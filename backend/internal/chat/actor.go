@@ -2023,6 +2023,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		if result != nil {
 			payload["trace_id"] = result.TraceID
 			appendSessionActorUsagePayload(payload, result.Usage)
+			appendSessionActorToolErrorPayload(payload, result)
 			if result.LimitReached {
 				payload["limit_reached"] = true
 				if result.LimitReason != "" {
@@ -2048,6 +2049,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			if result != nil {
 				hookPayload["trace_id"] = result.TraceID
 				appendSessionActorUsagePayload(hookPayload, result.Usage)
+				appendSessionActorToolErrorPayload(hookPayload, result)
 			}
 			hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionEnd, hookPayload)
 		}
@@ -3556,6 +3558,17 @@ func appendSessionActorUsagePayload(payload map[string]interface{}, usage *runti
 	if usage.CachedTokens > 0 {
 		payload["usage_cached_tokens"] = usage.CachedTokens
 	}
+	cacheReadTokens := usage.CacheReadTokens
+	if cacheReadTokens == 0 {
+		cacheReadTokens = usage.CachedTokens
+	}
+	if cacheReadTokens > 0 {
+		payload["usage_cache_read_tokens"] = cacheReadTokens
+	}
+	if usage.CacheCreationTokens > 0 {
+		payload["usage_cache_creation_tokens"] = usage.CacheCreationTokens
+	}
+	payload["usage_cache_read_reported"] = usage.CacheReadReported || usage.CachedTokens > 0
 	if usage.ReasoningTokens > 0 {
 		payload["usage_reasoning_tokens"] = usage.ReasoningTokens
 	}
@@ -3576,6 +3589,21 @@ func firstNonEmptyError(err error, result *agent.Result) string {
 		return ""
 	}
 	return strings.TrimSpace(result.Error)
+}
+
+func appendSessionActorToolErrorPayload(payload map[string]interface{}, result *agent.Result) {
+	if payload == nil || result == nil {
+		return
+	}
+	if result.ToolErrorCount > 0 {
+		payload["tool_error_count"] = result.ToolErrorCount
+	}
+	if result.RecoveredToolErrorCount > 0 {
+		payload["recovered_tool_error_count"] = result.RecoveredToolErrorCount
+	}
+	if result.UnrecoveredToolErrorCount > 0 {
+		payload["unrecovered_tool_error_count"] = result.UnrecoveredToolErrorCount
+	}
 }
 
 func appendStructuredRunErrorPayload(payload map[string]interface{}, err error) {

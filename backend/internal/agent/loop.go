@@ -36,7 +36,7 @@ import (
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
 const repeatedSemanticToolCallNoticeThreshold = 4
 const explorationStallNoticeThreshold = 12
-const defaultPromptPreflightAutoCompactRatio = 0.9
+const defaultPromptPreflightAutoCompactRatio = 0.85
 
 var errReActRunTimeout = stderrors.New("ReAct run duration limit reached")
 
@@ -77,6 +77,11 @@ type toolExecutionResult struct {
 	Output   interface{}
 	Error    string
 	Envelope *output.Envelope
+}
+
+type pendingToolFailure struct {
+	toolName string
+	message  string
 }
 
 type richToolCaller interface {
@@ -302,6 +307,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 	startTime := types.NewDuration()
 	var observations []types.Observation
+	hadToolFailure := false
+	failureMessages := make([]string, 0, 4)
+	pendingFailures := make([]pendingToolFailure, 0, 2)
+	toolErrorCount := 0
+	recoveredToolErrorCount := 0
 	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
 	if loop.config.MaxRunDuration > 0 {
 		var runCancel context.CancelFunc
@@ -333,6 +343,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if len(result.Observations) == 0 && len(observations) > 0 {
 			result.Observations = observations
 		}
+		result.ToolErrorCount = toolErrorCount
+		result.RecoveredToolErrorCount = recoveredToolErrorCount
+		result.UnrecoveredToolErrorCount = len(pendingFailures)
 		if runErr != nil && strings.TrimSpace(result.Output) == "" &&
 			(stderrors.Is(runErr, context.Canceled) || stderrors.Is(runErr, context.DeadlineExceeded)) {
 			result.Output = fmt.Sprintf("当前运行已停止；已保留 %d 条工具观察，可从现有会话继续。", len(result.Observations))
@@ -357,8 +370,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// view instead of reprocessing the same raw replay on every step.
 	promptBuilder := NewMessageBuilder(history)
 
-	hadToolFailure := false
-	failureMessages := make([]string, 0, 4)
 	sessionID := options.SessionID
 	if sessionID == "" {
 		sessionID = "react_" + uuid.NewString()
@@ -471,6 +482,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 						if persistErr := options.PersistHistory(recoveredHistory); persistErr != nil {
 							loop.agent.AddError(fmt.Sprintf("persist compacted history after %s error failed: %v", recoveryKind, persistErr))
 							result.Error = err.Error()
+							setLLMFailureDiagnostic(result, err)
 							result.Usage = totalUsage.Clone()
 							result.State = loop.agent.GetState()
 							return result, fmt.Errorf("%w: persisted compacted history failed: %v", err, persistErr)
@@ -484,6 +496,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			loop.agent.AddError(fmt.Sprintf("think failed: %v", err))
 			result.Error = err.Error()
+			setLLMFailureDiagnostic(result, err)
 			result.Usage = totalUsage.Clone()
 			result.State = loop.agent.GetState()
 			return result, err
@@ -511,6 +524,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				loop.agent.AddError(err.Error())
 				result.Success = false
 				result.Error = err.Error()
+				setLLMFailureDiagnostic(result, err)
 				result.Steps = step
 				result.Observations = observations
 				result.Duration = *startTime
@@ -523,15 +537,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				return nil, err
 			}
 
-			result.Success = !hadToolFailure
+			result.Success = len(pendingFailures) == 0
 			result.Output = action.Content
 			result.Reasoning = action.Reasoning
 			result.Steps = step
 			result.Observations = observations
 			result.Duration = *startTime
 			result.Usage = totalUsage.Clone()
-			if hadToolFailure && len(failureMessages) > 0 {
-				result.Error = joinFailureMessages(failureMessages)
+			if len(pendingFailures) > 0 {
+				result.Error = joinFailureMessages(pendingToolFailureMessages(pendingFailures))
 			}
 
 			// 记录到记忆
@@ -662,6 +676,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			loop.agent.AddError(fmt.Sprintf("act failed: %v", err))
 			hadToolFailure = true
 			failureMessages = append(failureMessages, err.Error())
+			pendingFailures = append(pendingFailures, pendingToolFailure{message: err.Error()})
+			toolErrorCount++
 
 			// 记录失败观察
 			obs := types.NewObservation(fmt.Sprintf("step_%d", step), "execution")
@@ -687,6 +703,19 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			hadToolFailure = true
 			failureMessages = append(failureMessages, toolResult.Error)
+			pendingFailures = append(pendingFailures, pendingToolFailure{
+				toolName: normalizeRecoveryToolName(toolResult.Call.Name),
+				message:  toolResult.Error,
+			})
+			toolErrorCount++
+		}
+		for _, toolResult := range toolResults {
+			if strings.TrimSpace(toolResult.Error) != "" {
+				continue
+			}
+			var recovered int
+			pendingFailures, recovered = recoverMatchingToolFailures(pendingFailures, toolResult.Call.Name)
+			recoveredToolErrorCount += recovered
 		}
 
 		// 3. Observe: 记录执行结果
@@ -835,6 +864,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			PromptBudget:             contextBudget.PromptBudget,
 			PromptBudgetSource:       contextBudget.BudgetSource,
 			PromptBudgetSourceDetail: contextBudget.BudgetSourceDetail,
+			// Allow Build-time keepRecent/trim/summary only under prompt pressure.
+			// contextmgr.Build budget-gates hot keepRecent so long history is
+			// preserved while estimated tokens remain under the prompt budget.
+			// Preflight / session auto-compact remain the primary overflow paths.
+			EnablePromptCompaction: true,
 		})
 		managedHistory = built.Messages
 		action.Metadata = map[string]interface{}{
@@ -902,6 +936,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 
 	requestProvider := loop.requestProvider()
 	requestModel := loop.requestModel()
+	logicalTurnID := traceID
+	llmRequestID := "llm_req_" + uuid.NewString()
 
 	// 构建请求
 	req := &llm.LLMRequest{
@@ -914,11 +950,18 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		ReasoningEffort: loop.config.ReasoningEffort,
 		Thinking:        types.CloneThinkingConfig(loop.config.Thinking),
 		Metadata: map[string]interface{}{
-			"trace_id":         traceID,
-			"session_id":       sessionID,
-			"remaining_budget": remainingBudget,
+			"trace_id":        traceID,
+			"logical_turn_id": logicalTurnID,
+			"llm_request_id":  llmRequestID,
+			"session_id":      sessionID,
 		},
 	}
+	if loop.agent != nil && loop.agent.config != nil {
+		if route := optionMap(loop.agent.config.Options, "route"); len(route) > 0 {
+			req.Metadata["route"] = cloneInterfaceMap(route)
+		}
+	}
+	addRemainingBudgetMetadata(req.Metadata, remainingBudget)
 	loop.applyRememberedProviderRequestDowngrades(req)
 	if loop.config.EnableParallelTools && loop.config.MaxParallelToolCalls > 1 && len(availableTools) > 1 && !loop.parallelToolCallsUnsupported.Load() {
 		req.Metadata[llm.MetadataKeyParallelToolCalls] = true
@@ -979,6 +1022,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			}
 		}
 	}
+	if req.Stream {
+		req.Metadata["stream_id"] = "stream_" + uuid.NewString()
+	}
 	callCtx := ctx
 	streamedReasoning := false
 	if req.Stream {
@@ -1026,13 +1072,18 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 
 	// 调用 LLM
 	requestPayload := map[string]interface{}{
-		"trace_id":         traceID,
-		"step":             step,
-		"model":            req.Model,
-		"provider":         req.Provider,
-		"message_count":    len(req.Messages),
-		"tool_count":       len(req.Tools),
-		"remaining_budget": remainingBudget,
+		"trace_id":        traceID,
+		"logical_turn_id": logicalTurnID,
+		"llm_request_id":  llmRequestID,
+		"step":            step,
+		"model":           req.Model,
+		"provider":        req.Provider,
+		"message_count":   len(req.Messages),
+		"tool_count":      len(req.Tools),
+	}
+	addRemainingBudgetMetadata(requestPayload, remainingBudget)
+	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
+		requestPayload["stream_id"] = streamID
 	}
 	if parallel, _ := req.Metadata[llm.MetadataKeyParallelToolCalls].(bool); parallel {
 		requestPayload[llm.MetadataKeyParallelToolCalls] = true
@@ -1127,19 +1178,29 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			eventType = "llm.parallel_tool_calls.downgraded"
 		}
 		loop.agent.emitRuntimeEvent(eventType, sessionID, "", map[string]interface{}{
-			"trace_id": traceID, "step": step, "provider": req.Provider, "model": req.Model,
+			"trace_id": traceID, "logical_turn_id": logicalTurnID, "llm_request_id": llmRequestID,
+			"step": step, "provider": req.Provider, "model": req.Model,
 			"parameter": parameter, "error": err.Error(),
 		})
 		response, err = loop.llmRuntime.Call(callCtx, req)
 	}
 	if err != nil {
+		failureDiagnostic := llm.DiagnoseFailure(err)
 		finishedPayload := map[string]interface{}{
-			"trace_id": traceID,
-			"step":     step,
-			"model":    req.Model,
-			"provider": req.Provider,
-			"success":  false,
-			"error":    err.Error(),
+			"trace_id":        traceID,
+			"logical_turn_id": logicalTurnID,
+			"llm_request_id":  llmRequestID,
+			"step":            step,
+			"model":           req.Model,
+			"provider":        req.Provider,
+			"success":         false,
+			"error":           err.Error(),
+			"error_code":      failureDiagnostic.ErrorCode,
+			"retryable":       failureDiagnostic.Retryable,
+			"next_action":     failureDiagnostic.NextAction,
+		}
+		if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
+			finishedPayload["stream_id"] = streamID
 		}
 		if totalMessageTokens > 0 {
 			finishedPayload["context_prompt_tokens"] = totalMessageTokens
@@ -1176,11 +1237,16 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	finishedPayload := map[string]interface{}{
 		"trace_id":        traceID,
+		"logical_turn_id": logicalTurnID,
+		"llm_request_id":  llmRequestID,
 		"step":            step,
 		"model":           req.Model,
 		"provider":        req.Provider,
 		"success":         true,
 		"tool_call_count": len(response.ToolCalls),
+	}
+	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
+		finishedPayload["stream_id"] = streamID
 	}
 	if totalMessageTokens > 0 {
 		finishedPayload["context_prompt_tokens"] = totalMessageTokens
@@ -1212,6 +1278,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			finishedPayload["context_window_tokens"] = value
 		}
 	}
+	usageSource := ""
+	if response != nil && response.Metadata != nil {
+		usageSource = strings.TrimSpace(stringValue(response.Metadata["usage_source"]))
+	}
 	if response != nil && response.Usage != nil {
 		finishedPayload["usage_prompt_tokens"] = response.Usage.PromptTokens
 		finishedPayload["usage_completion_tokens"] = response.Usage.CompletionTokens
@@ -1219,18 +1289,38 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if response.Usage.CachedTokens > 0 {
 			finishedPayload["usage_cached_tokens"] = response.Usage.CachedTokens
 		}
-		if response.Usage.PromptTokens > 0 {
+		cacheReadTokens := response.Usage.CacheReadTokens
+		if cacheReadTokens == 0 {
+			cacheReadTokens = response.Usage.CachedTokens
+		}
+		if cacheReadTokens > 0 {
+			finishedPayload["usage_cache_read_tokens"] = cacheReadTokens
+		}
+		if response.Usage.CacheCreationTokens > 0 {
+			finishedPayload["usage_cache_creation_tokens"] = response.Usage.CacheCreationTokens
+		}
+		cacheReadReported := response.Usage.CacheReadReported || response.Usage.CachedTokens > 0
+		finishedPayload["usage_cache_read_reported"] = cacheReadReported
+		if cacheReadReported && response.Usage.PromptTokens > 0 {
 			ratio := float64(response.Usage.CachedTokens) / float64(response.Usage.PromptTokens)
 			finishedPayload["usage_cache_hit_ratio"] = ratio
+		}
+		switch {
+		case response.Usage.CachedTokens > 0:
+			finishedPayload["usage_cache_status"] = "hit"
+		case cacheReadReported:
+			finishedPayload["usage_cache_status"] = "reported_zero"
+		case usageSource == "local_estimate":
+			finishedPayload["usage_cache_status"] = "not_available_for_local_estimate"
+		default:
+			finishedPayload["usage_cache_status"] = "not_reported_by_provider"
 		}
 		if response.Usage.ReasoningTokens > 0 {
 			finishedPayload["usage_reasoning_tokens"] = response.Usage.ReasoningTokens
 		}
 	}
-	if response != nil && response.Metadata != nil {
-		if source := strings.TrimSpace(stringValue(response.Metadata["usage_source"])); source != "" {
-			finishedPayload["usage_source"] = source
-		}
+	if usageSource != "" {
+		finishedPayload["usage_source"] = usageSource
 	}
 	loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 
@@ -1667,8 +1757,16 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_scheduler", result.Error, nil)
 					} else {
 						result.Output = renderSubagentResults(reports)
+						parentReports := summarizeSubagentReportsForParent(reports, defaultSubagentParentMetadataBudgetBytes)
 						metadata["subagent_count"] = len(reports)
-						metadata["subagent_reports"] = reports
+						metadata["subagent_reports"] = parentReports.Reports
+						metadata["subagent_reports_byte_count"] = parentReports.ByteCount
+						metadata["subagent_reports_sha256"] = parentReports.SHA256
+						metadata["subagent_reports_budget_bytes"] = parentReports.Budget
+						metadata["subagent_reports_truncated"] = parentReports.Truncated
+						if parentReports.Omitted > 0 {
+							metadata["subagent_reports_omitted"] = parentReports.Omitted
+						}
 					}
 				}
 			}
@@ -1684,6 +1782,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			})
 			if gatewayErr != nil && envelope != nil {
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
+			}
+			if envelope != nil && len(envelope.ArtifactIDs) > 0 {
+				envelope.Metadata["subagent_reports_artifact_id"] = envelope.ArtifactIDs[0]
 			}
 			result.Envelope = envelope
 			loop.emitToolReduced(sessionID, tc, step, traceID, result, map[string]interface{}{
@@ -1941,7 +2042,14 @@ func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step 
 		"policy":       policy,
 		"reason":       reason,
 		"trace_id":     traceID,
+		"error_code":   string(errors.ErrAgentPermission),
 	}
+	diagnostic := toolresult.Diagnose(tc.Name, tc.ID, reason, map[string]interface{}{
+		"error_code": string(errors.ErrAgentPermission),
+	})
+	payload["ok"] = diagnostic.OK
+	payload["retryable"] = diagnostic.Retryable
+	payload["next_action"] = diagnostic.NextAction
 	for key, value := range extra {
 		if key == "" {
 			continue
@@ -1959,9 +2067,15 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 		"tool_call_id": tc.ID,
 		"step":         step,
 		"error":        result.Error,
+		"ok":           strings.TrimSpace(result.Error) == "",
 		"trace_id":     traceID,
 	}
 	if result.Envelope != nil {
+		for _, key := range []string{"error_code", "retryable", "next_action", "ok"} {
+			if value, ok := result.Envelope.Metadata[key]; ok {
+				payload[key] = value
+			}
+		}
 		if reducer, ok := result.Envelope.Metadata["reducer"]; ok {
 			payload["reducer"] = reducer
 		}
@@ -2017,6 +2131,20 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 		}
 		if errText := strings.TrimSpace(event.Error); errText != "" {
 			payload["error"] = errText
+		}
+		if errorCode := strings.TrimSpace(event.ErrorCode); errorCode != "" {
+			payload["error_code"] = errorCode
+		}
+		for key, value := range map[string]string{
+			"logical_turn_id":     event.LogicalTurnID,
+			"llm_request_id":      event.LLMRequestID,
+			"retry_attempt_id":    event.RetryAttemptID,
+			"provider_request_id": event.ProviderRequestID,
+			"stream_id":           event.StreamID,
+		} {
+			if value = strings.TrimSpace(value); value != "" {
+				payload[key] = value
+			}
 		}
 		loop.agent.emitRuntimeEvent("llm.retry", sessionID, "", payload)
 	}
@@ -2095,6 +2223,14 @@ func errorString(err error) string {
 	return err.Error()
 }
 
+func setLLMFailureDiagnostic(result *Result, err error) {
+	if result == nil || err == nil {
+		return
+	}
+	diagnostic := llm.DiagnoseFailure(err)
+	result.Failure = &diagnostic
+}
+
 // observe 观察阶段：记录执行结果
 func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionResult, observations []types.Observation, step int) []types.Observation {
 
@@ -2108,6 +2244,11 @@ func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionR
 		obs.WithInput(result.Call.Args)
 
 		if result.Envelope != nil {
+			for _, key := range []string{"ok", "error_code", "retryable", "next_action"} {
+				if value, ok := result.Envelope.Metadata[key]; ok {
+					obs.WithMetric(key, value)
+				}
+			}
 			obs.WithOutput(result.Envelope.Render())
 			if reducer, ok := result.Envelope.Metadata["reducer"]; ok {
 				obs.WithMetric("reducer", reducer)
@@ -3055,6 +3196,37 @@ func estimatePromptMessageTokens(runtime *llm.LLMRuntime, messages []types.Messa
 	return runtime.CountMessagesTokens(messages)
 }
 
+func estimatePromptTokenBreakdown(runtime *llm.LLMRuntime, messages []types.Message) (historyTokens, toolResultTokens int) {
+	if runtime == nil || len(messages) == 0 {
+		return 0, 0
+	}
+	history := make([]types.Message, 0, len(messages))
+	toolResults := make([]types.Message, 0, len(messages))
+	for _, message := range messages {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			toolResults = append(toolResults, message)
+			continue
+		}
+		history = append(history, message)
+	}
+	return estimatePromptMessageTokens(runtime, history), estimatePromptMessageTokens(runtime, toolResults)
+}
+
+// A zero run budget means "not configured", not "exhausted". Omitting the
+// numeric field prevents logs and downstream UIs from reporting a false zero.
+func addRemainingBudgetMetadata(metadata map[string]interface{}, remainingBudget int) {
+	if metadata == nil {
+		return
+	}
+	if remainingBudget > 0 {
+		metadata["remaining_budget"] = remainingBudget
+		metadata["token_budget_configured"] = true
+		return
+	}
+	delete(metadata, "remaining_budget")
+	metadata["token_budget_configured"] = false
+}
+
 func mergeHookMetadata(metadata map[string]interface{}, message string, context map[string]string) {
 	if len(metadata) == 0 {
 		return
@@ -3082,6 +3254,7 @@ func mergeHookMetadata(metadata map[string]interface{}, message string, context 
 
 type promptPreflightBudget struct {
 	PromptBudget                         int
+	EffectiveInputBudget                 int
 	BudgetSource                         string
 	BudgetSourceDetail                   string
 	BudgetCandidates                     map[string]interface{}
@@ -3092,6 +3265,14 @@ type promptPreflightBudget struct {
 	ModelCapabilityMaxContextTokens      int
 	ModelCapabilityAutoCompactRatio      float64
 	ModelCapabilityAutoCompactTokenLimit int
+	ReservedOutputTokens                 int
+}
+
+func (budget promptPreflightBudget) enforcedInputBudget() int {
+	if budget.EffectiveInputBudget > 0 && (budget.PromptBudget <= 0 || budget.EffectiveInputBudget < budget.PromptBudget) {
+		return budget.EffectiveInputBudget
+	}
+	return budget.PromptBudget
 }
 
 func (budget promptPreflightBudget) Metadata() map[string]interface{} {
@@ -3128,6 +3309,14 @@ func (budget promptPreflightBudget) Metadata() map[string]interface{} {
 	}
 	if budget.ModelCapabilityAutoCompactTokenLimit > 0 {
 		metadata["model_capability_auto_compact_token_limit"] = budget.ModelCapabilityAutoCompactTokenLimit
+	}
+	if budget.ReservedOutputTokens > 0 {
+		metadata["reserved_output_tokens"] = budget.ReservedOutputTokens
+	}
+	if budget.EffectiveInputBudget > 0 {
+		metadata["effective_input_budget"] = budget.EffectiveInputBudget
+	} else if budget.PromptBudget > 0 {
+		metadata["effective_input_budget"] = budget.PromptBudget
 	}
 	if len(metadata) == 0 {
 		return nil
@@ -3191,6 +3380,8 @@ func newPromptPreflightError(
 	return &PromptPreflightError{
 		PromptTokens:                         promptTokens,
 		PromptBudget:                         budget.PromptBudget,
+		EffectiveInputBudget:                 budget.EffectiveInputBudget,
+		ReservedOutputTokens:                 budget.ReservedOutputTokens,
 		BudgetSource:                         budget.BudgetSource,
 		BudgetSourceDetail:                   budget.BudgetSourceDetail,
 		ResolvedProvider:                     budget.ResolvedProvider,
@@ -3230,6 +3421,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		return estimatePromptMessageTokens(loop.llmRuntime, input)
 	}
 	messageTokensBefore := countPromptMessages(messages)
+	historyTokensBefore, toolResultTokensBefore := estimatePromptTokenBreakdown(loop.llmRuntime, messages)
 	toolSchemaTokens := estimateToolDefinitionTokens(loop.llmRuntime, tools)
 	promptTokensBefore := messageTokensBefore + toolSchemaTokens
 	preflightMetadata := budget.Metadata()
@@ -3238,9 +3430,17 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	}
 	preflightMetadata["prompt_tokens_before"] = promptTokensBefore
 	preflightMetadata["message_tokens_before"] = messageTokensBefore
+	preflightMetadata["history_tokens"] = historyTokensBefore
+	preflightMetadata["tool_result_tokens"] = toolResultTokensBefore
 	preflightMetadata["tool_schema_tokens"] = toolSchemaTokens
 	preflightMetadata["tool_count"] = len(tools)
-	if promptTokensBefore <= 0 || promptTokensBefore <= budget.PromptBudget {
+	preflightMetadata["estimated_input_tokens"] = promptTokensBefore
+	inputBudget := budget.enforcedInputBudget()
+	preflightMetadata["compaction_required"] = promptTokensBefore > inputBudget
+	if promptTokensBefore > inputBudget {
+		preflightMetadata["compaction_reason"] = "estimated_input_exceeds_effective_budget"
+	}
+	if promptTokensBefore <= 0 || promptTokensBefore <= inputBudget {
 		return messages, preflightMetadata, nil
 	}
 
@@ -3255,18 +3455,18 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	startedPayload["tool_schema_tokens"] = toolSchemaTokens
 	startedPayload["tool_count"] = len(tools)
 	startedPayload["message_count"] = len(messages)
-	startedPayload["remaining_budget"] = remainingBudget
+	addRemainingBudgetMetadata(startedPayload, remainingBudget)
 	startedPayload["active_turn_replay"] = true
 	loop.agent.emitRuntimeEvent("context.preflight.started", sessionID, "", startedPayload)
 
-	messageBudget := budget.PromptBudget - toolSchemaTokens
+	messageBudget := inputBudget - toolSchemaTokens
 	if messageBudget <= 0 {
 		preflightMetadata["active_turn_compacted"] = false
 		failure := buildPromptPreflightFailure(
 			"tool_schema_exceeds_budget",
 			messages,
 			promptTokensBefore,
-			budget.PromptBudget,
+			inputBudget,
 		)
 		failureErr := newPromptPreflightError(budget, failure, promptTokensBefore, false, nil)
 		failedPayload := cloneInterfaceMap(startedPayload)
@@ -3294,6 +3494,11 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		preflightMetadata["prompt_tokens_after"] = promptTokensAfter
 		preflightMetadata["message_tokens_after"] = messageTokensAfter
 		preflightMetadata["message_count_after"] = len(compactedMessages)
+		preflightMetadata["estimated_input_tokens"] = promptTokensAfter
+		preflightMetadata["compaction_required"] = promptTokensAfter > inputBudget
+		if promptTokensAfter <= inputBudget {
+			preflightMetadata["compaction_reason"] = "active_turn_replay_compacted"
+		}
 
 		compactedPayload := budget.Metadata()
 		if compactedPayload == nil {
@@ -3309,10 +3514,10 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		compactedPayload["tool_count"] = len(tools)
 		compactedPayload["message_count_before"] = len(messages)
 		compactedPayload["message_count_after"] = len(compactedMessages)
-		compactedPayload["remaining_budget"] = remainingBudget
+		addRemainingBudgetMetadata(compactedPayload, remainingBudget)
 		compactedPayload["prompt_only"] = true
 		loop.agent.emitRuntimeEvent("context.preflight.compacted", sessionID, "", compactedPayload)
-		if promptTokensAfter <= budget.PromptBudget {
+		if promptTokensAfter <= inputBudget {
 			return compactedMessages, preflightMetadata, nil
 		}
 
@@ -3320,7 +3525,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 			"prompt_still_exceeds_budget_after_compaction",
 			compactedMessages,
 			promptTokensAfter,
-			budget.PromptBudget,
+			inputBudget,
 		)
 		failureErr := newPromptPreflightError(budget, failure, promptTokensAfter, true, nil)
 		failedPayload := budget.Metadata()
@@ -3334,7 +3539,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		failedPayload["tool_schema_tokens"] = toolSchemaTokens
 		failedPayload["tool_count"] = len(tools)
 		failedPayload["message_count"] = len(compactedMessages)
-		failedPayload["remaining_budget"] = remainingBudget
+		addRemainingBudgetMetadata(failedPayload, remainingBudget)
 		failedPayload["active_turn_compacted"] = true
 		failedPayload["prompt_tokens_before"] = promptTokensBefore
 		failedPayload["message_count_before"] = len(messages)
@@ -3351,7 +3556,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		"active_turn_not_compactable",
 		messages,
 		promptTokensBefore,
-		budget.PromptBudget,
+		inputBudget,
 	)
 	failureErr := newPromptPreflightError(budget, failure, promptTokensBefore, false, nil)
 	failedPayload := budget.Metadata()
@@ -3365,7 +3570,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	failedPayload["tool_schema_tokens"] = toolSchemaTokens
 	failedPayload["tool_count"] = len(tools)
 	failedPayload["message_count"] = len(messages)
-	failedPayload["remaining_budget"] = remainingBudget
+	addRemainingBudgetMetadata(failedPayload, remainingBudget)
 	failedPayload["active_turn_compacted"] = false
 	for key, value := range failureErr.Metadata() {
 		failedPayload[key] = value
@@ -3461,6 +3666,17 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		if result.Usage.CachedTokens > 0 {
 			completedPayload["usage_cached_tokens"] = result.Usage.CachedTokens
 		}
+		cacheReadTokens := result.Usage.CacheReadTokens
+		if cacheReadTokens == 0 {
+			cacheReadTokens = result.Usage.CachedTokens
+		}
+		if cacheReadTokens > 0 {
+			completedPayload["usage_cache_read_tokens"] = cacheReadTokens
+		}
+		if result.Usage.CacheCreationTokens > 0 {
+			completedPayload["usage_cache_creation_tokens"] = result.Usage.CacheCreationTokens
+		}
+		completedPayload["usage_cache_read_reported"] = result.Usage.CacheReadReported || result.Usage.CachedTokens > 0
 		if result.Usage.ReasoningTokens > 0 {
 			completedPayload["usage_reasoning_tokens"] = result.Usage.ReasoningTokens
 		}
@@ -3688,6 +3904,9 @@ func resolveContextBuildPromptBudget(runtime *llm.LLMRuntime, agent *Agent, loop
 
 func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, loopConfig *LoopReActConfig, remainingBudget int) promptPreflightBudget {
 	budget := promptPreflightBudget{}
+	if agent != nil && agent.config != nil {
+		budget.ReservedOutputTokens = resolveLoopMaxTokens(agent.config.DefaultMaxTokens, remainingBudget)
+	}
 
 	managerBudget := 0
 	hasManagerBudget := false
@@ -3786,6 +4005,17 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, loopCon
 			hasResolvedPromptLimit = true
 		}
 	}
+	contextWindow := budget.ModelCapabilityMaxContextTokens
+	if contextWindow <= 0 {
+		contextWindow = budget.ProviderContextLimit
+	}
+	budget.EffectiveInputBudget = budget.PromptBudget
+	if contextWindow > 0 && budget.ReservedOutputTokens > 0 {
+		remainingInput := contextWindow - budget.ReservedOutputTokens
+		if remainingInput > 0 && (budget.EffectiveInputBudget <= 0 || remainingInput < budget.EffectiveInputBudget) {
+			budget.EffectiveInputBudget = remainingInput
+		}
+	}
 
 	if !hasResolvedPromptLimit {
 		addFallbackPromptBudget()
@@ -3797,6 +4027,9 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, loopCon
 			remainingBudget,
 			"remaining token budget for current run",
 		)
+	}
+	if budget.EffectiveInputBudget <= 0 || (budget.PromptBudget > 0 && budget.PromptBudget < budget.EffectiveInputBudget) {
+		budget.EffectiveInputBudget = budget.PromptBudget
 	}
 
 	return budget
@@ -4093,6 +4326,36 @@ func joinFailureMessages(messages []string) string {
 		ordered = append(ordered, message)
 	}
 	return strings.Join(ordered, "; ")
+}
+
+func pendingToolFailureMessages(failures []pendingToolFailure) []string {
+	messages := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		messages = append(messages, failure.message)
+	}
+	return messages
+}
+
+func recoverMatchingToolFailures(failures []pendingToolFailure, successfulToolName string) ([]pendingToolFailure, int) {
+	if len(failures) == 0 {
+		return failures, 0
+	}
+	successfulToolName = normalizeRecoveryToolName(successfulToolName)
+	remaining := failures[:0]
+	recovered := 0
+	for _, failure := range failures {
+		if failure.toolName == "" || failure.toolName == successfulToolName {
+			recovered++
+			continue
+		}
+		remaining = append(remaining, failure)
+	}
+	return remaining, recovered
+}
+
+func normalizeRecoveryToolName(toolName string) string {
+	toolName = strings.ToLower(strings.TrimSpace(toolName))
+	return strings.ReplaceAll(toolName, "-", "_")
 }
 
 func optionString(options map[string]interface{}, key string) string {

@@ -48,6 +48,20 @@ func TestSessionActorSubmitPromptReturnsAfterActorStopped(t *testing.T) {
 	}
 }
 
+func TestAppendSessionActorToolErrorPayloadDistinguishesRecoveredErrors(t *testing.T) {
+	payload := map[string]interface{}{}
+	appendSessionActorToolErrorPayload(payload, &agent.Result{
+		Success:                   true,
+		ToolErrorCount:            3,
+		RecoveredToolErrorCount:   2,
+		UnrecoveredToolErrorCount: 1,
+	})
+
+	require.Equal(t, 3, payload["tool_error_count"])
+	require.Equal(t, 2, payload["recovered_tool_error_count"])
+	require.Equal(t, 1, payload["unrecovered_tool_error_count"])
+}
+
 func TestSessionActorSubmitPromptReturnsWhenLoopExitsBeforeReply(t *testing.T) {
 	actor := &SessionActor{
 		cmdCh: make(chan Command, 1),

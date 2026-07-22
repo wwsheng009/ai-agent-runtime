@@ -85,8 +85,8 @@ func TestManager_BuildCompactsAndRecalls(t *testing.T) {
 	}
 
 	manager := NewManager(Budget{
-		MaxPromptTokens:     200,
-		MaxMessages:         5,
+		MaxPromptTokens:     300,
+		MaxMessages:         12,
 		KeepRecentMessages:  2,
 		MaxRecallResults:    2,
 		MaxObservationItems: 2,
@@ -102,12 +102,13 @@ func TestManager_BuildCompactsAndRecalls(t *testing.T) {
 	manager.Agent = "test-agent"
 
 	result := manager.Build(context.Background(), BuildInput{
-		TraceID:                "trace_ctx_1",
-		SessionID:              "session-ctx",
-		Goal:                   "Find the error stack trace",
-		History:                history,
-		Memory:                 mem,
-		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		TraceID:   "trace_ctx_1",
+		SessionID: "session-ctx",
+		Goal:      "Find the error stack trace",
+		History:   history,
+		Memory:    mem,
+		// 6 raw * 80 = 480 > MaxPromptTokens 300; inject stages stay cheap under final trim.
+		CountTokens:            testTokenCounterStageAware(80, 15),
 		EnablePromptCompaction: true,
 	})
 
@@ -315,12 +316,13 @@ func TestManager_Build_CompactProfilePrefersSummaryAndSkipsRecall(t *testing.T) 
 	}
 
 	result := manager.Build(context.Background(), BuildInput{
-		TraceID:                "trace_ctx_compact",
-		SessionID:              "session-compact",
-		Goal:                   "Find the error stack trace",
-		History:                history,
-		Observations:           observations,
-		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		TraceID:      "trace_ctx_compact",
+		SessionID:    "session-compact",
+		Goal:         "Find the error stack trace",
+		History:      history,
+		Observations: observations,
+		// 6 msgs * 80 = 480 > MaxPromptTokens 400; after keepRecent estimate drops under budget.
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 80 },
 		EnablePromptCompaction: true,
 	})
 
@@ -548,10 +550,12 @@ func TestManager_Build_DoesNotSplitToolCallHistoryAtRecentBoundary(t *testing.T)
 	}
 
 	result := manager.Build(context.Background(), BuildInput{
-		SessionID:              "session-tool-boundary",
-		Goal:                   "你好，创建两个团队成员，分别探索docs目录文件并汇报进度",
-		History:                history,
-		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		SessionID: "session-tool-boundary",
+		Goal:      "你好，创建两个团队成员，分别探索docs目录文件并汇报进度",
+		History:   history,
+		// 10 msgs * 401 > MaxPromptTokens 4000; after keepRecent (~9) estimate falls under budget
+		// so final trim does not drop the protected tool-call prefix.
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 401 },
 		EnablePromptCompaction: true,
 	})
 
@@ -1068,7 +1072,8 @@ func TestManager_Build_PersistsProfileSourceRefsIntoLedger(t *testing.T) {
 				"notes":  map[string]interface{}{"content": "Profile investigation notes."},
 			},
 		},
-		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+		// 5 msgs * 450 > MaxPromptTokens 2000.
+		CountTokens: func(messages []types.Message) int { return len(messages) * 450 },
 	})
 
 	entries, err := store.LoadMemoryEntries(context.Background(), "session-profile-ledger", nil, 20)
@@ -1198,13 +1203,14 @@ func TestManager_Build_LongSessionLayerMetricsDifferAcrossProfiles(t *testing.T)
 	extendedManager := NewManagerWithProfile(BudgetProfileCold, ResolveBudget(BudgetProfileCold, Budget{}), store)
 
 	input := BuildInput{
-		TraceID:                "trace_ctx_profiles",
-		SessionID:              "session-long",
-		TaskID:                 "task-long",
-		Goal:                   "Find the error stack trace from archived evidence",
-		History:                history,
-		Observations:           observations,
-		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		TraceID:      "trace_ctx_profiles",
+		SessionID:    "session-long",
+		TaskID:       "task-long",
+		Goal:         "Find the error stack trace from archived evidence",
+		History:      history,
+		Observations: observations,
+		// 26 msgs * 900 exceeds compact(8000) and extended(20000); after keepRecent estimate drops under.
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 900 },
 		EnablePromptCompaction: true,
 	}
 
@@ -1470,4 +1476,106 @@ func containsEvent(events []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// testTokenCounterStageAware builds a CountTokens used by contextmgr Build tests that must
+// satisfy two opposing constraints after budget-gated keepRecent:
+//
+//  1. Raw history (no context_stage) is priced at rawCost so the estimate can exceed
+//     MaxPromptTokens and engage keepRecent / compact / ledger injection.
+//  2. Injected layers tagged with context_stage (compact/recall/warm_memory/ledger/...)
+//     are priced at injectedCost so the final trimByTokenBudget/MaxMessages pass does not
+//     drop them immediately after injection.
+//
+// Prefer this over a constant high return (e.g. 10000) or a flat len*N counter when the
+// test asserts that injected stages survive Build. Keep intentional flat counters for
+// boundary math tests that carefully choose N relative to MaxPromptTokens.
+func testTokenCounterStageAware(rawCost, injectedCost int) TokenCounter {
+	if rawCost < 0 {
+		rawCost = 0
+	}
+	if injectedCost < 0 {
+		injectedCost = 0
+	}
+	return func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			if message.Metadata.GetString("context_stage", "") != "" {
+				total += injectedCost
+				continue
+			}
+			total += rawCost
+		}
+		return total
+	}
+}
+
+func TestManager_Build_DoesNotKeepRecentWhenUnderTokenBudget(t *testing.T) {
+	history := []types.Message{*types.NewSystemMessage("system prompt")}
+	for i := 0; i < 12; i++ {
+		history = append(history,
+			*types.NewUserMessage("long-running step"),
+			*types.NewAssistantMessage("continuing analysis with tool results"),
+		)
+	}
+	// 1 system + 24 non-system messages; KeepRecentMessages defaults to 8.
+	manager := NewManager(Budget{
+		MaxPromptTokens:    10000,
+		MaxMessages:        40,
+		KeepRecentMessages: 8,
+	}, nil)
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-under-budget",
+		Goal:      "continue multi-step work",
+		History:   history,
+		// Under MaxPromptTokens: must preserve full history, not hard keepRecent=8.
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		EnablePromptCompaction: true,
+	})
+
+	if applied, _ := result.Metadata["hot_keep_recent_applied"].(bool); applied {
+		t.Fatalf("expected hot keepRecent not applied under budget, metadata=%v", result.Metadata["hot_keep_recent_applied"])
+	}
+	require.GreaterOrEqual(t, len(result.Messages), len(history),
+		"under-budget Build must not silently drop long history via keepRecent")
+	// Original early user/assistant turns must still be present (not only last 8).
+	foundEarly := false
+	for _, message := range result.Messages {
+		if message.Role == "user" && strings.Contains(message.Content, "long-running step") {
+			foundEarly = true
+			break
+		}
+	}
+	if !foundEarly {
+		t.Fatal("expected early history messages to survive under-budget Build")
+	}
+}
+
+func TestShouldApplyPromptCompactionPressure(t *testing.T) {
+	budget := Budget{MaxPromptTokens: 100}
+	messages := []types.Message{*types.NewUserMessage("x")}
+
+	if !shouldApplyPromptCompactionPressure(messages, budget, nil) {
+		t.Fatal("nil counter should treat explicit compaction as opted-in")
+	}
+	if shouldApplyPromptCompactionPressure(messages, budget, func([]types.Message) int { return 50 }) {
+		t.Fatal("under-budget counter must not apply keepRecent pressure")
+	}
+	if !shouldApplyPromptCompactionPressure(messages, budget, func([]types.Message) int { return 150 }) {
+		t.Fatal("over-budget counter must apply keepRecent pressure")
+	}
+}
+
+func TestTokenCounterStageAware(t *testing.T) {
+	raw := *types.NewUserMessage("raw")
+	injected := *types.NewAssistantMessage("inject")
+	injected.Metadata = types.Metadata{"context_stage": "recall"}
+	counter := testTokenCounterStageAware(80, 15)
+	if got := counter([]types.Message{raw, raw, injected}); got != 175 {
+		t.Fatalf("expected 80+80+15=175, got %d", got)
+	}
+	if got := counter([]types.Message{injected, injected}); got != 30 {
+		t.Fatalf("expected 15+15=30, got %d", got)
+	}
 }

@@ -38,6 +38,131 @@ func TestToolCallContextCarriesAgentDepth(t *testing.T) {
 	require.Equal(t, "session-depth", toolctx.SessionID(ctx))
 }
 
+func TestAddRemainingBudgetMetadataDistinguishesUnlimitedFromExhausted(t *testing.T) {
+	metadata := map[string]interface{}{"remaining_budget": 0}
+	addRemainingBudgetMetadata(metadata, 0)
+	require.NotContains(t, metadata, "remaining_budget")
+	require.Equal(t, false, metadata["token_budget_configured"])
+
+	addRemainingBudgetMetadata(metadata, 4096)
+	require.Equal(t, 4096, metadata["remaining_budget"])
+	require.Equal(t, true, metadata["token_budget_configured"])
+}
+
+func TestReActLoop_CompletedAnswerRecoversEarlierToolError(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will try the requested operation.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID: "call-fails", Name: "write_file",
+					Args: map[string]interface{}{"path": "missing.txt"},
+				}},
+			},
+			{
+				Content: "I will retry with the corrected path.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID: "call-recovers", Name: "write_file",
+					Args: map[string]interface{}{"path": "verified.txt"},
+				}},
+			},
+			{Content: "Completed with an alternative verified result.", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "recovery-agent", Provider: "test-provider", Model: "test-model", MaxSteps: 3,
+	}, &RecoveringMCPManager{}, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 3, EnableToolCalls: true})
+
+	result, err := loop.Run(context.Background(), "complete the operation")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "Completed with an alternative verified result.", result.Output)
+	require.Empty(t, result.Error)
+	require.Equal(t, 1, result.ToolErrorCount)
+	require.Equal(t, 1, result.RecoveredToolErrorCount)
+	require.Zero(t, result.UnrecoveredToolErrorCount)
+}
+
+func TestReActLoop_UnrelatedToolSuccessDoesNotRecoverEarlierError(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will write the requested file.", Model: "test-model",
+				ToolCalls: []types.ToolCall{{ID: "call-fails", Name: "write_file"}},
+			},
+			{
+				Content: "I will inspect another file.", Model: "test-model",
+				ToolCalls: []types.ToolCall{{ID: "call-unrelated", Name: "read_file"}},
+			},
+			{Content: "Inspection completed, but the write was not retried.", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "recovery-agent", Provider: "test-provider", Model: "test-model", MaxSteps: 3,
+	}, &RecoveringMCPManager{}, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 3, EnableToolCalls: true})
+
+	result, err := loop.Run(context.Background(), "write the file")
+
+	require.NoError(t, err)
+	require.False(t, result.Success)
+	require.Equal(t, 1, result.ToolErrorCount)
+	require.Zero(t, result.RecoveredToolErrorCount)
+	require.Equal(t, 1, result.UnrecoveredToolErrorCount)
+	require.Contains(t, result.Error, "file not found")
+}
+
+func TestRecoverMatchingToolFailuresRequiresSameTool(t *testing.T) {
+	pending := []pendingToolFailure{
+		{toolName: "write_file", message: "write failed"},
+		{toolName: "read_file", message: "read failed"},
+	}
+
+	remaining, recovered := recoverMatchingToolFailures(pending, "read-file")
+
+	require.Equal(t, 1, recovered)
+	require.Len(t, remaining, 1)
+	require.Equal(t, "write_file", remaining[0].toolName)
+	require.Equal(t, []string{"write failed"}, pendingToolFailureMessages(remaining))
+}
+
+func TestRecoverMatchingToolFailuresAllowsGenericActRecovery(t *testing.T) {
+	pending := []pendingToolFailure{{message: "act failed before a result was available"}}
+
+	remaining, recovered := recoverMatchingToolFailures(pending, "read_file")
+
+	require.Equal(t, 1, recovered)
+	require.Empty(t, remaining)
+}
+
+func TestSubagentSchedulerRejectsDepthBeforeStartingChildrenWithActionableError(t *testing.T) {
+	agent := &Agent{config: &Config{}}
+	bus := runtimeevents.NewBus()
+	var denied runtimeevents.Event
+	bus.Subscribe("subagent.denied", func(event runtimeevents.Event) { denied = event })
+	agent.SetEventBus(bus)
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxDepth: 1})
+
+	reports, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 2}, []SubagentTask{{ID: "nested", Goal: "inspect"}})
+	require.Error(t, err)
+	require.Empty(t, reports)
+	require.Contains(t, err.Error(), "before child creation")
+	require.Contains(t, err.Error(), "requested_depth=2")
+	require.Contains(t, err.Error(), "continue the work in the current agent")
+	require.Equal(t, "max_depth", denied.Payload["policy"])
+	require.Equal(t, 2, denied.Payload["depth"])
+	require.Equal(t, 1, denied.Payload["max_depth"])
+}
+
 // MockLLMProvider 模拟 LLM Provider 用于测试
 type MockLLMProvider struct {
 	name string
@@ -866,6 +991,47 @@ func TestReActLoop_RunWithSession_EmitsLLMRetryRuntimeEvent(t *testing.T) {
 	assert.Equal(t, "rate_limit", retryEvent.Payload["retry_reason"])
 	assert.EqualValues(t, 1, retryEvent.Payload["retry_delay_ms"])
 	assert.Contains(t, retryEvent.Payload["error"], "HTTP 429")
+	assert.Equal(t, "UPSTREAM_RATE_LIMITED", retryEvent.Payload["error_code"])
+	assert.NotEmpty(t, retryEvent.Payload["logical_turn_id"])
+	assert.NotEmpty(t, retryEvent.Payload["llm_request_id"])
+	assert.NotEmpty(t, retryEvent.Payload["retry_attempt_id"])
+	assert.NotEmpty(t, retryEvent.Payload["provider_request_id"])
+}
+
+func TestReActLoop_EmitsNonRetryableQuotaFailureDiagnostic(t *testing.T) {
+	provider := &RetrySequenceLLMProvider{
+		name: "test-provider",
+		errs: []error{fmt.Errorf("HTTP 403: insufficient_user_quota")},
+	}
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider", DefaultModel: "test-model", MaxRetries: 3,
+	})
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{config: &Config{Name: "test-agent", Provider: "test-provider", Model: "test-model"}}
+	bus := runtimeevents.NewBus()
+	var finished []runtimeevents.Event
+	bus.Subscribe("llm.request.finished", func(event runtimeevents.Event) { finished = append(finished, event) })
+	agent.SetEventBus(bus)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 1, EnableThought: true})
+
+	result, err := loop.RunWithSession(context.Background(), "complete the task", newTestHistorySession("session-quota"))
+	require.Error(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.Failure)
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", result.Failure.ErrorCode)
+	assert.False(t, result.Failure.Retryable)
+	require.NotNil(t, result.Contract)
+	require.NotEmpty(t, result.Contract.Errors)
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", result.Contract.Errors[0].Code)
+	assert.False(t, result.Contract.Errors[0].Retryable)
+	assert.Contains(t, result.Contract.Errors[0].NextAction, "do not retry unchanged")
+	require.Equal(t, 1, provider.callCount, "quota failure must not consume retry attempts")
+	require.Len(t, finished, 1)
+	assert.Equal(t, false, finished[0].Payload["success"])
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", finished[0].Payload["error_code"])
+	assert.Equal(t, false, finished[0].Payload["retryable"])
+	assert.Contains(t, finished[0].Payload["next_action"], "do not retry unchanged")
 }
 
 func TestReActLoop_ProviderContextErrorCompactsAndRetriesSameStep(t *testing.T) {
@@ -2376,9 +2542,10 @@ func TestResolvePromptPreflightBudget_UsesModelCapabilityThresholdWhenMoreConser
 
 	agent := &Agent{
 		config: &Config{
-			Name:     "test-agent",
-			Provider: "test-provider",
-			Model:    "test-model",
+			Name:             "test-agent",
+			Provider:         "test-provider",
+			Model:            "test-model",
+			DefaultMaxTokens: 4096,
 		},
 		contextMgr: &contextmgr.Manager{
 			Budget: contextmgr.Budget{
@@ -2394,6 +2561,24 @@ func TestResolvePromptPreflightBudget_UsesModelCapabilityThresholdWhenMoreConser
 	require.InDelta(t, 0.75, budget.ModelCapabilityAutoCompactRatio, 0.001)
 	require.Equal(t, 200000, budget.ProviderContextLimit)
 	require.Equal(t, 8192, budget.ProviderOutputLimit)
+	require.Equal(t, 4096, budget.ReservedOutputTokens)
+	require.Equal(t, 5904, budget.EffectiveInputBudget)
+}
+
+func TestEstimatePromptTokenBreakdownSeparatesToolResults(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{})
+	historyTokens, toolResultTokens := estimatePromptTokenBreakdown(llmRuntime, []types.Message{
+		*types.NewSystemMessage("system instructions"),
+		*types.NewUserMessage("user request"),
+		*types.NewToolMessage("call-1", strings.Repeat("tool output ", 40)),
+	})
+	require.Positive(t, historyTokens)
+	require.Positive(t, toolResultTokens)
+	require.Equal(t, historyTokens+toolResultTokens, estimatePromptMessageTokens(llmRuntime, []types.Message{
+		*types.NewSystemMessage("system instructions"),
+		*types.NewUserMessage("user request"),
+		*types.NewToolMessage("call-1", strings.Repeat("tool output ", 40)),
+	}))
 }
 
 func TestResolvePromptPreflightBudget_DoesNotLetDefaultBudgetOverrideKnownCapability(t *testing.T) {
@@ -2690,7 +2875,7 @@ func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabil
 	}
 
 	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
-	require.Equal(t, 7200, budget.PromptBudget)
+	require.Equal(t, 6800, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 8000, budget.ProviderContextLimit)
 	require.Equal(t, 2048, budget.ProviderOutputLimit)
@@ -2731,7 +2916,7 @@ func TestResolvePromptPreflightBudget_UsesProviderContextLimitWhenWildcardCapabi
 	}
 
 	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
-	require.Equal(t, 115200, budget.PromptBudget)
+	require.Equal(t, 108800, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 128000, budget.ProviderContextLimit)
 	require.Equal(t, 4096, budget.ProviderOutputLimit)
@@ -4429,7 +4614,85 @@ func TestReActLoop_Run_EmitsProviderCacheHitRatio(t *testing.T) {
 	require.True(t, result.Success)
 	require.Len(t, finishedEvents, 1)
 	require.Equal(t, 250, finishedEvents[0].Payload["usage_cached_tokens"])
+	require.Equal(t, 250, finishedEvents[0].Payload["usage_cache_read_tokens"])
+	require.Equal(t, true, finishedEvents[0].Payload["usage_cache_read_reported"])
+	require.Equal(t, "hit", finishedEvents[0].Payload["usage_cache_status"])
 	require.InDelta(t, 0.25, finishedEvents[0].Payload["usage_cache_hit_ratio"], 0.000001)
+}
+
+func TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage(t *testing.T) {
+	tests := []struct {
+		name         string
+		usage        *types.TokenUsage
+		wantStatus   string
+		wantRatio    bool
+		wantReported bool
+	}{
+		{
+			name: "reported zero",
+			usage: &types.TokenUsage{
+				PromptTokens:      1000,
+				CompletionTokens:  100,
+				TotalTokens:       1100,
+				CacheReadReported: true,
+			},
+			wantStatus:   "reported_zero",
+			wantRatio:    true,
+			wantReported: true,
+		},
+		{
+			name: "not reported",
+			usage: &types.TokenUsage{
+				PromptTokens:     1000,
+				CompletionTokens: 100,
+				TotalTokens:      1100,
+			},
+			wantStatus: "not_reported_by_provider",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llmRuntime := llm.NewLLMRuntime(nil)
+			provider := &SequenceLLMProvider{
+				name: "test-provider",
+				responses: []*llm.LLMResponse{{
+					Content: "Done.",
+					Model:   "test-model",
+					Usage:   tt.usage,
+				}},
+			}
+			require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+			agent := &Agent{config: &Config{
+				Name:     "test-agent",
+				Provider: "test-provider",
+				Model:    "test-model",
+				MaxSteps: 1,
+			}}
+			bus := runtimeevents.NewBus()
+			var finishedEvents []runtimeevents.Event
+			bus.Subscribe("llm.request.finished", func(event runtimeevents.Event) {
+				finishedEvents = append(finishedEvents, event)
+			})
+			agent.SetEventBus(bus)
+
+			loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+				MaxSteps:        1,
+				EnableThought:   true,
+				EnableToolCalls: false,
+			})
+			result, err := loop.Run(context.Background(), "finish the task")
+			require.NoError(t, err)
+			require.True(t, result.Success)
+			require.Len(t, finishedEvents, 1)
+			payload := finishedEvents[0].Payload
+			require.Equal(t, tt.wantStatus, payload["usage_cache_status"])
+			require.Equal(t, tt.wantReported, payload["usage_cache_read_reported"])
+			_, ratioPresent := payload["usage_cache_hit_ratio"]
+			require.Equal(t, tt.wantRatio, ratioPresent)
+		})
+	}
 }
 
 func TestResolveToolSourceForRequest_PrefersResolvedRuntimeSource(t *testing.T) {
@@ -5367,6 +5630,24 @@ type MockRichSequenceMCPManager struct {
 	output string
 	meta   map[string]interface{}
 	err    error
+}
+
+type RecoveringMCPManager struct{ calls int }
+
+func (m *RecoveringMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
+	return skill.ToolInfo{Name: toolName, Enabled: true, MCPName: "recovering-mcp"}, nil
+}
+
+func (m *RecoveringMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	m.calls++
+	if m.calls == 1 {
+		return "first attempt failed", fmt.Errorf("file not found")
+	}
+	return "verified write result", nil
+}
+
+func (m *RecoveringMCPManager) ListTools() []skill.ToolInfo {
+	return []skill.ToolInfo{{Name: "write_file", Description: "Write a file", Enabled: true, MCPName: "recovering-mcp"}}
 }
 
 func (m *MockRichSequenceMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {

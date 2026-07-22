@@ -132,7 +132,10 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 		return nil, fmt.Errorf("subagent scheduler is nil")
 	}
 	if options.Depth > s.config.MaxDepth {
-		err := fmt.Errorf("max subagent depth exceeded")
+		err := fmt.Errorf(
+			"subagent spawn depth limit reached before child creation: requested_depth=%d max_depth=%d; continue the work in the current agent instead of retrying the same spawn",
+			options.Depth, s.config.MaxDepth,
+		)
 		s.emitSubagentDenied(options, "", "max_depth", err.Error(), map[string]interface{}{
 			"depth":     options.Depth,
 			"max_depth": s.config.MaxDepth,
@@ -281,6 +284,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	task = spec.Task
 	childConfig := spec.Config
 	childAgent := spec.Agent
+	defer func() {
+		_ = childAgent.Close()
+	}()
 	childSessionID := spec.SessionID
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 		payload := mergeRouteAuditPayload(map[string]interface{}{

@@ -410,8 +410,16 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 	recent := cloneMessages(nonSystemMessages)
 	var older []types.Message
 	if input.EnablePromptCompaction {
-		recent = keepRecent(nonSystemMessages, budget.KeepRecentMessages)
-		older = dropRecent(nonSystemMessages, budget.KeepRecentMessages)
+		// Only drop older hot history when the prompt is under real pressure.
+		// Enabling compaction must not silently keepRecent=N on every step while
+		// the estimated token budget still has headroom.
+		if shouldApplyPromptCompactionPressure(scopedHistory, budget, input.CountTokens) {
+			recent = keepRecent(nonSystemMessages, budget.KeepRecentMessages)
+			older = dropRecent(nonSystemMessages, budget.KeepRecentMessages)
+			result.Metadata["hot_keep_recent_applied"] = true
+		} else {
+			result.Metadata["hot_keep_recent_applied"] = false
+		}
 	}
 	activeTurnHasReplay := activeUserTurnHasReplay(recent)
 
@@ -703,6 +711,8 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
+	// Final message/token trims are self-limiting (MaxMessages / MaxPromptTokens).
+	// Only the keepRecent hot-window drop is budget-gated above.
 	if input.EnablePromptCompaction {
 		managed = trimMessageCount(managed, budget.MaxMessages)
 		managed = trimByTokenBudget(managed, budget, input.CountTokens, result.Metadata)
@@ -1297,6 +1307,21 @@ func splitMessages(history []types.Message) ([]types.Message, []types.Message) {
 		nonSystemMessages = append(nonSystemMessages, *message.Clone())
 	}
 	return systemMessages, nonSystemMessages
+}
+
+// shouldApplyPromptCompactionPressure reports whether Build should drop older
+// hot history / trim managed messages. With a token counter, keepRecent only
+// runs when estimated tokens exceed MaxPromptTokens. Without a counter, an
+// explicit EnablePromptCompaction caller is treated as opting into the
+// message-window compact path (unit tests and specialized callers).
+func shouldApplyPromptCompactionPressure(messages []types.Message, budget Budget, counter TokenCounter) bool {
+	if counter == nil {
+		return true
+	}
+	if budget.MaxPromptTokens <= 0 {
+		return false
+	}
+	return counter(messages) > budget.MaxPromptTokens
 }
 
 func keepRecent(messages []types.Message, count int) []types.Message {

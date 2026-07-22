@@ -665,7 +665,7 @@ func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, result)
 	require.Equal(t, "below_limit", status.Reason)
-	require.Equal(t, 90, status.TriggerTokenLimit)
+	require.Equal(t, 85, status.TriggerTokenLimit)
 	require.Equal(t, 0, provider.callCount)
 }
 
@@ -1004,7 +1004,7 @@ func TestMaybeCompactMissingModelCapabilityUsesProviderContextWindow(t *testing.
 	require.Equal(t, "provider-a", status.ResolvedProvider)
 	require.Equal(t, "gpt-provider-default", status.ResolvedModel)
 	require.Equal(t, 96000, status.MaxContextTokens)
-	require.Equal(t, 86400, status.TriggerTokenLimit)
+	require.Equal(t, 81600, status.TriggerTokenLimit)
 	require.Equal(t, 1, provider.streamCount)
 }
 

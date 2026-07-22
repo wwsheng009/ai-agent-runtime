@@ -80,22 +80,26 @@ type AgentState struct {
 
 // Result Agent 执行结果
 type Result struct {
-	Success       bool                  `json:"success"`
-	Output        string                `json:"output"`
-	Steps         int                   `json:"steps"`
-	LimitReached  bool                  `json:"limit_reached,omitempty"`
-	StepLimit     int                   `json:"step_limit,omitempty"`
-	ToolCallLimit int                   `json:"tool_call_limit,omitempty"`
-	LimitReason   string                `json:"limit_reason,omitempty"`
-	Observations  []types.Observation   `json:"observations"`
-	Skill         string                `json:"skill,omitempty"`
-	TraceID       string                `json:"trace_id,omitempty"`
-	State         AgentState            `json:"state"`
-	Usage         *types.TokenUsage     `json:"usage,omitempty"`
-	Reasoning     *types.ReasoningBlock `json:"reasoning,omitempty"`
-	Duration      types.Duration        `json:"duration"`
-	Error         string                `json:"error,omitempty"`
-	Contract      *agentresult.Result   `json:"result_contract,omitempty"`
+	Success                   bool                   `json:"success"`
+	Output                    string                 `json:"output"`
+	Steps                     int                    `json:"steps"`
+	LimitReached              bool                   `json:"limit_reached,omitempty"`
+	StepLimit                 int                    `json:"step_limit,omitempty"`
+	ToolCallLimit             int                    `json:"tool_call_limit,omitempty"`
+	LimitReason               string                 `json:"limit_reason,omitempty"`
+	Observations              []types.Observation    `json:"observations"`
+	Skill                     string                 `json:"skill,omitempty"`
+	TraceID                   string                 `json:"trace_id,omitempty"`
+	State                     AgentState             `json:"state"`
+	Usage                     *types.TokenUsage      `json:"usage,omitempty"`
+	Reasoning                 *types.ReasoningBlock  `json:"reasoning,omitempty"`
+	Duration                  types.Duration         `json:"duration"`
+	Error                     string                 `json:"error,omitempty"`
+	Failure                   *llm.FailureDiagnostic `json:"failure,omitempty"`
+	ToolErrorCount            int                    `json:"tool_error_count,omitempty"`
+	RecoveredToolErrorCount   int                    `json:"recovered_tool_error_count,omitempty"`
+	UnrecoveredToolErrorCount int                    `json:"unrecovered_tool_error_count,omitempty"`
+	Contract                  *agentresult.Result    `json:"result_contract,omitempty"`
 }
 
 // NewAgent 创建 Agent

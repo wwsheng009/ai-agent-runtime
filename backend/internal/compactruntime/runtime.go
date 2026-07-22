@@ -19,7 +19,7 @@ const (
 	PhasePreTurn = "pre_turn"
 	PhaseMidTurn = "mid_turn"
 
-	defaultAutoCompactRatio         = 0.9
+	defaultAutoCompactRatio         = 0.85
 	defaultAutoCompactContextWindow = llm.DefaultContextWindowTokens
 	defaultKeepRecentMessages       = 8
 )

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -12,6 +13,8 @@ import (
 type PromptPreflightError struct {
 	PromptTokens                         int
 	PromptBudget                         int
+	EffectiveInputBudget                 int
+	ReservedOutputTokens                 int
 	BudgetSource                         string
 	BudgetSourceDetail                   string
 	ResolvedProvider                     string
@@ -37,24 +40,28 @@ func (e *PromptPreflightError) Error() string {
 	if e == nil {
 		return ""
 	}
+	budget := e.PromptBudget
+	if e.EffectiveInputBudget > 0 && (budget <= 0 || e.EffectiveInputBudget < budget) {
+		budget = e.EffectiveInputBudget
+	}
 	switch e.Code {
 	case "prompt_still_exceeds_budget_after_compaction":
 		return fmt.Sprintf(
 			"prompt preflight budget exceeded: prompt tokens %d > budget %d after active-turn compaction",
 			e.PromptTokens,
-			e.PromptBudget,
+			budget,
 		)
 	case "active_turn_not_compactable":
 		return fmt.Sprintf(
 			"prompt preflight budget exceeded: prompt tokens %d > budget %d; active-turn replay cannot be compacted further",
 			e.PromptTokens,
-			e.PromptBudget,
+			budget,
 		)
 	default:
 		return fmt.Sprintf(
 			"prompt preflight budget exceeded: prompt tokens %d > budget %d before provider request",
 			e.PromptTokens,
-			e.PromptBudget,
+			budget,
 		)
 	}
 }
@@ -65,12 +72,19 @@ func (e *PromptPreflightError) Metadata() map[string]interface{} {
 		return nil
 	}
 	metadata := map[string]interface{}{
+		"error_code":                 string(runtimeerrors.ErrContextBudget),
 		"failure_reason_code":        e.Code,
 		"failure_reason":             e.Reason,
 		"can_retry_after_compaction": e.CanRetryAfterCompaction,
 		"active_turn_compacted":      e.ActiveTurnCompacted,
 		"prompt_tokens":              e.PromptTokens,
 		"prompt_budget":              e.PromptBudget,
+	}
+	if e.EffectiveInputBudget > 0 {
+		metadata["effective_input_budget"] = e.EffectiveInputBudget
+	}
+	if e.ReservedOutputTokens > 0 {
+		metadata["reserved_output_tokens"] = e.ReservedOutputTokens
 	}
 	if e.Detail != "" {
 		metadata["failure_reason_detail"] = e.Detail

@@ -173,7 +173,7 @@ func TestReliabilityEvalLongSessionCompactStateRetention(t *testing.T) {
 				TaskID:      "task-release",
 				Goal:        activeGoal,
 				History:     history,
-				CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+				CountTokens: func(messages []types.Message) int { return len(messages) * 200 },
 			}
 
 			before := manager.Build(ctx, input)
