@@ -413,6 +413,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	if len(req.Messages) == 0 {
 		return nil, errors.New(errors.ErrValidationFailed, "messages cannot be empty")
 	}
+	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 
 	providerName := strings.TrimSpace(req.Provider)
 	if providerName == "" {
@@ -458,7 +459,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		}
 
 		lastError = err
-		retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, retryExecutionMeta{
+		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 			Source:   "llm_runtime",
 			Provider: providerName,
 			Model:    req.Model,
@@ -487,6 +488,7 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 	if len(req.Messages) == 0 {
 		return nil, errors.New(errors.ErrValidationFailed, "messages cannot be empty")
 	}
+	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 
 	req.Stream = true
 
@@ -563,7 +565,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 		}
 		lastErr = err
 
-		retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, meta)
+		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, meta)
 		if retryErr != nil {
 			return nil, attempt, retryErr
 		}
@@ -582,6 +584,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 
 func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provider Provider, policy retryPolicy, startedAt time.Time, attempt int, stream <-chan StreamChunk, req *LLMRequest, meta retryExecutionMeta) {
 	defer close(out)
+	activeMaxAttempts := policy.initialMaxAttempts()
 
 	for stream != nil {
 		emissionState := &streamEmissionState{}
@@ -591,7 +594,8 @@ func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provide
 			markRuntimeStreamEmission(emissionState, chunk)
 			if chunk.Type == EventTypeError && strings.TrimSpace(chunk.Error) != "" && !emissionState.emittedAnything() {
 				err := fmt.Errorf("%s", chunk.Error)
-				retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, meta)
+				attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
+				retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, meta)
 				if retryErr != nil {
 					sendStreamChunk(ctx, out, StreamChunk{Type: EventTypeError, Error: retryErr.Error(), Done: true})
 					return
@@ -604,6 +608,7 @@ func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provide
 					}
 					stream = nextStream
 					attempt = nextAttempt
+					activeMaxAttempts = retryResult.MaxAttempts
 					retrying = true
 					break
 				}

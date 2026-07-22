@@ -32,6 +32,14 @@ type retryDecision struct {
 	Multiplier  float64
 }
 
+// FailureDiagnostic is the vendor-neutral final disposition exposed to agent
+// events and result contracts after provider retry handling has finished.
+type FailureDiagnostic struct {
+	ErrorCode  string `json:"error_code"`
+	Retryable  bool   `json:"retryable"`
+	NextAction string `json:"next_action"`
+}
+
 type RetryTuning struct {
 	BaseDelay      time.Duration   `yaml:"baseDelay,omitempty" json:"baseDelay,omitempty"`
 	MaxDelay       time.Duration   `yaml:"maxDelay,omitempty" json:"maxDelay,omitempty"`
@@ -45,6 +53,7 @@ type RetryRule struct {
 	Name              string                 `yaml:"name,omitempty" json:"name,omitempty"`
 	Description       string                 `yaml:"description,omitempty" json:"description,omitempty"`
 	Enabled           bool                   `yaml:"enabled" json:"enabled"`
+	Action            RetryRuleAction        `yaml:"action,omitempty" json:"action,omitempty"`
 	MaxRetries        int                    `yaml:"maxRetries,omitempty" json:"maxRetries,omitempty"`
 	RetryDelay        time.Duration          `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
 	BackoffMultiplier float64                `yaml:"backoffMultiplier,omitempty" json:"backoffMultiplier,omitempty"`
@@ -52,6 +61,16 @@ type RetryRule struct {
 	ErrorCode         RetryErrorCodeMatcher  `yaml:"errorCode,omitempty" json:"errorCode,omitempty"`
 	StatusCode        RetryStatusCodeMatcher `yaml:"statusCode,omitempty" json:"statusCode,omitempty"`
 }
+
+// RetryRuleAction controls the generic policy outcome after a configured
+// matcher succeeds. Provider/account semantics belong in adapter output or
+// deployment configuration; the retry kernel only applies this disposition.
+type RetryRuleAction string
+
+const (
+	RetryRuleActionRetry RetryRuleAction = "retry"
+	RetryRuleActionStop  RetryRuleAction = "stop"
+)
 
 type RetryKeywordMatcher struct {
 	CaseSensitive bool     `yaml:"caseSensitive" json:"caseSensitive"`
@@ -479,6 +498,110 @@ func classifyRetryableLLMError(err error) retryDecision {
 	return classifyRetryableLLMErrorWithRules(err, nil)
 }
 
+// ClassifyFailureCode exposes a stable, vendor-neutral failure taxonomy for
+// runtime events and result contracts. Provider-specific meanings remain in
+// adapter RetryErrorCode values and configurable retry rules.
+func ClassifyFailureCode(err error) string {
+	return classifyLLMFailureCode(err, classifyRetryableLLMError(err))
+}
+
+// DiagnoseFailure classifies an LLM failure and explains the safe recovery
+// action. Retryable describes whether a fresh bounded attempt can help; it is
+// false after retry exhaustion and for account, permission, and request errors.
+func DiagnoseFailure(err error) FailureDiagnostic {
+	decision := classifyRetryableLLMError(err)
+	code := classifyLLMFailureCode(err, decision)
+	return FailureDiagnostic{
+		ErrorCode:  code,
+		Retryable:  decision.Retryable,
+		NextAction: llmFailureNextAction(code, decision),
+	}
+}
+
+func classifyLLMFailureCode(err error, decision retryDecision) string {
+	if err == nil {
+		return ""
+	}
+	if stderrs.Is(err, context.Canceled) {
+		return "USER_CANCELLED"
+	}
+	if IsContextWindowError(err) {
+		return "CONTEXT_BUDGET_EXCEEDED"
+	}
+	if isQuotaExhaustionError(err) {
+		return "UPSTREAM_QUOTA_EXHAUSTED"
+	}
+	if statusCode, ok := providerCallHTTPStatus(err); ok {
+		switch {
+		case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+			return "PERMISSION_DENIED"
+		case statusCode == http.StatusBadRequest:
+			return "UPSTREAM_INVALID_REQUEST"
+		case statusCode >= 500:
+			return "UPSTREAM_UNAVAILABLE"
+		}
+	}
+	switch decision.Reason {
+	case "rate_limit", "http_429":
+		return "UPSTREAM_RATE_LIMITED"
+	case "stream_interrupted", "transient_stream_or_server", "empty_reply", "reasoning_only_empty_reply":
+		return "STREAM_INTERRUPTED"
+	case "transport":
+		return "UPSTREAM_UNAVAILABLE"
+	case "context_canceled":
+		return "USER_CANCELLED"
+	case "invalid_request", "non_retryable_response", "content_inspection_failed", "truncated_tool_call":
+		return "UPSTREAM_INVALID_REQUEST"
+	}
+	if code := extractRetryErrorCode(err); code != "" {
+		return code
+	}
+	return "UPSTREAM_ERROR"
+}
+
+func isQuotaExhaustionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return containsAny(lower,
+		"insufficient_user_quota",
+		"insufficient quota",
+		"quota exhausted",
+		"quota exceeded",
+		"exceeded your current quota",
+		"billing hard limit",
+		"account balance is insufficient",
+	)
+}
+
+func llmFailureNextAction(code string, decision retryDecision) string {
+	switch strings.TrimSpace(code) {
+	case "UPSTREAM_QUOTA_EXHAUSTED":
+		return "Increase provider quota or switch to an available provider/model; do not retry unchanged."
+	case "PERMISSION_DENIED":
+		return "Verify provider credentials and model access before retrying."
+	case "CONTEXT_BUDGET_EXCEEDED":
+		return "Compact or reduce the prompt and tool history, then retry with a smaller request."
+	case "UPSTREAM_INVALID_REQUEST":
+		return "Correct the provider request or unsupported parameters before retrying."
+	case "UPSTREAM_RATE_LIMITED":
+		return "Retry with bounded backoff using the provider retry hint, or switch providers."
+	case "UPSTREAM_UNAVAILABLE", "STREAM_INTERRUPTED":
+		if decision.Retryable {
+			return "Retry with bounded backoff, then switch providers or report the blocker after repeated failure."
+		}
+		return "Automatic retries are exhausted; switch providers or report the upstream blocker."
+	case "USER_CANCELLED":
+		return "Do not retry automatically; start a new run only when continuation is still required."
+	default:
+		if decision.Retryable {
+			return "Retry with bounded backoff and stop after repeated failure."
+		}
+		return "Inspect the provider error and correct the cause before starting another request."
+	}
+}
+
 func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecision {
 	if err == nil {
 		return retryDecision{}
@@ -499,6 +622,9 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 
 	if decision, ok := decisionFromRetryRules(err, rules); ok {
 		return decision
+	}
+	if isQuotaExhaustionError(err) {
+		return retryDecision{Retryable: false, Reason: "quota_exhausted"}
 	}
 
 	if !isRetryableProviderResponseError(err) {
@@ -599,7 +725,6 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		"rate_limit_exceeded",
 		"too many requests",
 		"slow_down",
-		"quota exceeded",
 	) {
 		return retryDecision{
 			Retryable: true,
@@ -653,7 +778,7 @@ func decisionFromRetryRules(err error, rules []RetryRule) (retryDecision, bool) 
 			continue
 		}
 		decision := retryDecision{
-			Retryable:   true,
+			Retryable:   normalizeRetryRuleAction(rule.Action) != RetryRuleActionStop,
 			Delay:       decisionDelayFromServerHint(err),
 			BaseDelay:   rule.RetryDelay,
 			Reason:      strings.TrimSpace(rule.Name),
@@ -661,12 +786,25 @@ func decisionFromRetryRules(err error, rules []RetryRule) (retryDecision, bool) 
 			Multiplier:  rule.BackoffMultiplier,
 		}
 		if decision.Reason == "" {
-			decision.Reason = "configured_retry_rule"
+			if decision.Retryable {
+				decision.Reason = "configured_retry_rule"
+			} else {
+				decision.Reason = "configured_stop_rule"
+			}
 		}
 		return decision, true
 	}
 
 	return retryDecision{}, false
+}
+
+func normalizeRetryRuleAction(action RetryRuleAction) RetryRuleAction {
+	switch RetryRuleAction(strings.ToLower(strings.TrimSpace(string(action)))) {
+	case RetryRuleActionStop:
+		return RetryRuleActionStop
+	default:
+		return RetryRuleActionRetry
+	}
 }
 
 func decisionDelayFromServerHint(err error) time.Duration {

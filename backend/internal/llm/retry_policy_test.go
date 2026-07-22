@@ -25,14 +25,57 @@ func TestClassifyRetryableLLMError_UsesRetryAfterHint(t *testing.T) {
 	assert.Equal(t, "rate_limit", decision.Reason)
 }
 
-func TestClassifyRetryableLLMError_TreatsInsufficientQuotaAsRetryable(t *testing.T) {
-	decision := classifyRetryableLLMError(fmt.Errorf("HTTP 429: {\"error\":{\"code\":\"insufficient_quota\",\"message\":\"You exceeded your current quota\"}}"))
+func TestClassifyRetryableLLMError_TreatsUnclassifiedHTTP429AsRetryable(t *testing.T) {
+	decision := classifyRetryableLLMError(fmt.Errorf("HTTP 429: {\"error\":{\"code\":\"provider_resource_state\",\"message\":\"request rejected\"}}"))
 	assert.True(t, decision.Retryable)
 	assert.Equal(t, "http_429", decision.Reason)
 
 	decision = classifyRetryableLLMError(fmt.Errorf("HTTP 429: {\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"rate limit reached\"}}"))
 	assert.True(t, decision.Retryable)
 	assert.Equal(t, "rate_limit", decision.Reason)
+}
+
+func TestClassifyFailureCodeUsesVendorNeutralTaxonomy(t *testing.T) {
+	assert.Equal(t, "STREAM_INTERRUPTED", ClassifyFailureCode(fmt.Errorf("stream_interrupted: connection closed")))
+	assert.Equal(t, "UPSTREAM_UNAVAILABLE", ClassifyFailureCode(newProviderHTTPError(503, "temporarily unavailable", nil)))
+	assert.Equal(t, "CONTEXT_BUDGET_EXCEEDED", ClassifyFailureCode(fmt.Errorf("input exceeds the context window")))
+	assert.Equal(t, "PERMISSION_DENIED", ClassifyFailureCode(newProviderHTTPError(403, "forbidden", nil)))
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", ClassifyFailureCode(newProviderHTTPError(403, "insufficient_user_quota", nil)))
+	assert.Equal(t, "UPSTREAM_RATE_LIMITED", ClassifyFailureCode(newProviderHTTPError(429, "rate limit exceeded", nil)))
+}
+
+func TestDiagnoseFailureSeparatesQuotaAndTransientFailures(t *testing.T) {
+	quota := DiagnoseFailure(newProviderHTTPError(403, "insufficient_user_quota", nil))
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", quota.ErrorCode)
+	assert.False(t, quota.Retryable)
+	assert.Contains(t, quota.NextAction, "do not retry unchanged")
+	plainQuota := DiagnoseFailure(fmt.Errorf("HTTP 403: insufficient_user_quota"))
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", plainQuota.ErrorCode)
+	assert.False(t, plainQuota.Retryable)
+
+	transient := DiagnoseFailure(newProviderHTTPError(503, "temporarily unavailable", nil))
+	assert.Equal(t, "UPSTREAM_UNAVAILABLE", transient.ErrorCode)
+	assert.True(t, transient.Retryable)
+	assert.Contains(t, transient.NextAction, "bounded backoff")
+}
+
+func TestClassifyRetryableLLMErrorWithRules_ConfiguredStopUsesStructuredCode(t *testing.T) {
+	decision := classifyRetryableLLMErrorWithRules(retryPolicyTestError{
+		message: "provider rejected request",
+		code:    "account_resource_exhausted",
+	}, []RetryRule{
+		{
+			Name:    "resource_exhausted_stop",
+			Enabled: true,
+			Action:  RetryRuleActionStop,
+			ErrorCode: RetryErrorCodeMatcher{
+				Codes: []string{"account_resource_exhausted"},
+			},
+		},
+	})
+
+	assert.False(t, decision.Retryable)
+	assert.Equal(t, "resource_exhausted_stop", decision.Reason)
 }
 
 func TestClassifyRetryableLLMError_DoesNotRetryContextOverflowBehind5xx(t *testing.T) {

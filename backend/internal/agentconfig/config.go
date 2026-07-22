@@ -94,6 +94,7 @@ type RetryRuleConfig struct {
 	Name              string                `yaml:"name" mapstructure:"name"`
 	Description       string                `yaml:"description" mapstructure:"description"`
 	Enabled           bool                  `yaml:"enabled" mapstructure:"enabled"`
+	Action            string                `yaml:"action" mapstructure:"action"`
 	MaxRetries        int                   `yaml:"max_retries" mapstructure:"max_retries"`
 	RetryDelayMS      int                   `yaml:"retry_delay_ms" mapstructure:"retry_delay_ms"`
 	BackoffMultiplier float64               `yaml:"backoff_multiplier" mapstructure:"backoff_multiplier"`

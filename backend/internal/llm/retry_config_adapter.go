@@ -41,6 +41,7 @@ func RetryRulesFromAgentConfig(cfg *agentconfig.Config) []RetryRule {
 			Name:              rule.Name,
 			Description:       rule.Description,
 			Enabled:           rule.Enabled,
+			Action:            RetryRuleAction(rule.Action),
 			MaxRetries:        rule.MaxRetries,
 			RetryDelay:        time.Duration(rule.RetryDelayMS) * time.Millisecond,
 			BackoffMultiplier: rule.BackoffMultiplier,

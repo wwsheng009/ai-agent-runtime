@@ -221,7 +221,16 @@ Rules:
 | `tool_surface_fingerprint` | freeze events (`context.tool_schema.compacted` / `.frozen`), LLM request metadata / `tool_surface.fingerprint`, aicli `[llm-debug] request_started` |
 | `tool_schema_before` / `tool_schema_after` | `context.tool_schema.compacted` when freeze lean-compacted tools |
 | `usage_cached_tokens` | `llm.request.finished` when the provider reports cache reads |
-| `usage_cache_hit_ratio` | `llm.request.finished` = `cached / prompt`; aicli usage panel shows `cache_hit=xx.x%` |
+| `usage_cache_read_tokens` | Canonical cache-read count, including OpenAI-compatible `prompt_tokens_details.cached_tokens` |
+| `usage_cache_creation_tokens` | Cache-write count reported separately by providers such as Anthropic; it is not treated as a cache hit |
+| `usage_cache_hit_ratio` | `llm.request.finished` = `cache read / prompt`; emitted only when cache-read accounting was reported |
+| `usage_cache_status` | `hit`, `reported_zero`, `not_reported_by_provider`, or `not_available_for_local_estimate` |
+
+Provider-reported zero and an absent cache metric are intentionally different.
+The former emits `usage_cache_hit_ratio=0`; the latter omits the ratio so logs
+do not incorrectly claim a measured 0% hit rate. OpenAI-compatible nested usage
+details and Anthropic cache read/creation counters are normalized into the same
+contract without counting cache creation as a hit.
 
 ## Remaining optional follow-ups
 

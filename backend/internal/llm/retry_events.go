@@ -4,15 +4,21 @@ import "context"
 
 // RetryEvent captures a structured retry lifecycle event emitted by LLM runtime components.
 type RetryEvent struct {
-	Source       string `json:"source,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	Protocol     string `json:"protocol,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Attempt      int    `json:"attempt,omitempty"`
-	MaxAttempts  int    `json:"max_attempts,omitempty"`
-	Error        string `json:"error,omitempty"`
-	RetryReason  string `json:"retry_reason,omitempty"`
-	RetryDelayMS int64  `json:"retry_delay_ms,omitempty"`
+	Source            string `json:"source,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	Protocol          string `json:"protocol,omitempty"`
+	Model             string `json:"model,omitempty"`
+	Attempt           int    `json:"attempt,omitempty"`
+	MaxAttempts       int    `json:"max_attempts,omitempty"`
+	Error             string `json:"error,omitempty"`
+	RetryReason       string `json:"retry_reason,omitempty"`
+	ErrorCode         string `json:"error_code,omitempty"`
+	RetryDelayMS      int64  `json:"retry_delay_ms,omitempty"`
+	LogicalTurnID     string `json:"logical_turn_id,omitempty"`
+	LLMRequestID      string `json:"llm_request_id,omitempty"`
+	RetryAttemptID    string `json:"retry_attempt_id,omitempty"`
+	ProviderRequestID string `json:"provider_request_id,omitempty"`
+	StreamID          string `json:"stream_id,omitempty"`
 }
 
 // RetryEventReporter consumes structured retry events emitted by runtime LLM providers.
@@ -58,6 +64,21 @@ func reportRetryEvent(ctx context.Context, event RetryEvent) {
 		}
 		if event.MaxAttempts <= 0 {
 			event.MaxAttempts = state.MaxAttempts
+		}
+		if event.LogicalTurnID == "" {
+			event.LogicalTurnID = state.LogicalTurnID
+		}
+		if event.LLMRequestID == "" {
+			event.LLMRequestID = state.LLMRequestID
+		}
+		if event.RetryAttemptID == "" {
+			event.RetryAttemptID = state.RetryAttemptID
+		}
+		if event.ProviderRequestID == "" {
+			event.ProviderRequestID = state.ProviderRequestID
+		}
+		if event.StreamID == "" {
+			event.StreamID = state.StreamID
 		}
 	}
 	reporter, _ := ctx.Value(retryEventReporterContextKey{}).(RetryEventReporter)

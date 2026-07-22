@@ -52,9 +52,10 @@ func prepareRetry(ctx context.Context, policy retryPolicy, startedAt time.Time, 
 		MaxAttempts:  result.MaxAttempts,
 		Error:        err.Error(),
 		RetryReason:  result.Decision.Reason,
+		ErrorCode:    classifyLLMFailureCode(err, result.Decision),
 		RetryDelayMS: result.Delay.Milliseconds(),
 	})
-	reportRetryEvent(ctx, RetryEvent{
+	retryEvent := RetryEvent{
 		Source:       meta.Source,
 		Provider:     meta.Provider,
 		Protocol:     meta.Protocol,
@@ -63,8 +64,17 @@ func prepareRetry(ctx context.Context, policy retryPolicy, startedAt time.Time, 
 		MaxAttempts:  result.MaxAttempts,
 		Error:        err.Error(),
 		RetryReason:  result.Decision.Reason,
+		ErrorCode:    classifyLLMFailureCode(err, result.Decision),
 		RetryDelayMS: result.Delay.Milliseconds(),
-	})
+	}
+	if state, ok := retryAttemptStateFromContext(ctx); ok {
+		retryEvent.LogicalTurnID = state.LogicalTurnID
+		retryEvent.LLMRequestID = state.LLMRequestID
+		retryEvent.RetryAttemptID = state.RetryAttemptID
+		retryEvent.ProviderRequestID = state.ProviderRequestID
+		retryEvent.StreamID = state.StreamID
+	}
+	reportRetryEvent(ctx, retryEvent)
 
 	if waitErr := waitRetryDelay(ctx, result.Delay); waitErr != nil {
 		return result, waitErr
@@ -72,4 +82,12 @@ func prepareRetry(ctx context.Context, policy retryPolicy, startedAt time.Time, 
 
 	result.Retry = true
 	return result, nil
+}
+
+func retryAttemptStateFromContext(ctx context.Context) (httpDebugRetryAttemptState, bool) {
+	if ctx == nil {
+		return httpDebugRetryAttemptState{}, false
+	}
+	state, ok := ctx.Value(httpDebugRetryAttemptContextKey{}).(httpDebugRetryAttemptState)
+	return state, ok
 }

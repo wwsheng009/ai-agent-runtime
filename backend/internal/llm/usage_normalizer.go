@@ -48,6 +48,22 @@ func TokenUsageToMap(usage *types.TokenUsage) map[string]interface{} {
 	if usage.CachedTokens > 0 {
 		result["cached_tokens"] = usage.CachedTokens
 	}
+	cacheReadTokens := usage.CacheReadTokens
+	if cacheReadTokens == 0 {
+		cacheReadTokens = usage.CachedTokens
+	}
+	if cacheReadTokens > 0 {
+		result["cache_read_input_tokens"] = cacheReadTokens
+	}
+	if usage.CacheCreationTokens > 0 {
+		result["cache_creation_input_tokens"] = usage.CacheCreationTokens
+	}
+	if usage.CacheReadReported {
+		result["cache_read_reported"] = true
+	}
+	if usage.CacheCreationReported {
+		result["cache_creation_reported"] = true
+	}
 	if usage.ReasoningTokens > 0 {
 		result["reasoning_tokens"] = usage.ReasoningTokens
 	}
@@ -179,6 +195,13 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		return nil
 	}
 
+	// OpenAI-compatible providers commonly put cached/reasoning counts in
+	// prompt_tokens_details and completion_tokens_details. Read those details
+	// together with the top-level counters instead of returning early after the
+	// first top-level field match.
+	promptDetails := firstMapValue(raw, "prompt_tokens_details", "prompt_token_details", "input_tokens_details")
+	completionDetails := firstMapValue(raw, "completion_tokens_details", "output_tokens_details")
+
 	promptTokens := firstPositiveInt(
 		raw["prompt_tokens"],
 		raw["input_tokens"],
@@ -193,31 +216,54 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		raw["cached_tokens"],
 		raw["cache_tokens"],
 		raw["prompt_cached_tokens"],
+		promptDetails["cached_tokens"],
+		promptDetails["cache_tokens"],
+		promptDetails["prompt_cached_tokens"],
 	)
 	cacheReadInputTokens := firstPositiveInt(
 		raw["cache_read_input_tokens"],
 		raw["cacheReadInputTokens"],
+		promptDetails["cache_read_input_tokens"],
+		promptDetails["cacheReadInputTokens"],
 	)
 	cacheCreationInputTokens := firstPositiveInt(
 		raw["cache_creation_input_tokens"],
 		raw["cacheCreationInputTokens"],
+		promptDetails["cache_creation_input_tokens"],
+		promptDetails["cacheCreationInputTokens"],
 	)
-	cachedTokens := promptCachedTokens + cacheReadInputTokens + cacheCreationInputTokens
+	cacheReadReported := hasAnyMapKey(raw, "cached_tokens", "cache_tokens", "prompt_cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens") ||
+		hasAnyMapKey(promptDetails, "cached_tokens", "cache_tokens", "prompt_cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens")
+	cacheCreationReported := hasAnyMapKey(raw, "cache_creation_input_tokens", "cacheCreationInputTokens") ||
+		hasAnyMapKey(promptDetails, "cache_creation_input_tokens", "cacheCreationInputTokens")
+	if cacheReadInputTokens < promptCachedTokens {
+		cacheReadInputTokens = promptCachedTokens
+	}
+	cachedTokens := cacheReadInputTokens
 	reasoningTokens := firstPositiveInt(
 		raw["reasoning_tokens"],
 		raw["reasoningTokenCount"],
 		raw["thinking_tokens"],
+		completionDetails["reasoning_tokens"],
+		completionDetails["reasoningTokenCount"],
+		completionDetails["thinking_tokens"],
 	)
 	totalTokens := firstPositiveInt(
 		raw["total_tokens"],
 		raw["totalTokenCount"],
 	)
 
-	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 && cachedTokens == 0 && reasoningTokens == 0 {
+	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 && cachedTokens == 0 && cacheCreationInputTokens == 0 && reasoningTokens == 0 {
 		return nil
 	}
 	if totalTokens == 0 {
-		totalTokens = promptTokens + completionTokens + cacheReadInputTokens + cacheCreationInputTokens
+		totalTokens = promptTokens + completionTokens
+		// OpenAI prompt_tokens already includes cached input; Anthropic's
+		// input_tokens excludes cache read/creation input. Only add the latter
+		// when the provider used input_tokens-style accounting.
+		if _, hasInputTokens := raw["input_tokens"]; hasInputTokens {
+			totalTokens += cacheReadInputTokens + cacheCreationInputTokens
+		}
 	}
 	if promptTokens == 0 && totalTokens > completionTokens {
 		promptTokens = totalTokens - completionTokens
@@ -227,12 +273,34 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 	}
 
 	return &types.TokenUsage{
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      totalTokens,
-		CachedTokens:     cachedTokens,
-		ReasoningTokens:  reasoningTokens,
+		PromptTokens:          promptTokens,
+		CompletionTokens:      completionTokens,
+		TotalTokens:           totalTokens,
+		CachedTokens:          cachedTokens,
+		CacheReadTokens:       cacheReadInputTokens,
+		CacheCreationTokens:   cacheCreationInputTokens,
+		CacheReadReported:     cacheReadReported,
+		CacheCreationReported: cacheCreationReported,
+		ReasoningTokens:       reasoningTokens,
 	}
+}
+
+func firstMapValue(raw map[string]interface{}, keys ...string) map[string]interface{} {
+	for _, key := range keys {
+		if value, ok := raw[key].(map[string]interface{}); ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func hasAnyMapKey(raw map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := raw[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func estimateTokenUsage(protocol string, tokenizer *Tokenizer, requestMessages []types.Message, responseContent string) *types.TokenUsage {
@@ -278,11 +346,15 @@ func chatUsageFromTokenUsage(usage *types.TokenUsage) Usage {
 		return Usage{}
 	}
 	return Usage{
-		PromptTokens:     usage.PromptTokens,
-		CompletionTokens: usage.CompletionTokens,
-		TotalTokens:      usage.TotalTokens,
-		CachedTokens:     usage.CachedTokens,
-		ReasoningTokens:  usage.ReasoningTokens,
+		PromptTokens:          usage.PromptTokens,
+		CompletionTokens:      usage.CompletionTokens,
+		TotalTokens:           usage.TotalTokens,
+		CachedTokens:          usage.CachedTokens,
+		CacheReadTokens:       usage.CacheReadTokens,
+		CacheCreationTokens:   usage.CacheCreationTokens,
+		CacheReadReported:     usage.CacheReadReported,
+		CacheCreationReported: usage.CacheCreationReported,
+		ReasoningTokens:       usage.ReasoningTokens,
 	}
 }
 

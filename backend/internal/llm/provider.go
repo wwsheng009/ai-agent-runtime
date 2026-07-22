@@ -122,11 +122,15 @@ type MessageDelta struct {
 
 // Usage 使用情况
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	CachedTokens     int `json:"cached_tokens,omitempty"`
-	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+	PromptTokens          int  `json:"prompt_tokens"`
+	CompletionTokens      int  `json:"completion_tokens"`
+	TotalTokens           int  `json:"total_tokens"`
+	CachedTokens          int  `json:"cached_tokens,omitempty"`
+	CacheReadTokens       int  `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens   int  `json:"cache_creation_tokens,omitempty"`
+	CacheReadReported     bool `json:"cache_read_reported,omitempty"`
+	CacheCreationReported bool `json:"cache_creation_reported,omitempty"`
+	ReasoningTokens       int  `json:"reasoning_tokens,omitempty"`
 }
 
 // ChatChunk 聊天流式响应块
@@ -882,6 +886,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	if req == nil {
 		return nil, fmt.Errorf("request is required")
 	}
+	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 	if err := p.limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limit wait cancelled: %w", err)
 	}
@@ -912,7 +917,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
-		retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, retryExecutionMeta{
+		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 			Source:   "provider_wrapper",
 			Protocol: p.config.Type,
 			Model:    resolvedModel,
@@ -1107,7 +1112,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:    err.Error(),
 			})
 			lastErr = fmt.Errorf("failed to send request: %w", err)
-			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
+			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",
 				Protocol: p.config.Type,
 				Model:    adapterRequest.Model,
@@ -1139,7 +1144,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
 			lastErr = newProviderHTTPError(resp.StatusCode, string(responseBody), resp.Header)
-			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
+			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",
 				Protocol: p.config.Type,
 				Model:    adapterRequest.Model,
@@ -1232,7 +1237,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			if emissionState.emittedAnything() {
 				return nil, suppressRetry(lastErr)
 			}
-			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
+			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",
 				Protocol: p.config.Type,
 				Model:    adapterRequest.Model,
@@ -1332,6 +1337,7 @@ func (p *ProviderWrapper) Stream(ctx context.Context, req *LLMRequest) (<-chan S
 	if req == nil {
 		return nil, fmt.Errorf("request is required")
 	}
+	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 
 	ch := make(chan StreamChunk, 32)
 	go func() {
@@ -1489,11 +1495,15 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 		Model:    resp.Model,
 		Metadata: metadata,
 		Usage: &types.TokenUsage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-			CachedTokens:     resp.Usage.CachedTokens,
-			ReasoningTokens:  resp.Usage.ReasoningTokens,
+			PromptTokens:          resp.Usage.PromptTokens,
+			CompletionTokens:      resp.Usage.CompletionTokens,
+			TotalTokens:           resp.Usage.TotalTokens,
+			CachedTokens:          resp.Usage.CachedTokens,
+			CacheReadTokens:       resp.Usage.CacheReadTokens,
+			CacheCreationTokens:   resp.Usage.CacheCreationTokens,
+			CacheReadReported:     resp.Usage.CacheReadReported,
+			CacheCreationReported: resp.Usage.CacheCreationReported,
+			ReasoningTokens:       resp.Usage.ReasoningTokens,
 		},
 	}
 	if len(resp.Choices) == 0 {

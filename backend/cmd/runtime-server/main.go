@@ -1108,6 +1108,7 @@ func buildLLMRetryRules(cfg *config.Config) []runtimellm.RetryRule {
 			Name:              rule.Name,
 			Description:       rule.Description,
 			Enabled:           rule.Enabled,
+			Action:            runtimellm.RetryRuleAction(rule.Action),
 			MaxRetries:        rule.MaxRetries,
 			RetryDelay:        time.Duration(rule.RetryDelayMS) * time.Millisecond,
 			BackoffMultiplier: rule.BackoffMultiplier,

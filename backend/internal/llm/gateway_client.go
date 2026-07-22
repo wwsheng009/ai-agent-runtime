@@ -292,6 +292,10 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	if c.resourceManager == nil {
 		return nil, fmt.Errorf("resource manager not initialized")
 	}
+	if req == nil {
+		return nil, fmt.Errorf("request is required")
+	}
+	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 
 	// 设置默认模型
 	model := req.Model
@@ -358,7 +362,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 				return nil, err
 			}
 
-			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, retryExecutionMeta{
+			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 				Source:   "gateway_client",
 				Provider: gatewaySelectedProviderName(selected),
 				Protocol: gatewaySelectedProviderProtocol(selected),
@@ -874,6 +878,10 @@ func (c *GatewayClient) Stream(ctx context.Context, req *LLMRequest) (<-chan Str
 	if c.resourceManager == nil {
 		return nil, fmt.Errorf("resource manager not initialized")
 	}
+	if req == nil {
+		return nil, fmt.Errorf("request is required")
+	}
+	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 
 	// 设置默认模型
 	model := req.Model

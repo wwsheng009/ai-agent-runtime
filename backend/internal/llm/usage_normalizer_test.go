@@ -42,6 +42,41 @@ func TestResolveUnifiedTokenUsage_OpenAIJSONWithCachedAndReasoningTokens(t *test
 	require.Equal(t, 1, usage.ReasoningTokens)
 }
 
+func TestResolveUnifiedTokenUsage_OpenAINestedUsageDetails(t *testing.T) {
+	usage, source := resolveUnifiedTokenUsage(
+		"openai",
+		[]byte(`{"usage":{"prompt_tokens":13413,"completion_tokens":254,"total_tokens":13667,"prompt_tokens_details":{"cached_tokens":11008},"completion_tokens_details":{"reasoning_tokens":97}}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("openai"),
+	)
+	require.NotNil(t, usage)
+	require.Equal(t, usageSourceProviderReported, source)
+	require.Equal(t, 13413, usage.PromptTokens)
+	require.Equal(t, 254, usage.CompletionTokens)
+	require.Equal(t, 13667, usage.TotalTokens)
+	require.Equal(t, 11008, usage.CachedTokens)
+	require.Equal(t, 11008, usage.CacheReadTokens)
+	require.True(t, usage.CacheReadReported)
+	require.Equal(t, 97, usage.ReasoningTokens)
+}
+
+func TestResolveUnifiedTokenUsage_OpenAIReportsZeroCacheRead(t *testing.T) {
+	usage, _ := resolveUnifiedTokenUsage(
+		"openai",
+		[]byte(`{"usage":{"prompt_tokens":11139,"completion_tokens":212,"total_tokens":11351,"prompt_tokens_details":{"cached_tokens":0}}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("openai"),
+	)
+	require.NotNil(t, usage)
+	require.Zero(t, usage.CachedTokens)
+	require.Zero(t, usage.CacheReadTokens)
+	require.True(t, usage.CacheReadReported)
+}
+
 func TestResolveUnifiedTokenUsage_AnthropicJSON(t *testing.T) {
 	usage, source := resolveUnifiedTokenUsage(
 		"anthropic",
@@ -72,7 +107,27 @@ func TestResolveUnifiedTokenUsage_AnthropicCacheReadTokensCountTowardTotal(t *te
 	require.Equal(t, 780, usage.PromptTokens)
 	require.Equal(t, 28, usage.CompletionTokens)
 	require.Equal(t, 512, usage.CachedTokens)
+	require.Equal(t, 512, usage.CacheReadTokens)
+	require.True(t, usage.CacheReadReported)
 	require.Equal(t, 1320, usage.TotalTokens)
+}
+
+func TestResolveUnifiedTokenUsage_AnthropicCacheCreationIsNotCacheHit(t *testing.T) {
+	usage, _ := resolveUnifiedTokenUsage(
+		"anthropic",
+		[]byte(`{"usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":400}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("anthropic"),
+	)
+	require.NotNil(t, usage)
+	require.Zero(t, usage.CachedTokens)
+	require.Zero(t, usage.CacheReadTokens)
+	require.Equal(t, 400, usage.CacheCreationTokens)
+	require.False(t, usage.CacheReadReported)
+	require.True(t, usage.CacheCreationReported)
+	require.Equal(t, 520, usage.TotalTokens)
 }
 
 func TestResolveUnifiedTokenUsage_GeminiJSON(t *testing.T) {
@@ -194,11 +249,15 @@ func TestEstimateChatTokenUsageIncludesStructuredReplay(t *testing.T) {
 
 func TestTokenUsageToMap_PreservesCanonicalAndAliasFields(t *testing.T) {
 	usageMap := TokenUsageToMap(&types.TokenUsage{
-		PromptTokens:     11,
-		CompletionTokens: 4,
-		TotalTokens:      15,
-		CachedTokens:     2,
-		ReasoningTokens:  3,
+		PromptTokens:          11,
+		CompletionTokens:      4,
+		TotalTokens:           15,
+		CachedTokens:          2,
+		CacheReadTokens:       2,
+		CacheCreationTokens:   5,
+		CacheReadReported:     true,
+		CacheCreationReported: true,
+		ReasoningTokens:       3,
 	})
 
 	require.NotNil(t, usageMap)
@@ -208,5 +267,9 @@ func TestTokenUsageToMap_PreservesCanonicalAndAliasFields(t *testing.T) {
 	require.Equal(t, 4, usageMap["output_tokens"])
 	require.Equal(t, 15, usageMap["total_tokens"])
 	require.Equal(t, 2, usageMap["cached_tokens"])
+	require.Equal(t, 2, usageMap["cache_read_input_tokens"])
+	require.Equal(t, 5, usageMap["cache_creation_input_tokens"])
+	require.Equal(t, true, usageMap["cache_read_reported"])
+	require.Equal(t, true, usageMap["cache_creation_reported"])
 	require.Equal(t, 3, usageMap["reasoning_tokens"])
 }

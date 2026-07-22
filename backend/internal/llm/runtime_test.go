@@ -144,6 +144,47 @@ func (p *debugFlakyProvider) Call(ctx context.Context, req *LLMRequest) (*LLMRes
 	}, nil
 }
 
+func TestHTTPDebugRetryCorrelationIDs(t *testing.T) {
+	provider := &debugFlakyProvider{name: "test-provider", errs: []error{fmt.Errorf("temporary failure")}}
+	runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "test-model", MaxRetries: 2})
+	runtime.RegisterProvider(provider.Name(), provider)
+
+	var events []HTTPDebugEvent
+	ctx := WithHTTPDebugReporter(context.Background(), func(event HTTPDebugEvent) {
+		events = append(events, event)
+	})
+	_, err := runtime.Call(ctx, &LLMRequest{
+		Provider: provider.Name(),
+		Model:    "test-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+		Metadata: map[string]interface{}{
+			"logical_turn_id": "turn-1",
+			"llm_request_id":  "request-1",
+			"stream_id":       "stream-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("runtime call: %v", err)
+	}
+
+	var retryEvent *HTTPDebugEvent
+	for index := range events {
+		if events[index].Phase == "retry" {
+			retryEvent = &events[index]
+			break
+		}
+	}
+	if retryEvent == nil {
+		t.Fatalf("expected retry debug event, got %+v", events)
+	}
+	if retryEvent.LogicalTurnID != "turn-1" || retryEvent.LLMRequestID != "request-1" || retryEvent.StreamID != "stream-1" {
+		t.Fatalf("unexpected request correlation: %+v", retryEvent)
+	}
+	if retryEvent.RetryAttemptID == "" || retryEvent.ProviderRequestID == "" {
+		t.Fatalf("expected generated attempt correlation ids: %+v", retryEvent)
+	}
+}
+
 func (p *debugFlakyProvider) Stream(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
 	ch := make(chan StreamChunk, 1)
 	ch <- StreamChunk{Type: EventTypeDone, Done: true}

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // HTTPDebugEvent captures a low-level HTTP request/response snapshot emitted by runtime LLM providers.
@@ -31,7 +33,13 @@ type HTTPDebugEvent struct {
 	ResponseBodyRaw     []byte                 `json:"-"`
 	Error               string                 `json:"error,omitempty"`
 	RetryReason         string                 `json:"retry_reason,omitempty"`
+	ErrorCode           string                 `json:"error_code,omitempty"`
 	RetryDelayMS        int64                  `json:"retry_delay_ms,omitempty"`
+	LogicalTurnID       string                 `json:"logical_turn_id,omitempty"`
+	LLMRequestID        string                 `json:"llm_request_id,omitempty"`
+	RetryAttemptID      string                 `json:"retry_attempt_id,omitempty"`
+	ProviderRequestID   string                 `json:"provider_request_id,omitempty"`
+	StreamID            string                 `json:"stream_id,omitempty"`
 }
 
 // HTTPDebugReporter consumes runtime HTTP debug events.
@@ -39,10 +47,22 @@ type HTTPDebugReporter func(HTTPDebugEvent)
 
 type httpDebugReporterContextKey struct{}
 type httpDebugRetryAttemptContextKey struct{}
+type httpDebugRequestContextKey struct{}
 
 type httpDebugRetryAttemptState struct {
-	Attempt     int
-	MaxAttempts int
+	Attempt           int
+	MaxAttempts       int
+	LogicalTurnID     string
+	LLMRequestID      string
+	RetryAttemptID    string
+	ProviderRequestID string
+	StreamID          string
+}
+
+type httpDebugRequestState struct {
+	LogicalTurnID string
+	LLMRequestID  string
+	StreamID      string
 }
 
 const httpDebugRequestDiagnosticsKey = "_request_debug"
@@ -73,12 +93,65 @@ func reportHTTPDebug(ctx context.Context, event HTTPDebugEvent) {
 		if event.MaxAttempts <= 0 {
 			event.MaxAttempts = state.MaxAttempts
 		}
+		copyHTTPDebugCorrelation(&event, state)
+	}
+	if state, ok := ctx.Value(httpDebugRequestContextKey{}).(httpDebugRequestState); ok {
+		if event.LogicalTurnID == "" {
+			event.LogicalTurnID = state.LogicalTurnID
+		}
+		if event.LLMRequestID == "" {
+			event.LLMRequestID = state.LLMRequestID
+		}
+		if event.StreamID == "" {
+			event.StreamID = state.StreamID
+		}
 	}
 	reporter, _ := ctx.Value(httpDebugReporterContextKey{}).(HTTPDebugReporter)
 	if reporter == nil {
 		return
 	}
 	reporter(event)
+}
+
+func copyHTTPDebugCorrelation(event *HTTPDebugEvent, state httpDebugRetryAttemptState) {
+	if event == nil {
+		return
+	}
+	if event.LogicalTurnID == "" {
+		event.LogicalTurnID = state.LogicalTurnID
+	}
+	if event.LLMRequestID == "" {
+		event.LLMRequestID = state.LLMRequestID
+	}
+	if event.RetryAttemptID == "" {
+		event.RetryAttemptID = state.RetryAttemptID
+	}
+	if event.ProviderRequestID == "" {
+		event.ProviderRequestID = state.ProviderRequestID
+	}
+	if event.StreamID == "" {
+		event.StreamID = state.StreamID
+	}
+}
+
+func withHTTPDebugRequestMetadata(ctx context.Context, metadata map[string]interface{}) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state := httpDebugRequestState{
+		LogicalTurnID: metadataText(metadata, "logical_turn_id"),
+		LLMRequestID:  metadataText(metadata, "llm_request_id"),
+		StreamID:      metadataText(metadata, "stream_id"),
+	}
+	return context.WithValue(ctx, httpDebugRequestContextKey{}, state)
+}
+
+func metadataText(metadata map[string]interface{}, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
 }
 
 // boundHTTPDebugRawBody prevents diagnostics from duplicating an arbitrarily
@@ -108,9 +181,15 @@ func withHTTPDebugRetryAttempt(ctx context.Context, attempt int, maxAttempts int
 	if attempt <= 0 && maxAttempts <= 0 {
 		return ctx
 	}
+	requestState, _ := ctx.Value(httpDebugRequestContextKey{}).(httpDebugRequestState)
 	return context.WithValue(ctx, httpDebugRetryAttemptContextKey{}, httpDebugRetryAttemptState{
-		Attempt:     attempt,
-		MaxAttempts: maxAttempts,
+		Attempt:           attempt,
+		MaxAttempts:       maxAttempts,
+		LogicalTurnID:     requestState.LogicalTurnID,
+		LLMRequestID:      requestState.LLMRequestID,
+		RetryAttemptID:    "attempt_" + uuid.NewString(),
+		ProviderRequestID: "provider_req_" + uuid.NewString(),
+		StreamID:          requestState.StreamID,
 	})
 }
 
