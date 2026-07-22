@@ -143,8 +143,10 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
-			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
+			effective_model, requested_reasoning_effort, effective_reasoning_effort,
+			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
 			root_session_id = excluded.root_session_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -167,6 +169,14 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			route_warnings_json = excluded.route_warnings_json,
 			fallback_used = excluded.fallback_used,
 			fallback_reason = excluded.fallback_reason,
+			requested_provider = excluded.requested_provider,
+			effective_provider = excluded.effective_provider,
+			requested_model = excluded.requested_model,
+			effective_model = excluded.effective_model,
+			requested_reasoning_effort = excluded.requested_reasoning_effort,
+			effective_reasoning_effort = excluded.effective_reasoning_effort,
+			requested_permission_mode = excluded.requested_permission_mode,
+			effective_permission_mode = excluded.effective_permission_mode,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -191,6 +201,14 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			route_warnings_json = excluded.route_warnings_json,
 			fallback_used = excluded.fallback_used,
 			fallback_reason = excluded.fallback_reason,
+			requested_provider = excluded.requested_provider,
+			effective_provider = excluded.effective_provider,
+			requested_model = excluded.requested_model,
+			effective_model = excluded.effective_model,
+			requested_reasoning_effort = excluded.requested_reasoning_effort,
+			effective_reasoning_effort = excluded.effective_reasoning_effort,
+			requested_permission_mode = excluded.requested_permission_mode,
+			effective_permission_mode = excluded.effective_permission_mode,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -201,6 +219,10 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 		nullAgentString(record.ReasoningEffort), nullAgentString(record.Difficulty), nullAgentString(record.DifficultySource),
 		nullAgentString(record.DifficultyRationale), nullAgentString(record.RouteSource), routeWarningsJSON(record.RouteWarnings),
 		record.FallbackUsed, nullAgentString(record.FallbackReason),
+		nullAgentString(record.RequestedProvider), nullAgentString(record.EffectiveProvider),
+		nullAgentString(record.RequestedModel), nullAgentString(record.EffectiveModel),
+		nullAgentString(record.RequestedReasoningEffort), nullAgentString(record.EffectiveReasoningEffort),
+		nullAgentString(record.RequestedPermissionMode), nullAgentString(record.EffectivePermissionMode),
 		record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
 		nullableAgentTime(record.ClosedAt))
 	if err != nil {
@@ -265,8 +287,8 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 			WHERE root_session_id = ?
 				AND agent_path <> '/root'
 				AND closed_at IS NULL
-				AND status <> ?
-		`, root.RootSessionID, AgentStatusClosed).Scan(&activeCount); err != nil {
+				AND status NOT IN (?, ?)
+		`, root.RootSessionID, AgentStatusClosed, AgentStatusStale).Scan(&activeCount); err != nil {
 			return AgentRecord{}, fmt.Errorf("count active agent registry children: %w", err)
 		}
 		if activeCount >= maxThreads {
@@ -303,7 +325,9 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
-			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
+			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
+			effective_model, requested_reasoning_effort, effective_reasoning_effort,
+			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
 		FROM agent_control_agents
 	`
 	if len(clauses) > 0 {
@@ -381,14 +405,20 @@ func agentFilterClauses(filter AgentFilter) ([]string, []interface{}) {
 	}
 	if !filter.IncludeClosed {
 		clauses = append(clauses, "closed_at IS NULL")
-		clauses = append(clauses, "status <> ?")
-		args = append(args, AgentStatusClosed)
+		clauses = append(clauses, "status NOT IN (?, ?)")
+		args = append(args, AgentStatusClosed, AgentStatusStale)
 	}
 	if filter.AfterSeq > 0 {
 		clauses = append(clauses, "id > ?")
 		args = append(args, filter.AfterSeq)
 	}
 	return clauses, args
+}
+
+// MarkAgentControlAgentSubtreeStale removes one abandoned path subtree from
+// active routing while retaining a distinct diagnostic terminal state.
+func (s *SQLiteGlobalAgentRegistryStore) MarkAgentControlAgentSubtreeStale(ctx context.Context, rootSessionID string, agentPath string, staleAt time.Time) (int64, error) {
+	return s.markAgentControlAgentSubtreeTerminal(ctx, rootSessionID, agentPath, AgentStatusStale, "stale", staleAt)
 }
 
 func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentRecord) (AgentRecord, error) {
@@ -415,8 +445,10 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
-			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
+			effective_model, requested_reasoning_effort, effective_reasoning_effort,
+			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
 			root_session_id = excluded.root_session_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -439,6 +471,14 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			route_warnings_json = excluded.route_warnings_json,
 			fallback_used = excluded.fallback_used,
 			fallback_reason = excluded.fallback_reason,
+			requested_provider = excluded.requested_provider,
+			effective_provider = excluded.effective_provider,
+			requested_model = excluded.requested_model,
+			effective_model = excluded.effective_model,
+			requested_reasoning_effort = excluded.requested_reasoning_effort,
+			effective_reasoning_effort = excluded.effective_reasoning_effort,
+			requested_permission_mode = excluded.requested_permission_mode,
+			effective_permission_mode = excluded.effective_permission_mode,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -463,6 +503,14 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			route_warnings_json = excluded.route_warnings_json,
 			fallback_used = excluded.fallback_used,
 			fallback_reason = excluded.fallback_reason,
+			requested_provider = excluded.requested_provider,
+			effective_provider = excluded.effective_provider,
+			requested_model = excluded.requested_model,
+			effective_model = excluded.effective_model,
+			requested_reasoning_effort = excluded.requested_reasoning_effort,
+			effective_reasoning_effort = excluded.effective_reasoning_effort,
+			requested_permission_mode = excluded.requested_permission_mode,
+			effective_permission_mode = excluded.effective_permission_mode,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -473,6 +521,10 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 		nullAgentString(record.ReasoningEffort), nullAgentString(record.Difficulty), nullAgentString(record.DifficultySource),
 		nullAgentString(record.DifficultyRationale), nullAgentString(record.RouteSource), routeWarningsJSON(record.RouteWarnings),
 		record.FallbackUsed, nullAgentString(record.FallbackReason),
+		nullAgentString(record.RequestedProvider), nullAgentString(record.EffectiveProvider),
+		nullAgentString(record.RequestedModel), nullAgentString(record.EffectiveModel),
+		nullAgentString(record.RequestedReasoningEffort), nullAgentString(record.EffectiveReasoningEffort),
+		nullAgentString(record.RequestedPermissionMode), nullAgentString(record.EffectivePermissionMode),
 		record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
 		nullableAgentTime(record.ClosedAt))
 	if err != nil {
@@ -485,6 +537,10 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 
 // CloseAgentControlAgentSubtree marks one path and all descendants closed.
 func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx context.Context, rootSessionID string, agentPath string, closedAt time.Time) (int64, error) {
+	return s.markAgentControlAgentSubtreeTerminal(ctx, rootSessionID, agentPath, AgentStatusClosed, "closed", closedAt)
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ctx context.Context, rootSessionID string, agentPath, status, eventKind string, terminalAt time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
@@ -496,8 +552,8 @@ func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx conte
 	if agentPath == "" {
 		return 0, fmt.Errorf("agent path is required")
 	}
-	if closedAt.IsZero() {
-		closedAt = time.Now().UTC()
+	if terminalAt.IsZero() {
+		terminalAt = time.Now().UTC()
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE agent_control_agents
@@ -505,9 +561,9 @@ func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx conte
 		WHERE root_session_id = ?
 			AND (agent_path = ? OR agent_path LIKE ?)
 			AND closed_at IS NULL
-	`, AgentStatusClosed, formatAgentTime(closedAt), formatAgentTime(time.Now().UTC()), rootSessionID, agentPath, strings.TrimRight(agentPath, "/")+"/%")
+	`, status, formatAgentTime(terminalAt), formatAgentTime(time.Now().UTC()), rootSessionID, agentPath, strings.TrimRight(agentPath, "/")+"/%")
 	if err != nil {
-		return 0, fmt.Errorf("close agent control agent subtree: %w", err)
+		return 0, fmt.Errorf("mark agent control agent subtree %s: %w", status, err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
@@ -526,7 +582,7 @@ func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx conte
 			if !record.Closed() {
 				continue
 			}
-			wake, wakeErr := s.appendAgentWakeEvent(ctx, record, "closed")
+			wake, wakeErr := s.appendAgentWakeEvent(ctx, record, eventKind)
 			if wakeErr != nil {
 				return 0, wakeErr
 			}
@@ -541,7 +597,9 @@ func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Co
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
-			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
+			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
+			effective_model, requested_reasoning_effort, effective_reasoning_effort,
+			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
 		FROM agent_control_agents
 		WHERE agent_id = ?
 	`, strings.TrimSpace(agentID))
@@ -787,6 +845,14 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 			route_warnings_json TEXT NOT NULL DEFAULT '[]',
 			fallback_used INTEGER NOT NULL DEFAULT 0,
 			fallback_reason TEXT,
+			requested_provider TEXT,
+			effective_provider TEXT,
+			requested_model TEXT,
+			effective_model TEXT,
+			requested_reasoning_effort TEXT,
+			effective_reasoning_effort TEXT,
+			requested_permission_mode TEXT,
+			effective_permission_mode TEXT,
 			status TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
@@ -870,6 +936,14 @@ func (s *SQLiteGlobalAgentRegistryStore) ensureAgentControlAgentRouteColumns(ctx
 		{Name: "route_warnings_json", SQL: "ALTER TABLE agent_control_agents ADD COLUMN route_warnings_json TEXT NOT NULL DEFAULT '[]'"},
 		{Name: "fallback_used", SQL: "ALTER TABLE agent_control_agents ADD COLUMN fallback_used INTEGER NOT NULL DEFAULT 0"},
 		{Name: "fallback_reason", SQL: "ALTER TABLE agent_control_agents ADD COLUMN fallback_reason TEXT"},
+		{Name: "requested_provider", SQL: "ALTER TABLE agent_control_agents ADD COLUMN requested_provider TEXT"},
+		{Name: "effective_provider", SQL: "ALTER TABLE agent_control_agents ADD COLUMN effective_provider TEXT"},
+		{Name: "requested_model", SQL: "ALTER TABLE agent_control_agents ADD COLUMN requested_model TEXT"},
+		{Name: "effective_model", SQL: "ALTER TABLE agent_control_agents ADD COLUMN effective_model TEXT"},
+		{Name: "requested_reasoning_effort", SQL: "ALTER TABLE agent_control_agents ADD COLUMN requested_reasoning_effort TEXT"},
+		{Name: "effective_reasoning_effort", SQL: "ALTER TABLE agent_control_agents ADD COLUMN effective_reasoning_effort TEXT"},
+		{Name: "requested_permission_mode", SQL: "ALTER TABLE agent_control_agents ADD COLUMN requested_permission_mode TEXT"},
+		{Name: "effective_permission_mode", SQL: "ALTER TABLE agent_control_agents ADD COLUMN effective_permission_mode TEXT"},
 	}
 	for _, column := range columns {
 		if existing[column.Name] {
@@ -888,33 +962,44 @@ type agentRecordScanner interface {
 
 func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 	var (
-		record              AgentRecord
-		parentAgentID       sql.NullString
-		parentSessionID     sql.NullString
-		sessionID           sql.NullString
-		agentType           sql.NullString
-		nickname            sql.NullString
-		workflow            sql.NullString
-		teamID              sql.NullString
-		teammateID          sql.NullString
-		provider            sql.NullString
-		model               sql.NullString
-		reasoningEffort     sql.NullString
-		difficulty          sql.NullString
-		difficultySource    sql.NullString
-		difficultyRationale sql.NullString
-		routeSource         sql.NullString
-		routeWarningsRaw    string
-		fallbackUsed        int
-		fallbackReason      sql.NullString
-		createdRaw          string
-		updatedRaw          string
-		closedRaw           sql.NullString
+		record                   AgentRecord
+		parentAgentID            sql.NullString
+		parentSessionID          sql.NullString
+		sessionID                sql.NullString
+		agentType                sql.NullString
+		nickname                 sql.NullString
+		workflow                 sql.NullString
+		teamID                   sql.NullString
+		teammateID               sql.NullString
+		provider                 sql.NullString
+		model                    sql.NullString
+		reasoningEffort          sql.NullString
+		difficulty               sql.NullString
+		difficultySource         sql.NullString
+		difficultyRationale      sql.NullString
+		routeSource              sql.NullString
+		routeWarningsRaw         string
+		fallbackUsed             int
+		fallbackReason           sql.NullString
+		requestedProvider        sql.NullString
+		effectiveProvider        sql.NullString
+		requestedModel           sql.NullString
+		effectiveModel           sql.NullString
+		requestedReasoningEffort sql.NullString
+		effectiveReasoningEffort sql.NullString
+		requestedPermissionMode  sql.NullString
+		effectivePermissionMode  sql.NullString
+		createdRaw               string
+		updatedRaw               string
+		closedRaw                sql.NullString
 	)
 	if err := scanner.Scan(&record.Seq, &record.AgentID, &record.RootSessionID, &parentAgentID, &parentSessionID,
 		&sessionID, &record.AgentPath, &record.Depth, &agentType, &nickname, &workflow, &teamID,
 		&teammateID, &provider, &model, &reasoningEffort, &difficulty, &difficultySource,
 		&difficultyRationale, &routeSource, &routeWarningsRaw, &fallbackUsed, &fallbackReason,
+		&requestedProvider, &effectiveProvider, &requestedModel, &effectiveModel,
+		&requestedReasoningEffort, &effectiveReasoningEffort,
+		&requestedPermissionMode, &effectivePermissionMode,
 		&record.Status, &createdRaw, &updatedRaw, &closedRaw); err != nil {
 		return AgentRecord{}, err
 	}
@@ -936,6 +1021,14 @@ func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 	record.RouteWarnings = parseRouteWarningsJSON(routeWarningsRaw)
 	record.FallbackUsed = fallbackUsed != 0
 	record.FallbackReason = fallbackReason.String
+	record.RequestedProvider = requestedProvider.String
+	record.EffectiveProvider = effectiveProvider.String
+	record.RequestedModel = requestedModel.String
+	record.EffectiveModel = effectiveModel.String
+	record.RequestedReasoningEffort = requestedReasoningEffort.String
+	record.EffectiveReasoningEffort = effectiveReasoningEffort.String
+	record.RequestedPermissionMode = requestedPermissionMode.String
+	record.EffectivePermissionMode = effectivePermissionMode.String
 	if createdRaw != "" {
 		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 	}

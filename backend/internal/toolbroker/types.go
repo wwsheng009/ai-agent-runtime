@@ -275,25 +275,31 @@ type UserInputHandler interface {
 
 // SpawnAgentArgs describes a lightweight child-agent session request.
 type SpawnAgentArgs struct {
-	ID                  string   `json:"id,omitempty"`
-	SessionID           string   `json:"session_id,omitempty"`
-	Message             string   `json:"message,omitempty"`
-	AgentType           string   `json:"agent_type,omitempty"`
-	Difficulty          string   `json:"difficulty,omitempty"`
-	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
-	Provider            string   `json:"provider,omitempty"`
-	Model               string   `json:"model,omitempty"`
-	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
-	ThinkingEffort      string   `json:"thinking_effort,omitempty"`
-	PermissionMode      string   `json:"permission_mode,omitempty"`
-	ReadOnly            bool     `json:"read_only,omitempty"`
-	ForkContext         *bool    `json:"fork_context,omitempty"`
-	ForkTurns           string   `json:"fork_turns,omitempty"`
-	DifficultySource    string   `json:"-"`
-	RouteSource         string   `json:"-"`
-	RouteWarnings       []string `json:"-"`
-	FallbackUsed        bool     `json:"-"`
-	FallbackReason      string   `json:"-"`
+	ID                       string   `json:"id,omitempty"`
+	SessionID                string   `json:"session_id,omitempty"`
+	Message                  string   `json:"message,omitempty"`
+	AgentType                string   `json:"agent_type,omitempty"`
+	Difficulty               string   `json:"difficulty,omitempty"`
+	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
+	Provider                 string   `json:"provider,omitempty"`
+	Model                    string   `json:"model,omitempty"`
+	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
+	ThinkingEffort           string   `json:"thinking_effort,omitempty"`
+	PermissionMode           string   `json:"permission_mode,omitempty"`
+	ReadOnly                 bool     `json:"read_only,omitempty"`
+	ForkContext              *bool    `json:"fork_context,omitempty"`
+	ForkTurns                string   `json:"fork_turns,omitempty"`
+	DifficultySource         string   `json:"-"`
+	RouteSource              string   `json:"-"`
+	RouteWarnings            []string `json:"-"`
+	FallbackUsed             bool     `json:"-"`
+	FallbackReason           string   `json:"-"`
+	RequestedProvider        string   `json:"-"`
+	RequestedModel           string   `json:"-"`
+	RequestedReasoningEffort string   `json:"-"`
+	RequestedPermissionMode  string   `json:"-"`
+	EffectivePermissionMode  string   `json:"-"`
+	RequestedRouteCaptured   bool     `json:"-"`
 }
 
 // SendAgentInputArgs describes a follow-up input for an existing child agent.
@@ -364,6 +370,14 @@ type AgentStatusResult struct {
 	RouteWarnings            []string `json:"route_warnings,omitempty"`
 	FallbackUsed             bool     `json:"fallback_used,omitempty"`
 	FallbackReason           string   `json:"fallback_reason,omitempty"`
+	RequestedProvider        string   `json:"requested_provider,omitempty"`
+	EffectiveProvider        string   `json:"effective_provider,omitempty"`
+	RequestedModel           string   `json:"requested_model,omitempty"`
+	EffectiveModel           string   `json:"effective_model,omitempty"`
+	RequestedReasoningEffort string   `json:"requested_reasoning_effort,omitempty"`
+	EffectiveReasoningEffort string   `json:"effective_reasoning_effort,omitempty"`
+	RequestedPermissionMode  string   `json:"requested_permission_mode,omitempty"`
+	EffectivePermissionMode  string   `json:"effective_permission_mode,omitempty"`
 	Status                   string   `json:"status"`
 	Exists                   bool     `json:"exists"`
 	Created                  bool     `json:"created,omitempty"`
@@ -471,26 +485,30 @@ type AgentSessionController interface {
 }
 
 const (
-	AgentSessionContextProviderName        = "provider_name"
-	AgentSessionContextModel               = "model"
-	AgentSessionContextReasoningEffort     = "reasoning_effort"
-	AgentSessionContextParentSessionID     = agentcontrol.SessionContextParentSessionID
-	AgentSessionContextRootSessionID       = agentcontrol.SessionContextRootSessionID
-	AgentSessionContextAgentType           = agentcontrol.SessionContextAgentType
-	AgentSessionContextRequestedModel      = agentcontrol.SessionContextRequestedModel
-	AgentSessionContextDifficulty          = agentcontrol.SessionContextDifficulty
-	AgentSessionContextDifficultySource    = agentcontrol.SessionContextDifficultySource
-	AgentSessionContextDifficultyRationale = agentcontrol.SessionContextDifficultyRationale
-	AgentSessionContextRouteSource         = agentcontrol.SessionContextRouteSource
-	AgentSessionContextRouteWarnings       = agentcontrol.SessionContextRouteWarnings
-	AgentSessionContextFallbackUsed        = agentcontrol.SessionContextFallbackUsed
-	AgentSessionContextFallbackReason      = agentcontrol.SessionContextFallbackReason
-	AgentSessionContextPath                = agentcontrol.SessionContextPath
-	AgentSessionContextDepth               = agentcontrol.SessionContextDepth
-	AgentSessionContextTeamID              = agentcontrol.SessionContextTeamID
-	AgentSessionContextTeammateID          = agentcontrol.SessionContextTeammateID
-	AgentSessionContextPermissionMode      = "permission_mode"
-	AgentSessionContextReadOnly            = "read_only"
+	AgentSessionContextProviderName             = "provider_name"
+	AgentSessionContextModel                    = "model"
+	AgentSessionContextReasoningEffort          = "reasoning_effort"
+	AgentSessionContextParentSessionID          = agentcontrol.SessionContextParentSessionID
+	AgentSessionContextRootSessionID            = agentcontrol.SessionContextRootSessionID
+	AgentSessionContextAgentType                = agentcontrol.SessionContextAgentType
+	AgentSessionContextRequestedModel           = agentcontrol.SessionContextRequestedModel
+	AgentSessionContextDifficulty               = agentcontrol.SessionContextDifficulty
+	AgentSessionContextDifficultySource         = agentcontrol.SessionContextDifficultySource
+	AgentSessionContextDifficultyRationale      = agentcontrol.SessionContextDifficultyRationale
+	AgentSessionContextRouteSource              = agentcontrol.SessionContextRouteSource
+	AgentSessionContextRouteWarnings            = agentcontrol.SessionContextRouteWarnings
+	AgentSessionContextFallbackUsed             = agentcontrol.SessionContextFallbackUsed
+	AgentSessionContextFallbackReason           = agentcontrol.SessionContextFallbackReason
+	AgentSessionContextPath                     = agentcontrol.SessionContextPath
+	AgentSessionContextDepth                    = agentcontrol.SessionContextDepth
+	AgentSessionContextTeamID                   = agentcontrol.SessionContextTeamID
+	AgentSessionContextTeammateID               = agentcontrol.SessionContextTeammateID
+	AgentSessionContextPermissionMode           = "permission_mode"
+	AgentSessionContextReadOnly                 = "read_only"
+	AgentSessionContextRequestedProvider        = "agent_requested_provider"
+	AgentSessionContextRequestedReasoningEffort = "agent_requested_reasoning_effort"
+	AgentSessionContextRequestedPermissionMode  = "agent_requested_permission_mode"
+	AgentSessionContextEffectivePermissionMode  = "agent_effective_permission_mode"
 )
 
 // ApplySpawnAgentRouteContext persists spawn_agent route hints on a child
@@ -503,9 +521,16 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if provider := strings.TrimSpace(args.Provider); provider != "" {
 		session.SetContext(AgentSessionContextProviderName, provider)
 	}
+	if provider := strings.TrimSpace(args.RequestedProvider); provider != "" {
+		session.SetContext(AgentSessionContextRequestedProvider, provider)
+	}
 	if model := strings.TrimSpace(args.Model); model != "" {
-		session.SetContext(AgentSessionContextRequestedModel, model)
 		session.SetContext(AgentSessionContextModel, model)
+	}
+	if model := strings.TrimSpace(args.RequestedModel); model != "" {
+		session.SetContext(AgentSessionContextRequestedModel, model)
+	} else if model := strings.TrimSpace(args.Model); model != "" {
+		session.SetContext(AgentSessionContextRequestedModel, model)
 	}
 	effort := strings.TrimSpace(args.ReasoningEffort)
 	if effort == "" {
@@ -513,6 +538,9 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	}
 	if effort != "" {
 		session.SetContext(AgentSessionContextReasoningEffort, effort)
+	}
+	if effort := strings.TrimSpace(args.RequestedReasoningEffort); effort != "" {
+		session.SetContext(AgentSessionContextRequestedReasoningEffort, effort)
 	}
 	if difficulty := strings.TrimSpace(args.Difficulty); difficulty != "" {
 		session.SetContext(AgentSessionContextDifficulty, difficulty)
@@ -546,6 +574,13 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if permissionMode := strings.TrimSpace(args.PermissionMode); permissionMode != "" {
 		session.SetContext(AgentSessionContextPermissionMode, permissionMode)
 	}
+	if permissionMode := strings.TrimSpace(args.RequestedPermissionMode); permissionMode != "" {
+		session.SetContext(AgentSessionContextRequestedPermissionMode, permissionMode)
+	}
+	effectivePermissionMode := firstNonEmptyRouteString(args.EffectivePermissionMode, args.PermissionMode)
+	if effectivePermissionMode != "" {
+		session.SetContext(AgentSessionContextEffectivePermissionMode, effectivePermissionMode)
+	}
 	if args.ReadOnly {
 		session.SetContext(AgentSessionContextReadOnly, true)
 	}
@@ -559,19 +594,30 @@ func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentc
 	}
 	if provider := agentcontrol.ContextString(session, AgentSessionContextProviderName); provider != "" {
 		result.Provider = provider
+		result.EffectiveProvider = provider
 	}
-	model := agentcontrol.ContextString(session, AgentSessionContextRequestedModel)
+	result.RequestedProvider = agentcontrol.ContextString(session, AgentSessionContextRequestedProvider)
+	result.RequestedModel = agentcontrol.ContextString(session, AgentSessionContextRequestedModel)
+	model := agentcontrol.ContextString(session, AgentSessionContextModel)
 	if model == "" {
-		model = agentcontrol.ContextString(session, AgentSessionContextModel)
+		model = result.RequestedModel
 	}
 	if model != "" {
 		result.Model = model
+		result.EffectiveModel = model
 	}
 	if effort := agentcontrol.ContextString(session, AgentSessionContextReasoningEffort); effort != "" {
 		result.ReasoningEffort = effort
+		result.EffectiveReasoningEffort = effort
 	}
+	result.RequestedReasoningEffort = agentcontrol.ContextString(session, AgentSessionContextRequestedReasoningEffort)
 	if permissionMode := agentcontrol.ContextString(session, AgentSessionContextPermissionMode); permissionMode != "" {
 		result.PermissionMode = permissionMode
+	}
+	result.RequestedPermissionMode = agentcontrol.ContextString(session, AgentSessionContextRequestedPermissionMode)
+	result.EffectivePermissionMode = agentcontrol.ContextString(session, AgentSessionContextEffectivePermissionMode)
+	if result.EffectivePermissionMode == "" {
+		result.EffectivePermissionMode = result.PermissionMode
 	}
 	if value, ok := session.GetContext(AgentSessionContextReadOnly); ok {
 		result.ReadOnly, _ = value.(bool)
@@ -642,6 +688,20 @@ func AddSpawnAgentRoutePayload(payload map[string]interface{}, session agentcont
 	if status.FallbackReason != "" {
 		payload["fallback_reason"] = status.FallbackReason
 	}
+	for key, value := range map[string]string{
+		"requested_provider":         status.RequestedProvider,
+		"effective_provider":         firstNonEmptyRouteString(status.EffectiveProvider, status.Provider),
+		"requested_model":            status.RequestedModel,
+		"effective_model":            firstNonEmptyRouteString(status.EffectiveModel, status.Model),
+		"requested_reasoning_effort": status.RequestedReasoningEffort,
+		"effective_reasoning_effort": firstNonEmptyRouteString(status.EffectiveReasoningEffort, status.ReasoningEffort),
+		"requested_permission_mode":  status.RequestedPermissionMode,
+		"effective_permission_mode":  firstNonEmptyRouteString(status.EffectivePermissionMode, status.PermissionMode),
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			payload[key] = value
+		}
+	}
 }
 
 func ApplySpawnAgentRouteRecord(record *agentcontrol.AgentRecord, args SpawnAgentArgs) {
@@ -658,6 +718,14 @@ func ApplySpawnAgentRouteRecord(record *agentcontrol.AgentRecord, args SpawnAgen
 	record.RouteWarnings = trimNonEmptyStrings(args.RouteWarnings)
 	record.FallbackUsed = args.FallbackUsed
 	record.FallbackReason = strings.TrimSpace(args.FallbackReason)
+	record.RequestedProvider = strings.TrimSpace(args.RequestedProvider)
+	record.EffectiveProvider = strings.TrimSpace(args.Provider)
+	record.RequestedModel = strings.TrimSpace(args.RequestedModel)
+	record.EffectiveModel = strings.TrimSpace(args.Model)
+	record.RequestedReasoningEffort = strings.TrimSpace(args.RequestedReasoningEffort)
+	record.EffectiveReasoningEffort = firstNonEmptyRouteString(args.ReasoningEffort, args.ThinkingEffort)
+	record.RequestedPermissionMode = strings.TrimSpace(args.RequestedPermissionMode)
+	record.EffectivePermissionMode = firstNonEmptyRouteString(args.EffectivePermissionMode, args.PermissionMode)
 }
 
 func ApplySpawnAgentRouteRecordContext(record *agentcontrol.AgentRecord, session agentcontrol.ContextGetter) {
@@ -676,6 +744,14 @@ func ApplySpawnAgentRouteRecordContext(record *agentcontrol.AgentRecord, session
 	record.RouteWarnings = trimNonEmptyStrings(status.RouteWarnings)
 	record.FallbackUsed = status.FallbackUsed
 	record.FallbackReason = strings.TrimSpace(status.FallbackReason)
+	record.RequestedProvider = strings.TrimSpace(status.RequestedProvider)
+	record.EffectiveProvider = firstNonEmptyRouteString(status.EffectiveProvider, status.Provider)
+	record.RequestedModel = strings.TrimSpace(status.RequestedModel)
+	record.EffectiveModel = firstNonEmptyRouteString(status.EffectiveModel, status.Model)
+	record.RequestedReasoningEffort = strings.TrimSpace(status.RequestedReasoningEffort)
+	record.EffectiveReasoningEffort = firstNonEmptyRouteString(status.EffectiveReasoningEffort, status.ReasoningEffort)
+	record.RequestedPermissionMode = strings.TrimSpace(status.RequestedPermissionMode)
+	record.EffectivePermissionMode = firstNonEmptyRouteString(status.EffectivePermissionMode, status.PermissionMode)
 }
 
 func ApplySpawnAgentRouteStatusRecord(result *AgentStatusResult, record agentcontrol.AgentRecord) {
@@ -711,6 +787,30 @@ func ApplySpawnAgentRouteStatusRecord(result *AgentStatusResult, record agentcon
 	}
 	if result.FallbackReason == "" {
 		result.FallbackReason = strings.TrimSpace(record.FallbackReason)
+	}
+	if result.RequestedProvider == "" {
+		result.RequestedProvider = strings.TrimSpace(record.RequestedProvider)
+	}
+	if result.EffectiveProvider == "" {
+		result.EffectiveProvider = firstNonEmptyRouteString(record.EffectiveProvider, record.Provider)
+	}
+	if result.RequestedModel == "" {
+		result.RequestedModel = strings.TrimSpace(record.RequestedModel)
+	}
+	if result.EffectiveModel == "" {
+		result.EffectiveModel = firstNonEmptyRouteString(record.EffectiveModel, record.Model)
+	}
+	if result.RequestedReasoningEffort == "" {
+		result.RequestedReasoningEffort = strings.TrimSpace(record.RequestedReasoningEffort)
+	}
+	if result.EffectiveReasoningEffort == "" {
+		result.EffectiveReasoningEffort = firstNonEmptyRouteString(record.EffectiveReasoningEffort, record.ReasoningEffort)
+	}
+	if result.RequestedPermissionMode == "" {
+		result.RequestedPermissionMode = strings.TrimSpace(record.RequestedPermissionMode)
+	}
+	if result.EffectivePermissionMode == "" {
+		result.EffectivePermissionMode = strings.TrimSpace(record.EffectivePermissionMode)
 	}
 }
 

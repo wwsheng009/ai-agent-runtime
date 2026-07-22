@@ -96,6 +96,14 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			metadata["event_seq"] = seq
 		}
 		for _, key := range []string{
+			"requested_provider",
+			"effective_provider",
+			"requested_model",
+			"effective_model",
+			"requested_reasoning_effort",
+			"effective_reasoning_effort",
+			"requested_permission_mode",
+			"effective_permission_mode",
 			"difficulty",
 			"difficulty_source",
 			"difficulty_rationale",
@@ -110,6 +118,10 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			"usage_completion_tokens",
 			"usage_total_tokens",
 			"usage_cached_tokens",
+			"usage_cache_read_tokens",
+			"usage_cache_creation_tokens",
+			"usage_cache_read_reported",
+			"usage_cache_status",
 			"usage_reasoning_tokens",
 		} {
 			if value, ok := payload[key]; ok {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -112,7 +114,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolBackgroundTask,
-			Description: "Run a long-running task in the background and return a job id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command.",
+			Description: "Run a long-running task in the background and return a job id. Pass that exact job_id to task_output; never guess or synthesize an id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -135,6 +137,35 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					"restart_policy": map[string]interface{}{
 						"type":        "string",
 						"description": "Infrastructure-failure recovery policy: fail (default) or rerun. Rerun automatically requeues after heartbeat stalls, zombie detection, process loss, PID reuse, or repeated launch failure, and may repeat command side effects.",
+					},
+					"startup_acceptance": map[string]interface{}{
+						"type":        "object",
+						"description": "Optional generic startup acceptance gate. Defaults to a process-liveness check after a short grace period. TCP and HTTP probes require caller-supplied targets; the runtime does not infer application endpoints.",
+						"properties": map[string]interface{}{
+							"probe": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"none", "process", "tcp", "http"},
+								"description": "Acceptance probe type.",
+							},
+							"grace_period_ms": map[string]interface{}{
+								"type":        "integer",
+								"minimum":     0,
+								"description": "Delay before evaluating the probe.",
+							},
+							"timeout_ms": map[string]interface{}{
+								"type":        "integer",
+								"minimum":     0,
+								"description": "Maximum time allowed for acceptance.",
+							},
+							"address": map[string]interface{}{
+								"type":        "string",
+								"description": "TCP host:port supplied by the caller.",
+							},
+							"url": map[string]interface{}{
+								"type":        "string",
+								"description": "Absolute HTTP or HTTPS URL supplied by the caller.",
+							},
+						},
 					},
 				},
 				"required": []string{"command"},
@@ -262,7 +293,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for collaboration progress. With id/ids, waits for spawn_agent child sessions to become idle, blocked, failed, or waiting_approval; waiting_approval is a ready state that needs permission handling, not repeated waiting. Without id, waits for the current parent session mailbox/collab event. Session event-store watchers wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for collaboration progress. With id/ids, waits for spawn_agent child sessions to become idle, blocked, failed, or waiting_approval; a completed child's full final answer is returned in agent.output and should be consumed directly. Do not ask the child to write a report file only to recover this result. Waiting_approval needs permission handling, not repeated waiting. Without id, waits for the current parent session mailbox/collab event. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -409,7 +440,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle, blocked, failed, or waiting_approval. Treat waiting_approval as a ready state that needs permission handling, not repeated waiting. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team progress and final team.summary.",
+				Description: "Wait for a spawn_agent child session to become idle, blocked, failed, or waiting_approval. A completed child's full final answer is returned in agent.output; consume it directly instead of asking the child to write a report file. Treat waiting_approval as a ready state that needs permission handling, not repeated waiting. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team progress and final team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -829,13 +860,66 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 // Execute runs a broker tool without an originating tool call id.
 func (b *Broker) Execute(ctx context.Context, sessionID, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
 	result, metadata, err := b.execute(ctx, sessionID, toolName, args, "")
-	return result, withBrokerSourceMetadata(metadata), err
+	return result, withBrokerSourceMetadata(metadata), classifyBrokerExecutionError(toolName, err)
 }
 
 // ExecuteToolCall runs a broker tool for a concrete tool call.
 func (b *Broker) ExecuteToolCall(ctx context.Context, sessionID string, call types.ToolCall) (interface{}, map[string]interface{}, error) {
 	result, metadata, err := b.execute(ctx, sessionID, call.Name, call.Args, call.ID)
-	return result, withBrokerSourceMetadata(metadata), err
+	return result, withBrokerSourceMetadata(metadata), classifyBrokerExecutionError(call.Name, err)
+}
+
+func classifyBrokerExecutionError(toolName string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var runtimeErr *runtimeerrors.RuntimeError
+	if stderrors.As(err, &runtimeErr) {
+		return err
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	code := runtimeerrors.ErrToolBrokerFailure
+	switch {
+	case strings.Contains(lower, "not found"):
+		code = runtimeerrors.ErrToolPathNotFound
+	case strings.Contains(lower, "required"), strings.Contains(lower, "invalid "), strings.Contains(lower, "unknown broker tool"):
+		code = runtimeerrors.ErrToolInvalidArgs
+	}
+	return runtimeerrors.WrapWithContext(code, "broker tool execution failed", err, map[string]interface{}{
+		"tool": strings.TrimSpace(toolName),
+	})
+}
+
+func brokerIntArg(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func decorateBackgroundTaskResult(job background.Job) BackgroundTaskResult {
+	result := BackgroundTaskResult{
+		JobID: job.ID, Status: string(job.Status), Message: job.Message, RestartPolicy: job.RestartPolicy,
+	}
+	if value, ok := job.Metadata["launch_state"].(string); ok {
+		result.LaunchState = value
+	}
+	if value, ok := job.Metadata["healthcheck_state"].(string); ok {
+		result.HealthcheckState = value
+	}
+	if value, ok := job.Metadata["startup_probe"].(string); ok {
+		result.StartupProbe = value
+	}
+	result.StartupGraceMs = int64(brokerIntArg(job.Metadata["startup_grace_ms"]))
+	return result
 }
 
 // execute runs a broker tool.
@@ -919,13 +1003,18 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["restart_policy"].(string); ok {
 			req.RestartPolicy = background.RestartPolicy(strings.TrimSpace(value))
 		}
-		job, err := b.Background.SubmitShell(ctx, sessionID, background.BackgroundTaskArgs{
-			Command:       req.Command,
-			Cwd:           req.Cwd,
-			TimeoutSec:    req.TimeoutSec,
-			Priority:      req.Priority,
-			RestartPolicy: req.RestartPolicy,
-		})
+		if value, ok := args["startup_acceptance"].(map[string]interface{}); ok {
+			startup := &background.StartupAcceptance{}
+			if probe, ok := value["probe"].(string); ok {
+				startup.Probe = background.StartupProbeType(strings.TrimSpace(probe))
+			}
+			startup.GracePeriodMs = brokerIntArg(value["grace_period_ms"])
+			startup.TimeoutMs = brokerIntArg(value["timeout_ms"])
+			startup.Address, _ = value["address"].(string)
+			startup.URL, _ = value["url"].(string)
+			req.Startup = startup
+		}
+		job, err := b.Background.SubmitShell(ctx, sessionID, req)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -943,17 +1032,17 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":               string(job.Status),
 			"restart_policy":       job.RestartPolicy,
 		}
-		for _, key := range []string{"timeout_requested_ms", "timeout_effective_ms", "timeout_ms", "timeout_source"} {
+		for _, key := range []string{
+			"timeout_requested_ms", "timeout_effective_ms", "timeout_ms", "timeout_source",
+			"launch_state", "healthcheck_state", "startup_probe", "startup_grace_ms",
+		} {
 			if value, ok := job.Metadata[key]; ok {
 				resultMetadata[key] = value
 			}
 		}
-		return BackgroundTaskResult{
-			JobID:         jobAlias,
-			Status:        string(job.Status),
-			Message:       job.Message,
-			RestartPolicy: job.RestartPolicy,
-		}, resultMetadata, nil
+		outputSummary := decorateBackgroundTaskResult(*job)
+		outputSummary.JobID = jobAlias
+		return outputSummary, resultMetadata, nil
 
 	case ToolTaskOutput:
 		if b.Background == nil {
@@ -990,6 +1079,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			Limit:  limit,
 		})
 		if err != nil {
+			if runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound) {
+				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", err)
+			}
 			return nil, nil, err
 		}
 		displayJobID := strings.TrimSpace(output.JobID)
@@ -1012,6 +1104,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"timeout_effective_ms": output.TimeoutEffectiveMs,
 			"timeout_source":       output.TimeoutSource,
 			"cancel_source":        output.CancelSource,
+			"launch_state":         output.LaunchState,
+			"process_started":      output.ProcessStarted,
+			"process_alive":        output.ProcessAlive,
+			"startup_probe":        output.StartupProbe,
+			"startup_grace_ms":     output.StartupGraceMs,
+			"startup_accepted_at":  output.StartupAcceptedAt,
+			"healthcheck_state":    output.HealthcheckState,
+			"healthcheck_error":    output.HealthcheckError,
 		} {
 			if textValue, ok := value.(string); ok && strings.TrimSpace(textValue) == "" {
 				continue
@@ -1022,17 +1122,20 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			outputMetadata[key] = value
 		}
 		return TaskOutputResult{
-			JobID:              displayJobID,
-			Status:             output.Status,
-			Output:             output.Output,
-			NextOffset:         output.NextOffset,
-			ExitCode:           output.ExitCode,
-			Message:            output.Message,
-			ErrorCode:          output.ErrorCode,
-			TimeoutRequestedMs: output.TimeoutRequestedMs,
-			TimeoutEffectiveMs: output.TimeoutEffectiveMs,
-			TimeoutSource:      output.TimeoutSource,
-			CancelSource:       output.CancelSource,
+			JobID: displayJobID, Status: output.Status, Output: output.Output,
+			NextOffset: output.NextOffset, ExitCode: output.ExitCode, Message: output.Message,
+			ErrorCode: output.ErrorCode, TimeoutRequestedMs: output.TimeoutRequestedMs,
+			TimeoutEffectiveMs: output.TimeoutEffectiveMs, TimeoutSource: output.TimeoutSource,
+			CancelSource: output.CancelSource, WatchdogState: output.WatchdogState,
+			WatchdogErrorCode: output.WatchdogErrorCode, LaunchAttempt: output.LaunchAttempt,
+			LaunchMaxAttempts: output.LaunchMaxAttempts, ProcessState: output.ProcessState,
+			HeartbeatAgeMs: output.HeartbeatAgeMs, LastOutputAt: output.LastOutputAt,
+			QuietForMs: output.QuietForMs, RecoveryAttempt: output.RecoveryAttempt,
+			RecoveryMaxAttempts: output.RecoveryMaxAttempts, NextRecoveryAt: output.NextRecoveryAt,
+			LaunchState: output.LaunchState, ProcessStarted: output.ProcessStarted,
+			ProcessAlive: output.ProcessAlive, StartupProbe: output.StartupProbe,
+			StartupGraceMs: output.StartupGraceMs, StartupAcceptedAt: output.StartupAcceptedAt,
+			HealthcheckState: output.HealthcheckState, HealthcheckError: output.HealthcheckError,
 		}, outputMetadata, nil
 
 	case ToolSpawnAgent:
@@ -1089,6 +1192,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				return nil, nil, err
 			}
 			request.PermissionMode = permissionMode
+			request.RequestedPermissionMode = strings.TrimSpace(value)
 			permissionModeExplicit = strings.TrimSpace(value) != ""
 		}
 		if value, ok := args["read_only"].(bool); ok {
@@ -1097,6 +1201,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if request.ReadOnly && !permissionModeExplicit {
 			request.PermissionMode = string(runtimepolicy.ModePlan)
 		}
+		request.EffectivePermissionMode = request.PermissionMode
 		if strings.TrimSpace(request.PermissionMode) == "" {
 			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
 				if permissionMode, err := normalizeSpawnAgentPermissionMode(runMeta.PermissionMode); err == nil {
@@ -1110,6 +1215,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["fork_turns"].(string); ok {
 			request.ForkTurns = strings.TrimSpace(value)
 		}
+		request.RequestedProvider = strings.TrimSpace(request.Provider)
+		request.RequestedModel = strings.TrimSpace(request.Model)
+		request.RequestedReasoningEffort = strings.TrimSpace(request.ReasoningEffort)
+		request.RequestedRouteCaptured = true
 		explicitSessionID := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID)) != ""
 		result, err := b.AgentSessions.Spawn(ctx, strings.TrimSpace(sessionID), request)
 		if err != nil {
@@ -1164,6 +1273,20 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 			if reason := strings.TrimSpace(result.FallbackReason); reason != "" {
 				metadata["fallback_reason"] = reason
+			}
+			for key, value := range map[string]string{
+				"requested_provider":         result.RequestedProvider,
+				"effective_provider":         firstNonEmptyToolValue(result.EffectiveProvider, result.Provider),
+				"requested_model":            result.RequestedModel,
+				"effective_model":            firstNonEmptyToolValue(result.EffectiveModel, result.Model),
+				"requested_reasoning_effort": result.RequestedReasoningEffort,
+				"effective_reasoning_effort": firstNonEmptyToolValue(result.EffectiveReasoningEffort, result.ReasoningEffort),
+				"requested_permission_mode":  result.RequestedPermissionMode,
+				"effective_permission_mode":  firstNonEmptyToolValue(result.EffectivePermissionMode, result.PermissionMode),
+			} {
+				if value = strings.TrimSpace(value); value != "" {
+					metadata[key] = value
+				}
 			}
 		}
 		return aliasedResult, attachCacheSafeSummary(metadata, agentStatusCacheSafeSummary(aliasedResult)), nil

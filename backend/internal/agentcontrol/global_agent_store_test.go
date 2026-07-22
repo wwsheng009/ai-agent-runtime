@@ -27,25 +27,33 @@ func TestSQLiteGlobalAgentRegistryStoreUpsertAndList(t *testing.T) {
 	require.Equal(t, "/root", root.AgentPath)
 
 	child, err := store.UpsertAgentControlAgent(ctx, AgentRecord{
-		AgentID:          "child-agent",
-		RootSessionID:    "root-session",
-		ParentAgentID:    root.AgentID,
-		ParentSessionID:  "root-session",
-		SessionID:        "child-session",
-		AgentPath:        "/root/child-agent",
-		Depth:            1,
-		AgentType:        AgentTypeChild,
-		Nickname:         "worker",
-		Workflow:         WorkflowSpawnAgent,
-		Provider:         "remote",
-		Model:            "strong-model",
-		ReasoningEffort:  "high",
-		Difficulty:       "hard",
-		DifficultySource: "explicit",
-		RouteSource:      "difficulty_level",
-		RouteWarnings:    []string{"provider_fallback_parent"},
-		FallbackUsed:     true,
-		FallbackReason:   "provider_unresolved_parent",
+		AgentID:                  "child-agent",
+		RootSessionID:            "root-session",
+		ParentAgentID:            root.AgentID,
+		ParentSessionID:          "root-session",
+		SessionID:                "child-session",
+		AgentPath:                "/root/child-agent",
+		Depth:                    1,
+		AgentType:                AgentTypeChild,
+		Nickname:                 "worker",
+		Workflow:                 WorkflowSpawnAgent,
+		Provider:                 "remote",
+		Model:                    "strong-model",
+		ReasoningEffort:          "high",
+		Difficulty:               "hard",
+		DifficultySource:         "explicit",
+		RouteSource:              "difficulty_level",
+		RouteWarnings:            []string{"provider_fallback_parent"},
+		FallbackUsed:             true,
+		FallbackReason:           "provider_unresolved_parent",
+		RequestedProvider:        "requested-provider",
+		EffectiveProvider:        "remote",
+		RequestedModel:           "requested-model",
+		EffectiveModel:           "strong-model",
+		RequestedReasoningEffort: "xhigh",
+		EffectiveReasoningEffort: "high",
+		RequestedPermissionMode:  "plan",
+		EffectivePermissionMode:  "bypass_permissions",
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(2), child.Seq)
@@ -68,6 +76,14 @@ func TestSQLiteGlobalAgentRegistryStoreUpsertAndList(t *testing.T) {
 	require.Equal(t, []string{"provider_fallback_parent"}, records[1].RouteWarnings)
 	require.True(t, records[1].FallbackUsed)
 	require.Equal(t, "provider_unresolved_parent", records[1].FallbackReason)
+	require.Equal(t, "requested-provider", records[1].RequestedProvider)
+	require.Equal(t, "remote", records[1].EffectiveProvider)
+	require.Equal(t, "requested-model", records[1].RequestedModel)
+	require.Equal(t, "strong-model", records[1].EffectiveModel)
+	require.Equal(t, "xhigh", records[1].RequestedReasoningEffort)
+	require.Equal(t, "high", records[1].EffectiveReasoningEffort)
+	require.Equal(t, "plan", records[1].RequestedPermissionMode)
+	require.Equal(t, "bypass_permissions", records[1].EffectivePermissionMode)
 
 	records, err = store.ListAgentControlAgents(ctx, AgentFilter{
 		RootSessionID: "root-session",
@@ -194,6 +210,37 @@ func TestSQLiteGlobalAgentRegistryStoreClosesSubtree(t *testing.T) {
 	require.True(t, all[1].Closed())
 	require.True(t, all[2].Closed())
 	require.False(t, all[3].Closed())
+}
+
+func TestSQLiteGlobalAgentRegistryStoreMarksSubtreeStale(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+
+	for _, record := range []AgentRecord{
+		{AgentID: "root", RootSessionID: "root-session", SessionID: "root-session", AgentPath: "/root", AgentType: AgentTypeRoot},
+		{AgentID: "worker", RootSessionID: "root-session", ParentAgentID: "root", SessionID: "worker-session", AgentPath: "/root/worker", AgentType: AgentTypeChild},
+		{AgentID: "nested", RootSessionID: "root-session", ParentAgentID: "worker", SessionID: "nested-session", AgentPath: "/root/worker/nested", AgentType: AgentTypeChild},
+	} {
+		_, err := store.UpsertAgentControlAgent(ctx, record)
+		require.NoError(t, err)
+	}
+
+	count, err := store.MarkAgentControlAgentSubtreeStale(ctx, "root-session", "/root/worker", time.Unix(40, 0).UTC())
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count)
+
+	active, err := store.ListAgentControlAgents(ctx, AgentFilter{RootSessionID: "root-session"})
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	require.Equal(t, "root", active[0].AgentID)
+
+	all, err := store.ListAgentControlAgents(ctx, AgentFilter{RootSessionID: "root-session", IncludeClosed: true})
+	require.NoError(t, err)
+	require.Len(t, all, 3)
+	require.Equal(t, AgentStatusStale, all[1].Status)
+	require.Equal(t, AgentStatusStale, all[2].Status)
+	require.True(t, all[1].Closed())
+	require.NotNil(t, all[1].ClosedAt)
 }
 
 func TestSQLiteGlobalAgentRegistryStoreReserveSpawnEnforcesLimit(t *testing.T) {

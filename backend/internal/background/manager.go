@@ -237,6 +237,11 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	if command == "" {
 		return nil, fmt.Errorf("command is required")
 	}
+	startup := normalizeStartupAcceptance(req.Startup)
+	if err := validateStartupAcceptance(startup); err != nil {
+		return nil, runtimeerrors.WrapWithContext(runtimeerrors.ErrToolInvalidArgs, "invalid startup acceptance", err, nil)
+	}
+	req.Startup = &startup
 
 	jobID := "job_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	now := time.Now().UTC()
@@ -572,27 +577,9 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 
-	startedAt := time.Now().UTC()
-	managed.mu.Lock()
-	if managed.info.Status == StatusCancelled {
-		managed.mu.Unlock()
-		m.notifyDispatcher()
-		return
-	}
-	managed.info.Status = StatusRunning
-	managed.info.StartedAt = &startedAt
-	managed.info.Message = ""
-	managed.mu.Unlock()
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
-	}
-	m.appendJobEvent(context.Background(), managed.info.ID, "running", map[string]interface{}{
-		"status": managed.info.Status,
-	})
-
 	cmd := buildShellCommand(ctx, managed.info.Command)
 	if cmd == nil {
-		m.failJob(managed, fmt.Errorf("unsupported shell command"))
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return
 	}
 	if managed.info.Cwd != "" {
@@ -607,7 +594,15 @@ func (m *Manager) runJob(managed *managedJob) {
 			m.markCancelled(ctx, managed, "cancelled")
 			return
 		}
-		m.failJob(managed, err)
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, err)
+		return
+	}
+
+	startedAt := time.Now().UTC()
+	processAlive := func() bool { return processIsAlive(cmd.Process) }
+	if !m.acceptStartedProcess(ctx, managed, startedAt, cmd.Process.Pid, processAlive) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return
 	}
 
@@ -657,6 +652,136 @@ func (m *Manager) runJob(managed *managedJob) {
 	m.completeJob(managed, 0)
 }
 
+func processIsAlive(process *os.Process) bool {
+	if process == nil || process.Pid <= 0 {
+		return false
+	}
+	health := inspectProcess(process.Pid)
+	return health.Running && !health.Zombie
+}
+
+func (m *Manager) acceptStartedProcess(ctx context.Context, managed *managedJob, startedAt time.Time, pid int, processAlive func() bool) bool {
+	if managed == nil {
+		return false
+	}
+	startup := normalizeStartupAcceptance(managed.request.Startup)
+	managed.mu.Lock()
+	if managed.info.Status == StatusCancelled {
+		managed.scheduled = false
+		managed.mu.Unlock()
+		m.notifyDispatcher()
+		return false
+	}
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateProcessCreated
+	managed.info.Metadata[backgroundMetaProcessStarted] = true
+	managed.info.Metadata[backgroundMetaPID] = pid
+	if health := inspectProcess(pid); health.Identity != "" {
+		managed.info.Metadata[backgroundMetaProcessIdentity] = health.Identity
+	}
+	managed.info.StartedAt = &startedAt
+	managed.info.Message = ""
+	managed.info.ExitCode = nil
+	managed.info.FinishedAt = nil
+	managed.mu.Unlock()
+	m.persistManagedJob(managed)
+	m.appendJobEvent(context.Background(), managed.info.ID, "process_created", map[string]interface{}{
+		"status": StatusPending,
+		"pid":    pid,
+	})
+
+	managed.mu.Lock()
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateAccepting
+	if startup.Probe == StartupProbeNone {
+		managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStateNotConfigured
+	} else {
+		managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStatePending
+	}
+	managed.mu.Unlock()
+	m.persistManagedJob(managed)
+	m.appendJobEvent(context.Background(), managed.info.ID, "startup_acceptance_pending", map[string]interface{}{
+		"probe":           startup.Probe,
+		"grace_period_ms": startup.GracePeriodMs,
+		"timeout_ms":      startupProbeTimeout(startup).Milliseconds(),
+	})
+
+	if err := executeStartupProbe(ctx, startup, processAlive); err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				m.markTimedOut(managed, "command timed out during startup acceptance")
+			} else {
+				m.markCancelled(ctx, managed, "cancelled")
+			}
+			return false
+		}
+		m.failStartupAcceptance(managed, err)
+		return false
+	}
+
+	acceptedAt := time.Now().UTC()
+	managed.mu.Lock()
+	if managed.info.Status == StatusCancelled {
+		managed.scheduled = false
+		managed.mu.Unlock()
+		m.notifyDispatcher()
+		return false
+	}
+	managed.info.Status = StatusRunning
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateAccepted
+	managed.info.Metadata[backgroundMetaStartupAcceptedAt] = acceptedAt.Format(time.RFC3339Nano)
+	delete(managed.info.Metadata, backgroundMetaHealthcheckError)
+	if startup.Probe == StartupProbeNone {
+		managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStateNotConfigured
+	} else {
+		managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStatePassed
+	}
+	managed.scheduled = false
+	managed.mu.Unlock()
+	m.persistManagedJob(managed)
+	m.appendJobEvent(context.Background(), managed.info.ID, "startup_accepted", map[string]interface{}{
+		"status":      StatusRunning,
+		"pid":         pid,
+		"probe":       startup.Probe,
+		"accepted_at": acceptedAt.Format(time.RFC3339Nano),
+	})
+	m.appendJobEvent(context.Background(), managed.info.ID, "running", map[string]interface{}{
+		"status": StatusRunning,
+		"pid":    pid,
+	})
+	return true
+}
+
+func (m *Manager) failStartupAcceptance(managed *managedJob, err error) {
+	message := "startup acceptance failed"
+	if err != nil {
+		message = err.Error()
+	}
+	managed.mu.Lock()
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateFailed
+	managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStateFailed
+	managed.info.Metadata[backgroundMetaHealthcheckError] = message
+	managed.mu.Unlock()
+	m.appendJobEvent(context.Background(), managed.info.ID, "startup_acceptance_failed", map[string]interface{}{
+		"error_code": string(runtimeerrors.ErrProcessHealthcheck),
+		"error":      message,
+	})
+	m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessHealthcheck, err)
+}
+
+func (m *Manager) persistManagedJob(managed *managedJob) {
+	if m == nil || m.store == nil || managed == nil {
+		return
+	}
+	if snapshot := managed.snapshot(); snapshot != nil {
+		_ = m.store.UpdateJob(context.Background(), *snapshot)
+	}
+}
+
 func (m *Manager) completeJob(managed *managedJob, exitCode int) {
 	finishedAt := time.Now().UTC()
 	managed.mu.Lock()
@@ -671,6 +796,12 @@ func (m *Manager) completeJob(managed *managedJob, exitCode int) {
 	managed.info.Message = ""
 	managed.info.ExitCode = &exitCode
 	managed.info.FinishedAt = &finishedAt
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	if _, exists := managed.info.Metadata[backgroundMetaLaunchState]; !exists {
+		managed.info.Metadata[backgroundMetaLaunchState] = launchStateAccepted
+	}
 	managed.mu.Unlock()
 	if m.store != nil {
 		_ = m.store.UpdateJob(context.Background(), managed.info)
@@ -683,17 +814,25 @@ func (m *Manager) completeJob(managed *managedJob, exitCode int) {
 }
 
 func (m *Manager) failJob(managed *managedJob, err error) {
+	m.failJobWithErrorCode(managed, runtimeerrors.ErrToolExecution, err)
+}
+
+func (m *Manager) failJobWithErrorCode(managed *managedJob, code runtimeerrors.ErrorCode, err error) {
 	message := ""
 	if err != nil {
 		message = err.Error()
 	}
-	m.failJobWithCode(managed, exitCodeFromError(err), message)
+	m.failJobWithCodeAndError(managed, exitCodeFromError(err), code, message)
 	if err != nil {
 		managed.output.Write([]byte("\n" + err.Error()))
 	}
 }
 
 func (m *Manager) failJobWithCode(managed *managedJob, exitCode int, message string) {
+	m.failJobWithCodeAndError(managed, exitCode, runtimeerrors.ErrToolExecution, message)
+}
+
+func (m *Manager) failJobWithCodeAndError(managed *managedJob, exitCode int, code runtimeerrors.ErrorCode, message string) {
 	finishedAt := time.Now().UTC()
 	managed.mu.Lock()
 	if managed.info.Status == StatusCancelled {
@@ -707,14 +846,22 @@ func (m *Manager) failJobWithCode(managed *managedJob, exitCode int, message str
 	managed.info.Message = strings.TrimSpace(message)
 	managed.info.ExitCode = &exitCode
 	managed.info.FinishedAt = &finishedAt
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["error_code"] = string(code)
+	if code == runtimeerrors.ErrProcessStartFailed || code == runtimeerrors.ErrProcessHealthcheck {
+		managed.info.Metadata[backgroundMetaLaunchState] = launchStateFailed
+	}
 	managed.mu.Unlock()
 	if m.store != nil {
 		_ = m.store.UpdateJob(context.Background(), managed.info)
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "failed", map[string]interface{}{
-		"status":    managed.info.Status,
-		"exit_code": exitCode,
-		"error":     managed.info.Message,
+		"status":     managed.info.Status,
+		"exit_code":  exitCode,
+		"error_code": string(code),
+		"error":      managed.info.Message,
 	})
 	m.notifyDispatcher()
 }
@@ -772,13 +919,18 @@ func (m *Manager) orphanJob(managed *managedJob, message string) {
 	managed.info.Message = message
 	managed.info.ExitCode = nil
 	managed.info.FinishedAt = &finishedAt
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrProcessHealthcheck)
 	managed.mu.Unlock()
 	if m.store != nil {
 		_ = m.store.UpdateJob(context.Background(), managed.info)
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "orphaned", map[string]interface{}{
-		"status": StatusOrphaned,
-		"reason": message,
+		"status":     StatusOrphaned,
+		"error_code": string(runtimeerrors.ErrProcessHealthcheck),
+		"reason":     message,
 	})
 	m.notifyDispatcher()
 }
@@ -1129,18 +1281,67 @@ func (j *managedJob) snapshot() *Job {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	info := j.info
+	info.Metadata = cloneJobMetadata(j.info.Metadata)
+	if j.info.StartedAt != nil {
+		startedAt := *j.info.StartedAt
+		info.StartedAt = &startedAt
+	}
+	if j.info.FinishedAt != nil {
+		finishedAt := *j.info.FinishedAt
+		info.FinishedAt = &finishedAt
+	}
+	if j.info.ExitCode != nil {
+		exitCode := *j.info.ExitCode
+		info.ExitCode = &exitCode
+	}
 	return &info
+}
+
+func cloneJobMetadata(input map[string]interface{}) map[string]interface{} {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		output[key] = cloneJobMetadataValue(value)
+	}
+	return output
+}
+
+func cloneJobMetadataValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return cloneJobMetadata(typed)
+	case []interface{}:
+		cloned := make([]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneJobMetadataValue(item)
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	case []map[string]interface{}:
+		cloned := make([]map[string]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneJobMetadata(item)
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
 
 func sanitizeBackgroundTaskArgs(req BackgroundTaskArgs) BackgroundTaskArgs {
 	req.Command = strings.TrimSpace(req.Command)
 	req.Cwd = strings.TrimSpace(req.Cwd)
 	req.RestartPolicy = normalizeRestartPolicy(req.RestartPolicy)
+	startup := normalizeStartupAcceptance(req.Startup)
+	req.Startup = &startup
 	return req
 }
 
 func metadataFromRequest(req BackgroundTaskArgs, defaultTimeout time.Duration) map[string]interface{} {
-	metadata := make(map[string]interface{}, 6)
+	metadata := make(map[string]interface{}, 16)
 	if req.TimeoutSec > 0 {
 		metadata["timeout_sec"] = req.TimeoutSec
 	}
@@ -1154,6 +1355,23 @@ func metadataFromRequest(req BackgroundTaskArgs, defaultTimeout time.Duration) m
 	metadata["timeout_source"] = string(backgroundTimeoutSource(req))
 	if normalizeRestartPolicy(req.RestartPolicy) != RestartPolicyFail {
 		metadata["restart_policy"] = string(normalizeRestartPolicy(req.RestartPolicy))
+	}
+	startup := normalizeStartupAcceptance(req.Startup)
+	metadata[backgroundMetaLaunchState] = launchStateQueued
+	metadata[backgroundMetaProcessStarted] = false
+	metadata[backgroundMetaStartupProbe] = string(startup.Probe)
+	metadata[backgroundMetaStartupGraceMs] = startup.GracePeriodMs
+	metadata[backgroundMetaStartupTimeoutMs] = startup.TimeoutMs
+	if startup.Address != "" {
+		metadata[backgroundMetaStartupAddress] = startup.Address
+	}
+	if startup.URL != "" {
+		metadata[backgroundMetaStartupURL] = startup.URL
+	}
+	if startup.Probe == StartupProbeNone {
+		metadata[backgroundMetaHealthcheckState] = healthcheckStateNotConfigured
+	} else {
+		metadata[backgroundMetaHealthcheckState] = healthcheckStatePending
 	}
 	return metadata
 }
@@ -1178,6 +1396,19 @@ func requestFromJob(job Job) BackgroundTaskArgs {
 	if restartPolicy, ok := stringMetadataValue(job.Metadata, "restart_policy"); ok {
 		req.RestartPolicy = RestartPolicy(restartPolicy)
 	}
+	startup := normalizeStartupAcceptance(nil)
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaStartupProbe); ok {
+		startup.Probe = StartupProbeType(value)
+	}
+	if value, ok := intMetadataValue(job.Metadata, backgroundMetaStartupGraceMs); ok {
+		startup.GracePeriodMs = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, backgroundMetaStartupTimeoutMs); ok {
+		startup.TimeoutMs = value
+	}
+	startup.Address, _ = stringMetadataValue(job.Metadata, backgroundMetaStartupAddress)
+	startup.URL, _ = stringMetadataValue(job.Metadata, backgroundMetaStartupURL)
+	req.Startup = &startup
 	return req
 }
 
@@ -1219,6 +1450,27 @@ func decorateTaskOutputResult(result TaskOutputResult, job Job) TaskOutputResult
 	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaNextRecoveryAt); ok {
 		result.NextRecoveryAt = value
 	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaLaunchState); ok {
+		result.LaunchState = value
+	}
+	if value, ok := boolMetadataValue(job.Metadata, backgroundMetaProcessStarted); ok {
+		result.ProcessStarted = value
+	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaStartupProbe); ok {
+		result.StartupProbe = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, backgroundMetaStartupGraceMs); ok {
+		result.StartupGraceMs = int64(value)
+	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaStartupAcceptedAt); ok {
+		result.StartupAcceptedAt = value
+	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaHealthcheckState); ok {
+		result.HealthcheckState = value
+	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaHealthcheckError); ok {
+		result.HealthcheckError = value
+	}
 	decorateTaskOutputHealth(&result, job, time.Now().UTC())
 	return result
 }
@@ -1229,6 +1481,8 @@ func decorateTaskOutputHealth(result *TaskOutputResult, job Job, now time.Time) 
 	}
 	if pid, ok := detachedPID(job.Metadata); ok {
 		health := inspectProcess(pid)
+		alive := health.Running && !health.Zombie && detachedProcessMatches(job.Metadata, health)
+		result.ProcessAlive = &alive
 		switch {
 		case health.Zombie:
 			result.ProcessState = watchdogStateZombie
@@ -1250,6 +1504,18 @@ func decorateTaskOutputHealth(result *TaskOutputResult, job Job, now time.Time) 
 		result.LastOutputAt = lastOutputAt.Format(time.RFC3339Nano)
 		result.QuietForMs = nonNegativeDuration(now.Sub(lastOutputAt)).Milliseconds()
 	}
+}
+
+func boolMetadataValue(metadata map[string]interface{}, key string) (bool, bool) {
+	if len(metadata) == 0 {
+		return false, false
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return false, false
+	}
+	typed, ok := value.(bool)
+	return typed, ok
 }
 
 func nonNegativeDuration(value time.Duration) time.Duration {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
@@ -87,6 +88,22 @@ func TestDetachedLaunchDoesNotRetryAmbiguousPostStartFailure(t *testing.T) {
 	require.Equal(t, 1, attempts)
 	require.Equal(t, 1, managed.info.Metadata["launch_attempt"])
 	require.Equal(t, 3, managed.info.Metadata["launch_max_attempts"])
+}
+
+func TestDetachedLaunchFailureUsesStructuredProcessStartCode(t *testing.T) {
+	manager := NewManager(Config{})
+	defer func() { require.NoError(t, manager.Close()) }()
+	managed := &managedJob{
+		info:   Job{ID: "job-launch-failed", Status: StatusRunning, Metadata: map[string]interface{}{}},
+		output: newOutputBuffer(1024),
+	}
+	manager.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, errors.New("launcher unavailable"))
+
+	job := managed.snapshot()
+	require.NotNil(t, job)
+	require.Equal(t, StatusFailed, job.Status)
+	result := decorateTaskOutputResult(TaskOutputResult{}, *job)
+	require.Equal(t, string(runtimeerrors.ErrProcessStartFailed), result.ErrorCode)
 }
 
 func TestDetachedHeartbeatMonitorUsesObservedProgressInsteadOfWallClockModTime(t *testing.T) {

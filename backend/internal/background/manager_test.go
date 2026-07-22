@@ -21,6 +21,43 @@ func TestDefaultConfigKeepsExplicitRerunRecoveryUnlimited(t *testing.T) {
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.RecoveryBackoffSchedule)
 }
 
+func TestManagedJobSnapshotDoesNotShareMutableState(t *testing.T) {
+	startedAt := time.Now().UTC()
+	finishedAt := startedAt.Add(time.Second)
+	wantStartedAt := startedAt
+	wantFinishedAt := finishedAt
+	exitCode := 0
+	managed := &managedJob{info: Job{
+		StartedAt:  &startedAt,
+		FinishedAt: &finishedAt,
+		ExitCode:   &exitCode,
+		Metadata: map[string]interface{}{
+			"state":  "queued",
+			"nested": map[string]interface{}{"attempt": 1},
+			"items":  []interface{}{map[string]interface{}{"status": "pending"}},
+		},
+	}}
+
+	snapshot := managed.snapshot()
+	require.NotNil(t, snapshot)
+
+	managed.mu.Lock()
+	managed.info.Metadata["state"] = "running"
+	managed.info.Metadata["nested"].(map[string]interface{})["attempt"] = 2
+	managed.info.Metadata["items"].([]interface{})[0].(map[string]interface{})["status"] = "done"
+	*managed.info.StartedAt = startedAt.Add(time.Minute)
+	*managed.info.FinishedAt = finishedAt.Add(time.Minute)
+	*managed.info.ExitCode = 1
+	managed.mu.Unlock()
+
+	require.Equal(t, "queued", snapshot.Metadata["state"])
+	require.Equal(t, 1, snapshot.Metadata["nested"].(map[string]interface{})["attempt"])
+	require.Equal(t, "pending", snapshot.Metadata["items"].([]interface{})[0].(map[string]interface{})["status"])
+	require.Equal(t, wantStartedAt, *snapshot.StartedAt)
+	require.Equal(t, wantFinishedAt, *snapshot.FinishedAt)
+	require.Equal(t, 0, *snapshot.ExitCode)
+}
+
 func TestPendingCandidatesDoNotChargeRecoveryBackoffAgainstExecutionCapacity(t *testing.T) {
 	manager := &Manager{
 		maxConcurrentJobs: 1,

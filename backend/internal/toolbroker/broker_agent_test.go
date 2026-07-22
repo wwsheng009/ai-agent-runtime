@@ -447,24 +447,33 @@ func TestBroker_Execute_SpawnAgentRejectsInvalidDifficulty(t *testing.T) {
 func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 	ctx := testAgentContext{}
 	ApplySpawnAgentRouteContext(ctx, SpawnAgentArgs{
-		Provider:            " codex ",
-		Model:               " gpt-5.4 ",
-		ReasoningEffort:     " high ",
-		Difficulty:          " hard ",
-		DifficultyRationale: "provider-sensitive",
-		PermissionMode:      "bypass_permissions",
-		ReadOnly:            true,
-		RouteSource:         "difficulty_level",
-		RouteWarnings:       []string{" inherited ", " ", "capability_unknown"},
-		FallbackUsed:        true,
-		FallbackReason:      " provider_unresolved_parent ",
+		Provider:                 " codex ",
+		Model:                    " gpt-5.4 ",
+		ReasoningEffort:          " high ",
+		RequestedProvider:        " requested-codex ",
+		RequestedModel:           " requested-model ",
+		RequestedReasoningEffort: " xhigh ",
+		Difficulty:               " hard ",
+		DifficultyRationale:      "provider-sensitive",
+		PermissionMode:           "bypass_permissions",
+		RequestedPermissionMode:  " plan ",
+		EffectivePermissionMode:  " bypass_permissions ",
+		ReadOnly:                 true,
+		RouteSource:              "difficulty_level",
+		RouteWarnings:            []string{" inherited ", " ", "capability_unknown"},
+		FallbackUsed:             true,
+		FallbackReason:           " provider_unresolved_parent ",
 	})
 
 	if ctx[AgentSessionContextProviderName] != "codex" ||
-		ctx[AgentSessionContextRequestedModel] != "gpt-5.4" ||
+		ctx[AgentSessionContextRequestedProvider] != "requested-codex" ||
+		ctx[AgentSessionContextRequestedModel] != "requested-model" ||
 		ctx[AgentSessionContextModel] != "gpt-5.4" ||
 		ctx[AgentSessionContextReasoningEffort] != "high" ||
+		ctx[AgentSessionContextRequestedReasoningEffort] != "xhigh" ||
 		ctx[AgentSessionContextPermissionMode] != "bypass_permissions" ||
+		ctx[AgentSessionContextRequestedPermissionMode] != "plan" ||
+		ctx[AgentSessionContextEffectivePermissionMode] != "bypass_permissions" ||
 		ctx[AgentSessionContextReadOnly] != true ||
 		ctx[AgentSessionContextDifficulty] != "hard" ||
 		ctx[AgentSessionContextDifficultyRationale] != "provider-sensitive" ||
@@ -483,6 +492,11 @@ func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 	if status.Provider != "codex" ||
 		status.Model != "gpt-5.4" ||
 		status.ReasoningEffort != "high" ||
+		status.RequestedProvider != "requested-codex" ||
+		status.RequestedModel != "requested-model" ||
+		status.RequestedReasoningEffort != "xhigh" ||
+		status.RequestedPermissionMode != "plan" ||
+		status.EffectivePermissionMode != "bypass_permissions" ||
 		status.PermissionMode != "bypass_permissions" ||
 		!status.ReadOnly ||
 		status.Difficulty != "hard" ||
@@ -496,6 +510,14 @@ func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 	if payload["route_provider"] != "codex" ||
 		payload["route_model"] != "gpt-5.4" ||
 		payload["route_reasoning_effort"] != "high" ||
+		payload["requested_provider"] != "requested-codex" ||
+		payload["effective_provider"] != "codex" ||
+		payload["requested_model"] != "requested-model" ||
+		payload["effective_model"] != "gpt-5.4" ||
+		payload["requested_reasoning_effort"] != "xhigh" ||
+		payload["effective_reasoning_effort"] != "high" ||
+		payload["requested_permission_mode"] != "plan" ||
+		payload["effective_permission_mode"] != "bypass_permissions" ||
 		payload["permission_mode"] != "bypass_permissions" ||
 		payload["read_only"] != true ||
 		payload["difficulty"] != "hard" ||

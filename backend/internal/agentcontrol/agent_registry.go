@@ -16,6 +16,10 @@ const (
 
 	// AgentStatusActive is the default open identity state.
 	AgentStatusActive = "active"
+	// AgentStatusStale marks an abandoned identity whose execution container or
+	// lease can no longer support routing. Stale is terminal, but remains
+	// distinct from an orderly close for diagnostics and consistency audits.
+	AgentStatusStale = "stale"
 	// AgentStatusClosed marks an agent identity that should no longer receive
 	// routing or target resolution traffic.
 	AgentStatusClosed = "closed"
@@ -25,33 +29,41 @@ const (
 // intentionally separate from chat session state: sessions remain execution
 // containers, while AgentRecord is the durable control-plane identity.
 type AgentRecord struct {
-	Seq                 int64      `json:"seq,omitempty"`
-	AgentID             string     `json:"agent_id,omitempty"`
-	RootSessionID       string     `json:"root_session_id,omitempty"`
-	ParentAgentID       string     `json:"parent_agent_id,omitempty"`
-	ParentSessionID     string     `json:"parent_session_id,omitempty"`
-	SessionID           string     `json:"session_id,omitempty"`
-	AgentPath           string     `json:"agent_path,omitempty"`
-	Depth               int        `json:"depth,omitempty"`
-	AgentType           string     `json:"agent_type,omitempty"`
-	Nickname            string     `json:"nickname,omitempty"`
-	Workflow            string     `json:"workflow,omitempty"`
-	TeamID              string     `json:"team_id,omitempty"`
-	TeammateID          string     `json:"teammate_id,omitempty"`
-	Provider            string     `json:"provider,omitempty"`
-	Model               string     `json:"model,omitempty"`
-	ReasoningEffort     string     `json:"reasoning_effort,omitempty"`
-	Difficulty          string     `json:"difficulty,omitempty"`
-	DifficultySource    string     `json:"difficulty_source,omitempty"`
-	DifficultyRationale string     `json:"difficulty_rationale,omitempty"`
-	RouteSource         string     `json:"route_source,omitempty"`
-	RouteWarnings       []string   `json:"route_warnings,omitempty"`
-	FallbackUsed        bool       `json:"fallback_used,omitempty"`
-	FallbackReason      string     `json:"fallback_reason,omitempty"`
-	Status              string     `json:"status,omitempty"`
-	CreatedAt           time.Time  `json:"created_at,omitempty"`
-	UpdatedAt           time.Time  `json:"updated_at,omitempty"`
-	ClosedAt            *time.Time `json:"closed_at,omitempty"`
+	Seq                      int64      `json:"seq,omitempty"`
+	AgentID                  string     `json:"agent_id,omitempty"`
+	RootSessionID            string     `json:"root_session_id,omitempty"`
+	ParentAgentID            string     `json:"parent_agent_id,omitempty"`
+	ParentSessionID          string     `json:"parent_session_id,omitempty"`
+	SessionID                string     `json:"session_id,omitempty"`
+	AgentPath                string     `json:"agent_path,omitempty"`
+	Depth                    int        `json:"depth,omitempty"`
+	AgentType                string     `json:"agent_type,omitempty"`
+	Nickname                 string     `json:"nickname,omitempty"`
+	Workflow                 string     `json:"workflow,omitempty"`
+	TeamID                   string     `json:"team_id,omitempty"`
+	TeammateID               string     `json:"teammate_id,omitempty"`
+	Provider                 string     `json:"provider,omitempty"`
+	Model                    string     `json:"model,omitempty"`
+	ReasoningEffort          string     `json:"reasoning_effort,omitempty"`
+	Difficulty               string     `json:"difficulty,omitempty"`
+	DifficultySource         string     `json:"difficulty_source,omitempty"`
+	DifficultyRationale      string     `json:"difficulty_rationale,omitempty"`
+	RouteSource              string     `json:"route_source,omitempty"`
+	RouteWarnings            []string   `json:"route_warnings,omitempty"`
+	FallbackUsed             bool       `json:"fallback_used,omitempty"`
+	FallbackReason           string     `json:"fallback_reason,omitempty"`
+	RequestedProvider        string     `json:"requested_provider,omitempty"`
+	EffectiveProvider        string     `json:"effective_provider,omitempty"`
+	RequestedModel           string     `json:"requested_model,omitempty"`
+	EffectiveModel           string     `json:"effective_model,omitempty"`
+	RequestedReasoningEffort string     `json:"requested_reasoning_effort,omitempty"`
+	EffectiveReasoningEffort string     `json:"effective_reasoning_effort,omitempty"`
+	RequestedPermissionMode  string     `json:"requested_permission_mode,omitempty"`
+	EffectivePermissionMode  string     `json:"effective_permission_mode,omitempty"`
+	Status                   string     `json:"status,omitempty"`
+	CreatedAt                time.Time  `json:"created_at,omitempty"`
+	UpdatedAt                time.Time  `json:"updated_at,omitempty"`
+	ClosedAt                 *time.Time `json:"closed_at,omitempty"`
 }
 
 // Normalize returns a stable AgentRecord shape for storage and comparison.
@@ -76,6 +88,14 @@ func (r AgentRecord) Normalize() AgentRecord {
 	r.RouteSource = strings.TrimSpace(r.RouteSource)
 	r.RouteWarnings = trimAgentRecordStrings(r.RouteWarnings)
 	r.FallbackReason = strings.TrimSpace(r.FallbackReason)
+	r.RequestedProvider = strings.TrimSpace(r.RequestedProvider)
+	r.EffectiveProvider = strings.TrimSpace(r.EffectiveProvider)
+	r.RequestedModel = strings.TrimSpace(r.RequestedModel)
+	r.EffectiveModel = strings.TrimSpace(r.EffectiveModel)
+	r.RequestedReasoningEffort = strings.TrimSpace(r.RequestedReasoningEffort)
+	r.EffectiveReasoningEffort = strings.TrimSpace(r.EffectiveReasoningEffort)
+	r.RequestedPermissionMode = strings.TrimSpace(r.RequestedPermissionMode)
+	r.EffectivePermissionMode = strings.TrimSpace(r.EffectivePermissionMode)
 	r.Status = strings.TrimSpace(r.Status)
 	if r.Status == "" {
 		r.Status = AgentStatusActive
@@ -101,7 +121,10 @@ func trimAgentRecordStrings(values []string) []string {
 
 // Closed reports whether the durable identity is terminal.
 func (r AgentRecord) Closed() bool {
-	return r.ClosedAt != nil || strings.EqualFold(strings.TrimSpace(r.Status), AgentStatusClosed)
+	status := strings.TrimSpace(r.Status)
+	return r.ClosedAt != nil ||
+		strings.EqualFold(status, AgentStatusClosed) ||
+		strings.EqualFold(status, AgentStatusStale)
 }
 
 // AgentFilter describes reads from a durable AgentControl identity registry.
@@ -211,6 +234,12 @@ type AgentRegistryReader interface {
 type AgentRegistryWriter interface {
 	UpsertAgentControlAgent(ctx context.Context, record AgentRecord) (AgentRecord, error)
 	CloseAgentControlAgentSubtree(ctx context.Context, rootSessionID string, agentPath string, closedAt time.Time) (int64, error)
+}
+
+// AgentStaleMarker optionally preserves the abandoned-vs-orderly terminal
+// distinction while removing the identity subtree from active routing.
+type AgentStaleMarker interface {
+	MarkAgentControlAgentSubtreeStale(ctx context.Context, rootSessionID string, agentPath string, staleAt time.Time) (int64, error)
 }
 
 // AgentSpawnReservationStore optionally supports an atomic spawn reservation.

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
@@ -87,7 +88,7 @@ func (m *Manager) runDetachedJob(managed *managedJob) {
 		if m.scheduleDetachedRecovery(managed, "launch_failed", err.Error()) {
 			return
 		}
-		m.failJob(managed, err)
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, err)
 		return
 	}
 
@@ -106,21 +107,15 @@ func (m *Manager) runDetachedJob(managed *managedJob) {
 	if health := inspectProcess(launch.PID); health.Identity != "" {
 		managed.info.Metadata[backgroundMetaProcessIdentity] = health.Identity
 	}
-	managed.info.Status = StatusRunning
-	managed.info.StartedAt = &startedAt
-	managed.info.Message = ""
-	managed.info.ExitCode = nil
-	managed.info.FinishedAt = nil
-	managed.scheduled = false
 	managed.mu.Unlock()
 
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
+	processAlive := func() bool {
+		return managedDetachedProcessMatches(managed, inspectProcess(launch.PID))
 	}
-	m.appendJobEvent(context.Background(), managed.info.ID, "running", map[string]interface{}{
-		"status": managed.info.Status,
-		"pid":    launch.PID,
-	})
+	if !m.acceptStartedProcess(ctx, managed, startedAt, launch.PID, processAlive) {
+		_ = terminateProcess(launch.PID)
+		return
+	}
 
 	var deadline time.Time
 	timeout := time.Duration(req.TimeoutSec) * time.Second
@@ -440,6 +435,15 @@ func (m *Manager) scheduleDetachedRecovery(managed *managedJob, reason, message 
 	managed.info.Metadata[backgroundMetaRecoveryMax] = maxAttempts
 	managed.info.Metadata[backgroundMetaNextRecoveryAt] = nextRecoveryAt.Format(time.RFC3339Nano)
 	managed.info.Metadata["recovery_reason"] = strings.TrimSpace(reason)
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateQueued
+	managed.info.Metadata[backgroundMetaProcessStarted] = false
+	if startup := normalizeStartupAcceptance(managed.request.Startup); startup.Probe == StartupProbeNone {
+		managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStateNotConfigured
+	} else {
+		managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStatePending
+	}
+	delete(managed.info.Metadata, backgroundMetaStartupAcceptedAt)
+	delete(managed.info.Metadata, backgroundMetaHealthcheckError)
 	delete(managed.info.Metadata, backgroundMetaPID)
 	delete(managed.info.Metadata, backgroundMetaProcessIdentity)
 	managed.info.Message = fmt.Sprintf("automatic recovery %d scheduled in %s: %s", attempt, delay, strings.TrimSpace(message))
@@ -494,6 +498,8 @@ func (m *Manager) waitAndQueueDetachedRecovery(managed *managedJob, attempt int,
 	delete(managed.info.Metadata, backgroundMetaPID)
 	delete(managed.info.Metadata, backgroundMetaProcessIdentity)
 	delete(managed.info.Metadata, backgroundMetaNextRecoveryAt)
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateQueued
+	managed.info.Metadata[backgroundMetaProcessStarted] = false
 	snapshot := managed.info
 	managed.mu.Unlock()
 

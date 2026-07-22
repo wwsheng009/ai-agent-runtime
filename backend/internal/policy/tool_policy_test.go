@@ -37,7 +37,7 @@ func TestToolExecutionPolicy_AllowToolInfo_AllowsLocalRead(t *testing.T) {
 
 func TestToolExecutionPolicy_AllowTool_BlocksShellSurfaceInReadOnlyMode(t *testing.T) {
 	policy := NewToolExecutionPolicy(nil, true)
-	for _, name := range []string{"bash", "shell_command", "aicli_exec"} {
+	for _, name := range []string{"bash", "shell_command", "aicli_exec", "background_task"} {
 		if err := policy.AllowTool(name); err == nil {
 			t.Fatalf("expected read-only policy to block %q", name)
 		}

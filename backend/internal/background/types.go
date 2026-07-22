@@ -23,21 +23,47 @@ const (
 	StatusOrphaned  JobStatus = "orphaned"
 )
 
+// StartupProbeType identifies the generic probe used to accept a started process.
+type StartupProbeType string
+
+const (
+	StartupProbeNone    StartupProbeType = "none"
+	StartupProbeProcess StartupProbeType = "process"
+	StartupProbeTCP     StartupProbeType = "tcp"
+	StartupProbeHTTP    StartupProbeType = "http"
+)
+
+// StartupAcceptance configures the process-start acceptance gate. TCP and HTTP
+// probes are caller-supplied infrastructure checks; the runtime does not infer
+// application ports, endpoints, or provider-specific semantics.
+type StartupAcceptance struct {
+	Probe         StartupProbeType `json:"probe,omitempty"`
+	GracePeriodMs int              `json:"grace_period_ms,omitempty"`
+	TimeoutMs     int              `json:"timeout_ms,omitempty"`
+	Address       string           `json:"address,omitempty"`
+	URL           string           `json:"url,omitempty"`
+}
+
 // BackgroundTaskArgs describes background task submission.
 type BackgroundTaskArgs struct {
-	Command       string        `json:"command"`
-	Cwd           string        `json:"cwd,omitempty"`
-	TimeoutSec    int           `json:"timeout_sec,omitempty"`
-	Priority      int           `json:"priority,omitempty"`
-	RestartPolicy RestartPolicy `json:"restart_policy,omitempty"`
+	Command       string             `json:"command"`
+	Cwd           string             `json:"cwd,omitempty"`
+	TimeoutSec    int                `json:"timeout_sec,omitempty"`
+	Priority      int                `json:"priority,omitempty"`
+	RestartPolicy RestartPolicy      `json:"restart_policy,omitempty"`
+	Startup       *StartupAcceptance `json:"startup_acceptance,omitempty"`
 }
 
 // BackgroundTaskResult reports a submitted job.
 type BackgroundTaskResult struct {
-	JobID         string        `json:"job_id"`
-	Status        string        `json:"status"`
-	Message       string        `json:"message,omitempty"`
-	RestartPolicy RestartPolicy `json:"restart_policy,omitempty"`
+	JobID            string        `json:"job_id"`
+	Status           string        `json:"status"`
+	Message          string        `json:"message,omitempty"`
+	RestartPolicy    RestartPolicy `json:"restart_policy,omitempty"`
+	LaunchState      string        `json:"launch_state,omitempty"`
+	HealthcheckState string        `json:"healthcheck_state,omitempty"`
+	StartupProbe     string        `json:"startup_probe,omitempty"`
+	StartupGraceMs   int64         `json:"startup_grace_ms,omitempty"`
 }
 
 // TaskOutputArgs reads task output from an offset.
@@ -71,6 +97,14 @@ type TaskOutputResult struct {
 	RecoveryAttempt     int    `json:"recovery_attempt,omitempty"`
 	RecoveryMaxAttempts int    `json:"recovery_max_attempts,omitempty"`
 	NextRecoveryAt      string `json:"next_recovery_at,omitempty"`
+	LaunchState         string `json:"launch_state,omitempty"`
+	ProcessStarted      bool   `json:"process_started,omitempty"`
+	ProcessAlive        *bool  `json:"process_alive,omitempty"`
+	StartupProbe        string `json:"startup_probe,omitempty"`
+	StartupGraceMs      int64  `json:"startup_grace_ms,omitempty"`
+	StartupAcceptedAt   string `json:"startup_accepted_at,omitempty"`
+	HealthcheckState    string `json:"healthcheck_state,omitempty"`
+	HealthcheckError    string `json:"healthcheck_error,omitempty"`
 }
 
 // JobFilter filters background job queries.
