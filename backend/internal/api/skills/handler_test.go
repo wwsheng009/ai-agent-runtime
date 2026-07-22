@@ -664,6 +664,13 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 	assert.Equal(t, "llm_fallback", result["source"])
 	assert.Equal(t, true, result["success"])
 	assert.Equal(t, "hello from llm", result["output"])
+	for _, routePayload := range []map[string]interface{}{payload, result} {
+		assert.Equal(t, "test-model", routePayload["requested_provider"])
+		assert.Equal(t, "test-model", routePayload["effective_provider"])
+		assert.Equal(t, "test-model", routePayload["requested_model"])
+		assert.Equal(t, "test-model", routePayload["effective_model"])
+		assert.Equal(t, false, routePayload["fallback_used"])
+	}
 	orchestration := result["orchestration"].(map[string]interface{})
 	assert.Equal(t, "llm_fallback", orchestration["source"])
 	assert.Equal(t, false, orchestration["route_attempted"])
@@ -677,6 +684,10 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 	assert.Equal(t, "system", session.GetMessages()[0].Role)
 	assert.Equal(t, "user", session.GetMessages()[1].Role)
 	assert.Equal(t, "assistant", session.GetMessages()[2].Role)
+	assert.Equal(t, "test-model", sessionmeta.String(session.Metadata.Context, sessionmeta.RequestedProvider))
+	assert.Equal(t, "test-model", sessionmeta.String(session.Metadata.Context, sessionmeta.EffectiveProvider))
+	assert.Equal(t, "test-model", sessionmeta.String(session.Metadata.Context, sessionmeta.RequestedModel))
+	assert.Equal(t, "test-model", sessionmeta.String(session.Metadata.Context, sessionmeta.EffectiveModel))
 }
 
 func TestAgentChat_SessionHistoryAutoCompactsBeforeLLMFallback(t *testing.T) {
@@ -975,10 +986,11 @@ func TestAgentChat_EnableReAct_UsesAgentLoopAndPersistsSession(t *testing.T) {
 	handler := NewHandler(registry, nil, mcpManager)
 
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
-	require.NoError(t, runtime.RegisterProvider("test-model", &testLLMProvider{
+	provider := &testLLMProvider{
 		name:    "test-model",
 		content: "hello from react loop",
-	}))
+	}
+	require.NoError(t, runtime.RegisterProvider("test-model", provider))
 	handler.SetLLMRuntime(runtime)
 
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
@@ -1014,6 +1026,8 @@ func TestAgentChat_EnableReAct_UsesAgentLoopAndPersistsSession(t *testing.T) {
 	assert.Equal(t, true, result["success"])
 	assert.Equal(t, "hello from react loop", result["output"])
 	assert.NotEmpty(t, result["trace_id"])
+	assert.Equal(t, "test-model", result["requested_provider"])
+	assert.Equal(t, "test-model", result["effective_provider"])
 	orchestration := result["orchestration"].(map[string]interface{})
 	assert.Equal(t, "agent_react", orchestration["source"])
 	assert.Equal(t, false, orchestration["route_attempted"])
@@ -1024,6 +1038,11 @@ func TestAgentChat_EnableReAct_UsesAgentLoopAndPersistsSession(t *testing.T) {
 	assert.Equal(t, "user", session.GetMessages()[0].Role)
 	assert.Equal(t, "assistant", session.GetMessages()[1].Role)
 	assert.Equal(t, "hello from react loop", session.GetMessages()[1].Content)
+	require.NotEmpty(t, provider.requests)
+	route, ok := provider.requests[0].Metadata["route"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "test-model", route["requested_provider"])
+	assert.Equal(t, "test-model", route["effective_provider"])
 }
 
 func TestAgentChat_EnableReAct_IncludesWorkspaceContextInModelRequest(t *testing.T) {
@@ -1268,6 +1287,28 @@ func TestAgentChat_EnableReAct_ExposesSubagentSummary(t *testing.T) {
 	assert.Equal(t, float64(1), observationSummary["subagent_count"])
 	assert.Equal(t, float64(1), observationSummary["subagent_successful"])
 	assert.Contains(t, observationSummary["subagent_roles"].([]interface{}), "researcher")
+}
+
+func TestObservationSubagentReportsAcceptsCompactParentProjection(t *testing.T) {
+	observation := types.NewObservation("step_1", "spawn_subagents").
+		WithMetric("subagent_reports", []map[string]interface{}{
+			{
+				"id":         "child-1",
+				"role":       "researcher",
+				"session_id": "session-child-1",
+				"summary":    "found the cause",
+				"success":    true,
+				"read_only":  true,
+			},
+		})
+
+	reports := observationSubagentReports(*observation)
+	require.Len(t, reports, 1)
+	assert.Equal(t, "child-1", reports[0].ID)
+	assert.Equal(t, "session-child-1", reports[0].SessionID)
+	assert.Equal(t, "found the cause", reports[0].Summary)
+	assert.True(t, reports[0].Success)
+	assert.True(t, reports[0].ReadOnly)
 }
 
 func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
@@ -2404,11 +2445,21 @@ func TestStreamLLMChat_AttachesSessionMetadataForPromptCaching(t *testing.T) {
 		0,
 		"",
 		nil,
+		executionRouteTransparency{
+			RequestedProvider: "configured-alias",
+			EffectiveProvider: "test-model",
+			RequestedModel:    "friendly-model",
+			EffectiveModel:    "test-model",
+		},
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, provider.requests)
 	require.NotNil(t, provider.requests[0].Metadata)
 	assert.Equal(t, session.ID, provider.requests[0].Metadata["session_id"])
+	route, ok := provider.requests[0].Metadata["route"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "configured-alias", route["requested_provider"])
+	assert.Equal(t, "test-model", route["effective_provider"])
 }
 
 func TestStreamLLMChat_PublishesPromptLayoutRuntimeEvents(t *testing.T) {

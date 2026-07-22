@@ -1459,6 +1459,23 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if model := strings.TrimSpace(req.Model); model != "" {
 		agentModel = model
 	}
+	effectiveReasoningEffort := types.ResolveReasoningEffort(req.ReasoningEffort)
+	chatRoute := resolveAgentChatRouteTransparency(
+		runtimeLLM,
+		session,
+		req.Provider,
+		req.Model,
+		req.ReasoningEffort,
+		agentProvider,
+		agentModel,
+		effectiveReasoningEffort,
+	)
+	if session != nil {
+		persistExecutionRouteTransparency(session, chatRoute)
+		if h.sessionManager != nil {
+			_ = h.sessionManager.Update(ctx, session)
+		}
+	}
 	if agentProvider != "" {
 		ctx = logger.WithProvider(ctx, agentProvider)
 	}
@@ -1484,6 +1501,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
 	}
+	if agentConfig.Options == nil {
+		agentConfig.Options = make(map[string]interface{})
+	}
+	agentConfig.Options["route"] = chatRoute.payload()
 	if strings.TrimSpace(req.TeamID) != "" || strings.TrimSpace(req.TaskID) != "" {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
@@ -1580,6 +1601,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}
 
 			resultPayload := buildAgentResultPayload("agent_react", reactResult)
+			attachExecutionRouteTransparency(resultPayload, chatRoute)
 			resultPayload["orchestration"] = buildOrchestrationPayload(
 				"agent_react",
 				routeAttempted,
@@ -1664,6 +1686,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, orchResult.LLMResponse.Usage, orchResult.LLMResponse.Content)
 				}
 			}
+			attachExecutionRouteTransparency(resultPayload, chatRoute)
 
 			if planningPayload := buildPlanningPayload(orchResult); planningPayload != nil {
 				resultPayload["planning"] = planningPayload
@@ -1750,6 +1773,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			if shouldUseAgentResult(result, h.llmRuntime) {
 				h.recordUsage(usageScope, "agent_chat", result.Skill, result.Success, estimatedPromptTokens, result.Usage, result.Output)
 				payload := buildAgentResultPayload("agent_route", result)
+				attachExecutionRouteTransparency(payload, chatRoute)
 				payload["orchestration"] = buildOrchestrationPayload("agent_route", routeAttempted, routeCandidates, result, nil, "")
 				if planningPayload != nil {
 					payload["planning"] = planningPayload
@@ -1794,7 +1818,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if routeAttempted {
 			fallbackReason = "no_matching_skill"
 		}
-		if err := h.streamLLMChat(ctx, w, session, a.GetConfig().Name, agentModel, lastMessage, chatMessages, types.ResolveReasoningEffort(req.ReasoningEffort), types.ResolveThinkingConfig(req.Thinking), routeAttempted, routeCandidates, fallbackReason, usageScope, estimatedPromptTokens, requestTraceID, planningPayload); err != nil {
+		if err := h.streamLLMChat(ctx, w, session, a.GetConfig().Name, agentModel, lastMessage, chatMessages, effectiveReasoningEffort, types.ResolveThinkingConfig(req.Thinking), routeAttempted, routeCandidates, fallbackReason, usageScope, estimatedPromptTokens, requestTraceID, planningPayload, chatRoute); err != nil {
 			return
 		}
 		return
@@ -1841,6 +1865,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		responseResult := buildAgentResultPayload("agent_react", reactResult)
+		attachExecutionRouteTransparency(responseResult, chatRoute)
 		responseResult["orchestration"] = buildOrchestrationPayload(
 			"agent_react",
 			routeAttempted,
@@ -1858,6 +1883,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			"source":     responseResultSource(responseResult),
 			"status":     finalResultStatus(responseResult),
 		}
+		attachExecutionRouteTransparency(response, chatRoute)
 		h.writeJSON(w, http.StatusOK, response)
 		return
 	}
@@ -1937,6 +1963,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, orchResult.LLMResponse.Usage, orchResult.LLMResponse.Content)
 		}
 	}
+	attachExecutionRouteTransparency(responseResult.(map[string]interface{}), chatRoute)
 	if planningPayload := buildPlanningPayload(orchResult); planningPayload != nil {
 		responseResult.(map[string]interface{})["planning"] = planningPayload
 		if orchestration, ok := responseResult.(map[string]interface{})["orchestration"].(map[string]interface{}); ok {
@@ -1986,6 +2013,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		"source":     responseResultSource(responseResult),
 		"status":     finalResultStatus(responseResult),
 	}
+	attachExecutionRouteTransparency(response, chatRoute)
 	responseTraceID := requestTraceID
 	if resultMap, ok := responseResult.(map[string]interface{}); ok {
 		if traceValue, ok := resultMap["trace_id"].(string); ok && strings.TrimSpace(traceValue) != "" {
@@ -4613,6 +4641,12 @@ func observationSubagentReports(observation types.Observation) []agent.SubagentR
 	switch typed := value.(type) {
 	case []agent.SubagentResult:
 		return typed
+	case []map[string]interface{}:
+		reports := make([]agent.SubagentResult, 0, len(typed))
+		for _, reportMap := range typed {
+			reports = append(reports, subagentResultFromMap(reportMap))
+		}
+		return reports
 	case []interface{}:
 		reports := make([]agent.SubagentResult, 0, len(typed))
 		for _, item := range typed {
@@ -4620,17 +4654,24 @@ func observationSubagentReports(observation types.Observation) []agent.SubagentR
 			if !ok {
 				continue
 			}
-			reports = append(reports, agent.SubagentResult{
-				ID:      stringMapValueAny(reportMap, "id"),
-				Role:    stringMapValueAny(reportMap, "role"),
-				Success: boolMapValueAny(reportMap, "success"),
-				Patches: filePatchesFromAny(reportMap["patches"]),
-				Error:   stringMapValueAny(reportMap, "error"),
-			})
+			reports = append(reports, subagentResultFromMap(reportMap))
 		}
 		return reports
 	default:
 		return nil
+	}
+}
+
+func subagentResultFromMap(reportMap map[string]interface{}) agent.SubagentResult {
+	return agent.SubagentResult{
+		ID:        stringMapValueAny(reportMap, "id"),
+		Role:      stringMapValueAny(reportMap, "role"),
+		SessionID: stringMapValueAny(reportMap, "session_id"),
+		Summary:   stringMapValueAny(reportMap, "summary"),
+		Success:   boolMapValueAny(reportMap, "success"),
+		ReadOnly:  boolMapValueAny(reportMap, "read_only"),
+		Patches:   filePatchesFromAny(reportMap["patches"]),
+		Error:     stringMapValueAny(reportMap, "error"),
 	}
 }
 
@@ -6705,13 +6746,18 @@ func (h *Handler) writeJSON(w http.ResponseWriter, statusCode int, data interfac
 	json.NewEncoder(w).Encode(data)
 }
 
-func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, session *chat.Session, agentID, modelName, userPrompt string, messages []types.Message, reasoningEffort string, thinking *types.ThinkingConfig, routeAttempted bool, routeCandidates []*skill.RouteResult, fallback string, usageScope UsageScope, estimatedPromptTokens int, traceID string, planningPayload map[string]interface{}) error {
+func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, session *chat.Session, agentID, modelName, userPrompt string, messages []types.Message, reasoningEffort string, thinking *types.ThinkingConfig, routeAttempted bool, routeCandidates []*skill.RouteResult, fallback string, usageScope UsageScope, estimatedPromptTokens int, traceID string, planningPayload map[string]interface{}, routeAudit ...executionRouteTransparency) error {
 	model := strings.TrimSpace(modelName)
 	if model == "" {
 		model = defaultAgentModel(h.llmRuntime)
 	}
 	metadata := map[string]interface{}{
 		"session_id": sessionID(session),
+	}
+	var activeRoute executionRouteTransparency
+	if len(routeAudit) > 0 {
+		activeRoute = routeAudit[0]
+		metadata["route"] = activeRoute.payload()
 	}
 	promptLayoutPreview := ""
 	promptLayoutLength := 0
@@ -6870,6 +6916,9 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		"model":       model,
 		"reasoning":   reasoningBuilder.String(),
 		"tool_events": toolEvents,
+	}
+	if len(routeAudit) > 0 {
+		attachExecutionRouteTransparency(resultPayload, activeRoute)
 	}
 	resultPayload["orchestration"] = buildOrchestrationPayload("llm_stream", routeAttempted, routeCandidates, nil, &llm.LLMResponse{Model: model, Content: fullContent}, fallback)
 	if planningPayload != nil {

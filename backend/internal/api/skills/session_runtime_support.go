@@ -17,6 +17,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -629,6 +630,12 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		}
 		toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
 		copyAgentCompletionPayload(payload, event.Payload)
+		if registry := c.handler.getAgentControlAgentStore(); registry != nil && childPath != "" {
+			rootSessionID := apiAgentRootSessionID(childSession, parentSessionID)
+			if _, closeErr := registry.CloseAgentControlAgentSubtree(context.Background(), rootSessionID, childPath, time.Now().UTC()); closeErr != nil {
+				payload["lifecycle_close_error"] = closeErr.Error()
+			}
+		}
 		completionMessage, mailboxErr := c.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
 		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
 		c.dispatchAgentHook(runtimehooks.EventSubagentStop, cloneProfileContextValues(payload))
@@ -2446,6 +2453,10 @@ func copyAgentCompletionPayload(target map[string]interface{}, payload map[strin
 		"usage_completion_tokens",
 		"usage_total_tokens",
 		"usage_cached_tokens",
+		"usage_cache_read_tokens",
+		"usage_cache_creation_tokens",
+		"usage_cache_read_reported",
+		"usage_cache_status",
 		"usage_reasoning_tokens",
 	} {
 		if value, ok := payload[key]; ok {
@@ -2590,6 +2601,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	streamRequested := false
 	disableTools := false
 	childReadOnly := false
+	childDepth := 0
 	if session, err := h.sessionManager.Get(context.Background(), sessionID); err == nil && session != nil {
 		getContextString := func(key string) string {
 			return sessionmeta.String(session.Metadata.Context, key)
@@ -2617,6 +2629,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		}
 		if value, ok := sessionmeta.Bool(session.Metadata.Context, toolbroker.AgentSessionContextReadOnly); ok {
 			childReadOnly = value
+		}
+		if value, ok := sessionmeta.Int(session.Metadata.Context, toolbroker.AgentSessionContextDepth); ok {
+			childDepth = value
 		}
 	}
 
@@ -2710,8 +2725,17 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 			toolPolicy = toolPolicy.Clone()
 			toolPolicy.ReadOnly = true
 		}
+		toolPolicy.SetCapabilityScope([]runtimepolicy.Capability{
+			runtimepolicy.CapReadOnly,
+			runtimepolicy.CapNetwork,
+		})
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
+	maxDepth := 0
+	if selectedConfig != nil {
+		maxDepth = selectedConfig.Agents.MaxDepth
+	}
+	applyAPIAgentChildDepthPolicy(apiAgent, childDepth, maxDepth)
 	h.applyAgentHooks(apiAgent, selectedConfig)
 	h.applyAgentRuntimeServices(apiAgent, selectedConfig)
 
@@ -2744,6 +2768,25 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		return nil, err
 	}
 	return actor, nil
+}
+
+func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
+	if apiAgent == nil || maxDepth <= 0 || depth < maxDepth {
+		return
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
+	} else {
+		toolPolicy = toolPolicy.Clone()
+	}
+	if toolPolicy.DeniedTools == nil {
+		toolPolicy.DeniedTools = map[string]bool{}
+	}
+	for _, toolName := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+		toolPolicy.DeniedTools[toolName] = true
+	}
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
 }
 
 func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedReasoningEffort ...string) *agent.LoopReActConfig {

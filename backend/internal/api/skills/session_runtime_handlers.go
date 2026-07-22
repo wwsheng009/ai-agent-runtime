@@ -389,9 +389,10 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	payload := map[string]interface{}{
 		"state": state,
-	})
+	}
+	h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 }
 
 // ListSessionRuntimeTools returns the current runtime-server tool surface for a session.
@@ -684,16 +685,18 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if !completed {
-			h.writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			payload := map[string]interface{}{
 				"ok":      true,
 				"pending": true,
 				"state":   state,
-			})
+			}
+			h.writeJSON(w, http.StatusAccepted, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 			return
 		}
-		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		payload := map[string]interface{}{
 			"result": result,
-		})
+		}
+		h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 		return
 
 	case "continue", "continue_session":
@@ -707,16 +710,18 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if !completed {
-			h.writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			payload := map[string]interface{}{
 				"ok":      true,
 				"pending": true,
 				"state":   state,
-			})
+			}
+			h.writeJSON(w, http.StatusAccepted, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 			return
 		}
-		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		payload := map[string]interface{}{
 			"result": result,
-		})
+		}
+		h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 		return
 
 	case "approve_tool", "approve":
