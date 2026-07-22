@@ -24,7 +24,15 @@ func ensureAgentResultContract(result *Result, goal string) *agentresult.Result 
 		usage.TotalTokens = result.Usage.TotalTokens
 	}
 	usage.DurationMS = result.Duration.GetDuration().Milliseconds()
-	contract := agentresult.FromLegacy(result.Success, result.Output, resultErrorCode(result.Error), result.Error, usage)
+	errorCode := resultErrorCode(result.Error)
+	if result.Failure != nil && strings.TrimSpace(result.Failure.ErrorCode) != "" {
+		errorCode = strings.TrimSpace(result.Failure.ErrorCode)
+	}
+	contract := agentresult.FromLegacy(result.Success, result.Output, errorCode, result.Error, usage)
+	if result.Failure != nil && len(contract.Errors) > 0 {
+		contract.Errors[0].Retryable = result.Failure.Retryable
+		contract.Errors[0].NextAction = strings.TrimSpace(result.Failure.NextAction)
+	}
 	applyContractErrorStatus(contract, result.Error)
 	contract.TraceID = strings.TrimSpace(result.TraceID)
 

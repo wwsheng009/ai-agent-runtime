@@ -25,10 +25,18 @@ const (
 	ErrAgentRunCanceled     ErrorCode = "AGENT_RUN_CANCELED"
 	ErrApprovalExpired      ErrorCode = "APPROVAL_EXPIRED"
 	ErrSessionLeaseConflict ErrorCode = "SESSION_LEASE_CONFLICT"
+	ErrToolInvalidArgs      ErrorCode = "TOOL_INVALID_ARGS"
+	ErrToolPathNotFound     ErrorCode = "TOOL_PATH_NOT_FOUND"
+	ErrToolBrokerFailure    ErrorCode = "TOOL_BROKER_FAILURE"
+	ErrProcessStartFailed   ErrorCode = "PROCESS_START_FAILED"
+	ErrProcessHealthcheck   ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
 
 	// Agent 错误
-	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"
-	ErrAgentPermission ErrorCode = "AGENT_PERMISSION"
+	ErrAgentMaxSteps       ErrorCode = "AGENT_MAX_STEPS"
+	ErrAgentPermission     ErrorCode = "AGENT_PERMISSION"
+	ErrContextBudget       ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
+	ErrStreamInterrupted   ErrorCode = "STREAM_INTERRUPTED"
+	ErrUpstreamUnavailable ErrorCode = "UPSTREAM_UNAVAILABLE"
 
 	// 内存错误
 	ErrMemoryFull ErrorCode = "MEMORY_FULL"

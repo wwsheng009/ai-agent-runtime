@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"context"
 	stderrors "errors"
+	"strings"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
@@ -17,7 +19,10 @@ func recordToolExecutionOutcome(result *toolExecutionResult, metadata map[string
 	toolMetadata := cloneInterfaceMap(rawMeta)
 	if execErr != nil {
 		var runtimeErr *runtimeerrors.RuntimeError
-		if stderrors.As(execErr, &runtimeErr) {
+		if !stderrors.As(execErr, &runtimeErr) {
+			runtimeErr = classifyGenericToolExecutionError(execErr)
+		}
+		if runtimeErr != nil {
 			if toolMetadata == nil {
 				toolMetadata = map[string]interface{}{}
 			}
@@ -30,6 +35,37 @@ func recordToolExecutionOutcome(result *toolExecutionResult, metadata map[string
 	}
 	if execErr != nil {
 		result.Error = execErr.Error()
+	}
+}
+
+func classifyGenericToolExecutionError(err error) *runtimeerrors.RuntimeError {
+	if err == nil {
+		return nil
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	code := runtimeerrors.ErrToolExecution
+	switch {
+	case stderrors.Is(err, context.Canceled):
+		code = runtimeerrors.ErrAgentRunCanceled
+	case stderrors.Is(err, context.DeadlineExceeded), strings.Contains(lower, "timed out"), strings.Contains(lower, "timeout"):
+		code = runtimeerrors.ErrToolTimeout
+	case strings.Contains(lower, "permission denied"), strings.Contains(lower, "access denied"):
+		code = runtimeerrors.ErrAgentPermission
+	case strings.Contains(lower, "path not found"), strings.Contains(lower, "file not found"), strings.Contains(lower, "no such file or directory"):
+		code = runtimeerrors.ErrToolPathNotFound
+	case strings.Contains(lower, "invalid argument"), strings.Contains(lower, "invalid args"), strings.Contains(lower, "missing required"), strings.Contains(lower, " is required"):
+		code = runtimeerrors.ErrToolInvalidArgs
+	}
+	return runtimeerrors.Wrap(code, "tool execution failed", err)
+}
+
+func recordToolFailureMetadata(metadata map[string]interface{}, code runtimeerrors.ErrorCode, message string) {
+	if metadata == nil || code == "" {
+		return
+	}
+	metadata["error_code"] = string(code)
+	if message = strings.TrimSpace(message); message != "" {
+		metadata["error_message"] = message
 	}
 }
 

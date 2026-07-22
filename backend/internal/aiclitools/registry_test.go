@@ -107,6 +107,43 @@ type fakeToolSessionContext struct {
 	path      ExposurePath
 }
 
+type richNextMCPManager struct{}
+
+func (richNextMCPManager) FindTool(toolName string) (runtimeskill.ToolInfo, error) {
+	return runtimeskill.ToolInfo{Name: toolName, Enabled: true}, nil
+}
+
+func (richNextMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	return "fallback", nil
+}
+
+func (richNextMCPManager) CallToolWithMeta(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
+	return "patched", map[string]interface{}{"mutated_paths": []string{"changed.go"}}, nil
+}
+
+func (richNextMCPManager) ListTools() []runtimeskill.ToolInfo { return nil }
+
+func (richNextMCPManager) ResolveToolSource(toolName string) string { return "toolkit" }
+
+func TestCapabilityMCPManagerPreservesWrappedToolMetadataAndSource(t *testing.T) {
+	manager := &CapabilityMCPManager{Next: richNextMCPManager{}}
+
+	output, metadata, err := manager.CallToolWithMeta(context.Background(), "", "apply_patch", nil)
+	if err != nil {
+		t.Fatalf("CallToolWithMeta failed: %v", err)
+	}
+	if output != "patched" {
+		t.Fatalf("unexpected output: %#v", output)
+	}
+	paths, ok := metadata["mutated_paths"].([]string)
+	if !ok || len(paths) != 1 || paths[0] != "changed.go" {
+		t.Fatalf("expected mutation metadata, got %#v", metadata)
+	}
+	if source := manager.ResolveToolSource("apply_patch"); source != "toolkit" {
+		t.Fatalf("expected delegated source, got %q", source)
+	}
+}
+
 func (f *fakeToolSessionContext) SessionID() string {
 	return f.sessionID
 }

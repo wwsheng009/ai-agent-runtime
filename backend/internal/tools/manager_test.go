@@ -716,6 +716,31 @@ func TestManagerExecute_DoesNotWrapEmptySuccessfulTextResultAsJSON(t *testing.T)
 	}
 }
 
+func TestManagerExecute_SynthesizesEmptyMutationSuccessFromMetadata(t *testing.T) {
+	manager := &Manager{toolkit: toolkit.NewRegistry()}
+	if err := manager.toolkit.Register(toolkitSuccessToolStub{
+		name:       "empty_mutation_success",
+		content:    "",
+		outputKind: toolresult.KindText,
+		metadata: map[string]interface{}{
+			"mutated_paths": []string{"changed.go"},
+		},
+	}); err != nil {
+		t.Fatalf("register stub tool: %v", err)
+	}
+
+	output, metadata, err := manager.ExecuteWithMeta(context.Background(), "empty_mutation_success", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("ExecuteWithMeta failed: %v", err)
+	}
+	if output != "Tool completed successfully; changed 1 file: changed.go." {
+		t.Fatalf("expected mutation success summary, got %q", output)
+	}
+	if paths, ok := metadata["mutated_paths"].([]string); !ok || len(paths) != 1 || paths[0] != "changed.go" {
+		t.Fatalf("expected mutation metadata to be preserved, got %#v", metadata)
+	}
+}
+
 func TestAgentAdapter_CallToolWithMeta_PreservesOutputKind(t *testing.T) {
 	manager := &Manager{toolkit: toolkit.NewRegistry()}
 	if err := manager.toolkit.Register(toolkitSuccessToolStub{

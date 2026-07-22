@@ -47,6 +47,15 @@ func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {
 	if len(envelope.ArtifactIDs) != 1 {
 		t.Fatalf("expected 1 artifact id, got %d", len(envelope.ArtifactIDs))
 	}
+	if envelope.Metadata["artifact_id"] != envelope.ArtifactIDs[0] {
+		t.Fatalf("expected canonical artifact_id metadata, got %#v", envelope.Metadata["artifact_id"])
+	}
+	if envelope.Metadata["byte_count"] != len(rawOutput) {
+		t.Fatalf("expected byte_count=%d, got %#v", len(rawOutput), envelope.Metadata["byte_count"])
+	}
+	if digest, _ := envelope.Metadata["sha256"].(string); len(digest) != 64 {
+		t.Fatalf("expected sha256 digest, got %#v", envelope.Metadata["sha256"])
+	}
 	if strings.Contains(envelope.Summary, "line 5: tail") {
 		t.Fatal("expected summary to be truncated before the last line")
 	}
@@ -278,5 +287,48 @@ func TestGateway_PrefersReducerSummaryForLargeGoTestOutput(t *testing.T) {
 	}
 	if preferred, _ := envelope.Metadata["model_summary_preferred"].(bool); !preferred {
 		t.Fatalf("expected model summary preference for large test output, got %#v", envelope.Metadata)
+	}
+}
+
+func TestGateway_AddsActionableInvalidArgumentDiagnostic(t *testing.T) {
+	gateway := NewGateway(nil)
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		ToolName:   "background_task",
+		ToolCallID: "call-invalid",
+		Error:      "command is required",
+	})
+	if err != nil || envelope == nil {
+		t.Fatalf("process invalid tool result: envelope=%#v err=%v", envelope, err)
+	}
+	if envelope.OK || envelope.Metadata["ok"] != false {
+		t.Fatalf("expected failed invocation diagnostic, got %#v", envelope)
+	}
+	if envelope.ErrorCode != "TOOL_INVALID_ARGS" || envelope.Metadata["error_code"] != "TOOL_INVALID_ARGS" {
+		t.Fatalf("expected invalid-args code, got %#v", envelope)
+	}
+	if envelope.Retryable || envelope.Metadata["retryable"] != false {
+		t.Fatalf("invalid arguments must not be blindly retried: %#v", envelope.Metadata)
+	}
+	if strings.TrimSpace(envelope.NextAction) == "" || envelope.Metadata["next_action"] != envelope.NextAction {
+		t.Fatalf("expected corrective next action, got %#v", envelope.Metadata)
+	}
+}
+
+func TestGateway_SuccessfulTaskOutputKeepsUnderlyingFailureSeparate(t *testing.T) {
+	gateway := NewGateway(nil)
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		ToolName:   "task_output",
+		ToolCallID: "call-output",
+		Content:    map[string]interface{}{"status": "timed_out", "error_code": "TOOL_TIMEOUT"},
+		Metadata:   map[string]interface{}{"error_code": "TOOL_TIMEOUT"},
+	})
+	if err != nil || envelope == nil {
+		t.Fatalf("process task output: envelope=%#v err=%v", envelope, err)
+	}
+	if !envelope.OK || envelope.ErrorCode != "" || envelope.Metadata["ok"] != true {
+		t.Fatalf("query success must stay separate from job failure: %#v", envelope)
+	}
+	if envelope.Metadata["error_code"] != "TOOL_TIMEOUT" {
+		t.Fatalf("expected underlying job code to remain available, got %#v", envelope.Metadata)
 	}
 }

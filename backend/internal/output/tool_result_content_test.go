@@ -110,6 +110,48 @@ func TestRenderToolResultContentForModel_TaskOutputPreservesRawStructuredOutput(
 	}
 }
 
+func TestRenderToolResultContentForModel_WaitAgentPreservesCompleteFinalOutput(t *testing.T) {
+	finalOutput := strings.Repeat("analysis detail ", 80) + "FINAL_REPORT_END"
+	content := map[string]interface{}{
+		"agent": map[string]interface{}{
+			"session_id": "child-1",
+			"status":     "idle",
+			"output":     finalOutput,
+		},
+		"ready_count": 1,
+	}
+	envelope := &Envelope{
+		ToolName: "wait_agent",
+		Summary:  "Waited on child agents. Output: " + finalOutput[:200] + "...",
+		Metadata: map[string]interface{}{toolresult.MetadataKey: toolresult.KindStructured},
+	}
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+	if !strings.Contains(got, "FINAL_REPORT_END") {
+		t.Fatalf("expected complete child final output, got %q", got)
+	}
+	if got == envelope.Summary {
+		t.Fatal("wait_agent must not replace the final output with its cache-safe preview")
+	}
+}
+
+func TestRenderToolResultContentForModel_BackgroundTaskPreservesJobContract(t *testing.T) {
+	content := map[string]interface{}{
+		"job_id": "job_ref_42",
+		"status": "pending",
+	}
+	envelope := &Envelope{
+		ToolName: "background_task",
+		Summary:  "Background task queued.",
+		Metadata: map[string]interface{}{toolresult.MetadataKey: toolresult.KindStructured},
+	}
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+	if !strings.Contains(got, `"job_id": "job_ref_42"`) || !strings.Contains(got, `"status": "pending"`) {
+		t.Fatalf("expected reusable background task contract, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_PreservesFullTextWhenExplicitlyMarkedText(t *testing.T) {
 	envelope := &Envelope{
 		Summary: "line 1",
@@ -120,6 +162,24 @@ func TestRenderToolResultContentForModel_PreservesFullTextWhenExplicitlyMarkedTe
 	got := RenderToolResultContentForModel("line 1\nline 2\nline 3", "", envelope)
 	if got != "line 1\nline 2\nline 3" {
 		t.Fatalf("expected full text output, got %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_SynthesizesEmptyMutationSuccess(t *testing.T) {
+	envelope := &Envelope{
+		ToolName: "apply_patch",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+			"tool_metadata": map[string]interface{}{
+				"mutated_paths": []string{"changed.go"},
+			},
+		},
+	}
+
+	got := RenderToolResultContentForModel("", "", envelope)
+	want := "Tool completed successfully; changed 1 file: changed.go."
+	if got != want {
+		t.Fatalf("expected mutation success fallback %q, got %q", want, got)
 	}
 }
 
@@ -158,7 +218,7 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	}
 }
 
-func TestRenderToolResultContentForModel_DoesNotTruncateEditingToolOutput(t *testing.T) {
+func TestRenderToolResultContentForModel_TruncatesLargeEditingToolOutput(t *testing.T) {
 	envelope := &Envelope{
 		ToolName: "edit",
 		Metadata: map[string]interface{}{
@@ -176,11 +236,14 @@ func TestRenderToolResultContentForModel_DoesNotTruncateEditingToolOutput(t *tes
 
 	got := RenderToolResultContentForModel(content, "", envelope)
 
-	if got != content {
-		t.Fatal("expected editing tool output to bypass model-history truncation")
+	if got == content {
+		t.Fatal("expected large editing output to be truncated for model history")
 	}
 	if !strings.Contains(got, "@@ hunk-699 @@") || !strings.Contains(got, "+new-699") {
 		t.Fatalf("expected tail diff lines to be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("expected editing output truncation marker, got %q", got)
 	}
 }
 
@@ -219,6 +282,34 @@ func TestRenderToolResultContentForModel_TruncatesLargeErrorOutputForHistory(t *
 	}
 	if !strings.Contains(got, "output truncated for history safety") {
 		t.Fatalf("expected truncation marker, got %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_ExposesActionableFailureContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "task_output",
+		ToolCallID: "call-missing-job",
+		Metadata: map[string]interface{}{
+			"error_code": "JOB_NOT_FOUND",
+		},
+	}
+
+	got := RenderToolResultContentForModel(nil, "background job not found: guessed-id", envelope)
+	for _, expected := range []string{
+		`"ok":false`,
+		`"tool_name":"task_output"`,
+		`"tool_call_id":"call-missing-job"`,
+		`"error_code":"JOB_NOT_FOUND"`,
+		`"retryable":false`,
+		`"next_action":"Use the exact job_id returned by background_task; do not guess or synthesize an id."`,
+		"Tool execution failed: background job not found: guessed-id",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in model-visible result, got %q", expected, got)
+		}
+	}
+	if strings.Contains(got, `"retryable":true`) {
+		t.Fatalf("job-not-found must not request a blind retry: %q", got)
 	}
 }
 
@@ -282,7 +373,7 @@ func TestRenderToolResultContentForModel_ToolkitMCPPreservesStructuredSummary(t 
 	}
 }
 
-func TestRenderToolResultContentForModel_ExternalMCPPreservesLargeTextOutput(t *testing.T) {
+func TestRenderToolResultContentForModel_ExternalMCPTruncatesLargeTextOutput(t *testing.T) {
 	envelope := &Envelope{
 		Metadata: map[string]interface{}{
 			toolresult.MetadataKey: toolresult.KindText,
@@ -293,11 +384,11 @@ func TestRenderToolResultContentForModel_ExternalMCPPreservesLargeTextOutput(t *
 
 	got := RenderToolResultContentForModel(content, "", envelope)
 
-	if got != strings.TrimSpace(content) {
-		t.Fatalf("expected external MCP text to remain full content, got %q", got)
+	if got == strings.TrimSpace(content) {
+		t.Fatalf("expected external MCP text to be bounded for history, got %q", got)
 	}
-	if strings.Contains(got, "output truncated for history safety") {
-		t.Fatalf("did not expect external MCP content to be truncated, got %q", got)
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("expected external MCP content truncation marker, got %q", got)
 	}
 }
 

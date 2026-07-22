@@ -1,6 +1,7 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -40,11 +41,33 @@ func RenderFullToolResultContent(content interface{}, toolErr string) string {
 // history. Structured outputs keep the reduced envelope summary so specialized
 // reducers can preserve stable facts without dumping large JSON.
 func RenderToolResultContentForModel(content interface{}, toolErr string, envelope *Envelope) string {
+	body := renderToolResultBodyForModel(content, toolErr, envelope)
+	effectiveErr := strings.TrimSpace(toolErr)
+	if effectiveErr == "" && envelope != nil {
+		effectiveErr = strings.TrimSpace(envelope.Error)
+	}
+	diagnostic := toolresult.Diagnose(envelopeToolName(envelope), envelopeToolCallID(envelope), effectiveErr, envelopeMetadata(envelope))
+	if envelope != nil {
+		if strings.TrimSpace(envelope.ErrorCode) != "" {
+			diagnostic.ErrorCode = strings.TrimSpace(envelope.ErrorCode)
+			diagnostic.Retryable = envelope.Retryable
+		}
+		if strings.TrimSpace(envelope.NextAction) != "" {
+			diagnostic.NextAction = strings.TrimSpace(envelope.NextAction)
+		}
+	}
+	return renderToolResultContract(body, diagnostic)
+}
+
+func renderToolResultBodyForModel(content interface{}, toolErr string, envelope *Envelope) string {
 	if isEditingToolResult(envelope) {
-		return RenderFullToolResultContent(content, toolErr)
+		return renderToolTextForModelHistory(content, toolErr, envelope)
 	}
 	if isExternalMCPToolResult(envelope) {
-		return RenderFullToolResultContent(content, toolErr)
+		return renderToolTextForModelHistory(content, toolErr, envelope)
+	}
+	if isCollaborationResult(envelope) || isBackgroundTaskResult(envelope) {
+		return renderToolTextForModelHistory(content, toolErr, envelope)
 	}
 	if modelSummaryPreferred(envelope) {
 		return appendToolArtifactNotice(envelope.Render(), modelArtifactNotice(envelope))
@@ -76,6 +99,62 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 	return RenderFullToolResultContent(content, toolErr)
 }
 
+func envelopeToolName(envelope *Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	return envelope.ToolName
+}
+
+func envelopeToolCallID(envelope *Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	return envelope.ToolCallID
+}
+
+func renderToolResultContract(body string, diagnostic toolresult.Diagnostic) string {
+	if diagnostic.OK {
+		return body
+	}
+	type modelContract struct {
+		OK         bool   `json:"ok"`
+		ToolName   string `json:"tool_name,omitempty"`
+		ToolCallID string `json:"tool_call_id,omitempty"`
+		ErrorCode  string `json:"error_code,omitempty"`
+		Retryable  *bool  `json:"retryable,omitempty"`
+		NextAction string `json:"next_action,omitempty"`
+	}
+	contractValue := modelContract{
+		OK:         diagnostic.OK,
+		ToolName:   diagnostic.ToolName,
+		ToolCallID: diagnostic.ToolCallID,
+		ErrorCode:  diagnostic.ErrorCode,
+		NextAction: diagnostic.NextAction,
+	}
+	if !diagnostic.OK {
+		contractValue.Retryable = &diagnostic.Retryable
+	}
+	contract, err := json.Marshal(contractValue)
+	if err != nil {
+		return body
+	}
+	header := "Runtime tool result contract: " + string(contract)
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return header
+	}
+	separator := "\n\n"
+	remaining := modelToolTextByteBudget - len(header) - len(separator)
+	if remaining <= 0 {
+		return safePrefixByBytes(header, modelToolTextByteBudget)
+	}
+	if len(body) > remaining {
+		body = formatTruncatedToolTextForModel(body, remaining)
+	}
+	return header + separator + body
+}
+
 func modelSummaryPreferred(envelope *Envelope) bool {
 	if envelope == nil || strings.TrimSpace(envelope.Summary) == "" {
 		return false
@@ -89,6 +168,31 @@ func isTaskOutputToolResult(envelope *Envelope) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(envelope.ToolName), "task_output")
+}
+
+func isCollaborationResult(envelope *Envelope) bool {
+	if envelope == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
+	case "wait_agent", "read_agent_events", "list_agents", "spawn_agent", "send_message", "followup_task",
+		"send_input", "resolve_agent_approval", "close_agent", "resume_agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBackgroundTaskResult(envelope *Envelope) bool {
+	if envelope == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
+	case "background_task":
+		return true
+	default:
+		return false
+	}
 }
 
 func isEditingToolResult(envelope *Envelope) bool {
@@ -164,6 +268,11 @@ func isTextLikeToolResult(content interface{}) bool {
 
 func renderToolTextForModelHistory(content interface{}, toolErr string, envelope *Envelope) string {
 	full := RenderFullToolResultContent(content, toolErr)
+	if strings.TrimSpace(toolErr) == "" && strings.TrimSpace(stringify(content)) == "" {
+		if summary := toolresult.MutationSummary(envelopeMetadata(envelope)); summary != "" {
+			full = summary
+		}
+	}
 	notice := modelArtifactNotice(envelope)
 	if strings.TrimSpace(full) == "" {
 		return appendToolArtifactNotice(full, notice)
@@ -182,15 +291,28 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
 }
 
+func envelopeMetadata(envelope *Envelope) map[string]interface{} {
+	if envelope == nil {
+		return nil
+	}
+	return envelope.Metadata
+}
+
 func modelArtifactNotice(envelope *Envelope) string {
 	if envelope == nil {
 		return ""
 	}
-	path := strings.TrimSpace(metadataString(envelope.Metadata, "raw_output_artifact_path"))
-	if path == "" {
-		return ""
+	if artifactID := strings.TrimSpace(metadataString(envelope.Metadata, "artifact_id")); artifactID != "" {
+		return "Full raw output artifact_id: " + artifactID
 	}
-	return modelArtifactNoticePrefix + path
+	if len(envelope.ArtifactIDs) > 0 && strings.TrimSpace(envelope.ArtifactIDs[0]) != "" {
+		return "Full raw output artifact_id: " + strings.TrimSpace(envelope.ArtifactIDs[0])
+	}
+	path := strings.TrimSpace(metadataString(envelope.Metadata, "raw_output_artifact_path"))
+	if path != "" {
+		return modelArtifactNoticePrefix + path
+	}
+	return ""
 }
 
 func appendToolArtifactNotice(body string, notice string) string {

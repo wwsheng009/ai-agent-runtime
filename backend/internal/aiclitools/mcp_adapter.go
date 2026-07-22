@@ -48,11 +48,18 @@ func (m *CapabilityMCPManager) FindTool(toolName string) (runtimeskill.ToolInfo,
 }
 
 func (m *CapabilityMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	output, _, err := m.CallToolWithMeta(ctx, mcpName, toolName, args)
+	return output, err
+}
+
+// CallToolWithMeta preserves execution metadata from both local capabilities
+// and the wrapped runtime tool surface.
+func (m *CapabilityMCPManager) CallToolWithMeta(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
 	toolName = strings.TrimSpace(toolName)
 	if m != nil && m.Registry != nil && m.enabled() {
 		if cap, ok := m.Registry.Get(toolName); ok && cap.SupportsPath(m.exposurePath()) {
 			if cap.Execute == nil {
-				return nil, fmt.Errorf("capability %q is not executable", toolName)
+				return nil, nil, fmt.Errorf("capability %q is not executable", toolName)
 			}
 			callCtx, ok := ctx.(context.Context)
 			if !ok || callCtx == nil {
@@ -64,15 +71,38 @@ func (m *CapabilityMCPManager) CallTool(ctx interface{}, mcpName, toolName strin
 			}
 			result, err := cap.Execute(callCtx, session, args)
 			if err != nil {
-				return nil, err
+				return result.Output, cloneMap(result.Metadata), err
 			}
-			return result.Output, nil
+			return result.Output, cloneMap(result.Metadata), nil
 		}
 	}
 	if m != nil && m.Next != nil {
-		return m.Next.CallTool(ctx, mcpName, toolName, args)
+		if next, ok := m.Next.(interface {
+			CallToolWithMeta(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error)
+		}); ok {
+			return next.CallToolWithMeta(ctx, mcpName, toolName, args)
+		}
+		output, err := m.Next.CallTool(ctx, mcpName, toolName, args)
+		return output, nil, err
 	}
-	return nil, fmt.Errorf("tool '%s' not found", toolName)
+	return nil, nil, fmt.Errorf("tool '%s' not found", toolName)
+}
+
+// ResolveToolSource delegates source classification to the wrapped surface.
+func (m *CapabilityMCPManager) ResolveToolSource(toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" || m == nil {
+		return ""
+	}
+	if m.Registry != nil && m.enabled() {
+		if cap, ok := m.Registry.Get(toolName); ok && cap.SupportsPath(m.exposurePath()) {
+			return "mcp"
+		}
+	}
+	if next, ok := m.Next.(interface{ ResolveToolSource(string) string }); ok {
+		return next.ResolveToolSource(toolName)
+	}
+	return ""
 }
 
 func (m *CapabilityMCPManager) toolInfo(cap Capability) runtimeskill.ToolInfo {

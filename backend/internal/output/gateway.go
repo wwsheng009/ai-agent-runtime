@@ -2,6 +2,7 @@ package output
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,10 @@ type RawToolResult struct {
 type Envelope struct {
 	ToolName    string
 	ToolCallID  string
+	OK          bool
+	ErrorCode   string
+	Retryable   bool
+	NextAction  string
 	Summary     string
 	Error       string
 	ArtifactIDs []string
@@ -114,6 +119,8 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 		ByteCount: len([]byte(text)),
 	}
 	envelope.Metadata["raw_bytes"] = input.ByteCount
+	envelope.Metadata["byte_count"] = input.ByteCount
+	envelope.Metadata["sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 
 	var processErrs []string
 	if g.store != nil && strings.TrimSpace(text) != "" {
@@ -131,6 +138,7 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 		} else {
 			input.Artifact = artifactID
 			envelope.ArtifactIDs = append(envelope.ArtifactIDs, artifactID)
+			envelope.Metadata["artifact_id"] = artifactID
 		}
 	}
 
@@ -165,6 +173,13 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 		envelope.Summary = override
 		envelope.Metadata["summary_override"] = true
 	}
+
+	diagnostic := toolresult.Diagnose(result.ToolName, result.ToolCallID, result.Error, envelope.Metadata)
+	envelope.OK = diagnostic.OK
+	envelope.ErrorCode = diagnostic.ErrorCode
+	envelope.Retryable = diagnostic.Retryable
+	envelope.NextAction = diagnostic.NextAction
+	toolresult.ApplyDiagnosticMetadata(envelope.Metadata, diagnostic)
 
 	if len(processErrs) > 0 {
 		envelope.Metadata["gateway_errors"] = processErrs

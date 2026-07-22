@@ -51,7 +51,8 @@ type Evidence struct {
 type Error struct {
 	Code         string   `json:"code,omitempty" yaml:"code,omitempty"`
 	Message      string   `json:"message" yaml:"message"`
-	Retryable    bool     `json:"retryable,omitempty" yaml:"retryable,omitempty"`
+	Retryable    bool     `json:"retryable" yaml:"retryable"`
+	NextAction   string   `json:"next_action,omitempty" yaml:"next_action,omitempty"`
 	EvidenceRefs []string `json:"evidence_refs,omitempty" yaml:"evidence_refs,omitempty"`
 }
 

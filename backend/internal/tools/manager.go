@@ -328,13 +328,25 @@ func formatToolkitResult(result *toolkit.ToolResult) (string, map[string]interfa
 		return result.Content, metadata, result.Error
 	}
 	if result.Success {
+		mutationSummary := func() string {
+			if strings.TrimSpace(result.Content) != "" {
+				return ""
+			}
+			return toolresult.MutationSummary(metadata)
+		}
 		switch result.NormalizedOutputKind() {
 		case toolresult.KindText:
 			if result.Content != "" {
 				return result.Content, metadata, nil
 			}
+			if summary := mutationSummary(); summary != "" {
+				return summary, metadata, nil
+			}
 			return "", metadata, nil
 		case toolresult.KindEmpty:
+			if summary := mutationSummary(); summary != "" {
+				return summary, metadata, nil
+			}
 			return "", metadata, nil
 		case toolresult.KindStructured:
 			if strings.TrimSpace(result.Content) != "" {
@@ -352,6 +364,9 @@ func formatToolkitResult(result *toolkit.ToolResult) (string, map[string]interfa
 		}
 		if data, err := result.ToJSON(); err == nil && len(data) > 0 {
 			return string(data), metadata, nil
+		}
+		if summary := mutationSummary(); summary != "" {
+			return summary, metadata, nil
 		}
 		return "", metadata, nil
 	}

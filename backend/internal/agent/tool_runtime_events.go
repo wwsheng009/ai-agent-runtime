@@ -66,7 +66,7 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 		payload["summary"] = strings.Join(summaryLines, "\n")
 		payload["summary_lines"] = append([]string(nil), summaryLines...)
 	}
-	if output := editingToolRenderOutput(result.Call.Name, result.Output); output != "" {
+	if output := editingToolRenderOutput(result); output != "" {
 		payload["render_output"] = output
 		payload["render_output_format"] = "markdown"
 		payload["render_output_untruncated"] = true
@@ -85,13 +85,25 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	return payload
 }
 
-func editingToolRenderOutput(toolName string, output interface{}) string {
-	switch strings.TrimSpace(toolName) {
+func editingToolRenderOutput(result toolExecutionResult) string {
+	toolName := strings.TrimSpace(result.Call.Name)
+	output := strings.TrimSpace(extractToolTextOutput(result.Output))
+	switch toolName {
 	case "edit", "apply_patch":
+		if output != "" {
+			return output
+		}
+	case "write", "append_write", "multiedit":
+		if output != "" {
+			return ""
+		}
 	default:
 		return ""
 	}
-	return strings.TrimSpace(extractToolTextOutput(output))
+	if strings.TrimSpace(result.Error) != "" {
+		return ""
+	}
+	return toolresult.MutationSummary(toolMetadataFromEnvelope(result.Envelope))
 }
 
 func copyToolExecutionDirectory(payload map[string]interface{}, args map[string]interface{}) {
@@ -317,8 +329,11 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 		copyToolReliabilityMetadata(payload, nested)
 	}
 	for _, key := range []string{
+		"ok",
 		"error_code",
 		"error_message",
+		"retryable",
+		"next_action",
 		"timeout_requested_ms",
 		"timeout_effective_ms",
 		"timeout_source",
@@ -340,6 +355,9 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 func summarizeToolMetadata(metadata map[string]interface{}) string {
 	if len(metadata) == 0 {
 		return ""
+	}
+	if summary := toolresult.MutationSummary(metadata); summary != "" {
+		return summary
 	}
 
 	if fileCount, fileOK := intToolMetadataValue(metadata["file_count"]); fileOK {

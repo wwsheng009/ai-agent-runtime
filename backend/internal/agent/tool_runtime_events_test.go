@@ -178,6 +178,32 @@ func TestToolCompletedEventPayloadFallsBackToEnvelopeSummary(t *testing.T) {
 	}
 }
 
+func TestToolCompletedEventPayloadSynthesizesEmptyMutationSummary(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-empty-patch",
+			Name: "apply_patch",
+		},
+		Envelope: &output.Envelope{
+			ToolName: "apply_patch",
+			Metadata: map[string]interface{}{
+				"tool_metadata": map[string]interface{}{
+					"mutated_paths": []string{"changed.go"},
+				},
+			},
+		},
+	}, 1, "trace-empty-patch", nil)
+
+	want := "Tool completed successfully; changed 1 file: changed.go."
+	summaryLines, ok := payload["summary_lines"].([]string)
+	if !ok || len(summaryLines) != 1 || summaryLines[0] != want {
+		t.Fatalf("expected mutation summary line %q, got %#v", want, payload["summary_lines"])
+	}
+	if got := payload["render_output"]; got != want {
+		t.Fatalf("expected mutation render fallback %q, got %#v", want, got)
+	}
+}
+
 func TestToolCompletedEventPayloadPrefersErrorOverGenericFallbackSummary(t *testing.T) {
 	payload := toolCompletedEventPayload(toolExecutionResult{
 		Call: types.ToolCall{
@@ -333,5 +359,26 @@ func TestToolCompletedEventPayloadIncludesStructuredTimeoutMetadata(t *testing.T
 	}
 	if got := payload["timeout_source"]; got != "chat_turn_deadline" {
 		t.Fatalf("expected timeout source, got %#v", got)
+	}
+}
+
+func TestToolCompletedEventPayloadIncludesActionableDiagnostic(t *testing.T) {
+	result := toolExecutionResult{
+		Call:  types.ToolCall{ID: "call-missing", Name: "task_output"},
+		Error: "background job not found",
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"ok":          false,
+			"error_code":  "JOB_NOT_FOUND",
+			"retryable":   false,
+			"next_action": "Use the exact job_id returned by background_task.",
+		}},
+	}
+
+	payload := toolCompletedEventPayload(result, 1, "trace-diagnostic", nil)
+	if payload["ok"] != false || payload["error_code"] != "JOB_NOT_FOUND" || payload["retryable"] != false {
+		t.Fatalf("expected structured failure diagnostic, got %#v", payload)
+	}
+	if payload["next_action"] != "Use the exact job_id returned by background_task." {
+		t.Fatalf("expected next action, got %#v", payload)
 	}
 }

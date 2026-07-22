@@ -8,6 +8,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -180,6 +181,13 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 			})
 
 			toolResult := req.ToolExecutor.ExecuteTool(ctx, call)
+			if toolResult.Metadata == nil {
+				toolResult.Metadata = map[string]interface{}{}
+			}
+			toolresult.ApplyDiagnosticMetadata(
+				toolResult.Metadata,
+				toolresult.Diagnose(call.Name, call.ID, toolResult.Error, toolResult.Metadata),
+			)
 			execution := ToolExecutionSummary{
 				ToolCallID: call.ID,
 				ToolName:   call.Name,
@@ -195,7 +203,7 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 				errorCount++
 			}
 
-			toolMessage := types.NewToolMessage(call.ID, renderToolMessage(toolResult))
+			toolMessage := types.NewToolMessage(call.ID, renderToolMessage(call, toolResult))
 			if len(toolResult.Metadata) > 0 {
 				toolMessage.Metadata = types.NewMetadata()
 				for key, value := range toolResult.Metadata {
@@ -418,11 +426,13 @@ func toolDefinitionMetadata(defs []types.ToolDefinition, toolName string) map[st
 	return nil
 }
 
-func renderToolMessage(result ToolResult) string {
+func renderToolMessage(call types.ToolCall, result ToolResult) string {
 	var envelope *output.Envelope
-	if len(result.Metadata) > 0 {
+	if len(result.Metadata) > 0 || call.Name != "" || call.ID != "" {
 		envelope = &output.Envelope{
-			Metadata: cloneInterfaceMap(result.Metadata),
+			ToolName:   call.Name,
+			ToolCallID: call.ID,
+			Metadata:   cloneInterfaceMap(result.Metadata),
 		}
 	}
 	return output.RenderToolResultContentForModel(result.Content, result.Error, envelope)
