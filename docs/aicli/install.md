@@ -174,6 +174,10 @@ aicli:
       enabled: true
       animations: true
       items: [activity, state, project]
+  # 双轴主题：mode=明暗，name=配色（也可用环境变量 AICLI_THEME_MODE / AICLI_THEME）
+  theme:
+    mode: auto          # auto | dark | light
+    name: focus         # classic | focus | contrast | mono
   log:
     file_path: ${AICLI_LOG_FILE_PATH:-~/.aicli/logs/aicli.log}
 ```
@@ -303,7 +307,10 @@ aicli -c ./mycfg.yaml config
 
 # 全局选项
 aicli --logfile ./aicli.log config
-aicli --theme contrast config
+aicli --theme contrast config          # 切换配色
+aicli --theme dark config              # 仅切换明暗
+# 环境变量（优先级: --theme > AICLI_THEME/AICLI_THEME_MODE > 配置）
+# AICLI_THEME=contrast AICLI_THEME_MODE=light aicli config
 aicli --envelope --output json config
 ```
 
@@ -385,11 +392,12 @@ sessions:
 | `/session` | 显示当前会话信息 |
 | `/status` | 显示当前会话状态 |
 | `/debug [on|off|status|display|routing|export|zip]` | 控制会话 debug 模式；`routing` 显示 subagent difficulty routing 摘要，`display` 显示当前会话调试信息，`export/zip` 打包会话日志与 artifacts |
-| `/title <title>` | 更新当前会话标题 |
+| `/title <title>`、`/rename <title>` | 更新当前会话标题 |
 | `/history`、`/h` | 显示当前会话历史 |
 | `/stream [on|off|toggle|status]` | 查看或切换流式输出 |
 | `/s` | 开启流式输出，等价 `/stream on` |
 | `/normal`、`/n` | 关闭流式输出，等价 `/stream off` |
+| `/theme [mode\|palette\|list\|status\|preview\|select]` | 查看或切换终端主题（明暗 auto/dark/light + 配色 classic/focus/contrast/mono） |
 | `/model [name|status|clear-reasoning|--provider ...]` | 查看或切换 provider/model/reasoning_effort |
 | `/login [provider|--provider ...]` | 在 chat 内新增或更新 provider 登录凭证，并可刷新/切换当前模型 |
 | `/compact [auto|local|remote]` | 手动触发会话压缩 |
@@ -422,6 +430,7 @@ sessions:
 - `/model` 支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`；切换后会刷新 provider、adapter、BaseURL、HTTP client、function builder、logger 和 runtime session metadata。
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
+- `/theme` 支持双轴主题：明暗（`auto|dark|light`）与配色（`classic|focus|contrast|mono`）。会立即切换当前终端主题，并在可写配置存在时写回 `aicli.theme.name`（配色）与 `aicli.theme.mode`（明暗）。无参数时交互选择；`list`/`status`/`preview` 只读（`list`/`preview` 带角色色样例）；可写 `/theme dark`、`/theme focus`、`/theme light contrast` 等。配色别名：`default`/`balanced`→focus，`high-contrast`→contrast，`minimal`→mono。启动优先级：`--theme` > `AICLI_THEME`/`AICLI_THEME_MODE` > 配置文件。
 - `/resume` 会打开按最后更新时间倒序排列的全屏历史会话选择器，不再把候选项挤在聊天输入框上方的小弹层中。使用方向键或 `j`/`k` 移动，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾，`/` 搜索，回车恢复，`Esc` 或 `q` 取消。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中；不支持 ANSI/TTY 的环境自动回退到编号输入列表。
 - `/resume latest` 直接恢复最近的其他可恢复会话。全屏选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数、清理后的标题和选中会话摘要；session id、protocol、provider 和 model 只进入搜索索引，不占用候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。
 - chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。

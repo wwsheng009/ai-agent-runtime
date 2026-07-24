@@ -55,7 +55,7 @@
 
 `backend/cmd/aicli/commands/command.go` 的 `handleCommand` 是当前 chat slash 命令的事实路由。已识别的命令包括：
 
-- 会话控制：`/exit`、`/quit`、`/q`、`/clear`、`/cls`、`/new`、`/session`、`/sessions`、`/load`、`/resume`、`/title`、`/history`、`/h`
+- 会话控制：`/exit`、`/quit`、`/q`、`/clear`、`/cls`、`/new`、`/session`、`/sessions`、`/load`、`/resume`、`/title`、`/rename`、`/history`、`/h`
 - 输出与模型：`/stream`、`/s`、`/normal`、`/n`、`/model`
 - 上下文、附件与图片：`/compact`、`/attach`、`/image`、`/queue`
 - 权限与审批：`/permission-mode`、`/mode`、`/approval-reuse`、`/yolo`
@@ -184,7 +184,7 @@ catalog 初始建议：
 | `/sessions` | | 列出或筛选可恢复会话 |
 | `/load` | | 加载指定会话 |
 | `/resume` | | 恢复最近会话或弹出恢复菜单 |
-| `/title` | | 更新当前会话标题 |
+| `/title` | `/rename` | 更新当前会话标题 |
 | `/model` | | 查看或切换 provider/model/thinking_effort |
 | `/compact` | | 手动触发会话压缩 |
 | `/attach` | | 查看、添加或清空待发送图片附件 |
@@ -204,7 +204,7 @@ catalog 初始建议：
 **catalog ↔ handleCommand 双向同步**：`@backend/cmd/aicli/commands/command.go` 里命令分三类分发：
 
 - 精确 `switch cmd` 分支：`/exit`、`/quit`、`/q`、`/clear`、`/cls`、`/new`、`/s`、`/normal`、`/n`、`/history`、`/h`、`/functions`、`/catalog`、`/session`、`/compact`、`/sessions`、`/yolo`、`/attach`、`/image`、`/help`、`/?`。
-- `HasPrefix` + 空格分支（必须带参数）：`/shell `、`/cmd `、`/function `、`/describe `、`/functions `、`/catalog `、`/call `、`/tool `、`/skill `、`/sessions `、`/load `、`/title `。
+- `HasPrefix` + 空格分支（必须带参数）：`/shell `、`/cmd `、`/function `、`/describe `、`/functions `、`/catalog `、`/call `、`/tool `、`/skill `、`/sessions `、`/load `、`/title `、`/rename `。
 - `HasPrefix` 无空格分支（可带可不带参数）：`/attach`、`/image`、`/queue`、`/compact`、`/approval-reuse`、`/model`、`/stream`、`/resume`、`/permission-mode`、`/mode`。
 
 catalog 必须同时覆盖这三类，`RequiresArgs` 用来区分第二类；测试要求见「测试计划 → catalog 与路由同步测试」。
