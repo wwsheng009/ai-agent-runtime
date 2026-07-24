@@ -152,6 +152,160 @@ func TestApplyPatchTool_NormalizesCommonModelEnvelopeVariants(t *testing.T) {
 	}
 }
 
+func TestApplyPatchTool_AcceptsCollapsedSingleLineEnvelope(t *testing.T) {
+	root := t.TempDir()
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// Models sometimes emit Begin + Add File on one line without newlines.
+	patch := "*** Begin Patch *** *** Add File: package.go\npackage agentconfig\n\nfunc Hello() string { return \"ok\" }\n*** End Patch"
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected collapsed envelope success, got error: %v", result.Error)
+	}
+	assertFileContent(t, filepath.Join(root, "package.go"), "package agentconfig\n\nfunc Hello() string { return \"ok\" }\n")
+}
+
+func TestApplyPatchTool_IgnoresUnifiedDiffLineNumberContext(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "chat_bootstrap.go")
+	requireWriteFile(t, path, strings.Join([]string{
+		"package commands",
+		"",
+		"func bootstrap() {",
+		"\tsetup()",
+		"}",
+		"",
+	}, "\n"))
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// Unified-diff style header must not be treated as a literal context line.
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: chat_bootstrap.go",
+		"@@ -185,6 +185,12 @@",
+		" func bootstrap() {",
+		"-\tsetup()",
+		"+\tsetup()",
+		"+\tinitFastMode()",
+		" }",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected unified-diff header to be ignored as context, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, strings.Join([]string{
+		"package commands",
+		"",
+		"func bootstrap() {",
+		"\tsetup()",
+		"\tinitFastMode()",
+		"}",
+		"",
+	}, "\n"))
+}
+
+func TestHunkChangeContextLine_StripsUnifiedRanges(t *testing.T) {
+	cases := []struct {
+		header string
+		want   string
+	}{
+		{"@@", ""},
+		{"@@ func Foo()", "func Foo()"},
+		{"@@ -185,6 +185,12 @@", ""},
+		{"@@ -10 +12 @@", ""},
+		{"@@ -185,6 +185,12 @@ func bootstrap()", "func bootstrap()"},
+		{"@@ -1,3 +1,4 @@ type X struct {", "type X struct {"},
+	}
+	for _, tc := range cases {
+		if got := hunkChangeContextLine(tc.header); got != tc.want {
+			t.Fatalf("hunkChangeContextLine(%q)=%q, want %q", tc.header, got, tc.want)
+		}
+	}
+}
+
+func TestApplyPatchTool_AcceptsBareAddFileContentWithoutPlusPrefix(t *testing.T) {
+	root := t.TempDir()
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: package.go",
+		"package agentconfig",
+		"",
+		"func Hello() {}",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected bare add-file content to succeed, got error: %v", result.Error)
+	}
+	assertFileContent(t, filepath.Join(root, "package.go"), "package agentconfig\n\nfunc Hello() {}\n")
+}
+
+func TestApplyPatchTool_IgnoresTrailingContentAfterEndMarker(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tail.txt")
+	requireWriteFile(t, path, "old\n")
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: tail.txt",
+		"@@",
+		"-old",
+		"+new",
+		"*** End Patch",
+		"Here is extra model commentary that used to fail parsing.",
+		"More trailing text.",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected trailing content after end marker to be ignored, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "new\n")
+}
+
+func TestApplyPatchTool_AllowsMissingEndMarkerWhenOperationsExist(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "no-end.txt")
+	requireWriteFile(t, path, "old\n")
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: no-end.txt",
+		"@@",
+		"-old",
+		"+new",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected missing end marker with complete operations to succeed, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "new\n")
+}
+
 func TestApplyPatchTool_AcceptsFirstUpdateChunkWithoutContextMarker(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "no-context.txt")
@@ -608,6 +762,50 @@ func TestApplyPatchTool_MissingContextIncludesClosestCurrentLines(t *testing.T) 
 	if !strings.Contains(message, "3: func (m *Manager) RegisterGroup(name string, active bool) error {") {
 		t.Fatalf("expected stable current line numbers, got %q", message)
 	}
+}
+
+func TestApplyPatchTool_FallsBackWhenContextMarkerMissing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config_tui.go")
+	requireWriteFile(t, path, strings.Join([]string{
+		"package commands",
+		"",
+		"func renderStatus() {",
+		"\tfmt.Println(\"idle\")",
+		"}",
+		"",
+	}, "\n"))
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// Stale/wrong @@ context (as models often invent) must not hard-fail when
+	// the old content still uniquely exists in the file.
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: config_tui.go",
+		"@@ -539,13 +539,15 @@ func missingSymbolDoesNotExist() {",
+		" func renderStatus() {",
+		"-\tfmt.Println(\"idle\")",
+		"+\tfmt.Println(\"ready\")",
+		" }",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected stale @@ context to fall back to old-content match, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, strings.Join([]string{
+		"package commands",
+		"",
+		"func renderStatus() {",
+		"\tfmt.Println(\"ready\")",
+		"}",
+		"",
+	}, "\n"))
 }
 
 func requireWriteFile(t *testing.T, path, content string) {

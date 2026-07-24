@@ -67,3 +67,22 @@ func TestBuildPathKindMismatchHintForPath_UsesSiblingCandidates(t *testing.T) {
 		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
 	}
 }
+
+func TestBuildPathNotFoundHintForPath_DropsUnrelatedAbsoluteCandidates(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "project")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	// Create an unrelated sibling that would previously show up as a noisy candidate.
+	unrelated := filepath.Join(root, "completely-unrelated-docs")
+	if err := os.MkdirAll(unrelated, 0o755); err != nil {
+		t.Fatalf("mkdir unrelated: %v", err)
+	}
+
+	missing := filepath.Join(root, "topics", "bin")
+	hint := BuildPathNotFoundHintForPath(missing, workdir)
+	if strings.Contains(hint, "completely-unrelated-docs") {
+		t.Fatalf("expected unrelated absolute candidates to be filtered, got %q", hint)
+	}
+}

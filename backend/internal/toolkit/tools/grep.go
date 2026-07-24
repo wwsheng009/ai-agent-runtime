@@ -1704,9 +1704,44 @@ func compileGrepPattern(patterns []string, literal, ignoreCase, word, lineRegexp
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
-		return nil, fmt.Errorf("正则表达式无效: %w", err)
+		msg := fmt.Sprintf("正则表达式无效: %v。若要搜索字面文本请设置 literal=true（或 fixed_strings=true）；复杂正则可改用 rg_args 并启用 pcre2=true（需本机 rg）", err)
+		if looksLikePCREOnlyPattern(expr) || looksLikePCREOnlyPatterns(patterns) {
+			msg += "。检测到 lookaround/后行断言等 PCRE 语法（如 (?! / (?= / (?<= / (?<!），Go 内置 regexp 不支持；请设置 pcre2=true（需本机 rg），或改写为不含 lookaround 的模式 / 改用 literal=true"
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 	return re, nil
+}
+
+// looksLikePCREOnlyPattern reports patterns that commonly fail on Go's RE2
+// engine (lookaround / backreferences) and need rg --pcre2 instead.
+func looksLikePCREOnlyPattern(pattern string) bool {
+	if strings.TrimSpace(pattern) == "" {
+		return false
+	}
+	// Negative/positive lookaround and lookbehind; also \1-style backrefs.
+	if strings.Contains(pattern, "(?!") ||
+		strings.Contains(pattern, "(?=") ||
+		strings.Contains(pattern, "(?<!") ||
+		strings.Contains(pattern, "(?<=") {
+		return true
+	}
+	// Backreferences like \1 .. \9 (RE2 does not support them).
+	for i := 1; i <= 9; i++ {
+		if strings.Contains(pattern, fmt.Sprintf("\\%d", i)) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikePCREOnlyPatterns(patterns []string) bool {
+	for _, p := range patterns {
+		if looksLikePCREOnlyPattern(p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *GrepTool) loadPatternFiles(opts *grepOptions) error {

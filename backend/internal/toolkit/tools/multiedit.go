@@ -220,30 +220,36 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 
 	// 按顺序应用每个编辑操作
 	for i, edit := range edits {
-		// 检查是否存在匹配
-		if !strings.Contains(result, edit.OldString) {
-			failedEdits = append(failedEdits, fmt.Sprintf("编辑 %d: 未找到匹配文本", i))
+		matchedOld, matchedNew, ok := matchEditStrings(result, edit.OldString, edit.NewString)
+		if !ok {
+			failedEdits = append(failedEdits, fmt.Sprintf("编辑 %d: %s", i, buildEditOldStringNotFoundError(result, edit.OldString).Error()))
 			continue
 		}
 
 		if edit.ReplaceAll {
-			// 替换所有匹配
-			count := strings.Count(result, edit.OldString)
-			result = strings.ReplaceAll(result, edit.OldString, edit.NewString)
+			count := strings.Count(result, matchedOld)
+			result = strings.ReplaceAll(result, matchedOld, matchedNew)
 			appliedEdits += count
 		} else {
-			// 只替换第一个匹配
-			result = strings.Replace(result, edit.OldString, edit.NewString, 1)
+			result = strings.Replace(result, matchedOld, matchedNew, 1)
 			appliedEdits++
 		}
 	}
 
 	// 检查是否有变化
 	if result == originalContent {
+		detail := "没有任何编辑被应用"
+		if len(failedEdits) > 0 {
+			// Keep diagnostics actionable; first failure usually has closest snippet.
+			detail = fmt.Sprintf("没有任何编辑被应用。%s", failedEdits[0])
+			if len(failedEdits) > 1 {
+				detail += fmt.Sprintf("（另有 %d 处失败）", len(failedEdits)-1)
+			}
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("没有任何编辑被应用"),
+			Error:      fmt.Errorf("%s", detail),
 		}, nil
 	}
 

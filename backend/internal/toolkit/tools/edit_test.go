@@ -125,14 +125,69 @@ func TestEditTool_NotFoundDetectsLineEndingDifference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Success {
-		t.Fatalf("expected failure, got success with content %q", result.Content)
+	if !result.Success {
+		t.Fatalf("expected CRLF/LF auto-heal success, got error: %v content=%q", result.Error, result.Content)
 	}
-	if result.Error == nil {
-		t.Fatal("expected line-ending diagnostic, got nil")
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read file: %v", readErr)
+	}
+	if got := string(data); got != "updated\r\n" {
+		t.Fatalf("expected CRLF-preserving replacement, got %q", got)
+	}
+}
+
+func TestEditTool_NotFoundIncludesClosestSnippet(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "snippet.txt")
+	if err := os.WriteFile(path, []byte("func HelloWorld() {\n\treturn 1\n}\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	tool := NewEditTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  "snippet.txt",
+		"old_string": "func HelloWord() {\n\treturn 2\n}",
+		"new_string": "func HelloWorld() {\n\treturn 2\n}",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success")
 	}
 	message := result.Error.Error()
-	if !strings.Contains(message, "CRLF/LF") {
-		t.Fatalf("expected line-ending diagnostic, got %q", message)
+	if !strings.Contains(message, "最接近片段") {
+		t.Fatalf("expected closest snippet guidance, got %q", message)
+	}
+}
+
+func TestEditTool_HealsCRLFOldStringAgainstLFFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "lf.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	tool := NewEditTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  "lf.txt",
+		"old_string": "alpha\r\nbeta\r\n",
+		"new_string": "updated\r\n",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected CRLF old_string vs LF file auto-heal, got error: %v content=%q", result.Error, result.Content)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read file: %v", readErr)
+	}
+	if got := string(data); got != "updated\n" {
+		t.Fatalf("expected LF-preserving replacement, got %q", got)
 	}
 }

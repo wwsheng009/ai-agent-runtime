@@ -12,8 +12,11 @@ import (
 	"sync"
 	"time"
 
+	stderrors "errors"
+
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -130,7 +133,7 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。Windows 默认使用 PowerShell；没有 head 时使用 Select-Object。",
+			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。代码搜索优先用 toolkit `grep`（rg 在 shell 中 exit 1=无匹配、且易因引号/正则转义失败）；Windows 默认 PowerShell，没有 head 时用 Select-Object。",
 			"1.2.0",
 			parameters,
 			true, // 支持直接调用
@@ -191,7 +194,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("command 参数缺失或类型错误"),
+			Error:      buildBashMissingCommandError(params),
 		}, nil
 	}
 
@@ -200,7 +203,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("command 参数为空"),
+			Error:      buildBashEmptyCommandError(params),
 		}, nil
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
@@ -248,7 +251,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			OutputKind: toolresult.KindText,
 			Content:    execResult.Output,
 			Metadata:   buildCommandExecutionMetadata(command, mutatedPaths, execResult),
-			Error:      err,
+			Error:      buildBashCommandFailureError(command, execResult.Output, err),
 		}, nil
 	}
 
@@ -473,7 +476,7 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 	if failed > 0 {
 		return &toolkit.ToolResult{
 			Success: false, OutputKind: toolresult.KindText, Content: batchOutput,
-			Metadata: metadata, Error: fmt.Errorf("bash command batch completed with %d failure(s)", failed),
+			Metadata: metadata, Error: buildBashBatchFailureError(failed, items),
 		}, nil
 	}
 	return &toolkit.ToolResult{Success: true, OutputKind: toolresult.KindText, Content: batchOutput, Metadata: metadata}, nil
@@ -890,10 +893,18 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 	if len(cmdParts) > 0 {
 		mainCmd = strings.ToLower(cmdParts[0])
 	}
+	// Prefer the first search tool token even when the command is wrapped
+	// (e.g. "rg ... | Select-Object -First 20" or shell prefixes).
+	searchCmd := firstSearchToolToken(cmdParts)
+	if searchCmd == "" {
+		searchCmd = mainCmd
+	}
 
 	exitCode := -1
 	if exitError, ok := err.(*exec.ExitError); ok {
 		exitCode = exitError.ExitCode()
+	} else {
+		exitCode = exitCodeFromError(err)
 	}
 
 	switch {
@@ -914,6 +925,10 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 		return "提示: Windows 下请使用 `ver` 或 `systeminfo` 查看系统信息"
 	case mainCmd == "cat" && runtimeexecutor.IsWindows() && !strings.Contains(cmdLower, "."):
 		return "提示: Windows 下请使用 `type` 查看文件内容"
+	case isRipgrepOrGrepTool(searchCmd) || strings.Contains(outputLower, "regex parse error"):
+		if hint := friendlyHintForSearchTool(searchCmd, command, output, exitCode); hint != "" {
+			return hint
+		}
 	case exitCode == 127:
 		return "提示: 命令未找到，请检查命令拼写或确认命令是否已安装"
 	case strings.Contains(outputLower, "permission") ||
@@ -922,7 +937,12 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 	case strings.Contains(outputLower, "no such file or directory") ||
 		strings.Contains(outputLower, "cannot find the path") ||
 		strings.Contains(outputLower, "cannot find the file specified") ||
-		strings.Contains(outputLower, "path not found"):
+		strings.Contains(outputLower, "path not found") ||
+		strings.Contains(outputLower, "系统找不到指定的文件") ||
+		strings.Contains(outputLower, "系统找不到指定的路径") ||
+		strings.Contains(outputLower, "cannot find path") ||
+		strings.Contains(outputLower, "itemnotfoundexception") ||
+		strings.Contains(outputLower, "does not exist"):
 		if hint := runtimeexecutor.BuildPathNotFoundHintFromTokens(cmdParts, workdir); hint != "" {
 			return hint
 		}
@@ -932,6 +952,111 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 		return "提示: 文件或目录不存在"
 	}
 	return ""
+}
+
+func firstSearchToolToken(cmdParts []string) string {
+	for _, part := range cmdParts {
+		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
+		base = strings.TrimSuffix(base, ".exe")
+		if isRipgrepOrGrepTool(base) {
+			return base
+		}
+	}
+	return ""
+}
+
+func isRipgrepOrGrepTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "rg", "ripgrep", "grep", "egrep", "fgrep":
+		return true
+	default:
+		return false
+	}
+}
+
+// friendlyHintForSearchTool explains common rg/grep failures that models treat
+// as hard errors (regex parse, exit 1 = no matches). Prefer the dedicated grep tool.
+func friendlyHintForSearchTool(toolName, command, output string, exitCode int) string {
+	outputLower := strings.ToLower(output)
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		toolName = "rg"
+	}
+
+	switch {
+	case strings.Contains(outputLower, "regex parse error") ||
+		strings.Contains(outputLower, "regex error") ||
+		strings.Contains(outputLower, "invalid regex") ||
+		strings.Contains(outputLower, "error parsing regex"):
+		return fmt.Sprintf(
+			"提示: %s 正则解析失败（常见于 JSON 参数里对引号/`|`/`()` 转义不完整）。优先改用 toolkit `grep`（可设 literal=true 做字面搜索，或 pcre2=true）；若必须 shell 调用，请用单引号包裹 pattern，或改用 `rg -F` 字面匹配。",
+			toolName,
+		)
+	case exitCode == 1:
+		// rg/grep exit 1 means "no matches" when there is no error text.
+		// Models often retry uselessly; point them at the dedicated grep tool.
+		if strings.TrimSpace(output) == "" ||
+			(!strings.Contains(outputLower, "error") &&
+				!strings.Contains(outputLower, "failed") &&
+				!strings.Contains(outputLower, "denied") &&
+				!strings.Contains(outputLower, "no such file")) {
+			return fmt.Sprintf(
+				"提示: %s 退出码 1 通常表示未匹配到结果（不是命令崩溃）。若要搜索代码，优先用 toolkit `grep`（支持 literal/paths/glob，错误信息更可行动）；确认无结果后换关键词或扩大 path。命令: %s",
+				toolName,
+				truncateDiagnosticText(strings.TrimSpace(command), 160),
+			)
+		}
+	case exitCode == 2:
+		return fmt.Sprintf(
+			"提示: %s 退出码 2 通常表示用法/路径/正则错误。优先改用 toolkit `grep`；检查 path 是否存在，pattern 是否需要 literal=true。",
+			toolName,
+		)
+	}
+	return ""
+}
+
+// exitCodeFromError extracts a process exit code from *exec.ExitError or from
+// common "exit status N" / Windows hex status strings. Used when errors are
+// wrapped or when only the message remains after shell layers.
+func exitCodeFromError(err error) int {
+	if err == nil {
+		return -1
+	}
+	var exitErr *exec.ExitError
+	if stderrors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	msg := strings.TrimSpace(err.Error())
+	// "exit status 1" / "exit status 0x80008083"
+	const prefix = "exit status "
+	if idx := strings.LastIndex(strings.ToLower(msg), prefix); idx >= 0 {
+		token := strings.TrimSpace(msg[idx+len(prefix):])
+		// stop at first non-code char
+		end := 0
+		for end < len(token) {
+			c := token[end]
+			if (c >= '0' && c <= '9') || c == 'x' || c == 'X' ||
+				(c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+				end++
+				continue
+			}
+			break
+		}
+		token = token[:end]
+		if token == "" {
+			return -1
+		}
+		if strings.HasPrefix(strings.ToLower(token), "0x") {
+			if v, parseErr := strconv.ParseInt(token[2:], 16, 64); parseErr == nil {
+				return int(v)
+			}
+			return -1
+		}
+		if v, parseErr := strconv.Atoi(token); parseErr == nil {
+			return v
+		}
+	}
+	return -1
 }
 
 // GetShellEnvironmentInfo returns environment info for error messages,
@@ -1098,6 +1223,102 @@ func resolveShellTimeoutFromEnv(timeoutMSEnv string, timeoutEnv string, fallback
 		}
 	}
 	return fallback
+}
+
+func buildBashMissingCommandError(params map[string]interface{}) error {
+	parts := []string{"command 参数缺失或类型错误"}
+	if parseErr := extractString(params["_parse_error"]); parseErr != "" {
+		parts = append(parts, fmt.Sprintf("参数解析失败: %s。请缩短 command 或拆成 commands 批次后重试", parseErr))
+	} else if raw := extractString(params["_raw"]); raw != "" {
+		parts = append(parts, "检测到原始工具参数，但缺少可解析的 command 字段；请使用 {\"command\":\"...\"} 或 commands 数组")
+	} else {
+		parts = append(parts, "请提供非空 command 字符串，或改用 commands:[{command:\"...\"}] 批量执行")
+	}
+	return fmt.Errorf("%s", strings.Join(parts, "。"))
+}
+
+func buildBashEmptyCommandError(params map[string]interface{}) error {
+	parts := []string{"command 参数为空"}
+	if parseErr := extractString(params["_parse_error"]); parseErr != "" {
+		parts = append(parts, fmt.Sprintf("参数解析失败: %s", parseErr))
+	}
+	parts = append(parts, "请提供非空 command，或改用 commands 批次")
+	return fmt.Errorf("%s", strings.Join(parts, "。"))
+}
+
+// buildBashCommandFailureError enriches bare shell exit errors with command and
+// output snippets so models can recover without re-reading only "exit status 1".
+func buildBashCommandFailureError(command, output string, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Preserve structured timeout/cancellation errors for runtimeerrors.Is checks.
+	if runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout) ||
+		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded) ||
+		stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, context.Canceled) {
+		return err
+	}
+	base := strings.TrimSpace(err.Error())
+	// friendlyHintFor already embeds 提示 / environment info; keep as-is.
+	if strings.Contains(base, "提示:") || strings.Contains(base, "当前环境信息:") {
+		return err
+	}
+	cmdPreview := truncateDiagnosticText(strings.TrimSpace(command), 120)
+	snippet := firstNonEmptyLines(output, 4, 240)
+	if snippet != "" {
+		return fmt.Errorf("%s。命令: %s。输出摘要: %s。完整输出见 Content；批量检查请用 commands 并查看失败摘要", base, cmdPreview, snippet)
+	}
+	return fmt.Errorf("%s。命令: %s。无 stdout/stderr 输出；请检查命令拼写、workdir、PATH，以及是否需要先 cd 到正确目录", base, cmdPreview)
+}
+
+func firstNonEmptyLines(text string, maxLines, maxChars int) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	picked := make([]string, 0, maxLines)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		picked = append(picked, line)
+		if len(picked) >= maxLines {
+			break
+		}
+	}
+	if len(picked) == 0 {
+		return truncateDiagnosticText(text, maxChars)
+	}
+	return truncateDiagnosticText(strings.Join(picked, " | "), maxChars)
+}
+
+func buildBashBatchFailureError(failed int, items []map[string]interface{}) error {
+	parts := []string{fmt.Sprintf("bash command batch completed with %d failure(s)", failed)}
+	summaries := make([]string, 0, 3)
+	for _, item := range items {
+		if success, _ := item["success"].(bool); success {
+			continue
+		}
+		index, _ := item["index"].(int)
+		command := truncateDiagnosticText(extractString(item["command"]), 80)
+		errText := truncateDiagnosticText(extractString(item["error"]), 120)
+		if errText == "" {
+			errText = "unknown error"
+		}
+		summaries = append(summaries, fmt.Sprintf("#%d %s => %s", index+1, command, errText))
+		if len(summaries) >= 3 {
+			break
+		}
+	}
+	if len(summaries) > 0 {
+		parts = append(parts, "失败摘要: "+strings.Join(summaries, "; "))
+	}
+	parts = append(parts, "请查看 Content 中对应 command 段落输出后修复失败命令，或用 stop_on_error=true 在首个失败后停止")
+	return fmt.Errorf("%s", strings.Join(parts, "。"))
 }
 
 // extractString extracts a string value from a map, returning "" if not found.

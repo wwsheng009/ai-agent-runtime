@@ -59,7 +59,11 @@ func buildPathNotFoundSuggestion(path, workdir string) string {
 	if len(detail.Candidates) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s -> %s", trimmed, strings.Join(detail.Candidates, ", "))
+	filtered := filterRelevantPathCandidates(trimmed, detail.Candidates, workdir)
+	if len(filtered) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s -> %s", trimmed, strings.Join(filtered, ", "))
 }
 
 func buildPathKindMismatchSuggestion(path, workdir string) string {
@@ -126,6 +130,86 @@ func formatPathRelatedHint(message string, suggestions []string, workdir string)
 		message,
 		strings.Join(suggestions, "； "),
 	)
+}
+
+func filterRelevantPathCandidates(target string, candidates []string, workdir string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	targetBase := strings.ToLower(filepath.Base(strings.TrimSpace(target)))
+	workdirAnchor := normalizeResolutionBaseDir(workdir)
+	filtered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		// Prefer candidates that share a base-name fragment or sit under workdir.
+		candidateBase := strings.ToLower(filepath.Base(candidate))
+		underWorkdir := workdirAnchor != "" && isPathWithinRoot(candidate, workdirAnchor)
+		baseRelated := targetBase != "" && candidateBase != "" &&
+			(strings.Contains(candidateBase, targetBase) ||
+				strings.Contains(targetBase, candidateBase) ||
+				pathBaseSimilarity(targetBase, candidateBase) >= 0.5)
+		if underWorkdir || baseRelated {
+			filtered = append(filtered, candidate)
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+	// Absolute paths outside workdir often get drive-root siblings that confuse models.
+	// Prefer no candidates over unrelated noise when workdir is known.
+	if workdirAnchor != "" && filepath.IsAbs(strings.TrimSpace(target)) {
+		return nil
+	}
+	return candidates
+}
+
+func isPathWithinRoot(path, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	if path == root {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(strings.ToLower(path), strings.ToLower(root+sep))
+}
+
+func pathBaseSimilarity(a, b string) float64 {
+	if a == "" || b == "" {
+		return 0
+	}
+	if a == b {
+		return 1
+	}
+	// Dice coefficient over bigrams is lightweight and good enough for short basenames.
+	if len(a) < 2 || len(b) < 2 {
+		if strings.Contains(a, b) || strings.Contains(b, a) {
+			return 0.6
+		}
+		return 0
+	}
+	bigrams := func(s string) map[string]int {
+		out := make(map[string]int, len(s))
+		for i := 0; i+1 < len(s); i++ {
+			out[s[i:i+2]]++
+		}
+		return out
+	}
+	aa := bigrams(a)
+	bb := bigrams(b)
+	overlap := 0
+	for k, av := range aa {
+		if bv, ok := bb[k]; ok {
+			if av < bv {
+				overlap += av
+			} else {
+				overlap += bv
+			}
+		}
+	}
+	return 2 * float64(overlap) / float64(len(a)-1+len(b)-1)
 }
 
 func resolveHintTargetPath(path, workdir string) string {

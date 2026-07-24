@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -14,6 +16,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const viewDirPreviewLimit = 40
 
 // ViewTool 文件查看工具
 type ViewTool struct {
@@ -153,12 +157,31 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 		}, nil
 	}
 
-	// 检查是否为目录
+	// 检查是否为目录：自动列出浅层内容，避免模型多一轮改用 ls。
 	if fileInfo.IsDir() {
+		listing, listErr := v.listDirectoryPreview(resolvedPath)
+		if listErr != nil {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("路径是目录，不是文件: %s；尝试列出内容失败: %w", p.FilePath, listErr),
+			}, nil
+		}
 		return &toolkit.ToolResult{
-			Success:    false,
+			Success:    true,
 			OutputKind: toolresult.KindText,
-			Error:      v.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
+			Content: fmt.Sprintf(
+				"路径是目录，不是文件: %s\n已自动列出目录内容（depth=1，最多 %d 项）。如需递归请改用 ls 并设置 depth。\n\n%s",
+				p.FilePath,
+				viewDirPreviewLimit,
+				listing,
+			),
+			Metadata: map[string]interface{}{
+				"file_path":   resolvedPath,
+				"is_directory": true,
+				"auto_listed": true,
+				"depth":       1,
+			},
 		}, nil
 	}
 
@@ -355,6 +378,43 @@ func (v *ViewTool) formatContent(lines []string, offset int) string {
 		}
 	}
 	return output.String()
+}
+
+// listDirectoryPreview returns a shallow directory listing for auto-heal when
+// view is pointed at a directory instead of a file.
+func (v *ViewTool) listDirectoryPreview(dirPath string) (string, error) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return "", err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			name += string(filepath.Separator)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	limit := viewDirPreviewLimit
+	if len(names) < limit {
+		limit = len(names)
+	}
+	for i := 0; i < limit; i++ {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "%d: %s", i+1, names[i])
+	}
+	if len(names) > viewDirPreviewLimit {
+		fmt.Fprintf(&b, "\n... 省略 %d 项（共 %d）", len(names)-viewDirPreviewLimit, len(names))
+	}
+	if len(names) == 0 {
+		return "(空目录)", nil
+	}
+	return b.String(), nil
 }
 
 // isBinaryFile 检查文件是否为二进制文件

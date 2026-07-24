@@ -186,7 +186,10 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	contentStr := string(content)
 
 	// 检查 old_string 是否存在
-	if !strings.Contains(contentStr, p.OldString) {
+	// Auto-heal common CRLF/LF mismatches so models do not need a retry
+	// round-trip for pure line-ending differences.
+	matchedOld, matchedNew, ok := matchEditStrings(contentStr, p.OldString, p.NewString)
+	if !ok {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -207,11 +210,11 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	if p.ReplaceAll {
 		// 替换所有匹配项
-		newContent = strings.ReplaceAll(contentStr, p.OldString, p.NewString)
-		count = strings.Count(contentStr, p.OldString)
+		newContent = strings.ReplaceAll(contentStr, matchedOld, matchedNew)
+		count = strings.Count(contentStr, matchedOld)
 	} else {
 		// 只替换第一处
-		newContent = strings.Replace(contentStr, p.OldString, p.NewString, 1)
+		newContent = strings.Replace(contentStr, matchedOld, matchedNew, 1)
 		count = 1
 	}
 
@@ -311,6 +314,10 @@ func buildEditOldStringNotFoundError(content string, oldString string) error {
 		}
 	}
 
+	if closest := findClosestEditSnippet(normalizedContent, normalizedOld); closest != "" {
+		parts = append(parts, fmt.Sprintf("最接近片段: %q", truncateDiagnosticText(closest, 200)))
+	}
+
 	parts = append(parts,
 		"请先用 view/grep 获取文件中的最新片段后重试；代码编辑、多行替换或上下文可能变化时优先使用 apply_patch，并在 @@ 中提供靠近目标的函数/类上下文。",
 		fmt.Sprintf("old_string 预览: %q", truncateDiagnosticText(oldString, 200)),
@@ -318,8 +325,103 @@ func buildEditOldStringNotFoundError(content string, oldString string) error {
 	return fmt.Errorf("%s", strings.Join(parts, " "))
 }
 
+// matchEditStrings tries exact then line-ending-normalized matches so models
+// recover from CRLF/LF drift without a retry. Returns the exact substrings to
+// use for Replace (preserving the file's newline style when possible).
+func matchEditStrings(content, oldString, newString string) (matchedOld, matchedNew string, ok bool) {
+	if oldString == "" {
+		return "", "", false
+	}
+	if strings.Contains(content, oldString) {
+		return oldString, newString, true
+	}
+
+	normalizedOld := normalizeEditLineEndings(oldString)
+	normalizedNew := normalizeEditLineEndings(newString)
+	if normalizedOld == "" {
+		return "", "", false
+	}
+
+	// LF old_string against CRLF file content.
+	crlfOld := strings.ReplaceAll(normalizedOld, "\n", "\r\n")
+	if crlfOld != oldString && strings.Contains(content, crlfOld) {
+		return crlfOld, strings.ReplaceAll(normalizedNew, "\n", "\r\n"), true
+	}
+
+	// CRLF old_string against LF file content.
+	if normalizedOld != oldString && strings.Contains(content, normalizedOld) {
+		return normalizedOld, normalizedNew, true
+	}
+
+	return "", "", false
+}
+
 func normalizeEditLineEndings(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	return text
+}
+
+func findClosestEditSnippet(content, oldString string) string {
+	content = strings.TrimSpace(content)
+	oldString = strings.TrimSpace(oldString)
+	if content == "" || oldString == "" {
+		return ""
+	}
+	oldLines := strings.Split(oldString, "\n")
+	firstLine := strings.TrimSpace(oldLines[0])
+	if firstLine == "" {
+		return ""
+	}
+	contentLines := strings.Split(content, "\n")
+	bestIdx := -1
+	bestScore := 0.0
+	for i, line := range contentLines {
+		score := editLineSimilarity(strings.TrimSpace(line), firstLine)
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	if bestIdx < 0 || bestScore < 0.45 {
+		return ""
+	}
+	start := bestIdx
+	end := bestIdx + len(oldLines)
+	if end > len(contentLines) {
+		end = len(contentLines)
+	}
+	if end <= start {
+		return ""
+	}
+	return strings.Join(contentLines[start:end], "\n")
+}
+
+func editLineSimilarity(a, b string) float64 {
+	if a == "" || b == "" {
+		return 0
+	}
+	if a == b {
+		return 1
+	}
+	if strings.Contains(a, b) || strings.Contains(b, a) {
+		return 0.8
+	}
+	// lightweight token overlap
+	aParts := strings.Fields(a)
+	bParts := strings.Fields(b)
+	if len(aParts) == 0 || len(bParts) == 0 {
+		return 0
+	}
+	set := make(map[string]struct{}, len(aParts))
+	for _, p := range aParts {
+		set[p] = struct{}{}
+	}
+	overlap := 0
+	for _, p := range bParts {
+		if _, ok := set[p]; ok {
+			overlap++
+		}
+	}
+	return float64(overlap) / float64(len(aParts)+len(bParts)-overlap)
 }

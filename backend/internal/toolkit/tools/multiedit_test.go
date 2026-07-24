@@ -257,6 +257,73 @@ func TestMultieditTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
 	}
 }
 
+func TestMultieditTool_HealsCRLFMismatch(t *testing.T) {
+	tmpFile, err := osCreateTempFile("multiedit-crlf-*.txt", "alpha\r\nbeta\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer osRemove(tmpFile)
+
+	tool := NewMultieditTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": tmpFile,
+		"edits": []interface{}{
+			map[string]interface{}{
+				"old_string": "alpha\nbeta\n",
+				"new_string": "updated\n",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected CRLF auto-heal success, got %v", result.Error)
+	}
+	data, readErr := os.ReadFile(tmpFile)
+	if readErr != nil {
+		t.Fatalf("read: %v", readErr)
+	}
+	if got := string(data); got != "updated\r\n" {
+		t.Fatalf("expected CRLF-preserving rewrite, got %q", got)
+	}
+}
+
+func TestMultieditTool_NoEditsAppliedIncludesClosestSnippet(t *testing.T) {
+	tmpFile, err := osCreateTempFile("multiedit-miss-*.txt", "func HelloWorld() {\n\treturn 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer osRemove(tmpFile)
+
+	tool := NewMultieditTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": tmpFile,
+		"edits": []interface{}{
+			map[string]interface{}{
+				"old_string": "func HelloWord() {\n\treturn 2\n}",
+				"new_string": "func HelloWorld() {\n\treturn 2\n}",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected failure when no edits apply")
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "没有任何编辑被应用") {
+		t.Fatalf("expected no-edits applied prefix, got %q", message)
+	}
+	if !strings.Contains(message, "最接近片段") {
+		t.Fatalf("expected closest snippet guidance, got %q", message)
+	}
+	if !strings.Contains(message, "old_string 预览") {
+		t.Fatalf("expected old_string preview, got %q", message)
+	}
+}
+
 // Helper functions
 func osCreateTempFile(pattern, content string) (string, error) {
 	tmpFile, err := os.CreateTemp("", pattern)

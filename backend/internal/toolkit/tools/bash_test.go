@@ -186,6 +186,26 @@ func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
 	if result.Metadata["failed_count"] != 1 || result.Metadata["executed_count"] != 2 {
 		t.Fatalf("unexpected batch metadata: %#v", result.Metadata)
 	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "失败摘要") {
+		t.Fatalf("expected batch failure summary in error, got %#v", result.Error)
+	}
+}
+
+func TestBashTool_MissingCommandIncludesParseErrorHint(t *testing.T) {
+	tool := NewBashTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"_parse_error": "unexpected end of JSON input",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected missing command failure, got %#v", result)
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "command 参数缺失") || !strings.Contains(message, "unexpected end of JSON input") {
+		t.Fatalf("expected parse-error guidance, got %q", message)
+	}
 }
 
 func TestBashTool_CommandBatchCanStopOnError(t *testing.T) {
@@ -902,6 +922,36 @@ func TestFriendlyHintFor_WindowsHeadPipeline(t *testing.T) {
 	}
 }
 
+func TestFriendlyHintFor_RipgrepRegexParseError(t *testing.T) {
+	hint := friendlyHintForSearchTool("rg", `rg -n "foo|\"bar\"" backend`, `rg: regex parse error:`, 2)
+	if !strings.Contains(hint, "正则解析失败") {
+		t.Fatalf("expected regex parse guidance, got %q", hint)
+	}
+	if !strings.Contains(hint, "grep") {
+		t.Fatalf("expected grep tool recommendation, got %q", hint)
+	}
+	// Also through friendlyHintFor when output contains parse error text.
+	hint = friendlyHintFor(
+		`rg -n "foo" backend`,
+		`rg: regex parse error: unclosed group`,
+		fmt.Errorf("exit status 2"),
+		"",
+	)
+	if !strings.Contains(hint, "正则解析失败") {
+		t.Fatalf("expected regex parse guidance via friendlyHintFor, got %q", hint)
+	}
+}
+
+func TestFriendlyHintFor_RipgrepExitOneNoMatches(t *testing.T) {
+	hint := friendlyHintForSearchTool("rg", `rg -n "DoesNotExistSymbolXYZ" backend`, "", 1)
+	if !strings.Contains(hint, "未匹配到结果") {
+		t.Fatalf("expected no-match guidance, got %q", hint)
+	}
+	if !strings.Contains(hint, "grep") {
+		t.Fatalf("expected grep tool recommendation, got %q", hint)
+	}
+}
+
 func TestFriendlyHintFor_PathNotFoundIncludesWorkdirCandidates(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "backend")
@@ -959,4 +1009,87 @@ func TestEnsureLargeHistoryOutputArtifact_PersistsCompleteLargeOutput(t *testing
 
 func filepathIsAbs(p string) bool {
 	return len(p) > 0 && (p[0] == '/' || (len(p) > 1 && p[1] == ':'))
+}
+
+func TestBuildBashCommandFailureError_IncludesOutputSnippet(t *testing.T) {
+	err := buildBashCommandFailureError(
+		`go test ./internal/toolkit/tools -count=1`,
+		"--- FAIL: TestFoo (0.01s)\n    foo_test.go:12: boom\nFAIL\n",
+		fmt.Errorf("exit status 1"),
+	)
+	if err == nil {
+		t.Fatal("expected enriched error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "exit status 1") {
+		t.Fatalf("expected original exit status, got %q", message)
+	}
+	if !strings.Contains(message, "go test ./internal/toolkit/tools") {
+		t.Fatalf("expected command preview, got %q", message)
+	}
+	if !strings.Contains(message, "FAIL: TestFoo") {
+		t.Fatalf("expected output snippet, got %q", message)
+	}
+}
+
+func TestBuildBashCommandFailureError_EmptyOutputGuidance(t *testing.T) {
+	err := buildBashCommandFailureError("false", "", fmt.Errorf("exit status 1"))
+	if err == nil {
+		t.Fatal("expected enriched error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "无 stdout/stderr 输出") {
+		t.Fatalf("expected empty-output guidance, got %q", message)
+	}
+}
+
+func TestBashTool_SingleCommandFailureIncludesOutputSummary(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{
+		result: CommandExecutionResult{Output: "cannot open file: no such file"},
+		err:    fmt.Errorf("exit status 1"),
+	}
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "type missing.txt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected failure, got %#v", result)
+	}
+	message := result.Error.Error()
+	// When friendlyHintFor adds path guidance, keep it; otherwise require snippet.
+	if !strings.Contains(message, "cannot open file") && !strings.Contains(message, "提示:") {
+		t.Fatalf("expected output summary or friendly hint, got %q", message)
+	}
+}
+
+func TestExitCodeFromError_ParsesStatusStrings(t *testing.T) {
+	if got := exitCodeFromError(fmt.Errorf("exit status 1")); got != 1 {
+		t.Fatalf("expected 1, got %d", got)
+	}
+	if got := exitCodeFromError(fmt.Errorf("命令执行失败: exit status 2\n提示: x")); got != 2 {
+		t.Fatalf("expected 2 from wrapped message, got %d", got)
+	}
+	if got := exitCodeFromError(fmt.Errorf("exit status 0x80008083")); got != 0x80008083 {
+		t.Fatalf("expected hex status, got %d", got)
+	}
+	if got := exitCodeFromError(fmt.Errorf("something else")); got != -1 {
+		t.Fatalf("expected -1 for non-status error, got %d", got)
+	}
+}
+
+func TestFriendlyHintFor_RipgrepExitOneFromWrappedError(t *testing.T) {
+	// Models often see plain fmt.Errorf("exit status 1") after shell layers;
+	// exitCodeFromError must still unlock the no-match guidance.
+	hint := friendlyHintFor(
+		`rg -n "DoesNotExistSymbolXYZ" backend`,
+		"",
+		fmt.Errorf("exit status 1"),
+		"",
+	)
+	if !strings.Contains(hint, "未匹配到结果") {
+		t.Fatalf("expected no-match guidance from wrapped exit status, got %q", hint)
+	}
 }

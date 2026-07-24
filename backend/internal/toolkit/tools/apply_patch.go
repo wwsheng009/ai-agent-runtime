@@ -249,11 +249,9 @@ func parseApplyPatch(input string) ([]patchOperation, error) {
 		case headerLine == "":
 			index++
 		case headerLine == applyPatchEndMarker:
-			for _, tail := range lines[index+1:] {
-				if strings.TrimSpace(tail) != "" {
-					return nil, fmt.Errorf("第 %d 行后存在无效补丁内容", index+2)
-				}
-			}
+			// Models frequently append commentary or truncated prose after the
+			// end marker. Operations already collected are complete, so ignore
+			// trailing noise instead of failing the whole patch.
 			return operations, nil
 		case strings.HasPrefix(headerLine, applyPatchAddPrefix):
 			operation, next, err := parseAddFileOperation(lines, index)
@@ -277,11 +275,16 @@ func parseApplyPatch(input string) ([]patchOperation, error) {
 			operations = append(operations, operation)
 			index = next
 		default:
-			return nil, fmt.Errorf("第 %d 行不是合法的补丁操作头: %s", index+1, line)
+			return nil, fmt.Errorf("第 %d 行不是合法的补丁操作头: %s。操作头必须是 %q / %q / %q / %q 之一", index+1, truncateDiagnosticText(line, 120), applyPatchAddPrefix, applyPatchUpdatePrefix, applyPatchDeletePrefix, applyPatchEndMarker)
 		}
 	}
 
-	return nil, fmt.Errorf("补丁缺少 %q 结束标记", applyPatchEndMarker)
+	if len(operations) > 0 {
+		// Tolerate truncated model output that finished all file operations
+		// but dropped the end marker (common on large patches).
+		return operations, nil
+	}
+	return nil, fmt.Errorf("补丁缺少 %q 结束标记，且没有可执行的文件操作", applyPatchEndMarker)
 }
 
 func normalizeApplyPatchEnvelope(input string) string {
@@ -290,15 +293,144 @@ func normalizeApplyPatchEnvelope(input string) string {
 	if len(lines) >= 3 && strings.HasPrefix(strings.TrimSpace(lines[0]), "```") && strings.TrimSpace(lines[len(lines)-1]) == "```" {
 		lines = lines[1 : len(lines)-1]
 	}
-	for index, line := range lines {
-		switch strings.TrimSpace(line) {
-		case applyPatchBeginMarker + " ***":
-			lines[index] = applyPatchBeginMarker
-		case applyPatchEndMarker + " ***":
-			lines[index] = applyPatchEndMarker
+	// Models sometimes emit the whole patch on one line, e.g.
+	// "*** Begin Patch *** *** Add File: foo.go package foo ..."
+	// Split known markers onto their own lines before per-line cleanup.
+	lines = expandCollapsedApplyPatchLines(lines)
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case isApplyPatchBoundaryLine(trimmed, applyPatchBeginMarker):
+			normalized = append(normalized, applyPatchBeginMarker)
+		case isApplyPatchBoundaryLine(trimmed, applyPatchEndMarker):
+			normalized = append(normalized, applyPatchEndMarker)
+		default:
+			normalized = append(normalized, line)
 		}
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return strings.TrimSpace(strings.Join(normalized, "\n"))
+}
+
+// expandCollapsedApplyPatchLines splits lines that concatenate multiple Codex
+// patch markers (Begin/End/Add/Update/Delete/Move/@@) without newlines.
+func expandCollapsedApplyPatchLines(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+	markers := []string{
+		applyPatchBeginMarker,
+		applyPatchEndMarker,
+		applyPatchAddPrefix,
+		applyPatchUpdatePrefix,
+		applyPatchDeletePrefix,
+		applyPatchMoveToPrefix,
+		applyPatchEOFMarker,
+	}
+	out := make([]string, 0, len(lines)+4)
+	for _, line := range lines {
+		expanded := splitCollapsedApplyPatchLine(line, markers)
+		out = append(out, expanded...)
+	}
+	return out
+}
+
+func splitCollapsedApplyPatchLine(line string, markers []string) []string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return []string{line}
+	}
+	// Fast path: already a single marker / normal content line.
+	if !strings.Contains(trimmed, "***") && !strings.HasPrefix(trimmed, "@@") {
+		return []string{line}
+	}
+
+	// Walk the line and cut before each marker occurrence after offset 0.
+	type cut struct {
+		at     int
+		marker string
+	}
+	cuts := make([]cut, 0, 4)
+	for _, marker := range markers {
+		searchFrom := 0
+		for {
+			idx := strings.Index(trimmed[searchFrom:], marker)
+			if idx < 0 {
+				break
+			}
+			abs := searchFrom + idx
+			// Skip marker that starts the line (handled as the first segment).
+			if abs > 0 {
+				cuts = append(cuts, cut{at: abs, marker: marker})
+			}
+			searchFrom = abs + len(marker)
+		}
+	}
+	// Also split @@ hunk headers that models paste mid-line after file ops,
+	// e.g. "*** Update File: foo.go @@ func Foo()". If the line already
+	// starts with "@@", it is a complete hunk header (including unified-diff
+	// form "@@ -N,M +N,M @@") and must not be re-split on a trailing "@@".
+	if !strings.HasPrefix(trimmed, "@@") {
+		searchFrom := 0
+		for {
+			idx := strings.Index(trimmed[searchFrom:], "@@")
+			if idx < 0 {
+				break
+			}
+			abs := searchFrom + idx
+			if abs > 0 {
+				cuts = append(cuts, cut{at: abs, marker: "@@"})
+			}
+			searchFrom = abs + 2
+		}
+	}
+	if len(cuts) == 0 {
+		return []string{line}
+	}
+	// Sort cuts by position (stable insertion for tiny N).
+	for i := 1; i < len(cuts); i++ {
+		j := i
+		for j > 0 && cuts[j].at < cuts[j-1].at {
+			cuts[j], cuts[j-1] = cuts[j-1], cuts[j]
+			j--
+		}
+	}
+
+	parts := make([]string, 0, len(cuts)+1)
+	prev := 0
+	for _, c := range cuts {
+		if c.at <= prev {
+			continue
+		}
+		// Avoid cutting inside an already-started marker token stream when
+		// adjacent markers share stars (e.g. "*** Begin Patch *** *** Add").
+		segment := strings.TrimSpace(trimmed[prev:c.at])
+		if segment != "" && !isOnlyStarsAndSpaces(segment) {
+			parts = append(parts, segment)
+		} else if segment != "" && len(parts) > 0 {
+			// Trailing stars after Begin/End markers: drop as noise.
+		} else if segment != "" {
+			parts = append(parts, segment)
+		}
+		prev = c.at
+	}
+	tail := strings.TrimSpace(trimmed[prev:])
+	if tail != "" {
+		parts = append(parts, tail)
+	}
+	if len(parts) == 0 {
+		return []string{line}
+	}
+	return parts
+}
+
+func isOnlyStarsAndSpaces(s string) bool {
+	for _, r := range s {
+		if r != '*' && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func unwrapApplyPatchHeredoc(input string) string {
@@ -315,6 +447,27 @@ func unwrapApplyPatchHeredoc(input string) string {
 		}
 	}
 	return input
+}
+
+func isApplyPatchBoundaryLine(line, marker string) bool {
+	line = strings.TrimSpace(line)
+	if line == marker {
+		return true
+	}
+	// Accept common model variants: "*** Begin Patch ***", "*** Begin Patch***"
+	if !strings.HasPrefix(line, marker) {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, marker))
+	if rest == "" {
+		return true
+	}
+	for _, r := range rest {
+		if r != '*' && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseAddFileOperation(lines []string, start int) (patchOperation, int, error) {
@@ -339,8 +492,13 @@ func parseAddFileOperation(lines []string, start int) (patchOperation, int, erro
 		case strings.HasPrefix(line, "+"):
 			operation.AddLines = append(operation.AddLines, line[1:])
 			index++
+		case line == "" || isApplyPatchBareAddContentLine(line):
+			// Models often omit the required "+" prefix for Add File bodies.
+			// Treat plain content lines as added lines to avoid hard failures.
+			operation.AddLines = append(operation.AddLines, line)
+			index++
 		default:
-			return patchOperation{}, 0, fmt.Errorf("第 %d 行不是合法的新增文件内容: %s", index+1, line)
+			return patchOperation{}, 0, fmt.Errorf("第 %d 行不是合法的新增文件内容: %s。Add File 内容行应以 '+' 开头，例如 '+package foo'", index+1, truncateDiagnosticText(line, 120))
 		}
 	}
 
@@ -348,6 +506,24 @@ func parseAddFileOperation(lines []string, start int) (patchOperation, int, erro
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行的新增文件没有内容", start+1)
 	}
 	return operation, index, nil
+}
+
+func isApplyPatchBareAddContentLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+	if isApplyPatchBoundaryLine(trimmed, applyPatchBeginMarker) || isApplyPatchBoundaryLine(trimmed, applyPatchEndMarker) {
+		return false
+	}
+	if isPatchSectionHeader(line) || trimmed == applyPatchEOFMarker || strings.HasPrefix(trimmed, applyPatchMoveToPrefix) {
+		return false
+	}
+	// Keep strict rejection for obvious non-content markers.
+	if strings.HasPrefix(trimmed, "***") {
+		return false
+	}
+	return true
 }
 
 func parseDeleteFileOperation(lines []string, start int) (patchOperation, int, error) {
@@ -759,10 +935,16 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 		searchCursor := cursor
 		if contextLine := hunkChangeContextLine(hunk.Header); contextLine != "" {
 			contextStart := locateHunk(lines, []string{contextLine}, searchCursor, false)
-			if contextStart < 0 {
-				return "", buildPatchHunkNotFoundError(hunk, []string{contextLine}, lines, "未找到 @@ 上下文行")
+			if contextStart >= 0 {
+				// Prefer searching near the @@ context marker when present.
+				searchCursor = contextStart + 1
 			}
-			searchCursor = contextStart + 1
+			// If @@ context is stale/wrong (common when models invent function
+			// names or copy outdated headers), fall through and locate by old
+			// content across the whole file instead of hard-failing.
+			if contextStart < 0 && len(oldLines) == 0 {
+				return "", buildPatchHunkNotFoundError(hunk, []string{contextLine}, lines, "未找到 @@ 上下文行，且 hunk 无旧内容可回退匹配")
+			}
 		}
 
 		matchOldLines := oldLines
@@ -927,10 +1109,109 @@ func hunkChangeContextLine(header string) string {
 	if header == "@@" {
 		return ""
 	}
-	if strings.HasPrefix(header, "@@ ") {
-		return strings.TrimPrefix(header, "@@ ")
+	if !strings.HasPrefix(header, "@@") {
+		return ""
 	}
-	return ""
+	// Codex style: "@@ func Foo()" → context is "func Foo()".
+	// Unified-diff style models often emit "@@ -185,6 +185,12 @@" or
+	// "@@ -185,6 +185,12 @@ func Foo" — line-number spans must not be used as
+	// literal context lines (they never exist in the file).
+	rest := strings.TrimSpace(strings.TrimPrefix(header, "@@"))
+	if rest == "" {
+		return ""
+	}
+	// Strip optional trailing "@@" from unified headers.
+	if strings.HasSuffix(rest, "@@") {
+		rest = strings.TrimSpace(strings.TrimSuffix(rest, "@@"))
+	}
+	if rest == "" {
+		return ""
+	}
+	// Pure unified range: "-185,6 +185,12" or "-10 +10".
+	if isUnifiedDiffRangeToken(rest) {
+		return ""
+	}
+	// Mixed: "-185,6 +185,12 @@ func Foo" or "-185,6 +185,12 func Foo".
+	if stripped := stripLeadingUnifiedDiffRanges(rest); stripped != rest {
+		return stripped
+	}
+	// Remaining non-range text is Codex function/class context.
+	return rest
+}
+
+func isUnifiedDiffRangeToken(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	// Must look like one or two hunk ranges: -N[,M] [+N[,M]]
+	parts := strings.Fields(s)
+	if len(parts) == 0 || len(parts) > 2 {
+		return false
+	}
+	for _, part := range parts {
+		if !isUnifiedDiffRangePart(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isUnifiedDiffRangePart(part string) bool {
+	if part == "" {
+		return false
+	}
+	if part[0] != '-' && part[0] != '+' {
+		return false
+	}
+	body := part[1:]
+	if body == "" {
+		return false
+	}
+	// N or N,M
+	comma := strings.IndexByte(body, ',')
+	if comma < 0 {
+		return isAllDigits(body)
+	}
+	return isAllDigits(body[:comma]) && isAllDigits(body[comma+1:])
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func stripLeadingUnifiedDiffRanges(s string) string {
+	s = strings.TrimSpace(s)
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return s
+	}
+	i := 0
+	for i < len(parts) && isUnifiedDiffRangePart(parts[i]) {
+		i++
+	}
+	if i == 0 {
+		return s
+	}
+	if i >= len(parts) {
+		return ""
+	}
+	// Drop a lone "@@" token if present after ranges.
+	if parts[i] == "@@" {
+		i++
+	}
+	if i >= len(parts) {
+		return ""
+	}
+	return strings.Join(parts[i:], " ")
 }
 
 func buildPatchHunkNotFoundError(hunk patchHunk, expected, actual []string, reason string) error {

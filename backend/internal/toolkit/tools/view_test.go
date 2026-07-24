@@ -157,14 +157,17 @@ func TestViewTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
 	}
 }
 
-func TestViewTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
+func TestViewTool_DirectoryPathAutoListsContents(t *testing.T) {
 	root := t.TempDir()
-	candidate := filepath.Join(root, "project", "settings")
-	if err := os.MkdirAll(candidate, 0o755); err != nil {
-		t.Fatalf("mkdir candidate tree: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "project", "setting"), 0o755); err != nil {
+	dirPath := filepath.Join(root, "project", "setting")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		t.Fatalf("mkdir directory path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "token.go"), []byte("package types\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dirPath, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
 	}
 
 	tool := NewViewTool()
@@ -175,18 +178,17 @@ func TestViewTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Success {
-		t.Fatalf("expected failure, got success with content %q", result.Content)
+	if !result.Success {
+		t.Fatalf("expected auto-list success, got error %v content %q", result.Error, result.Content)
 	}
-	if result.Error == nil {
-		t.Fatal("expected path error, got nil")
+	if !strings.Contains(result.Content, "路径是目录，不是文件") {
+		t.Fatalf("expected directory notice, got %q", result.Content)
 	}
-	hint := result.Error.Error()
-	if !strings.Contains(hint, "路径是目录，不是文件") {
-		t.Fatalf("expected kind mismatch guidance, got %q", hint)
+	if !strings.Contains(result.Content, "token.go") {
+		t.Fatalf("expected listed file token.go, got %q", result.Content)
 	}
-	if !strings.Contains(hint, candidate) {
-		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	if result.Metadata["is_directory"] != true || result.Metadata["auto_listed"] != true {
+		t.Fatalf("expected directory auto-list metadata, got %#v", result.Metadata)
 	}
 }
 

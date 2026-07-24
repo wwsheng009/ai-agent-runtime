@@ -4954,3 +4954,43 @@ func TestGrepTool_StructuredSortFamilyTranslateToRipgrep(t *testing.T) {
 		})
 	}
 }
+
+func TestGrepTool_InvalidLookaroundRegexSuggestsPCRE2(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "sample.txt"), []byte("foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	// Force builtin compile path (no rg).
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": `(?!foo)bar`,
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected invalid regex failure, got %#v", result)
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "正则表达式无效") {
+		t.Fatalf("expected invalid-regex message, got %q", message)
+	}
+	if !strings.Contains(message, "pcre2=true") || !strings.Contains(message, "lookaround") {
+		t.Fatalf("expected PCRE/lookaround guidance, got %q", message)
+	}
+}
+
+func TestLooksLikePCREOnlyPattern(t *testing.T) {
+	if !looksLikePCREOnlyPattern(`(?!foo)` ) {
+		t.Fatal("expected negative lookahead to be PCRE-only")
+	}
+	if looksLikePCREOnlyPattern(`foo.*bar`) {
+		t.Fatal("plain RE2 pattern should not be flagged")
+	}
+}
