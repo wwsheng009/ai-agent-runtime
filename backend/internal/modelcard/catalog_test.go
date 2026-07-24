@@ -107,6 +107,43 @@ func TestMergeCapabilityPreservesExistingFields(t *testing.T) {
 	}
 }
 
+func TestMergeCapabilityPreferCardOverwritesCardManagedFields(t *testing.T) {
+	existing := agentconfig.ModelCapabilitySpec{
+		InputModalities:        []string{"text"},
+		ReasoningEfforts:       []string{"low"},
+		DefaultReasoningEffort: "low",
+		MaxContextTokens:       270000,
+		AutoCompactTokenLimit:  180000,
+		MaxTokens:              8192,
+	}
+	card := agentconfig.ModelCapabilitySpec{
+		InputModalities:        []string{"text", "image"},
+		ReasoningEfforts:       []string{"low", "medium", "high"},
+		DefaultReasoningEffort: "medium",
+		MaxContextTokens:       272000,
+		AutoCompactTokenLimit:  200000,
+		NativeTools:            agentconfig.NativeToolCapabilities{ImageGeneration: true},
+		ReasoningModel:         true,
+	}
+
+	got := MergeCapabilityPreferCard(card, existing)
+	if got.MaxContextTokens != 272000 || got.AutoCompactTokenLimit != 200000 {
+		t.Fatalf("card context fields not authoritative: %+v", got)
+	}
+	if strings.Join(got.InputModalities, ",") != "text,image" {
+		t.Fatalf("card input_modalities not authoritative: %+v", got)
+	}
+	if strings.Join(got.ReasoningEfforts, ",") != "low,medium,high" || got.DefaultReasoningEffort != "medium" {
+		t.Fatalf("card reasoning fields not authoritative: %+v", got)
+	}
+	if !got.NativeTools.ImageGeneration || !got.ReasoningModel {
+		t.Fatalf("card flags not applied: %+v", got)
+	}
+	if got.MaxTokens != 8192 {
+		t.Fatalf("local-only max_tokens should be preserved: %+v", got)
+	}
+}
+
 func TestLoadSourcesNonStrictReturnsWarnings(t *testing.T) {
 	catalog, warnings, err := LoadSources([]Source{{Name: "broken.yaml", Data: []byte("version: [")}}, false)
 	if err != nil {
@@ -171,6 +208,9 @@ func TestBuiltinSourceRecommendsCodexTemplateForCodexCompatibleAliases(t *testin
 		"gpt-5.4-openai-compact":       "openai.gpt-5.4.codex",
 		"gpt-5.5":                      "openai.gpt-5.5.codex",
 		"gpt-5.5-openai-compact":       "openai.gpt-5.5.codex",
+		"gpt-5.6-sol":                  "openai.gpt-5.6-sol.codex",
+		"gpt-5.6-terra":                "openai.gpt-5.6-terra.codex",
+		"gpt-5.6-luna":                 "openai.gpt-5.6-luna.codex",
 	}
 	for modelID, expectedCardID := range cases {
 		template, applied, ok := catalog.RecommendedProviderTemplate(Context{
@@ -183,7 +223,7 @@ func TestBuiltinSourceRecommendsCodexTemplateForCodexCompatibleAliases(t *testin
 		}
 
 		spec, resolved := catalog.Resolve(Context{RuntimeProtocol: "codex"}, modelID)
-		if len(resolved) == 0 || resolved[0].CardID != expectedCardID || spec.MaxContextTokens != 270000 || spec.AutoCompactTokenLimit != 200000 {
+		if len(resolved) == 0 || resolved[0].CardID != expectedCardID || spec.MaxContextTokens != 272000 || spec.AutoCompactTokenLimit != 200000 {
 			t.Fatalf("expected codex capability for %q via %s, got spec=%+v applied=%+v", modelID, expectedCardID, spec, resolved)
 		}
 	}
@@ -383,6 +423,79 @@ func TestRecommendedProviderTemplateIgnoresCurrentLoginProtocol(t *testing.T) {
 	}
 	if len(applied) == 0 || applied[0].CardID != "anthropic.claude-sonnet-4-6" {
 		t.Fatalf("unexpected applied cards: %+v", applied)
+	}
+}
+
+func TestRecommendedProviderTemplatesReturnsMultiProtocolMatches(t *testing.T) {
+	catalog, _, err := LoadSources([]Source{BuiltinSource()}, true)
+	if err != nil {
+		t.Fatalf("LoadSources builtin: %v", err)
+	}
+	matches := catalog.RecommendedProviderTemplates(Context{
+		RuntimeProtocol: "openai",
+		LoginProtocol:   "openai",
+	}, "grok-4.5")
+	if len(matches) != 3 {
+		t.Fatalf("expected 3 multi-protocol recommendations, got %+v", matches)
+	}
+	ids := make([]string, 0, len(matches))
+	cardIDs := make([]string, 0, len(matches))
+	for _, match := range matches {
+		ids = append(ids, match.Template.ID)
+		if len(match.Applied) == 0 {
+			t.Fatalf("expected applied card for template %s", match.Template.ID)
+		}
+		cardIDs = append(cardIDs, match.Applied[0].CardID)
+	}
+	// Equal priority/score => lexicographic card id order.
+	if strings.Join(ids, ",") != "anthropic.messages,codex.responses,openai.chat" {
+		t.Fatalf("unexpected templates: %v cards=%v", ids, cardIDs)
+	}
+	if strings.Join(cardIDs, ",") != "xai.grok-4.5.anthropic,xai.grok-4.5.codex,xai.grok-4.5.openai" {
+		t.Fatalf("unexpected applied cards: %v", cardIDs)
+	}
+	expectedCards := map[string]string{
+		"openai.chat":        "xai.grok-4.5.openai",
+		"anthropic.messages": "xai.grok-4.5.anthropic",
+		"codex.responses":    "xai.grok-4.5.codex",
+	}
+	for _, match := range matches {
+		expectedCard, ok := expectedCards[match.Template.ID]
+		if !ok {
+			t.Fatalf("unexpected template id %q", match.Template.ID)
+		}
+		if match.Applied[0].CardID != expectedCard {
+			t.Fatalf("expected card %s for %s, got %+v", expectedCard, match.Template.ID, match.Applied)
+		}
+	}
+
+	// Top recommendation should remain stable for callers of the singular API.
+	template, applied, ok := catalog.RecommendedProviderTemplate(Context{
+		RuntimeProtocol: "openai",
+		LoginProtocol:   "openai",
+	}, "grok-4.5")
+	if !ok || len(applied) == 0 {
+		t.Fatalf("expected singular recommendation, got template=%+v applied=%+v ok=%v", template, applied, ok)
+	}
+	if template.ID != matches[0].Template.ID || applied[0].CardID != matches[0].Applied[0].CardID {
+		t.Fatalf("singular recommendation should match first multi recommendation, got template=%+v applied=%+v", template, applied)
+	}
+}
+
+func TestRecommendedProviderTemplatesDedupesSameTemplate(t *testing.T) {
+	catalog, _, err := LoadSources([]Source{BuiltinSource()}, true)
+	if err != nil {
+		t.Fatalf("LoadSources builtin: %v", err)
+	}
+	matches := catalog.RecommendedProviderTemplates(Context{
+		RuntimeProtocol: "anthropic",
+		LoginProtocol:   "anthropic",
+	}, "claude-sonnet-4-6")
+	if len(matches) != 1 {
+		t.Fatalf("expected single anthropic template after dedupe, got %+v", matches)
+	}
+	if matches[0].Template.ID != "anthropic.messages" || matches[0].Applied[0].CardID != "anthropic.claude-sonnet-4-6" {
+		t.Fatalf("expected exact anthropic card to win, got %+v", matches)
 	}
 }
 

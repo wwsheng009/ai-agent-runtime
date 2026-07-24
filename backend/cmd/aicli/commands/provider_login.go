@@ -853,36 +853,45 @@ func groupProviderLoginModelsByProviderTemplate(
 		if modelID == "" {
 			continue
 		}
-		template, applied, hasTemplate := catalog.RecommendedProviderTemplate(ctx, modelID)
-		if imageTemplate, ok := providerLoginAutoImageModelTemplate(catalog, requestedLoginProtocol, modelID, applied, hasTemplate); ok {
-			template = imageTemplate
-			hasTemplate = true
+		recommendations := catalog.RecommendedProviderTemplates(ctx, modelID)
+		if imageTemplate, ok := providerLoginAutoImageModelTemplate(catalog, requestedLoginProtocol, modelID, recommendations); ok {
+			recommendations = []modelcard.RecommendedProviderTemplateMatch{{
+				Template: imageTemplate,
+			}}
 		}
-		if !hasTemplate && hasCurrentTemplate {
-			template = currentTemplate
-			hasTemplate = true
+		if len(recommendations) == 0 && hasCurrentTemplate {
+			recommendations = []modelcard.RecommendedProviderTemplateMatch{{
+				Template: currentTemplate,
+			}}
 		}
-		groupLoginProtocol := loginProtocolForProviderTemplate(template, hasTemplate, loginProtocol, authMode)
-		groupRuntimeProtocol := runtimeProtocolForLoginProtocol(groupLoginProtocol)
-		groupKey := providerLoginModelGroupKey(groupRuntimeProtocol, template, hasTemplate)
-		groupModel := model
-		groupModel.ID = normalizeProviderModelID(groupModel.ID, groupLoginProtocol)
-		if strings.TrimSpace(groupModel.ID) == "" {
-			continue
+		if len(recommendations) == 0 {
+			recommendations = []modelcard.RecommendedProviderTemplateMatch{{}}
 		}
-		index, ok := indexByKey[groupKey]
-		if !ok {
-			index = len(groups)
-			indexByKey[groupKey] = index
-			groups = append(groups, providerLoginModelGroup{
-				Key:              groupKey,
-				LoginProtocol:    groupLoginProtocol,
-				RuntimeProtocol:  groupRuntimeProtocol,
-				ProviderTemplate: template,
-				HasTemplate:      hasTemplate,
-			})
+		for _, recommendation := range recommendations {
+			template := recommendation.Template
+			hasTemplate := strings.TrimSpace(template.ID) != "" || strings.TrimSpace(template.Protocol) != ""
+			groupLoginProtocol := loginProtocolForProviderTemplate(template, hasTemplate, loginProtocol, authMode)
+			groupRuntimeProtocol := runtimeProtocolForLoginProtocol(groupLoginProtocol)
+			groupKey := providerLoginModelGroupKey(groupRuntimeProtocol, template, hasTemplate)
+			groupModel := model
+			groupModel.ID = normalizeProviderModelID(groupModel.ID, groupLoginProtocol)
+			if strings.TrimSpace(groupModel.ID) == "" {
+				continue
+			}
+			index, ok := indexByKey[groupKey]
+			if !ok {
+				index = len(groups)
+				indexByKey[groupKey] = index
+				groups = append(groups, providerLoginModelGroup{
+					Key:              groupKey,
+					LoginProtocol:    groupLoginProtocol,
+					RuntimeProtocol:  groupRuntimeProtocol,
+					ProviderTemplate: template,
+					HasTemplate:      hasTemplate,
+				})
+			}
+			groups[index].Models = append(groups[index].Models, groupModel)
 		}
-		groups[index].Models = append(groups[index].Models, groupModel)
 	}
 	for i := range groups {
 		groups[i].Models = dedupeProviderModels(groups[i].Models)
@@ -947,11 +956,11 @@ func providerLoginModelGroupsContainExplicitProtocol(groups []providerLoginModel
 	return false
 }
 
-func providerLoginAutoImageModelTemplate(catalog *modelcard.Catalog, requestedLoginProtocol, modelID string, applied []modelcard.AppliedCard, hasTemplate bool) (modelcard.ProviderTemplate, bool) {
+func providerLoginAutoImageModelTemplate(catalog *modelcard.Catalog, requestedLoginProtocol, modelID string, recommendations []modelcard.RecommendedProviderTemplateMatch) (modelcard.ProviderTemplate, bool) {
 	if !isAutoLoginProtocol(requestedLoginProtocol) || !providerLoginModelIDContainsImageKeyword(modelID) {
 		return modelcard.ProviderTemplate{}, false
 	}
-	if hasTemplate && !providerLoginRecommendationIsFallback(applied) {
+	if providerLoginRecommendationsHaveNonFallback(recommendations) {
 		return modelcard.ProviderTemplate{}, false
 	}
 	return catalog.ProviderTemplateForProtocol(providerLoginProtocolOpenAIImage)
@@ -961,16 +970,22 @@ func providerLoginModelIDContainsImageKeyword(modelID string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(modelID)), "image")
 }
 
-func providerLoginRecommendationIsFallback(applied []modelcard.AppliedCard) bool {
-	if len(applied) == 0 {
-		return false
-	}
-	for _, item := range applied {
-		if !item.Fallback {
-			return false
+func providerLoginRecommendationsHaveNonFallback(recommendations []modelcard.RecommendedProviderTemplateMatch) bool {
+	for _, recommendation := range recommendations {
+		if len(recommendation.Applied) == 0 {
+			// Template-only recommendation without applied cards is treated as non-fallback.
+			if strings.TrimSpace(recommendation.Template.ID) != "" || strings.TrimSpace(recommendation.Template.Protocol) != "" {
+				return true
+			}
+			continue
+		}
+		for _, item := range recommendation.Applied {
+			if !item.Fallback {
+				return true
+			}
 		}
 	}
-	return true
+	return false
 }
 
 func loginProtocolForProviderTemplate(template modelcard.ProviderTemplate, hasTemplate bool, fallbackLoginProtocol, authMode string) string {
@@ -1286,8 +1301,20 @@ func filterProviderLoginModelsByProviderTemplate(
 		if modelID == "" {
 			continue
 		}
-		recommended, _, ok := catalog.RecommendedProviderTemplate(ctx, modelID)
-		if !ok || sameProviderLoginTemplateID(currentTemplate, recommended) {
+		recommendations := catalog.RecommendedProviderTemplates(ctx, modelID)
+		if len(recommendations) == 0 {
+			filtered = append(filtered, model)
+			continue
+		}
+		keep := false
+		recommended := recommendations[0].Template
+		for _, recommendation := range recommendations {
+			if sameProviderLoginTemplateID(currentTemplate, recommendation.Template) {
+				keep = true
+				break
+			}
+		}
+		if keep {
 			filtered = append(filtered, model)
 			continue
 		}

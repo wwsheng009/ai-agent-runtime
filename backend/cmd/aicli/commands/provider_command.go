@@ -47,6 +47,7 @@ func NewProviderCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd.AddCommand(newProviderEnableCommand(configProvider, true))
 	cmd.AddCommand(newProviderEnableCommand(configProvider, false))
 	cmd.AddCommand(newProviderSetDefaultCommand(configProvider))
+	cmd.AddCommand(newProviderRefreshModelCardsCommand(configProvider))
 	return cmd
 }
 

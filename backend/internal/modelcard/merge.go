@@ -15,6 +15,12 @@ func MergeCapability(existing, remote, card, compat agentconfig.ModelCapabilityS
 	return merged
 }
 
+// MergeCapabilityPreferCard makes card-managed fields authoritative, then keeps
+// any remaining provider-local fields that the card does not set.
+func MergeCapabilityPreferCard(card, existing agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
+	return MergeCapability(card, existing, agentconfig.ModelCapabilitySpec{}, agentconfig.ModelCapabilitySpec{})
+}
+
 func CloneCapabilitySpec(input agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
 	if len(input.InputModalities) > 0 {
 		input.InputModalities = append([]string(nil), input.InputModalities...)
@@ -128,6 +134,67 @@ func CapabilityFieldNames(spec agentconfig.ModelCapabilitySpec) []string {
 		fields = append(fields, "compact_reasoning_effort")
 	}
 	return fields
+}
+
+// CapabilitySpecsEqual reports whether two capability specs are semantically equal.
+func CapabilitySpecsEqual(a, b agentconfig.ModelCapabilitySpec) bool {
+	if !stringSlicesEqualFoldOrder(a.InputModalities, b.InputModalities) {
+		return false
+	}
+	if a.NativeTools.ImageGeneration != b.NativeTools.ImageGeneration ||
+		a.NativeTools.ImagesGenerationsAPI != b.NativeTools.ImagesGenerationsAPI {
+		return false
+	}
+	if a.ReasoningModel != b.ReasoningModel {
+		return false
+	}
+	if !stringSlicesEqualFoldOrder(a.ReasoningEfforts, b.ReasoningEfforts) {
+		return false
+	}
+	if !intMapsEqual(a.ReasoningEffortBudgets, b.ReasoningEffortBudgets) {
+		return false
+	}
+	if strings.TrimSpace(a.DefaultReasoningEffort) != strings.TrimSpace(b.DefaultReasoningEffort) {
+		return false
+	}
+	if a.MaxContextTokens != b.MaxContextTokens ||
+		a.MaxTokens != b.MaxTokens ||
+		a.AutoCompactRatio != b.AutoCompactRatio ||
+		a.AutoCompactTokenLimit != b.AutoCompactTokenLimit ||
+		a.SupportsRemoteCompact != b.SupportsRemoteCompact {
+		return false
+	}
+	if strings.TrimSpace(a.AutoCompactMode) != strings.TrimSpace(b.AutoCompactMode) {
+		return false
+	}
+	if strings.TrimSpace(a.CompactReasoningEffort) != strings.TrimSpace(b.CompactReasoningEffort) {
+		return false
+	}
+	return true
+}
+
+func stringSlicesEqualFoldOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(strings.TrimSpace(a[i]), strings.TrimSpace(b[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+func intMapsEqual(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func capabilityIsEmpty(spec agentconfig.ModelCapabilitySpec) bool {

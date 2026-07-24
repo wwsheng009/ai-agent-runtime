@@ -119,6 +119,112 @@ cards:
       input_modalities:
         - text
 
+  - id: openai.gpt-5.6-sol.codex
+    title: GPT 5.6 Sol Codex
+    priority: 120
+    provider_template: codex.responses
+    match:
+      model_ids:
+        - gpt-5.6-sol
+      protocols:
+        - codex
+    capability:
+      max_context_tokens: 272000
+      auto_compact_token_limit: 200000
+      input_modalities:
+        - text
+        - image
+      native_tools:
+        image_generation: true
+      reasoning_model: true
+      default_reasoning_effort: low
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+        - ultra
+
+  - id: openai.gpt-5.6-terra.codex
+    title: GPT 5.6 Terra Codex
+    priority: 115
+    provider_template: codex.responses
+    match:
+      model_ids:
+        - gpt-5.6-terra
+      protocols:
+        - codex
+    capability:
+      max_context_tokens: 272000
+      auto_compact_token_limit: 200000
+      input_modalities:
+        - text
+        - image
+      native_tools:
+        image_generation: true
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+        - ultra
+
+  - id: openai.gpt-5.6-luna.codex
+    title: GPT 5.6 Luna Codex
+    priority: 110
+    provider_template: codex.responses
+    match:
+      model_ids:
+        - gpt-5.6-luna
+      protocols:
+        - codex
+    capability:
+      max_context_tokens: 272000
+      auto_compact_token_limit: 200000
+      input_modalities:
+        - text
+        - image
+      native_tools:
+        image_generation: true
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: openai.gpt-5.5.codex
+    title: GPT 5.5 Codex
+    priority: 100
+    provider_template: codex.responses
+    match:
+      model_ids:
+        - gpt-5.5
+        - gpt-5.5-openai-compact
+      protocols:
+        - codex
+    capability:
+      max_context_tokens: 272000
+      auto_compact_token_limit: 200000
+      input_modalities:
+        - text
+        - image
+      native_tools:
+        image_generation: true
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
   - id: openai.gpt-5.4.codex
     title: GPT 5.4 Codex
     priority: 100
@@ -130,7 +236,7 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 270000
+      max_context_tokens: 272000
       auto_compact_token_limit: 200000
       input_modalities:
         - text
@@ -138,8 +244,8 @@ cards:
       native_tools:
         image_generation: true
       reasoning_model: true
+      default_reasoning_effort: medium
       reasoning_efforts:
-        - none
         - low
         - medium
         - high
@@ -155,7 +261,7 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 270000
+      max_context_tokens: 272000
       auto_compact_token_limit: 200000
       input_modalities:
         - text
@@ -163,8 +269,8 @@ cards:
       native_tools:
         image_generation: true
       reasoning_model: true
+      default_reasoning_effort: medium
       reasoning_efforts:
-        - none
         - low
         - medium
         - high
@@ -182,14 +288,14 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 270000
+      max_context_tokens: 272000
       auto_compact_token_limit: 200000
       input_modalities:
         - text
         - image
       reasoning_model: true
+      default_reasoning_effort: medium
       reasoning_efforts:
-        - none
         - low
         - medium
         - high
@@ -206,14 +312,13 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 270000
+      max_context_tokens: 272000
       auto_compact_token_limit: 200000
       input_modalities:
         - text
         - image
       reasoning_model: true
       reasoning_efforts:
-        - none
         - low
         - medium
         - high
@@ -229,37 +334,12 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 270000
+      max_context_tokens: 272000
       auto_compact_token_limit: 200000
       input_modalities:
         - text
       reasoning_model: true
       reasoning_efforts:
-        - none
-        - low
-        - medium
-        - high
-        - xhigh
-
-  - id: openai.gpt-5.5.codex
-    title: GPT 5.5 Codex
-    priority: 90
-    provider_template: codex.responses
-    match:
-      model_ids:
-        - gpt-5.5
-        - gpt-5.5-openai-compact
-      protocols:
-        - codex
-    capability:
-      max_context_tokens: 270000
-      auto_compact_token_limit: 200000
-      input_modalities:
-        - text
-        - image
-      reasoning_model: true
-      reasoning_efforts:
-        - none
         - low
         - medium
         - high
@@ -275,13 +355,16 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 270000
+      max_context_tokens: 272000
       auto_compact_token_limit: 200000
       input_modalities:
         - text
+        - image
+      native_tools:
+        image_generation: true
       reasoning_model: true
+      default_reasoning_effort: medium
       reasoning_efforts:
-        - none
         - low
         - medium
         - high
@@ -483,6 +566,105 @@ cards:
         - anthropic.claude-*
       protocols:
         - anthropic
+    capability:
+      input_modalities:
+        - text
+
+  - id: xai.grok-4.5.openai
+    title: Grok 4.5 OpenAI Compatible
+    priority: 100
+    provider_template: openai.chat
+    match:
+      model_ids:
+        - grok-4.5
+      aliases:
+        - grok-4-5
+      model_patterns:
+        - grok-4.5*
+        - grok-4-5*
+      protocols:
+        - openai
+    capability:
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+
+  - id: xai.grok-4.5.anthropic
+    title: Grok 4.5 Anthropic Compatible
+    priority: 100
+    provider_template: anthropic.messages
+    match:
+      model_ids:
+        - grok-4.5
+      aliases:
+        - grok-4-5
+      model_patterns:
+        - grok-4.5*
+        - grok-4-5*
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+
+  - id: xai.grok-4.5.codex
+    title: Grok 4.5 Codex Compatible
+    priority: 100
+    provider_template: codex.responses
+    match:
+      model_ids:
+        - grok-4.5
+      aliases:
+        - grok-4-5
+      model_patterns:
+        - grok-4.5*
+        - grok-4-5*
+      protocols:
+        - codex
+    capability:
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+
+  - id: xai.grok.openai-pattern
+    title: Grok OpenAI Compatible Models
+    priority: 10
+    provider_template: openai.chat
+    match:
+      model_patterns:
+        - grok-*
+      protocols:
+        - openai
+    capability:
+      input_modalities:
+        - text
+
+  - id: xai.grok.anthropic-pattern
+    title: Grok Anthropic Compatible Models
+    priority: 10
+    provider_template: anthropic.messages
+    match:
+      model_patterns:
+        - grok-*
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+
+  - id: xai.grok.codex-pattern
+    title: Grok Codex Compatible Models
+    priority: 10
+    provider_template: codex.responses
+    match:
+      model_patterns:
+        - grok-*
+      protocols:
+        - codex
     capability:
       input_modalities:
         - text

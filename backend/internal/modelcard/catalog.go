@@ -66,6 +66,11 @@ type Context struct {
 	BaseURL          string
 }
 
+type RecommendedProviderTemplateMatch struct {
+	Template ProviderTemplate
+	Applied  []AppliedCard
+}
+
 type AppliedCard struct {
 	CardID           string   `json:"card_id"`
 	ProviderTemplate string   `json:"provider_template,omitempty"`
@@ -294,9 +299,9 @@ func (c *Catalog) ProviderTemplateList() []ProviderTemplate {
 	return out
 }
 
-func (c *Catalog) RecommendedProviderTemplate(ctx Context, modelID string) (ProviderTemplate, []AppliedCard, bool) {
+func (c *Catalog) RecommendedProviderTemplates(ctx Context, modelID string) []RecommendedProviderTemplateMatch {
 	if c == nil || strings.TrimSpace(modelID) == "" {
-		return ProviderTemplate{}, nil, false
+		return nil
 	}
 	matches := make([]matchedCard, 0)
 	for _, card := range c.Cards {
@@ -313,19 +318,35 @@ func (c *Catalog) RecommendedProviderTemplate(ctx Context, modelID string) (Prov
 		matches = append(matches, matchedCard{Card: card, Score: score})
 	}
 	sortMatchedCards(matches)
+
+	out := make([]RecommendedProviderTemplateMatch, 0)
+	seenTemplates := make(map[string]struct{})
 	for _, match := range matches {
+		templateID := strings.ToLower(strings.TrimSpace(match.Card.ProviderTemplate))
+		if templateID == "" {
+			continue
+		}
+		if _, seen := seenTemplates[templateID]; seen {
+			continue
+		}
 		template, ok := c.ProviderTemplate(match.Card.ProviderTemplate)
 		if !ok {
 			continue
 		}
-		applied := []AppliedCard{{
-			CardID:           strings.TrimSpace(match.Card.ID),
-			ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
-			Fields:           CapabilityFieldNames(match.Card.Capability),
-			Score:            match.Score,
-			Fallback:         match.Card.Fallback,
-		}}
-		return template, applied, true
+		seenTemplates[templateID] = struct{}{}
+		out = append(out, RecommendedProviderTemplateMatch{
+			Template: template,
+			Applied: []AppliedCard{{
+				CardID:           strings.TrimSpace(match.Card.ID),
+				ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
+				Fields:           CapabilityFieldNames(match.Card.Capability),
+				Score:            match.Score,
+				Fallback:         match.Card.Fallback,
+			}},
+		})
+	}
+	if len(out) > 0 {
+		return out
 	}
 	for _, match := range c.fallbackMatches(ctx) {
 		if strings.TrimSpace(match.Card.ProviderTemplate) == "" {
@@ -335,16 +356,26 @@ func (c *Catalog) RecommendedProviderTemplate(ctx Context, modelID string) (Prov
 		if !ok {
 			continue
 		}
-		applied := []AppliedCard{{
-			CardID:           strings.TrimSpace(match.Card.ID),
-			ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
-			Fields:           CapabilityFieldNames(match.Card.Capability),
-			Score:            match.Score,
-			Fallback:         match.Card.Fallback,
+		return []RecommendedProviderTemplateMatch{{
+			Template: template,
+			Applied: []AppliedCard{{
+				CardID:           strings.TrimSpace(match.Card.ID),
+				ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
+				Fields:           CapabilityFieldNames(match.Card.Capability),
+				Score:            match.Score,
+				Fallback:         match.Card.Fallback,
+			}},
 		}}
-		return template, applied, true
 	}
-	return ProviderTemplate{}, nil, false
+	return nil
+}
+
+func (c *Catalog) RecommendedProviderTemplate(ctx Context, modelID string) (ProviderTemplate, []AppliedCard, bool) {
+	matches := c.RecommendedProviderTemplates(ctx, modelID)
+	if len(matches) == 0 {
+		return ProviderTemplate{}, nil, false
+	}
+	return matches[0].Template, matches[0].Applied, true
 }
 
 func (c *Catalog) fallbackMatches(ctx Context) []matchedCard {

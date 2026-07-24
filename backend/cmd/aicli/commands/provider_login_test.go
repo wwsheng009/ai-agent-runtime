@@ -196,7 +196,7 @@ func TestRunProviderLogin_AppliesBuiltinModelCard(t *testing.T) {
 		t.Fatalf("expected model card applied, got %+v", result)
 	}
 	capability := cfg.Providers.Items["codex"].ModelCapabilities["gpt-5.4"]
-	if capability.MaxContextTokens != 270000 || capability.AutoCompactTokenLimit != 200000 || !capability.NativeTools.ImageGeneration {
+	if capability.MaxContextTokens != 272000 || capability.AutoCompactTokenLimit != 200000 || !capability.NativeTools.ImageGeneration {
 		t.Fatalf("unexpected model-card capability: %+v", capability)
 	}
 	if strings.Join(capability.InputModalities, ",") != "text,image" {
@@ -209,7 +209,7 @@ func TestRunProviderLogin_AppliesBuiltinModelCard(t *testing.T) {
 	text := string(content)
 	for _, expected := range []string{
 		"gpt-5.4:",
-		"max_context_tokens: 270000",
+		"max_context_tokens: 272000",
 		"auto_compact_token_limit: 200000",
 		"image_generation: true",
 	} {
@@ -230,6 +230,9 @@ func TestRunProviderLogin_OpenAICompatibleCodexModelsUseCodexTemplate(t *testing
 		"gpt-5.4-openai-compact",
 		"gpt-5.5",
 		"gpt-5.5-openai-compact",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
@@ -285,7 +288,7 @@ func TestRunProviderLogin_OpenAICompatibleCodexModelsUseCodexTemplate(t *testing
 		if !ok {
 			t.Fatalf("missing capability for %s: %+v", model, provider.ModelCapabilities)
 		}
-		if capability.MaxContextTokens != 270000 || capability.AutoCompactTokenLimit != 200000 || !capability.ReasoningModel {
+		if capability.MaxContextTokens != 272000 || capability.AutoCompactTokenLimit != 200000 || !capability.ReasoningModel {
 			t.Fatalf("unexpected capability for %s: %+v", model, capability)
 		}
 	}
@@ -728,6 +731,75 @@ func TestRunProviderLogin_OpenAIProtocolDoesNotUseAutoImageKeywordHeuristic(t *t
 	}
 	if _, exists := cfg.Providers.Items["openai_image_name_openai_image"]; exists {
 		t.Fatalf("explicit openai login should not create auto image group")
+	}
+}
+
+func TestRunProviderLogin_AutoGroupsGrokAcrossCompatibleProtocols(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"grok-4.5"},{"id":"claude-sonnet-4-6"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "auto_grok",
+		LoginProtocol: "auto",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || result.Protocol != "openai" {
+		t.Fatalf("auto should resolve to primary openai provider, got %+v", result)
+	}
+
+	providers := cfg.Providers.Items
+	primary := providers["auto_grok"]
+	if primary.Protocol != "openai" {
+		t.Fatalf("unexpected primary protocol: %+v", primary)
+	}
+	// grok-4.5 should appear in openai primary group together with gpt-4.1
+	if !containsString(primary.SupportedModels, "gpt-4.1") || !containsString(primary.SupportedModels, "grok-4.5") {
+		t.Fatalf("expected primary openai group to include gpt-4.1 and grok-4.5, got %+v", primary.SupportedModels)
+	}
+
+	anthropic, ok := providers["auto_grok_anthropic"]
+	if !ok {
+		t.Fatalf("expected anthropic grouped provider, got %+v", providers)
+	}
+	if anthropic.Protocol != "anthropic" || anthropic.APIPath != "/v1/messages" {
+		t.Fatalf("unexpected anthropic provider: %+v", anthropic)
+	}
+	if !containsString(anthropic.SupportedModels, "grok-4.5") || !containsString(anthropic.SupportedModels, "claude-sonnet-4-6") {
+		t.Fatalf("expected anthropic group to include grok-4.5 and claude-sonnet-4-6, got %+v", anthropic.SupportedModels)
+	}
+
+	codex, ok := providers["auto_grok_codex"]
+	if !ok {
+		t.Fatalf("expected codex grouped provider, got %+v", providers)
+	}
+	if codex.Protocol != "codex" || codex.APIPath != "/v1/responses" {
+		t.Fatalf("unexpected codex provider: %+v", codex)
+	}
+	if strings.Join(codex.SupportedModels, ",") != "grok-4.5" {
+		t.Fatalf("expected codex group to only include grok-4.5, got %+v", codex.SupportedModels)
+	}
+
+	// Ensure multi-group expansion created at least openai/anthropic/codex providers.
+	if len(result.ProviderConfigs) < 3 {
+		t.Fatalf("expected multi-protocol provider configs, got %+v", result.ProviderConfigs)
 	}
 }
 
