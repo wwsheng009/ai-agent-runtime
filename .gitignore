@@ -34,6 +34,7 @@ logs/
 dist/
 build/
 output/
+artifacts/
 
 # runtime-server embeds generated frontend files; only keep the build placeholder.
 !backend/internal/webui/dist/

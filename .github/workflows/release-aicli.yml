@@ -80,7 +80,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path "output/release-gate/logs" | Out-Null
+          $gateOutput = "output/release-gate"
+          $evidenceRoot = "artifacts/release-gate"
+          New-Item -ItemType Directory -Force -Path (Join-Path $gateOutput "logs") | Out-Null
+          New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
 
           $sha = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) {
             $env:GITHUB_SHA.Trim()
@@ -90,6 +93,7 @@ jobs:
           $version = "gate-" + $sha.Substring(0, [Math]::Min(12, $sha.Length))
           $gateArgs = @(
             "-Version", $version,
+            "-OutputDir", $gateOutput,
             "-PlaywrightVersion", $env:PLAYWRIGHT_CLI_VERSION,
             "-StepTimeoutSeconds", "1200"
           )
@@ -115,7 +119,7 @@ jobs:
             }
           } catch {
             $msg = $_.Exception.Message
-            $bootLog = "output/release-gate/logs/bootstrap-failure.log"
+            $bootLog = Join-Path $gateOutput "logs/bootstrap-failure.txt"
             @(
               "Release gate bootstrap/run failed.",
               "version=$version",
@@ -123,8 +127,35 @@ jobs:
               "message=$msg",
               "exception=$($_.Exception.ToString())"
             ) | Set-Content -LiteralPath $bootLog -Encoding utf8
-            Write-Error $msg
+            # Prefer host output + explicit exit so Stop-mode Write-Error cannot
+            # rethrow before the finally staging block finishes.
+            Write-Host "::error::Release gate failed: $msg"
             exit 1
+          }
+          finally {
+            # Stage evidence outside gitignored output/ so diagnosis files are easy
+            # to collect even when only partial gate output exists.
+            if (Test-Path -LiteralPath $evidenceRoot) {
+              Remove-Item -LiteralPath $evidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+            if (Test-Path -LiteralPath $gateOutput) {
+              Copy-Item -Path (Join-Path $gateOutput '*') -Destination $evidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            $manifest = Join-Path $evidenceRoot "upload-manifest.txt"
+            $files = @()
+            if (Test-Path -LiteralPath $evidenceRoot) {
+              $files = @(Get-ChildItem -LiteralPath $evidenceRoot -Recurse -File | ForEach-Object {
+                $_.FullName.Substring((Resolve-Path $evidenceRoot).Path.Length + 1)
+              })
+            }
+            @(
+              "gate_output=$gateOutput",
+              "evidence_root=$evidenceRoot",
+              "file_count=$($files.Count)",
+              "files:"
+            ) + $files | Set-Content -LiteralPath $manifest -Encoding utf8
+            Write-Host "Staged release-gate evidence: $($files.Count) files under $evidenceRoot"
           }
 
       - name: Upload release gate evidence
@@ -132,7 +163,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-gate-evidence
-          path: output/release-gate/**
+          path: artifacts/release-gate/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 

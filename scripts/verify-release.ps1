@@ -148,6 +148,55 @@ exit $exitCode
     [System.IO.File]::WriteAllText($Path, $source + "`n", $utf8)
 }
 
+function Resolve-PowerShellExecutable {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    try {
+        $mainModule = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if (-not [string]::IsNullOrWhiteSpace($mainModule)) {
+            [void]$candidates.Add($mainModule)
+        }
+    }
+    catch {
+        # MainModule can be unavailable under some Linux process-permission contexts.
+    }
+
+    foreach ($commandName in @("pwsh", "pwsh.exe", "powershell", "powershell.exe")) {
+        $resolved = Get-Command $commandName -ErrorAction SilentlyContinue
+        if ($null -ne $resolved -and -not [string]::IsNullOrWhiteSpace([string]$resolved.Source)) {
+            [void]$candidates.Add([string]$resolved.Source)
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PSHOME)) {
+        foreach ($leaf in @("pwsh", "pwsh.exe", "powershell", "powershell.exe")) {
+            [void]$candidates.Add((Join-Path $PSHOME $leaf))
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    throw "Unable to resolve a PowerShell executable for native step execution."
+}
+
+function ConvertTo-ProcessArgumentString {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    return ($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -match '[\s"]') {
+            '"' + ($value -replace '"', '\"') + '"'
+        } else {
+            $value
+        }
+    }) -join ' '
+}
+
 function Invoke-NativeCommandWithTimeout {
     param(
         [Parameter(Mandatory = $true)][string]$RunnerPath,
@@ -174,17 +223,34 @@ function Invoke-NativeCommandWithTimeout {
     $stderr = ""
     try {
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $startInfo.FileName = if (-not [string]::IsNullOrWhiteSpace($script:powerShellExecutable)) {
+            $script:powerShellExecutable
+        } else {
+            Resolve-PowerShellExecutable
+        }
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
-        foreach ($argument in @(
+        $runnerArguments = @(
             "-NoLogo", "-NoProfile", "-NonInteractive", "-File", $RunnerPath,
             "-InvocationPath", $InvocationPath
-        )) {
-            [void]$startInfo.ArgumentList.Add($argument)
+        )
+        $argumentList = $null
+        try {
+            $argumentList = $startInfo.ArgumentList
+        }
+        catch {
+            $argumentList = $null
+        }
+        if ($null -ne $argumentList) {
+            foreach ($argument in $runnerArguments) {
+                [void]$argumentList.Add($argument)
+            }
+        }
+        else {
+            $startInfo.Arguments = ConvertTo-ProcessArgumentString -Arguments $runnerArguments
         }
 
         $process = New-Object System.Diagnostics.Process
@@ -243,7 +309,7 @@ function Invoke-NativeStep {
     Write-Host "==> $Name"
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $safeName = $Name -replace '[^0-9A-Za-z._-]', '-'
-    $logPath = Join-Path $script:logsDir "$safeName.log"
+    $logPath = Join-Path $script:logsDir "$safeName.txt"
     $invocationPath = Join-Path $script:logsDir "$safeName.invocation.json"
     $lines = @()
     $exitCode = -1
@@ -302,6 +368,12 @@ function Invoke-NativeStep {
     else {
         "command failed with exit code $exitCode"
     }
+    if (-not $passed) {
+        Write-Host "!! $Name failed (exit=$exitCode timed_out=$timedOut)"
+        foreach ($line in @($lines | Select-Object -Last 40)) {
+            Write-Host $line
+        }
+    }
     Add-StepResult -Name $Name -Passed $passed -ExitCode $exitCode `
         -DurationMs $watch.ElapsedMilliseconds -LogPath $relativeLog `
         -Detail $detail -TimedOut $timedOut -TimeoutSeconds $TimeoutSeconds
@@ -318,7 +390,7 @@ function Invoke-InternalStep {
     Write-Host "==> $Name"
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $safeName = $Name -replace '[^0-9A-Za-z._-]', '-'
-    $logPath = Join-Path $script:logsDir "$safeName.log"
+    $logPath = Join-Path $script:logsDir "$safeName.txt"
     $passed = $false
     $detail = ""
     try {
@@ -335,6 +407,12 @@ function Invoke-InternalStep {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($logPath, $detail + "`n", $utf8)
     $relativeLog = Get-ReportRelativePath -Path $logPath
+    if (-not $passed) {
+        Write-Host "!! $Name failed"
+        foreach ($line in @(($detail -split "`r?`n") | Select-Object -Last 40)) {
+            Write-Host $line
+        }
+    }
     Add-StepResult -Name $Name -Passed $passed -ExitCode $(if ($passed) { 0 } else { 1 }) `
         -DurationMs $watch.ElapsedMilliseconds -LogPath $relativeLog -Detail $detail
     if (-not $passed) {
@@ -397,6 +475,7 @@ New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 New-Item -ItemType Directory -Path $packageOutput -Force | Out-Null
 $nativeStepRunnerPath = Join-Path $outputRoot ".native-step-runner.ps1"
 Write-NativeStepRunner -Path $nativeStepRunnerPath
+$script:powerShellExecutable = Resolve-PowerShellExecutable
 
 $oldGoMaxProcs = $env:GOMAXPROCS
 $oldCgoEnabled = $env:CGO_ENABLED
@@ -424,6 +503,7 @@ try {
             throw "Required command '$commandName' was not found in PATH."
         }
     }
+    Write-Host "Native step PowerShell: $script:powerShellExecutable"
     $env:GOMAXPROCS = "2"
     $env:CGO_ENABLED = "0"
 
