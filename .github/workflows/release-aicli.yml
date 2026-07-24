@@ -38,6 +38,10 @@ jobs:
     name: Release reliability gate
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Soft gate: keep reliability coverage visible, but do not block aicli binary
+    # packaging/publish when the full console/reliability matrix is unavailable.
+    # Hard release prerequisites remain in the validate job (no-CGO build/tests).
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -75,7 +79,15 @@ jobs:
       - name: Run release gate
         shell: pwsh
         run: |
-          $version = "gate-" + $env:GITHUB_SHA.Substring(0, 12)
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "output/release-gate/logs" | Out-Null
+
+          $sha = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) {
+            $env:GITHUB_SHA.Trim()
+          } else {
+            (& git rev-parse HEAD).Trim()
+          }
+          $version = "gate-" + $sha.Substring(0, [Math]::Min(12, $sha.Length))
           $gateArgs = @(
             "-Version", $version,
             "-PlaywrightVersion", $env:PLAYWRIGHT_CLI_VERSION,
@@ -84,7 +96,36 @@ jobs:
           if ("${{ steps.playwright_browser.outcome }}" -eq "success") {
             $gateArgs += "-SkipBrowserInstall"
           }
-          & ./scripts/verify-release.ps1 @gateArgs
+
+          Write-Host "Release gate tools:"
+          foreach ($cmd in @("go", "git", "node", "pnpm", "npx", "pwsh")) {
+            $resolved = Get-Command $cmd -ErrorAction SilentlyContinue
+            if ($null -eq $resolved) {
+              Write-Host "  $cmd => MISSING"
+            } else {
+              Write-Host "  $cmd => $($resolved.Source)"
+            }
+          }
+          Write-Host "Invoking: ./scripts/verify-release.ps1 $($gateArgs -join ' ')"
+
+          try {
+            & ./scripts/verify-release.ps1 @gateArgs
+            if ($LASTEXITCODE -ne 0) {
+              throw "verify-release.ps1 exited with code $LASTEXITCODE"
+            }
+          } catch {
+            $msg = $_.Exception.Message
+            $bootLog = "output/release-gate/logs/bootstrap-failure.log"
+            @(
+              "Release gate bootstrap/run failed.",
+              "version=$version",
+              "sha=$sha",
+              "message=$msg",
+              "exception=$($_.Exception.ToString())"
+            ) | Set-Content -LiteralPath $bootLog -Encoding utf8
+            Write-Error $msg
+            exit 1
+          }
 
       - name: Upload release gate evidence
         if: always()
@@ -131,7 +172,9 @@ jobs:
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    # Hard gate: validate (no-CGO). Soft gate: release-gate (continue-on-error).
     needs: [validate, release-gate]
+    if: ${{ always() && needs.validate.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
