@@ -677,6 +677,9 @@ func TestSessionAgentController_WaitUsesEventStoreWakeup(t *testing.T) {
 		require.NotNil(t, result)
 		assert.Equal(t, "api-event-store-wait-child", result.MatchedSessionID)
 		assert.Equal(t, 1, result.ReadyCount)
+		assert.Equal(t, []string{"api-event-store-wait-child"}, result.ReadyIDs)
+		assert.Equal(t, "consume_ready_outputs", result.NextAction)
+		assert.Positive(t, result.WaitedMs)
 	case <-time.After(450 * time.Millisecond):
 		t.Fatal("wait_agent did not wake from event store append")
 	}
@@ -790,6 +793,8 @@ func TestSessionAgentController_WaitWithoutTargetUsesParentMailbox(t *testing.T)
 		assert.Equal(t, int64(1), result.Event.Seq)
 		assert.Equal(t, int64(1), result.Event.Payload["mailbox_seq"])
 		assert.Equal(t, "api parent mailbox hello", result.Event.Payload["body"])
+		assert.Equal(t, "consume_mailbox_events", result.NextAction)
+		assert.Positive(t, result.WaitedMs)
 	case <-time.After(450 * time.Millisecond):
 		t.Fatal("wait_agent did not wake from parent mailbox event")
 	}

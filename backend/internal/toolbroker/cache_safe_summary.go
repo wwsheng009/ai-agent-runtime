@@ -235,6 +235,18 @@ func agentWaitCacheSafeSummary(result *AgentWaitResult) string {
 	if result.TimedOut {
 		lines = append(lines, "Wait timed out before a ready agent was found.")
 	}
+	if len(result.ReadyIDs) > 0 {
+		lines = append(lines, "Ready ids: "+strings.Join(result.ReadyIDs, ", ")+".")
+	}
+	if len(result.PendingIDs) > 0 {
+		lines = append(lines, "Pending ids: "+strings.Join(result.PendingIDs, ", ")+".")
+	}
+	if result.WaitedMs > 0 {
+		lines = append(lines, fmt.Sprintf("Waited: %d ms.", result.WaitedMs))
+	}
+	if nextAction := strings.TrimSpace(result.NextAction); nextAction != "" {
+		lines = append(lines, "Next action: "+nextAction+".")
+	}
 	if result.Event != nil {
 		lines[0] = fmt.Sprintf("Waited on parent mailbox. Events: %d.", len(result.Events))
 		lines = append(lines, fmt.Sprintf("Event: %s", result.Event.Type))

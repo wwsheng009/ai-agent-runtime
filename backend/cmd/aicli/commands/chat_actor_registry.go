@@ -1768,6 +1768,7 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	if args.MailboxOnly {
 		return r.waitForLocalAgentMailbox(ctx, args)
 	}
+	startedAt := time.Now()
 	sessionIDs := normalizeLocalAgentWaitIDs(args)
 	if len(sessionIDs) == 0 {
 		return nil, fmt.Errorf("id is required")
@@ -1793,6 +1794,8 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	defer unsubscribe()
 	for {
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
+		readyIDs := make([]string, 0, len(sessionIDs))
+		pendingIDs := make([]string, 0, len(sessionIDs))
 		var matched *toolbroker.AgentStatusResult
 		readyCount := 0
 		for _, sessionID := range sessionIDs {
@@ -1806,27 +1809,32 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 			snapshots = append(snapshots, *result)
 			if isLocalAgentWaitReady(result.Status) {
 				readyCount++
+				readyIDs = append(readyIDs, firstNonEmptyChatValue(result.ID, result.SessionID, sessionID))
 				if matched == nil {
 					cloned := *result
 					matched = &cloned
 				}
+			} else {
+				pendingIDs = append(pendingIDs, firstNonEmptyChatValue(result.ID, result.SessionID, sessionID))
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
 			Agents:       snapshots,
 			ReadyCount:   readyCount,
 			PendingCount: len(snapshots) - readyCount,
+			ReadyIDs:     readyIDs,
+			PendingIDs:   pendingIDs,
 		}
 		if matched != nil {
 			waitResult.Agent = matched
 			waitResult.MatchedID = matched.ID
 			waitResult.MatchedSessionID = matched.SessionID
-			return waitResult, nil
+			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		}
 		select {
 		case <-waitCtx.Done():
 			waitResult.TimedOut = true
-			return waitResult, nil
+			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}
@@ -1841,6 +1849,7 @@ func (r *localActorRegistry) waitForLocalAgentMailbox(ctx context.Context, args 
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
+	startedAt := time.Now()
 	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		defaultWaitMs := r.localAgentsConfig().DefaultWaitTimeoutMs
@@ -1858,12 +1867,12 @@ func (r *localActorRegistry) waitForLocalAgentMailbox(ctx context.Context, args 
 			return nil, err
 		} else if ok {
 			if result := buildLocalAgentMailboxWaitResult(sessionID, events); result != nil {
-				return result, nil
+				return toolbroker.FinalizeAgentWaitResult(result, startedAt), nil
 			}
 			if hasMailboxRows {
 				select {
 				case <-waitCtx.Done():
-					return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+					return toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{TimedOut: true}, startedAt), nil
 				case <-wakeCh:
 				case <-time.After(500 * time.Millisecond):
 				}
@@ -1875,11 +1884,11 @@ func (r *localActorRegistry) waitForLocalAgentMailbox(ctx context.Context, args 
 			return nil, err
 		}
 		if result := buildLocalAgentMailboxWaitResult(sessionID, events); result != nil {
-			return result, nil
+			return toolbroker.FinalizeAgentWaitResult(result, startedAt), nil
 		}
 		select {
 		case <-waitCtx.Done():
-			return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+			return toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{TimedOut: true}, startedAt), nil
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}

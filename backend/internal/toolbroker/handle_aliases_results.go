@@ -46,6 +46,18 @@ func aliasAgentWaitResult(result *AgentWaitResult, aliases *handleAliasRegistry)
 	}
 	cloned.MatchedID = aliasSessionValue(cloned.MatchedID, aliases)
 	cloned.MatchedSessionID = aliasSessionValue(cloned.MatchedSessionID, aliases)
+	if len(result.ReadyIDs) > 0 {
+		cloned.ReadyIDs = make([]string, len(result.ReadyIDs))
+		for index, value := range result.ReadyIDs {
+			cloned.ReadyIDs[index] = aliasSessionValue(value, aliases)
+		}
+	}
+	if len(result.PendingIDs) > 0 {
+		cloned.PendingIDs = make([]string, len(result.PendingIDs))
+		for index, value := range result.PendingIDs {
+			cloned.PendingIDs[index] = aliasSessionValue(value, aliases)
+		}
+	}
 	return &cloned
 }
 

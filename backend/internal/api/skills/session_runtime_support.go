@@ -1205,6 +1205,7 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	if args.MailboxOnly {
 		return c.waitForMailboxEvent(ctx, args)
 	}
+	startedAt := time.Now()
 	sessionIDs := normalizeAgentWaitIDs(args)
 	if len(sessionIDs) == 0 {
 		return nil, fmt.Errorf("id is required")
@@ -1230,6 +1231,8 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	defer unsubscribe()
 	for {
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
+		readyIDs := make([]string, 0, len(sessionIDs))
+		pendingIDs := make([]string, 0, len(sessionIDs))
 		var matched *toolbroker.AgentStatusResult
 		readyCount := 0
 		for _, sessionID := range sessionIDs {
@@ -1243,27 +1246,32 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 			snapshots = append(snapshots, *result)
 			if isAgentWaitReady(result.Status) {
 				readyCount++
+				readyIDs = append(readyIDs, firstNonEmptyString(result.ID, result.SessionID, sessionID))
 				if matched == nil {
 					cloned := *result
 					matched = &cloned
 				}
+			} else {
+				pendingIDs = append(pendingIDs, firstNonEmptyString(result.ID, result.SessionID, sessionID))
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
 			Agents:       snapshots,
 			ReadyCount:   readyCount,
 			PendingCount: len(snapshots) - readyCount,
+			ReadyIDs:     readyIDs,
+			PendingIDs:   pendingIDs,
 		}
 		if matched != nil {
 			waitResult.Agent = matched
 			waitResult.MatchedID = matched.ID
 			waitResult.MatchedSessionID = matched.SessionID
-			return waitResult, nil
+			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		}
 		select {
 		case <-waitCtx.Done():
 			waitResult.TimedOut = true
-			return waitResult, nil
+			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}
@@ -1278,6 +1286,7 @@ func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args t
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
+	startedAt := time.Now()
 	store := c.handler.getSessionEventStore()
 	if store == nil {
 		return nil, fmt.Errorf("session event store not configured")
@@ -1299,12 +1308,12 @@ func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args t
 			return nil, err
 		} else if ok {
 			if result := buildMailboxWaitResult(sessionID, events); result != nil {
-				return result, nil
+				return toolbroker.FinalizeAgentWaitResult(result, startedAt), nil
 			}
 			if hasMailboxRows {
 				select {
 				case <-waitCtx.Done():
-					return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+					return toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{TimedOut: true}, startedAt), nil
 				case <-wakeCh:
 				case <-time.After(500 * time.Millisecond):
 				}
@@ -1316,11 +1325,11 @@ func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args t
 			return nil, err
 		}
 		if result := buildMailboxWaitResult(sessionID, events); result != nil {
-			return result, nil
+			return toolbroker.FinalizeAgentWaitResult(result, startedAt), nil
 		}
 		select {
 		case <-waitCtx.Done():
-			return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+			return toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{TimedOut: true}, startedAt), nil
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}

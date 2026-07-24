@@ -2251,6 +2251,10 @@ type SessionAgentWaitResult struct {
 	TimedOut         bool                `json:"timed_out,omitempty"`
 	ReadyCount       int                 `json:"ready_count,omitempty"`
 	PendingCount     int                 `json:"pending_count,omitempty"`
+	ReadyIDs         []string            `json:"ready_ids,omitempty"`
+	PendingIDs       []string            `json:"pending_ids,omitempty"`
+	WaitedMs         int64               `json:"waited_ms,omitempty"`
+	NextAction       string              `json:"next_action,omitempty"`
 }
 
 type WaitSessionAgentsResponse struct {

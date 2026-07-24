@@ -1994,6 +1994,9 @@ func TestLocalActorRegistry_WaitUsesEventStoreWakeup(t *testing.T) {
 		if result == nil || result.MatchedSessionID != "event-wait-child" || result.ReadyCount != 1 {
 			t.Fatalf("unexpected wait result: %#v", result)
 		}
+		if len(result.ReadyIDs) != 1 || result.ReadyIDs[0] != "event-wait-child" || result.NextAction != "consume_ready_outputs" || result.WaitedMs <= 0 {
+			t.Fatalf("expected actionable ready diagnostics: %#v", result)
+		}
 	case <-time.After(450 * time.Millisecond):
 		t.Fatal("wait did not wake from event store append")
 	}
@@ -2127,6 +2130,9 @@ func TestLocalActorRegistry_WaitWithoutTargetUsesParentMailbox(t *testing.T) {
 		}
 		if result.Event.Payload["body"] != "parent mailbox hello" {
 			t.Fatalf("unexpected mailbox event payload: %#v", result.Event.Payload)
+		}
+		if result.NextAction != "consume_mailbox_events" || result.WaitedMs <= 0 {
+			t.Fatalf("expected actionable mailbox diagnostics: %#v", result)
 		}
 	case <-time.After(450 * time.Millisecond):
 		t.Fatal("wait_agent did not wake from parent mailbox event")

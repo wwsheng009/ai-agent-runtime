@@ -145,18 +145,12 @@ Response:
       "status": "idle",
       "output": "child done"
     },
-    "agents": [
-      {
-        "session_id": "session_child",
-        "status": "idle",
-        "output": "child done"
-      }
-    ],
     "matched_id": "session_child",
     "matched_session_id": "session_child",
     "ready_count": 1,
-    "pending_count": 0,
-    "timed_out": false
+    "ready_ids": ["session_child"],
+    "waited_ms": 125,
+    "next_action": "consume_ready_outputs"
   }
 }
 ```
@@ -164,7 +158,12 @@ Response:
 说明：
 
 - 批量模式下，任一 child ready 就会返回。
+- 单目标结果通过 `agent` 返回；批量结果同时返回轻量的匹配 `agent` 和完整
+  `agents` 列表。同一份较大的 `output` 只序列化一次。
 - 超时不会报错；而是返回当前快照并带 `timed_out=true`。
+- `ready_ids` / `pending_ids` 给出精确集合；`waited_ms` 给出实际等待时间；
+  `next_action` 给出下一步调度动作。超时且仍有 pending child 时，应先继续可独立
+  工作，不要立即对未变化的目标重复等待。
 - 当请求体没有 `id` / `session_id` / `ids` / `session_ids` 时，HTTP handler 会把目标设为父 session，并启用 `mailbox_only` 模式；这用于等待 parent mailbox / collab event，而不是等待某个 child session。
 
 ### `GET /api/runtime/sessions/{id}/agents/{agent_id}`
@@ -337,6 +336,10 @@ Response:
 - `timed_out`
 - `ready_count`
 - `pending_count`
+- `ready_ids`
+- `pending_ids`
+- `waited_ms`
+- `next_action`
 
 ### `result` from `events`
 

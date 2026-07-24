@@ -201,7 +201,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a lightweight child agent session and optionally send its first prompt. This is separate from spawn_team teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -293,13 +293,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for collaboration progress. With id/ids, waits for spawn_agent child sessions to become idle, blocked, failed, or waiting_approval; a completed child's full final answer is returned in agent.output and should be consumed directly. Do not ask the child to write a report file only to recover this result. Waiting_approval needs permission handling, not repeated waiting. Without id, waits for the current parent session mailbox/collab event. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. Do not use this for spawn_team teammate ids.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent session ids or paths. Returns when the first one becomes ready."},
+						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"after_seq":   map[string]interface{}{"type": "integer", "description": "When no id is provided, wait only for parent mailbox/collab events after this session event sequence."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
@@ -348,7 +348,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a lightweight child agent session and optionally send its first prompt. This is separate from spawn_team teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -440,13 +440,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle, blocked, failed, or waiting_approval. A completed child's full final answer is returned in agent.output; consume it directly instead of asking the child to write a report file. Treat waiting_approval as a ready state that needs permission handling, not repeated waiting. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team progress and final team.summary.",
+				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. Use wait_team for spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent session ids or paths. Returns when the first one becomes ready."},
+						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
 					},
@@ -1550,6 +1550,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        waitResultStatus(result),
 			"timed_out":     result != nil && result.TimedOut,
 			"ready_count":   valueOrZeroWaitReadyCount(result),
+			"pending_count": valueOrZeroWaitPendingCount(result),
+			"waited_ms":     valueOrZeroWaitedMs(result),
+			"next_action":   valueOrEmptyWaitNextAction(result),
 			"latest_seq":    valueOrZeroWaitSeq(result),
 		}, agentWaitCacheSafeSummary(aliasedResult)), nil
 
@@ -2694,6 +2697,11 @@ func waitResultStatus(result *AgentWaitResult) string {
 	}
 	if result.Agent != nil && strings.TrimSpace(result.Agent.Status) != "" {
 		return strings.TrimSpace(result.Agent.Status)
+	}
+	for index := range result.Agents {
+		if strings.EqualFold(strings.TrimSpace(result.Agents[index].SessionID), strings.TrimSpace(result.MatchedSessionID)) && strings.TrimSpace(result.Agents[index].Status) != "" {
+			return strings.TrimSpace(result.Agents[index].Status)
+		}
 	}
 	if result.TimedOut {
 		return "timeout"

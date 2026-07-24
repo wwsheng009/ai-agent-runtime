@@ -2,6 +2,7 @@ package toolbroker
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -707,6 +708,60 @@ func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
 	}
 	if meta["status"] != "idle" {
 		t.Fatalf("unexpected wait meta: %#v", meta)
+	}
+}
+
+func TestAgentWaitResultMarshalJSONAvoidsDuplicateAgentOutputs(t *testing.T) {
+	first := AgentStatusResult{ID: "child-1", SessionID: "child-1", Status: "idle", Output: "unique-first-output"}
+	second := AgentStatusResult{ID: "child-2", SessionID: "child-2", Status: "idle", Output: "unique-second-output"}
+
+	single, err := json.Marshal(AgentWaitResult{
+		Agent:      &first,
+		Agents:     []AgentStatusResult{first},
+		ReadyCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal single wait result: %v", err)
+	}
+	if strings.Count(string(single), first.Output) != 1 || strings.Contains(string(single), `"agents"`) {
+		t.Fatalf("single wait result duplicated agent output: %s", single)
+	}
+
+	batch, err := json.Marshal(AgentWaitResult{
+		Agent:      &first,
+		Agents:     []AgentStatusResult{first, second},
+		ReadyCount: 2,
+	})
+	if err != nil {
+		t.Fatalf("marshal batch wait result: %v", err)
+	}
+	if !strings.Contains(string(batch), `"agent"`) || !strings.Contains(string(batch), `"agents"`) {
+		t.Fatalf("batch wait result lost compatibility fields: %s", batch)
+	}
+	if strings.Count(string(batch), first.Output) != 1 || strings.Count(string(batch), second.Output) != 1 {
+		t.Fatalf("batch wait result duplicated agent output: %s", batch)
+	}
+}
+
+func TestFinalizeAgentWaitResultProvidesSchedulingGuidance(t *testing.T) {
+	result := FinalizeAgentWaitResult(&AgentWaitResult{
+		Agents:       []AgentStatusResult{{ID: "child-1", Status: "running"}},
+		TimedOut:     true,
+		PendingCount: 1,
+		PendingIDs:   []string{"child-1"},
+	}, time.Now().Add(-1500*time.Millisecond))
+	if result.WaitedMs < 1400 {
+		t.Fatalf("expected measured wait duration, got %d", result.WaitedMs)
+	}
+	if result.NextAction != "continue_independent_work_before_waiting_again" {
+		t.Fatalf("unexpected timeout next action: %#v", result)
+	}
+
+	result = FinalizeAgentWaitResult(&AgentWaitResult{
+		Agent: &AgentStatusResult{ID: "child-2", Status: "waiting_approval", PendingApproval: true},
+	}, time.Now())
+	if result.NextAction != "resolve_pending_approval" {
+		t.Fatalf("approval guidance must take precedence: %#v", result)
 	}
 }
 

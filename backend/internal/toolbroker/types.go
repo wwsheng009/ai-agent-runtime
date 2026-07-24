@@ -413,6 +413,84 @@ type AgentWaitResult struct {
 	TimedOut         bool                `json:"timed_out,omitempty"`
 	ReadyCount       int                 `json:"ready_count,omitempty"`
 	PendingCount     int                 `json:"pending_count,omitempty"`
+	ReadyIDs         []string            `json:"ready_ids,omitempty"`
+	PendingIDs       []string            `json:"pending_ids,omitempty"`
+	WaitedMs         int64               `json:"waited_ms,omitempty"`
+	NextAction       string              `json:"next_action,omitempty"`
+}
+
+// MarshalJSON keeps the legacy matched-agent view without serializing the same
+// potentially large final answer twice. Batch waits retain the lightweight
+// matched agent and the complete agents list.
+func (r AgentWaitResult) MarshalJSON() ([]byte, error) {
+	type wireAgentWaitResult AgentWaitResult
+	wire := wireAgentWaitResult(r)
+	if r.Agent != nil && agentWaitListContains(r.Agents, r.Agent) {
+		if len(r.Agents) == 1 {
+			wire.Agents = nil
+		} else {
+			matched := *r.Agent
+			matched.Output = ""
+			wire.Agent = &matched
+		}
+	}
+	return json.Marshal(wire)
+}
+
+func agentWaitListContains(agents []AgentStatusResult, target *AgentStatusResult) bool {
+	if target == nil {
+		return false
+	}
+	for index := range agents {
+		if strings.TrimSpace(agents[index].SessionID) != "" && strings.EqualFold(strings.TrimSpace(agents[index].SessionID), strings.TrimSpace(target.SessionID)) {
+			return true
+		}
+		if strings.TrimSpace(agents[index].ID) != "" && strings.EqualFold(strings.TrimSpace(agents[index].ID), strings.TrimSpace(target.ID)) {
+			return true
+		}
+	}
+	return false
+}
+
+// FinalizeAgentWaitResult adds compact scheduling guidance shared by local and
+// runtime-server wait implementations.
+func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *AgentWaitResult {
+	if result == nil {
+		return nil
+	}
+	if !startedAt.IsZero() {
+		result.WaitedMs = time.Since(startedAt).Milliseconds()
+		if result.WaitedMs == 0 {
+			result.WaitedMs = 1
+		}
+	}
+	if result.Event != nil || len(result.Events) > 0 {
+		result.NextAction = "consume_mailbox_events"
+	} else if agentWaitHasPendingApproval(result) {
+		result.NextAction = "resolve_pending_approval"
+	} else if result.TimedOut && result.PendingCount > 0 {
+		result.NextAction = "continue_independent_work_before_waiting_again"
+	} else if result.ReadyCount > 0 && result.PendingCount > 0 {
+		result.NextAction = "consume_ready_outputs_and_continue_independent_work"
+	} else if result.ReadyCount > 0 {
+		result.NextAction = "consume_ready_outputs"
+	}
+	return result
+}
+
+func agentWaitHasPendingApproval(result *AgentWaitResult) bool {
+	if result == nil {
+		return false
+	}
+	if result.Agent != nil && result.Agent.PendingApproval {
+		return true
+	}
+	for index := range result.Agents {
+		if result.Agents[index].PendingApproval {
+			return true
+		}
+	}
+	return false
 }
 
 // AgentListResult reports known child-agent sessions.

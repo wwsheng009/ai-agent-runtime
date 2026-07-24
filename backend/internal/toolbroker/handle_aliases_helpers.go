@@ -32,6 +32,27 @@ func valueOrZeroWaitReadyCount(result *AgentWaitResult) int {
 	return result.ReadyCount
 }
 
+func valueOrZeroWaitPendingCount(result *AgentWaitResult) int {
+	if result == nil {
+		return 0
+	}
+	return result.PendingCount
+}
+
+func valueOrZeroWaitedMs(result *AgentWaitResult) int64 {
+	if result == nil {
+		return 0
+	}
+	return result.WaitedMs
+}
+
+func valueOrEmptyWaitNextAction(result *AgentWaitResult) string {
+	if result == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.NextAction)
+}
+
 func valueOrZeroWaitSeq(result *AgentWaitResult) int64 {
 	if result == nil {
 		return 0
