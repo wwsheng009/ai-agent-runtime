@@ -116,6 +116,10 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 	opts.PromptFlag, _ = cmd.Flags().GetString("prompt")
 	opts.StreamFlag, _ = cmd.Flags().GetBool("stream")
 	opts.StreamChanged = cmd.Flags().Changed("stream")
+	if cmd.Flags().Lookup("fast") != nil {
+		opts.FastFlag, _ = cmd.Flags().GetBool("fast")
+		opts.FastChanged = cmd.Flags().Changed("fast")
+	}
 	opts.ReasoningEffortFlag, _ = cmd.Flags().GetString("reasoning-effort")
 	opts.RuntimeModeFlag, _ = cmd.Flags().GetString("runtime-mode")
 	opts.RuntimeServerFlag, _ = cmd.Flags().GetString("runtime-server")
@@ -298,6 +302,8 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		ModelFlag:              opts.ModelFlag,
 		StreamFlag:             opts.StreamFlag,
 		StreamChanged:          opts.StreamChanged,
+		FastFlag:               opts.FastFlag,
+		FastChanged:            opts.FastChanged,
 		NoInteractive:          true,
 		Message:                opts.Prompt,
 		ImagePaths:             opts.ImagePaths,

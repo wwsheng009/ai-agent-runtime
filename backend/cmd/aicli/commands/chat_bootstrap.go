@@ -37,6 +37,7 @@ type chatRuntimeState struct {
 	reasoningWarning         string
 	shouldStream             bool
 	streamSource             chatPreferenceSource
+	fastMode                 bool
 	baseURL                  string
 	retryCfg                 RetryConfig
 	requestTimeout           time.Duration
@@ -182,12 +183,21 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	adapter := finalContext.Adapter
 
 	shouldStream, streamSource := resolveChatStreamChoice(cfg, opts, loadedRuntimeSession)
+	fastMode := resolveChatFastModeChoice(cfg, opts, loadedRuntimeSession)
 	reasoningEffort, requestedReasoningEffort, reasoningSource, warningMessage, err := resolveChatReasoningChoice(cfg, provider, modelName, opts, loadedRuntimeSession)
 	if err != nil {
 		return nil, nil, err
 	}
 	if warningMessage != "" {
 		fmt.Fprintln(os.Stderr, warningMessage)
+	}
+	// Fast only affects Codex requests; warn when the CLI flag is set on other protocols.
+	if opts != nil && opts.FastChanged && !strings.EqualFold(strings.TrimSpace(provider.GetProtocol()), "codex") {
+		protocol := strings.TrimSpace(provider.GetProtocol())
+		if protocol == "" {
+			protocol = "(unknown)"
+		}
+		fmt.Fprintf(os.Stderr, "Warning: --fast 仅对 codex 协议生效（当前: %s），请求不会注入 service_tier\n", protocol)
 	}
 	if opts.OutputFormat == "json" && shouldStream {
 		return nil, nil, fmt.Errorf("--output json 暂不支持与 --stream 同时使用")
@@ -223,6 +233,7 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 		reasoningWarning:         warningMessage,
 		shouldStream:             shouldStream,
 		streamSource:             streamSource,
+		fastMode:                 fastMode,
 		baseURL:                  buildProviderURL(provider, adapter.GetAPIPath(), modelName),
 		retryCfg:                 retryCfg,
 		requestTimeout:           requestTimeout,

@@ -15,6 +15,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -1254,6 +1255,12 @@ func (b *chatRuntimeEventBridge) applySessionCompactStatus(event runtimeevents.E
 		} else if b.session.Interaction != nil {
 			b.session.Interaction.RefreshStatus("")
 		}
+		// Auto-compact updates title lineage on the runtime session; pull the
+		// new title into the terminal notifier without waiting for the next turn.
+		if err := syncRuntimeSessionBackIntoCLI(b.session); err != nil {
+			logpkg.Debugf("failed to sync session after compact completed: %v", err)
+		}
+		refreshChatTitleMetadata(b.session)
 	case runtimechat.EventSessionCompactStarted, runtimechat.EventSessionCompactSkipped, runtimechat.EventSessionCompactFailed:
 		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
 		if windowTokens > 0 && b.session.ContextWindowTokenCount != windowTokens {
@@ -3164,6 +3171,12 @@ func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTim
 		)}
 		if checkpointID := truncateChatRuntimeText(payloadStringValue(payload["checkpoint_id"]), 80); checkpointID != "" {
 			lines[0] += " checkpoint_id=" + checkpointID
+		}
+		if generation := intPayloadValue(payload, "compact_generation"); generation > 0 {
+			lines[0] += fmt.Sprintf(" generation=%d", generation)
+		}
+		if rootTitle := truncateChatRuntimeText(payloadStringValue(payload["compact_root_title"]), 80); rootTitle != "" {
+			lines[0] += " root_title=" + rootTitle
 		}
 		if extras := runtimeContextSummaryLines(payload, true); len(extras) > 0 {
 			lines = append(lines, extras...)

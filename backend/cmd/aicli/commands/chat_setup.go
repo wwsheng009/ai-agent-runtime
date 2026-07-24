@@ -83,6 +83,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		DisableTools:             opts.DisableTools,
 		HTTPDebug:                opts.HTTPDebug,
 		Stream:                   runtimeState.shouldStream,
+		FastMode:                 runtimeState.fastMode,
 		BaseURL:                  runtimeState.baseURL,
 		Messages:                 nil,
 		HTTPClient:               httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
@@ -459,6 +460,14 @@ func printChatSessionPreamble(session *ChatSession) {
 		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", theme.SuccessColor.Sprint("on"), theme.ColorizeLabel)
 	} else {
 		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", theme.Dimmed("off"), theme.ColorizeLabel)
+	}
+	// Fast is Codex-only (service_tier=priority); never imply Stream.
+	if info.SupportsFast {
+		if info.IsFast {
+			printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Fast:", theme.SuccessColor.Sprint("on"), theme.ColorizeLabel)
+		} else {
+			printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Fast:", theme.Dimmed("off"), theme.ColorizeLabel)
+		}
 	}
 	if info.ReasoningEnabled {
 		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Reasoning:", theme.WarningColor.Sprint("enabled"), theme.ColorizeLabel)

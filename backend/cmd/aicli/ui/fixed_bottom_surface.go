@@ -2197,12 +2197,18 @@ func formatFixedStatusLine(line string, theme *Theme) string {
 		theme = GetTheme(ThemeAuto)
 	}
 
-	state, rest, hasRest := strings.Cut(line, " | ")
+	// Prefer modern Codex-style separators, then legacy pipe separators.
+	state, rest, hasRest := strings.Cut(line, " · ")
+	sep := " · "
+	if !hasRest {
+		state, rest, hasRest = strings.Cut(line, " | ")
+		sep = " | "
+	}
 	formattedState := formatFixedStatusState(state, theme)
 	if !hasRest {
 		return formattedState
 	}
-	return formattedState + theme.Dimmed(" | "+rest)
+	return formattedState + theme.Dimmed(sep+rest)
 }
 
 func formatFixedStatusState(state string, theme *Theme) string {
@@ -2210,17 +2216,21 @@ func formatFixedStatusState(state string, theme *Theme) string {
 		theme = GetTheme(ThemeAuto)
 	}
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "ready", "idle":
+	case "ready", "idle", "就绪", "已完成":
 		return theme.SuccessColor.Sprint(state)
-	case "streaming", "running", "working":
+	case "streaming", "running", "working", "输出中", "执行工具", "规划中":
 		return theme.ToolColor.Sprint(state)
-	case "thinking", "reasoning":
+	case "thinking", "reasoning", "思考":
 		return theme.ReasoningColor.Sprint(state)
-	case "waiting", "pending", "busy":
+	case "waiting", "pending", "busy", "等待", "等待审批", "等待回答", "审批", "回答", "选择", "确认", "密钥", "导航", "选择选项", "确认操作", "输入密钥", "面板导航", "停止中", "停止":
 		return theme.WarningColor.Sprint(state)
-	case "error", "failed", "interrupted", "cancelled", "canceled":
+	case "error", "failed", "interrupted", "cancelled", "canceled", "失败":
 		return theme.ErrorColor.Sprint(state)
 	default:
+		// Model-first status lines start with model name rather than run state.
+		if strings.HasPrefix(state, "执行工具") {
+			return theme.ToolColor.Sprint(state)
+		}
 		return theme.InfoColor.Sprint(state)
 	}
 }

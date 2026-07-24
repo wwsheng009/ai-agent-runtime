@@ -9,15 +9,34 @@ import (
 )
 
 const chatRuntimeContextTokenCount = sessionmeta.LegacyAICLITokenCount
+const chatRuntimeContextInputTokenCount = sessionmeta.LegacyAICLIInputTokenCount
+const chatRuntimeContextOutputTokenCount = sessionmeta.LegacyAICLIOutputTokenCount
 const chatRuntimeContextContextTokenCount = sessionmeta.LegacyAICLIContextTokenCount
 const chatRuntimeContextContextWindowTokenCount = sessionmeta.LegacyAICLIContextWindowCount
 const chatRuntimeContextTurnContextTokenCount = sessionmeta.LegacyAICLITurnContextCount
 
 func applyChatTokenUsage(session *ChatSession, usage *runtimetypes.TokenUsage) {
-	if session == nil || usage == nil || usage.TotalTokens <= 0 {
+	if session == nil || usage == nil {
 		return
 	}
-	session.TokenCount += usage.TotalTokens
+	inputTokens := usage.PromptTokens
+	outputTokens := usage.CompletionTokens
+	totalTokens := usage.TotalTokens
+	if totalTokens <= 0 {
+		totalTokens = inputTokens + outputTokens
+	}
+	if totalTokens <= 0 && inputTokens <= 0 && outputTokens <= 0 {
+		return
+	}
+	if totalTokens > 0 {
+		session.TokenCount += totalTokens
+	}
+	if inputTokens > 0 {
+		session.InputTokenCount += inputTokens
+	}
+	if outputTokens > 0 {
+		session.OutputTokenCount += outputTokens
+	}
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
@@ -36,6 +55,8 @@ func resetChatConversationTokenUsage(session *ChatSession) {
 	}
 	resetChatContextTokenUsage(session)
 	session.TokenCount = 0
+	session.InputTokenCount = 0
+	session.OutputTokenCount = 0
 }
 
 func resetChatContextTokenUsage(session *ChatSession) {
@@ -258,6 +279,16 @@ func restoreChatTokenCount(session *ChatSession, runtimeSession *runtimechat.Ses
 		session.TokenCount = count
 	} else {
 		session.TokenCount = 0
+	}
+	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextInputTokenCount); ok {
+		session.InputTokenCount = count
+	} else {
+		session.InputTokenCount = 0
+	}
+	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextOutputTokenCount); ok {
+		session.OutputTokenCount = count
+	} else {
+		session.OutputTokenCount = 0
 	}
 }
 

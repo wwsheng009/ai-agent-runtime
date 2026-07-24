@@ -1,9 +1,11 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -748,6 +750,8 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 	return buildChatSurfaceStatusLineForWidth(session, state, ui.GetTerminalWidth())
 }
 
+const chatSurfaceStatusSeparator = " · "
+
 type chatStatusSegment struct {
 	full    string
 	compact string
@@ -766,27 +770,64 @@ func buildChatSurfaceStatusLineForWidthAndInputMode(session *ChatSession, state 
 		width = 80
 	}
 
-	queuedCount, _ := queuedInteractiveInputState(session)
-	primary := []chatStatusSegment{
-		{full: chatSurfaceStateDisplay(state), compact: compactChatSurfaceState(state)},
-		{full: "权限 " + chatPermissionModeDisplay(session), compact: "权限 " + compactChatPermissionMode(session)},
-		chatInputDestinationStatusSegment(inputMode, state, queuedCount),
-	}
-	if queuedCount > 0 {
-		primary = append(primary, chatStatusSegment{full: fmt.Sprintf("队列 %d", queuedCount), compact: fmt.Sprintf("队%d", queuedCount)})
-	}
-	parts := fitRequiredChatStatusSegments(primary, width)
-
-	for _, optional := range buildOptionalChatStatusSegments(session) {
-		candidate := append(append([]string(nil), parts...), optional)
-		if ui.DisplayWidth(strings.Join(candidate, " | ")) <= width {
-			parts = candidate
-		}
-	}
-	return truncateStatusValue(strings.Join(parts, " | "), width)
+	segments := buildChatSurfaceStatusSegments(session, state, inputMode)
+	parts := fitChatSurfaceStatusSegments(segments, width)
+	return truncateStatusValue(strings.Join(parts, chatSurfaceStatusSeparator), width)
 }
 
-func fitRequiredChatStatusSegments(segments []chatStatusSegment, width int) []string {
+func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMode chatInputMode) []chatStatusSegment {
+	segments := make([]chatStatusSegment, 0, 12)
+
+	// Critical modal/running hints first so narrow widths keep them.
+	if modal := chatSurfaceModalStatusSegment(state, inputMode); modal.full != "" {
+		segments = append(segments, modal)
+	}
+	queuedCount, _ := queuedInteractiveInputState(session)
+	if queuedCount > 0 {
+		segments = append(segments, chatStatusSegment{
+			full:    fmt.Sprintf("队列 %d", queuedCount),
+			compact: fmt.Sprintf("队%d", queuedCount),
+		})
+	}
+
+	// Reference diagnostics: model · provider · Context N% · cwd · project · branch · window · in · out · Fast
+	if model := chatSurfaceModelStatusSegment(session); model.full != "" {
+		segments = append(segments, model)
+	}
+	if providerSeg := chatSurfaceProviderStatusSegment(session); providerSeg.full != "" {
+		segments = append(segments, providerSeg)
+	}
+	if contextSeg := chatSurfaceContextUsedStatusSegment(session); contextSeg.full != "" {
+		segments = append(segments, contextSeg)
+	}
+	if cwdSeg := chatSurfaceDirectoryStatusSegment(session); cwdSeg.full != "" {
+		segments = append(segments, cwdSeg)
+	}
+	if projectSeg := chatSurfaceProjectStatusSegment(session); projectSeg.full != "" {
+		segments = append(segments, projectSeg)
+	}
+	if branchSeg := chatSurfaceGitBranchStatusSegment(session); branchSeg.full != "" {
+		segments = append(segments, branchSeg)
+	}
+	if windowSeg := chatSurfaceWindowStatusSegment(session); windowSeg.full != "" {
+		segments = append(segments, windowSeg)
+	}
+	if inSeg := chatSurfaceInputTokensStatusSegment(session); inSeg.full != "" {
+		segments = append(segments, inSeg)
+	}
+	if outSeg := chatSurfaceOutputTokensStatusSegment(session); outSeg.full != "" {
+		segments = append(segments, outSeg)
+	}
+	if fastSeg := chatSurfaceFastStatusSegment(session); fastSeg.full != "" {
+		segments = append(segments, fastSeg)
+	}
+	return segments
+}
+
+func fitChatSurfaceStatusSegments(segments []chatStatusSegment, width int) []string {
+	if len(segments) == 0 {
+		return nil
+	}
 	parts := make([]string, len(segments))
 	for i, segment := range segments {
 		parts[i] = segment.compact
@@ -794,17 +835,363 @@ func fitRequiredChatStatusSegments(segments []chatStatusSegment, width int) []st
 			parts[i] = segment.full
 		}
 	}
+	// Prefer full forms from the front when width allows.
 	for i, segment := range segments {
 		if segment.full == "" || segment.full == parts[i] {
 			continue
 		}
 		candidate := append([]string(nil), parts...)
 		candidate[i] = segment.full
-		if ui.DisplayWidth(strings.Join(candidate, " | ")) <= width {
+		if ui.DisplayWidth(strings.Join(candidate, chatSurfaceStatusSeparator)) <= width {
 			parts = candidate
 		}
 	}
+	// Drop trailing optional segments until the line fits.
+	for len(parts) > 1 && ui.DisplayWidth(strings.Join(parts, chatSurfaceStatusSeparator)) > width {
+		parts = parts[:len(parts)-1]
+	}
+	// If still too wide, fall back to compact forms from the front.
+	if ui.DisplayWidth(strings.Join(parts, chatSurfaceStatusSeparator)) > width {
+		compactParts := make([]string, 0, len(parts))
+		for i := range parts {
+			value := segments[i].compact
+			if value == "" {
+				value = segments[i].full
+			}
+			compactParts = append(compactParts, value)
+		}
+		parts = compactParts
+		for len(parts) > 1 && ui.DisplayWidth(strings.Join(parts, chatSurfaceStatusSeparator)) > width {
+			parts = parts[:len(parts)-1]
+		}
+	}
 	return parts
+}
+
+func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatStatusSegment {
+	switch normalizeChatInputMode(inputMode) {
+	case chatInputModeApproval:
+		return chatStatusSegment{full: "等待审批", compact: "审批"}
+	case chatInputModeAnswer:
+		return chatStatusSegment{full: "等待回答", compact: "回答"}
+	case chatInputModeSelection:
+		return chatStatusSegment{full: "选择选项", compact: "选择"}
+	case chatInputModeConfirmation:
+		return chatStatusSegment{full: "确认操作", compact: "确认"}
+	case chatInputModeSecret:
+		return chatStatusSegment{full: "输入密钥", compact: "密钥"}
+	case chatInputModePanel:
+		return chatStatusSegment{full: "面板导航", compact: "导航"}
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		detail := strings.TrimSpace(state[len("tool "):])
+		if detail != "" {
+			return chatStatusSegment{
+				full:    "执行工具 " + detail,
+				compact: "执行工具",
+			}
+		}
+		return chatStatusSegment{full: "执行工具", compact: "执行工具"}
+	}
+	switch normalized {
+	case "ready", "completed", "idle":
+		return chatStatusSegment{}
+	case "waiting":
+		return chatStatusSegment{full: "等待", compact: "等待"}
+	case "thinking":
+		return chatStatusSegment{full: "思考", compact: "思考"}
+	case "streaming":
+		return chatStatusSegment{full: "输出中", compact: "输出中"}
+	case "planning":
+		return chatStatusSegment{full: "规划中", compact: "规划中"}
+	case "tool running":
+		return chatStatusSegment{full: "执行工具", compact: "执行工具"}
+	case "awaiting approval":
+		return chatStatusSegment{full: "等待审批", compact: "审批"}
+	case "awaiting answer":
+		return chatStatusSegment{full: "等待回答", compact: "回答"}
+	case "stopping":
+		return chatStatusSegment{full: "停止中", compact: "停止"}
+	case "failed":
+		return chatStatusSegment{full: "失败", compact: "失败"}
+	default:
+		display := chatSurfaceStateDisplay(state)
+		if display == "" || display == "就绪" {
+			return chatStatusSegment{}
+		}
+		return chatStatusSegment{full: display, compact: compactChatSurfaceState(state)}
+	}
+}
+
+func chatSurfaceModelStatusSegment(session *ChatSession) chatStatusSegment {
+	if session == nil {
+		return chatStatusSegment{}
+	}
+	model := strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model))
+	if model == "" {
+		return chatStatusSegment{}
+	}
+	effort := strings.TrimSpace(firstNonEmptyChatValue(
+		session.EffectiveReasoningEffort,
+		session.ReasoningEffort,
+		session.RequestedReasoningEffort,
+	))
+	if effort != "" {
+		effort = strings.ToLower(effort)
+		full := model + " " + effort
+		compactModel := compactStatusValue(model, 16)
+		return chatStatusSegment{
+			full:    full,
+			compact: compactModel + " " + effort,
+		}
+	}
+	return chatStatusSegment{
+		full:    model,
+		compact: compactStatusValue(model, 16),
+	}
+}
+
+func chatSurfaceProviderStatusSegment(session *ChatSession) chatStatusSegment {
+	if session == nil {
+		return chatStatusSegment{}
+	}
+	provider := strings.TrimSpace(firstNonEmptyChatValue(
+		session.EffectiveProvider,
+		session.ProviderName,
+	))
+	if provider == "" {
+		provider = strings.TrimSpace(session.Provider.GetProtocol())
+	}
+	if provider == "" {
+		return chatStatusSegment{}
+	}
+	return chatStatusSegment{
+		full:    provider,
+		compact: compactStatusValue(provider, 16),
+	}
+}
+
+func chatSurfaceContextUsedStatusSegment(session *ChatSession) chatStatusSegment {
+	if session == nil {
+		return chatStatusSegment{}
+	}
+	budget := resolveSharedChatPromptBudget(session)
+	hasWindow := budget.ActiveTurnMaxTokens > 0 ||
+		budget.ModelCapabilityMaxContextTokens > 0 ||
+		budget.ProviderContextLimit > 0 ||
+		session.ContextWindowTokenCount > 0 ||
+		session.ContextTokenCount > 0 ||
+		len(session.Messages) > 0
+	if !hasWindow {
+		return chatStatusSegment{}
+	}
+	totalWindow := resolveChatStatusContextWindowTokens(session)
+	if totalWindow <= 0 {
+		totalWindow = budget.ActiveTurnMaxTokens
+	}
+	if totalWindow <= 0 {
+		return chatStatusSegment{}
+	}
+	usedTokens := resolveChatStatusContextUsedTokens(session)
+	percent := chatStatusContextUsedPercent(usedTokens, totalWindow)
+	return chatStatusSegment{
+		full:    fmt.Sprintf("Context %d%% used", percent),
+		compact: fmt.Sprintf("Ctx %d%%", percent),
+	}
+}
+
+func chatSurfaceDirectoryStatusSegment(session *ChatSession) chatStatusSegment {
+	cwd := resolveChatStatusCurrentDirectory(session)
+	if cwd == "" {
+		return chatStatusSegment{}
+	}
+	return chatStatusSegment{
+		full:    cwd,
+		compact: compactChatStatusDirectory(cwd),
+	}
+}
+
+func chatSurfaceProjectStatusSegment(session *ChatSession) chatStatusSegment {
+	name := resolveChatStatusProjectName(session)
+	if name == "" {
+		return chatStatusSegment{}
+	}
+	return chatStatusSegment{
+		full:    name,
+		compact: compactStatusValue(name, 16),
+	}
+}
+
+func chatSurfaceGitBranchStatusSegment(session *ChatSession) chatStatusSegment {
+	branch := resolveChatStatusGitBranch(session)
+	if branch == "" {
+		return chatStatusSegment{}
+	}
+	return chatStatusSegment{
+		full:    branch,
+		compact: compactStatusValue(branch, 18),
+	}
+}
+
+func chatSurfaceWindowStatusSegment(session *ChatSession) chatStatusSegment {
+	windowTokens := resolveChatStatusContextWindowTokens(session)
+	if windowTokens <= 0 {
+		budget := resolveSharedChatPromptBudget(session)
+		windowTokens = budget.ModelCapabilityMaxContextTokens
+		if windowTokens <= 0 {
+			windowTokens = budget.ProviderContextLimit
+		}
+		if windowTokens <= 0 {
+			windowTokens = budget.ActiveTurnMaxTokens
+		}
+	}
+	if windowTokens <= 0 {
+		return chatStatusSegment{}
+	}
+	label := strings.ToUpper(compactStatusCount(windowTokens)) + " window"
+	return chatStatusSegment{full: label, compact: label}
+}
+
+func chatSurfaceInputTokensStatusSegment(session *ChatSession) chatStatusSegment {
+	inputTokens := resolveChatStatusInputTokens(session)
+	if inputTokens <= 0 {
+		return chatStatusSegment{}
+	}
+	label := strings.ToUpper(compactStatusCount(inputTokens)) + " in"
+	return chatStatusSegment{full: label, compact: label}
+}
+
+func chatSurfaceOutputTokensStatusSegment(session *ChatSession) chatStatusSegment {
+	outputTokens := resolveChatStatusOutputTokens(session)
+	if outputTokens <= 0 {
+		return chatStatusSegment{}
+	}
+	label := strings.ToUpper(compactStatusCount(outputTokens)) + " out"
+	return chatStatusSegment{full: label, compact: label}
+}
+
+func chatSurfaceFastStatusSegment(session *ChatSession) chatStatusSegment {
+	// Fast is a Codex service-tier control (service_tier=priority), not stream mode.
+	if !chatSessionSupportsFastMode(session) {
+		return chatStatusSegment{}
+	}
+	if session.FastMode {
+		return chatStatusSegment{full: "Fast on", compact: "Fast on"}
+	}
+	return chatStatusSegment{full: "Fast off", compact: "Fast off"}
+}
+
+func resolveChatStatusProjectName(session *ChatSession) string {
+	if session != nil {
+		if name := strings.TrimSpace(session.ProfileName); name != "" {
+			return name
+		}
+	}
+	cwd := resolveChatStatusCurrentDirectory(session)
+	if cwd == "" {
+		return ""
+	}
+	if root := findGitRoot(cwd); root != "" {
+		base := filepath.Base(root)
+		if base != "" && base != "." && base != string(filepath.Separator) {
+			return base
+		}
+	}
+	base := filepath.Base(filepath.Clean(cwd))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
+}
+
+func resolveChatStatusInputTokens(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	if session.InputTokenCount > 0 {
+		return session.InputTokenCount
+	}
+	usage := chatStatusTokenUsageSnapshotForSession(session)
+	return usage.Input
+}
+
+func resolveChatStatusOutputTokens(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	if session.OutputTokenCount > 0 {
+		return session.OutputTokenCount
+	}
+	usage := chatStatusTokenUsageSnapshotForSession(session)
+	return usage.Output
+}
+
+type chatStatusGitCacheEntry struct {
+	branch    string
+	checkedAt time.Time
+}
+
+var (
+	chatStatusGitCacheMu sync.Mutex
+	chatStatusGitCache   = map[string]chatStatusGitCacheEntry{}
+	// chatStatusGitBranchLookup is overridable in tests to avoid real git calls.
+	chatStatusGitBranchLookup = lookupChatStatusGitBranch
+)
+
+const chatStatusGitCacheTTL = 5 * time.Second
+const chatStatusGitLookupTimeout = 250 * time.Millisecond
+
+func resetChatStatusGitBranchCacheForTest() {
+	chatStatusGitCacheMu.Lock()
+	chatStatusGitCache = map[string]chatStatusGitCacheEntry{}
+	chatStatusGitCacheMu.Unlock()
+}
+
+func resolveChatStatusGitBranch(session *ChatSession) string {
+	cwd := resolveChatStatusCurrentDirectory(session)
+	if cwd == "" {
+		return ""
+	}
+	clean := filepath.Clean(cwd)
+
+	chatStatusGitCacheMu.Lock()
+	if entry, ok := chatStatusGitCache[clean]; ok && time.Since(entry.checkedAt) < chatStatusGitCacheTTL {
+		branch := entry.branch
+		chatStatusGitCacheMu.Unlock()
+		return branch
+	}
+	chatStatusGitCacheMu.Unlock()
+
+	branch := chatStatusGitBranchLookup(clean)
+	chatStatusGitCacheMu.Lock()
+	chatStatusGitCache[clean] = chatStatusGitCacheEntry{
+		branch:    branch,
+		checkedAt: time.Now(),
+	}
+	chatStatusGitCacheMu.Unlock()
+	return branch
+}
+
+func lookupChatStatusGitBranch(cwd string) string {
+	if strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatStatusGitLookupTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(string(output))
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+	return branch
 }
 
 func compactChatSurfaceState(state string) string {
@@ -848,38 +1235,6 @@ func chatSurfaceStateDisplay(state string) string {
 	return compactChatSurfaceState(state)
 }
 
-func chatPermissionModeDisplay(session *ChatSession) string {
-	if session == nil {
-		return "默认"
-	}
-	switch strings.TrimSpace(string(session.PermissionMode)) {
-	case "accept_edits":
-		return "允许编辑"
-	case "plan":
-		return "计划"
-	case "bypass_permissions":
-		return "完全访问"
-	default:
-		return "默认"
-	}
-}
-
-func compactChatPermissionMode(session *ChatSession) string {
-	if session == nil {
-		return "默认"
-	}
-	switch strings.TrimSpace(string(session.PermissionMode)) {
-	case "accept_edits":
-		return "编辑"
-	case "plan":
-		return "计划"
-	case "bypass_permissions":
-		return "全开"
-	default:
-		return "默认"
-	}
-}
-
 func chatInputModeForSurfaceState(state string) chatInputMode {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "awaiting approval":
@@ -889,27 +1244,6 @@ func chatInputModeForSurfaceState(state string) chatInputMode {
 	default:
 		return chatInputModeChat
 	}
-}
-
-func chatInputDestinationStatusSegment(inputMode chatInputMode, state string, queuedCount int) chatStatusSegment {
-	switch normalizeChatInputMode(inputMode) {
-	case chatInputModeApproval:
-		return chatStatusSegment{full: "输入 审批决定", compact: "审批"}
-	case chatInputModeAnswer:
-		return chatStatusSegment{full: "输入 回答问题", compact: "回答"}
-	case chatInputModeSelection:
-		return chatStatusSegment{full: "输入 选择选项", compact: "选择"}
-	case chatInputModeConfirmation:
-		return chatStatusSegment{full: "输入 确认操作", compact: "确认"}
-	case chatInputModeSecret:
-		return chatStatusSegment{full: "输入 敏感信息", compact: "密钥"}
-	case chatInputModePanel:
-		return chatStatusSegment{full: "输入 面板导航", compact: "导航"}
-	}
-	if queuedCount > 0 || chatSurfaceStateIsRunning(state) {
-		return chatStatusSegment{full: "输入 当前运行后发送", compact: "稍后发"}
-	}
-	return chatStatusSegment{full: "输入 立即发送", compact: "立即发"}
 }
 
 func chatSurfaceStateIsRunning(state string) bool {
@@ -925,45 +1259,6 @@ func chatSurfaceStateIsRunning(state string) bool {
 	}
 }
 
-func buildOptionalChatStatusSegments(session *ChatSession) []string {
-	if session == nil {
-		return nil
-	}
-	parts := make([]string, 0, 4)
-	if cwd := compactChatStatusDirectory(resolveChatStatusCurrentDirectory(session)); cwd != "" {
-		parts = append(parts, "目录 "+cwd)
-	}
-	if model := compactStatusValue(strings.TrimSpace(session.Model), 20); model != "" {
-		parts = append(parts, "模型 "+model)
-	}
-	budget := resolveSharedChatPromptBudget(session)
-	if budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.ContextTokenCount > 0 || len(session.Messages) > 0 {
-		if context := formatChatContextWindowCompactSummary(session, budget); context != "" {
-			parts = append(parts, "上下文 "+context)
-		}
-	}
-	if goalStatus := resolveChatStatusGoal(session); goalStatus != "" {
-		parts = append(parts, goalStatus)
-	}
-	return parts
-}
-
-func formatChatContextWindowCompactSummary(session *ChatSession, budget sharedChatPromptBudget) string {
-	totalWindow := resolveChatStatusContextWindowTokens(session)
-	if totalWindow <= 0 {
-		totalWindow = budget.ActiveTurnMaxTokens
-	}
-	usedTokens := resolveChatStatusContextUsedTokens(session)
-	if totalWindow <= 0 {
-		if usedTokens > 0 {
-			return compactStatusCount(usedTokens)
-		}
-		return ""
-	}
-	// Codex-aligned used% (baseline + clamp); absolute token counts stay on /status.
-	return fmt.Sprintf("%d%%", chatStatusContextUsedPercent(usedTokens, totalWindow))
-}
-
 func compactChatStatusDirectory(cwd string) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
@@ -975,33 +1270,6 @@ func compactChatStatusDirectory(cwd string) string {
 		return compactStatusValue(clean, 20)
 	}
 	return compactStatusValue(base, 20)
-}
-
-func resolveChatStatusGoal(session *ChatSession) string {
-	goal, ok, err := currentSessionGoal(session)
-	if err != nil || !ok || goal == nil {
-		return ""
-	}
-	status := compactStatusValue(string(goal.Status), 12)
-	if status == "" {
-		return ""
-	}
-	return "目标 " + chatGoalStatusDisplay(status)
-}
-
-func chatGoalStatusDisplay(status string) string {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "active":
-		return "进行中"
-	case "paused":
-		return "已暂停"
-	case "budget_limited":
-		return "预算受限"
-	case "complete":
-		return "已完成"
-	default:
-		return status
-	}
 }
 
 func resolveChatStatusCurrentDirectory(session *ChatSession) string {
@@ -1020,22 +1288,6 @@ func resolveChatStatusCurrentDirectory(session *ChatSession) string {
 		return cwd
 	}
 	return ""
-}
-
-func formatChatContextWindowSummary(session *ChatSession, budget sharedChatPromptBudget) string {
-	totalWindow := resolveChatStatusContextWindowTokens(session)
-	if totalWindow <= 0 {
-		totalWindow = budget.ActiveTurnMaxTokens
-	}
-	usedTokens := resolveChatStatusContextUsedTokens(session)
-	if totalWindow <= 0 {
-		if usedTokens > 0 {
-			return fmt.Sprintf("used %d", usedTokens)
-		}
-		return ""
-	}
-	percent := chatStatusContextUsedPercent(usedTokens, totalWindow)
-	return fmt.Sprintf("%d used %d %d%%", totalWindow, usedTokens, percent)
 }
 
 func resolveChatStatusUsedTokens(session *ChatSession) int {

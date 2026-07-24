@@ -19,6 +19,8 @@ type AICLIChatPreferenceUpdate struct {
 	// Stream 使用指针指针以便在“不修改”、“显式 true”、“显式 false”三种语义之间区分。
 	// 外层指针为 nil 表示不修改；非 nil 时内层指针的值会被写入配置（包括 false）。
 	Stream **bool
+	// FastMode 与 Stream 相同的三态语义；仅对 Codex 协议的 Fast service tier 偏好生效。
+	FastMode **bool
 }
 
 // UpdateAICLIChatPreferences updates the aicli.chat section inside a config file
@@ -109,6 +111,14 @@ func applyAICLIChatPreferenceUpdate(current *AICLIChatConfig, update AICLIChatPr
 		} else {
 			value := **update.Stream
 			current.Stream = &value
+		}
+	}
+	if update.FastMode != nil {
+		if *update.FastMode == nil {
+			current.FastMode = nil
+		} else {
+			value := **update.FastMode
+			current.FastMode = &value
 		}
 	}
 }

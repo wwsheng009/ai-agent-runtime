@@ -1234,6 +1234,11 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.Contains(t, updated.History[2].Content, "recent user context")
 	require.Equal(t, 140, runtimeSessionObservedTokenUsage(updated))
 	require.Equal(t, 1, provider.callCount)
+	// Title should inherit pre-compact root title with a child compact marker.
+	require.Equal(t, sessionTitleSourceCompact, updated.Metadata.TitleSource)
+	require.Contains(t, updated.Metadata.Title, " · compact #1")
+	require.NotContains(t, updated.Metadata.Title, "Preserve the prior investigation")
+	require.Equal(t, 1, contextIntValue(updated.Metadata.Context, ContextCompactGeneration))
 
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
 	require.NoError(t, err)

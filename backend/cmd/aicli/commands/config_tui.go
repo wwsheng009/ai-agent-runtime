@@ -540,11 +540,13 @@ func (t *configTUI) runChatPreferences() error {
 		fmt.Fprintf(t.writer, "  Default model:    %s\n", emptyIfBlank(chat.DefaultModel))
 		fmt.Fprintf(t.writer, "  Reasoning effort: %s\n", emptyIfBlank(chat.ReasoningEffort))
 		fmt.Fprintf(t.writer, "  Stream:           %s\n", streamPreferenceText(chat.Stream))
+		fmt.Fprintf(t.writer, "  Fast mode:        %s\n", streamPreferenceText(chat.FastMode))
 		fmt.Fprintln(t.writer)
 		fmt.Fprintln(t.writer, "  p. 设置默认 provider")
 		fmt.Fprintln(t.writer, "  m. 设置默认 model")
 		fmt.Fprintln(t.writer, "  r. 设置 reasoning effort")
 		fmt.Fprintln(t.writer, "  s. 设置 stream")
+		fmt.Fprintln(t.writer, "  f. 设置 fast mode（Codex service_tier=priority）")
 		fmt.Fprintln(t.writer, "  b. 返回")
 		input, err := t.prompt("chat> ")
 		if err != nil {
@@ -579,6 +581,12 @@ func (t *configTUI) runChatPreferences() error {
 				return err
 			}
 			update.Stream = &stream
+		case "f", "fast":
+			fast, err := t.promptOptionalBool("Fast mode（true/false/clear；仅 codex）")
+			if err != nil {
+				return err
+			}
+			update.FastMode = &fast
 		default:
 			t.notice("未知选项: " + input)
 			changed = false

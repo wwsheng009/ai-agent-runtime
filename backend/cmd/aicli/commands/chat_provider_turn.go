@@ -384,6 +384,10 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 	if outputDir := currentGeneratedImageArtifactDir(session); strings.TrimSpace(outputDir) != "" {
 		config.Metadata[runtimellm.MetadataKeyGeneratedImageOutputDir] = outputDir
 	}
+	// Codex Fast mode maps to Responses API service_tier="priority".
+	if session.FastMode && chatSessionSupportsFastMode(session) {
+		config.Metadata["service_tier"] = codexServiceTierPriority
+	}
 	if defs := req.Tools; len(defs) > 0 {
 		if strings.EqualFold(strings.TrimSpace(session.Provider.GetProtocol()), "codex") {
 			config.Functions = runtimellm.BuildToolDefinitionsForRequest(

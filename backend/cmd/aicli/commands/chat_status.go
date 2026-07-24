@@ -84,12 +84,35 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		{Label: "Agents.md", Value: buildChatStatusAgentsMarkdownValue(session)},
 		{Label: "Collaboration mode", Value: buildChatStatusCollaborationModeValue(session)},
 		{Label: "Reasoning output", Value: buildChatStatusReasoningOutputValue(session)},
-		{Label: "Session", Value: buildChatStatusSessionValue(session)},
-		{Label: "Context used", Value: buildChatStatusContextUsedValue(session)},
-		{Label: "Token count", Value: buildChatStatusTokenCountValue(session)},
-		{Label: "Token usage", Value: buildChatStatusTokenUsageValue(session)},
-		{Label: "Limits", Value: buildChatStatusLimitsValue(session)},
 	}
+	if chatSessionSupportsFastMode(session) {
+		rows = append(rows, struct {
+			Label string
+			Value string
+		}{Label: "Fast mode", Value: buildChatStatusFastModeValue(session)})
+	}
+	rows = append(rows,
+		struct {
+			Label string
+			Value string
+		}{Label: "Session", Value: buildChatStatusSessionValue(session)},
+		struct {
+			Label string
+			Value string
+		}{Label: "Context used", Value: buildChatStatusContextUsedValue(session)},
+		struct {
+			Label string
+			Value string
+		}{Label: "Token count", Value: buildChatStatusTokenCountValue(session)},
+		struct {
+			Label string
+			Value string
+		}{Label: "Token usage", Value: buildChatStatusTokenUsageValue(session)},
+		struct {
+			Label string
+			Value string
+		}{Label: "Limits", Value: buildChatStatusLimitsValue(session)},
+	)
 	for _, row := range rows {
 		contentWidth = maxChatStatusContentWidth(contentWidth, estimateChatStatusRowWidth(row.Label, row.Value))
 	}
@@ -335,6 +358,15 @@ func buildChatStatusReasoningOutputValue(session *ChatSession) string {
 	return "off"
 }
 
+// buildChatStatusFastModeValue reports Codex Fast (service_tier=priority).
+// Call only when chatSessionSupportsFastMode(session) is true.
+func buildChatStatusFastModeValue(session *ChatSession) string {
+	if session != nil && session.FastMode {
+		return "on (priority)"
+	}
+	return "off"
+}
+
 func buildChatStatusSessionValue(session *ChatSession) string {
 	if session == nil || session.RuntimeSession == nil {
 		return "<none>"
@@ -343,7 +375,21 @@ func buildChatStatusSessionValue(session *ChatSession) string {
 	if sessionID == "" {
 		return "<none>"
 	}
-	return sessionID
+	parts := []string{sessionID}
+	title := strings.TrimSpace(runtimeResumeSessionTitle(session.RuntimeSession))
+	if title != "" && title != "(untitled)" {
+		parts = append(parts, title)
+	}
+	// Only append a separate badge when the title does not already embed
+	// "· compact #N" (sticky compact titles do). Keeps /status scannable without
+	// "title · compact #2 · compact #2" redundancy.
+	if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
+		badge := fmt.Sprintf("compact #%d", generation)
+		if title == "" || title == "(untitled)" || !strings.Contains(strings.ToLower(title), strings.ToLower(badge)) {
+			parts = append(parts, badge)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 func buildChatStatusTokenCountValue(session *ChatSession) string {
@@ -480,6 +526,18 @@ type chatStatusTokenUsageSnapshot struct {
 
 func chatStatusTokenUsageSnapshotForSession(session *ChatSession) chatStatusTokenUsageSnapshot {
 	snapshot := chatStatusTokenUsageSnapshot{}
+	if session != nil {
+		if session.InputTokenCount > 0 || session.OutputTokenCount > 0 {
+			snapshot.Input = session.InputTokenCount
+			snapshot.Output = session.OutputTokenCount
+			if session.TokenCount > 0 {
+				snapshot.Total = session.TokenCount
+			} else {
+				snapshot.Total = session.InputTokenCount + session.OutputTokenCount
+			}
+			return snapshot
+		}
+	}
 	if session != nil && session.Logger != nil && session.Logger.sessionLog != nil {
 		for _, entry := range session.Logger.sessionLog.Messages {
 			if !strings.EqualFold(strings.TrimSpace(entry.MessageType), "response") {

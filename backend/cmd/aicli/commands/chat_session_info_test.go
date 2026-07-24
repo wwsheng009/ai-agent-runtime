@@ -58,6 +58,41 @@ func TestBuildChatSessionInfo_IncludesEndpointHostAndOperationalMetadata(t *test
 	if !info.IsStream {
 		t.Fatal("expected stream session info")
 	}
+	if info.SupportsFast {
+		t.Fatal("expected non-codex protocol to omit Fast support")
+	}
+	if info.IsFast {
+		t.Fatal("expected IsFast false when Fast is unsupported")
+	}
+}
+
+func TestBuildChatSessionInfo_IncludesFastForCodexProtocol(t *testing.T) {
+	session := &ChatSession{
+		ProviderName: "codex_ee",
+		Provider: config.Provider{
+			Enabled:  true,
+			Protocol: "codex",
+			BaseURL:  "https://example.com",
+		},
+		Adapter:  &adapter.CodexAdapter{},
+		Model:    "gpt-5.2-codex",
+		FastMode: true,
+		Stream:   false,
+	}
+
+	info := buildChatSessionInfo(session)
+	if !info.SupportsFast {
+		t.Fatal("expected codex protocol to support Fast")
+	}
+	if !info.IsFast {
+		t.Fatal("expected IsFast true when FastMode enabled on codex")
+	}
+
+	session.FastMode = false
+	info = buildChatSessionInfo(session)
+	if !info.SupportsFast || info.IsFast {
+		t.Fatalf("expected SupportsFast with IsFast=false, got %+v", info)
+	}
 }
 
 func TestBuildChatSessionInfo_FallsBackToResolvedEndpoint(t *testing.T) {
@@ -142,6 +177,59 @@ func TestPrintSessionInfo_RendersProviderEndpointDetails(t *testing.T) {
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestPrintSessionInfo_RendersCompactLineage(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "session-compact-1"
+	runtimeSession.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		runtimechat.ContextCompactGeneration:    2,
+		runtimechat.ContextCompactRootTitle:     "检查登录流程为什么失败",
+		runtimechat.ContextCompactRootSessionID: "session-compact-1",
+	}
+	session := &ChatSession{
+		ProviderName:   "openai",
+		Provider:       config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com"},
+		Model:          "gpt-4.1",
+		RuntimeSession: runtimeSession,
+	}
+
+	output := captureStdout(t, func() {
+		printSessionInfo(session)
+	})
+	for _, expected := range []string{
+		"Compact Gen:       #2",
+		"Compact Root:      检查登录流程为什么失败",
+		"Compact Root ID:   session-compact-1",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected compact lineage row %q, got:\n%s", expected, output)
+		}
+	}
+
+	// printCurrentRuntimeSession reuses the same lineage printer (including Root ID).
+	currentOutput := captureStdout(t, func() {
+		printCurrentRuntimeSession(session)
+	})
+	for _, expected := range []string{
+		"Title:",
+		"检查登录流程为什么失败 · compact #2",
+		"Compact Gen:       #2",
+		"Compact Root:      检查登录流程为什么失败",
+		"Compact Root ID:   session-compact-1",
+	} {
+		if !strings.Contains(currentOutput, expected) {
+			t.Fatalf("expected current-session compact lineage row %q, got:\n%s", expected, currentOutput)
 		}
 	}
 }

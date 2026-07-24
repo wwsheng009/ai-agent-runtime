@@ -14,6 +14,7 @@ const (
 	ReasoningEffort          = "reasoning_effort"
 	ApprovalReuse            = "approval_reuse"
 	Stream                   = "stream"
+	FastMode                 = "fast_mode"
 	DisableTools             = "disable_tools"
 	DebugMode                = "debug_mode"
 	ProfileRef               = "profile_ref"
@@ -26,6 +27,8 @@ const (
 	Entrypoint               = "entrypoint"
 	MessageCount             = "message_count"
 	TokenCount               = "token_count"
+	InputTokenCount          = "input_token_count"
+	OutputTokenCount         = "output_token_count"
 	ContextTokenCount        = "context_token_count"
 	ContextWindowCount       = "context_window_token_count"
 	TurnContextCount         = "turn_context_token_count"
@@ -52,6 +55,7 @@ const (
 	LegacyAICLIReasoningEffort    = "aicli_reasoning_effort"
 	LegacyAICLIApprovalReuse      = "aicli_approval_reuse"
 	LegacyAICLIStream             = "aicli_stream"
+	LegacyAICLIFastMode           = "aicli_fast_mode"
 	LegacyAICLIDisableTools       = "aicli_disable_tools"
 	LegacyAICLIDebugMode          = "aicli_debug_mode"
 	LegacyAICLIMessageCount       = "aicli_message_count"
@@ -59,6 +63,8 @@ const (
 	LegacyAICLIProfileAgent       = "aicli_profile_agent"
 	LegacyAICLIProfileRoot        = "aicli_profile_root"
 	LegacyAICLITokenCount         = "aicli_token_count"
+	LegacyAICLIInputTokenCount    = "aicli_input_token_count"
+	LegacyAICLIOutputTokenCount   = "aicli_output_token_count"
 	LegacyAICLIContextTokenCount  = "aicli_context_token_count"
 	LegacyAICLIContextWindowCount = "aicli_context_window_token_count"
 	LegacyAICLITurnContextCount   = "aicli_turn_context_token_count"
@@ -79,6 +85,7 @@ var legacyToCanonical = map[string]string{
 	LegacyAICLIReasoningEffort:    ReasoningEffort,
 	LegacyAICLIApprovalReuse:      ApprovalReuse,
 	LegacyAICLIStream:             Stream,
+	LegacyAICLIFastMode:           FastMode,
 	LegacyAICLIDisableTools:       DisableTools,
 	LegacyAICLIDebugMode:          DebugMode,
 	LegacyAICLIMessageCount:       MessageCount,
@@ -86,6 +93,8 @@ var legacyToCanonical = map[string]string{
 	LegacyAICLIProfileAgent:       ProfileAgent,
 	LegacyAICLIProfileRoot:        ProfileRoot,
 	LegacyAICLITokenCount:         TokenCount,
+	LegacyAICLIInputTokenCount:    InputTokenCount,
+	LegacyAICLIOutputTokenCount:   OutputTokenCount,
 	LegacyAICLIContextTokenCount:  ContextTokenCount,
 	LegacyAICLIContextWindowCount: ContextWindowCount,
 	LegacyAICLITurnContextCount:   TurnContextCount,
@@ -105,6 +114,7 @@ var canonicalToLegacy = map[string][]string{
 	ReasoningEffort:    {LegacyAICLIReasoningEffort},
 	ApprovalReuse:      {LegacyAICLIApprovalReuse},
 	Stream:             {LegacyAICLIStream},
+	FastMode:           {LegacyAICLIFastMode},
 	DisableTools:       {LegacyAICLIDisableTools},
 	DebugMode:          {LegacyAICLIDebugMode},
 	MessageCount:       {LegacyAICLIMessageCount},
@@ -113,6 +123,8 @@ var canonicalToLegacy = map[string][]string{
 	ProfileAgent:       {LegacyAICLIProfileAgent},
 	ProfileRoot:        {LegacyAICLIProfileRoot},
 	TokenCount:         {LegacyAICLITokenCount},
+	InputTokenCount:    {LegacyAICLIInputTokenCount},
+	OutputTokenCount:   {LegacyAICLIOutputTokenCount},
 	ContextTokenCount:  {LegacyAICLIContextTokenCount},
 	ContextWindowCount: {LegacyAICLIContextWindowCount},
 	TurnContextCount:   {LegacyAICLITurnContextCount},

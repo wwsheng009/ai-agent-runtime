@@ -981,4 +981,9 @@ func TestMatchesChatSessionFilter(t *testing.T) {
 	if matchesChatSessionFilter(session, ChatSessionListFilter{State: runtimechat.StateArchived}) {
 		t.Fatal("did not expect state filter to match")
 	}
+
+	session.Metadata.Context[runtimechat.ContextCompactRootTitle] = "legacy login flow"
+	if !matchesChatSessionFilter(session, ChatSessionListFilter{Query: "legacy login"}) {
+		t.Fatal("expected query to match compact root title")
+	}
 }

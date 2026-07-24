@@ -1513,14 +1513,30 @@ func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *te
 		_ = os.Chdir(previousWD)
 	}()
 
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "feat/status-bar" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
+	// Use a short absolute ProfileRoot so the full cwd segment can fit width budgets.
+	// The path does not need to exist on disk for status rendering.
+	shortRoot := filepath.Clean(`E:\proj`)
+
 	session := &ChatSession{
 		Model:             "gpt-5.4-code",
 		ReasoningEffort:   "HIGH",
 		ProviderName:      "openai",
+		ProfileName:       "ai-gateway",
+		ProfileRoot:       shortRoot,
 		MsgCount:          17,
 		TokenCount:        28640,
 		ContextTokenCount: 28640,
+		InputTokenCount:   332_000_000,
+		OutputTokenCount:  970_000,
+		Stream:            false,
+		FastMode:          false,
 		Provider: config.Provider{
+			Protocol: "codex",
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4-code": {
 					MaxContextTokens:      128000,
@@ -1530,25 +1546,41 @@ func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *te
 		},
 	}
 
-	status := buildChatSurfaceStatusLineForWidth(session, "Thinking", 120)
+	status := buildChatSurfaceStatusLineForWidth(session, "Thinking", 220)
 
 	for _, want := range []string{
 		"思考",
-		"权限 默认",
-		"输入 当前运行后发送",
-		"模型 gpt-5.4-code",
+		"gpt-5.4-code high",
+		"openai",
 		// used=28640 / window=128000 with Codex baseline → ~14%
-		"上下文 14%",
-		"目录 epsilon",
+		"Context 14% used",
+		shortRoot,
+		"ai-gateway",
+		"feat/status-bar",
+		"128K window",
+		"332M in",
+		"970K out",
+		"Fast off",
 	} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("expected status line to contain %q, got %q", want, status)
 		}
 	}
-	for _, unwanted := range []string{"reasoning_effort", "openai", "msgs 17", filepath.Clean(nested)} {
+	if !strings.Contains(status, chatSurfaceStatusSeparator) {
+		t.Fatalf("expected Codex-style separator %q, got %q", chatSurfaceStatusSeparator, status)
+	}
+	// Provider appears as a bare name after the model segment; keep legacy labeled forms out.
+	for _, unwanted := range []string{"权限", "输入 ", "模型 ", "上下文 ", "目录 ", "目标 ", "reasoning_effort", "msgs 17"} {
 		if strings.Contains(status, unwanted) {
-			t.Fatalf("expected status line to omit low-priority diagnostic %q, got %q", unwanted, status)
+			t.Fatalf("expected status line to omit legacy diagnostic %q, got %q", unwanted, status)
 		}
+	}
+	// Ensure provider sits immediately after model (before context/cwd diagnostics).
+	modelIdx := strings.Index(status, "gpt-5.4-code high")
+	providerIdx := strings.Index(status, "openai")
+	contextIdx := strings.Index(status, "Context 14% used")
+	if modelIdx < 0 || providerIdx < 0 || contextIdx < 0 || !(modelIdx < providerIdx && providerIdx < contextIdx) {
+		t.Fatalf("expected model · provider · context order, got %q", status)
 	}
 }
 
@@ -1572,35 +1604,38 @@ func TestBuildChatSurfaceStatusLine_RespectsWidthAndKeepsRequiredState(t *testin
 			if got := ui.DisplayWidth(status); got > width {
 				t.Fatalf("status width %d exceeds budget %d: %q", got, width, status)
 			}
-			for _, want := range []string{"等待审批", "权限", "审批", "2"} {
-				if !strings.Contains(strings.ToLower(status), strings.ToLower(want)) {
-					t.Fatalf("expected required status %q at width %d, got %q", want, width, status)
-				}
+			hasApproval := strings.Contains(status, "等待审批") || strings.Contains(status, "审批")
+			if !hasApproval {
+				t.Fatalf("expected approval modal hint at width %d, got %q", width, status)
+			}
+			if !strings.Contains(status, "2") {
+				t.Fatalf("expected queue count at width %d, got %q", width, status)
+			}
+			if strings.Contains(status, "权限") {
+				t.Fatalf("permission mode should not appear on surface status, got %q", status)
 			}
 		})
 	}
 }
 
-func TestBuildChatSurfaceStatusLine_ShowsPermissionAndInputDestination(t *testing.T) {
+func TestBuildChatSurfaceStatusLine_ShowsModalHints(t *testing.T) {
 	tests := []struct {
-		name       string
-		mode       runtimepolicy.Mode
-		state      string
-		permission string
-		input      string
+		name  string
+		state string
+		want  string
 	}{
-		{name: "default ready", mode: runtimepolicy.ModeDefault, state: "Ready", permission: "权限 默认", input: "输入 立即发送"},
-		{name: "accept edits planning", mode: runtimepolicy.ModeAcceptEdits, state: "Planning", permission: "权限 允许编辑", input: "输入 当前运行后发送"},
-		{name: "plan awaiting answer", mode: runtimepolicy.ModePlan, state: "Awaiting answer", permission: "权限 计划", input: "输入 回答问题"},
-		{name: "full access tool", mode: runtimepolicy.ModeBypassPermissions, state: "Tool running", permission: "权限 完全访问", input: "输入 当前运行后发送"},
+		{name: "planning", state: "Planning", want: "规划中"},
+		{name: "awaiting answer", state: "Awaiting answer", want: "等待回答"},
+		{name: "tool running", state: "Tool running", want: "执行工具"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status := buildChatSurfaceStatusLineForWidth(&ChatSession{PermissionMode: tt.mode}, tt.state, 120)
-			for _, want := range []string{chatSurfaceStateDisplay(tt.state), tt.permission, tt.input} {
-				if !strings.Contains(status, want) {
-					t.Fatalf("expected %q in status, got %q", want, status)
-				}
+			status := buildChatSurfaceStatusLineForWidth(&ChatSession{Model: "gpt-5.4-code"}, tt.state, 120)
+			if !strings.Contains(status, tt.want) {
+				t.Fatalf("expected modal/state hint %q in status, got %q", tt.want, status)
+			}
+			if strings.Contains(status, "权限") || strings.Contains(status, "输入 ") {
+				t.Fatalf("legacy permission/input segments should be absent, got %q", status)
 			}
 		})
 	}
@@ -1608,16 +1643,16 @@ func TestBuildChatSurfaceStatusLine_ShowsPermissionAndInputDestination(t *testin
 
 func TestBuildChatSurfaceStatusLine_ExplicitModalInputModeOverridesAgentState(t *testing.T) {
 	status := buildChatSurfaceStatusLineForWidthAndInputMode(
-		&ChatSession{PermissionMode: runtimepolicy.ModeDefault},
+		&ChatSession{Model: "gpt-5.4-code"},
 		"Ready",
 		120,
 		chatInputModeSelection,
 	)
-	if !strings.Contains(status, "输入 选择选项") {
-		t.Fatalf("expected selection input destination, got %q", status)
+	if !strings.Contains(status, "选择选项") {
+		t.Fatalf("expected selection modal hint, got %q", status)
 	}
-	if strings.Contains(status, "立即发送") {
-		t.Fatalf("selection modal must not advertise chat submission, got %q", status)
+	if strings.Contains(status, "立即发送") || strings.Contains(status, "输入 ") {
+		t.Fatalf("selection modal must not advertise legacy input destination, got %q", status)
 	}
 }
 
@@ -1653,22 +1688,21 @@ func TestPushChatComposerInputMode_SameModeLeaseReleaseCannotOverwriteNewOwner(t
 
 func TestBuildChatSurfaceStatusLine_ShowsConfirmationInputDestination(t *testing.T) {
 	status := buildChatSurfaceStatusLineForWidthAndInputMode(
-		&ChatSession{PermissionMode: runtimepolicy.ModeDefault},
+		&ChatSession{Model: "gpt-5.4-code"},
 		"Ready",
 		120,
 		chatInputModeConfirmation,
 	)
-	if !strings.Contains(status, "输入 确认操作") {
-		t.Fatalf("expected confirmation input destination, got %q", status)
+	if !strings.Contains(status, "确认操作") {
+		t.Fatalf("expected confirmation modal hint, got %q", status)
 	}
-	if strings.Contains(status, "立即发送") {
-		t.Fatalf("confirmation prompt must not advertise chat submission, got %q", status)
+	if strings.Contains(status, "立即发送") || strings.Contains(status, "输入 ") {
+		t.Fatalf("confirmation prompt must not advertise legacy input destination, got %q", status)
 	}
 }
 
 func TestBuildChatSurfaceStatusLine_LocalizesAgentStates(t *testing.T) {
 	tests := map[string]string{
-		"Ready":             "就绪",
 		"Waiting":           "等待",
 		"Thinking":          "思考",
 		"Streaming":         "输出中",
@@ -1677,7 +1711,6 @@ func TestBuildChatSurfaceStatusLine_LocalizesAgentStates(t *testing.T) {
 		"Awaiting approval": "等待审批",
 		"Awaiting answer":   "等待回答",
 		"Stopping":          "停止中",
-		"Completed":         "已完成",
 		"Failed":            "失败",
 	}
 	for state, want := range tests {
@@ -1685,6 +1718,21 @@ func TestBuildChatSurfaceStatusLine_LocalizesAgentStates(t *testing.T) {
 			status := buildChatSurfaceStatusLineForWidth(&ChatSession{}, state, 120)
 			if !strings.Contains(status, want) {
 				t.Fatalf("expected localized state %q, got %q", want, status)
+			}
+		})
+	}
+	// Ready/Completed omit Chinese idle labels in the model-first bar.
+	for _, state := range []string{"Ready", "Completed"} {
+		t.Run(state+"_omits_idle_label", func(t *testing.T) {
+			status := buildChatSurfaceStatusLineForWidth(&ChatSession{
+				Provider: config.Provider{Protocol: "codex"},
+				FastMode: false,
+			}, state, 120)
+			if strings.Contains(status, "就绪") || strings.Contains(status, "已完成") {
+				t.Fatalf("expected idle state %q to omit Chinese label, got %q", state, status)
+			}
+			if !strings.Contains(status, "Fast off") {
+				t.Fatalf("expected idle status to still show Fast segment for codex, got %q", status)
 			}
 		})
 	}
@@ -1708,8 +1756,11 @@ func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyWindowIsKnown(t
 	}
 
 	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 80)
-	if !strings.Contains(status, "上下文 0%") {
+	if !strings.Contains(status, "Context 0% used") {
 		t.Fatalf("expected status line to include context window summary, got %q", status)
+	}
+	if !strings.Contains(status, "128K window") {
+		t.Fatalf("expected status line to include window size, got %q", status)
 	}
 	if strings.Contains(status, "Thinking") {
 		t.Fatalf("expected status line to keep supplied state only, got %q", status)
@@ -1882,8 +1933,10 @@ func TestBuildChatSurfaceStatusLine_IncludesGoalStatusWhenSet(t *testing.T) {
 
 	session := &ChatSession{RuntimeSession: runtimeSession}
 	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 120)
-	if !strings.Contains(status, "目标 已暂停") {
-		t.Fatalf("expected status line to include goal status, got %q", status)
+	// Goal remains available via /status helpers, but is intentionally omitted
+	// from the Codex-style bottom surface line.
+	if strings.Contains(status, "目标 ") {
+		t.Fatalf("expected surface status line to omit goal status, got %q", status)
 	}
 }
 
@@ -1902,7 +1955,7 @@ func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabil
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
 	// used=28640 / provider default 256000 with Codex baseline → ~7%
-	if !strings.Contains(status, "上下文 7%") {
+	if !strings.Contains(status, "Context 7% used") {
 		t.Fatalf("expected default context window summary, got %q", status)
 	}
 	if strings.Contains(status, "8000") {
@@ -1916,9 +1969,16 @@ func TestBuildChatSurfaceStatusLine_UsesZeroWhenCountersAreMissing(t *testing.T)
 		*runtimetypes.NewUserMessage("用户问题"),
 		*runtimetypes.NewAssistantMessage("模型回答"),
 	}
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
 	session := &ChatSession{
 		Model:        "gpt-5.4-code",
 		ProviderName: "openai",
+		ProfileRoot:  filepath.Clean(`E:\proj`),
+		ProfileName:  "proj",
 		Messages:     messages,
 		Provider: config.Provider{
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
@@ -1929,11 +1989,129 @@ func TestBuildChatSurfaceStatusLine_UsesZeroWhenCountersAreMissing(t *testing.T)
 		},
 	}
 
-	status := buildChatSurfaceStatusLine(session, "Ready")
+	// Force a wide budget so trailing segments (Fast/window) stay visible while we
+	// assert the history-based context percent.
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 200)
 	wantUsed := countChatContextTokensForMessages(session, messages)
 	wantPercent := chatStatusContextUsedPercent(wantUsed, 128000)
-	if !strings.Contains(status, fmt.Sprintf("上下文 %d%%", wantPercent)) {
+	wantFull := fmt.Sprintf("Context %d%% used", wantPercent)
+	wantCompact := fmt.Sprintf("Ctx %d%%", wantPercent)
+	if !strings.Contains(status, wantFull) && !strings.Contains(status, wantCompact) {
 		t.Fatalf("expected status line to fall back to history context estimate %d%%, got %q", wantPercent, status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesProvider(t *testing.T) {
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
+	// Prefer EffectiveProvider over ProviderName.
+	status := buildChatSurfaceStatusLineForWidth(&ChatSession{
+		Model:             "gpt-5.4-code",
+		ProviderName:      "configured-alias",
+		EffectiveProvider: "canonical-provider",
+		ProfileRoot:       filepath.Clean(`E:\proj`),
+		ProfileName:       "proj",
+	}, "Ready", 120)
+	if !strings.Contains(status, "canonical-provider") {
+		t.Fatalf("expected effective provider in status line, got %q", status)
+	}
+	if strings.Contains(status, "configured-alias") {
+		t.Fatalf("expected status line to prefer effective provider over alias, got %q", status)
+	}
+
+	// Fall back to ProviderName when EffectiveProvider is empty.
+	status = buildChatSurfaceStatusLineForWidth(&ChatSession{
+		Model:        "gpt-5.4-code",
+		ProviderName: "openai",
+		ProfileRoot:  filepath.Clean(`E:\proj`),
+		ProfileName:  "proj",
+	}, "Ready", 120)
+	if !strings.Contains(status, "openai") {
+		t.Fatalf("expected provider name in status line, got %q", status)
+	}
+
+	// Fall back to protocol when no provider name is configured.
+	status = buildChatSurfaceStatusLineForWidth(&ChatSession{
+		Model:       "gpt-5.4-code",
+		ProfileRoot: filepath.Clean(`E:\proj`),
+		ProfileName: "proj",
+		Provider:    config.Provider{Protocol: "anthropic"},
+	}, "Ready", 120)
+	if !strings.Contains(status, "anthropic") {
+		t.Fatalf("expected protocol fallback provider in status line, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_ShowsFastOnWhenStreaming(t *testing.T) {
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
+	status := buildChatSurfaceStatusLineForWidth(&ChatSession{
+		Stream:      true,
+		FastMode:    true,
+		Model:       "gpt-5.4-code",
+		ProfileRoot: filepath.Clean(`E:\proj`),
+		ProfileName: "proj",
+		Provider:    config.Provider{Protocol: "codex"},
+	}, "Ready", 120)
+	if !strings.Contains(status, "Fast on") {
+		t.Fatalf("expected Fast on when FastMode enabled on codex, got %q", status)
+	}
+	// Stream alone must not imply Fast on.
+	streamOnly := buildChatSurfaceStatusLineForWidth(&ChatSession{
+		Stream:   true,
+		FastMode: false,
+		Model:    "gpt-5.4-code",
+		Provider: config.Provider{Protocol: "codex"},
+	}, "Ready", 120)
+	if !strings.Contains(streamOnly, "Fast off") {
+		t.Fatalf("expected Fast off when Stream on but FastMode off, got %q", streamOnly)
+	}
+	// Non-codex protocols omit the Fast segment entirely.
+	nonCodex := buildChatSurfaceStatusLineForWidth(&ChatSession{
+		Stream:   true,
+		FastMode: true,
+		Model:    "gpt-5.4-code",
+		Provider: config.Provider{Protocol: "openai"},
+	}, "Ready", 120)
+	if strings.Contains(nonCodex, "Fast on") || strings.Contains(nonCodex, "Fast off") {
+		t.Fatalf("expected Fast segment omitted for non-codex protocol, got %q", nonCodex)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesTokenAndWindowSegments(t *testing.T) {
+	session := &ChatSession{
+		Model:             "gpt-5.6-sol",
+		ReasoningEffort:   "xhigh",
+		ProviderName:      "codex_ee",
+		ContextTokenCount: 100000,
+		InputTokenCount:   332_000_000,
+		OutputTokenCount:  970_000,
+		FastMode:          false,
+		Provider: config.Provider{
+			Protocol: "codex",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5.6-sol": {MaxContextTokens: 258000},
+			},
+		},
+	}
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 160)
+	for _, want := range []string{
+		"gpt-5.6-sol xhigh",
+		"codex_ee",
+		"258K window",
+		"332M in",
+		"970K out",
+		"Fast off",
+	} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("expected status line to contain %q, got %q", want, status)
+		}
 	}
 }
 

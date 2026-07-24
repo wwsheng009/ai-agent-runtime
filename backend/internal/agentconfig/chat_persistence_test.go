@@ -153,3 +153,70 @@ aicli:
 		t.Fatalf("expected stream field removed:\n%s", string(content))
 	}
 }
+
+func TestUpdateAICLIChatPreferences_PersistsFastMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := strings.TrimSpace(`
+providers:
+  default_provider: alpha
+  items:
+    alpha:
+      enabled: true
+      protocol: codex
+aicli:
+  chat:
+    default_provider: alpha
+    default_model: alpha-model
+`)
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	updated, err := UpdateAICLIChatPreferences(path, AICLIChatPreferenceUpdate{
+		FastMode: boolDoublePtr(true),
+	})
+	if err != nil {
+		t.Fatalf("UpdateAICLIChatPreferences: %v", err)
+	}
+	if updated == nil || updated.FastMode == nil || *updated.FastMode != true {
+		t.Fatalf("expected updated fast_mode=true, got %+v", updated)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(content), "fast_mode: true") {
+		t.Fatalf("expected fast_mode: true in updated file:\n%s", string(content))
+	}
+
+	loaded, err := InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig: %v", err)
+	}
+	if loaded.AICLI == nil || loaded.AICLI.Chat == nil || loaded.AICLI.Chat.FastMode == nil {
+		t.Fatalf("expected fast_mode to be loaded, got %+v", loaded.AICLI)
+	}
+	if *loaded.AICLI.Chat.FastMode != true {
+		t.Fatalf("expected loaded fast_mode=true, got %v", *loaded.AICLI.Chat.FastMode)
+	}
+
+	var nilInner *bool
+	updated, err = UpdateAICLIChatPreferences(path, AICLIChatPreferenceUpdate{
+		FastMode: &nilInner,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAICLIChatPreferences clear: %v", err)
+	}
+	if updated.FastMode != nil {
+		t.Fatalf("expected cleared fast_mode, got %+v", updated.FastMode)
+	}
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after clear: %v", err)
+	}
+	if strings.Contains(string(content), "fast_mode:") {
+		t.Fatalf("expected fast_mode field removed:\n%s", string(content))
+	}
+}

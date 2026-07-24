@@ -179,9 +179,19 @@ func buildResumeFullScreenItems(sessions []*runtimechat.Session, now time.Time) 
 		if summary == "" || strings.EqualFold(summary, title) {
 			summary = fmt.Sprintf("%d 轮对话，%d 条消息", turnCount, messageCount)
 		}
-		detail := fmt.Sprintf("%s  %d轮/%d条", formatSessionUpdatedAt(item.UpdatedAt, now), turnCount, messageCount)
+		generation := runtimeSessionCompactGeneration(item)
+		detailParts := []string{
+			formatSessionUpdatedAt(item.UpdatedAt, now),
+			fmt.Sprintf("%d轮/%d条", turnCount, messageCount),
+		}
+		if generation > 0 {
+			detailParts = append(detailParts, fmt.Sprintf("compact #%d", generation))
+		}
+		detail := strings.Join(detailParts, "  ")
 		searchText := strings.Join([]string{
 			item.ID,
+			title,
+			runtimeSessionContextString(item, runtimechat.ContextCompactRootTitle),
 			runtimeSessionContextString(item, chatRuntimeContextProtocol),
 			runtimeSessionContextString(item, chatRuntimeContextProviderName),
 			runtimeSessionContextString(item, chatRuntimeContextModel),
@@ -204,11 +214,12 @@ func readHistoricalSessionPick(session *ChatSession, sessions []*runtimechat.Ses
 	}
 	now := time.Now()
 	lines := []string{strings.TrimSpace(header)}
+	titleWidth := maxRuntimeResumeSessionTitleWidth(sessions)
 	for index, item := range sessions {
 		if item == nil {
 			continue
 		}
-		itemLine := renderRuntimeResumeSessionLine(item, now)
+		itemLine := renderRuntimeResumeSessionLine(item, now, titleWidth)
 		if strings.TrimSpace(itemLine) == "" {
 			continue
 		}
@@ -278,11 +289,21 @@ func readHistoricalSessionPick(session *ChatSession, sessions []*runtimechat.Ses
 func printResumeSuccess(session *ChatSession) {
 	if session != nil && session.RuntimeSession != nil {
 		turnCount, messageCount := runtimeSessionConversationCounts(session.RuntimeSession)
-		fmt.Printf("已恢复历史会话: %s（%d轮/%d条消息）\n",
-			runtimeResumeSessionTitle(session.RuntimeSession),
-			turnCount,
-			messageCount,
-		)
+		title := runtimeResumeSessionTitle(session.RuntimeSession)
+		if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
+			fmt.Printf("已恢复历史会话: %s（compact #%d · %d轮/%d条消息）\n",
+				title,
+				generation,
+				turnCount,
+				messageCount,
+			)
+		} else {
+			fmt.Printf("已恢复历史会话: %s（%d轮/%d条消息）\n",
+				title,
+				turnCount,
+				messageCount,
+			)
+		}
 	}
 	printCurrentRuntimeSession(session)
 	if hasVisibleChatHistory(session) {

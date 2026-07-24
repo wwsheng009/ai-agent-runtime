@@ -31,6 +31,7 @@ const (
 	chatRuntimeContextReasoningEffort = sessionmeta.LegacyAICLIReasoningEffort
 	chatRuntimeContextApprovalReuse   = sessionmeta.LegacyAICLIApprovalReuse
 	chatRuntimeContextStream          = sessionmeta.LegacyAICLIStream
+	chatRuntimeContextFastMode        = sessionmeta.LegacyAICLIFastMode
 	chatRuntimeContextDisableTools    = sessionmeta.LegacyAICLIDisableTools
 	chatRuntimeContextDebugMode       = sessionmeta.LegacyAICLIDebugMode
 	chatRuntimeContextMessageCount    = sessionmeta.LegacyAICLIMessageCount
@@ -377,6 +378,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	}
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ApprovalReuse, string(session.ApprovalReuseMode), chatRuntimeContextApprovalReuse)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, session.Stream, chatRuntimeContextStream)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.FastMode, session.FastMode, chatRuntimeContextFastMode)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, session.DisableTools, chatRuntimeContextDisableTools)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DebugMode, session.DebugMode, chatRuntimeContextDebugMode)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.MessageCount, len(session.Messages), chatRuntimeContextMessageCount)
@@ -385,6 +387,16 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.TokenCount, session.TokenCount, chatRuntimeContextTokenCount)
 	} else {
 		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.TokenCount, chatRuntimeContextTokenCount)
+	}
+	if session.InputTokenCount > 0 {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.InputTokenCount, session.InputTokenCount, chatRuntimeContextInputTokenCount)
+	} else {
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.InputTokenCount, chatRuntimeContextInputTokenCount)
+	}
+	if session.OutputTokenCount > 0 {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.OutputTokenCount, session.OutputTokenCount, chatRuntimeContextOutputTokenCount)
+	} else {
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.OutputTokenCount, chatRuntimeContextOutputTokenCount)
 	}
 	if session.ContextTokenCount > 0 {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, session.ContextTokenCount, chatRuntimeContextContextTokenCount)
@@ -491,6 +503,9 @@ func printCurrentRuntimeSession(session *ChatSession) {
 	if preview.Title != "" {
 		printChatSessionMetaRow("Title:", preview.Title)
 	}
+	// Reuse the shared lineage printer so /session, resume success, and
+	// /load all surface generation + root title + root id consistently.
+	printChatSessionCompactLineage(session)
 	if preview.MessageCount > 0 {
 		printChatSessionMetaRow("History:", fmt.Sprintf("%d messages", preview.MessageCount))
 	}
@@ -661,6 +676,7 @@ func matchesChatSessionFilter(session *runtimechat.Session, filter ChatSessionLi
 		session.ID,
 		preview.Title,
 		preview.Summary,
+		runtimeSessionContextString(session, runtimechat.ContextCompactRootTitle),
 		runtimeSessionContextString(session, chatRuntimeContextProviderName),
 		runtimeSessionContextString(session, chatRuntimeContextModel),
 	}
@@ -783,19 +799,6 @@ func uiPrintSessionSelectionSummary(count int, filter ChatSessionListFilter) {
 
 func startupSessionOptionLabelWidth() int {
 	return 4
-}
-
-func startupSessionListIDWidth(sessions []*runtimechat.Session) int {
-	width := len("(untitled)")
-	for _, session := range sessions {
-		if session == nil {
-			continue
-		}
-		if length := len(session.ID); length > width {
-			width = length
-		}
-	}
-	return width
 }
 
 func currentRuntimeSessionID(session *ChatSession) string {
@@ -991,6 +994,9 @@ func applyRuntimeSessionExecutionContext(session *ChatSession, runtimeSession *r
 	if storedStream, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextStream); ok {
 		session.Stream = storedStream
 	}
+	if storedFastMode, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextFastMode); ok {
+		session.FastMode = storedFastMode
+	}
 	if err := applyChatExecutionContext(session, providerCtx, resolvedReasoning); err != nil {
 		return err
 	}
@@ -1099,6 +1105,11 @@ func runtimeSessionContextString(session *runtimechat.Session, key string) strin
 		return ""
 	}
 	return sessionmeta.String(session.Metadata.Context, key)
+}
+
+func runtimeSessionCompactGeneration(session *runtimechat.Session) int {
+	generation, _ := runtimeSessionContextInt(session, runtimechat.ContextCompactGeneration)
+	return generation
 }
 
 func runtimeSessionContextBool(session *runtimechat.Session, key string) (bool, bool) {
@@ -1517,6 +1528,10 @@ func blankToDash(value string) string {
 	return value
 }
 
+// resumeSessionTitleColumnMaxWidth caps title padding so long titles do not push
+// the shared counts/time columns off-screen in non-fullscreen resume lists.
+const resumeSessionTitleColumnMaxWidth = 36
+
 func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Time) []string {
 	if session == nil {
 		return nil
@@ -1532,8 +1547,16 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Tim
 	provider := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextProviderName))
 	model := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextModel))
 	turnCount, messageCount := runtimeSessionConversationCounts(session)
+	generation := runtimeSessionCompactGeneration(session)
 
-	header := fmt.Sprintf("  %s [%s]", session.ID, session.State)
+	// Selection lists put title first; session ID stays available via search/detail
+	// paths (for example full-screen SearchText) but must not occupy column 1.
+	header := fmt.Sprintf("  %s [%s]", title, session.State)
+	if generation > 0 {
+		// Keep a compact badge even when the title already embeds "· compact #N",
+		// so /sessions rows remain scannable when titles are truncated.
+		header += fmt.Sprintf(" compact=#%d", generation)
+	}
 	header += fmt.Sprintf(" 协议=%s 最后更新=%s 轮次=%d 消息=%d",
 		blankToDash(protocol),
 		formatSessionUpdatedAt(session.UpdatedAt, now),
@@ -1545,24 +1568,78 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Tim
 	}
 
 	lines := []string{header}
-	lines = append(lines, fmt.Sprintf("    标题: %s", title))
 	if preview.Summary != "" && strings.TrimSpace(preview.Summary) != title {
 		lines = append(lines, fmt.Sprintf("    摘要: %s", strings.TrimSpace(preview.Summary)))
 	}
 	return lines
 }
 
-func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time) string {
+func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time, titleWidth int) string {
 	if session == nil {
 		return ""
 	}
 	turnCount, messageCount := runtimeSessionConversationCounts(session)
+	title := runtimeResumeSessionTitle(session)
+	if titleWidth > 0 {
+		title = fitDisplayText(title, titleWidth)
+		title = padDisplayText(title, titleWidth)
+	}
+	// Title first for resume/fallback pickers; session ID is never column 1.
+	// Keep compact generation as a separate badge so truncated titles stay scannable.
+	if generation := runtimeSessionCompactGeneration(session); generation > 0 {
+		return fmt.Sprintf("%s  compact #%d  %d轮/%d条消息  %s",
+			title,
+			generation,
+			turnCount,
+			messageCount,
+			formatSessionUpdatedAt(session.UpdatedAt, now),
+		)
+	}
 	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
-		formatSessionUpdatedAt(session.UpdatedAt, now),
+		title,
 		turnCount,
 		messageCount,
-		runtimeResumeSessionTitle(session),
+		formatSessionUpdatedAt(session.UpdatedAt, now),
 	)
+}
+
+// maxRuntimeResumeSessionTitleWidth returns the display width needed to align
+// title-first resume rows so the counts/time columns line up across the list.
+// The result is capped so one very long title cannot monopolize the row.
+func maxRuntimeResumeSessionTitleWidth(sessions []*runtimechat.Session) int {
+	maxWidth := 0
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		width := ui.DisplayWidth(runtimeResumeSessionTitle(session))
+		if width > maxWidth {
+			maxWidth = width
+		}
+	}
+	if maxWidth > resumeSessionTitleColumnMaxWidth {
+		return resumeSessionTitleColumnMaxWidth
+	}
+	return maxWidth
+}
+
+func padDisplayText(value string, width int) string {
+	if width <= 0 {
+		return value
+	}
+	if padding := width - ui.DisplayWidth(value); padding > 0 {
+		return value + strings.Repeat(" ", padding)
+	}
+	return value
+}
+
+// fitDisplayText truncates value to the given display width, appending "..." when
+// needed. Width is measured with ui.DisplayWidth so CJK titles stay aligned.
+func fitDisplayText(value string, width int) string {
+	if width <= 0 || ui.DisplayWidth(value) <= width {
+		return value
+	}
+	return truncateStatusValue(value, width)
 }
 
 // A conversation turn is one persisted user message. Message count includes

@@ -19,6 +19,10 @@ type chatCommandOptions struct {
 	ModelFlag                string
 	StreamFlag               bool
 	StreamChanged            bool
+	// FastFlag / FastChanged mirror Stream: CLI override for Codex Fast mode.
+	// Effective only when the resolved provider protocol is codex.
+	FastFlag                 bool
+	FastChanged              bool
 	NoInteractive            bool
 	Message                  string
 	ImagePaths               []string
@@ -71,6 +75,12 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	profileFlag, _ := cmd.Flags().GetString("profile")
 	agentFlag, _ := cmd.Flags().GetString("agent")
 	streamFlag, _ := cmd.Flags().GetBool("stream")
+	fastFlag := false
+	fastChanged := false
+	if cmd.Flags().Lookup("fast") != nil {
+		fastFlag, _ = cmd.Flags().GetBool("fast")
+		fastChanged = cmd.Flags().Changed("fast")
+	}
 	noInteractive, _ := cmd.Flags().GetBool("no-interactive")
 	message, _ := cmd.Flags().GetString("message")
 	imagePaths, _ := cmd.Flags().GetStringSlice("image")
@@ -140,6 +150,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		ModelFlag:              modelFlag,
 		StreamFlag:             streamFlag,
 		StreamChanged:          cmd.Flags().Changed("stream"),
+		FastFlag:               fastFlag,
+		FastChanged:            fastChanged,
 		NoInteractive:          noInteractive,
 		Message:                message,
 		ImagePaths:             imagePaths,
@@ -212,6 +224,24 @@ func resolveChatModelName(provider config.Provider, opts *chatCommandOptions, lo
 func resolveChatStreamMode(opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) bool {
 	stream, _ := resolveChatStreamChoice(nil, opts, loadedRuntimeSession)
 	return stream
+}
+
+// resolveChatFastModeChoice restores Fast mode preference.
+// Priority: --fast flag > session metadata > config aicli.chat.fast_mode > default false.
+// Fast is only effective for protocol=codex; callers gate request/status on protocol.
+func resolveChatFastModeChoice(cfg *config.Config, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) bool {
+	if opts != nil && opts.FastChanged {
+		return opts.FastFlag
+	}
+	if loadedRuntimeSession != nil {
+		if stored, ok := runtimeSessionContextBool(loadedRuntimeSession, chatRuntimeContextFastMode); ok {
+			return stored
+		}
+	}
+	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil && cfg.AICLI.Chat.FastMode != nil {
+		return *cfg.AICLI.Chat.FastMode
+	}
+	return false
 }
 
 func resolveChatStreamChoice(cfg *config.Config, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) (bool, chatPreferenceSource) {

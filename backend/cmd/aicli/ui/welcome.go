@@ -153,6 +153,7 @@ func PrintHelp() {
 		{"/provider [name]", "选择或查看提供商"},
 		{"/model [name]", "查看或切换模型，并调整 reasoning_effort"},
 		{"/stream [on|off]", "切换流式输出"},
+		{"/theme [mode|palette]", "查看或切换明暗/配色"},
 		{"/token", "显示 token 使用情况"},
 		{"/history", "显示消息历史"},
 		{"/save", "保存当前会话"},

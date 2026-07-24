@@ -54,7 +54,9 @@ type ChatSession struct {
 	DebugMode                       bool
 	HTTPDebug                       bool
 	Stream                          bool
-	BaseURL                         string
+	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
+	FastMode bool
+	BaseURL  string
 	Messages                        []runtimetypes.Message
 	HTTPClient                      *http.Client
 	cancelCtx                       context.Context                    // 可取消的上下文
@@ -73,6 +75,8 @@ type ChatSession struct {
 	Layout                          *ui.Layout                         // 屏幕布局
 	InputBox                        *ui.InputBox                       // 输入框
 	TokenCount                      int                                // 当前会话累计的真实 LLM API token 使用量，用于 /status 的 Token usage
+	InputTokenCount                 int                                // 当前会话累计 prompt/input tokens，用于状态栏 in 计数
+	OutputTokenCount                int                                // 当前会话累计 completion/output tokens，用于状态栏 out 计数
 	ContextTokenCount               int                                // 当前活跃上下文的 token 快照，用于 ctx used 与 compact 观察值
 	ContextWindowTokenCount         int                                // 当前模型上下文窗口大小
 	TurnContextTokenCount           int                                // 当前 turn 内请求上下文 token 诊断累计，仅用于调试
@@ -630,6 +634,27 @@ func printSessionInfo(session *ChatSession) {
 	}
 	if session.RetryConfig.DisableRetries {
 		printChatSessionMetaRow("Retry Mode:", "fail-fast")
+	}
+	printChatSessionCompactLineage(session)
+	// Codex Fast preference is already shown via ui.SessionInfo when supported.
+}
+
+func printChatSessionCompactLineage(session *ChatSession) {
+	if session == nil || session.RuntimeSession == nil {
+		return
+	}
+	runtimeSession := session.RuntimeSession
+	generation := runtimeSessionCompactGeneration(runtimeSession)
+	if generation <= 0 {
+		return
+	}
+	// Labels stay within chatSessionMetaLabelWidth (18) so /session rows align.
+	printChatSessionMetaRow("Compact Gen:", fmt.Sprintf("#%d", generation))
+	if rootTitle := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)); rootTitle != "" {
+		printChatSessionMetaRow("Compact Root:", rootTitle)
+	}
+	if rootID := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootSessionID)); rootID != "" {
+		printChatSessionMetaRow("Compact Root ID:", rootID)
 	}
 }
 

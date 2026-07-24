@@ -115,11 +115,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/goal") {
 		return handleGoalCommand(session, command)
 	}
-	if commandMatches(cmdLower, "/title") {
+	if commandMatches(cmdLower, "/title") || commandMatches(cmdLower, "/rename") {
 		title := extractCommandArgument(command)
 		if strings.TrimSpace(title) == "" {
 			fmt.Println("错误: 需要指定会话标题")
-			fmt.Println("用法: /title <title>")
+			fmt.Println("用法: /title <title> 或 /rename <title>")
 			return false
 		}
 		if session.RuntimeSession == nil {
@@ -158,6 +158,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	}
 	if commandMatches(cmdLower, "/stream") {
 		return applyStreamCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/fast") {
+		return applyFastCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/theme") {
+		return handleThemeCommand(session, command, noInteractive)
 	}
 	if commandMatches(cmdLower, "/reasoning") {
 		return applyReasoningCommand(session, command)
@@ -547,6 +553,11 @@ func handleCompactCommand(session *ChatSession, command string) bool {
 	report, err := runManualChatCompact(session, mode)
 	if report != nil {
 		applyChatCompactContextUsage(session, report.Result, report.Status, true)
+		// Compact rewrites the sticky title in place; refresh the terminal
+		// window/tab title so "thread" reflects compact #N immediately.
+		if report.Result != nil {
+			refreshChatTitleMetadata(session)
+		}
 		fmt.Println(formatChatCompactReport(report))
 	}
 	if err != nil {

@@ -49,6 +49,7 @@ func TestParseExecOptions_MapsCommonFlags(t *testing.T) {
 		"provider":         "local",
 		"model":            "gpt-test",
 		"stream":           "true",
+		"fast":             "true",
 		"reasoning-effort": "high",
 		"approval-reuse":   "off",
 		"debug-http":       "true",
@@ -67,7 +68,7 @@ func TestParseExecOptions_MapsCommonFlags(t *testing.T) {
 	if opts.ProfileFlag != "dev" || opts.AgentFlag != "coder" || opts.ProviderFlag != "local" || opts.ModelFlag != "gpt-test" {
 		t.Fatalf("common flags were not mapped: %+v", opts)
 	}
-	if !opts.StreamFlag || !opts.StreamChanged || opts.ReasoningEffortFlag != "high" || !opts.HTTPDebug || opts.CLISkillsTopK != 3 {
+	if !opts.StreamFlag || !opts.StreamChanged || !opts.FastFlag || !opts.FastChanged || opts.ReasoningEffortFlag != "high" || !opts.HTTPDebug || opts.CLISkillsTopK != 3 {
 		t.Fatalf("advanced flags were not mapped: %+v", opts)
 	}
 	if len(opts.ConfigOverrides) != 1 || opts.ConfigOverrides[0] != "model=gpt-test" {

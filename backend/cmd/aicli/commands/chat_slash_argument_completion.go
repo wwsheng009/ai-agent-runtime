@@ -71,6 +71,15 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "toggle", Summary: "切换流式状态", Group: string(chatSlashCommandGroupModel)},
 			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupModel)},
 		})
+	case "/fast":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "on", Summary: "开启 Fast（priority）", Group: string(chatSlashCommandGroupModel)},
+			{Command: "off", Summary: "关闭 Fast", Group: string(chatSlashCommandGroupModel)},
+			{Command: "toggle", Summary: "切换 Fast 状态", Group: string(chatSlashCommandGroupModel)},
+			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupModel)},
+		})
+	case "/theme":
+		return completeStaticSlashArgs(argsText, cursor, themeSlashArgumentCandidates())
 	case "/reasoning":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "on", Summary: "输出 reasoning 内容", Group: string(chatSlashCommandGroupModel)},
@@ -976,16 +985,9 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 			}
 			item = loaded
 		}
-		turnCount, messageCount := runtimeSessionConversationCounts(item)
-		summary := fmt.Sprintf("%s · %d轮/%d条消息 · 最后更新 %s",
-			runtimeResumeSessionTitle(item),
-			turnCount,
-			messageCount,
-			formatSessionUpdatedAt(item.UpdatedAt, now),
-		)
 		candidates = append(candidates, chatSlashCompletionCandidate{
 			Command:     item.ID,
-			Summary:     summary,
+			Summary:     formatResumeSessionCompletionSummary(item, now),
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: false,
 		})
@@ -1002,6 +1004,30 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 	return candidates
 }
 
+// formatResumeSessionCompletionSummary builds the /resume and /load argument
+// completion summary: title first, optional compact badge, then counts/time.
+func formatResumeSessionCompletionSummary(session *runtimechat.Session, now time.Time) string {
+	if session == nil {
+		return ""
+	}
+	turnCount, messageCount := runtimeSessionConversationCounts(session)
+	title := runtimeResumeSessionTitle(session)
+	// Keep title first; surface compact generation when present so completion
+	// rows match the interactive list badge without duplicating sticky titles.
+	if generation := runtimeSessionCompactGeneration(session); generation > 0 {
+		badge := fmt.Sprintf("compact #%d", generation)
+		if !strings.Contains(strings.ToLower(title), strings.ToLower(badge)) {
+			title = fmt.Sprintf("%s · %s", title, badge)
+		}
+	}
+	return fmt.Sprintf("%s · %d轮/%d条消息 · 最后更新 %s",
+		title,
+		turnCount,
+		messageCount,
+		formatSessionUpdatedAt(session.UpdatedAt, now),
+	)
+}
+
 func matchSlashArgumentCandidates(candidates []chatSlashCompletionCandidate, query string) []chatSlashCompletionCandidate {
 	if len(candidates) == 0 {
 		return nil
@@ -1011,17 +1037,28 @@ func matchSlashArgumentCandidates(candidates []chatSlashCompletionCandidate, que
 		return cloneSlashCompletionCandidates(candidates)
 	}
 
-	matches := make([]chatSlashCompletionCandidate, 0, len(candidates))
+	// Prefer ID prefix matches, then fall back to title/summary substring matches
+	// so /resume and /load can complete by human-readable session titles.
+	exactOrPrefix := make([]chatSlashCompletionCandidate, 0, len(candidates))
+	titleMatches := make([]chatSlashCompletionCandidate, 0)
 	for _, candidate := range candidates {
 		name := strings.ToLower(strings.TrimSpace(candidate.Command))
 		if name == "" {
 			continue
 		}
 		if name == query || strings.HasPrefix(name, query) {
-			matches = append(matches, candidate)
+			exactOrPrefix = append(exactOrPrefix, candidate)
+			continue
+		}
+		summary := strings.ToLower(strings.TrimSpace(candidate.Summary))
+		if summary != "" && strings.Contains(summary, query) {
+			titleMatches = append(titleMatches, candidate)
 		}
 	}
-	return matches
+	if len(exactOrPrefix) > 0 {
+		return exactOrPrefix
+	}
+	return titleMatches
 }
 
 func dedupeSlashArgumentCandidates(candidates []chatSlashCompletionCandidate) []chatSlashCompletionCandidate {

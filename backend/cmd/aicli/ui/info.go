@@ -17,6 +17,10 @@ type SessionInfo struct {
 	KeyCount         int
 	Timeout          string
 	IsStream         bool
+	// SupportsFast is true only when the active protocol can use Codex Fast
+	// mode (service_tier=priority). When false, Fast is omitted from the UI.
+	SupportsFast     bool
+	IsFast           bool
 	ReasoningEnabled bool
 }
 
@@ -56,6 +60,17 @@ func PrintSessionInfo(info SessionInfo) bool {
 		streamStatus = theme.Dimmed(streamStatus)
 	}
 	printSessionInfoRow(theme.SystemIcon+" ", "Stream:", streamStatus, theme.ColorizeLabel)
+
+	// Fast 模式：仅 Codex 协议展示（service_tier=priority），与 Stream 无关。
+	if info.SupportsFast {
+		fastStatus := "off"
+		if info.IsFast {
+			fastStatus = theme.SuccessColor.Sprint("on")
+		} else {
+			fastStatus = theme.Dimmed(fastStatus)
+		}
+		printSessionInfoRow(theme.SystemIcon+" ", "Fast:", fastStatus, theme.ColorizeLabel)
+	}
 
 	// reasoning 能力标识：只展示显式配置结果，不做模型名语义解释。
 	if info.ReasoningEnabled {

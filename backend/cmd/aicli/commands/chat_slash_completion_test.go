@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -68,6 +69,69 @@ func TestDetectSlashCompletionContext(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFormatResumeSessionCompletionSummaryIncludesCompactBadge(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
+	session := runtimechat.NewSession("tester")
+	session.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	session.Metadata.Context = map[string]interface{}{
+		runtimechat.ContextCompactGeneration: 2,
+		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
+	}
+	session.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "hi", Metadata: runtimetypes.NewMetadata()},
+	})
+	session.UpdatedAt = now.Add(-time.Minute)
+
+	got := formatResumeSessionCompletionSummary(session, now)
+	for _, expected := range []string{
+		"检查登录流程为什么失败 · compact #2",
+		"1轮/2条消息",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected completion summary to contain %q, got %q", expected, got)
+		}
+	}
+	if strings.Count(got, "compact #2") != 1 {
+		t.Fatalf("expected sticky compact title not to duplicate badge, got %q", got)
+	}
+
+	// Title without embedded marker still gets an explicit badge.
+	session.Metadata.Title = "检查登录流程为什么失败"
+	got = formatResumeSessionCompletionSummary(session, now)
+	if !strings.Contains(got, "检查登录流程为什么失败 · compact #2") {
+		t.Fatalf("expected appended compact badge, got %q", got)
+	}
+}
+
+func TestMatchSlashArgumentCandidatesPrefersIDThenTitle(t *testing.T) {
+	t.Parallel()
+
+	candidates := []chatSlashCompletionCandidate{
+		{Command: "session_abc123", Summary: "检查登录流程 · 2轮/4条消息 · 最后更新 2026-05-02 11:57"},
+		{Command: "session_def456", Summary: "实现 resume 列表 · 1轮/2条消息 · 最后更新 2026-05-02 12:00"},
+		{Command: "latest", Summary: "直接恢复最近的其他会话"},
+	}
+
+	byID := matchSlashArgumentCandidates(candidates, "session_def")
+	if len(byID) != 1 || byID[0].Command != "session_def456" {
+		t.Fatalf("expected ID prefix match, got %#v", byID)
+	}
+
+	byTitle := matchSlashArgumentCandidates(candidates, "登录")
+	if len(byTitle) != 1 || byTitle[0].Command != "session_abc123" {
+		t.Fatalf("expected title substring match, got %#v", byTitle)
+	}
+
+	// When an ID prefix matches, do not also return weaker title hits.
+	idWins := matchSlashArgumentCandidates(candidates, "session_")
+	if len(idWins) != 2 {
+		t.Fatalf("expected both ID prefix matches before title fallback, got %#v", idWins)
 	}
 }
 
@@ -344,10 +408,12 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/load", forms: []string{"/load"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/resume", forms: []string{"/resume"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/export", forms: []string{"/export"}, acceptsArgs: true, requiresArgs: false},
-		{canonical: "/title", forms: []string{"/title"}, acceptsArgs: true, requiresArgs: true},
+		{canonical: "/title", forms: []string{"/title", "/rename"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/goal", forms: []string{"/goal"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/history", forms: []string{"/history", "/h"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/stream", forms: []string{"/stream"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/fast", forms: []string{"/fast"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/theme", forms: []string{"/theme"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/reasoning", forms: []string{"/reasoning"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/reasoning_effort", forms: []string{"/reasoning_effort", "/reasoning-effort"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/s", forms: []string{"/s"}, acceptsArgs: false, requiresArgs: false, shortcutOf: "/stream"},

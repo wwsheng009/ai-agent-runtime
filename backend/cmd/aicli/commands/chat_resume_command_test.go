@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -41,8 +42,15 @@ func TestRenderRuntimeSessionSummaryLinesIncludesProtocolUpdateTimeAndCounts(t *
 	if strings.Contains(joined, "【当前】") {
 		t.Fatalf("did not expect current session marker, got %q", joined)
 	}
-	if !strings.Contains(joined, "标题:") {
-		t.Fatalf("expected title line, got %q", joined)
+	// Title is the first column; session ID must not lead the row.
+	if !strings.Contains(joined, "hello [active]") && !strings.Contains(joined, "hello") {
+		t.Fatalf("expected title-first summary row, got %q", joined)
+	}
+	if strings.Contains(joined, "resume-1 [active]") {
+		t.Fatalf("did not expect session ID as first column, got %q", joined)
+	}
+	if strings.Contains(joined, "标题:") {
+		t.Fatalf("did not expect separate title line after title-first header, got %q", joined)
 	}
 	if !strings.Contains(joined, "最后更新=2026-05-02 11:57 (3分钟前)") {
 		t.Fatalf("expected exact and relative update time, got %q", joined)
@@ -102,11 +110,13 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 	now := time.Date(2026, 7, 17, 16, 0, 0, 0, time.Local)
 	session := runtimechat.NewSession("tester")
 	session.ID = "resume-fullscreen"
-	session.Metadata.Title = "Resume full-screen picker"
+	session.Metadata.Title = "Resume full-screen picker · compact #1"
 	session.Metadata.Context = map[string]interface{}{
-		chatRuntimeContextProtocol:     "anthropic",
-		chatRuntimeContextProviderName: "provider-a",
-		chatRuntimeContextModel:        "model-a",
+		chatRuntimeContextProtocol:             "anthropic",
+		chatRuntimeContextProviderName:         "provider-a",
+		chatRuntimeContextModel:                "model-a",
+		runtimechat.ContextCompactRootTitle:    "Resume full-screen picker",
+		runtimechat.ContextCompactGeneration:   1,
 	}
 	session.ReplaceHistory([]runtimetypes.Message{
 		{Role: "user", Content: "improve resume", Metadata: runtimetypes.NewMetadata()},
@@ -119,19 +129,152 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 		t.Fatalf("expected nil sessions to be skipped while preserving selection mapping, got items=%#v selectable=%#v", items, selectable)
 	}
 	item := items[0]
-	if item.Title != "Resume full-screen picker" {
+	if item.Title != "Resume full-screen picker · compact #1" {
 		t.Fatalf("unexpected full-screen title: %q", item.Title)
 	}
-	for _, expected := range []string{"5分钟前", "1轮/2条"} {
+	for _, expected := range []string{"5分钟前", "1轮/2条", "compact #1"} {
 		if !strings.Contains(item.Detail, expected) {
 			t.Fatalf("expected detail to contain %q, got %q", expected, item.Detail)
 		}
 	}
-	for _, expected := range []string{"resume-fullscreen", "anthropic", "provider-a", "model-a"} {
+	for _, expected := range []string{"resume-fullscreen", "anthropic", "provider-a", "model-a", "Resume full-screen picker"} {
 		if !strings.Contains(item.SearchText, expected) {
 			t.Fatalf("expected search metadata to contain %q, got %q", expected, item.SearchText)
 		}
 	}
+}
+
+func TestRenderRuntimeResumeSessionLineAlignsTitleColumn(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
+	shortSession := runtimechat.NewSession("tester")
+	shortSession.Metadata.Title = "短标题"
+	shortSession.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "a", Metadata: runtimetypes.NewMetadata()},
+	})
+	shortSession.UpdatedAt = now.Add(-time.Minute)
+
+	longSession := runtimechat.NewSession("tester")
+	longSession.Metadata.Title = "这是一个更长的会话标题"
+	longSession.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "b", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "ok", Metadata: runtimetypes.NewMetadata()},
+	})
+	longSession.UpdatedAt = now.Add(-2 * time.Minute)
+
+	titleWidth := maxRuntimeResumeSessionTitleWidth([]*runtimechat.Session{shortSession, longSession})
+	shortLine := renderRuntimeResumeSessionLine(shortSession, now, titleWidth)
+	longLine := renderRuntimeResumeSessionLine(longSession, now, titleWidth)
+
+	shortPrefix, shortOK := splitResumeLineBeforeCounts(shortLine)
+	longPrefix, longOK := splitResumeLineBeforeCounts(longLine)
+	if !shortOK || !longOK {
+		t.Fatalf("expected counts markers in resume lines, short=%q long=%q", shortLine, longLine)
+	}
+	if got, want := ui.DisplayWidth(shortPrefix), ui.DisplayWidth(longPrefix); got != want {
+		t.Fatalf("expected aligned counts columns by display width, short=%d long=%d\nshort=%q\nlong=%q", got, want, shortLine, longLine)
+	}
+}
+
+func TestMaxRuntimeResumeSessionTitleWidthCapsLongTitles(t *testing.T) {
+	session := runtimechat.NewSession("tester")
+	session.Metadata.Title = strings.Repeat("很长的会话标题", 8)
+	width := maxRuntimeResumeSessionTitleWidth([]*runtimechat.Session{session})
+	if width != resumeSessionTitleColumnMaxWidth {
+		t.Fatalf("expected title width cap %d, got %d", resumeSessionTitleColumnMaxWidth, width)
+	}
+
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
+	line := renderRuntimeResumeSessionLine(session, now, width)
+	if !strings.Contains(line, "...") {
+		t.Fatalf("expected truncated title ellipsis in resume line, got %q", line)
+	}
+	prefix, ok := splitResumeLineBeforeCounts(line)
+	if !ok {
+		t.Fatalf("expected counts marker in resume line, got %q", line)
+	}
+	if got := ui.DisplayWidth(prefix); got != width+2 { // title + two spaces before counts
+		// Allow the two-space separator between padded title and counts.
+		if got < width || got > width+4 {
+			t.Fatalf("expected truncated title column near width %d, got prefix width %d (%q)", width, got, prefix)
+		}
+	}
+}
+
+func TestRenderRuntimeSessionSummaryLinesIncludesCompactBadge(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	session := runtimechat.NewSession("tester")
+	session.ID = "compact-list-1"
+	session.State = runtimechat.StateActive
+	session.UpdatedAt = now.Add(-time.Minute)
+	session.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	session.Metadata.Context = map[string]interface{}{
+		chatRuntimeContextProtocol:           "openai",
+		runtimechat.ContextCompactGeneration: 2,
+		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
+	}
+	session.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "hi", Metadata: runtimetypes.NewMetadata()},
+	})
+	session.UpdatedAt = now.Add(-time.Minute)
+
+	joined := strings.Join(renderRuntimeSessionSummaryLines(session, now), "\n")
+	if !strings.Contains(joined, "compact=#2") {
+		t.Fatalf("expected compact generation badge in sessions summary, got %q", joined)
+	}
+	if strings.Contains(joined, "compact-list-1 [active]") {
+		t.Fatalf("did not expect session id as first column, got %q", joined)
+	}
+}
+
+func TestRenderRuntimeResumeSessionLineIncludesCompactBadge(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
+	session := runtimechat.NewSession("tester")
+	session.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	session.Metadata.Context = map[string]interface{}{
+		runtimechat.ContextCompactGeneration: 2,
+		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
+	}
+	session.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "hi", Metadata: runtimetypes.NewMetadata()},
+	})
+	session.UpdatedAt = now.Add(-time.Minute)
+
+	line := renderRuntimeResumeSessionLine(session, now, 0)
+	if !strings.Contains(line, "1轮/2条消息") {
+		t.Fatalf("expected turn/message counts in resume line, got %q", line)
+	}
+	// Format injects a dedicated "  compact #N  " badge between title and counts.
+	// Titles already embed "· compact #N", so require the explicit double-space badge.
+	if !strings.Contains(line, "  compact #2  ") {
+		t.Fatalf("expected compact generation badge in resume line, got %q", line)
+	}
+	titleIndex := strings.Index(line, "检查登录流程为什么失败 · compact #2")
+	badgeIndex := strings.Index(line, "  compact #2  ")
+	countsIndex := strings.Index(line, "1轮/2条消息")
+	if titleIndex < 0 || badgeIndex < 0 || countsIndex < 0 || !(titleIndex < badgeIndex && badgeIndex < countsIndex) {
+		t.Fatalf("expected title, compact badge, then counts order, got %q", line)
+	}
+}
+
+func splitResumeLineBeforeCounts(line string) (string, bool) {
+	marker := "轮/"
+	index := strings.Index(line, marker)
+	if index < 0 {
+		return "", false
+	}
+	// Walk back over the leading digit(s) of the turn count so prefixes end
+	// immediately before the shared counts column.
+	start := index
+	for start > 0 {
+		r := rune(line[start-1])
+		if r < '0' || r > '9' {
+			break
+		}
+		start--
+	}
+	return line[:start], true
 }
 
 func TestResumeInteractiveSelectShowsHistoryDirectlyAndExcludesCurrent(t *testing.T) {

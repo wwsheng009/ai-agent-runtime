@@ -28,6 +28,8 @@ func TestPrintSessionInfo_AlignsLabelsIntoColumns(t *testing.T) {
 			KeyCount:     1,
 			Timeout:      "5m0s",
 			IsStream:     true,
+			SupportsFast: true,
+			IsFast:       true,
 		})
 	})
 
@@ -39,10 +41,34 @@ func TestPrintSessionInfo_AlignsLabelsIntoColumns(t *testing.T) {
 		fmt.Sprintf("%s%-*s %s", childPrefix, sessionInfoLabelWidth, "Host:", "ai.last.ee"),
 		fmt.Sprintf("%s%-*s %s", theme.SystemIcon+" ", sessionInfoLabelWidth, "Model:", "gpt-5.2-codex"),
 		fmt.Sprintf("%s%-*s %s", theme.SystemIcon+" ", sessionInfoLabelWidth, "Stream:", "on"),
+		fmt.Sprintf("%s%-*s %s", theme.SystemIcon+" ", sessionInfoLabelWidth, "Fast:", "on"),
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
 		}
+	}
+}
+
+func TestPrintSessionInfo_OmitsFastWhenUnsupported(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	SetTheme(ThemeAuto)
+
+	output := captureUIStdout(t, func() {
+		PrintSessionInfo(SessionInfo{
+			ProviderName: "openai",
+			Protocol:     "openai",
+			ModelName:    "gpt-4.1",
+			IsStream:     false,
+			SupportsFast: false,
+			IsFast:       true, // must still omit when unsupported
+		})
+	})
+	if strings.Contains(output, "Fast:") {
+		t.Fatalf("expected Fast row omitted when unsupported, got:\n%s", output)
 	}
 }
 

@@ -264,8 +264,12 @@ func TestPromptSelectSessionFromList_RetriesAfterInvalidChoice(t *testing.T) {
 	if !strings.Contains(stderr, "无效的选择，请重新输入") {
 		t.Fatalf("expected invalid-choice warning on stderr, got:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "[1 ] session-1") || !strings.Contains(stderr, "[2 ] session-2") {
-		t.Fatalf("expected aligned session rows, got:\n%s", stderr)
+	// Selection list first column is the session title, not the session ID.
+	if !strings.Contains(stderr, "[1 ] first") || !strings.Contains(stderr, "[2 ] second") {
+		t.Fatalf("expected title-first session rows, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "[1 ] session-1") || strings.Contains(stderr, "[2 ] session-2") {
+		t.Fatalf("did not expect session ID as first column, got:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "[idle") || !strings.Contains(stderr, "[active") {
 		t.Fatalf("expected aligned state column, got:\n%s", stderr)

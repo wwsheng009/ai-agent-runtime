@@ -16,6 +16,10 @@ type ExecOptions struct {
 	MaxTokens           int
 	StreamFlag          bool
 	StreamChanged       bool
+	// FastFlag / FastChanged mirror Stream: CLI override for Codex Fast mode.
+	// Effective only when the resolved provider protocol is codex.
+	FastFlag            bool
+	FastChanged         bool
 	ReasoningEffortFlag string
 	RuntimeModeFlag     string
 	RuntimeServerFlag   string

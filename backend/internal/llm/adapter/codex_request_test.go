@@ -193,6 +193,51 @@ func TestCodexBuildRequest_UsesConfiguredStreamFlag(t *testing.T) {
 	}
 }
 
+func TestCodexBuildRequest_SetsServiceTierPriorityForFastMode(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Metadata: map[string]interface{}{
+			"service_tier": "priority",
+		},
+	})
+	if req["service_tier"] != "priority" {
+		t.Fatalf("expected service_tier=priority, got %v", req["service_tier"])
+	}
+
+	// Legacy config name "fast" also maps to request value "priority".
+	req = a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Metadata: map[string]interface{}{
+			"service_tier": "fast",
+		},
+	})
+	if req["service_tier"] != "priority" {
+		t.Fatalf("expected service_tier=priority for fast alias, got %v", req["service_tier"])
+	}
+
+	// default / empty should omit the field.
+	req = a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Metadata: map[string]interface{}{
+			"service_tier": "default",
+		},
+	})
+	if _, ok := req["service_tier"]; ok {
+		t.Fatalf("expected service_tier omitted for default, got %v", req["service_tier"])
+	}
+	req = a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+	})
+	if _, ok := req["service_tier"]; ok {
+		t.Fatalf("expected service_tier omitted when unset, got %v", req["service_tier"])
+	}
+}
+
 func TestCodexBuildRequest_OmitsMaxOutputTokensWhenMetadataDisablesIt(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{

@@ -120,6 +120,76 @@ func TestSessionManualTitleIsNotOverwrittenByDerivedTitle(t *testing.T) {
 	}
 }
 
+func TestSessionApplyCompactTitleLineageInheritsRootTitle(t *testing.T) {
+	session := NewSession("test-user")
+	session.ID = "session-a"
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage("检查登录流程为什么失败"),
+		*types.NewAssistantMessage("我会检查登录链路。"),
+	})
+	if got := session.Metadata.Title; got != "检查登录流程为什么失败" {
+		t.Fatalf("expected derived root title, got %q", got)
+	}
+
+	rootHint := session.CompactRootTitleCandidate()
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("system"),
+		*types.NewUserMessage("Compaction summary: login flow failed due to token expiry."),
+	})
+	session.ApplyCompactTitleLineage(session.ID, rootHint)
+
+	if got := session.Metadata.Title; got != "检查登录流程为什么失败 · compact #1" {
+		t.Fatalf("expected compact child title, got %q", got)
+	}
+	if got := session.Metadata.TitleSource; got != sessionTitleSourceCompact {
+		t.Fatalf("expected compact title source, got %q", got)
+	}
+	if got := contextStringValue(session.Metadata.Context, ContextCompactRootTitle); got != "检查登录流程为什么失败" {
+		t.Fatalf("expected root title context, got %q", got)
+	}
+	if got := contextIntValue(session.Metadata.Context, ContextCompactGeneration); got != 1 {
+		t.Fatalf("expected generation 1, got %d", got)
+	}
+	if got := contextStringValue(session.Metadata.Context, ContextCompactParentSessionID); got != "session-a" {
+		t.Fatalf("expected parent session id, got %q", got)
+	}
+
+	// Multi-round compact: generation increments; root title stays stable.
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage("Second compaction summary should not become the title."),
+	})
+	session.ApplyCompactTitleLineage(session.ID, session.CompactRootTitleCandidate())
+	if got := session.Metadata.Title; got != "检查登录流程为什么失败 · compact #2" {
+		t.Fatalf("expected second compact child title, got %q", got)
+	}
+	if got := contextIntValue(session.Metadata.Context, ContextCompactGeneration); got != 2 {
+		t.Fatalf("expected generation 2, got %d", got)
+	}
+	if got := contextStringValue(session.Metadata.Context, ContextCompactRootTitle); got != "检查登录流程为什么失败" {
+		t.Fatalf("expected stable root title, got %q", got)
+	}
+
+	// Compact titles are sticky across later ReplaceHistory.
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage("later user message"),
+	})
+	if got := session.Metadata.Title; got != "检查登录流程为什么失败 · compact #2" {
+		t.Fatalf("expected sticky compact title after ReplaceHistory, got %q", got)
+	}
+}
+
+func TestFormatCompactChildTitleAndStripMarker(t *testing.T) {
+	if got := formatCompactChildTitle("Root", 1); got != "Root · compact #1" {
+		t.Fatalf("unexpected child title: %q", got)
+	}
+	if got := stripCompactTitleMarker("Root · compact #3"); got != "Root" {
+		t.Fatalf("expected marker strip, got %q", got)
+	}
+	if got := stripCompactTitleMarker("plain title"); got != "plain title" {
+		t.Fatalf("expected unchanged title, got %q", got)
+	}
+}
+
 func TestSessionManualTitleClearIsPreserved(t *testing.T) {
 	session := NewSession("test-user")
 	session.UpdateTitle("")

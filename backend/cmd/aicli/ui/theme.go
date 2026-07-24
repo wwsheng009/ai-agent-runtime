@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -10,13 +11,20 @@ import (
 	"golang.org/x/term"
 )
 
-// ThemeType 主题类型
+// ThemeType 主题类型（明暗轴）
 type ThemeType int
 
 const (
-	ThemeAuto  ThemeType = iota // 自动检测
+	ThemeAuto  ThemeType = iota // 自动检测终端
 	ThemeLight                  // 亮色模式
 	ThemeDark                   // 暗色模式
+)
+
+// Theme mode preference names (axis 1: light/dark).
+const (
+	ThemeModeAuto  = "auto"
+	ThemeModeLight = "light"
+	ThemeModeDark  = "dark"
 )
 
 // Theme 主题定义
@@ -99,6 +107,10 @@ var (
 	// 当前主题实例（单例模式）
 	currentTheme *Theme
 	themeMutex   sync.RWMutex
+
+	// currentThemeMode is the user preference for the light/dark axis.
+	// ThemeAuto means detect from the terminal environment.
+	currentThemeMode ThemeType = ThemeAuto
 )
 
 // GetTheme 获取主题（单例）
@@ -106,7 +118,7 @@ func GetTheme(themeType ThemeType) *Theme {
 	themeMutex.Lock()
 	defer themeMutex.Unlock()
 
-	if currentTheme != nil && (themeType == ThemeAuto || currentTheme.Type == themeType) && currentTheme.Name == normalizeThemePresetName(currentThemeName) {
+	if currentTheme != nil && themeMatchesRequest(currentTheme, themeType) && currentTheme.Name == normalizeThemePresetName(currentThemeName) {
 		return currentTheme
 	}
 
@@ -114,71 +126,151 @@ func GetTheme(themeType ThemeType) *Theme {
 	return currentTheme
 }
 
-// createTheme 创建主题
+func themeMatchesRequest(theme *Theme, requested ThemeType) bool {
+	if theme == nil {
+		return false
+	}
+	if requested == ThemeAuto {
+		// For Auto, cache is valid only when it matches the currently preferred/resolved mode.
+		return theme.Type == resolvePreferredThemeType()
+	}
+	return theme.Type == requested
+}
+
+// resolvePreferredThemeType returns the effective light/dark under the current mode preference.
+// Caller must hold themeMutex when currentThemeMode may race.
+func resolvePreferredThemeType() ThemeType {
+	switch currentThemeMode {
+	case ThemeLight:
+		return ThemeLight
+	case ThemeDark:
+		return ThemeDark
+	default:
+		return detectTerminalThemeType()
+	}
+}
+
+// createTheme builds a theme using the current global palette selection.
 func createTheme(themeType ThemeType) *Theme {
-	// 自动检测终端是否支持颜色
-	// color.NoColor 是一个 bool 变量，当不支持颜色时为 true
+	return createThemeWithPalette(themeType, currentThemeName)
+}
+
+// createThemeWithPalette builds a theme for an explicit palette without relying
+// on currentTheme beyond themeType resolution for ThemeAuto.
+// Caller must hold themeMutex when reading currentThemeMode/currentThemeName races matter;
+// this helper only reads currentThemeMode via resolvePreferredThemeType for ThemeAuto.
+func createThemeWithPalette(themeType ThemeType, palette string) *Theme {
+	// color.NoColor 为 true 时表示不支持颜色。
 	useColor := !color.NoColor
 
-	// 如果是自动模式，通过环境变量判断
 	actualType := themeType
 	if themeType == ThemeAuto {
-		// 检查 NO_COLOR 环境变量
 		if os.Getenv("NO_COLOR") != "" {
 			useColor = false
 		}
-		// 检测终端是否为暗色模式（粗略判断）
-		if os.Getenv("TERM_PROGRAM") == "vscode" || os.Getenv("TERM_PROGRAM") == "iTerm.app" {
-			actualType = ThemeDark
-		} else {
-			// 默认使用暗色模式
-			actualType = ThemeDark
-		}
+		actualType = resolvePreferredThemeType()
+	}
+	if actualType == ThemeAuto {
+		actualType = ThemeDark
 	}
 
+	theme := baseTheme(actualType)
+	theme.Name = normalizeThemePresetName(palette)
+	if theme.Name == "" {
+		theme.Name = ThemePresetFocus
+	}
+	applyThemePreset(theme, theme.Name)
+
+	if !useColor {
+		disableColors(theme)
+	}
+
+	return theme
+}
+
+// baseTheme builds shared role colors before palette overrides.
+// Light and dark bases differ so palette presets can layer on either axis.
+func baseTheme(actualType ThemeType) *Theme {
 	theme := &Theme{
 		Type:             actualType,
-		Name:             normalizeThemePresetName(currentThemeName),
-		UserColor:        color.New(color.FgCyan, color.Bold),
 		UserIcon:         ">",
-		AssistantColor:   color.New(color.FgGreen),
 		AssistantIcon:    "",
-		SystemColor:      color.New(color.FgHiYellow),
 		SystemIcon:       "ℹ️",
-		CommandColor:     color.New(color.FgMagenta),
 		CommandIcon:      "❯",
-		OutputColor:      color.New(color.Reset),
-		SecondaryColor:   color.New(color.FgWhite),
-		MutedColor:       color.New(color.FgHiBlack),
-		MetaLabelColor:   color.New(color.FgHiBlack),
-		TimelineColor:    color.New(color.FgHiBlack),
-		ToolColor:        color.New(color.FgCyan, color.Bold),
-		ReasoningColor:   color.New(color.FgYellow),
-		ApprovalColor:    color.New(color.FgMagenta, color.Bold),
-		ErrorColor:       color.New(color.FgRed, color.Bold),
 		ErrorIcon:        "❌",
-		WarningColor:     color.New(color.FgYellow, color.Bold),
 		WarningIcon:      "⚠️",
-		SuccessColor:     color.New(color.FgGreen, color.Bold),
 		SuccessIcon:      "✅",
-		InfoColor:        color.New(color.FgBlue),
 		InfoIcon:         "💡",
-		SeparatorColor:   color.New(color.FgHiBlack),
-		ProgressColor:    color.New(color.FgGreen),
 		ShellIcon:        "💻",
 		BorderHorizontal: "═",
 		BorderVertical:   "║",
 		Separator:        "─",
 	}
 
-	applyThemePreset(theme, theme.Name)
-
-	// 如果不支持颜色，禁用所有颜色
-	if !useColor {
-		disableColors(theme)
+	if actualType == ThemeLight {
+		theme.UserColor = color.New(color.FgBlue, color.Bold)
+		theme.AssistantColor = color.New(color.FgBlack)
+		theme.SystemColor = color.New(color.FgYellow)
+		theme.CommandColor = color.New(color.FgMagenta)
+		theme.OutputColor = color.New(color.Reset)
+		theme.SecondaryColor = color.New(color.FgBlack)
+		theme.MutedColor = color.New(color.FgHiBlack)
+		theme.MetaLabelColor = color.New(color.FgHiBlack)
+		theme.TimelineColor = color.New(color.FgHiBlack)
+		theme.ToolColor = color.New(color.FgBlue, color.Bold)
+		theme.ReasoningColor = color.New(color.FgYellow)
+		theme.ApprovalColor = color.New(color.FgMagenta, color.Bold)
+		theme.ErrorColor = color.New(color.FgRed, color.Bold)
+		theme.WarningColor = color.New(color.FgYellow, color.Bold)
+		theme.SuccessColor = color.New(color.FgGreen, color.Bold)
+		theme.InfoColor = color.New(color.FgBlue)
+		theme.SeparatorColor = color.New(color.FgHiBlack)
+		theme.ProgressColor = color.New(color.FgGreen)
+		return theme
 	}
 
+	theme.UserColor = color.New(color.FgCyan, color.Bold)
+	theme.AssistantColor = color.New(color.FgGreen)
+	theme.SystemColor = color.New(color.FgHiYellow)
+	theme.CommandColor = color.New(color.FgMagenta)
+	theme.OutputColor = color.New(color.Reset)
+	theme.SecondaryColor = color.New(color.FgWhite)
+	theme.MutedColor = color.New(color.FgHiBlack)
+	theme.MetaLabelColor = color.New(color.FgHiBlack)
+	theme.TimelineColor = color.New(color.FgHiBlack)
+	theme.ToolColor = color.New(color.FgCyan, color.Bold)
+	theme.ReasoningColor = color.New(color.FgYellow)
+	theme.ApprovalColor = color.New(color.FgMagenta, color.Bold)
+	theme.ErrorColor = color.New(color.FgRed, color.Bold)
+	theme.WarningColor = color.New(color.FgYellow, color.Bold)
+	theme.SuccessColor = color.New(color.FgGreen, color.Bold)
+	theme.InfoColor = color.New(color.FgBlue)
+	theme.SeparatorColor = color.New(color.FgHiBlack)
+	theme.ProgressColor = color.New(color.FgGreen)
 	return theme
+}
+
+// detectTerminalThemeType roughly detects light vs dark terminal background.
+// Prefer COLORFGBG (common on Unix terminals); default to dark when unknown.
+func detectTerminalThemeType() ThemeType {
+	if v := strings.TrimSpace(os.Getenv("COLORFGBG")); v != "" {
+		parts := strings.Split(v, ";")
+		if len(parts) > 0 {
+			bgRaw := strings.TrimSpace(parts[len(parts)-1])
+			if bg, err := strconv.Atoi(bgRaw); err == nil {
+				// ANSI palette: 7/15 are light backgrounds; 0/8 are dark.
+				if bg == 7 || bg == 15 {
+					return ThemeLight
+				}
+				return ThemeDark
+			}
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TERM_PROGRAM"))) {
+	case "vscode", "iterm.app", "apple_terminal", "windows_terminal":
+		return ThemeDark
+	}
+	return ThemeDark
 }
 
 // disableColors 禁用主题中所有颜色
@@ -203,10 +295,11 @@ func disableColors(theme *Theme) {
 	theme.ProgressColor = color.New()
 }
 
-// SetTheme 设置主题
+// SetTheme 设置明暗模式偏好（auto/light/dark），并立即重建当前配色。
 func SetTheme(themeType ThemeType) {
 	themeMutex.Lock()
 	defer themeMutex.Unlock()
+	currentThemeMode = themeType
 	currentTheme = createTheme(themeType)
 }
 

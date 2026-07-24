@@ -110,15 +110,58 @@ func main() {
 			commands.ConfigureAICLILoggerForCLI(cfg, logFilePath)
 		}
 
-		themeName := ""
-		if flagTheme, err := rootCmd.Flags().GetString("theme"); err == nil {
-			themeName = strings.TrimSpace(flagTheme)
+		// Theme startup precedence: --theme flag > AICLI_THEME/AICLI_THEME_MODE env > config.
+		// --theme may be either a palette name or a mode token (auto|dark|light|aliases).
+		flagTheme := ""
+		if v, err := rootCmd.Flags().GetString("theme"); err == nil {
+			flagTheme = strings.TrimSpace(v)
 		}
-		if themeName == "" && cfg != nil && cfg.AICLI != nil && cfg.AICLI.Theme != nil {
-			themeName = strings.TrimSpace(cfg.AICLI.Theme.Name)
+		envTheme := strings.TrimSpace(os.Getenv("AICLI_THEME"))
+		envThemeMode := strings.TrimSpace(os.Getenv("AICLI_THEME_MODE"))
+		cfgThemeName := ""
+		cfgThemeMode := ""
+		if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Theme != nil {
+			cfgThemeName = strings.TrimSpace(cfg.AICLI.Theme.Name)
+			cfgThemeMode = strings.TrimSpace(cfg.AICLI.Theme.Mode)
 		}
-		if themeName != "" {
-			if err := ui.SetThemePreset(themeName); err != nil {
+
+		palette := ""
+		mode := ""
+		// 1) Config defaults
+		if cfgThemeName != "" {
+			palette = cfgThemeName
+		}
+		if cfgThemeMode != "" {
+			mode = cfgThemeMode
+		}
+		// 2) Environment overrides
+		if envTheme != "" {
+			if m := ui.NormalizeThemeModeName(envTheme); m != "" && isStartupThemeModeToken(envTheme) {
+				// AICLI_THEME=dark is treated as mode for convenience (same as --theme).
+				mode = m
+			} else {
+				palette = envTheme
+			}
+		}
+		if envThemeMode != "" {
+			mode = envThemeMode
+		}
+		// 3) CLI flag highest priority
+		if flagTheme != "" {
+			if m := ui.NormalizeThemeModeName(flagTheme); m != "" && isStartupThemeModeToken(flagTheme) {
+				mode = m
+			} else {
+				palette = flagTheme
+			}
+		}
+
+		if palette != "" {
+			if err := ui.SetThemePreset(palette); err != nil {
+				return err
+			}
+		}
+		if mode != "" {
+			if err := ui.SetThemeMode(mode); err != nil {
 				return err
 			}
 		}
@@ -133,7 +176,7 @@ func main() {
 	// 全局 flags
 	rootCmd.PersistentFlags().StringP("config", "c", "", "配置文件路径（未指定时按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml 顺序查找）")
 	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
-	rootCmd.PersistentFlags().String("theme", "", "输出主题（classic|focus|contrast|mono，留空使用配置或默认）")
+	rootCmd.PersistentFlags().String("theme", "", "输出主题配色或明暗（classic|focus|contrast|mono 或 auto|dark|light；优先级: --theme > AICLI_THEME/AICLI_THEME_MODE > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 
 	// config 子命令
@@ -267,6 +310,7 @@ func main() {
   aicli chat --profile ./profiles/dev --agent coder
   aicli chat --provider nvidia            # 指定 provider
   aicli chat --provider nvidia --stream   # 流式输出
+  aicli chat --provider codex --fast     # Codex Fast（service_tier=priority）
   aicli chat --resume                     # 恢复最近会话
   aicli chat --session session_xxx        # 加载指定会话
   aicli chat --list-sessions              # 列出会话
@@ -290,6 +334,7 @@ func main() {
 	chatCmd.Flags().StringP("provider", "p", "", "指定 provider 名称")
 	chatCmd.Flags().StringP("model", "m", "", "指定模型名称")
 	chatCmd.Flags().BoolP("stream", "s", false, "使用流式输出")
+	chatCmd.Flags().Bool("fast", false, "启用 Codex Fast 模式（service_tier=priority；仅 protocol=codex 生效）")
 	chatCmd.Flags().Bool("no-interactive", false, "非交互模式（单次请求）")
 	chatCmd.Flags().String("output", "", "非交互模式输出格式（text|json）")
 	chatCmd.Flags().BoolP("json", "j", false, "兼容选项：等价于 --output json")
@@ -418,4 +463,15 @@ func shouldBootstrapConfigForCommand(cmd *cobra.Command, args []string) bool {
 		return false
 	}
 	return true
+}
+
+// isStartupThemeModeToken reports whether --theme value should be treated as a
+// light/dark mode rather than a palette name.
+func isStartupThemeModeToken(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "auto", "system", "dark", "night", "black", "light", "day", "white":
+		return true
+	default:
+		return false
+	}
 }

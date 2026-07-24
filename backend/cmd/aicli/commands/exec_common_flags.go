@@ -21,6 +21,7 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 		flags.StringP("prompt", "p", "", "提示词（可与 stdin 组合使用）")
 	}
 	flags.Bool("stream", false, "使用流式模型输出")
+	flags.Bool("fast", false, "启用 Codex Fast 模式（service_tier=priority；仅 protocol=codex 生效）")
 	flags.String("reasoning-effort", "", "当前模型支持的 reasoning_effort 值")
 	flags.String("runtime-mode", "", "执行宿主模式（local|server|auto）")
 	flags.String("runtime-server", "", "runtime-server 地址或模式别名（server|auto|local|http://127.0.0.1:8101）")

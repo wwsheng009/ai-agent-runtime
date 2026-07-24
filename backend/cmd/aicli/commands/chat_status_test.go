@@ -111,6 +111,66 @@ func TestBuildChatStatusTokenCountValue_FormatsCumulativeCount(t *testing.T) {
 	}
 }
 
+func TestBuildChatStatusSessionValueIncludesTitleAndCompactGeneration(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "session-status-1"
+	runtimeSession.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		runtimechat.ContextCompactGeneration: 2,
+		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
+	}
+	session := &ChatSession{RuntimeSession: runtimeSession}
+
+	got := buildChatStatusSessionValue(session)
+	for _, expected := range []string{
+		"session-status-1",
+		"检查登录流程为什么失败 · compact #2",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected status session value to contain %q, got %q", expected, got)
+		}
+	}
+	// Sticky compact titles already embed the generation badge; do not duplicate it.
+	if strings.Count(got, "compact #2") != 1 {
+		t.Fatalf("expected a single compact badge in status session value, got %q", got)
+	}
+
+	// When generation is present but the title does not embed the badge, append one.
+	runtimeSession.Metadata.Title = "检查登录流程为什么失败"
+	got = buildChatStatusSessionValue(session)
+	if !strings.Contains(got, "检查登录流程为什么失败 · compact #2") {
+		t.Fatalf("expected appended compact badge when title lacks marker, got %q", got)
+	}
+}
+
+func TestBuildChatStatusBoxLines_IncludesFastModeOnlyForCodex(t *testing.T) {
+	codex := &ChatSession{
+		ProviderName: "codex_ee",
+		Provider:     config.Provider{Enabled: true, Protocol: "codex", BaseURL: "https://example.com"},
+		Model:        "gpt-5.2-codex",
+		FastMode:     true,
+	}
+	lines := buildChatStatusBoxLines(codex, chatStatusDefaultContentWidth)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Fast mode:") {
+		t.Fatalf("expected Fast mode row for codex, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "on (priority)") {
+		t.Fatalf("expected Fast on (priority), got:\n%s", joined)
+	}
+
+	openai := &ChatSession{
+		ProviderName: "openai",
+		Provider:     config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com"},
+		Model:        "gpt-4.1",
+		FastMode:     true,
+	}
+	openaiLines := strings.Join(buildChatStatusBoxLines(openai, chatStatusDefaultContentWidth), "\n")
+	if strings.Contains(openaiLines, "Fast mode:") {
+		t.Fatalf("expected Fast mode omitted for non-codex, got:\n%s", openaiLines)
+	}
+}
+
 func TestBuildChatStatusContextUsedValue_UsesContextWindow(t *testing.T) {
 	session := &ChatSession{
 		TokenCount:              90000,

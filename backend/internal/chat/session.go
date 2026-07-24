@@ -2,6 +2,7 @@ package chat
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
@@ -24,6 +25,17 @@ const (
 	sessionSummaryLimit       = 120
 	sessionTitleSourceDerived = "derived"
 	sessionTitleSourceManual  = "manual"
+	sessionTitleSourceCompact = "compact"
+
+	// Compact lineage is stored on Metadata.Context so it survives persistence
+	// without a schema migration. Compact currently rewrites history in place
+	// (same session ID); these keys still record parent linkage + generation so
+	// multi-round compact titles chain to the original root title.
+	ContextCompactRootTitle         = "compact_root_title"
+	ContextCompactParentSessionID   = "compact_parent_session_id"
+	ContextCompactRootSessionID     = "compact_root_session_id"
+	ContextCompactGeneration        = "compact_generation"
+	ContextCompactSourceSessionID   = "compact_source_session_id"
 )
 
 // SessionMetadata 会话元数据
@@ -267,6 +279,272 @@ func (s *Session) UpdateTitle(title string) {
 	s.UpdatedAt = time.Now()
 }
 
+// CompactRootTitleCandidate returns the title that multi-round compact should
+// inherit. Call this before ReplaceHistory so compaction summary text does not
+// become the new root title.
+func (s *Session) CompactRootTitleCandidate() string {
+	if s == nil {
+		return ""
+	}
+	if root := strings.TrimSpace(contextStringValue(s.Metadata.Context, ContextCompactRootTitle)); root != "" {
+		return root
+	}
+	title := strings.TrimSpace(s.Metadata.Title)
+	if title == "" {
+		title = strings.TrimSpace(s.effectiveTitle())
+	}
+	return stripCompactTitleMarker(title)
+}
+
+// ApplyCompactTitleLineage records compact parent/root linkage and sets the
+// display title to "{rootTitle} · compact #N". parentSessionID is the session
+// that was compacted to produce the current history (usually the same ID when
+// compact rewrites in place). rootTitleHint should be captured before history
+// rewrite (see CompactRootTitleCandidate); when empty, existing lineage context
+// or the current title is used.
+func (s *Session) ApplyCompactTitleLineage(parentSessionID, rootTitleHint string) {
+	if s == nil {
+		return
+	}
+
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		parentSessionID = strings.TrimSpace(s.ID)
+	}
+
+	rootTitle := strings.TrimSpace(contextStringValue(s.Metadata.Context, ContextCompactRootTitle))
+	rootSessionID := strings.TrimSpace(contextStringValue(s.Metadata.Context, ContextCompactRootSessionID))
+	generation := contextIntValue(s.Metadata.Context, ContextCompactGeneration)
+
+	if rootTitle == "" {
+		rootTitle = strings.TrimSpace(rootTitleHint)
+	}
+	if rootTitle == "" {
+		rootTitle = strings.TrimSpace(s.Metadata.Title)
+		if rootTitle == "" {
+			rootTitle = strings.TrimSpace(s.effectiveTitle())
+		}
+	}
+	rootTitle = stripCompactTitleMarker(rootTitle)
+	if rootTitle == "" {
+		rootTitle = "(untitled)"
+	}
+	if rootSessionID == "" {
+		rootSessionID = parentSessionID
+		if rootSessionID == "" {
+			rootSessionID = strings.TrimSpace(s.ID)
+		}
+	}
+	if generation < 0 {
+		generation = 0
+	}
+	generation++
+
+	title := formatCompactChildTitle(rootTitle, generation)
+	s.Metadata.Title = title
+	s.Metadata.TitleSource = sessionTitleSourceCompact
+	s.SetContext(ContextCompactRootTitle, rootTitle)
+	s.SetContext(ContextCompactRootSessionID, rootSessionID)
+	s.SetContext(ContextCompactParentSessionID, parentSessionID)
+	s.SetContext(ContextCompactSourceSessionID, parentSessionID)
+	s.SetContext(ContextCompactGeneration, generation)
+	s.UpdatedAt = time.Now()
+}
+
+func formatCompactChildTitle(rootTitle string, generation int) string {
+	rootTitle = strings.TrimSpace(rootTitle)
+	if rootTitle == "" {
+		rootTitle = "(untitled)"
+	}
+	if generation < 1 {
+		generation = 1
+	}
+	return rootTitle + " · compact #" + itoaCompactGeneration(generation)
+}
+
+func stripCompactTitleMarker(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	const marker = " · compact #"
+	if idx := strings.LastIndex(title, marker); idx >= 0 {
+		// Only strip a trailing marker with a generation suffix.
+		suffix := title[idx+len(marker):]
+		if isCompactGenerationSuffix(suffix) {
+			return strings.TrimSpace(title[:idx])
+		}
+	}
+	return title
+}
+
+func isCompactGenerationSuffix(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func itoaCompactGeneration(n int) string {
+	if n <= 0 {
+		return "0"
+	}
+	// Avoid importing strconv solely for this small helper on the hot title path.
+	const digits = "0123456789"
+	if n < 10 {
+		return digits[n : n+1]
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = digits[n%10]
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+func contextStringValue(ctx map[string]interface{}, key string) string {
+	if ctx == nil {
+		return ""
+	}
+	raw, ok := ctx[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func contextIntValue(ctx map[string]interface{}, key string) int {
+	if ctx == nil {
+		return 0
+	}
+	raw, ok := ctx[key]
+	if !ok || raw == nil {
+		return 0
+	}
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float32:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		n := 0
+		for _, r := range strings.TrimSpace(v) {
+			if r < '0' || r > '9' {
+				return 0
+			}
+			n = n*10 + int(r-'0')
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
+type sessionTitleStateSnapshot struct {
+	Title       string
+	TitleSource string
+	RootTitle   string
+	RootID      string
+	ParentID    string
+	SourceID    string
+	Generation  interface{}
+	HasRoot     bool
+	HasRootID   bool
+	HasParent   bool
+	HasSource   bool
+	HasGen      bool
+}
+
+func snapshotSessionTitleState(session *Session) sessionTitleStateSnapshot {
+	if session == nil {
+		return sessionTitleStateSnapshot{}
+	}
+	snap := sessionTitleStateSnapshot{
+		Title:       session.Metadata.Title,
+		TitleSource: session.Metadata.TitleSource,
+	}
+	if session.Metadata.Context == nil {
+		return snap
+	}
+	if v, ok := session.Metadata.Context[ContextCompactRootTitle]; ok {
+		snap.HasRoot = true
+		snap.RootTitle = contextStringValue(session.Metadata.Context, ContextCompactRootTitle)
+		_ = v
+	}
+	if _, ok := session.Metadata.Context[ContextCompactRootSessionID]; ok {
+		snap.HasRootID = true
+		snap.RootID = contextStringValue(session.Metadata.Context, ContextCompactRootSessionID)
+	}
+	if _, ok := session.Metadata.Context[ContextCompactParentSessionID]; ok {
+		snap.HasParent = true
+		snap.ParentID = contextStringValue(session.Metadata.Context, ContextCompactParentSessionID)
+	}
+	if _, ok := session.Metadata.Context[ContextCompactSourceSessionID]; ok {
+		snap.HasSource = true
+		snap.SourceID = contextStringValue(session.Metadata.Context, ContextCompactSourceSessionID)
+	}
+	if v, ok := session.Metadata.Context[ContextCompactGeneration]; ok {
+		snap.HasGen = true
+		snap.Generation = v
+	}
+	return snap
+}
+
+func restoreSessionTitleState(session *Session, snap sessionTitleStateSnapshot) {
+	if session == nil {
+		return
+	}
+	session.Metadata.Title = snap.Title
+	session.Metadata.TitleSource = snap.TitleSource
+	if session.Metadata.Context == nil {
+		if !snap.HasRoot && !snap.HasRootID && !snap.HasParent && !snap.HasSource && !snap.HasGen {
+			return
+		}
+		session.Metadata.Context = make(map[string]interface{})
+	}
+	restoreContextValue(session.Metadata.Context, ContextCompactRootTitle, snap.RootTitle, snap.HasRoot)
+	restoreContextValue(session.Metadata.Context, ContextCompactRootSessionID, snap.RootID, snap.HasRootID)
+	restoreContextValue(session.Metadata.Context, ContextCompactParentSessionID, snap.ParentID, snap.HasParent)
+	restoreContextValue(session.Metadata.Context, ContextCompactSourceSessionID, snap.SourceID, snap.HasSource)
+	if snap.HasGen {
+		session.Metadata.Context[ContextCompactGeneration] = snap.Generation
+	} else {
+		delete(session.Metadata.Context, ContextCompactGeneration)
+	}
+}
+
+func restoreContextValue(ctx map[string]interface{}, key, value string, present bool) {
+	if ctx == nil {
+		return
+	}
+	if present {
+		ctx[key] = value
+		return
+	}
+	delete(ctx, key)
+}
+
 // LastMessage 返回最后一条消息
 func (s *Session) LastMessage() *types.Message {
 	history := s.visibleHistory()
@@ -405,7 +683,9 @@ func (s *Session) refreshDerivedTitle() {
 	derivedTitle := s.derivedTitle()
 	currentTitle := strings.TrimSpace(s.Metadata.Title)
 	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
-	if titleSource == sessionTitleSourceManual {
+	// Manual and compact-inherited titles are sticky across history rewrites
+	// (including ReplaceHistory after compact).
+	if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
 		return
 	}
 	if strings.TrimSpace(derivedTitle) == "" {
@@ -429,20 +709,20 @@ func (s *Session) effectiveTitle() string {
 	derivedTitle := s.derivedTitle()
 	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
 	if currentTitle == "" {
-		if titleSource == sessionTitleSourceManual {
+		if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
 			return ""
 		}
 		return derivedTitle
 	}
 
-	if titleSource == sessionTitleSourceManual {
+	if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
 		return currentTitle
 	}
 	if titleSource == sessionTitleSourceDerived || shouldRepairLegacyDerivedTitle(currentTitle) {
 		if strings.TrimSpace(derivedTitle) != "" {
 			return derivedTitle
 		}
-		if shouldRepairLegacyDerivedTitle(currentTitle) && titleSource != sessionTitleSourceManual {
+		if shouldRepairLegacyDerivedTitle(currentTitle) && titleSource != sessionTitleSourceManual && titleSource != sessionTitleSourceCompact {
 			return ""
 		}
 	}

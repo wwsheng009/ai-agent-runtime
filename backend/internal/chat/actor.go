@@ -1615,9 +1615,17 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 
 	a.reconcileCompactResult(ctx, session, result)
 	originalHistory := history
+	// Capture root title before history rewrite; ReplaceHistory would otherwise
+	// re-derive the title from the compaction summary text.
+	rootTitleHint := session.CompactRootTitleCandidate()
+	titleSnapshot := snapshotSessionTitleState(session)
 	session.ReplaceHistory(result.ReplacementHistory)
+	// Compact rewrites history in place; preserve root title + parent linkage
+	// so resume lists keep showing the original conversation title with a child marker.
+	session.ApplyCompactTitleLineage(session.ID, rootTitleHint)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
+		restoreSessionTitleState(session, titleSnapshot)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
 			Type:      EventSessionCompactFailed,
@@ -1631,6 +1639,12 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	payload["token_after"] = result.TokenAfter
 	payload["compacted_messages"] = result.CompactedMessages
 	payload["message_count_after"] = len(result.ReplacementHistory)
+	if gen := contextIntValue(session.Metadata.Context, ContextCompactGeneration); gen > 0 {
+		payload["compact_generation"] = gen
+	}
+	if rootTitle := contextStringValue(session.Metadata.Context, ContextCompactRootTitle); rootTitle != "" {
+		payload["compact_root_title"] = rootTitle
+	}
 	if len(result.CheckpointIDs) > 0 {
 		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
 		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
@@ -1755,9 +1769,17 @@ func (a *SessionActor) runManualCompact(
 
 	a.reconcileCompactResult(ctx, session, result)
 	originalHistory := session.GetMessages()
+	// Capture root title before history rewrite; ReplaceHistory would otherwise
+	// re-derive the title from the compaction summary text.
+	rootTitleHint := session.CompactRootTitleCandidate()
+	titleSnapshot := snapshotSessionTitleState(session)
 	session.ReplaceHistory(result.ReplacementHistory)
+	// Compact rewrites history in place; preserve root title + parent linkage
+	// so resume lists keep showing the original conversation title with a child marker.
+	session.ApplyCompactTitleLineage(session.ID, rootTitleHint)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
+		restoreSessionTitleState(session, titleSnapshot)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
 			Type:      EventSessionCompactFailed,
@@ -1771,6 +1793,12 @@ func (a *SessionActor) runManualCompact(
 	payload["token_after"] = result.TokenAfter
 	payload["compacted_messages"] = result.CompactedMessages
 	payload["message_count_after"] = len(result.ReplacementHistory)
+	if gen := contextIntValue(session.Metadata.Context, ContextCompactGeneration); gen > 0 {
+		payload["compact_generation"] = gen
+	}
+	if rootTitle := contextStringValue(session.Metadata.Context, ContextCompactRootTitle); rootTitle != "" {
+		payload["compact_root_title"] = rootTitle
+	}
 	if len(result.CheckpointIDs) > 0 {
 		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
 		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]

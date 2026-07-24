@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 )
 
@@ -12,6 +13,11 @@ type chatCompactReport struct {
 	RequestedMode string
 	Result        *compactruntime.Result
 	Status        compactruntime.Status
+	// Lineage fields are filled after a successful compact when the runtime
+	// session still carries compact title metadata (generation / root title).
+	Generation int
+	Title      string
+	RootTitle  string
 }
 
 const compactTokenSourceObservedUsage = "observed_usage"
@@ -61,11 +67,36 @@ func executeManualChatCompact(session *ChatSession, requestedMode string) (*chat
 			Status:        status,
 		}, syncErr
 	}
-	return &chatCompactReport{
+	report := &chatCompactReport{
 		RequestedMode: requestedMode,
 		Result:        result,
 		Status:        status,
-	}, nil
+	}
+	attachChatCompactLineage(report, session)
+	return report, nil
+}
+
+func attachChatCompactLineage(report *chatCompactReport, session *ChatSession) {
+	if report == nil || session == nil || session.RuntimeSession == nil {
+		return
+	}
+	runtimeSession := session.RuntimeSession
+	if generation, ok := runtimeSessionContextInt(runtimeSession, runtimechat.ContextCompactGeneration); ok && generation > 0 {
+		report.Generation = generation
+	}
+	if rootTitle := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)); rootTitle != "" {
+		report.RootTitle = rootTitle
+	}
+	title := strings.TrimSpace(runtimeSession.Metadata.Title)
+	if title == "" {
+		preview := runtimeSession.BuildPreview()
+		if preview != nil {
+			title = strings.TrimSpace(preview.Title)
+		}
+	}
+	if title != "" {
+		report.Title = title
+	}
 }
 
 func normalizeChatCompactMode(value string) (string, error) {
@@ -139,6 +170,15 @@ func formatChatCompactReport(report *chatCompactReport) string {
 		if reconciliation.CorrectionMade {
 			parts = append(parts, "correction=applied")
 		}
+	}
+	if report.Generation > 0 {
+		parts = append(parts, fmt.Sprintf("generation=%d", report.Generation))
+	}
+	if report.Title != "" {
+		parts = append(parts, "title="+report.Title)
+	} else if report.RootTitle != "" {
+		// Fallback when title is empty but root lineage was recorded.
+		parts = append(parts, "root_title="+report.RootTitle)
 	}
 	return strings.Join(parts, " | ")
 }

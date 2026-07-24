@@ -439,11 +439,25 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		result.TokenAfter = llmRuntime.CountMessagesTokens(replacement)
 	}
 
+	// Capture root title before history rewrite so the compaction summary cannot
+	// become the display title when syncRuntimeSessionFromChat replaces history.
+	rootTitleHint := ""
+	parentSessionID := ""
+	if session.RuntimeSession != nil {
+		rootTitleHint = session.RuntimeSession.CompactRootTitleCandidate()
+		parentSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
 	if err := replaceRuntimeMessages(session, result.ReplacementHistory); err != nil {
 		return history, report, fmt.Errorf("共享 chat 自动压缩结果更新失败: %w", err)
 	}
+	if session.RuntimeSession != nil {
+		// Shared-chat fallback path does not go through actor.Compact; apply the
+		// same in-place compact title lineage used by the actor-first path.
+		session.RuntimeSession.ApplyCompactTitleLineage(parentSessionID, rootTitleHint)
+	}
 	applyChatCompactContextUsage(session, result, status, true)
 	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
+	refreshChatTitleMetadata(session)
 	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
 }
 

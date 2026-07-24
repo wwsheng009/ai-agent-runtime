@@ -406,8 +406,13 @@ type AICLITimeoutConfig struct {
 }
 
 // AICLIThemeConfig holds aicli terminal theme preferences.
+//
+// Two axes (Codex-inspired):
+//   - Name: palette / color scheme (classic|focus|contrast|mono)
+//   - Mode: light/dark preference (auto|dark|light)
 type AICLIThemeConfig struct {
 	Name string `yaml:"name" mapstructure:"name" env:"AICLI_THEME"`
+	Mode string `yaml:"mode,omitempty" mapstructure:"mode" env:"AICLI_THEME_MODE"`
 }
 
 // AICLIChatConfig holds aicli chat preference defaults.
@@ -416,7 +421,10 @@ type AICLIChatConfig struct {
 	DefaultModel    string `yaml:"default_model,omitempty" mapstructure:"default_model"`
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort"`
 	// Stream 记录用户偏好的输出模式（流式/普通）。使用指针以便区分“未配置”与“显式 false”。
-	Stream        *bool                     `yaml:"stream,omitempty" mapstructure:"stream"`
+	Stream *bool `yaml:"stream,omitempty" mapstructure:"stream"`
+	// FastMode 记录 Codex 协议下的 Fast（service_tier=priority）偏好。
+	// 使用指针以便区分“未配置”与“显式 false”；仅对 protocol=codex 生效。
+	FastMode      *bool                     `yaml:"fast_mode,omitempty" mapstructure:"fast_mode"`
 	TerminalTitle *AICLITerminalTitleConfig `yaml:"terminal_title,omitempty" mapstructure:"terminal_title"`
 	Notifications *AICLIChatNotifications   `yaml:"notifications,omitempty" mapstructure:"notifications"`
 }

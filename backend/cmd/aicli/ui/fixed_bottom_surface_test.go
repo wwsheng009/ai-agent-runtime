@@ -41,6 +41,32 @@ func TestFormatFixedStatusLineColorsStateOnly(t *testing.T) {
 	}
 }
 
+func TestFormatFixedStatusLineColorsCodexSeparator(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = false
+	defer func() { color.NoColor = oldNoColor }()
+
+	theme := createTheme(ThemeDark)
+	got := formatFixedStatusLine("思考 · gpt-5.4-code high · Context 14% used", theme)
+	want := theme.ReasoningColor.Sprint("思考") + theme.Dimmed(" · gpt-5.4-code high · Context 14% used")
+	if got != want {
+		t.Fatalf("unexpected formatted Codex status line:\nwant %q\n got %q", want, got)
+	}
+}
+
+func TestFormatFixedStatusLineColorsModelFirstLine(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = false
+	defer func() { color.NoColor = oldNoColor }()
+
+	theme := createTheme(ThemeDark)
+	got := formatFixedStatusLine("gpt-5.6-sol xhigh · Context 90% used · Fast off", theme)
+	want := theme.InfoColor.Sprint("gpt-5.6-sol xhigh") + theme.Dimmed(" · Context 90% used · Fast off")
+	if got != want {
+		t.Fatalf("unexpected model-first status coloring:\nwant %q\n got %q", want, got)
+	}
+}
+
 func TestFormatFixedStatusStateUsesDifferentColors(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = false

@@ -3193,6 +3193,7 @@ func (r *localActorRegistry) ensureSession(ctx context.Context, sessionID string
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Model, strings.TrimSpace(r.Host.BaseSession.Model), chatRuntimeContextModel)
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ReasoningEffort, strings.TrimSpace(r.Host.BaseSession.ReasoningEffort), chatRuntimeContextReasoningEffort)
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, r.Host.BaseSession.Stream, chatRuntimeContextStream)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.FastMode, r.Host.BaseSession.FastMode, chatRuntimeContextFastMode)
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, r.Host.BaseSession.DisableTools, chatRuntimeContextDisableTools)
 	}
 	if _, err := r.applyTeamTeammateAgentContext(ctx, runtimeSession); err != nil {

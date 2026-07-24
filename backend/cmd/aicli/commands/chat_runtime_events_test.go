@@ -1121,9 +1121,11 @@ func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
 			"compacted_messages":  6,
 			"message_count_after": 4,
 			"checkpoint_id":       "cp-1",
+			"compact_generation":  2,
+			"compact_root_title":  "检查登录流程为什么失败",
 		},
 	}); got != strings.Join([]string{
-		"[context] session compact completed mode=local phase=pre_turn token 1200 -> 240 compacted_messages=6 history_messages=4 checkpoint_id=cp-1",
+		"[context] session compact completed mode=local phase=pre_turn token 1200 -> 240 compacted_messages=6 history_messages=4 checkpoint_id=cp-1 generation=2 root_title=检查登录流程为什么失败",
 		"  context: prompt=240",
 	}, "\n") {
 		t.Fatalf("unexpected session compact completed render: %q", got)

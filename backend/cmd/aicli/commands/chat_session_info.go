@@ -23,6 +23,7 @@ func buildChatSessionInfo(session *ChatSession) ui.SessionInfo {
 		reasoningEnabled = capability.ReasoningModel
 	}
 
+	supportsFast := chatSessionSupportsFastMode(session)
 	return ui.SessionInfo{
 		ProviderName:     session.ProviderName,
 		Protocol:         session.Provider.GetProtocol(),
@@ -32,6 +33,8 @@ func buildChatSessionInfo(session *ChatSession) ui.SessionInfo {
 		KeyCount:         len(session.Provider.GetAllAPIKeys()),
 		Timeout:          formatChatSessionTimeout(session),
 		IsStream:         session.Stream,
+		SupportsFast:     supportsFast,
+		IsFast:           supportsFast && session.FastMode,
 		ReasoningEnabled: reasoningEnabled,
 	}
 }

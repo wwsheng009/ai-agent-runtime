@@ -494,7 +494,10 @@ func (p *fileSessionPreviewText) apply(metadata *SessionMetadata) {
 		derivedTitle = p.firstOther
 	}
 	title := strings.TrimSpace(metadata.Title)
+	// Manual and compact-inherited titles are sticky; do not re-derive from
+	// compaction summary / first user message on load.
 	if metadata.TitleSource != sessionTitleSourceManual &&
+		metadata.TitleSource != sessionTitleSourceCompact &&
 		(title == "" || metadata.TitleSource == sessionTitleSourceDerived || shouldRepairLegacyDerivedTitle(title)) {
 		metadata.Title = derivedTitle
 		if derivedTitle != "" {

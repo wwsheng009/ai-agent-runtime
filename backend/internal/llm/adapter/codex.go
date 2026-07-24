@@ -20,9 +20,14 @@ type CodexAdapter struct{}
 
 const codexResponseOutputItemsKey = "response_output_items"
 const (
-	codexPromptCacheKeyMetadataKey          = "prompt_cache_key"
-	codexSessionIDMetadataKey               = "session_id"
-	codexConversationIDMetadataKey          = "conversation_id"
+	codexPromptCacheKeyMetadataKey = "prompt_cache_key"
+	codexSessionIDMetadataKey      = "session_id"
+	codexConversationIDMetadataKey = "conversation_id"
+	codexServiceTierMetadataKey    = "service_tier"
+	// codexServiceTierPriority is the request body value for Fast mode.
+	codexServiceTierPriority                = "priority"
+	codexServiceTierDefault                 = "default"
+	codexServiceTierFast                    = "fast"
 	codexImageGenerationToolType            = "image_generation"
 	codexImageGenerationCallType            = "image_generation_call"
 	codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
@@ -108,6 +113,9 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 	if promptCacheKey != "" {
 		request["prompt_cache_key"] = promptCacheKey
 	}
+	if serviceTier := resolveCodexServiceTier(config.Metadata); serviceTier != "" {
+		request["service_tier"] = serviceTier
+	}
 
 	// 设置 max_output_tokens（仅对支持该字段的 Codex 兼容上游发送）
 	if metadataAllowsCodexMaxOutputTokens(config.Metadata) {
@@ -160,6 +168,21 @@ func (a *CodexAdapter) resolvePromptCacheKey(config RequestConfig) string {
 		return key
 	}
 	return ""
+}
+
+// resolveCodexServiceTier maps metadata service_tier to the Responses API value.
+// Accepted inputs: "priority" / "fast" → "priority" (Fast mode); "default"/empty → omit.
+func resolveCodexServiceTier(metadata map[string]interface{}) string {
+	raw := strings.ToLower(strings.TrimSpace(stringFromMetadata(metadata, codexServiceTierMetadataKey)))
+	switch raw {
+	case "", codexServiceTierDefault:
+		return ""
+	case codexServiceTierPriority, codexServiceTierFast:
+		return codexServiceTierPriority
+	default:
+		// Pass through unknown tiers (e.g. "flex") for forward compatibility.
+		return raw
+	}
 }
 
 func stringFromMetadata(metadata map[string]interface{}, key string) string {
