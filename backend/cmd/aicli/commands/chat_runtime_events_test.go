@@ -2607,7 +2607,8 @@ func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
 	require.Empty(t, coord.AgentStageDetail())
 
 	bridge.EndRun()
-	require.Equal(t, chatAgentStageCompleted, coord.AgentStage())
+	// Codex-aligned: natural completion returns to idle/Ready, not sticky Completed.
+	require.Equal(t, chatAgentStageIdle, coord.AgentStage())
 }
 
 func TestChatRuntimeEvents_SecondaryRunDoesNotOverrideComposerAgentStage(t *testing.T) {

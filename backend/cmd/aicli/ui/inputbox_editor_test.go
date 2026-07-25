@@ -483,6 +483,47 @@ func TestDecodeEscapeInteractiveKey_AltDDeletesForwardWord(t *testing.T) {
 	}
 }
 
+func TestDecodeEscapeInteractiveKey_FocusChange(t *testing.T) {
+	gained, ok := decodeEscapeInteractiveKey([]byte{0x1b, '[', 'I'})
+	if !ok {
+		t.Fatal("expected CSI I to decode")
+	}
+	if gained.key.kind != editorKeyFocusGained || gained.consumed != 3 {
+		t.Fatalf("unexpected focus-gained decode: %+v", gained)
+	}
+
+	lost, ok := decodeEscapeInteractiveKey([]byte{0x1b, '[', 'O'})
+	if !ok {
+		t.Fatal("expected CSI O to decode")
+	}
+	if lost.key.kind != editorKeyFocusLost || lost.consumed != 3 {
+		t.Fatalf("unexpected focus-lost decode: %+v", lost)
+	}
+}
+
+func TestReadInteractiveLine_FocusChangeUpdatesTerminalFocus(t *testing.T) {
+	t.Cleanup(ResetTerminalFocusForTest)
+	SetTerminalFocused(true)
+
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("\x1b[Ohi\x1b[I\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hi" {
+		t.Fatalf("expected focus sequences to be ignored as input, got %q", line)
+	}
+	if !TerminalFocused() {
+		t.Fatal("expected terminal focus to end focused after CSI I")
+	}
+}
+
 func TestReadInteractiveLine_CtrlDeleteDeletesForwardWord(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(

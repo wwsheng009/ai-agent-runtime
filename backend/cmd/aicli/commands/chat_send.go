@@ -16,7 +16,14 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session.IsInterrupted() {
 		return "", fmt.Errorf("用户中断")
 	}
-	defer notifyChatSound(session, chatSoundTurnComplete)
+	// Codex-aligned: only notify when the agent is truly waiting for the user.
+	// Queued follow-up input starts the next turn immediately, so a completion
+	// bell at that boundary would feel like false attention.
+	defer func() {
+		if shouldNotifyChatTurnComplete(session) {
+			notifyChatSound(session, chatSoundTurnComplete)
+		}
+	}()
 	if session.Interaction != nil {
 		session.Interaction.StartWaiting()
 		defer session.Interaction.ClearWaiting()

@@ -399,7 +399,10 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		b.session.TitleNotifier.ClearTools()
 	}
 	if b.session != nil && b.session.Interaction != nil {
-		stage := chatAgentStageCompleted
+		// Codex-aligned: natural turn completion returns the composer to idle/Ready.
+		// Keep Stopping while an interrupt is in flight; surface Failed only as an
+		// internal terminal stage (UI still maps it to Ready).
+		stage := chatAgentStageIdle
 		if b.session.IsInterrupted() {
 			stage = chatAgentStageStopping
 		} else if b.RunError() != nil {

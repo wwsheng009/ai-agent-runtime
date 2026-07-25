@@ -222,6 +222,17 @@ func (t *Terminal) DisableBracketedPaste() {
 	fmt.Print("\033[?2004l")
 }
 
+// EnableFocusChange 启用终端 focus in/out 事件（CSI ?1004）。
+// 支持的终端会在窗口获得/失去焦点时发送 \x1b[I / \x1b[O。
+func (t *Terminal) EnableFocusChange() {
+	fmt.Print("\033[?1004h")
+}
+
+// DisableFocusChange 关闭终端 focus in/out 事件。
+func (t *Terminal) DisableFocusChange() {
+	fmt.Print("\033[?1004l")
+}
+
 // SetTitle 设置终端标题。
 func (t *Terminal) SetTitle(title string) {
 	title = strings.ReplaceAll(title, "\x1b", "")
@@ -242,6 +253,7 @@ func (t *Terminal) CleanupOnExit(clear bool) {
 	t.ShowCursor()
 	t.ResetScrollRegion()
 	t.DisableBracketedPaste()
+	t.DisableFocusChange()
 	t.DisableAltScreen()
 	if clear {
 		t.Clear()
@@ -343,6 +355,8 @@ func SetupTerminal() (cleanup func()) {
 		fmt.Print("\033[r")
 		// 关闭 bracketed paste
 		fmt.Print("\033[?2004l")
+		// 关闭 focus change reporting
+		fmt.Print("\033[?1004l")
 		// 禁用备用屏幕
 		fmt.Print("\033[?1049l")
 	}

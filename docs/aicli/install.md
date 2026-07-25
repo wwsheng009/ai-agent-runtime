@@ -173,7 +173,9 @@ aicli:
     terminal_title:
       enabled: true
       animations: true
-      items: [activity, state, project]
+      # activity/project are defaults (icon only; no Ready/Working prose).
+      # Optional Codex-aligned items: state, model, thread, git-branch (or branch), app-name.
+      items: [activity, project]
   # 双轴主题：mode=明暗，name=配色（也可用环境变量 AICLI_THEME_MODE / AICLI_THEME）
   theme:
     mode: auto          # auto | dark | light
@@ -217,7 +219,7 @@ providers:
 
 `/model`、`/stream`、`/s`、`/normal` 等 chat 内命令会同步更新当前 session；在具备可写配置路径时，也会把相关偏好写回 `aicli.chat`。
 
-交互式 `aicli chat` 默认会通过 OSC 0 更新终端窗口或标签标题。`activity` 显示状态图标，`state` 显示 `Ready`、`Waiting`、`Running` 或需要操作的提醒，`project` 显示当前目录名。`items` 还支持 `model`、`thread` 和 `app-name`；设置 `animations: false` 可保留状态图标但关闭动画，设置 `enabled: false` 可完全关闭标题更新。非 TTY、非交互模式、JSON 输出以及不支持 ANSI 标题的终端会自动跳过。
+交互式 `aicli chat` 默认会通过 OSC 0 更新终端窗口或标签标题。默认 `items` 为 `activity` + `project`：`activity` 只显示工作中的状态图标/spinner（空闲时不显示），需要用户操作时显示 `[ ! ] Action Required`；`project` 显示当前目录名。可选 `state` 才会追加 `Ready` / `Waiting` / `Working` 等文字标签（默认不启用，避免图标与描述同时出现）。`items` 还支持 `model`、`thread`、`git-branch` 和 `app-name`；设置 `animations: false` 可保留状态图标但关闭动画，设置 `enabled: false` 可完全关闭标题更新。非 TTY、非交互模式、JSON 输出以及不支持 ANSI 标题的终端会自动跳过。
 
 ### 环境变量
 

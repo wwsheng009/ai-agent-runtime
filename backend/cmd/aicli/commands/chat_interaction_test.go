@@ -174,8 +174,10 @@ func TestChatInteractionCoordinator_AgentStageLabels(t *testing.T) {
 		{chatAgentStageAwaitingApproval, "Awaiting approval"},
 		{chatAgentStageAwaitingAnswer, "Awaiting answer"},
 		{chatAgentStageStopping, "Stopping"},
-		{chatAgentStageCompleted, "Completed"},
-		{chatAgentStageFailed, "Failed"},
+		// Terminal stages surface as Ready (Codex-aligned), not sticky Completed/Failed.
+		{chatAgentStageCompleted, "Ready"},
+		{chatAgentStageFailed, "Ready"},
+		{chatAgentStageIdle, "Ready"},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.stage), func(t *testing.T) {
@@ -1711,7 +1713,6 @@ func TestBuildChatSurfaceStatusLine_LocalizesAgentStates(t *testing.T) {
 		"Awaiting approval": "等待审批",
 		"Awaiting answer":   "等待回答",
 		"Stopping":          "停止中",
-		"Failed":            "失败",
 	}
 	for state, want := range tests {
 		t.Run(state, func(t *testing.T) {
@@ -1721,14 +1722,15 @@ func TestBuildChatSurfaceStatusLine_LocalizesAgentStates(t *testing.T) {
 			}
 		})
 	}
-	// Ready/Completed omit Chinese idle labels in the model-first bar.
-	for _, state := range []string{"Ready", "Completed"} {
+	// Ready/Completed/Failed omit Chinese idle labels in the model-first bar.
+	// Codex-aligned terminal stages are treated as Ready for the surface.
+	for _, state := range []string{"Ready", "Completed", "Failed"} {
 		t.Run(state+"_omits_idle_label", func(t *testing.T) {
 			status := buildChatSurfaceStatusLineForWidth(&ChatSession{
 				Provider: config.Provider{Protocol: "codex"},
 				FastMode: false,
 			}, state, 120)
-			if strings.Contains(status, "就绪") || strings.Contains(status, "已完成") {
+			if strings.Contains(status, "就绪") || strings.Contains(status, "已完成") || strings.Contains(status, "失败") {
 				t.Fatalf("expected idle state %q to omit Chinese label, got %q", state, status)
 			}
 			if !strings.Contains(status, "Fast off") {
@@ -1933,17 +1935,169 @@ func TestBuildChatSurfaceStatusLine_IncludesGoalStatusWhenSet(t *testing.T) {
 
 	session := &ChatSession{RuntimeSession: runtimeSession}
 	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 120)
-	// Goal remains available via /status helpers, but is intentionally omitted
-	// from the Codex-style bottom surface line.
-	if strings.Contains(status, "目标 ") {
-		t.Fatalf("expected surface status line to omit goal status, got %q", status)
+	if !strings.Contains(status, "Goal paused (/goal resume)") {
+		t.Fatalf("expected surface status line to include Codex goal indicator, got %q", status)
 	}
 }
 
 func TestBuildChatSurfaceStatusLine_OmitsGoalStatusWhenUnset(t *testing.T) {
 	status := buildChatSurfaceStatusLine(&ChatSession{RuntimeSession: runtimechat.NewSession("test-user")}, "Ready")
-	if strings.Contains(status, "目标 ") {
+	if strings.Contains(status, "Goal ") || strings.Contains(status, "Pursuing goal") || strings.Contains(status, "目标 ") {
 		t.Fatalf("expected status line to omit missing goal, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesActiveGoalUsage(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("test-user")
+	goal, err := runtimegoal.NewSessionGoal(runtimeSession.ID, "finish remaining polish", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	goal.Status = runtimegoal.StatusActive
+	goal.TokenBudget = 10000
+	goal.TokensUsed = 2500
+	if err := runtimegoal.NewMetadataStore().Put(runtimeSession, goal); err != nil {
+		t.Fatalf("goal store Put: %v", err)
+	}
+
+	session := &ChatSession{RuntimeSession: runtimeSession}
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 120)
+	if !strings.Contains(status, "Pursuing goal (2.5K / 10.0K)") {
+		t.Fatalf("expected active goal usage indicator, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesCompletedGoal(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("test-user")
+	goal, err := runtimegoal.NewSessionGoal(runtimeSession.ID, "finish remaining polish", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	goal.Status = runtimegoal.StatusComplete
+	goal.TokenBudget = 8000
+	goal.TokensUsed = 4200
+	if err := runtimegoal.NewMetadataStore().Put(runtimeSession, goal); err != nil {
+		t.Fatalf("goal store Put: %v", err)
+	}
+
+	session := &ChatSession{RuntimeSession: runtimeSession}
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 120)
+	if !strings.Contains(status, "Goal achieved (4.2K tokens)") {
+		t.Fatalf("expected completed goal indicator, got %q", status)
+	}
+}
+
+func TestChatSurfaceGoalUsage_IncludesLiveActiveTurnElapsed(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	// Codex: baseline = max(observed_at, active_turn_started_at).
+	// Turn started before last observation: only post-observation seconds accrue.
+	goal := &runtimegoal.SessionGoal{
+		Status:          runtimegoal.StatusActive,
+		TimeUsedSeconds: 60,
+		UpdatedAt:       now.Add(-60 * time.Second),
+	}
+	usage := chatSurfaceGoalUsage(goal, now.Add(-3*time.Minute), now)
+	if usage != "2m" {
+		t.Fatalf("expected live accrual from observed_at, got %q", usage)
+	}
+
+	// Idle gap before turn start must not count.
+	goal.UpdatedAt = now.Add(-5 * time.Minute)
+	usage = chatSurfaceGoalUsage(goal, now.Add(-60*time.Second), now)
+	if usage != "2m" {
+		t.Fatalf("expected baseline max(observed_at, turn_start), got %q", usage)
+	}
+}
+
+func TestChatSurfaceGoalUsage_ActiveWithoutBudgetAlwaysShowsElapsed(t *testing.T) {
+	goal := &runtimegoal.SessionGoal{
+		Status:          runtimegoal.StatusActive,
+		TimeUsedSeconds: 0,
+	}
+	usage := chatSurfaceGoalUsage(goal, time.Time{}, time.Now())
+	if usage != "0s" {
+		t.Fatalf("expected Codex-style 0s elapsed for active unbudgeted goal, got %q", usage)
+	}
+}
+
+func TestFormatChatSurfaceGoalElapsed_MatchesCodex(t *testing.T) {
+	cases := map[int64]string{
+		0:                             "0s",
+		59:                            "59s",
+		60:                            "1m",
+		30 * 60:                       "30m",
+		90 * 60:                       "1h 30m",
+		2 * 60 * 60:                   "2h",
+		24*60*60 - 1:                  "23h 59m",
+		24 * 60 * 60:                  "1d 0h 0m",
+		2*24*60*60 + 23*60*60 + 42*60: "2d 23h 42m",
+	}
+	for seconds, want := range cases {
+		if got := formatChatSurfaceGoalElapsed(seconds); got != want {
+			t.Fatalf("formatChatSurfaceGoalElapsed(%d)=%q, want %q", seconds, got, want)
+		}
+	}
+}
+
+func TestMarkChatGoalStatusActiveTurnStarted_IsStickyWithinTurn(t *testing.T) {
+	session := &ChatSession{}
+	markChatGoalStatusActiveTurnStarted(session)
+	first := chatGoalStatusActiveTurnStartedAt(session)
+	if first.IsZero() {
+		t.Fatal("expected active turn start timestamp")
+	}
+	markChatGoalStatusActiveTurnStarted(session)
+	second := chatGoalStatusActiveTurnStartedAt(session)
+	if !first.Equal(second) {
+		t.Fatalf("expected sticky turn start across auto-continuation, first=%v second=%v", first, second)
+	}
+	clearChatGoalStatusActiveTurnStarted(session)
+	if !chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("expected cleared active turn start")
+	}
+}
+
+func TestStartWaitingAndClearWaiting_TrackGoalStatusActiveTurn(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+
+	coord.StartWaiting()
+	if chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("expected StartWaiting to mark goal-status active turn start")
+	}
+	// Nested mark from auto-continuation style refresh must remain sticky.
+	markChatGoalStatusActiveTurnStarted(session)
+	started := chatGoalStatusActiveTurnStartedAt(session)
+
+	coord.ClearWaiting()
+	if !chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("expected ClearWaiting to clear goal-status active turn start")
+	}
+	if started.IsZero() {
+		t.Fatal("expected non-zero sticky start before clear")
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesActiveGoalLiveElapsed(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("test-user")
+	now := time.Now()
+	goal, err := runtimegoal.NewSessionGoal(runtimeSession.ID, "live elapsed", now.Add(-5*time.Minute))
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	goal.Status = runtimegoal.StatusActive
+	goal.TimeUsedSeconds = 60
+	goal.UpdatedAt = now.Add(-5 * time.Minute)
+	if err := runtimegoal.NewMetadataStore().Put(runtimeSession, goal); err != nil {
+		t.Fatalf("goal store Put: %v", err)
+	}
+
+	session := &ChatSession{RuntimeSession: runtimeSession}
+	session.goalStatusActiveTurnStartedAt = now.Add(-90 * time.Second)
+	status := buildChatSurfaceStatusLineForWidth(session, "Thinking", 120)
+	if !strings.Contains(status, "Pursuing goal (2m)") {
+		t.Fatalf("expected live active-goal elapsed indicator, got %q", status)
 	}
 }
 

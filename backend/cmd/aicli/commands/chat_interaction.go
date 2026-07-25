@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -151,10 +152,10 @@ func chatAgentStageSurfaceLabel(stage chatAgentStage) string {
 		return "Awaiting answer"
 	case chatAgentStageStopping:
 		return "Stopping"
-	case chatAgentStageCompleted:
-		return "Completed"
-	case chatAgentStageFailed:
-		return "Failed"
+	case chatAgentStageCompleted, chatAgentStageFailed:
+		// Codex-aligned: once a task is no longer running, the composer surface
+		// shows Ready rather than sticky Completed/Failed.
+		return ""
 	default:
 		return ""
 	}
@@ -694,6 +695,9 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), c.promptInput, rows, cursorRow, cursorCol)
 	}
 	c.waitingActive = true
+	// Codex turn_lifecycle.start: begin live goal-time accrual for this turn.
+	// Keep the same start across auto-continuations inside sendMessage.
+	markChatGoalStatusActiveTurnStarted(c.session)
 	if chatAgentStageIsTerminal(c.agentStage) {
 		c.agentStage = chatAgentStageIdle
 		c.agentStageDetail = ""
@@ -706,12 +710,21 @@ func (c *chatInteractionCoordinator) ClearWaiting() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.shutdown || !c.waitingActive {
+		c.mu.Unlock()
 		return
 	}
 	c.waitingActive = false
+	// Codex turn_lifecycle.finish: stop live goal-time accrual.
+	clearChatGoalStatusActiveTurnStarted(c.session)
+	session := c.session
+	// Codex refreshes git-branch after turn complete so title/status pick up
+	// branch switches that happened during the turn. Invalidate before the
+	// status rebuild so both surfaces see a fresh probe.
+	invalidateChatStatusGitBranchCache(session)
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	c.mu.Unlock()
+	refreshChatTitleMetadata(session)
 }
 
 func (c *chatInteractionCoordinator) IsReady() bool {
@@ -788,6 +801,11 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 			full:    fmt.Sprintf("队列 %d", queuedCount),
 			compact: fmt.Sprintf("队%d", queuedCount),
 		})
+	}
+	// Codex-style goal indicator: keep near the front so residual active goals
+	// remain visible even when width drops optional diagnostics.
+	if goalSeg := chatSurfaceGoalStatusSegment(session); goalSeg.full != "" {
+		segments = append(segments, goalSeg)
 	}
 
 	// Reference diagnostics: model · provider · Context N% · cwd · project · branch · window · in · out · Fast
@@ -868,6 +886,177 @@ func fitChatSurfaceStatusSegments(segments []chatStatusSegment, width int) []str
 	return parts
 }
 
+// chatSurfaceGoalStatusSegment mirrors Codex footer GoalStatusIndicator labels.
+// Complete goals stay visible briefly so users see the achieved state; missing
+// or unreadable goals are omitted.
+func chatSurfaceGoalStatusSegment(session *ChatSession) chatStatusSegment {
+	goal, ok, err := currentSessionGoal(session)
+	if err != nil || !ok || goal == nil {
+		return chatStatusSegment{}
+	}
+	usage := chatSurfaceGoalUsage(goal, chatGoalStatusActiveTurnStartedAt(session), time.Now())
+	switch goal.Status {
+	case runtimegoal.StatusActive:
+		if usage != "" {
+			return chatStatusSegment{
+				full:    fmt.Sprintf("Pursuing goal (%s)", usage),
+				compact: "Goal",
+			}
+		}
+		return chatStatusSegment{full: "Pursuing goal", compact: "Goal"}
+	case runtimegoal.StatusPaused:
+		return chatStatusSegment{
+			full:    "Goal paused (/goal resume)",
+			compact: "Paused",
+		}
+	case runtimegoal.StatusBudgetLimited:
+		if usage != "" {
+			return chatStatusSegment{
+				full:    fmt.Sprintf("Goal unmet (%s)", usage),
+				compact: "Unmet",
+			}
+		}
+		return chatStatusSegment{full: "Goal abandoned", compact: "Unmet"}
+	case runtimegoal.StatusComplete:
+		if usage != "" {
+			return chatStatusSegment{
+				full:    fmt.Sprintf("Goal achieved (%s)", usage),
+				compact: "Done",
+			}
+		}
+		return chatStatusSegment{full: "Goal achieved", compact: "Done"}
+	default:
+		return chatStatusSegment{}
+	}
+}
+
+// chatSurfaceGoalUsage mirrors Codex active_goal_usage / completed_goal_usage.
+// Active goals without a token budget always report elapsed time, and while a
+// turn is running that elapsed time includes live seconds since
+// max(goal.UpdatedAt, active_turn_started_at).
+func chatSurfaceGoalUsage(goal *runtimegoal.SessionGoal, activeTurnStartedAt, now time.Time) string {
+	if goal == nil {
+		return ""
+	}
+	if goal.TokenBudget > 0 {
+		if goal.Status == runtimegoal.StatusComplete {
+			return fmt.Sprintf("%s tokens", formatChatSurfaceTokenCount(goal.TokensUsed))
+		}
+		if goal.Status == runtimegoal.StatusBudgetLimited {
+			return fmt.Sprintf("%s / %s tokens", formatChatSurfaceTokenCount(goal.TokensUsed), formatChatSurfaceTokenCount(goal.TokenBudget))
+		}
+		return fmt.Sprintf("%s / %s", formatChatSurfaceTokenCount(goal.TokensUsed), formatChatSurfaceTokenCount(goal.TokenBudget))
+	}
+	seconds := chatSurfaceGoalElapsedSeconds(goal, activeTurnStartedAt, now)
+	switch goal.Status {
+	case runtimegoal.StatusActive, runtimegoal.StatusComplete:
+		return formatChatSurfaceGoalElapsed(seconds)
+	default:
+		if seconds > 0 {
+			return formatChatSurfaceGoalElapsed(seconds)
+		}
+		return ""
+	}
+}
+
+func chatSurfaceGoalElapsedSeconds(goal *runtimegoal.SessionGoal, activeTurnStartedAt, now time.Time) int64 {
+	if goal == nil {
+		return 0
+	}
+	seconds := goal.TimeUsedSeconds
+	if seconds < 0 {
+		seconds = 0
+	}
+	if goal.Status != runtimegoal.StatusActive || activeTurnStartedAt.IsZero() {
+		return seconds
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	// Codex GoalStatusState.indicator:
+	// baseline = max(observed_at, active_turn_started_at)
+	// For aicli, goal.UpdatedAt is the last persisted usage observation.
+	baseline := activeTurnStartedAt
+	if !goal.UpdatedAt.IsZero() && goal.UpdatedAt.After(baseline) {
+		baseline = goal.UpdatedAt
+	}
+	if now.After(baseline) {
+		seconds += int64(now.Sub(baseline) / time.Second)
+	}
+	return seconds
+}
+
+func formatChatSurfaceTokenCount(n int) string {
+	if n < 0 {
+		n = 0
+	}
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// formatChatSurfaceGoalElapsed mirrors Codex format_goal_elapsed_seconds.
+func formatChatSurfaceGoalElapsed(seconds int64) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	if hours >= 24 {
+		days := hours / 24
+		remainingHours := hours % 24
+		return fmt.Sprintf("%dd %dh %dm", days, remainingHours, remainingMinutes)
+	}
+	if remainingMinutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh %dm", hours, remainingMinutes)
+}
+
+// markChatGoalStatusActiveTurnStarted records the turn start used for live
+// active-goal elapsed accrual. Subsequent marks in the same turn are no-ops so
+// goal auto-continuation keeps a continuous wall-clock baseline.
+func markChatGoalStatusActiveTurnStarted(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	session.goalStatusMu.Lock()
+	if session.goalStatusActiveTurnStartedAt.IsZero() {
+		session.goalStatusActiveTurnStartedAt = time.Now()
+	}
+	session.goalStatusMu.Unlock()
+}
+
+func clearChatGoalStatusActiveTurnStarted(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	session.goalStatusMu.Lock()
+	session.goalStatusActiveTurnStartedAt = time.Time{}
+	session.goalStatusMu.Unlock()
+}
+
+func chatGoalStatusActiveTurnStartedAt(session *ChatSession) time.Time {
+	if session == nil {
+		return time.Time{}
+	}
+	session.goalStatusMu.Lock()
+	defer session.goalStatusMu.Unlock()
+	return session.goalStatusActiveTurnStartedAt
+}
+
 func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatStatusSegment {
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:
@@ -896,7 +1085,8 @@ func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatSt
 		return chatStatusSegment{full: "执行工具", compact: "执行工具"}
 	}
 	switch normalized {
-	case "ready", "completed", "idle":
+	case "ready", "completed", "failed", "idle":
+		// Codex-aligned idle surface: terminal outcomes do not keep a sticky label.
 		return chatStatusSegment{}
 	case "waiting":
 		return chatStatusSegment{full: "等待", compact: "等待"}
@@ -914,8 +1104,6 @@ func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatSt
 		return chatStatusSegment{full: "等待回答", compact: "回答"}
 	case "stopping":
 		return chatStatusSegment{full: "停止中", compact: "停止"}
-	case "failed":
-		return chatStatusSegment{full: "失败", compact: "失败"}
 	default:
 		display := chatSurfaceStateDisplay(state)
 		if display == "" || display == "就绪" {
@@ -1146,6 +1334,19 @@ const chatStatusGitLookupTimeout = 250 * time.Millisecond
 func resetChatStatusGitBranchCacheForTest() {
 	chatStatusGitCacheMu.Lock()
 	chatStatusGitCache = map[string]chatStatusGitCacheEntry{}
+	chatStatusGitCacheMu.Unlock()
+}
+
+// invalidateChatStatusGitBranchCache drops the cached branch for session cwd so
+// the next resolve re-probes git. Codex refreshes branch after turn complete.
+func invalidateChatStatusGitBranchCache(session *ChatSession) {
+	cwd := resolveChatStatusCurrentDirectory(session)
+	if cwd == "" {
+		return
+	}
+	clean := filepath.Clean(cwd)
+	chatStatusGitCacheMu.Lock()
+	delete(chatStatusGitCache, clean)
 	chatStatusGitCacheMu.Unlock()
 }
 

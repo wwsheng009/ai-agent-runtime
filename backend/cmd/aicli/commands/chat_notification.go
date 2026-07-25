@@ -44,13 +44,16 @@ type chatTitleOptions struct {
 }
 
 type chatTitleSnapshot struct {
-	baseState  chatTitleState
-	tools      map[string]struct{}
-	actions    map[uint64]string
-	latestID   uint64
-	project    string
-	model      string
-	thread     string
+	baseState chatTitleState
+	tools     map[string]struct{}
+	actions   map[uint64]string
+	latestID  uint64
+	project   string
+	model     string
+	thread    string
+	// branch is the current git branch for the title "git-branch" item.
+	// Empty when unavailable/detached, matching Codex omission semantics.
+	branch     string
 	animations bool
 	items      []string
 }
@@ -59,15 +62,17 @@ type chatTitleSnapshot struct {
 // A single event loop owns animation timing, so tool calls and approvals never
 // create competing title goroutines.
 type chatTitleNotifier struct {
-	output chatTitleOutput
+	output  chatTitleOutput
+	session *ChatSession
 
-	mu       sync.Mutex
-	snapshot chatTitleSnapshot
-	nextID   uint64
-	wake     chan struct{}
-	done     chan struct{}
-	stopped  chan struct{}
-	close    sync.Once
+	mu                    sync.Mutex
+	snapshot              chatTitleSnapshot
+	nextID                uint64
+	lastGoalStatusSegment string
+	wake                  chan struct{}
+	done                  chan struct{}
+	stopped               chan struct{}
+	close                 sync.Once
 }
 
 func newChatTitleNotifier(output chatTitleOutput, options chatTitleOptions, session *ChatSession) *chatTitleNotifier {
@@ -75,7 +80,8 @@ func newChatTitleNotifier(output chatTitleOutput, options chatTitleOptions, sess
 		return nil
 	}
 	n := &chatTitleNotifier{
-		output: output,
+		output:  output,
+		session: session,
 		snapshot: chatTitleSnapshot{
 			baseState:  chatTitleIdle,
 			tools:      make(map[string]struct{}),
@@ -141,6 +147,13 @@ func (n *chatTitleNotifier) refreshMetadataLocked(session *ChatSession) {
 		}
 		n.snapshot.project = truncateChatTitlePart(project, 48)
 	}
+	// Only pay for git lookup when the configured title actually includes the
+	// branch segment (Codex also gates branch probes on configured items).
+	if chatTitleItemsInclude(n.snapshot.items, "git-branch") {
+		n.snapshot.branch = truncateChatTitlePart(resolveChatStatusGitBranch(session), 32)
+	} else {
+		n.snapshot.branch = ""
+	}
 	if session == nil {
 		n.snapshot.model = ""
 		n.snapshot.thread = ""
@@ -153,6 +166,19 @@ func (n *chatTitleNotifier) refreshMetadataLocked(session *ChatSession) {
 			n.snapshot.thread = truncateChatTitlePart(strings.TrimSpace(preview.Title), 56)
 		}
 	}
+}
+
+func chatTitleItemsInclude(items []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return false
+	}
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *chatTitleNotifier) SetToolRunning(key string, running bool) {
@@ -247,6 +273,9 @@ func (n *chatTitleNotifier) run() {
 			logpkg.Debugf("failed to update chat terminal title: %v", err)
 			return
 		}
+		// Codex refreshes the goal indicator on a time tick while a turn is
+		// running so "Pursuing goal (Ns)" advances without waiting for events.
+		n.refreshGoalStatusIndicatorForTimeTick(snapshot)
 		interval := chatTitleAnimationInterval(snapshot)
 		var timer *time.Timer
 		var timerC <-chan time.Time
@@ -270,6 +299,36 @@ func (n *chatTitleNotifier) run() {
 			frame++
 		}
 	}
+}
+
+// refreshGoalStatusIndicatorForTimeTick updates the composer status line while
+// an active turn is running so live goal elapsed time can advance. Codex only
+// rewrites the indicator when the rendered usage string changes.
+func (n *chatTitleNotifier) refreshGoalStatusIndicatorForTimeTick(snapshot chatTitleSnapshot) {
+	if n == nil || n.session == nil || n.session.Interaction == nil {
+		return
+	}
+	switch snapshot.effectiveState() {
+	case chatTitleRunning, chatTitleWaiting, chatTitleActionRequired, chatTitleStopping:
+	default:
+		return
+	}
+	if chatGoalStatusActiveTurnStartedAt(n.session).IsZero() {
+		return
+	}
+	segment := chatSurfaceGoalStatusSegment(n.session).full
+	n.mu.Lock()
+	changed := segment != n.lastGoalStatusSegment
+	if changed {
+		n.lastGoalStatusSegment = segment
+	}
+	n.mu.Unlock()
+	if !changed {
+		return
+	}
+	// Keep the status line in sync with live goal accrual. RefreshStatus
+	// recomputes segments under the interaction lock.
+	n.session.Interaction.RefreshStatus("")
 }
 
 func (n *chatTitleNotifier) currentSnapshot() chatTitleSnapshot {
@@ -323,15 +382,31 @@ func chatTitleAnimationInterval(snapshot chatTitleSnapshot) time.Duration {
 }
 
 func renderChatTerminalTitle(snapshot chatTitleSnapshot, frame int) string {
+	state := snapshot.effectiveState()
+	// Codex replaces the activity segment with a combined "[ ! ] Action Required"
+	// prefix when the title includes activity and the session is blocked. The
+	// separate run-state label is intentionally omitted in that path.
+	if state == chatTitleActionRequired && chatTitleItemsContain(snapshot.items, "activity") {
+		return renderChatActionRequiredTerminalTitle(snapshot, frame)
+	}
+
+	// Prefer the activity glyph when both activity and state are configured so
+	// the title never shows icon + Ready/Working prose together.
+	preferActivityGlyph := chatTitleItemsContain(snapshot.items, "activity")
+
 	var title strings.Builder
 	previousItem := ""
-	state := snapshot.effectiveState()
 	for _, item := range snapshot.items {
 		value := ""
 		switch item {
 		case "activity":
 			value = chatTitleActivity(state, snapshot.animations, frame)
 		case "state":
+			// Optional text-only run-state. Skipped when activity is present so
+			// icons and prose never stack.
+			if preferActivityGlyph {
+				continue
+			}
 			value = chatTitleStateLabel(snapshot, state)
 		case "project":
 			value = snapshot.project
@@ -339,6 +414,9 @@ func renderChatTerminalTitle(snapshot chatTitleSnapshot, frame int) string {
 			value = snapshot.model
 		case "thread":
 			value = snapshot.thread
+		case "git-branch":
+			// Omitted when empty (detached HEAD / non-git / lookup miss).
+			value = snapshot.branch
 		case "app-name":
 			value = "aicli"
 		}
@@ -357,10 +435,56 @@ func renderChatTerminalTitle(snapshot chatTitleSnapshot, frame int) string {
 	return title.String()
 }
 
+func renderChatActionRequiredTerminalTitle(snapshot chatTitleSnapshot, frame int) string {
+	// Match Codex: one combined action-required prefix, then remaining items
+	// except activity/state so the title never reads as icon + prose twice.
+	parts := []string{chatTitleActionRequiredPrefix(snapshot.animations, frame)}
+	for _, item := range snapshot.items {
+		if item == "activity" || item == "state" {
+			continue
+		}
+		value := ""
+		switch item {
+		case "project":
+			value = snapshot.project
+		case "model":
+			value = snapshot.model
+		case "thread":
+			value = snapshot.thread
+		case "git-branch":
+			value = snapshot.branch
+		case "app-name":
+			value = "aicli"
+		}
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+func chatTitleActionRequiredPrefix(animations bool, frame int) string {
+	if animations && frame%2 == 1 {
+		return "[ . ] Action Required"
+	}
+	return "[ ! ] Action Required"
+}
+
+func chatTitleItemsContain(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func chatTitleActivity(state chatTitleState, animations bool, frame int) string {
 	switch state {
 	case chatTitleIdle:
-		return "○"
+		// Codex only shows a spinner while work is in progress; idle keeps the
+		// title free of a redundant Ready glyph when activity is configured.
+		return ""
 	case chatTitleWaiting:
 		if animations {
 			return chatTitleWaitingFrames[frame%len(chatTitleWaitingFrames)]
@@ -374,6 +498,8 @@ func chatTitleActivity(state chatTitleState, animations bool, frame int) string 
 	case chatTitleStopping:
 		return "■"
 	case chatTitleActionRequired:
+		// Reached only when activity is configured without the combined
+		// action-required path (state-only titles still use chatTitleStateLabel).
 		if animations && frame%2 == 1 {
 			return "[ . ]"
 		}
@@ -390,7 +516,7 @@ func chatTitleStateLabel(snapshot chatTitleSnapshot, state chatTitleState) strin
 	case chatTitleWaiting:
 		return "Waiting"
 	case chatTitleRunning:
-		return "Running"
+		return "Working"
 	case chatTitleStopping:
 		return "Stopping"
 	case chatTitleActionRequired:
@@ -419,7 +545,9 @@ func resolveChatTitleOptions(cfg *config.Config) chatTitleOptions {
 	options := chatTitleOptions{
 		enabled:    true,
 		animations: true,
-		items:      []string{"activity", "state", "project"},
+		// Codex default is activity + project only: icon/spinner without a
+		// parallel Ready/Working text label. Users can still opt into "state".
+		items: []string{"activity", "project"},
 	}
 	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.Chat == nil || cfg.AICLI.Chat.TerminalTitle == nil {
 		return options
@@ -451,9 +579,12 @@ func normalizeChatTitleItems(items []string) []string {
 			item = "project"
 		case "thread-title":
 			item = "thread"
+		case "branch":
+			// Codex config id is git-branch; accept short alias for convenience.
+			item = "git-branch"
 		}
 		switch item {
-		case "activity", "state", "project", "model", "thread", "app-name":
+		case "activity", "state", "project", "model", "thread", "git-branch", "app-name":
 		default:
 			continue
 		}

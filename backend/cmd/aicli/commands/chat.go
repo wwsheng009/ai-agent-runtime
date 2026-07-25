@@ -33,30 +33,30 @@ const chatSessionMetaLabelWidth = 18
 
 // ChatSession 聊天会话状态
 type ChatSession struct {
-	ProviderName                    string
-	Provider                        config.Provider
-	Adapter                         adapter.ProtocolAdapter
-	Model                           string
-	ReasoningEffort                 string
-	RequestedProvider               string
-	EffectiveProvider               string
-	RequestedModel                  string
-	EffectiveModel                  string
-	RequestedReasoningEffort        string
-	EffectiveReasoningEffort        string
-	RequestedPermissionMode         string
-	EffectivePermissionMode         string
-	RouteWarnings                   []string
-	FallbackUsed                    bool
-	FallbackReason                  string
-	SuppressReasoningOutput         bool
-	DisableTools                    bool
-	DebugMode                       bool
-	HTTPDebug                       bool
-	Stream                          bool
+	ProviderName             string
+	Provider                 config.Provider
+	Adapter                  adapter.ProtocolAdapter
+	Model                    string
+	ReasoningEffort          string
+	RequestedProvider        string
+	EffectiveProvider        string
+	RequestedModel           string
+	EffectiveModel           string
+	RequestedReasoningEffort string
+	EffectiveReasoningEffort string
+	RequestedPermissionMode  string
+	EffectivePermissionMode  string
+	RouteWarnings            []string
+	FallbackUsed             bool
+	FallbackReason           string
+	SuppressReasoningOutput  bool
+	DisableTools             bool
+	DebugMode                bool
+	HTTPDebug                bool
+	Stream                   bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
-	FastMode bool
-	BaseURL  string
+	FastMode                        bool
+	BaseURL                         string
 	Messages                        []runtimetypes.Message
 	HTTPClient                      *http.Client
 	cancelCtx                       context.Context                    // 可取消的上下文
@@ -138,11 +138,15 @@ type ChatSession struct {
 	lastLocalShellArtifactPath      string
 	turnRecoveryMu                  sync.Mutex
 	turnRecovery                    *chatTurnRecovery
-	priorityPromptMu                sync.Mutex // serializes modal prompts that own the priority input channel
-	queuedInputDrain                bool       // suppress repeated queued-input notices while draining
-	queuedInputEchoed               bool       // queued input was already echoed in the fixed prompt while busy
-	lastInteractiveInputQueued      bool       // last chatInteractiveReadLine result came from InputQueue
-	ImagePaths                      []string   // explicit local image attachments for current turn
+	// goalStatusMu guards live goal-status turn timing used by the status line.
+	// Codex accrues active-goal elapsed only while an agent turn is running.
+	goalStatusMu                  sync.Mutex
+	goalStatusActiveTurnStartedAt time.Time
+	priorityPromptMu              sync.Mutex // serializes modal prompts that own the priority input channel
+	queuedInputDrain              bool       // suppress repeated queued-input notices while draining
+	queuedInputEchoed             bool       // queued input was already echoed in the fixed prompt while busy
+	lastInteractiveInputQueued    bool       // last chatInteractiveReadLine result came from InputQueue
+	ImagePaths                    []string   // explicit local image attachments for current turn
 }
 
 type chatRuntimeHTTPCapture struct {

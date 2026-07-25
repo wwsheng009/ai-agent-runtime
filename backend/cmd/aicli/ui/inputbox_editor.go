@@ -30,6 +30,8 @@ const (
 	ChatComposerMaxVisibleRows    = 6
 	bracketedPasteEnableSequence  = "\x1b[?2004h"
 	bracketedPasteDisableSequence = "\x1b[?2004l"
+	focusChangeEnableSequence     = "\x1b[?1004h"
+	focusChangeDisableSequence    = "\x1b[?1004l"
 	cursorSaveSequence            = "\x1b[s"
 	cursorRestoreSequence         = "\x1b[u"
 	cursorHideSequence            = "\x1b[?25l"
@@ -82,6 +84,8 @@ const (
 	editorKeyPasteClipboard
 	editorKeyInterrupt
 	editorKeyEOF
+	editorKeyFocusGained
+	editorKeyFocusLost
 )
 
 type editorKey struct {
@@ -183,12 +187,13 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 		return line, readErr
 	}
 	defer func() {
-		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+cursorShowSequence)
+		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
 	// 启用 bracketed paste 后，终端会给粘贴块加上明确边界，
 	// 这样我们就能把块内换行当作文本而不是 Enter。
-	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
+	// 同时启用 focus change reporting，用于 Codex 风格的失焦通知。
+	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence+focusChangeEnableSequence)
 	// 提示符已经由调用方渲染到屏幕上了。
 	// 重绘时使用相对光标移动定位输入区，避免依赖会被滚动失效的
 	// `\x1b[s` / `\x1b[u` 绝对锚点（多行粘贴触发滚动后会把同一段输入
@@ -241,10 +246,10 @@ func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt strin
 		return line, readErr
 	}
 	defer func() {
-		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+cursorShowSequence)
+		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
-	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
+	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence+focusChangeEnableSequence)
 
 	editorHistory := lineEditorHistory(ib.history, keepHistory)
 	line, readErr := readInteractiveLineWithHooksContext(ctx, os.Stdin, os.Stdout, prompt, editorHistory, nil, &hooks, echoSubmit, holdFirstRune)
@@ -993,6 +998,14 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			return "", readErr
 		}
 		if !ok || key.kind == editorKeyIgnore {
+			continue
+		}
+		if key.kind == editorKeyFocusGained {
+			SetTerminalFocused(true)
+			continue
+		}
+		if key.kind == editorKeyFocusLost {
+			SetTerminalFocused(false)
 			continue
 		}
 		if key.kind != editorKeyUp && key.kind != editorKeyDown && key.kind != editorKeyPageUp && key.kind != editorKeyPageDown {
@@ -2032,6 +2045,10 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: i + 1}, true
 			case 'F':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyEnd}, consumed: i + 1}, true
+			case 'I':
+				return decodedInteractiveKey{key: editorKey{kind: editorKeyFocusGained}, consumed: i + 1}, true
+			case 'O':
+				return decodedInteractiveKey{key: editorKey{kind: editorKeyFocusLost}, consumed: i + 1}, true
 			case '~':
 				switch string(pending[2:i]) {
 				case "13;2", "27;2;13", "27;3;13", "27;5;13":

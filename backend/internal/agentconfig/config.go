@@ -439,6 +439,9 @@ type AICLITerminalTitleConfig struct {
 // AICLIChatNotifications controls interactive attention signals.
 type AICLIChatNotifications struct {
 	Sound *AICLIChatSoundConfig `yaml:"sound,omitempty" mapstructure:"sound"`
+	// Condition controls when chat attention signals fire.
+	// Supported values: "unfocused" (default, Codex-aligned) and "always".
+	Condition string `yaml:"condition,omitempty" mapstructure:"condition"`
 }
 
 // AICLIChatSoundConfig controls the lightweight terminal bell notification.
