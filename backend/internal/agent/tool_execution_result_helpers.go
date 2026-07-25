@@ -57,6 +57,12 @@ func classifyGenericToolExecutionError(err error) *runtimeerrors.RuntimeError {
 		code = runtimeerrors.ErrToolPathNotFound
 	case strings.Contains(lower, "invalid argument"), strings.Contains(lower, "invalid args"), strings.Contains(lower, "missing required"), strings.Contains(lower, " is required"):
 		code = runtimeerrors.ErrToolInvalidArgs
+	case strings.Contains(lower, "spawn depth limit"),
+		strings.Contains(lower, "spawn_depth"),
+		strings.Contains(err.Error(), "SPAWN_DEPTH_LIMIT"),
+		(strings.Contains(lower, "max_depth") && strings.Contains(lower, "spawn")),
+		(strings.Contains(lower, "depth limit") && strings.Contains(lower, "spawn")):
+		code = runtimeerrors.ErrAgentSpawnDepthLimit
 	}
 	return runtimeerrors.Wrap(code, "tool execution failed", err)
 }
