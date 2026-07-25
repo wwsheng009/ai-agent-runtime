@@ -80,6 +80,7 @@ func NewGlobTool() *GlobTool {
 func (g *GlobTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
 }
 
@@ -166,22 +167,29 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 	}
 
+	metadata := map[string]interface{}{
+		"pattern":          pattern,
+		"path":             searchPath,
+		"limit":            limit,
+		"case_insensitive": caseInsensitive,
+		"count":            len(matches), // 兼容字段：返回数量
+		"returned_count":   len(matches),
+		"files":            append([]string(nil), matches...),
+		"truncated":        truncated, // 兼容字段：是否被截断
+		"limit_hit":        truncated,
+		"engine":           engine,
+	}
+	// True no-match success: stamp empty disposition for model recovery
+	// (broaden pattern / change path) without treating as hard failure.
+	if len(matches) == 0 && !truncated {
+		toolresult.MarkEmptySuccess(metadata)
+	}
+
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    output,
-		Metadata: map[string]interface{}{
-			"pattern":          pattern,
-			"path":             searchPath,
-			"limit":            limit,
-			"case_insensitive": caseInsensitive,
-			"count":            len(matches), // 兼容字段：返回数量
-			"returned_count":   len(matches),
-			"files":            append([]string(nil), matches...),
-			"truncated":        truncated, // 兼容字段：是否被截断
-			"limit_hit":        truncated,
-			"engine":           engine,
-		},
+		Metadata:   metadata,
 	}, nil
 }
 

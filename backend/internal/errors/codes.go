@@ -27,9 +27,13 @@ const (
 	ErrSessionLeaseConflict ErrorCode = "SESSION_LEASE_CONFLICT"
 	ErrToolInvalidArgs      ErrorCode = "TOOL_INVALID_ARGS"
 	ErrToolPathNotFound     ErrorCode = "TOOL_PATH_NOT_FOUND"
-	ErrToolBrokerFailure    ErrorCode = "TOOL_BROKER_FAILURE"
-	ErrProcessStartFailed   ErrorCode = "PROCESS_START_FAILED"
-	ErrProcessHealthcheck   ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
+	// ErrToolShellCompat marks shell/environment mismatch failures that are
+	// recoverable by changing the command shape (missing utility, wrong shell
+	// dialect, Unix-only pipeline on Windows, etc.). Generic — not tool-name bound.
+	ErrToolShellCompat    ErrorCode = "TOOL_SHELL_COMPAT"
+	ErrToolBrokerFailure  ErrorCode = "TOOL_BROKER_FAILURE"
+	ErrProcessStartFailed ErrorCode = "PROCESS_START_FAILED"
+	ErrProcessHealthcheck ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
 
 	// Agent 错误
 	ErrAgentMaxSteps       ErrorCode = "AGENT_MAX_STEPS"

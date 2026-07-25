@@ -173,8 +173,9 @@ func NewAICLIExecTool() *AICLIExecTool {
 func (t *AICLIExecTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
-		"execution_model": "argv_process",
-		"program":         "aicli",
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
+		"execution_model":                            "argv_process",
+		"program":                                    "aicli",
 	}
 }
 

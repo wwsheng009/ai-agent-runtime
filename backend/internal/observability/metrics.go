@@ -56,6 +56,11 @@ const (
 	MetricErrorsTotal    = "errors_total"
 	MetricErrorsByType   = "errors_by_type"
 	MetricErrorsBySource = "errors_by_source"
+
+	// Tool efficiency 相关指标（LLM↔tool 环路；低基数 label，不按 tool 名展开）
+	MetricToolPreflightTotal         = "tool_preflight_total"
+	MetricToolOutcomeTotal           = "tool_outcome_total"
+	MetricToolDispositionReplayTotal = "tool_disposition_replay_total"
 )
 
 // MetricLabel 标签常量
@@ -78,6 +83,10 @@ const (
 	LabelEntrypoint = "entrypoint"
 	LabelQuotaType  = "quota_type"
 	LabelTokenType  = "token_type"
+	LabelReason     = "reason"
+	LabelDecision   = "decision"
+	LabelErrorCode  = "error_code"
+	LabelRepeat     = "repeat"
 )
 
 // MetricValue 指标值类型

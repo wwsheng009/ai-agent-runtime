@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestViewTool_DescriptionAndSchemaSupportBatchReads(t *testing.T) {
@@ -84,6 +86,16 @@ func TestViewTool_BatchReadsReturnSuccessfulFilesAndPartialErrors(t *testing.T) 
 	}
 	if result.Metadata["succeeded_count"] != 2 || result.Metadata["failed_count"] != 1 || result.Metadata["partial_failure"] != true {
 		t.Fatalf("unexpected batch metadata: %#v", result.Metadata)
+	}
+	rawFailed, ok := result.Metadata[toolresult.MetadataFailedItemsKey].([]map[string]interface{})
+	if !ok || len(rawFailed) != 1 {
+		t.Fatalf("expected structured failed_items, got %#v", result.Metadata[toolresult.MetadataFailedItemsKey])
+	}
+	if rawFailed[0]["path"] != "missing.txt" {
+		t.Fatalf("expected missing.txt failed item, got %#v", rawFailed[0])
+	}
+	if idx, ok := rawFailed[0]["index"].(int); !ok || idx != 2 {
+		t.Fatalf("expected failed item index=2, got %#v", rawFailed[0]["index"])
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -154,7 +155,8 @@ func TestFileStorageStreamingEncodeRemovesFailedTempFile(t *testing.T) {
 	if err := storage.Save(context.Background(), session); err == nil {
 		t.Fatal("expected unsupported metadata encode to fail")
 	}
-	if _, err := os.Stat(storage.sessionPath(session.ID) + ".tmp"); !os.IsNotExist(err) {
+	tmpPath := storage.preferredSessionPath(session.ID, session.CreatedAt) + ".tmp"
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Fatalf("failed temp file was not removed: %v", err)
 	}
 }
@@ -178,7 +180,9 @@ func TestFileStorageMetadataListingScansHistoryWithoutRetainingIt(t *testing.T) 
 	if err != nil {
 		t.Fatalf("marshal legacy session: %v", err)
 	}
-	if err := os.WriteFile(storage.sessionPath(legacy.ID), payload, 0644); err != nil {
+	// Keep writing flat layout so metadata listing still discovers legacy files.
+	legacyPath := storage.legacySessionPath(legacy.ID)
+	if err := os.WriteFile(legacyPath, payload, 0644); err != nil {
 		t.Fatalf("write legacy session: %v", err)
 	}
 
@@ -202,5 +206,61 @@ func TestFileStorageMetadataListingScansHistoryWithoutRetainingIt(t *testing.T) 
 	}
 	if len(previews) != 1 || previews[0].MessageCount != 3 || previews[0].Title != "derived legacy title" {
 		t.Fatalf("unexpected scanned preview: %#v", previews)
+	}
+}
+
+func TestFileStorageUsesDatePartitionedPaths(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	storage, err := NewFileStorage(dir)
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+
+	session := NewSession("date-user")
+	session.CreatedAt = time.Date(2026, 7, 25, 10, 11, 12, 0, time.Local)
+	session.ID = "session_20260725101112_abcd1234"
+	session.History = []types.Message{*types.NewUserMessage("hello date partition")}
+	if err := storage.Save(ctx, session); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	wantPath := filepath.Join(dir, "2026", "07", "25", session.ID+".json")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("expected dated session file %q: %v", wantPath, err)
+	}
+
+	loaded, err := storage.Load(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("load dated session: %v", err)
+	}
+	if loaded.ID != session.ID {
+		t.Fatalf("unexpected loaded id: %s", loaded.ID)
+	}
+
+	// Legacy flat file remains readable and listable.
+	legacy := NewSession("date-user")
+	legacy.ID = "session_legacy_flat_xyz"
+	legacy.History = []types.Message{*types.NewUserMessage("legacy flat")}
+	payload, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, legacy.ID+".json"), payload, 0644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	loadedLegacy, err := storage.Load(ctx, legacy.ID)
+	if err != nil {
+		t.Fatalf("load legacy session: %v", err)
+	}
+	if loadedLegacy.ID != legacy.ID {
+		t.Fatalf("unexpected legacy id: %s", loadedLegacy.ID)
+	}
+	listed, err := storage.List(ctx, "date-user")
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("expected dated+legacy sessions, got %d", len(listed))
 	}
 }

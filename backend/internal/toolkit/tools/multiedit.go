@@ -75,6 +75,7 @@ func NewMultieditTool() *MultieditTool {
 func (m *MultieditTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
 }
 
@@ -217,12 +218,20 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 	result := originalContent
 	appliedEdits := 0
 	failedEdits := make([]string, 0)
+	failedItems := make([]map[string]interface{}, 0)
+	// Count of edit ops that succeeded at least once (not string replacement count).
+	succeededOps := 0
 
 	// 按顺序应用每个编辑操作
 	for i, edit := range edits {
 		matchedOld, matchedNew, ok := matchEditStrings(result, edit.OldString, edit.NewString)
 		if !ok {
-			failedEdits = append(failedEdits, fmt.Sprintf("编辑 %d: %s", i, buildEditOldStringNotFoundError(result, edit.OldString).Error()))
+			errText := buildEditOldStringNotFoundError(result, edit.OldString).Error()
+			failedEdits = append(failedEdits, fmt.Sprintf("编辑 %d: %s", i, errText))
+			ref := truncateDiagnosticText(edit.OldString, 60)
+			if row := toolresult.FailedItemMap(toolresult.IntPtr(i), filePath, ref, errText); row != nil {
+				failedItems = append(failedItems, row)
+			}
 			continue
 		}
 
@@ -234,6 +243,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			result = strings.Replace(result, matchedOld, matchedNew, 1)
 			appliedEdits++
 		}
+		succeededOps++
 	}
 
 	// 检查是否有变化
@@ -246,10 +256,23 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 				detail += fmt.Sprintf("（另有 %d 处失败）", len(failedEdits)-1)
 			}
 		}
+		meta := map[string]interface{}{
+			"file_path":       absPath,
+			"requested_count": len(edits),
+			"failed_count":    len(failedEdits),
+			"succeeded_count": 0,
+			"partial_failure": false,
+			"edits_applied":   0,
+			"edits_failed":    len(failedEdits),
+		}
+		if len(failedItems) > 0 {
+			meta[toolresult.MetadataFailedItemsKey] = failedItems
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("%s", detail),
+			Metadata:   meta,
 		}, nil
 	}
 
@@ -272,21 +295,30 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		message += fmt.Sprintf("，%d 处失败: %s", len(failedEdits), strings.Join(failedEdits, "; "))
 	}
 
+	meta := map[string]interface{}{
+		"file_path":       absPath,
+		"edits_applied":   appliedEdits,
+		"edits_failed":    len(failedEdits),
+		"requested_count": len(edits),
+		"failed_count":    len(failedEdits),
+		"succeeded_count": succeededOps,
+		"partial_failure": len(failedEdits) > 0 && succeededOps > 0,
+		"lines_before":    linesBefore,
+		"lines_after":     linesAfter,
+		"size_before":     len(originalContent),
+		"size_after":      len(result),
+		"size_difference": len(result) - len(originalContent),
+		"patch":           buildUnifiedPatch(absPath, originalContent, result),
+		"mutated_paths":   []string{absPath},
+	}
+	if len(failedItems) > 0 {
+		meta[toolresult.MetadataFailedItemsKey] = failedItems
+	}
+
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    message,
-		Metadata: map[string]interface{}{
-			"file_path":       absPath,
-			"edits_applied":   appliedEdits,
-			"edits_failed":    len(failedEdits),
-			"lines_before":    linesBefore,
-			"lines_after":     linesAfter,
-			"size_before":     len(originalContent),
-			"size_after":      len(result),
-			"size_difference": len(result) - len(originalContent),
-			"patch":           buildUnifiedPatch(absPath, originalContent, result),
-			"mutated_paths":   []string{absPath},
-		},
+		Metadata:   meta,
 	}, nil
 }

@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -63,6 +64,8 @@ func (a *MCPAdapter) CallToolWithMeta(ctx interface{}, mcpName, toolName string,
 }
 
 // extractToolResult 提取文本内容和 metadata。
+// Align with tools/manager formatMCPResult: IsError becomes a non-nil error so
+// circuit/outcome classification and model envelopes see failures consistently.
 func (a *MCPAdapter) extractToolResult(result *protocol.CallToolResult) (string, map[string]interface{}, error) {
 	if result == nil {
 		return "", nil, nil
@@ -74,8 +77,14 @@ func (a *MCPAdapter) extractToolResult(result *protocol.CallToolResult) (string,
 			output += content.Text
 		}
 	}
-
-	return output, cloneMeta(result.Meta), nil
+	metadata := cloneMeta(result.Meta)
+	if result.IsError {
+		if strings.TrimSpace(output) == "" {
+			return "", metadata, fmt.Errorf("tool execution failed")
+		}
+		return output, metadata, fmt.Errorf("%s", output)
+	}
+	return output, metadata, nil
 }
 
 // ListTools 列出工具

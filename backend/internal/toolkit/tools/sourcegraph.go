@@ -233,9 +233,19 @@ query Search($query: String!, $first: Int!) {
 
 	// 构建结果
 	var output strings.Builder
-	output.WriteString(fmt.Sprintf("搜索结果 (共约 %s 个匹配):\n\n", result.Data.Search.Results.ApproximateResultCount))
+	matches := result.Data.Search.Results.Results
+	returnedCount := len(matches)
+	if returnedCount == 0 {
+		output.WriteString("未找到匹配的内容")
+	} else {
+		approx := strings.TrimSpace(result.Data.Search.Results.ApproximateResultCount)
+		if approx == "" {
+			approx = fmt.Sprintf("%d", returnedCount)
+		}
+		output.WriteString(fmt.Sprintf("搜索结果 (共约 %s 个匹配):\n\n", approx))
+	}
 
-	for i, fileMatch := range result.Data.Search.Results.Results {
+	for i, fileMatch := range matches {
 		if i >= count {
 			break
 		}
@@ -274,16 +284,30 @@ query Search($query: String!, $first: Int!) {
 		output.WriteString("⚠️ 结果已达到限制，可能还有更多匹配\n")
 	}
 
+	// Cap reported counts to the request limit so metadata matches rendered output.
+	if returnedCount > count {
+		returnedCount = count
+	}
+	metadata := map[string]interface{}{
+		"query":             query,
+		"count":             returnedCount,
+		"match_count":       returnedCount,
+		"returned_count":    returnedCount,
+		"result_count":      returnedCount,
+		"approximate_total": result.Data.Search.Results.ApproximateResultCount,
+		"limit_hit":         result.Data.Search.Results.LimitHit,
+	}
+	// True no-match success: stamp empty disposition so the model broadens
+	// the query instead of treating a successful empty search as a hard failure.
+	if returnedCount == 0 {
+		toolresult.MarkEmptySuccess(metadata)
+	}
+
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    output.String(),
-		Metadata: map[string]interface{}{
-			"query":             query,
-			"count":             len(result.Data.Search.Results.Results),
-			"approximate_total": result.Data.Search.Results.ApproximateResultCount,
-			"limit_hit":         result.Data.Search.Results.LimitHit,
-		},
+		Metadata:   metadata,
 	}, nil
 }
 

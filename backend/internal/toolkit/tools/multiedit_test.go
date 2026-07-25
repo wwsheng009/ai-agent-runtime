@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestMultieditTool(t *testing.T) {
@@ -115,6 +116,53 @@ func TestMultieditTool(t *testing.T) {
 
 			t.Logf("Result: %s", result.Content)
 		})
+	}
+}
+
+func TestMultieditTool_PartialFailureEmitsFailedItems(t *testing.T) {
+	tmpFile, err := osCreateTempFile("multiedit-partial-*.txt", "line1\nline2\nline3\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer osRemove(tmpFile)
+
+	tool := NewMultieditTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": tmpFile,
+		"edits": []interface{}{
+			map[string]interface{}{
+				"old_string": "line1",
+				"new_string": "LINE1",
+			},
+			map[string]interface{}{
+				"old_string": "does-not-exist-xyz",
+				"new_string": "NOPE",
+			},
+		},
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected partial multiedit success, result=%#v err=%v", result, err)
+	}
+	if result.Metadata["partial_failure"] != true || result.Metadata["failed_count"] != 1 || result.Metadata["succeeded_count"] != 1 {
+		t.Fatalf("unexpected partial batch metadata: %#v", result.Metadata)
+	}
+	rawFailed, ok := result.Metadata[toolresult.MetadataFailedItemsKey].([]map[string]interface{})
+	if !ok || len(rawFailed) != 1 {
+		t.Fatalf("expected structured failed_items, got %#v", result.Metadata[toolresult.MetadataFailedItemsKey])
+	}
+	if idx, ok := rawFailed[0]["index"].(int); !ok || idx != 1 {
+		t.Fatalf("expected failed edit index=1, got %#v", rawFailed[0]["index"])
+	}
+	errText, _ := rawFailed[0]["error"].(string)
+	if strings.TrimSpace(errText) == "" {
+		t.Fatalf("expected failed item error text, got %#v", rawFailed[0])
+	}
+	content, readErr := os.ReadFile(tmpFile)
+	if readErr != nil {
+		t.Fatalf("read result file: %v", readErr)
+	}
+	if !strings.Contains(string(content), "LINE1") {
+		t.Fatalf("expected successful edit to persist, got %q", string(content))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestGlobTool(t *testing.T) {
@@ -525,6 +526,36 @@ func requireNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGlobTool_NoMatchesMarksEmptySuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewGlobTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "definitely-missing-*.xyz",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if result.Metadata["returned_count"] != 0 || result.Metadata["count"] != 0 {
+		t.Fatalf("expected zero counts, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result=true, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataOutcomeKey] != toolresult.OutcomeEmpty {
+		t.Fatalf("expected outcome=empty, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "未找到") {
+		t.Fatalf("expected no-match body text, got %q", result.Content)
 	}
 }
 

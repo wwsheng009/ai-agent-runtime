@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestTodosTool(t *testing.T) {
@@ -40,7 +41,7 @@ func TestTodosTool(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name: "multiple in_progress should fail",
+			name: "multiple in_progress auto heals",
 			params: map[string]interface{}{
 				"todos": []interface{}{
 					map[string]interface{}{
@@ -55,7 +56,7 @@ func TestTodosTool(t *testing.T) {
 					},
 				},
 			},
-			wantError: true,
+			wantError: false,
 		},
 		{
 			name:      "missing todos",
@@ -110,6 +111,22 @@ func TestTodosTool(t *testing.T) {
 				return
 			}
 
+			if tt.name == "multiple in_progress auto heals" {
+				if healed, _ := result.Metadata["multi_in_progress_healed"].(bool); !healed {
+					t.Fatalf("expected multi_in_progress_healed metadata, got %#v", result.Metadata)
+				}
+				if result.Metadata["in_progress"] != 1 {
+					t.Fatalf("expected single in_progress after heal, got %#v", result.Metadata["in_progress"])
+				}
+				if !strings.Contains(result.Content, "已自动修复") {
+					t.Fatalf("expected heal notice in content, got %q", result.Content)
+				}
+				next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+				if !strings.Contains(next, "in_progress") {
+					t.Fatalf("expected recovery next_action, got %#v", result.Metadata)
+				}
+			}
+
 			t.Logf("Result: %s", result.Content)
 		})
 	}
@@ -130,6 +147,41 @@ func TestTodosTool_Interface(t *testing.T) {
 
 	if !tool.CanDirectCall() {
 		t.Error("todos tool should support direct call")
+	}
+	if !strings.Contains(tool.Description(), "同一时间只能有一个任务为 in_progress") {
+		t.Fatalf("expected single in_progress policy in description, got %q", tool.Description())
+	}
+	if !strings.Contains(tool.Description(), "自动保留最后一项") {
+		t.Fatalf("expected multi-in_progress auto-heal guidance in description, got %q", tool.Description())
+	}
+}
+
+func TestHealMultipleInProgressTodos(t *testing.T) {
+	healed, changed, demoted := healMultipleInProgressTodos([]TodoItem{
+		{Content: "A", Status: "pending"},
+		{Content: "B", Status: "in_progress"},
+	})
+	if changed || len(demoted) != 0 {
+		t.Fatalf("single in_progress should not heal: changed=%v demoted=%v", changed, demoted)
+	}
+	if healed[1].Status != "in_progress" {
+		t.Fatalf("expected B stay in_progress, got %#v", healed)
+	}
+
+	healed, changed, demoted = healMultipleInProgressTodos([]TodoItem{
+		{Content: "A", Status: "in_progress"},
+		{Content: "B", Status: "completed"},
+		{Content: "C", Status: "in_progress"},
+		{Content: "D", Status: "in_progress"},
+	})
+	if !changed {
+		t.Fatal("expected multi in_progress heal")
+	}
+	if got := []string{healed[0].Status, healed[1].Status, healed[2].Status, healed[3].Status}; strings.Join(got, ",") != "pending,completed,pending,in_progress" {
+		t.Fatalf("unexpected statuses after heal: %v demoted=%v", got, demoted)
+	}
+	if len(demoted) != 2 || demoted[0] != "A" || demoted[1] != "C" {
+		t.Fatalf("expected demoted A,C keep last D, got %v", demoted)
 	}
 }
 

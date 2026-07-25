@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
@@ -74,6 +75,34 @@ func TestMCPAdapter_CallToolWithMeta_PreservesMetadata(t *testing.T) {
 	}
 	if meta["action"] != "created" {
 		t.Fatalf("expected action metadata, got %#v", meta)
+	}
+}
+
+func TestMCPAdapter_CallToolWithMeta_IsErrorBecomesError(t *testing.T) {
+	adapter := NewMCPAdapter(&fakeManager{
+		result: &protocol.CallToolResult{
+			IsError: true,
+			Content: []protocol.Content{
+				{Type: "text", Text: "path not found: missing.txt"},
+			},
+			Meta: map[string]any{
+				"error_code": "TOOL_PATH_NOT_FOUND",
+			},
+		},
+	})
+
+	output, meta, err := adapter.CallToolWithMeta(context.Background(), "fake-mcp", "view", map[string]interface{}{"file_path": "missing.txt"})
+	if err == nil {
+		t.Fatal("expected IsError to surface as non-nil error")
+	}
+	if output.(string) != "path not found: missing.txt" {
+		t.Fatalf("expected error text as output, got %#v", output)
+	}
+	if meta["error_code"] != "TOOL_PATH_NOT_FOUND" {
+		t.Fatalf("expected error_code metadata preserved, got %#v", meta)
+	}
+	if !strings.Contains(err.Error(), "path not found") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // FetchTool HTTP 内容获取工具
@@ -53,6 +54,13 @@ func NewFetchTool() *FetchTool {
 			true,
 		),
 		maxSize: 5 * 1024 * 1024, // 5MB
+	}
+}
+
+func (f *FetchTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: true,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
 }
 

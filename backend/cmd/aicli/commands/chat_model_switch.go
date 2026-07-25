@@ -166,24 +166,27 @@ func promptRuntimeModelSelectionPopup(session *ChatSession) (string, bool, error
 	currentMatch, _ := matchCaseInsensitive(options, currentModel)
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "模型选择")
 	defer restoreInput()
-	hint := "  提示: 输入编号、模型名，回车保持当前"
-	popupLines := renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, "")
-	prompt := "请输入选项 (回车保持当前): "
-	handle := beginRuntimeSelectionPopup(session, popupLines, prompt)
+	hint := "  提示: ↑↓ 选择，回车确认高亮项；也可输入编号或模型名"
+	prompt := "请输入选项 (回车确认高亮项): "
+	selectedIndex := initialRuntimeSelectionIndex(options, currentMatch, "")
+	render := func(selected int, warning string) []string {
+		return renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, warning, selected)
+	}
+	handle := beginRuntimeSelectionPopup(session, render(selectedIndex, ""), prompt)
 	defer clearRuntimeSelectionPopupHandle(session, handle)
+	controller := newRuntimeSelectionController(session, handle, prompt, options, selectedIndex, render)
 
 	for {
-		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		text, err := chatInteractiveReadSelectionLine(session, prompt, controller)
 		if err != nil {
 			return "", true, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		selected, ok := resolveRuntimeSelectionInput(text, currentModel, "", options, true, false)
+		selected, ok := resolveRuntimeSelectionInputWithCursor(text, currentModel, "", options, controller.Selected(), true, false)
 		if ok {
 			return selected, true, nil
 		}
-		popupLines = renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, "  无效的选择，请重新输入")
-		updateRuntimeSelectionPopup(session, handle, popupLines, prompt)
+		controller.SetWarning("  无效的选择，请重新输入")
 	}
 }
 
@@ -275,25 +278,28 @@ func selectRuntimeReasoningEffortPopup(session *ChatSession, current string, opt
 
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "reasoning_effort 选择")
 	defer restoreInput()
-	hint := "  提示: 输入编号、名称或自定义值，回车保留当前，输入 0 清空"
-	popupLines := renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "")
+	hint := "  提示: ↑↓ 选择，回车确认高亮项；也可输入编号/名称/自定义值，0 清空"
 	prompt := reasoningEffortSelectionPrompt(currentValid, defaultOption)
-	handle := beginRuntimeSelectionPopup(session, popupLines, prompt)
+	selectedIndex := initialRuntimeSelectionIndex(normalizedOptions, currentMatch, defaultOption)
+	render := func(selected int, warning string) []string {
+		return renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, warning, selected)
+	}
+	handle := beginRuntimeSelectionPopup(session, render(selectedIndex, ""), prompt)
 	defer clearRuntimeSelectionPopupHandle(session, handle)
+	controller := newRuntimeSelectionController(session, handle, prompt, normalizedOptions, selectedIndex, render)
 
 	for {
-		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		text, err := chatInteractiveReadSelectionLine(session, prompt, controller)
 		if err != nil {
 			return "", true, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
 		normalized := runtimetypes.NormalizeReasoningEffort(text)
-		selected, ok := resolveRuntimeReasoningEffortInput(normalized, currentMatch, currentValid, defaultOption, normalizedOptions)
+		selected, ok := resolveRuntimeReasoningEffortInputWithCursor(normalized, currentMatch, currentValid, defaultOption, normalizedOptions, controller.Selected())
 		if ok {
 			return selected, true, nil
 		}
-		popupLines = renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "  无效的选择，请重新输入")
-		updateRuntimeSelectionPopup(session, handle, popupLines, prompt)
+		controller.SetWarning("  无效的选择，请重新输入")
 	}
 }
 
@@ -419,7 +425,7 @@ func prepareRuntimeSelectionInput(session *ChatSession, promptKind string) (stri
 	}
 }
 
-func renderSelectionPopupLines(title, currentLabel, currentValue string, options []string, currentMatch, defaultOption, hint, notice, warning string) []string {
+func renderSelectionPopupLines(title, currentLabel, currentValue string, options []string, currentMatch, defaultOption, hint, notice, warning string, selectedIndex int) []string {
 	lines := make([]string, 0, 3+len(options))
 	if title = strings.TrimSpace(title); title != "" {
 		lines = append(lines, title)
@@ -445,15 +451,22 @@ func renderSelectionPopupLines(title, currentLabel, currentValue string, options
 				maxLen = width
 			}
 		}
+		if selectedIndex < 0 || selectedIndex >= len(options) {
+			selectedIndex = -1
+		}
 		for i, option := range options {
+			marker := " "
+			if i == selectedIndex {
+				marker = ">"
+			}
 			paddedOption := padRuntimeSelectionOption(option, maxLen)
 			switch {
 			case strings.EqualFold(option, currentMatch):
-				lines = append(lines, fmt.Sprintf("  [%d] %s  (当前)", i+1, paddedOption))
+				lines = append(lines, fmt.Sprintf(" %s[%d] %s  (当前)", marker, i+1, paddedOption))
 			case defaultOption != "" && strings.EqualFold(option, defaultOption):
-				lines = append(lines, fmt.Sprintf("  [%d] %s  (默认)", i+1, paddedOption))
+				lines = append(lines, fmt.Sprintf(" %s[%d] %s  (默认)", marker, i+1, paddedOption))
 			default:
-				lines = append(lines, fmt.Sprintf("  [%d] %s", i+1, paddedOption))
+				lines = append(lines, fmt.Sprintf(" %s[%d] %s", marker, i+1, paddedOption))
 			}
 		}
 	}

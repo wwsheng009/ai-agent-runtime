@@ -138,19 +138,20 @@ func TestRenderSelectionPopupLines_ShowsCurrentValueAndHint(t *testing.T) {
 		[]string{"gpt-4.1", "gpt-4.1-mini"},
 		"gpt-4.1",
 		"",
-		"  提示: 输入编号、模型名，回车保持当前",
+		"  提示: ↑↓ 选择，回车确认高亮项；也可输入编号或模型名",
 		"  [input] 检测到 1 条待处理输入；已在模型选择期间临时挂起，结束后将按原顺序恢复。",
 		"",
+		0,
 	)
 
 	rendered := strings.Join(lines, "\n")
 	for _, expected := range []string{
 		"选择模型",
 		"当前模型: gpt-4.1",
-		"[1] gpt-4.1",
+		">[1] gpt-4.1",
 		"(当前)",
-		"[2] gpt-4.1-mini",
-		"提示: 输入编号、模型名，回车保持当前",
+		" [2] gpt-4.1-mini",
+		"提示: ↑↓ 选择，回车确认高亮项；也可输入编号或模型名",
 		"模型选择期间临时挂起",
 	} {
 		if !strings.Contains(rendered, expected) {
@@ -170,6 +171,7 @@ func TestRenderSelectionPopupLinesAlignsCJKOptionsByDisplayWidth(t *testing.T) {
 		"",
 		"",
 		"",
+		0,
 	)
 
 	markerColumns := make([]int, 0, 2)

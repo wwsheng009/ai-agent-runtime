@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestLsTool(t *testing.T) {
@@ -120,6 +121,37 @@ func TestLsTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
 	}
 	if !strings.Contains(hint, candidate) {
 		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
+func TestLsTool_EmptyDirectoryMarksEmptySuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyDir := filepath.Join(tmpDir, "empty")
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		t.Fatalf("mkdir empty: %v", err)
+	}
+
+	tool := NewLsTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"path": emptyDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected empty-dir success, got error %v", result.Error)
+	}
+	if result.Metadata["returned_count"] != 0 || result.Metadata["total"] != 0 {
+		t.Fatalf("expected zero returned entries, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result=true, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataOutcomeKey] != toolresult.OutcomeEmpty {
+		t.Fatalf("expected outcome=empty, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "空目录") {
+		t.Fatalf("expected empty-directory content, got %q", result.Content)
 	}
 }
 

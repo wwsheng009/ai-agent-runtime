@@ -22,6 +22,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
@@ -29,6 +30,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -66,6 +68,7 @@ type ReActLoop struct {
 	agent                        *Agent
 	llmRuntime                   *llm.LLMRuntime
 	config                       *LoopReActConfig
+	toolExecMemory               *toolexec.Memory
 	parallelToolCallsUnsupported atomic.Bool
 	reasoningEffortUnsupported   atomic.Bool
 	thinkingUnsupported          atomic.Bool
@@ -142,9 +145,10 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 	}
 
 	return &ReActLoop{
-		agent:      agent,
-		llmRuntime: llmRuntime,
-		config:     config,
+		agent:          agent,
+		llmRuntime:     llmRuntime,
+		config:         config,
+		toolExecMemory: toolexec.NewMemory(toolexec.DefaultTerminalFailureThreshold),
 	}
 }
 
@@ -389,6 +393,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	repeatedToolPromptFingerprint := 0
 	lastSemanticToolFingerprint := ""
 	repeatedSemanticToolCalls := 0
+	// lastDispositionFingerprint tracks the last non-success disposition
+	// (partial/empty) so identical full-batch replays get a stronger advisory.
+	lastDispositionFingerprint := ""
+	lastDispositionOutcome := ""
 	consecutiveExplorationSteps := 0
 	totalToolCalls := 0
 
@@ -594,6 +602,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			if repeatedSemanticToolCalls >= 2 {
 				repeatedSemanticAdvisory = repeatedSemanticToolCallAdvisory(repeatedSemanticToolCalls)
 			}
+			// Prefer a stronger, outcome-aware advisory when the model is about to
+			// re-issue the same batch that previously returned partial/empty evidence.
+			if fingerprint == lastDispositionFingerprint && strings.TrimSpace(lastDispositionOutcome) != "" {
+				if dispositionAdvisory := dispositionReplayAdvisory(lastDispositionOutcome, repeatedSemanticToolCalls); dispositionAdvisory != "" {
+					// Count advisory emissions for efficiency dashboards (empty/partial only).
+					observability.RecordToolDispositionReplay(lastDispositionOutcome, repeatedSemanticToolCalls)
+					repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, dispositionAdvisory)
+				}
+			}
 		} else {
 			lastSemanticToolFingerprint = ""
 			repeatedSemanticToolCalls = 0
@@ -735,6 +752,12 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 		// 4. 更新对话历史
 		toolPayloads := toolResultsToPayloads(toolResults, repeatedSemanticAdvisory)
+		if fingerprint := semanticToolCallFingerprint(normalizedCalls); fingerprint != "" {
+			if outcome := dominantToolResultDisposition(toolResults); outcome == toolresult.OutcomePartial || outcome == toolresult.OutcomeEmpty {
+				lastDispositionFingerprint = fingerprint
+				lastDispositionOutcome = outcome
+			}
+		}
 		builder.AppendToolResults(normalizedCalls, toolPayloads)
 		promptBuilder.AppendToolResults(normalizedCalls, toolPayloads)
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
@@ -1394,19 +1417,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
 			loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
-			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-				SessionID:  sessionID,
-				ToolName:   tc.Name,
-				ToolCallID: tc.ID,
-				Step:       step,
-				Error:      result.Error,
-				Metadata:   metadata,
-			})
-			if gatewayErr != nil && envelope != nil {
-				envelope.Metadata["gateway_error"] = gatewayErr.Error()
-			}
-			result.Envelope = envelope
-			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
@@ -1423,19 +1434,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			if hookErr != nil {
 				result.Error = hookErr.Error()
 				loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
-				envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-					SessionID:  sessionID,
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Step:       step,
-					Error:      result.Error,
-					Metadata:   metadata,
-				})
-				if gatewayErr != nil && envelope != nil {
-					envelope.Metadata["gateway_error"] = gatewayErr.Error()
-				}
-				result.Envelope = envelope
-				loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 				results[i] = result
 				loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 				continue
@@ -1446,19 +1445,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 					result.Error = "hook blocked tool"
 				}
 				loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
-				envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-					SessionID:  sessionID,
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Step:       step,
-					Error:      result.Error,
-					Metadata:   metadata,
-				})
-				if gatewayErr != nil && envelope != nil {
-					envelope.Metadata["gateway_error"] = gatewayErr.Error()
-				}
-				result.Envelope = envelope
-				loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 				results[i] = result
 				loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 				continue
@@ -1468,19 +1455,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if patchErr != nil {
 					result.Error = patchErr.Error()
 					loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 					results[i] = result
 					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 					continue
@@ -1494,19 +1469,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		if len(allowedTools) > 0 && !allowedTools[tc.Name] {
 			result.Error = fmt.Sprintf("tool not allowed for this agent: %s", tc.Name)
 			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_whitelist", result.Error, nil)
-			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-				SessionID:  sessionID,
-				ToolName:   tc.Name,
-				ToolCallID: tc.ID,
-				Step:       step,
-				Error:      result.Error,
-				Metadata:   metadata,
-			})
-			if gatewayErr != nil && envelope != nil {
-				envelope.Metadata["gateway_error"] = gatewayErr.Error()
-			}
-			result.Envelope = envelope
-			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
@@ -1517,19 +1480,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if err := policy.AllowTool(tc.Name); err != nil {
 					result.Error = err.Error()
 					loop.emitToolDenied(sessionID, tc, step, traceID, classifyDeniedPolicy(result.Error), result.Error, nil)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 					results[i] = result
 					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 					continue
@@ -1550,19 +1501,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if evalErr != nil {
 					result.Error = evalErr.Error()
 					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 					results[i] = result
 					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 					continue
@@ -1571,19 +1510,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if decision.Type == runtimepolicy.DecisionDeny {
 					result.Error = decision.Reason
 					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 					results[i] = result
 					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 					continue
@@ -1593,19 +1520,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 					if patchErr != nil {
 						result.Error = patchErr.Error()
 						loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
-						envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-							SessionID:  sessionID,
-							ToolName:   tc.Name,
-							ToolCallID: tc.ID,
-							Step:       step,
-							Error:      result.Error,
-							Metadata:   metadata,
-						})
-						if gatewayErr != nil && envelope != nil {
-							envelope.Metadata["gateway_error"] = gatewayErr.Error()
-						}
-						result.Envelope = envelope
-						loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+						result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 						results[i] = result
 						loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 						continue
@@ -1615,6 +1530,26 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				}
 			}
 
+			preflightInfo := loop.lookupToolInfoForPreflight(callCtx, tc.Name, nil)
+			decision := loop.prepareToolExecution(metadata, tc.Name, tc.ID, tc.Args, preflightInfo)
+			if !decision.Allow {
+				if decision.SoftEmpty {
+					applySoftEmptyPreflightResult(&result, metadata, decision)
+					loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, "")
+					result = loop.finalizeSoftEmptyToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
+					results[i] = result
+					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+					continue
+				}
+				result.Error = decision.Error
+				loop.emitToolDenied(sessionID, tc, step, traceID, "tool_preflight", result.Error, metadata)
+				loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, result.Error)
+				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
+				results[i] = result
+				loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+				continue
+			}
+
 			var (
 				rawOutput interface{}
 				rawMeta   map[string]interface{}
@@ -1622,16 +1557,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			)
 			rawOutput, rawMeta, callErr = broker.ExecuteToolCall(callCtx, sessionID, tc)
 			recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, callErr)
+			loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, result.Error)
 
-			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-				SessionID:  sessionID,
-				ToolName:   tc.Name,
-				ToolCallID: tc.ID,
-				Step:       step,
-				Content:    result.Output,
-				Error:      result.Error,
-				Metadata:   metadata,
-			})
+			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
 			if gatewayErr != nil && envelope != nil {
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
 			}
@@ -1658,19 +1586,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if evalErr != nil {
 					result.Error = evalErr.Error()
 					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 					results[i] = result
 					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 					continue
@@ -1679,19 +1595,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if decision.Type == runtimepolicy.DecisionDeny {
 					result.Error = decision.Reason
 					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 					results[i] = result
 					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 					continue
@@ -1701,19 +1605,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 					if patchErr != nil {
 						result.Error = patchErr.Error()
 						loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
-						envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-							SessionID:  sessionID,
-							ToolName:   tc.Name,
-							ToolCallID: tc.ID,
-							Step:       step,
-							Error:      result.Error,
-							Metadata:   metadata,
-						})
-						if gatewayErr != nil && envelope != nil {
-							envelope.Metadata["gateway_error"] = gatewayErr.Error()
-						}
-						result.Envelope = envelope
-						loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+						result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 						results[i] = result
 						loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 						continue
@@ -1771,15 +1663,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				}
 			}
 
-			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-				SessionID:  sessionID,
-				ToolName:   tc.Name,
-				ToolCallID: tc.ID,
-				Step:       step,
-				Content:    result.Output,
-				Error:      result.Error,
-				Metadata:   metadata,
-			})
+			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
 			if gatewayErr != nil && envelope != nil {
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
 			}
@@ -1787,6 +1671,10 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				envelope.Metadata["subagent_reports_artifact_id"] = envelope.ArtifactIDs[0]
 			}
 			result.Envelope = envelope
+			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+				"awaiting_model": false,
+				"subagent":       true,
+			}))
 			loop.emitToolReduced(sessionID, tc, step, traceID, result, map[string]interface{}{
 				"subagent_count": metadata["subagent_count"],
 			})
@@ -1798,19 +1686,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		if loop.agent.mcpManager == nil {
 			result.Error = "mcp manager is nil"
 			loop.emitToolDenied(sessionID, tc, step, traceID, "runtime", result.Error, nil)
-			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-				SessionID:  sessionID,
-				ToolName:   tc.Name,
-				ToolCallID: tc.ID,
-				Step:       step,
-				Error:      result.Error,
-				Metadata:   metadata,
-			})
-			if gatewayErr != nil && envelope != nil {
-				envelope.Metadata["gateway_error"] = gatewayErr.Error()
-			}
-			result.Envelope = envelope
-			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
@@ -1821,19 +1697,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		if err != nil {
 			result.Error = fmt.Sprintf("tool not found: %s", tc.Name)
 			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_lookup", result.Error, nil)
-			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-				SessionID:  sessionID,
-				ToolName:   tc.Name,
-				ToolCallID: tc.ID,
-				Step:       step,
-				Error:      result.Error,
-				Metadata:   metadata,
-			})
-			if gatewayErr != nil && envelope != nil {
-				envelope.Metadata["gateway_error"] = gatewayErr.Error()
-			}
-			result.Envelope = envelope
-			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
@@ -1854,19 +1718,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			if evalErr != nil {
 				result.Error = evalErr.Error()
 				loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, metadata)
-				envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-					SessionID:  sessionID,
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Step:       step,
-					Error:      result.Error,
-					Metadata:   metadata,
-				})
-				if gatewayErr != nil && envelope != nil {
-					envelope.Metadata["gateway_error"] = gatewayErr.Error()
-				}
-				result.Envelope = envelope
-				loop.emitToolReduced(sessionID, tc, step, traceID, result, map[string]interface{}{
+				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
 					"mcp_name":       toolInfo.MCPName,
 					"execution_mode": toolInfo.ExecutionMode,
 				})
@@ -1878,19 +1730,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			if decision.Type == runtimepolicy.DecisionDeny {
 				result.Error = decision.Reason
 				loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, metadata)
-				envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-					SessionID:  sessionID,
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Step:       step,
-					Error:      result.Error,
-					Metadata:   metadata,
-				})
-				if gatewayErr != nil && envelope != nil {
-					envelope.Metadata["gateway_error"] = gatewayErr.Error()
-				}
-				result.Envelope = envelope
-				loop.emitToolReduced(sessionID, tc, step, traceID, result, map[string]interface{}{
+				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
 					"mcp_name":       toolInfo.MCPName,
 					"execution_mode": toolInfo.ExecutionMode,
 				})
@@ -1903,19 +1743,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if patchErr != nil {
 					result.Error = patchErr.Error()
 					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, metadata)
-					envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-						SessionID:  sessionID,
-						ToolName:   tc.Name,
-						ToolCallID: tc.ID,
-						Step:       step,
-						Error:      result.Error,
-						Metadata:   metadata,
-					})
-					if gatewayErr != nil && envelope != nil {
-						envelope.Metadata["gateway_error"] = gatewayErr.Error()
-					}
-					result.Envelope = envelope
-					loop.emitToolReduced(sessionID, tc, step, traceID, result, map[string]interface{}{
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
 						"mcp_name":       toolInfo.MCPName,
 						"execution_mode": toolInfo.ExecutionMode,
 					})
@@ -1930,19 +1758,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			if err := policy.AllowToolCall(toolInfo, tc.Args); err != nil {
 				result.Error = err.Error()
 				loop.emitToolDenied(sessionID, tc, step, traceID, classifyDeniedPolicy(result.Error), result.Error, metadata)
-				envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-					SessionID:  sessionID,
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Step:       step,
-					Error:      result.Error,
-					Metadata:   metadata,
-				})
-				if gatewayErr != nil && envelope != nil {
-					envelope.Metadata["gateway_error"] = gatewayErr.Error()
-				}
-				result.Envelope = envelope
-				loop.emitToolReduced(sessionID, tc, step, traceID, result, map[string]interface{}{
+				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
 					"mcp_name":       toolInfo.MCPName,
 					"execution_mode": toolInfo.ExecutionMode,
 				})
@@ -1950,6 +1766,32 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 				continue
 			}
+		}
+
+		preflightInfo := loop.lookupToolInfoForPreflight(callCtx, tc.Name, &toolInfo)
+		decision := loop.prepareToolExecution(metadata, tc.Name, tc.ID, tc.Args, preflightInfo)
+		if !decision.Allow {
+			if decision.SoftEmpty {
+				applySoftEmptyPreflightResult(&result, metadata, decision)
+				loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, "")
+				result = loop.finalizeSoftEmptyToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
+					"mcp_name":       toolInfo.MCPName,
+					"execution_mode": toolInfo.ExecutionMode,
+				})
+				results[i] = result
+				loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+				continue
+			}
+			result.Error = decision.Error
+			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_preflight", result.Error, metadata)
+			loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, result.Error)
+			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
+				"mcp_name":       toolInfo.MCPName,
+				"execution_mode": toolInfo.ExecutionMode,
+			})
+			results[i] = result
+			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+			continue
 		}
 
 		// 调用工具
@@ -1974,16 +1816,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			rawOutput, err = loop.agent.mcpManager.CallTool(ctx, toolInfo.MCPName, tc.Name, tc.Args)
 		}
 		recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, err)
+		loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, result.Error)
 
-		envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-			SessionID:  sessionID,
-			ToolName:   tc.Name,
-			ToolCallID: tc.ID,
-			Step:       step,
-			Content:    result.Output,
-			Error:      result.Error,
-			Metadata:   metadata,
-		})
+		envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
 		if gatewayErr != nil && envelope != nil {
 			envelope.Metadata["gateway_error"] = gatewayErr.Error()
 		}
@@ -2032,6 +1867,55 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	return results, nil
 }
 
+// finalizeDeniedToolResult runs gateway reduction for a denied/failed-before-exec
+// tool call and emits tool.completed so chat-log / offline analyzers see the same
+// disposition contract as successful executions (ok/outcome/next_action/...).
+// tool.denied remains the policy-specific signal; tool.completed is the durable
+// result record used by LogToolResult.
+func (loop *ReActLoop) finalizeDeniedToolResult(ctx context.Context, gateway *output.Gateway, sessionID string, tc types.ToolCall, step int, traceID string, result toolExecutionResult, metadata map[string]interface{}, reducedExtra map[string]interface{}) toolExecutionResult {
+	if loop == nil {
+		return result
+	}
+	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+	if gatewayErr != nil && envelope != nil {
+		envelope.Metadata["gateway_error"] = gatewayErr.Error()
+	}
+	result.Envelope = envelope
+	if loop.agent != nil {
+		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+			"awaiting_model": false,
+			"denied":         true,
+		}))
+	}
+	loop.emitToolReduced(sessionID, tc, step, traceID, result, reducedExtra)
+	return result
+}
+
+// finalizeSoftEmptyToolResult reduces an empty-replay short-circuit as a successful
+// empty disposition (not a hard deny). Skips tool.denied; still emits tool.completed.
+func (loop *ReActLoop) finalizeSoftEmptyToolResult(ctx context.Context, gateway *output.Gateway, sessionID string, tc types.ToolCall, step int, traceID string, result toolExecutionResult, metadata map[string]interface{}, reducedExtra map[string]interface{}) toolExecutionResult {
+	if loop == nil {
+		return result
+	}
+	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+	if gatewayErr != nil && envelope != nil {
+		envelope.Metadata["gateway_error"] = gatewayErr.Error()
+	}
+	result.Envelope = envelope
+	if loop.agent != nil {
+		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+			"awaiting_model": false,
+			"empty_replay":   true,
+		}))
+	}
+	if reducedExtra == nil {
+		reducedExtra = map[string]interface{}{}
+	}
+	reducedExtra["empty_replay"] = true
+	loop.emitToolReduced(sessionID, tc, step, traceID, result, reducedExtra)
+	return result
+}
+
 func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step int, traceID, policy, reason string, extra map[string]interface{}) {
 	if loop == nil || loop.agent == nil {
 		return
@@ -2050,6 +1934,8 @@ func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step 
 	payload["ok"] = diagnostic.OK
 	payload["retryable"] = diagnostic.Retryable
 	payload["next_action"] = diagnostic.NextAction
+	// Denies are always failed dispositions for offline efficiency scoring.
+	payload[toolresult.MetadataOutcomeKey] = toolresult.OutcomeFailed
 	for key, value := range extra {
 		if key == "" {
 			continue
@@ -2071,7 +1957,15 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 		"trace_id":     traceID,
 	}
 	if result.Envelope != nil {
-		for _, key := range []string{"error_code", "retryable", "next_action", "ok"} {
+		for _, key := range []string{
+			"error_code",
+			"retryable",
+			"next_action",
+			"ok",
+			toolresult.MetadataOutcomeKey,
+			toolresult.MetadataEmptyResultKey,
+			toolresult.MetadataPartialFailureKey,
+		} {
 			if value, ok := result.Envelope.Metadata[key]; ok {
 				payload[key] = value
 			}
@@ -2244,7 +2138,15 @@ func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionR
 		obs.WithInput(result.Call.Args)
 
 		if result.Envelope != nil {
-			for _, key := range []string{"ok", "error_code", "retryable", "next_action"} {
+			for _, key := range []string{
+				"ok",
+				"error_code",
+				"retryable",
+				"next_action",
+				toolresult.MetadataOutcomeKey,
+				toolresult.MetadataEmptyResultKey,
+				toolresult.MetadataPartialFailureKey,
+			} {
 				if value, ok := result.Envelope.Metadata[key]; ok {
 					obs.WithMetric(key, value)
 				}
@@ -2786,6 +2688,77 @@ func repeatedSemanticToolCallAdvisory(repeatCount int) string {
 		"Runtime advisory: the same semantic tool request has run %d consecutive times. Execution was not blocked. If the evidence is unchanged, reuse it and change the query, batch related inputs, or proceed to the next task step instead of repeating the call.",
 		repeatCount,
 	)
+}
+
+// dispositionReplayAdvisory strengthens guidance when the model re-issues a tool
+// batch that previously returned partial/empty evidence. Generic: no tool-name
+// special cases; relies on outcome metadata only.
+func dispositionReplayAdvisory(outcome string, repeatCount int) string {
+	outcome = toolresult.NormalizeOutcome(outcome)
+	switch outcome {
+	case toolresult.OutcomePartial:
+		if repeatCount <= 1 {
+			return "Runtime advisory: the previous identical tool batch returned outcome=partial. Reuse successful item outputs and re-run only the failed items with corrected inputs. Do not re-run the entire batch unchanged."
+		}
+		return fmt.Sprintf(
+			"Runtime advisory: identical tool batch replayed %d times after outcome=partial. Stop full-batch unchanged retries; reuse successes and fix only failed items, or change inputs.",
+			repeatCount,
+		)
+	case toolresult.OutcomeEmpty:
+		if repeatCount <= 1 {
+			return "Runtime advisory: the previous identical tool call returned a successful empty result. Treat that as valid evidence; broaden/change inputs or proceed instead of retrying unchanged."
+		}
+		return fmt.Sprintf(
+			"Runtime advisory: identical tool call replayed %d times after an empty successful result. Do not retry unchanged; broaden the query or move to the next task step.",
+			repeatCount,
+		)
+	default:
+		return ""
+	}
+}
+
+// dominantToolResultDisposition picks the most actionable non-success outcome
+// from a tool batch (partial > empty > failed > success).
+func dominantToolResultDisposition(results []toolExecutionResult) string {
+	hasPartial := false
+	hasEmpty := false
+	hasFailed := false
+	for _, result := range results {
+		outcome := ""
+		if result.Envelope != nil {
+			outcome = toolresult.NormalizeOutcome(strings.TrimSpace(fmt.Sprint(result.Envelope.Metadata[toolresult.MetadataOutcomeKey])))
+			if outcome == "" && result.Envelope.Metadata != nil {
+				if empty, ok := result.Envelope.Metadata[toolresult.MetadataEmptyResultKey].(bool); ok && empty {
+					outcome = toolresult.OutcomeEmpty
+				}
+			}
+		}
+		if outcome == "" {
+			if strings.TrimSpace(result.Error) != "" {
+				outcome = toolresult.OutcomeFailed
+			} else {
+				outcome = toolresult.OutcomeSuccess
+			}
+		}
+		switch outcome {
+		case toolresult.OutcomePartial:
+			hasPartial = true
+		case toolresult.OutcomeEmpty:
+			hasEmpty = true
+		case toolresult.OutcomeFailed:
+			hasFailed = true
+		}
+	}
+	switch {
+	case hasPartial:
+		return toolresult.OutcomePartial
+	case hasEmpty:
+		return toolresult.OutcomeEmpty
+	case hasFailed:
+		return toolresult.OutcomeFailed
+	default:
+		return toolresult.OutcomeSuccess
+	}
 }
 
 func nextExplorationStallCount(current int, calls []types.ToolCall) int {

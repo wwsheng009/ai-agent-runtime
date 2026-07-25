@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func containsString(values []string, want string) bool {
@@ -873,6 +874,9 @@ func TestGrepTool_DescriptionRgAvailable(t *testing.T) {
 	}
 	if !strings.Contains(desc, "内置扫描") || !strings.Contains(desc, "工具定义保持静态") {
 		t.Fatalf("expected stable description to mention builtin fallback and static tool definition, got %q", desc)
+	}
+	if !strings.Contains(desc, "优先于 shell") {
+		t.Fatalf("expected description to prefer toolkit grep over shell search, got %q", desc)
 	}
 }
 
@@ -2536,6 +2540,45 @@ func TestGrepTool_EmptyPatternFileBuiltinReturnsNoMatches(t *testing.T) {
 	}
 	if result.Metadata["match_count"] != 0 {
 		t.Fatalf("expected empty pattern_file match_count=0, got %#v", result.Metadata["match_count"])
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result on no-match success, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataOutcomeKey] != toolresult.OutcomeEmpty {
+		t.Fatalf("expected outcome=empty on no-match success, got %#v", result.Metadata)
+	}
+}
+
+func TestGrepTool_NoMatchesMarksEmptySuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "sample.txt"), []byte("hello\nworld\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewGrepTool()
+	tool.lookPath = func(string) (string, error) {
+		return "", os.ErrNotExist
+	}
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "NoSuchPatternXYZ123",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if result.Metadata["match_count"] != 0 {
+		t.Fatalf("expected match_count=0, got %#v", result.Metadata["match_count"])
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result=true, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataOutcomeKey] != toolresult.OutcomeEmpty {
+		t.Fatalf("expected outcome=empty, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "未找到") {
+		t.Fatalf("expected no-match body, got %q", result.Content)
 	}
 }
 

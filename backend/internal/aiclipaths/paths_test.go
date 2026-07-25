@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestExpandUserPathExpandsCurrentUserHome(t *testing.T) {
@@ -44,6 +45,43 @@ func TestExpandUserPathLeavesNonCurrentUserTildePathsAlone(t *testing.T) {
 	expected := filepath.Clean("~other/.aicli/logs/aicli.log")
 	if got != expected {
 		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestDatePartitionUsesLocalYMD(t *testing.T) {
+	stamp := time.Date(2026, 7, 25, 15, 4, 5, 0, time.Local)
+	year, month, day := DatePartition(stamp)
+	if year != "2026" || month != "07" || day != "25" {
+		t.Fatalf("unexpected partition: %s/%s/%s", year, month, day)
+	}
+}
+
+func TestJoinDatePartitionNestsUnderYMD(t *testing.T) {
+	stamp := time.Date(2026, 7, 25, 15, 4, 5, 0, time.Local)
+	got := JoinDatePartition(filepath.Join("root", "chat-logs"), stamp, "session-id", "debug.log")
+	want := filepath.Join("root", "chat-logs", "2026", "07", "25", "session-id", "debug.log")
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestParseTimestampedSessionIDTime(t *testing.T) {
+	chatID := "20260725_150405.123_ab12cd34"
+	got, ok := ParseTimestampedSessionIDTime(chatID)
+	if !ok {
+		t.Fatal("expected chat log session id to parse")
+	}
+	if got.Format("20060102_150405.000") != "20260725_150405.123" {
+		t.Fatalf("unexpected chat id time: %v", got)
+	}
+
+	fileID := "session_20260725150405_abcdEF12"
+	got, ok = ParseTimestampedSessionIDTime(fileID)
+	if !ok {
+		t.Fatal("expected file session id to parse")
+	}
+	if got.Format("20060102150405") != "20260725150405" {
+		t.Fatalf("unexpected file id time: %v", got)
 	}
 }
 

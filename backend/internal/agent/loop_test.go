@@ -4941,6 +4941,14 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 			deniedPolicies = append(deniedPolicies, policy)
 		}
 	})
+	var completedOutcomes []string
+	bus.Subscribe("tool.completed", func(event runtimeevents.Event) {
+		if outcome, ok := event.Payload["outcome"].(string); ok {
+			completedOutcomes = append(completedOutcomes, outcome)
+		} else if outcome := fmt.Sprint(event.Payload["outcome"]); outcome != "" && outcome != "<nil>" {
+			completedOutcomes = append(completedOutcomes, outcome)
+		}
+	})
 	agent.SetEventBus(bus)
 
 	llmRuntime := llm.NewLLMRuntime(nil)
@@ -4975,6 +4983,8 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 	require.NotEmpty(t, result.Observations)
 	assert.Contains(t, result.Observations[0].Error, "read-only policy blocks write-like tool")
 	assert.Contains(t, deniedPolicies, "read_only")
+	require.NotEmpty(t, completedOutcomes)
+	assert.Contains(t, completedOutcomes, "failed")
 
 	tools, err := loop.getAvailableTools(context.Background(), "write file", nil)
 	require.NoError(t, err)
@@ -5933,4 +5943,48 @@ func TestToolResultsToPayloads_AppendsSemanticRepeatAdvisoryOnce(t *testing.T) {
 	require.NotContains(t, payloads[0].Content, "Runtime advisory")
 	require.Contains(t, payloads[1].Content, "Execution was not blocked")
 	require.Equal(t, true, payloads[1].Metadata["semantic_repeat_advisory"])
+}
+
+func TestDispositionReplayAdvisory(t *testing.T) {
+	partialFirst := dispositionReplayAdvisory(toolresult.OutcomePartial, 1)
+	require.Contains(t, partialFirst, "outcome=partial")
+	require.Contains(t, partialFirst, "Do not re-run the entire batch unchanged")
+
+	partialRepeat := dispositionReplayAdvisory(toolresult.OutcomePartial, 3)
+	require.Contains(t, partialRepeat, "replayed 3 times")
+	require.Contains(t, partialRepeat, "Stop full-batch unchanged retries")
+
+	emptyFirst := dispositionReplayAdvisory(toolresult.OutcomeEmpty, 1)
+	require.Contains(t, emptyFirst, "successful empty result")
+	require.Contains(t, emptyFirst, "broaden/change inputs")
+
+	require.Empty(t, dispositionReplayAdvisory(toolresult.OutcomeSuccess, 2))
+	require.Empty(t, dispositionReplayAdvisory(toolresult.OutcomeFailed, 2))
+}
+
+func TestDominantToolResultDisposition(t *testing.T) {
+	partial := dominantToolResultDisposition([]toolExecutionResult{
+		{
+			Error: "batch completed with 1 failure(s)",
+			Envelope: &output.Envelope{
+				Metadata: map[string]interface{}{
+					toolresult.MetadataOutcomeKey: toolresult.OutcomePartial,
+				},
+			},
+		},
+		{Output: "ok"},
+	})
+	require.Equal(t, toolresult.OutcomePartial, partial)
+
+	empty := dominantToolResultDisposition([]toolExecutionResult{
+		{
+			Envelope: &output.Envelope{
+				Metadata: map[string]interface{}{
+					toolresult.MetadataEmptyResultKey: true,
+					toolresult.MetadataOutcomeKey:     toolresult.OutcomeEmpty,
+				},
+			},
+		},
+	})
+	require.Equal(t, toolresult.OutcomeEmpty, empty)
 }

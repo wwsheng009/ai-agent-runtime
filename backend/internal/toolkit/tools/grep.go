@@ -637,8 +637,8 @@ func NewGrepTool() *GrepTool {
 	return &GrepTool{
 		BaseTool: toolkit.NewBaseTool(
 			"grep",
-			"搜索文件内容。用 patterns + paths 批量搜索相关目标；高级 ripgrep 选项使用 rg_args。优先使用 rg，不可用时回退内置扫描。",
-			"3.2.0",
+			"代码/文件内容搜索的首选工具（优先于 shell rg/grep）。用 patterns + paths 批量搜索相关目标；字面匹配设 literal=true；高级 ripgrep 选项使用 rg_args。优先使用 rg，不可用时回退内置扫描。空结果是有效证据，不是崩溃。",
+			"3.3.0",
 			parameters,
 			true,
 		),
@@ -650,12 +650,13 @@ func NewGrepTool() *GrepTool {
 
 // Description returns a static tool description so provider-side tool caching is stable.
 func (g *GrepTool) Description() string {
-	return "文件内容搜索（优先使用 ripgrep/rg 引擎；rg 不可用时回退内置扫描）。工具定义保持静态，不随本机 rg 可用性变化；实际执行时在 metadata.engine 中标记 rg 或 builtin。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、ignore_file≈--ignore-file、ignore_file_case_insensitive≈--ignore-file-case-insensitive、no_ignore_files≈--no-ignore-files、no_ignore_parent/vcs/global/dot≈--no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot、hidden/no_hidden≈--hidden/--no-hidden、-u/-uu/-uuu/--unrestricted、no_config≈--no-config、one_file_system≈--one-file-system、no_messages≈--no-messages、pcre2≈-P/--pcre2、engine≈--engine、multiline≈-U/--multiline、multiline_dotall≈--multiline-dotall、replace≈-r/--replace、passthru≈--passthru、crlf≈--crlf、auto_hybrid_regex≈--auto-hybrid-regex、column≈--column、trim≈--trim、pretty≈--pretty、line_buffered≈--line-buffered、block_buffered≈--block-buffered、null/null_data≈--null/--null-data、field_context_separator≈--field-context-separator、path_separator≈--path-separator、context_separator≈--context-separator、max_columns≈-M/--max-columns、max_columns_preview≈--max-columns-preview、count_matches≈--count-matches、stats≈--stats、json≈--json、follow≈-L/--follow、sort/sortr≈--sort/--sortr、sort_files≈--sort-files、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、type_add/type_clear≈--type-add/--type-clear、files_with_matches≈-l、files_without_match≈--files-without-match、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（如 -f patterns.txt）、path 排序/倒序、匹配次数统计、stats 摘要、max_depth/max_count 显式 0 语义以及 rg_args，例如 rg -P 'foo.*bar' backend。默认输出规范化为稳定的 path:line[:column]: content；json/--json 会透传 rg 原始 JSON Lines；rg-only 能力在无 rg 时会明确提示。"
+	return "代码/文件内容搜索的首选工具（优先于 shell `rg`/`grep`）。优先使用 ripgrep/rg 引擎；rg 不可用时回退内置扫描。工具定义保持静态，不随本机 rg 可用性变化；实际执行时在 metadata.engine 中标记 rg 或 builtin。空匹配是有效证据（empty），不要当硬失败重试同一查询。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、ignore_file≈--ignore-file、ignore_file_case_insensitive≈--ignore-file-case-insensitive、no_ignore_files≈--no-ignore-files、no_ignore_parent/vcs/global/dot≈--no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot、hidden/no_hidden≈--hidden/--no-hidden、-u/-uu/-uuu/--unrestricted、no_config≈--no-config、one_file_system≈--one-file-system、no_messages≈--no-messages、pcre2≈-P/--pcre2、engine≈--engine、multiline≈-U/--multiline、multiline_dotall≈--multiline-dotall、replace≈-r/--replace、passthru≈--passthru、crlf≈--crlf、auto_hybrid_regex≈--auto-hybrid-regex、column≈--column、trim≈--trim、pretty≈--pretty、line_buffered≈--line-buffered、block_buffered≈--block-buffered、null/null_data≈--null/--null-data、field_context_separator≈--field-context-separator、path_separator≈--path-separator、context_separator≈--context-separator、max_columns≈-M/--max-columns、max_columns_preview≈--max-columns-preview、count_matches≈--count-matches、stats≈--stats、json≈--json、follow≈-L/--follow、sort/sortr≈--sort/--sortr、sort_files≈--sort-files、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、type_add/type_clear≈--type-add/--type-clear、files_with_matches≈-l、files_without_match≈--files-without-match、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（如 -f patterns.txt）、path 排序/倒序、匹配次数统计、stats 摘要、max_depth/max_count 显式 0 语义以及 rg_args，例如 rg -P 'foo.*bar' backend。默认输出规范化为稳定的 path:line[:column]: content；json/--json 会透传 rg 原始 JSON Lines；rg-only 能力在无 rg 时会明确提示。"
 }
 
 func (g *GrepTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
 }
 
@@ -5321,6 +5322,12 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 	if stats != nil {
 		metadata["stats"] = stats.metadataMap()
+	}
+	// True no-match success (match_count==0): stamp empty disposition so the
+	// model treats this as valid evidence, not a hard failure / dead retry.
+	// Do not mark when truncated mid-stream still reports zero (defensive).
+	if matchCount == 0 && !truncated {
+		toolresult.MarkEmptySuccess(metadata)
 	}
 
 	return &toolkit.ToolResult{

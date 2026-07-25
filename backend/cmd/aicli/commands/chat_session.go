@@ -808,6 +808,31 @@ func currentRuntimeSessionID(session *ChatSession) string {
 	return session.RuntimeSession.ID
 }
 
+func runtimeSessionCreatedAt(session *ChatSession) time.Time {
+	if session == nil || session.RuntimeSession == nil {
+		return time.Time{}
+	}
+	return session.RuntimeSession.CreatedAt
+}
+
+// fileSessionJSONPath nests file-backend session JSON under YYYY/MM/DD, matching Codex.
+func fileSessionJSONPath(sessionDir, sessionID string, createdAt time.Time) string {
+	sessionDir = strings.TrimSpace(sessionDir)
+	sessionID = filepath.Base(strings.TrimSpace(sessionID))
+	if sessionDir == "" || sessionID == "" || sessionID == "." {
+		return ""
+	}
+	partitionAt := createdAt
+	if partitionAt.IsZero() {
+		if parsed, ok := aiclipaths.ParseTimestampedSessionIDTime(sessionID); ok {
+			partitionAt = parsed
+		} else {
+			partitionAt = time.Now()
+		}
+	}
+	return aiclipaths.JoinDatePartition(sessionDir, partitionAt, sessionID+".json")
+}
+
 func currentRuntimeSessionPath(session *ChatSession) string {
 	if session == nil {
 		return ""
@@ -824,7 +849,7 @@ func currentRuntimeSessionPath(session *ChatSession) string {
 	if sessionDir == "" || sessionID == "" {
 		return ""
 	}
-	return filepath.Join(sessionDir, filepath.Base(strings.TrimSpace(sessionID))+".json")
+	return resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, sessionID, runtimeSessionCreatedAt(session)))
 }
 
 func currentRuntimeSessionArtifactRoot(session *ChatSession) string {
@@ -1572,6 +1597,38 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Tim
 		lines = append(lines, fmt.Sprintf("    摘要: %s", strings.TrimSpace(preview.Summary)))
 	}
 	return lines
+}
+
+// renderRuntimeResumeCurrentSessionLine renders the non-selectable current
+// session row shown at the top of /resume so users can verify a just-renamed
+// title without leaving the chat process.
+func renderRuntimeResumeCurrentSessionLine(session *runtimechat.Session, now time.Time, titleWidth int) string {
+	if session == nil {
+		return ""
+	}
+	turnCount, messageCount := runtimeSessionConversationCounts(session)
+	title := formatCurrentResumeSessionTitle(runtimeResumeSessionTitle(session))
+	if titleWidth > 0 {
+		// Current rows use a longer label ("当前 · title（不可选）"); pad to the
+		// shared column width when history rows exist so counts still align.
+		title = fitDisplayText(title, titleWidth)
+		title = padDisplayText(title, titleWidth)
+	}
+	if generation := runtimeSessionCompactGeneration(session); generation > 0 {
+		return fmt.Sprintf("%s  compact #%d  %d轮/%d条消息  %s",
+			title,
+			generation,
+			turnCount,
+			messageCount,
+			formatSessionUpdatedAt(session.UpdatedAt, now),
+		)
+	}
+	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
+		title,
+		turnCount,
+		messageCount,
+		formatSessionUpdatedAt(session.UpdatedAt, now),
+	)
 }
 
 func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time, titleWidth int) string {

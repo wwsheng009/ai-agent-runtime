@@ -13,6 +13,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 type fakeExecuter struct {
@@ -188,6 +189,24 @@ func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
 	}
 	if result.Error == nil || !strings.Contains(result.Error.Error(), "失败摘要") {
 		t.Fatalf("expected batch failure summary in error, got %#v", result.Error)
+	}
+	if result.Metadata["partial_failure"] != true || result.Metadata["succeeded_count"] != 1 {
+		t.Fatalf("expected partial_failure with succeeded_count=1, got %#v", result.Metadata)
+	}
+	rawFailed, ok := result.Metadata[toolresult.MetadataFailedItemsKey].([]map[string]interface{})
+	if !ok || len(rawFailed) != 1 {
+		t.Fatalf("expected structured failed_items, got %#v", result.Metadata[toolresult.MetadataFailedItemsKey])
+	}
+	if rawFailed[0]["ref"] != "first" {
+		t.Fatalf("expected failed command ref=first, got %#v", rawFailed[0])
+	}
+	if idx, ok := rawFailed[0]["index"].(int); !ok || idx != 0 {
+		t.Fatalf("expected failed item index=0, got %#v", rawFailed[0]["index"])
+	}
+	// Extractor should surface the same rows from source-side metadata.
+	items := toolresult.ExtractFailedItems(result.Metadata)
+	if len(items) != 1 || items[0].Ref != "first" {
+		t.Fatalf("expected ExtractFailedItems to use source failed_items, got %#v", items)
 	}
 }
 
@@ -432,6 +451,60 @@ func TestBashTool_GoTestUsesExtendedInferredTimeout(t *testing.T) {
 	}
 	if inspector.lastTimeout != defaultGoTestCommandTimeout {
 		t.Fatalf("expected go test timeout %v, got %v", defaultGoTestCommandTimeout, inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_SearchShellUsesShorterInferredTimeout(t *testing.T) {
+	t.Setenv(shellCommandTimeoutEnv, "")
+	t.Setenv(shellCommandTimeoutMSEnv, "")
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: ""}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": `rg -n "TodoItem" backend`,
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected search timeout inference success, result=%#v err=%v", result, err)
+	}
+	if inspector.lastTimeout != defaultSearchShellCommandTimeout {
+		t.Fatalf("expected search timeout %v, got %v", defaultSearchShellCommandTimeout, inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_ExplicitTimeoutOverridesSearchInference(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "match"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "grep -R pattern .",
+		"timeout": "45s",
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected explicit search timeout, result=%#v err=%v", result, err)
+	}
+	if inspector.lastTimeout != 45*time.Second {
+		t.Fatalf("expected explicit 45s timeout, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestInferredShellCommandTimeout_SearchVsGoTest(t *testing.T) {
+	if got := inferredShellCommandTimeout(`rg -n foo .`, 30*time.Second); got != defaultSearchShellCommandTimeout {
+		t.Fatalf("rg inferred timeout=%v want %v", got, defaultSearchShellCommandTimeout)
+	}
+	if got := inferredShellCommandTimeout(`findstr /s /n TodoItem *.go`, defaultShellCommandTimeout); got != defaultSearchShellCommandTimeout {
+		t.Fatalf("findstr inferred timeout=%v want %v", got, defaultSearchShellCommandTimeout)
+	}
+	// Env/default shorter than search clamp should be preserved.
+	if got := inferredShellCommandTimeout(`rg pattern`, 5*time.Second); got != 5*time.Second {
+		t.Fatalf("short fallback should win, got %v", got)
+	}
+	if got := inferredShellCommandTimeout(`go test ./...`, defaultShellCommandTimeout); got != defaultGoTestCommandTimeout {
+		t.Fatalf("go test inferred timeout=%v want %v", got, defaultGoTestCommandTimeout)
+	}
+	if got := inferredShellCommandTimeout(`git status`, defaultShellCommandTimeout); got != defaultShellCommandTimeout {
+		t.Fatalf("plain command inferred timeout=%v want %v", got, defaultShellCommandTimeout)
 	}
 }
 
@@ -1091,5 +1164,380 @@ func TestFriendlyHintFor_RipgrepExitOneFromWrappedError(t *testing.T) {
 	)
 	if !strings.Contains(hint, "未匹配到结果") {
 		t.Fatalf("expected no-match guidance from wrapped exit status, got %q", hint)
+	}
+}
+
+func TestIsSearchToolNoMatch(t *testing.T) {
+	if !isSearchToolNoMatch(`rg -n "missing" backend`, "", fmt.Errorf("exit status 1")) {
+		t.Fatal("expected empty rg exit 1 to be no-match")
+	}
+	if !isSearchToolNoMatch(`grep -n missing backend`, "some noise without keywords", fmt.Errorf("exit status 1")) {
+		t.Fatal("expected grep exit 1 without error keywords to be no-match")
+	}
+	if isSearchToolNoMatch(`rg -n "x" backend`, "rg: regex parse error:", fmt.Errorf("exit status 1")) {
+		t.Fatal("regex parse must not soft-succeed as no-match")
+	}
+	if isSearchToolNoMatch(`rg -n "x" backend`, "no such file or directory", fmt.Errorf("exit status 1")) {
+		t.Fatal("path errors must not soft-succeed as no-match")
+	}
+	if isSearchToolNoMatch(`go test ./...`, "", fmt.Errorf("exit status 1")) {
+		t.Fatal("non-search commands must not soft-succeed")
+	}
+	timeoutErr := runtimeerrors.Wrap(runtimeerrors.ErrToolTimeout, "execution timed out", context.DeadlineExceeded)
+	if isSearchToolNoMatch(`rg -n "x" backend`, "", timeoutErr) {
+		t.Fatal("timeouts must not soft-succeed as no-match")
+	}
+}
+
+func TestBashTool_SearchNoMatchSoftSucceeds(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{
+		result: CommandExecutionResult{Output: ""},
+		err:    fmt.Errorf("exit status 1"),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": `rg -n "DoesNotExistSymbolXYZ" backend`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected soft success for rg no-match, got failure: %v", result.Error)
+	}
+	if result.Error != nil {
+		t.Fatalf("expected nil Error on soft success, got %v", result.Error)
+	}
+	if result.Metadata["search_no_match"] != true {
+		t.Fatalf("expected search_no_match metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata[toolresult.MetadataOutcomeKey] != toolresult.OutcomeEmpty {
+		t.Fatalf("expected empty outcome, got %#v", result.Metadata[toolresult.MetadataOutcomeKey])
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "grep") {
+		t.Fatalf("expected next_action to prefer toolkit grep, got %q", next)
+	}
+	if !strings.Contains(result.Content, "未匹配到结果") {
+		t.Fatalf("expected empty-evidence content, got %q", result.Content)
+	}
+}
+
+func TestBashTool_SearchRealFailureStillFails(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{
+		result: CommandExecutionResult{Output: "rg: regex parse error: unclosed group"},
+		err:    fmt.Errorf("exit status 2"),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": `rg -n "foo(" backend`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected hard failure for regex parse, got %#v", result)
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "exit status 2") && !strings.Contains(message, "正则") {
+		t.Fatalf("expected failure guidance, got %q", message)
+	}
+
+	// Path/IO style exit 1 must also remain a hard failure.
+	tool.executer = fakeExecuter{
+		result: CommandExecutionResult{Output: "rg: no such file or directory"},
+		err:    fmt.Errorf("exit status 1"),
+	}
+	result, err = tool.Execute(context.Background(), map[string]interface{}{
+		"command": `rg -n "x" missing-dir`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected path failure to remain hard, got success content %q", result.Content)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "grep") {
+		t.Fatalf("expected search hard-failure next_action to prefer toolkit grep, got %q metadata=%#v", next, result.Metadata)
+	}
+}
+
+func TestBuildBashCommandFailureError_TimeoutGuidance(t *testing.T) {
+	timeoutErr := runtimeerrors.Wrap(runtimeerrors.ErrToolTimeout, "execution timed out after 2s", context.DeadlineExceeded)
+
+	searchErr := buildBashCommandFailureError(`rg -n "TodoItem" backend`, "", timeoutErr)
+	if searchErr == nil {
+		t.Fatal("expected enriched timeout error")
+	}
+	if !runtimeerrors.Is(searchErr, runtimeerrors.ErrToolTimeout) {
+		t.Fatalf("expected timeout type preserved via %%w, got %v", searchErr)
+	}
+	searchMsg := searchErr.Error()
+	if !strings.Contains(searchMsg, "grep") || !strings.Contains(searchMsg, "rg -n") {
+		t.Fatalf("expected search timeout guidance, got %q", searchMsg)
+	}
+
+	genericErr := buildBashCommandFailureError(`go test ./...`, "", timeoutErr)
+	if genericErr == nil {
+		t.Fatal("expected enriched generic timeout error")
+	}
+	if !runtimeerrors.Is(genericErr, runtimeerrors.ErrToolTimeout) {
+		t.Fatalf("expected timeout type preserved, got %v", genericErr)
+	}
+	genericMsg := genericErr.Error()
+	if !strings.Contains(genericMsg, "go test") {
+		t.Fatalf("expected command in generic timeout, got %q", genericMsg)
+	}
+	if !strings.Contains(genericMsg, "缩小范围") && !strings.Contains(genericMsg, "timeout") {
+		t.Fatalf("expected generic timeout recovery guidance, got %q", genericMsg)
+	}
+}
+
+func TestBashTool_BatchOfSearchNoMatchSucceeds(t *testing.T) {
+	tool := NewBashTool()
+	// batchInspectExecuter returns Output + optional err; empty-ish output +
+	// exit 1 on rg should soft-succeed per item and make the batch overall ok.
+	inspector := &batchInspectExecuter{
+		failures: map[string]error{
+			`rg -n "AlphaMissing" .`: fmt.Errorf("exit status 1"),
+			`rg -n "BetaMissing" .`:  fmt.Errorf("exit status 1"),
+		},
+	}
+	// Override default "output for ..." content so soft-success path treats empty evidence.
+	tool.executer = &searchNoMatchBatchExecuter{failures: inspector.failures}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": `rg -n "AlphaMissing" .`},
+			map[string]interface{}{"command": `rg -n "BetaMissing" .`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected batch of only no-match searches to succeed, got error: %v content=%q", result.Error, result.Content)
+	}
+	if result.Metadata["failed_count"] != 0 {
+		t.Fatalf("expected failed_count=0, got %#v", result.Metadata)
+	}
+}
+
+// searchNoMatchBatchExecuter returns empty output + exit 1 for configured commands.
+type searchNoMatchBatchExecuter struct {
+	failures map[string]error
+	commands []string
+}
+
+func (f *searchNoMatchBatchExecuter) Execute(_ context.Context, command string, _ time.Duration, _ ...ExecOption) (CommandExecutionResult, error) {
+	f.commands = append(f.commands, command)
+	return CommandExecutionResult{Output: ""}, f.failures[command]
+}
+
+func TestParseBashCommandBatch_CoercesJSONStringArray(t *testing.T) {
+	items, batch, err := parseBashCommandBatch(map[string]interface{}{
+		"commands": `[{"command":"go test ./..."},{"command":"git status"}]`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !batch {
+		t.Fatal("expected batch mode")
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 commands, got %#v", items)
+	}
+	if items[0].Command != "go test ./..." || items[1].Command != "git status" {
+		t.Fatalf("unexpected coerced commands: %#v", items)
+	}
+}
+
+func TestParseBashCommandBatch_CoercesBareCommandString(t *testing.T) {
+	items, batch, err := parseBashCommandBatch(map[string]interface{}{
+		"commands": "go test ./internal/prompt/ -count=1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !batch || len(items) != 1 || items[0].Command != "go test ./internal/prompt/ -count=1" {
+		t.Fatalf("expected single-item batch, got batch=%v items=%#v", batch, items)
+	}
+}
+
+func TestBashTool_WindowsHeredocPreflight(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("heredoc preflight is Windows-specific")
+	}
+	tool := NewBashTool()
+	// Ensure we never reach the executer for blocked dialect.
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "python - <<'PY'\nprint(1)\nPY",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected heredoc preflight failure, got %#v", result)
+	}
+	if !strings.Contains(result.Error.Error(), "heredoc") {
+		t.Fatalf("expected heredoc guidance, got %q", result.Error.Error())
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(strings.ToLower(next), "write") && !strings.Contains(strings.ToLower(next), "python -c") {
+		t.Fatalf("expected next_action to steer away from heredoc, got %q", next)
+	}
+}
+
+func TestLooksLikeBashHeredoc(t *testing.T) {
+	if !looksLikeBashHeredoc("cat <<EOF\nhello\nEOF") {
+		t.Fatal("expected classic heredoc to match")
+	}
+	if !looksLikeBashHeredoc("python - <<'PY'\nprint(1)\nPY") {
+		t.Fatal("expected quoted heredoc to match")
+	}
+	if looksLikeBashHeredoc("git status 2>&1") {
+		t.Fatal("PowerShell/stream redirect must not look like heredoc")
+	}
+	if looksLikeBashHeredoc("if ($a -lt 1) { }") {
+		t.Fatal("PowerShell comparison must not look like heredoc")
+	}
+}
+
+func TestBashCommandFailureNextAction_SearchRegex(t *testing.T) {
+	next := bashCommandFailureNextAction(
+		`rg -n "foo(" backend`,
+		"rg: regex parse error:",
+		fmt.Errorf("exit status 2"),
+	)
+	if !strings.Contains(next, "grep") {
+		t.Fatalf("expected grep recovery next_action, got %q", next)
+	}
+}
+
+func TestIsSearchToolNoMatch_IgnoresPowerShellNoise(t *testing.T) {
+	// PowerShell NativeCommandError chrome contains the substring "error" but
+	// still represents rg no-match under exit status 1.
+	noise := "\x1b[31;1mNativeCommandError:\x1b[0m\n+ CategoryInfo          : NotSpecified\n+ FullyQualifiedErrorId : NativeCommandError\n---\n"
+	if !isSearchToolNoMatch(`rg -n "MissingSymbol" backend`, noise, fmt.Errorf("exit status 1")) {
+		t.Fatal("expected PowerShell noise + empty search body to soft-succeed as no-match")
+	}
+	if !isSearchToolNoMatch(`rg -n "Missing" . | Select-Object -First 20`, "", fmt.Errorf("exit status 1")) {
+		t.Fatal("expected piped rg no-match to soft-succeed")
+	}
+	// Real regex failures must still hard-fail even with noise mixed in.
+	if isSearchToolNoMatch(`rg -n "foo(" backend`, noise+"\nrg: regex parse error:\nunclosed group", fmt.Errorf("exit status 1")) {
+		t.Fatal("regex parse must not soft-succeed even with PowerShell noise")
+	}
+}
+
+func TestBashTool_ShellToolkitCommandPreflight(t *testing.T) {
+	tool := NewBashTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "view -path internal/dbmigration/sql_migrations.go -offset 1040 -limit 50",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected preflight block for shell-invoked view, got %#v", result)
+	}
+	if !strings.Contains(result.Error.Error(), "toolkit") && !strings.Contains(result.Error.Error(), "view") {
+		t.Fatalf("expected toolkit misuse guidance, got %q", result.Error.Error())
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "view") {
+		t.Fatalf("expected next_action to prefer toolkit view, got %q", next)
+	}
+
+	// Real system grep without toolkit-style flags should not be preflight-blocked.
+	if name, blocked := looksLikeShellInvokedToolkitCommand(`grep -n "foo" backend`); blocked {
+		t.Fatalf("did not expect system grep to be blocked, got name=%q", name)
+	}
+	// Toolkit-style grep schema should be blocked.
+	if name, blocked := looksLikeShellInvokedToolkitCommand(`grep -pattern foo -path backend`); !blocked || name != "grep" {
+		t.Fatalf("expected toolkit-style grep to be blocked, got name=%q blocked=%v", name, blocked)
+	}
+	// Ordinary shell ls without toolkit flags remains allowed.
+	if _, blocked := looksLikeShellInvokedToolkitCommand("ls"); blocked {
+		t.Fatal("bare ls should remain a shell command")
+	}
+}
+
+func TestLooksLikeSearchPathShellGlob(t *testing.T) {
+	// Residual Windows failure: globs in path position.
+	if !looksLikeSearchPathShellGlob(`rg -n "ErrToolTimeout|func Is\(" backend/internal/errors/*.go`) {
+		t.Fatal("expected path-position *.go to be detected")
+	}
+	if !looksLikeSearchPathShellGlob(`rg -n foo backend/internal/toolkit/tools/*.go | Select-Object -First 20`) {
+		t.Fatal("expected piped path glob to be detected")
+	}
+	if !looksLikeSearchPathShellGlob(`rg -n pattern backend/**/*.go`) {
+		t.Fatal("expected **/*.go path glob to be detected")
+	}
+	// -g / --glob values are legitimate and must not preflight-block.
+	if looksLikeSearchPathShellGlob(`rg -n foo -g "*.go" backend`) {
+		t.Fatal("rg -g \"*.go\" path should not look like path shell glob")
+	}
+	if looksLikeSearchPathShellGlob(`rg -n foo --glob=*.go backend`) {
+		t.Fatal("rg --glob=*.go should not look like path shell glob")
+	}
+	if looksLikeSearchPathShellGlob(`rg -n "foo*" backend`) {
+		t.Fatal("glob metacharacters only in pattern must not be treated as path glob")
+	}
+	if looksLikeSearchPathShellGlob(`go test ./...`) {
+		t.Fatal("non-search commands must not match")
+	}
+}
+
+func TestBashTool_SearchPathShellGlobPreflight(t *testing.T) {
+	tool := NewBashTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": `rg -n "func toolResult" backend/internal/toolkit/tools/*.go`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected preflight block for path shell glob, got %#v", result)
+	}
+	errText := result.Error.Error()
+	if !strings.Contains(errText, "通配符") && !strings.Contains(errText, "glob") && !strings.Contains(errText, "-g") {
+		t.Fatalf("expected path-glob recovery message, got %q", errText)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(strings.ToLower(next), "grep") && !strings.Contains(next, "-g") {
+		t.Fatalf("expected next_action to steer to grep/-g, got %q", next)
+	}
+}
+
+func TestIsSearchToolNoMatch_PathIOErrorHardFails(t *testing.T) {
+	ioBody := `rg: backend/internal/errors/*.go: IO error for operation on backend/internal/errors/*.go: 文件名、目录名或卷标语法不正确。 (os error 123)`
+	if isSearchToolNoMatch(`rg -n "x" backend/internal/errors/*.go`, ioBody, fmt.Errorf("exit status 1")) {
+		t.Fatal("path IO error must not soft-succeed as no-match")
+	}
+	if !searchOutputLooksLikePathIOError(ioBody) {
+		t.Fatal("expected path IO classifier to match Windows os error 123 body")
+	}
+	// Empty no-match still soft-succeeds.
+	if !isSearchToolNoMatch(`rg -n "Missing" backend`, "", fmt.Errorf("exit status 1")) {
+		t.Fatal("empty no-match should still soft-succeed")
+	}
+}
+
+func TestBashCommandFailureNextAction_PathGlob(t *testing.T) {
+	next := bashCommandFailureNextAction(
+		`rg -n foo backend/**/*.go`,
+		`rg: backend/**/*.go: IO error ... os error 123`,
+		fmt.Errorf("exit status 1"),
+	)
+	if !strings.Contains(strings.ToLower(next), "glob") && !strings.Contains(next, "-g") {
+		t.Fatalf("expected path-glob next_action, got %q", next)
 	}
 }

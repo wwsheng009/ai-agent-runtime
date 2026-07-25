@@ -368,24 +368,27 @@ func promptModelCommandProviderSelectionPopup(session *ChatSession, current stri
 
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "provider 选择")
 	defer restoreInput()
-	hint := "  提示: 输入编号或名称，回车保持当前"
-	popupLines := renderSelectionPopupLines("选择 Provider", "provider", current, options, currentMatch, defaultOption, hint, notice, "")
+	hint := "  提示: ↑↓ 选择，回车确认高亮项；也可输入编号或名称"
 	prompt := providerSelectionPrompt(currentValid, defaultOption)
-	handle := beginRuntimeSelectionPopup(session, popupLines, prompt)
+	selectedIndex := initialRuntimeSelectionIndex(options, currentMatch, defaultOption)
+	render := func(selected int, warning string) []string {
+		return renderSelectionPopupLines("选择 Provider", "provider", current, options, currentMatch, defaultOption, hint, notice, warning, selected)
+	}
+	handle := beginRuntimeSelectionPopup(session, render(selectedIndex, ""), prompt)
 	defer clearRuntimeSelectionPopupHandle(session, handle)
+	controller := newRuntimeSelectionController(session, handle, prompt, options, selectedIndex, render)
 
 	for {
-		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		text, err := chatInteractiveReadSelectionLine(session, prompt, controller)
 		if err != nil {
 			return "", err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		selected, ok := resolveRuntimeSelectionInput(text, current, defaultOption, options, false, false)
+		selected, ok := resolveRuntimeSelectionInputWithCursor(text, current, defaultOption, options, controller.Selected(), false, false)
 		if ok {
 			return selected, nil
 		}
-		popupLines = renderSelectionPopupLines("选择 Provider", "provider", current, options, currentMatch, defaultOption, hint, notice, "  无效的选择，请重新输入")
-		updateRuntimeSelectionPopup(session, handle, popupLines, prompt)
+		controller.SetWarning("  无效的选择，请重新输入")
 	}
 }
 

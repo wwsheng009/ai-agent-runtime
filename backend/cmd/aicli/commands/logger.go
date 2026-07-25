@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 const (
@@ -128,7 +129,7 @@ func (cl *ChatLogger) ensureSessionArtifactLayout() error {
 		return nil
 	}
 
-	sessionDir := filepath.Join(cl.logDir, cl.sessionID)
+	sessionDir := cl.SessionDirPath()
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return fmt.Errorf("创建会话目录失败: %w", err)
 	}
@@ -325,7 +326,7 @@ func (cl *ChatLogger) WriteDebugInfo(logDir, debugInfo string) error {
 	}
 
 	// 创建会话子目录
-	sessionDir := filepath.Join(logDir, cl.sessionID)
+	sessionDir := cl.sessionDirPathFor(logDir)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return fmt.Errorf("创建会话目录失败: %w", err)
 	}
@@ -423,7 +424,7 @@ func (cl *ChatLogger) FlushSession() error {
 	cl.sessionLog.SessionSummary = cl.calculateSummary()
 
 	// 创建会话子目录
-	sessionDir := filepath.Join(cl.logDir, cl.sessionID)
+	sessionDir := cl.SessionDirPath()
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return fmt.Errorf("创建会话目录失败: %w", err)
 	}
@@ -495,7 +496,7 @@ func (cl *ChatLogger) SessionDirPath() string {
 	if cl == nil || cl.logDir == "" || cl.sessionLog == nil {
 		return ""
 	}
-	return filepath.Join(cl.logDir, cl.sessionID)
+	return cl.sessionDirPathFor(cl.logDir)
 }
 
 // SessionLogPath 返回当前会话日志路径。
@@ -621,7 +622,27 @@ func (cl *ChatLogger) buildLogPath() string {
 		sanitize(cl.sessionLog.Protocol),
 		sanitize(cl.sessionLog.Model),
 		cl.sessionID)
-	return filepath.Join(cl.logDir, cl.sessionID, filename)
+	return filepath.Join(cl.sessionDirPathFor(cl.logDir), filename)
+}
+
+// sessionDirPathFor nests session artifacts under logDir/YYYY/MM/DD/<sessionID>,
+// matching Codex's date-partitioned sessions layout for easier filesystem management.
+func (cl *ChatLogger) sessionDirPathFor(logDir string) string {
+	if cl == nil || strings.TrimSpace(logDir) == "" || strings.TrimSpace(cl.sessionID) == "" {
+		return ""
+	}
+	partitionAt := time.Time{}
+	if cl.sessionLog != nil {
+		partitionAt = cl.sessionLog.StartTime
+	}
+	if partitionAt.IsZero() {
+		if parsed, ok := aiclipaths.ParseTimestampedSessionIDTime(cl.sessionID); ok {
+			partitionAt = parsed
+		} else {
+			partitionAt = time.Now()
+		}
+	}
+	return aiclipaths.JoinDatePartition(logDir, partitionAt, cl.sessionID)
 }
 
 func (cl *ChatLogger) extractTotalTokensFromMessages() int {

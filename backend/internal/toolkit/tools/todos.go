@@ -64,7 +64,7 @@ func NewTodosTool() *TodosTool {
 		"properties": map[string]interface{}{
 			"todos": map[string]interface{}{
 				"type":        "array",
-				"description": "任务列表，每个任务包含 content（任务描述）、status（状态：pending/in_progress/completed）、active_form（执行时显示的文本）。如果任务很多或描述很长，请拆分为多个更小的 todos 调用，每次只聚焦一组相关任务，避免一次性生成超长结构化参数。",
+				"description": "任务列表，每个任务包含 content（任务描述）、status（状态：pending/in_progress/completed）、active_form（执行时显示的文本）。同一时间只能有一个任务为 in_progress：开始新任务前先把上一个 in_progress 标为 completed 或 pending。若误传多个 in_progress，会自动保留最后一项并将其余降为 pending。如果任务很多或描述很长，请拆分为多个更小的 todos 调用，每次只聚焦一组相关任务，避免一次性生成超长结构化参数。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -75,7 +75,7 @@ func NewTodosTool() *TodosTool {
 						"status": map[string]interface{}{
 							"type":        "string",
 							"enum":        []string{"pending", "in_progress", "completed"},
-							"description": "任务状态",
+							"description": "任务状态：pending / in_progress / completed。整个列表中最多只能有一个 in_progress。",
 						},
 						"active_form": map[string]interface{}{
 							"type":        "string",
@@ -92,8 +92,8 @@ func NewTodosTool() *TodosTool {
 	return &TodosTool{
 		BaseTool: toolkit.NewBaseTool(
 			"todos",
-			"创建和管理结构化任务列表，用于跟踪复杂多步骤任务。状态：pending（未开始）、in_progress（进行中）、completed（已完成）。同一时间只能有一个任务为 in_progress。若任务列表较长，请拆分为多个更小的 todos 调用，每次只聚焦一组相关任务。",
-			"1.0.0",
+			"创建和管理结构化任务列表，用于跟踪复杂多步骤任务。状态：pending（未开始）、in_progress（进行中）、completed（已完成）。同一时间只能有一个任务为 in_progress；若误传多个 in_progress，会自动保留最后一项为进行中、其余降为 pending。切换任务时仍应先完成/挂起当前项再开新项。若任务列表较长，请拆分为多个更小的 todos 调用，每次只聚焦一组相关任务。",
+			"1.1.0",
 			parameters,
 			true,
 		),
@@ -168,20 +168,10 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 		})
 	}
 
-	// 验证：同一时间只能有一个 in_progress
-	inProgressCount := 0
-	for _, todo := range newTodos {
-		if todo.Status == "in_progress" {
-			inProgressCount++
-		}
-	}
-	if inProgressCount > 1 {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("同一时间只能有一个任务为 in_progress，当前有 %d 个", inProgressCount),
-		}, nil
-	}
+	// Soft-heal multi in_progress: keep the last active item, demote extras to
+	// pending. Models often flip several tasks to in_progress when switching
+	// focus; failing hard burns a turn for an easy schema repair.
+	newTodos, multiInProgressHealed, demotedInProgress := healMultipleInProgressTodos(newTodos)
 
 	previousTodos, loadErr := t.loadTodos(storagePath, ownerKey)
 
@@ -224,23 +214,60 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 
 	// 构建结果
-	result := formatTodosResult(newTodos, updates, removedTodos, updateSummary, loadErr, pending, inProgress, completed)
+	result := formatTodosResult(newTodos, updates, removedTodos, updateSummary, loadErr, pending, inProgress, completed, multiInProgressHealed, demotedInProgress)
 
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    result,
-		Metadata: map[string]interface{}{
-			"total":        len(newTodos),
-			"pending":      pending,
-			"in_progress":  inProgress,
-			"completed":    completed,
-			"todos":        newTodos,
-			"storage_mode": storageMode,
-			"session_id":   toolctx.SessionID(ctx),
-			"goal_id":      toolctx.GoalID(ctx),
-		},
+		Metadata: buildTodosResultMetadata(ctx, newTodos, storageMode, pending, inProgress, completed, multiInProgressHealed, demotedInProgress),
 	}, nil
+}
+
+func buildTodosResultMetadata(ctx context.Context, todos []TodoItem, storageMode string, pending, inProgress, completed int, multiInProgressHealed bool, demotedInProgress []string) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"total":        len(todos),
+		"pending":      pending,
+		"in_progress":  inProgress,
+		"completed":    completed,
+		"todos":        todos,
+		"storage_mode": storageMode,
+		"session_id":   toolctx.SessionID(ctx),
+		"goal_id":      toolctx.GoalID(ctx),
+	}
+	if multiInProgressHealed {
+		metadata["multi_in_progress_healed"] = true
+		metadata["demoted_in_progress"] = demotedInProgress
+		metadata["demoted_in_progress_count"] = len(demotedInProgress)
+		metadata[toolresult.MetadataNextActionKey] = "Continue the single remaining in_progress task. When switching focus, mark the current task completed/pending before starting another; do not submit multiple in_progress items."
+	}
+	return metadata
+}
+
+// healMultipleInProgressTodos keeps the last in_progress item and demotes any
+// earlier ones to pending. Returns the healed list, whether healing occurred,
+// and the demoted contents (stable order).
+func healMultipleInProgressTodos(todos []TodoItem) ([]TodoItem, bool, []string) {
+	inProgressIndexes := make([]int, 0, 2)
+	for i, todo := range todos {
+		if todo.Status == "in_progress" {
+			inProgressIndexes = append(inProgressIndexes, i)
+		}
+	}
+	if len(inProgressIndexes) <= 1 {
+		return todos, false, nil
+	}
+	// Keep the last in_progress (most recent focus in the submitted list).
+	keep := inProgressIndexes[len(inProgressIndexes)-1]
+	demoted := make([]string, 0, len(inProgressIndexes)-1)
+	for _, idx := range inProgressIndexes {
+		if idx == keep {
+			continue
+		}
+		todos[idx].Status = "pending"
+		demoted = append(demoted, todos[idx].Content)
+	}
+	return todos, true, demoted
 }
 
 func compareTodoLists(previous, current []TodoItem) ([]todoItemUpdate, []TodoItem, todoUpdateSummary) {
@@ -289,10 +316,17 @@ func findMatchingTodo(items []TodoItem, matched []bool, content, status string) 
 	return -1
 }
 
-func formatTodosResult(todos []TodoItem, updates []todoItemUpdate, removed []TodoItem, summary todoUpdateSummary, loadErr error, pending, inProgress, completed int) string {
+func formatTodosResult(todos []TodoItem, updates []todoItemUpdate, removed []TodoItem, summary todoUpdateSummary, loadErr error, pending, inProgress, completed int, multiInProgressHealed bool, demotedInProgress []string) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "任务列表已更新: %d 待处理, %d 进行中, %d 已完成", pending, inProgress, completed)
 	builder.WriteString("\n")
+	if multiInProgressHealed {
+		fmt.Fprintf(&builder, "已自动修复: 检测到多个 in_progress，已保留最后一项为进行中，并将其余 %d 项降为 pending", len(demotedInProgress))
+		if len(demotedInProgress) > 0 {
+			fmt.Fprintf(&builder, "（%s）", strings.Join(demotedInProgress, "; "))
+		}
+		builder.WriteString("。next_action: 继续当前唯一 in_progress 任务；切换任务时先 completed/pending 再开新项，不要一次提交多个 in_progress。\n")
+	}
 	if loadErr != nil {
 		fmt.Fprintf(&builder, "任务列表更新状态: 已保存；旧列表读取失败，无法计算差异: %v", loadErr)
 	} else {

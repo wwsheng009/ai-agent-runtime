@@ -780,7 +780,7 @@ func buildChatSessionExportEnvelope(session *ChatSession, runtimeSession *runtim
 		if strings.EqualFold(strings.TrimSpace(runtimeSession.ID), currentRuntimeSessionID(session)) {
 			envelope.SessionPath = currentRuntimeSessionPath(session)
 		} else if session.SessionDir != "" && runtimeSession.ID != "" {
-			envelope.SessionPath = resolveAbsoluteChatPath(filepath.Join(session.SessionDir, filepath.Base(runtimeSession.ID)+".json"))
+			envelope.SessionPath = resolveAbsoluteChatPath(fileSessionJSONPath(session.SessionDir, runtimeSession.ID, runtimeSession.CreatedAt))
 		}
 	}
 	return envelope

@@ -85,6 +85,7 @@ func (t *ApplyPatchTool) DefinitionMetadata() map[string]interface{} {
 			"definition": applyPatchLarkGrammar,
 		},
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
 }
 
@@ -101,27 +102,21 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 		}
 	}
 	if strings.TrimSpace(rawPatch) == "" {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("patch 参数缺失或为空"),
-		}, nil
+		return toolResultFailure(
+			fmt.Errorf("patch 参数缺失或为空"),
+			"Provide a non-empty Codex apply_patch text in the patch field (Begin Patch ... End Patch). Do not send empty or whitespace-only patch content.",
+		), nil
 	}
 
 	operations, err := parseApplyPatch(rawPatch)
 	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      err,
-		}, nil
+		return toolResultFailure(err, applyPatchFailureNextAction(err)), nil
 	}
 	if len(operations) == 0 {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("补丁中没有可执行的文件操作"),
-		}, nil
+		return toolResultFailure(
+			fmt.Errorf("补丁中没有可执行的文件操作"),
+			"Include at least one Add/Update/Delete/Move File operation between *** Begin Patch and *** End Patch.",
+		), nil
 	}
 
 	applier := &patchApplier{
@@ -132,27 +127,15 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 
 	for _, operation := range operations {
 		if err := ctx.Err(); err != nil {
-			return &toolkit.ToolResult{
-				Success:    false,
-				OutputKind: toolresult.KindText,
-				Error:      err,
-			}, nil
+			return toolResultFailure(err, "Context canceled or timed out while applying the patch. Retry with a smaller focused patch if the deadline is tight."), nil
 		}
 		if err := applier.apply(operation, &summary); err != nil {
-			return &toolkit.ToolResult{
-				Success:    false,
-				OutputKind: toolresult.KindText,
-				Error:      err,
-			}, nil
+			return toolResultFailure(err, applyPatchFailureNextAction(err)), nil
 		}
 	}
 
 	if err := applier.commit(); err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      err,
-		}, nil
+		return toolResultFailure(err, applyPatchFailureNextAction(err)), nil
 	}
 
 	mutatedPaths, combinedPatch := applier.diff()
@@ -486,7 +469,7 @@ func parseAddFileOperation(lines []string, start int) (patchOperation, int, erro
 				return patchOperation{}, 0, fmt.Errorf("第 %d 行的新增文件没有内容", start+1)
 			}
 			return operation, index, nil
-		case line == applyPatchEOFMarker:
+		case isApplyPatchEOFMarkerLine(line):
 			operation.NoFinalNewline = true
 			index++
 		case strings.HasPrefix(line, "+"):
@@ -516,7 +499,7 @@ func isApplyPatchBareAddContentLine(line string) bool {
 	if isApplyPatchBoundaryLine(trimmed, applyPatchBeginMarker) || isApplyPatchBoundaryLine(trimmed, applyPatchEndMarker) {
 		return false
 	}
-	if isPatchSectionHeader(line) || trimmed == applyPatchEOFMarker || strings.HasPrefix(trimmed, applyPatchMoveToPrefix) {
+	if isPatchSectionHeader(line) || isApplyPatchEOFMarkerLine(line) || strings.HasPrefix(trimmed, applyPatchMoveToPrefix) {
 		return false
 	}
 	// Keep strict rejection for obvious non-content markers.
@@ -524,6 +507,12 @@ func isApplyPatchBareAddContentLine(line string) bool {
 		return false
 	}
 	return true
+}
+
+// isApplyPatchEOFMarkerLine accepts the grammar form and common model variants
+// such as "*** End of File ***" / "*** End of File***".
+func isApplyPatchEOFMarkerLine(line string) bool {
+	return isApplyPatchBoundaryLine(line, applyPatchEOFMarker)
 }
 
 func parseDeleteFileOperation(lines []string, start int) (patchOperation, int, error) {
@@ -604,7 +593,7 @@ func parsePatchHunkBody(lines []string, index int, header string, headerLine int
 	for index < len(lines) {
 		line := strings.TrimRight(lines[index], "\r")
 		switch {
-		case line == applyPatchEOFMarker:
+		case isApplyPatchEOFMarkerLine(line):
 			hunk.EndOfFile = true
 			index++
 			return hunk, index, nil
@@ -1228,12 +1217,33 @@ func buildPatchHunkNotFoundError(hunk patchHunk, expected, actual []string, reas
 		)
 	}
 	return fmt.Errorf(
-		"无法定位 hunk: %s；%s。请优先根据返回的当前内容直接修正补丁；信息不足时再用 view/grep。也可使用更靠近目标位置的 @@ 函数/类上下文。\n期望内容:\n%s%s",
+		"无法定位 hunk: %s；%s。next_action: 先用 view/grep 重读目标文件附近最新内容，按返回的“最接近的当前内容”重建补丁（一次只改一个文件/区域）；不要原样重试同一 stale @@/旧行。也可改用更短、更靠近目标的 @@ 上下文。\n期望内容:\n%s%s",
 		header,
 		reason,
 		formatPatchExpectedLines(expected),
 		current,
 	)
+}
+
+// applyPatchFailureNextAction extracts recovery guidance for structured metadata.
+func applyPatchFailureNextAction(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(msg, "无法定位 hunk") || strings.Contains(lower, "hunk"):
+		return "Re-view/grep the target file nearby, rebuild the patch from the closest current content, and keep the patch focused on one file/region. Do not retry the same stale @@/old lines unchanged."
+	case strings.Contains(msg, "Add File") || strings.Contains(msg, "应以 '+' 开头"):
+		return "For Add File hunks, every content line must start with '+'. Rewrite the add body with '+' prefixes, or use write/append_write for new files."
+	case strings.Contains(msg, "不是合法的补丁") || strings.Contains(msg, "Begin Patch") || strings.Contains(msg, "End Patch"):
+		return "Use Codex apply_patch markers: *** Begin Patch / *** Update|Add|Delete File / *** End Patch. Keep freeform patch text outside JSON when possible."
+	case strings.Contains(msg, "文件不存在") || strings.Contains(lower, "no such file") || strings.Contains(msg, "路径"):
+		return "Confirm the target path with ls/glob/view first; fix path typos or create missing parents before retrying apply_patch."
+	default:
+		return "Inspect the apply_patch error, re-read the target file with view/grep, and retry with a smaller focused patch. Prefer one file/region per call."
+	}
 }
 
 func formatPatchExpectedLines(lines []string) string {

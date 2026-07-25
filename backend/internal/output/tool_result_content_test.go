@@ -313,6 +313,281 @@ func TestRenderToolResultContentForModel_ExposesActionableFailureContract(t *tes
 	}
 }
 
+func TestRenderToolResultContentForModel_PathCandidatesInFailureContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "view",
+		ToolCallID: "call-path-miss",
+		ErrorCode:  "TOOL_PATH_NOT_FOUND",
+		Retryable:  false,
+		NextAction: "Path not found: missing.go. Nearby candidates: missing_file.go. Correct the path or working directory, then call the tool again. Do not retry the same missing path unchanged.",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataErrorCodeKey:      "TOOL_PATH_NOT_FOUND",
+			toolresult.MetadataRetryableKey:      false,
+			toolresult.MetadataNextActionKey:     "Path not found: missing.go. Nearby candidates: missing_file.go. Correct the path or working directory, then call the tool again. Do not retry the same missing path unchanged.",
+			toolresult.MetadataPathCandidatesKey: []string{"missing_file.go", "Missing.go"},
+			toolresult.MetadataAttemptedArgsKey: map[string]interface{}{
+				"file_path": "missing.go",
+			},
+		},
+	}
+	got := RenderToolResultContentForModel(nil, "path not found: missing.go (candidates: missing_file.go, Missing.go)", envelope)
+	for _, expected := range []string{
+		"Runtime tool result contract:",
+		`"ok":false`,
+		`"error_code":"TOOL_PATH_NOT_FOUND"`,
+		`"path_candidates":["missing_file.go","Missing.go"]`,
+		`"attempted_args":{"file_path":"missing.go"}`,
+		"path not found: missing.go",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in path-miss contract, got %q", expected, got)
+		}
+	}
+	if strings.Contains(got, `"retryable":true`) {
+		t.Fatalf("path miss must not be blindly retryable: %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_EmptySuccessContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "grep",
+		ToolCallID: "call-empty",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	got := RenderToolResultContentForModel("", "", envelope)
+	for _, expected := range []string{
+		"Runtime tool result contract:",
+		`"ok":true`,
+		`"outcome":"empty"`,
+		`"empty_result":true`,
+		"successful empty result, not a failure",
+		"Empty successful result is valid evidence",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in empty success contract, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderToolResultContentForModel_EmptySuccessIncludesAttemptedArgs(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "grep",
+		ToolCallID: "call-empty-args",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:            toolresult.KindText,
+			toolresult.MetadataEmptyResultKey: true,
+			toolresult.MetadataOutcomeKey:     toolresult.OutcomeEmpty,
+			toolresult.MetadataAttemptedArgsKey: map[string]interface{}{
+				"pattern": "NoSuchSymbolXYZ",
+				"path":    "backend/internal",
+			},
+		},
+	}
+	got := RenderToolResultContentForModel("", "", envelope)
+	for _, expected := range []string{
+		`"outcome":"empty"`,
+		`"empty_result":true`,
+		`"attempted_args":`,
+		`"pattern":"NoSuchSymbolXYZ"`,
+		`"path":"backend/internal"`,
+		"Empty successful result is valid evidence",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in empty attempted-args contract, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderToolResultContentForModel_PreservesSourceEmptyWithNoMatchBody(t *testing.T) {
+	// Source tools emit short "no matches" text while stamping empty_result.
+	// Model contracts must keep outcome=empty (not drop it for non-empty body).
+	envelope := &Envelope{
+		ToolName:   "grep",
+		ToolCallID: "call-no-match-text",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:            toolresult.KindText,
+			toolresult.MetadataEmptyResultKey: true,
+			toolresult.MetadataOutcomeKey:     toolresult.OutcomeEmpty,
+			"match_count":                     0,
+			toolresult.MetadataAttemptedArgsKey: map[string]interface{}{
+				"pattern": "NoSuchSymbolXYZ",
+			},
+		},
+	}
+	got := RenderToolResultContentForModel("未找到匹配的内容", "", envelope)
+	for _, expected := range []string{
+		`"outcome":"empty"`,
+		`"empty_result":true`,
+		"未找到匹配的内容",
+		"Empty successful result is valid evidence",
+		`"pattern":"NoSuchSymbolXYZ"`,
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in no-match body empty contract, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderToolResultContentForModel_PartialBatchContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "bash",
+		ToolCallID: "call-batch",
+		Error:      "bash command batch completed with 1 failure(s)",
+		ErrorCode:  "TOOL_EXECUTION",
+		Retryable:  false,
+		NextAction: "Batch finished with 1/3 item failure(s). Reuse successful item outputs; fix or re-run only the failed items with corrected inputs. Do not re-run the entire batch unchanged.",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:           toolresult.KindText,
+			toolresult.MetadataOutcomeKey:    toolresult.OutcomePartial,
+			"batch":                          true,
+			"failed_count":                   1,
+			"requested_count":                3,
+			toolresult.MetadataNextActionKey: "Batch finished with 1/3 item failure(s). Reuse successful item outputs; fix or re-run only the failed items with corrected inputs. Do not re-run the entire batch unchanged.",
+		},
+	}
+	got := RenderToolResultContentForModel("===== command 1/3 [ok] =====\nok\n===== command 2/3 [failed] =====\nbad", "bash command batch completed with 1 failure(s)", envelope)
+	for _, expected := range []string{
+		"Runtime tool result contract:",
+		`"ok":false`,
+		`"outcome":"partial"`,
+		"Reuse successful item outputs",
+		"command 1/3 [ok]",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in partial batch contract, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderToolResultContentForModel_PartialSuccessBatchCountsInContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "view",
+		ToolCallID: "call-view-partial",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+			"batch":                true,
+			"request_count":        3,
+			"succeeded_count":      2,
+			"failed_count":         1,
+			"partial_failure":      true,
+		},
+	}
+	got := RenderToolResultContentForModel("===== a.go =====\nok\n\n===== errors =====\nb.go: missing", "", envelope)
+	for _, expected := range []string{
+		"Runtime tool result contract:",
+		`"ok":true`,
+		`"outcome":"partial"`,
+		`"requested_count":3`,
+		`"failed_count":1`,
+		`"succeeded_count":2`,
+		`"partial_failure":true`,
+		"Reuse successful item outputs",
+		"===== a.go =====",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in partial success contract, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderToolResultContentForModel_PartialContractIncludesFailedItems(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "bash",
+		ToolCallID: "call-batch-failed-items",
+		Error:      "bash command batch completed with 1 failure(s)",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:        toolresult.KindText,
+			toolresult.MetadataOutcomeKey: toolresult.OutcomePartial,
+			"batch":                       true,
+			"failed_count":                1,
+			"requested_count":             2,
+			"items": []interface{}{
+				map[string]interface{}{"index": 0, "command": "echo ok", "success": true},
+				map[string]interface{}{"index": 1, "command": "bad-cmd", "success": false, "error": "exit status 1"},
+			},
+		},
+	}
+	got := RenderToolResultContentForModel("===== command 1/2 [ok] =====\nok", "batch completed with 1 failure(s)", envelope)
+	for _, expected := range []string{
+		"Runtime tool result contract:",
+		`"outcome":"partial"`,
+		`"failed_items"`,
+		"bad-cmd",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in failed_items contract, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderToolResultContentForModel_PreservesArtifactNoticeWithFailureContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "bash",
+		ToolCallID: "call-artifact-fail",
+		ErrorCode:  "TOOL_EXECUTION",
+		Retryable:  false,
+		NextAction: "Inspect the error details, correct the cause, and retry only when the operation is safe.",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:     toolresult.KindText,
+			"mcp_name":                 "toolkit",
+			"raw_output_artifact_path": `C:\temp\shell-output\toolkit\fail_123.txt`,
+		},
+	}
+	content := strings.Repeat("stderr failure detail line for truncation budget\n", 500)
+	got := RenderToolResultContentForModel(content, "exit status 1", envelope)
+	if !strings.Contains(got, "Runtime tool result contract:") {
+		t.Fatalf("expected failure contract, got %q", got)
+	}
+	if !strings.Contains(got, `Full raw output artifact: C:\temp\shell-output\toolkit\fail_123.txt`) {
+		t.Fatalf("expected artifact notice preserved under contract, got %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_PreservesArtifactNoticeWithPartialContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "bash",
+		ToolCallID: "call-artifact-partial",
+		Error:      "bash command batch completed with 1 failure(s)",
+		ErrorCode:  "TOOL_EXECUTION",
+		NextAction: "Batch finished with 1/2 item failure(s). Reuse successful item outputs; fix or re-run only the failed items with corrected inputs. Do not re-run the entire batch unchanged.",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:           toolresult.KindText,
+			toolresult.MetadataOutcomeKey:    toolresult.OutcomePartial,
+			"batch":                          true,
+			"failed_count":                   1,
+			"requested_count":                2,
+			"raw_output_artifact_path":       `C:\temp\shell-output\toolkit\batch_partial.txt`,
+			toolresult.MetadataNextActionKey: "Batch finished with 1/2 item failure(s). Reuse successful item outputs; fix or re-run only the failed items with corrected inputs. Do not re-run the entire batch unchanged.",
+		},
+	}
+	content := strings.Repeat("batch partial detail line for truncation budget\n", 500)
+	got := RenderToolResultContentForModel(content, "bash command batch completed with 1 failure(s)", envelope)
+	if !strings.Contains(got, `"outcome":"partial"`) {
+		t.Fatalf("expected partial contract, got %q", got)
+	}
+	if !strings.Contains(got, `Full raw output artifact: C:\temp\shell-output\toolkit\batch_partial.txt`) {
+		t.Fatalf("expected artifact notice preserved under partial contract, got %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_OrdinarySuccessOmitsContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName: "view",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	got := RenderToolResultContentForModel("package main\n", "", envelope)
+	if strings.Contains(got, "Runtime tool result contract:") {
+		t.Fatalf("ordinary success must stay compact, got %q", got)
+	}
+	if got != "package main" {
+		t.Fatalf("expected raw body, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_PrefersLargeTestSummaryAndArtifact(t *testing.T) {
 	envelope := &Envelope{
 		ToolName: "bash",

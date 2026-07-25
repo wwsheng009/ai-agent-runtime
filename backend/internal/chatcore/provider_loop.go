@@ -3,6 +3,7 @@ package chatcore
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
@@ -183,6 +184,11 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 			toolResult := req.ToolExecutor.ExecuteTool(ctx, call)
 			if toolResult.Metadata == nil {
 				toolResult.Metadata = map[string]interface{}{}
+			}
+			// Compact-inject attempted_args from the call so empty/failed
+			// recovery contracts remain model-actionable without tool-name branches.
+			if toolResult.Error != "" || looksEmptyToolContent(toolResult.Content) {
+				toolresult.EnsureAttemptedArgs(toolResult.Metadata, call.Args)
 			}
 			toolresult.ApplyDiagnosticMetadata(
 				toolResult.Metadata,
@@ -436,6 +442,19 @@ func renderToolMessage(call types.ToolCall, result ToolResult) string {
 		}
 	}
 	return output.RenderToolResultContentForModel(result.Content, result.Error, envelope)
+}
+
+func looksEmptyToolContent(content interface{}) bool {
+	switch typed := content.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(typed) == ""
+	case []byte:
+		return strings.TrimSpace(string(typed)) == ""
+	default:
+		return false
+	}
 }
 
 func cloneMessage(message *types.Message) *types.Message {

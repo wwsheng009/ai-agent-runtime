@@ -2562,6 +2562,7 @@ func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pendin
 		Content:    content,
 		Error:      toolErr,
 		Metadata:   toolMetadata,
+		Args:       decodePendingToolArgs(pending.ArgsJSON),
 	})
 	message := runtimetypes.NewToolMessage(pending.ToolCallID, "")
 	message.Content = runtimeoutput.RenderToolResultContentForModel(content, toolErr, envelope)

@@ -22,6 +22,7 @@ type FullScreenListItem struct {
 	Detail     string
 	Preview    string
 	SearchText string
+	Disabled   bool
 }
 
 // FullScreenListOptions configures the full-screen list header and items.
@@ -161,7 +162,7 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 			return FullScreenListResult{}, editorKey{}, fullScreenUnavailable("terminal height is too small", nil)
 		}
 		matches := fullScreenListMatches(options.Items, state.query)
-		state.clamp(len(matches), fullScreenListPageSize(height))
+		state.clampToEnabled(options.Items, matches, fullScreenListPageSize(height))
 		if dirty || width != lastWidth || height != lastHeight {
 			frame := renderFullScreenListFrame(options, state, matches, width, height)
 			if err := hooks.writeFrame(frame); err != nil {
@@ -178,7 +179,7 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		if !ok {
 			continue
 		}
-		result, done := applyFullScreenListKey(&state, key, matches, height)
+		result, done := applyFullScreenListKey(&state, key, options.Items, matches, height)
 		if done {
 			return result, key, nil
 		}
@@ -242,7 +243,7 @@ func fullScreenUnavailable(operation string, err error) error {
 	return fmt.Errorf("%w: %s: %v", ErrFullScreenUnavailable, operation, err)
 }
 
-func applyFullScreenListKey(state *fullScreenListState, key editorKey, matches []int, height int) (FullScreenListResult, bool) {
+func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []FullScreenListItem, matches []int, height int) (FullScreenListResult, bool) {
 	if state == nil {
 		return FullScreenListResult{Index: -1, Cancelled: true}, true
 	}
@@ -275,38 +276,50 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, matches [
 		if len(matches) == 0 {
 			return FullScreenListResult{}, false
 		}
-		return FullScreenListResult{Index: matches[state.selected]}, true
+		itemIndex := matches[state.selected]
+		if fullScreenListItemDisabled(items, itemIndex) {
+			// Current/disabled rows stay visible for confirmation but are not
+			// selectable targets. Keep the list open so callers can cancel.
+			return FullScreenListResult{}, false
+		}
+		return FullScreenListResult{Index: itemIndex}, true
 	case editorKeyCancelPopup, editorKeyInterrupt, editorKeyEOF:
 		return FullScreenListResult{Index: -1, Cancelled: true}, true
 	case editorKeyUp:
-		state.selected--
+		moveFullScreenListSelection(state, items, matches, -1)
 	case editorKeyDown:
-		state.selected++
+		moveFullScreenListSelection(state, items, matches, 1)
 	case editorKeyPageUp, editorKeyLeft:
 		state.selected = max(0, state.selected-pageSize)
+		state.snapToEnabled(items, matches, -1)
 	case editorKeyPageDown, editorKeyRight:
 		state.selected = min(len(matches)-1, state.selected+pageSize)
+		state.snapToEnabled(items, matches, 1)
 	case editorKeyHome:
 		state.selected = 0
+		state.snapToEnabled(items, matches, 1)
 	case editorKeyEnd:
 		state.selected = len(matches) - 1
+		state.snapToEnabled(items, matches, -1)
 	case editorKeyRune:
 		switch key.r {
 		case 'q', 'Q':
 			return FullScreenListResult{Index: -1, Cancelled: true}, true
 		case 'j':
-			state.selected++
+			moveFullScreenListSelection(state, items, matches, 1)
 		case 'k':
-			state.selected--
+			moveFullScreenListSelection(state, items, matches, -1)
 		case 'g':
 			state.selected = 0
+			state.snapToEnabled(items, matches, 1)
 		case 'G':
 			state.selected = len(matches) - 1
+			state.snapToEnabled(items, matches, -1)
 		case '/':
 			state.searching = true
 		}
 	}
-	state.clamp(len(matches), pageSize)
+	state.clampToEnabled(items, matches, pageSize)
 	return FullScreenListResult{}, false
 }
 
@@ -340,6 +353,68 @@ func (state *fullScreenListState) clamp(count, pageSize int) {
 	if state.offset > maxOffset {
 		state.offset = maxOffset
 	}
+}
+
+func (state *fullScreenListState) clampToEnabled(items []FullScreenListItem, matches []int, pageSize int) {
+	if state == nil {
+		return
+	}
+	state.clamp(len(matches), pageSize)
+	state.snapToEnabled(items, matches, 1)
+	state.clamp(len(matches), pageSize)
+}
+
+func (state *fullScreenListState) snapToEnabled(items []FullScreenListItem, matches []int, direction int) {
+	if state == nil || len(matches) == 0 {
+		return
+	}
+	if direction == 0 {
+		direction = 1
+	}
+	if !fullScreenListItemDisabled(items, matches[state.selected]) {
+		return
+	}
+	for step := 1; step < len(matches); step++ {
+		for _, dir := range []int{direction, -direction} {
+			candidate := state.selected + dir*step
+			if candidate < 0 || candidate >= len(matches) {
+				continue
+			}
+			if !fullScreenListItemDisabled(items, matches[candidate]) {
+				state.selected = candidate
+				return
+			}
+		}
+	}
+}
+
+func moveFullScreenListSelection(state *fullScreenListState, items []FullScreenListItem, matches []int, delta int) {
+	if state == nil || len(matches) == 0 || delta == 0 {
+		return
+	}
+	start := state.selected
+	for step := 0; step < len(matches); step++ {
+		state.selected += delta
+		if state.selected < 0 {
+			state.selected = len(matches) - 1
+		}
+		if state.selected >= len(matches) {
+			state.selected = 0
+		}
+		if !fullScreenListItemDisabled(items, matches[state.selected]) {
+			return
+		}
+		if state.selected == start {
+			return
+		}
+	}
+}
+
+func fullScreenListItemDisabled(items []FullScreenListItem, index int) bool {
+	if index < 0 || index >= len(items) {
+		return true
+	}
+	return items[index].Disabled
 }
 
 func fullScreenListMatches(items []FullScreenListItem, query string) []int {
@@ -483,7 +558,7 @@ func renderFullScreenListFrame(options FullScreenListOptions, state fullScreenLi
 }
 
 func renderCompactFullScreenListFrame(options FullScreenListOptions, state fullScreenListState, matches []int, width, height int) string {
-	state.clamp(len(matches), 1)
+	state.clampToEnabled(options.Items, matches, 1)
 	lines := make([]string, height)
 	title := strings.TrimSpace(options.Title)
 	if title == "" {
@@ -531,6 +606,9 @@ func renderFullScreenListItem(item FullScreenListItem, index int, selected bool,
 	marker := "  "
 	if selected {
 		marker = "> "
+	}
+	if item.Disabled {
+		marker = "· "
 	}
 	number := fmt.Sprintf("[%d] ", index+1)
 	detail := strings.TrimSpace(item.Detail)

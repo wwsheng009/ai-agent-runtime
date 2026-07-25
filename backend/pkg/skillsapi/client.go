@@ -1139,11 +1139,46 @@ func (s RuntimeStatus) MCPSummary() RuntimeMCPSummary {
 }
 
 type RuntimeStatus struct {
-	DefaultModel  string                  `json:"default_model"`
-	Providers     []RuntimeProviderStatus `json:"providers"`
-	ProviderCount int                     `json:"provider_count"`
-	MCPs          []RuntimeMCPStatus      `json:"mcps"`
-	MCPCount      int                     `json:"mcp_count"`
+	DefaultModel    string                  `json:"default_model"`
+	Providers       []RuntimeProviderStatus `json:"providers"`
+	ProviderCount   int                     `json:"provider_count"`
+	MCPs            []RuntimeMCPStatus      `json:"mcps"`
+	MCPCount        int                     `json:"mcp_count"`
+	ToolEfficiency  *RuntimeToolEfficiency  `json:"tool_efficiency,omitempty"`
+}
+
+// RuntimeToolEfficiency is the live tool-loop telemetry snapshot exposed by
+// /api/runtime/status. Labels are generic (reason/outcome/code) — not per-tool.
+type RuntimeToolEfficiency struct {
+	CapturedAt         time.Time              `json:"captured_at"`
+	Preflight          RuntimeToolPreflight   `json:"preflight"`
+	Outcomes           RuntimeToolOutcomes    `json:"outcomes"`
+	DispositionReplays RuntimeToolReplays     `json:"disposition_replays"`
+	FailCategories     map[string]float64     `json:"fail_categories"`
+	InefficiencyFlags  []string               `json:"inefficiency_flags"`
+}
+
+type RuntimeToolPreflight struct {
+	Total      float64            `json:"total"`
+	Allow      float64            `json:"allow"`
+	Deny       float64            `json:"deny"`
+	AllowRate  float64            `json:"allow_rate"`
+	ByReason   map[string]float64 `json:"by_reason"`
+	ByDecision map[string]float64 `json:"by_decision"`
+}
+
+type RuntimeToolOutcomes struct {
+	Total       float64            `json:"total"`
+	ByOutcome   map[string]float64 `json:"by_outcome"`
+	ByErrorCode map[string]float64 `json:"by_error_code"`
+	SuccessRate float64            `json:"success_rate"`
+	NonFailRate float64            `json:"non_fail_rate"`
+}
+
+type RuntimeToolReplays struct {
+	Total     float64            `json:"total"`
+	ByOutcome map[string]float64 `json:"by_outcome"`
+	ByRepeat  map[string]float64 `json:"by_repeat"`
 }
 
 type GetRuntimeStatusResponse struct {

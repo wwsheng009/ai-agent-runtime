@@ -255,6 +255,51 @@ func TestApplyPatchTool_AcceptsBareAddFileContentWithoutPlusPrefix(t *testing.T)
 	assertFileContent(t, filepath.Join(root, "package.go"), "package agentconfig\n\nfunc Hello() {}\n")
 }
 
+func TestApplyPatchTool_AcceptsEndOfFileMarkerVariants(t *testing.T) {
+	root := t.TempDir()
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+
+	// Residual failure mode: models emit "*** End of File ***" inside Add File.
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: no-final-nl.txt",
+		"+line-one",
+		"*** End of File ***",
+		"*** End Patch",
+	}, "\n")
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected End of File *** variant to succeed, got error: %v", result.Error)
+	}
+	// NoFinalNewline should omit trailing newline.
+	assertFileContent(t, filepath.Join(root, "no-final-nl.txt"), "line-one")
+
+	// Same variant should work for Update File hunks.
+	path := filepath.Join(root, "tail.txt")
+	requireWriteFile(t, path, "alpha\nbeta\n")
+	update := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: tail.txt",
+		"@@",
+		"-beta",
+		"+BETA",
+		"*** End of File***",
+		"*** End Patch",
+	}, "\n")
+	result, err = tool.Execute(context.Background(), map[string]interface{}{"patch": update})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected update End of File*** variant to succeed, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "alpha\nBETA\n")
+}
+
 func TestApplyPatchTool_IgnoresTrailingContentAfterEndMarker(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "tail.txt")
@@ -761,6 +806,25 @@ func TestApplyPatchTool_MissingContextIncludesClosestCurrentLines(t *testing.T) 
 	}
 	if !strings.Contains(message, "3: func (m *Manager) RegisterGroup(name string, active bool) error {") {
 		t.Fatalf("expected stable current line numbers, got %q", message)
+	}
+	next, _ := result.Metadata["next_action"].(string)
+	if !strings.Contains(next, "view") && !strings.Contains(next, "grep") {
+		t.Fatalf("expected structured next_action metadata for hunk miss, got %q metadata=%#v", next, result.Metadata)
+	}
+}
+
+func TestApplyPatchTool_EmptyPatchHasNextAction(t *testing.T) {
+	tool := NewApplyPatchTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": "   "})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected empty patch failure, got %#v", result)
+	}
+	next, _ := result.Metadata["next_action"].(string)
+	if !strings.Contains(strings.ToLower(next), "patch") {
+		t.Fatalf("expected next_action for empty patch, got %q", next)
 	}
 }
 

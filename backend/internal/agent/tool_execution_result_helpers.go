@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // recordToolExecutionOutcome preserves tool output/metadata even when the tool
@@ -79,5 +81,20 @@ func copyRuntimeErrorMetadata(target map[string]interface{}, runtimeErr *runtime
 	}
 	for key, value := range runtimeErr.GetContext() {
 		target[key] = value
+	}
+}
+
+// newRawToolResult builds a gateway input that carries call args so recovery
+// contracts can compact-inject attempted_args without tool-name branches.
+func newRawToolResult(sessionID string, call types.ToolCall, step int, content interface{}, toolErr string, metadata map[string]interface{}) output.RawToolResult {
+	return output.RawToolResult{
+		SessionID:  sessionID,
+		ToolName:   call.Name,
+		ToolCallID: call.ID,
+		Step:       step,
+		Content:    content,
+		Error:      toolErr,
+		Metadata:   metadata,
+		Args:       call.Args,
 	}
 }

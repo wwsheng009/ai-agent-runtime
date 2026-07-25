@@ -204,6 +204,19 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 		return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
 	}
 
+	preflightInfo := loop.lookupToolInfoForPreflight(callCtx, item.call.Name, &item.toolInfo)
+	decision := loop.prepareToolExecution(metadata, item.call.Name, item.call.ID, item.call.Args, preflightInfo)
+	if !decision.Allow {
+		if decision.SoftEmpty {
+			applySoftEmptyPreflightResult(&result, metadata, decision)
+			loop.finishToolExecutionOutcome(metadata, item.call.Name, decision.Digest, "")
+			return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
+		}
+		result.Error = decision.Error
+		loop.finishToolExecutionOutcome(metadata, item.call.Name, decision.Digest, result.Error)
+		return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
+	}
+
 	var (
 		rawOutput interface{}
 		rawMeta   map[string]interface{}
@@ -215,20 +228,13 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 		rawOutput, err = loop.agent.mcpManager.CallTool(callCtx, item.toolInfo.MCPName, item.call.Name, item.call.Args)
 	}
 	recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, err)
+	loop.finishToolExecutionOutcome(metadata, item.call.Name, decision.Digest, result.Error)
 
 	return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
 }
 
 func (loop *ReActLoop) finishParallelToolCall(ctx context.Context, gateway *output.Gateway, sessionID string, step int, traceID string, metadata map[string]interface{}, result toolExecutionResult, item parallelToolCallPlan, batchSize int) toolExecutionResult {
-	envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-		SessionID:  sessionID,
-		ToolName:   result.Call.Name,
-		ToolCallID: result.Call.ID,
-		Step:       step,
-		Content:    result.Output,
-		Error:      result.Error,
-		Metadata:   metadata,
-	})
+	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, result.Call, step, result.Output, result.Error, metadata))
 	if gatewayErr != nil && envelope != nil {
 		envelope.Metadata["gateway_error"] = gatewayErr.Error()
 	}

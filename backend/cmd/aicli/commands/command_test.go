@@ -1116,8 +1116,13 @@ func TestNewChatLogger_UsesDefaultChatLogDir(t *testing.T) {
 	if logger.logDir != defaultDir {
 		t.Fatalf("expected logger default dir %q, got %q", defaultDir, logger.logDir)
 	}
-	if got, want := logger.SessionDirPath(), filepath.Join(defaultDir, logger.sessionID); got != want {
+	wantSessionDir := logger.sessionDirPathFor(defaultDir)
+	if got, want := logger.SessionDirPath(), wantSessionDir; got != want {
 		t.Fatalf("unexpected session dir path: got %q want %q", got, want)
+	}
+	year, month, day := logger.sessionLog.StartTime.Local().Format("2006"), logger.sessionLog.StartTime.Local().Format("01"), logger.sessionLog.StartTime.Local().Format("02")
+	if !strings.Contains(filepath.ToSlash(wantSessionDir), "/"+year+"/"+month+"/"+day+"/") {
+		t.Fatalf("expected date partition in session dir path: %q", wantSessionDir)
 	}
 	if got := logger.SessionLogPath(); got == "" || filepath.Dir(got) != logger.SessionDirPath() {
 		t.Fatalf("unexpected session log path: %q", got)

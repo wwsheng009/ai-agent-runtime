@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -14,9 +16,9 @@ import (
 
 	stderrors "errors"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
-	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -50,6 +52,7 @@ const (
 	modelHistoryArtifactThresholdBytes = 12 * 1024
 	defaultShellCommandTimeout         = 30 * time.Second
 	defaultGoTestCommandTimeout        = 5 * time.Minute
+	defaultSearchShellCommandTimeout   = 12 * time.Second
 	shellCommandTimeoutEnv             = "AICLI_SHELL_COMMAND_TIMEOUT"
 	shellCommandTimeoutMSEnv           = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
 )
@@ -61,11 +64,11 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "单条 Shell 命令。需要顺序执行多条独立检查时改用 commands，减少 LLM 往返。用 workdir 切换目录；Windows PowerShell 没有 head 时使用 Select-Object。",
+				"description": "单条 Shell 命令。需要顺序执行多条独立检查时改用 commands，减少 LLM 往返。用 workdir 切换目录；Windows PowerShell 没有 head 时使用 Select-Object。代码搜索请优先用 toolkit grep，不要用 shell rg/grep。Windows 不要使用 bash heredoc（<<EOF）。",
 			},
 			"commands": map[string]interface{}{
 				"type":        "array",
-				"description": "命令批次。默认顺序执行；仅当各命令互不依赖且只读时可设置 parallel=true。每项可覆盖 workdir 和 timeout。",
+				"description": "命令批次（对象数组，也可容忍 JSON 字符串数组）。默认顺序执行；仅当各命令互不依赖且只读时可设置 parallel=true。每项可覆盖 workdir 和 timeout。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -98,7 +101,7 @@ func NewBashTool() *BashTool {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "string",
-				"description": "可选：命令超时，例如 30s、2m、5m。普通命令默认 30s，go test 未显式设置时自动使用至少 5m；环境变量和显式参数仍可覆盖。",
+				"description": "可选：命令超时，例如 30s、2m、5m。普通命令默认 30s；go test 未显式设置时自动使用至少 5m；shell 代码搜索（rg/grep/findstr）未显式设置时默认更短（约 12s）以促使改用 toolkit grep；环境变量和显式参数仍可覆盖。",
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
@@ -133,8 +136,8 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。代码搜索优先用 toolkit `grep`（rg 在 shell 中 exit 1=无匹配、且易因引号/正则转义失败）；Windows 默认 PowerShell，没有 head 时用 Select-Object。",
-			"1.2.0",
+			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。代码搜索优先用 toolkit `grep`（rg 在 shell 中 exit 1=无匹配、且易因引号/正则转义失败）；文件系统查看优先 ls/glob/view，不要把 view/grep/ls 写成 shell 命令。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。",
+			"1.3.3",
 			parameters,
 			true, // 支持直接调用
 		),
@@ -147,6 +150,7 @@ func NewBashTool() *BashTool {
 func (b *BashTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
 }
 
@@ -206,6 +210,18 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      buildBashEmptyCommandError(params),
 		}, nil
 	}
+	if blocked, message, nextAction := bashCommandPreflight(command); blocked {
+		metadata := map[string]interface{}{}
+		if nextAction != "" {
+			metadata[toolresult.MetadataNextActionKey] = nextAction
+		}
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("%s", message),
+			Metadata:   metadata,
+		}, nil
+	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
 	captureSettings, err := parseOutputCaptureSettings(params)
@@ -246,11 +262,38 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 使用 executer 执行命令
 	execResult, err := b.executeCommand(ctx, command, workdir, timeout, captureSettings)
 	if err != nil {
+		// rg/grep exit 1 with empty/no-error output is "no matches", not a hard
+		// crash. Soft-succeed so batch checks and model recovery treat it as
+		// empty evidence instead of failing the whole tool call.
+		if isSearchToolNoMatch(command, execResult.Output, err) {
+			metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
+			toolresult.MarkEmptySuccess(metadata)
+			metadata["search_no_match"] = true
+			metadata[toolresult.MetadataNextActionKey] = bashSearchNoMatchNextAction()
+			// Prefer the cleaned search body so PowerShell NativeCommandError chrome
+			// is not presented as useful stdout to the model.
+			content := strings.TrimSpace(stripPowerShellNoiseForSearchClassification(execResult.Output))
+			if content == "" {
+				content = "未匹配到结果（rg/grep exit 1）。这是空证据，不是命令崩溃。优先改用 toolkit `grep`，或更换关键词/扩大 path。"
+			} else if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
+				content = strings.TrimSpace(content + "\n" + hint)
+			}
+			return &toolkit.ToolResult{
+				Success:    true,
+				OutputKind: toolresult.KindText,
+				Content:    content,
+				Metadata:   metadata,
+			}, nil
+		}
+		failureMetadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
+		if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
+			failureMetadata[toolresult.MetadataNextActionKey] = next
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Content:    execResult.Output,
-			Metadata:   buildCommandExecutionMetadata(command, mutatedPaths, execResult),
+			Metadata:   failureMetadata,
 			Error:      buildBashCommandFailureError(command, execResult.Output, err),
 		}, nil
 	}
@@ -268,6 +311,13 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 	if !exists || raw == nil {
 		return nil, false, nil
 	}
+	// Some providers/models stringify optional array fields. Accept a JSON array
+	// string (or single command string) instead of forcing another round-trip.
+	if coerced, ok, err := coerceBashCommandsParam(raw); err != nil {
+		return nil, true, err
+	} else if ok {
+		raw = coerced
+	}
 	values, ok := raw.([]interface{})
 	if !ok {
 		if typed, typedOK := raw.([]map[string]interface{}); typedOK {
@@ -275,8 +325,15 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 			for _, item := range typed {
 				values = append(values, item)
 			}
+		} else if command, isString := raw.(string); isString {
+			command = strings.TrimSpace(command)
+			if command == "" {
+				return nil, true, fmt.Errorf("commands 参数必须是对象数组")
+			}
+			// Single string command coerced into a one-item batch.
+			return []bashCommandBatchItem{{Command: command, Params: map[string]interface{}{}}}, true, nil
 		} else {
-			return nil, true, fmt.Errorf("commands 参数必须是对象数组")
+			return nil, true, fmt.Errorf("commands 参数必须是对象数组（或 JSON 数组字符串）")
 		}
 	}
 	if len(values) == 0 {
@@ -413,6 +470,7 @@ func (b *BashTool) executeBatchItem(ctx context.Context, parent map[string]inter
 func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem, results []*toolkit.ToolResult, stopOnError bool, parallelism int) (*toolkit.ToolResult, error) {
 	sections := make([]string, 0, len(commands))
 	items := make([]map[string]interface{}, 0, len(commands))
+	failedItems := make([]map[string]interface{}, 0)
 	failed := 0
 	commandTexts := make([]string, 0, len(commands))
 	artifactPaths := make([]string, 0, len(commands))
@@ -435,21 +493,40 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 		if result == nil || !result.Success {
 			failed++
 			status = "failed"
+			errText := ""
 			if result != nil && result.Error != nil {
-				entry["error"] = result.Error.Error()
+				errText = result.Error.Error()
+				entry["error"] = errText
 				if strings.TrimSpace(content) == "" {
-					content = result.Error.Error()
+					content = errText
 				}
+			}
+			if errText == "" {
+				errText = "unknown error"
+			}
+			if row := toolresult.FailedItemMap(toolresult.IntPtr(index), "", item.Command, errText); row != nil {
+				failedItems = append(failedItems, row)
 			}
 		}
 		sections = append(sections, fmt.Sprintf("===== command %d/%d [%s] =====\n%s\n%s", index+1, len(commands), status, item.Command, strings.TrimSpace(content)))
 		items = append(items, entry)
 	}
+	succeeded := len(commands) - failed
+	if succeeded < 0 {
+		succeeded = 0
+	}
 	metadata := map[string]interface{}{
 		"batch": true, "requested_count": len(commands), "executed_count": len(items),
-		"failed_count": failed, "stop_on_error": stopOnError, "items": items,
+		"succeeded_count": succeeded, "failed_count": failed,
+		"partial_failure": failed > 0 && succeeded > 0,
+		"stop_on_error":   stopOnError, "items": items,
 		"parallel": parallelism > 1, "parallelism": parallelism,
 		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
+	}
+	if len(failedItems) > 0 {
+		// Source-side failed_items so gateway/Diagnose can enrich next_action
+		// without parsing items[] or error strings.
+		metadata[toolresult.MetadataFailedItemsKey] = failedItems
 	}
 	batchOutput := strings.Join(sections, "\n\n")
 	if mutatedPaths := extractStringList(parent["mutated_paths"]); len(mutatedPaths) > 0 {
@@ -914,6 +991,8 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
 		}
 		return ""
+	case runtimeexecutor.IsWindows() && looksLikeBashHeredoc(command):
+		return "提示: Windows PowerShell/cmd 不支持 bash heredoc（<<EOF）。请用 write/append_write 写临时脚本后执行，或改用 python -c / 专用文件工具。"
 	case runtimeexecutor.IsWindows() &&
 		(runtimeexecutor.HasPipedHeadToken(cmdParts) ||
 			mainCmd == "head" ||
@@ -925,7 +1004,10 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 		return "提示: Windows 下请使用 `ver` 或 `systeminfo` 查看系统信息"
 	case mainCmd == "cat" && runtimeexecutor.IsWindows() && !strings.Contains(cmdLower, "."):
 		return "提示: Windows 下请使用 `type` 查看文件内容"
-	case isRipgrepOrGrepTool(searchCmd) || strings.Contains(outputLower, "regex parse error"):
+	case isRipgrepOrGrepTool(searchCmd) ||
+		strings.Contains(outputLower, "regex parse error") ||
+		looksLikeSearchPathShellGlob(command) ||
+		searchOutputLooksLikePathIOError(output):
 		if hint := friendlyHintForSearchTool(searchCmd, command, output, exitCode); hint != "" {
 			return hint
 		}
@@ -977,29 +1059,46 @@ func isRipgrepOrGrepTool(name string) bool {
 // friendlyHintForSearchTool explains common rg/grep failures that models treat
 // as hard errors (regex parse, exit 1 = no matches). Prefer the dedicated grep tool.
 func friendlyHintForSearchTool(toolName, command, output string, exitCode int) string {
-	outputLower := strings.ToLower(output)
+	// Classify against cleaned search body so PowerShell NativeCommandError chrome
+	// does not hide the "exit 1 == no matches" recovery path.
+	cleaned := stripPowerShellNoiseForSearchClassification(output)
+	cleanedLower := strings.ToLower(cleaned)
+	rawLower := strings.ToLower(output)
 	toolName = strings.TrimSpace(toolName)
 	if toolName == "" {
 		toolName = "rg"
 	}
 
 	switch {
-	case strings.Contains(outputLower, "regex parse error") ||
-		strings.Contains(outputLower, "regex error") ||
-		strings.Contains(outputLower, "invalid regex") ||
-		strings.Contains(outputLower, "error parsing regex"):
+	case strings.Contains(cleanedLower, "regex parse error") ||
+		strings.Contains(cleanedLower, "regex error") ||
+		strings.Contains(cleanedLower, "invalid regex") ||
+		strings.Contains(cleanedLower, "error parsing regex") ||
+		// Fall back to raw output when noise strip kept nothing useful.
+		strings.Contains(rawLower, "regex parse error") ||
+		strings.Contains(rawLower, "regex error"):
 		return fmt.Sprintf(
 			"提示: %s 正则解析失败（常见于 JSON 参数里对引号/`|`/`()` 转义不完整）。优先改用 toolkit `grep`（可设 literal=true 做字面搜索，或 pcre2=true）；若必须 shell 调用，请用单引号包裹 pattern，或改用 `rg -F` 字面匹配。",
 			toolName,
 		)
+	case looksLikeSearchPathShellGlob(command) ||
+		searchOutputLooksLikePathIOError(output) ||
+		searchOutputLooksLikePathIOError(cleaned):
+		return fmt.Sprintf(
+			"提示: %s 路径参数含 shell 通配符或路径 IO 失败（Windows 常见 os error 123 / 文件名语法不正确）。不要写 `rg pattern backend/**/*.go`；改用 `rg -g \"*.go\" pattern backend`，或优先 toolkit `grep` 的 path/glob。命令: %s",
+			toolName,
+			truncateDiagnosticText(strings.TrimSpace(command), 160),
+		)
 	case exitCode == 1:
-		// rg/grep exit 1 means "no matches" when there is no error text.
+		// rg/grep exit 1 means "no matches" when there is no real error body.
 		// Models often retry uselessly; point them at the dedicated grep tool.
-		if strings.TrimSpace(output) == "" ||
-			(!strings.Contains(outputLower, "error") &&
-				!strings.Contains(outputLower, "failed") &&
-				!strings.Contains(outputLower, "denied") &&
-				!strings.Contains(outputLower, "no such file")) {
+		if strings.TrimSpace(cleaned) == "" ||
+			(!strings.Contains(cleanedLower, "error:") &&
+				!strings.Contains(cleanedLower, "failed:") &&
+				!strings.Contains(cleanedLower, "denied") &&
+				!strings.Contains(cleanedLower, "no such file") &&
+				!strings.Contains(cleanedLower, "cannot find path") &&
+				!searchOutputLooksLikePathIOError(cleaned)) {
 			return fmt.Sprintf(
 				"提示: %s 退出码 1 通常表示未匹配到结果（不是命令崩溃）。若要搜索代码，优先用 toolkit `grep`（支持 literal/paths/glob，错误信息更可行动）；确认无结果后换关键词或扩大 path。命令: %s",
 				toolName,
@@ -1008,12 +1107,127 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int) s
 		}
 	case exitCode == 2:
 		return fmt.Sprintf(
-			"提示: %s 退出码 2 通常表示用法/路径/正则错误。优先改用 toolkit `grep`；检查 path 是否存在，pattern 是否需要 literal=true。",
+			"提示: %s 退出码 2 通常表示用法/路径/正则错误。优先改用 toolkit `grep`；检查 path 是否存在，pattern 是否需要 literal=true；Windows 下勿把 `*.go` 放在 path 位置，改用 `-g`。",
 			toolName,
 		)
 	}
 	return ""
 }
+
+// isSearchToolNoMatch reports whether a failed shell command is the common
+// rg/grep "exit 1 == no matches" case rather than a real crash.
+func isSearchToolNoMatch(command, output string, err error) bool {
+	if err == nil {
+		return false
+	}
+	// Timeouts/cancels are real control-plane failures, never empty-search.
+	if runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout) ||
+		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded) ||
+		stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, context.Canceled) {
+		return false
+	}
+	cmdParts := runtimeexecutor.SplitCommandTokens(command)
+	searchCmd := firstSearchToolToken(cmdParts)
+	if searchCmd == "" {
+		// Also accept search commands detected by looser heuristics when token
+		// splitting is noisy (quoted pipelines / PowerShell wrappers).
+		if !looksLikeSearchShellCommand(command) {
+			return false
+		}
+	}
+	exitCode := exitCodeFromError(err)
+	if exitCode != 1 {
+		return false
+	}
+	// Strip PowerShell wrapper noise before classifying real search errors.
+	// NativeCommandError records often contain the substring "error" even when
+	// the underlying rg/grep simply found no matches under $ErrorActionPreference.
+	cleaned := stripPowerShellNoiseForSearchClassification(output)
+	cleanedLower := strings.ToLower(cleaned)
+	// Path/IO failures (including Windows os error 123 on unexpanded globs) must
+	// never soft-succeed as empty search, even when exit code is 1.
+	if searchOutputLooksLikePathIOError(cleaned) || searchOutputLooksLikePathIOError(output) {
+		return false
+	}
+	if strings.TrimSpace(cleaned) != "" &&
+		(strings.Contains(cleanedLower, "regex parse") ||
+			strings.Contains(cleanedLower, "regex error") ||
+			strings.Contains(cleanedLower, "invalid regex") ||
+			strings.Contains(cleanedLower, "error parsing regex") ||
+			strings.Contains(cleanedLower, "no such file") ||
+			strings.Contains(cleanedLower, "cannot find path") ||
+			strings.Contains(cleanedLower, "access is denied") ||
+			strings.Contains(cleanedLower, "permission denied") ||
+			strings.Contains(cleanedLower, "is not recognized") ||
+			// Remaining bare "error:" / "failed:" after noise strip are real.
+			strings.Contains(cleanedLower, "error:") ||
+			strings.Contains(cleanedLower, "failed:") ||
+			strings.Contains(cleanedLower, "denied") ||
+			strings.Contains(cleanedLower, "io error") ||
+			strings.Contains(cleanedLower, "os error")) {
+		return false
+	}
+	return true
+}
+
+// searchOutputLooksLikePathIOError detects rg/grep path IO failures that models
+// often create by putting shell globs in the path position on Windows.
+func searchOutputLooksLikePathIOError(output string) bool {
+	if strings.TrimSpace(output) == "" {
+		return false
+	}
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "io error") ||
+		strings.Contains(lower, "os error") ||
+		strings.Contains(lower, "os error 123") ||
+		strings.Contains(output, "文件名、目录名或卷标语法不正确") ||
+		strings.Contains(output, "语法不正确") ||
+		strings.Contains(lower, "filename, directory name, or volume label syntax is incorrect") ||
+		strings.Contains(lower, "the filename, directory name, or volume label syntax is incorrect")
+}
+
+// stripPowerShellNoiseForSearchClassification removes common PowerShell error-
+// record framing so soft-success can still recognize rg/grep no-match cases.
+func stripPowerShellNoiseForSearchClassification(output string) string {
+	if strings.TrimSpace(output) == "" {
+		return ""
+	}
+	text := strings.ReplaceAll(output, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		// Drop ANSI/PowerShell error-record chrome that is not the search tool body.
+		if strings.Contains(lower, "nativecommanderror") ||
+			strings.Contains(lower, "parentcontainserrorrecordexception") ||
+			strings.Contains(lower, "categoryinfo") ||
+			strings.Contains(lower, "fullyqualifiederrorid") ||
+			strings.Contains(lower, "remoteexception") ||
+			strings.HasPrefix(lower, "+ categoryinfo") ||
+			strings.HasPrefix(lower, "+ fullyqualifiederrorid") ||
+			// Common pwsh formatting lines around NativeCommandError.
+			strings.HasPrefix(lower, "line |") ||
+			(strings.HasPrefix(trimmed, "+") && strings.Contains(lower, "~~~")) {
+			continue
+		}
+		// Strip residual ANSI sequences for keyword checks.
+		cleaned := ansiEscapeSequencePattern.ReplaceAllString(trimmed, "")
+		cleaned = strings.TrimSpace(cleaned)
+		if cleaned == "" || cleaned == "---" {
+			continue
+		}
+		kept = append(kept, cleaned)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// ansiEscapeSequencePattern matches CSI/OSC-like ANSI sequences used in pwsh errors.
+var ansiEscapeSequencePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*(\x07|\x1b\\)`)
 
 // exitCodeFromError extracts a process exit code from *exec.ExitError or from
 // common "exit status N" / Windows hex status strings. Used when errors are
@@ -1172,6 +1386,15 @@ func inferredShellCommandTimeout(command string, fallback time.Duration) time.Du
 	if fallback <= 0 {
 		fallback = resolveDefaultShellCommandTimeout()
 	}
+	// Broad shell code searches often hang or thrash on large trees. Prefer a
+	// shorter default so models recover via toolkit grep instead of waiting out
+	// the full 30s shell budget. Explicit timeout still wins.
+	if looksLikeSearchShellCommand(command) {
+		if fallback > defaultSearchShellCommandTimeout {
+			return defaultSearchShellCommandTimeout
+		}
+		return fallback
+	}
 	fields := strings.Fields(strings.ToLower(command))
 	for index := 0; index+1 < len(fields); index++ {
 		if (fields[index] == "go" || fields[index] == "go.exe") && fields[index+1] == "test" {
@@ -1257,7 +1480,14 @@ func buildBashCommandFailureError(command, output string, err error) error {
 		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded) ||
 		stderrors.Is(err, context.DeadlineExceeded) ||
 		stderrors.Is(err, context.Canceled) {
-		return err
+		// Search-like timeouts should steer the model toward dedicated tools /
+		// narrower scopes instead of blindly replaying the same broad scan.
+		if looksLikeSearchShellCommand(command) {
+			return fmt.Errorf("%w。命令: %s。代码搜索超时请改用 toolkit `grep`（可设 path/glob/max_count），或缩小 workdir/pattern；不要原样重试同一宽范围 shell 搜索",
+				err, truncateDiagnosticText(strings.TrimSpace(command), 120))
+		}
+		return fmt.Errorf("%w。命令: %s。超时后先检查是否已有部分输出；缩小范围、提高 timeout，或改用更专用的工具，不要盲目重试同一命令",
+			err, truncateDiagnosticText(strings.TrimSpace(command), 120))
 	}
 	base := strings.TrimSpace(err.Error())
 	// friendlyHintFor already embeds 提示 / environment info; keep as-is.
@@ -1319,6 +1549,306 @@ func buildBashBatchFailureError(failed int, items []map[string]interface{}) erro
 	}
 	parts = append(parts, "请查看 Content 中对应 command 段落输出后修复失败命令，或用 stop_on_error=true 在首个失败后停止")
 	return fmt.Errorf("%s", strings.Join(parts, "。"))
+}
+
+func looksLikeSearchShellCommand(command string) bool {
+	cmdParts := runtimeexecutor.SplitCommandTokens(command)
+	if firstSearchToolToken(cmdParts) != "" {
+		return true
+	}
+	lower := strings.ToLower(command)
+	return strings.Contains(lower, "rg ") ||
+		strings.Contains(lower, "rg.exe") ||
+		strings.HasPrefix(strings.TrimSpace(lower), "rg") ||
+		strings.Contains(lower, "grep ") ||
+		strings.Contains(lower, "findstr ")
+}
+
+func bashSearchNoMatchNextAction() string {
+	return "Treat this as no-match / empty evidence, not a hard crash. Prefer toolkit `grep` (literal/paths/glob) for code search; change pattern or broaden path/workdir. Do not retry the identical shell query unchanged."
+}
+
+// bashCommandFailureNextAction returns structured recovery guidance for hard
+// shell failures. Search-like failures prefer the dedicated grep tool.
+func bashCommandFailureNextAction(command, output string, err error) string {
+	if err == nil {
+		return ""
+	}
+	if runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout) ||
+		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded) ||
+		stderrors.Is(err, context.DeadlineExceeded) {
+		if looksLikeSearchShellCommand(command) {
+			return "Code search timed out. Prefer toolkit `grep` with a narrower path/glob/max_count, or tighten workdir/pattern. Do not replay the same broad shell search unchanged."
+		}
+		return "Command timed out. Inspect any partial output, narrow the scope, raise timeout only if needed, or switch to a more specialized tool. Do not blindly retry the same command."
+	}
+	outputLower := strings.ToLower(output)
+	errLower := strings.ToLower(err.Error())
+	combined := outputLower + "\n" + errLower
+	if looksLikeSearchPathShellGlob(command) ||
+		searchOutputLooksLikePathIOError(output) ||
+		searchOutputLooksLikePathIOError(err.Error()) {
+		return "Shell search path looks like an unexpanded glob or path IO error. Prefer toolkit `grep` with path + glob; if using shell rg, put filters in `-g \"*.go\"` and keep path as a real directory. Do not retry `rg pattern dir/**/*.go` on Windows."
+	}
+	if looksLikeSearchShellCommand(command) ||
+		strings.Contains(combined, "regex parse") ||
+		strings.Contains(combined, "regex error") {
+		return "Shell search failed. Prefer toolkit `grep` (literal=true for fixed text, or pcre2=true). Fix path/pattern escaping; do not retry the identical shell rg/grep command."
+	}
+	if runtimeexecutor.IsWindows() && looksLikeBashHeredoc(command) {
+		return "Windows shells do not support bash heredoc. Prefer dedicated file tools, `python -c`, or write a temp script with write/append_write then execute it."
+	}
+	if runtimeexecutor.IsWindows() &&
+		(strings.Contains(combined, "the term 'head' is not recognized") ||
+			strings.Contains(combined, "is not recognized as the name of a cmdlet") ||
+			runtimeexecutor.HasPipedHeadToken(runtimeexecutor.SplitCommandTokens(command))) {
+		return "Windows PowerShell/pwsh has no `head`. Use `Select-Object -First N`, or prefer toolkit view/grep/ls for inspection."
+	}
+	return ""
+}
+
+// bashCommandPreflight blocks known-invalid shell dialects before execution so
+// models get actionable recovery instead of opaque parser errors.
+func bashCommandPreflight(command string) (blocked bool, message, nextAction string) {
+	if toolName, ok := looksLikeShellInvokedToolkitCommand(command); ok {
+		return true,
+			fmt.Sprintf("检测到在 shell 中调用 toolkit 命令风格参数（%s ...）。`%s`/`grep`/`ls`/`glob`/`view` 是专用工具，不是 shell 可执行文件。请直接调用 toolkit 工具，不要写成 `bash command=\"%s -path ...\"`。", toolName, toolName, toolName),
+			fmt.Sprintf("Call the dedicated toolkit `%s` tool directly with structured args (path/file_path/pattern/glob). Do not invoke toolkit tool names as shell commands.", toolName)
+	}
+	// Path-position shell globs are especially harmful on Windows (os error 123),
+	// but they are also a poor pattern on all shells versus -g / toolkit grep.
+	if looksLikeSearchPathShellGlob(command) {
+		return true,
+			"检测到搜索命令在 path 位置使用了 shell 通配符（如 `backend/**/*.go` 或 `internal/errors/*.go`）。请改用 `rg -g \"*.go\" pattern backend`，或优先调用 toolkit `grep`（path + glob）。",
+			"Prefer toolkit `grep` with path and glob. If shell rg is required, use `-g \"*.go\"` / `--glob` and keep path as a real directory; do not put `*` in the path argument."
+	}
+	if !runtimeexecutor.IsWindows() {
+		return false, "", ""
+	}
+	if looksLikeBashHeredoc(command) {
+		return true,
+			"当前 Windows shell 不支持 bash heredoc 语法（<<EOF / <<'PY'）。请改用专用文件工具写入脚本，或使用 python -c / 单行命令。",
+			"Prefer write/append_write + execute, python -c, or dedicated file/search tools. Do not retry bash heredoc on Windows."
+	}
+	return false, "", ""
+}
+
+// looksLikeSearchPathShellGlob reports rg/grep commands that place shell glob
+// metacharacters in a path positional argument (after the pattern). Common
+// residual failure on Windows: `rg -n foo backend/internal/**/*.go`.
+func looksLikeSearchPathShellGlob(command string) bool {
+	if !looksLikeSearchShellCommand(command) {
+		return false
+	}
+	parts := runtimeexecutor.SplitCommandTokens(command)
+	searchIdx := -1
+	for i, part := range parts {
+		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
+		base = strings.TrimSuffix(base, ".exe")
+		if isRipgrepOrGrepTool(base) {
+			searchIdx = i
+			break
+		}
+	}
+	if searchIdx < 0 {
+		return false
+	}
+	positional := 0
+	for i := searchIdx + 1; i < len(parts); i++ {
+		part := strings.TrimSpace(parts[i])
+		if part == "" {
+			continue
+		}
+		// Stop at common shell chain/pipe tokens; only inspect the search command.
+		if part == "|" || part == "||" || part == "&&" || part == ";" {
+			break
+		}
+		if strings.HasPrefix(part, "-") {
+			if searchFlagConsumesNextValue(part) {
+				// Combined forms like -g*.go / --glob=*.go already consumed the value.
+				if searchFlagHasInlineValue(part) {
+					continue
+				}
+				if i+1 < len(parts) && !strings.HasPrefix(strings.TrimSpace(parts[i+1]), "-") {
+					i++
+				}
+			}
+			continue
+		}
+		positional++
+		// First positional is the pattern (regex may legally contain * ? []).
+		if positional == 1 {
+			continue
+		}
+		// Later positionals are paths: globs here are the residual failure mode.
+		if pathTokenHasShellGlob(part) {
+			return true
+		}
+	}
+	return false
+}
+
+func searchFlagConsumesNextValue(flag string) bool {
+	lower := strings.ToLower(strings.TrimSpace(flag))
+	if searchFlagHasInlineValue(lower) {
+		return true
+	}
+	switch lower {
+	case "-e", "--regexp", "-f", "--file", "-g", "--glob", "--iglob",
+		"-t", "--type", "-T", "--type-not", "-m", "--max-count",
+		"-A", "--after-context", "-B", "--before-context", "-C", "--context",
+		"--max-depth", "--max-filesize", "--sort", "--sortr",
+		"-r", "--replace", "--type-add", "--type-clear", "--ignore-file",
+		"--engine", "--field-context-separator", "--path-separator",
+		"--context-separator":
+		return true
+	default:
+		// Combined short form -g*.go already handled by HasInlineValue.
+		return false
+	}
+}
+
+func searchFlagHasInlineValue(flag string) bool {
+	lower := strings.ToLower(strings.TrimSpace(flag))
+	if strings.HasPrefix(lower, "--") {
+		return strings.Contains(lower, "=")
+	}
+	// Short combined flags: -g*.go, -m10, -A2, -n is flag-only.
+	if strings.HasPrefix(lower, "-g") && lower != "-g" {
+		return true
+	}
+	if strings.HasPrefix(lower, "-e") && lower != "-e" && !strings.HasPrefix(lower, "-e-") {
+		// -ePATTERN is uncommon but possible; treat non-exact -e* carefully.
+		// Only -e followed by more alnum content without another short flag letter soup.
+		return len(lower) > 2
+	}
+	return false
+}
+
+func pathTokenHasShellGlob(token string) bool {
+	// Ignore escaped globs lightly: if every * is preceded by \, treat as literal.
+	// Residual failures are almost always unescaped path globs.
+	if !strings.ContainsAny(token, "*?[") {
+		return false
+	}
+	// Require path-ish shape so pure weird tokens are less likely to false-positive.
+	if strings.Contains(token, "/") ||
+		strings.Contains(token, "\\") ||
+		strings.Contains(token, ".") ||
+		strings.Contains(token, ":") {
+		return true
+	}
+	return strings.Contains(token, "*") || strings.Contains(token, "?")
+}
+
+// looksLikeShellInvokedToolkitCommand detects model mistakes like
+// `view -path foo.go` or `grep -pattern X` executed via bash.
+func looksLikeShellInvokedToolkitCommand(command string) (string, bool) {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return "", false
+	}
+	// Only intercept simple primary commands, not pipelines that legitimately
+	// might include unrelated tokens after a real program.
+	// Allow: "rg ... | Select-Object" (search tool). Block: bare toolkit names.
+	cmdParts := runtimeexecutor.SplitCommandTokens(trimmed)
+	if len(cmdParts) == 0 {
+		return "", false
+	}
+	primary := strings.ToLower(filepath.Base(strings.TrimSpace(cmdParts[0])))
+	primary = strings.TrimSuffix(primary, ".exe")
+	switch primary {
+	case "view", "ls", "glob", "grep", "write", "edit", "apply_patch", "append_write", "todos", "multiedit":
+		// Require at least one toolkit-style flag/arg so we do not block a
+		// hypothetical local binary named "view" with no args, and so that
+		// "ls" alone can still be a shell command (Windows alias/dir).
+		if primary == "ls" && !hasToolkitStyleFlag(cmdParts[1:]) {
+			return "", false
+		}
+		if primary == "grep" {
+			// Real system grep is common; only block when args look like toolkit schema.
+			if !hasToolkitStyleFlag(cmdParts[1:]) {
+				return "", false
+			}
+		}
+		if primary == "view" || primary == "glob" || primary == "write" ||
+			primary == "edit" || primary == "apply_patch" || primary == "append_write" ||
+			primary == "todos" || primary == "multiedit" || hasToolkitStyleFlag(cmdParts[1:]) {
+			return primary, true
+		}
+	}
+	return "", false
+}
+
+func hasToolkitStyleFlag(parts []string) bool {
+	for _, part := range parts {
+		lower := strings.ToLower(strings.TrimSpace(part))
+		switch {
+		case strings.HasPrefix(lower, "-path"),
+			strings.HasPrefix(lower, "--path"),
+			strings.HasPrefix(lower, "-file_path"),
+			strings.HasPrefix(lower, "--file_path"),
+			strings.HasPrefix(lower, "-file-path"),
+			strings.HasPrefix(lower, "--file-path"),
+			strings.HasPrefix(lower, "-pattern"),
+			strings.HasPrefix(lower, "--pattern"),
+			strings.HasPrefix(lower, "-glob"),
+			strings.HasPrefix(lower, "--glob"),
+			strings.HasPrefix(lower, "-offset"),
+			strings.HasPrefix(lower, "--offset"),
+			strings.HasPrefix(lower, "-limit"),
+			strings.HasPrefix(lower, "--limit"),
+			strings.HasPrefix(lower, "-old_string"),
+			strings.HasPrefix(lower, "--old_string"),
+			strings.HasPrefix(lower, "-new_string"),
+			strings.HasPrefix(lower, "--new_string"):
+			return true
+		}
+	}
+	return false
+}
+
+var bashHeredocPattern = regexp.MustCompile(`(<<[-]?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?)`)
+
+func looksLikeBashHeredoc(command string) bool {
+	if !strings.Contains(command, "<<") {
+		return false
+	}
+	// Avoid false positives on PowerShell redirection like "2>&1" or comparison.
+	// Require classic bash heredoc form: <<EOF / <<-EOF / <<'EOF' / <<"EOF".
+	return bashHeredocPattern.MatchString(command)
+}
+
+// coerceBashCommandsParam accepts JSON-encoded commands arrays that models
+// sometimes emit as strings under strict schemas.
+func coerceBashCommandsParam(raw interface{}) (interface{}, bool, error) {
+	text, ok := raw.(string)
+	if !ok {
+		return nil, false, nil
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, false, nil
+	}
+	// Prefer JSON array/object decoding when the string looks structured.
+	if strings.HasPrefix(text, "[") || strings.HasPrefix(text, "{") {
+		var decoded interface{}
+		if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+			return nil, false, fmt.Errorf("commands 参数必须是对象数组；检测到 JSON 字符串但解析失败: %v", err)
+		}
+		switch decoded.(type) {
+		case []interface{}, map[string]interface{}:
+			// Single object becomes a one-item batch below via typed handling.
+			if obj, isObj := decoded.(map[string]interface{}); isObj {
+				return []interface{}{obj}, true, nil
+			}
+			return decoded, true, nil
+		default:
+			return nil, false, fmt.Errorf("commands 参数必须是对象数组（或 JSON 数组字符串）")
+		}
+	}
+	// Bare command string is handled by the caller as a one-item batch.
+	return nil, false, nil
 }
 
 // extractString extracts a string value from a map, returning "" if not found.

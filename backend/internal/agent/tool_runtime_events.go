@@ -81,6 +81,11 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 		copyToolShellMetadata(payload, result.Envelope.Metadata)
 		copyToolReliabilityMetadata(payload, result.Envelope.Metadata)
 	}
+	// Promote disposition contracts onto tool.completed / chat-log payloads so
+	// offline analyzers can distinguish success vs empty vs partial vs failed
+	// without parsing summary text. Generic: driven by envelope metadata +
+	// toolresult.Diagnose, never tool-name special cases.
+	promoteToolDispositionToPayload(payload, result)
 	mergeToolEventPayload(payload, extra)
 	return payload
 }
@@ -329,11 +334,20 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 		copyToolReliabilityMetadata(payload, nested)
 	}
 	for _, key := range []string{
-		"ok",
-		"error_code",
+		toolresult.MetadataOKKey,
+		toolresult.MetadataErrorCodeKey,
 		"error_message",
-		"retryable",
-		"next_action",
+		toolresult.MetadataRetryableKey,
+		toolresult.MetadataNextActionKey,
+		toolresult.MetadataOutcomeKey,
+		toolresult.MetadataEmptyResultKey,
+		toolresult.MetadataRequestedCountKey,
+		toolresult.MetadataFailedCountKey,
+		toolresult.MetadataSucceededCountKey,
+		toolresult.MetadataPartialFailureKey,
+		toolresult.MetadataFailedItemsKey,
+		toolresult.MetadataPathCandidatesKey,
+		toolresult.MetadataAttemptedArgsKey,
 		"timeout_requested_ms",
 		"timeout_effective_ms",
 		"timeout_source",
@@ -348,6 +362,101 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 	} {
 		if value, ok := metadata[key]; ok && value != nil {
 			payload[key] = value
+		}
+	}
+}
+
+// promoteToolDispositionToPayload stamps the stable toolresult disposition
+// contract onto a tool.completed event payload. Chat-log export stores this
+// payload as tool_result.content.result, so offline efficiency reports can read
+// outcome/empty_result/failed_items without relying on model-facing history text.
+func promoteToolDispositionToPayload(payload map[string]interface{}, result toolExecutionResult) {
+	if payload == nil {
+		return
+	}
+	var metadata map[string]interface{}
+	if result.Envelope != nil {
+		metadata = result.Envelope.Metadata
+	}
+	toolName := firstNonEmptyToolRuntimeValue(result.Call.Name)
+	toolCallID := firstNonEmptyToolRuntimeValue(result.Call.ID)
+	if result.Envelope != nil {
+		if toolName == "" {
+			toolName = strings.TrimSpace(result.Envelope.ToolName)
+		}
+		if toolCallID == "" {
+			toolCallID = strings.TrimSpace(result.Envelope.ToolCallID)
+		}
+	}
+	diagnostic := toolresult.Diagnose(toolName, toolCallID, result.Error, metadata)
+
+	payload[toolresult.MetadataOKKey] = diagnostic.OK
+
+	outcome := toolresult.NormalizeOutcome(diagnostic.Outcome)
+	if outcome == "" {
+		if diagnostic.OK {
+			outcome = toolresult.OutcomeSuccess
+		} else {
+			outcome = toolresult.OutcomeFailed
+		}
+	}
+	payload[toolresult.MetadataOutcomeKey] = outcome
+
+	if diagnostic.EmptyResult || outcome == toolresult.OutcomeEmpty {
+		payload[toolresult.MetadataEmptyResultKey] = true
+	}
+	if code := strings.TrimSpace(diagnostic.ErrorCode); code != "" {
+		payload[toolresult.MetadataErrorCodeKey] = code
+	}
+	if !diagnostic.OK {
+		payload[toolresult.MetadataRetryableKey] = diagnostic.Retryable
+	}
+	if next := strings.TrimSpace(diagnostic.NextAction); next != "" {
+		payload[toolresult.MetadataNextActionKey] = next
+	}
+	if diagnostic.RequestedCount > 0 {
+		payload[toolresult.MetadataRequestedCountKey] = diagnostic.RequestedCount
+	}
+	if diagnostic.FailedCount > 0 {
+		payload[toolresult.MetadataFailedCountKey] = diagnostic.FailedCount
+	}
+	if diagnostic.SucceededCount > 0 {
+		payload[toolresult.MetadataSucceededCountKey] = diagnostic.SucceededCount
+	}
+	if diagnostic.PartialFailure || outcome == toolresult.OutcomePartial {
+		payload[toolresult.MetadataPartialFailureKey] = true
+	}
+
+	items := diagnostic.FailedItems
+	if len(items) == 0 {
+		items = toolresult.ExtractFailedItems(metadata)
+	}
+	if len(items) > 0 {
+		rows := make([]map[string]interface{}, 0, len(items))
+		for _, item := range items {
+			row := toolresult.FailedItemMap(item.Index, item.Path, item.Ref, item.Error)
+			if row == nil {
+				continue
+			}
+			rows = append(rows, row)
+		}
+		if len(rows) > 0 {
+			payload[toolresult.MetadataFailedItemsKey] = rows
+		}
+	}
+
+	// Recovery hints stay compact and generic when present.
+	if candidates := diagnostic.PathCandidates; len(candidates) > 0 {
+		payload[toolresult.MetadataPathCandidatesKey] = append([]string(nil), candidates...)
+	} else if existing := toolresult.ExtractPathCandidates(metadata); len(existing) > 0 {
+		payload[toolresult.MetadataPathCandidatesKey] = append([]string(nil), existing...)
+	}
+	if len(diagnostic.AttemptedArgs) > 0 {
+		payload[toolresult.MetadataAttemptedArgsKey] = diagnostic.AttemptedArgs
+	} else if existing := toolresult.ExtractAttemptedArgs(metadata); len(existing) > 0 {
+		// Only surface attempted_args for recovery-relevant dispositions.
+		if !diagnostic.OK || diagnostic.EmptyResult || outcome == toolresult.OutcomeEmpty || outcome == toolresult.OutcomePartial {
+			payload[toolresult.MetadataAttemptedArgsKey] = existing
 		}
 	}
 }

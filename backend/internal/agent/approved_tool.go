@@ -69,15 +69,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, 0, traceID, requestedExtra))
 
 	finalize := func() *types.Message {
-		envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
-			SessionID:  sessionID,
-			ToolName:   call.Name,
-			ToolCallID: call.ID,
-			Step:       0,
-			Content:    result.Output,
-			Error:      result.Error,
-			Metadata:   metadata,
-		})
+		envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, call, 0, result.Output, result.Error, metadata))
 		if gatewayErr != nil && envelope != nil {
 			envelope.Metadata["gateway_error"] = gatewayErr.Error()
 		}
@@ -143,8 +135,22 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	}
 
 	if broker := a.GetToolBroker(); broker != nil && broker.IsBrokerTool(call.Name) {
+		loop := NewReActLoop(a, a.llmRuntime, nil)
+		preflightInfo := loop.lookupToolInfoForPreflight(ctx, call.Name, nil)
+		decision := loop.prepareToolExecution(metadata, call.Name, call.ID, call.Args, preflightInfo)
+		if !decision.Allow {
+			if decision.SoftEmpty {
+				applySoftEmptyPreflightResult(&result, metadata, decision)
+				loop.finishToolExecutionOutcome(metadata, call.Name, decision.Digest, "")
+				return finalize(), nil
+			}
+			result.Error = decision.Error
+			loop.finishToolExecutionOutcome(metadata, call.Name, decision.Digest, result.Error)
+			return finalize(), nil
+		}
 		rawOutput, rawMeta, callErr := broker.ExecuteToolCall(ctx, sessionID, call)
 		recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, callErr)
+		loop.finishToolExecutionOutcome(metadata, call.Name, decision.Digest, result.Error)
 		return finalize(), nil
 	}
 
@@ -161,6 +167,20 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	metadata["mcp_name"] = toolInfo.MCPName
 	metadata["trust_level"] = toolInfo.MCPTrustLevel
 	metadata["execution_mode"] = toolInfo.ExecutionMode
+
+	loop := NewReActLoop(a, a.llmRuntime, nil)
+	preflightInfo := loop.lookupToolInfoForPreflight(ctx, call.Name, &toolInfo)
+	decision := loop.prepareToolExecution(metadata, call.Name, call.ID, call.Args, preflightInfo)
+	if !decision.Allow {
+		if decision.SoftEmpty {
+			applySoftEmptyPreflightResult(&result, metadata, decision)
+			loop.finishToolExecutionOutcome(metadata, call.Name, decision.Digest, "")
+			return finalize(), nil
+		}
+		result.Error = decision.Error
+		loop.finishToolExecutionOutcome(metadata, call.Name, decision.Digest, result.Error)
+		return finalize(), nil
+	}
 
 	var pending *runtimecheckpoint.PendingCheckpoint
 	checkpointMgr := a.GetCheckpointManager()
@@ -179,6 +199,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		result.Output, err = a.mcpManager.CallTool(ctx, toolInfo.MCPName, call.Name, call.Args)
 	}
 	recordToolExecutionOutcome(&result, metadata, result.Output, rawMeta, err)
+	loop.finishToolExecutionOutcome(metadata, call.Name, decision.Digest, result.Error)
 
 	message := finalize()
 	if pending != nil {

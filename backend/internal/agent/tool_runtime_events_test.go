@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -380,5 +382,221 @@ func TestToolCompletedEventPayloadIncludesActionableDiagnostic(t *testing.T) {
 	}
 	if payload["next_action"] != "Use the exact job_id returned by background_task." {
 		t.Fatalf("expected next action, got %#v", payload)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeFailed {
+		t.Fatalf("expected outcome=failed on hard failure, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+}
+
+func TestToolCompletedEventPayloadExportsEmptySuccessDisposition(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-empty-grep",
+			Name: "grep",
+			Args: map[string]interface{}{"pattern": "no-such-token"},
+		},
+		Output: "No matches found.",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				toolresult.MetadataOKKey:          true,
+				toolresult.MetadataEmptyResultKey: true,
+				toolresult.MetadataOutcomeKey:     toolresult.OutcomeEmpty,
+				toolresult.MetadataNextActionKey:  "Broaden the query or confirm the search scope; empty success is valid evidence.",
+				"match_count":                     0,
+			},
+		},
+	}, 1, "trace-empty", nil)
+
+	if payload[toolresult.MetadataOKKey] != true {
+		t.Fatalf("expected ok=true for empty success, got %#v", payload)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeEmpty {
+		t.Fatalf("expected outcome=empty, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+	if payload[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result=true, got %#v", payload[toolresult.MetadataEmptyResultKey])
+	}
+	if got := strings.TrimSpace(fmt.Sprint(payload[toolresult.MetadataNextActionKey])); got == "" || got == "<nil>" {
+		t.Fatalf("expected empty-success next_action, got %#v", payload[toolresult.MetadataNextActionKey])
+	}
+}
+
+func TestToolCompletedEventPayloadExportsPartialBatchDisposition(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-partial-view",
+			Name: "view",
+			Args: map[string]interface{}{
+				"files": []interface{}{
+					map[string]interface{}{"file_path": "a.go"},
+					map[string]interface{}{"file_path": "missing.go"},
+				},
+			},
+		},
+		Output: "partial batch body",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				toolresult.MetadataOKKey:             true,
+				toolresult.MetadataOutcomeKey:        toolresult.OutcomePartial,
+				toolresult.MetadataPartialFailureKey: true,
+				toolresult.MetadataRequestedCountKey: 2,
+				toolresult.MetadataFailedCountKey:    1,
+				toolresult.MetadataSucceededCountKey: 1,
+				toolresult.MetadataFailedItemsKey: []map[string]interface{}{
+					toolresult.FailedItemMap(toolresult.IntPtr(1), "missing.go", "", "path does not exist"),
+				},
+			},
+		},
+	}, 2, "trace-partial", nil)
+
+	if payload[toolresult.MetadataOKKey] != true {
+		t.Fatalf("expected ok=true for partial batch, got %#v", payload)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomePartial {
+		t.Fatalf("expected outcome=partial, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+	if payload[toolresult.MetadataPartialFailureKey] != true {
+		t.Fatalf("expected partial_failure=true, got %#v", payload[toolresult.MetadataPartialFailureKey])
+	}
+	if payload[toolresult.MetadataRequestedCountKey] != 2 {
+		t.Fatalf("expected requested_count=2, got %#v", payload[toolresult.MetadataRequestedCountKey])
+	}
+	if payload[toolresult.MetadataFailedCountKey] != 1 {
+		t.Fatalf("expected failed_count=1, got %#v", payload[toolresult.MetadataFailedCountKey])
+	}
+	if payload[toolresult.MetadataSucceededCountKey] != 1 {
+		t.Fatalf("expected succeeded_count=1, got %#v", payload[toolresult.MetadataSucceededCountKey])
+	}
+	rawItems, ok := payload[toolresult.MetadataFailedItemsKey].([]map[string]interface{})
+	if !ok || len(rawItems) == 0 {
+		t.Fatalf("expected failed_items on payload, got %#v", payload[toolresult.MetadataFailedItemsKey])
+	}
+	if got := fmt.Sprint(rawItems[0]["path"]); got != "missing.go" {
+		t.Fatalf("expected failed path missing.go, got %#v", rawItems[0])
+	}
+	if got := strings.TrimSpace(fmt.Sprint(payload[toolresult.MetadataNextActionKey])); got == "" || got == "<nil>" {
+		t.Fatalf("expected partial next_action, got %#v", payload[toolresult.MetadataNextActionKey])
+	}
+}
+
+func TestToolCompletedEventPayloadDerivesPartialFromNestedToolMetadata(t *testing.T) {
+	// Regression for live smoke: nested toolkit batch stats were copied onto the
+	// chat-log payload (partial_failure/counts) while outcome stayed success
+	// because Diagnose could not read nested integer counts.
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-nested-partial-view",
+			Name: "view",
+			Args: map[string]interface{}{
+				"files": []interface{}{
+					map[string]interface{}{"file_path": "a.go"},
+					map[string]interface{}{"file_path": "missing.go"},
+				},
+			},
+		},
+		Output: "===== a.go =====\nok\n\n===== errors =====\nmissing.go: missing",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				"tool_metadata": map[string]interface{}{
+					"batch":           true,
+					"request_count":   2,
+					"succeeded_count": 1,
+					"failed_count":    1,
+					"partial_failure": true,
+					toolresult.MetadataFailedItemsKey: []map[string]interface{}{
+						toolresult.FailedItemMap(toolresult.IntPtr(1), "missing.go", "missing.go", "path does not exist"),
+					},
+				},
+			},
+		},
+	}, 1, "trace-nested-partial", nil)
+
+	if payload[toolresult.MetadataOKKey] != true {
+		t.Fatalf("expected ok=true, got %#v", payload)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomePartial {
+		t.Fatalf("expected outcome=partial from nested tool_metadata, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+	if payload[toolresult.MetadataPartialFailureKey] != true {
+		t.Fatalf("expected partial_failure=true, got %#v", payload[toolresult.MetadataPartialFailureKey])
+	}
+	if payload[toolresult.MetadataRequestedCountKey] != 2 ||
+		payload[toolresult.MetadataFailedCountKey] != 1 ||
+		payload[toolresult.MetadataSucceededCountKey] != 1 {
+		t.Fatalf("expected nested counts on payload, got %#v", payload)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(payload[toolresult.MetadataNextActionKey])); got == "" || got == "<nil>" {
+		t.Fatalf("expected partial next_action, got %#v", payload[toolresult.MetadataNextActionKey])
+	}
+}
+
+func TestToolCompletedEventPayloadExportsOrdinarySuccessOutcome(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-success",
+			Name: "ls",
+			Args: map[string]interface{}{"path": "."},
+		},
+		Output: "main.go",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				toolresult.MetadataOKKey: true,
+				"file_count":             1,
+			},
+		},
+	}, 1, "trace-success", nil)
+
+	if payload[toolresult.MetadataOKKey] != true {
+		t.Fatalf("expected ok=true, got %#v", payload)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeSuccess {
+		t.Fatalf("expected outcome=success, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+	if payload[toolresult.MetadataEmptyResultKey] == true {
+		t.Fatalf("ordinary success must not set empty_result: %#v", payload)
+	}
+	if _, exists := payload[toolresult.MetadataFailedItemsKey]; exists {
+		t.Fatalf("ordinary success must not set failed_items: %#v", payload)
+	}
+}
+
+func TestFinalizeDeniedToolResultEmitsCompletedWithFailedOutcome(t *testing.T) {
+	agent := &Agent{config: &Config{Name: "test-agent", Model: "test-model"}}
+	bus := runtimeevents.NewBus()
+	var completed []runtimeevents.Event
+	bus.Subscribe("tool.completed", func(event runtimeevents.Event) {
+		completed = append(completed, event)
+	})
+	var reduced []runtimeevents.Event
+	bus.Subscribe("tool.reduced", func(event runtimeevents.Event) {
+		reduced = append(reduced, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, nil, &LoopReActConfig{MaxSteps: 1, EnableToolCalls: true})
+	gateway := output.NewGateway(nil)
+	tc := types.ToolCall{ID: "call-denied", Name: "write_file", Args: map[string]interface{}{"path": "x.txt"}}
+	result := toolExecutionResult{Call: tc, Error: "read-only policy blocks write-like tool"}
+	metadata := map[string]interface{}{}
+
+	got := loop.finalizeDeniedToolResult(context.Background(), gateway, "session-denied", tc, 1, "trace-denied", result, metadata, nil)
+	if got.Envelope == nil {
+		t.Fatal("expected envelope after denied finalize")
+	}
+	if len(completed) != 1 {
+		t.Fatalf("expected 1 tool.completed, got %d", len(completed))
+	}
+	payload := completed[0].Payload
+	if payload["denied"] != true {
+		t.Fatalf("expected denied=true, got %#v", payload)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeFailed {
+		t.Fatalf("expected outcome=failed, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+	if payload[toolresult.MetadataOKKey] != false {
+		t.Fatalf("expected ok=false, got %#v", payload[toolresult.MetadataOKKey])
+	}
+	if len(reduced) != 1 {
+		t.Fatalf("expected 1 tool.reduced, got %d", len(reduced))
 	}
 }

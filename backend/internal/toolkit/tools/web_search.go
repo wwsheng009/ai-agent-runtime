@@ -98,40 +98,55 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 	}
 
 	// 方法1: 使用 DuckDuckGo Instant Answer API
-	results, err := w.searchDuckDuckGo(ctx, query, count)
-	if err == nil && len(results) > 0 {
-		return &toolkit.ToolResult{
-			Success:    true,
-			OutputKind: toolresult.KindText,
-			Content:    w.formatResults(results),
-			Metadata: map[string]interface{}{
-				"query":  query,
-				"count":  len(results),
-				"source": "duckduckgo",
-			},
-		}, nil
+	results, instantErr := w.searchDuckDuckGo(ctx, query, count)
+	if instantErr == nil && len(results) > 0 {
+		return w.successSearchResult(query, results, "duckduckgo"), nil
 	}
 
 	// 方法2: 备用 - 使用 HTML 搜索页面解析
-	results, err = w.searchDuckDuckGoHTML(ctx, query, count)
-	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("搜索失败: %w", err),
-		}, nil
+	htmlResults, htmlErr := w.searchDuckDuckGoHTML(ctx, query, count)
+	if htmlErr == nil {
+		return w.successSearchResult(query, htmlResults, "duckduckgo_html"), nil
+	}
+
+	// Instant API can succeed with zero hits. Prefer that empty-success evidence
+	// over a later HTML transport/parse failure so models do not retry unchanged.
+	if instantErr == nil {
+		return w.successSearchResult(query, results, "duckduckgo"), nil
 	}
 
 	return &toolkit.ToolResult{
+		Success:    false,
+		OutputKind: toolresult.KindText,
+		Error:      fmt.Errorf("搜索失败: %w", htmlErr),
+	}, nil
+}
+
+// successSearchResult builds a successful search ToolResult, stamping empty
+// disposition only when the provider returned a true zero-hit payload.
+func (w *WebSearchTool) successSearchResult(query string, results []DuckDuckGoResult, source string) *toolkit.ToolResult {
+	if results == nil {
+		results = []DuckDuckGoResult{}
+	}
+	metadata := map[string]interface{}{
+		"query":          query,
+		"count":          len(results),
+		"match_count":    len(results),
+		"returned_count": len(results),
+		"result_count":   len(results),
+		"source":         source,
+	}
+	content := w.formatResults(results)
+	if len(results) == 0 {
+		content = "未找到匹配的内容"
+		toolresult.MarkEmptySuccess(metadata)
+	}
+	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    w.formatResults(results),
-		Metadata: map[string]interface{}{
-			"query":  query,
-			"count":  len(results),
-			"source": "duckduckgo_html",
-		},
-	}, nil
+		Content:    content,
+		Metadata:   metadata,
+	}
 }
 
 // searchDuckDuckGo 使用 DuckDuckGo Instant Answer API
@@ -157,6 +172,9 @@ func (w *WebSearchTool) searchDuckDuckGo(ctx context.Context, query string, coun
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("instant answer API 错误 (状态码 %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var ddg DDGInstantAnswer
@@ -190,7 +208,7 @@ func (w *WebSearchTool) searchDuckDuckGo(ctx context.Context, query string, coun
 	}
 
 	if len(results) == 0 {
-		return nil, fmt.Errorf("no results")
+		return []DuckDuckGoResult{}, nil
 	}
 
 	return results[:min(count, len(results))], nil
@@ -219,6 +237,9 @@ func (w *WebSearchTool) searchDuckDuckGoHTML(ctx context.Context, query string, 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTML 搜索错误 (状态码 %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	html := string(body)
@@ -285,7 +306,7 @@ func (w *WebSearchTool) searchDuckDuckGoHTML(ctx context.Context, query string, 
 	}
 
 	if len(results) == 0 {
-		return nil, fmt.Errorf("no results found")
+		return []DuckDuckGoResult{}, nil
 	}
 
 	return results, nil

@@ -48,6 +48,13 @@ func RenderShellExecutionGuidance() string {
 	lines := []string{
 		fmt.Sprintf("Detected operating system: %s.", runtime.GOOS),
 		fmt.Sprintf("Detected user shell: %s.", detectedShellName(shell)),
+		"Prefer toolkit `grep` for code search instead of shell `rg`/`grep` (rg in shell uses exit 1 for no matches and is easy to break with quotes/regex escapes).",
+		"Prefer toolkit `ls`/`glob`/`view` for filesystem inspection; use bash for builds, tests, git, and package managers.",
+		"Never invoke toolkit tool names as shell commands (for example `view -path ...` or `grep -pattern ...` inside bash). Call those tools directly with structured args.",
+		"When using bash for multiple independent checks, prefer `commands` batching so one tool call returns all results.",
+		"Do not treat empty search results as a crash; change the pattern/path or use the dedicated search tool instead of retrying the identical query.",
+		"If shell search fails with regex/path errors, switch to toolkit `grep` (literal=true for fixed text) rather than repairing complex shell quoting.",
+		"Do not put shell globs in the rg path argument (e.g. `rg pattern backend/**/*.go`); use `rg -g \"*.go\" pattern backend` or toolkit `grep` path+glob.",
 	}
 
 	switch {
@@ -58,12 +65,17 @@ func RenderShellExecutionGuidance() string {
 			"Do not use Unix-only commands such as `head` when a PowerShell-native form exists.",
 			"To limit output, prefer `... | Select-Object -First 200` instead of `... | head -200`.",
 			"To print the current directory, prefer `Get-Location` or `pwd` on PowerShell.",
+			"Do not use bash heredoc (`python - <<'PY'`, `cat <<EOF`); PowerShell does not support that syntax. Prefer dedicated file tools, `python -c`, or write a temp script with `write`/`append_write` then execute it.",
+			"Avoid chaining many search commands with `;` when one failed rg exit 1 can poison the whole command; use toolkit `grep` or bash `commands` with independent items.",
+			"Avoid bash-only operators such as `&&`/`||` chains when PowerShell parsing is unreliable; prefer separate bash `commands` items or native PowerShell control flow.",
+			"On Windows, unexpanded path globs often become os error 123; keep path as a real directory and put filters in `-g`/`--glob` or toolkit `grep`.",
 		)
 	case runtime.GOOS == "windows" && shell.Type == runtimeexecutor.ShellTypeCmd:
 		lines = append(lines,
 			"Treat the current shell as cmd.exe, not bash-compatible.",
 			"Do not use Unix-only commands such as `head`.",
 			"To print the current directory, prefer `cd` or `echo %cd%` on cmd.exe.",
+			"Do not use bash heredoc or Unix pipelines that cmd.exe cannot parse; prefer dedicated file/search tools.",
 		)
 	}
 
@@ -92,6 +104,10 @@ func RenderFileEditingGuidance() string {
 		"Do not use shell redirection, here-strings, or inline `Set-Content`/`Out-File`/`Add-Content` commands for large file writes.",
 		"For long content, prefer skeleton -> append_write chunk(s) -> apply_patch cleanup, instead of one huge full-file write or one huge shell command.",
 		"If a client or runtime-side transport write API is available, prefer that over pushing oversized inline content through model-generated shell text.",
+		"Before editing, re-read the latest nearby context with view/grep; stale @@ context is a common apply_patch failure mode.",
+		"Keep each apply_patch focused on one file or one nearby change region; split large or multi-file patches.",
+		"For Add File hunks, every content line must start with `+`.",
+		"When using `todos`, keep at most one task `in_progress`; mark the previous task completed/pending before starting another.",
 	}
 
 	rendered := make([]string, 0, len(lines)+1)

@@ -76,6 +76,7 @@ func NewViewTool() *ViewTool {
 func (v *ViewTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
 }
 
@@ -177,10 +178,10 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 				listing,
 			),
 			Metadata: map[string]interface{}{
-				"file_path":   resolvedPath,
+				"file_path":    resolvedPath,
 				"is_directory": true,
-				"auto_listed": true,
-				"depth":       1,
+				"auto_listed":  true,
+				"depth":        1,
 			},
 		}, nil
 	}
@@ -235,11 +236,15 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 	sections := make([]string, 0, len(requests))
 	items := make([]map[string]interface{}, 0, len(requests))
 	failures := make([]string, 0)
+	failedItems := make([]map[string]interface{}, 0)
 	succeeded := 0
-	for _, request := range requests {
+	for index, request := range requests {
 		result, err := v.executeSingle(ctx, request)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", request.FilePath, err))
+			if row := toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, err.Error()); row != nil {
+				failedItems = append(failedItems, row)
+			}
 			continue
 		}
 		if result == nil || !result.Success {
@@ -248,6 +253,9 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 				message = result.Error.Error()
 			}
 			failures = append(failures, fmt.Sprintf("%s: %s", request.FilePath, message))
+			if row := toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, message); row != nil {
+				failedItems = append(failedItems, row)
+			}
 			continue
 		}
 		succeeded++
@@ -258,29 +266,37 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 		sections = append(sections, "===== errors =====\n"+strings.Join(failures, "\n"))
 	}
 	if succeeded == 0 {
+		meta := map[string]interface{}{
+			"batch":         true,
+			"request_count": len(requests),
+			"failed_count":  len(failures),
+		}
+		if len(failedItems) > 0 {
+			meta[toolresult.MetadataFailedItemsKey] = failedItems
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("批量读取失败: %s", strings.Join(failures, "; ")),
-			Metadata: map[string]interface{}{
-				"batch":         true,
-				"request_count": len(requests),
-				"failed_count":  len(failures),
-			},
+			Metadata:   meta,
 		}, nil
+	}
+	meta := map[string]interface{}{
+		"batch":           true,
+		"request_count":   len(requests),
+		"succeeded_count": succeeded,
+		"failed_count":    len(failures),
+		"partial_failure": len(failures) > 0,
+		"items":           items,
+	}
+	if len(failedItems) > 0 {
+		meta[toolresult.MetadataFailedItemsKey] = failedItems
 	}
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    strings.Join(sections, "\n\n"),
-		Metadata: map[string]interface{}{
-			"batch":           true,
-			"request_count":   len(requests),
-			"succeeded_count": succeeded,
-			"failed_count":    len(failures),
-			"partial_failure": len(failures) > 0,
-			"items":           items,
-		},
+		Metadata:   meta,
 	}, nil
 }
 

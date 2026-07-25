@@ -106,6 +106,13 @@ func TestEditTool_NotFoundGuidesApplyPatch(t *testing.T) {
 	if !strings.Contains(message, "old_string 预览") {
 		t.Fatalf("expected old_string preview, got %q", message)
 	}
+	if !strings.Contains(message, "next_action") {
+		t.Fatalf("expected next_action text in error message, got %q", message)
+	}
+	next, _ := result.Metadata["next_action"].(string)
+	if !strings.Contains(next, "apply_patch") && !strings.Contains(next, "view") {
+		t.Fatalf("expected structured next_action metadata, got %q metadata=%#v", next, result.Metadata)
+	}
 }
 
 func TestEditTool_NotFoundDetectsLineEndingDifference(t *testing.T) {
@@ -189,5 +196,30 @@ func TestEditTool_HealsCRLFOldStringAgainstLFFile(t *testing.T) {
 	}
 	if got := string(data); got != "updated\n" {
 		t.Fatalf("expected LF-preserving replacement, got %q", got)
+	}
+}
+
+func TestEditTool_NotFoundIncludesStructuredNextAction(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("alpha\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	tool := NewEditTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  "sample.txt",
+		"old_string": "missing",
+		"new_string": "new",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected failure, got %#v", result)
+	}
+	next, _ := result.Metadata["next_action"].(string)
+	if next == "" {
+		t.Fatalf("expected next_action metadata, got %#v", result.Metadata)
 	}
 }

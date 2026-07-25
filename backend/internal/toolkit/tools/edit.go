@@ -61,6 +61,7 @@ func NewEditTool() *EditTool {
 func (e *EditTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
 }
 
@@ -190,11 +191,10 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// round-trip for pure line-ending differences.
 	matchedOld, matchedNew, ok := matchEditStrings(contentStr, p.OldString, p.NewString)
 	if !ok {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      buildEditOldStringNotFoundError(contentStr, p.OldString),
-		}, nil
+		return toolResultFailure(
+			buildEditOldStringNotFoundError(contentStr, p.OldString),
+			"Re-view/grep the file for the latest exact snippet, then retry edit with a short confirmed old_string; for multi-line or drifting context prefer apply_patch. Do not retry the same stale old_string unchanged.",
+		), nil
 	}
 
 	// 创建备份
@@ -319,7 +319,7 @@ func buildEditOldStringNotFoundError(content string, oldString string) error {
 	}
 
 	parts = append(parts,
-		"请先用 view/grep 获取文件中的最新片段后重试；代码编辑、多行替换或上下文可能变化时优先使用 apply_patch，并在 @@ 中提供靠近目标的函数/类上下文。",
+		"next_action: 先用 view/grep 获取文件中的最新片段后重试；代码编辑、多行替换或上下文可能变化时优先使用 apply_patch，并在 @@ 中提供靠近目标的函数/类上下文。不要原样重试同一 stale old_string。",
 		fmt.Sprintf("old_string 预览: %q", truncateDiagnosticText(oldString, 200)),
 	)
 	return fmt.Errorf("%s", strings.Join(parts, " "))

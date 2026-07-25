@@ -15,16 +15,16 @@ func TestFullScreenListNavigationAndSelection(t *testing.T) {
 	matches := fullScreenListMatches(items, "")
 	state := fullScreenListState{}
 
-	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyDown}, matches, 12); done || state.selected != 1 {
+	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyDown}, items, matches, 12); done || state.selected != 1 {
 		t.Fatalf("expected Down to select item 2, got selected=%d done=%v", state.selected, done)
 	}
-	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyPageDown}, matches, 12); done || state.selected != 5 {
+	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyPageDown}, items, matches, 12); done || state.selected != 5 {
 		t.Fatalf("expected PageDown to move one visible page, got selected=%d done=%v", state.selected, done)
 	}
-	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnd}, matches, 12); done || state.selected != 11 {
+	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnd}, items, matches, 12); done || state.selected != 11 {
 		t.Fatalf("expected End to select the final item, got selected=%d done=%v", state.selected, done)
 	}
-	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, matches, 12)
+	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, items, matches, 12)
 	if !done || result.Cancelled || result.Index != 11 {
 		t.Fatalf("expected Enter to select original item 11, got %#v done=%v", result, done)
 	}
@@ -38,9 +38,9 @@ func TestFullScreenListSearchFiltersAndKeepsOriginalIndex(t *testing.T) {
 	}
 	state := fullScreenListState{}
 	all := fullScreenListMatches(items, "")
-	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: '/'}, all, 24)
-	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'r'}, all, 24)
-	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'e'}, all, 24)
+	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: '/'}, items, all, 24)
+	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'r'}, items, all, 24)
+	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'e'}, items, all, 24)
 	if !state.searching || state.query != "re" {
 		t.Fatalf("expected active search query, got %#v", state)
 	}
@@ -54,9 +54,37 @@ func TestFullScreenListSearchFiltersAndKeepsOriginalIndex(t *testing.T) {
 	if len(matches) != 1 || matches[0] != 1 {
 		t.Fatalf("expected filtered item to retain original index 1, got %v", matches)
 	}
-	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, matches, 24)
+	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, items, matches, 24)
 	if !done || result.Index != 1 {
 		t.Fatalf("expected Enter to return original filtered index, got %#v done=%v", result, done)
+	}
+}
+
+func TestFullScreenListSkipsDisabledItems(t *testing.T) {
+	items := []FullScreenListItem{
+		{Title: "当前 · Live title（不可选）", Disabled: true},
+		{Title: "Previous session"},
+		{Title: "Older session"},
+	}
+	matches := fullScreenListMatches(items, "")
+	state := fullScreenListState{}
+	state.clampToEnabled(items, matches, 8)
+	if state.selected != 1 {
+		t.Fatalf("expected initial selection to skip disabled current row, got %d", state.selected)
+	}
+
+	if _, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyUp}, items, matches, 24); done || state.selected != 2 {
+		t.Fatalf("expected Up to wrap past disabled row onto last enabled item, got selected=%d done=%v", state.selected, done)
+	}
+	state.selected = 0
+	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, items, matches, 24)
+	if done {
+		t.Fatalf("expected Enter on disabled row to stay open, got %#v done=%v", result, done)
+	}
+	state.selected = 1
+	result, done = applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, items, matches, 24)
+	if !done || result.Index != 1 {
+		t.Fatalf("expected Enter on enabled row to select original index 1, got %#v done=%v", result, done)
 	}
 }
 

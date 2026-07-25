@@ -81,11 +81,28 @@ func TestReadResumeSessionPickRendersUpdateTimeCountsAndTitle(t *testing.T) {
 	})
 	session.RuntimeSession.UpdatedAt = time.Date(2026, 5, 2, 11, 57, 0, 0, time.Local)
 
+	history := runtimechat.NewSession("history")
+	history.ID = "history-1"
+	history.State = runtimechat.StateActive
+	history.Metadata.Title = "First session"
+	history.Metadata.Context = map[string]interface{}{
+		chatRuntimeContextProtocol:     "openai",
+		chatRuntimeContextProviderName: "openai",
+		chatRuntimeContextModel:        "gpt-4.1",
+	}
+	history.ReplaceHistory([]runtimetypes.Message{
+		{Role: "system", Content: "instructions", Metadata: runtimetypes.NewMetadata()},
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "hi", Metadata: runtimetypes.NewMetadata()},
+		{Role: "user", Content: "continue", Metadata: runtimetypes.NewMetadata()},
+	})
+	history.UpdatedAt = time.Date(2026, 5, 2, 11, 57, 0, 0, time.Local)
+
 	var picked *runtimechat.Session
 	lines := captureResumeStdout(t, func() {
-		picked, _ = readResumeSessionPick(session, []*runtimechat.Session{session.RuntimeSession})
+		picked, _ = readResumeSessionPick(session, []*runtimechat.Session{history}, nil)
 	})
-	if picked != session.RuntimeSession {
+	if picked != history {
 		t.Fatalf("expected Enter to restore the first session, got %#v", picked)
 	}
 
@@ -95,7 +112,7 @@ func TestReadResumeSessionPickRendersUpdateTimeCountsAndTitle(t *testing.T) {
 	if !strings.Contains(lines, "2026-05-02 11:57") || !strings.Contains(lines, "2轮/4条消息") {
 		t.Fatalf("expected update time and conversation counts in resume list, got %q", lines)
 	}
-	if strings.Contains(lines, "resume-1") {
+	if strings.Contains(lines, "resume-1") || strings.Contains(lines, "history-1") {
 		t.Fatalf("did not expect session id in resume list, got %q", lines)
 	}
 	if strings.Contains(lines, "协议=") || strings.Contains(lines, "provider=") || strings.Contains(lines, "【当前】") {
@@ -124,13 +141,16 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 	})
 	session.UpdatedAt = now.Add(-5 * time.Minute)
 
-	items, selectable := buildResumeFullScreenItems([]*runtimechat.Session{nil, session}, now)
+	items, selectable := buildResumeFullScreenItems([]*runtimechat.Session{nil, session}, nil, now)
 	if len(items) != 1 || len(selectable) != 1 || selectable[0] != session {
 		t.Fatalf("expected nil sessions to be skipped while preserving selection mapping, got items=%#v selectable=%#v", items, selectable)
 	}
 	item := items[0]
 	if item.Title != "Resume full-screen picker · compact #1" {
 		t.Fatalf("unexpected full-screen title: %q", item.Title)
+	}
+	if item.Disabled {
+		t.Fatalf("did not expect history row to be disabled")
 	}
 	for _, expected := range []string{"5分钟前", "1轮/2条", "compact #1"} {
 		if !strings.Contains(item.Detail, expected) {
@@ -141,6 +161,42 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 		if !strings.Contains(item.SearchText, expected) {
 			t.Fatalf("expected search metadata to contain %q, got %q", expected, item.SearchText)
 		}
+	}
+}
+
+func TestBuildResumeFullScreenItemsIncludesCurrentAsDisabled(t *testing.T) {
+	now := time.Date(2026, 7, 17, 16, 0, 0, 0, time.Local)
+	current := runtimechat.NewSession("tester")
+	current.ID = "current-live"
+	current.Metadata.Title = "Renamed live title"
+	current.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "live", Metadata: runtimetypes.NewMetadata()},
+	})
+	current.UpdatedAt = now.Add(-time.Minute)
+
+	history := runtimechat.NewSession("tester")
+	history.ID = "history-live"
+	history.Metadata.Title = "History session"
+	history.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "history", Metadata: runtimetypes.NewMetadata()},
+	})
+	history.UpdatedAt = now.Add(-2 * time.Minute)
+
+	items, selectable := buildResumeFullScreenItems([]*runtimechat.Session{history}, current, now)
+	if len(items) != 2 || len(selectable) != 2 {
+		t.Fatalf("expected current + history rows, got items=%#v selectable=%#v", items, selectable)
+	}
+	if !items[0].Disabled || selectable[0] != nil {
+		t.Fatalf("expected first row to be disabled current session, got item=%#v selectable=%#v", items[0], selectable[0])
+	}
+	if items[0].Title != "当前 · Renamed live title（不可选）" {
+		t.Fatalf("unexpected current title: %q", items[0].Title)
+	}
+	if !strings.Contains(items[0].Detail, "当前 · 不可选") {
+		t.Fatalf("expected current detail badge, got %q", items[0].Detail)
+	}
+	if items[1].Disabled || selectable[1] != history || items[1].Title != "History session" {
+		t.Fatalf("expected second row to remain selectable history, got item=%#v selectable=%#v", items[1], selectable[1])
 	}
 }
 
@@ -277,7 +333,7 @@ func splitResumeLineBeforeCounts(line string) (string, bool) {
 	return line[:start], true
 }
 
-func TestResumeInteractiveSelectShowsHistoryDirectlyAndExcludesCurrent(t *testing.T) {
+func TestResumeInteractiveSelectShowsCurrentAsNonSelectableAndHistory(t *testing.T) {
 	storage := runtimechat.NewInMemoryStorage()
 	manager := runtimechat.NewSessionManager(storage, nil)
 	t.Cleanup(manager.Stop)
@@ -310,6 +366,9 @@ func TestResumeInteractiveSelectShowsHistoryDirectlyAndExcludesCurrent(t *testin
 		t.Fatalf("save placeholder session: %v", err)
 	}
 
+	// Simulate an in-process rename that has already updated the live session.
+	current.Metadata.Title = "Renamed live"
+
 	session := &ChatSession{
 		SessionManager: manager,
 		SessionUserID:  "tester",
@@ -320,12 +379,19 @@ func TestResumeInteractiveSelectShowsHistoryDirectlyAndExcludesCurrent(t *testin
 		resumeInteractiveSelect(session)
 	})
 
-	for _, expected := range []string{"恢复历史会话（最近更新优先，共 1 个）:", "Previous session", "选择会话 (回车恢复 1，q 取消):", "当前会话保持不变"} {
+	for _, expected := range []string{
+		"恢复历史会话（最近更新优先，共 1 个可恢复 · 当前会话仅展示）:",
+		"[·]",
+		"当前 · Renamed live（不可选）",
+		"Previous session",
+		"选择会话 (回车恢复 1，q 取消):",
+		"当前会话保持不变",
+	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected direct resume flow to contain %q, got %q", expected, output)
 		}
 	}
-	for _, unexpected := range []string{"Current session", "current-session", "placeholder-session", "恢复最近可恢复会话", "选择历史会话", "匹配会话:"} {
+	for _, unexpected := range []string{"current-session", "placeholder-session", "恢复最近可恢复会话", "选择历史会话", "匹配会话:"} {
 		if strings.Contains(output, unexpected) {
 			t.Fatalf("did not expect direct resume flow to contain %q, got %q", unexpected, output)
 		}
@@ -350,6 +416,42 @@ func TestResumeInteractiveSelectShowsHistoryDirectlyAndExcludesCurrent(t *testin
 	})
 	if !strings.Contains(emptyOutput, "暂无其他历史会话") || strings.Contains(emptyOutput, "Current session") {
 		t.Fatalf("expected current-only result to render as an empty history list, got %q", emptyOutput)
+	}
+}
+
+func TestResumeInteractiveSelectShowsCurrentOnlyWhenNoHistory(t *testing.T) {
+	storage := runtimechat.NewInMemoryStorage()
+	manager := runtimechat.NewSessionManager(storage, nil)
+	t.Cleanup(manager.Stop)
+
+	current := runtimechat.NewSession("tester")
+	current.ID = "current-only"
+	current.Metadata.Title = "Only live session"
+	current.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "current prompt", Metadata: runtimetypes.NewMetadata()},
+	})
+	if err := storage.Save(context.Background(), current); err != nil {
+		t.Fatalf("save current session: %v", err)
+	}
+
+	session := &ChatSession{
+		SessionManager: manager,
+		SessionUserID:  "tester",
+		RuntimeSession: current,
+		InputReader:    bufio.NewReader(strings.NewReader("q\n")),
+	}
+	output := captureResumeStdout(t, func() {
+		resumeInteractiveSelect(session)
+	})
+	for _, expected := range []string{
+		"恢复历史会话（最近更新优先，共 0 个可恢复 · 当前会话仅展示）:",
+		"当前 · Only live session（不可选）",
+		"没有其他可恢复会话，输入 q 返回:",
+		"当前没有其他可恢复的历史会话",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected current-only resume flow to contain %q, got %q", expected, output)
+		}
 	}
 }
 

@@ -7,11 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // MockLLMProviderForObservability 用于 Observability 集成测试的 Mock Provider
@@ -86,7 +85,7 @@ func TestObservabilityWithLLMRuntime(t *testing.T) {
 	// 创建 LLM Runtime
 	runtimeConfig := &llm.RuntimeConfig{
 		DefaultModel: "gpt-4",
-		MaxRetries:    2,
+		MaxRetries:   2,
 	}
 	runtime := llm.NewLLMRuntime(runtimeConfig)
 
@@ -125,19 +124,16 @@ func TestObservabilityWithAgent(t *testing.T) {
 	// 清理全局 metrics（确保测试隔离）
 	GlobalMetrics = NewRegistry()
 
-	// 创建 Agent 配置
-	agentConfig := &agent.Config{
-		Name:         "test-agent-obs",
-		Model:        "gpt-4",
-		MaxSteps:     5,
-		SystemPrompt: "You are a helpful assistant.",
-	}
+	// Lightweight agent labels only — avoid importing internal/agent so tool
+	// efficiency counters can be recorded from agent without a test cycle.
+	agentName := "test-agent-obs"
+	agentMaxSteps := 5
 
 	// 创建追踪 span
 	span := StartSpan("agent_execution", "trace-123", "")
 	defer span.Finish()
 
-	labels := map[string]string{"agent": agentConfig.Name}
+	labels := map[string]string{"agent": agentName}
 
 	// 记录 Agent 运行指标
 	IncrementCounter(MetricAgentRunsTotal, labels)
@@ -150,8 +146,8 @@ func TestObservabilityWithAgent(t *testing.T) {
 	RecordDuration(MetricAgentDuration, labels, duration)
 
 	// 设置 span 属性
-	span.SetAttribute("agent.name", agentConfig.Name)
-	span.SetAttribute("agent.max_steps", fmt.Sprintf("%d", agentConfig.MaxSteps))
+	span.SetAttribute("agent.name", agentName)
+	span.SetAttribute("agent.max_steps", fmt.Sprintf("%d", agentMaxSteps))
 
 	// 验证指标
 	counter := GlobalMetrics.GetOrCreateCounter(MetricAgentRunsTotal, labels)
@@ -315,8 +311,8 @@ func TestObservabilityWithLogging(t *testing.T) {
 
 	// 创建 Logger Config
 	loggerConfig := &LoggerConfig{
-		Level:  LevelInfo,
-		Source: "test-source",
+		Level:   LevelInfo,
+		Source:  "test-source",
 		Writers: []LogWriter{jsonWriter},
 	}
 
@@ -349,8 +345,8 @@ func TestObservabilityEndToEndWorkflow(t *testing.T) {
 
 	var jsonBuffer strings.Builder
 	loggerConfig := &LoggerConfig{
-		Level:  LevelInfo,
-		Source: "workflow-test",
+		Level:   LevelInfo,
+		Source:  "workflow-test",
 		Writers: []LogWriter{NewJSONWriter(&jsonBuffer)},
 	}
 	logger := NewLogger(loggerConfig)

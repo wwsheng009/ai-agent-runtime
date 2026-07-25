@@ -61,6 +61,7 @@ func NewLsTool() *LsTool {
 func (l *LsTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
 }
 
@@ -214,16 +215,26 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 
 	output.WriteString(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount))
 
+	// Directory listing with zero entries is a true empty success (empty dir),
+	// not a tool failure. Stamp empty disposition so models do not retry the
+	// same path unchanged.
+	metadata := map[string]interface{}{
+		"path":           path,
+		"depth":          depth,
+		"file_count":     fileCount,
+		"dir_count":      dirCount,
+		"total":          len(entries),
+		"returned_count": len(entries),
+		"result_count":   len(entries),
+	}
+	if len(entries) == 0 {
+		toolresult.MarkEmptySuccess(metadata)
+	}
+
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    output.String(),
-		Metadata: map[string]interface{}{
-			"path":       path,
-			"depth":      depth,
-			"file_count": fileCount,
-			"dir_count":  dirCount,
-			"total":      len(entries),
-		},
+		Metadata:   metadata,
 	}, nil
 }

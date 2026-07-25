@@ -8197,6 +8197,7 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 		"context":               contextSnapshot,
 		"session_persistence":   h.sessionPersistenceSnapshot(),
 		"tool_catalog":          toolCatalog,
+		"tool_efficiency":       observability.SnapshotToolEfficiency(),
 		"patch_governance":      patchGovernance,
 		"provenance":            provenance,
 		"execution_diagnostics": h.executionDiagnosticsSnapshot(ctx),

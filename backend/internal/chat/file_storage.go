@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -93,8 +94,8 @@ func (s *FileStorage) Delete(ctx context.Context, sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := s.sessionPath(sessionID)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	path, err := s.resolveSessionPathLocked(sessionID)
+	if err != nil {
 		return ErrSessionNotFound
 	}
 	if err := os.Remove(path); err != nil {
@@ -117,19 +118,16 @@ func (s *FileStorage) ListMetadataPage(ctx context.Context, userID string, limit
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entries, err := os.ReadDir(s.dir)
+	paths, err := s.listSessionFilePathsLocked(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read session dir: %w", err)
+		return nil, err
 	}
-	sessions := make([]*Session, 0, len(entries))
-	for _, entry := range entries {
+	sessions := make([]*Session, 0, len(paths))
+	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		session, scanErr := s.readSessionMetadataFileLocked(filepath.Join(s.dir, entry.Name()))
+		session, scanErr := s.readSessionMetadataFileLocked(path)
 		if scanErr != nil {
 			return nil, scanErr
 		}
@@ -315,7 +313,14 @@ func (s *FileStorage) Cleanup(ctx context.Context, after time.Time) (int, error)
 			continue
 		}
 
-		if err := os.Remove(s.sessionPath(session.ID)); err != nil && !os.IsNotExist(err) {
+		path, resolveErr := s.resolveSessionPathLocked(session.ID)
+		if resolveErr != nil {
+			if resolveErr == ErrSessionNotFound {
+				continue
+			}
+			return removed, resolveErr
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return removed, fmt.Errorf("cleanup session %s: %w", session.ID, err)
 		}
 		removed++
@@ -402,21 +407,17 @@ func (s *FileStorage) listFiltered(ctx context.Context, keep func(*Session) bool
 }
 
 func (s *FileStorage) readAllSessionsLocked(ctx context.Context) ([]*Session, error) {
-	entries, err := os.ReadDir(s.dir)
+	paths, err := s.listSessionFilePathsLocked(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read session dir: %w", err)
+		return nil, err
 	}
 
-	sessions := make([]*Session, 0, len(entries))
-	for _, entry := range entries {
+	sessions := make([]*Session, 0, len(paths))
+	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		session, err := s.readSessionFileLocked(filepath.Join(s.dir, entry.Name()))
+		session, err := s.readSessionFileLocked(path)
 		if err != nil {
 			return nil, err
 		}
@@ -430,7 +431,11 @@ func (s *FileStorage) readSessionLocked(sessionID string) (*Session, error) {
 	if sessionID == "" {
 		return nil, ErrInvalidSession
 	}
-	return s.readSessionFileLocked(s.sessionPath(sessionID))
+	path, err := s.resolveSessionPathLocked(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.readSessionFileLocked(path)
 }
 
 func (s *FileStorage) readSessionFileLocked(path string) (*Session, error) {
@@ -601,7 +606,13 @@ func (s *FileStorage) writeSessionLocked(session *Session) error {
 	if session == nil || strings.TrimSpace(session.ID) == "" {
 		return ErrInvalidSession
 	}
-	path := s.sessionPath(session.ID)
+	path, err := s.sessionWritePathLocked(session)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create session dir for %s: %w", session.ID, err)
+	}
 	tmpPath := path + ".tmp"
 	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
@@ -706,8 +717,191 @@ func encodeSessionJSONField(writer *bufio.Writer, encoder *json.Encoder, name st
 	return nil
 }
 
+// sessionPath returns the preferred dated path for a session ID.
+// Existing files may still live at a legacy flat path; use resolveSessionPathLocked for reads.
 func (s *FileStorage) sessionPath(sessionID string) string {
-	return filepath.Join(s.dir, sanitizeSessionID(sessionID)+".json")
+	return s.preferredSessionPath(sessionID, time.Time{})
+}
+
+func (s *FileStorage) preferredSessionPath(sessionID string, createdAt time.Time) string {
+	sessionID = sanitizeSessionID(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	partitionAt := createdAt
+	if partitionAt.IsZero() {
+		if parsed, ok := aiclipaths.ParseTimestampedSessionIDTime(sessionID); ok {
+			partitionAt = parsed
+		} else {
+			partitionAt = time.Now()
+		}
+	}
+	return aiclipaths.JoinDatePartition(s.dir, partitionAt, sessionID+".json")
+}
+
+func (s *FileStorage) legacySessionPath(sessionID string) string {
+	sessionID = sanitizeSessionID(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	return filepath.Join(s.dir, sessionID+".json")
+}
+
+func (s *FileStorage) sessionWritePathLocked(session *Session) (string, error) {
+	if session == nil {
+		return "", ErrInvalidSession
+	}
+	sessionID := sanitizeSessionID(session.ID)
+	if sessionID == "" {
+		return "", ErrInvalidSession
+	}
+	if path, err := s.resolveSessionPathLocked(sessionID); err == nil {
+		return path, nil
+	} else if err != ErrSessionNotFound {
+		return "", err
+	}
+	return s.preferredSessionPath(sessionID, session.CreatedAt), nil
+}
+
+func (s *FileStorage) resolveSessionPathLocked(sessionID string) (string, error) {
+	sessionID = sanitizeSessionID(sessionID)
+	if sessionID == "" {
+		return "", ErrInvalidSession
+	}
+
+	candidates := make([]string, 0, 3)
+	if preferred := s.preferredSessionPath(sessionID, time.Time{}); preferred != "" {
+		candidates = append(candidates, preferred)
+	}
+	if legacy := s.legacySessionPath(sessionID); legacy != "" {
+		candidates = append(candidates, legacy)
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat session %s: %w", sessionID, err)
+		}
+	}
+
+	// Fallback: walk dated tree for older/malformed IDs that do not encode timestamps.
+	paths, err := s.listSessionFilePathsLocked(context.Background())
+	if err != nil {
+		return "", err
+	}
+	wantName := sessionID + ".json"
+	for _, path := range paths {
+		if filepath.Base(path) == wantName {
+			return path, nil
+		}
+	}
+	return "", ErrSessionNotFound
+}
+
+func (s *FileStorage) listSessionFilePathsLocked(ctx context.Context) ([]string, error) {
+	if s == nil || strings.TrimSpace(s.dir) == "" {
+		return nil, fmt.Errorf("storage directory cannot be empty")
+	}
+
+	paths := make([]string, 0, 16)
+	seen := make(map[string]struct{})
+	add := func(path string) {
+		path = filepath.Clean(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("read session dir: %w", err)
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		name := entry.Name()
+		full := filepath.Join(s.dir, name)
+		if !entry.IsDir() {
+			// Legacy flat layout: <dir>/<sessionID>.json
+			if filepath.Ext(name) == ".json" {
+				add(full)
+			}
+			continue
+		}
+		if !isYearDirName(name) {
+			continue
+		}
+		monthEntries, err := os.ReadDir(full)
+		if err != nil {
+			return nil, fmt.Errorf("read session year dir %s: %w", full, err)
+		}
+		for _, monthEntry := range monthEntries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !monthEntry.IsDir() || !isMonthOrDayDirName(monthEntry.Name()) {
+				continue
+			}
+			monthDir := filepath.Join(full, monthEntry.Name())
+			dayEntries, err := os.ReadDir(monthDir)
+			if err != nil {
+				return nil, fmt.Errorf("read session month dir %s: %w", monthDir, err)
+			}
+			for _, dayEntry := range dayEntries {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if !dayEntry.IsDir() || !isMonthOrDayDirName(dayEntry.Name()) {
+					continue
+				}
+				dayDir := filepath.Join(monthDir, dayEntry.Name())
+				fileEntries, err := os.ReadDir(dayDir)
+				if err != nil {
+					return nil, fmt.Errorf("read session day dir %s: %w", dayDir, err)
+				}
+				for _, fileEntry := range fileEntries {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					if fileEntry.IsDir() || filepath.Ext(fileEntry.Name()) != ".json" {
+						continue
+					}
+					add(filepath.Join(dayDir, fileEntry.Name()))
+				}
+			}
+		}
+	}
+	return paths, nil
+}
+
+func isYearDirName(name string) bool {
+	if len(name) != 4 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isMonthOrDayDirName(name string) bool {
+	if len(name) != 2 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func sanitizeSessionID(sessionID string) string {
