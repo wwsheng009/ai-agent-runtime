@@ -84,7 +84,7 @@ func NewBashTool() *BashTool {
 			},
 			"stop_on_error": map[string]interface{}{
 				"type":        "boolean",
-				"description": "commands 批次中某条失败后是否停止；默认 false，以便一次收集全部检查结果。",
+				"description": "commands 批次中某条硬失败（未启动/超时/取消/权限拒绝等）后是否停止；默认 false。进程非零退出码视为内容结果，不会触发停止。",
 			},
 			"parallel": map[string]interface{}{
 				"type":        "boolean",
@@ -136,8 +136,8 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。代码搜索优先用 toolkit `grep`（rg 在 shell 中 exit 1=无匹配、且易因引号/正则转义失败）；文件系统查看优先 ls/glob/view，不要把 view/grep/ls 写成 shell 命令。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。",
-			"1.3.3",
+			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。代码搜索优先用 toolkit `grep`（rg 在 shell 中 exit 1=无匹配、且易因引号/正则转义失败）；文件系统查看优先 ls/glob/view，不要把 view/grep/ls 写成 shell 命令。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。",
+			"1.3.4",
 			parameters,
 			true, // 支持直接调用
 		),
@@ -260,7 +260,9 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	// 使用 executer 执行命令
+	started := time.Now()
 	execResult, err := b.executeCommand(ctx, command, workdir, timeout, captureSettings)
+	duration := time.Since(started)
 	if err != nil {
 		// rg/grep exit 1 with empty/no-error output is "no matches", not a hard
 		// crash. Soft-succeed so batch checks and model recovery treat it as
@@ -269,6 +271,11 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
 			toolresult.MarkEmptySuccess(metadata)
 			metadata["search_no_match"] = true
+			metadata["exit_code"] = 1
+			metadata["non_zero_exit"] = true
+			if duration > 0 {
+				metadata["duration_ms"] = duration.Milliseconds()
+			}
 			metadata[toolresult.MetadataNextActionKey] = bashSearchNoMatchNextAction()
 			// Prefer the cleaned search body so PowerShell NativeCommandError chrome
 			// is not presented as useful stdout to the model.
@@ -278,6 +285,35 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			} else if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
 				content = strings.TrimSpace(content + "\n" + hint)
 			}
+			content = formatShellCommandContent(1, execResult.ShellType, workdir, duration, false, content)
+			return &toolkit.ToolResult{
+				Success:    true,
+				OutputKind: toolresult.KindText,
+				Content:    content,
+				Metadata:   metadata,
+			}, nil
+		}
+		// Completed process with a non-zero exit code is content success (Codex-
+		// like contract). Models must inspect Exit code / Output rather than
+		// treating every non-zero status as TOOL_EXECUTION.
+		if !isHardShellExecutionError(err) {
+			exitCode := exitCodeFromError(err)
+			if exitCode < 0 {
+				exitCode = 1
+			}
+			metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
+			metadata["exit_code"] = exitCode
+			metadata["non_zero_exit"] = exitCode != 0
+			if duration > 0 {
+				metadata["duration_ms"] = duration.Milliseconds()
+			}
+			if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
+				metadata[toolresult.MetadataNextActionKey] = next
+			}
+			content := formatShellCommandContent(exitCode, execResult.ShellType, workdir, duration, false, execResult.Output)
+			if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
+				content = strings.TrimRight(content, "\n") + "\n" + hint
+			}
 			return &toolkit.ToolResult{
 				Success:    true,
 				OutputKind: toolresult.KindText,
@@ -286,6 +322,12 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			}, nil
 		}
 		failureMetadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
+		if duration > 0 {
+			failureMetadata["duration_ms"] = duration.Milliseconds()
+		}
+		if code := exitCodeFromError(err); code >= 0 {
+			failureMetadata["exit_code"] = code
+		}
 		if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
 			failureMetadata[toolresult.MetadataNextActionKey] = next
 		}
@@ -298,11 +340,16 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
+	metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
+	metadata["exit_code"] = 0
+	if duration > 0 {
+		metadata["duration_ms"] = duration.Milliseconds()
+	}
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    execResult.Output,
-		Metadata:   buildCommandExecutionMetadata(command, mutatedPaths, execResult),
+		Content:    formatShellCommandContent(0, execResult.ShellType, workdir, duration, false, execResult.Output),
+		Metadata:   metadata,
 	}, nil
 }
 
@@ -472,6 +519,7 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 	items := make([]map[string]interface{}, 0, len(commands))
 	failedItems := make([]map[string]interface{}, 0)
 	failed := 0
+	nonZeroExit := 0
 	commandTexts := make([]string, 0, len(commands))
 	artifactPaths := make([]string, 0, len(commands))
 	batchArtifactPath := ""
@@ -486,6 +534,18 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 		if result != nil {
 			content = result.Content
 			entry["metadata"] = result.Metadata
+			if result.Metadata != nil {
+				if code, ok := result.Metadata["exit_code"]; ok {
+					entry["exit_code"] = code
+					if asInt, ok := asIntish(code); ok && asInt != 0 {
+						nonZeroExit++
+						entry["non_zero_exit"] = true
+						if result.Success {
+							status = "exit_nonzero"
+						}
+					}
+				}
+			}
 			if artifactPath := extractString(result.Metadata["raw_output_artifact_path"]); artifactPath != "" {
 				artifactPaths = append(artifactPaths, artifactPath)
 			}
@@ -523,6 +583,10 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 		"parallel": parallelism > 1, "parallelism": parallelism,
 		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
 	}
+	if nonZeroExit > 0 {
+		metadata["non_zero_exit_count"] = nonZeroExit
+		metadata["has_non_zero_exit"] = true
+	}
 	if len(failedItems) > 0 {
 		// Source-side failed_items so gateway/Diagnose can enrich next_action
 		// without parsing items[] or error strings.
@@ -555,6 +619,19 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 			Success: false, OutputKind: toolresult.KindText, Content: batchOutput,
 			Metadata: metadata, Error: buildBashBatchFailureError(failed, items),
 		}, nil
+	}
+	// Process non-zero exits are already content-success per item. Keep the
+	// batch tool call successful and surface recovery guidance in metadata.
+	if nonZeroExit > 0 {
+		metadata[toolresult.MetadataNextActionKey] = "One or more shell commands exited non-zero. Inspect each Exit code/Output section, reuse successful item outputs, and only retry the failed commands with a changed command/workdir/timeout. Non-zero exit is not a tool crash."
+		if failed == 0 && succeeded == len(commands) {
+			// All items completed; mark outcome-friendly partial only when mixed
+			// zero/non-zero is useful. Pure non-zero batch still succeeds.
+			if nonZeroExit < len(commands) {
+				metadata["partial_failure"] = false
+				metadata["partial_non_zero_exit"] = true
+			}
+		}
 	}
 	return &toolkit.ToolResult{Success: true, OutputKind: toolresult.KindText, Content: batchOutput, Metadata: metadata}, nil
 }
@@ -1273,6 +1350,77 @@ func exitCodeFromError(err error) int {
 	return -1
 }
 
+// isHardShellExecutionError reports true only for control-plane / launch failures
+// where the shell tool itself could not complete a normal process run. A finished
+// process with non-zero exit code is NOT a hard failure.
+func isHardShellExecutionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout) ||
+		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded) ||
+		stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, context.Canceled) {
+		return true
+	}
+	// Friendly wrappers around *exec.ExitError still parse as exit status.
+	if exitCodeFromError(err) >= 0 {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if stderrors.As(err, &exitErr) {
+		return false
+	}
+	return true
+}
+
+// formatShellCommandContent builds a Codex-like model-facing shell result body.
+// Non-zero exits remain tool Success with this structured content.
+func formatShellCommandContent(exitCode int, shellType, workdir string, duration time.Duration, timedOut bool, output string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Exit code: %d\n", exitCode)
+	if shell := strings.TrimSpace(shellType); shell != "" {
+		fmt.Fprintf(&b, "Shell: %s\n", shell)
+	} else if detected := runtimeexecutor.DefaultUserShell(); strings.TrimSpace(string(detected.Type)) != "" {
+		fmt.Fprintf(&b, "Shell: %s\n", detected.Type)
+	}
+	if wd := strings.TrimSpace(workdir); wd != "" {
+		fmt.Fprintf(&b, "Workdir: %s\n", wd)
+	}
+	if duration > 0 {
+		// Prefer compact wall time like Codex (e.g. 1.23s / 450ms).
+		if duration < time.Second {
+			fmt.Fprintf(&b, "Wall time: %dms\n", duration.Milliseconds())
+		} else {
+			fmt.Fprintf(&b, "Wall time: %.2fs\n", duration.Seconds())
+		}
+	}
+	fmt.Fprintf(&b, "Timed out: %v\n", timedOut)
+	fmt.Fprintf(&b, "Output:\n%s", output)
+	return b.String()
+}
+
+// asIntish coerces common numeric JSON/metadata shapes to int.
+func asIntish(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return int(i), true
+		}
+	}
+	return 0, false
+}
+
 // GetShellEnvironmentInfo returns environment info for error messages,
 // including the detected shell type.
 func GetShellEnvironmentInfo() string {
@@ -1585,6 +1733,9 @@ func bashCommandFailureNextAction(command, output string, err error) string {
 	outputLower := strings.ToLower(output)
 	errLower := strings.ToLower(err.Error())
 	combined := outputLower + "\n" + errLower
+	if looksLikeGitIgnoredPathFailure(command, combined) {
+		return "Git refused a path that is ignored by .gitignore / exclude rules. Inspect with `git check-ignore -v <path>` or `git status --ignored`. Use a non-ignored path, update ignore rules, or `git add -f` only when force-adding is intentional. Do not retry the same ignored path unchanged."
+	}
 	if looksLikeSearchPathShellGlob(command) ||
 		searchOutputLooksLikePathIOError(output) ||
 		searchOutputLooksLikePathIOError(err.Error()) {
@@ -1605,6 +1756,28 @@ func bashCommandFailureNextAction(command, output string, err error) string {
 		return "Windows PowerShell/pwsh has no `head`. Use `Select-Object -First N`, or prefer toolkit view/grep/ls for inspection."
 	}
 	return ""
+}
+
+// looksLikeGitIgnoredPathFailure detects git operations that fail because the
+// target path is excluded by ignore rules (common residual: git add/rm/update).
+func looksLikeGitIgnoredPathFailure(command, combinedLower string) bool {
+	cmdLower := strings.ToLower(strings.TrimSpace(command))
+	if !strings.Contains(cmdLower, "git") {
+		return false
+	}
+	switch {
+	case strings.Contains(combinedLower, "the following paths are ignored by one of your .gitignore files"),
+		strings.Contains(combinedLower, "ignored by one of your .gitignore"),
+		strings.Contains(combinedLower, "is ignored by one of your .gitignore"),
+		strings.Contains(combinedLower, "use -f if you really want to add them"),
+		strings.Contains(combinedLower, "use -f if you really want to add it"),
+		strings.Contains(combinedLower, "hint: use -f if you really want to add"),
+		strings.Contains(combinedLower, "the following paths are ignored"),
+		strings.Contains(combinedLower, "matches an ignore rule"):
+		return true
+	default:
+		return false
+	}
 }
 
 // bashCommandPreflight blocks known-invalid shell dialects before execution so

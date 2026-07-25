@@ -646,6 +646,12 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 	if waitErr != nil {
+		// Process finished with a non-zero exit is content success: complete the
+		// job and keep exit_code for callers. Only hard wait failures fail the job.
+		if exitCode, ok := finishedProcessExitCode(waitErr); ok {
+			m.completeJob(managed, exitCode)
+			return
+		}
 		m.failJob(managed, waitErr)
 		return
 	}
@@ -783,6 +789,13 @@ func (m *Manager) persistManagedJob(managed *managedJob) {
 }
 
 func (m *Manager) completeJob(managed *managedJob, exitCode int) {
+	m.completeJobWithMessage(managed, exitCode, "")
+}
+
+// completeJobWithMessage marks a finished process as completed regardless of exit
+// code. Non-zero exits keep exit_code (and optional message/metadata) but do not
+// set error_code / StatusFailed — those are reserved for hard failures.
+func (m *Manager) completeJobWithMessage(managed *managedJob, exitCode int, message string) {
 	finishedAt := time.Now().UTC()
 	managed.mu.Lock()
 	if managed.info.Status == StatusCancelled {
@@ -793,7 +806,10 @@ func (m *Manager) completeJob(managed *managedJob, exitCode int) {
 	}
 	managed.scheduled = false
 	managed.info.Status = StatusCompleted
-	managed.info.Message = ""
+	if strings.TrimSpace(message) == "" && exitCode != 0 {
+		message = fmt.Sprintf("command exited with code %d", exitCode)
+	}
+	managed.info.Message = strings.TrimSpace(message)
 	managed.info.ExitCode = &exitCode
 	managed.info.FinishedAt = &finishedAt
 	if managed.info.Metadata == nil {
@@ -802,6 +818,13 @@ func (m *Manager) completeJob(managed *managedJob, exitCode int) {
 	if _, exists := managed.info.Metadata[backgroundMetaLaunchState]; !exists {
 		managed.info.Metadata[backgroundMetaLaunchState] = launchStateAccepted
 	}
+	if exitCode != 0 {
+		managed.info.Metadata["non_zero_exit"] = true
+	} else {
+		delete(managed.info.Metadata, "non_zero_exit")
+	}
+	// Finished processes are never hard tool failures; drop any stale error_code.
+	delete(managed.info.Metadata, "error_code")
 	managed.mu.Unlock()
 	if m.store != nil {
 		_ = m.store.UpdateJob(context.Background(), managed.info)
@@ -1608,6 +1631,18 @@ func exitCodeFromError(err error) int {
 		return exitErr.ExitCode()
 	}
 	return -1
+}
+
+// finishedProcessExitCode reports whether err represents a process that finished
+// with a discrete exit status (including non-zero). Hard wait failures return false.
+func finishedProcessExitCode(err error) (int, bool) {
+	if err == nil {
+		return 0, true
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), true
+	}
+	return -1, false
 }
 
 func isTerminalStatus(status JobStatus) bool {

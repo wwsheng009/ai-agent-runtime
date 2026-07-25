@@ -278,6 +278,10 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	}
 
 	// Ignore duplicates; registry will reject with error.
+	// shell is the preferred Codex-aligned surface; bash and
+	// execute_shell_command remain compatibility aliases with identical
+	// execution semantics (including content-success for non-zero exits).
+	register(tools.NewShellTool())
 	register(tools.NewBashTool())
 	register(tools.NewExecuteShellCommandTool())
 	register(tools.NewAICLIExecTool())

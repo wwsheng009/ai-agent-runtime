@@ -3645,7 +3645,7 @@ func isChatOptionLine(text string) bool {
 // capability resolver can classify them.
 //
 // Current families:
-//   - "readonly_shell":   shell-like tools (bash, execute_shell_command, …)
+//   - "readonly_shell":   shell-like tools (shell, bash, execute_shell_command, …)
 //     whose command is clearly read-only (whitelist match).
 //   - "approved_shell":   shell-like tools whose command is not in the
 //     read-only whitelist but also not in the dangerous

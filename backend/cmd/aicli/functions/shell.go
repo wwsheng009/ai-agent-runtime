@@ -2,14 +2,17 @@ package functions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 // ShellFunction 执行 shell 命令的 Function
@@ -118,18 +121,40 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 	}
 
+	started := time.Now()
 	// 获取命令输出
 	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "function", command, "", outputMirror)
+	duration := time.Since(started)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "function", command)
 	outputStr := capture.Output
 	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir, budget)
+	if duration > 0 {
+		metadata["duration_ms"] = duration.Milliseconds()
+	}
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
+			metadata["timed_out"] = true
 			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, runtimeexecution.TimeoutError(budget)
 		}
 		if ctx.Err() == context.Canceled {
 			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, runtimeexecution.ContextCancellationError(ctx)
+		}
+
+		// Completed process with a non-zero exit is content success (Codex-like).
+		// Only launch/control-plane failures remain hard tool errors.
+		if !isHardShellFunctionError(err) {
+			exitCode := exitCodeFromShellError(err)
+			if exitCode < 0 {
+				exitCode = 1
+			}
+			metadata["exit_code"] = exitCode
+			metadata["non_zero_exit"] = exitCode != 0
+			content := formatShellFunctionContent(exitCode, string(shell.Type), cfg.workdir, duration, false, outputStr)
+			if hint := friendlyHintForCommand(command, outputStr, err, cfg.workdir); hint != "" {
+				content = strings.TrimRight(content, "\n") + "\n" + hint
+			}
+			return ShellExecutionResult{Output: content, Metadata: metadata}, nil
 		}
 
 		// 针对常见错误给出友好提示
@@ -140,7 +165,96 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 		return ShellExecutionResult{Output: outputStr, Metadata: metadata}, fmt.Errorf("命令执行失败: %w\n\n当前环境信息:\n%s", err, getShellEnvironmentInfo())
 	}
 
+	metadata["exit_code"] = 0
+	metadata["non_zero_exit"] = false
 	return ShellExecutionResult{Output: outputStr, Metadata: metadata}, nil
+}
+
+// isHardShellFunctionError reports true only for control-plane / launch failures.
+// A finished process with non-zero exit code is NOT a hard failure.
+func isHardShellFunctionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout) ||
+		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+	if exitCodeFromShellError(err) >= 0 {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false
+	}
+	return true
+}
+
+// exitCodeFromShellError extracts an exit status from *exec.ExitError or
+// common "exit status N" / hex status messages after wrapping.
+func exitCodeFromShellError(err error) int {
+	if err == nil {
+		return -1
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	msg := strings.TrimSpace(err.Error())
+	const prefix = "exit status "
+	if idx := strings.LastIndex(strings.ToLower(msg), prefix); idx >= 0 {
+		token := strings.TrimSpace(msg[idx+len(prefix):])
+		end := 0
+		for end < len(token) {
+			c := token[end]
+			if (c >= '0' && c <= '9') || c == 'x' || c == 'X' ||
+				(c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+				end++
+				continue
+			}
+			break
+		}
+		token = token[:end]
+		if token == "" {
+			return -1
+		}
+		if strings.HasPrefix(strings.ToLower(token), "0x") {
+			if v, parseErr := strconv.ParseInt(token[2:], 16, 64); parseErr == nil {
+				return int(v)
+			}
+			return -1
+		}
+		if v, parseErr := strconv.Atoi(token); parseErr == nil {
+			return v
+		}
+	}
+	return -1
+}
+
+// formatShellFunctionContent builds a Codex-like model-facing shell result body.
+func formatShellFunctionContent(exitCode int, shellType, workdir string, duration time.Duration, timedOut bool, output string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Exit code: %d\n", exitCode)
+	if shell := strings.TrimSpace(shellType); shell != "" {
+		fmt.Fprintf(&b, "Shell: %s\n", shell)
+	} else if detected := runtimeexecutor.DefaultUserShell(); strings.TrimSpace(string(detected.Type)) != "" {
+		fmt.Fprintf(&b, "Shell: %s\n", detected.Type)
+	}
+	if wd := strings.TrimSpace(workdir); wd != "" {
+		fmt.Fprintf(&b, "Workdir: %s\n", wd)
+	}
+	if duration > 0 {
+		if duration < time.Second {
+			fmt.Fprintf(&b, "Wall time: %dms\n", duration.Milliseconds())
+		} else {
+			fmt.Fprintf(&b, "Wall time: %.2fs\n", duration.Seconds())
+		}
+	}
+	fmt.Fprintf(&b, "Timed out: %v\n", timedOut)
+	fmt.Fprintf(&b, "Output:\n%s", output)
+	return b.String()
 }
 
 // prefixPowershellUTF8ForCmd prepends a UTF-8 encoding command for PowerShell.
@@ -465,7 +579,7 @@ func (f *ShellFunction) Name() string {
 
 // Description 返回 Function 描述
 func (f *ShellFunction) Description() string {
-	return "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。切换目录优先使用 workdir 参数；不要用裸 cd 验证当前目录。Windows PowerShell/pwsh 默认没有 `head`，需要截断输出时请改用 `Select-Object -First N`。路径建议使用正斜杠格式（如 E:/projects/foo）以确保跨平台兼容；路径不存在时会尽量给出候选路径建议。"
+	return "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。切换目录优先使用 workdir 参数；不要用裸 cd 验证当前目录。Windows PowerShell/pwsh 默认没有 `head`，需要截断输出时请改用 `Select-Object -First N`。路径建议使用正斜杠格式（如 E:/projects/foo）以确保跨平台兼容；路径不存在时会尽量给出候选路径建议。"
 }
 
 // Parameters 返回 Function 参数的 JSON Schema 描述

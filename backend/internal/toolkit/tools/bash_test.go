@@ -210,6 +210,98 @@ func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
 	}
 }
 
+func TestBashTool_CommandBatchNonZeroExitIsContentSuccess(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = &batchInspectExecuter{failures: map[string]error{
+		"first":  fmt.Errorf("exit status 1"),
+		"second": fmt.Errorf("exit status 2"),
+	}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "first"},
+			map[string]interface{}{"command": "second"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected batch of non-zero exits to succeed, got error: %v content=%q", result.Error, result.Content)
+	}
+	if result.Metadata["failed_count"] != 0 {
+		t.Fatalf("expected failed_count=0 for process exits, got %#v", result.Metadata)
+	}
+	if result.Metadata["non_zero_exit_count"] != 2 {
+		t.Fatalf("expected non_zero_exit_count=2, got %#v", result.Metadata["non_zero_exit_count"])
+	}
+	if !strings.Contains(result.Content, "exit_nonzero") {
+		t.Fatalf("expected exit_nonzero section status, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "Exit code: 1") || !strings.Contains(result.Content, "Exit code: 2") {
+		t.Fatalf("expected per-command Exit code headers, got %q", result.Content)
+	}
+}
+
+func TestFormatShellCommandContent(t *testing.T) {
+	content := formatShellCommandContent(1, "pwsh", `E:\work`, 1230*time.Millisecond, false, "boom\n")
+	if !strings.Contains(content, "Exit code: 1") {
+		t.Fatalf("missing exit code: %q", content)
+	}
+	if !strings.Contains(content, "Shell: pwsh") || !strings.Contains(content, `Workdir: E:\work`) {
+		t.Fatalf("missing shell/workdir: %q", content)
+	}
+	if !strings.Contains(content, "Wall time: 1.23s") {
+		t.Fatalf("missing wall time: %q", content)
+	}
+	if !strings.Contains(content, "Timed out: false") {
+		t.Fatalf("missing timed out: %q", content)
+	}
+	if !strings.Contains(content, "Output:\nboom\n") {
+		t.Fatalf("missing output body: %q", content)
+	}
+}
+
+func TestIsHardShellExecutionError(t *testing.T) {
+	if isHardShellExecutionError(fmt.Errorf("exit status 1")) {
+		t.Fatal("exit status must not be hard")
+	}
+	if isHardShellExecutionError(fmt.Errorf("命令执行失败: exit status 2\n提示: x")) {
+		t.Fatal("wrapped exit status must not be hard")
+	}
+	if !isHardShellExecutionError(fmt.Errorf("exec: file not found")) {
+		t.Fatal("launch failure must be hard")
+	}
+	timeoutErr := runtimeerrors.Wrap(runtimeerrors.ErrToolTimeout, "execution timed out", context.DeadlineExceeded)
+	if !isHardShellExecutionError(timeoutErr) {
+		t.Fatal("timeout must be hard")
+	}
+}
+
+func TestBashTool_RealNonZeroExitIsContentSuccess(t *testing.T) {
+	tool := NewBashTool()
+	command := "exit 1"
+	if runtime.GOOS != "windows" {
+		command = "false"
+	}
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":    command,
+		"timeout_ms": 10000,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected real non-zero exit to be content success, got error=%v content=%q", result.Error, result.Content)
+	}
+	if result.Metadata["exit_code"] != 1 {
+		t.Fatalf("expected exit_code=1, got %#v metadata=%#v", result.Metadata["exit_code"], result.Metadata)
+	}
+	if !strings.Contains(result.Content, "Exit code: 1") {
+		t.Fatalf("expected Exit code header in content, got %q", result.Content)
+	}
+}
+
 func TestBashTool_MissingCommandIncludesParseErrorHint(t *testing.T) {
 	tool := NewBashTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -1116,7 +1208,7 @@ func TestBuildBashCommandFailureError_EmptyOutputGuidance(t *testing.T) {
 	}
 }
 
-func TestBashTool_SingleCommandFailureIncludesOutputSummary(t *testing.T) {
+func TestBashTool_NonZeroExitIsContentSuccess(t *testing.T) {
 	tool := NewBashTool()
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: "cannot open file: no such file"},
@@ -1128,13 +1220,43 @@ func TestBashTool_SingleCommandFailureIncludesOutputSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
 	}
-	if result.Success || result.Error == nil {
-		t.Fatalf("expected failure, got %#v", result)
+	if !result.Success {
+		t.Fatalf("expected non-zero exit to be content success, got error: %v", result.Error)
 	}
-	message := result.Error.Error()
-	// When friendlyHintFor adds path guidance, keep it; otherwise require snippet.
-	if !strings.Contains(message, "cannot open file") && !strings.Contains(message, "提示:") {
-		t.Fatalf("expected output summary or friendly hint, got %q", message)
+	if result.Error != nil {
+		t.Fatalf("expected nil Error on content success, got %v", result.Error)
+	}
+	if result.Metadata["exit_code"] != 1 {
+		t.Fatalf("expected exit_code=1 metadata, got %#v", result.Metadata["exit_code"])
+	}
+	if result.Metadata["non_zero_exit"] != true {
+		t.Fatalf("expected non_zero_exit metadata, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "Exit code: 1") {
+		t.Fatalf("expected Exit code header, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "cannot open file: no such file") {
+		t.Fatalf("expected command output in content, got %q", result.Content)
+	}
+}
+
+func TestBashTool_HardLaunchFailureStillFails(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{
+		result: CommandExecutionResult{Output: ""},
+		err:    fmt.Errorf("exec: \"pwsh\": executable file not found in %%PATH%%"),
+	}
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "echo hi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected hard launch failure, got %#v", result)
+	}
+	if !strings.Contains(result.Error.Error(), "executable file not found") {
+		t.Fatalf("expected launch error text, got %q", result.Error.Error())
 	}
 }
 
@@ -1226,7 +1348,7 @@ func TestBashTool_SearchNoMatchSoftSucceeds(t *testing.T) {
 	}
 }
 
-func TestBashTool_SearchRealFailureStillFails(t *testing.T) {
+func TestBashTool_SearchRealFailureIsContentSuccessWithGuidance(t *testing.T) {
 	tool := NewBashTool()
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: "rg: regex parse error: unclosed group"},
@@ -1239,15 +1361,24 @@ func TestBashTool_SearchRealFailureStillFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
 	}
-	if result.Success || result.Error == nil {
-		t.Fatalf("expected hard failure for regex parse, got %#v", result)
+	if !result.Success {
+		t.Fatalf("expected process exit content success for regex parse, got error: %v", result.Error)
 	}
-	message := result.Error.Error()
-	if !strings.Contains(message, "exit status 2") && !strings.Contains(message, "正则") {
-		t.Fatalf("expected failure guidance, got %q", message)
+	if result.Metadata["exit_code"] != 2 {
+		t.Fatalf("expected exit_code=2, got %#v", result.Metadata["exit_code"])
+	}
+	if !strings.Contains(result.Content, "Exit code: 2") {
+		t.Fatalf("expected Exit code header, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "regex parse error") {
+		t.Fatalf("expected regex parse body, got %q", result.Content)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "grep") {
+		t.Fatalf("expected next_action to prefer toolkit grep, got %q", next)
 	}
 
-	// Path/IO style exit 1 must also remain a hard failure.
+	// Path/IO style exit 1 is also content success (process completed) with recovery guidance.
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: "rg: no such file or directory"},
 		err:    fmt.Errorf("exit status 1"),
@@ -1258,10 +1389,16 @@ func TestBashTool_SearchRealFailureStillFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
 	}
-	if result.Success {
-		t.Fatalf("expected path failure to remain hard, got success content %q", result.Content)
+	if !result.Success {
+		t.Fatalf("expected path exit to be content success, got error: %v content=%q", result.Error, result.Content)
 	}
-	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if result.Metadata["exit_code"] != 1 {
+		t.Fatalf("expected exit_code=1, got %#v", result.Metadata["exit_code"])
+	}
+	if !strings.Contains(result.Content, "no such file or directory") {
+		t.Fatalf("expected path error body, got %q", result.Content)
+	}
+	next, _ = result.Metadata[toolresult.MetadataNextActionKey].(string)
 	if !strings.Contains(next, "grep") {
 		t.Fatalf("expected search hard-failure next_action to prefer toolkit grep, got %q metadata=%#v", next, result.Metadata)
 	}
@@ -1539,5 +1676,37 @@ func TestBashCommandFailureNextAction_PathGlob(t *testing.T) {
 	)
 	if !strings.Contains(strings.ToLower(next), "glob") && !strings.Contains(next, "-g") {
 		t.Fatalf("expected path-glob next_action, got %q", next)
+	}
+}
+
+func TestBashCommandFailureNextAction_GitIgnoredPath(t *testing.T) {
+	next := bashCommandFailureNextAction(
+		`git add secrets/token.env`,
+		"The following paths are ignored by one of your .gitignore files:\nsecrets/token.env\nhint: Use -f if you really want to add them.",
+		fmt.Errorf("exit status 1"),
+	)
+	if !strings.Contains(next, "git check-ignore") {
+		t.Fatalf("expected check-ignore guidance, got %q", next)
+	}
+	if !strings.Contains(next, "git add -f") {
+		t.Fatalf("expected intentional force-add guidance, got %q", next)
+	}
+	if !strings.Contains(strings.ToLower(next), "do not retry") {
+		t.Fatalf("expected no unchanged-retry guidance, got %q", next)
+	}
+}
+
+func TestLooksLikeGitIgnoredPathFailure(t *testing.T) {
+	if !looksLikeGitIgnoredPathFailure(
+		"git add ignored.txt",
+		strings.ToLower("The following paths are ignored by one of your .gitignore files:\nignored.txt"),
+	) {
+		t.Fatal("expected gitignore failure classifier to match")
+	}
+	if looksLikeGitIgnoredPathFailure("rg ignored", "the following paths are ignored by one of your .gitignore files") {
+		t.Fatal("non-git commands must not match gitignore classifier")
+	}
+	if looksLikeGitIgnoredPathFailure("git status", "nothing to commit, working tree clean") {
+		t.Fatal("clean git status must not look like ignore failure")
 	}
 }

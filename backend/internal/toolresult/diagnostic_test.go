@@ -682,3 +682,20 @@ func TestCompactAttemptedArgsRedactsAndBounds(t *testing.T) {
 		t.Fatalf("expected overflow marker, got %q", last)
 	}
 }
+
+func TestShellFailureNextAction_GitIgnoredPath(t *testing.T) {
+	msg := "The following paths are ignored by one of your .gitignore files:\nbuild/out.bin\nhint: Use -f if you really want to add them.\nexit status 1"
+	next := shellFailureNextAction(msg)
+	if !strings.Contains(next, "git check-ignore") {
+		t.Fatalf("expected check-ignore recovery, got %q", next)
+	}
+	if !strings.Contains(next, "git add -f") {
+		t.Fatalf("expected force-add guidance, got %q", next)
+	}
+	if !isGitIgnoredPathFailure(strings.ToLower(msg)) {
+		t.Fatal("expected isGitIgnoredPathFailure to match")
+	}
+	if isGitIgnoredPathFailure("exit status 1") {
+		t.Fatal("bare exit must not look like gitignore failure")
+	}
+}

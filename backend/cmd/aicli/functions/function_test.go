@@ -2,13 +2,17 @@ package functions
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
@@ -531,11 +535,104 @@ func TestFriendlyHintForCommand_FileMissingIncludesQuotedPathSuggestion(t *testi
 	}
 }
 
+func TestFormatShellFunctionContent(t *testing.T) {
+	content := formatShellFunctionContent(1, "pwsh", `E:\work`, 1230*time.Millisecond, false, "boom\n")
+	if !strings.Contains(content, "Exit code: 1") {
+		t.Fatalf("missing exit code: %q", content)
+	}
+	if !strings.Contains(content, "Shell: pwsh") || !strings.Contains(content, `Workdir: E:\work`) {
+		t.Fatalf("missing shell/workdir: %q", content)
+	}
+	if !strings.Contains(content, "Wall time: 1.23s") {
+		t.Fatalf("missing wall time: %q", content)
+	}
+	if !strings.Contains(content, "Timed out: false") {
+		t.Fatalf("missing timed out: %q", content)
+	}
+	if !strings.Contains(content, "Output:\nboom\n") {
+		t.Fatalf("missing output body: %q", content)
+	}
+}
+
+func TestIsHardShellFunctionError(t *testing.T) {
+	if isHardShellFunctionError(fmt.Errorf("exit status 1")) {
+		t.Fatal("exit status must not be hard")
+	}
+	if isHardShellFunctionError(fmt.Errorf("命令执行失败: exit status 2\n提示: x")) {
+		t.Fatal("wrapped exit status must not be hard")
+	}
+	if !isHardShellFunctionError(fmt.Errorf("exec: file not found")) {
+		t.Fatal("launch failure must be hard")
+	}
+	timeoutErr := runtimeerrors.Wrap(runtimeerrors.ErrToolTimeout, "execution timed out", context.DeadlineExceeded)
+	if !isHardShellFunctionError(timeoutErr) {
+		t.Fatal("timeout must be hard")
+	}
+	if !isHardShellFunctionError(context.Canceled) {
+		t.Fatal("cancel must be hard")
+	}
+}
+
+func TestExitCodeFromShellError(t *testing.T) {
+	if got := exitCodeFromShellError(fmt.Errorf("exit status 7")); got != 7 {
+		t.Fatalf("expected 7, got %d", got)
+	}
+	if got := exitCodeFromShellError(fmt.Errorf("命令执行失败: exit status 2\n提示")); got != 2 {
+		t.Fatalf("expected wrapped 2, got %d", got)
+	}
+	if got := exitCodeFromShellError(errors.New("exec: not found")); got != -1 {
+		t.Fatalf("expected -1 for launch failure, got %d", got)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessThatExits1")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected helper process to fail")
+	}
+	if got := exitCodeFromShellError(err); got != 1 {
+		t.Fatalf("expected ExitError code 1, got %d err=%v", got, err)
+	}
+}
+
+func TestHelperProcessThatExits1(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	os.Exit(1)
+}
+
+func TestShellFunction_RealNonZeroExitIsContentSuccess(t *testing.T) {
+	fn := NewShellFunction()
+	command := "exit 1"
+	if runtime.GOOS != "windows" {
+		command = "false"
+	}
+	output, metadata, err := fn.ExecuteWithMeta(context.Background(), map[string]interface{}{
+		"command":    command,
+		"timeout_ms": 10000,
+	})
+	if err != nil {
+		t.Fatalf("expected content success with nil error, got %v output=%q", err, output)
+	}
+	if metadata["exit_code"] != 1 {
+		t.Fatalf("expected exit_code=1, got %#v metadata=%#v", metadata["exit_code"], metadata)
+	}
+	if metadata["non_zero_exit"] != true {
+		t.Fatalf("expected non_zero_exit=true, got %#v", metadata["non_zero_exit"])
+	}
+	if !strings.Contains(output, "Exit code: 1") {
+		t.Fatalf("expected Exit code header in content, got %q", output)
+	}
+}
+
 func TestShellFunction_DescriptionAndParameters_MentionPowerShellHeadGuidance(t *testing.T) {
 	fn := NewShellFunction()
 	description := strings.ToLower(fn.Description())
 	if !strings.Contains(description, "head") || !strings.Contains(description, "select-object") || !strings.Contains(description, "workdir") {
 		t.Fatalf("expected shell function description to mention head guidance and workdir, got %q", fn.Description())
+	}
+	if !strings.Contains(description, "exit code") && !strings.Contains(description, "非零") {
+		t.Fatalf("expected shell function description to mention non-zero exit content-success, got %q", fn.Description())
 	}
 
 	params := fn.Parameters()

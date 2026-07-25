@@ -1474,7 +1474,7 @@ const DefaultToolExecutionNextAction = "Inspect the error details, correct the c
 
 // DefaultShellCompatNextAction guides recovery from shell/environment mismatches
 // (missing utilities, wrong dialect, Unix-only pipelines on Windows shells).
-const DefaultShellCompatNextAction = "Command or utility is missing or incompatible with the current shell. Use a shell-native alternative (for example Select-Object -First N instead of head on PowerShell/pwsh), install the utility, or prefer a dedicated toolkit tool when available. Do not retry the same command unchanged."
+const DefaultShellCompatNextAction = "Command or utility is missing, broken, or incompatible with the current shell. Use a shell-native alternative (for example Select-Object -First N instead of head on PowerShell/pwsh), install/fix the utility (including unusable PATH placeholders and broken package shims), or prefer a dedicated toolkit tool when available. Do not retry the same command unchanged."
 
 func nextActionForToolError(code string, message string) string {
 	// Message-aware shell recovery first for execution/compat codes so bare
@@ -1546,6 +1546,8 @@ func shellFailureNextAction(message string) string {
 		return "Shell syntax or quoting failed. Simplify the command, fix quotes/escapes for the active shell, or split into smaller commands / a commands batch. Do not retry the identical command string."
 	case strings.Contains(lower, "command batch completed with") && strings.Contains(lower, "failure"):
 		return "Inspect failed item summaries in the result content; fix only the failed commands and re-run those items (prefer stop_on_error=true while diagnosing). Do not re-run successful batch items unchanged."
+	case isGitIgnoredPathFailure(lower):
+		return "Git refused a path that is ignored by .gitignore / exclude rules. Inspect with `git check-ignore -v <path>` or `git status --ignored`. Use a non-ignored path, update ignore rules, or `git add -f` only when force-adding is intentional. Do not retry the same ignored path unchanged."
 	case isNoMatchShellFailure(lower, message):
 		return "Treat this as no-match / empty evidence, not a hard crash. Change the search pattern, broaden path or workdir, or use a dedicated search tool that reports empty results clearly. Do not retry the identical query unchanged."
 	case isBareExitFailure(lower, message):
@@ -1625,6 +1627,22 @@ func isShellSyntaxFailure(lower string) bool {
 		strings.Contains(lower, "unrecognized token"),
 		strings.Contains(lower, "unexpected eof"),
 		strings.Contains(lower, "syntaxerror"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isGitIgnoredPathFailure(lower string) bool {
+	switch {
+	case strings.Contains(lower, "the following paths are ignored by one of your .gitignore files"),
+		strings.Contains(lower, "ignored by one of your .gitignore"),
+		strings.Contains(lower, "is ignored by one of your .gitignore"),
+		strings.Contains(lower, "use -f if you really want to add them"),
+		strings.Contains(lower, "use -f if you really want to add it"),
+		strings.Contains(lower, "hint: use -f if you really want to add"),
+		strings.Contains(lower, "the following paths are ignored") && strings.Contains(lower, "gitignore"),
+		strings.Contains(lower, "matches an ignore rule"):
 		return true
 	default:
 		return false

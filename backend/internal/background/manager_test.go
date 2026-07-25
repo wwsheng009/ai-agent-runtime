@@ -21,6 +21,38 @@ func TestDefaultConfigKeepsExplicitRerunRecoveryUnlimited(t *testing.T) {
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.RecoveryBackoffSchedule)
 }
 
+func TestCompleteJobTreatsNonZeroExitAsCompleted(t *testing.T) {
+	manager := NewManager(Config{})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	managed := &managedJob{
+		info: Job{
+			ID:       "job-nonzero",
+			Status:   StatusRunning,
+			Metadata: map[string]interface{}{"error_code": string(runtimeerrors.ErrToolExecution)},
+		},
+		output: newOutputBuffer(1024),
+	}
+	manager.completeJob(managed, 7)
+
+	job := managed.snapshot()
+	require.NotNil(t, job)
+	require.Equal(t, StatusCompleted, job.Status)
+	require.NotNil(t, job.ExitCode)
+	require.Equal(t, 7, *job.ExitCode)
+	require.Equal(t, "command exited with code 7", job.Message)
+	require.Equal(t, true, job.Metadata["non_zero_exit"])
+	_, hasErrorCode := job.Metadata["error_code"]
+	require.False(t, hasErrorCode)
+
+	result := decorateTaskOutputResult(TaskOutputResult{Status: string(job.Status), ExitCode: job.ExitCode}, *job)
+	require.Equal(t, string(StatusCompleted), result.Status)
+	require.NotNil(t, result.ExitCode)
+	require.Equal(t, 7, *result.ExitCode)
+	require.Equal(t, "command exited with code 7", result.Message)
+	require.Empty(t, result.ErrorCode)
+}
+
 func TestManagedJobSnapshotDoesNotShareMutableState(t *testing.T) {
 	startedAt := time.Now().UTC()
 	finishedAt := startedAt.Add(time.Second)
@@ -545,6 +577,40 @@ func shellDelayCommand(delay time.Duration, label string) string {
 		return fmt.Sprintf(`powershell -NoProfile -Command "Start-Sleep -Milliseconds %d; Write-Output %s"`, delay.Milliseconds(), label)
 	}
 	return fmt.Sprintf("sleep %.3f; printf '%s\\n'", delay.Seconds(), label)
+}
+
+func shellExitCommand(code int) string {
+	return fmt.Sprintf("exit %d", code)
+}
+
+func TestManagerCompletesShellJobWithNonZeroExit(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{MaxConcurrentJobs: 1})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{
+		Command: shellExitCommand(3),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusCompleted, backgroundTestTimeout(15*time.Second)))
+
+	got, err := manager.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, StatusCompleted, got.Status)
+	require.NotNil(t, got.ExitCode)
+	require.Equal(t, 3, *got.ExitCode)
+	require.Equal(t, true, got.Metadata["non_zero_exit"])
+	_, hasErrorCode := got.Metadata["error_code"]
+	require.False(t, hasErrorCode)
+
+	output, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: job.ID})
+	require.NoError(t, err)
+	require.Equal(t, string(StatusCompleted), output.Status)
+	require.NotNil(t, output.ExitCode)
+	require.Equal(t, 3, *output.ExitCode)
+	require.Empty(t, output.ErrorCode)
 }
 
 func sanitizeTestLabel(label string) string {

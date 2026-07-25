@@ -21,6 +21,7 @@
 - 对模型来说，`tool_result` 是**上下文事实输入**，不能因为“终端不好看”而丢信息。
 - 内置 / toolkit 的 `text` 输出在**较小**时保留全文，在**超大**时会在写入 history 前做独立的 history-safe truncation。
 - shell / exec 类工具在执行层还会额外应用 **capture limit**，避免 stdout/stderr 原始聚合本身无限膨胀。
+- shell / background 进程正常结束但 exit≠0 是**内容结果**（`Success:true` / job `completed` + `exit_code`），不是工具崩溃；硬失败仅限启动失败、超时、取消、权限/健康检查等。
 - `structured` / `binary` 输出允许通过 reducer 产出 envelope 摘要，但这是**模型上下文治理**，不是 CLI 展示截断。
 - 外部 MCP 工具当前优先保留完整输出，避免 host 过早压缩远端工具结果。
 
@@ -187,6 +188,7 @@
 当前内置 toolkit 工具已经逐个显式设置 `OutputKind`，例如：
 
 - `backend/internal/toolkit/tools/apply_patch.go`
+- `backend/internal/toolkit/tools/shell.go`（主入口；`bash` / `execute_shell_command` 为兼容别名）
 - `backend/internal/toolkit/tools/bash.go`
 - `backend/internal/toolkit/tools/view.go`
 - `backend/internal/toolkit/tools/write.go`

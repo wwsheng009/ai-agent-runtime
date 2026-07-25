@@ -114,7 +114,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolBackgroundTask,
-			Description: "Run a long-running task in the background and return a job id. Pass that exact job_id to task_output; never guess or synthesize an id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command.",
+			Description: "Run a long-running task in the background and return a job id. Pass that exact job_id to task_output; never guess or synthesize an id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command. A finished process with a non-zero exit code completes the job (status completed + exit_code); only launch/timeout/cancel/healthcheck failures hard-fail.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -173,7 +173,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolTaskOutput,
-			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset.",
+			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset. Inspect status and exit_code in the structured result; non-zero exit with status completed is a content result, not a tool crash. error_code is set only for hard failures.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

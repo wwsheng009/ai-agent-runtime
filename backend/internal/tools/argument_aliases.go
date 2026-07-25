@@ -29,7 +29,7 @@ func normalizeToolkitToolArgs(toolName string, args map[string]interface{}) map[
 			"old_string": {"old_text", "old", "oldString"},
 			"new_string": {"new_text", "new", "replacement", "newString"},
 		})
-	case "bash", "execute_shell_command":
+	case "shell", "bash", "execute_shell_command":
 		promote("command", "cmd", "script", "shell_command")
 		promote("workdir", "cwd", "working_directory")
 		normalized = normalizeObjectListAliases(normalized, "commands", map[string][]string{

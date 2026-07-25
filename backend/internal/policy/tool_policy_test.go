@@ -37,9 +37,22 @@ func TestToolExecutionPolicy_AllowToolInfo_AllowsLocalRead(t *testing.T) {
 
 func TestToolExecutionPolicy_AllowTool_BlocksShellSurfaceInReadOnlyMode(t *testing.T) {
 	policy := NewToolExecutionPolicy(nil, true)
-	for _, name := range []string{"bash", "shell_command", "aicli_exec", "background_task"} {
+	for _, name := range []string{"shell", "bash", "execute_shell_command", "shell_command", "aicli_exec", "background_task"} {
 		if err := policy.AllowTool(name); err == nil {
 			t.Fatalf("expected read-only policy to block %q", name)
+		}
+	}
+}
+
+func TestIsShellLikeToolName(t *testing.T) {
+	for _, name := range []string{"shell", "bash", "execute_shell_command", "ShellTool", "run_shell"} {
+		if !IsShellLikeToolName(name) {
+			t.Fatalf("expected %q to be shell-like", name)
+		}
+	}
+	for _, name := range []string{"", "view", "grep", "write", "apply_patch"} {
+		if IsShellLikeToolName(name) {
+			t.Fatalf("expected %q not to be shell-like", name)
 		}
 	}
 }

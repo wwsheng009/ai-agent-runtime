@@ -150,11 +150,7 @@ func (m *Manager) recoverDetachedRunningJob(job Job) bool {
 		}
 		m.mu.Unlock()
 		m.emitLogOutput(context.Background(), managed)
-		if exitCode == 0 {
-			m.completeJob(managed, exitCode)
-		} else {
-			m.failJobWithCode(managed, exitCode, fmt.Sprintf("command exited with code %d", exitCode))
-		}
+		m.completeJob(managed, exitCode)
 		return true
 	}
 
@@ -226,11 +222,7 @@ func (m *Manager) monitorDetachedJob(ctx context.Context, managed *managedJob, p
 		}
 		if exitCode, ok := readDetachedExitCode(statusPath); ok {
 			m.emitLogOutput(context.Background(), managed)
-			if exitCode == 0 {
-				m.completeJob(managed, exitCode)
-			} else {
-				m.failJobWithCode(managed, exitCode, fmt.Sprintf("command exited with code %d", exitCode))
-			}
+			m.completeJob(managed, exitCode)
 			return
 		}
 		health := inspectProcess(pid)

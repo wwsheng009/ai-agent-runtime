@@ -21,6 +21,7 @@ func main() {
 
 	registry := toolkit.NewRegistry()
 	allTools := []toolkit.Tool{
+		tools.NewShellTool(),
 		tools.NewBashTool(),
 		tools.NewViewTool(),
 		tools.NewApplyPatchTool(),

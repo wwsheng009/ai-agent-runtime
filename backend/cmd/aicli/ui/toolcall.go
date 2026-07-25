@@ -126,6 +126,8 @@ func FormatToolCallResult(functionName string, args map[string]interface{}, succ
 func formatToolFunctionName(name string) string {
 	// 常见缩写映射（仅保留最常用的）
 	shortNames := map[string]string{
+		"shell":                "Shell",
+		"bash":                 "Shell",
 		"execute_shell_command": "Shell",
 	}
 

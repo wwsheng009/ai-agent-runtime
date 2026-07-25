@@ -157,6 +157,7 @@ func TestNewDefaultManagerWithRuntimeConfig_AllBuiltinToolkitToolsExposeOutputKi
 
 	manager := NewDefaultManagerWithRuntimeConfig(nil, cfg)
 	argsByTool := map[string]map[string]interface{}{
+		"shell":                 {"command": ""},
 		"bash":                  {"command": ""},
 		"execute_shell_command": {"command": ""},
 		"apply_patch":           {"patch": ""},
@@ -174,6 +175,7 @@ func TestNewDefaultManagerWithRuntimeConfig_AllBuiltinToolkitToolsExposeOutputKi
 		"web_search":            {},
 	}
 	toolNames := []string{
+		"shell",
 		"bash",
 		"execute_shell_command",
 		"apply_patch",
@@ -461,6 +463,9 @@ func TestAgentAdapter_ListTools_MergesToolkitAndMCP(t *testing.T) {
 	toolNames := make(map[string]struct{}, len(tools))
 	for _, tool := range tools {
 		toolNames[tool.Name] = struct{}{}
+	}
+	if _, ok := toolNames["shell"]; !ok {
+		t.Fatalf("expected toolkit tool shell to be present: %+v", tools)
 	}
 	if _, ok := toolNames["bash"]; !ok {
 		t.Fatalf("expected toolkit tool bash to be present: %+v", tools)

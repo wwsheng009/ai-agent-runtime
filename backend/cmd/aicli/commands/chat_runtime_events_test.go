@@ -3698,7 +3698,7 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 		a.SetPermissionEngine(&agent.PermissionEngine{
 			Callback: func(ctx context.Context, req runtimepolicy.EvalRequest) (runtimepolicy.Decision, string, error) {
 				switch req.ToolName {
-				case "bash", "execute_shell_command":
+				case "shell", "bash", "execute_shell_command":
 					return runtimepolicy.Decision{Type: runtimepolicy.DecisionAsk}, "manual approval", nil
 				default:
 					return runtimepolicy.Decision{Type: runtimepolicy.DecisionAllow}, "", nil
@@ -3763,8 +3763,8 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 	if approvalCalls.Load() != 1 {
 		t.Fatalf("expected a single interactive approval prompt, got %d", approvalCalls.Load())
 	}
-	if mcpManager.callCount != 2 {
-		t.Fatalf("expected both shell tools to execute, got %d", mcpManager.callCount)
+	if mcpManager.callCount != 3 {
+		t.Fatalf("expected shell/bash/execute_shell_command to execute, got %d", mcpManager.callCount)
 	}
 	if strings.Contains(rendered.String(), "[approval] execute_shell_command") {
 		t.Fatalf("expected interactive approval line to stay suppressed, got %q", rendered.String())
@@ -3777,6 +3777,12 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 	}
 	if strings.Contains(rendered.String(), "[approval] auto-approved bash") {
 		t.Fatalf("expected no auto-approved line for cached bash approval, got %q", rendered.String())
+	}
+	if strings.Contains(rendered.String(), "[approval] shell") {
+		t.Fatalf("expected cached approval for shell to stay silent, got %q", rendered.String())
+	}
+	if strings.Contains(rendered.String(), "[approval] auto-approved shell") {
+		t.Fatalf("expected no auto-approved line for cached shell approval, got %q", rendered.String())
 	}
 }
 
@@ -3921,6 +3927,46 @@ func TestChatRuntimeEvents_SessionReadOnlyShellScopePersistsAcrossTurns(t *testi
 	bridge.BeginRun()
 	if !bridge.hasApprovalGrant(key) {
 		t.Fatalf("expected approval grant to persist across turns for session scope")
+	}
+}
+
+func TestChatRuntimeEvents_ShellAliasesShareReadonlyGrantKey(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	aliases := []string{"shell", "bash", "execute_shell_command"}
+	keys := make([]string, 0, len(aliases))
+	for _, name := range aliases {
+		key := bridge.autoApprovalGrantKey("session-1", &runtimechat.ApprovalRequest{
+			ToolName: name,
+			ArgsJSON: []byte(`{"command":"git status --short"}`),
+		})
+		if key == "" {
+			t.Fatalf("expected readonly grant key for %s", name)
+		}
+		if !strings.Contains(key, "readonly_shell") {
+			t.Fatalf("expected readonly_shell family for %s, got %q", name, key)
+		}
+		keys = append(keys, key)
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i] != keys[0] {
+			t.Fatalf("shell aliases should share grant key: %q vs %q", keys[0], keys[i])
+		}
+	}
+
+	// Approving via canonical shell should cover bash/execute_shell_command.
+	bridge.rememberApprovalGrant(keys[0])
+	for _, name := range aliases {
+		key := bridge.autoApprovalGrantKey("session-1", &runtimechat.ApprovalRequest{
+			ToolName: name,
+			ArgsJSON: []byte(`{"command":"ls"}`),
+		})
+		if !bridge.hasApprovalGrant(key) {
+			t.Fatalf("expected shared approval grant to cover %s", name)
+		}
 	}
 }
 
@@ -4594,6 +4640,17 @@ func (p *cachedShellApprovalProvider) Call(ctx context.Context, req *runtimellm.
 				},
 			},
 		}, nil
+	case 2:
+		return &runtimellm.LLMResponse{
+			Model: req.Model,
+			ToolCalls: []runtimetypes.ToolCall{
+				{
+					ID:   "call-shell-3",
+					Name: "shell",
+					Args: map[string]interface{}{"command": "pwd"},
+				},
+			},
+		}, nil
 	default:
 		return &runtimellm.LLMResponse{
 			Content: "shell approvals reused",
@@ -4674,7 +4731,7 @@ func (m *approvalCapturingMCPManager) ListTools() []runtimeskill.ToolInfo {
 
 func (m *shellApprovalCapturingMCPManager) FindTool(toolName string) (runtimeskill.ToolInfo, error) {
 	switch toolName {
-	case "bash", "execute_shell_command":
+	case "shell", "bash", "execute_shell_command":
 		return runtimeskill.ToolInfo{
 			Name:          toolName,
 			Description:   "Shell tool for approval cache tests",
@@ -4694,9 +4751,10 @@ func (m *shellApprovalCapturingMCPManager) CallTool(ctx interface{}, mcpName, to
 }
 
 func (m *shellApprovalCapturingMCPManager) ListTools() []runtimeskill.ToolInfo {
-	info1, _ := m.FindTool("execute_shell_command")
-	info2, _ := m.FindTool("bash")
-	return []runtimeskill.ToolInfo{info1, info2}
+	info1, _ := m.FindTool("shell")
+	info2, _ := m.FindTool("execute_shell_command")
+	info3, _ := m.FindTool("bash")
+	return []runtimeskill.ToolInfo{info1, info2, info3}
 }
 
 func (p *answerPreservingQuestionProvider) answerObserved() bool {
