@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -74,6 +75,10 @@ func NewMultieditTool() *MultieditTool {
 
 func (m *MultieditTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       true,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -268,12 +273,22 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		if len(failedItems) > 0 {
 			meta[toolresult.MetadataFailedItemsKey] = failedItems
 		}
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("%s", detail),
-			Metadata:   meta,
-		}, nil
+		// Total miss of old_string is the same recovery class as edit/apply_patch
+		// stale context: re-view and rebuild, never blind-retry the same payload.
+		if len(failedEdits) > 0 {
+			meta["failure_class"] = "stale_context"
+			if startLine := findClosestEditSnippetLine(originalContent, edits[0].OldString); startLine > 0 {
+				meta["suggested_view_offset"] = startLine - 1
+				meta["suggested_view_limit"] = 40
+			}
+			return toolResultFailureWithCode(
+				fmt.Errorf("%s", detail),
+				string(runtimeerrors.ErrToolStaleContext),
+				staleEditContextNextAction(),
+				meta,
+			), nil
+		}
+		return toolResultFailureWithCode(fmt.Errorf("%s", detail), "", "", meta), nil
 	}
 
 	// 写回文件

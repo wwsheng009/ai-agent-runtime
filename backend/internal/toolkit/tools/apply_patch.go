@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -84,6 +85,10 @@ func (t *ApplyPatchTool) DefinitionMetadata() map[string]interface{} {
 			"syntax":     "lark",
 			"definition": applyPatchLarkGrammar,
 		},
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       true,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -110,7 +115,7 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 
 	operations, err := parseApplyPatch(rawPatch)
 	if err != nil {
-		return toolResultFailure(err, applyPatchFailureNextAction(err)), nil
+		return applyPatchToolFailure(err, ""), nil
 	}
 	if len(operations) == 0 {
 		return toolResultFailure(
@@ -130,12 +135,12 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 			return toolResultFailure(err, "Context canceled or timed out while applying the patch. Retry with a smaller focused patch if the deadline is tight."), nil
 		}
 		if err := applier.apply(operation, &summary); err != nil {
-			return toolResultFailure(err, applyPatchFailureNextAction(err)), nil
+			return applyPatchToolFailure(err, operation.Path), nil
 		}
 	}
 
 	if err := applier.commit(); err != nil {
-		return toolResultFailure(err, applyPatchFailureNextAction(err)), nil
+		return applyPatchToolFailure(err, ""), nil
 	}
 
 	mutatedPaths, combinedPatch := applier.diff()
@@ -1225,6 +1230,64 @@ func buildPatchHunkNotFoundError(hunk patchHunk, expected, actual []string, reas
 	)
 }
 
+// applyPatchToolFailure classifies apply_patch failures, stamping STALE_CONTEXT
+// when @@ / old-content no longer matches the workspace.
+func applyPatchToolFailure(err error, filePath string) *toolkit.ToolResult {
+	if err == nil {
+		return toolResultFailure(fmt.Errorf("apply_patch failed"), applyPatchFailureNextAction(nil))
+	}
+	next := applyPatchFailureNextAction(err)
+	extra := map[string]interface{}{}
+	if path := strings.TrimSpace(filePath); path != "" {
+		extra["file_path"] = path
+	}
+	if isApplyPatchStaleContextError(err) {
+		extra["failure_class"] = "stale_context"
+		if startLine := extractPatchSuggestedViewLine(err.Error()); startLine > 0 {
+			extra["suggested_view_offset"] = startLine - 1 // view offset is 0-based
+			extra["suggested_view_limit"] = 40
+		}
+		return toolResultFailureWithCode(err, string(runtimeerrors.ErrToolStaleContext), next, extra)
+	}
+	return toolResultFailureWithCode(err, "", next, extra)
+}
+
+func isApplyPatchStaleContextError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	return strings.Contains(msg, "无法定位 hunk") ||
+		strings.Contains(msg, "未找到期望旧内容") ||
+		strings.Contains(msg, "未找到 @@ 上下文") ||
+		(strings.Contains(lower, "hunk") && strings.Contains(lower, "stale")) ||
+		strings.Contains(msg, "stale @@")
+}
+
+func extractPatchSuggestedViewLine(message string) int {
+	// Matches "第 %d 行附近" from buildPatchHunkNotFoundError.
+	const marker = "第 "
+	idx := strings.Index(message, marker)
+	if idx < 0 {
+		return 0
+	}
+	rest := message[idx+len(marker):]
+	end := strings.Index(rest, " 行")
+	if end <= 0 {
+		return 0
+	}
+	num := strings.TrimSpace(rest[:end])
+	var line int
+	for _, r := range num {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		line = line*10 + int(r-'0')
+	}
+	return line
+}
+
 // applyPatchFailureNextAction extracts recovery guidance for structured metadata.
 func applyPatchFailureNextAction(err error) string {
 	if err == nil {
@@ -1233,8 +1296,8 @@ func applyPatchFailureNextAction(err error) string {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 	switch {
-	case strings.Contains(msg, "无法定位 hunk") || strings.Contains(lower, "hunk"):
-		return "Re-view/grep the target file nearby, rebuild the patch from the closest current content, and keep the patch focused on one file/region. Do not retry the same stale @@/old lines unchanged."
+	case isApplyPatchStaleContextError(err):
+		return "STALE_CONTEXT: re-view/grep the target file nearby (use suggested_view_offset when present), rebuild the patch from the closest current content, and keep the patch focused on one file/region. Do not retry the same stale @@/old lines unchanged."
 	case strings.Contains(msg, "Add File") || strings.Contains(msg, "应以 '+' 开头"):
 		return "For Add File hunks, every content line must start with '+'. Rewrite the add body with '+' prefixes, or use write/append_write for new files."
 	case strings.Contains(msg, "不是合法的补丁") || strings.Contains(msg, "Begin Patch") || strings.Contains(msg, "End Patch"):

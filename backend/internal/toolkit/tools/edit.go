@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -60,6 +61,10 @@ func NewEditTool() *EditTool {
 
 func (e *EditTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       true,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -191,9 +196,19 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// round-trip for pure line-ending differences.
 	matchedOld, matchedNew, ok := matchEditStrings(contentStr, p.OldString, p.NewString)
 	if !ok {
-		return toolResultFailure(
+		extra := map[string]interface{}{
+			"file_path":     absPath,
+			"failure_class": "stale_context",
+		}
+		if startLine := findClosestEditSnippetLine(contentStr, p.OldString); startLine > 0 {
+			extra["suggested_view_offset"] = startLine - 1 // view offset is 0-based
+			extra["suggested_view_limit"] = 40
+		}
+		return toolResultFailureWithCode(
 			buildEditOldStringNotFoundError(contentStr, p.OldString),
-			"Re-view/grep the file for the latest exact snippet, then retry edit with a short confirmed old_string; for multi-line or drifting context prefer apply_patch. Do not retry the same stale old_string unchanged.",
+			string(runtimeerrors.ErrToolStaleContext),
+			staleEditContextNextAction(),
+			extra,
 		), nil
 	}
 
@@ -314,8 +329,11 @@ func buildEditOldStringNotFoundError(content string, oldString string) error {
 		}
 	}
 
-	if closest := findClosestEditSnippet(normalizedContent, normalizedOld); closest != "" {
+	if closest, startLine := findClosestEditSnippetWithLine(normalizedContent, normalizedOld); closest != "" {
 		parts = append(parts, fmt.Sprintf("最接近片段: %q", truncateDiagnosticText(closest, 200)))
+		if startLine > 0 {
+			parts = append(parts, fmt.Sprintf("建议从第 %d 行附近用 view 重读（suggested_view_offset=%d）。", startLine, startLine-1))
+		}
 	}
 
 	parts = append(parts,
@@ -323,6 +341,10 @@ func buildEditOldStringNotFoundError(content string, oldString string) error {
 		fmt.Sprintf("old_string 预览: %q", truncateDiagnosticText(oldString, 200)),
 	)
 	return fmt.Errorf("%s", strings.Join(parts, " "))
+}
+
+func staleEditContextNextAction() string {
+	return "STALE_CONTEXT: re-view/grep the file for the latest exact snippet (use suggested_view_offset when present), then retry edit with a short confirmed old_string; for multi-line or drifting context prefer apply_patch. Do not retry the same stale old_string unchanged."
 }
 
 // matchEditStrings tries exact then line-ending-normalized matches so models
@@ -363,15 +385,30 @@ func normalizeEditLineEndings(text string) string {
 }
 
 func findClosestEditSnippet(content, oldString string) string {
+	snippet, _ := findClosestEditSnippetWithLine(content, oldString)
+	return snippet
+}
+
+// findClosestEditSnippetLine returns a 1-based line number near the closest
+// current content for a missed old_string, or 0 when no useful hint exists.
+func findClosestEditSnippetLine(content, oldString string) int {
+	_, startLine := findClosestEditSnippetWithLine(
+		normalizeEditLineEndings(content),
+		normalizeEditLineEndings(oldString),
+	)
+	return startLine
+}
+
+func findClosestEditSnippetWithLine(content, oldString string) (string, int) {
 	content = strings.TrimSpace(content)
 	oldString = strings.TrimSpace(oldString)
 	if content == "" || oldString == "" {
-		return ""
+		return "", 0
 	}
 	oldLines := strings.Split(oldString, "\n")
 	firstLine := strings.TrimSpace(oldLines[0])
 	if firstLine == "" {
-		return ""
+		return "", 0
 	}
 	contentLines := strings.Split(content, "\n")
 	bestIdx := -1
@@ -384,7 +421,7 @@ func findClosestEditSnippet(content, oldString string) string {
 		}
 	}
 	if bestIdx < 0 || bestScore < 0.45 {
-		return ""
+		return "", 0
 	}
 	start := bestIdx
 	end := bestIdx + len(oldLines)
@@ -392,9 +429,9 @@ func findClosestEditSnippet(content, oldString string) string {
 		end = len(contentLines)
 	}
 	if end <= start {
-		return ""
+		return "", 0
 	}
-	return strings.Join(contentLines[start:end], "\n")
+	return strings.Join(contentLines[start:end], "\n"), start + 1
 }
 
 func editLineSimilarity(a, b string) float64 {

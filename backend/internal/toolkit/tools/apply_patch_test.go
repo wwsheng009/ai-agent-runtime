@@ -811,6 +811,15 @@ func TestApplyPatchTool_MissingContextIncludesClosestCurrentLines(t *testing.T) 
 	if !strings.Contains(next, "view") && !strings.Contains(next, "grep") {
 		t.Fatalf("expected structured next_action metadata for hunk miss, got %q metadata=%#v", next, result.Metadata)
 	}
+	if code, _ := result.Metadata["error_code"].(string); code != "STALE_CONTEXT" {
+		t.Fatalf("expected STALE_CONTEXT error_code for hunk miss, got %#v", result.Metadata)
+	}
+	if path, _ := result.Metadata["file_path"].(string); !strings.Contains(path, "manager.go") {
+		t.Fatalf("expected file_path metadata for hunk miss, got %#v", result.Metadata)
+	}
+	if _, ok := result.Metadata["suggested_view_offset"]; !ok {
+		t.Fatalf("expected suggested_view_offset for hunk miss, got %#v", result.Metadata)
+	}
 }
 
 func TestApplyPatchTool_EmptyPatchHasNextAction(t *testing.T) {

@@ -113,6 +113,12 @@ func TestEditTool_NotFoundGuidesApplyPatch(t *testing.T) {
 	if !strings.Contains(next, "apply_patch") && !strings.Contains(next, "view") {
 		t.Fatalf("expected structured next_action metadata, got %q metadata=%#v", next, result.Metadata)
 	}
+	if code, _ := result.Metadata["error_code"].(string); code != "STALE_CONTEXT" {
+		t.Fatalf("expected STALE_CONTEXT error_code, got %#v", result.Metadata)
+	}
+	if retryable, _ := result.Metadata["retryable"].(bool); retryable {
+		t.Fatalf("STALE_CONTEXT must not be retryable, got %#v", result.Metadata)
+	}
 }
 
 func TestEditTool_NotFoundDetectsLineEndingDifference(t *testing.T) {
@@ -167,6 +173,18 @@ func TestEditTool_NotFoundIncludesClosestSnippet(t *testing.T) {
 	message := result.Error.Error()
 	if !strings.Contains(message, "最接近片段") {
 		t.Fatalf("expected closest snippet guidance, got %q", message)
+	}
+	if code, _ := result.Metadata["error_code"].(string); code != "STALE_CONTEXT" {
+		t.Fatalf("expected STALE_CONTEXT error_code, got %#v", result.Metadata)
+	}
+	if offset, ok := result.Metadata["suggested_view_offset"].(int); !ok || offset != 0 {
+		t.Fatalf("expected suggested_view_offset=0 for first-line closest match, got %#v", result.Metadata)
+	}
+	if limit, ok := result.Metadata["suggested_view_limit"].(int); !ok || limit != 40 {
+		t.Fatalf("expected suggested_view_limit=40, got %#v", result.Metadata)
+	}
+	if !strings.Contains(message, "suggested_view_offset=") {
+		t.Fatalf("expected suggested_view_offset hint in error text, got %q", message)
 	}
 }
 

@@ -370,6 +370,22 @@ func TestMultieditTool_NoEditsAppliedIncludesClosestSnippet(t *testing.T) {
 	if !strings.Contains(message, "old_string 预览") {
 		t.Fatalf("expected old_string preview, got %q", message)
 	}
+	if code, _ := result.Metadata["error_code"].(string); code != "STALE_CONTEXT" {
+		t.Fatalf("expected STALE_CONTEXT error_code for total multiedit miss, got %#v", result.Metadata)
+	}
+	if retryable, _ := result.Metadata["retryable"].(bool); retryable {
+		t.Fatalf("STALE_CONTEXT must not be retryable, got %#v", result.Metadata)
+	}
+	if cls, _ := result.Metadata["failure_class"].(string); cls != "stale_context" {
+		t.Fatalf("expected failure_class=stale_context, got %#v", result.Metadata)
+	}
+	if _, ok := result.Metadata["suggested_view_offset"]; !ok {
+		t.Fatalf("expected suggested_view_offset for multiedit miss, got %#v", result.Metadata)
+	}
+	next, _ := result.Metadata["next_action"].(string)
+	if !strings.Contains(next, "STALE_CONTEXT") && !strings.Contains(next, "view") {
+		t.Fatalf("expected structured next_action for multiedit miss, got %q", next)
+	}
 }
 
 // Helper functions
