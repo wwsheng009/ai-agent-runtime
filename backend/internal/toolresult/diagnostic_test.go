@@ -76,6 +76,9 @@ func TestDiagnoseClassifiesCommonRecoveryModes(t *testing.T) {
 		{name: "server", message: "HTTP 503 service unavailable", code: runtimeerrors.ErrAPIServerError, retryable: true},
 		{name: "shell missing command", message: "head : The term 'head' is not recognized as a name of a cmdlet", code: runtimeerrors.ErrToolShellCompat},
 		{name: "shell exit 127", message: "exit status 127", code: runtimeerrors.ErrToolShellCompat},
+		{name: "stale patch hunk", message: "无法定位 hunk: @@；未找到期望旧内容", code: runtimeerrors.ErrToolStaleContext},
+		{name: "stale edit old_string", message: "old_string 未在文件中找到；edit 只执行精确匹配", code: runtimeerrors.ErrToolStaleContext},
+		{name: "spawn depth", message: "[SPAWN_DEPTH_LIMIT] agent spawn depth limit reached: max_depth=1 requested_depth=2", code: runtimeerrors.ErrAgentSpawnDepthLimit},
 	}
 
 	for _, tc := range testCases {

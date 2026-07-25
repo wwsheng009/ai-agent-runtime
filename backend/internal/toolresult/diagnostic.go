@@ -1354,6 +1354,7 @@ func classifyToolErrorCode(message string) string {
 		return code
 	}
 	lower := strings.ToLower(message)
+	msg := message
 	switch {
 	case strings.Contains(lower, "background job") && strings.Contains(lower, "not found"),
 		strings.Contains(lower, "job_id") && strings.Contains(lower, "not found"):
@@ -1392,6 +1393,15 @@ func classifyToolErrorCode(message string) string {
 		return string(runtimeerrors.ErrToolPathNotFound)
 	case strings.Contains(lower, "approval") && strings.Contains(lower, "expired"):
 		return string(runtimeerrors.ErrApprovalExpired)
+	case strings.Contains(lower, "spawn depth limit") || strings.Contains(lower, "spawn_depth") ||
+		(strings.Contains(lower, "max_depth") && strings.Contains(lower, "spawn")) ||
+		(strings.Contains(lower, "depth limit") && strings.Contains(lower, "spawn")):
+		return string(runtimeerrors.ErrAgentSpawnDepthLimit)
+	case strings.Contains(msg, "无法定位 hunk") || strings.Contains(msg, "old_string 未在文件中找到") ||
+		strings.Contains(lower, "stale_context") || strings.Contains(lower, "stale @@") ||
+		strings.Contains(lower, "stale old_string") ||
+		(strings.Contains(lower, "old_string") && strings.Contains(lower, "not found")):
+		return string(runtimeerrors.ErrToolStaleContext)
 	case strings.Contains(lower, "deadline exceeded"), strings.Contains(lower, "timed out"),
 		strings.Contains(lower, "timeout"):
 		return string(runtimeerrors.ErrToolTimeout)
@@ -1440,7 +1450,8 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrToolNotFound, runtimeerrors.ErrToolExecution, runtimeerrors.ErrToolTimeout,
 		runtimeerrors.ErrWritePrecondition, runtimeerrors.ErrJobNotFound, runtimeerrors.ErrTurnDeadlineExceeded,
 		runtimeerrors.ErrAgentRunCanceled, runtimeerrors.ErrApprovalExpired, runtimeerrors.ErrSessionLeaseConflict,
-		runtimeerrors.ErrToolInvalidArgs, runtimeerrors.ErrToolPathNotFound, runtimeerrors.ErrToolShellCompat,
+		runtimeerrors.ErrToolInvalidArgs, runtimeerrors.ErrToolPathNotFound, runtimeerrors.ErrToolStaleContext,
+		runtimeerrors.ErrToolShellCompat, runtimeerrors.ErrAgentSpawnDepthLimit,
 		runtimeerrors.ErrToolBrokerFailure,
 		runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck,
 		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission, runtimeerrors.ErrContextBudget,
@@ -1515,8 +1526,10 @@ func nextActionForToolError(code string, message string) string {
 		return "Retry with bounded backoff; stop after repeated failure and report the blocker."
 	case runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck:
 		return "Inspect launch and health-check details, correct the cause, then retry only if side effects are safe."
-	case runtimeerrors.ErrWritePrecondition:
-		return "Re-read the target state and rebuild the mutation from the latest content."
+	case runtimeerrors.ErrWritePrecondition, runtimeerrors.ErrToolStaleContext:
+		return "Re-read the target file with view/grep, rebuild the edit/patch from the latest content, and do not retry the same stale context unchanged."
+	case runtimeerrors.ErrAgentSpawnDepthLimit:
+		return "complete_locally_or_use_spawn_team: this agent cannot spawn another child (max depth). Continue the work in the current agent, reuse an existing child, or use spawn_team for multi-worker orchestration. Do not retry the same spawn_agent."
 	case runtimeerrors.ErrContextBudget:
 		return "Reduce or compact the input and tool output before continuing."
 	case runtimeerrors.ErrAgentRunCanceled:

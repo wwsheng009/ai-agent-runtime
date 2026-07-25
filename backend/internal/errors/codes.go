@@ -27,13 +27,20 @@ const (
 	ErrSessionLeaseConflict ErrorCode = "SESSION_LEASE_CONFLICT"
 	ErrToolInvalidArgs      ErrorCode = "TOOL_INVALID_ARGS"
 	ErrToolPathNotFound     ErrorCode = "TOOL_PATH_NOT_FOUND"
+	// ErrToolStaleContext marks edit/apply_patch failures where the provided
+	// old_string / @@ context no longer matches the workspace. Models must
+	// re-view and rebuild rather than retry the same payload unchanged.
+	ErrToolStaleContext ErrorCode = "STALE_CONTEXT"
 	// ErrToolShellCompat marks shell/environment mismatch failures that are
 	// recoverable by changing the command shape (missing utility, wrong shell
 	// dialect, Unix-only pipeline on Windows, etc.). Generic — not tool-name bound.
 	ErrToolShellCompat    ErrorCode = "TOOL_SHELL_COMPAT"
-	ErrToolBrokerFailure  ErrorCode = "TOOL_BROKER_FAILURE"
-	ErrProcessStartFailed ErrorCode = "PROCESS_START_FAILED"
-	ErrProcessHealthcheck ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
+	// ErrAgentSpawnDepthLimit marks spawn_agent failures caused by MaxDepth.
+	// Not retryable: continue locally or use spawn_team / an existing agent.
+	ErrAgentSpawnDepthLimit ErrorCode = "SPAWN_DEPTH_LIMIT"
+	ErrToolBrokerFailure    ErrorCode = "TOOL_BROKER_FAILURE"
+	ErrProcessStartFailed   ErrorCode = "PROCESS_START_FAILED"
+	ErrProcessHealthcheck   ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
 
 	// Agent 错误
 	ErrAgentMaxSteps       ErrorCode = "AGENT_MAX_STEPS"
