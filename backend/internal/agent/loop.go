@@ -2309,7 +2309,7 @@ func simpleGoalToolNames(goal string) map[string]bool {
 		strings.HasPrefix(normalized, "查找文件"):
 		return map[string]bool{"grep": true, "glob": true}
 	case normalized == "pwd" || normalized == "date" || normalized == "whoami" || normalized == "git status":
-		return map[string]bool{"bash": true, "execute_shell_command": true}
+		return map[string]bool{"shell": true, "bash": true, "execute_shell_command": true}
 	default:
 		return nil
 	}
@@ -2319,18 +2319,22 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 	if len(tools) == 0 {
 		return nil
 	}
-	hasBash := false
+	// Prefer shell > bash > execute_shell_command so models see one primary
+	// shell surface with Codex-like content-success semantics.
+	preferredShellName := ""
+	preferredShellRank := 0
 	for _, definition := range tools {
-		if strings.EqualFold(strings.TrimSpace(definition.Name), "bash") {
-			hasBash = true
-			break
+		name := strings.ToLower(strings.TrimSpace(definition.Name))
+		if rank := shellToolSurfaceRank(name); rank > preferredShellRank {
+			preferredShellRank = rank
+			preferredShellName = name
 		}
 	}
 
 	optimized := make([]types.ToolDefinition, 0, len(tools))
 	for _, definition := range tools {
 		name := strings.ToLower(strings.TrimSpace(definition.Name))
-		if hasBash && name == "execute_shell_command" {
+		if preferredShellName != "" && shellToolSurfaceRank(name) > 0 && name != preferredShellName {
 			continue
 		}
 		item := types.ToolDefinition{
@@ -2346,6 +2350,21 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 		optimized = append(optimized, item)
 	}
 	return optimized
+}
+
+// shellToolSurfaceRank ranks shell tool aliases for model surface compaction.
+// Higher rank wins; zero means not a shell surface alias.
+func shellToolSurfaceRank(name string) int {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "shell":
+		return 3
+	case "bash":
+		return 2
+	case "execute_shell_command":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func compactGrepParametersForModel(parameters map[string]interface{}) map[string]interface{} {
@@ -2777,7 +2796,7 @@ func isExplorationOnlyToolCall(call types.ToolCall) bool {
 	switch strings.ToLower(strings.TrimSpace(call.Name)) {
 	case "view", "grep", "glob", "ls", "fetch", "web_search", "sourcegraph", "list_mcp_resources":
 		return true
-	case "bash", "execute_shell_command":
+	case "bash", "shell", "execute_shell_command":
 		return !toolCallDeclaresMutatedPaths(call.Args)
 	default:
 		return false

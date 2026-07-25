@@ -481,13 +481,19 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		sessionReasoningEffort = session.ReasoningEffort
 	}
 	reasoningEffort := firstNonEmptyChatValue(requestedReasoningEffort, sessionReasoningEffort)
-	if stream || strings.TrimSpace(reasoningEffort) != "" || (workspaceRoot != "" && workspaceContextEnabled) || len(profileContext) > 0 {
+	// tool_base_path is always set when a workspace root is known so preflight /
+	// relative path resolution match toolkit SetBasePath even when workspace
+	// context scanning remains disabled by default.
+	if stream || strings.TrimSpace(reasoningEffort) != "" || workspaceRoot != "" || len(profileContext) > 0 {
 		agentConfig.Options = make(map[string]interface{})
 		if stream {
 			agentConfig.Options["stream"] = true
 		}
 		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(reasoningEffort); reasoningEffort != "" {
 			agentConfig.Options["reasoning_effort"] = reasoningEffort
+		}
+		if workspaceRoot != "" {
+			agentConfig.Options["tool_base_path"] = workspaceRoot
 		}
 		if workspaceRoot != "" && workspaceContextEnabled {
 			agentConfig.Options["workspace_path"] = workspaceRoot

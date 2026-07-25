@@ -140,6 +140,36 @@ func TestPrepareToolExecution_MissingRequiredArgs(t *testing.T) {
 	}
 }
 
+func TestToolWorkspaceRootPrefersToolBasePath(t *testing.T) {
+	loop := NewReActLoop(&Agent{
+		config: &Config{
+			Options: map[string]interface{}{
+				"tool_base_path": "/tools/root",
+				"workspace_path": "/context/root",
+			},
+		},
+	}, nil, nil)
+	if got := loop.toolWorkspaceRoot(); got != "/tools/root" {
+		t.Fatalf("tool_base_path should win, got %q", got)
+	}
+
+	loop = NewReActLoop(&Agent{
+		config: &Config{
+			Options: map[string]interface{}{
+				"workspace_path": "/context/root",
+			},
+		},
+	}, nil, nil)
+	if got := loop.toolWorkspaceRoot(); got != "/context/root" {
+		t.Fatalf("workspace_path fallback missing, got %q", got)
+	}
+
+	loop = NewReActLoop(&Agent{config: &Config{}}, nil, nil)
+	if got := loop.toolWorkspaceRoot(); got != "" {
+		t.Fatalf("expected empty root without options, got %q", got)
+	}
+}
+
 // emptySoftMCPManager returns successful empty results with explicit empty_result
 // metadata so RecordOutcome can open the soft negative cache.
 type emptySoftMCPManager struct {

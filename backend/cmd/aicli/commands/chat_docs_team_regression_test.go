@@ -893,7 +893,10 @@ func newWorkspaceLocalOrchestrationTestHost(t *testing.T, session *ChatSession, 
 			MaxSteps:     10,
 		}
 		if strings.TrimSpace(workspaceRoot) != "" {
-			agentConfig.Options = map[string]interface{}{"workspace_path": workspaceRoot}
+			agentConfig.Options = map[string]interface{}{
+				"tool_base_path": workspaceRoot,
+				"workspace_path": workspaceRoot,
+			}
 		}
 		a := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, llmRuntime)
 		a.SetEventBus(host.EventBus)

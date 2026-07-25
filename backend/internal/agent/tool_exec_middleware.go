@@ -31,14 +31,34 @@ func (loop *ReActLoop) prepareToolExecution(metadata map[string]interface{}, too
 		toolMeta = toolInfo.Metadata
 	}
 	decision := toolexec.ApplyPreflight(loop.ensureToolExecMemory(), toolexec.PreflightRequest{
-		ToolName:    toolName,
-		ToolCallID:  toolCallID,
-		Args:        args,
-		InputSchema: schema,
-		Metadata:    toolMeta,
+		ToolName:      toolName,
+		ToolCallID:    toolCallID,
+		Args:          args,
+		InputSchema:   schema,
+		Metadata:      toolMeta,
+		WorkspaceRoot: loop.toolWorkspaceRoot(),
 	})
 	toolexec.AttachPreflightMetadata(metadata, decision)
 	return decision
+}
+
+// toolWorkspaceRoot returns the filesystem base path used by toolkit tools
+// (SetBasePath). Prefer options["tool_base_path"] so path resolution stays
+// available even when workspace context injection is disabled. Fall back to
+// workspace_path for older sessions / tests that only set the context key.
+// Preflight must resolve relative paths against this same root so process CWD
+// mismatches do not false-deny.
+func (loop *ReActLoop) toolWorkspaceRoot() string {
+	if loop == nil || loop.agent == nil || loop.agent.config == nil {
+		return ""
+	}
+	if root := optionString(loop.agent.config.Options, "tool_base_path"); root != "" {
+		return root
+	}
+	if root := optionString(loop.agent.config.Options, "workspace_path"); root != "" {
+		return root
+	}
+	return ""
 }
 
 func (loop *ReActLoop) finishToolExecutionOutcome(metadata map[string]interface{}, toolName, digest, toolErr string) {

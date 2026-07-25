@@ -1497,7 +1497,7 @@ func TestReActLoop_ParentDeadlineIsNotReportedAsRunDurationLimit(t *testing.T) {
 
 func TestProjectSimpleGoalToolSurfaceKeepsOnlyRelevantTools(t *testing.T) {
 	tools := []types.ToolDefinition{
-		{Name: "ls"}, {Name: "glob"}, {Name: "view"}, {Name: "bash"},
+		{Name: "ls"}, {Name: "glob"}, {Name: "view"}, {Name: "shell"}, {Name: "bash"},
 		{Name: "web_search"}, {Name: "spawn_team"}, {Name: "openai_image_generate"},
 	}
 
@@ -1505,7 +1505,7 @@ func TestProjectSimpleGoalToolSurfaceKeepsOnlyRelevantTools(t *testing.T) {
 	require.Equal(t, []string{"ls", "glob"}, toolDefinitionNames(projected))
 
 	projected = projectSimpleGoalToolSurface("git status", tools)
-	require.Equal(t, []string{"bash"}, toolDefinitionNames(projected))
+	require.Equal(t, []string{"shell", "bash"}, toolDefinitionNames(projected))
 
 	projected = projectSimpleGoalToolSurface("inspect the repository and fix the failing tests", tools)
 	require.Equal(t, toolDefinitionNames(tools), toolDefinitionNames(projected))
@@ -4160,7 +4160,8 @@ func TestReActLoop_GetAvailableTools_ExposesStableManagerToolsAcrossGoals(t *tes
 
 func TestOptimizeModelToolSurfacePrefersCanonicalShellAndCompactsGrep(t *testing.T) {
 	raw := []types.ToolDefinition{
-		{Name: "bash", Description: "canonical shell", Parameters: map[string]interface{}{"type": "object"}},
+		{Name: "shell", Description: "canonical shell", Parameters: map[string]interface{}{"type": "object"}},
+		{Name: "bash", Description: "compat shell", Parameters: map[string]interface{}{"type": "object"}},
 		{Name: "execute_shell_command", Description: strings.Repeat("legacy shell guidance ", 100), Parameters: map[string]interface{}{"type": "object"}},
 		{
 			Name:        "grep",
@@ -4181,7 +4182,7 @@ func TestOptimizeModelToolSurfacePrefersCanonicalShellAndCompactsGrep(t *testing
 	require.NoError(t, err)
 
 	optimized := optimizeModelToolSurface(raw)
-	require.Equal(t, []string{"bash", "grep"}, toolDefinitionNames(optimized))
+	require.Equal(t, []string{"shell", "grep"}, toolDefinitionNames(optimized))
 	optimizedJSON, err := json.Marshal(optimized)
 	require.NoError(t, err)
 	require.Less(t, len(optimizedJSON), len(rawJSON)/2)
@@ -4199,6 +4200,12 @@ func TestOptimizeModelToolSurfaceKeepsLegacyShellWhenCanonicalIsUnavailable(t *t
 	tools := optimizeModelToolSurface([]types.ToolDefinition{{Name: "execute_shell_command"}})
 	require.Len(t, tools, 1)
 	require.Equal(t, "execute_shell_command", tools[0].Name)
+
+	tools = optimizeModelToolSurface([]types.ToolDefinition{
+		{Name: "bash"},
+		{Name: "execute_shell_command"},
+	})
+	require.Equal(t, []string{"bash"}, toolDefinitionNames(tools))
 }
 
 func TestOptimizeModelToolSurfaceReducesDefaultToolkitSchema(t *testing.T) {
@@ -4217,7 +4224,10 @@ func TestOptimizeModelToolSurfaceReducesDefaultToolkitSchema(t *testing.T) {
 	optimizedJSON, err := json.Marshal(optimized)
 	require.NoError(t, err)
 
-	require.NotContains(t, toolDefinitionNames(optimized), "execute_shell_command")
+	names := toolDefinitionNames(optimized)
+	require.Contains(t, names, "shell")
+	require.NotContains(t, names, "bash")
+	require.NotContains(t, names, "execute_shell_command")
 	require.Greater(t, len(rawJSON)-len(optimizedJSON), 8*1024)
 }
 

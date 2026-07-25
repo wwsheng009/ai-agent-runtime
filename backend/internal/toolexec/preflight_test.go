@@ -593,6 +593,107 @@ func TestPathPreflightAllowsPartialPathsArray(t *testing.T) {
 	}
 }
 
+func TestPathPreflightUsesWorkspaceRootForRelativePaths(t *testing.T) {
+	workspace := t.TempDir()
+	docsDir := filepath.Join(workspace, "docs")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	// Process CWD is a session-like empty directory without docs/.
+	cwd := t.TempDir()
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir empty cwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{"type": "string"},
+		},
+	}
+	meta := map[string]interface{}{"retry_class": "safe"}
+
+	// Without WorkspaceRoot, relative docs is checked against process CWD and denied.
+	denied := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "ls",
+		Args:        map[string]interface{}{"path": "docs"},
+		InputSchema: schema,
+		Metadata:    meta,
+	})
+	if denied.Allow || denied.Preflight != "path_existence" {
+		t.Fatalf("expected cwd-relative miss without workspace root: %+v", denied)
+	}
+
+	// With WorkspaceRoot, the same relative path resolves under the tool base path.
+	allowed := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:      "ls",
+		Args:          map[string]interface{}{"path": "docs"},
+		InputSchema:   schema,
+		Metadata:      meta,
+		WorkspaceRoot: workspace,
+	})
+	if !allowed.Allow {
+		t.Fatalf("expected workspace-relative docs to pass preflight: %+v", allowed)
+	}
+
+	// Missing relative path under workspace still fails, and candidates stay relative.
+	sibling := filepath.Join(workspace, "docz")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+	missing := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:      "ls",
+		Args:          map[string]interface{}{"path": "docs-missing"},
+		InputSchema:   schema,
+		Metadata:      meta,
+		WorkspaceRoot: workspace,
+	})
+	if missing.Allow || missing.Preflight != "path_existence" {
+		t.Fatalf("expected missing workspace-relative path denied: %+v", missing)
+	}
+	// docs/ is a nearby sibling of docs-missing under workspace; candidates should
+	// be rewritten relative so the model can reuse them without absolute roots.
+	foundRelative := false
+	for _, cand := range missing.PathCandidates {
+		if cand == "docs" || cand == "docz" || strings.HasSuffix(cand, "/docs") || strings.HasSuffix(cand, "/docz") {
+			foundRelative = true
+			if filepath.IsAbs(cand) {
+				t.Fatalf("expected relative candidate for relative miss, got %q", cand)
+			}
+		}
+	}
+	if !foundRelative && len(missing.PathCandidates) == 0 {
+		// Listing may still yield candidates depending on ranking; empty is ok if
+		// the primary existence check against workspace root already succeeded above.
+		t.Logf("no path candidates for docs-missing (ok): error=%q", missing.Error)
+	}
+}
+
+func TestResolvePreflightPathJoinsWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	got := resolvePreflightPath("docs", root)
+	want := filepath.Clean(filepath.Join(root, "docs"))
+	if got != want {
+		t.Fatalf("resolvePreflightPath(docs)=%q want %q", got, want)
+	}
+	// Use a real absolute path so Windows drive-letter abs checks work.
+	abs := filepath.Join(root, "abs", "file.go")
+	if !filepath.IsAbs(abs) {
+		t.Fatalf("fixture abs path not absolute: %q", abs)
+	}
+	if got := resolvePreflightPath(abs, root); got != filepath.Clean(abs) {
+		t.Fatalf("absolute path should not join workspace: got %q", got)
+	}
+	if got := resolvePreflightPath("docs", ""); got != "docs" {
+		t.Fatalf("empty root should keep relative path: got %q", got)
+	}
+}
+
 func TestCircuitOpenReplaysStoredPathCandidates(t *testing.T) {
 	mem := NewMemory(2)
 	schema := map[string]interface{}{

@@ -22,7 +22,12 @@ type PreflightRequest struct {
 	Args        map[string]interface{}
 	InputSchema map[string]interface{}
 	Metadata    map[string]interface{}
+	// WorkspaceRoot is the session/tool base path used to resolve relative
+	// content paths (mirrors toolkit SetBasePath). When empty, relative paths
+	// fall back to process cwd via filepath.Abs.
+	WorkspaceRoot string
 	// PathExists optionally overrides filesystem checks (tests).
+	// It receives the resolved absolute/candidate path after WorkspaceRoot join.
 	PathExists func(path string) bool
 }
 
@@ -117,7 +122,7 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 			} else if decision.ErrorCode == string(runtimeerrors.ErrToolPathNotFound) {
 				// Best-effort recompute when older records lack stored candidates.
 				if pathValue := firstMissingPathHint(req); pathValue != "" {
-					if hints := suggestNearbyPathCandidates(pathValue, req.PathExists); len(hints) > 0 {
+					if hints := suggestNearbyPathCandidatesForRequest(pathValue, req); len(hints) > 0 {
 						decision.PathCandidates = hints
 						if !strings.Contains(strings.ToLower(decision.NextAction), "nearby candidates") {
 							decision.NextAction = fmt.Sprintf(
@@ -183,7 +188,7 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 		decision.Preflight = "path_existence"
 		if pathValue != "" {
 			decision.Error = fmt.Sprintf("%s: %s", pathErr, pathValue)
-			if hints := suggestNearbyPathCandidates(pathValue, req.PathExists); len(hints) > 0 {
+			if hints := suggestNearbyPathCandidatesForRequest(pathValue, req); len(hints) > 0 {
 				decision.PathCandidates = hints
 				decision.NextAction = fmt.Sprintf(
 					"Path not found: %s. Nearby candidates: %s. Correct the path or working directory, then call the tool again. Do not retry the same missing path unchanged.",
@@ -358,10 +363,7 @@ func firstMissingPathHint(req PreflightRequest) string {
 	if len(candidates) == 0 {
 		candidates = collectReadPathCandidates(req.InputSchema, req.Args)
 	}
-	exists := req.PathExists
-	if exists == nil {
-		exists = defaultPathExists
-	}
+	exists := pathExistsChecker(req)
 	for _, candidate := range candidates {
 		path := strings.TrimSpace(candidate)
 		if path == "" || path == "." || path == "./" || strings.Contains(path, "://") {
@@ -897,10 +899,7 @@ func preflightMissingReadPath(req PreflightRequest) (string, string) {
 	if !shouldPreflightPaths(req.Metadata, req.InputSchema, req.Args) {
 		return "", ""
 	}
-	exists := req.PathExists
-	if exists == nil {
-		exists = defaultPathExists
-	}
+	exists := pathExistsChecker(req)
 	// Prefer content targets (file_path / paths / files[]) over execution roots
 	// (cwd/workdir). A present workdir must not soft-allow a missing single file.
 	candidates := collectContentReadPathCandidates(req.InputSchema, req.Args)
@@ -1210,25 +1209,109 @@ func isMutationLikeKey(key string) bool {
 	}
 }
 
+// pathExistsChecker returns a function that checks path existence using the
+// request's WorkspaceRoot for relative paths (matching toolkit SetBasePath).
+// Custom PathExists hooks still receive the resolved path.
+func pathExistsChecker(req PreflightRequest) func(path string) bool {
+	root := strings.TrimSpace(req.WorkspaceRoot)
+	if root != "" && !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	hook := req.PathExists
+	return func(path string) bool {
+		resolved := resolvePreflightPath(path, root)
+		if hook != nil {
+			// Prefer hook on resolved path; also accept original relative form so
+			// existing unit tests that stub by logical path keep working.
+			if hook(resolved) || (resolved != path && hook(path)) {
+				return true
+			}
+			return false
+		}
+		return defaultPathExists(resolved)
+	}
+}
+
+// resolvePreflightPath joins relative targets onto the session workspace root
+// the same way toolkit tools resolve via SetBasePath. Absolute paths are kept.
+func resolvePreflightPath(path, workspaceRoot string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return trimmed
+	}
+	if filepath.IsAbs(trimmed) {
+		return filepath.Clean(trimmed)
+	}
+	root := strings.TrimSpace(workspaceRoot)
+	if root == "" {
+		return trimmed
+	}
+	return filepath.Clean(filepath.Join(root, trimmed))
+}
+
 func defaultPathExists(path string) bool {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return false
 	}
-	// Relative paths are resolved against process cwd; tools may remap later,
-	// so preflight only rejects clearly missing absolute or relative targets.
+	// Prefer the path as given (already workspace-resolved when applicable).
 	if _, err := os.Stat(trimmed); err == nil {
 		return true
 	}
-	if abs, err := filepath.Abs(trimmed); err == nil {
-		if _, err := os.Stat(abs); err == nil {
-			return true
+	// Fall back to process-cwd absolute form for bare relative paths when no
+	// workspace root was supplied.
+	if !filepath.IsAbs(trimmed) {
+		if abs, err := filepath.Abs(trimmed); err == nil {
+			if _, err := os.Stat(abs); err == nil {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 const maxNearbyPathCandidates = 5
+
+// suggestNearbyPathCandidatesForRequest resolves the missing path against the
+// session workspace root before listing siblings, then rewrites candidates back
+// to the same shape the model originally used (relative vs absolute).
+func suggestNearbyPathCandidatesForRequest(missing string, req PreflightRequest) []string {
+	missing = strings.TrimSpace(missing)
+	if missing == "" {
+		return nil
+	}
+	root := strings.TrimSpace(req.WorkspaceRoot)
+	if root != "" && !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	resolved := resolvePreflightPath(missing, root)
+	hints := suggestNearbyPathCandidates(resolved, req.PathExists)
+	if len(hints) == 0 {
+		// Fall back to original form (process-cwd relative) for legacy behavior.
+		if resolved != missing {
+			hints = suggestNearbyPathCandidates(missing, req.PathExists)
+		}
+		return hints
+	}
+	if filepath.IsAbs(missing) || root == "" {
+		return hints
+	}
+	// Prefer workspace-relative candidates when the model supplied a relative path.
+	out := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		rel, err := filepath.Rel(root, hint)
+		if err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+			out = append(out, filepath.ToSlash(rel))
+			continue
+		}
+		out = append(out, hint)
+	}
+	return out
+}
 
 // suggestNearbyPathCandidates lists sibling filesystem entries near a missing path
 // and ranks generic typo / case / extension-preserving alternatives. This is a

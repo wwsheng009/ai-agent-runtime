@@ -818,7 +818,7 @@ func TestApplyLocalChildReadOnlyPolicyOverridesBypassPermissions(t *testing.T) {
 	if policy == nil || !policy.ReadOnly {
 		t.Fatalf("expected child read-only execution policy, got %#v", policy)
 	}
-	for _, toolName := range []string{"write_file", "edit", "apply_patch", "append_write", "bash", "execute_shell_command"} {
+	for _, toolName := range []string{"write_file", "edit", "apply_patch", "append_write", "shell", "bash", "execute_shell_command"} {
 		if err := policy.AllowTool(toolName); err == nil {
 			t.Fatalf("expected read-only policy to block %s", toolName)
 		}
@@ -2816,7 +2816,8 @@ func TestBuildLocalChatAgent_DisablesWorkspaceContextByDefaultForActorChat(t *te
 		Bootstrap: &runtimebootstrap.Manager{},
 	}
 
-	apiAgent := buildLocalChatAgent(session, host, nil, t.TempDir(), "", "")
+	workspaceRoot := t.TempDir()
+	apiAgent := buildLocalChatAgent(session, host, nil, workspaceRoot, "", "")
 	if apiAgent == nil {
 		t.Fatal("expected agent")
 	}
@@ -2825,13 +2826,18 @@ func TestBuildLocalChatAgent_DisablesWorkspaceContextByDefaultForActorChat(t *te
 	if cfg == nil {
 		t.Fatal("expected agent config")
 	}
-	if cfg.Options != nil {
-		if got := cfg.Options["workspace_path"]; got != nil {
-			t.Fatalf("expected workspace_path to be disabled by default, got %#v", got)
-		}
-		if got := cfg.Options["context_workspace_mode"]; got != nil {
-			t.Fatalf("expected context_workspace_mode to be disabled by default, got %#v", got)
-		}
+	if cfg.Options == nil {
+		t.Fatal("expected options with tool_base_path when workspace root is known")
+	}
+	// Tool path resolution stays available even when workspace context scanning is off.
+	if got := cfg.Options["tool_base_path"]; got != workspaceRoot {
+		t.Fatalf("expected tool_base_path=%q, got %#v", workspaceRoot, got)
+	}
+	if got := cfg.Options["workspace_path"]; got != nil {
+		t.Fatalf("expected workspace_path to be disabled by default, got %#v", got)
+	}
+	if got := cfg.Options["context_workspace_mode"]; got != nil {
+		t.Fatalf("expected context_workspace_mode to be disabled by default, got %#v", got)
 	}
 }
 
