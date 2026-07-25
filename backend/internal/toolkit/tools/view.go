@@ -19,6 +19,14 @@ import (
 
 const viewDirPreviewLimit = 40
 
+// viewDefaultLimit is the default window size when callers omit limit.
+// Large files should still be segmented with explicit offset/limit.
+const viewDefaultLimit = 2000
+
+// viewEfficiencyAdvisoryThreshold marks when a default-size leading window is
+// large enough that models should prefer narrower ranges or continue via offset.
+const viewEfficiencyAdvisoryThreshold = 2000
+
 // ViewTool 文件查看工具
 type ViewTool struct {
 	*toolkit.BaseTool
@@ -51,11 +59,11 @@ func NewViewTool() *ViewTool {
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
-				"description": "开始读取的行号（0-based，默认为 0）。大文件建议配合 limit 分段查看。",
+				"description": "开始读取的行号（0-based，默认为 0）。大文件请配合 limit 分段查看；不要反复全量 view 同一路径。",
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "读取行数，默认 2000；结果会标记 eof 和 is_truncated，便于按需继续。",
+				"description": "读取行数，默认 2000；结果会标记 eof 和 is_truncated，以及 suggested_next_offset，便于按需继续。大文件优先更小 limit。",
 			},
 		},
 		"required": []string{},
@@ -75,6 +83,10 @@ func NewViewTool() *ViewTool {
 
 func (v *ViewTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindRead,
+		runtimetypes.ToolMetadataReadOnlyKey:        true,
+		runtimetypes.ToolMetadataMutatesFSKey:       false,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
@@ -130,7 +142,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 		p.Offset = 0
 	}
 	if p.Limit <= 0 {
-		p.Limit = 2000
+		p.Limit = viewDefaultLimit
 	}
 	resolvedPath := v.resolvePath(p.FilePath)
 
@@ -229,7 +241,41 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	if readMeta.TotalLinesKnown {
 		result.Metadata["total_lines"] = readMeta.TotalLines
 	}
+	attachViewEfficiencyHints(result, p, readMeta)
 	return result, nil
+}
+
+// attachViewEfficiencyHints stamps continuation metadata and a soft advisory when
+// a large leading window is truncated. This is non-blocking guidance only.
+func attachViewEfficiencyHints(result *toolkit.ToolResult, request ViewFileRequest, readMeta viewReadResult) {
+	if result == nil || result.Metadata == nil {
+		return
+	}
+	if readMeta.HasMore {
+		nextOffset := request.Offset + readMeta.LinesRead
+		if nextOffset < request.Offset {
+			nextOffset = request.Offset
+		}
+		result.Metadata["suggested_next_offset"] = nextOffset
+	}
+	// Soft-warn only for default-sized leading windows that still truncated.
+	// Explicit small ranges are already efficient; EOF windows need no advisory.
+	if !readMeta.HasMore || request.Offset != 0 || request.Limit < viewEfficiencyAdvisoryThreshold {
+		return
+	}
+	nextOffset, _ := result.Metadata["suggested_next_offset"].(int)
+	result.Metadata["efficiency_advisory"] = "prefer_offset_limit"
+	advisory := fmt.Sprintf(
+		"[efficiency] File continues past this window (is_truncated=true, lines_read=%d). Prefer a smaller limit for large files, or continue with offset=%d limit<=%d. For multiple independent files, use view.files in one call instead of repeated full-file views.",
+		readMeta.LinesRead,
+		nextOffset,
+		viewDefaultLimit,
+	)
+	if strings.TrimSpace(result.Content) == "" {
+		result.Content = advisory
+		return
+	}
+	result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + advisory
 }
 
 func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest) (*toolkit.ToolResult, error) {

@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,6 +137,44 @@ func TestViewTool_LargeFileCanBeReadInSmallRanges(t *testing.T) {
 	}
 	if result.Content != "1: one" || result.Metadata["is_truncated"] != true {
 		t.Fatalf("unexpected large-file range result: content=%q metadata=%#v", result.Content, result.Metadata)
+	}
+	if next, ok := result.Metadata["suggested_next_offset"].(int); !ok || next != 1 {
+		t.Fatalf("expected suggested_next_offset=1 for truncated small window, got %#v", result.Metadata["suggested_next_offset"])
+	}
+	if _, ok := result.Metadata["efficiency_advisory"]; ok {
+		t.Fatalf("small explicit limit should not stamp efficiency_advisory, got %#v", result.Metadata)
+	}
+}
+
+func TestViewTool_DefaultWindowTruncationEmitsEfficiencyAdvisory(t *testing.T) {
+	root := t.TempDir()
+	var body strings.Builder
+	for i := 0; i < viewDefaultLimit+5; i++ {
+		fmt.Fprintf(&body, "line-%d\n", i+1)
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(body.String()), 0o644); err != nil {
+		t.Fatalf("write big file: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "big.txt",
+		// omit limit so default window applies
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected default-window read success, result=%#v err=%v", result, err)
+	}
+	if result.Metadata["is_truncated"] != true {
+		t.Fatalf("expected truncated default window, got %#v", result.Metadata)
+	}
+	if next, ok := result.Metadata["suggested_next_offset"].(int); !ok || next != viewDefaultLimit {
+		t.Fatalf("expected suggested_next_offset=%d, got %#v", viewDefaultLimit, result.Metadata["suggested_next_offset"])
+	}
+	if got, _ := result.Metadata["efficiency_advisory"].(string); got != "prefer_offset_limit" {
+		t.Fatalf("expected efficiency_advisory=prefer_offset_limit, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "[efficiency]") || !strings.Contains(result.Content, "offset=") {
+		t.Fatalf("expected efficiency advisory text in content, got %q", result.Content)
 	}
 }
 
