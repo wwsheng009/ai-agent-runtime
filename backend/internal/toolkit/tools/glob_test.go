@@ -621,3 +621,50 @@ func TestGlobTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
 		t.Fatalf("expected case_insensitive description, got %q", caseDesc)
 	}
 }
+
+func TestGlobTool_UnsupportedBracePatternEmptyRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.ts"), []byte("export {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGlobTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "*.{go,ts}",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected empty success for brace pattern, got %#v", result)
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result=true, got %#v", result.Metadata)
+	}
+	if result.Metadata["unsupported_brace_pattern"] != true {
+		t.Fatalf("expected unsupported_brace_pattern metadata, got %#v", result.Metadata)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "brace") && !strings.Contains(next, "*.go") {
+		t.Fatalf("expected brace recovery next_action, got %q", next)
+	}
+	if !strings.Contains(result.Content, "brace") && !strings.Contains(result.Content, "{") {
+		t.Fatalf("expected brace hint in content, got %q", result.Content)
+	}
+}
+
+func TestLooksLikeUnsupportedBraceGlob(t *testing.T) {
+	if !looksLikeUnsupportedBraceGlob("*.{go,ts}") {
+		t.Fatal("expected *.{go,ts} to be unsupported brace")
+	}
+	if !looksLikeUnsupportedBraceGlob("**/*.{js,ts,tsx}") {
+		t.Fatal("expected multi-ext brace to match")
+	}
+	if looksLikeUnsupportedBraceGlob("*.go") || looksLikeUnsupportedBraceGlob("{alone}") || looksLikeUnsupportedBraceGlob("") {
+		t.Fatal("plain patterns must not look like brace expansions")
+	}
+}

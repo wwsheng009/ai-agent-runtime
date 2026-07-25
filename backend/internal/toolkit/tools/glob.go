@@ -37,7 +37,7 @@ func NewGlobTool() *GlobTool {
 		"properties": map[string]interface{}{
 			"pattern": map[string]interface{}{
 				"type":        "string",
-				"description": "文件名/路径 glob 模式，例如 *.go, **/*.yaml。glob 只匹配路径，不搜索文件内容；若要查内容请使用 grep。若需要忽略大小写，优先使用 case_insensitive=true，而不是并行构造多个大小写变体。",
+				"description": "文件名/路径 glob 模式，例如 *.go, **/*.yaml。仅支持 * ? [] 与 **；不支持 shell brace 展开（如 *.{go,ts}）。多扩展名请分多次调用，或改用 grep 的 include/glob 数组。glob 只匹配路径，不搜索文件内容；若要查内容请使用 grep。大小写不确定时用 case_insensitive=true。",
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
@@ -66,7 +66,7 @@ func NewGlobTool() *GlobTool {
 	return &GlobTool{
 		BaseTool: toolkit.NewBaseTool(
 			"glob",
-			"文件名/路径模式匹配搜索，不搜索文件内容。递归文件匹配会优先使用 rg --files 加速；目录匹配、单层匹配或 rg 不可用时回退内置遍历。大小写不确定时使用 case_insensitive=true。",
+			"文件名/路径模式匹配搜索，不搜索文件内容。支持 * ? [] **，不支持 brace 展开（*.{go,ts}）。递归文件匹配优先用 rg --files；目录匹配、单层匹配或 rg 不可用时回退内置遍历。大小写不确定时用 case_insensitive=true。",
 			"1.0.0",
 			parameters,
 			true,
@@ -158,8 +158,12 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	// 格式化输出
 	var output string
+	braceHint := ""
+	if looksLikeUnsupportedBraceGlob(pattern) {
+		braceHint = "（检测到 shell brace 语法如 *.{a,b}；glob 不展开 brace。请分多次调用不同扩展名，或改用 grep include/glob 数组。）"
+	}
 	if len(matches) == 0 {
-		output = "未找到匹配项"
+		output = "未找到匹配项" + braceHint
 	} else {
 		output = strings.Join(matches, "\n")
 		if truncated {
@@ -179,10 +183,16 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		"limit_hit":        truncated,
 		"engine":           engine,
 	}
+	if braceHint != "" {
+		metadata["unsupported_brace_pattern"] = true
+	}
 	// True no-match success: stamp empty disposition for model recovery
 	// (broaden pattern / change path) without treating as hard failure.
 	if len(matches) == 0 && !truncated {
 		toolresult.MarkEmptySuccess(metadata)
+		if braceHint != "" {
+			metadata[toolresult.MetadataNextActionKey] = "glob 不支持 shell brace 展开（如 *.{go,ts}）。请拆成多次 pattern 调用（*.go、*.ts），或改用 toolkit grep 的 include/glob 数组。不要原样重试同一 brace pattern。"
+		}
 	}
 
 	return &toolkit.ToolResult{
@@ -603,6 +613,23 @@ func matchGlobPart(patternPart, pathPart string, caseInsensitive bool) (bool, er
 
 func hasGlobMeta(pattern string) bool {
 	return strings.ContainsAny(pattern, "*?[")
+}
+
+// looksLikeUnsupportedBraceGlob detects common shell brace expansions that
+// path.Match / rg --glob will treat as literal characters, producing false
+// empty matches (e.g. *.{go,ts} or **/*.{js,ts,tsx}).
+func looksLikeUnsupportedBraceGlob(pattern string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	open := strings.Index(pattern, "{")
+	close := strings.LastIndex(pattern, "}")
+	if open < 0 || close <= open {
+		return false
+	}
+	inner := pattern[open+1 : close]
+	return strings.Contains(inner, ",")
 }
 
 func containsDoubleStar(parts []string) bool {

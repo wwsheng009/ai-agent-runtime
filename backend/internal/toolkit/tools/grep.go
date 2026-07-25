@@ -300,9 +300,9 @@ func NewGrepTool() *GrepTool {
 				"description": "搜索路径（默认为当前目录）。若提供 rg_args，也可把 path 作为第二个位置参数放在 rg_args 中。",
 			},
 			"paths":   stringOrStringArraySchema("批量搜索多个文件或目录，等价于 rg pattern path1 path2 ...。"),
-			"include": stringOrStringArraySchema("包含的文件名 glob 模式，例如 *.go。支持字符串、字符串数组，或逗号分隔多个模式。"),
+			"include": stringOrStringArraySchema("包含的文件名 glob 模式，例如 *.go。支持字符串、字符串数组，或逗号分隔多个模式。多扩展名优先传数组 [\"*.go\",\"*.ts\"]，不要用 shell brace（*.{go,ts}）。"),
 			"exclude": stringOrStringArraySchema("排除的文件名 glob 模式，例如 *.test.ts。支持字符串、字符串数组，或逗号分隔多个模式。"),
-			"glob":    stringOrStringArraySchema("兼容 rg 的 --glob/-g。可直接按 ripgrep 思路传 glob；以 ! 开头的模式会视为排除模式。"),
+			"glob":    stringOrStringArraySchema("兼容 rg 的 --glob/-g。可直接按 ripgrep 思路传 glob；以 ! 开头的模式会视为排除模式。多扩展名用数组或多次 -g，不要用 *.{go,ts} brace 语法。"),
 			"glob_case_insensitive": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容 rg 的 --glob-case-insensitive：让通过 glob/-g 传入的模式按大小写不敏感方式匹配。若使用 rg_args，也支持 --iglob。",
@@ -5208,6 +5208,13 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	if opts != nil && opts.jsonOutput {
 		output = ""
 	}
+	braceHint := ""
+	if opts != nil && grepOptionsHasUnsupportedBraceGlob(opts) {
+		braceHint = "（检测到 shell brace 语法如 *.{a,b}；grep 的 glob/include 不展开 brace。请改用数组 [\"*.go\",\"*.ts\"] 或逗号分隔多个模式。）"
+		if matchCount == 0 && !truncated && output != "" {
+			output = output + braceHint
+		}
+	}
 	if len(results) > 0 {
 		output = strings.Join(results, "\n")
 		if truncated && (opts == nil || !opts.jsonOutput) {
@@ -5328,6 +5335,10 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	// Do not mark when truncated mid-stream still reports zero (defensive).
 	if matchCount == 0 && !truncated {
 		toolresult.MarkEmptySuccess(metadata)
+		if braceHint != "" {
+			metadata["unsupported_brace_pattern"] = true
+			metadata[toolresult.MetadataNextActionKey] = "grep glob/include 不支持 shell brace 展开（如 *.{go,ts}）。请改用数组 [\"*.go\",\"*.ts\"]、逗号分隔多个模式，或多次调用。不要原样重试同一 brace pattern。"
+		}
 	}
 
 	return &toolkit.ToolResult{
@@ -5342,4 +5353,37 @@ func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount i
 	result := buildGrepResult(opts, results, matchCount, truncated, stats)
 	result.Metadata["engine"] = engine
 	return result
+}
+
+// grepOptionsHasUnsupportedBraceGlob reports shell brace expansions in
+// include/exclude/glob filters that rg and the builtin matcher treat literally.
+func grepOptionsHasUnsupportedBraceGlob(opts *grepOptions) bool {
+	if opts == nil {
+		return false
+	}
+	if looksLikeUnsupportedBraceGlob(opts.include) || looksLikeUnsupportedBraceGlob(opts.exclude) {
+		return true
+	}
+	for _, spec := range opts.includeSpecs {
+		if looksLikeUnsupportedBraceGlob(spec.pattern) {
+			return true
+		}
+	}
+	for _, spec := range opts.excludeSpecs {
+		if looksLikeUnsupportedBraceGlob(spec.pattern) {
+			return true
+		}
+	}
+	// include/exclude may already be comma-joined; still scan raw fields.
+	for _, part := range strings.Split(opts.include, ",") {
+		if looksLikeUnsupportedBraceGlob(part) {
+			return true
+		}
+	}
+	for _, part := range strings.Split(opts.exclude, ",") {
+		if looksLikeUnsupportedBraceGlob(part) {
+			return true
+		}
+	}
+	return false
 }

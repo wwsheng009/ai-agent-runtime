@@ -5037,3 +5037,43 @@ func TestLooksLikePCREOnlyPattern(t *testing.T) {
 		t.Fatal("plain RE2 pattern should not be flagged")
 	}
 }
+
+func TestGrepBuildResult_UnsupportedBraceGlobEmptyRecovery(t *testing.T) {
+	opts := &grepOptions{
+		include: "*.{go,ts}",
+		includeSpecs: []grepGlobPattern{
+			{pattern: "*.{go,ts}"},
+		},
+	}
+	result := buildGrepResult(opts, nil, 0, false, nil)
+	if result == nil || !result.Success {
+		t.Fatalf("expected empty success, got %#v", result)
+	}
+	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
+		t.Fatalf("expected empty_result, got %#v", result.Metadata)
+	}
+	if result.Metadata["unsupported_brace_pattern"] != true {
+		t.Fatalf("expected unsupported_brace_pattern, got %#v", result.Metadata)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "brace") && !strings.Contains(next, "*.go") {
+		t.Fatalf("expected brace recovery next_action, got %q", next)
+	}
+	if !strings.Contains(result.Content, "brace") {
+		t.Fatalf("expected brace hint in content, got %q", result.Content)
+	}
+}
+
+func TestGrepOptionsHasUnsupportedBraceGlob(t *testing.T) {
+	if !grepOptionsHasUnsupportedBraceGlob(&grepOptions{include: "*.{go,ts}"}) {
+		t.Fatal("include brace should be detected")
+	}
+	if !grepOptionsHasUnsupportedBraceGlob(&grepOptions{
+		excludeSpecs: []grepGlobPattern{{pattern: "**/*.{js,ts}"}},
+	}) {
+		t.Fatal("excludeSpecs brace should be detected")
+	}
+	if grepOptionsHasUnsupportedBraceGlob(&grepOptions{include: "*.go", exclude: "*.tmp"}) {
+		t.Fatal("plain globs must not look like brace expansions")
+	}
+}
