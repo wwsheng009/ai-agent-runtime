@@ -12,20 +12,56 @@ import (
 // RenderEnvironmentContextBlock renders a compact model-visible environment block
 // that captures the current execution context relevant to shell/tool planning.
 func RenderEnvironmentContextBlock(cwd string) string {
-	values := CurrentEnvironmentValues()
+	return RenderEnvironmentContextBlockFromValues(cwd, CurrentEnvironmentValues())
+}
+
+// RenderEnvironmentContextBlockFromValues renders an environment block from a
+// previously captured values map. Callers that freeze session-scoped snapshots
+// should reuse those values instead of re-probing the host each turn.
+func RenderEnvironmentContextBlockFromValues(cwd string, values map[string]interface{}) string {
+	if values == nil {
+		values = map[string]interface{}{}
+	}
 	lines := []string{"<environment_context>"}
 
 	if cwd = strings.TrimSpace(cwd); cwd != "" {
 		lines = append(lines, fmt.Sprintf("  <cwd>%s</cwd>", cwd))
 	}
 
-	lines = append(lines, fmt.Sprintf("  <os>%s</os>", values["os"]))
-	lines = append(lines, fmt.Sprintf("  <shell>%s</shell>", values["shell"]))
-	lines = append(lines, fmt.Sprintf("  <current_date>%s</current_date>", values["current_date"]))
-	lines = append(lines, fmt.Sprintf("  <timezone>%s</timezone>", values["timezone"]))
+	lines = append(lines, fmt.Sprintf("  <os>%s</os>", environmentValueString(values["os"])))
+	lines = append(lines, fmt.Sprintf("  <shell>%s</shell>", environmentValueString(values["shell"])))
+	lines = append(lines, fmt.Sprintf("  <current_date>%s</current_date>", environmentValueString(values["current_date"])))
+	lines = append(lines, fmt.Sprintf("  <timezone>%s</timezone>", environmentValueString(values["timezone"])))
+	if available := environmentValueStringSlice(values["available_commands"]); len(available) > 0 {
+		lines = append(lines, fmt.Sprintf("  <available_commands>%s</available_commands>", strings.Join(available, ",")))
+	}
+	if unavailable := environmentValueStringSlice(values["unavailable_commands"]); len(unavailable) > 0 {
+		lines = append(lines, fmt.Sprintf("  <unavailable_commands>%s</unavailable_commands>", strings.Join(unavailable, ",")))
+	}
 	lines = append(lines, "</environment_context>")
 
 	return strings.Join(lines, "\n")
+}
+
+// EnvironmentSnapshot holds session-frozen environment prompt fragments.
+// Capture once at session create / first ensure, then reuse for later turns.
+type EnvironmentSnapshot struct {
+	ContextBlock         string
+	CapabilityGuidance   string
+	ProbedAt             time.Time
+	Values               map[string]interface{}
+}
+
+// CaptureEnvironmentSnapshot measures the host once and returns rendered prompt
+// fragments suitable for session freeze/reuse.
+func CaptureEnvironmentSnapshot(cwd string) EnvironmentSnapshot {
+	values := CurrentEnvironmentValues()
+	return EnvironmentSnapshot{
+		ContextBlock:       RenderEnvironmentContextBlockFromValues(cwd, values),
+		CapabilityGuidance: RenderEnvironmentCapabilityGuidance(),
+		ProbedAt:           time.Now().UTC(),
+		Values:             values,
+	}
 }
 
 // CurrentEnvironmentValues returns shell- and time-related runtime facts that
@@ -33,28 +69,43 @@ func RenderEnvironmentContextBlock(cwd string) string {
 func CurrentEnvironmentValues() map[string]interface{} {
 	shell := runtimeexecutor.DefaultUserShell()
 	now := time.Now()
-	return map[string]interface{}{
+	values := map[string]interface{}{
 		"os":           runtime.GOOS,
 		"shell":        detectedShellName(shell),
 		"current_date": now.Format("2006-01-02"),
 		"timezone":     detectedTimezoneLabel(now),
 	}
+	if available := AvailableEnvironmentCommands(); len(available) > 0 {
+		values["available_commands"] = available
+	}
+	if unavailable := highValueUnavailableCommands(); len(unavailable) > 0 {
+		values["unavailable_commands"] = unavailable
+	}
+	return values
 }
 
 // RenderShellExecutionGuidance renders shell-specific guardrails that help the
 // model choose commands compatible with the detected runtime environment.
 func RenderShellExecutionGuidance() string {
+	return RenderShellExecutionGuidanceWithCapability(RenderEnvironmentCapabilityGuidance())
+}
+
+// RenderShellExecutionGuidanceWithCapability renders shell guidance using a
+// precomputed (possibly session-frozen) capability section. Pass empty to omit
+// the measured capability appendix.
+func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) string {
 	shell := runtimeexecutor.DefaultUserShell()
 	lines := []string{
 		fmt.Sprintf("Detected operating system: %s.", runtime.GOOS),
 		fmt.Sprintf("Detected user shell: %s.", detectedShellName(shell)),
 		"Prefer toolkit `grep` for code search instead of shell `rg`/`grep` (rg in shell uses exit 1 for no matches and is easy to break with quotes/regex escapes).",
-		"Prefer toolkit `ls`/`glob`/`view` for filesystem inspection; use bash for builds, tests, git, and package managers.",
+		"Prefer toolkit `ls`/`glob`/`view` for filesystem inspection; use shell for builds, tests, git, and package managers.",
 		"Never invoke toolkit tool names as shell commands (for example `view -path ...` or `grep -pattern ...` inside bash). Call those tools directly with structured args.",
-		"When using bash for multiple independent checks, prefer `commands` batching so one tool call returns all results.",
+		"When using shell for multiple independent checks, prefer `commands` batching so one tool call returns all results.",
 		"Do not treat empty search results as a crash; change the pattern/path or use the dedicated search tool instead of retrying the identical query.",
 		"If shell search fails with regex/path errors, switch to toolkit `grep` (literal=true for fixed text) rather than repairing complex shell quoting.",
 		"Do not put shell globs in the rg path argument (e.g. `rg pattern backend/**/*.go`); use `rg -g \"*.go\" pattern backend` or toolkit `grep` path+glob.",
+		"Non-zero process exit codes from shell tools are content results (inspect Exit code/Output), not tool crashes; only launch/timeout/cancel/permission failures are hard tool errors.",
 	}
 
 	switch {
@@ -66,8 +117,8 @@ func RenderShellExecutionGuidance() string {
 			"To limit output, prefer `... | Select-Object -First 200` instead of `... | head -200`.",
 			"To print the current directory, prefer `Get-Location` or `pwd` on PowerShell.",
 			"Do not use bash heredoc (`python - <<'PY'`, `cat <<EOF`); PowerShell does not support that syntax. Prefer dedicated file tools, `python -c`, or write a temp script with `write`/`append_write` then execute it.",
-			"Avoid chaining many search commands with `;` when one failed rg exit 1 can poison the whole command; use toolkit `grep` or bash `commands` with independent items.",
-			"Avoid bash-only operators such as `&&`/`||` chains when PowerShell parsing is unreliable; prefer separate bash `commands` items or native PowerShell control flow.",
+			"Avoid chaining many search commands with `;` when one failed rg exit 1 can poison the whole command; use toolkit `grep` or shell `commands` with independent items.",
+			"Avoid bash-only operators such as `&&`/`||` chains when PowerShell parsing is unreliable; prefer separate shell `commands` items or native PowerShell control flow.",
 			"On Windows, unexpanded path globs often become os error 123; keep path as a real directory and put filters in `-g`/`--glob` or toolkit `grep`.",
 		)
 	case runtime.GOOS == "windows" && shell.Type == runtimeexecutor.ShellTypeCmd:
@@ -90,6 +141,9 @@ func RenderShellExecutionGuidance() string {
 			continue
 		}
 		rendered = append(rendered, "- "+line)
+	}
+	if capability := strings.TrimSpace(capabilityGuidance); capability != "" {
+		rendered = append(rendered, "", capability)
 	}
 	return strings.Join(rendered, "\n")
 }
@@ -129,7 +183,7 @@ func RenderParallelToolGuidance() string {
 		"When a tool definition explicitly marks supports_parallel=true, prefer batching it with other independent calls in the same assistant turn.",
 		"When several inspections do not depend on each other, request them in the same assistant turn so the runtime can batch them in parallel.",
 		"Prefer view.files for multiple file ranges and grep.patterns plus grep.paths for related searches, so one tool result can answer the whole inspection question.",
-		"Use bash.commands for checks or test targets that do not need model decisions between commands; set parallel=true only for independent read-only commands, otherwise keep the default ordered execution, and keep separate tool calls only for true data dependencies.",
+		"Use shell.commands for checks or test targets that do not need model decisions between commands; set parallel=true only for independent read-only commands, otherwise keep the default ordered execution, and keep separate tool calls only for true data dependencies.",
 		"Gather all predictable independent evidence in one assistant turn before deciding edits; do not discover unchanged files one at a time.",
 		"Keep dependent tool calls serial and wait for the earlier result before planning the next dependent step.",
 	}
@@ -184,4 +238,56 @@ func detectedTimezoneLabel(now time.Time) string {
 	hours := offsetSeconds / 3600
 	minutes := (offsetSeconds % 3600) / 60
 	return fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
+}
+
+func environmentValueString(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		if value == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func environmentValueStringSlice(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := environmentValueString(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func highValueUnavailableCommands() []string {
+	unavailable := UnavailableEnvironmentCommands()
+	if len(unavailable) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(unavailable))
+	for _, name := range unavailable {
+		switch name {
+		case "git", "rg", "gh", "go", "node", "python", "docker", "cargo":
+			out = append(out, name)
+		}
+	}
+	return out
 }

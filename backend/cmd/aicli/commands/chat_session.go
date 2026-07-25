@@ -833,6 +833,32 @@ func fileSessionJSONPath(sessionDir, sessionID string, createdAt time.Time) stri
 	return aiclipaths.JoinDatePartition(sessionDir, partitionAt, sessionID+".json")
 }
 
+// resolveFileSessionJSONPath prefers an existing on-disk session file (dated or
+// legacy flat layout) and otherwise returns the preferred dated path.
+func resolveFileSessionJSONPath(sessionDir, sessionID string, createdAt time.Time) string {
+	sessionDir = resolveAbsoluteChatPath(sessionDir)
+	sessionID = filepath.Base(strings.TrimSpace(sessionID))
+	if sessionDir == "" || sessionID == "" || sessionID == "." {
+		return ""
+	}
+
+	preferred := resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, sessionID, createdAt))
+	legacy := resolveAbsoluteChatPath(filepath.Join(sessionDir, sessionID+".json"))
+
+	for _, candidate := range []string{preferred, legacy} {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	if preferred != "" {
+		return preferred
+	}
+	return legacy
+}
+
 func currentRuntimeSessionPath(session *ChatSession) string {
 	if session == nil {
 		return ""
@@ -849,7 +875,7 @@ func currentRuntimeSessionPath(session *ChatSession) string {
 	if sessionDir == "" || sessionID == "" {
 		return ""
 	}
-	return resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, sessionID, runtimeSessionCreatedAt(session)))
+	return resolveFileSessionJSONPath(sessionDir, sessionID, runtimeSessionCreatedAt(session))
 }
 
 func currentRuntimeSessionArtifactRoot(session *ChatSession) string {
@@ -1153,18 +1179,38 @@ func composeChatSystemPromptWithGuidance(session *ChatSession) string {
 	return composeChatSystemPromptWithGuidanceForCWD(session, cwd)
 }
 
+// composeDurableChatSystemPromptWithGuidance builds the session-persisted system
+// prefix. Environment facts are frozen once per session; active goal guidance is
+// intentionally omitted so goal status changes never rewrite historical turns.
+func composeDurableChatSystemPromptWithGuidance(session *ChatSession) string {
+	cwd, _ := os.Getwd()
+	return composeDurableChatSystemPromptWithGuidanceForCWD(session, cwd)
+}
+
 func composeChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string) string {
+	lines := make([]string, 0, 2)
+	if durable := strings.TrimSpace(composeDurableChatSystemPromptWithGuidanceForCWD(session, cwd)); durable != "" {
+		lines = append(lines, durable)
+	}
+	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
+		lines = append(lines, guidance)
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string) string {
 	if session == nil {
 		return ""
 	}
+	snapshot := ensureSessionEnvironmentSnapshot(session, cwd)
 	lines := make([]string, 0, 6)
 	if base := strings.TrimSpace(session.SystemPromptText); base != "" {
 		lines = append(lines, base)
 	}
-	if context := strings.TrimSpace(runtimeprompt.RenderEnvironmentContextBlock(cwd)); context != "" {
+	if context := strings.TrimSpace(snapshot.ContextBlock); context != "" {
 		lines = append(lines, "Environment context:\n"+context)
 	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); guidance != "" {
+	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceWithCapability(snapshot.CapabilityGuidance)); guidance != "" {
 		lines = append(lines, guidance)
 	}
 	if guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance()); guidance != "" {
@@ -1176,10 +1222,98 @@ func composeChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string)
 	if guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidance()); guidance != "" {
 		lines = append(lines, guidance)
 	}
-	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
-		lines = append(lines, guidance)
-	}
 	return strings.Join(lines, "\n\n")
+}
+
+// ensureSessionEnvironmentSnapshot freezes measured environment facts onto the
+// session once and reuses them for later multi-turn prompt composition. Probe
+// only when no frozen snapshot exists (session create / first ensure / restore
+// of a legacy session without the freeze keys).
+func ensureSessionEnvironmentSnapshot(session *ChatSession, cwd string) runtimeprompt.EnvironmentSnapshot {
+	if session == nil {
+		return runtimeprompt.CaptureEnvironmentSnapshot(cwd)
+	}
+	if snap, ok := loadSessionEnvironmentSnapshot(session); ok {
+		return snap
+	}
+	snap := runtimeprompt.CaptureEnvironmentSnapshot(cwd)
+	storeSessionEnvironmentSnapshot(session, snap)
+	return snap
+}
+
+func loadSessionEnvironmentSnapshot(session *ChatSession) (runtimeprompt.EnvironmentSnapshot, bool) {
+	if session == nil || session.RuntimeSession == nil || session.RuntimeSession.Metadata.Context == nil {
+		return runtimeprompt.EnvironmentSnapshot{}, false
+	}
+	contextBlock := strings.TrimSpace(sessionmeta.String(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentContextBlock))
+	if contextBlock == "" {
+		return runtimeprompt.EnvironmentSnapshot{}, false
+	}
+	snap := runtimeprompt.EnvironmentSnapshot{
+		ContextBlock:       contextBlock,
+		CapabilityGuidance: strings.TrimSpace(sessionmeta.String(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentCapabilityGuidance)),
+		Values:             loadEnvironmentValuesMap(session.RuntimeSession.Metadata.Context),
+	}
+	if probedAt := strings.TrimSpace(sessionmeta.String(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentProbedAt)); probedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, probedAt); err == nil {
+			snap.ProbedAt = parsed
+		} else if parsed, err := time.Parse(time.RFC3339, probedAt); err == nil {
+			snap.ProbedAt = parsed
+		}
+	}
+	return snap, true
+}
+
+func storeSessionEnvironmentSnapshot(session *ChatSession, snap runtimeprompt.EnvironmentSnapshot) {
+	if session == nil || session.RuntimeSession == nil {
+		return
+	}
+	if session.RuntimeSession.Metadata.Context == nil {
+		session.RuntimeSession.Metadata.Context = make(map[string]interface{})
+	}
+	sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentContextBlock, strings.TrimSpace(snap.ContextBlock))
+	sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentCapabilityGuidance, strings.TrimSpace(snap.CapabilityGuidance))
+	if len(snap.Values) > 0 {
+		sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentValues, cloneEnvironmentValuesMap(snap.Values))
+	}
+	probedAt := snap.ProbedAt
+	if probedAt.IsZero() {
+		probedAt = time.Now().UTC()
+	}
+	sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentProbedAt, probedAt.UTC().Format(time.RFC3339Nano))
+}
+
+func loadEnvironmentValuesMap(context map[string]interface{}) map[string]interface{} {
+	if context == nil {
+		return nil
+	}
+	value, ok := sessionmeta.Value(context, sessionmeta.EnvironmentValues)
+	if !ok || value == nil {
+		return nil
+	}
+	typed, ok := value.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return cloneEnvironmentValuesMap(typed)
+}
+
+func cloneEnvironmentValuesMap(values map[string]interface{}) map[string]interface{} {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(values))
+	for key, value := range values {
+		switch typed := value.(type) {
+		case []string:
+			cloned[key] = append([]string(nil), typed...)
+		case []interface{}:
+			cloned[key] = append([]interface{}(nil), typed...)
+		default:
+			cloned[key] = value
+		}
+	}
+	return cloned
 }
 
 func renderActiveGoalGuidance(session *ChatSession) string {

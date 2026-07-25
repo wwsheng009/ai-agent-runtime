@@ -331,7 +331,7 @@ func TestCurrentRuntimeSessionPathAndStoreSummary_CustomDir(t *testing.T) {
 		},
 	}
 
-	expectedPath := filepath.Join(sessionDir, "session-1.json")
+	expectedPath := resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, "session-1", time.Time{}))
 	if got := currentRuntimeSessionPath(session); got != expectedPath {
 		t.Fatalf("expected session path %q, got %q", expectedPath, got)
 	}
@@ -342,6 +342,29 @@ func TestCurrentRuntimeSessionPathAndStoreSummary_CustomDir(t *testing.T) {
 	}
 	if !strings.Contains(summary, "(file; custom; default ") {
 		t.Fatalf("expected custom store summary, got %q", summary)
+	}
+}
+
+func TestResolveFileSessionJSONPathPrefersExistingLegacyFlatFile(t *testing.T) {
+	sessionDir := t.TempDir()
+	legacyPath := filepath.Join(sessionDir, "session-legacy.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"id":"session-legacy"}`), 0o644); err != nil {
+		t.Fatalf("write legacy session file: %v", err)
+	}
+
+	got := resolveFileSessionJSONPath(sessionDir, "session-legacy", time.Time{})
+	if got != resolveAbsoluteChatPath(legacyPath) {
+		t.Fatalf("expected existing legacy path %q, got %q", legacyPath, got)
+	}
+}
+
+func TestResolveFileSessionJSONPathUsesDatedPathWhenMissing(t *testing.T) {
+	sessionDir := t.TempDir()
+	createdAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.Local)
+	want := resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, "session-missing", createdAt))
+	got := resolveFileSessionJSONPath(sessionDir, "session-missing", createdAt)
+	if got != want {
+		t.Fatalf("expected dated path %q, got %q", want, got)
 	}
 }
 
@@ -419,7 +442,7 @@ func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
 
 	for _, expected := range []string{
 		"Session:           session-1 [active]",
-		"Session File:      " + filepath.Join(sessionDir, "session-1.json"),
+		"Session File:      " + resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, "session-1", time.Time{})),
 		"Session Store:     " + sessionDir + " (file; custom; default ",
 		"Chat Log File:     " + logger.SessionLogPath(),
 		"Debug Log File:    " + logger.DebugLogPath(),
@@ -478,7 +501,7 @@ func TestPrintCurrentRuntimeSession_ResolvesRelativePathsToAbsolute(t *testing.T
 	})
 
 	for _, expected := range []string{
-		"Session File:      " + resolveAbsoluteChatPath(filepath.Join("sessions", "session-1.json")),
+		"Session File:      " + resolveAbsoluteChatPath(fileSessionJSONPath("sessions", "session-1", time.Time{})),
 		"Session Store:     " + resolveAbsoluteChatPath("sessions") + " (file; custom; default ",
 		"Chat Log File:     " + resolveAbsoluteChatPath(logger.SessionLogPath()),
 		"Debug Log File:    " + resolveAbsoluteChatPath(logger.DebugLogPath()),
@@ -599,7 +622,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 	expectedFragments := []string{
 		"Session:           session-1 [active]",
 		fmt.Sprintf("%-18s %s", "Summary:", "session debug summary"),
-		"Session File:      " + filepath.Join(sessionDir, "session-1.json"),
+		"Session File:      " + resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, "session-1", time.Time{})),
 		"Session Store:     " + sessionDir,
 		"Chat Log File:     " + logger.SessionLogPath(),
 		"Debug Log File:    " + logger.DebugLogPath(),

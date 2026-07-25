@@ -186,7 +186,10 @@ func TestHandleDebugCommandExportsArchive(t *testing.T) {
 
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.ID = "session-debug"
-	sessionPath := filepath.Join(sessionDir, "session-debug.json")
+	sessionPath := resolveFileSessionJSONPath(sessionDir, runtimeSession.ID, runtimeSession.CreatedAt)
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
+		t.Fatalf("mkdir session path: %v", err)
+	}
 	if err := os.WriteFile(sessionPath, []byte(`{"id":"session-debug"}`), 0o644); err != nil {
 		t.Fatalf("write session file: %v", err)
 	}

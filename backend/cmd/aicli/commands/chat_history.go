@@ -30,7 +30,10 @@ func syncChatSystemPromptMessage(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	prompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
+	// Durable history stores a frozen environment-aware prefix without turn-
+	// volatile goal guidance. Goal text is injected only into outbound request
+	// assembly (composeChatSystemPromptWithGuidance / cfg.SystemPrompt).
+	prompt := strings.TrimSpace(composeDurableChatSystemPromptWithGuidance(session))
 	if prompt == "" {
 		return
 	}
@@ -40,6 +43,12 @@ func syncChatSystemPromptMessage(session *ChatSession) {
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(session.Messages[0].Role), "system") {
+		// Content-equality short-circuit: never rewrite historical prefix when
+		// the composed system prompt is unchanged (session-frozen environment
+		// snapshot makes environment churn a no-op across multi-turn sends).
+		if strings.TrimSpace(session.Messages[0].Content) == prompt {
+			return
+		}
 		replaced := make([]runtimetypes.Message, len(session.Messages))
 		copy(replaced, session.Messages)
 		updatedSystem := *replaced[0].Clone()
@@ -133,11 +142,19 @@ func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
 		return nil
 	}
 
-	hiddenSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
+	// Hide both durable and outbound system prefixes. Durable history omits goal
+	// guidance; older sessions may still store outbound-with-goal text.
+	hiddenSystemPrompt := strings.TrimSpace(composeDurableChatSystemPromptWithGuidance(session))
+	outboundSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 	rawSystemPrompt := strings.TrimSpace(session.SystemPromptText)
 	messages := make([]runtimetypes.Message, 0, len(session.Messages))
 	for _, message := range session.Messages {
 		if !isVisibleChatHistoryMessage(session, message, hiddenSystemPrompt, rawSystemPrompt) {
+			continue
+		}
+		if outboundSystemPrompt != "" &&
+			strings.EqualFold(strings.TrimSpace(message.Role), "system") &&
+			strings.TrimSpace(message.Content) == outboundSystemPrompt {
 			continue
 		}
 		messages = append(messages, *message.Clone())

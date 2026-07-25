@@ -252,7 +252,7 @@ func TestGoalFunctionsGetAndUpdateComplete(t *testing.T) {
 	}
 }
 
-func TestGoalFunctionUpdateCompleteRefreshesSystemPrompt(t *testing.T) {
+func TestGoalFunctionUpdateCompleteDoesNotRewriteDurableHistory(t *testing.T) {
 	session, cleanup := newGoalCommandTestSession(t)
 	defer cleanup()
 	session.SystemPromptText = "Base prompt."
@@ -260,9 +260,18 @@ func TestGoalFunctionUpdateCompleteRefreshesSystemPrompt(t *testing.T) {
 		handleCommand(session, "/goal implement goal tools", false)
 	})
 	ensureChatSystemPromptMessage(session)
-	if len(session.Messages) == 0 || !strings.Contains(session.Messages[0].Content, "implement goal tools") {
-		t.Fatalf("expected active goal guidance before completion, got %#v", session.Messages)
+	if len(session.Messages) == 0 {
+		t.Fatal("expected durable system prompt message")
 	}
+	// Goal guidance is outbound-only; durable history must stay goal-free.
+	if strings.Contains(session.Messages[0].Content, "implement goal tools") {
+		t.Fatalf("did not expect active goal guidance in durable history, got %#v", session.Messages[0].Content)
+	}
+	outbound := composeChatSystemPromptWithGuidance(session)
+	if !strings.Contains(outbound, "implement goal tools") {
+		t.Fatalf("expected active goal guidance in outbound prompt, got %q", outbound)
+	}
+	before := session.Messages[0].Content
 
 	if _, err := executeUpdateGoalFunction(session, map[string]interface{}{
 		"status":  "complete",
@@ -273,8 +282,11 @@ func TestGoalFunctionUpdateCompleteRefreshesSystemPrompt(t *testing.T) {
 	if len(session.Messages) == 0 {
 		t.Fatal("expected system prompt message")
 	}
-	if strings.Contains(session.Messages[0].Content, "implement goal tools") {
-		t.Fatalf("did not expect completed goal guidance to remain in system prompt, got %q", session.Messages[0].Content)
+	if session.Messages[0].Content != before {
+		t.Fatalf("expected durable system prefix to remain immutable after goal complete, before=%q after=%q", before, session.Messages[0].Content)
+	}
+	if strings.Contains(composeChatSystemPromptWithGuidance(session), "implement goal tools") {
+		t.Fatalf("did not expect completed goal guidance in outbound prompt, got %q", composeChatSystemPromptWithGuidance(session))
 	}
 }
 

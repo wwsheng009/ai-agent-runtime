@@ -901,7 +901,8 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	if payload.SessionID != "session-123" || payload.SessionState != "active" {
 		t.Fatalf("unexpected payload session fields: %+v", payload)
 	}
-	if payload.SessionPath != filepath.Join(sessionDir, payload.SessionID+".json") {
+	expectedSessionPath := resolveAbsoluteChatPath(fileSessionJSONPath(sessionDir, payload.SessionID, time.Time{}))
+	if payload.SessionPath != expectedSessionPath {
 		t.Fatalf("unexpected payload session path: %+v", payload)
 	}
 	if !strings.Contains(payload.SessionStore, sessionDir) {
@@ -1048,7 +1049,7 @@ func TestBuildChatResponsePayload_ResolvesRelativePathsToAbsolute(t *testing.T) 
 		},
 	}, "hello")
 
-	if payload.SessionPath != resolveAbsoluteChatPath(filepath.Join("sessions", "session-123.json")) {
+	if payload.SessionPath != resolveAbsoluteChatPath(fileSessionJSONPath("sessions", "session-123", time.Time{})) {
 		t.Fatalf("expected absolute session path, got %+v", payload)
 	}
 	if payload.LogPath != resolveAbsoluteChatPath(logger.SessionLogPath()) {

@@ -48,6 +48,18 @@ const (
 	RouteWarnings            = "route_warnings"
 	FallbackUsed             = "fallback_used"
 	FallbackReason           = "fallback_reason"
+	// EnvironmentContextBlock is the session-frozen rendered <environment_context>
+	// block. It is captured once (session create / first ensure) and reused so
+	// multi-turn history is not rewritten when host PATH/date facts change.
+	EnvironmentContextBlock = "environment_context_block"
+	// EnvironmentCapabilityGuidance is the session-frozen measured capability
+	// guidance text embedded in shell guidance.
+	EnvironmentCapabilityGuidance = "environment_capability_guidance"
+	// EnvironmentProbedAt records when the session environment snapshot was frozen.
+	EnvironmentProbedAt = "environment_probed_at"
+	// EnvironmentValues is the session-frozen structured environment facts map
+	// (os/shell/date/commands) used by request summaries without re-probing.
+	EnvironmentValues = "environment_values"
 
 	LegacyAICLIProviderName       = "aicli_provider_name"
 	LegacyAICLIProviderProtocol   = "aicli_protocol"

@@ -17,6 +17,15 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// Environment freeze keys mirror sessionmeta constants without importing that
+// package (sessionmeta -> chat -> agent -> skill would create an import cycle).
+const (
+	skillEnvironmentContextBlock         = "environment_context_block"
+	skillEnvironmentCapabilityGuidance   = "environment_capability_guidance"
+	skillEnvironmentProbedAt             = "environment_probed_at"
+	skillEnvironmentValues               = "environment_values"
+)
+
 var workflowTemplatePattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}`)
 
 var systemRoleExpectedRolePattern = regexp.MustCompile(`messages?(?:\[\d+\]|\.\d+)?\.role.*\b(expected|must be|should be)\b.*\b(user|assistant|developer)\b`)
@@ -282,7 +291,7 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 	if environmentContext := buildEnvironmentContextMessage(req); environmentContext != "" {
 		messages = append(messages, *types.NewSystemMessage("Environment context:\n" + environmentContext))
 	}
-	if shellGuidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); shellGuidance != "" {
+	if shellGuidance := buildShellGuidanceMessage(req); shellGuidance != "" {
 		messages = append(messages, *types.NewSystemMessage(shellGuidance))
 	}
 	if fileEditingGuidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance()); fileEditingGuidance != "" {
@@ -372,6 +381,15 @@ func buildContextSummary(req *types.Request) string {
 		if key == "context_pack" || key == "workspace_path" {
 			continue
 		}
+		// Frozen environment prompt fragments / measured host facts are assembled
+		// into dedicated system messages; keep them out of the runtime summary.
+		if key == skillEnvironmentContextBlock ||
+			key == skillEnvironmentCapabilityGuidance ||
+			key == skillEnvironmentProbedAt ||
+			key == skillEnvironmentValues ||
+			isEnvironmentFactKey(key) {
+			continue
+		}
 		if profileLayer && strings.HasPrefix(key, "profile_") {
 			continue
 		}
@@ -397,11 +415,45 @@ func buildContextSummary(req *types.Request) string {
 func buildEnvironmentContextMessage(req *types.Request) string {
 	workspacePath := ""
 	if req != nil && len(req.Context) > 0 {
+		// Prefer the session-frozen environment block injected by the caller
+		// (HTTP agent path). Avoid re-probing the host on every skill invoke.
+		if value, ok := req.Context[skillEnvironmentContextBlock].(string); ok {
+			if block := strings.TrimSpace(value); block != "" {
+				return block
+			}
+		}
 		if value, ok := req.Context["workspace_path"].(string); ok {
 			workspacePath = strings.TrimSpace(value)
 		}
 	}
+	// Standalone skill invocations without a frozen session snapshot still get
+	// a one-shot measured block for planning. Callers that own multi-turn
+	// history should freeze and pass environment_context_block instead.
 	return strings.TrimSpace(runtimeprompt.RenderEnvironmentContextBlock(workspacePath))
+}
+
+func buildShellGuidanceMessage(req *types.Request) string {
+	capability := ""
+	if req != nil && len(req.Context) > 0 {
+		if value, ok := req.Context[skillEnvironmentCapabilityGuidance].(string); ok {
+			capability = strings.TrimSpace(value)
+		}
+	}
+	// When no frozen capability text is present, RenderShellExecutionGuidance
+	// measures once for this standalone invoke.
+	if capability == "" {
+		return strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance())
+	}
+	return strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceWithCapability(capability))
+}
+
+func isEnvironmentFactKey(key string) bool {
+	switch strings.TrimSpace(key) {
+	case "os", "shell", "current_date", "timezone", "available_commands", "unavailable_commands":
+		return true
+	default:
+		return false
+	}
 }
 
 func shrinkContextPack(pack map[string]interface{}) map[string]interface{} {

@@ -1419,9 +1419,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		"session_id":       sessionID(session),
 		"reasoning_effort": types.ResolveReasoningEffort(req.ReasoningEffort),
 	}
-	for key, value := range runtimeprompt.CurrentEnvironmentValues() {
-		agentContext[key] = value
-	}
+	// Freeze measured environment facts once per durable session and reuse them
+	// for multi-turn request assembly. Do not re-probe every agent chat turn.
+	envSnap := ensureSessionEnvironmentSnapshot(session, workspacePath)
+	applyEnvironmentSnapshotToAgentContext(agentContext, envSnap)
 	if grantedPermissions := h.resolveGrantedSkillPermissions(r); len(grantedPermissions) > 0 {
 		agentContext["permissions"] = grantedPermissions
 	}
@@ -1568,7 +1569,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				execSession = chat.NewSession(usageScope.UserID)
 			}
 			execSession = execSession.Clone()
-			execSession.ReplaceHistory(prependContextMessages(historyForAgent, buildAgentContextMessages(agentContext, workspaceCtx)))
+			contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
+			execSession.ReplaceHistory(prependContextMessages(historyForAgent, contextMessages))
 			execSession.AddMessage(*types.NewUserMessage(lastMessage))
 
 			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
@@ -1596,7 +1598,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if session != nil {
-				session.ReplaceHistory(execSession.GetMessages())
+				// Persist conversation turns only; strip the ephemeral request
+				// context prefix so multi-turn history does not accumulate it.
+				session.ReplaceHistory(stripLeadingContextMessages(execSession.GetMessages(), contextMessages))
 				_ = h.sessionManager.Update(ctx, session)
 			}
 
@@ -1825,13 +1829,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.EnableReAct && h.llmRuntime != nil {
+		contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
 		execResult, reactErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
 			Agent:           a,
 			LLMRuntime:      h.llmRuntime,
 			Session:         session,
 			SessionUserID:   usageScope.UserID,
 			Prompt:          lastMessage,
-			PreparedHistory: prependContextMessages(historyForAgent, buildAgentContextMessages(agentContext, workspaceCtx)),
+			PreparedHistory: prependContextMessages(historyForAgent, contextMessages),
 			EnableReAct:     true,
 			ReActConfig: &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
@@ -1860,7 +1865,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		reactResult := execResult.ReactResult
 
 		if session != nil && execResult.UpdatedSession != nil {
-			session.ReplaceHistory(execResult.UpdatedSession.GetMessages())
+			// Persist conversation turns only; strip the ephemeral request
+			// context prefix so multi-turn history does not accumulate it.
+			session.ReplaceHistory(stripLeadingContextMessages(execResult.UpdatedSession.GetMessages(), contextMessages))
 			_ = h.sessionManager.Update(ctx, session)
 		}
 

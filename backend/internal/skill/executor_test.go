@@ -463,6 +463,81 @@ func TestExecutor_ExecuteDefault_IncludesEnvironmentContextAndShellGuidance(t *t
 	assert.True(t, sawRuntimeSummary, "expected runtime context summary in default executor request")
 }
 
+func TestExecutor_ExecuteDefault_ReusesFrozenEnvironmentSnapshot(t *testing.T) {
+	provider := &recordingLLMProvider{}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel:   "recording-llm",
+		DefaultTimeout: 10 * time.Second,
+		MaxRetries:     0,
+	})
+	require.NoError(t, runtime.RegisterProvider("recording-llm", provider))
+
+	executor := NewExecutor(NewRegistry(nil), nil, runtime)
+	skillItem := &Skill{
+		Name:         "skill_frozen_environment",
+		Description:  "frozen environment skill",
+		SystemPrompt: "Use the frozen environment context.",
+		UserPrompt:   "Answer the request.",
+	}
+
+	frozenBlock := "<environment_context>\n  <cwd>frozen-session-cwd</cwd>\n  <current_date>2099-01-01</current_date>\n</environment_context>"
+	frozenCapability := "Frozen capability guidance marker."
+	req := types.NewRequest("inspect frozen environment")
+	req.Context["workspace_path"] = `E:\projects\live-path`
+	req.Context[skillEnvironmentContextBlock] = frozenBlock
+	req.Context[skillEnvironmentCapabilityGuidance] = frozenCapability
+	req.Context[skillEnvironmentProbedAt] = "2099-01-01T00:00:00Z"
+	req.Context["current_date"] = "2099-01-01"
+	req.Context["timezone"] = "FROZEN"
+	req.Context["os"] = "frozen-os"
+	req.Context["shell"] = "frozen-shell"
+
+	result, err := executor.Execute(context.Background(), skillItem, req)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.NotNil(t, provider.lastRequest)
+
+	var sawFrozenEnvironment bool
+	var sawFrozenCapability bool
+	var sawRuntimeSummary bool
+	for _, message := range provider.lastRequest.Messages {
+		if message.Role != "system" {
+			continue
+		}
+		if strings.Contains(message.Content, "Environment context:") {
+			assert.Contains(t, message.Content, frozenBlock)
+			assert.NotContains(t, message.Content, `E:\projects\live-path`)
+			assert.Contains(t, message.Content, "2099-01-01")
+			sawFrozenEnvironment = true
+		}
+		if strings.Contains(message.Content, "Shell guidance:") {
+			assert.Contains(t, message.Content, frozenCapability)
+			sawFrozenCapability = true
+		}
+		if strings.Contains(message.Content, "Runtime context summary:") {
+			assert.Contains(t, message.Content, `"workspace_path":"E:\\projects\\live-path"`)
+			assert.NotContains(t, message.Content, skillEnvironmentContextBlock)
+			assert.NotContains(t, message.Content, `"current_date"`)
+			assert.NotContains(t, message.Content, `"timezone"`)
+			assert.NotContains(t, message.Content, `"os"`)
+			assert.NotContains(t, message.Content, `"shell"`)
+			sawRuntimeSummary = true
+		}
+	}
+
+	assert.True(t, sawFrozenEnvironment, "expected frozen environment context block")
+	assert.True(t, sawFrozenCapability, "expected frozen capability guidance in shell guidance")
+	assert.True(t, sawRuntimeSummary, "expected runtime context summary without environment fact keys")
+}
+
+func TestBuildEnvironmentContextMessage_PrefersFrozenBlock(t *testing.T) {
+	req := types.NewRequest("probe")
+	req.Context["workspace_path"] = `E:\projects\live`
+	req.Context[skillEnvironmentContextBlock] = "frozen-env-block"
+	assert.Equal(t, "frozen-env-block", buildEnvironmentContextMessage(req))
+}
+
 func TestBuildContextSummary_IncludesProfileLayer(t *testing.T) {
 	req := types.NewRequest("review prior notes")
 	req.Context["profile_memory_path"] = "E:/profiles/dev/agents/coder/memory/memory.json"

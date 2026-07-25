@@ -191,7 +191,7 @@ func TestEnsureChatSystemPromptMessage_PrependsAndReplaces(t *testing.T) {
 	if len(session.Messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(session.Messages))
 	}
-	expected := composeChatSystemPromptWithGuidance(session)
+	expected := composeDurableChatSystemPromptWithGuidance(session)
 	if session.Messages[0].Role != "system" || session.Messages[0].Content != expected {
 		t.Fatalf("unexpected leading system message: %#v", session.Messages[0])
 	}
@@ -201,7 +201,7 @@ func TestEnsureChatSystemPromptMessage_PrependsAndReplaces(t *testing.T) {
 	if len(session.Messages) != 2 {
 		t.Fatalf("expected no duplicate system message, got %d", len(session.Messages))
 	}
-	expected = composeChatSystemPromptWithGuidance(session)
+	expected = composeDurableChatSystemPromptWithGuidance(session)
 	if session.Messages[0].Content != expected {
 		t.Fatalf("expected system prompt update, got %#v", session.Messages[0].Content)
 	}
