@@ -86,6 +86,25 @@ providers:
 	}
 }
 
+func TestEffectiveProviderHeaders_UserAgentProviderOverridesGlobal(t *testing.T) {
+	merged := EffectiveProviderHeaders(
+		map[string]string{
+			"User-Agent": "global-ua/1.0",
+			"X-Trace":    "global-trace",
+		},
+		map[string]string{
+			"user-agent": "provider-ua/2.0",
+		},
+	)
+
+	if got := merged["User-Agent"]; got != "provider-ua/2.0" {
+		t.Fatalf("User-Agent = %q, want provider-ua/2.0", got)
+	}
+	if got := merged["X-Trace"]; got != "global-trace" {
+		t.Fatalf("X-Trace = %q, want global-trace", got)
+	}
+}
+
 func TestInitGlobalConfigProviderMaxTokenAlias(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	configYAML := `

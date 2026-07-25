@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -221,7 +222,7 @@ func (d *DownloadTool) doDownload(ctx context.Context, url, absPath string, time
 		return 0, fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "AI-Gateway-Toolkit/1.0")
+	req.Header.Set("User-Agent", buildinfo.UserAgent())
 
 	// 发送请求
 	client := &http.Client{

@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"strings"
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
 func TestResolveProviderExecutionContext(t *testing.T) {
@@ -75,5 +78,93 @@ func TestResolveProviderExecutionContext(t *testing.T) {
 	_, _, err = resolveProviderExecutionContext(cfg, "beta", "")
 	if err == nil {
 		t.Fatal("expected disabled provider error")
+	}
+}
+
+func TestEffectiveChatProviderHeaders_UserAgentOverridesDefaultInBuildHeaders(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			Headers: map[string]string{
+				"User-Agent": "global-config-ua/1.0",
+			},
+			Items: map[string]config.Provider{
+				"alpha": {
+					Enabled:  true,
+					Protocol: "openai",
+					Headers: map[string]string{
+						"user-agent": "provider-config-ua/2.0",
+					},
+				},
+			},
+		},
+	}
+
+	session := &ChatSession{
+		Config:   cfg,
+		Provider: cfg.Providers.Items["alpha"],
+	}
+	effective := effectiveChatProviderHeaders(session)
+	if got := effective["User-Agent"]; got != "provider-config-ua/2.0" {
+		// EffectiveProviderHeaders canonicalizes keys, so either form is fine.
+		if got == "" {
+			for k, v := range effective {
+				if strings.EqualFold(k, "User-Agent") {
+					got = v
+					break
+				}
+			}
+		}
+		if got != "provider-config-ua/2.0" {
+			t.Fatalf("effective User-Agent = %q, want provider-config-ua/2.0 (headers=%+v)", got, effective)
+		}
+	}
+
+	built := adapter.GetAdapterOrDefault("openai").BuildHeaders(adapter.AdapterConfig{
+		APIKey:  "k",
+		Headers: effective,
+	})
+	got := ""
+	for k, v := range built {
+		if strings.EqualFold(k, "User-Agent") {
+			got = v
+			break
+		}
+	}
+	if got != "provider-config-ua/2.0" {
+		t.Fatalf("BuildHeaders User-Agent = %q, want provider-config-ua/2.0 (default would be %q)", got, buildinfo.UserAgent())
+	}
+}
+
+func TestEffectiveChatProviderHeaders_MissingUserAgentFallsBackToDefault(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			Headers: map[string]string{
+				"X-Global": "only-this",
+			},
+			Items: map[string]config.Provider{
+				"alpha": {
+					Enabled:  true,
+					Protocol: "openai",
+				},
+			},
+		},
+	}
+	session := &ChatSession{
+		Config:   cfg,
+		Provider: cfg.Providers.Items["alpha"],
+	}
+	built := adapter.GetAdapterOrDefault("openai").BuildHeaders(adapter.AdapterConfig{
+		APIKey:  "k",
+		Headers: effectiveChatProviderHeaders(session),
+	})
+	got := ""
+	for k, v := range built {
+		if strings.EqualFold(k, "User-Agent") {
+			got = v
+			break
+		}
+	}
+	if got != buildinfo.UserAgent() {
+		t.Fatalf("User-Agent = %q, want default %q", got, buildinfo.UserAgent())
 	}
 }

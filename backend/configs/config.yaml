@@ -266,6 +266,8 @@ providers:
   default_provider: ${PROVIDERS_DEFAULT:-nvidia}
   # Applied to every upstream provider request. An item-level header with the
   # same name overrides this value (header names are case-insensitive).
+  # Includes User-Agent: when set here or under items.<provider>.headers, the
+  # configured value replaces the built-in default (aicli/<version> (os; arch)).
   headers: {}
   # Transient provider failures retry until the caller cancels. Deterministic
   # authentication, permission and request errors remain non-retryable.

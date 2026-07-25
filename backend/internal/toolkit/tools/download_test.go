@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -88,6 +89,32 @@ func TestDownloadTool_InvalidURL(t *testing.T) {
 
 	if result.Success {
 		t.Error("expected failure for invalid URL")
+	}
+}
+
+func TestDownloadTool_UsesDefaultUserAgent(t *testing.T) {
+	var gotUA string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "file.txt")
+	tool := NewDownloadTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"url":       server.URL,
+		"file_path": target,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if gotUA != buildinfo.UserAgent() {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, buildinfo.UserAgent())
 	}
 }
 

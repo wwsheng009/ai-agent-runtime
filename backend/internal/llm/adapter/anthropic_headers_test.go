@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strings"
 	"testing"
 
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
@@ -147,6 +148,66 @@ func TestOpenAIBuildHeaders_MergesCustomHeaders(t *testing.T) {
 	}
 	if got := getHeaderValueCaseInsensitive(headers, "x-trace-id"); got != "trace-456" {
 		t.Fatalf("expected custom trace header, got %q", got)
+	}
+	if got := getHeaderValueCaseInsensitive(headers, "User-Agent"); got == "" {
+		t.Fatal("expected default User-Agent to be injected")
+	}
+}
+
+func TestOpenAIBuildHeaders_InjectsDefaultUserAgent(t *testing.T) {
+	a := &OpenAIAdapter{}
+	headers := a.BuildHeaders(AdapterConfig{APIKey: "test-key"})
+	got := getHeaderValueCaseInsensitive(headers, "User-Agent")
+	if got == "" {
+		t.Fatal("expected default User-Agent")
+	}
+	if !strings.HasPrefix(got, "aicli/") {
+		t.Fatalf("expected aicli User-Agent prefix, got %q", got)
+	}
+}
+
+func TestOpenAIBuildHeaders_PreservesExplicitUserAgent(t *testing.T) {
+	a := &OpenAIAdapter{}
+	headers := a.BuildHeaders(AdapterConfig{
+		APIKey: "test-key",
+		Headers: map[string]string{
+			"user-agent": "custom-client/1.0",
+		},
+	})
+	if got := getHeaderValueCaseInsensitive(headers, "User-Agent"); got != "custom-client/1.0" {
+		t.Fatalf("expected explicit User-Agent to win, got %q", got)
+	}
+}
+
+func TestOpenAIBuildHeaders_ConfigUserAgentOverridesDefault(t *testing.T) {
+	// Simulates config.yaml providers.headers / items.<provider>.headers flowing
+	// into AdapterConfig.Headers after EffectiveProviderHeaders merge.
+	a := &OpenAIAdapter{}
+	headers := a.BuildHeaders(AdapterConfig{
+		APIKey: "test-key",
+		Headers: map[string]string{
+			"User-Agent": "config-yaml-ua/3.1",
+			"X-Custom":   "from-config",
+		},
+	})
+	if got := getHeaderValueCaseInsensitive(headers, "User-Agent"); got != "config-yaml-ua/3.1" {
+		t.Fatalf("config User-Agent should override default, got %q", got)
+	}
+	if got := getHeaderValueCaseInsensitive(headers, "X-Custom"); got != "from-config" {
+		t.Fatalf("expected X-Custom from config, got %q", got)
+	}
+}
+
+func TestCodexBuildHeaders_ConfigUserAgentOverridesDefault(t *testing.T) {
+	a := &CodexAdapter{}
+	headers := a.BuildHeaders(AdapterConfig{
+		APIKey: "test-key",
+		Headers: map[string]string{
+			"USER-AGENT": "provider-level-ua/9.9",
+		},
+	})
+	if got := getHeaderValueCaseInsensitive(headers, "User-Agent"); got != "provider-level-ua/9.9" {
+		t.Fatalf("provider User-Agent should override default, got %q", got)
 	}
 }
 

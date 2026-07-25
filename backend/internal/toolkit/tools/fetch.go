@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -115,7 +116,7 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 
-	req.Header.Set("User-Agent", "AI-Gateway-Toolkit/1.0")
+	req.Header.Set("User-Agent", buildinfo.UserAgent())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml,text/plain,*/*")
 
 	// 发送请求

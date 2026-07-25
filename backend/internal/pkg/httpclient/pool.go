@@ -632,7 +632,9 @@ func GetSharedHTTPClient(cfg *agentconfig.Config) *http.Client {
 
 		sharedClient = &http.Client{
 			Timeout:   0, // 不设置全局超时，使用 context 超时控制
-			Transport: &observedRoundTripper{base: sharedTransport, track: true, store: store},
+			Transport: WithDefaultUserAgent(&observedRoundTripper{
+				base: sharedTransport, track: true, store: store,
+			}),
 		}
 
 		logger.Info("Shared HTTP client initialized",
@@ -835,7 +837,9 @@ func createNewHTTPClient(httpTimeout agentconfig.HTTPTimeout, proxyCfg *agentcon
 
 	client := &http.Client{
 		Timeout:   0, // 不设置全局超时，使用 context 超时控制
-		Transport: &observedRoundTripper{base: transport, track: isShared, store: store},
+		Transport: WithDefaultUserAgent(&observedRoundTripper{
+			base: transport, track: isShared, store: store,
+		}),
 	}
 
 	if isShared {

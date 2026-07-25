@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -157,7 +158,7 @@ query Search($query: String!, $first: Int!) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "AI-Gateway-Toolkit/1.0")
+	req.Header.Set("User-Agent", buildinfo.UserAgent())
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

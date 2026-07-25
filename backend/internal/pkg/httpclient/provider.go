@@ -35,7 +35,8 @@ func NewProviderHTTPClient(
 
 	return &http.Client{
 		Timeout:   clientTimeout,
-		Transport: transport,
+		// Ensure provider traffic never falls back to Go-http-client/1.1.
+		Transport: WithDefaultUserAgent(transport),
 	}
 }
 

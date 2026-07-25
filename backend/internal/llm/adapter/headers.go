@@ -1,6 +1,10 @@
 package adapter
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+)
 
 const anthropicInterleavedThinkingBeta = "interleaved-thinking-2025-05-14"
 
@@ -8,6 +12,11 @@ func mergeHeaderMaps(base, overrides map[string]string) map[string]string {
 	result := cloneHeaderMap(base)
 	for key, value := range overrides {
 		setHeaderValueCaseInsensitive(result, key, value)
+	}
+	// Inject a structured product User-Agent when callers did not set one.
+	// Without this, Go falls back to "Go-http-client/1.1".
+	if strings.TrimSpace(getHeaderValueCaseInsensitive(result, "User-Agent")) == "" {
+		setHeaderValueCaseInsensitive(result, "User-Agent", buildinfo.UserAgent())
 	}
 	return result
 }

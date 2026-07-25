@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	runtimehttpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -83,6 +84,7 @@ func NewGatewayClient(resourceManager ResourceManager, defaultModel string) *Gat
 		maxRetries:      3,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			Transport: runtimehttpclient.WithDefaultUserAgent(http.DefaultTransport),
 		},
 		tokenizer: NewTokenizer("openai"),
 	}

@@ -2,9 +2,12 @@ package tools
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -53,6 +56,31 @@ func TestFetchTool_InvalidURL(t *testing.T) {
 
 	if result.Success {
 		t.Error("expected failure for invalid URL")
+	}
+}
+
+func TestFetchTool_UsesDefaultUserAgent(t *testing.T) {
+	var gotUA string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	tool := NewFetchTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"url":    server.URL,
+		"format": "text",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if gotUA != buildinfo.UserAgent() {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, buildinfo.UserAgent())
 	}
 }
 
