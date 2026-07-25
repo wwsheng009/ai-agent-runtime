@@ -149,6 +149,10 @@ func NewBashTool() *BashTool {
 
 func (b *BashTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindExec,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       false,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -211,16 +215,14 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 	if blocked, message, nextAction := bashCommandPreflight(command); blocked {
-		metadata := map[string]interface{}{}
-		if nextAction != "" {
-			metadata[toolresult.MetadataNextActionKey] = nextAction
-		}
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("%s", message),
-			Metadata:   metadata,
-		}, nil
+		return toolResultFailureWithCode(
+			fmt.Errorf("%s", message),
+			string(runtimeerrors.ErrToolShellCompat),
+			nextAction,
+			map[string]interface{}{
+				"failure_class": "shell_preflight",
+			},
+		), nil
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
@@ -331,13 +333,16 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
 			failureMetadata[toolresult.MetadataNextActionKey] = next
 		}
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Content:    execResult.Output,
-			Metadata:   failureMetadata,
-			Error:      buildBashCommandFailureError(command, execResult.Output, err),
-		}, nil
+		code := classifyHardShellExecutionErrorCode(err, execResult.Output)
+		result := toolResultFailureWithCode(
+			buildBashCommandFailureError(command, execResult.Output, err),
+			code,
+			"", // keep bashCommandFailureNextAction from failureMetadata when present
+			failureMetadata,
+		)
+		// Preserve partial stdout/stderr for model recovery even on hard fail.
+		result.Content = execResult.Output
+		return result, nil
 	}
 
 	metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
@@ -1372,6 +1377,48 @@ func isHardShellExecutionError(err error) bool {
 		return false
 	}
 	return true
+}
+
+// classifyHardShellExecutionErrorCode maps control-plane / launch failures to a
+// stable runtime error_code. Finished non-zero exits never reach this path.
+func classifyHardShellExecutionErrorCode(err error, output string) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout),
+		runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded),
+		stderrors.Is(err, context.DeadlineExceeded):
+		return string(runtimeerrors.ErrToolTimeout)
+	case stderrors.Is(err, context.Canceled),
+		runtimeerrors.Is(err, runtimeerrors.ErrAgentRunCanceled):
+		return string(runtimeerrors.ErrAgentRunCanceled)
+	}
+	combined := strings.ToLower(strings.TrimSpace(err.Error() + "\n" + output))
+	switch {
+	case strings.Contains(combined, "permission denied"),
+		strings.Contains(combined, "access is denied"),
+		strings.Contains(combined, "operation not permitted"),
+		strings.Contains(combined, "denied by policy"):
+		return string(runtimeerrors.ErrAgentPermission)
+	case strings.Contains(combined, "executable file not found"),
+		strings.Contains(combined, "not recognized as"),
+		strings.Contains(combined, "is not recognized"),
+		strings.Contains(combined, "command not found"),
+		strings.Contains(combined, "no such file or directory") && strings.Contains(combined, "exec"),
+		strings.Contains(combined, "the term '") && strings.Contains(combined, "is not recognized"),
+		strings.Contains(combined, "parsererror"),
+		strings.Contains(combined, "here-string"),
+		strings.Contains(combined, "heredoc"):
+		return string(runtimeerrors.ErrToolShellCompat)
+	case strings.Contains(combined, "failed to start"),
+		strings.Contains(combined, "cannot run"),
+		strings.Contains(combined, "exec:") && strings.Contains(combined, "not found"):
+		return string(runtimeerrors.ErrProcessStartFailed)
+	default:
+		// Unknown launch/control failures remain generic tool execution.
+		return string(runtimeerrors.ErrToolExecution)
+	}
 }
 
 // formatShellCommandContent builds a Codex-like model-facing shell result body.

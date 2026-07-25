@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ShellTool is the Codex-aligned primary shell surface. It reuses BashTool
@@ -54,6 +55,17 @@ func (t *ShellTool) Parameters() map[string]interface{} {
 // CanDirectCall indicates the tool can be invoked directly.
 func (t *ShellTool) CanDirectCall() bool {
 	return true
+}
+
+func (t *ShellTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindExec,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
+	}
 }
 
 // Execute delegates to the underlying BashTool.

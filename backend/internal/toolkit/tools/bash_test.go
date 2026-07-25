@@ -1530,6 +1530,12 @@ func TestBashTool_WindowsHeredocPreflight(t *testing.T) {
 	if !strings.Contains(strings.ToLower(next), "write") && !strings.Contains(strings.ToLower(next), "python -c") {
 		t.Fatalf("expected next_action to steer away from heredoc, got %q", next)
 	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
+		t.Fatalf("expected TOOL_SHELL_COMPAT error_code for heredoc preflight, got %#v", result.Metadata)
+	}
+	if retryable, _ := result.Metadata[toolresult.MetadataRetryableKey].(bool); retryable {
+		t.Fatalf("shell preflight must not be retryable, got %#v", result.Metadata)
+	}
 }
 
 func TestLooksLikeBashHeredoc(t *testing.T) {
@@ -1592,6 +1598,9 @@ func TestBashTool_ShellToolkitCommandPreflight(t *testing.T) {
 	if !strings.Contains(next, "view") {
 		t.Fatalf("expected next_action to prefer toolkit view, got %q", next)
 	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
+		t.Fatalf("expected TOOL_SHELL_COMPAT for toolkit misuse preflight, got %#v", result.Metadata)
+	}
 
 	// Real system grep without toolkit-style flags should not be preflight-blocked.
 	if name, blocked := looksLikeShellInvokedToolkitCommand(`grep -n "foo" backend`); blocked {
@@ -1651,6 +1660,29 @@ func TestBashTool_SearchPathShellGlobPreflight(t *testing.T) {
 	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
 	if !strings.Contains(strings.ToLower(next), "grep") && !strings.Contains(next, "-g") {
 		t.Fatalf("expected next_action to steer to grep/-g, got %q", next)
+	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
+		t.Fatalf("expected TOOL_SHELL_COMPAT for path-glob preflight, got %#v", result.Metadata)
+	}
+}
+
+func TestClassifyHardShellExecutionErrorCode(t *testing.T) {
+	if got := classifyHardShellExecutionErrorCode(context.DeadlineExceeded, ""); got != "TOOL_TIMEOUT" {
+		t.Fatalf("deadline => TOOL_TIMEOUT, got %q", got)
+	}
+	if got := classifyHardShellExecutionErrorCode(context.Canceled, ""); got != "AGENT_RUN_CANCELED" {
+		t.Fatalf("canceled => AGENT_RUN_CANCELED, got %q", got)
+	}
+	if got := classifyHardShellExecutionErrorCode(fmt.Errorf("%s", `exec: "head": executable file not found in %PATH%`), ""); got != "TOOL_SHELL_COMPAT" {
+		t.Fatalf("missing executable => TOOL_SHELL_COMPAT, got %q", got)
+	}
+	if got := classifyHardShellExecutionErrorCode(fmt.Errorf("permission denied"), ""); got != "AGENT_PERMISSION" {
+		t.Fatalf("permission => AGENT_PERMISSION, got %q", got)
+	}
+	// Finished non-zero exits never call this helper; still ensure generic launch
+	// failures do not collapse to empty.
+	if got := classifyHardShellExecutionErrorCode(fmt.Errorf("spawn failed mysteriously"), ""); got != "TOOL_EXECUTION" {
+		t.Fatalf("unknown hard fail => TOOL_EXECUTION, got %q", got)
 	}
 }
 
