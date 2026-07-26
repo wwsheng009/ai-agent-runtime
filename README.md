@@ -83,9 +83,25 @@ aicli config
 
 > 配置查找顺序、字段说明、环境变量 / `.env`：见 [install.md](./docs/aicli/install.md)。
 
-### 3) 登录 Provider（最小示例）
+### 3) 登录 Provider
 
-只有 OpenAI 兼容 API Key 时，复制下面这一条即可：
+**推荐：无参数交互登录**
+
+```bash
+aicli login
+```
+
+不带任何 flag 时，会进入交互向导，按提示逐步输入：
+
+- Provider 名称（新建，或从已有列表里选）
+- 登录协议（如 `openai`、`codex-oauth`）
+- Base URL
+- API key（终端隐藏输入，不进 shell 历史）
+- 是否设为默认 provider 等
+
+登录会校验 models endpoint，并把凭证写回配置。chat 内也可用 `/login`，逻辑相同。
+
+**可选：一条命令非交互登录**（脚本 / CI）
 
 ```bash
 # 建议 API key 走环境变量，避免写进 shell 历史
@@ -99,7 +115,7 @@ aicli login \
   --set-default
 ```
 
-**Windows PowerShell**
+**Windows PowerShell（非交互）**
 
 ```powershell
 $env:OPENAI_API_KEY = 'sk-...'
@@ -110,8 +126,6 @@ aicli login `
   --api-key $env:OPENAI_API_KEY `
   --set-default
 ```
-
-登录会校验 models endpoint，并把凭证写回配置。
 
 **成功信号**
 
@@ -206,7 +220,8 @@ aicli init --global
 aicli config
 aicli config --models
 aicli doctor provider
-aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key "$OPENAI_API_KEY" --set-default
+aicli login   # 无参数：交互向导
+# aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key "$OPENAI_API_KEY" --set-default
 
 # 聊天
 aicli
@@ -269,7 +284,7 @@ ai-agent-runtime/
 ├── scripts/install-aicli.*  # 跨平台安装脚本
 ├── .github/workflows/       # tag 触发的 aicli Release
 ├── Makefile
-├── MIGRATION.md             # 从 ai-gateway 拆分的迁移说明
+├── MIGRATION.md
 └── README.md
 ```
 
@@ -286,7 +301,7 @@ ai-agent-runtime/
 - [aicli 文档目录](./docs/aicli/README.md)
 - [项目文档目录](./docs/README.md)
 - [Roadmap](./docs/roadmap.md)
-- [迁移指南（ai-gateway）](./MIGRATION.md)
+- [迁移指南](./MIGRATION.md)
 
 ---
 
@@ -301,5 +316,3 @@ git push origin v0.2.0
 ```
 
 支持的 tag：`v*`、`aicli-v*`。含 `-rc` / `-beta` / `-alpha` 的 tag 会标为 prerelease。
-
-与 [`ai-gateway`](https://github.com/wwsheng009/ai-gateway) 的关系：本仓库负责 `aicli`、agent/runtime HTTP API 与 multi-agent runtime；网关能力留在 `ai-gateway`。细节见 [MIGRATION.md](./MIGRATION.md)。

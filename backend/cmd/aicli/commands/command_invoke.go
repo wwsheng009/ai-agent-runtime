@@ -415,6 +415,8 @@ func authorizeDirectFunctionInvocation(session *ChatSession, functionName string
 		Policy:     policy,
 		AskHandler: directFunctionApprovalHandler{session: session, interactive: interactive},
 	}
+	// Direct /call|/tool|/skill must honor project+CLI permission product rules.
+	runtimepolicy.ApplyPermissionsOverlayToEngine(engine, session.PermissionsOverlay)
 	decision, err := engine.Evaluate(ctx, runtimepolicy.EvalRequest{
 		SessionID:    currentRuntimeSessionID(session),
 		ToolCallID:   "direct-slash-call",

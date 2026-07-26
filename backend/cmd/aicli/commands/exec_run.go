@@ -161,6 +161,10 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 		return nil, newExecExitError(execExitUsage, "INVALID_APPROVAL_REUSE", err)
 	}
 	opts.ApprovalReuse = approvalReuse
+	cliAllowTools, _ := cmd.Flags().GetStringSlice("allow-tool")
+	cliDenyTools, _ := cmd.Flags().GetStringSlice("deny-tool")
+	opts.CLIAllowTools = append([]string(nil), cliAllowTools...)
+	opts.CLIDenyTools = append([]string(nil), cliDenyTools...)
 
 	opts.DisableTools, _ = cmd.Flags().GetBool("disable-tools")
 	opts.EnableTools, _ = cmd.Flags().GetBool("enable-tools")
@@ -323,6 +327,8 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		CLISkillsMode:          opts.CLISkillsMode,
 		CLISkillsDebug:         opts.CLISkillsDebug,
 		PermissionMode:         opts.PermissionMode,
+		CLIAllowTools:          append([]string(nil), opts.CLIAllowTools...),
+		CLIDenyTools:           append([]string(nil), opts.CLIDenyTools...),
 		ApprovalReuseMode:      opts.ApprovalReuse,
 		JSONOutput:             false,
 		OutputFlag:             opts.OutputFormat,

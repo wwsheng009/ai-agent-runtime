@@ -283,6 +283,8 @@ func main() {
 	chatCmd.Flags().String("skills-mode", "auto", "aicli chat 的 skills 暴露模式（auto|prefer|only）")
 	chatCmd.Flags().Bool("skills-debug", false, "打印当前请求的 skill route 候选、暴露结果与模式")
 	chatCmd.Flags().String("permission-mode", "default", "本地 actor/team 运行的权限模式（default|accept_edits|plan|bypass_permissions）")
+	chatCmd.Flags().StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
+	chatCmd.Flags().StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
 	chatCmd.Flags().String("approval-reuse", "session_readonly_shell", "本地 actor/team 审批复用策略（off|session_readonly_shell|team_readonly_shell）")
 	chatCmd.Flags().Bool("yolo", false, "快捷模式：等价于 --permission-mode bypass_permissions")
 	chatCmd.Flags().StringSliceP("image", "i", nil, "附加本地图片文件路径（可重复指定，支持 PNG/JPEG/GIF/WebP）")

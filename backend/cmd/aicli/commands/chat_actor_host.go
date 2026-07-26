@@ -160,6 +160,8 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	host.TeamLifecycle = newLocalTeamLifecycleService(host)
 
 	workspaceRoot := resolveLocalWorkspacePath(runtimeConfig, session)
+	// Re-apply project permissions against the resolved workspace root (cwd bootstrap may differ).
+	applyChatPermissionsOverlay(session, workspaceRoot)
 	claims := team.NewPathClaimManager(host.TeamStore, workspaceRoot)
 	host.TeamClaims = claims
 	host.Orchestrator = team.NewOrchestrator(host.TeamStore, claims, nil)
@@ -667,6 +669,8 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
+	// Product permission overlay rules on the actor permission engine.
+	applyChatPermissionsOverlayToAgent(apiAgent, session)
 	var baseHooks []runtimehooks.HookConfig
 	if runtimeConfig != nil {
 		baseHooks = runtimeConfig.Hooks
@@ -687,7 +691,9 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 		if cfg := apiAgent.GetConfig(); cfg != nil {
 			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, workspaceRoot)
 		}
+		// Plan mode may recreate/mutate the engine; re-apply product overlay after it.
 		applyChatPlanModeToAgent(apiAgent, session, runtimeSession)
+		applyChatPermissionsOverlayToAgent(apiAgent, session)
 		return nil
 	}
 }
@@ -786,6 +792,9 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 				allowedTools = []string{}
 			}
 			policy = runtimepolicy.NewToolExecutionPolicy(allowedTools, false)
+			// When policy was synthesized from tool surface (no profile policy),
+			// still apply product allow/deny hard gates from the overlay.
+			policy = runtimepolicy.ApplyPermissionsOverlayToPolicy(policy, session.PermissionsOverlay)
 		}
 	}
 	if session.DisableTools {

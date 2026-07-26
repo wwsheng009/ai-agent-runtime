@@ -48,6 +48,8 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.Duration("timeout", 0, "整次 exec 执行超时时间（如 5m, 30s），0 表示无限制")
 
 	flags.String("permission-mode", "default", "权限模式（default|accept_edits|plan|bypass_permissions）")
+	flags.StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
+	flags.StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
 	flags.String("approval-reuse", "session_readonly_shell", "审批复用策略（off|session_readonly_shell|team_readonly_shell）")
 	flags.Bool("yolo", false, "快捷模式：等价于 --permission-mode bypass_permissions")
 

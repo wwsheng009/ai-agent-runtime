@@ -16,6 +16,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -82,6 +83,7 @@ func printChatDebugInfo(session *ChatSession) {
 		printChatSessionMetaRow("Permission Mode:", chatDebugValueOrNone(string(session.PermissionMode)))
 		printChatSessionMetaRow("Approval Reuse:", chatDebugValueOrNone(formatChatApprovalReuseMode(session.ApprovalReuseMode)))
 	}
+	printChatDebugPermissions(session)
 	if session.InputQueue != nil {
 		queuedCount, draining := queuedInteractiveInputState(session)
 		if queuedCount == 0 && !draining {
@@ -106,6 +108,37 @@ func printChatDebugInfo(session *ChatSession) {
 	printChatDebugAgentControl(session)
 	printChatDebugAgentGraph(session)
 	printChatDebugMailbox(session)
+}
+
+func printChatDebugPermissions(session *ChatSession) {
+	if session == nil {
+		printChatSessionMetaRow("Permission Rules:", "<no session>")
+		return
+	}
+	overlay := session.PermissionsOverlay
+	summary := runtimepolicy.FormatPermissionsOverlaySummary(overlay)
+	printChatSessionMetaRow("Permission Rules:", chatDebugValueOrNone(summary))
+	if path := strings.TrimSpace(overlay.SourcePath); path != "" {
+		printChatSessionMetaRow("Permissions File:", chatDebugValueOrNone(resolveAbsoluteChatPath(path)))
+	}
+	if len(session.CLIAllowTools) > 0 {
+		printChatSessionMetaRow("CLI Allow Tools:", strings.Join(session.CLIAllowTools, ", "))
+	}
+	if len(session.CLIDenyTools) > 0 {
+		printChatSessionMetaRow("CLI Deny Tools:", strings.Join(session.CLIDenyTools, ", "))
+	}
+	if len(overlay.Rules) == 0 {
+		return
+	}
+	names := make([]string, 0, len(overlay.Rules))
+	for _, rule := range overlay.Rules {
+		name := strings.TrimSpace(rule.Name)
+		if name == "" {
+			name = string(rule.Decision)
+		}
+		names = append(names, name)
+	}
+	printChatSessionMetaRow("Permission Rule Names:", strings.Join(names, ", "))
 }
 
 func printChatDebugRoutingSummary(session *ChatSession) {

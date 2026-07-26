@@ -44,6 +44,9 @@ type ExecOptions struct {
 	PermissionMode runtimepolicy.Mode
 	ApprovalReuse  chatApprovalReuseMode
 	YoloMode       bool
+	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool product surface.
+	CLIAllowTools  []string
+	CLIDenyTools   []string
 
 	DisableTools   bool
 	EnableTools    bool

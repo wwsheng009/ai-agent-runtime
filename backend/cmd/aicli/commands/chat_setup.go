@@ -19,6 +19,7 @@ import (
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -122,6 +123,8 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		OutputFormat:             opts.OutputFormat,
 		InputReader:              chatOptionInputReader(opts),
 		PermissionMode:           opts.PermissionMode,
+		CLIAllowTools:            append([]string(nil), opts.CLIAllowTools...),
+		CLIDenyTools:             append([]string(nil), opts.CLIDenyTools...),
 		ApprovalReuseMode:        opts.ApprovalReuseMode,
 		Surface:                  surface,
 		runtimeHTTPCapture:       &chatRuntimeHTTPCapture{},
@@ -142,6 +145,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		session.ResolvedSkillDirs = profileState.SkillDirs()
 		session.ProfileContext = cloneSkillContextMap(profileState.ContextValues)
 		session.ToolPolicy = profileState.ToolPolicy
+		if session.ToolPolicy != nil {
+			session.BaseToolPolicy = session.ToolPolicy.Clone()
+		}
 		if session.FunctionCatalog != nil && session.ToolPolicy != nil {
 			session.FunctionCatalog.SetToolPolicy(session.ToolPolicy)
 		}
@@ -149,6 +155,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 			emitChatSandboxWarning(warning)
 		}
 	}
+	// Project + CLI permission product surface (R1). Workspace may refine later
+	// when local runtime host resolves an absolute root; cwd is the bootstrap root.
+	applyChatPermissionsOverlay(session, "")
 
 	cleanup := func() {
 		mcpmanager.SetStatusOutput(os.Stdout)
@@ -553,6 +562,9 @@ func printChatSessionPreamble(session *ChatSession) {
 	if session.LocalRuntimeHost != nil {
 		printChatSessionInfoRow(os.Stderr, "Permission Mode:", string(session.PermissionMode), chatSessionMetaLabelWidth)
 		printChatSessionInfoRow(os.Stderr, "Approval Reuse:", formatChatApprovalReuseMode(session.ApprovalReuseMode), chatSessionMetaLabelWidth)
+	}
+	if summary := runtimepolicy.FormatPermissionsOverlaySummary(session.PermissionsOverlay); summary != "" && summary != "<none>" {
+		printChatSessionInfoRow(os.Stderr, "Permission Rules:", summary, chatSessionMetaLabelWidth)
 	}
 	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
 		value := fmt.Sprintf("%d pending", queuedCount)

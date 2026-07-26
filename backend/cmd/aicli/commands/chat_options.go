@@ -39,6 +39,10 @@ type chatCommandOptions struct {
 	CLISkillsDebug           bool
 	PermissionMode           runtimepolicy.Mode
 	PermissionModeChanged    bool
+	// CLIAllowTools / CLIDenyTools are product-facing permission overlays
+	// (--allow-tool / --deny-tool). Applied after profile tool policy.
+	CLIAllowTools            []string
+	CLIDenyTools             []string
 	ApprovalReuseMode        chatApprovalReuseMode
 	JSONOutput               bool
 	OutputFlag               string
@@ -97,6 +101,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	cliSkillsDebug, _ := cmd.Flags().GetBool("skills-debug")
 	permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 	approvalReuseFlag, _ := cmd.Flags().GetString("approval-reuse")
+	cliAllowTools, _ := cmd.Flags().GetStringSlice("allow-tool")
+	cliDenyTools, _ := cmd.Flags().GetStringSlice("deny-tool")
 	yoloFlag, _ := cmd.Flags().GetBool("yolo")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	outputFlag, _ := cmd.Flags().GetString("output")
@@ -169,6 +175,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		CLISkillsDebug:         cliSkillsDebug,
 		PermissionMode:         permissionMode,
 		PermissionModeChanged:  cmd.Flags().Changed("permission-mode") || yoloFlag,
+		CLIAllowTools:          append([]string(nil), cliAllowTools...),
+		CLIDenyTools:           append([]string(nil), cliDenyTools...),
 		ApprovalReuseMode:      approvalReuseMode,
 		JSONOutput:             jsonOutput,
 		OutputFlag:             outputFlag,

@@ -124,7 +124,15 @@ type ChatSession struct {
 	ResolvedSkillDirs               []string                           // 解析后的 skills 目录
 	ProfileContext                  map[string]interface{}             // profile 提供的只读运行时上下文
 	ToolPolicy                      *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
+	// BaseToolPolicy is the pre-overlay policy (profile / session base) so
+	// project-root reloads can re-apply permissions without double-intersecting.
+	BaseToolPolicy                  *runtimepolicy.ToolExecutionPolicy
 	PermissionMode                  runtimepolicy.Mode                 // actor/team run permission mode
+	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool.
+	CLIAllowTools                   []string
+	CLIDenyTools                    []string
+	// PermissionsOverlay is the merged project file + CLI permission product surface.
+	PermissionsOverlay              runtimepolicy.PermissionsOverlay
 	ApprovalReuseMode               chatApprovalReuseMode              // local actor/team approval reuse policy
 	ActiveTeam                      *chatTeamBinding                   // ambient team binding across turns
 	SelectedAgentTarget             string                             // explicit /agents target used by /agents send/followup
