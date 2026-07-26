@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +23,19 @@ type GlobalAgentStoreConfig struct {
 // SQLiteGlobalAgentRegistryStore persists the AgentControl identity graph in a
 // single durable row-id space. It is deliberately scoped to identity data; chat
 // sessions remain execution state projections.
+// Path-backed construction is cheap: the durable database is opened on first
+// use so chat bootstrap can wire AgentControl without creating
+// agent_control.sqlite early.
 type SQLiteGlobalAgentRegistryStore struct {
+	cfg  GlobalAgentStoreConfig
+	path string
+
+	openOnce   sync.Once
+	openMu     sync.RWMutex
+	openErr    error
+	closed     bool
+	sharedOpen func() error
+
 	db     *sql.DB
 	dsn    string
 	ownsDB bool
@@ -44,32 +55,27 @@ type globalAgentWakeWatcher struct {
 	unwatch func()
 }
 
-// NewSQLiteGlobalAgentRegistryStore opens a SQLite-backed AgentControl identity
-// registry store.
+// NewSQLiteGlobalAgentRegistryStore creates a SQLite-backed AgentControl
+// identity registry store. Path-backed stores open lazily on first use.
 func NewSQLiteGlobalAgentRegistryStore(cfg *GlobalAgentStoreConfig) (*SQLiteGlobalAgentRegistryStore, error) {
 	if cfg == nil {
 		cfg = &GlobalAgentStoreConfig{}
 	}
-	dsn, err := resolveGlobalAgentDSN(cfg)
+	cfgCopy := *cfg
+	dsn, path, err := resolveLazyGlobalAgentDSN(&cfgCopy)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open agent control agent registry db: %w", err)
+	store := &SQLiteGlobalAgentRegistryStore{
+		cfg:    cfgCopy,
+		path:   path,
+		dsn:    dsn,
+		ownsDB: true,
 	}
-	if isGlobalMailboxMemoryDSN(dsn) {
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-	}
-	if err := configureAgentControlSQLiteDB(context.Background(), db, dsn); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	store := &SQLiteGlobalAgentRegistryStore{db: db, dsn: dsn, ownsDB: true}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	if path == "" || isGlobalMailboxMemoryDSN(dsn) {
+		if err := store.ensure(); err != nil {
+			return nil, err
+		}
 	}
 	return store, nil
 }
@@ -85,16 +91,131 @@ func newSQLiteGlobalAgentRegistryStoreWithDB(ctx context.Context, db *sql.DB, ds
 	return store, nil
 }
 
-// Close closes the underlying database.
+// Opened reports whether the durable backend has been opened.
+func (s *SQLiteGlobalAgentRegistryStore) Opened() bool {
+	if s == nil {
+		return false
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.db != nil
+}
+
+// Path returns the configured on-disk path when one is used.
+func (s *SQLiteGlobalAgentRegistryStore) Path() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.path)
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) ensure() error {
+	if s == nil {
+		return fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if s.sharedOpen != nil {
+		return s.sharedOpen()
+	}
+	s.openMu.RLock()
+	if s.closed {
+		s.openMu.RUnlock()
+		return fmt.Errorf("agent control agent registry store is closed")
+	}
+	if s.db != nil || s.openErr != nil {
+		err := s.openErr
+		s.openMu.RUnlock()
+		return err
+	}
+	s.openMu.RUnlock()
+
+	s.openOnce.Do(func() {
+		pathKey := strings.TrimSpace(s.path)
+		if pathKey != "" {
+			agentControlPathOpenMu.Lock()
+			defer agentControlPathOpenMu.Unlock()
+		}
+		s.openMu.Lock()
+		defer s.openMu.Unlock()
+		if s.closed {
+			s.openErr = fmt.Errorf("agent control agent registry store is closed")
+			return
+		}
+		if s.db != nil || s.openErr != nil {
+			return
+		}
+		if err := ensureAgentControlStoreDirectory(s.path); err != nil {
+			s.openErr = err
+			return
+		}
+		db, err := sql.Open("sqlite3", s.dsn)
+		if err != nil {
+			s.openErr = fmt.Errorf("open agent control agent registry db: %w", err)
+			return
+		}
+		if isGlobalMailboxMemoryDSN(s.dsn) {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+		}
+		if err := configureAgentControlSQLiteDB(context.Background(), db, s.dsn); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		store := &SQLiteGlobalAgentRegistryStore{db: db, dsn: s.dsn}
+		if err := store.init(context.Background()); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		s.db = db
+		s.ownsDB = true
+	})
+
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.openErr
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) durableFileExists() bool {
+	if s == nil {
+		return false
+	}
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) ensureForRead() (skipEmpty bool, err error) {
+	if s == nil {
+		return false, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if s.Opened() || s.durableFileExists() {
+		return false, s.ensure()
+	}
+	if strings.TrimSpace(s.path) == "" {
+		return false, s.ensure()
+	}
+	return true, nil
+}
+
+// Close closes the underlying database if it was opened and owned.
 func (s *SQLiteGlobalAgentRegistryStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.closed = true
 	s.closeAgentWakeWatchers()
-	if !s.ownsDB {
+	if s.db == nil || !s.ownsDB {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	s.db = nil
+	return err
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) closeAgentWakeWatchers() {
@@ -120,8 +241,11 @@ func (s *SQLiteGlobalAgentRegistryStore) closeAgentWakeWatchers() {
 // identity row. The row is idempotent by AgentID; root/path uniqueness remains
 // enforced separately so conflicting identity projections are visible errors.
 func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Context, record AgentRecord) (AgentRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return AgentRecord{}, err
 	}
 	record = record.Normalize()
 	if record.AgentID == "" {
@@ -244,8 +368,11 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 // active child count, and creates the child row. This is the registry-first
 // cross-process guard for spawn_agent thread limits.
 func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx context.Context, root AgentRecord, child AgentRecord, maxThreads int) (AgentRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return AgentRecord{}, err
 	}
 	root = root.Normalize()
 	child = child.Normalize()
@@ -316,8 +443,13 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 // ListAgentControlAgents returns durable AgentControl identity rows matching
 // filter, ordered by the global agent registry row id.
 func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Context, filter AgentFilter) ([]AgentRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	filter = filter.Normalize()
 	clauses, args := agentFilterClauses(filter)
@@ -541,8 +673,11 @@ func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx conte
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ctx context.Context, rootSessionID string, agentPath, status, eventKind string, terminalAt time.Time) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	rootSessionID = strings.TrimSpace(rootSessionID)
 	agentPath = normalizeAgentPath(agentPath)
@@ -618,7 +753,7 @@ func (s *SQLiteGlobalAgentRegistryStore) WatchAgentControlAgentWake(ctx context.
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s == nil || s.db == nil {
+	if s == nil {
 		return out, func() {}
 	}
 	filter = filter.Normalize()
@@ -657,8 +792,13 @@ func (s *SQLiteGlobalAgentRegistryStore) WatchAgentControlAgentWake(ctx context.
 // LastAgentControlAgentWakeSeq returns the durable agent wake event row-id
 // high-water mark for the requested identity graph stream.
 func (s *SQLiteGlobalAgentRegistryStore) LastAgentControlAgentWakeSeq(ctx context.Context, filter AgentWakeFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	filter = filter.Normalize()
 	clauses, args := agentWakeFilterClauses(filter)
@@ -674,8 +814,11 @@ func (s *SQLiteGlobalAgentRegistryStore) LastAgentControlAgentWakeSeq(ctx contex
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) appendAgentWakeEvent(ctx context.Context, record AgentRecord, eventKind string) (AgentWakeEvent, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return AgentWakeEvent{}, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return AgentWakeEvent{}, err
 	}
 	event := agentRecordWakeEvent(record, eventKind)
 	if event.CreatedAt.IsZero() {
@@ -1042,23 +1185,24 @@ func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 	return record, nil
 }
 
-func resolveGlobalAgentDSN(cfg *GlobalAgentStoreConfig) (string, error) {
+func resolveLazyGlobalAgentDSN(cfg *GlobalAgentStoreConfig) (string, string, error) {
 	if cfg == nil {
 		cfg = &GlobalAgentStoreConfig{}
 	}
 	if path := strings.TrimSpace(cfg.Path); path != "" {
-		dir := filepath.Dir(path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create agent control agent registry directory: %w", err)
-			}
-		}
-		return ensureGlobalMailboxDSNOptions(path), nil
+		return ensureGlobalMailboxDSNOptions(path), path, nil
 	}
 	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
-		return ensureGlobalMailboxDSNOptions(dsn), nil
+		return ensureGlobalMailboxDSNOptions(dsn), "", nil
 	}
-	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-agent-registry-%d?mode=memory&cache=shared", time.Now().UnixNano())), nil
+	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-agent-registry-%d?mode=memory&cache=shared", time.Now().UnixNano())), "", nil
+}
+
+// resolveGlobalAgentDSN keeps the historical helper for callers/tests that only
+// need a DSN. Directory creation is deferred until ensure().
+func resolveGlobalAgentDSN(cfg *GlobalAgentStoreConfig) (string, error) {
+	dsn, _, err := resolveLazyGlobalAgentDSN(cfg)
+	return dsn, err
 }
 
 func nullAgentString(value string) interface{} {

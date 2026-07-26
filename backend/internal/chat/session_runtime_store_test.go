@@ -191,6 +191,46 @@ func TestInMemoryRuntimeStoreSessionLeaseLifecycle(t *testing.T) {
 	require.Nil(t, lease)
 }
 
+func TestNewSQLiteRuntimeStore_PathBackedIsLazyUntilFirstUse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session_runtime.sqlite")
+
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	require.False(t, store.Opened())
+	require.Equal(t, path, store.Path())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err), "lazy open must not create the sqlite file early")
+
+	// Bootstrap-style projection repair must not force the first open.
+	repaired, err := store.RepairAgentControlMailboxProjection(context.Background(), agentcontrol.MailboxRecordFilter{})
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	// Empty reads on a brand-new path stay lazy.
+	state, err := store.LoadState(context.Background(), "session-1")
+	require.NoError(t, err)
+	require.Nil(t, state)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	_, err = store.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      "first-write",
+		SessionID: "session-1",
+		Payload:   map[string]interface{}{"ok": true},
+	})
+	require.NoError(t, err)
+	require.True(t, store.Opened())
+	_, err = os.Stat(path)
+	require.NoError(t, err)
+}
+
 func TestSQLiteRuntimeStoreSessionLeaseLifecycle(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		Path: filepath.Join(t.TempDir(), "runtime.sqlite"),
@@ -269,6 +309,7 @@ func TestSQLiteRuntimeStoreConfiguresLowMemoryFileConnection(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	require.NoError(t, store.ensure())
 	assert.True(t, store.fileBacked)
 	assert.Equal(t, 1, store.db.Stats().MaxOpenConnections)
 	var journalMode string
@@ -2092,10 +2133,13 @@ func TestSQLiteRuntimeStoreMigratesSessionMailboxTable(t *testing.T) {
 	assert.Equal(t, int64(1), event.Payload["mailbox_seq"])
 
 	var count int
+	require.NoError(t, store.ensure())
 	assertSQLiteTableMissing(t, store.db, "session_mailbox_messages")
 
+	require.NoError(t, store.ensure())
 	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
 
+	require.NoError(t, store.ensure())
 	err = store.db.QueryRowContext(context.Background(), `
 		SELECT COUNT(*)
 		FROM agent_control_mailbox_records
@@ -2230,7 +2274,9 @@ func TestSQLiteRuntimeStoreMigratesAgentControlMailboxSequence(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.ensure())
 	assertSQLiteTableMissing(t, store.db, "session_mailbox_messages")
+	require.NoError(t, store.ensure())
 	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
 
 	messages, err := store.ListAgentControlMailbox(context.Background(), "session-control-migration", 0, 10)

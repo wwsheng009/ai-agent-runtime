@@ -19,8 +19,18 @@ import (
 )
 
 // SQLiteStore persists team data in SQLite.
+// Construction is cheap: the durable database is opened on first use so new
+// chat bootstrap can prepare a TeamStore without creating team_store.sqlite.
 type SQLiteStore struct {
-	db *sql.DB
+	cfg  StoreConfig
+	dsn  string
+	path string
+
+	openOnce sync.Once
+	openMu   sync.RWMutex
+	openErr  error
+	closed   bool
+	db       *sql.DB
 
 	globalMailboxWriterMu sync.RWMutex
 	globalMailboxWriter   agentcontrol.GlobalMailboxWriter
@@ -61,7 +71,7 @@ func (s *SQLiteStore) SetGlobalMailboxWriter(writer agentcontrol.GlobalMailboxWr
 // AgentControl mailbox projection semantics.
 func (s *SQLiteStore) AgentControlMailboxProjectionStatus() agentcontrol.MailboxProjectionStatus {
 	status := agentcontrol.MailboxProjectionStatus{Store: "team_sqlite"}
-	if s == nil || s.db == nil {
+	if s == nil {
 		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
 		status.Reason = "store_not_configured"
 		return status.Normalize()
@@ -107,44 +117,159 @@ type agentControlWakeWatcher struct {
 	ch       chan agentcontrol.WakeEvent
 }
 
-// NewSQLiteStore opens a SQLite-backed team store.
+// NewSQLiteStore creates a SQLite-backed team store.
+// The underlying database is opened lazily on the first real operation so chat
+// bootstrap can wire a TeamStore without paying the open/migrate cost up front.
 func NewSQLiteStore(cfg *StoreConfig) (*SQLiteStore, error) {
 	if cfg == nil {
 		cfg = &StoreConfig{}
 	}
-	dsn, err := resolveDSN(cfg)
+	cfgCopy := *cfg
+	dsn, path, err := resolveLazyDSN(&cfgCopy)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open team db: %w", err)
+	store := &SQLiteStore{
+		cfg:  cfgCopy,
+		dsn:  dsn,
+		path: path,
 	}
-	if isSQLiteMemoryDSN(dsn) {
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-	}
-	store := &SQLiteStore{db: db}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	// In-memory stores are cheap and commonly used by tests that inspect the
+	// underlying *sql.DB immediately after construction. Path-backed stores stay
+	// lazy so new chat bootstrap does not create team_store.sqlite.
+	if path == "" || isSQLiteMemoryDSN(dsn) {
+		if err := store.ensure(); err != nil {
+			return nil, err
+		}
 	}
 	return store, nil
 }
 
-// Close closes the underlying database.
+// Opened reports whether the durable backend has been opened.
+func (s *SQLiteStore) Opened() bool {
+	if s == nil {
+		return false
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.db != nil
+}
+
+// Path returns the configured on-disk path when one is used.
+func (s *SQLiteStore) Path() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.path)
+}
+
+func (s *SQLiteStore) ensure() error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	s.openMu.RLock()
+	if s.closed {
+		s.openMu.RUnlock()
+		return fmt.Errorf("team store is closed")
+	}
+	if s.db != nil || s.openErr != nil {
+		err := s.openErr
+		s.openMu.RUnlock()
+		return err
+	}
+	s.openMu.RUnlock()
+
+	s.openOnce.Do(func() {
+		s.openMu.Lock()
+		defer s.openMu.Unlock()
+		if s.closed {
+			s.openErr = fmt.Errorf("team store is closed")
+			return
+		}
+		if s.db != nil || s.openErr != nil {
+			return
+		}
+		if err := ensureTeamStoreDirectory(s.path); err != nil {
+			s.openErr = err
+			return
+		}
+		db, err := sql.Open("sqlite3", s.dsn)
+		if err != nil {
+			s.openErr = fmt.Errorf("open team db: %w", err)
+			return
+		}
+		if isSQLiteMemoryDSN(s.dsn) {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+		}
+		store := &SQLiteStore{db: db}
+		if err := store.init(context.Background()); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		s.db = db
+	})
+
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.openErr
+}
+
+func (s *SQLiteStore) durableFileExists() bool {
+	if s == nil {
+		return false
+	}
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ensureForRead opens the durable backend only when it already exists (or was
+// previously opened). For a brand-new path-backed store, callers can treat the
+// absent file as an empty result set without creating team_store.sqlite.
+func (s *SQLiteStore) ensureForRead() (skipEmpty bool, err error) {
+	if s == nil {
+		return false, fmt.Errorf("team store is not initialized")
+	}
+	if s.Opened() || s.durableFileExists() {
+		return false, s.ensure()
+	}
+	// Memory/DSN-backed stores always open eagerly in NewSQLiteStore, so reaching
+	// here with an empty path means there is nothing durable to read yet.
+	if strings.TrimSpace(s.path) == "" {
+		return false, s.ensure()
+	}
+	return true, nil
+}
+
+// Close closes the underlying database if it was opened.
 func (s *SQLiteStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.closed = true
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
 }
 
 // WithImmediateTx executes fn inside a SQLite IMMEDIATE transaction.
 // The DSN is configured with _txlock=immediate, so BeginTx automatically uses IMMEDIATE mode.
 func (s *SQLiteStore) WithImmediateTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if fn == nil {
 		return nil
@@ -174,8 +299,11 @@ func (s *SQLiteStore) WithImmediateTx(ctx context.Context, fn func(*sql.Tx) erro
 
 // CreateTeam inserts a new team record.
 func (s *SQLiteStore) CreateTeam(ctx context.Context, team Team) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 	if team.ID == "" {
 		team.ID = "team_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -203,8 +331,13 @@ func (s *SQLiteStore) CreateTeam(ctx context.Context, team Team) (string, error)
 
 // GetTeam loads a team by id.
 func (s *SQLiteStore) GetTeam(ctx context.Context, id string) (*Team, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, lead_session_id, status, strategy, max_teammates, max_writers, created_at, updated_at
@@ -231,8 +364,13 @@ func (s *SQLiteStore) GetTeam(ctx context.Context, id string) (*Team, error) {
 
 // ListTeams returns teams matching the filter.
 func (s *SQLiteStore) ListTeams(ctx context.Context, filter TeamFilter) ([]Team, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	query := strings.Builder{}
 	query.WriteString(`
@@ -285,8 +423,11 @@ func (s *SQLiteStore) ListTeams(ctx context.Context, filter TeamFilter) ([]Team,
 
 // UpdateTeam updates a team record.
 func (s *SQLiteStore) UpdateTeam(ctx context.Context, team Team) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if team.ID == "" {
 		return fmt.Errorf("team id is required")
@@ -305,8 +446,11 @@ func (s *SQLiteStore) UpdateTeam(ctx context.Context, team Team) error {
 
 // UpdateTeamStatus updates a team's status field.
 func (s *SQLiteStore) UpdateTeamStatus(ctx context.Context, id string, status TeamStatus) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if id == "" {
 		return fmt.Errorf("team id is required")
@@ -322,8 +466,11 @@ func (s *SQLiteStore) UpdateTeamStatus(ctx context.Context, id string, status Te
 
 // DeleteTeam deletes a team record.
 func (s *SQLiteStore) DeleteTeam(ctx context.Context, id string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if id == "" {
 		return fmt.Errorf("team id is required")
@@ -337,8 +484,13 @@ func (s *SQLiteStore) DeleteTeam(ctx context.Context, id string) error {
 
 // ListTeamIDs returns all team ids.
 func (s *SQLiteStore) ListTeamIDs(ctx context.Context) ([]string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM teams ORDER BY created_at DESC`)
 	if err != nil {
@@ -358,8 +510,11 @@ func (s *SQLiteStore) ListTeamIDs(ctx context.Context) ([]string, error) {
 
 // UpsertTeammate inserts or updates a teammate record.
 func (s *SQLiteStore) UpsertTeammate(ctx context.Context, teammate Teammate) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 	if teammate.ID == "" {
 		teammate.ID = "mate_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -403,8 +558,13 @@ func (s *SQLiteStore) UpsertTeammate(ctx context.Context, teammate Teammate) (st
 
 // GetTeammate loads a teammate by id.
 func (s *SQLiteStore) GetTeammate(ctx context.Context, id string) (*Teammate, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, team_id, name, profile, session_id, state, last_heartbeat, capabilities_json, created_at, updated_at
@@ -434,8 +594,13 @@ func (s *SQLiteStore) GetTeammate(ctx context.Context, id string) (*Teammate, er
 
 // ListTeammates returns all teammates within a team.
 func (s *SQLiteStore) ListTeammates(ctx context.Context, teamID string) ([]Teammate, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, team_id, name, profile, session_id, state, last_heartbeat, capabilities_json, created_at, updated_at
@@ -472,8 +637,11 @@ func (s *SQLiteStore) ListTeammates(ctx context.Context, teamID string) ([]Teamm
 
 // UpdateTeammateState updates the state for a teammate.
 func (s *SQLiteStore) UpdateTeammateState(ctx context.Context, id string, state TeammateState) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE teammates SET state = ?, updated_at = ? WHERE id = ?
@@ -486,8 +654,11 @@ func (s *SQLiteStore) UpdateTeammateState(ctx context.Context, id string, state 
 
 // UpdateTeammateHeartbeat updates a teammate heartbeat timestamp.
 func (s *SQLiteStore) UpdateTeammateHeartbeat(ctx context.Context, id string, heartbeat time.Time) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE teammates SET last_heartbeat = ?, updated_at = ? WHERE id = ?
@@ -506,8 +677,11 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task Task) (string, error)
 // CreateAgentControlTaskRecord inserts a task through the AgentControl task
 // graph table. Legacy team_tasks is migration-only and is no longer written.
 func (s *SQLiteStore) CreateAgentControlTaskRecord(ctx context.Context, task Task) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 	if task.ID == "" {
 		task.ID = "task_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -553,8 +727,13 @@ func (s *SQLiteStore) CreateAgentControlTaskRecord(ctx context.Context, task Tas
 
 // GetTask loads a task by id.
 func (s *SQLiteStore) GetTask(ctx context.Context, id string) (*Task, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	if task, err := s.getAgentControlTask(ctx, id); err != nil {
 		return nil, err
@@ -565,8 +744,13 @@ func (s *SQLiteStore) GetTask(ctx context.Context, id string) (*Task, error) {
 }
 
 func (s *SQLiteStore) getAgentControlTask(ctx context.Context, id string) (*Task, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT task_id, team_id, parent_task_id, title, goal, difficulty, difficulty_rationale, status, priority, assignee, lease_until, retry_count,
@@ -634,15 +818,25 @@ func scanTaskRow(row taskRowScanner) (*Task, error) {
 
 // ListTasks returns tasks matching the filter.
 func (s *SQLiteStore) ListTasks(ctx context.Context, filter TaskFilter) ([]Task, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	return s.listAgentControlTasks(ctx, filter)
 }
 
 func (s *SQLiteStore) listAgentControlTasks(ctx context.Context, filter TaskFilter) ([]Task, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	query := strings.Builder{}
 	query.WriteString(`
@@ -708,8 +902,11 @@ func (s *SQLiteStore) UpdateTask(ctx context.Context, task Task) error {
 // UpdateAgentControlTaskRecord updates the AgentControl task table. Legacy
 // team_tasks is migration-only and is no longer synchronized.
 func (s *SQLiteStore) UpdateAgentControlTaskRecord(ctx context.Context, task Task) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(task.ID) == "" {
 		return fmt.Errorf("task id is required")
@@ -750,8 +947,11 @@ func (s *SQLiteStore) UpdateAgentControlTaskRecord(ctx context.Context, task Tas
 
 // UpdateTaskStatus updates a task status and summary.
 func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, id string, status TaskStatus, summary string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	changed := false
@@ -782,8 +982,11 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, id string, status Ta
 // UpdateAgentControlTaskRouteAudit updates latest route audit metadata without
 // changing task lifecycle, lease, assignee, version, or path-claim state.
 func (s *SQLiteStore) UpdateAgentControlTaskRouteAudit(ctx context.Context, request agentcontrol.TaskRouteAuditUpdateRequest) (*agentcontrol.TaskRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return nil, err
 	}
 	request = request.Normalize()
 	if request.ID == "" {
@@ -859,8 +1062,11 @@ func (s *SQLiteStore) UpdateAgentControlTaskRouteAudit(ctx context.Context, requ
 
 // IncrementTaskRetry increments the retry counter for a task.
 func (s *SQLiteStore) IncrementTaskRetry(ctx context.Context, id string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	changed := false
@@ -896,8 +1102,11 @@ func (s *SQLiteStore) MarkReadyTasks(ctx context.Context, teamID string) (int64,
 // MarkAgentControlTaskRecordsReady promotes dependency-satisfied AgentControl
 // task records.
 func (s *SQLiteStore) MarkAgentControlTaskRecordsReady(ctx context.Context, teamID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
@@ -963,8 +1172,11 @@ func (s *SQLiteStore) MarkAgentControlTaskRecordsReady(ctx context.Context, team
 
 // ClaimTask attempts to claim a ready task.
 func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string, leaseUntil time.Time, expectedVersion int64) (bool, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return false, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return false, err
 	}
 	id = strings.TrimSpace(id)
 	assignee = strings.TrimSpace(assignee)
@@ -1030,8 +1242,11 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 
 // ClaimTaskWithPathClaims atomically claims a task and records any path claims.
 func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, assignee string, leaseUntil time.Time, workspaceRoot string) (bool, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return false, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return false, err
 	}
 	taskID := strings.TrimSpace(task.ID)
 	teamID := strings.TrimSpace(task.TeamID)
@@ -1140,8 +1355,11 @@ func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, as
 
 // RenewTaskLease extends a running task lease.
 func (s *SQLiteStore) RenewTaskLease(ctx context.Context, id string, leaseUntil time.Time) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	changed := false
@@ -1171,8 +1389,11 @@ func (s *SQLiteStore) RenewTaskLease(ctx context.Context, id string, leaseUntil 
 
 // ReleaseTask releases a task lease and updates its status.
 func (s *SQLiteStore) ReleaseTask(ctx context.Context, id string, status TaskStatus) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	changed := false
@@ -1202,8 +1423,11 @@ func (s *SQLiteStore) ReleaseTask(ctx context.Context, id string, status TaskSta
 
 // BlockTask marks a task as blocked while preserving ownership context.
 func (s *SQLiteStore) BlockTask(ctx context.Context, id string, summary string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("task id is required")
@@ -1236,8 +1460,11 @@ func (s *SQLiteStore) BlockTask(ctx context.Context, id string, summary string) 
 }
 
 func (s *SQLiteStore) refreshAgentControlTaskAssigneeProjection(ctx context.Context, teamID, assignee string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	teamID = strings.TrimSpace(teamID)
 	assignee = strings.TrimSpace(assignee)
@@ -1276,8 +1503,11 @@ func (s *SQLiteStore) refreshAgentControlTaskAssigneeProjection(ctx context.Cont
 }
 
 func (s *SQLiteStore) upsertAgentControlTaskRecordValue(ctx context.Context, task Task, record agentcontrol.TaskRecord) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if task.Status == "" {
 		task.Status = TaskStatusPending
@@ -1428,8 +1658,11 @@ func (s *SQLiteStore) AddTaskDependency(ctx context.Context, taskID, dependsOnID
 // CreateAgentControlTaskDependencyRecord inserts a dependency edge through the
 // AgentControl task graph. Legacy team_task_dependencies is migration-only.
 func (s *SQLiteStore) CreateAgentControlTaskDependencyRecord(ctx context.Context, teamID, taskID, dependsOnID string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	teamID = strings.TrimSpace(teamID)
 	taskID = strings.TrimSpace(taskID)
@@ -1487,8 +1720,11 @@ func (s *SQLiteStore) CreateAgentControlTaskDependencyRecord(ctx context.Context
 }
 
 func (s *SQLiteStore) upsertAgentControlTaskDependencyRecord(ctx context.Context, dependencyID, taskID, dependsOnID string, createdAt time.Time) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	dependencyID = strings.TrimSpace(dependencyID)
 	taskID = strings.TrimSpace(taskID)
@@ -1549,8 +1785,13 @@ func (s *SQLiteStore) appendTaskDependencyCreatedEvent(ctx context.Context, depe
 
 // ListTaskDependencies returns dependency ids for a task.
 func (s *SQLiteStore) ListTaskDependencies(ctx context.Context, taskID string) ([]string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT depends_on_id
@@ -1575,8 +1816,13 @@ func (s *SQLiteStore) ListTaskDependencies(ctx context.Context, taskID string) (
 
 // ListTaskDependents returns task ids that depend on the given task.
 func (s *SQLiteStore) ListTaskDependents(ctx context.Context, taskID string) ([]string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT task_id
@@ -1601,8 +1847,13 @@ func (s *SQLiteStore) ListTaskDependents(ctx context.Context, taskID string) ([]
 
 // ListTaskDependencyRecords returns full dependency edge records.
 func (s *SQLiteStore) ListTaskDependencyRecords(ctx context.Context, filter TaskDependencyFilter) ([]TaskDependency, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	taskID := strings.TrimSpace(filter.TaskID)
 	dependsOnID := strings.TrimSpace(filter.DependsOnID)
@@ -1674,8 +1925,13 @@ func appendUniqueTaskDependencies(records []TaskDependency, extra ...TaskDepende
 // graph mirror using a store-global cursor while preserving each team's event
 // sequence separately.
 func (s *SQLiteStore) ListTaskGraphEvents(ctx context.Context, filter TaskGraphEventFilter) ([]TaskGraphEvent, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	afterSeq := filter.AfterSeq
 	if afterSeq < 0 {
@@ -1740,8 +1996,13 @@ func (s *SQLiteStore) ListTaskGraphEvents(ctx context.Context, filter TaskGraphE
 
 // ListAgentControlTaskRecords reads the AgentControl task graph table.
 func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter agentcontrol.TaskFilter) ([]agentcontrol.TaskRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	workflow := strings.TrimSpace(filter.Workflow)
 	if workflow == "" {
@@ -1813,8 +2074,13 @@ func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter ag
 }
 
 func (s *SQLiteStore) getAgentControlTaskRecord(ctx context.Context, workflow, taskID string) (*agentcontrol.TaskRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	workflow = strings.TrimSpace(workflow)
 	if workflow == "" {
@@ -1916,8 +2182,11 @@ func scanAgentControlTaskRecord(row taskRowScanner) (agentcontrol.TaskRecord, er
 
 // InsertMail inserts a mailbox message.
 func (s *SQLiteStore) InsertMail(ctx context.Context, message MailMessage) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 	message.TeamID = strings.TrimSpace(message.TeamID)
 	if message.TeamID == "" {
@@ -2019,8 +2288,11 @@ func (s *SQLiteStore) InsertMail(ctx context.Context, message MailMessage) (stri
 }
 
 func (s *SQLiteStore) insertMailSameTx(ctx context.Context, message MailMessage) (string, bool, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", false, nil
+	}
+	if err := s.ensure(); err != nil {
+		return "", false, err
 	}
 	s.globalMailboxWriterMu.RLock()
 	writer := s.globalMailboxWriter
@@ -2196,8 +2468,14 @@ func (s *SQLiteStore) appendPrimaryGlobalMailboxRecord(ctx context.Context, mess
 }
 
 func (s *SQLiteStore) updateTeamMailboxGlobalSeq(ctx context.Context, controlSeq int64, globalSeq int64) error {
-	if s == nil || s.db == nil || controlSeq <= 0 || globalSeq <= 0 {
+	if s == nil {
 		return nil
+	}
+	if controlSeq <= 0 || globalSeq <= 0 {
+		return nil
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	return s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
@@ -2216,8 +2494,15 @@ func (s *SQLiteStore) updateTeamMailboxGlobalSeq(ctx context.Context, controlSeq
 // rows that are missing a global registry backlink, then records the returned
 // global sequence on each repaired local row.
 func (s *SQLiteStore) RepairAgentControlMailboxProjection(ctx context.Context, filter agentcontrol.MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if !s.Opened() && !s.durableFileExists() {
+		// Bootstrap reconcile must not create an empty team store on new chats.
+		return 0, nil
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	s.globalMailboxWriterMu.RLock()
 	writer := s.globalMailboxWriter
@@ -2333,8 +2618,15 @@ func (s *SQLiteStore) listUnprojectedTeamMailboxRecords(ctx context.Context, fil
 // RepairAgentControlMailboxLocalProjection backfills missing local team mailbox
 // projection rows from the durable global registry.
 func (s *SQLiteStore) RepairAgentControlMailboxLocalProjection(ctx context.Context, filter agentcontrol.MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if !s.Opened() && !s.durableFileExists() {
+		// Bootstrap reconcile must not create an empty team store on new chats.
+		return 0, nil
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	s.globalMailboxWriterMu.RLock()
 	writer := s.globalMailboxWriter
@@ -2478,8 +2770,13 @@ func teamMessageFromMailboxRecord(record agentcontrol.MailboxRecord, teamSeq int
 
 // ListMail returns mailbox messages matching the filter.
 func (s *SQLiteStore) ListMail(ctx context.Context, filter MailFilter) ([]MailMessage, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	return s.listAgentControlMail(ctx, filter)
 }
@@ -2601,8 +2898,13 @@ func (s *SQLiteStore) listAgentControlMail(ctx context.Context, filter MailFilte
 // ListAgentControlMailboxRecords projects team mailbox rows into the shared
 // AgentControl mailbox registry read model.
 func (s *SQLiteStore) ListAgentControlMailboxRecords(ctx context.Context, filter agentcontrol.MailboxRecordFilter) ([]agentcontrol.MailboxRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	filter = filter.Normalize()
 	if filter.Scope != "" && filter.Scope != agentcontrol.MailboxScopeTeam {
@@ -2726,8 +3028,13 @@ func (s *SQLiteStore) WatchMail(ctx context.Context, teamID string) (<-chan Mail
 
 // LastMailSeq returns the current durable mailbox high-water mark for a team.
 func (s *SQLiteStore) LastMailSeq(ctx context.Context, teamID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
@@ -2744,8 +3051,13 @@ func (s *SQLiteStore) LastMailSeq(ctx context.Context, teamID string) (int64, er
 // LastAgentControlMailboxRecordSeq returns the shared AgentControl mailbox
 // registry high-water mark for team-scoped mailbox rows.
 func (s *SQLiteStore) LastAgentControlMailboxRecordSeq(ctx context.Context, filter agentcontrol.MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	filter = filter.Normalize()
 	if filter.Scope != "" && filter.Scope != agentcontrol.MailboxScopeTeam {
@@ -2819,8 +3131,13 @@ func (s *SQLiteStore) WatchAgentControlWake(ctx context.Context, filter agentcon
 // LastAgentControlWakeSeq returns the unified AgentControl wake high-water mark
 // for the workflow/kind/team filter.
 func (s *SQLiteStore) LastAgentControlWakeSeq(ctx context.Context, filter agentcontrol.WakeFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	filter = filter.Normalize()
 	filter.Workflow = normalizeAgentControlTaskWorkflow(filter.Workflow)
@@ -2895,8 +3212,13 @@ func (s *SQLiteStore) WatchAgentControlMailboxSignals(ctx context.Context, workf
 // LastAgentControlMailboxSignalSeq returns the AgentControl mailbox wake
 // high-water mark for the workflow/team filter.
 func (s *SQLiteStore) LastAgentControlMailboxSignalSeq(ctx context.Context, workflow, teamID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	workflow = normalizeAgentControlTaskWorkflow(workflow)
 	teamID = strings.TrimSpace(teamID)
@@ -2961,8 +3283,13 @@ func (s *SQLiteStore) WatchTaskSignals(ctx context.Context, teamID string) (<-ch
 
 // LastTaskSignalSeq returns the current durable task signal high-water mark for a team.
 func (s *SQLiteStore) LastTaskSignalSeq(ctx context.Context, teamID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
@@ -3021,8 +3348,13 @@ func (s *SQLiteStore) WatchAgentControlTaskSignals(ctx context.Context, workflow
 // LastAgentControlTaskSignalSeq returns the AgentControl task wake high-water
 // mark for the workflow/team filter.
 func (s *SQLiteStore) LastAgentControlTaskSignalSeq(ctx context.Context, workflow, teamID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	workflow = normalizeAgentControlTaskWorkflow(workflow)
 	teamID = strings.TrimSpace(teamID)
@@ -3078,8 +3410,11 @@ func (s *SQLiteStore) appendTaskSignalForTask(ctx context.Context, taskID string
 }
 
 func (s *SQLiteStore) appendTaskSignal(ctx context.Context, signal TaskSignal) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	workflow := normalizeAgentControlTaskWorkflow(signal.Workflow)
 	signal.TeamID = strings.TrimSpace(signal.TeamID)
@@ -3320,8 +3655,11 @@ func (s *SQLiteStore) AckMail(ctx context.Context, teamID, messageID string, ack
 
 // RecordMailReceipt marks a mailbox message as acknowledged for a specific agent.
 func (s *SQLiteStore) RecordMailReceipt(ctx context.Context, receipt MailReceipt) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	receipt.TeamID = strings.TrimSpace(receipt.TeamID)
 	receipt.MessageID = strings.TrimSpace(receipt.MessageID)
@@ -3367,8 +3705,13 @@ func (s *SQLiteStore) RecordMailReceipt(ctx context.Context, receipt MailReceipt
 
 // ListMailReceipts returns recorded receipts for a message.
 func (s *SQLiteStore) ListMailReceipts(ctx context.Context, teamID, messageID string) ([]MailReceipt, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT message_id, team_id, agent_id, acked_at
@@ -3398,8 +3741,13 @@ func (s *SQLiteStore) ListMailReceipts(ctx context.Context, teamID, messageID st
 
 // ListPathClaims returns path claims for a team.
 func (s *SQLiteStore) ListPathClaims(ctx context.Context, teamID string) ([]PathClaim, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, team_id, task_id, owner_agent_id, path, mode, lease_until
@@ -3429,8 +3777,11 @@ func (s *SQLiteStore) ListPathClaims(ctx context.Context, teamID string) ([]Path
 
 // CreatePathClaims stores path claims in a single transaction.
 func (s *SQLiteStore) CreatePathClaims(ctx context.Context, claims []PathClaim) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if len(claims) == 0 {
 		return nil
@@ -3460,8 +3811,11 @@ func (s *SQLiteStore) CreatePathClaims(ctx context.Context, claims []PathClaim) 
 
 // ReleasePathClaimsByTask deletes claims for a task.
 func (s *SQLiteStore) ReleasePathClaimsByTask(ctx context.Context, taskID string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM team_path_claims WHERE task_id = ?`, taskID)
 	if err != nil {
@@ -3472,8 +3826,11 @@ func (s *SQLiteStore) ReleasePathClaimsByTask(ctx context.Context, taskID string
 
 // RenewPathClaimsByTask extends leases for a task's claims.
 func (s *SQLiteStore) RenewPathClaimsByTask(ctx context.Context, taskID string, leaseUntil time.Time) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE team_path_claims SET lease_until = ? WHERE task_id = ?
@@ -3486,8 +3843,11 @@ func (s *SQLiteStore) RenewPathClaimsByTask(ctx context.Context, taskID string, 
 
 // DeleteExpiredPathClaims removes claims older than the provided timestamp.
 func (s *SQLiteStore) DeleteExpiredPathClaims(ctx context.Context, teamID string, asOf time.Time) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	if strings.TrimSpace(teamID) == "" {
 		return 0, fmt.Errorf("team id is required")
@@ -3508,8 +3868,11 @@ func (s *SQLiteStore) DeleteExpiredPathClaims(ctx context.Context, teamID string
 
 // AppendTeamEvent stores a team event and returns its sequence number.
 func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	teamID := strings.TrimSpace(event.TeamID)
 	if teamID == "" {
@@ -3559,8 +3922,13 @@ func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int
 
 // ListTeamEvents returns persisted team events after the given sequence.
 func (s *SQLiteStore) ListTeamEvents(ctx context.Context, filter TeamEventFilter) ([]TeamEventRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	teamID := strings.TrimSpace(filter.TeamID)
 	if teamID == "" {
@@ -3637,8 +4005,13 @@ func (s *SQLiteStore) ListTeamEvents(ctx context.Context, filter TeamEventFilter
 
 // LastTeamEventSeq returns the current durable team event high-water mark.
 func (s *SQLiteStore) LastTeamEventSeq(ctx context.Context, teamID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("team store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
@@ -4247,20 +4620,39 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 	return migrate.Apply(ctx, s.db, migrations)
 }
 
+func resolveLazyDSN(cfg *StoreConfig) (string, string, error) {
+	if cfg == nil {
+		cfg = &StoreConfig{}
+	}
+	if path := strings.TrimSpace(cfg.Path); path != "" {
+		return ensureSQLiteDSNOptions(path), path, nil
+	}
+	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
+		return ensureSQLiteDSNOptions(dsn), "", nil
+	}
+	return ensureSQLiteDSNOptions(fmt.Sprintf("file:team-store-%s?mode=memory&cache=shared", uuid.NewString())), "", nil
+}
+
+func ensureTeamStoreDirectory(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create team store directory: %w", err)
+	}
+	return nil
+}
+
+// resolveDSN keeps the historical helper for callers/tests that only need a DSN.
+// Directory creation is deferred until ensure() for path-backed stores.
 func resolveDSN(cfg *StoreConfig) (string, error) {
-	if cfg.Path != "" {
-		dir := filepath.Dir(cfg.Path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create team store directory: %w", err)
-			}
-		}
-		return ensureSQLiteDSNOptions(cfg.Path), nil
-	}
-	if cfg.DSN != "" {
-		return ensureSQLiteDSNOptions(cfg.DSN), nil
-	}
-	return ensureSQLiteDSNOptions(fmt.Sprintf("file:team-store-%s?mode=memory&cache=shared", uuid.NewString())), nil
+	dsn, _, err := resolveLazyDSN(cfg)
+	return dsn, err
 }
 
 func ensureSQLiteDSNOptions(dsn string) string {

@@ -23,6 +23,12 @@ import (
 
 // SQLiteSessionStorage keeps the immutable transcript separate from the
 // bounded prompt projection. Normal Load calls only materialize the projection.
+//
+// Schema evolution uses PRAGMA user_version so already-migrated databases skip
+// CREATE TABLE / ALTER TABLE inspection on every chat start. Bump
+// sqliteSessionSchemaVersion whenever the on-disk schema shape changes.
+const sqliteSessionSchemaVersion = 1
+
 type SQLiteSessionStorage struct {
 	db  *sql.DB
 	cfg PersistentSessionStorageConfig
@@ -259,7 +265,62 @@ func (s *SQLiteSessionStorage) CloseStorage() error {
 	return nil
 }
 
+func (s *SQLiteSessionStorage) userVersion(ctx context.Context) (int, error) {
+	var version int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read sqlite session schema version: %w", err)
+	}
+	return version, nil
+}
+
 func (s *SQLiteSessionStorage) init(ctx context.Context) error {
+	// busy_timeout must be set before any other PRAGMA/query so a concurrent
+	// aicli process holding the write lock does not fail the open path.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", s.cfg.BusyTimeout.Milliseconds())); err != nil {
+		return fmt.Errorf("configure sqlite session storage: %w", err)
+	}
+	version, err := s.userVersion(ctx)
+	if err != nil {
+		return err
+	}
+	// Fast path: already-migrated DBs only need per-connection PRAGMAs.
+	// Skip durable one-time settings (auto_vacuum / journal_mode / wal limits)
+	// that are already persisted on the database file.
+	if version >= sqliteSessionSchemaVersion {
+		if err := s.applyConnectionPRAGMAs(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := s.applyBootstrapPRAGMAs(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateSchema(ctx); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, sqliteSessionSchemaVersion)); err != nil {
+		return fmt.Errorf("set sqlite session schema version: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteSessionStorage) applyConnectionPRAGMAs(ctx context.Context) error {
+	pragmas := []string{
+		"PRAGMA synchronous=NORMAL",
+		fmt.Sprintf("PRAGMA busy_timeout=%d", s.cfg.BusyTimeout.Milliseconds()),
+		fmt.Sprintf("PRAGMA cache_size=-%d", s.cfg.SQLiteCacheKiB),
+		"PRAGMA temp_store=FILE",
+		// Keep mmap disabled by default so large session DBs do not pin hundreds
+		// of MB of virtual address space into every short-lived aicli process.
+		"PRAGMA mmap_size=0",
+		"PRAGMA foreign_keys=ON",
+	}
+	return execSQLitePRAGMAs(ctx, s.db, pragmas)
+}
+
+func (s *SQLiteSessionStorage) applyBootstrapPRAGMAs(ctx context.Context) error {
+	// Full setup used for first open / schema migration. Durable settings are
+	// persisted on the file; subsequent opens use applyConnectionPRAGMAs.
 	pragmas := []string{
 		"PRAGMA auto_vacuum=INCREMENTAL",
 		"PRAGMA journal_mode=WAL",
@@ -272,11 +333,19 @@ func (s *SQLiteSessionStorage) init(ctx context.Context) error {
 		"PRAGMA journal_size_limit=16777216",
 		"PRAGMA foreign_keys=ON",
 	}
+	return execSQLitePRAGMAs(ctx, s.db, pragmas)
+}
+
+func execSQLitePRAGMAs(ctx context.Context, db *sql.DB, pragmas []string) error {
 	for _, statement := range pragmas {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("configure sqlite session storage: %w", err)
 		}
 	}
+	return nil
+}
+
+func (s *SQLiteSessionStorage) migrateSchema(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, sqliteSessionSchema)
 	if err != nil {
 		return fmt.Errorf("initialize sqlite session storage: %w", err)
@@ -1933,8 +2002,51 @@ type legacyHotCollector struct {
 	tailBytes    int
 }
 
+// sessionDirMayContainLegacyJSON performs a cheap top-level scan. When the
+// sessions directory has already been fully migrated (no remaining .json
+// files), import is a no-op and we avoid even opening the directory repeatedly
+// beyond this short ReadDir. This is the common case after the first SQLite
+// migration.
+func sessionDirMayContainLegacyJSON(dir string) (bool, error) {
+	directory, err := os.Open(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer directory.Close()
+	for {
+		entries, readErr := directory.ReadDir(64)
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			if strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+				return true, nil
+			}
+		}
+		if readErr == io.EOF {
+			return false, nil
+		}
+		if readErr != nil {
+			return false, readErr
+		}
+		if len(entries) == 0 {
+			return false, nil
+		}
+	}
+}
+
 func (s *SQLiteSessionStorage) importLegacyJSONFiles(ctx context.Context) error {
 	if strings.TrimSpace(s.cfg.Dir) == "" {
+		return nil
+	}
+	mayContain, err := sessionDirMayContainLegacyJSON(s.cfg.Dir)
+	if err != nil {
+		return fmt.Errorf("scan legacy session directory: %w", err)
+	}
+	if !mayContain {
 		return nil
 	}
 	directory, err := os.Open(s.cfg.Dir)

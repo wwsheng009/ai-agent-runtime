@@ -2,12 +2,75 @@ package background
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewSQLiteStore_PathBackedIsLazyUntilFirstUse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "background.sqlite")
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	require.False(t, store.Opened())
+	require.Equal(t, path, store.Path())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err), "lazy open must not create the sqlite file early")
+
+	// Bootstrap-style empty reads must not force the first open.
+	jobs, err := store.ListJobs(context.Background(), JobFilter{Status: []JobStatus{StatusPending, StatusRunning}})
+	require.NoError(t, err)
+	require.Empty(t, jobs)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	pruned, err := store.PruneJobs(context.Background(), time.Now().UTC())
+	require.NoError(t, err)
+	require.Empty(t, pruned)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	require.NoError(t, store.SaveJob(context.Background(), Job{
+		ID:        "job_lazy",
+		SessionID: "session-lazy",
+		Kind:      "shell",
+		Status:    StatusPending,
+		Command:   "echo lazy",
+		CreatedAt: time.Now().UTC(),
+	}))
+	require.True(t, store.Opened())
+	_, err = os.Stat(path)
+	require.NoError(t, err)
+}
+
+func TestNewManager_PathBackedStoreStaysLazyOnBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runtime", "background.sqlite")
+	logDir := filepath.Join(dir, "runtime", "background_logs")
+
+	manager := NewManager(Config{
+		StorePath: path,
+		LogDir:    logDir,
+	})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	store, ok := manager.store.(*SQLiteStore)
+	require.True(t, ok)
+	require.False(t, store.Opened())
+	require.Equal(t, path, store.Path())
+	_, err := os.Stat(path)
+	require.True(t, os.IsNotExist(err), "manager bootstrap must not create background.sqlite early")
+	_, err = os.Stat(logDir)
+	require.True(t, os.IsNotExist(err), "manager bootstrap must not create background_logs early")
+}
 
 func TestSQLiteStorePersistsJobsAndEventsAcrossReopen(t *testing.T) {
 	ctx := context.Background()

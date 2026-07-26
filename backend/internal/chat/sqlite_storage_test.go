@@ -31,6 +31,58 @@ func newTestSQLiteSessionStorage(t *testing.T, mutate func(*PersistentSessionSto
 	return store
 }
 
+func TestSQLiteSessionStorageSchemaVersionFastPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.sqlite")
+
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = path
+	cfg.ImportLegacyJSON = false
+	first, err := NewSQLiteSessionStorage(cfg)
+	require.NoError(t, err)
+	require.NoError(t, first.CloseStorage())
+
+	db, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	require.Equal(t, sqliteSessionSchemaVersion, version)
+	require.NoError(t, db.Close())
+
+	// Reopen should skip migration work and still serve sessions.
+	second, err := NewSQLiteSessionStorage(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.CloseStorage()) })
+
+	session := NewSession("fast-path-user")
+	require.NoError(t, second.Save(context.Background(), session))
+	loaded, err := second.Load(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.Equal(t, session.ID, loaded.ID)
+}
+
+func TestSQLiteSessionStorageSkipsLegacyImportWhenNoJSON(t *testing.T) {
+	dir := t.TempDir()
+	// Directory contains only non-JSON entries.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("no sessions"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "nested"), 0o755))
+
+	mayContain, err := sessionDirMayContainLegacyJSON(dir)
+	require.NoError(t, err)
+	require.False(t, mayContain)
+
+	// With a leftover JSON file the preflight must detect it.
+	legacy := NewSession("legacy-detect")
+	legacy.ID = "session-legacy-detect"
+	payload, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, legacy.ID+".json"), payload, 0o644))
+
+	mayContain, err = sessionDirMayContainLegacyJSON(dir)
+	require.NoError(t, err)
+	require.True(t, mayContain)
+}
+
 func TestSQLiteSessionStorageKeepsCanonicalTranscriptAcrossProjectionReplacement(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {

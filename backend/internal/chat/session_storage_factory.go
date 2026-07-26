@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -46,19 +45,6 @@ func DefaultPersistentSessionStorageConfig(dir string) PersistentSessionStorageC
 		SQLiteCacheKiB:        2048,
 		BusyTimeout:           5 * time.Second,
 		ImportLegacyJSON:      true,
-	}
-}
-
-// OpenPersistentSessionStorage creates the configured durable session store.
-func OpenPersistentSessionStorage(cfg PersistentSessionStorageConfig) (SessionStorage, error) {
-	cfg = normalizePersistentSessionStorageConfig(cfg)
-	switch cfg.Backend {
-	case SessionStorageBackendFile:
-		return NewFileStorage(cfg.Dir)
-	case SessionStorageBackendSQLite:
-		return NewSQLiteSessionStorage(cfg)
-	default:
-		return nil, fmt.Errorf("unsupported session storage backend %q", cfg.Backend)
 	}
 }
 

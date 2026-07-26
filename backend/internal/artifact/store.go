@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,48 +77,170 @@ type Checkpoint struct {
 }
 
 // Store 负责将原始输出落到 SQLite，并在可能时启用 FTS5。
+// Path-backed construction is cheap: the durable database is opened on first use
+// so chat bootstrap/warmup can prepare an artifact store without creating
+// artifacts.sqlite early.
 type Store struct {
+	cfg  StoreConfig
+	dsn  string
+	path string
+
+	openOnce   sync.Once
+	openMu     sync.RWMutex
+	openErr    error
+	closed     bool
 	db         *sql.DB
 	ftsEnabled bool
 }
 
 // NewStore 创建一个 artifact store。
+// Path-backed stores open lazily on the first real operation.
 func NewStore(cfg *StoreConfig) (*Store, error) {
 	if cfg == nil {
 		cfg = &StoreConfig{}
 	}
-
-	dsn, err := resolveDSN(cfg)
+	cfgCopy := *cfg
+	dsn, path, err := resolveLazyDSN(&cfgCopy)
 	if err != nil {
 		return nil, err
 	}
-
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open artifact db: %w", err)
+	store := &Store{
+		cfg:  cfgCopy,
+		dsn:  dsn,
+		path: path,
 	}
-
-	store := &Store{db: db}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	// In-memory stores stay eager so tests can inspect the connection immediately.
+	if path == "" || isArtifactSQLiteMemoryDSN(dsn) {
+		if err := store.ensure(); err != nil {
+			return nil, err
+		}
 	}
-
 	return store, nil
+}
+
+// Opened reports whether the durable backend has been opened.
+func (s *Store) Opened() bool {
+	if s == nil {
+		return false
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.db != nil
+}
+
+// Path returns the configured on-disk path when one is used.
+func (s *Store) Path() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.path)
+}
+
+func (s *Store) ensure() error {
+	if s == nil {
+		return fmt.Errorf("artifact store is not initialized")
+	}
+	s.openMu.RLock()
+	if s.closed {
+		s.openMu.RUnlock()
+		return fmt.Errorf("artifact store is closed")
+	}
+	if s.db != nil || s.openErr != nil {
+		err := s.openErr
+		s.openMu.RUnlock()
+		return err
+	}
+	s.openMu.RUnlock()
+
+	s.openOnce.Do(func() {
+		s.openMu.Lock()
+		defer s.openMu.Unlock()
+		if s.closed {
+			s.openErr = fmt.Errorf("artifact store is closed")
+			return
+		}
+		if s.db != nil || s.openErr != nil {
+			return
+		}
+		if err := ensureArtifactStoreDirectory(s.path); err != nil {
+			s.openErr = err
+			return
+		}
+		db, err := sql.Open("sqlite3", s.dsn)
+		if err != nil {
+			s.openErr = fmt.Errorf("open artifact db: %w", err)
+			return
+		}
+		if isArtifactSQLiteMemoryDSN(s.dsn) {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+		}
+		bootstrap := &Store{db: db}
+		if err := bootstrap.init(context.Background()); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		s.db = db
+		s.ftsEnabled = bootstrap.ftsEnabled
+	})
+
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.openErr
+}
+
+func (s *Store) durableFileExists() bool {
+	if s == nil {
+		return false
+	}
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ensureForRead opens the durable backend only when it already exists (or was
+// previously opened). For a brand-new path-backed store, callers can treat the
+// absent file as an empty result set without creating artifacts.sqlite.
+func (s *Store) ensureForRead() (skipEmpty bool, err error) {
+	if s == nil {
+		return false, fmt.Errorf("artifact store is not initialized")
+	}
+	if s.Opened() || s.durableFileExists() {
+		return false, s.ensure()
+	}
+	if strings.TrimSpace(s.path) == "" {
+		return false, s.ensure()
+	}
+	return true, nil
 }
 
 // Close 关闭底层数据库。
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.closed = true
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
 }
 
 // Put 存储一条原始输出并返回 artifact id。
 func (s *Store) Put(ctx context.Context, record Record) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("artifact store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 
 	if record.ID == "" {
@@ -166,8 +289,15 @@ func (s *Store) Put(ctx context.Context, record Record) (string, error) {
 
 // Get 读取一条 artifact。
 func (s *Store) Get(ctx context.Context, id string) (*Record, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 
 	row := s.db.QueryRowContext(ctx, `
@@ -210,8 +340,15 @@ func (s *Store) Get(ctx context.Context, id string) (*Record, error) {
 
 // Search 在当前 session 内执行召回搜索。
 func (s *Store) Search(ctx context.Context, sessionID, query string, limit int) ([]SearchResult, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 5
@@ -271,8 +408,11 @@ func (s *Store) Search(ctx context.Context, sessionID, query string, limit int) 
 
 // InsertMemoryEntry 持久化一条 ledger，并基于 source hash 去重。
 func (s *Store) InsertMemoryEntry(ctx context.Context, entry MemoryEntry) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("artifact store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(entry.SessionID) == "" {
 		return "", fmt.Errorf("session id is required")
@@ -327,17 +467,21 @@ func (s *Store) InsertMemoryEntry(ctx context.Context, entry MemoryEntry) (strin
 
 // LoadMemoryEntries 读取 ledger 项。
 func (s *Store) LoadMemoryEntries(ctx context.Context, sessionID string, kinds []string, limit int) ([]MemoryEntry, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 12
 	}
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
+	var rows *sql.Rows
 	if len(kinds) == 0 {
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT id, session_id, task_id, kind, priority, content_json, source_refs_json, source_hash, created_at
@@ -401,8 +545,11 @@ func (s *Store) LoadMemoryEntries(ctx context.Context, sessionID string, kinds [
 
 // SaveCheckpoint 持久化一次 checkpoint 快照。
 func (s *Store) SaveCheckpoint(ctx context.Context, checkpoint Checkpoint) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", fmt.Errorf("artifact store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", err
 	}
 	if checkpoint.SessionID == "" {
 		return "", fmt.Errorf("session id is required")
@@ -440,8 +587,11 @@ func (s *Store) SaveCheckpoint(ctx context.Context, checkpoint Checkpoint) (stri
 
 // UpdateCheckpoint updates an existing checkpoint record.
 func (s *Store) UpdateCheckpoint(ctx context.Context, checkpoint Checkpoint) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("artifact store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(checkpoint.ID) == "" {
 		return fmt.Errorf("checkpoint id is required")
@@ -478,8 +628,15 @@ func (s *Store) UpdateCheckpoint(ctx context.Context, checkpoint Checkpoint) err
 
 // LatestCheckpoint 返回 session 最近的 checkpoint。
 func (s *Store) LatestCheckpoint(ctx context.Context, sessionID string) (*Checkpoint, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 
 	row := s.db.QueryRowContext(ctx, `
@@ -522,8 +679,15 @@ func (s *Store) LatestCheckpoint(ctx context.Context, sessionID string) (*Checkp
 
 // GetCheckpoint returns a checkpoint by id.
 func (s *Store) GetCheckpoint(ctx context.Context, id string) (*Checkpoint, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, task_id, reason, history_hash, message_count, ledger_json, metadata_json, created_at
@@ -563,8 +727,15 @@ func (s *Store) GetCheckpoint(ctx context.Context, id string) (*Checkpoint, erro
 
 // ListCheckpoints returns checkpoints for a session ordered by recency.
 func (s *Store) ListCheckpoints(ctx context.Context, sessionID string, limit, offset int) ([]Checkpoint, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -740,21 +911,44 @@ func (s *Store) init(ctx context.Context) error {
 	return nil
 }
 
-func resolveDSN(cfg *StoreConfig) (string, error) {
-	if cfg.Path != "" {
-		dir := filepath.Dir(cfg.Path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create artifact directory: %w", err)
-			}
-		}
-		return cfg.Path, nil
+func resolveLazyDSN(cfg *StoreConfig) (string, string, error) {
+	if cfg == nil {
+		cfg = &StoreConfig{}
 	}
-	if cfg.DSN != "" {
-		return cfg.DSN, nil
+	if path := strings.TrimSpace(cfg.Path); path != "" {
+		return path, path, nil
 	}
+	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
+		return dsn, "", nil
+	}
+	return fmt.Sprintf("file:runtime-artifacts-%s?mode=memory&cache=shared", uuid.NewString()), "", nil
+}
 
-	return fmt.Sprintf("file:runtime-artifacts-%s?mode=memory&cache=shared", uuid.NewString()), nil
+func ensureArtifactStoreDirectory(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create artifact directory: %w", err)
+	}
+	return nil
+}
+
+// resolveDSN keeps the historical helper for callers/tests that only need a DSN.
+// Directory creation is deferred until ensure() for path-backed stores.
+func resolveDSN(cfg *StoreConfig) (string, error) {
+	dsn, _, err := resolveLazyDSN(cfg)
+	return dsn, err
+}
+
+func isArtifactSQLiteMemoryDSN(dsn string) bool {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	return lower == ":memory:" || strings.Contains(lower, "mode=memory")
 }
 
 func preview(content string, maxLen int) string {

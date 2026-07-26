@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -163,6 +164,8 @@ func TestSQLiteStoreMigratesAgentControlTaskDifficultyMetadata(t *testing.T) {
 	store, err := NewSQLiteStore(&StoreConfig{Path: dbPath})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
+	// Path-backed stores open lazily; force open before inspecting schema.
+	require.NoError(t, store.ensure())
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "difficulty"))
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "difficulty_rationale"))
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_provider"))
@@ -512,6 +515,72 @@ func TestSQLiteStoreInsertMailCanCommitGlobalAndLocalInOneTx(t *testing.T) {
 	require.Len(t, globalRecords, 1)
 	require.Equal(t, globalRecords[0].Seq, localRecords[0].GlobalSeq)
 	require.Equal(t, "atomic-team-mailbox", globalRecords[0].MessageID)
+}
+
+func TestNewSQLiteStore_PathBackedIsLazyUntilFirstUse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "team_store.sqlite")
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	require.False(t, store.Opened())
+	require.Equal(t, path, store.Path())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err), "lazy open must not create the sqlite file early")
+
+	// Bootstrap-style projection repair must not force the first open.
+	repaired, err := store.RepairAgentControlMailboxProjection(context.Background(), agentcontrol.MailboxRecordFilter{})
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	// Lifecycle loop discovery on a new chat must also stay lazy.
+	teams, err := store.ListTeams(context.Background(), TeamFilter{Status: TeamStatusActive})
+	require.NoError(t, err)
+	require.Empty(t, teams)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	// Pure reads must not invent an empty durable store.
+	missingTeam, err := store.GetTeam(context.Background(), "missing")
+	require.NoError(t, err)
+	require.Nil(t, missingTeam)
+	missingTask, err := store.GetTask(context.Background(), "missing")
+	require.NoError(t, err)
+	require.Nil(t, missingTask)
+	mail, err := store.ListMail(context.Background(), MailFilter{TeamID: "missing"})
+	require.NoError(t, err)
+	require.Empty(t, mail)
+	seq, err := store.LastMailSeq(context.Background(), "missing")
+	require.NoError(t, err)
+	require.Zero(t, seq)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err))
+
+	teamID, err := store.CreateTeam(context.Background(), Team{ID: "lazy-team"})
+	require.NoError(t, err)
+	require.Equal(t, "lazy-team", teamID)
+	require.True(t, store.Opened())
+	_, err = os.Stat(path)
+	require.NoError(t, err)
+
+	// Resume after process restart must open existing data, not treat it as empty.
+	require.NoError(t, store.Close())
+	reopened, err := NewSQLiteStore(&StoreConfig{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	require.False(t, reopened.Opened())
+	loaded, err := reopened.GetTeam(context.Background(), teamID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, teamID, loaded.ID)
+	require.True(t, reopened.Opened())
 }
 
 func TestSQLiteStoreMailboxProjectionStatus(t *testing.T) {

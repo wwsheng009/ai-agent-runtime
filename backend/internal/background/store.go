@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,37 +59,159 @@ type EventReader interface {
 }
 
 // SQLiteStore persists background jobs in sqlite.
+// Path-backed construction is cheap: the durable database is opened on first use
+// so chat bootstrap can prepare a background store without creating
+// background.sqlite early.
 type SQLiteStore struct {
-	db *sql.DB
+	cfg  StoreConfig
+	dsn  string
+	path string
+
+	openOnce sync.Once
+	openMu   sync.RWMutex
+	openErr  error
+	closed   bool
+	db       *sql.DB
 }
 
 // NewSQLiteStore creates a sqlite-backed background store.
+// Path-backed stores open lazily on the first real operation.
 func NewSQLiteStore(cfg *StoreConfig) (*SQLiteStore, error) {
 	if cfg == nil {
 		cfg = &StoreConfig{}
 	}
-	dsn, err := resolveBackgroundDSN(cfg)
+	cfgCopy := *cfg
+	dsn, path, err := resolveLazyBackgroundDSN(&cfgCopy)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open background db: %w", err)
+	store := &SQLiteStore{
+		cfg:  cfgCopy,
+		dsn:  dsn,
+		path: path,
 	}
-	store := &SQLiteStore{db: db}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	// In-memory stores stay eager so tests can inspect the connection immediately.
+	if path == "" || isBackgroundSQLiteMemoryDSN(dsn) {
+		if err := store.ensure(); err != nil {
+			return nil, err
+		}
 	}
 	return store, nil
 }
 
+// Opened reports whether the durable backend has been opened.
+func (s *SQLiteStore) Opened() bool {
+	if s == nil {
+		return false
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.db != nil
+}
+
+// Path returns the configured on-disk path when one is used.
+func (s *SQLiteStore) Path() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.path)
+}
+
+func (s *SQLiteStore) ensure() error {
+	if s == nil {
+		return fmt.Errorf("background store is not initialized")
+	}
+	s.openMu.RLock()
+	if s.closed {
+		s.openMu.RUnlock()
+		return fmt.Errorf("background store is closed")
+	}
+	if s.db != nil || s.openErr != nil {
+		err := s.openErr
+		s.openMu.RUnlock()
+		return err
+	}
+	s.openMu.RUnlock()
+
+	s.openOnce.Do(func() {
+		s.openMu.Lock()
+		defer s.openMu.Unlock()
+		if s.closed {
+			s.openErr = fmt.Errorf("background store is closed")
+			return
+		}
+		if s.db != nil || s.openErr != nil {
+			return
+		}
+		if err := ensureBackgroundStoreDirectory(s.path); err != nil {
+			s.openErr = err
+			return
+		}
+		db, err := sql.Open("sqlite3", s.dsn)
+		if err != nil {
+			s.openErr = fmt.Errorf("open background db: %w", err)
+			return
+		}
+		if isBackgroundSQLiteMemoryDSN(s.dsn) {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+		}
+		bootstrap := &SQLiteStore{db: db}
+		if err := bootstrap.init(context.Background()); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		s.db = db
+	})
+
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.openErr
+}
+
+func (s *SQLiteStore) durableFileExists() bool {
+	if s == nil {
+		return false
+	}
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ensureForRead opens the durable backend only when it already exists (or was
+// previously opened). For a brand-new path-backed store, callers can treat the
+// absent file as an empty result set without creating background.sqlite.
+func (s *SQLiteStore) ensureForRead() (skipEmpty bool, err error) {
+	if s == nil {
+		return false, fmt.Errorf("background store is not initialized")
+	}
+	if s.Opened() || s.durableFileExists() {
+		return false, s.ensure()
+	}
+	if strings.TrimSpace(s.path) == "" {
+		return false, s.ensure()
+	}
+	return true, nil
+}
+
 // Close closes the store.
 func (s *SQLiteStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.closed = true
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
 }
 
 // UpsertJob upserts a background job record.
@@ -102,8 +225,11 @@ func (s *SQLiteStore) UpdateJob(ctx context.Context, job Job) error {
 }
 
 func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(job.ID) == "" {
 		return fmt.Errorf("job id is required")
@@ -167,8 +293,15 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
 
 // GetJob returns a background job.
 func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("background store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, session_id, kind, status, message, command, cwd, priority, created_at,
@@ -260,8 +393,15 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 
 // ListJobs returns background jobs matching the filter.
 func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("background store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 
 	clauses := make([]string, 0, 2)
@@ -401,8 +541,15 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 
 // PruneJobs deletes terminal jobs whose terminal timestamp is older than before.
 func (s *SQLiteStore) PruneJobs(ctx context.Context, before time.Time) ([]Job, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("background store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	if before.IsZero() {
 		return nil, nil
@@ -448,8 +595,11 @@ func (s *SQLiteStore) PruneJobs(ctx context.Context, before time.Time) ([]Job, e
 
 // AppendEvent stores a job event and returns its sequence.
 func (s *SQLiteStore) AppendEvent(ctx context.Context, jobID, eventType string, payload map[string]interface{}) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
@@ -498,8 +648,15 @@ func (s *SQLiteStore) AppendEvent(ctx context.Context, jobID, eventType string, 
 
 // ListEvents returns job events after the specified sequence.
 func (s *SQLiteStore) ListEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]JobEvent, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("background store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
@@ -629,20 +786,44 @@ func (s *SQLiteStore) ensureBackgroundJobsColumn(ctx context.Context, columnName
 	return nil
 }
 
+func resolveLazyBackgroundDSN(cfg *StoreConfig) (string, string, error) {
+	if cfg == nil {
+		cfg = &StoreConfig{}
+	}
+	if path := strings.TrimSpace(cfg.Path); path != "" {
+		return path, path, nil
+	}
+	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
+		return dsn, "", nil
+	}
+	return fmt.Sprintf("file:background-store-%s?mode=memory&cache=shared", uuid.NewString()), "", nil
+}
+
+func ensureBackgroundStoreDirectory(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create background store directory: %w", err)
+	}
+	return nil
+}
+
+// resolveBackgroundDSN keeps the historical helper for callers/tests that only need a DSN.
+// Directory creation is deferred until ensure() for path-backed stores.
 func resolveBackgroundDSN(cfg *StoreConfig) (string, error) {
-	if cfg.Path != "" {
-		dir := filepath.Dir(cfg.Path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create background store directory: %w", err)
-			}
-		}
-		return cfg.Path, nil
-	}
-	if cfg.DSN != "" {
-		return cfg.DSN, nil
-	}
-	return fmt.Sprintf("file:background-store-%s?mode=memory&cache=shared", uuid.NewString()), nil
+	dsn, _, err := resolveLazyBackgroundDSN(cfg)
+	return dsn, err
+}
+
+func isBackgroundSQLiteMemoryDSN(dsn string) bool {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	return lower == ":memory:" || strings.Contains(lower, "mode=memory")
 }
 
 func nullIfEmpty(value string) interface{} {

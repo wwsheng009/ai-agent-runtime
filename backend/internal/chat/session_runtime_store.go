@@ -1433,7 +1433,19 @@ func mailboxRecordFromRuntimeMessage(sessionID string, message team.MailMessage)
 }
 
 // SQLiteRuntimeStore persists runtime data in sqlite.
+// Construction is cheap for path-backed stores: the durable database is opened
+// on first use so chat bootstrap can prepare a runtime store without creating
+// session_runtime.sqlite early.
 type SQLiteRuntimeStore struct {
+	cfg  RuntimeStoreConfig
+	dsn  string
+	path string
+
+	openOnce sync.Once
+	openMu   sync.RWMutex
+	openErr  error
+	closed   bool
+
 	mu               sync.Mutex
 	db               *sql.DB
 	fileBacked       bool
@@ -1467,7 +1479,7 @@ func (s *SQLiteRuntimeStore) SetGlobalMailboxWriter(writer agentcontrol.GlobalMa
 // global AgentControl mailbox projection semantics.
 func (s *SQLiteRuntimeStore) AgentControlMailboxProjectionStatus() agentcontrol.MailboxProjectionStatus {
 	status := agentcontrol.MailboxProjectionStatus{Store: "runtime_sqlite"}
-	if s == nil || s.db == nil {
+	if s == nil {
 		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
 		status.Reason = "store_not_configured"
 		return status.Normalize()
@@ -1492,67 +1504,178 @@ func (s *SQLiteRuntimeStore) AgentControlMailboxProjectionStatus() agentcontrol.
 	return status.Normalize()
 }
 
-// NewSQLiteRuntimeStore opens a sqlite-backed runtime store.
+// NewSQLiteRuntimeStore creates a sqlite-backed runtime store.
+// Path-backed stores open lazily on the first real operation so chat bootstrap
+// can wire a RuntimeStore without creating session_runtime.sqlite early.
 func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error) {
 	if cfg == nil {
 		cfg = &RuntimeStoreConfig{}
 	}
-	dsn, err := resolveRuntimeDSN(cfg)
+	cfgCopy := *cfg
+	dsn, path, err := resolveLazyRuntimeDSN(&cfgCopy)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open runtime db: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	busyTimeout := cfg.BusyTimeout
+	busyTimeout := cfgCopy.BusyTimeout
 	if busyTimeout <= 0 {
 		busyTimeout = defaultRuntimeBusyTimeout
 	}
-	cacheKiB := cfg.SQLiteCacheKiB
+	cacheKiB := cfgCopy.SQLiteCacheKiB
 	if cacheKiB <= 0 {
 		cacheKiB = defaultRuntimeSQLiteCacheKiB
 	}
-	eventRetention := cfg.EventRetention
+	eventRetention := cfgCopy.EventRetention
 	if eventRetention <= 0 {
 		eventRetention = defaultRuntimeEventRetention
 	}
-	mailboxRetention := cfg.MailboxRetention
+	mailboxRetention := cfgCopy.MailboxRetention
 	if mailboxRetention <= 0 {
 		mailboxRetention = defaultRuntimeMailboxRetention
 	}
-	pruneInterval := cfg.PruneInterval
+	pruneInterval := cfgCopy.PruneInterval
 	if pruneInterval <= 0 {
 		pruneInterval = defaultRuntimePruneInterval
 	}
 	store := &SQLiteRuntimeStore{
-		db:               db,
-		fileBacked:       !isRuntimeSQLiteMemoryDSN(dsn),
+		cfg:              cfgCopy,
+		dsn:              dsn,
+		path:             path,
+		fileBacked:       path != "" && !isRuntimeSQLiteMemoryDSN(dsn),
 		busyTimeout:      busyTimeout,
 		cacheKiB:         cacheKiB,
 		eventRetention:   eventRetention,
 		mailboxRetention: mailboxRetention,
 		pruneInterval:    pruneInterval,
 	}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	// In-memory stores stay eager so tests can inspect the connection immediately.
+	if path == "" || isRuntimeSQLiteMemoryDSN(dsn) {
+		if err := store.ensure(); err != nil {
+			return nil, err
+		}
 	}
 	return store, nil
 }
 
-// Close closes the underlying database.
+// Opened reports whether the durable backend has been opened.
+func (s *SQLiteRuntimeStore) Opened() bool {
+	if s == nil {
+		return false
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.db != nil
+}
+
+// Path returns the configured on-disk path when one is used.
+func (s *SQLiteRuntimeStore) Path() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.path)
+}
+
+func (s *SQLiteRuntimeStore) ensure() error {
+	if s == nil {
+		return fmt.Errorf("runtime store is not initialized")
+	}
+	s.openMu.RLock()
+	if s.closed {
+		s.openMu.RUnlock()
+		return fmt.Errorf("runtime store is closed")
+	}
+	if s.db != nil || s.openErr != nil {
+		err := s.openErr
+		s.openMu.RUnlock()
+		return err
+	}
+	s.openMu.RUnlock()
+
+	s.openOnce.Do(func() {
+		s.openMu.Lock()
+		defer s.openMu.Unlock()
+		if s.closed {
+			s.openErr = fmt.Errorf("runtime store is closed")
+			return
+		}
+		if s.db != nil || s.openErr != nil {
+			return
+		}
+		if err := ensureRuntimeStoreDirectory(s.path); err != nil {
+			s.openErr = err
+			return
+		}
+		db, err := sql.Open("sqlite3", s.dsn)
+		if err != nil {
+			s.openErr = fmt.Errorf("open runtime db: %w", err)
+			return
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		store := &SQLiteRuntimeStore{
+			db:          db,
+			fileBacked:  s.fileBacked,
+			busyTimeout: s.busyTimeout,
+			cacheKiB:    s.cacheKiB,
+		}
+		if err := store.init(context.Background()); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		s.db = db
+	})
+
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.openErr
+}
+
+func (s *SQLiteRuntimeStore) durableFileExists() bool {
+	if s == nil {
+		return false
+	}
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ensureForRead opens the durable backend only when it already exists (or was
+// previously opened). For a brand-new path-backed store, callers can treat the
+// absent file as an empty result set without creating session_runtime.sqlite.
+func (s *SQLiteRuntimeStore) ensureForRead() (skipEmpty bool, err error) {
+	if s == nil {
+		return false, fmt.Errorf("runtime store is not initialized")
+	}
+	if s.Opened() || s.durableFileExists() {
+		return false, s.ensure()
+	}
+	if strings.TrimSpace(s.path) == "" {
+		return false, s.ensure()
+	}
+	return true, nil
+}
+
+// Close closes the underlying database if it was opened.
 func (s *SQLiteRuntimeStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.closed = true
+	if s.db == nil {
+		return nil
+	}
+	db := s.db
+	s.db = nil
 	if s.fileBacked {
 		ctx, cancel := context.WithTimeout(context.Background(), s.busyTimeout)
-		_, checkpointErr := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		_, checkpointErr := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 		cancel()
-		closeErr := s.db.Close()
+		closeErr := db.Close()
 		if closeErr != nil {
 			return closeErr
 		}
@@ -1561,12 +1684,15 @@ func (s *SQLiteRuntimeStore) Close() error {
 		}
 		return nil
 	}
-	return s.db.Close()
+	return db.Close()
 }
 
 func (s *SQLiteRuntimeStore) AcquireLease(ctx context.Context, req LeaseRequest) (*SessionLease, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return nil, err
 	}
 	lease, err := buildLeaseFromRequest(req)
 	if err != nil {
@@ -1610,8 +1736,11 @@ func (s *SQLiteRuntimeStore) AcquireLease(ctx context.Context, req LeaseRequest)
 }
 
 func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID string, ttl time.Duration) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
@@ -1652,8 +1781,11 @@ func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID 
 }
 
 func (s *SQLiteRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerID string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
@@ -1668,8 +1800,13 @@ func (s *SQLiteRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerI
 }
 
 func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*SessionLease, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -1691,8 +1828,13 @@ func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*S
 
 // LoadState loads runtime state for a session.
 func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*RuntimeState, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
@@ -1812,8 +1954,11 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 
 // SaveState upserts the runtime state.
 func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if state == nil || strings.TrimSpace(state.SessionID) == "" {
 		return fmt.Errorf("runtime state requires session id")
@@ -1919,8 +2064,11 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 
 // DeleteState removes runtime state for a session.
 func (s *SQLiteRuntimeStore) DeleteState(ctx context.Context, sessionID string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM session_tool_receipts WHERE session_id = ?`, sessionID); err != nil {
 		return fmt.Errorf("delete tool receipts: %w", err)
@@ -1934,8 +2082,11 @@ func (s *SQLiteRuntimeStore) DeleteState(ctx context.Context, sessionID string) 
 
 // SaveToolReceipt persists a replayable tool result.
 func (s *SQLiteRuntimeStore) SaveToolReceipt(ctx context.Context, receipt ToolExecutionReceipt) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	receipt.SessionID = strings.TrimSpace(receipt.SessionID)
 	receipt.ToolCallID = strings.TrimSpace(receipt.ToolCallID)
@@ -1963,8 +2114,13 @@ func (s *SQLiteRuntimeStore) SaveToolReceipt(ctx context.Context, receipt ToolEx
 
 // GetToolReceipt loads a persisted tool receipt.
 func (s *SQLiteRuntimeStore) GetToolReceipt(ctx context.Context, sessionID, toolCallID string) (*ToolExecutionReceipt, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_id, tool_call_id, tool_name, message_json, created_at, created_at_unix_nano
@@ -1994,8 +2150,11 @@ func (s *SQLiteRuntimeStore) GetToolReceipt(ctx context.Context, sessionID, tool
 
 // DeleteToolReceipt removes a persisted tool receipt.
 func (s *SQLiteRuntimeStore) DeleteToolReceipt(ctx context.Context, sessionID, toolCallID string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM session_tool_receipts WHERE session_id = ? AND tool_call_id = ?
@@ -2008,8 +2167,13 @@ func (s *SQLiteRuntimeStore) DeleteToolReceipt(ctx context.Context, sessionID, t
 
 // ListToolReceipts returns stored tool receipts for a session ordered by recency.
 func (s *SQLiteRuntimeStore) ListToolReceipts(ctx context.Context, sessionID string, limit int) ([]ToolExecutionReceipt, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	query := `
 		SELECT session_id, tool_call_id, tool_name, message_json, created_at, created_at_unix_nano
@@ -2055,8 +2219,11 @@ func (s *SQLiteRuntimeStore) ListToolReceipts(ctx context.Context, sessionID str
 
 // AppendEvent stores a runtime event and returns its sequence.
 func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevents.Event) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	if strings.TrimSpace(event.SessionID) == "" {
 		return 0, fmt.Errorf("event requires session id")
@@ -2141,8 +2308,11 @@ func (s *SQLiteRuntimeStore) pruneRuntimeRowsTx(ctx context.Context, tx *sql.Tx,
 // AppendMailbox stores an agent mailbox message through the runtime store's
 // mailbox substrate.
 func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return runtimeevents.Event{}, 0, err
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -2198,8 +2368,11 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 }
 
 func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return runtimeevents.Event{}, 0, false, nil
+	}
+	if err := s.ensure(); err != nil {
+		return runtimeevents.Event{}, 0, false, err
 	}
 	s.mu.Lock()
 	writer := s.globalMailboxWriter
@@ -2291,8 +2464,11 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 	if err := validateAgentControlMailboxMessage(message); err != nil {
 		return runtimeevents.Event{}, 0, err
 	}
-	if s == nil || s.db == nil {
+	if s == nil {
 		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return runtimeevents.Event{}, 0, err
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -2564,8 +2740,11 @@ func (s *SQLiteRuntimeStore) appendPrimaryGlobalMailboxRecord(ctx context.Contex
 }
 
 func (s *SQLiteRuntimeStore) updateRuntimeMailboxGlobalSeq(ctx context.Context, sessionID string, controlSeq int64, globalSeq int64) error {
-	if s == nil || s.db == nil || controlSeq <= 0 || globalSeq <= 0 {
+	if s == nil || controlSeq <= 0 || globalSeq <= 0 {
 		return nil
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2584,8 +2763,15 @@ func (s *SQLiteRuntimeStore) updateRuntimeMailboxGlobalSeq(ctx context.Context, 
 // rows that are missing a global registry backlink, then records the returned
 // global sequence on each repaired local row.
 func (s *SQLiteRuntimeStore) RepairAgentControlMailboxProjection(ctx context.Context, filter agentcontrol.MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if !s.Opened() && !s.durableFileExists() {
+		// Bootstrap reconcile must not create an empty runtime store on new chats.
+		return 0, nil
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	s.mu.Lock()
 	writer := s.globalMailboxWriter
@@ -2707,8 +2893,15 @@ func (s *SQLiteRuntimeStore) listUnprojectedRuntimeMailboxRecords(ctx context.Co
 // RepairAgentControlMailboxLocalProjection backfills missing local runtime
 // mailbox projection rows from the durable global registry.
 func (s *SQLiteRuntimeStore) RepairAgentControlMailboxLocalProjection(ctx context.Context, filter agentcontrol.MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if !s.Opened() && !s.durableFileExists() {
+		// Bootstrap reconcile must not create an empty runtime store on new chats.
+		return 0, nil
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	s.mu.Lock()
 	writer := s.globalMailboxWriter
@@ -2888,8 +3081,13 @@ func insertRuntimeMailboxRecordTx(ctx context.Context, tx *sql.Tx, sessionID str
 
 // ListEvents returns session events after a given sequence.
 func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	query := `
 		SELECT seq, type, trace_id, agent_name, tool_name, payload_json, created_at
@@ -2956,8 +3154,13 @@ func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, a
 
 // ListMailbox returns mailbox messages after a given mailbox sequence.
 func (s *SQLiteRuntimeStore) ListMailbox(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	query := `
 		SELECT id, global_seq, session_mailbox_seq, message_id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at
@@ -3027,8 +3230,13 @@ func (s *SQLiteRuntimeStore) ListMailbox(ctx context.Context, sessionID string, 
 
 // ListAgentControlMailbox returns mailbox messages with AgentControl envelope metadata.
 func (s *SQLiteRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	query := `
 		SELECT id, global_seq, session_mailbox_seq, message_id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at
@@ -3095,8 +3303,13 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessio
 // ListAgentControlMailboxRecords projects runtime control mailbox rows into
 // the shared AgentControl mailbox registry read model.
 func (s *SQLiteRuntimeStore) ListAgentControlMailboxRecords(ctx context.Context, filter agentcontrol.MailboxRecordFilter) ([]agentcontrol.MailboxRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	filter = filter.Normalize()
 	if filter.Scope != "" && filter.Scope != agentcontrol.MailboxScopeSession {
@@ -3293,8 +3506,13 @@ func (s *SQLiteRuntimeStore) WatchAgentControlMailbox(ctx context.Context, sessi
 
 // LastEventSeq returns the current durable event high-water mark for a session.
 func (s *SQLiteRuntimeStore) LastEventSeq(ctx context.Context, sessionID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
@@ -3310,8 +3528,13 @@ func (s *SQLiteRuntimeStore) LastEventSeq(ctx context.Context, sessionID string)
 
 // LastMailboxSeq returns the current durable mailbox high-water mark for a session.
 func (s *SQLiteRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
@@ -3327,8 +3550,13 @@ func (s *SQLiteRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID strin
 
 // LastAgentControlMailboxSeq returns the high-water mark for AgentControl mailbox rows.
 func (s *SQLiteRuntimeStore) LastAgentControlMailboxSeq(ctx context.Context, sessionID string) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
@@ -3345,8 +3573,13 @@ func (s *SQLiteRuntimeStore) LastAgentControlMailboxSeq(ctx context.Context, ses
 // LastAgentControlMailboxRecordSeq returns the shared AgentControl mailbox
 // registry high-water mark for runtime/session rows.
 func (s *SQLiteRuntimeStore) LastAgentControlMailboxRecordSeq(ctx context.Context, filter agentcontrol.MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	filter = filter.Normalize()
 	if filter.Scope != "" && filter.Scope != agentcontrol.MailboxScopeSession {
@@ -3806,20 +4039,39 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 	return migrate.Apply(ctx, s.db, migrations)
 }
 
+func resolveLazyRuntimeDSN(cfg *RuntimeStoreConfig) (string, string, error) {
+	if cfg == nil {
+		cfg = &RuntimeStoreConfig{}
+	}
+	if path := strings.TrimSpace(cfg.Path); path != "" {
+		return path, path, nil
+	}
+	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
+		return dsn, "", nil
+	}
+	return fmt.Sprintf("file:runtime-store-%s?mode=memory&cache=shared", uuid.NewString()), "", nil
+}
+
+func ensureRuntimeStoreDirectory(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create runtime store directory: %w", err)
+	}
+	return nil
+}
+
+// resolveRuntimeDSN keeps the historical helper for callers/tests that only need a DSN.
+// Directory creation is deferred until ensure() for path-backed stores.
 func resolveRuntimeDSN(cfg *RuntimeStoreConfig) (string, error) {
-	if cfg.Path != "" {
-		dir := filepath.Dir(cfg.Path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create runtime store directory: %w", err)
-			}
-		}
-		return cfg.Path, nil
-	}
-	if cfg.DSN != "" {
-		return cfg.DSN, nil
-	}
-	return fmt.Sprintf("file:runtime-store-%s?mode=memory&cache=shared", uuid.NewString()), nil
+	dsn, _, err := resolveLazyRuntimeDSN(cfg)
+	return dsn, err
 }
 
 func isRuntimeSQLiteMemoryDSN(dsn string) bool {

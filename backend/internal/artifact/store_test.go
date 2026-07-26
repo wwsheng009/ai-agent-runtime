@@ -2,10 +2,65 @@ package artifact
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestNewStore_PathBackedIsLazyUntilFirstUse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "artifacts.sqlite")
+
+	store, err := NewStore(&StoreConfig{Path: path})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if store.Opened() {
+		t.Fatal("expected path-backed artifact store to stay closed until first use")
+	}
+	if store.Path() != path {
+		t.Fatalf("expected path %q, got %q", path, store.Path())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("lazy open must not create the sqlite file early: %v", err)
+	}
+
+	// Bootstrap-style empty reads must not force the first open.
+	record, err := store.Get(context.Background(), "missing")
+	if err != nil {
+		t.Fatalf("get missing: %v", err)
+	}
+	if record != nil {
+		t.Fatal("expected nil record for missing artifact")
+	}
+	if store.Opened() {
+		t.Fatal("empty reads must keep the store closed")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("empty reads must not create the sqlite file: %v", err)
+	}
+
+	id, err := store.Put(context.Background(), Record{
+		SessionID: "session-lazy",
+		ToolName:  "view",
+		Content:   "lazy open content",
+	})
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected artifact id")
+	}
+	if !store.Opened() {
+		t.Fatal("expected store to open after first write")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected sqlite file after first write: %v", err)
+	}
+}
 
 func TestStore_MemoryEntriesAndCheckpoints(t *testing.T) {
 	store, err := NewStore(nil)

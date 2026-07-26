@@ -26,7 +26,19 @@ type GlobalMailboxStoreConfig struct {
 
 // SQLiteGlobalMailboxRegistryStore persists mailbox rows from local runtime
 // and workflow sources into one durable global row-id space.
+// Path-backed construction is cheap: the durable database is opened on first
+// use so chat bootstrap can wire AgentControl without creating
+// agent_control.sqlite early.
 type SQLiteGlobalMailboxRegistryStore struct {
+	cfg  GlobalMailboxStoreConfig
+	path string
+
+	openOnce   sync.Once
+	openMu     sync.RWMutex
+	openErr    error
+	closed     bool
+	sharedOpen func() error
+
 	db     *sql.DB
 	dsn    string
 	ownsDB bool
@@ -39,32 +51,27 @@ type SQLiteGlobalMailboxRegistryStore struct {
 var _ GlobalMailboxRegistryStore = (*SQLiteGlobalMailboxRegistryStore)(nil)
 var _ MailboxWakeSource = (*SQLiteGlobalMailboxRegistryStore)(nil)
 
-// NewSQLiteGlobalMailboxRegistryStore opens a SQLite-backed global mailbox
-// registry store.
+// NewSQLiteGlobalMailboxRegistryStore creates a SQLite-backed global mailbox
+// registry store. Path-backed stores open lazily on first use.
 func NewSQLiteGlobalMailboxRegistryStore(cfg *GlobalMailboxStoreConfig) (*SQLiteGlobalMailboxRegistryStore, error) {
 	if cfg == nil {
 		cfg = &GlobalMailboxStoreConfig{}
 	}
-	dsn, err := resolveGlobalMailboxDSN(cfg)
+	cfgCopy := *cfg
+	dsn, path, err := resolveLazyGlobalMailboxDSN(&cfgCopy)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open agent control mailbox registry db: %w", err)
+	store := &SQLiteGlobalMailboxRegistryStore{
+		cfg:    cfgCopy,
+		path:   path,
+		dsn:    dsn,
+		ownsDB: true,
 	}
-	if isGlobalMailboxMemoryDSN(dsn) {
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-	}
-	if err := configureAgentControlSQLiteDB(context.Background(), db, dsn); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	store := &SQLiteGlobalMailboxRegistryStore{db: db, dsn: dsn, ownsDB: true}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	if path == "" || isGlobalMailboxMemoryDSN(dsn) {
+		if err := store.ensure(); err != nil {
+			return nil, err
+		}
 	}
 	return store, nil
 }
@@ -80,16 +87,131 @@ func newSQLiteGlobalMailboxRegistryStoreWithDB(ctx context.Context, db *sql.DB, 
 	return store, nil
 }
 
-// Close closes the underlying database.
+// Opened reports whether the durable backend has been opened.
+func (s *SQLiteGlobalMailboxRegistryStore) Opened() bool {
+	if s == nil {
+		return false
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.db != nil
+}
+
+// Path returns the configured on-disk path when one is used.
+func (s *SQLiteGlobalMailboxRegistryStore) Path() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.path)
+}
+
+func (s *SQLiteGlobalMailboxRegistryStore) ensure() error {
+	if s == nil {
+		return fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if s.sharedOpen != nil {
+		return s.sharedOpen()
+	}
+	s.openMu.RLock()
+	if s.closed {
+		s.openMu.RUnlock()
+		return fmt.Errorf("agent control mailbox registry store is closed")
+	}
+	if s.db != nil || s.openErr != nil {
+		err := s.openErr
+		s.openMu.RUnlock()
+		return err
+	}
+	s.openMu.RUnlock()
+
+	s.openOnce.Do(func() {
+		pathKey := strings.TrimSpace(s.path)
+		if pathKey != "" {
+			agentControlPathOpenMu.Lock()
+			defer agentControlPathOpenMu.Unlock()
+		}
+		s.openMu.Lock()
+		defer s.openMu.Unlock()
+		if s.closed {
+			s.openErr = fmt.Errorf("agent control mailbox registry store is closed")
+			return
+		}
+		if s.db != nil || s.openErr != nil {
+			return
+		}
+		if err := ensureAgentControlStoreDirectory(s.path); err != nil {
+			s.openErr = err
+			return
+		}
+		db, err := sql.Open("sqlite3", s.dsn)
+		if err != nil {
+			s.openErr = fmt.Errorf("open agent control mailbox registry db: %w", err)
+			return
+		}
+		if isGlobalMailboxMemoryDSN(s.dsn) {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+		}
+		if err := configureAgentControlSQLiteDB(context.Background(), db, s.dsn); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		store := &SQLiteGlobalMailboxRegistryStore{db: db, dsn: s.dsn}
+		if err := store.init(context.Background()); err != nil {
+			_ = db.Close()
+			s.openErr = err
+			return
+		}
+		s.db = db
+		s.ownsDB = true
+	})
+
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.openErr
+}
+
+func (s *SQLiteGlobalMailboxRegistryStore) durableFileExists() bool {
+	if s == nil {
+		return false
+	}
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func (s *SQLiteGlobalMailboxRegistryStore) ensureForRead() (skipEmpty bool, err error) {
+	if s == nil {
+		return false, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if s.Opened() || s.durableFileExists() {
+		return false, s.ensure()
+	}
+	if strings.TrimSpace(s.path) == "" {
+		return false, s.ensure()
+	}
+	return true, nil
+}
+
+// Close closes the underlying database if it was opened and owned.
 func (s *SQLiteGlobalMailboxRegistryStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.closed = true
 	s.closeMailboxWakeWatchers()
-	if !s.ownsDB {
+	if s.db == nil || !s.ownsDB {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	s.db = nil
+	return err
 }
 
 func (s *SQLiteGlobalMailboxRegistryStore) closeMailboxWakeWatchers() {
@@ -114,8 +236,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) closeMailboxWakeWatchers() {
 // AppendGlobalMailboxRecord writes or refreshes one source-local mailbox row in
 // the durable global registry. The returned sequence is the global row id.
 func (s *SQLiteGlobalMailboxRegistryStore) AppendGlobalMailboxRecord(ctx context.Context, source string, record MailboxRecord) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	record = record.Normalize()
 	source = strings.TrimSpace(source)
@@ -228,8 +353,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendGlobalMailboxRecord(ctx context
 // is idempotent by workflow/scope/source id/message id and returns the durable
 // global row.
 func (s *SQLiteGlobalMailboxRegistryStore) AppendPrimaryGlobalMailboxRecord(ctx context.Context, record MailboxRecord) (MailboxRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return MailboxRecord{}, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return MailboxRecord{}, err
 	}
 	appended, created, err := appendPrimaryGlobalMailboxRecordSQL(ctx, s.db, "", record)
 	if err != nil {
@@ -254,12 +382,15 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendPrimaryGlobalMailboxRecordTx(ct
 
 // GlobalMailboxAttachDSN returns the SQLite DSN that local stores can attach
 // when they need a same-transaction global mailbox projection commit.
+// Path-backed stores report their DSN even before the first open so projection
+// status can advertise transactional capability without creating the file early.
+// Callers that actually attach must open/migrate first (see AttachGlobalMailboxSQLiteTx).
 func (s *SQLiteGlobalMailboxRegistryStore) GlobalMailboxAttachDSN() (string, bool) {
 	if s == nil {
 		return "", false
 	}
 	dsn := strings.TrimSpace(s.dsn)
-	if dsn == "" || strings.EqualFold(dsn, ":memory:") {
+	if dsn == "" || strings.EqualFold(dsn, ":memory:") || isGlobalMailboxMemoryDSN(dsn) {
 		return "", false
 	}
 	return dsn, true
@@ -380,8 +511,11 @@ func appendPrimaryGlobalMailboxRecordSQL(ctx context.Context, runner globalMailb
 // MaterializeMailboxRecords copies matching local source rows into the durable
 // global registry. It is idempotent by source/scope/source id/source seq.
 func (s *SQLiteGlobalMailboxRegistryStore) MaterializeMailboxRecords(ctx context.Context, sources []NamedMailboxRegistrySource, filter MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
 	}
 	filter = filter.Normalize()
 	filter.AfterSeq = 0
@@ -416,8 +550,13 @@ func (s *SQLiteGlobalMailboxRegistryStore) MaterializeMailboxRecords(ctx context
 // ListAgentControlMailboxRecords returns records from the durable global row-id
 // space.
 func (s *SQLiteGlobalMailboxRegistryStore) ListAgentControlMailboxRecords(ctx context.Context, filter MailboxRecordFilter) ([]MailboxRecord, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
 	}
 	filter = filter.Normalize()
 	clauses := []string{"id > ?"}
@@ -471,8 +610,13 @@ func (s *SQLiteGlobalMailboxRegistryStore) ListAgentControlMailboxRecords(ctx co
 
 // LastAgentControlMailboxRecordSeq returns the durable global high-water mark.
 func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxRecordSeq(ctx context.Context, filter MailboxRecordFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	filter = filter.Normalize()
 	clauses := make([]string, 0)
@@ -561,7 +705,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) WatchAgentControlMailboxWake(ctx cont
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s == nil || s.db == nil {
+	if s == nil {
 		return out, func() {}
 	}
 	filter = filter.Normalize()
@@ -600,8 +744,13 @@ func (s *SQLiteGlobalMailboxRegistryStore) WatchAgentControlMailboxWake(ctx cont
 // LastAgentControlMailboxWakeSeq returns the durable global mailbox row-id
 // high-water mark for the requested wake stream.
 func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxWakeSeq(ctx context.Context, filter MailboxWakeFilter) (int64, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	if skip, err := s.ensureForRead(); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, nil
 	}
 	filter = filter.Normalize()
 	clauses := make([]string, 0)
@@ -875,20 +1024,39 @@ func parseMailboxTime(raw string) time.Time {
 	return parsed.UTC()
 }
 
+func resolveLazyGlobalMailboxDSN(cfg *GlobalMailboxStoreConfig) (string, string, error) {
+	if cfg == nil {
+		cfg = &GlobalMailboxStoreConfig{}
+	}
+	if path := strings.TrimSpace(cfg.Path); path != "" {
+		return ensureGlobalMailboxDSNOptions(path), path, nil
+	}
+	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
+		return ensureGlobalMailboxDSNOptions(dsn), "", nil
+	}
+	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-mailbox-registry-%d?mode=memory&cache=shared", time.Now().UnixNano())), "", nil
+}
+
+func ensureAgentControlStoreDirectory(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create agent control store directory: %w", err)
+	}
+	return nil
+}
+
+// resolveGlobalMailboxDSN keeps the historical helper for callers/tests that
+// only need a DSN. Directory creation is deferred until ensure().
 func resolveGlobalMailboxDSN(cfg *GlobalMailboxStoreConfig) (string, error) {
-	if cfg.Path != "" {
-		dir := filepath.Dir(cfg.Path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create agent control mailbox registry directory: %w", err)
-			}
-		}
-		return ensureGlobalMailboxDSNOptions(cfg.Path), nil
-	}
-	if cfg.DSN != "" {
-		return ensureGlobalMailboxDSNOptions(cfg.DSN), nil
-	}
-	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-mailbox-registry-%d?mode=memory&cache=shared", time.Now().UnixNano())), nil
+	dsn, _, err := resolveLazyGlobalMailboxDSN(cfg)
+	return dsn, err
 }
 
 func ensureGlobalMailboxDSNOptions(dsn string) string {

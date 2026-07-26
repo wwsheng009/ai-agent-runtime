@@ -17,6 +17,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -548,6 +549,30 @@ tools: ["echo_tool"]
 	require.True(t, ok)
 	assert.Equal(t, "system duplicate", loadedSkill.Description)
 	assert.Equal(t, skill.SkillSourceLayerSystem, loadedSkill.Source.Layer)
+}
+
+func TestManager_NewManager_TeamStorePathIsLazyUntilFirstUse(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+	path := filepath.Join(t.TempDir(), "team_store.sqlite")
+	cfg.Team.StorePath = path
+
+	manager, err := NewManager(&Options{Config: cfg})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	store, ok := manager.TeamStore().(*team.SQLiteStore)
+	require.True(t, ok)
+	require.False(t, store.Opened())
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err), "bootstrap must not create team_store.sqlite early")
+
+	teamID, err := store.CreateTeam(context.Background(), team.Team{ID: "bootstrap-lazy"})
+	require.NoError(t, err)
+	require.Equal(t, "bootstrap-lazy", teamID)
+	require.True(t, store.Opened())
+	_, err = os.Stat(path)
+	require.NoError(t, err)
 }
 
 func TestManager_NewManager_DiscoverOnlyRegistersPromptLazyStubs(t *testing.T) {
