@@ -1,8 +1,64 @@
 # ai-agent-runtime
 
-本地优先的 AI Agent Runtime：用命令行 `aicli` 完成安装、登录、聊天与工具调用；需要时再启用 HTTP 服务与 Web 控制台。
+本地优先的 AI Agent Runtime：在你自己的机器上跑 agent，而不是把工作流绑死在某个云 IDE 或单一 SaaS 上。
 
-最短路径：
+## 项目介绍
+
+`ai-agent-runtime` 提供一套可本地运行、可扩展、可嵌入脚本/CI 的 Agent 运行时。默认入口是命令行工具 `aicli`：安装、登录、聊天、工具调用都能在终端完成；需要时再启用 `runtime-server` HTTP API 与 Web 控制台。
+
+### 它解决什么问题
+
+- 想在本地仓库里直接和代码对话、改文件、跑命令，而不是只做网页聊天。
+- 希望 agent 具备可控的工具执行、权限策略、session 恢复与 headless 输出，方便脚本和 CI。
+- 需要把「单 agent 对话」扩展到 skill、MCP、子 agent / team 编排，而不是只停在一次 LLM 调用。
+- 可选地通过 HTTP / Web UI 管理 session、team、runtime 配置，而不是强制依赖云端控制台。
+
+### 核心能力
+
+| 能力 | 说明 |
+|---|---|
+| 交互式 Chat | `aicli` / `aicli chat`：流式对话、slash 命令、session resume、模型/provider 切换 |
+| Headless Exec | `aicli exec`：JSON/JSONL 输出、退出码约定，适合管道、脚本与 CI |
+| 工具与工作区 | 文件读写、搜索、shell、patch 等；支持 preflight、权限 overlay、危险操作审批 |
+| Provider 接入 | OpenAI 兼容协议、Codex OAuth 等；`aicli login` 交互/非交互登录与 doctor 探活 |
+| Skills / MCP | 将 skills 暴露为可调用能力；可接入 MCP server 扩展工具面 |
+| 多 Agent | portable agent 定义、`spawn_agent` 子会话、team 任务编排与 outcome 契约 |
+| HTTP + Web | `runtime-server` 提供 `/api/agent/chat`、`/api/runtime/*`；前端工作台管理会话与 team |
+
+### 架构一览
+
+```text
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   aicli     │     │  runtime-server  │     │  Web 控制台     │
+│ chat/exec   │     │  HTTP / SSE API  │◄────│  React + Vite   │
+└──────┬──────┘     └────────┬─────────┘     └─────────────────┘
+       │                     │
+       └──────────┬──────────┘
+                  ▼
+        backend/internal/*
+        agent · chat · toolkit · policy
+        skills · team · provider · storage
+```
+
+- **默认路径**：本机安装 `aicli` → 配置 provider → 在仓库目录里聊天/执行。
+- **可选路径**：启动 `runtime-server` + frontend，用浏览器管理会话、team 与 runtime 配置。
+- **实现语言**：后端 Go（`backend/`），前端 TypeScript/React（`frontend/`）。
+
+### 设计原则
+
+1. **Local-first**：凭证、session、工具执行默认落在本机；HTTP/Web 是增强，不是门槛。
+2. **CLI 优先**：最短路径始终是 `aicli`，文档与安装脚本围绕「装上就能聊」收口。
+3. **契约清晰**：工具结果、exec 输出、team outcome、权限模式都尽量有稳定约定，便于自动化。
+4. **可组合扩展**：skills、MCP、agent definition、permission overlay 分层叠加，而不是写死单一 agent。
+
+### 适用场景
+
+- 本地开发助手：读仓库、改代码、跑测试、排查问题
+- 自动化脚本 / CI：`aicli exec` 做 code review、摘要、批处理
+- 多 agent 协作实验：子 agent 并行、team 任务分派与结果汇总
+- 自托管控制台：企业内部或本机部署 runtime-server + Web UI
+
+最短上手路径：
 
 ```text
 安装 aicli → aicli init --global → aicli login → aicli 进入 chat
@@ -16,6 +72,7 @@
 | 安装/配置/slash/session/MCP/卸载 | [docs/aicli/install.md](./docs/aicli/install.md) |
 | 卡住了（空 providers / 401 / PATH） | [docs/aicli/faq.md](./docs/aicli/faq.md) |
 | 全部 aicli 文档 | [docs/aicli/README.md](./docs/aicli/README.md) |
+| 运行时 / skills / multi-agent | [docs/README.md](./docs/README.md) |
 
 ---
 
