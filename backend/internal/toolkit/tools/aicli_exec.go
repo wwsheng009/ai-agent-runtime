@@ -222,7 +222,7 @@ func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = appendAICLIExecDepth(os.Environ())
 
-	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
+	outputMirror := resolveToolTerminalOutputMirror(ctx)
 	if outputMirror != nil {
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 	}

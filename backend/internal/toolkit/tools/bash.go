@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -743,7 +745,10 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		prefixPowershellUTF8(cmd)
 	}
 
-	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
+	outputMirror := resolveToolTerminalOutputMirror(ctx)
+	if outputMirror != nil {
+		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
+	}
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
 	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureSettings.captureLimitBytes(), "toolkit", command, artifactRoot, outputMirror)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
@@ -869,7 +874,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		prefixPowershellUTF8(cmd)
 	}
 
-	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
+	outputMirror := resolveToolTerminalOutputMirror(ctx)
 	if outputMirror != nil {
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 	}
@@ -930,6 +935,19 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 }
 
 // --- Helper functions ---
+
+// resolveToolTerminalOutputMirror tees the chat OutputMirror (if any) with a
+// tool.progress terminal stream writer when a progress Reporter is bound.
+// Consumers on the bus (API SSE / ACP / non-interactive) then see live chunks;
+// interactive chat keeps its existing direct terminal mirror.
+func resolveToolTerminalOutputMirror(ctx context.Context) io.Writer {
+	existing := runtimeexecutor.OutputMirrorFromContext(ctx)
+	mirror, _ := toolprotocol.TeeOutputMirrorWithTerminalStream(ctx, existing, toolprotocol.TerminalStreamOptions{
+		Channel: toolprotocol.StreamChannelCombined,
+		Message: "stdout",
+	})
+	return mirror
+}
 
 func commandExecutionFromCapture(capture runtimeexecutor.CombinedOutputCapture) CommandExecutionResult {
 	return CommandExecutionResult{

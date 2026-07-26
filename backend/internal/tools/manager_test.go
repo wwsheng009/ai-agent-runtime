@@ -17,6 +17,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -594,6 +595,46 @@ func TestAgentAdapter_CallTool_DelegatesToRuntimeManager(t *testing.T) {
 	}
 	if text != "echo:hello" {
 		t.Fatalf("unexpected tool output: %q", text)
+	}
+}
+
+func TestManager_ExecuteWithMeta_MCPReportsProgressPhases(t *testing.T) {
+	manager := NewDefaultManager(newStubMCPManager())
+	var reports []toolprotocol.Progress
+	ctx := toolprotocol.WithReporter(context.Background(), toolprotocol.ReporterFunc(func(p toolprotocol.Progress) {
+		reports = append(reports, p)
+	}))
+
+	output, _, err := manager.ExecuteWithMeta(ctx, "mcp_echo", map[string]interface{}{
+		"message": "stream-me",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWithMeta failed: %v", err)
+	}
+	if output != "echo:stream-me" {
+		t.Fatalf("output=%q", output)
+	}
+	if len(reports) < 2 {
+		t.Fatalf("expected start/stream/finish progress, got %d: %+v", len(reports), reports)
+	}
+	if reports[0].Metadata[toolprotocol.MetadataPhase] != toolprotocol.PhaseStart {
+		t.Fatalf("first phase=%v message=%q", reports[0].Metadata[toolprotocol.MetadataPhase], reports[0].Message)
+	}
+	last := reports[len(reports)-1]
+	if last.Metadata[toolprotocol.MetadataPhase] != toolprotocol.PhaseFinish {
+		t.Fatalf("last phase=%v", last.Metadata[toolprotocol.MetadataPhase])
+	}
+	foundStream := false
+	for _, p := range reports {
+		if p.Metadata[toolprotocol.MetadataStream] == true {
+			foundStream = true
+			if !strings.Contains(p.Partial, "echo:stream-me") {
+				t.Fatalf("stream partial=%q", p.Partial)
+			}
+		}
+	}
+	if !foundStream {
+		t.Fatalf("expected stream partial for MCP result: %+v", reports)
 	}
 }
 

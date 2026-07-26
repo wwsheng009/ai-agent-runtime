@@ -144,6 +144,23 @@ func ReporterFromContext(ctx context.Context) Reporter {
 	return NopReporter{}
 }
 
+// HasReporter reports whether ctx carries a non-nil progress Reporter other than
+// the implicit NopReporter. Tools use this to avoid building stream writers when
+// no consumer is listening.
+func HasReporter(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	reporter, ok := ctx.Value(progressContextKey{}).(Reporter)
+	if !ok || reporter == nil {
+		return false
+	}
+	if _, isNop := reporter.(NopReporter); isNop {
+		return false
+	}
+	return true
+}
+
 // Report is a convenience helper for tools to emit progress when a reporter exists.
 func Report(ctx context.Context, progress Progress) {
 	ReporterFromContext(ctx).ReportProgress(progress.Normalize())

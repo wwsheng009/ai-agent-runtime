@@ -63,6 +63,12 @@ func TestReporterContext(t *testing.T) {
 	}
 	// nop path
 	Report(context.Background(), Progress{ToolID: "x"})
+	if HasReporter(context.Background()) {
+		t.Fatal("background should not HasReporter")
+	}
+	if !HasReporter(ctx) {
+		t.Fatal("expected HasReporter on bound ctx")
+	}
 }
 
 func TestProgressTimestampInPayload(t *testing.T) {

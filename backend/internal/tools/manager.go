@@ -17,6 +17,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -137,9 +138,26 @@ func (m *Manager) Execute(ctx context.Context, name string, args map[string]inte
 func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	if name == "list_mcp_resources" {
 		metadata := toolresult.WithSource(toolresult.WithKind(nil, toolresult.KindText), toolresult.SourceMeta)
+		if toolprotocol.HasReporter(ctx) {
+			toolprotocol.ReportPhase(ctx, toolprotocol.PhaseStart, "mcp call started", map[string]interface{}{
+				"tool_name": name,
+				"source":    toolresult.SourceMeta,
+			})
+		}
 		output, err := m.listMCPResources(ctx, args)
 		if strings.TrimSpace(output) != "" {
 			metadata["output_size"] = len(output)
+			toolprotocol.ReportTextStream(ctx, output, toolprotocol.StreamChannelCombined)
+		}
+		if toolprotocol.HasReporter(ctx) {
+			finishMsg := "mcp call finished"
+			if err != nil {
+				finishMsg = "mcp call failed"
+			}
+			toolprotocol.ReportPhase(ctx, toolprotocol.PhaseFinish, finishMsg, map[string]interface{}{
+				"tool_name": name,
+				"source":    toolresult.SourceMeta,
+			})
 		}
 		return output, metadata, err
 	}
@@ -169,11 +187,40 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 					return formatToolkitResultWithSource(result, toolresult.SourceToolkit)
 				}
 			}
+			if toolprotocol.HasReporter(ctx) {
+				toolprotocol.ReportPhase(ctx, toolprotocol.PhaseStart, "mcp call started", map[string]interface{}{
+					"tool_name": name,
+					"mcp_name":  info.MCPName,
+					"source":    toolresult.SourceMCP,
+				})
+			}
 			result, callErr := m.mcp.CallTool(ctx, info.MCPName, name, args)
 			if callErr != nil {
+				if toolprotocol.HasReporter(ctx) {
+					toolprotocol.ReportPhase(ctx, toolprotocol.PhaseFinish, "mcp call failed", map[string]interface{}{
+						"tool_name": name,
+						"mcp_name":  info.MCPName,
+						"source":    toolresult.SourceMCP,
+					})
+				}
 				return "", nil, callErr
 			}
-			return formatMCPResultWithSource(result, toolresult.SourceMCP)
+			output, metadata, formatErr := formatMCPResultWithSource(result, toolresult.SourceMCP)
+			if strings.TrimSpace(output) != "" {
+				toolprotocol.ReportTextStream(ctx, output, toolprotocol.StreamChannelCombined)
+			}
+			if toolprotocol.HasReporter(ctx) {
+				finishMsg := "mcp call finished"
+				if formatErr != nil {
+					finishMsg = "mcp call failed"
+				}
+				toolprotocol.ReportPhase(ctx, toolprotocol.PhaseFinish, finishMsg, map[string]interface{}{
+					"tool_name": name,
+					"mcp_name":  info.MCPName,
+					"source":    toolresult.SourceMCP,
+				})
+			}
+			return output, metadata, formatErr
 		}
 	}
 
