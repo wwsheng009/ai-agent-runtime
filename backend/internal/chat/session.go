@@ -106,6 +106,12 @@ func NewSession(userID string) *Session {
 
 // AddMessage 添加消息到会话
 func (s *Session) AddMessage(msg types.Message) {
+	prevTurnID := ""
+	if len(s.History) > 0 {
+		prevTurnID = types.TurnID(s.History[len(s.History)-1])
+	}
+	_ = types.EnsureMessageIdentity(&msg, prevTurnID)
+
 	prevLen := len(s.History)
 	if s.CanonicalMessageCount < prevLen {
 		s.CanonicalMessageCount = prevLen
@@ -167,6 +173,7 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 	for i, msg := range messages {
 		cloned[i] = *msg.Clone()
 	}
+	_ = types.EnsureHistoryMessageIdentities(cloned)
 
 	s.History = cloned
 	s.HistoryLoaded = true
@@ -180,6 +187,15 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 	}
 	s.UpdatedAt = time.Now()
 	s.refreshDerivedMetadata()
+}
+
+// EnsureMessageIdentities backfills stable message_id / turn_id on loaded history.
+// Returns true when metadata was written (caller should persist when durable).
+func (s *Session) EnsureMessageIdentities() bool {
+	if s == nil || len(s.History) == 0 {
+		return false
+	}
+	return types.EnsureHistoryMessageIdentities(s.History)
 }
 
 // AddTag 添加标签

@@ -26,6 +26,8 @@ const (
 	EventContextReconciled       = "context_reconciled"
 	EventRewindStarted           = "rewind_started"
 	EventRewindFinished          = "rewind_finished"
+	EventBacktrackStarted        = "backtrack_started"
+	EventBacktrackFinished       = "backtrack_finished"
 	EventJobStarted              = "job_started"
 	EventJobOutput               = "job_output"
 	EventJobCancelled            = "job_cancelled"

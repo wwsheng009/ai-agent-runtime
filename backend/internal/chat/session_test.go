@@ -42,6 +42,68 @@ func TestSessionAddMessage(t *testing.T) {
 	if retrieved.Content != "Hello, AI!" {
 		t.Errorf("Expected message content 'Hello, AI!', got '%s'", retrieved.Content)
 	}
+	if types.MessageID(retrieved) == "" {
+		t.Fatal("expected AddMessage to assign message_id")
+	}
+	if types.TurnID(retrieved) == "" {
+		t.Fatal("expected AddMessage to assign turn_id for user message")
+	}
+}
+
+func TestSessionAddMessageInheritsTurnID(t *testing.T) {
+	session := NewSession("test-user")
+	session.AddMessage(*types.NewUserMessage("prompt"))
+	session.AddMessage(*types.NewAssistantMessage("reply"))
+	session.AddMessage(*types.NewToolMessage("tc1", "tool"))
+
+	userTurn := types.TurnID(session.History[0])
+	if userTurn == "" {
+		t.Fatal("expected user turn_id")
+	}
+	if types.TurnID(session.History[1]) != userTurn {
+		t.Fatalf("assistant turn_id=%q want %q", types.TurnID(session.History[1]), userTurn)
+	}
+	if types.TurnID(session.History[2]) != userTurn {
+		t.Fatalf("tool turn_id=%q want %q", types.TurnID(session.History[2]), userTurn)
+	}
+	ids := map[string]struct{}{}
+	for _, msg := range session.History {
+		id := types.MessageID(msg)
+		if id == "" {
+			t.Fatal("expected message_id on every history entry")
+		}
+		if _, exists := ids[id]; exists {
+			t.Fatalf("duplicate message_id %q", id)
+		}
+		ids[id] = struct{}{}
+	}
+}
+
+func TestSessionEnsureMessageIdentitiesBackfillsLegacyHistory(t *testing.T) {
+	session := NewSession("test-user")
+	// Bypass AddMessage to simulate pre-Phase-6 persisted history.
+	session.History = []types.Message{
+		{Role: "user", Content: "old user", Metadata: types.NewMetadata()},
+		{Role: "assistant", Content: "old assistant", Metadata: types.NewMetadata()},
+	}
+	session.HistoryLoaded = true
+
+	if !session.EnsureMessageIdentities() {
+		t.Fatal("expected legacy history to need identity backfill")
+	}
+	if types.MessageID(session.History[0]) == "" || types.TurnID(session.History[0]) == "" {
+		t.Fatal("expected user message identity after backfill")
+	}
+	if types.MessageID(session.History[1]) == "" {
+		t.Fatal("expected assistant message_id after backfill")
+	}
+	if types.TurnID(session.History[1]) != types.TurnID(session.History[0]) {
+		t.Fatalf("assistant should inherit user turn_id, got %q vs %q",
+			types.TurnID(session.History[1]), types.TurnID(session.History[0]))
+	}
+	if session.EnsureMessageIdentities() {
+		t.Fatal("second EnsureMessageIdentities should be idempotent")
+	}
 }
 
 func TestSessionDerivedTitleSkipsInstructionMessages(t *testing.T) {

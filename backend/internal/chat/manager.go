@@ -254,7 +254,11 @@ func (m *SessionManager) GetHistory(ctx context.Context, sessionID string, limit
 // exclusive cursor; zero starts from the newest message.
 func (m *SessionManager) GetHistoryPage(ctx context.Context, sessionID string, beforeSeq, limit int) (*SessionHistoryPage, error) {
 	if pager, ok := m.storage.(SessionStorageHistoryPager); ok {
-		return pager.GetMessagePage(ctx, sessionID, beforeSeq, limit)
+		page, err := pager.GetMessagePage(ctx, sessionID, beforeSeq, limit)
+		if err != nil {
+			return nil, err
+		}
+		return m.ensureHistoryPageIdentities(ctx, sessionID, page)
 	}
 	if reader, ok := m.storage.(SessionStorageRecentHistoryReader); ok {
 		if beforeSeq <= 0 {
@@ -266,12 +270,16 @@ func (m *SessionManager) GetHistoryPage(ctx context.Context, sessionID string, b
 			if countErr != nil {
 				total = len(messages)
 			}
-			return buildSessionHistoryPage(messages, total-len(messages)+1, total), nil
+			page := buildSessionHistoryPage(messages, total-len(messages)+1, total)
+			return m.ensureHistoryPageIdentities(ctx, sessionID, page)
 		}
 	}
 	session, err := m.Get(ctx, sessionID)
 	if err != nil {
 		return nil, err
+	}
+	if session.EnsureMessageIdentities() {
+		_ = m.Update(ctx, session)
 	}
 	total := session.MessageCount()
 	end := total
@@ -294,6 +302,57 @@ func (m *SessionManager) GetHistoryPage(ctx context.Context, sessionID string, b
 	}
 	messages := append([]types.Message(nil), history[start:end]...)
 	return buildSessionHistoryPage(messages, start+1, total), nil
+}
+
+// ensureHistoryPageIdentities best-effort backfills message_id/turn_id so
+// history API consumers always see stable selectors. Prefer a durable full-
+// session rewrite when any returned message is missing identity; otherwise
+// stamp only the page in memory as a last resort.
+func (m *SessionManager) ensureHistoryPageIdentities(ctx context.Context, sessionID string, page *SessionHistoryPage) (*SessionHistoryPage, error) {
+	if page == nil || len(page.Messages) == 0 {
+		return page, nil
+	}
+	needsIdentity := false
+	for _, msg := range page.Messages {
+		if types.MessageID(msg) == "" {
+			needsIdentity = true
+			break
+		}
+	}
+	if !needsIdentity {
+		return page, nil
+	}
+
+	if session, err := m.Get(ctx, sessionID); err == nil && session != nil {
+		if session.EnsureMessageIdentities() {
+			_ = m.Update(ctx, session)
+		}
+		total := session.MessageCount()
+		history := session.visibleHistory()
+		if page.FirstSeq > 0 && page.LastSeq >= page.FirstSeq {
+			start := page.FirstSeq - 1
+			end := page.LastSeq
+			if start < 0 {
+				start = 0
+			}
+			if end > len(history) {
+				end = len(history)
+			}
+			if start > end {
+				start = end
+			}
+			page.Messages = append([]types.Message(nil), history[start:end]...)
+			page.Total = total
+			return page, nil
+		}
+		// Cursor metadata missing: return full visible history stamped.
+		page.Messages = append([]types.Message(nil), history...)
+		page.Total = total
+		return buildSessionHistoryPage(page.Messages, 1, total), nil
+	}
+
+	_ = types.EnsureHistoryMessageIdentities(page.Messages)
+	return page, nil
 }
 
 func buildSessionHistoryPage(messages []types.Message, firstSeq, total int) *SessionHistoryPage {

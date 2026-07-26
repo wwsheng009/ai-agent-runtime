@@ -649,6 +649,8 @@ func (a *SessionActor) handle(cmd Command) {
 		a.handleInterrupt(payload)
 	case RewindTo:
 		a.handleRewindTo(payload)
+	case BacktrackTo:
+		a.handleBacktrackTo(payload)
 	case CompactSession:
 		a.handleCompactSession(payload)
 	case DeliverMailboxMessage:
@@ -2232,6 +2234,18 @@ func (a *SessionActor) loadSession(ctx context.Context) (*Session, error) {
 	if session == nil {
 		return nil, fmt.Errorf("session not found: %s", a.id)
 	}
+	// Lazily mint stable message_id/turn_id for pre-Phase-6 sessions so
+	// backtrack message_id selectors and history consumers stay durable.
+	if session.EnsureMessageIdentities() {
+		if persistErr := a.persistSession(ctx, session); persistErr != nil && a.eventBus != nil {
+			// Non-fatal: ids still exist in-memory for this request.
+			a.eventBus.Publish(runtimeevents.Event{
+				Type:      "session.message_identity_persist_error",
+				SessionID: a.id,
+				Payload:   map[string]interface{}{"error": persistErr.Error()},
+			})
+		}
+	}
 	return session, nil
 }
 
@@ -2434,6 +2448,12 @@ func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeStat
 		return saveErr
 	}
 	return nil
+}
+
+// UpdateStateForTest mutates runtime state for unit/integration tests.
+// Prefer this over reflecting into private fields.
+func (a *SessionActor) UpdateStateForTest(ctx context.Context, mutate func(*RuntimeState) error) error {
+	return a.updateState(ctx, mutate)
 }
 
 func (a *SessionActor) recordPendingToolCall(ctx context.Context, pending *PendingToolInvocation) error {

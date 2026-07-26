@@ -106,6 +106,19 @@ type RewindTo struct {
 	Reply        chan RewindResult
 }
 
+// BacktrackCommandResult carries the outcome of a user-turn backtrack command.
+type BacktrackCommandResult struct {
+	Result *BacktrackResult
+	Err    error
+}
+
+// BacktrackTo requests a user-turn backtrack (or preview when PreviewOnly is set).
+type BacktrackTo struct {
+	Ctx     context.Context
+	Request BacktrackRequest
+	Reply   chan BacktrackCommandResult
+}
+
 // CompactResult carries the outcome of a manual session compaction request.
 type CompactResult struct {
 	Result *compactruntime.Result
@@ -141,6 +154,7 @@ func (ApproveTool) isCommand()           {}
 func (AnswerQuestion) isCommand()        {}
 func (Interrupt) isCommand()             {}
 func (RewindTo) isCommand()              {}
+func (BacktrackTo) isCommand()           {}
 func (CompactSession) isCommand()        {}
 func (DeliverMailboxMessage) isCommand() {}
 func (SubscribeEvents) isCommand()       {}

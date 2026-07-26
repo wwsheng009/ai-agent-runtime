@@ -20,7 +20,9 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -2541,6 +2543,7 @@ func (c *sessionAgentController) applyTeamTeammateAgentContext(ctx context.Conte
 			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextDepth, 1) || changed
 			if profile := strings.TrimSpace(mate.Profile); profile != "" {
 				changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextAgentType, profile) || changed
+				changed = applyAPITeammateAgentdefSessionDefaults(session, profile) || changed
 			}
 			if err := c.upsertTeamTeammateAgentRecord(ctx, record, mate, session, leadSessionID, path); err != nil {
 				return false, err
@@ -2549,6 +2552,45 @@ func (c *sessionAgentController) applyTeamTeammateAgentContext(ctx context.Conte
 		}
 	}
 	return false, nil
+}
+
+// applyAPITeammateAgentdefSessionDefaults projects portable agentdef
+// permission_mode / read_only onto a teammate session when not already set.
+// Explicit session values win; task runs still force complete_task via RunMeta.
+func applyAPITeammateAgentdefSessionDefaults(session *chat.Session, profile string) bool {
+	if session == nil {
+		return false
+	}
+	profile = strings.TrimSpace(profile)
+	if !agentdef.IsPortableAgentName(profile) {
+		return false
+	}
+	workspacePath := ""
+	if session.Metadata.Context != nil {
+		if path := sessionmeta.String(session.Metadata.Context, toolbroker.AgentSessionContextWorktreePath); path != "" {
+			workspacePath = path
+		} else if path := sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath); path != "" {
+			workspacePath = path
+		}
+	}
+	defaults, ok := agentdef.PortableSessionDefaults(profile, agentdef.DiscoverOptions{
+		ProjectRoot: strings.TrimSpace(workspacePath),
+	})
+	if !ok {
+		return false
+	}
+	changed := false
+	if defaults.PermissionMode != "" {
+		if existing := agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode); strings.TrimSpace(existing) == "" {
+			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextPermissionMode, defaults.PermissionMode) || changed
+		}
+	}
+	if defaults.HasReadOnly && defaults.ReadOnly {
+		if _, ok := sessionmeta.Bool(session.Metadata.Context, toolbroker.AgentSessionContextReadOnly); !ok {
+			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextReadOnly, true) || changed
+		}
+	}
+	return changed
 }
 
 func (c *sessionAgentController) upsertTeamTeammateAgentRecord(ctx context.Context, record team.Team, mate team.Teammate, session *chat.Session, leadSessionID, path string) error {
@@ -3038,6 +3080,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	} else {
 		h.applyAgentExecutionPolicy(apiAgent, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
 	}
+	if strings.TrimSpace(childAgentType) != "" {
+		applyAPIChildAgentdefToolPolicy(apiAgent, childAgentType, workspacePath)
+	}
 	if childReadOnly {
 		toolPolicy := apiAgent.GetToolExecutionPolicy()
 		if toolPolicy == nil {
@@ -3110,6 +3155,72 @@ func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
+}
+
+// applyAPIChildAgentdefToolPolicy overlays agentdef allow/deny/read-only/sandbox
+// onto an API session actor when agent_type resolves to a portable definition.
+// Mirrors applyLocalChildAgentdefToolPolicy for spawn_agent / teammate parity.
+func applyAPIChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType, workspaceRoot string) {
+	if apiAgent == nil {
+		return
+	}
+	agentType = strings.TrimSpace(agentType)
+	if !agentdef.IsPortableAgentName(agentType) {
+		return
+	}
+	binding, err := agentdef.ResolvePortableBinding(agentType, agentdef.DiscoverOptions{
+		ProjectRoot: strings.TrimSpace(workspaceRoot),
+	})
+	if err != nil || binding == nil {
+		return
+	}
+	hasSandbox := len(binding.Sandbox) > 0
+	if len(binding.ToolAllowlist) == 0 && len(binding.ToolDenylist) == 0 && (binding.ReadOnly == nil || !*binding.ReadOnly) && !hasSandbox {
+		return
+	}
+
+	readOnly := binding.ReadOnly != nil && *binding.ReadOnly
+	var allowlist []string
+	if len(binding.ToolAllowlist) > 0 {
+		allowlist = append([]string(nil), binding.ToolAllowlist...)
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
+	} else {
+		toolPolicy = toolPolicy.DeriveChild(allowlist, readOnly)
+	}
+	if len(binding.ToolDenylist) > 0 {
+		if toolPolicy.DeniedTools == nil {
+			toolPolicy.DeniedTools = map[string]bool{}
+		}
+		for _, name := range binding.ToolDenylist {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				toolPolicy.DeniedTools[name] = true
+			}
+		}
+	}
+	if hasSandbox {
+		warnings, err := runtimeprofileinput.MaterializeSandboxForWorkspace(toolPolicy, binding.Sandbox, workspaceRoot)
+		if err != nil {
+			logger.Warnf("api child agentdef sandbox materialize failed for %s: %v", agentType, err)
+		}
+		for _, warning := range warnings {
+			logger.Warnf("api child agentdef sandbox: %s", warning)
+		}
+	}
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
+
+	if binding.PermissionMode == runtimepolicy.ModePlan {
+		engine := apiAgent.GetPermissionEngine()
+		if engine == nil {
+			engine = agent.NewPermissionEngine()
+			apiAgent.SetPermissionEngine(engine)
+		}
+		engine.Mode = runtimepolicy.ModePlan
+		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+	}
 }
 
 func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedReasoningEffort ...string) *agent.LoopReActConfig {

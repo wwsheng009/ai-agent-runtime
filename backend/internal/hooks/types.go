@@ -28,8 +28,9 @@ const (
 	// PreCompact DecisionBlock skips the compaction attempt.
 	EventPreCompact        Event = "pre_compact"
 	EventPostCompact       Event = "post_compact"
-	EventCheckpointCreated Event = "checkpoint_created"
-	EventRewindCompleted   Event = "rewind_completed"
+	EventCheckpointCreated  Event = "checkpoint_created"
+	EventRewindCompleted    Event = "rewind_completed"
+	EventBacktrackCompleted Event = "backtrack_completed"
 )
 
 // IsBlockingAction reports whether a decision should halt the enclosing flow.
