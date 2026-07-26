@@ -18,6 +18,7 @@ import (
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -4267,9 +4268,31 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 func renderToolProgressTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
 	toolName := firstNonEmptyChatValue(runtimeEventToolName(event), "tool")
 	message := truncateChatRuntimeText(payloadStringValue(event.Payload["message"]), 120)
-	partial := truncateChatRuntimeText(payloadStringValue(event.Payload["partial"]), 80)
+	partialRaw := payloadStringValue(event.Payload["partial"])
+	partial := truncateChatRuntimeText(partialRaw, 80)
 	percent, hasPercent := payloadFloatValue(event.Payload, "percent")
-	parts := []string{"• Progress", toolName}
+	isStream := payloadBoolValue(event.Payload, "stream")
+	if isStream && payloadBoolValue(event.Payload, toolprotocol.MetadataOutputMirrored) {
+		// The local output mirror already rendered these bytes. Keep the event for
+		// ACP/SSE consumers and stage updates, but avoid a duplicate chat line.
+		return chatRuntimeTimelineEvent{}
+	}
+	channel := payloadStringValue(event.Payload["stream_channel"])
+	phase := payloadStringValue(event.Payload["phase"])
+	chunkIndex, hasChunk := payloadFloatValue(event.Payload, "stream_chunk_index")
+
+	label := "• Progress"
+	if isStream {
+		label = "• Stream"
+	} else if phase == "start" {
+		label = "• Start"
+	} else if phase == "finish" {
+		label = "• Finish"
+	}
+	parts := []string{label, toolName}
+	if isStream && channel != "" && channel != "combined" {
+		parts = append(parts, channel)
+	}
 	if hasPercent && percent > 0 {
 		if percent == float64(int(percent)) {
 			parts = append(parts, fmt.Sprintf("%d%%", int(percent)))
@@ -4277,11 +4300,18 @@ func renderToolProgressTimelineEvent(event runtimeevents.Event) chatRuntimeTimel
 			parts = append(parts, fmt.Sprintf("%.1f%%", percent))
 		}
 	}
-	if message != "" {
+	if message != "" && !isStream {
+		parts = append(parts, message)
+	} else if message != "" && isStream && partial == "" {
 		parts = append(parts, message)
 	}
 	if partial != "" {
-		parts = append(parts, "("+partial+")")
+		// Stream chunks are the primary content; keep them readable.
+		if isStream {
+			parts = append(parts, strings.TrimRight(partial, "\r\n"))
+		} else {
+			parts = append(parts, "("+partial+")")
+		}
 	}
 	if len(parts) == 2 && message == "" && partial == "" && !(hasPercent && percent > 0) {
 		// Bare tool name with no details is noise; skip.
@@ -4289,8 +4319,17 @@ func renderToolProgressTimelineEvent(event runtimeevents.Event) chatRuntimeTimel
 	}
 	callID := payloadStringValue(event.Payload["tool_call_id"])
 	dedup := firstNonEmptyChatValue(callID, toolName) + ":" + message + ":" + partial
-	if hasPercent && percent > 0 {
+	if isStream {
+		// Prefer chunk index so successive stream lines are not over-deduped.
+		if hasChunk {
+			dedup = firstNonEmptyChatValue(callID, toolName) + ":stream:" + fmt.Sprintf("%.0f", chunkIndex)
+		} else {
+			dedup = firstNonEmptyChatValue(callID, toolName) + ":stream:" + partial
+		}
+	} else if hasPercent && percent > 0 {
 		dedup += fmt.Sprintf(":%.0f", percent)
+	} else if phase != "" {
+		dedup += ":" + phase
 	}
 	return chatRuntimeTimelineEvent{
 		Line:     strings.Join(parts, " "),
@@ -4304,6 +4343,16 @@ func chatToolProgressStageDetail(event runtimeevents.Event) string {
 	if toolName == "" {
 		return ""
 	}
+	if payloadBoolValue(event.Payload, "stream") {
+		partial := truncateChatRuntimeText(payloadStringValue(event.Payload["partial"]), 40)
+		if partial != "" {
+			return toolName + " " + strings.TrimRight(partial, "\r\n")
+		}
+		if channel := payloadStringValue(event.Payload["stream_channel"]); channel != "" {
+			return toolName + " stream:" + channel
+		}
+		return toolName + " stream"
+	}
 	message := truncateChatRuntimeText(payloadStringValue(event.Payload["message"]), 48)
 	percent, hasPercent := payloadFloatValue(event.Payload, "percent")
 	if hasPercent && percent > 0 {
@@ -4314,6 +4363,9 @@ func chatToolProgressStageDetail(event runtimeevents.Event) string {
 	}
 	if message != "" {
 		return toolName + " " + message
+	}
+	if phase := payloadStringValue(event.Payload["phase"]); phase != "" {
+		return toolName + " " + phase
 	}
 	return toolName
 }

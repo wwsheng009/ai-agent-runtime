@@ -27,6 +27,7 @@ import (
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -725,6 +726,41 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		Payload:  map[string]interface{}{},
 	}); got != "" {
 		t.Fatalf("expected empty progress render without details, got %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: "shell",
+		Payload: map[string]interface{}{
+			"tool_call_id":       "call-stream-1",
+			"stream":             true,
+			"stream_channel":     "combined",
+			"stream_chunk_index": float64(2),
+			"partial":            "building packages...\n",
+			"phase":              "stream",
+		},
+	}); got != "• Stream shell building packages..." {
+		t.Fatalf("unexpected tool stream progress render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: "shell",
+		Payload: map[string]interface{}{
+			"stream":                            true,
+			toolprotocol.MetadataOutputMirrored: true,
+			"partial":                           "building packages...\n",
+		},
+	}); got != "" {
+		t.Fatalf("expected directly mirrored stream to skip duplicate timeline rendering, got %q", got)
+	}
+	if got := chatToolProgressStageDetail(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: "shell",
+		Payload: map[string]interface{}{
+			"stream":  true,
+			"partial": "compiling main.go\n",
+		},
+	}); got != "shell compiling main.go" {
+		t.Fatalf("unexpected stream stage detail: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "list_mcp_resources", Payload: map[string]interface{}{"tool_source": "meta"}}); got != "• Running [meta] list_mcp_resources" {
 		t.Fatalf("unexpected meta tool requested render: %q", got)
