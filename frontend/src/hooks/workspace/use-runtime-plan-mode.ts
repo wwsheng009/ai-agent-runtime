@@ -6,15 +6,17 @@ import {
   type RuntimeSessionPlanMode,
   type RuntimeSessionPlanModeExitDecision,
 } from "@/lib/runtime-api";
+import { buildRuntimeEventReloadKey } from "@/hooks/workspace/use-runtime-checkpoints";
 
 type UseRuntimePlanModeOptions = {
   lastRuntimeEventType?: string;
+  runtimeEventCount?: number;
   sessionId?: string;
 };
 
 type ShouldReloadRuntimePlanModeOptions = {
-  hasPlan: boolean;
-  lastHandledEventType?: string;
+  lastHandledEventKey?: string;
+  lastRuntimeEventKey?: string;
   lastRuntimeEventType?: string;
   loadedPlanSessionId: string;
   sessionId?: string;
@@ -30,8 +32,8 @@ const PLAN_MODE_RELOAD_EVENTS = new Set([
 ]);
 
 export function shouldReloadRuntimePlanMode({
-  hasPlan,
-  lastHandledEventType,
+  lastHandledEventKey,
+  lastRuntimeEventKey,
   lastRuntimeEventType,
   loadedPlanSessionId,
   sessionId,
@@ -40,15 +42,13 @@ export function shouldReloadRuntimePlanMode({
     return false;
   }
 
+  // Session switch always reloads once; after a successful load we stop looping
+  // even when the plan payload is null/unavailable.
   if (loadedPlanSessionId !== sessionId) {
     return true;
   }
 
-  if (!hasPlan) {
-    return true;
-  }
-
-  if (!lastRuntimeEventType) {
+  if (!lastRuntimeEventType || !lastRuntimeEventKey) {
     return false;
   }
 
@@ -56,7 +56,7 @@ export function shouldReloadRuntimePlanMode({
     return false;
   }
 
-  return lastRuntimeEventType !== lastHandledEventType;
+  return lastRuntimeEventKey !== lastHandledEventKey;
 }
 
 export function formatPlanModeStatusLabel(plan: RuntimeSessionPlanMode | null) {
@@ -78,6 +78,7 @@ export function canSubmitPlanModeDecision(plan: RuntimeSessionPlanMode | null) {
 
 export function useRuntimePlanMode({
   lastRuntimeEventType,
+  runtimeEventCount,
   sessionId,
 }: UseRuntimePlanModeOptions) {
   const [plan, setPlan] = useState<RuntimeSessionPlanMode | null>(null);
@@ -85,15 +86,19 @@ export function useRuntimePlanMode({
   const [planLoading, setPlanLoading] = useState(false);
   const [planActionPending, setPlanActionPending] = useState(false);
   const [loadedPlanSessionId, setLoadedPlanSessionId] = useState("");
-  const [lastHandledEventType, setLastHandledEventType] = useState<string | undefined>();
+  const [lastHandledEventKey, setLastHandledEventKey] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
+  const lastRuntimeEventKey = buildRuntimeEventReloadKey(
+    lastRuntimeEventType,
+    runtimeEventCount,
+  );
 
   const reloadPlan = useCallback(async () => {
     if (!sessionId) {
       setPlan(null);
       setPlanError(null);
       setLoadedPlanSessionId("");
-      setLastHandledEventType(undefined);
+      setLastHandledEventKey("");
       setNotesDraft("");
       return;
     }
@@ -105,21 +110,24 @@ export function useRuntimePlanMode({
       const response = await getSessionPlanMode(sessionId);
       setPlan(response);
       setLoadedPlanSessionId(sessionId);
-      setLastHandledEventType(lastRuntimeEventType);
+      setLastHandledEventKey(lastRuntimeEventKey);
       setNotesDraft(response.notes ?? "");
     } catch (error) {
       setPlan(null);
       setPlanError(error instanceof Error ? error.message : "failed to load plan mode");
+      // Mark session as loaded even on error so we do not hammer the API in a loop.
+      setLoadedPlanSessionId(sessionId);
+      setLastHandledEventKey(lastRuntimeEventKey);
     } finally {
       setPlanLoading(false);
     }
-  }, [lastRuntimeEventType, sessionId]);
+  }, [lastRuntimeEventKey, sessionId]);
 
   useEffect(() => {
     if (
       !shouldReloadRuntimePlanMode({
-        hasPlan: plan !== null,
-        lastHandledEventType,
+        lastHandledEventKey,
+        lastRuntimeEventKey,
         lastRuntimeEventType,
         loadedPlanSessionId,
         sessionId,
@@ -136,7 +144,7 @@ export function useRuntimePlanMode({
           setPlan(null);
           setPlanError(null);
           setLoadedPlanSessionId("");
-          setLastHandledEventType(undefined);
+          setLastHandledEventKey("");
           setNotesDraft("");
         }
         return;
@@ -152,7 +160,7 @@ export function useRuntimePlanMode({
         }
         setPlan(response);
         setLoadedPlanSessionId(sessionId);
-        setLastHandledEventType(lastRuntimeEventType);
+        setLastHandledEventKey(lastRuntimeEventKey);
         setNotesDraft((current) =>
           current.trim().length > 0 ? current : (response.notes ?? ""),
         );
@@ -164,6 +172,8 @@ export function useRuntimePlanMode({
         setPlanError(
           error instanceof Error ? error.message : "failed to load plan mode",
         );
+        setLoadedPlanSessionId(sessionId);
+        setLastHandledEventKey(lastRuntimeEventKey);
       } finally {
         if (!cancelled) {
           setPlanLoading(false);
@@ -175,10 +185,10 @@ export function useRuntimePlanMode({
       cancelled = true;
     };
   }, [
-    lastHandledEventType,
+    lastHandledEventKey,
+    lastRuntimeEventKey,
     lastRuntimeEventType,
     loadedPlanSessionId,
-    plan,
     sessionId,
   ]);
 

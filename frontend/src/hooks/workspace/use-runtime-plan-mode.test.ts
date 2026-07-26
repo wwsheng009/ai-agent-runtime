@@ -5,6 +5,7 @@ import {
   formatPlanModeStatusLabel,
   shouldReloadRuntimePlanMode,
 } from "@/hooks/workspace/use-runtime-plan-mode";
+import { buildRuntimeEventReloadKey } from "@/hooks/workspace/use-runtime-checkpoints";
 import type { RuntimeSessionPlanMode } from "@/lib/runtime-api";
 
 function buildPlan(
@@ -22,10 +23,9 @@ function buildPlan(
 }
 
 describe("useRuntimePlanMode helpers", () => {
-  it("reloads when the session changes or plan data is missing", () => {
+  it("reloads when the session changes, not merely because plan is null", () => {
     expect(
       shouldReloadRuntimePlanMode({
-        hasPlan: false,
         loadedPlanSessionId: "",
         sessionId: "session-1",
       }),
@@ -33,7 +33,6 @@ describe("useRuntimePlanMode helpers", () => {
 
     expect(
       shouldReloadRuntimePlanMode({
-        hasPlan: true,
         loadedPlanSessionId: "session-1",
         sessionId: "session-1",
       }),
@@ -41,18 +40,20 @@ describe("useRuntimePlanMode helpers", () => {
 
     expect(
       shouldReloadRuntimePlanMode({
-        hasPlan: true,
         loadedPlanSessionId: "session-1",
         sessionId: "session-2",
       }),
     ).toBe(true);
   });
 
-  it("reloads on new plan-related runtime events only once", () => {
+  it("reloads on new plan-related runtime events only once per event key", () => {
+    const firstKey = buildRuntimeEventReloadKey("tool.completed", 1);
+    const secondKey = buildRuntimeEventReloadKey("tool.completed", 2);
+
     expect(
       shouldReloadRuntimePlanMode({
-        hasPlan: true,
-        lastHandledEventType: undefined,
+        lastHandledEventKey: "",
+        lastRuntimeEventKey: firstKey,
         lastRuntimeEventType: "tool.completed",
         loadedPlanSessionId: "session-1",
         sessionId: "session-1",
@@ -61,8 +62,8 @@ describe("useRuntimePlanMode helpers", () => {
 
     expect(
       shouldReloadRuntimePlanMode({
-        hasPlan: true,
-        lastHandledEventType: "tool.completed",
+        lastHandledEventKey: firstKey,
+        lastRuntimeEventKey: firstKey,
         lastRuntimeEventType: "tool.completed",
         loadedPlanSessionId: "session-1",
         sessionId: "session-1",
@@ -71,8 +72,18 @@ describe("useRuntimePlanMode helpers", () => {
 
     expect(
       shouldReloadRuntimePlanMode({
-        hasPlan: true,
-        lastHandledEventType: "tool.completed",
+        lastHandledEventKey: firstKey,
+        lastRuntimeEventKey: secondKey,
+        lastRuntimeEventType: "tool.completed",
+        loadedPlanSessionId: "session-1",
+        sessionId: "session-1",
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldReloadRuntimePlanMode({
+        lastHandledEventKey: firstKey,
+        lastRuntimeEventKey: buildRuntimeEventReloadKey("checkpoint_created", 3),
         lastRuntimeEventType: "checkpoint_created",
         loadedPlanSessionId: "session-1",
         sessionId: "session-1",
