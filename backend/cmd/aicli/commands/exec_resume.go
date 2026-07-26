@@ -92,6 +92,8 @@ func buildExecSessionWithResume(cfg *config.Config, opts *ExecOptions, processor
 	chatOpts.ResumeFlag = opts.ResumeArgs.Last
 	chatOpts.SessionIDFlag = opts.ResumeArgs.SessionID
 	chatOpts.SessionFeaturesRequested = true
+	// Headless resume: resolve folder trust before profile/plugin discovery.
+	ensureProcessFolderTrust(chatOpts.TrustGrant, false)
 
 	profileState, err := resolveChatProfileState(cfg, chatOpts)
 	if err != nil {

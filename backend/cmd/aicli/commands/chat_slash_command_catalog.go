@@ -456,6 +456,17 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/trust",
+			Usage:       "/trust [status|grant]",
+			Summary:     "查看或授予当前工作区 folder trust（项目 plugins/hooks/MCP）",
+			Group:       string(chatSlashCommandGroupPermission),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "查看 folder trust 状态"},
+				{Token: "grant", Summary: "信任当前工作区并写入 durable store"},
+			},
+		},
+		{
 			Name:        "/plan",
 			Usage:       "/plan [status|enter [path]|exit <approve|request_changes|quit>]",
 			Summary:     "进入/退出 plan mode，或查看计划写路径状态",

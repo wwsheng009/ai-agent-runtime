@@ -18,12 +18,19 @@ func ClearPluginCatalogCache() {}
 // discoverRuntimePluginCatalog loads the local plugin catalog with trust state applied.
 // Failures return (nil, err); callers should fail open (keep base dirs) so missing
 // plugins never break default multi-agent/skills behavior.
+//
+// When folder trust blocks project scope, project plugin roots (.aicli/plugins,
+// .agents/plugins) are skipped; user-home plugins remain available.
 func discoverRuntimePluginCatalog() (*plugins.Catalog, error) {
 	opts := plugins.DiscoverOptions{
 		State: plugins.NewStateStore(""),
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		opts.ProjectRoot = cwd
+	if projectScopeAllowed() {
+		if cwd, err := os.Getwd(); err == nil {
+			opts.ProjectRoot = cwd
+		}
+	} else {
+		opts.SkipProjectRoot = true
 	}
 	return plugins.Discover(opts)
 }

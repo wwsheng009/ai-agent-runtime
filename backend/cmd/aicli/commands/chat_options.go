@@ -43,6 +43,8 @@ type chatCommandOptions struct {
 	// (--allow-tool / --deny-tool). Applied after profile tool policy.
 	CLIAllowTools            []string
 	CLIDenyTools             []string
+	// TrustGrant is CLI --trust: durable grant of the current workspace before decide.
+	TrustGrant               bool
 	ApprovalReuseMode        chatApprovalReuseMode
 	JSONOutput               bool
 	OutputFlag               string
@@ -103,6 +105,10 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	approvalReuseFlag, _ := cmd.Flags().GetString("approval-reuse")
 	cliAllowTools, _ := cmd.Flags().GetStringSlice("allow-tool")
 	cliDenyTools, _ := cmd.Flags().GetStringSlice("deny-tool")
+	trustGrant := false
+	if cmd.Flags().Lookup("trust") != nil {
+		trustGrant, _ = cmd.Flags().GetBool("trust")
+	}
 	yoloFlag, _ := cmd.Flags().GetBool("yolo")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	outputFlag, _ := cmd.Flags().GetString("output")
@@ -177,6 +183,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		PermissionModeChanged:  cmd.Flags().Changed("permission-mode") || yoloFlag,
 		CLIAllowTools:          append([]string(nil), cliAllowTools...),
 		CLIDenyTools:           append([]string(nil), cliDenyTools...),
+		TrustGrant:             trustGrant,
 		ApprovalReuseMode:      approvalReuseMode,
 		JSONOutput:             jsonOutput,
 		OutputFlag:             outputFlag,

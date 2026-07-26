@@ -47,6 +47,8 @@ type ExecOptions struct {
 	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool product surface.
 	CLIAllowTools  []string
 	CLIDenyTools   []string
+	// TrustGrant is CLI --trust for folder trust durable grant (R2).
+	TrustGrant bool
 
 	DisableTools   bool
 	EnableTools    bool

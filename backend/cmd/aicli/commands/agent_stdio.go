@@ -302,6 +302,8 @@ func (h *acpSessionHost) bootstrapSessionLocked(ctx context.Context) (*acpHostSe
 	chatOpts.InputReader = nil
 	chatOpts.NoInteractive = true
 	chatOpts.JSONOutput = false
+	// Headless ACP: resolve folder trust before profile/plugin discovery.
+	ensureProcessFolderTrust(chatOpts.TrustGrant, false)
 
 	profileState, err := resolveChatProfileState(h.cfg, chatOpts)
 	if err != nil {

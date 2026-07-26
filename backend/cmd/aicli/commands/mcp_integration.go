@@ -9,6 +9,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
@@ -112,6 +113,15 @@ func resolveChatMCPStartupConfigPath(cfg *config.Config, session *ChatSession) (
 	configPath := strings.TrimSpace(resolveChatMCPConfigPath(cfg, session))
 	if configPath == "" {
 		return "", false
+	}
+
+	// Folder trust (R2): block project-scoped MCP configs when untrusted.
+	// User-global (~/.aicli, ~/.config/aicli) paths remain allowed.
+	if !sessionProjectScopeAllowed(session) {
+		projectRoot := folderTrustProjectRoot(session)
+		if foldertrust.IsProjectScopedPath(configPath, projectRoot) {
+			return "", false
+		}
 	}
 
 	if _, err := os.Stat(configPath); err == nil {

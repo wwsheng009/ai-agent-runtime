@@ -23,6 +23,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -133,6 +134,8 @@ type ChatSession struct {
 	CLIDenyTools                    []string
 	// PermissionsOverlay is the merged project file + CLI permission product surface.
 	PermissionsOverlay              runtimepolicy.PermissionsOverlay
+	// FolderTrust is the workspace trust resolution for project-scope plugins/hooks/MCP (R2).
+	FolderTrust                     foldertrust.Resolution
 	ApprovalReuseMode               chatApprovalReuseMode              // local actor/team approval reuse policy
 	ActiveTeam                      *chatTeamBinding                   // ambient team binding across turns
 	SelectedAgentTarget             string                             // explicit /agents target used by /agents send/followup
@@ -317,6 +320,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		exitCommandError("chat", "json", err, nil)
 	}
 	startupTiming.mark("parse_options")
+
+	// Resolve folder trust before profile/plugin discovery so project-scope
+	// plugins/hooks/MCP are gated consistently for this process.
+	ensureProcessFolderTrust(opts.TrustGrant, !opts.NoInteractive)
 
 	if restoreLogger := suppressChatConsoleLogger(cfg, opts); restoreLogger != nil {
 		defer restoreLogger()

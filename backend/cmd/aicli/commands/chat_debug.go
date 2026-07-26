@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -127,6 +128,7 @@ func printChatDebugPermissions(session *ChatSession) {
 	if len(session.CLIDenyTools) > 0 {
 		printChatSessionMetaRow("CLI Deny Tools:", strings.Join(session.CLIDenyTools, ", "))
 	}
+	printChatDebugFolderTrust(session)
 	if len(overlay.Rules) == 0 {
 		return
 	}
@@ -139,6 +141,16 @@ func printChatDebugPermissions(session *ChatSession) {
 		names = append(names, name)
 	}
 	printChatSessionMetaRow("Permission Rule Names:", strings.Join(names, ", "))
+}
+
+func printChatDebugFolderTrust(session *ChatSession) {
+	var res foldertrust.Resolution
+	if session != nil && (session.FolderTrust.WorkspaceKey != "" || session.FolderTrust.FeatureEnabled || session.FolderTrust.Source != "") {
+		res = session.FolderTrust
+	} else {
+		res = currentFolderTrust()
+	}
+	printChatSessionMetaRow("Folder Trust:", chatDebugValueOrNone(foldertrust.FormatSummary(res)))
 }
 
 func printChatDebugRoutingSummary(session *ChatSession) {

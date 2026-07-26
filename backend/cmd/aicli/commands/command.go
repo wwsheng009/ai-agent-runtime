@@ -183,6 +183,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
 		return handlePermissionModeCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/trust") {
+		return handleTrustCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/plan") {
 		return handlePlanCommand(session, command)
 	}

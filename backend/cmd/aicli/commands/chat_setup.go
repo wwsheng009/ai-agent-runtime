@@ -159,6 +159,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	// when local runtime host resolves an absolute root; cwd is the bootstrap root.
 	applyChatPermissionsOverlay(session, "")
 
+	// Folder trust (R2): attach process-level resolution (resolved early in HandleChat/exec).
+	applyChatFolderTrust(session, currentFolderTrust())
+
 	cleanup := func() {
 		mcpmanager.SetStatusOutput(os.Stdout)
 		if session.TitleNotifier != nil {

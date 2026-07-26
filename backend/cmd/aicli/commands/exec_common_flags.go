@@ -50,6 +50,7 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.String("permission-mode", "default", "权限模式（default|accept_edits|plan|bypass_permissions）")
 	flags.StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
 	flags.StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
+	flags.Bool("trust", false, "信任当前工作区并允许项目级 plugins/hooks/MCP（写入 durable store；需 AICLI_FOLDER_TRUST=1）")
 	flags.String("approval-reuse", "session_readonly_shell", "审批复用策略（off|session_readonly_shell|team_readonly_shell）")
 	flags.Bool("yolo", false, "快捷模式：等价于 --permission-mode bypass_permissions")
 

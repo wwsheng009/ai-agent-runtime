@@ -16,6 +16,9 @@ import (
 type DiscoverOptions struct {
 	// ProjectRoot defaults to cwd.
 	ProjectRoot string
+	// SkipProjectRoot skips .aicli/plugins and .agents/plugins under ProjectRoot.
+	// Used by folder-trust gating when the workspace is untrusted.
+	SkipProjectRoot bool
 	// UserHome overrides home for ~/.aicli/plugins.
 	UserHome string
 	// PluginsHome overrides the user plugins install root.
@@ -149,12 +152,12 @@ func Discover(opts DiscoverOptions) (*Catalog, error) {
 	}
 
 	projectRoot := strings.TrimSpace(opts.ProjectRoot)
-	if projectRoot == "" {
+	if projectRoot == "" && !opts.SkipProjectRoot {
 		if cwd, err := os.Getwd(); err == nil {
 			projectRoot = cwd
 		}
 	}
-	if projectRoot != "" {
+	if projectRoot != "" && !opts.SkipProjectRoot {
 		for _, rel := range []string{
 			filepath.Join(".aicli", "plugins"),
 			filepath.Join(".agents", "plugins"),

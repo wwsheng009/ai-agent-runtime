@@ -165,6 +165,9 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 	cliDenyTools, _ := cmd.Flags().GetStringSlice("deny-tool")
 	opts.CLIAllowTools = append([]string(nil), cliAllowTools...)
 	opts.CLIDenyTools = append([]string(nil), cliDenyTools...)
+	if cmd.Flags().Lookup("trust") != nil {
+		opts.TrustGrant, _ = cmd.Flags().GetBool("trust")
+	}
 
 	opts.DisableTools, _ = cmd.Flags().GetBool("disable-tools")
 	opts.EnableTools, _ = cmd.Flags().GetBool("enable-tools")
@@ -253,6 +256,8 @@ func buildExecSession(cfg *config.Config, opts *ExecOptions, processor ExecEvent
 	opts.RuntimeMode = runtimeMode
 	opts.RuntimeServerURL = runtimeServerURL
 	chatOpts := buildExecChatOptions(opts)
+	// Headless exec: resolve folder trust before profile/plugin discovery.
+	ensureProcessFolderTrust(chatOpts.TrustGrant, false)
 	profileState, err := resolveChatProfileState(cfg, chatOpts)
 	if err != nil {
 		return nil, nil, newExecExitError(execExitUsage, "PROFILE_FAILED", err)
@@ -329,6 +334,7 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		PermissionMode:         opts.PermissionMode,
 		CLIAllowTools:          append([]string(nil), opts.CLIAllowTools...),
 		CLIDenyTools:           append([]string(nil), opts.CLIDenyTools...),
+		TrustGrant:             opts.TrustGrant,
 		ApprovalReuseMode:      opts.ApprovalReuse,
 		JSONOutput:             false,
 		OutputFlag:             opts.OutputFormat,
