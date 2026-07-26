@@ -439,6 +439,10 @@ func (t *OpenAIImageGenerateTool) DefinitionMetadata() map[string]interface{} {
 			string(imageGeneratePathAPI),
 			string(imageGeneratePathCodexNative),
 		},
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindNetwork,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       false,
+		runtimetypes.ToolMetadataRequiresNetKey:     true,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }

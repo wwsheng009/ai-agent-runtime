@@ -10,6 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
 )
@@ -828,6 +829,54 @@ func TestManager_Build_IncludesWorkspaceRecall(t *testing.T) {
 	}
 	if got := result.Metadata["workspace_summary"]; got != "workspace summary" {
 		t.Fatalf("expected workspace_summary metadata, got %v", got)
+	}
+}
+
+func TestManager_Build_IncludesProjectMemory(t *testing.T) {
+	root := t.TempDir()
+	store, err := memorystore.New(memorystore.Config{Root: root})
+	require.NoError(t, err)
+
+	_, err = store.Append(memorystore.AppendNoteOptions{
+		Text:   "Prefer worktree isolation for parallel agents",
+		Tags:   []string{"isolation", "worktree"},
+		Source: "manual",
+	})
+	require.NoError(t, err)
+
+	manager := NewManager(DefaultBudget(), nil)
+	manager.ProjectMemory = store
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-project-memory",
+		Goal:      "worktree isolation parallel agents",
+		History: []types.Message{
+			*types.NewSystemMessage("system prompt"),
+			*types.NewUserMessage("worktree isolation parallel agents"),
+		},
+	})
+
+	var found bool
+	for _, message := range result.Messages {
+		if message.Metadata.GetString("context_stage", "") == "project_memory" {
+			found = true
+			if !strings.Contains(message.Content, "Project durable memory") {
+				t.Fatalf("expected project memory header, got %q", message.Content)
+			}
+			if !strings.Contains(message.Content, "worktree isolation") {
+				t.Fatalf("expected note body in project memory, got %q", message.Content)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected project memory message to be injected")
+	}
+	if got := result.Metadata["project_memory_injected"]; got != true {
+		t.Fatalf("expected project_memory_injected metadata, got %v", got)
+	}
+	if got := result.Metadata["project_memory_count"]; got != 1 {
+		t.Fatalf("expected project_memory_count=1, got %v", got)
 	}
 }
 

@@ -20,10 +20,12 @@ export {
   getRuntimeSession,
   getSessionHistory,
   getSessionCheckpointFiles,
+  getSessionPlanMode,
   listRuntimeSessionUsers,
   listRuntimeSessions,
   listSessionCheckpoints,
   previewSessionCheckpoint,
+  updateSessionPlanMode,
 } from "./sessions";
 export {
   ackRuntimeTeamMailboxMessage,

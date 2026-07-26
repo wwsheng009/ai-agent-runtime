@@ -87,3 +87,17 @@ func valueOrZeroEventsSeq(result *AgentEventsResult) int64 {
 	}
 	return result.LatestSeq
 }
+
+func valueOrEmptyWorktreeAction(result *AgentWorktreeResult) string {
+	if result == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Action)
+}
+
+func valueOrEmptyWorktreePath(result *AgentWorktreeResult) string {
+	if result == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.WorktreePath)
+}

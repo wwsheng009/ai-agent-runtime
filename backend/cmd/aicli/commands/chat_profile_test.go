@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -87,6 +88,15 @@ sandbox:
 	if state.ToolPolicy == nil || !state.ToolPolicy.ReadOnly {
 		t.Fatalf("expected read-only tool policy, got %#v", state.ToolPolicy)
 	}
+	if state.AgentSource != "profile" {
+		t.Fatalf("expected profile agent source, got %q", state.AgentSource)
+	}
+	if strings.TrimSpace(state.AgentSourcePath) == "" {
+		t.Fatal("expected profile agent source path (agent config or agent dir)")
+	}
+	if !strings.Contains(state.AgentSourcePath, filepath.Join("agents", "coder")) {
+		t.Fatalf("expected agent source path under agents/coder, got %q", state.AgentSourcePath)
+	}
 	if err := state.ToolPolicy.AllowTool("read_file"); err != nil {
 		t.Fatalf("expected read_file to be allowed, got %v", err)
 	}
@@ -107,6 +117,72 @@ sandbox:
 	}
 	if !opts.SessionFeaturesRequested {
 		t.Fatal("expected session features requested to be enabled for profile mode")
+	}
+}
+
+func TestResolveChatProfileState_AgentWithoutProfileUsesAgentdef(t *testing.T) {
+	state, err := resolveChatProfileState(nil, &chatCommandOptions{AgentFlag: "explore"})
+	if err != nil {
+		t.Fatalf("resolveChatProfileState: %v", err)
+	}
+	if !state.Active() {
+		t.Fatal("expected active agentdef state")
+	}
+	if state.Resolved.ProfileName != "agentdef" || state.Resolved.AgentID != "explore" {
+		t.Fatalf("unexpected resolved agent: %+v", state.Resolved)
+	}
+	if state.Reference != "agentdef:explore" {
+		t.Fatalf("unexpected reference: %q", state.Reference)
+	}
+	if strings.TrimSpace(state.AgentSourcePath) == "" {
+		t.Fatal("expected agent source path from agentdef resolve")
+	}
+	if state.AgentSource != "builtin" && state.AgentSource != "project" {
+		t.Fatalf("expected builtin or project agent source, got %q", state.AgentSource)
+	}
+	if !strings.Contains(state.PromptText, "read-only") && !strings.Contains(strings.ToLower(state.PromptText), "explorer") {
+		t.Fatalf("expected explorer role prompt, got:\n%s", state.PromptText)
+	}
+	if state.ToolPolicy == nil || !state.ToolPolicy.ReadOnly {
+		t.Fatalf("expected read-only explore tool policy, got %#v", state.ToolPolicy)
+	}
+	if err := state.ToolPolicy.AllowTool("view"); err != nil {
+		t.Fatalf("expected view allowed: %v", err)
+	}
+	if err := state.ToolPolicy.AllowTool("write"); err == nil {
+		t.Fatal("expected write blocked by explore denylist/read-only")
+	}
+	if state.PermissionMode != runtimepolicy.ModePlan {
+		t.Fatalf("expected plan permission mode from explore, got %q", state.PermissionMode)
+	}
+
+	opts := &chatCommandOptions{PermissionMode: runtimepolicy.ModeDefault}
+	applyProfileDefaultsToChatOptions(opts, state)
+	if opts.PermissionMode != runtimepolicy.ModePlan {
+		t.Fatalf("expected agentdef permission mode applied, got %q", opts.PermissionMode)
+	}
+	if !opts.SessionFeaturesRequested {
+		t.Fatal("expected session features requested for agentdef mode")
+	}
+
+	// Explicit CLI permission mode wins.
+	optsExplicit := &chatCommandOptions{
+		PermissionMode:        runtimepolicy.ModeBypassPermissions,
+		PermissionModeChanged: true,
+	}
+	applyProfileDefaultsToChatOptions(optsExplicit, state)
+	if optsExplicit.PermissionMode != runtimepolicy.ModeBypassPermissions {
+		t.Fatalf("expected explicit permission mode preserved, got %q", optsExplicit.PermissionMode)
+	}
+}
+
+func TestResolveChatProfileState_UnknownAgentWithoutProfileErrors(t *testing.T) {
+	_, err := resolveChatProfileState(nil, &chatCommandOptions{AgentFlag: "does-not-exist-agent"})
+	if err == nil {
+		t.Fatal("expected unknown agent to fail")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

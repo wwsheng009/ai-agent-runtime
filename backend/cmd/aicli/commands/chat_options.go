@@ -38,6 +38,7 @@ type chatCommandOptions struct {
 	CLISkillsMode            string
 	CLISkillsDebug           bool
 	PermissionMode           runtimepolicy.Mode
+	PermissionModeChanged    bool
 	ApprovalReuseMode        chatApprovalReuseMode
 	JSONOutput               bool
 	OutputFlag               string
@@ -167,6 +168,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		CLISkillsMode:          cliSkillsMode,
 		CLISkillsDebug:         cliSkillsDebug,
 		PermissionMode:         permissionMode,
+		PermissionModeChanged:  cmd.Flags().Changed("permission-mode") || yoloFlag,
 		ApprovalReuseMode:      approvalReuseMode,
 		JSONOutput:             jsonOutput,
 		OutputFlag:             outputFlag,

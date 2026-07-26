@@ -112,7 +112,7 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 		teammateID = strings.TrimSpace(*req.Task.Assignee)
 	}
 
-	taskWriter := NewAgentControlTaskRegistry(services.Store)
+	taskWriter := NewAgentControlTaskRegistry(services.Store).WithClaims(services.Claims)
 	if _, err := taskWriter.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
 		ID:              taskID,
 		Workflow:        agentcontrol.WorkflowSpawnTeam,
@@ -124,9 +124,6 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 		SkipStateUpdate: req.SkipStateUpdate,
 	}); err != nil {
 		return nil, err
-	}
-	if services.Claims != nil {
-		_ = services.Claims.Release(ctx, taskID)
 	}
 
 	result := &TerminalTaskOutcomeResult{
@@ -307,7 +304,7 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	}
 	handoffTo := strings.TrimSpace(normalized.HandoffTo)
 
-	taskWriter := NewAgentControlTaskRegistry(services.Store)
+	taskWriter := NewAgentControlTaskRegistry(services.Store).WithClaims(services.Claims)
 	if _, err := taskWriter.BlockAgentControlTask(ctx, agentcontrol.TaskBlockRequest{
 		ID:              taskID,
 		Workflow:        agentcontrol.WorkflowSpawnTeam,
@@ -316,9 +313,6 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 		SkipStateUpdate: req.SkipStateUpdate,
 	}); err != nil {
 		return nil, err
-	}
-	if services.Claims != nil {
-		_ = services.Claims.Release(ctx, taskID)
 	}
 
 	result := &BlockedTaskOutcomeResult{

@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -86,6 +87,8 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	// without parsing summary text. Generic: driven by envelope metadata +
 	// toolresult.Diagnose, never tool-name special cases.
 	promoteToolDispositionToPayload(payload, result)
+	// Nested portable wire view for hosts that prefer toolprotocol.Result shape.
+	attachProtocolResultToPayload(payload, result)
 	mergeToolEventPayload(payload, extra)
 	return payload
 }
@@ -459,6 +462,37 @@ func promoteToolDispositionToPayload(payload map[string]interface{}, result tool
 			payload[toolresult.MetadataAttemptedArgsKey] = existing
 		}
 	}
+}
+
+// attachProtocolResultToPayload nests a compact toolprotocol.Result wire view
+// under "protocol_result". Flat disposition fields stay authoritative for
+// existing chat-log / offline analyzers; this is additive for SSE/hosts/ACP.
+func attachProtocolResultToPayload(payload map[string]interface{}, result toolExecutionResult) {
+	if payload == nil {
+		return
+	}
+	var metadata map[string]interface{}
+	if result.Envelope != nil {
+		metadata = result.Envelope.Metadata
+	}
+	toolName := firstNonEmptyToolRuntimeValue(result.Call.Name)
+	toolCallID := firstNonEmptyToolRuntimeValue(result.Call.ID)
+	if result.Envelope != nil {
+		if toolName == "" {
+			toolName = strings.TrimSpace(result.Envelope.ToolName)
+		}
+		if toolCallID == "" {
+			toolCallID = strings.TrimSpace(result.Envelope.ToolCallID)
+		}
+	}
+	// Truncate raw text for ResultFromParts summary/content derivation only;
+	// EventMap omits full content blocks so the nested object stays compact.
+	content := extractToolTextOutput(result.Output)
+	if len(content) > 4096 {
+		content = content[:4096]
+	}
+	wire := toolprotocol.ResultFromParts(toolName, toolCallID, content, result.Error, metadata)
+	payload["protocol_result"] = wire.EventMap()
 }
 
 func summarizeToolMetadata(metadata map[string]interface{}) string {

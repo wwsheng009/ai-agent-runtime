@@ -9,6 +9,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/factledger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
@@ -70,6 +71,11 @@ type WorkspaceContextBuilder interface {
 	Build(query string) *workspace.WorkspaceContext
 }
 
+// ProjectMemoryStore selects durable project notes for prompt injection.
+type ProjectMemoryStore interface {
+	SelectForInject(opts memorystore.InjectOptions) ([]memorystore.Note, error)
+}
+
 // LedgerStore 约束持久 ledger/checkpoint 所需的最小能力。
 type LedgerStore interface {
 	InsertMemoryEntry(ctx context.Context, entry artifact.MemoryEntry) (string, error)
@@ -95,6 +101,8 @@ type Budget struct {
 	KeepRecentMessages  int
 	MaxRecallResults    int
 	MaxObservationItems int
+	MaxProjectMemory    int
+	ProjectMemoryTokens int
 }
 
 // BuildInput 描述一次上下文装配请求。
@@ -156,15 +164,16 @@ type LayerPlan struct {
 
 // Manager 实现 P1 级别的 admission/compaction/recall。
 type Manager struct {
-	Budget      Budget
-	Strategy    Strategy
-	Artifact    ArtifactSearcher
-	Ledger      LedgerStore
-	Facts       *factledger.Ledger
-	TeamContext TeamContextBuilder
-	Workspace   WorkspaceContextBuilder
-	Events      runtimeevents.Publisher
-	Agent       string
+	Budget        Budget
+	Strategy      Strategy
+	Artifact      ArtifactSearcher
+	Ledger        LedgerStore
+	Facts         *factledger.Ledger
+	TeamContext   TeamContextBuilder
+	Workspace     WorkspaceContextBuilder
+	ProjectMemory ProjectMemoryStore
+	Events        runtimeevents.Publisher
+	Agent         string
 }
 
 // DefaultBudget 返回保守的默认预算。
@@ -175,6 +184,8 @@ func DefaultBudget() Budget {
 		KeepRecentMessages:  8,
 		MaxRecallResults:    3,
 		MaxObservationItems: 6,
+		MaxProjectMemory:    memorystore.DefaultInjectLimit,
+		ProjectMemoryTokens: memorystore.DefaultTokenBudget,
 	}
 }
 
@@ -187,6 +198,8 @@ func BudgetForProfile(profile string) Budget {
 			KeepRecentMessages:  5,
 			MaxRecallResults:    2,
 			MaxObservationItems: 4,
+			MaxProjectMemory:    3,
+			ProjectMemoryTokens: 400,
 		}
 	case BudgetProfileExtended:
 		return Budget{
@@ -195,6 +208,8 @@ func BudgetForProfile(profile string) Budget {
 			KeepRecentMessages:  12,
 			MaxRecallResults:    5,
 			MaxObservationItems: 8,
+			MaxProjectMemory:    8,
+			ProjectMemoryTokens: 900,
 		}
 	default:
 		return DefaultBudget()
@@ -217,6 +232,12 @@ func ResolveBudget(profile string, overrides Budget) Budget {
 	}
 	if overrides.MaxObservationItems > 0 {
 		budget.MaxObservationItems = overrides.MaxObservationItems
+	}
+	if overrides.MaxProjectMemory > 0 {
+		budget.MaxProjectMemory = overrides.MaxProjectMemory
+	}
+	if overrides.ProjectMemoryTokens > 0 {
+		budget.ProjectMemoryTokens = overrides.ProjectMemoryTokens
 	}
 	return budget
 }
@@ -321,7 +342,7 @@ func ResolvedLayerPlan(profile string, budget Budget, strategy Strategy) LayerPl
 		Cold: LayerSpec{
 			Name:        "cold",
 			Description: "Compacted ledger and recalled artifacts referenced by the hot layer.",
-			Sources:     []string{"decision_ledger", "artifact_recall"},
+			Sources:     []string{"decision_ledger", "artifact_recall", "project_memory"},
 			MaxItems:    resolvedBudget.MaxRecallResults,
 			Mode:        resolvedStrategy.CompactionMode + "+" + resolvedStrategy.RecallMode,
 		},
@@ -448,6 +469,13 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"recall_injected":  false,
 			"recall_count":     0,
 			"max_recall_items": budget.MaxRecallResults,
+		},
+		"project_memory": map[string]interface{}{
+			"injected":                   false,
+			"count":                      0,
+			"max_items":                  budget.MaxProjectMemory,
+			"token_budget":               budget.ProjectMemoryTokens,
+			"suppressed_for_active_turn": false,
 		},
 		"workspace": map[string]interface{}{
 			"injected":                   false,
@@ -638,6 +666,43 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			payload["source_refs"] = recallRefs
 		}
 		m.emitEvent("recall.performed", input.TraceID, input.SessionID, payload)
+	}
+
+	if activeTurnHasReplay {
+		if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
+			metrics["suppressed_for_active_turn"] = true
+		}
+	} else if m.ProjectMemory != nil {
+		notes, err := m.ProjectMemory.SelectForInject(memorystore.InjectOptions{
+			Query:       input.Goal,
+			Limit:       budget.MaxProjectMemory,
+			TokenBudget: budget.ProjectMemoryTokens,
+		})
+		if err != nil {
+			result.Metadata["project_memory_error"] = err.Error()
+			m.emitEvent("context.project_memory.failed", input.TraceID, input.SessionID, map[string]interface{}{
+				"task_id": input.TaskID,
+				"query":   input.Goal,
+				"error":   err.Error(),
+			})
+		} else if msg, noteIDs := buildProjectMemoryMessage(notes, budget.ProjectMemoryTokens); msg != nil {
+			managed = append(managed, *msg)
+			result.Metadata["project_memory_injected"] = true
+			result.Metadata["project_memory_count"] = len(noteIDs)
+			if len(noteIDs) > 0 {
+				result.Metadata["project_memory_ids"] = append([]string(nil), noteIDs...)
+			}
+			if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
+				metrics["injected"] = true
+				metrics["count"] = len(noteIDs)
+			}
+			m.emitEvent("context.project_memory.injected", input.TraceID, input.SessionID, map[string]interface{}{
+				"task_id": input.TaskID,
+				"query":   input.Goal,
+				"count":   len(noteIDs),
+				"ids":     noteIDs,
+			})
+		}
 	}
 
 	if activeTurnHasReplay {
@@ -1684,7 +1749,7 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 			// never reorders them in front of conversation turns.
 			case "ledger", "correction", "profile", "compaction":
 				stableMessages = append(stableMessages, *message.Clone())
-			case "fact_ledger", "workspace", "team", "recall", "warm_memory", "observation", "todo_state":
+			case "fact_ledger", "workspace", "team", "recall", "warm_memory", "observation", "todo_state", "project_memory":
 				dynamicMessages = append(dynamicMessages, *message.Clone())
 			default:
 				dynamicMessages = append(dynamicMessages, *message.Clone())
@@ -1727,6 +1792,32 @@ func (m *Manager) emitEvent(eventType, traceID, sessionID string, payload map[st
 		SessionID: sessionID,
 		Payload:   payload,
 	})
+}
+
+func buildProjectMemoryMessage(notes []memorystore.Note, tokenBudget int) (*types.Message, []string) {
+	if len(notes) == 0 {
+		return nil, nil
+	}
+	content := strings.TrimSpace(memorystore.FormatNotes(notes, tokenBudget))
+	if content == "" {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(notes))
+	for _, note := range notes {
+		if id := strings.TrimSpace(note.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	message := types.NewAssistantMessage(content)
+	if message.Metadata == nil {
+		message.Metadata = types.Metadata{}
+	}
+	message.Metadata["context_stage"] = "project_memory"
+	message.Metadata["project_memory_count"] = len(notes)
+	if len(ids) > 0 {
+		message.Metadata["project_memory_ids"] = append([]string(nil), ids...)
+	}
+	return message, ids
 }
 
 func buildWorkspaceMessage(ctx *workspace.WorkspaceContext) (*types.Message, string) {

@@ -26,6 +26,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -88,6 +89,7 @@ type ChatSession struct {
 	turnPrimed                      bool                               // 当前用户 turn 已在 sendMessage 入口计数，等待首个 request scope 消费
 	SessionManager                  *runtimechat.SessionManager        // 持久化会话管理器
 	RuntimeSession                  *runtimechat.Session               // 当前持久化会话
+	runtimeSessionUnpersisted       bool                               // 新会话仅在内存中，尚未写入 session store
 	SessionUserID                   string                             // 当前会话所属用户
 	SessionDir                      string                             // 会话存储目录
 	Ephemeral                       bool                               // 会话仅驻留内存，不写入会话文件
@@ -111,6 +113,11 @@ type ChatSession struct {
 	ProfileName                     string                             // 当前 profile 名称
 	ProfileAgent                    string                             // 当前 profile agent
 	ProfileRoot                     string                             // 当前 profile 根目录
+	// AgentSourcePath is the winning agentdef/profile agent config path
+	// (or builtin:<name>) that produced the active role binding.
+	AgentSourcePath string
+	// AgentSource classifies discovery origin: builtin|user|project|profile.
+	AgentSource string
 	SystemPromptText                string                             // 组合后的系统提示
 	RuntimeConfigPath               string                             // 解析后的 runtime 配置路径
 	MCPConfigPath                   string                             // 解析后的 MCP 配置路径
@@ -122,7 +129,7 @@ type ChatSession struct {
 	ActiveTeam                      *chatTeamBinding                   // ambient team binding across turns
 	SelectedAgentTarget             string                             // explicit /agents target used by /agents send/followup
 	RuntimeEventBridge              *chatRuntimeEventBridge            // actor runtime event bridge
-	ExecEventBridge                 *execEventBridge                   // optional headless exec event bridge
+	ExecEventBridge                 headlessEventBridge                // optional headless exec/ACP event bridge
 	ActorFirstReady                 bool                               // actor-first executor established for this session
 	ChatExecutor                    aicliChatExecutor                  // 当前会话的统一 turn executor
 	LocalRuntimeHost                *localChatRuntimeHost              // actor-first local runtime host
@@ -290,20 +297,33 @@ const (
 
 // HandleChat 处理 chat 命令
 func HandleChat(cmd *cobra.Command, cfg *config.Config) {
+	startupTiming := newChatStartupTiming()
+	activeChatStartupTiming = startupTiming
+	defer func() {
+		activeChatStartupTiming = nil
+	}()
+	startupTiming.mark("begin")
+
 	opts, err := parseChatCommandOptions(cmd, cfg)
 	if err != nil {
 		exitCommandError("chat", "json", err, nil)
 	}
+	startupTiming.mark("parse_options")
 
 	if restoreLogger := suppressChatConsoleLogger(cfg, opts); restoreLogger != nil {
 		defer restoreLogger()
 	}
+
+	// Warm PATH/health capability cache off the critical path so the first
+	// system-prompt freeze is usually a memory/disk hit instead of a cold probe.
+	runtimeprompt.WarmEnvironmentCapabilitiesAsync()
 
 	profileState, err := resolveChatProfileState(cfg, opts)
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
 	applyProfileDefaultsToChatOptions(opts, profileState)
+	startupTiming.mark("profile")
 
 	persistenceState, err := prepareChatPersistence(cfg, opts, profileState)
 	if err != nil {
@@ -312,6 +332,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	if persistenceState.runtimeSessionManager != nil {
 		defer persistenceState.runtimeSessionManager.Stop()
 	}
+	startupTiming.mark("persistence")
 
 	if opts.ListSessionsFlag {
 		if err := printChatSessionSummaries(persistenceState.runtimeSessionManager, persistenceState.sessionUserID, "", opts.SessionFilter); err != nil {
@@ -335,11 +356,13 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, details)
 	}
+	startupTiming.mark("runtime_state")
 
 	session, cleanupSession, err := bootstrapChatSession(cfg, opts, profileState, persistenceState, runtimeState)
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
+	startupTiming.mark("bootstrap")
 	persistChatStartupPreferences(cfg, opts, persistenceState.loadedRuntimeSession, runtimeState)
 	finalCleanup := buildChatFinalCleanup(session, cleanupSession)
 	registerExitCleanup(finalCleanup)
@@ -353,6 +376,8 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 			printVisibleChatHistory(session, "已加载历史会话")
 		}
 	}
+	startupTiming.mark("ready")
+	startupTiming.flush(opts)
 
 	// 开始聊天循环
 	runChatLoop(session, opts.NoInteractive, opts.Message)
@@ -371,13 +396,12 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 		return resolved
 	}
 
-	runtimeManager := runtimecfg.NewRuntimeManager(configPath)
-	if err := runtimeManager.Load(); err != nil {
+	resolved, _, err := loadCachedRuntimeConfig(configPath)
+	if err != nil || resolved == nil {
 		fmt.Fprintf(os.Stderr, "Warning: 加载 runtime tools 配置失败，已退回默认 sandbox 配置: %v\n", err)
 		logpkg.Warnf("AICLI runtime tools config load failed: %v", err)
 		return runtimecfg.DefaultRuntimeConfig()
 	}
-	resolved := runtimeManager.Get()
 	if session != nil && session.ToolPolicy != nil && session.ToolPolicy.Sandbox != nil {
 		runtimeexecutor.OverlaySandboxConfig(&resolved.Sandbox, session.ToolPolicy.Sandbox.Config())
 	}
@@ -609,6 +633,9 @@ func printSessionInfo(session *ChatSession) {
 		}
 		printChatSessionMetaRow("Profile:", profileValue)
 	}
+	if line := formatChatAgentSourceLine(session); line != "" {
+		printChatSessionMetaRow("Agent Source:", line)
+	}
 	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
 		printChatSessionMetaRow("Reasoning Effort:", reasoningEffort)
 	}
@@ -668,6 +695,29 @@ func printChatSessionMetaRow(label, value string) {
 	}
 	theme := ui.GetTheme(ui.ThemeAuto)
 	fmt.Printf("%-*s %s\n", chatSessionMetaLabelWidth, theme.ColorizeLabel(label), theme.ColorizeSecondary(value))
+}
+
+// formatChatAgentSourceLine renders "source · path" for the active agentdef/profile agent.
+// Empty when neither source nor path is known (no agent binding).
+func formatChatAgentSourceLine(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	source := strings.TrimSpace(session.AgentSource)
+	path := strings.TrimSpace(session.AgentSourcePath)
+	if path != "" && !strings.HasPrefix(path, "builtin:") {
+		path = resolveAbsoluteChatPath(path)
+	}
+	switch {
+	case source != "" && path != "":
+		return source + " · " + path
+	case path != "":
+		return path
+	case source != "":
+		return source
+	default:
+		return ""
+	}
 }
 
 func resolvedChatSkillsMode(session *ChatSession, binding *skillsRuntimeBinding) string {

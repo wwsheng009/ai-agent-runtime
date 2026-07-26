@@ -75,14 +75,11 @@ func (m *LeaseManager) ReclaimExpiredTasks(ctx context.Context, teamID string, a
 		if dryRun {
 			continue
 		}
-		_, _ = NewAgentControlTaskRegistry(m.Store).RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
+		_, _ = NewAgentControlTaskRegistry(m.Store).WithClaims(m.Claims).RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
 			ID:       task.ID,
 			Workflow: agentcontrol.WorkflowSpawnTeam,
 			Status:   string(TaskStatusReady),
 		})
-		if m.Claims != nil {
-			_ = m.Claims.Release(ctx, task.ID)
-		}
 		if previousAssignee != "" {
 			_ = m.Store.UpdateTeammateState(ctx, previousAssignee, TeammateStateIdle)
 		}
@@ -115,15 +112,12 @@ func (m *LeaseManager) RenewTask(ctx context.Context, taskID string, leaseUntil 
 	if leaseUntil.IsZero() {
 		leaseUntil = time.Now().UTC().Add(5 * time.Minute)
 	}
-	if _, err := NewAgentControlTaskRegistry(m.Store).RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
+	if _, err := NewAgentControlTaskRegistry(m.Store).WithClaims(m.Claims).RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
 		ID:         taskID,
 		Workflow:   agentcontrol.WorkflowSpawnTeam,
 		LeaseUntil: leaseUntil,
 	}); err != nil {
 		return err
-	}
-	if m.Claims != nil {
-		_ = m.Claims.Renew(ctx, taskID, leaseUntil)
 	}
 	return nil
 }

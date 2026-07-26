@@ -94,6 +94,15 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "local", Summary: "本地压缩", Group: string(chatSlashCommandGroupModel)},
 			{Command: "remote", Summary: "远端压缩", Group: string(chatSlashCommandGroupModel)},
 		})
+	case "/memory":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "status", Summary: "查看记忆路径与最近笔记", Group: string(chatSlashCommandGroupContext)},
+			{Command: "add", Summary: "追加一条笔记", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "note", Summary: "add 的别名", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "list", Summary: "列出最近笔记", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "search", Summary: "关键词搜索", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "flush", Summary: "add 的别名", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+		})
 	case "/permission-mode":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "default", Summary: "默认权限", Group: string(chatSlashCommandGroupPermission)},

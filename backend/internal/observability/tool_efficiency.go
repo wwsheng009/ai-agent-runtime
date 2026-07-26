@@ -72,6 +72,25 @@ func RecordToolDispositionReplay(outcome string, repeatCount int) {
 	})
 }
 
+// RecordDoomLoop counts productized doom-loop harness signals.
+// phase is "warning" (soft, always-on at threshold) or "terminated" (hard stop).
+func RecordDoomLoop(phase string) {
+	IncrementCounter(MetricDoomLoopTotal, map[string]string{
+		LabelPhase: normalizeDoomLoopPhase(phase),
+	})
+}
+
+func normalizeDoomLoopPhase(phase string) string {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "warning", "warn":
+		return "warning"
+	case "terminated", "terminate", "stop", "hard_stop":
+		return "terminated"
+	default:
+		return "unknown"
+	}
+}
+
 func normalizePreflightReason(reason string, allowed bool) string {
 	reason = strings.ToLower(strings.TrimSpace(reason))
 	switch reason {

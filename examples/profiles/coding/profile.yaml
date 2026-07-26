@@ -1,0 +1,3 @@
+name: coding
+description: Sample coding profile with default and explore agents
+default_agent: default

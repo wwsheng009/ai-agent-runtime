@@ -6,6 +6,8 @@ import type {
   RuntimeSessionCheckpointPreviewResponse,
   RuntimeSessionCheckpointsQuery,
   RuntimeSessionCheckpointsResponse,
+  RuntimeSessionPlanMode,
+  RuntimeSessionPlanModeUpdateRequest,
   RuntimeSessionRecord,
   RuntimeSessionUsersResponse,
   RuntimeSessionsQuery,
@@ -139,6 +141,36 @@ export async function previewSessionCheckpoint(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+export async function getSessionPlanMode(
+  sessionId: string,
+): Promise<RuntimeSessionPlanMode> {
+  return fetchRuntimeJson<RuntimeSessionPlanMode>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/plan`),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+export async function updateSessionPlanMode(
+  sessionId: string,
+  body: RuntimeSessionPlanModeUpdateRequest,
+): Promise<RuntimeSessionPlanMode> {
+  return fetchRuntimeJson<RuntimeSessionPlanMode>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/plan`),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     },
   );
 }

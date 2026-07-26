@@ -55,7 +55,7 @@ func ReconcileFailedTaskDependencies(ctx context.Context, store Store, teamID st
 		if err := store.ReleaseTask(ctx, failure.TaskID, TaskStatusFailed); err != nil {
 			return nil, err
 		}
-		if err := store.ReleasePathClaimsByTask(ctx, failure.TaskID); err != nil {
+		if err := ReleaseTaskPathClaims(ctx, nil, store, failure.TaskID); err != nil {
 			return nil, err
 		}
 		if failure.Assignee != "" {

@@ -17,11 +17,22 @@ func NewLoginCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "新增或更新 provider 登录凭证",
-		Long:  "新增 provider 或修改现有 provider 的 base_url/API key/OAuth 凭证，校验 models endpoint 后写回 config.yaml。",
-		Example: `  aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-...
+		Long: `新增 provider 或修改现有 provider 的 base_url/API key/OAuth 凭证，校验 models endpoint 后写回 config.yaml。
+
+首次使用常见流程：
+  aicli init --global
+  aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-... --set-default
+  aicli doctor provider
+  aicli
+
+chat 内也可使用 /login，与本命令共用同一套登录逻辑。
+排错见 docs/aicli/faq.md。`,
+		Example: `  aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-... --set-default
   aicli login --provider openai_image --protocol openai_image --base-url https://api.openai.com --api-key sk-...
   aicli login --provider local --protocol openai --base-url http://127.0.0.1:4000 --models-path /v1/models
+  aicli login --provider codex --protocol codex-oauth --base-url https://api.openai.com --auth-ref codex --set-default
   aicli login --provider codex --protocol codex-apikey --base-url https://api.openai.com --api-key sk-...
+  aicli login --provider openai --base-url https://new.example.com --dry-run --json
   aicli login --provider openai --base-url https://new.example.com --output json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			HandleLogin(cmd, configProvider)

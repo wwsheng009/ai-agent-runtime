@@ -15,7 +15,8 @@ func newExecResumeCommand(getCfg func() *config.Config) *cobra.Command {
 		Short: "恢复之前的会话",
 		Long: `恢复指定会话，或使用 --last 恢复最近会话。
 
-没有 PROMPT 时只输出最后一条 assistant 消息，不发送新 turn。`,
+没有 PROMPT 时只输出最后一条 assistant 消息，不发送新 turn。
+会话恢复与输出契约见 docs/aicli/exec.md。`,
 		Example: `  aicli exec resume --last
   aicli exec resume <session-id>
   aicli exec resume --last "继续上次的任务"`,

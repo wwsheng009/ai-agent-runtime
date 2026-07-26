@@ -12,10 +12,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -546,10 +549,16 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		childSession.SetContext(toolbroker.AgentSessionContextAgentType, agentType)
 	}
 	toolbroker.ApplySpawnAgentRouteContext(childSession, args)
+	if err := c.applyAPISpawnIsolation(ctx, childSession, args); err != nil {
+		_ = storage.Delete(ctx, childSession.ID)
+		return nil, err
+	}
 	if err := storage.Save(ctx, childSession); err != nil {
+		c.cleanupAPISpawnIsolation(ctx, childSession)
 		return nil, err
 	}
 	if err := c.reserveOrRegisterAgentSpawn(ctx, parentSession, parentSessionID, childSession, args, childDepth); err != nil {
+		c.cleanupAPISpawnIsolation(ctx, childSession)
 		_ = storage.Delete(ctx, childSession.ID)
 		return nil, err
 	}
@@ -557,6 +566,7 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 
 	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
 	if err != nil {
+		c.cleanupAPISpawnIsolation(ctx, childSession)
 		return nil, err
 	}
 	queued := false
@@ -576,6 +586,292 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		"queued": queued,
 	}))
 	return result, nil
+}
+
+// applyAPISpawnIsolation creates a git worktree when isolation=worktree and binds
+// workspace_path for the child actor. Failures do not fall back to the main tree.
+func (c *sessionAgentController) applyAPISpawnIsolation(ctx context.Context, childSession *chat.Session, args toolbroker.SpawnAgentArgs) error {
+	if c == nil || childSession == nil {
+		return nil
+	}
+	mode, err := worktree.NormalizeMode(args.Isolation)
+	if err != nil {
+		return err
+	}
+	childSession.SetContext(toolbroker.AgentSessionContextIsolation, mode)
+	if mode != worktree.ModeWorktree {
+		return nil
+	}
+	repoRoot := c.resolveAPISpawnRepoRoot(childSession)
+	handle, err := worktree.Create(ctx, worktree.Options{
+		RepoRoot:  repoRoot,
+		SessionID: childSession.ID,
+	})
+	if err != nil {
+		return err
+	}
+	childSession.SetContext(toolbroker.AgentSessionContextWorktreePath, handle.Path)
+	childSession.SetContext(toolbroker.AgentSessionContextWorktreeBranch, handle.Branch)
+	childSession.SetContext(toolbroker.AgentSessionContextWorktreeRepoRoot, handle.RepoRoot)
+	childSession.SetContext(sessionmeta.WorkspacePath, handle.Path)
+	// Default claim/write scope: isolation root so path claims / team write_paths
+	// can inherit the worktree without falling back to the main tree.
+	childSession.SetContext(toolbroker.AgentSessionContextWritePaths, []string{handle.Path})
+	return nil
+}
+
+func (c *sessionAgentController) resolveAPISpawnRepoRoot(childSession *chat.Session) string {
+	if childSession != nil {
+		if path := agentcontrol.ContextString(childSession, sessionmeta.WorkspacePath); path != "" {
+			return path
+		}
+		if path := agentcontrol.ContextString(childSession, toolbroker.AgentSessionContextWorktreeRepoRoot); path != "" {
+			return path
+		}
+	}
+	if c != nil && c.handler != nil {
+		if runtimeConfig := c.handler.resolveRuntimeConfig(UsageScope{}); runtimeConfig != nil {
+			if root := strings.TrimSpace(runtimeConfig.Workspace.Root); root != "" {
+				return root
+			}
+		}
+	}
+	return ""
+}
+
+// cleanupAPISpawnIsolation removes a child worktree when isolation=worktree.
+// Safe when isolation is none, already applied/discarded, or context is incomplete.
+func (c *sessionAgentController) cleanupAPISpawnIsolation(ctx context.Context, childSession *chat.Session) error {
+	if childSession == nil {
+		return nil
+	}
+	session := childSession
+	if c != nil && c.handler != nil && c.handler.sessionManager != nil {
+		if loaded, err := c.handler.sessionManager.Get(ctx, childSession.ID); err == nil && loaded != nil {
+			session = loaded
+		}
+	}
+	mode := agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation)
+	path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)
+	if mode != worktree.ModeWorktree || path == "" {
+		return nil
+	}
+	handle := &worktree.Handle{
+		Path:      path,
+		Branch:    agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeBranch),
+		RepoRoot:  agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot),
+		SessionID: strings.TrimSpace(session.ID),
+	}
+	if err := handle.Remove(ctx); err != nil {
+		return err
+	}
+	clearAPISpawnWorktreeContext(session, "")
+	if c != nil && c.handler != nil && c.handler.sessionManager != nil {
+		_ = c.handler.sessionManager.Update(ctx, session)
+	}
+	return nil
+}
+
+func clearAPISpawnWorktreeContext(session *chat.Session, disposition string) {
+	if session == nil {
+		return
+	}
+	session.SetContext(toolbroker.AgentSessionContextWorktreePath, "")
+	session.SetContext(toolbroker.AgentSessionContextWorktreeBranch, "")
+	session.SetContext(toolbroker.AgentSessionContextWritePaths, []string{})
+	if repoRoot := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot); repoRoot != "" {
+		session.SetContext(sessionmeta.WorkspacePath, repoRoot)
+	}
+	if disposition = strings.TrimSpace(disposition); disposition != "" {
+		session.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, disposition)
+	}
+}
+
+func apiSpawnWorktreeHandle(session *chat.Session) (*worktree.Handle, error) {
+	if session == nil {
+		return nil, fmt.Errorf("session is required")
+	}
+	mode := agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation)
+	path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)
+	branch := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeBranch)
+	repoRoot := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot)
+	disposition := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeDisposition)
+	if mode != worktree.ModeWorktree {
+		return nil, fmt.Errorf("session %s isolation is %q (want worktree)", strings.TrimSpace(session.ID), mode)
+	}
+	if path == "" {
+		if disposition != "" {
+			return nil, fmt.Errorf("session %s worktree already %s", strings.TrimSpace(session.ID), disposition)
+		}
+		return nil, fmt.Errorf("session %s has no worktree path", strings.TrimSpace(session.ID))
+	}
+	if branch == "" || repoRoot == "" {
+		return nil, fmt.Errorf("session %s worktree context incomplete (branch/repo_root required)", strings.TrimSpace(session.ID))
+	}
+	return &worktree.Handle{
+		Path:      path,
+		Branch:    branch,
+		RepoRoot:  repoRoot,
+		SessionID: strings.TrimSpace(session.ID),
+	}, nil
+}
+
+func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbroker.ApplyAgentWorktreeArgs) (*toolbroker.AgentWorktreeResult, error) {
+	sessionRef := strings.TrimSpace(firstNonEmptyAPIString(args.ID, args.SessionID))
+	if sessionRef == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	sessionID, err := c.resolveTargetSessionID(ctx, sessionRef)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+		return nil, fmt.Errorf("session manager is not configured")
+	}
+	session, err := c.handler.sessionManager.Get(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	handle, err := apiSpawnWorktreeHandle(session)
+	if err != nil {
+		return nil, err
+	}
+	diffStat, _ := handle.DiffStat(ctx)
+	if err := handle.Apply(ctx, worktree.ApplyOptions{Paths: append([]string(nil), args.Paths...)}); err != nil {
+		return nil, err
+	}
+	result := &toolbroker.AgentWorktreeResult{
+		ID:             sessionID,
+		SessionID:      sessionID,
+		Action:         "apply",
+		Isolation:      worktree.ModeWorktree,
+		WorktreePath:   handle.Path,
+		WorktreeBranch: handle.Branch,
+		RepoRoot:       handle.RepoRoot,
+		DiffStat:       diffStat,
+		Paths:          append([]string(nil), args.Paths...),
+		Applied:        true,
+		Kept:           args.Keep,
+	}
+	if !args.Keep {
+		if err := handle.Remove(ctx); err != nil {
+			return nil, fmt.Errorf("apply succeeded but worktree remove failed: %w", err)
+		}
+		clearAPISpawnWorktreeContext(session, toolbroker.WorktreeDispositionApplied)
+		result.Removed = true
+		result.WorktreePath = ""
+	} else {
+		session.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, toolbroker.WorktreeDispositionApplied)
+	}
+	if err := c.handler.sessionManager.Update(ctx, session); err != nil {
+		return nil, err
+	}
+	if status, statusErr := c.snapshot(ctx, sessionID); statusErr == nil {
+		result.Status = status
+	}
+	return result, nil
+}
+
+func (c *sessionAgentController) DiscardWorktree(ctx context.Context, args toolbroker.DiscardAgentWorktreeArgs) (*toolbroker.AgentWorktreeResult, error) {
+	sessionRef := strings.TrimSpace(firstNonEmptyAPIString(args.ID, args.SessionID))
+	if sessionRef == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	sessionID, err := c.resolveTargetSessionID(ctx, sessionRef)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+		return nil, fmt.Errorf("session manager is not configured")
+	}
+	session, err := c.handler.sessionManager.Get(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	handle, err := apiSpawnWorktreeHandle(session)
+	if err != nil {
+		return nil, err
+	}
+	diffStat, _ := handle.DiffStat(ctx)
+	if err := handle.Remove(ctx); err != nil {
+		return nil, err
+	}
+	clearAPISpawnWorktreeContext(session, toolbroker.WorktreeDispositionDiscarded)
+	if err := c.handler.sessionManager.Update(ctx, session); err != nil {
+		return nil, err
+	}
+	result := &toolbroker.AgentWorktreeResult{
+		ID:             sessionID,
+		SessionID:      sessionID,
+		Action:         "discard",
+		Isolation:      worktree.ModeWorktree,
+		WorktreeBranch: handle.Branch,
+		RepoRoot:       handle.RepoRoot,
+		DiffStat:       diffStat,
+		Discarded:      true,
+		Removed:        true,
+	}
+	if status, statusErr := c.snapshot(ctx, sessionID); statusErr == nil {
+		result.Status = status
+	}
+	return result, nil
+}
+
+func firstNonEmptyAPIString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func annotateAPISpawnWorktreeCompletion(ctx context.Context, c *sessionAgentController, childSession *chat.Session, payload map[string]interface{}) {
+	if payload == nil || childSession == nil {
+		return
+	}
+	session := childSession
+	if c != nil && c.handler != nil && c.handler.sessionManager != nil {
+		if loaded, err := c.handler.sessionManager.Get(ctx, childSession.ID); err == nil && loaded != nil {
+			session = loaded
+		}
+	}
+	mode := agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation)
+	if mode != worktree.ModeWorktree {
+		return
+	}
+	path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)
+	branch := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeBranch)
+	repoRoot := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot)
+	disposition := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeDisposition)
+	if path != "" {
+		payload["worktree_path"] = path
+		payload["worktree_pending"] = disposition == ""
+		payload["isolation"] = mode
+		if branch != "" {
+			payload["worktree_branch"] = branch
+		}
+		if repoRoot != "" {
+			payload["worktree_repo_root"] = repoRoot
+		}
+		handle := &worktree.Handle{Path: path, Branch: branch, RepoRoot: repoRoot, SessionID: strings.TrimSpace(session.ID)}
+		if diff, err := handle.DiffStat(ctx); err == nil && strings.TrimSpace(diff) != "" {
+			payload["worktree_diff_stat"] = diff
+		}
+		payload["next_action"] = "Call apply_agent_worktree to land changes in the main repo, or discard_agent_worktree to drop them. close_agent also cleans remaining worktrees."
+		return
+	}
+	if disposition != "" {
+		payload["worktree_disposition"] = disposition
+		payload["worktree_pending"] = false
+		payload["isolation"] = mode
+	}
 }
 
 func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string, childSession *chat.Session) {
@@ -636,6 +932,9 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 				payload["lifecycle_close_error"] = closeErr.Error()
 			}
 		}
+		// Keep worktree after completion so parent can apply/discard explicitly.
+		// close_agent still cleans remaining worktrees.
+		annotateAPISpawnWorktreeCompletion(context.Background(), c, childSession, payload)
 		completionMessage, mailboxErr := c.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
 		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
 		c.dispatchAgentHook(runtimehooks.EventSubagentStop, cloneProfileContextValues(payload))
@@ -1095,7 +1394,8 @@ func (c *sessionAgentController) apiAgentRunMeta(ctx context.Context, sessionID 
 		return nil
 	}
 	return toolbroker.SpawnAgentRunMeta(toolbroker.SpawnAgentArgs{
-		PermissionMode: agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
+		PermissionMode:        agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
+		CompletionRequirement: agentcontrol.ContextString(session, toolbroker.AgentSessionContextCompletionRequirement),
 	})
 }
 
@@ -1681,6 +1981,9 @@ func (c *sessionAgentController) Close(ctx context.Context, sessionID string) (*
 			hub.Stop(closeID)
 		}
 		if c.handler.sessionManager != nil {
+			if session, loadErr := c.handler.sessionManager.Get(ctx, closeID); loadErr == nil && session != nil {
+				_ = c.cleanupAPISpawnIsolation(ctx, session)
+			}
 			_ = c.handler.sessionManager.Close(ctx, closeID)
 		}
 		closedIDs = append(closedIDs, closeID)
@@ -2082,7 +2385,11 @@ func normalizeAgentWaitIDs(args toolbroker.WaitAgentArgs) []string {
 func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentSession *chat.Session, parentSessionID string, childDepth int) error {
 	limits := c.agentsConfig()
 	if limits.MaxDepth > 0 && childDepth > limits.MaxDepth {
-		return fmt.Errorf("agent spawn depth limit reached: max_depth=%d requested_depth=%d", limits.MaxDepth, childDepth)
+		return runtimeerrors.Newf(
+			runtimeerrors.ErrAgentSpawnDepthLimit,
+			"agent spawn depth limit reached: max_depth=%d requested_depth=%d; next_action=complete_locally_or_use_spawn_team — continue the work in the current agent, reuse an existing child, or use spawn_team; do not retry the same spawn_agent",
+			limits.MaxDepth, childDepth,
+		)
 	}
 	if limits.MaxThreads <= 0 {
 		return nil
@@ -2607,6 +2914,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	requestedProvider := ""
 	requestedChildModel := ""
 	requestedReasoningEffort := ""
+	childCompletionRequirement := ""
 	streamRequested := false
 	disableTools := false
 	childReadOnly := false
@@ -2618,12 +2926,16 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		profileRef := getContextString(apiProfileContextReference)
 		agentID := getContextString(apiProfileContextAgent)
 		workspacePath = getContextString(sessionmeta.WorkspacePath)
+		if worktreePath := getContextString(toolbroker.AgentSessionContextWorktreePath); worktreePath != "" {
+			workspacePath = worktreePath
+		}
 		if profileRef != "" {
 			if resolved, err := h.resolveProfileSessionState(profileRef, agentID, workspacePath); err == nil {
 				profileState = resolved
 			}
 		}
 		childAgentType = getContextString(toolbroker.AgentSessionContextAgentType)
+		childCompletionRequirement = getContextString(toolbroker.AgentSessionContextCompletionRequirement)
 		requestedProvider = getContextString(sessionmeta.ProviderName)
 		requestedChildModel = getContextString(toolbroker.AgentSessionContextRequestedModel)
 		if requestedChildModel == "" {
@@ -2754,6 +3066,8 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
+	loopConfig := buildSessionLoopConfig(selectedConfig, requestedReasoningEffort)
+	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, childCompletionRequirement, workspacePath)
 	actor, err := chat.NewSessionActor(sessionID, chat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.llmRuntime,
@@ -2761,7 +3075,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		StateStore:   stateStore,
 		EventStore:   eventStore,
 		EventBus:     h.getRuntimeEventBus(),
-		LoopConfig:   buildSessionLoopConfig(selectedConfig, requestedReasoningEffort),
+		LoopConfig:   loopConfig,
 		PersistHook:  h.runtimeServerGoalPersistHook,
 		RecoverStale: true,
 		OnStop: func() {
@@ -2824,6 +3138,43 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedR
 		}
 	}
 	return config
+}
+
+// applyAPISessionCompletionRequirement sets loop completion from explicit session
+// context, then profile agent id / child agent_type agentdef lookup.
+func applyAPISessionCompletionRequirement(config *agent.LoopReActConfig, profileState *profileRuntimeState, agentType, explicitRequirement, workspacePath string) {
+	if config == nil {
+		return
+	}
+	requirement := strings.TrimSpace(explicitRequirement)
+	profileRoot := ""
+	profileAgent := ""
+	if profileState != nil && profileState.Resolved != nil {
+		profileRoot = strings.TrimSpace(profileState.Resolved.ProfileRoot)
+		profileAgent = strings.TrimSpace(profileState.Resolved.AgentID)
+	}
+	if requirement == "" && profileAgent != "" {
+		requirement = resolveAPIAgentdefCompletionRequirement(profileAgent, profileRoot, workspacePath)
+	}
+	if requirement == "" && strings.TrimSpace(agentType) != "" {
+		requirement = resolveAPIAgentdefCompletionRequirement(agentType, profileRoot, workspacePath)
+	}
+	config.CompletionRequirement = agent.NormalizeCompletionRequirement(requirement)
+}
+
+func resolveAPIAgentdefCompletionRequirement(agentName, profileRoot, projectRoot string) string {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return ""
+	}
+	def, err := agentdef.Resolve(agentName, agentdef.DiscoverOptions{
+		ProjectRoot: strings.TrimSpace(projectRoot),
+		ProfileRoot: strings.TrimSpace(profileRoot),
+	})
+	if err != nil || def == nil {
+		return ""
+	}
+	return string(def.CompletionRequirement)
 }
 
 func (h *Handler) getSessionRuntimeStore() chat.RuntimeStateStore {

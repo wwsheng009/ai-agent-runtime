@@ -66,6 +66,10 @@ func NewDownloadTool() *DownloadTool {
 
 func (d *DownloadTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindNetwork,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       true,
+		runtimetypes.ToolMetadataRequiresNetKey:     true,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}

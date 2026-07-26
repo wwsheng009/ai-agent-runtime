@@ -150,6 +150,12 @@ func TestValidateSandboxConfig(t *testing.T) {
 	cfg.Sandbox.DeniedHosts = []string{"duckduckgo.com", ""}
 	err = ValidateRuntimeConfig(cfg)
 	require.Error(t, err)
+
+	cfg.Sandbox.DeniedHosts = []string{"duckduckgo.com"}
+	cfg.Sandbox.OSSandbox = "require"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+	cfg.Sandbox.OSSandbox = "nope"
+	require.Error(t, ValidateRuntimeConfig(cfg))
 }
 
 func TestDefaultRuntimeConfigDoesNotCapExplicitToolTimeouts(t *testing.T) {

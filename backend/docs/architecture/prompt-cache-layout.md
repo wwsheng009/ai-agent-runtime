@@ -193,7 +193,7 @@ go test ./internal/chat/ -count=1
 Optional live inspection: session `debug.log` lines
 `[llm-debug] request_started` / `request_finished` carry prompt layout and
 usage (including cache tokens when the provider reports them). See
-`docs/aicli/prompt-layout-debug-note.md`.
+`backend/docs/aicli/prompt-layout-debug-note.md`.
 
 ## Invalidation policy
 

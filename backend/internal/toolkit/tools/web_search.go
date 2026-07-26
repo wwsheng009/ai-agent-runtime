@@ -12,6 +12,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // WebSearchTool 网络搜索工具
@@ -50,6 +51,17 @@ func NewWebSearchTool() *WebSearchTool {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+	}
+}
+
+func (w *WebSearchTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindSearch,
+		runtimetypes.ToolMetadataReadOnlyKey:         true,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      true,
+		runtimetypes.ToolMetadataSupportsParallelKey: true,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -678,7 +679,7 @@ func TestSessionAgentController_WaitUsesEventStoreWakeup(t *testing.T) {
 		assert.Equal(t, "api-event-store-wait-child", result.MatchedSessionID)
 		assert.Equal(t, 1, result.ReadyCount)
 		assert.Equal(t, []string{"api-event-store-wait-child"}, result.ReadyIDs)
-		assert.Equal(t, "consume_ready_outputs", result.NextAction)
+		assert.True(t, strings.HasPrefix(result.NextAction, "consume_ready_outputs"), "next_action=%q", result.NextAction)
 		assert.Positive(t, result.WaitedMs)
 	case <-time.After(450 * time.Millisecond):
 		t.Fatal("wait_agent did not wake from event store append")

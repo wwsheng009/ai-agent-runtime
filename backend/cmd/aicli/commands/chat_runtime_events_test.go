@@ -700,6 +700,32 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != "• Running ls path=src" {
 		t.Fatalf("unexpected tool requested render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: "download",
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-progress-1",
+			"message":      "fetching blob",
+			"percent":      float64(42),
+			"partial":      "chunk-3",
+		},
+	}); got != "• Progress download 42% fetching blob (chunk-3)" {
+		t.Fatalf("unexpected tool progress render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: "shell",
+		Payload:  map[string]interface{}{"message": "still running"},
+	}); got != "• Progress shell still running" {
+		t.Fatalf("unexpected tool progress message-only render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: "shell",
+		Payload:  map[string]interface{}{},
+	}); got != "" {
+		t.Fatalf("expected empty progress render without details, got %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "list_mcp_resources", Payload: map[string]interface{}{"tool_source": "meta"}}); got != "• Running [meta] list_mcp_resources" {
 		t.Fatalf("unexpected meta tool requested render: %q", got)
 	}
@@ -2598,6 +2624,18 @@ func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
 	})
 	require.Equal(t, chatAgentStageToolRunning, coord.AgentStage())
 	require.Equal(t, "execute_shell_command", coord.AgentStageDetail())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.progress",
+		SessionID: runtimeSession.ID,
+		ToolName:  "execute_shell_command",
+		Payload: map[string]interface{}{
+			"message": "compiling",
+			"percent": float64(60),
+		},
+	})
+	require.Equal(t, chatAgentStageToolRunning, coord.AgentStage())
+	require.Equal(t, "execute_shell_command 60% compiling", coord.AgentStageDetail())
 
 	bridge.handleEvent(runtimeevents.Event{
 		Type:      runtimechat.EventLLMRequestStarted,

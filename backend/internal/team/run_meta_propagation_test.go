@@ -57,6 +57,24 @@ func TestTeammateRunnerStartTaskIncludesRunMeta(t *testing.T) {
 	assert.Equal(t, "mate-1", client.lastRunMeta.Team.AgentID)
 	assert.Equal(t, "task-1", client.lastRunMeta.Team.CurrentTaskID)
 	assert.Equal(t, "bypass_permissions", client.lastRunMeta.PermissionMode)
+	assert.Equal(t, "complete_task", client.lastRunMeta.CompletionRequirement)
+	assert.Equal(t, "complete_task", EffectiveCompletionRequirement(client.lastRunMeta))
+}
+
+func TestEffectiveCompletionRequirement(t *testing.T) {
+	assert.Equal(t, "none", EffectiveCompletionRequirement(nil))
+	assert.Equal(t, "none", EffectiveCompletionRequirement(&RunMeta{}))
+	assert.Equal(t, "none", EffectiveCompletionRequirement(&RunMeta{
+		Team: &TeamRunMeta{TeamID: "team-1", AgentID: "mate-1", CurrentTaskID: "task-1"},
+	}))
+	assert.Equal(t, "complete_task", EffectiveCompletionRequirement(&RunMeta{
+		CompletionRequirement: "complete_task",
+		Team:                  &TeamRunMeta{TeamID: "team-1", AgentID: "mate-1"},
+	}))
+	assert.Equal(t, "none", EffectiveCompletionRequirement(&RunMeta{
+		CompletionRequirement: "none",
+		Team:                  &TeamRunMeta{TeamID: "team-1", AgentID: "mate-1"},
+	}))
 }
 
 func TestTeamRunMetaCloneCopiesRouteWarnings(t *testing.T) {
@@ -102,6 +120,8 @@ func TestLeadPlannerInitialPlanIncludesTeamRunMeta(t *testing.T) {
 	assert.Equal(t, "", client.lastRunMeta.Team.AgentID)
 	assert.Equal(t, "", client.lastRunMeta.Team.CurrentTaskID)
 	assert.Equal(t, "bypass_permissions", client.lastRunMeta.PermissionMode)
+	assert.Equal(t, "none", client.lastRunMeta.CompletionRequirement)
+	assert.Equal(t, "none", EffectiveCompletionRequirement(client.lastRunMeta))
 }
 
 func TestLeadPlannerReplanOnFailureIncludesTaskRunMeta(t *testing.T) {

@@ -26,6 +26,16 @@ const (
 type SandboxConfig struct {
 	Enabled          bool          `yaml:"enabled" json:"enabled"`
 	MaxExecutionTime time.Duration `yaml:"maxExecutionTime" json:"maxExecutionTime"`
+	// Profile records the named application-layer sandbox profile that produced
+	// this config (off|workspace|read-only|strict). Empty means raw/manual.
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// BlockNetwork denies all outbound URL checks when true (strict profile).
+	BlockNetwork bool `yaml:"blockNetwork,omitempty" json:"blockNetwork,omitempty"`
+	// OSSandbox selects optional OS-level process isolation for command launches:
+	// off (default) | auto (use backend when available, else explicit degrade) |
+	// require (fail-closed when OS isolation cannot be applied).
+	// Application-layer path/network/command policy always remains active.
+	OSSandbox string `yaml:"osSandbox,omitempty" json:"osSandbox,omitempty"`
 
 	AllowedPaths  []string `yaml:"allowedPaths" json:"allowedPaths"`
 	DeniedPaths   []string `yaml:"deniedPaths" json:"deniedPaths"`
@@ -40,7 +50,8 @@ type SandboxConfig struct {
 
 // Sandbox is a reusable local execution policy wrapper.
 type Sandbox struct {
-	config SandboxConfig
+	config    SandboxConfig
+	osBackend OSSandboxBackend
 }
 
 // NewSandbox creates a sandbox from the provided config.
@@ -48,10 +59,14 @@ func NewSandbox(config *SandboxConfig) *Sandbox {
 	if config == nil {
 		config = &SandboxConfig{}
 	}
+	osMode, _ := NormalizeOSSandboxMode(config.OSSandbox)
 	return &Sandbox{
 		config: SandboxConfig{
 			Enabled:          config.Enabled,
 			MaxExecutionTime: config.MaxExecutionTime,
+			Profile:          strings.TrimSpace(config.Profile),
+			BlockNetwork:     config.BlockNetwork,
+			OSSandbox:        osMode,
 			AllowedPaths:     cloneStrings(config.AllowedPaths),
 			DeniedPaths:      cloneStrings(config.DeniedPaths),
 			ReadOnlyPaths:    cloneStrings(config.ReadOnlyPaths),
@@ -72,6 +87,9 @@ func (s *Sandbox) Config() SandboxConfig {
 	return SandboxConfig{
 		Enabled:          s.config.Enabled,
 		MaxExecutionTime: s.config.MaxExecutionTime,
+		Profile:          s.config.Profile,
+		BlockNetwork:     s.config.BlockNetwork,
+		OSSandbox:        s.config.OSSandbox,
 		AllowedPaths:     cloneStrings(s.config.AllowedPaths),
 		DeniedPaths:      cloneStrings(s.config.DeniedPaths),
 		ReadOnlyPaths:    cloneStrings(s.config.ReadOnlyPaths),
@@ -174,6 +192,9 @@ func (s *Sandbox) CheckURL(rawURL string) error {
 	if s == nil || !s.active() {
 		return nil
 	}
+	if s.config.BlockNetwork {
+		return fmt.Errorf("network access denied by sandbox policy")
+	}
 
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -241,21 +262,13 @@ func (s *Sandbox) active() bool {
 	if s == nil {
 		return false
 	}
-	if s.config.Enabled {
-		return true
-	}
-	return s.config.MaxExecutionTime > 0 ||
-		len(s.config.AllowedPaths) > 0 ||
-		len(s.config.DeniedPaths) > 0 ||
-		len(s.config.ReadOnlyPaths) > 0 ||
-		len(s.config.AllowedCommands) > 0 ||
-		len(s.config.DeniedCommands) > 0 ||
-		len(s.config.EnvWhitelist) > 0 ||
-		len(s.config.AllowedHosts) > 0 ||
-		len(s.config.DeniedHosts) > 0
+	return SandboxConfigActive(s.config)
 }
 
 // ExecuteCommand runs a local process under sandbox policy.
+// When SandboxConfig.OSSandbox is auto/require, the launch may be rewritten by
+// the optional OS backend (Linux bubblewrap). Failures degrade explicitly
+// (auto) or fail-closed (require) — never silent "looks sandboxed but isn't".
 func (s *Sandbox) ExecuteCommand(ctx context.Context, command string, args []string, workDir string) (string, error) {
 	if err := s.ValidateCommand(command); err != nil {
 		return "", err
@@ -274,12 +287,25 @@ func (s *Sandbox) ExecuteCommand(ctx context.Context, command string, args []str
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, command, args...)
-	if strings.TrimSpace(workDir) != "" {
+	// BuildFilteredEnv only applies EnvWhitelist when present; OSSandbox-only
+	// configs must not wipe the process environment.
+	env := BuildFilteredEnv(s, os.Environ())
+	launch, err := s.PrepareOSCommand(execCtx, command, args, workDir, env)
+	if err != nil {
+		return "", err
+	}
+
+	cmd := exec.CommandContext(execCtx, launch.Command, launch.Args...)
+	if strings.TrimSpace(launch.WorkDir) != "" {
+		cmd.Dir = launch.WorkDir
+	} else if !launch.Applied && strings.TrimSpace(workDir) != "" {
+		// Host Dir only when OS wrap did not already chdir inside the guest.
 		cmd.Dir = workDir
 	}
-	if s != nil {
-		cmd.Env = s.FilterEnv(os.Environ())
+	if launch.Env != nil {
+		cmd.Env = launch.Env
+	} else if s != nil {
+		cmd.Env = env
 	}
 
 	capture, err := CaptureCombinedOutputWithMirror(cmd, DefaultRetainedOutputBytes, OutputMirrorFromContext(ctx))

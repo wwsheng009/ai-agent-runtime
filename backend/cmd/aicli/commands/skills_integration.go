@@ -36,6 +36,10 @@ type skillExecutor interface {
 
 type skillsRuntimeBinding struct {
 	manager              *runtimebootstrap.Manager
+	// ownsManager is true when this binding created the bootstrap manager and
+	// must stop it on Close. Shared host bootstrap managers set this false so
+	// LocalRuntimeHost remains the single owner.
+	ownsManager          bool
 	count                int
 	exposureTopK         int
 	exposureMode         string
@@ -88,7 +92,7 @@ func (b *skillsRuntimeBinding) Count() int {
 }
 
 func (b *skillsRuntimeBinding) Close() error {
-	if b == nil || b.manager == nil {
+	if b == nil || b.manager == nil || !b.ownsManager {
 		return nil
 	}
 	return b.manager.Stop()
@@ -691,6 +695,14 @@ func appendUniqueCaseInsensitive(values []string, value string) []string {
 }
 
 func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *runtimetools.Manager, cliSkillDirs []string, cliSkillsTopK int, cliSkillsMode string) (*skillsRuntimeBinding, error) {
+	return initSkillFunctionsWithManager(cfg, session, toolManager, nil, cliSkillDirs, cliSkillsTopK, cliSkillsMode)
+}
+
+// initSkillFunctionsWithManager builds the skill function surface. When shared
+// manager is non-nil it is reused (no second DiscoverOnly scan); ownership stays
+// with the caller. When nil, a private DiscoverOnly manager is created and owned
+// by the returned binding.
+func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, toolManager *runtimetools.Manager, shared *runtimebootstrap.Manager, cliSkillDirs []string, cliSkillsTopK int, cliSkillsMode string) (*skillsRuntimeBinding, error) {
 	catalog := ensureFunctionCatalog(session)
 	if cfg == nil || session == nil || catalog == nil || catalog.Registry() == nil {
 		return nil, nil
@@ -704,17 +716,6 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 		return nil, nil
 	}
 
-	runtimeManager := runtimecfg.NewRuntimeManager(resolveChatRuntimeConfigPath(cfg, session))
-	if err := runtimeManager.Load(); err != nil {
-		return nil, fmt.Errorf("加载 skills runtime 配置失败: %w", err)
-	}
-
-	runtimeConfig := runtimeManager.Get()
-	runtimeConfig.HotReload.Enabled = false
-	if session.Model != "" {
-		runtimeConfig.Agent.DefaultModel = session.Model
-	}
-
 	var mcpRuntime runtimeskill.MCPManager
 	if toolManager != nil {
 		mcpRuntime = runtimetools.NewAgentAdapter(toolManager)
@@ -722,26 +723,47 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 		mcpRuntime = runtimeskill.NewMCPAdapter(MCPManagerInstance)
 	}
 
-	manager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
-		Config:          runtimeConfig,
-		SkillDir:        resolvedSkillDirs[0],
-		SkillDirs:       resolvedSkillDirs,
-		DiscoverOnly:    true,
-		MCPManager:      mcpRuntime,
-		ProviderConfigs: buildSkillsProviderConfigs(cfg),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("初始化 skills runtime 失败: %w", err)
+	manager := shared
+	ownsManager := false
+	if manager == nil {
+		runtimeConfig, _, err := loadCachedRuntimeConfig(resolveChatRuntimeConfigPath(cfg, session))
+		if err != nil {
+			return nil, fmt.Errorf("加载 skills runtime 配置失败: %w", err)
+		}
+		if runtimeConfig == nil {
+			runtimeConfig = runtimecfg.DefaultRuntimeConfig()
+		}
+		runtimeConfig.HotReload.Enabled = false
+		if session.Model != "" {
+			runtimeConfig.Agent.DefaultModel = session.Model
+		}
+
+		manager, err = runtimebootstrap.NewManager(&runtimebootstrap.Options{
+			Config:          runtimeConfig,
+			SkillDir:        resolvedSkillDirs[0],
+			SkillDirs:       resolvedSkillDirs,
+			DiscoverOnly:    true,
+			MCPManager:      mcpRuntime,
+			ProviderConfigs: buildSkillsProviderConfigs(cfg),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("初始化 skills runtime 失败: %w", err)
+		}
+		ownsManager = true
 	}
 
 	if err := bindSessionModelAlias(manager, session); err != nil {
-		_ = manager.Stop()
+		if ownsManager {
+			_ = manager.Stop()
+		}
 		return nil, err
 	}
 
 	summaries := manager.Registry().ListSummaries()
 	if len(summaries) == 0 {
-		_ = manager.Stop()
+		if ownsManager {
+			_ = manager.Stop()
+		}
 		return nil, nil
 	}
 
@@ -849,6 +871,7 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 
 	binding := &skillsRuntimeBinding{
 		manager:              manager,
+		ownsManager:          ownsManager,
 		count:                len(summaries),
 		exposureTopK:         exposureTopK,
 		exposureMode:         resolveConfiguredSkillExposureMode(cfg.SkillsRuntime, cliSkillsMode),
@@ -871,12 +894,12 @@ func resolveChatRuntimeConfigPath(cfg *config.Config, session *ChatSession) stri
 }
 
 func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []string) []string {
-	if cfg == nil {
-		return nil
-	}
-
 	seen := make(map[string]struct{})
-	resolved := make([]string, 0, 1+len(cfg.SkillDirs)+len(cfg.ExtraSkillDirs)+len(cliSkillDirs)+6)
+	capacity := len(cliSkillDirs) + 6
+	if cfg != nil {
+		capacity += 1 + len(cfg.SkillDirs) + len(cfg.ExtraSkillDirs)
+	}
+	resolved := make([]string, 0, capacity)
 
 	addDir := func(dir string) {
 		resolvedDir := resolveExistingPathValue(dir, true)
@@ -890,25 +913,30 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 		resolved = append(resolved, resolvedDir)
 	}
 
-	addDir(cfg.SkillDir)
-	for _, dir := range cfg.SkillDirs {
-		addDir(dir)
-	}
-	for _, dir := range cfg.ExtraSkillDirs {
-		addDir(dir)
+	if cfg != nil {
+		addDir(cfg.SkillDir)
+		for _, dir := range cfg.SkillDirs {
+			addDir(dir)
+		}
+		for _, dir := range cfg.ExtraSkillDirs {
+			addDir(dir)
+		}
 	}
 	for _, dir := range cliSkillDirs {
 		addDir(dir)
 	}
-	if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
-		if resolvedConfigFile := resolveExistingPathValue(configFile, false); resolvedConfigFile != "" {
-			for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
-				addDir(dir)
+	if cfg != nil {
+		if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
+			if resolvedConfigFile := resolveExistingPathValue(configFile, false); resolvedConfigFile != "" {
+				for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
+					addDir(dir)
+				}
 			}
 		}
 	}
 
-	return resolved
+	// Trusted+enabled plugins contribute skill roots into the existing skill loader path.
+	return mergeActivePluginSkillDirs(resolved)
 }
 
 func bindSessionModelAlias(manager *runtimebootstrap.Manager, session *ChatSession) error {

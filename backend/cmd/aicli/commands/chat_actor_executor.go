@@ -39,6 +39,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if session.RuntimeSession == nil {
 		return "", fmt.Errorf("runtime session is not configured")
 	}
+	if err := ensureChatRuntimeSessionPersisted(session); err != nil {
+		return "", fmt.Errorf("persist runtime session: %w", err)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -120,11 +123,14 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
-	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
-		return "", fmt.Errorf("local runtime host is not configured")
-	}
 	if session.RuntimeSession == nil {
 		return "", fmt.Errorf("runtime session is not configured")
+	}
+	if err := ensureChatRuntimeSessionPersisted(session); err != nil {
+		return "", fmt.Errorf("persist runtime session: %w", err)
+	}
+	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		return "", fmt.Errorf("local runtime host is not configured")
 	}
 	if ctx == nil {
 		ctx = context.Background()

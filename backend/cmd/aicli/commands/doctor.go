@@ -92,10 +92,28 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "诊断 aicli 本地配置、provider 和运行时调用链",
+		Long: `诊断 aicli 本地配置、provider 连通性与运行时调用链。
+
+子命令：
+  doctor provider        对指定 provider 执行可复现调用矩阵
+  doctor subagent-route  预览子 Agent / Team 难度路由（不调用模型）
+
+典型用法：
+  aicli doctor provider
+  aicli doctor provider --provider openai --model gpt-4.1 --json
+  aicli doctor subagent-route --difficulty hard --goal "review auth changes" --json
+
+排错文档：docs/aicli/faq.md`,
 	}
 	providerCmd := &cobra.Command{
 		Use:   "provider",
 		Short: "对指定 provider 执行可复现调用矩阵",
+		Long: `对指定 provider 执行可复现调用矩阵，用于排查 401、超时、默认模型、tools/skills 暴露等问题。
+
+示例：
+  aicli doctor provider
+  aicli doctor provider --provider openai --model gpt-4.1
+  aicli doctor provider --provider local --include-yolo=false --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
 			if err != nil {

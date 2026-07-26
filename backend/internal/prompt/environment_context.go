@@ -46,20 +46,31 @@ func RenderEnvironmentContextBlockFromValues(cwd string, values map[string]inter
 // EnvironmentSnapshot holds session-frozen environment prompt fragments.
 // Capture once at session create / first ensure, then reuse for later turns.
 type EnvironmentSnapshot struct {
-	ContextBlock         string
-	CapabilityGuidance   string
-	ProbedAt             time.Time
-	Values               map[string]interface{}
+	ContextBlock       string
+	CapabilityGuidance string
+	ProbedAt           time.Time
+	Values             map[string]interface{}
 }
 
 // CaptureEnvironmentSnapshot measures the host once and returns rendered prompt
 // fragments suitable for session freeze/reuse.
+//
+// Capability probing happens exactly once per capture: context values and
+// capability guidance are derived from the same report so startup does not
+// re-scan PATH for each prompt fragment.
 func CaptureEnvironmentSnapshot(cwd string) EnvironmentSnapshot {
-	values := CurrentEnvironmentValues()
+	report := DetectEnvironmentCapabilities()
+	values := currentEnvironmentValuesFromReport(report)
+	probedAt := report.ProbedAt
+	if probedAt.IsZero() {
+		probedAt = time.Now().UTC()
+	} else {
+		probedAt = probedAt.UTC()
+	}
 	return EnvironmentSnapshot{
 		ContextBlock:       RenderEnvironmentContextBlockFromValues(cwd, values),
-		CapabilityGuidance: RenderEnvironmentCapabilityGuidance(),
-		ProbedAt:           time.Now().UTC(),
+		CapabilityGuidance: renderEnvironmentCapabilityGuidanceFromReport(report),
+		ProbedAt:           probedAt,
 		Values:             values,
 	}
 }
@@ -67,6 +78,10 @@ func CaptureEnvironmentSnapshot(cwd string) EnvironmentSnapshot {
 // CurrentEnvironmentValues returns shell- and time-related runtime facts that
 // are useful both for prompt injection and runtime summaries.
 func CurrentEnvironmentValues() map[string]interface{} {
+	return currentEnvironmentValuesFromReport(DetectEnvironmentCapabilities())
+}
+
+func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport) map[string]interface{} {
 	shell := runtimeexecutor.DefaultUserShell()
 	now := time.Now()
 	values := map[string]interface{}{
@@ -75,10 +90,10 @@ func CurrentEnvironmentValues() map[string]interface{} {
 		"current_date": now.Format("2006-01-02"),
 		"timezone":     detectedTimezoneLabel(now),
 	}
-	if available := AvailableEnvironmentCommands(); len(available) > 0 {
+	if available := availableEnvironmentCommandsFromReport(report); len(available) > 0 {
 		values["available_commands"] = available
 	}
-	if unavailable := highValueUnavailableCommands(); len(unavailable) > 0 {
+	if unavailable := highValueUnavailableCommandsFromReport(report); len(unavailable) > 0 {
 		values["unavailable_commands"] = unavailable
 	}
 	return values
@@ -102,6 +117,7 @@ func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) strin
 		"Prefer toolkit `ls`/`glob`/`view` for filesystem inspection; use shell for builds, tests, git, and package managers.",
 		"Never invoke toolkit tool names as shell commands (for example `view -path ...` or `grep -pattern ...` inside bash). Call those tools directly with structured args.",
 		"When using shell for multiple independent checks, prefer `commands` batching so one tool call returns all results.",
+		"When several inspections do not depend on each other, batch them in one turn: `view.files`, `grep` with patterns/paths, and shell `commands`.",
 		"Do not treat empty search results as a crash; change the pattern/path or use the dedicated search tool instead of retrying the identical query.",
 		"If shell search fails with regex/path errors, switch to toolkit `grep` (literal=true for fixed text) rather than repairing complex shell quoting.",
 		"Do not put shell globs in the rg path argument (e.g. `rg pattern backend/**/*.go`); use `rg -g \"*.go\" pattern backend` or toolkit `grep` path+glob.",
@@ -159,6 +175,7 @@ func RenderFileEditingGuidance() string {
 		"For long content, prefer skeleton -> append_write chunk(s) -> apply_patch cleanup, instead of one huge full-file write or one huge shell command.",
 		"If a client or runtime-side transport write API is available, prefer that over pushing oversized inline content through model-generated shell text.",
 		"Before editing, re-read the latest nearby context with view/grep; stale @@ context is a common apply_patch failure mode.",
+		"After STALE_CONTEXT / old_string miss / hunk miss, re-view first and rebuild; never replay the same patch or old_string unchanged.",
 		"Keep each apply_patch focused on one file or one nearby change region; split large or multi-file patches.",
 		"For Add File hunks, every content line must start with `+`.",
 		"When using `todos`, keep at most one task `in_progress`; mark the previous task completed/pending before starting another.",
@@ -185,6 +202,8 @@ func RenderParallelToolGuidance() string {
 		"Prefer view.files for multiple file ranges and grep.patterns plus grep.paths for related searches, so one tool result can answer the whole inspection question.",
 		"Use shell.commands for checks or test targets that do not need model decisions between commands; set parallel=true only for independent read-only commands, otherwise keep the default ordered execution, and keep separate tool calls only for true data dependencies.",
 		"Gather all predictable independent evidence in one assistant turn before deciding edits; do not discover unchanged files one at a time.",
+		"For large files, always pass view offset/limit; if is_truncated=true, continue with suggested_next_offset instead of re-viewing the whole file from offset 0.",
+		"Do not repeatedly full-file view the same path; reuse prior evidence or narrow with offset/limit/grep.",
 		"Keep dependent tool calls serial and wait for the earlier result before planning the next dependent step.",
 	}
 
@@ -278,7 +297,11 @@ func environmentValueStringSlice(value interface{}) []string {
 }
 
 func highValueUnavailableCommands() []string {
-	unavailable := UnavailableEnvironmentCommands()
+	return highValueUnavailableCommandsFromReport(DetectEnvironmentCapabilities())
+}
+
+func highValueUnavailableCommandsFromReport(report EnvironmentCapabilityReport) []string {
+	unavailable := unavailableEnvironmentCommandsFromReport(report)
 	if len(unavailable) == 0 {
 		return nil
 	}

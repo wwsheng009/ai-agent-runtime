@@ -170,7 +170,8 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 	}
 	prompt := buildTaskPrompt(teamID, mate.Name, task, digest, teamContext, route)
 	runMeta := &RunMeta{
-		PermissionMode: "bypass_permissions",
+		PermissionMode:        "bypass_permissions",
+		CompletionRequirement: "complete_task",
 		Team: &TeamRunMeta{
 			TeamID:        teamID,
 			AgentID:       strings.TrimSpace(mate.ID),
@@ -707,12 +708,113 @@ func decodeObservedTaskOutcomePayload(output interface{}) (taskOutcomeObservatio
 	if output == nil {
 		return taskOutcomeObservationPayload{}, false
 	}
-	raw, err := json.Marshal(output)
+	switch value := output.(type) {
+	case taskOutcomeObservationPayload:
+		return value, true
+	case *taskOutcomeObservationPayload:
+		if value == nil {
+			return taskOutcomeObservationPayload{}, false
+		}
+		return *value, true
+	case map[string]interface{}:
+		return decodeObservedTaskOutcomePayloadFromJSON(value)
+	case string:
+		return decodeObservedTaskOutcomePayloadFromText(value)
+	case []byte:
+		return decodeObservedTaskOutcomePayloadFromText(string(value))
+	case json.RawMessage:
+		return decodeObservedTaskOutcomePayloadFromText(string(value))
+	default:
+		// Structured tool results are sometimes wrapped in typed structs. Prefer
+		// JSON re-encoding so ReportTaskOutcomeResult and similar payloads decode.
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return taskOutcomeObservationPayload{}, false
+		}
+		return decodeObservedTaskOutcomePayloadFromJSONBytes(raw)
+	}
+}
+
+func decodeObservedTaskOutcomePayloadFromJSON(value interface{}) (taskOutcomeObservationPayload, bool) {
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return taskOutcomeObservationPayload{}, false
 	}
+	return decodeObservedTaskOutcomePayloadFromJSONBytes(raw)
+}
+
+func decodeObservedTaskOutcomePayloadFromJSONBytes(raw []byte) (taskOutcomeObservationPayload, bool) {
 	var payload taskOutcomeObservationPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
+		return taskOutcomeObservationPayload{}, false
+	}
+	if strings.TrimSpace(payload.Status) == "" &&
+		strings.TrimSpace(payload.Outcome) == "" &&
+		strings.TrimSpace(payload.Summary) == "" &&
+		strings.TrimSpace(payload.Blocker) == "" &&
+		strings.TrimSpace(payload.HandoffTo) == "" {
+		return taskOutcomeObservationPayload{}, false
+	}
+	return payload, true
+}
+
+func decodeObservedTaskOutcomePayloadFromText(text string) (taskOutcomeObservationPayload, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return taskOutcomeObservationPayload{}, false
+	}
+	// Prefer structured JSON payloads (object or JSON code block) when present.
+	if strings.HasPrefix(text, "{") || strings.Contains(text, "```") {
+		if payload, ok := decodeObservedTaskOutcomePayloadFromJSONBytes([]byte(text)); ok {
+			return payload, true
+		}
+		if outcome, err := ParseTaskOutcomeContract(text); err == nil {
+			return taskOutcomeObservationPayload{
+				Status:    string(outcome.Status),
+				Outcome:   string(outcome.Status),
+				Summary:   outcome.Summary,
+				Blocker:   outcome.Blocker,
+				HandoffTo: outcome.HandoffTo,
+			}, true
+		}
+	}
+	// Cache-safe summary lines from report_task_outcome / block_current_task.
+	if payload, ok := decodeObservedTaskOutcomePayloadFromCacheSafeSummary(text); ok {
+		return payload, true
+	}
+	if payload, ok := decodeObservedTaskOutcomePayloadFromJSONBytes([]byte(text)); ok {
+		return payload, true
+	}
+	return taskOutcomeObservationPayload{}, false
+}
+
+func decodeObservedTaskOutcomePayloadFromCacheSafeSummary(text string) (taskOutcomeObservationPayload, bool) {
+	var payload taskOutcomeObservationPayload
+	found := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "task outcome:"):
+			value := strings.TrimSpace(trimmed[len("Task outcome:"):])
+			payload.Outcome = value
+			payload.Status = value
+			found = true
+		case strings.HasPrefix(lower, "summary:"):
+			payload.Summary = strings.TrimSpace(trimmed[len("Summary:"):])
+			found = true
+		case strings.HasPrefix(lower, "blocker:"):
+			payload.Blocker = strings.TrimSpace(trimmed[len("Blocker:"):])
+			found = true
+		case strings.HasPrefix(lower, "handoff to:"):
+			payload.HandoffTo = strings.TrimSpace(trimmed[len("Handoff to:"):])
+			found = true
+		}
+	}
+	if !found {
 		return taskOutcomeObservationPayload{}, false
 	}
 	return payload, true

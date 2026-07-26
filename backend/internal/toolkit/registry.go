@@ -72,6 +72,22 @@ func (r *Registry) List() []Tool {
 	return tools
 }
 
+// ListForContext lists tools that pass ShouldList for the given listing context.
+// Tools that do not implement ListableTool are included by default.
+func (r *Registry) ListForContext(listCtx ListToolsContext) []Tool {
+	all := r.List()
+	if len(all) == 0 {
+		return nil
+	}
+	filtered := make([]Tool, 0, len(all))
+	for _, tool := range all {
+		if ShouldList(tool, listCtx) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
 // Execute 执行工具
 func (r *Registry) Execute(ctx context.Context, name string, params map[string]interface{}) (*ToolResult, error) {
 	tool, exists := r.Get(name)
@@ -91,18 +107,14 @@ func (r *Registry) Execute(ctx context.Context, name string, params map[string]i
 
 // GetToolSchemas 获取所有工具的 Schema（用于发送给 AI）
 func (r *Registry) GetToolSchemas() []map[string]interface{} {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	return r.GetToolSchemasForContext(ListToolsContext{})
+}
 
-	names := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	schemas := make([]map[string]interface{}, 0, len(names))
-	for _, name := range names {
-		tool := r.tools[name]
+// GetToolSchemasForContext returns model-facing schemas filtered by ShouldList.
+func (r *Registry) GetToolSchemasForContext(listCtx ListToolsContext) []map[string]interface{} {
+	tools := r.ListForContext(listCtx)
+	schemas := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
 		schema := map[string]interface{}{
 			"name":        tool.Name(),
 			"description": tool.Description(),

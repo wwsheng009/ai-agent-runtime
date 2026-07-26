@@ -23,6 +23,8 @@ type ApprovalResponse struct {
 	Allowed     bool            `json:"allowed"`
 	Reason      string          `json:"reason,omitempty"`
 	PatchedArgs json.RawMessage `json:"patched_args,omitempty"`
+	// Remember requests that an allow decision be stored as a grant (ignored for dangerous tools).
+	Remember bool `json:"remember,omitempty"`
 }
 
 // ApprovalHandler handles interactive approval requests.

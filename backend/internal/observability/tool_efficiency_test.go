@@ -114,6 +114,22 @@ func TestRecordToolDispositionReplay(t *testing.T) {
 	}
 }
 
+func TestRecordDoomLoop(t *testing.T) {
+	prev := GlobalMetrics
+	GlobalMetrics = NewRegistry()
+	t.Cleanup(func() { GlobalMetrics = prev })
+
+	RecordDoomLoop("warning")
+	RecordDoomLoop("warn")
+	RecordDoomLoop("terminated")
+	RecordDoomLoop("hard_stop")
+	RecordDoomLoop("something-else")
+
+	assertCounter(t, MetricDoomLoopTotal, map[string]string{LabelPhase: "warning"}, 2)
+	assertCounter(t, MetricDoomLoopTotal, map[string]string{LabelPhase: "terminated"}, 2)
+	assertCounter(t, MetricDoomLoopTotal, map[string]string{LabelPhase: "unknown"}, 1)
+}
+
 func TestSnapshotToolEfficiency(t *testing.T) {
 	prev := GlobalMetrics
 	GlobalMetrics = NewRegistry()

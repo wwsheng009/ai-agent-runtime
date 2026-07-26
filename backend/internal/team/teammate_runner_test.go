@@ -953,6 +953,44 @@ func TestTeammateRunnerUsesObservedReportTaskOutcomeAsCanonicalResult(t *testing
 	assert.Empty(t, result.ProtocolError)
 }
 
+func TestTeammateRunnerUsesRenderedReportTaskOutcomeObservation(t *testing.T) {
+	runner := &TeammateRunner{
+		Sessions: &staticSessionClient{
+			result: &SessionResult{
+				Success: true,
+				Output:  "Could not complete the task.",
+				Observations: []SessionObservation{
+					{
+						Tool:    "report_task_outcome",
+						Success: true,
+						// Mirrors loop.observe storing Envelope.Render() as a string.
+						Output: "Task outcome: failed\nSummary: auto smoke failed\nBlocker: auto smoke failed",
+					},
+				},
+			},
+		},
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "task-1",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Success)
+	assert.False(t, result.Blocked)
+	assert.True(t, result.Structured)
+	assert.True(t, result.OutcomeApplied)
+	assert.Equal(t, TaskOutcomeFailed, result.Outcome)
+	assert.Equal(t, "auto smoke failed", result.Summary)
+	assert.Equal(t, "auto smoke failed", result.Blocker)
+	assert.Empty(t, result.ProtocolError)
+}
+
 func TestTeammateRunnerUsesObservedBlockCurrentTaskAsCanonicalResult(t *testing.T) {
 	runner := &TeammateRunner{
 		Sessions: &staticSessionClient{

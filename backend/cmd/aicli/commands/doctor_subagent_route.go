@@ -93,6 +93,14 @@ func newDoctorSubagentRouteCommand(getCfg func() *config.Config) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "subagent-route",
 		Short: "预览子 Agent / Team 难度路由结果，不调用模型",
+		Long: `预览 spawn_agent / spawn_team 的难度路由结果，不实际调用模型。
+
+用于确认 difficulty、provider/model override、read-only 与 team 上下文如何落到路由决策。
+角色 / agent 定义见 docs/aicli/agents.md；排错见 docs/aicli/faq.md。
+
+示例：
+  aicli doctor subagent-route --difficulty hard --goal "review auth changes"
+  aicli doctor subagent-route --scope team --workflow spawn_team --task-id t1 --difficulty expert --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
 			if err != nil {

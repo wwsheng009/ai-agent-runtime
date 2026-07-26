@@ -67,15 +67,18 @@ type chatRuntimeEventBridge struct {
 	askQuestion                     func(prompt string, suggestions []string, required bool) (string, error)
 	approveTool                     func(ctx context.Context, sessionID, requestID string, allow bool) error
 	answerQuestion                  func(ctx context.Context, sessionID, questionID, answer string) error
-	writeLine                       func(string)
-	writeDelta                      func(string)
-	finalizeDelta                   func()
-	completeDelta                   func(string) bool
-	writeReasoningDelta             func(*runtimetypes.ReasoningBlock)
-	finalizeReasoning               func()
-	completeReasoning               func(*runtimetypes.ReasoningBlock) bool
-	renderResponse                  func(string)
-	writePrompt                     func()
+	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
+	// from auto-denying tools so askApproval can RPC to an external client.
+	preferInteractiveApprovals bool
+	writeLine                  func(string)
+	writeDelta                 func(string)
+	finalizeDelta              func()
+	completeDelta              func(string) bool
+	writeReasoningDelta        func(*runtimetypes.ReasoningBlock)
+	finalizeReasoning          func()
+	completeReasoning          func(*runtimetypes.ReasoningBlock) bool
+	renderResponse             func(string)
+	writePrompt                func()
 }
 
 type chatRuntimeQueuedEvent struct {
@@ -1093,7 +1096,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			}
 			return
 		}
-		if b.session.NoInteractive {
+		if b.session.NoInteractive && !b.preferInteractiveApprovals {
 			b.setRunError(b.nonInteractiveApprovalError(approval))
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
@@ -1155,6 +1158,12 @@ func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event r
 		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
 	case runtimechat.EventToolStarted, "tool.requested":
 		b.session.Interaction.SetAgentStageDetail(chatAgentStageToolRunning, runtimeEventToolName(event))
+	case "tool.progress":
+		// Light stage detail only — progress is high-frequency and must not
+		// hard-block the composer the way late tool start/finish does.
+		if detail := chatToolProgressStageDetail(event); detail != "" {
+			b.session.Interaction.SetAgentStageDetail(chatAgentStageToolRunning, detail)
+		}
 	}
 }
 
@@ -1201,6 +1210,10 @@ func (b *chatRuntimeEventBridge) shouldSuppressLatePrimaryRunEvent(event runtime
 	case runtimechat.EventToolStarted, "tool.requested":
 		return true
 	case runtimechat.EventToolFinished, "tool.completed":
+		return true
+	case "tool.progress":
+		// Live-only mid-tool updates: drop after the primary run settles so the
+		// timeline is not spammed by late progress from finishing tools.
 		return true
 	default:
 		return false
@@ -2549,6 +2562,8 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		lines := []string{fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))}
 		lines = append(lines, compactToolContextLines(event.Payload)...)
 		return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n")}
+	case "tool.progress":
+		return renderToolProgressTimelineEvent(event)
 	case runtimechat.EventApprovalRequested:
 		return renderApprovalRequestedTimelineEvent(event)
 	case runtimechat.EventQuestionAsked:
@@ -4245,6 +4260,62 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 		return ""
 	}
 	return "[llm-debug] request_finished " + strings.Join(parts, " ")
+}
+
+// renderToolProgressTimelineEvent formats live tool.progress notifications.
+// Progress is high-frequency and live-only; keep the line compact.
+func renderToolProgressTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	toolName := firstNonEmptyChatValue(runtimeEventToolName(event), "tool")
+	message := truncateChatRuntimeText(payloadStringValue(event.Payload["message"]), 120)
+	partial := truncateChatRuntimeText(payloadStringValue(event.Payload["partial"]), 80)
+	percent, hasPercent := payloadFloatValue(event.Payload, "percent")
+	parts := []string{"• Progress", toolName}
+	if hasPercent && percent > 0 {
+		if percent == float64(int(percent)) {
+			parts = append(parts, fmt.Sprintf("%d%%", int(percent)))
+		} else {
+			parts = append(parts, fmt.Sprintf("%.1f%%", percent))
+		}
+	}
+	if message != "" {
+		parts = append(parts, message)
+	}
+	if partial != "" {
+		parts = append(parts, "("+partial+")")
+	}
+	if len(parts) == 2 && message == "" && partial == "" && !(hasPercent && percent > 0) {
+		// Bare tool name with no details is noise; skip.
+		return chatRuntimeTimelineEvent{}
+	}
+	callID := payloadStringValue(event.Payload["tool_call_id"])
+	dedup := firstNonEmptyChatValue(callID, toolName) + ":" + message + ":" + partial
+	if hasPercent && percent > 0 {
+		dedup += fmt.Sprintf(":%.0f", percent)
+	}
+	return chatRuntimeTimelineEvent{
+		Line:     strings.Join(parts, " "),
+		DedupKey: "tool.progress:" + dedup,
+	}
+}
+
+// chatToolProgressStageDetail builds a short composer stage label from progress.
+func chatToolProgressStageDetail(event runtimeevents.Event) string {
+	toolName := runtimeEventToolName(event)
+	if toolName == "" {
+		return ""
+	}
+	message := truncateChatRuntimeText(payloadStringValue(event.Payload["message"]), 48)
+	percent, hasPercent := payloadFloatValue(event.Payload, "percent")
+	if hasPercent && percent > 0 {
+		if message != "" {
+			return fmt.Sprintf("%s %d%% %s", toolName, int(percent), message)
+		}
+		return fmt.Sprintf("%s %d%%", toolName, int(percent))
+	}
+	if message != "" {
+		return toolName + " " + message
+	}
+	return toolName
 }
 
 func renderSubagentCompletedTimelineEvent(event runtimeevents.Event) string {

@@ -82,3 +82,133 @@ func TestEngineUsesCapabilityScopeBeforeApprovalDecision(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, DecisionAllow, decision.Type)
 }
+
+func TestEnginePlanModeWriteAllowPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty paths keep legacy plan deny for CapWriteFS", func(t *testing.T) {
+		engine := &Engine{Mode: ModePlan}
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "write",
+			Mode:     ModePlan,
+			Args:     map[string]interface{}{"file_path": "plan.md", "content": "x"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DecisionDeny, decision.Type)
+		assert.Equal(t, "mode:plan_denies_non_readonly", decision.Reason)
+	})
+
+	t.Run("allow matching plan.md path", func(t *testing.T) {
+		engine := &Engine{
+			Mode:                ModePlan,
+			PlanWriteAllowPaths: DefaultPlanWriteAllowPaths(),
+		}
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "write",
+			Mode:     ModePlan,
+			Args:     map[string]interface{}{"file_path": "plan.md", "content": "# plan"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DecisionAllow, decision.Type)
+		assert.Equal(t, "mode:plan_mode_write_path_allowed", decision.Reason)
+		assert.Equal(t, StageMode, decision.Stage)
+	})
+
+	t.Run("allow basename match under nested path", func(t *testing.T) {
+		engine := &Engine{
+			Mode:                ModePlan,
+			PlanWriteAllowPaths: []string{"plan.md"},
+		}
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "edit",
+			Mode:     ModePlan,
+			Args:     map[string]interface{}{"file_path": "docs/plan.md", "old_string": "a", "new_string": "b"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DecisionAllow, decision.Type)
+		assert.Equal(t, "mode:plan_mode_write_path_allowed", decision.Reason)
+	})
+
+	t.Run("deny non-matching write path", func(t *testing.T) {
+		engine := &Engine{
+			Mode:                ModePlan,
+			PlanWriteAllowPaths: DefaultPlanWriteAllowPaths(),
+		}
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "write",
+			Mode:     ModePlan,
+			Args:     map[string]interface{}{"file_path": "main.go", "content": "package main"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DecisionDeny, decision.Type)
+		assert.Equal(t, "mode:plan_mode_write_path_not_allowed", decision.Reason)
+	})
+
+	t.Run("allow apply_patch mentioning plan path", func(t *testing.T) {
+		engine := &Engine{
+			Mode:                ModePlan,
+			PlanWriteAllowPaths: DefaultPlanWriteAllowPaths(),
+		}
+		patchText := "Update File: plan.md\n@@\n+# step\n"
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "apply_patch",
+			Mode:     ModePlan,
+			Args: map[string]interface{}{
+				"patch": patchText,
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DecisionAllow, decision.Type)
+		assert.Equal(t, "mode:plan_mode_write_path_allowed", decision.Reason)
+	})
+
+	t.Run("read tools still allow under plan", func(t *testing.T) {
+		engine := &Engine{
+			Mode:                ModePlan,
+			PlanWriteAllowPaths: DefaultPlanWriteAllowPaths(),
+		}
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "view",
+			Mode:     ModePlan,
+			Args:     map[string]interface{}{"file_path": "main.go"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DecisionAllow, decision.Type)
+	})
+}
+
+func TestEnsureAndSetPlanWriteAllowPaths(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{}
+	EnsurePlanWriteAllowPaths(engine)
+	assert.Equal(t, []string{DefaultPlanFileName}, engine.PlanWriteAllowPaths)
+
+	// second ensure is a no-op when already set
+	engine.PlanWriteAllowPaths = []string{"custom-plan.md"}
+	EnsurePlanWriteAllowPaths(engine)
+	assert.Equal(t, []string{"custom-plan.md"}, engine.PlanWriteAllowPaths)
+
+	SetPlanWriteAllowPaths(engine)
+	assert.Equal(t, []string{DefaultPlanFileName}, engine.PlanWriteAllowPaths)
+
+	SetPlanWriteAllowPaths(engine, " docs/plan.md ", "docs/plan.md", "")
+	assert.Equal(t, []string{"docs/plan.md"}, engine.PlanWriteAllowPaths)
+}
+
+func TestEnginePlanModeAllowsEnterExitPlanModeTools(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{
+		Mode:                ModePlan,
+		PlanWriteAllowPaths: DefaultPlanWriteAllowPaths(),
+	}
+	for _, toolName := range []string{"enter_plan_mode", "exit_plan_mode"} {
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: toolName,
+			Mode:     ModePlan,
+		})
+		require.NoError(t, err, toolName)
+		assert.Equal(t, DecisionAllow, decision.Type, toolName)
+	}
+}

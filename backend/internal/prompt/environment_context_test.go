@@ -20,6 +20,9 @@ func TestRenderShellExecutionGuidance_PrefersDedicatedSearchTools(t *testing.T) 
 	if !strings.Contains(got, "commands") {
 		t.Fatalf("expected bash commands batch guidance, got:\n%s", got)
 	}
+	if !strings.Contains(got, "view.files") {
+		t.Fatalf("expected view.files batching guidance, got:\n%s", got)
+	}
 	if !strings.Contains(got, "empty search results") {
 		t.Fatalf("expected empty-search recovery guidance, got:\n%s", got)
 	}
@@ -70,6 +73,12 @@ func TestRenderParallelToolGuidance_EncouragesBatchedReadOnlyInspections(t *test
 	if !strings.Contains(got, "dependent tool calls serial") {
 		t.Fatalf("expected serial dependency guidance, got:\n%s", got)
 	}
+	if !strings.Contains(got, "suggested_next_offset") || !strings.Contains(got, "offset/limit") {
+		t.Fatalf("expected large-file offset/limit efficiency guidance, got:\n%s", got)
+	}
+	if !strings.Contains(got, "repeatedly full-file view") {
+		t.Fatalf("expected anti-repeat full-file view guidance, got:\n%s", got)
+	}
 }
 
 func TestRenderFileEditingGuidance_PrefersApplyPatchForCodeEdits(t *testing.T) {
@@ -89,6 +98,9 @@ func TestRenderFileEditingGuidance_PrefersApplyPatchForCodeEdits(t *testing.T) {
 	}
 	if !strings.Contains(got, "stale @@ context") {
 		t.Fatalf("expected apply_patch context guidance, got:\n%s", got)
+	}
+	if !strings.Contains(got, "STALE_CONTEXT") {
+		t.Fatalf("expected STALE_CONTEXT recovery guidance, got:\n%s", got)
 	}
 	if !strings.Contains(got, "every content line must start with `+`") {
 		t.Fatalf("expected Add File line-prefix guidance, got:\n%s", got)

@@ -18,9 +18,13 @@ func NewExecCommand(getCfg func() *config.Config) *cobra.Command {
 支持：
   aicli exec [OPTIONS] [PROMPT]
   aicli exec resume [SESSION_ID] [PROMPT]
-  aicli exec review [--uncommitted|--base|--commit] [指令]`,
+  aicli exec review [--uncommitted|--base|--commit] [指令]
+
+使用前请先完成 provider 登录（aicli login）并可用 aicli doctor provider 做连通性检查。
+输出契约、退出码与 CI 示例见 docs/aicli/exec.md；排错见 docs/aicli/faq.md。`,
 		Example: `  aicli exec "解释这段代码的作用"
   cat main.go | aicli exec -p "分析代码质量"
+  aicli exec --provider openai --model gpt-4.1 "生成变更摘要"
   aicli exec --json "创建一个 Hello World 程序"
   aicli exec resume --last
   aicli exec review --uncommitted`,

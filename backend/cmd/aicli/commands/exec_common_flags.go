@@ -29,7 +29,9 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.Bool("json", false, "以 JSONL 事件流格式输出")
 	flags.String("output", "", "输出格式（text|json）")
 	flags.StringP("output-last-message", "o", "", "将最后消息写入文件")
-	flags.String("output-schema", "", "最终 assistant 消息的 JSON Schema 文件路径或内联 JSON")
+	if !has("output-schema") {
+		flags.String("output-schema", "", "最终 assistant 消息的 JSON Schema 文件路径或内联 JSON")
+	}
 	flags.Bool("envelope", false, "JSON 输出使用 envelope 结构")
 
 	flags.Bool("ephemeral", false, "不持久化会话文件")

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -43,6 +44,9 @@ type SubagentTask struct {
 	BudgetTokens        int         `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
 	TimeoutSec          int         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	ReadOnly            bool        `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	// CompletionRequirement is none|complete_task for child harness loops.
+	// Empty inherits none at the child factory (team workers set complete_task via RunMeta).
+	CompletionRequirement string `json:"completion_requirement,omitempty" yaml:"completion_requirement,omitempty"`
 }
 
 // SubagentResult 是父代理可见的结构化回执。
@@ -132,8 +136,9 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 		return nil, fmt.Errorf("subagent scheduler is nil")
 	}
 	if options.Depth > s.config.MaxDepth {
-		err := fmt.Errorf(
-			"subagent spawn depth limit reached before child creation: requested_depth=%d max_depth=%d; continue the work in the current agent instead of retrying the same spawn",
+		err := runtimeerrors.Newf(
+			runtimeerrors.ErrAgentSpawnDepthLimit,
+			"subagent spawn depth limit reached before child creation: requested_depth=%d max_depth=%d; next_action=complete_locally_or_use_spawn_team — continue the work in the current agent instead of retrying the same spawn",
 			options.Depth, s.config.MaxDepth,
 		)
 		s.emitSubagentDenied(options, "", "max_depth", err.Error(), map[string]interface{}{

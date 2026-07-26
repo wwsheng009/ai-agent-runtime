@@ -4,6 +4,7 @@ import {
   GlobeIcon,
   HistoryIcon,
   ImageIcon,
+  ScrollTextIcon,
   SparklesIcon,
 } from "lucide-react";
 import {
@@ -17,6 +18,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { type Artifact } from "@/data/mock";
 import { useRuntimeCheckpoints } from "@/hooks/workspace/use-runtime-checkpoints";
+import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import {
   classifyArtifactCategory,
   formatArtifactCategory,
@@ -30,6 +32,14 @@ const ArtifactPanelCheckpointSurface = lazy(() =>
     }),
   ),
 );
+
+const ArtifactPanelPlanSurface = lazy(() =>
+  import("@/components/workspace/artifact-panel-plan-surface").then((module) => ({
+    default: module.ArtifactPanelPlanSurface,
+  })),
+);
+
+type ArtifactPanelSurface = "artifacts" | "checkpoints" | "plan";
 
 type ArtifactPanelProps = {
   artifacts: Artifact[];
@@ -54,7 +64,7 @@ function iconForArtifact(kind: Artifact["kind"]) {
 
 function surfaceButtonClass(
   active: boolean,
-  tone: "artifact" | "checkpoint",
+  tone: "artifact" | "checkpoint" | "plan",
   disabled = false,
 ) {
   if (disabled) {
@@ -70,12 +80,31 @@ function surfaceButtonClass(
     );
   }
 
+  if (tone === "plan") {
+    return cn(
+      "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
+      active
+        ? "border-[#9db7ff]/30 bg-[#9db7ff]/10 text-[#9db7ff]"
+        : "border-white/10 bg-white/4 text-[var(--muted-foreground)] hover:border-white/16 hover:bg-white/8",
+    );
+  }
+
   return cn(
     "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
     active
       ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
       : "border-white/10 bg-white/4 text-[var(--muted-foreground)] hover:border-white/16 hover:bg-white/8",
   );
+}
+
+function surfaceFromIndex(index: number): ArtifactPanelSurface {
+  if (index === 1) {
+    return "plan";
+  }
+  if (index === 2) {
+    return "checkpoints";
+  }
+  return "artifacts";
 }
 
 function getEnabledTabIndices(disabledStates: boolean[]) {
@@ -136,12 +165,14 @@ export function ArtifactPanel({
   const asideTitleId = useId();
   const asideDescriptionId = useId();
   const artifactSurfaceTabId = useId();
+  const planSurfaceTabId = useId();
   const checkpointSurfaceTabId = useId();
   const artifactSurfacePanelId = useId();
+  const planSurfacePanelId = useId();
   const checkpointSurfacePanelId = useId();
   const surfaceTabRefs = useState<Array<HTMLButtonElement | null>>([])[0];
-  const [activeSurface, setActiveSurface] = useState<"artifacts" | "checkpoints">(
-    artifacts.length > 0 ? "artifacts" : "checkpoints",
+  const [activeSurface, setActiveSurface] = useState<ArtifactPanelSurface>(
+    artifacts.length > 0 ? "artifacts" : "plan",
   );
 
   const {
@@ -167,11 +198,27 @@ export function ArtifactPanel({
     sessionId,
   });
 
+  const {
+    canSubmitDecision,
+    notesDraft,
+    onNotesDraftChange,
+    plan,
+    planActionPending,
+    planError,
+    planLoading,
+    planStatusLabel,
+    reloadPlan,
+    submitDecision,
+  } = useRuntimePlanMode({
+    lastRuntimeEventType,
+    sessionId,
+  });
+
   const resolvedActiveSurface =
-    artifacts.length === 0 && checkpoints.length > 0
-      ? "checkpoints"
-      : checkpoints.length === 0 && artifacts.length > 0
-        ? "artifacts"
+    artifacts.length === 0 && plan?.active
+      ? "plan"
+      : artifacts.length === 0 && checkpoints.length > 0 && !plan?.active
+        ? "checkpoints"
         : activeSurface;
   const evidenceArtifacts = artifacts.filter(
     (artifact) => classifyArtifactCategory(artifact) === "evidence",
@@ -185,7 +232,7 @@ export function ArtifactPanel({
   const selectedArtifactCategory = selectedArtifact
     ? classifyArtifactCategory(selectedArtifact)
     : null;
-  const surfaceTabDisabledStates = [false, !sessionId];
+  const surfaceTabDisabledStates = [false, !sessionId, !sessionId];
   const artifactSelectionAnnouncement = selectedArtifact
     ? `${formatArtifactCategory(selectedArtifactCategory ?? "file")} selected: ${
         selectedArtifact.name
@@ -325,7 +372,7 @@ export function ArtifactPanel({
         {artifactSelectionAnnouncement}
       </div>
       <div className="sr-only" id={asideDescriptionId}>
-        Workspace artifacts and restore points for the current thread.
+        Workspace artifacts, plan preview, and restore points for the current thread.
       </div>
       <div className="border-b border-white/8 px-3 py-2.5">
         <div className="flex items-center justify-between gap-3">
@@ -353,8 +400,7 @@ export function ArtifactPanel({
                 handleHorizontalTabKeyDown(event, {
                   currentIndex: 0,
                   disabledStates: surfaceTabDisabledStates,
-                  onSelectIndex: (index) =>
-                    setActiveSurface(index === 0 ? "artifacts" : "checkpoints"),
+                  onSelectIndex: (index) => setActiveSurface(surfaceFromIndex(index)),
                   refs: surfaceTabRefs,
                 })
               }
@@ -367,11 +413,45 @@ export function ArtifactPanel({
               Items
             </button>
             <button
+              aria-controls={planSurfacePanelId}
+              aria-selected={resolvedActiveSurface === "plan"}
+              id={planSurfaceTabId}
+              ref={(node) => {
+                surfaceTabRefs[1] = node;
+              }}
+              role="tab"
+              tabIndex={resolvedActiveSurface === "plan" ? 0 : -1}
+              type="button"
+              onClick={() => setActiveSurface("plan")}
+              onKeyDown={(event) =>
+                handleHorizontalTabKeyDown(event, {
+                  currentIndex: 1,
+                  disabledStates: surfaceTabDisabledStates,
+                  onSelectIndex: (index) => setActiveSurface(surfaceFromIndex(index)),
+                  refs: surfaceTabRefs,
+                })
+              }
+              className={surfaceButtonClass(
+                resolvedActiveSurface === "plan",
+                "plan",
+                !sessionId,
+              )}
+              disabled={!sessionId}
+            >
+              <ScrollTextIcon size={14} />
+              Plan
+              {plan?.active ? (
+                <span className="rounded-full bg-[#9db7ff]/20 px-1.5 py-0.5 text-[10px] tracking-[0.08em] text-[#9db7ff]">
+                  live
+                </span>
+              ) : null}
+            </button>
+            <button
               aria-controls={checkpointSurfacePanelId}
               aria-selected={resolvedActiveSurface === "checkpoints"}
               id={checkpointSurfaceTabId}
               ref={(node) => {
-                surfaceTabRefs[1] = node;
+                surfaceTabRefs[2] = node;
               }}
               role="tab"
               tabIndex={resolvedActiveSurface === "checkpoints" ? 0 : -1}
@@ -379,10 +459,9 @@ export function ArtifactPanel({
               onClick={() => setActiveSurface("checkpoints")}
               onKeyDown={(event) =>
                 handleHorizontalTabKeyDown(event, {
-                  currentIndex: 1,
+                  currentIndex: 2,
                   disabledStates: surfaceTabDisabledStates,
-                  onSelectIndex: (index) =>
-                    setActiveSurface(index === 0 ? "artifacts" : "checkpoints"),
+                  onSelectIndex: (index) => setActiveSurface(surfaceFromIndex(index)),
                   refs: surfaceTabRefs,
                 })
               }
@@ -411,6 +490,35 @@ export function ArtifactPanel({
         role="tabpanel"
       >
         {artifactSurface}
+      </div>
+      <div
+        aria-labelledby={planSurfaceTabId}
+        className="min-h-0 flex-1"
+        hidden={resolvedActiveSurface !== "plan"}
+        id={planSurfacePanelId}
+        role="tabpanel"
+      >
+        {resolvedActiveSurface === "plan" ? (
+          <Suspense fallback={<ArtifactPanelPlanFallback />}>
+            <ArtifactPanelPlanSurface
+              canSubmitDecision={canSubmitDecision}
+              notesDraft={notesDraft}
+              onNotesDraftChange={onNotesDraftChange}
+              onReload={() => {
+                void reloadPlan();
+              }}
+              onSubmitDecision={(decision) => {
+                void submitDecision(decision);
+              }}
+              plan={plan}
+              planActionPending={planActionPending}
+              planError={planError}
+              planLoading={planLoading}
+              planStatusLabel={planStatusLabel}
+              sessionId={sessionId}
+            />
+          </Suspense>
+        ) : null}
       </div>
       <div
         aria-labelledby={checkpointSurfaceTabId}
@@ -453,6 +561,16 @@ function ArtifactPanelCheckpointFallback() {
     <div className="grid min-h-0 flex-1 gap-3 overflow-auto p-3">
       <div className="flex min-h-[14rem] items-center justify-center rounded-[0.9rem] border border-white/8 bg-white/[0.035] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)]">
         正在加载 restore points…
+      </div>
+    </div>
+  );
+}
+
+function ArtifactPanelPlanFallback() {
+  return (
+    <div className="grid min-h-0 flex-1 gap-3 overflow-auto p-3">
+      <div className="flex min-h-[14rem] items-center justify-center rounded-[0.9rem] border border-white/8 bg-white/[0.035] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)]">
+        正在加载 plan preview…
       </div>
     </div>
   );

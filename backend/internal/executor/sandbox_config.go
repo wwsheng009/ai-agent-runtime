@@ -1,10 +1,17 @@
 package executor
 
+import (
+	"strings"
+)
+
 // CloneSandboxConfig returns a defensive copy of a sandbox config.
 func CloneSandboxConfig(cfg SandboxConfig) SandboxConfig {
 	return SandboxConfig{
 		Enabled:          cfg.Enabled,
 		MaxExecutionTime: cfg.MaxExecutionTime,
+		Profile:          cfg.Profile,
+		BlockNetwork:     cfg.BlockNetwork,
+		OSSandbox:        cfg.OSSandbox,
 		AllowedPaths:     cloneStrings(cfg.AllowedPaths),
 		DeniedPaths:      cloneStrings(cfg.DeniedPaths),
 		ReadOnlyPaths:    cloneStrings(cfg.ReadOnlyPaths),
@@ -26,6 +33,20 @@ func OverlaySandboxConfig(base *SandboxConfig, override SandboxConfig) {
 	}
 	if override.MaxExecutionTime > 0 {
 		base.MaxExecutionTime = override.MaxExecutionTime
+	}
+	if override.Profile != "" {
+		base.Profile = override.Profile
+	}
+	if override.BlockNetwork {
+		base.BlockNetwork = true
+	}
+	if raw := strings.TrimSpace(override.OSSandbox); raw != "" {
+		if mode, err := NormalizeOSSandboxMode(raw); err == nil {
+			base.OSSandbox = mode
+		} else {
+			// Preserve raw invalid value so validation can surface it.
+			base.OSSandbox = raw
+		}
 	}
 	if len(override.AllowedPaths) > 0 {
 		base.AllowedPaths = cloneStrings(override.AllowedPaths)
@@ -55,8 +76,11 @@ func OverlaySandboxConfig(base *SandboxConfig, override SandboxConfig) {
 
 // SandboxConfigActive reports whether a sandbox config contains effective restrictions.
 func SandboxConfigActive(cfg SandboxConfig) bool {
+	osMode, _ := NormalizeOSSandboxMode(cfg.OSSandbox)
 	return cfg.Enabled ||
 		cfg.MaxExecutionTime > 0 ||
+		cfg.BlockNetwork ||
+		(osMode != "" && osMode != OSSandboxModeOff) ||
 		len(cfg.AllowedPaths) > 0 ||
 		len(cfg.DeniedPaths) > 0 ||
 		len(cfg.ReadOnlyPaths) > 0 ||

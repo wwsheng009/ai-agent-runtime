@@ -17,6 +17,9 @@ import (
 // the primary task substrate.
 type AgentControlTaskRegistry struct {
 	Store Store
+	// Claims is the optional ambient-team path claim lifecycle handle.
+	// When set, release/retry/terminal/renew also update path claims.
+	Claims *PathClaimManager
 }
 
 type agentControlTaskRecordReaderStore interface {
@@ -66,6 +69,27 @@ var _ TaskRouteAuditSink = AgentControlTaskRegistry{}
 // store.
 func NewAgentControlTaskRegistry(store Store) AgentControlTaskRegistry {
 	return AgentControlTaskRegistry{Store: store}
+}
+
+// WithClaims returns a copy of the registry that also drives path-claim
+// release/renew side effects through PathClaimManager.
+func (r AgentControlTaskRegistry) WithClaims(claims *PathClaimManager) AgentControlTaskRegistry {
+	r.Claims = claims
+	return r
+}
+
+func (r AgentControlTaskRegistry) releasePathClaims(ctx context.Context, taskID string) {
+	if r.Claims == nil {
+		return
+	}
+	_ = r.Claims.Release(ctx, taskID)
+}
+
+func (r AgentControlTaskRegistry) renewPathClaims(ctx context.Context, taskID string, leaseUntil time.Time) {
+	if r.Claims == nil {
+		return
+	}
+	_ = r.Claims.Renew(ctx, taskID, leaseUntil)
 }
 
 // ListAgentControlTasks projects team tasks into AgentControl task records.
@@ -1044,6 +1068,7 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTaskTerminal(ctx context.Con
 			mate = record
 		}
 	}
+	r.releasePathClaims(ctx, request.ID)
 	record := AgentControlTaskRecord(*task, mate)
 	return &record, nil
 }
@@ -1129,6 +1154,8 @@ func (r AgentControlTaskRegistry) BlockAgentControlTask(ctx context.Context, req
 			mate = record
 		}
 	}
+	// Blocked tasks no longer hold exclusive path leases; release when Claims is wired.
+	r.releasePathClaims(ctx, request.ID)
 	record := AgentControlTaskRecord(*task, mate)
 	return &record, nil
 }
@@ -1225,6 +1252,7 @@ func (r AgentControlTaskRegistry) ReleaseAgentControlTask(ctx context.Context, r
 			mate = record
 		}
 	}
+	r.releasePathClaims(ctx, request.ID)
 	record := AgentControlTaskRecord(*task, mate)
 	return &record, nil
 }
@@ -1261,6 +1289,7 @@ func (r AgentControlTaskRegistry) RenewAgentControlTaskLease(ctx context.Context
 			mate = record
 		}
 	}
+	r.renewPathClaims(ctx, request.ID, request.LeaseUntil)
 	record := AgentControlTaskRecord(*task, mate)
 	return &record, nil
 }
@@ -1309,6 +1338,8 @@ func (r AgentControlTaskRegistry) RetryAgentControlTask(ctx context.Context, req
 			mate = record
 		}
 	}
+	// Retry/reclaim drops the prior assignee lease; free path claims for reassignment.
+	r.releasePathClaims(ctx, request.ID)
 	record := AgentControlTaskRecord(*task, mate)
 	return &record, nil
 }

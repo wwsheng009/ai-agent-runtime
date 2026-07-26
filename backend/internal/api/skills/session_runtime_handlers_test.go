@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -657,7 +658,9 @@ func TestSubmitSessionRuntimeCommand_SubmitPromptReturnsAcceptedWhenApprovalIsPe
 					{
 						ID:   "tool_shell_1",
 						Name: "run_shell_command",
-						Args: map[string]interface{}{"command": "rg pending"},
+						// Must not be shell-readonly (e.g. "rg …"); those auto-allow and
+						// complete submit_prompt with 200 instead of waiting_approval/202.
+						Args: map[string]interface{}{"command": "git commit -m pending"},
 					},
 				},
 			},
@@ -1529,6 +1532,121 @@ func TestStreamSessionRuntimeEventsWakesFromEventWatcher(t *testing.T) {
 	assert.Contains(t, rec.BodyString(), "event: runtime_event")
 	assert.Contains(t, rec.BodyString(), `"type":"assistant_message"`)
 	assert.Contains(t, rec.BodyString(), `"content":"watcher stream response"`)
+}
+
+func TestStreamSessionRuntimeEventsLiveProgressFromBus(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	// Arm durable bridge via bus accessor; tool.progress must still stay non-persisted.
+	_ = handler.getRuntimeEventBus()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-stream-live/runtime/stream?live=1&poll_ms=5000", nil).WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-stream-live"})
+	rec := newSynchronizedResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		handler.StreamSessionRuntimeEvents(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(80 * time.Millisecond)
+	handler.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      toolprotocol.EventTypeProgress,
+		SessionID: "session-runtime-stream-live",
+		ToolName:  "shell",
+		TraceID:   "trace-live-progress",
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-live-1",
+			"kind":         "progress",
+			"message":      "running step 1",
+			"percent":      40.0,
+		},
+	})
+	// Other session must not leak into this stream.
+	handler.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      toolprotocol.EventTypeProgress,
+		SessionID: "session-other",
+		ToolName:  "shell",
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-other",
+			"message":      "should-not-appear",
+		},
+	})
+
+	require.Eventually(t, func() bool {
+		body := rec.BodyString()
+		return strings.Contains(body, `"type":"tool.progress"`) &&
+			strings.Contains(body, `"running step 1"`) &&
+			strings.Contains(body, `"live":true`)
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// Progress remains live-only: not written to the durable session store.
+	stored, err := runtimeStore.ListEvents(context.Background(), "session-runtime-stream-live", 0, 0)
+	require.NoError(t, err)
+	for _, event := range stored {
+		assert.NotEqual(t, toolprotocol.EventTypeProgress, event.Type)
+	}
+
+	body := rec.BodyString()
+	assert.Contains(t, body, "event: runtime_event")
+	assert.Contains(t, body, `"tool_call_id":"call-live-1"`)
+	assert.NotContains(t, body, "should-not-appear")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not exit after context cancellation")
+	}
+}
+
+func TestStreamSessionRuntimeEventsWithoutLiveFlagIgnoresBusProgress(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-stream-no-live/runtime/stream?poll_ms=5000", nil).WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-stream-no-live"})
+	rec := newSynchronizedResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		handler.StreamSessionRuntimeEvents(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(80 * time.Millisecond)
+	handler.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      toolprotocol.EventTypeProgress,
+		SessionID: "session-runtime-stream-no-live",
+		ToolName:  "shell",
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-hidden",
+			"message":      "progress-without-live-flag",
+		},
+	})
+
+	time.Sleep(200 * time.Millisecond)
+	assert.NotContains(t, rec.BodyString(), "progress-without-live-flag")
+	assert.NotContains(t, rec.BodyString(), `"type":"tool.progress"`)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not exit after context cancellation")
+	}
 }
 
 func TestStreamSessionRuntimeEventsIncludesCompactProvenanceSummary(t *testing.T) {

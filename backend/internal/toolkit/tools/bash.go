@@ -714,6 +714,30 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	cmd.Dir = resolvedWorkdir
 	cmd.Env = runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ())
 
+	// Optional OS-level wrap (Linux bubblewrap when configured). Application-
+	// layer policy already ran above; auto degrades with warnings, require fails closed.
+	if launch, wrapErr := b.sandbox.PrepareOSCommand(cmdCtx, shellCmd[0], shellCmd[1:], resolvedWorkdir, cmd.Env); wrapErr != nil {
+		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied os isolation", wrapErr, map[string]interface{}{
+			"policy":    "sandbox",
+			"operation": string(runtimeexecutor.OpExecute),
+			"command":   mainCmd,
+			"launcher":  shellCmd[0],
+			"os_mode":   b.sandbox.Config().OSSandbox,
+		})
+	} else {
+		cmd = exec.CommandContext(cmdCtx, launch.Command, launch.Args...)
+		if strings.TrimSpace(launch.WorkDir) != "" {
+			cmd.Dir = launch.WorkDir
+		} else if !launch.Applied {
+			cmd.Dir = resolvedWorkdir
+		}
+		if launch.Env != nil {
+			cmd.Env = launch.Env
+		}
+		// Surface explicit degrade notices in structured metadata when present.
+		_ = launch.Warnings
+	}
+
 	// PowerShell 需要 UTF-8 输出编码
 	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
 		prefixPowershellUTF8(cmd)

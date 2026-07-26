@@ -43,7 +43,10 @@ func NewSkillCommand() *cobra.Command {
 		Use:     "skill",
 		Aliases: []string{"skills"},
 		Short:   "管理 Codex 风格 skill",
-		Long:    "安装项目内置或外部 Codex 风格 skill 目录（包含 SKILL.md）到目标工具的 skills 根目录。",
+		Long: "安装项目内置或外部 Codex 风格 skill 目录（包含 SKILL.md）到目标工具的 skills 根目录。\n\n" +
+			"CLI 安装示例见 docs/aicli/install.md；\n" +
+			"chat 内 skills 暴露 / 路由说明见 docs/skill_runtime/aicli_skills_usage.md；\n" +
+			"角色 agent 与 skill 内 agents/openai.yaml 的区别见 docs/aicli/agents.md。",
 	}
 	cmd.AddCommand(newSkillInstallCommand())
 	return cmd

@@ -1264,7 +1264,7 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 	if task == nil || task.Status != team.TaskStatusFailed {
 		t.Fatalf("expected failed task, got %+v", task)
 	}
-	if strings.TrimSpace(task.Summary) != "Could not complete the task." {
+	if strings.TrimSpace(task.Summary) != "auto smoke failed" {
 		t.Fatalf("expected failed task summary, got %+v", task)
 	}
 
@@ -2129,7 +2129,7 @@ func (p *failedAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 				return &runtimellm.LLMResponse{Content: "team-failed task-failed", Model: req.Model}, nil
 			case "call-report-failed":
 				return &runtimellm.LLMResponse{
-					Content: "Could not complete the task.\n\n```json\n{\"task_status\":\"failed\",\"summary\":\"auto smoke failed\"}\n```",
+					Content: "Could not complete the task.\n\n```json\n{\"task_status\":\"failed\",\"summary\":\"auto smoke failed\",\"blocker\":\"auto smoke failed\"}\n```",
 					Model:   req.Model,
 				}, nil
 			}
@@ -2179,6 +2179,7 @@ func (p *failedAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 							Args: map[string]interface{}{
 								"task_status": "failed",
 								"summary":     "auto smoke failed",
+								"blocker":     "auto smoke failed",
 							},
 						},
 					},

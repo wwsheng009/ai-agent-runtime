@@ -17,7 +17,9 @@ type chatActorWarmup struct {
 }
 
 func startChatActorWarmup(session *ChatSession) {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil || session.RuntimeSession == nil {
+	// Unpersisted new sessions must not force a durable Load/Save during
+	// bootstrap. Warm them up after the first persistence flush instead.
+	if session == nil || session.runtimeSessionUnpersisted || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil || session.RuntimeSession == nil {
 		setChatActorWarmup(session, nil)
 		return
 	}

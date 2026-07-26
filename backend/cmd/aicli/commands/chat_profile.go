@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
@@ -16,6 +17,15 @@ type chatProfileState struct {
 	PromptText    string
 	ContextValues map[string]interface{}
 	ToolPolicy    *runtimepolicy.ToolExecutionPolicy
+	// SandboxWarnings are explicit application-sandbox downgrade notices.
+	SandboxWarnings []string
+	// PermissionMode is optional agent/profile default applied only when the
+	// CLI did not explicitly set --permission-mode / --yolo.
+	PermissionMode runtimepolicy.Mode
+	// AgentSourcePath is the definition/config file that won for this binding.
+	AgentSourcePath string
+	// AgentSource is builtin|user|project|profile (empty when unknown).
+	AgentSource string
 }
 
 func (s *chatProfileState) Active() bool {
@@ -53,8 +63,8 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 		profileRef = strings.TrimSpace(cfg.Profiles.DefaultProfile)
 	}
 	if profileRef == "" {
-		if strings.TrimSpace(opts.AgentFlag) != "" {
-			return nil, fmt.Errorf("--agent requires --profile or profiles.default_profile")
+		if agentName := strings.TrimSpace(opts.AgentFlag); agentName != "" {
+			return resolveChatAgentdefState(agentName, "")
 		}
 		return nil, nil
 	}
@@ -78,13 +88,80 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 		return nil, err
 	}
 
-	return &chatProfileState{
-		Reference:     profileRef,
-		Resolved:      resolved,
-		PromptText:    inputs.PromptText,
-		ContextValues: inputs.ContextValues,
-		ToolPolicy:    inputs.ToolPolicy,
-	}, nil
+	state := &chatProfileState{
+		Reference:       profileRef,
+		Resolved:        resolved,
+		PromptText:      inputs.PromptText,
+		ContextValues:   inputs.ContextValues,
+		ToolPolicy:      inputs.ToolPolicy,
+		SandboxWarnings: append([]string(nil), inputs.SandboxWarnings...),
+		AgentSource:     string(agentdef.SourceProfile),
+	}
+	if resolved != nil {
+		if path := strings.TrimSpace(resolved.Paths.AgentConfigFile); path != "" {
+			state.AgentSourcePath = path
+		} else if path := strings.TrimSpace(resolved.Paths.AgentDir); path != "" {
+			state.AgentSourcePath = path
+		}
+	}
+	return state, nil
+}
+
+// resolveChatAgentdefState loads a portable agent definition without a profile
+// package so `aicli chat --agent explore` works against builtins/project agents.
+func resolveChatAgentdefState(agentName, profileRoot string) (*chatProfileState, error) {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return nil, nil
+	}
+	def, err := agentdef.Resolve(agentName, agentdef.DiscoverOptions{
+		ProfileRoot: strings.TrimSpace(profileRoot),
+		ExtraDirs:   mergeActivePluginAgentDirs(nil),
+	})
+	if err != nil {
+		return nil, err
+	}
+	binding, err := agentdef.BuildBinding(def)
+	if err != nil {
+		return nil, err
+	}
+	resolved := agentdef.ToResolvedAgent(binding, profileRoot)
+	if resolved == nil {
+		return nil, fmt.Errorf("agentdef: failed to project agent %q", agentName)
+	}
+
+	toolPolicy, sandboxWarnings, err := runtimeprofileinput.BuildToolExecutionPolicyWithWorkspace(runtimeprofileinput.ResolvedToolPolicy{
+		Allowlist: append([]string(nil), binding.ToolAllowlist...),
+		Denylist:  append([]string(nil), binding.ToolDenylist...),
+		ReadOnly:  binding.ReadOnly,
+		Sandbox:   binding.Sandbox,
+		Sources:   []string{binding.SourcePath},
+	}, "")
+	if err != nil {
+		return nil, err
+	}
+
+	promptText := agentdef.MergePrompt("", binding)
+	if strings.TrimSpace(promptText) == "" {
+		promptText = strings.TrimSpace(binding.PromptText)
+	}
+	if strings.TrimSpace(promptText) == "" && strings.TrimSpace(def.Description) != "" {
+		promptText = strings.TrimSpace(def.Description)
+	}
+
+	state := &chatProfileState{
+		Reference:       "agentdef:" + binding.AgentID,
+		Resolved:        resolved,
+		PromptText:      promptText,
+		ToolPolicy:      toolPolicy,
+		SandboxWarnings: sandboxWarnings,
+		AgentSourcePath: strings.TrimSpace(binding.SourcePath),
+		AgentSource:     string(binding.Source),
+	}
+	if binding.PermissionMode != "" {
+		state.PermissionMode = binding.PermissionMode
+	}
+	return state, nil
 }
 
 func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProfileState) {
@@ -96,6 +173,9 @@ func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProf
 	}
 	if !opts.ModelChanged && strings.TrimSpace(opts.ModelFlag) == "" {
 		opts.ModelFlag = strings.TrimSpace(state.Resolved.Model)
+	}
+	if !opts.PermissionModeChanged && state.PermissionMode != "" {
+		opts.PermissionMode = state.PermissionMode
 	}
 	if strings.TrimSpace(opts.SessionDirFlag) == "" {
 		opts.SessionDirFlag = strings.TrimSpace(state.Resolved.Paths.SessionsDir)
@@ -132,7 +212,9 @@ func skillRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfig {
 
 func resolveChatSkillDirs(cfg *config.Config, session *ChatSession, cliSkillDirs []string) []string {
 	if session != nil && len(session.ResolvedSkillDirs) > 0 {
-		return appendUniqueExistingDirs(session.ResolvedSkillDirs, cliSkillDirs)
+		// Profile/session skill dirs already include configured dirs; still append
+		// active plugin skill roots so trust→hot-load works mid-session after restart.
+		return mergeActivePluginSkillDirs(appendUniqueExistingDirs(session.ResolvedSkillDirs, cliSkillDirs))
 	}
 	return resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), cliSkillDirs)
 }

@@ -14,10 +14,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -132,6 +134,8 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		session.ProfileName = profileState.Resolved.ProfileName
 		session.ProfileAgent = profileState.Resolved.AgentID
 		session.ProfileRoot = profileState.Resolved.ProfileRoot
+		session.AgentSourcePath = strings.TrimSpace(profileState.AgentSourcePath)
+		session.AgentSource = strings.TrimSpace(profileState.AgentSource)
 		session.SystemPromptText = profileState.PromptText
 		session.RuntimeConfigPath = profileState.RuntimeConfigPath()
 		session.MCPConfigPath = profileState.MCPConfigPath()
@@ -140,6 +144,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		session.ToolPolicy = profileState.ToolPolicy
 		if session.FunctionCatalog != nil && session.ToolPolicy != nil {
 			session.FunctionCatalog.SetToolPolicy(session.ToolPolicy)
+		}
+		for _, warning := range profileState.SandboxWarnings {
+			emitChatSandboxWarning(warning)
 		}
 	}
 
@@ -240,7 +247,8 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 		return fmt.Errorf("创建会话失败: %w", err)
 	}
 	ensureChatSystemPromptMessage(session)
-	warnIfChatSessionSyncFails(session, "init session prompt", syncRuntimeSessionFromChat(session))
+	// New sessions stay in-memory until the first user turn so bootstrap does
+	// not open the large session history store for an empty shell.
 	return nil
 }
 
@@ -269,6 +277,7 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			fmt.Fprintf(os.Stderr, "Warning: 初始化 MCP 失败: %v\n", err)
 			logpkg.Warnf("AICLI MCP init failed: %v", err)
 		}
+		markChatStartup("capabilities_mcp")
 
 		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(MCPManagerInstance, loadRuntimeToolConfig(cfg, session))
 		toolDescs := toolManager.ListTools()
@@ -289,9 +298,32 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			sort.Strings(toolNames)
 			logpkg.Infof("AICLI tools loaded: %d (%s)", len(toolNames), strings.Join(toolNames, ", "))
 		}
+		markChatStartup("capabilities_tools")
+	}
 
+	// Build the local runtime host first so skills can reuse its DiscoverOnly
+	// bootstrap manager instead of scanning skill directories a second time.
+	localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
+	if hostErr != nil {
+		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: %w", hostErr)
+	}
+	if localRuntimeHost == nil {
+		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: runtime host is nil")
+	}
+	session.LocalRuntimeHost = localRuntimeHost
+	session.ActorFirstReady = true
+	restoreLocalRuntimeHostTeamState(session)
+	session.ChatExecutor = newAICLIActorChatExecutor()
+	startChatActorWarmup(session)
+	markChatStartup("capabilities_runtime_host")
+
+	if !session.DisableTools {
+		var sharedBootstrap *runtimebootstrap.Manager
+		if localRuntimeHost != nil {
+			sharedBootstrap = localRuntimeHost.Bootstrap
+		}
 		var err error
-		skillsBinding, err = initSkillFunctions(cfg, session, toolManager, opts.CLISkillDirs, opts.CLISkillsTopK, opts.CLISkillsMode)
+		skillsBinding, err = initSkillFunctionsWithManager(cfg, session, toolManager, sharedBootstrap, opts.CLISkillDirs, opts.CLISkillsTopK, opts.CLISkillsMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: 初始化 Skills 失败: %v\n", err)
 		} else if skillsBinding != nil {
@@ -300,26 +332,8 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 				session.FunctionCatalog.SetSkillsBinding(skillsBinding)
 			}
 		}
+		markChatStartup("capabilities_skills")
 	}
-
-	localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
-	if hostErr != nil {
-		if skillsBinding != nil {
-			_ = skillsBinding.Close()
-		}
-		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: %w", hostErr)
-	}
-	if localRuntimeHost == nil {
-		if skillsBinding != nil {
-			_ = skillsBinding.Close()
-		}
-		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: runtime host is nil")
-	}
-	session.LocalRuntimeHost = localRuntimeHost
-	session.ActorFirstReady = true
-	restoreLocalRuntimeHostTeamState(session)
-	session.ChatExecutor = newAICLIActorChatExecutor()
-	startChatActorWarmup(session)
 
 	refreshBuiltinFunctionSchemas(session)
 	if session.FunctionCatalog != nil {
@@ -348,6 +362,10 @@ func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileS
 		return nil, nil, err
 	}
 
+	if err := materializeChatSessionSandbox(session, profileState); err != nil {
+		buildChatFinalCleanup(session, cleanupSession)()
+		return nil, nil, err
+	}
 	if err := restoreChatPersistenceState(session, persistenceState, opts); err != nil {
 		buildChatFinalCleanup(session, cleanupSession)()
 		return nil, nil, err
@@ -374,6 +392,48 @@ func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileS
 	}
 
 	return session, cleanup, nil
+}
+
+// materializeChatSessionSandbox re-applies named sandbox profiles once the
+// concrete workspace root is known so path bounds are not left incomplete.
+func materializeChatSessionSandbox(session *ChatSession, profileState *chatProfileState) error {
+	if session == nil || session.ToolPolicy == nil {
+		return nil
+	}
+	sandboxMap := map[string]interface{}{}
+	if profileState != nil && profileState.Active() && profileState.Resolved != nil {
+		sandboxMap = profileState.Resolved.ToolPolicy.Sandbox
+	}
+	if len(sandboxMap) == 0 && session.ToolPolicy.Sandbox != nil {
+		cfg := session.ToolPolicy.Sandbox.Config()
+		if mode := strings.TrimSpace(cfg.Profile); mode != "" {
+			sandboxMap = map[string]interface{}{"mode": mode}
+		}
+	}
+	if len(sandboxMap) == 0 {
+		return nil
+	}
+	workspaceRoot := resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session)
+	warnings, err := runtimeprofileinput.MaterializeSandboxForWorkspace(session.ToolPolicy, sandboxMap, workspaceRoot)
+	if err != nil {
+		return err
+	}
+	for _, warning := range warnings {
+		emitChatSandboxWarning(warning)
+	}
+	if session.FunctionCatalog != nil {
+		session.FunctionCatalog.SetToolPolicy(session.ToolPolicy)
+	}
+	return nil
+}
+
+func emitChatSandboxWarning(warning string) {
+	warning = strings.TrimSpace(warning)
+	if warning == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	logpkg.Warnf("AICLI sandbox profile: %s", warning)
 }
 
 func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
@@ -483,6 +543,9 @@ func printChatSessionPreamble(session *ChatSession) {
 			profileValue += fmt.Sprintf(" (agent=%s)", session.ProfileAgent)
 		}
 		printChatSessionInfoRow(os.Stderr, "Profile:", profileValue, chatSessionMetaLabelWidth)
+	}
+	if line := formatChatAgentSourceLine(session); line != "" {
+		printChatSessionInfoRow(os.Stderr, "Agent Source:", line, chatSessionMetaLabelWidth)
 	}
 	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
 		printChatSessionInfoRow(os.Stderr, "Reasoning Effort:", reasoningEffort, chatSessionMetaLabelWidth)
@@ -596,7 +659,12 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 	}
 
 	awaitNoInteractiveLocalTeamDrain(session)
-	warnIfChatSessionSyncFails(session, "shutdown", syncRuntimeSessionFromChat(session))
+	// Skip durable flush for brand-new shells that never left memory. Writing
+	// an empty system-prompt-only session only pollutes history and forces a
+	// late session_history.sqlite open during shutdown.
+	if !session.runtimeSessionUnpersisted || runtimeSessionHasConversation(session.RuntimeSession) || chatMessagesHaveConversation(session.Messages) {
+		warnIfChatSessionSyncFails(session, "shutdown", syncRuntimeSessionFromChat(session))
+	}
 	if session.Logger != nil && session.Logger.logDir != "" {
 		var err error
 		if terminalErr != nil {

@@ -1391,9 +1391,13 @@ func TestReActLoop_ObservesRepeatedSemanticToolCallsWithoutStopping(t *testing.T
 		EnableToolCalls: true,
 	})
 	bus := runtimeevents.NewBus()
-	var observedEvents []runtimeevents.Event
-	bus.Subscribe("tool_loop.repeated_semantic_call_observed", func(event runtimeevents.Event) {
-		observedEvents = append(observedEvents, event)
+	var legacyEvents []runtimeevents.Event
+	var productWarnings []runtimeevents.Event
+	bus.Subscribe(EventRepeatedSemanticCallObserved, func(event runtimeevents.Event) {
+		legacyEvents = append(legacyEvents, event)
+	})
+	bus.Subscribe(EventDoomLoopWarning, func(event runtimeevents.Event) {
+		productWarnings = append(productWarnings, event)
 	})
 	agent.SetEventBus(bus)
 
@@ -1404,8 +1408,11 @@ func TestReActLoop_ObservesRepeatedSemanticToolCallsWithoutStopping(t *testing.T
 	require.Equal(t, "日志检查完成。", result.Output)
 	require.Equal(t, repeatedSemanticToolCallNoticeThreshold+1, len(provider.requests))
 	require.Equal(t, repeatedSemanticToolCallNoticeThreshold, manager.callCount)
-	require.Len(t, observedEvents, 1)
-	require.Equal(t, repeatedSemanticToolCallNoticeThreshold, observedEvents[0].Payload["repeat_count"])
+	require.Len(t, legacyEvents, 1)
+	require.Len(t, productWarnings, 1)
+	require.Equal(t, repeatedSemanticToolCallNoticeThreshold, legacyEvents[0].Payload["repeat_count"])
+	require.Equal(t, "warning", productWarnings[0].Payload["phase"])
+	require.Equal(t, DoomLoopWarningThreshold, productWarnings[0].Payload["warning_threshold"])
 	advisoryFound := false
 	for _, message := range provider.requests[2].Messages {
 		if message.Role == "tool" && strings.Contains(message.Content, "Execution was not blocked") {
@@ -1432,6 +1439,12 @@ func TestReActLoop_StopsRepeatedSemanticToolCallsAtConfiguredLimit(t *testing.T)
 		MaxRepeatedToolCalls: 3,
 		EnableToolCalls:      true,
 	})
+	bus := runtimeevents.NewBus()
+	var terminations []runtimeevents.Event
+	bus.Subscribe(EventDoomLoopTerminated, func(event runtimeevents.Event) {
+		terminations = append(terminations, event)
+	})
+	agent.SetEventBus(bus)
 
 	result, err := loop.Run(context.Background(), "inspect logs")
 	require.NoError(t, err)
@@ -1439,6 +1452,10 @@ func TestReActLoop_StopsRepeatedSemanticToolCallsAtConfiguredLimit(t *testing.T)
 	require.Equal(t, "repeated_tool_calls", result.LimitReason)
 	require.Equal(t, 3, provider.callCount)
 	require.Len(t, result.Observations, 2, "the threshold call must not execute again")
+	require.Len(t, terminations, 1)
+	require.Equal(t, "terminated", terminations[0].Payload["phase"])
+	require.Equal(t, 3, terminations[0].Payload["stop_limit"])
+	require.Equal(t, "repeated_tool_calls", terminations[0].Payload["limit_reason"])
 }
 
 func TestReActLoop_StopsBeforeExceedingToolCallBudget(t *testing.T) {
@@ -3406,6 +3423,7 @@ func TestDecodeSubagentTasksReadsRoutingFields(t *testing.T) {
 				"model":                "strong-model",
 				"thinking_effort":      "high",
 				"read_only":            true,
+				"completion_requirement": "complete_task",
 			},
 		},
 	})
@@ -3416,7 +3434,23 @@ func TestDecodeSubagentTasksReadsRoutingFields(t *testing.T) {
 	assert.Equal(t, "local-strong", tasks[0].Provider)
 	assert.Equal(t, "strong-model", tasks[0].Model)
 	assert.Equal(t, "high", tasks[0].ReasoningEffort)
+	assert.Equal(t, "complete_task", tasks[0].CompletionRequirement)
 	assert.Contains(t, tasks[0].RouteWarnings, "thinking_effort_alias_used")
+}
+
+func TestDecodeSubagentTasksReadsCompletionRequirementCamelCase(t *testing.T) {
+	tasks, err := decodeSubagentTasks(map[string]interface{}{
+		"agents": []interface{}{
+			map[string]interface{}{
+				"id":                    "child-2",
+				"goal":                  "Finish with outcome.",
+				"completionRequirement": "complete_task",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "complete_task", tasks[0].CompletionRequirement)
 }
 
 func TestReActLoop_Run_SpawnSubagentsChildUsesPromptBuilder(t *testing.T) {

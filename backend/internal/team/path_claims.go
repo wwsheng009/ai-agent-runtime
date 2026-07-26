@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+// PathClaimConflictsError is returned by PathClaimManager.Acquire when the
+// requested paths overlap active claims held by other tasks.
+type PathClaimConflictsError struct {
+	Conflicts []Conflict
+}
+
+func (e *PathClaimConflictsError) Error() string {
+	if e == nil {
+		return "path claim conflict"
+	}
+	if len(e.Conflicts) == 0 {
+		return "path claim conflict"
+	}
+	first := e.Conflicts[0]
+	return fmt.Sprintf("path claim conflict on %s (held by task %s owner %s mode %s)", first.Path, first.ExistingTaskID, first.ExistingOwner, first.ExistingMode)
+}
+
 // PathClaimManager coordinates read/write path locks for team tasks.
 type PathClaimManager struct {
 	store Store
@@ -88,13 +105,24 @@ func (m *PathClaimManager) CanClaim(ctx context.Context, teamID string, readPath
 	return true, nil, nil
 }
 
-// Acquire registers path claims for a task.
+// Acquire registers path claims for a task after a non-atomic conflict check.
+// Prefer ClaimTaskWithPathClaims / TaskClaimRequest.UsePathClaims for ambient
+// team assignment, where claim + task lease must be transactional. This method
+// remains the formal PathClaimManager write entry for non-atomic acquire paths
+// (tests, recovery, and explicit claim tooling).
 func (m *PathClaimManager) Acquire(ctx context.Context, teamID, taskID, ownerAgentID string, readPaths, writePaths []string, leaseUntil time.Time) ([]PathClaim, error) {
 	if m == nil || m.store == nil {
 		return nil, fmt.Errorf("path claim manager is not initialized")
 	}
 	if teamID == "" || taskID == "" || ownerAgentID == "" {
 		return nil, fmt.Errorf("team id, task id, and owner are required")
+	}
+	ok, conflicts, err := m.CanClaim(ctx, teamID, readPaths, writePaths)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, &PathClaimConflictsError{Conflicts: conflicts}
 	}
 	if leaseUntil.IsZero() {
 		leaseUntil = time.Now().UTC().Add(5 * time.Minute)
@@ -146,6 +174,23 @@ func (m *PathClaimManager) Release(ctx context.Context, taskID string) error {
 		return nil
 	}
 	return m.store.ReleasePathClaimsByTask(ctx, taskID)
+}
+
+// ReleaseTaskPathClaims is the ambient-team release entry point. Prefer
+// PathClaimManager when available; fall back to the store for store-only paths
+// (for example generic dependency failure without a manager handle).
+func ReleaseTaskPathClaims(ctx context.Context, claims *PathClaimManager, store Store, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil
+	}
+	if claims != nil {
+		return claims.Release(ctx, taskID)
+	}
+	if store == nil {
+		return fmt.Errorf("path claim store is not configured")
+	}
+	return store.ReleasePathClaimsByTask(ctx, taskID)
 }
 
 // Renew extends path claim leases for the task.

@@ -13,8 +13,11 @@ import (
 // ReconcileFailedTaskDependencies applies dependency failure propagation and
 // its durable events in one transaction.
 func (s *SQLiteStore) ReconcileFailedTaskDependencies(ctx context.Context, teamID string) ([]DependencyFailure, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return nil, err
 	}
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {

@@ -7,5 +7,7 @@ type PermissionEngine = runtimepolicy.Engine
 
 // NewPermissionEngine creates a new permission engine.
 func NewPermissionEngine() *PermissionEngine {
-	return &runtimepolicy.Engine{}
+	engine := &runtimepolicy.Engine{}
+	runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+	return engine
 }

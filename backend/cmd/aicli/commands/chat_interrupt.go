@@ -261,7 +261,7 @@ func (h *localChatRuntimeHost) cancelActiveTeamTasks(ctx context.Context, teamID
 	if err != nil {
 		return err
 	}
-	taskRegistry := team.NewAgentControlTaskRegistry(h.TeamStore)
+	taskRegistry := team.NewAgentControlTaskRegistry(h.TeamStore).WithClaims(h.TeamClaims)
 	for _, item := range tasks {
 		assignee := taskAssignee(item)
 		summary := "cancelled by user interrupt"
@@ -273,7 +273,6 @@ func (h *localChatRuntimeHost) cancelActiveTeamTasks(ctx context.Context, teamID
 		}); err != nil {
 			return err
 		}
-		_ = h.TeamStore.ReleasePathClaimsByTask(ctx, item.ID)
 		h.dispatchCancelledTaskLifecycleEvent(ctx, item, assignee, summary)
 	}
 	return nil

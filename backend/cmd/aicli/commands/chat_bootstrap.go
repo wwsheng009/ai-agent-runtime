@@ -50,6 +50,7 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 	}
 
 	runtimeConfig, runtimeConfigPath := loadChatPersistenceRuntimeConfig(cfg, profileState)
+	markChatStartup("persistence_config")
 	if manager, userID, sessionDir, configured, err := prepareRuntimeServerChatPersistence(runtimeConfig, opts); err != nil {
 		return nil, err
 	} else if configured {
@@ -67,6 +68,7 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 	}
 
 	manager, userID, sessionDir, err := newChatSessionManagerWithRuntimeConfig(opts.SessionDirFlag, runtimeConfig, runtimeConfigPath, opts.SessionUserFlag)
+	markChatStartup("persistence_store")
 	if err != nil {
 		if opts.SessionFeaturesRequested {
 			return nil, fmt.Errorf("初始化会话管理失败: %w", err)
@@ -117,12 +119,10 @@ func loadChatPersistenceRuntimeConfig(cfg *config.Config, profileState *chatProf
 	if runtimePath == "" {
 		return nil, ""
 	}
-	manager := runtimecfg.NewRuntimeManager(runtimePath)
-	if err := manager.Load(); err != nil {
+	runtimeConfig, runtimeConfigPath, err := loadCachedRuntimeConfig(runtimePath)
+	if err != nil || runtimeConfig == nil {
 		return nil, runtimePath
 	}
-	runtimeConfig := manager.Get()
-	runtimeConfigPath := manager.GetFilePath()
 	sessionruntime.ApplyDefaults(runtimeConfig, sessionruntime.ResolveOptions{
 		Config:     runtimeConfig,
 		ConfigFile: runtimeConfigPath,

@@ -3,6 +3,7 @@ package toolbroker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -273,6 +274,43 @@ type UserInputHandler interface {
 	AskUserQuestion(ctx context.Context, req UserQuestionRequest) (string, error)
 }
 
+// EnterPlanModeArgs describes enter_plan_mode tool input.
+type EnterPlanModeArgs struct {
+	// PlanPath is the plan artifact path (default plan.md).
+	PlanPath string `json:"plan_path,omitempty"`
+}
+
+// ExitPlanModeArgs describes exit_plan_mode tool input.
+type ExitPlanModeArgs struct {
+	// Decision is required: approve | request_changes | quit.
+	Decision string `json:"decision"`
+	// Notes are optional free-form notes recorded with the exit decision.
+	Notes string `json:"notes,omitempty"`
+}
+
+// PlanModeResult reports plan-mode enter/exit outcome for agent tools.
+type PlanModeResult struct {
+	Active          bool     `json:"active"`
+	Status          string   `json:"status,omitempty"`
+	PlanPath        string   `json:"plan_path,omitempty"`
+	PermissionMode  string   `json:"permission_mode,omitempty"`
+	PreviousMode    string   `json:"previous_mode,omitempty"`
+	ExitDecision    string   `json:"exit_decision,omitempty"`
+	Notes           string   `json:"notes,omitempty"`
+	WriteAllowPaths []string `json:"write_allow_paths,omitempty"`
+	EnteredAt       string   `json:"entered_at,omitempty"`
+	ExitedAt        string   `json:"exited_at,omitempty"`
+}
+
+// PlanModeController toggles durable plan mode for the current session mid-turn.
+// Implementations must persist session plan_mode context, apply the live
+// permission engine, and update RunMeta.PermissionMode when present so the
+// remainder of the turn evaluates tools under plan (or restored) mode.
+type PlanModeController interface {
+	EnterPlanMode(ctx context.Context, sessionID string, args EnterPlanModeArgs) (*PlanModeResult, error)
+	ExitPlanMode(ctx context.Context, sessionID string, args ExitPlanModeArgs) (*PlanModeResult, error)
+}
+
 // SpawnAgentArgs describes a lightweight child-agent session request.
 type SpawnAgentArgs struct {
 	ID                       string   `json:"id,omitempty"`
@@ -286,6 +324,13 @@ type SpawnAgentArgs struct {
 	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
 	ThinkingEffort           string   `json:"thinking_effort,omitempty"`
 	PermissionMode           string   `json:"permission_mode,omitempty"`
+	// CompletionRequirement is none|complete_task for the child harness loop.
+	// When empty, callers may fill from agentdef for agent_type; team workers
+	// still set complete_task explicitly via TeammateRunner RunMeta.
+	CompletionRequirement string `json:"completion_requirement,omitempty"`
+	// Isolation is none|worktree. Empty normalizes to none. worktree fails closed
+	// (no silent main-tree fallback) when git worktree creation is unavailable.
+	Isolation                string   `json:"isolation,omitempty"`
 	ReadOnly                 bool     `json:"read_only,omitempty"`
 	ForkContext              *bool    `json:"fork_context,omitempty"`
 	ForkTurns                string   `json:"fork_turns,omitempty"`
@@ -363,6 +408,10 @@ type AgentStatusResult struct {
 	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
 	PermissionMode           string   `json:"permission_mode,omitempty"`
 	ReadOnly                 bool     `json:"read_only,omitempty"`
+	Isolation                string   `json:"isolation,omitempty"`
+	WorktreePath             string   `json:"worktree_path,omitempty"`
+	WorktreeBranch           string   `json:"worktree_branch,omitempty"`
+	WorktreeRepoRoot         string   `json:"worktree_repo_root,omitempty"`
 	Difficulty               string   `json:"difficulty,omitempty"`
 	DifficultySource         string   `json:"difficulty_source,omitempty"`
 	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
@@ -467,13 +516,15 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 	if result.Event != nil || len(result.Events) > 0 {
 		result.NextAction = "consume_mailbox_events"
 	} else if agentWaitHasPendingApproval(result) {
-		result.NextAction = "resolve_pending_approval"
+		result.NextAction = agentWaitPendingApprovalNextAction(result)
 	} else if result.TimedOut && result.PendingCount > 0 {
-		result.NextAction = "continue_independent_work_before_waiting_again"
+		result.NextAction = "continue_independent_work_before_waiting_again: do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children"
 	} else if result.ReadyCount > 0 && result.PendingCount > 0 {
-		result.NextAction = "consume_ready_outputs_and_continue_independent_work"
+		result.NextAction = "consume_ready_outputs_and_continue_independent_work: use ready child outputs now; keep other independent work moving instead of blocking only on pending agents"
 	} else if result.ReadyCount > 0 {
-		result.NextAction = "consume_ready_outputs"
+		result.NextAction = "consume_ready_outputs: use the returned ready outputs and do not re-wait for already-ready agents"
+	} else if result.TimedOut {
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timed out with no ready agents; do other work or inspect child status before waiting again"
 	}
 	return result
 }
@@ -491,6 +542,45 @@ func agentWaitHasPendingApproval(result *AgentWaitResult) bool {
 		}
 	}
 	return false
+}
+
+// agentWaitPendingApprovalNextAction steers parents toward resolve_agent_approval
+// instead of re-wait/poll loops when a child is blocked on tool approval.
+func agentWaitPendingApprovalNextAction(result *AgentWaitResult) string {
+	pending := firstAgentWaitPendingApproval(result)
+	if pending == nil {
+		return "resolve_pending_approval: call resolve_agent_approval with allow=true|false; do not re-wait or poll for the same approval"
+	}
+	sessionRef := firstNonEmptyToolValue(pending.ID, pending.SessionID, pending.Path)
+	requestID := strings.TrimSpace(pending.PendingApprovalID)
+	parts := []string{"resolve_pending_approval"}
+	if sessionRef != "" && requestID != "" {
+		parts = append(parts, fmt.Sprintf("call resolve_agent_approval with id=%q request_id=%q allow=true|false", sessionRef, requestID))
+	} else if sessionRef != "" {
+		parts = append(parts, fmt.Sprintf("inspect pending_approval_id for id=%q then call resolve_agent_approval with allow=true|false", sessionRef))
+	} else if requestID != "" {
+		parts = append(parts, fmt.Sprintf("call resolve_agent_approval with request_id=%q allow=true|false", requestID))
+	} else {
+		parts = append(parts, "call resolve_agent_approval with allow=true|false")
+	}
+	parts = append(parts, "do not re-wait, poll, or start a fallback agent for the same approval")
+	return strings.Join(parts, ": ")
+}
+
+func firstAgentWaitPendingApproval(result *AgentWaitResult) *AgentStatusResult {
+	if result == nil {
+		return nil
+	}
+	if result.Agent != nil && result.Agent.PendingApproval {
+		return result.Agent
+	}
+	for index := range result.Agents {
+		if result.Agents[index].PendingApproval {
+			agent := result.Agents[index]
+			return &agent
+		}
+	}
+	return nil
 }
 
 // AgentListResult reports known child-agent sessions.
@@ -548,6 +638,40 @@ type AgentEventsResult struct {
 	TimedOut  bool             `json:"timed_out,omitempty"`
 }
 
+// ApplyAgentWorktreeArgs applies a child's worktree isolation changes into the main repo.
+type ApplyAgentWorktreeArgs struct {
+	ID        string   `json:"id,omitempty"`
+	SessionID string   `json:"session_id,omitempty"`
+	// Paths limits apply to specific relative paths. Empty = all tracked changes.
+	Paths []string `json:"paths,omitempty"`
+	// Keep preserves the worktree after apply (default false removes it).
+	Keep bool `json:"keep,omitempty"`
+}
+
+// DiscardAgentWorktreeArgs discards a child's worktree isolation without applying changes.
+type DiscardAgentWorktreeArgs struct {
+	ID        string `json:"id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// AgentWorktreeResult reports apply/discard outcomes for worktree isolation.
+type AgentWorktreeResult struct {
+	ID             string   `json:"id,omitempty"`
+	SessionID      string   `json:"session_id,omitempty"`
+	Action         string   `json:"action"` // apply | discard
+	Isolation      string   `json:"isolation,omitempty"`
+	WorktreePath   string   `json:"worktree_path,omitempty"`
+	WorktreeBranch string   `json:"worktree_branch,omitempty"`
+	RepoRoot       string   `json:"repo_root,omitempty"`
+	DiffStat       string   `json:"diff_stat,omitempty"`
+	Paths          []string `json:"paths,omitempty"`
+	Applied        bool     `json:"applied,omitempty"`
+	Discarded      bool     `json:"discarded,omitempty"`
+	Removed        bool     `json:"removed,omitempty"`
+	Kept           bool     `json:"kept,omitempty"`
+	Status         *AgentStatusResult `json:"status,omitempty"`
+}
+
 // AgentSessionController provides lightweight child-agent lifecycle operations.
 type AgentSessionController interface {
 	Spawn(ctx context.Context, parentSessionID string, args SpawnAgentArgs) (*AgentStatusResult, error)
@@ -560,6 +684,11 @@ type AgentSessionController interface {
 	ReadEvents(ctx context.Context, args ReadAgentEventsArgs) (*AgentEventsResult, error)
 	Close(ctx context.Context, sessionID string) (*AgentStatusResult, error)
 	Resume(ctx context.Context, sessionID string) (*AgentStatusResult, error)
+	// ApplyWorktree copies isolation changes into the main tree (optional path filter).
+	// Default removes the worktree after apply unless Keep=true.
+	ApplyWorktree(ctx context.Context, args ApplyAgentWorktreeArgs) (*AgentWorktreeResult, error)
+	// DiscardWorktree removes isolation without applying; main tree stays unchanged.
+	DiscardWorktree(ctx context.Context, args DiscardAgentWorktreeArgs) (*AgentWorktreeResult, error)
 }
 
 const (
@@ -582,7 +711,22 @@ const (
 	AgentSessionContextTeamID                   = agentcontrol.SessionContextTeamID
 	AgentSessionContextTeammateID               = agentcontrol.SessionContextTeammateID
 	AgentSessionContextPermissionMode           = "permission_mode"
+	AgentSessionContextCompletionRequirement    = "completion_requirement"
 	AgentSessionContextReadOnly                 = "read_only"
+	AgentSessionContextIsolation                = "isolation"
+	AgentSessionContextWorktreePath             = "worktree_path"
+	AgentSessionContextWorktreeBranch           = "worktree_branch"
+	AgentSessionContextWorktreeRepoRoot         = "worktree_repo_root"
+	// AgentSessionContextWorktreeDisposition records parent decision on isolation:
+	// applied | discarded. Empty means still pending explicit apply/discard/close.
+	AgentSessionContextWorktreeDisposition = "worktree_disposition"
+	// AgentSessionContextWritePaths is the default write scope for a child
+	// session. Worktree isolation binds this to the isolation root so later
+	// claim/task code can inherit the isolated workspace as write_paths.
+	AgentSessionContextWritePaths = "write_paths"
+
+	WorktreeDispositionApplied   = "applied"
+	WorktreeDispositionDiscarded = "discarded"
 	AgentSessionContextRequestedProvider        = "agent_requested_provider"
 	AgentSessionContextRequestedReasoningEffort = "agent_requested_reasoning_effort"
 	AgentSessionContextRequestedPermissionMode  = "agent_requested_permission_mode"
@@ -659,6 +803,12 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if effectivePermissionMode != "" {
 		session.SetContext(AgentSessionContextEffectivePermissionMode, effectivePermissionMode)
 	}
+	if requirement := strings.TrimSpace(args.CompletionRequirement); requirement != "" {
+		session.SetContext(AgentSessionContextCompletionRequirement, requirement)
+	}
+	if isolation := strings.TrimSpace(args.Isolation); isolation != "" {
+		session.SetContext(AgentSessionContextIsolation, isolation)
+	}
 	if args.ReadOnly {
 		session.SetContext(AgentSessionContextReadOnly, true)
 	}
@@ -699,6 +849,18 @@ func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentc
 	}
 	if value, ok := session.GetContext(AgentSessionContextReadOnly); ok {
 		result.ReadOnly, _ = value.(bool)
+	}
+	if isolation := agentcontrol.ContextString(session, AgentSessionContextIsolation); isolation != "" {
+		result.Isolation = isolation
+	}
+	if path := agentcontrol.ContextString(session, AgentSessionContextWorktreePath); path != "" {
+		result.WorktreePath = path
+	}
+	if branch := agentcontrol.ContextString(session, AgentSessionContextWorktreeBranch); branch != "" {
+		result.WorktreeBranch = branch
+	}
+	if repoRoot := agentcontrol.ContextString(session, AgentSessionContextWorktreeRepoRoot); repoRoot != "" {
+		result.WorktreeRepoRoot = repoRoot
 	}
 	if difficulty := agentcontrol.ContextString(session, AgentSessionContextDifficulty); difficulty != "" {
 		result.Difficulty = difficulty
@@ -753,6 +915,18 @@ func AddSpawnAgentRoutePayload(payload map[string]interface{}, session agentcont
 	}
 	if status.ReadOnly {
 		payload["read_only"] = true
+	}
+	if status.Isolation != "" {
+		payload["isolation"] = status.Isolation
+	}
+	if status.WorktreePath != "" {
+		payload["worktree_path"] = status.WorktreePath
+	}
+	if status.WorktreeBranch != "" {
+		payload["worktree_branch"] = status.WorktreeBranch
+	}
+	if status.WorktreeRepoRoot != "" {
+		payload["worktree_repo_root"] = status.WorktreeRepoRoot
 	}
 	if status.RouteSource != "" {
 		payload["route_source"] = status.RouteSource
@@ -894,10 +1068,14 @@ func ApplySpawnAgentRouteStatusRecord(result *AgentStatusResult, record agentcon
 
 func SpawnAgentRunMeta(args SpawnAgentArgs) *team.RunMeta {
 	permissionMode := strings.TrimSpace(args.PermissionMode)
-	if permissionMode == "" {
+	completionRequirement := strings.TrimSpace(args.CompletionRequirement)
+	if permissionMode == "" && completionRequirement == "" {
 		return nil
 	}
-	return &team.RunMeta{PermissionMode: permissionMode}
+	return &team.RunMeta{
+		PermissionMode:        permissionMode,
+		CompletionRequirement: completionRequirement,
+	}
 }
 
 func firstNonEmptyRouteString(values ...string) string {

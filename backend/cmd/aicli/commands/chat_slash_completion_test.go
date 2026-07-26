@@ -147,7 +147,7 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 		{
 			name:  "shared m prefix",
 			query: "/m",
-			want:  []string{"/model", "/mode"},
+			want:  []string{"/model", "/memory", "/mode"},
 		},
 		{
 			name:  "slash s prefix order",
@@ -423,9 +423,11 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/compact", forms: []string{"/compact"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/attach", forms: []string{"/attach"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/image", forms: []string{"/image"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/memory", forms: []string{"/memory"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/retry", forms: []string{"/retry"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/queue", forms: []string{"/queue"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/permission-mode", forms: []string{"/permission-mode", "/mode"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/plan", forms: []string{"/plan"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/approval-reuse", forms: []string{"/approval-reuse"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/yolo", forms: []string{"/yolo"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/functions", forms: []string{"/functions", "/catalog"}, acceptsArgs: true, requiresArgs: false},

@@ -22,6 +22,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeoutput "github.com/wwsheng009/ai-agent-runtime/internal/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -1204,7 +1205,8 @@ func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Sess
 	if a.llmRuntime == nil {
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigWithRouteOverride(a.loopConfig, routeOverride))
+	runMeta, _ := team.GetRunMeta(ctx)
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigForRun(a.loopConfig, routeOverride, runMeta))
 	return loop.RunWithSession(ctx, prompt, session)
 }
 
@@ -1215,7 +1217,8 @@ func (a *SessionActor) continueLoop(ctx context.Context, session *Session, route
 	if a.llmRuntime == nil {
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigWithRouteOverride(a.loopConfig, routeOverride))
+	runMeta, _ := team.GetRunMeta(ctx)
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigForRun(a.loopConfig, routeOverride, runMeta))
 	return loop.ContinueWithSession(ctx, session)
 }
 
@@ -1249,6 +1252,35 @@ func cloneLoopConfigWithRouteOverride(base *agent.LoopReActConfig, routeOverride
 		}
 	}
 	return &cfg
+}
+
+func cloneLoopConfigForRun(base *agent.LoopReActConfig, routeOverride *RunRouteOverride, runMeta *team.RunMeta) *agent.LoopReActConfig {
+	cfg := cloneLoopConfigWithRouteOverride(base, routeOverride)
+	if cfg == nil {
+		if runMeta == nil {
+			return nil
+		}
+		cfg = &agent.LoopReActConfig{
+			MaxSteps:             0,
+			EnableThought:        true,
+			EnableToolCalls:      true,
+			EnableParallelTools:  true,
+			MaxParallelToolCalls: 4,
+			Temperature:          0.7,
+			StopOnSuccess:        true,
+			MaxIterations:        10,
+		}
+	}
+	// Explicit RunMeta.CompletionRequirement overrides base loop / agentdef defaults.
+	// Team workers set complete_task in TeammateRunner; absent field keeps base/none.
+	if runMeta != nil {
+		if requirement := team.EffectiveCompletionRequirement(runMeta); strings.TrimSpace(runMeta.CompletionRequirement) != "" ||
+			requirement != agent.CompletionRequirementNone {
+			cfg.CompletionRequirement = agent.NormalizeCompletionRequirement(requirement)
+		}
+	}
+	cfg.CompletionRequirement = agent.NormalizeCompletionRequirement(cfg.CompletionRequirement)
+	return cfg
 }
 
 func runRouteOverrideFromRunMeta(runMeta *team.RunMeta) *RunRouteOverride {
@@ -1562,6 +1594,20 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		taskID = strings.TrimSpace(runMeta.Team.CurrentTaskID)
 	}
 
+	if allow, blockMsg := a.dispatchPreCompactHook(ctx, payload); !allow {
+		payload["reason"] = "pre_compact_hook_blocked"
+		if strings.TrimSpace(blockMsg) != "" {
+			payload["hook_message"] = strings.TrimSpace(blockMsg)
+		}
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   payload,
+		})
+		return
+	}
+
 	observedTokens, hasObservedTokens := runtimeSessionActiveContextTokens(a.llmRuntime, session, history)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
@@ -1655,6 +1701,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		TraceID:   turnID,
 		Payload:   payload,
 	})
+	a.dispatchPostCompactHook(ctx, payload)
 	a.publishCompactReconciliation(turnID, result)
 }
 
@@ -1708,6 +1755,21 @@ func (a *SessionActor) runManualCompact(
 	}
 
 	traceID := "compact_" + uuid.NewString()
+	if allow, blockMsg := a.dispatchPreCompactHook(ctx, payload); !allow {
+		status.Reason = "pre_compact_hook_blocked"
+		payload["reason"] = status.Reason
+		if strings.TrimSpace(blockMsg) != "" {
+			payload["hook_message"] = strings.TrimSpace(blockMsg)
+		}
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   traceID,
+			Payload:   payload,
+		})
+		return nil, status, nil
+	}
+
 	manager := a.agent.GetContextManager()
 	keepRecent := 0
 	cfg := a.agent.GetConfig()
@@ -1809,8 +1871,44 @@ func (a *SessionActor) runManualCompact(
 		TraceID:   traceID,
 		Payload:   payload,
 	})
+	a.dispatchPostCompactHook(ctx, payload)
 	a.publishCompactReconciliation(traceID, result)
 	return result, status, nil
+}
+
+// dispatchPreCompactHook returns false when compaction should be skipped.
+func (a *SessionActor) dispatchPreCompactHook(ctx context.Context, payload map[string]interface{}) (allow bool, message string) {
+	if a == nil || a.agent == nil {
+		return true, ""
+	}
+	hookMgr := a.agent.GetHookManager()
+	if hookMgr == nil {
+		return true, ""
+	}
+	decision, err := hookMgr.Dispatch(ctx, runtimehooks.EventPreCompact, cloneEventPayload(payload))
+	if err != nil {
+		return true, ""
+	}
+	if runtimehooks.IsBlockingAction(decision.Action) {
+		msg := strings.TrimSpace(decision.Message)
+		if msg == "" {
+			msg = "pre_compact hook blocked compaction"
+		}
+		return false, msg
+	}
+	return true, strings.TrimSpace(decision.Message)
+}
+
+// dispatchPostCompactHook notifies hooks after a successful compaction.
+func (a *SessionActor) dispatchPostCompactHook(ctx context.Context, payload map[string]interface{}) {
+	if a == nil || a.agent == nil {
+		return
+	}
+	hookMgr := a.agent.GetHookManager()
+	if hookMgr == nil {
+		return
+	}
+	hookMgr.DispatchAsync(ctx, runtimehooks.EventPostCompact, cloneEventPayload(payload))
 }
 
 func cloneEventPayload(input map[string]interface{}) map[string]interface{} {
@@ -1943,6 +2041,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			}
 			return
 		}
+	}
+	// Re-apply plan mode after prepareRun so durable plan_mode context and
+	// session permission mode stay enforced for this turn.
+	if engine := a.agent.GetPermissionEngine(); engine != nil {
+		a.applyPlanModeStateToEngine(engine, planmode.Load(session))
 	}
 
 	if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
@@ -3514,13 +3617,50 @@ func (a *SessionActor) configureRuntime() {
 	} else if engine.AskHandler == nil {
 		engine.AskHandler = a
 	}
+	runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+	a.applyPlanModeToEngine(engine)
 
 	broker := a.agent.GetToolBroker()
 	if broker == nil {
-		a.agent.SetToolBroker(&toolbroker.Broker{UserInput: a})
-	} else if broker.UserInput == nil {
-		broker.UserInput = a
+		a.agent.SetToolBroker(&toolbroker.Broker{UserInput: a, PlanMode: a})
+	} else {
+		if broker.UserInput == nil {
+			broker.UserInput = a
+		}
+		if broker.PlanMode == nil {
+			broker.PlanMode = a
+		}
 	}
+}
+
+// applyPlanModeToEngine loads durable plan_mode context and forces plan write
+// allow paths when the session is actively in plan mode.
+func (a *SessionActor) applyPlanModeToEngine(engine *runtimepolicy.Engine) {
+	if a == nil || engine == nil {
+		return
+	}
+	var state planmode.State
+	if a.sessionStore != nil {
+		if session, err := a.sessionStore.Load(context.Background(), a.id); err == nil && session != nil {
+			state = planmode.Load(session)
+		}
+	}
+	a.applyPlanModeStateToEngine(engine, state)
+}
+
+// applyPlanModeStateToEngine applies an already-loaded plan state to the engine.
+func (a *SessionActor) applyPlanModeStateToEngine(engine *runtimepolicy.Engine, state planmode.State) {
+	if engine == nil {
+		return
+	}
+	if !planmode.IsActive(state) {
+		if engine.Mode == runtimepolicy.ModePlan {
+			// Bare permission_mode=plan (no durable plan_mode state) still gets default allow paths.
+			runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+		}
+		return
+	}
+	planmode.ApplyToEngine(engine, state)
 }
 
 func (a *SessionActor) publish(event runtimeevents.Event) {

@@ -53,6 +53,10 @@ func NewWriteTool() *WriteTool {
 
 func (w *WriteTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:        false,
+		runtimetypes.ToolMetadataMutatesFSKey:       true,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 	}

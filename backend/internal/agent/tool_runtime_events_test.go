@@ -101,6 +101,46 @@ func TestToolCompletedEventPayloadPrefersStructuredSummary(t *testing.T) {
 	}
 }
 
+func TestToolCompletedEventPayloadIncludesProtocolResult(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-protocol",
+			Name: "view",
+			Args: map[string]interface{}{"file_path": "a.go"},
+		},
+		Output: "file body line one\nfile body line two",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				toolresult.MetadataOKKey:      true,
+				toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
+				toolresult.MetadataKey:        toolresult.KindText,
+				toolresult.SourceKey:          toolresult.SourceToolkit,
+			},
+		},
+	}, 1, "trace-protocol", nil)
+
+	raw, ok := payload["protocol_result"].(map[string]interface{})
+	if !ok || raw == nil {
+		t.Fatalf("expected protocol_result map, got %#v", payload["protocol_result"])
+	}
+	if raw["ok"] != true {
+		t.Fatalf("protocol_result.ok=%#v", raw["ok"])
+	}
+	if raw["tool_id"] != "view" || raw["call_id"] != "call-protocol" {
+		t.Fatalf("protocol_result ids=%#v", raw)
+	}
+	if raw["outcome"] != toolresult.OutcomeSuccess {
+		t.Fatalf("protocol_result.outcome=%#v", raw["outcome"])
+	}
+	if _, hasContent := raw["content"]; hasContent {
+		t.Fatalf("protocol_result must stay compact without content: %#v", raw)
+	}
+	// Flat disposition fields remain for offline analyzers.
+	if payload[toolresult.MetadataOKKey] != true || payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeSuccess {
+		t.Fatalf("flat disposition missing: %#v", payload)
+	}
+}
+
 func TestToolCompletedEventPayloadPreservesTodosListLines(t *testing.T) {
 	output := strings.Join([]string{
 		"任务列表已更新: 2 待处理, 1 进行中, 0 已完成",

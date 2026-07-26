@@ -1,0 +1,17 @@
+name: explore
+description: Read-only explorer role inside the coding profile
+permission_mode: plan
+tools:
+  - view
+  - grep
+  - glob
+  - ls
+  - shell
+disallowed_tools:
+  - write
+  - edit
+  - apply_patch
+  - append_write
+  - multiedit
+completion_requirement: none
+sandbox: read-only

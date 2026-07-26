@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -25,6 +27,8 @@ import (
 
 const (
 	ToolAskUserQuestion      = "ask_user_question"
+	ToolEnterPlanMode        = "enter_plan_mode"
+	ToolExitPlanMode         = "exit_plan_mode"
 	ToolBackgroundTask       = "background_task"
 	ToolTaskOutput           = "task_output"
 	ToolSpawnAgent           = "spawn_agent"
@@ -37,6 +41,8 @@ const (
 	ToolReadAgentEvents      = "read_agent_events"
 	ToolCloseAgent           = "close_agent"
 	ToolResumeAgent          = "resume_agent"
+	ToolApplyAgentWorktree   = "apply_agent_worktree"
+	ToolDiscardAgentWorktree = "discard_agent_worktree"
 	ToolSpawnTeam            = "spawn_team"
 	ToolWaitTeam             = "wait_team"
 	ToolSendTeamMessage      = "send_team_message"
@@ -50,6 +56,7 @@ const (
 // Broker provides synthetic tools backed by runtime services.
 type Broker struct {
 	UserInput            UserInputHandler
+	PlanMode             PlanModeController
 	Background           *background.Manager
 	AgentSessions        AgentSessionController
 	SessionContextStore  SessionContextStore
@@ -80,7 +87,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
 		return true
 	default:
 		return false
@@ -112,7 +119,45 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				"required": []string{"prompt"},
 			},
 		},
-		{
+	}
+	if b != nil && b.PlanMode != nil {
+		definitions = append(definitions,
+			types.ToolDefinition{
+				Name:        ToolEnterPlanMode,
+				Description: "Enter plan mode for the current session. Restricts writes to the plan artifact (default plan.md) until exit_plan_mode. Prefer this before large implementation work when a plan should be reviewed first. Nested re-enter keeps the original previous permission mode.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"plan_path": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional plan file path to allow writes (default plan.md).",
+						},
+					},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolExitPlanMode,
+				Description: "Exit plan mode with an explicit decision. decision=approve restores the previous permission mode to execute; request_changes stays in plan mode for revisions; quit restores previous mode without executing. Completion does not auto-exit plan mode.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"decision": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"approve", "request_changes", "quit"},
+							"description": "Required exit decision: approve | request_changes | quit.",
+						},
+						"notes": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional notes recorded with the exit decision.",
+						},
+					},
+					"required": []string{"decision"},
+				},
+			},
+		)
+	}
+	definitions = append(definitions,
+		types.ToolDefinition{
 			Name:        ToolBackgroundTask,
 			Description: "Run a long-running task in the background and return a job id. Pass that exact job_id to task_output; never guess or synthesize an id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command. A finished process with a non-zero exit code completes the job (status completed + exit_code); only launch/timeout/cancel/healthcheck failures hard-fail.",
 			Parameters: map[string]interface{}{
@@ -171,7 +216,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				"required": []string{"command"},
 			},
 		},
-		{
+		types.ToolDefinition{
 			Name:        ToolTaskOutput,
 			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset. Inspect status and exit_code in the structured result; non-zero exit with status completed is a content result, not a tool crash. error_code is set only for hard failures.",
 			Parameters: map[string]interface{}{
@@ -193,7 +238,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				"required": []string{"job_id"},
 			},
 		},
-	}
+	)
 	if b == nil || b.TeamStore == nil {
 		if b == nil || b.AgentSessions == nil {
 			return withBrokerSourceDefinitions(definitions)
@@ -201,7 +246,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. This is separate from spawn_team teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -215,10 +260,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":      map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
-						"read_only":            map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
-						"fork_context":         map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
-						"fork_turns":           map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"permission_mode":         map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"completion_requirement":  map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "Optional end-of-run harness constraint for the child. complete_task requires report_task_outcome or block_current_task before the run can finish cleanly; empty defaults to none (or agent_type definition when available)."},
+						"completionRequirement":   map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "CamelCase alias for completion_requirement."},
+						"isolation":               map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
+						"read_only":               map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
+						"fork_context":            map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":              map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
@@ -342,13 +390,37 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 				},
 			},
+			types.ToolDefinition{
+				Name:        ToolApplyAgentWorktree,
+				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"paths":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional relative paths to apply. Empty applies all tracked changes from the isolation branch."},
+						"keep":       map[string]interface{}{"type": "boolean", "description": "When true, keep the worktree after apply (default false removes it)."},
+					},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolDiscardAgentWorktree,
+				Description: "Discard a spawn_agent child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; close_agent also cleans up remaining worktrees.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
+					},
+				},
+			},
 		))
 	}
 	if b.AgentSessions != nil {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. This is separate from spawn_team teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -362,10 +434,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":      map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
-						"read_only":            map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
-						"fork_context":         map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
-						"fork_turns":           map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"permission_mode":         map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"completion_requirement":  map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "Optional end-of-run harness constraint for the child. complete_task requires report_task_outcome or block_current_task before the run can finish cleanly; empty defaults to none (or agent_type definition when available)."},
+						"completionRequirement":   map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "CamelCase alias for completion_requirement."},
+						"isolation":               map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
+						"read_only":               map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
+						"fork_context":            map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":              map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
@@ -480,6 +555,30 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			types.ToolDefinition{
 				Name:        ToolResumeAgent,
 				Description: "Recreate an in-memory actor for an existing child agent session.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
+					},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolApplyAgentWorktree,
+				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"paths":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional relative paths to apply. Empty applies all tracked changes from the isolation branch."},
+						"keep":       map[string]interface{}{"type": "boolean", "description": "When true, keep the worktree after apply (default false removes it)."},
+					},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolDiscardAgentWorktree,
+				Description: "Discard a spawn_agent child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; close_agent also cleans up remaining worktrees.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -977,6 +1076,56 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			toolresult.MetadataKey: toolresult.KindStructured,
 		}, nil
 
+	case ToolEnterPlanMode:
+		if b.PlanMode == nil {
+			return nil, nil, fmt.Errorf("plan mode controller is not configured")
+		}
+		req := EnterPlanModeArgs{}
+		if value, ok := args["plan_path"].(string); ok {
+			req.PlanPath = strings.TrimSpace(value)
+		}
+		result, err := b.PlanMode.EnterPlanMode(ctx, sessionID, req)
+		if err != nil {
+			return nil, nil, err
+		}
+		meta := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+		}
+		if result != nil {
+			meta["active"] = result.Active
+			meta["permission_mode"] = result.PermissionMode
+			meta["plan_path"] = result.PlanPath
+		}
+		return result, meta, nil
+
+	case ToolExitPlanMode:
+		if b.PlanMode == nil {
+			return nil, nil, fmt.Errorf("plan mode controller is not configured")
+		}
+		req := ExitPlanModeArgs{}
+		if value, ok := args["decision"].(string); ok {
+			req.Decision = strings.TrimSpace(value)
+		}
+		if value, ok := args["notes"].(string); ok {
+			req.Notes = strings.TrimSpace(value)
+		}
+		if req.Decision == "" {
+			return nil, nil, fmt.Errorf("decision is required (approve|request_changes|quit)")
+		}
+		result, err := b.PlanMode.ExitPlanMode(ctx, sessionID, req)
+		if err != nil {
+			return nil, nil, err
+		}
+		meta := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+		}
+		if result != nil {
+			meta["active"] = result.Active
+			meta["permission_mode"] = result.PermissionMode
+			meta["exit_decision"] = result.ExitDecision
+		}
+		return result, meta, nil
+
 	case ToolBackgroundTask:
 		if b.Background == nil {
 			b.Background = background.NewManager(background.DefaultConfig())
@@ -1195,13 +1344,29 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			request.RequestedPermissionMode = strings.TrimSpace(value)
 			permissionModeExplicit = strings.TrimSpace(value) != ""
 		}
+		if value, ok := args["completion_requirement"].(string); ok {
+			request.CompletionRequirement = strings.TrimSpace(value)
+		}
+		if request.CompletionRequirement == "" {
+			if value, ok := args["completionRequirement"].(string); ok {
+				request.CompletionRequirement = strings.TrimSpace(value)
+			}
+		}
+		if value, ok := args["isolation"].(string); ok {
+			isolation, err := worktree.NormalizeMode(value)
+			if err != nil {
+				return nil, nil, err
+			}
+			request.Isolation = isolation
+		}
+		readOnlyExplicit := false
 		if value, ok := args["read_only"].(bool); ok {
 			request.ReadOnly = value
+			readOnlyExplicit = true
 		}
 		if request.ReadOnly && !permissionModeExplicit {
 			request.PermissionMode = string(runtimepolicy.ModePlan)
 		}
-		request.EffectivePermissionMode = request.PermissionMode
 		if strings.TrimSpace(request.PermissionMode) == "" {
 			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
 				if permissionMode, err := normalizeSpawnAgentPermissionMode(runMeta.PermissionMode); err == nil {
@@ -1209,16 +1374,33 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
+		if strings.TrimSpace(request.CompletionRequirement) == "" {
+			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
+				if requirement := strings.TrimSpace(runMeta.CompletionRequirement); requirement != "" {
+					request.CompletionRequirement = requirement
+				}
+			}
+		}
+		if strings.TrimSpace(request.CompletionRequirement) == "" && strings.TrimSpace(request.AgentType) != "" {
+			if requirement := resolveSpawnAgentCompletionRequirement(request.AgentType); requirement != "" {
+				request.CompletionRequirement = requirement
+			}
+		}
+		request.RequestedProvider = strings.TrimSpace(request.Provider)
+		request.RequestedModel = strings.TrimSpace(request.Model)
+		request.RequestedReasoningEffort = strings.TrimSpace(request.ReasoningEffort)
+		request.RequestedRouteCaptured = true
+		if strings.TrimSpace(request.AgentType) != "" {
+			applySpawnAgentAgentdefDefaults(&request, permissionModeExplicit, readOnlyExplicit)
+		}
+		request.EffectivePermissionMode = request.PermissionMode
+		request.CompletionRequirement = normalizeSpawnAgentCompletionRequirement(request.CompletionRequirement)
 		if value, ok := args["fork_context"].(bool); ok {
 			request.ForkContext = &value
 		}
 		if value, ok := args["fork_turns"].(string); ok {
 			request.ForkTurns = strings.TrimSpace(value)
 		}
-		request.RequestedProvider = strings.TrimSpace(request.Provider)
-		request.RequestedModel = strings.TrimSpace(request.Model)
-		request.RequestedReasoningEffort = strings.TrimSpace(request.ReasoningEffort)
-		request.RequestedRouteCaptured = true
 		explicitSessionID := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID)) != ""
 		result, err := b.AgentSessions.Spawn(ctx, strings.TrimSpace(sessionID), request)
 		if err != nil {
@@ -1258,6 +1440,23 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 			if permissionMode := strings.TrimSpace(result.PermissionMode); permissionMode != "" {
 				metadata["permission_mode"] = permissionMode
+			}
+			if requirement := strings.TrimSpace(request.CompletionRequirement); requirement != "" {
+				metadata["completion_requirement"] = requirement
+			}
+			if isolation := strings.TrimSpace(result.Isolation); isolation != "" {
+				metadata["isolation"] = isolation
+			} else if isolation := strings.TrimSpace(request.Isolation); isolation != "" {
+				metadata["isolation"] = isolation
+			}
+			if path := strings.TrimSpace(result.WorktreePath); path != "" {
+				metadata["worktree_path"] = path
+			}
+			if branch := strings.TrimSpace(result.WorktreeBranch); branch != "" {
+				metadata["worktree_branch"] = branch
+			}
+			if repoRoot := strings.TrimSpace(result.WorktreeRepoRoot); repoRoot != "" {
+				metadata["worktree_repo_root"] = repoRoot
 			}
 			if result.ReadOnly {
 				metadata["read_only"] = true
@@ -1692,6 +1891,107 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"session_alias": aliasedSessionID,
 			"status":        valueOrEmptyAgentStatus(result),
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
+
+	case ToolApplyAgentWorktree:
+		if b.AgentSessions == nil {
+			return nil, nil, fmt.Errorf("agent session controller is not configured")
+		}
+		request := ApplyAgentWorktreeArgs{}
+		if value, ok := args["id"].(string); ok {
+			request.ID = strings.TrimSpace(value)
+		}
+		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
+			request.SessionID = strings.TrimSpace(value)
+		}
+		request.Paths = coerceStringSlice(args["paths"])
+		if value, ok := args["keep"].(bool); ok {
+			request.Keep = value
+		}
+		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
+		if sessionRef == "" {
+			return nil, nil, fmt.Errorf("id is required")
+		}
+		actualSessionID := sessionRef
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionRef, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolApplyAgentWorktree, actualSessionID); err != nil {
+			return nil, nil, err
+		}
+		if strings.TrimSpace(request.ID) != "" {
+			request.ID = actualSessionID
+		} else {
+			request.SessionID = actualSessionID
+		}
+		result, err := b.AgentSessions.ApplyWorktree(ctx, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		aliasedResult := aliasAgentWorktreeResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"action":        valueOrEmptyWorktreeAction(result),
+			"applied":       result != nil && result.Applied,
+			"removed":       result != nil && result.Removed,
+			"kept":          result != nil && result.Kept,
+			"worktree_path": valueOrEmptyWorktreePath(result),
+		}, agentWorktreeCacheSafeSummary(aliasedResult)), nil
+
+	case ToolDiscardAgentWorktree:
+		if b.AgentSessions == nil {
+			return nil, nil, fmt.Errorf("agent session controller is not configured")
+		}
+		request := DiscardAgentWorktreeArgs{}
+		if value, ok := args["id"].(string); ok {
+			request.ID = strings.TrimSpace(value)
+		}
+		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
+			request.SessionID = strings.TrimSpace(value)
+		}
+		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
+		if sessionRef == "" {
+			return nil, nil, fmt.Errorf("id is required")
+		}
+		actualSessionID := sessionRef
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionRef, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolDiscardAgentWorktree, actualSessionID); err != nil {
+			return nil, nil, err
+		}
+		if strings.TrimSpace(request.ID) != "" {
+			request.ID = actualSessionID
+		} else {
+			request.SessionID = actualSessionID
+		}
+		result, err := b.AgentSessions.DiscardWorktree(ctx, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		aliasedResult := aliasAgentWorktreeResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"action":        valueOrEmptyWorktreeAction(result),
+			"discarded":     result != nil && result.Discarded,
+			"removed":       result != nil && result.Removed,
+			"worktree_path": valueOrEmptyWorktreePath(result),
+		}, agentWorktreeCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSpawnTeam:
 		if b.TeamStore == nil {
@@ -2646,6 +2946,10 @@ func normalizeToolName(name string) string {
 	switch name {
 	case "askuserquestion":
 		return ToolAskUserQuestion
+	case "enterplanmode":
+		return ToolEnterPlanMode
+	case "exitplanmode":
+		return ToolExitPlanMode
 	case "backgroundtask":
 		return ToolBackgroundTask
 	case "taskoutput":
@@ -2670,6 +2974,10 @@ func normalizeToolName(name string) string {
 		return ToolCloseAgent
 	case "resumeagent":
 		return ToolResumeAgent
+	case "applyagentworktree", "apply_worktree", "applyworktree":
+		return ToolApplyAgentWorktree
+	case "discardagentworktree", "discard_worktree", "discardworktree":
+		return ToolDiscardAgentWorktree
 	case "spawnteam":
 		return ToolSpawnTeam
 	case "waitteam":
@@ -3090,6 +3398,78 @@ func normalizeSpawnAgentPermissionMode(raw string) (string, error) {
 		return string(mode), nil
 	default:
 		return "", fmt.Errorf("invalid agent permission_mode: %s", strings.TrimSpace(raw))
+	}
+}
+
+// normalizeSpawnAgentCompletionRequirement keeps empty empty so RunMeta stays nil
+// when callers did not request a harness constraint. Known aliases map to
+// none|complete_task; unknown values are ignored (treated as unset).
+func normalizeSpawnAgentCompletionRequirement(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case string(agentdef.CompletionNone):
+		return string(agentdef.CompletionNone)
+	case string(agentdef.CompletionCompleteTask), "complete-task", "completetask":
+		return string(agentdef.CompletionCompleteTask)
+	default:
+		return ""
+	}
+}
+
+// resolveSpawnAgentCompletionRequirement fills completion from agentdef when
+// spawn_agent only provided agent_type. Missing definitions are not errors.
+func resolveSpawnAgentCompletionRequirement(agentType string) string {
+	agentType = strings.TrimSpace(agentType)
+	if agentType == "" {
+		return ""
+	}
+	def, err := agentdef.Resolve(agentType, agentdef.DiscoverOptions{})
+	if err != nil || def == nil {
+		return ""
+	}
+	return normalizeSpawnAgentCompletionRequirement(string(def.CompletionRequirement))
+}
+
+// applySpawnAgentAgentdefDefaults fills permission_mode / read_only / model /
+// provider from the portable agent definition when spawn_agent only provided
+// agent_type (or left those fields empty). Explicit spawn args win.
+func applySpawnAgentAgentdefDefaults(request *SpawnAgentArgs, permissionModeExplicit, readOnlyExplicit bool) {
+	if request == nil {
+		return
+	}
+	agentType := strings.TrimSpace(request.AgentType)
+	if agentType == "" {
+		return
+	}
+	def, err := agentdef.Resolve(agentType, agentdef.DiscoverOptions{})
+	if err != nil || def == nil {
+		return
+	}
+	binding, err := agentdef.BuildBinding(def)
+	if err != nil || binding == nil {
+		return
+	}
+
+	if !readOnlyExplicit && binding.ReadOnly != nil && *binding.ReadOnly {
+		request.ReadOnly = true
+	}
+	if !permissionModeExplicit && strings.TrimSpace(request.PermissionMode) == "" {
+		if mode := strings.TrimSpace(string(binding.PermissionMode)); mode != "" {
+			if normalized, err := normalizeSpawnAgentPermissionMode(mode); err == nil && normalized != "" {
+				request.PermissionMode = normalized
+			}
+		}
+		// sandbox: read-only agents default to plan mode when mode still empty.
+		if request.ReadOnly && strings.TrimSpace(request.PermissionMode) == "" {
+			request.PermissionMode = string(runtimepolicy.ModePlan)
+		}
+	}
+	if strings.TrimSpace(request.Provider) == "" {
+		request.Provider = strings.TrimSpace(binding.Provider)
+	}
+	if strings.TrimSpace(request.Model) == "" {
+		request.Model = strings.TrimSpace(binding.Model)
 	}
 }
 

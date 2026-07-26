@@ -28,6 +28,7 @@ import (
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
@@ -36,7 +37,9 @@ import (
 )
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
-const repeatedSemanticToolCallNoticeThreshold = 4
+// repeatedSemanticToolCallNoticeThreshold aliases the productized warning threshold
+// so existing tests and call sites keep a stable local name.
+const repeatedSemanticToolCallNoticeThreshold = DoomLoopWarningThreshold
 const explorationStallNoticeThreshold = 12
 const defaultPromptPreflightAutoCompactRatio = 0.85
 
@@ -61,6 +64,11 @@ type LoopReActConfig struct {
 	Thinking             *types.ThinkingConfig `yaml:"thinking"`
 	StopOnSuccess        bool                  `yaml:"stopOnSuccess"`
 	MaxIterations        int                   `yaml:"maxIterations"`
+	// CompletionRequirement is none|complete_task (worker harness constraint).
+	CompletionRequirement string `yaml:"completionRequirement"`
+	// MaxCompletionRecoveryTurns limits recovery turns when complete_task is missing.
+	// Zero with complete_task defaults to 1; negative disables recovery (finish unsatisfied).
+	MaxCompletionRecoveryTurns int `yaml:"maxCompletionRecoveryTurns"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -134,6 +142,7 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 		}
 	}
 	config.MaxSteps = NormalizeMaxSteps(config.MaxSteps)
+	config.CompletionRequirement = NormalizeCompletionRequirement(config.CompletionRequirement)
 	if config.MaxParallelToolCalls <= 0 {
 		config.MaxParallelToolCalls = 1
 	}
@@ -391,14 +400,21 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	sessionCompactionRecoveryInputs := make(map[string]struct{})
 	lastToolPromptFingerprint := ""
 	repeatedToolPromptFingerprint := 0
-	lastSemanticToolFingerprint := ""
-	repeatedSemanticToolCalls := 0
+	// Doom-loop tracker: soft advisories always-on; hard stop via MaxRepeatedToolCalls.
+	doomLoop := NewDoomLoopTracker(loop.config.MaxRepeatedToolCalls)
 	// lastDispositionFingerprint tracks the last non-success disposition
 	// (partial/empty) so identical full-batch replays get a stronger advisory.
 	lastDispositionFingerprint := ""
 	lastDispositionOutcome := ""
 	consecutiveExplorationSteps := 0
 	totalToolCalls := 0
+	completionRequirement := NormalizeCompletionRequirement(loop.config.CompletionRequirement)
+	maxCompletionRecoveryTurns := normalizeCompletionRecoveryTurns(loop.config.MaxCompletionRecoveryTurns, completionRequirement)
+	completionRecoveryUsed := 0
+	completionSatisfied := true
+	if RequiresCompleteTask(completionRequirement) {
+		completionSatisfied = false
+	}
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -538,8 +554,48 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				result.Duration = *startTime
 				result.Usage = totalUsage.Clone()
 				result.State = loop.agent.GetState()
+				applyCompletionResultFields(result, completionRequirement, completionSatisfied, completionRecoveryUsed)
 				return result, err
 			}
+
+			// Worker harness: require report_task_outcome / block_current_task.
+			if RequiresCompleteTask(completionRequirement) {
+				if HasSuccessfulTaskOutcomeObservation(observations) {
+					completionSatisfied = true
+				} else if completionRecoveryUsed < maxCompletionRecoveryTurns && hasRemainingStepBudget(loop.config.MaxSteps, step) {
+					completionRecoveryUsed++
+					reminder := completionRequirementReminder(completionRequirement, completionRecoveryUsed, maxCompletionRecoveryTurns)
+					builder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
+					promptBuilder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
+					reminderMsg := types.NewUserMessage(reminder)
+					if reminderMsg.Metadata == nil {
+						reminderMsg.Metadata = types.Metadata{}
+					}
+					reminderMsg.Metadata["completion_requirement_reminder"] = true
+					reminderMsg.Metadata["completion_recovery_attempt"] = completionRecoveryUsed
+					builder.Add(*reminderMsg)
+					promptBuilder.Add(*reminderMsg)
+					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+						return nil, err
+					}
+					loop.agent.emitRuntimeEvent("completion.requirement_recovery", sessionID, "", map[string]interface{}{
+						"trace_id":               traceID,
+						"step":                   step,
+						"completion_requirement": completionRequirement,
+						"recovery_attempt":       completionRecoveryUsed,
+						"max_recovery_turns":     maxCompletionRecoveryTurns,
+					})
+					if loop.config.Verbose {
+						fmt.Printf("[Step %d] Completion requirement recovery %d/%d\n", step, completionRecoveryUsed, maxCompletionRecoveryTurns)
+					}
+					continue
+				} else {
+					completionSatisfied = false
+				}
+			} else {
+				completionSatisfied = true
+			}
+
 			builder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
 			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 				return nil, err
@@ -554,6 +610,52 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.Usage = totalUsage.Clone()
 			if len(pendingFailures) > 0 {
 				result.Error = joinFailureMessages(pendingToolFailureMessages(pendingFailures))
+			}
+			if RequiresCompleteTask(completionRequirement) && !completionSatisfied {
+				msg := missingCompletionRequirementMessage(completionRequirement)
+				if result.Error == "" {
+					result.Error = msg
+				} else {
+					result.Error = joinFailureMessages([]string{result.Error, msg})
+				}
+				// Incomplete structured outcome is not a hard failure of the whole run
+				// unless there were unrecovered tool errors; mark success false so team
+				// runners can fall through to structured/text recovery paths.
+				result.Success = false
+			}
+			applyCompletionResultFields(result, completionRequirement, completionSatisfied, completionRecoveryUsed)
+
+			// Stop gate: hooks may block finishing and force another step when
+			// step budget remains (e.g. tests not green yet).
+			if result.Success {
+				if continueRun, stopMsg := loop.dispatchStopHook(currentCtx, sessionID, traceID, step, result, "no_tool_calls"); continueRun {
+					// Durable history already has the assistant text (above);
+					// mirror it into the prompt view and inject a recovery cue.
+					promptBuilder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
+					reminderMsg := types.NewUserMessage(stopHookRecoveryMessage(stopMsg))
+					if reminderMsg.Metadata == nil {
+						reminderMsg.Metadata = types.Metadata{}
+					}
+					reminderMsg.Metadata["stop_hook_block"] = true
+					builder.Add(*reminderMsg)
+					promptBuilder.Add(*reminderMsg)
+					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+						return nil, err
+					}
+					loop.agent.emitRuntimeEvent("hooks.stop_blocked", sessionID, "", map[string]interface{}{
+						"trace_id": traceID,
+						"step":     step,
+						"message":  stopMsg,
+					})
+					// Reset terminal fields; we continue the loop.
+					result.Success = false
+					result.Output = ""
+					result.Error = ""
+					result.Reasoning = nil
+					continue
+				}
+			} else {
+				loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, step, result, "terminal_without_success")
 			}
 
 			// 记录到记忆
@@ -580,40 +682,30 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 				return nil, err
 			}
+			loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, step, result, "tool_call_limit")
 			return result, nil
 		}
 		repeatedSemanticAdvisory := ""
-		if fingerprint := semanticToolCallFingerprint(action.ToolCalls); fingerprint != "" {
-			if fingerprint == lastSemanticToolFingerprint {
-				repeatedSemanticToolCalls++
-			} else {
-				lastSemanticToolFingerprint = fingerprint
-				repeatedSemanticToolCalls = 1
+		doomObs := doomLoop.ObserveSemanticToolBatch(action.ToolCalls)
+		if doomObs.EmitWarning {
+			warningPayload := DoomLoopWarningPayload(traceID, step, doomObs)
+			// Dual-emit: legacy subscribers + product doom-loop surface.
+			loop.agent.emitRuntimeEvent(EventRepeatedSemanticCallObserved, sessionID, "", warningPayload)
+			loop.agent.emitRuntimeEvent(EventDoomLoopWarning, sessionID, "", warningPayload)
+			observability.RecordDoomLoop("warning")
+		}
+		if doomObs.RepeatCount >= 2 {
+			repeatedSemanticAdvisory = doomObs.Advisory
+		}
+		// Prefer a stronger, outcome-aware advisory when the model is about to
+		// re-issue the same batch that previously returned partial/empty evidence.
+		// Parallel partial batches are guided here; they are not a separate doom class.
+		if doomObs.Fingerprint != "" && doomObs.Fingerprint == lastDispositionFingerprint && strings.TrimSpace(lastDispositionOutcome) != "" {
+			if dispositionAdvisory := dispositionReplayAdvisory(lastDispositionOutcome, doomObs.RepeatCount); dispositionAdvisory != "" {
+				// Count advisory emissions for efficiency dashboards (empty/partial only).
+				observability.RecordToolDispositionReplay(lastDispositionOutcome, doomObs.RepeatCount)
+				repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, dispositionAdvisory)
 			}
-			if repeatedSemanticToolCalls == repeatedSemanticToolCallNoticeThreshold {
-				loop.agent.emitRuntimeEvent("tool_loop.repeated_semantic_call_observed", sessionID, "", map[string]interface{}{
-					"trace_id":              traceID,
-					"step":                  step,
-					"tool_call_fingerprint": fingerprint,
-					"repeat_count":          repeatedSemanticToolCalls,
-					"tool_call_count":       len(action.ToolCalls),
-				})
-			}
-			if repeatedSemanticToolCalls >= 2 {
-				repeatedSemanticAdvisory = repeatedSemanticToolCallAdvisory(repeatedSemanticToolCalls)
-			}
-			// Prefer a stronger, outcome-aware advisory when the model is about to
-			// re-issue the same batch that previously returned partial/empty evidence.
-			if fingerprint == lastDispositionFingerprint && strings.TrimSpace(lastDispositionOutcome) != "" {
-				if dispositionAdvisory := dispositionReplayAdvisory(lastDispositionOutcome, repeatedSemanticToolCalls); dispositionAdvisory != "" {
-					// Count advisory emissions for efficiency dashboards (empty/partial only).
-					observability.RecordToolDispositionReplay(lastDispositionOutcome, repeatedSemanticToolCalls)
-					repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, dispositionAdvisory)
-				}
-			}
-		} else {
-			lastSemanticToolFingerprint = ""
-			repeatedSemanticToolCalls = 0
 		}
 		consecutiveExplorationSteps = nextExplorationStallCount(consecutiveExplorationSteps, action.ToolCalls)
 		if consecutiveExplorationSteps == explorationStallNoticeThreshold {
@@ -646,11 +738,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			return result, nil
 		}
-		if loop.config.MaxRepeatedToolCalls > 0 && repeatedSemanticToolCalls >= loop.config.MaxRepeatedToolCalls {
+		if doomObs.ShouldStop {
+			termPayload := DoomLoopTerminationPayload(traceID, step, doomObs)
+			loop.agent.emitRuntimeEvent(EventDoomLoopTerminated, sessionID, "", termPayload)
+			observability.RecordDoomLoop("terminated")
 			result.Success = false
 			result.LimitReached = true
-			result.LimitReason = "repeated_tool_calls"
-			result.Output = repeatedToolLimitReachedMessage(loop.config.MaxRepeatedToolCalls)
+			result.LimitReason = doomObs.LimitReason
+			result.Output = repeatedToolLimitReachedMessage(doomObs.StopLimit)
 			result.Error = result.Output
 			result.Steps = step
 			result.Observations = observations
@@ -801,16 +896,31 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	result.Observations = observations
 	result.Duration = *startTime
 	result.Usage = totalUsage.Clone()
+	if RequiresCompleteTask(completionRequirement) {
+		completionSatisfied = HasSuccessfulTaskOutcomeObservation(observations)
+		if !completionSatisfied {
+			msg := missingCompletionRequirementMessage(completionRequirement)
+			if result.Error == "" {
+				result.Error = msg
+			} else {
+				result.Error = joinFailureMessages([]string{result.Error, msg})
+			}
+		}
+	}
+	applyCompletionResultFields(result, completionRequirement, completionSatisfied, completionRecoveryUsed)
 	builder.AppendAssistantAction(result.Output, nil, nil, nil)
 	if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 		return nil, err
 	}
 	if hadToolFailure && len(failureMessages) > 0 {
 		result.Error = joinFailureMessages(append(failureMessages, result.Output))
-	} else {
+	} else if strings.TrimSpace(result.Error) == "" {
 		result.Error = result.Output
+	} else {
+		result.Error = joinFailureMessages([]string{result.Error, result.Output})
 	}
 	result.State = loop.agent.GetState()
+	loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, result.Steps, result, "step_limit")
 
 	return result, nil
 }
@@ -1413,6 +1523,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			metadata[toolresult.SourceKey] = source
 		}
 		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i], loop.agent, sessionID, depth), results[:i])
+		callCtx = loop.agent.withToolProgressReporter(callCtx, sessionID, traceID, tc)
 		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, toolRequestedEventSourcePayload(loop.agent, tc.Name)))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
@@ -1559,6 +1670,77 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, callErr)
 			loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, result.Error)
 
+			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+			if gatewayErr != nil && envelope != nil {
+				envelope.Metadata["gateway_error"] = gatewayErr.Error()
+			}
+			result.Envelope = envelope
+			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+				"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
+			}))
+			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
+			results[i] = result
+			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+			continue
+		}
+
+		if strings.EqualFold(strings.TrimSpace(tc.Name), toolSearchName) {
+			if engine != nil {
+				decision, evalErr := engine.Evaluate(callCtx, runtimepolicy.EvalRequest{
+					SessionID:  sessionID,
+					TraceID:    traceID,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Name,
+					Args:       tc.Args,
+					Mode:       permissionModeFromContext(ctx),
+				})
+				if evalErr != nil {
+					result.Error = evalErr.Error()
+					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
+					results[i] = result
+					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+					continue
+				}
+				mergeHookMetadata(metadata, decision.HookMessage, decision.HookContext)
+				if decision.Type == runtimepolicy.DecisionDeny {
+					result.Error = decision.Reason
+					loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
+					result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
+					results[i] = result
+					loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+					continue
+				}
+				if len(decision.PatchedArgs) > 0 {
+					patched, patchErr := runtimepolicy.ApplyPatchedArgs(tc.Args, decision.PatchedArgs)
+					if patchErr != nil {
+						result.Error = patchErr.Error()
+						loop.emitToolDenied(sessionID, tc, step, traceID, "permission_engine", result.Error, nil)
+						result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
+						results[i] = result
+						loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+						continue
+					}
+					tc.Args = patched
+					result.Call.Args = patched
+				}
+			}
+
+			catalog := loop.fullCatalogForSearch(callCtx, toolWhitelist)
+			output, searchMeta, searchErr := executeSearchTool(tc.Args, catalog)
+			if len(searchMeta) > 0 {
+				for key, value := range searchMeta {
+					metadata[key] = value
+				}
+			}
+			if searchErr != nil {
+				result.Error = searchErr.Error()
+				if strings.TrimSpace(output) != "" {
+					result.Output = output
+				}
+			} else {
+				result.Output = output
+			}
 			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
 			if gatewayErr != nil && envelope != nil {
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
@@ -1811,9 +1993,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			rawMeta   map[string]interface{}
 		)
 		if caller, ok := loop.agent.mcpManager.(richToolCaller); ok {
-			rawOutput, rawMeta, err = caller.CallToolWithMeta(ctx, toolInfo.MCPName, tc.Name, tc.Args)
+			rawOutput, rawMeta, err = caller.CallToolWithMeta(callCtx, toolInfo.MCPName, tc.Name, tc.Args)
 		} else {
-			rawOutput, err = loop.agent.mcpManager.CallTool(ctx, toolInfo.MCPName, tc.Name, tc.Args)
+			rawOutput, err = loop.agent.mcpManager.CallTool(callCtx, toolInfo.MCPName, tc.Name, tc.Args)
 		}
 		recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, err)
 		loop.finishToolExecutionOutcome(metadata, tc.Name, decision.Digest, result.Error)
@@ -2222,11 +2404,19 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 				Name:        mt.Name,
 				Description: mt.Description,
 				Parameters:  normalizeToolParameters(mt.InputSchema),
+				Metadata:    cloneInterfaceMap(mt.Metadata),
 			}
 			if source := resolveToolSourceForRequest(loop.agent, mt.Name); source != "" {
-				definition.Metadata = map[string]interface{}{
-					toolresult.SourceKey: source,
+				if definition.Metadata == nil {
+					definition.Metadata = map[string]interface{}{}
 				}
+				definition.Metadata[toolresult.SourceKey] = source
+			}
+			if strings.TrimSpace(mt.MCPName) != "" {
+				if definition.Metadata == nil {
+					definition.Metadata = map[string]interface{}{}
+				}
+				definition.Metadata["mcp_name"] = mt.MCPName
 			}
 			tools = append(tools, definition)
 		}
@@ -2259,9 +2449,15 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 		}
 	}
 
+	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))
+	tools = filterToolDefinitionsByShouldList(tools, listCtx)
 	tools = optimizeModelToolSurface(tools)
-	if len(allowed) == 0 {
+	// Simple-goal projection wins for tiny prompts. Otherwise apply search
+	// projection so large catalogs keep core tools + search_tool only.
+	if len(allowed) == 0 && len(simpleGoalToolNames(goal)) > 0 {
 		tools = projectSimpleGoalToolSurface(goal, tools)
+	} else {
+		tools = projectToolSurfaceWithSearch(tools, toolkit.DefaultToolSearchThreshold)
 	}
 	tools = loop.compactToolSurfaceToBudget(tools)
 	sortToolDefinitionsByName(tools)
@@ -3051,39 +3247,6 @@ func actionPromptFingerprint(action *AgentAction) string {
 	return strings.TrimSpace(stringValue(action.Metadata["prompt_fingerprint"]))
 }
 
-func semanticToolCallFingerprint(calls []types.ToolCall) string {
-	if len(calls) == 0 {
-		return ""
-	}
-	type semanticToolCall struct {
-		Name string                 `json:"name"`
-		Args map[string]interface{} `json:"arguments,omitempty"`
-	}
-	payload := make([]semanticToolCall, 0, len(calls))
-	for _, call := range calls {
-		name := strings.ToLower(strings.TrimSpace(call.Name))
-		if name == "" || semanticToolCallRepeatExempt(name) {
-			return ""
-		}
-		payload = append(payload, semanticToolCall{Name: name, Args: call.Args})
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(encoded)
-	return fmt.Sprintf("%x", sum[:])
-}
-
-func semanticToolCallRepeatExempt(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "background_task", "wait_agent", "read_agent", "list_agents", "get_agents", "get_goal", "read_goal":
-		return true
-	default:
-		return false
-	}
-}
-
 func promptMessageFingerprint(messages []types.Message) string {
 	if len(messages) == 0 {
 		return ""
@@ -3611,6 +3774,16 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	}
 	loop.agent.emitRuntimeEvent("session_compact_started", sessionID, "", startedPayload)
 
+	if allow, blockMsg := loop.agent.dispatchPreCompactHook(ctx, startedPayload); !allow {
+		skippedPayload := cloneInterfaceMap(startedPayload)
+		skippedPayload["reason"] = "pre_compact_hook_blocked"
+		if strings.TrimSpace(blockMsg) != "" {
+			skippedPayload["hook_message"] = strings.TrimSpace(blockMsg)
+		}
+		loop.agent.emitRuntimeEvent("session_compact_skipped", sessionID, "", skippedPayload)
+		return nil, false, nil
+	}
+
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
 		SessionID:             sessionID,
 		TaskID:                sessionID,
@@ -3681,6 +3854,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		completedPayload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
 	}
 	loop.agent.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
+	loop.agent.dispatchPostCompactHook(ctx, completedPayload)
 
 	return cloneMessageHistory(result.ReplacementHistory), true, nil
 }
@@ -3732,6 +3906,16 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 	startedPayload["prompt_only"] = true
 	startedPayload["durable_history_replaced"] = false
 	loop.agent.emitRuntimeEvent(eventPrefix+".started", sessionID, "", startedPayload)
+
+	if allow, blockMsg := loop.agent.dispatchPreCompactHook(ctx, startedPayload); !allow {
+		skippedPayload := cloneInterfaceMap(startedPayload)
+		skippedPayload["reason"] = "pre_compact_hook_blocked"
+		if strings.TrimSpace(blockMsg) != "" {
+			skippedPayload["hook_message"] = strings.TrimSpace(blockMsg)
+		}
+		loop.agent.emitRuntimeEvent(eventPrefix+".skipped", sessionID, "", skippedPayload)
+		return nil, nil, false, nil
+	}
 
 	taskID := sessionID
 	if loop.agent.config != nil {
@@ -3805,6 +3989,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		completedPayload["usage_total_tokens"] = result.Usage.TotalTokens
 	}
 	loop.agent.emitRuntimeEvent(eventPrefix+".completed", sessionID, "", completedPayload)
+	loop.agent.dispatchPostCompactHook(ctx, completedPayload)
 	return cloneMessageHistory(result.ReplacementHistory), result.Usage, true, nil
 }
 
@@ -4229,19 +4414,24 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 			reasoningEffort = thinkingEffort
 			routeWarnings = append(routeWarnings, "thinking_effort_alias_used")
 		}
+		completionRequirement := stringValue(item["completion_requirement"])
+		if completionRequirement == "" {
+			completionRequirement = stringValue(item["completionRequirement"])
+		}
 		task := SubagentTask{
-			ID:                  stringValue(item["id"]),
-			Role:                stringValue(item["role"]),
-			Goal:                stringValue(item["goal"]),
-			Difficulty:          stringValue(item["difficulty"]),
-			DifficultyRationale: stringValue(item["difficulty_rationale"]),
-			Provider:            stringValue(item["provider"]),
-			Model:               stringValue(item["model"]),
-			ReasoningEffort:     reasoningEffort,
-			RouteWarnings:       routeWarnings,
-			BudgetTokens:        intValue(item["budget_tokens"]),
-			TimeoutSec:          intValue(item["timeout"]),
-			ReadOnly:            boolValue(item["read_only"]),
+			ID:                    stringValue(item["id"]),
+			Role:                  stringValue(item["role"]),
+			Goal:                  stringValue(item["goal"]),
+			Difficulty:            stringValue(item["difficulty"]),
+			DifficultyRationale:   stringValue(item["difficulty_rationale"]),
+			Provider:              stringValue(item["provider"]),
+			Model:                 stringValue(item["model"]),
+			ReasoningEffort:       reasoningEffort,
+			RouteWarnings:         routeWarnings,
+			BudgetTokens:          intValue(item["budget_tokens"]),
+			TimeoutSec:            intValue(item["timeout"]),
+			ReadOnly:              boolValue(item["read_only"]),
+			CompletionRequirement: completionRequirement,
 		}
 		task.ToolsWhitelist = stringSliceValue(item["tools_whitelist"])
 		task.DependsOn = stringSliceValue(item["depends_on"])

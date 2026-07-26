@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 func TestSQLiteStoreDeleteExpiredPathClaims(t *testing.T) {
@@ -144,4 +145,107 @@ func TestSQLiteStoreClaimTaskWithPathClaimsConflictLeavesTaskReady(t *testing.T)
 	require.NoError(t, err)
 	require.NotNil(t, mate)
 	require.Equal(t, TeammateStateIdle, mate.State)
+}
+
+func TestPathClaimManagerAcquireSuccessAndRelease(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	manager := NewPathClaimManager(store, "workspace")
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	claims, err := manager.Acquire(ctx, teamID, "task-1", "mate-a", []string{"docs"}, []string{"src/file.txt"}, time.Now().UTC().Add(5*time.Minute))
+	require.NoError(t, err)
+	require.Len(t, claims, 2)
+
+	listed, err := store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+
+	require.NoError(t, manager.Release(ctx, "task-1"))
+	listed, err = store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Empty(t, listed)
+}
+
+func TestPathClaimManagerAcquireConflict(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	manager := NewPathClaimManager(store, "workspace")
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = manager.Acquire(ctx, teamID, "task-existing", "mate-b", nil, []string{"src/file.txt"}, time.Now().UTC().Add(5*time.Minute))
+	require.NoError(t, err)
+
+	_, err = manager.Acquire(ctx, teamID, "task-new", "mate-a", nil, []string{"src"}, time.Now().UTC().Add(5*time.Minute))
+	require.Error(t, err)
+	var conflict *PathClaimConflictsError
+	require.ErrorAs(t, err, &conflict)
+	require.NotEmpty(t, conflict.Conflicts)
+
+	listed, err := store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, "task-existing", listed[0].TaskID)
+}
+
+func TestReleaseTaskPathClaimsPrefersManager(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	manager := NewPathClaimManager(store, "workspace")
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = manager.Acquire(ctx, teamID, "task-1", "mate-a", nil, []string{"a.txt"}, time.Now().UTC().Add(5*time.Minute))
+	require.NoError(t, err)
+
+	require.NoError(t, ReleaseTaskPathClaims(ctx, manager, store, "task-1"))
+	listed, err := store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Empty(t, listed)
+
+	_, err = manager.Acquire(ctx, teamID, "task-2", "mate-a", nil, []string{"b.txt"}, time.Now().UTC().Add(5*time.Minute))
+	require.NoError(t, err)
+	require.NoError(t, ReleaseTaskPathClaims(ctx, nil, store, "task-2"))
+	listed, err = store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Empty(t, listed)
+}
+
+func TestAgentControlTaskRegistryWithClaimsReleasesOnTerminal(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	manager := NewPathClaimManager(store, "workspace")
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "done work",
+		Status: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+
+	_, err = manager.Acquire(ctx, teamID, taskID, "mate-a", nil, []string{"out.txt"}, time.Now().UTC().Add(5*time.Minute))
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store).WithClaims(manager)
+	_, err = registry.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
+		ID:         taskID,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		Status:     string(TaskStatusDone),
+		Summary:    "finished",
+		TeammateID: "mate-a",
+	})
+	require.NoError(t, err)
+
+	listed, err := store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Empty(t, listed)
 }

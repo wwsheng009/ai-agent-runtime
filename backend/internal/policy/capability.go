@@ -23,7 +23,7 @@ type CapabilityResolver interface {
 	Resolve(req EvalRequest) []Capability
 }
 
-// DefaultCapabilityResolver applies basic heuristics on tool name.
+// DefaultCapabilityResolver applies taxonomy first, then basic heuristics on tool name.
 type DefaultCapabilityResolver struct{}
 
 // Resolve returns capabilities for the given request.
@@ -33,9 +33,21 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 		return []Capability{CapReadOnly}
 	}
 
+	meta := req.Metadata
+	if meta == nil && req.ToolInfo != nil && len(req.ToolInfo.Metadata) > 0 {
+		meta = req.ToolInfo.Metadata
+	}
+	if tax, ok := ResolveToolTaxonomy(toolName, meta); ok {
+		if caps := capabilitiesFromTaxonomy(tax); len(caps) > 0 {
+			return caps
+		}
+	}
+
 	switch normalizeToolName(toolName) {
 	case "ask_user_question":
 		return []Capability{CapAskUser}
+	case "enter_plan_mode", "exit_plan_mode":
+		return []Capability{CapReadOnly, CapAskUser}
 	case "background_task":
 		return []Capability{CapBackgroundTask}
 	case "task_output":
@@ -86,6 +98,10 @@ func normalizeToolName(name string) string {
 	switch name {
 	case "askuserquestion":
 		return "ask_user_question"
+	case "enterplanmode":
+		return "enter_plan_mode"
+	case "exitplanmode":
+		return "exit_plan_mode"
 	case "backgroundtask":
 		return "background_task"
 	case "taskoutput":

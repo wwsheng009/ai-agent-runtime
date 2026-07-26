@@ -11,18 +11,20 @@ import (
 )
 
 type fakeAgentSessionController struct {
-	lastParent  string
-	lastSpawn   SpawnAgentArgs
-	lastList    ListAgentsArgs
-	lastMsg     AgentMessageArgs
-	lastFollow  AgentMessageArgs
-	lastInput   SendAgentInputArgs
-	lastApprove ResolveAgentApprovalArgs
-	lastWait    WaitAgentArgs
-	lastRead    ReadAgentEventsArgs
-	lastClose   string
-	lastResume  string
-	agents      []AgentStatusResult
+	lastParent     string
+	lastSpawn      SpawnAgentArgs
+	lastList       ListAgentsArgs
+	lastMsg        AgentMessageArgs
+	lastFollow     AgentMessageArgs
+	lastInput      SendAgentInputArgs
+	lastApprove    ResolveAgentApprovalArgs
+	lastWait       WaitAgentArgs
+	lastRead       ReadAgentEventsArgs
+	lastClose      string
+	lastResume     string
+	lastApply      ApplyAgentWorktreeArgs
+	lastDiscard    DiscardAgentWorktreeArgs
+	agents         []AgentStatusResult
 }
 
 type testAgentContext map[string]interface{}
@@ -52,6 +54,7 @@ func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID 
 		ReasoningEffort:     args.ReasoningEffort,
 		PermissionMode:      args.PermissionMode,
 		ReadOnly:            args.ReadOnly,
+		Isolation:           args.Isolation,
 		Difficulty:          args.Difficulty,
 		DifficultyRationale: args.DifficultyRationale,
 		RouteSource:         args.RouteSource,
@@ -167,6 +170,37 @@ func (f *fakeAgentSessionController) Resume(ctx context.Context, sessionID strin
 	return &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "idle", Exists: true, CurrentTurnID: "turn-dynamic-567"}, nil
 }
 
+func (f *fakeAgentSessionController) ApplyWorktree(ctx context.Context, args ApplyAgentWorktreeArgs) (*AgentWorktreeResult, error) {
+	f.lastApply = args
+	sessionID := firstNonEmptyString(args.ID, args.SessionID)
+	return &AgentWorktreeResult{
+		ID:           sessionID,
+		SessionID:    sessionID,
+		Action:       "apply",
+		Isolation:    "worktree",
+		WorktreePath: "/tmp/wt/" + sessionID,
+		Applied:      true,
+		Removed:      !args.Keep,
+		Kept:         args.Keep,
+		Paths:        append([]string(nil), args.Paths...),
+		Status:       &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "idle", Exists: true},
+	}, nil
+}
+
+func (f *fakeAgentSessionController) DiscardWorktree(ctx context.Context, args DiscardAgentWorktreeArgs) (*AgentWorktreeResult, error) {
+	f.lastDiscard = args
+	sessionID := firstNonEmptyString(args.ID, args.SessionID)
+	return &AgentWorktreeResult{
+		ID:        sessionID,
+		SessionID: sessionID,
+		Action:    "discard",
+		Isolation: "worktree",
+		Discarded: true,
+		Removed:   true,
+		Status:    &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "idle", Exists: true},
+	}, nil
+}
+
 func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.T) {
 	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
 	defs := broker.Definitions()
@@ -176,7 +210,7 @@ func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.
 		seen[def.Name] = true
 	}
 
-	for _, name := range []string{ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent} {
+	for _, name := range []string{ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree} {
 		if !seen[name] {
 			t.Fatalf("expected %s in broker definitions", name)
 		}
@@ -199,10 +233,18 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("spawn_agent properties missing: %#v", spawnDef)
 	}
-	for _, key := range []string{"difficulty", "difficulty_rationale", "provider", "model", "reasoning_effort", "thinking_effort", "permission_mode", "read_only"} {
+	for _, key := range []string{"difficulty", "difficulty_rationale", "provider", "model", "reasoning_effort", "thinking_effort", "permission_mode", "read_only", "completion_requirement", "completionRequirement", "isolation"} {
 		if _, ok := properties[key]; !ok {
 			t.Fatalf("expected spawn_agent property %q in %#v", key, properties)
 		}
+	}
+	completionRequirement, ok := properties["completion_requirement"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("completion_requirement property has unexpected shape: %#v", properties["completion_requirement"])
+	}
+	completionEnum, ok := completionRequirement["enum"].([]string)
+	if !ok || strings.Join(completionEnum, ",") != "none,complete_task" {
+		t.Fatalf("unexpected completion_requirement enum: %#v", completionRequirement["enum"])
 	}
 	difficulty, ok := properties["difficulty"].(map[string]interface{})
 	if !ok {
@@ -219,6 +261,14 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 	permissionEnum, ok := permissionMode["enum"].([]string)
 	if !ok || strings.Join(permissionEnum, ",") != "default,accept_edits,plan,bypass_permissions" {
 		t.Fatalf("unexpected permission_mode enum: %#v", permissionMode["enum"])
+	}
+	isolation, ok := properties["isolation"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("isolation property has unexpected shape: %#v", properties["isolation"])
+	}
+	isolationEnum, ok := isolation["enum"].([]string)
+	if !ok || strings.Join(isolationEnum, ",") != "none,worktree" {
+		t.Fatalf("unexpected isolation enum: %#v", isolation["enum"])
 	}
 }
 
@@ -374,6 +424,187 @@ func TestBroker_Execute_SpawnAgentInheritsPermissionModeFromRunMeta(t *testing.T
 	}
 	if controller.lastSpawn.PermissionMode != "bypass_permissions" {
 		t.Fatalf("expected inherited permission_mode, got %#v", controller.lastSpawn)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentParsesCompletionRequirement(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":               "finish with outcome",
+		"completion_requirement": "Complete-Task",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.CompletionRequirement != "complete_task" {
+		t.Fatalf("expected complete_task, got %#v", controller.lastSpawn)
+	}
+	if meta["completion_requirement"] != "complete_task" {
+		t.Fatalf("expected completion metadata, got %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentParsesCompletionRequirementCamelCase(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":              "finish with outcome",
+		"completionRequirement": "complete_task",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.CompletionRequirement != "complete_task" {
+		t.Fatalf("expected complete_task from camelCase alias, got %#v", controller.lastSpawn)
+	}
+	if meta["completion_requirement"] != "complete_task" {
+		t.Fatalf("expected completion metadata, got %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentInheritsCompletionRequirementFromRunMeta(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{CompletionRequirement: "complete_task"})
+
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.CompletionRequirement != "complete_task" {
+		t.Fatalf("expected inherited completion_requirement, got %#v", controller.lastSpawn)
+	}
+	if meta["completion_requirement"] != "complete_task" {
+		t.Fatalf("expected inherited completion metadata, got %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentIgnoresUnknownCompletionRequirement(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":                "inspect",
+		"completion_requirement": "must_finish",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.CompletionRequirement != "" {
+		t.Fatalf("expected unknown completion_requirement to be ignored, got %#v", controller.lastSpawn)
+	}
+	if _, ok := meta["completion_requirement"]; ok {
+		t.Fatalf("did not expect completion metadata for unknown value: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentParsesIsolation(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":   "inspect isolation",
+		"isolation": " WorkTree ",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.Isolation != "worktree" {
+		t.Fatalf("expected isolation worktree, got %#v", controller.lastSpawn)
+	}
+	result, ok := raw.(*AgentStatusResult)
+	if !ok || result.Isolation != "worktree" {
+		t.Fatalf("unexpected isolation result: %#v", raw)
+	}
+	if meta["isolation"] != "worktree" {
+		t.Fatalf("expected isolation metadata, got %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentDefaultsIsolationNone(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message": "default isolation",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.Isolation != "" {
+		t.Fatalf("expected empty isolation arg (none by default), got %#v", controller.lastSpawn)
+	}
+	if _, ok := meta["isolation"]; ok {
+		t.Fatalf("did not expect isolation metadata for default none: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentRejectsInvalidIsolation(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":   "bad isolation",
+		"isolation": "sandbox",
+	})
+	if err == nil {
+		t.Fatal("expected invalid isolation to fail")
+	}
+	if !strings.Contains(err.Error(), "isolation") {
+		t.Fatalf("expected isolation error, got %v", err)
+	}
+	if controller.lastSpawn.Message != "" {
+		t.Fatalf("spawn should not run on invalid isolation, got %#v", controller.lastSpawn)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentAppliesAgentdefDefaults(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":    "scout the tree",
+		"agent_type": "explore",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if !controller.lastSpawn.ReadOnly {
+		t.Fatalf("expected explore agentdef read_only default, got %#v", controller.lastSpawn)
+	}
+	if controller.lastSpawn.PermissionMode != "plan" {
+		t.Fatalf("expected explore agentdef permission_mode=plan, got %#v", controller.lastSpawn)
+	}
+	if meta["read_only"] != true || meta["permission_mode"] != "plan" {
+		t.Fatalf("unexpected explore metadata: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentExplicitArgsWinOverAgentdef(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":         "override",
+		"agent_type":      "explore",
+		"permission_mode": "bypass_permissions",
+		"read_only":       false,
+		"model":           "explicit-model",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.ReadOnly {
+		t.Fatalf("expected explicit read_only=false to win, got %#v", controller.lastSpawn)
+	}
+	if controller.lastSpawn.PermissionMode != "bypass_permissions" {
+		t.Fatalf("expected explicit permission_mode, got %#v", controller.lastSpawn)
+	}
+	if controller.lastSpawn.Model != "explicit-model" {
+		t.Fatalf("expected explicit model, got %#v", controller.lastSpawn)
 	}
 }
 
@@ -546,6 +777,21 @@ func TestSpawnAgentRunMetaUsesPermissionMode(t *testing.T) {
 	}
 }
 
+func TestSpawnAgentRunMetaUsesCompletionRequirement(t *testing.T) {
+	got := SpawnAgentRunMeta(SpawnAgentArgs{CompletionRequirement: " complete_task "})
+	if got == nil || got.CompletionRequirement != "complete_task" {
+		t.Fatalf("unexpected spawn agent run meta: %#v", got)
+	}
+}
+
+func TestApplySpawnAgentRouteContextPersistsCompletionRequirement(t *testing.T) {
+	ctx := testAgentContext{}
+	ApplySpawnAgentRouteContext(ctx, SpawnAgentArgs{CompletionRequirement: "complete_task"})
+	if ctx[AgentSessionContextCompletionRequirement] != "complete_task" {
+		t.Fatalf("expected completion_requirement context, got %#v", ctx)
+	}
+}
+
 func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
@@ -679,6 +925,36 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	if controller.lastResume != "child-1" {
 		t.Fatalf("unexpected resume id: %s", controller.lastResume)
 	}
+
+	rawApply, applyMeta, err := broker.Execute(context.Background(), "parent-session", ToolApplyAgentWorktree, map[string]interface{}{
+		"id":    "child-1",
+		"paths": []interface{}{"src/a.go"},
+		"keep":  true,
+	})
+	if err != nil {
+		t.Fatalf("apply_agent_worktree failed: %v", err)
+	}
+	if controller.lastApply.ID != "child-1" || !controller.lastApply.Keep || len(controller.lastApply.Paths) != 1 || controller.lastApply.Paths[0] != "src/a.go" {
+		t.Fatalf("unexpected apply args: %#v", controller.lastApply)
+	}
+	applyResult, ok := rawApply.(*AgentWorktreeResult)
+	if !ok || applyResult == nil || !applyResult.Applied || !applyResult.Kept || applyMeta["applied"] != true {
+		t.Fatalf("unexpected apply result/meta: %#v %#v", rawApply, applyMeta)
+	}
+
+	rawDiscard, discardMeta, err := broker.Execute(context.Background(), "parent-session", ToolDiscardAgentWorktree, map[string]interface{}{
+		"session_id": "child-2",
+	})
+	if err != nil {
+		t.Fatalf("discard_agent_worktree failed: %v", err)
+	}
+	if controller.lastDiscard.SessionID != "child-2" {
+		t.Fatalf("unexpected discard args: %#v", controller.lastDiscard)
+	}
+	discardResult, ok := rawDiscard.(*AgentWorktreeResult)
+	if !ok || discardResult == nil || !discardResult.Discarded || discardMeta["discarded"] != true {
+		t.Fatalf("unexpected discard result/meta: %#v %#v", rawDiscard, discardMeta)
+	}
 }
 
 func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
@@ -753,15 +1029,31 @@ func TestFinalizeAgentWaitResultProvidesSchedulingGuidance(t *testing.T) {
 	if result.WaitedMs < 1400 {
 		t.Fatalf("expected measured wait duration, got %d", result.WaitedMs)
 	}
-	if result.NextAction != "continue_independent_work_before_waiting_again" {
+	if !strings.HasPrefix(result.NextAction, "continue_independent_work_before_waiting_again") {
 		t.Fatalf("unexpected timeout next action: %#v", result)
 	}
 
 	result = FinalizeAgentWaitResult(&AgentWaitResult{
 		Agent: &AgentStatusResult{ID: "child-2", Status: "waiting_approval", PendingApproval: true},
 	}, time.Now())
-	if result.NextAction != "resolve_pending_approval" {
+	if !strings.HasPrefix(result.NextAction, "resolve_pending_approval") {
 		t.Fatalf("approval guidance must take precedence: %#v", result)
+	}
+	if !strings.Contains(result.NextAction, "resolve_agent_approval") || !strings.Contains(result.NextAction, "child-2") {
+		t.Fatalf("approval next_action should name resolve_agent_approval and child id: %#v", result)
+	}
+
+	result = FinalizeAgentWaitResult(&AgentWaitResult{
+		Agent: &AgentStatusResult{
+			ID:                "child-3",
+			SessionID:         "sess-3",
+			Status:            "waiting_approval",
+			PendingApproval:   true,
+			PendingApprovalID: "approval-42",
+		},
+	}, time.Now())
+	if !strings.Contains(result.NextAction, `request_id="approval-42"`) || !strings.Contains(result.NextAction, `id="child-3"`) {
+		t.Fatalf("approval next_action should include id and request_id: %#v", result)
 	}
 }
 
@@ -919,6 +1211,26 @@ func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
 	}
 	if controller.lastApprove.ID != "" {
 		t.Fatalf("expected resolve_agent_approval not to reach controller, got %#v", controller.lastApprove)
+	}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolApplyAgentWorktree, map[string]interface{}{
+		"id": "member-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+		t.Fatalf("expected apply_agent_worktree teammate id error, got %v", err)
+	}
+	if controller.lastApply.ID != "" || controller.lastApply.SessionID != "" {
+		t.Fatalf("expected apply_agent_worktree not to reach controller, got %#v", controller.lastApply)
+	}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolDiscardAgentWorktree, map[string]interface{}{
+		"id": "member-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+		t.Fatalf("expected discard_agent_worktree teammate id error, got %v", err)
+	}
+	if controller.lastDiscard.ID != "" || controller.lastDiscard.SessionID != "" {
+		t.Fatalf("expected discard_agent_worktree not to reach controller, got %#v", controller.lastDiscard)
 	}
 }
 

@@ -6,10 +6,89 @@
 
 本文档涵盖：
 
+- [零、第一次使用（推荐路径）](#零第一次使用推荐路径)
 - [一、安装](#一安装)
 - [二、配置](#二配置)
 - [三、常用命令](#三常用命令)
-- [四、卸载](#四卸载)
+  - [MCP / skill / plugin / agent 概览](#mcp-子命令概览)
+- [四、常见问题（FAQ）](#四常见问题faq)
+- [五、卸载](#五卸载)
+- [六、相关链接](#六相关链接)
+
+最短上手路径见 [quickstart.md](./quickstart.md)；独立排错清单见 [faq.md](./faq.md)。
+
+---
+
+## 零、第一次使用（推荐路径）
+
+如果你只是想尽快用上 `aicli`，也可直接看独立文档 [quickstart.md](./quickstart.md)。下面是同一条最短路径的摘要：
+
+```text
+安装 aicli
+  → 初始化/确认配置（~/.aicli/config.yaml）
+  → aicli login 登录 provider
+  → aicli 进入 chat，用 /model 切换模型
+```
+
+**首次安装 checklist**（细节与成功信号见 [quickstart.md](./quickstart.md#0-首次安装-checklist含成功信号)）：
+
+| 步骤 | 命令 | 成功信号 |
+|---|---|---|
+| 0. 安装 | 安装脚本 / Release / `make install-aicli` | `aicli version` 打印版本号 |
+| 1. 初始化 | `aicli init --global` | `aicli config` 能读到配置路径 |
+| 2. 登录 | `aicli login ... --set-default` | `aicli provider list` 可见 provider；`aicli doctor provider` 不报致命错误 |
+| 3. 使用 | `aicli` | 模型能回复；`/model status` 显示当前 provider/model |
+
+```bash
+# 1) 安装后验证
+aicli version
+
+# 2) 初始化用户级配置（推荐）
+aicli init --global
+aicli config   # 成功信号：能读到配置路径
+
+# 3) 登录 provider（会校验 models endpoint 并写回 config）
+# 建议 API key 走环境变量，避免写进 shell 历史
+export OPENAI_API_KEY=sk-...
+aicli login \
+  --provider openai \
+  --protocol openai \
+  --base-url https://api.openai.com \
+  --api-key "$OPENAI_API_KEY" \
+  --set-default
+
+# 4) 进入 chat
+aicli
+# 在 chat 内：
+#   /model status
+#   /model gpt-4.1
+#   /help
+```
+
+**Windows PowerShell 登录示例**
+
+```powershell
+$env:OPENAI_API_KEY = 'sk-...'
+aicli login `
+  --provider openai `
+  --protocol openai `
+  --base-url https://api.openai.com `
+  --api-key $env:OPENAI_API_KEY `
+  --set-default
+```
+
+登录后建议先检查（成功信号）：
+
+```bash
+aicli provider list
+aicli doctor provider
+aicli doctor provider --provider openai --model gpt-4.1
+aicli config --models
+```
+
+也可以在 chat 内执行 `/login`，与 `aicli login` 共用同一套登录逻辑。
+
+更细的安装方式、配置字段、slash 命令和卸载说明见下文各章节。
 
 ---
 
@@ -226,10 +305,19 @@ providers:
 配置中 `${VAR:-default}` 语法支持从环境变量注入。常见 API key 变量：
 
 ```bash
+export OPENAI_API_KEY=sk-xxxxx
 export NVIDIA_API_KEYS=nvapi-xxxxx
 export DEEPSEEK_API_KEY=sk-xxxxx
 export BIGMODEL_API_KEYS=xxxxx
 export GEMINI_API_KEY=xxxxx
+```
+
+Windows PowerShell：
+
+```powershell
+$env:OPENAI_API_KEY = 'sk-xxxxx'
+$env:NVIDIA_API_KEYS = 'nvapi-xxxxx'
+$env:DEEPSEEK_API_KEY = 'sk-xxxxx'
 ```
 
 支持自动加载 `.env` 文件，搜索顺序：
@@ -269,11 +357,28 @@ echo "Hello" | aicli pipe --model gpt-4 --timeout 120
 # MCP 子命令
 aicli mcp --help
 
+# skill 安装到目标工具目录（codex|aicli|workspace）
+aicli skill install
+aicli skill install aicli --target codex --dry-run
+
+# 本地 plugin 安装 / 信任 / 启用（无 marketplace）
+aicli plugin install ./my-plugin
+aicli plugin list
+aicli plugin trust my-plugin
+
+# ACP 子集宿主（stdin/stdout NDJSON；详见 agents.md）
+aicli agent stdio --provider openai --model gpt-4o
+
 # 登录或更新 provider，并校验 models endpoint 后写回 config.yaml
 aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-... --set-default
 aicli login --provider local --protocol openai --base-url http://127.0.0.1:4000 --models-path /v1/models
 aicli login --provider codex --protocol codex-oauth --base-url https://api.openai.com --auth-ref codex --set-default
 aicli login --provider openai --base-url https://new.example.com --dry-run --json
+
+# 诊断 provider 调用链（可复现矩阵；不是裸 `aicli doctor`）
+aicli doctor provider
+aicli doctor provider --provider openai --model gpt-4.1
+aicli doctor subagent-route --role writer --difficulty hard
 
 # 交互式聊天（默认）
 aicli
@@ -380,6 +485,70 @@ sessions:
 - `reload`
 
 常用参数包括 `--config-file/-C`、`--transport`、`--header`、`--auth` 等；完整参数以 `aicli mcp --help` 和各子命令 `--help` 为准。
+
+### skill 安装概览
+
+`aicli skill`（别名 `skills`）把 Codex 风格 skill 目录（含 `SKILL.md`）安装到目标工具的 skills 根目录：
+
+```bash
+aicli skill install                         # 默认安装内置 aicli skill
+aicli skill install aicli --target codex
+aicli skill install aicli --target aicli
+aicli skill install aicli --target workspace
+aicli skill install aicli --source-dir .\.agents\skills --dry-run --output json
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--target` | `codex` / `aicli` / `workspace`；被 `--target-dir` 覆盖 |
+| `--target-dir` | 显式 skills 根目录；最终落到 `<target-dir>/<name>` |
+| `--source-dir` | 单个 skill 目录，或包含多个 skill 子目录的根 |
+| `--dry-run` / `--force` | 预览或覆盖已存在目标 |
+
+chat 内 skills **暴露 / 路由**（默认启用、top-k、exec 假阴性）见 [skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_skills_usage.md)。  
+角色 agent 与 skill 内 `agents/openai.yaml` 的区别见 [agents.md](./agents.md)。
+
+### plugin 本地包概览
+
+`aicli plugin`（别名 `plugins`）管理**本地** plugin 包，不做 marketplace：
+
+```bash
+aicli plugin install ./my-plugin
+aicli plugin install ./my-plugin --trust
+aicli plugin list
+aicli plugin trust my-plugin
+aicli plugin enable my-plugin
+aicli plugin disable my-plugin
+aicli plugin untrust my-plugin
+```
+
+要点：
+
+- plugin 是带 `plugin.yaml` 的目录，可贡献 `skills/`、`agents/`、hooks、MCP
+- 默认安装到 `~/.aicli/plugins`（或 `$AICLI_HOME/plugins`）
+- **新安装默认 untrusted**：不会向 runtime 贡献，直到 `aicli plugin trust <name>`
+- 已信任后仍可用 `enable` / `disable` 控制是否贡献
+
+skills 暴露见 [skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_skills_usage.md)；agent 定义层见 [agents.md](./agents.md)。
+
+### agent ACP 宿主概览
+
+`aicli agent stdio` 以 Agent Client Protocol (ACP) **子集**在 stdin/stdout 上服务（JSON-RPC 2.0 over NDJSON）。  
+这与 `aicli chat --agent`（Portable AgentDefinition / profile 角色）不是同一入口：
+
+| 入口 | 用途 |
+|---|---|
+| `aicli chat --agent <name>` | 交互/非交互 chat 绑定角色 def |
+| `aicli agent stdio` | 外部 IDE/客户端协议宿主；stdin 是协议流，不是 prompt 文本 |
+| `aicli exec` | headless 工具代理（CI/脚本） |
+
+```bash
+aicli agent stdio --provider openai --model gpt-4o
+aicli agent stdio --profile default --permission-mode default
+aicli agent stdio --yolo --enable-tools
+```
+
+角色 / permission / profile 概念见 [agents.md](./agents.md#9-acp-宿主-aicli-agent-stdio)；headless 输出契约见 [exec.md](./exec.md)。
 
 ### chat 内置斜杠命令补充
 
@@ -539,7 +708,34 @@ tool 参数边界：
 
 ---
 
-## 四、卸载
+## 四、常见问题（FAQ）
+
+完整排错清单已拆到独立文档 [faq.md](./faq.md)。本节只保留入口索引：
+
+| 问题 | 文档 |
+|------|------|
+| 找不到配置 / `providers` 为空 | [faq.md §1](./faq.md#1-找不到配置--providers-为空) |
+| `aicli login` models endpoint 校验失败 | [faq.md §2](./faq.md#2-aicli-login-校验-models-endpoint-失败) |
+| chat 里 `/model` 切换失败 | [faq.md §3](./faq.md#3-chat-里-model-切换失败) |
+| HTTP 401 / Invalid API key | [faq.md §4](./faq.md#4-http-401--invalid-api-key) |
+| Windows 安装后找不到 `aicli` | [faq.md §5](./faq.md#5-windows-安装后找不到-aicli) |
+| 临时使用另一份配置 | [faq.md §6](./faq.md#6-临时使用另一份配置) |
+| 日志路径 | [faq.md §7](./faq.md#7-日志在哪里) |
+| 仓库示例配置读不到 | [faq.md §8](./faq.md#8-仓库里的示例配置为什么读不到) |
+
+快速自检：
+
+```bash
+aicli config
+aicli doctor provider
+aicli doctor provider --provider openai --model gpt-4.1
+```
+
+最短上手见 [quickstart.md](./quickstart.md)。
+
+---
+
+## 五、卸载
 
 如需删除 aicli 在本机写入的配置与运行数据，可先预览，再确认删除：
 
@@ -575,8 +771,14 @@ Remove-Item "$env:LOCALAPPDATA\Programs\aicli\aicli.exe"
 
 ---
 
-## 五、相关链接
+## 六、相关链接
 
+- [quickstart.md](./quickstart.md)
+- [faq.md](./faq.md)
+- [exec.md](./exec.md)
+- [agents.md](./agents.md)（含 `aicli chat --agent` 与 `aicli agent stdio`）
+- [tool_image_generate.md](./tool_image_generate.md)
+- [skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_skills_usage.md)
 - [GitHub Releases](https://github.com/wwsheng009/ai-agent-runtime/releases)
 - [Release workflow 源码](../../.github/workflows/release-aicli.yml)
 - [完整配置示例](../../backend/configs/config.yaml)

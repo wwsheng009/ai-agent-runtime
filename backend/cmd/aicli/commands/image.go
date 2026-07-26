@@ -52,7 +52,10 @@ func NewImageCommand(configProvider func() *config.Config) *cobra.Command {
 		Use:     "image [prompt]",
 		Aliases: []string{"img"},
 		Short:   "直接调用图片生成工具",
-		Long:    "直接调用 openai_image_generate，通过 OpenAI 兼容 /v1/images/generations 或 Codex 原生 image_generation 生成图片并保存到本地目录。",
+		Long: "直接调用 openai_image_generate，通过 OpenAI 兼容 /v1/images/generations 或 Codex 原生 image_generation 生成图片并保存到本地目录。\n\n" +
+			"默认 path=auto：优先 images_generations_api，找不到时回退 codex_native。\n" +
+			"chat 内也可用 /image 或 /call openai_image_generate。\n" +
+			"详细路径与输出目录见 docs/aicli/tool_image_generate.md。",
 		Example: `  aicli image "一只在月光下奔跑的猫"
 	aicli image --provider SENSENOVA_IMAGE --model sensenova-u1-fast "海边日落照片"
 	aicli image --prompt "产品海报，白底" --size 1024x1024 --output-dir ./out/images

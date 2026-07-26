@@ -2,6 +2,7 @@ package profileinput
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +12,6 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
-	"gopkg.in/yaml.v3"
 )
 
 // ResolvedAgentInputs contains shared runtime-facing inputs derived from a resolved profile.
@@ -21,6 +21,9 @@ type ResolvedAgentInputs struct {
 	ContextText   string
 	ContextValues map[string]interface{}
 	ToolPolicy    *runtimepolicy.ToolExecutionPolicy
+	// SandboxWarnings are explicit application-sandbox downgrade notices
+	// (e.g. strict without workspace root). Callers should surface them.
+	SandboxWarnings []string
 }
 
 // BuildResolvedAgentInputs converts a resolved profile into shared runtime inputs.
@@ -41,7 +44,7 @@ func BuildResolvedAgentInputs(resolved *ResolvedAgent) (*ResolvedAgentInputs, er
 	if err != nil {
 		return nil, err
 	}
-	toolPolicy, err := BuildToolExecutionPolicy(resolved.ToolPolicy)
+	toolPolicy, sandboxWarnings, err := BuildToolExecutionPolicyWithWorkspace(resolved.ToolPolicy, "")
 	if err != nil {
 		return nil, err
 	}
@@ -54,11 +57,12 @@ func BuildResolvedAgentInputs(resolved *ResolvedAgent) (*ResolvedAgentInputs, er
 	}
 
 	return &ResolvedAgentInputs{
-		PromptText:    ComposeSystemPrompt(promptText, contextText),
-		PromptLayers:  promptLayers,
-		ContextText:   contextText,
-		ContextValues: contextValues,
-		ToolPolicy:    toolPolicy,
+		PromptText:      ComposeSystemPrompt(promptText, contextText),
+		PromptLayers:    promptLayers,
+		ContextText:     contextText,
+		ContextValues:   contextValues,
+		ToolPolicy:      toolPolicy,
+		SandboxWarnings: sandboxWarnings,
 	}, nil
 }
 
@@ -160,9 +164,16 @@ func LoadContextInputs(paths ResolvedPaths) (string, map[string]interface{}, err
 
 // BuildToolExecutionPolicy converts a resolved profile tool policy into a runtime policy.
 func BuildToolExecutionPolicy(resolved ResolvedToolPolicy) (*runtimepolicy.ToolExecutionPolicy, error) {
+	policy, _, err := BuildToolExecutionPolicyWithWorkspace(resolved, "")
+	return policy, err
+}
+
+// BuildToolExecutionPolicyWithWorkspace converts a resolved profile tool policy
+// into a runtime policy, materializing named sandbox profiles against workspaceRoot.
+func BuildToolExecutionPolicyWithWorkspace(resolved ResolvedToolPolicy, workspaceRoot string) (*runtimepolicy.ToolExecutionPolicy, []string, error) {
 	hasPolicy := len(resolved.Allowlist) > 0 || len(resolved.Denylist) > 0 || resolved.ReadOnly != nil || len(resolved.Sandbox) > 0
 	if !hasPolicy {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	readOnly := resolved.ReadOnly != nil && *resolved.ReadOnly
@@ -180,16 +191,56 @@ func BuildToolExecutionPolicy(resolved ResolvedToolPolicy) (*runtimepolicy.ToolE
 			}
 		}
 	}
+	var warnings []string
 	if len(resolved.Sandbox) > 0 {
-		sandboxCfg, err := decodeSandboxConfig(resolved.Sandbox)
+		result, err := runtimeexecutor.ResolveSandboxMap(resolved.Sandbox, runtimeexecutor.SandboxProfileOptions{
+			WorkspaceRoot: workspaceRoot,
+		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if sandboxCfg != nil {
-			policy.Sandbox = runtimeexecutor.NewSandbox(sandboxCfg)
+		warnings = append(warnings, result.Warnings...)
+		if result.ReadOnly {
+			readOnly = true
+			policy.ReadOnly = true
+		}
+		if result.Config.Enabled || runtimeexecutor.SandboxConfigActive(result.Config) {
+			cfg := result.Config
+			if !cfg.Enabled {
+				cfg.Enabled = runtimeexecutor.SandboxConfigActive(cfg)
+			}
+			policy.Sandbox = runtimeexecutor.NewSandbox(&cfg)
+			warnings = append(warnings, policy.Sandbox.CollectOSSandboxWarnings(context.Background())...)
 		}
 	}
-	return policy, nil
+	return policy, warnings, nil
+}
+
+// MaterializeSandboxForWorkspace re-applies named sandbox profiles once a
+// concrete workspace root is known (chat/API session startup).
+func MaterializeSandboxForWorkspace(policy *runtimepolicy.ToolExecutionPolicy, sandboxMap map[string]interface{}, workspaceRoot string) ([]string, error) {
+	if policy == nil || len(sandboxMap) == 0 {
+		return nil, nil
+	}
+	result, err := runtimeexecutor.ResolveSandboxMap(sandboxMap, runtimeexecutor.SandboxProfileOptions{
+		WorkspaceRoot: workspaceRoot,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result.ReadOnly {
+		policy.ReadOnly = true
+	}
+	warnings := append([]string(nil), result.Warnings...)
+	if result.Config.Enabled || runtimeexecutor.SandboxConfigActive(result.Config) {
+		cfg := result.Config
+		if !cfg.Enabled {
+			cfg.Enabled = true
+		}
+		policy.Sandbox = runtimeexecutor.NewSandbox(&cfg)
+		warnings = append(warnings, policy.Sandbox.CollectOSSandboxWarnings(context.Background())...)
+	}
+	return warnings, nil
 }
 
 const (
@@ -301,16 +352,19 @@ func decodeSandboxConfig(raw map[string]interface{}) (*runtimeexecutor.SandboxCo
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	data, err := yaml.Marshal(raw)
+	result, err := runtimeexecutor.ResolveSandboxMap(raw, runtimeexecutor.SandboxProfileOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("marshal profile sandbox config: %w", err)
+		return nil, err
 	}
-	cfg := &runtimeexecutor.SandboxConfig{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse profile sandbox config: %w", err)
-	}
+	cfg := result.Config
 	if !cfg.Enabled {
-		cfg.Enabled = runtimeexecutor.SandboxConfigActive(*cfg)
+		cfg.Enabled = runtimeexecutor.SandboxConfigActive(cfg)
 	}
-	return cfg, nil
+	if !cfg.Enabled && !runtimeexecutor.SandboxConfigActive(cfg) {
+		// Named mode off / empty after resolution.
+		if result.Effective == runtimeexecutor.SandboxProfileOff || result.Effective == "" {
+			return &cfg, nil
+		}
+	}
+	return &cfg, nil
 }

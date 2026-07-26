@@ -45,3 +45,37 @@ func TestNewAgentWithLLM_DefersWorkspaceScanUntilBuild(t *testing.T) {
 		t.Fatalf("expected lazy scan to include %s, got %v", file, ctx.Files)
 	}
 }
+
+func TestNewAgentWithLLM_AttachesProjectMemory(t *testing.T) {
+	tmpDir := t.TempDir()
+	a := NewAgentWithLLM(&Config{
+		Name:  "project-memory-test",
+		Model: "test-model",
+		Options: map[string]interface{}{
+			"workspace_path": tmpDir,
+		},
+	}, nil, nil)
+	if a == nil {
+		t.Fatal("expected agent")
+	}
+	ctxMgr := a.GetContextManager()
+	if ctxMgr == nil || ctxMgr.ProjectMemory == nil {
+		t.Fatal("expected project memory store attached from workspace_path")
+	}
+
+	// Disable path.
+	disabled := NewAgentWithLLM(&Config{
+		Name:  "project-memory-disabled",
+		Model: "test-model",
+		Options: map[string]interface{}{
+			"workspace_path":          tmpDir,
+			"context_project_memory":  false,
+		},
+	}, nil, nil)
+	if disabled == nil {
+		t.Fatal("expected agent")
+	}
+	if disabled.GetContextManager() != nil && disabled.GetContextManager().ProjectMemory != nil {
+		t.Fatal("expected project memory to be disabled")
+	}
+}

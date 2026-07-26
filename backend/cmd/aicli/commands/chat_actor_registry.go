@@ -14,8 +14,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -644,10 +646,15 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		childSession.SetContext(toolbroker.AgentSessionContextAgentType, agentType)
 	}
 	toolbroker.ApplySpawnAgentRouteContext(childSession, args)
+	if err := r.applyLocalSpawnIsolation(ctx, childSession, args); err != nil {
+		return nil, err
+	}
 	if err := r.Host.SessionStore.Save(ctx, childSession); err != nil {
+		r.cleanupLocalSpawnIsolation(ctx, childSession)
 		return nil, err
 	}
 	if err := r.reserveOrRegisterLocalAgentSpawn(ctx, parentSession, parentSessionID, childSession, args, childDepth); err != nil {
+		r.cleanupLocalSpawnIsolation(ctx, childSession)
 		_ = r.Host.SessionStore.Delete(ctx, childSession.ID)
 		return nil, err
 	}
@@ -655,6 +662,7 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 
 	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
 	if err != nil {
+		r.cleanupLocalSpawnIsolation(ctx, childSession)
 		return nil, err
 	}
 	queued := false
@@ -674,6 +682,278 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		"queued": queued,
 	}))
 	return result, nil
+}
+
+// applyLocalSpawnIsolation creates a git worktree when isolation=worktree and
+// binds workspace_path / worktree_* context for the child actor. Failures are
+// returned as-is (no main-tree fallback).
+func (r *localActorRegistry) applyLocalSpawnIsolation(ctx context.Context, childSession *runtimechat.Session, args toolbroker.SpawnAgentArgs) error {
+	if r == nil || childSession == nil {
+		return nil
+	}
+	mode, err := worktree.NormalizeMode(args.Isolation)
+	if err != nil {
+		return err
+	}
+	childSession.SetContext(toolbroker.AgentSessionContextIsolation, mode)
+	if mode != worktree.ModeWorktree {
+		return nil
+	}
+	repoRoot := ""
+	if r.Host != nil {
+		repoRoot = resolveLocalWorkspacePath(r.Host.RuntimeConfig, r.Host.BaseSession)
+	}
+	handle, err := worktree.Create(ctx, worktree.Options{
+		RepoRoot:  repoRoot,
+		SessionID: childSession.ID,
+	})
+	if err != nil {
+		return err
+	}
+	childSession.SetContext(toolbroker.AgentSessionContextWorktreePath, handle.Path)
+	childSession.SetContext(toolbroker.AgentSessionContextWorktreeBranch, handle.Branch)
+	childSession.SetContext(toolbroker.AgentSessionContextWorktreeRepoRoot, handle.RepoRoot)
+	childSession.SetContext(sessionmeta.WorkspacePath, handle.Path)
+	// Default claim/write scope: isolation root. Downstream team write_paths /
+	// path-claim flows can inherit this without re-discovering the worktree.
+	childSession.SetContext(toolbroker.AgentSessionContextWritePaths, []string{handle.Path})
+	return nil
+}
+
+// cleanupLocalSpawnIsolation removes a child worktree when isolation=worktree.
+// Safe when isolation is none, already applied/discarded, or context is incomplete.
+func (r *localActorRegistry) cleanupLocalSpawnIsolation(ctx context.Context, childSession *runtimechat.Session) error {
+	if childSession == nil {
+		return nil
+	}
+	// Prefer live session context if available (may include path after reload).
+	session := childSession
+	if r != nil && r.Host != nil && r.Host.SessionStore != nil {
+		if loaded, err := r.Host.SessionStore.Load(ctx, childSession.ID); err == nil && loaded != nil {
+			session = loaded
+		}
+	}
+	mode := agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation)
+	path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)
+	if mode != worktree.ModeWorktree || path == "" {
+		return nil
+	}
+	handle := &worktree.Handle{
+		Path:      path,
+		Branch:    agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeBranch),
+		RepoRoot:  agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot),
+		SessionID: strings.TrimSpace(session.ID),
+	}
+	if err := handle.Remove(ctx); err != nil {
+		return err
+	}
+	clearLocalSpawnWorktreeContext(session, "")
+	if r != nil && r.Host != nil && r.Host.SessionStore != nil {
+		_ = r.Host.SessionStore.Update(ctx, session)
+	}
+	return nil
+}
+
+func clearLocalSpawnWorktreeContext(session *runtimechat.Session, disposition string) {
+	if session == nil {
+		return
+	}
+	session.SetContext(toolbroker.AgentSessionContextWorktreePath, "")
+	session.SetContext(toolbroker.AgentSessionContextWorktreeBranch, "")
+	session.SetContext(toolbroker.AgentSessionContextWritePaths, []string{})
+	if repoRoot := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot); repoRoot != "" {
+		session.SetContext(sessionmeta.WorkspacePath, repoRoot)
+	}
+	if disposition = strings.TrimSpace(disposition); disposition != "" {
+		session.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, disposition)
+	}
+}
+
+func localSpawnWorktreeHandle(session *runtimechat.Session) (*worktree.Handle, error) {
+	if session == nil {
+		return nil, fmt.Errorf("session is required")
+	}
+	mode := agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation)
+	path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)
+	branch := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeBranch)
+	repoRoot := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot)
+	disposition := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeDisposition)
+	if mode != worktree.ModeWorktree {
+		return nil, fmt.Errorf("session %s isolation is %q (want worktree)", strings.TrimSpace(session.ID), mode)
+	}
+	if path == "" {
+		if disposition != "" {
+			return nil, fmt.Errorf("session %s worktree already %s", strings.TrimSpace(session.ID), disposition)
+		}
+		return nil, fmt.Errorf("session %s has no worktree path", strings.TrimSpace(session.ID))
+	}
+	if branch == "" || repoRoot == "" {
+		return nil, fmt.Errorf("session %s worktree context incomplete (branch/repo_root required)", strings.TrimSpace(session.ID))
+	}
+	return &worktree.Handle{
+		Path:      path,
+		Branch:    branch,
+		RepoRoot:  repoRoot,
+		SessionID: strings.TrimSpace(session.ID),
+	}, nil
+}
+
+func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.ApplyAgentWorktreeArgs) (*toolbroker.AgentWorktreeResult, error) {
+	sessionRef := strings.TrimSpace(firstNonEmptyTrimmed(args.ID, args.SessionID))
+	if sessionRef == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	sessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionRef)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+		return nil, fmt.Errorf("session store is not configured")
+	}
+	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	handle, err := localSpawnWorktreeHandle(session)
+	if err != nil {
+		return nil, err
+	}
+	diffStat, _ := handle.DiffStat(ctx)
+	if err := handle.Apply(ctx, worktree.ApplyOptions{Paths: append([]string(nil), args.Paths...)}); err != nil {
+		return nil, err
+	}
+	result := &toolbroker.AgentWorktreeResult{
+		ID:             sessionID,
+		SessionID:      sessionID,
+		Action:         "apply",
+		Isolation:      worktree.ModeWorktree,
+		WorktreePath:   handle.Path,
+		WorktreeBranch: handle.Branch,
+		RepoRoot:       handle.RepoRoot,
+		DiffStat:       diffStat,
+		Paths:          append([]string(nil), args.Paths...),
+		Applied:        true,
+		Kept:           args.Keep,
+	}
+	if !args.Keep {
+		if err := handle.Remove(ctx); err != nil {
+			return nil, fmt.Errorf("apply succeeded but worktree remove failed: %w", err)
+		}
+		clearLocalSpawnWorktreeContext(session, toolbroker.WorktreeDispositionApplied)
+		result.Removed = true
+		result.WorktreePath = ""
+	} else {
+		session.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, toolbroker.WorktreeDispositionApplied)
+	}
+	if err := r.Host.SessionStore.Update(ctx, session); err != nil {
+		return nil, err
+	}
+	if status, statusErr := r.agentSnapshot(ctx, sessionID); statusErr == nil {
+		result.Status = status
+	}
+	return result, nil
+}
+
+func (r *localActorRegistry) DiscardWorktree(ctx context.Context, args toolbroker.DiscardAgentWorktreeArgs) (*toolbroker.AgentWorktreeResult, error) {
+	sessionRef := strings.TrimSpace(firstNonEmptyTrimmed(args.ID, args.SessionID))
+	if sessionRef == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	sessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionRef)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+		return nil, fmt.Errorf("session store is not configured")
+	}
+	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	handle, err := localSpawnWorktreeHandle(session)
+	if err != nil {
+		return nil, err
+	}
+	diffStat, _ := handle.DiffStat(ctx)
+	if err := handle.Remove(ctx); err != nil {
+		return nil, err
+	}
+	clearLocalSpawnWorktreeContext(session, toolbroker.WorktreeDispositionDiscarded)
+	if err := r.Host.SessionStore.Update(ctx, session); err != nil {
+		return nil, err
+	}
+	result := &toolbroker.AgentWorktreeResult{
+		ID:             sessionID,
+		SessionID:      sessionID,
+		Action:         "discard",
+		Isolation:      worktree.ModeWorktree,
+		WorktreeBranch: handle.Branch,
+		RepoRoot:       handle.RepoRoot,
+		DiffStat:       diffStat,
+		Discarded:      true,
+		Removed:        true,
+	}
+	if status, statusErr := r.agentSnapshot(ctx, sessionID); statusErr == nil {
+		result.Status = status
+	}
+	return result, nil
+}
+
+func firstNonEmptyTrimmed(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func annotateLocalSpawnWorktreeCompletion(ctx context.Context, r *localActorRegistry, childSession *runtimechat.Session, payload map[string]interface{}) {
+	if payload == nil || childSession == nil {
+		return
+	}
+	session := childSession
+	if r != nil && r.Host != nil && r.Host.SessionStore != nil {
+		if loaded, err := r.Host.SessionStore.Load(ctx, childSession.ID); err == nil && loaded != nil {
+			session = loaded
+		}
+	}
+	mode := agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation)
+	if mode != worktree.ModeWorktree {
+		return
+	}
+	path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)
+	branch := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeBranch)
+	repoRoot := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot)
+	disposition := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeDisposition)
+	if path != "" {
+		payload["worktree_path"] = path
+		payload["worktree_pending"] = disposition == ""
+		payload["isolation"] = mode
+		if branch != "" {
+			payload["worktree_branch"] = branch
+		}
+		if repoRoot != "" {
+			payload["worktree_repo_root"] = repoRoot
+		}
+		handle := &worktree.Handle{Path: path, Branch: branch, RepoRoot: repoRoot, SessionID: strings.TrimSpace(session.ID)}
+		if diff, err := handle.DiffStat(ctx); err == nil && strings.TrimSpace(diff) != "" {
+			payload["worktree_diff_stat"] = diff
+		}
+		payload["next_action"] = "Call apply_agent_worktree to land changes in the main repo, or discard_agent_worktree to drop them. close_agent also cleans remaining worktrees."
+		return
+	}
+	if disposition != "" {
+		payload["worktree_disposition"] = disposition
+		payload["worktree_pending"] = false
+		payload["isolation"] = mode
+	}
 }
 
 func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID string, childSession *runtimechat.Session) {
@@ -729,6 +1009,9 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 				payload["lifecycle_close_error"] = closeErr.Error()
 			}
 		}
+		// Keep worktree after completion so parent can apply/discard explicitly.
+		// close_agent still cleans remaining worktrees.
+		annotateLocalSpawnWorktreeCompletion(context.Background(), r, childSession, payload)
 		completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
 		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
 		r.dispatchLocalAgentHook(runtimehooks.EventSubagentStop, cloneRuntimeEventPayload(payload))
@@ -1659,7 +1942,8 @@ func (r *localActorRegistry) localAgentRunMeta(ctx context.Context, sessionID st
 		return nil
 	}
 	return toolbroker.SpawnAgentRunMeta(toolbroker.SpawnAgentArgs{
-		PermissionMode: agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
+		PermissionMode:        agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
+		CompletionRequirement: agentcontrol.ContextString(session, toolbroker.AgentSessionContextCompletionRequirement),
 	})
 }
 
@@ -2242,6 +2526,8 @@ func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*tool
 		}
 		if r != nil && r.Host != nil && r.Host.SessionStore != nil {
 			if session, loadErr := r.Host.SessionStore.Load(ctx, closeID); loadErr == nil && session != nil {
+				// Best-effort isolation cleanup before marking closed.
+				_ = r.cleanupLocalSpawnIsolation(ctx, session)
 				session.UpdateState(runtimechat.StateClosed)
 				_ = r.Host.SessionStore.Update(ctx, session)
 			}
@@ -2692,8 +2978,9 @@ func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, p
 	limits := r.localAgentsConfig()
 	if limits.MaxDepth > 0 && childDepth > limits.MaxDepth {
 		parentDepth := childDepth - 1
-		return fmt.Errorf(
-			"agent spawn depth limit reached before child creation: parent_session_id=%q parent_depth=%d requested_child_depth=%d max_depth=%d; this agent cannot spawn another child, so continue the work locally or send it to an existing agent",
+		return runtimeerrors.Newf(
+			runtimeerrors.ErrAgentSpawnDepthLimit,
+			"agent spawn depth limit reached before child creation: parent_session_id=%q parent_depth=%d requested_child_depth=%d max_depth=%d; next_action=complete_locally_or_use_spawn_team — continue the work in the current agent, reuse an existing child, or use spawn_team; do not retry the same spawn_agent",
 			strings.TrimSpace(parentSessionID), parentDepth, childDepth, limits.MaxDepth,
 		)
 	}

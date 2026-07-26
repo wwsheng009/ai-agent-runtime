@@ -20,7 +20,8 @@ func newExecReviewCommand(getCfg func() *config.Config) *cobra.Command {
 		Short: "运行代码审查",
 		Long: `对当前 Git 仓库运行代码审查。
 
-默认审查未提交更改。positional args 会作为审查指令。`,
+默认审查未提交更改。positional args 会作为审查指令。
+代码审查入口与示例见 docs/aicli/exec.md。`,
 		Example: `  aicli exec review --uncommitted
   aicli exec review --base main
   aicli exec review --commit abc1234

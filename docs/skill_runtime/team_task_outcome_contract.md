@@ -131,7 +131,39 @@ Canonical tool:
 
 `block_current_task` is kept as a compatibility alias for `blocked` / `handoff`.
 
+## Worker `completionRequirement` harness
+
+Team workers and opt-in child agents can require a structured task outcome before a run finishes cleanly. This harness aligns with the tools above; it does **not** invent a second completion API.
+
+Supported values (normalized):
+
+- `none` — default for ordinary chat / non-worker runs; no terminal tool is required
+- `complete_task` — the run must observe a successful `report_task_outcome` or `block_current_task` before finishing cleanly
+
+Aliases accepted on spawn / agentdef input: `complete-task`, `completetask` → `complete_task`. Unknown values are treated as unset on spawn (ignored) and as `none` after loop normalize.
+
+### Where it is set
+
+| Path | Default / behavior |
+| --- | --- |
+| Team teammate worker (`TeammateRunner`) | Defaults to `complete_task` via `team.RunMeta` |
+| `spawn_agent` | Optional `completion_requirement` / `completionRequirement`; may inherit parent `RunMeta`; may resolve from `agent_type` agentdef |
+| `spawn_subagents` task item | Optional per-task `completion_requirement` / `completionRequirement` → child loop config |
+| Session actor loop | Explicit session context → profile agent agentdef → child `agent_type` agentdef; empty stays `none` |
+| `cloneLoopConfigForRun` | Explicit `RunMeta.CompletionRequirement` overrides base loop defaults |
+
+Session context key: `completion_requirement` (`toolbroker.AgentSessionContextCompletionRequirement`).
+
+### Loop behavior when `complete_task` is active
+
+1. While the model ends a turn without a successful outcome tool observation, the loop injects a **system reminder** and grants a limited recovery turn (default 1).
+2. Reminder text points at `report_task_outcome` (`task_status` `done|failed|blocked|handoff` + `summary`) and notes `block_current_task` as the blocked/handoff compatibility alias.
+3. If recovery is exhausted without a successful outcome observation, the result is marked unsatisfied (`CompletionSatisfied=false`) with a clear error message—same tool names as the team outcome contract, no dual write path.
+
+This keeps worker completion, broker tools, and HTTP `/outcome` on one semantic surface: structured task status + summary (+ blocker/handoff fields when required).
+
 ## Notes
 
 - Non-structured teammate model output is still parsed separately by the teammate runner via the shared teammate outcome contract.
 - The HTTP and broker entrypoints now share the same apply layer for task status changes, mailbox side effects, claim release, and replanning.
+- Worker harness recovery only requires that one of the outcome tools succeeded; it does not re-validate HTTP field rules already enforced by the broker/apply layer.

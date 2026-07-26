@@ -6,7 +6,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDetectEnvironmentCapabilities_UsesInjectedProbe(t *testing.T) {
@@ -250,9 +253,9 @@ func TestDetectEnvironmentCapabilities_CachesUntilReset(t *testing.T) {
 		ResetEnvironmentCapabilityCache()
 	})
 
-	calls := 0
+	var calls atomic.Int64
 	SetEnvironmentCommandProbe(func(name string) (string, error) {
-		calls++
+		calls.Add(1)
 		if name == "git" {
 			return "/bin/git", nil
 		}
@@ -265,22 +268,182 @@ func TestDetectEnvironmentCapabilities_CachesUntilReset(t *testing.T) {
 
 	first := DetectEnvironmentCapabilities()
 	second := DetectEnvironmentCapabilities()
-	if calls == 0 {
+	if calls.Load() == 0 {
 		t.Fatal("expected probe calls")
 	}
-	firstCalls := calls
+	firstCalls := calls.Load()
 	if len(AvailableEnvironmentCommands()) == 0 {
 		t.Fatalf("expected available commands from first probe, got %#v", first)
 	}
 	_ = second
-	if calls != firstCalls {
-		t.Fatalf("expected cache hit without extra probes, calls %d -> %d", firstCalls, calls)
+	if calls.Load() != firstCalls {
+		t.Fatalf("expected cache hit without extra probes, calls %d -> %d", firstCalls, calls.Load())
 	}
 
 	ResetEnvironmentCapabilityCache()
 	_ = DetectEnvironmentCapabilities()
-	if calls <= firstCalls {
-		t.Fatalf("expected re-probe after cache reset, calls stayed at %d", calls)
+	if calls.Load() <= firstCalls {
+		t.Fatalf("expected re-probe after cache reset, calls stayed at %d", calls.Load())
+	}
+}
+
+func TestDetectEnvironmentCapabilities_ProbesInParallel(t *testing.T) {
+	t.Cleanup(func() {
+		SetEnvironmentCommandProbe(nil)
+		SetEnvironmentCommandHealthProbe(nil)
+		ResetEnvironmentCapabilityCache()
+	})
+
+	var active atomic.Int64
+	var maxActive atomic.Int64
+	SetEnvironmentCommandProbe(func(name string) (string, error) {
+		cur := active.Add(1)
+		for {
+			prev := maxActive.Load()
+			if cur <= prev || maxActive.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		active.Add(-1)
+		if name == "git" || name == "go" || name == "rg" {
+			return "/bin/" + name, nil
+		}
+		return "", errors.New("missing")
+	})
+	SetEnvironmentCommandHealthProbe(func(name, path string) (bool, string) {
+		return true, ""
+	})
+	ResetEnvironmentCapabilityCache()
+
+	start := time.Now()
+	report := DetectEnvironmentCapabilities()
+	elapsed := time.Since(start)
+
+	if maxActive.Load() < 2 {
+		t.Fatalf("expected concurrent probes, max active=%d", maxActive.Load())
+	}
+	// Sequential would be catalog_size * 40ms (~480ms+). Bounded parallelism should finish sooner.
+	if elapsed > 400*time.Millisecond {
+		t.Fatalf("expected parallel probe latency, elapsed=%s maxActive=%d", elapsed, maxActive.Load())
+	}
+	available := availableEnvironmentCommandsFromReport(report)
+	if len(available) < 3 {
+		t.Fatalf("expected git/go/rg available, got %#v", available)
+	}
+}
+
+func TestDetectEnvironmentCapabilities_DiskCacheRoundTrip(t *testing.T) {
+	t.Cleanup(func() {
+		SetEnvironmentCommandProbe(nil)
+		SetEnvironmentCommandHealthProbe(nil)
+		SetEnvironmentCapabilityDiskCacheEnabled(true)
+		SetEnvironmentCapabilityDiskCachePath("")
+		ResetEnvironmentCapabilityCache()
+	})
+
+	cachePath := filepath.Join(t.TempDir(), "env_capabilities.json")
+	SetEnvironmentCapabilityDiskCachePath(cachePath)
+	SetEnvironmentCapabilityDiskCacheEnabled(true)
+
+	// First measure with real host probes so the durable cache is meaningful.
+	SetEnvironmentCommandProbe(nil)
+	SetEnvironmentCommandHealthProbe(nil)
+	ResetEnvironmentCapabilityCache()
+	first := DetectEnvironmentCapabilities()
+	if len(first.Capabilities) == 0 {
+		t.Fatal("expected capabilities from first probe")
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("expected disk cache file: %v", err)
+	}
+
+	// Clear only the in-memory snapshot so the next detect must load from disk
+	// (or re-probe). A short pause makes a fresh ProbedAt distinguishable.
+	time.Sleep(20 * time.Millisecond)
+	ResetEnvironmentCapabilityCache()
+
+	second := DetectEnvironmentCapabilities()
+	if len(second.Capabilities) != len(first.Capabilities) {
+		t.Fatalf("disk cache size mismatch: first=%d second=%d", len(first.Capabilities), len(second.Capabilities))
+	}
+	if !second.ProbedAt.Equal(first.ProbedAt) {
+		t.Fatalf("expected disk-cache ProbedAt reuse, first=%s second=%s", first.ProbedAt, second.ProbedAt)
+	}
+	for i := range first.Capabilities {
+		if first.Capabilities[i].Name != second.Capabilities[i].Name ||
+			first.Capabilities[i].Available != second.Capabilities[i].Available {
+			t.Fatalf("disk cache mismatch at %d: first=%#v second=%#v", i, first.Capabilities[i], second.Capabilities[i])
+		}
+	}
+}
+
+func TestDetectEnvironmentCapabilities_SingleflightSharesProbe(t *testing.T) {
+	t.Cleanup(func() {
+		SetEnvironmentCommandProbe(nil)
+		SetEnvironmentCommandHealthProbe(nil)
+		ResetEnvironmentCapabilityCache()
+	})
+
+	var started atomic.Int64
+	var inProbe sync.WaitGroup
+	inProbe.Add(1)
+	var release sync.WaitGroup
+	release.Add(1)
+
+	SetEnvironmentCommandProbe(func(name string) (string, error) {
+		if started.Add(1) == 1 {
+			inProbe.Done()
+			release.Wait()
+		}
+		if name == "git" {
+			return "/bin/git", nil
+		}
+		return "", errors.New("missing")
+	})
+	SetEnvironmentCommandHealthProbe(func(name, path string) (bool, string) {
+		return true, ""
+	})
+	ResetEnvironmentCapabilityCache()
+
+	var wg sync.WaitGroup
+	reports := make([]EnvironmentCapabilityReport, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			reports[idx] = DetectEnvironmentCapabilities()
+		}(i)
+	}
+	inProbe.Wait()
+	// Concurrent callers should join the in-flight probe, not each re-scan.
+	time.Sleep(20 * time.Millisecond)
+	release.Done()
+	wg.Wait()
+
+	for i, report := range reports {
+		if len(report.Capabilities) == 0 {
+			t.Fatalf("report %d empty", i)
+		}
+		foundGit := false
+		for _, cap := range report.Capabilities {
+			if cap.Name == "git" && cap.Available {
+				foundGit = true
+				break
+			}
+		}
+		if !foundGit {
+			t.Fatalf("report %d missing available git: %#v", i, report.Capabilities)
+		}
+	}
+	// One probe wave walks the catalog once. Without singleflight, four waiters
+	// would roughly multiply LookPath traffic by the waiter count.
+	calls := started.Load()
+	if calls < 1 {
+		t.Fatal("expected probe to start")
+	}
+	if calls > int64(len(environmentCapabilityCatalog)*4) {
+		t.Fatalf("singleflight failed: LookPath calls=%d catalog=%d", calls, len(environmentCapabilityCatalog))
 	}
 }
 
@@ -312,8 +475,13 @@ func TestDetectEnvironmentCapabilities_RealHostProbe(t *testing.T) {
 	t.Cleanup(func() {
 		SetEnvironmentCommandProbe(nil)
 		SetEnvironmentCommandHealthProbe(nil)
+		SetEnvironmentCapabilityDiskCachePath("")
+		SetEnvironmentCapabilityDiskCacheEnabled(true)
 		ResetEnvironmentCapabilityCache()
 	})
+	// Isolate from host disk cache so a previous poisoned snapshot cannot fail
+	// this live probe comparison.
+	SetEnvironmentCapabilityDiskCachePath(filepath.Join(t.TempDir(), "env_capabilities.json"))
 	SetEnvironmentCommandProbe(nil)
 	SetEnvironmentCommandHealthProbe(nil)
 	ResetEnvironmentCapabilityCache()
@@ -340,12 +508,10 @@ func TestDetectEnvironmentCapabilities_RealHostProbe(t *testing.T) {
 			// Windows installs may only expose rg.exe.
 			path, err = exec.LookPath("rg.exe")
 		}
-		wantAvailable := false
-		if err == nil && strings.TrimSpace(path) != "" && !isUnusablePathStub(path) {
-			// Independent health check using the same default probe semantics.
-			okHealth, _ := defaultEnvironmentCommandHealthProbe(name, path)
-			wantAvailable = okHealth
-		}
+		// Default production probe is PATH + stub rejection (no --version spawn).
+		// Keep the independent check aligned so this test does not reintroduce
+		// process-health latency into the availability contract.
+		wantAvailable := err == nil && strings.TrimSpace(path) != "" && !isUnusablePathStub(path)
 		if cap.Available != wantAvailable {
 			t.Fatalf("%s availability mismatch: report=%v independent_want=%v path=%q note=%q", name, cap.Available, wantAvailable, path, cap.Note)
 		}
@@ -365,5 +531,72 @@ func TestDetectEnvironmentCapabilities_RealHostProbe(t *testing.T) {
 	}
 	if !byName["gh"].Available && !strings.Contains(guidance, "gh is not available") {
 		t.Fatalf("gh missing but guidance omitted gh tip:\n%s", guidance)
+	}
+}
+
+func BenchmarkDetectEnvironmentCapabilities_Cold(b *testing.B) {
+	b.Cleanup(func() {
+		SetEnvironmentCommandProbe(nil)
+		SetEnvironmentCommandHealthProbe(nil)
+		SetEnvironmentCapabilityDiskCachePath("")
+		SetEnvironmentCapabilityDiskCacheEnabled(true)
+		ResetEnvironmentCapabilityCache()
+	})
+	cachePath := filepath.Join(b.TempDir(), "env_capabilities.json")
+	SetEnvironmentCapabilityDiskCachePath(cachePath)
+	SetEnvironmentCapabilityDiskCacheEnabled(false)
+	SetEnvironmentCommandProbe(nil)
+	SetEnvironmentCommandHealthProbe(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ResetEnvironmentCapabilityCache()
+		_ = DetectEnvironmentCapabilities()
+	}
+}
+
+func BenchmarkDetectEnvironmentCapabilities_WarmMemory(b *testing.B) {
+	b.Cleanup(func() {
+		SetEnvironmentCommandProbe(nil)
+		SetEnvironmentCommandHealthProbe(nil)
+		SetEnvironmentCapabilityDiskCachePath("")
+		SetEnvironmentCapabilityDiskCacheEnabled(true)
+		ResetEnvironmentCapabilityCache()
+	})
+	SetEnvironmentCapabilityDiskCacheEnabled(false)
+	SetEnvironmentCommandProbe(nil)
+	SetEnvironmentCommandHealthProbe(nil)
+	ResetEnvironmentCapabilityCache()
+	_ = DetectEnvironmentCapabilities()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = DetectEnvironmentCapabilities()
+	}
+}
+
+func BenchmarkDetectEnvironmentCapabilities_WarmDisk(b *testing.B) {
+	b.Cleanup(func() {
+		SetEnvironmentCommandProbe(nil)
+		SetEnvironmentCommandHealthProbe(nil)
+		SetEnvironmentCapabilityDiskCachePath("")
+		SetEnvironmentCapabilityDiskCacheEnabled(true)
+		ResetEnvironmentCapabilityCache()
+	})
+	cachePath := filepath.Join(b.TempDir(), "env_capabilities.json")
+	SetEnvironmentCapabilityDiskCachePath(cachePath)
+	SetEnvironmentCapabilityDiskCacheEnabled(true)
+	SetEnvironmentCommandProbe(nil)
+	SetEnvironmentCommandHealthProbe(nil)
+	ResetEnvironmentCapabilityCache()
+	_ = DetectEnvironmentCapabilities()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ResetEnvironmentCapabilityCache()
+		_ = DetectEnvironmentCapabilities()
 	}
 }

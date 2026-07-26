@@ -14,3 +14,4 @@ Suggested entry points:
 - `profile/aicli_profile_loading_flow.md`
 - `agents/plan/refactor_roadmap.md`
 - `teams/plan/multi-agent-processing-chain.md`
+- [`../aicli/agents.md`](../aicli/agents.md) — portable AgentDefinition、`chat --agent`、`spawn_agent.agent_type`、与 skill `openai.yaml` 的边界

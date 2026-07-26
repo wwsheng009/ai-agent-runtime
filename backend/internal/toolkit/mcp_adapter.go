@@ -58,14 +58,20 @@ func (a *MCPAdapter) ExecuteAsMCP(ctx context.Context, args map[string]interface
 
 // RegistryToMCPTools 将工具注册表转换为 MCP 工具列表
 func RegistryToMCPTools(registry *Registry) []*protocol.Tool {
-	tools := registry.List()
-	mcpTools := make([]*protocol.Tool, 0, len(tools))
+	return RegistryToMCPToolsForContext(registry, ListToolsContext{})
+}
 
+// RegistryToMCPToolsForContext converts registry tools that pass ShouldList.
+func RegistryToMCPToolsForContext(registry *Registry, listCtx ListToolsContext) []*protocol.Tool {
+	if registry == nil {
+		return nil
+	}
+	tools := registry.ListForContext(listCtx)
+	mcpTools := make([]*protocol.Tool, 0, len(tools))
 	for _, tool := range tools {
 		adapter := NewMCPAdapter(tool)
 		mcpTools = append(mcpTools, adapter.ToMCPTool())
 	}
-
 	return mcpTools
 }
 

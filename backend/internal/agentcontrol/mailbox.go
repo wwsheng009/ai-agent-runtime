@@ -162,6 +162,14 @@ func AttachGlobalMailboxSQLiteTx(ctx context.Context, conn *sql.Conn, writer Glo
 	if !ok || txWriter == nil {
 		return nil, "", func() {}, false, nil
 	}
+	// Ensure the durable global store is opened/migrated before ATTACH so the
+	// attached schema contains the expected tables. Status checks still use
+	// GlobalMailboxAttachDSN without opening.
+	if ensurer, ok := writer.(interface{ ensure() error }); ok && ensurer != nil {
+		if err := ensurer.ensure(); err != nil {
+			return nil, "", func() {}, false, err
+		}
+	}
 	dsn, ok := txWriter.GlobalMailboxAttachDSN()
 	if !ok || strings.TrimSpace(dsn) == "" {
 		return nil, "", func() {}, false, nil

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -893,7 +894,9 @@ func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 		!strings.Contains(err.Error(), "depth limit") ||
 		!strings.Contains(err.Error(), `parent_session_id="child-2"`) ||
 		!strings.Contains(err.Error(), "requested_child_depth=2") ||
-		!strings.Contains(err.Error(), "continue the work locally") {
+		(!strings.Contains(err.Error(), "continue the work locally") &&
+			!strings.Contains(err.Error(), "continue the work in the current agent")) ||
+		!strings.Contains(err.Error(), "SPAWN_DEPTH_LIMIT") {
 		t.Fatalf("expected actionable max depth pre-check error, got %v", err)
 	}
 
@@ -986,6 +989,414 @@ func TestLocalActorRegistrySpawnPersistsDifficultyRouteContext(t *testing.T) {
 	if got := agentcontrol.ContextString(stored, sessionmeta.ReasoningEffort); got != "high" {
 		t.Fatalf("expected stored reasoning high, got %q", got)
 	}
+}
+
+func TestLocalActorRegistrySpawnWorktreeIsolationBindsAndCleansUp(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := initLocalIsolationTestRepo(t)
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Workspace.Root = repo
+	host.BaseSession = &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	result, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn worktree: %v", err)
+	}
+	if result.Isolation != "worktree" {
+		t.Fatalf("expected isolation worktree, got %#v", result)
+	}
+	if strings.TrimSpace(result.WorktreePath) == "" {
+		t.Fatalf("expected worktree_path in spawn result, got %#v", result)
+	}
+	if filepath.Clean(result.WorktreePath) == filepath.Clean(repo) {
+		t.Fatalf("worktree path must not equal main repo root: %s", result.WorktreePath)
+	}
+	if _, err := os.Stat(result.WorktreePath); err != nil {
+		t.Fatalf("worktree path missing after spawn: %v", err)
+	}
+
+	stored, err := manager.Get(ctx, "wt-child")
+	if err != nil {
+		t.Fatalf("manager.Get child: %v", err)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextIsolation); got != "worktree" {
+		t.Fatalf("expected stored isolation worktree, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextWorktreePath); got != result.WorktreePath {
+		t.Fatalf("stored worktree_path=%q want %q", got, result.WorktreePath)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.WorkspacePath); got != result.WorktreePath {
+		t.Fatalf("stored workspace_path=%q want %q", got, result.WorktreePath)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextWorktreeRepoRoot); filepath.Clean(got) != filepath.Clean(repo) {
+		t.Fatalf("stored worktree_repo_root=%q want %q", got, repo)
+	}
+	if got := isolationWritePathsFromContext(stored); len(got) != 1 || filepath.Clean(got[0]) != filepath.Clean(result.WorktreePath) {
+		t.Fatalf("expected default write_paths claim of isolation root %q, got %#v", result.WorktreePath, got)
+	}
+
+	// Child mutation must stay isolated from the main tree until parent apply_agent_worktree.
+	isolatedFile := filepath.Join(result.WorktreePath, "isolated-only.txt")
+	if err := os.WriteFile(isolatedFile, []byte("child-only\n"), 0o644); err != nil {
+		t.Fatalf("write isolated file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "isolated-only.txt")); !os.IsNotExist(err) {
+		t.Fatalf("main tree should not see isolated-only.txt, err=%v", err)
+	}
+
+	if _, err := host.ActorRegistry.Close(ctx, "wt-child"); err != nil {
+		t.Fatalf("Close worktree child: %v", err)
+	}
+	if _, err := os.Stat(result.WorktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree removed after close, err=%v path=%s", err, result.WorktreePath)
+	}
+}
+
+func TestLocalActorRegistryApplyAndDiscardWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := initLocalIsolationTestRepo(t)
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Workspace.Root = repo
+	host.BaseSession = &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	applyChild, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-apply-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn apply child: %v", err)
+	}
+	applyFile := filepath.Join(applyChild.WorktreePath, "applied.txt")
+	if err := os.WriteFile(applyFile, []byte("land-me\n"), 0o644); err != nil {
+		t.Fatalf("write apply child file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "applied.txt")); !os.IsNotExist(err) {
+		t.Fatalf("main tree must not see applied.txt before apply, err=%v", err)
+	}
+
+	applyResult, err := host.ActorRegistry.ApplyWorktree(ctx, toolbroker.ApplyAgentWorktreeArgs{
+		ID: "wt-apply-child",
+	})
+	if err != nil {
+		t.Fatalf("ApplyWorktree: %v", err)
+	}
+	if applyResult == nil || !applyResult.Applied || !applyResult.Removed || applyResult.Kept {
+		t.Fatalf("unexpected apply result: %#v", applyResult)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "applied.txt"))
+	if err != nil {
+		t.Fatalf("read applied main-tree file: %v", err)
+	}
+	if string(data) != "land-me\n" {
+		t.Fatalf("unexpected applied content: %q", data)
+	}
+	if _, err := os.Stat(applyChild.WorktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected apply worktree removed by default, err=%v path=%s", err, applyChild.WorktreePath)
+	}
+	storedApply, err := manager.Get(ctx, "wt-apply-child")
+	if err != nil {
+		t.Fatalf("manager.Get apply child: %v", err)
+	}
+	if got := agentcontrol.ContextString(storedApply, toolbroker.AgentSessionContextWorktreePath); got != "" {
+		t.Fatalf("expected worktree_path cleared after apply, got %q", got)
+	}
+	if got := agentcontrol.ContextString(storedApply, toolbroker.AgentSessionContextWorktreeDisposition); got != toolbroker.WorktreeDispositionApplied {
+		t.Fatalf("expected disposition applied, got %q", got)
+	}
+
+	discardChild, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-discard-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn discard child: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(discardChild.WorktreePath, "discard-me.txt"), []byte("drop\n"), 0o644); err != nil {
+		t.Fatalf("write discard child file: %v", err)
+	}
+
+	discardResult, err := host.ActorRegistry.DiscardWorktree(ctx, toolbroker.DiscardAgentWorktreeArgs{
+		ID: "wt-discard-child",
+	})
+	if err != nil {
+		t.Fatalf("DiscardWorktree: %v", err)
+	}
+	if discardResult == nil || !discardResult.Discarded || !discardResult.Removed {
+		t.Fatalf("unexpected discard result: %#v", discardResult)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "discard-me.txt")); !os.IsNotExist(err) {
+		t.Fatalf("main tree must not receive discarded file, err=%v", err)
+	}
+	if _, err := os.Stat(discardChild.WorktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected discard worktree removed, err=%v path=%s", err, discardChild.WorktreePath)
+	}
+	storedDiscard, err := manager.Get(ctx, "wt-discard-child")
+	if err != nil {
+		t.Fatalf("manager.Get discard child: %v", err)
+	}
+	if got := agentcontrol.ContextString(storedDiscard, toolbroker.AgentSessionContextWorktreePath); got != "" {
+		t.Fatalf("expected worktree_path cleared after discard, got %q", got)
+	}
+	if got := agentcontrol.ContextString(storedDiscard, toolbroker.AgentSessionContextWorktreeDisposition); got != toolbroker.WorktreeDispositionDiscarded {
+		t.Fatalf("expected disposition discarded, got %q", got)
+	}
+
+	keepChild, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-keep-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn keep child: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(keepChild.WorktreePath, "kept.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatalf("write keep child file: %v", err)
+	}
+	keepResult, err := host.ActorRegistry.ApplyWorktree(ctx, toolbroker.ApplyAgentWorktreeArgs{
+		ID:   "wt-keep-child",
+		Keep: true,
+	})
+	if err != nil {
+		t.Fatalf("ApplyWorktree keep: %v", err)
+	}
+	if keepResult == nil || !keepResult.Applied || !keepResult.Kept || keepResult.Removed {
+		t.Fatalf("unexpected keep apply result: %#v", keepResult)
+	}
+	if _, err := os.Stat(keepChild.WorktreePath); err != nil {
+		t.Fatalf("keep=true must preserve worktree path: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(repo, "kept.txt")); err != nil || string(data) != "keep\n" {
+		t.Fatalf("expected kept.txt applied, data=%q err=%v", data, err)
+	}
+	storedKeep, err := manager.Get(ctx, "wt-keep-child")
+	if err != nil {
+		t.Fatalf("manager.Get keep child: %v", err)
+	}
+	if got := agentcontrol.ContextString(storedKeep, toolbroker.AgentSessionContextWorktreePath); got != keepChild.WorktreePath {
+		t.Fatalf("keep=true should retain worktree_path, got %q want %q", got, keepChild.WorktreePath)
+	}
+	if got := agentcontrol.ContextString(storedKeep, toolbroker.AgentSessionContextWorktreeDisposition); got != toolbroker.WorktreeDispositionApplied {
+		t.Fatalf("expected disposition applied with keep, got %q", got)
+	}
+	if _, err := host.ActorRegistry.Close(ctx, "wt-keep-child"); err != nil {
+		t.Fatalf("Close keep child: %v", err)
+	}
+}
+
+func TestLocalActorRegistrySpawnWorktreeFailsClosedOutsideGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	nonGit := t.TempDir()
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Workspace.Root = nonGit
+	host.BaseSession = &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	_, err = host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-fail-child",
+		Isolation: "worktree",
+	})
+	if err == nil {
+		t.Fatal("expected worktree spawn to fail outside git repo")
+	}
+	if !strings.Contains(err.Error(), "no main-tree fallback") && !strings.Contains(err.Error(), "git") {
+		t.Fatalf("expected fail-closed isolation error, got: %v", err)
+	}
+	if _, getErr := manager.Get(ctx, "wt-fail-child"); getErr == nil {
+		t.Fatal("failed isolation spawn must not leave a child session")
+	}
+}
+
+func TestLocalActorRegistrySpawnDefaultsIsolationNone(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.BaseSession = &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	result, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "none-child"})
+	if err != nil {
+		t.Fatalf("Spawn default: %v", err)
+	}
+	if result.Isolation != "none" {
+		t.Fatalf("expected default isolation none, got %#v", result)
+	}
+	if result.WorktreePath != "" {
+		t.Fatalf("did not expect worktree_path for isolation none, got %#v", result)
+	}
+	stored, err := manager.Get(ctx, "none-child")
+	if err != nil {
+		t.Fatalf("manager.Get child: %v", err)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextIsolation); got != "none" {
+		t.Fatalf("expected stored isolation none, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextWorktreePath); got != "" {
+		t.Fatalf("did not expect stored worktree_path, got %q", got)
+	}
+}
+
+func isolationWritePathsFromContext(session interface {
+	GetContext(key string) (interface{}, bool)
+}) []string {
+	if session == nil {
+		return nil
+	}
+	value, ok := session.GetContext(toolbroker.AgentSessionContextWritePaths)
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				if trimmed := strings.TrimSpace(text); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		return out
+	case string:
+		if trimmed := strings.TrimSpace(typed); trimmed != "" {
+			return []string{trimmed}
+		}
+	}
+	return nil
+}
+
+func initLocalIsolationTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init")
+	run("checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "README.md")
+	run("commit", "-m", "seed")
+	return dir
 }
 
 func TestLocalActorRegistrySpawnKeepsLegacyRouteContextWhenRoutingDisabled(t *testing.T) {
@@ -1994,8 +2405,11 @@ func TestLocalActorRegistry_WaitUsesEventStoreWakeup(t *testing.T) {
 		if result == nil || result.MatchedSessionID != "event-wait-child" || result.ReadyCount != 1 {
 			t.Fatalf("unexpected wait result: %#v", result)
 		}
-		if len(result.ReadyIDs) != 1 || result.ReadyIDs[0] != "event-wait-child" || result.NextAction != "consume_ready_outputs" || result.WaitedMs <= 0 {
+		if len(result.ReadyIDs) != 1 || result.ReadyIDs[0] != "event-wait-child" || result.WaitedMs <= 0 {
 			t.Fatalf("expected actionable ready diagnostics: %#v", result)
+		}
+		if !strings.HasPrefix(result.NextAction, "consume_ready_outputs") {
+			t.Fatalf("expected ready next_action guidance, got %#v", result.NextAction)
 		}
 	case <-time.After(450 * time.Millisecond):
 		t.Fatal("wait did not wake from event store append")
@@ -2982,6 +3396,22 @@ func TestBuildLocalChatLoopConfig_PropagatesParallelToolConfig(t *testing.T) {
 	}
 	if config.MaxParallelToolCalls != 4 {
 		t.Fatalf("expected MaxParallelToolCalls=4, got %d", config.MaxParallelToolCalls)
+	}
+}
+
+func TestApplyLocalChatCompletionRequirement_ExplicitOverridesAgentType(t *testing.T) {
+	config := &agent.LoopReActConfig{}
+	applyLocalChatCompletionRequirement(config, &ChatSession{ProfileAgent: "explore"}, "explore", "complete_task", "")
+	if config.CompletionRequirement != agent.CompletionRequirementCompleteTask {
+		t.Fatalf("expected explicit complete_task, got %#v", config.CompletionRequirement)
+	}
+}
+
+func TestApplyLocalChatCompletionRequirement_EmptyDefaultsToNone(t *testing.T) {
+	config := &agent.LoopReActConfig{}
+	applyLocalChatCompletionRequirement(config, &ChatSession{}, "", "", "")
+	if config.CompletionRequirement != agent.CompletionRequirementNone {
+		t.Fatalf("expected none default, got %#v", config.CompletionRequirement)
 	}
 }
 

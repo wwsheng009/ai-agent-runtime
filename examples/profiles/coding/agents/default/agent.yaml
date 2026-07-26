@@ -1,0 +1,6 @@
+name: default
+description: General coding agent for the sample coding profile
+model: ""
+permission_mode: default
+completion_requirement: none
+sandbox: workspace

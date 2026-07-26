@@ -103,6 +103,10 @@ func NewTodosTool() *TodosTool {
 
 func (t *TodosTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindControl,
+		runtimetypes.ToolMetadataReadOnlyKey:        true,
+		runtimetypes.ToolMetadataMutatesFSKey:       false,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }

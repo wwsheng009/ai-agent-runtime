@@ -61,6 +61,8 @@ const (
 	MetricToolPreflightTotal         = "tool_preflight_total"
 	MetricToolOutcomeTotal           = "tool_outcome_total"
 	MetricToolDispositionReplayTotal = "tool_disposition_replay_total"
+	// Doom-loop product surface (C4a): warning vs hard-stop termination.
+	MetricDoomLoopTotal = "doom_loop_total"
 )
 
 // MetricLabel 标签常量
@@ -87,6 +89,8 @@ const (
 	LabelDecision   = "decision"
 	LabelErrorCode  = "error_code"
 	LabelRepeat     = "repeat"
+	// LabelPhase is used for multi-stage harness signals (e.g. doom-loop warning|terminated).
+	LabelPhase = "phase"
 )
 
 // MetricValue 指标值类型

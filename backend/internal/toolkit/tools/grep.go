@@ -655,6 +655,10 @@ func (g *GrepTool) Description() string {
 
 func (g *GrepTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindSearch,
+		runtimetypes.ToolMetadataReadOnlyKey:        true,
+		runtimetypes.ToolMetadataMutatesFSKey:       false,
+		runtimetypes.ToolMetadataRequiresNetKey:     false,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}

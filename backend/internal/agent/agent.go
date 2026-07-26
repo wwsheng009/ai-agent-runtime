@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -99,7 +100,12 @@ type Result struct {
 	ToolErrorCount            int                    `json:"tool_error_count,omitempty"`
 	RecoveredToolErrorCount   int                    `json:"recovered_tool_error_count,omitempty"`
 	UnrecoveredToolErrorCount int                    `json:"unrecovered_tool_error_count,omitempty"`
-	Contract                  *agentresult.Result    `json:"result_contract,omitempty"`
+	// CompletionSatisfied is false when completionRequirement=complete_task was
+	// not met after recovery attempts (or recovery was disabled).
+	CompletionSatisfied *bool `json:"completion_satisfied,omitempty"`
+	// CompletionRecoveryTurns is how many recovery turns were injected.
+	CompletionRecoveryTurns int                `json:"completion_recovery_turns,omitempty"`
+	Contract                *agentresult.Result `json:"result_contract,omitempty"`
 }
 
 // NewAgent 创建 Agent
@@ -845,12 +851,19 @@ func newDefaultContextManager(cfg *Config, store *artifact.Store) *contextmgr.Ma
 		if value, ok := contextOptionInt(cfg.Options, "context_max_observation_items"); ok {
 			overrides.MaxObservationItems = value
 		}
+		if value, ok := contextOptionInt(cfg.Options, "context_max_project_memory"); ok {
+			overrides.MaxProjectMemory = value
+		}
+		if value, ok := contextOptionInt(cfg.Options, "context_project_memory_tokens"); ok {
+			overrides.ProjectMemoryTokens = value
+		}
 	}
 	budget := contextmgr.ResolveBudget(profile, overrides)
 	manager := contextmgr.NewManagerWithProfile(profile, budget, store)
 	if manager != nil {
 		manager.Strategy = contextmgr.ResolveStrategy(profile, strategy)
 		attachWorkspaceContext(manager, cfg)
+		attachProjectMemory(manager, cfg)
 	}
 	return manager
 }
@@ -864,6 +877,59 @@ func attachWorkspaceContext(manager *contextmgr.Manager, cfg *Config) {
 		return
 	}
 	manager.Workspace = newLazyWorkspaceContextBuilder(path, wsCfg)
+}
+
+func attachProjectMemory(manager *contextmgr.Manager, cfg *Config) {
+	if manager == nil {
+		return
+	}
+	options := map[string]interface{}{}
+	if cfg != nil && cfg.Options != nil {
+		options = cfg.Options
+	}
+	if raw, ok := options["context_project_memory"]; ok {
+		switch v := raw.(type) {
+		case bool:
+			if !v {
+				return
+			}
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "0", "false", "off", "disabled", "no":
+				return
+			}
+		}
+	}
+
+	projectRoot := ""
+	if path, _ := workspaceOptions(options); path != "" {
+		projectRoot = path
+	}
+	if root := strings.TrimSpace(optionString(options, "project_memory_root")); root != "" {
+		// Explicit root overrides workspace-derived path.
+		store, err := memorystore.New(memorystore.Config{Root: root})
+		if err != nil {
+			return
+		}
+		manager.ProjectMemory = store
+		return
+	}
+	if root := strings.TrimSpace(optionString(options, "project_root")); root != "" {
+		projectRoot = root
+	}
+	profileMemoryDir := strings.TrimSpace(optionString(options, "profile_memory_dir"))
+	if projectRoot == "" && profileMemoryDir == "" {
+		// Soft-fail: no usable root; leave ProjectMemory unset.
+		return
+	}
+	store, err := memorystore.New(memorystore.Config{
+		ProjectRoot:      projectRoot,
+		ProfileMemoryDir: profileMemoryDir,
+	})
+	if err != nil {
+		return
+	}
+	manager.ProjectMemory = store
 }
 
 type lazyWorkspaceContextBuilder struct {

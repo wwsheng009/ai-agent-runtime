@@ -8,6 +8,21 @@
 
 `aicli`（默认进入 chat）和 `aicli chat` 现在都支持把 skills 作为 AI 可调用 functions 暴露给模型。
 
+### 默认启用（避免“skills 没装”假阴性）
+
+| 事实 | 说明 |
+| --- | --- |
+| Skills Runtime **默认启用** | `skills_runtime.enabled` 默认为 true；仓库/用户 skill 目录会进入 loader/registry |
+| Chat **默认暴露** tools + skills | 除非显式 `--disable-tools` |
+| 暴露是 **route + top-k**，不是全量 dump | 模型每轮只看到 route 命中后的候选 skill 子集 |
+| `aicli exec` 常默认关 tools | 纯文本 headless 为降低误调用默认 `--disable-tools`；这不等于 skills 未加载 |
+
+常见假阴性：
+
+1. 只开了 `aicli exec "…"`（无 `--enable-tools` / `--yolo` / 非 default permission / profile|agent）→ tools/skills 未暴露给模型  
+2. `skills-top-k` 过小或 prompt 未命中 route → 期望 skill 不在候选里  
+3. 把 skill 内 `agents/openai.yaml` 当成角色 agent（**不是**；角色见 `docs/aicli/agents.md`）
+
 当前链路：
 
 `aicli` / `aicli chat` -> route candidate skills -> model tool selection -> skill executor -> workflow / MCP / LLM
@@ -19,7 +34,10 @@
 如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli` 默认 chat / `aicli chat` 常用命令、`/call`、`/tool`、`/skill`、`/skills` 这类 chat 斜杠命令，请同时阅读：
 
 - `docs/aicli/README.md`
+- `docs/aicli/quickstart.md`
 - `docs/aicli/install.md`
+- `docs/aicli/faq.md`
+- `docs/aicli/agents.md`（Portable AgentDefinition / `aicli chat --agent` / agents 三层）
 
 ## Skills 来源
 
@@ -83,7 +101,7 @@
 
 ### `skills-top-k`
 
-控制每轮请求最多暴露给模型的候选 skill 数量。
+控制每轮请求最多暴露给模型的候选 skill 数量（**routed top-k**，不是 registered 全量）。
 
 ```bash
 aicli chat --provider nvidia --skills-top-k 3
@@ -95,6 +113,25 @@ aicli chat --provider nvidia --skills-top-k 3
 skills_runtime:
   aicli_skill_exposure_top_k: 5
 ```
+
+在交互式 chat 中可用：
+
+```text
+/skills
+/skills <query>
+/functions <prompt>
+/functions <prompt> --json
+```
+
+对照理解：
+
+| 概念 | 含义 |
+| --- | --- |
+| registered count | loader/registry 已发现的 skill 总数（`/skills` 列表侧） |
+| routed candidates | 当前 prompt 经 route 打分后的候选 |
+| exposed top-k | 最终发给模型的 skill function 数量上限（`skills-top-k` / 配置） |
+
+`--skills-debug` 与 `/functions <prompt>` 共用同一份 exposure report，可同时看到 catalog 总量与本轮 exposed 集合。
 
 ### `skills-mode`
 

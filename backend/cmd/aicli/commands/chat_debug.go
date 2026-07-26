@@ -67,6 +67,7 @@ func printChatDebugInfo(session *ChatSession) {
 		printChatSessionMetaRow("AICLI Config Path:", chatDebugValueOrNone(resolveAbsoluteChatPath(session.Config.ConfigFilePath)))
 	}
 	printChatSessionMetaRow("Profile Root:", chatDebugValueOrNone(resolveAbsoluteChatPath(session.ProfileRoot)))
+	printChatSessionMetaRow("Agent Source:", chatDebugValueOrNone(formatChatAgentSourceLine(session)))
 	printChatSessionMetaRow("Runtime Config Path:", chatDebugValueOrNone(resolveAbsoluteChatPath(session.RuntimeConfigPath)))
 	printChatSessionMetaRow("MCP Config Path:", chatDebugValueOrNone(resolveAbsoluteChatPath(session.MCPConfigPath)))
 	printChatSessionMetaRow("Resolved Skill Dirs:", chatDebugJoinedPaths(session.ResolvedSkillDirs))

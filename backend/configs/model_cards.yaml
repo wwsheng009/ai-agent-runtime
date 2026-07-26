@@ -585,6 +585,8 @@ cards:
       protocols:
         - openai
     capability:
+      max_context_tokens: 500000
+      auto_compact_token_limit: 450000
       input_modalities:
         - text
         - image
@@ -605,6 +607,8 @@ cards:
       protocols:
         - anthropic
     capability:
+      max_context_tokens: 500000
+      auto_compact_token_limit: 450000
       input_modalities:
         - text
         - image
@@ -625,6 +629,8 @@ cards:
       protocols:
         - codex
     capability:
+      max_context_tokens: 500000
+      auto_compact_token_limit: 450000
       input_modalities:
         - text
         - image

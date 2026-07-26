@@ -80,15 +80,16 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	childAgent.SetToolExecutionPolicy(parent.GetSubagentScheduler().childPolicy(task))
 
 	loopConfig := &LoopReActConfig{
-		MaxSteps:             childConfig.MaxSteps,
-		MaxToolCalls:         childConfig.MaxToolCalls,
-		MaxRunDuration:       childConfig.MaxRunDuration,
-		MaxExplorationSteps:  childConfig.MaxExplorationSteps,
-		MaxRepeatedToolCalls: childConfig.MaxRepeatedToolCalls,
-		EnableThought:        true,
-		EnableToolCalls:      true,
-		Temperature:          childConfig.Temperature,
-		ReasoningEffort:      decision.ReasoningEffort,
+		MaxSteps:               childConfig.MaxSteps,
+		MaxToolCalls:           childConfig.MaxToolCalls,
+		MaxRunDuration:         childConfig.MaxRunDuration,
+		MaxExplorationSteps:    childConfig.MaxExplorationSteps,
+		MaxRepeatedToolCalls:   childConfig.MaxRepeatedToolCalls,
+		EnableThought:          true,
+		EnableToolCalls:        true,
+		Temperature:            childConfig.Temperature,
+		ReasoningEffort:        decision.ReasoningEffort,
+		CompletionRequirement:  NormalizeCompletionRequirement(task.CompletionRequirement),
 	}
 
 	return ChildAgentSpec{

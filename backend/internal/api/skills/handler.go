@@ -703,6 +703,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/files", h.GetCheckpointFiles).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/preview", h.PreviewSessionCheckpoint).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/restore", h.RestoreSessionCheckpoint).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.GetSessionPlanMode).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
 
 	// Teams
@@ -3934,6 +3936,24 @@ func (h *Handler) applyAgentExecutionPolicy(a *agent.Agent, workspacePath string
 		executor.OverlaySandboxConfig(&sandboxCfg, profilePolicy.Sandbox.Config())
 	}
 
+	// If profile/runtime only carried a named profile label without path bounds,
+	// materialize against the request workspace so workspace/read-only/strict
+	// actually enforce application-layer isolation.
+	if profile := strings.TrimSpace(sandboxCfg.Profile); profile != "" && strings.TrimSpace(workspacePath) != "" {
+		if resolved, err := executor.ResolveSandboxProfile(profile, executor.SandboxProfileOptions{
+			WorkspaceRoot: workspacePath,
+			Override:      sandboxCfg,
+		}); err == nil {
+			sandboxCfg = resolved.Config
+			if resolved.ReadOnly {
+				readOnly = true
+			}
+			for _, warning := range resolved.Warnings {
+				logger.Warnf("API agent sandbox: %s", warning)
+			}
+		}
+	}
+
 	if readOnly {
 		sandboxCfg.DeniedCommands = appendUniqueStrings(sandboxCfg.DeniedCommands, defaultReadOnlyDeniedCommands()...)
 	}
@@ -3946,6 +3966,9 @@ func (h *Handler) applyAgentExecutionPolicy(a *agent.Agent, workspacePath string
 	if executor.SandboxConfigActive(sandboxCfg) || strings.TrimSpace(workspacePath) != "" || readOnly {
 		sandboxCfg.Enabled = true
 		toolPolicy.Sandbox = executor.NewSandbox(&sandboxCfg)
+		for _, warning := range toolPolicy.Sandbox.CollectOSSandboxWarnings(context.Background()) {
+			logger.Warnf("API agent sandbox: %s", warning)
+		}
 	}
 
 	a.SetToolExecutionPolicy(toolPolicy)

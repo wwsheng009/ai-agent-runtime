@@ -24,12 +24,20 @@ func NewInitCommand() *cobra.Command {
 
 默认会在当前工作目录的 .aicli/config.yaml 创建最小 starter 配置。
 如需写入用户目录，可使用 --global 或 --config ~/.aicli/config.yaml。
-如果配置文件已经存在，则保持原样，不会覆盖。`,
+如果配置文件已经存在，则保持原样，不会覆盖。
+
+首次使用推荐：
+  aicli init --global
+  aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-... --set-default
+  aicli
+
+更多说明见 docs/aicli/quickstart.md。`,
 		Example: `  aicli init
   aicli init --global
   aicli init --config .aicli/config.yaml
   aicli init --config ~/.aicli/config.yaml
-  aicli init --config /path/to/custom/config.yaml`,
+  aicli init --config /path/to/custom/config.yaml
+  aicli init --global --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			handleInitCommand(cmd)
 		},

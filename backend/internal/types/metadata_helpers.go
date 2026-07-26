@@ -14,6 +14,19 @@ const (
 	// to schedulers and approval policy.
 	ToolMetadataRetryClassKey = "retry_class"
 
+	// Tool taxonomy metadata keys (Iteration A permission/parallel productization).
+	ToolMetadataKindKey        = "tool_kind"
+	ToolMetadataReadOnlyKey    = "read_only"
+	ToolMetadataMutatesFSKey   = "mutates_fs"
+	ToolMetadataRequiresNetKey = "requires_net"
+
+	ToolKindRead    = "read"
+	ToolKindSearch  = "search"
+	ToolKindEdit    = "edit"
+	ToolKindExec    = "exec"
+	ToolKindNetwork = "network"
+	ToolKindControl = "control"
+
 	ToolRetryClassNever                  = "never"
 	ToolRetryClassSafe                   = "safe"
 	ToolRetryClassIdempotencyKeyRequired = "idempotency_key_required"

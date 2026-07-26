@@ -285,6 +285,60 @@ func TestPrintSessionInfo_AlignsFollowupMetadataRows(t *testing.T) {
 	}
 }
 
+func TestFormatChatAgentSourceLine(t *testing.T) {
+	if got := formatChatAgentSourceLine(nil); got != "" {
+		t.Fatalf("expected empty line for nil session, got %q", got)
+	}
+	if got := formatChatAgentSourceLine(&ChatSession{}); got != "" {
+		t.Fatalf("expected empty line when source/path unset, got %q", got)
+	}
+	if got := formatChatAgentSourceLine(&ChatSession{AgentSource: "builtin"}); got != "builtin" {
+		t.Fatalf("expected source-only line, got %q", got)
+	}
+	if got := formatChatAgentSourceLine(&ChatSession{
+		AgentSource:     "builtin",
+		AgentSourcePath: "builtin:explore",
+	}); got != "builtin · builtin:explore" {
+		t.Fatalf("expected builtin path preserved, got %q", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "agents", "explore.md")
+	got := formatChatAgentSourceLine(&ChatSession{
+		AgentSource:     "project",
+		AgentSourcePath: path,
+	})
+	want := "project · " + resolveAbsoluteChatPath(path)
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestPrintSessionInfo_IncludesAgentSource(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	agentPath := filepath.Join(t.TempDir(), ".agents", "agents", "general.md")
+	session := &ChatSession{
+		ProviderName:    "openai",
+		Provider:        config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com"},
+		Model:           "gpt-4.1",
+		AgentSource:     "project",
+		AgentSourcePath: agentPath,
+	}
+
+	output := captureStdout(t, func() {
+		printSessionInfo(session)
+	})
+	expected := fmt.Sprintf("%-18s %s", "Agent Source:", "project · "+resolveAbsoluteChatPath(agentPath))
+	if !strings.Contains(output, expected) {
+		t.Fatalf("expected agent source row %q, got:\n%s", expected, output)
+	}
+}
+
 func TestPrintSessionInfo_RendersExplicitReasoningCapability(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -548,6 +602,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 	}
 	enabled := true
 
+	agentConfigPath := filepath.Join(profileRoot, "agents", "agent-x", "agent.yaml")
 	session := &ChatSession{
 		ProviderName:        "codex_ee",
 		Provider:            config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com", APIKeys: []string{"key-1"}},
@@ -565,6 +620,8 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		ProfileName:         "debug-profile",
 		ProfileAgent:        "agent-x",
 		ProfileRoot:         profileRoot,
+		AgentSource:         "profile",
+		AgentSourcePath:     agentConfigPath,
 		RuntimeConfigPath:   runtimeConfigPath,
 		MCPConfigPath:       mcpConfigPath,
 		ResolvedSkillDirs:   []string{skillsDir},
@@ -633,6 +690,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		fmt.Sprintf("%-18s %s", "Last HTTP Resp:", responsePath),
 		fmt.Sprintf("%-18s %s", "Last Shell Out:", filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt")),
 		fmt.Sprintf("%-18s %s", "Profile Root:", profileRoot),
+		fmt.Sprintf("%-18s %s", "Agent Source:", "profile · "+resolveAbsoluteChatPath(agentConfigPath)),
 		fmt.Sprintf("%-18s %s", "Runtime Config Path:", runtimeConfigPath),
 		fmt.Sprintf("%-18s %s", "MCP Config Path:", mcpConfigPath),
 		fmt.Sprintf("%-18s %s", "Resolved Skill Dirs:", skillsDir),

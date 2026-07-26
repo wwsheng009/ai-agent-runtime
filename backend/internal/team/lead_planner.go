@@ -425,7 +425,8 @@ func buildLeadRunMeta(teamID, taskID string) *RunMeta {
 		return nil
 	}
 	return &RunMeta{
-		PermissionMode: "bypass_permissions",
+		PermissionMode:        "bypass_permissions",
+		CompletionRequirement: "none",
 		Team: &TeamRunMeta{
 			TeamID:        teamID,
 			CurrentTaskID: taskID,

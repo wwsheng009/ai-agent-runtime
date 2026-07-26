@@ -34,48 +34,10 @@ func main() {
 
 	// 创建 root 命令
 	rootCmd := &cobra.Command{
-		Use:   "aicli [子命令]",
-		Short: "AI API Gateway 测试工具，默认进入 chat",
-		Long: `AI CLI 是一个用于测试 AI Gateway 的命令行工具。
-
-功能包括：
-  - 列出当前配置信息（providers, provider_groups）
-  - 管理 provider（list/show/remove/enable/disable/set-default）
-  - 对不同端点进行测试
-  - 直接调用图片生成工具
-  - 测试模型的最大上下文窗口和最大生成长度
-
-直接运行 ` + "`aicli`" + ` 会默认进入交互式 chat 模式。
-
-文档入口：
-  - docs/aicli/README.md
-  - docs/aicli/install.md
-  - docs/skill_runtime/aicli_skills_usage.md`,
-		Example: `  # 列出配置信息
-  aicli config
-  aicli config --provider nvidia
-  aicli config --groups
-  aicli provider list
-  aicli provider show openai --models
-  aicli provider remove old-provider -y
-
-  # 直接进入交互式聊天（默认）
-  aicli
-  aicli chat
-
-  # 测试端点
-  aicli test --model gpt-4 --message "Hello"
-  aicli test --provider nvidia --message "测试"
-  aicli test --stream
-
-  # 直接生成图片
-  aicli image "一只在月光下奔跑的猫"
-  aicli image --provider SENSENOVA_IMAGE "海边日落照片"
-
-  # 测试上下文窗口
-  aicli context --model glm-4.7
-  aicli context --provider nvidia --model gpt-4
-  aicli context --model gpt-4 --step 5000`,
+		Use:     "aicli [子命令]",
+		Short:   "AI CLI 工具，默认进入 chat",
+		Long:    rootCommandLongHelp,
+		Example: rootCommandExampleHelp,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmd.Help()
 		},
@@ -181,16 +143,10 @@ func main() {
 
 	// config 子命令
 	configCmd := &cobra.Command{
-		Use:   "config",
-		Short: "管理配置",
-		Long:  `交互式管理配置；也可通过 flags 输出 providers、provider_groups、models 等只读信息。`,
-		Example: `  aicli config                        # 默认进入交互式配置管理
-  aicli config --no-tui                # 显示配置摘要
-  aicli config --provider nvidia       # 只显示指定 provider
-  aicli config --groups                # 只显示 provider groups
-  aicli config --models                # 列出所有可用模型
-  aicli config --tui                   # 显式进入交互式配置管理
-  aicli config --output json           # 结构化 JSON 输出`,
+		Use:     "config",
+		Short:   "管理配置",
+		Long:    configCommandLongHelp,
+		Example: configCommandExampleHelp,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleConfig(cmd, cfg)
 		},
@@ -212,15 +168,10 @@ func main() {
 
 	// test 子命令
 	testCmd := &cobra.Command{
-		Use:   "test",
-		Short: "测试端点",
-		Long:  `向配置的 endpoint 发送测试请求。`,
-		Example: `  aicli test --model gpt-4 --message "Hello"
-  aicli test --provider nvidia --message "测试"
-  aicli test --provider bigmodel --path "/v1/messages" --message "Hello"
-  aicli test --stream                                   # 测试流式响应
-  aicli test --model gpt-4 --output text               # 只输出结果文本
-  aicli test --model gpt-4 --output json               # 输出结构化 JSON`,
+		Use:     "test",
+		Short:   "测试端点",
+		Long:    testCommandLongHelp,
+		Example: testCommandExampleHelp,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleTest(cmd, cfg)
 		},
@@ -257,6 +208,9 @@ func main() {
 	// skill 管理子命令
 	rootCmd.AddCommand(commands.NewSkillCommand())
 
+	// plugin 本地打包/信任管理（无 marketplace）
+	rootCmd.AddCommand(commands.NewPluginCommand())
+
 	// image 子命令
 	rootCmd.AddCommand(commands.NewImageCommand(func() *config.Config {
 		return cfg
@@ -264,15 +218,10 @@ func main() {
 
 	// context 子命令
 	contextCmd := &cobra.Command{
-		Use:   "context",
-		Short: "测试上下文窗口和最大输出",
-		Long:  `测试模型的最大上下文窗口和最大生成长度。`,
-		Example: `  aicli context --model glm-4.7
-  aicli context --provider nvidia --model gpt-4
-  aicli context --model gpt-4 --step 5000
-  aicli context --model gpt-4 --max-output-only
-  aicli context --model gpt-4 --start 10000 --end 20000
-  aicli context --model gpt-4 --output json`,
+		Use:     "context",
+		Short:   "测试上下文窗口和最大输出",
+		Long:    contextCommandLongHelp,
+		Example: contextCommandExampleHelp,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleContext(cmd, cfg)
 		},
@@ -291,46 +240,17 @@ func main() {
 
 	// chat 子命令
 	chatCmd := &cobra.Command{
-		Use:   "chat",
-		Short: "交互式聊天",
-		Long: `与 AI 模型进行交互式对话。
-
-进入 chat 后可使用斜杠命令：
-  - /functions <prompt>
-  - /call <function> [args-json]
-  - /tool <function> [args-json]
-  - /skill <skill> <prompt>
-  - /skills [query]
-
-更完整说明见：
-  - docs/aicli/install.md
-  - docs/skill_runtime/aicli_skills_usage.md`,
-		Example: `  aicli chat                              # 交互式聊天
-  aicli chat --profile dev                  # 使用命名 profile
-  aicli chat --profile ./profiles/dev --agent coder
-  aicli chat --provider nvidia            # 指定 provider
-  aicli chat --provider nvidia --stream   # 流式输出
-  aicli chat --provider codex --fast     # Codex Fast（service_tier=priority）
-  aicli chat --resume                     # 恢复最近会话
-  aicli chat --session session_xxx        # 加载指定会话
-  aicli chat --list-sessions              # 列出会话
-  aicli chat --list-sessions --session-provider nvidia --session-query review
-  aicli chat --no-interactive --message "Hello"  # 非交互模式
-  aicli chat --no-interactive --output json -M "Hello"  # JSON 输出
-
-  # chat 内斜杠命令
-  /functions 帮我生成一张图片
-  /call openai_image_generate 帮我生成一张海边日落照片
-  /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
-  /skill imagegen 帮我生成一张海边日落照片
-  /skills`,
+		Use:     "chat",
+		Short:   "交互式聊天",
+		Long:    chatCommandLongHelp,
+		Example: chatCommandExampleHelp,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleChat(cmd, cfg)
 		},
 	}
 	defaultChatLogDir := commands.ResolveDefaultChatLogDir()
 	chatCmd.Flags().String("profile", "", "profile 名称或目录路径（按 profiles 配置或显式路径解析）")
-	chatCmd.Flags().String("agent", "", "profile 内 agent 标识（留空时使用 profile.default_agent）")
+	chatCmd.Flags().String("agent", "", "agent 标识：有 profile 时为 profile 内 agent；无 profile 时加载 portable agentdef（builtin/项目 .agents/agents）")
 	chatCmd.Flags().StringP("provider", "p", "", "指定 provider 名称")
 	chatCmd.Flags().StringP("model", "m", "", "指定模型名称")
 	chatCmd.Flags().BoolP("stream", "s", false, "使用流式输出")
@@ -372,37 +292,17 @@ func main() {
 		return cfg
 	}))
 
+	// agent 子命令 — ACP 等外部 Agent 协议宿主
+	rootCmd.AddCommand(commands.NewAgentCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// pipe 子命令 - 管道输入处理
 	pipeCmd := &cobra.Command{
-		Use:   "pipe",
-		Short: "管道模式处理",
-		Long: `从标准输入读取数据，结合提示词发送给 AI 处理。
-
-支持两种模式：
-  - 缓冲模式（默认）：读取所有输入后一次性发送
-  - 流式模式（--stream）：实时处理管道输入
-
-使用场景：
-  - 日志分析：tail -f app.log | aicli pipe -p "分析异常"
-  - 文件处理：cat file.txt | aicli pipe -p "翻译成法语"
-  - CI/CD：git diff | aicli pipe -p "生成 PR 描述"`,
-		Example: `  # 日志监控
-  tail -f app.log | aicli pipe -p "如果出现异常，请通知我"
-
-  # 翻译
-  echo "Hello World" | aicli pipe -p "翻译成中文"
-
-  # 流式处理
-  tail -f app.log | aicli pipe -p "分析日志" --stream
-
-  # 指定模型
-  cat data.json | aicli pipe -p "格式化这个 JSON" --model gpt-4
-
-  # JSON 输出
-  echo "Hello" | aicli pipe -p "翻译成中文" --output json
-
-  # CI 场景
-  git diff main...HEAD | aicli pipe -p "为新代码生成 PR 描述"`,
+		Use:     "pipe",
+		Short:   "管道模式处理",
+		Long:    pipeCommandLongHelp,
+		Example: pipeCommandExampleHelp,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandlePipe(cmd, cfg)
 		},

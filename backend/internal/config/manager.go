@@ -1041,6 +1041,9 @@ func ValidateSandboxConfig(config *runtimeexecutor.SandboxConfig) error {
 	if config.MaxExecutionTime < 0 {
 		return errors.New(errors.ErrValidationFailed, "sandbox.maxExecutionTime cannot be negative")
 	}
+	if _, err := runtimeexecutor.NormalizeOSSandboxMode(config.OSSandbox); err != nil {
+		return errors.New(errors.ErrValidationFailed, err.Error())
+	}
 	for _, path := range append(append([]string{}, config.AllowedPaths...), append(config.DeniedPaths, config.ReadOnlyPaths...)...) {
 		if strings.TrimSpace(path) == "" {
 			return errors.New(errors.ErrValidationFailed, "sandbox paths cannot contain empty entries")

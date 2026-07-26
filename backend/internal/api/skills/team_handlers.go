@@ -1931,7 +1931,7 @@ func (h *Handler) RenewAgentControlTaskLease(w http.ResponseWriter, r *http.Requ
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	registry := team.NewAgentControlTaskRegistry(store)
+	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	record, err := registry.RenewAgentControlTaskLease(r.Context(), agentcontrol.TaskLeaseRenewRequest{
 		ID:         taskID,
 		Workflow:   firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
@@ -1940,9 +1940,6 @@ func (h *Handler) RenewAgentControlTaskLease(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if claims := h.getTeamClaimsManager(); claims != nil {
-		_ = claims.Renew(r.Context(), taskID, leaseUntil)
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -1980,7 +1977,7 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 		return
 	}
 	assignee := teamTaskAssigneeID(current)
-	registry := team.NewAgentControlTaskRegistry(store)
+	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	record, err := registry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
 		ID:       taskID,
 		Workflow: firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
@@ -1990,9 +1987,6 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if claims := h.getTeamClaimsManager(); claims != nil {
-		_ = claims.Release(r.Context(), taskID)
 	}
 	if teammateID := strings.TrimSpace(req.TeammateID); teammateID != "" {
 		_ = store.UpdateTeammateState(r.Context(), teammateID, team.TeammateStateIdle)
@@ -2031,7 +2025,7 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	registry := team.NewAgentControlTaskRegistry(store)
+	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	record, err := registry.UpdateAgentControlTaskTerminal(r.Context(), agentcontrol.TaskTerminalUpdateRequest{
 		ID:              taskID,
 		Workflow:        firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
@@ -2045,9 +2039,6 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if claims := h.getTeamClaimsManager(); claims != nil {
-		_ = claims.Release(r.Context(), taskID)
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -2071,7 +2062,7 @@ func (h *Handler) BlockAgentControlTask(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
-	registry := team.NewAgentControlTaskRegistry(store)
+	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	record, err := registry.BlockAgentControlTask(r.Context(), agentcontrol.TaskBlockRequest{
 		ID:              taskID,
 		Workflow:        firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
@@ -3567,7 +3558,7 @@ func (h *Handler) RenewTaskLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	if _, err := taskRegistry.RenewAgentControlTaskLease(r.Context(), agentcontrol.TaskLeaseRenewRequest{
 		ID:         taskID,
 		Workflow:   agentcontrol.WorkflowSpawnTeam,
@@ -3575,9 +3566,6 @@ func (h *Handler) RenewTaskLease(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if claims := h.getTeamClaimsManager(); claims != nil {
-		_ = claims.Renew(r.Context(), taskID, leaseUntil)
 	}
 	updated, _ := store.GetTask(r.Context(), taskID)
 	if updated == nil {
@@ -3638,7 +3626,7 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = team.TaskStatusPending
 	}
-	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	released, err := taskRegistry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
 		ID:       taskID,
 		Workflow: agentcontrol.WorkflowSpawnTeam,
@@ -3648,9 +3636,6 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if claims := h.getTeamClaimsManager(); claims != nil {
-		_ = claims.Release(r.Context(), taskID)
 	}
 	if strings.TrimSpace(req.TeammateID) != "" {
 		_ = store.UpdateTeammateState(r.Context(), strings.TrimSpace(req.TeammateID), team.TeammateStateIdle)
@@ -3721,7 +3706,7 @@ func (h *Handler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = team.TaskStatusPending
 	}
-	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	if _, err := taskRegistry.RetryAgentControlTask(r.Context(), agentcontrol.TaskRetryRequest{
 		ID:       taskID,
 		Workflow: agentcontrol.WorkflowSpawnTeam,
@@ -3730,9 +3715,6 @@ func (h *Handler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if claims := h.getTeamClaimsManager(); claims != nil {
-		_ = claims.Release(r.Context(), taskID)
 	}
 	if strings.TrimSpace(req.TeammateID) != "" {
 		_ = store.UpdateTeammateState(r.Context(), strings.TrimSpace(req.TeammateID), team.TeammateStateIdle)
@@ -4378,7 +4360,7 @@ func (h *Handler) SweepTeammates(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := make([]map[string]interface{}, 0)
 	reclaimedTasks := make([]map[string]interface{}, 0)
-	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	for _, mate := range teammates {
 		if mate.State == team.TeammateStateOffline {
 			continue
@@ -4423,9 +4405,6 @@ func (h *Handler) SweepTeammates(w http.ResponseWriter, r *http.Request) {
 				}); err != nil {
 					h.writeError(w, http.StatusInternalServerError, err)
 					return
-				}
-				if claims := h.getTeamClaimsManager(); claims != nil {
-					_ = claims.Release(r.Context(), task.ID)
 				}
 				reclaimedTasks = append(reclaimedTasks, map[string]interface{}{
 					"task_id":     task.ID,

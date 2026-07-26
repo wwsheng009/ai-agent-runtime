@@ -120,6 +120,22 @@ func aliasAgentEventsResult(result *AgentEventsResult, aliases *handleAliasRegis
 	return &cloned
 }
 
+func aliasAgentWorktreeResult(result *AgentWorktreeResult, aliases *handleAliasRegistry) *AgentWorktreeResult {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	cloned.ID = aliasSessionValue(cloned.ID, aliases)
+	cloned.SessionID = aliasSessionValue(cloned.SessionID, aliases)
+	if result.Status != nil {
+		cloned.Status = aliasAgentStatusResult(result.Status, aliases)
+	}
+	if len(result.Paths) > 0 {
+		cloned.Paths = append([]string(nil), result.Paths...)
+	}
+	return &cloned
+}
+
 func aliasSessionValue(value string, aliases *handleAliasRegistry) string {
 	if aliases == nil {
 		return strings.TrimSpace(value)

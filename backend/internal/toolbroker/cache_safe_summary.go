@@ -307,6 +307,47 @@ func agentMessageCacheSafeSummary(result *AgentMessageResult) string {
 	return strings.Join(lines, "\n")
 }
 
+func agentWorktreeCacheSafeSummary(result *AgentWorktreeResult) string {
+	if result == nil {
+		return ""
+	}
+	sessionRef := firstNonEmptyString(strings.TrimSpace(result.SessionID), strings.TrimSpace(result.ID), "child_agent")
+	action := firstNonEmptyString(strings.TrimSpace(result.Action), "worktree")
+	lines := []string{fmt.Sprintf("Child agent %s worktree %s.", sessionRef, action)}
+	flags := make([]string, 0, 4)
+	if result.Applied {
+		flags = append(flags, "applied")
+	}
+	if result.Discarded {
+		flags = append(flags, "discarded")
+	}
+	if result.Removed {
+		flags = append(flags, "removed")
+	}
+	if result.Kept {
+		flags = append(flags, "kept")
+	}
+	if len(flags) > 0 {
+		lines = append(lines, "Flags: "+strings.Join(flags, ", "))
+	}
+	if path := strings.TrimSpace(result.WorktreePath); path != "" {
+		lines = append(lines, "Worktree path: "+path)
+	}
+	if branch := strings.TrimSpace(result.WorktreeBranch); branch != "" {
+		lines = append(lines, "Branch: "+branch)
+	}
+	if len(result.Paths) > 0 {
+		lines = append(lines, fmt.Sprintf("Paths: %d selected.", len(result.Paths)))
+	}
+	if diff := truncateCacheSafeSummary(result.DiffStat, 180); diff != "" {
+		lines = append(lines, "Diff: "+diff)
+	}
+	if result.Status != nil {
+		lines = append(lines, agentStatusCacheSafeSummary(result.Status))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func agentEventsCacheSafeSummary(result *AgentEventsResult) string {
 	if result == nil {
 		return ""

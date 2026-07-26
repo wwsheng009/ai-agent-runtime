@@ -133,12 +133,17 @@ describe("ArtifactPanel", () => {
     const evidenceTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
       (button) => button.textContent?.includes("Items"),
     );
+    const planTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
+      (button) => button.textContent?.includes("Plan"),
+    );
     const restorePointsTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
       (button) => button.textContent?.includes("Restore"),
     );
 
     expect(container.querySelector('[role="tablist"]')).toBeInstanceOf(HTMLElement);
     expect(evidenceTab?.getAttribute("aria-selected")).toBe("true");
+    expect(planTab).toBeInstanceOf(HTMLButtonElement);
+    expect((planTab as HTMLButtonElement).disabled).toBe(true);
     expect(restorePointsTab).toBeInstanceOf(HTMLButtonElement);
     expect((restorePointsTab as HTMLButtonElement).disabled).toBe(true);
   });

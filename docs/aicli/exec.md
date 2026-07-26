@@ -77,7 +77,15 @@ aicli exec -P nvidia -m gpt-4.1 "生成变更摘要"
 ```bash
 aicli exec --profile dev "检查当前实现"
 aicli exec --profile ./profiles/dev --agent reviewer "审查代码"
+# portable agentdef（无需 profile；与 aicli chat --agent 同源 discovery）
+aicli exec --agent explore --enable-tools "Locate the spawn_agent entrypoint"
 ```
+
+说明：
+
+- 纯文本 `aicli exec "…"` 默认常关闭 tools/skills（headless 安全默认），**不是** skills 未安装。
+- 需要工具时：`--enable-tools`、`--yolo`、非 default `--permission-mode`，或带 `--profile` / `--agent`。
+- 角色定义与 agents 三层见 [`agents.md`](./agents.md)。
 
 `exec` 会复用 `chat` 的 profile/agent 解析逻辑，因此 profile 中的 system prompt、runtime config、tool policy、skills 目录等会继续生效。
 

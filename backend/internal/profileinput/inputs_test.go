@@ -59,6 +59,61 @@ func TestBuildResolvedAgentInputs_LoadsPromptsAndToolPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildToolExecutionPolicyWithWorkspace_NamedProfiles(t *testing.T) {
+	root := t.TempDir()
+	policy, warnings, err := BuildToolExecutionPolicyWithWorkspace(ResolvedToolPolicy{
+		Sandbox: map[string]interface{}{"mode": "strict"},
+	}, root)
+	if err != nil {
+		t.Fatalf("BuildToolExecutionPolicyWithWorkspace: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings with workspace, got %#v", warnings)
+	}
+	if policy == nil || !policy.ReadOnly {
+		t.Fatalf("expected read-only policy, got %#v", policy)
+	}
+	if policy.Sandbox == nil {
+		t.Fatal("expected sandbox")
+	}
+	cfg := policy.Sandbox.Config()
+	if !cfg.BlockNetwork || cfg.Profile != "strict" {
+		t.Fatalf("unexpected sandbox config: %#v", cfg)
+	}
+	if len(cfg.AllowedPaths) != 1 {
+		t.Fatalf("expected workspace allow path, got %#v", cfg.AllowedPaths)
+	}
+
+	// Missing workspace should emit explicit downgrade warning.
+	policy2, warnings2, err := BuildToolExecutionPolicyWithWorkspace(ResolvedToolPolicy{
+		Sandbox: map[string]interface{}{"mode": "strict"},
+	}, "")
+	if err != nil {
+		t.Fatalf("strict without workspace: %v", err)
+	}
+	if len(warnings2) == 0 {
+		t.Fatal("expected downgrade warning")
+	}
+	if policy2 == nil || policy2.Sandbox == nil {
+		t.Fatal("expected partial sandbox")
+	}
+	if !policy2.Sandbox.Config().BlockNetwork {
+		t.Fatal("expected network still blocked after downgrade")
+	}
+
+	// Materialize upgrades path bounds once workspace is known.
+	warnings3, err := MaterializeSandboxForWorkspace(policy2, map[string]interface{}{"mode": "strict"}, root)
+	if err != nil {
+		t.Fatalf("MaterializeSandboxForWorkspace: %v", err)
+	}
+	if len(warnings3) != 0 {
+		t.Fatalf("unexpected warnings after materialize: %#v", warnings3)
+	}
+	if len(policy2.Sandbox.Config().AllowedPaths) != 1 {
+		t.Fatalf("expected path bounds after materialize, got %#v", policy2.Sandbox.Config().AllowedPaths)
+	}
+}
+
 func TestBuildResolvedAgentInputs_LoadsProfileResourcesIntoPromptAndContext(t *testing.T) {
 	dir := t.TempDir()
 	memoryPath := filepath.Join(dir, "memory", "memory.json")

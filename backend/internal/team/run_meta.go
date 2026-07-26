@@ -21,8 +21,11 @@ type TeamRunMeta struct {
 
 // RunMeta captures the execution context for a session run.
 type RunMeta struct {
-	PermissionMode string       `json:"permission_mode,omitempty"`
-	Team           *TeamRunMeta `json:"team,omitempty"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// CompletionRequirement is none|complete_task for worker harness loops.
+	// Team task runs default to complete_task when unset at the runner boundary.
+	CompletionRequirement string       `json:"completion_requirement,omitempty"`
+	Team                  *TeamRunMeta `json:"team,omitempty"`
 }
 
 // Clone returns a defensive copy of TeamRunMeta.
@@ -41,9 +44,24 @@ func (m *RunMeta) Clone() *RunMeta {
 		return nil
 	}
 	return &RunMeta{
-		PermissionMode: m.PermissionMode,
-		Team:           m.Team.Clone(),
+		PermissionMode:        m.PermissionMode,
+		CompletionRequirement: m.CompletionRequirement,
+		Team:                  m.Team.Clone(),
 	}
+}
+
+// EffectiveCompletionRequirement returns the harness completion mode for a run.
+// Only an explicit CompletionRequirement is authoritative. Team worker runs
+// must set complete_task at the runner boundary (see TeammateRunner); we do not
+// infer complete_task from TeamID/AgentID alone so permission/route team metas
+// without an outcome contract stay on none.
+func EffectiveCompletionRequirement(runMeta *RunMeta) string {
+	if runMeta != nil {
+		if value := strings.TrimSpace(runMeta.CompletionRequirement); value != "" {
+			return strings.ToLower(value)
+		}
+	}
+	return "none"
 }
 
 // TaskExecutionRouteFromRunMeta reconstructs the observable route summary for

@@ -59,6 +59,10 @@ func NewFetchTool() *FetchTool {
 
 func (f *FetchTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
+		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindNetwork,
+		runtimetypes.ToolMetadataReadOnlyKey:        true,
+		runtimetypes.ToolMetadataMutatesFSKey:       false,
+		runtimetypes.ToolMetadataRequiresNetKey:     true,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}

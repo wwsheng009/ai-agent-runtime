@@ -105,11 +105,19 @@ func (a *Agent) CollectToolCatalogDefinitions(ctx context.Context) []types.ToolD
 				continue
 			}
 			seen[mt.Name] = true
-			tools = append(tools, types.ToolDefinition{
+			definition := types.ToolDefinition{
 				Name:        mt.Name,
 				Description: mt.Description,
 				Parameters:  normalizeToolParameters(mt.InputSchema),
-			})
+				Metadata:    cloneInterfaceMap(mt.Metadata),
+			}
+			if strings.TrimSpace(mt.MCPName) != "" {
+				if definition.Metadata == nil {
+					definition.Metadata = map[string]interface{}{}
+				}
+				definition.Metadata["mcp_name"] = mt.MCPName
+			}
+			tools = append(tools, definition)
 		}
 	}
 
@@ -136,7 +144,11 @@ func (a *Agent) CollectToolCatalogDefinitions(ctx context.Context) []types.ToolD
 		}
 	}
 
+	listCtx := listToolsContextForAgent(ctx, a, len(tools))
+	tools = filterToolDefinitionsByShouldList(tools, listCtx)
 	tools = optimizeModelToolSurface(tools)
+	// Eligibility catalog stays pre-search-projection so binding keys track the
+	// full authorized surface; turn listing applies search projection separately.
 	sortToolDefinitionsByName(tools)
 	return tools
 }

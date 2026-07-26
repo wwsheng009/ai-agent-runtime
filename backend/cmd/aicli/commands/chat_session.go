@@ -153,6 +153,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 		return nil
 	}
 
+	session.runtimeSessionUnpersisted = false
 	previousSessionID := currentRuntimeSessionID(session)
 	restoredRuntimeSession := runtimeSession.CloneWithoutHistory()
 	if restoredRuntimeSession == nil {
@@ -183,14 +184,20 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	return nil
 }
 
+// createNewRuntimeConversation builds a brand-new runtime session in memory.
+// The empty shell is not written to durable storage yet: the first real
+// conversation content (or an explicit /new hand-off) opens the session store.
 func createNewRuntimeConversation(session *ChatSession, title string) error {
 	if session == nil || session.SessionManager == nil {
 		return fmt.Errorf("会话管理未启用")
 	}
+	if strings.TrimSpace(session.SessionUserID) == "" {
+		return fmt.Errorf("session user id cannot be empty")
+	}
 
-	runtimeSession, err := session.SessionManager.Create(context.Background(), session.SessionUserID)
-	if err != nil {
-		return err
+	runtimeSession := runtimechat.NewSession(session.SessionUserID)
+	if cfg := session.SessionManager.GetConfig(); cfg != nil && cfg.TTL > 0 {
+		runtimeSession.SetTTL(cfg.TTL)
 	}
 	if strings.TrimSpace(title) != "" {
 		runtimeSession.UpdateTitle(title)
@@ -204,15 +211,50 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
 	session.RuntimeSession = runtimeSession
+	// Only local lazy SQLite stores defer the empty-shell Save. Remote/runtime
+	// server and eager backends keep the previous Create+Save semantics so
+	// session IDs are immediately durable and listable.
+	session.runtimeSessionUnpersisted = !session.Ephemeral && sessionStorageDefersDurableOpen(session.SessionManager.GetStorage())
 	clearChatTurnRecovery(session)
 	resetStableSharedToolSurface(session)
 	ensureChatSystemPromptMessage(session)
-	if err := syncRuntimeSessionFromChat(session); err != nil {
-		return err
+	// Keep the empty shell in memory only. Durable Save happens on the first
+	// real conversation content (or shutdown with content), so new-chat
+	// startup stays off the large session_history.sqlite open path.
+	if !session.runtimeSessionUnpersisted {
+		if err := syncRuntimeSessionFromChat(session); err != nil {
+			return err
+		}
 	}
 	refreshChatTitleMetadata(session)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
+	}
+	return nil
+}
+
+// sessionStorageDefersDurableOpen reports whether the store intentionally
+// delays opening its durable backend. The local lazy SQLite wrapper exposes
+// Opened() for this probe; other backends create/open eagerly.
+func sessionStorageDefersDurableOpen(storage runtimechat.SessionStorage) bool {
+	type openedProbe interface{ Opened() bool }
+	_, ok := storage.(openedProbe)
+	return ok
+}
+
+// ensureChatRuntimeSessionPersisted flushes an in-memory new session into the
+// durable store before actor/runtime paths that require a Loadable row.
+func ensureChatRuntimeSessionPersisted(session *ChatSession) error {
+	if session == nil || !session.runtimeSessionUnpersisted {
+		return nil
+	}
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		return err
+	}
+	// First durable flush is also the first safe moment to warm the actor;
+	// bootstrap intentionally skipped warmup for unpersisted shells.
+	if session.LocalRuntimeHost != nil && currentChatActorWarmup(session, currentRuntimeSessionID(session)) == nil {
+		startChatActorWarmup(session)
 	}
 	return nil
 }
@@ -433,6 +475,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 			return err
 		}
 	}
+	session.runtimeSessionUnpersisted = false
 	// SQLite replaces History with the bounded prompt projection after the
 	// canonical append commits. Keep the live CLI history on that projection as
 	// well so a long-running process does not retain every previous turn.

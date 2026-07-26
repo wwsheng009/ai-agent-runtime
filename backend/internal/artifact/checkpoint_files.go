@@ -26,8 +26,11 @@ type CheckpointFile struct {
 
 // SaveBlob persists content in the blobs table, deduplicated by sha256.
 func (s *Store) SaveBlob(ctx context.Context, data []byte) (string, string, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return "", "", fmt.Errorf("artifact store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return "", "", err
 	}
 	hash := sha256.Sum256(data)
 	sum := hex.EncodeToString(hash[:])
@@ -52,8 +55,11 @@ func (s *Store) SaveBlob(ctx context.Context, data []byte) (string, string, erro
 
 // SaveCheckpointFiles stores checkpoint file metadata.
 func (s *Store) SaveCheckpointFiles(ctx context.Context, checkpointID string, files []CheckpointFile) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("artifact store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(checkpointID) == "" {
 		return fmt.Errorf("checkpoint id is required")
@@ -93,8 +99,15 @@ func (s *Store) SaveCheckpointFiles(ctx context.Context, checkpointID string, fi
 
 // LoadBlob returns blob data by id.
 func (s *Store) LoadBlob(ctx context.Context, blobID string) ([]byte, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	blobID = strings.TrimSpace(blobID)
 	if blobID == "" {
@@ -113,8 +126,15 @@ func (s *Store) LoadBlob(ctx context.Context, blobID string) ([]byte, error) {
 
 // GetCheckpointFiles returns checkpoint file metadata for a checkpoint.
 func (s *Store) GetCheckpointFiles(ctx context.Context, checkpointID string) ([]CheckpointFile, error) {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
 	}
 	checkpointID = strings.TrimSpace(checkpointID)
 	if checkpointID == "" {

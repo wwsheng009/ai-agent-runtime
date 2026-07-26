@@ -117,7 +117,9 @@ type RegistryServiceHealth struct {
 	StartedAt         time.Time `json:"started_at,omitempty"`
 }
 
-// NewRegistryService opens the durable AgentControl registry service.
+// NewRegistryService creates the durable AgentControl registry service.
+// Path-backed stores remain lazy until first use so chat bootstrap can prepare
+// AgentControl wiring without creating agent_control.sqlite early.
 func NewRegistryService(ctx context.Context, cfg RegistryServiceConfig) (*RegistryService, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -131,37 +133,93 @@ func NewRegistryService(ctx context.Context, cfg RegistryServiceConfig) (*Regist
 		}, nil
 	}
 	if sharedCfg, ok := cfg.sharedSQLiteConfig(); ok {
-		dsn, err := resolveGlobalMailboxDSN(&sharedCfg)
-		if err != nil {
-			return nil, err
-		}
-		db, err := sql.Open("sqlite3", dsn)
-		if err != nil {
-			return nil, fmt.Errorf("open agent control registry db: %w", err)
-		}
-		if isGlobalMailboxMemoryDSN(dsn) {
-			db.SetMaxOpenConns(1)
-			db.SetMaxIdleConns(1)
-		}
-		if err := configureAgentControlSQLiteDB(ctx, db, dsn); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
+		// Single-SQLite mode keeps one shared DB handle for mailbox + agent
+		// tables, but opens it lazily on first store use so bootstrap stays free.
 		service := &RegistryService{
 			cfg:       cfg,
 			mode:      RegistryServiceModeSingleSQLite,
 			startedAt: time.Now().UTC(),
-			db:        db,
 		}
-		mailboxStore, err := newSQLiteGlobalMailboxRegistryStoreWithDB(ctx, db, dsn)
-		if err != nil {
-			_ = db.Close()
-			return nil, err
+		mailboxStore := &SQLiteGlobalMailboxRegistryStore{
+			cfg:    sharedCfg,
+			path:   strings.TrimSpace(sharedCfg.Path),
+			ownsDB: false,
 		}
-		agentStore, err := newSQLiteGlobalAgentRegistryStoreWithDB(ctx, db, dsn)
-		if err != nil {
-			_ = db.Close()
+		if dsn, path, err := resolveLazyGlobalMailboxDSN(&sharedCfg); err != nil {
 			return nil, err
+		} else {
+			mailboxStore.dsn = dsn
+			mailboxStore.path = path
+		}
+		agentCfg := GlobalAgentStoreConfig{Path: sharedCfg.Path, DSN: sharedCfg.DSN}
+		agentStore := &SQLiteGlobalAgentRegistryStore{
+			cfg:    agentCfg,
+			ownsDB: false,
+		}
+		if dsn, path, err := resolveLazyGlobalAgentDSN(&agentCfg); err != nil {
+			return nil, err
+		} else {
+			agentStore.dsn = dsn
+			agentStore.path = path
+		}
+		// Share one open path: first ensure opens the DB and both stores attach.
+		openShared := func() error {
+			service.mu.Lock()
+			defer service.mu.Unlock()
+			if service.closed {
+				return ErrRegistryServiceClosed
+			}
+			if service.db != nil {
+				return nil
+			}
+			pathKey := strings.TrimSpace(mailboxStore.path)
+			if pathKey != "" {
+				agentControlPathOpenMu.Lock()
+				defer agentControlPathOpenMu.Unlock()
+			}
+			if err := ensureAgentControlStoreDirectory(mailboxStore.path); err != nil {
+				return err
+			}
+			db, err := sql.Open("sqlite3", mailboxStore.dsn)
+			if err != nil {
+				return fmt.Errorf("open agent control registry db: %w", err)
+			}
+			if isGlobalMailboxMemoryDSN(mailboxStore.dsn) {
+				db.SetMaxOpenConns(1)
+				db.SetMaxIdleConns(1)
+			}
+			if err := configureAgentControlSQLiteDB(context.Background(), db, mailboxStore.dsn); err != nil {
+				_ = db.Close()
+				return err
+			}
+			mailboxInit := &SQLiteGlobalMailboxRegistryStore{db: db, dsn: mailboxStore.dsn}
+			if err := mailboxInit.init(context.Background()); err != nil {
+				_ = db.Close()
+				return err
+			}
+			agentInit := &SQLiteGlobalAgentRegistryStore{db: db, dsn: agentStore.dsn}
+			if err := agentInit.init(context.Background()); err != nil {
+				_ = db.Close()
+				return err
+			}
+			mailboxStore.openMu.Lock()
+			mailboxStore.db = db
+			mailboxStore.ownsDB = false
+			mailboxStore.openMu.Unlock()
+			agentStore.openMu.Lock()
+			agentStore.db = db
+			agentStore.ownsDB = false
+			agentStore.openMu.Unlock()
+			service.db = db
+			return nil
+		}
+		mailboxStore.sharedOpen = openShared
+		agentStore.sharedOpen = openShared
+		// Memory DSN still opens eagerly for tests that inspect tables immediately.
+		if mailboxStore.path == "" || isGlobalMailboxMemoryDSN(mailboxStore.dsn) {
+			if err := openShared(); err != nil {
+				return nil, err
+			}
 		}
 		service.MailboxStore = mailboxStore
 		service.AgentStore = agentStore
@@ -229,7 +287,7 @@ func (s *RegistryService) Health(ctx context.Context) (RegistryServiceHealth, er
 		ConfigKey:         s.cfg.Key(),
 		MailboxConfigured: s.MailboxStore != nil,
 		AgentConfigured:   s.AgentStore != nil,
-		SharedDB:          s.db != nil,
+		SharedDB:          s.mode == RegistryServiceModeSingleSQLite,
 		StartedAt:         s.startedAt,
 	}
 	db := s.db
@@ -300,12 +358,26 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 		return fmt.Errorf("configure agent control registry busy timeout: %w", err)
 	}
 	if !isGlobalMailboxMemoryDSN(dsn) {
-		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
+		var err error
+		for attempt := 0; attempt < 8; attempt++ {
+			if _, err = db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err == nil {
+				break
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "database is locked") {
+				break
+			}
+			time.Sleep(time.Duration(20*(attempt+1)) * time.Millisecond)
+		}
+		if err != nil {
 			return fmt.Errorf("configure agent control registry wal mode: %w", err)
 		}
 	}
 	return nil
 }
+
+// agentControlPathOpenMu serializes first-open/migrate of path-backed AgentControl
+// SQLite files across store instances in the same process.
+var agentControlPathOpenMu sync.Mutex
 
 type closedGlobalMailboxRegistryStore struct{}
 

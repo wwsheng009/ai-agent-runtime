@@ -2721,6 +2721,24 @@ func TestBuildSessionLoopConfig_PropagatesParallelToolConfig(t *testing.T) {
 	assert.Equal(t, agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps), config.MaxSteps)
 }
 
+func TestApplyAPISessionCompletionRequirement_ExplicitOverridesProfile(t *testing.T) {
+	config := &agent.LoopReActConfig{}
+	state := &profileRuntimeState{
+		Resolved: &profilesys.ResolvedAgent{
+			AgentID:     "explore",
+			ProfileRoot: t.TempDir(),
+		},
+	}
+	applyAPISessionCompletionRequirement(config, state, "explore", "complete_task", "")
+	assert.Equal(t, agent.CompletionRequirementCompleteTask, config.CompletionRequirement)
+}
+
+func TestApplyAPISessionCompletionRequirement_EmptyDefaultsToNone(t *testing.T) {
+	config := &agent.LoopReActConfig{}
+	applyAPISessionCompletionRequirement(config, nil, "", "", "")
+	assert.Equal(t, agent.CompletionRequirementNone, config.CompletionRequirement)
+}
+
 func TestBuildSessionActor_DoesNotAutoScanDefaultWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package demo\nfunc SearchDocs() {}\n"), 0o644))

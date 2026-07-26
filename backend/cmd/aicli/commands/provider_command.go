@@ -39,7 +39,24 @@ func NewProviderCommand(configProvider func() *config.Config) *cobra.Command {
 		Use:     "provider",
 		Aliases: []string{"providers"},
 		Short:   "管理 provider 配置",
-		Long:    "列出、查看、启停、删除 provider，并维护默认 provider 配置。",
+		Long: `列出、查看、启停、删除 provider，并维护默认 provider 配置。
+
+常用子命令：
+  aicli provider list
+  aicli provider show <name> [--models]
+  aicli provider set-default <name>
+  aicli provider enable|disable <name...>
+  aicli provider remove [name...]
+
+首次配置 provider 请用 aicli login；连通性诊断用 aicli doctor provider。
+更多说明见 docs/aicli/quickstart.md 与 docs/aicli/faq.md。`,
+		Example: `  aicli provider list
+  aicli provider list --enabled --json
+  aicli provider show openai --models
+  aicli provider set-default openai
+  aicli provider enable openai
+  aicli provider disable old-provider
+  aicli provider remove old-provider --yes --cascade`,
 	}
 	cmd.AddCommand(newProviderListCommand(configProvider))
 	cmd.AddCommand(newProviderShowCommand(configProvider))

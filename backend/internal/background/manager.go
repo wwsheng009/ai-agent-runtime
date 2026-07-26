@@ -172,10 +172,10 @@ func NewManager(cfg Config) *Manager {
 	if manager.logDir == "" && strings.TrimSpace(cfg.LogDir) != "" {
 		manager.logDir = strings.TrimSpace(cfg.LogDir)
 	}
-	if manager.logDir != "" {
-		_ = os.MkdirAll(manager.logDir, 0o755)
-	}
+	// Keep log-dir creation deferred until a job actually needs it so empty chat
+	// bootstrap does not create background_logs just by wiring the manager.
 	go manager.dispatchLoop()
+	// recover/cleanup open the store only when a durable file already exists.
 	manager.recoverPersistedJobs(context.Background())
 	_, _ = manager.Cleanup(context.Background())
 	manager.notifyDispatcher()
@@ -247,8 +247,10 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	now := time.Now().UTC()
 	logPath := ""
 	if m.logDir != "" {
-		logPath = filepath.Join(m.logDir, jobID+".log")
-		_ = os.WriteFile(logPath, []byte{}, 0o644)
+		if err := os.MkdirAll(m.logDir, 0o755); err == nil {
+			logPath = filepath.Join(m.logDir, jobID+".log")
+			_ = os.WriteFile(logPath, []byte{}, 0o644)
+		}
 	}
 	req = sanitizeBackgroundTaskArgs(req)
 	jobCtx, cancel := context.WithCancel(context.Background())

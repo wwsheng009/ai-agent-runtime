@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -66,6 +67,9 @@ func (a *Agent) runPostToolUseHooks(ctx context.Context, sessionID string, resul
 			}
 		}
 		hookMgr.DispatchAsync(ctx, runtimehooks.EventPostToolUse, payload)
+		if strings.TrimSpace(result.Error) != "" {
+			hookMgr.DispatchAsync(ctx, runtimehooks.EventPostToolUseFailure, payload)
+		}
 	}
 	a.mu.RLock()
 	hooks := make([]func(context.Context, string, toolExecutionResult), len(a.toolHooks.PostToolUse))

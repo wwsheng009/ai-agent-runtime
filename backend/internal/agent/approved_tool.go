@@ -67,6 +67,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		requestedExtra[toolresult.SourceKey] = source
 	}
 	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, 0, traceID, requestedExtra))
+	ctx = a.withToolProgressReporter(ctx, sessionID, traceID, call)
 
 	finalize := func() *types.Message {
 		envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, call, 0, result.Output, result.Error, metadata))

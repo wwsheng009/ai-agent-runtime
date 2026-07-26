@@ -9,6 +9,13 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
+// headlessEventBridge receives runtime/chat-core events for non-interactive
+// hosts (exec JSONL, ACP stdio) without writing human output to stdout.
+type headlessEventBridge interface {
+	HandleChatCoreEvent(event runtimechatcore.ChatEvent)
+	HandleRuntimeEvent(event runtimeevents.Event)
+}
+
 type execEventBridge struct {
 	processor ExecEventProcessor
 	mu        sync.Mutex

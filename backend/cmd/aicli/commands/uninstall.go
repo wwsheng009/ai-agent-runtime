@@ -46,7 +46,9 @@ func NewUninstallCommand() *cobra.Command {
 		Use:   "uninstall",
 		Short: "删除 aicli 用户级和当前目录配置文件",
 		Long: "删除 aicli 在用户目录和当前工作目录树下的 .aicli 目录。\n\n" +
-			"默认目标为 $HOME/.aicli，以及当前工作目录和子目录中的所有 .aicli 目录，包含配置、凭证、日志、会话、skills 等文件。",
+			"默认目标为 $HOME/.aicli，以及当前工作目录和子目录中的所有 .aicli 目录，包含配置、凭证、日志、会话、skills 等文件。\n\n" +
+			"该命令只清理配置与数据目录，不删除 aicli 可执行文件本身。\n" +
+			"更多说明见 docs/aicli/install.md。",
 		Example: `  aicli uninstall --dry-run
   aicli uninstall --yes
   aicli uninstall --user-only --yes

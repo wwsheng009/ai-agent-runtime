@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -22,7 +23,10 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -255,6 +259,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	requestedProvider := ""
 	requestedModel := ""
 	requestedReasoningEffort := ""
+	childCompletionRequirement := ""
 	childReadOnly := false
 	childDepth := 0
 	baseSessionID := ""
@@ -269,7 +274,14 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 					childAgentType = strings.TrimSpace(text)
 				}
 			}
+			childCompletionRequirement = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextCompletionRequirement)
 			if !isBaseSession {
+				// Prefer per-child worktree path so tools and system prompt cwd stay isolated.
+				if path := agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextWorktreePath); path != "" {
+					workspaceRoot = path
+				} else if path := agentcontrol.ContextString(runtimeSession, sessionmeta.WorkspacePath); path != "" {
+					workspaceRoot = path
+				}
 				requestedProvider = agentcontrol.ContextString(runtimeSession, sessionmeta.ProviderName)
 				requestedModel = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextRequestedModel)
 				if requestedModel == "" {
@@ -284,6 +296,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		}
 	}
 	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel, requestedProvider, requestedReasoningEffort)
+	if !isBaseSession && strings.TrimSpace(childAgentType) != "" {
+		applyLocalChildAgentdefToolPolicy(apiAgent, childAgentType, session, workspaceRoot)
+	}
 	applyLocalChildReadOnlyPolicy(apiAgent, childReadOnly)
 	maxDepth := 0
 	if runtimeConfig != nil {
@@ -296,6 +311,8 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
+	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort)
+	applyLocalChatCompletionRequirement(loopConfig, session, childAgentType, childCompletionRequirement, workspaceRoot)
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.Bootstrap.LLMRuntime(),
@@ -303,7 +320,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		StateStore:   h.RuntimeStore,
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
-		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort),
+		LoopConfig:   loopConfig,
 		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
 		PersistHook:  localGoalPersistHook(sessionStore),
 		RecoverStale: true,
@@ -320,6 +337,81 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return nil, err
 	}
 	return actor, nil
+}
+
+// applyLocalChildAgentdefToolPolicy overlays agentdef allow/deny/read-only onto
+// a child actor when spawn_agent agent_type resolves to a portable definition.
+func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, session *ChatSession, workspaceRoot string) {
+	if apiAgent == nil {
+		return
+	}
+	agentType = strings.TrimSpace(agentType)
+	if agentType == "" {
+		return
+	}
+	profileRoot := ""
+	if session != nil {
+		profileRoot = strings.TrimSpace(session.ProfileRoot)
+	}
+	def, err := agentdef.Resolve(agentType, agentdef.DiscoverOptions{
+		ProjectRoot: strings.TrimSpace(workspaceRoot),
+		ProfileRoot: profileRoot,
+	})
+	if err != nil || def == nil {
+		return
+	}
+	binding, err := agentdef.BuildBinding(def)
+	if err != nil || binding == nil {
+		return
+	}
+	hasSandbox := len(binding.Sandbox) > 0
+	if len(binding.ToolAllowlist) == 0 && len(binding.ToolDenylist) == 0 && (binding.ReadOnly == nil || !*binding.ReadOnly) && !hasSandbox {
+		return
+	}
+
+	readOnly := binding.ReadOnly != nil && *binding.ReadOnly
+	var allowlist []string
+	if len(binding.ToolAllowlist) > 0 {
+		allowlist = append([]string(nil), binding.ToolAllowlist...)
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
+	} else {
+		toolPolicy = toolPolicy.DeriveChild(allowlist, readOnly)
+	}
+	if len(binding.ToolDenylist) > 0 {
+		if toolPolicy.DeniedTools == nil {
+			toolPolicy.DeniedTools = map[string]bool{}
+		}
+		for _, name := range binding.ToolDenylist {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				toolPolicy.DeniedTools[name] = true
+			}
+		}
+	}
+	if hasSandbox {
+		warnings, err := runtimeprofileinput.MaterializeSandboxForWorkspace(toolPolicy, binding.Sandbox, workspaceRoot)
+		if err != nil {
+			logpkg.Warnf("child agentdef sandbox materialize failed for %s: %v", agentType, err)
+		}
+		for _, warning := range warnings {
+			logpkg.Warnf("child agentdef sandbox: %s", warning)
+		}
+	}
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
+
+	// Plan-role children get plan write allow paths even without /plan state.
+	if binding.PermissionMode == runtimepolicy.ModePlan {
+		engine := apiAgent.GetPermissionEngine()
+		if engine == nil {
+			engine = agent.NewPermissionEngine()
+			apiAgent.SetPermissionEngine(engine)
+		}
+		engine.Mode = runtimepolicy.ModePlan
+		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+	}
 }
 
 func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
@@ -575,8 +667,12 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
-	if runtimeConfig != nil && len(runtimeConfig.Hooks) > 0 {
-		apiAgent.SetHookManager(runtimehooks.NewManager(runtimeConfig.Hooks))
+	var baseHooks []runtimehooks.HookConfig
+	if runtimeConfig != nil {
+		baseHooks = runtimeConfig.Hooks
+	}
+	if mergedHooks := mergeActivePluginHooks(baseHooks); len(mergedHooks) > 0 {
+		apiAgent.SetHookManager(runtimehooks.NewManager(mergedHooks))
 	}
 
 	return apiAgent
@@ -591,7 +687,36 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 		if cfg := apiAgent.GetConfig(); cfg != nil {
 			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, workspaceRoot)
 		}
+		applyChatPlanModeToAgent(apiAgent, session, runtimeSession)
 		return nil
+	}
+}
+
+// applyChatPlanModeToAgent configures the permission engine for active plan mode.
+func applyChatPlanModeToAgent(apiAgent *agent.Agent, session *ChatSession, runtimeSession *runtimechat.Session) {
+	if apiAgent == nil {
+		return
+	}
+	engine := apiAgent.GetPermissionEngine()
+	if engine == nil {
+		engine = agent.NewPermissionEngine()
+		apiAgent.SetPermissionEngine(engine)
+	}
+	runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+
+	state := planmode.State{Status: planmode.StatusInactive}
+	if runtimeSession != nil {
+		state = planmode.Load(runtimeSession)
+	} else if session != nil && session.RuntimeSession != nil {
+		state = planmode.Load(session.RuntimeSession)
+	}
+	if planmode.IsActive(state) {
+		planmode.ApplyToEngine(engine, state)
+		return
+	}
+	if session != nil && session.PermissionMode == runtimepolicy.ModePlan {
+		engine.Mode = runtimepolicy.ModePlan
+		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
 	}
 }
 
@@ -705,6 +830,46 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 		}
 	}
 	return config
+}
+
+// applyLocalChatCompletionRequirement sets LoopReActConfig.CompletionRequirement from,
+// in order: explicit child session context, ProfileAgent agentdef, agent_type agentdef.
+// Empty remains none; RunMeta still overrides at cloneLoopConfigForRun time.
+func applyLocalChatCompletionRequirement(config *agent.LoopReActConfig, session *ChatSession, agentType, explicitRequirement, workspaceRoot string) {
+	if config == nil {
+		return
+	}
+	requirement := strings.TrimSpace(explicitRequirement)
+	if requirement == "" && session != nil {
+		if profileAgent := strings.TrimSpace(session.ProfileAgent); profileAgent != "" {
+			requirement = resolveLocalAgentdefCompletionRequirement(profileAgent, session.ProfileRoot, workspaceRoot)
+		}
+	}
+	if requirement == "" {
+		if agentType = strings.TrimSpace(agentType); agentType != "" {
+			profileRoot := ""
+			if session != nil {
+				profileRoot = session.ProfileRoot
+			}
+			requirement = resolveLocalAgentdefCompletionRequirement(agentType, profileRoot, workspaceRoot)
+		}
+	}
+	config.CompletionRequirement = agent.NormalizeCompletionRequirement(requirement)
+}
+
+func resolveLocalAgentdefCompletionRequirement(agentName, profileRoot, projectRoot string) string {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return ""
+	}
+	def, err := agentdef.Resolve(agentName, agentdef.DiscoverOptions{
+		ProjectRoot: strings.TrimSpace(projectRoot),
+		ProfileRoot: strings.TrimSpace(profileRoot),
+	})
+	if err != nil || def == nil {
+		return ""
+	}
+	return string(def.CompletionRequirement)
 }
 
 func localChatSubagentRoutingConfig(session *ChatSession) *config.AICLISubagentRoutingConfig {
@@ -828,18 +993,20 @@ func loadLocalChatRuntimeConfig(cfg *config.Config, session *ChatSession) (*runt
 		applyLocalChatRuntimePersistenceDefaults(config, session, "")
 		return config, nil
 	}
-	manager := runtimecfg.NewRuntimeManager(configPath)
-	if err := manager.Load(); err != nil {
+	config, loadedPath, err := loadCachedRuntimeConfig(configPath)
+	if err != nil || config == nil {
 		fmt.Fprintf(os.Stderr, "Warning: 加载 actor runtime 配置失败，已退回默认配置: %v\n", err)
 		config := runtimecfg.DefaultRuntimeConfig()
 		applyLocalChatRuntimePersistenceDefaults(config, session, configPath)
 		return config, nil
 	}
-	config := manager.Get()
 	if session != nil && session.Model != "" {
 		config.Agent.DefaultModel = session.Model
 	}
-	applyLocalChatRuntimePersistenceDefaults(config, session, configPath)
+	if strings.TrimSpace(loadedPath) == "" {
+		loadedPath = configPath
+	}
+	applyLocalChatRuntimePersistenceDefaults(config, session, loadedPath)
 	return config, nil
 }
 

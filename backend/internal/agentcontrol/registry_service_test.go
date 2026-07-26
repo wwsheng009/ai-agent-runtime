@@ -3,6 +3,7 @@ package agentcontrol
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -93,6 +94,62 @@ func TestRegistryServiceAllowsMailboxAndAgentOverrides(t *testing.T) {
 	defer service.Close()
 	if service.MailboxStore == nil || service.AgentStore == nil {
 		t.Fatalf("expected both override stores, got mailbox=%T agent=%T", service.MailboxStore, service.AgentStore)
+	}
+}
+
+func TestRegistryService_PathBackedIsLazyUntilFirstUse(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent_control.sqlite")
+	service, err := NewRegistryService(ctx, RegistryServiceConfig{StorePath: path})
+	if err != nil {
+		t.Fatalf("NewRegistryService: %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	mailbox, ok := service.MailboxStore.(*SQLiteGlobalMailboxRegistryStore)
+	if !ok {
+		t.Fatalf("expected mailbox sqlite store, got %T", service.MailboxStore)
+	}
+	agentStore, ok := service.AgentStore.(*SQLiteGlobalAgentRegistryStore)
+	if !ok {
+		t.Fatalf("expected agent sqlite store, got %T", service.AgentStore)
+	}
+	if mailbox.Opened() || agentStore.Opened() {
+		t.Fatal("expected registry service stores to stay closed until first use")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap must not create agent_control.sqlite early: %v", err)
+	}
+
+	rows, err := mailbox.ListAgentControlMailboxRecords(ctx, MailboxRecordFilter{})
+	if err != nil {
+		t.Fatalf("ListAgentControlMailboxRecords: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected empty mailbox rows, got %#v", rows)
+	}
+	if mailbox.Opened() || agentStore.Opened() {
+		t.Fatal("empty reads must not force the first open")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("empty reads must not create agent_control.sqlite: %v", err)
+	}
+
+	if _, err := service.AgentStore.UpsertAgentControlAgent(ctx, AgentRecord{
+		AgentID:       "agent-1",
+		RootSessionID: "root-session",
+		SessionID:     "root-session",
+		AgentPath:     "/root",
+		AgentType:     AgentTypeRoot,
+		Status:        AgentStatusActive,
+	}); err != nil {
+		t.Fatalf("UpsertAgentControlAgent: %v", err)
+	}
+	if !mailbox.Opened() || !agentStore.Opened() {
+		t.Fatal("expected shared registry open after first write")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected agent_control.sqlite after first write: %v", err)
 	}
 }
 
@@ -223,7 +280,11 @@ func TestRegistryServiceSharedSQLiteConcurrentInstances(t *testing.T) {
 	}
 	wg.Wait()
 	if len(otherErrors) > 0 {
-		t.Fatalf("unexpected reservation errors: %#v", otherErrors)
+		msgs := make([]string, 0, len(otherErrors))
+		for _, err := range otherErrors {
+			msgs = append(msgs, err.Error())
+		}
+		t.Fatalf("unexpected reservation errors: %v", msgs)
 	}
 	if successes != 3 || limitErrors != 9 {
 		t.Fatalf("expected 3 successes and 9 limit errors, got successes=%d limitErrors=%d", successes, limitErrors)

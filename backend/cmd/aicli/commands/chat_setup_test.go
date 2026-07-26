@@ -49,6 +49,88 @@ func TestPrepareChatPersistence_UsesProvidedSessionDir(t *testing.T) {
 	}
 }
 
+func TestPrepareChatPersistence_DoesNotOpenSQLiteEagerly(t *testing.T) {
+	dir := t.TempDir()
+	state, err := prepareChatPersistence(nil, &chatCommandOptions{
+		SessionDirFlag:           dir,
+		SessionFeaturesRequested: true,
+	}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.runtimeSessionManager)
+	t.Cleanup(state.runtimeSessionManager.Stop)
+
+	// New-chat bootstrap only prepares a lazy manager; the large history DB
+	// must stay closed until the first Save/Load/List.
+	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	require.True(t, os.IsNotExist(statErr), "prepareChatPersistence must not open sqlite for a new chat")
+	if pathReader, ok := state.runtimeSessionManager.GetStorage().(interface{ Path() string }); ok {
+		require.Equal(t, filepath.Join(dir, "session_history.sqlite"), pathReader.Path())
+	}
+}
+
+func TestCreateNewRuntimeConversation_DefersDurableSave(t *testing.T) {
+	dir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(dir)
+	require.NoError(t, err)
+	t.Cleanup(manager.Stop)
+
+	session := &ChatSession{
+		ProviderName:   "codex_ee",
+		Provider:       config.Provider{Protocol: "codex"},
+		Model:          "gpt-5.2-code",
+		SessionManager: manager,
+		SessionUserID:  userID,
+		SessionDir:     dir,
+	}
+	require.NoError(t, createNewRuntimeConversation(session, "deferred"))
+	require.True(t, session.runtimeSessionUnpersisted)
+	require.NotNil(t, session.RuntimeSession)
+	require.NotEmpty(t, session.RuntimeSession.ID)
+
+	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	require.True(t, os.IsNotExist(statErr), "empty new session must not open sqlite")
+
+	// Shutdown without conversation content must stay off the durable path.
+	finalizeChatSession(session)
+	require.True(t, session.runtimeSessionUnpersisted)
+	_, statErr = os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	require.True(t, os.IsNotExist(statErr), "empty finalize must not open sqlite")
+
+	session.Messages = append(session.Messages, *runtimetypes.NewUserMessage("hello"))
+	require.NoError(t, ensureChatRuntimeSessionPersisted(session))
+	require.False(t, session.runtimeSessionUnpersisted)
+	_, statErr = os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	require.NoError(t, statErr)
+
+	loaded, err := manager.Get(context.Background(), session.RuntimeSession.ID)
+	require.NoError(t, err)
+	require.Equal(t, session.RuntimeSession.ID, loaded.ID)
+}
+
+func TestRestoreChatPersistenceState_NewSessionStaysUnpersisted(t *testing.T) {
+	dir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(dir)
+	require.NoError(t, err)
+	t.Cleanup(manager.Stop)
+
+	session := &ChatSession{
+		Provider:       config.Provider{Protocol: "codex"},
+		Model:          "gpt-5.2-code",
+		SessionManager: manager,
+		SessionUserID:  userID,
+	}
+	err = restoreChatPersistenceState(session, &chatPersistenceState{
+		runtimeSessionManager: manager,
+		sessionUserID:         userID,
+		resolvedSessionDir:    dir,
+	}, &chatCommandOptions{})
+	require.NoError(t, err)
+	require.True(t, session.runtimeSessionUnpersisted)
+	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	require.True(t, os.IsNotExist(statErr))
+}
+
 func TestBuildChatSession_NoInteractive(t *testing.T) {
 	cfg := &config.Config{}
 	opts := &chatCommandOptions{
@@ -834,6 +916,47 @@ func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
 	if !sessionHub.IsValid() || sessionHub.IsNil() {
 		t.Fatal("expected local runtime host to include SessionHub")
 	}
+
+	require.NotNil(t, session.LocalRuntimeHost)
+	require.NotNil(t, session.LocalRuntimeHost.TeamStore)
+	teamStore, ok := session.LocalRuntimeHost.TeamStore.(*team.SQLiteStore)
+	require.True(t, ok)
+	require.False(t, teamStore.Opened(), "new chat bootstrap must keep team store closed")
+	teamPath := filepath.Join(dir, "runtime", "team_store.sqlite")
+	_, statErr := os.Stat(teamPath)
+	require.True(t, os.IsNotExist(statErr), "bootstrap must not create team_store.sqlite early")
+	require.Equal(t, teamPath, teamStore.Path())
+
+	runtimeStore, ok := session.LocalRuntimeHost.RuntimeStore.(*runtimechat.SQLiteRuntimeStore)
+	require.True(t, ok, "expected sqlite runtime store")
+	require.False(t, runtimeStore.Opened(), "new chat bootstrap must keep session runtime store closed")
+	runtimePath := filepath.Join(dir, "runtime", "session_runtime.sqlite")
+	_, statErr = os.Stat(runtimePath)
+	require.True(t, os.IsNotExist(statErr), "bootstrap must not create session_runtime.sqlite early")
+	require.Equal(t, runtimePath, runtimeStore.Path())
+
+	require.NotNil(t, session.LocalRuntimeHost.AgentControl)
+	agentControlPath := filepath.Join(dir, "runtime", "agent_control.sqlite")
+	_, statErr = os.Stat(agentControlPath)
+	require.True(t, os.IsNotExist(statErr), "bootstrap must not create agent_control.sqlite early")
+	if mailbox, ok := session.LocalRuntimeHost.AgentControl.MailboxStore.(interface{ Opened() bool }); ok {
+		require.False(t, mailbox.Opened(), "new chat bootstrap must keep agent control mailbox store closed")
+	}
+	if agentStore, ok := session.LocalRuntimeHost.AgentControl.AgentStore.(interface{ Opened() bool }); ok {
+		require.False(t, agentStore.Opened(), "new chat bootstrap must keep agent control agent store closed")
+	}
+
+	artifactPath := filepath.Join(dir, "runtime", "artifacts.sqlite")
+	_, statErr = os.Stat(artifactPath)
+	require.True(t, os.IsNotExist(statErr), "bootstrap must not create artifacts.sqlite early")
+
+	require.NotNil(t, session.LocalRuntimeHost.Background)
+	backgroundPath := filepath.Join(dir, "runtime", "background.sqlite")
+	_, statErr = os.Stat(backgroundPath)
+	require.True(t, os.IsNotExist(statErr), "bootstrap must not create background.sqlite early")
+	backgroundLogDir := filepath.Join(dir, "runtime", "background_logs")
+	_, statErr = os.Stat(backgroundLogDir)
+	require.True(t, os.IsNotExist(statErr), "bootstrap must not create background_logs early")
 }
 
 func TestBootstrapChatSession_DisableToolsUsesActorExecutorWithEmptyToolSurface(t *testing.T) {

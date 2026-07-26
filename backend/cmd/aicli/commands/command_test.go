@@ -1895,12 +1895,22 @@ func TestHandleCommand_DirectFunctionPermissionModes(t *testing.T) {
 		return &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry, PermissionMode: mode}, fn
 	}
 
+	// Mutating shell must stay denied under plan mode. Read-only commands like
+	// `echo ok` are intentionally auto-allowed via shell_readonly.
 	planSession, planFn := newSession(runtimepolicy.ModePlan)
 	planOutput := captureStdout(t, func() {
-		handleCommand(planSession, `/call execute_shell_command {"command":"echo ok"}`, false)
+		handleCommand(planSession, `/call execute_shell_command {"command":"rm -rf /tmp/plan-mode-test"}`, false)
 	})
 	if planFn.lastArgs != nil || !strings.Contains(planOutput, "permission-mode=plan 阻止直接调用") {
-		t.Fatalf("expected plan mode to deny shell execution, args=%#v output=%q", planFn.lastArgs, planOutput)
+		t.Fatalf("expected plan mode to deny mutating shell execution, args=%#v output=%q", planFn.lastArgs, planOutput)
+	}
+
+	planReadOnlySession, planReadOnlyFn := newSession(runtimepolicy.ModePlan)
+	planReadOnlyOutput := captureStdout(t, func() {
+		handleCommand(planReadOnlySession, `/call execute_shell_command {"command":"echo ok"}`, false)
+	})
+	if planReadOnlyFn.lastArgs == nil || !strings.Contains(planReadOnlyOutput, "done") {
+		t.Fatalf("expected plan mode to allow read-only shell, args=%#v output=%q", planReadOnlyFn.lastArgs, planReadOnlyOutput)
 	}
 
 	bypassSession, bypassFn := newSession(runtimepolicy.ModeBypassPermissions)

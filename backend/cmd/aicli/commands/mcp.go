@@ -42,7 +42,9 @@ func MCPCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "管理 MCP (Model Context Protocol) 服务器",
-		Long:  `MCP 命令用于管理 Model Context Protocol 服务器，支持添加、列出、移除、启用、禁用 MCP 服务器。`,
+		Long: `MCP 命令用于管理 Model Context Protocol 服务器，支持添加、列出、移除、启用、禁用 MCP 服务器。
+
+子命令概览与配置说明见 docs/aicli/install.md（MCP 子命令概览）。`,
 	}
 	cmd.PersistentFlags().StringVarP(&mcpConfigFile, "config-file", "C", "", "MCP 配置文件路径")
 	cmd.PersistentFlags().StringVar(&mcpOutputFormat, "output", "", "查询类子命令输出格式（text|json）")

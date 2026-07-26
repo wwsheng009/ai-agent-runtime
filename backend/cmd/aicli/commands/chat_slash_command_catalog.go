@@ -377,6 +377,21 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/memory",
+			Usage:       "/memory [status|add <text>|list [n]|search <query>]",
+			Summary:     "查看或写入项目级持久记忆（.aicli/memory）",
+			Group:       string(chatSlashCommandGroupContext),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "查看记忆路径与最近笔记"},
+				{Token: "add", Summary: "追加一条笔记"},
+				{Token: "note", Summary: "add 的别名"},
+				{Token: "list", Summary: "列出最近笔记"},
+				{Token: "search", Summary: "关键词搜索"},
+				{Token: "flush", Summary: "add 的别名"},
+			},
+		},
+		{
 			Name:        "/attach",
 			Usage:       "/attach [path|clear|remove <序号>]",
 			Summary:     "查看、添加或清空待发送图片附件",
@@ -438,6 +453,21 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "accept_edits", Summary: "允许编辑"},
 				{Token: "plan", Summary: "计划模式"},
 				{Token: "bypass_permissions", Summary: "绕过权限"},
+			},
+		},
+		{
+			Name:        "/plan",
+			Usage:       "/plan [status|enter [path]|exit <approve|request_changes|quit>]",
+			Summary:     "进入/退出 plan mode，或查看计划写路径状态",
+			Group:       string(chatSlashCommandGroupPermission),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "查看 plan mode 状态"},
+				{Token: "enter", Summary: "进入 plan mode"},
+				{Token: "exit", Summary: "退出 plan mode"},
+				{Token: "approve", Summary: "批准计划并退出"},
+				{Token: "request_changes", Summary: "请求修改并保持 plan mode"},
+				{Token: "quit", Summary: "放弃计划并退出"},
 			},
 		},
 		{
