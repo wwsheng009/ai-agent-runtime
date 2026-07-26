@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -170,7 +171,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 	}
 	prompt := buildTaskPrompt(teamID, mate.Name, task, digest, teamContext, route)
 	runMeta := &RunMeta{
-		PermissionMode:        "bypass_permissions",
+		PermissionMode:        teammateRunPermissionMode(mate.Profile),
 		CompletionRequirement: "complete_task",
 		Team: &TeamRunMeta{
 			TeamID:        teamID,
@@ -407,6 +408,17 @@ func (r *TeammateRunner) resolveStore() Store {
 	return nil
 }
 
+// teammateRunPermissionMode returns the RunMeta permission mode for a teammate.
+// Portable agentdef profiles (e.g. explore → plan) win; otherwise keep the
+// historical team-worker default of bypass_permissions so unlabeled mates stay
+// unattended-capable. Lead planner stays on its own hardcoded default.
+func teammateRunPermissionMode(profile string) string {
+	if mode := strings.TrimSpace(agentdef.TeammatePermissionMode(profile, agentdef.DiscoverOptions{})); mode != "" {
+		return mode
+	}
+	return "bypass_permissions"
+}
+
 func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest string, teamContext string, route *TaskExecutionRoute) string {
 	teammateName = strings.TrimSpace(teammateName)
 	if teammateName == "" {
@@ -613,28 +625,60 @@ func formatPathList(paths []string) string {
 }
 
 func applyStructuredTaskOutcome(run *TaskRunResult, output string) {
-	if run == nil || !run.Success {
+	if run == nil {
 		return
 	}
+	// Parse even when the session reported Success=false. Worker harness
+	// complete_task may fail for missing report_task_outcome / block_current_task
+	// while the assistant still emitted a valid structured status JSON fallback.
+	// That fallback is part of the teammate contract and must recover the run.
 	outcome, err := ParseTaskOutcomeContract(output)
 	if err != nil {
-		applyTaskProtocolError(run, err)
+		// Protocol errors only apply when the session otherwise succeeded; keep
+		// original session failures (preflight, cancel, etc.) when no structured
+		// contract is present.
+		if run.Success {
+			applyTaskProtocolError(run, err)
+		}
 		return
 	}
 	run.Structured = true
 	run.Outcome = outcome.Status
+	run.ProtocolError = ""
 	run.Blocker = strings.TrimSpace(outcome.Blocker)
 	run.HandoffTo = strings.TrimSpace(outcome.HandoffTo)
 	if summary := strings.TrimSpace(firstNonEmptyString(outcome.Summary, outcome.Blocker)); summary != "" {
 		run.Summary = summary
 	}
+	// Do not set OutcomeApplied: structured text is a fallback contract. The
+	// orchestrator still needs BlockTask/complete/fail store transitions (unlike
+	// tool/store-applied outcomes recovered via recoverStructuredTaskOutcome).
 	switch outcome.Status {
 	case TaskOutcomeBlocked, TaskOutcomeHandoff:
+		// Recover success so executeAssignment takes the blocked replan path
+		// instead of failTaskWithRunResult (complete_task missing is not a hard
+		// task failure when structured blocked/handoff is present).
+		run.Success = true
 		run.Blocked = true
+		run.Blocker = strings.TrimSpace(firstNonEmptyString(run.Blocker, run.Summary))
+		// Clear harness completion-requirement noise; blocker/summary carry state.
+		if strings.Contains(strings.ToLower(run.Error), "completion requirement") {
+			run.Error = ""
+		}
 	case TaskOutcomeFailed:
 		run.Success = false
-		if run.Error == "" {
-			run.Error = firstNonEmptyString(run.Summary, "task failed")
+		run.Blocked = false
+		run.Blocker = strings.TrimSpace(firstNonEmptyString(run.Blocker, run.Summary))
+		if run.Error == "" || strings.Contains(strings.ToLower(run.Error), "completion requirement") {
+			run.Error = firstNonEmptyString(run.Summary, run.Blocker, "task failed")
+		}
+	default: // done
+		run.Success = true
+		run.Blocked = false
+		run.Blocker = ""
+		run.HandoffTo = ""
+		if strings.Contains(strings.ToLower(run.Error), "completion requirement") {
+			run.Error = ""
 		}
 	}
 }

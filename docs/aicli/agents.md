@@ -192,7 +192,7 @@ Agent Source:      profile · E:\repo\examples\profiles\coding\agents\coder\agen
 
 子会话启动时还会按 def 叠加 tool allow/deny、read-only 与 **sandbox profile materialize**（local actor host；workspace 已知时写入 path bounds）。
 
-> Team teammate 的 `profile` 字段仍是 teammate 角色标签；与 portable `agent_type` 对齐的更深统一可在后续迭代继续收紧，**spawn_agent 路径已 consumable**。
+> Team teammate 的 `profile` 在可解析为 portable agentdef 时与 `spawn_agent` 对齐：投影 `agent_type`、默认 `permission_mode` / `read_only`，RunMeta 采用 def 权限（如 `explore` → `plan`），local/API actor 叠加 tool allow/deny 与 sandbox。未设置 profile 或仅合成 `team_teammate` 时仍默认 `bypass_permissions`（无人值守兼容）。任务 run 的 `complete_task` 仍由 runner 边界强制，不从 def 推断。
 
 ## 5. 与 skill `agents/openai.yaml` 的区别
 
@@ -254,13 +254,22 @@ go test ./internal/policy -count=1 -run "TestEngineShellReadOnly|TestEngineTaxon
 
 当前支持的方法（子集）：
 
-- client → agent：`initialize`、`session/new`、`session/prompt`、`session/cancel`
+- client → agent：`initialize`、`session/new`、`session/prompt`、`session/cancel`、`session/load`
 - agent → client：`session/update`、`session/request_permission`
+- capability：`loadSession=true`（`session/load` 回放历史为 `session/update`，结果为 `null`）
+
+`session/load` 解析顺序：
+
+1. 进程内已附着的 session（`session/new` 之后同 id 可再 load）
+2. 持久化会话（需非 ephemeral，例如 `--session-dir`）；默认 `--ephemeral` 时只支持内存 reattach
+
+MCPServers 参数暂不支持。
 
 ```bash
 aicli agent stdio --provider openai --model gpt-4o
 aicli agent stdio --profile default --permission-mode default
 aicli agent stdio --yolo --enable-tools
+aicli agent stdio --session-dir ~/.aicli/sessions
 ```
 
 权限 / profile / agentdef 语义与 chat 共用同一套概念（见上文第 3–7 节）；headless 工具代理与输出契约见 [`docs/aicli/exec.md`](./exec.md)。  

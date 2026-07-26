@@ -189,6 +189,42 @@ func TestTeammateRunnerPrefersAgentControlTriggerTask(t *testing.T) {
 	assert.Equal(t, "triggered", result.Summary)
 }
 
+func TestTeammateRunnerUsesAgentdefPermissionModeFromProfile(t *testing.T) {
+	control := &capturingTaskTriggerClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"explored\"}\n```",
+		},
+	}
+	runner := &TeammateRunner{AgentControl: control}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-explore",
+		Name:      "Explorer",
+		SessionID: "session-explore",
+		Profile:   "explore",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "Map codebase",
+		Goal:   "Map codebase",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, control.called)
+	require.NotNil(t, control.request.RunMeta)
+	assert.Equal(t, "plan", control.request.RunMeta.PermissionMode)
+	assert.Equal(t, "complete_task", control.request.RunMeta.CompletionRequirement)
+}
+
+func TestTeammateRunPermissionModeDefaults(t *testing.T) {
+	assert.Equal(t, "bypass_permissions", teammateRunPermissionMode(""))
+	assert.Equal(t, "bypass_permissions", teammateRunPermissionMode("team_teammate"))
+	assert.Equal(t, "bypass_permissions", teammateRunPermissionMode("not-a-real-agent-xyz"))
+	assert.Equal(t, "plan", teammateRunPermissionMode("explore"))
+	assert.Equal(t, "default", teammateRunPermissionMode("general"))
+}
+
 func TestTeammateRunnerPassesResolvedRouteIntoTriggerRunMetaAndPrompt(t *testing.T) {
 	control := &capturingTaskTriggerClient{
 		result: &SessionResult{
@@ -411,6 +447,105 @@ func TestTeammateRunnerParsesStructuredJSONOutcome(t *testing.T) {
 	assert.Equal(t, "handoff to reviewer", result.Summary)
 	assert.Equal(t, "need review", result.Blocker)
 	assert.Equal(t, "mate-2", result.HandoffTo)
+}
+
+func TestTeammateRunnerRecoversStructuredBlockedWhenCompleteTaskMissing(t *testing.T) {
+	// Worker harness marks Success=false when complete_task is unsatisfied, but
+	// the teammate prompt contract still accepts structured JSON as terminal
+	// fallback. Recovery must flip blocked runs back to Success so orchestrator
+	// takes BlockTask/replan instead of failTaskWithRunResult.
+	runner := &TeammateRunner{
+		Sessions: &staticSessionClient{
+			result: &SessionResult{
+				Success: false,
+				Error:   "completion requirement complete_task was not satisfied: no successful report_task_outcome or block_current_task observation",
+				Output:  "Scanned docs root and agents intro.\n\n```json\n{\"task_status\":\"blocked\",\"summary\":\"waiting on focused API guide summary\",\"blocker\":\"need a dedicated summary for docs/guides/getting-started.md\"}\n```",
+			},
+		},
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "Explore docs root",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Success, "structured blocked recovers session success")
+	assert.True(t, result.Blocked)
+	assert.True(t, result.Structured)
+	assert.False(t, result.OutcomeApplied, "text fallback still needs orchestrator BlockTask")
+	assert.Equal(t, TaskOutcomeBlocked, result.Outcome)
+	assert.Equal(t, "waiting on focused API guide summary", result.Summary)
+	assert.Equal(t, "need a dedicated summary for docs/guides/getting-started.md", result.Blocker)
+	assert.Empty(t, result.Error)
+	assert.Empty(t, result.ProtocolError)
+}
+
+func TestTeammateRunnerRecoversStructuredDoneWhenCompleteTaskMissing(t *testing.T) {
+	runner := &TeammateRunner{
+		Sessions: &staticSessionClient{
+			result: &SessionResult{
+				Success: false,
+				Error:   "completion requirement complete_task was not satisfied: no successful report_task_outcome or block_current_task observation",
+				Output:  "Focused guide reviewed.\n\n```json\n{\"task_status\":\"done\",\"summary\":\"docs/guides/getting-started.md explains how to start using the docs toolkit\"}\n```",
+			},
+		},
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "Summarize API guide",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.False(t, result.Blocked)
+	assert.True(t, result.Structured)
+	assert.False(t, result.OutcomeApplied)
+	assert.Equal(t, TaskOutcomeDone, result.Outcome)
+	assert.Equal(t, "docs/guides/getting-started.md explains how to start using the docs toolkit", result.Summary)
+	assert.Empty(t, result.Error)
+	assert.Empty(t, result.ProtocolError)
+}
+
+func TestTeammateRunnerKeepsSessionFailureWhenStructuredOutcomeMissing(t *testing.T) {
+	// Non-contract failures must not be rewritten into protocol errors just
+	// because complete_task recovery also failed.
+	runner := &TeammateRunner{
+		Sessions: &staticSessionClient{
+			result: &SessionResult{
+				Success:   false,
+				Error:     "prompt preflight budget exceeded",
+				ErrorType: "prompt_preflight",
+				Output:    "partial notes without structured outcome",
+			},
+		},
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "task-1",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Success)
+	assert.False(t, result.Blocked)
+	assert.False(t, result.Structured)
+	assert.Equal(t, "prompt_preflight", result.ErrorType)
+	assert.Contains(t, result.Error, "prompt preflight budget exceeded")
+	assert.Empty(t, result.ProtocolError)
 }
 
 func TestTeammateRunnerPreservesStructuredSessionErrorMetadata(t *testing.T) {
