@@ -1354,6 +1354,43 @@ func TestReadInteractiveLine_CtrlCOnEmptyLineRequestsExit(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_EscOnEmptyLineRequestsBacktrack(t *testing.T) {
+	var output bytes.Buffer
+	_, err := readInteractiveLine(
+		strings.NewReader("\x1b"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+	)
+	if !errors.Is(err, ErrInteractiveInputBacktrackRequested) {
+		t.Fatalf("expected backtrack request error, got %v", err)
+	}
+}
+
+func TestReadInteractiveLine_EscWithTypedContentKeepsDraft(t *testing.T) {
+	var output bytes.Buffer
+	// Deliver bare Esc as its own chunk so the decoder treats it as CancelPopup,
+	// not Alt+Enter (ESC followed immediately by LF in one buffer).
+	line, err := readInteractiveLine(
+		io.MultiReader(
+			strings.NewReader("hello"),
+			strings.NewReader("\x1b"),
+			strings.NewReader("\n"),
+		),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected typed Esc to keep draft and continue, got err %v", err)
+	}
+	if line != "hello" {
+		t.Fatalf("expected draft preserved after Esc, got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_CtrlCWithTypedContentCancelsInput(t *testing.T) {
 	var output bytes.Buffer
 	_, err := readInteractiveLine(

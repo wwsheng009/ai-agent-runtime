@@ -144,6 +144,24 @@ func TestNormalizeChatComposerReadErrorInterruptsAndResetsPrompt(t *testing.T) {
 	}
 }
 
+func TestNormalizeChatComposerReadErrorBacktrackDoesNotInterrupt(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("draft")
+
+	err := normalizeChatComposerReadError(session, ui.ErrInteractiveInputBacktrackRequested)
+	if !errors.Is(err, ui.ErrInteractiveInputBacktrackRequested) {
+		t.Fatalf("expected backtrack error to pass through, got %v", err)
+	}
+	if session.IsInterrupted() {
+		t.Fatal("did not expect backtrack Esc to interrupt the session")
+	}
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "" {
+		t.Fatalf("expected backtrack Esc to reset prompt state, got %#v", snapshot)
+	}
+}
+
 func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

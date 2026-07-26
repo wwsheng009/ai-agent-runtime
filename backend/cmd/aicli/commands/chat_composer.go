@@ -212,6 +212,11 @@ func normalizeChatComposerReadError(session *ChatSession, err error) error {
 		resetChatComposerPrompt(session)
 		return io.EOF
 	}
+	// Esc on empty composer opens the backtrack picker; do not interrupt the session.
+	if errors.Is(err, ui.ErrInteractiveInputBacktrackRequested) {
+		resetChatComposerPrompt(session)
+		return ui.ErrInteractiveInputBacktrackRequested
+	}
 	resetChatComposerPrompt(session)
 	return err
 }

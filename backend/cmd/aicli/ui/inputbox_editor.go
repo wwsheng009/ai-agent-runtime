@@ -19,6 +19,9 @@ import (
 
 var ErrInteractiveInputInterrupted = errors.New("interactive input interrupted")
 var ErrInteractiveInputExitRequested = errors.New("interactive input exit requested")
+// ErrInteractiveInputBacktrackRequested signals bare Esc on an empty composer.
+// Chat may open the user-turn backtrack picker; other callers should treat it as a no-op cancel.
+var ErrInteractiveInputBacktrackRequested = errors.New("interactive input backtrack requested")
 var errInteractiveInputReadinessUnsupported = errors.New("interactive input readiness unsupported")
 var waitForInteractiveInputReady = platformWaitForInteractiveInputReady
 var readInteractiveClipboardText = platformClipboardText
@@ -1155,6 +1158,14 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			if hooks != nil && hooks.OnCancelPopup != nil && hooks.OnCancelPopup(snapshot()) {
 				continue
 			}
+			// Bare Esc with empty draft: signal chat to open user-turn backtrack selection.
+			// Keep typed drafts untouched so Esc never silently discards composer text.
+			if len(line) == 0 && !pasteBurst.IsActive() {
+				if onChange != nil {
+					onChange("")
+				}
+				return "", ErrInteractiveInputBacktrackRequested
+			}
 		case editorKeyEnter:
 			suppressSubmitDrain := false
 			handledCarriageReturn := false
@@ -1473,6 +1484,17 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				return "", ErrInteractiveInputExitRequested
 			}
 			if cursor >= len(line) {
+				// Ctrl+D at EOL is a no-op on a live TTY. When the input source is already
+				// exhausted (piped/test readers with no stdinFile), looping would hang; submit.
+				if stdinFile == nil {
+					if echoSubmit {
+						writeEditorText("\r\n", renderSnapshot())
+					}
+					if onChange != nil {
+						onChange("")
+					}
+					return string(line), nil
+				}
 				continue
 			}
 			promoteDraft()

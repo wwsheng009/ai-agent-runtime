@@ -108,6 +108,73 @@ func TestCreateNewRuntimeConversation_DefersDurableSave(t *testing.T) {
 	require.Equal(t, session.RuntimeSession.ID, loaded.ID)
 }
 
+func TestCreateNewRuntimeConversation_RotatesChatLogAndArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(dir)
+	require.NoError(t, err)
+	t.Cleanup(manager.Stop)
+
+	existingSession, err := manager.Create(context.Background(), userID)
+	require.NoError(t, err)
+
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	logDir := t.TempDir()
+	require.NoError(t, logger.SetLogDir(logDir))
+	logger.LogRequest(aicliLogScope{TurnID: "turn-1", RequestID: "req-1"}, "ping")
+	require.NoError(t, logger.FlushSession())
+
+	oldLogSessionID := logger.sessionID
+	oldLogPath := logger.SessionLogPath()
+	oldHTTPDir := logger.RuntimeHTTPArtifactDir()
+	oldShellDir := logger.LocalShellArtifactDir()
+
+	capture := &chatRuntimeHTTPCapture{}
+	capture.SetArtifactDir(oldHTTPDir)
+	capture.RecordArtifactPath("request", filepath.Join(oldHTTPDir, "001_request_gateway_client.json"))
+	capture.RecordArtifactPath("response", filepath.Join(oldHTTPDir, "001_response_gateway_client.json"))
+	capture.artifactCounter = 3
+
+	session := &ChatSession{
+		ProviderName:               "codex_ee",
+		Provider:                   config.Provider{Protocol: "codex"},
+		Model:                      "gpt-5.2-code",
+		SessionManager:             manager,
+		SessionUserID:              userID,
+		SessionDir:                 dir,
+		RuntimeSession:             existingSession,
+		Logger:                     logger,
+		runtimeHTTPCapture:         capture,
+		localShellArtifactCounter:  2,
+		lastLocalShellArtifactPath: filepath.Join(oldShellDir, "001_git.txt"),
+		ImagePaths:                 []string{"old.png"},
+		MsgCount:                   4,
+		TurnRequestCount:           2,
+	}
+
+	require.NoError(t, createNewRuntimeConversation(session, "fresh"))
+	require.NotNil(t, session.RuntimeSession)
+	require.NotEqual(t, existingSession.ID, session.RuntimeSession.ID)
+	require.NotEqual(t, oldLogSessionID, session.Logger.sessionID)
+	require.NotEqual(t, oldLogPath, currentChatLogFile(session))
+	require.NotEqual(t, oldHTTPDir, currentRuntimeHTTPArtifactDir(session))
+	require.NotEqual(t, oldShellDir, currentLocalShellArtifactDir(session))
+	require.Equal(t, 0, session.MsgCount)
+	require.Equal(t, 0, session.TurnRequestCount)
+	require.Empty(t, session.ImagePaths)
+	require.Equal(t, 0, session.localShellArtifactCounter)
+	require.Empty(t, session.lastLocalShellArtifactPath)
+
+	snapshot := session.runtimeHTTPCapture.Snapshot()
+	require.Empty(t, snapshot.RequestArtifactPath)
+	require.Empty(t, snapshot.ResponseArtifactPath)
+	require.Equal(t, currentRuntimeHTTPArtifactDir(session), snapshot.ArtifactDir)
+	require.Equal(t, 0, session.runtimeHTTPCapture.artifactCounter)
+
+	// Previous chat log stays available after /new.
+	_, statErr := os.Stat(oldLogPath)
+	require.NoError(t, statErr)
+}
+
 func TestRestoreChatPersistenceState_NewSessionStaysUnpersisted(t *testing.T) {
 	dir := t.TempDir()
 	manager, userID, _, err := newChatSessionManager(dir)

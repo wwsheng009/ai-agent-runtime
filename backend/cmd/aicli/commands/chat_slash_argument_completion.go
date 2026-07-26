@@ -94,6 +94,18 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "local", Summary: "本地压缩", Group: string(chatSlashCommandGroupModel)},
 			{Command: "remote", Summary: "远端压缩", Group: string(chatSlashCommandGroupModel)},
 		})
+	case "/backtrack", "/rewind":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "list", Summary: "列出 user turns", Group: string(chatSlashCommandGroupSession)},
+			{Command: "select", Summary: "打开交互选择器（Esc 空输入等价）", Group: string(chatSlashCommandGroupSession)},
+			{Command: "audit", Summary: "列出 durable tombstone 审计摘要", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--apply", Summary: "执行截断", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--both", Summary: "对话+代码联合回退", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--code", Summary: "仅代码恢复", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--edit", Summary: "编辑后的提示", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--submit", Summary: "截断后自动发送", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--include-anchor", Summary: "保留锚点消息", Group: string(chatSlashCommandGroupSession)},
+		})
 	case "/memory":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "status", Summary: "查看记忆路径与最近笔记", Group: string(chatSlashCommandGroupContext)},
