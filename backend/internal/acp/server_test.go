@@ -17,8 +17,10 @@ type fakeBackend struct {
 	newSessionFn func(ctx context.Context, req NewSessionRequest) (NewSessionResponse, error)
 	promptFn     func(ctx context.Context, req PromptRequest, emit Emitter) (PromptResponse, error)
 	cancelFn     func(ctx context.Context, sessionID string) error
+	loadSessionFn func(ctx context.Context, req LoadSessionRequest, emit Emitter) error
 
 	cancelled []string
+	loaded    []string
 }
 
 func (f *fakeBackend) NewSession(ctx context.Context, req NewSessionRequest) (NewSessionResponse, error) {
@@ -43,6 +45,18 @@ func (f *fakeBackend) Cancel(ctx context.Context, sessionID string) error {
 	if f.cancelFn != nil {
 		return f.cancelFn(ctx, sessionID)
 	}
+	return nil
+}
+
+func (f *fakeBackend) LoadSession(ctx context.Context, req LoadSessionRequest, emit Emitter) error {
+	f.mu.Lock()
+	f.loaded = append(f.loaded, req.SessionID)
+	f.mu.Unlock()
+	if f.loadSessionFn != nil {
+		return f.loadSessionFn(ctx, req, emit)
+	}
+	_ = emit.SessionUpdate(req.SessionID, UserMessageChunk("prior user"))
+	_ = emit.SessionUpdate(req.SessionID, AgentMessageChunk("prior assistant"))
 	return nil
 }
 
@@ -128,8 +142,8 @@ func TestServerInitializeSessionPrompt(t *testing.T) {
 	if initResp.AgentInfo == nil || initResp.AgentInfo.Name != "aicli" {
 		t.Fatalf("agentInfo = %+v", initResp.AgentInfo)
 	}
-	if initResp.AgentCapabilities.LoadSession {
-		t.Fatal("loadSession should be false in MVP")
+	if !initResp.AgentCapabilities.LoadSession {
+		t.Fatal("loadSession should be true after R6")
 	}
 	if initResp.AuthMethods == nil {
 		t.Fatal("authMethods should be a non-nil empty slice")
@@ -395,6 +409,177 @@ func TestMapToolKind(t *testing.T) {
 		if got := MapToolKind(in); got != want {
 			t.Fatalf("MapToolKind(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+func TestServerSessionLoadReplaysHistory(t *testing.T) {
+	t.Parallel()
+
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	defer clientReader.Close()
+	defer agentWriter.Close()
+	defer agentReader.Close()
+	defer clientWriter.Close()
+
+	backend := &fakeBackend{
+		loadSessionFn: func(ctx context.Context, req LoadSessionRequest, emit Emitter) error {
+			if req.SessionID != "sess_resume" {
+				t.Errorf("sessionId = %q, want sess_resume", req.SessionID)
+			}
+			if req.Cwd != "/tmp/project" {
+				t.Errorf("cwd = %q, want /tmp/project", req.Cwd)
+			}
+			_ = emit.SessionUpdate(req.SessionID, UserMessageChunk("hello again"))
+			_ = emit.SessionUpdate(req.SessionID, AgentMessageChunk("welcome back"))
+			return nil
+		},
+	}
+
+	agentConn := NewConn(agentReader, agentWriter)
+	server := NewServer(agentConn, backend, ServerOptions{
+		AgentInfo:         Implementation{Name: "aicli", Version: "test"},
+		AgentCapabilities: DefaultAgentCapabilities(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(ctx)
+	}()
+
+	clientConn := NewConn(clientReader, clientWriter)
+	var (
+		updatesMu sync.Mutex
+		updates   []SessionUpdateNotification
+	)
+	clientConn.SetHandler(func(ctx context.Context, msg Message) (interface{}, *RPCError) {
+		switch msg.Method {
+		case MethodSessionUpdate:
+			var note SessionUpdateNotification
+			if err := DecodeParams(msg, &note); err != nil {
+				return nil, err
+			}
+			updatesMu.Lock()
+			updates = append(updates, note)
+			updatesMu.Unlock()
+			return nil, nil
+		default:
+			if msg.IsNotification() {
+				return nil, nil
+			}
+			return nil, NewRPCError(CodeMethodNotFound, msg.Method)
+		}
+	})
+	go func() { _ = clientConn.Serve(context.Background()) }()
+
+	var initResp InitializeResponse
+	if err := clientConn.Call(ctx, MethodInitialize, InitializeRequest{
+		ProtocolVersion: ProtocolVersion,
+		ClientInfo:      &Implementation{Name: "test-client"},
+	}, &initResp); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	if !initResp.AgentCapabilities.LoadSession {
+		t.Fatal("expected loadSession capability")
+	}
+
+	// session/load result is null; Call with a pointer to interface{} is fine.
+	var loadResult interface{}
+	if err := clientConn.Call(ctx, MethodSessionLoad, LoadSessionRequest{
+		SessionID: "sess_resume",
+		Cwd:       "/tmp/project",
+	}, &loadResult); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		updatesMu.Lock()
+		n := len(updates)
+		updatesMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	updatesMu.Lock()
+	got := append([]SessionUpdateNotification(nil), updates...)
+	updatesMu.Unlock()
+	if len(got) < 2 {
+		t.Fatalf("expected >=2 replay updates, got %d (%+v)", len(got), got)
+	}
+	// Conn dispatches notifications concurrently, so arrival order is not a
+	// protocol guarantee in this transport. Assert both replay kinds are present.
+	kinds := map[string]int{}
+	for _, note := range got {
+		kinds[note.Update.SessionUpdate]++
+	}
+	if kinds[SessionUpdateUserMessageChunk] < 1 {
+		t.Fatalf("missing user_message_chunk in replay updates: %+v", got)
+	}
+	if kinds[SessionUpdateAgentMessageChunk] < 1 {
+		t.Fatalf("missing agent_message_chunk in replay updates: %+v", got)
+	}
+
+	backend.mu.Lock()
+	loaded := append([]string(nil), backend.loaded...)
+	backend.mu.Unlock()
+	if len(loaded) != 1 || loaded[0] != "sess_resume" {
+		t.Fatalf("loaded = %v", loaded)
+	}
+
+	cancel()
+	agentReader.Close()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not exit")
+	}
+}
+
+func TestServerSessionLoadWithoutCapability(t *testing.T) {
+	t.Parallel()
+
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	defer clientReader.Close()
+	defer agentWriter.Close()
+	defer agentReader.Close()
+	defer clientWriter.Close()
+
+	// Explicitly disable loadSession even though fakeBackend implements it.
+	agentConn := NewConn(agentReader, agentWriter)
+	server := NewServer(agentConn, &fakeBackend{}, ServerOptions{
+		AgentInfo: Implementation{Name: "aicli"},
+		AgentCapabilities: AgentCapabilities{
+			LoadSession: false,
+			PromptCapabilities: &PromptCapabilities{
+				Image: false,
+			},
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.Serve(ctx) }()
+
+	clientConn := NewConn(clientReader, clientWriter)
+	clientConn.SetHandler(func(ctx context.Context, msg Message) (interface{}, *RPCError) {
+		return nil, nil
+	})
+	go func() { _ = clientConn.Serve(context.Background()) }()
+
+	_ = clientConn.Call(ctx, MethodInitialize, InitializeRequest{ProtocolVersion: ProtocolVersion}, &InitializeResponse{})
+
+	err := clientConn.Call(ctx, MethodSessionLoad, LoadSessionRequest{SessionID: "x"}, &struct{}{})
+	if err == nil {
+		t.Fatal("expected method-not-found for session/load when capability off")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "method not found") &&
+		!strings.Contains(err.Error(), "32601") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

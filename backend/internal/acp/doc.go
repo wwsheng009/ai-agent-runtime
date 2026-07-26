@@ -6,6 +6,7 @@
 //   - session/new
 //   - session/prompt
 //   - session/cancel (notification)
+//   - session/load (when agentCapabilities.loadSession=true and backend implements SessionLoader)
 //
 // Supported agent → client traffic:
 //   - session/update (notification)

@@ -12,6 +12,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type recordingACPEmitter struct {
@@ -189,6 +190,58 @@ func TestACPEventBridge_RuntimeToolStartedFinished(t *testing.T) {
 	}
 }
 
+func TestACPEventBridge_RuntimeToolProgressStream(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_1", emit)
+	defer bridge.EndPrompt()
+
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type:    runtimechat.EventToolStarted,
+		TraceID: "trace-stream",
+		Payload: map[string]interface{}{
+			"tool_name":    "shell",
+			"tool_call_id": "tc_stream",
+		},
+	})
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type:    "tool.progress",
+		TraceID: "trace-stream",
+		Payload: map[string]interface{}{
+			"tool_name":          "shell",
+			"tool_call_id":       "tc_stream",
+			"stream":             true,
+			"stream_channel":     "combined",
+			"stream_chunk_index": 1,
+			"partial":            "hello from shell\n",
+			"phase":              "stream",
+		},
+	})
+
+	updates := emit.snapshot()
+	// tool_call + in_progress + stream content update
+	if len(updates) != 3 {
+		t.Fatalf("expected 3 updates, got %d: %+v", len(updates), updates)
+	}
+	if updates[2].SessionUpdate != acp.SessionUpdateToolCallUpdate {
+		t.Fatalf("progress kind = %q", updates[2].SessionUpdate)
+	}
+	if updates[2].Status != acp.ToolCallStatusInProgress {
+		t.Fatalf("progress status = %q", updates[2].Status)
+	}
+	if updates[2].ToolCallID != "tc_stream" {
+		t.Fatalf("toolCallId = %q", updates[2].ToolCallID)
+	}
+	if len(updates[2].ToolContent) == 0 || updates[2].ToolContent[0].Content == nil {
+		t.Fatalf("expected stream content, got %+v", updates[2].ToolContent)
+	}
+	if !strings.Contains(updates[2].ToolContent[0].Content.Text, "hello from shell") {
+		t.Fatalf("stream content = %+v", updates[2].ToolContent[0].Content)
+	}
+}
+
 func TestACPEventBridge_AskApprovalAllowOnce(t *testing.T) {
 	t.Parallel()
 
@@ -341,5 +394,118 @@ func TestNewAgentCommandRegistersStdio(t *testing.T) {
 	}
 	if cmd.Commands()[0].Flags().Lookup("prompt") != nil {
 		t.Fatal("agent stdio should not expose --prompt")
+	}
+}
+
+func TestReplayACPSessionHistory_UserAssistantAndTools(t *testing.T) {
+	t.Parallel()
+
+	hostSess := &acpHostSession{
+		id: "sess_hist",
+		chat: &ChatSession{
+			Messages: []runtimetypes.Message{
+				{Role: "system", Content: "hidden system"},
+				{Role: "user", Content: "list files"},
+				{
+					Role:    "assistant",
+					Content: "I will list them.",
+					ToolCalls: []runtimetypes.ToolCall{
+						{ID: "call_1", Name: "shell", Args: map[string]interface{}{"command": "ls"}},
+					},
+				},
+				{Role: "tool", ToolCallID: "call_1", Content: "a.go\nb.go"},
+				{Role: "assistant", Content: "done"},
+			},
+		},
+	}
+	emit := &recordingACPEmitter{}
+	if err := replayACPSessionHistory("sess_hist", hostSess, emit); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	updates := emit.snapshot()
+	// user + assistant text + tool_call + tool_finished + final assistant
+	if len(updates) != 5 {
+		t.Fatalf("expected 5 updates, got %d: %+v", len(updates), updates)
+	}
+	if updates[0].SessionUpdate != acp.SessionUpdateUserMessageChunk {
+		t.Fatalf("u0 = %q", updates[0].SessionUpdate)
+	}
+	if updates[0].Content == nil || updates[0].Content.Text != "list files" {
+		t.Fatalf("user text = %+v", updates[0].Content)
+	}
+	if updates[1].SessionUpdate != acp.SessionUpdateAgentMessageChunk {
+		t.Fatalf("u1 = %q", updates[1].SessionUpdate)
+	}
+	if updates[2].SessionUpdate != acp.SessionUpdateToolCall || updates[2].ToolCallID != "call_1" {
+		t.Fatalf("tool start = %+v", updates[2])
+	}
+	if updates[3].SessionUpdate != acp.SessionUpdateToolCallUpdate || updates[3].Status != acp.ToolCallStatusCompleted {
+		t.Fatalf("tool finish = %+v", updates[3])
+	}
+	if updates[4].SessionUpdate != acp.SessionUpdateAgentMessageChunk {
+		t.Fatalf("u4 = %q", updates[4].SessionUpdate)
+	}
+}
+
+func TestACPSessionHost_LoadSessionInMemoryReplay(t *testing.T) {
+	t.Parallel()
+
+	host := newACPSessionHost(&config.Config{}, &agentStdioOptions{ExecOptions: &ExecOptions{Ephemeral: true}})
+	defer host.Close()
+
+	sessionID := "acp_mem_1"
+	host.mu.Lock()
+	host.sess[sessionID] = &acpHostSession{
+		id: sessionID,
+		chat: &ChatSession{
+			Messages: []runtimetypes.Message{
+				{Role: "user", Content: "hello"},
+				{Role: "assistant", Content: "hi there"},
+			},
+		},
+	}
+	host.mu.Unlock()
+
+	emit := &recordingACPEmitter{}
+	if err := host.LoadSession(context.Background(), acp.LoadSessionRequest{SessionID: sessionID}, emit); err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	updates := emit.snapshot()
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d: %+v", len(updates), updates)
+	}
+	if updates[0].Content == nil || updates[0].Content.Text != "hello" {
+		t.Fatalf("user chunk = %+v", updates[0])
+	}
+	if updates[1].Content == nil || updates[1].Content.Text != "hi there" {
+		t.Fatalf("agent chunk = %+v", updates[1])
+	}
+}
+
+func TestACPSessionHost_LoadSessionUnknownID(t *testing.T) {
+	t.Parallel()
+
+	host := newACPSessionHost(&config.Config{}, &agentStdioOptions{ExecOptions: &ExecOptions{Ephemeral: true}})
+	defer host.Close()
+
+	err := host.LoadSession(context.Background(), acp.LoadSessionRequest{SessionID: "missing_session"}, &recordingACPEmitter{})
+	if err == nil {
+		t.Fatal("expected error for unknown session")
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "not found") && !strings.Contains(msg, "session") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestACPSessionHost_LoadSessionEmptyID(t *testing.T) {
+	t.Parallel()
+
+	host := newACPSessionHost(&config.Config{}, &agentStdioOptions{ExecOptions: &ExecOptions{Ephemeral: true}})
+	defer host.Close()
+
+	err := host.LoadSession(context.Background(), acp.LoadSessionRequest{}, &recordingACPEmitter{})
+	if err == nil {
+		t.Fatal("expected error for empty sessionId")
 	}
 }

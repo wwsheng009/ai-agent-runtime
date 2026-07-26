@@ -12,6 +12,7 @@ import (
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -198,6 +199,27 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		kind := acpToolKindForName(toolName)
 		_ = b.sessionUpdate(acp.ToolCallStarted(id, toolName, kind, rawInput))
 		_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
+
+	case toolprotocol.EventTypeProgress:
+		toolName := runtimeEventToolName(event)
+		toolCallID := firstNonEmptyChatValue(
+			payloadStringValue(event.Payload["tool_call_id"]),
+			event.TraceID,
+			toolName,
+		)
+		id := b.stableToolCallID("runtime_tool:"+toolCallID, toolCallID)
+		text := firstNonEmptyChatValue(
+			payloadStringValue(event.Payload["partial"]),
+			payloadStringValue(event.Payload["message"]),
+		)
+		text = truncateForACP(text, 4000)
+		if text == "" {
+			_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
+			return
+		}
+		_ = b.sessionUpdate(acp.ToolCallProgressContent(id, acp.ToolCallStatusInProgress, []acp.ToolCallContent{
+			acp.TextToolContent(text),
+		}))
 
 	case runtimechat.EventToolFinished, "tool.completed":
 		toolName := runtimeEventToolName(event)

@@ -19,6 +19,14 @@ type SessionBackend interface {
 	Cancel(ctx context.Context, sessionID string) error
 }
 
+// SessionLoader is an optional SessionBackend extension for session/load.
+// When AgentCapabilities.LoadSession is true and the backend implements this
+// interface, Server dispatches MethodSessionLoad. Spec requires replaying the
+// conversation via Emitter (session/update) before returning; result is null.
+type SessionLoader interface {
+	LoadSession(ctx context.Context, req LoadSessionRequest, emit Emitter) error
+}
+
 // Emitter sends session/update notifications to the client.
 type Emitter interface {
 	SessionUpdate(sessionID string, update SessionUpdate) error
@@ -135,6 +143,8 @@ func (s *Server) handle(ctx context.Context, msg Message) (interface{}, *RPCErro
 		return s.handleSessionPrompt(ctx, msg)
 	case MethodSessionCancel:
 		return s.handleSessionCancel(ctx, msg)
+	case MethodSessionLoad:
+		return s.handleSessionLoad(ctx, msg)
 	default:
 		if msg.IsNotification() {
 			// Ignore unknown notifications.
@@ -248,6 +258,40 @@ func (s *Server) handleSessionCancel(ctx context.Context, msg Message) (interfac
 		}
 	}
 	_ = s.backend.Cancel(ctx, req.SessionID)
+	return nil, nil
+}
+
+func (s *Server) handleSessionLoad(ctx context.Context, msg Message) (interface{}, *RPCError) {
+	if !s.opts.AgentCapabilities.LoadSession {
+		return nil, NewRPCError(CodeMethodNotFound, "method not found: "+MethodSessionLoad)
+	}
+	loader, ok := s.backend.(SessionLoader)
+	if !ok || loader == nil {
+		return nil, NewRPCError(CodeMethodNotFound, "method not found: "+MethodSessionLoad)
+	}
+	var req LoadSessionRequest
+	if err := DecodeParams(msg, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nil, NewRPCError(CodeInvalidParams, "sessionId is required")
+	}
+	emit := connEmitter{conn: s.conn}
+	if err := loader.LoadSession(ctx, req, emit); err != nil {
+		if isCancelError(err) {
+			return nil, NewRPCError(CodeInternalError, "session load cancelled")
+		}
+		// Map "not found" style errors to a stable invalid-params class so
+		// clients can distinguish missing sessions from agent bugs.
+		msgText := strings.ToLower(err.Error())
+		if strings.Contains(msgText, "not found") ||
+			strings.Contains(msgText, "unknown session") ||
+			strings.Contains(msgText, "no such session") {
+			return nil, NewRPCError(CodeInvalidParams, err.Error())
+		}
+		return nil, NewRPCError(CodeInternalError, err.Error())
+	}
+	// ACP session/load result is null.
 	return nil, nil
 }
 

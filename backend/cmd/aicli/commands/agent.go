@@ -39,16 +39,22 @@ Stdout 仅用于协议消息；日志与诊断写入 stderr / 日志文件。
   session/new
   session/prompt
   session/cancel
+  session/load   (loadSession=true；回放历史后返回 null)
 
 Agent → client：
   session/update
   session/request_permission
+
+session/load 解析顺序：先内存中已附着的 session，再按 --session-dir
+等非 ephemeral 配置从持久化存储恢复。默认 --ephemeral 时仅支持进程内
+session/new 后再 load 同一 id。MCPServers 参数暂不支持。
 
 stdin 是协议流，不是 prompt 文本。模型/权限等通过 flags 配置。
 权限 / profile / agent 相关概念见 docs/aicli/agents.md 与 docs/aicli/exec.md。`,
 		Example: `  aicli agent stdio --provider openai --model gpt-4o
   aicli agent stdio --profile default --permission-mode default
   aicli agent stdio --yolo --enable-tools
+  aicli agent stdio --session-dir %USERPROFILE%\.aicli\sessions
   aicli agent stdio --ephemeral --log-dir %USERPROFILE%\.aicli\logs`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {

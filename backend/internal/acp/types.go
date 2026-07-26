@@ -166,6 +166,18 @@ type CancelNotification struct {
 	SessionID string `json:"sessionId"`
 }
 
+// LoadSessionRequest is the params for session/load.
+// Spec: agent replays conversation via session/update, then returns null result.
+type LoadSessionRequest struct {
+	SessionID  string          `json:"sessionId"`
+	Cwd        string          `json:"cwd,omitempty"`
+	MCPServers json.RawMessage `json:"mcpServers,omitempty"`
+}
+
+// LoadSessionResponse is the result for session/load.
+// ACP returns null; we use an empty struct so Call unmarshals cleanly.
+type LoadSessionResponse struct{}
+
 // ContentBlock is a discriminated content unit in prompts / updates.
 // Only type=text is required for the MVP; other types are preserved as raw
 // fields so future capabilities can be added without breaking decode.
@@ -340,6 +352,15 @@ func TextContent(text string) ContentBlock {
 	return ContentBlock{Type: "text", Text: text}
 }
 
+// UserMessageChunk builds a session update for replayed user text.
+func UserMessageChunk(text string) SessionUpdate {
+	block := TextContent(text)
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateUserMessageChunk,
+		Content:       &block,
+	}
+}
+
 // AgentMessageChunk builds a session update for assistant text.
 func AgentMessageChunk(text string) SessionUpdate {
 	block := TextContent(text)
@@ -370,6 +391,20 @@ func ToolCallProgress(toolCallID, status string) SessionUpdate {
 		SessionUpdate: SessionUpdateToolCallUpdate,
 		ToolCallID:    toolCallID,
 		Status:        status,
+	}
+}
+
+// ToolCallProgressContent builds a tool_call_update with in-progress content
+// (e.g. mid-call terminal stream chunks).
+func ToolCallProgressContent(toolCallID, status string, content []ToolCallContent) SessionUpdate {
+	if status == "" {
+		status = ToolCallStatusInProgress
+	}
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateToolCallUpdate,
+		ToolCallID:    toolCallID,
+		Status:        status,
+		ToolContent:   content,
 	}
 }
 
@@ -439,7 +474,9 @@ func ExtractText(blocks []ContentBlock) string {
 // DefaultAgentCapabilities returns MVP capabilities (text prompts only).
 func DefaultAgentCapabilities() AgentCapabilities {
 	return AgentCapabilities{
-		LoadSession: false,
+		// R6: advertise session/load so IDE hosts can resume conversations.
+		// Server still returns method-not-found when the backend lacks SessionLoader.
+		LoadSession: true,
 		PromptCapabilities: &PromptCapabilities{
 			Image:           false,
 			Audio:           false,
