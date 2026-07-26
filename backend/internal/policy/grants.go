@@ -32,6 +32,18 @@ type GrantStore interface {
 	Remember(grant Grant) error
 }
 
+// GrantLister is an optional GrantStore extension for control-plane listing.
+type GrantLister interface {
+	List() []Grant
+}
+
+// GrantRevoker is an optional GrantStore extension for revoking remembered grants.
+type GrantRevoker interface {
+	// Revoke removes matching grants. Empty pattern matches tool-wide grants only
+	// when matchEmptyPattern is true; otherwise empty pattern revokes all grants for the tool.
+	Revoke(toolName, pattern string, matchEmptyPattern bool) int
+}
+
 // MemoryGrantStore is an in-memory GrantStore implementation.
 type MemoryGrantStore struct {
 	mu     sync.RWMutex
@@ -84,7 +96,75 @@ func (s *MemoryGrantStore) Remember(grant Grant) error {
 	return nil
 }
 
+// List returns a copy of remembered grants.
+func (s *MemoryGrantStore) List() []Grant {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.grants) == 0 {
+		return nil
+	}
+	out := make([]Grant, len(s.grants))
+	copy(out, s.grants)
+	return out
+}
+
+// Revoke removes matching grants and returns how many were removed.
+func (s *MemoryGrantStore) Revoke(toolName, pattern string, matchEmptyPattern bool) int {
+	if s == nil {
+		return 0
+	}
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return 0
+	}
+	pattern = strings.TrimSpace(pattern)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.grants) == 0 {
+		return 0
+	}
+	kept := s.grants[:0]
+	removed := 0
+	for _, grant := range s.grants {
+		if !strings.EqualFold(strings.TrimSpace(grant.Tool), toolName) {
+			kept = append(kept, grant)
+			continue
+		}
+		grantPattern := strings.TrimSpace(grant.Pattern)
+		if pattern == "" {
+			if matchEmptyPattern && grantPattern != "" {
+				kept = append(kept, grant)
+				continue
+			}
+			removed++
+			continue
+		}
+		if !strings.EqualFold(grantPattern, pattern) {
+			kept = append(kept, grant)
+			continue
+		}
+		removed++
+	}
+	if removed == 0 {
+		return 0
+	}
+	// zero trailing slots to avoid retaining references
+	for i := len(kept); i < len(s.grants); i++ {
+		s.grants[i] = Grant{}
+	}
+	s.grants = kept
+	return removed
+}
+
 var errDangerousGrant = monadicError("grant_rejected_dangerous_tool")
+
+// IsDangerousGrantError reports whether Remember rejected a dangerous tool.
+func IsDangerousGrantError(err error) bool {
+	return err != nil && err.Error() == string(errDangerousGrant)
+}
 
 type monadicError string
 
