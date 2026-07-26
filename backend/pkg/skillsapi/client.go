@@ -1139,23 +1139,23 @@ func (s RuntimeStatus) MCPSummary() RuntimeMCPSummary {
 }
 
 type RuntimeStatus struct {
-	DefaultModel    string                  `json:"default_model"`
-	Providers       []RuntimeProviderStatus `json:"providers"`
-	ProviderCount   int                     `json:"provider_count"`
-	MCPs            []RuntimeMCPStatus      `json:"mcps"`
-	MCPCount        int                     `json:"mcp_count"`
-	ToolEfficiency  *RuntimeToolEfficiency  `json:"tool_efficiency,omitempty"`
+	DefaultModel   string                  `json:"default_model"`
+	Providers      []RuntimeProviderStatus `json:"providers"`
+	ProviderCount  int                     `json:"provider_count"`
+	MCPs           []RuntimeMCPStatus      `json:"mcps"`
+	MCPCount       int                     `json:"mcp_count"`
+	ToolEfficiency *RuntimeToolEfficiency  `json:"tool_efficiency,omitempty"`
 }
 
 // RuntimeToolEfficiency is the live tool-loop telemetry snapshot exposed by
 // /api/runtime/status. Labels are generic (reason/outcome/code) — not per-tool.
 type RuntimeToolEfficiency struct {
-	CapturedAt         time.Time              `json:"captured_at"`
-	Preflight          RuntimeToolPreflight   `json:"preflight"`
-	Outcomes           RuntimeToolOutcomes    `json:"outcomes"`
-	DispositionReplays RuntimeToolReplays     `json:"disposition_replays"`
-	FailCategories     map[string]float64     `json:"fail_categories"`
-	InefficiencyFlags  []string               `json:"inefficiency_flags"`
+	CapturedAt         time.Time            `json:"captured_at"`
+	Preflight          RuntimeToolPreflight `json:"preflight"`
+	Outcomes           RuntimeToolOutcomes  `json:"outcomes"`
+	DispositionReplays RuntimeToolReplays   `json:"disposition_replays"`
+	FailCategories     map[string]float64   `json:"fail_categories"`
+	InefficiencyFlags  []string             `json:"inefficiency_flags"`
 }
 
 type RuntimeToolPreflight struct {
@@ -2449,6 +2449,109 @@ type CheckpointFile struct {
 type CheckpointFilesResponse struct {
 	Files []CheckpointFile `json:"files"`
 	Count int              `json:"count"`
+}
+
+// SessionUserTurn describes one user-authored turn in visible session history.
+type SessionUserTurn struct {
+	Index            int      `json:"index"`
+	MessageIndex     int      `json:"message_index"`
+	Preview          string   `json:"preview"`
+	EndMessageIndex  int      `json:"end_message_index"`
+	MessageID        string   `json:"message_id,omitempty"`
+	TurnID           string   `json:"turn_id,omitempty"`
+	HasLaterMutation bool     `json:"has_later_mutation,omitempty"`
+	CheckpointIDs    []string `json:"checkpoint_ids,omitempty"`
+	BaseCheckpointID string   `json:"base_checkpoint_id,omitempty"`
+}
+
+type SessionTurnsResponse struct {
+	SessionID string            `json:"session_id"`
+	Turns     []SessionUserTurn `json:"turns"`
+	Count     int               `json:"count"`
+}
+
+// SessionBacktrackAuditResponse lists durable backtrack tombstones for a session.
+// Entries are oldest-first; full message bodies are intentionally not retained.
+type SessionBacktrackAuditResponse struct {
+	SessionID string                      `json:"session_id"`
+	Entries   []SessionBacktrackTombstone `json:"entries"`
+	Count     int                         `json:"count"`
+}
+
+// SessionBacktrackRequest selects a user-turn anchor and describes how to rewind.
+type SessionBacktrackRequest struct {
+	UserTurnIndex *int   `json:"user_turn_index,omitempty"`
+	MessageIndex  *int   `json:"message_index,omitempty"`
+	MessageID     string `json:"message_id,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	EditPrompt    string `json:"edit_prompt,omitempty"`
+	AutoSubmit    bool   `json:"auto_submit,omitempty"`
+	IncludeAnchor bool   `json:"include_anchor,omitempty"`
+	PreviewOnly   bool   `json:"preview_only,omitempty"`
+}
+
+type SessionBacktrackCodeRestore struct {
+	CheckpointID string   `json:"checkpoint_id,omitempty"`
+	Mode         string   `json:"mode,omitempty"`
+	AppliedPaths []string `json:"applied_paths,omitempty"`
+	Errors       []string `json:"errors,omitempty"`
+	Preview      []string `json:"preview,omitempty"`
+}
+
+// SessionBacktrackResult is the outcome of a user-turn backtrack (or preview).
+type SessionBacktrackResult struct {
+	SessionID               string   `json:"session_id"`
+	Mode                    string   `json:"mode"`
+	UserTurnIndex           int      `json:"user_turn_index"`
+	MessageIndex            int      `json:"message_index"`
+	MessageID               string   `json:"message_id,omitempty"`
+	TruncatedToMessageCount int      `json:"truncated_to_message_count"`
+	RemovedMessageCount     int      `json:"removed_message_count"`
+	RemovedUserTurns        int      `json:"removed_user_turns"`
+	AnchorPreview           string   `json:"anchor_preview,omitempty"`
+	EditedPrompt            string   `json:"edited_prompt,omitempty"`
+	ComposerPrompt          string   `json:"composer_prompt,omitempty"`
+	IncludeAnchor           bool     `json:"include_anchor,omitempty"`
+	AutoSubmitted           bool     `json:"auto_submitted,omitempty"`
+	PreviewOnly             bool     `json:"preview_only,omitempty"`
+	BaseCheckpointID        string   `json:"base_checkpoint_id,omitempty"`
+	LaterCheckpointIDs      []string `json:"later_checkpoint_ids,omitempty"`
+	// Tombstone is the durable audit summary written on successful conversation truncation.
+	Tombstone     *SessionBacktrackTombstone   `json:"tombstone,omitempty"`
+	CodeRestore   *SessionBacktrackCodeRestore `json:"code_restore,omitempty"`
+	Warnings      []string                     `json:"warnings,omitempty"`
+	EventsEmitted []string                     `json:"events_emitted,omitempty"`
+}
+
+// SessionBacktrackTombstone is a lightweight durable audit summary of a physical history truncate.
+// Full message bodies are intentionally not retained.
+type SessionBacktrackTombstone struct {
+	ID                      string    `json:"id"`
+	CreatedAt               time.Time `json:"created_at"`
+	SessionID               string    `json:"session_id,omitempty"`
+	Mode                    string    `json:"mode,omitempty"`
+	Reason                  string    `json:"reason,omitempty"`
+	UserTurnIndex           int       `json:"user_turn_index"`
+	MessageIndex            int       `json:"message_index"`
+	MessageID               string    `json:"message_id,omitempty"`
+	AnchorPreview           string    `json:"anchor_preview,omitempty"`
+	TruncatedToMessageCount int       `json:"truncated_to_message_count"`
+	RemovedMessageCount     int       `json:"removed_message_count"`
+	RemovedUserTurns        int       `json:"removed_user_turns"`
+	PriorMessageCount       int       `json:"prior_message_count,omitempty"`
+	RemovedMessageIDs       []string  `json:"removed_message_ids,omitempty"`
+	RemovedTurnIDs          []string  `json:"removed_turn_ids,omitempty"`
+	Edited                  bool      `json:"edited,omitempty"`
+	IncludeAnchor           bool      `json:"include_anchor,omitempty"`
+	BaseCheckpointID        string    `json:"base_checkpoint_id,omitempty"`
+	LaterCheckpointIDs      []string  `json:"later_checkpoint_ids,omitempty"`
+}
+
+type SessionBacktrackResponse struct {
+	OK           bool                    `json:"ok"`
+	Result       *SessionBacktrackResult `json:"result,omitempty"`
+	Error        string                  `json:"error,omitempty"`
+	SubmitResult map[string]interface{}  `json:"submit_result,omitempty"`
 }
 
 type ClearSessionHistoryResponse struct {
@@ -4620,6 +4723,41 @@ func (c *Client) RestoreSessionCheckpoint(ctx context.Context, sessionID, checkp
 	}
 	var response SessionRuntimeCommandResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/restore", query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ListSessionTurns(ctx context.Context, sessionID string) (*SessionTurnsResponse, error) {
+	var response SessionTurnsResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/turns", nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ListSessionBacktrackAudit(ctx context.Context, sessionID string) (*SessionBacktrackAuditResponse, error) {
+	var response SessionBacktrackAuditResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/backtrack/audit", nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) PreviewSessionBacktrack(ctx context.Context, sessionID string, req SessionBacktrackRequest) (*SessionBacktrackResponse, error) {
+	req.PreviewOnly = true
+	req.AutoSubmit = false
+	var response SessionBacktrackResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/backtrack/preview", nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ApplySessionBacktrack(ctx context.Context, sessionID string, req SessionBacktrackRequest) (*SessionBacktrackResponse, error) {
+	req.PreviewOnly = false
+	var response SessionBacktrackResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/backtrack", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

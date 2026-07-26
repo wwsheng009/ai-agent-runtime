@@ -3337,3 +3337,89 @@ func TestClient_ListAndAckTeamMailbox(t *testing.T) {
 func strPtr(v string) *string {
 	return &v
 }
+
+func TestClient_SessionBacktrackEndpoints(t *testing.T) {
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/turns"):
+			_, _ = w.Write([]byte(`{"session_id":"sess/1","count":2,"turns":[{"index":0,"message_index":0,"preview":"first","end_message_index":2},{"index":1,"message_index":2,"preview":"second","end_message_index":4,"base_checkpoint_id":"chk_1","has_later_mutation":true,"checkpoint_ids":["chk_2"]}]}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/backtrack/audit"):
+			_, _ = w.Write([]byte(`{"session_id":"sess/1","count":1,"entries":[{"id":"bt_1","created_at":"2026-07-26T00:00:00Z","mode":"conversation","user_turn_index":1,"message_index":2,"anchor_preview":"second","truncated_to_message_count":2,"removed_message_count":2,"removed_user_turns":1,"prior_message_count":4}]}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/backtrack/preview"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"session_id":"sess/1","mode":"conversation","user_turn_index":1,"message_index":2,"truncated_to_message_count":2,"removed_message_count":2,"removed_user_turns":1,"composer_prompt":"second","preview_only":true}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/backtrack"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"session_id":"sess/1","mode":"both","user_turn_index":1,"message_index":2,"truncated_to_message_count":2,"removed_message_count":2,"removed_user_turns":1,"composer_prompt":"second rewritten","edited_prompt":"second rewritten","base_checkpoint_id":"chk_1","later_checkpoint_ids":["chk_2"],"code_restore":{"checkpoint_id":"chk_1","mode":"code","applied_paths":["a.txt"]},"events_emitted":["backtrack_started","backtrack_finished"]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL)
+	ctx := context.Background()
+
+	turns, err := client.ListSessionTurns(ctx, "sess/1")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, gotMethod)
+	require.Equal(t, "/api/runtime/sessions/sess%2F1/turns", gotPath)
+	require.Equal(t, "sess/1", turns.SessionID)
+	require.Equal(t, 2, turns.Count)
+	require.Len(t, turns.Turns, 2)
+	require.Equal(t, "second", turns.Turns[1].Preview)
+	require.Equal(t, "chk_1", turns.Turns[1].BaseCheckpointID)
+
+	audit, err := client.ListSessionBacktrackAudit(ctx, "sess/1")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, gotMethod)
+	require.Equal(t, "/api/runtime/sessions/sess%2F1/backtrack/audit", gotPath)
+	require.Equal(t, "sess/1", audit.SessionID)
+	require.Equal(t, 1, audit.Count)
+	require.Len(t, audit.Entries, 1)
+	require.Equal(t, "bt_1", audit.Entries[0].ID)
+	require.Equal(t, "second", audit.Entries[0].AnchorPreview)
+
+	idx := 1
+	preview, err := client.PreviewSessionBacktrack(ctx, "sess/1", SessionBacktrackRequest{
+		UserTurnIndex: &idx,
+		Mode:          "conversation",
+		AutoSubmit:    true, // client must force false for preview
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/api/runtime/sessions/sess%2F1/backtrack/preview", gotPath)
+	require.Contains(t, gotBody, `"user_turn_index":1`)
+	require.Contains(t, gotBody, `"preview_only":true`)
+	require.NotContains(t, gotBody, `"auto_submit":true`)
+	require.True(t, preview.OK)
+	require.NotNil(t, preview.Result)
+	require.True(t, preview.Result.PreviewOnly)
+	require.Equal(t, 2, preview.Result.TruncatedToMessageCount)
+
+	apply, err := client.ApplySessionBacktrack(ctx, "sess/1", SessionBacktrackRequest{
+		UserTurnIndex: &idx,
+		Mode:          "both",
+		EditPrompt:    "second rewritten",
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/api/runtime/sessions/sess%2F1/backtrack", gotPath)
+	require.Contains(t, gotBody, `"mode":"both"`)
+	require.Contains(t, gotBody, `"edit_prompt":"second rewritten"`)
+	require.True(t, apply.OK)
+	require.NotNil(t, apply.Result)
+	require.Equal(t, "chk_1", apply.Result.BaseCheckpointID)
+	require.NotNil(t, apply.Result.CodeRestore)
+	require.Equal(t, []string{"a.txt"}, apply.Result.CodeRestore.AppliedPaths)
+	require.Contains(t, apply.Result.EventsEmitted, "backtrack_started")
+}
