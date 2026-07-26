@@ -114,10 +114,11 @@ func resolveChatAgentdefState(agentName, profileRoot string) (*chatProfileState,
 	if agentName == "" {
 		return nil, nil
 	}
-	def, err := agentdef.Resolve(agentName, agentdef.DiscoverOptions{
-		ProfileRoot: strings.TrimSpace(profileRoot),
-		ExtraDirs:   mergeActivePluginAgentDirs(nil),
-	})
+	def, err := agentdef.Resolve(agentName, agentdefDiscoverOptions(
+		"",
+		strings.TrimSpace(profileRoot),
+		mergeActivePluginAgentDirs(nil),
+	))
 	if err != nil {
 		return nil, err
 	}

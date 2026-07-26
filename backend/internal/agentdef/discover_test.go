@@ -90,4 +90,55 @@ func TestResolveNotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDiscoverSkipProjectRoot(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+
+	userDir := filepath.Join(home, ".aicli", "agents")
+	require.NoError(t, os.MkdirAll(userDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(userDir, "helper.md"), []byte(`---
+name: helper
+description: user helper
+permissionMode: default
+---
+User helper
+`), 0o644))
+
+	projectDir := filepath.Join(project, ".agents", "agents")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "helper.md"), []byte(`---
+name: helper
+description: project helper
+permissionMode: plan
+---
+Project helper
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "project-only.md"), []byte(`---
+name: project-only
+description: project only agent
+permissionMode: default
+---
+Project only
+`), 0o644))
+
+	catalog, err := Discover(DiscoverOptions{
+		ProjectRoot:     project,
+		UserHome:        home,
+		SkipProjectRoot: true,
+	})
+	require.NoError(t, err)
+
+	def, ok := catalog.Get("helper")
+	require.True(t, ok)
+	assert.Equal(t, "user helper", def.Description)
+	assert.Equal(t, SourceUser, def.Source)
+
+	_, ok = catalog.Get("project-only")
+	assert.False(t, ok, "project agents must be skipped when SkipProjectRoot")
+
+	// Builtins remain available.
+	_, ok = catalog.Get("explore")
+	assert.True(t, ok)
+}
+
 func boolPtr(v bool) *bool { return &v }

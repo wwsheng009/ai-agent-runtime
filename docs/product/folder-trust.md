@@ -23,8 +23,11 @@ Truth-y values: `1`, `true`, `on` (case-insensitive). Everything else is off.
 |---------|-------------------|---------------------|
 | Project plugins (`.aicli/plugins`, `.agents/plugins`) | Loaded | **Skipped** (`SkipProjectRoot`) |
 | User-home plugins (`~/.aicli/plugins`, `AICLI_HOME/plugins`) | Loaded | Loaded |
+| Project agent defs (`.agents/agents`, `.aicli/agents`) | Loaded | **Skipped** (`agentdef.SkipProjectRoot`) |
+| Builtin + user-home agents (`~/.aicli/agents`) | Loaded | Loaded |
 | Project MCP config under project root | Allowed | **Blocked** |
 | User-global MCP (`~/.aicli`, `~/.config/aicli`) | Allowed | Allowed |
+| Plugin-contributed hooks (via project plugins) | Loaded with plugins | **Skipped** with project plugins |
 | Project `permissions.yaml` (R1) | Not gated by folder trust | Not gated by folder trust |
 
 Untrusted does **not** disable tools or permissions; it only skips **project-local** code-exec surfaces that can run unreviewed repo content.
@@ -87,6 +90,7 @@ Session bootstrap attaches the same resolution to `ChatSession.FolderTrust`.
 | Pure decide/store/paths | `backend/internal/foldertrust/` |
 | Process gate + `/trust` | `backend/cmd/aicli/commands/chat_folder_trust.go` |
 | Plugin skip | `plugin_runtime.go` → `plugins.DiscoverOptions.SkipProjectRoot` |
+| Agentdef skip | `agentdefDiscoverOptions` → `agentdef.DiscoverOptions.SkipProjectRoot` |
 | MCP path gate | `mcp_integration.go` → `foldertrust.IsProjectScopedPath` |
 | Flags | `chat --trust`, shared exec `--trust` |
 
@@ -94,4 +98,5 @@ Session bootstrap attaches the same resolution to `ChatSession.FolderTrust`.
 
 - Default **off** keeps CI and existing scripts unchanged until operators opt in.
 - Folder trust is complementary to R1 project permissions; it does not replace tool allow/deny lists.
-- Optional future gates (project agentdef roots, direct `hooks.yaml` outside plugins) are product follow-ups; current R2 wiring focuses on plugins + MCP path gate.
+- Project hooks are gated today via **project plugins** (no separate direct project `hooks.yaml` loader in CLI). Direct hooks load remains a product follow-up if added later.
+- API/toolbroker agentdef resolve paths are out of this CLI process gate unless they share the same process cache.

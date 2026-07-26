@@ -756,7 +756,8 @@ off | workspace | read-only | strict
 | Plan mode 文件流 + 审批（CLI/agent/API/UI） | B3 + residuals | **已交付** | frontend Plan 页签已闭环 |
 | Project durable memory | B4 | **MVP 已交付** | keyword JSONL；**非** FTS/vector/云同步 |
 | 应用层 sandbox profiles | B5 | **已交付** | off/workspace/read-only/strict + 显式降级 |
-| Lifecycle hooks Stop/Compact/… | B6 | **已交付** | folder trust **未做** |
+| Lifecycle hooks Stop/Compact/… | B6 | **已交付** | folder trust 见 R2 |
+| Folder trust（项目 plugins/agentdef/MCP） | R2 | **已交付** | 默认 off（`AICLI_FOLDER_TRUST`）；CLI early resolve |
 | Tool protocol + streaming / SSE live | C1 | **已交付（MVP）** | 非完整外部 tool server |
 | Plugin 安装/信任/装载 | C2 | **已交付（MVP）** | **无 marketplace** |
 | ACP stdio 子集 | C3 | **已交付（子集）** | 无 session/load；无 Leader IPC |
@@ -787,7 +788,7 @@ off | workspace | read-only | strict
 | ID | 项 | 建议触发条件 |
 | --- | --- | --- |
 | R1 | 项目 permission 规则源文件 + CLI `--allow/--deny` 产品面 | **done（2026-07-25）** — `policy/permissions_file.go` + chat/exec overlay + `/debug`；见 product note |
-| R2 | Folder trust（项目 hooks/MCP 信任模型） | 打开陌生仓成为主路径 |
+| R2 | Folder trust（项目 hooks/MCP 信任模型） | **done（2026-07-25）** — `internal/foldertrust` + CLI early resolve + plugin/agentdef/MCP gates + `/trust`/`--trust`；见 `docs/product/folder-trust.md` |
 | R3 | 统一 system-reminder / ephemeral instruction 通道 | completion/doom-loop/plan 提醒形态要统一 |
 | R4 | team teammate ↔ agentdef 更深字段对齐 | teammate 要完整继承 def tools/sandbox |
 | R5 | frontend grants / memory / plugins 面板 | Web 控制面要运营 harness 配置 |

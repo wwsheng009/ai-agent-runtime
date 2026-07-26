@@ -250,6 +250,51 @@ func TestHandleTrustCommandFeatureOff(t *testing.T) {
 	}
 }
 
+func TestAgentdefDiscoverOptionsRespectsTrust(t *testing.T) {
+	t.Setenv(foldertrust.EnvFolderTrust, "1")
+	resetProcessFolderTrust()
+	t.Cleanup(resetProcessFolderTrust)
+
+	project := t.TempDir()
+	setProcessFolderTrust(foldertrust.Resolution{
+		FeatureEnabled: true,
+		Trusted:        false,
+		Outcome:        foldertrust.OutcomeUntrusted,
+		Source:         "headless_deny",
+		WorkspaceKey:   project,
+		ProjectRoot:    project,
+	})
+	opts := agentdefDiscoverOptions(project, "", nil)
+	if !opts.SkipProjectRoot {
+		t.Fatal("untrusted must set SkipProjectRoot")
+	}
+	if opts.ProjectRoot != "" {
+		t.Fatalf("untrusted must not pass ProjectRoot, got %q", opts.ProjectRoot)
+	}
+
+	setProcessFolderTrust(foldertrust.Resolution{
+		FeatureEnabled: true,
+		Trusted:        true,
+		Outcome:        foldertrust.OutcomeTrusted,
+		Source:         "grant",
+		WorkspaceKey:   project,
+		ProjectRoot:    project,
+	})
+	opts = agentdefDiscoverOptions(project, "profile-root", []string{"extra"})
+	if opts.SkipProjectRoot {
+		t.Fatal("trusted must not skip project root")
+	}
+	if opts.ProjectRoot != project {
+		t.Fatalf("ProjectRoot = %q, want %q", opts.ProjectRoot, project)
+	}
+	if opts.ProfileRoot != "profile-root" {
+		t.Fatalf("ProfileRoot = %q", opts.ProfileRoot)
+	}
+	if len(opts.ExtraDirs) != 1 || opts.ExtraDirs[0] != "extra" {
+		t.Fatalf("ExtraDirs = %#v", opts.ExtraDirs)
+	}
+}
+
 func TestPluginsStateFileNameStable(t *testing.T) {
 	if plugins.StateFileName == "" {
 		t.Fatal("plugins.StateFileName empty")

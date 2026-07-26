@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 )
 
@@ -120,6 +121,22 @@ func folderTrustProjectRoot(session *ChatSession) string {
 		return cwd
 	}
 	return ""
+}
+
+// agentdefDiscoverOptions builds agentdef discovery options with folder-trust applied.
+// Untrusted workspaces skip project agent roots; builtins, user-home agents, profile,
+// and ExtraDirs (e.g. trusted plugin agent dirs) remain available.
+func agentdefDiscoverOptions(projectRoot, profileRoot string, extraDirs []string) agentdef.DiscoverOptions {
+	opts := agentdef.DiscoverOptions{
+		ProfileRoot: strings.TrimSpace(profileRoot),
+		ExtraDirs:   extraDirs,
+	}
+	if projectScopeAllowed() {
+		opts.ProjectRoot = strings.TrimSpace(projectRoot)
+	} else {
+		opts.SkipProjectRoot = true
+	}
+	return opts
 }
 
 // applyChatFolderTrust attaches a resolved trust decision to the session.

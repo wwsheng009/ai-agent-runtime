@@ -15,6 +15,10 @@ import (
 type DiscoverOptions struct {
 	// ProjectRoot is the project working directory (defaults to cwd when empty).
 	ProjectRoot string
+	// SkipProjectRoot skips .agents/agents and .aicli/agents under ProjectRoot/cwd.
+	// Used by folder-trust gating when the workspace is untrusted; user-home and
+	// builtin agents remain available.
+	SkipProjectRoot bool
 	// UserHome overrides the home directory used for ~/.aicli/agents.
 	UserHome string
 	// ProfileRoot, when set, also loads profile agents/<id>/agent.yaml via adapter.
@@ -82,20 +86,22 @@ func Discover(opts DiscoverOptions) (*Catalog, error) {
 		return nil, err
 	}
 
-	projectRoot := strings.TrimSpace(opts.ProjectRoot)
-	if projectRoot == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			projectRoot = cwd
+	if !opts.SkipProjectRoot {
+		projectRoot := strings.TrimSpace(opts.ProjectRoot)
+		if projectRoot == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				projectRoot = cwd
+			}
 		}
-	}
-	if projectRoot != "" {
-		for _, rel := range []string{
-			filepath.Join(".agents", "agents"),
-			filepath.Join(".aicli", "agents"),
-		} {
-			dir := filepath.Join(projectRoot, rel)
-			if err := loadDirIntoCatalog(catalog, dir, SourceProject); err != nil {
-				return nil, err
+		if projectRoot != "" {
+			for _, rel := range []string{
+				filepath.Join(".agents", "agents"),
+				filepath.Join(".aicli", "agents"),
+			} {
+				dir := filepath.Join(projectRoot, rel)
+				if err := loadDirIntoCatalog(catalog, dir, SourceProject); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

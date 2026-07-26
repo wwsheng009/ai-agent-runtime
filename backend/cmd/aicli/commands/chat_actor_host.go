@@ -355,10 +355,11 @@ func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, 
 	if session != nil {
 		profileRoot = strings.TrimSpace(session.ProfileRoot)
 	}
-	def, err := agentdef.Resolve(agentType, agentdef.DiscoverOptions{
-		ProjectRoot: strings.TrimSpace(workspaceRoot),
-		ProfileRoot: profileRoot,
-	})
+	def, err := agentdef.Resolve(agentType, agentdefDiscoverOptions(
+		strings.TrimSpace(workspaceRoot),
+		profileRoot,
+		nil,
+	))
 	if err != nil || def == nil {
 		return
 	}
@@ -871,10 +872,11 @@ func resolveLocalAgentdefCompletionRequirement(agentName, profileRoot, projectRo
 	if agentName == "" {
 		return ""
 	}
-	def, err := agentdef.Resolve(agentName, agentdef.DiscoverOptions{
-		ProjectRoot: strings.TrimSpace(projectRoot),
-		ProfileRoot: strings.TrimSpace(profileRoot),
-	})
+	def, err := agentdef.Resolve(agentName, agentdefDiscoverOptions(
+		strings.TrimSpace(projectRoot),
+		strings.TrimSpace(profileRoot),
+		nil,
+	))
 	if err != nil || def == nil {
 		return ""
 	}
