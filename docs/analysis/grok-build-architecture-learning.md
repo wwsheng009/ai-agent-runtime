@@ -32,9 +32,10 @@
 > | --- | --- | --- |
 > | Iteration A（Agent def + permission + completion） | **核心已交付** | 无 MiniJinja；R1 项目 `.aicli/permissions.yaml` + CLI allow/deny 产品面已加深 |
 > | Iteration B（worktree / plan / memory / sandbox profiles / hooks） | **核心已交付** | memory 为 keyword JSONL MVP；无 FTS/vector/云同步；无 best-of-n / persona IO contract |
-> | Iteration C（toolprotocol / plugin / ACP / doom-loop / tool search / optional OS sandbox） | **核心已交付** | 均为子集/MVP；无 marketplace / Leader IPC / session load |
+> | Iteration C（toolprotocol / plugin / ACP / doom-loop / tool search / optional OS sandbox） | **核心已交付** | 均为子集/MVP；ACP 含 session/load（R6）+ tool terminal stream（R7）；无 marketplace / Leader IPC |
 >
-> 残余债与明确非目标见实施方案 **§15 需求覆盖矩阵与残余 backlog**。
+> 残余债与明确非目标见实施方案 **§15 需求覆盖矩阵与残余 backlog**。  
+> R1–R7 已收口（permissions 产品面 / folder trust / system-reminder / teammate↔agentdef / frontend harness 面板 / ACP session/load / tool terminal stream）；A5 residual（2026-07-26）补齐 complete_task 缺失时 structured JSON fallback → blocked/done 恢复；R3 residual（2026-07-26）pure advisory strip-on-persist；旁路产品面 **user-turn backtrack Phase 1–6 + residual UI done**（2026-07-26：`message_id`/`turn_id` + TUI Esc 选择器 + tombstone/审计 API/CLI + Restore 面板 Backtrack audit + dialog `edit_prompt` + frontend transcript 内联导航/高亮 + bubble **Edit** 内联编辑 seed dialog）；下一波 ROI 候选为 R8+（可选重开项：FTS/marketplace/best-of-n）。
 
 ---
 
@@ -47,7 +48,7 @@
 | 核心价值 | 单机/工作区 coding harness：编辑、沙箱、子 agent、插件、记忆 | 运行时编排：chat actor、team、mailbox、skills、provider 多协议 |
 | 扩展面 | Agent def / Personas / Plugins / Hooks / MCP / LSP / Marketplace | Skills Runtime / toolkit / MCP / team tools / spawn_agent / spawn_team / profile agent 包 |
 | 集成协议 | ACP（stdio / WS serve / relay）+ Leader IPC | HTTP/SSE runtime API + aicli 本地 actor |
-| 安全 | OS 级 sandbox + 多层 permission + folder trust | 应用层 sandbox profiles + permission 管道已产品化；Linux 可选 bwrap（默认 off）；**folder trust 仍弱** |
+| 安全 | OS 级 sandbox + 多层 permission + folder trust | 应用层 sandbox profiles + permission 管道已产品化；Linux 可选 bwrap（默认 off）；**folder trust 已交付（R2，默认 off）** |
 | Skills | 目录发现 + slash 可调用 + plugin 打包；偏 harness 产品面 | **更深 runtime**：workflow DAG、embedding route、top-k exposure、hot-reload、quota/usage、admin API |
 | Agents | `.grok/agents/*.md` 一等公民角色定义 + built-in subagents + personas | **四层并存**：(1) runtime multi-agent（强）；(2) profile/`agent.yaml`（有样例）；(3) skill 元数据 `agents/openai.yaml`（非角色 def）；(4) 可移植 `.agents/agents/*.md` **已落地** |
 
@@ -175,7 +176,7 @@ User/Client (TUI | ACP | -p headless)
 | Runtime multi-agent：`spawn_agent` / `spawn_team` / child session / AgentControl | **已实现且在用** | 对标 Grok subagent/host 协作；编排更强；worktree isolation **已可选** |
 | Profile agent 包：`profile.yaml` + `agents/*/agent.yaml` | **加载器 + 仓库样例**（如 `examples/profiles/coding`） | 对标 Grok agent package/配置；与 md def 可互转 |
 | Skill 元数据：`.agents/skills/*/agents/openai.yaml` | 存在，属 Codex skill 元数据 | **不是** Grok 式角色定义（刻意不升级） |
-| Grok 式可移植 `AgentDefinition`（tools/permissionMode/skills/completionRequirement + body prompt） | **已交付**（`internal/agentdef` + `.agents/agents/*.md` + `chat --agent` / spawn defaults） | 无 MiniJinja 条件模板；team teammate 更深对齐仍可收紧 |
+| Grok 式可移植 `AgentDefinition`（tools/permissionMode/skills/completionRequirement + body prompt） | **已交付**（`internal/agentdef` + `.agents/agents/*.md` + `chat --agent` / spawn defaults + teammate profile 对齐） | 无 MiniJinja 条件模板 |
 
 ### 3.2 相对 Grok 的能力债（实施后：已交付 / 仍弱 / 明确不做）
 
@@ -191,13 +192,13 @@ User/Client (TUI | ACP | -p headless)
 | Plan Mode 产品流 | **已交付** | planmode 包 + `/plan` + agent tools + API + frontend Plan 页签 | 与 Grok UX 仍有差距，但闭环可用 |
 | Cross-session memory | **MVP 已交付** | keyword JSONL + `/memory` + context 注入 | **明确不做** FTS/vector/云同步/session-end 自动摘要（除非重开） |
 | 插件/打包 | **MVP 已交付** | `internal/plugins` + `aicli plugin` | **明确不做** marketplace（除非重开） |
-| 标准嵌入协议 | **子集已交付** | `aicli agent stdio` ACP 子集 | 无 session/load、无 Leader IPC |
-| Tool streaming | **核心已交付** | progress + live SSE fan-out | 全工具 terminal stream 完备度仍可加深 |
+| 标准嵌入协议 | **子集已交付（含 R6）** | `aicli agent stdio` ACP 子集 + `session/load` | 无 Leader IPC；MCPServers 未接 |
+| Tool streaming | **已交付（含 R7）** | progress + live SSE + shell/MCP terminal stream + ACP/chat consumers | 非 shell toolkit 中途 chunk 与远程 MCP progressive 仍可加深 |
 | Doom-loop / completionRequirement | **已交付** | completion recovery + doom-loop tracker（硬停 opt-in） | 默认软警告；与 Grok 硬策略不同 |
-| Folder trust | **仍弱** | 未产品化 | 打开陌生仓的 hooks/MCP 信任风险仍在 |
+| Folder trust | **已交付（R2）** | `internal/foldertrust` + CLI early resolve + plugin/agentdef/MCP gates | 默认 off（`AICLI_FOLDER_TRUST`）；见 product note |
 | Profile / agent 样例 | **已补** | coding profile + explore/plan/general md | 默认 subagent routing 仍可能关闭（配置问题，非能力缺失） |
-| 统一 system-reminder 通道 | **部分** | completion 等路径有 reminder | 非统一 ephemeral instruction 产品面 |
-| frontend grants/memory/plugins 面板 | **仍弱 / 未立项硬门** | 仅 plan preview 已做 | Web 控制面 harness 面板不完整 |
+| 统一 system-reminder 通道 | **已交付（R3 + residual）** | `agent/system_reminder.go` 统一 envelope + kinds；completion/stop-hook/doom-loop/plan 共通道；pure advisory strip-on-persist | recovery 仍 durable；pure advisory 不污染 session history |
+| frontend grants/memory/plugins 面板 | **已交付（R5 MVP）** | Settings Harness：permissions 只读 + grants remember/revoke + memory keyword + local plugins trust/enable | 无 marketplace / FTS/vector；危险工具不可 remember |
 
 ---
 
@@ -400,16 +401,22 @@ Grok 有 doom-loop recovery 测试与策略。
 - 同工具同参重复 N 次 → 提醒/熔断
 - 编辑连续失败 → 换策略提醒
 - 无 `complete_task`/`report_task_outcome` 结束 → recovery reminder
+- recovery 后仍无 tool observation 时：若 terminal 输出含合法 structured JSON（`task_status` blocked/done/failed/handoff），teammate runner 恢复为 orchestrator 可消费的 blocked/done，**不再**一律 `task.failed`
 - 并行 batch 失败不要误判为 doom-loop
 
 #### 4.13 System Reminder 机制
 
 Grok 大量用 `<system-reminder>` 注入短暂策略（persona、completion、goal continuation），不污染长期 system prompt。
 
-建议本项目统一：
+**实施后（R3，2026-07-25）**：本项目已统一 ephemeral instruction 通道：
 
-- ephemeral instruction channel（不入长期 memory）
-- 用于：permission 变更、plan mode、worker completion、tool 失败恢复
+- 包：`backend/internal/agent/system_reminder.go`
+- 模型可见 envelope：`<system-reminder kind="...">...</system-reminder>`
+- kinds：`completion_requirement` / `stop_hook` / `doom_loop` / `disposition_replay` / `exploration_stall` / `plan_mode` / `runtime_advisory`
+- 元数据：`system_reminder`、`system_reminder_kind`、`ephemeral_instruction`、可选 `system_reminder_durable`
+- 事件：`system_reminder.injected`
+- 生产者：completion recovery、stop-hook block、doom-loop/disposition/exploration advisories、plan mode 首轮注入
+- R3 residual（2026-07-26）：pure advisory 已收紧为 **prompt-only / strip-on-persist**（`DurableToolResultPayloads` + `DurableMessagesForPersist`；`system_reminder_durable=false`）；recovery（completion/stop_hook/plan_mode）仍 durable
 
 ---
 
@@ -484,15 +491,17 @@ Grok 大量用 `<system-reminder>` 注入短暂策略（persona、completion、g
 
 | 现有 | 改造意图 | 状态 |
 | --- | --- | --- |
-| `agent/loop` | permission pipeline、completionRequirement、reminders、doom-loop | **核心已接** |
+| `agent/loop` | permission pipeline、completionRequirement、reminders、doom-loop | **核心已接**；R3 统一 reminder 通道 |
+| `agent/system_reminder` | `<system-reminder kind>` envelope + kinds + inject event | **已落地（R3）** |
 | `policy.Engine` | 规则管道 + grants + readonly auto + plan paths | **核心已接** |
 | `toolkit` | capabilities + stream + should_list | **核心已接** |
 | `toolbroker` | 路由/会话绑定；plan/worktree 控制器 | **核心已接** |
-| `hooks` | Stop/Failure/Compact；PostToolUseFailure | **主事件已接**；folder trust **未做** |
+| `hooks` | Stop/Failure/Compact；PostToolUseFailure | **主事件已接**；folder trust **已接（R2）** |
+| `foldertrust` | 项目 hooks/plugin/agentdef/MCP 信任门 | **已落地（R2）** |
 | `executor/sandbox` | profile 化 + optional OS backend | **已接** |
 | `chat/actor` | plan mode 状态机；agentdef 绑定 | **已接** |
-| `team/*` | isolation 字段 / outcome；persona IO **未做** | **部分** |
-| frontend | plan 审批 **已做**；grants/memory/plugins 面板 **未做** | **部分** |
+| `team/*` | isolation 字段 / outcome；persona IO **未做** | **部分**（R4 teammate↔agentdef 权限/tool/sandbox 已对齐；persona IO 仍未做） |
+| frontend | plan 审批 **已做**；grants/memory/plugins harness 面板 **已做（R5）** | **核心已接** |
 
 ---
 
@@ -504,18 +513,19 @@ Grok 大量用 `<system-reminder>` 注入短暂策略（persona、completion、g
 | Runtime multi-agent / Team 任务图 | 中 | **强** | **强** | 保持优势 |
 | 可移植 markdown Agent 角色定义 | **强** | 弱 | **中强 / 已交付** | 无 MiniJinja |
 | Profile/`agent.yaml` 包 | 中 | 中强代码 / 弱样例 | **中强 + 有样例** | coding profile 等 |
-| 权限规则管道 | 强 | 中 | **中强 / 核心已交付** | R1 规则源产品面已加深；folder trust 仍弱 |
+| 权限规则管道 | 强 | 中 | **中强 / 核心已交付** | R1 规则源 + R2 folder trust 已加深 |
 | OS Sandbox | 强 | 弱 | **中（应用层强；OS 可选）** | Linux bwrap；默认 off |
 | Worktree 隔离 | 强 | 弱 | **中强 / 已交付** | 无 best-of-n |
 | Plan Mode 产品流 | 强 | 弱 | **中强 / 已交付** | CLI+API+前端 |
-| Hooks 完备度 | 强 | 中 | **中强** | folder trust 仍缺 |
+| Hooks 完备度 | 强 | 中 | **中强** | Stop/Compact 已接；folder trust R2 已接 |
+| System-reminder 通道 | 强 | 弱/分散 | **中强 / 已交付（R3）** | 统一 envelope；pure prompt-only 可再收紧 |
 | Cross-session Memory | 强 | 中弱 | **中（keyword MVP）** | 非 FTS/vector |
 | Plugin 生态 | 强 | 弱 | **中（本地 MVP）** | 无 marketplace |
 | MCP | 强 | 强 | **强** | + dynamic list |
 | ACP/IDE 嵌入 | 强 | 弱 | **中（stdio 子集）** | 无 Leader IPC |
-| Tool streaming | 强 | 中 | **中强** | protocol + live SSE |
+| Tool streaming | 强 | 中 | **强（R7）** | shell/MCP stream + ACP/chat；非 shell toolkit 仍可加深 |
 | HTTP Runtime API | 弱/不同定位 | 强 | **强** | 保持优势 |
-| Web 控制台 | Dashboard 向 | 强（Teams 控制面） | **强**；harness 面板部分 | plan 已做；grants/memory/plugins 未做 |
+| Web 控制台 | Dashboard 向 | 强（Teams 控制面） | **强**；harness 面板 MVP | plan + Settings Harness（R5）；无 marketplace/FTS |
 | Provider 多协议 | 相对聚焦 | 强 | **强** | 保持优势 |
 
 ### 8.1 初版判断 → 校正后 → 实施后（diff 表）

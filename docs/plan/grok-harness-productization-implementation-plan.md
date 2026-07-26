@@ -1,7 +1,7 @@
 # Grok Harness 产品化实施方案
 
 更新时间: 2026-07-25  
-状态: Iteration A 完成（含 A6 Agent Source residual）；**Iteration B 核心已收口**（B1–B6，含 general.md）；**Iteration C 核心已收口**（C1–C3 + C4a doom-loop + C4b tool search + C4c optional OS sandbox）  
+状态: Iteration A 完成（含 A6 Agent Source residual）；**Iteration B 核心已收口**（B1–B6，含 general.md）；**Iteration C 核心已收口**（C1–C3 + C4a doom-loop + C4b tool search + C4c optional OS sandbox）；**R1–R7 residual 已收口**；**R3 pure-advisory strip-on-persist residual 已收口**；旁路 **backtrack frontend residual 已收口**（audit 面板 + dialog edit_prompt + transcript 导航/内联编辑；下一波仅 R8+ 可选产品线）  
 权威分析: [`docs/analysis/grok-build-architecture-learning.md`](../analysis/grok-build-architecture-learning.md)
 
 ## 0. 一句话目标
@@ -334,12 +334,15 @@ type ToolMeta struct {
 2. [x] Team worker / 指定 child 默认 `complete_task`（可配置）  
 3. [x] Loop 结束前检查：未调用 complete → system reminder + 有限次 recovery turn  
 4. [x] 与 `report_task_outcome` / team task status 字段对齐，避免双写语义分叉  
+5. [x] **A5 residual（2026-07-26）**：session `Success=false`（complete_task 未观察 tool）时仍解析 terminal structured JSON fallback；`task_status=blocked|handoff|done` 恢复为 orchestrator 可消费的 Success/Blocked，走 `BlockTask`/complete 而非硬 `task.failed`
 
 **主要触点**：
 
 - `backend/internal/agent/loop*.go` + `completion_requirement.go`  
+- `backend/internal/team/teammate_runner.go`（`applyStructuredTaskOutcome`）  
 - team worker 启动路径 / `spawn_agent` / `spawn_subagents` / session actor loop config  
-- `docs/skill_runtime/team_task_outcome_contract.md`
+- `docs/skill_runtime/team_task_outcome_contract.md`  
+- 回归：`cmd/aicli/commands` docs team regression + `internal/team` structured recovery tests
 
 ### A6. 文档与可观测 — **done（文档主路径 + Agent Source residual）**
 
@@ -517,7 +520,8 @@ off | workspace | read-only | strict
 - [x] bridge：runtime/chatcore events → `session/update`；approvals → `session/request_permission`  
 - [x] 约束：stdout 仅 NDJSON；tools 默认开；ephemeral 默认 true  
 - 目标：IDE/外部 host 可嵌入，不替代 HTTP runtime-server  
-- 残余：端到端真实 LLM 联调（非单测）可选；session/load 未实现（LoadSession=false）
+- 残余：端到端真实 LLM 联调（非单测）可选  
+- R6：`session/load` 已实现（`LoadSession=true`；host 内存 reattach + 可选 durable load；回放 `session/update` 后返回 null）
 
 ### C4. Harness 打磨
 
@@ -733,6 +737,16 @@ off | workspace | read-only | strict
 | 2026-07-25 | B3 frontend plan preview：session plan API client + `useRuntimePlanMode` + Artifact panel Plan 页签（approve/request_changes/quit） |
 | 2026-07-25 | 文档对齐：分析文档回写实施后状态；本方案新增 §15 需求覆盖矩阵与残余 backlog；scrub B3「可后置」过时触点 |
 | 2026-07-25 | R1 收口：项目 `.aicli/permissions.yaml` + CLI `--allow-tool`/`--deny-tool` 产品面；chat/exec/actor/`/call`/`/debug` 接线；`docs/product/project-permissions.md` |
+| 2026-07-25 | R2 收口：`internal/foldertrust` + CLI early resolve + plugin/agentdef/MCP gates + `/trust`/`--trust`；`docs/product/folder-trust.md` |
+| 2026-07-25 | R3 收口：统一 system-reminder / ephemeral instruction 通道（`agent/system_reminder.go`）；completion / stop-hook / doom-loop / plan 共 envelope + kind metadata + `system_reminder.injected` |
+| 2026-07-25 | R4 收口：team teammate ↔ agentdef 更深字段对齐（permission/read_only 投影 + API/local tool allow/deny/sandbox） |
+| 2026-07-25 | R5 收口：frontend Settings Harness 面板（permissions/grants/memory/plugins MVP）+ harness control-plane API client/hook；`docs/product/harness-settings.md` |
+| 2026-07-26 | R6 收口：ACP `session/load`（`LoadSession=true` + host 内存 reattach / durable resume + 历史 `session/update` 回放）；`docs/aicli/agents.md` / install 同步 |
+| 2026-07-25 | R7 收口：Tool terminal stream 完备度 — `toolprotocol.TerminalStreamWriter` + shell/aicli_exec OutputMirror tee + MCP start/result phase/stream + ACP `tool.progress` content + chat stream render；live-only 合同不变 |
+| 2026-07-26 | A5 residual 收口：`applyStructuredTaskOutcome` 在 complete_task 未满足（session Success=false）时仍解析 structured JSON fallback；blocked/handoff/done 恢复 Success 并走 BlockTask/complete；docs team regression + full `cmd/aicli/commands` / R7 packages green |
+| 2026-07-26 | R3 residual 收口：pure advisory（doom-loop / disposition / exploration / runtime_advisory）prompt-only + strip-on-persist；`DurableToolResultPayloads` / `DurableMessagesForPersist`；recovery kinds 仍 durable；`go test ./internal/agent` green |
+| 2026-07-26 | Backtrack Phase 6 residual：frontend Restore 面板 **Backtrack audit**（tombstone 列表/详情接到 `useRuntimeCheckpoints` 已有 audit 数据；Restore tab 徽标；`artifact-panel-shared` helpers + 单测）；见 `docs/plan/session-user-turn-backtrack-plan.md` |
+| 2026-07-26 | Backtrack Phase 6 residual 收口：transcript 内联导航（Esc/↑↓/Enter/双击）+ bubble **Edit** 内联编辑；`resolveSeededBacktrackEditPrompt` seed dialog；plan-mode reload event-key 去重；WIP 拆分指南 `docs/plan/wip-commit-split-guide.md` |
 
 ---
 
@@ -750,7 +764,7 @@ off | workspace | read-only | strict
 | Permission 管道（hooks→rules→grants→readonly→mode）+ trace | A4 | **核心已交付** | 项目文件规则源 / CLI `--allow/--deny` 产品面仍可加深 |
 | Shell 只读表 + dangerous | A4 | **已交付** | 与 readonly auto 联动 |
 | Tool taxonomy（read_only / mutates / kind） | A 侧 toolkit 标注；C1 加深 | **已交付** | 未强制独立 `tooltaxonomy` 包 |
-| completionRequirement ↔ team outcome | A5 | **已交付** | team worker 强制 complete_task；general.md = none |
+| completionRequirement ↔ team outcome | A5 | **已交付** | team worker 强制 complete_task；structured JSON fallback 在 complete_task 缺失时仍恢复 blocked/done；general.md = none |
 | Worktree isolation + apply/discard + claims | B1 + residuals | **已交付** | 无 completion auto-apply；无 best-of-n |
 | 内置 explore / plan / general 角色 | B2 | **已交付** | |
 | Plan mode 文件流 + 审批（CLI/agent/API/UI） | B3 + residuals | **已交付** | frontend Plan 页签已闭环 |
@@ -760,10 +774,12 @@ off | workspace | read-only | strict
 | Folder trust（项目 plugins/agentdef/MCP） | R2 | **已交付** | 默认 off（`AICLI_FOLDER_TRUST`）；CLI early resolve |
 | Tool protocol + streaming / SSE live | C1 | **已交付（MVP）** | 非完整外部 tool server |
 | Plugin 安装/信任/装载 | C2 | **已交付（MVP）** | **无 marketplace** |
-| ACP stdio 子集 | C3 | **已交付（子集）** | 无 session/load；无 Leader IPC |
+| ACP stdio 子集 | C3 + R6 | **已交付（子集）** | session/load 已支持；无 Leader IPC / 无 MCPServers |
 | Doom-loop harness | C4a | **已交付** | 硬停 opt-in；默认可警告 |
 | Tool search / dynamic listing | C4b | **已交付** | ShouldList + search_tool |
 | Optional OS sandbox | C4c | **已交付（可选）** | Linux bwrap；非 Linux stub；默认 off |
+| 统一 system-reminder / ephemeral instruction | R3 | **已交付** | `<system-reminder kind>` envelope + kinds；completion/stop-hook/doom-loop/plan 共通道；pure advisory strip-on-persist（R3 residual） |
+| frontend harness 面板（permissions/grants/memory/plugins） | R5 | **已交付（MVP）** | Settings Harness；permissions 只读；无 marketplace/FTS |
 | Skills Runtime 加深 / 重做 loader | 非目标 | **不做** | 保持现有 runtime |
 | 重写 team 编排 / TUI 克隆 | 非目标 | **不做** | |
 | skill `agents/openai.yaml` 升角色系统 | 非目标 | **不做** | |
@@ -789,11 +805,11 @@ off | workspace | read-only | strict
 | --- | --- | --- |
 | R1 | 项目 permission 规则源文件 + CLI `--allow/--deny` 产品面 | **done（2026-07-25）** — `policy/permissions_file.go` + chat/exec overlay + `/debug`；见 product note |
 | R2 | Folder trust（项目 hooks/MCP 信任模型） | **done（2026-07-25）** — `internal/foldertrust` + CLI early resolve + plugin/agentdef/MCP gates + `/trust`/`--trust`；见 `docs/product/folder-trust.md` |
-| R3 | 统一 system-reminder / ephemeral instruction 通道 | completion/doom-loop/plan 提醒形态要统一 |
-| R4 | team teammate ↔ agentdef 更深字段对齐 | teammate 要完整继承 def tools/sandbox |
-| R5 | frontend grants / memory / plugins 面板 | Web 控制面要运营 harness 配置 |
-| R6 | ACP session/load 与更多 methods | IDE 嵌入超出当前 stdio 子集 |
-| R7 | Tool terminal stream 全工具完备度 | 长 shell/MCP UX 不够 |
+| R3 | 统一 system-reminder / ephemeral instruction 通道 | **done（2026-07-25）** — `agent/system_reminder.go` + completion/stop-hook/doom-loop/plan producers；`system_reminder.injected`；**R3 residual（2026-07-26）** pure advisory prompt-only / strip-on-persist（tool-result 进 prompt，durable history 剥离；recovery 仍 durable） |
+| R4 | team teammate ↔ agentdef 更深字段对齐 | **done（2026-07-25）** — profile→agentdef permission/read_only 投影；RunMeta 用 def 权限（无 profile 仍 bypass）；API/local tool allow/deny/sandbox 对齐 spawn_agent |
+| R5 | frontend grants / memory / plugins 面板 | **done（2026-07-25）** — Settings Harness + `/api/runtime/harness/*` client + control-plane hook；permissions 只读 / grants remember-revoke / memory keyword list-search-append / local plugins trust-enable-disable；无 marketplace/FTS；见 `docs/product/harness-settings.md` |
+| R6 | ACP session/load 与更多 methods | **done（2026-07-25）** — `loadSession=true` + host `LoadSession` 内存/durable 解析 + 历史回放；MCPServers/Leader IPC 仍不做 |
+| R7 | Tool terminal stream 全工具完备度 | **done（2026-07-25）** — `TerminalStreamWriter` + shell/aicli_exec mirror tee → `tool.progress`；MCP phase start/finish + result stream；ACP mid-call content；chat `• Stream` render；非 shell toolkit 仍 out of scope；无远程 MCP progressive protocol |
 | R8 | Memory FTS/embedding（若重开） | keyword MVP 不够用且接受复杂度 |
 | R9 | Marketplace（若重开） | 本地 plugin MVP 不够分发 |
 | R10 | best-of-n / persona IO（若重开） | 并行方案评选成为产品诉求 |
