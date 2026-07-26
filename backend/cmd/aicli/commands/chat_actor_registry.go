@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
@@ -3149,6 +3150,7 @@ func (r *localActorRegistry) applyTeamTeammateAgentContext(ctx context.Context, 
 			changed = setLocalAgentSessionContextIfChanged(session, toolbroker.AgentSessionContextDepth, 1) || changed
 			if profile := strings.TrimSpace(mate.Profile); profile != "" {
 				changed = setLocalAgentSessionContextIfChanged(session, toolbroker.AgentSessionContextAgentType, profile) || changed
+				changed = applyLocalTeammateAgentdefSessionDefaults(session, profile) || changed
 			}
 			if err := r.upsertTeamTeammateAgentRecord(ctx, record, mate, session, leadSessionID, path); err != nil {
 				return false, err
@@ -3157,6 +3159,44 @@ func (r *localActorRegistry) applyTeamTeammateAgentContext(ctx context.Context, 
 		}
 	}
 	return false, nil
+}
+
+// applyLocalTeammateAgentdefSessionDefaults projects portable agentdef
+// permission_mode / read_only onto a teammate session when not already set.
+// Explicit session values win; task runs still force complete_task via RunMeta.
+func applyLocalTeammateAgentdefSessionDefaults(session *runtimechat.Session, profile string) bool {
+	if session == nil {
+		return false
+	}
+	profile = strings.TrimSpace(profile)
+	if !agentdef.IsPortableAgentName(profile) {
+		return false
+	}
+	workspaceRoot := ""
+	if path := agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath); path != "" {
+		workspaceRoot = path
+	} else if path := agentcontrol.ContextString(session, sessionmeta.WorkspacePath); path != "" {
+		workspaceRoot = path
+	}
+	profileRoot := ""
+	// ChatSession-backed sessions may store ProfileRoot only on the host session;
+	// discovery still works from project/user/builtin roots.
+	defaults, ok := agentdef.PortableSessionDefaults(profile, agentdefDiscoverOptions(workspaceRoot, profileRoot, nil))
+	if !ok {
+		return false
+	}
+	changed := false
+	if defaults.PermissionMode != "" {
+		if existing := strings.TrimSpace(agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode)); existing == "" {
+			changed = setLocalAgentSessionContextIfChanged(session, toolbroker.AgentSessionContextPermissionMode, defaults.PermissionMode) || changed
+		}
+	}
+	if defaults.HasReadOnly && defaults.ReadOnly {
+		if _, ok := runtimeSessionContextBool(session, toolbroker.AgentSessionContextReadOnly); !ok {
+			changed = setLocalAgentSessionContextIfChanged(session, toolbroker.AgentSessionContextReadOnly, true) || changed
+		}
+	}
+	return changed
 }
 
 func (r *localActorRegistry) upsertTeamTeammateAgentRecord(ctx context.Context, record team.Team, mate team.Teammate, session *runtimechat.Session, leadSessionID, path string) error {

@@ -348,7 +348,7 @@ func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, 
 		return
 	}
 	agentType = strings.TrimSpace(agentType)
-	if agentType == "" {
+	if !agentdef.IsPortableAgentName(agentType) {
 		return
 	}
 	profileRoot := ""

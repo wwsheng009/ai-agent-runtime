@@ -415,10 +415,16 @@ func (p *docsTeamRegressionProvider) Call(ctx context.Context, req *runtimellm.L
 
 	lastUser := latestMessageByRole(req.Messages, "user")
 	lastTool := latestMessageByRole(req.Messages, "tool")
-
+	lastUserContent := strings.TrimSpace(lastUser.Content)
+	// Prefer durable session/tool identity over brittle last-user prefixes.
+	// Multi-step teammate runs may inject system-reminder / recovery user
+	// messages after tool results, so HasPrefix("You are teammate") alone flakes.
 	switch {
+	case strings.HasPrefix(sessionID, "team_docs__"):
+		return p.handleTeammateRequest(sessionID, req, lastTool)
+
 	case strings.TrimSpace(lastTool.ToolCallID) == "" &&
-		strings.TrimSpace(lastUser.Content) == "创建几个团队成员来探索docs目录的文档":
+		lastUserContent == "创建几个团队成员来探索docs目录的文档":
 		return &runtimellm.LLMResponse{
 			Model: req.Model,
 			ToolCalls: []runtimetypes.ToolCall{
@@ -447,23 +453,24 @@ func (p *docsTeamRegressionProvider) Call(ctx context.Context, req *runtimellm.L
 			},
 		}, nil
 
-	case strings.HasPrefix(strings.TrimSpace(lastUser.Content), "You are the team lead. Decompose the goal into a DAG plan."):
+	case strings.Contains(lastUserContent, "You are the team lead. Decompose the goal into a DAG plan."):
 		return &runtimellm.LLMResponse{
 			Content: `{"tasks":[{"id":"task_docs_guides","title":"Summarize docs/guides/getting-started.md","goal":"Read docs/guides/getting-started.md and summarize the getting started guidance","read_paths":["docs/guides"],"deliverables":["guide summary"]}],"summary":"follow up on blocked docs exploration"}`,
 			Model:   req.Model,
 		}, nil
 
-	case strings.HasPrefix(strings.TrimSpace(lastUser.Content), "You are the team lead. Provide a concise final summary"):
+	case strings.Contains(lastUserContent, "You are the team lead. Provide a concise final summary"):
 		return &runtimellm.LLMResponse{
 			Content: "docs 探索已完成，agents 说明协作方式，guides 给出起步路径。",
 			Model:   req.Model,
 		}, nil
 
-	case strings.HasPrefix(strings.TrimSpace(lastUser.Content), "You are teammate"):
+	case strings.Contains(lastUserContent, "You are teammate") ||
+		strings.HasPrefix(strings.TrimSpace(lastTool.ToolCallID), "call-docs-"):
 		return p.handleTeammateRequest(sessionID, req, lastTool)
 
 	case strings.TrimSpace(lastTool.ToolCallID) == "call-spawn-docs" &&
-		strings.TrimSpace(lastUser.Content) == "创建几个团队成员来探索docs目录的文档":
+		lastUserContent == "创建几个团队成员来探索docs目录的文档":
 		return &runtimellm.LLMResponse{
 			Content: "已创建 team_docs，两个成员会探索 docs 目录并持续回报。",
 			Model:   req.Model,
@@ -474,9 +481,22 @@ func (p *docsTeamRegressionProvider) Call(ctx context.Context, req *runtimellm.L
 }
 
 func (p *docsTeamRegressionProvider) handleTeammateRequest(sessionID string, req *runtimellm.LLMRequest, lastTool runtimetypes.Message) (*runtimellm.LLMResponse, error) {
-	switch strings.TrimSpace(sessionID) {
+	sessionID = strings.TrimSpace(sessionID)
+	toolCallID := strings.TrimSpace(lastTool.ToolCallID)
+	// Derive teammate identity from tool-call prefixes when session metadata is missing
+	// or when recovery/reminder user messages obscure the original teammate prompt.
+	if sessionID == "" {
+		switch {
+		case strings.HasPrefix(toolCallID, "call-docs-arch"):
+			sessionID = "team_docs__docs_arch"
+		case strings.HasPrefix(toolCallID, "call-docs-api"):
+			sessionID = "team_docs__docs_api"
+		}
+	}
+
+	switch sessionID {
 	case "team_docs__docs_arch":
-		switch strings.TrimSpace(lastTool.ToolCallID) {
+		switch toolCallID {
 		case "":
 			return singleToolResponse(req.Model, "call-docs-arch-spec", toolbroker.ToolReadTaskSpec, map[string]interface{}{})
 		case "call-docs-arch-spec":
@@ -497,7 +517,7 @@ func (p *docsTeamRegressionProvider) handleTeammateRequest(sessionID string, req
 		}
 
 	case "team_docs__docs_api":
-		switch strings.TrimSpace(lastTool.ToolCallID) {
+		switch toolCallID {
 		case "":
 			return singleToolResponse(req.Model, "call-docs-api-context", toolbroker.ToolReadTaskContext, map[string]interface{}{})
 		case "call-docs-api-context":
