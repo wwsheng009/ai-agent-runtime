@@ -11,6 +11,15 @@ export {
 } from "./config";
 export { sendAgentChat } from "./agent-chat";
 export {
+  appendHarnessMemory,
+  getHarnessGrants,
+  getHarnessMemory,
+  getHarnessPermissions,
+  getHarnessPlugins,
+  updateHarnessGrants,
+  updateHarnessPlugin,
+} from "./harness";
+export {
   listRuntimeLogs,
   streamRuntimeLogs,
 } from "./logs";

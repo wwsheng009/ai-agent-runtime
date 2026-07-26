@@ -3,6 +3,7 @@ import {
   InfoIcon,
   PaletteIcon,
   Settings2Icon,
+  ShieldIcon,
   SlidersHorizontalIcon,
   XIcon,
   type LucideIcon,
@@ -22,6 +23,7 @@ import { useTranslation } from "react-i18next";
 import { AboutSettingsPage } from "./about-settings-page";
 import { AppearanceSettingsPage } from "./appearance-settings-page";
 import { ChatSettingsPage } from "./chat-settings-page";
+import { HarnessSettingsPage } from "./harness-settings-page";
 import { LocalizationSettings } from "./localization-settings";
 import { NotificationSettingsPage } from "./notification-settings-page";
 import { WorkspaceSettingsPage } from "./workspace-settings-page";
@@ -31,6 +33,7 @@ export type SettingsSectionId =
   | "workspace"
   | "chat"
   | "notifications"
+  | "harness"
   | "about";
 
 type SettingsDialogProps = {
@@ -155,6 +158,12 @@ export function SettingsDialog({
         icon: BellIcon,
       },
       {
+        id: "harness",
+        label: t("sections.harness.label"),
+        description: t("sections.harness.description"),
+        icon: ShieldIcon,
+      },
+      {
         id: "about",
         label: t("sections.about.label"),
         description: t("sections.about.description"),
@@ -274,6 +283,9 @@ export function SettingsDialog({
               />
             ) : null}
             {activeSection === "notifications" ? <NotificationSettingsPage /> : null}
+            {activeSection === "harness" ? (
+              <HarnessSettingsPage runtimeClient={runtimeClient} />
+            ) : null}
             {activeSection === "about" ? (
               <AboutSettingsPage
                 providerOptions={providerOptions}

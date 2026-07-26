@@ -33,6 +33,7 @@ import (
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -2737,6 +2738,25 @@ func TestApplyAPISessionCompletionRequirement_EmptyDefaultsToNone(t *testing.T) 
 	config := &agent.LoopReActConfig{}
 	applyAPISessionCompletionRequirement(config, nil, "", "", "")
 	assert.Equal(t, agent.CompletionRequirementNone, config.CompletionRequirement)
+}
+
+func TestApplyAPIChildAgentdefToolPolicy_ExploreDeniesWrites(t *testing.T) {
+	apiAgent := agent.NewAgent(&agent.Config{Name: "child", Provider: "test", Model: "test"}, nil)
+	applyAPIChildAgentdefToolPolicy(apiAgent, "explore", t.TempDir())
+	policy := apiAgent.GetToolExecutionPolicy()
+	require.NotNil(t, policy)
+	assert.True(t, policy.ReadOnly)
+	assert.True(t, policy.DeniedTools["write"])
+	assert.True(t, policy.DeniedTools["edit"])
+	engine := apiAgent.GetPermissionEngine()
+	require.NotNil(t, engine)
+	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode)
+}
+
+func TestApplyAPIChildAgentdefToolPolicy_SkipsSyntheticTeamTeammate(t *testing.T) {
+	apiAgent := agent.NewAgent(&agent.Config{Name: "child", Provider: "test", Model: "test"}, nil)
+	applyAPIChildAgentdefToolPolicy(apiAgent, "team_teammate", t.TempDir())
+	assert.Nil(t, apiAgent.GetToolExecutionPolicy())
 }
 
 func TestBuildSessionActor_DoesNotAutoScanDefaultWorkspace(t *testing.T) {

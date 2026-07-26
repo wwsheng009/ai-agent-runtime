@@ -711,6 +711,15 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
 
+	// Harness control plane (project permissions / grants / memory / plugins)
+	runtimeRouter.HandleFunc("/harness/permissions", h.GetHarnessPermissions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/grants", h.GetHarnessGrants).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/grants", h.UpdateHarnessGrants).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/memory", h.GetHarnessMemory).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/memory", h.UpdateHarnessMemory).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
+
 	// Teams
 	runtimeRouter.HandleFunc("/agent-control/agents", h.ListAgentControlAgents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/agent-control/mailbox", h.ListAgentControlMailbox).Methods(http.MethodGet)
