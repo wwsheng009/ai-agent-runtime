@@ -1,14 +1,19 @@
 import type {
   RuntimeCreateSessionRequest,
   RuntimeCreateSessionResponse,
+  RuntimeSessionBacktrackAuditResponse,
+  RuntimeSessionBacktrackRequest,
+  RuntimeSessionBacktrackResponse,
   RuntimeSessionCheckpointFilesResponse,
   RuntimeSessionCheckpointPreviewMode,
   RuntimeSessionCheckpointPreviewResponse,
+  RuntimeSessionCheckpointRestoreResponse,
   RuntimeSessionCheckpointsQuery,
   RuntimeSessionCheckpointsResponse,
   RuntimeSessionPlanMode,
   RuntimeSessionPlanModeUpdateRequest,
   RuntimeSessionRecord,
+  RuntimeSessionTurnsResponse,
   RuntimeSessionUsersResponse,
   RuntimeSessionsQuery,
   RuntimeSessionsResponse,
@@ -141,6 +146,97 @@ export async function previewSessionCheckpoint(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+export async function restoreSessionCheckpoint(
+  sessionId: string,
+  checkpointId: string,
+  mode: RuntimeSessionCheckpointPreviewMode = "both",
+): Promise<RuntimeSessionCheckpointRestoreResponse> {
+  return fetchRuntimeJson<RuntimeSessionCheckpointRestoreResponse>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+export async function listSessionTurns(
+  sessionId: string,
+): Promise<RuntimeSessionTurnsResponse> {
+  return fetchRuntimeJson<RuntimeSessionTurnsResponse>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/turns`),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+export async function previewSessionBacktrack(
+  sessionId: string,
+  request: RuntimeSessionBacktrackRequest,
+): Promise<RuntimeSessionBacktrackResponse> {
+  return fetchRuntimeJson<RuntimeSessionBacktrackResponse>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/backtrack/preview`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...request,
+        preview_only: true,
+        auto_submit: false,
+      }),
+    },
+  );
+}
+
+export async function applySessionBacktrack(
+  sessionId: string,
+  request: RuntimeSessionBacktrackRequest,
+): Promise<RuntimeSessionBacktrackResponse> {
+  return fetchRuntimeJson<RuntimeSessionBacktrackResponse>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/backtrack`),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...request,
+        preview_only: false,
+      }),
+    },
+  );
+}
+
+export async function listSessionBacktrackAudit(
+  sessionId: string,
+): Promise<RuntimeSessionBacktrackAuditResponse> {
+  return fetchRuntimeJson<RuntimeSessionBacktrackAuditResponse>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/backtrack/audit`,
+    ),
+    {
+      headers: {
+        Accept: "application/json",
+      },
     },
   );
 }

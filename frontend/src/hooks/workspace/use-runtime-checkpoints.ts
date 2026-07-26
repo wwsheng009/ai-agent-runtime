@@ -9,22 +9,36 @@ import {
 } from "@/components/workspace/artifact-panel-shared";
 import {
   getSessionCheckpointFiles,
+  listSessionBacktrackAudit,
   listSessionCheckpoints,
   previewSessionCheckpoint,
+  restoreSessionCheckpoint,
+  type RuntimeSessionBacktrackTombstone,
   type RuntimeSessionCheckpointFile,
+  type RuntimeSessionCheckpointPreviewMode,
   type RuntimeSessionCheckpointPreviewResult,
   type RuntimeSessionCheckpointSummary,
 } from "@/lib/runtime-api";
 
 type UseRuntimeCheckpointsOptions = {
   lastRuntimeEventType?: string;
+  runtimeEventCount?: number;
   sessionId?: string;
 };
 
 type ShouldReloadRuntimeCheckpointsOptions = {
-  checkpointsCount: number;
+  lastHandledEventKey?: string;
+  lastRuntimeEventKey?: string;
   lastRuntimeEventType?: string;
   loadedCheckpointSessionId: string;
+  sessionId?: string;
+};
+
+type ShouldReloadBacktrackAuditOptions = {
+  lastHandledEventKey?: string;
+  lastRuntimeEventKey?: string;
+  lastRuntimeEventType?: string;
+  loadedAuditSessionId: string;
   sessionId?: string;
 };
 
@@ -35,8 +49,20 @@ type ResolveCheckpointDetailStateOptions = {
   selectedCheckpointFilePath: string | null;
 };
 
+export function buildRuntimeEventReloadKey(
+  lastRuntimeEventType?: string,
+  runtimeEventCount?: number,
+) {
+  if (!lastRuntimeEventType) {
+    return "";
+  }
+
+  return `${lastRuntimeEventType}:${runtimeEventCount ?? 0}`;
+}
+
 export function shouldReloadRuntimeCheckpoints({
-  checkpointsCount,
+  lastHandledEventKey,
+  lastRuntimeEventKey,
   lastRuntimeEventType,
   loadedCheckpointSessionId,
   sessionId,
@@ -45,11 +71,52 @@ export function shouldReloadRuntimeCheckpoints({
     return false;
   }
 
-  return (
-    loadedCheckpointSessionId !== sessionId ||
-    checkpointsCount === 0 ||
-    lastRuntimeEventType === "checkpoint_created"
-  );
+  if (loadedCheckpointSessionId !== sessionId) {
+    return true;
+  }
+
+  if (
+    lastRuntimeEventType !== "checkpoint_created" &&
+    lastRuntimeEventType !== "backtrack_finished" &&
+    lastRuntimeEventType !== "rewind_finished"
+  ) {
+    return false;
+  }
+
+  if (!lastRuntimeEventKey) {
+    return false;
+  }
+
+  return lastRuntimeEventKey !== lastHandledEventKey;
+}
+
+export function shouldReloadBacktrackAudit({
+  lastHandledEventKey,
+  lastRuntimeEventKey,
+  lastRuntimeEventType,
+  loadedAuditSessionId,
+  sessionId,
+}: ShouldReloadBacktrackAuditOptions) {
+  if (!sessionId) {
+    return false;
+  }
+
+  if (loadedAuditSessionId !== sessionId) {
+    return true;
+  }
+
+  if (
+    lastRuntimeEventType !== "backtrack_finished" &&
+    lastRuntimeEventType !== "rewind_finished"
+  ) {
+    return false;
+  }
+
+  if (!lastRuntimeEventKey) {
+    return false;
+  }
+
+  return lastRuntimeEventKey !== lastHandledEventKey;
 }
 
 export function resolveCheckpointDetailState({
@@ -88,12 +155,14 @@ export function resolveCheckpointDetailState({
 
 export function useRuntimeCheckpoints({
   lastRuntimeEventType,
+  runtimeEventCount,
   sessionId,
 }: UseRuntimeCheckpointsOptions) {
   const [checkpoints, setCheckpoints] = useState<RuntimeSessionCheckpointSummary[]>([]);
   const [checkpointsError, setCheckpointsError] = useState<string | null>(null);
   const [checkpointsLoading, setCheckpointsLoading] = useState(false);
   const [loadedCheckpointSessionId, setLoadedCheckpointSessionId] = useState("");
+  const [lastHandledCheckpointEventKey, setLastHandledCheckpointEventKey] = useState("");
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [selectedCheckpointFilePath, setSelectedCheckpointFilePath] = useState<string | null>(
     null,
@@ -108,11 +177,41 @@ export function useRuntimeCheckpoints({
   const [checkpointPreviewById, setCheckpointPreviewById] = useState<
     Record<string, RuntimeSessionCheckpointPreviewResult>
   >({});
+  const [checkpointRestorePendingId, setCheckpointRestorePendingId] = useState("");
+  const [checkpointRestoreError, setCheckpointRestoreError] = useState<string | null>(null);
+  const [checkpointRestoreNotice, setCheckpointRestoreNotice] = useState<string | null>(null);
+  const [backtrackAuditEntries, setBacktrackAuditEntries] = useState<
+    RuntimeSessionBacktrackTombstone[]
+  >([]);
+  const [backtrackAuditError, setBacktrackAuditError] = useState<string | null>(null);
+  const [backtrackAuditLoading, setBacktrackAuditLoading] = useState(false);
+  const [loadedAuditSessionId, setLoadedAuditSessionId] = useState("");
+  const [lastHandledAuditEventKey, setLastHandledAuditEventKey] = useState("");
+  const lastRuntimeEventKey = buildRuntimeEventReloadKey(
+    lastRuntimeEventType,
+    runtimeEventCount,
+  );
 
   useEffect(() => {
+    if (!sessionId) {
+      setCheckpoints([]);
+      setCheckpointsError(null);
+      setCheckpointsLoading(false);
+      setLoadedCheckpointSessionId("");
+      setLastHandledCheckpointEventKey("");
+      setSelectedCheckpointId(null);
+      setSelectedCheckpointFilePath(null);
+      setCheckpointDetailsError(null);
+      setCheckpointDetailsLoadingId("");
+      setCheckpointRestoreError(null);
+      setCheckpointRestoreNotice(null);
+      return;
+    }
+
     if (
       !shouldReloadRuntimeCheckpoints({
-        checkpointsCount: checkpoints.length,
+        lastHandledEventKey: lastHandledCheckpointEventKey,
+        lastRuntimeEventKey,
         lastRuntimeEventType,
         loadedCheckpointSessionId,
         sessionId,
@@ -140,6 +239,7 @@ export function useRuntimeCheckpoints({
             ? current
             : response.checkpoints[0]?.id ?? null,
         );
+        setLastHandledCheckpointEventKey(lastRuntimeEventKey);
       } catch (error) {
         if (cancelled) {
           return;
@@ -160,9 +260,74 @@ export function useRuntimeCheckpoints({
       cancelled = true;
     };
   }, [
-    checkpoints.length,
+    lastHandledCheckpointEventKey,
+    lastRuntimeEventKey,
     lastRuntimeEventType,
     loadedCheckpointSessionId,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setBacktrackAuditEntries([]);
+      setBacktrackAuditError(null);
+      setBacktrackAuditLoading(false);
+      setLoadedAuditSessionId("");
+      setLastHandledAuditEventKey("");
+      return;
+    }
+
+    if (
+      !shouldReloadBacktrackAudit({
+        lastHandledEventKey: lastHandledAuditEventKey,
+        lastRuntimeEventKey,
+        lastRuntimeEventType,
+        loadedAuditSessionId,
+        sessionId,
+      })
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      setBacktrackAuditLoading(true);
+      setBacktrackAuditError(null);
+
+      try {
+        const response = await listSessionBacktrackAudit(sessionId);
+        if (cancelled) {
+          return;
+        }
+
+        setBacktrackAuditEntries(response.entries ?? []);
+        setLoadedAuditSessionId(sessionId);
+        setLastHandledAuditEventKey(lastRuntimeEventKey);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setBacktrackAuditEntries([]);
+        setBacktrackAuditError(
+          error instanceof Error ? error.message : "failed to load backtrack audit",
+        );
+      } finally {
+        if (!cancelled) {
+          setBacktrackAuditLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    lastHandledAuditEventKey,
+    lastRuntimeEventKey,
+    lastRuntimeEventType,
+    loadedAuditSessionId,
     sessionId,
   ]);
 
@@ -271,7 +436,52 @@ export function useRuntimeCheckpoints({
     setSelectedCheckpointFilePath(filePath);
   }
 
+  async function handleRestoreCheckpoint(
+    mode: RuntimeSessionCheckpointPreviewMode = "both",
+  ) {
+    if (!sessionId || !selectedCheckpointId) {
+      return;
+    }
+
+    const confirmed =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Restore checkpoint ${selectedCheckpointId} with mode="${mode}"?\nThis may rewrite conversation and/or workspace files.`,
+          );
+    if (!confirmed) {
+      return;
+    }
+
+    setCheckpointRestorePendingId(selectedCheckpointId);
+    setCheckpointRestoreError(null);
+    setCheckpointRestoreNotice(null);
+    try {
+      const response = await restoreSessionCheckpoint(sessionId, selectedCheckpointId, mode);
+      if (!response.ok) {
+        throw new Error(response.error || "Failed to restore checkpoint");
+      }
+      const applied = response.result?.applied_paths?.length ?? 0;
+      const conversationChanged = response.result?.conversation_changed ? "yes" : "no";
+      setCheckpointRestoreNotice(
+        `Restored ${selectedCheckpointId} (mode=${mode}, files=${applied}, conversation_changed=${conversationChanged}).`,
+      );
+      // Force list reload on next event/effect cycle.
+      setLoadedCheckpointSessionId("");
+      setCheckpoints([]);
+    } catch (error) {
+      setCheckpointRestoreError(
+        error instanceof Error ? error.message : "Failed to restore checkpoint",
+      );
+    } finally {
+      setCheckpointRestorePendingId("");
+    }
+  }
+
   return {
+    backtrackAuditEntries,
+    backtrackAuditError,
+    backtrackAuditLoading,
     checkpointConversationSummary,
     checkpointDetailsError,
     checkpointDetailsLoadingId,
@@ -281,9 +491,13 @@ export function useRuntimeCheckpoints({
     checkpointPreviewFiles,
     checkpointProvenance,
     checkpointProvenanceSummary,
+    checkpointRestoreError,
+    checkpointRestoreNotice,
+    checkpointRestorePendingId,
     checkpoints,
     checkpointsError,
     checkpointsLoading,
+    onRestoreCheckpoint: handleRestoreCheckpoint,
     onSelectCheckpoint: handleSelectCheckpoint,
     onSelectCheckpointFile: handleSelectCheckpointFile,
     selectedCheckpoint,

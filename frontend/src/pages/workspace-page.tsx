@@ -1,6 +1,7 @@
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
+import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
@@ -108,6 +109,29 @@ export function WorkspacePage() {
     selectedThread,
     setThreads,
   });
+  const {
+    backtrackDialog,
+    backtrackError,
+    backtrackNotice,
+    backtrackPendingMessageId,
+    backtrackNavigationActive,
+    backtrackSelectedMessageId,
+    backtrackToMessage,
+    canBacktrack,
+    closeBacktrackDialog,
+    confirmBacktrack,
+    selectBacktrackNavigationMessage,
+    setBacktrackEditPrompt,
+    setBacktrackMode,
+    setBacktrackPrefill,
+  } = useSessionBacktrack({
+    applySessionHistoryToThread,
+    isResponding,
+    selectedThread,
+    setDraft,
+    setThreads,
+    draft,
+  });
 
   if (!selectedThread) {
     return null;
@@ -148,6 +172,20 @@ export function WorkspacePage() {
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}
       onStopResponding={stopResponding}
       onSubmit={submitPrompt}
+      onBacktrackToMessage={backtrackToMessage}
+      backtrackDialog={backtrackDialog}
+      backtrackError={backtrackError}
+      backtrackNotice={backtrackNotice}
+      backtrackPendingMessageId={backtrackPendingMessageId}
+      backtrackNavigationActive={backtrackNavigationActive}
+      backtrackSelectedMessageId={backtrackSelectedMessageId}
+      canBacktrack={canBacktrack}
+      onCloseBacktrackDialog={closeBacktrackDialog}
+      onConfirmBacktrack={confirmBacktrack}
+      onBacktrackEditPromptChange={setBacktrackEditPrompt}
+      onBacktrackModeChange={setBacktrackMode}
+      onBacktrackPrefillChange={setBacktrackPrefill}
+      onSelectBacktrackNavigationMessage={selectBacktrackNavigationMessage}
       providerOptions={providerOptions}
       runtimeModelsError={runtimeModelsError}
       runtimeModelsLoading={runtimeModelsLoading}

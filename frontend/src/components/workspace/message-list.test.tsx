@@ -59,6 +59,77 @@ describe("MessageList", () => {
     expect(markup).toContain("Runtime stream active");
   });
 
+  it("renders backtrack and inline edit actions on user messages when enabled", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [
+          {
+            type: "text",
+            content: "Rewrite from here",
+          },
+        ],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        canBacktrack
+        isResponding={false}
+        messages={messages}
+        onBacktrackToMessage={() => {}}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Backtrack");
+    expect(markup).toContain("Edit");
+    expect(markup).toContain('aria-label="Backtrack to this user turn"');
+    expect(markup).toContain('aria-label="Edit this user turn before backtrack"');
+  });
+
+  it("highlights the selected user turn during keyboard backtrack navigation", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "older" }],
+      },
+      {
+        id: "user-2",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "newer" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        backtrackNavigationActive
+        backtrackSelectedMessageId="user-2"
+        canBacktrack
+        isResponding={false}
+        messages={messages}
+        onBacktrackToMessage={() => {}}
+        onSelectBacktrackNavigationMessage={() => {}}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Backtrack navigation active");
+    expect(markup).toContain('aria-current="true"');
+    expect(markup).toContain('data-backtrack-selected="true"');
+    expect(markup).toContain(" · selected");
+  });
+
   it("announces rich-segment and related-artifact fallbacks as status updates", () => {
     const messages: ChatMessage[] = [
       {

@@ -44,6 +44,7 @@ type ArtifactPanelSurface = "artifacts" | "checkpoints" | "plan";
 type ArtifactPanelProps = {
   artifacts: Artifact[];
   lastRuntimeEventType?: string;
+  runtimeEventCount?: number;
   onOpenArtifact: (artifactId: string) => void;
   selectedArtifactId: string | null;
   sessionId?: string;
@@ -158,6 +159,7 @@ function handleHorizontalTabKeyDown(
 export function ArtifactPanel({
   artifacts,
   lastRuntimeEventType,
+  runtimeEventCount,
   onOpenArtifact,
   selectedArtifactId,
   sessionId,
@@ -176,6 +178,9 @@ export function ArtifactPanel({
   );
 
   const {
+    backtrackAuditEntries,
+    backtrackAuditError,
+    backtrackAuditLoading,
     checkpointConversationSummary,
     checkpointDetailsError,
     checkpointDetailsLoadingId,
@@ -185,9 +190,13 @@ export function ArtifactPanel({
     checkpointPreviewFiles,
     checkpointProvenance,
     checkpointProvenanceSummary,
+    checkpointRestoreError,
+    checkpointRestoreNotice,
+    checkpointRestorePendingId,
     checkpoints,
     checkpointsError,
     checkpointsLoading,
+    onRestoreCheckpoint,
     onSelectCheckpoint,
     onSelectCheckpointFile,
     selectedCheckpoint,
@@ -195,6 +204,7 @@ export function ArtifactPanel({
     selectedCheckpointId,
   } = useRuntimeCheckpoints({
     lastRuntimeEventType,
+    runtimeEventCount,
     sessionId,
   });
 
@@ -211,6 +221,7 @@ export function ArtifactPanel({
     submitDecision,
   } = useRuntimePlanMode({
     lastRuntimeEventType,
+    runtimeEventCount,
     sessionId,
   });
 
@@ -372,7 +383,8 @@ export function ArtifactPanel({
         {artifactSelectionAnnouncement}
       </div>
       <div className="sr-only" id={asideDescriptionId}>
-        Workspace artifacts, plan preview, and restore points for the current thread.
+        Workspace artifacts, plan preview, restore points, and backtrack audit for
+        the current thread.
       </div>
       <div className="border-b border-white/8 px-3 py-2.5">
         <div className="flex items-center justify-between gap-3">
@@ -474,6 +486,11 @@ export function ArtifactPanel({
             >
               <HistoryIcon size={14} />
               Restore
+              {backtrackAuditEntries.length > 0 ? (
+                <span className="rounded-full bg-[#f0c77b]/20 px-1.5 py-0.5 text-[10px] tracking-[0.08em] text-[#f0c77b]">
+                  {backtrackAuditEntries.length}
+                </span>
+              ) : null}
             </button>
           </div>
           <div className="flex items-center gap-2">
@@ -530,6 +547,9 @@ export function ArtifactPanel({
         {resolvedActiveSurface === "checkpoints" ? (
           <Suspense fallback={<ArtifactPanelCheckpointFallback />}>
             <ArtifactPanelCheckpointSurface
+              backtrackAuditEntries={backtrackAuditEntries}
+              backtrackAuditError={backtrackAuditError}
+              backtrackAuditLoading={backtrackAuditLoading}
               checkpointConversationSummary={checkpointConversationSummary}
               checkpointDetailsError={checkpointDetailsError}
               checkpointDetailsLoadingId={checkpointDetailsLoadingId}
@@ -539,9 +559,13 @@ export function ArtifactPanel({
               checkpointPreviewFiles={checkpointPreviewFiles}
               checkpointProvenance={checkpointProvenance}
               checkpointProvenanceSummary={checkpointProvenanceSummary}
+              checkpointRestoreError={checkpointRestoreError}
+              checkpointRestoreNotice={checkpointRestoreNotice}
+              checkpointRestorePendingId={checkpointRestorePendingId}
               checkpoints={checkpoints}
               checkpointsError={checkpointsError}
               checkpointsLoading={checkpointsLoading}
+              onRestoreCheckpoint={onRestoreCheckpoint}
               onSelectCheckpoint={onSelectCheckpoint}
               onSelectCheckpointFile={onSelectCheckpointFile}
               selectedCheckpoint={selectedCheckpoint}

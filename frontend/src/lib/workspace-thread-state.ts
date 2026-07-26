@@ -322,6 +322,28 @@ function createJsonArtifact(
   };
 }
 
+function readHistoryMessageIdentity(
+  message: SessionHistoryMessage,
+): string | undefined {
+  const metadata =
+    message.metadata && typeof message.metadata === "object"
+      ? message.metadata
+      : undefined;
+  if (!metadata) {
+    return undefined;
+  }
+  for (const key of ["message_id", "id"] as const) {
+    const raw = metadata[key];
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+  return undefined;
+}
+
 function buildHistoryMessage(
   sessionId: string,
   index: number,
@@ -330,8 +352,9 @@ function buildHistoryMessage(
   generatedImageSegments: MessageSegment[],
 ): ChatMessage {
   const relatedArtifactIds = artifacts.map((artifact) => artifact.id);
+  const stableId = readHistoryMessageIdentity(message);
   return {
-    id: `${sessionId}-history-${index}`,
+    id: stableId || `${sessionId}-history-${index}`,
     role: message.role === "user" ? "user" : "assistant",
     author: getHistoryMessageAuthor(message.role),
     label: message.role || "runtime",
@@ -373,9 +396,13 @@ function mapSessionHistoryToMessages(
     );
     const fallbackText = getPrimaryTextContent(fallback);
 
+    const stableId = readHistoryMessageIdentity(item);
     const matched = existingMessages.find((message) => {
       if (usedMessageIds.has(message.id)) {
         return false;
+      }
+      if (stableId && message.id === stableId) {
+        return true;
       }
       return (
         message.role === fallback.role &&
@@ -391,6 +418,9 @@ function mapSessionHistoryToMessages(
     }
 
     usedMessageIds.add(matched.id);
+    if (stableId) {
+      usedMessageIds.add(stableId);
+    }
     const codeSegments = matched.segments.filter(
       (segment): segment is Extract<MessageSegment, { type: "code" }> =>
         segment.type === "code",
@@ -404,6 +434,8 @@ function mapSessionHistoryToMessages(
       artifacts: restoredArtifacts,
       message: {
         ...matched,
+        // Prefer durable runtime message_id once history exposes it.
+        id: stableId || matched.id || fallback.id,
         role: fallback.role,
         author: matched.author || fallback.author,
         label: matched.label || fallback.label,

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildRuntimeEventReloadKey,
   resolveCheckpointDetailState,
+  shouldReloadBacktrackAudit,
   shouldReloadRuntimeCheckpoints,
 } from "@/hooks/workspace/use-runtime-checkpoints";
 
@@ -9,7 +11,6 @@ describe("useRuntimeCheckpoints helpers", () => {
   it("detects when checkpoint data should reload", () => {
     expect(
       shouldReloadRuntimeCheckpoints({
-        checkpointsCount: 0,
         loadedCheckpointSessionId: "",
         sessionId: "session-1",
       }),
@@ -17,7 +18,6 @@ describe("useRuntimeCheckpoints helpers", () => {
 
     expect(
       shouldReloadRuntimeCheckpoints({
-        checkpointsCount: 2,
         loadedCheckpointSessionId: "session-1",
         sessionId: "session-1",
       }),
@@ -25,12 +25,70 @@ describe("useRuntimeCheckpoints helpers", () => {
 
     expect(
       shouldReloadRuntimeCheckpoints({
-        checkpointsCount: 2,
+        lastHandledEventKey: "",
+        lastRuntimeEventKey: buildRuntimeEventReloadKey("checkpoint_created", 1),
         lastRuntimeEventType: "checkpoint_created",
         loadedCheckpointSessionId: "session-1",
         sessionId: "session-1",
       }),
     ).toBe(true);
+
+    expect(
+      shouldReloadRuntimeCheckpoints({
+        lastHandledEventKey: buildRuntimeEventReloadKey("backtrack_finished", 2),
+        lastRuntimeEventKey: buildRuntimeEventReloadKey("backtrack_finished", 2),
+        lastRuntimeEventType: "backtrack_finished",
+        loadedCheckpointSessionId: "session-1",
+        sessionId: "session-1",
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldReloadRuntimeCheckpoints({
+        lastHandledEventKey: buildRuntimeEventReloadKey("backtrack_finished", 2),
+        lastRuntimeEventKey: buildRuntimeEventReloadKey("backtrack_finished", 3),
+        lastRuntimeEventType: "backtrack_finished",
+        loadedCheckpointSessionId: "session-1",
+        sessionId: "session-1",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects when backtrack audit should reload without looping on the same event", () => {
+    expect(
+      shouldReloadBacktrackAudit({
+        loadedAuditSessionId: "",
+        sessionId: "session-1",
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldReloadBacktrackAudit({
+        lastHandledEventKey: buildRuntimeEventReloadKey("backtrack_finished", 4),
+        lastRuntimeEventKey: buildRuntimeEventReloadKey("backtrack_finished", 4),
+        lastRuntimeEventType: "backtrack_finished",
+        loadedAuditSessionId: "session-1",
+        sessionId: "session-1",
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldReloadBacktrackAudit({
+        lastHandledEventKey: buildRuntimeEventReloadKey("backtrack_finished", 4),
+        lastRuntimeEventKey: buildRuntimeEventReloadKey("backtrack_finished", 5),
+        lastRuntimeEventType: "backtrack_finished",
+        loadedAuditSessionId: "session-1",
+        sessionId: "session-1",
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldReloadBacktrackAudit({
+        lastRuntimeEventType: "tool.completed",
+        loadedAuditSessionId: "session-1",
+        sessionId: "session-1",
+      }),
+    ).toBe(false);
   });
 
   it("resolves checkpoint detail selection from preview files first", () => {

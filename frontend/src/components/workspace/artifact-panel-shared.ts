@@ -1,5 +1,6 @@
 import type {
   RuntimeCheckpointProvenanceSummary,
+  RuntimeSessionBacktrackTombstone,
   RuntimeSessionCheckpointConversationMessage,
   RuntimeSessionCheckpointFile,
   RuntimeSessionCheckpointPreviewFile,
@@ -178,4 +179,68 @@ export function buildCheckpointConversationSummary(
       role,
     };
   });
+}
+
+export function formatBacktrackAuditTitle(entry: RuntimeSessionBacktrackTombstone) {
+  const preview = entry.anchor_preview?.trim();
+  if (preview) {
+    return preview.length > 72 ? `${preview.slice(0, 69)}…` : preview;
+  }
+
+  const messageId = entry.message_id?.trim();
+  if (messageId) {
+    return `Backtrack ${messageId.slice(0, 12)}`;
+  }
+
+  return `User turn ${entry.user_turn_index}`;
+}
+
+export function formatBacktrackAuditMeta(entry: RuntimeSessionBacktrackTombstone) {
+  const parts = [
+    `turn ${entry.user_turn_index}`,
+    `msg ${entry.message_index}`,
+    `−${entry.removed_message_count} msgs`,
+  ];
+
+  if (entry.removed_user_turns > 0) {
+    parts.push(`−${entry.removed_user_turns} turns`);
+  }
+
+  const mode = entry.mode?.trim();
+  if (mode) {
+    parts.push(mode);
+  }
+
+  if (entry.edited) {
+    parts.push("edited");
+  }
+
+  return parts.join(" · ");
+}
+
+export function formatBacktrackAuditSummary(entry: RuntimeSessionBacktrackTombstone) {
+  const reason = entry.reason?.trim();
+  if (reason) {
+    return reason;
+  }
+
+  return `Truncated to ${entry.truncated_to_message_count} messages; removed ${entry.removed_user_turns} user turn(s).`;
+}
+
+export function formatBacktrackAuditIdentity(entry: RuntimeSessionBacktrackTombstone) {
+  const messageId = entry.message_id?.trim();
+  if (messageId) {
+    return messageId;
+  }
+  return entry.id;
+}
+
+export function pickInitialBacktrackAuditId(
+  entries: RuntimeSessionBacktrackTombstone[],
+  preferredId?: string | null,
+) {
+  if (preferredId && entries.some((entry) => entry.id === preferredId)) {
+    return preferredId;
+  }
+  return entries[0]?.id ?? null;
 }

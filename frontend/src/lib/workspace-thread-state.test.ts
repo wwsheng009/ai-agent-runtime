@@ -82,6 +82,38 @@ describe("thread-runtime", () => {
     expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
   });
 
+  it("uses durable message_id from history metadata as ChatMessage.id", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 2,
+      history: [
+        {
+          role: "user",
+          content: "rewrite this",
+          metadata: {
+            message_id: "msg_user_1",
+            turn_id: "turn_1",
+          },
+        },
+        {
+          role: "assistant",
+          content: "done",
+          metadata: {
+            message_id: "msg_assistant_1",
+            turn_id: "turn_1",
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.messages).toHaveLength(2);
+    expect(nextThread.messages[0].id).toBe("msg_user_1");
+    expect(nextThread.messages[0].role).toBe("user");
+    expect(nextThread.messages[1].id).toBe("msg_assistant_1");
+  });
+
   it("treats null session history as an empty message list", () => {
     const response = {
       session_id: "session-1",

@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildCheckpointConversationSummary,
   buildCheckpointFileCode,
+  formatBacktrackAuditIdentity,
+  formatBacktrackAuditMeta,
+  formatBacktrackAuditSummary,
+  formatBacktrackAuditTitle,
   formatCheckpointFileChangeLabel,
   formatCheckpointMeta,
   formatCheckpointProvenance,
@@ -10,6 +14,7 @@ import {
   formatCheckpointReason,
   formatCheckpointTitle,
   isCheckpointDetailLoading,
+  pickInitialBacktrackAuditId,
   pickInitialCheckpointFilePath,
   resolveCheckpointFileEntries,
 } from "@/components/workspace/artifact-panel-shared";
@@ -141,5 +146,59 @@ describe("artifact panel helpers", () => {
         content: "Keep this short",
       },
     ]);
+  });
+
+  it("formats backtrack audit tombstone titles, meta, and selection", () => {
+    const entry = {
+      id: "tomb-1",
+      created_at: "2026-07-26T12:00:00Z",
+      mode: "both",
+      reason: "user requested rewind",
+      user_turn_index: 2,
+      message_index: 5,
+      message_id: "msg-abcdef123456",
+      anchor_preview: "Please rewrite the plan for the next phase",
+      truncated_to_message_count: 4,
+      removed_message_count: 6,
+      removed_user_turns: 2,
+      edited: true,
+    };
+
+    expect(formatBacktrackAuditTitle(entry)).toBe(
+      "Please rewrite the plan for the next phase",
+    );
+    expect(formatBacktrackAuditMeta(entry)).toBe(
+      "turn 2 · msg 5 · −6 msgs · −2 turns · both · edited",
+    );
+    expect(formatBacktrackAuditSummary(entry)).toBe("user requested rewind");
+    expect(formatBacktrackAuditIdentity(entry)).toBe("msg-abcdef123456");
+    expect(
+      pickInitialBacktrackAuditId(
+        [
+          entry,
+          {
+            ...entry,
+            id: "tomb-2",
+            message_id: undefined,
+            anchor_preview: undefined,
+          },
+        ],
+        "tomb-2",
+      ),
+    ).toBe("tomb-2");
+    expect(pickInitialBacktrackAuditId([entry], "missing")).toBe("tomb-1");
+    expect(
+      formatBacktrackAuditTitle({
+        ...entry,
+        anchor_preview: undefined,
+        message_id: undefined,
+      }),
+    ).toBe("User turn 2");
+    expect(
+      formatBacktrackAuditSummary({
+        ...entry,
+        reason: undefined,
+      }),
+    ).toBe("Truncated to 4 messages; removed 2 user turn(s).");
   });
 });

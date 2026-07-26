@@ -16,6 +16,7 @@ export {
 } from "./logs";
 export { listRuntimeModels } from "./models";
 export {
+  applySessionBacktrack,
   createRuntimeSession,
   getRuntimeSession,
   getSessionHistory,
@@ -23,8 +24,12 @@ export {
   getSessionPlanMode,
   listRuntimeSessionUsers,
   listRuntimeSessions,
+  listSessionBacktrackAudit,
   listSessionCheckpoints,
+  listSessionTurns,
+  previewSessionBacktrack,
   previewSessionCheckpoint,
+  restoreSessionCheckpoint,
   updateSessionPlanMode,
 } from "./sessions";
 export {

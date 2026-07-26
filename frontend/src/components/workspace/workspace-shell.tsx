@@ -7,6 +7,7 @@ import {
   type CSSProperties,
 } from "react";
 
+import { MessageBacktrackDialog } from "@/components/workspace/message-backtrack-dialog";
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { MessageList } from "@/components/workspace/message-list";
 import { type SettingsSectionId } from "@/components/workspace/settings";
@@ -21,8 +22,10 @@ import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { useAppSettings } from "@/core/settings";
 import { type Artifact, type Thread } from "@/data/mock";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
+import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
 import {
+  type RuntimeSessionBacktrackMode,
   type RuntimeSessionRecord,
   type RuntimeSessionUserSummary,
   type RuntimeTeamRecord,
@@ -81,6 +84,24 @@ type WorkspaceShellProps = {
   onResetRuntimeClientIdentity: () => void;
   onStopResponding: () => void;
   onSubmit: () => void;
+  onBacktrackToMessage?: (
+    messageId: string,
+    mode?: "conversation" | "both",
+    options?: { editPrompt?: string },
+  ) => void;
+  backtrackDialog?: SessionBacktrackDialogState;
+  backtrackError?: string | null;
+  backtrackNotice?: string | null;
+  backtrackPendingMessageId?: string | null;
+  backtrackNavigationActive?: boolean;
+  backtrackSelectedMessageId?: string | null;
+  canBacktrack?: boolean;
+  onCloseBacktrackDialog?: () => void;
+  onConfirmBacktrack?: () => void;
+  onBacktrackEditPromptChange?: (value: string) => void;
+  onBacktrackModeChange?: (mode: RuntimeSessionBacktrackMode) => void;
+  onBacktrackPrefillChange?: (prefill: boolean) => void;
+  onSelectBacktrackNavigationMessage?: (messageId: string) => void;
   providerOptions: string[];
   runtimeModelsError: string | null;
   runtimeModelsLoading: boolean;
@@ -122,6 +143,20 @@ export function WorkspaceShell({
   onResetRuntimeClientIdentity,
   onStopResponding,
   onSubmit,
+  onBacktrackToMessage,
+  backtrackDialog,
+  backtrackError = null,
+  backtrackNotice = null,
+  backtrackPendingMessageId = null,
+  backtrackNavigationActive = false,
+  backtrackSelectedMessageId = null,
+  canBacktrack = false,
+  onCloseBacktrackDialog,
+  onConfirmBacktrack,
+  onBacktrackEditPromptChange,
+  onBacktrackModeChange,
+  onBacktrackPrefillChange,
+  onSelectBacktrackNavigationMessage,
   providerOptions,
   runtimeModelsError,
   runtimeModelsLoading,
@@ -301,6 +336,12 @@ export function WorkspaceShell({
                 <div className="min-h-0 flex-1 overflow-hidden">
                   <MessageList
                     artifacts={selectedThread.artifacts}
+                    backtrackError={backtrackError}
+                    backtrackNotice={backtrackNotice}
+                    backtrackPendingMessageId={backtrackPendingMessageId}
+                    backtrackNavigationActive={backtrackNavigationActive}
+                    backtrackSelectedMessageId={backtrackSelectedMessageId}
+                    canBacktrack={canBacktrack}
                     className={cn(
                       "h-full px-3 sm:px-4 lg:px-5",
                       isCompact ? "pt-3" : "pt-4",
@@ -311,6 +352,8 @@ export function WorkspaceShell({
                     )}
                     isResponding={isResponding}
                     messages={selectedThread.messages}
+                    onBacktrackToMessage={onBacktrackToMessage}
+                    onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
                     onSelectArtifact={handleOpenArtifact}
                     style={messageListStyle}
                   />
@@ -382,6 +425,7 @@ export function WorkspaceShell({
             <ArtifactPanel
               artifacts={selectedThread.artifacts}
               lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+              runtimeEventCount={selectedThread.runtimeEventCount}
               selectedArtifactId={selectedArtifactId}
               sessionId={selectedThread.sessionId}
               onOpenArtifact={handleOpenArtifact}
@@ -418,6 +462,21 @@ export function WorkspaceShell({
             selectedProvider={selectedProvider}
           />
         </Suspense>
+      ) : null}
+      {backtrackDialog?.open &&
+      onCloseBacktrackDialog &&
+      onConfirmBacktrack &&
+      onBacktrackEditPromptChange &&
+      onBacktrackModeChange &&
+      onBacktrackPrefillChange ? (
+        <MessageBacktrackDialog
+          onApply={onConfirmBacktrack}
+          onClose={onCloseBacktrackDialog}
+          onEditPromptChange={onBacktrackEditPromptChange}
+          onModeChange={onBacktrackModeChange}
+          onPrefillChange={onBacktrackPrefillChange}
+          state={backtrackDialog}
+        />
       ) : null}
     </div>
   );
