@@ -275,7 +275,7 @@ type ToolMeta struct {
 
 **当前**：`policy.Engine` 已有 hooks / rules / mode / ask 骨架。  
 **已落地**：remembered grants、read-only auto、shell 只读表、stage/reason trace、dangerous 不记忆 always-allow、bypass 仍尊重 hook deny。  
-**可后续加深**：项目文件规则源 / CLI allow-deny 产品化命名与 `/debug` 面板展示（不阻塞 A residual）。
+**R1 已加深（2026-07-25）**：项目 `.aicli/permissions.yaml` + CLI `--allow-tool`/`--deny-tool` + session/`/debug` 展示；见 [`docs/product/project-permissions.md`](../product/project-permissions.md)。
 
 目标管道（固定顺序，写进代码注释与文档）：
 
@@ -732,6 +732,7 @@ off | workspace | read-only | strict
 | 2026-07-25 | A6 residual：session info + `/debug` **Agent Source**（source · path）；B2 residual：项目 `.agents/agents/general.md`（def `none`，team worker 仍 runner 强制 complete_task） |
 | 2026-07-25 | B3 frontend plan preview：session plan API client + `useRuntimePlanMode` + Artifact panel Plan 页签（approve/request_changes/quit） |
 | 2026-07-25 | 文档对齐：分析文档回写实施后状态；本方案新增 §15 需求覆盖矩阵与残余 backlog；scrub B3「可后置」过时触点 |
+| 2026-07-25 | R1 收口：项目 `.aicli/permissions.yaml` + CLI `--allow-tool`/`--deny-tool` 产品面；chat/exec/actor/`/call`/`/debug` 接线；`docs/product/project-permissions.md` |
 
 ---
 
@@ -785,7 +786,7 @@ off | workspace | read-only | strict
 
 | ID | 项 | 建议触发条件 |
 | --- | --- | --- |
-| R1 | 项目 permission 规则源文件 + CLI `--allow/--deny` 产品面 | 用户/CI 需要可版本化规则 |
+| R1 | 项目 permission 规则源文件 + CLI `--allow/--deny` 产品面 | **done（2026-07-25）** — `policy/permissions_file.go` + chat/exec overlay + `/debug`；见 product note |
 | R2 | Folder trust（项目 hooks/MCP 信任模型） | 打开陌生仓成为主路径 |
 | R3 | 统一 system-reminder / ephemeral instruction 通道 | completion/doom-loop/plan 提醒形态要统一 |
 | R4 | team teammate ↔ agentdef 更深字段对齐 | teammate 要完整继承 def tools/sandbox |

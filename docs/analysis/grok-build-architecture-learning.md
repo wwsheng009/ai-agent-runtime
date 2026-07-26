@@ -30,7 +30,7 @@
 >
 > | 迭代 | 状态 | 深度备注 |
 > | --- | --- | --- |
-> | Iteration A（Agent def + permission + completion） | **核心已交付** | 无 MiniJinja；项目规则源 / CLI allow-deny 产品面仍可加深 |
+> | Iteration A（Agent def + permission + completion） | **核心已交付** | 无 MiniJinja；R1 项目 `.aicli/permissions.yaml` + CLI allow/deny 产品面已加深 |
 > | Iteration B（worktree / plan / memory / sandbox profiles / hooks） | **核心已交付** | memory 为 keyword JSONL MVP；无 FTS/vector/云同步；无 best-of-n / persona IO contract |
 > | Iteration C（toolprotocol / plugin / ACP / doom-loop / tool search / optional OS sandbox） | **核心已交付** | 均为子集/MVP；无 marketplace / Leader IPC / session load |
 >
@@ -185,7 +185,7 @@ User/Client (TUI | ACP | -p headless)
 | --- | --- | --- | --- |
 | 可移植 markdown Agent 角色定义 | **已交付** | discovery / parse / binding / 样例 / Agent Source 调试字段 | 无 MiniJinja；team 更深 def 对齐可收紧 |
 | 工具协议分层 | **已交付（MVP）** | `internal/toolprotocol` + progress / SSE live / `protocol_result` | 非完整外部 tool server 平台 |
-| 权限管道 | **核心已交付** | hooks → rules → grants → readonly auto → mode + trace | 项目文件规则源 / CLI `--allow/--deny` 产品面未满 |
+| 权限管道 | **核心已交付** | hooks → rules → grants → readonly auto → mode + trace | R1：项目 `.aicli/permissions.yaml` + CLI allow/deny 产品面已加深 |
 | Sandbox | **应用层已交付；OS 可选** | profiles `off\|workspace\|read-only\|strict`；Linux bwrap 可选 | 非 Linux OS 强制仍弱；默认 off |
 | Subagent isolation | **核心已交付** | worktree create/apply/discard + path claims | 无 best-of-n / persona IO contract |
 | Plan Mode 产品流 | **已交付** | planmode 包 + `/plan` + agent tools + API + frontend Plan 页签 | 与 Grok UX 仍有差距，但闭环可用 |
@@ -504,7 +504,7 @@ Grok 大量用 `<system-reminder>` 注入短暂策略（persona、completion、g
 | Runtime multi-agent / Team 任务图 | 中 | **强** | **强** | 保持优势 |
 | 可移植 markdown Agent 角色定义 | **强** | 弱 | **中强 / 已交付** | 无 MiniJinja |
 | Profile/`agent.yaml` 包 | 中 | 中强代码 / 弱样例 | **中强 + 有样例** | coding profile 等 |
-| 权限规则管道 | 强 | 中 | **中强 / 核心已交付** | 规则源产品面可加深 |
+| 权限规则管道 | 强 | 中 | **中强 / 核心已交付** | R1 规则源产品面已加深；folder trust 仍弱 |
 | OS Sandbox | 强 | 弱 | **中（应用层强；OS 可选）** | Linux bwrap；默认 off |
 | Worktree 隔离 | 强 | 弱 | **中强 / 已交付** | 无 best-of-n |
 | Plan Mode 产品流 | 强 | 弱 | **中强 / 已交付** | CLI+API+前端 |
