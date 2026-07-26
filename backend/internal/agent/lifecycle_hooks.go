@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // dispatchStopHook asks stop hooks whether the agent may finish this turn.
@@ -145,8 +146,24 @@ func cloneHookPayload(payload map[string]interface{}) map[string]interface{} {
 
 func stopHookRecoveryMessage(hookMessage string) string {
 	msg := strings.TrimSpace(hookMessage)
+	var body string
 	if msg == "" {
-		return "A stop hook blocked finishing this turn. Continue working and resolve the stop condition before concluding."
+		body = "A stop hook blocked finishing this turn. Continue working and resolve the stop condition before concluding."
+	} else {
+		body = fmt.Sprintf("A stop hook blocked finishing this turn: %s\nContinue working and address the stop condition before concluding.", msg)
 	}
-	return fmt.Sprintf("A stop hook blocked finishing this turn: %s\nContinue working and address the stop condition before concluding.", msg)
+	// R3: unified <system-reminder> envelope.
+	return FormatSystemReminder(ReminderKindStopHook, body)
+}
+
+// newStopHookReminderMessage builds a durable stop-gate recovery reminder.
+func newStopHookReminderMessage(hookMessage string) *types.Message {
+	return NewSystemReminderMessage(SystemReminder{
+		Kind:    ReminderKindStopHook,
+		Body:    stripSystemReminderEnvelope(stopHookRecoveryMessage(hookMessage)),
+		Durable: true,
+		Extra: types.Metadata{
+			"stop_hook_block": true,
+		},
+	})
 }

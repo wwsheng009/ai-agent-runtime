@@ -81,8 +81,12 @@ func TestReActLoop_CompleteTaskRecoversThenSucceeds(t *testing.T) {
 	foundReminder := false
 	for _, req := range provider.requests {
 		for _, msg := range req.Messages {
-			if msg.Role == "user" && strings.Contains(msg.Content, "System reminder: this worker run requires a structured task completion") {
+			if msg.Role == "user" &&
+				(strings.Contains(msg.Content, "this worker run requires a structured task completion") ||
+					strings.Contains(msg.Content, `<system-reminder kind="completion_requirement">`)) {
 				foundReminder = true
+				assert.True(t, IsSystemReminder(msg), "completion recovery should use unified reminder channel")
+				assert.Equal(t, ReminderKindCompletionRequirement, ReminderKindOf(msg))
 			}
 		}
 	}

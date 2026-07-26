@@ -416,6 +416,21 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		completionSatisfied = false
 	}
 
+	// R3: when permission engine is in plan mode, inject a one-shot plan reminder
+	// into the prompt view (and durable history for recovery continuity).
+	if rem := loop.planModeSystemReminder(builder.Messages()); rem != nil {
+		builder.Add(*rem)
+		promptBuilder.Add(*rem)
+		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+			return nil, err
+		}
+		loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, 0, SystemReminder{
+			Kind:    ReminderKindOf(*rem),
+			Body:    stripSystemReminderEnvelope(rem.Content),
+			Durable: true,
+		}))
+	}
+
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
 		loop.agent.state.CurrentStep = step
@@ -564,17 +579,18 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					completionSatisfied = true
 				} else if completionRecoveryUsed < maxCompletionRecoveryTurns && hasRemainingStepBudget(loop.config.MaxSteps, step) {
 					completionRecoveryUsed++
-					reminder := completionRequirementReminder(completionRequirement, completionRecoveryUsed, maxCompletionRecoveryTurns)
 					builder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
 					promptBuilder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
-					reminderMsg := types.NewUserMessage(reminder)
-					if reminderMsg.Metadata == nil {
-						reminderMsg.Metadata = types.Metadata{}
+					reminderMsg := newCompletionRequirementReminderMessage(completionRequirement, completionRecoveryUsed, maxCompletionRecoveryTurns)
+					if reminderMsg != nil {
+						builder.Add(*reminderMsg)
+						promptBuilder.Add(*reminderMsg)
+						loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, step, SystemReminder{
+							Kind:    ReminderKindCompletionRequirement,
+							Body:    stripSystemReminderEnvelope(reminderMsg.Content),
+							Durable: true,
+						}))
 					}
-					reminderMsg.Metadata["completion_requirement_reminder"] = true
-					reminderMsg.Metadata["completion_recovery_attempt"] = completionRecoveryUsed
-					builder.Add(*reminderMsg)
-					promptBuilder.Add(*reminderMsg)
 					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 						return nil, err
 					}
@@ -632,13 +648,16 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					// Durable history already has the assistant text (above);
 					// mirror it into the prompt view and inject a recovery cue.
 					promptBuilder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
-					reminderMsg := types.NewUserMessage(stopHookRecoveryMessage(stopMsg))
-					if reminderMsg.Metadata == nil {
-						reminderMsg.Metadata = types.Metadata{}
+					reminderMsg := newStopHookReminderMessage(stopMsg)
+					if reminderMsg != nil {
+						builder.Add(*reminderMsg)
+						promptBuilder.Add(*reminderMsg)
+						loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, step, SystemReminder{
+							Kind:    ReminderKindStopHook,
+							Body:    stripSystemReminderEnvelope(reminderMsg.Content),
+							Durable: true,
+						}))
 					}
-					reminderMsg.Metadata["stop_hook_block"] = true
-					builder.Add(*reminderMsg)
-					promptBuilder.Add(*reminderMsg)
 					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 						return nil, err
 					}
@@ -846,6 +865,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 4. 更新对话历史
+		// Prompt path keeps pure advisories; durable builder strips them so
+		// session history / resume do not accumulate doom-loop noise (R3 residual).
 		toolPayloads := toolResultsToPayloads(toolResults, repeatedSemanticAdvisory)
 		if fingerprint := semanticToolCallFingerprint(normalizedCalls); fingerprint != "" {
 			if outcome := dominantToolResultDisposition(toolResults); outcome == toolresult.OutcomePartial || outcome == toolresult.OutcomeEmpty {
@@ -853,7 +874,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				lastDispositionOutcome = outcome
 			}
 		}
-		builder.AppendToolResults(normalizedCalls, toolPayloads)
+		builder.AppendToolResults(normalizedCalls, DurableToolResultPayloads(toolPayloads))
 		promptBuilder.AppendToolResults(normalizedCalls, toolPayloads)
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
@@ -2889,10 +2910,36 @@ func toolResultsToPayloads(results []toolExecutionResult, advisory string) []Too
 	}
 	if len(payloads) > 0 && strings.TrimSpace(advisory) != "" {
 		last := len(payloads) - 1
-		payloads[last].Content = strings.TrimSpace(payloads[last].Content) + "\n\n" + strings.TrimSpace(advisory)
+		// R3: wrap tool-result advisories in the unified system-reminder envelope.
+		// Pure advisories are prompt-only: durable history strips them on persist.
+		kind := inferAdvisoryReminderKind(advisory)
+		wrapped := FormatSystemReminder(kind, strings.TrimSpace(advisory))
+		if wrapped == "" {
+			wrapped = strings.TrimSpace(advisory)
+		}
+		payloads[last].Content = strings.TrimSpace(payloads[last].Content) + "\n\n" + wrapped
 		payloads[last].Metadata["semantic_repeat_advisory"] = true
+		payloads[last].Metadata[MetaSystemReminder] = true
+		payloads[last].Metadata[MetaSystemReminderKind] = kind
+		payloads[last].Metadata[MetaEphemeralInstruction] = true
+		payloads[last].Metadata[MetaSystemReminderDurable] = false
 	}
 	return payloads
+}
+
+// inferAdvisoryReminderKind classifies joined runtime advisories for metadata/events.
+func inferAdvisoryReminderKind(advisory string) string {
+	text := strings.ToLower(strings.TrimSpace(advisory))
+	switch {
+	case strings.Contains(text, "semantic tool request") || strings.Contains(text, "same semantic tool"):
+		return ReminderKindDoomLoop
+	case strings.Contains(text, "outcome=partial") || strings.Contains(text, "empty successful result") || strings.Contains(text, "empty result"):
+		return ReminderKindDispositionReplay
+	case strings.Contains(text, "only inspected") || strings.Contains(text, "exploration"):
+		return ReminderKindExplorationStall
+	default:
+		return ReminderKindRuntimeAdvisory
+	}
 }
 
 func repeatedSemanticToolCallAdvisory(repeatCount int) string {
@@ -3105,7 +3152,9 @@ func persistBuilderHistory(builder *MessageBuilder, persist func([]types.Message
 	if builder == nil || persist == nil {
 		return nil
 	}
-	return persist(builder.Messages())
+	// Defense in depth: strip any non-durable pure advisories that may have
+	// landed on the durable builder (standalone Durable=false reminders).
+	return persist(DurableMessagesForPersist(builder.Messages()))
 }
 
 func hasLeadingSystemPrompt(history []types.Message, systemPrompt string) bool {

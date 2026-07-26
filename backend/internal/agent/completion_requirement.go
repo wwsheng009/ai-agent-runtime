@@ -76,14 +76,44 @@ func completionRequirementReminder(requirement string, attempt, maxTurns int) st
 	if remaining < 1 {
 		remaining = 1
 	}
-	return strings.TrimSpace(strings.Join([]string{
-		"System reminder: this worker run requires a structured task completion.",
+	body := strings.TrimSpace(strings.Join([]string{
+		"This worker run requires a structured task completion.",
 		"Before finishing, call report_task_outcome with task_status done|failed|blocked|handoff and a short summary",
 		"(block_current_task remains a compatibility alias for blocked/handoff).",
 		"Do not end with text only; emit the completion tool call now.",
 		"This is recovery attempt " + itoaMin1(attempt) + " of " + itoaMin1(maxTurns) +
 			" (" + itoaMin1(remaining) + " remaining including this turn).",
 	}, " "))
+	// R3: unified <system-reminder> envelope (body kept plain for tests/hosts).
+	return FormatSystemReminder(ReminderKindCompletionRequirement, body)
+}
+
+// newCompletionRequirementReminderMessage builds a durable recovery reminder.
+func newCompletionRequirementReminderMessage(requirement string, attempt, maxTurns int) *types.Message {
+	return NewSystemReminderMessage(SystemReminder{
+		Kind:    ReminderKindCompletionRequirement,
+		Body:    stripSystemReminderEnvelope(completionRequirementReminder(requirement, attempt, maxTurns)),
+		Durable: true,
+		Extra: types.Metadata{
+			"completion_requirement_reminder": true,
+			"completion_recovery_attempt":     attempt,
+		},
+	})
+}
+
+// stripSystemReminderEnvelope returns the inner body when content is already wrapped.
+func stripSystemReminderEnvelope(content string) string {
+	content = strings.TrimSpace(content)
+	const openPrefix = "<system-reminder"
+	const closeTag = "</system-reminder>"
+	if !strings.HasPrefix(content, openPrefix) || !strings.HasSuffix(content, closeTag) {
+		return content
+	}
+	start := strings.Index(content, ">")
+	if start < 0 || start+1 >= len(content)-len(closeTag) {
+		return content
+	}
+	return strings.TrimSpace(content[start+1 : len(content)-len(closeTag)])
 }
 
 func itoaMin1(n int) string {

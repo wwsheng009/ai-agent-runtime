@@ -3571,7 +3571,9 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 			Role:         "researcher",
 			Goal:         "Inspect the logs.",
 			ReadOnly:     true,
-			BudgetTokens: 1024,
+			// Keep budget above subagent prompt size so preflight compact does not
+			// consume the only SequenceLLMProvider response before the model turn.
+			BudgetTokens: 8192,
 		},
 	})
 	require.NoError(t, err)
@@ -3582,8 +3584,9 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 	assert.Equal(t, 10, results[0].Usage.TotalTokens)
 	assert.Equal(t, results[0].SessionID, startedSessionID)
 	assert.Equal(t, 10.0, completedUsageTotal)
-	require.Len(t, provider.requests, 1)
-	assert.Equal(t, 1024, provider.requests[0].MaxTokens)
+	req := firstNonCompactLLMRequest(provider.requests)
+	require.NotNil(t, req, "expected a non-compact child LLM request, got %d request(s)", len(provider.requests))
+	assert.Equal(t, 8192, req.MaxTokens)
 }
 
 func TestSubagentScheduler_RunChildren_RoutesByDifficulty(t *testing.T) {
@@ -3847,6 +3850,9 @@ func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOv
 	})
 	agent.SetEventBus(bus)
 
+	// Budget is large enough that prompt preflight does not spend the first
+	// SequenceLLMProvider response on active-turn compaction. This test is about
+	// routing inheritance, not compact budgets.
 	results, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
 		{
 			ID:              "legacy-child",
@@ -3854,16 +3860,17 @@ func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOv
 			Provider:        "ignored-provider",
 			Model:           "legacy-child-model",
 			ReasoningEffort: "high",
-			BudgetTokens:    1280,
+			BudgetTokens:    8192,
 			ReadOnly:        true,
 		},
 	})
 	require.NoError(t, err)
-	require.Len(t, parentProvider.requests, 1, "results=%+v", results)
-	assert.Equal(t, "parent-provider", parentProvider.requests[0].Provider)
-	assert.Equal(t, "legacy-child-model", parentProvider.requests[0].Model)
-	assert.Equal(t, "", parentProvider.requests[0].ReasoningEffort)
-	assert.Equal(t, 1280, parentProvider.requests[0].MaxTokens)
+	req := firstNonCompactLLMRequest(parentProvider.requests)
+	require.NotNil(t, req, "results=%+v requests=%d", results, len(parentProvider.requests))
+	assert.Equal(t, "parent-provider", req.Provider)
+	assert.Equal(t, "legacy-child-model", req.Model)
+	assert.Equal(t, "", req.ReasoningEffort)
+	assert.Equal(t, 8192, req.MaxTokens)
 	require.NotNil(t, startPayload)
 	assert.Equal(t, "disabled", startPayload["route_source"])
 }
@@ -5773,6 +5780,28 @@ func (m *MockPolicyMCPManager) ListTools() []skill.ToolInfo {
 	}
 }
 
+// firstNonCompactLLMRequest returns the first recorded request that is not an
+// internal active-turn compaction call. Subagent routing/budget tests should
+// assert against the model turn, not a preflight compact that may consume the
+// SequenceLLMProvider response queue when BudgetTokens is tight.
+func firstNonCompactLLMRequest(requests []*llm.LLMRequest) *llm.LLMRequest {
+	for _, req := range requests {
+		if req == nil {
+			continue
+		}
+		if req.Metadata != nil {
+			if op, _ := req.Metadata["internal_operation"].(string); strings.EqualFold(strings.TrimSpace(op), "compact") {
+				continue
+			}
+			if phase, _ := req.Metadata["compact_phase"].(string); strings.TrimSpace(phase) != "" {
+				continue
+			}
+		}
+		return req
+	}
+	return nil
+}
+
 func cloneLLMRequest(req *llm.LLMRequest) *llm.LLMRequest {
 	if req == nil {
 		return nil
@@ -5986,7 +6015,11 @@ func TestToolResultsToPayloads_AppendsSemanticRepeatAdvisoryOnce(t *testing.T) {
 	require.Len(t, payloads, 2)
 	require.NotContains(t, payloads[0].Content, "Runtime advisory")
 	require.Contains(t, payloads[1].Content, "Execution was not blocked")
+	require.Contains(t, payloads[1].Content, `<system-reminder kind="doom_loop">`)
 	require.Equal(t, true, payloads[1].Metadata["semantic_repeat_advisory"])
+	require.Equal(t, true, payloads[1].Metadata[MetaSystemReminder])
+	require.Equal(t, ReminderKindDoomLoop, payloads[1].Metadata[MetaSystemReminderKind])
+	require.Equal(t, false, payloads[1].Metadata[MetaSystemReminderDurable])
 }
 
 func TestDispositionReplayAdvisory(t *testing.T) {
