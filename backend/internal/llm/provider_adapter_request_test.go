@@ -173,7 +173,7 @@ func TestBuildProviderAdapterRequest_AnthropicDropsTrailingAssistantPrefill(t *t
 func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
 	input := providerAdapterRequestInput{
 		Protocol:  "anthropic",
-		Model:     "unknown-model",
+		Model:     "mimo-v2.5-pro",
 		MaxTokens: 131072,
 		Messages: []map[string]interface{}{
 			{"role": "user", "content": "hello"},
@@ -183,7 +183,48 @@ func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
 	result := buildProviderAdapterRequest(input)
 
 	if result.MaxTokens != 131072 {
-		t.Fatalf("expected MaxTokens to remain 131072 (no capability), got %d", result.MaxTokens)
+		t.Fatalf("expected MaxTokens to remain 131072 for non-Claude model without capability, got %d", result.MaxTokens)
+	}
+}
+
+func TestBuildProviderAdapterRequest_CapsClaudeFamilyWithoutCapability(t *testing.T) {
+	input := providerAdapterRequestInput{
+		Protocol:  "anthropic",
+		Model:     "claude-fable-5",
+		MaxTokens: 131072,
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+		},
+	}
+
+	result := buildProviderAdapterRequest(input)
+
+	if result.MaxTokens != defaultClaudeMaxOutputTokens {
+		t.Fatalf("expected MaxTokens to be capped at %d for claude-fable-5, got %d", defaultClaudeMaxOutputTokens, result.MaxTokens)
+	}
+}
+
+func TestBuildProviderAdapterRequest_CapsClaudeFamilyWithCapabilityMissingMaxTokens(t *testing.T) {
+	input := providerAdapterRequestInput{
+		Protocol:  "anthropic",
+		Model:     "claude-fable-5",
+		MaxTokens: 131072,
+		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"claude-fable-5": {
+				// Pattern cards often omit max_tokens; family default should still apply.
+				MaxContextTokens: 1000000,
+				InputModalities:  []string{"text", "image"},
+			},
+		},
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+		},
+	}
+
+	result := buildProviderAdapterRequest(input)
+
+	if result.MaxTokens != defaultClaudeMaxOutputTokens {
+		t.Fatalf("expected MaxTokens to be capped at %d when capability omits MaxTokens, got %d", defaultClaudeMaxOutputTokens, result.MaxTokens)
 	}
 }
 

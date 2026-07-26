@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,10 @@ const (
 
 	providerLoginProtocolAuto        = "auto"
 	providerLoginProtocolOpenAIImage = "openai_image"
+
+	// loginProviderPageSize controls how many providers are shown per page
+	// during interactive login selection.
+	loginProviderPageSize = 15
 )
 
 type providerLoginPrompter interface {
@@ -363,34 +369,80 @@ func resolveLoginProviderName(req providerLoginRequest, cfg *config.Config) (str
 	if !req.Interactive || req.Prompter == nil {
 		return "", fmt.Errorf("provider is required")
 	}
-	current := ""
+	configuredDefault := ""
 	if cfg != nil {
-		current = strings.TrimSpace(cfg.Providers.DefaultProvider)
+		configuredDefault = strings.TrimSpace(cfg.Providers.DefaultProvider)
 	}
-	options := loginProviderSelectionOptions(cfg, current)
-	if len(options) > 0 {
-		req.Prompter.PrintLine("现有 providers:")
-		for i, option := range options {
-			req.Prompter.PrintLine(fmt.Sprintf("  [%d] %s", i+1, option))
-		}
-		req.Prompter.PrintLine("提示: 输入编号选择现有 provider，或直接输入新 provider 名称")
+	options := loginProviderSelectionOptions(cfg)
+	current := resolveLoginProviderDefault(cfg, options)
+	state := loginProviderPickerState{
+		Options:  options,
+		Current:  current,
+		PageSize: loginProviderPageSize,
 	}
+	printLoginProviderPicker(req.Prompter, state, configuredDefault, true)
+	promptLabel := "Provider 名称/编号/搜索（/关键词, n下一页, p上一页）"
 	for {
-		value, err := req.Prompter.PromptText("Provider 名称（新建或现有）", current, true)
+		value, err := req.Prompter.PromptText(promptLabel, state.Current, true)
 		if err != nil {
 			return "", err
 		}
-		value = strings.TrimSpace(value)
-		if selected, ok := resolveLoginProviderSelection(value, current, options); ok {
-			return selected, nil
+		next, result := applyLoginProviderPickerInput(state, value)
+		state = next
+		if result.Message != "" {
+			req.Prompter.PrintLine(result.Message)
 		}
-		if value != "" {
-			return value, nil
+		if result.Done {
+			return result.Selected, nil
+		}
+		if result.Redraw {
+			printLoginProviderPicker(req.Prompter, state, configuredDefault, false)
 		}
 	}
 }
 
-func loginProviderSelectionOptions(cfg *config.Config, current string) []string {
+func printLoginProviderPicker(prompter providerLoginPrompter, state loginProviderPickerState, configuredDefault string, first bool) {
+	if prompter == nil {
+		return
+	}
+	if len(state.Options) == 0 {
+		if configuredDefault != "" {
+			prompter.PrintLine(fmt.Sprintf("提示: 配置的 default_provider=%s 不在 providers.items 中；请输入要新建或登录的 provider 名称", configuredDefault))
+		} else if first {
+			prompter.PrintLine("当前没有已配置的 provider，请输入要新建的 provider 名称")
+		}
+		return
+	}
+	pageItems, page, pageCount, filteredTotal := state.pageWindow()
+	header := fmt.Sprintf("现有 providers（共 %d", len(state.Options))
+	if strings.TrimSpace(state.Filter) != "" {
+		header += fmt.Sprintf("，过滤 %q 匹配 %d", state.Filter, filteredTotal)
+	}
+	if pageCount > 1 {
+		header += fmt.Sprintf("，第 %d/%d 页", page+1, pageCount)
+	}
+	header += "）:"
+	prompter.PrintLine(header)
+	if filteredTotal == 0 {
+		prompter.PrintLine("  （无匹配项，输入 / 清除过滤，或直接输入新 provider 名称）")
+	} else {
+		for i, option := range pageItems {
+			marker := ""
+			if state.Current != "" && strings.EqualFold(option, state.Current) {
+				marker = " (默认)"
+			}
+			prompter.PrintLine(fmt.Sprintf("  [%d] %s%s", i+1, option, marker))
+		}
+	}
+	if first {
+		prompter.PrintLine("提示: 输入编号选择当前页；输入名称精确选择/新建；/关键词 模糊搜索；n/p 翻页；c 清除过滤；+名称 强制新建；回车使用默认")
+		if configuredDefault != "" && state.Current == "" {
+			prompter.PrintLine(fmt.Sprintf("提示: 配置的 default_provider=%s 不在 providers.items 中，回车不会自动使用它", configuredDefault))
+		}
+	}
+}
+
+func loginProviderSelectionOptions(cfg *config.Config) []string {
 	seen := make(map[string]struct{})
 	options := make([]string, 0)
 	add := func(value string) {
@@ -405,30 +457,333 @@ func loginProviderSelectionOptions(cfg *config.Config, current string) []string 
 		seen[key] = struct{}{}
 		options = append(options, value)
 	}
-	add(current)
 	if cfg != nil {
-		add(cfg.Providers.DefaultProvider)
 		for name := range cfg.Providers.Items {
 			add(name)
 		}
 	}
+	sort.Strings(options)
 	return options
 }
 
-func resolveLoginProviderSelection(input, current string, options []string) (string, bool) {
+func resolveLoginProviderDefault(cfg *config.Config, options []string) string {
+	if cfg == nil {
+		return ""
+	}
+	current := strings.TrimSpace(cfg.Providers.DefaultProvider)
+	if current == "" {
+		return ""
+	}
+	for _, option := range options {
+		if strings.EqualFold(option, current) {
+			return option
+		}
+	}
+	// Prefer an exact items lookup so case matches the configured key.
+	if _, ok := cfg.Providers.Items[current]; ok {
+		return current
+	}
+	return ""
+}
+
+func resolveLoginProviderSelection(input, current string, options []string) (string, bool, string) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		if strings.TrimSpace(current) != "" {
-			return strings.TrimSpace(current), true
+			return strings.TrimSpace(current), true, ""
 		}
-		return "", false
+		return "", false, "请输入 provider 编号或名称"
 	}
-	for i, option := range options {
-		if input == fmt.Sprintf("%d", i+1) || strings.EqualFold(input, option) {
-			return option, true
+	state := loginProviderPickerState{
+		Options:  options,
+		Current:  current,
+		PageSize: loginProviderPageSize,
+	}
+	_, result := applyLoginProviderPickerInput(state, input)
+	if result.Done {
+		return result.Selected, true, ""
+	}
+	if result.Message != "" {
+		return "", false, result.Message
+	}
+	return "", false, "请输入 provider 编号或名称"
+}
+
+type loginProviderPickerState struct {
+	Options  []string
+	Current  string
+	Filter   string
+	Page     int
+	PageSize int
+}
+
+type loginProviderPickerResult struct {
+	Selected string
+	Done     bool
+	Message  string
+	Redraw   bool
+}
+
+func (s loginProviderPickerState) normalizedPageSize() int {
+	if s.PageSize <= 0 {
+		return loginProviderPageSize
+	}
+	return s.PageSize
+}
+
+func (s loginProviderPickerState) filteredOptions() []string {
+	return filterLoginProviders(s.Options, s.Filter)
+}
+
+func (s loginProviderPickerState) pageWindow() (items []string, page, pageCount, total int) {
+	filtered := s.filteredOptions()
+	total = len(filtered)
+	pageSize := s.normalizedPageSize()
+	if total == 0 {
+		return nil, 0, 1, 0
+	}
+	pageCount = (total + pageSize - 1) / pageSize
+	page = s.Page
+	if page < 0 {
+		page = 0
+	}
+	if page >= pageCount {
+		page = pageCount - 1
+	}
+	start := page * pageSize
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return filtered[start:end], page, pageCount, total
+}
+
+func applyLoginProviderPickerInput(state loginProviderPickerState, input string) (loginProviderPickerState, loginProviderPickerResult) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		if strings.TrimSpace(state.Current) != "" {
+			return state, loginProviderPickerResult{Selected: strings.TrimSpace(state.Current), Done: true}
+		}
+		return state, loginProviderPickerResult{Message: "请输入 provider 编号、名称，或 /关键词 搜索"}
+	}
+
+	// Exact match always wins, including reserved command names that happen to
+	// be real provider ids.
+	for _, option := range state.Options {
+		if strings.EqualFold(input, option) {
+			return state, loginProviderPickerResult{Selected: option, Done: true}
 		}
 	}
-	return "", false
+
+	// "+name" forces create/select by literal name, bypassing reserved commands
+	// and fuzzy filtering (useful for names like "next" / "help").
+	// A bare "+" remains a next-page command below.
+	if strings.HasPrefix(input, "+") && strings.TrimSpace(input) != "+" {
+		name := strings.TrimSpace(strings.TrimPrefix(input, "+"))
+		if name == "" {
+			return state, loginProviderPickerResult{Message: "请在 + 后输入 provider 名称"}
+		}
+		for _, option := range state.Options {
+			if strings.EqualFold(name, option) {
+				return state, loginProviderPickerResult{Selected: option, Done: true}
+			}
+		}
+		return state, loginProviderPickerResult{Selected: name, Done: true}
+	}
+
+	lower := strings.ToLower(input)
+	switch lower {
+	case "n", "next", ">", "+":
+		return moveLoginProviderPickerPage(state, 1)
+	case "p", "prev", "previous", "<", "-":
+		return moveLoginProviderPickerPage(state, -1)
+	case "c", "clear":
+		if state.Filter == "" && state.Page == 0 {
+			return state, loginProviderPickerResult{Message: "当前没有过滤条件"}
+		}
+		state.Filter = ""
+		state.Page = 0
+		return state, loginProviderPickerResult{Message: "已清除过滤", Redraw: true}
+	case "h", "help", "?":
+		return state, loginProviderPickerResult{
+			Message: "用法: 编号=当前页选择; 名称=精确选择/新建; /关键词=模糊搜索; n/p=翻页; c=清除过滤; +名称=强制新建; 回车=默认",
+		}
+	}
+
+	if strings.HasPrefix(input, "/") {
+		query := strings.TrimSpace(strings.TrimPrefix(input, "/"))
+		state.Filter = query
+		state.Page = 0
+		if query == "" {
+			return state, loginProviderPickerResult{Message: "已清除过滤", Redraw: true}
+		}
+		matched := filterLoginProviders(state.Options, query)
+		if len(matched) == 0 {
+			return state, loginProviderPickerResult{
+				Message: fmt.Sprintf("没有匹配 %q 的 provider，可继续输入新名称创建", query),
+				Redraw:  true,
+			}
+		}
+		return state, loginProviderPickerResult{
+			Message: fmt.Sprintf("已按 %q 过滤，匹配 %d 项", query, len(matched)),
+			Redraw:  true,
+		}
+	}
+
+	if num, err := strconv.Atoi(input); err == nil {
+		pageItems, _, _, total := state.pageWindow()
+		if total == 0 {
+			return state, loginProviderPickerResult{Message: "当前没有可选 provider 编号，请直接输入 provider 名称或 /关键词"}
+		}
+		if num >= 1 && num <= len(pageItems) {
+			return state, loginProviderPickerResult{Selected: pageItems[num-1], Done: true}
+		}
+		return state, loginProviderPickerResult{
+			Message: fmt.Sprintf("无效编号 %d，请输入当前页 1-%d，或使用 /关键词 搜索", num, len(pageItems)),
+		}
+	}
+
+	// Bare query acts as fuzzy search when it matches existing providers.
+	matched := filterLoginProviders(state.Options, input)
+	switch len(matched) {
+	case 0:
+		// Allow creating a brand-new provider by typing a non-numeric name.
+		return state, loginProviderPickerResult{Selected: input, Done: true}
+	case 1:
+		return state, loginProviderPickerResult{Selected: matched[0], Done: true}
+	default:
+		state.Filter = input
+		state.Page = 0
+		return state, loginProviderPickerResult{
+			Message: fmt.Sprintf("匹配到 %d 个 provider，已过滤；请输入编号选择，或继续缩小关键词", len(matched)),
+			Redraw:  true,
+		}
+	}
+}
+
+func moveLoginProviderPickerPage(state loginProviderPickerState, delta int) (loginProviderPickerState, loginProviderPickerResult) {
+	_, page, pageCount, total := state.pageWindow()
+	if total == 0 || pageCount <= 1 {
+		return state, loginProviderPickerResult{Message: "当前只有一页，无需翻页"}
+	}
+	next := page + delta
+	if next < 0 {
+		return state, loginProviderPickerResult{Message: "已经是第一页"}
+	}
+	if next >= pageCount {
+		return state, loginProviderPickerResult{Message: "已经是最后一页"}
+	}
+	state.Page = next
+	return state, loginProviderPickerResult{
+		Message: fmt.Sprintf("第 %d/%d 页", state.Page+1, pageCount),
+		Redraw:  true,
+	}
+}
+
+func filterLoginProviders(options []string, query string) []string {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		out := append([]string(nil), options...)
+		return out
+	}
+	type scored struct {
+		name  string
+		score int
+	}
+	tokens := strings.Fields(strings.ToLower(query))
+	ranked := make([]scored, 0, len(options))
+	for _, option := range options {
+		score, ok := loginProviderMatchScore(option, tokens)
+		if !ok {
+			continue
+		}
+		ranked = append(ranked, scored{name: option, score: score})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return strings.ToLower(ranked[i].name) < strings.ToLower(ranked[j].name)
+	})
+	out := make([]string, 0, len(ranked))
+	for _, item := range ranked {
+		out = append(out, item.name)
+	}
+	return out
+}
+
+func loginProviderMatchScore(name string, tokens []string) (int, bool) {
+	if len(tokens) == 0 {
+		return 0, true
+	}
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return 0, false
+	}
+	total := 0
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		switch {
+		case lower == token:
+			total += 1000
+		case strings.HasPrefix(lower, token):
+			// Prefer shorter provider names on prefix matches.
+			total += 800 - minInt(len([]rune(lower)), 100)
+		case strings.Contains(lower, token):
+			idx := strings.Index(lower, token)
+			total += 600 - minInt(idx, 100) - minInt(len([]rune(lower))/4, 50)
+		default:
+			subScore, ok := loginProviderSubsequenceScore(lower, token)
+			if !ok {
+				return 0, false
+			}
+			total += subScore
+		}
+	}
+	return total, true
+}
+
+func loginProviderSubsequenceScore(name, query string) (int, bool) {
+	if query == "" {
+		return 0, true
+	}
+	nameRunes := []rune(name)
+	queryRunes := []rune(query)
+	if len(queryRunes) > len(nameRunes) {
+		return 0, false
+	}
+	j := 0
+	first := -1
+	last := -1
+	for i := 0; i < len(nameRunes) && j < len(queryRunes); i++ {
+		if nameRunes[i] != queryRunes[j] {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		last = i
+		j++
+	}
+	if j != len(queryRunes) {
+		return 0, false
+	}
+	// Higher score for earlier and denser subsequence matches, and shorter names.
+	span := last - first + 1
+	densityBonus := minInt(80, (len(queryRunes)*80)/maxInt(span, 1))
+	earlyBonus := 40 - minInt(first, 40)
+	lengthPenalty := minInt(len(nameRunes), 40)
+	return 300 + densityBonus + earlyBonus - lengthPenalty, true
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func resolveLoginProtocolAndMode(req providerLoginRequest, existing config.Provider, exists bool) (string, string, error) {
@@ -1425,12 +1780,13 @@ func sameProviderLoginTemplateID(left, right modelcard.ProviderTemplate) bool {
 }
 
 type providerLoginTemplateDefaults struct {
-	APIPath              string
-	APIPathCandidates    []string
-	ForwardURL           string
-	ForwardURLCandidates []string
-	SupportTypes         []string
-	MaxTokensLimit       int
+	APIPath                  string
+	APIPathCandidates        []string
+	ForwardURL               string
+	ForwardURLCandidates     []string
+	SupportTypes             []string
+	MaxTokensLimit           int
+	MaxTokensLimitCandidates []int
 }
 
 func providerLoginProviderTemplateDefaults(provider config.Provider, template modelcard.ProviderTemplate) providerLoginTemplateDefaults {
@@ -1448,6 +1804,7 @@ func providerLoginProviderTemplateDefaults(provider config.Provider, template mo
 	}
 	defaults.APIPathCandidates = providerLoginProviderTemplatePathCandidates(template, defaults.APIPath, template.APIPath)
 	defaults.ForwardURLCandidates = providerLoginProviderTemplatePathCandidates(template, defaults.ForwardURL, template.ForwardURL)
+	defaults.MaxTokensLimitCandidates = providerLoginProviderTemplateMaxTokensLimitCandidates(template, defaults.MaxTokensLimit)
 	return defaults
 }
 
@@ -1493,7 +1850,7 @@ func applyProviderLoginProviderTemplateDefaults(provider *config.Provider, templ
 	provider.APIPath = providerLoginMergedTemplatePath(provider.APIPath, current.APIPath, previous.APIPathCandidates, hasPrevious)
 	provider.ForwardURL = providerLoginMergedTemplatePath(provider.ForwardURL, current.ForwardURL, previous.ForwardURLCandidates, hasPrevious)
 	provider.SupportTypes = providerLoginMergedTemplateSupportTypes(provider.SupportTypes, current.SupportTypes, previous.SupportTypes, hasPrevious)
-	provider.MaxTokensLimit = providerLoginMergedTemplateMaxTokensLimit(provider.MaxTokensLimit, current.MaxTokensLimit, previous.MaxTokensLimit, hasPrevious)
+	provider.MaxTokensLimit = providerLoginMergedTemplateMaxTokensLimit(provider.MaxTokensLimit, current.MaxTokensLimit, previous.MaxTokensLimitCandidates, hasPrevious)
 }
 
 func providerLoginMergedTemplatePath(configured, currentDefault string, previousDefaults []string, hasPrevious bool) string {
@@ -1516,14 +1873,55 @@ func providerLoginMergedTemplateSupportTypes(configured, currentDefault, previou
 	return configured
 }
 
-func providerLoginMergedTemplateMaxTokensLimit(configured, currentDefault, previousDefault int, hasPrevious bool) int {
+func providerLoginProviderTemplateMaxTokensLimitCandidates(template modelcard.ProviderTemplate, values ...int) []int {
+	out := make([]int, 0, len(values)+2)
+	add := func(value int) {
+		if value <= 0 {
+			return
+		}
+		for _, existing := range out {
+			if existing == value {
+				return
+			}
+		}
+		out = append(out, value)
+	}
+	for _, value := range values {
+		add(value)
+	}
+	// Keep historical template defaults so protocol switches still rewrite
+	// providers that were provisioned before the catalog limit changed.
+	switch strings.ToLower(strings.TrimSpace(template.ID)) {
+	case "openai.chat", "codex.responses":
+		add(10000)
+		add(128000)
+	case "anthropic.messages":
+		add(10000)
+		add(131072)
+	}
+	return out
+}
+
+func providerLoginMergedTemplateMaxTokensLimit(configured, currentDefault int, previousDefaults []int, hasPrevious bool) int {
 	if configured <= 0 {
 		return currentDefault
 	}
-	if hasPrevious && previousDefault > 0 && configured == previousDefault {
+	if hasPrevious && providerLoginConfiguredMaxTokensLimitMatchesAny(configured, previousDefaults) {
 		return currentDefault
 	}
 	return configured
+}
+
+func providerLoginConfiguredMaxTokensLimitMatchesAny(configured int, previousDefaults []int) bool {
+	if configured <= 0 {
+		return false
+	}
+	for _, previous := range previousDefaults {
+		if previous > 0 && configured == previous {
+			return true
+		}
+	}
+	return false
 }
 
 func providerLoginStringSlicesEqualFold(left, right []string) bool {

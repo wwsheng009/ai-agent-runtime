@@ -163,6 +163,9 @@ type ProviderConfig struct {
 	SupportedModels         []string                                   `json:"supportedModels,omitempty"`
 	ModelMappings           map[string]string                          `json:"modelMappings,omitempty"`
 	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
+	// EnableImageGeneration opts into Codex native image_generation injection.
+	// Nil/false keeps the tool out of request payloads by default.
+	EnableImageGeneration   *bool                                      `json:"enableImageGeneration,omitempty"`
 	Headers                 map[string]string                          `json:"headers,omitempty"`
 	HeaderMappings          map[string]string                          `json:"headerMappings,omitempty"`
 	HeaderMappingRules      []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
@@ -855,7 +858,17 @@ func (p *ProviderWrapper) SupportedModels() []string {
 	case "openai":
 		return []string{"gpt-4", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-4o", "o1", "o1-mini"}
 	case "anthropic":
-		return []string{"claude-3-opus", "claude-3-sonnet", "claude-3-haiku", "claude-3.5-sonnet"}
+		return []string{
+			"claude-fable-5",
+			"claude-mythos-5",
+			"claude-opus-5",
+			"claude-sonnet-5",
+			"claude-opus-4-8",
+			"claude-opus-4-7",
+			"claude-opus-4-6",
+			"claude-sonnet-4-6",
+			"claude-haiku-4-5",
+		}
 	case "gemini":
 		return []string{"gemini-pro", "gemini-1.5-pro"}
 	case "codex":
@@ -900,6 +913,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	startedAt := time.Now()
 	resolvedModel := p.resolveModel(chatReq.Model)
 	activeMaxAttempts := policy.initialMaxAttempts()
+	maxTokensRecovered := false
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -917,6 +931,18 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
+		// Deterministic max_tokens ceiling rejections can be repaired once by
+		// lowering the request budget to the provider-reported limit.
+		if !maxTokensRecovered && applyMaxTokensLimitRecovery(&chatReq.MaxTokens, err) {
+			maxTokensRecovered = true
+			if activeMaxAttempts < attempt+1 {
+				activeMaxAttempts = attempt + 1
+			}
+			if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+				policy.MaxAttempts = activeMaxAttempts
+			}
+			continue
+		}
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 			Source:   "provider_wrapper",
 			Protocol: p.config.Type,
@@ -1050,32 +1076,38 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	}
 
 	request := p.toChatRequest(req)
-	adapterRequest := p.convertRequest(request)
-	adapterRequest.Stream = true
+	buildStreamingBody := func(chatReq ChatRequest) (adapter.RequestConfig, map[string]interface{}, []byte, map[string]string, error) {
+		adapterRequest := p.convertRequest(chatReq)
+		adapterRequest.Stream = true
+		requestBody := p.adapter.BuildRequest(adapterRequest)
+		requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
+		bodyBytes, err := json.Marshal(requestBody)
+		if err != nil {
+			return adapter.RequestConfig{}, nil, nil, nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		adapterConfig := adapter.AdapterConfig{
+			Type:        p.config.Type,
+			APIKey:      p.config.APIKey,
+			Timeout:     p.config.Timeout,
+			Model:       adapterRequest.Model,
+			RequestBody: requestBody,
+			Headers:     p.config.Headers,
+		}
+		return adapterRequest, requestBody, bodyBytes, p.adapter.BuildHeaders(adapterConfig), nil
+	}
 
-	requestBody := p.adapter.BuildRequest(adapterRequest)
-	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
-	bodyBytes, err := json.Marshal(requestBody)
+	adapterRequest, requestBody, bodyBytes, headers, err := buildStreamingBody(request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, err
 	}
 
 	url := p.buildURL(p.adapter.GetAPIPath())
-	adapterConfig := adapter.AdapterConfig{
-		Type:        p.config.Type,
-		APIKey:      p.config.APIKey,
-		Timeout:     p.config.Timeout,
-		Model:       adapterRequest.Model,
-		RequestBody: requestBody,
-		Headers:     p.config.Headers,
-	}
-	headers := p.adapter.BuildHeaders(adapterConfig)
-
 	client := p.providerHTTPClient(true)
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
 	var lastErr error
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
+	maxTokensRecovered := false
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -1144,6 +1176,24 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
 			lastErr = newProviderHTTPError(resp.StatusCode, string(responseBody), resp.Header)
+			if !maxTokensRecovered && applyMaxTokensLimitRecovery(&request.MaxTokens, lastErr) {
+				rebuiltAdapterRequest, rebuiltBody, rebuiltBytes, rebuiltHeaders, rebuildErr := buildStreamingBody(request)
+				if rebuildErr != nil {
+					return nil, rebuildErr
+				}
+				adapterRequest = rebuiltAdapterRequest
+				requestBody = rebuiltBody
+				bodyBytes = rebuiltBytes
+				headers = rebuiltHeaders
+				maxTokensRecovered = true
+				if activeMaxAttempts < attempt+1 {
+					activeMaxAttempts = attempt + 1
+				}
+				if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+					policy.MaxAttempts = activeMaxAttempts
+				}
+				continue
+			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",
 				Protocol: p.config.Type,
@@ -1521,6 +1571,18 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 	}
 	result.Content = choice.Message.Content
 	result.Reasoning = choice.Message.Reasoning
+	result.FinishReason = strings.TrimSpace(choice.FinishReason)
+	if result.FinishReason == "" {
+		result.FinishReason = strings.TrimSpace(resp.FinishReason)
+	}
+	if result.FinishReason != "" {
+		if result.Metadata == nil {
+			result.Metadata = map[string]interface{}{}
+		}
+		if _, exists := result.Metadata["finish_reason"]; !exists {
+			result.Metadata["finish_reason"] = result.FinishReason
+		}
+	}
 	if reasoningBlock := types.ReasoningBlockFromMap(result.Metadata[assistantReasoningDetailsKey]); reasoningBlock != nil {
 		result.ReasoningBlock = reasoningBlock
 		if result.Reasoning == "" {
@@ -1599,6 +1661,7 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		Model:                   resolvedModel,
 		SupportsMaxOutputTokens: p.config.SupportsMaxOutputTokens,
 		ModelCapabilities:       p.modelCapabilities(),
+		EnableImageGeneration:   p.config.EnableImageGeneration,
 		Messages:                messages,
 		Tools:                   chatToolsToToolDefinitions(request.Tools),
 		Metadata:                metadata,
@@ -1615,12 +1678,15 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 
 // convertTools 转换工具定义（从 OpenAI 嵌套格式转换为协议特定格式）
 func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model string, includeMeta bool) interface{} {
+	enableNativeImageGeneration := p != nil && p.config != nil &&
+		p.config.EnableImageGeneration != nil && *p.config.EnableImageGeneration
 	return BuildToolDefinitionsForRequest(
 		chatToolsToToolDefinitions(tools),
 		protocol,
 		model,
 		p.config.ModelCapabilities,
 		includeMeta,
+		enableNativeImageGeneration,
 	)
 }
 

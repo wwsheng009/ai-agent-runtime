@@ -71,6 +71,7 @@ type LLMResponse struct {
 	ToolCalls      []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
 	Usage          *types.TokenUsage      `json:"usage,omitempty" yaml:"usage,omitempty"`
 	Model          string                 `json:"model" yaml:"model"`
+	FinishReason   string                 `json:"finish_reason,omitempty" yaml:"finish_reason,omitempty"`
 	Reasoning      string                 `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
 	ReasoningBlock *types.ReasoningBlock  `json:"reasoning_block,omitempty" yaml:"reasoning_block,omitempty"`
 	Metadata       map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`

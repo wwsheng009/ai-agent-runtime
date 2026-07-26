@@ -19,7 +19,7 @@ version: 1
 cards:
   - id: test.gpt-5.4.codex
     title: GPT 5.4 Codex
-    priority: 100
+    priority: 200
     provider_template: codex.responses
     match:
       model_ids:
@@ -27,8 +27,8 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 1050000
+      auto_compact_token_limit: 945000
       input_modalities:
         - text
         - image
@@ -69,6 +69,7 @@ providers:
             - low
             - medium
           max_tokens: 8192
+          supports_remote_compact: true
         local-only-model:
           max_context_tokens: 12345
           input_modalities:
@@ -93,11 +94,11 @@ providers:
 
 	provider := cfg.Providers.Items["openai_codex"]
 	got := provider.ModelCapabilities["gpt-5.4"]
-	if got.MaxContextTokens != 272000 {
-		t.Fatalf("expected max_context_tokens 272000, got %d", got.MaxContextTokens)
+	if got.MaxContextTokens != 1050000 {
+		t.Fatalf("expected max_context_tokens 1050000, got %d", got.MaxContextTokens)
 	}
-	if got.AutoCompactTokenLimit != 200000 {
-		t.Fatalf("expected auto_compact_token_limit 200000, got %d", got.AutoCompactTokenLimit)
+	if got.AutoCompactTokenLimit != 945000 {
+		t.Fatalf("expected auto_compact_token_limit 945000, got %d", got.AutoCompactTokenLimit)
 	}
 	if strings.Join(got.InputModalities, ",") != "text,image" {
 		t.Fatalf("unexpected input_modalities: %+v", got.InputModalities)
@@ -111,9 +112,13 @@ providers:
 	if got.DefaultReasoningEffort != "medium" {
 		t.Fatalf("expected default_reasoning_effort medium, got %q", got.DefaultReasoningEffort)
 	}
+	// max_tokens is now card-managed for gpt-5.4 (builtin/catalog fill); local value should be overwritten.
+	if got.MaxTokens != 128000 {
+		t.Fatalf("expected card max_tokens 128000, got %d", got.MaxTokens)
+	}
 	// card-unmanaged local field should remain
-	if got.MaxTokens != 8192 {
-		t.Fatalf("expected local max_tokens preserved, got %d", got.MaxTokens)
+	if !got.SupportsRemoteCompact {
+		t.Fatalf("expected local supports_remote_compact preserved, got %+v", got)
 	}
 	// unmatched model should stay untouched
 	local := provider.ModelCapabilities["local-only-model"]
@@ -127,7 +132,7 @@ providers:
 		t.Fatalf("reload config: %v", err)
 	}
 	persisted := reloaded.Providers.Items["openai_codex"].ModelCapabilities["gpt-5.4"]
-	if persisted.MaxContextTokens != 272000 || strings.Join(persisted.ReasoningEfforts, ",") != "low,medium,high,xhigh" {
+	if persisted.MaxContextTokens != 1050000 || strings.Join(persisted.ReasoningEfforts, ",") != "low,medium,high,xhigh" {
 		t.Fatalf("persisted capability mismatch: %+v", persisted)
 	}
 }
@@ -146,7 +151,7 @@ cards:
       model_ids: [gpt-5.4]
       protocols: [codex]
     capability:
-      max_context_tokens: 272000
+      max_context_tokens: 1050000
       reasoning_efforts: [low, medium, high]
 `)+"\n"), 0o644); err != nil {
 		t.Fatalf("write cards: %v", err)
@@ -211,7 +216,7 @@ cards:
       model_ids: [gpt-5.4]
       protocols: [codex]
     capability:
-      max_context_tokens: 272000
+      max_context_tokens: 1050000
   - id: fallback.openai
     fallback: true
     priority: 1
@@ -256,7 +261,7 @@ providers:
 	if len(result.Providers) != 1 || result.Providers[0].Name != "openai_codex" {
 		t.Fatalf("protocol filter failed: %+v", result.Providers)
 	}
-	if cfg.Providers.Items["openai_codex"].ModelCapabilities["gpt-5.4"].MaxContextTokens != 272000 {
+	if cfg.Providers.Items["openai_codex"].ModelCapabilities["gpt-5.4"].MaxContextTokens != 1050000 {
 		t.Fatalf("codex provider not refreshed")
 	}
 	if cfg.Providers.Items["openai_chat"].ModelCapabilities["gpt-4.1"].MaxContextTokens != 100000 {
@@ -302,7 +307,7 @@ cards:
       model_ids: [gpt-5.4]
       protocols: [codex]
     capability:
-      max_context_tokens: 272000
+      max_context_tokens: 1050000
       reasoning_efforts: [low, medium, high]
 `)+"\n"), 0o644); err != nil {
 		t.Fatalf("write cards: %v", err)

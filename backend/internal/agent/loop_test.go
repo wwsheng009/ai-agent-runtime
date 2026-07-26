@@ -733,6 +733,30 @@ func TestReActLoop_DowngradesUnsupportedOptionalParametersAndRemembersCapability
 	require.True(t, loop.temperatureUnsupported.Load())
 }
 
+func TestReActLoop_DowngradesThinkingAdaptiveEffortFromReasoningEffort(t *testing.T) {
+	// Live failure shape: ReasoningEffort-derived adaptive thinking is rejected as
+	// thinking.adaptive.effort extra_forbidden. req.Thinking may be nil; still
+	// must clear ReasoningEffort so the next attempt does not rebuild adaptive.
+	loop := NewReActLoop(&Agent{config: &Config{Name: "test"}}, nil, &LoopReActConfig{
+		MaxSteps: 1, ReasoningEffort: "high",
+	})
+	req := &llm.LLMRequest{ReasoningEffort: "high"}
+	err := fmt.Errorf(`HTTP 400: {"type":"error","error":{"type":"invalid_request_error","message":"thinking.adaptive.effort: Extra inputs are not permitted"}}`)
+
+	got := loop.downgradeUnsupportedProviderRequest(req, err)
+	require.Equal(t, "thinking", got)
+	require.Empty(t, req.ReasoningEffort)
+	require.Nil(t, req.Thinking)
+	require.True(t, loop.thinkingUnsupported.Load())
+	require.True(t, loop.reasoningEffortUnsupported.Load())
+
+	// Remembered capability must also strip effort on subsequent requests.
+	next := &llm.LLMRequest{ReasoningEffort: "xhigh", Thinking: &types.ThinkingConfig{Type: "adaptive", Effort: "xhigh"}}
+	loop.applyRememberedProviderRequestDowngrades(next)
+	require.Empty(t, next.ReasoningEffort)
+	require.Nil(t, next.Thinking)
+}
+
 func TestResolvePromptPreflightProviderModelUsesLoopConfigOverride(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "default-provider",
@@ -6036,7 +6060,29 @@ func TestDispositionReplayAdvisory(t *testing.T) {
 	require.Contains(t, emptyFirst, "broaden/change inputs")
 
 	require.Empty(t, dispositionReplayAdvisory(toolresult.OutcomeSuccess, 2))
-	require.Empty(t, dispositionReplayAdvisory(toolresult.OutcomeFailed, 2))
+
+	failedFirst := dispositionReplayAdvisory(toolresult.OutcomeFailed, 1)
+	require.Contains(t, failedFirst, "outcome=failed")
+	require.Contains(t, failedFirst, "Do not replay the same args unchanged")
+
+	staleFirst := dispositionReplayAdvisory(toolresult.OutcomeFailed, 1, "STALE_CONTEXT")
+	require.Contains(t, staleFirst, "STALE_CONTEXT")
+	require.Contains(t, staleFirst, "current_snippet")
+	require.Contains(t, staleFirst, "suggested_view_offset")
+	require.Contains(t, staleFirst, "do not retry the same stale")
+
+	staleRepeat := dispositionReplayAdvisory(toolresult.OutcomeFailed, 4, "STALE_CONTEXT")
+	require.Contains(t, staleRepeat, "replayed 4 times")
+	require.Contains(t, staleRepeat, "Stop unchanged edit/patch retries")
+
+	pathFirst := dispositionReplayAdvisory(toolresult.OutcomeFailed, 1, "TOOL_PATH_NOT_FOUND")
+	require.Contains(t, pathFirst, "TOOL_PATH_NOT_FOUND")
+	require.Contains(t, pathFirst, "path_candidates")
+	require.Contains(t, pathFirst, "do not retry the same missing path")
+
+	pathRepeat := dispositionReplayAdvisory(toolresult.OutcomeFailed, 3, "TOOL_PATH_NOT_FOUND")
+	require.Contains(t, pathRepeat, "replayed 3 times")
+	require.Contains(t, pathRepeat, "Stop unchanged path retries")
 }
 
 func TestDominantToolResultDisposition(t *testing.T) {
@@ -6064,4 +6110,43 @@ func TestDominantToolResultDisposition(t *testing.T) {
 		},
 	})
 	require.Equal(t, toolresult.OutcomeEmpty, empty)
+}
+
+func TestDominantToolResultErrorCodePrefersStaleContext(t *testing.T) {
+	code := dominantToolResultErrorCode([]toolExecutionResult{
+		{
+			Error: "path missing",
+			Envelope: &output.Envelope{
+				Metadata: map[string]interface{}{
+					"error_code": "TOOL_PATH_NOT_FOUND",
+				},
+			},
+		},
+		{
+			Error: "old_string miss",
+			Envelope: &output.Envelope{
+				Metadata: map[string]interface{}{
+					"error_code": "STALE_CONTEXT",
+					"tool_metadata": map[string]interface{}{
+						"error_code": "STALE_CONTEXT",
+					},
+				},
+			},
+		},
+	})
+	require.Equal(t, "STALE_CONTEXT", code)
+
+	nestedOnly := dominantToolResultErrorCode([]toolExecutionResult{
+		{
+			Error: "stale",
+			Envelope: &output.Envelope{
+				Metadata: map[string]interface{}{
+					"tool_metadata": map[string]interface{}{
+						"error_code": "STALE_CONTEXT",
+					},
+				},
+			},
+		},
+	})
+	require.Equal(t, "STALE_CONTEXT", nestedOnly)
 }

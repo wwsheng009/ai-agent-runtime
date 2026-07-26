@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +197,7 @@ func TestRunProviderLogin_AppliesBuiltinModelCard(t *testing.T) {
 		t.Fatalf("expected model card applied, got %+v", result)
 	}
 	capability := cfg.Providers.Items["codex"].ModelCapabilities["gpt-5.4"]
-	if capability.MaxContextTokens != 272000 || capability.AutoCompactTokenLimit != 200000 || !capability.NativeTools.ImageGeneration {
+	if capability.MaxContextTokens != 1050000 || capability.AutoCompactTokenLimit != 945000 || !capability.NativeTools.ImageGeneration {
 		t.Fatalf("unexpected model-card capability: %+v", capability)
 	}
 	if strings.Join(capability.InputModalities, ",") != "text,image" {
@@ -209,8 +210,8 @@ func TestRunProviderLogin_AppliesBuiltinModelCard(t *testing.T) {
 	text := string(content)
 	for _, expected := range []string{
 		"gpt-5.4:",
-		"max_context_tokens: 272000",
-		"auto_compact_token_limit: 200000",
+		"max_context_tokens: 1050000",
+		"auto_compact_token_limit: 945000",
 		"image_generation: true",
 	} {
 		if !strings.Contains(text, expected) {
@@ -283,12 +284,35 @@ func TestRunProviderLogin_OpenAICompatibleCodexModelsUseCodexTemplate(t *testing
 	if provider.Protocol != "codex" || provider.APIPath != "/v1/responses" || provider.ForwardURL != "/v1/responses" {
 		t.Fatalf("expected codex.responses provider defaults, got %+v", provider)
 	}
+	expectedLimits := map[string]struct {
+		maxContextTokens      int
+		autoCompactTokenLimit int
+	}{
+		"codex-auto-review":            {400000, 360000},
+		"gpt-5.2":                      {400000, 360000},
+		"gpt-5.2-openai-compact":       {400000, 360000},
+		"gpt-5.3-codex":                {400000, 360000},
+		"gpt-5.3-codex-openai-compact": {400000, 360000},
+		"gpt-5.4-nano":                 {400000, 360000},
+		"gpt-5.4-openai-compact":       {1050000, 945000},
+		"gpt-5.5":                      {1050000, 945000},
+		"gpt-5.5-openai-compact":       {1050000, 945000},
+		"gpt-5.6-sol":                  {1050000, 945000},
+		"gpt-5.6-terra":                {1050000, 945000},
+		"gpt-5.6-luna":                 {1050000, 945000},
+	}
 	for _, model := range codexModels {
 		capability, ok := provider.ModelCapabilities[model]
 		if !ok {
 			t.Fatalf("missing capability for %s: %+v", model, provider.ModelCapabilities)
 		}
-		if capability.MaxContextTokens != 272000 || capability.AutoCompactTokenLimit != 200000 || !capability.ReasoningModel {
+		expected, ok := expectedLimits[model]
+		if !ok {
+			t.Fatalf("missing expected limits for %s", model)
+		}
+		if capability.MaxContextTokens != expected.maxContextTokens ||
+			capability.AutoCompactTokenLimit != expected.autoCompactTokenLimit ||
+			!capability.ReasoningModel {
 			t.Fatalf("unexpected capability for %s: %+v", model, capability)
 		}
 	}
@@ -359,7 +383,7 @@ func TestRunProviderLogin_AppliesAnthropicModelCard(t *testing.T) {
 		t.Fatalf("expected anthropic model card, got %+v", result.ModelCardsApplied)
 	}
 	capability := cfg.Providers.Items["anthropic"].ModelCapabilities["claude-sonnet-4-6"]
-	if capability.MaxContextTokens != 1000000 || capability.MaxTokens != 64000 || !capability.ReasoningModel {
+	if capability.MaxContextTokens != 1000000 || capability.MaxTokens != 128000 || !capability.ReasoningModel {
 		t.Fatalf("unexpected anthropic capability: %+v", capability)
 	}
 	if strings.Join(capability.InputModalities, ",") != "text,image" {
@@ -527,7 +551,7 @@ func TestRunProviderLogin_OpenAIImageProtocolUsesImageTemplate(t *testing.T) {
 		t.Fatalf("unexpected support types: %+v", provider.SupportTypes)
 	}
 	capability := provider.ModelCapabilities["gpt-image-2"]
-	if !capability.NativeTools.ImagesGenerationsAPI || strings.Join(capability.InputModalities, ",") != "text" {
+	if !capability.NativeTools.ImagesGenerationsAPI || strings.Join(capability.InputModalities, ",") != "text,image" {
 		t.Fatalf("unexpected image capability: %+v", capability)
 	}
 	content, err := os.ReadFile(path)
@@ -920,10 +944,11 @@ func TestApplyProviderLoginProviderTemplateDefaults_ReplacesOnlyKnownPreviousDef
 		MaxTokensLimit: 10000,
 	}
 	previous := providerLoginTemplateDefaults{
-		APIPathCandidates:    []string{"/v1/chat/completions"},
-		ForwardURLCandidates: []string{"/v1/chat/completions"},
-		SupportTypes:         []string{"openai"},
-		MaxTokensLimit:       10000,
+		APIPathCandidates:        []string{"/v1/chat/completions"},
+		ForwardURLCandidates:     []string{"/v1/chat/completions"},
+		SupportTypes:             []string{"openai"},
+		MaxTokensLimit:           10000,
+		MaxTokensLimitCandidates: []int{10000, 128000},
 	}
 	applyProviderLoginProviderTemplateDefaults(&provider, modelcard.ProviderTemplate{
 		ID:             "anthropic.messages",
@@ -1012,7 +1037,7 @@ providers:
 	if capability.MaxContextTokens != 123 {
 		t.Fatalf("max context overwritten: %+v", capability)
 	}
-	if capability.AutoCompactTokenLimit != 200000 || !capability.NativeTools.ImageGeneration {
+	if capability.AutoCompactTokenLimit != 945000 || !capability.NativeTools.ImageGeneration {
 		t.Fatalf("expected template to fill missing fields: %+v", capability)
 	}
 }
@@ -1410,8 +1435,8 @@ func TestRunProviderLogin_InteractiveProviderSelectionByNumber(t *testing.T) {
 		},
 	}
 	prompter := &testLoginPrompter{text: map[string]string{
-		"Provider 名称（新建或现有）": "1",
-		"Base URL":           server.URL,
+		"Provider 名称/编号/搜索（/关键词, n下一页, p上一页）": "1",
+		"Base URL": server.URL,
 	}}
 	result, err := runProviderLogin(providerLoginRequest{
 		Config:      cfg,
@@ -1423,6 +1448,267 @@ func TestRunProviderLogin_InteractiveProviderSelectionByNumber(t *testing.T) {
 	}
 	if result.ProviderName != "alpha" || !result.Updated {
 		t.Fatalf("unexpected provider selection result: %+v", result)
+	}
+}
+
+func TestLoginProviderSelectionOptions_SortsAndOmitsGhostDefault(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "gemini_local",
+			Items: map[string]config.Provider{
+				"zeta":  {Enabled: true},
+				"alpha": {Enabled: true},
+			},
+		},
+	}
+	options := loginProviderSelectionOptions(cfg)
+	if len(options) != 2 || options[0] != "alpha" || options[1] != "zeta" {
+		t.Fatalf("expected sorted real providers only, got %#v", options)
+	}
+	if got := resolveLoginProviderDefault(cfg, options); got != "" {
+		t.Fatalf("expected empty default for missing provider, got %q", got)
+	}
+}
+
+func TestResolveLoginProviderSelection_NumberAndInvalidNumber(t *testing.T) {
+	options := []string{"alpha", "beta", "gamma"}
+	selected, ok, reason := resolveLoginProviderSelection("2", "alpha", options)
+	if !ok || selected != "beta" || reason != "" {
+		t.Fatalf("expected beta from number 2, got selected=%q ok=%v reason=%q", selected, ok, reason)
+	}
+	selected, ok, reason = resolveLoginProviderSelection("99", "alpha", options)
+	if ok || selected != "" || !strings.Contains(reason, "无效编号") {
+		t.Fatalf("expected invalid number rejection, got selected=%q ok=%v reason=%q", selected, ok, reason)
+	}
+	selected, ok, reason = resolveLoginProviderSelection("", "", options)
+	if ok || selected != "" || reason == "" {
+		t.Fatalf("expected empty input without default to fail, got selected=%q ok=%v reason=%q", selected, ok, reason)
+	}
+	selected, ok, reason = resolveLoginProviderSelection("new_provider", "alpha", options)
+	if !ok || selected != "new_provider" || reason != "" {
+		t.Fatalf("expected free-form new provider name, got selected=%q ok=%v reason=%q", selected, ok, reason)
+	}
+}
+
+func TestFilterLoginProviders_FuzzyRanking(t *testing.T) {
+	options := []string{
+		"openai_proxy",
+		"openai",
+		"azure_openai",
+		"claude",
+		"deepseek",
+	}
+	matched := filterLoginProviders(options, "open")
+	if len(matched) != 3 {
+		t.Fatalf("expected 3 open* matches, got %#v", matched)
+	}
+	if matched[0] != "openai" {
+		t.Fatalf("expected openai ranked first, got %#v", matched)
+	}
+	// subsequence: oai -> openai
+	matched = filterLoginProviders(options, "oai")
+	if len(matched) == 0 || matched[0] != "openai" {
+		t.Fatalf("expected subsequence match openai first, got %#v", matched)
+	}
+	matched = filterLoginProviders(options, "nope")
+	if len(matched) != 0 {
+		t.Fatalf("expected no matches, got %#v", matched)
+	}
+}
+
+func TestApplyLoginProviderPickerInput_FilterPageAndSelect(t *testing.T) {
+	options := make([]string, 0, 20)
+	for i := 1; i <= 20; i++ {
+		options = append(options, fmt.Sprintf("provider_%02d", i))
+	}
+	options = append(options, "openai", "openai_proxy", "azure_openai")
+	sort.Strings(options)
+
+	state := loginProviderPickerState{
+		Options:  options,
+		Current:  "openai",
+		PageSize: 5,
+	}
+
+	// fuzzy multi-match becomes a filter
+	state, result := applyLoginProviderPickerInput(state, "openai")
+	// exact name openai exists, so exact match wins
+	if !result.Done || result.Selected != "openai" {
+		t.Fatalf("expected exact openai select, got %+v", result)
+	}
+
+	state = loginProviderPickerState{Options: options, Current: "openai", PageSize: 5}
+	state, result = applyLoginProviderPickerInput(state, "/open")
+	if result.Done || !result.Redraw || state.Filter != "open" {
+		t.Fatalf("expected filter applied, got state=%+v result=%+v", state, result)
+	}
+	pageItems, page, pageCount, total := state.pageWindow()
+	if page != 0 || total < 2 || len(pageItems) == 0 {
+		t.Fatalf("unexpected page window: items=%#v page=%d pageCount=%d total=%d", pageItems, page, pageCount, total)
+	}
+
+	// page-local number selects filtered item
+	state, result = applyLoginProviderPickerInput(state, "1")
+	if !result.Done || result.Selected == "" {
+		t.Fatalf("expected page-local selection, got %+v", result)
+	}
+	if !strings.Contains(strings.ToLower(result.Selected), "open") {
+		t.Fatalf("expected selected item to match filter, got %q", result.Selected)
+	}
+
+	// pagination
+	state = loginProviderPickerState{Options: options, PageSize: 5}
+	state, result = applyLoginProviderPickerInput(state, "n")
+	if !result.Redraw || state.Page != 1 {
+		t.Fatalf("expected next page, got state=%+v result=%+v", state, result)
+	}
+	state, result = applyLoginProviderPickerInput(state, "p")
+	if !result.Redraw || state.Page != 0 {
+		t.Fatalf("expected prev page, got state=%+v result=%+v", state, result)
+	}
+
+	// bare multi-match filters without exact option name
+	state = loginProviderPickerState{Options: options, PageSize: 10}
+	state, result = applyLoginProviderPickerInput(state, "provider")
+	if result.Done || !result.Redraw || state.Filter != "provider" {
+		t.Fatalf("expected multi-match filter, got state=%+v result=%+v", state, result)
+	}
+
+	// forced create bypasses reserved command words
+	state = loginProviderPickerState{Options: options, PageSize: 10}
+	state, result = applyLoginProviderPickerInput(state, "+next")
+	if !result.Done || result.Selected != "next" {
+		t.Fatalf("expected forced create next, got %+v", result)
+	}
+}
+
+func TestRunProviderLogin_InteractiveFilterAndPageSelect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"new-model"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	items := map[string]config.Provider{}
+	for i := 1; i <= 18; i++ {
+		name := fmt.Sprintf("provider_%02d", i)
+		items[name] = config.Provider{
+			Enabled:      true,
+			Protocol:     "openai",
+			BaseURL:      server.URL,
+			APIKey:       "k-" + name,
+			DefaultModel: "m-" + name,
+		}
+	}
+	items["openai_proxy"] = config.Provider{
+		Enabled:      true,
+		Protocol:     "openai",
+		BaseURL:      server.URL,
+		APIKey:       "proxy-key",
+		DefaultModel: "proxy-model",
+	}
+	items["azure_openai"] = config.Provider{
+		Enabled:      true,
+		Protocol:     "openai",
+		BaseURL:      server.URL,
+		APIKey:       "azure-key",
+		DefaultModel: "azure-model",
+	}
+	cfg := &config.Config{
+		ConfigFilePath: path,
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "provider_01",
+			Items:           items,
+		},
+	}
+	prompter := &testLoginPrompter{
+		text: map[string]string{
+			"Base URL": server.URL,
+		},
+		textQueue: map[string][]string{
+			"Provider 名称/编号/搜索（/关键词, n下一页, p上一页）": {"/open", "1"},
+		},
+	}
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:      cfg,
+		Interactive: true,
+		Prompter:    prompter,
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.ProviderName != "azure_openai" && result.ProviderName != "openai_proxy" {
+		t.Fatalf("expected filtered open* provider, got %+v", result)
+	}
+	joined := strings.Join(prompter.lines, "\n")
+	if !strings.Contains(joined, "过滤") && !strings.Contains(joined, "匹配") {
+		t.Fatalf("expected filter/page output, got lines:\n%s", joined)
+	}
+}
+
+func TestRunProviderLogin_InteractiveRejectsGhostDefaultAndInvalidNumber(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"new-model"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{
+		ConfigFilePath: path,
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "gemini_local",
+			Items: map[string]config.Provider{
+				"alpha": {
+					Enabled:      true,
+					Protocol:     "openai",
+					BaseURL:      server.URL,
+					APIKey:       "old-key",
+					DefaultModel: "old-model",
+				},
+				"beta": {
+					Enabled:      true,
+					Protocol:     "openai",
+					BaseURL:      server.URL,
+					APIKey:       "beta-key",
+					DefaultModel: "beta-model",
+				},
+			},
+		},
+	}
+	prompter := &testLoginPrompter{
+		text: map[string]string{
+			"Provider 名称/编号/搜索（/关键词, n下一页, p上一页）": "99",
+			"Base URL": server.URL,
+		},
+		textQueue: map[string][]string{
+			"Provider 名称/编号/搜索（/关键词, n下一页, p上一页）": {"99", "2"},
+		},
+	}
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:      cfg,
+		Interactive: true,
+		Prompter:    prompter,
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.ProviderName != "beta" {
+		t.Fatalf("expected beta after rejecting invalid number, got %+v", result)
+	}
+	joined := strings.Join(prompter.lines, "\n")
+	if !strings.Contains(joined, "default_provider=gemini_local") {
+		t.Fatalf("expected ghost default warning, got lines:\n%s", joined)
+	}
+	if !strings.Contains(joined, "无效编号 99") {
+		t.Fatalf("expected invalid number message, got lines:\n%s", joined)
 	}
 }
 
@@ -1697,11 +1983,20 @@ func TestParseChatLoginCommandRequest(t *testing.T) {
 }
 
 type testLoginPrompter struct {
-	text    map[string]string
-	secrets map[string]string
+	text      map[string]string
+	textQueue map[string][]string
+	secrets   map[string]string
+	lines     []string
 }
 
 func (p *testLoginPrompter) PromptText(label, current string, required bool) (string, error) {
+	if p != nil && p.textQueue != nil {
+		if queue := p.textQueue[label]; len(queue) > 0 {
+			value := queue[0]
+			p.textQueue[label] = queue[1:]
+			return value, nil
+		}
+	}
 	if p != nil && p.text != nil {
 		if value, ok := p.text[label]; ok {
 			return value, nil
@@ -1719,4 +2014,9 @@ func (p *testLoginPrompter) PromptSecret(label, currentMasked string, required b
 	return "", nil
 }
 
-func (p *testLoginPrompter) PrintLine(line string) {}
+func (p *testLoginPrompter) PrintLine(line string) {
+	if p == nil {
+		return
+	}
+	p.lines = append(p.lines, line)
+}

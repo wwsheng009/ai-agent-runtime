@@ -22,22 +22,23 @@ custom_section:
 
 	models := []string{"gpt-4.1-mini", "gpt-4.1-mini", "gpt-5"}
 	updated, err := UpdateProviderConfig(path, ProviderConfigUpdate{
-		Name:               "alpha",
-		SetDefaultProvider: true,
-		Enabled:            boolPtr(true),
-		Protocol:           stringPtr("openai"),
-		BaseURL:            stringPtr("https://api.example.com"),
-		APIPath:            stringPtr("/v1/chat/completions"),
-		ForwardURL:         stringPtr("/v1/chat/completions"),
-		APIKey:             stringPtr("sk-test"),
-		APIKeyRef:          stringPtr("alpha-key"),
-		SupportedModels:    &models,
-		DefaultModel:       stringPtr("gpt-4.1-mini"),
-		AuthMode:           stringPtr("api_key"),
-		ModelsPath:         stringPtr("/v1/models"),
-		ModelsVerifiedAt:   stringPtr("2026-05-02T00:00:00Z"),
-		SupportTypes:       &[]string{"openai", "openai"},
-		MaxTokensLimit:     intPtr(10000),
+		Name:                  "alpha",
+		SetDefaultProvider:    true,
+		Enabled:               boolPtr(true),
+		Protocol:              stringPtr("openai"),
+		BaseURL:               stringPtr("https://api.example.com"),
+		APIPath:               stringPtr("/v1/chat/completions"),
+		ForwardURL:            stringPtr("/v1/chat/completions"),
+		APIKey:                stringPtr("sk-test"),
+		APIKeyRef:             stringPtr("alpha-key"),
+		SupportedModels:       &models,
+		DefaultModel:          stringPtr("gpt-4.1-mini"),
+		AuthMode:              stringPtr("api_key"),
+		ModelsPath:            stringPtr("/v1/models"),
+		ModelsVerifiedAt:      stringPtr("2026-05-02T00:00:00Z"),
+		SupportTypes:          &[]string{"openai", "openai"},
+		MaxTokensLimit:        intPtr(10000),
+		EnableImageGeneration: boolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("UpdateProviderConfig: %v", err)
@@ -64,6 +65,7 @@ custom_section:
 		"supported_models:",
 		"support_types:",
 		"max_tokens_limit: 10000",
+		"enable_image_generation: true",
 		"- gpt-4.1-mini",
 		"- gpt-5",
 	} {

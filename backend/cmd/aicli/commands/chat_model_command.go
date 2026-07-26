@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
@@ -15,6 +16,23 @@ import (
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const modelCommandProviderPageSize = 10
+
+type modelCommandProviderPickerState struct {
+	Options   []string
+	Preferred string
+	Filter    string
+	Page      int
+	PageSize  int
+}
+
+type modelCommandProviderPickerResult struct {
+	Selected string
+	Done     bool
+	Message  string
+	Redraw   bool
+}
 
 type modelCommandRequest struct {
 	Provider          string
@@ -365,18 +383,19 @@ func promptModelCommandProviderSelectionPopup(session *ChatSession, current stri
 	if !currentValid {
 		defaultOption = options[0]
 	}
+	state := newModelCommandProviderPickerState(options, currentMatch, defaultOption, modelCommandProviderPageSize)
 
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "provider 选择")
 	defer restoreInput()
-	hint := "  提示: ↑↓ 选择，回车确认高亮项；也可输入编号或名称"
-	prompt := providerSelectionPrompt(currentValid, defaultOption)
-	selectedIndex := initialRuntimeSelectionIndex(options, currentMatch, defaultOption)
+	prompt := modelCommandProviderPickerPrompt(currentValid, defaultOption)
+	pageOptions, _, _, _ := state.pageWindow()
+	selectedIndex := initialRuntimeSelectionIndex(pageOptions, currentMatch, defaultOption)
 	render := func(selected int, warning string) []string {
-		return renderSelectionPopupLines("选择 Provider", "provider", current, options, currentMatch, defaultOption, hint, notice, warning, selected)
+		return renderModelCommandProviderPickerPopupLines(state, current, currentMatch, defaultOption, notice, warning, selected)
 	}
 	handle := beginRuntimeSelectionPopup(session, render(selectedIndex, ""), prompt)
 	defer clearRuntimeSelectionPopupHandle(session, handle)
-	controller := newRuntimeSelectionController(session, handle, prompt, options, selectedIndex, render)
+	controller := newRuntimeSelectionController(session, handle, prompt, pageOptions, selectedIndex, render)
 
 	for {
 		text, err := chatInteractiveReadSelectionLine(session, prompt, controller)
@@ -384,11 +403,21 @@ func promptModelCommandProviderSelectionPopup(session *ChatSession, current stri
 			return "", err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		selected, ok := resolveRuntimeSelectionInputWithCursor(text, current, defaultOption, options, controller.Selected(), false, false)
-		if ok {
-			return selected, nil
+		blankSelection, _ := controller.SelectedOption()
+		nextState, result := applyModelCommandProviderPickerInput(state, text, blankSelection)
+		state = nextState
+		if result.Done {
+			return result.Selected, nil
 		}
-		controller.SetWarning("  无效的选择，请重新输入")
+		if result.Redraw {
+			pageOptions, _, _, _ = state.pageWindow()
+			selectedIndex = initialRuntimeSelectionIndex(pageOptions, currentMatch, defaultOption)
+			render = func(selected int, warning string) []string {
+				return renderModelCommandProviderPickerPopupLines(state, current, currentMatch, defaultOption, notice, warning, selected)
+			}
+			controller = newRuntimeSelectionController(session, handle, prompt, pageOptions, selectedIndex, render)
+		}
+		controller.SetWarning(result.Message)
 	}
 }
 
@@ -404,6 +433,7 @@ func promptModelCommandProviderSelectionLegacy(session *ChatSession, current str
 	if !currentValid {
 		defaultOption = options[0]
 	}
+	state := newModelCommandProviderPickerState(options, currentMatch, defaultOption, modelCommandProviderPageSize)
 
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "provider 选择")
 	defer restoreInput()
@@ -421,39 +451,9 @@ func promptModelCommandProviderSelectionLegacy(session *ChatSession, current str
 	default:
 		fmt.Println("  当前 provider: (无)")
 	}
+	printModelCommandProviderPickerLegacyPage(session, state, currentMatch, defaultOption)
 
-	maxLen := 0
-	for _, option := range options {
-		if len(option) > maxLen {
-			maxLen = len(option)
-		}
-	}
-	for i, option := range options {
-		summary := runtimeProviderSelectionSummary(session, option)
-		switch {
-		case strings.EqualFold(option, currentMatch):
-			if summary != "" {
-				fmt.Printf("  [%d] %-*s  %s %s\n", i+1, maxLen, option, theme.Dimmed(summary), theme.Dimmed("(当前)"))
-			} else {
-				fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLen, option, theme.Dimmed("(当前)"))
-			}
-		case defaultOption != "" && strings.EqualFold(option, defaultOption):
-			if summary != "" {
-				fmt.Printf("  [%d] %-*s  %s %s\n", i+1, maxLen, option, theme.Dimmed(summary), theme.Dimmed("(默认)"))
-			} else {
-				fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLen, option, theme.Dimmed("(默认)"))
-			}
-		default:
-			if summary != "" {
-				fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLen, option, theme.Dimmed(summary))
-			} else {
-				fmt.Printf("  [%d] %-*s\n", i+1, maxLen, option)
-			}
-		}
-	}
-	fmt.Println("  提示: 也可以直接输入 provider 名称")
-
-	prompt := providerSelectionPrompt(currentValid, defaultOption)
+	prompt := modelCommandProviderPickerPrompt(currentValid, defaultOption)
 	ui.PrintEmptyLine()
 	for {
 		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
@@ -461,12 +461,239 @@ func promptModelCommandProviderSelectionLegacy(session *ChatSession, current str
 			return "", err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		selected, ok := resolveRuntimeSelectionInput(text, current, defaultOption, options, false, false)
-		if ok {
-			return selected, nil
+		blankSelection := ""
+		pageOptions, _, _, _ := state.pageWindow()
+		if currentValid {
+			if state.Filter == "" {
+				blankSelection = currentMatch
+			} else if matched, ok := matchCaseInsensitive(state.filteredOptions(), currentMatch); ok {
+				blankSelection = matched
+			}
 		}
-		ui.PrintWarning("无效的选择，请重新输入")
+		if blankSelection == "" {
+			if len(pageOptions) > 0 {
+				blankSelection = pageOptions[0]
+			} else {
+				blankSelection = defaultOption
+			}
+		}
+		nextState, result := applyModelCommandProviderPickerInput(state, text, blankSelection)
+		state = nextState
+		if result.Done {
+			return result.Selected, nil
+		}
+		ui.PrintWarning("%s", result.Message)
+		if result.Redraw {
+			printModelCommandProviderPickerLegacyPage(session, state, currentMatch, defaultOption)
+		}
 	}
+}
+
+func newModelCommandProviderPickerState(options []string, currentMatch, defaultOption string, pageSize int) modelCommandProviderPickerState {
+	preferred := strings.TrimSpace(currentMatch)
+	if preferred == "" {
+		preferred = strings.TrimSpace(defaultOption)
+	}
+	state := modelCommandProviderPickerState{
+		Options:   append([]string(nil), options...),
+		Preferred: preferred,
+		PageSize:  pageSize,
+	}
+	state.Page = state.pageForOption(preferred)
+	return state
+}
+
+func (s modelCommandProviderPickerState) normalizedPageSize() int {
+	if s.PageSize <= 0 {
+		return modelCommandProviderPageSize
+	}
+	return s.PageSize
+}
+
+func (s modelCommandProviderPickerState) filteredOptions() []string {
+	return filterLoginProviders(s.Options, s.Filter)
+}
+
+func (s modelCommandProviderPickerState) pageWindow() (items []string, page, pageCount, total int) {
+	filtered := s.filteredOptions()
+	total = len(filtered)
+	pageSize := s.normalizedPageSize()
+	if total == 0 {
+		return nil, 0, 1, 0
+	}
+	pageCount = (total + pageSize - 1) / pageSize
+	page = s.Page
+	if page < 0 {
+		page = 0
+	}
+	if page >= pageCount {
+		page = pageCount - 1
+	}
+	start := page * pageSize
+	end := min(start+pageSize, total)
+	return filtered[start:end], page, pageCount, total
+}
+
+func (s modelCommandProviderPickerState) pageForOption(option string) int {
+	index := indexOfCaseInsensitive(s.filteredOptions(), option)
+	if index < 0 {
+		return 0
+	}
+	return index / s.normalizedPageSize()
+}
+
+func applyModelCommandProviderPickerInput(state modelCommandProviderPickerState, input, blankSelection string) (modelCommandProviderPickerState, modelCommandProviderPickerResult) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		if selected, ok := matchCaseInsensitive(state.Options, blankSelection); ok {
+			return state, modelCommandProviderPickerResult{Selected: selected, Done: true}
+		}
+		return state, modelCommandProviderPickerResult{Message: "当前没有可确认的 provider，请输入名称或搜索关键词"}
+	}
+
+	// Provider 名称优先于 n/p/c 等控制命令，避免同名 provider 无法选择。
+	if selected, ok := matchCaseInsensitive(state.Options, input); ok {
+		return state, modelCommandProviderPickerResult{Selected: selected, Done: true}
+	}
+
+	switch strings.ToLower(input) {
+	case "n", "next", ">", "+":
+		return moveModelCommandProviderPickerPage(state, 1)
+	case "p", "prev", "previous", "<", "-":
+		return moveModelCommandProviderPickerPage(state, -1)
+	case "c", "clear":
+		if strings.TrimSpace(state.Filter) == "" {
+			return state, modelCommandProviderPickerResult{Message: "当前没有搜索条件"}
+		}
+		state.Filter = ""
+		state.Page = state.pageForOption(state.Preferred)
+		return state, modelCommandProviderPickerResult{Message: "已清除 provider 搜索", Redraw: true}
+	case "h", "help", "?":
+		return state, modelCommandProviderPickerResult{Message: "用法: 当前页编号/完整名称选择；关键词或 /关键词搜索；n/p 翻页；c 清除搜索；回车确认高亮项"}
+	}
+
+	if strings.HasPrefix(input, "/") {
+		return applyModelCommandProviderPickerFilter(state, strings.TrimSpace(strings.TrimPrefix(input, "/")))
+	}
+
+	if number, err := strconv.Atoi(input); err == nil {
+		pageOptions, _, _, total := state.pageWindow()
+		if total > 0 && number >= 1 && number <= len(pageOptions) {
+			return state, modelCommandProviderPickerResult{Selected: pageOptions[number-1], Done: true}
+		}
+		return state, modelCommandProviderPickerResult{
+			Message: fmt.Sprintf("无效编号 %d；请输入当前页 1-%d，或输入关键词搜索", number, len(pageOptions)),
+		}
+	}
+
+	matched := filterLoginProviders(state.Options, input)
+	if len(matched) == 1 {
+		return state, modelCommandProviderPickerResult{Selected: matched[0], Done: true}
+	}
+	return applyModelCommandProviderPickerFilter(state, input)
+}
+
+func applyModelCommandProviderPickerFilter(state modelCommandProviderPickerState, query string) (modelCommandProviderPickerState, modelCommandProviderPickerResult) {
+	state.Filter = strings.TrimSpace(query)
+	state.Page = 0
+	matched := state.filteredOptions()
+	if state.Filter == "" {
+		state.Page = state.pageForOption(state.Preferred)
+		return state, modelCommandProviderPickerResult{Message: "已清除 provider 搜索", Redraw: true}
+	}
+	if len(matched) == 0 {
+		return state, modelCommandProviderPickerResult{
+			Message: fmt.Sprintf("没有匹配 %q 的 provider；可继续搜索或输入 c 清除", state.Filter),
+			Redraw:  true,
+		}
+	}
+	return state, modelCommandProviderPickerResult{
+		Message: fmt.Sprintf("已按 %q 搜索，匹配 %d 个 provider", state.Filter, len(matched)),
+		Redraw:  true,
+	}
+}
+
+func moveModelCommandProviderPickerPage(state modelCommandProviderPickerState, delta int) (modelCommandProviderPickerState, modelCommandProviderPickerResult) {
+	_, page, pageCount, total := state.pageWindow()
+	if total == 0 || pageCount <= 1 {
+		return state, modelCommandProviderPickerResult{Message: "当前只有一页，无需翻页"}
+	}
+	next := page + delta
+	if next < 0 {
+		return state, modelCommandProviderPickerResult{Message: "已经是第一页"}
+	}
+	if next >= pageCount {
+		return state, modelCommandProviderPickerResult{Message: "已经是最后一页"}
+	}
+	state.Page = next
+	return state, modelCommandProviderPickerResult{
+		Message: fmt.Sprintf("第 %d/%d 页", next+1, pageCount),
+		Redraw:  true,
+	}
+}
+
+func modelCommandProviderPickerTitle(state modelCommandProviderPickerState) string {
+	_, page, pageCount, filteredTotal := state.pageWindow()
+	title := fmt.Sprintf("选择 Provider（共 %d", len(state.Options))
+	if strings.TrimSpace(state.Filter) != "" {
+		title += fmt.Sprintf("，搜索 %q 匹配 %d", state.Filter, filteredTotal)
+	}
+	return title + fmt.Sprintf("，第 %d/%d 页）", page+1, pageCount)
+}
+
+func renderModelCommandProviderPickerPopupLines(state modelCommandProviderPickerState, current, currentMatch, defaultOption, notice, warning string, selected int) []string {
+	pageOptions, _, _, total := state.pageWindow()
+	if total == 0 && strings.TrimSpace(warning) == "" {
+		warning = "没有匹配的 provider"
+	}
+	hint := "提示: ↑↓ 选择，回车确认；关键词搜索；n/p 翻页；c 清除搜索；编号按当前页"
+	return renderSelectionPopupLines(
+		modelCommandProviderPickerTitle(state),
+		"provider",
+		current,
+		pageOptions,
+		currentMatch,
+		defaultOption,
+		hint,
+		notice,
+		warning,
+		selected,
+	)
+}
+
+func printModelCommandProviderPickerLegacyPage(session *ChatSession, state modelCommandProviderPickerState, currentMatch, defaultOption string) {
+	pageOptions, _, _, total := state.pageWindow()
+	theme := ui.GetTheme(ui.ThemeAuto)
+	fmt.Printf("\n  %s\n", modelCommandProviderPickerTitle(state))
+	if total == 0 {
+		fmt.Println("  （无匹配 provider；可继续搜索或输入 c 清除）")
+	} else {
+		maxLen := 0
+		for _, option := range pageOptions {
+			maxLen = max(maxLen, len(option))
+		}
+		for i, option := range pageOptions {
+			summary := runtimeProviderSelectionSummary(session, option)
+			suffix := ""
+			switch {
+			case strings.EqualFold(option, currentMatch):
+				suffix = " " + theme.Dimmed("(当前)")
+			case defaultOption != "" && strings.EqualFold(option, defaultOption):
+				suffix = " " + theme.Dimmed("(默认)")
+			}
+			if summary != "" {
+				fmt.Printf("  [%d] %-*s  %s%s\n", i+1, maxLen, option, theme.Dimmed(summary), suffix)
+			} else {
+				fmt.Printf("  [%d] %-*s%s\n", i+1, maxLen, option, suffix)
+			}
+		}
+	}
+	fmt.Println("  提示: 输入关键词或 /关键词搜索；n/p 翻页；c 清除搜索；编号按当前页；完整名称直接选择")
+}
+
+func modelCommandProviderPickerPrompt(currentValid bool, defaultOption string) string {
+	base := providerSelectionPrompt(currentValid, defaultOption)
+	return strings.TrimSuffix(base, ": ") + "；支持关键词搜索、n/p 翻页: "
 }
 
 func promptModelCommandModelSelection(session *ChatSession, provider config.Provider, current string) (string, error) {

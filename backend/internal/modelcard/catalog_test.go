@@ -120,14 +120,14 @@ func TestMergeCapabilityPreferCardOverwritesCardManagedFields(t *testing.T) {
 		InputModalities:        []string{"text", "image"},
 		ReasoningEfforts:       []string{"low", "medium", "high"},
 		DefaultReasoningEffort: "medium",
-		MaxContextTokens:       272000,
-		AutoCompactTokenLimit:  200000,
+		MaxContextTokens:       1050000,
+		AutoCompactTokenLimit:  945000,
 		NativeTools:            agentconfig.NativeToolCapabilities{ImageGeneration: true},
 		ReasoningModel:         true,
 	}
 
 	got := MergeCapabilityPreferCard(card, existing)
-	if got.MaxContextTokens != 272000 || got.AutoCompactTokenLimit != 200000 {
+	if got.MaxContextTokens != 1050000 || got.AutoCompactTokenLimit != 945000 {
 		t.Fatalf("card context fields not authoritative: %+v", got)
 	}
 	if strings.Join(got.InputModalities, ",") != "text,image" {
@@ -198,33 +198,40 @@ func TestBuiltinSourceRecommendsCodexTemplateForCodexCompatibleAliases(t *testin
 		t.Fatalf("unexpected warnings: %+v", warnings)
 	}
 
-	cases := map[string]string{
-		"codex-auto-review":            "openai.codex-auto-review.codex",
-		"gpt-5.2":                      "openai.gpt-5.2-codex",
-		"gpt-5.2-openai-compact":       "openai.gpt-5.2-codex",
-		"gpt-5.3-codex":                "openai.gpt-5.3-codex",
-		"gpt-5.3-codex-openai-compact": "openai.gpt-5.3-codex",
-		"gpt-5.4-nano":                 "openai.gpt-5.4-nano.codex",
-		"gpt-5.4-openai-compact":       "openai.gpt-5.4.codex",
-		"gpt-5.5":                      "openai.gpt-5.5.codex",
-		"gpt-5.5-openai-compact":       "openai.gpt-5.5.codex",
-		"gpt-5.6-sol":                  "openai.gpt-5.6-sol.codex",
-		"gpt-5.6-terra":                "openai.gpt-5.6-terra.codex",
-		"gpt-5.6-luna":                 "openai.gpt-5.6-luna.codex",
+	type expectedCodexCard struct {
+		cardID                string
+		maxContextTokens      int
+		autoCompactTokenLimit int
 	}
-	for modelID, expectedCardID := range cases {
+	cases := map[string]expectedCodexCard{
+		"codex-auto-review":            {cardID: "openai.codex-auto-review.codex", maxContextTokens: 400000, autoCompactTokenLimit: 360000},
+		"gpt-5.2":                      {cardID: "openai.gpt-5.2-codex", maxContextTokens: 400000, autoCompactTokenLimit: 360000},
+		"gpt-5.2-openai-compact":       {cardID: "openai.gpt-5.2-codex", maxContextTokens: 400000, autoCompactTokenLimit: 360000},
+		"gpt-5.3-codex":                {cardID: "openai.gpt-5.3-codex", maxContextTokens: 400000, autoCompactTokenLimit: 360000},
+		"gpt-5.3-codex-openai-compact": {cardID: "openai.gpt-5.3-codex", maxContextTokens: 400000, autoCompactTokenLimit: 360000},
+		"gpt-5.4-nano":                 {cardID: "openai.gpt-5.4-nano.codex", maxContextTokens: 400000, autoCompactTokenLimit: 360000},
+		"gpt-5.4-openai-compact":       {cardID: "openai.gpt-5.4.codex", maxContextTokens: 1050000, autoCompactTokenLimit: 945000},
+		"gpt-5.5":                      {cardID: "openai.gpt-5.5.codex", maxContextTokens: 1050000, autoCompactTokenLimit: 945000},
+		"gpt-5.5-openai-compact":       {cardID: "openai.gpt-5.5.codex", maxContextTokens: 1050000, autoCompactTokenLimit: 945000},
+		"gpt-5.6-sol":                  {cardID: "openai.gpt-5.6-sol.codex", maxContextTokens: 1050000, autoCompactTokenLimit: 945000},
+		"gpt-5.6-terra":                {cardID: "openai.gpt-5.6-terra.codex", maxContextTokens: 1050000, autoCompactTokenLimit: 945000},
+		"gpt-5.6-luna":                 {cardID: "openai.gpt-5.6-luna.codex", maxContextTokens: 1050000, autoCompactTokenLimit: 945000},
+	}
+	for modelID, expected := range cases {
 		template, applied, ok := catalog.RecommendedProviderTemplate(Context{
 			RuntimeProtocol:  "openai",
 			LoginProtocol:    "openai",
 			ProviderTemplate: "openai.chat",
 		}, modelID)
-		if !ok || template.ID != "codex.responses" || len(applied) == 0 || applied[0].CardID != expectedCardID {
-			t.Fatalf("expected %q to recommend codex.responses via %s, got template=%+v applied=%+v ok=%v", modelID, expectedCardID, template, applied, ok)
+		if !ok || template.ID != "codex.responses" || len(applied) == 0 || applied[0].CardID != expected.cardID {
+			t.Fatalf("expected %q to recommend codex.responses via %s, got template=%+v applied=%+v ok=%v", modelID, expected.cardID, template, applied, ok)
 		}
 
 		spec, resolved := catalog.Resolve(Context{RuntimeProtocol: "codex"}, modelID)
-		if len(resolved) == 0 || resolved[0].CardID != expectedCardID || spec.MaxContextTokens != 272000 || spec.AutoCompactTokenLimit != 200000 {
-			t.Fatalf("expected codex capability for %q via %s, got spec=%+v applied=%+v", modelID, expectedCardID, spec, resolved)
+		if len(resolved) == 0 || resolved[0].CardID != expected.cardID ||
+			spec.MaxContextTokens != expected.maxContextTokens ||
+			spec.AutoCompactTokenLimit != expected.autoCompactTokenLimit {
+			t.Fatalf("expected codex capability for %q via %s, got spec=%+v applied=%+v", modelID, expected.cardID, spec, resolved)
 		}
 	}
 }
@@ -283,19 +290,42 @@ func TestBuiltinSourceResolvesAnthropicLatestModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSources builtin: %v", err)
 	}
-	opus, applied := catalog.Resolve(Context{RuntimeProtocol: "anthropic"}, "claude-opus-4-7")
-	if len(applied) == 0 {
-		t.Fatal("expected claude-opus-4-7 card")
+
+	cases := []struct {
+		modelID            string
+		wantCardID         string
+		wantContext        int
+		wantMaxTokens      int
+		wantReasoning      string
+		wantDefaultEffort  string
+	}{
+		{"claude-fable-5", "anthropic.claude-fable-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-mythos-5", "anthropic.claude-mythos-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-mythos-preview", "anthropic.claude-mythos-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-opus-5", "anthropic.claude-opus-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-sonnet-5", "anthropic.claude-sonnet-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-opus-4-8", "anthropic.claude-opus-4-8", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-opus-4-7", "anthropic.claude-opus-4-7", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
+		{"claude-sonnet-4-6", "anthropic.claude-sonnet-4-6", 1000000, 128000, "low,medium,high,max", "high"},
+		{"claude-haiku-4-5", "anthropic.claude-haiku-4-5", 200000, 64000, "", ""},
 	}
-	if opus.MaxContextTokens != 1000000 || opus.MaxTokens != 128000 || strings.Join(opus.ReasoningEfforts, ",") != "low,medium,high,xhigh,max" {
-		t.Fatalf("unexpected opus capability: %+v", opus)
-	}
-	haiku, applied := catalog.Resolve(Context{RuntimeProtocol: "anthropic"}, "claude-haiku-4-5")
-	if len(applied) == 0 {
-		t.Fatal("expected claude-haiku-4-5 alias card")
-	}
-	if haiku.MaxContextTokens != 200000 || haiku.MaxTokens != 64000 || len(haiku.ReasoningEfforts) != 0 {
-		t.Fatalf("unexpected haiku capability: %+v", haiku)
+	for _, tc := range cases {
+		spec, applied := catalog.Resolve(Context{RuntimeProtocol: "anthropic"}, tc.modelID)
+		if len(applied) == 0 {
+			t.Fatalf("expected card for %q", tc.modelID)
+		}
+		if applied[0].CardID != tc.wantCardID {
+			t.Fatalf("%q: expected card %q, got %q via %+v", tc.modelID, tc.wantCardID, applied[0].CardID, applied)
+		}
+		if spec.MaxContextTokens != tc.wantContext || spec.MaxTokens != tc.wantMaxTokens {
+			t.Fatalf("%q: unexpected token limits: %+v", tc.modelID, spec)
+		}
+		if strings.Join(spec.ReasoningEfforts, ",") != tc.wantReasoning {
+			t.Fatalf("%q: unexpected reasoning efforts: %+v", tc.modelID, spec.ReasoningEfforts)
+		}
+		if strings.TrimSpace(spec.DefaultReasoningEffort) != tc.wantDefaultEffort {
+			t.Fatalf("%q: unexpected default effort %q", tc.modelID, spec.DefaultReasoningEffort)
+		}
 	}
 }
 

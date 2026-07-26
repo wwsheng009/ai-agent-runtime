@@ -169,7 +169,10 @@ func (loop *ReActLoop) applyRememberedProviderRequestDowngrades(req *llm.LLMRequ
 		req.ReasoningEffort = ""
 	}
 	if loop.thinkingUnsupported.Load() {
+		// Anthropic adapters may rebuild thinking from ReasoningEffort; clear both
+		// so a remembered thinking rejection cannot reintroduce adaptive thinking.
 		req.Thinking = nil
+		req.ReasoningEffort = ""
 	}
 	if loop.temperatureUnsupported.Load() {
 		req.Temperature = 0
@@ -192,9 +195,24 @@ func (loop *ReActLoop) downgradeUnsupportedProviderRequest(req *llm.LLMRequest, 
 		req.ReasoningEffort = ""
 		return "reasoning_effort"
 	}
-	if req.Thinking != nil && llm.IsUnsupportedRequestParameter(err, "thinking") {
-		loop.thinkingUnsupported.Store(true)
-		req.Thinking = nil
+	// Explicit Thinking and ReasoningEffort-derived adaptive thinking both surface
+	// as "thinking.*" validation errors (e.g. thinking.adaptive.effort).
+	if llm.IsUnsupportedRequestParameter(err, "thinking") {
+		hadThinking := req.Thinking != nil
+		hadEffort := strings.TrimSpace(req.ReasoningEffort) != ""
+		if !hadThinking && !hadEffort {
+			return ""
+		}
+		if hadThinking {
+			loop.thinkingUnsupported.Store(true)
+			req.Thinking = nil
+		}
+		if hadEffort {
+			// Derived adaptive thinking is rebuilt from ReasoningEffort on Anthropic.
+			loop.reasoningEffortUnsupported.Store(true)
+			loop.thinkingUnsupported.Store(true)
+			req.ReasoningEffort = ""
+		}
 		return "thinking"
 	}
 	if req.Temperature != 0 && llm.IsUnsupportedRequestParameter(err, "temperature") {
@@ -403,9 +421,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// Doom-loop tracker: soft advisories always-on; hard stop via MaxRepeatedToolCalls.
 	doomLoop := NewDoomLoopTracker(loop.config.MaxRepeatedToolCalls)
 	// lastDispositionFingerprint tracks the last non-success disposition
-	// (partial/empty) so identical full-batch replays get a stronger advisory.
+	// (partial/empty/failed, including STALE_CONTEXT) so identical full-batch
+	// replays get a stronger advisory instead of blind unchanged retries.
 	lastDispositionFingerprint := ""
 	lastDispositionOutcome := ""
+	lastDispositionErrorCode := ""
 	consecutiveExplorationSteps := 0
 	totalToolCalls := 0
 	completionRequirement := NormalizeCompletionRequirement(loop.config.CompletionRequirement)
@@ -720,8 +740,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// re-issue the same batch that previously returned partial/empty evidence.
 		// Parallel partial batches are guided here; they are not a separate doom class.
 		if doomObs.Fingerprint != "" && doomObs.Fingerprint == lastDispositionFingerprint && strings.TrimSpace(lastDispositionOutcome) != "" {
-			if dispositionAdvisory := dispositionReplayAdvisory(lastDispositionOutcome, doomObs.RepeatCount); dispositionAdvisory != "" {
-				// Count advisory emissions for efficiency dashboards (empty/partial only).
+			if dispositionAdvisory := dispositionReplayAdvisory(lastDispositionOutcome, doomObs.RepeatCount, lastDispositionErrorCode); dispositionAdvisory != "" {
+				// Count advisory emissions for efficiency dashboards
+				// (empty/partial/failed with structured codes such as STALE_CONTEXT).
 				observability.RecordToolDispositionReplay(lastDispositionOutcome, doomObs.RepeatCount)
 				repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, dispositionAdvisory)
 			}
@@ -869,9 +890,18 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// session history / resume do not accumulate doom-loop noise (R3 residual).
 		toolPayloads := toolResultsToPayloads(toolResults, repeatedSemanticAdvisory)
 		if fingerprint := semanticToolCallFingerprint(normalizedCalls); fingerprint != "" {
-			if outcome := dominantToolResultDisposition(toolResults); outcome == toolresult.OutcomePartial || outcome == toolresult.OutcomeEmpty {
+			outcome := dominantToolResultDisposition(toolResults)
+			switch outcome {
+			case toolresult.OutcomePartial, toolresult.OutcomeEmpty, toolresult.OutcomeFailed:
 				lastDispositionFingerprint = fingerprint
 				lastDispositionOutcome = outcome
+				lastDispositionErrorCode = dominantToolResultErrorCode(toolResults)
+			default:
+				// Success clears disposition memory so unrelated later calls
+				// do not inherit a stale failed/partial advisory.
+				lastDispositionFingerprint = ""
+				lastDispositionOutcome = ""
+				lastDispositionErrorCode = ""
 			}
 		}
 		builder.AppendToolResults(normalizedCalls, DurableToolResultPayloads(toolPayloads))
@@ -1337,6 +1367,31 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"parameter": parameter, "error": err.Error(),
 		})
 		response, err = loop.llmRuntime.Call(callCtx, req)
+	}
+	// Claude Code-style one-shot escalate: capped 8k default hit max_tokens → retry at 64k.
+	if err == nil && response != nil && shouldEscalateMaxOutputTokens(req, response) {
+		escalated := llm.EscalatedRequestMaxTokens(req.MaxTokens, 0)
+		if escalated > req.MaxTokens {
+			previous := req.MaxTokens
+			req.MaxTokens = escalated
+			if req.Metadata == nil {
+				req.Metadata = map[string]interface{}{}
+			}
+			req.Metadata["max_output_tokens_escalated"] = true
+			req.Metadata["max_output_tokens_previous"] = previous
+			loop.agent.emitRuntimeEvent("llm.max_output_tokens.escalated", sessionID, "", map[string]interface{}{
+				"trace_id":        traceID,
+				"logical_turn_id": logicalTurnID,
+				"llm_request_id":  llmRequestID,
+				"step":            step,
+				"provider":        req.Provider,
+				"model":           req.Model,
+				"from_max_tokens": previous,
+				"to_max_tokens":   escalated,
+				"finish_reason":   responseFinishReason(response),
+			})
+			response, err = loop.llmRuntime.Call(callCtx, req)
+		}
 	}
 	if err != nil {
 		failureDiagnostic := llm.DiagnoseFailure(err)
@@ -2933,7 +2988,11 @@ func inferAdvisoryReminderKind(advisory string) string {
 	switch {
 	case strings.Contains(text, "semantic tool request") || strings.Contains(text, "same semantic tool"):
 		return ReminderKindDoomLoop
-	case strings.Contains(text, "outcome=partial") || strings.Contains(text, "empty successful result") || strings.Contains(text, "empty result"):
+	case strings.Contains(text, "outcome=partial") ||
+		strings.Contains(text, "outcome=failed") ||
+		strings.Contains(text, "stale_context") ||
+		strings.Contains(text, "empty successful result") ||
+		strings.Contains(text, "empty result"):
 		return ReminderKindDispositionReplay
 	case strings.Contains(text, "only inspected") || strings.Contains(text, "exploration"):
 		return ReminderKindExplorationStall
@@ -2953,10 +3012,14 @@ func repeatedSemanticToolCallAdvisory(repeatCount int) string {
 }
 
 // dispositionReplayAdvisory strengthens guidance when the model re-issues a tool
-// batch that previously returned partial/empty evidence. Generic: no tool-name
-// special cases; relies on outcome metadata only.
-func dispositionReplayAdvisory(outcome string, repeatCount int) string {
+// batch that previously returned partial/empty/failed evidence. Generic: no
+// tool-name special cases; relies on outcome + structured error_code only.
+func dispositionReplayAdvisory(outcome string, repeatCount int, errorCode ...string) string {
 	outcome = toolresult.NormalizeOutcome(outcome)
+	code := ""
+	if len(errorCode) > 0 {
+		code = strings.ToUpper(strings.TrimSpace(errorCode[0]))
+	}
 	switch outcome {
 	case toolresult.OutcomePartial:
 		if repeatCount <= 1 {
@@ -2972,6 +3035,32 @@ func dispositionReplayAdvisory(outcome string, repeatCount int) string {
 		}
 		return fmt.Sprintf(
 			"Runtime advisory: identical tool call replayed %d times after an empty successful result. Do not retry unchanged; broaden the query or move to the next task step.",
+			repeatCount,
+		)
+	case toolresult.OutcomeFailed:
+		if code == string(errors.ErrToolStaleContext) {
+			if repeatCount <= 1 {
+				return "Runtime advisory: the previous identical tool call failed with STALE_CONTEXT (outcome=failed). Copy exact lines from current_snippet / closest current content (or re-view with suggested_view_offset), rebuild args from that text, and do not retry the same stale old_string/@@ hunk unchanged."
+			}
+			return fmt.Sprintf(
+				"Runtime advisory: identical tool call replayed %d times after STALE_CONTEXT (outcome=failed). Stop unchanged edit/patch retries; use current_snippet or re-view first and rebuild a smaller confirmed hunk, or switch strategy.",
+				repeatCount,
+			)
+		}
+		if code == string(errors.ErrToolPathNotFound) {
+			if repeatCount <= 1 {
+				return "Runtime advisory: the previous identical tool call failed with TOOL_PATH_NOT_FOUND (outcome=failed). Use path_candidates / Nearby candidates from the previous result (or ls/glob the parent directory), correct the path, and do not retry the same missing path unchanged."
+			}
+			return fmt.Sprintf(
+				"Runtime advisory: identical tool call replayed %d times after TOOL_PATH_NOT_FOUND (outcome=failed). Stop unchanged path retries; pick a candidate from path_candidates or discover the path with ls/glob first.",
+				repeatCount,
+			)
+		}
+		if repeatCount <= 1 {
+			return "Runtime advisory: the previous identical tool call returned outcome=failed. Inspect next_action/error_code, correct the cause, and only retry with changed inputs. Do not replay the same args unchanged."
+		}
+		return fmt.Sprintf(
+			"Runtime advisory: identical tool call replayed %d times after outcome=failed. Stop unchanged retries; fix inputs using the previous error/next_action or proceed with a different approach.",
 			repeatCount,
 		)
 	default:
@@ -3021,6 +3110,59 @@ func dominantToolResultDisposition(results []toolExecutionResult) string {
 	default:
 		return toolresult.OutcomeSuccess
 	}
+}
+
+// dominantToolResultErrorCode returns a structured error_code for advisory
+// strengthening (prefer STALE_CONTEXT / path / shell compat over generic codes).
+func dominantToolResultErrorCode(results []toolExecutionResult) string {
+	prefer := map[string]int{
+		string(errors.ErrToolStaleContext):        100,
+		string(errors.ErrToolPathNotFound):        90,
+		string(errors.ErrToolShellCompat):         80,
+		string(errors.ErrToolInvalidArgs):         70,
+		string(errors.ErrToolTimeout):             60,
+		string(errors.ErrAgentSpawnDepthLimit):    50,
+		string(errors.ErrToolExecution):           10,
+	}
+	best := ""
+	bestScore := -1
+	for _, result := range results {
+		code := toolResultErrorCode(result)
+		if code == "" {
+			continue
+		}
+		score, ok := prefer[code]
+		if !ok {
+			score = 1
+		}
+		if score > bestScore {
+			best = code
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func toolResultErrorCode(result toolExecutionResult) string {
+	if result.Envelope == nil || len(result.Envelope.Metadata) == 0 {
+		return ""
+	}
+	meta := result.Envelope.Metadata
+	if code, ok := meta["error_code"].(string); ok {
+		code = strings.TrimSpace(code)
+		if code != "" {
+			return strings.ToUpper(code)
+		}
+	}
+	if nested, ok := meta["tool_metadata"].(map[string]interface{}); ok {
+		if code, ok := nested["error_code"].(string); ok {
+			code = strings.TrimSpace(code)
+			if code != "" {
+				return strings.ToUpper(code)
+			}
+		}
+	}
+	return ""
 }
 
 func nextExplorationStallCount(current int, calls []types.ToolCall) int {
@@ -4387,6 +4529,44 @@ func resolveLoopMaxTokens(defaultMaxTokens int, remainingBudget int) int {
 		maxTokens = remainingBudget
 	}
 	return maxTokens
+}
+
+func responseFinishReason(response *llm.LLMResponse) string {
+	if response == nil {
+		return ""
+	}
+	if reason := strings.TrimSpace(response.FinishReason); reason != "" {
+		return reason
+	}
+	if len(response.Metadata) == 0 {
+		return ""
+	}
+	if reason, ok := response.Metadata["finish_reason"].(string); ok {
+		return strings.TrimSpace(reason)
+	}
+	return ""
+}
+
+// shouldEscalateMaxOutputTokens reports whether a successful response was
+// truncated by the request max_tokens budget and is eligible for a one-shot
+// escalate retry (Claude Code max_output_tokens_escalate).
+func shouldEscalateMaxOutputTokens(req *llm.LLMRequest, response *llm.LLMResponse) bool {
+	if req == nil || response == nil {
+		return false
+	}
+	if req.Metadata != nil {
+		if escalated, _ := req.Metadata["max_output_tokens_escalated"].(bool); escalated {
+			return false
+		}
+	}
+	// Only escalate the capped slot-reservation default, not explicit large budgets.
+	if req.MaxTokens <= 0 || req.MaxTokens > llm.CappedDefaultMaxTokens {
+		return false
+	}
+	if !llm.IsMaxOutputTokensStop(responseFinishReason(response)) {
+		return false
+	}
+	return llm.EscalatedRequestMaxTokens(req.MaxTokens, 0) > req.MaxTokens
 }
 
 func generatedImageOutputDirForAgentSession(agent *Agent, sessionID string) string {

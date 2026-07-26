@@ -17,6 +17,9 @@ type providerAdapterRequestInput struct {
 	Model                   string
 	SupportsMaxOutputTokens *bool
 	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec
+	// EnableImageGeneration is the provider-level Codex native image_generation
+	// opt-in. Nil/false keeps the tool out of request payloads by default.
+	EnableImageGeneration *bool
 
 	Messages []map[string]interface{}
 	Tools    []types.ToolDefinition
@@ -82,6 +85,7 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 
 	var tools interface{}
 	if !metadataDisablesTools(metadata) {
+		enableNativeImageGeneration := input.EnableImageGeneration != nil && *input.EnableImageGeneration
 		tools = BuildToolDefinitionsForRequestWithImageOptions(
 			input.Tools,
 			input.Protocol,
@@ -89,6 +93,7 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 			modelCapabilities,
 			!metadataDisablesMetaTools(metadata),
 			CodexImageGenerationOptionsFromMetadata(metadata),
+			enableNativeImageGeneration,
 		)
 	}
 
@@ -100,13 +105,13 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		reasoningEffortBudgets = capability.ReasoningEffortBudgets
 	}
 
-	// Cap MaxTokens by model capability limit when available.
-	// This prevents provider-level max_tokens_limit (e.g. 131072 for
-	// the anthropic.messages template) from exceeding a specific model's
-	// actual output-token ceiling (e.g. 128000 for claude-opus-4-7).
-	maxTokens := input.MaxTokens
-	if hasCapability && capability.MaxTokens > 0 && maxTokens > capability.MaxTokens {
-		maxTokens = capability.MaxTokens
+	// Resolve/clamp MaxTokens with Claude Code-style default/upperLimit logic.
+	// Positive request budgets are only clamped to the hard ceiling; zero/unset
+	// budgets fall back to the capped model default (8k) unless env overrides.
+	maxTokens := CapRequestMaxTokens(input.Protocol, input.Model, input.MaxTokens, capability, hasCapability, 0)
+	if maxTokens <= 0 {
+		resolved := ResolveRequestMaxTokens(input.Protocol, input.Model, 0, capability, hasCapability, 0)
+		maxTokens = resolved.Default
 	}
 
 	return adapter.RequestConfig{
@@ -125,6 +130,20 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		Timeout:                input.Timeout,
 		Metadata:               metadata,
 	}
+}
+
+const defaultClaudeMaxOutputTokens = 128000
+
+func looksLikeClaudeModel(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if normalized == "" {
+		return false
+	}
+	return strings.HasPrefix(normalized, "claude-") ||
+		strings.HasPrefix(normalized, "claude.") ||
+		strings.HasPrefix(normalized, "anthropic.claude") ||
+		strings.Contains(normalized, ".claude-") ||
+		strings.Contains(normalized, "/claude-")
 }
 
 func providerAdapterStopSequences(metadata map[string]interface{}) []string {

@@ -14,24 +14,25 @@ import (
 // ProviderConfigUpdate describes a partial update to providers.items.<name>.
 // Nil fields are not touched, allowing callers to preserve unrelated provider keys.
 type ProviderConfigUpdate struct {
-	Name               string
-	SetDefaultProvider bool
-	Enabled            *bool
-	Protocol           *string
-	BaseURL            *string
-	APIPath            *string
-	ForwardURL         *string
-	APIKey             *string
-	APIKeyRef          *string
-	AuthMode           *string
-	AuthRef            *string
-	ModelsPath         *string
-	ModelsVerifiedAt   *string
-	SupportedModels    *[]string
-	DefaultModel       *string
-	SupportTypes       *[]string
-	MaxTokensLimit     *int
-	ModelCapabilities  *map[string]ModelCapabilitySpec
+	Name                   string
+	SetDefaultProvider     bool
+	Enabled                *bool
+	Protocol               *string
+	BaseURL                *string
+	APIPath                *string
+	ForwardURL             *string
+	APIKey                 *string
+	APIKeyRef              *string
+	AuthMode               *string
+	AuthRef                *string
+	ModelsPath             *string
+	ModelsVerifiedAt       *string
+	SupportedModels        *[]string
+	DefaultModel           *string
+	SupportTypes           *[]string
+	MaxTokensLimit         *int
+	EnableImageGeneration  *bool
+	ModelCapabilities      *map[string]ModelCapabilitySpec
 }
 
 // UpdateProviderConfig updates one provider node without rewriting unrelated config sections.
@@ -136,6 +137,9 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 		} else {
 			upsertYAMLMappingValue(node, "max_tokens_limit", intYAMLNode(*update.MaxTokensLimit))
 		}
+	}
+	if update.EnableImageGeneration != nil {
+		upsertYAMLMappingValue(node, "enable_image_generation", boolYAMLNode(*update.EnableImageGeneration))
 	}
 	if update.ModelCapabilities != nil {
 		if len(*update.ModelCapabilities) == 0 {

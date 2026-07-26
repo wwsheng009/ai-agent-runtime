@@ -402,8 +402,8 @@ providers:
                         - xhigh
                     reasoning_model: true
                 gpt-5.2-codex:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
+                    max_context_tokens: 400000
+                    auto_compact_token_limit: 360000
                     input_modalities:
                         - text
                         - image
@@ -417,8 +417,8 @@ providers:
                         - xhigh
                     reasoning_model: true
                 gpt-5.4-mini:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
+                    max_context_tokens: 400000
+                    auto_compact_token_limit: 360000
                     input_modalities:
                         - text
                         - image
@@ -432,8 +432,8 @@ providers:
                         - xhigh
                     reasoning_model: true
                 gpt-5.4:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
+                    max_context_tokens: 1050000
+                    auto_compact_token_limit: 945000
                     input_modalities:
                         - text
                         - image

@@ -9,7 +9,7 @@ provider_templates:
       - openai
       - anthropic
       - gemini
-    max_tokens_limit: 10000
+    max_tokens_limit: 128000
 
   - id: openai.chat
     protocol: openai
@@ -17,7 +17,7 @@ provider_templates:
     forward_url: /v1/chat/completions
     support_types:
       - openai
-    max_tokens_limit: 10000
+    max_tokens_limit: 128000
 
   - id: openai.images
     protocol: openai_image
@@ -126,11 +126,13 @@ cards:
     match:
       model_ids:
         - gpt-5.6-sol
+        - gpt-5.6
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 1050000
+      max_tokens: 128000
+      auto_compact_token_limit: 945000
       input_modalities:
         - text
         - image
@@ -139,12 +141,12 @@ cards:
       reasoning_model: true
       default_reasoning_effort: low
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
         - xhigh
         - max
-        - ultra
 
   - id: openai.gpt-5.6-terra.codex
     title: GPT 5.6 Terra Codex
@@ -156,8 +158,9 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 1050000
+      max_tokens: 128000
+      auto_compact_token_limit: 945000
       input_modalities:
         - text
         - image
@@ -166,12 +169,12 @@ cards:
       reasoning_model: true
       default_reasoning_effort: medium
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
         - xhigh
         - max
-        - ultra
 
   - id: openai.gpt-5.6-luna.codex
     title: GPT 5.6 Luna Codex
@@ -183,8 +186,9 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 1050000
+      max_tokens: 128000
+      auto_compact_token_limit: 945000
       input_modalities:
         - text
         - image
@@ -193,6 +197,7 @@ cards:
       reasoning_model: true
       default_reasoning_effort: medium
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
@@ -210,8 +215,9 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 1050000
+      max_tokens: 128000
+      auto_compact_token_limit: 945000
       input_modalities:
         - text
         - image
@@ -220,6 +226,7 @@ cards:
       reasoning_model: true
       default_reasoning_effort: medium
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
@@ -236,16 +243,18 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 1050000
+      max_tokens: 128000
+      auto_compact_token_limit: 945000
       input_modalities:
         - text
         - image
       native_tools:
         image_generation: true
       reasoning_model: true
-      default_reasoning_effort: medium
+      default_reasoning_effort: none
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
@@ -261,16 +270,18 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 400000
+      max_tokens: 128000
+      auto_compact_token_limit: 360000
       input_modalities:
         - text
         - image
       native_tools:
         image_generation: true
       reasoning_model: true
-      default_reasoning_effort: medium
+      default_reasoning_effort: none
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
@@ -288,8 +299,9 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 400000
+      max_tokens: 128000
+      auto_compact_token_limit: 360000
       input_modalities:
         - text
         - image
@@ -312,8 +324,9 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 400000
+      max_tokens: 128000
+      auto_compact_token_limit: 360000
       input_modalities:
         - text
         - image
@@ -334,12 +347,16 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 400000
+      max_tokens: 128000
+      auto_compact_token_limit: 360000
       input_modalities:
         - text
+        - image
       reasoning_model: true
+      default_reasoning_effort: none
       reasoning_efforts:
+        - none
         - low
         - medium
         - high
@@ -355,8 +372,9 @@ cards:
       protocols:
         - codex
     capability:
-      max_context_tokens: 272000
-      auto_compact_token_limit: 200000
+      max_context_tokens: 400000
+      max_tokens: 128000
+      auto_compact_token_limit: 360000
       input_modalities:
         - text
         - image
@@ -382,6 +400,7 @@ cards:
     capability:
       input_modalities:
         - text
+        - image
       native_tools:
         images_generations_api: true
 
@@ -397,6 +416,7 @@ cards:
     capability:
       input_modalities:
         - text
+        - image
       native_tools:
         images_generations_api: true
 
@@ -412,6 +432,7 @@ cards:
     capability:
       input_modalities:
         - text
+        - image
       native_tools:
         images_generations_api: true
 
@@ -462,6 +483,144 @@ cards:
         high: 0
         max: 0
 
+  # Claude family cards below track Anthropic's public models overview
+  # (https://docs.anthropic.com/en/docs/about-claude/models/overview, 2026-07):
+  # Fable/Opus 5/Sonnet 5/Opus 4.x/Sonnet 4.6 = 1M context / 128k max output; Haiku 4.5 = 200k / 64k.
+  # Adaptive-thinking models expose effort as low|medium|high|xhigh|max; API default is high
+  # for Opus 5 / Sonnet 5 / Opus 4.8.
+
+  - id: anthropic.claude-fable-5
+    title: Claude Fable 5
+    priority: 140
+    provider_template: anthropic.messages
+    match:
+      model_ids:
+        - claude-fable-5
+      aliases:
+        - anthropic.claude-fable-5
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+        - image
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: anthropic.claude-mythos-5
+    title: Claude Mythos 5
+    priority: 140
+    provider_template: anthropic.messages
+    match:
+      model_ids:
+        - claude-mythos-5
+      aliases:
+        - anthropic.claude-mythos-5
+        - claude-mythos-preview
+        - anthropic.claude-mythos-preview
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+        - image
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: anthropic.claude-opus-5
+    title: Claude Opus 5
+    priority: 130
+    provider_template: anthropic.messages
+    match:
+      model_ids:
+        - claude-opus-5
+      aliases:
+        - anthropic.claude-opus-5
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+        - image
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: anthropic.claude-sonnet-5
+    title: Claude Sonnet 5
+    priority: 120
+    provider_template: anthropic.messages
+    match:
+      model_ids:
+        - claude-sonnet-5
+      aliases:
+        - anthropic.claude-sonnet-5
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+        - image
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: anthropic.claude-opus-4-8
+    title: Claude Opus 4.8
+    priority: 115
+    provider_template: anthropic.messages
+    match:
+      model_ids:
+        - claude-opus-4-8
+      aliases:
+        - anthropic.claude-opus-4-8
+      protocols:
+        - anthropic
+    capability:
+      input_modalities:
+        - text
+        - image
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
   - id: anthropic.claude-opus-4-7
     title: Claude Opus 4.7
     priority: 110
@@ -480,6 +639,7 @@ cards:
       max_context_tokens: 1000000
       max_tokens: 128000
       reasoning_model: true
+      default_reasoning_effort: high
       reasoning_efforts:
         - low
         - medium
@@ -506,6 +666,7 @@ cards:
       max_context_tokens: 1000000
       max_tokens: 128000
       reasoning_model: true
+      default_reasoning_effort: high
       reasoning_efforts:
         - low
         - medium
@@ -528,8 +689,10 @@ cards:
         - text
         - image
       max_context_tokens: 1000000
-      max_tokens: 64000
+      # Anthropic thinking docs: Sonnet 4.6 supports up to 128k output tokens.
+      max_tokens: 128000
       reasoning_model: true
+      default_reasoning_effort: high
       reasoning_efforts:
         - low
         - medium
@@ -546,6 +709,7 @@ cards:
       aliases:
         - claude-haiku-4-5
         - anthropic.claude-haiku-4-5-20251001-v1:0
+        - claude-haiku-4-5@20251001
       protocols:
         - anthropic
     capability:
@@ -569,6 +733,10 @@ cards:
     capability:
       input_modalities:
         - text
+      # Conservative Claude-family ceiling used when a model-specific card is absent.
+      # Prevents anthropic.messages template budgets (131072) from overshooting
+      # common Claude output limits (e.g. claude-fable-5 → 128000).
+      max_tokens: 128000
 
   - id: xai.grok-4.5.openai
     title: Grok 4.5 OpenAI Compatible
