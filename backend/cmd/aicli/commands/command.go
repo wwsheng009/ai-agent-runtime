@@ -150,6 +150,25 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/compact") {
 		return handleCompactCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/backtrack") {
+		return handleBacktrackCommand(session, command)
+	}
+	// /rewind with a numeric first arg is user-turn backtrack; non-numeric keeps
+	// checkpoint-id restore reserved for a future dedicated path.
+	if commandMatches(cmdLower, "/rewind") {
+		arg := strings.TrimSpace(extractCommandArgument(command))
+		if first := firstToken(arg); first != "" {
+			if _, err := strconv.Atoi(first); err == nil {
+				return handleBacktrackCommand(session, "/backtrack "+arg)
+			}
+		}
+		if arg == "" || strings.EqualFold(firstToken(arg), "list") || strings.EqualFold(firstToken(arg), "ls") {
+			return handleBacktrackCommand(session, "/backtrack "+arg)
+		}
+		fmt.Println("提示: /rewind <checkpoint_id> 尚未接线；数字参数请用 /backtrack <user_turn_index>")
+		fmt.Println("用法: /backtrack [list|<index> --apply|--both|--edit|--submit]")
+		return false
+	}
 	if commandMatches(cmdLower, "/model") {
 		return handleModelCommand(session, command, noInteractive)
 	}

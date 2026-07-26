@@ -1084,6 +1084,11 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					fmt.Println("正在退出...")
 					break
 				}
+				// Bare Esc on empty composer: open user-turn backtrack picker (Codex-style).
+				if errors.Is(err, ui.ErrInteractiveInputBacktrackRequested) {
+					handleInteractiveBacktrackSelect(session)
+					continue
+				}
 				// Ctrl+D (EOF)：交互行编辑器场景静默忽略；队列/普通 reader 场景在输入结束后退出循环，避免空转。
 				if errors.Is(err, io.EOF) {
 					if !shouldUseInteractiveLineEditor(session) {

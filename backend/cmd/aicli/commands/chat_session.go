@@ -195,6 +195,10 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 		return fmt.Errorf("session user id cannot be empty")
 	}
 
+	// Bootstrap also uses this helper for the first empty shell. Only rotate
+	// chat-log/artifact paths when replacing an already-bound conversation.
+	rotateDiagnostics := session.RuntimeSession != nil
+
 	runtimeSession := runtimechat.NewSession(session.SessionUserID)
 	if cfg := session.SessionManager.GetConfig(); cfg != nil && cfg.TTL > 0 {
 		runtimeSession.SetTTL(cfg.TTL)
@@ -217,6 +221,11 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.runtimeSessionUnpersisted = !session.Ephemeral && sessionStorageDefersDurableOpen(session.SessionManager.GetStorage())
 	clearChatTurnRecovery(session)
 	resetStableSharedToolSurface(session)
+	if rotateDiagnostics {
+		if err := rotateChatSessionDiagnostics(session); err != nil {
+			return err
+		}
+	}
 	ensureChatSystemPromptMessage(session)
 	// Keep the empty shell in memory only. Durable Save happens on the first
 	// real conversation content (or shutdown with content), so new-chat
@@ -230,6 +239,30 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
+	return nil
+}
+
+// rotateChatSessionDiagnostics starts a fresh chat-log/artifact session for
+// /new so Chat Log / Debug / HTTP / Shell paths no longer point at the previous
+// conversation's diagnostic directory.
+func rotateChatSessionDiagnostics(session *ChatSession) error {
+	if session == nil {
+		return nil
+	}
+	if session.Logger != nil {
+		if err := session.Logger.RotateSession(); err != nil {
+			return fmt.Errorf("rotate chat log session: %w", err)
+		}
+	}
+	if session.runtimeHTTPCapture != nil {
+		session.runtimeHTTPCapture.Reset()
+		session.runtimeHTTPCapture.SetArtifactDir(currentRuntimeHTTPArtifactDir(session))
+	}
+	session.localShellArtifactMu.Lock()
+	session.localShellArtifactCounter = 0
+	session.lastLocalShellArtifactPath = ""
+	session.localShellArtifactMu.Unlock()
+	session.ImagePaths = nil
 	return nil
 }
 

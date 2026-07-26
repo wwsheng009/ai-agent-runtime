@@ -542,10 +542,14 @@ skills 暴露见 [skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_sk
 | `aicli agent stdio` | 外部 IDE/客户端协议宿主；stdin 是协议流，不是 prompt 文本 |
 | `aicli exec` | headless 工具代理（CI/脚本） |
 
+支持方法：`initialize`、`session/new`、`session/prompt`、`session/cancel`、`session/load`（`loadSession=true`，回放后返回 null）。  
+默认 `--ephemeral`：`session/load` 仅能 reattach 本进程 `session/new` 的 id；跨进程恢复需 `--session-dir`。
+
 ```bash
 aicli agent stdio --provider openai --model gpt-4o
 aicli agent stdio --profile default --permission-mode default
 aicli agent stdio --yolo --enable-tools
+aicli agent stdio --session-dir ~/.aicli/sessions
 ```
 
 角色 / permission / profile 概念见 [agents.md](./agents.md#9-acp-宿主-aicli-agent-stdio)；headless 输出契约见 [exec.md](./exec.md)。

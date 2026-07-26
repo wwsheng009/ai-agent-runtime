@@ -111,6 +111,59 @@ func newChatLogSessionID() string {
 	return time.Now().Format("20060102_150405.000") + "_" + shortID
 }
 
+// RotateSession ends the current chat-log session (best effort) and starts a
+// fresh log/artifact session while keeping the same log root and provider
+// metadata. Used by /new so diagnostic paths match the new runtime conversation.
+func (cl *ChatLogger) RotateSession() error {
+	if cl == nil {
+		return nil
+	}
+
+	logDir := strings.TrimSpace(cl.logDir)
+	provider, protocol, model, baseURL := "", "", "", ""
+	stream := false
+	if cl.sessionLog != nil {
+		provider = cl.sessionLog.Provider
+		protocol = cl.sessionLog.Protocol
+		model = cl.sessionLog.Model
+		baseURL = cl.sessionLog.BaseURL
+		stream = cl.sessionLog.Stream
+		if logDir != "" {
+			// Best-effort close of the previous chat log so /new never loses
+			// diagnostics when rotation itself succeeds. Skip empty shells to
+			// avoid creating orphan chat_*.json files for unused sessions.
+			if len(cl.sessionLog.Messages) > 0 || cl.totalRequests > 0 || cl.totalResponses > 0 || cl.totalToolCalls > 0 {
+				_ = cl.SaveSession()
+			}
+		}
+	}
+
+	sessionID := newChatLogSessionID()
+	now := time.Now()
+	cl.sessionID = sessionID
+	cl.currentReqIndex = -1
+	cl.totalRequests = 0
+	cl.totalResponses = 0
+	cl.totalToolCalls = 0
+	cl.responseTimeMS = 0
+	cl.sessionLog = &ChatSessionLog{
+		SessionID:      sessionID,
+		StartTime:      now,
+		LastObservedAt: now,
+		Status:         "active",
+		Provider:       provider,
+		Protocol:       protocol,
+		Model:          model,
+		BaseURL:        baseURL,
+		Stream:         stream,
+		Messages:       []ChatLogDetail{},
+	}
+	if logDir == "" {
+		return nil
+	}
+	return cl.ensureSessionArtifactLayout()
+}
+
 // SetLogDir 设置日志保存目录
 func (cl *ChatLogger) SetLogDir(dir string) error {
 	// 创建目录

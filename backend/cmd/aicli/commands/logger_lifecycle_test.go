@@ -73,3 +73,53 @@ func TestFinalizeChatSessionWithErrorPersistsFailure(t *testing.T) {
 	require.True(t, strings.Contains(logger.sessionLog.TerminationReason, "stream interrupted"))
 	require.False(t, logger.sessionLog.EndTime.IsZero())
 }
+
+func TestChatLoggerRotateSessionStartsFreshArtifactLayout(t *testing.T) {
+	logger := NewChatLogger("provider", "openai", "model", true, "https://example.com")
+	logDir := t.TempDir()
+	require.NoError(t, logger.SetLogDir(logDir))
+
+	oldSessionID := logger.sessionID
+	oldSessionDir := logger.SessionDirPath()
+	oldLogPath := logger.SessionLogPath()
+	require.NotEmpty(t, oldSessionDir)
+
+	logger.LogRequest(aicliLogScope{TurnID: "turn-1", RequestID: "req-1"}, map[string]string{"hello": "world"})
+	require.NoError(t, logger.FlushSession())
+	_, err := os.Stat(oldLogPath)
+	require.NoError(t, err)
+
+	require.NoError(t, logger.RotateSession())
+
+	require.NotEqual(t, oldSessionID, logger.sessionID)
+	require.NotEqual(t, oldSessionDir, logger.SessionDirPath())
+	require.NotEqual(t, oldLogPath, logger.SessionLogPath())
+	require.Equal(t, "active", logger.sessionLog.Status)
+	require.True(t, logger.sessionLog.EndTime.IsZero())
+	require.Empty(t, logger.sessionLog.Messages)
+	require.Equal(t, "provider", logger.sessionLog.Provider)
+	require.Equal(t, "openai", logger.sessionLog.Protocol)
+	require.Equal(t, "model", logger.sessionLog.Model)
+	require.True(t, logger.sessionLog.Stream)
+	require.Equal(t, "https://example.com", logger.sessionLog.BaseURL)
+	require.Zero(t, logger.totalRequests)
+
+	for _, path := range []string{
+		logger.SessionDirPath(),
+		logger.RuntimeHTTPArtifactDir(),
+		logger.LocalShellArtifactDir(),
+		logger.DebugLogPath(),
+	} {
+		info, statErr := os.Stat(path)
+		require.NoError(t, statErr, path)
+		if path == logger.DebugLogPath() {
+			require.False(t, info.IsDir(), path)
+			continue
+		}
+		require.True(t, info.IsDir(), path)
+	}
+
+	// Previous session remains on disk after rotation.
+	_, err = os.Stat(oldLogPath)
+	require.NoError(t, err)
+}
