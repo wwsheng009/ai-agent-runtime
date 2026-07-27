@@ -250,23 +250,23 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
-						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":              map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
-						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
-						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
-						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
-						"provider":             map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
-						"model":                map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
-						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
-						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":         map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
-						"completion_requirement":  map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "Optional end-of-run harness constraint for the child. complete_task requires report_task_outcome or block_current_task before the run can finish cleanly; empty defaults to none (or agent_type definition when available)."},
-						"completionRequirement":   map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "CamelCase alias for completion_requirement."},
-						"isolation":               map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
-						"read_only":               map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
-						"fork_context":            map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
-						"fork_turns":              map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"id":                     map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
+						"session_id":             map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"message":                map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
+						"agent_type":             map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
+						"difficulty":             map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
+						"difficulty_rationale":   map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"provider":               map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
+						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
+						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
+						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
+						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
+						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
+						"read_only":              map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
+						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
@@ -424,23 +424,23 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
-						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":              map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
-						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
-						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
-						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
-						"provider":             map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
-						"model":                map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
-						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
-						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":         map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
-						"completion_requirement":  map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "Optional end-of-run harness constraint for the child. complete_task requires report_task_outcome or block_current_task before the run can finish cleanly; empty defaults to none (or agent_type definition when available)."},
-						"completionRequirement":   map[string]interface{}{"type": "string", "enum": []string{"none", "complete_task"}, "description": "CamelCase alias for completion_requirement."},
-						"isolation":               map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
-						"read_only":               map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
-						"fork_context":            map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
-						"fork_turns":              map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"id":                     map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
+						"session_id":             map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"message":                map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
+						"agent_type":             map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
+						"difficulty":             map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
+						"difficulty_rationale":   map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"provider":               map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
+						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
+						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
+						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
+						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
+						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
+						"read_only":              map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
+						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
@@ -1352,6 +1352,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				request.CompletionRequirement = strings.TrimSpace(value)
 			}
 		}
+		normalizedCompletionRequirement, err := normalizeSpawnAgentCompletionRequirement(request.CompletionRequirement)
+		if err != nil {
+			return nil, nil, err
+		}
+		request.CompletionRequirement = normalizedCompletionRequirement
 		if value, ok := args["isolation"].(string); ok {
 			isolation, err := worktree.NormalizeMode(value)
 			if err != nil {
@@ -1377,7 +1382,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		// completion_requirement belongs to the spawned child and must never be
 		// copied from the parent run's Team task contract.
 		if strings.TrimSpace(request.CompletionRequirement) == "" && strings.TrimSpace(request.AgentType) != "" {
-			if requirement := resolveSpawnAgentCompletionRequirement(request.AgentType); requirement != "" {
+			requirement, err := resolveSpawnAgentCompletionRequirement(request.AgentType)
+			if err != nil {
+				return nil, nil, err
+			}
+			if requirement != "" {
 				request.CompletionRequirement = requirement
 			}
 		}
@@ -1389,7 +1398,6 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			applySpawnAgentAgentdefDefaults(&request, permissionModeExplicit, readOnlyExplicit)
 		}
 		request.EffectivePermissionMode = request.PermissionMode
-		request.CompletionRequirement = normalizeSpawnAgentCompletionRequirement(request.CompletionRequirement)
 		if value, ok := args["fork_context"].(bool); ok {
 			request.ForkContext = &value
 		}
@@ -3398,32 +3406,33 @@ func normalizeSpawnAgentPermissionMode(raw string) (string, error) {
 	}
 }
 
-// normalizeSpawnAgentCompletionRequirement keeps empty empty so RunMeta stays nil
-// when callers did not request a harness constraint. Known aliases map to
-// none|complete_task; unknown values are ignored (treated as unset).
-func normalizeSpawnAgentCompletionRequirement(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+// normalizeSpawnAgentCompletionRequirement validates the public spawn_agent
+// contract. Ordinary children have no Team task identity, so complete_task can
+// only be introduced later by TeammateRunner for a bound Team assignment.
+func normalizeSpawnAgentCompletionRequirement(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	switch strings.ToLower(trimmed) {
 	case "":
-		return ""
+		return "", nil
 	case string(agentdef.CompletionNone):
-		return string(agentdef.CompletionNone)
+		return string(agentdef.CompletionNone), nil
 	case string(agentdef.CompletionCompleteTask), "complete-task", "completetask":
-		return string(agentdef.CompletionCompleteTask)
+		return "", runtimeerrors.Newf(runtimeerrors.ErrValidationFailed, "spawn_agent completion_requirement %q is not supported: ordinary child sessions have no Team task identity; use spawn_team or a Team assignment for complete_task workers", trimmed)
 	default:
-		return ""
+		return "", runtimeerrors.Newf(runtimeerrors.ErrValidationFailed, "invalid spawn_agent completion_requirement %q: ordinary child sessions only support none", trimmed)
 	}
 }
 
 // resolveSpawnAgentCompletionRequirement fills completion from agentdef when
 // spawn_agent only provided agent_type. Missing definitions are not errors.
-func resolveSpawnAgentCompletionRequirement(agentType string) string {
+func resolveSpawnAgentCompletionRequirement(agentType string) (string, error) {
 	agentType = strings.TrimSpace(agentType)
 	if agentType == "" {
-		return ""
+		return "", nil
 	}
 	def, err := agentdef.Resolve(agentType, agentdef.DiscoverOptions{})
 	if err != nil || def == nil {
-		return ""
+		return "", nil
 	}
 	return normalizeSpawnAgentCompletionRequirement(string(def.CompletionRequirement))
 }
@@ -3521,55 +3530,6 @@ func (b *Broker) loadScopedTask(ctx context.Context, sessionID, explicitTeamID, 
 		return "", "", nil, fmt.Errorf("task does not belong to team: %s", teamID)
 	}
 	return teamID, agentID, task, nil
-}
-
-// executeStandaloneCompletionOutcome records the structured terminal observation
-// needed by a lightweight spawn_agent completion contract. There is deliberately
-// no team-store mutation here: ordinary spawn_agent children do not own a team
-// task, and their parent consumes the successful tool observation through the
-// agent result/wait_agent lifecycle.
-func executeStandaloneCompletionOutcome(request ReportTaskOutcomeArgs, defaultStatus team.TaskOutcomeStatus, requireStructured bool, allowed ...team.TaskOutcomeStatus) (ReportTaskOutcomeResult, map[string]interface{}, error) {
-	outcome, structured, err := team.NormalizeTaskOutcomeContract(defaultStatus, team.TaskOutcomeContract{
-		Status:    team.TaskOutcomeStatus(request.TaskStatus),
-		Summary:   request.Summary,
-		Blocker:   request.Blocker,
-		HandoffTo: request.HandoffTo,
-	})
-	if err != nil {
-		return ReportTaskOutcomeResult{}, nil, err
-	}
-	if requireStructured && !structured {
-		return ReportTaskOutcomeResult{}, nil, fmt.Errorf("task_status is required")
-	}
-	if err := team.ValidateAllowedTaskOutcomeStatus(outcome, allowed...); err != nil {
-		return ReportTaskOutcomeResult{}, nil, err
-	}
-	result := ReportTaskOutcomeResult{
-		Status:    string(outcome.Status),
-		Outcome:   string(outcome.Status),
-		Summary:   strings.TrimSpace(outcome.Summary),
-		Blocker:   strings.TrimSpace(outcome.Blocker),
-		HandoffTo: strings.TrimSpace(outcome.HandoffTo),
-		ResultRef: strings.TrimSpace(request.ResultRef),
-	}
-	payload := map[string]interface{}{
-		"completion_scope": "agent_session",
-		"status":           result.Status,
-		"outcome":          result.Outcome,
-	}
-	if result.Summary != "" {
-		payload["summary"] = result.Summary
-	}
-	if result.Blocker != "" {
-		payload["blocker"] = result.Blocker
-	}
-	if result.HandoffTo != "" {
-		payload["handoff_to"] = result.HandoffTo
-	}
-	if result.ResultRef != "" {
-		payload["result_ref"] = result.ResultRef
-	}
-	return result, attachCacheSafeSummary(payload, reportTaskOutcomeCacheSafeSummary(result)), nil
 }
 
 func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string, request ReportTaskOutcomeArgs, defaultStatus team.TaskOutcomeStatus, requireStructured bool, allowed ...team.TaskOutcomeStatus) (ReportTaskOutcomeResult, map[string]interface{}, error) {

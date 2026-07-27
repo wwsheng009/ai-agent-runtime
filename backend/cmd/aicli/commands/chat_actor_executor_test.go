@@ -112,7 +112,7 @@ func TestCurrentRunMetaForSession_PreservesExplicitActiveTeamWithoutTeamStore(t 
 	}
 }
 
-func TestCurrentRunMetaForSession_IncludesCompletionRequirementFromRuntimeContext(t *testing.T) {
+func TestCurrentRunMetaForSession_ForcesNoneCompletionRequirementFromRuntimeContext(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "child-session"},
 	}
@@ -122,8 +122,8 @@ func TestCurrentRunMetaForSession_IncludesCompletionRequirementFromRuntimeContex
 	if runMeta == nil {
 		t.Fatalf("expected run meta for completion requirement")
 	}
-	if runMeta.CompletionRequirement != "complete_task" {
-		t.Fatalf("expected completion requirement to be propagated, got %+v", runMeta)
+	if runMeta.CompletionRequirement != "none" {
+		t.Fatalf("ordinary session must not re-enter complete_task from context, got %+v", runMeta)
 	}
 	if runMeta.Team != nil {
 		t.Fatalf("ordinary child session should not gain team run meta, got %+v", runMeta.Team)

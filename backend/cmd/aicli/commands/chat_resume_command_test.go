@@ -140,8 +140,15 @@ func TestReadResumeSessionPickRendersUpdateTimeCountsAndTitle(t *testing.T) {
 	if !strings.Contains(lines, "First session") {
 		t.Fatalf("expected title in resume list, got %q", lines)
 	}
-	if !strings.Contains(lines, "2026-05-02 11:57") || !strings.Contains(lines, "2轮/4条消息") {
-		t.Fatalf("expected update time and conversation counts in resume list, got %q", lines)
+	if !strings.Contains(lines, "2轮/4条消息") {
+		t.Fatalf("expected conversation counts in resume list, got %q", lines)
+	}
+	// Resume list should show relative age only (e.g. "3分钟前" / "N天前"), not absolute timestamps.
+	if strings.Contains(lines, "2026-05-02 11:57") {
+		t.Fatalf("did not expect absolute update timestamp in resume list, got %q", lines)
+	}
+	if !strings.Contains(lines, "前") && !strings.Contains(lines, "刚刚") {
+		t.Fatalf("expected relative update time in resume list, got %q", lines)
 	}
 	if strings.Contains(lines, "resume-1") || strings.Contains(lines, "history-1") {
 		t.Fatalf("did not expect session id in resume list, got %q", lines)
@@ -344,6 +351,47 @@ func TestRenderRuntimeResumeSessionLineIncludesCompactBadge(t *testing.T) {
 	countsIndex := strings.Index(line, "1轮/2条消息")
 	if titleIndex < 0 || badgeIndex < 0 || countsIndex < 0 || !(titleIndex < badgeIndex && badgeIndex < countsIndex) {
 		t.Fatalf("expected title, compact badge, then counts order, got %q", line)
+	}
+}
+
+func TestRenderRuntimeResumeSessionLineUsesRelativeTimeOnly(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
+	session := runtimechat.NewSession("tester")
+	session.Metadata.Title = "Relative time session"
+	session.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "hi", Metadata: runtimetypes.NewMetadata()},
+	})
+	session.UpdatedAt = now.Add(-3 * time.Minute)
+
+	line := renderRuntimeResumeSessionLine(session, now, 0)
+	if !strings.Contains(line, "3分钟前") {
+		t.Fatalf("expected relative update time in resume line, got %q", line)
+	}
+	if strings.Contains(line, "2026-05-02 11:57") {
+		t.Fatalf("did not expect absolute update timestamp in resume line, got %q", line)
+	}
+	if strings.Contains(line, "(") || strings.Contains(line, ")") {
+		t.Fatalf("did not expect absolute+relative parentheses form in resume line, got %q", line)
+	}
+}
+
+func TestBuildResumeFullScreenItemUsesRelativeTimeOnly(t *testing.T) {
+	now := time.Date(2026, 7, 17, 16, 0, 0, 0, time.Local)
+	session := runtimechat.NewSession("tester")
+	session.ID = "relative-only"
+	session.Metadata.Title = "Relative full-screen"
+	session.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+	})
+	session.UpdatedAt = now.Add(-8 * time.Minute)
+
+	item := buildResumeFullScreenItem(session, now, false)
+	if !strings.Contains(item.Detail, "8分钟前") {
+		t.Fatalf("expected relative update time in full-screen detail, got %q", item.Detail)
+	}
+	if strings.Contains(item.Detail, "2026-07-17") || strings.Contains(item.Detail, "(") {
+		t.Fatalf("did not expect absolute update timestamp in full-screen detail, got %q", item.Detail)
 	}
 }
 

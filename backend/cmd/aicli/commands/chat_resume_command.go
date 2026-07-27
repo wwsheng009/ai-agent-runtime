@@ -273,7 +273,8 @@ func buildResumeFullScreenItem(session *runtimechat.Session, now time.Time, curr
 	}
 	generation := runtimeSessionCompactGeneration(session)
 	detailParts := []string{
-		formatSessionUpdatedAt(session.UpdatedAt, now),
+		// Resume picker shows relative age only; absolute timestamps clutter the list.
+		formatSessionRelativeTime(session.UpdatedAt, now),
 		fmt.Sprintf("%d轮/%d条", turnCount, messageCount),
 	}
 	workspacePath := runtimeSessionWorkspacePath(session)

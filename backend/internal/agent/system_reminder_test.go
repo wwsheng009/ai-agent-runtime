@@ -179,6 +179,8 @@ func TestPlanModeSystemReminder_WhenEngineInPlanMode(t *testing.T) {
 	assert.Equal(t, ReminderKindPlanMode, ReminderKindOf(*msg))
 	assert.Contains(t, msg.Content, "docs/feature-plan.md")
 	assert.Contains(t, msg.Content, `<system-reminder kind="plan_mode">`)
+	assert.False(t, IsSystemReminderDurable(*msg))
+	assert.Empty(t, DurableMessagesForPersist([]types.Message{*msg}))
 
 	// Already present in history → no second inject.
 	assert.Nil(t, loop.planModeSystemReminder([]types.Message{*msg}))
@@ -186,4 +188,20 @@ func TestPlanModeSystemReminder_WhenEngineInPlanMode(t *testing.T) {
 	// Non-plan mode should not inject.
 	engine.Mode = runtimepolicy.ModeDefault
 	assert.Nil(t, loop.planModeSystemReminder(nil))
+}
+
+func TestStripPlanModeSystemReminders_RemovesCurrentAndLegacyMessages(t *testing.T) {
+	current := NewSystemReminderMessage(SystemReminder{
+		Kind:    ReminderKindPlanMode,
+		Body:    PlanModeReminderBody("docs/current.md"),
+		Durable: true, // Simulate history persisted by an older runtime.
+	})
+	require.NotNil(t, current)
+
+	legacy := types.NewUserMessage(`<system-reminder kind="plan_mode">legacy plan instruction</system-reminder>`)
+	normal := types.NewUserMessage("implement the approved change")
+
+	filtered := stripPlanModeSystemReminders([]types.Message{*current, *legacy, *normal})
+	require.Len(t, filtered, 1)
+	assert.Equal(t, normal.Content, filtered[0].Content)
 }

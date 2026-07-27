@@ -190,6 +190,8 @@ Agent Source:      profile · E:\repo\examples\profiles\coding\agents\coder\agen
 
 不会被 explore 的 plan/read-only 默认覆盖。
 
+`completion_requirement` 对普通 `spawn_agent` 固定为 `none`：schema 不再宣传 `complete_task`，显式 snake/camel 或 agentdef 解析出 `complete_task` 会在创建 child 前被拒绝，并提示改用 `spawn_team` / Team assignment。fork 会复制父上下文，但 route context 会覆盖为 `none`；真正的 teammate `complete_task` 只由 `TeammateRunner` 在绑定了 `TeamID` + `CurrentTaskID` 的 `RunMeta` 上注入。
+
 子会话启动时还会按 def 叠加 tool allow/deny、read-only 与 **sandbox profile materialize**（local actor host；workspace 已知时写入 path bounds）。
 
 > Team teammate 的 `profile` 在可解析为 portable agentdef 时与 `spawn_agent` 对齐：投影 `agent_type`、默认 `permission_mode` / `read_only`，RunMeta 采用 def 权限（如 `explore` → `plan`），local/API actor 叠加 tool allow/deny 与 sandbox。未设置 profile 或仅合成 `team_teammate` 时仍默认 `bypass_permissions`（无人值守兼容）。任务 run 的 `complete_task` 仍由 runner 边界强制，不从 def 推断。

@@ -23,8 +23,8 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
-	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -736,10 +736,24 @@ func applyChatPlanModeToAgent(apiAgent *agent.Agent, session *ChatSession, runti
 		planmode.ApplyToEngine(engine, state)
 		return
 	}
-	if session != nil && session.PermissionMode == runtimepolicy.ModePlan {
-		engine.Mode = runtimepolicy.ModePlan
-		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+
+	// Reconcile the live engine on every run, including the transition out of
+	// plan mode.  Previously this function only forced ModePlan on entry and
+	// left the engine untouched on exit, so the durable/session state could say
+	// default or accept_edits while the next model turn was still evaluated as
+	// plan.
+	modeText := planmode.EffectivePermissionMode(state)
+	if state.Status == planmode.StatusExited {
+		modeText = planmode.ResumeModeAfterExit(state)
 	}
+	if session != nil && strings.TrimSpace(string(session.PermissionMode)) != "" {
+		modeText = string(session.PermissionMode)
+	}
+	mode, err := parseChatPermissionMode(modeText, false)
+	if err != nil {
+		mode = runtimepolicy.ModeDefault
+	}
+	engine.Mode = mode
 }
 
 func resolveLocalChatWorkspaceMode(runtimeConfig *runtimecfg.RuntimeConfig) string {
@@ -776,7 +790,7 @@ func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) st
 			"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
 			"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
-			"Team collaboration tools such as read_task_spec, read_task_context, send_team_message, and read_mailbox_digest require an active team run. report_task_outcome and block_current_task normally use the active team task, but may also be exposed for a standalone spawn_agent complete_task contract; in that case call the exposed outcome tool without inventing team_id or task_id.",
+			"Team collaboration tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Ordinary spawn_agent children only support completion_requirement=none; use spawn_team or a Team assignment when a structured complete_task outcome is required.",
 			"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
 			"For simple single-command checks such as `git status`, inspect them directly in the parent session; do not spawn a child agent unless the user explicitly asks for subagents or the task benefits from parallel delegation.",
 			"When the user explicitly requests a trusted bounded child agent task that must run local tools, pass spawn_agent permission_mode=\"bypass_permissions\" only if the task is safe and scoped; otherwise keep the default approval behavior and expect the child may wait for approval.",

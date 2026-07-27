@@ -220,7 +220,7 @@ func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testi
 	}
 }
 
-func TestBrokerDefinitionsForContext_IncludesOutcomeToolsForStandaloneCompletionContract(t *testing.T) {
+func TestBrokerDefinitionsForContext_HidesOutcomeToolsWithoutActiveTeamRun(t *testing.T) {
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store}
 	runCtx := team.WithRunMeta(context.Background(), &team.RunMeta{
@@ -228,17 +228,9 @@ func TestBrokerDefinitionsForContext_IncludesOutcomeToolsForStandaloneCompletion
 	})
 
 	names := toolDefinitionNames(broker.DefinitionsForContext(runCtx))
-	assert.Contains(t, names, ToolReportTaskOutcome)
-	assert.Contains(t, names, ToolBlockCurrentTask)
-	for _, def := range broker.DefinitionsForContext(runCtx) {
-		if def.Name != ToolReportTaskOutcome && def.Name != ToolBlockCurrentTask {
-			continue
-		}
-		assert.Equal(t, "completion_requirement", def.Metadata["availability"])
-		assert.Equal(t, "agent_session", def.Metadata["completion_scope"])
-		assert.NotContains(t, def.Description, "Requires an active team run")
-	}
 	for _, hidden := range []string{
+		ToolReportTaskOutcome,
+		ToolBlockCurrentTask,
 		ToolSendTeamMessage,
 		ToolReadMailboxDigest,
 		ToolReadTaskSpec,
@@ -247,20 +239,11 @@ func TestBrokerDefinitionsForContext_IncludesOutcomeToolsForStandaloneCompletion
 		assert.NotContains(t, names, hidden)
 	}
 
-	raw, metadata, err := broker.Execute(runCtx, "standalone-child", ToolReportTaskOutcome, map[string]interface{}{
+	_, _, err := broker.Execute(runCtx, "standalone-child", ToolReportTaskOutcome, map[string]interface{}{
 		"task_status": "done",
 		"summary":     "review completed",
 	})
-	require.NoError(t, err)
-	result, ok := raw.(ReportTaskOutcomeResult)
-	require.True(t, ok)
-	assert.Equal(t, "done", result.Status)
-	assert.Equal(t, "done", result.Outcome)
-	assert.Equal(t, "review completed", result.Summary)
-	assert.Empty(t, result.TeamID)
-	assert.Empty(t, result.TaskID)
-	require.NotNil(t, metadata)
-	assert.Equal(t, "agent_session", metadata["completion_scope"])
+	require.Error(t, err)
 }
 
 func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {

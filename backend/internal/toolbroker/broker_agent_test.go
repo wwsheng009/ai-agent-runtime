@@ -3,6 +3,8 @@ package toolbroker
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -243,8 +245,12 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 		t.Fatalf("completion_requirement property has unexpected shape: %#v", properties["completion_requirement"])
 	}
 	completionEnum, ok := completionRequirement["enum"].([]string)
-	if !ok || strings.Join(completionEnum, ",") != "none,complete_task" {
+	if !ok || strings.Join(completionEnum, ",") != "none" {
 		t.Fatalf("unexpected completion_requirement enum: %#v", completionRequirement["enum"])
+	}
+	completionAlias, ok := properties["completionRequirement"].(map[string]interface{})
+	if !ok || strings.Join(completionAlias["enum"].([]string), ",") != "none" {
+		t.Fatalf("unexpected completionRequirement enum: %#v", properties["completionRequirement"])
 	}
 	difficulty, ok := properties["difficulty"].(map[string]interface{})
 	if !ok {
@@ -427,77 +433,67 @@ func TestBroker_Execute_SpawnAgentInheritsPermissionModeFromRunMeta(t *testing.T
 	}
 }
 
-func TestBroker_Execute_SpawnAgentParsesCompletionRequirement(t *testing.T) {
-	controller := &fakeAgentSessionController{}
-	broker := &Broker{AgentSessions: controller}
+func TestBroker_Execute_SpawnAgentRejectsCompleteTaskCompletionRequirement(t *testing.T) {
+	for _, key := range []string{"completion_requirement", "completionRequirement"} {
+		t.Run(key, func(t *testing.T) {
+			controller := &fakeAgentSessionController{}
+			broker := &Broker{AgentSessions: controller}
 
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
-		"message":               "finish with outcome",
-		"completion_requirement": "Complete-Task",
-	})
-	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
-	}
-	if controller.lastSpawn.CompletionRequirement != "complete_task" {
-		t.Fatalf("expected complete_task, got %#v", controller.lastSpawn)
-	}
-	if meta["completion_requirement"] != "complete_task" {
-		t.Fatalf("expected completion metadata, got %#v", meta)
+			_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+				"message": "finish with outcome",
+				key:       "Complete-Task",
+			})
+			if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+				t.Fatalf("expected actionable complete_task rejection, got %v", err)
+			}
+			if controller.lastParent != "" {
+				t.Fatalf("controller should not be called, got parent %q", controller.lastParent)
+			}
+		})
 	}
 }
 
-func TestBroker_Execute_SpawnAgentParsesCompletionRequirementCamelCase(t *testing.T) {
+func TestBroker_Execute_SpawnAgentDoesNotInheritCompletionRequirementFromRunMeta(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
-
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
-		"message":              "finish with outcome",
-		"completionRequirement": "complete_task",
+	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{
+		PermissionMode:        "bypass_permissions",
+		CompletionRequirement: "complete_task",
+		Team: &team.TeamRunMeta{
+			TeamID:        "team-1",
+			AgentID:       "mate-1",
+			CurrentTaskID: "task-1",
+		},
 	})
-	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
-	}
-	if controller.lastSpawn.CompletionRequirement != "complete_task" {
-		t.Fatalf("expected complete_task from camelCase alias, got %#v", controller.lastSpawn)
-	}
-	if meta["completion_requirement"] != "complete_task" {
-		t.Fatalf("expected completion metadata, got %#v", meta)
-	}
-}
-
-func TestBroker_Execute_SpawnAgentInheritsCompletionRequirementFromRunMeta(t *testing.T) {
-	controller := &fakeAgentSessionController{}
-	broker := &Broker{AgentSessions: controller}
-	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{CompletionRequirement: "complete_task"})
 
 	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"})
 	if err != nil {
 		t.Fatalf("spawn_agent failed: %v", err)
 	}
-	if controller.lastSpawn.CompletionRequirement != "complete_task" {
-		t.Fatalf("expected inherited completion_requirement, got %#v", controller.lastSpawn)
+	if controller.lastSpawn.CompletionRequirement != "" {
+		t.Fatalf("ordinary child must not inherit completion_requirement, got %#v", controller.lastSpawn)
 	}
-	if meta["completion_requirement"] != "complete_task" {
-		t.Fatalf("expected inherited completion metadata, got %#v", meta)
+	if controller.lastSpawn.PermissionMode != "bypass_permissions" {
+		t.Fatalf("permission mode should still inherit, got %#v", controller.lastSpawn)
+	}
+	if _, ok := meta["completion_requirement"]; ok {
+		t.Fatalf("did not expect inherited completion metadata, got %#v", meta)
 	}
 }
 
-func TestBroker_Execute_SpawnAgentIgnoresUnknownCompletionRequirement(t *testing.T) {
+func TestBroker_Execute_SpawnAgentRejectsUnknownCompletionRequirement(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
 		"message":                "inspect",
 		"completion_requirement": "must_finish",
 	})
-	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "only support none") {
+		t.Fatalf("expected invalid completion_requirement error, got %v", err)
 	}
-	if controller.lastSpawn.CompletionRequirement != "" {
-		t.Fatalf("expected unknown completion_requirement to be ignored, got %#v", controller.lastSpawn)
-	}
-	if _, ok := meta["completion_requirement"]; ok {
-		t.Fatalf("did not expect completion metadata for unknown value: %#v", meta)
+	if controller.lastParent != "" {
+		t.Fatalf("controller should not be called, got parent %q", controller.lastParent)
 	}
 }
 
@@ -777,18 +773,89 @@ func TestSpawnAgentRunMetaUsesPermissionMode(t *testing.T) {
 	}
 }
 
-func TestSpawnAgentRunMetaUsesCompletionRequirement(t *testing.T) {
+func TestSpawnAgentRunMetaForcesNoneCompletionRequirement(t *testing.T) {
 	got := SpawnAgentRunMeta(SpawnAgentArgs{CompletionRequirement: " complete_task "})
-	if got == nil || got.CompletionRequirement != "complete_task" {
-		t.Fatalf("unexpected spawn agent run meta: %#v", got)
+	if got == nil || got.CompletionRequirement != "none" {
+		t.Fatalf("ordinary spawn run meta must force none, got %#v", got)
+	}
+	got = SpawnAgentRunMeta(SpawnAgentArgs{
+		PermissionMode:        "bypass_permissions",
+		CompletionRequirement: "complete_task",
+	})
+	if got == nil || got.PermissionMode != "bypass_permissions" || got.CompletionRequirement != "none" {
+		t.Fatalf("permission mode should survive while completion stays none, got %#v", got)
 	}
 }
 
-func TestApplySpawnAgentRouteContextPersistsCompletionRequirement(t *testing.T) {
-	ctx := testAgentContext{}
+func TestApplySpawnAgentRouteContextPersistsNoneCompletionRequirement(t *testing.T) {
+	ctx := testAgentContext{
+		AgentSessionContextCompletionRequirement: "complete_task",
+	}
 	ApplySpawnAgentRouteContext(ctx, SpawnAgentArgs{CompletionRequirement: "complete_task"})
-	if ctx[AgentSessionContextCompletionRequirement] != "complete_task" {
-		t.Fatalf("expected completion_requirement context, got %#v", ctx)
+	if ctx[AgentSessionContextCompletionRequirement] != "none" {
+		t.Fatalf("expected forked complete_task to be overwritten with none, got %#v", ctx)
+	}
+}
+
+func TestSpawnAgentRunMetaFromContextUsesChildRouteContext(t *testing.T) {
+	ctx := testAgentContext{
+		AgentSessionContextPermissionMode:        "bypass_permissions",
+		AgentSessionContextCompletionRequirement: "none",
+	}
+	got := SpawnAgentRunMetaFromContext(ctx)
+	if got == nil || got.PermissionMode != "bypass_permissions" || got.CompletionRequirement != "none" {
+		t.Fatalf("unexpected child run meta from context: %#v", got)
+	}
+}
+
+func TestNormalizeOrdinarySpawnAgentArgsRejectsCompleteTask(t *testing.T) {
+	_, err := NormalizeOrdinarySpawnAgentArgs(SpawnAgentArgs{
+		Message:               "inspect",
+		CompletionRequirement: "complete_task",
+	})
+	if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+		t.Fatalf("expected complete_task rejection, got %v", err)
+	}
+	got, err := NormalizeOrdinarySpawnAgentArgs(SpawnAgentArgs{
+		Message:               "inspect",
+		CompletionRequirement: "none",
+	})
+	if err != nil {
+		t.Fatalf("explicit none should pass: %v", err)
+	}
+	if got.CompletionRequirement != "none" {
+		t.Fatalf("expected none, got %#v", got)
+	}
+}
+
+func TestNormalizeOrdinarySpawnAgentArgsRejectsCompleteTaskAgentdef(t *testing.T) {
+	root := t.TempDir()
+	agentsDir := filepath.Join(root, ".agents", "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatalf("mkdir agents dir: %v", err)
+	}
+	path := filepath.Join(agentsDir, "worker-complete.md")
+	content := "---\nname: worker-complete\ncompletionRequirement: complete_task\n---\n# worker\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write agentdef: %v", err)
+	}
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	_, err = NormalizeOrdinarySpawnAgentArgs(SpawnAgentArgs{
+		Message:   "inspect",
+		AgentType: "worker-complete",
+	})
+	if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+		t.Fatalf("expected agentdef complete_task rejection, got %v", err)
 	}
 }
 

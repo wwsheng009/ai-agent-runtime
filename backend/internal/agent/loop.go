@@ -390,8 +390,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}
 	totalUsage := &types.TokenUsage{}
 
-	// 构建初始对话历史
-	history := cloneMessageHistory(options.History)
+	// 构建初始对话历史. Plan-mode instructions are derived from the current
+	// live engine below, so remove any reminder persisted by older runtimes
+	// before it can leak across approve/quit or retain an outdated plan path.
+	history := stripPlanModeSystemReminders(cloneMessageHistory(options.History))
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
 	}
@@ -438,7 +440,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}
 
 	// R3: when permission engine is in plan mode, inject a one-shot plan reminder
-	// into the prompt view (and durable history for recovery continuity).
+	// into the current prompt view. Durable plan state recreates it on resume.
 	if rem := loop.planModeSystemReminder(builder.Messages()); rem != nil {
 		builder.Add(*rem)
 		promptBuilder.Add(*rem)
@@ -448,7 +450,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, 0, SystemReminder{
 			Kind:    ReminderKindOf(*rem),
 			Body:    stripSystemReminderEnvelope(rem.Content),
-			Durable: true,
+			Durable: false,
 		}))
 	}
 

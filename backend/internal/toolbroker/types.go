@@ -313,20 +313,20 @@ type PlanModeController interface {
 
 // SpawnAgentArgs describes a lightweight child-agent session request.
 type SpawnAgentArgs struct {
-	ID                       string   `json:"id,omitempty"`
-	SessionID                string   `json:"session_id,omitempty"`
-	Message                  string   `json:"message,omitempty"`
-	AgentType                string   `json:"agent_type,omitempty"`
-	Difficulty               string   `json:"difficulty,omitempty"`
-	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
-	Provider                 string   `json:"provider,omitempty"`
-	Model                    string   `json:"model,omitempty"`
-	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
-	ThinkingEffort           string   `json:"thinking_effort,omitempty"`
-	PermissionMode           string   `json:"permission_mode,omitempty"`
-	// CompletionRequirement is none|complete_task for the child harness loop.
-	// When empty, callers may fill from agentdef for agent_type; team workers
-	// still set complete_task explicitly via TeammateRunner RunMeta.
+	ID                  string `json:"id,omitempty"`
+	SessionID           string `json:"session_id,omitempty"`
+	Message             string `json:"message,omitempty"`
+	AgentType           string `json:"agent_type,omitempty"`
+	Difficulty          string `json:"difficulty,omitempty"`
+	DifficultyRationale string `json:"difficulty_rationale,omitempty"`
+	Provider            string `json:"provider,omitempty"`
+	Model               string `json:"model,omitempty"`
+	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
+	ThinkingEffort      string `json:"thinking_effort,omitempty"`
+	PermissionMode      string `json:"permission_mode,omitempty"`
+	// CompletionRequirement is retained for wire compatibility, but ordinary
+	// spawn_agent children only support none. Team workers receive complete_task
+	// from TeammateRunner RunMeta after a real task assignment is bound.
 	CompletionRequirement string `json:"completion_requirement,omitempty"`
 	// Isolation is none|worktree. Empty normalizes to none. worktree fails closed
 	// (no silent main-tree fallback) when git worktree creation is unavailable.
@@ -640,8 +640,8 @@ type AgentEventsResult struct {
 
 // ApplyAgentWorktreeArgs applies a child's worktree isolation changes into the main repo.
 type ApplyAgentWorktreeArgs struct {
-	ID        string   `json:"id,omitempty"`
-	SessionID string   `json:"session_id,omitempty"`
+	ID        string `json:"id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 	// Paths limits apply to specific relative paths. Empty = all tracked changes.
 	Paths []string `json:"paths,omitempty"`
 	// Keep preserves the worktree after apply (default false removes it).
@@ -656,19 +656,19 @@ type DiscardAgentWorktreeArgs struct {
 
 // AgentWorktreeResult reports apply/discard outcomes for worktree isolation.
 type AgentWorktreeResult struct {
-	ID             string   `json:"id,omitempty"`
-	SessionID      string   `json:"session_id,omitempty"`
-	Action         string   `json:"action"` // apply | discard
-	Isolation      string   `json:"isolation,omitempty"`
-	WorktreePath   string   `json:"worktree_path,omitempty"`
-	WorktreeBranch string   `json:"worktree_branch,omitempty"`
-	RepoRoot       string   `json:"repo_root,omitempty"`
-	DiffStat       string   `json:"diff_stat,omitempty"`
-	Paths          []string `json:"paths,omitempty"`
-	Applied        bool     `json:"applied,omitempty"`
-	Discarded      bool     `json:"discarded,omitempty"`
-	Removed        bool     `json:"removed,omitempty"`
-	Kept           bool     `json:"kept,omitempty"`
+	ID             string             `json:"id,omitempty"`
+	SessionID      string             `json:"session_id,omitempty"`
+	Action         string             `json:"action"` // apply | discard
+	Isolation      string             `json:"isolation,omitempty"`
+	WorktreePath   string             `json:"worktree_path,omitempty"`
+	WorktreeBranch string             `json:"worktree_branch,omitempty"`
+	RepoRoot       string             `json:"repo_root,omitempty"`
+	DiffStat       string             `json:"diff_stat,omitempty"`
+	Paths          []string           `json:"paths,omitempty"`
+	Applied        bool               `json:"applied,omitempty"`
+	Discarded      bool               `json:"discarded,omitempty"`
+	Removed        bool               `json:"removed,omitempty"`
+	Kept           bool               `json:"kept,omitempty"`
 	Status         *AgentStatusResult `json:"status,omitempty"`
 }
 
@@ -692,31 +692,31 @@ type AgentSessionController interface {
 }
 
 const (
-	AgentSessionContextProviderName             = "provider_name"
-	AgentSessionContextModel                    = "model"
-	AgentSessionContextReasoningEffort          = "reasoning_effort"
-	AgentSessionContextParentSessionID          = agentcontrol.SessionContextParentSessionID
-	AgentSessionContextRootSessionID            = agentcontrol.SessionContextRootSessionID
-	AgentSessionContextAgentType                = agentcontrol.SessionContextAgentType
-	AgentSessionContextRequestedModel           = agentcontrol.SessionContextRequestedModel
-	AgentSessionContextDifficulty               = agentcontrol.SessionContextDifficulty
-	AgentSessionContextDifficultySource         = agentcontrol.SessionContextDifficultySource
-	AgentSessionContextDifficultyRationale      = agentcontrol.SessionContextDifficultyRationale
-	AgentSessionContextRouteSource              = agentcontrol.SessionContextRouteSource
-	AgentSessionContextRouteWarnings            = agentcontrol.SessionContextRouteWarnings
-	AgentSessionContextFallbackUsed             = agentcontrol.SessionContextFallbackUsed
-	AgentSessionContextFallbackReason           = agentcontrol.SessionContextFallbackReason
-	AgentSessionContextPath                     = agentcontrol.SessionContextPath
-	AgentSessionContextDepth                    = agentcontrol.SessionContextDepth
-	AgentSessionContextTeamID                   = agentcontrol.SessionContextTeamID
-	AgentSessionContextTeammateID               = agentcontrol.SessionContextTeammateID
-	AgentSessionContextPermissionMode           = "permission_mode"
-	AgentSessionContextCompletionRequirement    = "completion_requirement"
-	AgentSessionContextReadOnly                 = "read_only"
-	AgentSessionContextIsolation                = "isolation"
-	AgentSessionContextWorktreePath             = "worktree_path"
-	AgentSessionContextWorktreeBranch           = "worktree_branch"
-	AgentSessionContextWorktreeRepoRoot         = "worktree_repo_root"
+	AgentSessionContextProviderName          = "provider_name"
+	AgentSessionContextModel                 = "model"
+	AgentSessionContextReasoningEffort       = "reasoning_effort"
+	AgentSessionContextParentSessionID       = agentcontrol.SessionContextParentSessionID
+	AgentSessionContextRootSessionID         = agentcontrol.SessionContextRootSessionID
+	AgentSessionContextAgentType             = agentcontrol.SessionContextAgentType
+	AgentSessionContextRequestedModel        = agentcontrol.SessionContextRequestedModel
+	AgentSessionContextDifficulty            = agentcontrol.SessionContextDifficulty
+	AgentSessionContextDifficultySource      = agentcontrol.SessionContextDifficultySource
+	AgentSessionContextDifficultyRationale   = agentcontrol.SessionContextDifficultyRationale
+	AgentSessionContextRouteSource           = agentcontrol.SessionContextRouteSource
+	AgentSessionContextRouteWarnings         = agentcontrol.SessionContextRouteWarnings
+	AgentSessionContextFallbackUsed          = agentcontrol.SessionContextFallbackUsed
+	AgentSessionContextFallbackReason        = agentcontrol.SessionContextFallbackReason
+	AgentSessionContextPath                  = agentcontrol.SessionContextPath
+	AgentSessionContextDepth                 = agentcontrol.SessionContextDepth
+	AgentSessionContextTeamID                = agentcontrol.SessionContextTeamID
+	AgentSessionContextTeammateID            = agentcontrol.SessionContextTeammateID
+	AgentSessionContextPermissionMode        = "permission_mode"
+	AgentSessionContextCompletionRequirement = "completion_requirement"
+	AgentSessionContextReadOnly              = "read_only"
+	AgentSessionContextIsolation             = "isolation"
+	AgentSessionContextWorktreePath          = "worktree_path"
+	AgentSessionContextWorktreeBranch        = "worktree_branch"
+	AgentSessionContextWorktreeRepoRoot      = "worktree_repo_root"
 	// AgentSessionContextWorktreeDisposition records parent decision on isolation:
 	// applied | discarded. Empty means still pending explicit apply/discard/close.
 	AgentSessionContextWorktreeDisposition = "worktree_disposition"
@@ -725,8 +725,8 @@ const (
 	// claim/task code can inherit the isolated workspace as write_paths.
 	AgentSessionContextWritePaths = "write_paths"
 
-	WorktreeDispositionApplied   = "applied"
-	WorktreeDispositionDiscarded = "discarded"
+	WorktreeDispositionApplied                  = "applied"
+	WorktreeDispositionDiscarded                = "discarded"
 	AgentSessionContextRequestedProvider        = "agent_requested_provider"
 	AgentSessionContextRequestedReasoningEffort = "agent_requested_reasoning_effort"
 	AgentSessionContextRequestedPermissionMode  = "agent_requested_permission_mode"
@@ -803,9 +803,10 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if effectivePermissionMode != "" {
 		session.SetContext(AgentSessionContextEffectivePermissionMode, effectivePermissionMode)
 	}
-	if requirement := strings.TrimSpace(args.CompletionRequirement); requirement != "" {
-		session.SetContext(AgentSessionContextCompletionRequirement, requirement)
-	}
+	// Forking copies parent context, but ordinary spawn_agent children never own
+	// the parent's Team completion contract. Persist none even when omitted so a
+	// cloned complete_task value cannot survive into initial or resumed runs.
+	session.SetContext(AgentSessionContextCompletionRequirement, "none")
 	if isolation := strings.TrimSpace(args.Isolation); isolation != "" {
 		session.SetContext(AgentSessionContextIsolation, isolation)
 	}
@@ -1068,13 +1069,12 @@ func ApplySpawnAgentRouteStatusRecord(result *AgentStatusResult, record agentcon
 
 func SpawnAgentRunMeta(args SpawnAgentArgs) *team.RunMeta {
 	permissionMode := strings.TrimSpace(args.PermissionMode)
-	completionRequirement := strings.TrimSpace(args.CompletionRequirement)
-	if permissionMode == "" && completionRequirement == "" {
+	if permissionMode == "" && strings.TrimSpace(args.CompletionRequirement) == "" {
 		return nil
 	}
 	return &team.RunMeta{
 		PermissionMode:        permissionMode,
-		CompletionRequirement: completionRequirement,
+		CompletionRequirement: "none",
 	}
 }
 

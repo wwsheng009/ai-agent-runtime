@@ -140,16 +140,16 @@ Supported values (normalized):
 - `none` — default for ordinary chat / non-worker runs; no terminal tool is required
 - `complete_task` — the run must observe a successful `report_task_outcome` or `block_current_task` before finishing cleanly
 
-Aliases accepted on spawn / agentdef input: `complete-task`, `completetask` → `complete_task`. Unknown values are treated as unset on spawn (ignored) and as `none` after loop normalize. These compatibility inputs do not by themselves create Team task identity; the loop only activates `complete_task` for a per-run `RunMeta` containing both `TeamID` and `CurrentTaskID`.
+Aliases accepted on Team worker / agentdef input: `complete-task`, `completetask` → `complete_task`. Ordinary `spawn_agent` still parses both snake_case and camelCase fields so old callers get an actionable migration error instead of a silent ignore; unknown values are rejected at the spawn entry. The loop only activates `complete_task` for a per-run `RunMeta` containing both `TeamID` and `CurrentTaskID`.
 
 ### Where it is set
 
 | Path | Default / behavior |
 | --- | --- |
 | Team teammate worker (`TeammateRunner`) | Injects `complete_task` together with `TeamID`, `AgentID`, and `CurrentTaskID` at the assignment boundary |
-| `spawn_agent` | Accepts `completion_requirement` / `completionRequirement` for compatibility and may resolve an agentdef default, but never inherits the parent Team worker contract or task identity |
+| `spawn_agent` | Ordinary children are fixed to `none`. Explicit `complete_task` (snake/camel) or an agentdef that resolves to `complete_task` is rejected before session creation; callers should use `spawn_team` / Team assignment instead. Parent Team worker contracts and task identity are never inherited |
 | `spawn_subagents` task item | Optional per-task `completion_requirement` / `completionRequirement` → child loop config |
-| Spawn route context | Explicitly writes `none` when the child did not request a requirement, overriding any value copied by session fork |
+| Spawn route context | Always persists `completion_requirement=none` for ordinary children, overriding any value copied by session fork |
 | Session actor loop | Treats profile/session/legacy `complete_task` as `none` unless the current per-run Team task identity is complete |
 | `cloneLoopConfigForRun` | Honors explicit `complete_task` only when the same `RunMeta` contains non-empty `TeamID` and `CurrentTaskID` |
 
@@ -163,7 +163,7 @@ Session context key: `completion_requirement` (`toolbroker.AgentSessionContextCo
 
 This keeps worker completion, broker tools, and HTTP `/outcome` on one semantic surface: structured task status + summary (+ blocker/handoff fields when required).
 
-Forking copies conversation history and session context, not ownership of the parent's Team assignment. Both the local CLI controller and the HTTP/API session controller apply the child spawn route context after cloning so an omitted child requirement is persisted as `none`. Follow-up, send-input, and resume rebuild `RunMeta` from the child session itself and cannot recover the parent's `complete_task` contract.
+Forking copies conversation history and session context, not ownership of the parent's Team assignment. Both the local CLI controller and the HTTP/API session controller normalize ordinary spawn args first, then apply the child spawn route context after cloning so the child requirement is always persisted as `none`. Follow-up, send-input, and resume rebuild `RunMeta` from the child session itself (`SpawnAgentRunMetaFromContext`) and cannot recover the parent's `complete_task` contract. Old snake_case/camelCase `complete_task` requests are rejected with a migration hint toward `spawn_team`, rather than accepted and later failed for missing outcome tools.
 
 ## Notes
 

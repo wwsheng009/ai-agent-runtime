@@ -1928,14 +1928,14 @@ func renderRuntimeResumeCurrentSessionLine(session *runtimechat.Session, now tim
 			generation,
 			turnCount,
 			messageCount,
-			formatSessionUpdatedAt(session.UpdatedAt, now),
+			formatSessionRelativeTime(session.UpdatedAt, now),
 		)
 	}
 	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
 		title,
 		turnCount,
 		messageCount,
-		formatSessionUpdatedAt(session.UpdatedAt, now),
+		formatSessionRelativeTime(session.UpdatedAt, now),
 	)
 }
 
@@ -1951,20 +1951,21 @@ func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time,
 	}
 	// Title first for resume/fallback pickers; session ID is never column 1.
 	// Keep compact generation as a separate badge so truncated titles stay scannable.
+	// Resume lists only show relative age ("3分钟前") to keep rows scannable.
 	if generation := runtimeSessionCompactGeneration(session); generation > 0 {
 		return fmt.Sprintf("%s  compact #%d  %d轮/%d条消息  %s",
 			title,
 			generation,
 			turnCount,
 			messageCount,
-			formatSessionUpdatedAt(session.UpdatedAt, now),
+			formatSessionRelativeTime(session.UpdatedAt, now),
 		)
 	}
 	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
 		title,
 		turnCount,
 		messageCount,
-		formatSessionUpdatedAt(session.UpdatedAt, now),
+		formatSessionRelativeTime(session.UpdatedAt, now),
 	)
 }
 

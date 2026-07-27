@@ -335,14 +335,16 @@ type ToolMeta struct {
 3. [x] Loop 结束前检查：未调用 complete → system reminder + 有限次 recovery turn  
 4. [x] 与 `report_task_outcome` / team task status 字段对齐，避免双写语义分叉  
 5. [x] **A5 residual（2026-07-26）**：session `Success=false`（complete_task 未观察 tool）时仍解析 terminal structured JSON fallback；`task_status=blocked|handoff|done` 恢复为 orchestrator 可消费的 Success/Blocked，走 `BlockTask`/complete 而非硬 `task.failed`
+6. [x] **A5 residual（2026-07-27）**：普通 `spawn_agent` 入口拒绝 `complete_task`（snake/camel + agentdef 解析）；fork 后 route context 强制 `none`；follow-up/resume 仅从 child session 重建 `RunMeta`（`NormalizeOrdinarySpawnAgentArgs` / `SpawnAgentRunMetaFromContext`）；local CLI + API controller residual 回归 green
 
 **主要触点**：
 
 - `backend/internal/agent/loop*.go` + `completion_requirement.go`  
 - `backend/internal/team/teammate_runner.go`（`applyStructuredTaskOutcome`）  
 - team worker 启动路径 / `spawn_agent` / `spawn_subagents` / session actor loop config  
+- `backend/internal/toolbroker/spawn_agent_completion.go` + local/API spawn controllers  
 - `docs/skill_runtime/team_task_outcome_contract.md`  
-- 回归：`cmd/aicli/commands` docs team regression + `internal/team` structured recovery tests
+- 回归：`cmd/aicli/commands` docs team regression + `internal/team` structured recovery tests + local/API complete_task reject/fork residual tests
 
 ### A6. 文档与可观测 — **done（文档主路径 + Agent Source residual）**
 
@@ -744,6 +746,7 @@ off | workspace | read-only | strict
 | 2026-07-26 | R6 收口：ACP `session/load`（`LoadSession=true` + host 内存 reattach / durable resume + 历史 `session/update` 回放）；`docs/aicli/agents.md` / install 同步 |
 | 2026-07-25 | R7 收口：Tool terminal stream 完备度 — `toolprotocol.TerminalStreamWriter` + shell/aicli_exec OutputMirror tee + MCP start/result phase/stream + ACP `tool.progress` content + chat stream render；live-only 合同不变 |
 | 2026-07-26 | A5 residual 收口：`applyStructuredTaskOutcome` 在 complete_task 未满足（session Success=false）时仍解析 structured JSON fallback；blocked/handoff/done 恢复 Success 并走 BlockTask/complete；docs team regression + full `cmd/aicli/commands` / R7 packages green |
+| 2026-07-27 | A5 residual 再收口：普通 `spawn_agent` 拒 `complete_task`（创建 child 前 + migration 提示 `spawn_team`）；fork/route context 强制 `none`；follow-up/resume 用 child-only `SpawnAgentRunMetaFromContext`；local/API residual tests green（`TestLocalActorRegistry_*` / `TestSessionAgentController_*` / toolbroker） |
 | 2026-07-26 | R3 residual 收口：pure advisory（doom-loop / disposition / exploration / runtime_advisory）prompt-only + strip-on-persist；`DurableToolResultPayloads` / `DurableMessagesForPersist`；recovery kinds 仍 durable；`go test ./internal/agent` green |
 | 2026-07-26 | Backtrack Phase 6 residual：frontend Restore 面板 **Backtrack audit**（tombstone 列表/详情接到 `useRuntimeCheckpoints` 已有 audit 数据；Restore tab 徽标；`artifact-panel-shared` helpers + 单测）；见 `docs/plan/session-user-turn-backtrack-plan.md` |
 | 2026-07-26 | Backtrack Phase 6 residual 收口：transcript 内联导航（Esc/↑↓/Enter/双击）+ bubble **Edit** 内联编辑；`resolveSeededBacktrackEditPrompt` seed dialog；plan-mode reload event-key 去重；WIP 拆分指南 `docs/plan/wip-commit-split-guide.md` |

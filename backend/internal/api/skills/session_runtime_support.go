@@ -479,6 +479,11 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
 		return nil, fmt.Errorf("session manager not configured")
 	}
+	normalizedArgs, err := toolbroker.NormalizeOrdinarySpawnAgentArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	args = normalizedArgs
 	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
 	storage := c.handler.sessionManager.GetStorage()
 	if storage == nil {
@@ -573,7 +578,7 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	}
 	queued := false
 	if message := strings.TrimSpace(args.Message); message != "" {
-		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMeta(args)); err != nil {
+		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMetaFromContext(childSession)); err != nil {
 			return nil, err
 		}
 		queued = true
@@ -1395,10 +1400,11 @@ func (c *sessionAgentController) apiAgentRunMeta(ctx context.Context, sessionID 
 	if err != nil || session == nil {
 		return nil
 	}
-	return toolbroker.SpawnAgentRunMeta(toolbroker.SpawnAgentArgs{
-		PermissionMode:        agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
-		CompletionRequirement: agentcontrol.ContextString(session, toolbroker.AgentSessionContextCompletionRequirement),
-	})
+	// Child follow-up/resume must rebuild RunMeta from the child session only.
+	// SpawnAgentRunMetaFromContext forces completion_requirement=none for
+	// ordinary spawn_agent children so a legacy complete_task context value
+	// cannot re-enter the run.
+	return toolbroker.SpawnAgentRunMetaFromContext(session)
 }
 
 func (c *sessionAgentController) deliverAgentMailboxEvent(ctx context.Context, sessionID string, mail team.MailMessage) error {

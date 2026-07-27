@@ -170,7 +170,9 @@ func ReminderKindOf(msg types.Message) string {
 }
 
 // IsPureAdvisoryReminderKind is true for non-recovery, prompt-only advisories.
-// Recovery kinds (completion / stop_hook / plan_mode) stay durable by default.
+// Completion and stop-hook recovery messages stay durable by default. Plan mode
+// is also prompt-only, but is classified separately because its lifecycle is
+// driven by durable plan state and the live permission engine.
 func IsPureAdvisoryReminderKind(kind string) bool {
 	switch NormalizeReminderKind(kind) {
 	case ReminderKindDoomLoop, ReminderKindDispositionReplay, ReminderKindExplorationStall, ReminderKindRuntimeAdvisory:
@@ -208,7 +210,7 @@ func PlanModeReminderBody(planPath string) string {
 
 // planModeSystemReminder returns a one-shot plan-mode reminder when the
 // permission engine is currently in mode=plan. Nil when not in plan mode or
-// when history already carries a plan_mode reminder (avoid multi-turn pile-up).
+// when the current prompt already carries a plan_mode reminder.
 func (loop *ReActLoop) planModeSystemReminder(history []types.Message) *types.Message {
 	if loop == nil || loop.agent == nil {
 		return nil
@@ -225,14 +227,37 @@ func (loop *ReActLoop) planModeSystemReminder(history []types.Message) *types.Me
 		planPath = strings.TrimSpace(engine.PlanWriteAllowPaths[0])
 	}
 	return NewSystemReminderMessage(SystemReminder{
-		Kind:    ReminderKindPlanMode,
-		Body:    PlanModeReminderBody(planPath),
-		Durable: true,
+		Kind: ReminderKindPlanMode,
+		Body: PlanModeReminderBody(planPath),
+		// Plan state and permission mode are durable already. Keeping this model
+		// instruction in chat history would make it survive approve/quit and
+		// incorrectly constrain later implementation turns.
+		Durable: false,
 		Extra: types.Metadata{
 			"plan_mode_reminder": true,
 			"permission_mode":    string(runtimepolicy.ModePlan),
 		},
 	})
+}
+
+// stripPlanModeSystemReminders removes prompt instructions left by an earlier
+// plan-mode turn. A fresh reminder is injected from the live permission engine
+// when plan mode is still active; otherwise the old instruction must not reach
+// the model after approve/quit. The content fallback also cleans legacy
+// reminders persisted before explicit reminder metadata was introduced.
+func stripPlanModeSystemReminders(history []types.Message) []types.Message {
+	if len(history) == 0 {
+		return history
+	}
+	filtered := make([]types.Message, 0, len(history))
+	for _, msg := range history {
+		if IsSystemReminder(msg) &&
+			(ReminderKindOf(msg) == ReminderKindPlanMode || strings.Contains(msg.Content, `kind="plan_mode"`)) {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	return filtered
 }
 
 // historyHasReminderKind reports whether any message is a system-reminder of kind.

@@ -595,6 +595,11 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil || r.Host.SessionHub == nil {
 		return nil, fmt.Errorf("session runtime host is not configured")
 	}
+	normalizedArgs, err := toolbroker.NormalizeOrdinarySpawnAgentArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	args = normalizedArgs
 	sessionID := firstNonEmptyChatValue(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
 	parentSessionID = firstNonEmptyChatValue(strings.TrimSpace(parentSessionID), r.Host.baseRuntimeSessionID())
 
@@ -683,7 +688,7 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 	queued := false
 	if message := strings.TrimSpace(args.Message); message != "" {
-		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMeta(args)); err != nil {
+		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMetaFromContext(childSession)); err != nil {
 			return nil, err
 		}
 		queued = true
@@ -1957,10 +1962,11 @@ func (r *localActorRegistry) localAgentRunMeta(ctx context.Context, sessionID st
 	if err != nil || session == nil {
 		return nil
 	}
-	return toolbroker.SpawnAgentRunMeta(toolbroker.SpawnAgentArgs{
-		PermissionMode:        agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
-		CompletionRequirement: agentcontrol.ContextString(session, toolbroker.AgentSessionContextCompletionRequirement),
-	})
+	// Child follow-up/resume must rebuild RunMeta from the child session only.
+	// SpawnAgentRunMetaFromContext forces completion_requirement=none for
+	// ordinary spawn_agent children so a legacy complete_task context value
+	// cannot re-enter the run.
+	return toolbroker.SpawnAgentRunMetaFromContext(session)
 }
 
 func (r *localActorRegistry) deliverAgentMailboxEvent(ctx context.Context, sessionID string, mail team.MailMessage) error {

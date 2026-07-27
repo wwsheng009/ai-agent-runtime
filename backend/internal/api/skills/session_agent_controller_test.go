@@ -145,6 +145,66 @@ func TestSessionAgentControllerSpawnPersistsRouteContext(t *testing.T) {
 	assert.Equal(t, "bypass_permissions", agentcontrol.ContextString(child, toolbroker.AgentSessionContextPermissionMode))
 }
 
+func TestSessionAgentControllerSpawnRejectsCompleteTaskCompletionRequirement(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-complete-reject")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:                    "api-reject-complete-child",
+		Message:               "inspect",
+		CompletionRequirement: "complete_task",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "use spawn_team")
+
+	_, getErr := sessionManager.Get(ctx, "api-reject-complete-child")
+	require.Error(t, getErr)
+}
+
+func TestSessionAgentController_ForkedChildDropsParentCompleteTaskContext(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-complete-fork")
+	require.NoError(t, err)
+	rootSession.SetContext(toolbroker.AgentSessionContextCompletionRequirement, "complete_task")
+	rootSession.SetContext(toolbroker.AgentSessionContextPermissionMode, "bypass_permissions")
+	require.NoError(t, sessionManager.Update(ctx, rootSession))
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	forkAll := true
+
+	result, err := controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:          "api-fork-none-complete-child",
+		ForkContext: &forkAll,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	child, err := sessionManager.Get(ctx, "api-fork-none-complete-child")
+	require.NoError(t, err)
+	assert.Equal(t, "none", agentcontrol.ContextString(child, toolbroker.AgentSessionContextCompletionRequirement))
+	assert.Equal(t, "bypass_permissions", agentcontrol.ContextString(child, toolbroker.AgentSessionContextPermissionMode))
+
+	runMeta := controller.apiAgentRunMeta(ctx, child.ID)
+	require.NotNil(t, runMeta)
+	assert.Equal(t, "none", runMeta.CompletionRequirement)
+}
+
 func TestSessionAgentControllerSpawnIgnoresProviderAndReasoningWhenRoutingDisabled(t *testing.T) {
 	ctx := context.Background()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)

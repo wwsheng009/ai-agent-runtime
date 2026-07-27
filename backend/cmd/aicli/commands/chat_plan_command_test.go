@@ -219,3 +219,26 @@ func TestApplyChatPlanModeToAgent_ActiveStateForcesPlanPaths(t *testing.T) {
 		t.Fatalf("expected plan write allow paths, got %#v", engine.PlanWriteAllowPaths)
 	}
 }
+
+func TestApplyChatPlanModeToAgent_ExitRestoresLiveEngineMode(t *testing.T) {
+	session := newPlanCommandSession(runtimepolicy.ModeAcceptEdits)
+	if err := enterChatPlanMode(session, "plan.md"); err != nil {
+		t.Fatalf("enter: %v", err)
+	}
+
+	apiAgent := agent.NewAgent(&agent.Config{Name: "plan-mode-exit-test"}, nil)
+	applyChatPlanModeToAgent(apiAgent, session, session.RuntimeSession)
+	engine := apiAgent.GetPermissionEngine()
+	if engine == nil || engine.Mode != runtimepolicy.ModePlan {
+		t.Fatalf("expected live engine in plan mode before exit, got %#v", engine)
+	}
+
+	if err := exitChatPlanMode(session, string(planmode.ExitApprove), ""); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	applyChatPlanModeToAgent(apiAgent, session, session.RuntimeSession)
+
+	if engine.Mode != runtimepolicy.ModeAcceptEdits {
+		t.Fatalf("expected live engine restored to accept_edits, got %s", engine.Mode)
+	}
+}

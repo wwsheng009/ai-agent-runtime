@@ -2195,6 +2195,97 @@ func TestLocalActorRegistry_UsesConfiguredDefaultForkTurns(t *testing.T) {
 	}
 }
 
+func TestLocalActorRegistry_SpawnRejectsCompleteTaskCompletionRequirement(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+
+	_, err = host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:                    "reject-complete-child",
+		Message:               "inspect",
+		CompletionRequirement: "complete_task",
+	})
+	if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+		t.Fatalf("expected actionable complete_task rejection, got %v", err)
+	}
+	if _, getErr := manager.Get(context.Background(), "reject-complete-child"); getErr == nil {
+		t.Fatal("rejected complete_task spawn must not leave a child session")
+	}
+}
+
+func TestLocalActorRegistry_ForkedChildDropsParentCompleteTaskContext(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	rootSession.SetContext(toolbroker.AgentSessionContextCompletionRequirement, "complete_task")
+	rootSession.SetContext(toolbroker.AgentSessionContextPermissionMode, "bypass_permissions")
+	if err := manager.Update(context.Background(), rootSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	forkAll := true
+
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:          "fork-none-complete-child",
+		ForkContext: &forkAll,
+	}); err != nil {
+		t.Fatalf("spawn forked child: %v", err)
+	}
+	child, err := manager.Get(context.Background(), "fork-none-complete-child")
+	if err != nil {
+		t.Fatalf("load forked child: %v", err)
+	}
+	if got := agentcontrol.ContextString(child, toolbroker.AgentSessionContextCompletionRequirement); got != "none" {
+		t.Fatalf("expected forked child completion_requirement=none, got %q", got)
+	}
+	if got := agentcontrol.ContextString(child, toolbroker.AgentSessionContextPermissionMode); got != "bypass_permissions" {
+		t.Fatalf("expected forked child to keep permission mode, got %q", got)
+	}
+	runMeta := host.ActorRegistry.localAgentRunMeta(context.Background(), child.ID)
+	if runMeta == nil || runMeta.CompletionRequirement != "none" {
+		t.Fatalf("expected follow-up/resume run meta to force none, got %+v", runMeta)
+	}
+}
+
 func TestLocalActorRegistry_CloseAgentPathClosesSubtree(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {

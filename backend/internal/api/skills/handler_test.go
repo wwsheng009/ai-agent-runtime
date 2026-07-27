@@ -4902,9 +4902,11 @@ func TestAgentChat_StreamSSE(t *testing.T) {
 func TestAgentChat_StreamSSE_AgentRouteResult(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
+	directRoute := true
 	require.NoError(t, registry.Register(&skill.Skill{
 		Name:        "route-skill",
 		Description: "route streaming test",
+		DirectRoute: &directRoute,
 		Triggers: []skill.Trigger{{
 			Type:   "keyword",
 			Values: []string{"route"},
@@ -4955,9 +4957,11 @@ func TestAgentChat_StreamSSE_AgentRouteResult(t *testing.T) {
 func TestAgentChat_StreamSSE_AgentRouteResult_WithPlanning(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
+	directRoute := true
 	require.NoError(t, registry.Register(&skill.Skill{
 		Name:        "route-plan-skill",
 		Description: "route streaming planning test",
+		DirectRoute: &directRoute,
 		Triggers: []skill.Trigger{{
 			Type:   "keyword",
 			Values: []string{"planroute"},
