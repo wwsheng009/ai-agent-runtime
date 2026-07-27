@@ -468,8 +468,20 @@ func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
 			if term := session.Layout.Terminal(); term != nil {
 				term.CleanupOnExit(true)
 			}
+			printChatExitResumeHint(session)
 		})
 	}
+}
+
+func printChatExitResumeHint(session *ChatSession) {
+	if session == nil || session.Ephemeral || session.runtimeSessionUnpersisted {
+		return
+	}
+	sessionID := strings.TrimSpace(currentRuntimeSessionID(session))
+	if sessionID == "" {
+		return
+	}
+	fmt.Printf("\n下次可使用以下命令恢复当前会话：\n  aicli resume %s\n", sessionID)
 }
 
 func restoreLocalRuntimeHostTeamState(session *ChatSession) {

@@ -1273,16 +1273,27 @@ func cloneLoopConfigForRun(base *agent.LoopReActConfig, routeOverride *RunRouteO
 			MaxIterations:        10,
 		}
 	}
-	// Explicit RunMeta.CompletionRequirement overrides base loop / agentdef defaults.
-	// Team workers set complete_task in TeammateRunner; absent field keeps base/none.
-	if runMeta != nil {
-		if requirement := team.EffectiveCompletionRequirement(runMeta); strings.TrimSpace(runMeta.CompletionRequirement) != "" ||
-			requirement != agent.CompletionRequirementNone {
-			cfg.CompletionRequirement = agent.NormalizeCompletionRequirement(requirement)
+	// complete_task is a Team task terminal protocol, not a reusable session
+	// default. A profile, persisted session, or lightweight spawn_agent RunMeta
+	// may still contain the legacy value, but enforcing it without both TeamID
+	// and CurrentTaskID would require tools that are intentionally hidden outside
+	// an active Team task. Start from none, then accept an explicit per-run Team
+	// assignment injected by TeammateRunner.
+	cfg.CompletionRequirement = agent.CompletionRequirementNone
+	if runMeta != nil && strings.TrimSpace(runMeta.CompletionRequirement) != "" {
+		requirement := agent.NormalizeCompletionRequirement(team.EffectiveCompletionRequirement(runMeta))
+		if requirement != agent.CompletionRequirementCompleteTask || hasBoundTeamTask(runMeta) {
+			cfg.CompletionRequirement = requirement
 		}
 	}
-	cfg.CompletionRequirement = agent.NormalizeCompletionRequirement(cfg.CompletionRequirement)
 	return cfg
+}
+
+func hasBoundTeamTask(runMeta *team.RunMeta) bool {
+	return runMeta != nil &&
+		runMeta.Team != nil &&
+		strings.TrimSpace(runMeta.Team.TeamID) != "" &&
+		strings.TrimSpace(runMeta.Team.CurrentTaskID) != ""
 }
 
 func runRouteOverrideFromRunMeta(runMeta *team.RunMeta) *RunRouteOverride {
@@ -1313,7 +1324,7 @@ func (a *SessionActor) tryRouteSkill(ctx context.Context, prompt string, session
 	if router == nil || executor == nil {
 		return nil, false, nil
 	}
-	routes := router.Route(ctx, prompt)
+	routes := router.RouteDirect(ctx, prompt)
 	if len(routes) == 0 || routes[0] == nil || routes[0].Skill == nil {
 		return nil, false, nil
 	}
@@ -3760,6 +3771,9 @@ func appendSessionActorUsagePayload(payload map[string]interface{}, usage *runti
 	payload["usage_cache_read_reported"] = usage.CacheReadReported || usage.CachedTokens > 0
 	if usage.ReasoningTokens > 0 {
 		payload["usage_reasoning_tokens"] = usage.ReasoningTokens
+	}
+	if source := strings.TrimSpace(usage.UsageSource); source != "" {
+		payload["usage_source"] = source
 	}
 }
 

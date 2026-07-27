@@ -6,23 +6,33 @@ import Prism from "prismjs";
 // Set the global explicitly, then load components in dependency order.
 (globalThis as typeof globalThis & { Prism: typeof Prism }).Prism = Prism;
 
-await import("prismjs/components/prism-markup");
-await import("prismjs/components/prism-css");
-await import("prismjs/components/prism-clike");
-await import("prismjs/components/prism-javascript");
-await import("prismjs/components/prism-markup-templating");
-await import("prismjs/components/prism-bash");
-await import("prismjs/components/prism-diff");
-await import("prismjs/components/prism-go");
-await import("prismjs/components/prism-json");
-await import("prismjs/components/prism-jsx");
-await import("prismjs/components/prism-markdown");
-await import("prismjs/components/prism-powershell");
-await import("prismjs/components/prism-python");
-await import("prismjs/components/prism-sql");
-await import("prismjs/components/prism-typescript");
-await import("prismjs/components/prism-tsx");
-await import("prismjs/components/prism-yaml");
+async function loadPrismLanguages() {
+  await import("prismjs/components/prism-markup");
+  await import("prismjs/components/prism-css");
+  await import("prismjs/components/prism-clike");
+  await import("prismjs/components/prism-javascript");
+  await import("prismjs/components/prism-markup-templating");
+  await import("prismjs/components/prism-bash");
+  await import("prismjs/components/prism-diff");
+  await import("prismjs/components/prism-go");
+  await import("prismjs/components/prism-json");
+  await import("prismjs/components/prism-jsx");
+  await import("prismjs/components/prism-markdown");
+  await import("prismjs/components/prism-powershell");
+  await import("prismjs/components/prism-python");
+  await import("prismjs/components/prism-sql");
+  await import("prismjs/components/prism-typescript");
+  await import("prismjs/components/prism-tsx");
+  await import("prismjs/components/prism-yaml");
+}
+
+// Do not block the Workspace route module with top-level await. Code blocks
+// render a plain-text fallback while the legacy Prism components load, then
+// re-render once the language catalog is ready.
+export const codeHighlightingReady = loadPrismLanguages().then(
+  () => undefined,
+  () => undefined,
+);
 
 export type CodeHighlightSegment = {
   content: string;

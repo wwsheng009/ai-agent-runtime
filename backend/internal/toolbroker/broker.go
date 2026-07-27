@@ -1374,13 +1374,8 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
-		if strings.TrimSpace(request.CompletionRequirement) == "" {
-			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
-				if requirement := strings.TrimSpace(runMeta.CompletionRequirement); requirement != "" {
-					request.CompletionRequirement = requirement
-				}
-			}
-		}
+		// completion_requirement belongs to the spawned child and must never be
+		// copied from the parent run's Team task contract.
 		if strings.TrimSpace(request.CompletionRequirement) == "" && strings.TrimSpace(request.AgentType) != "" {
 			if requirement := resolveSpawnAgentCompletionRequirement(request.AgentType); requirement != "" {
 				request.CompletionRequirement = requirement
@@ -2700,6 +2695,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["auto_replan"].(bool); ok {
 			request.AutoReplan = &value
 		}
+		// Team outcome execution always resolves through an active scoped task.
 		result, meta, err := b.executeReportTaskOutcome(ctx, sessionID, request, team.TaskOutcomeBlocked, false, team.TaskOutcomeBlocked, team.TaskOutcomeHandoff)
 		if err != nil {
 			return nil, nil, err
@@ -2735,6 +2731,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["auto_replan"].(bool); ok {
 			request.AutoReplan = &value
 		}
+		// Team outcome execution always resolves through an active scoped task.
 		return b.executeReportTaskOutcome(ctx, sessionID, request, "", true, team.TaskOutcomeDone, team.TaskOutcomeFailed, team.TaskOutcomeBlocked, team.TaskOutcomeHandoff)
 
 	default:
@@ -3524,6 +3521,55 @@ func (b *Broker) loadScopedTask(ctx context.Context, sessionID, explicitTeamID, 
 		return "", "", nil, fmt.Errorf("task does not belong to team: %s", teamID)
 	}
 	return teamID, agentID, task, nil
+}
+
+// executeStandaloneCompletionOutcome records the structured terminal observation
+// needed by a lightweight spawn_agent completion contract. There is deliberately
+// no team-store mutation here: ordinary spawn_agent children do not own a team
+// task, and their parent consumes the successful tool observation through the
+// agent result/wait_agent lifecycle.
+func executeStandaloneCompletionOutcome(request ReportTaskOutcomeArgs, defaultStatus team.TaskOutcomeStatus, requireStructured bool, allowed ...team.TaskOutcomeStatus) (ReportTaskOutcomeResult, map[string]interface{}, error) {
+	outcome, structured, err := team.NormalizeTaskOutcomeContract(defaultStatus, team.TaskOutcomeContract{
+		Status:    team.TaskOutcomeStatus(request.TaskStatus),
+		Summary:   request.Summary,
+		Blocker:   request.Blocker,
+		HandoffTo: request.HandoffTo,
+	})
+	if err != nil {
+		return ReportTaskOutcomeResult{}, nil, err
+	}
+	if requireStructured && !structured {
+		return ReportTaskOutcomeResult{}, nil, fmt.Errorf("task_status is required")
+	}
+	if err := team.ValidateAllowedTaskOutcomeStatus(outcome, allowed...); err != nil {
+		return ReportTaskOutcomeResult{}, nil, err
+	}
+	result := ReportTaskOutcomeResult{
+		Status:    string(outcome.Status),
+		Outcome:   string(outcome.Status),
+		Summary:   strings.TrimSpace(outcome.Summary),
+		Blocker:   strings.TrimSpace(outcome.Blocker),
+		HandoffTo: strings.TrimSpace(outcome.HandoffTo),
+		ResultRef: strings.TrimSpace(request.ResultRef),
+	}
+	payload := map[string]interface{}{
+		"completion_scope": "agent_session",
+		"status":           result.Status,
+		"outcome":          result.Outcome,
+	}
+	if result.Summary != "" {
+		payload["summary"] = result.Summary
+	}
+	if result.Blocker != "" {
+		payload["blocker"] = result.Blocker
+	}
+	if result.HandoffTo != "" {
+		payload["handoff_to"] = result.HandoffTo
+	}
+	if result.ResultRef != "" {
+		payload["result_ref"] = result.ResultRef
+	}
+	return result, attachCacheSafeSummary(payload, reportTaskOutcomeCacheSafeSummary(result)), nil
 }
 
 func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string, request ReportTaskOutcomeArgs, defaultStatus team.TaskOutcomeStatus, requireStructured bool, allowed ...team.TaskOutcomeStatus) (ReportTaskOutcomeResult, map[string]interface{}, error) {

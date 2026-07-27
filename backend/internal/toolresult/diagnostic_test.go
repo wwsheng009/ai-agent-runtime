@@ -1,6 +1,7 @@
 package toolresult
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -24,6 +25,218 @@ func TestDiagnoseFailureUsesStructuredMetadataAndAction(t *testing.T) {
 	}
 	if !strings.HasPrefix(diagnostic.NextAction, "Use the") {
 		t.Fatalf("expected precise id recovery action, got %q", diagnostic.NextAction)
+	}
+}
+
+func TestDiagnoseAttachesStaleViewHints(t *testing.T) {
+	snippet := "\tfunc Hello() {\n\t\treturn 1\n\t}\n"
+	diagnostic := Diagnose("edit", "call-stale-hints", "old_string 未在文件中找到", map[string]interface{}{
+		"error_code":                 string(runtimeerrors.ErrToolStaleContext),
+		"failure_class":              "stale_context",
+		"file_path":                  "snippet.go",
+		"suggested_view_offset":      12,
+		"suggested_view_limit":       40,
+		"current_snippet":            snippet,
+		"current_snippet_start_line": 13,
+		"next_action":                "STALE_CONTEXT: copy current_snippet then retry",
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT", diagnostic.ErrorCode)
+	}
+	if diagnostic.FilePath != "snippet.go" {
+		t.Fatalf("file_path=%q", diagnostic.FilePath)
+	}
+	if diagnostic.SuggestedViewOffset == nil || *diagnostic.SuggestedViewOffset != 12 {
+		t.Fatalf("suggested_view_offset=%v", diagnostic.SuggestedViewOffset)
+	}
+	if diagnostic.SuggestedViewLimit == nil || *diagnostic.SuggestedViewLimit != 40 {
+		t.Fatalf("suggested_view_limit=%v", diagnostic.SuggestedViewLimit)
+	}
+	if diagnostic.CurrentSnippetStartLine == nil || *diagnostic.CurrentSnippetStartLine != 13 {
+		t.Fatalf("current_snippet_start_line=%v", diagnostic.CurrentSnippetStartLine)
+	}
+	// Must preserve leading tab indent — TrimSpace would break copy-paste rebuild.
+	if diagnostic.CurrentSnippet != snippet {
+		t.Fatalf("current_snippet=%q want exact %q", diagnostic.CurrentSnippet, snippet)
+	}
+}
+
+func TestDiagnoseCapsOversizedCurrentSnippet(t *testing.T) {
+	// Oversized multi-line snippet must stay under contract budget and drop the
+	// tail on whole-line boundaries (no mid-line cut when multiple lines fit).
+	var lines []string
+	// ~80 chars/line * 120 lines >> 4KiB budget.
+	pad := strings.Repeat("x", 64)
+	for i := 0; i < 120; i++ {
+		lines = append(lines, fmt.Sprintf("\tline_%03d = %s", i, pad))
+	}
+	huge := strings.Join(lines, "\n")
+	if len(huge) <= maxCurrentSnippetContractBytes {
+		t.Fatalf("test fixture too small: len=%d budget=%d", len(huge), maxCurrentSnippetContractBytes)
+	}
+	diagnostic := Diagnose("edit", "call-big-snip", "old_string 未在文件中找到", map[string]interface{}{
+		"error_code":      string(runtimeerrors.ErrToolStaleContext),
+		"current_snippet": huge,
+	})
+	if diagnostic.CurrentSnippet == "" {
+		t.Fatal("expected capped current_snippet")
+	}
+	if len(diagnostic.CurrentSnippet) > maxCurrentSnippetContractBytes {
+		t.Fatalf("capped snippet len=%d over budget %d", len(diagnostic.CurrentSnippet), maxCurrentSnippetContractBytes)
+	}
+	if strings.Contains(diagnostic.CurrentSnippet, "line_119") {
+		t.Fatalf("expected oversized tail dropped, got tail present in %q", diagnostic.CurrentSnippet[len(diagnostic.CurrentSnippet)-40:])
+	}
+	if !strings.Contains(diagnostic.CurrentSnippet, "line_000") {
+		t.Fatalf("expected head lines retained, got %q", diagnostic.CurrentSnippet[:80])
+	}
+	// Whole-line cap: every retained line should still be complete.
+	for _, line := range strings.Split(diagnostic.CurrentSnippet, "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "\tline_") || !strings.HasSuffix(line, pad) {
+			t.Fatalf("expected complete padded line, got %q", line)
+		}
+	}
+}
+
+func TestDiagnosePrefersNestedAuthoredNextActionForStaleContext(t *testing.T) {
+	// Historical / pre-promotion payloads may only carry recovery fields under
+	// tool_metadata. Diagnose must not fall back to generic STALE_CONTEXT text
+	// when the tool already authored a specific next_action.
+	authored := "STALE_CONTEXT: re-view offset 12 first; do not replay the same old_string."
+	diagnostic := Diagnose("edit", "call-stale", "old_string 未在文件中找到", map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			"error_code":            string(runtimeerrors.ErrToolStaleContext),
+			"retryable":             false,
+			"failure_class":         "stale_context",
+			"suggested_view_offset": 12,
+			"next_action":           authored,
+		},
+	})
+	if diagnostic.OK {
+		t.Fatal("expected failed diagnostic")
+	}
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT", diagnostic.ErrorCode)
+	}
+	if diagnostic.Retryable {
+		t.Fatalf("STALE_CONTEXT must not be retryable: %#v", diagnostic)
+	}
+	if diagnostic.NextAction != authored {
+		t.Fatalf("expected nested authored next_action, got %q", diagnostic.NextAction)
+	}
+	if diagnostic.SuggestedViewOffset == nil || *diagnostic.SuggestedViewOffset != 12 {
+		t.Fatalf("expected nested suggested_view_offset=12, got %v", diagnostic.SuggestedViewOffset)
+	}
+}
+
+func TestDiagnoseRefinesGenericToolExecutionToStaleContextFromMessage(t *testing.T) {
+	// Live chat-logs from pre-promotion / older binaries often stamp
+	// error_code=TOOL_EXECUTION + generic next_action while the body is clearly
+	// an edit old_string miss. Diagnose must refine to STALE_CONTEXT so
+	// tool.completed / offline efficiency stop counting bare TOOL_EXECUTION.
+	diagnostic := Diagnose(
+		"edit",
+		"call-edit-miss",
+		"old_string 未在文件中找到；edit 只执行精确匹配（包括空格、缩进和换行），不会自动模糊定位。",
+		map[string]interface{}{
+			"error_code":  string(runtimeerrors.ErrToolExecution),
+			"retryable":   true,
+			"next_action": DefaultToolExecutionNextAction,
+		},
+	)
+	if diagnostic.OK {
+		t.Fatal("expected failed diagnostic")
+	}
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT; diagnostic=%#v", diagnostic.ErrorCode, diagnostic)
+	}
+	if diagnostic.Retryable {
+		t.Fatalf("refined STALE_CONTEXT must not be retryable: %#v", diagnostic)
+	}
+	if !strings.Contains(diagnostic.NextAction, "stale") && !strings.Contains(strings.ToLower(diagnostic.NextAction), "re-read") &&
+		!strings.Contains(diagnostic.NextAction, "view") {
+		t.Fatalf("expected stale recovery next_action, got %q", diagnostic.NextAction)
+	}
+}
+
+func TestDiagnoseRefinesGenericToolExecutionToStaleContextFromFailureClass(t *testing.T) {
+	diagnostic := Diagnose("apply_patch", "call-hunk", "patch apply failed", map[string]interface{}{
+		"error_code":    string(runtimeerrors.ErrToolExecution),
+		"failure_class": "stale_context",
+		"next_action":   DefaultToolExecutionNextAction,
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT from failure_class; %#v", diagnostic.ErrorCode, diagnostic)
+	}
+	if diagnostic.Retryable {
+		t.Fatalf("STALE_CONTEXT must not be retryable")
+	}
+}
+
+func TestDiagnoseDoesNotDemoteSpecificStructuredCode(t *testing.T) {
+	// Specific tool-authored codes win even if the message looks like something else.
+	// Non-edit tools (bash) must keep TOOL_TIMEOUT even if body mentions old_string.
+	diagnostic := Diagnose("bash", "call-timeout", "old_string 未在文件中找到", map[string]interface{}{
+		"error_code": string(runtimeerrors.ErrToolTimeout),
+		"retryable":  true,
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolTimeout) {
+		t.Fatalf("specific TOOL_TIMEOUT must not be demoted, got %q", diagnostic.ErrorCode)
+	}
+	if !diagnostic.Retryable {
+		t.Fatalf("authored retryable=true for timeout must stick")
+	}
+}
+
+func TestDiagnoseRefinesMislabeledTimeoutOnEditStaleBody(t *testing.T) {
+	// Live residual: edit old_string miss body embeds map keys like TOOL_TIMEOUT /
+	// "timeout", and some export paths stamped error_code=TOOL_TIMEOUT + timeout next_action.
+	// Models then follow timeout recovery instead of STALE current_snippet rebuild.
+	body := "old_string 未在文件中找到；edit 只执行精确匹配。 最接近片段: \"TOOL_TIMEOUT\": \"timeout\",\n    \"TOOL_PATH_NOT_FOUND\": \"path_missing\""
+	diagnostic := Diagnose("edit", "call-edit-timeout-mislabeled", body, map[string]interface{}{
+		"error_code":  string(runtimeerrors.ErrToolTimeout),
+		"retryable":   true,
+		"next_action": "Code search timed out. Prefer toolkit grep with a narrower path.",
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT; diagnostic=%#v", diagnostic.ErrorCode, diagnostic)
+	}
+	if diagnostic.Retryable {
+		t.Fatalf("refined STALE_CONTEXT must not be retryable: %#v", diagnostic)
+	}
+	if strings.Contains(strings.ToLower(diagnostic.NextAction), "timed out") ||
+		strings.Contains(strings.ToLower(diagnostic.NextAction), "timeout") {
+		t.Fatalf("timeout next_action must not stick after STALE refine, got %q", diagnostic.NextAction)
+	}
+	if !strings.Contains(diagnostic.NextAction, "STALE_CONTEXT") &&
+		!strings.Contains(strings.ToLower(diagnostic.NextAction), "stale") &&
+		!strings.Contains(strings.ToLower(diagnostic.NextAction), "old_string") &&
+		!strings.Contains(strings.ToLower(diagnostic.NextAction), "view") {
+		t.Fatalf("expected STALE recovery next_action, got %q", diagnostic.NextAction)
+	}
+}
+
+func TestDiagnoseRefinesMislabeledPathOnEditStaleBody(t *testing.T) {
+	body := "old_string 未在文件中找到；已尝试 CRLF/LF。 最接近片段: \"path_missing\" / no such file"
+	diagnostic := Diagnose("edit", "call-edit-path-mislabeled", body, map[string]interface{}{
+		"error_code": string(runtimeerrors.ErrToolPathNotFound),
+		"retryable":  false,
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT; %#v", diagnostic.ErrorCode, diagnostic)
+	}
+}
+
+func TestClassifyToolErrorCodePrefersStaleOverTimeoutInSnippet(t *testing.T) {
+	// Without structured code, message-only classification must still prefer STALE
+	// when the body is an old_string miss even if closest snippet mentions timeout.
+	msg := "old_string 未在文件中找到；最接近片段: ERROR_CODE_TO_CATEGORY timeout TOOL_TIMEOUT"
+	code := classifyToolErrorCode(msg)
+	if code != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("classify=%q want STALE_CONTEXT", code)
 	}
 }
 
@@ -61,6 +274,120 @@ func TestApplyDiagnosticMetadata(t *testing.T) {
 	}
 }
 
+func TestApplyDiagnosticMetadataPromotesStaleRecoveryFields(t *testing.T) {
+	snippet := "\tfunc Hello() {\n\t\treturn 1\n\t}"
+	diagnostic := Diagnose("edit", "call-stale-promote", "old_string 未在文件中找到", map[string]interface{}{
+		"error_code":                 string(runtimeerrors.ErrToolStaleContext),
+		"failure_class":              "stale_context",
+		"file_path":                  "snippet.go",
+		"suggested_view_offset":      12,
+		"suggested_view_limit":       40,
+		"current_snippet":            snippet,
+		"current_snippet_start_line": 13,
+		"next_action":                "STALE_CONTEXT: copy current_snippet then retry",
+	})
+	// Simulate a stripped export that only kept disposition codes.
+	metadata := map[string]interface{}{
+		"error_code": string(runtimeerrors.ErrToolStaleContext),
+	}
+	ApplyDiagnosticMetadata(metadata, diagnostic)
+	if got, _ := metadata["current_snippet"].(string); got != snippet {
+		t.Fatalf("current_snippet=%q want exact %q", got, snippet)
+	}
+	if got, _ := metadata["file_path"].(string); got != "snippet.go" {
+		t.Fatalf("file_path=%q", got)
+	}
+	if offset, ok := metadata["suggested_view_offset"].(int); !ok || offset != 12 {
+		t.Fatalf("suggested_view_offset=%#v", metadata["suggested_view_offset"])
+	}
+	if start, ok := metadata["current_snippet_start_line"].(int); !ok || start != 13 {
+		t.Fatalf("current_snippet_start_line=%#v", metadata["current_snippet_start_line"])
+	}
+}
+
+func TestDiagnoseParsesClosestSnippetFromErrorBody(t *testing.T) {
+	// Live residual: pre-promotion chat-logs only embed closest lines in error text.
+	body := "old_string 未在文件中找到；edit 只执行精确匹配。\n" +
+		"建议从第 30 行附近用 view 重读（suggested_view_offset=29）。\n" +
+		"最接近的当前内容（第 30 行附近，可直接据此重建 old_string）:\n" +
+		"    30|\tcase toolresult.OutcomeFailed:\n" +
+		"    31|\t\tif code == string(errors.ErrToolStaleContext) {\n" +
+		"next_action: 优先用上方“最接近的当前内容”\n" +
+		"old_string 预览: \"stale\""
+	diagnostic := Diagnose("edit", "call-parse-snip", body, map[string]interface{}{
+		"error_code": string(runtimeerrors.ErrToolExecution),
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%q want STALE_CONTEXT", diagnostic.ErrorCode)
+	}
+	if !strings.Contains(diagnostic.CurrentSnippet, "case toolresult.OutcomeFailed") {
+		t.Fatalf("expected parsed current_snippet, got %q", diagnostic.CurrentSnippet)
+	}
+	if !strings.Contains(diagnostic.CurrentSnippet, "\tcase") {
+		t.Fatalf("expected leading tab preserved in snippet, got %q", diagnostic.CurrentSnippet)
+	}
+	if diagnostic.SuggestedViewOffset == nil || *diagnostic.SuggestedViewOffset != 29 {
+		t.Fatalf("suggested_view_offset=%v want 29", diagnostic.SuggestedViewOffset)
+	}
+	if diagnostic.CurrentSnippetStartLine == nil || *diagnostic.CurrentSnippetStartLine != 30 {
+		t.Fatalf("current_snippet_start_line=%v want 30", diagnostic.CurrentSnippetStartLine)
+	}
+
+	// Also promote onto metadata for chat-log export.
+	meta := map[string]interface{}{}
+	ApplyDiagnosticMetadata(meta, diagnostic)
+	if snip, _ := meta["current_snippet"].(string); !strings.Contains(snip, "OutcomeFailed") {
+		t.Fatalf("promoted current_snippet missing: %#v", meta["current_snippet"])
+	}
+}
+
+func TestParseClosestSnippetFromQuotedFragment(t *testing.T) {
+	body := `old_string 未在文件中找到。 最接近片段: "\tcase toolresult.OutcomeFailed:\n\t\tif code == \"STALE_CONTEXT\" {" next_action: view`
+	snip, start := parseClosestSnippetFromErrorMessage(body)
+	if !strings.Contains(snip, "case toolresult.OutcomeFailed") {
+		t.Fatalf("snippet=%q", snip)
+	}
+	if !strings.HasPrefix(snip, "\tcase") {
+		t.Fatalf("expected tab indent, got %q", snip)
+	}
+	if start != 0 {
+		t.Fatalf("quoted form has no line number, start=%d", start)
+	}
+}
+
+func TestParseClosestSnippetFromTruncatedQuotedFragment(t *testing.T) {
+	// Historical binaries mid-line-truncated %q closest (no closing quote).
+	// Offline rehydrate / Diagnose must still recover a usable partial snippet.
+	body := "old_string 未在文件中找到；edit 只执行精确匹配（包括空格、缩进和换行），不会自动模糊定位。 " +
+		`最接近片段: "\tEventRewindStarted           = \"rewind_started\"\n\tEventRewindFinished          = \"rewind_fin`
+	snip, start := parseClosestSnippetFromErrorMessage(body)
+	if !strings.Contains(snip, "EventRewindStarted") {
+		t.Fatalf("expected partial snippet recovery, got %q", snip)
+	}
+	if !strings.Contains(snip, "EventRewindFinished") {
+		t.Fatalf("expected second line of truncated quote, got %q", snip)
+	}
+	if start != 0 {
+		t.Fatalf("quoted form has no line number, start=%d", start)
+	}
+}
+
+func TestParseClosestSnippetRejectsProseMentionOfClosestMarker(t *testing.T) {
+	// Live residual: apply_patch bodies often only have next_action prose that
+	// quotes “最接近的当前内容”, then dump 期望内容 (model-intended old lines).
+	// That must not rehydrate as current_snippet — it is not file current text.
+	body := "更新文件 foo.go 失败: 无法定位 hunk: @@；未找到期望旧内容。" +
+		"next_action: 先用 view/grep 重读目标文件附近最新内容，按返回的“最接近的当前内容”重建补丁" +
+		"（一次只改一个文件/区域）；不要原样重试同一 stale @@/旧行。\n" +
+		"期望内容:\n" +
+		"func (c *Controller) selectCandidates(\n" +
+		"\tctx context.Context,\n"
+	snip, start := parseClosestSnippetFromErrorMessage(body)
+	if snip != "" || start != 0 {
+		t.Fatalf("expected empty snippet for prose-only mention, got snip=%q start=%d", snip, start)
+	}
+}
+
 func TestDiagnoseClassifiesCommonRecoveryModes(t *testing.T) {
 	testCases := []struct {
 		name      string
@@ -89,6 +416,69 @@ func TestDiagnoseClassifiesCommonRecoveryModes(t *testing.T) {
 			}
 			if diagnostic.NextAction == "" {
 				t.Fatalf("expected next action for %q", tc.message)
+			}
+		})
+	}
+}
+
+func TestDiagnoseChineseToolkitInvalidArgsNextAction(t *testing.T) {
+	testCases := []struct {
+		name           string
+		tool           string
+		message        string
+		wantNextSubstr string
+	}{
+		{
+			name:           "pattern missing",
+			tool:           "grep",
+			message:        "pattern 参数缺失或无效",
+			wantNextSubstr: "Provide every required argument",
+		},
+		{
+			name:           "file_path missing",
+			tool:           "edit",
+			message:        "file_path 参数缺失或无效",
+			wantNextSubstr: "Provide every required argument",
+		},
+		{
+			name:           "content missing empty",
+			tool:           "write",
+			message:        "content 参数缺失或为空",
+			wantNextSubstr: "Provide every required argument",
+		},
+		{
+			name:           "command not string",
+			tool:           "shell",
+			message:        "command 参数缺失或不是字符串",
+			wantNextSubstr: "Provide every required argument",
+		},
+		{
+			name:           "type invalid",
+			tool:           "write",
+			message:        "参数类型错误: content",
+			wantNextSubstr: "argument value types",
+		},
+		{
+			name:           "apply_patch illegal hunk",
+			tool:           "apply_patch",
+			message:        "第 41 行不是合法的 hunk 内容: *** Begin Patch\",",
+			wantNextSubstr: "argument",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			diagnostic := Diagnose(tc.tool, "call-zh-args", tc.message, nil)
+			if diagnostic.ErrorCode != string(runtimeerrors.ErrToolInvalidArgs) {
+				t.Fatalf("error_code=%q want TOOL_INVALID_ARGS; diagnostic=%#v", diagnostic.ErrorCode, diagnostic)
+			}
+			if !strings.Contains(diagnostic.NextAction, tc.wantNextSubstr) {
+				t.Fatalf("next_action %q missing %q", diagnostic.NextAction, tc.wantNextSubstr)
+			}
+			if strings.Contains(diagnostic.NextAction, "Inspect the error details") {
+				t.Fatalf("must not fall back to generic execution next_action: %q", diagnostic.NextAction)
+			}
+			if diagnostic.Retryable {
+				t.Fatalf("invalid args must not be blindly retryable: %#v", diagnostic)
 			}
 		})
 	}

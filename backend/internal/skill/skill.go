@@ -36,7 +36,8 @@ type Skill struct {
 	Tags         []string `yaml:"tags" json:"tags"`
 
 	// 触发规则
-	Triggers []Trigger `yaml:"triggers" json:"triggers"`
+	Triggers    []Trigger `yaml:"triggers" json:"triggers"`
+	DirectRoute *bool     `yaml:"directRoute,omitempty" json:"directRoute,omitempty"`
 
 	// 工具列表 (引用 MCP tools)
 	Tools []string `yaml:"tools" json:"tools"`
@@ -114,6 +115,20 @@ func (s *Skill) HasWorkflow() bool {
 // HasCustomHandler 检查是否有自定义处理器
 func (s *Skill) HasCustomHandler() bool {
 	return s.Handler != nil
+}
+
+// AllowsDirectRoute reports whether a matched skill may run before the LLM.
+// Tool workflows default to false because an incidental keyword match must not
+// turn the complete user prompt into tool arguments. Prompt-only and custom
+// handler skills retain the historical direct-routing behavior.
+func (s *Skill) AllowsDirectRoute() bool {
+	if s == nil {
+		return false
+	}
+	if s.DirectRoute != nil {
+		return *s.DirectRoute
+	}
+	return !s.HasWorkflow()
 }
 
 // SetSource 设置技能来源信息

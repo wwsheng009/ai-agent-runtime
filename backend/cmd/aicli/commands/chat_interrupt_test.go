@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -347,6 +349,82 @@ func TestInterruptActiveRunsStopsBaseSessionActor(t *testing.T) {
 	if actorState == nil || actorState.Status != runtimechat.SessionStopped {
 		t.Fatalf("expected base actor stopped state, got %+v", actorState)
 	}
+	if !actor.IsStopped() {
+		t.Fatal("expected interrupted base actor to be fully stopped")
+	}
+	if _, ok := hub.Get("session-1"); ok {
+		t.Fatal("expected interrupted actor to be removed from hub so the next prompt recreates it")
+	}
+}
+
+func TestInterruptActiveRunsReleasesSessionLease(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+	const sessionID = "session-lease-1"
+	const ownerID = "test-owner-interrupt-lease"
+
+	hub := runtimechat.NewSessionHub(func(id string) (*runtimechat.SessionActor, error) {
+		handle, err := runtimechat.AcquireSessionLease(ctx, runtimeStore, runtimechat.LeaseRequest{
+			SessionID: id,
+			OwnerID:   ownerID,
+			OwnerKind: "test",
+			TTL:       time.Minute,
+		})
+		if err != nil {
+			return nil, err
+		}
+		llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+			DefaultProvider: "mock",
+			DefaultModel:    "mock-model",
+		})
+		provider := runtimellm.NewMockProvider("mock", 0)
+		if err := llmRuntime.RegisterProvider("mock", provider); err != nil {
+			_ = handle.Release(context.Background())
+			return nil, err
+		}
+		a := agent.NewAgentWithLLM(&agent.Config{
+			Name:     "lease-test-actor",
+			Provider: "mock",
+			Model:    "mock-model",
+			MaxSteps: 1,
+		}, nil, llmRuntime)
+		return runtimechat.NewSessionActor(id, runtimechat.SessionActorConfig{
+			Agent:      a,
+			LLMRuntime: llmRuntime,
+			OnStop: func() {
+				_ = handle.Release(context.Background())
+			},
+		})
+	})
+	host := &localChatRuntimeHost{
+		SessionHub:   hub,
+		RuntimeStore: runtimeStore,
+	}
+	t.Cleanup(hub.StopAll)
+
+	if _, err := hub.GetOrCreate(sessionID); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	lease, err := runtimeStore.GetLease(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("GetLease before interrupt: %v", err)
+	}
+	if lease == nil || lease.OwnerID != ownerID {
+		t.Fatalf("expected active lease before interrupt, got %+v", lease)
+	}
+
+	host.interruptActiveRuns(ctx, sessionID, "", "")
+
+	lease, err = runtimeStore.GetLease(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("GetLease after interrupt: %v", err)
+	}
+	if lease != nil {
+		t.Fatalf("expected lease released after interrupt stop, got %+v", lease)
+	}
+	if _, ok := hub.Get(sessionID); ok {
+		t.Fatal("expected interrupted leased actor to be removed from hub")
+	}
 }
 
 func TestWaitForInterruptCleanupWaitsForConcurrentCleanups(t *testing.T) {
@@ -374,6 +452,54 @@ func TestWaitForInterruptCleanupWaitsForConcurrentCleanups(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cleanup wait did not return after all cleanups completed")
 	}
+}
+
+func TestWaitForInterruptCleanupReturnsAfterHardTimeout(t *testing.T) {
+	session := &ChatSession{}
+	stuck := make(chan struct{})
+	session.setInterruptCleanup(stuck)
+
+	started := time.Now()
+	session.waitForInterruptCleanupWithin(30 * time.Millisecond)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("cleanup hard timeout returned too slowly: %s", elapsed)
+	}
+
+	session.interruptCleanupMu.Lock()
+	defer session.interruptCleanupMu.Unlock()
+	if session.interruptCleanupDone != nil {
+		t.Fatal("expected timed-out cleanup signal to be detached")
+	}
+}
+
+func TestTimedOutInterruptCleanupDoesNotReplaceNewCleanup(t *testing.T) {
+	session := &ChatSession{}
+	stuck := make(chan struct{})
+	session.setInterruptCleanup(stuck)
+
+	waited := make(chan struct{})
+	go func() {
+		session.waitForInterruptCleanupWithin(40 * time.Millisecond)
+		close(waited)
+	}()
+	time.Sleep(10 * time.Millisecond)
+	newer := make(chan struct{})
+	session.setInterruptCleanup(newer)
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup wait did not return after its hard timeout")
+	}
+
+	session.interruptCleanupMu.Lock()
+	current := session.interruptCleanupDone
+	session.interruptCleanupMu.Unlock()
+	if current == nil {
+		t.Fatal("expected a newer cleanup signal to remain registered")
+	}
+	close(stuck)
+	close(newer)
+	session.waitForInterruptCleanupWithin(time.Second)
 }
 
 func TestInterruptActiveRunsStopsNestedChildAgentState(t *testing.T) {

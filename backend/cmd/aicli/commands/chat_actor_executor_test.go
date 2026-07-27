@@ -7,6 +7,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func TestRenderAsyncTeamLaunchNotice_RendersForNewRunningTeam(t *testing.T) {
@@ -108,5 +109,23 @@ func TestCurrentRunMetaForSession_PreservesExplicitActiveTeamWithoutTeamStore(t 
 	}
 	if runMeta.Team.TeamID != "team-explicit" || runMeta.Team.AgentID != "mate-1" || runMeta.Team.CurrentTaskID != "task-1" {
 		t.Fatalf("unexpected explicit active team run meta: %+v", runMeta.Team)
+	}
+}
+
+func TestCurrentRunMetaForSession_IncludesCompletionRequirementFromRuntimeContext(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "child-session"},
+	}
+	session.RuntimeSession.SetContext(toolbroker.AgentSessionContextCompletionRequirement, "complete_task")
+
+	runMeta := currentRunMetaForSession(session)
+	if runMeta == nil {
+		t.Fatalf("expected run meta for completion requirement")
+	}
+	if runMeta.CompletionRequirement != "complete_task" {
+		t.Fatalf("expected completion requirement to be propagated, got %+v", runMeta)
+	}
+	if runMeta.Team != nil {
+		t.Fatalf("ordinary child session should not gain team run meta, got %+v", runMeta.Team)
 	}
 }

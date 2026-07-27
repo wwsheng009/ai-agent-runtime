@@ -8,7 +8,8 @@ import { Link } from "react-router-dom";
 
 import { Section } from "@/components/landing/section";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
+import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 export function CommunitySection() {
@@ -78,16 +79,18 @@ export function CommunitySection() {
             </div>
           </div>
           <div className="mt-6 flex flex-wrap gap-3">
-            <Link to="/workspace">
-              <Button variant="primary" size="md">
-                <SparklesIcon size={16} />
-                {t("community.launchWorkspace")}
-              </Button>
+            <Link
+              to="/workspace"
+              className={cn(buttonVariants({ variant: "primary", size: "md" }))}
+            >
+              <SparklesIcon size={16} />
+              {t("community.launchWorkspace")}
             </Link>
-            <a href="#product-highlights">
-              <Button variant="secondary" size="md">
-                {t("community.browseHighlights")}
-              </Button>
+            <a
+              href="#product-highlights"
+              className={cn(buttonVariants({ variant: "secondary", size: "md" }))}
+            >
+              {t("community.browseHighlights")}
             </a>
           </div>
         </div>

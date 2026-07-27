@@ -2,7 +2,8 @@ import { ArrowRightIcon, BookOpenIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
+import { cn } from "@/lib/utils";
 
 export function LandingFooter() {
   const { t } = useTranslation("landing");
@@ -17,17 +18,19 @@ export function LandingFooter() {
           {t("footer.body")}
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-          <Link to="/workspace">
-            <Button variant="primary" size="md">
-              {t("footer.openWorkspace")}
-              <ArrowRightIcon size={16} />
-            </Button>
+          <Link
+            to="/workspace"
+            className={cn(buttonVariants({ variant: "primary", size: "md" }))}
+          >
+            {t("footer.openWorkspace")}
+            <ArrowRightIcon size={16} />
           </Link>
-          <a href="#product-highlights">
-            <Button variant="secondary" size="md">
-              <BookOpenIcon size={16} />
-              {t("footer.viewProductHighlights")}
-            </Button>
+          <a
+            href="#product-highlights"
+            className={cn(buttonVariants({ variant: "secondary", size: "md" }))}
+          >
+            <BookOpenIcon size={16} />
+            {t("footer.viewProductHighlights")}
           </a>
         </div>
       </div>

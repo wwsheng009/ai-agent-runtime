@@ -76,6 +76,19 @@ type Diagnostic struct {
 	// FailedItems lists compact failed batch entries so the model can re-run only
 	// those items. Prefer indexes/paths/errors already present in tool metadata.
 	FailedItems []FailedItem `json:"failed_items,omitempty"`
+	// FilePath is the primary target path for stale/path recovery when authored.
+	FilePath string `json:"file_path,omitempty"`
+	// SuggestedViewOffset is a 0-based view offset hint for STALE_CONTEXT recovery.
+	SuggestedViewOffset *int `json:"suggested_view_offset,omitempty"`
+	// SuggestedViewLimit is the recommended view window size with SuggestedViewOffset.
+	SuggestedViewLimit *int `json:"suggested_view_limit,omitempty"`
+	// CurrentSnippetStartLine is the 1-based line of current_snippet when present.
+	CurrentSnippetStartLine *int `json:"current_snippet_start_line,omitempty"`
+	// CurrentSnippet is the exact current file window for STALE recovery so the
+	// model can rebuild old_string/@@ without an extra view when the contract is
+	// the only durable structured surface (body error text may truncate).
+	// Cap applied in attachRecoveryHints to keep model contracts bounded.
+	CurrentSnippet string `json:"current_snippet,omitempty"`
 }
 
 // FailedItem is one failed entry from a multi-item tool invocation.
@@ -104,21 +117,66 @@ func Diagnose(toolName, toolCallID, toolErr string, metadata map[string]interfac
 	}
 
 	structuredCode := strings.TrimSpace(diagnosticString(metadata, MetadataErrorCodeKey))
-	if knownRuntimeErrorCode(structuredCode) {
-		diagnostic.ErrorCode = structuredCode
-	} else {
-		diagnostic.ErrorCode = classifyToolErrorCode(toolErr)
+	messageCode := classifyToolErrorCode(toolErr)
+	// Prefer tool-authored structured codes, but refine generic TOOL_EXECUTION
+	// when message / failure_class evidence yields a more specific recovery code
+	// (historical chat-logs and partial promotion paths often stamp TOOL_EXECUTION
+	// while the body is clearly STALE_CONTEXT / PATH_NOT_FOUND / …).
+	// Also correct a small class of mislabels where edit/apply_patch STALE bodies
+	// were stamped TIMEOUT/PATH because closest snippets mention those words.
+	switch {
+	case knownRuntimeErrorCode(structuredCode) && !isGenericToolExecutionCode(structuredCode):
+		if refined := refineMislabeledStructuredCode(diagnostic.ToolName, structuredCode, messageCode, metadata, toolErr); refined != "" {
+			diagnostic.ErrorCode = refined
+		} else {
+			diagnostic.ErrorCode = structuredCode
+		}
+	case knownRuntimeErrorCode(structuredCode) && isGenericToolExecutionCode(structuredCode):
+		if refined := refineGenericToolExecutionCode(structuredCode, messageCode, metadata, toolErr); refined != "" {
+			diagnostic.ErrorCode = refined
+		} else {
+			diagnostic.ErrorCode = structuredCode
+		}
+	default:
+		if refined := refineGenericToolExecutionCode("", messageCode, metadata, toolErr); refined != "" {
+			diagnostic.ErrorCode = refined
+		} else {
+			diagnostic.ErrorCode = messageCode
+		}
 	}
+	refinedFromStructured := knownRuntimeErrorCode(structuredCode) &&
+		diagnostic.ErrorCode != "" &&
+		diagnostic.ErrorCode != structuredCode
 	if retryable, ok := diagnosticBool(metadata, MetadataRetryableKey); ok {
-		diagnostic.Retryable = retryable
+		// Authored retryable wins, except when a more specific non-retryable
+		// recovery code was refined from a generic TOOL_EXECUTION stamp or a
+		// mislabeled TIMEOUT/PATH was corrected to STALE_CONTEXT.
+		if (isGenericToolExecutionCode(structuredCode) || refinedFromStructured) &&
+			!isGenericToolExecutionCode(diagnostic.ErrorCode) &&
+			!retryableToolErrorCode(diagnostic.ErrorCode) {
+			diagnostic.Retryable = false
+		} else {
+			diagnostic.Retryable = retryable
+		}
 	} else {
 		diagnostic.Retryable = retryableToolErrorCode(diagnostic.ErrorCode)
 	}
 	// Prefer metadata-authored next_action; otherwise derive from error code and
 	// message patterns (shell/exit failures need message-aware recovery text).
-	explicitNext := strings.TrimSpace(diagnosticTopLevelString(metadata, MetadataNextActionKey)) != ""
+	// Prefer top-level, then nested tool_metadata (pre-promotion / historical payloads).
+	// When we refined a generic TOOL_EXECUTION into a specific recovery code,
+	// ignore generic default next_action so models get STALE_CONTEXT guidance.
+	// Same for mislabeled TIMEOUT/PATH that we corrected to STALE.
+	authoredNext := strings.TrimSpace(diagnosticString(metadata, MetadataNextActionKey))
+	explicitNext := authoredNext != "" && !isGenericDefaultNextAction(authoredNext)
+	if refinedFromStructured {
+		// Wrong recovery class next_action (timeout/path) must not stick after refine.
+		if isMismatchedRecoveryNextAction(authoredNext, diagnostic.ErrorCode) {
+			explicitNext = false
+		}
+	}
 	if explicitNext {
-		diagnostic.NextAction = strings.TrimSpace(diagnosticTopLevelString(metadata, MetadataNextActionKey))
+		diagnostic.NextAction = authoredNext
 	} else {
 		diagnostic.NextAction = nextActionForToolError(diagnostic.ErrorCode, toolErr)
 	}
@@ -138,7 +196,7 @@ func Diagnose(toolName, toolCallID, toolErr string, metadata map[string]interfac
 	if diagnostic.Outcome == "" {
 		diagnostic.Outcome = OutcomeFailed
 	}
-	attachRecoveryHints(&diagnostic, metadata)
+	attachRecoveryHints(&diagnostic, metadata, toolErr)
 	return diagnostic
 }
 
@@ -183,7 +241,7 @@ func enrichSuccessDiagnostic(diagnostic *Diagnostic, metadata map[string]interfa
 	// Only attach recovery hints for dispositions that benefit model recovery
 	// (empty/partial). Ordinary success stays compact.
 	if diagnostic.EmptyResult || diagnostic.Outcome == OutcomeEmpty || diagnostic.Outcome == OutcomePartial {
-		attachRecoveryHints(diagnostic, metadata)
+		attachRecoveryHints(diagnostic, metadata, "")
 		// Refresh partial next_action once failed_items are known so success-path
 		// mixed batches also get item-aware guidance (not only count-only text).
 		if diagnostic.Outcome == OutcomePartial &&
@@ -196,7 +254,7 @@ func enrichSuccessDiagnostic(diagnostic *Diagnostic, metadata map[string]interfa
 	}
 }
 
-func attachRecoveryHints(diagnostic *Diagnostic, metadata map[string]interface{}) {
+func attachRecoveryHints(diagnostic *Diagnostic, metadata map[string]interface{}, toolErr string) {
 	if diagnostic == nil {
 		return
 	}
@@ -209,6 +267,323 @@ func attachRecoveryHints(diagnostic *Diagnostic, metadata map[string]interface{}
 	if items := ExtractFailedItems(metadata); len(items) > 0 {
 		diagnostic.FailedItems = items
 	}
+	if path := strings.TrimSpace(diagnosticString(metadata, "file_path")); path != "" {
+		diagnostic.FilePath = path
+	}
+	if offset, ok := diagnosticIntPtr(metadata, "suggested_view_offset"); ok {
+		diagnostic.SuggestedViewOffset = offset
+	}
+	if limit, ok := diagnosticIntPtr(metadata, "suggested_view_limit"); ok {
+		diagnostic.SuggestedViewLimit = limit
+	}
+	if start, ok := diagnosticIntPtr(metadata, "current_snippet_start_line"); ok {
+		diagnostic.CurrentSnippetStartLine = start
+	}
+	if snippet := diagnosticMultilineString(metadata, "current_snippet"); snippet != "" {
+		diagnostic.CurrentSnippet = capCurrentSnippetForContract(snippet)
+	}
+	// Prefer toolErr body, then metadata error_message (historical exports).
+	errBody := strings.TrimSpace(toolErr)
+	if errBody == "" {
+		errBody = diagnosticString(metadata, "error_message")
+	}
+	// Historical / partial-promotion chat-logs often only embed closest lines in
+	// the error body ("最接近片段" / multi-line "最接近的当前内容"). Recover them so
+	// model contracts and tool.completed export still get current_snippet.
+	if strings.TrimSpace(diagnostic.CurrentSnippet) == "" {
+		if parsed, startLine := parseClosestSnippetFromErrorMessage(errBody); parsed != "" {
+			diagnostic.CurrentSnippet = capCurrentSnippetForContract(parsed)
+			if diagnostic.CurrentSnippetStartLine == nil && startLine > 0 {
+				v := startLine
+				diagnostic.CurrentSnippetStartLine = &v
+			}
+			if diagnostic.SuggestedViewOffset == nil && startLine > 0 {
+				off := startLine - 1
+				diagnostic.SuggestedViewOffset = &off
+			}
+		}
+	}
+	if diagnostic.SuggestedViewOffset == nil {
+		if off, ok := parseSuggestedViewOffsetFromMessage(errBody); ok {
+			diagnostic.SuggestedViewOffset = &off
+			if diagnostic.SuggestedViewLimit == nil {
+				lim := 40
+				diagnostic.SuggestedViewLimit = &lim
+			}
+		}
+	}
+}
+
+// parseClosestSnippetFromErrorMessage recovers copy-pasteable current lines from
+// edit/apply_patch STALE error bodies when structured current_snippet is missing.
+// Returns (snippet, startLine1Based). startLine is 0 when unknown.
+func parseClosestSnippetFromErrorMessage(message string) (string, int) {
+	message = strings.ReplaceAll(message, "\r\n", "\n")
+	message = strings.ReplaceAll(message, "\r", "\n")
+	if strings.TrimSpace(message) == "" {
+		return "", 0
+	}
+
+	// Multi-line header only: 最接近的当前内容（第 N 行附近…）:\n  12|code
+	// Reject prose mentions such as 按返回的“最接近的当前内容”重建补丁 — those lack the
+	// （第 … header form and would otherwise swallow 期望内容 as a false snippet.
+	const multiMarker = "最接近的当前内容（第"
+	if idx := strings.Index(message, multiMarker); idx >= 0 {
+		rest := message[idx:]
+		// Optional start line from header.
+		startLine := 0
+		if open := strings.Index(rest, "第 "); open >= 0 {
+			numPart := rest[open+len("第 "):]
+			end := strings.Index(numPart, " 行")
+			if end > 0 {
+				startLine = parseLeadingInt(strings.TrimSpace(numPart[:end]))
+			}
+		}
+		// Body after first newline following the header line.
+		body := rest
+		if nl := strings.Index(rest, "\n"); nl >= 0 {
+			body = rest[nl+1:]
+		} else {
+			// Header without a following block is not usable.
+			body = ""
+		}
+		// Stop before next_action / old_string preview / 期望内容 trailers.
+		for _, stop := range []string{"\nnext_action:", "\nold_string 预览:", "\n期望内容:", "\n建议从第 "} {
+			if cut := strings.Index(body, stop); cut >= 0 {
+				body = body[:cut]
+			}
+		}
+		lines := strings.Split(body, "\n")
+		out := make([]string, 0, len(lines))
+		firstLineNo := 0
+		numbered := 0
+		for _, ln := range lines {
+			// Skip empty header residue / ellipsis-only tails.
+			if strings.TrimSpace(ln) == "" {
+				if len(out) > 0 {
+					out = append(out, "")
+				}
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(ln), "...") {
+				break
+			}
+			// "  12|text" line-number prefix from formatEditClosestLines / formatPatchCurrentLines.
+			if pipe := strings.Index(ln, "|"); pipe > 0 {
+				prefix := strings.TrimSpace(ln[:pipe])
+				if isAllDigits(prefix) {
+					if firstLineNo == 0 {
+						firstLineNo = parseLeadingInt(prefix)
+					}
+					numbered++
+					out = append(out, ln[pipe+1:])
+					continue
+				}
+			}
+			// formatPatchCurrentLines uses "12: text" style.
+			if colon := strings.Index(ln, ": "); colon > 0 {
+				prefix := strings.TrimSpace(ln[:colon])
+				if isAllDigits(prefix) {
+					if firstLineNo == 0 {
+						firstLineNo = parseLeadingInt(prefix)
+					}
+					numbered++
+					out = append(out, ln[colon+2:])
+					continue
+				}
+			}
+			// Stop if we hit prose that is clearly not code block body.
+			if strings.HasPrefix(ln, "next_action:") || strings.HasPrefix(ln, "old_string") || strings.HasPrefix(ln, "期望内容") {
+				break
+			}
+			// Only keep non-numbered lines once we have seen at least one numbered
+			// code line; otherwise raw prose / 期望内容 would pollute the snippet.
+			if numbered > 0 {
+				out = append(out, ln)
+			}
+		}
+		// Trim trailing empties.
+		for len(out) > 0 && out[len(out)-1] == "" {
+			out = out[:len(out)-1]
+		}
+		// Require at least one numbered line so prose false-positives never win.
+		if len(out) > 0 && numbered > 0 {
+			if startLine <= 0 {
+				startLine = firstLineNo
+			}
+			return strings.Join(out, "\n"), startLine
+		}
+	}
+
+	// Quoted single-fragment form: 最接近片段: "...."
+	// Historical binaries often mid-line-truncated the %q payload (no closing
+	// quote before next_action / EOF). Still recover the partial snippet so
+	// offline dashboards / model contracts get *some* copy-paste signal.
+	const quoteMarker = "最接近片段:"
+	if idx := strings.Index(message, quoteMarker); idx >= 0 {
+		rest := strings.TrimSpace(message[idx+len(quoteMarker):])
+		if strings.HasPrefix(rest, "\"") {
+			rest = rest[1:]
+			// Find closing quote; content may contain escaped quotes.
+			end := -1
+			escaped := false
+			for i := 0; i < len(rest); i++ {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if rest[i] == '\\' {
+					escaped = true
+					continue
+				}
+				if rest[i] == '"' {
+					end = i
+					break
+				}
+			}
+			raw := ""
+			if end >= 0 {
+				raw = rest[:end]
+			} else {
+				// Truncated historical body: take until trailer keywords / EOL run.
+				cut := len(rest)
+				for _, stop := range []string{" next_action:", "\nnext_action:", " old_string", "\nold_string", " 建议从第", "\n建议从第"} {
+					if i := strings.Index(rest, stop); i >= 0 && i < cut {
+						cut = i
+					}
+				}
+				raw = rest[:cut]
+				// Drop a dangling incomplete escape at the cut boundary.
+				raw = strings.TrimRight(raw, `\`)
+			}
+			// Unescape common Go %q sequences used in live errors.
+			raw = strings.ReplaceAll(raw, `\\`, `\`)
+			raw = strings.ReplaceAll(raw, `\n`, "\n")
+			raw = strings.ReplaceAll(raw, `\t`, "\t")
+			raw = strings.ReplaceAll(raw, `\"`, `"`)
+			if strings.TrimSpace(raw) != "" {
+				return raw, 0
+			}
+		}
+	}
+	return "", 0
+}
+
+// parseSuggestedViewOffsetFromMessage extracts 0-based view offset from STALE
+// error prose (suggested_view_offset=N or 建议从第 N 行).
+func parseSuggestedViewOffsetFromMessage(message string) (int, bool) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return 0, false
+	}
+	const key = "suggested_view_offset="
+	if idx := strings.Index(message, key); idx >= 0 {
+		n := parseLeadingInt(strings.TrimSpace(message[idx+len(key):]))
+		if n >= 0 {
+			// Accept 0 as valid first-line offset.
+			rest := strings.TrimSpace(message[idx+len(key):])
+			if rest != "" && (rest[0] >= '0' && rest[0] <= '9') {
+				return n, true
+			}
+		}
+	}
+	const suggest = "建议从第 "
+	if idx := strings.Index(message, suggest); idx >= 0 {
+		n := parseLeadingInt(strings.TrimSpace(message[idx+len(suggest):]))
+		if n > 0 {
+			return n - 1, true
+		}
+	}
+	return 0, false
+}
+
+func parseLeadingInt(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	n := 0
+	found := false
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			break
+		}
+		found = true
+		n = n*10 + int(r-'0')
+	}
+	if !found {
+		return 0
+	}
+	return n
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// maxCurrentSnippetContractBytes bounds model-visible current_snippet so STALE
+// recovery stays copy-pasteable without blowing the tool_result contract budget.
+// ~4KiB covers ~16 full code lines with generous indent; larger windows still
+// have suggested_view_offset + body error block / chat-log metadata.
+const maxCurrentSnippetContractBytes = 4 * 1024
+
+func capCurrentSnippetForContract(snippet string) string {
+	snippet = strings.ReplaceAll(snippet, "\r\n", "\n")
+	snippet = strings.ReplaceAll(snippet, "\r", "\n")
+	if snippet == "" {
+		return ""
+	}
+	// Prefer whole lines under the byte budget so models never copy a mid-line cut.
+	if len(snippet) <= maxCurrentSnippetContractBytes {
+		return snippet
+	}
+	lines := strings.Split(snippet, "\n")
+	var b strings.Builder
+	b.Grow(maxCurrentSnippetContractBytes)
+	for i, line := range lines {
+		candidate := line
+		if i > 0 {
+			candidate = "\n" + line
+		}
+		if b.Len()+len(candidate) > maxCurrentSnippetContractBytes {
+			if b.Len() == 0 {
+				// Single oversized line: hard cut with ellipsis marker.
+				cut := maxCurrentSnippetContractBytes
+				if cut > 3 {
+					cut -= 3
+				}
+				return snippet[:cut] + "..."
+			}
+			break
+		}
+		b.WriteString(candidate)
+	}
+	return b.String()
+}
+
+// diagnosticMultilineString reads a metadata string without TrimSpace so leading
+// indent / trailing blank lines on code snippets stay exact for copy-paste.
+func diagnosticMultilineString(metadata map[string]interface{}, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if value, ok := metadata[key].(string); ok && value != "" {
+		return value
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if value, ok := nested[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // NormalizeOutcome maps free-form outcome labels onto the stable contract.
@@ -643,6 +1018,44 @@ func ApplyDiagnosticMetadata(metadata map[string]interface{}, diagnostic Diagnos
 	metadata[MetadataErrorCodeKey] = diagnostic.ErrorCode
 	metadata[MetadataRetryableKey] = diagnostic.Retryable
 	metadata[MetadataNextActionKey] = diagnostic.NextAction
+	// STALE / path recovery fields must land on top-level metadata so chat-log
+	// export, model contracts, and offline dashboards can read them without
+	// digging nested tool_metadata or re-parsing error text.
+	promoteStaleRecoveryFields(metadata, diagnostic)
+}
+
+// promoteStaleRecoveryFields writes file/snippet/view recovery hints from the
+// diagnostic onto metadata when absent. Never overwrites tool-authored values.
+func promoteStaleRecoveryFields(metadata map[string]interface{}, diagnostic Diagnostic) {
+	if metadata == nil {
+		return
+	}
+	if path := strings.TrimSpace(diagnostic.FilePath); path != "" {
+		if _, exists := metadata["file_path"]; !exists {
+			metadata["file_path"] = path
+		}
+	}
+	if diagnostic.SuggestedViewOffset != nil {
+		if _, exists := metadata["suggested_view_offset"]; !exists {
+			metadata["suggested_view_offset"] = *diagnostic.SuggestedViewOffset
+		}
+	}
+	if diagnostic.SuggestedViewLimit != nil {
+		if _, exists := metadata["suggested_view_limit"]; !exists {
+			metadata["suggested_view_limit"] = *diagnostic.SuggestedViewLimit
+		}
+	}
+	if snippet := diagnostic.CurrentSnippet; snippet != "" {
+		// Keep exact bytes (indent) — do not TrimSpace.
+		if existing, _ := metadata["current_snippet"].(string); existing == "" {
+			metadata["current_snippet"] = snippet
+		}
+	}
+	if diagnostic.CurrentSnippetStartLine != nil {
+		if _, exists := metadata["current_snippet_start_line"]; !exists {
+			metadata["current_snippet_start_line"] = *diagnostic.CurrentSnippetStartLine
+		}
+	}
 }
 
 // ExtractPathCandidates returns nearby path suggestions from metadata when present.
@@ -1348,6 +1761,173 @@ func diagnosticInt(metadata map[string]interface{}, key string) int {
 	return 0
 }
 
+// diagnosticIntPtr returns a pointer when the key is present so 0-valued
+// suggested_view_offset remains distinguishable from "unset".
+func diagnosticIntPtr(metadata map[string]interface{}, key string) (*int, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	if value, ok := intFromAny(metadata[key]); ok {
+		v := value
+		return &v, true
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if value, ok := intFromAny(nested[key]); ok {
+			v := value
+			return &v, true
+		}
+	}
+	return nil, false
+}
+
+// isGenericToolExecutionCode reports codes that are safe to refine with message
+// / failure_class evidence. Specific recovery codes must not be overwritten.
+func isGenericToolExecutionCode(code string) bool {
+	switch runtimeerrors.ErrorCode(strings.TrimSpace(code)) {
+	case "", runtimeerrors.ErrToolExecution, runtimeerrors.ErrToolBrokerFailure:
+		return true
+	default:
+		return false
+	}
+}
+
+// isGenericDefaultNextAction reports the stock "inspect and retry" guidance that
+// often accompanies a bare TOOL_EXECUTION stamp and should yield to refined codes.
+func isGenericDefaultNextAction(next string) bool {
+	next = strings.TrimSpace(next)
+	if next == "" {
+		return false
+	}
+	if next == DefaultToolExecutionNextAction {
+		return true
+	}
+	lower := strings.ToLower(next)
+	return strings.HasPrefix(lower, "inspect the error details") &&
+		strings.Contains(lower, "retry only when")
+}
+
+// refineGenericToolExecutionCode upgrades a generic/empty code using message
+// classification and failure_class hints. Returns "" when no refinement applies.
+func refineGenericToolExecutionCode(structuredCode, messageCode string, metadata map[string]interface{}, toolErr string) string {
+	// failure_class authored by edit/apply_patch is authoritative for stale misses
+	// even when error_code stayed generic (partial promotion / older binaries).
+	failureClass := strings.ToLower(strings.TrimSpace(diagnosticString(metadata, "failure_class")))
+	if failureClass == "stale_context" {
+		return string(runtimeerrors.ErrToolStaleContext)
+	}
+	msgCode := strings.TrimSpace(messageCode)
+	if msgCode == "" {
+		msgCode = classifyToolErrorCode(toolErr)
+	}
+	if !knownRuntimeErrorCode(msgCode) || isGenericToolExecutionCode(msgCode) {
+		return ""
+	}
+	// Only refine when structured was generic/empty; never demote a specific code.
+	if structuredCode != "" && !isGenericToolExecutionCode(structuredCode) {
+		return ""
+	}
+	return msgCode
+}
+
+// refineMislabeledStructuredCode corrects a narrow set of wrong specific codes
+// when the body is unambiguously an edit/apply_patch STALE miss. Live chat-logs
+// showed TOOL_TIMEOUT / TOOL_PATH_NOT_FOUND stamped on old_string misses because
+// closest snippets contain those substrings and message heuristics fired first.
+// Returns "" when no correction applies (preserves true timeouts/paths).
+// Only edit-family tools are eligible — bash TOOL_TIMEOUT must never demote.
+func refineMislabeledStructuredCode(toolName, structuredCode, messageCode string, metadata map[string]interface{}, toolErr string) string {
+	if !isEditFamilyToolName(toolName) {
+		return ""
+	}
+	structuredCode = strings.TrimSpace(structuredCode)
+	if structuredCode == "" || isGenericToolExecutionCode(structuredCode) {
+		return ""
+	}
+	// Only override timeout/path mislabels — never auth/permission/spawn/etc.
+	switch runtimeerrors.ErrorCode(structuredCode) {
+	case runtimeerrors.ErrToolTimeout, runtimeerrors.ErrToolPathNotFound:
+		// ok
+	default:
+		return ""
+	}
+	failureClass := strings.ToLower(strings.TrimSpace(diagnosticString(metadata, "failure_class")))
+	if failureClass == "stale_context" || messageLooksLikeStaleEditOrPatch(toolErr) {
+		return string(runtimeerrors.ErrToolStaleContext)
+	}
+	msgCode := strings.TrimSpace(messageCode)
+	if msgCode == "" {
+		msgCode = classifyToolErrorCode(toolErr)
+	}
+	if msgCode == string(runtimeerrors.ErrToolStaleContext) {
+		return string(runtimeerrors.ErrToolStaleContext)
+	}
+	return ""
+}
+
+func isEditFamilyToolName(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "edit", "multiedit", "apply_patch", "applypatch", "patch":
+		return true
+	default:
+		return false
+	}
+}
+
+// messageLooksLikeStaleEditOrPatch reports high-confidence edit/apply_patch miss
+// phrasing independent of timeout/path substrings that may appear in snippets.
+func messageLooksLikeStaleEditOrPatch(message string) bool {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(msg, "old_string 未在文件中找到") ||
+		strings.Contains(msg, "无法定位 hunk") ||
+		strings.Contains(lower, "stale_context") ||
+		strings.Contains(lower, "stale old_string") ||
+		strings.Contains(lower, "stale @@") {
+		return true
+	}
+	// English-ish edit miss without Chinese lead-in.
+	if strings.Contains(lower, "old_string") &&
+		(strings.Contains(lower, "not found") || strings.Contains(lower, "exact match")) {
+		return true
+	}
+	// Hunk miss variants.
+	if strings.Contains(lower, "hunk") &&
+		(strings.Contains(lower, "not found") || strings.Contains(lower, "failed to find") ||
+			strings.Contains(lower, "could not find") || strings.Contains(msg, "未找到期望旧内容")) {
+		return true
+	}
+	return false
+}
+
+// isMismatchedRecoveryNextAction reports authored next_action text that clearly
+// belongs to a different recovery class than the refined error code (e.g. timeout
+// guidance stuck on a STALE_CONTEXT refine).
+func isMismatchedRecoveryNextAction(next, refinedCode string) bool {
+	next = strings.TrimSpace(next)
+	refinedCode = strings.TrimSpace(refinedCode)
+	if next == "" || refinedCode == "" {
+		return false
+	}
+	lower := strings.ToLower(next)
+	switch runtimeerrors.ErrorCode(refinedCode) {
+	case runtimeerrors.ErrToolStaleContext:
+		// Timeout / path-not-found stock guidance must not stick on STALE.
+		if strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") ||
+			strings.Contains(lower, "deadline") ||
+			(strings.Contains(lower, "path not found") && !strings.Contains(lower, "current_snippet") &&
+				!strings.Contains(lower, "old_string") && !strings.Contains(lower, "stale")) {
+			return true
+		}
+		// Prefer STALE-authored text; generic inspect/retry is already filtered.
+		return false
+	default:
+		return false
+	}
+}
+
 func classifyToolErrorCode(message string) string {
 	message = strings.TrimSpace(message)
 	if code := bracketedRuntimeErrorCode(message); code != "" {
@@ -1385,6 +1965,11 @@ func classifyToolErrorCode(message string) string {
 	// (exec: ... / executable file not found) rather than a tool path arg.
 	case isMissingCommandShellFailure(lower, message), isShellDialectFailure(lower):
 		return string(runtimeerrors.ErrToolShellCompat)
+	// STALE before PATH/TIMEOUT: edit/apply_patch error bodies embed closest file
+	// snippets that often contain "timeout" / "no such file" map keys, which must
+	// not reclassify an old_string/hunk miss as path/timeout.
+	case messageLooksLikeStaleEditOrPatch(msg):
+		return string(runtimeerrors.ErrToolStaleContext)
 	case strings.Contains(lower, "path not found"), strings.Contains(lower, "file not found"),
 		strings.Contains(lower, "no such file or directory"), strings.Contains(lower, "cannot find the path specified"),
 		strings.Contains(lower, "cannot find the file specified"),
@@ -1397,11 +1982,6 @@ func classifyToolErrorCode(message string) string {
 		(strings.Contains(lower, "max_depth") && strings.Contains(lower, "spawn")) ||
 		(strings.Contains(lower, "depth limit") && strings.Contains(lower, "spawn")):
 		return string(runtimeerrors.ErrAgentSpawnDepthLimit)
-	case strings.Contains(msg, "无法定位 hunk") || strings.Contains(msg, "old_string 未在文件中找到") ||
-		strings.Contains(lower, "stale_context") || strings.Contains(lower, "stale @@") ||
-		strings.Contains(lower, "stale old_string") ||
-		(strings.Contains(lower, "old_string") && strings.Contains(lower, "not found")):
-		return string(runtimeerrors.ErrToolStaleContext)
 	case strings.Contains(lower, "deadline exceeded"), strings.Contains(lower, "timed out"),
 		strings.Contains(lower, "timeout"):
 		return string(runtimeerrors.ErrToolTimeout)
@@ -1411,7 +1991,19 @@ func classifyToolErrorCode(message string) string {
 	case strings.Contains(lower, "invalid argument"), strings.Contains(lower, "invalid args"),
 		strings.Contains(lower, "missing required"), strings.Contains(lower, " is required"),
 		strings.Contains(lower, "cannot unmarshal"), strings.Contains(lower, "unexpected end of json"),
-		strings.Contains(lower, "failed to parse arguments"), strings.Contains(lower, "unknown field"):
+		strings.Contains(lower, "failed to parse arguments"), strings.Contains(lower, "unknown field"),
+		// Toolkit tools emit Chinese validation copy (live residual: grep/edit/write
+		// "pattern/file_path 参数缺失或无效" was bare TOOL_EXECUTION + generic next_action).
+		strings.Contains(message, "参数缺失"), strings.Contains(message, "参数无效"),
+		strings.Contains(message, "参数错误"), strings.Contains(message, "参数类型错误"),
+		strings.Contains(message, "参数缺失或无效"), strings.Contains(message, "参数缺失或为空"),
+		strings.Contains(message, "参数缺失或类型错误"), strings.Contains(message, "参数缺失或不是字符串"),
+		// apply_patch parse failures (live residual: nested Begin marker mid-hunk
+		// and empty/malformed envelopes) were bare TOOL_EXECUTION.
+		strings.Contains(message, "不是合法的 hunk"), strings.Contains(message, "不是合法的补丁"),
+		strings.Contains(message, "不是合法的新增文件内容"), strings.Contains(message, "hunk 没有内容"),
+		strings.Contains(message, "补丁中没有可执行的文件操作"),
+		strings.Contains(lower, "malformed patch"), strings.Contains(lower, "invalid patch"):
 		return string(runtimeerrors.ErrToolInvalidArgs)
 	default:
 		return string(runtimeerrors.ErrToolExecution)
@@ -1499,13 +2091,16 @@ func nextActionForToolError(code string, message string) string {
 	switch runtimeerrors.ErrorCode(strings.TrimSpace(code)) {
 	case runtimeerrors.ErrToolInvalidArgs, runtimeerrors.ErrAPIBadRequest,
 		runtimeerrors.ErrValidationFailed, runtimeerrors.ErrConfigInvalid:
-		return "Correct the tool arguments using the current schema, then call it again."
+		if refined := invalidArgsNextAction(message); refined != "" {
+			return refined
+		}
+		return "Correct the tool arguments using the current schema, then call it again. Do not retry the same invalid/missing args unchanged."
 	case runtimeerrors.ErrJobNotFound:
 		return "Use the exact job_id returned by background_task; do not guess or synthesize an id."
 	case runtimeerrors.ErrToolNotFound, runtimeerrors.ErrToolNotRegistered:
 		return "Choose a tool name from the current tool definitions; do not retry the unavailable name."
 	case runtimeerrors.ErrToolPathNotFound:
-		return "Verify the path and working directory, correct them, then call the tool again."
+		return "Path not found. Prefer path_candidates when present, or ls/glob under the existing parent directory to discover the correct name; then retry with a confirmed path. Do not retry the same missing path unchanged."
 	case runtimeerrors.ErrToolShellCompat:
 		return DefaultShellCompatNextAction
 	case runtimeerrors.ErrAgentPermission, runtimeerrors.ErrAPIUnauthorized, runtimeerrors.ErrApprovalExpired:
@@ -1538,6 +2133,55 @@ func nextActionForToolError(code string, message string) string {
 		return DefaultToolExecutionNextAction
 	default:
 		return DefaultToolExecutionNextAction
+	}
+}
+
+// invalidArgsNextAction refines generic schema guidance for common argument
+// validation failures. Keep this message-pattern based so it applies uniformly
+// to built-in, toolkit, MCP, and function-catalog tools.
+func invalidArgsNextAction(message string) string {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return ""
+	}
+
+	switch {
+	case strings.Contains(lower, "unknown field"),
+		strings.Contains(lower, "unexpected field"),
+		strings.Contains(lower, "additional properties") && strings.Contains(lower, "not allowed"),
+		strings.Contains(lower, "unrecognized argument"),
+		strings.Contains(lower, "unknown argument"):
+		return "Remove or rename unsupported arguments using the current tool schema, then retry. Do not resend the same unknown fields unchanged."
+	case strings.Contains(lower, "required") &&
+		(strings.Contains(lower, "missing") || strings.Contains(lower, "is required") || strings.Contains(lower, "不能为空")),
+		strings.Contains(lower, "missing required"),
+		strings.Contains(lower, "缺少必填"),
+		strings.Contains(lower, "缺少必要"),
+		// Toolkit tools emit Chinese validation copy such as
+		// "pattern/file_path 参数缺失或无效" / "…参数缺失或为空".
+		strings.Contains(message, "参数缺失"),
+		strings.Contains(message, "参数缺失或无效"),
+		strings.Contains(message, "参数缺失或为空"),
+		strings.Contains(message, "参数缺失或类型错误"),
+		strings.Contains(message, "参数缺失或不是字符串"):
+		return "Provide every required argument with the schema-prescribed type and shape, then retry. Do not resend the same incomplete arguments unchanged."
+	case strings.Contains(lower, "cannot unmarshal"),
+		strings.Contains(lower, "invalid json"),
+		strings.Contains(lower, "json syntax"),
+		strings.Contains(lower, "unexpected end of json"),
+		strings.Contains(lower, "expected type"),
+		strings.Contains(lower, "must be a"),
+		strings.Contains(message, "参数无效"),
+		strings.Contains(message, "参数错误"),
+		strings.Contains(message, "参数类型错误"):
+		return "Correct the JSON syntax and argument value types to match the current tool schema, then retry. Do not resend the same malformed payload unchanged."
+	case strings.Contains(lower, "mutually exclusive"),
+		strings.Contains(lower, "conflicting argument"),
+		strings.Contains(lower, "cannot be used together"),
+		strings.Contains(lower, "不能同时"):
+		return "Remove the conflicting arguments and choose one schema-supported option, then retry. Do not resend the same incompatible combination unchanged."
+	default:
+		return ""
 	}
 }
 

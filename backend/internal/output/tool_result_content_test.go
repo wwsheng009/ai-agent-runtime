@@ -313,6 +313,43 @@ func TestRenderToolResultContentForModel_ExposesActionableFailureContract(t *tes
 	}
 }
 
+func TestRenderToolResultContentForModel_ExposesStaleViewHints(t *testing.T) {
+	snippet := "\tfunc Hello() {\n\t\treturn 1\n\t}"
+	envelope := &Envelope{
+		ToolName:   "edit",
+		ToolCallID: "call-stale-edit",
+		Metadata: map[string]interface{}{
+			"error_code":                 "STALE_CONTEXT",
+			"failure_class":              "stale_context",
+			"file_path":                  "snippet.go",
+			"suggested_view_offset":      0,
+			"suggested_view_limit":       40,
+			"current_snippet":            snippet,
+			"current_snippet_start_line": 1,
+			"next_action":                "STALE_CONTEXT: copy current_snippet then retry",
+			"retryable":                  false,
+		},
+	}
+	got := RenderToolResultContentForModel(nil, "old_string 未在文件中找到", envelope)
+	for _, expected := range []string{
+		`"error_code":"STALE_CONTEXT"`,
+		`"file_path":"snippet.go"`,
+		`"suggested_view_offset":0`,
+		`"suggested_view_limit":40`,
+		`"current_snippet_start_line":1`,
+		`"retryable":false`,
+		"current_snippet",
+		// Exact file window must appear in the contract JSON (escaped), not only
+		// as a next_action mention — models often read contract fields first.
+		`\tfunc Hello()`,
+		`return 1`,
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in model-visible STALE contract, got %q", expected, got)
+		}
+	}
+}
+
 func TestRenderToolResultContentForModel_PathCandidatesInFailureContract(t *testing.T) {
 	envelope := &Envelope{
 		ToolName:   "view",

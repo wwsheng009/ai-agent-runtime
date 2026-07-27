@@ -3,13 +3,16 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -127,11 +130,167 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 		return w.successSearchResult(query, results, "duckduckgo"), nil
 	}
 
-	return &toolkit.ToolResult{
-		Success:    false,
-		OutputKind: toolresult.KindText,
-		Error:      fmt.Errorf("搜索失败: %w", htmlErr),
-	}, nil
+	// Prefer the first transport error (Instant), fall back to HTML error.
+	// Live residual: connectex / dial failures were bare TOOL_EXECUTION with
+	// generic next_action, so models blind-retried the same query.
+	primary := instantErr
+	if primary == nil {
+		primary = htmlErr
+	}
+	return w.failureSearchResult(query, primary, instantErr, htmlErr), nil
+}
+
+// failureSearchResult stamps structured recovery for transport/network failures
+// so chat-log / Diagnose / disposition replay do not treat them as opaque
+// TOOL_EXECUTION.
+func (w *WebSearchTool) failureSearchResult(query string, primary, instantErr, htmlErr error) *toolkit.ToolResult {
+	if primary == nil {
+		primary = errors.New("web_search failed")
+	}
+	err := fmt.Errorf("搜索失败: %w", primary)
+	code := classifyWebSearchFailureCode(primary)
+	if code == "" {
+		code = classifyWebSearchFailureCode(instantErr)
+	}
+	if code == "" {
+		code = classifyWebSearchFailureCode(htmlErr)
+	}
+	extra := map[string]interface{}{
+		"query": query,
+		"attempted_args": map[string]interface{}{
+			"query": query,
+		},
+	}
+	if instantErr != nil {
+		extra["instant_error"] = instantErr.Error()
+	}
+	if htmlErr != nil {
+		extra["html_error"] = htmlErr.Error()
+	}
+	next := ""
+	if code != "" {
+		// Prefer code-specific next_action; leave empty so Diagnose fills network guidance.
+		next = webSearchFailureNextAction(code, query)
+		extra["failure_class"] = webSearchFailureClass(code)
+	}
+	return toolResultFailureWithCode(err, code, next, extra)
+}
+
+func classifyWebSearchFailureCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	// Scan the full error string first so HTTP 429/5xx still win when the
+	// client wraps a transport/status error in *url.Error / *net.OpError.
+	if code := classifyWebSearchFailureMessage(err.Error()); code != "" {
+		// Prefer explicit upstream/rate-limit signals over generic network class.
+		switch runtimeerrors.ErrorCode(code) {
+		case runtimeerrors.ErrAPIRateLimit, runtimeerrors.ErrAPIServerError:
+			return code
+		}
+	}
+
+	// Prefer typed network errors over string heuristics.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return string(runtimeerrors.ErrNetworkTimeout)
+		}
+		// url.Error implements net.Error; only treat as unavailable when it is
+		// not an HTTP status-bearing upstream failure (checked above).
+		if code := classifyWebSearchFailureMessage(err.Error()); code != "" {
+			return code
+		}
+		return string(runtimeerrors.ErrNetworkUnavailable)
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return string(runtimeerrors.ErrNetworkUnavailable)
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return string(runtimeerrors.ErrNetworkUnavailable)
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Timeout() {
+			return string(runtimeerrors.ErrNetworkTimeout)
+		}
+		// Unwrap further when possible; otherwise treat dial/transport failures as network.
+		if urlErr.Err != nil {
+			if nested := classifyWebSearchFailureCode(urlErr.Err); nested != "" {
+				return nested
+			}
+		}
+		if code := classifyWebSearchFailureMessage(urlErr.Error()); code != "" {
+			return code
+		}
+		return string(runtimeerrors.ErrNetworkUnavailable)
+	}
+
+	return classifyWebSearchFailureMessage(err.Error())
+}
+
+func classifyWebSearchFailureMessage(message string) string {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	if msg == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(msg, "http 429") || strings.Contains(msg, "status 429") ||
+		strings.Contains(msg, "rate limit"):
+		return string(runtimeerrors.ErrAPIRateLimit)
+	case strings.Contains(msg, "http 502") || strings.Contains(msg, "http 503") ||
+		strings.Contains(msg, "http 504") || strings.Contains(msg, "status 502") ||
+		strings.Contains(msg, "status 503") || strings.Contains(msg, "status 504") ||
+		strings.Contains(msg, "bad gateway") || strings.Contains(msg, "service unavailable"):
+		return string(runtimeerrors.ErrAPIServerError)
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "context deadline"):
+		return string(runtimeerrors.ErrNetworkTimeout)
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connectex") || strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "network is unreachable") || strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "tls:") || strings.Contains(msg, "x509:") ||
+		strings.Contains(msg, "dial tcp") || strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "wsarecv") || strings.Contains(msg, "forcibly closed"):
+		return string(runtimeerrors.ErrNetworkUnavailable)
+	default:
+		return ""
+	}
+}
+
+func webSearchFailureClass(code string) string {
+	switch runtimeerrors.ErrorCode(strings.TrimSpace(code)) {
+	case runtimeerrors.ErrNetworkTimeout, runtimeerrors.ErrNetworkUnavailable:
+		return "network"
+	case runtimeerrors.ErrAPIRateLimit:
+		return "rate_limit"
+	case runtimeerrors.ErrAPIServerError:
+		return "upstream"
+	default:
+		return "execution"
+	}
+}
+
+func webSearchFailureNextAction(code, query string) string {
+	q := strings.TrimSpace(query)
+	switch runtimeerrors.ErrorCode(strings.TrimSpace(code)) {
+	case runtimeerrors.ErrNetworkTimeout, runtimeerrors.ErrNetworkUnavailable:
+		if q != "" {
+			return fmt.Sprintf(
+				"NETWORK_UNAVAILABLE: search transport failed for query %q. Retry with bounded backoff, simplify/split the query, or continue without web evidence if offline. Do not spam identical web_search retries.",
+				q,
+			)
+		}
+		return "NETWORK_UNAVAILABLE: search transport failed. Retry with bounded backoff, simplify/split the query, or continue without web evidence if offline. Do not spam identical web_search retries."
+	case runtimeerrors.ErrAPIRateLimit:
+		return "Rate limited by the search provider. Wait with backoff, reduce count/frequency, or continue with local tools. Do not immediately replay the same query."
+	case runtimeerrors.ErrAPIServerError:
+		return "Search upstream returned a server error. Retry with bounded backoff or continue without web evidence. Do not spam identical queries."
+	default:
+		return ""
+	}
 }
 
 // successSearchResult builds a successful search ToolResult, stamping empty

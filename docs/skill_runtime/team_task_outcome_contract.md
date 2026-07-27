@@ -133,24 +133,25 @@ Canonical tool:
 
 ## Worker `completionRequirement` harness
 
-Team workers and opt-in child agents can require a structured task outcome before a run finishes cleanly. This harness aligns with the tools above; it does **not** invent a second completion API.
+Team task workers can require a structured task outcome before a run finishes cleanly. This harness aligns with the tools above; it does **not** invent a second completion API or expose Team outcome tools to an ordinary child session.
 
 Supported values (normalized):
 
 - `none` — default for ordinary chat / non-worker runs; no terminal tool is required
 - `complete_task` — the run must observe a successful `report_task_outcome` or `block_current_task` before finishing cleanly
 
-Aliases accepted on spawn / agentdef input: `complete-task`, `completetask` → `complete_task`. Unknown values are treated as unset on spawn (ignored) and as `none` after loop normalize.
+Aliases accepted on spawn / agentdef input: `complete-task`, `completetask` → `complete_task`. Unknown values are treated as unset on spawn (ignored) and as `none` after loop normalize. These compatibility inputs do not by themselves create Team task identity; the loop only activates `complete_task` for a per-run `RunMeta` containing both `TeamID` and `CurrentTaskID`.
 
 ### Where it is set
 
 | Path | Default / behavior |
 | --- | --- |
-| Team teammate worker (`TeammateRunner`) | Defaults to `complete_task` via `team.RunMeta` |
-| `spawn_agent` | Optional `completion_requirement` / `completionRequirement`; may inherit parent `RunMeta`; may resolve from `agent_type` agentdef |
+| Team teammate worker (`TeammateRunner`) | Injects `complete_task` together with `TeamID`, `AgentID`, and `CurrentTaskID` at the assignment boundary |
+| `spawn_agent` | Accepts `completion_requirement` / `completionRequirement` for compatibility and may resolve an agentdef default, but never inherits the parent Team worker contract or task identity |
 | `spawn_subagents` task item | Optional per-task `completion_requirement` / `completionRequirement` → child loop config |
-| Session actor loop | Explicit session context → profile agent agentdef → child `agent_type` agentdef; empty stays `none` |
-| `cloneLoopConfigForRun` | Explicit `RunMeta.CompletionRequirement` overrides base loop defaults |
+| Spawn route context | Explicitly writes `none` when the child did not request a requirement, overriding any value copied by session fork |
+| Session actor loop | Treats profile/session/legacy `complete_task` as `none` unless the current per-run Team task identity is complete |
+| `cloneLoopConfigForRun` | Honors explicit `complete_task` only when the same `RunMeta` contains non-empty `TeamID` and `CurrentTaskID` |
 
 Session context key: `completion_requirement` (`toolbroker.AgentSessionContextCompletionRequirement`).
 
@@ -162,8 +163,11 @@ Session context key: `completion_requirement` (`toolbroker.AgentSessionContextCo
 
 This keeps worker completion, broker tools, and HTTP `/outcome` on one semantic surface: structured task status + summary (+ blocker/handoff fields when required).
 
+Forking copies conversation history and session context, not ownership of the parent's Team assignment. Both the local CLI controller and the HTTP/API session controller apply the child spawn route context after cloning so an omitted child requirement is persisted as `none`. Follow-up, send-input, and resume rebuild `RunMeta` from the child session itself and cannot recover the parent's `complete_task` contract.
+
 ## Notes
 
 - Non-structured teammate model output is still parsed separately by the teammate runner via the shared teammate outcome contract.
+- `report_task_outcome` and `block_current_task` remain hidden without an active Team run; ordinary `spawn_agent` children do not receive a synthetic Team identity or an agent-session-only outcome implementation.
 - The HTTP and broker entrypoints now share the same apply layer for task status changes, mailbox side effects, claim release, and replanning.
 - Worker harness recovery only requires that one of the outcome tools succeeded; it does not re-validate HTTP field rules already enforced by the broker/apply layer.

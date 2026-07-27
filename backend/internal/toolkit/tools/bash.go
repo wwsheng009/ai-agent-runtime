@@ -57,6 +57,10 @@ const (
 	defaultSearchShellCommandTimeout   = 12 * time.Second
 	shellCommandTimeoutEnv             = "AICLI_SHELL_COMMAND_TIMEOUT"
 	shellCommandTimeoutMSEnv           = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
+	// shellTimeoutNoiseFloor rejects absurdly small numeric timeout_ms values.
+	// Live sessions show models using timeout_ms=1/30 as if the unit were seconds;
+	// deliberate sub-100ms budgets remain available through timeout="30ms".
+	shellTimeoutNoiseFloor = 100 * time.Millisecond
 )
 
 // NewBashTool 创建 Bash 工具
@@ -77,7 +81,7 @@ func NewBashTool() *BashTool {
 						"command":     map[string]interface{}{"type": "string"},
 						"workdir":     map[string]interface{}{"type": "string"},
 						"timeout":     map[string]interface{}{"type": "string"},
-						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1},
+						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1, "description": "毫秒超时；小于 100 的数值会按模型占位噪声忽略。确需亚 100ms 时使用 timeout 字符串（如 30ms）。"},
 						"timeout_sec": map[string]interface{}{"type": "integer", "minimum": 1},
 					},
 					"required":             []string{"command"},
@@ -108,12 +112,12 @@ func NewBashTool() *BashTool {
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 30ms）。秒级超时优先只设 timeout_sec 或 timeout。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
+				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。与 timeout_ms 二选一即可，不要同时填占位 1ms。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
@@ -151,10 +155,10 @@ func NewBashTool() *BashTool {
 
 func (b *BashTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindExec,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       false,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindExec,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -225,6 +229,24 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 				"failure_class": "shell_preflight",
 			},
 		), nil
+	}
+	if searchTool, redirect := looksLikeSimpleShellCodeSearch(command); redirect {
+		nextAction := "Call toolkit `grep` directly with structured pattern/path/glob arguments; use literal=true for fixed text. Do not replay the same shell search."
+		return &toolkit.ToolResult{
+			Success:    true,
+			OutputKind: toolresult.KindText,
+			Content: fmt.Sprintf(
+				"未执行简单 shell `%s` 代码搜索；runtime 已将其软重定向到专用 toolkit `grep`。这不是无匹配结果，也不是 hard failure。请按 next_action 直接调用 grep。",
+				searchTool,
+			),
+			Metadata: map[string]interface{}{
+				toolresult.MetadataOutcomeKey:    toolresult.OutcomeSuccess,
+				toolresult.MetadataNextActionKey: nextAction,
+				"shell_search_redirected":        true,
+				"redirect_tool":                  "grep",
+				"executed":                       false,
+			},
+		}, nil
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
@@ -1164,11 +1186,53 @@ func firstSearchToolToken(cmdParts []string) string {
 	for _, part := range cmdParts {
 		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
 		base = strings.TrimSuffix(base, ".exe")
+		if isRipgrepOrGrepTool(base) || isPrimaryOnlySearchTool(base) {
+			return base
+		}
+	}
+	return ""
+}
+
+func firstRipgrepOrGrepToken(cmdParts []string) string {
+	for _, part := range cmdParts {
+		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
+		base = strings.TrimSuffix(base, ".exe")
 		if isRipgrepOrGrepTool(base) {
 			return base
 		}
 	}
 	return ""
+}
+
+// primaryCommandBase returns the first non-assignment command token base name
+// (e.g. rg, select-string), skipping simple FOO=bar env prefixes.
+func primaryCommandBase(cmdParts []string) string {
+	for _, part := range cmdParts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		// Skip simple env assignments: FOO=bar
+		if eq := strings.IndexByte(trimmed, '='); eq > 0 &&
+			!strings.ContainsAny(trimmed[:eq], `/\`) &&
+			!strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(trimmed))
+		return strings.TrimSuffix(base, ".exe")
+	}
+	return ""
+}
+
+// isPrimaryOnlySearchTool reports search tools whose exit-1 no-match semantics
+// must only apply when they are the primary command (not a filter after builds).
+func isPrimaryOnlySearchTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "select-string", "findstr":
+		return true
+	default:
+		return false
+	}
 }
 
 func isRipgrepOrGrepTool(name string) bool {
@@ -1258,6 +1322,16 @@ func isSearchToolNoMatch(command, output string, err error) bool {
 		// splitting is noisy (quoted pipelines / PowerShell wrappers).
 		if !looksLikeSearchShellCommand(command) {
 			return false
+		}
+	} else if isPrimaryOnlySearchTool(searchCmd) {
+		// Select-String / findstr only soft-empty when they are the primary
+		// command. Pipelines like `tsc | Select-String` must not hide real
+		// build failures behind empty-search success.
+		if primaryCommandBase(cmdParts) != searchCmd {
+			// Still allow soft-empty when an rg/grep stage is present in the pipe.
+			if firstRipgrepOrGrepToken(cmdParts) == "" {
+				return false
+			}
 		}
 	}
 	exitCode := exitCodeFromError(err)
@@ -1584,37 +1658,70 @@ func parseShellCommandTimeout(params map[string]interface{}, defaultTimeout time
 		return defaultTimeout, nil
 	}
 
+	var (
+		hasMS, hasSec, hasNamed bool
+		ms, sec, named          time.Duration
+	)
+
 	if raw, ok := params["timeout_ms"]; ok && raw != nil && !isNumericZero(raw) {
 		value, err := extractPositiveInt(raw)
 		if err != nil {
 			return 0, fmt.Errorf("timeout_ms 参数无效: %w", err)
 		}
-		return time.Duration(value) * time.Millisecond, nil
+		ms = time.Duration(value) * time.Millisecond
+		hasMS = true
 	}
 	if raw, ok := params["timeout_sec"]; ok && raw != nil && !isNumericZero(raw) {
 		value, err := extractPositiveInt(raw)
 		if err != nil {
 			return 0, fmt.Errorf("timeout_sec 参数无效: %w", err)
 		}
-		return time.Duration(value) * time.Second, nil
+		sec = time.Duration(value) * time.Second
+		hasSec = true
 	}
 	if raw, ok := params["timeout"]; ok && raw != nil {
 		timeoutText, ok := raw.(string)
 		if !ok {
-			return defaultTimeout, nil
+			// Non-string timeout is treated as absent; fall through to other keys/default.
+		} else {
+			timeoutText = strings.TrimSpace(timeoutText)
+			if timeoutText != "" {
+				if seconds, numberErr := strconv.ParseFloat(timeoutText, 64); numberErr == nil && seconds > 0 {
+					named = time.Duration(seconds * float64(time.Second))
+					hasNamed = true
+				} else {
+					parsed, err := time.ParseDuration(timeoutText)
+					if err != nil || parsed <= 0 {
+						return 0, fmt.Errorf("timeout 参数无效: %q", timeoutText)
+					}
+					named = parsed
+					hasNamed = true
+				}
+			}
 		}
-		timeoutText = strings.TrimSpace(timeoutText)
-		if timeoutText == "" {
-			return defaultTimeout, nil
+	}
+
+	// Prefer coarser seconds/duration when present; otherwise treat a sub-floor
+	// numeric millisecond value as schema noise and use the inferred/default
+	// timeout. This prevents 1ms/30ms hard failures caused by unit confusion.
+	if hasMS && ms < shellTimeoutNoiseFloor {
+		if hasSec && sec >= time.Second && sec > ms {
+			hasMS = false
+		} else if hasNamed && named >= time.Second && named > ms {
+			hasMS = false
+		} else {
+			hasMS = false
 		}
-		if seconds, numberErr := strconv.ParseFloat(timeoutText, 64); numberErr == nil && seconds > 0 {
-			return time.Duration(seconds * float64(time.Second)), nil
-		}
-		parsed, err := time.ParseDuration(timeoutText)
-		if err != nil || parsed <= 0 {
-			return 0, fmt.Errorf("timeout 参数无效: %q", timeoutText)
-		}
-		return parsed, nil
+	}
+
+	if hasMS {
+		return ms, nil
+	}
+	if hasSec {
+		return sec, nil
+	}
+	if hasNamed {
+		return named, nil
 	}
 	return defaultTimeout, nil
 }
@@ -1649,6 +1756,11 @@ func hasExplicitShellTimeout(params map[string]interface{}) bool {
 		if value, ok := params[key]; ok && value != nil {
 			if isNumericZero(value) {
 				continue
+			}
+			if key == "timeout_ms" {
+				if milliseconds, err := extractPositiveInt(value); err == nil && time.Duration(milliseconds)*time.Millisecond < shellTimeoutNoiseFloor {
+					continue
+				}
 			}
 			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
 				return true
@@ -1790,15 +1902,51 @@ func buildBashBatchFailureError(failed int, items []map[string]interface{}) erro
 
 func looksLikeSearchShellCommand(command string) bool {
 	cmdParts := runtimeexecutor.SplitCommandTokens(command)
-	if firstSearchToolToken(cmdParts) != "" {
+	if firstRipgrepOrGrepToken(cmdParts) != "" {
+		return true
+	}
+	if isPrimaryOnlySearchTool(primaryCommandBase(cmdParts)) {
 		return true
 	}
 	lower := strings.ToLower(command)
 	return strings.Contains(lower, "rg ") ||
 		strings.Contains(lower, "rg.exe") ||
 		strings.HasPrefix(strings.TrimSpace(lower), "rg") ||
-		strings.Contains(lower, "grep ") ||
-		strings.Contains(lower, "findstr ")
+		strings.Contains(lower, "grep ")
+}
+
+// looksLikeSimpleShellCodeSearch recognizes standalone rg invocations that can
+// be expressed by the dedicated toolkit grep tool. It intentionally excludes
+// pipelines/chains/redirections and administrative rg modes so shell remains
+// available when it provides behavior the toolkit grep API does not.
+func looksLikeSimpleShellCodeSearch(command string) (string, bool) {
+	parts := runtimeexecutor.SplitCommandTokens(command)
+	if len(parts) < 2 {
+		return "", false
+	}
+	primary := primaryCommandBase(parts)
+	if primary != "rg" && primary != "ripgrep" {
+		return "", false
+	}
+	for _, part := range parts {
+		switch strings.TrimSpace(part) {
+		case "|", "||", "&&", "&", ";", ">", "<":
+			return "", false
+		}
+	}
+	for _, part := range parts[1:] {
+		lower := strings.ToLower(strings.TrimSpace(part))
+		if eq := strings.IndexByte(lower, '='); eq >= 0 {
+			lower = lower[:eq]
+		}
+		switch lower {
+		case "-h", "--help", "-v", "--version", "--pcre2-version",
+			"--files", "--files-with-matches", "--files-without-match",
+			"--type-list", "--type-add", "--type-clear", "--generate":
+			return "", false
+		}
+	}
+	return primary, true
 }
 
 func bashSearchNoMatchNextAction() string {

@@ -106,6 +106,7 @@ const chatApprovalGrantTTL = 10 * time.Minute
 const chatRuntimeEventSettleWindow = 80 * time.Millisecond
 const chatRuntimeEventQueueByteLimit int64 = 4 << 20
 const chatRuntimeEndRunDrainTimeout = 8 * time.Second
+const chatRuntimeInterruptedEndRunDrainTimeout = 250 * time.Millisecond
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	if session == nil {
@@ -394,7 +395,7 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	if b == nil {
 		return
 	}
-	b.WaitForCurrentEvents(chatRuntimeEndRunDrainTimeout)
+	b.WaitForCurrentEvents(b.endRunDrainTimeout())
 	b.logRunEndFallback()
 	b.renderMu.Lock()
 	b.runActive = false
@@ -404,10 +405,11 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	if b.session != nil && b.session.Interaction != nil {
 		// Codex-aligned: natural turn completion returns the composer to idle/Ready.
-		// Keep Stopping while an interrupt is in flight; surface Failed only as an
-		// internal terminal stage (UI still maps it to Ready).
+		// Keep Stopping only while interrupt cleanup (actor stop / lease release)
+		// is still in flight. Once cleanup finishes, return to Ready even if the
+		// interrupted flag remains set until the next ResetInterrupt().
 		stage := chatAgentStageIdle
-		if b.session.IsInterrupted() {
+		if b.session.IsInterrupted() && b.session.isInterruptCleanupInFlight() {
 			stage = chatAgentStageStopping
 		} else if b.RunError() != nil {
 			stage = chatAgentStageFailed
@@ -416,6 +418,23 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	flushChatSessionLog(b.session)
 	b.writePromptIfIdle()
+}
+
+func (b *chatRuntimeEventBridge) endRunDrainTimeout() time.Duration {
+	if b != nil && b.session != nil && b.session.IsInterrupted() {
+		return chatRuntimeInterruptedEndRunDrainTimeout
+	}
+	return chatRuntimeEndRunDrainTimeout
+}
+
+func chatRuntimeEventDrainTimeout(session *ChatSession, normal time.Duration) time.Duration {
+	if session != nil && session.IsInterrupted() {
+		return chatRuntimeInterruptedEndRunDrainTimeout
+	}
+	if normal <= 0 {
+		return chatRuntimeEndRunDrainTimeout
+	}
+	return normal
 }
 
 func (b *chatRuntimeEventBridge) logRunEndFallback() {

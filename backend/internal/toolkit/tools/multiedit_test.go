@@ -337,6 +337,42 @@ func TestMultieditTool_HealsCRLFMismatch(t *testing.T) {
 	}
 }
 
+func TestMultieditTool_HealsMissingLeadingIndent(t *testing.T) {
+	tmpFile, err := osCreateTempFile(
+		"multiedit-indent-*.go",
+		"func TestFoo(t *testing.T) {\n\tif session.ChatExecutor == nil {\n\t\tt.Fatal(\"expected\")\n\t}\n}\n",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer osRemove(tmpFile)
+
+	tool := NewMultieditTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": tmpFile,
+		"edits": []interface{}{
+			map[string]interface{}{
+				"old_string": "if session.ChatExecutor == nil {\n\t\tt.Fatal(\"expected\")\n\t}",
+				"new_string": "if session.ChatExecutor == nil {\n\t\tt.Fatal(\"expected ready\")\n\t}",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected indent auto-heal via shared matchEditStrings, got %v", result.Error)
+	}
+	data, readErr := os.ReadFile(tmpFile)
+	if readErr != nil {
+		t.Fatalf("read: %v", readErr)
+	}
+	want := "func TestFoo(t *testing.T) {\n\tif session.ChatExecutor == nil {\n\t\tt.Fatal(\"expected ready\")\n\t}\n}\n"
+	if got := string(data); got != want {
+		t.Fatalf("multiedit indent heal mismatch\nwant %q\ngot  %q", want, got)
+	}
+}
+
 func TestMultieditTool_NoEditsAppliedIncludesClosestSnippet(t *testing.T) {
 	tmpFile, err := osCreateTempFile("multiedit-miss-*.txt", "func HelloWorld() {\n\treturn 1\n}\n")
 	if err != nil {
@@ -364,7 +400,7 @@ func TestMultieditTool_NoEditsAppliedIncludesClosestSnippet(t *testing.T) {
 	if !strings.Contains(message, "没有任何编辑被应用") {
 		t.Fatalf("expected no-edits applied prefix, got %q", message)
 	}
-	if !strings.Contains(message, "最接近片段") {
+	if !strings.Contains(message, "最接近的当前内容") && !strings.Contains(message, "最接近片段") {
 		t.Fatalf("expected closest snippet guidance, got %q", message)
 	}
 	if !strings.Contains(message, "old_string 预览") {

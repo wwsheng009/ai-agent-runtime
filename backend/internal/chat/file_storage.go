@@ -914,6 +914,17 @@ func sanitizeSessionID(sessionID string) string {
 
 func sortSessionsByUpdated(sessions []*Session) {
 	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+		left, right := sessions[i], sessions[j]
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		// Match SQLite ORDER BY updated_at DESC, id ASC so equal-time rows stay deterministic.
+		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})
 }

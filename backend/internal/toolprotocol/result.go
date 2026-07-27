@@ -49,13 +49,21 @@ type Result struct {
 // ResultFromParts builds a Result from common agent/gateway fields.
 func ResultFromParts(toolName, toolCallID, content, toolErr string, metadata map[string]interface{}) Result {
 	diag := toolresult.Diagnose(toolName, toolCallID, toolErr, metadata)
+	// Promote disposition + STALE recovery fields (current_snippet / view offset)
+	// onto wire metadata so protocol_result.EventMap thin metadata and hosts
+	// see the same contract as flat tool.completed payloads.
+	metaOut := cloneMap(metadata)
+	if metaOut == nil {
+		metaOut = map[string]interface{}{}
+	}
+	toolresult.ApplyDiagnosticMetadata(metaOut, diag)
 	result := Result{
 		ToolID:   ToolID(strings.TrimSpace(toolName)),
 		CallID:   NormalizeCallID(toolCallID),
 		OK:       diag.OK,
 		Outcome:  toolresult.NormalizeOutcome(diag.Outcome),
-		Metadata: cloneMap(metadata),
-		Source:   toolresult.SourceFromMetadata(metadata),
+		Metadata: metaOut,
+		Source:   toolresult.SourceFromMetadata(metaOut),
 	}
 	if result.Outcome == "" {
 		if diag.OK {
@@ -68,7 +76,7 @@ func ResultFromParts(toolName, toolCallID, content, toolErr string, metadata map
 			result.Outcome = toolresult.OutcomeFailed
 		}
 	}
-	if kind := toolresult.KindFromMetadata(metadata); kind != "" {
+	if kind := toolresult.KindFromMetadata(metaOut); kind != "" {
 		result.OutputKind = OutputKind(kind)
 	} else if strings.TrimSpace(content) == "" && diag.OK {
 		result.OutputKind = OutputKindEmpty
@@ -188,6 +196,13 @@ func thinEventMetadata(metadata map[string]interface{}) map[string]interface{} {
 		toolresult.MetadataFailedItemsKey,
 		toolresult.MetadataPathCandidatesKey,
 		toolresult.SourceKey,
+		// STALE / path recovery hints (compact; current_snippet is already capped).
+		"failure_class",
+		"file_path",
+		"suggested_view_offset",
+		"suggested_view_limit",
+		"current_snippet",
+		"current_snippet_start_line",
 	}
 	out := make(map[string]interface{}, len(keys))
 	for _, key := range keys {

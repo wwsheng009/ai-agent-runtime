@@ -57,13 +57,14 @@ func RecordToolOutcome(outcome, errorCode string) {
 }
 
 // RecordToolDispositionReplay counts identical-batch advisories for empty/partial
-// evidence. repeat is bucketed (1 / 2 / 3+) to avoid unbounded labels.
+// /failed evidence (failed includes STALE_CONTEXT replays). repeat is bucketed
+// (1 / 2 / 3+) to avoid unbounded labels.
 func RecordToolDispositionReplay(outcome string, repeatCount int) {
 	normalized := normalizeToolOutcome(outcome)
 	switch normalized {
-	case ToolOutcomeEmpty, ToolOutcomePartial:
+	case ToolOutcomeEmpty, ToolOutcomePartial, ToolOutcomeFailed:
 	default:
-		// Only empty/partial replays are advisory-relevant.
+		// Success/unknown are not disposition-replay advisories.
 		return
 	}
 	IncrementCounter(MetricToolDispositionReplayTotal, map[string]string{

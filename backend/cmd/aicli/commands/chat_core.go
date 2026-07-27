@@ -582,6 +582,7 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		SupportedModels:         append([]string(nil), session.Provider.SupportedModels...),
 		ModelMappings:           cloneStringMap(session.Provider.ModelMappings),
 		ModelCapabilities:       cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
+		EnableImageGeneration:   session.Provider.EnableImageGeneration,
 		Headers:                 effectiveChatProviderHeaders(session),
 		HeaderMappings:          cloneStringMap(session.Provider.HeaderMappings),
 		HeaderMappingRules:      cloneHeaderMappingRules(session.Provider.HeaderMappingRules),

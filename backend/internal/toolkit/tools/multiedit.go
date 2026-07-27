@@ -277,9 +277,14 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		// stale context: re-view and rebuild, never blind-retry the same payload.
 		if len(failedEdits) > 0 {
 			meta["failure_class"] = "stale_context"
-			if startLine := findClosestEditSnippetLine(originalContent, edits[0].OldString); startLine > 0 {
+			if closest, startLine := findClosestEditSnippetWithLine(
+				normalizeEditLineEndings(originalContent),
+				normalizeEditLineEndings(edits[0].OldString),
+			); closest != "" && startLine > 0 {
 				meta["suggested_view_offset"] = startLine - 1
 				meta["suggested_view_limit"] = 40
+				meta["current_snippet"] = closest
+				meta["current_snippet_start_line"] = startLine
 			}
 			return toolResultFailureWithCode(
 				fmt.Errorf("%s", detail),

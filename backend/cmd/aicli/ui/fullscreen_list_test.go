@@ -328,3 +328,53 @@ func TestDecodeInteractiveKeyRecognizesPageNavigation(t *testing.T) {
 		}
 	}
 }
+
+func TestFullScreenListNumbersEnabledMatchesContiguously(t *testing.T) {
+	options := FullScreenListOptions{
+		Title: "恢复历史会话",
+		Items: []FullScreenListItem{
+			{Title: "当前 · Live title（不可选）", Disabled: true, Detail: "1分钟前"},
+			{Title: "Alpha history", Detail: "3分钟前", SearchText: "alpha"},
+			{Title: "Beta skipped", Detail: "4分钟前", SearchText: "beta"},
+			{Title: "Gamma history", Detail: "5分钟前", SearchText: "gamma"},
+		},
+	}
+
+	allMatches := fullScreenListMatches(options.Items, "")
+	if got := fullScreenListItemNumber(options.Items, allMatches, 0); got != "[·]" {
+		t.Fatalf("expected disabled current row to use [·], got %q", got)
+	}
+	if got := fullScreenListItemNumber(options.Items, allMatches, 1); got != "[1]" {
+		t.Fatalf("expected first history row to start at [1], got %q", got)
+	}
+	if got := fullScreenListItemNumber(options.Items, allMatches, 3); got != "[3]" {
+		t.Fatalf("expected third enabled row to be [3], got %q", got)
+	}
+
+	frame := renderFullScreenListFrame(options, fullScreenListState{selected: 1}, allMatches, 80, 16)
+	for _, expected := range []string{"[·] 当前 · Live title（不可选）", "[1] Alpha history", "[2] Beta skipped", "[3] Gamma history"} {
+		if !strings.Contains(frame, expected) {
+			t.Fatalf("expected frame to contain %q, got %q", expected, frame)
+		}
+	}
+	if strings.Contains(frame, "[4] ") {
+		t.Fatalf("did not expect original item index numbering after disabled current row, got %q", frame)
+	}
+
+	filtered := fullScreenListMatches(options.Items, "history")
+	if len(filtered) != 2 || filtered[0] != 1 || filtered[1] != 3 {
+		t.Fatalf("expected filtered matches to keep original indexes [1 3], got %v", filtered)
+	}
+	if got := fullScreenListItemNumber(options.Items, filtered, 0); got != "[1]" {
+		t.Fatalf("expected filtered first enabled match to renumber as [1], got %q", got)
+	}
+	if got := fullScreenListItemNumber(options.Items, filtered, 1); got != "[2]" {
+		t.Fatalf("expected filtered second enabled match to renumber as [2], got %q", got)
+	}
+
+	state := fullScreenListState{selected: 1}
+	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyEnter}, options.Items, filtered, 24)
+	if !done || result.Index != 3 {
+		t.Fatalf("expected Enter to return original item index 3, got %#v done=%v", result, done)
+	}
+}

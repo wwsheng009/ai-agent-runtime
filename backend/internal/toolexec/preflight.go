@@ -52,12 +52,25 @@ type PreflightDecision struct {
 	// PathCandidates are nearby filesystem siblings that may correct a missing path.
 	// Generic model recovery signal — not tool-specific.
 	PathCandidates []string
+	// PathAutoHealed is true when a unique high-confidence nearby path replaced
+	// a missing read-only path so the tool can run instead of hard-failing.
+	PathAutoHealed bool
+	// OriginalPath / ResolvedPath record the auto-heal rewrite for observability.
+	OriginalPath string
+	ResolvedPath string
 }
 
 // ApplyPreflight validates required args, consults the failure circuit, and
 // optionally checks read-like path existence when schema/metadata imply it.
 func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 	toolName := strings.TrimSpace(req.ToolName)
+	// Models sometimes emit empty/null path placeholders as the literal characters
+	// `""` / `null` (live residual: grep path=""). Normalize those to true empty
+	// before digest/required/path checks so optional path tools can default to
+	// workspace root instead of hard-failing with root-directory noise candidates.
+	if clearPlaceholderPathLikeArgs(req.Args) {
+		// Keep decision.Args pointing at the mutated map below.
+	}
 	digest := ArgsDigest(toolName, req.Args)
 	attempt := 1
 	if memory != nil {
@@ -180,6 +193,60 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 	}
 
 	if pathErr, pathValue := preflightMissingReadPath(req); pathErr != "" {
+		// Unique high-confidence sibling (case / extension / close typo): rewrite
+		// the single missing content path and allow the read-like tool to run.
+		// Multi-path batches stay on the deny/partial path to avoid silent wrong-file reads.
+		if pathValue != "" && canAutoHealSingleMissingContentPath(req) {
+			if healedPath, hints, ambiguous := uniqueHighConfidencePathCandidate(pathValue, req); healedPath != "" {
+				// Honor PathExists hooks (tests / virtual FS). Only rewrite when the
+				// healed candidate is considered present by the same checker used for
+				// the original miss — never invent a path that still fails existence.
+				if pathExistsChecker(req)(healedPath) && rewritePathLikeArgs(req.Args, pathValue, healedPath) {
+					decision.Allow = true
+					decision.PathAutoHealed = true
+					decision.OriginalPath = pathValue
+					decision.ResolvedPath = healedPath
+					decision.PathCandidates = hints
+					decision.Preflight = "path_auto_heal"
+					decision.Args = req.Args
+					decision.Digest = ArgsDigest(toolName, req.Args)
+					if memory != nil {
+						decision.Attempt = memory.BeginAttempt(toolName, decision.Digest)
+					}
+					decision.NextAction = fmt.Sprintf(
+						"Path auto-healed: %s → %s (unique high-confidence nearby match). Proceed with resolved path; prefer the corrected path on future calls.",
+						pathValue,
+						healedPath,
+					)
+					observability.RecordToolPreflight(decision.Preflight, true)
+					return decision
+				}
+			} else if ambiguous && len(hints) > 0 {
+				// Multiple high-confidence siblings — deny with explicit pick guidance
+				// so the model does not invent a third path or blind-retry the miss.
+				decision.Allow = false
+				decision.ErrorCode = string(runtimeerrors.ErrToolPathNotFound)
+				decision.Error = fmt.Sprintf("%s: %s (ambiguous candidates: %s)", pathErr, pathValue, strings.Join(hints, ", "))
+				decision.Retryable = false
+				decision.PathCandidates = hints
+				decision.Preflight = "path_existence"
+				decision.NextAction = fmt.Sprintf(
+					"Path not found: %s. Ambiguous nearby matches (no unique auto-heal): %s. Pick exactly one confirmed path_candidates entry (or ls/glob to disambiguate), then retry. Do not invent a third path or retry the same missing path unchanged.",
+					pathValue,
+					strings.Join(hints, ", "),
+				)
+				diagMeta := map[string]interface{}{
+					toolresult.MetadataErrorCodeKey:  decision.ErrorCode,
+					toolresult.MetadataRetryableKey:  false,
+					toolresult.MetadataNextActionKey: decision.NextAction,
+					MetadataPathCandidatesKey:        decision.PathCandidates,
+				}
+				decision.Diagnostic = toolresult.Diagnose(toolName, req.ToolCallID, decision.Error, diagMeta)
+				observability.RecordToolPreflight(decision.Preflight, false)
+				return decision
+			}
+		}
+
 		decision.Allow = false
 		decision.ErrorCode = string(runtimeerrors.ErrToolPathNotFound)
 		decision.Error = pathErr
@@ -188,14 +255,55 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 		decision.Preflight = "path_existence"
 		if pathValue != "" {
 			decision.Error = fmt.Sprintf("%s: %s", pathErr, pathValue)
-			if hints := suggestNearbyPathCandidatesForRequest(pathValue, req); len(hints) > 0 {
+			hints := suggestNearbyPathCandidatesForRequest(pathValue, req)
+			parentHint := existingParentPathHint(pathValue, req)
+			// Ranked sibling miss is common for invented leaves. When the parent
+			// exists, still surface a short non-noise sibling sample so the model
+			// can pick a real name without an extra ls/glob round-trip.
+			parentOnly := false
+			if len(hints) == 0 && parentHint != "" {
+				parentOnly = true
+				hints = []string{parentHint}
+				if siblings := listParentSiblingDiscoveryHints(pathValue, parentHint, req); len(siblings) > 0 {
+					hints = append(hints, siblings...)
+				}
+			}
+			if len(hints) > 0 {
 				decision.PathCandidates = hints
-				decision.NextAction = fmt.Sprintf(
-					"Path not found: %s. Nearby candidates: %s. Correct the path or working directory, then call the tool again. Do not retry the same missing path unchanged.",
-					pathValue,
-					strings.Join(hints, ", "),
-				)
+				if parentOnly {
+					if len(hints) > 1 {
+						decision.NextAction = fmt.Sprintf(
+							"Path not found: %s. Parent directory exists: %s. Sample siblings under the parent are listed in path_candidates after the parent; pick one confirmed entry (or ls/glob under the parent for more), then retry. Do not invent a new leaf or retry the same missing path unchanged.",
+							pathValue,
+							parentHint,
+						)
+					} else {
+						decision.NextAction = fmt.Sprintf(
+							"Path not found: %s. Parent directory exists: %s. Use ls/glob under the parent (or glob for the basename), pick a confirmed path from path_candidates, then retry. Do not retry the same missing path unchanged.",
+							pathValue,
+							parentHint,
+						)
+					}
+				} else if len(hints) >= 2 {
+					decision.NextAction = fmt.Sprintf(
+						"Path not found: %s. Multiple nearby candidates: %s. Pick exactly one path_candidates entry (or ls/glob under the parent to confirm), then call the tool again. Do not invent a new path or retry the same missing path unchanged.",
+						pathValue,
+						strings.Join(hints, ", "),
+					)
+				} else {
+					decision.NextAction = fmt.Sprintf(
+						"Path not found: %s. Nearby candidates: %s. Prefer a path_candidates entry (or ls/glob under the parent), then call the tool again. Do not retry the same missing path unchanged.",
+						pathValue,
+						strings.Join(hints, ", "),
+					)
+				}
 				decision.Error = fmt.Sprintf("%s: %s (candidates: %s)", pathErr, pathValue, strings.Join(hints, ", "))
+			} else if parentHint != "" {
+				decision.NextAction = fmt.Sprintf(
+					"Path not found: %s. Parent directory exists: %s. Use ls/glob under the parent to discover the correct name, then retry. Do not retry the same missing path unchanged.",
+					pathValue,
+					parentHint,
+				)
 			}
 		}
 		diagMeta := map[string]interface{}{
@@ -227,6 +335,21 @@ func AttachPreflightMetadata(metadata map[string]interface{}, decision Preflight
 	}
 	if decision.Circuit {
 		metadata[MetadataCircuitOpenKey] = true
+	}
+	if decision.PathAutoHealed {
+		metadata["path_auto_healed"] = true
+		if decision.OriginalPath != "" {
+			metadata["original_path"] = decision.OriginalPath
+		}
+		if decision.ResolvedPath != "" {
+			metadata["resolved_path"] = decision.ResolvedPath
+		}
+		if len(decision.PathCandidates) > 0 {
+			metadata[MetadataPathCandidatesKey] = append([]string(nil), decision.PathCandidates...)
+		}
+		if decision.NextAction != "" {
+			metadata[toolresult.MetadataNextActionKey] = decision.NextAction
+		}
 	}
 	if decision.SoftEmpty {
 		metadata[MetadataEmptyReplayKey] = true
@@ -267,6 +390,15 @@ func AttachPreflightMetadata(metadata map[string]interface{}, decision Preflight
 	}
 	if len(decision.PathCandidates) > 0 {
 		invocation[MetadataPathCandidatesKey] = append([]string(nil), decision.PathCandidates...)
+	}
+	if decision.PathAutoHealed {
+		invocation["path_auto_healed"] = true
+		if decision.OriginalPath != "" {
+			invocation["original_path"] = decision.OriginalPath
+		}
+		if decision.ResolvedPath != "" {
+			invocation["resolved_path"] = decision.ResolvedPath
+		}
 	}
 	if len(compactArgs) > 0 {
 		invocation[MetadataAttemptedArgsKey] = compactArgs
@@ -883,7 +1015,10 @@ func isEmptyArgValue(value interface{}) bool {
 	case nil:
 		return true
 	case string:
-		return strings.TrimSpace(typed) == ""
+		// Treat placeholder tokens ("" / null / undefined) as empty so required
+		// path checks and stringValues collection stay consistent with
+		// clearPlaceholderPathLikeArgs normalization.
+		return normalizePathArgPlaceholder(typed) == ""
 	case []interface{}:
 		return len(typed) == 0
 	case []string:
@@ -893,6 +1028,141 @@ func isEmptyArgValue(value interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// clearPlaceholderPathLikeArgs rewrites path-like args that are model
+// placeholders for "no path" into true empty strings (or drops them from
+// string slices). Returns whether any rewrite happened.
+//
+// Live residual (2026-07-26): grep path="" (two quote chars) was treated as a
+// missing relative path, ranked workspace-root siblings (.agents/.backups/.git)
+// as path_candidates, and blocked an otherwise valid workspace-wide search.
+func clearPlaceholderPathLikeArgs(args map[string]interface{}) bool {
+	if len(args) == 0 {
+		return false
+	}
+	changed := false
+	for key, raw := range args {
+		if !isPathLikeKey(key) {
+			// Still rewrite nested files[] path fields below.
+			if key != "files" {
+				continue
+			}
+		}
+		switch typed := raw.(type) {
+		case string:
+			if normalized := normalizePathArgPlaceholder(typed); normalized != typed {
+				args[key] = normalized
+				changed = true
+			}
+		case []string:
+			localChanged := false
+			next := make([]string, 0, len(typed))
+			for _, item := range typed {
+				normalized := normalizePathArgPlaceholder(item)
+				if normalized == "" {
+					if item != "" {
+						localChanged = true
+					}
+					continue
+				}
+				if normalized != item {
+					localChanged = true
+				}
+				next = append(next, normalized)
+			}
+			if localChanged {
+				args[key] = next
+				changed = true
+			}
+		case []interface{}:
+			localChanged := false
+			// files[] objects vs path string arrays share []interface{} shape.
+			if key == "files" {
+				for _, item := range typed {
+					obj, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					for _, nk := range []string{"file_path", "path", "filepath"} {
+						if v, exists := obj[nk]; exists {
+							if s, ok := v.(string); ok {
+								if normalized := normalizePathArgPlaceholder(s); normalized != s {
+									obj[nk] = normalized
+									localChanged = true
+								}
+							}
+						}
+					}
+				}
+				if localChanged {
+					args[key] = typed
+					changed = true
+				}
+				continue
+			}
+			next := make([]interface{}, 0, len(typed))
+			for _, item := range typed {
+				s, ok := item.(string)
+				if !ok {
+					next = append(next, item)
+					continue
+				}
+				normalized := normalizePathArgPlaceholder(s)
+				if normalized == "" {
+					if s != "" {
+						localChanged = true
+					}
+					continue
+				}
+				if normalized != s {
+					localChanged = true
+					next = append(next, normalized)
+				} else {
+					next = append(next, s)
+				}
+			}
+			if localChanged {
+				args[key] = next
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// normalizePathArgPlaceholder maps model-emitted empty/null path tokens to "".
+// True empty / "." remain caller's choice; only placeholder *literals* collapse.
+func normalizePathArgPlaceholder(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	// Literal empty-string spellings models paste when they mean "omit path".
+	switch trimmed {
+	case `""`, `''`, "``":
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	switch lower {
+	case "null", "none", "undefined", "<nil>", "nil", "n/a", "na":
+		return ""
+	}
+	// Quoted empty after one unwrap: "\"\"" already handled; also "null".
+	if len(trimmed) >= 2 {
+		if (trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"') ||
+			(trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'') {
+			inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+			if inner == "" {
+				return ""
+			}
+			switch strings.ToLower(inner) {
+			case "null", "none", "undefined", "<nil>", "nil", "n/a", "na":
+				return ""
+			}
+		}
+	}
+	return path
 }
 
 func preflightMissingReadPath(req PreflightRequest) (string, string) {
@@ -1058,7 +1328,7 @@ func collectReadPathCandidates(schema map[string]interface{}, args map[string]in
 			continue
 		}
 		for _, path := range stringValues(args[key]) {
-			path = strings.TrimSpace(path)
+			path = normalizePathArgPlaceholder(path)
 			if path == "" {
 				continue
 			}
@@ -1073,7 +1343,7 @@ func collectReadPathCandidates(schema map[string]interface{}, args map[string]in
 	if rawFiles, ok := args["files"]; ok {
 		for _, item := range asObjectSlice(rawFiles) {
 			for _, key := range []string{"file_path", "path", "filepath"} {
-				if path := strings.TrimSpace(fmt.Sprint(item[key])); path != "" && path != "<nil>" {
+				if path := normalizePathArgPlaceholder(fmt.Sprint(item[key])); path != "" && path != "<nil>" {
 					if _, ok := seen[path]; ok {
 						continue
 					}
@@ -1107,7 +1377,7 @@ func collectContentReadPathCandidates(schema map[string]interface{}, args map[st
 			continue
 		}
 		for _, path := range stringValues(args[key]) {
-			path = strings.TrimSpace(path)
+			path = normalizePathArgPlaceholder(path)
 			if path == "" {
 				continue
 			}
@@ -1121,7 +1391,7 @@ func collectContentReadPathCandidates(schema map[string]interface{}, args map[st
 	if rawFiles, ok := args["files"]; ok {
 		for _, item := range asObjectSlice(rawFiles) {
 			for _, key := range []string{"file_path", "path", "filepath"} {
-				if path := strings.TrimSpace(fmt.Sprint(item[key])); path != "" && path != "<nil>" {
+				if path := normalizePathArgPlaceholder(fmt.Sprint(item[key])); path != "" && path != "<nil>" {
 					if _, ok := seen[path]; ok {
 						continue
 					}
@@ -1137,16 +1407,25 @@ func collectContentReadPathCandidates(schema map[string]interface{}, args map[st
 func stringValues(value interface{}) []string {
 	switch typed := value.(type) {
 	case string:
-		if strings.TrimSpace(typed) == "" {
+		// Drop empty + placeholder path tokens so existence preflight never ranks
+		// workspace-root siblings for path=""/null.
+		if normalizePathArgPlaceholder(typed) == "" {
 			return nil
 		}
 		return []string{typed}
 	case []string:
-		return typed
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if normalizePathArgPlaceholder(item) == "" {
+				continue
+			}
+			out = append(out, item)
+		}
+		return out
 	case []interface{}:
 		out := make([]string, 0, len(typed))
 		for _, item := range typed {
-			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+			if text, ok := item.(string); ok && normalizePathArgPlaceholder(text) != "" {
 				out = append(out, text)
 			}
 		}
@@ -1274,6 +1553,178 @@ func defaultPathExists(path string) bool {
 
 const maxNearbyPathCandidates = 5
 
+// minPathAutoHealScore is the confidence floor for silently rewriting a missing
+// read path. Scores come from suggestNearbyPathCandidates ranking:
+// case-only=100, same-stem different-ext=70, close typo with same ext≈60-80.
+const minPathAutoHealScore = 70
+
+// canAutoHealSingleMissingContentPath is true only for single-target read-like
+// path checks. Multi-path batches keep partial/deny semantics.
+func canAutoHealSingleMissingContentPath(req PreflightRequest) bool {
+	if !shouldPreflightPaths(req.Metadata, req.InputSchema, req.Args) {
+		return false
+	}
+	// Never rewrite mutation-shaped tools even if path preflight somehow ran.
+	if hasMutationLikeArgs(req.Args) || schemaHasMutationLikeProperty(req.InputSchema) {
+		return false
+	}
+	candidates := collectContentReadPathCandidates(req.InputSchema, req.Args)
+	if len(candidates) == 0 {
+		candidates = collectReadPathCandidates(req.InputSchema, req.Args)
+	}
+	// Only auto-heal when exactly one content path is present (after trim).
+	count := 0
+	for _, candidate := range candidates {
+		path := strings.TrimSpace(candidate)
+		if path == "" || path == "." || path == "./" || strings.Contains(path, "://") {
+			continue
+		}
+		count++
+		if count > 1 {
+			return false
+		}
+	}
+	return count == 1
+}
+
+// uniqueHighConfidencePathCandidate returns a single nearby sibling when ranking
+// is unambiguous and above minPathAutoHealScore. hints always carries the ranked
+// list for metadata even when no unique heal is selected.
+//
+// The third return value is true when multiple high-confidence siblings are
+// close enough that silent rewrite would be unsafe (model must pick one).
+func uniqueHighConfidencePathCandidate(missing string, req PreflightRequest) (healed string, hints []string, ambiguous bool) {
+	missing = strings.TrimSpace(missing)
+	if missing == "" {
+		return "", nil, false
+	}
+	root := strings.TrimSpace(req.WorkspaceRoot)
+	if root != "" && !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	resolved := resolvePreflightPath(missing, root)
+	scored := rankNearbyPathCandidates(resolved)
+	if len(scored) == 0 && resolved != missing {
+		scored = rankNearbyPathCandidates(missing)
+	}
+	if len(scored) == 0 {
+		return "", nil, false
+	}
+
+	// Present candidates in the same shape the model used (relative vs absolute).
+	hints = make([]string, 0, len(scored))
+	for _, item := range scored {
+		hints = append(hints, presentPathCandidate(item.path, missing, root))
+	}
+
+	top := scored[0]
+	if top.score < minPathAutoHealScore {
+		return "", hints, false
+	}
+	// Ambiguous: another candidate within 10 points of the top score.
+	if len(scored) > 1 && scored[1].score >= top.score-10 && scored[1].score >= minPathAutoHealScore {
+		return "", hints, true
+	}
+	return presentPathCandidate(top.path, missing, root), hints, false
+}
+
+func presentPathCandidate(candidate, originalMissing, workspaceRoot string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return candidate
+	}
+	if filepath.IsAbs(originalMissing) || strings.TrimSpace(workspaceRoot) == "" {
+		return candidate
+	}
+	rel, err := filepath.Rel(workspaceRoot, candidate)
+	if err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	// If candidate was already relative (rank used original missing dir), keep it.
+	if !filepath.IsAbs(candidate) {
+		return filepath.ToSlash(candidate)
+	}
+	return candidate
+}
+
+// rewritePathLikeArgs replaces exact path occurrences in path-like args.
+// Mutates args in place and returns whether any rewrite happened.
+func rewritePathLikeArgs(args map[string]interface{}, from, to string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	from = strings.TrimSpace(from)
+	to = strings.TrimSpace(to)
+	if from == "" || to == "" || from == to {
+		return false
+	}
+	changed := false
+
+	rewriteString := func(value string) (string, bool) {
+		if strings.TrimSpace(value) == from {
+			return to, true
+		}
+		return value, false
+	}
+
+	for key, raw := range args {
+		if !isPathLikeKey(key) || isExecutionRootPathKey(key) {
+			// Still allow nested files[] rewrites below.
+			if key != "files" {
+				continue
+			}
+		}
+		switch typed := raw.(type) {
+		case string:
+			if next, ok := rewriteString(typed); ok {
+				args[key] = next
+				changed = true
+			}
+		case []string:
+			localChanged := false
+			for i, item := range typed {
+				if next, ok := rewriteString(item); ok {
+					typed[i] = next
+					localChanged = true
+				}
+			}
+			if localChanged {
+				args[key] = typed
+				changed = true
+			}
+		case []interface{}:
+			localChanged := false
+			for i, item := range typed {
+				switch nested := item.(type) {
+				case string:
+					if next, ok := rewriteString(nested); ok {
+						typed[i] = next
+						localChanged = true
+					}
+				case map[string]interface{}:
+					for _, nk := range []string{"file_path", "path", "filepath"} {
+						if v, exists := nested[nk]; exists {
+							if s, ok := v.(string); ok {
+								if next, ok := rewriteString(s); ok {
+									nested[nk] = next
+									localChanged = true
+								}
+							}
+						}
+					}
+				}
+			}
+			if localChanged {
+				args[key] = typed
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
 // suggestNearbyPathCandidatesForRequest resolves the missing path against the
 // session workspace root before listing siblings, then rewrites candidates back
 // to the same shape the model originally used (relative vs absolute).
@@ -1321,13 +1772,42 @@ func suggestNearbyPathCandidatesForRequest(missing string, req PreflightRequest)
 // the real parent directory so candidates are grounded in actual FS contents.
 func suggestNearbyPathCandidates(missing string, pathExists func(string) bool) []string {
 	_ = pathExists
+	scored := rankNearbyPathCandidates(missing)
+	if len(scored) == 0 {
+		return nil
+	}
+	limit := maxNearbyPathCandidates
+	if len(scored) < limit {
+		limit = len(scored)
+	}
+	out := make([]string, 0, limit)
+	seen := map[string]struct{}{}
+	for _, item := range scored[:limit] {
+		if _, ok := seen[item.path]; ok {
+			continue
+		}
+		seen[item.path] = struct{}{}
+		out = append(out, item.path)
+	}
+	return out
+}
+
+type nearbyPathScore struct {
+	path  string
+	score int
+}
+
+// rankNearbyPathCandidates returns all scored sibling candidates sorted by score desc.
+func rankNearbyPathCandidates(missing string) []nearbyPathScore {
 	missing = strings.TrimSpace(missing)
 	if missing == "" {
 		return nil
 	}
 
 	dir, base := filepath.Dir(missing), filepath.Base(missing)
-	if base == "" || base == "." || base == string(filepath.Separator) {
+	// Placeholder / empty basenames must never rank workspace-root noise.
+	if base == "" || base == "." || base == string(filepath.Separator) ||
+		normalizePathArgPlaceholder(base) == "" {
 		return nil
 	}
 
@@ -1343,23 +1823,33 @@ func suggestNearbyPathCandidates(missing string, pathExists func(string) bool) [
 		}
 	}
 
-	type scored struct {
-		path  string
-		score int
-	}
 	wantLower := strings.ToLower(base)
 	wantExt := strings.ToLower(filepath.Ext(base))
+	// Treat pure dotfiles (".backups") carefully: filepath.Ext(".backups") == ".backups"
+	// which would leave an empty stem and make strings.Contains(wantStem, "") always true.
 	wantStem := strings.TrimSuffix(wantLower, wantExt)
+	if wantStem == "" {
+		wantStem = wantLower
+		wantExt = ""
+	}
 
-	candidates := make([]scored, 0, 8)
+	candidates := make([]nearbyPathScore, 0, 8)
 	for _, entry := range entries {
 		name := entry.Name()
 		if name == "" || name == base {
 			continue
 		}
+		// Drop VCS/backup noise unless the model was already looking for a dotfile.
+		if isPathSuggestionNoiseName(name) && !strings.HasPrefix(wantLower, ".") {
+			continue
+		}
 		nameLower := strings.ToLower(name)
 		nameExt := strings.ToLower(filepath.Ext(name))
 		nameStem := strings.TrimSuffix(nameLower, nameExt)
+		if nameStem == "" {
+			nameStem = nameLower
+			nameExt = ""
+		}
 
 		score := 0
 		switch {
@@ -1373,15 +1863,29 @@ func suggestNearbyPathCandidates(missing string, pathExists func(string) bool) [
 			if dist <= 2 && dist < max(1, len(wantStem)/2+1) {
 				score = 80 - dist*10
 			}
-		case nameStem == wantStem:
+		case nameStem == wantStem && wantStem != "":
+			// Missing/extra extension only (ui → ui.tsx).
 			score = 70
+		case separatorFoldedPathStemEqual(wantStem, nameStem):
+			// providertoken ↔ provider_token / aiSites ↔ ai_sites: models often
+			// drop or invent _/- separators. Strong enough for unique auto-heal.
+			score = 85
 		default:
 			dist := runeEditDistance(wantLower, nameLower)
 			if dist <= 2 && dist < max(1, len(wantLower)/2+1) {
 				score = 60 - dist*10
-			} else if wantStem != "" && (strings.Contains(nameLower, wantStem) || strings.Contains(wantStem, nameStem)) {
-				score = 40
+			} else if wantStem != "" && nameStem != "" &&
+				(strings.Contains(nameLower, wantStem) || strings.Contains(wantStem, nameStem)) {
+				// Require a meaningful stem length so tiny/empty fragments never match.
+				if len([]rune(nameStem)) >= 2 && len([]rune(wantStem)) >= 2 {
+					score = 40
+				}
 			}
+		}
+		// Separator-folded equality can still upgrade a weaker contains/typo score
+		// when the only difference is _/- (without demoting stronger exact ranks).
+		if score > 0 && score < 85 && separatorFoldedPathStemEqual(wantStem, nameStem) {
+			score = 85
 		}
 		if score <= 0 {
 			continue
@@ -1395,7 +1899,7 @@ func suggestNearbyPathCandidates(missing string, pathExists func(string) bool) [
 				candidatePath = name
 			}
 		}
-		candidates = append(candidates, scored{path: candidatePath, score: score})
+		candidates = append(candidates, nearbyPathScore{path: candidatePath, score: score})
 	}
 
 	if len(candidates) == 0 {
@@ -1407,20 +1911,170 @@ func suggestNearbyPathCandidates(missing string, pathExists func(string) bool) [
 		}
 		return candidates[i].path < candidates[j].path
 	})
-	limit := maxNearbyPathCandidates
-	if len(candidates) < limit {
-		limit = len(candidates)
+	return candidates
+}
+
+// isPathSuggestionNoiseName filters sibling basenames that commonly dominate empty
+// directories in this repo (and similar workspaces) but almost never correct a
+// missing source path. Kept as a small denylist — not a full ignore-file parser.
+func isPathSuggestionNoiseName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return true
 	}
-	out := make([]string, 0, limit)
-	seen := map[string]struct{}{}
-	for _, item := range candidates[:limit] {
-		if _, ok := seen[item.path]; ok {
+	lower := strings.ToLower(name)
+	switch lower {
+	case ".backups", ".backup", ".git", ".svn", ".hg", ".ds_store",
+		"__pycache__", "node_modules", ".idea", ".vscode", ".turbo", ".cache":
+		return true
+	}
+	// Generic backup/cache dirs: ".backups-2026", "backups", etc.
+	if strings.HasPrefix(lower, ".backup") || lower == "backups" {
+		return true
+	}
+	return false
+}
+
+// separatorFoldedPathStemEqual reports whether two basenames/stems are equal after
+// dropping _ and - separators (and case). Models frequently invent or drop these
+// when recalling package/dir names (providertoken vs provider_token).
+// Requires a minimum folded length so tiny stems never auto-heal.
+func separatorFoldedPathStemEqual(a, b string) bool {
+	fa := foldPathStemSeparators(a)
+	fb := foldPathStemSeparators(b)
+	if fa == "" || fb == "" || fa != fb {
+		return false
+	}
+	// Avoid matching very short accidental collisions (e.g. "a" / "a_").
+	if len([]rune(fa)) < 4 {
+		return false
+	}
+	return true
+}
+
+func foldPathStemSeparators(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '_' || r == '-' {
 			continue
 		}
-		seen[item.path] = struct{}{}
-		out = append(out, item.path)
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+const maxParentSiblingDiscoveryHints = 4
+
+// listParentSiblingDiscoveryHints returns a short sample of real non-noise
+// siblings under an existing parent when ranked typo candidates were empty.
+// First path_candidates entry remains the parent itself; these are discovery
+// hints only (never auto-heal targets by themselves).
+func listParentSiblingDiscoveryHints(missing, parentHint string, req PreflightRequest) []string {
+	missing = strings.TrimSpace(missing)
+	parentHint = strings.TrimSpace(parentHint)
+	if missing == "" || parentHint == "" {
+		return nil
+	}
+	root := strings.TrimSpace(req.WorkspaceRoot)
+	if root != "" && !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	resolvedParent := resolvePreflightPath(parentHint, root)
+	entries, err := os.ReadDir(resolvedParent)
+	if err != nil {
+		// Fall back to the presented parent form (relative) when resolve differs.
+		entries, err = os.ReadDir(parentHint)
+		if err != nil {
+			return nil
+		}
+		resolvedParent = parentHint
+	}
+	wantBase := filepath.Base(missing)
+	out := make([]string, 0, maxParentSiblingDiscoveryHints)
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "" || name == wantBase || isPathSuggestionNoiseName(name) {
+			continue
+		}
+		// Prefer the caller's relative/absolute style via presentPathCandidate.
+		candidatePath := filepath.Join(resolvedParent, name)
+		presented := presentPathCandidate(candidatePath, missing, root)
+		if presented == "" {
+			continue
+		}
+		if _, ok := seen[presented]; ok {
+			continue
+		}
+		// Skip duplicates of the parent itself.
+		if pathCandidatesEqual(presented, parentHint) {
+			continue
+		}
+		seen[presented] = struct{}{}
+		out = append(out, presented)
+		if len(out) >= maxParentSiblingDiscoveryHints {
+			break
+		}
 	}
 	return out
+}
+
+// existingParentPathHint returns the parent directory of a missing path when that
+// parent itself exists on disk (so models can ls/glob instead of inventing leaves).
+func existingParentPathHint(missing string, req PreflightRequest) string {
+	missing = strings.TrimSpace(missing)
+	if missing == "" || missing == "." || missing == "./" {
+		return ""
+	}
+	root := strings.TrimSpace(req.WorkspaceRoot)
+	if root != "" && !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	resolved := resolvePreflightPath(missing, root)
+	parent := filepath.Dir(resolved)
+	if parent == "" || parent == "." || parent == string(filepath.Separator) {
+		return ""
+	}
+	// Avoid suggesting drive roots / filesystem roots as "discovery" targets.
+	if parent == filepath.Dir(parent) {
+		return ""
+	}
+	exists := pathExistsChecker(req)
+	if !exists(parent) {
+		// Fall back to original missing's parent form for relative inputs.
+		origParent := filepath.Dir(missing)
+		if origParent != "" && origParent != "." && exists(origParent) {
+			return presentPathCandidate(origParent, missing, root)
+		}
+		return ""
+	}
+	// Confirm parent is a directory when possible.
+	if info, err := os.Stat(parent); err == nil && !info.IsDir() {
+		return ""
+	}
+	return presentPathCandidate(parent, missing, root)
+}
+
+func pathCandidatesEqual(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b)) ||
+		strings.EqualFold(filepath.ToSlash(filepath.Clean(a)), filepath.ToSlash(filepath.Clean(b)))
 }
 
 // runeEditDistance is a small Levenshtein distance over runes for short basenames.

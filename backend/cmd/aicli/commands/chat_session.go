@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,12 +44,13 @@ const (
 )
 
 type ChatSessionListFilter struct {
-	State    runtimechat.SessionState
-	Protocol string
-	Provider string
-	Model    string
-	Query    string
-	Limit    int
+	State     runtimechat.SessionState
+	Protocol  string
+	Provider  string
+	Model     string
+	Workspace string
+	Query     string
+	Limit     int
 }
 
 func newChatSessionManager(dir string) (*runtimechat.SessionManager, string, string, error) {
@@ -119,6 +123,10 @@ func resolveChatSessionUserID() string {
 }
 
 func loadRequestedRuntimeSession(ctx context.Context, manager *runtimechat.SessionManager, userID, sessionID string, resume bool) (*runtimechat.Session, error) {
+	return loadRequestedRuntimeSessionWithFilter(ctx, manager, userID, sessionID, resume, ChatSessionListFilter{})
+}
+
+func loadRequestedRuntimeSessionWithFilter(ctx context.Context, manager *runtimechat.SessionManager, userID, sessionID string, resume bool, filter ChatSessionListFilter) (*runtimechat.Session, error) {
 	if manager == nil {
 		return nil, nil
 	}
@@ -138,7 +146,7 @@ func loadRequestedRuntimeSession(ctx context.Context, manager *runtimechat.Sessi
 		return nil, nil
 	}
 
-	session, err := loadLatestResumableRuntimeSession(ctx, manager, userID)
+	session, err := loadLatestResumableRuntimeSessionExcludingWithFilter(ctx, manager, userID, "", filter)
 	if err != nil {
 		if errors.Is(err, runtimechat.ErrSessionNotFound) {
 			return nil, nil
@@ -324,7 +332,7 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 		return fmt.Errorf("会话管理未启用")
 	}
 
-	runtimeSession, err := loadLatestResumableRuntimeSessionExcluding(context.Background(), session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session))
+	runtimeSession, err := loadLatestResumableRuntimeSessionExcludingWithFilter(context.Background(), session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), session.SessionFilter)
 	if err != nil {
 		return err
 	}
@@ -349,6 +357,10 @@ func loadLatestResumableRuntimeSession(ctx context.Context, manager *runtimechat
 }
 
 func loadLatestResumableRuntimeSessionExcluding(ctx context.Context, manager *runtimechat.SessionManager, userID, excludedSessionID string) (*runtimechat.Session, error) {
+	return loadLatestResumableRuntimeSessionExcludingWithFilter(ctx, manager, userID, excludedSessionID, ChatSessionListFilter{})
+}
+
+func loadLatestResumableRuntimeSessionExcludingWithFilter(ctx context.Context, manager *runtimechat.SessionManager, userID, excludedSessionID string, filter ChatSessionListFilter) (*runtimechat.Session, error) {
 	if manager == nil {
 		return nil, nil
 	}
@@ -373,6 +385,9 @@ func loadLatestResumableRuntimeSessionExcluding(ctx context.Context, manager *ru
 			}
 			loaded, loadErr := manager.Get(ctx, preview.ID)
 			if loadErr != nil || loaded == nil {
+				continue
+			}
+			if !matchesChatSessionFilter(loaded, filter) {
 				continue
 			}
 			if fallback == nil {
@@ -713,7 +728,31 @@ func listResumeCandidateChatSessions(manager *runtimechat.SessionManager, userID
 			break
 		}
 	}
+	// Re-sort after filter/load so UI order matches true recency even if a
+	// storage backend returned unstable equal-time order or skipped rows.
+	sortChatSessionsByRecency(candidates)
 	return candidates, nil
+}
+
+// sortChatSessionsByRecency orders sessions newest-first, with ID ASC as a
+// stable tie-break so equal UpdatedAt values never flip between listings.
+func sortChatSessionsByRecency(sessions []*runtimechat.Session) {
+	if len(sessions) <= 1 {
+		return
+	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		left, right := sessions[i], sessions[j]
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
+	})
 }
 
 func matchesChatSessionFilter(session *runtimechat.Session, filter ChatSessionListFilter) bool {
@@ -744,6 +783,13 @@ func matchesChatSessionFilter(session *runtimechat.Session, filter ChatSessionLi
 		}
 	}
 
+	if workspace := strings.TrimSpace(filter.Workspace); workspace != "" {
+		storedWorkspace := runtimeSessionWorkspacePath(session)
+		if !sameChatSessionWorkspace(storedWorkspace, workspace) {
+			return false
+		}
+	}
+
 	query := strings.ToLower(strings.TrimSpace(filter.Query))
 	if query == "" {
 		return true
@@ -757,6 +803,7 @@ func matchesChatSessionFilter(session *runtimechat.Session, filter ChatSessionLi
 		runtimeSessionContextString(session, runtimechat.ContextCompactRootTitle),
 		runtimeSessionContextString(session, chatRuntimeContextProviderName),
 		runtimeSessionContextString(session, chatRuntimeContextModel),
+		runtimeSessionWorkspacePath(session),
 	}
 	for _, candidate := range candidates {
 		if strings.Contains(strings.ToLower(candidate), query) {
@@ -764,6 +811,52 @@ func matchesChatSessionFilter(session *runtimechat.Session, filter ChatSessionLi
 		}
 	}
 	return false
+}
+
+func sameChatSessionWorkspace(left, right string) bool {
+	left = normalizeChatSessionWorkspace(left)
+	right = normalizeChatSessionWorkspace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func normalizeChatSessionWorkspace(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	return filepath.Clean(path)
+}
+
+func runtimeSessionWorkspacePath(session *runtimechat.Session) string {
+	if session == nil || session.Metadata.Context == nil {
+		return ""
+	}
+	if workspace := normalizeChatSessionWorkspace(runtimeSessionContextString(session, sessionmeta.WorkspacePath)); workspace != "" {
+		return workspace
+	}
+
+	// Older aicli sessions froze cwd only inside the environment context block.
+	// Keep them resumable by the cwd filter without changing the storage schema.
+	block := strings.TrimSpace(runtimeSessionContextString(session, sessionmeta.EnvironmentContextBlock))
+	if block == "" {
+		return ""
+	}
+	var environment struct {
+		CWD string `xml:"cwd"`
+	}
+	if err := xml.Unmarshal([]byte(block), &environment); err != nil {
+		return ""
+	}
+	return normalizeChatSessionWorkspace(environment.CWD)
 }
 
 func promptStartupSessionSelection(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter) (*runtimechat.Session, bool, error) {
@@ -1805,6 +1898,9 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Tim
 	}
 
 	lines := []string{header}
+	if workspace := runtimeSessionWorkspacePath(session); workspace != "" {
+		lines = append(lines, fmt.Sprintf("    工作目录: %s", workspace))
+	}
 	if preview.Summary != "" && strings.TrimSpace(preview.Summary) != title {
 		lines = append(lines, fmt.Sprintf("    摘要: %s", strings.TrimSpace(preview.Summary)))
 	}

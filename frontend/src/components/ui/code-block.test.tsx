@@ -3,14 +3,18 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { CodeBlock } from "./code-block";
-import { highlightCode } from "./code-highlighting";
+import { codeHighlightingReady, highlightCode } from "./code-highlighting";
 
 describe("CodeBlock", () => {
   let container: HTMLDivElement;
   let root: Root | null;
+
+  beforeAll(async () => {
+    await codeHighlightingReady;
+  });
 
   beforeEach(() => {
     container = document.createElement("div");

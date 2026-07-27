@@ -215,6 +215,13 @@ func TestAnthropicIsReasoningModel_ReturnsTrueForClaudeModels(t *testing.T) {
 	a := &AnthropicAdapter{}
 
 	reasoningModels := []string{
+		"claude-fable-5",
+		"claude-mythos-5",
+		"claude-mythos-preview",
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-opus-4-8",
+		"claude-opus-4-7",
 		"claude-opus-4-6",
 		"claude-sonnet-4-6",
 		"claude-opus-4-5",

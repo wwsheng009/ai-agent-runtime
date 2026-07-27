@@ -17,6 +17,11 @@ func TestIsUnsupportedRequestParameter(t *testing.T) {
 			t.Fatalf("expected unsupported parameter match for %q", message)
 		}
 	}
+	// Anthropic adaptive thinking rejects nested effort under thinking.adaptive.
+	adaptiveErr := fmt.Errorf(`HTTP 400: {"type":"error","error":{"type":"invalid_request_error","message":"thinking.adaptive.effort: Extra inputs are not permitted"}}`)
+	if !IsUnsupportedRequestParameter(adaptiveErr, "thinking") {
+		t.Fatalf("expected thinking.adaptive.effort extra_forbidden to match thinking")
+	}
 	if IsUnsupportedRequestParameter(fmt.Errorf("HTTP 502: upstream unavailable"), MetadataKeyParallelToolCalls) {
 		t.Fatal("did not expect unrelated provider error to match")
 	}

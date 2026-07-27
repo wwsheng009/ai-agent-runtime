@@ -605,7 +605,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 
 	req := a.buildRequest(prompt, nil, true, nil, "", nil)
 
-	routes := a.skillRouter.Route(ctx, prompt)
+	routes := a.skillRouter.RouteDirect(ctx, prompt)
 	return a.runWithPreparedRoutes(ctx, req, routes)
 }
 
@@ -619,7 +619,7 @@ func (a *Agent) RunWithHistory(ctx context.Context, prompt string, history []typ
 
 	req := a.buildRequest(prompt, history, false, nil, "", nil)
 
-	routes := a.skillRouter.Route(ctx, prompt)
+	routes := a.skillRouter.RouteDirect(ctx, prompt)
 	return a.runWithPreparedRoutes(ctx, req, routes)
 }
 
@@ -633,7 +633,7 @@ func (a *Agent) RunWithHistoryAndContext(ctx context.Context, prompt string, his
 
 	req := a.buildRequest(prompt, history, false, contextValues, "", nil)
 
-	routes := a.skillRouter.Route(ctx, prompt)
+	routes := a.skillRouter.RouteDirect(ctx, prompt)
 	return a.runWithPreparedRoutes(ctx, req, routes)
 }
 

@@ -48,6 +48,67 @@ func TestSessionActorSubmitPromptReturnsAfterActorStopped(t *testing.T) {
 	}
 }
 
+func TestCloneLoopConfigForRunRequiresBoundTeamTaskForCompleteTask(t *testing.T) {
+	base := &agent.LoopReActConfig{
+		CompletionRequirement: agent.CompletionRequirementCompleteTask,
+	}
+	tests := []struct {
+		name    string
+		runMeta *team.RunMeta
+		want    string
+	}{
+		{
+			name: "persisted base without run meta is ignored",
+			want: agent.CompletionRequirementNone,
+		},
+		{
+			name: "standalone child requirement is ignored",
+			runMeta: &team.RunMeta{
+				CompletionRequirement: "complete_task",
+			},
+			want: agent.CompletionRequirementNone,
+		},
+		{
+			name: "team without current task is ignored",
+			runMeta: &team.RunMeta{
+				CompletionRequirement: "complete_task",
+				Team:                  &team.TeamRunMeta{TeamID: "team-1"},
+			},
+			want: agent.CompletionRequirementNone,
+		},
+		{
+			name: "bound teammate task keeps explicit requirement",
+			runMeta: &team.RunMeta{
+				CompletionRequirement: "complete_task",
+				Team: &team.TeamRunMeta{
+					TeamID:        "team-1",
+					CurrentTaskID: "task-1",
+				},
+			},
+			want: agent.CompletionRequirementCompleteTask,
+		},
+		{
+			name: "explicit none overrides persisted base for team run",
+			runMeta: &team.RunMeta{
+				CompletionRequirement: "none",
+				Team: &team.TeamRunMeta{
+					TeamID:        "team-1",
+					CurrentTaskID: "task-1",
+				},
+			},
+			want: agent.CompletionRequirementNone,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cloneLoopConfigForRun(base, nil, tt.runMeta)
+			require.NotNil(t, got)
+			assert.Equal(t, tt.want, got.CompletionRequirement)
+		})
+	}
+}
+
 func TestAppendSessionActorToolErrorPayloadDistinguishesRecoveredErrors(t *testing.T) {
 	payload := map[string]interface{}{}
 	appendSessionActorToolErrorPayload(payload, &agent.Result{
@@ -1801,6 +1862,60 @@ func TestSessionActorSubmitPrompt_RoutesMatchedSkillBeforeReAct(t *testing.T) {
 	require.GreaterOrEqual(t, len(updated.History), 2)
 	require.Equal(t, "assistant", updated.History[len(updated.History)-1].Role)
 	require.Equal(t, "SKILL_RUNTIME_OK", updated.History[len(updated.History)-1].Content)
+}
+
+func TestSessionActorSubmitPrompt_DoesNotDirectRouteToolWorkflow(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "gpt-4",
+		MaxRetries:   1,
+	})
+	mockProvider := NewMockLLMProviderForChat()
+	runtime.RegisterProvider(mockProvider.Name(), mockProvider)
+	_ = runtime.RegisterProviderAlias("gpt-4", mockProvider.Name())
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-workflow-route-guard-test",
+		Model:    "gpt-4",
+		MaxSteps: 2,
+	}, nil, runtime)
+	require.NoError(t, apiAgent.RegisterSkill(&skill.Skill{
+		Name:        "run_shell_command",
+		Description: "Run a shell workflow",
+		Triggers: []skill.Trigger{
+			{Type: "keyword", Values: []string{"shell command"}, Weight: 1},
+		},
+		Workflow: &skill.Workflow{Steps: []skill.WorkflowStep{{
+			ID:   "run_command",
+			Tool: "shell",
+			Args: map[string]interface{}{"command": "{{prompt}}"},
+		}}},
+	}))
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	prompt := "Running shell commands=[3]\nCaptured output only; analyze why the agent stopped."
+	result, err := actor.SubmitPrompt(ctx, prompt, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Greater(t, result.Steps, 0, "the prompt must reach the LLM loop")
+	require.NotEqual(t, "run_shell_command", result.Skill)
 }
 
 func TestSessionActorSubmitPrompt_BypassesMatchedSkillDuringTeamRun(t *testing.T) {

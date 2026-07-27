@@ -367,16 +367,124 @@ func TestShellFunction_ExplicitTimeoutOverridesEnvDefault(t *testing.T) {
 	}
 }
 
+func TestShellFunction_IgnoresZeroTimeoutPlaceholder(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 0,
+	})
+	// Zero is treated as absent placeholder (align with toolkit bash).
+	if err != nil {
+		t.Fatalf("expected zero timeout_ms to fall back to default, got %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != resolveDefaultShellFunctionTimeout() {
+		t.Fatalf("expected default timeout, got %v", inspector.lastTimeout)
+	}
+}
+
 func TestShellFunction_RejectsInvalidTimeout(t *testing.T) {
 	fn := NewShellFunction()
 	fn.SetExecuter(&inspectShellExecuter{output: "ok"})
 
 	_, err := fn.Execute(context.Background(), map[string]interface{}{
 		"command":    "npx tsc --noEmit",
-		"timeout_ms": 0,
+		"timeout_ms": -1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "timeout_ms 参数无效") {
 		t.Fatalf("expected timeout validation error, got %v", err)
+	}
+}
+
+func TestShellFunction_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":     `rg -n "pattern" backend/cmd/aicli --type go`,
+		"timeout_ms":  1,
+		"timeout_sec": 30,
+		"timeout":     "",
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != 30*time.Second {
+		t.Fatalf("expected timeout_sec=30 to win over noisy timeout_ms=1, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestShellFunction_KeepsPlausibleShortTimeoutMsOverTimeoutSec(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":     "echo hi",
+		"timeout_ms":  250,
+		"timeout_sec": 20,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != 250*time.Millisecond {
+		t.Fatalf("expected plausible timeout_ms=250 to keep priority, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestParseShellFunctionTimeout_NoiseReconciliation(t *testing.T) {
+	got, err := parseShellFunctionTimeout(map[string]interface{}{
+		"timeout_ms":  1,
+		"timeout_sec": 60,
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellFunctionTimeout: %v", err)
+	}
+	if got != 60*time.Second {
+		t.Fatalf("expected 60s, got %v", got)
+	}
+
+	got, err = parseShellFunctionTimeout(map[string]interface{}{
+		"timeout_ms": 1,
+		"timeout":    "2m",
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellFunctionTimeout named: %v", err)
+	}
+	if got != 2*time.Minute {
+		t.Fatalf("expected 2m, got %v", got)
+	}
+
+	got, err = parseShellFunctionTimeout(map[string]interface{}{
+		"timeout_ms": 30,
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellFunctionTimeout lone ms: %v", err)
+	}
+	if got != 30*time.Second {
+		t.Fatalf("expected lone timeout_ms=30 noise to use the default, got %v", got)
+	}
+
+	got, err = parseShellFunctionTimeout(map[string]interface{}{
+		"timeout": "30ms",
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellFunctionTimeout explicit sub-floor duration: %v", err)
+	}
+	if got != 30*time.Millisecond {
+		t.Fatalf("expected timeout=30ms to remain explicit, got %v", got)
 	}
 }
 

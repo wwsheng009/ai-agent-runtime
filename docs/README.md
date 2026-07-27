@@ -27,6 +27,7 @@ Main sections:
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
 - `working/` - point-in-time debugging notes and implementation snapshots
+- Provider config field notes live under `backend/docs/config/` (for example `enable_image_generation`)
 
 Recommended starting points:
 

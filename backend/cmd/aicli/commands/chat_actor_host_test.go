@@ -3346,11 +3346,16 @@ func TestBuildLocalChatAgent_PropagatesRuntimeWorkspaceOptions(t *testing.T) {
 	}
 }
 
-func TestBuildLocalChatAgent_UsesProviderMaxTokensLimitAsDefault(t *testing.T) {
+func TestBuildLocalChatAgent_UsesCappedDefaultMaxTokens(t *testing.T) {
 	session := &ChatSession{
 		Provider: agentconfig.Provider{
-			MaxTokensLimit: 10000,
+			Protocol:       "anthropic",
+			MaxTokensLimit: 131072,
+			ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"claude-opus-4-7": {MaxTokens: 128000},
+			},
 		},
+		Model: "claude-opus-4-7",
 	}
 	host := &localChatRuntimeHost{
 		Bootstrap: &runtimebootstrap.Manager{},
@@ -3365,8 +3370,9 @@ func TestBuildLocalChatAgent_UsesProviderMaxTokensLimitAsDefault(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("expected agent config")
 	}
-	if cfg.DefaultMaxTokens != 10000 {
-		t.Fatalf("expected DefaultMaxTokens=10000, got %d", cfg.DefaultMaxTokens)
+	// Provider max_tokens_limit is a hard ceiling, not the default request budget.
+	if cfg.DefaultMaxTokens != runtimellm.CappedDefaultMaxTokens {
+		t.Fatalf("expected DefaultMaxTokens=%d (capped default), got %d", runtimellm.CappedDefaultMaxTokens, cfg.DefaultMaxTokens)
 	}
 }
 

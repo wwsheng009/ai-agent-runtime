@@ -19,6 +19,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -356,8 +357,22 @@ func localChatRouteParentDefaults(host *localChatRuntimeHost, parentSession *run
 		parent.Provider = strings.TrimSpace(base.ProviderName)
 		parent.Model = strings.TrimSpace(base.Model)
 		parent.ReasoningEffort = strings.TrimSpace(base.ReasoningEffort)
-		if maxTokens := base.Provider.GetMaxTokensLimit(); maxTokens > 0 {
-			parent.MaxTokens = maxTokens
+		// Parent default request budget uses the capped model default, not
+		// the full provider max_tokens_limit ceiling.
+		protocol := base.Provider.GetProtocol()
+		model := strings.TrimSpace(base.Model)
+		providerLimit := base.Provider.GetMaxTokensLimit()
+		capability, hasCapability := agentconfig.ModelCapabilitySpec{}, false
+		if model != "" && len(base.Provider.ModelCapabilities) > 0 {
+			if cap, ok := base.Provider.ModelCapabilities[model]; ok {
+				capability, hasCapability = cap, true
+			} else if cap, ok := base.Provider.ModelCapabilities["*"]; ok {
+				capability, hasCapability = cap, true
+			}
+		}
+		resolved := runtimellm.ResolveRequestMaxTokens(protocol, model, 0, capability, hasCapability, providerLimit)
+		if resolved.Default > 0 {
+			parent.MaxTokens = resolved.Default
 		}
 		parent.Timeout = base.Provider.Timeout
 	}

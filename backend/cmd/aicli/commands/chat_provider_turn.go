@@ -333,17 +333,23 @@ func hasIncompleteToolCallMarkup(content string) bool {
 }
 
 func resolveMaxTokens(session *ChatSession) int {
-	if limit := session.Provider.GetMaxTokensLimit(); limit > 0 {
-		return limit
+	if session == nil {
+		return runtimellm.CappedDefaultMaxTokens
 	}
-	switch strings.ToLower(strings.TrimSpace(session.Provider.GetProtocol())) {
-	case "anthropic":
-		return 8192
-	case "gemini":
-		return 8192
-	default:
-		return 4096
+	protocol := session.Provider.GetProtocol()
+	model := strings.TrimSpace(session.Model)
+	providerLimit := session.Provider.GetMaxTokensLimit()
+	capability, hasCapability := reasoningEffortCapabilityForRequest(session)
+	// Prefer an explicit session override when present; otherwise use the
+	// Claude Code-style capped model default instead of the full provider ceiling.
+	resolved := runtimellm.ResolveRequestMaxTokens(protocol, model, 0, capability, hasCapability, providerLimit)
+	if resolved.Default > 0 {
+		return resolved.Default
 	}
+	if providerLimit > 0 {
+		return minInt(providerLimit, runtimellm.CappedDefaultMaxTokens)
+	}
+	return runtimellm.CappedDefaultMaxTokens
 }
 
 func adapterRequestConfig(session *ChatSession, messages []map[string]interface{}, req runtimechatcore.ProviderTurnRequest) adapter.RequestConfig {
@@ -388,6 +394,7 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 	if session.FastMode && chatSessionSupportsFastMode(session) {
 		config.Metadata["service_tier"] = codexServiceTierPriority
 	}
+	enableNativeImageGeneration := session.Provider.AllowsCodexImageGeneration()
 	if defs := req.Tools; len(defs) > 0 {
 		if strings.EqualFold(strings.TrimSpace(session.Provider.GetProtocol()), "codex") {
 			config.Functions = runtimellm.BuildToolDefinitionsForRequest(
@@ -396,6 +403,7 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 				session.Model,
 				session.Provider.ModelCapabilities,
 				false,
+				enableNativeImageGeneration,
 			)
 		} else {
 			catalog := ensureFunctionCatalog(session)
@@ -409,6 +417,7 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 			session.Model,
 			session.Provider.ModelCapabilities,
 			false,
+			enableNativeImageGeneration,
 		)
 	}
 	return config

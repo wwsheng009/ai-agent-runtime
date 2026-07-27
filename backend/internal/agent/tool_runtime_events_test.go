@@ -404,6 +404,142 @@ func TestToolCompletedEventPayloadIncludesStructuredTimeoutMetadata(t *testing.T
 	}
 }
 
+func TestToolCompletedEventPayloadPromotesStaleContextDisposition(t *testing.T) {
+	// End-to-end: tool-authored STALE_CONTEXT lives in raw toolkit metadata,
+	// recordToolExecutionOutcome must promote codes + recovery hints, and
+	// tool.completed payload / Diagnose must surface them for chat-log export.
+	metadata := map[string]interface{}{"step": 2, "trace_id": "trace-stale-event"}
+	result := toolExecutionResult{
+		Call: types.ToolCall{ID: "call-edit-stale", Name: "edit"},
+	}
+	recordToolExecutionOutcome(&result, metadata, "partial", map[string]interface{}{
+		"error_code":                 string(runtimeerrors.ErrToolStaleContext),
+		"retryable":                  false,
+		"failure_class":              "stale_context",
+		"file_path":                  `E:\projects\demo\file.go`,
+		"suggested_view_offset":      12,
+		"suggested_view_limit":       40,
+		"current_snippet":            "func Hello() {}\n",
+		"current_snippet_start_line": 13,
+		"next_action":                "STALE_CONTEXT: copy current_snippet then rebuild; do not retry the same stale old_string unchanged.",
+	}, fmt.Errorf("old_string 未在文件中找到；edit 只执行精确匹配"))
+	result.Envelope = &output.Envelope{Metadata: metadata}
+
+	payload := toolCompletedEventPayload(result, 2, "trace-stale-event", nil)
+	if payload["error_code"] != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("payload error_code=%v want STALE_CONTEXT meta=%#v", payload["error_code"], metadata)
+	}
+	if payload["ok"] != false {
+		t.Fatalf("expected ok=false, got %#v", payload)
+	}
+	if payload["retryable"] != false {
+		t.Fatalf("expected retryable=false, got %#v", payload)
+	}
+	next, _ := payload["next_action"].(string)
+	if !strings.Contains(next, "STALE_CONTEXT") || !strings.Contains(next, "current_snippet") {
+		t.Fatalf("expected tool-authored STALE_CONTEXT next_action, got %q", next)
+	}
+	if payload["failure_class"] != "stale_context" {
+		t.Fatalf("expected failure_class=stale_context, got %#v", payload["failure_class"])
+	}
+	if payload["file_path"] != `E:\projects\demo\file.go` {
+		t.Fatalf("expected file_path promoted, got %#v", payload["file_path"])
+	}
+	if offset, _ := payload["suggested_view_offset"].(int); offset != 12 {
+		t.Fatalf("expected suggested_view_offset=12, got %#v", payload["suggested_view_offset"])
+	}
+	if limit, _ := payload["suggested_view_limit"].(int); limit != 40 {
+		t.Fatalf("expected suggested_view_limit=40, got %#v", payload["suggested_view_limit"])
+	}
+	if snippet, _ := payload["current_snippet"].(string); !strings.Contains(snippet, "func Hello") {
+		t.Fatalf("expected current_snippet on payload, got %#v", payload["current_snippet"])
+	}
+	if start, _ := payload["current_snippet_start_line"].(int); start != 13 {
+		t.Fatalf("expected current_snippet_start_line=13, got %#v", payload["current_snippet_start_line"])
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeFailed {
+		t.Fatalf("expected outcome=failed, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+}
+
+func TestToolCompletedEventPayloadRefinesGenericToolExecutionEditMiss(t *testing.T) {
+	// Mirrors live chat-log shape: TOOL_EXECUTION + generic next_action stamped
+	// on envelope metadata while the error body is an edit old_string miss.
+	// Diagnose must refine so chat-log export stops counting bare TOOL_EXECUTION.
+	result := toolExecutionResult{
+		Call:  types.ToolCall{ID: "call-edit-generic", Name: "edit"},
+		Error: "old_string 未在文件中找到；edit 只执行精确匹配（包括空格、缩进和换行），不会自动模糊定位。",
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"error_code":  string(runtimeerrors.ErrToolExecution),
+			"retryable":   true,
+			"next_action": toolresult.DefaultToolExecutionNextAction,
+		}},
+	}
+	payload := toolCompletedEventPayload(result, 3, "trace-edit-refine", nil)
+	if payload["error_code"] != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("payload error_code=%v want STALE_CONTEXT payload=%#v", payload["error_code"], payload)
+	}
+	if payload["ok"] != false {
+		t.Fatalf("expected ok=false, got %#v", payload)
+	}
+	if payload["retryable"] != false {
+		t.Fatalf("refined STALE_CONTEXT must not be retryable, got %#v", payload["retryable"])
+	}
+	next, _ := payload["next_action"].(string)
+	if next == toolresult.DefaultToolExecutionNextAction || strings.HasPrefix(strings.ToLower(next), "inspect the error details") {
+		t.Fatalf("generic next_action must yield to stale recovery, got %q", next)
+	}
+	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeFailed {
+		t.Fatalf("expected outcome=failed, got %#v", payload[toolresult.MetadataOutcomeKey])
+	}
+}
+
+func TestToolCompletedEventPayloadRehydratesSnippetFromErrorBody(t *testing.T) {
+	// Live residual: toolkit metadata lost current_snippet; only error body has
+	// multi-line closest block. tool.completed / chat-log must still export it.
+	errBody := "old_string 未在文件中找到；已尝试 CRLF/LF。\n" +
+		"建议从第 10 行附近用 view 重读（suggested_view_offset=9）。\n" +
+		"最接近的当前内容（第 10 行附近，可直接据此重建 old_string）:\n" +
+		"    10|\tfunc Hello() {\n" +
+		"    11|\t\treturn\n" +
+		"    12|\t}\n" +
+		"next_action: 优先用上方“最接近的当前内容”"
+	result := toolExecutionResult{
+		Call:  types.ToolCall{ID: "call-edit-rehydrate", Name: "edit"},
+		Error: errBody,
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"error_code":  string(runtimeerrors.ErrToolExecution),
+			"next_action": toolresult.DefaultToolExecutionNextAction,
+		}},
+	}
+	payload := toolCompletedEventPayload(result, 4, "trace-rehydrate", nil)
+	if payload["error_code"] != string(runtimeerrors.ErrToolStaleContext) {
+		t.Fatalf("error_code=%v want STALE_CONTEXT", payload["error_code"])
+	}
+	snip, _ := payload["current_snippet"].(string)
+	if !strings.Contains(snip, "func Hello()") {
+		t.Fatalf("expected rehydrated current_snippet, got %#v", payload["current_snippet"])
+	}
+	if !strings.Contains(snip, "\tfunc Hello") {
+		t.Fatalf("expected indent preserved in snippet, got %q", snip)
+	}
+	if offset, _ := payload["suggested_view_offset"].(int); offset != 9 {
+		t.Fatalf("suggested_view_offset=%#v want 9", payload["suggested_view_offset"])
+	}
+	// Nested protocol_result thin metadata should also carry snippet.
+	proto, _ := payload["protocol_result"].(map[string]interface{})
+	if proto == nil {
+		t.Fatalf("expected protocol_result, payload=%#v", payload)
+	}
+	meta, _ := proto["metadata"].(map[string]interface{})
+	if meta == nil {
+		t.Fatalf("expected protocol_result.metadata, got %#v", proto)
+	}
+	if psnip, _ := meta["current_snippet"].(string); !strings.Contains(psnip, "func Hello") {
+		t.Fatalf("protocol_result.metadata.current_snippet missing: %#v", meta)
+	}
+}
+
 func TestToolCompletedEventPayloadIncludesActionableDiagnostic(t *testing.T) {
 	result := toolExecutionResult{
 		Call:  types.ToolCall{ID: "call-missing", Name: "task_output"},

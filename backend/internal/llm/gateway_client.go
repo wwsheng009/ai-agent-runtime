@@ -83,7 +83,7 @@ func NewGatewayClient(resourceManager ResourceManager, defaultModel string) *Gat
 		defaultTimeout:  30 * time.Second,
 		maxRetries:      3,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
 			Transport: runtimehttpclient.WithDefaultUserAgent(http.DefaultTransport),
 		},
 		tokenizer: NewTokenizer("openai"),
@@ -318,6 +318,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	}
 
 	var lastError error
+	maxTokensRecovered := false
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		retryInfo.Attempt = attempt
@@ -346,6 +347,19 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			)
 
 			lastError = err
+			// Deterministic max_tokens ceiling rejections can be repaired once
+			// without rotating providers, using the provider-reported limit.
+			if !maxTokensRecovered && applyMaxTokensLimitRecovery(&req.MaxTokens, err) {
+				maxTokensRecovered = true
+				if activeMaxAttempts < attempt+1 {
+					activeMaxAttempts = attempt + 1
+				}
+				if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+					policy.MaxAttempts = activeMaxAttempts
+				}
+				retryInfo.MaxAttempts = activeMaxAttempts
+				continue
+			}
 			// 更新重试信息
 			if selected.GroupName != "" {
 				retryInfo.TriedGroups = append(retryInfo.TriedGroups, selected.GroupName)
@@ -1167,6 +1181,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		Model:                   resolvedModel,
 		SupportsMaxOutputTokens: supportsMaxOutputTokens,
 		ModelCapabilities:       modelCapabilities,
+		EnableImageGeneration:   enableImageGenerationFromSelected(selected),
 		Messages:                messages,
 		Tools:                   req.Tools,
 		Metadata:                metadata,
@@ -1182,14 +1197,18 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 
 // convertTools 转换工具定义（根据协议类型生成正确格式）
 // protocol: "openai" | "anthropic" | "codex" | "gemini"
+//
+// enableNativeImageGeneration must be provided by the caller from the provider
+// enable_image_generation flag; model capabilities alone never auto-enable it.
 func (c *GatewayClient) convertTools(
 	tools []types.ToolDefinition,
 	protocol string,
 	model string,
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
 	includeMeta bool,
+	enableNativeImageGeneration bool,
 ) interface{} {
-	return BuildToolDefinitionsForRequest(tools, protocol, model, modelCapabilities, includeMeta)
+	return BuildToolDefinitionsForRequest(tools, protocol, model, modelCapabilities, includeMeta, enableNativeImageGeneration)
 }
 
 // convertToolCalls 转换 tool_calls 格式
@@ -1311,6 +1330,22 @@ func selectedProviderModelCapabilities(selected *SelectedResource) map[string]ag
 		}
 	}
 	return providerModelCapabilitiesWithFallback(modelCapabilities, providerName, protocol, baseURL)
+}
+
+func enableImageGenerationFromSelected(selected *SelectedResource) *bool {
+	if selected == nil || selected.Provider == nil {
+		return nil
+	}
+	if selected.Provider.EnableImageGeneration != nil {
+		return selected.Provider.EnableImageGeneration
+	}
+	switch cfg := selected.Provider.Config.(type) {
+	case *agentconfig.Provider:
+		return cfg.EnableImageGeneration
+	case agentconfig.Provider:
+		return cfg.EnableImageGeneration
+	}
+	return nil
 }
 
 func providerNameFromSelected(selected *SelectedResource) string {

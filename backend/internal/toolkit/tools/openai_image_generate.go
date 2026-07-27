@@ -439,10 +439,10 @@ func (t *OpenAIImageGenerateTool) DefinitionMetadata() map[string]interface{} {
 			string(imageGeneratePathAPI),
 			string(imageGeneratePathCodexNative),
 		},
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindNetwork,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       false,
-		runtimetypes.ToolMetadataRequiresNetKey:     true,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindNetwork,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      true,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
@@ -685,18 +685,22 @@ func (t *OpenAIImageGenerateTool) newCodexNativeProvider(provider agentconfig.Pr
 	}
 	cfg := t.resolveProviderConfig()
 	return llm.NewProvider(&llm.ProviderConfig{
-		Type:                    provider.GetProtocol(),
-		APIKey:                  provider.GetAPIKey(),
-		BaseURL:                 provider.BaseURL,
-		APIPath:                 provider.APIPath,
-		Timeout:                 providerTimeout,
-		MaxRetries:              llm.ProviderMaxRetriesFromAgentConfig(cfg),
-		RetryTuning:             llm.RetryTuningFromAgentConfig(cfg),
-		RetryRules:              llm.RetryRulesFromAgentConfig(cfg),
-		DefaultModel:            strings.TrimSpace(provider.DefaultModel),
-		SupportedModels:         append([]string(nil), provider.SupportedModels...),
-		ModelMappings:           cloneStringStringMap(provider.ModelMappings),
-		ModelCapabilities:       cloneModelCapabilityMap(provider.ModelCapabilities),
+		Type:              provider.GetProtocol(),
+		APIKey:            provider.GetAPIKey(),
+		BaseURL:           provider.BaseURL,
+		APIPath:           provider.APIPath,
+		Timeout:           providerTimeout,
+		MaxRetries:        llm.ProviderMaxRetriesFromAgentConfig(cfg),
+		RetryTuning:       llm.RetryTuningFromAgentConfig(cfg),
+		RetryRules:        llm.RetryRulesFromAgentConfig(cfg),
+		DefaultModel:      strings.TrimSpace(provider.DefaultModel),
+		SupportedModels:   append([]string(nil), provider.SupportedModels...),
+		ModelMappings:     cloneStringStringMap(provider.ModelMappings),
+		ModelCapabilities: cloneModelCapabilityMap(provider.ModelCapabilities),
+		// Native image_generation injection still requires provider opt-in.
+		// Selection already enforces AllowsCodexImageGeneration(); pass it through
+		// so convertRequest actually injects the tool.
+		EnableImageGeneration:   provider.EnableImageGeneration,
 		Headers:                 cloneStringStringMap(provider.Headers),
 		HeaderMappings:          cloneStringStringMap(provider.HeaderMappings),
 		HeaderMappingRules:      cloneLLMHeaderMappingRules(provider.HeaderMappingRules),

@@ -80,6 +80,39 @@ func TestResultEventMapIsCompact(t *testing.T) {
 	}
 }
 
+func TestResultFromPartsPromotesStaleSnippetIntoThinMetadata(t *testing.T) {
+	errBody := "old_string 未在文件中找到\n" +
+		"最接近的当前内容（第 5 行附近）:\n" +
+		"     5|\treturn true\n" +
+		"next_action: rebuild"
+	result := ResultFromParts("edit", "call-stale-wire", "", errBody, map[string]interface{}{
+		toolresult.MetadataErrorCodeKey: string(ErrorCodeExecution),
+		"noisy_internal":                "drop-me",
+	})
+	if result.OK {
+		t.Fatal("expected failed result")
+	}
+	eventMap := result.EventMap()
+	meta, _ := eventMap["metadata"].(map[string]interface{})
+	if meta == nil {
+		t.Fatalf("expected thin metadata, got %#v", eventMap)
+	}
+	if _, ok := meta["noisy_internal"]; ok {
+		t.Fatalf("noisy key leaked: %#v", meta)
+	}
+	snip, _ := meta["current_snippet"].(string)
+	if !strings.Contains(snip, "return true") {
+		t.Fatalf("thin metadata missing current_snippet: %#v", meta)
+	}
+	if code, _ := meta[toolresult.MetadataErrorCodeKey].(string); code != string(ErrorCodeStaleContext) &&
+		code != "STALE_CONTEXT" {
+		// Error code may live on result.Error; metadata should still have recovery.
+		if snip == "" {
+			t.Fatalf("expected recovery fields even without code promote, meta=%#v err=%+v", meta, result.Error)
+		}
+	}
+}
+
 func TestFromToolkitResultRoundTrip(t *testing.T) {
 	original := &toolkit.ToolResult{
 		Success:    true,

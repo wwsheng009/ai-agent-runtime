@@ -343,7 +343,7 @@ func TestPathPreflightSkipsMutationArgs(t *testing.T) {
 	}
 }
 
-func TestPathPreflightSuggestsNearbyCandidates(t *testing.T) {
+func TestPathPreflightAutoHealsUniqueNearbyTypo(t *testing.T) {
 	dir := t.TempDir()
 	realName := "config.yaml"
 	if err := os.WriteFile(filepath.Join(dir, realName), []byte("ok"), 0o644); err != nil {
@@ -355,6 +355,67 @@ func TestPathPreflightSuggestsNearbyCandidates(t *testing.T) {
 	}
 
 	missing := filepath.Join(dir, "config.yam") // missing trailing 'l'
+	realPath := filepath.Join(dir, realName)
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"file_path": map[string]interface{}{"type": "string"},
+		},
+	}
+	args := map[string]interface{}{"file_path": missing}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "view",
+		Args:        args,
+		InputSchema: schema,
+		Metadata:    map[string]interface{}{"retry_class": "safe"},
+		// Existence is checked against rewritten path after auto-heal.
+		PathExists: func(path string) bool {
+			return path == realPath || strings.HasSuffix(path, realName)
+		},
+	})
+	if !decision.Allow {
+		t.Fatalf("expected unique high-confidence typo to auto-heal, got deny error=%q next=%q", decision.Error, decision.NextAction)
+	}
+	if !decision.PathAutoHealed {
+		t.Fatal("expected PathAutoHealed=true")
+	}
+	if got, _ := args["file_path"].(string); !strings.Contains(got, realName) {
+		t.Fatalf("expected args rewritten to %q, got %q", realName, got)
+	}
+	if len(decision.PathCandidates) == 0 || !strings.Contains(strings.Join(decision.PathCandidates, "\n"), realName) {
+		t.Fatalf("expected path_candidates to include %q, got %v", realName, decision.PathCandidates)
+	}
+	if !strings.Contains(decision.NextAction, "Path auto-healed") {
+		t.Fatalf("expected auto-heal next_action, got %q", decision.NextAction)
+	}
+
+	meta := map[string]interface{}{}
+	AttachPreflightMetadata(meta, decision)
+	if meta["path_auto_healed"] != true {
+		t.Fatalf("expected path_auto_healed metadata, got %#v", meta)
+	}
+	raw, ok := meta[MetadataPathCandidatesKey].([]string)
+	if !ok || len(raw) == 0 {
+		t.Fatalf("expected path_candidates metadata, got %#v", meta)
+	}
+	invocation, ok := meta[MetadataInvocationKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tool_invocation metadata, got %#v", meta)
+	}
+	if invArgs, ok := invocation[MetadataAttemptedArgsKey].(map[string]interface{}); !ok || invArgs["file_path"] == nil {
+		t.Fatalf("expected attempted_args in tool_invocation, got %#v", invocation)
+	}
+}
+
+func TestPathPreflightSuggestsNearbyCandidatesWhenAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	// Two close siblings → no unique auto-heal; still surface candidates.
+	for _, name := range []string{"config.yaml", "config.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("ok"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	missing := filepath.Join(dir, "config.yam")
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -369,22 +430,22 @@ func TestPathPreflightSuggestsNearbyCandidates(t *testing.T) {
 		PathExists:  func(string) bool { return false },
 	})
 	if decision.Allow {
-		t.Fatal("expected missing path to be blocked")
+		t.Fatal("ambiguous nearby matches must not auto-heal")
 	}
 	if decision.ErrorCode != "TOOL_PATH_NOT_FOUND" {
 		t.Fatalf("error_code=%s", decision.ErrorCode)
 	}
-	if len(decision.PathCandidates) == 0 {
-		t.Fatalf("expected nearby candidates, got error=%q next=%q", decision.Error, decision.NextAction)
-	}
 	joined := strings.Join(decision.PathCandidates, "\n")
-	if !strings.Contains(joined, realName) {
-		t.Fatalf("expected candidate containing %q, got %v", realName, decision.PathCandidates)
+	if !strings.Contains(joined, "config.yaml") || !strings.Contains(joined, "config.yml") {
+		t.Fatalf("expected both close candidates, got %v", decision.PathCandidates)
 	}
-	if !strings.Contains(decision.NextAction, "Nearby candidates") {
+	if !strings.Contains(decision.NextAction, "Nearby candidates") &&
+		!strings.Contains(decision.NextAction, "Ambiguous nearby matches") &&
+		!strings.Contains(decision.NextAction, "path_candidates") {
 		t.Fatalf("expected next_action to surface candidates, got %q", decision.NextAction)
 	}
-	if !strings.Contains(decision.Error, "candidates:") {
+	if !strings.Contains(decision.Error, "candidates:") &&
+		!strings.Contains(decision.Error, "ambiguous candidates:") {
 		t.Fatalf("expected error to surface candidates, got %q", decision.Error)
 	}
 
@@ -398,12 +459,133 @@ func TestPathPreflightSuggestsNearbyCandidates(t *testing.T) {
 	if !ok || args["file_path"] == nil {
 		t.Fatalf("expected attempted_args metadata with file_path, got %#v", meta)
 	}
-	invocation, ok := meta[MetadataInvocationKey].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected tool_invocation metadata, got %#v", meta)
+}
+
+func TestSuggestNearbyPathCandidatesIgnoresBackupNoise(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".backups"), 0o755); err != nil {
+		t.Fatalf("mkdir .backups: %v", err)
 	}
-	if invArgs, ok := invocation[MetadataAttemptedArgsKey].(map[string]interface{}); !ok || invArgs["file_path"] == nil {
-		t.Fatalf("expected attempted_args in tool_invocation, got %#v", invocation)
+	// No real sibling match — only noise.
+	missing := filepath.Join(dir, "metadata.go")
+	got := suggestNearbyPathCandidates(missing, nil)
+	for _, cand := range got {
+		if strings.Contains(cand, ".backups") {
+			t.Fatalf(".backups must not be suggested for missing source path, got %v", got)
+		}
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no candidates when only noise siblings exist, got %v", got)
+	}
+}
+
+func TestPathPreflightSurfacesParentWhenNoSiblingMatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".backups"), 0o755); err != nil {
+		t.Fatalf("mkdir .backups: %v", err)
+	}
+	// Real non-noise siblings should appear after the parent for discovery.
+	if err := os.WriteFile(filepath.Join(dir, "real_a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatalf("write real_a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real_b.go"), []byte("package b\n"), 0o644); err != nil {
+		t.Fatalf("write real_b: %v", err)
+	}
+	missing := filepath.Join(dir, "definitely-missing-leaf.go")
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"file_path": map[string]interface{}{"type": "string"},
+		},
+	}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "view",
+		Args:        map[string]interface{}{"file_path": missing},
+		InputSchema: schema,
+		Metadata:    map[string]interface{}{"retry_class": "safe"},
+		// Parent exists on real FS; leaf does not.
+		PathExists: func(path string) bool {
+			return path == dir || path == filepath.Clean(dir)
+		},
+	})
+	if decision.Allow {
+		t.Fatal("expected missing leaf to be blocked")
+	}
+	if decision.ErrorCode != "TOOL_PATH_NOT_FOUND" {
+		t.Fatalf("error_code=%s", decision.ErrorCode)
+	}
+	if len(decision.PathCandidates) == 0 {
+		t.Fatalf("expected parent candidate, next=%q error=%q", decision.NextAction, decision.Error)
+	}
+	joined := strings.Join(decision.PathCandidates, "\n")
+	if strings.Contains(joined, ".backups") {
+		t.Fatalf("must not surface .backups noise, got %v", decision.PathCandidates)
+	}
+	// Parent first, then sample siblings (not ranked typo matches).
+	if !pathCandidatesEqual(decision.PathCandidates[0], dir) &&
+		!strings.EqualFold(filepath.Clean(decision.PathCandidates[0]), filepath.Clean(dir)) {
+		// presentPathCandidate may keep absolute form; accept either.
+		if !strings.Contains(decision.PathCandidates[0], filepath.Base(dir)) &&
+			decision.PathCandidates[0] != dir {
+			// Absolute parent path is fine.
+			if abs, err := filepath.Abs(dir); err == nil && !pathCandidatesEqual(decision.PathCandidates[0], abs) {
+				t.Fatalf("expected parent as first path_candidates entry, got %v", decision.PathCandidates)
+			}
+		}
+	}
+	hasSibling := false
+	for _, cand := range decision.PathCandidates[1:] {
+		if strings.Contains(cand, "real_a.go") || strings.Contains(cand, "real_b.go") {
+			hasSibling = true
+			break
+		}
+	}
+	if !hasSibling {
+		t.Fatalf("expected sample siblings after parent, got %v", decision.PathCandidates)
+	}
+	if !strings.Contains(decision.NextAction, "Parent directory exists") {
+		t.Fatalf("expected parent discovery next_action, got %q", decision.NextAction)
+	}
+	if !strings.Contains(decision.NextAction, "Sample siblings") &&
+		!strings.Contains(decision.NextAction, "path_candidates") {
+		t.Fatalf("expected sibling discovery next_action, got %q", decision.NextAction)
+	}
+}
+
+func TestPathPreflightParentOnlyWhenOnlyNoiseSiblings(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".backups"), 0o755); err != nil {
+		t.Fatalf("mkdir .backups: %v", err)
+	}
+	missing := filepath.Join(dir, "definitely-missing-leaf.go")
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"file_path": map[string]interface{}{"type": "string"},
+		},
+	}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "view",
+		Args:        map[string]interface{}{"file_path": missing},
+		InputSchema: schema,
+		Metadata:    map[string]interface{}{"retry_class": "safe"},
+		PathExists: func(path string) bool {
+			return path == dir || path == filepath.Clean(dir)
+		},
+	})
+	if decision.Allow {
+		t.Fatal("expected missing leaf to be blocked")
+	}
+	if len(decision.PathCandidates) != 1 {
+		t.Fatalf("noise-only parent should surface parent alone, got %v", decision.PathCandidates)
+	}
+	joined := strings.Join(decision.PathCandidates, "\n")
+	if strings.Contains(joined, ".backups") {
+		t.Fatalf("must not surface .backups noise, got %v", decision.PathCandidates)
+	}
+	if !strings.Contains(decision.NextAction, "Parent directory exists") &&
+		!strings.Contains(decision.NextAction, "ls/glob") {
+		t.Fatalf("expected parent discovery next_action, got %q", decision.NextAction)
 	}
 }
 
@@ -481,6 +663,159 @@ func TestSuggestNearbyPathCandidatesRanksTypoAndCase(t *testing.T) {
 	}
 	if !strings.Contains(got[0], "Notes.md") {
 		t.Fatalf("expected Notes.md first, got %v", got)
+	}
+}
+
+func TestPathPreflightAutoHealsUniqueExtensionCandidate(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "ui.tsx")
+	if err := os.WriteFile(real, []byte("export const ui = 1\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// Unrelated sibling must not block unique stem match.
+	if err := os.WriteFile(filepath.Join(dir, "readme.md"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+
+	missing := filepath.Join(dir, "ui") // model omitted extension
+	args := map[string]interface{}{"file_path": missing}
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"file_path": map[string]interface{}{"type": "string"},
+		},
+	}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "view",
+		Args:        args,
+		InputSchema: schema,
+		Metadata:    map[string]interface{}{"retry_class": "safe"},
+		// No PathExists stub: real FS so the healed path is verified present.
+	})
+	if !decision.Allow {
+		t.Fatalf("expected unique high-confidence path auto-heal allow, got %+v", decision)
+	}
+	if !decision.PathAutoHealed {
+		t.Fatalf("expected PathAutoHealed, got %+v", decision)
+	}
+	if decision.Preflight != "path_auto_heal" {
+		t.Fatalf("preflight=%q", decision.Preflight)
+	}
+	if got, _ := args["file_path"].(string); !strings.Contains(got, "ui.tsx") {
+		t.Fatalf("expected args.file_path rewritten to ui.tsx, got %q", got)
+	}
+	if !strings.Contains(decision.ResolvedPath, "ui.tsx") {
+		t.Fatalf("resolved_path=%q", decision.ResolvedPath)
+	}
+	if !strings.Contains(decision.NextAction, "Path auto-healed") {
+		t.Fatalf("next_action=%q", decision.NextAction)
+	}
+
+	meta := map[string]interface{}{}
+	AttachPreflightMetadata(meta, decision)
+	if meta["path_auto_healed"] != true {
+		t.Fatalf("expected path_auto_healed metadata, got %#v", meta)
+	}
+	if _, ok := meta["resolved_path"]; !ok {
+		t.Fatalf("expected resolved_path metadata, got %#v", meta)
+	}
+}
+
+func TestPathPreflightDoesNotAutoHealAmbiguousCandidates(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"ui.tsx", "ui.ts", "readme.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	missing := filepath.Join(dir, "ui")
+	args := map[string]interface{}{"file_path": missing}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName: "view",
+		Args:     args,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"file_path": map[string]interface{}{"type": "string"},
+			},
+		},
+		Metadata: map[string]interface{}{"retry_class": "safe"},
+	})
+	if decision.Allow || decision.PathAutoHealed {
+		t.Fatalf("ambiguous candidates must not auto-heal: %+v", decision)
+	}
+	if decision.ErrorCode != "TOOL_PATH_NOT_FOUND" {
+		t.Fatalf("error_code=%s", decision.ErrorCode)
+	}
+	if got, _ := args["file_path"].(string); got != missing {
+		t.Fatalf("args must stay unchanged on deny, got %q", got)
+	}
+	if len(decision.PathCandidates) < 2 {
+		t.Fatalf("expected multiple candidates on deny, got %v", decision.PathCandidates)
+	}
+	if !strings.Contains(decision.NextAction, "Ambiguous nearby matches") &&
+		!strings.Contains(decision.NextAction, "Multiple nearby candidates") &&
+		!strings.Contains(decision.NextAction, "Pick exactly one") {
+		t.Fatalf("expected ambiguous multi-candidate next_action, got %q", decision.NextAction)
+	}
+	// Deny path must not claim a successful rewrite happened.
+	if strings.Contains(decision.NextAction, "Path auto-healed") ||
+		strings.Contains(decision.NextAction, "→") {
+		t.Fatalf("deny path must not claim auto-heal rewrite, got %q", decision.NextAction)
+	}
+}
+
+func TestPathPreflightAutoHealsSeparatorFoldedStem(t *testing.T) {
+	dir := t.TempDir()
+	// Live residual: models drop "_" (providertoken → provider_token).
+	real := filepath.Join(dir, "provider_token")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	// Unrelated sibling must not block unique separator-folded match.
+	if err := os.Mkdir(filepath.Join(dir, "other_pkg"), 0o755); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+
+	missing := filepath.Join(dir, "providertoken")
+	args := map[string]interface{}{"path": missing}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName: "ls",
+		Args:     args,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string"},
+			},
+		},
+		Metadata: map[string]interface{}{"retry_class": "safe"},
+	})
+	if !decision.Allow || !decision.PathAutoHealed {
+		t.Fatalf("expected separator-folded auto-heal allow, got %+v", decision)
+	}
+	if got, _ := args["path"].(string); !strings.Contains(got, "provider_token") {
+		t.Fatalf("expected path rewritten to provider_token, got %q", got)
+	}
+	if !strings.Contains(decision.ResolvedPath, "provider_token") {
+		t.Fatalf("resolved_path=%q", decision.ResolvedPath)
+	}
+	if decision.Preflight != "path_auto_heal" {
+		t.Fatalf("preflight=%q", decision.Preflight)
+	}
+}
+
+func TestSuggestNearbyPathCandidatesRanksSeparatorFoldedStem(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "styles.css"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write styles: %v", err)
+	}
+	// Model drops underscore (aiSites → ai_sites).
+	if err := os.Mkdir(filepath.Join(dir, "ai_sites"), 0o755); err != nil {
+		t.Fatalf("mkdir ai_sites: %v", err)
+	}
+	got := suggestNearbyPathCandidates(filepath.Join(dir, "aiSites"), nil)
+	if len(got) == 0 || !strings.Contains(got[0], "ai_sites") {
+		t.Fatalf("expected ai_sites first for separator-folded stem, got %v", got)
 	}
 }
 
@@ -880,6 +1215,97 @@ func TestNonEmptySuccessClearsEmptySoftCache(t *testing.T) {
 	})
 	if !decision.Allow || decision.SoftEmpty {
 		t.Fatalf("expected allow after soft-cache clear, got %+v", decision)
+	}
+}
+
+func TestPathPreflightAllowsPlaceholderEmptyPath(t *testing.T) {
+	// Live residual: models pass path as the two-character token "" (or null)
+	// meaning "default/workspace root". That must not path-deny with root
+	// sibling candidates (.agents/.git/.backups).
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path":    map[string]interface{}{"type": "string"},
+			"pattern": map[string]interface{}{"type": "string"},
+		},
+		"required": []interface{}{"pattern"},
+	}
+	meta := map[string]interface{}{"retry_class": "safe"}
+
+	for _, placeholder := range []string{`""`, "''", "null", "undefined", "None"} {
+		args := map[string]interface{}{
+			"path":    placeholder,
+			"pattern": "foo",
+		}
+		decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+			ToolName:    "grep",
+			Args:        args,
+			InputSchema: schema,
+			Metadata:    meta,
+			// Fail-closed existence stub: only real paths would pass. Placeholder
+			// must be cleared so no existence check runs at all.
+			PathExists: func(path string) bool { return false },
+		})
+		if !decision.Allow {
+			t.Fatalf("placeholder path %q must allow (optional path defaults to root), got %+v", placeholder, decision)
+		}
+		if decision.Preflight == "path_existence" || decision.ErrorCode == "TOOL_PATH_NOT_FOUND" {
+			t.Fatalf("placeholder path %q must not path-deny: %+v", placeholder, decision)
+		}
+		if got, _ := args["path"].(string); got != "" {
+			t.Fatalf("placeholder path %q should rewrite to empty string, got %q", placeholder, got)
+		}
+		if len(decision.PathCandidates) > 0 {
+			t.Fatalf("placeholder path must not surface root candidates, got %v", decision.PathCandidates)
+		}
+	}
+}
+
+func TestPathPreflightRequiredPlaceholderIsMissingArg(t *testing.T) {
+	// Required file_path with placeholder should surface as missing required args,
+	// not as a confusing path_not_found with workspace-root candidates.
+	args := map[string]interface{}{"file_path": `""`}
+	decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName: "view",
+		Args:     args,
+		InputSchema: map[string]interface{}{
+			"type":     "object",
+			"required": []interface{}{"file_path"},
+			"properties": map[string]interface{}{
+				"file_path": map[string]interface{}{"type": "string"},
+			},
+		},
+		Metadata: map[string]interface{}{"retry_class": "safe"},
+	})
+	if decision.Allow {
+		t.Fatalf("required placeholder file_path must deny, got %+v", decision)
+	}
+	if decision.ErrorCode != "TOOL_INVALID_ARGS" {
+		t.Fatalf("expected TOOL_INVALID_ARGS for required placeholder, got %s (%+v)", decision.ErrorCode, decision)
+	}
+	if !strings.Contains(decision.Error, "file_path") {
+		t.Fatalf("expected missing file_path in error, got %q", decision.Error)
+	}
+}
+
+func TestNormalizePathArgPlaceholder(t *testing.T) {
+	cases := map[string]string{
+		"":          "",
+		"   ":       "",
+		`""`:        "",
+		"''":        "",
+		"null":      "",
+		"NULL":      "",
+		"undefined": "",
+		`"null"`:    "",
+		"real.go":   "real.go",
+		".":         ".",
+		"./src":     "./src",
+	}
+	for in, want := range cases {
+		if got := normalizePathArgPlaceholder(in); got != want {
+			t.Fatalf("normalizePathArgPlaceholder(%q)=%q want %q", in, got, want)
+		}
 	}
 }
 

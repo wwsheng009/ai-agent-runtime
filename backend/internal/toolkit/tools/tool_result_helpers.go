@@ -27,7 +27,12 @@ func toolResultFailureWithCode(err error, errorCode, nextAction string, extra ma
 		// Stale edit/patch context, spawn depth limits, and shell dialect preflight
 		// failures are never safe to blind-retry with the same payload.
 		switch runtimeerrors.ErrorCode(code) {
-		case runtimeerrors.ErrToolStaleContext, runtimeerrors.ErrAgentSpawnDepthLimit, runtimeerrors.ErrToolShellCompat:
+		case runtimeerrors.ErrToolStaleContext,
+			runtimeerrors.ErrAgentSpawnDepthLimit,
+			runtimeerrors.ErrToolShellCompat,
+			runtimeerrors.ErrToolInvalidArgs:
+			// Invalid args / stale / shell-compat / depth limits are never safe
+			// to blind-retry with the same payload.
 			metadata[toolresult.MetadataRetryableKey] = false
 		}
 	}

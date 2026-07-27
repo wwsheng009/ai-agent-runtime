@@ -2,15 +2,16 @@ package types
 
 // TokenUsage Token 使用统计
 type TokenUsage struct {
-	PromptTokens          int  `json:"prompt_tokens" yaml:"prompt_tokens"`
-	CompletionTokens      int  `json:"completion_tokens" yaml:"completion_tokens"`
-	TotalTokens           int  `json:"total_tokens" yaml:"total_tokens"`
-	CachedTokens          int  `json:"cached_tokens,omitempty" yaml:"cached_tokens,omitempty"`
-	CacheReadTokens       int  `json:"cache_read_tokens,omitempty" yaml:"cache_read_tokens,omitempty"`
-	CacheCreationTokens   int  `json:"cache_creation_tokens,omitempty" yaml:"cache_creation_tokens,omitempty"`
-	CacheReadReported     bool `json:"cache_read_reported,omitempty" yaml:"cache_read_reported,omitempty"`
-	CacheCreationReported bool `json:"cache_creation_reported,omitempty" yaml:"cache_creation_reported,omitempty"`
-	ReasoningTokens       int  `json:"reasoning_tokens,omitempty" yaml:"reasoning_tokens,omitempty"`
+	UsageSource           string `json:"usage_source,omitempty" yaml:"usage_source,omitempty"`
+	PromptTokens          int    `json:"prompt_tokens" yaml:"prompt_tokens"`
+	CompletionTokens      int    `json:"completion_tokens" yaml:"completion_tokens"`
+	TotalTokens           int    `json:"total_tokens" yaml:"total_tokens"`
+	CachedTokens          int    `json:"cached_tokens,omitempty" yaml:"cached_tokens,omitempty"`
+	CacheReadTokens       int    `json:"cache_read_tokens,omitempty" yaml:"cache_read_tokens,omitempty"`
+	CacheCreationTokens   int    `json:"cache_creation_tokens,omitempty" yaml:"cache_creation_tokens,omitempty"`
+	CacheReadReported     bool   `json:"cache_read_reported,omitempty" yaml:"cache_read_reported,omitempty"`
+	CacheCreationReported bool   `json:"cache_creation_reported,omitempty" yaml:"cache_creation_reported,omitempty"`
+	ReasoningTokens       int    `json:"reasoning_tokens,omitempty" yaml:"reasoning_tokens,omitempty"`
 }
 
 // Clone 克隆 TokenUsage
@@ -19,6 +20,7 @@ func (u *TokenUsage) Clone() *TokenUsage {
 		return nil
 	}
 	return &TokenUsage{
+		UsageSource:           u.UsageSource,
 		PromptTokens:          u.PromptTokens,
 		CompletionTokens:      u.CompletionTokens,
 		TotalTokens:           u.TotalTokens,
@@ -45,6 +47,14 @@ func (u *TokenUsage) Add(other *TokenUsage) {
 	u.CacheReadReported = u.CacheReadReported || other.CacheReadReported
 	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
 	u.ReasoningTokens += other.ReasoningTokens
+	if other.UsageSource != "" {
+		switch {
+		case u.UsageSource == "":
+			u.UsageSource = other.UsageSource
+		case u.UsageSource != other.UsageSource:
+			u.UsageSource = "mixed"
+		}
+	}
 }
 
 // IsZero 检查是否为零值

@@ -67,6 +67,14 @@ html[data-theme="light"] {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --animate-grid-drift: none;
+    --animate-fade-up: none;
+    --animate-breathe: none;
+  }
+}
+
 .container-shell {
   width: min(1320px, calc(100% - 1.5rem));
   margin-inline: auto;

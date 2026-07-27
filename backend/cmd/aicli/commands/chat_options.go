@@ -13,36 +13,36 @@ import (
 )
 
 type chatCommandOptions struct {
-	ProfileFlag              string
-	AgentFlag                string
-	ProviderFlag             string
-	ModelFlag                string
-	StreamFlag               bool
-	StreamChanged            bool
+	ProfileFlag   string
+	AgentFlag     string
+	ProviderFlag  string
+	ModelFlag     string
+	StreamFlag    bool
+	StreamChanged bool
 	// FastFlag / FastChanged mirror Stream: CLI override for Codex Fast mode.
 	// Effective only when the resolved provider protocol is codex.
-	FastFlag                 bool
-	FastChanged              bool
-	NoInteractive            bool
-	Message                  string
-	ImagePaths               []string
-	LogDir                   string
-	RequestTimeoutFlag       string
-	ReasoningEffortFlag      string
-	ReasoningEffortChanged   bool
-	DisableTools             bool
-	HTTPDebug                bool
-	FailFast                 bool
-	CLISkillDirs             []string
-	CLISkillsTopK            int
-	CLISkillsMode            string
-	CLISkillsDebug           bool
-	PermissionMode           runtimepolicy.Mode
-	PermissionModeChanged    bool
+	FastFlag               bool
+	FastChanged            bool
+	NoInteractive          bool
+	Message                string
+	ImagePaths             []string
+	LogDir                 string
+	RequestTimeoutFlag     string
+	ReasoningEffortFlag    string
+	ReasoningEffortChanged bool
+	DisableTools           bool
+	HTTPDebug              bool
+	FailFast               bool
+	CLISkillDirs           []string
+	CLISkillsTopK          int
+	CLISkillsMode          string
+	CLISkillsDebug         bool
+	PermissionMode         runtimepolicy.Mode
+	PermissionModeChanged  bool
 	// CLIAllowTools / CLIDenyTools are product-facing permission overlays
 	// (--allow-tool / --deny-tool). Applied after profile tool policy.
-	CLIAllowTools            []string
-	CLIDenyTools             []string
+	CLIAllowTools []string
+	CLIDenyTools  []string
 	// TrustGrant is CLI --trust: durable grant of the current workspace before decide.
 	TrustGrant               bool
 	ApprovalReuseMode        chatApprovalReuseMode
@@ -58,6 +58,7 @@ type chatCommandOptions struct {
 	SessionStateFlag         string
 	SessionProviderFilter    string
 	SessionModelFilter       string
+	SessionCurrentDirOnly    bool
 	SessionQueryFlag         string
 	SessionLimitFlag         int
 	RuntimeServerFlag        string
@@ -121,6 +122,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	sessionStateFlag, _ := cmd.Flags().GetString("session-state")
 	sessionProviderFilterFlag, _ := cmd.Flags().GetString("session-provider")
 	sessionModelFilterFlag, _ := cmd.Flags().GetString("session-model")
+	sessionCurrentDirOnly, _ := cmd.Flags().GetBool("cwd")
+	sessionWorkspaceFilterExplicit := sessionCurrentDirOnly && cmd.Flags().Changed("cwd")
 	sessionQueryFlag, _ := cmd.Flags().GetString("session-query")
 	sessionLimitFlag, _ := cmd.Flags().GetInt("session-limit")
 	runtimeServerFlag, _ := cmd.Flags().GetString("runtime-server")
@@ -149,6 +152,17 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		Model:    strings.TrimSpace(sessionModelFilterFlag),
 		Query:    strings.TrimSpace(sessionQueryFlag),
 		Limit:    sessionLimitFlag,
+	}
+	if sessionCurrentDirOnly {
+		workspace := strings.TrimSpace(resolveLocalWorkspacePath(loadRuntimeToolConfig(cfg, nil), nil))
+		if workspace == "" {
+			currentDir, cwdErr := os.Getwd()
+			if cwdErr != nil {
+				return nil, fmt.Errorf("获取当前工作目录失败: %w", cwdErr)
+			}
+			workspace = currentDir
+		}
+		sessionFilter.Workspace = normalizeChatSessionWorkspace(workspace)
 	}
 	if sessionFilter.Protocol == "" && cmd.Flags().Changed("provider") && cfg != nil {
 		if provider, ok := cfg.Providers.Items[strings.TrimSpace(providerFlag)]; ok {
@@ -197,6 +211,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		SessionStateFlag:       sessionStateFlag,
 		SessionProviderFilter:  sessionProviderFilterFlag,
 		SessionModelFilter:     sessionModelFilterFlag,
+		SessionCurrentDirOnly:  sessionCurrentDirOnly,
 		SessionQueryFlag:       sessionQueryFlag,
 		SessionLimitFlag:       sessionLimitFlag,
 		RuntimeServerFlag:      runtimeServerFlag,
@@ -209,7 +224,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		InputReader:            bufio.NewReader(os.Stdin),
 		SessionFilter:          sessionFilter,
 		SessionFeaturesRequested: listSessionsFlag || resumeFlag || strings.TrimSpace(sessionIDFlag) != "" || strings.TrimSpace(sessionDirFlag) != "" || strings.TrimSpace(sessionUserFlag) != "" ||
-			sessionFilter.State != "" || sessionFilter.Provider != "" || sessionFilter.Model != "" || sessionFilter.Query != "",
+			sessionFilter.State != "" || sessionFilter.Provider != "" || sessionFilter.Model != "" || sessionWorkspaceFilterExplicit || sessionFilter.Query != "",
 	}, nil
 }
 

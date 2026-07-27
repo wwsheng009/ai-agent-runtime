@@ -13,6 +13,23 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+const runtimeModelSelectionPageSize = 10
+
+type runtimeModelPickerState struct {
+	Options   []string
+	Preferred string
+	Filter    string
+	Page      int
+	PageSize  int
+}
+
+type runtimeModelPickerResult struct {
+	Selected string
+	Done     bool
+	Message  string
+	Redraw   bool
+}
+
 func handleModelCommand(session *ChatSession, command string, noInteractive bool) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
@@ -164,17 +181,18 @@ func promptRuntimeModelSelectionPopup(session *ChatSession) (string, bool, error
 	currentModel := effectiveRuntimeModel(session)
 	options := runtimeModelSelectionOptions(session)
 	currentMatch, _ := matchCaseInsensitive(options, currentModel)
+	state := newRuntimeModelPickerState(options, currentMatch, runtimeModelSelectionPageSize)
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "模型选择")
 	defer restoreInput()
-	hint := "  提示: ↑↓ 选择，回车确认高亮项；也可输入编号或模型名"
-	prompt := "请输入选项 (回车确认高亮项): "
-	selectedIndex := initialRuntimeSelectionIndex(options, currentMatch, "")
+	prompt := runtimeModelPickerPopupPrompt()
+	pageOptions, _, _, _ := state.pageWindow()
+	selectedIndex := initialRuntimeSelectionIndex(pageOptions, currentMatch, "")
 	render := func(selected int, warning string) []string {
-		return renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, warning, selected)
+		return renderRuntimeModelPickerPopupLines(state, currentModel, currentMatch, notice, warning, selected)
 	}
 	handle := beginRuntimeSelectionPopup(session, render(selectedIndex, ""), prompt)
 	defer clearRuntimeSelectionPopupHandle(session, handle)
-	controller := newRuntimeSelectionController(session, handle, prompt, options, selectedIndex, render)
+	controller := newRuntimeSelectionController(session, handle, prompt, pageOptions, selectedIndex, render)
 
 	for {
 		text, err := chatInteractiveReadSelectionLine(session, prompt, controller)
@@ -182,11 +200,21 @@ func promptRuntimeModelSelectionPopup(session *ChatSession) (string, bool, error
 			return "", true, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		selected, ok := resolveRuntimeSelectionInputWithCursor(text, currentModel, "", options, controller.Selected(), true, false)
-		if ok {
-			return selected, true, nil
+		blankSelection, _ := controller.SelectedOption()
+		nextState, result := applyRuntimeModelPickerInput(state, text, blankSelection)
+		state = nextState
+		if result.Done {
+			return result.Selected, true, nil
 		}
-		controller.SetWarning("  无效的选择，请重新输入")
+		if result.Redraw {
+			pageOptions, _, _, _ = state.pageWindow()
+			selectedIndex = initialRuntimeSelectionIndex(pageOptions, currentMatch, "")
+			render = func(selected int, warning string) []string {
+				return renderRuntimeModelPickerPopupLines(state, currentModel, currentMatch, notice, warning, selected)
+			}
+			controller = newRuntimeSelectionController(session, handle, prompt, pageOptions, selectedIndex, render)
+		}
+		controller.SetWarning(result.Message)
 	}
 }
 
@@ -194,6 +222,8 @@ func promptRuntimeModelSelectionLegacy(session *ChatSession) (string, bool, erro
 	beginDirectInteractiveOutput(session)
 	currentModel := effectiveRuntimeModel(session)
 	options := runtimeModelSelectionOptions(session)
+	currentMatch, _ := matchCaseInsensitive(options, currentModel)
+	state := newRuntimeModelPickerState(options, currentMatch, runtimeModelSelectionPageSize)
 
 	notice, restoreInput := prepareRuntimeSelectionInput(session, "模型选择")
 	defer restoreInput()
@@ -208,52 +238,253 @@ func promptRuntimeModelSelectionLegacy(session *ChatSession) (string, bool, erro
 	} else {
 		fmt.Println("  当前模型: (无)")
 	}
+	printRuntimeModelPickerLegacyPage(state, currentMatch, theme)
 
-	if len(options) > 0 {
-		maxLen := 0
-		for _, option := range options {
-			if len(option) > maxLen {
-				maxLen = len(option)
-			}
-		}
-		for i, option := range options {
-			label := option
-			if strings.EqualFold(option, currentModel) {
-				fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLen, label, theme.Dimmed("(当前)"))
-				continue
-			}
-			fmt.Printf("  [%d] %-*s\n", i+1, maxLen, label)
-		}
-		fmt.Println("  提示: 也可以直接输入自定义模型名")
-	}
-
-	prompt := "请输入选项 (回车保持当前): "
+	prompt := runtimeModelPickerLegacyPrompt()
 	ui.PrintEmptyLine()
 	for {
-		fmt.Print(prompt)
 		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
 		if err != nil {
 			return "", false, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		if text == "" {
-			return currentModel, false, nil
+		blankSelection := ""
+		if state.Filter == "" {
+			blankSelection = currentMatch
+		} else if matched, ok := matchCaseInsensitive(state.filteredOptions(), currentMatch); ok {
+			blankSelection = matched
 		}
-
-		if num, err := strconv.Atoi(text); err == nil {
-			if num >= 1 && num <= len(options) {
-				return options[num-1], false, nil
+		if blankSelection == "" {
+			pageOptions, _, _, _ := state.pageWindow()
+			if len(pageOptions) > 0 {
+				blankSelection = pageOptions[0]
 			}
-			ui.PrintWarning("无效的选择，请重新输入")
-			continue
 		}
-
-		if matched, ok := matchCaseInsensitive(options, text); ok {
-			return matched, false, nil
+		nextState, result := applyRuntimeModelPickerInput(state, text, blankSelection)
+		state = nextState
+		if result.Done {
+			return result.Selected, false, nil
 		}
-
-		return text, false, nil
+		ui.PrintWarning("%s", result.Message)
+		if result.Redraw {
+			printRuntimeModelPickerLegacyPage(state, currentMatch, theme)
+		}
 	}
+}
+
+func newRuntimeModelPickerState(options []string, preferred string, pageSize int) runtimeModelPickerState {
+	state := runtimeModelPickerState{
+		Options:   append([]string(nil), options...),
+		Preferred: strings.TrimSpace(preferred),
+		PageSize:  pageSize,
+	}
+	state.Page = state.pageForOption(state.Preferred)
+	return state
+}
+
+func (s runtimeModelPickerState) normalizedPageSize() int {
+	if s.PageSize <= 0 {
+		return runtimeModelSelectionPageSize
+	}
+	return s.PageSize
+}
+
+func (s runtimeModelPickerState) filteredOptions() []string {
+	return filterLoginProviders(s.Options, s.Filter)
+}
+
+func (s runtimeModelPickerState) pageWindow() (items []string, page, pageCount, total int) {
+	filtered := s.filteredOptions()
+	total = len(filtered)
+	pageSize := s.normalizedPageSize()
+	if total == 0 {
+		return nil, 0, 1, 0
+	}
+	pageCount = (total + pageSize - 1) / pageSize
+	page = s.Page
+	if page < 0 {
+		page = 0
+	}
+	if page >= pageCount {
+		page = pageCount - 1
+	}
+	start := page * pageSize
+	end := min(start+pageSize, total)
+	return filtered[start:end], page, pageCount, total
+}
+
+func (s runtimeModelPickerState) pageForOption(option string) int {
+	index := indexOfCaseInsensitive(s.filteredOptions(), option)
+	if index < 0 {
+		return 0
+	}
+	return index / s.normalizedPageSize()
+}
+
+func applyRuntimeModelPickerInput(state runtimeModelPickerState, input, blankSelection string) (runtimeModelPickerState, runtimeModelPickerResult) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		if selected, ok := matchCaseInsensitive(state.Options, blankSelection); ok {
+			return state, runtimeModelPickerResult{Selected: selected, Done: true}
+		}
+		return state, runtimeModelPickerResult{Message: "当前没有可确认的模型，请输入模型名或搜索关键词"}
+	}
+
+	// 精确模型名优先于 n/p/c 等控制命令，避免同名模型无法选择。
+	if selected, ok := matchCaseInsensitive(state.Options, input); ok {
+		return state, runtimeModelPickerResult{Selected: selected, Done: true}
+	}
+
+	// 使用 +模型名 可强制按自定义模型处理；单独的 + 仍表示下一页。
+	if strings.HasPrefix(input, "+") && input != "+" {
+		modelName := strings.TrimSpace(strings.TrimPrefix(input, "+"))
+		if modelName == "" {
+			return state, runtimeModelPickerResult{Message: "请在 + 后输入自定义模型名"}
+		}
+		if selected, ok := matchCaseInsensitive(state.Options, modelName); ok {
+			return state, runtimeModelPickerResult{Selected: selected, Done: true}
+		}
+		return state, runtimeModelPickerResult{Selected: modelName, Done: true}
+	}
+
+	switch strings.ToLower(input) {
+	case "n", "next", ">", "+":
+		return moveRuntimeModelPickerPage(state, 1)
+	case "p", "prev", "previous", "<", "-":
+		return moveRuntimeModelPickerPage(state, -1)
+	case "c", "clear":
+		if state.Filter == "" {
+			return state, runtimeModelPickerResult{Message: "当前没有搜索条件"}
+		}
+		state.Filter = ""
+		state.Page = state.pageForOption(state.Preferred)
+		return state, runtimeModelPickerResult{Message: "已清除模型搜索", Redraw: true}
+	case "h", "help", "?":
+		return state, runtimeModelPickerResult{Message: "用法: 当前页编号/完整名称选择；关键词或 /关键词搜索；n/p 翻页；c 清除搜索；+模型名选择自定义模型；回车确认高亮项"}
+	}
+
+	if strings.HasPrefix(input, "/") {
+		return applyRuntimeModelPickerFilter(state, strings.TrimSpace(strings.TrimPrefix(input, "/")))
+	}
+
+	if number, err := strconv.Atoi(input); err == nil {
+		pageOptions, _, _, total := state.pageWindow()
+		if total == 0 {
+			return state, runtimeModelPickerResult{Message: "当前没有可选模型编号；请继续搜索、输入 c 清除，或用 +模型名选择自定义模型"}
+		}
+		if number >= 1 && number <= len(pageOptions) {
+			return state, runtimeModelPickerResult{Selected: pageOptions[number-1], Done: true}
+		}
+		return state, runtimeModelPickerResult{Message: fmt.Sprintf("无效编号 %d；请输入当前页 1-%d，或输入关键词搜索", number, len(pageOptions))}
+	}
+
+	matched := filterLoginProviders(state.Options, input)
+	switch len(matched) {
+	case 0:
+		return state, runtimeModelPickerResult{Selected: input, Done: true}
+	case 1:
+		return state, runtimeModelPickerResult{Selected: matched[0], Done: true}
+	default:
+		return applyRuntimeModelPickerFilter(state, input)
+	}
+}
+
+func applyRuntimeModelPickerFilter(state runtimeModelPickerState, query string) (runtimeModelPickerState, runtimeModelPickerResult) {
+	state.Filter = strings.TrimSpace(query)
+	state.Page = 0
+	matched := state.filteredOptions()
+	if state.Filter == "" {
+		state.Page = state.pageForOption(state.Preferred)
+		return state, runtimeModelPickerResult{Message: "已清除模型搜索", Redraw: true}
+	}
+	if len(matched) == 0 {
+		return state, runtimeModelPickerResult{
+			Message: fmt.Sprintf("没有匹配 %q 的模型；可继续搜索、输入 c 清除，或用 +模型名选择自定义模型", state.Filter),
+			Redraw:  true,
+		}
+	}
+	return state, runtimeModelPickerResult{
+		Message: fmt.Sprintf("已按 %q 搜索，匹配 %d 个模型", state.Filter, len(matched)),
+		Redraw:  true,
+	}
+}
+
+func moveRuntimeModelPickerPage(state runtimeModelPickerState, delta int) (runtimeModelPickerState, runtimeModelPickerResult) {
+	_, page, pageCount, total := state.pageWindow()
+	if total == 0 || pageCount <= 1 {
+		return state, runtimeModelPickerResult{Message: "当前只有一页，无需翻页"}
+	}
+	next := page + delta
+	if next < 0 {
+		return state, runtimeModelPickerResult{Message: "已经是第一页"}
+	}
+	if next >= pageCount {
+		return state, runtimeModelPickerResult{Message: "已经是最后一页"}
+	}
+	state.Page = next
+	return state, runtimeModelPickerResult{
+		Message: fmt.Sprintf("第 %d/%d 页", next+1, pageCount),
+		Redraw:  true,
+	}
+}
+
+func runtimeModelPickerTitle(state runtimeModelPickerState) string {
+	_, page, pageCount, filteredTotal := state.pageWindow()
+	title := fmt.Sprintf("选择模型（共 %d", len(state.Options))
+	if strings.TrimSpace(state.Filter) != "" {
+		title += fmt.Sprintf("，搜索 %q 匹配 %d", state.Filter, filteredTotal)
+	}
+	return title + fmt.Sprintf("，第 %d/%d 页）", page+1, pageCount)
+}
+
+func renderRuntimeModelPickerPopupLines(state runtimeModelPickerState, currentModel, currentMatch, notice, warning string, selected int) []string {
+	pageOptions, _, _, total := state.pageWindow()
+	if total == 0 && strings.TrimSpace(warning) == "" {
+		warning = "没有匹配的模型"
+	}
+	hint := "提示: ↑↓ 选择，回车确认；关键词搜索；n/p 翻页；c 清除搜索；编号按当前页；+模型名选择自定义模型"
+	return renderSelectionPopupLines(
+		runtimeModelPickerTitle(state),
+		"模型",
+		currentModel,
+		pageOptions,
+		currentMatch,
+		"",
+		hint,
+		notice,
+		warning,
+		selected,
+	)
+}
+
+func printRuntimeModelPickerLegacyPage(state runtimeModelPickerState, currentMatch string, theme *ui.Theme) {
+	pageOptions, _, _, total := state.pageWindow()
+	fmt.Printf("\n  %s\n", runtimeModelPickerTitle(state))
+	if total == 0 {
+		fmt.Println("  （无匹配模型；可继续搜索、输入 c 清除，或用 +模型名选择自定义模型）")
+	} else {
+		maxLen := 0
+		for _, option := range pageOptions {
+			maxLen = max(maxLen, ui.DisplayWidth(option))
+		}
+		for i, option := range pageOptions {
+			label := padRuntimeSelectionOption(option, maxLen)
+			if strings.EqualFold(option, currentMatch) {
+				fmt.Printf("  [%d] %s  %s\n", i+1, label, theme.Dimmed("(当前)"))
+				continue
+			}
+			fmt.Printf("  [%d] %s\n", i+1, label)
+		}
+	}
+	fmt.Println("  提示: 输入关键词或 /关键词搜索；n/p 翻页；c 清除搜索；编号按当前页；完整名称直接选择；+模型名选择自定义模型")
+}
+
+func runtimeModelPickerPopupPrompt() string {
+	return "请输入选项 (回车确认高亮项；支持关键词搜索、n/p 翻页): "
+}
+
+func runtimeModelPickerLegacyPrompt() string {
+	return "请输入选项 (回车保持当前；支持关键词搜索、n/p 翻页): "
 }
 
 func selectRuntimeReasoningEffort(session *ChatSession, current string, options []string) (string, bool, error) {

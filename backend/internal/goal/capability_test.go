@@ -3,6 +3,7 @@ package goal
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclitools"
@@ -41,6 +42,20 @@ func (s *goalCapabilityTestSession) RefreshRuntimeSession(context.Context, *runt
 
 func (s *goalCapabilityTestSession) ExecutorPath() aiclitools.ExposurePath {
 	return aiclitools.ExposureShared
+}
+
+func TestUpdateGoalDescriptionRequiresConfirmedActiveGoal(t *testing.T) {
+	capabilities := Capabilities()
+	for _, capability := range capabilities {
+		if capability.Name != UpdateToolName {
+			continue
+		}
+		if !strings.Contains(capability.Description, "get_goal confirmed a non-null active goal") {
+			t.Fatalf("update_goal description must guard missing-goal no-ops: %q", capability.Description)
+		}
+		return
+	}
+	t.Fatal("update_goal capability not found")
 }
 
 func TestExecuteUpdateGoalWithoutGoalIsStructuredNoOp(t *testing.T) {

@@ -206,6 +206,10 @@ func failCategoryForCode(code string) string {
 		return "arg_schema"
 	case "TOOL_TIMEOUT", "TURN_DEADLINE_EXCEEDED":
 		return "timeout"
+	case "STALE_CONTEXT", "TOOL_STALE_CONTEXT":
+		return "stale_context"
+	case "SPAWN_DEPTH_LIMIT", "AGENT_SPAWN_DEPTH_LIMIT":
+		return "spawn_depth"
 	case "TOOL_EXECUTION", "PROCESS_START_FAILED", "PROCESS_HEALTHCHECK_FAILED", "TOOL_BROKER_FAILURE":
 		return "execution"
 	case "TOOL_NOT_FOUND", "TOOL_NOT_REGISTERED":
@@ -247,6 +251,12 @@ func deriveInefficiencyFlags(snap ToolEfficiencySnapshot) []string {
 	}
 	if snap.FailCategories["path_missing"] > 0 {
 		flags = append(flags, "path_missing_failures")
+	}
+	if snap.FailCategories["stale_context"] > 0 {
+		flags = append(flags, "stale_context_failures")
+	}
+	if snap.FailCategories["spawn_depth"] > 0 {
+		flags = append(flags, "spawn_depth_failures")
 	}
 	if snap.Preflight.ByReason[PreflightReasonPathExistence] > 0 {
 		flags = append(flags, "path_existence_preflight_denies")

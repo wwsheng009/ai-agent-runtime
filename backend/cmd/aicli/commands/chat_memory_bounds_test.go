@@ -67,3 +67,37 @@ func TestChatLoggerBoundsDetailsAndPreservesCumulativeSummary(t *testing.T) {
 		t.Fatalf("initial message exceeded bound: %d", len(logger.sessionLog.InitialMessage))
 	}
 }
+
+func TestBoundChatLogContentPreservesDiagnosticEnvelope(t *testing.T) {
+	payload := map[string]interface{}{
+		"event_type":              "llm.request.finished",
+		"llm_request_id":          "llm-1",
+		"trace_id":                "trace-1",
+		"success":                 true,
+		"usage_prompt_tokens":     120,
+		"usage_completion_tokens": 10,
+		"usage_total_tokens":      130,
+		"usage_source":            "provider_reported",
+		"response_body":           strings.Repeat("x", chatLogContentMaxBytes*2),
+		"error":                   "sensitive upstream response",
+	}
+	bounded, ok := boundChatLogContent(payload).(map[string]interface{})
+	if !ok || bounded["truncated"] != true {
+		t.Fatalf("expected bounded diagnostic map, got %#v", bounded)
+	}
+	if bounded["usage_total_tokens"] != float64(130) && bounded["usage_total_tokens"] != 130 {
+		t.Fatalf("usage envelope was not preserved: %#v", bounded)
+	}
+	if bounded["llm_request_id"] != "llm-1" || bounded["diagnostic_envelope_preserved"] != true {
+		t.Fatalf("request identity was not preserved: %#v", bounded)
+	}
+	if _, leaked := bounded["response_body"]; leaked {
+		t.Fatal("large response body leaked into diagnostic envelope")
+	}
+	if _, leaked := bounded["error"]; leaked {
+		t.Fatal("raw error leaked into diagnostic envelope")
+	}
+	if bounded["error_present"] != true {
+		t.Fatal("expected non-sensitive error presence marker")
+	}
+}

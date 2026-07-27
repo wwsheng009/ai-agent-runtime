@@ -26,6 +26,12 @@ export function Hero() {
   });
 
   useEffect(() => {
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
     const timer = window.setInterval(() => {
       rotateWord();
     }, 1800);

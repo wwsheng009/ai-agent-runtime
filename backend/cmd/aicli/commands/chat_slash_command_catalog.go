@@ -189,12 +189,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/resume",
-			Usage:       "/resume [latest|<session-id>]",
+			Usage:       "/resume [latest|<session-id>] [--cwd]",
 			Summary:     "打开历史会话列表或恢复指定会话",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "latest", Summary: "直接恢复最近的其他会话"},
+				{Token: "--cwd", Summary: "显式仅显示并恢复当前工作目录的会话（默认行为）"},
 				{Token: "<session-id>", Summary: "恢复指定会话"},
 			},
 		},

@@ -133,6 +133,7 @@ func enterChatPlanMode(session *ChatSession, planPath string) error {
 	saveChatPlanMode(session, state)
 	applyChatPlanPermissionMode(session, runtimepolicy.ModePlan)
 	warnIfChatSessionSyncFails(session, "enter plan mode", syncRuntimeSessionFromChat(session))
+	refreshChatComposerContext(session)
 	return nil
 }
 
@@ -174,7 +175,18 @@ func exitChatPlanMode(session *ChatSession, decisionToken, notes string) error {
 	}
 
 	warnIfChatSessionSyncFails(session, "exit plan mode", syncRuntimeSessionFromChat(session))
+	refreshChatComposerContext(session)
 	return nil
+}
+
+func toggleChatPlanMode(session *ChatSession) error {
+	if session == nil {
+		return fmt.Errorf("当前没有活动会话")
+	}
+	if chatPlanModeActive(session) {
+		return exitChatPlanMode(session, string(planmode.ExitQuit), "")
+	}
+	return enterChatPlanMode(session, "")
 }
 
 func applyChatPlanPermissionMode(session *ChatSession, mode runtimepolicy.Mode) {

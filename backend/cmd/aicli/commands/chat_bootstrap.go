@@ -58,7 +58,7 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 		state.sessionUserID = userID
 		state.resolvedSessionDir = sessionDir
 		if manager != nil {
-			loadedRuntimeSession, loadErr := loadRequestedRuntimeSession(context.Background(), manager, userID, opts.SessionIDFlag, opts.ResumeFlag)
+			loadedRuntimeSession, loadErr := loadRequestedRuntimeSessionWithFilter(context.Background(), manager, userID, opts.SessionIDFlag, opts.ResumeFlag, opts.SessionFilter)
 			if loadErr != nil {
 				return nil, fmt.Errorf("加载会话失败: %w", loadErr)
 			}
@@ -82,7 +82,7 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 	state.resolvedSessionDir = sessionDir
 
 	if manager != nil {
-		loadedRuntimeSession, err := loadRequestedRuntimeSession(context.Background(), manager, userID, opts.SessionIDFlag, opts.ResumeFlag)
+		loadedRuntimeSession, err := loadRequestedRuntimeSessionWithFilter(context.Background(), manager, userID, opts.SessionIDFlag, opts.ResumeFlag, opts.SessionFilter)
 		if err != nil {
 			return nil, fmt.Errorf("加载会话失败: %w", err)
 		}

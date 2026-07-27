@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestApplyPatchTool_AppliesAddUpdateMoveAndDelete(t *testing.T) {
@@ -84,6 +87,104 @@ func TestApplyPatchTool_RejectsMalformedPatch(t *testing.T) {
 	if result.Error == nil || !strings.Contains(result.Error.Error(), "*** Begin Patch") {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != string(runtimeerrors.ErrToolInvalidArgs) {
+		t.Fatalf("error_code=%q want TOOL_INVALID_ARGS meta=%#v", code, result.Metadata)
+	}
+	if retryable, _ := result.Metadata[toolresult.MetadataRetryableKey].(bool); retryable {
+		t.Fatalf("malformed patch must not be retryable: %#v", result.Metadata)
+	}
+}
+
+func TestApplyPatchTool_InvalidHunkSyntaxIsToolInvalidArgs(t *testing.T) {
+	// Live residual: nested Begin marker inside a hunk body was bare TOOL_EXECUTION
+	// with generic "Inspect the error details…" next_action.
+	root := t.TempDir()
+	path := filepath.Join(root, "target.go")
+	requireWriteFile(t, path, "package target\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// Build nested-marker body without embedding the begin marker as a contiguous
+	// freeform apply_patch document that confuses outer tooling.
+	nested := "*** " + "Begin Patch" + `",`
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: target.go",
+		"@@",
+		" package target",
+		nested,
+		"+package other",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected nested begin marker inside hunk to fail")
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "不是合法的 hunk") {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != string(runtimeerrors.ErrToolInvalidArgs) {
+		t.Fatalf("error_code=%q want TOOL_INVALID_ARGS meta=%#v", code, result.Metadata)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "TOOL_INVALID_ARGS") && !strings.Contains(strings.ToLower(next), "syntax") {
+		t.Fatalf("expected syntax-focused next_action, got %q", next)
+	}
+	if fc, _ := result.Metadata["failure_class"].(string); fc != "invalid_patch_syntax" {
+		t.Fatalf("failure_class=%q want invalid_patch_syntax", fc)
+	}
+}
+
+func TestSanitizeApplyPatchPath(t *testing.T) {
+	cases := map[string]string{
+		`snippet.go",`:   "snippet.go",
+		`"snippet.go"`:   "snippet.go",
+		`'pkg/foo.go'`:   "pkg/foo.go",
+		"  bar.go  ":     "bar.go",
+		"`quoted.go`":    "quoted.go",
+		`path/file.go,`:  "path/file.go",
+		`E:\x\y.go",`:    `E:\x\y.go`,
+		"normal/path.go": "normal/path.go",
+		"":               "",
+	}
+	for in, want := range cases {
+		if got := sanitizeApplyPatchPath(in); got != want {
+			t.Fatalf("sanitizeApplyPatchPath(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestApplyPatchTool_SanitizesTrailingQuoteOnUpdatePath(t *testing.T) {
+	// Live residual: Update File path carried trailing `",` from JSON/prose paste
+	// and hard-failed with Windows "filename syntax is incorrect".
+	root := t.TempDir()
+	path := filepath.Join(root, "snippet.go")
+	requireWriteFile(t, path, "package snippet\n\nfunc Hello() {}\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	dirtyPath := "snippet.go" + `",`
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: " + dirtyPath,
+		"@@",
+		"-func Hello() {}",
+		"+func Hello() string { return \"ok\" }",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected trailing-quote path sanitize success, got error: %v meta=%#v", result.Error, result.Metadata)
+	}
+	assertFileContent(t, path, "package snippet\n\nfunc Hello() string { return \"ok\" }\n")
 }
 
 func TestApplyPatchTool_AcceptsHeredocWrapper(t *testing.T) {
@@ -804,7 +905,9 @@ func TestApplyPatchTool_MissingContextIncludesClosestCurrentLines(t *testing.T) 
 	if !strings.Contains(message, "最接近的当前内容") {
 		t.Fatalf("expected current context in diagnostic, got %q", message)
 	}
-	if !strings.Contains(message, "3: func (m *Manager) RegisterGroup(name string, active bool) error {") {
+	// Line-prefixed full current lines (pipe form, no mid-line truncate) for
+	// copy-paste / offline rehydrate parity with edit formatEditClosestLines.
+	if !strings.Contains(message, "3|func (m *Manager) RegisterGroup(name string, active bool) error {") {
 		t.Fatalf("expected stable current line numbers, got %q", message)
 	}
 	next, _ := result.Metadata["next_action"].(string)
@@ -819,6 +922,261 @@ func TestApplyPatchTool_MissingContextIncludesClosestCurrentLines(t *testing.T) 
 	}
 	if _, ok := result.Metadata["suggested_view_offset"]; !ok {
 		t.Fatalf("expected suggested_view_offset for hunk miss, got %#v", result.Metadata)
+	}
+	snippet, _ := result.Metadata["current_snippet"].(string)
+	if !strings.Contains(snippet, "func (m *Manager) RegisterGroup(name string, active bool) error {") {
+		t.Fatalf("expected current_snippet with live file lines for copy-paste recovery, got %#v", result.Metadata["current_snippet"])
+	}
+	if start, _ := result.Metadata["current_snippet_start_line"].(int); start <= 0 {
+		t.Fatalf("expected current_snippet_start_line > 0, got %#v", result.Metadata["current_snippet_start_line"])
+	}
+	if !strings.Contains(next, "current_snippet") {
+		t.Fatalf("expected next_action to mention current_snippet, got %q", next)
+	}
+}
+
+func TestApplyPatchTool_HealsBlankRunLengthDrift(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "blank_run.go")
+	// File has 3 blank lines between blocks; model invents 4 blanks in the hunk.
+	original := strings.Join([]string{
+		"package demo",
+		"",
+		"func Alpha() {",
+		"\treturn",
+		"}",
+		"",
+		"",
+		"",
+		"func Beta() {",
+		"\treturn",
+		"}",
+		"",
+	}, "\n")
+	requireWriteFile(t, path, original)
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// old side uses 4 blank lines between } and func Beta; file only has 3.
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: blank_run.go",
+		"@@",
+		" func Alpha() {",
+		" \treturn",
+		" }",
+		" ",
+		" ",
+		" ",
+		" ",
+		"-func Beta() {",
+		"+func BetaUpdated() {",
+		" \treturn",
+		" }",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected blank-run auto-heal for apply_patch, got error: %v metadata=%#v", result.Error, result.Metadata)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read file: %v", readErr)
+	}
+	// File blank-run length preserved; only the renamed function changes.
+	want := strings.Join([]string{
+		"package demo",
+		"",
+		"func Alpha() {",
+		"\treturn",
+		"}",
+		"",
+		"",
+		"",
+		"func BetaUpdated() {",
+		"\treturn",
+		"}",
+		"",
+	}, "\n")
+	if got := string(data); got != want {
+		t.Fatalf("blank-run patch heal mismatch\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestApplyPatchTool_ClosestSnippetPrefersMultiLineWindow(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "targets.go")
+	original := strings.Join([]string{
+		"package demo",
+		"",
+		"func Alpha() {",
+		"\treturn 1",
+		"}",
+		"",
+		"func Beta() {",
+		"\treturn 2",
+		"}",
+		"",
+		"func GammaSpecial() {",
+		"\treturn helper(3)",
+		"}",
+		"",
+	}, "\n")
+	requireWriteFile(t, path, original)
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// Hunk old lines mix a generic early func with a distinctive later block that drifted.
+	patch := strings.Join([]string{
+		"*** " + "Begin Patch",
+		"*** Update File: targets.go",
+		"@@",
+		"-func Alpha() {",
+		"-\treturn 9",
+		"-}",
+		"-",
+		"-func GammaSpecial() {",
+		"-\treturn helper(9)",
+		"-}",
+		"+func Alpha() {",
+		"+\treturn 9",
+		"+}",
+		"+",
+		"+func GammaSpecial() {",
+		"+\treturn helper(42)",
+		"+}",
+		"*** " + "End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected true content drift failure, got %#v", result)
+	}
+	snippet, _ := result.Metadata["current_snippet"].(string)
+	if !strings.Contains(snippet, "GammaSpecial") {
+		t.Fatalf("expected multi-line closest near GammaSpecial, got %q meta=%#v", snippet, result.Metadata)
+	}
+	start, _ := result.Metadata["current_snippet_start_line"].(int)
+	if start <= 0 {
+		t.Fatalf("expected current_snippet_start_line > 0, got %#v", result.Metadata["current_snippet_start_line"])
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "GammaSpecial") {
+		t.Fatalf("expected GammaSpecial in diagnostic body, got %q", message)
+	}
+}
+
+func TestClosestPatchCurrentContext_MultiLineBeatsGenericFirstLine(t *testing.T) {
+	actual := []string{
+		"package demo",
+		"",
+		"func Alpha() {",
+		"\treturn 1",
+		"}",
+		"",
+		"func GammaSpecial() {",
+		"\treturn helper(3)",
+		"}",
+	}
+	expected := []string{
+		"func Alpha() {",
+		"\treturn 9",
+		"}",
+		"",
+		"func GammaSpecial() {",
+		"\treturn helper(9)",
+		"}",
+	}
+	start, closest := closestPatchCurrentContext(actual, expected)
+	joined := strings.Join(closest, "\n")
+	if !strings.Contains(joined, "GammaSpecial") {
+		t.Fatalf("expected GammaSpecial in closest window, start=%d closest=%q", start, joined)
+	}
+	if start < 1 {
+		t.Fatalf("expected positive start line, got %d", start)
+	}
+}
+
+func TestClosestPatchCurrentContext_AnchorsOnNearIdentifierTypo(t *testing.T) {
+	actual := []string{
+		"import (",
+		"\t\"fmt\"",
+		")",
+		"",
+		"func Other() {}",
+		"",
+		"func HelloWorld() {",
+		"\treturn 1",
+		"}",
+	}
+	// First line completely wrong/generic; later lines nearly match via typo.
+	expected := []string{
+		"import (",
+		"\t\"missing\"",
+		")",
+		"",
+		"func HelloWord() {",
+		"\treturn 1",
+		"}",
+	}
+	start, closest := closestPatchCurrentContext(actual, expected)
+	joined := strings.Join(closest, "\n")
+	if !strings.Contains(joined, "HelloWorld") {
+		t.Fatalf("expected HelloWorld in closest window, start=%d closest=%q", start, joined)
+	}
+	// Recovery should land near the distinctive block, not only on import noise.
+	if start < 5 {
+		t.Fatalf("expected tightened anchor near HelloWorld block, got start=%d closest=%q", start, joined)
+	}
+}
+
+func TestApplyPatchTool_NotFoundIncludesNearIdentifierClosest(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "snippet.go")
+	original := "package demo\n\nfunc HelloWorld() {\n\treturn 1\n}\n"
+	requireWriteFile(t, path, original)
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	// Concatenate markers so nested apply_patch payloads stay inert if this
+	// test body is itself ever patched with apply_patch.
+	patch := strings.Join([]string{
+		"*** " + "Begin Patch",
+		"*** " + "Update File: snippet.go",
+		"@@",
+		"-func HelloWord() {",
+		"-\treturn 2",
+		"-}",
+		"+func HelloWorld() {",
+		"+\treturn 2",
+		"+}",
+		"*** " + "End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected true content drift failure, got %#v", result)
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "最接近的当前内容") && !strings.Contains(message, "HelloWorld") {
+		t.Fatalf("expected closest guidance with HelloWorld, got %q", message)
+	}
+	snippet, _ := result.Metadata["current_snippet"].(string)
+	if !strings.Contains(snippet, "HelloWorld") {
+		t.Fatalf("expected current_snippet with HelloWorld, got %#v", result.Metadata["current_snippet"])
+	}
+	if code, _ := result.Metadata["error_code"].(string); code != "STALE_CONTEXT" {
+		t.Fatalf("expected STALE_CONTEXT error_code, got %#v", result.Metadata)
 	}
 }
 

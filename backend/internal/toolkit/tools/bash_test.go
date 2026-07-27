@@ -554,7 +554,8 @@ func TestBashTool_SearchShellUsesShorterInferredTimeout(t *testing.T) {
 	tool.executer = inspector
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": `rg -n "TodoItem" backend`,
+		// Pipeline keeps shell execution (simple pure rg is soft-redirected).
+		"command": `rg -n "TodoItem" backend | Select-Object -First 20`,
 	})
 	if err != nil || !result.Success {
 		t.Fatalf("expected search timeout inference success, result=%#v err=%v", result, err)
@@ -698,6 +699,97 @@ func TestBashTool_IgnoresZeroTimeoutPlaceholder(t *testing.T) {
 	}
 	if inspector.lastTimeout != tool.timeout {
 		t.Fatalf("expected default timeout %v, got %v", tool.timeout, inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise(t *testing.T) {
+	// Live residual: models emit timeout_ms=1 with timeout_sec=30/60, which used
+	// to hard-timeout after 1ms under strict timeout_ms priority.
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		// Use a pipeline so soft-redirect does not short-circuit timeout parsing.
+		"command":     `rg -n "pattern" backend | Select-Object -First 20`,
+		"timeout_ms":  1,
+		"timeout_sec": 30,
+		"timeout":     "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 30*time.Second {
+		t.Fatalf("expected timeout_sec=30 to win over noisy timeout_ms=1, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_KeepsPlausibleShortTimeoutMsOverTimeoutSec(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":     "echo hi",
+		"timeout_ms":  500,
+		"timeout_sec": 30,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 500*time.Millisecond {
+		t.Fatalf("expected plausible timeout_ms=500 to keep priority, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestParseShellCommandTimeout_NoiseReconciliation(t *testing.T) {
+	got, err := parseShellCommandTimeout(map[string]interface{}{
+		"timeout_ms":  1,
+		"timeout_sec": 60,
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellCommandTimeout: %v", err)
+	}
+	if got != 60*time.Second {
+		t.Fatalf("expected 60s from timeout_sec, got %v", got)
+	}
+
+	got, err = parseShellCommandTimeout(map[string]interface{}{
+		"timeout_ms": 1,
+		"timeout":    "45s",
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellCommandTimeout named: %v", err)
+	}
+	if got != 45*time.Second {
+		t.Fatalf("expected 45s from timeout, got %v", got)
+	}
+
+	// Lone sub-floor numeric timeout_ms is treated as unit-confusion noise.
+	got, err = parseShellCommandTimeout(map[string]interface{}{
+		"timeout_ms": 30,
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellCommandTimeout lone ms: %v", err)
+	}
+	if got != 30*time.Second {
+		t.Fatalf("expected lone timeout_ms=30 noise to use the default, got %v", got)
+	}
+
+	got, err = parseShellCommandTimeout(map[string]interface{}{
+		"timeout": "30ms",
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("parseShellCommandTimeout explicit sub-floor duration: %v", err)
+	}
+	if got != 30*time.Millisecond {
+		t.Fatalf("expected timeout=30ms to remain explicit, got %v", got)
 	}
 }
 
@@ -1296,6 +1388,12 @@ func TestIsSearchToolNoMatch(t *testing.T) {
 	if !isSearchToolNoMatch(`grep -n missing backend`, "some noise without keywords", fmt.Errorf("exit status 1")) {
 		t.Fatal("expected grep exit 1 without error keywords to be no-match")
 	}
+	if !isSearchToolNoMatch(`Select-String -Path backend/*.go -Pattern Missing`, "", fmt.Errorf("exit status 1")) {
+		t.Fatal("expected primary Select-String exit 1 without output to be no-match")
+	}
+	if isSearchToolNoMatch(`npx tsc --noEmit 2>&1 | Select-String -Pattern Missing`, "", fmt.Errorf("exit status 1")) {
+		t.Fatal("filter-only Select-String must not hide a primary build failure")
+	}
 	if isSearchToolNoMatch(`rg -n "x" backend`, "rg: regex parse error:", fmt.Errorf("exit status 1")) {
 		t.Fatal("regex parse must not soft-succeed as no-match")
 	}
@@ -1319,7 +1417,7 @@ func TestBashTool_SearchNoMatchSoftSucceeds(t *testing.T) {
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": `rg -n "DoesNotExistSymbolXYZ" backend`,
+		"command": `rg -n "DoesNotExistSymbolXYZ" backend | Select-Object -First 20`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
@@ -1356,7 +1454,7 @@ func TestBashTool_SearchRealFailureIsContentSuccessWithGuidance(t *testing.T) {
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": `rg -n "foo(" backend`,
+		"command": `rg -n "foo(" backend | Select-Object -First 20`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
@@ -1384,7 +1482,7 @@ func TestBashTool_SearchRealFailureIsContentSuccessWithGuidance(t *testing.T) {
 		err:    fmt.Errorf("exit status 1"),
 	}
 	result, err = tool.Execute(context.Background(), map[string]interface{}{
-		"command": `rg -n "x" missing-dir`,
+		"command": `rg -n "x" missing-dir | Select-Object -First 20`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
@@ -1663,6 +1761,49 @@ func TestBashTool_SearchPathShellGlobPreflight(t *testing.T) {
 	}
 	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
 		t.Fatalf("expected TOOL_SHELL_COMPAT for path-glob preflight, got %#v", result.Metadata)
+	}
+}
+
+func TestLooksLikeSimpleShellCodeSearch(t *testing.T) {
+	if tool, ok := looksLikeSimpleShellCodeSearch(`rg -n "foo" backend`); !ok || tool != "rg" {
+		t.Fatalf("expected simple rg code search, got tool=%q ok=%v", tool, ok)
+	}
+	if _, ok := looksLikeSimpleShellCodeSearch(`rg -n "foo" backend | Select-Object -First 20`); ok {
+		t.Fatal("pipelines must not soft-redirect")
+	}
+	if _, ok := looksLikeSimpleShellCodeSearch(`rg --files -g "*.go"`); ok {
+		t.Fatal("rg --files must remain executable")
+	}
+	if _, ok := looksLikeSimpleShellCodeSearch(`grep -n foo backend`); ok {
+		t.Fatal("system grep is not soft-redirected")
+	}
+}
+
+func TestBashTool_SimpleShellCodeSearchSoftRedirect(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": `rg -n "DoesNotExistSymbolXYZ" backend`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected soft redirect success, got error: %v", result.Error)
+	}
+	if result.Metadata["shell_search_redirected"] != true {
+		t.Fatalf("expected shell_search_redirected metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata["executed"] != false {
+		t.Fatalf("expected executed=false, got %#v", result.Metadata["executed"])
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "grep") {
+		t.Fatalf("expected next_action to prefer toolkit grep, got %q", next)
+	}
+	if !strings.Contains(result.Content, "软重定向") && !strings.Contains(result.Content, "toolkit") {
+		t.Fatalf("expected redirect content, got %q", result.Content)
 	}
 }
 

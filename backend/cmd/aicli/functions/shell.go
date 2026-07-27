@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
-	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 // ShellFunction 执行 shell 命令的 Function
@@ -25,6 +25,9 @@ const (
 	defaultShellFunctionTimeout        = 30 * time.Second
 	shellFunctionTimeoutEnv            = "AICLI_SHELL_COMMAND_TIMEOUT"
 	shellFunctionTimeoutMSEnv          = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
+	// shellTimeoutNoiseFloor rejects absurdly small numeric timeout_ms values.
+	// Deliberate sub-100ms budgets remain available through timeout="30ms".
+	shellTimeoutNoiseFloor = 100 * time.Millisecond
 )
 
 type ShellExecutionResult struct {
@@ -461,34 +464,67 @@ func parseShellFunctionTimeout(args map[string]interface{}, defaultTimeout time.
 		return defaultTimeout, nil
 	}
 
-	if raw, ok := args["timeout_ms"]; ok && raw != nil {
+	var (
+		hasMS, hasSec, hasNamed bool
+		ms, sec, named          time.Duration
+	)
+
+	if raw, ok := args["timeout_ms"]; ok && raw != nil && !isNumericZero(raw) {
 		value, err := extractPositiveInt(raw)
 		if err != nil {
 			return 0, fmt.Errorf("timeout_ms 参数无效: %w", err)
 		}
-		return time.Duration(value) * time.Millisecond, nil
+		ms = time.Duration(value) * time.Millisecond
+		hasMS = true
 	}
-	if raw, ok := args["timeout_sec"]; ok && raw != nil {
+	if raw, ok := args["timeout_sec"]; ok && raw != nil && !isNumericZero(raw) {
 		value, err := extractPositiveInt(raw)
 		if err != nil {
 			return 0, fmt.Errorf("timeout_sec 参数无效: %w", err)
 		}
-		return time.Duration(value) * time.Second, nil
+		sec = time.Duration(value) * time.Second
+		hasSec = true
 	}
 	if raw, ok := args["timeout"]; ok && raw != nil {
 		timeoutText, ok := raw.(string)
-		if !ok {
-			return defaultTimeout, nil
+		if ok {
+			timeoutText = strings.TrimSpace(timeoutText)
+			if timeoutText != "" {
+				if seconds, numberErr := strconv.ParseFloat(timeoutText, 64); numberErr == nil && seconds > 0 {
+					named = time.Duration(seconds * float64(time.Second))
+					hasNamed = true
+				} else {
+					parsed, err := time.ParseDuration(timeoutText)
+					if err != nil || parsed <= 0 {
+						return 0, fmt.Errorf("timeout 参数无效: %q", timeoutText)
+					}
+					named = parsed
+					hasNamed = true
+				}
+			}
 		}
-		timeoutText = strings.TrimSpace(timeoutText)
-		if timeoutText == "" {
-			return defaultTimeout, nil
+	}
+
+	// Prefer coarser seconds/duration when present; otherwise use the default for
+	// sub-floor numeric values that models commonly emit with the wrong unit.
+	if hasMS && ms < shellTimeoutNoiseFloor {
+		if hasSec && sec >= time.Second && sec > ms {
+			hasMS = false
+		} else if hasNamed && named >= time.Second && named > ms {
+			hasMS = false
+		} else {
+			hasMS = false
 		}
-		parsed, err := time.ParseDuration(timeoutText)
-		if err != nil || parsed <= 0 {
-			return 0, fmt.Errorf("timeout 参数无效: %q", timeoutText)
-		}
-		return parsed, nil
+	}
+
+	if hasMS {
+		return ms, nil
+	}
+	if hasSec {
+		return sec, nil
+	}
+	if hasNamed {
+		return named, nil
 	}
 	return defaultTimeout, nil
 }
@@ -499,11 +535,42 @@ func hasExplicitShellFunctionTimeout(args map[string]interface{}) bool {
 		if !ok || value == nil {
 			continue
 		}
+		if isNumericZero(value) {
+			continue
+		}
+		if key == "timeout_ms" {
+			if milliseconds, err := extractPositiveInt(value); err == nil && time.Duration(milliseconds)*time.Millisecond < shellTimeoutNoiseFloor {
+				continue
+			}
+		}
 		if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
 			return true
 		}
 	}
 	return false
+}
+
+func isNumericZero(value interface{}) bool {
+	switch typed := value.(type) {
+	case int:
+		return typed == 0
+	case int32:
+		return typed == 0
+	case int64:
+		return typed == 0
+	case uint:
+		return typed == 0
+	case uint32:
+		return typed == 0
+	case uint64:
+		return typed == 0
+	case float32:
+		return typed == 0
+	case float64:
+		return typed == 0
+	default:
+		return false
+	}
 }
 
 func shellFunctionTimeoutError(timeout time.Duration) error {
@@ -601,11 +668,11 @@ func (f *ShellFunction) Parameters() map[string]interface{} {
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 30ms）。秒级超时优先只设 timeout_sec 或 timeout。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
+				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。与 timeout_ms 二选一即可，不要同时填占位 1ms。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",

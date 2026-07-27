@@ -404,15 +404,14 @@ func (a *CodexAdapter) GetAPIPath() string {
 
 // GetDefaultModel 获取默认模型
 func (a *CodexAdapter) GetDefaultModel() string {
-	return "gpt-4.1"
+	return "gpt-5.4"
 }
 
 // IsReasoningModel 判断是否为推理模型
 func (a *CodexAdapter) IsReasoningModel(model string) bool {
-	model = strings.ToLower(model)
-	return strings.Contains(model, "o1") ||
-		strings.Contains(model, "o3") ||
-		strings.Contains(model, "gpt-4.1")
+	return looksLikeOpenAIReasoningModel(model) ||
+		isReasoningModelPrefix(model) ||
+		strings.Contains(strings.ToLower(strings.TrimSpace(model)), "gpt-4.1")
 }
 
 // HandleResponse 处理完整响应（流式或非流式）
@@ -2265,6 +2264,7 @@ func IsCodexModel(model string) bool {
 	model = strings.ToLower(model)
 	return strings.Contains(model, "code-") ||
 		strings.Contains(model, "codex") ||
+		strings.HasPrefix(model, "gpt-5") ||
 		strings.Contains(model, "gpt-4.1") ||
 		strings.Contains(model, "o1") ||
 		strings.Contains(model, "o3")

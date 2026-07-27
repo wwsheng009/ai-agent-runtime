@@ -790,6 +790,7 @@ function MenuButton({
       type="button"
       disabled={disabled}
       title={description}
+      aria-pressed={active}
       onClick={onClick}
       className={cn(
         "min-w-0 max-w-full w-full rounded-[0.8rem] border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
@@ -1154,6 +1155,19 @@ export function BackendConfigSettingsPage() {
 
     void load();
   }, [t]);
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [hasUnsavedChanges]);
 
   async function switchMode(nextMode: EditorMode) {
     if (nextMode === mode) {
@@ -3230,27 +3244,53 @@ export function BackendConfigSettingsPage() {
       >
         <div className="grid gap-3 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[17rem_minmax(0,1fr)]">
           <div className="min-w-0 space-y-2.5 lg:sticky lg:top-[8.5rem] lg:self-start">
-            <ControlPanel
-              title={t("editor.panels.modeTitle")}
-              description={t("editor.panels.modeDescription")}
-            >
-              <div className="grid gap-2">
+            <label className="block rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3 lg:hidden">
+              <span className="block text-sm font-semibold text-[var(--foreground)]">
+                {t("editor.panels.modeTitle")}
+              </span>
+              <span className="mt-1 block text-xs leading-5 text-[var(--muted-foreground)]">
+                {t("editor.panels.modeDescription")}
+              </span>
+              <select
+                value={mode}
+                disabled={isModeSwitching}
+                aria-label={t("editor.panels.modeTitle")}
+                onChange={(event) => {
+                  void switchMode(event.target.value as EditorMode);
+                }}
+                className="mt-3 h-10 w-full rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
                 {translatedModeMenuEntries.map((entry) => (
-                  <MenuButton
-                    key={entry.mode}
-                    active={mode === entry.mode}
-                    badge={getModeBadge(entry.mode)}
-                    description={entry.description}
-                    disabled={isModeSwitching}
-                    icon={entry.icon}
-                    label={entry.label}
-                    onClick={() => {
-                      void switchMode(entry.mode);
-                    }}
-                  />
+                  <option key={entry.mode} value={entry.mode}>
+                    {entry.label}
+                  </option>
                 ))}
-              </div>
-            </ControlPanel>
+              </select>
+            </label>
+
+            <div className="hidden lg:block">
+              <ControlPanel
+                title={t("editor.panels.modeTitle")}
+                description={t("editor.panels.modeDescription")}
+              >
+                <div className="grid gap-2">
+                  {translatedModeMenuEntries.map((entry) => (
+                    <MenuButton
+                      key={entry.mode}
+                      active={mode === entry.mode}
+                      badge={getModeBadge(entry.mode)}
+                      description={entry.description}
+                      disabled={isModeSwitching}
+                      icon={entry.icon}
+                      label={entry.label}
+                      onClick={() => {
+                        void switchMode(entry.mode);
+                      }}
+                    />
+                  ))}
+                </div>
+              </ControlPanel>
+            </div>
 
             <ControlPanel
               title={t("editor.panels.summaryTitle")}

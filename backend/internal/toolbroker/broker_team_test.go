@@ -220,6 +220,49 @@ func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testi
 	}
 }
 
+func TestBrokerDefinitionsForContext_IncludesOutcomeToolsForStandaloneCompletionContract(t *testing.T) {
+	store := newTeamStore(t)
+	broker := &Broker{TeamStore: store}
+	runCtx := team.WithRunMeta(context.Background(), &team.RunMeta{
+		CompletionRequirement: "complete_task",
+	})
+
+	names := toolDefinitionNames(broker.DefinitionsForContext(runCtx))
+	assert.Contains(t, names, ToolReportTaskOutcome)
+	assert.Contains(t, names, ToolBlockCurrentTask)
+	for _, def := range broker.DefinitionsForContext(runCtx) {
+		if def.Name != ToolReportTaskOutcome && def.Name != ToolBlockCurrentTask {
+			continue
+		}
+		assert.Equal(t, "completion_requirement", def.Metadata["availability"])
+		assert.Equal(t, "agent_session", def.Metadata["completion_scope"])
+		assert.NotContains(t, def.Description, "Requires an active team run")
+	}
+	for _, hidden := range []string{
+		ToolSendTeamMessage,
+		ToolReadMailboxDigest,
+		ToolReadTaskSpec,
+		ToolReadTaskContext,
+	} {
+		assert.NotContains(t, names, hidden)
+	}
+
+	raw, metadata, err := broker.Execute(runCtx, "standalone-child", ToolReportTaskOutcome, map[string]interface{}{
+		"task_status": "done",
+		"summary":     "review completed",
+	})
+	require.NoError(t, err)
+	result, ok := raw.(ReportTaskOutcomeResult)
+	require.True(t, ok)
+	assert.Equal(t, "done", result.Status)
+	assert.Equal(t, "done", result.Outcome)
+	assert.Equal(t, "review completed", result.Summary)
+	assert.Empty(t, result.TeamID)
+	assert.Empty(t, result.TaskID)
+	require.NotNil(t, metadata)
+	assert.Equal(t, "agent_session", metadata["completion_scope"])
+}
+
 func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()

@@ -12,11 +12,38 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+func TestParseResumeCommandArgumentCurrentDirectory(t *testing.T) {
+	currentDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	target, filter, err := parseResumeCommandArgument("latest --cwd", ChatSessionListFilter{Query: "keep"}, nil)
+	if err != nil {
+		t.Fatalf("parseResumeCommandArgument: %v", err)
+	}
+	if target != "latest" {
+		t.Fatalf("target = %q, want latest", target)
+	}
+	if !sameChatSessionWorkspace(filter.Workspace, currentDir) {
+		t.Fatalf("workspace = %q, want current dir %q", filter.Workspace, currentDir)
+	}
+	if filter.Query != "keep" {
+		t.Fatalf("query = %q, want existing filter preserved", filter.Query)
+	}
+
+	if _, _, err := parseResumeCommandArgument("one two --cwd", ChatSessionListFilter{}, nil); err == nil {
+		t.Fatal("expected multiple resume targets to fail")
+	}
+}
+
 func TestRenderRuntimeSessionSummaryLinesIncludesProtocolUpdateTimeAndCounts(t *testing.T) {
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	workspace := t.TempDir()
 	session := runtimechat.NewSession("tester")
 	session.ID = "resume-1"
 	session.State = runtimechat.StateActive
@@ -25,6 +52,7 @@ func TestRenderRuntimeSessionSummaryLinesIncludesProtocolUpdateTimeAndCounts(t *
 		chatRuntimeContextProtocol:     "openai",
 		chatRuntimeContextProviderName: "openai",
 		chatRuntimeContextModel:        "gpt-4.1",
+		sessionmeta.WorkspacePath:      workspace,
 	}
 	session.ReplaceHistory([]runtimetypes.Message{
 		{Role: "system", Content: "instructions", Metadata: runtimetypes.NewMetadata()},
@@ -57,6 +85,9 @@ func TestRenderRuntimeSessionSummaryLinesIncludesProtocolUpdateTimeAndCounts(t *
 	}
 	if !strings.Contains(joined, "轮次=2 消息=4") {
 		t.Fatalf("expected conversation counts, got %q", joined)
+	}
+	if !strings.Contains(joined, "工作目录: "+workspace) {
+		t.Fatalf("expected workspace path, got %q", joined)
 	}
 }
 
@@ -125,15 +156,17 @@ func TestReadResumeSessionPickRendersUpdateTimeCountsAndTitle(t *testing.T) {
 
 func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 17, 16, 0, 0, 0, time.Local)
+	workspace := t.TempDir()
 	session := runtimechat.NewSession("tester")
 	session.ID = "resume-fullscreen"
 	session.Metadata.Title = "Resume full-screen picker · compact #1"
 	session.Metadata.Context = map[string]interface{}{
-		chatRuntimeContextProtocol:             "anthropic",
-		chatRuntimeContextProviderName:         "provider-a",
-		chatRuntimeContextModel:                "model-a",
-		runtimechat.ContextCompactRootTitle:    "Resume full-screen picker",
-		runtimechat.ContextCompactGeneration:   1,
+		chatRuntimeContextProtocol:           "anthropic",
+		chatRuntimeContextProviderName:       "provider-a",
+		chatRuntimeContextModel:              "model-a",
+		runtimechat.ContextCompactRootTitle:  "Resume full-screen picker",
+		runtimechat.ContextCompactGeneration: 1,
+		sessionmeta.WorkspacePath:            workspace,
 	}
 	session.ReplaceHistory([]runtimetypes.Message{
 		{Role: "user", Content: "improve resume", Metadata: runtimetypes.NewMetadata()},
@@ -152,12 +185,12 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 	if item.Disabled {
 		t.Fatalf("did not expect history row to be disabled")
 	}
-	for _, expected := range []string{"5分钟前", "1轮/2条", "compact #1"} {
+	for _, expected := range []string{"5分钟前", "1轮/2条", "compact #1", workspace} {
 		if !strings.Contains(item.Detail, expected) {
 			t.Fatalf("expected detail to contain %q, got %q", expected, item.Detail)
 		}
 	}
-	for _, expected := range []string{"resume-fullscreen", "anthropic", "provider-a", "model-a", "Resume full-screen picker"} {
+	for _, expected := range []string{"resume-fullscreen", "anthropic", "provider-a", "model-a", "Resume full-screen picker", workspace} {
 		if !strings.Contains(item.SearchText, expected) {
 			t.Fatalf("expected search metadata to contain %q, got %q", expected, item.SearchText)
 		}

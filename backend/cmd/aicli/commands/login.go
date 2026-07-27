@@ -201,6 +201,7 @@ func (p *cliLoginPrompter) PromptText(label, current string, required bool) (str
 			prompt = fmt.Sprintf("%s [%s]: ", label, current)
 		}
 		fmt.Print(prompt)
+		_ = os.Stdout.Sync()
 		line, err := p.reader.ReadString('\n')
 		if err != nil && strings.TrimSpace(line) == "" {
 			return "", err
@@ -223,6 +224,7 @@ func (p *cliLoginPrompter) PromptSecret(label, currentMasked string, required bo
 			prompt = fmt.Sprintf("%s [%s，回车保持不变]: ", label, currentMasked)
 		}
 		fmt.Print(prompt)
+		_ = os.Stdout.Sync()
 		var raw []byte
 		var err error
 		if term.IsTerminal(int(os.Stdin.Fd())) {

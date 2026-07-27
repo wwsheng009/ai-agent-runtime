@@ -982,11 +982,17 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 		return nil
 	}
 
-	candidates := make([]chatSlashCompletionCandidate, 0, len(sessions)+1)
+	candidates := make([]chatSlashCompletionCandidate, 0, len(sessions)+2)
 	if includeLatest {
 		candidates = append(candidates, chatSlashCompletionCandidate{
 			Command:     "latest",
 			Summary:     "直接恢复最近的其他会话",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: false,
+		})
+		candidates = append(candidates, chatSlashCompletionCandidate{
+			Command:     "--cwd",
+			Summary:     "显式仅显示并恢复当前工作目录的会话（默认行为）",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: false,
 		})

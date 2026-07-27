@@ -20,6 +20,7 @@ type SkillSummary struct {
 	Capabilities      []string              `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	Tags              []string              `yaml:"tags,omitempty" json:"tags,omitempty"`
 	Triggers          []Trigger             `yaml:"triggers" json:"triggers"`
+	DirectRoute       *bool                 `yaml:"directRoute,omitempty" json:"directRoute,omitempty"`
 	Tools             []string              `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Context           ContextConfig         `yaml:"context,omitempty" json:"context,omitempty"`
 	Permissions       []string              `yaml:"permissions,omitempty" json:"permissions,omitempty"`
@@ -53,6 +54,7 @@ func SummaryFromSkill(item *Skill) *SkillSummary {
 		Capabilities: append([]string(nil), item.Capabilities...),
 		Tags:         append([]string(nil), item.Tags...),
 		Triggers:     cloneTriggers(item.Triggers),
+		DirectRoute:  cloneOptionalBool(item.DirectRoute),
 		Tools:        append([]string(nil), item.Tools...),
 		Context: ContextConfig{
 			Files:       append([]string(nil), item.Context.Files...),
@@ -104,6 +106,7 @@ func (s *SkillSummary) ToSkillStub() *Skill {
 		Capabilities: append([]string(nil), s.Capabilities...),
 		Tags:         append([]string(nil), s.Tags...),
 		Triggers:     cloneTriggers(s.Triggers),
+		DirectRoute:  cloneOptionalBool(s.DirectRoute),
 		Tools:        append([]string(nil), s.Tools...),
 		Context: ContextConfig{
 			Files:       append([]string(nil), s.Context.Files...),
@@ -156,6 +159,14 @@ func cloneTriggers(triggers []Trigger) []Trigger {
 	return cloned
 }
 
+func cloneOptionalBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 func cloneSkillSummary(item *SkillSummary) *SkillSummary {
 	if item == nil {
 		return nil
@@ -165,6 +176,7 @@ func cloneSkillSummary(item *SkillSummary) *SkillSummary {
 	cloned.Capabilities = append([]string(nil), item.Capabilities...)
 	cloned.Tags = append([]string(nil), item.Tags...)
 	cloned.Triggers = cloneTriggers(item.Triggers)
+	cloned.DirectRoute = cloneOptionalBool(item.DirectRoute)
 	cloned.Tools = append([]string(nil), item.Tools...)
 	cloned.Context = ContextConfig{
 		Files:       append([]string(nil), item.Context.Files...),

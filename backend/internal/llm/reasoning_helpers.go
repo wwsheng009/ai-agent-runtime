@@ -595,81 +595,153 @@ func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[stri
 	return filtered
 }
 
-// sanitizeAnthropicProtocolMessages converts OpenAI-style tool role messages
-// into Anthropic-compatible user messages with tool_result content blocks.
-// The Anthropic API only accepts "user" and "assistant" roles; tool results
-// must be embedded as content blocks inside user messages.
+// sanitizeAnthropicProtocolMessages converts tool role messages and removes
+// incomplete tool replay blocks. Anthropic requires every assistant tool_use
+// block to be followed immediately by a user message containing all matching
+// tool_result blocks; retaining a partial historical block makes the entire
+// request fail before the model can recover.
 func sanitizeAnthropicProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
 	if len(messages) == 0 {
 		return nil
 	}
 
-	// Collect all tool_use IDs declared by assistant messages.
-	knownToolUseIDs := make(map[string]struct{})
+	normalized := make([]map[string]interface{}, 0, len(messages))
 	for _, msg := range messages {
 		role, _ := msg["role"].(string)
-		if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		if !strings.EqualFold(strings.TrimSpace(role), "tool") {
+			normalized = append(normalized, msg)
 			continue
 		}
-		// tool_use blocks in assistant content (Anthropic format)
-		for _, block := range decodeSliceOfMaps(msg["content"]) {
-			blockType, _ := block["type"].(string)
-			if strings.ToLower(strings.TrimSpace(blockType)) != "tool_use" {
-				continue
-			}
-			if id, ok := block["id"].(string); ok && strings.TrimSpace(id) != "" {
-				knownToolUseIDs[strings.TrimSpace(id)] = struct{}{}
-			}
+
+		toolCallID := strings.TrimSpace(msgValueString(msg, "tool_call_id"))
+		if toolCallID == "" {
+			continue
 		}
-		// OpenAI-style tool_calls on assistant messages
-		for id := range protocolMessageToolCallIDs(msg) {
-			knownToolUseIDs[id] = struct{}{}
+		block := map[string]interface{}{
+			"type":        "tool_result",
+			"tool_use_id": toolCallID,
+			"content":     msgValueString(msg, "content"),
 		}
+		if name := strings.TrimSpace(msgValueString(msg, "name")); name != "" {
+			block["name"] = name
+		}
+		normalized = append(normalized, map[string]interface{}{
+			"role":    "user",
+			"content": []interface{}{block},
+		})
 	}
 
-	result := make([]map[string]interface{}, 0, len(messages))
-	for _, msg := range messages {
+	result := make([]map[string]interface{}, 0, len(normalized))
+	var (
+		pendingAssistant map[string]interface{}
+		pendingToolIDs   map[string]struct{}
+		pendingBlocks    []interface{}
+		pendingRemainder []interface{}
+	)
+	resetPending := func() {
+		pendingAssistant = nil
+		pendingToolIDs = nil
+		pendingBlocks = nil
+		pendingRemainder = nil
+	}
+	flushPending := func() {
+		if pendingAssistant == nil || len(pendingToolIDs) != 0 {
+			return
+		}
+		result = append(result, pendingAssistant)
+		content := append(append([]interface{}{}, pendingBlocks...), pendingRemainder...)
+		result = append(result, map[string]interface{}{"role": "user", "content": content})
+		resetPending()
+	}
+
+	for _, msg := range normalized {
 		role, _ := msg["role"].(string)
 		role = strings.ToLower(strings.TrimSpace(role))
 
-		if role != "tool" {
+		if len(pendingToolIDs) > 0 && (role == "system" || role == "developer") {
+			// Instructions are split out of Anthropic dialogue messages later, so
+			// they do not break tool_use/tool_result adjacency on the wire.
 			result = append(result, msg)
 			continue
 		}
-
-		// Convert tool message to Anthropic user message with tool_result block.
-		toolCallID := strings.TrimSpace(msgValueString(msg, "tool_call_id"))
-		if toolCallID == "" {
-			// No tool_call_id – drop the orphan.
-			continue
-		}
-
-		contentText := msgValueString(msg, "content")
-		toolResultBlock := map[string]interface{}{
-			"type":        "tool_result",
-			"tool_use_id": toolCallID,
-			"content":     contentText,
-		}
-		// Preserve tool_name if present so the Anthropic adapter can map it.
-		if name := strings.TrimSpace(msgValueString(msg, "name")); name != "" {
-			toolResultBlock["name"] = name
-		}
-
-		// Merge consecutive tool results into a single user message when possible.
-		if last := lastAppendedUserRole(result); last != nil {
-			if existingContent, ok := last["content"].([]interface{}); ok {
-				last["content"] = append(existingContent, toolResultBlock)
-			} else {
-				last["content"] = []interface{}{toolResultBlock}
+		if len(pendingToolIDs) > 0 && role == "user" {
+			matched, remainder, matchedIDs := splitAnthropicToolResultContent(msg["content"], pendingToolIDs)
+			if len(matchedIDs) > 0 {
+				pendingBlocks = append(pendingBlocks, matched...)
+				pendingRemainder = append(pendingRemainder, remainder...)
+				for _, id := range matchedIDs {
+					delete(pendingToolIDs, id)
+				}
+				flushPending()
+				continue
 			}
-		} else {
-			result = append(result, map[string]interface{}{
-				"role":    "user",
-				"content": []interface{}{toolResultBlock},
-			})
+		}
+		if len(pendingToolIDs) > 0 {
+			// A non-result message interrupted the block. Drop the held assistant
+			// tool_use plus partial results, then process the current message.
+			resetPending()
+		}
+
+		switch role {
+		case "assistant":
+			toolIDs := anthropicMessageToolUseIDs(msg)
+			if len(toolIDs) > 0 {
+				pendingAssistant = msg
+				pendingToolIDs = toolIDs
+				continue
+			}
+			result = append(result, msg)
+		case "user":
+			_, remainder, _ := splitAnthropicToolResultContent(msg["content"], nil)
+			if len(remainder) == 0 {
+				continue
+			}
+			clean := cloneMapStringAny(msg)
+			clean["content"] = remainder
+			result = append(result, clean)
+		default:
+			result = append(result, msg)
 		}
 	}
+	// An incomplete trailing assistant tool_use block is intentionally dropped.
 	return trimAnthropicAssistantPrefill(enforceAnthropicMessageAlternation(result))
+}
+
+func anthropicMessageToolUseIDs(message map[string]interface{}) map[string]struct{} {
+	ids := protocolMessageToolCallIDs(message)
+	for _, block := range decodeSliceOfMaps(message["content"]) {
+		blockType, _ := block["type"].(string)
+		if !strings.EqualFold(strings.TrimSpace(blockType), "tool_use") {
+			continue
+		}
+		if id := strings.TrimSpace(msgValueString(block, "id")); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func splitAnthropicToolResultContent(content interface{}, expected map[string]struct{}) (matched []interface{}, remainder []interface{}, matchedIDs []string) {
+	for _, rawBlock := range normalizeToContentBlocks(content) {
+		block, ok := rawBlock.(map[string]interface{})
+		if !ok {
+			remainder = append(remainder, rawBlock)
+			continue
+		}
+		blockType := strings.TrimSpace(msgValueString(block, "type"))
+		if !strings.EqualFold(blockType, "tool_result") {
+			remainder = append(remainder, rawBlock)
+			continue
+		}
+		toolUseID := strings.TrimSpace(msgValueString(block, "tool_use_id"))
+		if _, ok := expected[toolUseID]; !ok || toolUseID == "" {
+			// Drop orphan or unrelated tool results.
+			continue
+		}
+		matched = append(matched, rawBlock)
+		matchedIDs = append(matchedIDs, toolUseID)
+	}
+	return matched, remainder, matchedIDs
 }
 
 func trimAnthropicAssistantPrefill(messages []map[string]interface{}) []map[string]interface{} {

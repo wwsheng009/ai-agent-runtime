@@ -13,6 +13,7 @@ func TestRootCommandHelpMentionsOnboardingDocs(t *testing.T) {
 	for _, want := range []string{
 		"aicli init --global",
 		"aicli login --provider openai",
+		"aicli resume",
 		"aicli doctor provider",
 		"docs/aicli/quickstart.md",
 		"docs/aicli/install.md",
@@ -24,25 +25,6 @@ func TestRootCommandHelpMentionsOnboardingDocs(t *testing.T) {
 	} {
 		if !strings.Contains(rootCommandLongHelp, want) && !strings.Contains(rootCommandExampleHelp, want) {
 			t.Fatalf("root help missing %q", want)
-		}
-	}
-}
-
-func TestChatCommandHelpMentionsSlashCommandsAndDocs(t *testing.T) {
-	for _, want := range []string{
-		"/help",
-		"/login ...",
-		"/functions <prompt>",
-		"/skill <skill> <prompt>",
-		"docs/aicli/quickstart.md",
-		"docs/aicli/install.md",
-		"docs/aicli/faq.md",
-		"docs/aicli/agents.md",
-		"docs/skill_runtime/aicli_skills_usage.md",
-		"aicli chat --resume",
-	} {
-		if !strings.Contains(chatCommandLongHelp, want) && !strings.Contains(chatCommandExampleHelp, want) {
-			t.Fatalf("chat help missing %q", want)
 		}
 	}
 }
@@ -106,8 +88,6 @@ func TestMainPackageHelpDocsPathsExist(t *testing.T) {
 	texts := []string{
 		rootCommandLongHelp,
 		rootCommandExampleHelp,
-		chatCommandLongHelp,
-		chatCommandExampleHelp,
 		configCommandLongHelp,
 		configCommandExampleHelp,
 		testCommandLongHelp,

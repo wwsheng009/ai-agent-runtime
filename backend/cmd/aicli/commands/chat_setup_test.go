@@ -275,6 +275,42 @@ func TestBuildChatFinalCleanup_ClearsScreenAndStopsPromptRedraw(t *testing.T) {
 	}
 }
 
+func TestBuildChatFinalCleanup_PrintsResumeHintAfterTerminalCleanup(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session_exit_hint"},
+	}
+	session.Layout = ui.NewLayout(ui.LayoutSimple)
+
+	output := captureStdout(t, func() {
+		buildChatFinalCleanup(session, nil)()
+	})
+
+	clearAt := strings.LastIndex(output, "\x1b[2J")
+	hintAt := strings.LastIndex(output, "aicli resume session_exit_hint")
+	if clearAt < 0 {
+		t.Fatalf("expected terminal cleanup output, got %q", output)
+	}
+	if hintAt < 0 {
+		t.Fatalf("expected resume hint, got %q", output)
+	}
+	if hintAt < clearAt {
+		t.Fatalf("expected resume hint after terminal cleanup, got %q", output)
+	}
+}
+
+func TestPrintChatExitResumeHint_SkipsNonResumableSessions(t *testing.T) {
+	for _, session := range []*ChatSession{
+		nil,
+		{Ephemeral: true, RuntimeSession: &runtimechat.Session{ID: "session_ephemeral"}},
+		{runtimeSessionUnpersisted: true, RuntimeSession: &runtimechat.Session{ID: "session_empty"}},
+		{RuntimeSession: &runtimechat.Session{}},
+	} {
+		if output := captureStdout(t, func() { printChatExitResumeHint(session) }); output != "" {
+			t.Fatalf("expected no resume hint for non-resumable session, got %q", output)
+		}
+	}
+}
+
 func TestPresentChatSession_WritesStartupPreambleAndSkillsToStderr(t *testing.T) {
 	session := &ChatSession{
 		ProviderName:   "codex_ee",
@@ -1505,7 +1541,7 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 		`Interpret "当前目录", ".", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.`,
 		"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 		"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
-		"Team-only tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Only call them after spawn_team has created the team run or when the current chat is already bound to an active team task.",
+		"Team collaboration tools such as read_task_spec, read_task_context, send_team_message, and read_mailbox_digest require an active team run. report_task_outcome and block_current_task normally use the active team task, but may also be exposed for a standalone spawn_agent complete_task contract; in that case call the exposed outcome tool without inventing team_id or task_id.",
 		`When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id="current" for teammates.`,
 		"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
 		"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",

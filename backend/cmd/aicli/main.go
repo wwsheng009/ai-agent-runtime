@@ -238,58 +238,14 @@ func main() {
 	contextCmd.Flags().IntP("retries", "r", 3, "失败重试次数")
 	rootCmd.AddCommand(contextCmd)
 
-	// chat 子命令
-	chatCmd := &cobra.Command{
-		Use:     "chat",
-		Short:   "交互式聊天",
-		Long:    chatCommandLongHelp,
-		Example: chatCommandExampleHelp,
-		Run: func(cmd *cobra.Command, args []string) {
-			commands.HandleChat(cmd, cfg)
-		},
-	}
-	defaultChatLogDir := commands.ResolveDefaultChatLogDir()
-	chatCmd.Flags().String("profile", "", "profile 名称或目录路径（按 profiles 配置或显式路径解析）")
-	chatCmd.Flags().String("agent", "", "agent 标识：有 profile 时为 profile 内 agent；无 profile 时加载 portable agentdef（builtin/项目 .agents/agents）")
-	chatCmd.Flags().StringP("provider", "p", "", "指定 provider 名称")
-	chatCmd.Flags().StringP("model", "m", "", "指定模型名称")
-	chatCmd.Flags().BoolP("stream", "s", false, "使用流式输出")
-	chatCmd.Flags().Bool("fast", false, "启用 Codex Fast 模式（service_tier=priority；仅 protocol=codex 生效）")
-	chatCmd.Flags().Bool("no-interactive", false, "非交互模式（单次请求）")
-	chatCmd.Flags().String("output", "", "非交互模式输出格式（text|json）")
-	chatCmd.Flags().BoolP("json", "j", false, "兼容选项：等价于 --output json")
-	chatCmd.Flags().StringP("message", "M", "", "非交互模式下发送的消息")
-	chatCmd.Flags().StringP("log-dir", "", defaultChatLogDir, fmt.Sprintf("保存会话日志到指定目录（默认: %s）", defaultChatLogDir))
-	chatCmd.Flags().String("request-timeout", "", "单次请求超时（例如 60s、2m，留空使用配置）")
-	chatCmd.Flags().String("reasoning-effort", "", "当前模型配置显式支持的 reasoning_effort 值（留空则不注入，由配置和交互流程决定）")
-	chatCmd.Flags().String("runtime-mode", "", "执行宿主模式（local|server|auto；留空使用 aicli.runtime.mode 或 local）")
-	chatCmd.Flags().String("runtime-server", "", "runtime-server 地址或模式别名（server|auto|local|http://127.0.0.1:8101）")
-	chatCmd.Flags().String("session", "", "加载指定 chat 会话 ID")
-	chatCmd.Flags().Bool("resume", false, "恢复最近一次 chat 会话")
-	chatCmd.Flags().Bool("list-sessions", false, "列出当前用户的 chat 会话并退出")
-	chatCmd.Flags().String("session-dir", "", "chat 会话持久化目录（默认: ~/.aicli/sessions）")
-	chatCmd.Flags().String("user", "", "chat 会话用户 ID（优先于 AICLI_SESSION_USER 和 runtime sessions.defaultUserId）")
-	chatCmd.Flags().String("title", "", "设置当前 chat 会话标题")
-	chatCmd.Flags().String("session-state", "", "按会话状态筛选（active|idle|closed|archived）")
-	chatCmd.Flags().String("session-provider", "", "按 provider 名称筛选会话")
-	chatCmd.Flags().String("session-model", "", "按模型名称筛选会话")
-	chatCmd.Flags().String("session-query", "", "按会话 ID/标题/摘要/provider/model 模糊筛选")
-	chatCmd.Flags().Int("session-limit", 20, "会话列表和启动选择器的最大展示数量")
-	chatCmd.Flags().Bool("disable-tools", false, "禁用 aicli chat 的 tools/skills 暴露，避免上游 function calling 兼容性问题")
-	chatCmd.Flags().Bool("debug-http", false, "记录 chat 请求的 HTTP 调试信息（重试尝试、状态码、最后响应预览）")
-	chatCmd.Flags().Bool("fail-fast", false, "调试模式：禁用自动重试，首次失败立即返回")
-	chatCmd.Flags().StringSlice("skills-dir", nil, "附加外部 skills 目录（可重复指定），与系统级 skills 一起加载")
-	chatCmd.Flags().Int("skills-top-k", 0, "aicli chat 暴露给模型的候选 skills 数量（0=使用配置默认值）")
-	chatCmd.Flags().String("skills-mode", "auto", "aicli chat 的 skills 暴露模式（auto|prefer|only）")
-	chatCmd.Flags().Bool("skills-debug", false, "打印当前请求的 skill route 候选、暴露结果与模式")
-	chatCmd.Flags().String("permission-mode", "default", "本地 actor/team 运行的权限模式（default|accept_edits|plan|bypass_permissions）")
-	chatCmd.Flags().StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
-	chatCmd.Flags().StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
-	chatCmd.Flags().Bool("trust", false, "信任当前工作区并允许项目级 plugins/hooks/MCP（写入 durable store；需 AICLI_FOLDER_TRUST=1）")
-	chatCmd.Flags().String("approval-reuse", "session_readonly_shell", "本地 actor/team 审批复用策略（off|session_readonly_shell|team_readonly_shell）")
-	chatCmd.Flags().Bool("yolo", false, "快捷模式：等价于 --permission-mode bypass_permissions")
-	chatCmd.Flags().StringSliceP("image", "i", nil, "附加本地图片文件路径（可重复指定，支持 PNG/JPEG/GIF/WebP）")
+	// chat / resume 子命令（共享 flags 与 HandleChat 启动路径）
+	chatCmd := commands.NewChatCommand(func() *config.Config {
+		return cfg
+	})
 	rootCmd.AddCommand(chatCmd)
+	rootCmd.AddCommand(commands.NewResumeCommand(func() *config.Config {
+		return cfg
+	}))
 
 	rootCmd.AddCommand(commands.NewExecCommand(func() *config.Config {
 		return cfg

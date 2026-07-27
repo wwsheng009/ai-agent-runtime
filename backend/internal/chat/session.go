@@ -31,11 +31,11 @@ const (
 	// without a schema migration. Compact currently rewrites history in place
 	// (same session ID); these keys still record parent linkage + generation so
 	// multi-round compact titles chain to the original root title.
-	ContextCompactRootTitle         = "compact_root_title"
-	ContextCompactParentSessionID   = "compact_parent_session_id"
-	ContextCompactRootSessionID     = "compact_root_session_id"
-	ContextCompactGeneration        = "compact_generation"
-	ContextCompactSourceSessionID   = "compact_source_session_id"
+	ContextCompactRootTitle       = "compact_root_title"
+	ContextCompactParentSessionID = "compact_parent_session_id"
+	ContextCompactRootSessionID   = "compact_root_session_id"
+	ContextCompactGeneration      = "compact_generation"
+	ContextCompactSourceSessionID = "compact_source_session_id"
 )
 
 // SessionMetadata 会话元数据
@@ -796,7 +796,6 @@ func shouldIgnoreDerivedTitleContent(content string) bool {
 	if strings.TrimSpace(content) == "" {
 		return false
 	}
-
 	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(content)), " "))
 	switch {
 	case strings.HasPrefix(normalized, "shell guidance:"):

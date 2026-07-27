@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LogsPageDetailLabels } from "@/pages/logs-page-detail-panel.i18n";
-import { buildRuntimeInsightRows } from "@/pages/logs-page-detail-panel";
+import { buildRuntimeInsightRows } from "@/pages/logs-page-detail-panel-insights";
 import type { RuntimeLogEntry } from "@/types/runtime";
 
 const insightLabels = {

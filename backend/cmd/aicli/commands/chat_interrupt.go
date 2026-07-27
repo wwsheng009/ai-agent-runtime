@@ -12,7 +12,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
-const chatInterruptCleanupTimeout = 5 * time.Second
+const (
+	chatInterruptCleanupTimeout     = 5 * time.Second
+	chatInterruptCleanupWaitTimeout = chatInterruptCleanupTimeout + time.Second
+)
 
 func (s *ChatSession) interruptLocalRuntimeWorkAsync() chan struct{} {
 	done := make(chan struct{})
@@ -26,6 +29,7 @@ func (s *ChatSession) interruptLocalRuntimeWorkAsync() chan struct{} {
 	activeTeamID := activeTeamID(s)
 
 	go func() {
+		defer s.finishInterruptCleanupUI()
 		defer close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
 		defer cancel()
@@ -40,15 +44,24 @@ func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSess
 	}
 	baseSessionID = strings.TrimSpace(baseSessionID)
 	userID = strings.TrimSpace(userID)
+	// Team bookkeeping first: cancel/pause tasks before any actor Stop waits on
+	// canceled runs, so interrupt is recorded as cancelled rather than failed.
+	teamSessionIDs := h.prepareTeamInterrupt(ctx, baseSessionID, activeTeamID)
 	if baseSessionID != "" {
 		h.interruptActorRun(ctx, baseSessionID)
 		h.markRuntimeSessionStopped(ctx, baseSessionID)
 	}
-	teamSessionIDs := h.interruptActiveTeamRuns(ctx, baseSessionID, activeTeamID)
+	for sessionID := range teamSessionIDs {
+		if sessionID == "" || strings.EqualFold(sessionID, baseSessionID) {
+			continue
+		}
+		h.interruptActorRun(ctx, sessionID)
+		h.markRuntimeSessionStopped(ctx, sessionID)
+	}
 	h.interruptChildAgentRuns(ctx, baseSessionID, userID, teamSessionIDs)
 }
 
-func (h *localChatRuntimeHost) interruptActiveTeamRuns(ctx context.Context, baseSessionID, activeTeamID string) map[string]struct{} {
+func (h *localChatRuntimeHost) prepareTeamInterrupt(ctx context.Context, baseSessionID, activeTeamID string) map[string]struct{} {
 	sessionIDs := map[string]struct{}{}
 	if h == nil || h.TeamStore == nil {
 		return sessionIDs
@@ -56,17 +69,13 @@ func (h *localChatRuntimeHost) interruptActiveTeamRuns(ctx context.Context, base
 	teamIDs := h.interruptTargetTeamIDs(ctx, baseSessionID, activeTeamID)
 	for _, teamID := range teamIDs {
 		h.stopTeamLifecycleLoop(teamID)
+		h.markTeamInterrupted(ctx, teamID)
 		for _, sessionID := range h.teamSessionIDs(ctx, teamID) {
 			if sessionID == "" {
 				continue
 			}
 			sessionIDs[sessionID] = struct{}{}
-			if !strings.EqualFold(sessionID, strings.TrimSpace(baseSessionID)) {
-				h.interruptActorRun(ctx, sessionID)
-			}
-			h.markRuntimeSessionStopped(ctx, sessionID)
 		}
-		h.markTeamInterrupted(ctx, teamID)
 	}
 	return sessionIDs
 }
@@ -195,13 +204,19 @@ func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID 
 	if h == nil || h.SessionHub == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	actor, ok := h.SessionHub.Get(strings.TrimSpace(sessionID))
+	sessionID = strings.TrimSpace(sessionID)
+	actor, ok := h.SessionHub.Get(sessionID)
 	if !ok || actor == nil {
 		return
 	}
 	interruptCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 	_ = actor.Interrupt(interruptCtx)
+	// Interrupt only cancels the active turn and marks runtime state stopped.
+	// The SessionActor itself must be stopped so OnStop releases the session
+	// lease; otherwise a later terminal/process still sees ownership conflict.
+	// The next prompt recreates the actor via SessionHub.GetOrCreate.
+	h.SessionHub.Stop(sessionID)
 }
 
 func (h *localChatRuntimeHost) markRuntimeSessionStopped(ctx context.Context, sessionID string) {

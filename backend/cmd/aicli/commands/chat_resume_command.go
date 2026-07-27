@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 //     Falls back to the latest resumable session when interaction is unavailable.
 //   - /resume latest           -> legacy "resume latest" behavior, resolved as the latest resumable session.
 //   - /resume <session-id>     -> load that session by ID (alias of /load).
+//   - /resume [latest] --cwd   -> explicitly keep the default current-working-directory filter.
 //
 // The function never exits the chat loop, mirroring the rest of the slash commands.
 func handleResumeCommand(session *ChatSession, command string) bool {
@@ -31,7 +33,15 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
-	arg := strings.TrimSpace(extractCommandArgument(command))
+	arg, filter, err := parseResumeCommandArgument(extractCommandArgument(command), session.SessionFilter, session)
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	previousFilter := session.SessionFilter
+	session.SessionFilter = filter
+	defer func() { session.SessionFilter = previousFilter }()
+
 	switch strings.ToLower(arg) {
 	case "":
 		return resumeInteractiveSelect(session)
@@ -49,6 +59,33 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 	}
 	printResumeSuccess(session)
 	return false
+}
+
+func parseResumeCommandArgument(argument string, filter ChatSessionListFilter, session *ChatSession) (string, ChatSessionListFilter, error) {
+	var target string
+	for _, token := range splitChatCommandFields(strings.TrimSpace(argument)) {
+		switch strings.ToLower(strings.TrimSpace(token)) {
+		case "--cwd":
+			workspace := ""
+			if session != nil {
+				workspace = strings.TrimSpace(resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, nil), nil))
+			}
+			if workspace == "" {
+				currentDir, err := os.Getwd()
+				if err != nil {
+					return "", filter, fmt.Errorf("获取当前工作目录失败: %w", err)
+				}
+				workspace = currentDir
+			}
+			filter.Workspace = normalizeChatSessionWorkspace(workspace)
+		default:
+			if target != "" {
+				return "", filter, fmt.Errorf("/resume 最多接受一个会话目标；可选参数为 --cwd")
+			}
+			target = strings.TrimSpace(token)
+		}
+	}
+	return target, filter, nil
 }
 
 func resumeLatestAndPrint(session *ChatSession) bool {
@@ -239,6 +276,10 @@ func buildResumeFullScreenItem(session *runtimechat.Session, now time.Time, curr
 		formatSessionUpdatedAt(session.UpdatedAt, now),
 		fmt.Sprintf("%d轮/%d条", turnCount, messageCount),
 	}
+	workspacePath := runtimeSessionWorkspacePath(session)
+	if workspacePath != "" {
+		detailParts = append(detailParts, workspacePath)
+	}
 	if generation > 0 {
 		detailParts = append(detailParts, fmt.Sprintf("compact #%d", generation))
 	}
@@ -254,6 +295,7 @@ func buildResumeFullScreenItem(session *runtimechat.Session, now time.Time, curr
 		runtimeSessionContextString(session, chatRuntimeContextProtocol),
 		runtimeSessionContextString(session, chatRuntimeContextProviderName),
 		runtimeSessionContextString(session, chatRuntimeContextModel),
+		workspacePath,
 		"当前",
 	}, " ")
 	return ui.FullScreenListItem{

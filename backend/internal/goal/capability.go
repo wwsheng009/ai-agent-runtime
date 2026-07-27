@@ -33,7 +33,7 @@ func Capabilities() []aiclitools.Capability {
 		},
 		{
 			Name:        UpdateToolName,
-			Description: "Mark the current goal complete only when the objective has actually been achieved and no required work remains.",
+			Description: "Mark the current goal complete only when the objective has actually been achieved and no required work remains. Do not call this tool unless get_goal confirmed a non-null active goal or the current run was explicitly started with a persistent goal.",
 			Parameters:  UpdateParameters(),
 			Metadata:    CapabilityMetadata(),
 			Exposure: []aiclitools.ExposurePath{

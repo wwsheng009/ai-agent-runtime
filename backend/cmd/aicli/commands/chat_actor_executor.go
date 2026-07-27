@@ -15,6 +15,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -88,7 +89,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		if waitTimeout < 8*time.Second {
 			waitTimeout = 8 * time.Second
 		}
-		bridge.WaitForCurrentEvents(waitTimeout)
+		bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout))
 		if runErr := bridge.RunError(); runErr != nil {
 			logActorExecutorFailureIfUnrecorded(session, prompt, runErr)
 			warnIfChatSessionSyncFails(session, "actor runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
@@ -177,7 +178,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 				waitTimeout = 8 * time.Second
 			}
 		}
-		bridge.WaitForCurrentEvents(waitTimeout)
+		bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout))
 		if runErr := bridge.RunError(); runErr != nil {
 			warnIfChatSessionSyncFails(session, "actor goal continuation runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
 			warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
@@ -313,6 +314,9 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 	if session.PermissionMode != "" {
 		runMeta.PermissionMode = string(session.PermissionMode)
 	}
+	if session.RuntimeSession != nil {
+		runMeta.CompletionRequirement = runtimeSessionContextString(session.RuntimeSession, toolbroker.AgentSessionContextCompletionRequirement)
+	}
 	binding := resolvedInteractiveTeamBinding(session)
 	if binding != nil && strings.TrimSpace(binding.TeamID) != "" && shouldPropagateTeamRunMeta(session, binding) {
 		runMeta.Team = &team.TeamRunMeta{
@@ -321,7 +325,7 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 			CurrentTaskID: strings.TrimSpace(binding.TaskID),
 		}
 	}
-	if strings.TrimSpace(runMeta.PermissionMode) == "" && runMeta.Team == nil {
+	if strings.TrimSpace(runMeta.PermissionMode) == "" && strings.TrimSpace(runMeta.CompletionRequirement) == "" && runMeta.Team == nil {
 		return nil
 	}
 	return runMeta

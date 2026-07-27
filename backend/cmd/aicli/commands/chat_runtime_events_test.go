@@ -2713,11 +2713,42 @@ func TestChatRuntimeEvents_InterruptedRunKeepsComposerStoppingStage(t *testing.T
 	bridge := newChatRuntimeEventBridge(session)
 
 	bridge.BeginRun()
-	session.InterruptPreservePendingInput()
+	// Keep cleanup in-flight so EndRun still surfaces Stopping while stop work runs.
+	cleanup := make(chan struct{})
+	session.interrupted.Store(true)
+	session.setInterruptCleanup(cleanup)
+	coord.SetAgentStage(chatAgentStageStopping)
+	require.Equal(t, chatRuntimeInterruptedEndRunDrainTimeout, bridge.endRunDrainTimeout())
+	require.Equal(t, chatRuntimeInterruptedEndRunDrainTimeout, chatRuntimeEventDrainTimeout(session, 12*time.Second))
+	// Simulate an event processor that stopped making progress during interrupt.
+	// EndRun must use the short interrupt drain rather than the normal 8s bound.
+	bridge.progressMu.Lock()
+	bridge.enqueuedEvents = 1
+	bridge.processedEvents = 0
+	bridge.progressMu.Unlock()
+	started := time.Now()
 	bridge.EndRun()
+	require.Less(t, time.Since(started), time.Second)
 
 	require.Equal(t, chatAgentStageStopping, coord.AgentStage())
+	close(cleanup)
+	session.finishInterruptCleanupUI()
+	require.Equal(t, chatAgentStageIdle, coord.AgentStage())
 	session.ResetInterrupt()
+	require.Equal(t, chatAgentStageIdle, coord.AgentStage())
+}
+
+func TestChatRuntimeEvents_InterruptedRunReturnsReadyAfterCleanup(t *testing.T) {
+	session := &ChatSession{NoInteractive: true}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	bridge := newChatRuntimeEventBridge(session)
+
+	bridge.BeginRun()
+	// No LocalRuntimeHost: interrupt cleanup finishes immediately and must leave Ready.
+	session.InterruptPreservePendingInput()
+	session.waitForInterruptCleanupWithin(time.Second)
+	bridge.EndRun()
 	require.Equal(t, chatAgentStageIdle, coord.AgentStage())
 }
 

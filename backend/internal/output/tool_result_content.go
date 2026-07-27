@@ -146,35 +146,45 @@ func envelopeToolCallID(envelope *Envelope) string {
 
 func renderToolResultContract(body string, diagnostic toolresult.Diagnostic) string {
 	type modelContract struct {
-		OK             bool                    `json:"ok"`
-		Outcome        string                  `json:"outcome,omitempty"`
-		ToolName       string                  `json:"tool_name,omitempty"`
-		ToolCallID     string                  `json:"tool_call_id,omitempty"`
-		ErrorCode      string                  `json:"error_code,omitempty"`
-		Retryable      *bool                   `json:"retryable,omitempty"`
-		EmptyResult    *bool                   `json:"empty_result,omitempty"`
-		NextAction     string                  `json:"next_action,omitempty"`
-		PathCandidates []string                `json:"path_candidates,omitempty"`
-		AttemptedArgs  map[string]interface{}  `json:"attempted_args,omitempty"`
-		RequestedCount int                     `json:"requested_count,omitempty"`
-		FailedCount    int                     `json:"failed_count,omitempty"`
-		SucceededCount int                     `json:"succeeded_count,omitempty"`
-		PartialFailure *bool                   `json:"partial_failure,omitempty"`
-		FailedItems    []toolresult.FailedItem `json:"failed_items,omitempty"`
+		OK                      bool                    `json:"ok"`
+		Outcome                 string                  `json:"outcome,omitempty"`
+		ToolName                string                  `json:"tool_name,omitempty"`
+		ToolCallID              string                  `json:"tool_call_id,omitempty"`
+		ErrorCode               string                  `json:"error_code,omitempty"`
+		Retryable               *bool                   `json:"retryable,omitempty"`
+		EmptyResult             *bool                   `json:"empty_result,omitempty"`
+		NextAction              string                  `json:"next_action,omitempty"`
+		PathCandidates          []string                `json:"path_candidates,omitempty"`
+		AttemptedArgs           map[string]interface{}  `json:"attempted_args,omitempty"`
+		RequestedCount          int                     `json:"requested_count,omitempty"`
+		FailedCount             int                     `json:"failed_count,omitempty"`
+		SucceededCount          int                     `json:"succeeded_count,omitempty"`
+		PartialFailure          *bool                   `json:"partial_failure,omitempty"`
+		FailedItems             []toolresult.FailedItem `json:"failed_items,omitempty"`
+		FilePath                string                  `json:"file_path,omitempty"`
+		SuggestedViewOffset     *int                    `json:"suggested_view_offset,omitempty"`
+		SuggestedViewLimit      *int                    `json:"suggested_view_limit,omitempty"`
+		CurrentSnippet          string                  `json:"current_snippet,omitempty"`
+		CurrentSnippetStartLine *int                    `json:"current_snippet_start_line,omitempty"`
 	}
 	contractValue := modelContract{
-		OK:             diagnostic.OK,
-		Outcome:        diagnostic.Outcome,
-		ToolName:       diagnostic.ToolName,
-		ToolCallID:     diagnostic.ToolCallID,
-		ErrorCode:      diagnostic.ErrorCode,
-		NextAction:     diagnostic.NextAction,
-		PathCandidates: append([]string(nil), diagnostic.PathCandidates...),
-		AttemptedArgs:  diagnostic.AttemptedArgs,
-		RequestedCount: diagnostic.RequestedCount,
-		FailedCount:    diagnostic.FailedCount,
-		SucceededCount: diagnostic.SucceededCount,
-		FailedItems:    append([]toolresult.FailedItem(nil), diagnostic.FailedItems...),
+		OK:                      diagnostic.OK,
+		Outcome:                 diagnostic.Outcome,
+		ToolName:                diagnostic.ToolName,
+		ToolCallID:              diagnostic.ToolCallID,
+		ErrorCode:               diagnostic.ErrorCode,
+		NextAction:              diagnostic.NextAction,
+		PathCandidates:          append([]string(nil), diagnostic.PathCandidates...),
+		AttemptedArgs:           diagnostic.AttemptedArgs,
+		RequestedCount:          diagnostic.RequestedCount,
+		FailedCount:             diagnostic.FailedCount,
+		SucceededCount:          diagnostic.SucceededCount,
+		FailedItems:             append([]toolresult.FailedItem(nil), diagnostic.FailedItems...),
+		FilePath:                diagnostic.FilePath,
+		SuggestedViewOffset:     diagnostic.SuggestedViewOffset,
+		SuggestedViewLimit:      diagnostic.SuggestedViewLimit,
+		CurrentSnippet:          diagnostic.CurrentSnippet,
+		CurrentSnippetStartLine: diagnostic.CurrentSnippetStartLine,
 	}
 	if diagnostic.PartialFailure || diagnostic.Outcome == toolresult.OutcomePartial {
 		partial := true

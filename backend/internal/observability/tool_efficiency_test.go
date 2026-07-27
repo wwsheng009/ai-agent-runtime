@@ -89,9 +89,9 @@ func TestRecordToolDispositionReplay(t *testing.T) {
 	RecordToolDispositionReplay(ToolOutcomeEmpty, 1)
 	RecordToolDispositionReplay(ToolOutcomePartial, 2)
 	RecordToolDispositionReplay(ToolOutcomeEmpty, 5)
-	// success/failed must not be recorded
-	RecordToolDispositionReplay(ToolOutcomeSuccess, 3)
 	RecordToolDispositionReplay(ToolOutcomeFailed, 3)
+	// success must not be recorded
+	RecordToolDispositionReplay(ToolOutcomeSuccess, 3)
 
 	assertCounter(t, MetricToolDispositionReplayTotal, map[string]string{
 		LabelOutcome: ToolOutcomeEmpty,
@@ -105,7 +105,11 @@ func TestRecordToolDispositionReplay(t *testing.T) {
 		LabelOutcome: ToolOutcomeEmpty,
 		LabelRepeat:  "3plus",
 	}, 1)
-	// Ensure success/failed counters were not created.
+	assertCounter(t, MetricToolDispositionReplayTotal, map[string]string{
+		LabelOutcome: ToolOutcomeFailed,
+		LabelRepeat:  "3plus",
+	}, 1)
+	// Ensure success counters were not created.
 	if got := GlobalMetrics.GetOrCreateCounter(MetricToolDispositionReplayTotal, map[string]string{
 		LabelOutcome: ToolOutcomeSuccess,
 		LabelRepeat:  "3plus",
@@ -144,7 +148,7 @@ func TestSnapshotToolEfficiency(t *testing.T) {
 	}
 	RecordToolPreflight(PreflightReasonPathExistence, false)
 
-	// 12 outcomes so rate flags can fire.
+	// 13 outcomes so rate flags can fire.
 	for i := 0; i < 8; i++ {
 		RecordToolOutcome(ToolOutcomeSuccess, "")
 	}
@@ -152,6 +156,7 @@ func TestSnapshotToolEfficiency(t *testing.T) {
 	RecordToolOutcome(ToolOutcomePartial, "")
 	RecordToolOutcome(ToolOutcomeFailed, "TOOL_SHELL_COMPAT")
 	RecordToolOutcome(ToolOutcomeFailed, "TOOL_PATH_NOT_FOUND")
+	RecordToolOutcome(ToolOutcomeFailed, "STALE_CONTEXT")
 
 	RecordToolDispositionReplay(ToolOutcomeEmpty, 1)
 	RecordToolDispositionReplay(ToolOutcomeEmpty, 4)
@@ -170,14 +175,17 @@ func TestSnapshotToolEfficiency(t *testing.T) {
 		t.Fatalf("path_existence reason count: want 1, got %v", snap.Preflight.ByReason[PreflightReasonPathExistence])
 	}
 
-	if snap.Outcomes.Total != 12 {
-		t.Fatalf("outcomes total: want 12, got %v", snap.Outcomes.Total)
+	if snap.Outcomes.Total != 13 {
+		t.Fatalf("outcomes total: want 13, got %v", snap.Outcomes.Total)
 	}
 	if snap.Outcomes.ByOutcome[ToolOutcomeSuccess] != 8 {
 		t.Fatalf("success count: want 8, got %v", snap.Outcomes.ByOutcome[ToolOutcomeSuccess])
 	}
 	if snap.Outcomes.ByErrorCode["TOOL_SHELL_COMPAT"] != 1 {
 		t.Fatalf("shell_compat error code: want 1, got %v", snap.Outcomes.ByErrorCode["TOOL_SHELL_COMPAT"])
+	}
+	if snap.Outcomes.ByErrorCode["STALE_CONTEXT"] != 1 {
+		t.Fatalf("stale_context error code: want 1, got %v", snap.Outcomes.ByErrorCode["STALE_CONTEXT"])
 	}
 	if snap.Outcomes.SuccessRate <= 0 || snap.Outcomes.SuccessRate >= 1 {
 		t.Fatalf("success_rate should be in (0,1), got %v", snap.Outcomes.SuccessRate)
@@ -191,6 +199,9 @@ func TestSnapshotToolEfficiency(t *testing.T) {
 	}
 	if snap.FailCategories["path_missing"] != 1 {
 		t.Fatalf("fail_categories path_missing: want 1, got %v", snap.FailCategories["path_missing"])
+	}
+	if snap.FailCategories["stale_context"] != 1 {
+		t.Fatalf("fail_categories stale_context: want 1, got %v", snap.FailCategories["stale_context"])
 	}
 
 	if snap.DispositionReplays.Total != 2 {
@@ -210,6 +221,7 @@ func TestSnapshotToolEfficiency(t *testing.T) {
 		"repeated_empty_partial_3plus",
 		"shell_compat_failures",
 		"path_missing_failures",
+		"stale_context_failures",
 		"path_existence_preflight_denies",
 	} {
 		if !flagSet[want] {

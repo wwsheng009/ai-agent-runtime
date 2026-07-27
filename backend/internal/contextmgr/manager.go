@@ -1528,6 +1528,11 @@ func trimFlexibleMessageCount(rawMessages, dynamicMessages []types.Message, keep
 	if keep < len(unpinnedRaw) {
 		unpinnedRaw = trimRawMessagesFromFrontByCount(unpinnedRaw, keep)
 	}
+	if len(pinnedRaw) > 0 && len(unpinnedRaw) == 1 && unpinnedRaw[0].Role == "user" {
+		// A completed historical turn reduced to only its user prompt no longer
+		// carries useful replay context. Prefer the pinned current turn.
+		unpinnedRaw = nil
+	}
 	if len(pinnedRaw) > 0 {
 		unpinnedRaw = append(unpinnedRaw, pinnedRaw...)
 	}
@@ -1565,25 +1570,48 @@ func dropLeadingRawTrimUnit(messages []types.Message) []types.Message {
 		return messages
 	}
 
-	switch messages[0].Role {
-	case "assistant":
-		if len(messages[0].ToolCalls) == 0 {
-			return messages[1:]
+	// Prefer dropping a whole completed user turn. This keeps the next retained
+	// raw message provider-valid instead of exposing an assistant tool_use block
+	// at the start of the request.
+	for index := 1; index < len(messages); index++ {
+		if messages[index].Role == "user" {
+			return messages[index:]
 		}
-		end := 1
-		for end < len(messages) && messages[end].Role == "tool" {
-			end++
-		}
-		return messages[end:]
-	case "tool":
-		end := 1
-		for end < len(messages) && messages[end].Role == "tool" {
-			end++
-		}
-		return messages[end:]
-	default:
-		return messages[1:]
 	}
+
+	if messages[0].Role != "user" {
+		// Repair already malformed history by advancing to the next user boundary.
+		for index := 1; index < len(messages); index++ {
+			if messages[index].Role == "user" {
+				return messages[index:]
+			}
+		}
+		return nil
+	}
+
+	// A single long user turn may exceed MaxMessages by itself. Preserve its
+	// original user prompt as an anchor and remove the oldest assistant/tool
+	// replay unit, rather than cutting the anchor off and leaving assistant-first
+	// history. Repeated calls progressively shorten the turn while keeping every
+	// retained tool call adjacent to its results.
+	if len(messages) == 1 {
+		return messages
+	}
+	end := 2
+	switch messages[1].Role {
+	case "assistant":
+		for end < len(messages) && messages[end].Role == "tool" {
+			end++
+		}
+	case "tool":
+		for end < len(messages) && messages[end].Role == "tool" {
+			end++
+		}
+	}
+	trimmed := make([]types.Message, 0, 1+len(messages)-end)
+	trimmed = append(trimmed, messages[0])
+	trimmed = append(trimmed, messages[end:]...)
+	return trimmed
 }
 
 func assembleManagedMessages(systemMessages, stableMessages, rawMessages, dynamicMessages []types.Message) []types.Message {
@@ -1614,7 +1642,12 @@ func trimByTokenBudget(messages []types.Message, budget Budget, counter TokenCou
 		if len(unpinnedRaw) > 0 {
 			next := dropLeadingRawTrimUnit(unpinnedRaw)
 			if len(next) >= len(unpinnedRaw) {
-				break
+				if len(pinnedRaw) == 0 {
+					break
+				}
+				unpinnedRaw = nil
+				trimmed = assembleManagedMessages(systemMessages, stableMessages, pinnedRaw, dynamicMessages)
+				continue
 			}
 			unpinnedRaw = next
 			trimmed = assembleManagedMessages(systemMessages, stableMessages, append(unpinnedRaw, pinnedRaw...), dynamicMessages)

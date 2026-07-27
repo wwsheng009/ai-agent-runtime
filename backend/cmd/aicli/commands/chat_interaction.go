@@ -13,6 +13,8 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -802,6 +804,12 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 			compact: fmt.Sprintf("队%d", queuedCount),
 		})
 	}
+	// Plan mode is an interactive composer mode rather than a transient agent
+	// stage. Keep its compact ON/OFF state near the front so it remains visible
+	// in the fixed-bottom status bar even when optional diagnostics are dropped.
+	if planSeg := chatSurfacePlanModeStatusSegment(session); planSeg.full != "" {
+		segments = append(segments, planSeg)
+	}
 	// Codex-style goal indicator: keep near the front so residual active goals
 	// remain visible even when width drops optional diagnostics.
 	if goalSeg := chatSurfaceGoalStatusSegment(session); goalSeg.full != "" {
@@ -884,6 +892,23 @@ func fitChatSurfaceStatusSegments(segments []chatStatusSegment, width int) []str
 		}
 	}
 	return parts
+}
+
+func chatPlanModeActive(session *ChatSession) bool {
+	if session == nil {
+		return false
+	}
+	return session.PermissionMode == runtimepolicy.ModePlan || planmode.IsActive(loadChatPlanMode(session))
+}
+
+func chatSurfacePlanModeStatusSegment(session *ChatSession) chatStatusSegment {
+	if session == nil {
+		return chatStatusSegment{}
+	}
+	if chatPlanModeActive(session) {
+		return chatStatusSegment{full: "Plan ON", compact: "Plan ON"}
+	}
+	return chatStatusSegment{full: "Plan OFF", compact: "Plan OFF"}
 }
 
 // chatSurfaceGoalStatusSegment mirrors Codex footer GoalStatusIndicator labels.

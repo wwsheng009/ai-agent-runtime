@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -85,10 +86,10 @@ func (t *ApplyPatchTool) DefinitionMetadata() map[string]interface{} {
 			"syntax":     "lark",
 			"definition": applyPatchLarkGrammar,
 		},
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       true,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        true,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -107,9 +108,11 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 		}
 	}
 	if strings.TrimSpace(rawPatch) == "" {
-		return toolResultFailure(
+		return toolResultFailureWithCode(
 			fmt.Errorf("patch 参数缺失或为空"),
+			string(runtimeerrors.ErrToolInvalidArgs),
 			"Provide a non-empty Codex apply_patch text in the patch field (Begin Patch ... End Patch). Do not send empty or whitespace-only patch content.",
+			map[string]interface{}{"failure_class": "invalid_patch_syntax"},
 		), nil
 	}
 
@@ -118,9 +121,11 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 		return applyPatchToolFailure(err, ""), nil
 	}
 	if len(operations) == 0 {
-		return toolResultFailure(
+		return toolResultFailureWithCode(
 			fmt.Errorf("补丁中没有可执行的文件操作"),
+			string(runtimeerrors.ErrToolInvalidArgs),
 			"Include at least one Add/Update/Delete/Move File operation between *** Begin Patch and *** End Patch.",
+			map[string]interface{}{"failure_class": "invalid_patch_syntax"},
 		), nil
 	}
 
@@ -459,7 +464,7 @@ func isApplyPatchBoundaryLine(line, marker string) bool {
 }
 
 func parseAddFileOperation(lines []string, start int) (patchOperation, int, error) {
-	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchAddPrefix))
+	path := sanitizeApplyPatchPath(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchAddPrefix))
 	if path == "" {
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少新增文件路径", start+1)
 	}
@@ -521,7 +526,7 @@ func isApplyPatchEOFMarkerLine(line string) bool {
 }
 
 func parseDeleteFileOperation(lines []string, start int) (patchOperation, int, error) {
-	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchDeletePrefix))
+	path := sanitizeApplyPatchPath(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchDeletePrefix))
 	if path == "" {
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少删除文件路径", start+1)
 	}
@@ -532,7 +537,7 @@ func parseDeleteFileOperation(lines []string, start int) (patchOperation, int, e
 }
 
 func parseUpdateFileOperation(lines []string, start int) (patchOperation, int, error) {
-	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchUpdatePrefix))
+	path := sanitizeApplyPatchPath(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchUpdatePrefix))
 	if path == "" {
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少更新文件路径", start+1)
 	}
@@ -543,7 +548,7 @@ func parseUpdateFileOperation(lines []string, start int) (patchOperation, int, e
 	}
 	index := start + 1
 	if index < len(lines) && strings.HasPrefix(lines[index], applyPatchMoveToPrefix) {
-		operation.MoveTo = strings.TrimSpace(strings.TrimPrefix(lines[index], applyPatchMoveToPrefix))
+		operation.MoveTo = sanitizeApplyPatchPath(strings.TrimPrefix(lines[index], applyPatchMoveToPrefix))
 		if operation.MoveTo == "" {
 			return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少移动目标路径", index+1)
 		}
@@ -805,6 +810,35 @@ func (a *patchApplier) resolvePath(targetPath string, op runtimeexecutor.Permiss
 	return absPath, nil
 }
 
+// sanitizeApplyPatchPath trims whitespace and common model punctuation that
+// leaks into Update/Add/Delete File headers (live residual: snippet.go", from
+// mid-sentence / JSON / markdown fragments). Does not rewrite valid
+// relative/absolute paths or intentional spaces inside names.
+func sanitizeApplyPatchPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	// Strip balanced outer quotes once: "foo.go" / 'foo.go' / `foo.go`.
+	if len(path) >= 2 {
+		first, last := path[0], path[len(path)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') || (first == '`' && last == '`') {
+			path = strings.TrimSpace(path[1 : len(path)-1])
+		}
+	}
+	// Trailing punctuation common when models paste path + sentence/JSON crumbs.
+	for {
+		trimmed := strings.TrimRight(path, " \t\"'`.,;:)]}>")
+		if trimmed == path {
+			break
+		}
+		path = strings.TrimSpace(trimmed)
+	}
+	// Leading quote crumbs after unbalanced paste.
+	path = strings.TrimLeft(path, " \t\"'`([{<,")
+	return strings.TrimSpace(path)
+}
+
 func (a *patchApplier) load(path string) (*stagedFile, error) {
 	if file, ok := a.files[path]; ok {
 		return file, nil
@@ -944,6 +978,7 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 		matchOldLines := oldLines
 		matchNewLines := newLines
 		start := len(lines)
+		matchEnd := -1 // inclusive end when blank-run flexible window is used
 		if len(matchOldLines) > 0 {
 			start = locateHunk(lines, matchOldLines, searchCursor, hunk.EndOfFile)
 			if start < 0 && matchOldLines[len(matchOldLines)-1] == "" {
@@ -958,18 +993,49 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 					start = retryStart
 				}
 			}
+			// Fixed-length windows miss when models invent blank-run length
+			// (same recovery class as edit blank-run flexible match).
+			if start < 0 {
+				if brStart, brEnd, brOK := locateBlankRunLineSpan(lines, matchOldLines); brOK {
+					start = brStart
+					matchEnd = brEnd
+				} else if matchOldLines[len(matchOldLines)-1] == "" {
+					trimmedOldLines := matchOldLines[:len(matchOldLines)-1]
+					if brStart, brEnd, brOK := locateBlankRunLineSpan(lines, trimmedOldLines); brOK {
+						matchOldLines = trimmedOldLines
+						if len(matchNewLines) > 0 && matchNewLines[len(matchNewLines)-1] == "" {
+							matchNewLines = matchNewLines[:len(matchNewLines)-1]
+						}
+						start = brStart
+						matchEnd = brEnd
+					}
+				}
+			}
 		}
 		if start < 0 {
 			return "", buildPatchHunkNotFoundError(hunk, oldLines, lines, "未找到期望旧内容")
 		}
-		touchesEOF := start+len(matchOldLines) == len(lines)
 
-		updated := make([]string, 0, len(lines)-len(matchOldLines)+len(matchNewLines))
+		var replaceLines []string
+		var oldSpanLen int
+		if matchEnd >= start {
+			// Blank-run flexible: preserve file blank runs; rewrite only changed
+			// non-blank bodies from the model's new side.
+			fileSpan := lines[start : matchEnd+1]
+			replaceLines = rebuildPatchBlankRunReplacement(fileSpan, matchOldLines, matchNewLines)
+			oldSpanLen = matchEnd - start + 1
+		} else {
+			replaceLines = matchNewLines
+			oldSpanLen = len(matchOldLines)
+		}
+		touchesEOF := start+oldSpanLen == len(lines)
+
+		updated := make([]string, 0, len(lines)-oldSpanLen+len(replaceLines))
 		updated = append(updated, lines[:start]...)
-		updated = append(updated, matchNewLines...)
-		updated = append(updated, lines[start+len(matchOldLines):]...)
+		updated = append(updated, replaceLines...)
+		updated = append(updated, lines[start+oldSpanLen:]...)
 		lines = updated
-		cursor = start + len(matchNewLines)
+		cursor = start + len(replaceLines)
 
 		if touchesEOF {
 			trailingNewline = true
@@ -1021,6 +1087,85 @@ func locateHunk(lines []string, expected []string, cursor int, eof bool) int {
 		}
 	}
 	return -1
+}
+
+// rebuildPatchBlankRunReplacement maps model new-side lines onto a file span
+// found via blank-run flexible match. File blank runs are preserved; non-blank
+// lines keep file bytes when collapse-ws-equal to the model/old body, otherwise
+// inherit file indent like edit's blank-run rebuild.
+func rebuildPatchBlankRunReplacement(fileSpan, oldLines, newLines []string) []string {
+	if len(newLines) == 0 {
+		// Pure deletion: drop the matched file span.
+		return nil
+	}
+	fileNB := editNonBlankLines(fileSpan)
+	oldNB := editNonBlankLines(oldLines)
+	newNB := editNonBlankLines(newLines)
+	if len(newNB) == 0 {
+		// Model only emitted blanks — keep file blanks as-is rather than invent.
+		return append([]string(nil), fileSpan...)
+	}
+
+	// Equal non-blank counts: walk file shape, rewrite bodies from newNB.
+	if len(newNB) == len(fileNB) && len(oldNB) == len(fileNB) {
+		out := make([]string, 0, len(fileSpan)+2)
+		nbIdx := 0
+		for _, fileLine := range fileSpan {
+			if strings.TrimSpace(fileLine) == "" {
+				out = append(out, fileLine)
+				continue
+			}
+			if nbIdx >= len(newNB) {
+				out = append(out, fileLine)
+				continue
+			}
+			modelLine := newNB[nbIdx]
+			if normalizePatchComparableLine(modelLine) == normalizePatchComparableLine(fileLine) ||
+				normalizePatchComparableLine(modelLine) == normalizePatchComparableLine(oldNB[nbIdx]) {
+				out = append(out, fileLine)
+			} else {
+				newWS := leadingWhitespace(modelLine)
+				body := strings.TrimPrefix(modelLine, newWS)
+				oldWS := leadingWhitespace(oldNB[nbIdx])
+				fileWS := leadingWhitespace(fileLine)
+				rel := newWS
+				if oldWS != "" && strings.HasPrefix(newWS, oldWS) {
+					rel = strings.TrimPrefix(newWS, oldWS)
+				} else if newWS == oldWS {
+					rel = ""
+				} else if oldWS == "" {
+					rel = newWS
+				} else {
+					out = append(out, modelLine)
+					nbIdx++
+					continue
+				}
+				out = append(out, fileWS+rel+body)
+			}
+			nbIdx++
+		}
+		for ; nbIdx < len(newNB); nbIdx++ {
+			line := newNB[nbIdx]
+			if len(fileNB) > 0 {
+				fileWS0 := leadingWhitespace(fileNB[0])
+				oldWS0 := ""
+				if len(oldNB) > 0 {
+					oldWS0 = leadingWhitespace(oldNB[0])
+				}
+				newWS := leadingWhitespace(line)
+				if oldWS0 == "" && fileWS0 != "" && !strings.HasPrefix(newWS, fileWS0) {
+					out = append(out, fileWS0+line)
+					continue
+				}
+			}
+			out = append(out, line)
+		}
+		return out
+	}
+
+	// Fallback: model-shaped new lines (fixed-window semantics) when non-blank
+	// counts diverge — still better than failing after a successful locate.
+	return append([]string(nil), newLines...)
 }
 
 type hunkSearchRange struct {
@@ -1095,7 +1240,10 @@ func normalizePatchComparableLine(line string) string {
 			builder.WriteRune(char)
 		}
 	}
-	return builder.String()
+	// Collapse internal whitespace so column-alignment padding
+	// (e.g. "Name  Event" vs "Name Event") still matches while
+	// replace continues to use the file's exact bytes.
+	return strings.Join(strings.Fields(builder.String()), " ")
 }
 
 func hunkChangeContextLine(header string) string {
@@ -1214,20 +1362,49 @@ func buildPatchHunkNotFoundError(hunk patchHunk, expected, actual []string, reas
 		header = "@@"
 	}
 	current := ""
-	if startLine, closest := closestPatchCurrentContext(actual, expected); len(closest) > 0 {
+	startLine, closest := closestPatchCurrentContext(actual, expected)
+	if len(closest) > 0 {
 		current = fmt.Sprintf(
 			"\n最接近的当前内容（第 %d 行附近，可直接据此修正补丁）:\n%s",
 			startLine,
 			formatPatchCurrentLines(closest, startLine),
 		)
 	}
-	return fmt.Errorf(
+	message := fmt.Sprintf(
 		"无法定位 hunk: %s；%s。next_action: 先用 view/grep 重读目标文件附近最新内容，按返回的“最接近的当前内容”重建补丁（一次只改一个文件/区域）；不要原样重试同一 stale @@/旧行。也可改用更短、更靠近目标的 @@ 上下文。\n期望内容:\n%s%s",
 		header,
 		reason,
 		formatPatchExpectedLines(expected),
 		current,
 	)
+	return &patchHunkNotFoundError{
+		message:   message,
+		startLine: startLine,
+		closest:   closest,
+	}
+}
+
+// patchHunkNotFoundError carries structured recovery fields for STALE_CONTEXT
+// so apply_patch can promote current_snippet without re-parsing error text.
+type patchHunkNotFoundError struct {
+	message   string
+	startLine int
+	closest   []string
+}
+
+func (e *patchHunkNotFoundError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func extractPatchHunkNotFoundError(err error) *patchHunkNotFoundError {
+	var target *patchHunkNotFoundError
+	if errors.As(err, &target) {
+		return target
+	}
+	return nil
 }
 
 // applyPatchToolFailure classifies apply_patch failures, stamping STALE_CONTEXT
@@ -1243,11 +1420,25 @@ func applyPatchToolFailure(err error, filePath string) *toolkit.ToolResult {
 	}
 	if isApplyPatchStaleContextError(err) {
 		extra["failure_class"] = "stale_context"
-		if startLine := extractPatchSuggestedViewLine(err.Error()); startLine > 0 {
-			extra["suggested_view_offset"] = startLine - 1 // view offset is 0-based
+		// Prefer structured fields from patchHunkNotFoundError (parity with edit).
+		if detail := extractPatchHunkNotFoundError(err); detail != nil && len(detail.closest) > 0 && detail.startLine > 0 {
+			extra["suggested_view_offset"] = detail.startLine - 1 // view offset is 0-based
+			extra["suggested_view_limit"] = 40
+			// Structured copy-paste recovery: models often blind-retry apply_patch
+			// after STALE; expose exact current lines so @@ / old lines can be rebuilt
+			// without an extra view round-trip when the window is already known.
+			extra["current_snippet"] = strings.Join(detail.closest, "\n")
+			extra["current_snippet_start_line"] = detail.startLine
+		} else if startLine := extractPatchSuggestedViewLine(err.Error()); startLine > 0 {
+			// Fallback for wrapped / legacy messages that only embed line hints.
+			extra["suggested_view_offset"] = startLine - 1
 			extra["suggested_view_limit"] = 40
 		}
 		return toolResultFailureWithCode(err, string(runtimeerrors.ErrToolStaleContext), next, extra)
+	}
+	if isApplyPatchInvalidSyntaxError(err) {
+		extra["failure_class"] = "invalid_patch_syntax"
+		return toolResultFailureWithCode(err, string(runtimeerrors.ErrToolInvalidArgs), next, extra)
 	}
 	return toolResultFailureWithCode(err, "", next, extra)
 }
@@ -1256,6 +1447,9 @@ func isApplyPatchStaleContextError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if extractPatchHunkNotFoundError(err) != nil {
+		return true
+	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 	return strings.Contains(msg, "无法定位 hunk") ||
@@ -1263,6 +1457,47 @@ func isApplyPatchStaleContextError(err error) bool {
 		strings.Contains(msg, "未找到 @@ 上下文") ||
 		(strings.Contains(lower, "hunk") && strings.Contains(lower, "stale")) ||
 		strings.Contains(msg, "stale @@")
+}
+
+// isApplyPatchInvalidSyntaxError reports parse/format failures that should be
+// TOOL_INVALID_ARGS (not bare TOOL_EXECUTION). Live residual: hunk lines that
+// re-open Begin/End markers mid-body, or malformed headers, were generic
+// execution fails with "Inspect the error details…".
+func isApplyPatchInvalidSyntaxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isApplyPatchStaleContextError(err) {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(msg, "不是合法的 hunk"),
+		strings.Contains(msg, "不是合法的补丁"),
+		strings.Contains(msg, "不是合法的补丁操作头"),
+		strings.Contains(msg, "不是合法的新增文件内容"),
+		strings.Contains(msg, "hunk 没有内容"),
+		strings.Contains(msg, "更新文件没有内容变更"),
+		strings.Contains(msg, "新增文件没有内容"),
+		strings.Contains(msg, "缺少新增文件路径"),
+		strings.Contains(msg, "缺少更新文件路径"),
+		strings.Contains(msg, "缺少删除文件路径"),
+		strings.Contains(msg, "缺少移动目标路径"),
+		strings.Contains(msg, "patch 参数缺失"),
+		strings.Contains(msg, "补丁中没有可执行的文件操作"),
+		strings.Contains(msg, "补丁必须以"),
+		strings.Contains(msg, "补丁缺少"),
+		strings.Contains(msg, "应以 '+' 开头"):
+		return true
+	case strings.Contains(lower, "invalid patch"),
+		strings.Contains(lower, "malformed patch"),
+		// Envelope marker guidance errors always mention Begin/End Patch.
+		strings.Contains(msg, "Begin Patch") || strings.Contains(msg, "End Patch"):
+		return true
+	default:
+		return false
+	}
 }
 
 func extractPatchSuggestedViewLine(message string) int {
@@ -1297,12 +1532,14 @@ func applyPatchFailureNextAction(err error) string {
 	lower := strings.ToLower(msg)
 	switch {
 	case isApplyPatchStaleContextError(err):
-		return "STALE_CONTEXT: re-view/grep the target file nearby (use suggested_view_offset when present), rebuild the patch from the closest current content, and keep the patch focused on one file/region. Do not retry the same stale @@/old lines unchanged."
+		return "STALE_CONTEXT: copy exact lines from current_snippet / “最接近的当前内容” (or re-view with suggested_view_offset), rebuild a smaller focused patch from that text (one file/region), and do not retry the same stale @@/old lines unchanged."
 	case strings.Contains(msg, "Add File") || strings.Contains(msg, "应以 '+' 开头"):
 		return "For Add File hunks, every content line must start with '+'. Rewrite the add body with '+' prefixes, or use write/append_write for new files."
+	case strings.Contains(msg, "不是合法的 hunk") || strings.Contains(msg, "hunk 没有内容") || strings.Contains(msg, "更新文件没有内容变更"):
+		return "TOOL_INVALID_ARGS: fix apply_patch syntax — each Update File needs @@ hunk headers and +/-/ context lines only (no nested Begin/End markers inside a hunk). Prefer one file/region; rebuild from a fresh view of the target."
 	case strings.Contains(msg, "不是合法的补丁") || strings.Contains(msg, "Begin Patch") || strings.Contains(msg, "End Patch"):
 		return "Use Codex apply_patch markers: *** Begin Patch / *** Update|Add|Delete File / *** End Patch. Keep freeform patch text outside JSON when possible."
-	case strings.Contains(msg, "文件不存在") || strings.Contains(lower, "no such file") || strings.Contains(msg, "路径"):
+	case strings.Contains(msg, "文件不存在") || strings.Contains(lower, "no such file") || strings.Contains(msg, "访问文件失败") || strings.Contains(msg, "解析补丁路径失败"):
 		return "Confirm the target path with ls/glob/view first; fix path typos or create missing parents before retrying apply_patch."
 	default:
 		return "Inspect the apply_patch error, re-read the target file with view/grep, and retry with a smaller focused patch. Prefer one file/region per call."
@@ -1332,44 +1569,310 @@ func closestPatchCurrentContext(actual, expected []string) (int, []string) {
 	if len(actual) == 0 {
 		return 0, nil
 	}
-	bestIndex := -1
+	if len(expected) == 0 {
+		return 0, nil
+	}
+
+	// Multi-line window score first: single best-line search often anchors on
+	// generic tokens (package/import/return) while the real drift is later.
+	bestStart := -1
+	bestEnd := -1
 	bestScore := 0
-	for actualIndex, actualLine := range actual {
-		for _, expectedLine := range expected {
-			if score := patchLineSimilarity(actualLine, expectedLine); score > bestScore {
+	// Track the expected slice used by the winning window so tighten compares
+	// like-with-like (full-window vs late-line tail), instead of forcing a weak
+	// prefix onto a tail-aligned core and then left-padding into noise.
+	bestExpected := expected
+	windowLen := len(expected)
+	if windowLen < 1 {
+		windowLen = 1
+	}
+	maxStart := len(actual)
+	if windowLen <= len(actual) {
+		maxStart = len(actual) - windowLen + 1
+	}
+	for start := 0; start < maxStart; start++ {
+		end := start + windowLen
+		if end > len(actual) {
+			end = len(actual)
+		}
+		score := scorePatchClosestWindow(actual[start:end], expected)
+		if score > bestScore {
+			bestScore = score
+			bestStart = start
+			bestEnd = end
+			bestExpected = expected
+		}
+	}
+
+	// Anchor each expected non-blank line so a drifted first line still recovers.
+	// Align from the strong line forward (avoid forcing weak expected prefixes).
+	for expectedIdx, expectedLine := range expected {
+		if strings.TrimSpace(expectedLine) == "" {
+			continue
+		}
+		tailExpected := expected[expectedIdx:]
+		for actualIdx, actualLine := range actual {
+			lineScore := patchLineSimilarity(actualLine, expectedLine)
+			if lineScore < 500 {
+				continue
+			}
+			end := actualIdx + len(tailExpected)
+			if end > len(actual) {
+				end = len(actual)
+			}
+			if end <= actualIdx {
+				continue
+			}
+			score := scorePatchClosestWindow(actual[actualIdx:end], tailExpected) + lineScore/40
+			if score > bestScore {
 				bestScore = score
-				bestIndex = actualIndex
+				bestStart = actualIdx
+				bestEnd = end
+				bestExpected = tailExpected
 			}
 		}
 	}
-	if bestIndex < 0 {
-		return 0, nil
-	}
-	start := bestIndex - 3
-	if start < 0 {
-		start = 0
-	}
-	window := len(expected) + 6
-	if window < 8 {
-		window = 8
-	}
-	if window > 16 {
-		window = 16
-	}
-	end := start + window
-	if end > len(actual) {
-		end = len(actual)
-		start = end - window
-		if start < 0 {
-			start = 0
+
+	if bestStart < 0 || bestEnd <= bestStart {
+		// Fall back to single-line best match with padding (legacy behavior).
+		bestIndex := -1
+		lineBest := 0
+		for actualIndex, actualLine := range actual {
+			for _, expectedLine := range expected {
+				if score := patchLineSimilarity(actualLine, expectedLine); score > lineBest {
+					lineBest = score
+					bestIndex = actualIndex
+				}
+			}
 		}
+		if bestIndex < 0 {
+			return 0, nil
+		}
+		bestStart = bestIndex
+		bestEnd = bestIndex + 1
 	}
+
+	_ = bestScore // reserved for future min-score gating
+
+	// Tighten weak leading/trailing alignment so recovery starts near real drift
+	// (same class as edit closest multi-line scoring).
+	aligned := actual[bestStart:bestEnd]
+	from, to := tightenPatchClosestWindowBounds(aligned, bestExpected)
+	coreStart := bestStart + from
+	coreEnd := bestStart + to
+	if coreEnd <= coreStart {
+		coreStart = bestStart
+		coreEnd = bestEnd
+	}
+
+	// Pad a little context around the strong core so models can rebuild @@.
+	// Prefer right-side padding first; never steal so much left context that
+	// suggested_view_offset / current_snippet start on weak import noise when
+	// the real anchor is a later distinctive block.
+	start, end := padPatchClosestWindow(len(actual), coreStart, coreEnd)
 	return start + 1, append([]string(nil), actual[start:end]...)
 }
 
+// padPatchClosestWindow expands [coreStart, coreEnd) with modest context while
+// keeping the strong core near the start of the returned window.
+func padPatchClosestWindow(fileLen, coreStart, coreEnd int) (start, end int) {
+	if fileLen <= 0 {
+		return 0, 0
+	}
+	if coreStart < 0 {
+		coreStart = 0
+	}
+	if coreEnd > fileLen {
+		coreEnd = fileLen
+	}
+	if coreEnd <= coreStart {
+		coreStart = 0
+		coreEnd = fileLen
+		if coreEnd > 8 {
+			coreEnd = 8
+		}
+	}
+
+	const (
+		preferPad = 2
+		minWindow = 8
+		maxWindow = 16
+	)
+
+	start = coreStart - preferPad
+	if start < 0 {
+		start = 0
+	}
+	end = coreEnd + preferPad
+	if end > fileLen {
+		end = fileLen
+	}
+
+	// Grow toward the right first so short late anchors keep a high start line.
+	for end-start < minWindow && end < fileLen {
+		end++
+	}
+	for end-start < minWindow && start > 0 {
+		// Only pull left when right is exhausted; stop once we already have the
+		// core plus a small lead-in so start does not drift into early noise.
+		if coreStart-start >= preferPad && end-start >= coreEnd-coreStart+preferPad {
+			break
+		}
+		start--
+	}
+
+	if end-start > maxWindow {
+		// Keep the strong core; trim padding from the far side.
+		coreLen := coreEnd - coreStart
+		if coreLen >= maxWindow {
+			start = coreStart
+			end = coreStart + maxWindow
+			if end > fileLen {
+				end = fileLen
+				start = end - maxWindow
+				if start < 0 {
+					start = 0
+				}
+			}
+		} else {
+			// Bias remaining pad to the right of the core.
+			rightPad := maxWindow - coreLen
+			if rightPad > preferPad+2 {
+				// Keep at most preferPad lines before the core when trimming.
+				leftPad := preferPad
+				if leftPad > rightPad {
+					leftPad = rightPad
+				}
+				start = coreStart - leftPad
+				if start < 0 {
+					start = 0
+				}
+				end = start + maxWindow
+				if end > fileLen {
+					end = fileLen
+					start = end - maxWindow
+					if start < 0 {
+						start = 0
+					}
+				}
+				// Ensure core is still inside the window.
+				if start > coreStart {
+					start = coreStart
+					end = start + maxWindow
+					if end > fileLen {
+						end = fileLen
+					}
+				}
+			} else {
+				start = coreStart
+				end = coreStart + maxWindow
+				if end > fileLen {
+					end = fileLen
+					start = end - maxWindow
+					if start < 0 {
+						start = 0
+					}
+				}
+			}
+		}
+	}
+	return start, end
+}
+
+func tightenPatchClosestWindowBounds(window, expected []string) (from, to int) {
+	if len(window) == 0 {
+		return 0, 0
+	}
+	firstStrong := -1
+	lastStrong := -1
+	limit := len(expected)
+	if limit > len(window) {
+		limit = len(window)
+	}
+	for i := 0; i < limit; i++ {
+		if strings.TrimSpace(expected[i]) == "" {
+			continue
+		}
+		if patchLineSimilarity(window[i], expected[i]) >= 500 {
+			if firstStrong < 0 {
+				firstStrong = i
+			}
+			lastStrong = i
+		}
+	}
+	if firstStrong < 0 {
+		return 0, len(window)
+	}
+	from = firstStrong
+	if from > 0 {
+		from--
+	}
+	to = lastStrong + 1
+	if to < len(window) {
+		to++
+	}
+	if to > len(window) {
+		to = len(window)
+	}
+	if to <= from {
+		return 0, len(window)
+	}
+	return from, to
+}
+
+func scorePatchClosestWindow(window, expected []string) int {
+	if len(expected) == 0 {
+		return 0
+	}
+	total := 0
+	strong := 0
+	compared := 0
+	for i, expectedLine := range expected {
+		if strings.TrimSpace(expectedLine) == "" {
+			if i < len(window) && strings.TrimSpace(window[i]) == "" {
+				total += 50
+			}
+			continue
+		}
+		compared++
+		if i >= len(window) {
+			continue
+		}
+		score := patchLineSimilarity(window[i], expectedLine)
+		total += score
+		if score >= 500 {
+			strong++
+		}
+	}
+	if compared == 0 {
+		return total
+	}
+	// Reward multi-line agreement so generic first-line hits lose to real blocks.
+	if compared >= 2 && strong >= 2 {
+		total += 800 * strong / compared
+	} else if compared >= 2 && strong == 1 {
+		total += 120
+	}
+	return total
+}
+
 func patchLineSimilarity(actual, expected string) int {
-	actual = strings.ToLower(normalizePatchComparableLine(actual))
-	expected = strings.ToLower(normalizePatchComparableLine(expected))
+	rawActual := strings.TrimSpace(actual)
+	rawExpected := strings.TrimSpace(expected)
+	if rawActual == "" || rawExpected == "" {
+		return 0
+	}
+	// Tiny structural lines match everywhere; keep them weak so multi-line
+	// recovery anchors on distinctive identifiers (parity with edit closest).
+	if isGenericStructuralLine(rawActual) || isGenericStructuralLine(rawExpected) {
+		if rawActual == rawExpected {
+			return 250
+		}
+		return 0
+	}
+
+	actual = strings.ToLower(normalizePatchComparableLine(rawActual))
+	expected = strings.ToLower(normalizePatchComparableLine(rawExpected))
 	if actual == "" || expected == "" {
 		return 0
 	}
@@ -1379,6 +1882,12 @@ func patchLineSimilarity(actual, expected string) int {
 	if strings.Contains(actual, expected) || strings.Contains(expected, actual) {
 		return 5000 + min(len([]rune(actual)), len([]rune(expected)))
 	}
+	// Near-identifier typos: "HelloWord" vs "HelloWorld" must still count as a
+	// strong anchor for current_snippet ranking (never used for auto-heal writes).
+	if sim := runeEditSimilarity(actual, expected); sim >= 0.72 {
+		return 5500 + int(sim*1000) + min(len([]rune(actual)), len([]rune(expected)))
+	}
+
 	actualTerms := patchComparableTerms(actual)
 	expectedTerms := patchComparableTerms(expected)
 	if len(actualTerms) == 0 || len(expectedTerms) == 0 {
@@ -1388,6 +1897,17 @@ func patchLineSimilarity(actual, expected string) int {
 	for term := range expectedTerms {
 		if actualTerms[term] {
 			score += 100 + len([]rune(term))
+			continue
+		}
+		// Soft token match for near typos inside signatures.
+		best := 0.0
+		for actualTerm := range actualTerms {
+			if s := runeEditSimilarity(actualTerm, term); s > best {
+				best = s
+			}
+		}
+		if best >= 0.72 {
+			score += int(float64(80+len([]rune(term))) * best)
 		}
 	}
 	return score
@@ -1408,7 +1928,10 @@ func patchComparableTerms(line string) map[string]bool {
 func formatPatchCurrentLines(lines []string, startLine int) string {
 	formatted := make([]string, 0, len(lines))
 	for index, line := range lines {
-		formatted = append(formatted, fmt.Sprintf("%d: %s", startLine+index, truncateDiagnosticText(line, 240)))
+		// Keep full line text (no mid-line truncation) so models / offline
+		// rehydrate can copy exact current_snippet bytes including long
+		// identifiers; only cap total line count upstream.
+		formatted = append(formatted, fmt.Sprintf("%6d|%s", startLine+index, line))
 	}
 	return strings.Join(formatted, "\n")
 }

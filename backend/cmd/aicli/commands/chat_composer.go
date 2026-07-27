@@ -90,11 +90,11 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
+		OnComplete:            c.onComplete,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 	}
 	if c.completion != nil {
-		hooks.OnComplete = c.onComplete
 		hooks.OnNavigate = c.onNavigate
 		hooks.OnSubmit = c.onSubmit
 		hooks.OnCancelPopup = c.onCancelPopup
@@ -169,14 +169,28 @@ func (c *chatComposerController) onTerminalWrite(_ ui.LineEditorSnapshot, render
 }
 
 func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
-	if c == nil || c.completion == nil {
+	if c == nil {
 		return ui.LineEditorReplacement{}, false
 	}
-	nextText, nextCursor, ok := c.completion.ApplyCompletion(snapshot.Text, snapshot.Cursor)
-	if !ok {
+	if c.completion != nil {
+		if nextText, nextCursor, ok := c.completion.ApplyCompletion(snapshot.Text, snapshot.Cursor); ok {
+			return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+		}
+	}
+	// Preserve Tab completion semantics for slash-command drafts. Everywhere
+	// else in the main chat composer, Tab is the plan-mode toggle shortcut.
+	if isSlashCommandInput(snapshot.Text) {
 		return ui.LineEditorReplacement{}, false
 	}
-	return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+	if err := toggleChatPlanMode(c.session); err != nil {
+		if c.session != nil && c.session.Surface != nil {
+			c.session.Surface.SetPromptEditorStatusLine(fmt.Sprintf("Plan mode 切换失败：%v", err))
+		}
+		return ui.LineEditorReplacement{}, false
+	}
+	// Re-apply the unchanged draft so the line editor redraws after the fixed
+	// status bar changes without inserting a literal tab character.
+	return ui.LineEditorReplacement{Text: snapshot.Text, Cursor: snapshot.Cursor}, true
 }
 
 func (c *chatComposerController) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {

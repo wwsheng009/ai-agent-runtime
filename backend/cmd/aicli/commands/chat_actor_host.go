@@ -549,8 +549,23 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		MaxSteps:     0,
 	}
 	if session != nil {
-		if maxTokens := session.Provider.GetMaxTokensLimit(); maxTokens > 0 {
-			agentConfig.DefaultMaxTokens = maxTokens
+		// Use the Claude Code-style capped request default, not the provider
+		// hard ceiling (max_tokens_limit). The ceiling still clamps via the
+		// LLM adapter request builder.
+		protocol := session.Provider.GetProtocol()
+		model := resolveLocalChatAgentModel(session, host)
+		providerLimit := session.Provider.GetMaxTokensLimit()
+		capability, hasCapability := config.ModelCapabilitySpec{}, false
+		if model != "" && len(session.Provider.ModelCapabilities) > 0 {
+			if cap, ok := session.Provider.ModelCapabilities[model]; ok {
+				capability, hasCapability = cap, true
+			} else if cap, ok := session.Provider.ModelCapabilities["*"]; ok {
+				capability, hasCapability = cap, true
+			}
+		}
+		resolved := runtimellm.ResolveRequestMaxTokens(protocol, model, 0, capability, hasCapability, providerLimit)
+		if resolved.Default > 0 {
+			agentConfig.DefaultMaxTokens = resolved.Default
 		}
 	}
 	if requestedProvider != "" {
@@ -761,7 +776,7 @@ func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) st
 			"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
 			"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
-			"Team-only tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Only call them after spawn_team has created the team run or when the current chat is already bound to an active team task.",
+			"Team collaboration tools such as read_task_spec, read_task_context, send_team_message, and read_mailbox_digest require an active team run. report_task_outcome and block_current_task normally use the active team task, but may also be exposed for a standalone spawn_agent complete_task contract; in that case call the exposed outcome tool without inventing team_id or task_id.",
 			"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
 			"For simple single-command checks such as `git status`, inspect them directly in the parent session; do not spawn a child agent unless the user explicitly asks for subagents or the task benefits from parallel delegation.",
 			"When the user explicitly requests a trusted bounded child agent task that must run local tools, pass spawn_agent permission_mode=\"bypass_permissions\" only if the task is safe and scoped; otherwise keep the default approval behavior and expect the child may wait for approval.",
@@ -1066,22 +1081,23 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 	maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(session.Config)
 	if _, err := runtime.GetProvider(providerName); err != nil {
 		provider, buildErr := runtimellm.NewProvider(&runtimellm.ProviderConfig{
-			Type:              session.Provider.GetType(),
-			APIKey:            session.Provider.GetAPIKey(),
-			BaseURL:           session.Provider.BaseURL,
-			APIPath:           session.Provider.APIPath,
-			Timeout:           session.Provider.Timeout,
-			MaxRetries:        maxRetries,
-			RetryTuning:       retryTuning,
-			RetryRules:        retryRules,
-			DefaultModel:      session.Provider.DefaultModel,
-			SupportedModels:   append([]string(nil), session.Provider.SupportedModels...),
-			ModelMappings:     cloneStringMap(session.Provider.ModelMappings),
-			ModelCapabilities: cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
-			Headers:           effectiveChatProviderHeaders(session),
-			HeaderMappings:    cloneStringMap(session.Provider.HeaderMappings),
-			Proxy:             session.Provider.Proxy.Clone(),
-			RequestsPerMinute: session.Provider.RequestsPerMinute,
+			Type:                  session.Provider.GetType(),
+			APIKey:                session.Provider.GetAPIKey(),
+			BaseURL:               session.Provider.BaseURL,
+			APIPath:               session.Provider.APIPath,
+			Timeout:               session.Provider.Timeout,
+			MaxRetries:            maxRetries,
+			RetryTuning:           retryTuning,
+			RetryRules:            retryRules,
+			DefaultModel:          session.Provider.DefaultModel,
+			SupportedModels:       append([]string(nil), session.Provider.SupportedModels...),
+			ModelMappings:         cloneStringMap(session.Provider.ModelMappings),
+			ModelCapabilities:     cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
+			EnableImageGeneration: session.Provider.EnableImageGeneration,
+			Headers:               effectiveChatProviderHeaders(session),
+			HeaderMappings:        cloneStringMap(session.Provider.HeaderMappings),
+			Proxy:                 session.Provider.Proxy.Clone(),
+			RequestsPerMinute:     session.Provider.RequestsPerMinute,
 		})
 		if buildErr != nil {
 			return buildErr

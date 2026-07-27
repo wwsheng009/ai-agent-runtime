@@ -3,6 +3,7 @@ import {
   BarChart3Icon,
   CheckIcon,
   CopyIcon,
+  DatabaseIcon,
   RefreshCwIcon,
   SearchIcon,
   ShieldIcon,
@@ -573,7 +574,7 @@ export function LogsPage() {
                   </span>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <nav className="flex flex-wrap items-center gap-2" aria-label={t("title")}>
                 <Link
                   to="/workspace/chats/new"
                   className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
@@ -589,12 +590,19 @@ export function LogsPage() {
                   {t("usage")}
                 </Link>
                 <Link
+                  to="/runtime/config"
+                  className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+                >
+                  <DatabaseIcon size={14} />
+                  Runtime
+                </Link>
+                <Link
                   to="/"
                   className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
                 >
                   {t("home")}
                 </Link>
-              </div>
+              </nav>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-2">
@@ -607,6 +615,7 @@ export function LogsPage() {
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder={t("searchPlaceholder")}
+                  aria-label={t("searchPlaceholder")}
                   className="h-8 w-full rounded-[0.7rem] border border-[var(--border)] bg-black/15 pl-10 pr-4 app-text-11 text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)]"
                 />
               </label>
@@ -738,6 +747,7 @@ export function LogsPage() {
                           key={stat.key}
                           type="button"
                           disabled={!canFilter}
+                          aria-pressed={canFilter ? active : undefined}
                           title={
                             canFilter
                               ? `${active ? t("clearSearch") : t("showOnly")} ${stat.label}`

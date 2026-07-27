@@ -189,6 +189,11 @@ type Provider struct {
 	SupportTypes            []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
 	ModelMappings           map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
 	ModelCapabilities       map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
+	// EnableImageGeneration is the provider-level opt-in for Codex native
+	// image_generation tool injection. When nil or false, requests never
+	// auto-append image_generation even if a model capability advertises it.
+	// Some third-party Codex-compatible sites reject that tool by default.
+	EnableImageGeneration   *bool                          `yaml:"enable_image_generation,omitempty" mapstructure:"enable_image_generation" json:"enable_image_generation,omitempty"`
 	MaxTokensLimit          int                            `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
 	MaxToken                int                            `yaml:"max_token" mapstructure:"max_token" json:"max_token"`
 	SupportsMaxOutputTokens *bool                          `yaml:"supports_max_output_tokens" mapstructure:"supports_max_output_tokens" json:"supports_max_output_tokens"`
@@ -197,6 +202,12 @@ type Provider struct {
 	// RequestsPerMinute caps the number of provider API calls per rolling minute.
 	// Zero means no client-side rate limiting.
 	RequestsPerMinute int `yaml:"requests_per_minute" mapstructure:"requests_per_minute" json:"requests_per_minute"`
+}
+
+// AllowsCodexImageGeneration reports whether this provider explicitly opts into
+// Codex native image_generation. Unset/false means disabled (default off).
+func (p Provider) AllowsCodexImageGeneration() bool {
+	return p.EnableImageGeneration != nil && *p.EnableImageGeneration
 }
 
 // HeaderMappingRule defines a conditional header rewrite rule.

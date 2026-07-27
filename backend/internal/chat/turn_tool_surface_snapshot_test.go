@@ -88,6 +88,31 @@ func TestRuntimeTurnToolSurfaceSnapshotInvalidatesAcrossTurnsWhenBindingChanges(
 	require.Empty(t, state.StableToolSurfaceFingerprint)
 }
 
+func TestRuntimeTurnToolSurfaceSnapshotInvalidatesLegacyCompletionSurfaceWithoutOutcomeTool(t *testing.T) {
+	actor := &SessionActor{
+		id: "session-legacy-completion-tools",
+		state: &RuntimeState{
+			SessionID:            "session-legacy-completion-tools",
+			Status:               SessionRunning,
+			CurrentTurnID:        "turn-resumed",
+			CurrentRunMeta:       &team.RunMeta{CompletionRequirement: "complete_task"},
+			StableToolSurfaceSet: true,
+			StableToolSurface:    []types.ToolDefinition{{Name: "view"}},
+			// Binding is intentionally empty to model the legacy array-only
+			// stable_tool_surface_json observed in resumed sessions.
+			StableToolSurfaceBinding: "",
+		},
+	}
+
+	tools, cached, err := actor.turnToolSurfaceSnapshot("turn-resumed").LoadTurnToolSurface(context.Background())
+	require.NoError(t, err)
+	require.False(t, cached)
+	require.Nil(t, tools)
+	state := actor.State()
+	require.False(t, state.StableToolSurfaceSet)
+	require.Empty(t, state.StableToolSurface)
+}
+
 func TestRuntimeTurnToolSurfaceSnapshotKeepsFrozenSurfaceWhenBindingChangesMidTurn(t *testing.T) {
 	runtimeAgent := runtimeagent.NewAgent(&runtimeagent.Config{Name: "test-agent"}, nil)
 	actor := &SessionActor{

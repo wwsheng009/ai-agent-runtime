@@ -1321,12 +1321,14 @@ workflow:
 		t.Fatalf("write skill failed: %v", err)
 	}
 
+	enabledImageGeneration := true
 	session := &ChatSession{
 		ProviderName:     "codex_fox",
 		Model:            "gpt-5.4-mini",
 		FunctionRegistry: functions.NewFunctionRegistry(),
 		Provider: config.Provider{
-			Protocol: "codex",
+			Protocol:              "codex",
+			EnableImageGeneration: &enabledImageGeneration,
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4-mini": {
 					InputModalities: []string{"text", "image"},

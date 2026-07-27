@@ -105,6 +105,44 @@ func TestIsContextWindowErrorSupportsAgentLevelRecovery(t *testing.T) {
 	require.False(t, IsContextWindowError(fmt.Errorf("HTTP 502: upstream unavailable")))
 }
 
+func TestParseMaxTokensLimitError_AnthropicClaudeFableStyle(t *testing.T) {
+	err := fmt.Errorf(`HTTP 400: {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 131072 > 128000, which is the maximum allowed number of output tokens for claude-fable-5"}}`)
+	limit, ok := ParseMaxTokensLimitError(err)
+	require.True(t, ok)
+	assert.Equal(t, 128000, limit)
+	assert.True(t, IsMaxTokensLimitError(err))
+}
+
+func TestApplyMaxTokensLimitRecovery_LowersBudgetOnce(t *testing.T) {
+	current := 131072
+	err := fmt.Errorf("max_tokens: 131072 > 128000, which is the maximum allowed number of output tokens for claude-fable-5")
+	require.True(t, applyMaxTokensLimitRecovery(&current, err))
+	assert.Equal(t, 128000, current)
+	// Already at or below the limit — do not recover again.
+	require.False(t, applyMaxTokensLimitRecovery(&current, err))
+	assert.Equal(t, 128000, current)
+}
+
+func TestApplyMaxTokensLimitRecovery_IgnoresUnrelatedErrors(t *testing.T) {
+	current := 131072
+	require.False(t, applyMaxTokensLimitRecovery(&current, fmt.Errorf("HTTP 429: rate limit exceeded")))
+	assert.Equal(t, 131072, current)
+}
+
+func TestParseMaxTokensLimitError_AlternateForms(t *testing.T) {
+	for _, message := range []string{
+		"max_tokens must be <= 64000",
+		"max_output_tokens at most 8192",
+		"maximum allowed number of output tokens for claude-sonnet-4-6 is 128000",
+	} {
+		limit, ok := ParseMaxTokensLimitError(fmt.Errorf("%s", message))
+		require.True(t, ok, message)
+		require.Greater(t, limit, 0, message)
+	}
+	_, ok := ParseMaxTokensLimitError(fmt.Errorf("invalid_request_error: unknown parameter"))
+	require.False(t, ok)
+}
+
 func TestParseRetryAfterHeaderValue_ParsesSecondsAndHTTPDate(t *testing.T) {
 	now := time.Date(2026, time.April, 26, 10, 0, 0, 0, time.UTC)
 

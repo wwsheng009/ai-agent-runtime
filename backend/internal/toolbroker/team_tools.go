@@ -43,7 +43,10 @@ func metadataRequiresActiveTeamRun(existing map[string]interface{}) map[string]i
 }
 
 // DefinitionsForContext returns broker tools visible for the current request context.
-// Team-only tools stay hidden until an active team run is bound into ctx.
+// Team-only tools stay hidden until an active team run is bound into ctx. The two
+// completion outcome tools are also exposed to a lightweight spawn_agent run
+// carrying completion_requirement=complete_task: that contract must never ask a
+// worker to call a tool which was removed from its tool surface.
 func (b *Broker) DefinitionsForContext(ctx context.Context) []types.ToolDefinition {
 	defs := b.Definitions()
 	if len(defs) == 0 || hasActiveTeamRun(ctx) {
@@ -52,11 +55,53 @@ func (b *Broker) DefinitionsForContext(ctx context.Context) []types.ToolDefiniti
 	filtered := make([]types.ToolDefinition, 0, len(defs))
 	for _, def := range defs {
 		if RequiresActiveTeamRun(def.Name) {
-			continue
+			if !allowsStandaloneCompletionOutcome(ctx, def.Name) {
+				continue
+			}
+			def = standaloneCompletionOutcomeDefinition(def)
 		}
 		filtered = append(filtered, def)
 	}
 	return filtered
+}
+
+func standaloneCompletionOutcomeDefinition(def types.ToolDefinition) types.ToolDefinition {
+	metadata := make(map[string]interface{}, len(def.Metadata)+2)
+	for key, value := range def.Metadata {
+		metadata[key] = value
+	}
+	metadata["availability"] = "completion_requirement"
+	metadata["completion_scope"] = "agent_session"
+	metadata["defer_loading"] = false
+	def.Metadata = metadata
+	switch normalizeToolName(def.Name) {
+	case ToolReportTaskOutcome:
+		def.Description = "Report the structured done, failed, blocked, or handoff outcome required by this standalone agent session. No team_id or task_id is needed."
+	case ToolBlockCurrentTask:
+		def.Description = "Compatibility alias for reporting a blocked or handoff outcome required by this standalone agent session."
+	}
+	return def
+}
+
+func allowsStandaloneCompletionOutcome(ctx context.Context, name string) bool {
+	switch normalizeToolName(name) {
+	case ToolReportTaskOutcome, ToolBlockCurrentTask:
+	default:
+		return false
+	}
+	if ctx == nil {
+		return false
+	}
+	runMeta, ok := team.GetRunMeta(ctx)
+	if !ok || runMeta == nil || (runMeta.Team != nil && strings.TrimSpace(runMeta.Team.TeamID) != "") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(runMeta.CompletionRequirement)) {
+	case "complete_task", "complete-task", "completetask":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasActiveTeamRun(ctx context.Context) bool {

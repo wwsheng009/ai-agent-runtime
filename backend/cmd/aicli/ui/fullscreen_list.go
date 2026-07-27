@@ -504,7 +504,7 @@ func renderFullScreenListFrame(options FullScreenListOptions, state fullScreenLi
 			selected := visibleIndex == state.selected
 			row := listStart + visibleIndex - state.offset
 			lines[row] = fullScreenFrameLine{
-				text:         renderFullScreenListItem(options.Items[itemIndex], itemIndex, selected, width),
+				text:         renderFullScreenListItem(options.Items[itemIndex], fullScreenListItemNumber(options.Items, matches, visibleIndex), selected, width),
 				selected:     selected,
 				preformatted: true,
 			}
@@ -570,7 +570,7 @@ func renderCompactFullScreenListFrame(options FullScreenListOptions, state fullS
 			lines[1] = fullScreenListEmptyMessage(options)
 		} else {
 			item := options.Items[matches[state.selected]]
-			lines[1] = fmt.Sprintf("> [%d] %s", matches[state.selected]+1, item.Title)
+			lines[1] = fmt.Sprintf("> %s %s", fullScreenListItemNumber(options.Items, matches, state.selected), item.Title)
 		}
 	}
 	if height > 2 {
@@ -602,7 +602,28 @@ func fullScreenListConfirmLabel(options FullScreenListOptions) string {
 	return "选择选中项"
 }
 
-func renderFullScreenListItem(item FullScreenListItem, index int, selected bool, width int) string {
+// fullScreenListItemNumber returns the visible rank label for a matched row.
+// Disabled rows use "[·]" so they do not consume selectable ranks; enabled rows
+// are numbered 1..N among currently matched enabled items only. Selection still
+// maps through the original item index stored in matches.
+func fullScreenListItemNumber(items []FullScreenListItem, matches []int, visibleIndex int) string {
+	if visibleIndex < 0 || visibleIndex >= len(matches) {
+		return "[·]"
+	}
+	itemIndex := matches[visibleIndex]
+	if fullScreenListItemDisabled(items, itemIndex) {
+		return "[·]"
+	}
+	rank := 0
+	for index := 0; index <= visibleIndex; index++ {
+		if !fullScreenListItemDisabled(items, matches[index]) {
+			rank++
+		}
+	}
+	return fmt.Sprintf("[%d]", rank)
+}
+
+func renderFullScreenListItem(item FullScreenListItem, indexLabel string, selected bool, width int) string {
 	marker := "  "
 	if selected {
 		marker = "> "
@@ -610,7 +631,11 @@ func renderFullScreenListItem(item FullScreenListItem, index int, selected bool,
 	if item.Disabled {
 		marker = "· "
 	}
-	number := fmt.Sprintf("[%d] ", index+1)
+	number := strings.TrimSpace(indexLabel)
+	if number == "" {
+		number = "[·]"
+	}
+	number += " "
 	detail := strings.TrimSpace(item.Detail)
 	detailWidth := min(32, max(12, width/3))
 	detail = fitFullScreenText(detail, detailWidth)

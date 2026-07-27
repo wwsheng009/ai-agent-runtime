@@ -123,10 +123,9 @@ func sessionHasCodexNativeImageGeneration(session *ChatSession) bool {
 	if session == nil {
 		return false
 	}
-	return runtimellm.CodexImageGenerationEnabled(
-		session.Provider.GetProtocol(),
+	return runtimellm.CodexNativeImageGenerationEnabled(
+		session.Provider,
 		strings.TrimSpace(session.Model),
-		session.Provider.ModelCapabilities,
 	)
 }
 

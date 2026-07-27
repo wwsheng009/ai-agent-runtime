@@ -1487,6 +1487,57 @@ func TestTrimMessageCount_DropsWholeToolReplayBlockInsteadOfLeavingOrphanTools(t
 	}
 }
 
+func TestTrimMessageCount_PreservesUserAnchorInsideLongCompletedTurn(t *testing.T) {
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("inspect the session failure"),
+		{
+			Role:      "assistant",
+			ToolCalls: []types.ToolCall{{ID: "call_1", Name: "shell"}},
+		},
+		*types.NewToolMessage("call_1", "first result"),
+		{
+			Role:      "assistant",
+			ToolCalls: []types.ToolCall{{ID: "call_2", Name: "shell"}},
+		},
+		*types.NewToolMessage("call_2", "second result"),
+		{
+			Role:      "assistant",
+			ToolCalls: []types.ToolCall{{ID: "call_3", Name: "shell"}},
+		},
+		*types.NewToolMessage("call_3", "third result"),
+		*types.NewAssistantMessage("the history window is the cause"),
+		*types.NewUserMessage("如何修复"),
+	}
+
+	trimmed := trimMessageCount(messages, 6)
+
+	require.LessOrEqual(t, len(trimmed), 6)
+	require.GreaterOrEqual(t, len(trimmed), 3)
+	assert.Equal(t, "system", trimmed[0].Role)
+	assert.Equal(t, "user", trimmed[1].Role)
+	assert.Equal(t, "inspect the session failure", trimmed[1].Content)
+	assert.Equal(t, "user", trimmed[len(trimmed)-1].Role)
+	assert.Equal(t, "如何修复", trimmed[len(trimmed)-1].Content)
+	assertToolReplayBlocksComplete(t, trimmed)
+}
+
+func assertToolReplayBlocksComplete(t *testing.T, messages []types.Message) {
+	t.Helper()
+	for index, message := range messages {
+		if message.Role != "assistant" || len(message.ToolCalls) == 0 {
+			continue
+		}
+		results := make(map[string]bool, len(message.ToolCalls))
+		for next := index + 1; next < len(messages) && messages[next].Role == "tool"; next++ {
+			results[messages[next].ToolCallID] = true
+		}
+		for _, call := range message.ToolCalls {
+			assert.True(t, results[call.ID], "tool call %s must retain its adjacent result", call.ID)
+		}
+	}
+}
+
 func ledgerMessagesFromResult(messages []types.Message) []types.Message {
 	ledgers := make([]types.Message, 0)
 	for _, message := range messages {

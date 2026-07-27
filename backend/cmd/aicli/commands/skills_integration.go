@@ -35,7 +35,7 @@ type skillExecutor interface {
 }
 
 type skillsRuntimeBinding struct {
-	manager              *runtimebootstrap.Manager
+	manager *runtimebootstrap.Manager
 	// ownsManager is true when this binding created the bootstrap manager and
 	// must stop it on Close. Shared host bootstrap managers set this false so
 	// LocalRuntimeHost remains the single owner.
@@ -983,23 +983,24 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 		maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(cfg)
 
 		providerConfigs[name] = &runtimellm.ProviderConfig{
-			Type:               providerType,
-			APIKey:             provider.GetAPIKey(),
-			BaseURL:            provider.BaseURL,
-			APIPath:            provider.APIPath,
-			Timeout:            timeout,
-			MaxRetries:         maxRetries,
-			RetryTuning:        retryTuning,
-			RetryRules:         retryRules,
-			DefaultModel:       provider.DefaultModel,
-			SupportedModels:    append([]string(nil), provider.SupportedModels...),
-			ModelMappings:      cloneStringMap(provider.ModelMappings),
-			ModelCapabilities:  cloneProviderModelCapabilities(provider.ModelCapabilities),
-			Headers:            config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
-			HeaderMappings:     cloneStringMap(provider.HeaderMappings),
-			HeaderMappingRules: cloneHeaderMappingRules(provider.HeaderMappingRules),
-			Proxy:              config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
-			RequestsPerMinute:  provider.RequestsPerMinute,
+			Type:                  providerType,
+			APIKey:                provider.GetAPIKey(),
+			BaseURL:               provider.BaseURL,
+			APIPath:               provider.APIPath,
+			Timeout:               timeout,
+			MaxRetries:            maxRetries,
+			RetryTuning:           retryTuning,
+			RetryRules:            retryRules,
+			DefaultModel:          provider.DefaultModel,
+			SupportedModels:       append([]string(nil), provider.SupportedModels...),
+			ModelMappings:         cloneStringMap(provider.ModelMappings),
+			ModelCapabilities:     cloneProviderModelCapabilities(provider.ModelCapabilities),
+			EnableImageGeneration: provider.EnableImageGeneration,
+			Headers:               config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
+			HeaderMappings:        cloneStringMap(provider.HeaderMappings),
+			HeaderMappingRules:    cloneHeaderMappingRules(provider.HeaderMappingRules),
+			Proxy:                 config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
+			RequestsPerMinute:     provider.RequestsPerMinute,
 		}
 	}
 

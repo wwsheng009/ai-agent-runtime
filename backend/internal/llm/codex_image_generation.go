@@ -38,14 +38,20 @@ type CodexImageGenerationOptions struct {
 // BuildToolDefinitionsForRequest converts local tool definitions into protocol
 // request payloads and appends Codex native tools when the selected model
 // explicitly supports them.
+//
+// enableNativeImageGeneration is the provider-level opt-in. When false (the
+// default for callers that do not pass provider enable_image_generation), the
+// image_generation tool is never auto-injected even if model capabilities
+// advertise support.
 func BuildToolDefinitionsForRequest(
 	tools []types.ToolDefinition,
 	protocol string,
 	model string,
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
 	includeMeta bool,
+	enableNativeImageGeneration bool,
 ) interface{} {
-	return BuildToolDefinitionsForRequestWithImageOptions(tools, protocol, model, modelCapabilities, includeMeta, nil)
+	return BuildToolDefinitionsForRequestWithImageOptions(tools, protocol, model, modelCapabilities, includeMeta, nil, enableNativeImageGeneration)
 }
 
 // BuildToolDefinitionsForRequestWithImageOptions is BuildToolDefinitionsForRequest
@@ -57,8 +63,10 @@ func BuildToolDefinitionsForRequestWithImageOptions(
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
 	includeMeta bool,
 	imageOptions *CodexImageGenerationOptions,
+	enableNativeImageGeneration bool,
 ) interface{} {
-	nativeImageGenerationEnabled := CodexImageGenerationEnabled(protocol, model, modelCapabilities)
+	nativeImageGenerationEnabled := enableNativeImageGeneration &&
+		CodexImageGenerationEnabled(protocol, model, modelCapabilities)
 	tools = filterOpenAIImageGenerateToolForCodexNative(tools, nativeImageGenerationEnabled)
 	if len(tools) == 0 && !nativeImageGenerationEnabled && !includeMeta {
 		return nil
@@ -141,8 +149,12 @@ func filterOpenAIImageGenerateToolForCodexNative(tools []types.ToolDefinition, n
 	return filtered
 }
 
-// CodexImageGenerationEnabled reports whether the configured provider/model pair
+// CodexImageGenerationEnabled reports whether the configured model capability
 // may expose the Responses image_generation native tool.
+//
+// This is the model-level check only. Callers that have a full provider should
+// prefer CodexNativeImageGenerationEnabled so the provider-level
+// enable_image_generation opt-in (default off) is enforced.
 func CodexImageGenerationEnabled(
 	protocol string,
 	model string,
@@ -153,6 +165,13 @@ func CodexImageGenerationEnabled(
 	}
 	capability, ok := ResolveModelCapabilitySpec(model, modelCapabilities)
 	return ok && agentconfig.ModelCapabilityHasTextImageNativeGeneration(capability)
+}
+
+// CodexNativeImageGenerationEnabled reports whether a provider/model pair should
+// expose Codex native image_generation. Both provider opt-in and model
+// capability must allow it.
+func CodexNativeImageGenerationEnabled(provider agentconfig.Provider, model string) bool {
+	return agentconfig.ProviderHasCodexNativeImageGeneration(provider, model)
 }
 
 // ProcessCodexAssistantImageGeneration saves image_generation results to disk,

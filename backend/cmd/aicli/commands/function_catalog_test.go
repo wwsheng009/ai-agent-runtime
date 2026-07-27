@@ -466,12 +466,14 @@ func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesOpenAIImageGenerateWhe
 		Parameters:  map[string]interface{}{"type": "object"},
 	})
 
+	enabledImageGeneration := true
 	session := &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,
 		Model:            "gpt-5.4",
 		Provider: config.Provider{
-			Protocol: "codex",
+			Protocol:              "codex",
+			EnableImageGeneration: &enabledImageGeneration,
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4": {
 					InputModalities: []string{"text", "image"},

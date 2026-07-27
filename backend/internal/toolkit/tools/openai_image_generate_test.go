@@ -81,17 +81,19 @@ func TestOpenAIImageGenerateTool_CodexNativePathSavesImageAndForcesToolChoice(t 
 			},
 		},
 	})
+	enabledImageGeneration := true
 	tool.providerConfigResolver = func() *agentconfig.Config {
 		return &agentconfig.Config{
 			Providers: agentconfig.ProvidersConfig{
 				Items: map[string]agentconfig.Provider{
 					"CODEX_NATIVE": {
-						Enabled:         true,
-						Protocol:        "codex",
-						BaseURL:         server.URL,
-						APIKey:          "codex-key",
-						DefaultModel:    "gpt-5.4",
-						SupportedModels: []string{"gpt-5.4"},
+						Enabled:               true,
+						Protocol:              "codex",
+						BaseURL:               server.URL,
+						APIKey:                "codex-key",
+						DefaultModel:          "gpt-5.4",
+						SupportedModels:       []string{"gpt-5.4"},
+						EnableImageGeneration: &enabledImageGeneration,
 						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
 							"gpt-5.4": {
 								InputModalities: []string{"text", "image"},

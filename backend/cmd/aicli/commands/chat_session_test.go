@@ -269,6 +269,8 @@ func TestDecodeToolArguments_RepairsMissingStructuralClosers(t *testing.T) {
 }
 
 func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *testing.T) {
+	firstWorkspace := t.TempDir()
+	secondWorkspace := t.TempDir()
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {
 		t.Fatalf("new file storage: %v", err)
@@ -285,6 +287,7 @@ func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *t
 	if err != nil {
 		t.Fatalf("create first session: %v", err)
 	}
+	first.SetContext(sessionmeta.WorkspacePath, firstWorkspace)
 	first.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "first", Metadata: runtimetypes.NewMetadata()}})
 	if err := manager.Update(ctx, first); err != nil {
 		t.Fatalf("update first session: %v", err)
@@ -296,6 +299,7 @@ func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *t
 	if err != nil {
 		t.Fatalf("create second session: %v", err)
 	}
+	second.SetContext(sessionmeta.WorkspacePath, secondWorkspace)
 	second.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "second", Metadata: runtimetypes.NewMetadata()}})
 	if err := manager.Update(ctx, second); err != nil {
 		t.Fatalf("update second session: %v", err)
@@ -327,6 +331,14 @@ func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *t
 	}
 	if loaded.ID == third.ID {
 		t.Fatalf("did not expect system-only session %s to be selected", third.ID)
+	}
+
+	loaded, err = loadRequestedRuntimeSessionWithFilter(ctx, manager, "tester", "", true, ChatSessionListFilter{Workspace: firstWorkspace})
+	if err != nil {
+		t.Fatalf("loadRequestedRuntimeSessionWithFilter: %v", err)
+	}
+	if loaded == nil || loaded.ID != first.ID {
+		t.Fatalf("expected latest session in current workspace %s, got %#v", first.ID, loaded)
 	}
 }
 
@@ -762,6 +774,48 @@ func TestListResumeCandidateChatSessionsLoadsSQLiteMetadataCandidatesOnDemand(t 
 	}
 }
 
+func TestSortChatSessionsByRecencyOrdersNewestFirstWithIDTieBreak(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	older := runtimechat.NewSession("tester")
+	older.ID = "b-older"
+	older.UpdatedAt = now.Add(-2 * time.Minute)
+	mid := runtimechat.NewSession("tester")
+	mid.ID = "a-mid"
+	mid.UpdatedAt = now.Add(-time.Minute)
+	newest := runtimechat.NewSession("tester")
+	newest.ID = "z-newest"
+	newest.UpdatedAt = now
+	tieA := runtimechat.NewSession("tester")
+	tieA.ID = "a-tie"
+	tieA.UpdatedAt = now.Add(-3 * time.Minute)
+	tieB := runtimechat.NewSession("tester")
+	tieB.ID = "b-tie"
+	tieB.UpdatedAt = now.Add(-3 * time.Minute)
+
+	// Intentionally shuffle so the helper must reorder to 3,4,5-style recency
+	// instead of leaving a 3,5,4 permutation.
+	sessions := []*runtimechat.Session{older, tieB, newest, mid, tieA}
+	sortChatSessionsByRecency(sessions)
+
+	want := []string{"z-newest", "a-mid", "b-older", "a-tie", "b-tie"}
+	if len(sessions) != len(want) {
+		t.Fatalf("expected %d sessions, got %d", len(want), len(sessions))
+	}
+	for index, id := range want {
+		if sessions[index] == nil || sessions[index].ID != id {
+			got := make([]string, 0, len(sessions))
+			for _, session := range sessions {
+				if session == nil {
+					got = append(got, "<nil>")
+					continue
+				}
+				got = append(got, session.ID)
+			}
+			t.Fatalf("expected order %v, got %v", want, got)
+		}
+	}
+}
+
 func TestSyncRuntimeSessionFromChatPersistsRouteTransparency(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -959,6 +1013,7 @@ func TestRuntimeResumeSessionTitleStripsEmbeddedSessionMetadata(t *testing.T) {
 }
 
 func TestMatchesChatSessionFilter(t *testing.T) {
+	workspace := t.TempDir()
 	session := runtimechat.NewSession("tester")
 	session.UpdateTitle("Review API gateway")
 	session.Metadata.Summary = "Investigate regression"
@@ -966,6 +1021,7 @@ func TestMatchesChatSessionFilter(t *testing.T) {
 		chatRuntimeContextProviderName: "nvidia",
 		chatRuntimeContextProtocol:     "openai",
 		chatRuntimeContextModel:        "gpt-4.1",
+		sessionmeta.WorkspacePath:      workspace,
 	}
 
 	if !matchesChatSessionFilter(session, ChatSessionListFilter{Provider: "NVIDIA"}) {
@@ -986,9 +1042,31 @@ func TestMatchesChatSessionFilter(t *testing.T) {
 	if matchesChatSessionFilter(session, ChatSessionListFilter{State: runtimechat.StateArchived}) {
 		t.Fatal("did not expect state filter to match")
 	}
+	if !matchesChatSessionFilter(session, ChatSessionListFilter{Workspace: workspace}) {
+		t.Fatal("expected current workspace filter to match")
+	}
+	if matchesChatSessionFilter(session, ChatSessionListFilter{Workspace: t.TempDir()}) {
+		t.Fatal("did not expect a different workspace filter to match")
+	}
+	if !matchesChatSessionFilter(session, ChatSessionListFilter{Query: workspace}) {
+		t.Fatal("expected query to include workspace path")
+	}
 
 	session.Metadata.Context[runtimechat.ContextCompactRootTitle] = "legacy login flow"
 	if !matchesChatSessionFilter(session, ChatSessionListFilter{Query: "legacy login"}) {
 		t.Fatal("expected query to match compact root title")
+	}
+
+	delete(session.Metadata.Context, sessionmeta.WorkspacePath)
+	session.Metadata.Context[sessionmeta.EnvironmentContextBlock] = "<environment_context><cwd>" + workspace + "</cwd></environment_context>"
+	if got := runtimeSessionWorkspacePath(session); !sameChatSessionWorkspace(got, workspace) {
+		t.Fatalf("legacy environment cwd = %q, want %q", got, workspace)
+	}
+	if !matchesChatSessionFilter(session, ChatSessionListFilter{Workspace: workspace}) {
+		t.Fatal("expected workspace filter to support legacy environment context")
+	}
+	session.Metadata.Context[sessionmeta.EnvironmentContextBlock] = "<environment_context><cwd>broken"
+	if got := runtimeSessionWorkspacePath(session); got != "" {
+		t.Fatalf("malformed environment cwd = %q, want empty", got)
 	}
 }

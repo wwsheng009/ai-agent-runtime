@@ -14,6 +14,8 @@ import (
 // AnthropicAdapter Anthropic 协议适配器
 type AnthropicAdapter struct{}
 
+const anthropicCompactedHistoryUserAnchor = "Earlier user content was omitted by context compaction. Continue from the retained conversation history."
+
 // Name 返回适配器名称
 func (a *AnthropicAdapter) Name() string {
 	return "anthropic"
@@ -49,13 +51,31 @@ func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interfa
 	}
 	thinkingEnabled := false
 	if thinking != nil && (normalizeAnthropicThinkingType(thinking.Type) != "" || normalizeAnthropicThinkingEffort(thinking.Effort) != "") {
-		request["thinking"] = thinking
-		thinkingEnabled = normalizeAnthropicThinkingType(thinking.Type) != "disabled"
-		// For adaptive thinking, add output_config with effort level
-		if normalizeAnthropicThinkingType(thinking.Type) == "adaptive" && thinking.Effort != "" {
-			request["output_config"] = map[string]interface{}{
-				"effort": thinking.Effort,
+		thinkingType := normalizeAnthropicThinkingType(thinking.Type)
+		thinkingEnabled = thinkingType != "disabled"
+		// Adaptive thinking accepts only {type:"adaptive"} on the thinking object.
+		// Effort belongs in output_config; nesting effort under thinking.adaptive is
+		// rejected by Anthropic-compatible gateways as extra_forbidden
+		// ("thinking.adaptive.effort: Extra inputs are not permitted").
+		if thinkingType == "adaptive" {
+			wire := cloneAnthropicThinking(thinking)
+			if wire == nil {
+				wire = &anthropictypes.Thinking{Type: "adaptive"}
 			}
+			effort := normalizeAnthropicThinkingEffort(wire.Effort)
+			wire.Effort = ""
+			wire.BudgetTokens = nil
+			if strings.TrimSpace(wire.Type) == "" {
+				wire.Type = "adaptive"
+			}
+			request["thinking"] = wire
+			if effort != "" {
+				request["output_config"] = map[string]interface{}{
+					"effort": effort,
+				}
+			}
+		} else {
+			request["thinking"] = thinking
 		}
 	}
 
@@ -97,7 +117,30 @@ func splitAnthropicSystemAndMessages(messages []map[string]interface{}) (string,
 			inputMessages = append(inputMessages, msg)
 		}
 	}
-	return strings.TrimSpace(strings.Join(systemParts, "\n\n")), inputMessages
+	return strings.TrimSpace(strings.Join(systemParts, "\n\n")), ensureAnthropicUserStart(inputMessages)
+}
+
+func ensureAnthropicUserStart(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) == 0 {
+		return messages
+	}
+	role, _ := messages[0]["role"].(string)
+	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		return messages
+	}
+
+	// Context trimming can retain a complete assistant tool_use/tool_result
+	// suffix while omitting the original user prompt. Some Anthropic-compatible
+	// relays rewrite assistant-first histories and break the required adjacency.
+	// A neutral user anchor preserves the retained replay and makes the final
+	// wire request valid even for sessions created before the trim fix.
+	repaired := make([]map[string]interface{}, 0, len(messages)+1)
+	repaired = append(repaired, map[string]interface{}{
+		"role":    "user",
+		"content": anthropicCompactedHistoryUserAnchor,
+	})
+	repaired = append(repaired, messages...)
+	return repaired
 }
 
 func anthropicInstructionText(message map[string]interface{}) string {
@@ -725,6 +768,14 @@ func (a *AnthropicAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]in
 func (a *AnthropicAdapter) IsReasoningModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	reasoningModels := []string{
+		// Claude 5 / late-4 adaptive-thinking family
+		"claude-fable-5",
+		"claude-mythos-5",
+		"claude-mythos-preview",
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-opus-4-8",
+		"claude-opus-4-7",
 		"claude-opus-4-6",
 		"claude-sonnet-4-6",
 		"claude-opus-4-5",

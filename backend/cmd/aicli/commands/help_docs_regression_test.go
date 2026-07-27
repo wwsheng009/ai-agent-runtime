@@ -271,6 +271,8 @@ func TestCommandHelpDocsPathsExist(t *testing.T) {
 	texts := []string{
 		NewInitCommand().Long,
 		NewLoginCommand(func() *config.Config { return nil }).Long,
+		NewChatCommand(func() *config.Config { return nil }).Long,
+		NewResumeCommand(func() *config.Config { return nil }).Long,
 		doctorCmd.Long,
 		doctorSubagentLong,
 		NewProviderCommand(func() *config.Config { return nil }).Long,

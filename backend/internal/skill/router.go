@@ -64,6 +64,23 @@ func (r *Router) Route(ctx context.Context, prompt string) []*RouteResult {
 	return r.RouteWithConfig(ctx, prompt, nil)
 }
 
+// RouteDirect returns only skills that explicitly allow execution before the
+// LLM. Route remains unchanged for discovery and tool-exposure selection.
+func (r *Router) RouteDirect(ctx context.Context, prompt string) []*RouteResult {
+	routes := r.Route(ctx, prompt)
+	if len(routes) == 0 {
+		return nil
+	}
+	direct := make([]*RouteResult, 0, len(routes))
+	for _, route := range routes {
+		if route == nil || route.Skill == nil || !route.Skill.AllowsDirectRoute() {
+			continue
+		}
+		direct = append(direct, route)
+	}
+	return direct
+}
+
 // RouteWithConfig 带配置的路由
 func (r *Router) RouteWithConfig(ctx context.Context, prompt string, config map[string]interface{}) []*RouteResult {
 	processedPrompt := prompt

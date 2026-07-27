@@ -35,6 +35,59 @@ func TestAnthropicBuildRequest_MovesInstructionMessagesToSystem(t *testing.T) {
 	}
 }
 
+func TestAnthropicBuildRequest_RepairsAssistantFirstCompactedHistory(t *testing.T) {
+	a := &AnthropicAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model: "claude-opus-5",
+		Messages: []map[string]interface{}{
+			{
+				"role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{"type": "thinking", "thinking": "inspect the logs"},
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "toolu_1",
+						"name":  "shell",
+						"input": map[string]interface{}{"command": "Get-ChildItem"},
+					},
+				},
+			},
+			{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_1",
+						"content":     "ok",
+					},
+				},
+			},
+		},
+	})
+
+	messages, ok := req["messages"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected anthropic messages array, got %#v", req["messages"])
+	}
+	if len(messages) != 3 {
+		t.Fatalf("expected user anchor plus retained tool replay, got %#v", messages)
+	}
+	if messages[0]["role"] != "user" || messages[0]["content"] != anthropicCompactedHistoryUserAnchor {
+		t.Fatalf("expected neutral user anchor before assistant-first history, got %#v", messages[0])
+	}
+	if messages[1]["role"] != "assistant" || messages[2]["role"] != "user" {
+		t.Fatalf("expected retained assistant/tool_result adjacency, got %#v", messages)
+	}
+	resultBlocks, ok := messages[2]["content"].([]interface{})
+	if !ok || len(resultBlocks) != 1 {
+		t.Fatalf("expected one retained tool_result block, got %#v", messages[2]["content"])
+	}
+	result, ok := resultBlocks[0].(map[string]interface{})
+	if !ok || result["tool_use_id"] != "toolu_1" {
+		t.Fatalf("expected tool_result for toolu_1 immediately after tool_use, got %#v", resultBlocks)
+	}
+}
+
 func TestAnthropicBuildRequest_OmitsEmptySystemField(t *testing.T) {
 	a := &AnthropicAdapter{}
 	req := a.BuildRequest(RequestConfig{
@@ -120,8 +173,13 @@ func TestAnthropicBuildRequest_AdaptiveThinkingGeneratesCorrectBody(t *testing.T
 	if thinking.Type != "adaptive" {
 		t.Fatalf("expected thinking type adaptive, got %q", thinking.Type)
 	}
-	if thinking.Effort != "high" {
-		t.Fatalf("expected thinking effort high, got %q", thinking.Effort)
+	// Nested effort under thinking.adaptive is rejected by Anthropic gateways.
+	// Effort must live only in output_config.
+	if thinking.Effort != "" {
+		t.Fatalf("expected wire thinking.effort empty for adaptive, got %q", thinking.Effort)
+	}
+	if thinking.BudgetTokens != nil {
+		t.Fatalf("expected wire thinking.budget_tokens nil for adaptive, got %#v", thinking.BudgetTokens)
 	}
 
 	// Check output_config
@@ -135,6 +193,27 @@ func TestAnthropicBuildRequest_AdaptiveThinkingGeneratesCorrectBody(t *testing.T
 	}
 	if config["effort"] != "high" {
 		t.Fatalf("expected output_config.effort high, got %v", config["effort"])
+	}
+
+	// Defense-in-depth: even if a caller still embeds Effort on the struct,
+	// JSON must not emit thinking.effort for adaptive.
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	thinkingJSON, ok := decoded["thinking"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected thinking object in JSON, got %#v", decoded["thinking"])
+	}
+	if _, hasEffort := thinkingJSON["effort"]; hasEffort {
+		t.Fatalf("JSON must omit thinking.effort for adaptive, got %#v", thinkingJSON)
+	}
+	if thinkingJSON["type"] != "adaptive" {
+		t.Fatalf("expected JSON thinking.type=adaptive, got %#v", thinkingJSON["type"])
 	}
 }
 

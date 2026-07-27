@@ -30,14 +30,81 @@ func TestChatComposerControllerBuildsCoreHooksWithoutCompletion(t *testing.T) {
 	if hooks.OnChange == nil || hooks.OnBeforeTerminalWrite == nil || hooks.OnTerminalWrite == nil {
 		t.Fatal("expected core editor hooks to be present")
 	}
-	if hooks.OnComplete != nil || hooks.OnNavigate != nil || hooks.OnSubmit != nil || hooks.OnCancelPopup != nil {
-		t.Fatal("expected slash completion hooks to be absent without a fixed-bottom surface")
+	if hooks.OnComplete == nil {
+		t.Fatal("expected Tab plan-mode toggle hook to be present")
+	}
+	if hooks.OnNavigate != nil || hooks.OnSubmit != nil || hooks.OnCancelPopup != nil {
+		t.Fatal("expected slash-only hooks to be absent without a fixed-bottom surface")
 	}
 
 	hooks.OnChange(ui.LineEditorSnapshot{Text: "next", Cursor: 4})
 	snapshot := coord.PromptInputSnapshot()
 	if snapshot.Text != "next" || snapshot.Cursor != 4 {
 		t.Fatalf("expected composer change hook to update interaction prompt, got %#v", snapshot)
+	}
+}
+
+func TestChatComposerControllerTabTogglesPlanModeAndPreservesDraft(t *testing.T) {
+	session := newPlanCommandSession("")
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	composer := &chatComposerController{
+		session: session,
+		prompt:  formatSessionUserPrompt(session),
+	}
+	hooks := composer.hooks()
+	if hooks.OnComplete == nil {
+		t.Fatal("expected Tab hook")
+	}
+
+	replacement, ok := hooks.OnComplete(ui.LineEditorSnapshot{Text: "draft", Cursor: len([]rune("draft"))})
+	if !ok {
+		t.Fatal("expected Tab to toggle plan mode")
+	}
+	if replacement.Text != "draft" || replacement.Cursor != len([]rune("draft")) {
+		t.Fatalf("expected Tab toggle to preserve draft, got %#v", replacement)
+	}
+	if session.PermissionMode != "plan" || !chatPlanModeActive(session) {
+		t.Fatalf("expected Tab to enter plan mode, permission=%q active=%t", session.PermissionMode, chatPlanModeActive(session))
+	}
+
+	replacement, ok = hooks.OnComplete(ui.LineEditorSnapshot{Text: "draft", Cursor: 2})
+	if !ok {
+		t.Fatal("expected second Tab to toggle plan mode off")
+	}
+	if replacement.Text != "draft" || replacement.Cursor != 2 {
+		t.Fatalf("expected second Tab toggle to preserve cursor, got %#v", replacement)
+	}
+	if session.PermissionMode != "default" || chatPlanModeActive(session) {
+		t.Fatalf("expected Tab to leave plan mode, permission=%q active=%t", session.PermissionMode, chatPlanModeActive(session))
+	}
+}
+
+func TestChatComposerControllerTabKeepsSlashCompletionSemantics(t *testing.T) {
+	session := newPlanCommandSession("")
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	composer := &chatComposerController{
+		session:    session,
+		prompt:     formatSessionUserPrompt(session),
+		completion: newChatSlashCompletionController(session),
+	}
+	hooks := composer.hooks()
+
+	replacement, ok := hooks.OnComplete(ui.LineEditorSnapshot{Text: "/m", Cursor: 2})
+	if !ok || replacement.Text == "/m" {
+		t.Fatalf("expected slash completion to keep owning Tab, replacement=%#v ok=%t", replacement, ok)
+	}
+	if chatPlanModeActive(session) {
+		t.Fatal("slash completion Tab must not toggle plan mode")
+	}
+
+	replacement, ok = hooks.OnComplete(ui.LineEditorSnapshot{Text: "/unknown", Cursor: len([]rune("/unknown"))})
+	if ok || replacement.Text != "" {
+		t.Fatalf("expected unknown slash draft to leave Tab unconsumed, replacement=%#v ok=%t", replacement, ok)
+	}
+	if chatPlanModeActive(session) {
+		t.Fatal("unknown slash Tab must not toggle plan mode")
 	}
 }
 

@@ -28,15 +28,16 @@ import (
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
+
 // repeatedSemanticToolCallNoticeThreshold aliases the productized warning threshold
 // so existing tests and call sites keep a stable local name.
 const repeatedSemanticToolCallNoticeThreshold = DoomLoopWarningThreshold
@@ -1570,7 +1571,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		thought += " to provide the final answer."
 	}
 
-	return thought, action, response.Usage, nil
+	usage = response.Usage.Clone()
+	if usage != nil {
+		usage.UsageSource = usageSource
+	}
+	return thought, action, usage, nil
 }
 
 // act 行动阶段：执行工具调用
@@ -3116,13 +3121,13 @@ func dominantToolResultDisposition(results []toolExecutionResult) string {
 // strengthening (prefer STALE_CONTEXT / path / shell compat over generic codes).
 func dominantToolResultErrorCode(results []toolExecutionResult) string {
 	prefer := map[string]int{
-		string(errors.ErrToolStaleContext):        100,
-		string(errors.ErrToolPathNotFound):        90,
-		string(errors.ErrToolShellCompat):         80,
-		string(errors.ErrToolInvalidArgs):         70,
-		string(errors.ErrToolTimeout):             60,
-		string(errors.ErrAgentSpawnDepthLimit):    50,
-		string(errors.ErrToolExecution):           10,
+		string(errors.ErrToolStaleContext):     100,
+		string(errors.ErrToolPathNotFound):     90,
+		string(errors.ErrToolShellCompat):      80,
+		string(errors.ErrToolInvalidArgs):      70,
+		string(errors.ErrToolTimeout):          60,
+		string(errors.ErrAgentSpawnDepthLimit): 50,
+		string(errors.ErrToolExecution):        10,
 	}
 	best := ""
 	bestScore := -1

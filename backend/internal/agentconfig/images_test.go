@@ -274,14 +274,16 @@ func TestSelectAllImagesGenerationsProvider_HintByModel(t *testing.T) {
 }
 
 func TestSelectAllCodexNativeImageGenerationProviders_SelectsTextImageCodexModel(t *testing.T) {
+	enabled := true
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
 				"CODEX_NATIVE": {
-					Enabled:         true,
-					Protocol:        "codex",
-					DefaultModel:    "gpt-5.4",
-					SupportedModels: []string{"gpt-5.4"},
+					Enabled:               true,
+					Protocol:              "codex",
+					DefaultModel:          "gpt-5.4",
+					SupportedModels:       []string{"gpt-5.4"},
+					EnableImageGeneration: &enabled,
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"gpt-5.4": {
 							InputModalities: []string{"text", "image"},
@@ -318,13 +320,15 @@ func TestSelectAllCodexNativeImageGenerationProviders_SelectsTextImageCodexModel
 }
 
 func TestSelectAllCodexNativeImageGenerationProviders_RejectsTextOnlyModel(t *testing.T) {
+	enabled := true
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
 				"CODEX_TEXT": {
-					Enabled:      true,
-					Protocol:     "codex",
-					DefaultModel: "gpt-5.4",
+					Enabled:               true,
+					Protocol:              "codex",
+					DefaultModel:          "gpt-5.4",
+					EnableImageGeneration: &enabled,
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"gpt-5.4": {
 							InputModalities: []string{"text"},
@@ -340,5 +344,31 @@ func TestSelectAllCodexNativeImageGenerationProviders_RejectsTextOnlyModel(t *te
 
 	if _, err := SelectAllCodexNativeImageGenerationProviders(cfg, CodexNativeImageGenerationHint{}); err == nil {
 		t.Fatal("expected error for text-only native image model")
+	}
+}
+
+func TestSelectAllCodexNativeImageGenerationProviders_RejectsProviderWithoutOptIn(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Items: map[string]Provider{
+				"CODEX_NATIVE": {
+					Enabled:      true,
+					Protocol:     "codex",
+					DefaultModel: "gpt-5.4",
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-5.4": {
+							InputModalities: []string{"text", "image"},
+							NativeTools: NativeToolCapabilities{
+								ImageGeneration: true,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := SelectAllCodexNativeImageGenerationProviders(cfg, CodexNativeImageGenerationHint{}); err == nil {
+		t.Fatal("expected error when provider has not opted in to native image generation")
 	}
 }

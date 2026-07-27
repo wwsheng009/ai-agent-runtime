@@ -22,9 +22,10 @@ import (
 )
 
 type toolkitErrorToolStub struct {
-	name    string
-	content string
-	err     error
+	name     string
+	content  string
+	err      error
+	metadata map[string]interface{}
 }
 
 type toolkitSuccessToolStub struct {
@@ -48,9 +49,10 @@ func (s toolkitErrorToolStub) Parameters() map[string]interface{} {
 
 func (s toolkitErrorToolStub) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	return &toolkit.ToolResult{
-		Success: false,
-		Content: s.content,
-		Error:   s.err,
+		Success:  false,
+		Content:  s.content,
+		Error:    s.err,
+		Metadata: s.metadata,
 	}, nil
 }
 
@@ -737,6 +739,46 @@ func TestManagerExecute_PreservesToolkitOutputOnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exit status 128") {
 		t.Fatalf("expected exit status in error, got %v", err)
+	}
+}
+
+func TestManagerExecuteWithMeta_PreservesStaleContextMetadata(t *testing.T) {
+	manager := &Manager{toolkit: toolkit.NewRegistry()}
+	if err := manager.toolkit.Register(toolkitErrorToolStub{
+		name:    "edit_stale",
+		content: "",
+		err:     fmt.Errorf("old_string 未在文件中找到；edit 只执行精确匹配"),
+		metadata: map[string]interface{}{
+			"error_code":            "STALE_CONTEXT",
+			"retryable":             false,
+			"failure_class":         "stale_context",
+			"file_path":             `E:\projects\demo\file.go`,
+			"suggested_view_offset": 8,
+			"suggested_view_limit":  40,
+			"next_action":           "STALE_CONTEXT: re-view offset 8; do not retry the same stale old_string.",
+		},
+	}); err != nil {
+		t.Fatalf("register stub tool: %v", err)
+	}
+
+	_, metadata, err := manager.ExecuteWithMeta(context.Background(), "edit_stale", map[string]interface{}{})
+	if err == nil {
+		t.Fatal("expected edit_stale to fail")
+	}
+	if !strings.Contains(err.Error(), "old_string 未在文件中找到") {
+		t.Fatalf("expected stale error message, got %v", err)
+	}
+	if code, _ := metadata["error_code"].(string); code != "STALE_CONTEXT" {
+		t.Fatalf("expected STALE_CONTEXT metadata through manager, got %#v", metadata)
+	}
+	if metadata["failure_class"] != "stale_context" {
+		t.Fatalf("expected failure_class preserved, got %#v", metadata)
+	}
+	if next, _ := metadata["next_action"].(string); !strings.Contains(next, "STALE_CONTEXT") {
+		t.Fatalf("expected next_action preserved, got %#v", metadata)
+	}
+	if offset, _ := metadata["suggested_view_offset"].(int); offset != 8 {
+		t.Fatalf("expected suggested_view_offset=8, got %#v", metadata)
 	}
 }
 

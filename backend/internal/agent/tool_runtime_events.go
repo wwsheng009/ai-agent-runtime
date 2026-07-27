@@ -351,6 +351,15 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 		toolresult.MetadataFailedItemsKey,
 		toolresult.MetadataPathCandidatesKey,
 		toolresult.MetadataAttemptedArgsKey,
+		"failure_class",
+		"file_path",
+		"suggested_view_offset",
+		"suggested_view_limit",
+		"current_snippet",
+		"current_snippet_start_line",
+		"path_auto_healed",
+		"original_path",
+		"resolved_path",
 		"timeout_requested_ms",
 		"timeout_effective_ms",
 		"timeout_source",
@@ -460,6 +469,34 @@ func promoteToolDispositionToPayload(payload map[string]interface{}, result tool
 		// Only surface attempted_args for recovery-relevant dispositions.
 		if !diagnostic.OK || diagnostic.EmptyResult || outcome == toolresult.OutcomeEmpty || outcome == toolresult.OutcomePartial {
 			payload[toolresult.MetadataAttemptedArgsKey] = existing
+		}
+	}
+	// STALE recovery fields: prefer diagnostic (may rehydrate from error body),
+	// then fall back to envelope metadata. Never overwrite values already set
+	// by copyToolReliabilityMetadata unless they are empty.
+	if path := strings.TrimSpace(diagnostic.FilePath); path != "" {
+		if existing, _ := payload["file_path"].(string); strings.TrimSpace(existing) == "" {
+			payload["file_path"] = path
+		}
+	}
+	if diagnostic.SuggestedViewOffset != nil {
+		if _, exists := payload["suggested_view_offset"]; !exists {
+			payload["suggested_view_offset"] = *diagnostic.SuggestedViewOffset
+		}
+	}
+	if diagnostic.SuggestedViewLimit != nil {
+		if _, exists := payload["suggested_view_limit"]; !exists {
+			payload["suggested_view_limit"] = *diagnostic.SuggestedViewLimit
+		}
+	}
+	if snippet := diagnostic.CurrentSnippet; snippet != "" {
+		if existing, _ := payload["current_snippet"].(string); existing == "" {
+			payload["current_snippet"] = snippet
+		}
+	}
+	if diagnostic.CurrentSnippetStartLine != nil {
+		if _, exists := payload["current_snippet_start_line"]; !exists {
+			payload["current_snippet_start_line"] = *diagnostic.CurrentSnippetStartLine
 		}
 	}
 }

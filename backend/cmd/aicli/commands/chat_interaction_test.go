@@ -1643,6 +1643,23 @@ func TestBuildChatSurfaceStatusLine_ShowsModalHints(t *testing.T) {
 	}
 }
 
+func TestBuildChatSurfaceStatusLine_ShowsPlanModeState(t *testing.T) {
+	inactive := buildChatSurfaceStatusLineForWidth(&ChatSession{Model: "gpt-5.4-code"}, "Ready", 120)
+	if !strings.Contains(inactive, "Plan OFF") {
+		t.Fatalf("expected inactive plan-mode status, got %q", inactive)
+	}
+
+	active := buildChatSurfaceStatusLineForWidth(&ChatSession{Model: "gpt-5.4-code", PermissionMode: runtimepolicy.ModePlan}, "Ready", 120)
+	if !strings.Contains(active, "Plan ON") {
+		t.Fatalf("expected active plan-mode status, got %q", active)
+	}
+
+	narrow := buildChatSurfaceStatusLineForWidth(&ChatSession{PermissionMode: runtimepolicy.ModePlan}, "Ready", 16)
+	if !strings.Contains(narrow, "Plan ON") {
+		t.Fatalf("expected narrow status to keep compact plan-mode state, got %q", narrow)
+	}
+}
+
 func TestBuildChatSurfaceStatusLine_ExplicitModalInputModeOverridesAgentState(t *testing.T) {
 	status := buildChatSurfaceStatusLineForWidthAndInputMode(
 		&ChatSession{Model: "gpt-5.4-code"},

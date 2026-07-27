@@ -4,6 +4,7 @@ import (
 	stderrs "errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -115,6 +116,74 @@ func IsContextWindowError(err error) bool {
 		}
 	}
 	return false
+}
+
+var maxTokensLimitPatterns = []*regexp.Regexp{
+	// Anthropic-compatible: "max_tokens: 131072 > 128000, which is the maximum allowed number of output tokens for claude-fable-5"
+	regexp.MustCompile(`(?i)max[_ ]?tokens[^0-9]{0,40}(\d+)\s*>\s*(\d+)`),
+	// Alternate forms: "max_tokens must be <= 128000" / "maximum allowed ... is 128000"
+	regexp.MustCompile(`(?i)max[_ ]?(?:output[_ ]?)?tokens[^0-9]{0,80}(?:must be|<=|at most|maximum(?: allowed)?(?: number of output tokens)?(?: for [^,]+)?(?: is|:))\s*(\d+)`),
+	regexp.MustCompile(`(?i)maximum allowed number of output tokens(?: for [^,]+)?(?: is|:)\s*(\d+)`),
+}
+
+// ParseMaxTokensLimitError extracts the provider-reported output-token ceiling
+// from deterministic max_tokens validation failures.
+func ParseMaxTokensLimitError(err error) (limit int, ok bool) {
+	if err == nil {
+		return 0, false
+	}
+	message := err.Error()
+	if strings.TrimSpace(message) == "" {
+		return 0, false
+	}
+	lower := strings.ToLower(message)
+	if !strings.Contains(lower, "max_tokens") &&
+		!strings.Contains(lower, "max tokens") &&
+		!strings.Contains(lower, "output tokens") &&
+		!strings.Contains(lower, "max_output_tokens") {
+		return 0, false
+	}
+	for _, pattern := range maxTokensLimitPatterns {
+		matches := pattern.FindStringSubmatch(message)
+		if len(matches) == 0 {
+			continue
+		}
+		// Prefer the second capture group when present (requested > limit).
+		candidate := matches[len(matches)-1]
+		parsed, convErr := strconv.Atoi(candidate)
+		if convErr != nil || parsed <= 0 {
+			continue
+		}
+		return parsed, true
+	}
+	return 0, false
+}
+
+// applyMaxTokensLimitRecovery lowers currentMaxTokens to the provider-reported
+// ceiling when the request budget was rejected. Returns true when the caller
+// should rebuild and retry the request with the adjusted budget.
+func applyMaxTokensLimitRecovery(currentMaxTokens *int, err error) bool {
+	if currentMaxTokens == nil || err == nil {
+		return false
+	}
+	limit, ok := ParseMaxTokensLimitError(err)
+	if !ok || limit <= 0 {
+		return false
+	}
+	// Only recover when the current budget exceeds the provider ceiling, or
+	// when the budget was unset (0) and the provider reported an explicit limit.
+	if *currentMaxTokens > 0 && *currentMaxTokens <= limit {
+		return false
+	}
+	*currentMaxTokens = limit
+	return true
+}
+
+// IsMaxTokensLimitError reports provider rejections caused by an oversized
+// max_tokens / max_output_tokens request parameter.
+func IsMaxTokensLimitError(err error) bool {
+	_, ok := ParseMaxTokensLimitError(err)
+	return ok
 }
 
 func providerCallHTTPStatus(err error) (int, bool) {

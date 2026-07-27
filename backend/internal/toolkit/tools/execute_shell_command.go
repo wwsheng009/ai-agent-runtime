@@ -34,12 +34,12 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 30ms）。秒级超时优先只设 timeout_sec 或 timeout。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
+				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。与 timeout_ms 二选一即可，不要同时填占位 1ms。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",

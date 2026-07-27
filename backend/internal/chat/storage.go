@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -483,7 +484,17 @@ func (s *InMemoryStorage) sortSessionsByUpdated(sessions []*Session) {
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+		left, right := sessions[i], sessions[j]
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})
 }
 

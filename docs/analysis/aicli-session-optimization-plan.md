@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 工具整体 | 近窗 clean metrics：`err_total=4.29%`（hard `2.77%` / soft `1.52%`） | 主路径已可用；剩余失败集中在少数工具与语义误标 |
 | 工具热点 | `bash/shell` 批失败与非零退出、`apply_patch` 上下文 miss、`wait_agent` 超时、`spawn_agent` 深度限制 | 大多是 **可恢复业务失败**，但部分被标成 hard fail，拉低效率并诱导重试 |
-| LLM | 近窗 `71/3985 ≈ 1.78%` fail；主因 `model_not_found(404)`、`503 CPU overload`、`502`、TLS/流中断 | **配置 + 上游稳定性** 主导；重试后仍失败会直接 `session_end success=false` |
+| LLM | 近窗 `71/3985 ≈ 1.78%` fail；主因 `model_not_found(404)`、`503 CPU overload`、`502`、TLS/流中断；近窗亦见 `thinking.adaptive.effort` 400 | **配置 + 上游稳定性** 主导；runtime 侧 adaptive thinking wire 误嵌套 effort 已修 |
 | 会话成功 | `session_end` 近窗约 `success≈145 / fail≈103`（含配置错误与中断） | 工具能恢复，但 **LLM 终态失败 / 补丁 miss / 深度限制** 仍会终结会话 |
 | 效率 | 单会话工具调用中位数偏高；`view/bash/grep` 占绝对多数 | 读多改少 + shell 误用 rg/heredoc 造成 token/时延浪费 |
 
@@ -23,6 +23,28 @@
 3. **P1**：`apply_patch`/`edit` 统一 `STALE_CONTEXT` + suggested view offset；`wait_agent` 超时 next_action 强化；`spawn` depth=`SPAWN_DEPTH_LIMIT`  
 4. **P1**：prompt/策略层减少 shell-rg/heredoc、鼓励 toolkit 并行与 `view.files`  
 5. **P2**：失败时间线看板、会话级效率指标落盘、审批/协作漏斗可视化
+
+### 2026-07-26 夜间复测（最近 30 个有效会话）
+
+本轮新增 `scripts/analyze-aicli-session-history.ps1`，递归读取日期分层目录，并按 `session directory + tool_call_id/request_id` 去重。旧的 `~/.aicli/analyze_tool_errors.ps1` 只扫描 `chat-logs` 第一层，容易漏掉 `YYYY/MM/DD/session` 新布局并重复计算模型切换日志；现已优先转发到新分析器。
+
+复测窗口：`2026-07-26 14:16` 至 `23:11`；为收集 30 个有效会话，按时间倒序跳过了 24 个零消息探测会话：
+
+| 指标 | 结果 | 解释 |
+| --- | ---: | --- |
+| 工具 hard error | `40 / 3313 = 1.21%` | non-fail `98.79%`；另有 empty 149、partial 2，均不算硬失败 |
+| shell hard error | `10 / 481 = 2.08%` | 其中 8 次为 `timeout_ms=1/30` 单位误用导致的 1–30ms 超时；其余 2 次为 shell 兼容性预检 |
+| apply_patch hard error | `9 / 177 = 5.08%` | 仍以 stale hunk / malformed patch 为主；新结果已逐步收敛到 `STALE_CONTEXT` |
+| grep hard error | `7 / 788 = 0.89%` | 空 path、把 `pattern_files` 字面量当文件、缺 pattern 为主 |
+| LLM request failure | `45 / 1057 = 4.26%` | 主要是 provider unavailable、流中断/EOF、TLS、配额；用户取消 4 次不属于 runtime 缺陷 |
+| 语义 no-op | `update_goal` 4 次 | 工具返回成功但 `updated=false / goal_missing`，单独统计，不混入 hard error |
+| replay 完整性 | unmatched tool calls `0` | chat-log 本身成对；但模型切换后的 Anthropic wire 历史仍出现 1 次 incomplete `tool_use` replay 400 |
+
+据此补了两个 residual 修复：
+
+1. 数值 `timeout_ms < 100` 且没有更粗粒度超时时，按模型单位混淆噪声忽略，回退到推断/默认超时；确需亚 100ms 使用 `timeout="30ms"`，避免把 `30` 误当 30 秒后立即 hard-timeout。
+2. Anthropic 历史重放现在按相邻块验证 `tool_use -> tool_result` 完整性；缺任一结果时丢弃整个不完整 replay block，而不是向上游发送必然 400 的历史。完整的多工具结果仍合并并保留。
+3. `update_goal` 的工具说明要求先由 `get_goal` 确认非空 active goal，或明确处于持久 goal run，减少普通会话结束时的 `goal_missing` no-op。
 
 ---
 
@@ -162,6 +184,18 @@ provider fails: gegeda≈68, localhost=2, grok.x4188.top=1
 - 注入 503 后第二次选择不同 provider/key（单测 mock ResourceManager）。  
 - 失败诊断 JSON 含 `error_code/retryable/next_action`。
 
+**状态（2026-07-26 residual）**
+
+- 上游/账号类（TLS / 401 / model_not_found）仍属配置与宿主问题，保持暂缓。  
+- **runtime 可修 residual 已落地**：Anthropic adaptive thinking 误把 `effort` 嵌在 `thinking` 下，触发  
+  `thinking.adaptive.effort: Extra inputs are not permitted`（看板 `other_llm` 桶，会话 `20260726_150533...`）。  
+  现已：  
+  1) `AnthropicAdapter.BuildRequest` adaptive wire 仅 `{type:"adaptive"}`，effort 只进 `output_config`；  
+  2) `Thinking.MarshalJSON` 对 adaptive 省略 nested effort（防御）；  
+  3) `downgradeUnsupportedProviderRequest` 识别 `thinking.*` 时同步清 `ReasoningEffort`（派生 adaptive 路径）；  
+  4) remembered downgrade 在 thinking unsupported 时一并清 effort，避免下一轮重建。  
+- 单测：`adapter` adaptive body、`types/anthropic` marshal、`agent` downgrade、`llm` IsUnsupportedRequestParameter。
+
 ### P0-2 Shell 内容失败语义收敛
 
 **目标**
@@ -190,6 +224,13 @@ provider fails: gegeda≈68, localhost=2, grok.x4188.top=1
 - hard fail（超时/取消/权限/缺失可执行/启动失败）现打结构化 `error_code`（`TOOL_TIMEOUT` / `AGENT_RUN_CANCELED` / `AGENT_PERMISSION` / `TOOL_SHELL_COMPAT` / `PROCESS_START_FAILED` / 兜底 `TOOL_EXECUTION`），并保留 partial stdout。  
 - 历史 chat-logs 仍可能显示 `TOOL_EXECUTION`；新会话应以结构化码 + content success 为主。
 
+**状态（2026-07-26 residual denoise）**
+
+- **简单纯 `rg` 代码搜索软重定向**：无管道/链式/重定向的 standalone `rg` 不再执行，返回 `Success=true` + `shell_search_redirected=true` + next_action 指向 toolkit `grep`（不抬 hard rate）。管道/`rg --files` 等仍可走 shell。  
+- **Select-String / findstr no-match**：仅当其为 **primary** 命令时 exit 1 空输出可 soft-empty；`tsc | Select-String` 等过滤管道不伪装 empty，避免吞掉构建失败。  
+- 管道 `rg ... | Select-Object` no-match / regex parse 仍分别走 empty success / content success（既有契约）。  
+- 离线 `analyze_tool_errors.ps1` 已按新契约区分 `hard` / `empty` / `content_nonzero` / `redirected`，避免把 `ok=true` 的 no-match 与 content 非零退出算进 hard。
+
 ### P1-1 apply_patch / edit 上下文失效
 
 **目标**
@@ -208,12 +249,158 @@ provider fails: gegeda≈68, localhost=2, grok.x4188.top=1
 - 故意 stale patch：一次失败后模型下一工具为 view/grep 的比例上升（评测集）。  
 - apply_patch hard rate 目标 **< 4%**。
 
-**状态（2026-07-25）**
+**状态（2026-07-25；管道收口 2026-07-26）**
 
 - `apply_patch` / `edit` 已输出 `error_code=STALE_CONTEXT`、`failure_class=stale_context`、`retryable=false`。  
 - `edit` / `multiedit` 现补齐 `suggested_view_offset` / `suggested_view_limit`（与 apply_patch 一致）。  
 - `multiedit` 全失败（old_string 全 miss）现与 edit 同一错误码，不再落回裸 `TOOL_EXECUTION`。  
-- 历史 chat-logs 若早于该改动，看板仍可能以 message 启发归类 `patch_context_miss` / `edit_old_string_miss`，`error_code` 列会显示 `TOOL_EXECUTION`；新会话应以 `STALE_CONTEXT` 为主。
+- **2026-07-26**：`recordToolExecutionOutcome` 曾把工具自带 `STALE_CONTEXT` 覆盖成顶层 `TOOL_EXECUTION`，chat-log 看板因此显示通用 next_action。现已：  
+  1) 优先保留 tool-authored `error_code`；  
+  2) 将 `next_action` / `retryable` / `suggested_view_*` 提升到顶层 metadata；  
+  3) 无结构化码时，消息启发也把 `old_string 未在文件中找到` / hunk miss 归为 `STALE_CONTEXT`。  
+- **2026-07-26（管道完备）**：  
+  4) `toolresult.Diagnose` 对 nested `tool_metadata.next_action` 与 top-level 同等优先（历史 payload 不丢 tool-authored 指引）；  
+  5) `tool.completed` / chat-log payload 导出 `failure_class` / `file_path` / `suggested_view_offset|limit`，看板可直接读。  
+- **2026-07-26（导出 refine residual）**：live chat-log 仍见 `edit` miss → `error_code=TOOL_EXECUTION` + 通用 next_action（历史 stamp / 部分 promotion）。现已：  
+  6) `Diagnose` 在 **generic `TOOL_EXECUTION`** 上用 message / `failure_class=stale_context` **refine → `STALE_CONTEXT`**，并替换 generic default next_action；特定码（如 `TOOL_TIMEOUT`）不 demote；  
+  7) live `failCategoryForCode` + offline `tool_efficiency_common` 映射 `STALE_CONTEXT`→`stale_context`、`SPAWN_DEPTH_LIMIT`→`spawn_depth`，并补 `stale_context_failures` flag；  
+  8) manager `ExecuteWithMeta` 保留 toolkit STALE metadata 的集成测 + payload refine 测。  
+- 重建 runtime 后的新会话：`tool.completed` / chat-log 应以 `STALE_CONTEXT` + 可执行 next_action 为主；离线看板即使读到旧 `TOOL_EXECUTION` 正文，也会按 message 归入 `stale_context`。  
+- **2026-07-26（disposition replay residual）**：此前 `dispositionReplayAdvisory` 只跟踪 empty/partial，模型在 `edit`/`apply_patch` STALE 后仍会盲重试同参。现已：  
+  9) loop 跟踪 `failed` disposition + dominant `error_code`（优先 `STALE_CONTEXT`）；  
+  10) 同 fingerprint 重放时注入 STALE 专属 advisory（re-view / suggested_view_offset / 禁止同 stale hunk）；  
+  11) observability `RecordToolDispositionReplay` 计入 `failed`；  
+  12) 离线 dashboard `rehydrate_tool_result_fields` 把历史 `TOOL_EXECUTION`+old_string/hunk miss 回填为 `STALE_CONTEXT` 并替换 generic next_action（复测：`error_codes` 以 `STALE_CONTEXT` 为主）。
+
+- **2026-07-26（edit indent/whitespace auto-heal residual）**：近窗 hard 主峰仍是 `edit::edit_old_string_miss`。chat-log 抽样显示大量 miss 并非语义 stale，而是模型 `old_string` **丢掉外层 tab/空格** 或 **行尾空白不一致**（closest 与 old 仅 indent 差）。现已：  
+  13) `matchEditStrings` 在 exact + CRLF/LF 之后增加 **whitespace/indent-tolerant** 匹配（与 `apply_patch` line matchers 同级：`TrimRight` → `TrimSpace`）；  
+  14) 命中时用 **文件真实子串** 做替换，并对 `new_string` 做 **按行 indent 对齐**（避免改写到错误缩进）；  
+  15) **多窗口命中则拒绝 auto-heal**，回落 `STALE_CONTEXT`，防止错误位点编辑；  
+  16) STALE 诊断改为多行“最接近的当前内容”块（含行号），便于模型直接重建 `old_string`；文案标明已尝试 CRLF/空白对齐。  
+  - 单测：`TestEditTool_HealsMissingLeadingIndent` / trailing-ws / unique-window / CRLF+indent；`TestMultieditTool_HealsMissingLeadingIndent`。  
+  - 预期：indent-only miss 不再抬 hard rate；真 content drift 仍走 STALE + 可复制 closest 块。  
+- **2026-07-26（STALE recovery copy-paste residual）**：live 复测（~60 sessions）写失败后 **~53% next tool 仍是同 write（edit）**，且 `suggested_view_offset` 未进 model contract；closest 仅在 error 正文。现已：  
+  17) `edit`/`multiedit` metadata 增加 **`current_snippet` + `current_snippet_start_line`**（与多行 closest 块同源）；  
+  18) promote / `tool.completed` 导出 `current_snippet*`；`Diagnose` + model contract 暴露 `file_path` / `suggested_view_offset|limit` / `current_snippet_start_line`；  
+  19) STALE `next_action` / disposition replay advisory 改为 **优先复制 current_snippet**，而非仅“再 view”；  
+  20) closest 行文本 **不做 mid-line truncate**（只限行数），保证可精确复制 indent。  
+  - 验收信号：新会话 STALE 后 `next_same_write` 下降、`read_within_3` 或同轮用 snippet 重建成功上升；chat-log 顶层可见 `current_snippet`。
+- **2026-07-26（apply_patch current_snippet residual）**：`edit` 已导出结构化 `current_snippet*`，但 `apply_patch` hunk miss 仍只把 closest 塞进 error 正文 + `suggested_view_offset`，模型/下游无法像 edit 一样直接 copy-paste 重建。现已：  
+  20b) `patchHunkNotFoundError` 结构化携带 `startLine` + `closest`（`errors.As` 穿透 wrap）；  
+  20c) `applyPatchToolFailure` 导出 `current_snippet` / `current_snippet_start_line`（与 edit 同字段）；  
+  20d) STALE `next_action` 改为优先 `current_snippet`，保留 message 解析 fallback。  
+  - 单测：`TestApplyPatchTool_MissingContextIncludesClosestCurrentLines` 断言 snippet metadata。  
+  - 预期：apply_patch STALE 与 edit 走同一 recovery contract，减少盲重试 stale @@。
+- **2026-07-26（edit column-ws / blank-run residual）**：近窗 hard 主峰仍是 `edit::edit_old_string_miss`（看板 ~33）。抽样显示两类 **非语义** miss：  
+  (a) Go 列对齐内部多空格（`Name  Event` vs `Name Event`）；  
+  (b) 模型编造 blank-run 长度（3 vs 4/5 空行）而显著行相同。此前 `edit` 仅 TrimRight/TrimSpace，且 `normalizePatchComparableLine` 不折叠内部空白。现已：  
+  20e) `normalizePatchComparableLine` **collapse internal whitespace**（`strings.Fields`），`apply_patch` 与 `edit` 共享；  
+  20f) `edit` whitespace-tolerant matcher 增加 collapse-ws 级；  
+  20g) fixed-window 失败后 **blank-run flexible** 匹配（非空行序列唯一命中，允许中间空行数漂移）；  
+  20h) `rebuildEditReplacement`：**未变行保留文件精确字节**（列 padding / blank-run），仅改写真正变化的 body 并继承 file indent；真 content drift（多余显著行）仍 STALE。  
+  - 单测：`TestEditTool_HealsInternalColumnWhitespace` / `TestEditTool_HealsBlankRunLengthDrift`；trailing-ws 期望改为保留文件行尾空白。  
+  - 预期：列对齐 / blank-run 类 miss 不再抬 hard rate；语义 drift 仍 STALE + current_snippet。  
+- **2026-07-26（apply_patch blank-run residual）**：看板次峰 `apply_patch::patch_context_miss`（~7）。`edit` 已有 blank-run 柔性匹配，但 `apply_patch` 的 `locateHunk` 仍固定窗口，模型编造 3 vs 4 空行即 STALE。现已：  
+  20i) 抽出共享 `locateBlankRunLineSpan`（edit/apply_patch 共用）；  
+  20j) `applyPatchHunks` 在 fixed-window miss 后走 blank-run 唯一 span 定位；  
+  20k) `rebuildPatchBlankRunReplacement`：保留文件 blank-run，仅改写变化的非空行 body 并继承 file indent；真 content drift 仍 STALE。  
+  - 单测：`TestApplyPatchTool_HealsBlankRunLengthDrift`。  
+  - 预期：blank-run 类 apply_patch miss 不再抬 hard rate；语义 drift 仍 STALE + current_snippet。
+- **2026-07-26（closest near-identifier typo residual）**：真 content drift 场景里模型常把标识符打成近邻 typo（`HelloWord` vs `HelloWorld`），且 multi-line old/hunk 前缀是 generic `import (` / `)`。此前 closest 只做 token 精确重合 + contains，late distinctive 行锚不住；apply_patch 还会用完整 expected 对 tail 窗口 tighten，再 min-8 左扩到 import 噪声。现已：  
+  20k2) `editLineSimilarity` / `patchLineSimilarity` 增加 `runeEditSimilarity` 全行/软 token 近邻匹配（**仅 ranking，绝不 auto-heal 写**）；  
+  20k3) generic structural 行（`}`/`)`/`{`…）降权，避免到处命中；  
+  20k4) apply_patch 记录 winning `bestExpected`（full vs tail）再 tighten；`padPatchClosestWindow` **先右后左**，避免 late core 的 suggested_view_offset 漂到文件头。  
+  - 单测：`TestFindClosestEditSnippetWithLine_AnchorsOnLaterDistinctiveLine` / `TestClosestPatchCurrentContext_AnchorsOnNearIdentifierTypo` / `TestApplyPatchTool_NotFoundIncludesNearIdentifierClosest`。  
+  - 预期：近 typo + 弱前缀的 STALE 仍给出可复制 HelloWorld 块与靠近目标的 offset。
+
+- **2026-07-26（model contract current_snippet residual）**：metadata / `tool.completed` 已有 `current_snippet`，但 model-visible contract **只导出** `current_snippet_start_line`；error 正文 closest 又常 mid-line truncate → 模型读 contract 时无法 copy-paste。现已：  
+  20l) `Diagnostic.CurrentSnippet` + `attachRecoveryHints` 读取（**不 TrimSpace**，保 indent）；  
+  20m) `capCurrentSnippetForContract`（4KiB、**整行截断**）；  
+  20n) model contract JSON 导出 `current_snippet` 文本。  
+  - 单测：`TestDiagnoseAttachesStaleViewHints` / `TestDiagnoseCapsOversizedCurrentSnippet` / `TestRenderToolResultContentForModel_ExposesStaleViewHints`。  
+  - 预期：新会话 STALE 后 contract 顶层可见可复制 snippet；语义 drift 场景 `next_same_write` 下降。
+
+- **2026-07-26（path_missing unique auto-heal residual）**：近窗 hard 次峰为 `view/ls/grep::path_not_found`（`TOOL_PATH_NOT_FOUND`≈11）。抽样常见模式是 **漏扩展名 / 近邻唯一高分**（如 `.../ui` → `.../ui.tsx`），此前仅 surface candidates 仍 hard-fail。现已：
+  21) read-safe preflight 在 **单 content path** 且存在 **唯一高置信 sibling**（score≥70，次名与 top 分差>10）时 **原地改写 path-like args 并 Allow**；  
+  22) 用同一 `pathExistsChecker` 校验 healed 路径存在（测试 stub 仍走 deny+candidates）；  
+  23) metadata：`path_auto_healed` / `original_path` / `resolved_path` / `path_candidates` + `preflight=path_auto_heal`；promote 到 tool.completed / chat-log；  
+  24) 多候选 / 多 path batch / mutation 工具 **不 auto-heal**；  
+  25) disposition replay 对 `TOOL_PATH_NOT_FOUND` 专属 advisory（用 path_candidates / ls/glob，禁止同 missing path 盲重试）。  
+  - 单测：`TestPathPreflightAutoHealsUniqueNearbyTypo` / ambiguous deny；`TestDispositionReplayAdvisory` PATH 分支。  
+  - 预期：唯一扩展名/大小写类 miss 不再抬 hard rate；真歧义路径仍结构化 fail + candidates。  
+- **2026-07-26（path candidate quality residual）**：live 复测 path fails 中 **~36% 仅建议 `.backups`**（空 stem / `strings.Contains(want, "")` 噪声），且无 sibling 时缺少可执行发现指引。现已：  
+  26) `rankNearbyPathCandidates` 过滤 `.backups` / VCS / cache 噪声；修复 pure-dotfile empty-stem 误匹配；  
+  27) 无有效 sibling 时把 **已存在 parent dir** 写入 `path_candidates`，`next_action` 引导 `ls/glob`；  
+  28) 默认 `TOOL_PATH_NOT_FOUND` next_action 改为 prefer `path_candidates` / parent discovery。  
+  - 单测：`TestSuggestNearbyPathCandidatesIgnoresBackupNoise` / `TestPathPreflightSurfacesParentWhenNoSiblingMatch`。  
+  - 预期：新会话不再把 `.backups` 当主候选；invented leaf 后下一工具更常 `ls/glob` 或使用真实 sibling。  
+- **2026-07-26（path separator-fold auto-heal residual）**：近窗 path 次峰中仍有 **唯一 sibling 仅差 `_`/`-`** 却 hard-fail 的样本（如 `providertoken`→`provider_token`、`aiSites`→`ai_sites`）。此前 stem 比较只做大小写/扩展名/Levenshtein，折叠分隔符后相等也只落在 contains=40，达不到 auto-heal 阈值。现已：  
+  29) `separatorFoldedPathStemEqual` / `foldPathStemSeparators`：去掉 `_`/`-` 后 case-insensitive 比较（最短 4 rune，防短 stem 误 heal）；  
+  30) `rankNearbyPathCandidates` 对折叠相等给 **score=85**（≥`minPathAutoHealScore=70`），并在更弱 typo/contains 分上 upgrade 到 85；  
+  31) 唯一高分时走既有 `path_auto_heal` 改写；多候选仍 deny + surface candidates。  
+  - 单测：`TestPathPreflightAutoHealsSeparatorFoldedStem` / `TestSuggestNearbyPathCandidatesRanksSeparatorFoldedStem`。  
+  - 预期：唯一 underscore/hyphen 漂移不再抬 `TOOL_PATH_NOT_FOUND` hard rate。  
+- **2026-07-26（path placeholder empty residual）**：最新 live fail：`grep path=""`（两字符引号字面量，非空串）被当 missing relative path，`rankNearbyPathCandidates` 读 workspace root 列出 `.agents/.backups/.git…` 作 candidates 并 hard-deny。工具本身对空 path 本会默认 `.`。现已：  
+  31b) `normalizePathArgPlaceholder` / `clearPlaceholderPathLikeArgs`：在 digest/required/path preflight 前把 `""`/`''`/`null`/`undefined`/`None` 等占位 token 归一为真 empty；  
+  31c) `stringValues` / path collectors / ranking base 同步跳过 placeholder；可选 path（grep）Allow 后由工具默认 workspace root；必填 `file_path` placeholder → `TOOL_INVALID_ARGS`（missing required），不再 `PATH_NOT_FOUND`+根目录噪声。  
+  - 单测：`TestPathPreflightAllowsPlaceholderEmptyPath` / `TestPathPreflightRequiredPlaceholderIsMissingArg` / `TestNormalizePathArgPlaceholder`。  
+  - 预期：新会话不再出现 `path not found: "" (candidates: .agents, .backups, …)`。  
+- **2026-07-26（edit STALE mislabel refine residual）**：live chat-log 见 `edit` old_string miss 被标成 `TOOL_TIMEOUT` / `TOOL_PATH_NOT_FOUND`（closest 片段含 `timeout` / `no such file` map 键，message 启发抢先；structured 码也偶发错贴）。模型随后跟 timeout/path recovery，绕开 `current_snippet`。现已：  
+  32) `classifyToolErrorCode`：**STALE 判定先于 PATH/TIMEOUT**（`messageLooksLikeStaleEditOrPatch`）；  
+  33) `refineMislabeledStructuredCode`：仅 **edit 家族**（edit/multiedit/apply_patch）在 structured=`TOOL_TIMEOUT|TOOL_PATH_NOT_FOUND` 且 body 明确 STALE 时 refine→`STALE_CONTEXT`；bash 真 timeout 不 demote；  
+  34) 误标 refine 后丢弃 timeout/path 类 `next_action`，换 STALE recovery 文案；`retryable=false`。  
+  - 单测：`TestDiagnoseRefinesMislabeledTimeoutOnEditStaleBody` / Path 变体 / `TestClassifyToolErrorCodePrefersStaleOverTimeoutInSnippet`；保留 bash 不 demote。  
+  - 预期：新会话 edit miss 的 error_code/next_action 以 `STALE_CONTEXT` 为主，看板不再把 STALE 计入 timeout/path 桶。  
+- **2026-07-26（STALE recovery field export residual）**：live 复测 edit/apply_patch fail **`has_current_snippet=0/50`**，chat-log 仅有 error 正文里的「最接近片段」，`protocol_result.metadata` 只有 disposition 五元组；模型/看板无法结构化 copy-paste。根因：`Diagnose` 能挂 recovery 字段，但 `ApplyDiagnosticMetadata` / `promoteToolDispositionToPayload` / `thinEventMetadata` 未稳定导出，且历史 body 未回填。现已：  
+  35) `attachRecoveryHints(toolErr)`：从 error 正文解析 `最接近的当前内容`（行号前缀 `|`/`:`）与 `最接近片段:"…"`（`%q` unescape），并回填 `suggested_view_offset`；  
+  36) `promoteStaleRecoveryFields` + `ApplyDiagnosticMetadata` 失败路径写出 `file_path` / `current_snippet*` / view hints（不覆盖已有）；  
+  37) `promoteToolDispositionToPayload` 把 diagnostic recovery 补到 flat tool.completed；  
+  38) `ResultFromParts` 先 `ApplyDiagnosticMetadata`；`thinEventMetadata` 纳入 recovery keys（snippet 已 4KiB cap）。  
+  - 单测：`TestDiagnoseParsesClosestSnippetFromErrorBody` / quoted fragment；`TestApplyDiagnosticMetadataPromotesStaleRecoveryFields`；`TestToolCompletedEventPayloadRehydratesSnippetFromErrorBody`；`TestResultFromPartsPromotesStaleSnippetIntoThinMetadata`。  
+  - 预期：新会话 STALE fail 顶层与 `protocol_result.metadata` 可见 `current_snippet`；离线扫描 `has_current_snippet` 上升；`next_same_write` 可继续压。  
+- **2026-07-26（web_search network fail residual）**：看板出现 `web_search::tool_failed_other`（connectex / dial tcp 被标成通用 `TOOL_EXECUTION` + “Inspect the error details…”）。模型对同一 query 盲重试。现已：  
+  39) `failureSearchResult` 结构化失败：优先 Instant 错误，回落 HTML；  
+  40) `classifyWebSearchFailureCode`：typed `net/url` 错误 + 消息启发；**HTTP 429/5xx 优先于** 泛网络类（避免 `url.Error` 吞掉 503）；  
+  41) 导出 `error_code=NETWORK_UNAVAILABLE|NETWORK_TIMEOUT|API_RATE_LIMIT|API_SERVER_ERROR`、`failure_class`、含 query 的 `next_action`（backoff / 拆 query / 可离线继续）、`attempted_args.query`；  
+  42) agent `knownToolOutcomeErrorCode` 纳入 network/rate/upstream 码以便 promotion。  
+  - 单测：`TestWebSearchTool_NetworkFailureIsStructured` / HTTP 503 / `TestClassifyWebSearchFailureCode`。  
+  - 预期：新会话 web_search 传输失败不再进 bare `TOOL_EXECUTION`；看板可分桶 network；模型 next_action 明确禁止 spam 同 query。
+- **2026-07-26（dashboard STALE snippet rehydrate + path ambiguity residual）**：近窗扫描 `edit` STALE `has_current_snippet=0/40`（历史二进制未导出 structured 字段；body 常有「最接近片段」却未回填）。另 path 多高置信候选时 next_action 仍偏 generic。现已：  
+  43) `tool_efficiency_common.rehydrate_tool_result_fields` 统一看板/离线 rehydrate：从 error body 解析 `最接近的当前内容（第…）` 多行块与 `最接近片段:"…"`（%q unescape），回填 `current_snippet*` / `suggested_view_offset`，并把 generic next_action 换成 copy-snippet 指引；  
+  44) 解析收紧：只认 header 形 `最接近的当前内容（第`，且要求至少一行带行号——避免 next_action 散文引用 + `期望内容` 误当 current_snippet；  
+  45) `uniqueHighConfidencePathCandidate` 返回 `ambiguous`；多高置信 sibling deny 时 next_action 明确 **Pick exactly one path_candidates**（`no unique auto-heal`），禁止 invent 第三条路径。  
+  - 单测：`TestStaleSnippetRehydrate*` / prose reject；`TestParseClosestSnippetRejectsProseMentionOfClosestMarker`；`TestPathPreflightDoesNotAutoHealAmbiguousCandidates` next_action。  
+  - 验收：离线 `snip_rehydrated` 对含「最接近片段」的历史 edit 上升；apply_patch 仅 prose+期望内容不再假 snip；歧义 path deny 文案可执行。
+- **2026-07-26（shell multi-key timeout_ms=1 residual）**：近窗 hard 主峰切到 `shell::TOOL_TIMEOUT`（~6/40 session fails）。dump 显示 **全部 1ms 假超时** 同源：`attempted_args.timeout_ms=1` **且** `timeout_sec=20/30/60`、`timeout=""`，`timeout_source=tool_argument`。根因是 schema 多字段噪声 + 解析器严格 `timeout_ms` 优先，1ms 在进程真正启动前 deadline 即到。现已：  
+  46) `parseShellCommandTimeout` / `parseShellFunctionTimeout` 先收集 ms/sec/named 候选，再协调：当 `timeout_ms < 100ms` 且存在 ≥1s 的 `timeout_sec`/`timeout` 时 **丢弃噪声 ms**，改用更粗粒度候选；  
+  47) 合理短预算（如 250/500ms）仍保持 `timeout_ms` 优先；单独 `timeout_ms=1`（无 coarse 备选）仍显式生效；  
+  48) shell function 对齐 bash：`timeout_ms=0` 视作 absent placeholder；schema 文案提醒勿同时乱填 ms+sec。  
+  - 单测：`TestBashTool_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise` / `TestParseShellCommandTimeout_NoiseReconciliation`；`TestShellFunction_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise` / `TestParseShellFunctionTimeout_NoiseReconciliation`；保留 short-ms priority 与 negative reject。  
+  - 预期：新会话不再出现 `execution timed out after 1ms` + `timeout_source=tool_argument` 的假超时；真超时仍按 sec/ms 语义执行。
+- **2026-07-26（true content_diff / 旧二进制无 closest residual）**：近窗 hard 主峰仍是 `edit::edit_old_string_miss`。离线分类：`true_first_gone`≈31、`rh_snip` 39/42，但 **no_snip=3** 里含「旧二进制无 closest 块」+「首行全编造 / 标识符仍在文件」空窗。根因：`findClosestEditSnippetWithLine` 多行窗 **score<0.45 直接空返回**（与 apply_patch 单行 fallback 不对齐）；历史 body `最接近片段:"…"` 常 **mid-line 截断无闭引号**，rehydrate 丢弃；apply_patch 正文仍 `truncateDiagnosticText(…,240)` 行内截断。现已：  
+  49) edit multi-line miss 后 **token/single-line fallback**（`editDistinctiveTokens` + 邻行扩展 + pad 窗）导出 `current_snippet*` / 多行「最接近的当前内容」——**仅 ranking，绝不 auto-heal 写**；  
+  50) `formatPatchCurrentLines` 改为与 edit 同形 **`N|full line`**（无 mid-line truncate）；  
+  51) `parseClosestSnippetFromErrorMessage` + offline `parse_closest_snippet_from_error_message` 接受 **截断 %q**（无闭引号时切到 next_action/old_string trailer）。  
+  - 单测：`TestFindClosestEditSnippetWithLine_TokenFallbackWhenFirstLineGone` / `TestEditTool_NotFoundTokenFallbackExportsCurrentSnippet`；`TestParseClosestSnippetFromTruncatedQuotedFragment`；`test_parse_truncated_quoted_fragment`；apply_patch line-prefix 断言更新。  
+  - 预期：新会话真 content_diff 只要文件仍有 distinctive id，STALE 必带可复制 snippet；历史截断 quote 离线 `has_current_snippet` 上升；完全无关 old_string 仍可空窗。
+- **2026-07-26（Chinese invalid-args next_action residual）**：toolkit 中文校验文案（`pattern/file_path 参数缺失或无效` 等）虽已分类为 `TOOL_INVALID_ARGS`，但 `invalidArgsNextAction` 未覆盖中文 pattern，仍落默认 schema 文案或过宽 generic。现已：  
+  52) `invalidArgsNextAction` 覆盖 `参数缺失*` → required 补齐指引，`参数无效/错误/类型错误` → 类型/形态纠正指引；  
+  53) 单测：`TestDiagnoseChineseToolkitInvalidArgsNextAction`。  
+  - 预期：新会话中文 missing-arg fail 的 `next_action` 明确要求补齐/修正 schema 参数，禁止同 incomplete payload 盲重试。  
+- **2026-07-26（parent sibling discovery residual）**：invented leaf + 无 ranked sibling 时，此前 `path_candidates` 仅 parent，模型仍常 invent 第三条路径或再开 ls。现已：  
+  54) `listParentSiblingDiscoveryHints`：parent 存在且无 typo-rank 命中时，在 parent 后附最多 4 个非噪声 sibling 样本（过滤 `.backups`/VCS/cache）；  
+  55) parent-only next_action 区分「仅 parent」vs「parent + sample siblings」；**不 auto-heal** 这些 discovery 样本。  
+  - 单测：`TestPathPreflightSurfacesParentWhenNoSiblingMatch`（含真实 sibling）/ `TestPathPreflightParentOnlyWhenOnlyNoiseSiblings`。  
+  - 预期：invented leaf 后 `path_candidates` 可直接点选真实 sibling，减少 invent/ls 往返。
+- **2026-07-26（apply_patch invalid syntax / path crumb residual）**：近窗仍见 `apply_patch::TOOL_EXECUTION` 非 STALE 样本：  
+  (a) hunk 中嵌套 `*** Begin Patch` / 非法 hunk 行 → 通用 “Inspect the error details…”；  
+  (b) `Update File: snippet.go",` 路径粘贴引号/标点 → Windows “filename syntax is incorrect”。现已：  
+  56) `sanitizeApplyPatchPath` 剥离 Update/Add/Delete/Move 路径外层引号与尾部 `",` 等标点；  
+  57) `isApplyPatchInvalidSyntaxError` + `applyPatchToolFailure` 将解析/信封失败标为 **`TOOL_INVALID_ARGS`**（`failure_class=invalid_patch_syntax`，`retryable=false`）并给 syntax next_action；  
+  58) empty patch / 无操作 同步 `TOOL_INVALID_ARGS`；`toolResultFailureWithCode` 对 INVALID_ARGS 默认不可盲重试；  
+  59) `classifyToolErrorCode` 覆盖「不是合法的 hunk/补丁」等中文 parse 文案。  
+  - 单测：`TestApplyPatchTool_InvalidHunkSyntaxIsToolInvalidArgs` / `TestSanitizeApplyPatchPath` / `TestApplyPatchTool_SanitizesTrailingQuoteOnUpdatePath`；`TestApplyPatchTool_RejectsMalformedPatch` 断言 INVALID_ARGS；diagnostic 中文 illegal hunk case。  
+  - 预期：新会话非法 patch 不再 bare `TOOL_EXECUTION`；尾部引号路径可成功 apply；模型按 syntax next_action 重建而非盲重试。
 
 ### P1-2 wait_agent / spawn 协作
 
@@ -335,6 +522,9 @@ provider fails: gegeda≈68, localhost=2, grok.x4188.top=1
 ## 8. 配套命令
 
 ```powershell
+# 最近有效会话的去重统计（flat + YYYY/MM/DD 分区、多模型日志）
+.\scripts\analyze-aicli-session-history.ps1 -Sessions 30 -JsonOut .\tmp\aicli_recent_session_analysis.json
+
 # 失败时间线 + 看板 JSON/MD（含 hard/soft、error_code、协作漏斗、效率快照）
 python tmp/aicli_failure_timeline_dashboard.py
 python tmp/aicli_failure_timeline_dashboard.py --limit 80 --hours 0

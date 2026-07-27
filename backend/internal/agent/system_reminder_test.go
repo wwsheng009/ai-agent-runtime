@@ -159,6 +159,7 @@ func TestIsPureAdvisoryReminderKind(t *testing.T) {
 func TestInferAdvisoryReminderKind(t *testing.T) {
 	assert.Equal(t, ReminderKindDoomLoop, inferAdvisoryReminderKind("the same semantic tool request has run 3 consecutive times"))
 	assert.Equal(t, ReminderKindDispositionReplay, inferAdvisoryReminderKind("previous identical tool batch returned outcome=partial"))
+	assert.Equal(t, ReminderKindDispositionReplay, inferAdvisoryReminderKind("failed with STALE_CONTEXT (outcome=failed)"))
 	assert.Equal(t, ReminderKindExplorationStall, inferAdvisoryReminderKind("consecutive tool rounds have only inspected"))
 	assert.Equal(t, ReminderKindRuntimeAdvisory, inferAdvisoryReminderKind("something else"))
 }

@@ -389,7 +389,11 @@ aicli chat --provider CODEX_04 --model gpt-5.4-mini
 
 # 非交互 chat / session 恢复 / 图片输入
 aicli chat --no-interactive --message "summarize this repo"
-aicli chat --resume latest
+aicli resume                              # 顶层恢复当前工作目录的最近会话（等价 aicli chat --resume）
+aicli resume --cwd=false                  # 跨工作目录恢复最近会话
+aicli resume session_xxx                  # 顶层加载指定会话（等价 aicli chat --session）
+aicli chat --resume                       # 兼容写法：恢复当前工作目录的最近会话
+aicli chat --session session_xxx          # 兼容写法：加载指定会话
 aicli chat --list-sessions --session-state active --session-provider CODEX_04 --session-query runtime --session-limit 20
 aicli chat --image ./screenshot.png --message "describe this screenshot"
 
@@ -434,7 +438,7 @@ aicli --help
 | provider/model | `--provider`、`--model`、`--reasoning-effort` | 指定本轮 chat 的 provider、模型和 reasoning effort |
 | 非交互 | `--message`、`--no-interactive`、`--request-timeout` | 一次性发送消息并退出，适合脚本 |
 | session | `--session`、`--resume`、`--list-sessions` | 加载指定 session、恢复最近 session 或列出历史 |
-| session 过滤 | `--session-state`、`--session-provider`、`--session-model`、`--session-query`、`--session-limit` | 筛选可恢复 session |
+| session 过滤 | `--cwd`、`--session-state`、`--session-provider`、`--session-model`、`--session-query`、`--session-limit` | 默认按当前工作目录筛选；使用 `--cwd=false` 查看全部目录，或叠加其他筛选条件 |
 | skills/tools | `--skills-dir`、`--skills-mode`、`--skills-debug`、`--tools-debug` | 控制 skills 暴露、路由和调试输出 |
 | 权限 | `--permission-mode`、`--approval-reuse`、`--yolo` | 控制命令/编辑审批策略 |
 | 多模态 | `--image/-i` | 为下一条消息附加图片 |
@@ -606,9 +610,10 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
 - `/theme` 支持双轴主题：明暗（`auto|dark|light`）与配色（`classic|focus|contrast|mono`）。会立即切换当前终端主题，并在可写配置存在时写回 `aicli.theme.name`（配色）与 `aicli.theme.mode`（明暗）。无参数时交互选择；`list`/`status`/`preview` 只读（`list`/`preview` 带角色色样例）；可写 `/theme dark`、`/theme focus`、`/theme light contrast` 等。配色别名：`default`/`balanced`→focus，`high-contrast`→contrast，`minimal`→mono。启动优先级：`--theme` > `AICLI_THEME`/`AICLI_THEME_MODE` > 配置文件。
-- `/resume` 会打开按最后更新时间倒序排列的全屏历史会话选择器，不再把候选项挤在聊天输入框上方的小弹层中。使用方向键或 `j`/`k` 移动，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾，`/` 搜索，回车恢复，`Esc` 或 `q` 取消。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中；不支持 ANSI/TTY 的环境自动回退到编号输入列表。
+- `/resume` 会打开按最后更新时间倒序排列的全屏历史会话选择器，默认仅显示 `workspace_path` 与当前工作目录一致的历史会话；`/resume --cwd` 可显式声明相同行为。不再把候选项挤在聊天输入框上方的小弹层中。使用方向键或 `j`/`k` 移动，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾，`/` 搜索，回车恢复，`Esc` 或 `q` 取消。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中；不支持 ANSI/TTY 的环境自动回退到编号输入列表。
 - `/resume latest` 直接恢复最近的其他可恢复会话。全屏选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数、清理后的标题和选中会话摘要；session id、protocol、provider 和 model 只进入搜索索引，不占用候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。
-- chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。
+- chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` / `aicli resume --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。会话列表和最近会话恢复默认按当前工作目录过滤，传入 `--cwd=false` 才会查看全部目录。CLI 入口上，`aicli resume` 默认恢复当前工作目录最近的可恢复会话，`aicli resume <session-id>` 仍可直接加载指定会话；`aicli --resume` 会经默认 chat 参数改写为 `aicli chat --resume`。
+- 退出交互式 TUI 后，终端会显示 `aicli resume <session-id>`，便于下次继续当前会话；临时会话以及尚未落盘的空会话不会显示无效的恢复命令。
 - `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
 - `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、runtime-http/local-shell/generated-images artifacts 打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。

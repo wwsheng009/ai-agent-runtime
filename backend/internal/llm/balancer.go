@@ -39,8 +39,12 @@ type ProviderResource struct {
 	Weight                  int
 	Enabled                 bool
 	SupportsMaxOutputTokens *bool
-	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec
-	Config                  interface{} // 原始配置（用于模型映射等）
+	// EnableImageGeneration is the provider-level Codex native image_generation
+	// opt-in. Prefer this field when available; Config is a fallback for hosts
+	// that only embed agentconfig.Provider there.
+	EnableImageGeneration *bool
+	ModelCapabilities     map[string]agentconfig.ModelCapabilitySpec
+	Config                interface{} // 原始配置（用于模型映射等）
 }
 
 // RetryInfo 重试上下文信息

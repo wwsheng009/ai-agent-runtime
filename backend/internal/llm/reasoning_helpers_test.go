@@ -705,6 +705,65 @@ func TestRuntimeMessagesToProtocolMessages_AnthropicKeepsToolResultTurnAtEnd(t *
 	}
 }
 
+func TestRuntimeMessagesToProtocolMessages_AnthropicDropsIncompleteToolReplayBlock(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_1", Name: "view"},
+			{ID: "call_2", Name: "grep"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewUserMessage("Inspect the repository"),
+		assistant,
+		*types.NewToolMessage("call_1", "view result"),
+		*types.NewUserMessage("Continue without the missing result"),
+	}, "anthropic")
+
+	if len(messages) != 1 {
+		t.Fatalf("expected incomplete assistant tool replay to be dropped, got %d messages: %#v", len(messages), messages)
+	}
+	if messages[0]["role"] != "user" {
+		t.Fatalf("expected remaining user content to be preserved, got %#v", messages[0])
+	}
+	for _, block := range decodeSliceOfMaps(messages[0]["content"]) {
+		if block["type"] == "tool_result" {
+			t.Fatalf("did not expect partial orphan tool_result after sanitization: %#v", messages[0])
+		}
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_AnthropicKeepsCompleteMultiToolReplay(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_1", Name: "view"},
+			{ID: "call_2", Name: "grep"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewUserMessage("Inspect the repository"),
+		assistant,
+		*types.NewToolMessage("call_1", "view result"),
+		*types.NewToolMessage("call_2", "grep result"),
+	}, "anthropic")
+
+	if len(messages) != 3 {
+		t.Fatalf("expected complete multi-tool replay to be preserved, got %d messages: %#v", len(messages), messages)
+	}
+	blocks := decodeSliceOfMaps(messages[2]["content"])
+	if len(blocks) != 2 {
+		t.Fatalf("expected two tool_result blocks, got %#v", messages[2])
+	}
+	if blocks[0]["tool_use_id"] != "call_1" || blocks[1]["tool_use_id"] != "call_2" {
+		t.Fatalf("expected both matching tool results in order, got %#v", blocks)
+	}
+}
+
 func TestAnthropicToolUseBlock_DefaultsEmptyInputForNoArgToolCall(t *testing.T) {
 	block := anthropicToolUseBlock(map[string]interface{}{
 		"id":   "call_1",

@@ -5,7 +5,7 @@ const rootCommandLongHelp = `aicli 是 ai-agent-runtime 的命令行工具，默
 常用能力：
   - 初始化配置：aicli init [--global]
   - 登录 provider：aicli login
-  - 交互式 chat / session resume / slash commands
+  - 交互式 chat / 顶层 resume / session resume / slash commands
   - 配置查看与 provider 管理
   - doctor 诊断、端点测试、上下文测试
   - headless exec、图片生成、MCP、管道模式
@@ -40,6 +40,9 @@ const rootCommandExampleHelp = `  # 首次使用
   aicli
   aicli chat
   aicli chat --provider openai --model gpt-4.1
+  aicli resume
+  aicli resume session_xxx
+  aicli chat --resume
 
   # 诊断
   aicli doctor provider
@@ -53,48 +56,6 @@ const rootCommandExampleHelp = `  # 首次使用
   # 图片 / headless
   aicli image "一只在月光下奔跑的猫"
   aicli exec "解释这段代码的作用"`
-
-const chatCommandLongHelp = `与 AI 模型进行交互式对话。
-
-进入 chat 后可使用斜杠命令：
-  - /help
-  - /model [status|model|--provider ...]
-  - /login ...
-  - /stream on|off
-  - /status /sessions /resume
-  - /functions <prompt>
-  - /call <function> [args-json]
-  - /tool <function> [args-json]
-  - /skill <skill> <prompt>
-  - /skills [query]
-
-更完整说明见：
-  - docs/aicli/quickstart.md
-  - docs/aicli/install.md
-  - docs/aicli/faq.md
-  - docs/aicli/agents.md
-  - docs/skill_runtime/aicli_skills_usage.md`
-
-const chatCommandExampleHelp = `  aicli chat                              # 交互式聊天
-  aicli chat --profile dev                  # 使用命名 profile
-  aicli chat --profile ./profiles/dev --agent coder
-  aicli chat --agent explore              # portable agentdef（无需 profile）
-  aicli chat --provider nvidia            # 指定 provider
-  aicli chat --provider nvidia --stream   # 流式输出
-  aicli chat --provider codex --fast     # Codex Fast（service_tier=priority）
-  aicli chat --resume                     # 恢复最近会话
-  aicli chat --session session_xxx        # 加载指定会话
-  aicli chat --list-sessions              # 列出会话
-  aicli chat --list-sessions --session-provider nvidia --session-query review
-  aicli chat --no-interactive --message "Hello"  # 非交互模式
-  aicli chat --no-interactive --output json -M "Hello"  # JSON 输出
-
-  # chat 内斜杠命令
-  /functions 帮我生成一张图片
-  /call openai_image_generate 帮我生成一张海边日落照片
-  /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
-  /skill imagegen 帮我生成一张海边日落照片
-  /skills`
 
 const configCommandLongHelp = `交互式管理配置；也可通过 flags 输出 providers、provider_groups、models 等只读信息。
 

@@ -20,6 +20,8 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 	chat.Flags().StringP("message", "M", "", "")
 	chat.Flags().BoolP("stream", "s", false, "")
 	chat.Flags().Bool("no-interactive", false, "")
+	chat.Flags().Bool("resume", false, "")
+	chat.Flags().String("session", "", "")
 	chat.Flags().String("runtime-server", "", "")
 	root.AddCommand(chat)
 
@@ -59,6 +61,16 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 			want: []string{"chat", "--runtime-server", "server", "-M", "hello"},
 		},
 		{
+			name: "resume flag default to chat",
+			args: []string{"--resume"},
+			want: []string{"chat", "--resume"},
+		},
+		{
+			name: "session flag default to chat",
+			args: []string{"--session", "session_abc"},
+			want: []string{"chat", "--session", "session_abc"},
+		},
+		{
 			name: "help flag preserves root help",
 			args: []string{"--help"},
 			want: []string{"--help"},
@@ -77,6 +89,16 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 			name: "explicit positional arg is unchanged",
 			args: []string{"config"},
 			want: []string{"config"},
+		},
+		{
+			name: "explicit resume command is unchanged",
+			args: []string{"resume"},
+			want: []string{"resume"},
+		},
+		{
+			name: "resume command with session id is unchanged",
+			args: []string{"resume", "session_abc"},
+			want: []string{"resume", "session_abc"},
 		},
 		{
 			name: "double dash followed by args is unchanged",

@@ -3,6 +3,7 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -344,9 +345,35 @@ type ContentBlockWithToolResult struct {
 	IsError   bool   `json:"is_error,omitempty"`
 }
 
-// Thinking Claude Thinking 推理参数
+// Thinking Claude Thinking 推理参数。
+//
+// Effort is retained in-memory so adapters can map adaptive effort into
+// output_config.effort. Adaptive wire payloads must not nest effort under
+// thinking (Anthropic rejects thinking.adaptive.effort as extra_forbidden).
+// MarshalJSON strips Effort when Type is adaptive as a defense-in-depth guard
+// for any path that serializes Thinking directly.
 type Thinking struct {
 	Type         string `json:"type"`                    // "enabled", "disabled", "adaptive", "low", "medium", "high"
 	BudgetTokens *int   `json:"budget_tokens,omitempty"` // 最大推理 token 数
-	Effort       string `json:"effort,omitempty"`        // adaptive 模式下的 effort 原值（由上游协议定义）
+	Effort       string `json:"effort,omitempty"`        // adaptive 模式下的 effort 原值（由上游协议定义；adaptive 序列化时省略）
+}
+
+// MarshalJSON omits nested effort for adaptive thinking. Effort for adaptive
+// mode must be sent via output_config, not thinking.effort.
+func (t Thinking) MarshalJSON() ([]byte, error) {
+	type wireThinking struct {
+		Type         string `json:"type"`
+		BudgetTokens *int   `json:"budget_tokens,omitempty"`
+		Effort       string `json:"effort,omitempty"`
+	}
+	out := wireThinking{
+		Type:         t.Type,
+		BudgetTokens: t.BudgetTokens,
+		Effort:       t.Effort,
+	}
+	if strings.EqualFold(strings.TrimSpace(t.Type), "adaptive") {
+		out.Effort = ""
+		out.BudgetTokens = nil
+	}
+	return json.Marshal(out)
 }
