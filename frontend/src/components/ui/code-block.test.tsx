@@ -8,6 +8,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CodeBlock } from "./code-block";
 import { codeHighlightingReady, highlightCode } from "./code-highlighting";
 
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
 describe("CodeBlock", () => {
   let container: HTMLDivElement;
   let root: Root | null;

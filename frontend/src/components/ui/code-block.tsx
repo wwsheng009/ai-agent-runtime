@@ -1,10 +1,11 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
   codeHighlightingReady,
   highlightCode,
+  isCodeHighlightingReady,
 } from "@/components/ui/code-highlighting";
 import { cn } from "@/lib/utils";
 
@@ -63,13 +64,11 @@ function CodeBlockSurface({
 }: CodeBlockSurfaceProps) {
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [highlightingReady, setHighlightingReady] = useState(false);
+  const [highlightedLines, setHighlightedLines] = useState(() =>
+    highlightCode(code, language),
+  );
   const resolvedCollapseLineCount =
     collapseLineCount ?? DEFAULT_COLLAPSE_LINE_COUNT;
-  const highlightedLines = useMemo(
-    () => highlightCode(code, language),
-    [code, highlightingReady, language],
-  );
   const canCollapse =
     collapsible &&
     !streaming &&
@@ -80,17 +79,21 @@ function CodeBlockSurface({
   const hiddenLineCount = highlightedLines.length - visibleLines.length;
 
   useEffect(() => {
+    if (isCodeHighlightingReady()) {
+      return;
+    }
+
     let active = true;
     void codeHighlightingReady.then(() => {
       if (active) {
-        setHighlightingReady(true);
+        setHighlightedLines(highlightCode(code, language));
       }
     });
 
     return () => {
       active = false;
     };
-  }, []);
+  }, [code, language]);
 
   async function handleCopy() {
     try {

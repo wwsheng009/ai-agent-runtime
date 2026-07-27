@@ -29,10 +29,20 @@ async function loadPrismLanguages() {
 // Do not block the Workspace route module with top-level await. Code blocks
 // render a plain-text fallback while the legacy Prism components load, then
 // re-render once the language catalog is ready.
-export const codeHighlightingReady = loadPrismLanguages().then(
-  () => undefined,
-  () => undefined,
-);
+let codeHighlightingSettled = false;
+
+export const codeHighlightingReady = loadPrismLanguages()
+  .then(
+    () => undefined,
+    () => undefined,
+  )
+  .then(() => {
+    codeHighlightingSettled = true;
+  });
+
+export function isCodeHighlightingReady() {
+  return codeHighlightingSettled;
+}
 
 export type CodeHighlightSegment = {
   content: string;

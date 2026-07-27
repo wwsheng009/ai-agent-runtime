@@ -1,9 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
+import { codeHighlightingReady } from "../ui/code-highlighting";
 import { MessageMarkdown } from "./message-markdown";
 
 describe("MessageMarkdown", () => {
+  beforeAll(async () => {
+    await codeHighlightingReady;
+  });
+
   it("renders markdown links, lists, and tables", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown
