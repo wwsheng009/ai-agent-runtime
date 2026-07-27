@@ -268,9 +268,29 @@ export const zhCN = {
   },
   workspace: {
     shell: {
-      newChatEyebrow: "新工作区聊天",
-      newChatTitle: "从一个空白线程开始，让运行时状态在工作推进时附着上来。",
-      newChatBody: "这个路由现在是真实的新聊天入口，不再依赖预置的 mock 线程。",
+      newChatTitle: "今天想完成什么？",
+      suggestions: {
+        analyze: {
+          title: "分析项目",
+          description: "了解代码、依赖与当前状态",
+          prompt: "请先分析当前项目的目录、依赖和工作区状态，给出关键发现后再建议下一步。",
+        },
+        implement: {
+          title: "实现需求",
+          description: "修改代码并完成必要验证",
+          prompt: "请分析这项需求，制定简洁的实施步骤，然后修改代码并运行必要验证。",
+        },
+        review: {
+          title: "审查代码",
+          description: "发现缺陷、风险与改进机会",
+          prompt: "请审查当前代码变更，优先找出缺陷、回归风险和缺失的测试，并给出可执行的改进。",
+        },
+        plan: {
+          title: "制定计划",
+          description: "拆解任务并逐步推进",
+          prompt: "请梳理目标和约束，制定分阶段实施计划，并从优先级最高的步骤开始执行。",
+        },
+      },
       loadingSettingsPanel: "正在加载设置面板…",
       loadingArtifactPanel: "正在加载 artifact 面板…",
       loadingArtifactDetails: "正在加载 artifact 详情…",
@@ -282,10 +302,10 @@ export const zhCN = {
       usage: "使用分析",
       runtime: "Runtime",
       settings: "设置",
+      openSidebar: "打开聊天导航",
       showFiles: "显示文件",
       hideFiles: "隐藏文件",
       newThreadTitle: "新建聊天",
-      newThreadSubtitle: "先开始一个线程，再让运行时状态在工作推进时附着上来。",
       threadTransport: {
         live: "在线运行时",
         error: "运行时降级",
@@ -308,6 +328,8 @@ export const zhCN = {
       appName: "AI Agent Runtime",
       refreshRuntimeTeams: "刷新运行时团队",
       openSettings: "打开设置",
+      navigation: "聊天与会话导航",
+      closeNavigation: "关闭聊天导航",
       startNewChat: "新建聊天",
       searchPlaceholder: "搜索线程",
       sections: {

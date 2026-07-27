@@ -1,8 +1,8 @@
 import {
   ChartNoAxesCombinedIcon,
   DatabaseIcon,
-  HomeIcon,
   MessageSquarePlusIcon,
+  PanelLeftOpenIcon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
   Settings2Icon,
@@ -22,6 +22,7 @@ type WorkspaceShellTopbarProps = {
   density: "comfortable" | "compact";
   isNewThread?: boolean;
   liveTeamCount: number;
+  onOpenSidebar: () => void;
   onOpenSettings: () => void;
   onToggleArtifactRail: () => void;
   selectedThread: Thread;
@@ -35,6 +36,7 @@ export function WorkspaceShellTopbar({
   density,
   isNewThread = false,
   liveTeamCount,
+  onOpenSidebar,
   onOpenSettings,
   onToggleArtifactRail,
   selectedThread,
@@ -49,39 +51,46 @@ export function WorkspaceShellTopbar({
     <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
       <div
         className={cn(
-          "flex w-full max-w-[72rem] items-center gap-2.5 rounded-[0.9rem] border border-[var(--border)] bg-[var(--workspace-topbar-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg",
+          "flex w-full max-w-[72rem] items-center gap-1 rounded-[0.9rem] border border-[var(--border)] bg-[var(--workspace-topbar-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg sm:gap-2",
           isCompact ? "h-10 px-3" : "h-11 px-3.5",
         )}
       >
-        <div className="flex items-center gap-2 xl:hidden">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0 xl:hidden"
+          onClick={onOpenSidebar}
+          aria-label={t("topbar.openSidebar")}
+          title={t("topbar.openSidebar")}
+        >
+          <PanelLeftOpenIcon size={16} />
+        </Button>
+        {!isNewThread ? (
           <Link
-            to="/"
-            className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-            aria-label={t("topbar.home")}
+            to="/workspace/chats/new"
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "icon" }),
+              "shrink-0 xl:hidden",
+            )}
+            aria-label={t("topbar.newChat")}
+            title={t("topbar.newChat")}
           >
-            <HomeIcon size={14} />
-            <span className="hidden sm:inline">{t("topbar.home")}</span>
+            <MessageSquarePlusIcon size={15} />
           </Link>
-          {!isNewThread ? (
-            <Link
-              to="/workspace/chats/new"
-              className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-            >
-              <MessageSquarePlusIcon size={14} />
-              <span className="hidden sm:inline">{t("topbar.newChat")}</span>
-            </Link>
-          ) : null}
-        </div>
+        ) : null}
         <div className="min-w-0 flex-1">
           <div className="truncate app-text-13 font-semibold tracking-[-0.02em]">
             {isNewThread ? t("topbar.newThreadTitle") : selectedThread.title}
           </div>
-          <div className="truncate app-text-10 text-[var(--muted-foreground)]">
-            {isNewThread ? t("topbar.newThreadSubtitle") : threadSubtitle}
-          </div>
+          {!isNewThread ? (
+            <div className="hidden truncate app-text-10 text-[var(--muted-foreground)] sm:block">
+              {threadSubtitle}
+            </div>
+          ) : null}
         </div>
-        <div className="hidden items-center gap-2.5 md:flex">
-          <Badge>{threadStatusLabel}</Badge>
+        {!isNewThread ? (
+          <div className="hidden items-center gap-2.5 md:flex">
+            <Badge>{threadStatusLabel}</Badge>
           <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
             {transportLabel}
           </div>
@@ -90,54 +99,56 @@ export function WorkspaceShellTopbar({
               {t("sidebar.active", { count: liveTeamCount })}
             </div>
           ) : null}
-        </div>
+          </div>
+        ) : null}
         <Link
           to="/logs"
-          className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+          className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}
+          aria-label={t("topbar.logs")}
+          title={t("topbar.logs")}
         >
           <TerminalSquareIcon size={16} />
-          <span className="hidden sm:inline">{t("topbar.logs")}</span>
         </Link>
         <Link
           to="/usage"
-          className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+          className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}
+          aria-label={t("topbar.usage")}
+          title={t("topbar.usage")}
         >
           <ChartNoAxesCombinedIcon size={16} />
-          <span className="hidden lg:inline">{t("topbar.usage")}</span>
         </Link>
         <Link
           to="/runtime/config"
-          className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+          className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}
+          aria-label={t("topbar.runtime")}
+          title={t("topbar.runtime")}
         >
           <DatabaseIcon size={16} />
-          <span className="hidden sm:inline">{t("topbar.runtime")}</span>
         </Link>
         <Button
           variant="ghost"
           size="sm"
-          className="px-2.5"
+          className="shrink-0"
           onClick={onOpenSettings}
           aria-label={t("topbar.settings")}
+          title={t("topbar.settings")}
         >
           <Settings2Icon size={16} />
-          <span className="hidden sm:inline">{t("topbar.settings")}</span>
         </Button>
         {!isNewThread ? (
           <Button
             variant="ghost"
             size="sm"
-            className="px-2.5"
+            className="shrink-0"
             onClick={onToggleArtifactRail}
             aria-label={artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
+            title={artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
           >
             {artifactRailOpen ? (
               <PanelRightCloseIcon size={16} />
             ) : (
               <PanelRightOpenIcon size={16} />
             )}
-            <span className="hidden sm:inline">
-              {artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
-            </span>
           </Button>
         ) : null}
       </div>

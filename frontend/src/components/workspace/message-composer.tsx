@@ -1,10 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-
-import {
-  ArrowUpIcon,
-  ChevronDownIcon,
-  SquareIcon,
-} from "lucide-react";
+import { ArrowUpIcon, SquareIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
@@ -21,7 +15,6 @@ type MessageComposerProps = {
   modelOptions: string[];
   onModelChange: (value: string) => void;
   onProviderChange: (value: string) => void;
-  prompts: Thread["prompts"];
   providerOptions: string[];
   runtimeModelsError: string | null;
   runtimeModelsLoading: boolean;
@@ -43,7 +36,6 @@ export function MessageComposer({
   modelOptions,
   onModelChange,
   onProviderChange,
-  prompts,
   providerOptions,
   runtimeModelsError,
   runtimeModelsLoading,
@@ -57,17 +49,6 @@ export function MessageComposer({
 }: MessageComposerProps) {
   const { t } = useTranslation("workspace");
   const isCompact = density === "compact";
-  const promptMenuRef = useRef<HTMLDivElement | null>(null);
-  const [promptMenuOpen, setPromptMenuOpen] = useState(false);
-  const transportLabel =
-    transport === "live"
-      ? t("composer.transport.live")
-      : transport === "error"
-        ? t("composer.transport.error")
-        : t("composer.transport.seeded");
-  const sessionStateLabel = hasSession
-    ? t("composer.sessionState.attached")
-    : t("composer.sessionState.new");
   const placeholder = isNewThread
     ? t("composer.placeholder.newThread")
     : t("composer.placeholder.thread");
@@ -90,119 +71,34 @@ export function MessageComposer({
   }));
   const runtimeModelStatusLabel = runtimeModelsLoading
     ? t("composer.loadingModels")
-    : runtimeModelsError
-      ? t("composer.modelCatalogUnavailable")
-      : selectedModel
-        ? t("composer.modelWithName", { model: selectedModel })
-        : t("composer.runtimeDefaultModel");
-
-  useEffect(() => {
-    if (!promptMenuOpen) {
-      return;
-    }
-
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-
-      if (!promptMenuRef.current?.contains(target)) {
-        setPromptMenuOpen(false);
-      }
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPromptMenuOpen(false);
-      }
-    };
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [promptMenuOpen]);
+    : !showModelPicker && !runtimeModelsError
+      ? t("composer.runtimeDefaultModel")
+      : null;
+  const showStatusRow =
+    transport === "error" || selectedArtifactCount > 0 || isResponding;
 
   return (
     <div className="rounded-[0.95rem] border border-[var(--border)] [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
-      <div
-        className={cn(
-          "relative border-b border-[var(--border)] px-3",
-          isCompact ? "py-1" : "py-1.5",
-        )}
-      >
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
-          <span>{transportLabel}</span>
-          <span className="size-1 rounded-full bg-[var(--border-strong)]" />
-          <span>{t("composer.filesCount", { count: selectedArtifactCount })}</span>
-          <span className="size-1 rounded-full bg-[var(--border-strong)]" />
-          <span>{sessionStateLabel}</span>
-          {prompts.length > 0 ? (
-            <>
-              <span className="size-1 rounded-full bg-[var(--border-strong)]" />
-              <div ref={promptMenuRef} className="relative">
-                <button
-                  type="button"
-                  className={cn(
-                    "inline-flex items-center gap-1 text-base uppercase tracking-[0.14em] transition",
-                    promptMenuOpen
-                      ? "text-[var(--foreground)]"
-                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-                  )}
-                  onClick={() => setPromptMenuOpen((open) => !open)}
-                  aria-expanded={promptMenuOpen}
-                  aria-haspopup="menu"
-                >
-                  <span>{t("composer.promptTips")}</span>
-                  <span className="text-[var(--placeholder-foreground)]">
-                    {prompts.length}
-                  </span>
-                  <ChevronDownIcon
-                    size={12}
-                    className={cn(
-                      "transition-transform duration-150",
-                      promptMenuOpen ? "rotate-180" : "rotate-0",
-                    )}
-                  />
-                </button>
-
-                {promptMenuOpen ? (
-                  <div className="absolute left-0 top-full z-20 mt-2 w-80 max-w-[calc(100vw-4rem)] rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-overlay)] p-1.5 shadow-[0_10px_24px_rgba(0,0,0,0.24)]">
-                    <div className="px-2 py-1 app-text-9 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
-                      {t("composer.promptTipsMenuTitle")}
-                    </div>
-                    <div className="flex max-h-64 flex-col overflow-y-auto">
-                      {prompts.map((prompt) => (
-                        <button
-                          key={prompt}
-                          type="button"
-                          onClick={() => {
-                            onDraftChange(prompt);
-                            setPromptMenuOpen(false);
-                          }}
-                          className="rounded-[0.65rem] px-2.5 py-2 text-left text-base leading-6 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]"
-                        >
-                          {prompt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </>
+      {showStatusRow ? (
+        <div
+          className={cn(
+            "flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--border)] px-3 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]",
+            isCompact ? "py-1" : "py-1.5",
+          )}
+        >
+          {transport === "error" ? (
+            <span className="text-[#d8a66d]">{t("composer.transport.error")}</span>
+          ) : null}
+          {selectedArtifactCount > 0 ? (
+            <span>{t("composer.filesCount", { count: selectedArtifactCount })}</span>
           ) : null}
           {isResponding ? (
-            <>
-              <span className="size-1 rounded-full bg-[var(--accent-secondary-border)]" />
-              <span className="text-[var(--accent-secondary)]">{t("composer.responseActive")}</span>
-            </>
+            <span className="text-[var(--accent-secondary)]">
+              {t("composer.responseActive")}
+            </span>
           ) : null}
         </div>
-      </div>
+      ) : null}
 
       <div>
         <textarea
@@ -221,9 +117,11 @@ export function MessageComposer({
           placeholder={placeholder}
           className={cn(
             "app-chat-input w-full resize-none bg-transparent text-[var(--foreground)] outline-none",
-            isCompact
-              ? "min-h-[4.25rem] px-3 py-2.5"
-              : "min-h-[5rem] px-3.5 py-3",
+            isNewThread
+              ? "min-h-[7rem] px-3.5 py-3.5"
+              : isCompact
+                ? "min-h-[4.25rem] px-3 py-2.5"
+                : "min-h-[5rem] px-3.5 py-3",
           )}
         />
         <div
@@ -265,11 +163,9 @@ export function MessageComposer({
                 />
               </label>
             ) : null}
-            <span className="truncate">{runtimeModelStatusLabel}</span>
-            <span className="size-1 shrink-0 rounded-full bg-[var(--border-strong)]" />
-            <span className="truncate">{t("composer.shortcuts")}</span>
-            <span className="size-1 shrink-0 rounded-full bg-[var(--border-strong)]" />
-            <span className="truncate">{isResponding ? t("composer.stop") : t("composer.submitShort")}</span>
+            {runtimeModelStatusLabel ? (
+              <span className="truncate">{runtimeModelStatusLabel}</span>
+            ) : null}
             {runtimeModelsError ? (
               <>
                 <span className="size-1 shrink-0 rounded-full bg-[#d8a66d]/40" />
@@ -281,7 +177,7 @@ export function MessageComposer({
             variant="secondary"
             size="icon"
             aria-label={submitButtonLabel}
-            title={submitButtonLabel}
+            title={`${submitButtonLabel} (${t("composer.shortcuts")})`}
             className={
               isResponding
                 ? "size-8 shrink-0 border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)] p-0 text-[var(--foreground)] shadow-none hover:border-[var(--accent-secondary-border)] hover:bg-[var(--accent-secondary-soft)]"

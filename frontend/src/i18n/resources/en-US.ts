@@ -276,11 +276,33 @@ export const enUS = {
   },
   workspace: {
     shell: {
-      newChatEyebrow: "New workspace chat",
-      newChatTitle:
-        "Start from a blank thread, then let runtime state attach as work begins.",
-      newChatBody:
-        "This route now behaves like a real new chat entry without depending on seeded mock threads.",
+      newChatTitle: "What do you want to accomplish?",
+      suggestions: {
+        analyze: {
+          title: "Analyze project",
+          description: "Understand the code, dependencies, and current state",
+          prompt:
+            "Analyze the current project's structure, dependencies, and workspace state first. Summarize the key findings, then recommend the next step.",
+        },
+        implement: {
+          title: "Implement a change",
+          description: "Update the code and run the necessary checks",
+          prompt:
+            "Analyze this requirement, create a concise implementation path, then update the code and run the necessary verification.",
+        },
+        review: {
+          title: "Review code",
+          description: "Find defects, risks, and improvement opportunities",
+          prompt:
+            "Review the current code changes. Prioritize defects, regression risks, and missing tests, then recommend actionable improvements.",
+        },
+        plan: {
+          title: "Create a plan",
+          description: "Break down the task and move it forward",
+          prompt:
+            "Clarify the goal and constraints, create a phased implementation plan, and begin with the highest-priority step.",
+        },
+      },
       loadingSettingsPanel: "Loading settings panel...",
       loadingArtifactPanel: "Loading artifact panel...",
       loadingArtifactDetails: "Loading artifact details...",
@@ -292,11 +314,10 @@ export const enUS = {
       usage: "Usage",
       runtime: "Runtime",
       settings: "Settings",
+      openSidebar: "Open chat navigation",
       showFiles: "Show files",
       hideFiles: "Hide files",
       newThreadTitle: "New chat",
-      newThreadSubtitle:
-        "Start a thread, then let runtime state attach as work begins.",
       threadTransport: {
         live: "Live runtime",
         error: "Runtime degraded",
@@ -319,6 +340,8 @@ export const enUS = {
       appName: "AI Agent Runtime",
       refreshRuntimeTeams: "Refresh runtime teams",
       openSettings: "Open settings",
+      navigation: "Chat and session navigation",
+      closeNavigation: "Close chat navigation",
       startNewChat: "Start new chat",
       searchPlaceholder: "Search threads",
       sections: {

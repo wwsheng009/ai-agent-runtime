@@ -6,6 +6,14 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import {
+  ArrowUpRightIcon,
+  BotIcon,
+  Code2Icon,
+  FileSearchIcon,
+  ListTodoIcon,
+  ShieldCheckIcon,
+} from "lucide-react";
 
 import { MessageBacktrackDialog } from "@/components/workspace/message-backtrack-dialog";
 import { MessageComposer } from "@/components/workspace/message-composer";
@@ -167,8 +175,39 @@ export function WorkspaceShell({
   const { t } = useTranslation("workspace");
   const isNewThread = selectedThread.id === NEW_THREAD_ID;
   const isCompact = settings.workspace.density === "compact";
+  const newThreadSuggestions = [
+    {
+      key: "analyze",
+      icon: FileSearchIcon,
+      title: t("shell.suggestions.analyze.title"),
+      description: t("shell.suggestions.analyze.description"),
+      prompt: t("shell.suggestions.analyze.prompt"),
+    },
+    {
+      key: "implement",
+      icon: Code2Icon,
+      title: t("shell.suggestions.implement.title"),
+      description: t("shell.suggestions.implement.description"),
+      prompt: t("shell.suggestions.implement.prompt"),
+    },
+    {
+      key: "review",
+      icon: ShieldCheckIcon,
+      title: t("shell.suggestions.review.title"),
+      description: t("shell.suggestions.review.description"),
+      prompt: t("shell.suggestions.review.prompt"),
+    },
+    {
+      key: "plan",
+      icon: ListTodoIcon,
+      title: t("shell.suggestions.plan.title"),
+      description: t("shell.suggestions.plan.description"),
+      prompt: t("shell.suggestions.plan.prompt"),
+    },
+  ];
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("appearance");
@@ -276,7 +315,12 @@ export function WorkspaceShell({
       >
         <WorkspaceSidebar
           density={settings.workspace.density}
-          onOpenSettings={() => openSettings("workspace")}
+          mobileOpen={mobileSidebarOpen}
+          onCloseMobile={() => setMobileSidebarOpen(false)}
+          onOpenSettings={() => {
+            setMobileSidebarOpen(false);
+            openSettings("workspace");
+          }}
           runtimeTeams={runtimeTeams}
           runtimeTeamsError={runtimeTeamsError}
           runtimeTeamsLoading={runtimeTeamsLoading}
@@ -296,7 +340,10 @@ export function WorkspaceShell({
           onRefreshRuntimeTeams={onRefreshRuntimeTeams}
           threads={threads}
           selectedThreadId={selectedThread.id}
-          onSelectThread={onSelectThread}
+          onSelectThread={(threadId) => {
+            setMobileSidebarOpen(false);
+            onSelectThread(threadId);
+          }}
         />
 
         <section
@@ -308,6 +355,7 @@ export function WorkspaceShell({
             density={settings.workspace.density}
             isNewThread={isNewThread}
             liveTeamCount={liveTeamCount}
+            onOpenSidebar={() => setMobileSidebarOpen(true)}
             onOpenSettings={() => openSettings("appearance")}
             onToggleArtifactRail={() => setArtifactRailManualOpen((current) => !current)}
             selectedThread={selectedThread}
@@ -359,17 +407,44 @@ export function WorkspaceShell({
                   />
                 </div>
               ) : (
-                <div className="mx-auto flex w-full max-w-[44rem] flex-1 flex-col justify-center">
-                  <div className="ide-panel rounded-[1rem] px-4 py-4 sm:px-5">
-                    <div className="app-text-11 uppercase tracking-[0.22em] text-[var(--accent-secondary)]">
-                      {t("shell.newChatEyebrow")}
+                <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
+                  <div className="text-center">
+                    <div className="mx-auto grid size-11 place-items-center rounded-[1rem] border border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] shadow-[0_8px_24px_var(--accent-primary-shadow)]">
+                      <BotIcon size={20} />
                     </div>
-                    <h1 className="mt-2 text-[1.45rem] font-semibold tracking-[-0.03em] text-[var(--foreground)] sm:text-[1.65rem]">
+                    <h1 className="mt-3 text-[1.45rem] font-semibold tracking-[-0.03em] text-[var(--foreground)] sm:text-[1.7rem]">
                       {t("shell.newChatTitle")}
                     </h1>
-                    <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">
-                      {t("shell.newChatBody")}
-                    </p>
+                  </div>
+                  <div className="mt-5 grid grid-cols-2 gap-2 sm:gap-3">
+                    {newThreadSuggestions.map((suggestion) => {
+                      const SuggestionIcon = suggestion.icon;
+
+                      return (
+                        <button
+                          key={suggestion.key}
+                          type="button"
+                          onClick={() => onDraftChange(suggestion.prompt)}
+                          className="group flex min-h-[5.5rem] items-start gap-3 rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-left transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] sm:px-3.5"
+                        >
+                          <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-secondary)]">
+                            <SuggestionIcon size={15} />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center justify-between gap-2 text-sm font-semibold text-[var(--foreground)]">
+                              {suggestion.title}
+                              <ArrowUpRightIcon
+                                size={13}
+                                className="shrink-0 text-[var(--muted-foreground)] transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-[var(--foreground)]"
+                              />
+                            </span>
+                            <span className="mt-1 block text-xs leading-5 text-[var(--muted-foreground)]">
+                              {suggestion.description}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -403,7 +478,6 @@ export function WorkspaceShell({
                     selectedArtifactCount={selectedThread.artifacts.length}
                     onModelChange={onModelChange}
                     onProviderChange={onProviderChange}
-                    prompts={selectedThread.prompts}
                     providerOptions={providerOptions}
                     runtimeModelsError={runtimeModelsError}
                     runtimeModelsLoading={runtimeModelsLoading}

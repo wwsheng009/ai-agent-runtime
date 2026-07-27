@@ -13,6 +13,7 @@ import {
   SparklesIcon,
   TriangleAlertIcon,
   UserIcon,
+  XIcon,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -55,6 +56,8 @@ const RuntimeTeamsDialog = lazy(() =>
 
 type WorkspaceSidebarProps = {
   density: "comfortable" | "compact";
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
   onOpenSettings?: () => void;
   runtimeTeams: RuntimeTeamRecord[];
   runtimeTeamsError: string | null;
@@ -239,6 +242,8 @@ function SidebarSection({
 
 export function WorkspaceSidebar({
   density,
+  mobileOpen = false,
+  onCloseMobile,
   onOpenSettings,
   runtimeTeams,
   runtimeTeamsError,
@@ -268,7 +273,7 @@ export function WorkspaceSidebar({
   const [openSections, setOpenSections] = useState<SidebarSectionState>({
     chats: true,
     sessions: true,
-    runtime: true,
+    runtime: false,
   });
   const [openSessionDirectories, setOpenSessionDirectories] = useState<
     Record<string, boolean>
@@ -330,7 +335,11 @@ export function WorkspaceSidebar({
       }>;
 
     const selectedUserId = selectedRuntimeSessionUserId.trim();
-    if (selectedUserId && !seen.has(selectedUserId)) {
+    if (
+      selectedUserId &&
+      !seen.has(selectedUserId) &&
+      runtimeSessionsSummary.totalCount > 0
+    ) {
       items.unshift({
         userId: selectedUserId,
         displayName: selectedUserId,
@@ -369,9 +378,17 @@ export function WorkspaceSidebar({
     Boolean(runtimeSessionUsersError) ||
     sessionUserMenuItems.length > 0 ||
     Boolean(deferredQuery);
+  const showChatsSection = chatThreads.length > 0 || Boolean(deferredQuery);
+  const showSearch = threads.length > 0 || runtimeSessions.length > 0;
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
   ).length;
+  const hasRuntimeStats =
+    runtimeSessionsSummary.totalCount > 0 ||
+    runtimeSessionsSummary.recoverableCount > 0 ||
+    sessionRailSummary.pendingCount > 0 ||
+    runtimeSessionsLoading ||
+    Boolean(runtimeSessionsRefreshing);
   const sidebarLabels: WorkspaceSidebarIconLabels = {
     threadReview: t("sidebar.threadStatuses.review"),
     threadDraft: t("sidebar.threadStatuses.draft"),
@@ -410,6 +427,23 @@ export function WorkspaceSidebar({
       cancelled = true;
     };
   }, [deferredQuery]);
+
+  useEffect(() => {
+    if (!mobileOpen || !onCloseMobile) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCloseMobile();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [mobileOpen, onCloseMobile]);
 
   useEffect(() => {
     setOpenSessionDirectories((current) => {
@@ -456,7 +490,26 @@ export function WorkspaceSidebar({
   }
 
   return (
-    <aside className="hidden h-full min-h-0 flex-col overflow-hidden border-r border-[var(--border)] [background:var(--workspace-sidebar-bg)] xl:flex">
+    <>
+      {mobileOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 bg-black/55 backdrop-blur-[2px] xl:hidden"
+          onClick={onCloseMobile}
+          aria-label={t("sidebar.closeNavigation")}
+        />
+      ) : null}
+      <aside
+        role={mobileOpen ? "dialog" : "navigation"}
+        aria-modal={mobileOpen ? "true" : undefined}
+        aria-label={t("sidebar.navigation")}
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 flex h-full w-[min(20rem,calc(100vw-3rem))] min-h-0 flex-col overflow-hidden border-r border-[var(--border)] [background:var(--workspace-sidebar-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.35)] transition-[transform,visibility] duration-200 xl:visible xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:shadow-none",
+          mobileOpen
+            ? "visible translate-x-0"
+            : "invisible -translate-x-full",
+        )}
+      >
       <div
         className={cn(
           "border-b border-[var(--border)]",
@@ -464,7 +517,7 @@ export function WorkspaceSidebar({
         )}
       >
         <div className="flex items-center justify-between gap-3">
-          <Link to="/" className="flex items-center gap-3">
+          <Link to="/" className="flex items-center gap-3" onClick={onCloseMobile}>
             <span className="grid size-8 place-items-center rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-soft)] text-xs font-semibold text-[var(--accent-primary)]">
               AR
             </span>
@@ -476,6 +529,16 @@ export function WorkspaceSidebar({
             </div>
           </Link>
           <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="xl:hidden"
+              onClick={onCloseMobile}
+              aria-label={t("sidebar.closeNavigation")}
+              title={t("sidebar.closeNavigation")}
+            >
+              <XIcon size={16} />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -514,22 +577,25 @@ export function WorkspaceSidebar({
           {t("sidebar.startNewChat")}
         </button>
 
-        <div
-          className={cn(
-            "mt-2.5 rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3",
-            isCompact ? "py-2" : "py-2.5",
-          )}
-        >
-          <div className="flex items-center gap-2.5 text-sm text-[var(--muted-foreground)]">
-            <SearchIcon size={15} />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={t("sidebar.searchPlaceholder")}
-              className="w-full bg-transparent outline-none"
-            />
+        {showSearch ? (
+          <div
+            className={cn(
+              "mt-2.5 rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3",
+              isCompact ? "py-2" : "py-2.5",
+            )}
+          >
+            <div className="flex items-center gap-2.5 text-sm text-[var(--muted-foreground)]">
+              <SearchIcon size={15} />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={t("sidebar.searchPlaceholder")}
+                aria-label={t("sidebar.searchPlaceholder")}
+                className="w-full bg-transparent outline-none"
+              />
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
 
       <div
@@ -539,15 +605,16 @@ export function WorkspaceSidebar({
         )}
       >
         <div className={cn(isCompact ? "space-y-3.5" : "space-y-4")}>
+          {showChatsSection ? (
           <SidebarSection
-            id="chats"
-            icon={MessagesSquareIcon}
-            iconClassName="text-[var(--accent-primary)]"
-            title={t("sidebar.sections.chats")}
-            count={<Badge>{chatThreads.length}</Badge>}
-            isOpen={openSections.chats}
-            onToggle={toggleSection}
-          >
+              id="chats"
+              icon={MessagesSquareIcon}
+              iconClassName="text-[var(--accent-primary)]"
+              title={t("sidebar.sections.chats")}
+              count={<Badge>{chatThreads.length}</Badge>}
+              isOpen={openSections.chats}
+              onToggle={toggleSection}
+            >
                 <div className="space-y-1">
                   {chatThreads.length > 0 ? (
                     chatThreads.map((thread) => {
@@ -600,7 +667,8 @@ export function WorkspaceSidebar({
                 </div>
               )}
             </div>
-          </SidebarSection>
+            </SidebarSection>
+          ) : null}
 
           {showSessionsSection ? (
             <SidebarSection
@@ -792,34 +860,52 @@ export function WorkspaceSidebar({
               icon={CompassIcon}
               iconClassName="text-[var(--accent-secondary)]"
               title={t("sidebar.sections.runtime")}
-              count={<Badge>{t("sidebar.active", { count: liveTeamCount })}</Badge>}
+              count={
+                liveTeamCount > 0 ? (
+                  <Badge>{t("sidebar.active", { count: liveTeamCount })}</Badge>
+                ) : runtimeSessionsSummary.totalCount > 0 ? (
+                  <Badge>
+                    {t("sidebar.runtimeStats.sessions", {
+                      count: runtimeSessionsSummary.totalCount,
+                    })}
+                  </Badge>
+                ) : undefined
+              }
               isOpen={openSections.runtime}
               onToggle={toggleSection}
             >
               <section className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-                <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                  {t("sidebar.runtimeStats.sessions", {
-                    count: runtimeSessionsSummary.totalCount,
-                  })}
-                  </span>
-                  <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                  {t("sidebar.runtimeStats.recoverable", {
-                    count: runtimeSessionsSummary.recoverableCount,
-                  })}
-                  </span>
-                  <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                  {t("sidebar.runtimeStats.pending", {
-                    count: sessionRailSummary.pendingCount,
-                  })}
-                  </span>
+                {hasRuntimeStats ? (
+                  <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    {runtimeSessionsSummary.totalCount > 0 ? (
+                      <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                        {t("sidebar.runtimeStats.sessions", {
+                          count: runtimeSessionsSummary.totalCount,
+                        })}
+                      </span>
+                    ) : null}
+                    {runtimeSessionsSummary.recoverableCount > 0 ? (
+                      <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                        {t("sidebar.runtimeStats.recoverable", {
+                          count: runtimeSessionsSummary.recoverableCount,
+                        })}
+                      </span>
+                    ) : null}
+                    {sessionRailSummary.pendingCount > 0 ? (
+                      <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                        {t("sidebar.runtimeStats.pending", {
+                          count: sessionRailSummary.pendingCount,
+                        })}
+                      </span>
+                    ) : null}
                   {runtimeSessionsLoading || runtimeSessionsRefreshing ? (
                     <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
                       <LoaderCircleIcon size={12} className="animate-spin" />
                       {t("sidebar.runtimeStats.syncing")}
                     </span>
                   ) : null}
-                </div>
+                  </div>
+                ) : null}
 
               {runtimeSessionsError ? (
                 <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
@@ -827,26 +913,23 @@ export function WorkspaceSidebar({
                 </div>
               ) : null}
 
-              <div className="mt-3 space-y-1.5">
-                {runtimeTeams.slice(0, 4).map((team) => (
-                  <div
-                    key={team.id}
-                    className="flex items-center justify-between rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-2"
-                  >
-                    <div className="truncate app-text-13 text-[var(--foreground)]">
-                      {team.id}
+              {runtimeTeams.length > 0 ? (
+                <div className="mt-3 space-y-1.5">
+                  {runtimeTeams.slice(0, 4).map((team) => (
+                    <div
+                      key={team.id}
+                      className="flex items-center justify-between rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-2"
+                    >
+                      <div className="truncate app-text-13 text-[var(--foreground)]">
+                        {team.id}
+                      </div>
+                      <span className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        {team.status || t("sidebar.unknown")}
+                      </span>
                     </div>
-                    <span className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      {team.status || t("sidebar.unknown")}
-                    </span>
-                  </div>
-                ))}
-                {!runtimeTeamsLoading && runtimeTeams.length === 0 ? (
-                  <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
-                    {t("sidebar.runtimeTeamsUnavailable")}
-                  </div>
-                ) : null}
-              </div>
+                  ))}
+                </div>
+              ) : null}
 
               <Button
                 variant="secondary"
@@ -858,6 +941,7 @@ export function WorkspaceSidebar({
               </Button>
               <Link
                 to="/runtime/config"
+                onClick={onCloseMobile}
                 className={cn(
                   buttonVariants({ variant: "secondary", size: "sm" }),
                   "mt-2 w-full",
@@ -883,7 +967,8 @@ export function WorkspaceSidebar({
           />
         </Suspense>
       ) : null}
-    </aside>
+      </aside>
+    </>
   );
 }
 
