@@ -23,6 +23,12 @@ export {
   listRuntimeLogs,
   streamRuntimeLogs,
 } from "./logs";
+export {
+  getAnalyticsDimensions,
+  getAnalyticsSessionUsage,
+  getAnalyticsSummary,
+  listAnalyticsSessions,
+} from "./analytics";
 export { listRuntimeModels } from "./models";
 export {
   applySessionBacktrack,

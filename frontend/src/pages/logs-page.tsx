@@ -1,5 +1,6 @@
 import {
   ArrowLeftIcon,
+  BarChart3Icon,
   CheckIcon,
   CopyIcon,
   RefreshCwIcon,
@@ -579,6 +580,13 @@ export function LogsPage() {
                 >
                   <ArrowLeftIcon size={14} />
                   {t("backToWorkspace")}
+                </Link>
+                <Link
+                  to="/usage"
+                  className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+                >
+                  <BarChart3Icon size={14} />
+                  {t("usage")}
                 </Link>
                 <Link
                   to="/"

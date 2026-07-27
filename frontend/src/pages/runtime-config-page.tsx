@@ -1,4 +1,9 @@
-import { ArrowLeftIcon, DatabaseIcon, TerminalSquareIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  BarChart3Icon,
+  DatabaseIcon,
+  TerminalSquareIcon,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { BackendConfigSettingsPage } from "@/components/workspace/settings/backend-config-settings-page";
@@ -48,6 +53,13 @@ export function RuntimeConfigPage() {
               >
                 <TerminalSquareIcon size={14} />
                 {t("page.logs")}
+              </Link>
+              <Link
+                to="/usage"
+                className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+              >
+                <BarChart3Icon size={14} />
+                {t("page.usage")}
               </Link>
             </div>
           </div>

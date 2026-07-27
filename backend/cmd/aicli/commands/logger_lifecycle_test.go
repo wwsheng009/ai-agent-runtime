@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
 func TestChatLoggerFlushReportsActiveDurationAndObservation(t *testing.T) {
@@ -28,8 +29,45 @@ func TestChatLoggerFlushReportsActiveDurationAndObservation(t *testing.T) {
 	var persisted ChatSessionLog
 	require.NoError(t, json.Unmarshal(payload, &persisted))
 	require.Equal(t, "active", persisted.Status)
+	require.NotEmpty(t, persisted.WorkingDirectory)
+	require.NotEmpty(t, persisted.ProjectPath)
 	require.False(t, persisted.LastObservedAt.IsZero())
 	require.Zero(t, persisted.EndTime)
+}
+
+func TestNewChatLoggerCapturesWorkingDirectoryAndProjectRoot(t *testing.T) {
+	previous, err := os.Getwd()
+	require.NoError(t, err)
+	project := filepath.Join(t.TempDir(), "project")
+	workingDirectory := filepath.Join(project, "backend", "internal")
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(workingDirectory, 0o755))
+	require.NoError(t, os.Chdir(workingDirectory))
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	logger := NewChatLogger("provider", "openai", "model", false, "")
+	require.Equal(t, filepath.Clean(workingDirectory), logger.sessionLog.WorkingDirectory)
+	require.Equal(t, filepath.Clean(project), logger.sessionLog.ProjectPath)
+
+	logger.logDir = ""
+	require.NoError(t, logger.RotateSession())
+	require.Equal(t, filepath.Clean(workingDirectory), logger.sessionLog.WorkingDirectory)
+	require.Equal(t, filepath.Clean(project), logger.sessionLog.ProjectPath)
+}
+
+func TestChatLoggerCapturesRuntimeSessionTitleAndFirstPrompt(t *testing.T) {
+	logger := NewChatLogger("provider", "openai", "model", false, "")
+	runtimeSession := runtimechat.NewSession("user")
+	runtimeSession.ID = "session-runtime-title"
+	runtimeSession.UpdateTitle("Usage analytics investigation")
+	session := &ChatSession{Logger: logger, RuntimeSession: runtimeSession}
+
+	beginChatUserTurn(session, "First user prompt")
+	syncChatLoggerSessionMetadata(session)
+
+	require.Equal(t, "First user prompt", logger.sessionLog.InitialMessage)
+	require.Equal(t, runtimeSession.ID, logger.sessionLog.RuntimeSessionID)
+	require.Equal(t, "Usage analytics investigation", logger.sessionLog.Title)
 }
 
 func TestChatLoggerFailSessionPersistsTerminalFailure(t *testing.T) {

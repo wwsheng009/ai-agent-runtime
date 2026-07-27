@@ -403,6 +403,7 @@ export function Select({
           return (
             <div
               key={option.value}
+              title={option.label}
               id={`${listboxId}-option-${index}`}
               role="option"
               aria-selected={selected}
@@ -447,6 +448,7 @@ export function Select({
           aria-haspopup="listbox"
           aria-expanded={open}
           aria-controls={listboxId}
+          title={triggerLabel}
           disabled={isDisabled}
           onClick={(event) => {
             event.stopPropagation();

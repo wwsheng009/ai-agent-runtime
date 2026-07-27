@@ -472,16 +472,16 @@ func (p *fileSessionPreviewText) observe(message types.Message) {
 	p.lastContent = summarizeSessionText(content, sessionSummaryLimit)
 	switch strings.ToLower(strings.TrimSpace(message.Role)) {
 	case "user":
-		if p.firstUser == "" {
+		if p.firstUser == "" && !shouldIgnoreDerivedTitleContent(content) {
 			p.firstUser = summarizeSessionText(content, sessionTitleLimit)
 		}
 	case "assistant":
-		if p.firstAssistant == "" {
+		if p.firstAssistant == "" && !shouldIgnoreDerivedTitleContent(content) {
 			p.firstAssistant = summarizeSessionText(content, sessionTitleLimit)
 		}
 	case "system", "developer", "tool":
 	default:
-		if p.firstOther == "" {
+		if p.firstOther == "" && !shouldIgnoreDerivedTitleContent(content) {
 			p.firstOther = summarizeSessionText(content, sessionTitleLimit)
 		}
 	}

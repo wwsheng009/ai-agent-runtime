@@ -16,6 +16,11 @@ const RuntimeConfigPage = lazy(() =>
     default: module.RuntimeConfigPage,
   })),
 );
+const UsageAnalyticsPage = lazy(() =>
+  import("@/pages/usage-analytics-page").then((module) => ({
+    default: module.UsageAnalyticsPage,
+  })),
+);
 const WorkspacePage = lazy(() =>
   import("@/pages/workspace-page").then((module) => ({
     default: module.WorkspacePage,
@@ -31,6 +36,9 @@ export default function App() {
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/logs" element={<LogsPage />} />
+          <Route path="/usage" element={<UsageAnalyticsPage />} />
+          <Route path="/usage/sessions/:sessionId" element={<UsageAnalyticsPage />} />
+          <Route path="/analytics" element={<UsageAnalyticsPage />} />
           <Route path="/runtime/config" element={<RuntimeConfigPage />} />
           <Route
             path="/workspace"

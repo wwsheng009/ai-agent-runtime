@@ -110,6 +110,7 @@ func flushChatSessionLog(session *ChatSession) {
 	if session == nil {
 		return
 	}
+	syncChatLoggerSessionMetadata(session)
 	if session.Logger != nil && session.Logger.logDir != "" {
 		if err := session.Logger.FlushSession(); err != nil {
 			writeChatLogSaveError(session, err)
@@ -117,6 +118,17 @@ func flushChatSessionLog(session *ChatSession) {
 		return
 	}
 	writeChatLogBufferedMarker(session)
+}
+
+func syncChatLoggerSessionMetadata(session *ChatSession) {
+	if session == nil || session.Logger == nil || session.RuntimeSession == nil {
+		return
+	}
+	title := strings.TrimSpace(session.RuntimeSession.Metadata.Title)
+	if preview := session.RuntimeSession.BuildPreview(); preview != nil && strings.TrimSpace(preview.Title) != "" {
+		title = preview.Title
+	}
+	session.Logger.SetRuntimeSessionMetadata(session.RuntimeSession.ID, title)
 }
 
 func logChatTurnFailureIfUnrecorded(session *ChatSession, userMessage string, turnErr error) {
@@ -197,6 +209,9 @@ func nextLogScope(session *ChatSession, userMessage string) aicliLogScope {
 func beginChatUserTurn(session *ChatSession, userMessage string) {
 	if session == nil || strings.TrimSpace(userMessage) == "" {
 		return
+	}
+	if session.Logger != nil && session.Logger.sessionLog != nil && strings.TrimSpace(session.Logger.sessionLog.InitialMessage) == "" {
+		session.Logger.SetInitialMessage(userMessage)
 	}
 	session.MsgCount++
 	session.TurnRequestCount = 0

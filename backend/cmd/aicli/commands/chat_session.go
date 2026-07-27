@@ -178,6 +178,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoreChatContextTokenUsage(session, session.RuntimeSession)
 	restoreChatTokenCount(session, session.RuntimeSession)
 	refreshChatTitleMetadata(session)
+	syncChatLoggerSessionMetadata(session)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
@@ -236,6 +237,7 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 		}
 	}
 	refreshChatTitleMetadata(session)
+	syncChatLoggerSessionMetadata(session)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}

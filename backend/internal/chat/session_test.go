@@ -150,6 +150,20 @@ func TestSessionSystemOnlyDoesNotDeriveInstructionTitle(t *testing.T) {
 	}
 }
 
+func TestSessionTitleSkipsToolTranscriptContent(t *testing.T) {
+	session := NewSession("test-user")
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("Shell guidance: use pwsh"),
+		*types.NewUserMessage("\u2022 Running shell commands=[3] workdir: E:\\projects"),
+		*types.NewAssistantMessage("Exit code: 1 Shell: pwsh"),
+		*types.NewUserMessage("分析真实的用户请求"),
+	})
+
+	if got := session.BuildPreview().Title; got != "分析真实的用户请求" {
+		t.Fatalf("expected title from the first usable user message, got %q", got)
+	}
+}
+
 func TestSessionRepairsLegacyInstructionDerivedTitle(t *testing.T) {
 	session := NewSession("test-user")
 	session.Metadata.Title = "Shell guidance: - Detected operating system: ..."

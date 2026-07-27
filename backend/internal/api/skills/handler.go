@@ -132,6 +132,7 @@ type Handler struct {
 	serviceControlService          RuntimeServiceControlService
 	fileTransferService            FileTransferService
 	logFilePath                    string
+	chatLogsDir                    string
 	profileRegistry                *profilesys.Registry
 	profileDefaultRef              string
 	profileGlobalRuntimePath       string
@@ -655,6 +656,13 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/events", h.ListRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/logs", h.ListRuntimeLogs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/logs/stream", h.StreamRuntimeLogs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions", h.ListAnalyticsSessions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/overview", h.GetAnalyticsSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/summary", h.GetAnalyticsSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/dimensions", h.GetAnalyticsDimensions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions/{id}", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions/{id}/usage", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions/{id}/turns", h.ListAnalyticsSessionTurns).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces", h.GetRuntimeTraces).Methods(http.MethodGet)

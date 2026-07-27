@@ -82,11 +82,14 @@ func TestCreateNewRuntimeConversation_DefersDurableSave(t *testing.T) {
 		SessionManager: manager,
 		SessionUserID:  userID,
 		SessionDir:     dir,
+		Logger:         NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, ""),
 	}
 	require.NoError(t, createNewRuntimeConversation(session, "deferred"))
 	require.True(t, session.runtimeSessionUnpersisted)
 	require.NotNil(t, session.RuntimeSession)
 	require.NotEmpty(t, session.RuntimeSession.ID)
+	require.Equal(t, session.RuntimeSession.ID, session.Logger.sessionLog.RuntimeSessionID)
+	require.Equal(t, "deferred", session.Logger.sessionLog.Title)
 
 	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
 	require.True(t, os.IsNotExist(statErr), "empty new session must not open sqlite")

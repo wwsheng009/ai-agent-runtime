@@ -41,6 +41,10 @@ type ChatLogDetail struct {
 // ChatSessionLog 聊天会话日志
 type ChatSessionLog struct {
 	SessionID         string              `json:"session_id"`
+	RuntimeSessionID  string              `json:"runtime_session_id,omitempty"`
+	Title             string              `json:"title,omitempty"`
+	WorkingDirectory  string              `json:"working_directory,omitempty"`
+	ProjectPath       string              `json:"project_path,omitempty"`
 	StartTime         time.Time           `json:"start_time"`
 	EndTime           time.Time           `json:"end_time,omitempty"`
 	LastObservedAt    time.Time           `json:"last_observed_at,omitempty"`
@@ -84,20 +88,23 @@ type ChatLogger struct {
 func NewChatLogger(provider, protocol, model string, stream bool, baseURL string) *ChatLogger {
 	sessionID := newChatLogSessionID()
 	now := time.Now()
+	workingDirectory, projectPath := currentChatProjectContext()
 	return &ChatLogger{
 		sessionID: sessionID,
 		logDir:    resolveDefaultChatLogDir(),
 		sessionLog: &ChatSessionLog{
-			SessionID:      sessionID,
-			StartTime:      now,
-			LastObservedAt: now,
-			Status:         "active",
-			Provider:       provider,
-			Protocol:       protocol,
-			Model:          model,
-			BaseURL:        baseURL,
-			Stream:         stream,
-			Messages:       []ChatLogDetail{},
+			SessionID:        sessionID,
+			WorkingDirectory: workingDirectory,
+			ProjectPath:      projectPath,
+			StartTime:        now,
+			LastObservedAt:   now,
+			Status:           "active",
+			Provider:         provider,
+			Protocol:         protocol,
+			Model:            model,
+			BaseURL:          baseURL,
+			Stream:           stream,
+			Messages:         []ChatLogDetail{},
 		},
 		currentReqIndex: -1,
 	}
@@ -140,6 +147,7 @@ func (cl *ChatLogger) RotateSession() error {
 
 	sessionID := newChatLogSessionID()
 	now := time.Now()
+	workingDirectory, projectPath := currentChatProjectContext()
 	cl.sessionID = sessionID
 	cl.currentReqIndex = -1
 	cl.totalRequests = 0
@@ -147,21 +155,36 @@ func (cl *ChatLogger) RotateSession() error {
 	cl.totalToolCalls = 0
 	cl.responseTimeMS = 0
 	cl.sessionLog = &ChatSessionLog{
-		SessionID:      sessionID,
-		StartTime:      now,
-		LastObservedAt: now,
-		Status:         "active",
-		Provider:       provider,
-		Protocol:       protocol,
-		Model:          model,
-		BaseURL:        baseURL,
-		Stream:         stream,
-		Messages:       []ChatLogDetail{},
+		SessionID:        sessionID,
+		WorkingDirectory: workingDirectory,
+		ProjectPath:      projectPath,
+		StartTime:        now,
+		LastObservedAt:   now,
+		Status:           "active",
+		Provider:         provider,
+		Protocol:         protocol,
+		Model:            model,
+		BaseURL:          baseURL,
+		Stream:           stream,
+		Messages:         []ChatLogDetail{},
 	}
 	if logDir == "" {
 		return nil
 	}
 	return cl.ensureSessionArtifactLayout()
+}
+
+func currentChatProjectContext() (workingDirectory, projectPath string) {
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return "", ""
+	}
+	workingDirectory = filepath.Clean(cwd)
+	projectPath = findGitRoot(workingDirectory)
+	if projectPath == "" {
+		projectPath = workingDirectory
+	}
+	return workingDirectory, filepath.Clean(projectPath)
 }
 
 // SetLogDir 设置日志保存目录
@@ -354,10 +377,60 @@ func boundChatLogContent(content interface{}) interface{} {
 	if err != nil || len(payload) <= chatLogContentMaxBytes {
 		return content
 	}
-	return map[string]interface{}{
+	bounded := map[string]interface{}{
 		"truncated":  true,
 		"byte_count": len(payload),
-		"preview":    truncateUTF8ByteSlice(payload, chatLogContentMaxBytes),
+		"preview":    truncateUTF8ByteSlice(payload, chatLogContentMaxBytes-4096),
+	}
+	for key, value := range chatLogDiagnosticEnvelope(payload) {
+		bounded[key] = value
+	}
+	return bounded
+}
+
+func chatLogDiagnosticEnvelope(payload []byte) map[string]interface{} {
+	var source map[string]interface{}
+	if json.Unmarshal(payload, &source) != nil {
+		return nil
+	}
+	preserved := make(map[string]interface{})
+	for key, value := range source {
+		if !isChatLogDiagnosticKey(key) || !isChatLogDiagnosticScalar(value) {
+			continue
+		}
+		preserved[key] = value
+	}
+	if _, hasError := source["error"]; hasError {
+		preserved["error_present"] = true
+	}
+	if len(preserved) > 0 {
+		preserved["diagnostic_envelope_preserved"] = true
+	}
+	return preserved
+}
+
+func isChatLogDiagnosticKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if strings.HasPrefix(key, "usage_") {
+		return true
+	}
+	switch key {
+	case "event_type", "source", "success", "provider", "model", "step",
+		"trace_id", "logical_turn_id", "llm_request_id", "stream_id",
+		"tool_call_count", "context_prompt_tokens", "context_window_tokens",
+		"prompt_budget", "executor_path":
+		return true
+	default:
+		return false
+	}
+}
+
+func isChatLogDiagnosticScalar(value interface{}) bool {
+	switch value.(type) {
+	case string, bool, float64, json.Number:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -405,7 +478,19 @@ func (cl *ChatLogger) WriteDebugInfo(logDir, debugInfo string) error {
 
 // SetInitialMessage 设置初始消息
 func (cl *ChatLogger) SetInitialMessage(msg string) {
+	if cl == nil || cl.sessionLog == nil {
+		return
+	}
 	cl.sessionLog.InitialMessage = truncateUTF8Bytes(msg, chatLogContentMaxBytes)
+}
+
+// SetRuntimeSessionMetadata links diagnostics to the durable conversation.
+func (cl *ChatLogger) SetRuntimeSessionMetadata(sessionID, title string) {
+	if cl == nil || cl.sessionLog == nil {
+		return
+	}
+	cl.sessionLog.RuntimeSessionID = strings.TrimSpace(sessionID)
+	cl.sessionLog.Title = truncateUTF8Bytes(strings.Join(strings.Fields(title), " "), 512)
 }
 
 // EndSession 结束会话

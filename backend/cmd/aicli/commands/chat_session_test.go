@@ -843,11 +843,13 @@ func TestRestoreChatStateFromRuntimeSessionRestoresRouteTransparency(t *testing.
 		sessionmeta.FallbackUsed:             true,
 		sessionmeta.FallbackReason:           "route_policy",
 	}
+	runtimeSession.UpdateTitle("Restored diagnostic title")
 	session := &ChatSession{
 		ProviderName:    "canonical-provider",
 		Model:           "canonical-model",
 		ReasoningEffort: "high",
 		PermissionMode:  runtimepolicy.ModeDefault,
+		Logger:          NewChatLogger("canonical-provider", "openai", "canonical-model", false, ""),
 	}
 
 	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
@@ -863,6 +865,9 @@ func TestRestoreChatStateFromRuntimeSessionRestoresRouteTransparency(t *testing.
 	}
 	if !session.FallbackUsed || session.FallbackReason != "route_policy" || len(session.RouteWarnings) != 1 {
 		t.Fatalf("unexpected restored route decision metadata: %+v", session)
+	}
+	if session.Logger.sessionLog.RuntimeSessionID != runtimeSession.ID || session.Logger.sessionLog.Title != "Restored diagnostic title" {
+		t.Fatalf("expected restored session metadata to sync to chat log, got %+v", session.Logger.sessionLog)
 	}
 }
 

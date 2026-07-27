@@ -761,7 +761,7 @@ func (s *Session) titleSourceContent() string {
 			if !strings.EqualFold(strings.TrimSpace(msg.Role), role) {
 				continue
 			}
-			if content := strings.TrimSpace(msg.Content); content != "" {
+			if content := strings.TrimSpace(msg.Content); content != "" && !shouldIgnoreDerivedTitleContent(content) {
 				return content
 			}
 		}
@@ -771,7 +771,7 @@ func (s *Session) titleSourceContent() string {
 		if isInstructionMessageRole(msg.Role) || strings.EqualFold(strings.TrimSpace(msg.Role), "tool") {
 			continue
 		}
-		if content := strings.TrimSpace(msg.Content); content != "" {
+		if content := strings.TrimSpace(msg.Content); content != "" && !shouldIgnoreDerivedTitleContent(content) {
 			return content
 		}
 	}
@@ -789,11 +789,15 @@ func isInstructionMessageRole(role string) bool {
 }
 
 func shouldRepairLegacyDerivedTitle(title string) bool {
-	if strings.TrimSpace(title) == "" {
+	return shouldIgnoreDerivedTitleContent(title)
+}
+
+func shouldIgnoreDerivedTitleContent(content string) bool {
+	if strings.TrimSpace(content) == "" {
 		return false
 	}
 
-	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(title)), " "))
+	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(content)), " "))
 	switch {
 	case strings.HasPrefix(normalized, "shell guidance:"):
 		return true
@@ -802,6 +806,14 @@ func shouldRepairLegacyDerivedTitle(title string) bool {
 	case strings.HasPrefix(normalized, "parallel tool guidance:"):
 		return true
 	case strings.HasPrefix(normalized, "detected operating system:"):
+		return true
+	case strings.HasPrefix(normalized, "running shell commands="):
+		return true
+	case strings.HasPrefix(normalized, "\u2022 running shell commands="):
+		return true
+	case strings.HasPrefix(normalized, "exit code:") && strings.Contains(normalized, " shell:"):
+		return true
+	case strings.HasPrefix(normalized, "runtime tool result contract:"):
 		return true
 	default:
 		return false

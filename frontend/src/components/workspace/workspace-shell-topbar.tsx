@@ -1,4 +1,5 @@
 import {
+  ChartNoAxesCombinedIcon,
   DatabaseIcon,
   HomeIcon,
   MessageSquarePlusIcon,
@@ -96,6 +97,13 @@ export function WorkspaceShellTopbar({
         >
           <TerminalSquareIcon size={16} />
           <span className="hidden sm:inline">{t("topbar.logs")}</span>
+        </Link>
+        <Link
+          to="/usage"
+          className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+        >
+          <ChartNoAxesCombinedIcon size={16} />
+          <span className="hidden lg:inline">{t("topbar.usage")}</span>
         </Link>
         <Link
           to="/runtime/config"
