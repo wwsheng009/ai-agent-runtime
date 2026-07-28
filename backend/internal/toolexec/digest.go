@@ -11,8 +11,9 @@ import (
 
 // ArgsDigest returns a stable fingerprint for tool_name + normalized arguments.
 // The digest is schema-agnostic and never hard-codes tool or command names.
+// Tool names are lower-cased so provider casing variants share one fingerprint.
 func ArgsDigest(toolName string, args map[string]interface{}) string {
-	name := strings.TrimSpace(toolName)
+	name := strings.ToLower(strings.TrimSpace(toolName))
 	normalized := normalizeForDigest(args)
 	payload := map[string]interface{}{
 		"tool": name,
@@ -45,7 +46,13 @@ func normalizeForDigest(value interface{}) interface{} {
 		sort.Strings(keys)
 		out := make(map[string]interface{}, len(keys))
 		for _, key := range keys {
-			out[key] = normalizeForDigest(typed[key])
+			normalized := normalizeForDigest(typed[key])
+			// Drop pure noise so optional null / "" args do not split one semantic
+			// call into multiple digests (models flip omit vs empty freely).
+			if isDigestNoiseValue(normalized) {
+				continue
+			}
+			out[key] = normalized
 		}
 		return out
 	case map[string]string:
@@ -59,6 +66,9 @@ func normalizeForDigest(value interface{}) interface{} {
 		sort.Strings(keys)
 		out := make(map[string]interface{}, len(keys))
 		for _, key := range keys {
+			if isDigestNoiseValue(typed[key]) {
+				continue
+			}
 			out[key] = typed[key]
 		}
 		return out
@@ -84,5 +94,20 @@ func normalizeForDigest(value interface{}) interface{} {
 		return nil
 	default:
 		return fmt.Sprint(typed)
+	}
+}
+
+// isDigestNoiseValue reports values that should not contribute to ArgsDigest.
+// Underscore-prefixed keys are filtered at the map level; this covers value noise.
+func isDigestNoiseValue(value interface{}) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case string:
+		return typed == ""
+	case map[string]interface{}:
+		return len(typed) == 0
+	default:
+		return false
 	}
 }

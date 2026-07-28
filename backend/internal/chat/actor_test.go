@@ -1650,6 +1650,22 @@ func TestSessionActorCompactForcesCompaction(t *testing.T) {
 		EventStore:   runtimeStore,
 	})
 	require.NoError(t, err)
+	stableTools := []types.ToolDefinition{{
+		Name:        "view",
+		Description: "read a file",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"file_path": map[string]interface{}{"type": "string"},
+			},
+			"required": []interface{}{"file_path"},
+		},
+	}}
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.StableToolSurface = cloneRuntimeToolDefinitions(stableTools)
+		state.StableToolSurfaceSet = true
+		return nil
+	}))
 
 	result, status, err := actor.Compact(ctx, compactruntime.ModeLocal)
 	require.NoError(t, err)
@@ -1657,6 +1673,10 @@ func TestSessionActorCompactForcesCompaction(t *testing.T) {
 	require.Equal(t, compactruntime.ModeLocal, result.Mode)
 	require.Equal(t, compactruntime.ModeLocal, status.Mode)
 	require.Equal(t, 1, provider.callCount)
+	require.Len(t, provider.requests, 1)
+	require.Equal(t, stableTools, provider.requests[0].Tools,
+		"manual compaction must retain the session-frozen tool surface")
+	require.Equal(t, "none", provider.requests[0].Metadata["tool_choice"])
 
 	updated, err := storage.Load(ctx, session.ID)
 	require.NoError(t, err)

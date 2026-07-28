@@ -137,7 +137,9 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 
 	// 添加 Function Call
 	if config.Functions != nil {
-		tools := mergeCodexTools(config.Functions, BuildMCPMetaTools())
+		// Functions already contains the session-frozen, protocol-converted tool
+		// surface. Do not inject, filter, or reorder tools again in the adapter.
+		tools := mergeCodexTools(config.Functions)
 		if len(tools) > 0 {
 			request["tools"] = tools
 			if config.ToolChoice != nil {
@@ -232,22 +234,34 @@ func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]inte
 		return "", nil
 	}
 
+	// Only the leading system/developer prefix becomes top-level instructions.
+	// Later developer/system turn-context messages must stay in input so goal /
+	// recall / todo snapshots can grow append-only without rewriting the
+	// provider instructions prefix used for prompt caching.
 	instructionParts := make([]string, 0, 2)
 	inputMessages := make([]map[string]interface{}, 0, len(messages))
+	inLeadingInstructions := true
 
 	for _, msg := range messages {
 		if outputItems := decodeSliceOfMaps(msg[codexResponseOutputItemsKey]); len(outputItems) > 0 {
+			inLeadingInstructions = false
 			inputMessages = append(inputMessages, msg)
 			continue
 		}
 
 		role, _ := msg["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
 		switch role {
 		case "system", "developer":
-			if content := extractCodexMessageText(msg); content != "" {
-				instructionParts = append(instructionParts, content)
+			if inLeadingInstructions {
+				if content := extractCodexMessageText(msg); content != "" {
+					instructionParts = append(instructionParts, content)
+				}
+				continue
 			}
+			inputMessages = append(inputMessages, msg)
 		default:
+			inLeadingInstructions = false
 			inputMessages = append(inputMessages, msg)
 		}
 	}
@@ -267,9 +281,10 @@ func IsValidCodexReasoningEffort(effort string) bool {
 }
 
 // convertMessagesToCodexInput 将 OpenAI 格式的 messages 转换为 Codex 格式的 input 数组。
-// system/developer messages are handled as top-level instructions in BuildRequest.
-// OpenAI 格式: {"role": "user/assistant/tool", "content": "...", "tool_calls": [...]}
-// Codex 格式: {"type": "message", "role": "user/assistant", "content": [...]}
+// Leading system/developer messages are handled as top-level instructions in
+// BuildRequest. Later system/developer turn-context messages stay in input.
+// OpenAI 格式: {"role": "user/assistant/tool/developer", "content": "...", "tool_calls": [...]}
+// Codex 格式: {"type": "message", "role": "user/assistant/developer", "content": [...]}
 //
 //	或 {"type": "function_call", "call_id": "...", "name": "...", "arguments": "..."}
 //	或 {"type": "function_call_output", "call_id": "...", "output": "..."}
@@ -285,9 +300,10 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 		}
 
 		role, _ := msg["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
 
 		switch role {
-		case "user", "assistant":
+		case "user", "assistant", "developer", "system":
 			content := extractCodexMessageText(msg)
 			reasoning := extractCodexReasoningText(msg)
 			if role == "assistant" {
@@ -298,19 +314,36 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 					input = append(input, buildCodexAssistantMessageItem(content))
 				}
 			} else {
+				// Codex input accepts developer messages. Map residual system
+				// turn-context items to developer so they stay in the append-only
+				// conversation stream instead of top-level instructions.
+				inputRole := role
+				if role == "system" {
+					inputRole = "developer"
+				}
 				inputItem := map[string]interface{}{
 					"type": "message",
-					"role": role,
+					"role": inputRole,
 				}
-				if parts := extractCodexUserInputParts(msg); len(parts) > 0 {
-					inputItem["content"] = parts
+				if role == "user" {
+					if parts := extractCodexUserInputParts(msg); len(parts) > 0 {
+						inputItem["content"] = parts
+					} else if content != "" {
+						inputItem["content"] = []map[string]interface{}{{
+							"type": "input_text",
+							"text": content,
+						}}
+					} else {
+						inputItem["content"] = []map[string]interface{}{}
+					}
 				} else if content != "" {
 					inputItem["content"] = []map[string]interface{}{{
 						"type": "input_text",
 						"text": content,
 					}}
 				} else {
-					inputItem["content"] = []map[string]interface{}{}
+					// Skip empty residual instruction messages.
+					continue
 				}
 				input = append(input, inputItem)
 			}
@@ -1451,19 +1484,11 @@ func codexToolItemKeys(item map[string]interface{}) []string {
 
 func mergeCodexTools(groups ...interface{}) []map[string]interface{} {
 	merged := make([]map[string]interface{}, 0)
-	seen := make(map[string]struct{})
 
 	for _, group := range groups {
 		for _, tool := range normalizeCodexTools(group) {
 			if tool == nil {
 				continue
-			}
-			name, _ := tool["name"].(string)
-			if name != "" {
-				if _, exists := seen[name]; exists {
-					continue
-				}
-				seen[name] = struct{}{}
 			}
 			merged = append(merged, tool)
 		}
@@ -1472,20 +1497,6 @@ func mergeCodexTools(groups ...interface{}) []map[string]interface{} {
 	if len(merged) == 0 {
 		return nil
 	}
-	sort.SliceStable(merged, func(i, j int) bool {
-		leftName := codexToolName(merged[i])
-		rightName := codexToolName(merged[j])
-		if leftName == rightName {
-			return false
-		}
-		if leftName == "" {
-			return false
-		}
-		if rightName == "" {
-			return true
-		}
-		return leftName < rightName
-	})
 	return merged
 }
 

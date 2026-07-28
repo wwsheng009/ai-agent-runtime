@@ -1,9 +1,13 @@
 package commands
 
-import "strings"
+import (
+	"strings"
+
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
 
 func stableSharedFunctionSelectionForRequest(session *ChatSession, _ string) (*aicliFunctionSelection, *skillExposureDetails) {
-	if session == nil || session.DisableTools {
+	if session == nil {
 		return nil, nil
 	}
 	catalog := ensureFunctionCatalog(session)
@@ -22,6 +26,16 @@ func stableSharedFunctionSelectionForRequest(session *ChatSession, _ string) (*a
 	session.stableSharedToolSessionID = sessionID
 	session.stableSharedToolSelection = cloneFunctionSelection(selection)
 	return cloneFunctionSelection(selection), nil
+}
+
+func stableSharedToolDefinitions(session *ChatSession) []runtimetypes.ToolDefinition {
+	if session == nil || session.stableSharedToolSelection == nil {
+		return nil
+	}
+	if !strings.EqualFold(session.stableSharedToolSessionID, currentRuntimeSessionID(session)) {
+		return nil
+	}
+	return toolDefinitionsFromSelection(session.stableSharedToolSelection)
 }
 
 func resetStableSharedToolSurface(session *ChatSession) {

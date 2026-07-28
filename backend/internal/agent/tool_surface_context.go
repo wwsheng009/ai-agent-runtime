@@ -44,6 +44,20 @@ func TurnToolSurfaceSnapshotFromContext(ctx context.Context) (TurnToolSurfaceSna
 	return snapshot, true
 }
 
+// frozenTurnToolSurface returns the already-frozen turn tool surface when one
+// exists. Compact callers use this to keep the same tools prefix as chat.
+func frozenTurnToolSurface(ctx context.Context) []types.ToolDefinition {
+	snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx)
+	if !ok || snapshot == nil {
+		return nil
+	}
+	tools, cached, err := snapshot.LoadTurnToolSurface(ctx)
+	if err != nil || !cached || len(tools) == 0 {
+		return nil
+	}
+	return cloneToolDefinitions(tools)
+}
+
 func ensureTurnToolSurfaceSnapshot(ctx context.Context) context.Context {
 	if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
 		return ctx

@@ -816,7 +816,7 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 		segments = append(segments, goalSeg)
 	}
 
-	// Reference diagnostics: model · provider · Context N% · cwd · project · branch · window · in · out · Fast
+	// Reference diagnostics: model · provider · Context N% · cwd · [project] · branch · window · in · out · Fast
 	if model := chatSurfaceModelStatusSegment(session); model.full != "" {
 		segments = append(segments, model)
 	}
@@ -826,10 +826,15 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 	if contextSeg := chatSurfaceContextUsedStatusSegment(session); contextSeg.full != "" {
 		segments = append(segments, contextSeg)
 	}
-	if cwdSeg := chatSurfaceDirectoryStatusSegment(session); cwdSeg.full != "" {
+	cwdSeg := chatSurfaceDirectoryStatusSegment(session)
+	if cwdSeg.full != "" {
 		segments = append(segments, cwdSeg)
 	}
-	if projectSeg := chatSurfaceProjectStatusSegment(session); projectSeg.full != "" {
+	// Project is only useful when it adds identity beyond the cwd label. At the
+	// repo root, basename(cwd) == project and the status bar would otherwise
+	// render the same name twice (e.g. "ai-agent-runtime · ai-agent-runtime").
+	if projectSeg := chatSurfaceProjectStatusSegment(session); projectSeg.full != "" &&
+		!chatStatusProjectRedundantWithDirectory(cwdSeg, projectSeg) {
 		segments = append(segments, projectSeg)
 	}
 	if branchSeg := chatSurfaceGitBranchStatusSegment(session); branchSeg.full != "" {
@@ -1224,6 +1229,38 @@ func chatSurfaceDirectoryStatusSegment(session *ChatSession) chatStatusSegment {
 		full:    cwd,
 		compact: compactChatStatusDirectory(cwd),
 	}
+}
+
+// chatStatusProjectRedundantWithDirectory reports whether the project segment
+// would visually duplicate the directory segment. Keep the directory segment
+// (it can expand to a full path when width allows) and drop the project name.
+func chatStatusProjectRedundantWithDirectory(cwdSeg, projectSeg chatStatusSegment) bool {
+	project := strings.TrimSpace(projectSeg.full)
+	if project == "" {
+		return true
+	}
+	projectCompact := strings.TrimSpace(projectSeg.compact)
+	if cwdCompact := strings.TrimSpace(cwdSeg.compact); cwdCompact != "" {
+		if strings.EqualFold(cwdCompact, project) ||
+			(projectCompact != "" && strings.EqualFold(cwdCompact, projectCompact)) {
+			return true
+		}
+	}
+	cwdFull := strings.TrimSpace(cwdSeg.full)
+	if cwdFull == "" {
+		return false
+	}
+	base := filepath.Base(filepath.Clean(cwdFull))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return false
+	}
+	if strings.EqualFold(base, project) {
+		return true
+	}
+	if projectCompact != "" && strings.EqualFold(base, projectCompact) {
+		return true
+	}
+	return false
 }
 
 func chatSurfaceProjectStatusSegment(session *ChatSession) chatStatusSegment {

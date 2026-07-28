@@ -23,6 +23,12 @@ type gatewayTestResourceManager struct {
 	results     []gatewayTestRecordedResult
 }
 
+type gatewaySequenceResourceManager struct {
+	selected    []*SelectedResource
+	selectCalls int
+	results     []gatewayTestRecordedResult
+}
+
 type gatewayTestRecordedResult struct {
 	success    bool
 	statusCode int
@@ -45,6 +51,26 @@ func (m *gatewayTestResourceManager) RecordResult(selected *SelectedResource, su
 	m.results = append(m.results, record)
 }
 
+func (m *gatewaySequenceResourceManager) SelectResource(retryInfo RetryInfo) (*SelectedResource, error) {
+	if len(m.selected) == 0 {
+		return nil, fmt.Errorf("no selected resource")
+	}
+	index := m.selectCalls
+	if index >= len(m.selected) {
+		index = len(m.selected) - 1
+	}
+	m.selectCalls++
+	return m.selected[index], nil
+}
+
+func (m *gatewaySequenceResourceManager) RecordResult(selected *SelectedResource, success bool, err error, statusCode int, latencyMs int64) {
+	record := gatewayTestRecordedResult{success: success, statusCode: statusCode}
+	if err != nil {
+		record.err = err.Error()
+	}
+	m.results = append(m.results, record)
+}
+
 func TestBuildGatewayProviderURLDedupesVersionPrefixInBaseURL(t *testing.T) {
 	got := buildGatewayProviderURL(&ProviderResource{
 		BaseURL: "https://api.example.com/v1",
@@ -59,7 +85,7 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 		{Name: "bash", Description: "执行 Shell 命令", Parameters: map[string]interface{}{"type": "object"}},
 	}
 
-	got := client.convertTools(tools, "codex", "", nil, true, false)
+	got := client.convertTools(tools, "codex", "", nil, false, false)
 	if got == nil {
 		t.Fatal("expected tools, got nil")
 	}
@@ -67,8 +93,8 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected []map[string]interface{}, got %T", got)
 	}
-	if len(toolList) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(toolList))
+	if len(toolList) != 1 {
+		t.Fatalf("expected only the caller tool without converter injection, got %d", len(toolList))
 	}
 	if toolList[0]["name"] != "bash" {
 		t.Fatalf("expected bash, got %v", toolList[0]["name"])
@@ -79,9 +105,6 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 	}
 	if params["type"] != "object" {
 		t.Fatalf("expected type=object, got %v", params["type"])
-	}
-	if toolList[1]["name"] != "list_mcp_resources" {
-		t.Fatalf("expected list_mcp_resources, got %v", toolList[1]["name"])
 	}
 }
 
@@ -113,6 +136,177 @@ func TestGatewayClient_ConvertTools_CodexAddsImageGenerationWhenModelCapabilityA
 		}
 	}
 	assert.True(t, sawImageGeneration, "expected image_generation native tool in %#v", toolList)
+}
+
+func TestGatewayClientCall_FallbackScopesCacheKeyToFinalWireToolGeneration(t *testing.T) {
+	var bodies []map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies = append(bodies, body)
+		if len(bodies) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"temporary native-image route failure"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_cache_scope","model":"gpt-5.4"}}`,
+			"",
+			"event: response.output_item.added",
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`,
+			"",
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","output_index":0,"delta":"ok"}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"id":"resp_cache_scope","status":"completed","stop_reason":"end_turn"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	enabled := true
+	disabled := false
+	nativeCapability := map[string]agentconfig.ModelCapabilitySpec{
+		"gpt-5.4": {
+			InputModalities: []string{"text", "image"},
+			NativeTools: agentconfig.NativeToolCapabilities{
+				ImageGeneration: true,
+			},
+		},
+	}
+	rm := &gatewaySequenceResourceManager{selected: []*SelectedResource{
+		{
+			Provider: &ProviderResource{
+				Name:                  "codex-native-image",
+				Type:                  "codex",
+				BaseURL:               server.URL,
+				EnableImageGeneration: &enabled,
+				ModelCapabilities:     nativeCapability,
+			},
+			KeyValue: "test-key",
+			Model:    "gpt-5.4",
+		},
+		{
+			Provider: &ProviderResource{
+				Name:                  "codex-local-image-tool",
+				Type:                  "codex",
+				BaseURL:               server.URL,
+				EnableImageGeneration: &disabled,
+				ModelCapabilities:     nativeCapability,
+			},
+			KeyValue: "test-key",
+			Model:    "gpt-5.4",
+		},
+	}}
+	client := NewGatewayClient(rm, "gpt-5.4")
+	client.SetMaxRetries(2)
+
+	response, err := client.Call(context.Background(), &LLMRequest{
+		Model:  "gpt-5.4",
+		Stream: true,
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "generate an image",
+		}},
+		Tools: []types.ToolDefinition{
+			{Name: "view", Description: "read a file", Parameters: map[string]interface{}{"type": "object"}},
+			{Name: "openai_image_generate", Description: "generate an image", Parameters: map[string]interface{}{"type": "object"}},
+		},
+		Metadata: map[string]interface{}{"prompt_cache_key": "session-cache-generation"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	require.Len(t, bodies, 2)
+
+	firstKey, _ := bodies[0]["prompt_cache_key"].(string)
+	secondKey, _ := bodies[1]["prompt_cache_key"].(string)
+	require.NotEmpty(t, firstKey)
+	require.NotEmpty(t, secondKey)
+	assert.NotEqual(t, firstKey, secondKey, "wire tool generation changes must create a new cache key")
+	assert.True(t, strings.HasPrefix(firstKey, "gw_"))
+	assert.True(t, strings.HasPrefix(secondKey, "gw_"))
+
+	containsTool := func(body map[string]interface{}, predicate func(map[string]interface{}) bool) bool {
+		tools, _ := body["tools"].([]interface{})
+		for _, raw := range tools {
+			if tool, ok := raw.(map[string]interface{}); ok && predicate(tool) {
+				return true
+			}
+		}
+		return false
+	}
+	assert.True(t, containsTool(bodies[0], func(tool map[string]interface{}) bool {
+		return tool["type"] == "image_generation"
+	}))
+	assert.False(t, containsTool(bodies[0], func(tool map[string]interface{}) bool {
+		return tool["name"] == "openai_image_generate"
+	}))
+	assert.False(t, containsTool(bodies[1], func(tool map[string]interface{}) bool {
+		return tool["type"] == "image_generation"
+	}))
+	assert.True(t, containsTool(bodies[1], func(tool map[string]interface{}) bool {
+		return tool["name"] == "openai_image_generate"
+	}))
+}
+
+func TestScopeGatewayPromptCacheKey_IsStableForSameToolsAndIgnoresToolChoice(t *testing.T) {
+	selected := &SelectedResource{Provider: &ProviderResource{
+		Name:    "codex-stable",
+		Type:    "codex",
+		BaseURL: "https://api.example.test",
+	}}
+	toolsA := []map[string]interface{}{{
+		"type":        "function",
+		"name":        "view",
+		"description": "read a file",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"description": "file path", "type": "string"},
+			},
+		},
+	}}
+	toolsB := []map[string]interface{}{{
+		"parameters": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string", "description": "file path"},
+			},
+			"type": "object",
+		},
+		"description": "read a file",
+		"name":        "view",
+		"type":        "function",
+	}}
+	normal := map[string]interface{}{
+		"prompt_cache_key": "session-stable",
+		"tools":            toolsA,
+		"tool_choice":      "auto",
+	}
+	compact := map[string]interface{}{
+		"prompt_cache_key": "session-stable",
+		"tools":            toolsB,
+		"tool_choice":      "none",
+	}
+
+	scopeGatewayPromptCacheKey(normal, selected, "codex", "gpt-5.4")
+	scopeGatewayPromptCacheKey(compact, selected, "codex", "gpt-5.4")
+	assert.Equal(t, normal["prompt_cache_key"], compact["prompt_cache_key"])
+
+	changed := map[string]interface{}{
+		"prompt_cache_key": "session-stable",
+		"tools": []map[string]interface{}{{
+			"type":        "function",
+			"name":        "view",
+			"description": "changed description",
+			"parameters":  toolsA[0]["parameters"],
+		}},
+	}
+	scopeGatewayPromptCacheKey(changed, selected, "codex", "gpt-5.4")
+	assert.NotEqual(t, normal["prompt_cache_key"], changed["prompt_cache_key"])
 }
 
 func TestGatewayClient_ConvertTools_CodexDoesNotAddImageGenerationWhenProviderDisabled(t *testing.T) {

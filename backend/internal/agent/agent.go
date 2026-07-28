@@ -104,7 +104,7 @@ type Result struct {
 	// not met after recovery attempts (or recovery was disabled).
 	CompletionSatisfied *bool `json:"completion_satisfied,omitempty"`
 	// CompletionRecoveryTurns is how many recovery turns were injected.
-	CompletionRecoveryTurns int                `json:"completion_recovery_turns,omitempty"`
+	CompletionRecoveryTurns int                 `json:"completion_recovery_turns,omitempty"`
 	Contract                *agentresult.Result `json:"result_contract,omitempty"`
 }
 
@@ -550,10 +550,10 @@ func (a *Agent) buildRequest(prompt string, history []types.Message, includeProm
 		})
 	}
 	populatePromptCacheMetadata(req.Metadata, contextValues)
+	req.History = mergeConfiguredSystemPrompt(req.History, a.config.SystemPrompt)
 	if includePromptInHistory {
 		req.AddToHistory(*types.NewUserMessage(prompt))
 	}
-	req.History = mergeConfiguredSystemPrompt(req.History, a.config.SystemPrompt)
 	return req
 }
 

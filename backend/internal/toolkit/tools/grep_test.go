@@ -5030,11 +5030,75 @@ func TestGrepTool_InvalidLookaroundRegexSuggestsPCRE2(t *testing.T) {
 }
 
 func TestLooksLikePCREOnlyPattern(t *testing.T) {
-	if !looksLikePCREOnlyPattern(`(?!foo)` ) {
+	if !looksLikePCREOnlyPattern(`(?!foo)`) {
 		t.Fatal("expected negative lookahead to be PCRE-only")
 	}
 	if looksLikePCREOnlyPattern(`foo.*bar`) {
 		t.Fatal("plain RE2 pattern should not be flagged")
+	}
+}
+
+func TestGrepTool_BraceIncludeAutoExpands(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\nconst Target = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.ts"), []byte("export const Target = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "c.txt"), []byte("Target should be ignored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist // force builtin path through normalizeGlobPatterns
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "Target",
+		"path":    tmpDir,
+		"include": "*.{go,ts}",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if result.Metadata["unsupported_brace_pattern"] == true {
+		t.Fatalf("auto-expanded include should not be unsupported, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "a.go") || !strings.Contains(result.Content, "b.ts") {
+		t.Fatalf("expected matches in a.go and b.ts, got %q", result.Content)
+	}
+	if strings.Contains(result.Content, "c.txt") {
+		t.Fatalf("did not expect c.txt match, got %q", result.Content)
+	}
+}
+
+func TestNormalizeGlobPatterns_ExpandsBrace(t *testing.T) {
+	got := normalizeGlobPatterns([]grepGlobPattern{{pattern: "*.{go,ts}"}, {pattern: "*.md"}})
+	if len(got) != 3 {
+		t.Fatalf("expected 3 patterns after brace expand, got %#v", got)
+	}
+	if got[0].pattern != "*.go" || got[1].pattern != "*.ts" || got[2].pattern != "*.md" {
+		t.Fatalf("unexpected expanded patterns: %#v", got)
+	}
+}
+
+func TestSplitCommaSeparatedPatterns_PreservesBrace(t *testing.T) {
+	got := splitCommaSeparatedPatterns("*.{go,ts}")
+	if len(got) != 1 || got[0] != "*.{go,ts}" {
+		t.Fatalf("expected brace pattern kept whole, got %#v", got)
+	}
+	got = splitCommaSeparatedPatterns("*.{go,ts},*.md")
+	if len(got) != 2 || got[0] != "*.{go,ts}" || got[1] != "*.md" {
+		t.Fatalf("expected brace + md, got %#v", got)
+	}
+	got = splitCommaSeparatedPatterns("*.go,*.ts")
+	if len(got) != 2 || got[0] != "*.go" || got[1] != "*.ts" {
+		t.Fatalf("expected plain comma split, got %#v", got)
 	}
 }
 
@@ -5064,14 +5128,37 @@ func TestGrepBuildResult_UnsupportedBraceGlobEmptyRecovery(t *testing.T) {
 	}
 }
 
-func TestGrepOptionsHasUnsupportedBraceGlob(t *testing.T) {
-	if !grepOptionsHasUnsupportedBraceGlob(&grepOptions{include: "*.{go,ts}"}) {
-		t.Fatal("include brace should be detected")
+func TestGrepBuildResult_ExpandedBraceDoesNotFlagUnsupported(t *testing.T) {
+	opts := &grepOptions{
+		include: "*.{go,ts}",
+		includeSpecs: []grepGlobPattern{
+			{pattern: "*.go"},
+			{pattern: "*.ts"},
+		},
 	}
+	result := buildGrepResult(opts, nil, 0, false, nil)
+	if result == nil || !result.Success {
+		t.Fatalf("expected empty success, got %#v", result)
+	}
+	if result.Metadata["unsupported_brace_pattern"] == true {
+		t.Fatalf("expanded brace must not set unsupported_brace_pattern: %#v", result.Metadata)
+	}
+	if strings.Contains(result.Content, "brace") {
+		t.Fatalf("expanded brace empty result must not append residual brace hint, got %q", result.Content)
+	}
+}
+
+func TestGrepOptionsHasUnsupportedBraceGlob(t *testing.T) {
 	if !grepOptionsHasUnsupportedBraceGlob(&grepOptions{
 		excludeSpecs: []grepGlobPattern{{pattern: "**/*.{js,ts}"}},
 	}) {
-		t.Fatal("excludeSpecs brace should be detected")
+		t.Fatal("residual excludeSpecs brace should be detected")
+	}
+	if grepOptionsHasUnsupportedBraceGlob(&grepOptions{
+		include:      "*.{go,ts}", // original request may remain available for metadata
+		includeSpecs: []grepGlobPattern{{pattern: "*.go"}, {pattern: "*.ts"}},
+	}) {
+		t.Fatal("successfully expanded specs must not be reported as unsupported")
 	}
 	if grepOptionsHasUnsupportedBraceGlob(&grepOptions{include: "*.go", exclude: "*.tmp"}) {
 		t.Fatal("plain globs must not look like brace expansions")

@@ -29,6 +29,57 @@ func TestToolDefinitionsFingerprintIsOrderSensitive(t *testing.T) {
 	require.NotEqual(t, fingerprint, ToolDefinitionsFingerprint([]types.ToolDefinition{first, second}))
 }
 
+func TestToolDefinitionsFingerprintTracksSchemaAndWireMetadata(t *testing.T) {
+	base := []types.ToolDefinition{{
+		Name:        "apply_patch",
+		Description: "Apply a patch",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"patch": map[string]interface{}{"type": "string", "description": "patch text"},
+			},
+			"required":             []interface{}{"patch"},
+			"additionalProperties": false,
+		},
+		Metadata: map[string]interface{}{
+			"type":   "custom",
+			"format": map[string]interface{}{"type": "grammar", "syntax": "lark", "definition": "start: /.+/"},
+		},
+	}}
+	fingerprint := ToolDefinitionsFingerprint(base)
+	require.NotEmpty(t, fingerprint)
+
+	equivalent := []types.ToolDefinition{{
+		Description: "Apply a patch",
+		Name:        "apply_patch",
+		Metadata: map[string]interface{}{
+			"format": map[string]interface{}{"definition": "start: /.+/", "syntax": "lark", "type": "grammar"},
+			"type":   "custom",
+		},
+		Parameters: map[string]interface{}{
+			"additionalProperties": false,
+			"required":             []interface{}{"patch"},
+			"properties": map[string]interface{}{
+				"patch": map[string]interface{}{"description": "patch text", "type": "string"},
+			},
+			"type": "object",
+		},
+	}}
+	require.Equal(t, fingerprint, ToolDefinitionsFingerprint(equivalent), "map insertion order must not affect the fingerprint")
+
+	changedSchema := cloneToolDefinitions(base)
+	changedSchema[0].Parameters["required"] = []interface{}{}
+	require.NotEqual(t, fingerprint, ToolDefinitionsFingerprint(changedSchema))
+
+	changedMetadata := cloneToolDefinitions(base)
+	changedMetadata[0].Metadata["format"].(map[string]interface{})["definition"] = "start: /[a-z]+/"
+	require.NotEqual(t, fingerprint, ToolDefinitionsFingerprint(changedMetadata))
+
+	changedName := cloneToolDefinitions(base)
+	changedName[0].Name = "apply_diff"
+	require.NotEqual(t, fingerprint, ToolDefinitionsFingerprint(changedName))
+}
+
 func TestBuildToolSurfaceEligibilityKeyTracksPermissionPolicyAndCatalog(t *testing.T) {
 	catalog := []types.ToolDefinition{
 		{Name: "view", Description: "View a file"},

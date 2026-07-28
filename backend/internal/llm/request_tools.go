@@ -10,8 +10,10 @@ const (
 )
 
 func metadataDisablesTools(metadata map[string]interface{}) bool {
-	if metadataBool(metadata[MetadataKeyDisableTools]) {
-		return true
+	// Explicit disable_tools wins so compact can keep the chat tools prefix for
+	// prompt-cache reuse while still opting out of tool execution via tool_choice.
+	if raw, ok := metadata[MetadataKeyDisableTools]; ok {
+		return metadataBool(raw)
 	}
 	return strings.EqualFold(strings.TrimSpace(stringValue(metadata[MetadataKeyInternalOperation])), "compact")
 }

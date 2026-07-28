@@ -22,6 +22,7 @@ func ToolDefinitionsFingerprint(tools []types.ToolDefinition) string {
 		Name        string                 `json:"name,omitempty"`
 		Description string                 `json:"description,omitempty"`
 		Parameters  map[string]interface{} `json:"parameters,omitempty"`
+		Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	}
 	payload := make([]fingerprintTool, 0, len(tools))
 	for _, tool := range tools {
@@ -33,6 +34,7 @@ func ToolDefinitionsFingerprint(tools []types.ToolDefinition) string {
 			Name:        name,
 			Description: tool.Description,
 			Parameters:  tool.Parameters,
+			Metadata:    tool.Metadata,
 		})
 	}
 	if len(payload) == 0 {
@@ -46,12 +48,14 @@ func ToolDefinitionsFingerprint(tools []types.ToolDefinition) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-// BuildToolSurfaceEligibilityKey captures the inputs that authorize a durable
-// session-stable tool surface. When any of these change, StableToolSurface must
-// be discarded and re-frozen instead of reused across turns.
+// BuildToolSurfaceEligibilityKey captures diagnostics for the inputs that
+// selected a durable session-stable tool surface. A changed key does not mutate
+// an existing cache lane: permission/policy changes are enforced at execution
+// time, while provider/tool capability changes require an explicit new session
+// or cache generation before a new surface can be selected.
 //
-// Goal-specific projection is intentionally excluded: session stability is for
-// schema continuity, while per-turn goal projection only applies on first freeze.
+// Goal-specific projection is intentionally excluded because it is only an
+// input to the first generation's selection.
 func BuildToolSurfaceEligibilityKey(permissionMode string, policy *ToolExecutionPolicy, catalog []types.ToolDefinition) string {
 	type keyPayload struct {
 		PermissionMode string                 `json:"permission_mode,omitempty"`

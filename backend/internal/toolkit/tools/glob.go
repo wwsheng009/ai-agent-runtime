@@ -37,7 +37,7 @@ func NewGlobTool() *GlobTool {
 		"properties": map[string]interface{}{
 			"pattern": map[string]interface{}{
 				"type":        "string",
-				"description": "文件名/路径 glob 模式，例如 *.go, **/*.yaml。仅支持 * ? [] 与 **；不支持 shell brace 展开（如 *.{go,ts}）。多扩展名请分多次调用，或改用 grep 的 include/glob 数组。glob 只匹配路径，不搜索文件内容；若要查内容请使用 grep。大小写不确定时用 case_insensitive=true。",
+				"description": "文件名/路径 glob 模式，例如 *.go, **/*.yaml。支持 * ? [] 与 **；常见 shell brace（如 *.{go,ts}）会自动展开为多个模式。多扩展名也可直接传 brace 或分多次调用。glob 只匹配路径，不搜索文件内容；若要查内容请使用 grep。大小写不确定时用 case_insensitive=true。",
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
@@ -66,7 +66,7 @@ func NewGlobTool() *GlobTool {
 	return &GlobTool{
 		BaseTool: toolkit.NewBaseTool(
 			"glob",
-			"文件名/路径模式匹配搜索，不搜索文件内容。支持 * ? [] **，不支持 brace 展开（*.{go,ts}）。递归文件匹配优先用 rg --files；目录匹配、单层匹配或 rg 不可用时回退内置遍历。大小写不确定时用 case_insensitive=true。",
+			"文件名/路径模式匹配搜索，不搜索文件内容。支持 * ? [] **；常见 shell brace（*.{go,ts}）会自动展开。递归文件匹配优先用 rg --files；目录匹配、单层匹配或 rg 不可用时回退内置遍历。大小写不确定时用 case_insensitive=true。",
 			"1.0.0",
 			parameters,
 			true,
@@ -79,10 +79,10 @@ func NewGlobTool() *GlobTool {
 
 func (g *GlobTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindSearch,
-		runtimetypes.ToolMetadataReadOnlyKey:        true,
-		runtimetypes.ToolMetadataMutatesFSKey:       false,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindSearch,
+		runtimetypes.ToolMetadataReadOnlyKey:         true,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
@@ -151,7 +151,16 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	caseInsensitive, _ := resolveBoolParam(params, "case_insensitive", "ignore_case")
 
-	matches, truncated, engine, err := g.findMatches(ctx, resolvedSearchPath, pattern, searchPathInfo.IsDir(), limit, caseInsensitive)
+	expandedPatterns := expandShellBraceGlobs(pattern)
+	if len(expandedPatterns) == 0 {
+		expandedPatterns = []string{pattern}
+	}
+	braceExpanded := looksLikeUnsupportedBraceGlob(pattern) &&
+		(len(expandedPatterns) > 1 || expandedPatterns[0] != strings.TrimSpace(pattern))
+	// Residual brace that could not be expanded still needs recovery guidance.
+	braceUnsupported := looksLikeUnsupportedBraceGlob(pattern) && !braceExpanded
+
+	matches, truncated, engine, err := g.findMatchesMulti(ctx, resolvedSearchPath, expandedPatterns, searchPathInfo.IsDir(), limit, caseInsensitive)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -163,8 +172,8 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 格式化输出
 	var output string
 	braceHint := ""
-	if looksLikeUnsupportedBraceGlob(pattern) {
-		braceHint = "（检测到 shell brace 语法如 *.{a,b}；glob 不展开 brace。请分多次调用不同扩展名，或改用 grep include/glob 数组。）"
+	if braceUnsupported {
+		braceHint = "（检测到无法安全展开的 shell brace 语法如 *.{a,b}；请拆成多次 pattern 调用，或改用 grep include/glob 数组。）"
 	}
 	if len(matches) == 0 {
 		output = "未找到匹配项" + braceHint
@@ -187,15 +196,19 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		"limit_hit":        truncated,
 		"engine":           engine,
 	}
-	if braceHint != "" {
+	if braceExpanded {
+		metadata["brace_expanded"] = true
+		metadata["expanded_patterns"] = append([]string(nil), expandedPatterns...)
+	}
+	if braceUnsupported {
 		metadata["unsupported_brace_pattern"] = true
 	}
 	// True no-match success: stamp empty disposition for model recovery
 	// (broaden pattern / change path) without treating as hard failure.
 	if len(matches) == 0 && !truncated {
 		toolresult.MarkEmptySuccess(metadata)
-		if braceHint != "" {
-			metadata[toolresult.MetadataNextActionKey] = "glob 不支持 shell brace 展开（如 *.{go,ts}）。请拆成多次 pattern 调用（*.go、*.ts），或改用 toolkit grep 的 include/glob 数组。不要原样重试同一 brace pattern。"
+		if braceUnsupported {
+			metadata[toolresult.MetadataNextActionKey] = "glob 无法安全展开该 shell brace pattern（如过大或畸形 *.{go,ts}）。请拆成多次 pattern 调用（*.go、*.ts），或改用 toolkit grep 的 include/glob 数组。不要原样重试同一 brace pattern。"
 		}
 	}
 
@@ -205,6 +218,55 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		Content:    output,
 		Metadata:   metadata,
 	}, nil
+}
+
+// findMatchesMulti unions results across expanded brace patterns while
+// respecting the shared limit and de-duplicating paths.
+func (g *GlobTool) findMatchesMulti(ctx context.Context, resolvedSearchPath string, patterns []string, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, string, error) {
+	if len(patterns) == 0 {
+		return nil, false, "builtin", nil
+	}
+	if len(patterns) == 1 {
+		return g.findMatches(ctx, resolvedSearchPath, patterns[0], rootIsDir, limit, caseInsensitive)
+	}
+
+	matches := make([]string, 0, 16)
+	seen := make(map[string]struct{}, 16)
+	engine := "builtin"
+	for _, pattern := range patterns {
+		// Request one extra across every alternative so an exact limit from an
+		// early pattern does not falsely imply truncation when later patterns are empty.
+		requestLimit := 0
+		if limit > 0 {
+			requestLimit = limit + 1
+		}
+		part, partTruncated, partEngine, err := g.findMatches(ctx, resolvedSearchPath, pattern, rootIsDir, requestLimit, caseInsensitive)
+		if err != nil {
+			return nil, false, partEngine, err
+		}
+		if partEngine != "" {
+			engine = partEngine
+		}
+		for _, match := range part {
+			if _, ok := seen[match]; ok {
+				continue
+			}
+			seen[match] = struct{}{}
+			matches = append(matches, match)
+			if limit > 0 && len(matches) > limit {
+				return matches[:limit], true, engine, nil
+			}
+		}
+		if partTruncated {
+			// The child search omitted results. Ordinarily requestLimit guarantees
+			// enough returned rows to hit the shared limit; keep the flag defensive.
+			if limit > 0 && len(matches) >= limit {
+				return matches[:limit], true, engine, nil
+			}
+			return matches, true, engine, nil
+		}
+	}
+	return matches, false, engine, nil
 }
 
 func (g *GlobTool) findMatches(ctx context.Context, resolvedSearchPath, pattern string, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, string, error) {
@@ -617,6 +679,114 @@ func matchGlobPart(patternPart, pathPart string, caseInsensitive bool) (bool, er
 
 func hasGlobMeta(pattern string) bool {
 	return strings.ContainsAny(pattern, "*?[")
+}
+
+const maxShellBraceExpansion = 64
+
+// expandShellBraceGlobs expands common shell brace patterns emitted by models
+// (e.g. *.{go,ts} -> [*.go *.ts]). Nested braces expand left-to-right.
+// Patterns without comma alternatives are returned unchanged.
+func expandShellBraceGlobs(pattern string) []string {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return nil
+	}
+	pending := []string{pattern}
+	expanded := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	for len(pending) > 0 {
+		current := pending[0]
+		pending = pending[1:]
+		open, close := findExpandableBraceRange(current)
+		if open < 0 {
+			if _, ok := seen[current]; ok {
+				continue
+			}
+			seen[current] = struct{}{}
+			expanded = append(expanded, current)
+			continue
+		}
+
+		alts := splitBraceAlternatives(current[open+1 : close])
+		if len(alts) <= 1 {
+			return []string{pattern}
+		}
+		// Fail closed instead of returning a partial expansion that silently
+		// omits file types. The caller can keep the legacy recovery guidance.
+		if len(expanded)+len(pending)+len(alts) > maxShellBraceExpansion {
+			return []string{pattern}
+		}
+		prefix := current[:open]
+		suffix := current[close+1:]
+		for _, alt := range alts {
+			pending = append(pending, prefix+alt+suffix)
+		}
+	}
+	if len(expanded) == 0 {
+		return []string{pattern}
+	}
+	return expanded
+}
+
+// findExpandableBraceRange returns the leftmost {...} span that contains a
+// top-level comma (shell-style alternatives). Nested braces are depth-tracked.
+func findExpandableBraceRange(pattern string) (open, close int) {
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] != '{' {
+			continue
+		}
+		depth := 1
+		hasComma := false
+		for j := i + 1; j < len(pattern); j++ {
+			switch pattern[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					if hasComma {
+						return i, j
+					}
+					// Single-item or empty braces: skip and keep scanning.
+					break
+				}
+			case ',':
+				if depth == 1 {
+					hasComma = true
+				}
+			}
+			if depth == 0 {
+				break
+			}
+		}
+	}
+	return -1, -1
+}
+
+func splitBraceAlternatives(inner string) []string {
+	if inner == "" {
+		return []string{""}
+	}
+	parts := make([]string, 0, 4)
+	start := 0
+	depth := 0
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, inner[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, inner[start:])
+	return parts
 }
 
 // looksLikeUnsupportedBraceGlob detects common shell brace expansions that

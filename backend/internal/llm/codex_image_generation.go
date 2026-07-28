@@ -88,6 +88,10 @@ func BuildToolDefinitionsForRequestWithImageOptions(
 		normalized = append(normalized, buildCodexNativeImageGenerationTool(imageOptions))
 	}
 
+	// Meta-tool injection is conditional on having a frozen callable surface.
+	// Native-only requests (for example image_generation) must not gain an
+	// unrelated function tool merely because a protocol adapter was selected.
+	includeMeta = includeMeta && len(tools) > 0
 	return buildToolDefinitionsForProtocol(normalized, protocol, includeMeta)
 }
 

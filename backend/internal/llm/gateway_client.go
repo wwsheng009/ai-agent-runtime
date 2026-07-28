@@ -3,6 +3,8 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -219,7 +221,7 @@ func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequ
 	}
 
 	resolvedModel := resolveGatewaySelectedModel(selected, model)
-	requestBody := buildCodexRemoteCompactRequest(resolvedModel, req.History)
+	requestBody := buildCodexRemoteCompactRequest(resolvedModel, req.History, req.SessionID)
 	url := resolveCompactURL(selected.Provider.BaseURL, selected.Provider.APIPath, (&adapter.CodexAdapter{}).GetAPIPath()+"/compact")
 	bodyBytes, marshalErr := json.Marshal(requestBody)
 	if marshalErr != nil {
@@ -438,6 +440,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
+	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -673,6 +676,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
+	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -1152,6 +1156,55 @@ func (c *GatewayClient) CheckHealth(ctx context.Context) error {
 
 	_, err := c.resourceManager.SelectResource(retryInfo)
 	return err
+}
+
+// scopeGatewayPromptCacheKey binds the caller's stable session key to the
+// selected provider generation and the final wire tool surface. Gateway retry
+// may select another protocol/model/capability set; that is an explicit cache
+// generation change rather than silently reusing one key with different tools.
+// tool_choice is intentionally excluded so compact requests (choice=none) keep
+// sharing the same tools prefix as normal turns.
+func scopeGatewayPromptCacheKey(requestBody map[string]interface{}, selected *SelectedResource, protocol, model string) {
+	if requestBody == nil {
+		return
+	}
+	original, _ := requestBody["prompt_cache_key"].(string)
+	original = strings.TrimSpace(original)
+	if original == "" {
+		return
+	}
+
+	providerName := ""
+	baseURL := ""
+	apiPath := ""
+	if selected != nil && selected.Provider != nil {
+		providerName = strings.TrimSpace(selected.Provider.Name)
+		baseURL = strings.TrimSpace(selected.Provider.BaseURL)
+		apiPath = strings.TrimSpace(selected.Provider.APIPath)
+	}
+	scope := struct {
+		Original     string      `json:"original"`
+		ProviderName string      `json:"provider_name,omitempty"`
+		BaseURL      string      `json:"base_url,omitempty"`
+		APIPath      string      `json:"api_path,omitempty"`
+		Protocol     string      `json:"protocol"`
+		Model        string      `json:"model"`
+		Tools        interface{} `json:"tools,omitempty"`
+	}{
+		Original:     original,
+		ProviderName: providerName,
+		BaseURL:      baseURL,
+		APIPath:      apiPath,
+		Protocol:     strings.ToLower(strings.TrimSpace(protocol)),
+		Model:        strings.TrimSpace(model),
+		Tools:        requestBody["tools"],
+	}
+	encoded, err := json.Marshal(scope)
+	if err != nil {
+		return
+	}
+	digest := sha256.Sum256(encoded)
+	requestBody["prompt_cache_key"] = "gw_" + hex.EncodeToString(digest[:])[:60]
 }
 
 // buildAdapterRequest 构建 Adapter 请求

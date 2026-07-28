@@ -622,12 +622,15 @@ func TestGlobTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
 	}
 }
 
-func TestGlobTool_UnsupportedBracePatternEmptyRecovery(t *testing.T) {
+func TestGlobTool_BracePatternAutoExpands(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "b.ts"), []byte("export {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "c.txt"), []byte("skip\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -640,20 +643,24 @@ func TestGlobTool_UnsupportedBracePatternEmptyRecovery(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result == nil || !result.Success {
-		t.Fatalf("expected empty success for brace pattern, got %#v", result)
+		t.Fatalf("expected success for brace pattern, got %#v", result)
 	}
-	if result.Metadata[toolresult.MetadataEmptyResultKey] != true {
-		t.Fatalf("expected empty_result=true, got %#v", result.Metadata)
+	if result.Metadata["brace_expanded"] != true {
+		t.Fatalf("expected brace_expanded metadata, got %#v", result.Metadata)
 	}
-	if result.Metadata["unsupported_brace_pattern"] != true {
-		t.Fatalf("expected unsupported_brace_pattern metadata, got %#v", result.Metadata)
+	if result.Metadata["unsupported_brace_pattern"] == true {
+		t.Fatalf("auto-expanded brace should not be marked unsupported, got %#v", result.Metadata)
 	}
-	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
-	if !strings.Contains(next, "brace") && !strings.Contains(next, "*.go") {
-		t.Fatalf("expected brace recovery next_action, got %q", next)
+	files, _ := result.Metadata["files"].([]string)
+	if len(files) != 2 {
+		t.Fatalf("expected 2 matches (a.go, b.ts), got %#v content=%q", files, result.Content)
 	}
-	if !strings.Contains(result.Content, "brace") && !strings.Contains(result.Content, "{") {
-		t.Fatalf("expected brace hint in content, got %q", result.Content)
+	joined := strings.Join(files, "\n")
+	if !strings.Contains(joined, "a.go") || !strings.Contains(joined, "b.ts") {
+		t.Fatalf("expected a.go and b.ts in matches, got %#v", files)
+	}
+	if strings.Contains(joined, "c.txt") {
+		t.Fatalf("did not expect c.txt, got %#v", files)
 	}
 }
 
@@ -666,5 +673,39 @@ func TestLooksLikeUnsupportedBraceGlob(t *testing.T) {
 	}
 	if looksLikeUnsupportedBraceGlob("*.go") || looksLikeUnsupportedBraceGlob("{alone}") || looksLikeUnsupportedBraceGlob("") {
 		t.Fatal("plain patterns must not look like brace expansions")
+	}
+}
+
+func TestExpandShellBraceGlobs(t *testing.T) {
+	got := expandShellBraceGlobs("*.{go,ts}")
+	if len(got) != 2 || got[0] != "*.go" || got[1] != "*.ts" {
+		t.Fatalf("expected [*.go *.ts], got %#v", got)
+	}
+	got = expandShellBraceGlobs("**/*.{js,ts,tsx}")
+	if len(got) != 3 || got[0] != "**/*.js" || got[1] != "**/*.ts" || got[2] != "**/*.tsx" {
+		t.Fatalf("expected three expanded patterns, got %#v", got)
+	}
+	got = expandShellBraceGlobs("src/{a,b}/*.{go,ts}")
+	want := map[string]bool{
+		"src/a/*.go": true,
+		"src/a/*.ts": true,
+		"src/b/*.go": true,
+		"src/b/*.ts": true,
+	}
+	if len(got) != 4 {
+		t.Fatalf("expected 4 nested expansions, got %#v", got)
+	}
+	for _, item := range got {
+		if !want[item] {
+			t.Fatalf("unexpected expansion %q in %#v", item, got)
+		}
+	}
+	got = expandShellBraceGlobs("*.go")
+	if len(got) != 1 || got[0] != "*.go" {
+		t.Fatalf("plain pattern should pass through, got %#v", got)
+	}
+	got = expandShellBraceGlobs("{alone}")
+	if len(got) != 1 || got[0] != "{alone}" {
+		t.Fatalf("single-item brace should pass through, got %#v", got)
 	}
 }

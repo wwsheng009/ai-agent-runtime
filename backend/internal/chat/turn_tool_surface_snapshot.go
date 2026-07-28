@@ -52,75 +52,15 @@ func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context
 		return nil, false, nil
 	}
 
-	storedBinding := strings.TrimSpace(state.StableToolSurfaceBinding)
 	tools := cloneRuntimeToolDefinitions(state.StableToolSurface)
-	completionRequirement := ""
-	if state.CurrentRunMeta != nil {
-		completionRequirement = strings.TrimSpace(state.CurrentRunMeta.CompletionRequirement)
-	}
-	if completionRequirement == "" && state.AmbientRunMeta != nil {
-		completionRequirement = strings.TrimSpace(state.AmbientRunMeta.CompletionRequirement)
-	}
 	s.actor.mu.RUnlock()
 
-	// Legacy states without a binding keep reusing the stable surface until the
-	// next freeze rewrites them with an eligibility key. One exception is an old
-	// impossible completion surface: complete_task must not keep a cache which
-	// contains neither of its terminal outcome tools after resume/upgrade.
-	if storedBinding == "" {
-		if legacyCompletionSurfaceMissingOutcome(completionRequirement, tools) {
-			if err := s.actor.updateState(ctx, func(state *RuntimeState) error {
-				if state == nil || !state.StableToolSurfaceSet || strings.TrimSpace(state.StableToolSurfaceBinding) != "" {
-					return nil
-				}
-				if !legacyCompletionSurfaceMissingOutcome(completionRequirement, state.StableToolSurface) {
-					return nil
-				}
-				clearStableToolSurface(state)
-				state.UpdatedAt = time.Now().UTC()
-				return nil
-			}); err != nil {
-				return nil, false, err
-			}
-			return nil, false, nil
-		}
-		return tools, true, nil
-	}
-
-	currentBinding := s.currentEligibilityKey(ctx)
-	if currentBinding == "" || currentBinding == storedBinding {
-		return tools, true, nil
-	}
-
-	// Policy / MCP / permission changed since the surface was frozen: drop the
-	// durable cache so the next think step re-freezes under the new binding.
-	if err := s.actor.updateState(ctx, func(state *RuntimeState) error {
-		if state == nil || !state.StableToolSurfaceSet {
-			return nil
-		}
-		if strings.TrimSpace(state.StableToolSurfaceBinding) != storedBinding {
-			return nil
-		}
-		clearStableToolSurface(state)
-		state.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		return nil, false, err
-	}
-	return nil, false, nil
-}
-
-func legacyCompletionSurfaceMissingOutcome(requirement string, tools []types.ToolDefinition) bool {
-	if !agent.RequiresCompleteTask(requirement) {
-		return false
-	}
-	for _, tool := range tools {
-		switch strings.ToLower(strings.TrimSpace(tool.Name)) {
-		case "report_task_outcome", "block_current_task":
-			return false
-		}
-	}
-	return true
+	// Session-stable tool schemas are immutable for a prompt-cache lane.
+	// Permission / policy / MCP changes are enforced at execution time; compact
+	// keeps the same surface and disables calls via tool_choice rather than
+	// starting a tool-schema epoch. Capability upgrades become visible only in a
+	// new session or an explicitly-created cache generation.
+	return tools, true, nil
 }
 
 func (s *runtimeTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context, tools []types.ToolDefinition) error {
@@ -180,14 +120,4 @@ func resetFrozenTurnTools(state *RuntimeState) {
 	}
 	state.FrozenTurnTools = nil
 	state.FrozenTurnToolsSet = false
-}
-
-func clearStableToolSurface(state *RuntimeState) {
-	if state == nil {
-		return
-	}
-	state.StableToolSurface = nil
-	state.StableToolSurfaceSet = false
-	state.StableToolSurfaceBinding = ""
-	state.StableToolSurfaceFingerprint = ""
 }

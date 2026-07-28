@@ -22,6 +22,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -1973,6 +1974,10 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 	require.True(t, ok, "expected context_preflight metadata map, got %T", rawPreflight)
 	require.Equal(t, true, preflight["active_turn_prompt_only"])
 	require.Equal(t, true, preflight["active_turn_compacted"])
+	// Active-turn replay compaction is an intentional cache epoch break: the third
+	// request may rewrite earlier tool traffic, so exact-prefix reuse ends here.
+	require.Equal(t, true, preflight["prompt_cache_epoch_break"])
+	require.Equal(t, "active_turn_replay_compaction", preflight["prompt_cache_epoch_reason"])
 }
 
 func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t *testing.T) {
@@ -2112,7 +2117,9 @@ func TestReActLoop_MidTurnSemanticCompactionContinuesWithoutReplacingDurableHist
 	require.True(t, result.Success)
 	require.Equal(t, "Fix completed after the semantic checkpoint.", result.Output)
 	require.Len(t, provider.requests, 3)
-	require.Empty(t, provider.requests[1].Tools, "semantic compaction must not expose execution tools")
+	require.NotEmpty(t, provider.requests[1].Tools, "semantic compaction should retain the frozen tools prefix for prompt cache")
+	require.Equal(t, false, provider.requests[1].Metadata[llm.MetadataKeyDisableTools])
+	require.Equal(t, "none", provider.requests[1].Metadata["tool_choice"])
 	require.Contains(t, provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content, "CONTEXT CHECKPOINT COMPACTION")
 
 	continuationPrompt := provider.requests[2].Messages
@@ -2271,7 +2278,7 @@ func TestMergeConfiguredSystemPromptReplacesExtendedPrefixWithoutDuplication(t *
 	merged := mergeConfiguredSystemPrompt(history, extended)
 	require.Len(t, merged, 2)
 	require.Equal(t, "system", merged[0].Role)
-	require.Equal(t, extended, merged[0].Content)
+	require.Equal(t, base, merged[0].Content)
 	require.Equal(t, "base", merged[0].Metadata.GetString("prompt_layer", ""))
 	require.Equal(t, base, history[0].Content, "source history must not be mutated")
 }
@@ -3438,15 +3445,15 @@ func TestDecodeSubagentTasksReadsRoutingFields(t *testing.T) {
 	tasks, err := decodeSubagentTasks(map[string]interface{}{
 		"agents": []interface{}{
 			map[string]interface{}{
-				"id":                   "child-1",
-				"role":                 "verifier",
-				"goal":                 "Verify the implementation.",
-				"difficulty":           "hard",
-				"difficulty_rationale": "Touches provider routing.",
-				"provider":             "local-strong",
-				"model":                "strong-model",
-				"thinking_effort":      "high",
-				"read_only":            true,
+				"id":                     "child-1",
+				"role":                   "verifier",
+				"goal":                   "Verify the implementation.",
+				"difficulty":             "hard",
+				"difficulty_rationale":   "Touches provider routing.",
+				"provider":               "local-strong",
+				"model":                  "strong-model",
+				"thinking_effort":        "high",
+				"read_only":              true,
 				"completion_requirement": "complete_task",
 			},
 		},
@@ -3591,10 +3598,10 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 		Depth:           1,
 	}, []SubagentTask{
 		{
-			ID:           "child-1",
-			Role:         "researcher",
-			Goal:         "Inspect the logs.",
-			ReadOnly:     true,
+			ID:       "child-1",
+			Role:     "researcher",
+			Goal:     "Inspect the logs.",
+			ReadOnly: true,
 			// Keep budget above subagent prompt size so preflight compact does not
 			// consume the only SequenceLLMProvider response before the model turn.
 			BudgetTokens: 8192,
@@ -4397,7 +4404,7 @@ func TestFreezeToolSurfaceForTurnUsesFixedPromptBudgetShare(t *testing.T) {
 	toolTokens := estimateToolDefinitionTokens(llmRuntime, tools)
 	require.Positive(t, toolTokens)
 
-	// Tight turn budget: tools alone exceed 1/4 of prompt budget, so freeze lean.
+	// Tight turn budget must not rewrite cache-relevant descriptions or schemas.
 	tightAgent := &Agent{config: &Config{
 		Name:  "test-agent",
 		Model: "test-model",
@@ -4407,9 +4414,9 @@ func TestFreezeToolSurfaceForTurnUsesFixedPromptBudgetShare(t *testing.T) {
 	}}
 	tightLoop := NewReActLoop(tightAgent, llmRuntime, &LoopReActConfig{})
 	frozenTight := tightLoop.freezeToolSurfaceForTurn(tools)
-	require.Less(t, estimateToolDefinitionTokens(llmRuntime, frozenTight), toolTokens)
+	require.Equal(t, tools, frozenTight)
 
-	// Large turn budget: keep full descriptions when tools fit the reserved share.
+	// A larger budget produces the same immutable surface.
 	wideAgent := &Agent{config: &Config{
 		Name:  "test-agent",
 		Model: "test-model",
@@ -4553,7 +4560,7 @@ func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata
 	assert.Equal(t, toolresult.SourceBroker, brokerSource)
 }
 
-func TestReActLoop_EmptyAllowlistHidesAndRejectsEveryToolSurface(t *testing.T) {
+func TestReActLoop_EmptyAllowlistPreservesSurfaceAndRejectsExecution(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
 			Name:         "test-agent",
@@ -4570,7 +4577,8 @@ func TestReActLoop_EmptyAllowlistHidesAndRejectsEveryToolSurface(t *testing.T) {
 	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
 	tools, err := loop.getAvailableTools(context.Background(), "try every tool", nil)
 	require.NoError(t, err)
-	require.Empty(t, tools, "empty allowlist must hide MCP, broker, and subagent tools")
+	require.NotEmpty(t, tools, "execution policy must not remove request definitions")
+	assert.Contains(t, toolDefinitionNames(tools), "write_file")
 
 	provider := &SequenceLLMProvider{
 		name: "test-provider",
@@ -5063,9 +5071,8 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 
 	tools, err := loop.getAvailableTools(context.Background(), "write file", nil)
 	require.NoError(t, err)
-	for _, tool := range tools {
-		assert.NotEqual(t, "write_file", tool.Name)
-	}
+	assert.Contains(t, toolDefinitionNames(tools), "write_file",
+		"execution policy must not dynamically remove tools from the frozen request surface")
 }
 
 func TestReActLoop_Run_HooksCanBlockAndObserveTools(t *testing.T) {
@@ -6110,6 +6117,21 @@ func TestDominantToolResultDisposition(t *testing.T) {
 		},
 	})
 	require.Equal(t, toolresult.OutcomeEmpty, empty)
+
+	mixed := dominantToolResultDisposition([]toolExecutionResult{
+		{
+			Envelope: &output.Envelope{Metadata: map[string]interface{}{
+				toolresult.MetadataOutcomeKey: toolresult.OutcomeEmpty,
+			}},
+		},
+		{
+			Error: "stale edit",
+			Envelope: &output.Envelope{Metadata: map[string]interface{}{
+				toolresult.MetadataOutcomeKey: toolresult.OutcomeFailed,
+			}},
+		},
+	})
+	require.Equal(t, toolresult.OutcomeFailed, mixed)
 }
 
 func TestDominantToolResultErrorCodePrefersStaleContext(t *testing.T) {
@@ -6149,4 +6171,170 @@ func TestDominantToolResultErrorCodePrefersStaleContext(t *testing.T) {
 		},
 	})
 	require.Equal(t, "STALE_CONTEXT", nestedOnly)
+}
+
+func TestReActLoop_PromptCacheExactPrefixAcrossToolSteps(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will inspect logs.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID:   "call-logs",
+					Name: "read_logs",
+					Args: map[string]interface{}{"path": "app.log"},
+				}},
+			},
+			{
+				Content: "I will re-read logs for confirmation.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID:   "call-logs-2",
+					Name: "read_logs",
+					Args: map[string]interface{}{"path": "app.log"},
+				}},
+			},
+			{Content: "Logs look healthy.", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	apiAgent := NewAgentWithLLM(&Config{
+		Name:         "prefix-agent",
+		Provider:     "test-provider",
+		Model:        "test-model",
+		MaxSteps:     4,
+		SystemPrompt: "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"active_goal_guidance": "Persistent goal.\n\nkeep the prefix stable",
+			// Keep Build free of budget-driven rewrites for this sequence test.
+			"context_max_prompt_tokens": 200000,
+			"context_max_messages":      200,
+		},
+	}, &MockSequenceMCPManager{output: "log line ok"}, llmRuntime)
+
+	// Inject a product-managed todo context message before the first model call
+	// by seeding history with only system/user; Build will append goal + freeze.
+	loop := NewReActLoop(apiAgent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        4,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.Run(context.Background(), "check application logs")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.GreaterOrEqual(t, len(provider.requests), 3)
+
+	requests := make([]*llm.LLMRequest, 0, len(provider.requests))
+	for _, req := range provider.requests {
+		if req == nil {
+			continue
+		}
+		if req.Metadata != nil {
+			if op, _ := req.Metadata["internal_operation"].(string); strings.EqualFold(strings.TrimSpace(op), "compact") {
+				continue
+			}
+		}
+		requests = append(requests, req)
+	}
+	require.GreaterOrEqual(t, len(requests), 3)
+
+	for step := 1; step < len(requests); step++ {
+		prev := requests[step-1]
+		curr := requests[step]
+		require.NotNil(t, prev)
+		require.NotNil(t, curr)
+		require.GreaterOrEqual(t, len(curr.Messages), len(prev.Messages), "step %d grew shorter", step)
+		require.Equal(t, prev.Messages, curr.Messages[:len(prev.Messages)], "request %d must keep previous messages as exact prefix", step)
+
+		// Tools surface must remain frozen across ordinary ReAct steps.
+		require.Equal(t, ToolDefinitionsFingerprint(prev.Tools), ToolDefinitionsFingerprint(curr.Tools))
+	}
+
+	// Snapshot must sit after the user message and before later tool traffic.
+	first := requests[0]
+	userIdx := -1
+	goalIdx := -1
+	for index, message := range first.Messages {
+		if message.Role == "user" && strings.Contains(message.Content, "check application logs") {
+			userIdx = index
+		}
+		if message.Metadata.GetString("context_stage", "") == "active_goal" {
+			goalIdx = index
+			require.True(t, message.Metadata.GetBool("context_snapshot", false))
+			require.Contains(t, message.Content, "keep the prefix stable")
+		}
+	}
+	require.GreaterOrEqual(t, userIdx, 0)
+	require.Greater(t, goalIdx, userIdx)
+
+	// Later requests must still keep the same frozen goal text in the same place.
+	for _, req := range requests[1:] {
+		require.Equal(t, first.Messages[goalIdx], req.Messages[goalIdx])
+	}
+
+	// Wire-level Codex assertion: instructions stay byte-stable and input grows
+	// by suffix only across ReAct steps (exact body prefix for prompt cache).
+	codexBodies := make([]map[string]interface{}, 0, len(requests))
+	codex := &llmadapter.CodexAdapter{}
+	for _, req := range requests {
+		protocolMessages := llm.RuntimeMessagesToProtocolMessages(req.Messages, "codex")
+		functions := make([]map[string]interface{}, 0, len(req.Tools))
+		for _, tool := range req.Tools {
+			functions = append(functions, map[string]interface{}{
+				"type":        "function",
+				"name":        tool.Name,
+				"description": tool.Description,
+				"parameters":  tool.Parameters,
+			})
+		}
+		body := codex.BuildRequest(llmadapter.RequestConfig{
+			Model:     "gpt-5.4",
+			Messages:  protocolMessages,
+			Stream:    false,
+			Functions: functions,
+			Metadata: map[string]interface{}{
+				"prompt_cache_key": "prefix-session",
+			},
+		})
+		codexBodies = append(codexBodies, body)
+	}
+	require.GreaterOrEqual(t, len(codexBodies), 3)
+
+	firstInstructions, _ := codexBodies[0]["instructions"].(string)
+	require.Equal(t, "You are a helpful assistant.", firstInstructions)
+	// Active goal is a frozen turn-context developer message and must stay in
+	// input (after the user message), never rewrite top-level instructions.
+	require.NotContains(t, firstInstructions, "keep the prefix stable")
+	require.Equal(t, "prefix-session", codexBodies[0]["prompt_cache_key"])
+
+	firstInput, okFirstInput := codexBodies[0]["input"].([]map[string]interface{})
+	require.True(t, okFirstInput)
+	foundGoalInInput := false
+	for _, item := range firstInput {
+		if item["role"] == "developer" {
+			contentJSON, _ := json.Marshal(item["content"])
+			if strings.Contains(string(contentJSON), "keep the prefix stable") {
+				foundGoalInInput = true
+				break
+			}
+		}
+	}
+	require.True(t, foundGoalInInput, "expected frozen goal developer item in codex input")
+
+	for step := 1; step < len(codexBodies); step++ {
+		prev := codexBodies[step-1]
+		curr := codexBodies[step]
+		require.Equal(t, prev["instructions"], curr["instructions"], "codex instructions must stay stable across step %d", step)
+		require.Equal(t, prev["prompt_cache_key"], curr["prompt_cache_key"])
+		require.Equal(t, prev["tools"], curr["tools"], "codex tools must stay frozen across step %d", step)
+
+		prevInput, okPrev := prev["input"].([]map[string]interface{})
+		currInput, okCurr := curr["input"].([]map[string]interface{})
+		require.True(t, okPrev && okCurr, "expected codex input arrays at step %d", step)
+		require.GreaterOrEqual(t, len(currInput), len(prevInput), "codex input shortened at step %d", step)
+		require.Equal(t, prevInput, currInput[:len(prevInput)], "codex input of request %d must be exact prefix of request %d", step, step+1)
+	}
 }

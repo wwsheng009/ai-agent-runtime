@@ -615,6 +615,12 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		}
 	}
 	applyLocalChatContextOptions(agentConfig, runtimeConfig)
+	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options["active_goal_guidance"] = guidance
+	}
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
 	apiAgent.SetSubagentScheduler(agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
@@ -706,6 +712,14 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 		ensureChatSystemPromptMessage(session)
 		if cfg := apiAgent.GetConfig(); cfg != nil {
 			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, workspaceRoot)
+			if cfg.Options == nil {
+				cfg.Options = make(map[string]interface{})
+			}
+			if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
+				cfg.Options["active_goal_guidance"] = guidance
+			} else {
+				delete(cfg.Options, "active_goal_guidance")
+			}
 		}
 		// Plan mode may recreate/mutate the engine; re-apply product overlay after it.
 		applyChatPlanModeToAgent(apiAgent, session, runtimeSession)

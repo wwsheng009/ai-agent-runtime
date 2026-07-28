@@ -166,14 +166,12 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 	var selection *aicliFunctionSelection
 	var exposureDetails *skillExposureDetails
 	var exposureReport *aicliFunctionExposureReport
-	if !session.DisableTools {
-		if catalog := ensureFunctionCatalog(session); catalog != nil && catalog.Registry() != nil {
-			selection, exposureDetails = stableSharedFunctionSelectionForRequest(session, prompt)
-			exposureReport = buildFunctionExposureReport(catalog, prompt, selection, exposureDetails)
-			if session.SkillsDebug {
-				beginDirectInteractiveOutput(session)
-				fmt.Printf("\n%s\n", formatSkillExposureDebug(exposureReport))
-			}
+	if catalog := ensureFunctionCatalog(session); catalog != nil && catalog.Registry() != nil {
+		selection, exposureDetails = stableSharedFunctionSelectionForRequest(session, prompt)
+		exposureReport = buildFunctionExposureReport(catalog, prompt, selection, exposureDetails)
+		if session.SkillsDebug {
+			beginDirectInteractiveOutput(session)
+			fmt.Printf("\n%s\n", formatSkillExposureDebug(exposureReport))
 		}
 	}
 
@@ -212,6 +210,14 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 	if isGoalContinuation {
 		historyCompactor = nil
 	}
+	toolLoopMetadata := buildToolLoopRequestMetadataFromExposureReport(exposureReport)
+	if session.DisableTools {
+		if toolLoopMetadata == nil {
+			toolLoopMetadata = make(map[string]interface{})
+		}
+		toolLoopMetadata[runtimellm.MetadataKeyDisableTools] = true
+		toolLoopMetadata["tool_choice"] = "none"
+	}
 
 	loopResult, err := executeToolLoop(ctx, runtimechatcore.ToolLoopRequest{
 		Prompt:                               prompt,
@@ -228,7 +234,7 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 		ModelCapabilityAutoCompactRatio:      promptBudget.ModelCapabilityAutoCompactRatio,
 		ModelCapabilityAutoCompactTokenLimit: promptBudget.ModelCapabilityAutoCompactTokenLimit,
 		HistoryCompactor:                     historyCompactor,
-		Metadata:                             buildToolLoopRequestMetadataFromExposureReport(exposureReport),
+		Metadata:                             toolLoopMetadata,
 		Stream:                               session.Stream,
 		Tools:                                toolDefinitionsFromSelection(selection),
 		Provider:                             provider,
@@ -420,6 +426,7 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		CountTokens:       llmRuntime.CountMessagesTokens,
 		ObservedTokens:    resolveChatContextSnapshotTokens(session, history),
 		HasObservedTokens: true,
+		Tools:             stableSharedToolDefinitions(session),
 	})
 	report := &sharedChatAutoCompactReport{
 		Result: result,
@@ -522,6 +529,7 @@ func buildSharedChatPromptPreflightCompactor(session *ChatSession, renderer *aic
 			CountTokens:       countSharedChatMessagesTokens,
 			ObservedTokens:    resolveChatContextSnapshotTokens(session, history),
 			HasObservedTokens: true,
+			Tools:             stableSharedToolDefinitions(session),
 		})
 		report := &sharedChatAutoCompactReport{
 			Result: result,

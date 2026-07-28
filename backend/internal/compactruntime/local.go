@@ -22,21 +22,31 @@ const (
 	localRetainedRecentMaxTokens   = 20000
 	localCompactDefaultMaxTokens   = 2048
 	localCompactMaxRequestBytes    = 1024 * 1024
-	localFallbackUserRunes         = 1600
-	localFallbackAssistantRunes    = 2000
-	localFallbackToolRequestRunes  = 800
+	localFallbackUserRunes         = 2200
+	localFallbackAssistantRunes    = 2200
+	localFallbackToolRequestRunes  = 1400
 	localFallbackToolRunes         = 3600
-	localFallbackFailureRunes      = 1200
+	localFallbackFailureRunes      = 1800
+	localFallbackConstraintRunes   = 1400
+	localFallbackReferenceRunes    = 1800
+	localFallbackRemainingRunes    = 1400
+	localFallbackDurableRunes      = 2200
 	localFallbackPriorSummaryRunes = 3600
 	localCompactionPrompt          = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+Use this structure when the information exists:
+1. Current goal / latest user objective
+2. Constraints, preferences, and hard requirements
+3. Key decisions and progress so far
+4. Critical references (paths, commands, IDs, evidence)
+5. Failures and pitfalls to avoid repeating
+6. Remaining work and concrete next steps
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`
+Rules:
+- Prefer durable facts over transient chatter.
+- Preserve exact paths, commands, identifiers, error text, and decisions when present.
+- Do not invent work that was not already in the history.
+- Be concise, structured, and continuation-ready.`
 )
 
 type LocalAdapter struct {
@@ -63,18 +73,32 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 	}
 
 	recentTokenLimit := localRecentTokenLimit(req, systemMessages, *summaryMessage, counter)
+	retainedDurable := selectCompactionDurableContext(nonSystemMessages, counter, recentTokenLimit)
+	recentHistoryTokenLimit := recentTokenLimit
+	if counter != nil {
+		recentHistoryTokenLimit -= counter(retainedDurable)
+		if recentHistoryTokenLimit <= 0 {
+			recentHistoryTokenLimit = 1
+		}
+	}
 	retainedRecent := selectCompactionRecentMessages(
 		nonSystemMessages,
 		req.KeepRecentMessages,
 		counter,
-		recentTokenLimit,
+		recentHistoryTokenLimit,
 	)
-	replacement := buildLocalReplacementHistory(systemMessages, retainedRecent, *summaryMessage)
+	retainedRecent = stripDurableContextMessages(retainedRecent)
+	replacement := buildLocalReplacementHistory(systemMessages, retainedRecent, retainedDurable, *summaryMessage)
 	if normalizedPhase(req.Phase) == PhaseMidTurn {
 		retainedUsers := selectCompactionUserMessages(nonSystemMessages, counter, recentTokenLimit)
-		replayTokenLimit := recentTokenLimit
+		durableTokenLimit := recentTokenLimit
 		if counter != nil {
-			replayTokenLimit -= counter(retainedUsers)
+			durableTokenLimit -= counter(retainedUsers)
+		}
+		retainedDurable := selectCompactionDurableContext(nonSystemMessages, counter, durableTokenLimit)
+		replayTokenLimit := durableTokenLimit
+		if counter != nil {
+			replayTokenLimit -= counter(retainedDurable)
 		}
 		retainedReplay := selectCompactionRecentToolReplay(
 			nonSystemMessages,
@@ -82,8 +106,9 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 			counter,
 			replayTokenLimit,
 		)
-		replacement = buildMidTurnReplacementHistory(systemMessages, retainedUsers, retainedReplay, *summaryMessage)
-		retainedRecent = append(cloneMessages(retainedUsers), cloneMessages(retainedReplay)...)
+		replacement = buildMidTurnReplacementHistory(systemMessages, retainedUsers, retainedDurable, retainedReplay, *summaryMessage)
+		retainedRecent = append(cloneMessages(retainedUsers), cloneMessages(retainedDurable)...)
+		retainedRecent = append(retainedRecent, cloneMessages(retainedReplay)...)
 	}
 
 	compactedMessages := len(nonSystemMessages) - len(retainedRecent)
@@ -255,37 +280,86 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 
 	userItems := make([]string, 0, 16)
 	priorSummaryItems := make([]string, 0, 4)
-	assistantItems := make([]string, 0, 24)
-	toolRequestItems := make([]string, 0, 12)
+	durableItems := make([]string, 0, 8)
+	decisionItems := make([]string, 0, 16)
+	progressItems := make([]string, 0, 24)
+	constraintItems := make([]string, 0, 12)
+	referenceItems := make([]string, 0, 20)
+	remainingItems := make([]string, 0, 12)
+	toolRequestItems := make([]string, 0, 16)
 	toolItems := make([]string, 0, 32)
-	failureItems := make([]string, 0, 12)
+	failureItems := make([]string, 0, 16)
 	toolNames := toolCallNamesByID(history)
 	for _, message := range history {
 		content := strings.TrimSpace(message.Content)
-		switch message.Role {
-		case "user":
-			stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
-			if strings.EqualFold(stage, "compaction") {
-				if content != "" {
-					priorSummaryItems = appendWithinRuneBudget(priorSummaryItems, summarizeCompactLine(content, 1200), 4, localFallbackPriorSummaryRunes)
-				}
-				continue
-			}
-			if stage != "" {
-				continue
-			}
+		stage := strings.ToLower(strings.TrimSpace(message.Metadata.GetString("context_stage", "")))
+		if stage == "compaction" {
 			if content != "" {
-				userItems = appendWithinRuneBudget(userItems, summarizeCompactLine(content, 260), 16, localFallbackUserRunes)
+				priorSummaryItems = appendWithinRuneBudget(priorSummaryItems, summarizeCompactLine(content, 1200), 4, localFallbackPriorSummaryRunes)
+			}
+			continue
+		}
+		if isDurableCompactStage(stage) {
+			if content != "" {
+				label := durableCompactStageLabel(stage)
+				durableItems = appendWithinRuneBudget(durableItems, label+": "+summarizeCompactLine(content, 420), 8, localFallbackDurableRunes)
+				for _, item := range extractCompactConstraintLines(content) {
+					constraintItems = appendWithinRuneBudget(constraintItems, item, 12, localFallbackConstraintRunes)
+				}
+				for _, item := range extractCompactRemainingLines(content) {
+					remainingItems = appendWithinRuneBudget(remainingItems, item, 12, localFallbackRemainingRunes)
+				}
+			}
+			continue
+		}
+		if stage != "" {
+			// Skip transient projections (workspace/recall/etc.); they are
+			// re-injected by context build after compact.
+			continue
+		}
+		switch message.Role {
+		case "user", "developer":
+			if content != "" {
+				userItems = appendWithinRuneBudget(userItems, summarizeCompactLine(content, 360), 16, localFallbackUserRunes)
+				for _, item := range extractCompactConstraintLines(content) {
+					constraintItems = appendWithinRuneBudget(constraintItems, item, 12, localFallbackConstraintRunes)
+				}
+				for _, item := range extractCompactRemainingLines(content) {
+					remainingItems = appendWithinRuneBudget(remainingItems, item, 12, localFallbackRemainingRunes)
+				}
+				for _, item := range extractCompactReferenceLinesFromText(content) {
+					referenceItems = appendWithinRuneBudget(referenceItems, item, 16, localFallbackReferenceRunes)
+				}
 			}
 		case "assistant":
 			if content != "" {
-				assistantItems = appendWithinRuneBudget(assistantItems, summarizeCompactLine(content, 260), 24, localFallbackAssistantRunes)
+				summary := summarizeCompactLine(content, 320)
+				if looksLikeCompactDecision(content) {
+					decisionItems = appendWithinRuneBudget(decisionItems, summary, 12, localFallbackAssistantRunes)
+				} else {
+					progressItems = appendWithinRuneBudget(progressItems, summary, 20, localFallbackAssistantRunes)
+				}
+				for _, item := range extractCompactConstraintLines(content) {
+					constraintItems = appendWithinRuneBudget(constraintItems, item, 12, localFallbackConstraintRunes)
+				}
+				for _, item := range extractCompactRemainingLines(content) {
+					remainingItems = appendWithinRuneBudget(remainingItems, item, 12, localFallbackRemainingRunes)
+				}
+				for _, item := range extractCompactReferenceLinesFromText(content) {
+					referenceItems = appendWithinRuneBudget(referenceItems, item, 16, localFallbackReferenceRunes)
+				}
+				if looksLikeCompactFailure(content) {
+					failureItems = appendWithinRuneBudget(failureItems, summary, 12, localFallbackFailureRunes)
+				}
 			}
 			if len(message.ToolCalls) > 0 {
 				names := make([]string, 0, len(message.ToolCalls))
 				for _, call := range message.ToolCalls {
 					if name := strings.TrimSpace(call.Name); name != "" {
 						names = append(names, name)
+					}
+					for _, item := range extractCompactReferenceLinesFromToolCall(call) {
+						referenceItems = appendWithinRuneBudget(referenceItems, item, 16, localFallbackReferenceRunes)
 					}
 				}
 				if len(names) > 0 {
@@ -294,18 +368,25 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 			}
 		case "tool":
 			if content != "" {
-				item := summarizeCompactLine(content, 300)
+				item := summarizeCompactLine(content, 360)
 				if name := toolNames[strings.TrimSpace(message.ToolCallID)]; name != "" {
 					item = name + ": " + item
 				}
 				toolItems = appendWithinRuneBudget(toolItems, item, 32, localFallbackToolRunes)
-				if toolErr := strings.TrimSpace(message.Metadata.GetString("tool_error", "")); toolErr != "" {
-					failure := summarizeCompactLine(toolErr, 300)
-					if name := toolNames[strings.TrimSpace(message.ToolCallID)]; name != "" {
-						failure = name + ": " + failure
-					}
-					failureItems = appendWithinRuneBudget(failureItems, failure, 12, localFallbackFailureRunes)
+				for _, itemRef := range extractCompactReferenceLinesFromText(content) {
+					referenceItems = appendWithinRuneBudget(referenceItems, itemRef, 16, localFallbackReferenceRunes)
 				}
+			}
+			toolErr := strings.TrimSpace(message.Metadata.GetString("tool_error", ""))
+			if toolErr == "" && looksLikeCompactFailure(content) {
+				toolErr = content
+			}
+			if toolErr != "" {
+				failure := summarizeCompactLine(toolErr, 360)
+				if name := toolNames[strings.TrimSpace(message.ToolCallID)]; name != "" {
+					failure = name + ": " + failure
+				}
+				failureItems = appendWithinRuneBudget(failureItems, failure, 12, localFallbackFailureRunes)
 			}
 		}
 	}
@@ -317,14 +398,32 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 		}
 	}
 	if len(userItems) > 0 {
-		lines = append(lines, "Recent user requests:")
+		lines = append(lines, "Current goal / recent user requests:")
 		for _, item := range userItems {
 			lines = append(lines, "- "+item)
 		}
 	}
-	if len(assistantItems) > 0 {
+	if len(durableItems) > 0 {
+		lines = append(lines, "Durable session context:")
+		for _, item := range durableItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(constraintItems) > 0 {
+		lines = append(lines, "Constraints and preferences:")
+		for _, item := range constraintItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(decisionItems) > 0 {
+		lines = append(lines, "Key decisions:")
+		for _, item := range decisionItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(progressItems) > 0 {
 		lines = append(lines, "Assistant progress:")
-		for _, item := range assistantItems {
+		for _, item := range progressItems {
 			lines = append(lines, "- "+item)
 		}
 	}
@@ -340,13 +439,26 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 			lines = append(lines, "- "+item)
 		}
 	}
+	if len(referenceItems) > 0 {
+		lines = append(lines, "Critical references:")
+		for _, item := range referenceItems {
+			lines = append(lines, "- "+item)
+		}
+	}
 	if len(failureItems) > 0 {
 		lines = append(lines, "Recent tool failures to account for:")
 		for _, item := range failureItems {
 			lines = append(lines, "- "+item)
 		}
 	}
-	lines = append(lines, "Next step: continue from the retained latest user request and use checkpoints or artifacts for full raw outputs when needed.")
+	if len(remainingItems) > 0 {
+		lines = append(lines, "Remaining work:")
+		for _, item := range remainingItems {
+			lines = append(lines, "- "+item)
+		}
+	} else {
+		lines = append(lines, "Next step: continue from the retained latest user request and use checkpoints or artifacts for full raw outputs when needed.")
+	}
 	return ensureSummaryHeading(strings.Join(lines, "\n"))
 }
 
@@ -368,21 +480,38 @@ func extractCompactSummaryText(response *llm.LLMResponse) string {
 }
 
 func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types.Message, maxTokens int, reasoningEffort string) *llm.LLMRequest {
+	tools := cloneToolDefinitions(req.Tools)
+	metadata := map[string]interface{}{
+		llm.MetadataKeyInternalOperation: "compact",
+		"compact_mode":                   ModeLocal,
+		"compact_phase":                  normalizedPhase(req.Phase),
+		// Keep local compact on the same Codex/OpenAI cache route as chat
+		// turns. session_id alone is usually enough for adapters, but set
+		// prompt_cache_key explicitly so other protocols/debug surfaces see it.
+		"session_id":       strings.TrimSpace(req.SessionID),
+		"prompt_cache_key": strings.TrimSpace(req.SessionID),
+	}
+	if len(tools) > 0 {
+		// Preserve the chat tools prefix for provider prompt-cache hits, but
+		// force tool_choice=none so the compact summary never executes tools.
+		metadata[llm.MetadataKeyDisableTools] = false
+		metadata[llm.MetadataKeyDisableMetaTools] = false
+		metadata["tool_choice"] = "none"
+		metadata["compact_tools_retained"] = true
+		metadata["compact_tool_count"] = len(tools)
+	} else {
+		metadata[llm.MetadataKeyDisableTools] = true
+		metadata[llm.MetadataKeyDisableMetaTools] = true
+	}
 	return &llm.LLMRequest{
 		Provider:        strings.TrimSpace(req.Provider),
 		Model:           strings.TrimSpace(req.Model),
 		Messages:        buildLocalCompactionRequest(systemMessages, history),
+		Tools:           tools,
 		MaxTokens:       maxTokens,
 		Temperature:     0,
 		ReasoningEffort: strings.TrimSpace(reasoningEffort),
-		Metadata: map[string]interface{}{
-			llm.MetadataKeyInternalOperation: "compact",
-			llm.MetadataKeyDisableTools:      true,
-			llm.MetadataKeyDisableMetaTools:  true,
-			"compact_mode":                   ModeLocal,
-			"compact_phase":                  normalizedPhase(req.Phase),
-			"session_id":                     strings.TrimSpace(req.SessionID),
-		},
+		Metadata:        metadata,
 	}
 }
 
@@ -462,14 +591,23 @@ func localCompactionRequestBudgetFailure(runtime *llm.LLMRuntime, request *llm.L
 	if err != nil {
 		return fmt.Sprintf("compact request could not be measured safely: %v", err)
 	}
-	if len(encoded) > localCompactMaxRequestBytes {
-		return fmt.Sprintf("compact request skipped because serialized input is %d bytes (limit %d)", len(encoded), localCompactMaxRequestBytes)
+	requestBytes := len(encoded)
+	toolSchemaTokens := 0
+	if len(request.Tools) > 0 {
+		if toolsEncoded, toolsErr := json.Marshal(request.Tools); toolsErr == nil {
+			requestBytes += len(toolsEncoded)
+			toolSchemaTokens = runtime.CountTokens(string(toolsEncoded))
+		}
+	}
+	if requestBytes > localCompactMaxRequestBytes {
+		return fmt.Sprintf("compact request skipped because serialized input is %d bytes (limit %d)", requestBytes, localCompactMaxRequestBytes)
 	}
 
 	inputTokens := runtime.CountMessagesTokens(request.Messages)
 	if serializedTokens := runtime.CountTokens(string(encoded)); serializedTokens > inputTokens {
 		inputTokens = serializedTokens
 	}
+	inputTokens += toolSchemaTokens
 	inputBudget := localCompactionInputBudget(runtime, request, threshold)
 	if inputBudget > 0 && inputTokens > inputBudget {
 		return fmt.Sprintf("compact request skipped because estimated input is %d tokens (budget %d)", inputTokens, inputBudget)
@@ -671,21 +809,29 @@ func flattenLocalRetentionUnits(units []localRetentionUnit) []types.Message {
 	return flattened
 }
 
-func buildLocalReplacementHistory(systemMessages, retainedRecent []types.Message, summaryMessage types.Message) []types.Message {
-	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedRecent)+1)
+func buildLocalReplacementHistory(systemMessages, retainedRecent, retainedDurable []types.Message, summaryMessage types.Message) []types.Message {
+	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedRecent)+len(retainedDurable)+1)
 	replacement = append(replacement, cloneMessages(systemMessages)...)
 	replacement = append(replacement, *summaryMessage.Clone())
+	// Place durable world-state after the summary and before retained raw
+	// history so the next turn can treat it as an authoritative prefix rather
+	// than reconstructing it from compacted prose alone.
+	replacement = append(replacement, cloneMessages(retainedDurable)...)
 	replacement = append(replacement, cloneMessages(retainedRecent)...)
 	return replacement
 }
 
 // Mid-turn replacement follows Codex's context-window shape: canonical
-// instructions, independently retained real user requests, recent complete
-// tool replay, and one latest semantic checkpoint as the final item.
-func buildMidTurnReplacementHistory(systemMessages, retainedUsers, retainedReplay []types.Message, summaryMessage types.Message) []types.Message {
-	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedUsers)+len(retainedReplay)+1)
+// instructions, independently retained real user requests, the latest durable
+// world-state snapshot, recent complete tool replay, and one latest semantic
+// checkpoint as the final item. Durable context remains between the user request
+// and its replay so the next context build can reuse it instead of reconstructing
+// authoritative state from compacted prose.
+func buildMidTurnReplacementHistory(systemMessages, retainedUsers, retainedDurable, retainedReplay []types.Message, summaryMessage types.Message) []types.Message {
+	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedUsers)+len(retainedDurable)+len(retainedReplay)+1)
 	replacement = append(replacement, cloneMessages(systemMessages)...)
 	replacement = append(replacement, cloneMessages(retainedUsers)...)
+	replacement = append(replacement, cloneMessages(retainedDurable)...)
 	replacement = append(replacement, cloneMessages(retainedReplay)...)
 	replacement = append(replacement, *summaryMessage.Clone())
 	return replacement
@@ -715,6 +861,114 @@ func isRealCompactionUserMessage(message types.Message) bool {
 		return false
 	}
 	return strings.TrimSpace(message.Metadata.GetString("context_stage", "")) == ""
+}
+
+// selectCompactionDurableContext keeps the newest authoritative projection for
+// each durable stage. Selection is priority-aware under pressure, while output
+// order follows the source history so turn semantics remain deterministic.
+func selectCompactionDurableContext(messages []types.Message, counter TokenCounter, maxTokens int) []types.Message {
+	if maxTokens <= 0 || len(messages) == 0 {
+		return nil
+	}
+	latest := make(map[string]int)
+	for index := len(messages) - 1; index >= 0; index-- {
+		stage := strings.ToLower(strings.TrimSpace(messages[index].Metadata.GetString("context_stage", "")))
+		if !isDurableCompactStage(stage) {
+			continue
+		}
+		if _, exists := latest[stage]; !exists {
+			latest[stage] = index
+		}
+	}
+	priorities := []string{"active_goal", "todo_state", "fact_ledger", "team", "project_memory", "observation"}
+	selectedIndexes := make(map[int]bool, len(latest))
+	selected := make([]types.Message, 0, len(latest))
+	for _, stage := range priorities {
+		index, exists := latest[stage]
+		if !exists {
+			continue
+		}
+		candidate := append(cloneMessages(selected), *messages[index].Clone())
+		if counter != nil && counter(candidate) > maxTokens {
+			continue
+		}
+		selected = candidate
+		selectedIndexes[index] = true
+	}
+	if len(selectedIndexes) == 0 {
+		return nil
+	}
+	ordered := make([]types.Message, 0, len(selectedIndexes))
+	for index := range messages {
+		if selectedIndexes[index] {
+			ordered = append(ordered, *messages[index].Clone())
+		}
+	}
+	return ordered
+}
+
+func stripDurableContextMessages(messages []types.Message) []types.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	filtered := make([]types.Message, 0, len(messages))
+	for _, message := range messages {
+		stage := strings.ToLower(strings.TrimSpace(message.Metadata.GetString("context_stage", "")))
+		if isDurableCompactStage(stage) {
+			continue
+		}
+		filtered = append(filtered, *message.Clone())
+	}
+	return filtered
+}
+
+func mergeDurableWorldState(phase string, source, replacement []types.Message, counter TokenCounter, maxTokens int) []types.Message {
+	durable := selectCompactionDurableContext(source, counter, maxTokens)
+	if len(durable) == 0 {
+		return cloneMessages(replacement)
+	}
+	result := stripDurableContextMessages(replacement)
+	insertAt := durableWorldStateInsertIndex(phase, result)
+	merged := make([]types.Message, 0, len(result)+len(durable))
+	merged = append(merged, cloneMessages(result[:insertAt])...)
+	merged = append(merged, cloneMessages(durable)...)
+	merged = append(merged, cloneMessages(result[insertAt:])...)
+	return merged
+}
+
+func durableWorldStateInsertIndex(phase string, messages []types.Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
+	if normalizedPhase(phase) == PhaseMidTurn {
+		lastUser := -1
+		for index, message := range messages {
+			if isRealCompactionUserMessage(message) {
+				lastUser = index
+			}
+		}
+		if lastUser >= 0 {
+			return lastUser + 1
+		}
+		// Keep provider checkpoint last when no real user remains.
+		for index := len(messages) - 1; index >= 0; index-- {
+			if isCompactionMessage(messages[index]) {
+				return index
+			}
+		}
+		return len(messages)
+	}
+	// Pre-turn: place durable world-state after the summary and before retained
+	// raw history, matching the local replacement shape.
+	for index, message := range messages {
+		if isCompactionMessage(message) {
+			return index + 1
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(messages[0].Role), "system") {
+		return 1
+	}
+	return 0
 }
 
 func selectCompactionRecentToolReplay(messages []types.Message, keepRecent int, counter TokenCounter, maxTokens int) []types.Message {
@@ -764,6 +1018,203 @@ func toolCallNamesByID(history []types.Message) map[string]string {
 		}
 	}
 	return names
+}
+
+func isDurableCompactStage(stage string) bool {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "active_goal", "todo_state", "team", "fact_ledger", "project_memory", "observation":
+		return true
+	default:
+		return false
+	}
+}
+
+func durableCompactStageLabel(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "active_goal":
+		return "active goal"
+	case "todo_state":
+		return "todos"
+	case "team":
+		return "team"
+	case "fact_ledger":
+		return "fact ledger"
+	case "project_memory":
+		return "project memory"
+	case "observation":
+		return "observations"
+	default:
+		return strings.TrimSpace(stage)
+	}
+}
+
+func looksLikeCompactDecision(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(lower, "decision:") ||
+		strings.Contains(lower, "conclusion:") ||
+		strings.Contains(lower, "most likely") ||
+		strings.Contains(lower, "we should") ||
+		strings.Contains(lower, "decided") ||
+		strings.Contains(lower, "root cause") ||
+		strings.Contains(lower, "结论") ||
+		strings.Contains(lower, "决定")
+}
+
+func looksLikeCompactFailure(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(lower, "failed") ||
+		strings.Contains(lower, "failure") ||
+		strings.Contains(lower, "error") ||
+		strings.Contains(lower, "denied") ||
+		strings.Contains(lower, "panic") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "traceback") ||
+		strings.Contains(lower, "exit code") ||
+		strings.Contains(lower, "失败") ||
+		strings.Contains(lower, "错误")
+}
+
+func extractCompactConstraintLines(text string) []string {
+	lines := splitCompactContentLines(text)
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "must ") ||
+			strings.Contains(lower, "must not") ||
+			strings.Contains(lower, "do not") ||
+			strings.Contains(lower, "don't") ||
+			strings.Contains(lower, "never ") ||
+			strings.Contains(lower, "only ") ||
+			strings.Contains(lower, "constraint") ||
+			strings.Contains(lower, "preference") ||
+			strings.Contains(lower, "require") ||
+			strings.Contains(lower, "必须") ||
+			strings.Contains(lower, "不要") ||
+			strings.Contains(lower, "禁止") ||
+			strings.Contains(lower, "只能") {
+			out = append(out, summarizeCompactLine(line, 280))
+		}
+	}
+	return out
+}
+
+func extractCompactRemainingLines(text string) []string {
+	lines := splitCompactContentLines(text)
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "todo") ||
+			strings.Contains(lower, "next step") ||
+			strings.Contains(lower, "remaining") ||
+			strings.Contains(lower, "still need") ||
+			strings.Contains(lower, "follow up") ||
+			strings.Contains(lower, "待办") ||
+			strings.Contains(lower, "下一步") ||
+			strings.Contains(lower, "剩余") ||
+			strings.HasPrefix(lower, "- [ ]") ||
+			strings.HasPrefix(lower, "* [ ]") {
+			out = append(out, summarizeCompactLine(line, 280))
+		}
+	}
+	return out
+}
+
+func extractCompactReferenceLinesFromToolCall(call types.ToolCall) []string {
+	name := strings.TrimSpace(call.Name)
+	if len(call.Args) == 0 {
+		return nil
+	}
+	keys := []string{
+		"path", "file_path", "filepath", "file", "cwd", "workdir",
+		"command", "cmd", "url", "query", "pattern", "target",
+		"session_id", "team_id", "goal_id", "id",
+	}
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value, ok := call.Args[key]
+		if !ok || value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if text == "" {
+			continue
+		}
+		item := key + "=" + summarizeCompactLine(text, 220)
+		if name != "" {
+			item = name + ": " + item
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func extractCompactReferenceLinesFromText(text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	candidates := make([]string, 0, 8)
+	for _, token := range strings.Fields(text) {
+		token = strings.Trim(token, "`,\"'()[]{}<>")
+		if token == "" {
+			continue
+		}
+		if looksLikeCompactReferenceToken(token) {
+			candidates = append(candidates, summarizeCompactLine(token, 220))
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	// Keep a small unique set so noise from long dumps does not dominate.
+	seen := make(map[string]struct{}, len(candidates))
+	out := make([]string, 0, 8)
+	for _, item := range candidates {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
+func looksLikeCompactReferenceToken(token string) bool {
+	if strings.Contains(token, "://") {
+		return true
+	}
+	if strings.ContainsAny(token, `/\`) && (strings.Contains(token, ".") || strings.Contains(token, "/") || strings.Contains(token, `\`)) {
+		// Paths and path-like identifiers.
+		if len(token) >= 3 {
+			return true
+		}
+	}
+	if strings.HasPrefix(token, "evt_") || strings.HasPrefix(token, "goal_") || strings.HasPrefix(token, "session-") || strings.HasPrefix(token, "team-") {
+		return true
+	}
+	return false
+}
+
+func splitCompactContentLines(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	raw := strings.Split(text, "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		if trimmed := strings.TrimSpace(text); trimmed != "" {
+			return []string{trimmed}
+		}
+	}
+	return out
 }
 
 func appendWithinRuneBudget(items []string, item string, maxItems, maxRunes int) []string {
@@ -1024,6 +1475,33 @@ func cloneMessages(messages []types.Message) []types.Message {
 	cloned := make([]types.Message, len(messages))
 	for index := range messages {
 		cloned[index] = *messages[index].Clone()
+	}
+	return cloned
+}
+
+func cloneToolDefinitions(tools []types.ToolDefinition) []types.ToolDefinition {
+	if len(tools) == 0 {
+		return nil
+	}
+	cloned := make([]types.ToolDefinition, len(tools))
+	for index, tool := range tools {
+		cloned[index] = tool
+		if len(tool.Parameters) > 0 {
+			encoded, err := json.Marshal(tool.Parameters)
+			if err == nil {
+				var parameters map[string]interface{}
+				if json.Unmarshal(encoded, &parameters) == nil {
+					cloned[index].Parameters = parameters
+				}
+			}
+		}
+		if len(tool.Metadata) > 0 {
+			metadata := make(map[string]interface{}, len(tool.Metadata))
+			for key, value := range tool.Metadata {
+				metadata[key] = value
+			}
+			cloned[index].Metadata = metadata
+		}
 	}
 	return cloned
 }

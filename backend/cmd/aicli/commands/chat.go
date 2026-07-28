@@ -437,14 +437,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	registerExitCleanup(finalCleanup)
 	defer runExitCleanup()
 
-	if shouldShowChatSessionStartupPreamble(opts) {
-		presentChatSession(session)
-		if persistenceState.loadedRuntimeSession != nil && shouldPrintChatSessionPreamble(session) && hasVisibleChatHistory(session) {
-			beginDirectInteractiveOutput(session)
-			fmt.Println()
-			printVisibleChatHistory(session, "已加载历史会话")
-		}
-	}
+	// Welcome/meta preamble stays TUI-gated, but restored history must still
+	// replay so `aicli resume <id>` / `aicli chat --session` match in-chat
+	// `/resume` visibility even when interactive TUI is enabled.
+	presentChatStartupSession(session, opts, persistenceState.loadedRuntimeSession)
 	startupTiming.mark("ready")
 	startupTiming.flush(opts)
 
@@ -921,6 +917,43 @@ func chatRuntimeExecutorDescriptor(executor aicliChatExecutor) (aicliRuntimeExec
 
 func shouldPrintChatSessionPreamble(session *ChatSession) bool {
 	return session != nil && !session.NoInteractive && !session.JSONOutput
+}
+
+// presentChatStartupSession renders startup session context after bootstrap.
+//
+// Welcome banner and full session meta remain TUI-gated via
+// shouldShowChatSessionStartupPreamble. Restored conversation history is
+// independent of that gate so CLI resume (`aicli resume`, `aicli chat
+// --session`, `--resume`) still shows the transcript the user is continuing.
+func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) {
+	if session == nil || opts == nil {
+		return
+	}
+
+	showPreamble := shouldShowChatSessionStartupPreamble(opts)
+	if showPreamble {
+		presentChatSession(session)
+	}
+	if loadedRuntimeSession == nil || !shouldPrintChatSessionPreamble(session) {
+		return
+	}
+
+	// Legacy/plain interactive path already printed full meta via presentChatSession;
+	// only append the transcript when visible history exists.
+	if showPreamble {
+		if !hasVisibleChatHistory(session) {
+			return
+		}
+		beginDirectInteractiveOutput(session)
+		fmt.Println()
+		printVisibleChatHistory(session, "已加载历史会话")
+		return
+	}
+
+	// TUI path: skip welcome/meta preamble, but still surface resume status +
+	// history so CLI resume matches in-chat `/resume` visibility.
+	beginDirectInteractiveOutput(session)
+	printResumeSuccess(session)
 }
 
 type chatResponsePayload struct {

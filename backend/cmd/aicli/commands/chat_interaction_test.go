@@ -1586,6 +1586,96 @@ func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *te
 	}
 }
 
+func TestChatStatusProjectRedundantWithDirectory(t *testing.T) {
+	t.Parallel()
+
+	same := chatStatusSegment{
+		full:    filepath.Clean(`E:\projects\ai\ai-agent-runtime`),
+		compact: "ai-agent-runtime",
+	}
+	project := chatStatusSegment{full: "ai-agent-runtime", compact: "ai-agent-runtime"}
+	if !chatStatusProjectRedundantWithDirectory(same, project) {
+		t.Fatalf("expected project to be redundant when equal to cwd basename")
+	}
+
+	nested := chatStatusSegment{
+		full:    filepath.Clean(`E:\projects\ai\ai-agent-runtime\backend`),
+		compact: "backend",
+	}
+	if chatStatusProjectRedundantWithDirectory(nested, project) {
+		t.Fatalf("expected nested cwd to keep distinct project segment")
+	}
+	if chatStatusProjectRedundantWithDirectory(chatStatusSegment{}, project) {
+		t.Fatalf("expected project to remain when cwd segment is empty")
+	}
+	if !chatStatusProjectRedundantWithDirectory(same, chatStatusSegment{}) {
+		t.Fatalf("expected empty project to be treated as redundant")
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_DedupesProjectWhenSameAsDirectory(t *testing.T) {
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "main" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
+	root := filepath.Clean(`E:\projects\ai\ai-agent-runtime`)
+	session := &ChatSession{
+		Model:       "gpt-5.4-code",
+		ProfileRoot: root,
+		ProfileName: "ai-agent-runtime",
+	}
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 200)
+
+	dup := "ai-agent-runtime" + chatSurfaceStatusSeparator + "ai-agent-runtime"
+	if strings.Contains(status, dup) {
+		t.Fatalf("expected project segment deduped when equal to cwd, got %q", status)
+	}
+	if !strings.Contains(status, "ai-agent-runtime") {
+		t.Fatalf("expected cwd name still present once, got %q", status)
+	}
+	if !strings.Contains(status, "main") {
+		t.Fatalf("expected branch still present, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_KeepsDistinctProjectWhenCwdNested(t *testing.T) {
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "feat/nested" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
+	workspace := t.TempDir()
+	repoRoot := filepath.Join(workspace, "ai-agent-runtime")
+	nested := filepath.Join(repoRoot, "backend", "cmd")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("os.Mkdir .git: %v", err)
+	}
+
+	session := &ChatSession{
+		Model:       "gpt-5.4-code",
+		ProfileRoot: nested,
+		// ProfileName intentionally empty so project resolves from git root.
+	}
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 220)
+
+	if !strings.Contains(status, "ai-agent-runtime") {
+		t.Fatalf("expected project name from git root, got %q", status)
+	}
+	// Compact cwd should be the leaf directory when not equal to project.
+	if !strings.Contains(status, "cmd") && !strings.Contains(status, nested) {
+		t.Fatalf("expected nested cwd segment, got %q", status)
+	}
+	// Order is cwd then project when both are kept.
+	if !strings.Contains(status, "cmd"+chatSurfaceStatusSeparator+"ai-agent-runtime") &&
+		!strings.Contains(status, nested+chatSurfaceStatusSeparator+"ai-agent-runtime") {
+		t.Fatalf("expected distinct cwd · project pair, got %q", status)
+	}
+}
+
 func TestBuildChatSurfaceStatusLine_RespectsWidthAndKeepsRequiredState(t *testing.T) {
 	queue := newChatInputQueue(nil)
 	queue.routeLine(chatQueuedInput{Text: "first\n", Source: "stdin"})

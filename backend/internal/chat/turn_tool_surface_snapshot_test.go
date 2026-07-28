@@ -48,7 +48,7 @@ func TestRuntimeTurnToolSurfaceSnapshotReusesStableSurfaceAcrossTurns(t *testing
 	require.NotEmpty(t, actor.State().StableToolSurfaceBinding)
 }
 
-func TestRuntimeTurnToolSurfaceSnapshotInvalidatesAcrossTurnsWhenBindingChanges(t *testing.T) {
+func TestRuntimeTurnToolSurfaceSnapshotKeepsStableSurfaceAcrossBindingChanges(t *testing.T) {
 	runtimeAgent := runtimeagent.NewAgent(&runtimeagent.Config{Name: "test-agent"}, nil)
 	actor := &SessionActor{
 		id:    "session-binding-change",
@@ -79,16 +79,16 @@ func TestRuntimeTurnToolSurfaceSnapshotInvalidatesAcrossTurnsWhenBindingChanges(
 
 	tools, cached, err := actor.turnToolSurfaceSnapshot("turn-2").LoadTurnToolSurface(context.Background())
 	require.NoError(t, err)
-	require.False(t, cached)
-	require.Nil(t, tools)
+	require.True(t, cached)
+	require.Equal(t, []string{"view"}, []string{tools[0].Name})
 	state = actor.State()
-	require.False(t, state.StableToolSurfaceSet)
-	require.Empty(t, state.StableToolSurface)
-	require.Empty(t, state.StableToolSurfaceBinding)
-	require.Empty(t, state.StableToolSurfaceFingerprint)
+	require.True(t, state.StableToolSurfaceSet)
+	require.Equal(t, []string{"view"}, []string{state.StableToolSurface[0].Name})
+	require.NotEmpty(t, state.StableToolSurfaceBinding)
+	require.NotEmpty(t, state.StableToolSurfaceFingerprint)
 }
 
-func TestRuntimeTurnToolSurfaceSnapshotInvalidatesLegacyCompletionSurfaceWithoutOutcomeTool(t *testing.T) {
+func TestRuntimeTurnToolSurfaceSnapshotKeepsLegacySurfaceWithoutEpochBreak(t *testing.T) {
 	actor := &SessionActor{
 		id: "session-legacy-completion-tools",
 		state: &RuntimeState{
@@ -106,11 +106,11 @@ func TestRuntimeTurnToolSurfaceSnapshotInvalidatesLegacyCompletionSurfaceWithout
 
 	tools, cached, err := actor.turnToolSurfaceSnapshot("turn-resumed").LoadTurnToolSurface(context.Background())
 	require.NoError(t, err)
-	require.False(t, cached)
-	require.Nil(t, tools)
+	require.True(t, cached)
+	require.Equal(t, []string{"view"}, []string{tools[0].Name})
 	state := actor.State()
-	require.False(t, state.StableToolSurfaceSet)
-	require.Empty(t, state.StableToolSurface)
+	require.True(t, state.StableToolSurfaceSet)
+	require.Equal(t, []string{"view"}, []string{state.StableToolSurface[0].Name})
 }
 
 func TestRuntimeTurnToolSurfaceSnapshotKeepsFrozenSurfaceWhenBindingChangesMidTurn(t *testing.T) {

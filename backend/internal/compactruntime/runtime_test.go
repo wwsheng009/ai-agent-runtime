@@ -258,6 +258,11 @@ func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t
 		CountTokens: func(messages []types.Message) int {
 			return len(messages) * 60
 		},
+		Tools: []types.ToolDefinition{{
+			Name:        "view",
+			Description: "View a file",
+			Parameters:  map[string]interface{}{"type": "object"},
+		}},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -267,8 +272,13 @@ func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t
 	assert.True(t, provider.lastRequest.Stream)
 	assert.Empty(t, provider.lastRequest.ReasoningEffort)
 	assert.Equal(t, "compact", provider.lastRequest.Metadata[llm.MetadataKeyInternalOperation])
-	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableTools])
-	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableMetaTools])
+	assert.Equal(t, false, provider.lastRequest.Metadata[llm.MetadataKeyDisableTools])
+	assert.Equal(t, false, provider.lastRequest.Metadata[llm.MetadataKeyDisableMetaTools])
+	assert.Equal(t, "none", provider.lastRequest.Metadata["tool_choice"])
+	require.Len(t, provider.lastRequest.Tools, 1)
+	assert.Equal(t, "view", provider.lastRequest.Tools[0].Name)
+	assert.Equal(t, "session-compact-request-shape", provider.lastRequest.Metadata["session_id"])
+	assert.Equal(t, "session-compact-request-shape", provider.lastRequest.Metadata["prompt_cache_key"])
 }
 
 func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderSummaryEmpty(t *testing.T) {
@@ -588,6 +598,62 @@ func TestBuildDeterministicCompactSummaryCarriesPriorCompactedContext(t *testing
 	require.Contains(t, summary, "Continue optimizing.")
 }
 
+func TestBuildDeterministicCompactSummaryRetainsContinuationCriticalContext(t *testing.T) {
+	goal := types.NewDeveloperMessage("Persistent goal: fix prompt cache misses without regressing environment freeze.")
+	goal.Metadata["context_stage"] = "active_goal"
+	todos := types.NewAssistantMessage("Current todos:\n- [x] Confirm root cause\n- [ ] Add wire-level regression test")
+	todos.Metadata["context_stage"] = "todo_state"
+	team := types.NewAssistantMessage("Team handoff: member-2 owns adapter verification; remaining work is to merge results.")
+	team.Metadata["context_stage"] = "team"
+	transientRecall := types.NewAssistantMessage("stale recall projection that should be regenerated")
+	transientRecall.Metadata["context_stage"] = "recall"
+	assistant := types.NewAssistantMessage("Decision: keep the top-level instructions stable. Next step: run the focused compact tests.")
+	assistant.ToolCalls = []types.ToolCall{{
+		ID:   "call-view",
+		Name: "view",
+		Args: map[string]interface{}{
+			"file_path": `E:\projects\ai\ai-agent-runtime\backend\internal\compactruntime\local.go`,
+		},
+	}}
+	toolResult := types.NewToolMessage("call-view", "Exit code 1: regression failed at backend/internal/compactruntime/runtime_test.go:601")
+	toolResult.Metadata["tool_error"] = "go test failed: expected stable handoff context"
+
+	summary := buildDeterministicCompactSummary([]types.Message{
+		*types.NewUserMessage("Do not revert unrelated user changes. Optimize local compact now."),
+		*goal,
+		*todos,
+		*team,
+		*transientRecall,
+		*assistant,
+		*toolResult,
+	}, "provider unavailable")
+
+	require.Contains(t, summary, "Durable session context:")
+	require.Contains(t, summary, "fix prompt cache misses")
+	require.Contains(t, summary, "Add wire-level regression test")
+	require.Contains(t, summary, "member-2 owns adapter verification")
+	require.NotContains(t, summary, "stale recall projection")
+	require.Contains(t, summary, "Constraints and preferences:")
+	require.Contains(t, summary, "Do not revert unrelated user changes")
+	require.Contains(t, summary, "Key decisions:")
+	require.Contains(t, summary, "keep the top-level instructions stable")
+	require.Contains(t, summary, "Critical references:")
+	require.Contains(t, summary, `E:\projects\ai\ai-agent-runtime\backend\internal\compactruntime\local.go`)
+	require.Contains(t, summary, "Recent tool failures to account for:")
+	require.Contains(t, summary, "expected stable handoff context")
+	require.Contains(t, summary, "Remaining work:")
+	require.Contains(t, summary, "run the focused compact tests")
+}
+
+func TestLocalCompactionPromptRequiresContinuationReadyHandoff(t *testing.T) {
+	require.Contains(t, localCompactionPrompt, "Current goal / latest user objective")
+	require.Contains(t, localCompactionPrompt, "Constraints, preferences, and hard requirements")
+	require.Contains(t, localCompactionPrompt, "Critical references")
+	require.Contains(t, localCompactionPrompt, "Failures and pitfalls")
+	require.Contains(t, localCompactionPrompt, "Remaining work")
+	require.Contains(t, localCompactionPrompt, "Do not invent work")
+}
+
 func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamRequestsToolCall(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -866,6 +932,54 @@ func TestMaybeCompactUsesRemoteAdapterWhenCapabilitySupportsIt(t *testing.T) {
 	require.Equal(t, 1, provider.remoteCallCount)
 	require.Len(t, result.ReplacementHistory, 3)
 	require.Equal(t, "remote-checkpoint-1", result.CheckpointIDs[0])
+}
+
+func TestMaybeCompactRemotePinsDurableWorldStateFromSourceHistory(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	goal := types.NewDeveloperMessage("latest remote goal")
+	goal.Metadata["context_stage"] = "active_goal"
+	facts := types.NewAssistantMessage("Verified fact ledger: remote facts")
+	facts.Metadata["context_stage"] = "fact_ledger"
+	provider := &compactRemoteProvider{
+		compactTestProvider: &compactTestProvider{
+			name: "provider-a",
+			capabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"gpt-5": {AutoCompactTokenLimit: 150, SupportsRemoteCompact: true},
+			},
+		},
+		response: &llm.RemoteCompactResponse{
+			ReplacementHistory: []types.Message{
+				*types.NewSystemMessage("You are a helpful assistant."),
+				*types.NewAssistantMessage("Compacted context from remote provider."),
+				*types.NewUserMessage("Continue and summarize the root cause."),
+			},
+			CompactedMessages: 2,
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	history := append(compactTestHistory(), *goal, *facts)
+	result, status, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-compact-remote-durable",
+		Model:     "gpt-5",
+		History:   history,
+		Phase:     PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, ModeRemote, status.Mode)
+	require.Equal(t, "active_goal", result.ReplacementHistory[1].Metadata.GetString("context_stage", ""))
+	require.Equal(t, "fact_ledger", result.ReplacementHistory[2].Metadata.GetString("context_stage", ""))
+	require.Contains(t, result.ReplacementHistory[1].Content, "latest remote goal")
+	require.Contains(t, result.ReplacementHistory[2].Content, "remote facts")
 }
 
 func TestMaybeCompactSkipsWhenRemoteModeSelectedButProviderUnsupported(t *testing.T) {
@@ -1330,6 +1444,78 @@ func TestMaybeCompactMidTurnKeepsRealUsersAndLatestToolReplayBeforeSummary(t *te
 	require.NotContains(t, buildDeterministicCompactSummary(history[1:], "provider unavailable"), "stale workspace wrapper")
 }
 
+func TestMaybeCompactMidTurnPinsLatestDurableWorldState(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a", DefaultModel: "gpt-5", MaxRetries: 0,
+	})
+	provider := &compactTestProvider{
+		name:            "provider-a",
+		responseContent: "Continue from the compacted checkpoint.",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 100},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	oldGoal := types.NewDeveloperMessage("old goal")
+	oldGoal.Metadata["context_stage"] = "active_goal"
+	latestGoal := types.NewDeveloperMessage("latest goal")
+	latestGoal.Metadata["context_stage"] = "active_goal"
+	latestGoal.Metadata["context_snapshot"] = true
+	todos := types.NewAssistantMessage("Current todos: verify the fix")
+	todos.Metadata["context_stage"] = "todo_state"
+	todos.Metadata["context_snapshot"] = true
+	facts := types.NewAssistantMessage("Verified fact ledger: tests passed")
+	facts.Metadata["context_stage"] = "fact_ledger"
+	facts.Metadata["context_snapshot"] = true
+	staleWorkspace := types.NewAssistantMessage("stale workspace")
+	staleWorkspace.Metadata["context_stage"] = "workspace"
+	call := types.NewAssistantMessage("Run verification")
+	call.ToolCalls = []types.ToolCall{{ID: "call-verify", Name: "shell"}}
+	history := []types.Message{
+		*types.NewSystemMessage("stable system"),
+		*types.NewUserMessage("finish the optimization"),
+		*oldGoal,
+		*latestGoal,
+		*todos,
+		*facts,
+		*staleWorkspace,
+		*call,
+		*types.NewToolMessage("call-verify", "ok"),
+	}
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content) + len(message.ToolCalls)*20
+		}
+		return total
+	}
+
+	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-durable-mid-turn", Model: "gpt-5", Force: true,
+		History: history, KeepRecentMessages: 2, ReplacementTokenLimit: 2000,
+		Phase: PhaseMidTurn, CountTokens: counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	stages := make([]string, 0, len(result.ReplacementHistory))
+	joined := ""
+	for _, message := range result.ReplacementHistory {
+		stages = append(stages, message.Metadata.GetString("context_stage", ""))
+		joined += "\n" + message.Content
+	}
+	require.Contains(t, stages, "active_goal")
+	require.Contains(t, stages, "todo_state")
+	require.Contains(t, stages, "fact_ledger")
+	require.NotContains(t, stages, "workspace")
+	require.Contains(t, joined, "latest goal")
+	require.NotContains(t, joined, "old goal")
+	require.Less(t, indexOfContextStage(result.ReplacementHistory, "active_goal"), indexOfContextStage(result.ReplacementHistory, "compaction"))
+	require.Less(t, indexOfContextStage(result.ReplacementHistory, "fact_ledger"), indexOfContextStage(result.ReplacementHistory, "compaction"))
+}
+
 func TestMaybeCompactRepeatedMidTurnReplacesPriorSummaryInsteadOfStacking(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultProvider: "provider-a", DefaultModel: "gpt-5", MaxRetries: 0})
 	provider := &compactTestProvider{
@@ -1453,6 +1639,15 @@ func requireCompactionMessage(t *testing.T, messages []types.Message) types.Mess
 	}
 	require.FailNow(t, "compaction message not found")
 	return types.Message{}
+}
+
+func indexOfContextStage(messages []types.Message, stage string) int {
+	for index, message := range messages {
+		if message.Metadata.GetString("context_stage", "") == stage {
+			return index
+		}
+	}
+	return -1
 }
 
 func compactTestHistory() []types.Message {

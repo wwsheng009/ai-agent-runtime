@@ -93,10 +93,27 @@ func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interfa
 
 	// tool_choice
 	if config.ToolChoice != nil {
-		request["tool_choice"] = config.ToolChoice
+		request["tool_choice"] = normalizeAnthropicToolChoice(config.ToolChoice)
 	}
 
 	return request
+}
+
+func normalizeAnthropicToolChoice(choice interface{}) interface{} {
+	raw, ok := choice.(string)
+	if !ok {
+		return choice
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "auto":
+		return map[string]interface{}{"type": "auto"}
+	case "required", "any":
+		return map[string]interface{}{"type": "any"}
+	case "none":
+		return map[string]interface{}{"type": "none"}
+	default:
+		return choice
+	}
 }
 
 func splitAnthropicSystemAndMessages(messages []map[string]interface{}) (string, []map[string]interface{}) {
@@ -104,16 +121,33 @@ func splitAnthropicSystemAndMessages(messages []map[string]interface{}) (string,
 		return "", nil
 	}
 
+	// Only the leading system/developer prefix becomes top-level system text.
+	// Later turn-context developer/system messages stay in the conversation so
+	// goal/todo/recall snapshots can grow append-only without rewriting system.
 	systemParts := make([]string, 0, 2)
 	inputMessages := make([]map[string]interface{}, 0, len(messages))
+	inLeadingSystem := true
 	for _, msg := range messages {
 		role, _ := msg["role"].(string)
-		switch strings.ToLower(strings.TrimSpace(role)) {
+		role = strings.ToLower(strings.TrimSpace(role))
+		switch role {
 		case "system", "developer":
+			if inLeadingSystem {
+				if text := anthropicInstructionText(msg); text != "" {
+					systemParts = append(systemParts, text)
+				}
+				continue
+			}
+			// Anthropic message roles are user/assistant only. Residual instruction
+			// items become user messages so they remain in the append-only stream.
 			if text := anthropicInstructionText(msg); text != "" {
-				systemParts = append(systemParts, text)
+				inputMessages = append(inputMessages, map[string]interface{}{
+					"role":    "user",
+					"content": text,
+				})
 			}
 		default:
+			inLeadingSystem = false
 			inputMessages = append(inputMessages, msg)
 		}
 	}

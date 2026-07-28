@@ -44,6 +44,10 @@ type Request struct {
 	CountTokens           TokenCounter
 	ObservedTokens        int
 	HasObservedTokens     bool
+	// Tools optionally carries the caller's frozen chat tool surface. When set,
+	// local compact keeps that tools prefix and forces tool_choice=none so the
+	// summary pass can reuse provider prompt cache without executing tools.
+	Tools []types.ToolDefinition
 }
 
 // Result captures a successful history replacement.

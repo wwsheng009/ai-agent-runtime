@@ -19,6 +19,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -3073,8 +3074,16 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		}
 		mergeProfileContextInto(agentConfig.Options, profileState.ContextValues)
 	}
+	if disableTools {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options[llm.MetadataKeyDisableTools] = true
+	}
 
-	sessionMCPManager := h.runtimeServerToolSurfaceForSession(context.Background(), sessionID, h.mcpManager, !disableTools)
+	// Always construct the request catalog. disable_tools is an execution/choice
+	// decision and must not remove definitions from an existing cache lane.
+	sessionMCPManager := h.runtimeServerToolSurfaceForSession(context.Background(), sessionID, h.mcpManager, true)
 	apiAgent := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
 		registry:        h.skillRegistry,
 		embeddingRouter: h.embeddingRouter,

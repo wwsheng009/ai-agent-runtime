@@ -1352,21 +1352,17 @@ func composeChatSystemPromptWithGuidance(session *ChatSession) string {
 
 // composeDurableChatSystemPromptWithGuidance builds the session-persisted system
 // prefix. Environment facts are frozen once per session; active goal guidance is
-// intentionally omitted so goal status changes never rewrite historical turns.
+// intentionally omitted so goal status changes never rewrite historical turns or
+// the provider instructions prefix used for prompt caching.
 func composeDurableChatSystemPromptWithGuidance(session *ChatSession) string {
 	cwd, _ := os.Getwd()
 	return composeDurableChatSystemPromptWithGuidanceForCWD(session, cwd)
 }
 
 func composeChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string) string {
-	lines := make([]string, 0, 2)
-	if durable := strings.TrimSpace(composeDurableChatSystemPromptWithGuidanceForCWD(session, cwd)); durable != "" {
-		lines = append(lines, durable)
-	}
-	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
-		lines = append(lines, guidance)
-	}
-	return strings.Join(lines, "\n\n")
+	// Outbound instructions must stay byte-stable for provider prompt caching.
+	// Active goal guidance is injected as a frozen turn-context message instead.
+	return composeDurableChatSystemPromptWithGuidanceForCWD(session, cwd)
 }
 
 func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string) string {

@@ -22,19 +22,57 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 		return nil
 	}
 
-	userItems := make([]string, 0, 3)
-	assistantItems := make([]string, 0, 3)
-	toolItems := make([]string, 0, 4)
+	const (
+		userBudget         = 1400
+		assistantBudget    = 1600
+		toolBudget         = 2200
+		failureBudget      = 1200
+		constraintBudget   = 1000
+		referenceBudget    = 1200
+		remainingBudget    = 1000
+		durableBudget      = 1400
+		priorSummaryBudget = 2400
+	)
+
+	userItems := make([]string, 0, 12)
+	assistantItems := make([]string, 0, 16)
+	decisionItems := make([]string, 0, 8)
+	toolItems := make([]string, 0, 20)
+	failureItems := make([]string, 0, 10)
+	constraintItems := make([]string, 0, 10)
+	referenceItems := make([]string, 0, 12)
+	remainingItems := make([]string, 0, 10)
+	durableItems := make([]string, 0, 8)
+	priorSummaryItems := make([]string, 0, 4)
 
 	for _, message := range messages {
 		content := strings.TrimSpace(message.Content)
-		if content == "" {
+		stage := strings.ToLower(strings.TrimSpace(message.Metadata.GetString("context_stage", "")))
+		if stage == "compaction" {
+			if content != "" {
+				priorSummaryItems = appendWithinBudgetLatest(priorSummaryItems, summarizeLine(content, 900), 3, priorSummaryBudget)
+			}
 			continue
 		}
-
+		if isDurablePromptStage(stage) {
+			if content != "" {
+				durableItems = appendWithinBudgetLatest(durableItems, durablePromptStageLabel(stage)+": "+summarizeLine(content, 280), 6, durableBudget)
+				constraintItems = appendManyWithinBudgetLatest(constraintItems, extractConstraintHints(content), 8, constraintBudget)
+				remainingItems = appendManyWithinBudgetLatest(remainingItems, extractRemainingHints(content), 8, remainingBudget)
+			}
+			continue
+		}
+		if stage != "" {
+			continue
+		}
 		switch message.Role {
-		case "user":
-			userItems = appendLimited(userItems, summarizeLine(content, 160), 3)
+		case "user", "developer":
+			if content != "" {
+				userItems = appendWithinBudgetLatest(userItems, summarizeLine(content, 240), 10, userBudget)
+				constraintItems = appendManyWithinBudgetLatest(constraintItems, extractConstraintHints(content), 8, constraintBudget)
+				remainingItems = appendManyWithinBudgetLatest(remainingItems, extractRemainingHints(content), 8, remainingBudget)
+				referenceItems = appendManyWithinBudgetLatest(referenceItems, extractReferenceHints(content), 10, referenceBudget)
+			}
 		case "assistant":
 			if len(message.ToolCalls) > 0 {
 				names := make([]string, 0, len(message.ToolCalls))
@@ -42,26 +80,74 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 					if call.Name != "" {
 						names = append(names, call.Name)
 					}
+					referenceItems = appendManyWithinBudgetLatest(referenceItems, extractToolCallReferences(call), 10, referenceBudget)
 				}
 				if len(names) > 0 {
-					toolItems = appendLimited(toolItems, "assistant requested tools: "+strings.Join(names, ", "), 4)
+					toolItems = appendWithinBudgetLatest(toolItems, "assistant requested tools: "+strings.Join(names, ", "), 12, toolBudget)
 				}
 			}
-			assistantItems = appendLimited(assistantItems, summarizeLine(content, 160), 3)
+			if content != "" {
+				summary := summarizeLine(content, 220)
+				if looksLikeDecision(strings.ToLower(content)) {
+					decisionItems = appendWithinBudgetLatest(decisionItems, summary, 8, assistantBudget)
+				} else {
+					assistantItems = appendWithinBudgetLatest(assistantItems, summary, 12, assistantBudget)
+				}
+				constraintItems = appendManyWithinBudgetLatest(constraintItems, extractConstraintHints(content), 8, constraintBudget)
+				remainingItems = appendManyWithinBudgetLatest(remainingItems, extractRemainingHints(content), 8, remainingBudget)
+				referenceItems = appendManyWithinBudgetLatest(referenceItems, extractReferenceHints(content), 10, referenceBudget)
+				if looksLikeFailure(strings.ToLower(content)) {
+					failureItems = appendWithinBudgetLatest(failureItems, summary, 8, failureBudget)
+				}
+			}
 		case "tool":
-			toolItems = appendLimited(toolItems, summarizeLine(content, 180), 4)
+			if content != "" {
+				toolItems = appendWithinBudgetLatest(toolItems, summarizeLine(content, 260), 16, toolBudget)
+				referenceItems = appendManyWithinBudgetLatest(referenceItems, extractReferenceHints(content), 10, referenceBudget)
+			}
+			toolErr := strings.TrimSpace(message.Metadata.GetString("tool_error", ""))
+			if toolErr == "" && looksLikeFailure(strings.ToLower(content)) {
+				toolErr = content
+			}
+			if toolErr != "" {
+				failureItems = appendWithinBudgetLatest(failureItems, summarizeLine(toolErr, 260), 8, failureBudget)
+			}
 		}
 	}
 
 	lines := []string{compactionHeading(continued)}
+	if len(priorSummaryItems) > 0 {
+		lines = append(lines, "Prior compacted context:")
+		for _, item := range priorSummaryItems {
+			lines = append(lines, "- "+item)
+		}
+	}
 	if len(userItems) > 0 {
-		lines = append(lines, "User goals:")
+		lines = append(lines, "Current goal / recent user requests:")
 		for _, item := range userItems {
 			lines = append(lines, "- "+item)
 		}
 	}
+	if len(durableItems) > 0 {
+		lines = append(lines, "Durable session context:")
+		for _, item := range durableItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(constraintItems) > 0 {
+		lines = append(lines, "Constraints and preferences:")
+		for _, item := range constraintItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(decisionItems) > 0 {
+		lines = append(lines, "Key decisions:")
+		for _, item := range decisionItems {
+			lines = append(lines, "- "+item)
+		}
+	}
 	if len(assistantItems) > 0 {
-		lines = append(lines, "Assistant decisions:")
+		lines = append(lines, "Assistant progress:")
 		for _, item := range assistantItems {
 			lines = append(lines, "- "+item)
 		}
@@ -69,6 +155,24 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 	if len(toolItems) > 0 {
 		lines = append(lines, "Tool outcomes:")
 		for _, item := range toolItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(referenceItems) > 0 {
+		lines = append(lines, "Critical references:")
+		for _, item := range referenceItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(failureItems) > 0 {
+		lines = append(lines, "Failures to account for:")
+		for _, item := range failureItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(remainingItems) > 0 {
+		lines = append(lines, "Remaining work:")
+		for _, item := range remainingItems {
 			lines = append(lines, "- "+item)
 		}
 	}
@@ -207,6 +311,200 @@ func appendLimited(items []string, item string, limit int) []string {
 		return items
 	}
 	return append(items, item)
+}
+
+func appendWithinBudgetLatest(items []string, item string, maxItems, maxRunes int) []string {
+	item = strings.TrimSpace(item)
+	if item == "" || maxItems <= 0 || maxRunes <= 0 {
+		return items
+	}
+	items = append(items, item)
+	usedRunes := 0
+	start := len(items)
+	for index := len(items) - 1; index >= 0 && len(items)-index <= maxItems; index-- {
+		itemRunes := len([]rune(items[index]))
+		if usedRunes+itemRunes > maxRunes {
+			break
+		}
+		usedRunes += itemRunes
+		start = index
+	}
+	if start == len(items) {
+		return []string{summarizeLine(item, maxRunes)}
+	}
+	return append([]string(nil), items[start:]...)
+}
+
+func appendManyWithinBudgetLatest(items []string, more []string, maxItems, maxRunes int) []string {
+	for _, item := range more {
+		items = appendWithinBudgetLatest(items, item, maxItems, maxRunes)
+	}
+	return items
+}
+
+func isDurablePromptStage(stage string) bool {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "active_goal", "todo_state", "team", "fact_ledger", "project_memory", "observation":
+		return true
+	default:
+		return false
+	}
+}
+
+func durablePromptStageLabel(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "active_goal":
+		return "active goal"
+	case "todo_state":
+		return "todos"
+	case "team":
+		return "team"
+	case "fact_ledger":
+		return "fact ledger"
+	case "project_memory":
+		return "project memory"
+	case "observation":
+		return "observations"
+	default:
+		return strings.TrimSpace(stage)
+	}
+}
+
+func extractConstraintHints(text string) []string {
+	out := make([]string, 0, 4)
+	for _, line := range splitPromptLines(text) {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "must ") ||
+			strings.Contains(lower, "must not") ||
+			strings.Contains(lower, "do not") ||
+			strings.Contains(lower, "don't") ||
+			strings.Contains(lower, "never ") ||
+			strings.Contains(lower, "only ") ||
+			strings.Contains(lower, "constraint") ||
+			strings.Contains(lower, "preference") ||
+			strings.Contains(lower, "require") ||
+			strings.Contains(lower, "必须") ||
+			strings.Contains(lower, "不要") ||
+			strings.Contains(lower, "禁止") ||
+			strings.Contains(lower, "只能") {
+			out = append(out, summarizeLine(line, 220))
+		}
+	}
+	return out
+}
+
+func extractRemainingHints(text string) []string {
+	out := make([]string, 0, 4)
+	for _, line := range splitPromptLines(text) {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "todo") ||
+			strings.Contains(lower, "next step") ||
+			strings.Contains(lower, "remaining") ||
+			strings.Contains(lower, "still need") ||
+			strings.Contains(lower, "follow up") ||
+			strings.Contains(lower, "待办") ||
+			strings.Contains(lower, "下一步") ||
+			strings.Contains(lower, "剩余") ||
+			strings.HasPrefix(lower, "- [ ]") ||
+			strings.HasPrefix(lower, "* [ ]") {
+			out = append(out, summarizeLine(line, 220))
+		}
+	}
+	return out
+}
+
+func extractToolCallReferences(call types.ToolCall) []string {
+	if len(call.Args) == 0 {
+		return nil
+	}
+	keys := []string{
+		"path", "file_path", "filepath", "file", "cwd", "workdir",
+		"command", "cmd", "url", "query", "pattern", "target",
+		"session_id", "team_id", "goal_id", "id",
+	}
+	out := make([]string, 0, len(keys))
+	name := strings.TrimSpace(call.Name)
+	for _, key := range keys {
+		value, ok := call.Args[key]
+		if !ok || value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if text == "" {
+			continue
+		}
+		item := key + "=" + summarizeLine(text, 180)
+		if name != "" {
+			item = name + ": " + item
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func extractReferenceHints(text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	candidates := make([]string, 0, 8)
+	for _, token := range strings.Fields(text) {
+		token = strings.Trim(token, "`,\"'()[]{}<>")
+		if token == "" {
+			continue
+		}
+		if looksLikeReferenceToken(token) {
+			candidates = append(candidates, summarizeLine(token, 180))
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	out := make([]string, 0, 8)
+	for _, item := range candidates {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
+func looksLikeReferenceToken(token string) bool {
+	if strings.Contains(token, "://") {
+		return true
+	}
+	if strings.ContainsAny(token, `/\`) && len(token) >= 3 {
+		return true
+	}
+	if strings.HasPrefix(token, "evt_") || strings.HasPrefix(token, "goal_") || strings.HasPrefix(token, "session-") || strings.HasPrefix(token, "team-") {
+		return true
+	}
+	return false
+}
+
+func splitPromptLines(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	raw := strings.Split(text, "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		if trimmed := strings.TrimSpace(text); trimmed != "" {
+			return []string{trimmed}
+		}
+	}
+	return out
 }
 
 func summarizeLine(text string, limit int) string {

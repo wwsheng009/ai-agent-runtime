@@ -380,6 +380,15 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 	for key, value := range req.Metadata {
 		config.Metadata[key] = value
 	}
+	if choice, exists := config.Metadata["tool_choice"]; exists {
+		config.ToolChoice = choice
+	} else if session.DisableTools {
+		// Keep the session-frozen definitions in the request while disabling
+		// invocation through the provider-native choice field.
+		config.Metadata[runtimellm.MetadataKeyDisableTools] = true
+		config.Metadata["tool_choice"] = "none"
+		config.ToolChoice = "none"
+	}
 	if requestReasoningEffort != "" {
 		config.Metadata["reasoning_effort"] = requestReasoningEffort
 	}

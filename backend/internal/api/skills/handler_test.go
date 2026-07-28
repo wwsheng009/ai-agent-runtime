@@ -2673,13 +2673,15 @@ func TestBuildSessionActor_UsesSharedSessionMetadataContext(t *testing.T) {
 	assert.Equal(t, "server-model", request.Model)
 	assert.Equal(t, "high", request.ReasoningEffort)
 	assert.True(t, request.Stream)
-	assert.Empty(t, request.Tools, "disable_tools metadata should remove the tool surface")
+	assert.NotEmpty(t, request.Tools, "disable_tools must retain the frozen request surface")
+	assert.Equal(t, true, request.Metadata[llm.MetadataKeyDisableTools])
+	assert.Equal(t, "none", request.Metadata["tool_choice"])
 	assert.True(t, messageListContainsText(request.Messages, "Shared workspace instruction."))
 	assert.True(t, messageListContainsText(request.Messages, "Task difficulty rating and subagent delegation policy:"))
 	assert.True(t, messageListContainsText(request.Messages, "difficulty_rationale"))
 }
 
-func TestBuildSessionActor_ReadOnlyChildHidesShellTools(t *testing.T) {
+func TestBuildSessionActor_ReadOnlyChildPreservesShellSurface(t *testing.T) {
 	mcpManager := &readOnlyToolSurfaceMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, nil, mcpManager)
@@ -2707,7 +2709,7 @@ func TestBuildSessionActor_ReadOnlyChildHidesShellTools(t *testing.T) {
 		names[definition.Name] = true
 	}
 	assert.True(t, names["echo_tool"])
-	assert.False(t, names["bash"])
+	assert.True(t, names["bash"], "read-only policy must be enforced at execution rather than by deleting definitions")
 }
 
 func TestBuildSessionLoopConfig_PropagatesParallelToolConfig(t *testing.T) {

@@ -1634,6 +1634,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
 		ObservedTokens:     observedTokens,
 		HasObservedTokens:  hasObservedTokens,
+		Tools:              a.compactToolSurface(ctx, turnID),
 	})
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode
@@ -1716,6 +1717,21 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	})
 	a.dispatchPostCompactHook(ctx, payload)
 	a.publishCompactReconciliation(turnID, result)
+}
+
+func (a *SessionActor) compactToolSurface(ctx context.Context, turnID string) []runtimetypes.ToolDefinition {
+	if a == nil || strings.TrimSpace(turnID) == "" {
+		return nil
+	}
+	snapshot := a.turnToolSurfaceSnapshot(turnID)
+	if snapshot == nil {
+		return nil
+	}
+	tools, cached, err := snapshot.LoadTurnToolSurface(ctx)
+	if err != nil || !cached || len(tools) == 0 {
+		return nil
+	}
+	return cloneRuntimeToolDefinitions(tools)
 }
 
 func (a *SessionActor) runManualCompact(
@@ -1805,6 +1821,7 @@ func (a *SessionActor) runManualCompact(
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
 		ObservedTokens:     countRuntimeChatContextTokens(a.llmRuntime, session.GetMessages()),
 		HasObservedTokens:  true,
+		Tools:              a.compactToolSurface(ctx, traceID),
 	})
 	status = resolvedStatus
 	payload["reason"] = status.Reason

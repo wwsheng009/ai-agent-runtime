@@ -10,9 +10,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -304,8 +307,10 @@ func TestAICLISharedChatExecutor_UsesStableToolSurfaceAcrossPrompts(t *testing.T
 	}()
 
 	var captured [][]types.ToolDefinition
+	var capturedMetadata []map[string]interface{}
 	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
 		captured = append(captured, append([]types.ToolDefinition(nil), req.Tools...))
+		capturedMetadata = append(capturedMetadata, req.Metadata)
 		history := cloneRuntimeMessages(req.History)
 		if strings.TrimSpace(req.Prompt) != "" {
 			history = append(history, *types.NewUserMessage(req.Prompt))
@@ -366,13 +371,23 @@ func TestAICLISharedChatExecutor_UsesStableToolSurfaceAcrossPrompts(t *testing.T
 	if _, err := session.ChatExecutor.Execute(context.Background(), session, "please use skill__alpha and generate an image"); err != nil {
 		t.Fatalf("second Execute failed: %v", err)
 	}
-	if len(captured) != 2 {
-		t.Fatalf("expected two captured requests, got %d", len(captured))
+	session.DisableTools = true
+	if _, err := session.ChatExecutor.Execute(context.Background(), session, "continue without invoking tools"); err != nil {
+		t.Fatalf("disabled-tools Execute failed: %v", err)
+	}
+	if len(captured) != 3 {
+		t.Fatalf("expected three captured requests, got %d", len(captured))
 	}
 	firstNames := toolDefinitionNamesForTest(captured[0])
 	secondNames := toolDefinitionNamesForTest(captured[1])
 	if strings.Join(firstNames, ",") != strings.Join(secondNames, ",") {
 		t.Fatalf("expected stable shared tool surface, first=%v second=%v", firstNames, secondNames)
+	}
+	if !reflect.DeepEqual(captured[0], captured[2]) {
+		t.Fatalf("disable_tools changed frozen shared definitions:\nfirst=%#v\ndisabled=%#v", captured[0], captured[2])
+	}
+	if capturedMetadata[2][runtimellm.MetadataKeyDisableTools] != true || capturedMetadata[2]["tool_choice"] != "none" {
+		t.Fatalf("expected choice-only disable metadata, got %#v", capturedMetadata[2])
 	}
 	for _, name := range []string{"builtin__diagnose", "skill__alpha", toolnames.OpenAIImageGenerateToolName} {
 		if !toolDefinitionsContain(captured[0], name) {
@@ -2488,6 +2503,57 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 	if !strings.Contains(err.Error(), "本次请求在发送给模型前已被本地拦截") {
 		t.Fatalf("expected humanized preflight error, got %v", err)
 	}
+}
+
+func TestBuildSharedChatPromptPreflightCompactor_RetainsFrozenTools(t *testing.T) {
+	var captured map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-compact","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"Compact summary."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		ProviderName: "shared-provider",
+		Model:        "test-model",
+		Provider: config.Provider{
+			Enabled:      true,
+			Protocol:     "openai",
+			BaseURL:      server.URL,
+			DefaultModel: "test-model",
+		},
+		stableSharedToolSelection: &aicliFunctionSelection{Schemas: []map[string]interface{}{{
+			"name":        "view",
+			"description": "read a file",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{"type": "string"},
+				},
+			},
+		}}},
+	}
+	compactor := buildSharedChatPromptPreflightCompactor(session, nil)
+	require.NotNil(t, compactor)
+	history := []types.Message{
+		*types.NewUserMessage("Investigate the failure."),
+		*types.NewAssistantMessage(strings.Repeat("Earlier analysis. ", 20)),
+		*types.NewUserMessage("Continue."),
+	}
+	_, compacted, err := compactor(context.Background(), history)
+	require.NoError(t, err)
+	require.True(t, compacted)
+
+	tools, ok := captured["tools"].([]interface{})
+	require.True(t, ok, "expected compact request tools, got %#v", captured["tools"])
+	require.Len(t, tools, 1)
+	tool, ok := tools[0].(map[string]interface{})
+	require.True(t, ok)
+	function, ok := tool["function"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "view", function["name"])
+	assert.Equal(t, "none", captured["tool_choice"])
 }
 
 func TestAICLISharedChatExecutor_AutoCompactsHistoryBeforeToolLoop(t *testing.T) {

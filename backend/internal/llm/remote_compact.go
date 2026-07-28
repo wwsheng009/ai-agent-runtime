@@ -44,11 +44,20 @@ type RemoteCompactionProvider interface {
 
 const remoteCompactPlaceholder = "Compacted context stored remotely."
 
-func buildCodexRemoteCompactRequest(model string, history []types.Message) map[string]interface{} {
+// buildCodexRemoteCompactRequest builds a Codex /responses/compact body.
+// promptCacheKey should be the same stable session/conversation key used by
+// ordinary chat turns so the compact request can stay on the same cache route.
+func buildCodexRemoteCompactRequest(model string, history []types.Message, promptCacheKey string) map[string]interface{} {
 	codexAdapter := &adapter.CodexAdapter{}
+	metadata := map[string]interface{}{}
+	if key := strings.TrimSpace(promptCacheKey); key != "" {
+		metadata["session_id"] = key
+		metadata["prompt_cache_key"] = key
+	}
 	built := codexAdapter.BuildRequest(adapter.RequestConfig{
 		Model:    strings.TrimSpace(model),
 		Messages: RuntimeMessagesToProtocolMessages(history, "codex", model),
+		Metadata: metadata,
 	})
 
 	request := map[string]interface{}{
@@ -59,6 +68,11 @@ func buildCodexRemoteCompactRequest(model string, history []types.Message) map[s
 	}
 	if instructions, ok := built["instructions"].(string); ok && strings.TrimSpace(instructions) != "" {
 		request["instructions"] = instructions
+	}
+	if key, ok := built["prompt_cache_key"].(string); ok {
+		if trimmed := strings.TrimSpace(key); trimmed != "" {
+			request["prompt_cache_key"] = trimmed
+		}
 	}
 	if tools, ok := built["tools"]; ok && tools != nil {
 		request["tools"] = tools

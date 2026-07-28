@@ -31,8 +31,8 @@ func syncChatSystemPromptMessage(session *ChatSession) {
 		return
 	}
 	// Durable history stores a frozen environment-aware prefix without turn-
-	// volatile goal guidance. Goal text is injected only into outbound request
-	// assembly (composeChatSystemPromptWithGuidance / cfg.SystemPrompt).
+	// volatile goal guidance. Goal text is injected as a frozen turn-context
+	// message via agent Options["active_goal_guidance"], never via SystemPrompt.
 	prompt := strings.TrimSpace(composeDurableChatSystemPromptWithGuidance(session))
 	if prompt == "" {
 		return
@@ -142,8 +142,9 @@ func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
 		return nil
 	}
 
-	// Hide both durable and outbound system prefixes. Durable history omits goal
-	// guidance; older sessions may still store outbound-with-goal text.
+	// Hide both durable and outbound system prefixes. Goal guidance is injected as
+	// turn-context messages (not system text); older sessions may still store
+	// outbound-with-goal system text.
 	hiddenSystemPrompt := strings.TrimSpace(composeDurableChatSystemPromptWithGuidance(session))
 	outboundSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 	rawSystemPrompt := strings.TrimSpace(session.SystemPromptText)
@@ -164,6 +165,12 @@ func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
 
 func isVisibleChatHistoryMessage(session *ChatSession, message runtimetypes.Message, hiddenSystemPrompt string, rawSystemPrompt string) bool {
 	if strings.TrimSpace(message.Role) == "" {
+		return false
+	}
+	// Frozen turn-context snapshots (fact/recall/goal/todo/etc.) are prompt-only
+	// infrastructure and must not pollute the user-visible transcript.
+	if message.Metadata.GetBool("context_snapshot", false) ||
+		strings.TrimSpace(message.Metadata.GetString("context_stage", "")) != "" {
 		return false
 	}
 

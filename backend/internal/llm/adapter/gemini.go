@@ -110,8 +110,33 @@ func (a *GeminiAdapter) BuildRequest(config RequestConfig) map[string]interface{
 	if config.Functions != nil {
 		request["tools"] = config.Functions
 	}
+	if toolConfig := buildGeminiToolConfig(config.ToolChoice); len(toolConfig) > 0 {
+		request["toolConfig"] = toolConfig
+	}
 
 	return request
+}
+
+func buildGeminiToolConfig(choice interface{}) map[string]interface{} {
+	raw, ok := choice.(string)
+	if !ok {
+		return nil
+	}
+	mode := ""
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "none":
+		mode = "NONE"
+	case "auto":
+		mode = "AUTO"
+	case "required", "any":
+		mode = "ANY"
+	}
+	if mode == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		"functionCallingConfig": map[string]interface{}{"mode": mode},
+	}
 }
 
 // BuildHeaders 构建请求头

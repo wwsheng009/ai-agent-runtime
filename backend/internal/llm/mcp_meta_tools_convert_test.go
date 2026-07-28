@@ -2,7 +2,7 @@ package llm
 
 import "testing"
 
-func TestBuildToolDefinitionsForProtocol_SortsInputToolsByName(t *testing.T) {
+func TestBuildToolDefinitionsForProtocol_PreservesInputToolOrder(t *testing.T) {
 	tools := []map[string]interface{}{
 		{
 			"name":        "write",
@@ -24,8 +24,24 @@ func TestBuildToolDefinitionsForProtocol_SortsInputToolsByName(t *testing.T) {
 
 	firstFn, _ := list[0]["function"].(map[string]interface{})
 	secondFn, _ := list[1]["function"].(map[string]interface{})
-	if firstFn["name"] != "bash" || secondFn["name"] != "write" {
-		t.Fatalf("expected sorted tool definitions, got %#v", list)
+	if firstFn["name"] != "write" || secondFn["name"] != "bash" {
+		t.Fatalf("expected adapter to preserve caller tool order, got %#v", list)
+	}
+}
+
+func TestBuildToolDefinitionsForProtocol_DoesNotSilentlyDeduplicateCallerTools(t *testing.T) {
+	tools := []map[string]interface{}{
+		{"name": "duplicate", "description": "first", "parameters": map[string]interface{}{"type": "object"}},
+		{"name": "duplicate", "description": "second", "parameters": map[string]interface{}{"type": "object"}},
+	}
+
+	converted := buildToolDefinitionsForProtocol(tools, "anthropic", false)
+	list, ok := converted.([]map[string]interface{})
+	if !ok || len(list) != 2 {
+		t.Fatalf("expected adapter to preserve both caller definitions, got %T %#v", converted, converted)
+	}
+	if list[0]["description"] != "first" || list[1]["description"] != "second" {
+		t.Fatalf("expected caller order and definitions to remain intact, got %#v", list)
 	}
 }
 

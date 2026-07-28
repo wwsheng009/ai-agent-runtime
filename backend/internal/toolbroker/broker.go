@@ -72,6 +72,22 @@ func withBrokerSourceMetadata(metadata map[string]interface{}) map[string]interf
 	return toolresult.WithSource(metadata, toolresult.SourceBroker)
 }
 
+func withVolatileEmptyReplayMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	} else {
+		cloned := make(map[string]interface{}, len(metadata)+1)
+		for key, value := range metadata {
+			cloned[key] = value
+		}
+		metadata = cloned
+	}
+	// Polling / state tools can be empty now and non-empty later under the same
+	// arguments. Opt them out of the run-scoped empty negative cache.
+	metadata[types.ToolMetadataEmptyReplayCacheKey] = false
+	return metadata
+}
+
 func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.ToolDefinition {
 	if len(definitions) == 0 {
 		return nil
@@ -80,8 +96,20 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 	copy(out, definitions)
 	for index := range out {
 		out[index].Metadata = withBrokerSourceMetadata(out[index].Metadata)
+		if isVolatileEmptyReplayTool(out[index].Name) {
+			out[index].Metadata = withVolatileEmptyReplayMetadata(out[index].Metadata)
+		}
 	}
 	return out
+}
+
+func isVolatileEmptyReplayTool(name string) bool {
+	switch normalizeToolName(name) {
+	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsBrokerTool returns true if the tool is handled by the broker.

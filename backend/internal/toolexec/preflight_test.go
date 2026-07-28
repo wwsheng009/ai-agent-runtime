@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestArgsDigestStableAcrossMapOrder(t *testing.T) {
@@ -19,6 +20,49 @@ func TestArgsDigestStableAcrossMapOrder(t *testing.T) {
 	c := ArgsDigest("view", map[string]interface{}{"file_path": "b.go", "limit": 10})
 	if a == c {
 		t.Fatalf("expected digest to change with args")
+	}
+}
+
+func TestArgsDigestIgnoresProviderNoiseAndEmptyOptionalArgs(t *testing.T) {
+	base := ArgsDigest("grep", map[string]interface{}{
+		"pattern": "doom",
+		"path":    "backend",
+	})
+	noisy := ArgsDigest("grep", map[string]interface{}{
+		"path":                  "backend",
+		"pattern":               "doom",
+		"_provider_diagnostic":  "parse-hint",
+		"glob":                  "",
+		"max_depth":             nil,
+		"include":               map[string]interface{}{},
+		"_internal_trace":       "x",
+	})
+	if base == "" || base != noisy {
+		t.Fatalf("expected noise-stripped digests to match, got base=%q noisy=%q", base, noisy)
+	}
+	// Meaningful arg change still shifts the digest.
+	changed := ArgsDigest("grep", map[string]interface{}{
+		"pattern": "doom",
+		"path":    "frontend",
+	})
+	if base == changed {
+		t.Fatalf("expected digest to change with path")
+	}
+	// Tool name remains part of the fingerprint.
+	otherTool := ArgsDigest("glob", map[string]interface{}{
+		"pattern": "doom",
+		"path":    "backend",
+	})
+	if base == otherTool {
+		t.Fatalf("expected tool name to affect digest")
+	}
+	// Provider casing on the tool name must not split digests.
+	cased := ArgsDigest("Grep", map[string]interface{}{
+		"pattern": "doom",
+		"path":    "backend",
+	})
+	if base != cased {
+		t.Fatalf("expected case-insensitive tool name digests, got base=%q cased=%q", base, cased)
 	}
 }
 
@@ -1054,8 +1098,8 @@ func TestCircuitOpenReplaysStoredPathCandidates(t *testing.T) {
 			t.Fatalf("attempt %d expected path preflight failure", i+1)
 		}
 		outcomeMeta := map[string]interface{}{
-			toolresult.MetadataErrorCodeKey:   d.ErrorCode,
-			toolresult.MetadataRetryableKey:   false,
+			toolresult.MetadataErrorCodeKey:      d.ErrorCode,
+			toolresult.MetadataRetryableKey:      false,
 			toolresult.MetadataPathCandidatesKey: candidates,
 		}
 		_ = RecordOutcome(mem, "view", d.Digest, d.Error, outcomeMeta)
@@ -1176,6 +1220,47 @@ func TestEmptySoftCacheShortCircuitsAfterThreshold(t *testing.T) {
 	// Soft empty is success disposition: no hard error_code stamp.
 	if _, has := stamped[toolresult.MetadataErrorCodeKey]; has {
 		t.Fatalf("soft empty must not stamp error_code: %#v", stamped)
+	}
+}
+
+func TestEmptySoftCacheDisabledForVolatileToolMetadata(t *testing.T) {
+	mem := NewMemory(2)
+	toolName := "read_agent_events"
+	args := map[string]interface{}{"after_seq": 10}
+	digest := ArgsDigest(toolName, args)
+	toolMeta := map[string]interface{}{runtimetypes.ToolMetadataEmptyReplayCacheKey: false}
+
+	for i := 0; i < 3; i++ {
+		decision := ApplyPreflight(mem, PreflightRequest{
+			ToolName: toolName,
+			Args:     args,
+			Metadata: toolMeta,
+		})
+		if !decision.Allow || decision.SoftEmpty {
+			t.Fatalf("volatile empty call %d must remain executable, got %+v", i+1, decision)
+		}
+		if !decision.SkipEmptyReplayCache {
+			t.Fatalf("volatile empty call %d must carry cache opt-out", i+1)
+		}
+		meta := map[string]interface{}{
+			toolresult.MetadataEmptyResultKey:            true,
+			toolresult.MetadataOutcomeKey:                toolresult.OutcomeEmpty,
+			runtimetypes.ToolMetadataEmptyReplayCacheKey: false,
+		}
+		RecordOutcome(mem, toolName, digest, "", meta)
+	}
+
+	if record, open := mem.LookupEmpty(toolName, digest); open || record != nil {
+		t.Fatalf("volatile empty results must never open negative cache: open=%v record=%+v", open, record)
+	}
+	decision := ApplyPreflight(mem, PreflightRequest{ToolName: toolName, Args: args, Metadata: toolMeta})
+	if !decision.Allow || decision.SoftEmpty {
+		t.Fatalf("later volatile poll must still execute, got %+v", decision)
+	}
+	stamped := map[string]interface{}{}
+	AttachPreflightMetadata(stamped, decision)
+	if enabled, ok := runtimetypes.BoolMetadataValue(stamped, runtimetypes.ToolMetadataEmptyReplayCacheKey); !ok || enabled {
+		t.Fatalf("expected empty_replay_cache=false in invocation metadata, got %#v", stamped)
 	}
 }
 

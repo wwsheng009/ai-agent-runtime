@@ -62,7 +62,7 @@ func TestChatToolAvailable_GoalToolRuntimeServerUnsupported(t *testing.T) {
 	captureStdout(t, func() {
 		handleCommand(session, "/goal runtime server unsupported guidance", false)
 	})
-	prompt := composeChatSystemPromptWithGuidance(session)
+	prompt := renderActiveGoalGuidance(session)
 	if strings.Contains(prompt, "call update_goal") {
 		t.Fatalf("did not expect runtime-server guidance to ask for update_goal, got %q", prompt)
 	}
@@ -103,7 +103,7 @@ func TestChatToolAvailable_RespectsToolPolicy(t *testing.T) {
 	captureStdout(t, func() {
 		handleCommand(session, "/goal policy gated guidance", false)
 	})
-	prompt := composeChatSystemPromptWithGuidance(session)
+	prompt := renderActiveGoalGuidance(session)
 	if strings.Contains(prompt, "call update_goal") {
 		t.Fatalf("did not expect update_goal guidance when policy blocks it, got %q", prompt)
 	}

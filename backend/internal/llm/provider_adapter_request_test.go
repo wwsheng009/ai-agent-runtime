@@ -170,6 +170,87 @@ func TestBuildProviderAdapterRequest_AnthropicDropsTrailingAssistantPrefill(t *t
 	}
 }
 
+func TestBuildProviderAdapterRequest_AllProtocolsRetainFrozenToolsWhenDisabled(t *testing.T) {
+	protocols := []string{"openai", "codex", "anthropic", "gemini"}
+	for _, protocol := range protocols {
+		t.Run(protocol, func(t *testing.T) {
+			result := buildProviderAdapterRequest(providerAdapterRequestInput{
+				Protocol: protocol,
+				Model:    "claude-sonnet-4-6",
+				Messages: []map[string]interface{}{{"role": "user", "content": "summarize"}},
+				Tools: []types.ToolDefinition{{
+					Name:       "view",
+					Parameters: map[string]interface{}{"type": "object"},
+				}},
+				Metadata: map[string]interface{}{
+					MetadataKeyInternalOperation: "compact",
+					MetadataKeyDisableTools:      false,
+					"tool_choice":                "none",
+				},
+			})
+
+			if result.Functions == nil {
+				t.Fatal("expected frozen tools to be retained when execution is disabled")
+			}
+			if result.ToolChoice != "none" {
+				t.Fatalf("expected tool_choice=none, got %#v", result.ToolChoice)
+			}
+		})
+	}
+}
+
+func TestBuildProviderAdapterRequest_PreservesToolOrderAndSchemaAcrossProtocols(t *testing.T) {
+	tools := []types.ToolDefinition{
+		{Name: "write", Description: "write a file", Parameters: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string", "description": "destination"},
+			}, "required": []string{"path"},
+		}},
+		{Name: "view", Description: "view a file", Parameters: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string"},
+			},
+		}},
+	}
+	for _, protocol := range []string{"openai", "codex", "anthropic", "gemini"} {
+		t.Run(protocol, func(t *testing.T) {
+			first := buildProviderAdapterRequest(providerAdapterRequestInput{Protocol: protocol, Model: "test", Tools: tools})
+			second := buildProviderAdapterRequest(providerAdapterRequestInput{
+				Protocol: protocol, Model: "test", Tools: tools,
+				Metadata: map[string]interface{}{MetadataKeyDisableTools: true},
+			})
+			if !reflect.DeepEqual(first.Functions, second.Functions) {
+				t.Fatalf("tool definitions changed when execution was disabled:\nfirst:  %#v\nsecond: %#v", first.Functions, second.Functions)
+			}
+		})
+	}
+}
+
+func TestProviderWrapperToolRoundTripPreservesMetadataForCodexFreeform(t *testing.T) {
+	metadata := map[string]interface{}{
+		"freeform": map[string]interface{}{
+			"type":       "grammar",
+			"syntax":     "lark",
+			"definition": "start: patch",
+		},
+	}
+	req := &LLMRequest{Tools: []types.ToolDefinition{{
+		Name:        "apply_patch",
+		Description: "apply a patch",
+		Parameters:  map[string]interface{}{"type": "object"},
+		Metadata:    metadata,
+	}}}
+	wrapper := &ProviderWrapper{config: &ProviderConfig{}}
+	chatReq := wrapper.toChatRequest(req)
+	if len(chatReq.Tools) != 1 || !reflect.DeepEqual(chatReq.Tools[0].Metadata, metadata) {
+		t.Fatalf("tool metadata was lost converting to ChatRequest: %#v", chatReq.Tools)
+	}
+	roundTripped := chatToolsToToolDefinitions(chatReq.Tools)
+	if len(roundTripped) != 1 || !reflect.DeepEqual(roundTripped[0].Metadata, metadata) {
+		t.Fatalf("tool metadata was lost converting back to ToolDefinition: %#v", roundTripped)
+	}
+}
+
 func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
 	input := providerAdapterRequestInput{
 		Protocol:  "anthropic",

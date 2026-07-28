@@ -2,10 +2,10 @@ package agent
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -24,21 +24,21 @@ const (
 	DoomLoopWarningThreshold = 4
 
 	// Event names: product surface (stable for hosts/telemetry).
-	EventDoomLoopWarning     = "tool_loop.doom_loop_warning"
-	EventDoomLoopTerminated  = "tool_loop.doom_loop_terminated"
+	EventDoomLoopWarning    = "tool_loop.doom_loop_warning"
+	EventDoomLoopTerminated = "tool_loop.doom_loop_terminated"
 	// Legacy names retained for existing subscribers/tests.
 	EventRepeatedSemanticCallObserved = "tool_loop.repeated_semantic_call_observed"
 )
 
 // DoomLoopObservation is the per-turn result of ObserveSemanticToolBatch.
 type DoomLoopObservation struct {
-	Fingerprint      string
-	RepeatCount      int
-	ToolCallCount    int
-	EmitWarning      bool
-	ShouldStop       bool
-	StopLimit        int
-	Advisory         string
+	Fingerprint   string
+	RepeatCount   int
+	ToolCallCount int
+	EmitWarning   bool
+	ShouldStop    bool
+	StopLimit     int
+	Advisory      string
 	// LimitReason is set when ShouldStop is true.
 	LimitReason string
 }
@@ -142,34 +142,41 @@ func DoomLoopTerminationPayload(traceID string, step int, obs DoomLoopObservatio
 }
 
 // semanticToolCallFingerprint hashes normalized tool name+args for the batch.
+// Reuse the execution-layer argument digest so provider-only underscore-prefixed
+// diagnostics do not split one semantic call into multiple repeat streaks.
 // Returns empty when any call is exempt (polling/control tools) or the batch is empty.
 func semanticToolCallFingerprint(calls []types.ToolCall) string {
 	if len(calls) == 0 {
 		return ""
 	}
-	type semanticToolCall struct {
-		Name string                 `json:"name"`
-		Args map[string]interface{} `json:"arguments,omitempty"`
-	}
-	payload := make([]semanticToolCall, 0, len(calls))
+	batch := strings.Builder{}
 	for _, call := range calls {
 		name := strings.ToLower(strings.TrimSpace(call.Name))
 		if name == "" || semanticToolCallRepeatExempt(name) {
 			return ""
 		}
-		payload = append(payload, semanticToolCall{Name: name, Args: call.Args})
+		digest := toolexec.ArgsDigest(name, call.Args)
+		fmt.Fprintf(&batch, "%d:%s", len(digest), digest)
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(encoded)
+	sum := sha256.Sum256([]byte(batch.String()))
 	return fmt.Sprintf("%x", sum[:])
 }
 
 func semanticToolCallRepeatExempt(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "background_task", "wait_agent", "read_agent", "list_agents", "get_agents", "get_goal", "read_goal":
+	case "background_task",
+		"task_output",
+		"wait_agent",
+		"read_agent",
+		"read_agent_events",
+		"list_agents",
+		"get_agents",
+		"wait_team",
+		"read_mailbox_digest",
+		"read_task_spec",
+		"read_task_context",
+		"get_goal",
+		"read_goal":
 		return true
 	default:
 		return false

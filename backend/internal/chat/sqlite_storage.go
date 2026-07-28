@@ -1235,6 +1235,14 @@ func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedS
 		if stage := bounded.Metadata.GetString("context_stage", ""); stage != "" {
 			minimal.Metadata["context_stage"] = truncateUTF8Middle(stage, 256)
 		}
+		// Prompt-cache freeze flags must survive hot-message bounding. Losing them
+		// lets later Build/trim paths reclassify turn-context items into the tail.
+		if bounded.Metadata.GetBool("context_snapshot", false) {
+			minimal.Metadata["context_snapshot"] = true
+		}
+		if turnID := strings.TrimSpace(bounded.Metadata.GetString("context_turn_id", "")); turnID != "" {
+			minimal.Metadata["context_turn_id"] = truncateUTF8Middle(turnID, 256)
+		}
 		toolCallLimit := min(len(bounded.ToolCalls), 16)
 		minimal.ToolCalls = make([]types.ToolCall, 0, toolCallLimit)
 		for index := 0; index < toolCallLimit; index++ {

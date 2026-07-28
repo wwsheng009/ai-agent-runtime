@@ -8,7 +8,7 @@
 
 - 增加统一的压缩适配层，保留本地压缩 / 远程压缩两种模式的扩展位。
 - 先实现本地压缩。
-- 先做 `pre-turn auto compact`，不做 `mid-turn`。
+- 先落地 `pre-turn auto compact`；`mid-turn compact` 现已在 ReAct 循环中可用。
 - 压缩结果会替换并持久化有界的 prompt projection；SQLite canonical transcript 采用追加写，不会因 compact 丢失压缩前原文。
 - 压缩阈值按 `provider -> model_capabilities -> model` 解析，不再使用全局固定 token limit。
 - 普通 prompt 组装不再默认执行 recent-window / ledger / summary 重组；只有显式 compact、达到阈值的 session compact 或发送前 preflight 压缩才允许缩短要发送的 prompt。
@@ -124,6 +124,12 @@ providers:
 
 当前实现里，普通 `contextmgr.Manager.Build()` 默认保留完整原始 history，不会因为 balanced profile 的 `MaxPromptTokens=12000`、`MaxMessages` 或 `KeepRecentMessages` 提前裁掉长会话目标。recent-window / ledger / summary 重组由 `BuildInput.EnablePromptCompaction` 显式打开；生产请求路径默认关闭这条 prompt-view compaction，避免在 session-level compact 前破坏 provider prompt cache 或导致 `ctx used` 从大到小抖动。
 
+压缩 replacement 不只保留模型生成的 handoff prose。`active_goal`、`todo_state`、`fact_ledger`、`team` 等 durable world-state 会按 stage 保留最新快照：
+- local compact：pre-turn 放在 summary 之后；mid-turn 放在真实 user request 与 tool replay 之间
+- remote compact：对 provider 返回的 replacement 再 merge 同一份 durable 快照
+
+若 mid-turn compact 后 active turn 中出现 compaction checkpoint 且仍缺少 `fact_ledger`，下一次 context build 允许 append-only rehydrate 权威 ledger；普通 ReAct tool replay 不会因此反复注入。workspace / recall 等瞬时投影仍不跨 compact 钉住，由下一轮按需重新构建。
+
 解析顺序：
 
 1. 如果配置了 `context.maxPromptTokens`，它表示用户显式硬上限，优先级最高。
@@ -197,16 +203,29 @@ context:
 3. 将较早历史发送给当前 provider/model 做一次内部 compact summary 请求。
 4. 构造 replacement history：
    - system 消息
-   - 一条 assistant compaction summary
+   - 一条 compaction summary
    - 近期原始消息
 5. 成功后由调用方替换并持久化 session history。
 
 本地 summary 请求约束：
 
-- 不带 tools。
+- 若调用方提供了当前 turn 的冻结 tool surface，会保留同一套 `tools`，并设置 `tool_choice=none`，避免 compact 执行工具，同时尽量复用 chat 的 tools 前缀 cache。
+- 没有 tools 时仍禁用 tools。
 - `temperature=0`。
 - metadata 带 `internal_operation=compact`。
+- 与 chat 使用相同的 `session_id` / `prompt_cache_key`。
 - 这次请求不会写成用户可见会话回合。
+
+当 provider summary 不可用时，会走 deterministic fallback handoff，而不是只保留最早几条粗摘要。fallback 优先保留：
+
+- 当前 goal / 最近 user 请求
+- 约束与偏好
+- durable session context（active goal / todos / team / fact ledger）
+- 关键决策与进展
+- 关键路径、命令、ID 等 references
+- 失败与 pitfalls
+- remaining work / next steps
+- 上一轮 compacted context（如有）
 
 ### 3. checkpoint 复用
 
@@ -402,6 +421,9 @@ compaction message 的 metadata 包含：
 - Codex remote compact endpoint 路径构造
 - 远端 `compaction` item 的持久化与回放
 - gateway 路径下的 remote compact
+- remote/local compact 请求都会携带与 chat 相同的 `session_id` / `prompt_cache_key`，避免 compact 请求切到另一条 cache 路由
+
+- local compact 在调用方提供冻结 tool surface 时会保留同一套 `tools`，并设置 `tool_choice=none`，避免 compact 执行工具，同时尽量复用 chat 的 tools 前缀 cache
 
 建议验证命令：
 
@@ -418,15 +440,16 @@ go test ./internal/llm ./internal/compactruntime ./internal/chat ./internal/api/
 2. Codex provider 已接入真实远端 compact endpoint。
 3. 当前 provider 若声明 `remote` 但没有实现远端压缩接口，会显式 skip，reason 为：
    `remote_compact_unsupported`
+4. ReAct 已支持 `mid-turn compact`：保留真实 user request、durable world-state 与近期完整 tool replay，并在 active turn 中允许 append-only rehydrate `fact_ledger`。
 
 后续可以继续补：
 
 1. 其他 provider 的 `RemoteCompactor`
    沿用同一条 replacement history 安装链路接入真实 compact endpoint。
-2. `mid-turn compact`
-   需要和 pending tool / approval / question 的恢复语义一起设计。
-3. model downshift compact
+2. model downshift compact
    当后续回合切换到更小 context 模型时，提前压缩旧历史。
+3. mid-turn compact 与 pending tool / approval / question 恢复语义的更细边界
+   当前实现已可运行，但跨 resume / 恢复路径仍可继续打磨。
 
 ## 结论
 

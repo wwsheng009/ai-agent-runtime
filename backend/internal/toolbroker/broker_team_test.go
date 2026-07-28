@@ -144,6 +144,36 @@ func TestBrokerDefinitionsIncludeBrokerSourceMetadata(t *testing.T) {
 	}
 }
 
+func TestBrokerDefinitionsDisableEmptyReplayCacheForVolatileReads(t *testing.T) {
+	store := newTeamStore(t)
+	broker := &Broker{TeamStore: store, AgentSessions: &fakeAgentSessionController{}}
+	wantVolatile := map[string]bool{
+		ToolTaskOutput:        false,
+		ToolListAgents:        false,
+		ToolWaitAgent:         false,
+		ToolReadAgentEvents:   false,
+		ToolWaitTeam:          false,
+		ToolReadMailboxDigest: false,
+		ToolReadTaskSpec:      false,
+		ToolReadTaskContext:   false,
+	}
+	for _, def := range broker.Definitions() {
+		if _, tracked := wantVolatile[def.Name]; !tracked {
+			continue
+		}
+		enabled, ok := types.BoolMetadataValue(def.Metadata, types.ToolMetadataEmptyReplayCacheKey)
+		if !ok || enabled {
+			t.Fatalf("expected %s=false for volatile tool %s, metadata=%#v", types.ToolMetadataEmptyReplayCacheKey, def.Name, def.Metadata)
+		}
+		wantVolatile[def.Name] = true
+	}
+	for name, found := range wantVolatile {
+		if !found {
+			t.Fatalf("expected volatile tool definition %s", name)
+		}
+	}
+}
+
 func TestBrokerDefinitionsAnnotateActiveTeamRunRequirements(t *testing.T) {
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store}

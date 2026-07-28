@@ -48,7 +48,10 @@ type PreflightDecision struct {
 	// digest. Allow is false so tools are not re-executed, but Error stays empty
 	// and the result is treated as a successful empty disposition.
 	SoftEmpty bool
-	Preflight string
+	// SkipEmptyReplayCache is true when tool metadata declares that empty results
+	// are volatile (for example polling/state reads) and must not be replayed.
+	SkipEmptyReplayCache bool
+	Preflight            string
 	// PathCandidates are nearby filesystem siblings that may correct a missing path.
 	// Generic model recovery signal — not tool-specific.
 	PathCandidates []string
@@ -78,10 +81,11 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 	}
 
 	decision := PreflightDecision{
-		Allow:   true,
-		Digest:  digest,
-		Attempt: attempt,
-		Args:    req.Args,
+		Allow:                true,
+		Digest:               digest,
+		Attempt:              attempt,
+		Args:                 req.Args,
+		SkipEmptyReplayCache: emptyReplayCacheDisabled(req.Metadata),
 	}
 
 	if missing := missingRequiredArgs(req.InputSchema, req.Args); len(missing) > 0 {
@@ -161,34 +165,36 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 		}
 		// Soft empty negative cache: identical empty-success digests short-circuit
 		// without re-executing. Still a success disposition (Error empty).
-		if record, open := memory.LookupEmpty(toolName, digest); open && record != nil {
-			decision.Allow = false
-			decision.SoftEmpty = true
-			decision.Retryable = false
-			decision.Preflight = "empty_replay"
-			decision.NextAction = strengthenEmptyReplayAction(record.NextAction, record.Count)
-			if decision.NextAction == "" {
-				decision.NextAction = strengthenEmptyReplayAction("", record.Count)
+		if !decision.SkipEmptyReplayCache {
+			if record, open := memory.LookupEmpty(toolName, digest); open && record != nil {
+				decision.Allow = false
+				decision.SoftEmpty = true
+				decision.Retryable = false
+				decision.Preflight = "empty_replay"
+				decision.NextAction = strengthenEmptyReplayAction(record.NextAction, record.Count)
+				if decision.NextAction == "" {
+					decision.NextAction = strengthenEmptyReplayAction("", record.Count)
+				}
+				diagMeta := map[string]interface{}{
+					toolresult.MetadataEmptyResultKey: true,
+					toolresult.MetadataOutcomeKey:     toolresult.OutcomeEmpty,
+					toolresult.MetadataRetryableKey:   false,
+					toolresult.MetadataNextActionKey:  decision.NextAction,
+					MetadataEmptyReplayKey:            true,
+				}
+				if len(record.AttemptedArgs) > 0 {
+					diagMeta[MetadataAttemptedArgsKey] = cloneStringInterfaceMap(record.AttemptedArgs)
+				} else if compact := toolresult.CompactAttemptedArgs(req.Args); len(compact) > 0 {
+					diagMeta[MetadataAttemptedArgsKey] = compact
+				}
+				// Soft empty is a successful empty disposition: Diagnose with empty err.
+				decision.Diagnostic = toolresult.Diagnose(toolName, req.ToolCallID, "", diagMeta)
+				decision.Diagnostic.EmptyResult = true
+				decision.Diagnostic.Outcome = toolresult.OutcomeEmpty
+				decision.Diagnostic.NextAction = decision.NextAction
+				observability.RecordToolPreflight(decision.Preflight, false)
+				return decision
 			}
-			diagMeta := map[string]interface{}{
-				toolresult.MetadataEmptyResultKey: true,
-				toolresult.MetadataOutcomeKey:     toolresult.OutcomeEmpty,
-				toolresult.MetadataRetryableKey:   false,
-				toolresult.MetadataNextActionKey:  decision.NextAction,
-				MetadataEmptyReplayKey:            true,
-			}
-			if len(record.AttemptedArgs) > 0 {
-				diagMeta[MetadataAttemptedArgsKey] = cloneStringInterfaceMap(record.AttemptedArgs)
-			} else if compact := toolresult.CompactAttemptedArgs(req.Args); len(compact) > 0 {
-				diagMeta[MetadataAttemptedArgsKey] = compact
-			}
-			// Soft empty is a successful empty disposition: Diagnose with empty err.
-			decision.Diagnostic = toolresult.Diagnose(toolName, req.ToolCallID, "", diagMeta)
-			decision.Diagnostic.EmptyResult = true
-			decision.Diagnostic.Outcome = toolresult.OutcomeEmpty
-			decision.Diagnostic.NextAction = decision.NextAction
-			observability.RecordToolPreflight(decision.Preflight, false)
-			return decision
 		}
 	}
 
@@ -330,6 +336,9 @@ func AttachPreflightMetadata(metadata map[string]interface{}, decision Preflight
 	}
 	metadata[MetadataArgumentsDigestKey] = decision.Digest
 	metadata[MetadataAttemptKey] = decision.Attempt
+	if decision.SkipEmptyReplayCache {
+		metadata[runtimetypes.ToolMetadataEmptyReplayCacheKey] = false
+	}
 	if decision.Preflight != "" {
 		metadata[MetadataPreflightKey] = decision.Preflight
 	}
@@ -413,6 +422,13 @@ func RecordOutcome(memory *Memory, toolName, digest, toolErr string, metadata ma
 		return diagnostic
 	}
 	if diagnostic.OK {
+		if disabled, ok := runtimetypes.BoolMetadataValue(metadata, runtimetypes.ToolMetadataEmptyReplayCacheKey); ok && !disabled {
+			// Volatile tools may be empty now and non-empty moments later. Never
+			// retain empty evidence as a negative cache entry; hard-failure
+			// circuits below remain available for true terminal errors.
+			memory.RecordNonEmptySuccess(toolName, digest)
+			return diagnostic
+		}
 		if diagnostic.EmptyResult || diagnostic.Outcome == toolresult.OutcomeEmpty {
 			// Soft negative cache for identical empty successes. Do not clear
 			// via RecordSuccess (that would wipe the soft cache we just built).
@@ -452,6 +468,11 @@ func RecordOutcome(memory *Memory, toolName, digest, toolErr string, metadata ma
 		}
 	}
 	return diagnostic
+}
+
+func emptyReplayCacheDisabled(metadata map[string]interface{}) bool {
+	enabled, ok := runtimetypes.BoolMetadataValue(metadata, runtimetypes.ToolMetadataEmptyReplayCacheKey)
+	return ok && !enabled
 }
 
 func strengthenNoRetryAction(existing, code string) string {

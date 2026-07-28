@@ -340,6 +340,32 @@ func TestSQLiteSessionStorageEnforcesHardHotMessageLimit(t *testing.T) {
 	require.True(t, loaded.History[0].Metadata.GetBool("session_storage_truncated", false))
 }
 
+func TestSQLiteSessionStoragePreservesFrozenContextMetadataWhenTruncated(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
+		cfg.MaxHotMessageBytes = 4096
+		cfg.HotHistoryBytes = 8192
+	})
+	session := NewSession("snapshot-metadata-user")
+	require.NoError(t, store.Save(ctx, session))
+
+	message := *types.NewAssistantMessage(strings.Repeat("frozen context ", 1000))
+	message.Metadata["context_stage"] = "recall"
+	message.Metadata["context_snapshot"] = true
+	message.Metadata["context_turn_id"] = "turn-cache-prefix"
+	message.Metadata["large_metadata"] = strings.Repeat("metadata", 4000)
+	require.NoError(t, store.AddMessage(ctx, session.ID, message))
+
+	loaded, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.History, 1)
+	stored := loaded.History[0]
+	require.True(t, stored.Metadata.GetBool("session_storage_truncated", false))
+	require.Equal(t, "recall", stored.Metadata.GetString("context_stage", ""))
+	require.True(t, stored.Metadata.GetBool("context_snapshot", false))
+	require.Equal(t, "turn-cache-prefix", stored.Metadata.GetString("context_turn_id", ""))
+}
+
 func TestSQLiteSessionStorageKeepsProjectionBoundedAsTranscriptGrows(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {

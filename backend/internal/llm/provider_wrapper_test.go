@@ -161,8 +161,50 @@ func TestProviderWrapper_InternalCompactRequestDisablesTools(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "compact summary", resp.Content)
-	require.NotContains(t, capturedBody, "tools")
-	require.NotContains(t, capturedBody, "tool_choice")
+	require.Contains(t, capturedBody, "tools")
+	require.Equal(t, "none", capturedBody["tool_choice"])
+}
+
+func TestProviderWrapper_InternalCompactRequestKeepsToolsWhenExplicitlyEnabled(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"compact summary"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 0,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "summarize",
+		}},
+		Tools: []types.ToolDefinition{{
+			Name:        "list_mcp_resources",
+			Description: "List resources",
+			Parameters:  map[string]interface{}{"type": "object"},
+		}},
+		Metadata: map[string]interface{}{
+			MetadataKeyInternalOperation: "compact",
+			MetadataKeyDisableTools:      false,
+			MetadataKeyDisableMetaTools:  false,
+			"tool_choice":                "none",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "compact summary", resp.Content)
+	tools, ok := capturedBody["tools"].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, tools)
+	require.Equal(t, "none", capturedBody["tool_choice"])
 }
 
 func TestProviderWrapper_CallDropsUnsupportedReasoningEffortFromCapability(t *testing.T) {
@@ -939,6 +981,103 @@ func TestProviderWrapper_CallReportsHTTPDebugPayload(t *testing.T) {
 	assert.Equal(t, 200, events[1].ResponseStatusCode)
 	assert.Contains(t, events[1].ResponseBodyPreview, `"resp_ok_1"`)
 	assert.Contains(t, string(events[1].ResponseBodyRaw), `"resp_ok_1"`)
+}
+
+func TestProviderWrapper_CallRetryKeepsCodexWireToolsAndCacheKeyStable(t *testing.T) {
+	var bodies []map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies = append(bodies, body)
+
+		if len(bodies) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"temporary upstream failure","type":"server_error"}}`)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"resp_retry_ok",
+			"model":"gpt-5.2-codex",
+			"stop_reason":"end_turn",
+			"output":[
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}
+			],
+			"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.2-codex",
+		MaxRetries:   1,
+		RetryRules: []RetryRule{{
+			Name:       "http_5xx_retry",
+			Enabled:    true,
+			MaxRetries: 2,
+			StatusCode: RetryStatusCodeMatcher{Range: "500-504"},
+		}},
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: 0,
+		},
+	})
+	require.NoError(t, err)
+
+	response, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.2-codex",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "inspect the repository",
+		}},
+		Tools: []types.ToolDefinition{
+			{
+				Name:        "view",
+				Description: "Read a file without modifying it.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"file_path": map[string]interface{}{"type": "string"},
+					},
+					"required": []interface{}{"file_path"},
+				},
+			},
+			{
+				Name:        "grep",
+				Description: "Search file contents.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"pattern": map[string]interface{}{"type": "string"},
+						"path":    map[string]interface{}{"type": "string"},
+					},
+				},
+			},
+		},
+		Metadata: map[string]interface{}{
+			"prompt_cache_key": "session-stable-generation",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, "ok", response.Content)
+	require.Len(t, bodies, 2)
+
+	firstTools, ok := bodies[0]["tools"].([]interface{})
+	require.True(t, ok)
+	secondTools, ok := bodies[1]["tools"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, firstTools, 2)
+	assert.Equal(t, firstTools, secondTools, "provider retries must reuse the exact wire tool order and schemas")
+	assert.Equal(t, "view", firstTools[0].(map[string]interface{})["name"])
+	assert.Equal(t, "grep", firstTools[1].(map[string]interface{})["name"])
+	assert.Equal(t, "session-stable-generation", bodies[0]["prompt_cache_key"])
+	assert.Equal(t, bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"])
 }
 
 func TestProviderWrapper_CallReportsStreamDeltasFromSSEResponse(t *testing.T) {

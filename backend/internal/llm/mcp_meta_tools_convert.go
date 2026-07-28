@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -27,19 +26,10 @@ func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol st
 	}
 
 	combined := make([]map[string]interface{}, 0, len(tools)+4)
-	seen := make(map[string]struct{}, len(tools)+4)
 	addTool := func(tool map[string]interface{}) {
 		if len(tool) == 0 {
 			return
 		}
-		key := protocolToolDedupKey(tool)
-		if key == "" {
-			return
-		}
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
 		combined = append(combined, tool)
 	}
 
@@ -51,23 +41,6 @@ func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol st
 			addTool(prepareToolDefinitionForProtocol(tool, protocol))
 		}
 	}
-
-	sort.SliceStable(combined, func(i, j int) bool {
-		left, _ := combined[i]["name"].(string)
-		right, _ := combined[j]["name"].(string)
-		left = strings.TrimSpace(left)
-		right = strings.TrimSpace(right)
-		if left == right {
-			return false
-		}
-		if left == "" {
-			return false
-		}
-		if right == "" {
-			return true
-		}
-		return left < right
-	})
 
 	switch protocol {
 	case "codex":
@@ -193,17 +166,4 @@ func convertNamedToolsToCodex(meta []map[string]interface{}) []map[string]interf
 		})
 	}
 	return result
-}
-
-func protocolToolDedupKey(tool map[string]interface{}) string {
-	if len(tool) == 0 {
-		return ""
-	}
-	if name, _ := tool["name"].(string); strings.TrimSpace(name) != "" {
-		return "name:" + strings.TrimSpace(name)
-	}
-	if toolType, _ := tool["type"].(string); strings.TrimSpace(toolType) != "" {
-		return "type:" + strings.TrimSpace(toolType)
-	}
-	return ""
 }

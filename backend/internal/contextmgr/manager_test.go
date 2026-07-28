@@ -1315,7 +1315,7 @@ func TestManager_Build_LongSessionLayerMetricsDifferAcrossProfiles(t *testing.T)
 	}
 }
 
-func TestTrimByTokenBudget_PrefersDroppingDynamicThenOldRawThenNewestStable(t *testing.T) {
+func TestTrimByTokenBudget_PreservesActiveTurnSnapshotBeforeOldRawAndStable(t *testing.T) {
 	messages := []types.Message{
 		*types.NewSystemMessage("system prompt"),
 		{
@@ -1351,9 +1351,10 @@ func TestTrimByTokenBudget_PrefersDroppingDynamicThenOldRawThenNewestStable(t *t
 
 	require.Len(t, trimmed, 3)
 	assert.Equal(t, "system", trimmed[0].Role)
-	assert.Equal(t, "profile", trimmed[1].Metadata.GetString("context_stage", ""))
-	assert.Equal(t, "user", trimmed[2].Role)
-	assert.Equal(t, "latest user question", trimmed[2].Content)
+	assert.Equal(t, "user", trimmed[1].Role)
+	assert.Equal(t, "latest user question", trimmed[1].Content)
+	assert.Equal(t, "workspace", trimmed[2].Metadata.GetString("context_stage", ""))
+	assert.True(t, trimmed[2].Metadata.GetBool(metaContextSnapshot, false))
 }
 
 func TestTrimByTokenBudget_KeepsLastUserWhenStableContextExceedsBudget(t *testing.T) {
@@ -1389,7 +1390,7 @@ func TestTrimByTokenBudget_KeepsLastUserWhenStableContextExceedsBudget(t *testin
 	assert.Equal(t, "latest user question", trimmed[2].Content)
 }
 
-func TestTrimByTokenBudget_KeepsWorkspaceRecallInDynamicTail(t *testing.T) {
+func TestTrimByTokenBudget_KeepsPostUserWorkspaceAsFrozenSnapshot(t *testing.T) {
 	messages := []types.Message{
 		*types.NewSystemMessage("system prompt"),
 		{
@@ -1413,8 +1414,8 @@ func TestTrimByTokenBudget_KeepsWorkspaceRecallInDynamicTail(t *testing.T) {
 		},
 	}
 
-	// Budget fits 4 messages. Dynamic workspace should be dropped before the active
-	// user turn, and must not be reordered in front of raw conversation history.
+	// Budget fits 4 messages. Post-user workspace is already part of the active
+	// turn snapshot, so old raw history is dropped before that immutable anchor.
 	trimmed := trimByTokenBudget(messages, Budget{
 		MaxPromptTokens: 40,
 	}, func(messages []types.Message) int {
@@ -1424,13 +1425,10 @@ func TestTrimByTokenBudget_KeepsWorkspaceRecallInDynamicTail(t *testing.T) {
 	require.Len(t, trimmed, 4)
 	assert.Equal(t, "system", trimmed[0].Role)
 	assert.Equal(t, "profile", trimmed[1].Metadata.GetString("context_stage", ""))
-	assert.Equal(t, "assistant", trimmed[2].Role)
-	assert.Equal(t, "recent assistant reply", trimmed[2].Content)
-	assert.Equal(t, "user", trimmed[3].Role)
-	assert.Equal(t, "latest user question", trimmed[3].Content)
-	for _, message := range trimmed {
-		require.NotEqual(t, "workspace", message.Metadata.GetString("context_stage", ""))
-	}
+	assert.Equal(t, "user", trimmed[2].Role)
+	assert.Equal(t, "latest user question", trimmed[2].Content)
+	assert.Equal(t, "workspace", trimmed[3].Metadata.GetString("context_stage", ""))
+	assert.True(t, trimmed[3].Metadata.GetBool(metaContextSnapshot, false))
 }
 
 func TestTrimByTokenBudget_DropsWholeToolReplayBlockInsteadOfLeavingOrphanTools(t *testing.T) {
@@ -1519,6 +1517,59 @@ func TestTrimMessageCount_PreservesUserAnchorInsideLongCompletedTurn(t *testing.
 	assert.Equal(t, "inspect the session failure", trimmed[1].Content)
 	assert.Equal(t, "user", trimmed[len(trimmed)-1].Role)
 	assert.Equal(t, "如何修复", trimmed[len(trimmed)-1].Content)
+	assertToolReplayBlocksComplete(t, trimmed)
+}
+
+func TestTrimMessageCount_PreservesFrozenTurnContextWithUserAnchor(t *testing.T) {
+	goal := *types.NewDeveloperMessage("Persistent goal.\n\nkeep snapshot")
+	goal.Metadata = types.Metadata{
+		"context_stage":    contextStageActiveGoal,
+		"context_snapshot": true,
+		"context_turn_id":  "turn-1",
+	}
+	todo := *types.NewAssistantMessage("Current todos:\n- freeze context")
+	todo.Metadata = types.Metadata{
+		"context_stage":    "todo_state",
+		"context_snapshot": true,
+		"context_turn_id":  "turn-1",
+	}
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("inspect the session failure"),
+		goal,
+		todo,
+		{
+			Role:      "assistant",
+			ToolCalls: []types.ToolCall{{ID: "call_1", Name: "shell"}},
+		},
+		*types.NewToolMessage("call_1", "first result"),
+		{
+			Role:      "assistant",
+			ToolCalls: []types.ToolCall{{ID: "call_2", Name: "shell"}},
+		},
+		*types.NewToolMessage("call_2", "second result"),
+		{
+			Role:      "assistant",
+			ToolCalls: []types.ToolCall{{ID: "call_3", Name: "shell"}},
+		},
+		*types.NewToolMessage("call_3", "third result"),
+		*types.NewAssistantMessage("the history window is the cause"),
+		*types.NewUserMessage("continue with the next turn"),
+	}
+
+	trimmed := trimMessageCount(messages, 6)
+
+	require.LessOrEqual(t, len(trimmed), 6)
+	require.GreaterOrEqual(t, len(trimmed), 4)
+	require.Equal(t, "system", trimmed[0].Role)
+	require.Equal(t, "user", trimmed[1].Role)
+	require.Equal(t, "inspect the session failure", trimmed[1].Content)
+	require.Equal(t, contextStageActiveGoal, trimmed[2].Metadata.GetString(metaContextStage, ""))
+	require.True(t, trimmed[2].Metadata.GetBool(metaContextSnapshot, false))
+	require.Equal(t, "todo_state", trimmed[3].Metadata.GetString(metaContextStage, ""))
+	require.True(t, trimmed[3].Metadata.GetBool(metaContextSnapshot, false))
+	require.Equal(t, "user", trimmed[len(trimmed)-1].Role)
+	require.Equal(t, "continue with the next turn", trimmed[len(trimmed)-1].Content)
 	assertToolReplayBlocksComplete(t, trimmed)
 }
 
@@ -1678,4 +1729,283 @@ func TestTokenCounterStageAware(t *testing.T) {
 	if got := counter([]types.Message{injected, injected}); got != 30 {
 		t.Fatalf("expected 15+15=30, got %d", got)
 	}
+}
+
+func TestManager_BuildFreezesDynamicTailAndKeepsExactPrefix(t *testing.T) {
+	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.RecallMode = RecallModeDisabled
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+	manager.Strategy.ObservationMode = ObservationModeAll
+
+	todo := *types.NewAssistantMessage("Current todos:\n- freeze context")
+	todo.Metadata = types.Metadata{"context_stage": "todo_state"}
+
+	history := []types.Message{
+		*types.NewSystemMessage("stable system"),
+		*types.NewUserMessage("inspect the runtime"),
+		todo,
+	}
+
+	first := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-1",
+		SessionID:          "session-prefix",
+		Goal:               "inspect the runtime",
+		History:            history,
+		ActiveGoalGuidance: "Persistent goal.\n\nfinish cache work",
+	})
+	require.NotEmpty(t, first.Messages)
+	require.True(t, first.Metadata["active_goal_injected"].(bool))
+
+	userIdx := -1
+	goalIdx := -1
+	todoIdx := -1
+	for index, message := range first.Messages {
+		stage := message.Metadata.GetString("context_stage", "")
+		switch stage {
+		case "todo_state":
+			todoIdx = index
+			require.Equal(t, todo, message, "existing history must not be mutated merely to add snapshot metadata")
+		case "active_goal":
+			goalIdx = index
+			require.Equal(t, "developer", message.Role)
+			require.Contains(t, message.Content, "finish cache work")
+			require.True(t, message.Metadata.GetBool("context_snapshot", false))
+		}
+		if message.Role == "user" && message.Content == "inspect the runtime" {
+			userIdx = index
+		}
+	}
+	require.GreaterOrEqual(t, userIdx, 0)
+	require.Greater(t, todoIdx, userIdx)
+	require.Greater(t, goalIdx, userIdx)
+
+	// Simulate the first model step appending assistant + tool traffic after the
+	// frozen snapshot. The next Build must keep the previous managed prefix exact.
+	historyAfterTools := append(cloneMessages(first.Messages),
+		*types.NewAssistantMessage("calling tools"),
+		*types.NewToolMessage("call-1", "tool output"),
+	)
+	// Drop the leading system message so Build re-reads the durable history shape
+	// used by the loop (system may also come from mergeConfiguredSystemPrompt).
+	// Keep full first.Messages because that is what reusablePromptHistory stores.
+	second := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-1",
+		SessionID:          "session-prefix",
+		Goal:               "inspect the runtime",
+		History:            historyAfterTools,
+		ActiveGoalGuidance: "Persistent goal.\n\nfinish cache work UPDATED",
+	})
+	require.True(t, second.Metadata["turn_context_snapshot_reused"].(bool))
+	require.GreaterOrEqual(t, len(second.Messages), len(first.Messages)+2)
+	require.Equal(t, first.Messages, second.Messages[:len(first.Messages)])
+	require.Equal(t, "calling tools", second.Messages[len(first.Messages)].Content)
+	require.Equal(t, "tool", second.Messages[len(first.Messages)+1].Role)
+
+	// Goal text must stay frozen from the first snapshot, not rewrite in place.
+	foundUpdatedGoal := false
+	for _, message := range second.Messages {
+		if message.Metadata.GetString("context_stage", "") == "active_goal" &&
+			strings.Contains(message.Content, "UPDATED") {
+			foundUpdatedGoal = true
+		}
+	}
+	require.False(t, foundUpdatedGoal, "frozen goal snapshot must not rewrite mid-turn")
+}
+
+func TestManager_BuildKeepsDynamicStageSnapshotBeforeToolReplay(t *testing.T) {
+	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.RecallMode = RecallModeDisabled
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+
+	history := []types.Message{
+		*types.NewSystemMessage("stable system"),
+		*types.NewUserMessage("inspect the runtime"),
+	}
+	for _, stage := range []string{"fact_ledger", "recall", "team", "todo_state"} {
+		message := *types.NewAssistantMessage("frozen " + stage)
+		message.Metadata = types.Metadata{
+			metaContextStage:    stage,
+			metaContextSnapshot: true,
+			metaContextTurnID:   "turn-dynamic-prefix",
+		}
+		history = append(history, message)
+	}
+
+	first := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-dynamic-prefix",
+		SessionID:          "session-dynamic-prefix",
+		Goal:               "inspect the runtime",
+		History:            history,
+		ActiveGoalGuidance: "Persistent goal.\n\nkeep dynamic stages fixed",
+	})
+	require.Equal(t, history, first.Messages[:len(history)])
+
+	secondHistory := append(cloneMessages(first.Messages),
+		*types.NewAssistantMessage("calling tools"),
+		*types.NewToolMessage("call-1", "tool output"),
+	)
+	second := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-dynamic-prefix",
+		SessionID:          "session-dynamic-prefix",
+		Goal:               "inspect the runtime",
+		History:            secondHistory,
+		ActiveGoalGuidance: "Persistent goal.\n\nUPDATED must remain frozen",
+	})
+
+	require.Equal(t, secondHistory, second.Messages[:len(secondHistory)])
+	for index, stage := range []string{"fact_ledger", "recall", "team", "todo_state"} {
+		message := second.Messages[2+index]
+		require.Equal(t, stage, message.Metadata.GetString(metaContextStage, ""))
+		require.True(t, message.Metadata.GetBool(metaContextSnapshot, false))
+		require.Equal(t, "turn-dynamic-prefix", message.Metadata.GetString(metaContextTurnID, ""))
+	}
+}
+
+func TestManager_BuildAppendsMissingStagesAfterReplayWithoutMovingPrefix(t *testing.T) {
+	// Stages that were not part of the earlier request may still be appended after
+	// assistant/tool replay. That is cache-safe because it only grows the suffix.
+	// Stages already present must stay frozen in place.
+	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.RecallMode = RecallModeDisabled
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+	manager.Strategy.ObservationMode = ObservationModeFailures
+
+	goal := *types.NewDeveloperMessage("Persistent goal.\n\noriginal")
+	goal.Metadata = types.Metadata{
+		"context_stage":    "active_goal",
+		"context_snapshot": true,
+		"context_turn_id":  "turn-legacy",
+	}
+	history := []types.Message{
+		*types.NewSystemMessage("stable system"),
+		*types.NewUserMessage("inspect the runtime"),
+		goal,
+		*types.NewAssistantMessage("calling tools"),
+		*types.NewToolMessage("call-1", "tool output"),
+	}
+	prefix := cloneMessages(history)
+	result := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-legacy",
+		SessionID:          "session-legacy",
+		Goal:               "inspect the runtime",
+		History:            history,
+		ActiveGoalGuidance: "Persistent goal.\n\nUPDATED should not rewrite",
+	})
+
+	require.Nil(t, result.Metadata["active_goal_injected"])
+	require.True(t, result.Metadata["active_goal_suppressed_for_snapshot"].(bool))
+	require.GreaterOrEqual(t, len(result.Messages), len(prefix))
+	require.Equal(t, prefix, result.Messages[:len(prefix)])
+
+	goalCount := 0
+	for _, message := range result.Messages {
+		if message.Metadata.GetString("context_stage", "") == "active_goal" {
+			goalCount++
+			require.Contains(t, message.Content, "original")
+			require.NotContains(t, message.Content, "UPDATED")
+			require.True(t, message.Metadata.GetBool("context_snapshot", false))
+		}
+	}
+	require.Equal(t, 1, goalCount)
+}
+
+func TestManager_BuildPreservesArbitraryHistoryOrderWithoutCompaction(t *testing.T) {
+	manager := NewManager(Budget{
+		MaxPromptTokens:     12000,
+		MaxMessages:         24,
+		KeepRecentMessages:  8,
+		MaxRecallResults:    3,
+		MaxObservationItems: 6,
+	}, nil)
+
+	lateSystem := types.NewSystemMessage("late runtime notice")
+	lateSystem.Metadata["context_stage"] = "runtime_notice"
+	goalOwned := types.NewAssistantMessage("result from the previous goal")
+	goalOwned.Metadata["goal_id"] = "goal-old"
+	history := []types.Message{
+		*types.NewSystemMessage("stable instructions"),
+		*types.NewUserMessage("first turn"),
+		*types.NewAssistantMessage("first answer"),
+		*lateSystem,
+		*goalOwned,
+		*types.NewUserMessage("second turn"),
+	}
+
+	result := manager.Build(context.Background(), BuildInput{
+		TraceID:                "turn-second",
+		GoalID:                 "goal-new",
+		History:                history,
+		EnablePromptCompaction: true,
+		CountTokens:            func([]types.Message) int { return 100 },
+	})
+
+	require.Len(t, result.Messages, len(history))
+	require.Equal(t, history, result.Messages)
+	require.Equal(t, 0, result.Metadata["goal_scoped_messages_filtered"])
+	require.Equal(t, false, result.Metadata["hot_keep_recent_applied"])
+}
+
+func TestManager_BuildNewUserTurnAppendsSnapshotWithoutRewritingPriorTurn(t *testing.T) {
+	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.RecallMode = RecallModeDisabled
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+
+	first := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-1",
+		SessionID:          "session-multi-turn-prefix",
+		Goal:               "finish the cache fix",
+		History:            []types.Message{*types.NewSystemMessage("stable system"), *types.NewUserMessage("start")},
+		ActiveGoalGuidance: "Persistent goal.\n\nfirst snapshot",
+	})
+	require.NotEmpty(t, first.Messages)
+
+	secondHistory := append(cloneMessages(first.Messages),
+		*types.NewAssistantMessage("first turn complete"),
+		*types.NewUserMessage("continue"),
+	)
+	second := manager.Build(context.Background(), BuildInput{
+		TraceID:            "turn-2",
+		SessionID:          "session-multi-turn-prefix",
+		Goal:               "finish the cache fix",
+		History:            secondHistory,
+		ActiveGoalGuidance: "Persistent goal.\n\nsecond snapshot",
+	})
+
+	require.Greater(t, len(second.Messages), len(secondHistory))
+	require.Equal(t, secondHistory, second.Messages[:len(secondHistory)])
+	require.Equal(t, contextStageActiveGoal, second.Messages[len(secondHistory)].Metadata.GetString(metaContextStage, ""))
+	require.True(t, second.Messages[len(secondHistory)].Metadata.GetBool(metaContextSnapshot, false))
+	require.Equal(t, "turn-2", second.Messages[len(secondHistory)].Metadata.GetString(metaContextTurnID, ""))
+	require.Contains(t, second.Messages[len(secondHistory)].Content, "second snapshot")
+
+	goalSnapshots := 0
+	for _, message := range second.Messages {
+		if message.Metadata.GetString(metaContextStage, "") == contextStageActiveGoal {
+			goalSnapshots++
+		}
+	}
+	require.Equal(t, 2, goalSnapshots)
+}
+
+func TestSplitManagedMessagesAdoptsPostUserDynamicContextAsRawHistory(t *testing.T) {
+	snapshot := *types.NewAssistantMessage("frozen recall")
+	snapshot.Metadata = types.Metadata{
+		"context_stage":    "recall",
+		"context_snapshot": true,
+	}
+	dynamic := *types.NewAssistantMessage("fresh recall")
+	dynamic.Metadata = types.Metadata{"context_stage": "recall"}
+
+	system, stable, dynamicMsgs, raw := splitManagedMessages([]types.Message{
+		*types.NewSystemMessage("sys"),
+		*types.NewUserMessage("hi"),
+		snapshot,
+		*types.NewAssistantMessage("answer"),
+		dynamic,
+	})
+	require.Len(t, system, 1)
+	require.Empty(t, stable)
+	require.Empty(t, dynamicMsgs)
+	require.Equal(t, []string{"hi", "frozen recall", "answer", "fresh recall"}, []string{raw[0].Content, raw[1].Content, raw[2].Content, raw[3].Content})
+	require.True(t, raw[3].Metadata.GetBool(metaContextSnapshot, false))
 }

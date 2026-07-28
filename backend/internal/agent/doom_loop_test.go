@@ -62,31 +62,49 @@ func TestDoomLoopTracker_ResetsOnDifferentArgs(t *testing.T) {
 }
 
 func TestDoomLoopTracker_ExemptsPollingTools(t *testing.T) {
-	tracker := NewDoomLoopTracker(2)
-	// Seed a real streak first.
-	seed := []types.ToolCall{{Name: "view", Args: map[string]interface{}{"file_path": "x.go"}}}
-	require.Equal(t, 1, tracker.ObserveSemanticToolBatch(seed).RepeatCount)
-	// Polling tools clear the tracker and never count.
-	poll := []types.ToolCall{{Name: "wait_agent", Args: map[string]interface{}{"id": "child-1"}}}
-	obs := tracker.ObserveSemanticToolBatch(poll)
-	require.Empty(t, obs.Fingerprint)
-	require.Zero(t, obs.RepeatCount)
-	require.False(t, obs.ShouldStop)
-	// After exempt batch, a new real call starts at 1.
-	require.Equal(t, 1, tracker.ObserveSemanticToolBatch(seed).RepeatCount)
+	for _, toolName := range []string{
+		"task_output",
+		"wait_agent",
+		"read_agent_events",
+		"list_agents",
+		"wait_team",
+		"read_mailbox_digest",
+		"read_task_spec",
+		"read_task_context",
+		"get_goal",
+	} {
+		t.Run(toolName, func(t *testing.T) {
+			tracker := NewDoomLoopTracker(2)
+			// Seed a real streak first.
+			seed := []types.ToolCall{{Name: "view", Args: map[string]interface{}{"file_path": "x.go"}}}
+			require.Equal(t, 1, tracker.ObserveSemanticToolBatch(seed).RepeatCount)
+			// Polling tools clear the tracker and never count.
+			poll := []types.ToolCall{{Name: toolName, Args: map[string]interface{}{"id": "child-1"}}}
+			obs := tracker.ObserveSemanticToolBatch(poll)
+			require.Empty(t, obs.Fingerprint)
+			require.Zero(t, obs.RepeatCount)
+			require.False(t, obs.ShouldStop)
+			// After an exempt batch, a new real call starts at 1.
+			require.Equal(t, 1, tracker.ObserveSemanticToolBatch(seed).RepeatCount)
+		})
+	}
 }
 
 func TestSemanticToolCallFingerprintStableAndExempt(t *testing.T) {
 	a := semanticToolCallFingerprint([]types.ToolCall{{
 		Name: "View",
-		Args: map[string]interface{}{"file_path": "a.go"},
+		Args: map[string]interface{}{"file_path": "a.go", "_provider_diagnostic": "first"},
 	}})
 	b := semanticToolCallFingerprint([]types.ToolCall{{
 		Name: "view",
-		Args: map[string]interface{}{"file_path": "a.go"},
+		Args: map[string]interface{}{"_provider_diagnostic": "second", "file_path": "a.go"},
 	}})
 	require.NotEmpty(t, a)
 	require.Equal(t, a, b)
+	require.NotEqual(t, a, semanticToolCallFingerprint([]types.ToolCall{{
+		Name: "view",
+		Args: map[string]interface{}{"file_path": "b.go"},
+	}}))
 	require.Empty(t, semanticToolCallFingerprint([]types.ToolCall{{
 		Name: "background_task",
 		Args: map[string]interface{}{"task_id": "t1"},

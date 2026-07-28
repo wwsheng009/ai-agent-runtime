@@ -52,14 +52,16 @@ func TestProviderWrapperRemoteCompactCodexUsesCompactEndpointAndBuildsReplayable
 	}
 
 	response, err := provider.RemoteCompact(context.Background(), RemoteCompactRequest{
-		Model:   "gpt-5.4",
-		History: remoteCompactTestHistory(),
+		SessionID: "session-remote-compact-1",
+		Model:     "gpt-5.4",
+		History:   remoteCompactTestHistory(),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
 	assert.Equal(t, "/v1/responses/compact", capturedPath)
 	assert.Equal(t, "gpt-5.4", capturedBody["model"])
+	assert.Equal(t, "session-remote-compact-1", capturedBody["prompt_cache_key"])
 	assert.False(t, capturedBody["parallel_tool_calls"].(bool))
 	require.Empty(t, decodeSliceOfMaps(capturedBody["tools"]))
 
@@ -95,11 +97,18 @@ func TestRemoteCompactReplayFeedsCompactionItemBackIntoCodexInput(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
-	request := buildCodexRemoteCompactRequest("gpt-5.4", response.ReplacementHistory)
+	request := buildCodexRemoteCompactRequest("gpt-5.4", response.ReplacementHistory, "session-remote-compact-2")
 	inputItems := decodeSliceOfMaps(request["input"])
 	require.Len(t, inputItems, 1)
 	assert.Equal(t, "compaction", inputItems[0]["type"])
 	assert.Equal(t, "opaque-token-2", inputItems[0]["encrypted_content"])
+	assert.Equal(t, "session-remote-compact-2", request["prompt_cache_key"])
+}
+
+func TestBuildCodexRemoteCompactRequestOmitsEmptyPromptCacheKey(t *testing.T) {
+	request := buildCodexRemoteCompactRequest("gpt-5.4", remoteCompactTestHistory(), "  ")
+	_, hasKey := request["prompt_cache_key"]
+	assert.False(t, hasKey)
 }
 
 func TestGatewayClientRemoteCompactCodexUsesSelectedProviderCompactEndpoint(t *testing.T) {
@@ -136,8 +145,9 @@ func TestGatewayClientRemoteCompactCodexUsesSelectedProviderCompactEndpoint(t *t
 	client := NewGatewayClient(rm, "gpt-5.4-mini")
 
 	response, err := client.RemoteCompact(context.Background(), RemoteCompactRequest{
-		Model:   "gpt-5.4",
-		History: remoteCompactTestHistory(),
+		SessionID: "session-gateway-remote-compact",
+		Model:     "gpt-5.4",
+		History:   remoteCompactTestHistory(),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, response)
@@ -149,6 +159,7 @@ func TestGatewayClientRemoteCompactCodexUsesSelectedProviderCompactEndpoint(t *t
 
 	assert.Equal(t, "/custom/responses/compact", capturedPath)
 	assert.Equal(t, "gpt-5.4-mini", capturedBody["model"])
+	assert.Equal(t, "session-gateway-remote-compact", capturedBody["prompt_cache_key"])
 	require.Len(t, response.ReplacementHistory, 2)
 	reasoning := types.GetReasoningBlock(response.ReplacementHistory[1].Metadata)
 	require.NotNil(t, reasoning)

@@ -97,7 +97,7 @@ func TestSyncChatSystemPromptMessage_DoesNotRewriteWhenSnapshotUnchanged(t *test
 	}
 }
 
-func TestComposeChatSystemPrompt_GoalIsOutboundOnly(t *testing.T) {
+func TestComposeChatSystemPrompt_GoalDoesNotRewriteOutboundInstructions(t *testing.T) {
 	session, cleanup := newGoalCommandTestSession(t)
 	defer cleanup()
 	session.SystemPromptText = "Base prompt."
@@ -112,8 +112,14 @@ func TestComposeChatSystemPrompt_GoalIsOutboundOnly(t *testing.T) {
 	if strings.Contains(durable, "finish persistent work") {
 		t.Fatalf("durable prompt must omit goal guidance, got:\n%s", durable)
 	}
-	if !strings.Contains(outbound, "finish persistent work") {
-		t.Fatalf("outbound prompt must include goal guidance, got:\n%s", outbound)
+	if strings.Contains(outbound, "finish persistent work") {
+		t.Fatalf("outbound instructions must omit volatile goal guidance, got:\n%s", outbound)
+	}
+	if outbound != durable {
+		t.Fatalf("outbound and durable instructions must be identical\ndurable:\n%s\noutbound:\n%s", durable, outbound)
+	}
+	if guidance := renderActiveGoalGuidance(session); !strings.Contains(guidance, "finish persistent work") {
+		t.Fatalf("goal guidance must remain available for turn-context injection, got:\n%s", guidance)
 	}
 	if len(session.Messages) == 0 || session.Messages[0].Content != durable {
 		t.Fatalf("stored history must use durable prompt without goal")

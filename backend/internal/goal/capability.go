@@ -9,6 +9,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclitools"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
@@ -53,6 +54,9 @@ func CapabilityRegistry() *aiclitools.Registry {
 func CapabilityMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		"source": "aicli_goal",
+		// get_goal can legitimately flip from empty/nil to an active goal under the
+		// same zero-arg call; do not soft-cache empty results across the run.
+		runtimetypes.ToolMetadataEmptyReplayCacheKey: false,
 	}
 }
 

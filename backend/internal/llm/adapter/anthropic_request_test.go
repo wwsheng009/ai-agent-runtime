@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -100,6 +101,40 @@ func TestAnthropicBuildRequest_OmitsEmptySystemField(t *testing.T) {
 
 	if _, exists := req["system"]; exists {
 		t.Fatalf("did not expect system field, got %#v", req["system"])
+	}
+}
+
+func TestAnthropicBuildRequest_KeepsTurnContextDeveloperOutOfSystem(t *testing.T) {
+	a := &AnthropicAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model: "claude-3-7-sonnet",
+		Messages: []map[string]interface{}{
+			{"role": "system", "content": "Base guardrail"},
+			{"role": "user", "content": "check application logs"},
+			{"role": "developer", "content": "Persistent goal.\n\nkeep the prefix stable"},
+			{"role": "assistant", "content": "I will inspect logs."},
+		},
+		Stream: false,
+	})
+
+	if req["system"] != "Base guardrail" {
+		t.Fatalf("expected only leading system in top-level system, got %#v", req["system"])
+	}
+	messages, ok := req["messages"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected anthropic messages array, got %#v", req["messages"])
+	}
+	if len(messages) != 3 {
+		t.Fatalf("expected user + residual goal + assistant, got %#v", messages)
+	}
+	if messages[0]["role"] != "user" || messages[0]["content"] != "check application logs" {
+		t.Fatalf("unexpected first message: %#v", messages[0])
+	}
+	if messages[1]["role"] != "user" || messages[1]["content"] != "Persistent goal.\n\nkeep the prefix stable" {
+		t.Fatalf("expected residual developer goal as user message, got %#v", messages[1])
+	}
+	if messages[2]["role"] != "assistant" {
+		t.Fatalf("expected assistant trailing message, got %#v", messages[2])
 	}
 }
 
@@ -231,6 +266,28 @@ func TestAnthropicBuildRequest_ToolChoiceIsPropagated(t *testing.T) {
 	}
 	if tc["type"] != "auto" {
 		t.Fatalf("expected tool_choice type auto, got %v", tc["type"])
+	}
+}
+
+func TestAnthropicBuildRequest_NormalizesNoneToolChoiceWithoutDroppingTools(t *testing.T) {
+	a := &AnthropicAdapter{}
+	tools := []map[string]interface{}{{
+		"name":         "view",
+		"input_schema": map[string]interface{}{"type": "object"},
+	}}
+	req := a.BuildRequest(RequestConfig{
+		Model:      "claude-sonnet-4-6",
+		Messages:   []map[string]interface{}{{"role": "user", "content": "summarize"}},
+		Functions:  tools,
+		ToolChoice: "none",
+	})
+
+	if got := req["tools"]; !reflect.DeepEqual(got, tools) {
+		t.Fatalf("expected frozen tools to be retained, got %#v", got)
+	}
+	choice, ok := req["tool_choice"].(map[string]interface{})
+	if !ok || choice["type"] != "none" {
+		t.Fatalf("expected anthropic tool_choice {type:none}, got %#v", req["tool_choice"])
 	}
 }
 

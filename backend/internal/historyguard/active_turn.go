@@ -347,6 +347,8 @@ func buildActiveTurnReplaySummary(messages []types.Message) *types.Message {
 
 	message := types.NewAssistantMessage(strings.Join(lines, "\n"))
 	message.Metadata["active_turn_compaction"] = true
+	message.Metadata["prompt_cache_epoch_break"] = true
+	message.Metadata["prompt_cache_epoch_reason"] = "active_turn_replay_compaction"
 	message.Metadata["compacted_messages"] = len(messages)
 	message.Metadata["compacted_tool_calls"] = toolCalls
 	return message

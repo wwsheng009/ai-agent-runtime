@@ -391,13 +391,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	totalUsage := &types.TokenUsage{}
 
 	// 构建初始对话历史. Plan-mode instructions are derived from the current
-	// live engine below, so remove any reminder persisted by older runtimes
-	// before it can leak across approve/quit or retain an outdated plan path.
-	history := stripPlanModeSystemReminders(cloneMessageHistory(options.History))
+	// Previously persisted history is immutable until explicit compaction. Runtime
+	// mode changes are represented by appended reminders, never by deleting an old
+	// plan-mode item from the provider prefix.
+	history := cloneMessageHistory(options.History)
+	history = mergeConfiguredSystemPrompt(history, loop.agent.config.SystemPrompt)
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
 	}
-	history = mergeConfiguredSystemPrompt(history, loop.agent.config.SystemPrompt)
 	builder := NewMessageBuilder(history)
 	// Keep a compact prompt view separate from the full durable audit history.
 	// Once preflight compacts a long active turn, later model calls build on that
@@ -567,6 +568,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		result.Usage = totalUsage.Clone()
 		if len(action.promptHistory) > 0 {
 			promptBuilder = NewMessageBuilder(action.promptHistory)
+			// Frozen turn-context snapshots are part of the prompt view. Mirror any
+			// newly frozen items into durable history so the next user turn keeps
+			// them as an immutable prefix instead of dropping them.
+			if appendMissingContextSnapshots(builder, action.promptHistory) {
+				if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+					return nil, err
+				}
+			}
 		}
 		if options.BudgetTokens > 0 && usage != nil {
 			remainingBudget -= usage.TotalTokens
@@ -1048,6 +1057,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			Memory:                   loop.agent.GetMemory(),
 			Observations:             observations,
 			CountTokens:              countTokens,
+			ActiveGoalGuidance:       optionString(loop.agent.config.Options, "active_goal_guidance"),
 			PromptBudget:             contextBudget.PromptBudget,
 			PromptBudgetSource:       contextBudget.BudgetSource,
 			PromptBudgetSourceDetail: contextBudget.BudgetSourceDetail,
@@ -1146,6 +1156,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if loop.agent != nil && loop.agent.config != nil {
 		if route := optionMap(loop.agent.config.Options, "route"); len(route) > 0 {
 			req.Metadata["route"] = cloneInterfaceMap(route)
+		}
+		if boolValue(optionValue(loop.agent.config.Options, llm.MetadataKeyDisableTools)) {
+			// Execution can be disabled without changing the frozen definitions
+			// that form the provider prompt-cache prefix.
+			req.Metadata[llm.MetadataKeyDisableTools] = true
+			req.Metadata["tool_choice"] = "none"
 		}
 	}
 	addRemainingBudgetMetadata(req.Metadata, remainingBudget)
@@ -2476,9 +2492,6 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 			if len(allowed) > 0 && !allowed[mt.Name] {
 				continue
 			}
-			if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && policy.AllowToolInfo(mt) != nil {
-				continue
-			}
 			if seen[mt.Name] {
 				continue
 			}
@@ -2506,8 +2519,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	}
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
-		if (len(allowed) == 0 || allowed["spawn_subagents"]) &&
-			(loop.agent.GetToolExecutionPolicy() == nil || loop.agent.GetToolExecutionPolicy().AllowsDefinition("spawn_subagents")) {
+		if len(allowed) == 0 || allowed["spawn_subagents"] {
 			definition := spawnSubagentsToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
@@ -2521,9 +2533,6 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 			if len(allowed) > 0 && !allowed[def.Name] {
 				continue
 			}
-			if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && !policy.AllowsDefinition(def.Name) {
-				continue
-			}
 			if seen[def.Name] {
 				continue
 			}
@@ -2535,8 +2544,9 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))
 	tools = filterToolDefinitionsByShouldList(tools, listCtx)
 	tools = optimizeModelToolSurface(tools)
-	// Simple-goal projection wins for tiny prompts. Otherwise apply search
-	// projection so large catalogs keep core tools + search_tool only.
+	// Projection is allowed only while selecting a session's first cache
+	// generation. The snapshot above then preserves this exact result on every
+	// later step and turn; adapters must never project it again.
 	if len(allowed) == 0 && len(simpleGoalToolNames(goal)) > 0 {
 		tools = projectSimpleGoalToolSurface(goal, tools)
 	} else {
@@ -2678,14 +2688,6 @@ func compactGrepParametersForModel(parameters map[string]interface{}) map[string
 }
 
 func (loop *ReActLoop) compactToolSurfaceToBudget(tools []types.ToolDefinition) []types.ToolDefinition {
-	return loop.compactToolSurfaceForPrompt(nil, tools, 0)
-}
-
-// freezeToolSurfaceForTurn selects a turn-stable tool surface before the first
-// model call. It uses the fixed turn prompt budget and reserves most of that
-// budget for active-turn message growth, so later steps do not need to rewrite
-// tools under tighter prompt pressure.
-func (loop *ReActLoop) freezeToolSurfaceForTurn(tools []types.ToolDefinition) []types.ToolDefinition {
 	if loop == nil || loop.llmRuntime == nil || len(tools) == 0 {
 		return tools
 	}
@@ -2697,13 +2699,11 @@ func (loop *ReActLoop) freezeToolSurfaceForTurn(tools []types.ToolDefinition) []
 	if before <= 0 {
 		return tools
 	}
-	// Keep tools to at most ~1/4 of the turn prompt budget so active-turn replay
-	// growth and preflight message compaction still have room later in the turn.
+	// Provider limits may be handled once, before the session's first cache
+	// generation is frozen. Reserve most of the fixed prompt budget for messages
+	// so later active-turn growth never requires rewriting frozen tool schemas.
 	toolBudget := budget.PromptBudget / 4
-	if toolBudget < 1 {
-		toolBudget = 1
-	}
-	if before <= toolBudget {
+	if toolBudget < 1 || before <= toolBudget {
 		return tools
 	}
 	compacted := compactToolDefinitionAnnotations(tools)
@@ -2711,6 +2711,13 @@ func (loop *ReActLoop) freezeToolSurfaceForTurn(tools []types.ToolDefinition) []
 		return compacted
 	}
 	return tools
+}
+
+// freezeToolSurfaceForTurn owns an immutable copy of the already-selected
+// session tool surface. Prompt pressure is handled by compacting messages;
+// rewriting tool descriptions or JSON Schema would invalidate provider caches.
+func (loop *ReActLoop) freezeToolSurfaceForTurn(tools []types.ToolDefinition) []types.ToolDefinition {
+	return cloneToolDefinitions(tools)
 }
 
 func (loop *ReActLoop) compactToolSurfaceForPrompt(messages []types.Message, tools []types.ToolDefinition, remainingBudget int) []types.ToolDefinition {
@@ -3076,7 +3083,8 @@ func dispositionReplayAdvisory(outcome string, repeatCount int, errorCode ...str
 }
 
 // dominantToolResultDisposition picks the most actionable non-success outcome
-// from a tool batch (partial > empty > failed > success).
+// from a tool batch (partial > failed > empty > success). A hard failure must
+// not be hidden by an unrelated successful empty search in the same batch.
 func dominantToolResultDisposition(results []toolExecutionResult) string {
 	hasPartial := false
 	hasEmpty := false
@@ -3110,10 +3118,10 @@ func dominantToolResultDisposition(results []toolExecutionResult) string {
 	switch {
 	case hasPartial:
 		return toolresult.OutcomePartial
-	case hasEmpty:
-		return toolresult.OutcomeEmpty
 	case hasFailed:
 		return toolresult.OutcomeFailed
+	case hasEmpty:
+		return toolresult.OutcomeEmpty
 	default:
 		return toolresult.OutcomeSuccess
 	}
@@ -3323,14 +3331,14 @@ func mergeConfiguredSystemPrompt(history []types.Message, systemPrompt string) [
 		return []types.Message{*types.NewSystemMessage(desired)}
 	}
 
-	first := history[0]
-	existing := strings.TrimSpace(first.Content)
-	if first.Role == "system" && (existing == desired || (existing != "" && strings.HasPrefix(desired, existing+"\n"))) {
-		merged := cloneMessageHistory(history)
-		merged[0].Content = desired
-		return merged
+	// A persisted chat history may intentionally omit request-only system
+	// instructions. In that case prepend the configured prompt on every request
+	// so continuation/resume paths keep the same provider prefix. If the history
+	// already owns a leading system message, preserve it verbatim: changing the
+	// configured prompt must not silently rewrite an existing cache generation.
+	if history[0].Role == "system" {
+		return cloneMessageHistory(history)
 	}
-
 	merged := make([]types.Message, 0, len(history)+1)
 	merged = append(merged, *types.NewSystemMessage(desired))
 	merged = append(merged, cloneMessageHistory(history)...)
@@ -3376,6 +3384,10 @@ func reusablePromptHistory(source, managed []types.Message) []types.Message {
 	for _, message := range managed {
 		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
 		if stage != "" {
+			if message.Metadata.GetBool("context_snapshot", false) {
+				reusable = append(reusable, *message.Clone())
+				continue
+			}
 			key := promptContextMessageKey(message, stage)
 			if persistedContext[key] <= 0 {
 				continue
@@ -3385,6 +3397,40 @@ func reusablePromptHistory(source, managed []types.Message) []types.Message {
 		reusable = append(reusable, *message.Clone())
 	}
 	return reusable
+}
+
+func appendMissingContextSnapshots(builder *MessageBuilder, managed []types.Message) bool {
+	if builder == nil || len(managed) == 0 {
+		return false
+	}
+	existing := make(map[string][]int)
+	for index, message := range builder.history {
+		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+		if stage == "" {
+			continue
+		}
+		key := promptContextMessageKey(message, stage)
+		existing[key] = append(existing[key], index)
+	}
+
+	changed := false
+	for _, message := range managed {
+		if !message.Metadata.GetBool("context_snapshot", false) {
+			continue
+		}
+		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+		key := promptContextMessageKey(message, stage)
+		if indices := existing[key]; len(indices) > 0 {
+			existing[key] = indices[1:]
+			// A content-equivalent historical item already exists. Never mutate it
+			// merely to add snapshot metadata: non-compaction history is immutable,
+			// and Build now preserves managed items in place on every later request.
+			continue
+		}
+		builder.Add(message)
+		changed = true
+	}
+	return changed
 }
 
 func promptContextMessageKey(message types.Message, stage string) string {
@@ -3844,6 +3890,10 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		promptTokensAfter := messageTokensAfter + toolSchemaTokens
 		preflightMetadata["active_turn_compacted"] = true
 		preflightMetadata["active_turn_prompt_only"] = true
+		// Active-turn replay compaction rewrites already-sent history. Treat it as
+		// an intentional prompt-cache epoch break, not a silent prefix mutation.
+		preflightMetadata["prompt_cache_epoch_break"] = true
+		preflightMetadata["prompt_cache_epoch_reason"] = "active_turn_replay_compaction"
 		preflightMetadata["prompt_tokens_after"] = promptTokensAfter
 		preflightMetadata["message_tokens_after"] = messageTokensAfter
 		preflightMetadata["message_count_after"] = len(compactedMessages)
@@ -3869,6 +3919,8 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		compactedPayload["message_count_after"] = len(compactedMessages)
 		addRemainingBudgetMetadata(compactedPayload, remainingBudget)
 		compactedPayload["prompt_only"] = true
+		compactedPayload["prompt_cache_epoch_break"] = true
+		compactedPayload["prompt_cache_epoch_reason"] = "active_turn_replay_compaction"
 		loop.agent.emitRuntimeEvent("context.preflight.compacted", sessionID, "", compactedPayload)
 		if promptTokensAfter <= inputBudget {
 			return compactedMessages, preflightMetadata, nil
@@ -3995,6 +4047,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		CountTokens: func(messages []types.Message) int {
 			return estimatePromptMessageTokens(loop.llmRuntime, messages)
 		},
+		Tools: frozenTurnToolSurface(ctx),
 	})
 	if err != nil {
 		failedPayload := cloneInterfaceMap(startedPayload)
@@ -4135,6 +4188,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		},
 		ObservedTokens:    promptTokens,
 		HasObservedTokens: true,
+		Tools:             frozenTurnToolSurface(ctx),
 	}
 	result, status, err := runtime.MaybeCompact(ctx, compactRequest)
 	if status.Mode == compactruntime.ModeRemote && (err != nil || result == nil || len(result.ReplacementHistory) == 0) && ctx.Err() == nil {

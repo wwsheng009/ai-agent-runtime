@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -33,35 +34,18 @@ func TestCodexBuildRequest_AddsToolChoice(t *testing.T) {
 	}
 
 	tools, ok := req["tools"].([]map[string]interface{})
-	if !ok || len(tools) != 2 {
-		t.Fatalf("expected 2 tools, got %T %v", req["tools"], req["tools"])
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected the caller tool without adapter injection, got %T %v", req["tools"], req["tools"])
 	}
 	if tools[0]["name"] != "bash" {
 		t.Fatalf("expected first tool bash, got %v", tools[0]["name"])
 	}
-	if tools[1]["name"] != "list_mcp_resources" {
-		t.Fatalf("expected second tool list_mcp_resources, got %v", tools[1]["name"])
-	}
-	params, ok := tools[1]["parameters"].(map[string]interface{})
+	params, ok := tools[0]["parameters"].(map[string]interface{})
 	if !ok || params == nil {
-		t.Fatalf("expected parameters map, got %T", tools[1]["parameters"])
+		t.Fatalf("expected parameters map, got %T", tools[0]["parameters"])
 	}
 	if params["additionalProperties"] != false {
 		t.Fatalf("expected additionalProperties=false, got %v", params["additionalProperties"])
-	}
-	required, ok := params["required"].([]string)
-	if !ok {
-		rawRequired, ok := params["required"].([]interface{})
-		if !ok {
-			t.Fatalf("expected required list on MCP meta tool, got %T", params["required"])
-		}
-		required = make([]string, 0, len(rawRequired))
-		for _, item := range rawRequired {
-			required = append(required, item.(string))
-		}
-	}
-	if len(required) != 2 {
-		t.Fatalf("expected both MCP params to be required for codex, got %v", required)
 	}
 }
 
@@ -129,7 +113,7 @@ func TestCodexBuildRequest_PropagatesParallelToolCalls(t *testing.T) {
 	}
 }
 
-func TestCodexBuildRequest_SortsMergedToolsByName(t *testing.T) {
+func TestCodexBuildRequest_PreservesMergedToolOrder(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
 		Model:    "gpt-5.2",
@@ -163,8 +147,8 @@ func TestCodexBuildRequest_SortsMergedToolsByName(t *testing.T) {
 	})
 
 	tools, ok := req["tools"].([]map[string]interface{})
-	if !ok || len(tools) != 4 {
-		t.Fatalf("expected 4 tools, got %T %v", req["tools"], req["tools"])
+	if !ok || len(tools) != 3 {
+		t.Fatalf("expected 3 caller tools, got %T %v", req["tools"], req["tools"])
 	}
 
 	got := make([]string, 0, len(tools))
@@ -172,8 +156,28 @@ func TestCodexBuildRequest_SortsMergedToolsByName(t *testing.T) {
 		name, _ := tool["name"].(string)
 		got = append(got, name)
 	}
-	if joined := strings.Join(got, ","); joined != "bash,edit,list_mcp_resources,write" {
-		t.Fatalf("expected stable merged tool order, got %q", joined)
+	if joined := strings.Join(got, ","); joined != "write,bash,edit" {
+		t.Fatalf("expected adapter to preserve caller order without injection, got %q", joined)
+	}
+}
+
+func TestCodexBuildRequest_DoesNotSilentlyDeduplicateCallerTools(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Functions: []map[string]interface{}{
+			{"type": "function", "name": "duplicate", "description": "first", "parameters": map[string]interface{}{"type": "object"}},
+			{"type": "function", "name": "duplicate", "description": "second", "parameters": map[string]interface{}{"type": "object"}},
+		},
+	})
+
+	tools, ok := req["tools"].([]map[string]interface{})
+	if !ok || len(tools) != 2 {
+		t.Fatalf("expected both caller tools to be preserved, got %T %#v", req["tools"], req["tools"])
+	}
+	if tools[0]["description"] != "first" || tools[1]["description"] != "second" {
+		t.Fatalf("expected caller order and definitions intact, got %#v", tools)
 	}
 }
 
@@ -294,6 +298,99 @@ func TestCodexBuildRequest_MergesSystemAndDeveloperMessagesIntoInstructions(t *t
 	input := req["input"].([]map[string]interface{})
 	if len(input) != 1 || input[0]["role"] != "user" {
 		t.Fatalf("expected only user input item, got %#v", input)
+	}
+}
+
+func TestCodexBuildRequest_ExactPrefixAcrossMultiStepToolTurn(t *testing.T) {
+	// Simulates a frozen turn layout after context-snapshot fix:
+	// leading system stays in instructions; frozen developer goal stays in
+	// input after the user message; conversation traffic grows only by suffix.
+	a := &CodexAdapter{}
+	functions := []map[string]interface{}{
+		{
+			"type":        "function",
+			"name":        "read_logs",
+			"description": "read logs",
+			"parameters":  map[string]interface{}{"type": "object"},
+		},
+	}
+
+	step1 := a.BuildRequest(RequestConfig{
+		Model: "gpt-5.4",
+		Messages: []map[string]interface{}{
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "check application logs"},
+			{"role": "developer", "content": "Persistent goal.\n\nkeep the prefix stable"},
+		},
+		Stream:    false,
+		Functions: functions,
+		Metadata:  map[string]interface{}{"prompt_cache_key": "turn-1"},
+	})
+
+	step2 := a.BuildRequest(RequestConfig{
+		Model: "gpt-5.4",
+		Messages: []map[string]interface{}{
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "check application logs"},
+			{"role": "developer", "content": "Persistent goal.\n\nkeep the prefix stable"},
+			{
+				"role":    "assistant",
+				"content": "I will inspect logs.",
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call-logs",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "read_logs",
+							"arguments": `{"path":"app.log"}`,
+						},
+					},
+				},
+			},
+			{"role": "tool", "tool_call_id": "call-logs", "content": "log line ok"},
+		},
+		Stream:    false,
+		Functions: functions,
+		Metadata:  map[string]interface{}{"prompt_cache_key": "turn-1"},
+	})
+
+	if step1["instructions"] != step2["instructions"] {
+		t.Fatalf("instructions drifted across tool steps:\nstep1=%#v\nstep2=%#v", step1["instructions"], step2["instructions"])
+	}
+	instructions, _ := step1["instructions"].(string)
+	if instructions != "You are a helpful assistant." {
+		t.Fatalf("expected only leading system in instructions, got %#v", step1["instructions"])
+	}
+	if strings.Contains(instructions, "keep the prefix stable") {
+		t.Fatalf("turn-context goal must not rewrite top-level instructions, got %#v", instructions)
+	}
+	if step1["prompt_cache_key"] != step2["prompt_cache_key"] {
+		t.Fatalf("prompt_cache_key drifted: %#v vs %#v", step1["prompt_cache_key"], step2["prompt_cache_key"])
+	}
+
+	prevInput, okPrev := step1["input"].([]map[string]interface{})
+	currInput, okCurr := step2["input"].([]map[string]interface{})
+	if !okPrev || !okCurr {
+		t.Fatalf("expected codex input arrays, got %T and %T", step1["input"], step2["input"])
+	}
+	if len(currInput) <= len(prevInput) {
+		t.Fatalf("expected step2 input to grow by suffix only, prev=%d curr=%d", len(prevInput), len(currInput))
+	}
+	if len(prevInput) < 2 {
+		t.Fatalf("expected user + developer goal in step1 input, got %#v", prevInput)
+	}
+	if prevInput[0]["role"] != "user" {
+		t.Fatalf("expected first input role user, got %#v", prevInput[0])
+	}
+	if prevInput[1]["role"] != "developer" {
+		t.Fatalf("expected frozen goal as developer input item, got %#v", prevInput[1])
+	}
+	for index := range prevInput {
+		prevJSON, _ := json.Marshal(prevInput[index])
+		currJSON, _ := json.Marshal(currInput[index])
+		if string(prevJSON) != string(currJSON) {
+			t.Fatalf("input item %d is not an exact prefix match:\nprev=%s\ncurr=%s", index, prevJSON, currJSON)
+		}
 	}
 }
 

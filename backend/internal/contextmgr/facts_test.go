@@ -133,3 +133,93 @@ func TestBuildDoesNotPrependFactLedgerBeforeHistory(t *testing.T) {
 	require.Equal(t, "fact_ledger", result.Messages[len(result.Messages)-1].Metadata.GetString("context_stage", ""))
 }
 
+func TestBuildRehydratesFactLedgerAfterMidTurnCompactHistory(t *testing.T) {
+	store, err := artifact.NewStore(&artifact.StoreConfig{Path: t.TempDir() + "/rehydrate.sqlite"})
+	require.NoError(t, err)
+	defer store.Close()
+
+	ledger := factledger.New(store)
+	_, err = ledger.Append(context.Background(), factledger.Fact{
+		FactID: "session-fact", SessionID: "s", Scope: factledger.ScopeSession,
+		Kind: "constraint", Subject: "user", Predicate: "requires", Value: "Chinese output",
+		SourceEventID: "event:u1", EvidenceRefs: []string{"event:u1"},
+	})
+	require.NoError(t, err)
+
+	// Mid-turn compact leaves real user + tool replay + a trailing compaction
+	// checkpoint. The checkpoint must not open a new turn window that hides
+	// world-state rehydration.
+	summary := types.NewUserMessage("Compacted context from earlier turns:\nRoot cause confirmed.")
+	summary.Metadata["context_stage"] = "compaction"
+	summary.Metadata["compact_phase"] = "mid_turn"
+	history := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("continue optimizing"),
+		*types.NewAssistantMessage("inspecting"),
+		*types.NewToolMessage("call-1", "tool output"),
+		*summary,
+	}
+
+	manager := NewManager(DefaultBudget(), store)
+	manager.Strategy.RecallMode = RecallModeDisabled
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "s",
+		Goal:      "continue optimizing",
+		History:   history,
+	})
+	require.True(t, result.Metadata["fact_ledger_injected"].(bool))
+
+	// History prefix stays exact; fact ledger only appends after the compacted turn.
+	require.GreaterOrEqual(t, len(result.Messages), len(history))
+	require.Equal(t, history, result.Messages[:len(history)])
+	ledgerMsg := result.Messages[len(result.Messages)-1]
+	require.Equal(t, "fact_ledger", ledgerMsg.Metadata.GetString("context_stage", ""))
+	require.True(t, ledgerMsg.Metadata.GetBool("context_snapshot", false))
+	require.Contains(t, ledgerMsg.Content, "Chinese output")
+}
+
+func TestBuildSkipsFactLedgerWhenActiveTurnAlreadyHasSnapshot(t *testing.T) {
+	store, err := artifact.NewStore(&artifact.StoreConfig{Path: t.TempDir() + "/skip-rehydrate.sqlite"})
+	require.NoError(t, err)
+	defer store.Close()
+
+	ledger := factledger.New(store)
+	_, err = ledger.Append(context.Background(), factledger.Fact{
+		FactID: "session-fact", SessionID: "s", Scope: factledger.ScopeSession,
+		Kind: "constraint", Subject: "user", Predicate: "requires", Value: "Chinese output",
+		SourceEventID: "event:u1", EvidenceRefs: []string{"event:u1"},
+	})
+	require.NoError(t, err)
+
+	frozen := types.NewAssistantMessage("Verified fact ledger (authoritative over compacted prose):\n- frozen only")
+	frozen.Metadata["context_stage"] = "fact_ledger"
+	frozen.Metadata["context_snapshot"] = true
+	history := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("continue"),
+		*frozen,
+		*types.NewAssistantMessage("calling tools"),
+		*types.NewToolMessage("call-1", "tool output"),
+	}
+
+	manager := NewManager(DefaultBudget(), store)
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "s",
+		Goal:      "continue",
+		History:   history,
+	})
+	require.Nil(t, result.Metadata["fact_ledger_injected"])
+	require.Equal(t, history, result.Messages[:len(history)])
+
+	factCount := 0
+	for _, message := range result.Messages {
+		if message.Metadata.GetString("context_stage", "") == "fact_ledger" {
+			factCount++
+			require.Contains(t, message.Content, "frozen only")
+			require.NotContains(t, message.Content, "Chinese output")
+		}
+	}
+	require.Equal(t, 1, factCount)
+}

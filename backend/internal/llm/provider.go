@@ -68,8 +68,9 @@ type Message struct {
 
 // Tool 工具
 type Tool struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
+	Type     string                 `json:"type"`
+	Function ToolFunction           `json:"function"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ToolFunction 工具函数
@@ -151,27 +152,27 @@ type ChoiceChunk struct {
 
 // ProviderConfig 提供者配置
 type ProviderConfig struct {
-	Type                    string                                     `json:"type"` // openai, anthropic, gemini, codex
-	APIKey                  string                                     `json:"apiKey"`
-	BaseURL                 string                                     `json:"baseUrl"`
-	APIPath                 string                                     `json:"apiPath,omitempty"`
-	Timeout                 time.Duration                              `json:"timeout"`
-	MaxRetries              int                                        `json:"maxRetries"`
-	RetryTuning             RetryTuning                                `json:"retryTuning,omitempty"`
-	RetryRules              []RetryRule                                `json:"retryRules,omitempty"`
-	DefaultModel            string                                     `json:"defaultModel,omitempty"`
-	SupportedModels         []string                                   `json:"supportedModels,omitempty"`
-	ModelMappings           map[string]string                          `json:"modelMappings,omitempty"`
-	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
+	Type              string                                     `json:"type"` // openai, anthropic, gemini, codex
+	APIKey            string                                     `json:"apiKey"`
+	BaseURL           string                                     `json:"baseUrl"`
+	APIPath           string                                     `json:"apiPath,omitempty"`
+	Timeout           time.Duration                              `json:"timeout"`
+	MaxRetries        int                                        `json:"maxRetries"`
+	RetryTuning       RetryTuning                                `json:"retryTuning,omitempty"`
+	RetryRules        []RetryRule                                `json:"retryRules,omitempty"`
+	DefaultModel      string                                     `json:"defaultModel,omitempty"`
+	SupportedModels   []string                                   `json:"supportedModels,omitempty"`
+	ModelMappings     map[string]string                          `json:"modelMappings,omitempty"`
+	ModelCapabilities map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
 	// EnableImageGeneration opts into Codex native image_generation injection.
 	// Nil/false keeps the tool out of request payloads by default.
-	EnableImageGeneration   *bool                                      `json:"enableImageGeneration,omitempty"`
-	Headers                 map[string]string                          `json:"headers,omitempty"`
-	HeaderMappings          map[string]string                          `json:"headerMappings,omitempty"`
-	HeaderMappingRules      []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
-	SupportsMaxOutputTokens *bool                                      `json:"supportsMaxOutputTokens,omitempty"`
-	Proxy                   *agentconfig.ProxyConfig                   `json:"proxy,omitempty"`
-	RequestsPerMinute       int                                        `json:"requestsPerMinute,omitempty"`
+	EnableImageGeneration   *bool                    `json:"enableImageGeneration,omitempty"`
+	Headers                 map[string]string        `json:"headers,omitempty"`
+	HeaderMappings          map[string]string        `json:"headerMappings,omitempty"`
+	HeaderMappingRules      []HeaderMappingRule      `json:"headerMappingRules,omitempty"`
+	SupportsMaxOutputTokens *bool                    `json:"supportsMaxOutputTokens,omitempty"`
+	Proxy                   *agentconfig.ProxyConfig `json:"proxy,omitempty"`
+	RequestsPerMinute       int                      `json:"requestsPerMinute,omitempty"`
 }
 
 // tokenBucketLimiter implements a simple sliding-window rate limiter.
@@ -318,7 +319,7 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 	}
 
 	model := strings.TrimSpace(p.resolveModel(req.Model))
-	requestBody := buildCodexRemoteCompactRequest(model, req.History)
+	requestBody := buildCodexRemoteCompactRequest(model, req.History, req.SessionID)
 	url := resolveCompactURL(p.config.BaseURL, p.config.APIPath, (&adapter.CodexAdapter{}).GetAPIPath()+"/compact")
 	bodyBytes, marshalErr := json.Marshal(requestBody)
 	if marshalErr != nil {
@@ -1508,7 +1509,8 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 	tools := make([]Tool, 0, len(req.Tools))
 	for _, tool := range req.Tools {
 		tools = append(tools, Tool{
-			Type: "function",
+			Type:     "function",
+			Metadata: cloneDeepMapStringAny(tool.Metadata),
 			Function: ToolFunction{
 				Name:        tool.Name,
 				Description: tool.Description,

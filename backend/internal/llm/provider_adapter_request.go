@@ -83,15 +83,24 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		}
 	}
 
+	// Tool definitions are part of the provider prompt-cache prefix. Never use a
+	// per-request execution decision (compact/disable_tools/tool_choice) to remove
+	// or rewrite that prefix. Callers that need a no-tool operation must express
+	// it through tool_choice while retaining the frozen session surface.
+	if metadataDisablesTools(metadata) {
+		if _, exists := metadata["tool_choice"]; !exists {
+			metadata["tool_choice"] = "none"
+		}
+	}
 	var tools interface{}
-	if !metadataDisablesTools(metadata) {
-		enableNativeImageGeneration := input.EnableImageGeneration != nil && *input.EnableImageGeneration
+	enableNativeImageGeneration := input.EnableImageGeneration != nil && *input.EnableImageGeneration
+	if len(input.Tools) > 0 || enableNativeImageGeneration {
 		tools = BuildToolDefinitionsForRequestWithImageOptions(
 			input.Tools,
 			input.Protocol,
 			input.Model,
 			modelCapabilities,
-			!metadataDisablesMetaTools(metadata),
+			false,
 			CodexImageGenerationOptionsFromMetadata(metadata),
 			enableNativeImageGeneration,
 		)
@@ -182,6 +191,7 @@ func chatToolsToToolDefinitions(tools []Tool) []types.ToolDefinition {
 			Name:        tool.Function.Name,
 			Description: tool.Function.Description,
 			Parameters:  cloneDeepMapStringAny(tool.Function.Parameters),
+			Metadata:    cloneDeepMapStringAny(tool.Metadata),
 		})
 	}
 	return normalized

@@ -51,6 +51,10 @@ func (a *RemoteAdapter) Compact(ctx context.Context, req Request, limit threshol
 	}
 
 	replacement := cloneMessages(response.ReplacementHistory)
+	// Remote providers return prose/history projections. Re-pin the latest
+	// durable world-state from the source turn so goal/todo/facts are not left
+	// only inside compacted text.
+	replacement = mergeDurableWorldState(req.Phase, req.History, replacement, counter, remoteDurableTokenBudget(req, replacement, counter))
 	var usage *types.TokenUsage
 	if response.Usage != nil {
 		usage = response.Usage.Clone()
@@ -77,4 +81,20 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func remoteDurableTokenBudget(req Request, replacement []types.Message, counter TokenCounter) int {
+	if counter == nil {
+		return 4000
+	}
+	if req.ReplacementTokenLimit > 0 {
+		remaining := req.ReplacementTokenLimit - counter(replacement)
+		if remaining <= 0 {
+			return 1
+		}
+		return remaining
+	}
+	// Keep remote durable rehydrate bounded even when the caller did not set an
+	// explicit replacement ceiling.
+	return 4000
 }

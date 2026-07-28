@@ -13,6 +13,10 @@ const (
 	// ToolMetadataRetryClassKey declares the side-effect retry contract exposed
 	// to schedulers and approval policy.
 	ToolMetadataRetryClassKey = "retry_class"
+	// ToolMetadataEmptyReplayCacheKey controls whether successful empty results
+	// may open the run-scoped same-arguments negative cache. It defaults to true;
+	// volatile polling/state tools should explicitly set it to false.
+	ToolMetadataEmptyReplayCacheKey = "empty_replay_cache"
 
 	// Tool taxonomy metadata keys (Iteration A permission/parallel productization).
 	ToolMetadataKindKey        = "tool_kind"

@@ -51,6 +51,14 @@ const (
 	ledgerCheckpointSegmentStartKey = "segment_start"
 	ledgerCheckpointSegmentEndKey   = "segment_end"
 	compactionSummaryTextKey        = "summary_text"
+
+	// Turn-scoped dynamic context is frozen once and then treated as raw history so
+	// later ReAct requests keep the previous model input as an exact prefix.
+	metaContextStage    = "context_stage"
+	metaContextSnapshot = "context_snapshot"
+	metaContextTurnID   = "context_turn_id"
+
+	contextStageActiveGoal = "active_goal"
 )
 
 // TokenCounter 允许 context manager 复用不同 tokenizer。
@@ -119,6 +127,10 @@ type BuildInput struct {
 	Memory       *memory.Memory
 	Observations []types.Observation
 	CountTokens  TokenCounter
+	// ActiveGoalGuidance is optional turn-local goal text. It is injected as a
+	// frozen dynamic context message, never rewritten into the durable system
+	// prefix / provider instructions field.
+	ActiveGoalGuidance string
 
 	PromptBudget             int
 	PromptBudgetSource       string
@@ -390,7 +402,13 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		promptBudgetSource = "context_manager_budget"
 	}
 
-	scopedHistory, goalScopeStats := filterMessagesByGoalScope(input.History, input.GoalID)
+	// Previously sent conversation history is immutable until an explicit
+	// compaction replaces it. Goal ownership is useful for recall/fact selection,
+	// but filtering goal-tagged messages here deletes or edits an already-sent
+	// provider prefix when the active goal changes. Keep the full history and add
+	// any new goal guidance as a frozen append-only context snapshot instead.
+	scopedHistory := cloneMessages(input.History)
+	goalScopeStats := goalScopeFilterStats{}
 	systemMessages, nonSystemMessages := splitMessages(scopedHistory)
 	result := BuildResult{
 		Metadata: map[string]interface{}{
@@ -430,19 +448,45 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 
 	recent := cloneMessages(nonSystemMessages)
 	var older []types.Message
-	if input.EnablePromptCompaction {
+	compactionPressure := input.EnablePromptCompaction && shouldApplyPromptCompactionPressure(scopedHistory, budget, input.CountTokens)
+	if compactionPressure {
+		// Metadata adoption is itself a history mutation, so it is allowed only
+		// inside the explicit compaction epoch. Ordinary builds preserve even the
+		// metadata of every prior message byte-for-byte.
+		freezeConversationContextMessages(scopedHistory)
+		freezeActiveTurnContextMessages(scopedHistory, input.TraceID)
+		systemMessages, nonSystemMessages = splitMessages(scopedHistory)
+		recent = cloneMessages(nonSystemMessages)
 		// Only drop older hot history when the prompt is under real pressure.
 		// Enabling compaction must not silently keepRecent=N on every step while
 		// the estimated token budget still has headroom.
-		if shouldApplyPromptCompactionPressure(scopedHistory, budget, input.CountTokens) {
-			recent = keepRecent(nonSystemMessages, budget.KeepRecentMessages)
-			older = dropRecent(nonSystemMessages, budget.KeepRecentMessages)
-			result.Metadata["hot_keep_recent_applied"] = true
-		} else {
-			result.Metadata["hot_keep_recent_applied"] = false
-		}
+		recent = keepRecent(nonSystemMessages, budget.KeepRecentMessages)
+		older = dropRecent(nonSystemMessages, budget.KeepRecentMessages)
+		result.Metadata["hot_keep_recent_applied"] = true
+	} else if input.EnablePromptCompaction {
+		result.Metadata["hot_keep_recent_applied"] = false
 	}
 	activeTurnHasReplay := activeUserTurnHasReplay(recent)
+	hadFrozenTurnContext := activeTurnHasContextSnapshot(recent)
+	// Never regenerate a context_stage that is already present in the active turn:
+	// re-appending it after assistant/tool traffic would relocate the item and break
+	// the provider prompt-cache prefix. Missing stages may still be appended at the
+	// end (append-only). Volatile projections (observations/workspace/project memory)
+	// are additionally suppressed once the active turn already has assistant/tool
+	// replay. Authoritative fact_ledger follows the same freeze rule during ordinary
+	// replay, but after a mid-turn compaction checkpoint appears in the active turn
+	// it may rehydrate append-only so compacted prose never outranks structured
+	// world state.
+	presentStages := activeTurnContextStages(recent)
+	stagePresent := func(stage string) bool {
+		return presentStages[strings.TrimSpace(stage)]
+	}
+	markStage := func(stage string) {
+		if stage = strings.TrimSpace(stage); stage != "" {
+			presentStages[stage] = true
+		}
+	}
+	factLedgerSuppressed := stagePresent("fact_ledger") || (activeTurnHasReplay && !stagePresent("compaction"))
 
 	layerMetrics := map[string]interface{}{
 		"hot": map[string]interface{}{
@@ -497,16 +541,25 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"injected":                   false,
 			"count":                      0,
 			"goal_id":                    input.GoalID,
-			"suppressed_for_active_turn": activeTurnHasReplay,
+			"suppressed_for_active_turn": factLedgerSuppressed,
 		},
+	}
+	if hadFrozenTurnContext {
+		result.Metadata["turn_context_snapshot_reused"] = true
 	}
 	result.Metadata["context_layer_metrics"] = layerMetrics
 
-	managed := make([]types.Message, 0, len(systemMessages)+len(recent)+3)
-	managed = append(managed, cloneMessages(systemMessages)...)
+	managed := make([]types.Message, 0, len(scopedHistory)+3)
+	if compactionPressure {
+		managed = append(managed, cloneMessages(systemMessages)...)
+	} else {
+		// This is the central non-compaction invariant: preserve every historical
+		// message in place and only grow the request by appending below.
+		managed = append(managed, cloneMessages(scopedHistory)...)
+	}
 
-	if profileMessage, profileMeta := buildProfileMessage(input.Profile); profileMessage != nil {
-		managed = append(managed, *profileMessage)
+	profileMessage, profileMeta := buildProfileMessage(input.Profile)
+	if profileMessage != nil {
 		result.Metadata["profile_context_injected"] = true
 		for key, value := range profileMeta {
 			result.Metadata[key] = value
@@ -536,7 +589,9 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		factCount    int
 		factEvidence []string
 	)
-	if !activeTurnHasReplay {
+	if factLedgerSuppressed {
+		layerMetrics["facts"].(map[string]interface{})["suppressed_for_active_turn"] = true
+	} else {
 		factMessage, factCount, factEvidence = m.buildFactLedgerMessage(ctx, input)
 	}
 
@@ -622,12 +677,22 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 	// Append-only raw history after the stable session prefix. Within a session this
 	// slice must only grow by appending (or be replaced by cold compaction summaries
 	// for older turns), never receive forward inserts.
-	managed = append(managed, cloneMessages(recent)...)
+	if compactionPressure {
+		managed = append(managed, cloneMessages(recent)...)
+	}
 
 	// Mutable context layers are always appended after raw history so they cannot
 	// reorder or split the conversation prefix used for provider prompt caching.
+	// On the first model call of a logical turn they are stamped as a frozen
+	// snapshot and later reused in place via prompt history.
+	turnID := strings.TrimSpace(input.TraceID)
+	appendDynamic := func(message types.Message) {
+		stampContextSnapshot(&message, turnID)
+		managed = append(managed, message)
+		markStage(message.Metadata.GetString(metaContextStage, ""))
+	}
 	if factMessage != nil {
-		managed = append(managed, *factMessage)
+		appendDynamic(*factMessage)
 		result.Metadata["fact_ledger_injected"] = true
 		result.Metadata["fact_count"] = factCount
 		result.Metadata["fact_evidence_refs"] = factEvidence
@@ -643,16 +708,18 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 
 	selectedObservations := selectObservationsForMode(input.Memory, input.Observations, m.Strategy.ObservationMode)
 	layerMetrics["warm"].(map[string]interface{})["selected_items"] = len(selectedObservations)
-	if activeTurnHasReplay {
+	if stagePresent("warm_memory") || stagePresent("observation") || activeTurnHasReplay {
 		layerMetrics["warm"].(map[string]interface{})["suppressed_for_active_turn"] = true
 	} else if observationMessage := buildObservationMessage(selectedObservations, budget.MaxObservationItems); observationMessage != nil {
-		managed = append(managed, *observationMessage)
+		appendDynamic(*observationMessage)
 		result.Metadata["observation_injected"] = true
 		layerMetrics["warm"].(map[string]interface{})["injected"] = true
 	}
 
-	if recalled, recallCount, recallRefs := m.buildRecallMessage(ctx, input.SessionID, input.Goal, budget.MaxRecallResults); recalled != nil {
-		managed = append(managed, *recalled)
+	if stagePresent("recall") {
+		layerMetrics["cold"].(map[string]interface{})["suppressed_for_active_turn"] = true
+	} else if recalled, recallCount, recallRefs := m.buildRecallMessage(ctx, input.SessionID, input.Goal, budget.MaxRecallResults); recalled != nil {
+		appendDynamic(*recalled)
 		result.Metadata["recall_injected"] = true
 		result.Metadata["recall_count"] = recallCount
 		layerMetrics["cold"].(map[string]interface{})["recall_injected"] = true
@@ -668,7 +735,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		m.emitEvent("recall.performed", input.TraceID, input.SessionID, payload)
 	}
 
-	if activeTurnHasReplay {
+	if stagePresent("project_memory") || activeTurnHasReplay {
 		if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
 			metrics["suppressed_for_active_turn"] = true
 		}
@@ -686,7 +753,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 				"error":   err.Error(),
 			})
 		} else if msg, noteIDs := buildProjectMemoryMessage(notes, budget.ProjectMemoryTokens); msg != nil {
-			managed = append(managed, *msg)
+			appendDynamic(*msg)
 			result.Metadata["project_memory_injected"] = true
 			result.Metadata["project_memory_count"] = len(noteIDs)
 			if len(noteIDs) > 0 {
@@ -704,8 +771,16 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			})
 		}
 	}
+	if profileMessage != nil && !stagePresent("profile") {
+		// Profile data can change at runtime. Freeze it behind the current user
+		// anchor instead of rebuilding it before history, which would mutate the
+		// already-sent request prefix.
+		appendDynamic(*profileMessage)
+	} else if profileMessage != nil {
+		result.Metadata["profile_context_suppressed_for_snapshot"] = true
+	}
 
-	if activeTurnHasReplay {
+	if stagePresent("workspace") || activeTurnHasReplay {
 		layerMetrics["workspace"].(map[string]interface{})["suppressed_for_active_turn"] = true
 	} else if m.Workspace != nil && m.shouldBuildWorkspace(input.Goal) {
 		wsCtx := m.Workspace.Build(input.Goal)
@@ -718,7 +793,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 				symbolCount = len(wsCtx.Symbols)
 				chunkCount = len(wsCtx.Chunks)
 			}
-			managed = append(managed, *wsMsg)
+			appendDynamic(*wsMsg)
 			result.Metadata["workspace_context_injected"] = true
 			if wsSummary != "" {
 				result.Metadata["workspace_summary"] = wsSummary
@@ -737,7 +812,9 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
-	if m.TeamContext != nil && (strings.TrimSpace(input.TeamID) != "" || strings.TrimSpace(input.TaskID) != "") {
+	if stagePresent("team") {
+		layerMetrics["team"].(map[string]interface{})["suppressed_for_active_turn"] = true
+	} else if m.TeamContext != nil && (strings.TrimSpace(input.TeamID) != "" || strings.TrimSpace(input.TaskID) != "") {
 		teamBudget := maxInt(3, budget.MaxObservationItems)
 		ctxSummary, err := m.TeamContext.Build(ctx, strings.TrimSpace(input.TeamID), strings.TrimSpace(input.TaskID), teamBudget)
 		if err != nil {
@@ -757,7 +834,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			if strings.TrimSpace(ctxSummary.TaskID) != "" {
 				message.Metadata["task_id"] = ctxSummary.TaskID
 			}
-			managed = append(managed, *message)
+			appendDynamic(*message)
 			result.Metadata["team_context_injected"] = true
 			layerMetrics["team"].(map[string]interface{})["injected"] = true
 			layerMetrics["team"].(map[string]interface{})["team_id"] = ctxSummary.TeamID
@@ -776,9 +853,23 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
+	if !stagePresent(contextStageActiveGoal) {
+		if guidance := strings.TrimSpace(input.ActiveGoalGuidance); guidance != "" {
+			goalMessage := types.NewDeveloperMessage(guidance)
+			if goalMessage.Metadata == nil {
+				goalMessage.Metadata = types.NewMetadata()
+			}
+			goalMessage.Metadata[metaContextStage] = contextStageActiveGoal
+			appendDynamic(*goalMessage)
+			result.Metadata["active_goal_injected"] = true
+		}
+	} else if strings.TrimSpace(input.ActiveGoalGuidance) != "" {
+		result.Metadata["active_goal_suppressed_for_snapshot"] = true
+	}
+
 	// Final message/token trims are self-limiting (MaxMessages / MaxPromptTokens).
 	// Only the keepRecent hot-window drop is budget-gated above.
-	if input.EnablePromptCompaction {
+	if compactionPressure {
 		managed = trimMessageCount(managed, budget.MaxMessages)
 		managed = trimByTokenBudget(managed, budget, input.CountTokens, result.Metadata)
 	} else if input.CountTokens != nil {
@@ -1364,11 +1455,13 @@ func messageHasForeignGoal(message types.Message, activeGoalID string) bool {
 func splitMessages(history []types.Message) ([]types.Message, []types.Message) {
 	systemMessages := make([]types.Message, 0, 1)
 	nonSystemMessages := make([]types.Message, 0, len(history))
+	inLeadingSystemPrefix := true
 	for _, message := range history {
-		if message.Role == "system" {
+		if inLeadingSystemPrefix && strings.EqualFold(strings.TrimSpace(message.Role), "system") {
 			systemMessages = append(systemMessages, *message.Clone())
 			continue
 		}
+		inLeadingSystemPrefix = false
 		nonSystemMessages = append(nonSystemMessages, *message.Clone())
 	}
 	return systemMessages, nonSystemMessages
@@ -1446,9 +1539,18 @@ func adjustRecentWindowForToolBlock(messages []types.Message, start int) int {
 
 func activeUserTurnStart(messages []types.Message) int {
 	for index := len(messages) - 1; index >= 0; index-- {
-		if messages[index].Role == "user" {
-			return index
+		if !strings.EqualFold(strings.TrimSpace(messages[index].Role), "user") {
+			continue
 		}
+		// Compaction checkpoints and other context-stage user wrappers are not
+		// real user turns. Treating them as turn starts hides durable context
+		// rehydrated earlier in the same logical turn (especially after mid-turn
+		// compact, where the semantic checkpoint is a trailing synthetic user).
+		stage := strings.ToLower(strings.TrimSpace(messages[index].Metadata.GetString(metaContextStage, "")))
+		if stage != "" {
+			continue
+		}
+		return index
 	}
 	return -1
 }
@@ -1469,6 +1571,90 @@ func activeUserTurnHasReplay(messages []types.Message) bool {
 		}
 	}
 	return false
+}
+
+func activeTurnContextStages(messages []types.Message) map[string]bool {
+	stages := make(map[string]bool)
+	start := activeUserTurnStart(messages)
+	if start < 0 || start >= len(messages)-1 {
+		return stages
+	}
+	for _, message := range messages[start+1:] {
+		stage := strings.TrimSpace(message.Metadata.GetString(metaContextStage, ""))
+		if stage == "" {
+			continue
+		}
+		stages[stage] = true
+	}
+	return stages
+}
+
+func activeTurnHasContextSnapshot(messages []types.Message) bool {
+	start := activeUserTurnStart(messages)
+	if start < 0 || start >= len(messages)-1 {
+		return false
+	}
+	for _, message := range messages[start+1:] {
+		if isContextSnapshot(message) {
+			return true
+		}
+	}
+	return false
+}
+
+func freezeActiveTurnContextMessages(messages []types.Message, turnID string) {
+	start := activeUserTurnStart(messages)
+	if start < 0 || start >= len(messages)-1 {
+		return
+	}
+	for index := start + 1; index < len(messages); index++ {
+		stage := strings.ToLower(strings.TrimSpace(messages[index].Metadata.GetString(metaContextStage, "")))
+		if stage == "" || stage == "compaction" || stage == "ledger" || stage == "profile" || stage == "correction" {
+			continue
+		}
+		stampContextSnapshot(&messages[index], turnID)
+	}
+}
+
+func freezeConversationContextMessages(messages []types.Message) {
+	seenUser := false
+	for index := range messages {
+		stage := strings.ToLower(strings.TrimSpace(messages[index].Metadata.GetString(metaContextStage, "")))
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "user") && stage == "" {
+			seenUser = true
+			continue
+		}
+		if !seenUser || stage == "" || isStableManagedContextStage(stage) {
+			continue
+		}
+		stampContextSnapshot(&messages[index], "")
+	}
+}
+
+func isStableManagedContextStage(stage string) bool {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "ledger", "correction", "profile", "compaction":
+		return true
+	default:
+		return false
+	}
+}
+
+func stampContextSnapshot(message *types.Message, turnID string) {
+	if message == nil {
+		return
+	}
+	if message.Metadata == nil {
+		message.Metadata = types.NewMetadata()
+	}
+	message.Metadata[metaContextSnapshot] = true
+	if turnID = strings.TrimSpace(turnID); turnID != "" {
+		message.Metadata[metaContextTurnID] = turnID
+	}
+}
+
+func isContextSnapshot(message types.Message) bool {
+	return message.Metadata.GetBool(metaContextSnapshot, false)
 }
 
 func cloneMessages(messages []types.Message) []types.Message {
@@ -1590,15 +1776,19 @@ func dropLeadingRawTrimUnit(messages []types.Message) []types.Message {
 	}
 
 	// A single long user turn may exceed MaxMessages by itself. Preserve its
-	// original user prompt as an anchor and remove the oldest assistant/tool
-	// replay unit, rather than cutting the anchor off and leaving assistant-first
-	// history. Repeated calls progressively shorten the turn while keeping every
-	// retained tool call adjacent to its results.
-	if len(messages) == 1 {
+	// original user prompt and frozen turn-context snapshot as one immutable
+	// anchor, then remove the oldest assistant/tool replay unit. Treating the
+	// snapshot as replay would detach or delete goal/recall/todo context under
+	// pressure and would make the next request rewrite an earlier cache prefix.
+	anchorEnd := 1
+	for anchorEnd < len(messages) && isContextSnapshot(messages[anchorEnd]) {
+		anchorEnd++
+	}
+	if anchorEnd >= len(messages) {
 		return messages
 	}
-	end := 2
-	switch messages[1].Role {
+	end := anchorEnd + 1
+	switch messages[anchorEnd].Role {
 	case "assistant":
 		for end < len(messages) && messages[end].Role == "tool" {
 			end++
@@ -1608,8 +1798,8 @@ func dropLeadingRawTrimUnit(messages []types.Message) []types.Message {
 			end++
 		}
 	}
-	trimmed := make([]types.Message, 0, 1+len(messages)-end)
-	trimmed = append(trimmed, messages[0])
+	trimmed := make([]types.Message, 0, anchorEnd+len(messages)-end)
+	trimmed = append(trimmed, messages[:anchorEnd]...)
 	trimmed = append(trimmed, messages[end:]...)
 	return trimmed
 }
@@ -1770,12 +1960,18 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 	stableMessages := make([]types.Message, 0, 2)
 	dynamicMessages := make([]types.Message, 0, 6)
 	rawMessages := make([]types.Message, 0, len(messages))
+	seenUser := false
 	for _, message := range messages {
-		if message.Role == "system" {
-			systemMessages = append(systemMessages, *message.Clone())
-			continue
-		}
-		if stage := message.Metadata.GetString("context_stage", ""); stage != "" {
+		if stage := message.Metadata.GetString(metaContextStage, ""); stage != "" {
+			// Frozen turn snapshots are immutable conversation history. Keeping them
+			// in the raw bucket preserves their original position between the user
+			// message and later assistant/tool replay.
+			if isContextSnapshot(message) || (seenUser && !isStableManagedContextStage(stage)) {
+				frozen := *message.Clone()
+				stampContextSnapshot(&frozen, "")
+				rawMessages = append(rawMessages, frozen)
+				continue
+			}
 			switch stage {
 			// Session-stable cold layers may sit after system and before raw history.
 			// Mutable/request-local layers stay in the dynamic tail so trim/assemble
@@ -1788,6 +1984,13 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 				dynamicMessages = append(dynamicMessages, *message.Clone())
 			}
 			continue
+		}
+		if message.Role == "system" {
+			systemMessages = append(systemMessages, *message.Clone())
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			seenUser = true
 		}
 		rawMessages = append(rawMessages, *message.Clone())
 	}

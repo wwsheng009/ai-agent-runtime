@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -413,6 +415,57 @@ func TestShouldShowChatSessionStartupPreamble_SkipsInTUI(t *testing.T) {
 	chatIsInteractiveTerminal = func() bool { return true }
 	if shouldShowChatSessionStartupPreamble(&chatCommandOptions{OutputFormat: "interactive"}) {
 		t.Fatal("expected startup preamble to be skipped in TUI mode")
+	}
+}
+
+func TestPresentChatStartupSession_ReplaysHistoryInTUI(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	oldNoColor := color.NoColor
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+		color.NoColor = oldNoColor
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return true }
+	color.NoColor = true
+	ui.SetTheme(ui.ThemeAuto)
+
+	loaded := runtimechat.NewSession("tester")
+	loaded.ID = "session_startup_resume_tui"
+	loaded.Metadata.Title = "Resume history fixture"
+	loaded.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewUserMessage("继续上次任务"),
+		*runtimetypes.NewAssistantMessage("好的，我先回顾上下文。"),
+	})
+
+	session := &ChatSession{
+		RuntimeSession: loaded,
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var transcript bytes.Buffer
+	session.Interaction.SetWriter(&transcript)
+	if err := replaceRuntimeMessages(session, loaded.GetMessages()); err != nil {
+		t.Fatalf("replaceRuntimeMessages: %v", err)
+	}
+
+	opts := &chatCommandOptions{OutputFormat: "interactive"}
+	if shouldShowChatSessionStartupPreamble(opts) {
+		t.Fatal("precondition failed: TUI preamble should stay suppressed")
+	}
+
+	stdout := captureStdout(t, func() {
+		presentChatStartupSession(session, opts, loaded)
+	})
+	combined := stdout + transcript.String()
+	for _, expected := range []string{
+		"已恢复历史会话",
+		"继续上次任务",
+		"好的，我先回顾上下文。",
+		"已加载历史会话",
+	} {
+		if !strings.Contains(combined, expected) {
+			t.Fatalf("expected TUI resume startup to contain %q, got:\n%s", expected, combined)
+		}
 	}
 }
 
