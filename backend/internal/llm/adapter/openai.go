@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +12,70 @@ import (
 
 // OpenAIAdapter OpenAI/Gemini protocol adapter
 type OpenAIAdapter struct{}
+
+type openAIStreamError struct {
+	eventType string
+	code      string
+	errorType string
+	message   string
+}
+
+type openAIProtocolError struct {
+	code    string
+	message string
+}
+
+func (e *openAIProtocolError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("openai_stream_protocol_error: code=%s: %s", strings.TrimSpace(e.code), strings.TrimSpace(e.message))
+}
+
+func (e *openAIProtocolError) RetryErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.code)
+}
+
+func (e *openAIStreamError) Error() string {
+	if e == nil {
+		return ""
+	}
+	metadata := make([]string, 0, 3)
+	if e.eventType != "" {
+		metadata = append(metadata, "event="+e.eventType)
+	}
+	if e.errorType != "" {
+		metadata = append(metadata, "type="+e.errorType)
+	}
+	if e.code != "" && e.code != e.errorType {
+		metadata = append(metadata, "code="+e.code)
+	}
+	detail := ""
+	if len(metadata) > 0 {
+		detail = " (" + strings.Join(metadata, ", ") + ")"
+	}
+	message := strings.TrimSpace(e.message)
+	if message == "" {
+		message = "upstream stream returned an error event"
+	}
+	return "stream_interrupted: openai stream error" + detail + ": " + message
+}
+
+func (e *openAIStreamError) RetryErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	if code := strings.TrimSpace(e.code); code != "" {
+		return code
+	}
+	if errorType := strings.TrimSpace(e.errorType); errorType != "" {
+		return errorType
+	}
+	return "openai_stream_error"
+}
 
 // Name returns adapter name
 func (a *OpenAIAdapter) Name() string {
@@ -108,6 +171,7 @@ func (a *OpenAIAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]interface{}); ok {
 			if msg, ok := choice["message"].(map[string]interface{}); ok {
+				procResult.Refusal = openAIRefusalText(msg["refusal"])
 				if reasoning, ok := msg["reasoning_content"].(string); ok {
 					procResult.Reasoning = reasoning
 					procResult.ReasoningPresent = true
@@ -128,7 +192,11 @@ func (a *OpenAIAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 				}
 				if fn, ok := msg["function_call"].(map[string]interface{}); ok {
 					procResult.HasToolCalls = true
-					procResult.ToolCalls = append(procResult.ToolCalls, fn)
+					procResult.ToolCalls = append(procResult.ToolCalls, map[string]interface{}{
+						"id":       "legacy_function_call_1",
+						"type":     "function",
+						"function": fn,
+					})
 				}
 				if procResult.Content != "" {
 					cleanContent, markupToolCalls, _ := parseToolCallMarkupContent(procResult.Content, true, len(procResult.ToolCalls))
@@ -198,11 +266,13 @@ type StreamToolCall struct {
 type StreamState struct {
 	Content          strings.Builder
 	Reasoning        strings.Builder
+	Refusal          strings.Builder
 	ReasoningPresent bool
 	ToolCalls        map[int]*StreamToolCall // key 是 tool_call 的 index
 	MarkupTail       string
 	MarkupCalls      []map[string]interface{}
 	FinishReason     string
+	ProtocolError    error
 }
 
 // NewStreamState 创建新的累积器
@@ -495,37 +565,48 @@ func (s *StreamState) rawToolCalls() []map[string]interface{} {
 func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	if isStream {
 		state := NewStreamState()
-
-		scanner := bufio.NewScanner(respBody)
-		buf := make([]byte, 0, 1024*1024)
-		scanner.Buffer(buf, 20*1024*1024) // 最大 20MB
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
+		if err := scanSSEFrames(respBody, func(frame SSEFrame) (bool, error) {
+			data := strings.TrimSpace(frame.Data)
+			eventType := strings.TrimSpace(frame.Event)
+			if strings.EqualFold(eventType, "error") && data == "" {
+				return false, &openAIStreamError{eventType: eventType, message: "upstream returned an empty error event"}
 			}
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" || data == "" {
-				continue
+			if data == "[DONE]" {
+				if strings.EqualFold(eventType, "error") {
+					return false, &openAIStreamError{eventType: eventType, message: data}
+				}
+				return false, nil
+			}
+			if data == "" {
+				if isOpenAIStreamDoneEvent(eventType) {
+					return false, nil
+				}
+				return true, nil
 			}
 
 			var chunk map[string]interface{}
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				continue
+				if strings.EqualFold(eventType, "error") {
+					return false, &openAIStreamError{eventType: eventType, message: data}
+				}
+				return false, fmt.Errorf("malformed_stream_event: event=%s: %w", eventType, err)
+			}
+			if streamErr := newOpenAIStreamError(eventType, chunk); streamErr != nil {
+				return false, streamErr
 			}
 
 			parseChunk(state, chunk, callbacks)
-
-			if state.FinishReason != "" {
-				break
+			if state.ProtocolError != nil {
+				return false, state.ProtocolError
 			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("读取流式响应失败: %w", err)
+			return !isOpenAIStreamDoneEvent(eventType), nil
+		}); err != nil {
+			return nil, err
 		}
 		flushPendingMarkupContent(state, callbacks)
+		if err := validateOpenAIStreamState(state); err != nil {
+			return nil, err
+		}
 
 		// 转换为最终结果
 		streamData := state.ToMap()
@@ -534,6 +615,7 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callba
 		reasoning, _ := streamData["reasoning"].(string)
 		_, reasoningPresent := streamData["reasoning"]
 		assistantMsg := a.buildAssistantMessageWithReasoningPresence(content, toolCalls, reasoning, reasoningPresent)
+		attachOpenAIRefusal(assistantMsg, state.Refusal.String())
 		if finishReason, _ := streamData["finish_reason"].(string); strings.TrimSpace(finishReason) != "" {
 			assistantMsg["finish_reason"] = finishReason
 		}
@@ -554,9 +636,267 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callba
 		return nil, err
 	}
 
+	if streamErr := newOpenAIStreamError("", result); streamErr != nil {
+		return nil, streamErr
+	}
 	procResult := a.ProcessResponse(result)
+	if err := validateOpenAIRawToolCalls(procResult.ToolCalls); err != nil {
+		return nil, err
+	}
 	assistantMsg := a.buildAssistantMessageWithReasoningPresence(procResult.Content, procResult.ToolCalls, procResult.Reasoning, procResult.ReasoningPresent)
+	attachOpenAIRefusal(assistantMsg, procResult.Refusal)
+	if choice := firstOpenAIChoice(result); choice != nil {
+		if finishReason := strings.TrimSpace(firstOpenAIErrorString(choice["finish_reason"])); finishReason != "" {
+			if err := validateOpenAIFinishReason(finishReason); err != nil {
+				return nil, err
+			}
+			assistantMsg["finish_reason"] = finishReason
+		}
+	}
 	return attachReasoningBlock(assistantMsg, procResult.ReasoningBlock), nil
+}
+
+func newOpenAIStreamError(eventType string, chunk map[string]interface{}) error {
+	eventType = strings.TrimSpace(eventType)
+	rawError, hasError := chunk["error"]
+	hasError = hasError && openAIErrorPayloadPresent(rawError)
+	chunkType := firstOpenAIErrorString(chunk["type"], chunk["object"])
+	isErrorType := strings.EqualFold(chunkType, "error") || strings.HasSuffix(strings.ToLower(chunkType), "_error")
+	isFailedResponse := strings.EqualFold(chunkType, "response.failed") || strings.EqualFold(eventType, "response.failed")
+	isCancelledResponse := isOpenAIResponseCancelled(chunkType) || isOpenAIResponseCancelled(eventType)
+	if !hasError && !strings.EqualFold(eventType, "error") && !isErrorType && !isFailedResponse && !isCancelledResponse {
+		return nil
+	}
+
+	details, _ := rawError.(map[string]interface{})
+	message := ""
+	errorType := ""
+	code := ""
+	if rawMessage, ok := rawError.(string); ok {
+		message = strings.TrimSpace(rawMessage)
+	}
+	if details != nil {
+		message = firstOpenAIErrorString(details["message"], details["detail"], message)
+	}
+	if response, ok := chunk["response"].(map[string]interface{}); ok {
+		if nested, ok := response["error"].(map[string]interface{}); ok {
+			message = firstOpenAIErrorString(nested["message"], nested["detail"], message)
+			if errorType == "" {
+				errorType = firstOpenAIErrorString(nested["type"])
+			}
+			if code == "" {
+				code = firstOpenAIErrorString(nested["code"])
+			}
+		}
+	}
+	message = firstOpenAIErrorString(message, chunk["message"], chunk["detail"])
+	if isCancelledResponse {
+		if code == "" {
+			code = "response_cancelled"
+		}
+		if message == "" {
+			message = "upstream response was cancelled before completion"
+		}
+	}
+
+	if details != nil {
+		errorType = firstOpenAIErrorString(errorType, details["type"])
+		code = firstOpenAIErrorString(code, details["code"])
+	}
+	errorType = firstOpenAIErrorString(errorType, chunk["type"], chunk["object"])
+	code = firstOpenAIErrorString(code, chunk["code"])
+
+	return &openAIStreamError{
+		eventType: eventType,
+		code:      code,
+		errorType: errorType,
+		message:   message,
+	}
+}
+
+func isOpenAIResponseCancelled(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "response.cancelled", "response.canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAIStreamDoneEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "done", "response.completed", "response.done":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateOpenAIStreamState(state *StreamState) error {
+	if state == nil {
+		return &openAIProtocolError{code: "invalid_stream_state", message: "stream state is nil"}
+	}
+	finishReason := strings.ToLower(strings.TrimSpace(state.FinishReason))
+	if err := validateOpenAIFinishReason(finishReason); err != nil {
+		return err
+	}
+	switch finishReason {
+	case "tool_calls", "function_call":
+		if len(state.ToolCalls)+len(state.MarkupCalls) == 0 {
+			return &openAIProtocolError{
+				code:    "missing_tool_call",
+				message: fmt.Sprintf("finish_reason=%s was returned without a tool call", finishReason),
+			}
+		}
+	}
+
+	for index, call := range state.ToolCalls {
+		if call == nil {
+			return &openAIProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is nil", index)}
+		}
+		if strings.TrimSpace(call.Name) == "" {
+			return &openAIProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is missing a function name", index)}
+		}
+		if call.ID == "" {
+			call.ID = fmt.Sprintf("stream_tool_call_%d", index+1)
+		}
+		if call.Type == "" {
+			call.Type = "function"
+		}
+		arguments := strings.TrimSpace(call.Args.String())
+		if arguments == "" {
+			arguments = "{}"
+			call.Args.WriteString(arguments)
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
+			return &openAIProtocolError{
+				code:    "invalid_tool_arguments",
+				message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, call.Name),
+			}
+		}
+	}
+	return nil
+}
+
+func validateOpenAIFinishReason(finishReason string) error {
+	switch strings.ToLower(strings.TrimSpace(finishReason)) {
+	case "content_filter":
+		return &openAIProtocolError{code: "content_filter", message: "provider blocked the response by content policy"}
+	case "insufficient_system_resource":
+		return &openAIProtocolError{code: "insufficient_system_resource", message: "provider ended the response because upstream resources were unavailable"}
+	default:
+		return nil
+	}
+}
+
+func validateOpenAIRawToolCalls(toolCalls []map[string]interface{}) error {
+	for index, call := range toolCalls {
+		function, _ := call["function"].(map[string]interface{})
+		if function == nil {
+			return &openAIProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is missing its function object", index)}
+		}
+		name := strings.TrimSpace(firstOpenAIErrorString(function["name"]))
+		if name == "" {
+			return &openAIProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is missing a function name", index)}
+		}
+		rawArguments := function["arguments"]
+		if _, ok := rawArguments.(map[string]interface{}); ok {
+			continue
+		}
+		arguments := strings.TrimSpace(firstOpenAIErrorString(rawArguments))
+		if arguments == "" {
+			continue
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
+			return &openAIProtocolError{
+				code:    "invalid_tool_arguments",
+				message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, name),
+			}
+		}
+	}
+	return nil
+}
+
+func firstOpenAIChoice(result map[string]interface{}) map[string]interface{} {
+	choices, _ := result["choices"].([]interface{})
+	if len(choices) == 0 {
+		return nil
+	}
+	choice, _ := choices[0].(map[string]interface{})
+	return choice
+}
+
+func openAIRefusalText(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []interface{}:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := openAIRefusalText(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]interface{}:
+		return firstOpenAIErrorString(typed["refusal"], typed["text"], typed["content"], typed["message"])
+	default:
+		return ""
+	}
+}
+
+func attachOpenAIRefusal(assistantMsg map[string]interface{}, refusal string) {
+	refusal = strings.TrimSpace(refusal)
+	if len(assistantMsg) == 0 || refusal == "" {
+		return
+	}
+	assistantMsg["refusal"] = refusal
+	if content, _ := assistantMsg["content"].(string); strings.TrimSpace(content) == "" {
+		assistantMsg["content"] = refusal
+	}
+	metadata, _ := assistantMsg["metadata"].(map[string]interface{})
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata["refusal"] = refusal
+	metadata["refused"] = true
+	assistantMsg["metadata"] = metadata
+}
+
+func openAIErrorPayloadPresent(value interface{}) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case map[string]interface{}:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func firstOpenAIErrorString(values ...interface{}) string {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		var text string
+		switch typed := value.(type) {
+		case string:
+			text = typed
+		case json.Number:
+			text = typed.String()
+		case float64, float32, int, int32, int64, uint, uint32, uint64:
+			text = fmt.Sprint(typed)
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // parseChunk 解析单个流式 chunk
@@ -582,8 +922,14 @@ func parseChunk(state *StreamState, chunk map[string]interface{}, callbacks Stre
 	}
 
 	parseReasoning(state, delta, callbacks)
+	if refusal, ok := delta["refusal"].(string); ok && refusal != "" {
+		state.Refusal.WriteString(refusal)
+	} else if refusal := openAIRefusalText(delta["refusal"]); refusal != "" {
+		state.Refusal.WriteString(refusal)
+	}
 	parseContent(state, delta, callbacks)
 	parseToolCalls(state, delta)
+	parseLegacyFunctionCall(state, delta)
 }
 
 // parseContent 解析 delta 中的 content
@@ -655,11 +1001,11 @@ func parseToolCalls(state *StreamState, delta map[string]interface{}) {
 			continue
 		}
 
-		indexFloat, ok := tcMap["index"].(float64)
-		if !ok {
-			continue // 没有 index 则跳过
+		index, err := resolveOpenAIToolCallIndex(state, tcMap)
+		if err != nil {
+			state.ProtocolError = err
+			return
 		}
-		index := int(indexFloat)
 
 		tc := state.getToolCall(index)
 
@@ -671,6 +1017,59 @@ func parseToolCalls(state *StreamState, delta map[string]interface{}) {
 		}
 
 		parseFunction(tc, tcMap)
+	}
+}
+
+func resolveOpenAIToolCallIndex(state *StreamState, tcMap map[string]interface{}) (int, error) {
+	if rawIndex, ok := tcMap["index"].(float64); ok && rawIndex >= 0 && rawIndex == float64(int(rawIndex)) {
+		return int(rawIndex), nil
+	}
+	id := strings.TrimSpace(firstOpenAIErrorString(tcMap["id"]))
+	if id != "" {
+		for index, call := range state.ToolCalls {
+			if call != nil && call.ID == id {
+				return index, nil
+			}
+		}
+		index := 0
+		for existing := range state.ToolCalls {
+			if existing >= index {
+				index = existing + 1
+			}
+		}
+		return index, nil
+	}
+	if len(state.ToolCalls) == 0 {
+		return 0, nil
+	}
+	if len(state.ToolCalls) == 1 {
+		for index := range state.ToolCalls {
+			return index, nil
+		}
+	}
+	return -1, &openAIProtocolError{
+		code:    "ambiguous_tool_call_delta",
+		message: "tool call delta omitted both index and id while multiple calls were active",
+	}
+}
+
+func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
+	functionCall, ok := delta["function_call"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	tc := state.getToolCall(0)
+	if tc.ID == "" {
+		tc.ID = "legacy_function_call_1"
+	}
+	if tc.Type == "" {
+		tc.Type = "function"
+	}
+	if name, ok := functionCall["name"].(string); ok && name != "" {
+		tc.Name = name
+	}
+	if arguments, ok := functionCall["arguments"].(string); ok {
+		tc.Args.WriteString(arguments)
 	}
 }
 

@@ -6,6 +6,7 @@ const (
 	MetadataKeyInternalOperation = "internal_operation"
 	MetadataKeyDisableTools      = "disable_tools"
 	MetadataKeyDisableMetaTools  = "disable_meta_tools"
+	MetadataKeyDisableRetries    = "disable_retries"
 	MetadataKeyParallelToolCalls = "parallel_tool_calls"
 )
 

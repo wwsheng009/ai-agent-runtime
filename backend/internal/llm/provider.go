@@ -591,6 +591,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	if assistantMessageHasTruncatedToolCall(assistantMsg) {
 		return nil, fmt.Errorf("truncated_tool_call: model output was truncated before completing a tool call; split long file writes into smaller chunks and retry")
 	}
+	if err := validateAssistantMessageSemantics(assistantMsg); err != nil {
+		return nil, err
+	}
 	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(request.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
 			if _, imageErr := ProcessCodexAssistantImageGenerationWithOptions(assistantMsg, outputDir, CodexImageGenerationOptionsFromMetadata(request.Metadata)); imageErr != nil {
@@ -620,7 +623,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 					Role:    "assistant",
 					Content: content,
 				},
-				FinishReason: "stop",
+				FinishReason: assistantMessageFinishReason(assistantMsg),
 			},
 		},
 		Usage: chatUsageFromTokenUsage(usage),
@@ -640,7 +643,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		case []interface{}:
 			if len(tcSlice) > 0 {
 				response.Choices[0].Message.ToolCalls = p.convertToolCalls(tcSlice)
-				response.Choices[0].FinishReason = "tool_calls"
+				if response.Choices[0].FinishReason == "stop" {
+					response.Choices[0].FinishReason = "tool_calls"
+				}
 			}
 		case []map[string]interface{}:
 			if len(tcSlice) > 0 {
@@ -649,7 +654,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 					normalized = append(normalized, tc)
 				}
 				response.Choices[0].Message.ToolCalls = p.convertToolCalls(normalized)
-				response.Choices[0].FinishReason = "tool_calls"
+				if response.Choices[0].FinishReason == "stop" {
+					response.Choices[0].FinishReason = "tool_calls"
+				}
 			}
 		}
 	}
@@ -802,6 +809,10 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	streamReader := p.normalizeStreamReader(adapterRequest.Model, io.TeeReader(resp.Body, &responseBuffer))
 	assistantMsg, err := p.adapter.HandleResponse(true, streamReader, callbacks)
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+	if err == nil {
+		assistantMsg = p.normalizeAssistantMessage(adapterRequest.Model, assistantMsg)
+		err = validateStreamingAggregateResponse(p.config.Type, responseBody, assistantMsg)
+	}
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:              "provider_wrapper",
 		Phase:               "response",
@@ -818,7 +829,6 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	if err != nil {
 		return fmt.Errorf("failed to handle stream response: %w", err)
 	}
-	assistantMsg = p.normalizeAssistantMessage(adapterRequest.Model, assistantMsg)
 	if assistantMessageHasTruncatedToolCall(assistantMsg) {
 		return fmt.Errorf("truncated_tool_call: model output was truncated before completing a tool call; split long file writes into smaller chunks and retry")
 	}
@@ -910,6 +920,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 
 	chatReq := p.toChatRequest(req)
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
+	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastErr error
 	startedAt := time.Now()
 	resolvedModel := p.resolveModel(chatReq.Model)
@@ -1105,6 +1116,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	url := p.buildURL(p.adapter.GetAPIPath())
 	client := p.providerHTTPClient(true)
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
+	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastErr error
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
@@ -1330,7 +1342,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 					Message: Message{
 						Role: "assistant",
 					},
-					FinishReason: "stop",
+					FinishReason: assistantMessageFinishReason(assistantMsg),
 				},
 			},
 			Usage: chatUsageFromTokenUsage(usage),
@@ -1349,7 +1361,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			case []interface{}:
 				if len(tcSlice) > 0 {
 					response.Choices[0].Message.ToolCalls = p.convertToolCalls(tcSlice)
-					response.Choices[0].FinishReason = "tool_calls"
+					if response.Choices[0].FinishReason == "stop" {
+						response.Choices[0].FinishReason = "tool_calls"
+					}
 				}
 			case []map[string]interface{}:
 				if len(tcSlice) > 0 {
@@ -1358,7 +1372,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 						normalized = append(normalized, tc)
 					}
 					response.Choices[0].Message.ToolCalls = p.convertToolCalls(normalized)
-					response.Choices[0].FinishReason = "tool_calls"
+					if response.Choices[0].FinishReason == "stop" {
+						response.Choices[0].FinishReason = "tool_calls"
+					}
 				}
 			}
 		}
@@ -1756,4 +1772,13 @@ func (p *ProviderWrapper) convertToolCalls(tcSlice []interface{}) []ToolCall {
 		}
 	}
 	return result
+}
+
+func assistantMessageFinishReason(assistantMsg map[string]interface{}) string {
+	if finishReason, ok := assistantMsg["finish_reason"].(string); ok {
+		if finishReason = strings.TrimSpace(finishReason); finishReason != "" {
+			return finishReason
+		}
+	}
+	return "stop"
 }

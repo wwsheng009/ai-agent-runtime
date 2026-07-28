@@ -159,11 +159,17 @@ func convertNamedToolsToCodex(meta []map[string]interface{}) []map[string]interf
 			result = append(result, cloned)
 			continue
 		}
-		result = append(result, map[string]interface{}{
+		converted := map[string]interface{}{
 			"name":        tool["name"],
 			"description": tool["description"],
 			"parameters":  tool["parameters"],
-		})
+		}
+		if strict, ok := tool["strict"].(bool); ok {
+			converted["strict"] = strict
+		} else {
+			converted["strict"] = false
+		}
+		result = append(result, converted)
 	}
 	return result
 }

@@ -270,6 +270,27 @@ func TestRetryPolicy_KeepsRuleAttemptLimitsErrorSpecific(t *testing.T) {
 	assert.Equal(t, 3, policy.maxAttemptsForDecision(serverDecision))
 }
 
+func TestApplyRequestRetryPolicy_DisablesConfiguredAndRuleRetries(t *testing.T) {
+	policy := newProviderRetryPolicy(3, RetryTuning{}, []RetryRule{{
+		Name:       "rate_limit_retry",
+		Enabled:    true,
+		MaxRetries: 10,
+		Keyword: RetryKeywordMatcher{
+			Values: []string{"rate limit"},
+		},
+	}})
+
+	policy = applyRequestRetryPolicy(policy, map[string]interface{}{MetadataKeyDisableRetries: true})
+	require.Equal(t, 1, policy.MaxAttempts)
+	require.Equal(t, 1, policy.DefaultMaxAttempts)
+	require.Empty(t, policy.Rules)
+
+	result, err := prepareRetry(context.Background(), policy, time.Now(), 1, fmt.Errorf("HTTP 429: rate limit reached"), retryExecutionMeta{})
+	require.NoError(t, err)
+	require.False(t, result.Retry)
+	require.Equal(t, 1, result.MaxAttempts)
+}
+
 func TestRetryPolicy_DefaultAttemptLimitWithoutRulesRemainsUnchanged(t *testing.T) {
 	providerPolicy := newProviderRetryPolicy(3, RetryTuning{}, nil)
 	assert.Equal(t, 3, providerPolicy.MaxAttempts)
@@ -406,6 +427,26 @@ func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspec
 	assert.True(t, classifyRetryableLLMError(streamInterruptedErr).Retryable)
 	assert.Equal(t, "stream_interrupted", classifyRetryableLLMError(streamInterruptedErr).Reason)
 
+	nullFinishReasonErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+		`event: error`,
+		`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
+	}, "\n\n")), map[string]interface{}{
+		"content": "partial",
+	})
+	require.Error(t, nullFinishReasonErr)
+	assert.Contains(t, nullFinishReasonErr.Error(), "stream_interrupted")
+	assert.True(t, classifyRetryableLLMError(nullFinishReasonErr).Retryable)
+	assert.Equal(t, "stream_interrupted", classifyRetryableLLMError(nullFinishReasonErr).Reason)
+
+	finishReasonWithoutDoneErr := validateStreamingAggregateResponse("openai", []byte(
+		`data: {"choices":[{"index":0,"delta":{"content":"complete"},"finish_reason":"stop"}]}`,
+	), map[string]interface{}{
+		"content":       "complete",
+		"finish_reason": "stop",
+	})
+	require.NoError(t, finishReasonWithoutDoneErr)
+
 	contentInspectionErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
 		`data: {"error":{"code":"data_inspection_failed","message":"Output data may contain inappropriate content."}}`,
 	}, "\n\n")), map[string]interface{}{})
@@ -434,6 +475,67 @@ func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspec
 	assert.Contains(t, truncatedToolCallErr.Error(), "truncated_tool_call")
 	assert.False(t, classifyRetryableLLMError(truncatedToolCallErr).Retryable)
 	assert.Equal(t, "truncated_tool_call", classifyRetryableLLMError(truncatedToolCallErr).Reason)
+}
+
+func TestOpenAIStreamBodyHasCompletionRecognizesNamedTerminalEvents(t *testing.T) {
+	for _, eventType := range []string{"done", "response.completed", "response.done"} {
+		body := "event: " + eventType + "\ndata: {}\n\n"
+		assert.True(t, openAIStreamBodyHasCompletion(body), eventType)
+	}
+	assert.False(t, openAIStreamBodyHasCompletion("event: error\ndata: {\"error\":{}}\n\n"))
+}
+
+func TestCodexStreamBodyHasCompletionParsesLifecycleEvents(t *testing.T) {
+	for _, eventType := range []string{
+		"response.completed",
+		"response.done",
+		"response.failed",
+		"response.incomplete",
+		"response.cancelled",
+	} {
+		body := "event: " + eventType + "\ndata: {\"type\":\"" + eventType + "\"}\n\n"
+		assert.True(t, codexStreamBodyHasCompletion(body), eventType)
+	}
+	assert.True(t, codexStreamBodyHasCompletion("data: {\"type\":\"response.completed\"}\n\n"))
+	assert.False(t, codexStreamBodyHasCompletion("data: {\"type\":\"response.output_text.delta\",\"delta\":\"response.completed\"}\n\n"))
+}
+
+func TestValidateAssistantMessageSemanticsRejectsUnsafeToolCallsAndClassifiesFinishReasons(t *testing.T) {
+	err := validateAssistantMessageSemantics(map[string]interface{}{
+		"finish_reason": "tool_calls",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing_tool_call")
+	assert.True(t, classifyRetryableLLMError(err).Retryable)
+	assert.Equal(t, "malformed_tool_call", classifyRetryableLLMError(err).Reason)
+
+	err = validateAssistantMessageSemantics(map[string]interface{}{
+		"finish_reason": "tool_calls",
+		"tool_calls": []map[string]interface{}{{
+			"id": "call_1",
+			"function": map[string]interface{}{
+				"name":      "write",
+				"arguments": `{"content":"truncated`,
+			},
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid_tool_arguments")
+
+	contentFilterErr := validateAssistantMessageSemantics(map[string]interface{}{
+		"finish_reason": "content_filter",
+	})
+	require.Error(t, contentFilterErr)
+	assert.False(t, classifyRetryableLLMError(contentFilterErr).Retryable)
+	assert.Equal(t, "content_filter", classifyRetryableLLMError(contentFilterErr).Reason)
+	assert.Equal(t, "CONTENT_FILTERED", ClassifyFailureCode(contentFilterErr))
+
+	resourceErr := validateAssistantMessageSemantics(map[string]interface{}{
+		"finish_reason": "insufficient_system_resource",
+	})
+	require.Error(t, resourceErr)
+	assert.True(t, classifyRetryableLLMError(resourceErr).Retryable)
+	assert.Equal(t, "insufficient_system_resource", classifyRetryableLLMError(resourceErr).Reason)
 }
 
 type retryPolicyTestError struct {

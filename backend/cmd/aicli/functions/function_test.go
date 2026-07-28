@@ -187,6 +187,9 @@ func TestFunctionCallBuilders_DefaultNilParametersToObjectSchema(t *testing.T) {
 			if !ok || len(tools) != 1 {
 				t.Fatalf("%s: unexpected tools %#v", tc.provider, built)
 			}
+			if tools[0]["strict"] != false {
+				t.Fatalf("%s: expected Codex-compatible strict=false default, got %#v", tc.provider, tools[0]["strict"])
+			}
 			params = tools[0]["parameters"]
 		}
 
@@ -197,6 +200,27 @@ func TestFunctionCallBuilders_DefaultNilParametersToObjectSchema(t *testing.T) {
 		if schema["type"] != "object" || schema["additionalProperties"] != false {
 			t.Fatalf("%s: unexpected default parameters schema %#v", tc.provider, schema)
 		}
+	}
+}
+
+func TestCodexFunctionCallBuilderPreservesExplicitStrict(t *testing.T) {
+	built := (&CodexFunctionCallBuilder{}).BuildFunctions([]map[string]interface{}{
+		{
+			"name":        "strict_lookup",
+			"description": "lookup by id",
+			"strict":      true,
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{"type": "string"},
+				},
+				"required": []string{"id"},
+			},
+		},
+	}).([]map[string]interface{})
+
+	if len(built) != 1 || built[0]["strict"] != true {
+		t.Fatalf("expected explicit strict=true to be preserved, got %#v", built)
 	}
 }
 

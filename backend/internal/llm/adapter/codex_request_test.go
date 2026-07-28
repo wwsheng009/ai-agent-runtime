@@ -875,6 +875,76 @@ func TestCodexHandleResponse_StreamReturnsErrorOnFailedResponse(t *testing.T) {
 	}
 }
 
+func TestCodexHandleResponse_StreamReturnsErrorForStandaloneErrorEvent(t *testing.T) {
+	a := &CodexAdapter{}
+	sseData := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
+		"",
+		"event: error",
+		`data: {"type":"error","code":"internal_server_error","message":"connection reset by peer"}`,
+		"",
+	}, "\n")
+
+	msg, err := a.handleCodexStreamResponse(strings.NewReader(sseData), StreamCallbacks{})
+	if err == nil {
+		t.Fatal("expected standalone error event to fail the stream")
+	}
+	if !strings.Contains(err.Error(), "connection reset by peer") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, _ := msg["finish_reason"].(string); got != "failed" {
+		t.Fatalf("expected finish_reason failed, got %#v", msg["finish_reason"])
+	}
+}
+
+func TestCodexHandleResponse_StreamRecoversDoneEventsWithoutDeltas(t *testing.T) {
+	a := &CodexAdapter{}
+	var emittedText strings.Builder
+	sseData := strings.Join([]string{
+		"event: response.output_text.done",
+		`data: {"type":"response.output_text.done","text":"Recovered text"}`,
+		"",
+		"event: response.function_call_arguments.done",
+		`data: {"type":"response.function_call_arguments.done","output_index":1,"call_id":"call_1","name":"shell","arguments":"{\"command\":\"git status\"}"}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed","stop_reason":"tool_call"}}`,
+		"",
+	}, "\n")
+
+	msg, err := a.handleCodexStreamResponse(strings.NewReader(sseData), StreamCallbacks{
+		OnText: func(delta string) { emittedText.WriteString(delta) },
+	})
+	if err != nil {
+		t.Fatalf("handleCodexStreamResponse failed: %v", err)
+	}
+	if got := msg["content"]; got != "Recovered text" || emittedText.String() != "Recovered text" {
+		t.Fatalf("expected recovered text, got content=%#v emitted=%q", got, emittedText.String())
+	}
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected one recovered tool call, got %T %#v", msg["tool_calls"], msg["tool_calls"])
+	}
+	if toolCalls[0]["id"] != "call_1" || toolCalls[0]["name"] != "shell" {
+		t.Fatalf("unexpected recovered tool call: %#v", toolCalls[0])
+	}
+}
+
+func TestCodexHandleResponse_StreamReadsNestedResponseError(t *testing.T) {
+	a := &CodexAdapter{}
+	sseData := strings.Join([]string{
+		"event: response.failed",
+		`data: {"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_error","message":"nested provider failure"}}}`,
+		"",
+	}, "\n")
+
+	_, err := a.handleCodexStreamResponse(strings.NewReader(sseData), StreamCallbacks{})
+	if err == nil || !strings.Contains(err.Error(), "nested provider failure") {
+		t.Fatalf("expected nested response error, got %v", err)
+	}
+}
+
 func TestCodexHandleResponse_StreamEmitsImageProgressCallbacks(t *testing.T) {
 	a := &CodexAdapter{}
 	var phases []string
@@ -932,7 +1002,72 @@ func TestCodexHandleResponse_StreamEmitsImageProgressCallbacks(t *testing.T) {
 	}
 }
 
-func TestCodexBuildRequest_SanitizesOptionalPropertiesToNullableRequired(t *testing.T) {
+func TestCodexBuildRequest_DefaultsToNonStrictAndPreservesOptionalProperties(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Functions: []map[string]interface{}{
+			{
+				"type":        "function",
+				"name":        "view",
+				"description": "查看文件内容",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"file_path": map[string]interface{}{"type": "string"},
+						"offset":    map[string]interface{}{"type": "integer"},
+						"limit":     map[string]interface{}{"type": "integer"},
+					},
+					"required": []string{"file_path"},
+				},
+			},
+		},
+	})
+
+	tools := req["tools"].([]map[string]interface{})
+	view := findToolByName(t, tools, "view")
+	if view["strict"] != false {
+		t.Fatalf("expected Codex-compatible strict=false default, got %v", view["strict"])
+	}
+	params := view["parameters"].(map[string]interface{})
+	required := toStringSlice(t, params["required"])
+	if len(required) != 1 || required[0] != "file_path" {
+		t.Fatalf("expected only the declared field to remain required, got %v", required)
+	}
+	offset := params["properties"].(map[string]interface{})["offset"].(map[string]interface{})
+	if offset["type"] != "integer" {
+		t.Fatalf("expected optional integer schema to remain unchanged, got %v", offset["type"])
+	}
+}
+
+func TestCodexBuildRequest_NonStrictOmitsEmptyRequiredKeyword(t *testing.T) {
+	req := (&CodexAdapter{}).BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Functions: []map[string]interface{}{{
+			"type":        "function",
+			"name":        "shell",
+			"description": "execute shell",
+			"parameters": map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{"command": map[string]interface{}{"type": "string"}},
+				"required":   []string{},
+			},
+		}},
+	})
+
+	tool := findToolByName(t, req["tools"].([]map[string]interface{}), "shell")
+	if tool["strict"] != false {
+		t.Fatalf("expected strict=false, got %v", tool["strict"])
+	}
+	parameters := tool["parameters"].(map[string]interface{})
+	if _, exists := parameters["required"]; exists {
+		t.Fatalf("invalid required:null must be omitted, got %#v", parameters["required"])
+	}
+}
+
+func TestCodexBuildRequest_StrictToolSanitizesOptionalPropertiesToNullableRequired(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
 		Model:    "gpt-5.2",
@@ -971,6 +1106,37 @@ func TestCodexBuildRequest_SanitizesOptionalPropertiesToNullableRequired(t *test
 	}
 }
 
+func TestCodexBuildRequest_PreservesWrappedFunctionStrictFlag(t *testing.T) {
+	req := (&CodexAdapter{}).BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Functions: []map[string]interface{}{{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":   "inspect",
+				"strict": true,
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path":  map[string]interface{}{"type": "string"},
+						"limit": map[string]interface{}{"type": "integer"},
+					},
+					"required": []string{"path"},
+				},
+			},
+		}},
+	})
+
+	tool := findToolByName(t, req["tools"].([]map[string]interface{}), "inspect")
+	if tool["strict"] != true {
+		t.Fatalf("expected wrapped strict=true to be preserved, got %v", tool["strict"])
+	}
+	required := toStringSlice(t, tool["parameters"].(map[string]interface{})["required"])
+	if len(required) != 2 {
+		t.Fatalf("expected strict schema normalization, got required=%v", required)
+	}
+}
+
 func TestCodexBuildRequest_RemovesDefaultsAndSanitizesNestedSchemas(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
@@ -981,6 +1147,7 @@ func TestCodexBuildRequest_RemovesDefaultsAndSanitizesNestedSchemas(t *testing.T
 				"type":        "function",
 				"name":        "todos",
 				"description": "todo list",
+				"strict":      true,
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1044,7 +1211,7 @@ func TestCodexBuildRequest_RemovesDefaultsAndSanitizesNestedSchemas(t *testing.T
 	}
 }
 
-func TestCodexBuildRequest_SanitizesSkillRuntimeOpenObjects(t *testing.T) {
+func TestCodexBuildRequest_NonStrictToolPreservesSkillRuntimeOpenObjects(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
 		Model:    "gpt-5.2",
@@ -1054,6 +1221,7 @@ func TestCodexBuildRequest_SanitizesSkillRuntimeOpenObjects(t *testing.T) {
 				"type":        "function",
 				"name":        "skill__alpha",
 				"description": "skill",
+				"strict":      false,
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1069,19 +1237,144 @@ func TestCodexBuildRequest_SanitizesSkillRuntimeOpenObjects(t *testing.T) {
 
 	tools := req["tools"].([]map[string]interface{})
 	skillTool := findToolByName(t, tools, "skill__alpha")
+	if skillTool["strict"] != false {
+		t.Fatalf("expected non-strict skill tool, got %v", skillTool["strict"])
+	}
 	params := skillTool["parameters"].(map[string]interface{})
 	required := toStringSlice(t, params["required"])
-	if len(required) != 3 {
-		t.Fatalf("expected all skill params required, got %v", required)
+	if len(required) != 1 || required[0] != "prompt" {
+		t.Fatalf("expected only prompt to remain required, got %v", required)
 	}
 	props := params["properties"].(map[string]interface{})
 	context := props["context"].(map[string]interface{})
-	contextTypes := toStringSlice(t, context["type"])
-	if len(contextTypes) != 2 || contextTypes[0] != "object" || contextTypes[1] != "null" {
-		t.Fatalf("expected context object to become nullable, got %v", context["type"])
+	if context["type"] != "object" {
+		t.Fatalf("expected context to remain an object, got %v", context["type"])
 	}
-	if context["additionalProperties"] != false {
-		t.Fatalf("expected context additionalProperties=false, got %v", context["additionalProperties"])
+	if _, exists := context["additionalProperties"]; exists {
+		t.Fatalf("expected open context object to remain open, got %v", context["additionalProperties"])
+	}
+}
+
+func TestCodexBuildRequest_NormalizesCompatibleNonStrictSchemaShapes(t *testing.T) {
+	req := (&CodexAdapter{}).BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Functions: []map[string]interface{}{{
+			"type":   "function",
+			"name":   "compat_schema",
+			"strict": false,
+			"parameters": map[string]interface{}{
+				"properties": map[string]interface{}{
+					"tags":     map[string]interface{}{"type": "array"},
+					"metadata": map[string]interface{}{"properties": map[string]interface{}{"label": map[string]interface{}{"type": "string"}}},
+					"kind":     map[string]interface{}{"const": "file"},
+					"enabled":  true,
+				},
+				"required": []string{"kind"},
+				"$defs":    []interface{}{"malformed"},
+			},
+		}},
+	})
+
+	tool := findToolByName(t, req["tools"].([]map[string]interface{}), "compat_schema")
+	params := tool["parameters"].(map[string]interface{})
+	if params["type"] != "object" {
+		t.Fatalf("expected object type inference, got %v", params["type"])
+	}
+	props := params["properties"].(map[string]interface{})
+	tags := props["tags"].(map[string]interface{})
+	if tags["items"].(map[string]interface{})["type"] != "string" {
+		t.Fatalf("expected default array items, got %#v", tags["items"])
+	}
+	metadata := props["metadata"].(map[string]interface{})
+	if metadata["type"] != "object" {
+		t.Fatalf("expected nested object type inference, got %#v", metadata)
+	}
+	kind := props["kind"].(map[string]interface{})
+	if kind["type"] != "string" {
+		t.Fatalf("expected const schema to infer string, got %#v", kind)
+	}
+	enumValues, ok := kind["enum"].([]interface{})
+	if !ok || len(enumValues) != 1 || enumValues[0] != "file" {
+		t.Fatalf("expected const to become enum, got %#v", kind["enum"])
+	}
+	if props["enabled"].(map[string]interface{})["type"] != "string" {
+		t.Fatalf("expected boolean schema form to degrade safely, got %#v", props["enabled"])
+	}
+	if _, exists := params["$defs"]; exists {
+		t.Fatalf("expected malformed definitions to be dropped, got %#v", params["$defs"])
+	}
+}
+
+func TestCodexBuildRequest_CompactsOversizedSchemaDescriptions(t *testing.T) {
+	req := (&CodexAdapter{}).BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Functions: []map[string]interface{}{{
+			"type": "function",
+			"name": "large_schema",
+			"parameters": map[string]interface{}{
+				"type":        "object",
+				"description": strings.Repeat("verbose ", 900),
+				"properties": map[string]interface{}{
+					"description": map[string]interface{}{"type": "string", "description": "user value"},
+					"path":        map[string]interface{}{"type": "string", "description": "path value"},
+				},
+			},
+		}},
+	})
+
+	tool := findToolByName(t, req["tools"].([]map[string]interface{}), "large_schema")
+	params := tool["parameters"].(map[string]interface{})
+	if _, exists := params["description"]; exists {
+		t.Fatalf("expected oversized schema descriptions to be stripped")
+	}
+	props := params["properties"].(map[string]interface{})
+	if _, exists := props["description"]; !exists {
+		t.Fatalf("schema property named description must be preserved")
+	}
+	if _, exists := props["description"].(map[string]interface{})["description"]; exists {
+		t.Fatalf("expected nested description annotation to be stripped")
+	}
+}
+
+func TestCodexBuildRequest_PrunesUnreachableSchemaDefinitions(t *testing.T) {
+	req := (&CodexAdapter{}).BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Functions: []map[string]interface{}{{
+			"type": "function",
+			"name": "refs",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"user_name": map[string]interface{}{"$ref": "#/$defs/User/properties/name"},
+				},
+				"$defs": map[string]interface{}{
+					"User": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"name":    map[string]interface{}{"type": "string"},
+							"address": map[string]interface{}{"$ref": "#/$defs/Address"},
+						},
+					},
+					"Address": map[string]interface{}{"type": "string"},
+					"Unused":  map[string]interface{}{"type": "boolean"},
+				},
+			},
+		}},
+	})
+
+	tool := findToolByName(t, req["tools"].([]map[string]interface{}), "refs")
+	definitions := tool["parameters"].(map[string]interface{})["$defs"].(map[string]interface{})
+	if _, exists := definitions["User"]; !exists {
+		t.Fatalf("expected directly reachable definition")
+	}
+	if _, exists := definitions["Address"]; !exists {
+		t.Fatalf("expected transitively reachable definition")
+	}
+	if _, exists := definitions["Unused"]; exists {
+		t.Fatalf("expected unreachable definition to be pruned")
 	}
 }
 

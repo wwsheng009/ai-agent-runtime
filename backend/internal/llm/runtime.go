@@ -448,6 +448,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 
 	maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
 	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
+	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastError error
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
@@ -524,6 +525,7 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 
 	maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
 	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
+	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	startedAt := time.Now()
 	meta := retryExecutionMeta{
 		Source:   "llm_runtime",

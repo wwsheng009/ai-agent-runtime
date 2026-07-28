@@ -617,6 +617,19 @@ func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.
 	}
 }
 
+func TestBuildLocalChatAgent_PropagatesFailFastToAgentOptions(t *testing.T) {
+	session := &ChatSession{RetryConfig: RetryConfig{DisableRetries: true}}
+	host := &localChatRuntimeHost{Bootstrap: &runtimebootstrap.Manager{}}
+
+	apiAgent := buildLocalChatAgent(session, host, nil, "", "", "")
+	if apiAgent == nil || apiAgent.GetConfig() == nil {
+		t.Fatal("expected agent config")
+	}
+	if got := apiAgent.GetConfig().Options[runtimellm.MetadataKeyDisableRetries]; got != true {
+		t.Fatalf("expected disable_retries=true, got %#v", got)
+	}
+}
+
 func TestBuildLocalChatAgent_UsesRequestedRouteOverrides(t *testing.T) {
 	session := &ChatSession{
 		ProviderName:    "base-provider",

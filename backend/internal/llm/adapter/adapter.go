@@ -135,6 +135,7 @@ type ProcessResult struct {
 	Reasoning        string                       // 推理/thinking 内容
 	ReasoningPresent bool                         // 是否显式返回了 reasoning 字段（允许空字符串）
 	ReasoningBlock   *runtimetypes.ReasoningBlock // 统一 reasoning 抽象
+	Refusal          string                       // provider 返回的结构化拒绝文本
 	Content          string                       // 普通内容
 	HasToolCalls     bool                         // 是否包含 Function Call
 	ToolCalls        []map[string]interface{}     // Function Call 原始数据

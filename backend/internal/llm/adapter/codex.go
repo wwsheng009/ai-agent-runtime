@@ -1,11 +1,11 @@
 package adapter
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +31,8 @@ const (
 	codexImageGenerationToolType            = "image_generation"
 	codexImageGenerationCallType            = "image_generation_call"
 	codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
+	codexToolSchemaCompactBytes             = 5000
+	codexToolSchemaCompactDepth             = 3
 )
 
 // Name 返回适配器名称
@@ -41,17 +43,21 @@ func (a *CodexAdapter) Name() string {
 // CodexStreamState Codex 流式状态管理
 // 事件驱动，需要跟踪 output_item 和 reasoning_summary
 type CodexStreamState struct {
-	ResponseID   string
-	Model        string
-	Content      strings.Builder
-	Reasoning    strings.Builder
-	ToolCalls    map[int]*CodexToolCall // index -> tool call
-	ToolItemKeys map[string]int
-	OutputItems  map[int]map[string]interface{}
-	FinishReason string
-	Usage        map[string]int64
-	ErrorCode    string
-	ErrorMessage string
+	ResponseID    string
+	Model         string
+	Content       strings.Builder
+	Reasoning     strings.Builder
+	Refusal       strings.Builder
+	ToolCalls     map[int]*CodexToolCall // index -> tool call
+	ToolItemKeys  map[string]int
+	OutputItems   map[int]map[string]interface{}
+	FinishReason  string
+	Usage         map[string]int64
+	ErrorCode     string
+	ErrorMessage  string
+	Annotations   []map[string]interface{}
+	UnknownEvents map[string]int
+	ImagePhases   map[string]map[string]struct{}
 
 	// 追踪当前 output item
 	CurrentItemIndex   int
@@ -87,6 +93,9 @@ func NewCodexStreamState() *CodexStreamState {
 		ToolItemKeys:       make(map[string]int),
 		OutputItems:        make(map[int]map[string]interface{}),
 		Usage:              make(map[string]int64),
+		UnknownEvents:      make(map[string]int),
+		ImagePhases:        make(map[string]map[string]struct{}),
+		CurrentItemIndex:   -1,
 		NextSyntheticIndex: 1000000,
 	}
 }
@@ -449,31 +458,117 @@ func (a *CodexAdapter) IsReasoningModel(model string) bool {
 
 // HandleResponse 处理完整响应（流式或非流式）
 func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
+	if isStream {
+		result, err := a.handleCodexStreamResponse(respBody, callbacks)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateCodexToolCalls(result); err != nil {
+			return nil, err
+		}
+		procResult := a.ProcessResponse(result)
+		assistantMsg := attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock)
+		attachCodexResultMetadata(assistantMsg, result)
+		return assistantMsg, nil
+	}
+
 	rawBody, err := io.ReadAll(respBody)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	// 某些 Codex 网关在 stream=false 时仍会返回 SSE；这里按响应体内容自适应解析。
-	if isStream || looksLikeCodexSSEResponse(rawBody) {
+	if looksLikeCodexSSEResponse(rawBody) {
 		result, err := a.handleCodexStreamResponse(bytes.NewReader(rawBody), callbacks)
 		if err != nil {
 			return nil, err
 		}
+		if err := validateCodexToolCalls(result); err != nil {
+			return nil, err
+		}
 		procResult := a.ProcessResponse(result)
-		return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
+		assistantMsg := attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock)
+		attachCodexResultMetadata(assistantMsg, result)
+		return assistantMsg, nil
 	}
 	result, err := a.handleCodexNonStreamResponse(bytes.NewReader(rawBody), callbacks)
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCodexToolCalls(result); err != nil {
+		return nil, err
+	}
 	procResult := a.ProcessResponse(result)
-	return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
+	assistantMsg := attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock)
+	attachCodexResultMetadata(assistantMsg, result)
+	return assistantMsg, nil
+}
+
+func validateCodexToolCalls(result map[string]interface{}) error {
+	for index, call := range decodeSliceOfMaps(result["tool_calls"]) {
+		kind := strings.ToLower(strings.TrimSpace(asCodexString(call["type"])))
+		callID := strings.TrimSpace(asCodexString(call["id"]))
+		name := strings.TrimSpace(asCodexString(call["name"]))
+		if callID == "" {
+			return &codexResponseError{kind: "codex response invalid", code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is missing a call id", index)}
+		}
+		if name == "" {
+			return &codexResponseError{kind: "codex response invalid", code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is missing a name", index)}
+		}
+		if kind == "custom_tool_call" {
+			continue
+		}
+		arguments := strings.TrimSpace(asCodexString(call["arguments"]))
+		if arguments == "" {
+			continue
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
+			return &codexResponseError{
+				kind:    "codex response invalid",
+				code:    "invalid_tool_arguments",
+				message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, name),
+			}
+		}
+	}
+	return nil
+}
+
+func attachCodexResultMetadata(assistantMsg map[string]interface{}, result map[string]interface{}) {
+	if finishReason := strings.TrimSpace(asCodexString(result["finish_reason"])); finishReason != "" {
+		assistantMsg["finish_reason"] = finishReason
+	}
+	metadata := decodeMap(assistantMsg["metadata"])
+	if annotations := decodeSliceOfMaps(result["annotations"]); len(annotations) > 0 {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["annotations"] = annotations
+	}
+	if unknownEvents := decodeMap(result["sse_unknown_events"]); len(unknownEvents) > 0 {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["sse_unknown_events"] = unknownEvents
+	}
+	refusal := strings.TrimSpace(asCodexString(result["refusal"]))
+	if refusal != "" {
+		assistantMsg["refusal"] = refusal
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["refusal"] = refusal
+		metadata["refused"] = true
+	}
+	if len(metadata) > 0 {
+		assistantMsg["metadata"] = metadata
+	}
 }
 
 func looksLikeCodexSSEResponse(body []byte) bool {
 	trimmed := strings.TrimSpace(string(body))
-	return strings.HasPrefix(trimmed, "event: ") || strings.HasPrefix(trimmed, "data: ")
+	trimmed = strings.TrimPrefix(trimmed, "\uFEFF")
+	return strings.HasPrefix(trimmed, "event:") || strings.HasPrefix(trimmed, "data:")
 }
 
 // handleCodexStreamResponse 处理 Codex 流式响应
@@ -489,39 +584,45 @@ func looksLikeCodexSSEResponse(body []byte) bool {
 //	data: {"type":"response.completed","response":{"id":"resp_xxx","status":"completed","stop_reason":"end_turn"}}
 func (a *CodexAdapter) handleCodexStreamResponse(respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	state := NewCodexStreamState()
-
-	scanner := bufio.NewScanner(respBody)
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 20*1024*1024) // 最大 20MB
-
-	var currentEvent string
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// 解析 SSE 格式
-		if strings.HasPrefix(line, "event: ") {
-			currentEvent = strings.TrimPrefix(line, "event: ")
-			continue
+	if err := scanSSEFrames(respBody, func(frame SSEFrame) (bool, error) {
+		data := strings.TrimSpace(frame.Data)
+		frameEvent := strings.ToLower(strings.TrimSpace(frame.Event))
+		if data == "" {
+			if isCodexFailureEventType(frameEvent) {
+				return false, &codexResponseError{
+					kind:    "codex stream error",
+					code:    "empty_" + strings.ReplaceAll(frameEvent, ".", "_") + "_event",
+					message: "upstream returned an empty " + frameEvent + " event",
+				}
+			}
+			if isCodexDoneEventType(frameEvent) && state.FinishReason == "" {
+				state.FinishReason = "stop"
+			}
+			return true, nil
+		}
+		if data == "[DONE]" {
+			if isCodexFailureEventType(frameEvent) {
+				return false, &codexResponseError{kind: "codex stream error", message: data}
+			}
+			if state.FinishReason == "" {
+				state.FinishReason = "stop"
+			}
+			return false, nil
 		}
 
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "" {
-				continue
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			if strings.EqualFold(strings.TrimSpace(frame.Event), "error") {
+				return false, &codexResponseError{kind: "codex stream error", message: data}
 			}
-
-			var event map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
-			}
-
-			a.processCodexEvent(state, currentEvent, event, callbacks)
+			return false, fmt.Errorf("malformed_stream_event: event=%s: %w", frame.Event, err)
 		}
-	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("读取流式响应失败: %w", err)
+		eventType := resolveCodexEventType(frame.Event, event)
+		a.processCodexEvent(state, eventType, event, callbacks)
+		return true, nil
+	}); err != nil {
+		return state.ToMap(), err
 	}
 
 	if err := state.StreamError(); err != nil {
@@ -542,61 +643,143 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 	}
 
 	switch eventType {
-	case "response.created":
+	case "response.created", "response.queued", "response.in_progress":
 		a.handleResponseCreated(state, event)
 
 	case "response.output_item.added":
 		a.handleOutputItemAdded(state, event, callbacks)
+	case "response.content_part.added":
+		a.handleContentPartAdded(state, event)
 
 	case "response.image_generation_call.partial_image":
 		a.handleImageGenerationCallPartialImage(state, event, callbacks)
+	case "response.image_generation_call.in_progress":
+		a.emitCodexImageProgress(callbacks, state, nil, event, "started")
+	case "response.image_generation_call.generating":
+		a.emitCodexImageProgress(callbacks, state, nil, event, "generating")
+	case "response.image_generation_call.completed":
+		a.emitCodexImageProgress(callbacks, state, nil, event, "completed")
+	case "response.image_generation_call.failed":
+		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
 
 	case "response.output_text.delta":
 		a.handleOutputTextDelta(state, event, callbacks)
+	case "response.output_text.done":
+		a.handleOutputTextDone(state, event, callbacks)
+	case "response.output_text.annotation.added":
+		a.handleOutputTextAnnotationAdded(state, event)
+	case "response.content_part.done":
+		a.handleContentPartDone(state, event, callbacks)
+	case "response.refusal.delta":
+		a.handleRefusalDelta(state, event, callbacks)
+	case "response.refusal.done":
+		a.handleRefusalDone(state, event, callbacks)
 
 	case "response.function_call_arguments.delta":
 		a.handleFunctionCallArgumentsDelta(state, event)
+	case "response.function_call_arguments.done":
+		a.handleFunctionCallArgumentsDone(state, event)
 
 	case "response.custom_tool_call_input.delta":
 		a.handleCustomToolCallInputDelta(state, event)
+	case "response.custom_tool_call_input.done":
+		a.handleCustomToolCallInputDone(state, event)
 
 	case "response.reasoning_summary_part.added":
 		a.handleReasoningSummaryPartAdded(state, event)
 
 	case "response.reasoning_summary_text.delta":
 		a.handleReasoningSummaryTextDelta(state, event, callbacks)
+	case "response.reasoning_summary_text.done":
+		a.handleReasoningTextDone(state, event, callbacks)
 
 	case "response.reasoning_summary_part.done":
 		// 推理块结束，无需特殊处理
 
 	case "response.reasoning_text.delta":
 		a.handleReasoningTextDelta(state, event, callbacks)
+	case "response.reasoning_text.done":
+		a.handleReasoningTextDone(state, event, callbacks)
 
 	case "response.output_item.done":
 		a.handleOutputItemDone(state, event, callbacks)
 
 	case "response.completed":
-		a.handleResponseCompleted(state, event)
+		a.handleResponseCompleted(state, event, callbacks)
 
 	case "response.failed":
+		a.recoverCodexResponseSnapshot(state, event, callbacks)
 		a.handleResponseFailed(state, event, callbacks)
+	case "response.cancelled", "response.canceled":
+		a.recoverCodexResponseSnapshot(state, event, callbacks)
+		a.handleResponseCancelled(state, event, callbacks)
 
 	case "response.incomplete":
+		a.recoverCodexResponseSnapshot(state, event, callbacks)
 		a.handleResponseIncomplete(state, event, callbacks)
 
 	case "error":
 		a.handleErrorEvent(state, event, callbacks)
 
-	case "response.done":
-		// 增量响应结束信号
-		if usage, ok := event["usage"].(map[string]interface{}); ok {
-			if inputTokens, ok := usage["input_tokens"].(float64); ok {
-				state.Usage["input_tokens"] = int64(inputTokens)
-			}
-			if outputTokens, ok := usage["output_tokens"].(float64); ok {
-				state.Usage["output_tokens"] = int64(outputTokens)
-			}
-		}
+	case "done", "response.done":
+		a.handleResponseCompleted(state, event, callbacks)
+
+	default:
+		state.RecordUnknownEvent(eventType)
+	}
+}
+
+func resolveCodexEventType(frameEvent string, event map[string]interface{}) string {
+	frameType := strings.ToLower(strings.TrimSpace(frameEvent))
+	payloadType := strings.ToLower(strings.TrimSpace(asCodexString(event["type"])))
+	if isCodexFailureEventType(payloadType) {
+		return payloadType
+	}
+	if frameType == "error" || isCodexFailureEventType(frameType) {
+		return frameType
+	}
+	if payloadType != "" {
+		return payloadType
+	}
+	if codexEventHasErrorPayload(event) {
+		return "error"
+	}
+	if frameType == "message" {
+		return ""
+	}
+	return frameType
+}
+
+func isCodexFailureEventType(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "error", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCodexDoneEventType(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "done", "response.completed", "response.done":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexEventHasErrorPayload(event map[string]interface{}) bool {
+	raw, exists := event["error"]
+	if !exists || raw == nil {
+		return false
+	}
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case map[string]interface{}:
+		return len(typed) > 0
+	default:
+		return true
 	}
 }
 
@@ -654,28 +837,42 @@ func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[
 
 	// 如果是 function_call，初始化 ToolCall
 	if itemType == "function_call" || itemType == "custom_tool_call" {
-		tc := &CodexToolCall{Kind: itemType}
-		if callID, ok := item["call_id"].(string); ok {
+		tc, exists := state.ToolCalls[index]
+		if !exists {
+			tc = &CodexToolCall{Kind: itemType}
+			state.ToolCalls[index] = tc
+		}
+		if tc.Kind == "" {
+			tc.Kind = itemType
+		}
+		if callID := strings.TrimSpace(asCodexString(item["call_id"])); tc.CallID == "" {
 			tc.CallID = callID
 		}
-		if name, ok := item["name"].(string); ok {
+		if name := strings.TrimSpace(asCodexString(item["name"])); tc.Name == "" {
 			tc.Name = name
 		}
 		if itemType == "custom_tool_call" {
-			if input, ok := item["input"].(string); ok && input != "" {
-				tc.Arguments.WriteString(input)
-			}
-			for _, key := range codexToolItemKeys(item) {
-				state.ToolItemKeys[key] = index
-			}
+			appendMissingCodexText(&tc.Arguments, asCodexString(item["input"]), nil)
+		} else {
+			appendMissingCodexText(&tc.Arguments, asCodexString(item["arguments"]), nil)
 		}
-		state.ToolCalls[index] = tc
+		for _, key := range codexToolItemKeys(item) {
+			state.ToolItemKeys[key] = index
+		}
 		return
 	}
 
 	if itemType == codexImageGenerationCallType {
 		a.emitCodexImageProgress(callbacks, state, item, event, "started")
 	}
+}
+
+func (a *CodexAdapter) handleContentPartAdded(state *CodexStreamState, event map[string]interface{}) {
+	part := decodeMap(event["part"])
+	if part == nil {
+		return
+	}
+	state.AddAnnotations(part["annotations"])
 }
 
 // handleOutputTextDelta 处理 response.output_text.delta 事件
@@ -689,9 +886,58 @@ func (a *CodexAdapter) handleOutputTextDelta(state *CodexStreamState, event map[
 	callbacks.EmitText(delta)
 }
 
+func (a *CodexAdapter) handleOutputTextDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	text := strings.TrimSpace(asCodexString(event["text"]))
+	appendMissingCodexText(&state.Content, text, callbacks.EmitText)
+}
+
+func (a *CodexAdapter) handleContentPartDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	part := decodeMap(event["part"])
+	if part == nil {
+		return
+	}
+	state.AddAnnotations(part["annotations"])
+	switch strings.ToLower(strings.TrimSpace(asCodexString(part["type"]))) {
+	case "output_text":
+		appendMissingCodexText(&state.Content, asCodexString(part["text"]), callbacks.EmitText)
+	case "refusal":
+		refusal := asCodexString(part["refusal"])
+		if refusal == "" {
+			refusal = asCodexString(part["text"])
+		}
+		appendMissingCodexText(&state.Refusal, refusal, nil)
+		appendMissingCodexText(&state.Content, refusal, callbacks.EmitText)
+	}
+}
+
+func (a *CodexAdapter) handleOutputTextAnnotationAdded(state *CodexStreamState, event map[string]interface{}) {
+	if annotation := decodeMap(event["annotation"]); annotation != nil {
+		state.AddAnnotation(annotation)
+	}
+}
+
+func (a *CodexAdapter) handleRefusalDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	delta := asCodexString(event["delta"])
+	if delta == "" {
+		return
+	}
+	state.Refusal.WriteString(delta)
+	state.Content.WriteString(delta)
+	callbacks.EmitText(delta)
+}
+
+func (a *CodexAdapter) handleRefusalDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	refusal := asCodexString(event["refusal"])
+	if refusal == "" {
+		refusal = asCodexString(event["text"])
+	}
+	appendMissingCodexText(&state.Refusal, refusal, nil)
+	appendMissingCodexText(&state.Content, refusal, callbacks.EmitText)
+}
+
 // handleFunctionCallArgumentsDelta 处理 response.function_call_arguments.delta 事件
 func (a *CodexAdapter) handleFunctionCallArgumentsDelta(state *CodexStreamState, event map[string]interface{}) {
-	index := getIntIndex(event)
+	index := resolveCodexToolIndex(state, event)
 	if index == -1 {
 		return
 	}
@@ -707,6 +953,28 @@ func (a *CodexAdapter) handleFunctionCallArgumentsDelta(state *CodexStreamState,
 		state.ToolCalls[index] = tc
 	}
 	tc.Arguments.WriteString(delta)
+}
+
+func (a *CodexAdapter) handleFunctionCallArgumentsDone(state *CodexStreamState, event map[string]interface{}) {
+	index := resolveCodexToolIndex(state, event)
+	if index == -1 {
+		return
+	}
+	tc, exists := state.ToolCalls[index]
+	if !exists {
+		tc = &CodexToolCall{Kind: "function_call"}
+		state.ToolCalls[index] = tc
+	}
+	if tc.Kind == "" {
+		tc.Kind = "function_call"
+	}
+	if name := strings.TrimSpace(asCodexString(event["name"])); tc.Name == "" {
+		tc.Name = name
+	}
+	if callID := strings.TrimSpace(asCodexString(event["call_id"])); tc.CallID == "" {
+		tc.CallID = callID
+	}
+	appendMissingCodexText(&tc.Arguments, asCodexString(event["arguments"]), nil)
 }
 
 func (a *CodexAdapter) handleCustomToolCallInputDelta(state *CodexStreamState, event map[string]interface{}) {
@@ -738,6 +1006,34 @@ func (a *CodexAdapter) handleCustomToolCallInputDelta(state *CodexStreamState, e
 		tc.Kind = "custom_tool_call"
 	}
 	tc.Arguments.WriteString(delta)
+}
+
+func (a *CodexAdapter) handleCustomToolCallInputDone(state *CodexStreamState, event map[string]interface{}) {
+	key := codexToolItemKeyFromEvent(event)
+	if key == "" {
+		return
+	}
+	index, ok := state.ToolItemKeys[key]
+	if !ok {
+		index = state.NextSyntheticIndex
+		state.NextSyntheticIndex++
+		state.ToolItemKeys[key] = index
+	}
+	tc, exists := state.ToolCalls[index]
+	if !exists {
+		tc = &CodexToolCall{Kind: "custom_tool_call"}
+		state.ToolCalls[index] = tc
+	}
+	if tc.Kind == "" {
+		tc.Kind = "custom_tool_call"
+	}
+	if callID := strings.TrimSpace(asCodexString(event["call_id"])); tc.CallID == "" {
+		tc.CallID = callID
+	}
+	if name := strings.TrimSpace(asCodexString(event["name"])); tc.Name == "" {
+		tc.Name = name
+	}
+	appendMissingCodexText(&tc.Arguments, asCodexString(event["input"]), nil)
 }
 
 // handleReasoningSummaryPartAdded 处理 response.reasoning_summary_part.added 事件
@@ -773,12 +1069,38 @@ func (a *CodexAdapter) handleReasoningTextDelta(state *CodexStreamState, event m
 	callbacks.EmitReasoning(delta)
 }
 
+func (a *CodexAdapter) handleReasoningTextDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	text := strings.TrimSpace(asCodexString(event["text"]))
+	appendMissingCodexText(&state.Reasoning, text, callbacks.EmitReasoning)
+}
+
+func appendMissingCodexText(builder *strings.Builder, authoritative string, emit func(string)) {
+	if builder == nil || authoritative == "" {
+		return
+	}
+	current := builder.String()
+	if current == authoritative || strings.HasSuffix(current, authoritative) {
+		return
+	}
+	missing := authoritative
+	if strings.HasPrefix(authoritative, current) {
+		missing = strings.TrimPrefix(authoritative, current)
+	}
+	if missing == "" {
+		return
+	}
+	builder.WriteString(missing)
+	if emit != nil {
+		emit(missing)
+	}
+}
+
 // handleOutputItemDone 处理 response.output_item.done 事件
 func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	index := getIntIndex(event)
 	item, _ := event["item"].(map[string]interface{})
 	itemType, _ := item["type"].(string)
-	if index == -1 && itemType == "custom_tool_call" {
+	if index == -1 && (itemType == "function_call" || itemType == "custom_tool_call") {
 		key := codexToolItemKeyFromItem(item)
 		if key == "" {
 			key = codexToolItemKeyFromEvent(event)
@@ -822,19 +1144,27 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 			tc.Name = name
 		}
 		if itemType == "function_call" {
-			if args, ok := item["arguments"].(string); ok && tc.Arguments.Len() == 0 {
-				tc.Arguments.WriteString(args)
-			}
+			appendMissingCodexText(&tc.Arguments, asCodexString(item["arguments"]), nil)
 		} else {
-			if input, ok := item["input"].(string); ok && tc.Arguments.Len() == 0 {
-				tc.Arguments.WriteString(input)
-			}
+			appendMissingCodexText(&tc.Arguments, asCodexString(item["input"]), nil)
 			for _, key := range codexToolItemKeys(item) {
 				state.ToolItemKeys[key] = index
 			}
 		}
+	} else if itemType == "message" {
+		a.recoverCodexMessageItem(state, item, callbacks)
+	} else if itemType == "reasoning" {
+		a.recoverCodexReasoningItem(state, item, callbacks)
 	} else if itemType == codexImageGenerationCallType {
-		a.emitCodexImageProgress(callbacks, state, item, event, "completed")
+		phase := strings.ToLower(strings.TrimSpace(asCodexString(item["status"])))
+		switch phase {
+		case "failed", "generating":
+		case "in_progress", "queued":
+			phase = "started"
+		default:
+			phase = "completed"
+		}
+		a.emitCodexImageProgress(callbacks, state, item, event, phase)
 	}
 	state.OutputItems[index] = cloneInterfaceMap(item)
 
@@ -842,22 +1172,137 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 	state.CurrentItemStarted = false
 }
 
-// handleResponseCompleted 处理 response.completed 事件
-func (a *CodexAdapter) handleResponseCompleted(state *CodexStreamState, event map[string]interface{}) {
-	if resp, ok := event["response"].(map[string]interface{}); ok {
-		if stopReason, ok := resp["stop_reason"].(string); ok {
-			state.FinishReason = stopReason
+func (a *CodexAdapter) recoverCodexReasoningItem(state *CodexStreamState, item map[string]interface{}, callbacks StreamCallbacks) {
+	for _, part := range decodeSliceOfMaps(item["summary"]) {
+		if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "summary_text") {
+			appendMissingCodexText(&state.Reasoning, asCodexString(part["text"]), callbacks.EmitReasoning)
 		}
-		if usage, ok := resp["usage"].(map[string]interface{}); ok {
-			if inputTokens, ok := usage["input_tokens"].(float64); ok {
-				state.Usage["input_tokens"] = int64(inputTokens)
+	}
+	for _, part := range decodeSliceOfMaps(item["content"]) {
+		if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "reasoning_text") {
+			appendMissingCodexText(&state.Reasoning, asCodexString(part["text"]), callbacks.EmitReasoning)
+		}
+	}
+}
+
+func (a *CodexAdapter) recoverCodexMessageItem(state *CodexStreamState, item map[string]interface{}, callbacks StreamCallbacks) {
+	content, _ := item["content"].([]interface{})
+	for _, rawPart := range content {
+		part := decodeMap(rawPart)
+		if part == nil {
+			continue
+		}
+		state.AddAnnotations(part["annotations"])
+		switch strings.ToLower(strings.TrimSpace(asCodexString(part["type"]))) {
+		case "output_text":
+			appendMissingCodexText(&state.Content, asCodexString(part["text"]), callbacks.EmitText)
+		case "refusal":
+			refusal := asCodexString(part["refusal"])
+			if refusal == "" {
+				refusal = asCodexString(part["text"])
 			}
-			if outputTokens, ok := usage["output_tokens"].(float64); ok {
-				state.Usage["output_tokens"] = int64(outputTokens)
+			appendMissingCodexText(&state.Refusal, refusal, nil)
+			appendMissingCodexText(&state.Content, refusal, callbacks.EmitText)
+		}
+	}
+}
+
+// handleResponseCompleted consumes the authoritative response snapshot carried
+// by response.completed/response.done. Some compatible gateways omit deltas,
+// so final output items must be recoverable from this event alone.
+func (a *CodexAdapter) handleResponseCompleted(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	resp := a.recoverCodexResponseSnapshot(state, event, callbacks)
+
+	status := strings.ToLower(strings.TrimSpace(asCodexString(resp["status"])))
+	switch status {
+	case "failed":
+		a.handleResponseFailed(state, resp, callbacks)
+		return
+	case "cancelled", "canceled":
+		a.handleResponseCancelled(state, resp, callbacks)
+		return
+	case "incomplete":
+		a.handleResponseIncomplete(state, resp, callbacks)
+		return
+	}
+	if stopReason := strings.TrimSpace(asCodexString(resp["stop_reason"])); stopReason != "" {
+		state.FinishReason = stopReason
+	}
+	if state.FinishReason == "" {
+		state.FinishReason = "stop"
+	}
+}
+
+func (a *CodexAdapter) recoverCodexResponseSnapshot(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) map[string]interface{} {
+	resp := decodeMap(event["response"])
+	if resp == nil {
+		resp = event
+	}
+	if id := strings.TrimSpace(asCodexString(resp["id"])); id != "" {
+		state.ResponseID = id
+	}
+	if model := strings.TrimSpace(asCodexString(resp["model"])); model != "" {
+		state.Model = model
+	}
+	if usage := decodeMap(resp["usage"]); usage != nil {
+		mergeCodexUsage(state, usage)
+	}
+	a.recoverCodexFinalOutput(state, decodeSliceOfMaps(resp["output"]), callbacks)
+	return resp
+}
+
+func (a *CodexAdapter) recoverCodexFinalOutput(state *CodexStreamState, output []map[string]interface{}, callbacks StreamCallbacks) {
+	var content strings.Builder
+	var refusal strings.Builder
+	var reasoning strings.Builder
+	for index, item := range output {
+		event := map[string]interface{}{"output_index": float64(index), "item": item}
+		switch strings.ToLower(strings.TrimSpace(asCodexString(item["type"]))) {
+		case "message":
+			state.OutputItems[index] = cloneInterfaceMap(item)
+			for _, part := range decodeSliceOfMaps(item["content"]) {
+				state.AddAnnotations(part["annotations"])
+				switch strings.ToLower(strings.TrimSpace(asCodexString(part["type"]))) {
+				case "output_text":
+					content.WriteString(asCodexString(part["text"]))
+				case "refusal":
+					text := asCodexString(part["refusal"])
+					if text == "" {
+						text = asCodexString(part["text"])
+					}
+					refusal.WriteString(text)
+					content.WriteString(text)
+				}
 			}
-			if totalTokens, ok := usage["total_tokens"].(float64); ok {
-				state.Usage["total_tokens"] = int64(totalTokens)
+		case "reasoning":
+			state.OutputItems[index] = cloneInterfaceMap(item)
+			for _, part := range decodeSliceOfMaps(item["summary"]) {
+				if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "summary_text") {
+					reasoning.WriteString(asCodexString(part["text"]))
+				}
 			}
+			for _, part := range decodeSliceOfMaps(item["content"]) {
+				if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "reasoning_text") {
+					reasoning.WriteString(asCodexString(part["text"]))
+				}
+			}
+		default:
+			a.handleOutputItemDone(state, event, callbacks)
+		}
+	}
+	appendMissingCodexText(&state.Content, content.String(), callbacks.EmitText)
+	appendMissingCodexText(&state.Refusal, refusal.String(), nil)
+	appendMissingCodexText(&state.Reasoning, reasoning.String(), callbacks.EmitReasoning)
+	state.CurrentItemStarted = false
+}
+
+func mergeCodexUsage(state *CodexStreamState, usage map[string]interface{}) {
+	if state == nil {
+		return
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "total_tokens"} {
+		if value, ok := numericValue(usage[key]); ok {
+			state.Usage[key] = int64(value)
 		}
 	}
 }
@@ -872,10 +1317,29 @@ func (a *CodexAdapter) handleResponseFailed(state *CodexStreamState, event map[s
 	state.SetError(code, message)
 }
 
+func (a *CodexAdapter) handleResponseCancelled(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	if a.shouldEmitFailedImageProgress(state) {
+		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
+	}
+	state.FinishReason = "failed"
+	code, message := codexErrorFromEvent(event)
+	if code == "" {
+		code = "response_cancelled"
+	}
+	if message == "" {
+		message = "codex response was cancelled before completion"
+	}
+	state.SetError(code, message)
+}
+
 // handleResponseIncomplete 处理 response.incomplete 事件
 func (a *CodexAdapter) handleResponseIncomplete(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	if a.shouldEmitFailedImageProgress(state) {
 		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
+	}
+	if reason := codexIncompleteReason(event); isCodexMaxOutputStop(reason) {
+		state.FinishReason = reason
+		return
 	}
 	state.FinishReason = "incomplete"
 	code, message := codexIncompleteMessage(event)
@@ -886,6 +1350,7 @@ func (a *CodexAdapter) handleErrorEvent(state *CodexStreamState, event map[strin
 	if a.shouldEmitFailedImageProgress(state) {
 		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
 	}
+	state.FinishReason = "failed"
 	code, message := codexErrorFromEvent(event)
 	state.SetError(code, message)
 }
@@ -916,6 +1381,9 @@ func (a *CodexAdapter) emitCodexImageProgress(callbacks StreamCallbacks, state *
 		if index := state.CurrentItemIndex; index >= 0 {
 			metadata["output_index"] = index
 		}
+	}
+	if index, ok := numericValue(firstPresentValue(event, "output_index", "item_index")); ok {
+		metadata["output_index"] = int(index)
 	}
 
 	source := item
@@ -963,8 +1431,41 @@ func (a *CodexAdapter) emitCodexImageProgress(callbacks StreamCallbacks, state *
 			metadata["error_code"] = strings.TrimSpace(errorCode)
 		}
 	}
+	if state != nil && !state.ShouldEmitImagePhase(codexImagePhaseKey(metadata), phase) {
+		return
+	}
 
 	callbacks.EmitImage(metadata)
+}
+
+func codexImagePhaseKey(metadata map[string]interface{}) string {
+	if index, ok := numericValue(metadata["output_index"]); ok {
+		return fmt.Sprintf("output:%d", int(index))
+	}
+	for _, key := range []string{"image_id", "item_id", "sanitized_id"} {
+		if value := strings.TrimSpace(asCodexString(metadata[key])); value != "" {
+			return key + ":" + value
+		}
+	}
+	return "current"
+}
+
+func (s *CodexStreamState) ShouldEmitImagePhase(key, phase string) bool {
+	if s == nil {
+		return true
+	}
+	phase = strings.ToLower(strings.TrimSpace(phase))
+	if phase == "" || phase == "partial" {
+		return true
+	}
+	if s.ImagePhases[key] == nil {
+		s.ImagePhases[key] = make(map[string]struct{})
+	}
+	if _, exists := s.ImagePhases[key][phase]; exists {
+		return false
+	}
+	s.ImagePhases[key][phase] = struct{}{}
+	return true
 }
 
 func (a *CodexAdapter) isCurrentImageGenerationCall(state *CodexStreamState) bool {
@@ -1080,8 +1581,33 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 	if err := json.NewDecoder(respBody).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
+	status := strings.ToLower(strings.TrimSpace(asCodexString(resp["status"])))
+	incompleteFinishReason := ""
+	switch status {
+	case "failed":
+		code, message := codexErrorFromEvent(resp)
+		if message == "" {
+			message = "unknown codex response failure"
+		}
+		return nil, &codexResponseError{kind: "codex response failed", code: code, message: message}
+	case "incomplete":
+		if reason := codexIncompleteReason(resp); isCodexMaxOutputStop(reason) {
+			incompleteFinishReason = reason
+			break
+		}
+		code, message := codexIncompleteMessage(resp)
+		if message == "" {
+			message = "unknown codex incomplete response"
+		}
+		return nil, &codexResponseError{kind: "codex response incomplete", code: code, message: message}
+	}
 
 	result := make(map[string]interface{})
+	if incompleteFinishReason != "" {
+		result["finish_reason"] = incompleteFinishReason
+	} else if status == "completed" {
+		result["finish_reason"] = "stop"
+	}
 
 	// 提取基本信息
 	if id, ok := resp["id"].(string); ok {
@@ -1111,6 +1637,7 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 	var content strings.Builder
 	var reasoning strings.Builder
 	toolCalls := make([]map[string]interface{}, 0)
+	annotations := make([]map[string]interface{}, 0)
 
 	for _, item := range output {
 		itemMap, ok := item.(map[string]interface{})
@@ -1126,11 +1653,22 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 			if contentArr, ok := itemMap["content"].([]interface{}); ok {
 				for _, c := range contentArr {
 					if cMap, ok := c.(map[string]interface{}); ok {
+						annotations = append(annotations, decodeSliceOfMaps(cMap["annotations"])...)
 						if cType, ok := cMap["type"].(string); ok {
 							if cType == "output_text" {
 								if text, ok := cMap["text"].(string); ok {
 									content.WriteString(text)
 									callbacks.EmitText(text)
+								}
+							} else if cType == "refusal" {
+								refusal := strings.TrimSpace(asCodexString(cMap["refusal"]))
+								if refusal == "" {
+									refusal = strings.TrimSpace(asCodexString(cMap["text"]))
+								}
+								if refusal != "" {
+									result["refusal"] = refusal
+									content.WriteString(refusal)
+									callbacks.EmitText(refusal)
 								}
 							}
 						}
@@ -1191,6 +1729,9 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 	if len(toolCalls) > 0 {
 		result["tool_calls"] = toolCalls
 	}
+	if len(annotations) > 0 {
+		result["annotations"] = annotations
+	}
 
 	return result, nil
 }
@@ -1207,6 +1748,9 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 	}
 
 	result["content"] = s.Content.String()
+	if s.Refusal.Len() > 0 {
+		result["refusal"] = s.Refusal.String()
+	}
 
 	if s.Reasoning.Len() > 0 {
 		result["reasoning"] = s.Reasoning.String()
@@ -1224,6 +1768,16 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 
 	if len(s.Usage) > 0 {
 		result["usage"] = s.Usage
+	}
+	if len(s.Annotations) > 0 {
+		result["annotations"] = s.Annotations
+	}
+	if len(s.UnknownEvents) > 0 {
+		unknownEvents := make(map[string]interface{}, len(s.UnknownEvents))
+		for eventType, count := range s.UnknownEvents {
+			unknownEvents[eventType] = count
+		}
+		result["sse_unknown_events"] = unknownEvents
 	}
 
 	// 转换 ToolCalls
@@ -1274,6 +1828,37 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 	}
 
 	return result
+}
+
+func (s *CodexStreamState) AddAnnotations(raw interface{}) {
+	for _, annotation := range decodeSliceOfMaps(raw) {
+		s.AddAnnotation(annotation)
+	}
+}
+
+func (s *CodexStreamState) AddAnnotation(annotation map[string]interface{}) {
+	if s == nil || len(annotation) == 0 {
+		return
+	}
+	encoded, _ := json.Marshal(annotation)
+	for _, existing := range s.Annotations {
+		existingJSON, _ := json.Marshal(existing)
+		if bytes.Equal(existingJSON, encoded) {
+			return
+		}
+	}
+	s.Annotations = append(s.Annotations, cloneInterfaceMap(annotation))
+}
+
+func (s *CodexStreamState) RecordUnknownEvent(eventType string) {
+	if s == nil {
+		return
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = "(missing)"
+	}
+	s.UnknownEvents[eventType]++
 }
 
 func (s *CodexStreamState) SetError(code, message string) {
@@ -1338,6 +1923,9 @@ func (e *codexResponseError) Error() string {
 		return ""
 	}
 	kind := strings.TrimSpace(e.kind)
+	if code := strings.TrimSpace(e.code); code != "" {
+		kind = fmt.Sprintf("%s (code=%s)", kind, code)
+	}
 	message := strings.TrimSpace(e.message)
 	switch {
 	case kind == "":
@@ -1365,8 +1953,24 @@ func codexErrorFromEvent(event map[string]interface{}) (string, string) {
 		if code == "" {
 			code = strings.TrimSpace(asCodexString(nested["code"]))
 		}
+		if code == "" {
+			code = strings.TrimSpace(asCodexString(nested["type"]))
+		}
 		if message := strings.TrimSpace(asCodexString(nested["message"])); message != "" {
 			return code, message
+		}
+	}
+	if response, ok := event["response"].(map[string]interface{}); ok {
+		if nested, ok := response["error"].(map[string]interface{}); ok {
+			if code == "" {
+				code = strings.TrimSpace(asCodexString(nested["code"]))
+			}
+			if code == "" {
+				code = strings.TrimSpace(asCodexString(nested["type"]))
+			}
+			if message := strings.TrimSpace(asCodexString(nested["message"])); message != "" {
+				return code, message
+			}
 		}
 	}
 	return code, strings.TrimSpace(asCodexString(event["message"]))
@@ -1389,6 +1993,30 @@ func codexIncompleteMessage(event map[string]interface{}) (string, string) {
 		}
 	}
 	return "incomplete", strings.TrimSpace(asCodexString(event["message"]))
+}
+
+func codexIncompleteReason(event map[string]interface{}) string {
+	if len(event) == 0 {
+		return ""
+	}
+	if details := decodeMap(event["incomplete_details"]); details != nil {
+		if reason := strings.TrimSpace(asCodexString(details["reason"])); reason != "" {
+			return reason
+		}
+	}
+	if response := decodeMap(event["response"]); response != nil {
+		return codexIncompleteReason(response)
+	}
+	return ""
+}
+
+func isCodexMaxOutputStop(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_output_tokens", "max_tokens", "length", "max_output_tokens_exceeded":
+		return true
+	default:
+		return false
+	}
 }
 
 func stringifyCodexEventField(value interface{}) string {
@@ -1430,13 +2058,33 @@ func cloneInterfaceMap(raw map[string]interface{}) map[string]interface{} {
 
 // getIntIndex 从事件中获取 index 字段
 func getIntIndex(event map[string]interface{}) int {
-	if index, ok := event["index"].(float64); ok {
+	if index, ok := numericValue(event["index"]); ok {
 		return int(index)
 	}
-	if outputIndex, ok := event["output_index"].(float64); ok {
+	if outputIndex, ok := numericValue(event["output_index"]); ok {
 		return int(outputIndex)
 	}
 	return -1
+}
+
+func resolveCodexToolIndex(state *CodexStreamState, event map[string]interface{}) int {
+	if index := getIntIndex(event); index >= 0 {
+		if key := codexToolItemKeyFromEvent(event); key != "" {
+			state.ToolItemKeys[key] = index
+		}
+		return index
+	}
+	key := codexToolItemKeyFromEvent(event)
+	if key == "" {
+		return -1
+	}
+	if index, exists := state.ToolItemKeys[key]; exists {
+		return index
+	}
+	index := state.NextSyntheticIndex
+	state.NextSyntheticIndex++
+	state.ToolItemKeys[key] = index
+	return index
 }
 
 func codexToolItemKeyFromEvent(event map[string]interface{}) string {
@@ -1546,10 +2194,12 @@ func normalizeCodexTools(raw interface{}) []map[string]interface{} {
 			if _, ok := out["parameters"]; !ok {
 				out["parameters"] = emptyCodexObjectParameters()
 			}
-			if strict, ok := tool["strict"]; ok {
+			if strict, ok := tool["strict"].(bool); ok {
+				out["strict"] = strict
+			} else if strict, ok := fn["strict"].(bool); ok {
 				out["strict"] = strict
 			} else {
-				out["strict"] = true
+				out["strict"] = false
 			}
 			out = sanitizeCodexTool(out)
 			normalized = append(normalized, out)
@@ -1573,8 +2223,10 @@ func normalizeCodexTools(raw interface{}) []map[string]interface{} {
 		} else if flat["parameters"] == nil {
 			flat["parameters"] = emptyCodexObjectParameters()
 		}
-		if _, ok := flat["strict"]; !ok {
-			flat["strict"] = true
+		if strict, ok := flat["strict"].(bool); ok {
+			flat["strict"] = strict
+		} else {
+			flat["strict"] = false
 		}
 		normalized = append(normalized, sanitizeCodexTool(flat))
 	}
@@ -1599,7 +2251,7 @@ func codexToolsContainType(tools []map[string]interface{}, target string) bool {
 	return false
 }
 
-// NormalizeCodexToolsForRequest normalizes tool schemas to the Codex/Responses strict subset.
+// NormalizeCodexToolsForRequest normalizes tools for the Codex/Responses API.
 func NormalizeCodexToolsForRequest(raw interface{}) []map[string]interface{} {
 	return normalizeCodexTools(raw)
 }
@@ -1614,8 +2266,11 @@ func sanitizeCodexTool(tool map[string]interface{}) map[string]interface{} {
 		sanitized[key] = value
 	}
 
+	strict, _ := sanitized["strict"].(bool)
 	if params := decodeMap(sanitized["parameters"]); params != nil {
-		sanitized["parameters"] = sanitizeCodexSchemaMap(params, false)
+		parameters := sanitizeCodexSchemaMap(params, false, strict)
+		compactLargeCodexToolSchema(parameters, strict)
+		sanitized["parameters"] = parameters
 	} else if strings.EqualFold(strings.TrimSpace(asCodexString(sanitized["type"])), "function") || sanitized["type"] == nil {
 		sanitized["parameters"] = emptyCodexObjectParameters()
 	}
@@ -1631,7 +2286,7 @@ func emptyCodexObjectParameters() map[string]interface{} {
 	}
 }
 
-func sanitizeCodexSchemaMap(schema map[string]interface{}, optional bool) map[string]interface{} {
+func sanitizeCodexSchemaMap(schema map[string]interface{}, optional bool, strict bool) map[string]interface{} {
 	if schema == nil {
 		return nil
 	}
@@ -1643,46 +2298,79 @@ func sanitizeCodexSchemaMap(schema map[string]interface{}, optional bool) map[st
 		}
 		sanitized[key] = value
 	}
+	if constValue, ok := sanitized["const"]; ok {
+		delete(sanitized, "const")
+		if _, hasEnum := sanitized["enum"]; !hasEnum {
+			sanitized["enum"] = []interface{}{constValue}
+		}
+	}
+	normalizeCodexSchemaRequired(sanitized)
+	normalizeCodexSchemaEnum(sanitized)
+	normalizeCodexSchemaType(sanitized)
+	inferCodexSchemaType(sanitized)
+	pruneUnsupportedCodexSchemaKeywords(sanitized)
+	if !codexSchemaHasShape(sanitized) {
+		return map[string]interface{}{}
+	}
 
 	for _, key := range []string{"properties", "items", "anyOf", "oneOf", "allOf"} {
 		switch key {
 		case "properties":
-			if props := decodeMapOfMaps(sanitized[key]); len(props) > 0 {
+			if rawProps, exists := sanitized[key]; exists {
+				props := decodeMap(rawProps)
 				requiredSet := buildRequiredSet(sanitized["required"])
 				names := make([]string, 0, len(props))
 				sanitizedProps := make(map[string]interface{}, len(props))
 				for name, prop := range props {
 					names = append(names, name)
-					sanitizedProp := sanitizeCodexSchemaMap(prop, !requiredSet[name])
+					sanitizedProp := sanitizeCodexSchemaValue(prop, strict && !requiredSet[name], strict)
 					sanitizedProps[name] = sanitizedProp
-					requiredSet[name] = true
 				}
-				sort.Strings(names)
 				sanitized["properties"] = sanitizedProps
-				sanitized["required"] = names
+				if strict {
+					sort.Strings(names)
+					sanitized["required"] = names
+				}
 			}
 		case "items":
-			if items := decodeMap(sanitized[key]); items != nil {
-				sanitized["items"] = sanitizeCodexSchemaMap(items, false)
+			if items, exists := sanitized[key]; exists {
+				sanitized["items"] = sanitizeCodexSchemaValue(items, false, strict)
 			}
 		default:
-			if variants := decodeSliceOfMaps(sanitized[key]); len(variants) > 0 {
-				out := make([]map[string]interface{}, 0, len(variants))
-				for _, variant := range variants {
-					out = append(out, sanitizeCodexSchemaMap(variant, false))
+			if _, exists := sanitized[key]; exists {
+				if variants := sanitizeCodexSchemaVariants(sanitized[key], strict); len(variants) > 0 {
+					sanitized[key] = variants
+				} else {
+					delete(sanitized, key)
 				}
-				sanitized[key] = out
 			}
+		}
+	}
+	sanitizeCodexSchemaDefinitions(sanitized, strict)
+	pruneUnreachableCodexSchemaDefinitions(sanitized)
+	if additional, exists := sanitized["additionalProperties"]; exists {
+		if _, ok := additional.(bool); !ok {
+			sanitized["additionalProperties"] = sanitizeCodexSchemaValue(additional, false, strict)
 		}
 	}
 
 	if schemaType, ok := sanitized["type"]; ok {
 		if typeContains(schemaType, "object") {
-			sanitized["additionalProperties"] = false
-			if properties, exists := sanitized["properties"]; exists {
-				if _, ok := properties.(map[string]interface{}); !ok {
-					sanitized["properties"] = map[string]interface{}{}
+			if strict {
+				sanitized["additionalProperties"] = false
+			}
+			if _, exists := sanitized["properties"]; !exists {
+				sanitized["properties"] = map[string]interface{}{}
+			}
+			if strict {
+				if _, exists := sanitized["required"]; !exists {
+					sanitized["required"] = []string{}
 				}
+			}
+		}
+		if typeContains(schemaType, "array") {
+			if _, exists := sanitized["items"]; !exists {
+				sanitized["items"] = map[string]interface{}{"type": "string"}
 			}
 		}
 	}
@@ -1692,6 +2380,464 @@ func sanitizeCodexSchemaMap(schema map[string]interface{}, optional bool) map[st
 	}
 
 	return sanitized
+}
+
+func sanitizeCodexSchemaValue(raw interface{}, optional bool, strict bool) interface{} {
+	if _, ok := raw.(bool); ok {
+		return sanitizeCodexSchemaMap(map[string]interface{}{"type": "string"}, optional, strict)
+	}
+	if schema := decodeMap(raw); schema != nil {
+		return sanitizeCodexSchemaMap(schema, optional, strict)
+	}
+	return map[string]interface{}{}
+}
+
+func sanitizeCodexSchemaVariants(raw interface{}, strict bool) []interface{} {
+	var values []interface{}
+	switch typed := raw.(type) {
+	case []interface{}:
+		values = typed
+	case []map[string]interface{}:
+		values = make([]interface{}, len(typed))
+		for index, value := range typed {
+			values[index] = value
+		}
+	default:
+		encoded, err := json.Marshal(raw)
+		if err != nil || json.Unmarshal(encoded, &values) != nil {
+			return nil
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]interface{}, 0, len(values))
+	for _, value := range values {
+		out = append(out, sanitizeCodexSchemaValue(value, false, strict))
+	}
+	return out
+}
+
+func sanitizeCodexSchemaDefinitions(schema map[string]interface{}, strict bool) {
+	for _, key := range []string{"$defs", "definitions"} {
+		raw, exists := schema[key]
+		if !exists {
+			continue
+		}
+		definitions := decodeMap(raw)
+		if definitions == nil {
+			delete(schema, key)
+			continue
+		}
+		sanitized := make(map[string]interface{}, len(definitions))
+		for name, definition := range definitions {
+			sanitized[name] = sanitizeCodexSchemaValue(definition, false, strict)
+		}
+		schema[key] = sanitized
+	}
+}
+
+func normalizeCodexSchemaRequired(schema map[string]interface{}) {
+	raw, exists := schema["required"]
+	if !exists {
+		return
+	}
+	var required []string
+	switch typed := raw.(type) {
+	case []string:
+		required = append([]string(nil), typed...)
+	case []interface{}:
+		for _, value := range typed {
+			if name, ok := value.(string); ok {
+				required = append(required, name)
+			}
+		}
+	default:
+		delete(schema, "required")
+		return
+	}
+	if len(required) == 0 {
+		// JSON Schema requires `required` to be an array when present. In Go,
+		// normalizing an empty slice through a nil accumulator would otherwise
+		// serialize it as `null`, which several Responses-compatible providers
+		// reject before inference starts. Omission is equivalent for non-strict
+		// schemas; strict normalization reconstructs the complete array later.
+		delete(schema, "required")
+		return
+	}
+	schema["required"] = required
+}
+
+func normalizeCodexSchemaEnum(schema map[string]interface{}) {
+	raw, exists := schema["enum"]
+	if !exists {
+		return
+	}
+	if _, ok := raw.([]interface{}); ok {
+		return
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		delete(schema, "enum")
+		return
+	}
+	var values []interface{}
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		delete(schema, "enum")
+		return
+	}
+	schema["enum"] = values
+}
+
+func normalizeCodexSchemaType(schema map[string]interface{}) {
+	raw, exists := schema["type"]
+	if !exists {
+		return
+	}
+	allowed := func(value string) bool {
+		switch value {
+		case "object", "string", "number", "integer", "boolean", "array", "null":
+			return true
+		default:
+			return false
+		}
+	}
+	switch typed := raw.(type) {
+	case string:
+		if !allowed(typed) {
+			delete(schema, "type")
+		}
+	case []string:
+		values := make([]interface{}, 0, len(typed))
+		for _, value := range typed {
+			if allowed(value) {
+				values = append(values, value)
+			}
+		}
+		if len(values) == 0 {
+			delete(schema, "type")
+		} else {
+			schema["type"] = values
+		}
+	case []interface{}:
+		values := make([]interface{}, 0, len(typed))
+		for _, rawValue := range typed {
+			if value, ok := rawValue.(string); ok && allowed(value) {
+				values = append(values, value)
+			}
+		}
+		if len(values) == 0 {
+			delete(schema, "type")
+		} else {
+			schema["type"] = values
+		}
+	default:
+		delete(schema, "type")
+	}
+}
+
+type codexDefinitionRef struct {
+	table string
+	name  string
+}
+
+func pruneUnreachableCodexSchemaDefinitions(schema map[string]interface{}) {
+	definitions := map[string]map[string]interface{}{}
+	for _, table := range []string{"$defs", "definitions"} {
+		if values := decodeMap(schema[table]); values != nil {
+			definitions[table] = values
+		}
+	}
+	if len(definitions) == 0 {
+		return
+	}
+
+	reachable := make(map[codexDefinitionRef]bool)
+	queue := collectCodexDefinitionRefs(schema, false)
+	for len(queue) > 0 {
+		ref := queue[0]
+		queue = queue[1:]
+		if reachable[ref] {
+			continue
+		}
+		reachable[ref] = true
+		definition := definitions[ref.table][ref.name]
+		if definition != nil {
+			queue = append(queue, collectCodexDefinitionRefs(definition, true)...)
+		}
+	}
+
+	for table, values := range definitions {
+		for name := range values {
+			if !reachable[codexDefinitionRef{table: table, name: name}] {
+				delete(values, name)
+			}
+		}
+		if len(values) == 0 {
+			delete(schema, table)
+		}
+	}
+}
+
+func collectCodexDefinitionRefs(value interface{}, includeDefinitionTables bool) []codexDefinitionRef {
+	refs := make([]codexDefinitionRef, 0)
+	var visit func(interface{})
+	visit = func(current interface{}) {
+		switch typed := current.(type) {
+		case map[string]interface{}:
+			if rawRef, _ := typed["$ref"].(string); rawRef != "" {
+				if ref, ok := parseCodexDefinitionRef(rawRef); ok {
+					refs = append(refs, ref)
+				}
+			}
+			if properties := decodeMap(typed["properties"]); properties != nil {
+				for _, property := range properties {
+					visit(property)
+				}
+			}
+			for _, key := range []string{"items", "anyOf", "oneOf", "allOf"} {
+				visit(typed[key])
+			}
+			if _, isBool := typed["additionalProperties"].(bool); !isBool {
+				visit(typed["additionalProperties"])
+			}
+			if includeDefinitionTables {
+				for _, table := range []string{"$defs", "definitions"} {
+					if definitions := decodeMap(typed[table]); definitions != nil {
+						for _, definition := range definitions {
+							visit(definition)
+						}
+					}
+				}
+			}
+		case []interface{}:
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	return refs
+}
+
+func parseCodexDefinitionRef(raw string) (codexDefinitionRef, bool) {
+	fragment := strings.TrimPrefix(raw, "#")
+	if fragment == raw {
+		return codexDefinitionRef{}, false
+	}
+	if decoded, err := url.PathUnescape(fragment); err == nil {
+		fragment = decoded
+	}
+	parts := strings.Split(strings.TrimPrefix(fragment, "/"), "/")
+	if len(parts) < 2 {
+		return codexDefinitionRef{}, false
+	}
+	table := strings.ReplaceAll(strings.ReplaceAll(parts[0], "~1", "/"), "~0", "~")
+	name := strings.ReplaceAll(strings.ReplaceAll(parts[1], "~1", "/"), "~0", "~")
+	if (table == "$defs" || table == "definitions") && name != "" {
+		return codexDefinitionRef{table: table, name: name}, true
+	}
+	return codexDefinitionRef{}, false
+}
+
+func inferCodexSchemaType(schema map[string]interface{}) {
+	if schema == nil || schema["type"] != nil || schema["$ref"] != nil {
+		return
+	}
+	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+		if schema[key] != nil {
+			return
+		}
+	}
+	for _, key := range []string{"properties", "required", "additionalProperties"} {
+		if _, exists := schema[key]; exists {
+			schema["type"] = "object"
+			return
+		}
+	}
+	for _, key := range []string{"items", "prefixItems"} {
+		if _, exists := schema[key]; exists {
+			schema["type"] = "array"
+			return
+		}
+	}
+	for _, key := range []string{"enum", "format"} {
+		if _, exists := schema[key]; exists {
+			schema["type"] = "string"
+			return
+		}
+	}
+	for _, key := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"} {
+		if _, exists := schema[key]; exists {
+			schema["type"] = "number"
+			return
+		}
+	}
+}
+
+func pruneUnsupportedCodexSchemaKeywords(schema map[string]interface{}) {
+	for key := range schema {
+		switch key {
+		case "$ref", "type", "description", "encrypted", "enum",
+			"items", "properties", "required", "additionalProperties",
+			"anyOf", "oneOf", "allOf", "$defs", "definitions":
+		default:
+			delete(schema, key)
+		}
+	}
+}
+
+func codexSchemaHasShape(schema map[string]interface{}) bool {
+	for _, key := range []string{"$ref", "type", "enum", "items", "properties", "required", "additionalProperties", "anyOf", "oneOf", "allOf"} {
+		if _, exists := schema[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func compactLargeCodexToolSchema(schema map[string]interface{}, strict bool) {
+	if codexSchemaFitsCompactBudget(schema) {
+		return
+	}
+	stripCodexSchemaDescriptions(schema)
+	if strict || codexSchemaFitsCompactBudget(schema) {
+		return
+	}
+	rewriteCodexDefinitionRefs(schema)
+	delete(schema, "$defs")
+	delete(schema, "definitions")
+	if codexSchemaFitsCompactBudget(schema) {
+		return
+	}
+	collapseDeepCodexSchemaObjects(schema, 0)
+	if !codexSchemaFitsCompactBudget(schema) {
+		pruneCodexSchemaCompositions(schema)
+	}
+}
+
+func codexSchemaFitsCompactBudget(schema map[string]interface{}) bool {
+	encoded, err := json.Marshal(schema)
+	return err == nil && len(encoded) <= codexToolSchemaCompactBytes
+}
+
+func stripCodexSchemaDescriptions(value interface{}) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		delete(typed, "description")
+		if properties := decodeMap(typed["properties"]); properties != nil {
+			for _, property := range properties {
+				stripCodexSchemaDescriptions(property)
+			}
+		}
+		for _, key := range []string{"items", "anyOf", "oneOf", "allOf"} {
+			stripCodexSchemaDescriptions(typed[key])
+		}
+		if _, isBool := typed["additionalProperties"].(bool); !isBool {
+			stripCodexSchemaDescriptions(typed["additionalProperties"])
+		}
+		for _, key := range []string{"$defs", "definitions"} {
+			if definitions := decodeMap(typed[key]); definitions != nil {
+				for _, definition := range definitions {
+					stripCodexSchemaDescriptions(definition)
+				}
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			stripCodexSchemaDescriptions(child)
+		}
+	}
+}
+
+func rewriteCodexDefinitionRefs(value interface{}) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if ref, _ := typed["$ref"].(string); strings.HasPrefix(ref, "#/$defs/") || strings.HasPrefix(ref, "#/definitions/") {
+			for key := range typed {
+				delete(typed, key)
+			}
+			return
+		}
+		if properties := decodeMap(typed["properties"]); properties != nil {
+			for _, property := range properties {
+				rewriteCodexDefinitionRefs(property)
+			}
+		}
+		for _, key := range []string{"items", "anyOf", "oneOf", "allOf"} {
+			rewriteCodexDefinitionRefs(typed[key])
+		}
+		if _, isBool := typed["additionalProperties"].(bool); !isBool {
+			rewriteCodexDefinitionRefs(typed["additionalProperties"])
+		}
+	case []interface{}:
+		for _, child := range typed {
+			rewriteCodexDefinitionRefs(child)
+		}
+	}
+}
+
+func collapseDeepCodexSchemaObjects(value interface{}, depth int) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if depth >= codexToolSchemaCompactDepth && codexSchemaIsComplex(typed) {
+			for key := range typed {
+				delete(typed, key)
+			}
+			return
+		}
+		if properties := decodeMap(typed["properties"]); properties != nil {
+			for _, property := range properties {
+				collapseDeepCodexSchemaObjects(property, depth+1)
+			}
+		}
+		for _, key := range []string{"items", "anyOf", "oneOf", "allOf"} {
+			collapseDeepCodexSchemaObjects(typed[key], depth+1)
+		}
+		if _, isBool := typed["additionalProperties"].(bool); !isBool {
+			collapseDeepCodexSchemaObjects(typed["additionalProperties"], depth+1)
+		}
+	case []interface{}:
+		for _, child := range typed {
+			collapseDeepCodexSchemaObjects(child, depth)
+		}
+	}
+}
+
+func codexSchemaIsComplex(schema map[string]interface{}) bool {
+	for _, key := range []string{"properties", "items", "anyOf", "oneOf", "allOf", "additionalProperties", "$ref"} {
+		if _, exists := schema[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func pruneCodexSchemaCompositions(value interface{}) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+			if _, exists := typed[key]; exists {
+				for existing := range typed {
+					delete(typed, existing)
+				}
+				return
+			}
+		}
+		if properties := decodeMap(typed["properties"]); properties != nil {
+			for _, property := range properties {
+				pruneCodexSchemaCompositions(property)
+			}
+		}
+		pruneCodexSchemaCompositions(typed["items"])
+		if _, isBool := typed["additionalProperties"].(bool); !isBool {
+			pruneCodexSchemaCompositions(typed["additionalProperties"])
+		}
+	case []interface{}:
+		for _, child := range typed {
+			pruneCodexSchemaCompositions(child)
+		}
+	}
 }
 
 func buildRequiredSet(raw interface{}) map[string]bool {
@@ -1800,31 +2946,6 @@ func typeContains(raw interface{}, target string) bool {
 		}
 	}
 	return false
-}
-
-func decodeMapOfMaps(raw interface{}) map[string]map[string]interface{} {
-	if raw == nil {
-		return nil
-	}
-	if typed, ok := raw.(map[string]interface{}); ok {
-		out := make(map[string]map[string]interface{}, len(typed))
-		for key, value := range typed {
-			if decoded := decodeMap(value); decoded != nil {
-				out[key] = decoded
-			}
-		}
-		return out
-	}
-
-	bytes, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var out map[string]map[string]interface{}
-	if err := json.Unmarshal(bytes, &out); err != nil {
-		return nil
-	}
-	return out
 }
 
 func decodeToolsToMaps(raw interface{}) []map[string]interface{} {

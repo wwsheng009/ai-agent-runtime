@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,36 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestRunGrepCommandClosesStdin(t *testing.T) {
+	binaryPath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := runGrepCommand(
+		context.Background(),
+		binaryPath,
+		t.TempDir(),
+		[]string{"-test.run=^TestRunGrepCommandStdinHelper$"},
+	)
+	if err != nil {
+		t.Fatalf("helper failed: %v, output=%s", err, output)
+	}
+	if !strings.Contains(string(output), "stdin-bytes=0") {
+		t.Fatalf("expected immediate EOF from closed stdin, got %q", output)
+	}
+}
+
+func TestRunGrepCommandStdinHelper(t *testing.T) {
+	if !containsString(os.Args, "-test.run=^TestRunGrepCommandStdinHelper$") {
+		t.Skip("subprocess helper")
+	}
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("stdin-bytes=%d", len(input))
 }
 
 func TestGrepTool(t *testing.T) {
@@ -1496,6 +1528,29 @@ func TestNormalizeRipgrepOutput_ContextLines(t *testing.T) {
 	}
 	if lines[2] != "pkg/my-file.go:4: line4" {
 		t.Fatalf("unexpected normalized trailing context line: %q", lines[2])
+	}
+}
+
+func TestParseRGCompatArgsRejectsExecutableAndArchiveOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []interface{}
+	}{
+		{name: "pre split", args: []interface{}{"--pre", "cmd", "needle", "."}},
+		{name: "pre equals", args: []interface{}{"--pre=cmd", "needle", "."}},
+		{name: "hostname bin split", args: []interface{}{"--hostname-bin", "cmd", "needle", "."}},
+		{name: "hostname bin equals", args: []interface{}{"--hostname-bin=cmd", "needle", "."}},
+		{name: "search zip", args: []interface{}{"--search-zip", "needle", "."}},
+		{name: "search zip short", args: []interface{}{"-z", "needle", "."}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseRGCompatArgs(map[string]interface{}{"rg_args": tt.args})
+			if err == nil || !strings.Contains(err.Error(), "暂不支持的 rg_args 选项") {
+				t.Fatalf("expected unsafe rg option to be rejected, got %v", err)
+			}
+		})
 	}
 }
 

@@ -1163,6 +1163,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			req.Metadata[llm.MetadataKeyDisableTools] = true
 			req.Metadata["tool_choice"] = "none"
 		}
+		if boolValue(optionValue(loop.agent.config.Options, llm.MetadataKeyDisableRetries)) {
+			req.Metadata[llm.MetadataKeyDisableRetries] = true
+		}
 	}
 	addRemainingBudgetMetadata(req.Metadata, remainingBudget)
 	loop.applyRememberedProviderRequestDowngrades(req)
@@ -2661,17 +2664,19 @@ func compactGrepParametersForModel(parameters map[string]interface{}) map[string
 	if len(properties) == 0 {
 		return parameters
 	}
-	commonNames := []string{
-		"pattern", "patterns", "regexp", "pattern_file", "pattern_files",
-		"path", "paths", "glob", "include", "exclude", "file_type", "type", "type_not",
-		"fixed_strings", "literal", "ignore_case", "case_sensitive", "smart_case",
-		"word", "word_regexp", "line_regexp", "invert_match", "only_matching",
-		"context", "before_context", "after_context", "max_count", "max_depth", "max_filesize",
-		"files_with_matches", "files_without_match", "count", "count_matches",
-		"hidden", "no_ignore", "ignore_file", "pcre2", "multiline", "rg_args",
+	// Keep the model surface compact even though Codex sends these options as
+	// non-strict and optional. Smaller schemas reduce prompt cost and also avoid
+	// low-quality compatible providers volunteering placeholder options such as
+	// max_depth=0, which intentionally means root-only. Advanced and alias
+	// options remain available through rg_args.
+	modelNames := []string{
+		"pattern", "patterns", "path", "paths", "glob",
+		"literal", "ignore_case", "case_sensitive", "word",
+		"context", "files_with_matches", "count",
+		"hidden", "no_ignore", "rg_args",
 	}
-	compactProperties := make(map[string]interface{}, len(commonNames))
-	for _, name := range commonNames {
+	compactProperties := make(map[string]interface{}, len(modelNames))
+	for _, name := range modelNames {
 		if schema, ok := properties[name]; ok {
 			compactProperties[name] = schema
 		}

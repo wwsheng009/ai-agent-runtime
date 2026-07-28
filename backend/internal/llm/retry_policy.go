@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
 const (
@@ -312,6 +314,16 @@ func (p retryPolicy) initialMaxAttempts() int {
 	return p.maxAttemptsForDecision(retryDecision{})
 }
 
+func applyRequestRetryPolicy(policy retryPolicy, metadata map[string]interface{}) retryPolicy {
+	if !metadataBool(metadata[MetadataKeyDisableRetries]) {
+		return policy
+	}
+	policy.MaxAttempts = 1
+	policy.DefaultMaxAttempts = 1
+	policy.Rules = nil
+	return policy
+}
+
 func retryAttemptAllowed(maxAttempts int, attempt int) bool {
 	return attempt > 0 && (maxAttempts <= 0 || attempt <= maxAttempts)
 }
@@ -546,6 +558,12 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 		return "UPSTREAM_RATE_LIMITED"
 	case "stream_interrupted", "transient_stream_or_server", "empty_reply", "reasoning_only_empty_reply":
 		return "STREAM_INTERRUPTED"
+	case "insufficient_system_resource":
+		return "UPSTREAM_UNAVAILABLE"
+	case "malformed_tool_call":
+		return "UPSTREAM_INVALID_RESPONSE"
+	case "content_filter":
+		return "CONTENT_FILTERED"
 	case "transport":
 		return "UPSTREAM_UNAVAILABLE"
 	case "context_canceled":
@@ -587,6 +605,13 @@ func llmFailureNextAction(code string, decision retryDecision) string {
 		return "Correct the provider request or unsupported parameters before retrying."
 	case "UPSTREAM_RATE_LIMITED":
 		return "Retry with bounded backoff using the provider retry hint, or switch providers."
+	case "CONTENT_FILTERED":
+		return "Do not retry unchanged; revise the request only when policy-compliant output is possible."
+	case "UPSTREAM_INVALID_RESPONSE":
+		if decision.Retryable {
+			return "Retry once with bounded backoff; never execute malformed tool arguments."
+		}
+		return "Do not execute malformed tool arguments; inspect the provider response."
 	case "UPSTREAM_UNAVAILABLE", "STREAM_INTERRUPTED":
 		if decision.Retryable {
 			return "Retry with bounded backoff, then switch providers or report the blocker after repeated failure."
@@ -629,6 +654,22 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 
 	if !isRetryableProviderResponseError(err) {
 		return retryDecision{Retryable: false, Reason: "non_retryable_response"}
+	}
+	switch strings.ToLower(strings.TrimSpace(extractRetryErrorCode(err))) {
+	case "content_filter", "safety", "safety_filter":
+		return retryDecision{Retryable: false, Reason: "content_filter"}
+	case "insufficient_system_resource":
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "insufficient_system_resource",
+		}
+	case "missing_tool_call", "invalid_tool_call", "invalid_tool_arguments", "ambiguous_tool_call_delta":
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "malformed_tool_call",
+		}
 	}
 
 	lower := strings.ToLower(err.Error())
@@ -683,6 +724,23 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		return retryDecision{
 			Retryable: false,
 			Reason:    "content_inspection_failed",
+		}
+	}
+	if containsAny(lower, "code=content_filter", "finish_reason=content_filter") {
+		return retryDecision{Retryable: false, Reason: "content_filter"}
+	}
+	if containsAny(lower, "code=insufficient_system_resource", "finish_reason=insufficient_system_resource") {
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "insufficient_system_resource",
+		}
+	}
+	if containsAny(lower, "code=missing_tool_call", "code=invalid_tool_call", "code=invalid_tool_arguments", "code=ambiguous_tool_call_delta") {
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "malformed_tool_call",
 		}
 	}
 	if containsAny(lower, "truncated_tool_call", "incomplete tool call markup", "truncated before completing a tool call") {
@@ -1219,6 +1277,10 @@ func validateStreamingAggregateResponse(protocol string, responseBody []byte, as
 		return fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")
 	}
 
+	if err := validateAssistantMessageSemantics(assistantMsg); err != nil {
+		return err
+	}
+
 	if !assistantMessageHasSubstantiveOutput(assistantMsg) {
 		return fmt.Errorf("empty_reply: stream ended without substantive output")
 	}
@@ -1226,12 +1288,90 @@ func validateStreamingAggregateResponse(protocol string, responseBody []byte, as
 	return nil
 }
 
+type assistantProtocolError struct {
+	code    string
+	message string
+}
+
+func (e *assistantProtocolError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("assistant_protocol_error: code=%s: %s", e.code, e.message)
+}
+
+func (e *assistantProtocolError) RetryErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.code
+}
+
+func validateAssistantMessageSemantics(assistantMsg map[string]interface{}) error {
+	finishReason := strings.ToLower(strings.TrimSpace(stringValue(assistantMsg["finish_reason"])))
+	switch finishReason {
+	case "content_filter":
+		return &assistantProtocolError{code: "content_filter", message: "provider blocked the response by content policy"}
+	case "insufficient_system_resource":
+		return &assistantProtocolError{code: "insufficient_system_resource", message: "provider ended the response because upstream resources were unavailable"}
+	}
+
+	toolCalls := assistantMessageToolCalls(assistantMsg)
+	if (finishReason == "tool_calls" || finishReason == "function_call") && len(toolCalls) == 0 {
+		return &assistantProtocolError{code: "missing_tool_call", message: fmt.Sprintf("finish_reason=%s was returned without a tool call", finishReason)}
+	}
+	for index, call := range toolCalls {
+		kind := strings.ToLower(strings.TrimSpace(stringValue(call["type"])))
+		if kind == "custom_tool_call" {
+			if strings.TrimSpace(stringValue(call["name"])) == "" {
+				return &assistantProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("custom tool call %d is missing a name", index)}
+			}
+			continue
+		}
+
+		name := strings.TrimSpace(stringValue(call["name"]))
+		arguments := stringValue(call["arguments"])
+		if function := decodeMapAny(call["function"]); function != nil {
+			name = strings.TrimSpace(stringValue(function["name"]))
+			arguments = stringValue(function["arguments"])
+		}
+		if name == "" {
+			return &assistantProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is missing a function name", index)}
+		}
+		if strings.TrimSpace(arguments) == "" {
+			continue
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
+			return &assistantProtocolError{code: "invalid_tool_arguments", message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, name)}
+		}
+	}
+	return nil
+}
+
+func assistantMessageToolCalls(assistantMsg map[string]interface{}) []map[string]interface{} {
+	switch calls := assistantMsg["tool_calls"].(type) {
+	case []map[string]interface{}:
+		return calls
+	case []interface{}:
+		result := make([]map[string]interface{}, 0, len(calls))
+		for _, raw := range calls {
+			if call := decodeMapAny(raw); call != nil {
+				result = append(result, call)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
 func streamBodyLooksIncomplete(protocol string, body string) bool {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "codex":
-		return !containsAny(body, "response.completed", "response.failed", "response.incomplete")
+		return !codexStreamBodyHasCompletion(body)
 	case "openai":
-		return !strings.Contains(body, "\"finish_reason\"") && !strings.Contains(body, "[DONE]")
+		return !openAIStreamBodyHasCompletion(body)
 	case "anthropic":
 		return !strings.Contains(body, "event: message_stop")
 	case "gemini":
@@ -1239,6 +1379,76 @@ func streamBodyLooksIncomplete(protocol string, body string) bool {
 	default:
 		return false
 	}
+}
+
+func codexStreamBodyHasCompletion(body string) bool {
+	completed := false
+	_ = adapter.ScanSSEFrames(strings.NewReader(body), func(frame adapter.SSEFrame) (bool, error) {
+		payload := strings.TrimSpace(frame.Data)
+		eventType := strings.ToLower(strings.TrimSpace(frame.Event))
+		if payload == "[DONE]" || isCodexTerminalStreamEvent(eventType) {
+			completed = true
+			return false, nil
+		}
+		if payload == "" {
+			return true, nil
+		}
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			return true, nil
+		}
+		if isCodexTerminalStreamEvent(strings.ToLower(strings.TrimSpace(stringValue(event["type"])))) {
+			completed = true
+			return false, nil
+		}
+		return true, nil
+	})
+	return completed
+}
+
+func isCodexTerminalStreamEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "done", "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func openAIStreamBodyHasCompletion(body string) bool {
+	completed := false
+	_ = adapter.ScanSSEFrames(strings.NewReader(body), func(frame adapter.SSEFrame) (bool, error) {
+		payload := strings.TrimSpace(frame.Data)
+		eventType := strings.ToLower(strings.TrimSpace(frame.Event))
+		if payload == "[DONE]" || eventType == "done" || eventType == "response.completed" || eventType == "response.done" {
+			completed = true
+			return false, nil
+		}
+		if payload == "" {
+			return true, nil
+		}
+
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return true, nil
+		}
+		chunkType := strings.ToLower(strings.TrimSpace(stringValue(chunk["type"])))
+		if chunkType == "response.completed" || chunkType == "response.done" {
+			completed = true
+			return false, nil
+		}
+		choices, _ := chunk["choices"].([]interface{})
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]interface{})
+			finishReason, _ := choice["finish_reason"].(string)
+			if strings.TrimSpace(finishReason) != "" {
+				completed = true
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+	return completed
 }
 
 func assistantMessageHasSubstantiveOutput(assistantMsg map[string]interface{}) bool {

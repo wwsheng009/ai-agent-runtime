@@ -18,13 +18,13 @@ const (
 // ResponsesRequest Codex/Responses API 请求
 // 参考: https://platform.openai.com/docs/api-reference/responses
 type ResponsesRequest struct {
-	Model                string          `json:"model"`
-	Stream               bool            `json:"stream,omitempty"`
-	Input                []InputItem     `json:"input,omitempty"`
-	Tools                []Tool          `json:"tools,omitempty"`
-	ToolChoice           interface{}     `json:"tool_choice,omitempty"` // string or ToolChoiceObject
-	ParallelToolCalls    *bool           `json:"parallel_tool_calls,omitempty"`
-	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
+	Model             string      `json:"model"`
+	Stream            bool        `json:"stream,omitempty"`
+	Input             []InputItem `json:"input,omitempty"`
+	Tools             []Tool      `json:"tools,omitempty"`
+	ToolChoice        interface{} `json:"tool_choice,omitempty"` // string or ToolChoiceObject
+	ParallelToolCalls *bool       `json:"parallel_tool_calls,omitempty"`
+	PromptCacheKey    string      `json:"prompt_cache_key,omitempty"`
 
 	// 推理配置
 	Reasoning *Reasoning `json:"reasoning,omitempty"`
@@ -116,14 +116,14 @@ type TextFormat struct {
 
 // ResponsesResponse Codex/Responses API 响应
 type ResponsesResponse struct {
-	ID                   string          `json:"id"`
-	Object               string          `json:"object"`
-	CreatedAt            int64           `json:"created_at"`
-	Model                string          `json:"model"`
-	Status               string          `json:"status"` // in_progress, completed, failed
-	Output               []OutputItem    `json:"output,omitempty"`
-	Usage                *Usage          `json:"usage,omitempty"`
-	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
+	ID             string       `json:"id"`
+	Object         string       `json:"object"`
+	CreatedAt      int64        `json:"created_at"`
+	Model          string       `json:"model"`
+	Status         string       `json:"status"` // in_progress, completed, failed
+	Output         []OutputItem `json:"output,omitempty"`
+	Usage          *Usage       `json:"usage,omitempty"`
+	PromptCacheKey string       `json:"prompt_cache_key,omitempty"`
 
 	// 错误信息
 	Error *ResponseError `json:"error,omitempty"`
@@ -237,14 +237,14 @@ type StreamEvent struct {
 
 // ResponseData 响应数据
 type ResponseData struct {
-	ID                   string          `json:"id"`
-	Model                string          `json:"model"`
-	CreatedAt            int64           `json:"created_at"`
-	Status               string          `json:"status"`
-	Output               []OutputItem    `json:"output,omitempty"`
-	Usage                *Usage          `json:"usage,omitempty"`
-	StopReason           string          `json:"stop_reason,omitempty"`
-	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
+	ID             string       `json:"id"`
+	Model          string       `json:"model"`
+	CreatedAt      int64        `json:"created_at"`
+	Status         string       `json:"status"`
+	Output         []OutputItem `json:"output,omitempty"`
+	Usage          *Usage       `json:"usage,omitempty"`
+	StopReason     string       `json:"stop_reason,omitempty"`
+	PromptCacheKey string       `json:"prompt_cache_key,omitempty"`
 
 	// 错误信息
 	Error *ResponseError `json:"error,omitempty"`
@@ -260,22 +260,29 @@ type ResponseData struct {
 const (
 	// 响应级别事件
 	EventTypeResponseCreated    = "response.created"
+	EventTypeResponseQueued     = "response.queued"
 	EventTypeResponseCompleted  = "response.completed"
 	EventTypeResponseInProgress = "response.in_progress"
 	EventTypeResponseDone       = "response.done"       // 增量完成
 	EventTypeResponseFailed     = "response.failed"     // 响应失败
 	EventTypeResponseIncomplete = "response.incomplete" // 响应不完整
+	EventTypeResponseCancelled  = "response.cancelled"
+	EventTypeResponseCanceled   = "response.canceled"
 
 	// 输出项事件
 	EventTypeResponseOutputItemAdded = "response.output_item.added"
 	EventTypeResponseOutputItemDone  = "response.output_item.done"
 
-	// 内容部分事件（注意：Codex 客户端不处理这些事件）
+	// 内容部分事件
 	EventTypeResponseContentPartAdded = "response.content_part.added"
 	EventTypeResponseContentPartDone  = "response.content_part.done"
 
 	// 文本输出事件
-	EventTypeResponseOutputTextDelta = "response.output_text.delta"
+	EventTypeResponseOutputTextDelta           = "response.output_text.delta"
+	EventTypeResponseOutputTextDone            = "response.output_text.done"
+	EventTypeResponseOutputTextAnnotationAdded = "response.output_text.annotation.added"
+	EventTypeResponseRefusalDelta              = "response.refusal.delta"
+	EventTypeResponseRefusalDone               = "response.refusal.done"
 
 	// 推理/思考事件 - 使用 summary_index
 	EventTypeResponseReasoningSummaryPartAdded = "response.reasoning_summary_part.added"
@@ -285,9 +292,22 @@ const (
 
 	// 推理文本事件 - 使用 content_index
 	EventTypeResponseReasoningTextDelta = "response.reasoning_text.delta"
+	EventTypeResponseReasoningTextDone  = "response.reasoning_text.done"
 
 	// 工具调用事件
 	EventTypeResponseFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
+	EventTypeResponseFunctionCallArgumentsDone  = "response.function_call_arguments.done"
+	EventTypeResponseCustomToolInputDelta       = "response.custom_tool_call_input.delta"
+	EventTypeResponseCustomToolInputDone        = "response.custom_tool_call_input.done"
+
+	// 图片生成事件
+	EventTypeResponseImageGenerationInProgress = "response.image_generation_call.in_progress"
+	EventTypeResponseImageGenerationGenerating = "response.image_generation_call.generating"
+	EventTypeResponseImageGenerationPartial    = "response.image_generation_call.partial_image"
+	EventTypeResponseImageGenerationCompleted  = "response.image_generation_call.completed"
+	EventTypeResponseImageGenerationFailed     = "response.image_generation_call.failed"
+
+	EventTypeError = "error"
 )
 
 // 错误码常量

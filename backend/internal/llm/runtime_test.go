@@ -338,6 +338,26 @@ func TestLLMRuntime_Call_RetriesRetryableProviderErrors(t *testing.T) {
 	assert.Equal(t, 3, provider.calls)
 }
 
+func TestLLMRuntime_Call_RequestCanDisableRetries(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{fmt.Errorf("HTTP 500: temporary upstream failure")},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+		Metadata: map[string]interface{}{MetadataKeyDisableRetries: true},
+	})
+	require.Error(t, err)
+	require.Equal(t, 1, provider.calls)
+}
+
 func TestLLMRuntime_Call_ReportsRetryDebugEventAndPropagatesAttemptContext(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",

@@ -540,7 +540,7 @@ type CodexFunctionCallBuilder struct{}
 //	  "name": "...",
 //	  "description": "...",
 //	  "parameters": {...},
-//	  "strict": true  // optional
+//	  "strict": false  // optional
 //	}
 func (b *CodexFunctionCallBuilder) BuildFunctions(schemas []map[string]interface{}) interface{} {
 	tools := make([]map[string]interface{}, 0, len(schemas))
@@ -551,8 +551,12 @@ func (b *CodexFunctionCallBuilder) BuildFunctions(schemas []map[string]interface
 			"description": schema["description"],
 			"parameters":  normalizeFunctionParameters(schema["parameters"]),
 		}
-		// 添加 strict 字段（默认 true）
-		tool["strict"] = true
+		// Match the Codex client: function tools are non-strict unless a caller
+		// explicitly opts into Structured Outputs semantics.
+		tool["strict"] = false
+		if strict, ok := schema["strict"].(bool); ok {
+			tool["strict"] = strict
+		}
 		tools = append(tools, tool)
 	}
 	return llmadapter.NormalizeCodexToolsForRequest(tools)

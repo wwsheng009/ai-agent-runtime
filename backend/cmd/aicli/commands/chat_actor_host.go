@@ -621,6 +621,12 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		}
 		agentConfig.Options["active_goal_guidance"] = guidance
 	}
+	if session != nil && session.RetryConfig.DisableRetries {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options[runtimellm.MetadataKeyDisableRetries] = true
+	}
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
 	apiAgent.SetSubagentScheduler(agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{

@@ -3990,6 +3990,10 @@ func isRipgrepNoMatch(err error) bool {
 func runGrepCommand(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	cmd.Dir = workingDir
+	// Keep search input detached from the parent process. With a nil Stdin,
+	// os/exec connects the child to the null device, so ripgrep searches the
+	// requested paths instead of switching to piped-stdin mode or waiting.
+	cmd.Stdin = nil
 	return cmd.CombinedOutput()
 }
 

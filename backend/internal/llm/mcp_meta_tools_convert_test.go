@@ -105,6 +105,50 @@ func TestBuildToolDefinitionsForProtocol_DefaultsInvalidParametersToObjectSchema
 	}
 }
 
+func TestBuildToolDefinitionsForProtocol_CodexDefaultsToNonStrictAndPreservesExplicitFlags(t *testing.T) {
+	tools := []map[string]interface{}{
+		{
+			"name":        "inspect",
+			"description": "inspect a path",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path":  map[string]interface{}{"type": "string"},
+					"limit": map[string]interface{}{"type": "integer"},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			"name":        "open_inspect",
+			"description": "inspect an open object",
+			"parameters":  map[string]interface{}{"type": "object"},
+			"strict":      false,
+		},
+		{
+			"name":        "strict_inspect",
+			"description": "strictly inspect a path",
+			"parameters":  map[string]interface{}{"type": "object"},
+			"strict":      true,
+		},
+	}
+
+	converted := buildToolDefinitionsForProtocol(tools, "codex", false)
+	list, ok := converted.([]map[string]interface{})
+	if !ok || len(list) != 3 {
+		t.Fatalf("expected 3 Codex tools, got %T %#v", converted, converted)
+	}
+	if list[0]["strict"] != false {
+		t.Fatalf("expected Codex-compatible default strict=false, got %#v", list[0]["strict"])
+	}
+	if list[1]["strict"] != false {
+		t.Fatalf("expected explicit strict=false to be preserved, got %#v", list[1]["strict"])
+	}
+	if list[2]["strict"] != true {
+		t.Fatalf("expected explicit strict=true to be preserved, got %#v", list[2]["strict"])
+	}
+}
+
 func TestBuildToolDefinitionsForProtocol_CodexPromotesFreeformApplyPatch(t *testing.T) {
 	tools := []map[string]interface{}{
 		{

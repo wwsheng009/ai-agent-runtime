@@ -1016,8 +1016,37 @@ func TestGatewayClient_StreamProviderEmitsReasoningChunks(t *testing.T) {
 	assert.Equal(t, "先梳理需求。", chunks[0].Content)
 	assert.Equal(t, EventTypeText, chunks[1].Type)
 	assert.Equal(t, "开始处理。", chunks[1].Content)
-	assert.Equal(t, EventTypeError, chunks[2].Type)
-	assert.Empty(t, chunks[2].Error)
+	assert.Equal(t, EventTypeDone, chunks[2].Type)
+	assert.True(t, chunks[2].Done)
+	assert.Equal(t, "stop", chunks[2].Metadata["finish_reason"])
+}
+
+func TestGatewayClient_StreamProviderRejectsIncompleteStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{Provider: &ProviderResource{
+		Name: "openai_ee", Type: "openai", BaseURL: server.URL,
+	}, KeyValue: "test-key"}
+	stream, err := client.streamProvider(context.Background(), selected, "gpt-4o-mini", &LLMRequest{
+		Model: "gpt-4o-mini", Stream: true,
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	var chunks []StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	assert.Equal(t, EventTypeText, chunks[0].Type)
+	assert.Equal(t, EventTypeError, chunks[1].Type)
+	assert.True(t, chunks[1].Done)
+	assert.Contains(t, chunks[1].Error, "stream_interrupted")
 }
 
 func TestGatewayClient_CallProvider_AnthropicReasoningEffortMapsToThinking(t *testing.T) {

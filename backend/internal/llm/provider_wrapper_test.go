@@ -481,6 +481,48 @@ func TestProviderWrapper_StreamImplementsUnifiedInterface(t *testing.T) {
 	assert.True(t, sawDone)
 }
 
+func TestProviderWrapper_StreamRejectsNullFinishReasonWithoutDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	stream, err := provider.Stream(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "stream this",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+
+	var content strings.Builder
+	var streamErr string
+	var sawDone bool
+	for chunk := range stream {
+		switch chunk.Type {
+		case EventTypeText:
+			content.WriteString(chunk.Content)
+		case EventTypeError:
+			streamErr = chunk.Error
+		case EventTypeDone:
+			sawDone = true
+		}
+	}
+
+	assert.Equal(t, "partial", content.String())
+	assert.Contains(t, streamErr, "stream disconnected before completion")
+	assert.False(t, sawDone)
+}
+
 func TestProviderWrapper_OpenAICall_ParsesToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
@@ -1564,6 +1606,72 @@ func TestProviderWrapper_CodexCall_WithStreamReturnsProviderFailure(t *testing.T
 	assert.Contains(t, err.Error(), "no available resource: no available key/provider")
 }
 
+func TestProviderWrapper_CodexCall_RetriesSSEErrorBeforeOutput(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, "event: error\n"+`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`+"\n\n")
+			return
+		}
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.output_text.done",
+			`data: {"type":"response.output_text.done","text":"ok"}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"status":"completed"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{Type: "codex", BaseURL: server.URL, DefaultModel: "gpt-5.4", MaxRetries: 2})
+	require.NoError(t, err)
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4", Stream: true,
+		Messages: []types.Message{{Role: "user", Content: "continue"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, 2, requests)
+}
+
+func TestProviderWrapper_CodexCall_DoesNotRetrySSEErrorAfterText(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","delta":"partial"}`,
+			"",
+			"event: error",
+			`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{Type: "codex", BaseURL: server.URL, DefaultModel: "gpt-5.4", MaxRetries: 2})
+	require.NoError(t, err)
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+	_, err = provider.Call(ctx, &LLMRequest{
+		Model: "gpt-5.4", Stream: true,
+		Messages: []types.Message{{Role: "user", Content: "continue"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upstream_error")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, []string{"partial"}, deltas)
+}
+
 func TestProviderWrapper_Call_RetryRuleOverridesMaxRetriesForHTTP503(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1759,6 +1867,77 @@ func TestProviderWrapper_CallWithStream_DoesNotRetryAfterTextDelta(t *testing.T)
 	assert.Equal(t, []string{"hello"}, deltas)
 }
 
+func TestProviderWrapper_CallWithStream_PropagatesSSEErrorAfterTextDelta(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			`data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+			"",
+			"event: error",
+			`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+
+	_, err = provider.Call(ctx, &LLMRequest{
+		Model: "grok-4.5",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "continue",
+		}},
+		Stream: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to handle stream response")
+	assert.Contains(t, err.Error(), "upstream_error")
+	assert.Contains(t, err.Error(), "Upstream request failed")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, []string{"partial"}, deltas)
+}
+
+func TestProviderWrapper_CallWithStream_RetriesSSEErrorBeforeOutput(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, "event: error\n"+`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`+"\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{Type: "openai", BaseURL: server.URL, MaxRetries: 2})
+	require.NoError(t, err)
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "grok-4.5", Stream: true,
+		Messages: []types.Message{{Role: "user", Content: "continue"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, 2, requests)
+}
+
 func TestProviderWrapper_CallWithStream_RetriesAfterReasoningOnlyDeltaWithoutContent(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1894,6 +2073,31 @@ func TestProviderWrapper_Call_StreamRejectsTruncatedToolCallMarkup(t *testing.T)
 	assert.Nil(t, resp)
 	assert.Contains(t, err.Error(), "truncated_tool_call")
 	assert.Equal(t, 1, requests, "truncated tool calls should surface immediately instead of retrying the same oversized write")
+}
+
+func TestProviderWrapper_Call_StreamPreservesLengthFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			`data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}`,
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{Type: "openai", BaseURL: server.URL})
+	require.NoError(t, err)
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model:    "gpt-4o-mini",
+		Stream:   true,
+		Messages: []types.Message{{Role: "user", Content: "long answer"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "length", resp.FinishReason)
+	assert.Equal(t, "length", resp.Metadata["finish_reason"])
 }
 
 func TestProviderWrapper_AnthropicCall_PropagatesThinkingToBodyAndHeader(t *testing.T) {

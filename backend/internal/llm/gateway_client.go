@@ -309,6 +309,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 
 	// 选择 Provider
 	policy := newProviderRetryPolicy(c.maxRetries, c.retryTuning, c.retryRules)
+	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 	retryInfo := RetryInfo{
@@ -598,6 +599,9 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		return nil, newGatewayResponseError("failed to handle response", err, c.retryRules)
 	}
 	assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
+	if err := validateAssistantMessageSemantics(assistantMsg); err != nil {
+		return nil, newGatewayResponseError("invalid assistant response", err, c.retryRules)
+	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
 			if _, imageErr := ProcessCodexAssistantImageGenerationWithOptions(assistantMsg, outputDir, CodexImageGenerationOptionsFromMetadata(req.Metadata)); imageErr != nil {
@@ -615,9 +619,10 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 
 	// 构建响应
 	response := &LLMResponse{
-		Content: "",
-		Usage:   usage,
-		Model:   adapterRequest.Model,
+		Content:      "",
+		Usage:        usage,
+		Model:        adapterRequest.Model,
+		FinishReason: assistantMessageFinishReason(assistantMsg),
 		Metadata: map[string]interface{}{
 			"provider":     selected.Provider.Name,
 			"latency_ms":   latency.Milliseconds(),
@@ -640,8 +645,12 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
 		if tcSlice := normalizeGatewayToolCalls(toolCalls); len(tcSlice) > 0 {
 			response.ToolCalls = c.convertToolCalls(tcSlice)
+			if response.FinishReason == "stop" {
+				response.FinishReason = "tool_calls"
+			}
 		}
 	}
+	response.Metadata["finish_reason"] = response.FinishReason
 
 	if reasoningBlock != nil {
 		response.ReasoningBlock = reasoningBlock
@@ -857,9 +866,10 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	usage, usageSource := resolveUnifiedTokenUsage(protocol, responseBody, assistantMsg, req.Messages, stringValue(assistantMsg["content"]), c.tokenizer)
 
 	response := &LLMResponse{
-		Content: "",
-		Usage:   usage,
-		Model:   adapterRequest.Model,
+		Content:      "",
+		Usage:        usage,
+		Model:        adapterRequest.Model,
+		FinishReason: assistantMessageFinishReason(assistantMsg),
 		Metadata: map[string]interface{}{
 			"provider":     selected.Provider.Name,
 			"latency_ms":   latency.Milliseconds(),
@@ -878,8 +888,12 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
 		if tcSlice := normalizeGatewayToolCalls(toolCalls); len(tcSlice) > 0 {
 			response.ToolCalls = c.convertToolCalls(tcSlice)
+			if response.FinishReason == "stop" {
+				response.FinishReason = "tool_calls"
+			}
 		}
 	}
+	response.Metadata["finish_reason"] = response.FinishReason
 	if reasoningBlock != nil {
 		response.ReasoningBlock = reasoningBlock
 		response.Reasoning = reasoningBlock.DisplayText()
@@ -1087,8 +1101,12 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 
 		// 使用 adapter 处理流式响应
 		streamReader := normalizeGatewayStreamReader(selected, protocol, adapterRequest.Model, io.TeeReader(httpResp.Body, &responseBuffer))
-		_, err := adpt.HandleResponse(true, streamReader, callbacks)
+		assistantMsg, err := adpt.HandleResponse(true, streamReader, callbacks)
 		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+		if err == nil {
+			assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
+			err = validateStreamingAggregateResponse(protocol, responseBody, assistantMsg)
+		}
 		reportHTTPDebug(ctx, HTTPDebugEvent{
 			Source:              "gateway_client",
 			Phase:               "response",
@@ -1107,12 +1125,16 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			ch <- StreamChunk{
 				Type:  EventTypeError,
 				Error: err.Error(),
+				Done:  true,
 			}
+			return
 		}
 
-		// 发送结束块
+		finishReason := assistantMessageFinishReason(assistantMsg)
 		ch <- StreamChunk{
-			Type: EventTypeError, // 使用 Error 类型表示流结束
+			Type:     EventTypeDone,
+			Done:     true,
+			Metadata: map[string]interface{}{"finish_reason": finishReason},
 		}
 	}()
 

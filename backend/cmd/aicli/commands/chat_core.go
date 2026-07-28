@@ -218,6 +218,12 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 		toolLoopMetadata[runtimellm.MetadataKeyDisableTools] = true
 		toolLoopMetadata["tool_choice"] = "none"
 	}
+	if session.RetryConfig.DisableRetries {
+		if toolLoopMetadata == nil {
+			toolLoopMetadata = make(map[string]interface{})
+		}
+		toolLoopMetadata[runtimellm.MetadataKeyDisableRetries] = true
+	}
 
 	loopResult, err := executeToolLoop(ctx, runtimechatcore.ToolLoopRequest{
 		Prompt:                               prompt,

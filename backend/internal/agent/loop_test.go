@@ -656,6 +656,36 @@ func TestReActLoop_PropagatesParallelToolCapabilityToLLMRequest(t *testing.T) {
 	require.Equal(t, 4, provider.requests[0].Metadata["max_parallel_tool_calls"])
 }
 
+func TestReActLoop_PropagatesDisableRetriesOptionToLLMRequest(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{{
+			Content: "done",
+			Model:   "test-model",
+		}},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "test-provider",
+			Model:        "test-model",
+			SystemPrompt: "You are a helpful assistant.",
+			Options:      map[string]interface{}{llm.MetadataKeyDisableRetries: true},
+		},
+		mcpManager: &MockMCPManager{},
+	}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 1})
+
+	result, err := loop.RunWithSession(context.Background(), "finish", newTestHistorySession("session-fail-fast"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, provider.requests, 1)
+	require.Equal(t, true, provider.requests[0].Metadata[llm.MetadataKeyDisableRetries])
+}
+
 func TestReActLoop_DowngradesUnsupportedParallelToolParameterWithoutAdvancingStep(t *testing.T) {
 	provider := &RetrySequenceLLMProvider{
 		name: "test-provider",
