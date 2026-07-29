@@ -3037,12 +3037,121 @@ func (c *chatInteractionCoordinator) paintActiveStreamLocked(delta string, asMar
 		// Recompute stable cut from full buffer on mode upgrades.
 		newlyStable = c.activeStream.SetAssistantSnapshot(c.streamBuffer.String(), true)
 	}
+	c.commitActiveStableScrollbackLocked(asMarkdown)
 	frame, changed := c.activeStream.PaintLines(time.Now(), false)
 	if c.surfaceOutputActiveLocked() && changed {
 		c.syncActiveBandLinesLocked(frame)
 	}
 	c.scheduleActiveStreamFrameLocked()
 	return newlyStable
+}
+
+func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdown bool) {
+	if c == nil || c.activeStream == nil || c.reasoningActive || !c.surfaceOutputActiveLocked() {
+		return
+	}
+	stable := c.activeStream.StableContent()
+	if len(stable) <= c.streamRenderedPrefixLen {
+		return
+	}
+	width, rows := c.surface.ActiveBandViewportSize()
+	cut := plainStableScrollbackCut(stable, c.streamRenderedPrefixLen, width, rows)
+	if asMarkdown {
+		cut = markdownStableScrollbackCut(stable, c.streamRenderedPrefixLen)
+	}
+	if cut <= c.streamRenderedPrefixLen || cut > len(stable) {
+		return
+	}
+	chunk := stable[c.streamRenderedPrefixLen:cut]
+	wrote := false
+	if asMarkdown {
+		formatted := strings.TrimRight(chunk, "\r\n")
+		if c.session != nil && c.session.Formatter != nil {
+			formatted = strings.TrimRight(c.session.Formatter.Format(chunk), "\r\n")
+		}
+		if strings.TrimSpace(formatted) != "" {
+			c.writeTextLocked(ui.FormatAssistantRendered(formatted) + "\n\n")
+			wrote = true
+		}
+	} else if chunk != "" {
+		c.writeTextLocked(ui.FormatAssistantRendered(chunk))
+		wrote = true
+	}
+	c.streamRendered = true
+	c.streamRenderedPrefixLen = cut
+	if wrote {
+		c.streamTrailingLF = true
+	}
+	c.completeBlockOutput = false
+	c.activeStream.CommitStablePrefix(cut)
+}
+
+func markdownStableScrollbackCut(stable string, committed int) int {
+	if committed < 0 || committed >= len(stable) {
+		return committed
+	}
+	rest := stable[committed:]
+	cut := -1
+	if index := strings.LastIndex(rest, "\n\n"); index >= 0 {
+		cut = index + 2
+	}
+	if index := strings.LastIndex(rest, "\r\n\r\n"); index >= 0 && index+4 > cut {
+		cut = index + 4
+	}
+	if cut <= 0 {
+		return committed
+	}
+	return committed + cut
+}
+
+func plainStableScrollbackCut(stable string, committed, width, viewportRows int) int {
+	if committed < 0 || committed >= len(stable) {
+		return committed
+	}
+	if width <= 0 {
+		width = 80
+	}
+	bodyRows := viewportRows - 1
+	if bodyRows < 1 {
+		bodyRows = 1
+	}
+	rest := stable[committed:]
+	type completedLine struct {
+		end  int
+		rows int
+	}
+	completed := make([]completedLine, 0, strings.Count(rest, "\n"))
+	totalRows := 0
+	cursor := 0
+	for cursor < len(rest) {
+		newline := strings.IndexByte(rest[cursor:], '\n')
+		if newline < 0 {
+			totalRows += activeSourceDisplayRows(strings.TrimSuffix(rest[cursor:], "\r"), width)
+			break
+		}
+		end := cursor + newline + 1
+		lineRows := activeSourceDisplayRows(strings.TrimSuffix(rest[cursor:end-1], "\r"), width)
+		completed = append(completed, completedLine{end: end, rows: lineRows})
+		totalRows += lineRows
+		cursor = end
+	}
+	cut := 0
+	for _, line := range completed {
+		if totalRows <= bodyRows {
+			break
+		}
+		cut = line.end
+		totalRows -= line.rows
+	}
+	return committed + cut
+}
+
+func activeSourceDisplayRows(line string, width int) int {
+	rows := (render.Width(line) + width - 1) / width
+	if rows < 1 {
+		return 1
+	}
+	return rows
 }
 
 // scheduleActiveStreamFrameLocked arms the single coordinator-owned wakeup

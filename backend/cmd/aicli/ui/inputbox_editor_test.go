@@ -183,6 +183,33 @@ func TestReadInteractiveLine_UpMovesInsideMultilineDraftBeforeHistory(t *testing
 	}
 }
 
+func TestReadInteractiveLine_RedrawsCachedInitialDraftBeforeSubmit(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{
+			InitialText:       "cached paste",
+			InitialCursor:     len([]rune("cached paste")),
+			RedrawInitialText: true,
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "cached paste" {
+		t.Fatalf("expected cached draft to submit unchanged, got %q", line)
+	}
+	if !strings.Contains(output.String(), "cached paste") {
+		t.Fatalf("expected cached draft to be repainted without another editing key, got %q", output.String())
+	}
+}
+
 func TestDecodeInteractiveKey_CtrlVRequestsClipboardPaste(t *testing.T) {
 	decoded, ok := decodeInteractiveKey([]byte{22})
 	if !ok {
@@ -678,6 +705,56 @@ func TestReadInteractiveLine_HandlesBracketedPasteAsAtomicMultiLineInput(t *test
 	}
 	if line != "first\nsecond" {
 		t.Fatalf("expected pasted multiline input to stay intact, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_DisplaysBracketedPasteAfterIdleBeforeEndMarker(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	const pasted = "paste that must become visible"
+	output := &notifyingBuffer{
+		notify: make(chan struct{}),
+		match:  pasted,
+	}
+	done := make(chan struct{})
+	var (
+		line    string
+		readErr error
+	)
+	go func() {
+		line, readErr = readInteractiveLineWithOptions(reader, output, UserPromptText(0), nil, nil, true, false)
+		close(done)
+	}()
+
+	if _, err := writer.WriteString("\x1b[200~" + pasted); err != nil {
+		t.Fatalf("write paste body: %v", err)
+	}
+	select {
+	case <-output.notify:
+	case <-time.After(500 * time.Millisecond):
+		_ = writer.Close()
+		<-done
+		t.Fatalf("expected an idle bracketed paste to render before another key, output=%q", output.String())
+	}
+
+	if _, err := writer.WriteString("\x1b[201~\n"); err != nil {
+		t.Fatalf("write paste terminator: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for bracketed paste submission")
+	}
+	if readErr != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", readErr)
+	}
+	if line != pasted {
+		t.Fatalf("expected pasted text to remain intact, got %q", line)
 	}
 }
 
