@@ -808,6 +808,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	bootstrapManager.ApplyToSkillsHandler(handler)
 	handler.SetAICLIConfig(cfg)
 	handler.SetFileTransferService(filetransport.NewLocalService())
+	handler.SetSiteAccountService(runtimeserver.NewLocalSiteAccountService(configPath, config.DefaultAuthStorePath()))
 	handler.SetRuntimeConfig(runtimeConfig, runtimeManager.GetFilePath())
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
 	handler.SetRuntimeConfigResolver(func(scope skillsapi.UsageScope) *runtimecfg.RuntimeConfig {

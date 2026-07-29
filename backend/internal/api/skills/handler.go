@@ -625,6 +625,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/skills/hot-reload/stats", h.GetHotReloadStats).Methods(http.MethodGet)
 
 	// Runtime / governance / observability
+	runtimeRouter.HandleFunc("/siteaccount/detect", h.DetectRuntimeSiteAccount).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/siteaccount/fetch", h.FetchRuntimeSiteAccount).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/providers/{name}/account/refresh", h.RefreshRuntimeProviderAccount).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/usage/stats", h.GetUsageStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/usage/ledger", h.GetUsageLedger).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/usage/reset", h.ResetUsageStats).Methods(http.MethodPost)
