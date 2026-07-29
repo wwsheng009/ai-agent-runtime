@@ -32,7 +32,26 @@ func TestFrameSchedulerCoalesceAndFPS(t *testing.T) {
 	}
 }
 
-func TestBufferBackendDiffAndTruncate(t *testing.T) {
+func TestFrameSchedulerNextDelayKeepsPendingFinalFrame(t *testing.T) {
+	s := NewFrameScheduler(10)
+	start := time.Unix(100, 0)
+	s.Request("first")
+	if !s.Consume(start) {
+		t.Fatal("first frame should emit")
+	}
+	s.Request("final")
+	if delay, pending := s.NextDelay(start.Add(25 * time.Millisecond)); !pending || delay != 75*time.Millisecond {
+		t.Fatalf("NextDelay=(%s,%t), want (75ms,true)", delay, pending)
+	}
+	if !s.Consume(start.Add(100 * time.Millisecond)) {
+		t.Fatal("pending final frame should emit at the reported deadline")
+	}
+	if _, pending := s.NextDelay(start.Add(100 * time.Millisecond)); pending {
+		t.Fatal("scheduler should be idle after final frame")
+	}
+}
+
+func TestBufferBackendDiffAndSoftWrap(t *testing.T) {
 	b := &BufferBackend{Width: 10, Height: 3}
 	doc := Document{Blocks: []Block{{
 		Lines: []Line{
@@ -41,8 +60,8 @@ func TestBufferBackendDiffAndTruncate(t *testing.T) {
 		},
 	}}}
 	out := b.Render(doc)
-	if !strings.Contains(out, "…") && Width(b.Lines[0]) > 10 {
-		t.Fatalf("expected truncate: %q lines=%v", out, b.Lines)
+	if strings.Contains(out, "…") || len(b.Lines) != 3 {
+		t.Fatalf("expected three untruncated wrapped rows: %q lines=%v", out, b.Lines)
 	}
 	prev := b.Snapshot()
 	doc2 := Document{Blocks: []Block{{
@@ -53,12 +72,12 @@ func TestBufferBackendDiffAndTruncate(t *testing.T) {
 	}}}
 	_ = b.Render(doc2)
 	diffs := b.Diff(prev)
-	if len(diffs) != 1 || diffs[0].Index != 1 {
+	if len(diffs) != 1 || diffs[0].Index != 2 {
 		t.Fatalf("diffs=%+v", diffs)
 	}
 }
 
-func TestBufferBackendRetainsStyledLinesAfterCellTruncate(t *testing.T) {
+func TestBufferBackendRetainsStyledLinesAfterCellWrap(t *testing.T) {
 	b := &BufferBackend{Width: 8, Height: 2}
 	doc := LinesDoc(Line{Spans: []Span{
 		{Text: "标题", Style: Style{Role: "Accent", Bold: true}},
@@ -67,11 +86,11 @@ func TestBufferBackendRetainsStyledLinesAfterCellTruncate(t *testing.T) {
 	b.Render(doc)
 
 	styled := b.StyledSnapshot()
-	if len(styled) != 1 || LineWidth(styled[0]) > 8 {
+	if len(styled) != 2 || LineWidth(styled[0]) > 8 || LineWidth(styled[1]) > 8 {
 		t.Fatalf("unexpected styled frame geometry: %#v", styled)
 	}
 	if len(styled[0].Spans) == 0 || styled[0].Spans[0].Style.Role != "Accent" {
-		t.Fatalf("expected leading semantic role to survive truncate: %#v", styled[0].Spans)
+		t.Fatalf("expected leading semantic role to survive wrap: %#v", styled[0].Spans)
 	}
 	if got := (PlainBackend{}).Render(LinesDoc(styled...)); got != strings.Join(b.Lines, "\n") {
 		t.Fatalf("styled/plain frame projections diverged: styled=%q plain=%q", got, b.Lines)

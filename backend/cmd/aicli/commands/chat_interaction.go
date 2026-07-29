@@ -68,7 +68,7 @@ type chatInteractionCoordinator struct {
 	// Phase 5: in-memory active cell + coalesced frames (viewport model).
 	// Transcript commit still uses the existing write path; this avoids
 	// scrollback spam for future surface painting and tracks stable markdown.
-	activeStream         *ui.ActiveStreamController
+	activeStream          *ui.ActiveStreamController
 	activeFrameTimer      *time.Timer
 	activeFrameDue        time.Time
 	activeFrameGeneration uint64
