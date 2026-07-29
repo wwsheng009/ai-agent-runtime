@@ -6,7 +6,9 @@ import (
 	"sort"
 	"strings"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pathdisplay"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -35,16 +37,18 @@ var preferredToolArgPreviewKeys = []string{
 func toolRequestedEventPayload(call types.ToolCall, step int, traceID string, extra map[string]interface{}) map[string]interface{} {
 	payload := map[string]interface{}{
 		"tool_call_id": call.ID,
+		"logical_tool": strings.TrimSpace(call.Name),
 		"step":         step,
 		"trace_id":     traceID,
 	}
-	if preview := summarizeToolCallArgs(call.Args); preview != "" {
+	if preview := summarizeToolCallArgs(call.Name, call.Args); preview != "" {
 		payload["arg_preview"] = preview
 	}
 	if commandText := summarizeShellToolCommand(call.Name, call.Args); commandText != "" {
 		payload["command_text"] = commandText
 	}
 	copyToolExecutionDirectory(payload, call.Args)
+	copyToolDisplayFilePath(payload, call.Args)
 	mergeToolEventPayload(payload, extra)
 	return payload
 }
@@ -52,17 +56,19 @@ func toolRequestedEventPayload(call types.ToolCall, step int, traceID string, ex
 func toolCompletedEventPayload(result toolExecutionResult, step int, traceID string, extra map[string]interface{}) map[string]interface{} {
 	payload := map[string]interface{}{
 		"tool_call_id": result.Call.ID,
+		"logical_tool": strings.TrimSpace(result.Call.Name),
 		"step":         step,
 		"error":        result.Error,
 		"trace_id":     traceID,
 	}
-	if preview := summarizeToolCallArgs(result.Call.Args); preview != "" {
+	if preview := summarizeToolCallArgs(result.Call.Name, result.Call.Args); preview != "" {
 		payload["arg_preview"] = preview
 	}
 	if commandText := summarizeShellToolCommand(result.Call.Name, result.Call.Args); commandText != "" {
 		payload["command_text"] = commandText
 	}
 	copyToolExecutionDirectory(payload, result.Call.Args)
+	copyToolDisplayFilePath(payload, result.Call.Args)
 	if summaryLines := summarizeToolExecutionLines(result); len(summaryLines) > 0 {
 		payload["summary"] = strings.Join(summaryLines, "\n")
 		payload["summary_lines"] = append([]string(nil), summaryLines...)
@@ -70,6 +76,10 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	if output := editingToolRenderOutput(result); output != "" {
 		payload["render_output"] = output
 		payload["render_output_format"] = "markdown"
+		payload["render_output_untruncated"] = true
+	} else if output := shellDiffToolRenderOutput(result); output != "" {
+		payload["render_output"] = output
+		payload["render_output_format"] = "diff"
 		payload["render_output_untruncated"] = true
 	}
 	if result.Envelope != nil {
@@ -114,6 +124,28 @@ func editingToolRenderOutput(result toolExecutionResult) string {
 	return toolresult.MutationSummary(toolMetadataFromEnvelope(result.Envelope))
 }
 
+func shellDiffToolRenderOutput(result toolExecutionResult) string {
+	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(result.Call.Name)) ||
+		!runtimeexecutor.IsGitDiffCommand(renderToolArgValue(result.Call.Args["command"])) ||
+		strings.TrimSpace(result.Error) != "" {
+		return ""
+	}
+	if result.Envelope != nil {
+		metadata := result.Envelope.Metadata
+		if complete, ok := metadataBoolValue(metadata, "output_capture_complete"); ok && !complete {
+			return ""
+		}
+		if limited, _ := metadataBoolValue(metadata, "capture_limit_reached"); limited {
+			return ""
+		}
+	}
+	output := strings.TrimSpace(extractToolTextOutput(result.Output))
+	if !runtimeexecutor.LooksLikeUnifiedDiffOutput(output) {
+		return ""
+	}
+	return output
+}
+
 func copyToolExecutionDirectory(payload map[string]interface{}, args map[string]interface{}) {
 	if payload == nil || len(args) == 0 {
 		return
@@ -122,8 +154,22 @@ func copyToolExecutionDirectory(payload map[string]interface{}, args map[string]
 		payload["workdir"] = truncateToolEventText(workdir, 200)
 		return
 	}
+	if workdir := normalizeToolEventText(renderToolArgValue(args["working_directory"])); workdir != "" && workdir != "<nil>" {
+		payload["workdir"] = truncateToolEventText(workdir, 200)
+		return
+	}
 	if cwd := normalizeToolEventText(renderToolArgValue(args["cwd"])); cwd != "" && cwd != "<nil>" {
 		payload["cwd"] = truncateToolEventText(cwd, 200)
+	}
+}
+
+func copyToolDisplayFilePath(payload map[string]interface{}, args map[string]interface{}) {
+	if payload == nil {
+		return
+	}
+	_, path := pathdisplay.File(args)
+	if pathdisplay.NeedsOwnLine(path) {
+		payload["display_file_path"] = path
 	}
 }
 
@@ -136,16 +182,21 @@ func mergeToolEventPayload(payload map[string]interface{}, extra map[string]inte
 	}
 }
 
-func summarizeToolCallArgs(args map[string]interface{}) string {
+func summarizeToolCallArgs(toolName string, args map[string]interface{}) string {
 	if len(args) == 0 {
 		return ""
 	}
+	if preview := summarizeSearchToolCallArgs(toolName, args); preview != "" {
+		return preview
+	}
 
+	fileArgKey, filePath := pathdisplay.File(args)
+	parts := make([]string, 0, len(args))
 	seen := make(map[string]struct{}, len(preferredToolArgPreviewKeys))
 	for _, key := range preferredToolArgPreviewKeys {
 		seen[key] = struct{}{}
-		if preview := formatSingleToolArgPreview(key, args[key]); preview != "" {
-			return preview
+		if preview := formatToolArgPreview(key, args[key], fileArgKey, filePath); preview != "" {
+			parts = append(parts, preview)
 		}
 	}
 
@@ -158,11 +209,82 @@ func summarizeToolCallArgs(args map[string]interface{}) string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if preview := formatSingleToolArgPreview(key, args[key]); preview != "" {
-			return preview
+		if toolArgPreviewRenderedSeparately(key) {
+			continue
+		}
+		if preview := formatToolArgPreview(key, args[key], fileArgKey, filePath); preview != "" {
+			parts = append(parts, preview)
 		}
 	}
-	return ""
+	return truncateToolEventText(strings.Join(parts, " "), 200)
+}
+
+func toolArgPreviewRenderedSeparately(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "cwd", "workdir", "working_directory":
+		return true
+	default:
+		return false
+	}
+}
+
+func summarizeSearchToolCallArgs(toolName string, args map[string]interface{}) string {
+	var keys []string
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "glob":
+		keys = []string{"pattern", "path", "case_insensitive", "ignore_case", "limit"}
+	case "grep":
+		keys = []string{"patterns", "pattern", "regexp", "paths", "path", "glob", "include", "type", "literal", "ignore_case"}
+	default:
+		return ""
+	}
+
+	parts := make([]string, 0, len(args))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		seen[key] = struct{}{}
+		if preview := formatSearchToolArgPreview(key, args[key]); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
+
+	remainingKeys := make([]string, 0, len(args)-len(parts))
+	for key := range args {
+		if _, ok := seen[key]; ok || toolArgPreviewRenderedSeparately(key) {
+			continue
+		}
+		remainingKeys = append(remainingKeys, key)
+	}
+	sort.Strings(remainingKeys)
+	for _, key := range remainingKeys {
+		if preview := formatSingleToolArgPreview(key, args[key]); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
+	return truncateToolEventText(strings.Join(parts, " "), 200)
+}
+
+func formatSearchToolArgPreview(key string, value interface{}) string {
+	key = strings.TrimSpace(key)
+	if key == "" || value == nil {
+		return ""
+	}
+	text := normalizeToolEventText(renderSearchToolArgValue(value))
+	if text == "" || text == "{}" || text == "[]" {
+		return ""
+	}
+	return key + "=" + text
+}
+
+func renderSearchToolArgValue(value interface{}) string {
+	switch value.(type) {
+	case []string, []interface{}:
+		raw, err := json.Marshal(value)
+		if err == nil {
+			return string(raw)
+		}
+	}
+	return renderToolArgValue(value)
 }
 
 func summarizeShellToolCommand(toolName string, args map[string]interface{}) string {
@@ -181,12 +303,38 @@ func formatSingleToolArgPreview(key string, value interface{}) string {
 	if key == "" || value == nil {
 		return ""
 	}
+	if sensitiveToolArgPreviewKey(key) {
+		return key + "=<redacted>"
+	}
 
 	text := normalizeToolEventText(renderToolArgValue(value))
 	if text == "" || text == "{}" || text == "[]" {
 		return ""
 	}
 	return truncateToolEventText(fmt.Sprintf("%s=%s", key, text), 72)
+}
+
+func formatToolArgPreview(key string, value interface{}, fileArgKey, filePath string) string {
+	if key == fileArgKey && filePath != "" {
+		if pathdisplay.NeedsOwnLine(filePath) {
+			return ""
+		}
+		value = filePath
+	}
+	return formatSingleToolArgPreview(key, value)
+}
+
+func sensitiveToolArgPreviewKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	for _, marker := range []string{
+		"api_key", "apikey", "access_key", "private_key", "authorization",
+		"credential", "password", "passwd", "secret", "cookie",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return strings.HasSuffix(normalized, "token")
 }
 
 func renderToolArgValue(value interface{}) string {
@@ -196,10 +344,7 @@ func renderToolArgValue(value interface{}) string {
 	case string:
 		return typed
 	case bool:
-		if !typed {
-			return ""
-		}
-		return "true"
+		return fmt.Sprintf("%t", typed)
 	case []string:
 		switch len(typed) {
 		case 0:
@@ -227,7 +372,7 @@ func renderToolArgValue(value interface{}) string {
 				return strings.TrimPrefix(preview, nestedKey+"=")
 			}
 		}
-		raw, err := json.Marshal(typed)
+		raw, err := json.Marshal(toolresult.CompactAttemptedArgs(typed))
 		if err != nil {
 			return fmt.Sprintf("%v", value)
 		}
@@ -340,6 +485,11 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 		toolresult.MetadataOKKey,
 		toolresult.MetadataErrorCodeKey,
 		"error_message",
+		"engine",
+		"execution_backend",
+		"backend_command",
+		"backend_path",
+		"backend_source",
 		toolresult.MetadataRetryableKey,
 		toolresult.MetadataNextActionKey,
 		toolresult.MetadataOutcomeKey,
@@ -374,6 +524,12 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 	} {
 		if value, ok := metadata[key]; ok && value != nil {
 			payload[key] = value
+		}
+	}
+	logicalTool := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["logical_tool"])))
+	if backend := strings.TrimSpace(fmt.Sprint(payload["execution_backend"])); (backend == "" || backend == "<nil>") && (logicalTool == "grep" || logicalTool == "glob") {
+		if engine := strings.TrimSpace(fmt.Sprint(payload["engine"])); engine != "" && engine != "<nil>" {
+			payload["execution_backend"] = engine
 		}
 	}
 }

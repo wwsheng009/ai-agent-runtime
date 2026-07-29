@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +28,148 @@ func TestToolRequestedEventPayloadIncludesArgPreview(t *testing.T) {
 	}
 	if got := payload["command_text"]; got != "Get-ChildItem -Force" {
 		t.Fatalf("expected command text, got %#v", got)
+	}
+}
+
+func TestToolRequestedEventPayloadIncludesMultipleGenericArgs(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-view",
+		Name: "view",
+		Args: map[string]interface{}{
+			"file_path":            "main.go",
+			"offset":               40,
+			"limit":                20,
+			"include_line_numbers": false,
+			"workdir":              "E:/repo",
+		},
+	}, 1, "trace-view", nil)
+
+	want := "file_path=main.go include_line_numbers=false limit=20 offset=40"
+	if got := payload["arg_preview"]; got != want {
+		t.Fatalf("expected complete generic preview %q, got %#v", want, got)
+	}
+	if got := payload["workdir"]; got != "E:/repo" {
+		t.Fatalf("expected workdir context, got %#v", got)
+	}
+	if strings.Contains(payload["arg_preview"].(string), "workdir") {
+		t.Fatalf("workdir must not be duplicated in arg preview: %#v", payload["arg_preview"])
+	}
+}
+
+func TestToolRequestedEventPayloadPreservesLongFilename(t *testing.T) {
+	base := t.TempDir()
+	filename := strings.Repeat("very-long-file-name-", 4) + "component.generated.tsx"
+	absPath := filepath.Join(base, "apps", "portal-modern", "src", filename)
+	wantPath := filepath.Join("apps", "portal-modern", "src", filename)
+
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-long-view",
+		Name: "view",
+		Args: map[string]interface{}{
+			"file_path": absPath,
+			"workdir":   base,
+			"limit":     20,
+		},
+	}, 1, "trace-long-view", nil)
+
+	if got := payload["arg_preview"]; got != "limit=20" {
+		t.Fatalf("long file path must leave the compact preview, got %#v", got)
+	}
+	if got := payload["display_file_path"]; got != wantPath {
+		t.Fatalf("expected complete relative file path %q, got %#v", wantPath, got)
+	}
+	if !strings.HasSuffix(payload["display_file_path"].(string), filename) {
+		t.Fatalf("filename was not preserved: %#v", payload["display_file_path"])
+	}
+}
+
+func TestToolCompletedEventPayloadRedactsSensitiveArgs(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-fetch",
+			Name: "fetch",
+			Args: map[string]interface{}{
+				"url":          "https://example.test",
+				"api_key":      "should-not-leak",
+				"timeout_ms":   3000,
+				"token_budget": 4096,
+			},
+		},
+	}, 1, "trace-fetch", nil)
+
+	want := "url=https://example.test api_key=<redacted> timeout_ms=3000 token_budget=4096"
+	if got := payload["arg_preview"]; got != want {
+		t.Fatalf("expected redacted generic preview %q, got %#v", want, got)
+	}
+	if strings.Contains(payload["arg_preview"].(string), "should-not-leak") {
+		t.Fatalf("sensitive value leaked in arg preview: %#v", payload["arg_preview"])
+	}
+}
+
+func TestToolRequestedEventPayloadIncludesCompleteGlobPreview(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-glob",
+		Name: "glob",
+		Args: map[string]interface{}{
+			"pattern":          "**/*.tsx",
+			"path":             "apps/portal-modern/src",
+			"case_insensitive": false,
+			"limit":            50,
+		},
+	}, 1, "trace-glob", nil)
+
+	if got := payload["arg_preview"]; got != "pattern=**/*.tsx path=apps/portal-modern/src case_insensitive=false limit=50" {
+		t.Fatalf("expected complete glob preview, got %#v", got)
+	}
+	if got := payload["logical_tool"]; got != "glob" {
+		t.Fatalf("expected logical_tool=glob, got %#v", got)
+	}
+}
+
+func TestToolRequestedEventPayloadIncludesCompleteGrepPreview(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-grep",
+		Name: "grep",
+		Args: map[string]interface{}{
+			"patterns": []interface{}{"Popover", "DialogTrigger"},
+			"paths":    []interface{}{"apps/portal-modern/src"},
+			"glob":     "*.tsx",
+			"context":  2,
+		},
+	}, 1, "trace-grep", nil)
+
+	want := `patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx context=2`
+	if got := payload["arg_preview"]; got != want {
+		t.Fatalf("expected complete grep preview %q, got %#v", want, got)
+	}
+}
+
+func TestToolCompletedEventPayloadPromotesSearchBackend(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-grep-backend",
+			Name: "grep",
+			Args: map[string]interface{}{"pattern": "Popover", "path": "src"},
+		},
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				"tool_metadata": map[string]interface{}{
+					"engine":          "rg",
+					"backend_command": "rg",
+					"backend_path":    `C:\tools\rg.exe`,
+				},
+			},
+		},
+	}, 1, "trace-grep-backend", nil)
+
+	if got := payload["execution_backend"]; got != "rg" {
+		t.Fatalf("expected execution_backend=rg, got %#v", got)
+	}
+	if got := payload["backend_command"]; got != "rg" {
+		t.Fatalf("expected backend command, got %#v", got)
+	}
+	if got := payload["backend_path"]; got != `C:\tools\rg.exe` {
+		t.Fatalf("expected backend path, got %#v", got)
 	}
 }
 
@@ -217,6 +360,50 @@ func TestToolCompletedEventPayloadFallsBackToEnvelopeSummary(t *testing.T) {
 	}
 	if got := payload["command_text"]; got != "git status" {
 		t.Fatalf("expected command text, got %#v", got)
+	}
+}
+
+func TestToolCompletedEventPayloadCarriesCompleteGitDiffForRendering(t *testing.T) {
+	diff := "--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old\n+new\n"
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-diff",
+			Name: "bash",
+			Args: map[string]interface{}{"command": "git -C repo diff -- app.go"},
+		},
+		Output: diff,
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"output_capture_complete": true,
+		}},
+	}, 1, "trace-diff", nil)
+
+	if got := payload["render_output_format"]; got != "diff" {
+		t.Fatalf("render_output_format=%#v, want diff", got)
+	}
+	if got := payload["render_output"]; got != strings.TrimSpace(diff) {
+		t.Fatalf("unexpected diff render output: %#v", got)
+	}
+	if got := payload["render_output_untruncated"]; got != true {
+		t.Fatalf("render_output_untruncated=%#v, want true", got)
+	}
+}
+
+func TestToolCompletedEventPayloadDoesNotRenderTruncatedGitDiff(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-diff-truncated",
+			Name: "bash",
+			Args: map[string]interface{}{"command": "git diff"},
+		},
+		Output: "--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old",
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"output_capture_complete": false,
+			"capture_limit_reached":   true,
+		}},
+	}, 1, "trace-diff-truncated", nil)
+
+	if _, ok := payload["render_output"]; ok {
+		t.Fatalf("truncated diff must not be marked renderable: %#v", payload)
 	}
 }
 

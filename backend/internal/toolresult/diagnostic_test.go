@@ -406,6 +406,9 @@ func TestDiagnoseClassifiesCommonRecoveryModes(t *testing.T) {
 		{name: "stale patch hunk", message: "无法定位 hunk: @@；未找到期望旧内容", code: runtimeerrors.ErrToolStaleContext},
 		{name: "stale edit old_string", message: "old_string 未在文件中找到；edit 只执行精确匹配", code: runtimeerrors.ErrToolStaleContext},
 		{name: "spawn depth", message: "[SPAWN_DEPTH_LIMIT] agent spawn depth limit reached: max_depth=1 requested_depth=2", code: runtimeerrors.ErrAgentSpawnDepthLimit},
+		{name: "agent already exists", message: "session already exists: child-1", code: runtimeerrors.ErrAgentAlreadyExists},
+		{name: "agent busy", message: "session is busy (running)", code: runtimeerrors.ErrAgentBusy},
+		{name: "sqlite interrupted", message: "sqlite3: interrupted", code: runtimeerrors.ErrStreamInterrupted, retryable: true},
 	}
 
 	for _, tc := range testCases {
@@ -416,6 +419,32 @@ func TestDiagnoseClassifiesCommonRecoveryModes(t *testing.T) {
 			}
 			if diagnostic.NextAction == "" {
 				t.Fatalf("expected next action for %q", tc.message)
+			}
+		})
+	}
+}
+
+func TestDiagnoseAgentLifecycleConflictNextActions(t *testing.T) {
+	testCases := []struct {
+		name           string
+		message        string
+		code           runtimeerrors.ErrorCode
+		wantNextSubstr string
+	}{
+		{name: "already exists", message: "session already exists: child-1", code: runtimeerrors.ErrAgentAlreadyExists, wantNextSubstr: "Do not retry the same spawn_agent unchanged"},
+		{name: "busy", message: "session is busy (running)", code: runtimeerrors.ErrAgentBusy, wantNextSubstr: "Do not retry the same send_input unchanged"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			diagnostic := Diagnose("test_tool", "call-lifecycle", tc.message, nil)
+			if diagnostic.ErrorCode != string(tc.code) {
+				t.Fatalf("error_code=%q want %q; diagnostic=%#v", diagnostic.ErrorCode, tc.code, diagnostic)
+			}
+			if diagnostic.Retryable {
+				t.Fatalf("lifecycle conflict must not be retryable: %#v", diagnostic)
+			}
+			if !strings.Contains(diagnostic.NextAction, tc.wantNextSubstr) {
+				t.Fatalf("next_action %q missing %q", diagnostic.NextAction, tc.wantNextSubstr)
 			}
 		})
 	}

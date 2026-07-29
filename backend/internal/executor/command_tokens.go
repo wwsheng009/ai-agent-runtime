@@ -110,3 +110,64 @@ func HasPipedHeadToken(tokens []string) bool {
 	}
 	return false
 }
+
+// IsGitDiffCommand reports whether a shell command contains a git diff
+// invocation. It understands common git global options without treating an
+// option value named "diff" as the subcommand.
+func IsGitDiffCommand(command string) bool {
+	tokens := SplitCommandTokens(command)
+	for i := 0; i < len(tokens); i++ {
+		if !isGitExecutableToken(tokens[i]) {
+			continue
+		}
+		for j := i + 1; j < len(tokens); j++ {
+			token := tokens[j]
+			if isShellCommandSeparator(token) {
+				break
+			}
+			if gitGlobalOptionConsumesValue(token) {
+				j++
+				continue
+			}
+			if strings.HasPrefix(token, "-") {
+				continue
+			}
+			if strings.EqualFold(token, "diff") {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
+// LooksLikeUnifiedDiffOutput performs a cheap gate before a complete shell
+// capture is promoted into the UI's full unified-diff parser.
+func LooksLikeUnifiedDiffOutput(output string) bool {
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	for i := 0; i+2 < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "--- ") &&
+			strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") &&
+			strings.HasPrefix(strings.TrimSpace(lines[i+2]), "@@") {
+			return true
+		}
+	}
+	return false
+}
+
+func isGitExecutableToken(token string) bool {
+	token = strings.ToLower(strings.TrimSpace(strings.ReplaceAll(token, `\`, "/")))
+	if i := strings.LastIndexByte(token, '/'); i >= 0 {
+		token = token[i+1:]
+	}
+	return token == "git" || token == "git.exe"
+}
+
+func gitGlobalOptionConsumesValue(token string) bool {
+	switch strings.ToLower(token) {
+	case "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env":
+		return true
+	default:
+		return false
+	}
+}

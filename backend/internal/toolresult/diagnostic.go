@@ -1982,6 +1982,13 @@ func classifyToolErrorCode(message string) string {
 		(strings.Contains(lower, "max_depth") && strings.Contains(lower, "spawn")) ||
 		(strings.Contains(lower, "depth limit") && strings.Contains(lower, "spawn")):
 		return string(runtimeerrors.ErrAgentSpawnDepthLimit)
+	case strings.Contains(lower, "session already exists"):
+		return string(runtimeerrors.ErrAgentAlreadyExists)
+	case strings.Contains(lower, "session is busy"):
+		return string(runtimeerrors.ErrAgentBusy)
+	case strings.Contains(lower, "sqlite3: interrupted"),
+		strings.Contains(lower, "database operation interrupted"):
+		return string(runtimeerrors.ErrStreamInterrupted)
 	case strings.Contains(lower, "deadline exceeded"), strings.Contains(lower, "timed out"),
 		strings.Contains(lower, "timeout"):
 		return string(runtimeerrors.ErrToolTimeout)
@@ -2046,7 +2053,8 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrToolShellCompat, runtimeerrors.ErrAgentSpawnDepthLimit,
 		runtimeerrors.ErrToolBrokerFailure,
 		runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck,
-		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission, runtimeerrors.ErrContextBudget,
+		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission,
+		runtimeerrors.ErrAgentAlreadyExists, runtimeerrors.ErrAgentBusy, runtimeerrors.ErrContextBudget,
 		runtimeerrors.ErrStreamInterrupted, runtimeerrors.ErrUpstreamUnavailable,
 		runtimeerrors.ErrMemoryFull, runtimeerrors.ErrWorkflowCycle, runtimeerrors.ErrWorkflowStep,
 		runtimeerrors.ErrSkillNotFound, runtimeerrors.ErrSkillLoadFailed, runtimeerrors.ErrInvalidManifest,
@@ -2125,6 +2133,10 @@ func nextActionForToolError(code string, message string) string {
 		return "Re-read the target file with view/grep, rebuild the edit/patch from the latest content, and do not retry the same stale context unchanged."
 	case runtimeerrors.ErrAgentSpawnDepthLimit:
 		return "complete_locally_or_use_spawn_team: this agent cannot spawn another child (max depth). Continue the work in the current agent, reuse an existing child, or use spawn_team for multi-worker orchestration. Do not retry the same spawn_agent."
+	case runtimeerrors.ErrAgentAlreadyExists:
+		return "The requested child id already exists. Reuse the existing child with send_input/followup_task, close it if replacement is intended, or spawn with a different id. Do not retry the same spawn_agent unchanged."
+	case runtimeerrors.ErrAgentBusy:
+		return "The child already has an active run. Use wait_agent/read_agent_events to observe it, send_input with interrupt=true only when replacing that run is intentional, or use followup_task to queue follow-up work. Do not retry the same send_input unchanged."
 	case runtimeerrors.ErrContextBudget:
 		return "Reduce or compact the input and tool output before continuing."
 	case runtimeerrors.ErrAgentRunCanceled:
