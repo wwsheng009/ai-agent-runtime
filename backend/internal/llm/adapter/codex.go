@@ -3357,6 +3357,9 @@ func (a *CodexAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interf
 		}
 		toolType, _ := raw["type"].(string)
 		toolType = strings.TrimSpace(toolType)
+		if toolType != "" {
+			tc.Type = toolType
+		}
 
 		if argsStr, ok := raw["arguments"].(string); ok {
 			// 直接使用 arguments 字符串（已经是 JSON）

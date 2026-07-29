@@ -32,9 +32,11 @@ type Message struct {
 
 // ToolCall 工具调用
 type ToolCall struct {
-	ID   string                 `json:"id" yaml:"id"`
-	Name string                 `json:"name" yaml:"name"`
-	Args map[string]interface{} `json:"arguments" yaml:"arguments"`
+	ID       string                 `json:"id" yaml:"id"`
+	Type     string                 `json:"type,omitempty" yaml:"type,omitempty"`
+	Name     string                 `json:"name" yaml:"name"`
+	Args     map[string]interface{} `json:"arguments" yaml:"arguments"`
+	RawInput string                 `json:"input,omitempty" yaml:"input,omitempty"`
 }
 
 // ToolDefinition 工具定义
@@ -104,8 +106,10 @@ func (m *Message) Clone() *Message {
 		clone.ToolCalls = make([]ToolCall, len(m.ToolCalls))
 		for i, tc := range m.ToolCalls {
 			clone.ToolCalls[i] = ToolCall{
-				ID:   tc.ID,
-				Name: tc.Name,
+				ID:       tc.ID,
+				Type:     tc.Type,
+				Name:     tc.Name,
+				RawInput: tc.RawInput,
 			}
 			// 克隆 Args
 			if len(tc.Args) > 0 {

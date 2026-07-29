@@ -87,3 +87,36 @@ func TestDecodeJSONUnwrapsProviderRawEnvelope(t *testing.T) {
 		t.Fatalf("expected nested raw arguments to be unwrapped, got %#v", got)
 	}
 }
+
+func TestBindFreeformBindsSoleRequiredStringField(t *testing.T) {
+	raw := "*** Begin Patch\n*** End Patch"
+	got := BindFreeform(DecodeFreeform(raw), map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"patch": map[string]interface{}{"type": "string"},
+		},
+		"required": []string{"patch"},
+	})
+	if got["patch"] != raw || got["_raw"] != nil || got["_parse_error"] != nil {
+		t.Fatalf("expected raw input to bind cleanly to patch, got %#v", got)
+	}
+}
+
+func TestBindFreeformRejectsAmbiguousOrParsedInputs(t *testing.T) {
+	args := map[string]interface{}{"_raw": "payload", "_parse_error": "invalid JSON"}
+	schema := map[string]interface{}{
+		"properties": map[string]interface{}{
+			"first":  map[string]interface{}{"type": "string"},
+			"second": map[string]interface{}{"type": "string"},
+		},
+		"required": []interface{}{"first", "second"},
+	}
+	if got := BindFreeform(args, schema); got["_parse_error"] == nil {
+		t.Fatalf("expected parse-error input to remain untouched, got %#v", got)
+	}
+
+	delete(args, "_parse_error")
+	if got := BindFreeform(args, schema); got["first"] != nil || got["second"] != nil {
+		t.Fatalf("expected ambiguous schema to remain unbound, got %#v", got)
+	}
+}

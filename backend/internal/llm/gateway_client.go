@@ -1295,12 +1295,31 @@ func (c *GatewayClient) convertToolCalls(tcSlice []interface{}) []types.ToolCall
 			if id, ok := tcMap["id"].(string); ok {
 				toolCall.ID = id
 			}
+			if toolCall.ID == "" {
+				toolCall.ID, _ = tcMap["call_id"].(string)
+			}
+			toolCall.Type, _ = tcMap["type"].(string)
+			toolCall.Name, _ = tcMap["name"].(string)
+			if strings.EqualFold(strings.TrimSpace(toolCall.Type), "custom_tool_call") {
+				toolCall.RawInput, _ = tcMap["input"].(string)
+				if toolCall.RawInput == "" {
+					toolCall.RawInput, _ = tcMap["arguments"].(string)
+				}
+				toolCall.Args = toolargs.DecodeFreeform(toolCall.RawInput)
+			}
 			if fn, ok := tcMap["function"].(map[string]interface{}); ok {
 				if name, ok := fn["name"].(string); ok {
 					toolCall.Name = name
 				}
-				if args, ok := fn["arguments"].(string); ok {
+				if args, ok := fn["arguments"].(string); ok && toolCall.Args == nil {
 					toolCall.Args = parseToolArguments(args)
+				}
+			}
+			if toolCall.Args == nil {
+				if args, ok := tcMap["arguments"].(string); ok {
+					toolCall.Args = parseToolArguments(args)
+				} else {
+					toolCall.Args = map[string]interface{}{}
 				}
 			}
 			result = append(result, toolCall)

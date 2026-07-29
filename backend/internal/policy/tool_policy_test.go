@@ -65,6 +65,17 @@ func TestToolExecutionPolicy_AllowTool_BlocksDenylistedTool(t *testing.T) {
 	}
 }
 
+func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *testing.T) {
+	policy := NewToolExecutionPolicy([]string{"view", "grep"}, true)
+	if err := policy.AllowTool("search_tool"); err != nil {
+		t.Fatalf("expected runtime search meta-tool to remain executable, got %v", err)
+	}
+	policy.DeniedTools = map[string]bool{"search_tool": true}
+	if err := policy.AllowTool("search_tool"); err == nil {
+		t.Fatal("expected explicit deny to override runtime search allowance")
+	}
+}
+
 func TestToolExecutionPolicy_AllowToolCall_BlocksPathOutsideSandbox(t *testing.T) {
 	root := t.TempDir()
 	policy := NewToolExecutionPolicy(nil, false)

@@ -49,6 +49,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	call = NewReActLoop(a, a.llmRuntime, nil).bindFreeformToolCall(ctx, call)
 	traceID := "trace_" + uuid.NewString()
 	gateway := a.GetOutputGateway()
 	result := toolExecutionResult{Call: call}

@@ -1601,12 +1601,16 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 
 // act 行动阶段：执行工具调用
 func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step int, depth int, historySnapshot []types.Message, toolCalls []types.ToolCall, toolWhitelist []string) ([]toolExecutionResult, error) {
+	for index := range toolCalls {
+		toolCalls[index] = loop.bindFreeformToolCall(ctx, toolCalls[index])
+	}
 	results := make([]toolExecutionResult, len(toolCalls))
 	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
 		return loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan), nil
 	}
 	gateway := loop.agent.GetOutputGateway()
 	allowedTools := whitelistSet(toolWhitelist)
+	searchToolVisible := searchToolVisibleInTurn(ctx)
 	var pendingCheckpoints map[string]*runtimecheckpoint.PendingCheckpoint
 	checkpointMgr := loop.agent.GetCheckpointManager()
 	historyCount := len(historySnapshot)
@@ -1679,7 +1683,8 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			mergeHookMetadata(metadata, decision.Message, decision.ExtraContext)
 		}
 
-		if len(allowedTools) > 0 && !allowedTools[tc.Name] {
+		visibleSearchCall := searchToolVisible && strings.EqualFold(strings.TrimSpace(tc.Name), toolSearchName)
+		if len(allowedTools) > 0 && !allowedTools[tc.Name] && !visibleSearchCall {
 			result.Error = fmt.Sprintf("tool not allowed for this agent: %s", tc.Name)
 			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_whitelist", result.Error, nil)
 			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)

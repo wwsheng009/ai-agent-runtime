@@ -5,10 +5,25 @@ import (
 	"strings"
 
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+// bindFreeformToolCall resolves a custom tool's raw input against its schema
+// before hooks, permission checks, sandbox validation, and preflight run.
+func (loop *ReActLoop) bindFreeformToolCall(ctx context.Context, call types.ToolCall) types.ToolCall {
+	if !strings.EqualFold(strings.TrimSpace(call.Type), "custom_tool_call") {
+		return call
+	}
+	info := loop.lookupToolInfoForPreflight(ctx, call.Name, nil)
+	if info == nil {
+		return call
+	}
+	call.Args = toolargs.BindFreeform(call.Args, info.InputSchema)
+	return call
+}
 
 func (loop *ReActLoop) ensureToolExecMemory() *toolexec.Memory {
 	if loop == nil {

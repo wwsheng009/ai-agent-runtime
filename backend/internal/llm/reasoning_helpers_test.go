@@ -64,6 +64,33 @@ func TestRuntimeMessagesToProtocolMessages_OpenAINormalizesToolReplayPayload(t *
 	}
 }
 
+func TestRuntimeMessagesToProtocolMessages_CodexReplaysCustomToolInput(t *testing.T) {
+	raw := "*** Begin Patch\n*** End Patch"
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{{
+			ID: "call_patch", Type: "custom_tool_call", Name: "apply_patch",
+			Args: map[string]interface{}{"patch": raw}, RawInput: raw,
+		}},
+		Metadata: types.NewMetadata(),
+	}
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewUserMessage("Apply the patch"),
+		assistant,
+		*types.NewToolMessage("call_patch", "Done"),
+	}, "codex")
+	if len(messages) != 3 {
+		t.Fatalf("expected complete custom-tool replay, got %#v", messages)
+	}
+	items := decodeSliceOfMaps(messages[1][codexResponseOutputItemsMessageKey])
+	if len(items) != 1 || items[0]["type"] != "custom_tool_call" || items[0]["input"] != raw {
+		t.Fatalf("expected raw custom tool input to survive replay, got %#v", items)
+	}
+	if messages[2]["role"] != "tool" || messages[2]["tool_call_id"] != "call_patch" {
+		t.Fatalf("expected matching custom tool result to remain associated, got %#v", messages[2])
+	}
+}
+
 func TestRuntimeMessagesToProtocolMessages_OpenAIIncludesCompatibleMessageOverrides(t *testing.T) {
 	assistant := types.Message{
 		Role:     "assistant",

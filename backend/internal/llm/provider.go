@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1498,14 +1499,23 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 		toolCalls := make([]ToolCall, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
 			argsJSON := "{}"
-			if len(call.Args) > 0 {
+			callType := strings.TrimSpace(call.Type)
+			if callType == "" {
+				callType = "function"
+			}
+			if strings.EqualFold(callType, "custom_tool_call") {
+				argsJSON = call.RawInput
+				if argsJSON == "" {
+					argsJSON, _ = call.Args["_raw"].(string)
+				}
+			} else if len(call.Args) > 0 {
 				if argsBytes, err := json.Marshal(call.Args); err == nil && len(argsBytes) > 0 && string(argsBytes) != "null" {
 					argsJSON = normalizeToolCallArgumentsJSON(string(argsBytes))
 				}
 			}
 			toolCalls = append(toolCalls, ToolCall{
 				ID:   call.ID,
-				Type: "function",
+				Type: callType,
 				Function: ToolCallFunc{
 					Name:      call.Name,
 					Arguments: argsJSON,
@@ -1613,10 +1623,21 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 	if len(choice.Message.ToolCalls) > 0 {
 		result.ToolCalls = make([]types.ToolCall, 0, len(choice.Message.ToolCalls))
 		for _, call := range choice.Message.ToolCalls {
+			callType := strings.ToLower(strings.TrimSpace(call.Type))
+			var args map[string]interface{}
+			rawInput := ""
+			if callType == "custom_tool_call" {
+				rawInput = call.Function.Arguments
+				args = toolargs.DecodeFreeform(rawInput)
+			} else {
+				args = parseToolArguments(call.Function.Arguments)
+			}
 			result.ToolCalls = append(result.ToolCalls, types.ToolCall{
-				ID:   call.ID,
-				Name: call.Function.Name,
-				Args: parseToolArguments(call.Function.Arguments),
+				ID:       call.ID,
+				Type:     callType,
+				Name:     call.Function.Name,
+				Args:     args,
+				RawInput: rawInput,
 			})
 		}
 	}
@@ -1745,11 +1766,19 @@ func (p *ProviderWrapper) convertToolCalls(tcSlice []interface{}) []ToolCall {
 	for _, tc := range tcSlice {
 		if tcMap, ok := tc.(map[string]interface{}); ok {
 			toolCall := ToolCall{
-				ID:   "", // 从 tcMap 提取
+				ID:   "",
 				Type: "function",
 			}
 			if id, ok := tcMap["id"].(string); ok {
 				toolCall.ID = id
+			}
+			if toolCall.ID == "" {
+				if id, ok := tcMap["call_id"].(string); ok {
+					toolCall.ID = id
+				}
+			}
+			if callType, ok := tcMap["type"].(string); ok && strings.TrimSpace(callType) != "" {
+				toolCall.Type = strings.ToLower(strings.TrimSpace(callType))
 			}
 			if name, ok := tcMap["name"].(string); ok {
 				toolCall.Function.Name = name
@@ -1757,14 +1786,16 @@ func (p *ProviderWrapper) convertToolCalls(tcSlice []interface{}) []ToolCall {
 			if args, ok := tcMap["arguments"].(string); ok {
 				toolCall.Function.Arguments = args
 			}
-			if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-				toolCall.Function = ToolCallFunc{
-					Name: "",
+			if toolCall.Type == "custom_tool_call" {
+				if input, ok := tcMap["input"].(string); ok && (input != "" || toolCall.Function.Arguments == "") {
+					toolCall.Function.Arguments = input
 				}
+			}
+			if fn, ok := tcMap["function"].(map[string]interface{}); ok {
 				if name, ok := fn["name"].(string); ok {
 					toolCall.Function.Name = name
 				}
-				if args, ok := fn["arguments"].(string); ok {
+				if args, ok := fn["arguments"].(string); ok && toolCall.Function.Arguments == "" {
 					toolCall.Function.Arguments = args
 				}
 			}

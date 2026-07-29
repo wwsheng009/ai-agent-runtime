@@ -1502,6 +1502,19 @@ func encodeRuntimeToolCalls(calls []types.ToolCall) []map[string]interface{} {
 	}
 	result := make([]map[string]interface{}, 0, len(calls))
 	for _, call := range calls {
+		if strings.EqualFold(strings.TrimSpace(call.Type), "custom_tool_call") {
+			input := call.RawInput
+			if input == "" {
+				input, _ = call.Args["_raw"].(string)
+			}
+			result = append(result, map[string]interface{}{
+				"id":    call.ID,
+				"type":  "custom_tool_call",
+				"name":  call.Name,
+				"input": input,
+			})
+			continue
+		}
 		argsJSON := "{}"
 		if len(call.Args) > 0 {
 			if argsBytes, err := json.Marshal(call.Args); err == nil && len(argsBytes) > 0 && string(argsBytes) != "null" {
@@ -1526,6 +1539,15 @@ func encodeProviderToolCalls(calls []ToolCall) []map[string]interface{} {
 	}
 	result := make([]map[string]interface{}, 0, len(calls))
 	for _, call := range calls {
+		if strings.EqualFold(strings.TrimSpace(call.Type), "custom_tool_call") {
+			result = append(result, map[string]interface{}{
+				"id":    call.ID,
+				"type":  "custom_tool_call",
+				"name":  call.Function.Name,
+				"input": call.Function.Arguments,
+			})
+			continue
+		}
 		result = append(result, map[string]interface{}{
 			"id":   call.ID,
 			"type": call.Type,

@@ -47,7 +47,11 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	if p.DeniedTools[toolName] {
 		return fmt.Errorf("tool denied by execution policy: %s", toolName)
 	}
-	if p.AllowlistEnabled && !p.AllowedTools[toolName] {
+	// search_tool is a runtime-owned, read-only catalog projection. It may be
+	// injected after an agent allowlist is derived, so the allowlist must not
+	// make a model-visible search surface impossible to execute. Explicit deny
+	// rules and capability/read-only checks below still apply.
+	if p.AllowlistEnabled && !p.AllowedTools[toolName] && normalizeToolName(toolName) != "search_tool" {
 		return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
 	}
 	if err := p.AllowCapabilities(p.resolveCapabilities(EvalRequest{ToolName: toolName})); err != nil {

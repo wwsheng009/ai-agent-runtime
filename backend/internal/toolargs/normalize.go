@@ -41,6 +41,71 @@ func DecodeJSON(raw string) map[string]interface{} {
 	}
 }
 
+// DecodeFreeform preserves provider-emitted custom tool input without trying
+// to interpret it as JSON. Schema binding happens later, when the runtime has
+// the selected tool definition available.
+func DecodeFreeform(raw string) map[string]interface{} {
+	if raw == "" {
+		return map[string]interface{}{}
+	}
+	return map[string]interface{}{"_raw": raw}
+}
+
+// BindFreeform binds an unparsed custom-tool payload to the schema's sole
+// required string field. It is deliberately conservative: parse failures,
+// explicit arguments, ambiguous required fields, and non-string targets are
+// left untouched.
+func BindFreeform(args map[string]interface{}, schema map[string]interface{}) map[string]interface{} {
+	if len(args) == 0 || len(schema) == 0 {
+		return args
+	}
+	if _, failed := args["_parse_error"]; failed || hasNonMetaKeys(args) {
+		return args
+	}
+	raw, ok := args["_raw"].(string)
+	if !ok {
+		return args
+	}
+
+	required := stringSlice(schema["required"])
+	if len(required) != 1 {
+		return args
+	}
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return args
+	}
+	property, ok := properties[required[0]].(map[string]interface{})
+	if !ok || !strings.EqualFold(strings.TrimSpace(stringValue(property["type"])), "string") {
+		return args
+	}
+	return map[string]interface{}{required[0]: raw}
+}
+
+func stringSlice(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []interface{}:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return nil
+			}
+			result = append(result, text)
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func stringValue(value interface{}) string {
+	text, _ := value.(string)
+	return text
+}
+
 func decodeJSONObject(text string) (map[string]interface{}, error) {
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(text), &args); err != nil {

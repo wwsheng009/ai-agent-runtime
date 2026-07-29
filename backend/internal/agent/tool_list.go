@@ -56,6 +56,15 @@ func ensureSearchToolPresent(tools []types.ToolDefinition) []types.ToolDefinitio
 	return append(tools, searchToolDefinition())
 }
 
+func searchToolVisibleInTurn(ctx context.Context) bool {
+	for _, def := range frozenTurnToolSurface(ctx) {
+		if strings.EqualFold(strings.TrimSpace(def.Name), toolSearchName) {
+			return true
+		}
+	}
+	return false
+}
+
 func filterToolDefinitionsByShouldList(tools []types.ToolDefinition, listCtx toolkit.ListToolsContext) []types.ToolDefinition {
 	if len(tools) == 0 {
 		return nil
