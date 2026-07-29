@@ -43,6 +43,7 @@ const (
 	clearToEndSequence            = "\x1b[J"
 	escapeSequenceWait            = 30 * time.Millisecond
 	trailingLineFeedDrainWait     = 12 * time.Millisecond
+	bracketedPasteDisplayIdleWait = 60 * time.Millisecond
 )
 
 func defaultPasteBurstHoldFirstRune() bool {
@@ -576,6 +577,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		lastRenderedLine = append(lastRenderedLine[:0], line...)
 		writeEditorText(builder.String(), renderBefore)
 	}
+	if hooks != nil && hooks.RedrawInitialText && len(line) > 0 {
+		// A fixed composer can be restarted with a draft that survived a prompt
+		// clear. Repaint it now instead of waiting for the next key to make the
+		// editor's render cache and the terminal agree again.
+		redraw()
+	}
 
 	setLine := func(next []rune) {
 		composer.ReplaceText(string(next))
@@ -819,25 +826,53 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 
 	waitForPasteBurstWindow := func() error {
-		if !pasteBurst.IsActive() || stdinFile == nil || len(pending) > 0 {
-			return nil
-		}
-		timeout := time.Until(pasteBurst.Deadline())
-		if timeout <= 0 {
-			flushPasteBurst()
-			return nil
-		}
-		ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
-		if err != nil {
-			if errors.Is(err, errInteractiveInputReadinessUnsupported) {
-				time.Sleep(timeout)
+		for pasteBurst.IsActive() && stdinFile != nil && len(pending) == 0 {
+			timeout := time.Until(pasteBurst.Deadline())
+			if timeout <= 0 {
 				flushPasteBurst()
 				return nil
 			}
-			return err
+			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+			if err != nil {
+				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					time.Sleep(timeout)
+					continue
+				}
+				return err
+			}
+			if ready {
+				return nil
+			}
+			// poll(2) accepts millisecond timeouts and can return just before a
+			// sub-millisecond remainder expires. Re-check the deadline instead of
+			// falling through to a blocking key read with an unflushed buffer.
 		}
-		if !ready {
-			flushPasteBurst()
+		return nil
+	}
+
+	waitForBracketedPasteDisplay := func() error {
+		if !pasteActive || len(pasteBuffer) == 0 || stdinFile == nil || len(pending) > 0 {
+			return nil
+		}
+		deadline := time.Now().Add(bracketedPasteDisplayIdleWait)
+		for pasteActive && len(pasteBuffer) > 0 && len(pending) == 0 {
+			timeout := time.Until(deadline)
+			if timeout <= 0 {
+				insertPastedText(string(pasteBuffer))
+				pasteBuffer = pasteBuffer[:0]
+				return nil
+			}
+			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+			if err != nil {
+				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					time.Sleep(timeout)
+					continue
+				}
+				return err
+			}
+			if ready {
+				return nil
+			}
 		}
 		return nil
 	}
@@ -996,6 +1031,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if err := waitForPasteBurstWindow(); err != nil {
 			return "", err
 		}
+		if err := waitForBracketedPasteDisplay(); err != nil {
+			return "", err
+		}
 		key, ok, readErr := nextInteractiveKey(ctx, reader, &pending, stdinFile)
 		if readErr != nil {
 			flushPasteBurstBeforeModifiedInput()
@@ -1023,13 +1061,13 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			continue
 		}
 		if key.kind == editorKeyPasteEnd {
-			insertedPaste := false
+			wasPasteActive := pasteActive
 			if pasteActive && len(pasteBuffer) > 0 {
-				insertedPaste = insertPastedText(string(pasteBuffer))
+				insertPastedText(string(pasteBuffer))
 				pasteBuffer = pasteBuffer[:0]
 			}
 			pasteActive = false
-			if insertedPaste {
+			if wasPasteActive {
 				emitChange()
 			}
 			continue

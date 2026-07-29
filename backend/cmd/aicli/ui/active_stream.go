@@ -37,6 +37,7 @@ type ActiveStreamController struct {
 	prevStyled []render.Line
 	active     bool
 	markdown   bool
+	committed  int
 
 	markdownDoc        render.Document
 	markdownDocSource  string
@@ -221,6 +222,43 @@ func (c *ActiveStreamController) PushAssistantDelta(delta string, asMarkdown boo
 	return newlyStable
 }
 
+// StableContent returns the append-only source prefix that is safe to move
+// from the mutable viewport into scrollback.
+func (c *ActiveStreamController) StableContent() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active || c.cell.Kind != cell.ActiveAssistant {
+		return ""
+	}
+	if c.markdown {
+		return c.md.Stable()
+	}
+	return c.cell.Stable
+}
+
+// CommitStablePrefix hides an absolute source prefix from the mutable cell.
+// Finalize still returns the complete raw source for transcript ownership and
+// history persistence.
+func (c *ActiveStreamController) CommitStablePrefix(offset int) {
+	if c == nil || offset <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stableLen := len(c.cell.Stable)
+	if c.markdown {
+		stableLen = len(c.md.Stable())
+	}
+	if offset <= c.committed || offset > stableLen {
+		return
+	}
+	c.committed = offset
+	c.Scheduler.Request("assistant.commit")
+}
+
 // SetAssistantSnapshot replaces content (for snapshot-style streams).
 func (c *ActiveStreamController) SetAssistantSnapshot(content string, asMarkdown bool) (newlyStable string) {
 	if c == nil {
@@ -352,6 +390,7 @@ func (c *ActiveStreamController) shouldGrowViewportLocked() bool {
 	if c.markdown {
 		content = c.cell.Stable
 	}
+	content = activeSourceSuffix(content, c.committed)
 	if c.cell.Holdback != "" {
 		content += c.cell.Holdback
 	}
@@ -376,6 +415,7 @@ func (c *ActiveStreamController) shouldGrowViewportLocked() bool {
 func (c *ActiveStreamController) activeDocumentLocked(now time.Time) render.Document {
 	active := c.cell
 	if c.markdown && active.Kind == cell.ActiveAssistant {
+		active.Stable = activeSourceSuffix(active.Stable, c.committed)
 		width := 80
 		if c.Buffer != nil && c.Buffer.Width > 0 {
 			width = c.Buffer.Width
@@ -409,7 +449,21 @@ func (c *ActiveStreamController) activeDocumentLocked(now time.Time) render.Docu
 		}
 		return c.markdownFrameDoc
 	}
+	if active.Kind == cell.ActiveAssistant && c.committed > 0 {
+		active.Body = activeSourceSuffix(active.Body, c.committed)
+		active.Stable = activeSourceSuffix(active.Stable, c.committed)
+	}
 	return active.Document(now, c.Policy)
+}
+
+func activeSourceSuffix(source string, committed int) string {
+	if committed <= 0 {
+		return source
+	}
+	if committed >= len(source) {
+		return ""
+	}
+	return source[committed:]
 }
 
 func newActiveStreamHighlighter() syntax.Highlighter {
@@ -563,6 +617,7 @@ func (c *ActiveStreamController) ViewportRows() int {
 func (c *ActiveStreamController) resetLocked() {
 	c.active = false
 	c.markdown = false
+	c.committed = 0
 	c.cell = cell.ActiveCell{}
 	c.md.Reset()
 	c.prev = nil

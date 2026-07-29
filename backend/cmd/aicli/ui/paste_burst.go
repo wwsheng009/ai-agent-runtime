@@ -249,7 +249,7 @@ func (b *PasteBurst) FlushIfDue(now time.Time) FlushResult {
 	if b.HasBufferedText() {
 		timeout = pasteBurstActiveIdleTimeout
 	}
-	timedOut := !b.lastPlainCharTime.IsZero() && now.Sub(b.lastPlainCharTime) > timeout
+	timedOut := !b.lastPlainCharTime.IsZero() && !now.Before(b.lastPlainCharTime.Add(timeout))
 	if timedOut && b.HasBufferedText() {
 		b.active = false
 		out := string(b.buffer)
