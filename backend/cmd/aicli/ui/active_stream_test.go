@@ -48,6 +48,25 @@ func TestActiveStreamControllerMarkdownNoScrollbackSpam(t *testing.T) {
 	}
 }
 
+func TestActiveStreamControllerCommittedPrefixLeavesMutableTail(t *testing.T) {
+	c := NewActiveStreamController(40, 6)
+	c.BeginAssistant("assistant")
+	c.PushAssistantDelta("committed line\nmutable tail\n", false)
+	if stable := c.StableContent(); stable != "committed line\nmutable tail\n" {
+		t.Fatalf("StableContent=%q", stable)
+	}
+	c.CommitStablePrefix(len("committed line\n"))
+	lines, _ := c.PaintLines(time.Now(), true)
+	plain := (render.PlainBackend{}).Render(render.LinesDoc(lines...))
+	if strings.Contains(plain, "committed line") || !strings.Contains(plain, "mutable tail") {
+		t.Fatalf("active viewport did not retain only the mutable tail: %q", plain)
+	}
+	content, _ := c.Finalize()
+	if content != "committed line\nmutable tail\n" {
+		t.Fatalf("Finalize lost committed source prefix: %q", content)
+	}
+}
+
 func TestActiveStreamControllerPaintLinesRetainsSemanticRoles(t *testing.T) {
 	c := NewActiveStreamController(12, 4)
 	c.BeginAssistant("assistant")

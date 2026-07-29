@@ -74,7 +74,8 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 			height, ui.ActiveBandMaxRows, wantBandBudget)
 	}
 
-	// Build a reply that forces the live band to the max row budget.
+	// Build a reply that repeatedly promotes stable blocks into scrollback while
+	// retaining only the mutable tail in ActiveBand.
 	var reply strings.Builder
 	reply.WriteString("# 长回复\n\n")
 	for i := 1; i <= 30; i++ {
@@ -129,9 +130,15 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 	if len(band) == 0 {
 		t.Fatalf("expected active band mid-stream, screen:\n%s", screen.dump())
 	}
-	if len(band) < wantBandBudget {
-		t.Fatalf("expected band to reach budget %d mid-stream, got %d lines: %v\nscreen:\n%s",
+	if len(band) > wantBandBudget {
+		t.Fatalf("active tail exceeded budget %d, got %d lines: %v\nscreen:\n%s",
 			wantBandBudget, len(band), band, screen.dump())
+	}
+	if joined := strings.Join(band, "\n"); !strings.Contains(joined, "收尾段落") {
+		t.Fatalf("expected newest mutable tail in ActiveBand, got %v\nscreen:\n%s", band, screen.dump())
+	}
+	if !strings.Contains(screen.dump(), "章节 29") {
+		t.Fatalf("expected older stable blocks in scrollback, screen:\n%s", screen.dump())
 	}
 
 	// Band is laid out bottom-up above the status row while prompt is hidden.
@@ -420,9 +427,13 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 		}
 	})
 	screen.feed(streaming)
-	if got := len(surface.ActiveBandLines()); got < budget {
-		t.Fatalf("expected full band before finalize, got %d want >= %d; screen:\n%s",
+	band := surface.ActiveBandLines()
+	if got := len(band); got == 0 || got > budget {
+		t.Fatalf("expected bounded mutable tail before finalize, got %d want 1..%d; screen:\n%s",
 			got, budget, screen.dump())
+	}
+	if !strings.Contains(strings.Join(band, "\n"), "融合收尾") {
+		t.Fatalf("expected final mutable paragraph in ActiveBand, got %v; screen:\n%s", band, screen.dump())
 	}
 
 	// Finalize alone: commit + ClearActiveBand (no prompt yet).

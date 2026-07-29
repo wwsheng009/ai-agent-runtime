@@ -2930,7 +2930,10 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 			formatted = c.session.Formatter.Format(suffix)
 		}
 		inlineContinuation := !c.streamTrailingLF && !strings.HasPrefix(suffix, "\n") && !strings.Contains(formatted, "\n")
-		formatted = strings.TrimLeft(formatted, "\n")
+		// Trim both sides: leading blanks avoid a double gap after a prior
+		// stable commit, trailing blanks must not combine with writeLineLocked's
+		// terminating "\n" into an extra empty row above status/prompt.
+		formatted = strings.Trim(formatted, "\r\n")
 		if strings.TrimSpace(formatted) == "" {
 			if !c.streamTrailingLF {
 				c.writeLineLocked("")
@@ -3047,8 +3050,8 @@ func (c *chatInteractionCoordinator) paintActiveStreamLocked(delta string, asMar
 		// Recompute stable cut from full buffer on mode upgrades.
 		newlyStable = c.activeStream.SetAssistantSnapshot(c.streamBuffer.String(), true)
 	}
-	c.commitActiveStableScrollbackLocked(asMarkdown)
-	frame, changed := c.activeStream.PaintLines(time.Now(), false)
+	committed := c.commitActiveStableScrollbackLocked(asMarkdown)
+	frame, changed := c.activeStream.PaintLines(time.Now(), committed)
 	if c.surfaceOutputActiveLocked() && changed {
 		c.syncActiveBandLinesLocked(frame)
 	}
@@ -3056,21 +3059,24 @@ func (c *chatInteractionCoordinator) paintActiveStreamLocked(delta string, asMar
 	return newlyStable
 }
 
-func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdown bool) {
+func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdown bool) bool {
 	if c == nil || c.activeStream == nil || c.reasoningActive || !c.surfaceOutputActiveLocked() {
-		return
+		return false
 	}
 	stable := c.activeStream.StableContent()
 	if len(stable) <= c.streamRenderedPrefixLen {
-		return
+		return false
 	}
 	width, rows := c.surface.ActiveBandViewportSize()
 	cut := plainStableScrollbackCut(stable, c.streamRenderedPrefixLen, width, rows)
 	if asMarkdown {
-		cut = markdownStableScrollbackCut(stable, c.streamRenderedPrefixLen)
+		// Never split a Markdown paragraph. Move completed blocks as soon as a
+		// following block exists, while retaining the newest stable block in the
+		// live viewport even when the source currently ends on a blank line.
+		cut = markdownStableScrollbackCut(stable, c.streamRenderedPrefixLen, len(stable))
 	}
 	if cut <= c.streamRenderedPrefixLen || cut > len(stable) {
-		return
+		return false
 	}
 	chunk := stable[c.streamRenderedPrefixLen:cut]
 	wrote := false
@@ -3080,7 +3086,11 @@ func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdo
 			formatted = strings.TrimRight(c.session.Formatter.Format(chunk), "\r\n")
 		}
 		if strings.TrimSpace(formatted) != "" {
-			c.writeTextLocked(ui.FormatAssistantRendered(formatted) + "\n\n")
+			// Single trailing newline only. A literal "\n\n" writes one permanent
+			// blank plus a cursor-park blank; when ActiveBand then shrinks, the
+			// park blank is not absorbed (shrink clears outputCursorOnBlankRow),
+			// leaving a mid-stream hole above the live band / status.
+			c.writeLineLocked(ui.FormatAssistantRendered(formatted))
 			wrote = true
 		}
 	} else if chunk != "" {
@@ -3091,21 +3101,31 @@ func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdo
 	c.streamRenderedPrefixLen = cut
 	if wrote {
 		c.streamTrailingLF = true
+		// Treat promoted stable blocks as completed output so a later finalize
+		// or follow-up block can insert a single separator when needed.
+		c.completeBlockOutput = true
 	}
-	c.completeBlockOutput = false
 	c.activeStream.CommitStablePrefix(cut)
+	return true
 }
 
-func markdownStableScrollbackCut(stable string, committed int) int {
-	if committed < 0 || committed >= len(stable) {
+func markdownStableScrollbackCut(stable string, committed, maxCut int) int {
+	if committed < 0 || committed >= len(stable) || maxCut <= committed {
 		return committed
 	}
-	rest := stable[committed:]
+	if maxCut > len(stable) {
+		maxCut = len(stable)
+	}
+	rest := stable[committed:maxCut]
+	search := rest
+	if maxCut == len(stable) {
+		search = strings.TrimSuffix(strings.TrimSuffix(rest, "\n"), "\r")
+	}
 	cut := -1
-	if index := strings.LastIndex(rest, "\n\n"); index >= 0 {
+	if index := strings.LastIndex(search, "\n\n"); index >= 0 {
 		cut = index + 2
 	}
-	if index := strings.LastIndex(rest, "\r\n\r\n"); index >= 0 && index+4 > cut {
+	if index := strings.LastIndex(search, "\r\n\r\n"); index >= 0 && index+4 > cut {
 		cut = index + 4
 	}
 	if cut <= 0 {

@@ -2652,8 +2652,8 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 
 	coord.RenderAssistantDelta("# Title\n\n")
 	coord.RenderAssistantDelta("Hello stable paragraph.\n")
-	if output.String() != "" {
-		t.Fatalf("surface/markdown path must not write transcript mid-stream, got %q", output.String())
+	if !strings.Contains(output.String(), "Title") || strings.Contains(output.String(), "Hello stable paragraph") {
+		t.Fatalf("surface path should commit only the completed markdown block, got %q", output.String())
 	}
 	if coord.activeStream == nil || !coord.activeStream.Active() {
 		t.Fatal("expected active stream controller to be active")
@@ -2678,6 +2678,9 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 	if !strings.Contains(output.String(), "Hello") && !strings.Contains(output.String(), "Title") {
 		t.Fatalf("expected finalized transcript commit, got %q", output.String())
 	}
+	if strings.Count(output.String(), "Title") != 1 {
+		t.Fatalf("stable markdown prefix should commit exactly once, got %q", output.String())
+	}
 }
 
 func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *testing.T) {
@@ -2697,8 +2700,8 @@ func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *tes
 	coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
 	coord.RenderAssistantDelta("coalesced-final-row\n")
 	waitForActiveBandText(t, surface, "coalesced-final-row", time.Second)
-	if output.Len() != 0 {
-		t.Fatalf("delayed viewport paint must not write scrollback, got %q", output.String())
+	if !strings.Contains(output.String(), "one") || strings.Contains(output.String(), "coalesced-final-row") {
+		t.Fatalf("only overflowed stable rows should enter scrollback before finalize, got %q", output.String())
 	}
 }
 
@@ -2907,6 +2910,20 @@ func TestSplitToolStageDetail(t *testing.T) {
 	name, progress = splitToolStageDetail("  ")
 	if name != "" || progress != "" {
 		t.Fatalf("empty detail got name=%q progress=%q", name, progress)
+	}
+}
+
+func TestActiveStreamStableScrollbackCuts(t *testing.T) {
+	markdownSource := "# One\n\nParagraph two.\n\nMutable tail"
+	if got, want := markdownStableScrollbackCut(markdownSource, 0, len(markdownSource)), len("# One\n\nParagraph two.\n\n"); got != want {
+		t.Fatalf("markdownStableScrollbackCut=%d want %d", got, want)
+	}
+	plainSource := "one\ntwo\nthree\nfour\nfive\n"
+	if got, want := plainStableScrollbackCut(plainSource, 0, 80, 4), len("one\ntwo\n"); got != want {
+		t.Fatalf("plainStableScrollbackCut=%d want %d", got, want)
+	}
+	if got := plainStableScrollbackCut("very-long-line-without-newline", 0, 8, 3); got != 0 {
+		t.Fatalf("partial line must remain mutable, cut=%d", got)
 	}
 }
 
