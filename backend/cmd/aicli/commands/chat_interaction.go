@@ -72,6 +72,9 @@ type chatInteractionCoordinator struct {
 	activeFrameTimer      *time.Timer
 	activeFrameDue        time.Time
 	activeFrameGeneration uint64
+	dynamicStatusStarted  time.Time
+	dynamicStatusTimer    *time.Timer
+	dynamicStatusTimerSeq uint64
 	activeTools           map[string]chatActiveTool
 	activeToolSequence    uint64
 }
@@ -329,10 +332,84 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 	if c.session != nil && c.session.TitleNotifier != nil {
 		c.session.TitleNotifier.SetBaseState(chatTitleStateForSurface(chatSurfaceTitleState(state)))
 	}
+	now := time.Now()
+	c.updateDynamicStatusClockLocked(state, now)
 	if c.surface != nil {
-		c.surface.SetStatusModel(buildChatSurfaceStatusModelForWidthAndInputMode(c.session, state, ui.GetTerminalWidth(), c.inputMode))
+		c.surface.SetStatusModels(
+			buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth()),
+			buildChatDynamicStatusModelForWidthAndInputMode(state, ui.GetTerminalWidth(), c.inputMode, c.dynamicStatusElapsedLocked(now)),
+		)
 		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, state, ui.GetTerminalWidth()))
+		c.scheduleDynamicStatusTickLocked(now)
 	}
+}
+
+func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(state string, now time.Time) {
+	if !chatSurfaceStateIsRunning(state) {
+		c.dynamicStatusStarted = time.Time{}
+		c.stopDynamicStatusTickLocked()
+		return
+	}
+	if c.dynamicStatusStarted.IsZero() {
+		c.dynamicStatusStarted = now
+	}
+}
+
+func (c *chatInteractionCoordinator) dynamicStatusElapsedLocked(now time.Time) time.Duration {
+	if c.dynamicStatusStarted.IsZero() || now.Before(c.dynamicStatusStarted) {
+		return 0
+	}
+	return now.Sub(c.dynamicStatusStarted)
+}
+
+func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Time) {
+	if c == nil || c.shutdown || c.dynamicStatusStarted.IsZero() || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.dynamicStatusTimer != nil {
+		return
+	}
+	elapsed := c.dynamicStatusElapsedLocked(now)
+	delay := time.Second - elapsed%time.Second
+	if delay < 10*time.Millisecond {
+		delay = time.Second
+	}
+	c.dynamicStatusTimerSeq++
+	sequence := c.dynamicStatusTimerSeq
+	c.dynamicStatusTimer = time.AfterFunc(delay, func() {
+		c.refreshDynamicStatusTick(sequence)
+	})
+}
+
+func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if sequence != c.dynamicStatusTimerSeq {
+		return
+	}
+	c.dynamicStatusTimer = nil
+	if c.shutdown || c.dynamicStatusStarted.IsZero() || !c.surfaceOutputActiveLocked() {
+		return
+	}
+	now := time.Now()
+	c.surface.SetDynamicStatusModel(buildChatDynamicStatusModelForWidthAndInputMode(
+		c.currentSurfaceStateLocked(),
+		ui.GetTerminalWidth(),
+		c.inputMode,
+		c.dynamicStatusElapsedLocked(now),
+	))
+	c.scheduleDynamicStatusTickLocked(now)
+}
+
+func (c *chatInteractionCoordinator) stopDynamicStatusTickLocked() {
+	if c == nil {
+		return
+	}
+	c.dynamicStatusTimerSeq++
+	if c.dynamicStatusTimer != nil {
+		c.dynamicStatusTimer.Stop()
+	}
+	c.dynamicStatusTimer = nil
 }
 
 func chatSurfaceTitleState(state string) string {
@@ -948,6 +1025,96 @@ func buildChatSurfaceStatusModelForWidthAndInputMode(session *ChatSession, state
 	return model
 }
 
+func buildChatPersistentStatusModelForWidth(session *ChatSession, width int) style.StatusLineModel {
+	return buildChatSurfaceStatusModelForWidthAndInputMode(session, "Ready", width, chatInputModeChat)
+}
+
+func buildChatDynamicStatusModelForWidthAndInputMode(state string, width int, inputMode chatInputMode, elapsed time.Duration) *style.StatusLineModel {
+	state, width = normalizeChatSurfaceStatusInput(state, width)
+	action, role, interruptible := chatDynamicStatusAction(state, inputMode)
+	if action == "" {
+		return nil
+	}
+	suffix := ""
+	if interruptible {
+		suffix = fmt.Sprintf(" (%s • esc to interrupt)", formatChatDynamicStatusElapsed(elapsed))
+	}
+	if budget := width - ui.DisplayWidth("◦ "+suffix); budget >= 4 {
+		action = compactStatusValue(action, budget)
+	}
+	text := "◦ " + action + suffix
+	model := &style.StatusLineModel{
+		State:     chatStatusRunState(role),
+		StateText: text,
+		StateRole: role,
+	}
+	return model
+}
+
+func chatDynamicStatusAction(state string, inputMode chatInputMode) (string, style.Role, bool) {
+	switch normalizeChatInputMode(inputMode) {
+	case chatInputModeApproval:
+		return "Waiting for approval", style.RoleApproval, true
+	case chatInputModeAnswer:
+		return "Waiting for answer", style.RoleWarning, true
+	case chatInputModeSelection:
+		return "Selecting an option", style.RoleInfo, false
+	case chatInputModeConfirmation:
+		return "Waiting for confirmation", style.RoleWarning, false
+	case chatInputModeSecret:
+		return "Waiting for credentials", style.RoleWarning, false
+	case chatInputModePanel:
+		return "Navigating panel", style.RoleInfo, false
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		detail := compactStatusValue(strings.TrimSpace(state[len("tool "):]), chatAgentStageDetailMaxWidth)
+		if detail == "" {
+			detail = "tool"
+		}
+		return "Running " + detail, style.RoleTool, true
+	}
+	switch normalized {
+	case "waiting", "thinking", "planning":
+		return "Analyzing", style.RoleReasoning, true
+	case "streaming":
+		return "Generating response", style.RoleProgress, true
+	case "tool running":
+		return "Running tool", style.RoleTool, true
+	case "awaiting approval":
+		return "Waiting for approval", style.RoleApproval, true
+	case "awaiting answer":
+		return "Waiting for answer", style.RoleWarning, true
+	case "stopping":
+		return "Stopping", style.RoleWarning, true
+	case "retrying":
+		return "Retrying", style.RoleWarning, true
+	case "running", "working", "busy":
+		return "Working", style.RoleProgress, true
+	default:
+		return "", "", false
+	}
+}
+
+func formatChatDynamicStatusElapsed(elapsed time.Duration) string {
+	seconds := int64(elapsed / time.Second)
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	remainingSeconds := seconds % 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm %ds", minutes, remainingSeconds)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	return fmt.Sprintf("%dh %dm %ds", hours, remainingMinutes, remainingSeconds)
+}
+
 func normalizeChatSurfaceStatusInput(state string, width int) (string, int) {
 	state = strings.TrimSpace(state)
 	if state == "" {
@@ -977,7 +1144,9 @@ func chatStatusRunState(role style.Role) style.RunState {
 func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMode chatInputMode) []chatStatusSegment {
 	segments := make([]chatStatusSegment, 0, 12)
 
-	// Critical modal/running hints first so narrow widths keep them.
+	// Keep this projection capable of describing a complete status model for
+	// non-surface consumers. The fixed-bottom production path requests a Ready
+	// projection and renders live state in its dedicated composer-adjacent row.
 	if modal := chatSurfaceModalStatusSegment(state, inputMode); modal.full != "" {
 		segments = append(segments, presentChatStatusSegment(modal, style.StatusSegState, chatSurfaceModalStatusRole(state, inputMode)))
 	}
@@ -2593,6 +2762,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.lastCompletedAsyncLine = false
 	c.promptAfterBlockGap = false
 	c.stopActiveStreamFrameLocked()
+	c.stopDynamicStatusTickLocked()
+	c.dynamicStatusStarted = time.Time{}
 	if c.activeStream != nil {
 		c.activeStream.Cancel()
 	}
@@ -3128,10 +3299,121 @@ func markdownStableScrollbackCut(stable string, committed, maxCut int) int {
 	if index := strings.LastIndex(search, "\r\n\r\n"); index >= 0 && index+4 > cut {
 		cut = index + 4
 	}
+	if structuralCut := markdownStructuralScrollbackCut(search); structuralCut > cut {
+		cut = structuralCut
+	}
 	if cut <= 0 {
 		return committed
 	}
 	return committed + cut
+}
+
+// markdownStructuralScrollbackCut finds boundaries that remain stable without
+// a blank line. In particular, the start of a later list item proves the
+// previous item is complete, and a following line proves an ATX heading or
+// fenced block can be emitted. The newest block is deliberately retained.
+func markdownStructuralScrollbackCut(source string) int {
+	cut := 0
+	openFenceMarker := byte(0)
+	openFenceLength := 0
+	baseListIndent := -1
+	for offset := 0; offset < len(source); {
+		lineEnd := strings.IndexByte(source[offset:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(source)
+		} else {
+			lineEnd += offset
+		}
+		next := lineEnd
+		if lineEnd < len(source) {
+			next++
+		}
+		line := strings.TrimSuffix(source[offset:lineEnd], "\r")
+		trimmed := strings.TrimSpace(line)
+
+		marker, markerLength, markerRest, fence := markdownSourceFenceRun(line)
+		if openFenceMarker != 0 {
+			if fence && marker == openFenceMarker && markerLength >= openFenceLength && strings.TrimSpace(markerRest) == "" {
+				openFenceMarker = 0
+				openFenceLength = 0
+				if next < len(source) {
+					cut = next
+				}
+			}
+		} else if fence && (marker != '`' || !strings.Contains(markerRest, "`")) {
+			openFenceMarker = marker
+			openFenceLength = markerLength
+		} else {
+			if indent, listItem := markdownListItemIndent(line); listItem {
+				if baseListIndent < 0 {
+					baseListIndent = indent
+					if offset > 0 {
+						cut = offset
+					}
+				} else if indent <= baseListIndent {
+					cut = offset
+					baseListIndent = indent
+				}
+			}
+			if line == trimmed && markdownATXHeading(trimmed) && next < len(source) {
+				cut = next
+			}
+		}
+
+		if next <= offset {
+			break
+		}
+		offset = next
+	}
+	return cut
+}
+
+func markdownSourceFenceRun(line string) (marker byte, runLength int, rest string, ok bool) {
+	// Nested/list-indented fences remain attached to their parent item. This
+	// helper finds only top-level boundaries; the collector's fence scanner
+	// still handles the complete Markdown indentation rules for holdback.
+	if line == "" || line[0] == ' ' || line[0] == '\t' {
+		return 0, 0, "", false
+	}
+	marker = line[0]
+	if marker != '`' && marker != '~' {
+		return 0, 0, "", false
+	}
+	end := 0
+	for end < len(line) && line[end] == marker {
+		end++
+	}
+	if end < 3 {
+		return 0, 0, "", false
+	}
+	return marker, end, line[end:], true
+}
+
+func markdownATXHeading(line string) bool {
+	if line == "" || line[0] != '#' {
+		return false
+	}
+	index := 0
+	for index < len(line) && line[index] == '#' {
+		index++
+	}
+	return index <= 6 && (index == len(line) || line[index] == ' ' || line[index] == '\t')
+}
+
+func markdownListItemIndent(line string) (int, bool) {
+	indent := 0
+	for indent < len(line) && (line[indent] == ' ' || line[indent] == '\t') {
+		indent++
+	}
+	line = line[indent:]
+	if len(line) >= 2 && (line[0] == '-' || line[0] == '+' || line[0] == '*') && (line[1] == ' ' || line[1] == '\t') {
+		return indent, true
+	}
+	index := 0
+	for index < len(line) && index < 9 && line[index] >= '0' && line[index] <= '9' {
+		index++
+	}
+	return indent, index > 0 && index+1 < len(line) && (line[index] == '.' || line[index] == ')') && (line[index+1] == ' ' || line[index+1] == '\t')
 }
 
 func plainStableScrollbackCut(stable string, committed, width, viewportRows int) int {

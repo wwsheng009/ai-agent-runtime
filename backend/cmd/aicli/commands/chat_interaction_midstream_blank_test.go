@@ -243,6 +243,43 @@ func TestFixedBottomSurface_MidStreamBandGrowthKeepsScrollbackAdjacent(t *testin
 	}
 }
 
+// A stable-prefix promotion writes into the old output region before the
+// mutable tail contracts. The contraction must reclaim the released rows
+// without leaving an extra cursor-park row between scrollback and ActiveBand.
+func TestFixedBottomSurface_StableCommitThenBandShrinkKeepsAdjacency(t *testing.T) {
+	const width, height = 80, 48
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	screen := newScreenVT(width, height)
+
+	seed := captureSurfaceStdout(t, func() {
+		for i := 1; i <= 20; i++ {
+			if _, err, ok := surface.WriteOutput(os.Stdout, fmt.Sprintf("prior-%02d\n", i)); !ok || err != nil {
+				t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
+			}
+		}
+		if !surface.SetActiveBand([]string{"assistant", "one", "two", "three", "four", "five"}) {
+			t.Fatal("SetActiveBand failed")
+		}
+	})
+	screen.feed(seed)
+
+	transition := captureSurfaceStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "heading\n\nbody\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput stable prefix: ok=%v err=%v", ok, err)
+		}
+		if !surface.SetActiveBand([]string{"assistant", "mutable tail"}) {
+			t.Fatal("SetActiveBand shrink failed")
+		}
+	})
+	screen.feed(transition)
+
+	bandStart := height - len(surface.ActiveBandLines())
+	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, height-1); gap > 1 {
+		t.Fatalf("stable commit + band shrink left gap=%d; screen:\n%s", gap, screen.dump())
+	}
+}
+
 // TestFixedBottomSurface_EOSFusionLeavesNoBlankGap pins the stream-end
 // ActiveBand fusion window:
 //

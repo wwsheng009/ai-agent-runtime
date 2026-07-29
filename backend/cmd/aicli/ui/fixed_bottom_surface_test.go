@@ -663,6 +663,57 @@ func TestFixedBottomSurface_SetActiveBandRendersWithoutScrollbackCommit(t *testi
 	}
 }
 
+func TestFixedBottomSurface_DynamicStatusDoesNotOverlapActiveBand(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	surface := newTestFixedBottomSurface()
+	dynamic := style.StatusLineModel{State: style.RunStreaming, StateText: "Generating response"}
+
+	output := captureUIStdout(t, func() {
+		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, &dynamic)
+	})
+	if got, want := surface.promptRenderedStartRow, 23; got != want {
+		t.Fatalf("dynamic-only stack start=%d want %d", got, want)
+	}
+
+	output += captureUIStdout(t, func() {
+		if !surface.SetActiveBand([]string{"assistant", "mutable tail"}) {
+			t.Fatal("expected ActiveBand update")
+		}
+	})
+
+	if got, want := surface.promptRenderedStartRow, 21; got != want {
+		t.Fatalf("bottom stack start=%d want %d", got, want)
+	}
+	if !strings.Contains(output, "\x1b[21;1Hassistant") || !strings.Contains(output, "\x1b[22;1Hmutable tail") {
+		t.Fatalf("active rows were not rendered above dynamic status: %q", output)
+	}
+	if !strings.Contains(output, "\x1b[23;1H") || !strings.Contains(output, "Generating response") {
+		t.Fatalf("dynamic status was not rendered on its own row: %q", output)
+	}
+}
+
+func TestFixedBottomSurface_RemovingDynamicStatusReclaimsOutputRow(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	surface := newTestFixedBottomSurface()
+	dynamic := style.StatusLineModel{State: style.RunStreaming, StateText: "Generating response"}
+	captureUIStdout(t, func() {
+		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, &dynamic)
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed line\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, nil)
+	})
+	if !strings.Contains(output, terminalScrollDownSequence(1)) {
+		t.Fatalf("dynamic status release did not reclaim output row: %q", output)
+	}
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("dynamic status left pending compensation=%d", surface.pendingScrollDownRows)
+	}
+}
+
 func TestFixedBottomSurface_SetActiveBandStyledPreservesRolesAndStripsControls(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("AICLI_COLOR_DEPTH", "truecolor")

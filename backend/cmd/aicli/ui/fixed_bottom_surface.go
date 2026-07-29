@@ -18,7 +18,7 @@ const (
 	// tall terminals so scrollback keeps most of the screen.
 	ActiveBandMaxRows = 14
 	// activeBandReservedRows is the space kept for scrollback output, composer,
-	// notice and status rows when sizing the band.
+	// transient activity, notices and status rows when sizing the band.
 	activeBandReservedRows = 12
 	// activeBandHeightDivisor gives the band roughly one third of the screen
 	// before the ceiling and reserve clamps apply.
@@ -51,7 +51,9 @@ type FixedBottomSurface struct {
 	terminal               *Terminal
 	mu                     sync.Mutex
 	enabled                bool
+	testMode               bool
 	statusModel            *style.StatusLineModel
+	dynamicStatusModel     *style.StatusLineModel
 	popupLines             []string
 	popupOwner             string
 	popupInstance          uint64
@@ -137,6 +139,7 @@ func (s *FixedBottomSurface) Enable() bool {
 		return false
 	}
 	s.enabled = true
+	s.testMode = false
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -168,9 +171,22 @@ func (s *FixedBottomSurface) EnableForTest(width, height int) {
 	// would silently discard the requested height on the next layout pass.
 	s.terminal.SetSizeForTest(width, height)
 	s.enabled = true
+	s.testMode = true
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = 1
+}
+
+// DynamicStatusTicksEnabled reports whether wall-clock activity updates should
+// be scheduled. Synthetic surfaces are driven explicitly by tests and must not
+// leave background timers running after a test returns.
+func (s *FixedBottomSurface) DynamicStatusTicksEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled && !s.testMode
 }
 
 func (s *FixedBottomSurface) Disable() {
@@ -196,7 +212,9 @@ func (s *FixedBottomSurface) Disable() {
 	s.clearPromptStateLocked(true)
 	s.activeBandLines = nil
 	s.activeBandStyled = nil
+	s.dynamicStatusModel = nil
 	s.enabled = false
+	s.testMode = false
 	s.scrollCompensatedRows = 0
 	s.pendingScrollDownRows = 0
 	s.outputCursorOnBlankRow = false
@@ -321,7 +339,11 @@ func (s *FixedBottomSurface) promptInputMaxVisibleRowsLocked() int {
 		statusRows       = 1
 		editorStatusRows = 1
 	)
-	rows := height - outputRows - statusRows - editorStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine)) - len(s.activeBandLines)
+	dynamicStatusRows := 0
+	if s.dynamicStatusModel != nil {
+		dynamicStatusRows = 1
+	}
+	rows := height - outputRows - statusRows - editorStatusRows - dynamicStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine)) - len(s.activeBandLines)
 	if rows < 1 {
 		return 1
 	}
@@ -537,6 +559,7 @@ func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
+		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -1112,6 +1135,7 @@ func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
 		s.promptRenderedStartRow = 0
 		s.promptRenderedRows = 0
 		s.applyLayoutLocked()
+		s.renderPromptRowsLocked(true)
 		s.moveToOutputLocked()
 	})
 	return true
@@ -1463,6 +1487,52 @@ func (s *FixedBottomSurface) SetStatusModel(model style.StatusLineModel) {
 	s.repaintStatusUpdateLocked()
 }
 
+// SetDynamicStatusModel sets the transient activity row rendered immediately
+// above the prompt. Passing nil removes the row; the persistent diagnostics
+// remain in the terminal's final status row.
+func (s *FixedBottomSurface) SetDynamicStatusModel(model *style.StatusLineModel) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	var normalized *style.StatusLineModel
+	if model != nil {
+		value := sanitizeStatusLineModel(*model)
+		if strings.TrimSpace(style.StatusLineDocument(value, 0).PlainText()) != "" {
+			normalized = cloneStatusLineModel(&value)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dynamicStatusModel = normalized
+	s.reflowPromptViewportLocked()
+	s.repaintStatusUpdateLocked()
+}
+
+// SetStatusModels updates the persistent footer and transient activity row in
+// one paint, avoiding a visible intermediate frame during state transitions.
+func (s *FixedBottomSurface) SetStatusModels(status style.StatusLineModel, dynamic *style.StatusLineModel) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	status = sanitizeStatusLineModel(status)
+	if strings.TrimSpace(style.StatusLineDocument(status, 0).PlainText()) == "" {
+		status = style.StatusLineModel{State: style.RunReady}
+	}
+	var normalizedDynamic *style.StatusLineModel
+	if dynamic != nil {
+		value := sanitizeStatusLineModel(*dynamic)
+		if strings.TrimSpace(style.StatusLineDocument(value, 0).PlainText()) != "" {
+			normalizedDynamic = cloneStatusLineModel(&value)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statusModel = cloneStatusLineModel(&status)
+	s.dynamicStatusModel = normalizedDynamic
+	s.reflowPromptViewportLocked()
+	s.repaintStatusUpdateLocked()
+}
+
 func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 	if !s.enabled {
 		return
@@ -1481,6 +1551,10 @@ func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
+		// Removing the dynamic status row grows the output region just like
+		// releasing ActiveBand. Flush only after its stale pixels are cleared,
+		// otherwise the newly moved transcript row can be erased again.
+		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -2063,7 +2137,7 @@ func (s *FixedBottomSurface) promptMaxVisibleRowsLocked() int {
 	bottom := s.promptBottomRowLocked()
 	outputBottom := s.outputBottomRowLocked()
 	state := s.bottomPaneStateLocked()
-	rows := bottom - outputBottom - state.promptNoticeVisibleRowCount() - state.activeBandVisibleRowCount()
+	rows := bottom - outputBottom - state.dynamicStatusVisibleRowCount() - state.promptNoticeVisibleRowCount() - state.activeBandVisibleRowCount()
 	if rows < 1 {
 		return 1
 	}
@@ -2145,7 +2219,7 @@ func (s *FixedBottomSurface) promptBottomRowLocked() int {
 	// prompt is hidden (streaming before the prompt returns). Anchoring the
 	// stack to the output bottom in that case would paint the band inside the
 	// scroll region and leave its reserved rows blank above the status line.
-	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 || state.activeBandVisibleRowCount() > 0 {
+	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 || state.dynamicStatusVisibleRowCount() > 0 || state.activeBandVisibleRowCount() > 0 {
 		row := s.statusRowLocked() - 1
 		if row < 1 {
 			return 1
@@ -2250,7 +2324,7 @@ func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
 			rows = maxRows
 		}
 	}
-	rows += state.promptNoticeVisibleRowCount()
+	rows += state.dynamicStatusVisibleRowCount() + state.promptNoticeVisibleRowCount()
 	startRow := bottom - rows + 1
 	if startRow < 1 {
 		startRow = 1
@@ -2271,8 +2345,9 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	}
 	rows := state.promptVisibleRowCount()
 	noticeRows := state.promptNoticeVisibleRowCount()
+	dynamicRows := state.dynamicStatusVisibleRowCount()
 	activeRows := state.activeBandVisibleRowCount()
-	if rows < 1 && noticeRows < 1 && activeRows < 1 {
+	if rows < 1 && noticeRows < 1 && dynamicRows < 1 && activeRows < 1 {
 		if s.promptRenderedRows > 0 {
 			s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 			s.promptRenderedStartRow = 0
@@ -2292,22 +2367,31 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if bottom < 1 {
 		return
 	}
-	// Layout bottom-up: [active band][notice][prompt][status]
+	// Layout bottom-up: [active band][notice][dynamic status][prompt][status].
+	// Keeping the transient activity adjacent to the composer makes the fixed
+	// footer stable while a turn progresses.
 	promptStart := bottom
 	if rows > 0 {
 		promptStart = bottom - rows + 1
 	}
-	noticeStart := promptStart
+	dynamicStart := promptStart
 	if rows > 0 {
-		noticeStart = promptStart - noticeRows
+		dynamicStart = promptStart - dynamicRows
 	} else {
+		dynamicStart = bottom - dynamicRows + 1
+	}
+	if dynamicRows < 1 {
+		dynamicStart = promptStart
+	}
+	noticeStart := dynamicStart - noticeRows
+	if dynamicRows < 1 && rows < 1 {
 		noticeStart = bottom - noticeRows + 1
 	}
 	if noticeRows < 1 {
-		noticeStart = promptStart
+		noticeStart = dynamicStart
 	}
 	activeStart := noticeStart - activeRows
-	if noticeRows < 1 && rows < 1 {
+	if noticeRows < 1 && dynamicRows < 1 && rows < 1 {
 		activeStart = bottom - activeRows + 1
 	}
 	if activeRows < 1 {
@@ -2317,7 +2401,7 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if start < 1 {
 		start = 1
 	}
-	areaRows := activeRows + noticeRows + rows
+	areaRows := activeRows + noticeRows + dynamicRows + rows
 	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != start || s.promptRenderedRows != areaRows) {
 		s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 	}
@@ -2375,6 +2459,11 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 				}), activeTheme))
 			}
 		}
+	}
+	if dynamicRows > 0 && state.DynamicStatusModel != nil {
+		s.terminal.MoveTo(dynamicStart, 1)
+		model := *state.DynamicStatusModel
+		fmt.Print(formatFixedStatusModelWithContext(model, s.terminal.Width(), activeTheme))
 	}
 	if rows > 0 {
 		s.terminal.MoveTo(promptStart, 1)
@@ -2445,6 +2534,7 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 
 type BottomPaneState struct {
 	StatusModel            *style.StatusLineModel
+	DynamicStatusModel     *style.StatusLineModel
 	PopupLines             []string
 	PopupOwner             string
 	PopupBelowPrompt       bool
@@ -2477,6 +2567,16 @@ func (s BottomPaneState) promptNoticeVisibleRowCount() int {
 	return len(s.promptNoticeLines())
 }
 
+func (s BottomPaneState) dynamicStatusVisibleRowCount() int {
+	if s.composerVisibleRowCount() > 0 || s.DynamicStatusModel == nil {
+		return 0
+	}
+	if strings.TrimSpace(style.StatusLineDocument(*s.DynamicStatusModel, 0).PlainText()) == "" {
+		return 0
+	}
+	return 1
+}
+
 func (s BottomPaneState) promptNoticeLines() []string {
 	lines := promptNoticeDisplayLines(s.PromptNoticeLine)
 	if status := strings.TrimSpace(s.PromptEditorStatusLine); status != "" {
@@ -2503,7 +2603,7 @@ func (s BottomPaneState) activeBandVisibleRowCount() int {
 }
 
 func (s BottomPaneState) promptAreaVisibleRowCount() int {
-	return s.activeBandVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVisibleRowCount()
+	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVisibleRowCount()
 }
 
 func (s BottomPaneState) popupExpandsBelowPrompt() bool {
@@ -2514,7 +2614,7 @@ func (s BottomPaneState) popupTopReservedRowCount() int {
 	if !s.popupExpandsBelowPrompt() {
 		return 0
 	}
-	rows := s.activeBandVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptReservedRowCount()
+	rows := s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptReservedRowCount()
 	if rows < 0 {
 		return 0
 	}
@@ -2565,7 +2665,7 @@ func (s BottomPaneState) extraPromptReservedRowCount() int {
 }
 
 func (s BottomPaneState) popupBottomGapRowCount() int {
-	return s.activeBandVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
+	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
 }
 
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
@@ -2807,6 +2907,7 @@ func promptNoticeDisplayLines(line string) []string {
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	state := BottomPaneState{
 		StatusModel:            cloneStatusLineModel(s.statusModel),
+		DynamicStatusModel:     cloneStatusLineModel(s.dynamicStatusModel),
 		PopupLines:             append([]string(nil), s.popupLines...),
 		PopupOwner:             s.popupOwner,
 		PopupBelowPrompt:       s.popupBelowPrompt,

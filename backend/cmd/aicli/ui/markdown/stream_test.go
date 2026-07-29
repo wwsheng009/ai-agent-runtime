@@ -27,6 +27,45 @@ func TestStreamCollectorHoldsOpenFence(t *testing.T) {
 	}
 }
 
+func TestStreamCollectorRequiresMatchingFenceMarkerAndLength(t *testing.T) {
+	var c StreamCollector
+	_ = c.Push("before\n````go\ncode\n")
+	if released := c.Push("```\n"); released != "" {
+		t.Fatalf("shorter closing fence released mutable code: %q", released)
+	}
+	if hold := c.Holdback(); !strings.Contains(hold, "````go") || !strings.Contains(hold, "```\n") {
+		t.Fatalf("mismatched fence was not retained: %q", hold)
+	}
+	if released := c.Push("````\n"); !strings.Contains(released, "code") {
+		t.Fatalf("matching fence did not release code: %q", released)
+	}
+	if hold := c.Holdback(); hold != "" {
+		t.Fatalf("matching fence left holdback: %q", hold)
+	}
+}
+
+func TestStreamCollectorDoesNotTreatIndentedFenceAsContainer(t *testing.T) {
+	var c StreamCollector
+	input := "    ```\nindented code text\n"
+	if stable := c.Push(input); stable != input {
+		t.Fatalf("four-space indented fence should follow indented-code parsing, stable=%q holdback=%q", stable, c.Holdback())
+	}
+}
+
+func TestStreamCollectorTracksFenceInsideBlockquote(t *testing.T) {
+	var c StreamCollector
+	_ = c.Push("before\n> ````go\n> code\n")
+	if released := c.Push("> ```\n"); released != "" {
+		t.Fatalf("short quoted fence released mutable code: %q", released)
+	}
+	if hold := c.Holdback(); !strings.Contains(hold, "> ````go") {
+		t.Fatalf("quoted open fence missing from holdback: %q", hold)
+	}
+	if released := c.Push("> ````\n"); !strings.Contains(released, "> code") {
+		t.Fatalf("matching quoted fence did not release code: %q", released)
+	}
+}
+
 func TestStreamCollectorHoldsPartialTable(t *testing.T) {
 	var c StreamCollector
 	_ = c.Push("before\n")
@@ -63,6 +102,30 @@ func TestStreamCollectorHoldsBorderlessTableUntilFollowingBlock(t *testing.T) {
 	}
 	if stable := c.Stable(); !strings.Contains(stable, "after\n") {
 		t.Fatalf("released stable content missing following block: %q", stable)
+	}
+}
+
+func TestStreamCollectorHoldsQuotedTable(t *testing.T) {
+	var c StreamCollector
+	_ = c.Push("before\n")
+	_ = c.Push("> Name | Value\n> --- | ---\n> one | 1\n")
+	if got := c.Stable(); got != "before\n" {
+		t.Fatalf("quoted table leaked into stable prefix: %q", got)
+	}
+	if hold := c.Holdback(); !strings.Contains(hold, "> Name | Value") || !strings.Contains(hold, "> one | 1") {
+		t.Fatalf("quoted table missing from holdback: %q", hold)
+	}
+}
+
+func TestTableSeparatorRequiresThreeDashesPerColumn(t *testing.T) {
+	if isTableSeparator("A | B") || isTableSeparator("-- | ---") || isTableSeparator("--- | :--:") {
+		t.Fatal("invalid delimiter row accepted")
+	}
+	if !isTableSeparator("--- | :---:") {
+		t.Fatal("valid borderless delimiter row rejected")
+	}
+	if isTableRowCandidate(`plain \| escaped`) {
+		t.Fatal("escaped pipe should not create a table candidate")
 	}
 }
 

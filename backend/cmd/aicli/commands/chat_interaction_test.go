@@ -2705,6 +2705,43 @@ func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *tes
 	}
 }
 
+func TestChatInteractionCoordinator_ActiveBandPromotesLongMarkdownList(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	captureSurfaceStdout(t, func() {
+		for i := 1; i <= 20; i++ {
+			coord.RenderAssistantDelta(fmt.Sprintf("- item %02d\n", i))
+		}
+	})
+
+	committed := output.String()
+	if !strings.Contains(committed, "item 01") || strings.Contains(committed, "item 20") {
+		t.Fatalf("expected older list items in scrollback and newest item in tail, got %q", committed)
+	}
+	band := strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(band, "item 20") {
+		t.Fatalf("newest list item missing from ActiveBand: %q", band)
+	}
+
+	captureSurfaceStdout(t, func() {
+		coord.FinalizeAssistantDelta()
+	})
+	rendered := output.String()
+	for i := 1; i <= 20; i++ {
+		want := fmt.Sprintf("item %02d", i)
+		if strings.Count(rendered, want) != 1 {
+			t.Fatalf("list item %q should render exactly once, got %q", want, rendered)
+		}
+	}
+}
+
 func TestChatInteractionCoordinator_ActiveBandSpinnerAdvancesWithoutDelta(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -2924,6 +2961,18 @@ func TestActiveStreamStableScrollbackCuts(t *testing.T) {
 	}
 	if got := plainStableScrollbackCut("very-long-line-without-newline", 0, 8, 3); got != 0 {
 		t.Fatalf("partial line must remain mutable, cut=%d", got)
+	}
+	listSource := "- one\n- two\n- three\n"
+	if got, want := markdownStableScrollbackCut(listSource, 0, len(listSource)), len("- one\n- two\n"); got != want {
+		t.Fatalf("list stable cut=%d want %d", got, want)
+	}
+	nestedList := "- parent\n  - child\n- next parent\n"
+	if got, want := markdownStableScrollbackCut(nestedList, 0, len(nestedList)), len("- parent\n  - child\n"); got != want {
+		t.Fatalf("nested list stable cut=%d want %d", got, want)
+	}
+	fencedSource := "````go\ncode\n```\nstill code\n````\nafter\n"
+	if got, want := markdownStableScrollbackCut(fencedSource, 0, len(fencedSource)), len("````go\ncode\n```\nstill code\n````\n"); got != want {
+		t.Fatalf("fenced stable cut=%d want %d", got, want)
 	}
 }
 

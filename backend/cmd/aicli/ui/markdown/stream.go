@@ -152,13 +152,12 @@ func stableMarkdownCut(src string) int {
 	if src == "" {
 		return 0
 	}
-	// Hold everything while an open fenced code block is unfinished.
-	if inOpenFence(src) {
-		// Commit content before the opening fence line.
-		if idx := lastOpenFenceStart(src); idx >= 0 {
-			return idx
-		}
-		return 0
+	// Hold everything while an open fenced code block is unfinished. The
+	// opening byte offset comes from the same stateful scan that validates the
+	// closing marker, so mismatched marker kinds or shorter runs cannot release
+	// mutable code into scrollback.
+	if openAt := openMarkdownFenceStart(src); openAt >= 0 {
+		return openAt
 	}
 	// Hold incomplete table (header without separator, or trailing partial row).
 	if cut, hold := tableHoldbackCut(src); hold {
@@ -183,41 +182,69 @@ func stableMarkdownCut(src string) int {
 	return len(src)
 }
 
-func inOpenFence(src string) bool {
-	lines := strings.Split(src, "\n")
-	open := false
-	for _, line := range lines {
-		trim := strings.TrimSpace(line)
-		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
-			open = !open
-		}
-	}
-	return open
-}
-
-func lastOpenFenceStart(src string) int {
-	lines := strings.Split(src, "\n")
-	offset := 0
+func openMarkdownFenceStart(src string) int {
 	openAt := -1
-	open := false
-	for _, line := range lines {
-		trim := strings.TrimSpace(line)
-		lineStart := offset
-		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
-			if !open {
-				openAt = lineStart
-				open = true
-			} else {
-				open = false
+	var openMarker byte
+	openLength := 0
+	for offset := 0; offset <= len(src); {
+		lineEnd := strings.IndexByte(src[offset:], '\n')
+		next := len(src) + 1
+		if lineEnd < 0 {
+			lineEnd = len(src)
+		} else {
+			lineEnd += offset
+			next = lineEnd + 1
+		}
+		line := strings.TrimSuffix(src[offset:lineEnd], "\r")
+		marker, runLength, rest, ok := markdownFenceRun(line)
+		if ok {
+			if openMarker == 0 {
+				// Backtick fence info strings cannot themselves contain a
+				// backtick. Treating such a line as an opener would diverge
+				// from Goldmark and hold ordinary prose indefinitely.
+				if marker != '`' || !strings.Contains(rest, "`") {
+					openAt = offset
+					openMarker = marker
+					openLength = runLength
+				}
+			} else if marker == openMarker && runLength >= openLength && strings.TrimSpace(rest) == "" {
 				openAt = -1
+				openMarker = 0
+				openLength = 0
 			}
 		}
-		offset += len(line) + 1 // +1 for \n; last line may overshoot — ok for start idx
-	}
-	if !open {
-		return -1
+		if next > len(src) {
+			break
+		}
+		offset = next
 	}
 	return openAt
+}
+
+func markdownFenceRun(line string) (marker byte, runLength int, rest string, ok bool) {
+	indent := 0
+	for indent < len(line) && line[indent] == ' ' {
+		indent++
+	}
+	if indent > 3 || indent >= len(line) {
+		return 0, 0, "", false
+	}
+	line = stripMarkdownBlockquotePrefix(line[indent:])
+	if line == "" {
+		return 0, 0, "", false
+	}
+	marker = line[0]
+	if marker != '`' && marker != '~' {
+		return 0, 0, "", false
+	}
+	end := 0
+	for end < len(line) && line[end] == marker {
+		end++
+	}
+	if end < 3 {
+		return 0, 0, "", false
+	}
+	return marker, end, line[end:], true
 }
 
 func tableHoldbackCut(src string) (cut int, hold bool) {
@@ -269,23 +296,67 @@ func tableHoldbackCut(src string) (cut int, hold bool) {
 }
 
 func isTableRowCandidate(line string) bool {
-	trim := strings.TrimSpace(line)
-	return trim != "" && strings.Contains(trim, "|")
+	segments, ok := markdownTableSegments(stripMarkdownBlockquotePrefix(line))
+	if !ok {
+		return false
+	}
+	for _, segment := range segments {
+		if strings.TrimSpace(segment) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func isTableSeparator(line string) bool {
-	line = strings.TrimSpace(line)
-	if !strings.Contains(line, "-") {
+	segments, ok := markdownTableSegments(stripMarkdownBlockquotePrefix(line))
+	if !ok || len(segments) == 0 {
 		return false
 	}
-	for _, r := range line {
-		switch r {
-		case '|', ':', '-', ' ', '\t':
-		default:
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		segment = strings.TrimPrefix(segment, ":")
+		segment = strings.TrimSuffix(segment, ":")
+		if len(segment) < 3 || strings.Trim(segment, "-") != "" {
 			return false
 		}
 	}
-	return strings.Contains(line, "-")
+	return true
+}
+
+func markdownTableSegments(line string) ([]string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, false
+	}
+	hasOuterPipe := strings.HasPrefix(line, "|") || strings.HasSuffix(line, "|")
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	segments := make([]string, 0, strings.Count(line, "|")+1)
+	start := 0
+	for index := 0; index < len(line); index++ {
+		if line[index] == '\\' {
+			index++
+			continue
+		}
+		if line[index] == '|' {
+			segments = append(segments, line[start:index])
+			start = index + 1
+		}
+	}
+	segments = append(segments, line[start:])
+	if !hasOuterPipe && len(segments) <= 1 {
+		return nil, false
+	}
+	return segments, true
+}
+
+func stripMarkdownBlockquotePrefix(line string) string {
+	rest := strings.TrimLeft(line, " \t")
+	for strings.HasPrefix(rest, ">") {
+		rest = strings.TrimLeft(strings.TrimPrefix(rest, ">"), " \t")
+	}
+	return rest
 }
 
 func partialLeadHoldback(src string) int {
