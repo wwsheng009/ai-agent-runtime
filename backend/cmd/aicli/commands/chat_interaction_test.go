@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -2679,6 +2680,75 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 	}
 }
 
+func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	coord.activeStream.Policy = motion.NewPolicy(motion.Config{
+		Forced:      motion.ForceMode(motion.ModeOff),
+		Interactive: true,
+	})
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(40, 24)
+	coord.SetSurface(surface)
+
+	coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
+	coord.RenderAssistantDelta("coalesced-final-row\n")
+	waitForActiveBandText(t, surface, "coalesced-final-row", time.Second)
+	if output.Len() != 0 {
+		t.Fatalf("delayed viewport paint must not write scrollback, got %q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_ActiveBandSpinnerAdvancesWithoutDelta(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	coord.activeStream.Policy = motion.NewPolicy(motion.Config{
+		Forced:      motion.ForceMode(motion.ModeFull),
+		Interactive: true,
+		Frames:      []string{"a", "b"},
+		Interval:    40 * time.Millisecond,
+	})
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(40, 24)
+	coord.SetSurface(surface)
+	coord.RenderAssistantDelta("spinner body that is long enough to stream\n")
+	initial := strings.Join(surface.ActiveBandLines(), "\n")
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		current := strings.Join(surface.ActiveBandLines(), "\n")
+		if current != "" && current != initial {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("active band activity marker did not advance without a new delta: %q", initial)
+}
+
+func TestChatInteractionCoordinator_FinalizeUsesActiveStreamSource(t *testing.T) {
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.RenderAssistantDelta("controller-owned final content\n")
+	coord.streamBuffer.Reset() // Simulate a missing duplicate coordinator snapshot.
+	coord.FinalizeAssistantDelta()
+	if !strings.Contains(output.String(), "controller-owned final content") {
+		t.Fatalf("finalize should consolidate the active stream source, got %q", output.String())
+	}
+	if coord.activeStream.Active() || len(surface.ActiveBandLines()) != 0 {
+		t.Fatal("finalize should release the active cell and clear its viewport")
+	}
+}
+
 func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -2726,6 +2796,33 @@ func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
 	}
 }
 
+func TestChatInteractionCoordinator_ToolFinishIsScopedByCallID(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coord.Shutdown)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.SetToolAgentStage("call-1", "shell compiling")
+	coord.SetToolAgentStage("call-2", "view reading")
+	coord.FinishToolAgentStage("call-1", "shell")
+	joined := strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(strings.ToLower(joined), "view") || strings.Contains(strings.ToLower(joined), "shell") {
+		t.Fatalf("late finish for old call cleared or replaced newer tool: %q", joined)
+	}
+	if coord.AgentStage() != chatAgentStageToolRunning {
+		t.Fatalf("newer tool should remain running, stage=%q", coord.AgentStage())
+	}
+
+	coord.FinishToolAgentStage("call-2", "view")
+	if len(surface.ActiveBandLines()) != 0 || coord.activeStream.IsToolActive() {
+		t.Fatalf("finishing last call should clear ActiveBand, got %v", surface.ActiveBandLines())
+	}
+	if coord.AgentStage() != chatAgentStagePlanning {
+		t.Fatalf("active run should return to planning after its last tool, stage=%q", coord.AgentStage())
+	}
+}
+
 func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -2759,6 +2856,7 @@ func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) 
 	if output.String() != "" {
 		t.Fatalf("progress update must not write scrollback, got %q", output.String())
 	}
+	waitForActiveBandText(t, surface, "45%", time.Second)
 	joined = strings.Join(surface.ActiveBandLines(), "\n")
 	if !strings.Contains(joined, "45%") {
 		t.Fatalf("expected updated progress in band, got %q", joined)
@@ -2779,6 +2877,21 @@ func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) 
 	coord.ClearAgentStage()
 	if len(surface.ActiveBandLines()) != 0 {
 		t.Fatalf("expected band cleared after idle, got %v", surface.ActiveBandLines())
+	}
+}
+
+func waitForActiveBandText(t *testing.T, surface *ui.FixedBottomSurface, expected string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		joined := strings.Join(surface.ActiveBandLines(), "\n")
+		if strings.Contains(joined, expected) {
+			return joined
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active band did not contain %q before timeout; got %q", expected, joined)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

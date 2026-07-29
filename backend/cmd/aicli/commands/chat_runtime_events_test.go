@@ -2904,6 +2904,7 @@ func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
 		Type:      runtimechat.EventToolStarted,
 		SessionID: runtimeSession.ID,
 		ToolName:  "execute_shell_command",
+		Payload:   map[string]interface{}{"tool_call_id": "call-1"},
 	})
 	require.Equal(t, chatAgentStageToolRunning, coord.AgentStage())
 	require.Equal(t, "execute_shell_command", coord.AgentStageDetail())
@@ -2913,12 +2914,22 @@ func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
 		SessionID: runtimeSession.ID,
 		ToolName:  "execute_shell_command",
 		Payload: map[string]interface{}{
-			"message": "compiling",
-			"percent": float64(60),
+			"tool_call_id": "call-1",
+			"message":      "compiling",
+			"percent":      float64(60),
 		},
 	})
 	require.Equal(t, chatAgentStageToolRunning, coord.AgentStage())
 	require.Equal(t, "execute_shell_command 60% compiling", coord.AgentStageDetail())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventToolFinished,
+		SessionID: runtimeSession.ID,
+		ToolName:  "execute_shell_command",
+		Payload:   map[string]interface{}{"tool_call_id": "call-1"},
+	})
+	require.Equal(t, chatAgentStagePlanning, coord.AgentStage())
+	require.Empty(t, coord.AgentStageDetail())
 
 	bridge.handleEvent(runtimeevents.Event{
 		Type:      runtimechat.EventLLMRequestStarted,

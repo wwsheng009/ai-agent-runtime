@@ -124,6 +124,19 @@ func TestActiveStreamControllerPaintLinesKeepsOpenFenceInMutedHoldback(t *testin
 	if !foundMutedHoldback {
 		t.Fatalf("expected open fence to remain a muted holdback span: %#v", lines)
 	}
+	fenceRow, codeRow := -1, -1
+	for i, line := range lines {
+		text := (render.PlainBackend{}).Render(render.LinesDoc(line))
+		if strings.Contains(text, "```go") {
+			fenceRow = i
+		}
+		if strings.Contains(text, "func pending") {
+			codeRow = i
+		}
+	}
+	if fenceRow < 0 || codeRow <= fenceRow {
+		t.Fatalf("open fence should preserve complete code rows instead of flattening them: %#v", lines)
+	}
 }
 
 func TestActiveStreamControllerBurstFillsViewportBeforeCoalescingTail(t *testing.T) {
@@ -245,6 +258,22 @@ func TestActiveStreamControllerCoalesceFPS(t *testing.T) {
 	if !ch3 && c.Active() {
 		// force should render
 		t.Log("force paint returned changed=false (identical buffer ok)")
+	}
+}
+
+func TestActiveStreamControllerReportsPendingFrameDeadline(t *testing.T) {
+	c := NewActiveStreamController(20, 2)
+	c.Scheduler = render.NewFrameScheduler(10)
+	c.Policy = motion.NewPolicy(motion.Config{Forced: motion.ForceMode(motion.ModeOff), Interactive: true})
+	c.BeginAssistant("")
+	c.PushAssistantDelta("first\nsecond\n", false)
+	start := time.Unix(100, 0)
+	_, _ = c.PaintLines(start, false)
+	c.PushAssistantDelta("final\n", false)
+	_, _ = c.PaintLines(start.Add(25*time.Millisecond), false)
+	delay, needed := c.NextFrameDelay(start.Add(25 * time.Millisecond))
+	if !needed || delay != 75*time.Millisecond {
+		t.Fatalf("NextFrameDelay=(%s,%t), want (75ms,true)", delay, needed)
 	}
 }
 

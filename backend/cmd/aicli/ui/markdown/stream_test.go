@@ -38,9 +38,31 @@ func TestStreamCollectorHoldsPartialTable(t *testing.T) {
 		t.Fatalf("newly stable partial: %q", n)
 	}
 	n2 := c.Push(" 2 |\n")
+	if strings.Contains(c.Stable(), "| A | B |") {
+		t.Fatalf("recognized table should remain mutable until a following block: %q", c.Stable())
+	}
 	all := c.Stable() + c.Holdback()
 	if !strings.Contains(all, "| 1 | 2 |") {
 		t.Fatalf("raw missing row: stable=%q hold=%q n2=%q", c.Stable(), c.Holdback(), n2)
+	}
+}
+
+func TestStreamCollectorHoldsBorderlessTableUntilFollowingBlock(t *testing.T) {
+	var c StreamCollector
+	_ = c.Push("before\n")
+	_ = c.Push("Name | Value\n--- | ---\none | 1\ntwo | 2\n")
+	if got := c.Stable(); got != "before\n" {
+		t.Fatalf("stable=%q, want only the prefix before the mutable table", got)
+	}
+	if hold := c.Holdback(); !strings.Contains(hold, "Name | Value") || !strings.Contains(hold, "two | 2") {
+		t.Fatalf("borderless table missing from holdback: %q", hold)
+	}
+	_ = c.Push("\nafter\n")
+	if hold := c.Holdback(); hold != "" {
+		t.Fatalf("blank line should close and release table, holdback=%q", hold)
+	}
+	if stable := c.Stable(); !strings.Contains(stable, "after\n") {
+		t.Fatalf("released stable content missing following block: %q", stable)
 	}
 }
 
