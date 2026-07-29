@@ -67,6 +67,26 @@ func TestDetectEnvironmentCapabilities_UsesInjectedProbe(t *testing.T) {
 	}
 }
 
+func TestBuildEnvironmentPathIndexHonorsBrokenExplicitRipgrepOverride(t *testing.T) {
+	pathDir := t.TempDir()
+	for _, name := range []string{"rg", "rg.exe"} {
+		if err := os.WriteFile(filepath.Join(pathDir, name), []byte("stub"), 0o755); err != nil {
+			t.Fatalf("write PATH candidate: %v", err)
+		}
+	}
+	t.Setenv("PATH", pathDir)
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("AICLI_RG_PATH", filepath.Join(t.TempDir(), "missing-rg"))
+
+	index := buildEnvironmentPathIndex()
+	if path := index[normalizeEnvironmentCommandKey("rg")]; path != "" {
+		t.Fatalf("broken explicit rg override must block PATH fallback, got %q", path)
+	}
+	if path := index[normalizeEnvironmentCommandKey("rg.exe")]; path != "" {
+		t.Fatalf("broken explicit rg override must block PATH alias fallback, got %q", path)
+	}
+}
+
 func TestDetectEnvironmentCapabilities_SkipsWindowsStoreStubAndBrokenHealth(t *testing.T) {
 	t.Cleanup(func() {
 		SetEnvironmentCommandProbe(nil)

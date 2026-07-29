@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -72,7 +72,7 @@ func NewGlobTool() *GlobTool {
 			true,
 		),
 		limit:      defaultGlobLimit,
-		lookPath:   exec.LookPath,
+		lookPath:   runtimeripgrep.LookPath,
 		runCommand: runGrepCommand,
 	}
 }
@@ -196,6 +196,18 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		"limit_hit":        truncated,
 		"engine":           engine,
 	}
+	backendCommand := "builtin-walker"
+	backendPath := ""
+	if engine == "rg" {
+		backendCommand = "rg --files"
+		if g != nil && g.lookPath != nil {
+			resolved, resolveErr := g.lookPath("rg")
+			if resolveErr == nil {
+				backendPath = resolved
+			}
+		}
+	}
+	annotateSearchBackend(metadata, engine, backendCommand, backendPath)
 	if braceExpanded {
 		metadata["brace_expanded"] = true
 		metadata["expanded_patterns"] = append([]string(nil), expandedPatterns...)

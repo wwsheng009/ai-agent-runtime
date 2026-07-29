@@ -84,6 +84,14 @@ mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/$BIN" "$INSTALL_DIR/$BIN"
 info "已安装 $BIN -> $INSTALL_DIR/$BIN"
 
+if [ -f "$tmp/codex-path/rg" ]; then
+  mkdir -p "$INSTALL_DIR/codex-path"
+  install -m 0755 "$tmp/codex-path/rg" "$INSTALL_DIR/codex-path/rg"
+  info "已安装 bundled ripgrep -> $INSTALL_DIR/codex-path/rg"
+else
+  warn "归档中未包含 codex-path/rg；搜索将回退到 PATH 或 builtin 引擎"
+fi
+
 # ---- PATH 提示 ----
 case ":${PATH:-}:" in
   *":$INSTALL_DIR:"*) ;;

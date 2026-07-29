@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -643,7 +644,7 @@ func NewGrepTool() *GrepTool {
 			true,
 		),
 		maxMatches: 100,
-		lookPath:   exec.LookPath,
+		lookPath:   runtimeripgrep.LookPath,
 		runCommand: runGrepCommand,
 	}
 }
@@ -3392,9 +3393,9 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 	}
 
 	if totalMatchCount == 0 && len(allLines) == 0 {
-		return buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg"), true, nil
+		return buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg", rgPath), true, nil
 	}
-	return buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg"), true, nil
+	return buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath), true, nil
 }
 
 func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) []string {
@@ -5379,6 +5380,7 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		"truncated":                        truncated,
 		"engine":                           engine,
 	}
+	annotateSearchBackend(metadata, engine, "builtin-walker", "")
 	if stats != nil {
 		metadata["stats"] = stats.metadataMap()
 	}
@@ -5401,9 +5403,9 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 }
 
-func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats, engine string) *toolkit.ToolResult {
+func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats, engine, binaryPath string) *toolkit.ToolResult {
 	result := buildGrepResult(opts, results, matchCount, truncated, stats)
-	result.Metadata["engine"] = engine
+	annotateSearchBackend(result.Metadata, engine, "rg", binaryPath)
 	return result
 }
 

@@ -103,6 +103,17 @@ try {
   }
   Info "已安装 $BinName.exe -> $dstExe"
 
+  $srcRg = Join-Path $tmp 'codex-path\rg.exe'
+  if (Test-Path -LiteralPath $srcRg) {
+    $dstRgDir = Join-Path $InstallDir 'codex-path'
+    New-Item -ItemType Directory -Path $dstRgDir -Force | Out-Null
+    $dstRg = Join-Path $dstRgDir 'rg.exe'
+    Copy-Item -LiteralPath $srcRg -Destination $dstRg -Force
+    Info "已安装 bundled ripgrep -> $dstRg"
+  } else {
+    Warn '归档中未包含 codex-path\rg.exe；搜索将回退到 PATH 或 builtin 引擎'
+  }
+
   # ---- 追加到用户 PATH ----
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   $parts = @()

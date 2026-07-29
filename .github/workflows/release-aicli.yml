@@ -27,6 +27,7 @@ env:
   NODE_VERSION: '24'
   PNPM_VERSION: '10.27.0'
   PLAYWRIGHT_CLI_VERSION: '0.1.17'
+  RIPGREP_VERSION: '15.2.0'
   CMD_PATH: ./cmd/aicli
   BIN_NAME: aicli
   WORKDIR: backend
@@ -271,6 +272,16 @@ jobs:
           go build -trimpath -ldflags "${LDFLAGS}" -o "${OUTDIR}/${ARTIFACT}" ${CMD_PATH}
           ls -lh "${OUTDIR}/${ARTIFACT}"
 
+      - name: Bundle verified ripgrep
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-ripgrep-release.sh \
+            "${RIPGREP_VERSION}" \
+            "${{ matrix.goos }}" \
+            "${{ matrix.goarch }}" \
+            "dist/rg"
+
       - name: Package artifact
         id: pkg
         shell: bash
@@ -283,15 +294,16 @@ jobs:
           if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
           BIN="${BIN_NAME}-${GOOS}-${GOARCH}${EXT}"
           BASENAME="${BIN_NAME}-${VERSION}-${GOOS}-${GOARCH}"
-          mkdir -p dist/release
+          mkdir -p dist/release/codex-path
           cp "dist/${BIN}" "dist/release/${BIN_NAME}${EXT}"
+          cp "dist/rg/rg${EXT}" "dist/release/codex-path/rg${EXT}"
           # 复制可选的 README / LICENSE（如果存在）
           [ -f README.md ] && cp README.md dist/release/ || true
           [ -f LICENSE ] && cp LICENSE dist/release/ || true
           cd dist/release
           if [[ "${GOOS}" == "windows" ]]; then
             ARCHIVE="../${BASENAME}.zip"
-            zip -9 "${ARCHIVE}" ./*
+            zip -9 -r "${ARCHIVE}" ./*
           else
             ARCHIVE="../${BASENAME}.tar.gz"
             tar -czf "${ARCHIVE}" ./*

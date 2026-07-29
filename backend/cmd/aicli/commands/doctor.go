@@ -96,10 +96,12 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
 
 子命令：
   doctor provider        对指定 provider 执行可复现调用矩阵
+  doctor search          诊断 grep/glob 的 rg 后端与 builtin 回退
   doctor subagent-route  预览子 Agent / Team 难度路由（不调用模型）
 
 典型用法：
   aicli doctor provider
+  aicli doctor search --json
   aicli doctor provider --provider openai --model gpt-4.1 --json
   aicli doctor subagent-route --difficulty hard --goal "review auth changes" --json
 
@@ -152,6 +154,7 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
 	providerCmd.Flags().Bool("include-yolo", true, "包含 exec --yolo 用例，用于观察工具调用链")
 	providerCmd.Flags().Bool("include-tool-chat", true, "包含 chat 暴露 tools/skills 的用例")
 	cmd.AddCommand(providerCmd)
+	cmd.AddCommand(newDoctorSearchCommand())
 	cmd.AddCommand(newDoctorSubagentRouteCommand(getCfg))
 	return cmd
 }

@@ -237,6 +237,12 @@ func TestGrepTool_PrefersRipgrepWhenAvailable(t *testing.T) {
 	if result.Metadata["engine"] != "rg" {
 		t.Fatalf("expected engine=rg, got %#v", result.Metadata["engine"])
 	}
+	if result.Metadata["execution_backend"] != "rg" || result.Metadata["backend_command"] != "rg" {
+		t.Fatalf("expected observable rg backend metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata["backend_path"] != "rg" {
+		t.Fatalf("expected backend path metadata, got %#v", result.Metadata["backend_path"])
+	}
 	if result.Content != "main.go:3: func main() {}" {
 		t.Fatalf("unexpected content: %q", result.Content)
 	}

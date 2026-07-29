@@ -134,6 +134,23 @@ iwr -useb https://raw.githubusercontent.com/wwsheng009/ai-agent-runtime/main/scr
 
 脚本会自动识别 `amd64` / `arm64` 架构，并校验 `sha256`。
 
+Release 归档同时包含经过 SHA-256 校验的固定版本 ripgrep，安装在 `codex-path/rg`（Windows 为 `codex-path/rg.exe`）。结构化 `grep` / `glob` 按以下顺序解析搜索后端：
+
+1. `AICLI_RG_PATH` 指定的可执行文件。
+2. `aicli` 同目录下的 `codex-path/rg`。
+3. `aicli` 相邻目录或 `resources/rg`。
+4. 系统 `PATH` 中的 `rg`。
+5. toolkit 内置扫描器。
+
+可通过以下命令检查实际使用的路径、来源、版本和回退状态：
+
+```bash
+aicli doctor search
+aicli doctor search --json
+```
+
+源码编译和 `go install` 不会自动下载额外二进制；它们默认使用系统 `PATH` 中的 `rg`，找不到时回退 builtin。需要固定自定义路径时设置 `AICLI_RG_PATH`。
+
 ### 方式 2：源码编译安装
 
 ```bash

@@ -388,6 +388,12 @@ func TestGlobTool_UsesRipgrepFilesWhenAvailable(t *testing.T) {
 	if engine := result.Metadata["engine"]; engine != "rg" {
 		t.Fatalf("expected rg engine metadata, got %#v", engine)
 	}
+	if result.Metadata["execution_backend"] != "rg" || result.Metadata["backend_command"] != "rg --files" {
+		t.Fatalf("expected observable rg backend metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata["backend_path"] != "rg" {
+		t.Fatalf("expected backend path metadata, got %#v", result.Metadata["backend_path"])
+	}
 	if truncated, ok := result.Metadata["truncated"].(bool); !ok || !truncated {
 		t.Fatalf("expected rg result to be truncated, got %#v", result.Metadata["truncated"])
 	}

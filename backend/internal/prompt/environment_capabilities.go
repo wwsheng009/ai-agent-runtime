@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 )
 
 // EnvironmentCommandProbe is the pluggable PATH lookup used by capability
@@ -47,7 +49,7 @@ type EnvironmentCapabilityReport struct {
 
 // Bump when probe semantics change so durable snapshots from older builds are
 // discarded instead of reusing PATH-only vs process-health mismatches.
-const environmentCapabilityCacheVersion = 5
+const environmentCapabilityCacheVersion = 6
 
 var (
 	environmentProbeMu      sync.Mutex
@@ -410,6 +412,15 @@ func buildEnvironmentPathIndex() map[string]string {
 	}
 
 	index := make(map[string]string, len(wanted))
+	blockPathRipgrep := false
+	if resolution, err := runtimeripgrep.Resolve(); err == nil {
+		index[normalizeEnvironmentCommandKey("rg")] = resolution.Path
+		index[normalizeEnvironmentCommandKey("rg.exe")] = resolution.Path
+	} else if strings.TrimSpace(os.Getenv(runtimeripgrep.EnvironmentPath)) != "" {
+		// An explicit but broken override must not silently disagree with the
+		// grep/glob resolver by advertising a different PATH executable.
+		blockPathRipgrep = true
+	}
 	pathEnv := os.Getenv("PATH")
 	if strings.TrimSpace(pathEnv) == "" {
 		return index
@@ -447,6 +458,9 @@ func buildEnvironmentPathIndex() map[string]string {
 			}
 			full := filepath.Join(dir, base)
 			for _, key := range keys {
+				if blockPathRipgrep && (key == normalizeEnvironmentCommandKey("rg") || key == normalizeEnvironmentCommandKey("rg.exe")) {
+					continue
+				}
 				if _, exists := index[key]; exists {
 					continue
 				}
@@ -754,6 +768,7 @@ func environmentCapabilityFingerprint() string {
 		"arch=" + runtime.GOARCH,
 		"path=" + os.Getenv("PATH"),
 		"path_ext=" + os.Getenv("PATHEXT"),
+		"aicli_rg_path=" + os.Getenv(runtimeripgrep.EnvironmentPath),
 		"catalog=" + strings.Join(names, ","),
 	}, "\n")
 	sum := sha256.Sum256([]byte(payload))
