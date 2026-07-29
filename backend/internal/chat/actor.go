@@ -2596,7 +2596,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	}
 	pending := *state.PendingTool
 	if len(patchedArgs) > 0 {
-		pending.ArgsJSON = append(json.RawMessage(nil), patchedArgs...)
+		applyPendingToolPatchedArgs(&pending, patchedArgs)
 	}
 	if !sessionHasToolCall(session, pending.ToolCallID) {
 		if err := a.recordPendingToolCall(ctx, &pending); err != nil {
@@ -2644,7 +2644,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 			return fmt.Errorf("pending tool changed while resuming")
 		}
 		if len(patchedArgs) > 0 {
-			runtimeState.PendingTool.ArgsJSON = append(json.RawMessage(nil), patchedArgs...)
+			applyPendingToolPatchedArgs(runtimeState.PendingTool, patchedArgs)
 		}
 		runtimeState.PendingTool.ExecutionState = PendingToolExecutionStarted
 		runtimeState.PendingTool.ExecutionStartedAt = time.Now().UTC()
@@ -2656,9 +2656,11 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	runMeta := state.CurrentRunMeta.Clone()
 	runCtx := team.WithRunMeta(ctx, runMeta)
 	message, err := a.agent.ExecuteApprovedToolCall(runCtx, a.id, runtimetypes.ToolCall{
-		ID:   pending.ToolCallID,
-		Name: pending.ToolName,
-		Args: decodePendingToolArgs(pending.ArgsJSON),
+		ID:       pending.ToolCallID,
+		Type:     pending.ToolType,
+		Name:     pending.ToolName,
+		Args:     decodePendingToolArgs(pending.ArgsJSON),
+		RawInput: pending.RawInput,
 	}, session.GetMessages())
 	if err != nil {
 		return err
@@ -3273,6 +3275,13 @@ func newPendingToolInvocation(ctx context.Context, toolCallID, toolName string, 
 		pending.ArgsJSON = append(json.RawMessage(nil), argsJSON...)
 	}
 	pending.BatchToolCalls = pendingToolCallsFromContext(ctx, pending.ToolCallID, pending.ToolName, pending.ArgsJSON)
+	for _, call := range pending.BatchToolCalls {
+		if call.ToolCallID == pending.ToolCallID {
+			pending.ToolType = call.ToolType
+			pending.RawInput = call.RawInput
+			break
+		}
+	}
 	return pending, nil
 }
 
@@ -3330,6 +3339,11 @@ func pendingToolCallsFromContext(ctx context.Context, toolCallID, toolName strin
 		ToolName:   strings.TrimSpace(toolName),
 		ArgsJSON:   append(json.RawMessage(nil), argsJSON...),
 	}
+	currentIndex := len(batchCtx.CompletedToolMessages)
+	if currentIndex >= 0 && currentIndex < len(batchCtx.ToolCalls) {
+		current.ToolType = batchCtx.ToolCalls[currentIndex].Type
+		current.RawInput = batchCtx.ToolCalls[currentIndex].RawInput
+	}
 	if current.ToolCallID == "" {
 		return calls
 	}
@@ -3339,7 +3353,6 @@ func pendingToolCallsFromContext(ctx context.Context, toolCallID, toolName strin
 		}
 	}
 
-	currentIndex := len(batchCtx.CompletedToolMessages)
 	if currentIndex >= 0 && currentIndex < len(calls) {
 		calls[currentIndex] = current
 		return calls
@@ -3364,8 +3377,10 @@ func normalizedPendingToolCalls(toolCalls []runtimetypes.ToolCall) []PendingTool
 		}
 		calls = append(calls, PendingToolCall{
 			ToolCallID: callID,
+			ToolType:   call.Type,
 			ToolName:   strings.TrimSpace(call.Name),
 			ArgsJSON:   append(json.RawMessage(nil), payload...),
+			RawInput:   call.RawInput,
 		})
 	}
 	return calls
@@ -3420,9 +3435,11 @@ func pendingRuntimeToolCalls(session *Session, pending *PendingToolInvocation) [
 			return batch
 		}
 		return []runtimetypes.ToolCall{{
-			ID:   pending.ToolCallID,
-			Name: pending.ToolName,
-			Args: decodePendingToolArgs(pending.ArgsJSON),
+			ID:       pending.ToolCallID,
+			Type:     pending.ToolType,
+			Name:     pending.ToolName,
+			Args:     decodePendingToolArgs(pending.ArgsJSON),
+			RawInput: pending.RawInput,
 		}}
 	}
 	calls := make([]runtimetypes.ToolCall, 0, len(pending.BatchToolCalls))
@@ -3432,9 +3449,11 @@ func pendingRuntimeToolCalls(session *Session, pending *PendingToolInvocation) [
 			continue
 		}
 		calls = append(calls, runtimetypes.ToolCall{
-			ID:   callID,
-			Name: strings.TrimSpace(call.ToolName),
-			Args: decodePendingToolArgs(call.ArgsJSON),
+			ID:       callID,
+			Type:     call.ToolType,
+			Name:     strings.TrimSpace(call.ToolName),
+			Args:     decodePendingToolArgs(call.ArgsJSON),
+			RawInput: call.RawInput,
 		})
 	}
 	return calls
@@ -3455,8 +3474,10 @@ func sessionToolCallsForPending(session *Session, toolCallID string) []runtimety
 	calls := make([]runtimetypes.ToolCall, len(message.ToolCalls))
 	for i := range message.ToolCalls {
 		calls[i] = runtimetypes.ToolCall{
-			ID:   message.ToolCalls[i].ID,
-			Name: message.ToolCalls[i].Name,
+			ID:       message.ToolCalls[i].ID,
+			Type:     message.ToolCalls[i].Type,
+			Name:     message.ToolCalls[i].Name,
+			RawInput: message.ToolCalls[i].RawInput,
 		}
 		if len(message.ToolCalls[i].Args) > 0 {
 			calls[i].Args = make(map[string]interface{}, len(message.ToolCalls[i].Args))
@@ -3505,6 +3526,48 @@ func decodePendingToolArgs(argsJSON json.RawMessage) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return decoded
+}
+
+func applyPendingToolPatchedArgs(pending *PendingToolInvocation, argsJSON json.RawMessage) {
+	if pending == nil || len(argsJSON) == 0 {
+		return
+	}
+	pending.ArgsJSON = append(json.RawMessage(nil), argsJSON...)
+	if strings.EqualFold(strings.TrimSpace(pending.ToolType), "custom_tool_call") {
+		pending.RawInput = pendingFreeformInput(argsJSON, pending.RawInput)
+	}
+	for index := range pending.BatchToolCalls {
+		call := &pending.BatchToolCalls[index]
+		if strings.TrimSpace(call.ToolCallID) != strings.TrimSpace(pending.ToolCallID) {
+			continue
+		}
+		call.ArgsJSON = append(json.RawMessage(nil), argsJSON...)
+		call.ToolType = pending.ToolType
+		call.RawInput = pending.RawInput
+		break
+	}
+}
+
+func pendingFreeformInput(argsJSON json.RawMessage, fallback string) string {
+	args := decodePendingToolArgs(argsJSON)
+	if raw, ok := args["_raw"].(string); ok {
+		return raw
+	}
+	value := ""
+	for key, raw := range args {
+		if strings.HasPrefix(strings.TrimSpace(key), "_") {
+			continue
+		}
+		text, ok := raw.(string)
+		if !ok || value != "" {
+			return fallback
+		}
+		value = text
+	}
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func encodePendingToolResultMessage(message *runtimetypes.Message) (json.RawMessage, error) {

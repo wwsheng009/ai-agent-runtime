@@ -3506,9 +3506,11 @@ func promptMessageFingerprint(messages []types.Message) string {
 		return ""
 	}
 	type fingerprintToolCall struct {
-		ID   string                 `json:"id,omitempty"`
-		Name string                 `json:"name,omitempty"`
-		Args map[string]interface{} `json:"arguments,omitempty"`
+		ID       string                 `json:"id,omitempty"`
+		Type     string                 `json:"type,omitempty"`
+		Name     string                 `json:"name,omitempty"`
+		Args     map[string]interface{} `json:"arguments,omitempty"`
+		RawInput string                 `json:"input,omitempty"`
 	}
 	type fingerprintMessage struct {
 		Role         string                `json:"role,omitempty"`
@@ -3529,9 +3531,11 @@ func promptMessageFingerprint(messages []types.Message) string {
 			item.ToolCalls = make([]fingerprintToolCall, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
 				item.ToolCalls = append(item.ToolCalls, fingerprintToolCall{
-					ID:   call.ID,
-					Name: call.Name,
-					Args: call.Args,
+					ID:       call.ID,
+					Type:     call.Type,
+					Name:     call.Name,
+					Args:     call.Args,
+					RawInput: call.RawInput,
 				})
 			}
 		}

@@ -472,9 +472,11 @@ func cloneMessage(message *types.Message) *types.Message {
 		cloned.ToolCalls = make([]types.ToolCall, len(message.ToolCalls))
 		for index, call := range message.ToolCalls {
 			cloned.ToolCalls[index] = types.ToolCall{
-				ID:   call.ID,
-				Name: call.Name,
-				Args: cloneInterfaceMap(call.Args),
+				ID:       call.ID,
+				Type:     call.Type,
+				Name:     call.Name,
+				Args:     cloneInterfaceMap(call.Args),
+				RawInput: call.RawInput,
 			}
 		}
 	}

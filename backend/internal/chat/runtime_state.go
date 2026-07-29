@@ -13,8 +13,10 @@ import (
 // PendingToolInvocation captures the tool call that is currently paused.
 type PendingToolInvocation struct {
 	ToolCallID           string            `json:"tool_call_id"`
+	ToolType             string            `json:"tool_type,omitempty"`
 	ToolName             string            `json:"tool_name"`
 	ArgsJSON             json.RawMessage   `json:"args_json,omitempty"`
+	RawInput             string            `json:"raw_input,omitempty"`
 	BatchToolCalls       []PendingToolCall `json:"batch_tool_calls,omitempty"`
 	ExecutionState       string            `json:"execution_state,omitempty"`
 	ExecutionStartedAt   time.Time         `json:"execution_started_at,omitempty"`
@@ -26,8 +28,10 @@ type PendingToolInvocation struct {
 // PendingToolCall captures one tool call within the paused assistant turn batch.
 type PendingToolCall struct {
 	ToolCallID string          `json:"tool_call_id"`
+	ToolType   string          `json:"tool_type,omitempty"`
 	ToolName   string          `json:"tool_name"`
 	ArgsJSON   json.RawMessage `json:"args_json,omitempty"`
+	RawInput   string          `json:"raw_input,omitempty"`
 }
 
 const (
@@ -206,8 +210,10 @@ func clonePendingToolInvocation(pending *PendingToolInvocation, includeResult bo
 		for index, call := range pending.BatchToolCalls {
 			cloned.BatchToolCalls[index] = PendingToolCall{
 				ToolCallID: call.ToolCallID,
+				ToolType:   call.ToolType,
 				ToolName:   call.ToolName,
 				ArgsJSON:   append(json.RawMessage(nil), call.ArgsJSON...),
+				RawInput:   call.RawInput,
 			}
 		}
 	}

@@ -29,9 +29,11 @@ func WithToolBatchContext(ctx context.Context, toolCalls []types.ToolCall, curre
 		payload.ToolCalls = make([]types.ToolCall, len(toolCalls))
 		for index := range toolCalls {
 			payload.ToolCalls[index] = types.ToolCall{
-				ID:   toolCalls[index].ID,
-				Name: toolCalls[index].Name,
-				Args: cloneInterfaceMap(toolCalls[index].Args),
+				ID:       toolCalls[index].ID,
+				Type:     toolCalls[index].Type,
+				Name:     toolCalls[index].Name,
+				Args:     cloneInterfaceMap(toolCalls[index].Args),
+				RawInput: toolCalls[index].RawInput,
 			}
 		}
 	}
@@ -60,9 +62,11 @@ func ToolBatchContextFromContext(ctx context.Context) (ToolBatchContext, bool) {
 		cloned.ToolCalls = make([]types.ToolCall, len(payload.ToolCalls))
 		for index := range payload.ToolCalls {
 			cloned.ToolCalls[index] = types.ToolCall{
-				ID:   payload.ToolCalls[index].ID,
-				Name: payload.ToolCalls[index].Name,
-				Args: cloneInterfaceMap(payload.ToolCalls[index].Args),
+				ID:       payload.ToolCalls[index].ID,
+				Type:     payload.ToolCalls[index].Type,
+				Name:     payload.ToolCalls[index].Name,
+				Args:     cloneInterfaceMap(payload.ToolCalls[index].Args),
+				RawInput: payload.ToolCalls[index].RawInput,
 			}
 		}
 	}

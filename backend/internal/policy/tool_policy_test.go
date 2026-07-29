@@ -71,8 +71,10 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *te
 		t.Fatalf("expected runtime search meta-tool to remain executable, got %v", err)
 	}
 	policy.DeniedTools = map[string]bool{"search_tool": true}
-	if err := policy.AllowTool("search_tool"); err == nil {
-		t.Fatal("expected explicit deny to override runtime search allowance")
+	for _, name := range []string{"search_tool", "Search_Tool"} {
+		if err := policy.AllowTool(name); err == nil {
+			t.Fatalf("expected explicit deny to override runtime search allowance for %q", name)
+		}
 	}
 }
 
