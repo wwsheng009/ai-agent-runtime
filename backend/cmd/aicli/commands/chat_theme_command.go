@@ -2,6 +2,8 @@ package commands
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -25,6 +27,7 @@ type themeCommandRequest struct {
 	Action  themeCommandAction
 	Palette string
 	Mode    string
+	Syntax  string
 }
 
 func parseThemeCommandRequest(command string) (themeCommandRequest, error) {
@@ -37,7 +40,7 @@ func parseThemeCommandRequest(command string) (themeCommandRequest, error) {
 	if len(fields) == 0 {
 		return themeCommandRequest{Action: themeCommandSelect}, nil
 	}
-	if len(fields) > 2 {
+	if len(fields) > 3 {
 		return themeCommandRequest{}, fmt.Errorf("无法识别的 /theme 参数: %s", arg)
 	}
 
@@ -54,6 +57,18 @@ func parseThemeCommandRequest(command string) (themeCommandRequest, error) {
 		case "select", "pick", "choose":
 			return themeCommandRequest{Action: themeCommandSelect}, nil
 		}
+	}
+
+	// /theme syntax <name>
+	if len(fields) >= 1 && strings.EqualFold(fields[0], "syntax") {
+		if len(fields) == 1 {
+			return themeCommandRequest{Action: themeCommandStatus}, nil
+		}
+		syntax := ui.NormalizeSyntaxThemeName(fields[1])
+		if syntax == "" {
+			return themeCommandRequest{}, fmt.Errorf("未知语法主题: %s", fields[1])
+		}
+		return themeCommandRequest{Action: themeCommandSet, Syntax: syntax}, nil
 	}
 
 	req := themeCommandRequest{Action: themeCommandSet}
@@ -76,17 +91,37 @@ func parseThemeCommandRequest(command string) (themeCommandRequest, error) {
 			req.Palette = palette
 			continue
 		}
+		if syntax := ui.NormalizeSyntaxThemeName(token); syntax != "" && !isThemeModeToken(token) {
+			// Only accept curated names as bare tokens to avoid accidental matches.
+			if isCuratedSyntaxToken(token) {
+				if req.Syntax != "" {
+					return themeCommandRequest{}, fmt.Errorf("重复的语法主题参数: %s", arg)
+				}
+				req.Syntax = syntax
+				continue
+			}
+		}
 		return themeCommandRequest{}, fmt.Errorf(
-			"未知主题参数: %s（明暗: %s；配色: %s）",
+			"未知主题参数: %s（明暗: %s；配色: %s；语法: /theme syntax <name>）",
 			token,
 			strings.Join(ui.SupportedThemeModeNames(), "|"),
 			strings.Join(ui.SupportedThemePresetNames(), "|"),
 		)
 	}
-	if req.Palette == "" && req.Mode == "" {
+	if req.Palette == "" && req.Mode == "" && req.Syntax == "" {
 		return themeCommandRequest{}, fmt.Errorf("无法识别的 /theme 参数: %s", arg)
 	}
 	return req, nil
+}
+
+func isCuratedSyntaxToken(raw string) bool {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	for _, n := range ui.CuratedSyntaxThemeNames() {
+		if strings.EqualFold(n, raw) {
+			return true
+		}
+	}
+	return false
 }
 
 // isThemeModeToken returns true when the raw token is intentionally a mode word
@@ -128,22 +163,22 @@ func handleThemeCommand(session *ChatSession, command string, noInteractive bool
 			printThemeCommandStatus(session)
 			return false
 		}
-		palette, mode, err := selectThemeWithReader(session, bufio.NewReader(os.Stdin))
+		palette, mode, syntax, cancelled, err := selectThemeInteractive(session)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
-		if palette == "" && mode == "" {
+		if cancelled {
 			fmt.Println("已取消，主题未变更")
 			return false
 		}
-		if err := applyThemeCommandSelection(session, palette, mode); err != nil {
+		if err := applyThemeCommandSelection(session, palette, mode, syntax); err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
 		printThemeCommandStatus(session)
 	case themeCommandSet:
-		if err := applyThemeCommandSelection(session, req.Palette, req.Mode); err != nil {
+		if err := applyThemeCommandSelection(session, req.Palette, req.Mode, req.Syntax); err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
@@ -152,39 +187,50 @@ func handleThemeCommand(session *ChatSession, command string, noInteractive bool
 	return false
 }
 
-func applyThemeCommandSelection(session *ChatSession, palette string, mode string) error {
+func applyThemeCommandSelection(session *ChatSession, palette string, mode string, syntax string) error {
 	if session == nil {
 		return fmt.Errorf("当前没有活动会话")
 	}
 
 	previousPalette := ui.CurrentThemeName()
 	previousMode := ui.CurrentThemeModeName()
+	previousSyntax := ui.CurrentSyntaxThemeName()
 
 	if err := ui.ApplyThemeSelection(palette, mode); err != nil {
 		return err
 	}
+	if strings.TrimSpace(syntax) != "" {
+		if err := ui.SetSyntaxTheme(syntax); err != nil {
+			return err
+		}
+	}
 
 	nextPalette := ui.CurrentThemeName()
 	nextMode := ui.CurrentThemeModeName()
+	nextSyntax := ui.CurrentSyntaxThemeName()
 
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
+		session.Interaction.RefreshActiveStreamViewport()
 	}
 
-	changed := previousPalette != nextPalette || previousMode != nextMode
+	changed := previousPalette != nextPalette || previousMode != nextMode || previousSyntax != nextSyntax
 	if !changed {
-		fmt.Printf("提示: 主题未变更（mode=%s palette=%s）\n", nextMode, nextPalette)
+		fmt.Printf("提示: 主题未变更（mode=%s palette=%s syntax=%s）\n", nextMode, nextPalette, nextSyntax)
 		return nil
 	}
 
-	persistThemeCommandPreference(session, nextPalette, nextMode)
+	persistThemeCommandPreference(session, nextPalette, nextMode, nextSyntax)
 
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 3)
 	if previousMode != nextMode || strings.TrimSpace(mode) != "" {
 		parts = append(parts, "明暗="+nextMode)
 	}
 	if previousPalette != nextPalette || strings.TrimSpace(palette) != "" {
 		parts = append(parts, "配色="+nextPalette)
+	}
+	if previousSyntax != nextSyntax || strings.TrimSpace(syntax) != "" {
+		parts = append(parts, "语法="+nextSyntax)
 	}
 	if len(parts) == 0 {
 		parts = append(parts, ui.ThemeSelectionDescription())
@@ -209,8 +255,10 @@ func printThemeCommandStatus(session *ChatSession) {
 		fmt.Printf(" — %s", desc)
 	}
 	fmt.Println()
+	fmt.Printf("当前语法: %s\n", ui.CurrentSyntaxThemeName())
 	fmt.Printf("可选明暗: %s\n", strings.Join(ui.SupportedThemeModeNames(), ", "))
 	fmt.Printf("可选配色: %s\n", strings.Join(ui.SupportedThemePresetNames(), ", "))
+	fmt.Printf("可选语法: %s\n", strings.Join(ui.CuratedSyntaxThemeNames(), ", "))
 	if sample := ui.FormatThemePreviewSample(ui.BuildThemePreview(palette, mode)); sample != "" {
 		fmt.Printf("预览: %s\n", sample)
 	}
@@ -263,16 +311,22 @@ func printThemeCommandPreview(session *ChatSession) {
 	mode := ui.CurrentThemeModeName()
 	palette := ui.CurrentThemeName()
 	resolved := ui.CurrentThemeResolvedModeName()
+	syntax := ui.CurrentSyntaxThemeName()
 	fmt.Printf("主题预览: mode=%s", mode)
 	if mode == ui.ThemeModeAuto {
 		fmt.Printf(" (实际: %s)", resolved)
 	}
-	fmt.Printf(" palette=%s\n", palette)
+	fmt.Printf(" palette=%s syntax=%s\n", palette, syntax)
 
-	// Show current selection sample, then one sample per palette under the effective mode.
-	currentSample := ui.FormatThemePreviewSample(ui.BuildThemePreview(palette, mode))
-	if currentSample != "" {
-		fmt.Printf("当前: %s\n", currentSample)
+	rich := ui.FormatThemePreviewRich(ui.ThemePreviewOptions{
+		Width:       ui.GetTerminalWidth(),
+		Palette:     palette,
+		Mode:        mode,
+		SyntaxTheme: syntax,
+		Compact:     false,
+	})
+	if rich != "" {
+		fmt.Println(rich)
 	}
 	fmt.Println("各配色（按当前有效明暗）:")
 	for _, name := range ui.SupportedThemePresetNames() {
@@ -316,6 +370,189 @@ func printThemeConfigDefaults(session *ChatSession) {
 	fmt.Printf("配置默认: %s\n", strings.Join(parts, ", "))
 }
 
+// selectThemeInteractive prefers fullscreen live-preview picker; falls back to prompts.
+func selectThemeInteractive(session *ChatSession) (palette, mode, syntax string, cancelled bool, err error) {
+	fp, fm, fs, ok, ferr := selectThemeFullScreen(session)
+	switch {
+	case ferr == nil && ok:
+		return fp, fm, fs, false, nil
+	case ferr == nil && !ok:
+		return "", "", "", true, nil
+	case ferr != nil && errors.Is(ferr, ui.ErrFullScreenUnavailable):
+		// legacy text prompts
+	default:
+		return "", "", "", false, ferr
+	}
+	palette, mode, err = selectThemeWithReader(session, bufio.NewReader(os.Stdin))
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if palette == "" && mode == "" {
+		return "", "", "", true, nil
+	}
+	return palette, mode, "", false, nil
+}
+
+func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, ok bool, err error) {
+	terminal := resumeFullScreenTerminal(session)
+	if !ui.CanUseFullScreenList(terminal) {
+		return "", "", "", false, ui.ErrFullScreenUnavailable
+	}
+
+	snapPalette := ui.CurrentThemeName()
+	snapMode := ui.CurrentThemeModeName()
+	snapSyntax := ui.CurrentSyntaxThemeName()
+
+	type themePickKind int
+	const (
+		pickPalette themePickKind = iota
+		pickMode
+		pickSyntax
+	)
+	type themePick struct {
+		kind  themePickKind
+		value string
+	}
+
+	var picks []themePick
+	items := make([]ui.FullScreenListItem, 0, 32)
+	// Section: modes
+	items = append(items, ui.FullScreenListItem{
+		Title:      "── 明暗模式 ──",
+		Disabled:   true,
+		SearchText: "mode",
+	})
+	picks = append(picks, themePick{}) // placeholder aligned? better track only enabled
+	// Rebuild with index map for enabled only.
+	items = items[:0]
+	picks = picks[:0]
+
+	for _, name := range ui.SupportedThemeModeNames() {
+		desc := ui.ThemeModeDescription(name)
+		title := name
+		if desc != "" {
+			title = name + " — " + desc
+		}
+		if name == snapMode {
+			title += " (当前)"
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     "mode",
+			SearchText: "mode " + name + " " + desc,
+			Preview:    ui.FormatThemePreviewSample(ui.BuildThemePreview(snapPalette, name)),
+		})
+		picks = append(picks, themePick{kind: pickMode, value: name})
+	}
+	for _, name := range ui.SupportedThemePresetNames() {
+		desc := ui.ThemePresetDescription(name)
+		title := name
+		if desc != "" {
+			title = name + " — " + desc
+		}
+		if name == snapPalette {
+			title += " (当前)"
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     "palette · light/dark compatible",
+			SearchText: "palette " + name + " " + desc,
+			Preview:    ui.FormatThemePreviewSample(ui.BuildThemePreview(name, snapMode)),
+		})
+		picks = append(picks, themePick{kind: pickPalette, value: name})
+	}
+	for _, name := range ui.CuratedSyntaxThemeNames() {
+		title := name + " — 语法高亮"
+		if name == snapSyntax {
+			title += " (当前)"
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     "syntax · builtin",
+			SearchText: "syntax " + name,
+		})
+		picks = append(picks, themePick{kind: pickSyntax, value: name})
+	}
+
+	// Working selection accumulates axes during browsing; cancel restores snap.
+	workPalette, workMode, workSyntax := snapPalette, snapMode, snapSyntax
+	confirmed := false
+
+	surfaceEnabled := session != nil && session.Surface != nil && session.Surface.Enabled()
+	if surfaceEnabled {
+		session.Surface.Disable()
+	}
+	defer func() {
+		if surfaceEnabled {
+			session.Surface.Enable()
+		}
+		if session != nil && session.Interaction != nil {
+			session.Interaction.ResetPromptState()
+			session.Interaction.RefreshStatus("")
+		}
+	}()
+
+	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		Title:        "选择主题",
+		Subtitle:     "上下移动实时预览 · Esc 取消恢复 · Enter 确认并保存",
+		ConfirmLabel: "应用主题",
+		EmptyMessage: "没有匹配的主题",
+		Items:        items,
+		OnSelectionChanged: func(index int) {
+			if index < 0 || index >= len(picks) {
+				return
+			}
+			p := picks[index]
+			switch p.kind {
+			case pickMode:
+				workMode = p.value
+				_ = ui.ApplyThemeSelection("", workMode)
+			case pickPalette:
+				workPalette = p.value
+				_ = ui.ApplyThemeSelection(workPalette, "")
+			case pickSyntax:
+				workSyntax = p.value
+				_ = ui.SetSyntaxTheme(workSyntax)
+			}
+			if session != nil && session.Interaction != nil {
+				session.Interaction.RefreshStatus("")
+			}
+		},
+		OnCancel: func() {
+			_ = ui.ApplyThemeSelection(snapPalette, snapMode)
+			_ = ui.SetSyntaxTheme(snapSyntax)
+		},
+		OnConfirm: func(index int) error {
+			if index < 0 || index >= len(picks) {
+				return fmt.Errorf("无效选择")
+			}
+			// Commit working axes (already applied by selection hooks).
+			confirmed = true
+			return nil
+		},
+		PreviewForItem: func(index int) string {
+			return ui.FormatThemePreviewRich(ui.ThemePreviewOptions{
+				Width:       72,
+				Palette:     workPalette,
+				Mode:        workMode,
+				SyntaxTheme: workSyntax,
+				Compact:     true,
+			})
+		},
+	})
+	if err != nil {
+		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
+		_ = ui.SetSyntaxTheme(snapSyntax)
+		return "", "", "", false, err
+	}
+	if result.Cancelled || !confirmed {
+		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
+		_ = ui.SetSyntaxTheme(snapSyntax)
+		return "", "", "", false, nil
+	}
+	return workPalette, workMode, workSyntax, true, nil
+}
+
 func selectThemeWithReader(session *ChatSession, reader *bufio.Reader) (palette string, mode string, err error) {
 	if reader == nil {
 		reader = bufio.NewReader(os.Stdin)
@@ -334,7 +571,7 @@ func selectThemeWithReader(session *ChatSession, reader *bufio.Reader) (palette 
 			label = name + " — " + desc
 		}
 		if name == currentMode {
-			printChatSelectionLine("  [%d] %s %s", i+1, label, ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+			printChatSelectionMutedSuffix(fmt.Sprintf("  [%d] %s ", i+1, label), "(当前)")
 			continue
 		}
 		printChatSelectionLine("  [%d] %s", i+1, label)
@@ -359,7 +596,7 @@ func selectThemeWithReader(session *ChatSession, reader *bufio.Reader) (palette 
 		}
 		sample := ui.FormatThemePreviewSample(ui.BuildThemePreview(name, previewMode))
 		if name == currentPalette {
-			printChatSelectionLine("  [%d] %s %s", i+1, label, ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+			printChatSelectionMutedSuffix(fmt.Sprintf("  [%d] %s ", i+1, label), "(当前)")
 		} else {
 			printChatSelectionLine("  [%d] %s", i+1, label)
 		}
@@ -429,7 +666,7 @@ func readThemeOption(reader *bufio.Reader, options []string, current string, lab
 	}
 }
 
-func persistThemeCommandPreference(session *ChatSession, palette string, mode string) {
+func persistThemeCommandPreference(session *ChatSession, palette string, mode string, syntax string) {
 	if session == nil || session.Config == nil {
 		return
 	}
@@ -440,6 +677,7 @@ func persistThemeCommandPreference(session *ChatSession, palette string, mode st
 	}
 	paletteValue := strings.TrimSpace(palette)
 	modeValue := strings.TrimSpace(mode)
+	syntaxValue := strings.TrimSpace(syntax)
 	update := config.AICLIThemePreferenceUpdate{}
 	if paletteValue != "" {
 		update.Name = &paletteValue
@@ -447,7 +685,10 @@ func persistThemeCommandPreference(session *ChatSession, palette string, mode st
 	if modeValue != "" {
 		update.Mode = &modeValue
 	}
-	if update.Name == nil && update.Mode == nil {
+	if syntaxValue != "" {
+		update.Syntax = &syntaxValue
+	}
+	if update.Name == nil && update.Mode == nil && update.Syntax == nil {
 		return
 	}
 	if _, err := config.UpdateAICLIThemePreferences(configPath, update); err != nil {
@@ -465,6 +706,9 @@ func persistThemeCommandPreference(session *ChatSession, palette string, mode st
 	}
 	if update.Mode != nil {
 		session.Config.AICLI.Theme.Mode = modeValue
+	}
+	if update.Syntax != nil {
+		session.Config.AICLI.Theme.Syntax = syntaxValue
 	}
 }
 
@@ -496,7 +740,15 @@ func themeSlashArgumentCandidates() []chatSlashCompletionCandidate {
 		chatSlashCompletionCandidate{Command: "list", Summary: "列出明暗与配色（含预览）", Group: string(chatSlashCommandGroupBasics)},
 		chatSlashCompletionCandidate{Command: "status", Summary: "查看当前主题", Group: string(chatSlashCommandGroupBasics)},
 		chatSlashCompletionCandidate{Command: "preview", Summary: "预览当前与各配色样例", Group: string(chatSlashCommandGroupBasics)},
-		chatSlashCompletionCandidate{Command: "select", Summary: "交互选择主题", Group: string(chatSlashCommandGroupBasics)},
+		chatSlashCompletionCandidate{Command: "select", Summary: "交互选择主题（全屏实时预览）", Group: string(chatSlashCommandGroupBasics)},
+		chatSlashCompletionCandidate{Command: "syntax", Summary: "设置语法高亮主题", Group: string(chatSlashCommandGroupBasics)},
 	)
+	for _, name := range ui.CuratedSyntaxThemeNames() {
+		candidates = append(candidates, chatSlashCompletionCandidate{
+			Command: "syntax " + name,
+			Summary: "语法高亮 " + name,
+			Group:   string(chatSlashCommandGroupBasics),
+		})
+	}
 	return candidates
 }

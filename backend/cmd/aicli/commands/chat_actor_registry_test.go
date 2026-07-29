@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -947,4 +948,50 @@ func buildTestSessionHubWithProvider(t *testing.T, provider runtimellm.Provider)
 			EventBus:     runtimeevents.NewBusWithRetention(32),
 		})
 	})
+}
+
+type interruptedReadEventsStore struct {
+	listCalls int
+}
+
+func (s *interruptedReadEventsStore) AppendEvent(context.Context, runtimeevents.Event) (int64, error) {
+	return 0, nil
+}
+
+func (s *interruptedReadEventsStore) ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error) {
+	s.listCalls++
+	if s.listCalls == 1 {
+		return nil, fmt.Errorf("sqlite3: interrupted")
+	}
+	return nil, nil
+}
+
+func TestLocalActorRegistry_ReadEventsTreatsSQLiteInterruptAsSoftTimeout(t *testing.T) {
+	store := &interruptedReadEventsStore{}
+	registry := newLocalActorRegistry(&localChatRuntimeHost{EventStore: store})
+
+	result, err := registry.ReadEvents(context.Background(), toolbroker.ReadAgentEventsArgs{
+		ID:          "child-1",
+		MailboxOnly: true,
+		WaitMs:      50,
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ReadEvents returned hard failure: %v", err)
+	}
+	if result == nil || !result.TimedOut || result.Count != 0 {
+		t.Fatalf("expected empty soft timeout, got %#v", result)
+	}
+	if store.listCalls != 2 {
+		t.Fatalf("expected interrupted read plus best-effort final read, calls=%d", store.listCalls)
+	}
+}
+
+func TestIsLocalAgentReadWaitInterruptedIsNarrow(t *testing.T) {
+	if !isLocalAgentReadWaitInterrupted(context.Background(), fmt.Errorf("database operation interrupted")) {
+		t.Fatal("database interrupt should be recognized")
+	}
+	if isLocalAgentReadWaitInterrupted(context.Background(), fmt.Errorf("session interrupted by user")) {
+		t.Fatal("generic session interrupt must not be treated as SQLite wait timeout")
+	}
 }

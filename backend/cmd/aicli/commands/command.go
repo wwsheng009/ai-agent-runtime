@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -1198,6 +1200,13 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 	return result.Output, nil
 }
 
+func shouldRenderLocalShellDiff(command string, capture runtimeexecutor.CombinedOutputCapture, commandErr error) bool {
+	return commandErr == nil &&
+		!capture.Truncated &&
+		runtimeexecutor.IsGitDiffCommand(command) &&
+		runtimeexecutor.LooksLikeUnifiedDiffOutput(capture.Output)
+}
+
 // executeShellCommand 执行 shell 命令
 func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellCommandResult, error) {
 	executedCommand, cfg, err := parseShellCommandInvocation(cmdStr)
@@ -1209,6 +1218,12 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 		ExecutedCommand: executedCommand,
 		Config:          cfg,
 	}
+	bufferGitDiffOutput := runtimeexecutor.IsGitDiffCommand(executedCommand)
+	gitDiffRenderBufferLimit := runtimeexecutor.DefaultRetainedOutputBytes
+	if captureLimit := shellCommandCaptureLimit(cfg); captureLimit > 0 && captureLimit < gitDiffRenderBufferLimit {
+		gitDiffRenderBufferLimit = captureLimit
+	}
+	var bufferedGitDiff bytes.Buffer
 
 	// 检查危险命令
 	if isDangerousCommand(executedCommand) {
@@ -1313,11 +1328,25 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 			if !ok {
 				// 输出通道关闭，等待 goroutine 完成
 				<-doneChan
-				fmt.Println()
+				if !bufferGitDiffOutput {
+					fmt.Println()
+				}
 				goto commandDone
 			}
-			fmt.Print(string(chunk))
 			_, _ = captureAccumulator.Write(chunk)
+			if bufferGitDiffOutput {
+				_, _ = bufferedGitDiff.Write(chunk)
+				if bufferedGitDiff.Len() > gitDiffRenderBufferLimit {
+					// Rendering waits for a complete diff, but an explicitly
+					// disabled/large capture limit must not create an unbounded
+					// in-memory display buffer. Fall back to the original stream.
+					fmt.Print(bufferedGitDiff.String())
+					bufferedGitDiff.Reset()
+					bufferGitDiffOutput = false
+				}
+			} else {
+				fmt.Print(string(chunk))
+			}
 			if artifactWriter != nil {
 				if err := artifactWriter.WriteChunk(chunk); err != nil {
 					writeSessionDebugInfo(session, fmt.Sprintf("[shell-debug] local shell artifact write failed path=%q error=%q", artifactWriter.Path(), err.Error()), false)
@@ -1333,6 +1362,9 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 			if session.IsInterrupted() {
 				cmd.Process.Kill()
 				<-doneChan
+				if bufferGitDiffOutput {
+					fmt.Print(bufferedGitDiff.String())
+				}
 				capture := captureAccumulator.Result()
 				result.Capture = capture
 				result.Output = capture.Output
@@ -1343,6 +1375,9 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 			// 超时
 			cmd.Process.Kill()
 			<-doneChan
+			if bufferGitDiffOutput {
+				fmt.Print(bufferedGitDiff.String())
+			}
 			capture := captureAccumulator.Result()
 			result.Capture = capture
 			result.Output = capture.Output
@@ -1359,7 +1394,20 @@ commandDone: // 等待命令完成
 	result.Capture = outputCapture
 	result.Output = outputStr
 
-	if err := cmd.Wait(); err != nil {
+	waitErr := cmd.Wait()
+	renderDeferredDiff := bufferGitDiffOutput && shouldRenderLocalShellDiff(executedCommand, outputCapture, waitErr)
+	var renderedDiff string
+	if renderDeferredDiff {
+		if supplement := renderDiffOutput(outputStr, "Diff"); supplement != "" {
+			renderedDiff = ui.FormatAssistantSupplementBlock(supplement)
+		}
+	}
+	if bufferGitDiffOutput && renderedDiff == "" {
+		fmt.Print(bufferedGitDiff.String())
+		fmt.Println()
+	}
+
+	if waitErr != nil {
 		// 命令执行失败（返回非零状态码）
 		// 针对常见错误给出友好提示
 		cmdLower := strings.ToLower(cmdStr)
@@ -1367,7 +1415,7 @@ commandDone: // 等待命令完成
 
 		var friendlyHint string
 		exitCode := -1
-		if exitError, ok := err.(*exec.ExitError); ok {
+		if exitError, ok := waitErr.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		}
 
@@ -1421,11 +1469,11 @@ commandDone: // 等待命令完成
 		}
 
 		if friendlyHint != "" {
-			logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行失败: %w\n%s", err, friendlyHint))
-			return result, fmt.Errorf("命令执行失败: %w\n%s", err, friendlyHint)
+			logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行失败: %w\n%s", waitErr, friendlyHint))
+			return result, fmt.Errorf("命令执行失败: %w\n%s", waitErr, friendlyHint)
 		}
-		logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行失败: %w", err))
-		return result, fmt.Errorf("命令执行失败: %w", err)
+		logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行失败: %w", waitErr))
+		return result, fmt.Errorf("命令执行失败: %w", waitErr)
 	}
 
 	// 命令执行成功
@@ -1440,6 +1488,10 @@ commandDone: // 等待命令完成
 		if strings.TrimSpace(result.RawOutputArtifactPath) != "" {
 			fmt.Printf("[提示] 完整原始输出已保存到: %s\n", resolveAbsoluteChatPath(result.RawOutputArtifactPath))
 		}
+	}
+	if renderedDiff != "" {
+		fmt.Println(renderedDiff)
+		fmt.Println()
 	}
 
 	fmt.Println("--- 完成 ---")

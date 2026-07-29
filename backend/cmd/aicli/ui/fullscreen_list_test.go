@@ -5,7 +5,15 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
+
+func renderTestFullScreenListFrame(options FullScreenListOptions, state fullScreenListState, matches []int, width, height int) string {
+	return renderFullScreenListFrameWithProfile(
+		options, state, matches, width, height, render.TrueColorProfile(),
+	)
+}
 
 func TestFullScreenListNavigationAndSelection(t *testing.T) {
 	items := make([]FullScreenListItem, 12)
@@ -100,7 +108,7 @@ func TestRenderFullScreenListFrameUsesWholeViewport(t *testing.T) {
 		},
 	}
 	matches := fullScreenListMatches(options.Items, "")
-	frame := renderFullScreenListFrame(options, fullScreenListState{selected: 1}, matches, 80, 16)
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{selected: 1}, matches, 80, 16)
 	if count := strings.Count(frame, "\x1b[2K"); count != 16 {
 		t.Fatalf("expected all 16 viewport rows to be redrawn, got %d", count)
 	}
@@ -118,7 +126,7 @@ func TestRenderFullScreenListFrameHandlesSmallViewport(t *testing.T) {
 			Title: "A very long session title that must be truncated",
 		}},
 	}
-	frame := renderFullScreenListFrame(options, fullScreenListState{}, []int{0}, 18, 4)
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{}, []int{0}, 18, 4)
 	if count := strings.Count(frame, "\x1b[2K"); count != 4 {
 		t.Fatalf("expected compact renderer to stay within four rows, got %d", count)
 	}
@@ -158,7 +166,7 @@ func TestRenderFullScreenListFrameUsesConfigurableGenericCopy(t *testing.T) {
 		EmptyMessage: "No matching workspaces",
 		ConfirmLabel: "open selected workspace",
 	}
-	frame := renderFullScreenListFrame(options, fullScreenListState{}, nil, 80, 12)
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{}, nil, 80, 12)
 	for _, expected := range []string{"No matching workspaces", "Enter open selected workspace"} {
 		if !strings.Contains(frame, expected) {
 			t.Fatalf("expected generic frame to contain %q, got %q", expected, frame)
@@ -180,7 +188,7 @@ func TestRenderFullScreenListFrameWrapsPreviewAcrossRows(t *testing.T) {
 	if len(wrapped) < 2 {
 		t.Fatalf("expected preview to wrap over multiple rows, got %v", wrapped)
 	}
-	frame := renderFullScreenListFrame(options, fullScreenListState{}, []int{0}, 28, 14)
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{}, []int{0}, 28, 14)
 	for _, line := range wrapped {
 		if !strings.Contains(frame, line) {
 			t.Fatalf("expected wrapped preview line %q in frame, got %q", line, frame)
@@ -303,7 +311,7 @@ func TestRenderFullScreenListFrameSanitizesDataBeforeAddingTrustedStyle(t *testi
 			Preview: "Preview\x1b[2J should stay visible",
 		}},
 	}
-	frame := renderFullScreenListFrame(options, fullScreenListState{}, []int{0}, 80, 12)
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{}, []int{0}, 80, 12)
 	for _, unsafe := range []string{"\x1b[2J", "\x1b]0;owned\x07"} {
 		if strings.Contains(frame, unsafe) {
 			t.Fatalf("expected untrusted terminal sequence %q to be removed, got %q", unsafe, frame)
@@ -314,6 +322,55 @@ func TestRenderFullScreenListFrameSanitizesDataBeforeAddingTrustedStyle(t *testi
 	}
 	if !strings.Contains(frame, "\x1b[7m") || !strings.Contains(frame, "\x1b[0m") {
 		t.Fatalf("expected renderer-owned selection style to remain, got %q", frame)
+	}
+}
+
+func TestRenderFullScreenListFrameKeepsSafeRichPreviewSGR(t *testing.T) {
+	rich := fitFullScreenPreformattedTextWithProfile(
+		"\x1b[31mred\x1b[0m safe", 38, render.TrueColorProfile(),
+	)
+	if !strings.Contains(rich, "\x1b[31m") {
+		t.Fatalf("preformatted helper lost SGR: %q", rich)
+	}
+	options := FullScreenListOptions{
+		Title: "主题",
+		Items: []FullScreenListItem{{
+			Title:   "dracula",
+			Preview: "\x1b[31mred\x1b[0m\x1b[2J safe",
+		}},
+	}
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{}, []int{0}, 40, 12)
+	if !strings.Contains(frame, "\x1b[31m") || !strings.Contains(frame, "red") {
+		t.Fatalf("safe preview SGR was lost: %q", frame)
+	}
+	if strings.Contains(frame, "\x1b[2J") {
+		t.Fatalf("dangerous preview CSI leaked: %q", frame)
+	}
+}
+
+func TestFitFullScreenPreformattedTextUsesNegotiatedColorDepth(t *testing.T) {
+	rich := "\x1b[38;2;255;64;32mred\x1b[0m safe"
+
+	plain := fitFullScreenPreformattedTextWithProfile(rich, 38, render.NoColorProfile())
+	if strings.ContainsRune(plain, '\x1b') {
+		t.Fatalf("no-color rich preview contains ESC: %q", plain)
+	}
+	if plain != "red safe" {
+		t.Fatalf("no-color rich preview = %q, want %q", plain, "red safe")
+	}
+
+	ansi16 := fitFullScreenPreformattedTextWithProfile(rich, 38, render.ColorProfile{
+		Enabled: true,
+		Depth:   render.ColorANSI16,
+	})
+	if !strings.ContainsRune(ansi16, '\x1b') {
+		t.Fatalf("ANSI-16 rich preview has no SGR: %q", ansi16)
+	}
+	if strings.Contains(ansi16, "\x1b[38;2;") || strings.Contains(ansi16, "\x1b[38;5;") {
+		t.Fatalf("ANSI-16 rich preview contains higher-depth color: %q", ansi16)
+	}
+	if render.ANSIToPlain(ansi16) != "red safe" {
+		t.Fatalf("ANSI-16 rich preview changed plain content: %q", ansi16)
 	}
 }
 
@@ -351,7 +408,7 @@ func TestFullScreenListNumbersEnabledMatchesContiguously(t *testing.T) {
 		t.Fatalf("expected third enabled row to be [3], got %q", got)
 	}
 
-	frame := renderFullScreenListFrame(options, fullScreenListState{selected: 1}, allMatches, 80, 16)
+	frame := renderTestFullScreenListFrame(options, fullScreenListState{selected: 1}, allMatches, 80, 16)
 	for _, expected := range []string{"[·] 当前 · Live title（不可选）", "[1] Alpha history", "[2] Beta skipped", "[3] Gamma history"} {
 		if !strings.Contains(frame, expected) {
 			t.Fatalf("expected frame to contain %q, got %q", expected, frame)

@@ -16,6 +16,8 @@ type AICLIThemePreferenceUpdate struct {
 	Name *string
 	// Mode 使用同样的指针语义（auto|dark|light）。
 	Mode *string
+	// Syntax 使用同样的指针语义（Chroma theme name）。
+	Syntax *string
 }
 
 // UpdateAICLIThemePreferences updates the aicli.theme section inside a config file
@@ -96,6 +98,9 @@ func applyAICLIThemePreferenceUpdate(current *AICLIThemeConfig, update AICLIThem
 	}
 	if update.Mode != nil {
 		current.Mode = strings.TrimSpace(*update.Mode)
+	}
+	if update.Syntax != nil {
+		current.Syntax = strings.TrimSpace(*update.Syntax)
 	}
 }
 

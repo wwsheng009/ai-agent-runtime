@@ -3,21 +3,15 @@ package commands
 import (
 	"bytes"
 	"context"
-	"strings"
-	"testing"
-
-	"github.com/fatih/color"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"strings"
+	"testing"
 )
 
 func TestAICLITranscriptRenderer_RendersCompleteBlocksWithInteraction(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
@@ -86,11 +80,7 @@ func TestAICLITranscriptRenderer_RendersCompleteBlocksWithInteraction(t *testing
 }
 
 func TestAICLITranscriptRenderer_RendersWithoutInteraction(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	renderer := newAICLITranscriptRenderer(&ChatSession{})
@@ -124,11 +114,7 @@ func TestAICLITranscriptRenderer_RendersWithoutInteraction(t *testing.T) {
 }
 
 func TestChatRuntimeEventBridge_CompleteResponseMatchesTranscriptRenderer(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	content := "异步团队已经完成。"
@@ -145,11 +131,7 @@ func TestChatRuntimeEventBridge_CompleteResponseMatchesTranscriptRenderer(t *tes
 }
 
 func TestShellSlashCommand_RendersCompleteResponseThroughTranscriptRenderer(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	const response = "slash command assistant response"

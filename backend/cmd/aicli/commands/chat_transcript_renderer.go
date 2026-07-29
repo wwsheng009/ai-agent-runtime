@@ -48,6 +48,7 @@ func (r *aicliTranscriptRenderer) RenderAssistant(content string) bool {
 	if r.session.Formatter != nil {
 		formatted = r.session.Formatter.Format(content)
 	}
+	// Formatter may emit SGR; DisplayAssistantMessage preserves it.
 	ui.DisplayAssistantMessage(formatted)
 	return true
 }

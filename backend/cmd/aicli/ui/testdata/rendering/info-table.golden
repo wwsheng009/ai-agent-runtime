@@ -1,0 +1,89 @@
+[width=40 lines=4]
+00 plain="名称      状态    说明                  "
+   span="名称" {role=MetaLabel,fg=ansi:8}
+   span="    "
+   span="  "
+   span="状态" {role=MetaLabel,fg=ansi:8}
+   span="  "
+   span="  "
+   span="说明" {role=MetaLabel,fg=ansi:8}
+   span="                  "
+01 plain="--------  ------  ----------------------"
+   span="--------" {role=Border,fg=ansi:8}
+   span="  " {role=Border,fg=ansi:8}
+   span="------" {role=Border,fg=ansi:8}
+   span="  " {role=Border,fg=ansi:8}
+   span="----------------------" {role=Border,fg=ansi:8}
+02 plain="Markdown  完成    Goldmark AST + Chroma…"
+   span="Markdown" {role=TextPrimary}
+   span="  "
+   span="完成" {role=TextPrimary}
+   span="  "
+   span="  "
+   span="Goldmark AST + Chroma…" {role=TextPrimary}
+03 plain="终端颜色  进行中  TrueColor / ANSI-256 …"
+   span="终端颜色" {role=TextPrimary}
+   span="  "
+   span="进行中" {role=TextPrimary}
+   span="  "
+   span="TrueColor / ANSI-256 …" {role=TextPrimary}
+[width=80 lines=4]
+00 plain="名称      状态    说明                                    "
+   span="名称" {role=MetaLabel,fg=ansi:8}
+   span="    "
+   span="  "
+   span="状态" {role=MetaLabel,fg=ansi:8}
+   span="  "
+   span="  "
+   span="说明" {role=MetaLabel,fg=ansi:8}
+   span="                                    "
+01 plain="--------  ------  ----------------------------------------"
+   span="--------" {role=Border,fg=ansi:8}
+   span="  " {role=Border,fg=ansi:8}
+   span="------" {role=Border,fg=ansi:8}
+   span="  " {role=Border,fg=ansi:8}
+   span="----------------------------------------" {role=Border,fg=ansi:8}
+02 plain="Markdown  完成    Goldmark AST + Chroma token spans       "
+   span="Markdown" {role=TextPrimary}
+   span="  "
+   span="完成" {role=TextPrimary}
+   span="  "
+   span="  "
+   span="Goldmark AST + Chroma token spans" {role=TextPrimary}
+   span="       "
+03 plain="终端颜色  进行中  TrueColor / ANSI-256 / ANSI-16 / NoColor"
+   span="终端颜色" {role=TextPrimary}
+   span="  "
+   span="进行中" {role=TextPrimary}
+   span="  "
+   span="TrueColor / ANSI-256 / ANSI-16 / NoColor" {role=TextPrimary}
+[width=120 lines=4]
+00 plain="名称      状态    说明                                    "
+   span="名称" {role=MetaLabel,fg=ansi:8}
+   span="    "
+   span="  "
+   span="状态" {role=MetaLabel,fg=ansi:8}
+   span="  "
+   span="  "
+   span="说明" {role=MetaLabel,fg=ansi:8}
+   span="                                    "
+01 plain="--------  ------  ----------------------------------------"
+   span="--------" {role=Border,fg=ansi:8}
+   span="  " {role=Border,fg=ansi:8}
+   span="------" {role=Border,fg=ansi:8}
+   span="  " {role=Border,fg=ansi:8}
+   span="----------------------------------------" {role=Border,fg=ansi:8}
+02 plain="Markdown  完成    Goldmark AST + Chroma token spans       "
+   span="Markdown" {role=TextPrimary}
+   span="  "
+   span="完成" {role=TextPrimary}
+   span="  "
+   span="  "
+   span="Goldmark AST + Chroma token spans" {role=TextPrimary}
+   span="       "
+03 plain="终端颜色  进行中  TrueColor / ANSI-256 / ANSI-16 / NoColor"
+   span="终端颜色" {role=TextPrimary}
+   span="  "
+   span="进行中" {role=TextPrimary}
+   span="  "
+   span="TrueColor / ANSI-256 / ANSI-16 / NoColor" {role=TextPrimary}

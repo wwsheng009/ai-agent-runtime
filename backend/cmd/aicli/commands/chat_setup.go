@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
@@ -24,6 +25,12 @@ import (
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+func newChatMarkdownFormatter() *formatter.MarkdownFormatter {
+	f := formatter.NewMarkdownFormatter(true)
+	f.ThemeContextProvider = ui.CurrentThemeContext
+	return f
+}
 
 func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState *chatProfileState, persistenceState *chatPersistenceState, runtimeState *chatRuntimeState) (*ChatSession, func(), error) {
 	if opts == nil || runtimeState == nil {
@@ -97,7 +104,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		FunctionRegistry:         registry,
 		FunctionBuilder:          functionCatalog.Builder(runtimeState.provider.GetProtocol()),
 		Logger:                   logger,
-		Formatter:                formatter.NewMarkdownFormatter(true),
+		Formatter:                newChatMarkdownFormatter(),
 		Layout:                   layout,
 		InputBox:                 inputBox,
 		KeyHandler:               keyHandler,
@@ -523,38 +530,38 @@ func printChatSessionPreamble(session *ChatSession) {
 
 	printChatSelectionBlankLine()
 	fmt.Fprintln(os.Stderr, ui.NewSeparator().SetType(ui.SeparatorThick).Build())
-	printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Provider:", theme.SuccessColor.Sprint("( "+info.ProviderName+" )"), theme.ColorizeLabel)
+	printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Provider:", "( "+info.ProviderName+" )", style.RoleSuccess)
 	if info.Protocol != "" {
-		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Protocol:", theme.Dimmed(info.Protocol), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Protocol:", info.Protocol, style.RoleTextMuted)
 	}
 	if info.EndpointURL != "" {
-		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Endpoint:", theme.Dimmed(info.EndpointURL), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Endpoint:", info.EndpointURL, style.RoleTextMuted)
 	}
 	if info.Host != "" {
-		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Host:", theme.Dimmed(info.Host), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Host:", info.Host, style.RoleTextMuted)
 	}
 	if info.KeyCount > 0 {
-		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Auth Keys:", theme.Dimmed(fmt.Sprintf("%d", info.KeyCount)), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Auth Keys:", fmt.Sprintf("%d", info.KeyCount), style.RoleTextMuted)
 	}
 	if info.Timeout != "" {
-		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Timeout:", theme.Dimmed(info.Timeout), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Timeout:", info.Timeout, style.RoleTextMuted)
 	}
-	printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Model:", theme.SuccessColor.Sprint(info.ModelName), theme.ColorizeLabel)
+	printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Model:", info.ModelName, style.RoleSuccess)
 	if info.IsStream {
-		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", theme.SuccessColor.Sprint("on"), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", "on", style.RoleSuccess)
 	} else {
-		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", theme.Dimmed("off"), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", "off", style.RoleTextMuted)
 	}
 	// Fast is Codex-only (service_tier=priority); never imply Stream.
 	if info.SupportsFast {
 		if info.IsFast {
-			printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Fast:", theme.SuccessColor.Sprint("on"), theme.ColorizeLabel)
+			printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Fast:", "on", style.RoleSuccess)
 		} else {
-			printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Fast:", theme.Dimmed("off"), theme.ColorizeLabel)
+			printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Fast:", "off", style.RoleTextMuted)
 		}
 	}
 	if info.ReasoningEnabled {
-		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Reasoning:", theme.WarningColor.Sprint("enabled"), theme.ColorizeLabel)
+		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Reasoning:", "enabled", style.RoleWarning)
 	}
 
 	if session.MCPEnabled && session.MCPStatus != nil {
@@ -611,12 +618,20 @@ func printChatSessionPreamble(session *ChatSession) {
 	}
 }
 
-func printChatSessionInfoLine(writer *os.File, prefix, label, value string, colorizeLabel func(string) string) {
-	if colorizeLabel == nil {
-		colorizeLabel = func(text string) string { return text }
+func printChatSessionInfoLine(writer io.Writer, prefix, label, value string, valueRole style.Role) {
+	if writer == nil {
+		return
 	}
-	labelText := fmt.Sprintf("%-*s", chatSessionMetaLabelWidth, label)
-	fmt.Fprintf(writer, "%s%s %s\n", prefix, colorizeLabel(labelText), value)
+	label = strings.Join(strings.Fields(ui.SanitizeTerminalText(label)), " ")
+	pad := chatSessionMetaLabelWidth - ui.DisplayWidth(label)
+	if pad < 0 {
+		pad = 0
+	}
+	writeChatParts(writer, true,
+		chatPart(prefix, style.RoleSystem),
+		chatBoldPart(label+strings.Repeat(" ", pad), style.RoleMetaLabel),
+		chatPart(" "+value, valueRole),
+	)
 }
 
 func printChatCurrentRuntimeSessionStderr(session *ChatSession) {
@@ -672,8 +687,15 @@ func printChatSessionInfoRow(writer *os.File, label, value string, width int) {
 	if writer == nil || strings.TrimSpace(label) == "" {
 		return
 	}
-	theme := ui.GetTheme(ui.ThemeAuto)
-	fmt.Fprintf(writer, "%-*s %s\n", width, theme.ColorizeLabel(label), theme.ColorizeSecondary(value))
+	label = strings.Join(strings.Fields(ui.SanitizeTerminalText(label)), " ")
+	pad := width - ui.DisplayWidth(label)
+	if pad < 0 {
+		pad = 0
+	}
+	writeChatParts(writer, true,
+		chatBoldPart(label+strings.Repeat(" ", pad), style.RoleMetaLabel),
+		chatPart(" "+value, style.RoleTextSecondary),
+	)
 }
 
 func finalizeChatSession(session *ChatSession) {

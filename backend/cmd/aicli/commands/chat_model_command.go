@@ -442,12 +442,11 @@ func promptModelCommandProviderSelectionLegacy(session *ChatSession, current str
 	}
 
 	ui.PrintSection("选择 Provider")
-	theme := ui.GetTheme(ui.ThemeAuto)
 	switch {
 	case currentMatch != "":
-		fmt.Printf("  当前 provider: %s %s\n", theme.Dimmed(currentMatch), theme.Dimmed("(当前)"))
+		writeChatMutedSuffix(os.Stdout, "  当前 provider: ", currentMatch, " (当前)")
 	case current != "":
-		fmt.Printf("  当前 provider: %s %s\n", theme.Dimmed(current), theme.Dimmed("(当前无效或已禁用)"))
+		writeChatMutedSuffix(os.Stdout, "  当前 provider: ", current, " (当前无效或已禁用)")
 	default:
 		fmt.Println("  当前 provider: (无)")
 	}
@@ -663,7 +662,6 @@ func renderModelCommandProviderPickerPopupLines(state modelCommandProviderPicker
 
 func printModelCommandProviderPickerLegacyPage(session *ChatSession, state modelCommandProviderPickerState, currentMatch, defaultOption string) {
 	pageOptions, _, _, total := state.pageWindow()
-	theme := ui.GetTheme(ui.ThemeAuto)
 	fmt.Printf("\n  %s\n", modelCommandProviderPickerTitle(state))
 	if total == 0 {
 		fmt.Println("  （无匹配 provider；可继续搜索或输入 c 清除）")
@@ -677,14 +675,15 @@ func printModelCommandProviderPickerLegacyPage(session *ChatSession, state model
 			suffix := ""
 			switch {
 			case strings.EqualFold(option, currentMatch):
-				suffix = " " + theme.Dimmed("(当前)")
+				suffix = " (当前)"
 			case defaultOption != "" && strings.EqualFold(option, defaultOption):
-				suffix = " " + theme.Dimmed("(默认)")
+				suffix = " (默认)"
 			}
+			primary := fmt.Sprintf("  [%d] %-*s", i+1, maxLen, option)
 			if summary != "" {
-				fmt.Printf("  [%d] %-*s  %s%s\n", i+1, maxLen, option, theme.Dimmed(summary), suffix)
+				writeChatMutedSuffix(os.Stdout, primary, "  "+summary, suffix)
 			} else {
-				fmt.Printf("  [%d] %-*s%s\n", i+1, maxLen, option, suffix)
+				writeChatMutedSuffix(os.Stdout, primary, suffix)
 			}
 		}
 	}

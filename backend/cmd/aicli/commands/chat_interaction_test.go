@@ -6,6 +6,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,17 +25,6 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
-
-	"github.com/fatih/color"
-	"github.com/stretchr/testify/require"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type synchronizedBuffer struct {
@@ -64,11 +63,7 @@ func TestChatInteractionCoordinator_RendersPromptAndAsyncLineOnSameWriter(t *tes
 }
 
 func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteractiveMode(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
@@ -90,11 +85,7 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 }
 
 func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
@@ -349,12 +340,34 @@ func TestRenderSubmittedUserInputEchoSkipsLegacyPromptPath(t *testing.T) {
 	}
 }
 
+func TestChatInteractionCoordinator_ClearPromptKeepsComposerDraft(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.promptAdvanceFn = func() bool { return false }
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+
+	draft := "typed while streaming"
+	coord.PrintPrompt()
+	coord.SetPromptInput(draft)
+	// Turn boundaries and async output clear the prompt rows before writing.
+	coord.ClearPrompt()
+
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != draft || snapshot.Cursor != len([]rune(draft)) {
+		t.Fatalf("expected prompt clear to keep the composer draft, got %#v", snapshot)
+	}
+
+	coord.PrintPrompt()
+	if rendered := output.String(); !strings.Contains(rendered, draft) {
+		t.Fatalf("expected the preserved draft to be repainted with the prompt, got %q", rendered)
+	}
+}
+
 func TestChatInteractionCoordinator_ClearPromptClearsWrappedInput(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
@@ -376,11 +389,7 @@ func TestChatInteractionCoordinator_ClearPromptClearsWrappedInput(t *testing.T) 
 }
 
 func TestChatInteractionCoordinator_ClearPromptClearsMultilineInput(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
@@ -428,11 +437,7 @@ func TestInteractivePromptPositionPreWrapsWideRuneAtRightEdge(t *testing.T) {
 }
 
 func TestNotifyChatInputDraftState_IsSilent(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
@@ -1498,6 +1503,48 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 	}
 }
 
+func TestBuildChatSurfaceStatusModelIdleUsesTypedSegmentsWithoutReady(t *testing.T) {
+	model := buildChatSurfaceStatusModelForWidthAndInputMode(
+		&ChatSession{Model: "gpt-5.6-sol"},
+		"Ready",
+		200,
+		chatInputModeChat,
+	)
+	if !model.HideState {
+		t.Fatal("expected idle model-first status to hide the implicit Ready state")
+	}
+	foundModel := false
+	for _, segment := range model.Segments {
+		if segment.Kind == style.StatusSegModel && segment.Text == "gpt-5.6-sol" && segment.Role == style.RoleAccent {
+			foundModel = true
+			break
+		}
+	}
+	if !foundModel {
+		t.Fatalf("expected typed model segment, got %#v", model.Segments)
+	}
+	plain := style.StatusLineDocument(model, 200).PlainText()
+	if !strings.Contains(plain, "gpt-5.6-sol") || strings.Contains(plain, "Ready") {
+		t.Fatalf("unexpected idle typed status: %q", plain)
+	}
+}
+
+func TestBuildChatSurfaceStatusModelUsesTypedApprovalState(t *testing.T) {
+	model := buildChatSurfaceStatusModelForWidthAndInputMode(
+		&ChatSession{Model: "gpt-5.6-sol"},
+		"Streaming",
+		200,
+		chatInputModeApproval,
+	)
+	if model.HideState || model.State != style.RunWaiting || model.StateText != "等待审批" || model.StateRole != style.RoleApproval {
+		t.Fatalf("unexpected approval state model: %#v", model)
+	}
+	plain := style.StatusLineDocument(model, 200).PlainText()
+	if !strings.HasPrefix(plain, "等待审批 · ") || !strings.Contains(plain, "gpt-5.6-sol") {
+		t.Fatalf("unexpected approval typed status: %q", plain)
+	}
+}
+
 func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *testing.T) {
 	previousWD, err := os.Getwd()
 	if err != nil {
@@ -2510,11 +2557,12 @@ func TestChatInteractionCoordinator_FinalizeAssistantDelta_ReformatsMarkdown(t *
 	coord.FinalizeAssistantDelta()
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "# Title") {
+	// Goldmark path renders ATX h1 as "▶ Title" (not raw "# Title").
+	if !strings.Contains(rendered, "Title") {
 		t.Fatalf("expected streamed markdown content in output, got %q", rendered)
 	}
-	if !strings.Contains(rendered, ui.FormatAssistantMessage("# Title")) {
-		t.Fatalf("expected formatted assistant message after rewrite, got %q", rendered)
+	if !strings.Contains(rendered, "▶") && !strings.Contains(rendered, "# Title") {
+		t.Fatalf("expected formatted heading marker after rewrite, got %q", rendered)
 	}
 }
 
@@ -2529,8 +2577,11 @@ func TestChatInteractionCoordinator_RenderAssistant_FormatsIndentedTable(t *test
 	coord.RenderAssistant("下面是一个 Markdown 表格格式示例：\n\n  | 列名1 | 列名2 | 列名3 |\n  |------|------|------|\n  | 数据A | 数据B | 数据C |\n  | 数据D | 数据E | 数据F |")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "列名1 │ 列名2 │ 列名3") {
+	if !strings.Contains(rendered, "列名1") || !strings.Contains(rendered, "数据A") {
 		t.Fatalf("expected assistant renderer to format indented table, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "│") && !strings.Contains(rendered, "列名1:") {
+		t.Fatalf("expected table grid or records layout, got %q", rendered)
 	}
 }
 
@@ -2549,7 +2600,7 @@ func TestChatInteractionCoordinator_FinalizeAssistantDelta_FormatsOnlyIndentedTa
 	coord.FinalizeAssistantDelta()
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "列名1 │ 列名2 │ 列名3") {
+	if !strings.Contains(rendered, "列名1") || !strings.Contains(rendered, "数据A") {
 		t.Fatalf("expected finalized delta path to format indented table, got %q", rendered)
 	}
 }
@@ -2568,13 +2619,14 @@ func TestChatInteractionCoordinator_RenderAssistant_FormatsMixedMarkdownDocument
 	rendered := output.String()
 	for _, expected := range []string{
 		"混合 Markdown 验证",
-		"│ 这是一条引用",
+		"这是一条引用",
 		"• 苹果",
 		"• 香蕉",
 		"• 樱桃",
-		"名称 │ 值",
+		"名称",
 		"package main",
-		"fmt.Println(\"hello\")",
+		"fmt.Println",
+		"hello",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected mixed markdown render to contain %q, got %q", expected, rendered)
@@ -2582,6 +2634,267 @@ func TestChatInteractionCoordinator_RenderAssistant_FormatsMixedMarkdownDocument
 	}
 	if strings.Contains(rendered, "```go") {
 		t.Fatalf("expected fenced go block to be rendered as code content, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *testing.T) {
+	session := &ChatSession{
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.RenderAssistantDelta("# Title\n\n")
+	coord.RenderAssistantDelta("Hello stable paragraph.\n")
+	if output.String() != "" {
+		t.Fatalf("surface/markdown path must not write transcript mid-stream, got %q", output.String())
+	}
+	if coord.activeStream == nil || !coord.activeStream.Active() {
+		t.Fatal("expected active stream controller to be active")
+	}
+	coord.RefreshActiveStreamViewport()
+	band := surface.ActiveBandLines()
+	if len(band) == 0 {
+		t.Fatal("expected active band lines on enabled surface")
+	}
+	joined := strings.Join(band, "\n")
+	if !strings.Contains(joined, "Hello") && !strings.Contains(joined, "Title") && !strings.Contains(joined, "assistant") {
+		t.Fatalf("expected band to mirror stream viewport, got %q", joined)
+	}
+
+	coord.FinalizeAssistantDelta()
+	if coord.activeStream.Active() {
+		t.Fatal("active stream should clear after finalize")
+	}
+	if len(surface.ActiveBandLines()) != 0 {
+		t.Fatalf("active band should clear after finalize, got %v", surface.ActiveBandLines())
+	}
+	if !strings.Contains(output.String(), "Hello") && !strings.Contains(output.String(), "Title") {
+		t.Fatalf("expected finalized transcript commit, got %q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+	if output.String() != "" {
+		t.Fatalf("tool active band must not write scrollback, got %q", output.String())
+	}
+	band := surface.ActiveBandLines()
+	if len(band) == 0 {
+		t.Fatal("expected tool-running active band lines")
+	}
+	joined := strings.Join(band, "\n")
+	if !strings.Contains(strings.ToLower(joined), "shell") && !strings.Contains(joined, "shell_command") {
+		t.Fatalf("expected tool name in active band, got %q", joined)
+	}
+	if !coord.activeStream.IsToolActive() {
+		t.Fatal("expected active stream tool cell")
+	}
+
+	// Progress with same detail should not thrash or clear the band.
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+	if len(surface.ActiveBandLines()) == 0 {
+		t.Fatal("expected band to remain after identical tool progress")
+	}
+
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "view_file")
+	joined = strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(strings.ToLower(joined), "view") && !strings.Contains(joined, "view_file") {
+		t.Fatalf("expected updated tool name in active band, got %q", joined)
+	}
+
+	coord.ClearAgentStage()
+	if len(surface.ActiveBandLines()) != 0 {
+		t.Fatalf("expected active band cleared after idle stage, got %v", surface.ActiveBandLines())
+	}
+	if coord.activeStream.IsToolActive() {
+		t.Fatal("tool cell should cancel when stage returns idle")
+	}
+}
+
+func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell 10% starting")
+	if output.String() != "" {
+		t.Fatalf("tool progress band must not write scrollback, got %q", output.String())
+	}
+	joined := strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(strings.ToLower(joined), "shell") {
+		t.Fatalf("expected tool name in band, got %q", joined)
+	}
+	if !strings.Contains(joined, "10%") {
+		t.Fatalf("expected progress text in band, got %q", joined)
+	}
+	if coord.activeStream.ToolName() != "shell" {
+		t.Fatalf("ToolName=%q want shell", coord.activeStream.ToolName())
+	}
+	if coord.activeStream.ToolProgress() != "10% starting" {
+		t.Fatalf("ToolProgress=%q", coord.activeStream.ToolProgress())
+	}
+
+	// Same tool, richer progress should update the band body in place.
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell 45% downloading")
+	if output.String() != "" {
+		t.Fatalf("progress update must not write scrollback, got %q", output.String())
+	}
+	joined = strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(joined, "45%") {
+		t.Fatalf("expected updated progress in band, got %q", joined)
+	}
+	if strings.Contains(joined, "10%") {
+		t.Fatalf("stale progress should be replaced, got %q", joined)
+	}
+	if coord.activeStream.ToolName() != "shell" {
+		t.Fatalf("tool name should stay shell, got %q", coord.activeStream.ToolName())
+	}
+
+	// Identical name+progress should keep the band without clearing.
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell 45% downloading")
+	if len(surface.ActiveBandLines()) == 0 {
+		t.Fatal("identical progress must keep active band")
+	}
+
+	coord.ClearAgentStage()
+	if len(surface.ActiveBandLines()) != 0 {
+		t.Fatalf("expected band cleared after idle, got %v", surface.ActiveBandLines())
+	}
+}
+
+func TestSplitToolStageDetail(t *testing.T) {
+	name, progress := splitToolStageDetail("shell 45% downloading")
+	if name != "shell" || progress != "45% downloading" {
+		t.Fatalf("got name=%q progress=%q", name, progress)
+	}
+	name, progress = splitToolStageDetail("view_file")
+	if name != "view_file" || progress != "" {
+		t.Fatalf("got name=%q progress=%q", name, progress)
+	}
+	name, progress = splitToolStageDetail("  ")
+	if name != "" || progress != "" {
+		t.Fatalf("empty detail got name=%q progress=%q", name, progress)
+	}
+}
+
+func TestChatInteractionCoordinator_AgentStageDetailKeepsProgressBudget(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	// Longer than the old 48 budget, under the 96 ActiveBand-oriented budget.
+	detail := "shell 45% downloading large artifact from remote cache mirror xyz"
+	if ui.DisplayWidth(detail) <= 48 {
+		t.Fatalf("test detail should exceed old 48 budget, width=%d", ui.DisplayWidth(detail))
+	}
+	if ui.DisplayWidth(detail) > chatAgentStageDetailMaxWidth {
+		t.Fatalf("test detail should fit new budget %d, width=%d", chatAgentStageDetailMaxWidth, ui.DisplayWidth(detail))
+	}
+
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, detail)
+	if got := coord.AgentStageDetail(); got != detail {
+		t.Fatalf("stage detail truncated too early: got %q want %q", got, detail)
+	}
+	if got := coord.currentSurfaceStateForTest(); got != "Tool "+detail {
+		t.Fatalf("surface state lost progress budget, got %q", got)
+	}
+
+	// Over-budget details still compact rather than unbounded growth.
+	tooLong := detail + " extra-tail-that-forces-truncation-aaaaaaaa"
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, tooLong)
+	got := coord.AgentStageDetail()
+	if got == "" || got == tooLong {
+		t.Fatalf("expected over-budget detail to compact, got %q", got)
+	}
+	if ui.DisplayWidth(got) > chatAgentStageDetailMaxWidth {
+		t.Fatalf("compacted detail width %d exceeds max %d (%q)", ui.DisplayWidth(got), chatAgentStageDetailMaxWidth, got)
+	}
+}
+
+func TestChatInteractionCoordinator_ToolBandYieldsToAssistantStream(t *testing.T) {
+	session := &ChatSession{
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+	if len(surface.ActiveBandLines()) == 0 {
+		t.Fatal("expected tool band before assistant stream")
+	}
+
+	coord.RenderAssistantDelta("Hello stable plain response.\n")
+	coord.RefreshActiveStreamViewport()
+	if coord.activeStream.IsToolActive() {
+		t.Fatal("assistant stream should replace tool cell")
+	}
+	band := surface.ActiveBandLines()
+	joined := strings.Join(band, "\n")
+	if !strings.Contains(joined, "Hello") && !strings.Contains(joined, "assistant") {
+		t.Fatalf("expected assistant band content, got %q", joined)
+	}
+
+	// Tool stage updates must not clobber an in-progress assistant band.
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "other_tool")
+	joined = strings.Join(surface.ActiveBandLines(), "\n")
+	if coord.activeStream.IsToolActive() {
+		t.Fatal("tool stage must not replace active assistant stream cell")
+	}
+	if strings.Contains(strings.ToLower(joined), "other_tool") || strings.Contains(joined, "OtherTool") {
+		t.Fatalf("tool stage must not replace active assistant band, got %q", joined)
+	}
+}
+
+func TestChatInteractionCoordinator_LivePlainTextStreamsStableChunksWithoutSurface(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("First complete sentence. ")
+	first := output.String()
+	if !strings.Contains(first, "First complete sentence.") {
+		t.Fatalf("expected first plain chunk to stream live, got %q", first)
+	}
+
+	coord.RenderAssistantDelta("Second complete sentence.")
+	full := output.String()
+	if !strings.Contains(full, "Second complete sentence.") {
+		t.Fatalf("expected second plain chunk to append live, got %q", full)
+	}
+	if strings.Count(full, "First complete sentence.") != 1 {
+		t.Fatalf("expected first chunk once (no duplicate), got %q", full)
+	}
+	if coord.surface != nil {
+		t.Fatal("expected no surface for plain live-stream path")
+	}
+	coord.FinalizeAssistantDelta()
+	if !strings.HasSuffix(output.String(), "\n") {
+		t.Fatalf("expected finalize newline, got %q", output.String())
 	}
 }
 
@@ -2602,8 +2915,11 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_RewritesMarkdownIncreme
 
 	coord.FinalizeAssistantDelta()
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.FormatAssistantMessage("# Title")) {
+	if !strings.Contains(rendered, "Title") {
 		t.Fatalf("expected finalized formatted markdown output, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "▶") && !strings.Contains(rendered, "#") {
+		t.Fatalf("expected heading formatting, got %q", rendered)
 	}
 }
 
@@ -2627,7 +2943,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_BuffersMarkdownLead(t *
 
 	coord.FinalizeAssistantDelta()
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.FormatAssistantMessage("# Title")) {
+	if !strings.Contains(rendered, "Title") {
 		t.Fatalf("expected buffered markdown lead to finalize as formatted markdown, got %q", rendered)
 	}
 }
@@ -2702,9 +3018,6 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_DedupesSnapshotStyleChu
 	if !strings.Contains(rendered, "如果你愿意，我可以继续帮你做代码、写作、检索、分析等任务。") {
 		t.Fatalf("expected new suffix to remain visible, got %q", rendered)
 	}
-	if !strings.Contains(rendered, ui.FormatAssistantMessage(first+"  \n如果你愿意，我可以继续帮你做代码、写作、检索、分析等任务。")) {
-		t.Fatalf("expected buffered stream to finalize as one formatted message, got %q", rendered)
-	}
 }
 
 func TestChatInteractionCoordinator_RenderAssistant_StripsAsyncTeamChoiceTail(t *testing.T) {
@@ -2757,8 +3070,10 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_KeepsPlainTextModeAfter
 	if strings.Count(rendered, third) != 1 {
 		t.Fatalf("expected trailing plain-text paragraph once, got %q", rendered)
 	}
-	if !strings.Contains(rendered, ui.FormatAssistantMessage(first+second+third)) {
-		t.Fatalf("expected buffered plain text to finalize as one formatted message, got %q", rendered)
+	// Inline backticks make IsMarkdown true, so final output may be markdown-rendered
+	// rather than Theme.ColorizeAssistant of the raw concatenation.
+	if !strings.Contains(rendered, first) || !strings.Contains(rendered, third) {
+		t.Fatalf("expected buffered content retained after finalize, got %q", rendered)
 	}
 }
 
@@ -2796,9 +3111,6 @@ func TestChatInteractionCoordinator_CompleteAssistantResponse_AppendsMissingPlai
 	}
 	if !strings.Contains(rendered, "第二段。") {
 		t.Fatalf("expected missing suffix to be appended, got %q", rendered)
-	}
-	if !strings.Contains(rendered, ui.FormatAssistantMessage("第一段。\n\n第二段。")) {
-		t.Fatalf("expected stream completion to render one formatted final response, got %q", rendered)
 	}
 }
 

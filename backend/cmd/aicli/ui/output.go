@@ -1,17 +1,25 @@
 package ui
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
 )
 
 // OutputConfig 输出配置
 type OutputConfig struct {
-	Indent     string  // 缩进前缀
-	MaxWidth   int     // 最大宽度
-	WordWrap   bool    // 是否自动换行
-	Colorize   bool    // 是否启用颜色
-	LineNumber bool    // 是否显示行号
+	Indent     string // 缩进前缀
+	MaxWidth   int    // 最大宽度
+	WordWrap   bool   // 是否自动换行
+	Colorize   bool   // 是否启用颜色
+	LineNumber bool   // 是否显示行号
 }
 
 // NewOutputConfig 创建新的输出配置
@@ -25,7 +33,11 @@ func NewOutputConfig() *OutputConfig {
 	}
 }
 
-// FormatOutput 格式化输出文本
+// FormatOutput 格式化输出文本。
+//
+// Migration note: prefer building a render.Document and encoding via
+// render.ANSIBackend / render.PlainBackend. This helper remains for
+// legacy call sites and will eventually become a thin adapter.
 func FormatOutput(text string, config *OutputConfig, theme *Theme) string {
 	if config == nil {
 		config = NewOutputConfig()
@@ -34,226 +46,213 @@ func FormatOutput(text string, config *OutputConfig, theme *Theme) string {
 		theme = GetTheme(ThemeAuto)
 	}
 
-	// 分行处理
-	lines := strings.Split(text, "\n")
+	doc := FormatOutputDocument(text, config)
+	if !config.Colorize {
+		return render.PlainBackend{}.Render(doc)
+	}
+	return renderDocumentWithProfile(doc, theme)
+}
 
-	var result strings.Builder
-
-	for i, line := range lines {
-		var formattedLine string
-
-		// 添加行号（如果启用）
+// FormatOutputDocument 构建带行号、缩进和终端单元格换行的结构化输出。
+func FormatOutputDocument(text string, config *OutputConfig) render.Document {
+	if config == nil {
+		config = NewOutputConfig()
+	}
+	safe := strings.ReplaceAll(SanitizeTerminalText(text), "\r", "")
+	sourceLines := strings.Split(safe, "\n")
+	out := make([]render.Line, 0, len(sourceLines))
+	indent := strings.ReplaceAll(strings.ReplaceAll(SanitizeTerminalText(config.Indent), "\r", ""), "\n", " ")
+	for i, source := range sourceLines {
+		prefix := make([]render.Span, 0, 2)
+		prefixWidth := render.Width(indent)
 		if config.LineNumber {
 			lineNum := fmt.Sprintf("%3d ", i+1)
-			formattedLine += theme.Dimmed(lineNum)
+			prefix = append(prefix, semanticSpan(lineNum, style.RoleTextMuted, false))
+			prefixWidth += render.Width(lineNum)
 		}
-
-		// 添加缩进
-		formattedLine += config.Indent
-
-		// 自动换行（如果启用）
+		if indent != "" {
+			prefix = append(prefix, semanticSpan(indent, style.RoleTextPrimary, false))
+		}
+		content := render.Line{Spans: []render.Span{semanticSpan(source, style.RoleTextPrimary, false)}}
+		wrapped := []render.Line{content}
 		if config.WordWrap && config.MaxWidth > 0 {
-			wrapped := wrapLine(line, config.MaxWidth-len(config.Indent))
-			for j, wl := range wrapped {
-				if j > 0 {
-					result.WriteString("\n" + wl)
-					// 计算续行缩进
-					continuationIndent := strings.Repeat(" ", len(config.Indent))
-					if config.LineNumber {
-						continuationIndent += "    "
-					}
-					result.WriteString(continuationIndent)
-				} else {
-					result.WriteString(wl)
-				}
+			budget := config.MaxWidth - prefixWidth
+			if budget < 1 {
+				budget = 1
 			}
-		} else {
-			result.WriteString(line)
+			wrapped = render.Wrap(content, budget, render.WrapOptions{BreakWord: true})
 		}
-
-		// 换行
-		if i < len(lines)-1 || line == "" {
-			result.WriteString("\n")
+		for j, line := range wrapped {
+			if j == 0 {
+				line.Spans = append(append([]render.Span{}, prefix...), line.Spans...)
+			} else if prefixWidth > 0 {
+				line.Spans = append([]render.Span{semanticSpan(strings.Repeat(" ", prefixWidth), style.RoleTextMuted, false)}, line.Spans...)
+			}
+			out = append(out, line)
 		}
 	}
-
-	return result.String()
+	return render.Document{Blocks: []render.Block{{Kind: render.BlockParagraph, Lines: out}}}
 }
 
-// wrapLine 自动换行
-func wrapLine(line string, maxWidth int) []string {
-	if maxWidth <= 0 || len(line) <= maxWidth {
-		return []string{line}
-	}
-
-	var lines []string
-	current := ""
-
-	for _, r := range line {
-		if len(current) < maxWidth {
-			current += string(r)
-		} else {
-			lines = append(lines, current)
-			current = string(r)
-		}
-	}
-
-	if current != "" {
-		lines = append(lines, current)
-	}
-
-	return lines
-}
-
-// FormatCodeBlock 格式化代码块
+// FormatCodeBlock 格式化代码块。
+//
+// Deprecated: migration-period helper. Prefer markdown/syntax renderers that
+// emit render.Document. Do not use in new components.
 func FormatCodeBlock(code, language string, theme *Theme) string {
 	if theme == nil {
 		theme = GetTheme(ThemeAuto)
 	}
-
-	if code == "" {
-		return ""
-	}
-
-	// 语言标签
-	var langTag string
-	if language != "" {
-		langTag = fmt.Sprintf("%s ", language)
-	}
-
-	// 分隔符
-	separator := fmt.Sprintf("```%s", language)
-
-	// 内容行
-	lines := strings.Split(code, "\n")
-	var content strings.Builder
-	for _, line := range lines {
-		content.WriteString(fmt.Sprintf("%s%s\n", strings.Repeat(" ", 2), line))
-	}
-
-	// 使用主题颜色构建代码块
-	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("%s%s%s\n",
-		theme.SeparatorColor.Sprint(separator),
-		langTag,
-		content.String()))
-	builder.WriteString(theme.SeparatorColor.Sprint(fmt.Sprintf("%s", separator)))
-
-	return builder.String()
+	return renderDocumentWithProfile(CodeBlockDocument(code, language), theme)
 }
 
-// FormatJSON 格式化 JSON 输出（简化版，不实际解析 JSON）
+// CodeBlockDocument 使用 Chroma 生成 token spans，不再把 fence 或语言名
+// 混入可复制的代码正文。
+func CodeBlockDocument(code, language string) render.Document {
+	if code == "" {
+		return render.Document{}
+	}
+	safe := strings.ReplaceAll(SanitizeTerminalText(code), "\r", "")
+	lines, _ := syntax.Highlight(syntax.HighlightRequest{
+		Code:     safe,
+		Language: strings.TrimSpace(SanitizeTerminalText(language)),
+		Theme:    CurrentResolvedSyntaxThemeName(),
+	})
+	return render.Document{Blocks: []render.Block{{Kind: render.BlockCode, Lines: lines}}}
+}
+
+// FormatJSON pretty-prints JSON using encoding/json.
+// On parse failure the original text is returned unchanged (no brace rewriting).
 func FormatJSON(jsonStr string) string {
-	if strings.TrimSpace(jsonStr) == "" {
+	trimmed := strings.TrimSpace(jsonStr)
+	if trimmed == "" {
 		return ""
 	}
 
-	// 简单处理：如果 JSON 很长，可以添加缩进
-	if strings.Count(jsonStr, "\n") <= 5 {
+	var parsed any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
 		return jsonStr
 	}
-
-	// 添加基础缩进
-	var builder strings.Builder
-	indent := 0
-	inString := false
-
-	for _, r := range jsonStr {
-		switch r {
-		case '{', '[':
-			if inString {
-				builder.WriteRune(r)
-			} else {
-				builder.WriteRune(r)
-				builder.WriteString("\n")
-				indent++
-				builder.WriteString(strings.Repeat("  ", indent))
-			}
-		case '}', ']':
-			if inString {
-				builder.WriteRune(r)
-			} else {
-				builder.WriteString("\n")
-				indent--
-				builder.WriteString(strings.Repeat("  ", indent))
-				builder.WriteRune(r)
-			}
-		case ',':
-			if inString {
-				builder.WriteRune(r)
-			} else {
-				builder.WriteRune(r)
-				builder.WriteString("\n")
-				builder.WriteString(strings.Repeat("  ", indent))
-			}
-		case '"':
-			inString = !inString
-			builder.WriteRune(r)
-		default:
-			builder.WriteRune(r)
-		}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(parsed); err != nil {
+		return jsonStr
 	}
-
-	return builder.String()
+	// Encoder always appends a trailing newline; trim for stable callers.
+	return strings.TrimSuffix(buf.String(), "\n")
 }
 
-// FormatMarkdown 格式化 Markdown 文本到终端（简化版）
+// FormatMarkdown formats Markdown for the terminal via Goldmark + Chroma.
+//
+// Prefer FormatMarkdownDocument when the caller can consume render.Document.
 func FormatMarkdown(text string) string {
 	if text == "" {
 		return ""
 	}
-
-	// 这里可以添加 Markdown 基础格式化
-	// 比如：加粗、列表、代码块等
-	// 为了保持简单，暂时直接返回原文本
-	return text
+	width := GetTerminalWidth()
+	return FormatMarkdownWidth(text, width)
 }
 
-// Truncate 截断文本
-func Truncate(text string, maxLen int, suffix string) string {
-	if len(text) <= maxLen {
-		return text
+// FormatMarkdownWidth formats Markdown constrained to width terminal cells.
+func FormatMarkdownWidth(text string, width int) string {
+	if text == "" {
+		return ""
 	}
-
-	actualLen := maxLen - len(suffix)
-	if actualLen < 0 {
-		actualLen = 0
-	}
-
-	return text[:actualLen] + suffix
+	f := formatter.NewMarkdownFormatter(true)
+	f.Width = width
+	f.ThemeContextProvider = CurrentThemeContext
+	return renderDocumentWithProfile(f.FormatDocument(text), GetTheme(ThemeAuto))
 }
 
-// HighlightKeywords 高亮关键词
+// FormatMarkdownDocument returns the structured markdown render model.
+func FormatMarkdownDocument(text string, width int) render.Document {
+	if text == "" {
+		return render.Document{}
+	}
+	f := formatter.NewMarkdownFormatter(true)
+	f.Width = width
+	f.ThemeContextProvider = CurrentThemeContext
+	return f.FormatDocument(text)
+}
+
+// TruncateVisible truncates by terminal cell width.
+func TruncateVisible(text string, maxWidth int, marker string) string {
+	return render.TruncateText(text, maxWidth, marker)
+}
+
+// HighlightKeywords 高亮关键词。
+//
+// Deprecated: migration-period helper. Prefer typed spans over string replace.
 func HighlightKeywords(text string, keywords []string, theme *Theme) string {
 	if theme == nil {
 		theme = GetTheme(ThemeAuto)
 	}
 
-	if len(keywords) == 0 {
-		return text
-	}
+	doc := KeywordDocument(text, keywords)
+	return renderDocumentWithProfile(doc, theme)
+}
 
-	result := text
+// KeywordDocument performs deterministic, non-overlapping keyword matching.
+// At the same position the longest keyword wins; source order breaks ties.
+func KeywordDocument(text string, keywords []string) render.Document {
+	safe := strings.ReplaceAll(SanitizeTerminalText(text), "\r", "")
+	clean := make([]string, 0, len(keywords))
 	for _, keyword := range keywords {
-		if keyword == "" {
-			continue
+		keyword = SanitizeTerminalText(keyword)
+		if keyword != "" && !strings.Contains(keyword, "\n") {
+			clean = append(clean, keyword)
 		}
-		// 使用简单的字符串替换（不处理大小写）
-		result = strings.ReplaceAll(result, keyword,
-			theme.CommandColor.Sprintf("[%s]", keyword))
 	}
+	if len(clean) == 0 {
+		return RoleTextDocument(safe, style.RoleTextPrimary)
+	}
+	parts := strings.Split(safe, "\n")
+	lines := make([]render.Line, 0, len(parts))
+	for _, part := range parts {
+		lines = append(lines, render.Line{Spans: keywordLineSpans(part, clean)})
+	}
+	return render.LinesDoc(lines...)
+}
 
-	return result
+func keywordLineSpans(safe string, keywords []string) []render.Span {
+	var spans []render.Span
+	for pos := 0; pos < len(safe); {
+		bestAt, bestKeyword := -1, ""
+		for _, keyword := range keywords {
+			idx := strings.Index(safe[pos:], keyword)
+			if idx < 0 {
+				continue
+			}
+			at := pos + idx
+			if bestAt < 0 || at < bestAt || (at == bestAt && len(keyword) > len(bestKeyword)) {
+				bestAt, bestKeyword = at, keyword
+			}
+		}
+		if bestAt < 0 {
+			spans = append(spans, semanticSpan(safe[pos:], style.RoleTextPrimary, false))
+			break
+		}
+		if bestAt > pos {
+			spans = append(spans, semanticSpan(safe[pos:bestAt], style.RoleTextPrimary, false))
+		}
+		spans = append(spans, semanticSpan("["+bestKeyword+"]", style.RoleCommand, true))
+		pos = bestAt + len(bestKeyword)
+	}
+	if len(spans) == 0 {
+		spans = append(spans, semanticSpan("", style.RoleTextPrimary, false))
+	}
+	return spans
 }
 
 // PrintFormattedOutput 打印格式化输出
 func PrintFormattedOutput(text string, config *OutputConfig) {
 	theme := GetTheme(ThemeAuto)
-	fmt.Println(FormatOutput(text, config, theme))
+	_, _ = WriteTerminalLine(os.Stdout, FormatOutput(text, config, theme))
 }
 
 // PrintCodeBlock 打印代码块
 func PrintCodeBlock(code, language string) {
 	theme := GetTheme(ThemeAuto)
-	fmt.Println(FormatCodeBlock(code, language, theme))
+	_, _ = WriteTerminalLine(os.Stdout, FormatCodeBlock(code, language, theme))
 }

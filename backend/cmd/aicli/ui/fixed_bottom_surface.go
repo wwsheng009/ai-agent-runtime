@@ -5,7 +5,45 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
+
+const (
+	// ActiveBandMinRows keeps the in-progress stream viewport usable on short
+	// terminals; it matches the historical fixed band height.
+	ActiveBandMinRows = 6
+	// ActiveBandMaxRows is the hard ceiling for the stream viewport on very
+	// tall terminals so scrollback keeps most of the screen.
+	ActiveBandMaxRows = 14
+	// activeBandReservedRows is the space kept for scrollback output, composer,
+	// notice and status rows when sizing the band.
+	activeBandReservedRows = 12
+	// activeBandHeightDivisor gives the band roughly one third of the screen
+	// before the ceiling and reserve clamps apply.
+	activeBandHeightDivisor = 3
+)
+
+// ActiveBandRows returns the adaptive row budget for the in-progress stream
+// viewport. It grows with terminal height, never drops below the historical
+// six rows, and always leaves room for output, composer and status rows.
+func ActiveBandRows(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return ActiveBandMinRows
+	}
+	rows := terminalHeight / activeBandHeightDivisor
+	if rows > ActiveBandMaxRows {
+		rows = ActiveBandMaxRows
+	}
+	if limit := terminalHeight - activeBandReservedRows; rows > limit {
+		rows = limit
+	}
+	if rows < ActiveBandMinRows {
+		rows = ActiveBandMinRows
+	}
+	return rows
+}
 
 // FixedBottomSurface reserves the last terminal row for lightweight status
 // while normal chat output scrolls in the region above it.
@@ -13,7 +51,7 @@ type FixedBottomSurface struct {
 	terminal               *Terminal
 	mu                     sync.Mutex
 	enabled                bool
-	statusLine             string
+	statusModel            *style.StatusLineModel
 	popupLines             []string
 	popupOwner             string
 	popupInstance          uint64
@@ -24,6 +62,9 @@ type FixedBottomSurface struct {
 	composerLine           string
 	promptNoticeLine       string
 	promptEditorStatusLine string
+	// activeBandLines is the Phase 5 in-progress stream viewport (not scrollback).
+	activeBandLines        []string
+	activeBandStyled       []render.Line
 	promptLine             string
 	promptInput            string
 	promptReservedRows     int
@@ -37,6 +78,12 @@ type FixedBottomSurface struct {
 	popupRenderedStartRow  int
 	popupReservedRows      int
 	scrollCompensatedRows  int
+	pendingScrollDownRows  int
+	// outputCursorOnBlankRow is true when the last WriteOutput ended on a
+	// trailing newline, leaving the output-region cursor on an empty row.
+	// Band/popup growth must consume that blank instead of scrolling it into
+	// a permanent gap above the reserved bottom pane.
+	outputCursorOnBlankRow bool
 	lastWidth              int
 	lastHeight             int
 	lastBottomRows         int
@@ -73,8 +120,10 @@ func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
 		term = NewTerminal()
 	}
 	return &FixedBottomSurface{
-		terminal:   term,
-		statusLine: "Ready",
+		terminal: term,
+		statusModel: &style.StatusLineModel{
+			State: style.RunReady,
+		},
 	}
 }
 
@@ -98,6 +147,32 @@ func (s *FixedBottomSurface) Enable() bool {
 	return true
 }
 
+// EnableForTest forces the surface on with a synthetic geometry for unit tests.
+// It skips TTY capability probes and does not paint (callers drive Set* APIs).
+func (s *FixedBottomSurface) EnableForTest(width, height int) {
+	if s == nil {
+		return
+	}
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.terminal == nil {
+		s.terminal = &Terminal{width: width, height: height, theme: GetTheme(ThemeAuto)}
+	}
+	// Pin the geometry: probing a non-TTY writer always reports 80x24, which
+	// would silently discard the requested height on the next layout pass.
+	s.terminal.SetSizeForTest(width, height)
+	s.enabled = true
+	s.lastWidth = width
+	s.lastHeight = height
+	s.lastBottomRows = 1
+}
+
 func (s *FixedBottomSurface) Disable() {
 	if s == nil || s.terminal == nil {
 		return
@@ -119,8 +194,12 @@ func (s *FixedBottomSurface) Disable() {
 	s.clearPopupStateLocked(true)
 	s.clearComposerStateLocked()
 	s.clearPromptStateLocked(true)
+	s.activeBandLines = nil
+	s.activeBandStyled = nil
 	s.enabled = false
 	s.scrollCompensatedRows = 0
+	s.pendingScrollDownRows = 0
+	s.outputCursorOnBlankRow = false
 }
 
 func (s *FixedBottomSurface) clearPopupStateLocked(clearStack bool) {
@@ -242,7 +321,7 @@ func (s *FixedBottomSurface) promptInputMaxVisibleRowsLocked() int {
 		statusRows       = 1
 		editorStatusRows = 1
 	)
-	rows := height - outputRows - statusRows - editorStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine))
+	rows := height - outputRows - statusRows - editorStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine)) - len(s.activeBandLines)
 	if rows < 1 {
 		return 1
 	}
@@ -352,10 +431,16 @@ func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, er
 	var err error
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
+		s.flushPendingOutputScrollDownLocked()
 		s.moveToOutputLocked()
 		n, err = io.WriteString(writer, normalizeFixedSurfaceOutputText(text))
 		if n > 0 {
 			s.markOutputWrittenLocked()
+			// Trailing newline parks the cursor on a blank row at the output
+			// bottom. Later bottom-reserve growth must absorb that blank or it
+			// becomes a visible hole above the active band / prompt.
+			normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+			s.outputCursorOnBlankRow = strings.HasSuffix(normalized, "\n")
 		}
 		s.restoreStoredPromptCursorLocked()
 	})
@@ -492,6 +577,278 @@ func (s *FixedBottomSurface) SetPromptNoticeLine(line string) bool {
 		}
 	})
 	return true
+}
+
+// SetActiveBand updates the in-progress stream viewport above the prompt/status.
+// Lines are sanitized and capped to the adaptive row budget. Empty clears it.
+// This never writes into scrollback; callers commit final content separately.
+func (s *FixedBottomSurface) SetActiveBand(lines []string) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	normalized := normalizeActiveBandLines(lines, s.terminal.Width(), s.ActiveBandRowBudget())
+	return s.setActiveBand(normalized, nil)
+}
+
+// SetActiveBandStyled updates the active viewport from structured lines.
+// Text is sanitized and width-limited before storage; only semantic styles
+// generated by the application reach the terminal rendering adapter.
+func (s *FixedBottomSurface) SetActiveBandStyled(lines []render.Line) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	styled := normalizeActiveBandStyledLines(lines, s.terminal.Width(), s.ActiveBandRowBudget())
+	plain := render.PlainBackend{}.RenderLines(render.LinesDoc(styled...))
+	return s.setActiveBand(plain, styled)
+}
+
+// ActiveBandRowBudget reports how many rows the stream viewport may use for the
+// current terminal size. It falls back to the historical minimum when the
+// terminal height is unknown.
+func (s *FixedBottomSurface) ActiveBandRowBudget() int {
+	if s == nil || s.terminal == nil {
+		return ActiveBandMinRows
+	}
+	return ActiveBandRows(s.terminal.Height())
+}
+
+// ActiveBandViewportSize reports the cached terminal width and the adaptive row
+// budget for the in-progress stream viewport. Producers use it to keep their
+// frame buffer sized to the surface without extra terminal syscalls.
+func (s *FixedBottomSurface) ActiveBandViewportSize() (width, rows int) {
+	if s == nil || s.terminal == nil {
+		return 0, ActiveBandMinRows
+	}
+	return s.terminal.Width(), ActiveBandRows(s.terminal.Height())
+}
+
+func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.Line) bool {
+	if len(normalized) == 0 {
+		return s.clearActiveBand()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if activeBandLinesEqual(s.activeBandLines, normalized) && render.LinesEqual(s.activeBandStyled, styled) {
+		return s.enabled
+	}
+	s.activeBandLines = normalized
+	s.activeBandStyled = cloneRenderLines(styled)
+	s.reflowPromptViewportLocked()
+	return s.repaintActiveBandLocked()
+}
+
+// RefreshActiveBand repaints the stored frame after a theme or terminal
+// capability change, even when its structured content is unchanged.
+func (s *FixedBottomSurface) RefreshActiveBand() bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.repaintActiveBandLocked()
+}
+
+func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
+	if !s.enabled {
+		return false
+	}
+	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
+	WithTerminalWriteLock(func() {
+		if restorePromptCursor {
+			s.terminal.HideCursor()
+			defer s.terminal.ShowCursor()
+		} else {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.renderPromptRowsLocked(true)
+		// Freed band rows are already cleared here, so a deferred shrink
+		// compensation can safely pull the transcript down to the prompt.
+		s.flushPendingOutputScrollDownLocked()
+		if restorePromptCursor {
+			s.restoreStoredPromptCursorLocked()
+		} else {
+			s.moveToOutputLocked()
+		}
+	})
+	return true
+}
+
+// ClearActiveBand removes the in-progress stream viewport.
+func (s *FixedBottomSurface) ClearActiveBand() bool {
+	return s.clearActiveBand()
+}
+
+// clearActiveBand releases the active viewport as one terminal-space
+// transaction. The old pixels must be erased before the enlarged output region
+// is scrolled down; repainting the old coordinates afterwards could erase the
+// transcript that was just moved into those rows.
+func (s *FixedBottomSurface) clearActiveBand() bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.activeBandLines) == 0 && len(s.activeBandStyled) == 0 {
+		return s.enabled
+	}
+
+	oldStart := s.promptRenderedStartRow
+	oldRows := s.promptRenderedRows
+	s.activeBandLines = nil
+	s.activeBandStyled = nil
+	s.reflowPromptViewportLocked()
+	if !s.enabled {
+		return false
+	}
+
+	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
+	WithTerminalWriteLock(func() {
+		if restorePromptCursor {
+			s.terminal.HideCursor()
+			defer s.terminal.ShowCursor()
+		} else {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
+
+		// Emit geometry contraction, stale-pixel cleanup and scroll-down as one
+		// write. This avoids exposing a cleared 14-row band to a later output
+		// write before the transcript has been pulled into the released space.
+		var transition strings.Builder
+		s.appendApplyLayoutSequenceLocked(&transition)
+		appendClearRowsSequence(&transition, oldStart, oldRows)
+		s.appendPendingOutputScrollDownLocked(&transition)
+		if transition.Len() > 0 {
+			fmt.Print(transition.String())
+		}
+
+		// The old coordinates are invalid after scroll-down. The following
+		// repaint must only track rows belonging to the new bottom-pane state.
+		s.promptRenderedStartRow = 0
+		s.promptRenderedRows = 0
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.renderPromptRowsLocked(true)
+		if restorePromptCursor {
+			s.restoreStoredPromptCursorLocked()
+		} else {
+			s.moveToOutputLocked()
+		}
+	})
+	return true
+}
+
+// ActiveBandLines returns a copy of the current active band.
+func (s *FixedBottomSurface) ActiveBandLines() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.activeBandLines) == 0 {
+		return nil
+	}
+	return append([]string(nil), s.activeBandLines...)
+}
+
+func normalizeActiveBandLines(lines []string, width, maxRows int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	if maxRows <= 0 {
+		maxRows = ActiveBandMinRows
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+		// Keep blank lines as spacers inside the band; drop fully empty
+		// leading/trailing rows so they cannot inflate the reserved height
+		// into a visible hole above the first real content line.
+		if width > 0 {
+			line = truncateFixedPopupLine(line, width)
+		}
+		out = append(out, line)
+	}
+	// Trim leading blank lines.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
+	// Trim trailing blank lines.
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	if len(out) > maxRows {
+		// Keep the newest tail — streaming focus is the end of the active cell.
+		out = out[len(out)-maxRows:]
+	}
+	return out
+}
+
+func normalizeActiveBandStyledLines(lines []render.Line, width, maxRows int) []render.Line {
+	if len(lines) == 0 {
+		return nil
+	}
+	if maxRows <= 0 {
+		maxRows = ActiveBandMinRows
+	}
+	out := make([]render.Line, 0, len(lines))
+	for _, line := range lines {
+		clean := line
+		clean.Spans = make([]render.Span, 0, len(line.Spans))
+		for _, span := range line.Spans {
+			span.Text = strings.ReplaceAll(SanitizeTerminalText(span.Text), "\r", " ")
+			span.Text = strings.ReplaceAll(span.Text, "\n", " ")
+			span.Link = sanitizeStatusLineText(span.Link)
+			if span.Text != "" || span.Link != "" {
+				clean.Spans = append(clean.Spans, span)
+			}
+		}
+		if width > 0 && render.LineWidth(clean) > width {
+			clean = render.Truncate(clean, width, "…")
+		}
+		out = append(out, clean)
+	}
+	for len(out) > 0 && strings.TrimSpace((render.PlainBackend{}).Render(render.LinesDoc(out[0]))) == "" {
+		out = out[1:]
+	}
+	for len(out) > 0 && strings.TrimSpace((render.PlainBackend{}).Render(render.LinesDoc(out[len(out)-1]))) == "" {
+		out = out[:len(out)-1]
+	}
+	if len(out) > maxRows {
+		out = out[len(out)-maxRows:]
+	}
+	return out
+}
+
+func activeBandLinesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneRenderLines(lines []render.Line) []render.Line {
+	if len(lines) == 0 {
+		return nil
+	}
+	clone := make([]render.Line, len(lines))
+	for i, line := range lines {
+		clone[i] = line
+		clone[i].Spans = append([]render.Span(nil), line.Spans...)
+	}
+	return clone
 }
 
 // SetPromptEditorStatusLine shows compact, editor-owned context above a
@@ -1010,17 +1367,23 @@ func (s *FixedBottomSurface) ClearPopupHandlePreserveCursor(handle PopupHandle) 
 	})
 }
 
-func (s *FixedBottomSurface) SetStatusLine(line string) {
+// SetStatusModel updates the status row from structured semantic data.
+func (s *FixedBottomSurface) SetStatusModel(model style.StatusLineModel) {
 	if s == nil || s.terminal == nil {
 		return
 	}
-	line = strings.TrimSpace(SanitizeTerminalText(line))
+	model = sanitizeStatusLineModel(model)
+	line := strings.TrimSpace(style.StatusLineDocument(model, 0).PlainText())
 	if line == "" {
-		line = "Ready"
+		model = style.StatusLineModel{State: style.RunReady}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.statusLine = line
+	s.statusModel = cloneStatusLineModel(&model)
+	s.repaintStatusUpdateLocked()
+}
+
+func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 	if !s.enabled {
 		return
 	}
@@ -1042,6 +1405,41 @@ func (s *FixedBottomSurface) SetStatusLine(line string) {
 			s.restoreStoredPromptCursorLocked()
 		}
 	})
+}
+
+func sanitizeStatusLineModel(model style.StatusLineModel) style.StatusLineModel {
+	model.State = style.RunState(sanitizeStatusLineText(string(model.State)))
+	model.StateText = sanitizeStatusLineText(model.StateText)
+	if model.Separator != "" {
+		model.Separator = strings.ReplaceAll(SanitizeTerminalText(model.Separator), "\r", " ")
+		model.Separator = strings.ReplaceAll(model.Separator, "\n", " ")
+	}
+	segments := make([]style.StatusSegment, 0, len(model.Segments))
+	for _, segment := range model.Segments {
+		segment.Text = sanitizeStatusLineText(segment.Text)
+		if segment.Text == "" {
+			continue
+		}
+		segment.Link = sanitizeStatusLineText(segment.Link)
+		segments = append(segments, segment)
+	}
+	model.Segments = segments
+	return model
+}
+
+func sanitizeStatusLineText(text string) string {
+	text = strings.ReplaceAll(SanitizeTerminalText(text), "\r", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	return strings.TrimSpace(text)
+}
+
+func cloneStatusLineModel(model *style.StatusLineModel) *style.StatusLineModel {
+	if model == nil {
+		return nil
+	}
+	clone := *model
+	clone.Segments = append([]style.StatusSegment(nil), model.Segments...)
+	return &clone
 }
 
 // SetComposerPreview 在底部固定区额外保留一行 composer 预览。
@@ -1353,16 +1751,86 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Bu
 	}
 	sameSize := width == lastWidth && height == lastHeight
 	compensatedRows := s.scrollCompensatedRows
-	if sameSize && compensatedRows > 0 && bottomRows > compensatedRows {
-		appendOutputScrollUpForBottomReserveGrowthSequence(builder, height, compensatedRows, bottomRows)
+	switch {
+	case sameSize && compensatedRows > 0 && bottomRows > compensatedRows:
+		// A pending shrink compensation cancels out an immediate re-growth:
+		// content never moved down, so it must not be scrolled up twice.
+		growth := bottomRows - compensatedRows
+		if s.pendingScrollDownRows > 0 {
+			canceled := s.pendingScrollDownRows
+			if canceled > growth {
+				canceled = growth
+			}
+			s.pendingScrollDownRows -= canceled
+			growth -= canceled
+		}
+		scrollGrowth := growth
+		// WriteOutput("...\n") leaves the cursor on an empty output row. The
+		// first reserved row can occupy that blank directly; scrolling it up
+		// would open a permanent hole between scrollback and the active band
+		// (or popup) during a single reply — most visible when the band jumps
+		// toward ActiveBandMaxRows on a tall terminal.
+		if scrollGrowth > 0 && s.outputCursorOnBlankRow {
+			scrollGrowth--
+			s.outputCursorOnBlankRow = false
+		}
+		if scrollGrowth > 0 {
+			// When a trailing blank is absorbed, scrollGrowth == growth-1 and
+			// (bottomRows-scrollGrowth) is one past the true previous bottom:
+			// the scroll region ends on the last content row so the blank row
+			// becomes the first newly reserved row instead of a hole above it.
+			// Without absorption, scrollGrowth == growth and this equals the
+			// real previous bottomRows.
+			appendOutputScrollUpForBottomReserveGrowthSequence(builder, height, bottomRows-scrollGrowth, bottomRows)
+		}
 		s.scrollCompensatedRows = bottomRows
-	} else if !sameSize || compensatedRows <= 0 {
+	case sameSize && compensatedRows > 0 && bottomRows < compensatedRows:
+		// Freed reserve rows (a released active band, a closed popup) would
+		// otherwise stay blank between the last committed output line and the
+		// prompt. The scroll itself is deferred until the stale rows above the
+		// prompt have been cleared, so a repaint cannot erase moved content.
+		s.pendingScrollDownRows += compensatedRows - bottomRows
 		s.scrollCompensatedRows = bottomRows
+		// Shrink repaints the freed rows; any prior trailing blank is gone.
+		s.outputCursorOnBlankRow = false
+	case !sameSize || compensatedRows <= 0:
+		s.pendingScrollDownRows = 0
+		s.scrollCompensatedRows = bottomRows
+		s.outputCursorOnBlankRow = false
 	}
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = bottomRows
 	builder.WriteString(terminalScrollRegionSequence(1, outputBottomRowForHeight(height, bottomRows)))
+}
+
+// appendPendingOutputScrollDownLocked flushes a deferred bottom-reserve shrink
+// compensation. Callers must invoke it only after the freed rows above the
+// prompt have been cleared or repainted, otherwise the moved output lines would
+// be erased again. BeginOutput must not flush: it only positions the cursor and
+// may be followed by another transient popup instead of real output.
+func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *strings.Builder) {
+	if s == nil || s.terminal == nil || builder == nil || s.pendingScrollDownRows < 1 {
+		return
+	}
+	rows := s.pendingScrollDownRows
+	s.pendingScrollDownRows = 0
+	height := s.terminal.Height()
+	if height <= 1 {
+		return
+	}
+	appendOutputScrollDownForBottomReserveShrinkSequence(builder, height, s.effectiveBottomRowsLocked(height), rows)
+}
+
+func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
+	if s == nil || s.pendingScrollDownRows < 1 {
+		return
+	}
+	var builder strings.Builder
+	s.appendPendingOutputScrollDownLocked(&builder)
+	if builder.Len() > 0 {
+		fmt.Print(builder.String())
+	}
 }
 
 // markOutputWrittenLocked invalidates prior spare-row compensation only after
@@ -1386,10 +1854,13 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 	state := s.bottomPaneStateLocked()
 	s.terminal.MoveTo(s.statusRowLocked(), 1)
 	s.terminal.ClearLine()
-	line := truncateFixedStatusLine(state.StatusLine, s.terminal.Width())
-	if line != "" {
-		fmt.Print(formatFixedStatusLine(line, GetTheme(ThemeAuto)))
+	width := s.terminal.Width()
+	themeContext := s.activeBandThemeContextLocked()
+	model := style.StatusLineModel{State: style.RunReady}
+	if state.StatusModel != nil {
+		model = *state.StatusModel
 	}
+	fmt.Print(formatFixedStatusModelWithContext(model, width, themeContext))
 	s.terminal.ClearLine()
 }
 
@@ -1511,7 +1982,8 @@ func (s *FixedBottomSurface) promptCursorPositionLocked(rowOffset, col int) (int
 func (s *FixedBottomSurface) promptMaxVisibleRowsLocked() int {
 	bottom := s.promptBottomRowLocked()
 	outputBottom := s.outputBottomRowLocked()
-	rows := bottom - outputBottom - s.bottomPaneStateLocked().promptNoticeVisibleRowCount()
+	state := s.bottomPaneStateLocked()
+	rows := bottom - outputBottom - state.promptNoticeVisibleRowCount() - state.activeBandVisibleRowCount()
 	if rows < 1 {
 		return 1
 	}
@@ -1589,7 +2061,11 @@ func (s *FixedBottomSurface) promptBottomRowLocked() int {
 		}
 		return row
 	}
-	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 {
+	// A visible active band reserves rows in bottomRowsLocked even when the
+	// prompt is hidden (streaming before the prompt returns). Anchoring the
+	// stack to the output bottom in that case would paint the band inside the
+	// scroll region and leave its reserved rows blank above the status line.
+	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 || state.activeBandVisibleRowCount() > 0 {
 		row := s.statusRowLocked() - 1
 		if row < 1 {
 			return 1
@@ -1714,52 +2190,137 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		return
 	}
 	rows := state.promptVisibleRowCount()
-	if rows < 1 {
+	noticeRows := state.promptNoticeVisibleRowCount()
+	activeRows := state.activeBandVisibleRowCount()
+	if rows < 1 && noticeRows < 1 && activeRows < 1 {
+		if s.promptRenderedRows > 0 {
+			s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
+			s.promptRenderedStartRow = 0
+			s.promptRenderedRows = 0
+		}
 		return
 	}
-	noticeRows := state.promptNoticeVisibleRowCount()
-	if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
-		rows = maxRows
+	if rows > 0 {
+		if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
+			rows = maxRows
+		}
 	}
 	bottom := s.promptBottomRowLocked()
 	if bottom < 1 {
+		bottom = s.statusRowLocked() - 1
+	}
+	if bottom < 1 {
 		return
 	}
-	promptStart := bottom - rows + 1
-	start := promptStart - noticeRows
+	// Layout bottom-up: [active band][notice][prompt][status]
+	promptStart := bottom
+	if rows > 0 {
+		promptStart = bottom - rows + 1
+	}
+	noticeStart := promptStart
+	if rows > 0 {
+		noticeStart = promptStart - noticeRows
+	} else {
+		noticeStart = bottom - noticeRows + 1
+	}
+	if noticeRows < 1 {
+		noticeStart = promptStart
+	}
+	activeStart := noticeStart - activeRows
+	if noticeRows < 1 && rows < 1 {
+		activeStart = bottom - activeRows + 1
+	}
+	if activeRows < 1 {
+		activeStart = noticeStart
+	}
+	start := activeStart
 	if start < 1 {
 		start = 1
 	}
-	areaRows := noticeRows + rows
+	areaRows := activeRows + noticeRows + rows
 	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != start || s.promptRenderedRows != areaRows) {
 		s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 	}
 	if clear {
 		s.clearRowsLocked(start, areaRows)
 	}
-	if noticeRows > 0 {
-		noticeLines := state.promptNoticeLines()
-		for i := 0; i < noticeRows && i < len(noticeLines); i++ {
-			s.terminal.MoveTo(start+i, 1)
-			notice := truncateFixedPopupLine(noticeLines[i], s.terminal.Width())
-			if notice != "" {
-				fmt.Print(GetTheme(ThemeAuto).Dimmed(notice))
+	activeTheme := s.activeBandThemeContextLocked()
+	if activeRows > 0 {
+		// After a shrink the stored band can exceed the current budget; keep the
+		// newest tail so streaming focus stays on the end of the active cell.
+		band := state.ActiveBandLines
+		styled := state.ActiveBandStyled
+		if len(band) > activeRows {
+			band = band[len(band)-activeRows:]
+		}
+		if len(styled) > activeRows {
+			styled = styled[len(styled)-activeRows:]
+		}
+		for i := 0; i < activeRows && i < len(band); i++ {
+			row := activeStart + i
+			if row < 1 {
+				continue
+			}
+			s.terminal.MoveTo(row, 1)
+			if i < len(styled) {
+				line := styled[i]
+				if render.LineWidth(line) > s.terminal.Width() {
+					line = render.Truncate(line, s.terminal.Width(), "…")
+				}
+				fmt.Print(style.RenderDocument(render.LinesDoc(line), activeTheme))
+				continue
+			}
+			plain := truncateFixedPopupLine(band[i], s.terminal.Width())
+			if plain != "" {
+				fmt.Print(style.RenderDocument(render.SingleLineDoc(render.Span{
+					Text:  plain,
+					Style: render.Style{Role: string(style.RoleInfo)},
+				}), activeTheme))
 			}
 		}
 	}
-	s.terminal.MoveTo(promptStart, 1)
-	viewportText := renderInteractiveInputViewport(
-		s.promptLine,
-		[]rune(s.promptInput),
-		s.terminal.Width(),
-		s.promptViewportStart,
-		rows,
-	)
-	if viewportText != "" {
-		fmt.Print(viewportText)
+	if noticeRows > 0 {
+		noticeLines := state.promptNoticeLines()
+		for i := 0; i < noticeRows && i < len(noticeLines); i++ {
+			row := noticeStart + i
+			if row < 1 {
+				continue
+			}
+			s.terminal.MoveTo(row, 1)
+			notice := truncateFixedPopupLine(noticeLines[i], s.terminal.Width())
+			if notice != "" {
+				fmt.Print(style.RenderDocument(render.SingleLineDoc(render.Span{
+					Text:  notice,
+					Style: render.Style{Role: string(style.RoleTextMuted)},
+				}), activeTheme))
+			}
+		}
+	}
+	if rows > 0 {
+		s.terminal.MoveTo(promptStart, 1)
+		viewportText := renderInteractiveInputViewport(
+			s.promptLine,
+			[]rune(s.promptInput),
+			s.terminal.Width(),
+			s.promptViewportStart,
+			rows,
+		)
+		if viewportText != "" {
+			fmt.Print(viewportText)
+		}
 	}
 	s.promptRenderedStartRow = start
 	s.promptRenderedRows = areaRows
+}
+
+func (s *FixedBottomSurface) activeBandThemeContextLocked() style.ThemeContext {
+	var profile style.ColorProfile
+	if s.terminal != nil && s.terminal.driver != nil {
+		profile = s.terminal.driver.ColorProfile()
+	} else {
+		profile = CurrentColorProfile()
+	}
+	return ThemeContextForProfile(profile)
 }
 
 func (s *FixedBottomSurface) clearRowsLocked(startRow int, rows int) {
@@ -1803,7 +2364,7 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 }
 
 type BottomPaneState struct {
-	StatusLine             string
+	StatusModel            *style.StatusLineModel
 	PopupLines             []string
 	PopupOwner             string
 	PopupBelowPrompt       bool
@@ -1812,6 +2373,9 @@ type BottomPaneState struct {
 	ComposerLine           string
 	PromptNoticeLine       string
 	PromptEditorStatusLine string
+	ActiveBandLines        []string
+	ActiveBandStyled       []render.Line
+	ActiveBandMaxRows      int
 	PromptReservedRows     int
 }
 
@@ -1841,8 +2405,25 @@ func (s BottomPaneState) promptNoticeLines() []string {
 	return lines
 }
 
+// activeBandVisibleRowCount is independent of prompt visibility so streaming
+// can show progress while the prompt is hidden.
+func (s BottomPaneState) activeBandVisibleRowCount() int {
+	if s.composerVisibleRowCount() > 0 {
+		return 0
+	}
+	n := len(s.ActiveBandLines)
+	limit := s.ActiveBandMaxRows
+	if limit <= 0 {
+		limit = ActiveBandMaxRows
+	}
+	if n > limit {
+		return limit
+	}
+	return n
+}
+
 func (s BottomPaneState) promptAreaVisibleRowCount() int {
-	return s.promptNoticeVisibleRowCount() + s.promptVisibleRowCount()
+	return s.activeBandVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVisibleRowCount()
 }
 
 func (s BottomPaneState) popupExpandsBelowPrompt() bool {
@@ -1853,7 +2434,7 @@ func (s BottomPaneState) popupTopReservedRowCount() int {
 	if !s.popupExpandsBelowPrompt() {
 		return 0
 	}
-	rows := s.promptNoticeVisibleRowCount() + s.promptReservedRowCount()
+	rows := s.activeBandVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptReservedRowCount()
 	if rows < 0 {
 		return 0
 	}
@@ -1904,7 +2485,7 @@ func (s BottomPaneState) extraPromptReservedRowCount() int {
 }
 
 func (s BottomPaneState) popupBottomGapRowCount() int {
-	return s.promptNoticeVisibleRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
+	return s.activeBandVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
 }
 
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
@@ -2145,7 +2726,7 @@ func promptNoticeDisplayLines(line string) []string {
 
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	state := BottomPaneState{
-		StatusLine:             s.statusLine,
+		StatusModel:            cloneStatusLineModel(s.statusModel),
 		PopupLines:             append([]string(nil), s.popupLines...),
 		PopupOwner:             s.popupOwner,
 		PopupBelowPrompt:       s.popupBelowPrompt,
@@ -2153,6 +2734,9 @@ func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 		PopupViewport:          clonePopupViewportSpec(s.popupViewport),
 		PromptNoticeLine:       s.promptNoticeLine,
 		PromptEditorStatusLine: s.promptEditorStatusLine,
+		ActiveBandLines:        append([]string(nil), s.activeBandLines...),
+		ActiveBandStyled:       cloneRenderLines(s.activeBandStyled),
+		ActiveBandMaxRows:      s.ActiveBandRowBudget(),
 		PromptReservedRows:     s.promptReservedRows,
 	}
 	if strings.TrimSpace(s.composerLine) != "" {
@@ -2161,78 +2745,8 @@ func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	return state
 }
 
-func truncateFixedStatusLine(line string, width int) string {
-	if width <= 0 {
-		width = 80
-	}
-	if DisplayWidth(line) <= width {
-		return line
-	}
-	if width <= 3 {
-		return ""
-	}
-	var builder strings.Builder
-	current := 0
-	limit := width - 3
-	for _, r := range line {
-		w := DisplayWidth(string(r))
-		if w <= 0 {
-			continue
-		}
-		if current+w > limit {
-			break
-		}
-		builder.WriteRune(r)
-		current += w
-	}
-	builder.WriteString("...")
-	return builder.String()
-}
-
-func formatFixedStatusLine(line string, theme *Theme) string {
-	if line == "" {
-		return ""
-	}
-	if theme == nil {
-		theme = GetTheme(ThemeAuto)
-	}
-
-	// Prefer modern Codex-style separators, then legacy pipe separators.
-	state, rest, hasRest := strings.Cut(line, " · ")
-	sep := " · "
-	if !hasRest {
-		state, rest, hasRest = strings.Cut(line, " | ")
-		sep = " | "
-	}
-	formattedState := formatFixedStatusState(state, theme)
-	if !hasRest {
-		return formattedState
-	}
-	return formattedState + theme.Dimmed(sep+rest)
-}
-
-func formatFixedStatusState(state string, theme *Theme) string {
-	if theme == nil {
-		theme = GetTheme(ThemeAuto)
-	}
-	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "ready", "idle", "就绪", "已完成":
-		return theme.SuccessColor.Sprint(state)
-	case "streaming", "running", "working", "输出中", "执行工具", "规划中":
-		return theme.ToolColor.Sprint(state)
-	case "thinking", "reasoning", "思考":
-		return theme.ReasoningColor.Sprint(state)
-	case "waiting", "pending", "busy", "等待", "等待审批", "等待回答", "审批", "回答", "选择", "确认", "密钥", "导航", "选择选项", "确认操作", "输入密钥", "面板导航", "停止中", "停止":
-		return theme.WarningColor.Sprint(state)
-	case "error", "failed", "interrupted", "cancelled", "canceled", "失败":
-		return theme.ErrorColor.Sprint(state)
-	default:
-		// Model-first status lines start with model name rather than run state.
-		if strings.HasPrefix(state, "执行工具") {
-			return theme.ToolColor.Sprint(state)
-		}
-		return theme.InfoColor.Sprint(state)
-	}
+func formatFixedStatusModelWithContext(model style.StatusLineModel, width int, theme style.ThemeContext) string {
+	return style.RenderDocument(style.StatusLineDocument(model, width), theme)
 }
 
 func truncateFixedPopupLine(line string, width int) string {
@@ -2344,6 +2858,23 @@ func terminalScrollRegionSequence(top, bottom int) string {
 	return fmt.Sprintf("\x1b[%d;%dr", top, bottom) + terminalMoveToSequence(top, 1)
 }
 
+func appendClearRowsSequence(builder *strings.Builder, startRow, rows int) {
+	if builder == nil || startRow < 1 || rows < 1 {
+		return
+	}
+	for row := startRow; row < startRow+rows; row++ {
+		builder.WriteString(terminalMoveToSequence(row, 1))
+		builder.WriteString("\x1b[K")
+	}
+}
+
+func terminalScrollDownSequence(rows int) string {
+	if rows < 1 {
+		return ""
+	}
+	return fmt.Sprintf("\x1b[%dT", rows)
+}
+
 func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height int, oldBottomRows int, newBottomRows int) {
 	if builder == nil || height <= 1 || newBottomRows <= oldBottomRows {
 		return
@@ -2364,6 +2895,28 @@ func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder
 	builder.WriteString(terminalScrollRegionSequence(1, oldOutputBottom))
 	builder.WriteString(terminalMoveToSequence(oldOutputBottom, 1))
 	builder.WriteString(strings.Repeat("\n", delta))
+}
+
+// appendOutputScrollDownForBottomReserveShrinkSequence mirrors the growth
+// compensation. When reserved bottom rows are released, the output region grows
+// downwards and the freed rows stay blank between the last committed line and
+// the prompt. CSI Ps T scrolls the complete region down in one operation. It is
+// preferable to a burst of one-row RI controls here: the transition is atomic
+// from the terminal's perspective and is reliable through Windows ConPTY.
+func appendOutputScrollDownForBottomReserveShrinkSequence(builder *strings.Builder, height, bottomRows, rows int) {
+	if builder == nil || height <= 1 || rows < 1 {
+		return
+	}
+	outputBottom := outputBottomRowForHeight(height, bottomRows)
+	if outputBottom < 1 {
+		return
+	}
+	if rows > outputBottom {
+		rows = outputBottom
+	}
+	builder.WriteString(terminalScrollRegionSequence(1, outputBottom))
+	builder.WriteString(terminalMoveToSequence(1, 1))
+	builder.WriteString(terminalScrollDownSequence(rows))
 }
 
 func outputBottomRowForHeight(height int, bottomRows int) int {

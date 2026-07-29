@@ -1,0 +1,163 @@
+[width=40 lines=6]
+00 plain="user asst system tool think err ok dim"
+   span="user" {role=User,fg=ansi:14,bold}
+   span=" "
+   span="asst" {role=Assistant}
+   span=" "
+   span="system" {role=System,fg=ansi:11}
+   span=" "
+   span="tool" {role=Tool,fg=ansi:14,bold}
+   span=" "
+   span="think" {role=Reasoning,fg=ansi:11}
+   span=" "
+   span="err" {role=Error,fg=ansi:9,bold}
+   span=" "
+   span="ok" {role=Success,fg=ansi:10,bold}
+   span=" "
+   span="dim" {role=TextMuted,fg=ansi:8,dim}
+01 plain="func Hello(n int) string { return \"hi\" …"
+   span="func" {role=Code.KeywordDeclaration,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="Hello" {role=Code.NameFunction,fg=#a6e22e}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2}
+   span="n" {role=Code.NameOther,fg=#a6e22e}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="int" {role=Code.KeywordType,fg=#66d9ef}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="string" {role=Code.KeywordType,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="{" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="return" {role=Code.Keyword,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="…" {role=Code.TextWhitespace,fg=#f8f8f2}
+02 plain="• Edited demo.go"
+   span="• Edited demo.go" {role=Tool,fg=ansi:14,bold}
+03 plain="- return \"bye\"                          " line={bg=#321414}
+   span="- " {role=Error,fg=ansi:9,bg=#321414,bold}
+   span="return" {role=Code.Keyword,fg=#66d9ef,bg=#321414,dim}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2,bg=#321414,dim}
+   span="\"bye\"" {role=Code.LiteralString,fg=#e6db74,bg=#321414,dim}
+   span="                          " {bg=#321414}
+04 plain="+ return \"hi\"                           " line={bg=#143214}
+   span="+ " {role=Success,fg=ansi:10,bg=#143214,bold}
+   span="return" {role=Code.Keyword,fg=#66d9ef,bg=#143214}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2,bg=#143214}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+   span="                           " {bg=#143214}
+05 plain="  }"
+   span="  " {role=TextMuted,fg=ansi:8,dim}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}
+[width=80 lines=6]
+00 plain="user asst system tool think err ok dim"
+   span="user" {role=User,fg=ansi:14,bold}
+   span=" "
+   span="asst" {role=Assistant}
+   span=" "
+   span="system" {role=System,fg=ansi:11}
+   span=" "
+   span="tool" {role=Tool,fg=ansi:14,bold}
+   span=" "
+   span="think" {role=Reasoning,fg=ansi:11}
+   span=" "
+   span="err" {role=Error,fg=ansi:9,bold}
+   span=" "
+   span="ok" {role=Success,fg=ansi:10,bold}
+   span=" "
+   span="dim" {role=TextMuted,fg=ansi:8,dim}
+01 plain="func Hello(n int) string { return \"hi\" } // demo"
+   span="func" {role=Code.KeywordDeclaration,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="Hello" {role=Code.NameFunction,fg=#a6e22e}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2}
+   span="n" {role=Code.NameOther,fg=#a6e22e}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="int" {role=Code.KeywordType,fg=#66d9ef}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="string" {role=Code.KeywordType,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="{" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="return" {role=Code.Keyword,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="// demo" {role=Code.CommentSingle,fg=#75715e}
+02 plain="• Edited demo.go"
+   span="• Edited demo.go" {role=Tool,fg=ansi:14,bold}
+03 plain="- return \"bye\"                                                                  " line={bg=#321414}
+   span="- " {role=Error,fg=ansi:9,bg=#321414,bold}
+   span="return" {role=Code.Keyword,fg=#66d9ef,bg=#321414,dim}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2,bg=#321414,dim}
+   span="\"bye\"" {role=Code.LiteralString,fg=#e6db74,bg=#321414,dim}
+   span="                                                                  " {bg=#321414}
+04 plain="+ return \"hi\"                                                                   " line={bg=#143214}
+   span="+ " {role=Success,fg=ansi:10,bg=#143214,bold}
+   span="return" {role=Code.Keyword,fg=#66d9ef,bg=#143214}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2,bg=#143214}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+   span="                                                                   " {bg=#143214}
+05 plain="  }"
+   span="  " {role=TextMuted,fg=ansi:8,dim}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}
+[width=120 lines=6]
+00 plain="user asst system tool think err ok dim"
+   span="user" {role=User,fg=ansi:14,bold}
+   span=" "
+   span="asst" {role=Assistant}
+   span=" "
+   span="system" {role=System,fg=ansi:11}
+   span=" "
+   span="tool" {role=Tool,fg=ansi:14,bold}
+   span=" "
+   span="think" {role=Reasoning,fg=ansi:11}
+   span=" "
+   span="err" {role=Error,fg=ansi:9,bold}
+   span=" "
+   span="ok" {role=Success,fg=ansi:10,bold}
+   span=" "
+   span="dim" {role=TextMuted,fg=ansi:8,dim}
+01 plain="func Hello(n int) string { return \"hi\" } // demo"
+   span="func" {role=Code.KeywordDeclaration,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="Hello" {role=Code.NameFunction,fg=#a6e22e}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2}
+   span="n" {role=Code.NameOther,fg=#a6e22e}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="int" {role=Code.KeywordType,fg=#66d9ef}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="string" {role=Code.KeywordType,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="{" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="return" {role=Code.Keyword,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="// demo" {role=Code.CommentSingle,fg=#75715e}
+02 plain="• Edited demo.go"
+   span="• Edited demo.go" {role=Tool,fg=ansi:14,bold}
+03 plain="- return \"bye\"                                                                                                          " line={bg=#321414}
+   span="- " {role=Error,fg=ansi:9,bg=#321414,bold}
+   span="return" {role=Code.Keyword,fg=#66d9ef,bg=#321414,dim}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2,bg=#321414,dim}
+   span="\"bye\"" {role=Code.LiteralString,fg=#e6db74,bg=#321414,dim}
+   span="                                                                                                          " {bg=#321414}
+04 plain="+ return \"hi\"                                                                                                           " line={bg=#143214}
+   span="+ " {role=Success,fg=ansi:10,bg=#143214,bold}
+   span="return" {role=Code.Keyword,fg=#66d9ef,bg=#143214}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2,bg=#143214}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+   span="                                                                                                           " {bg=#143214}
+05 plain="  }"
+   span="  " {role=TextMuted,fg=ansi:8,dim}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}

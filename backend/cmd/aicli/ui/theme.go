@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/fatih/color"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"golang.org/x/term"
 )
 
@@ -32,67 +32,14 @@ type Theme struct {
 	Type ThemeType
 	Name string
 
-	// 用户消息颜色
-	UserColor *color.Color
-	UserIcon  string
-
-	// 助手消息颜色
-	AssistantColor *color.Color
-	AssistantIcon  string
-
-	// 系统消息颜色
-	SystemColor *color.Color
-	SystemIcon  string
-
-	// 命令执行颜色
-	CommandColor *color.Color
-	CommandIcon  string
-
-	// 输出颜色
-	OutputColor *color.Color
-
-	// 次级内容颜色
-	SecondaryColor *color.Color
-
-	// 弱化辅助信息颜色
-	MutedColor *color.Color
-
-	// 元信息标签颜色
-	MetaLabelColor *color.Color
-
-	// 时间线/辅助提示颜色
-	TimelineColor *color.Color
-
-	// 工具相关颜色
-	ToolColor *color.Color
-
-	// 推理相关颜色
-	ReasoningColor *color.Color
-
-	// 审批/确认相关颜色
-	ApprovalColor *color.Color
-
-	// 错误颜色
-	ErrorColor *color.Color
-	ErrorIcon  string
-
-	// 警告颜色
-	WarningColor *color.Color
-	WarningIcon  string
-
-	// 成功颜色
-	SuccessColor *color.Color
-	SuccessIcon  string
-
-	// 信息颜色
-	InfoColor *color.Color
-	InfoIcon  string
-
-	// 分隔线颜色
-	SeparatorColor *color.Color
-
-	// 进度条颜色
-	ProgressColor *color.Color
+	UserIcon      string
+	AssistantIcon string
+	SystemIcon    string
+	CommandIcon   string
+	ErrorIcon     string
+	WarningIcon   string
+	SuccessIcon   string
+	InfoIcon      string
 
 	// Shell 图标
 	ShellIcon string
@@ -160,14 +107,8 @@ func createTheme(themeType ThemeType) *Theme {
 // Caller must hold themeMutex when reading currentThemeMode/currentThemeName races matter;
 // this helper only reads currentThemeMode via resolvePreferredThemeType for ThemeAuto.
 func createThemeWithPalette(themeType ThemeType, palette string) *Theme {
-	// color.NoColor 为 true 时表示不支持颜色。
-	useColor := !color.NoColor
-
 	actualType := themeType
 	if themeType == ThemeAuto {
-		if os.Getenv("NO_COLOR") != "" {
-			useColor = false
-		}
 		actualType = resolvePreferredThemeType()
 	}
 	if actualType == ThemeAuto {
@@ -179,19 +120,14 @@ func createThemeWithPalette(themeType ThemeType, palette string) *Theme {
 	if theme.Name == "" {
 		theme.Name = ThemePresetFocus
 	}
-	applyThemePreset(theme, theme.Name)
-
-	if !useColor {
-		disableColors(theme)
-	}
 
 	return theme
 }
 
-// baseTheme builds shared role colors before palette overrides.
-// Light and dark bases differ so palette presets can layer on either axis.
+// baseTheme stores non-style presentation data. Semantic colors live only in
+// style.Palette and are resolved at the final render boundary.
 func baseTheme(actualType ThemeType) *Theme {
-	theme := &Theme{
+	return &Theme{
 		Type:             actualType,
 		UserIcon:         ">",
 		AssistantIcon:    "",
@@ -206,48 +142,6 @@ func baseTheme(actualType ThemeType) *Theme {
 		BorderVertical:   "║",
 		Separator:        "─",
 	}
-
-	if actualType == ThemeLight {
-		theme.UserColor = color.New(color.FgBlue, color.Bold)
-		theme.AssistantColor = color.New(color.FgBlack)
-		theme.SystemColor = color.New(color.FgYellow)
-		theme.CommandColor = color.New(color.FgMagenta)
-		theme.OutputColor = color.New(color.Reset)
-		theme.SecondaryColor = color.New(color.FgBlack)
-		theme.MutedColor = color.New(color.FgHiBlack)
-		theme.MetaLabelColor = color.New(color.FgHiBlack)
-		theme.TimelineColor = color.New(color.FgHiBlack)
-		theme.ToolColor = color.New(color.FgBlue, color.Bold)
-		theme.ReasoningColor = color.New(color.FgYellow)
-		theme.ApprovalColor = color.New(color.FgMagenta, color.Bold)
-		theme.ErrorColor = color.New(color.FgRed, color.Bold)
-		theme.WarningColor = color.New(color.FgYellow, color.Bold)
-		theme.SuccessColor = color.New(color.FgGreen, color.Bold)
-		theme.InfoColor = color.New(color.FgBlue)
-		theme.SeparatorColor = color.New(color.FgHiBlack)
-		theme.ProgressColor = color.New(color.FgGreen)
-		return theme
-	}
-
-	theme.UserColor = color.New(color.FgCyan, color.Bold)
-	theme.AssistantColor = color.New(color.FgGreen)
-	theme.SystemColor = color.New(color.FgHiYellow)
-	theme.CommandColor = color.New(color.FgMagenta)
-	theme.OutputColor = color.New(color.Reset)
-	theme.SecondaryColor = color.New(color.FgWhite)
-	theme.MutedColor = color.New(color.FgHiBlack)
-	theme.MetaLabelColor = color.New(color.FgHiBlack)
-	theme.TimelineColor = color.New(color.FgHiBlack)
-	theme.ToolColor = color.New(color.FgCyan, color.Bold)
-	theme.ReasoningColor = color.New(color.FgYellow)
-	theme.ApprovalColor = color.New(color.FgMagenta, color.Bold)
-	theme.ErrorColor = color.New(color.FgRed, color.Bold)
-	theme.WarningColor = color.New(color.FgYellow, color.Bold)
-	theme.SuccessColor = color.New(color.FgGreen, color.Bold)
-	theme.InfoColor = color.New(color.FgBlue)
-	theme.SeparatorColor = color.New(color.FgHiBlack)
-	theme.ProgressColor = color.New(color.FgGreen)
-	return theme
 }
 
 // detectTerminalThemeType roughly detects light vs dark terminal background.
@@ -273,34 +167,13 @@ func detectTerminalThemeType() ThemeType {
 	return ThemeDark
 }
 
-// disableColors 禁用主题中所有颜色
-func disableColors(theme *Theme) {
-	theme.UserColor = color.New()
-	theme.AssistantColor = color.New()
-	theme.SystemColor = color.New()
-	theme.CommandColor = color.New()
-	theme.OutputColor = color.New()
-	theme.SecondaryColor = color.New()
-	theme.MutedColor = color.New()
-	theme.MetaLabelColor = color.New()
-	theme.TimelineColor = color.New()
-	theme.ToolColor = color.New()
-	theme.ReasoningColor = color.New()
-	theme.ApprovalColor = color.New()
-	theme.ErrorColor = color.New()
-	theme.WarningColor = color.New()
-	theme.SuccessColor = color.New()
-	theme.InfoColor = color.New()
-	theme.SeparatorColor = color.New()
-	theme.ProgressColor = color.New()
-}
-
 // SetTheme 设置明暗模式偏好（auto/light/dark），并立即重建当前配色。
 func SetTheme(themeType ThemeType) {
 	themeMutex.Lock()
-	defer themeMutex.Unlock()
 	currentThemeMode = themeType
 	currentTheme = createTheme(themeType)
+	themeMutex.Unlock()
+	refreshAutoSyntaxTheme()
 }
 
 // String 返回主题字符串表示
@@ -317,100 +190,102 @@ func (t *Theme) String() string {
 
 // PrintSeparator 打印分隔线
 func (t *Theme) PrintSeparator(width int) {
-	t.SeparatorColor.Println(strings.Repeat(t.Separator, width))
+	_, _ = WriteTerminalLine(os.Stdout, RenderRoleTextWithTheme(strings.Repeat(t.Separator, width), style.RoleBorder, t))
 }
 
 // PrintBorder 打印边框分隔线
 func (t *Theme) PrintBorder(width int) {
-	t.SeparatorColor.Println(strings.Repeat(t.BorderHorizontal, width))
+	_, _ = WriteTerminalLine(os.Stdout, RenderRoleTextWithTheme(strings.Repeat(t.BorderHorizontal, width), style.RoleBorder, t))
 }
 
 // FormatUser 格式化用户消息
 func (t *Theme) FormatUser(text string) string {
-	return formatThemedPrefix(t.UserColor, t.UserIcon, text)
+	return t.formatRolePrefix(style.RoleUser, t.UserIcon, text)
 }
 
 // FormatAssistant 格式化助手消息
 func (t *Theme) FormatAssistant(text string) string {
-	return formatThemedPrefix(t.AssistantColor, t.AssistantIcon, text)
+	return t.formatRolePrefix(style.RoleAssistant, t.AssistantIcon, text)
 }
 
 // FormatSystem 格式化系统消息
 func (t *Theme) FormatSystem(text string) string {
-	return t.SystemColor.Sprintf("%s %s", t.SystemIcon, text)
+	return t.formatRolePrefix(style.RoleSystem, t.SystemIcon, text)
 }
 
 // FormatError 格式化错误消息
 func (t *Theme) FormatError(text string) string {
-	return t.ErrorColor.Sprintf("%s %s", t.ErrorIcon, text)
+	return t.formatRolePrefix(style.RoleError, t.ErrorIcon, text)
 }
 
 // FormatWarning 格式化警告消息
 func (t *Theme) FormatWarning(text string) string {
-	return t.WarningColor.Sprintf("%s %s", t.WarningIcon, text)
+	return t.formatRolePrefix(style.RoleWarning, t.WarningIcon, text)
 }
 
 // FormatSuccess 格式化成功消息
 func (t *Theme) FormatSuccess(text string) string {
-	return t.SuccessColor.Sprintf("%s %s", t.SuccessIcon, text)
+	return t.formatRolePrefix(style.RoleSuccess, t.SuccessIcon, text)
 }
 
 // FormatInfo 格式化信息消息
 func (t *Theme) FormatInfo(text string) string {
-	return t.InfoColor.Sprintf("%s %s", t.InfoIcon, text)
+	return t.formatRolePrefix(style.RoleInfo, t.InfoIcon, text)
 }
 
-func formatThemedPrefix(c *color.Color, icon string, text string) string {
+func (t *Theme) formatRolePrefix(role style.Role, icon string, text string) string {
+	icon = strings.TrimSpace(SanitizeTerminalText(icon))
+	text = SanitizeTerminalText(text)
+	var visible string
 	if strings.TrimSpace(icon) == "" {
-		return c.Sprint(text)
+		visible = text
+	} else if text == "" {
+		visible = icon + " "
+	} else {
+		visible = icon + " " + text
 	}
-	if text == "" {
-		return c.Sprintf("%s ", icon)
-	}
-	return c.Sprintf("%s %s", icon, text)
+	doc := RoleTextDocument(visible, role)
+	return renderDocumentWithProfile(doc, t)
 }
 
 // ColorizeUser 用户消息颜色化
 func (t *Theme) ColorizeUser(text string) string {
-	return t.UserColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleUser, t)
 }
 
 // ColorizeAssistant 助手消息颜色化
 func (t *Theme) ColorizeAssistant(text string) string {
-	return t.AssistantColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleAssistant, t)
 }
 
 // ColorizeSystem 系统消息颜色化
 func (t *Theme) ColorizeSystem(text string) string {
-	return t.SystemColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleSystem, t)
 }
 
 // ColorizeError 错误消息颜色化
 func (t *Theme) ColorizeError(text string) string {
-	return t.ErrorColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleError, t)
 }
 
 // ColorizeWarning 警告消息颜色化
 func (t *Theme) ColorizeWarning(text string) string {
-	return t.WarningColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleWarning, t)
 }
 
 // ColorizeSuccess 成功消息颜色化
 func (t *Theme) ColorizeSuccess(text string) string {
-	return t.SuccessColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleSuccess, t)
 }
 
 // ColorizeInfo 信息消息颜色化
 func (t *Theme) ColorizeInfo(text string) string {
-	return t.InfoColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleInfo, t)
 }
 
 // Dimmed 变暗文本
 func (t *Theme) Dimmed(text string) string {
-	if t == nil {
-		return text
-	}
-	return t.MutedColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleTextMuted, t)
 }
 
 // GetTerminalWidth 获取终端宽度（用于自适应布局）
@@ -420,6 +295,15 @@ func GetTerminalWidth() int {
 		return width
 	}
 	return defaultWidth
+}
+
+// GetTerminalHeight 获取终端高度（用于自适应布局）
+func GetTerminalHeight() int {
+	defaultHeight := 24
+	if _, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil && height > 0 {
+		return height
+	}
+	return defaultHeight
 }
 
 // CenterText 居中文本

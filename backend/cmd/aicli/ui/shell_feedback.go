@@ -3,6 +3,11 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // ShellFeedback Shell 命令执行反馈组件
@@ -54,54 +59,117 @@ func (s *ShellFeedback) ShowFull(show bool) *ShellFeedback {
 	return s
 }
 
-// Format 格式化反馈信息
-func (s *ShellFeedback) Format() string {
-	var builder strings.Builder
+// truncateRunes returns the first n runes of s (UTF-8 safe).
+func truncateRunes(s string, n int) string {
+	if n <= 0 || s == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	i := 0
+	for idx := range s {
+		if i == n {
+			return s[:idx]
+		}
+		i++
+	}
+	return s
+}
 
-	// 命令
-	builder.WriteString(s.theme.CommandColor.Sprintf("%s 执行: %s%s\n",
-		s.theme.CommandIcon, s.theme.ShellIcon, s.command))
+// Document builds the structured shell feedback model (roles, no pre-colored ANSI).
+func (s *ShellFeedback) Document() render.Document {
+	theme := s.theme
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	var lines []render.Line
 
-	// 输出
-	if s.output != "" {
-		if s.showFull || len(s.output) <= 200 {
-			// 显示完整输出
-			lines := strings.Split(s.output, "\n")
-			for _, line := range lines {
-				if line != "" {
-					builder.WriteString(s.theme.Dimmed(fmt.Sprintf("  │ %s\n", line)))
-				}
-			}
+	// Command header — sanitize to prevent control-sequence injection.
+	safeCommand := SanitizeTerminalText(s.command)
+	header := fmt.Sprintf("%s 执行: %s%s", theme.CommandIcon, theme.ShellIcon, safeCommand)
+	lines = append(lines, render.Line{Spans: []render.Span{{
+		Text:  header,
+		Style: render.Style{Role: string(style.RoleCommand)},
+	}}})
+
+	// Output — Phase 3 head/tail preview via cell; never pass raw ESC/OSC.
+	if strings.TrimSpace(s.output) != "" {
+		opts := cell.DefaultPreviewOptions()
+		opts.AllowANSI = false
+		if s.showFull {
+			opts.MaxLines = 10000
+			opts.HeadLines = 10000
+			opts.TailLines = 0
+			opts.MaxBytes = 0
 		} else {
-			// 截断输出
-			truncated := s.output[:200]
-			builder.WriteString(s.theme.Dimmed(fmt.Sprintf("  │ %s...\n", truncated)))
-			builder.WriteString(fmt.Sprintf("  ╰─ %s\n", s.theme.InfoColor.Sprintf("(%d 字符)", len(s.output))))
+			opts.MaxLines = 8
+			opts.HeadLines = 4
+			opts.TailLines = 2
+			opts.MaxBytes = 4096
+			opts.MaxLineWidth = 200
+		}
+		preview := cell.BuildPreview(s.output, opts)
+		for _, line := range preview.Lines {
+			plain := render.PlainBackend{}.Render(render.Document{
+				Blocks: []render.Block{{Lines: []render.Line{line}}},
+			})
+			if plain == "" {
+				continue
+			}
+			lines = append(lines, render.Line{Spans: []render.Span{{
+				Text:  "  │ " + plain,
+				Style: render.Style{Role: string(style.RoleTextMuted), Dim: true},
+			}}})
+		}
+		if preview.OmittedLines > 0 || preview.ByteTruncated {
+			lines = append(lines, render.Line{Spans: []render.Span{
+				{Text: "  ╰─ ", Style: render.Style{Role: string(style.RoleTextMuted), Dim: true}},
+				{Text: fmt.Sprintf("(%d 行, 已截断)", preview.TotalLines), Style: render.Style{Role: string(style.RoleInfo)}},
+			}})
 		}
 	}
 
-	// 状态信息
-	var statusParts []string
-
+	// Status row.
+	var statusSpans []render.Span
 	if s.duration != "" {
-		statusParts = append(statusParts, fmt.Sprintf("%s %s",
-			s.theme.InfoIcon, s.theme.Dimmed(s.duration)))
+		statusSpans = append(statusSpans,
+			render.Span{Text: theme.InfoIcon + " ", Style: render.Style{Role: string(style.RoleInfo)}},
+			render.Span{Text: s.duration, Style: render.Style{Role: string(style.RoleTextMuted), Dim: true}},
+		)
 	}
-
 	if s.exitCode != 0 {
-		statusParts = append(statusParts, fmt.Sprintf("%s 退出码: %s",
-			s.theme.ErrorIcon, s.theme.ErrorColor.Sprintf("%d", s.exitCode)))
+		if len(statusSpans) > 0 {
+			statusSpans = append(statusSpans, render.Span{Text: " "})
+		}
+		statusSpans = append(statusSpans,
+			render.Span{Text: theme.ErrorIcon + " 退出码: ", Style: render.Style{Role: string(style.RoleError)}},
+			render.Span{Text: fmt.Sprintf("%d", s.exitCode), Style: render.Style{Role: string(style.RoleError)}},
+		)
 	} else {
-		statusParts = append(statusParts, fmt.Sprintf("%s 成功",
-			s.theme.SuccessIcon))
+		if len(statusSpans) > 0 {
+			statusSpans = append(statusSpans, render.Span{Text: " "})
+		}
+		statusSpans = append(statusSpans, render.Span{
+			Text:  theme.SuccessIcon + " 成功",
+			Style: render.Style{Role: string(style.RoleSuccess)},
+		})
+	}
+	if len(statusSpans) > 0 {
+		indented := append([]render.Span{{Text: "  "}}, statusSpans...)
+		lines = append(lines, render.Line{Spans: indented})
 	}
 
-	if len(statusParts) > 0 {
-		builder.WriteString(fmt.Sprintf("  %s\n",
-			strings.Join(statusParts, " ")))
-	}
+	return render.Document{Blocks: []render.Block{{
+		Kind:  render.BlockParagraph,
+		Lines: lines,
+	}}}
+}
 
-	return builder.String()
+// Format 格式化反馈信息，并按当前终端能力解析语义颜色。
+func (s *ShellFeedback) Format() string {
+	doc := s.Document()
+	return renderDocumentWithProfile(doc, s.theme)
 }
 
 // Print 打印反馈信息
@@ -109,42 +177,89 @@ func (s *ShellFeedback) Print() {
 	fmt.Println(s.Format())
 }
 
+// FormatShellCommand formats a shell command header via Document roles.
+// Untrusted command text is sanitized before styling.
+func FormatShellCommand(command string) string {
+	theme := GetTheme(ThemeAuto)
+	safeCommand := SanitizeTerminalText(command)
+	header := fmt.Sprintf("%s 执行: %s%s", theme.CommandIcon, theme.ShellIcon, safeCommand)
+	doc := render.Document{Blocks: []render.Block{{
+		Kind: render.BlockParagraph,
+		Lines: []render.Line{{Spans: []render.Span{{
+			Text:  header,
+			Style: render.Style{Role: string(style.RoleCommand)},
+		}}}},
+	}}}
+	return strings.TrimRight(renderDocumentWithProfile(doc, theme), "\n")
+}
+
 // DisplayShellCommand 显示执行的 Shell 命令
 func DisplayShellCommand(command string) {
+	fmt.Println(FormatShellCommand(command))
+}
+
+// FormatShellOutput formats shell stdout/stderr for display.
+// Raw ESC/OSC is stripped via cell.BuildPreview (AllowANSI=false).
+// maxLines <= 0 shows a large but still bounded head-only preview.
+func FormatShellOutput(output string, maxLines int) string {
+	if strings.TrimSpace(output) == "" {
+		return ""
+	}
 	theme := GetTheme(ThemeAuto)
-	fmt.Printf("%s 执行: %s%s\n",
-		theme.CommandColor.Sprint(theme.CommandIcon),
-		theme.CommandColor.Sprint(theme.ShellIcon),
-		theme.CommandColor.Sprint(command))
+	opts := cell.DefaultPreviewOptions()
+	opts.AllowANSI = false
+	opts.MaxLineWidth = 200
+	if maxLines > 0 {
+		opts.MaxLines = maxLines
+		opts.HeadLines = maxLines
+		opts.TailLines = 0
+		opts.MaxBytes = 0
+	} else {
+		// Keep a hard ceiling so unbounded dumps cannot freeze the UI.
+		opts.MaxLines = 10000
+		opts.HeadLines = 10000
+		opts.TailLines = 0
+		opts.MaxBytes = 0
+	}
+	preview := cell.BuildPreview(output, opts)
+
+	var lines []render.Line
+	for _, line := range preview.Lines {
+		plain := render.PlainBackend{}.Render(render.Document{
+			Blocks: []render.Block{{Lines: []render.Line{line}}},
+		})
+		if plain == "" {
+			continue
+		}
+		// BuildPreview already emits an English omission marker; keep it muted.
+		lines = append(lines, render.Line{Spans: []render.Span{{
+			Text:  "  │ " + plain,
+			Style: render.Style{Role: string(style.RoleTextMuted), Dim: true},
+		}}})
+	}
+	if preview.OmittedLines > 0 || preview.ByteTruncated {
+		lines = append(lines, render.Line{Spans: []render.Span{
+			{Text: "  ╰─ ", Style: render.Style{Role: string(style.RoleTextMuted), Dim: true}},
+			{Text: fmt.Sprintf("(已省略 %d 行)", preview.OmittedLines), Style: render.Style{Role: string(style.RoleInfo)}},
+		}})
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	doc := render.Document{Blocks: []render.Block{{
+		Kind:  render.BlockParagraph,
+		Lines: lines,
+	}}}
+	return strings.TrimRight(renderDocumentWithProfile(doc, theme), "\n")
 }
 
 // DisplayShellOutput 显示 Shell 命令输出
 func DisplayShellOutput(output string, maxLines int) {
-	theme := GetTheme(ThemeAuto)
-
-	if output == "" {
+	formatted := FormatShellOutput(output, maxLines)
+	if formatted == "" {
 		return
 	}
-
-	lines := strings.Split(output, "\n")
-	displayLines := lines
-
-	// 限制显示行数
-	if maxLines > 0 && len(lines) > maxLines {
-		displayLines = lines[:maxLines]
-		for _, line := range displayLines {
-			if line != "" {
-				fmt.Println(theme.Dimmed(fmt.Sprintf("  │ %s", line)))
-			}
-		}
-		fmt.Printf("  ╰─ %s\n", theme.InfoColor.Sprintf("(已省略 %d 行)", len(lines)-maxLines))
-	} else {
-		for _, line := range lines {
-			if line != "" {
-				fmt.Println(theme.Dimmed(fmt.Sprintf("  │ %s", line)))
-			}
-		}
-	}
+	fmt.Println(formatted)
 }
 
 // DisplayShellError 显示 Shell 命令错误
@@ -158,11 +273,11 @@ func DisplayShellError(err error, exitCode int) {
 	}
 }
 
-// FormatShellSummary 格式化命令执行摘要
+// FormatShellSummary 格式化命令执行摘要（命令文本先消毒）。
 func FormatShellSummary(command string, exitCode int, durationMs int64) string {
 	theme := GetTheme(ThemeAuto)
+	safeCommand := SanitizeTerminalText(command)
 
-	// 计算时长
 	var durationStr string
 	if durationMs >= 1000 {
 		durationStr = fmt.Sprintf("%.2fs", float64(durationMs)/1000.0)
@@ -170,19 +285,22 @@ func FormatShellSummary(command string, exitCode int, durationMs int64) string {
 		durationStr = fmt.Sprintf("%dms", durationMs)
 	}
 
-	// 状态图标
-	var statusIcon string
-	if exitCode == 0 {
-		statusIcon = theme.SuccessIcon
-	} else {
+	statusRole := style.RoleSuccess
+	statusIcon := theme.SuccessIcon
+	if exitCode != 0 {
+		statusRole = style.RoleError
 		statusIcon = theme.ErrorIcon
 	}
-
-	return fmt.Sprintf("%s %s%s %s (%s)",
-		statusIcon,
-		theme.ShellIcon,
-		theme.CommandColor.Sprint(command),
-		theme.Dimmed(durationStr),
-		theme.ColorizeSuccess(fmt.Sprintf("exit=%d", exitCode)),
-	)
+	doc := render.Document{Blocks: []render.Block{{
+		Kind: render.BlockParagraph,
+		Lines: []render.Line{{Spans: []render.Span{
+			{Text: statusIcon + " ", Style: render.Style{Role: string(statusRole)}},
+			{Text: theme.ShellIcon + safeCommand, Style: render.Style{Role: string(style.RoleCommand)}},
+			{Text: " " + durationStr, Style: render.Style{Role: string(style.RoleTextMuted), Dim: true}},
+			{Text: " (", Style: render.Style{Role: string(style.RoleTextMuted)}},
+			{Text: fmt.Sprintf("exit=%d", exitCode), Style: render.Style{Role: string(statusRole)}},
+			{Text: ")", Style: render.Style{Role: string(style.RoleTextMuted)}},
+		}}},
+	}}}
+	return strings.TrimRight(renderDocumentWithProfile(doc, theme), "\n")
 }

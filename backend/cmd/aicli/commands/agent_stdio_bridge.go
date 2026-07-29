@@ -366,6 +366,7 @@ func silenceChatRuntimeBridgeWriters(bridge *chatRuntimeEventBridge) {
 		return
 	}
 	bridge.writeLine = func(string) {}
+	bridge.writeDocument = nil
 	bridge.writeDelta = func(string) {}
 	bridge.finalizeDelta = func() {}
 	bridge.completeDelta = func(string) bool { return false }

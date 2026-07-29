@@ -1,16 +1,13 @@
 package ui
 
 import (
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"strings"
 	"testing"
-
-	"github.com/fatih/color"
 )
 
 func TestFixedBottomSurface_TerminalProfileMatrix(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	cases := []struct {
 		name       string
@@ -135,7 +132,11 @@ func TestFixedBottomSurface_TerminalProfileMatrix(t *testing.T) {
 			}
 
 			output := captureUIStdout(t, func() {
-				surface.SetStatusLine("Ready | " + tc.name)
+				surface.SetStatusModel(style.StatusLineModel{
+					State:     style.RunReady,
+					Separator: " | ",
+					Segments:  []style.StatusSegment{{Text: tc.name}},
+				})
 				surface.SetComposerPreview("draft: /model")
 			})
 

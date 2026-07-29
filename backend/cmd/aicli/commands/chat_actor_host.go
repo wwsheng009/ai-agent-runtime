@@ -648,6 +648,20 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if host.EventBus != nil {
 		apiAgent.SetEventBus(host.EventBus)
 	}
+	checkpointConfig := runtimecfg.DefaultRuntimeConfig().Checkpoint
+	if runtimeConfig != nil {
+		checkpointConfig = runtimeConfig.Checkpoint
+	}
+	apiAgent.ApplyCheckpointConfig(
+		checkpointConfig.Enabled,
+		checkpointConfig.MaxFileBytes,
+		agent.CheckpointStorageOptions{
+			StoreMode:                checkpointConfig.StoreMode,
+			ConversationSnapshot:     checkpointConfig.ConversationSnapshot,
+			MaxDiffBytes:             checkpointConfig.MaxDiffBytes,
+			MaxCheckpointsPerSession: checkpointConfig.MaxCheckpointsPerSession,
+		},
+	)
 	if host.TeamStore != nil {
 		if ctxMgr := apiAgent.GetContextManager(); ctxMgr != nil {
 			ctxMgr.TeamContext = team.NewContextBuilder(host.TeamStore)
@@ -1055,7 +1069,8 @@ func loadLocalChatRuntimeConfig(cfg *config.Config, session *ChatSession) (*runt
 	}
 	config, loadedPath, err := loadCachedRuntimeConfig(configPath)
 	if err != nil || config == nil {
-		fmt.Fprintf(os.Stderr, "Warning: 加载 actor runtime 配置失败，已退回默认配置: %v\n", err)
+		reason := formatRuntimeConfigLoadFallback(configPath, err)
+		fmt.Fprintf(os.Stderr, "Warning: 加载 actor runtime 配置失败，已退回默认配置: %s\n", reason)
 		config := runtimecfg.DefaultRuntimeConfig()
 		applyLocalChatRuntimePersistenceDefaults(config, session, configPath)
 		return config, nil

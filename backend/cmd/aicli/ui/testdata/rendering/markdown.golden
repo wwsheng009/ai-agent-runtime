@@ -1,0 +1,123 @@
+[width=40 lines=9]
+00 plain="▶ 渲染状态"
+   span="▶ " {role=Accent,fg=ansi:14,bold}
+   span="渲染状态" {role=TextPrimary,bold}
+01 plain=""
+02 plain="• 完成: 使用 aicli"
+   span="• " {role=Accent,fg=ansi:14,bold}
+   span="完成" {role=TextPrimary,bold}
+   span=": 使用 " {role=TextPrimary}
+   span="aicli" {role=CodeInline,fg=ansi:13,bold}
+03 plain="• 文档"
+   span="• " {role=Accent,fg=ansi:14,bold}
+   span="文档" {role=Link,fg=ansi:14,underline} link="https://example.com/docs"
+04 plain=""
+05 plain="字段: 模式"
+   span="字段: " {role=Accent,fg=ansi:14,bold}
+   span="模式" {role=TextPrimary}
+06 plain="值: structured render"
+   span="值: " {role=Accent,fg=ansi:14,bold}
+   span="structured render" {role=TextPrimary}
+07 plain=""
+08 plain="func main() { fmt.Println(\"hi\") }"
+   span="func" {role=Code.KeywordDeclaration,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="main" {role=Code.NameFunction,fg=#a6e22e}
+   span="()" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="{" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="fmt" {role=Code.NameOther,fg=#a6e22e}
+   span="." {role=Code.Punctuation,fg=#f8f8f2}
+   span="Println" {role=Code.NameFunction,fg=#a6e22e}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}
+[width=80 lines=10]
+00 plain="▶ 渲染状态"
+   span="▶ " {role=Accent,fg=ansi:14,bold}
+   span="渲染状态" {role=TextPrimary,bold}
+01 plain=""
+02 plain="• 完成: 使用 aicli"
+   span="• " {role=Accent,fg=ansi:14,bold}
+   span="完成" {role=TextPrimary,bold}
+   span=": 使用 " {role=TextPrimary}
+   span="aicli" {role=CodeInline,fg=ansi:13,bold}
+03 plain="• 文档"
+   span="• " {role=Accent,fg=ansi:14,bold}
+   span="文档" {role=Link,fg=ansi:14,underline} link="https://example.com/docs"
+04 plain=""
+05 plain="字段 │ 值               "
+   span="字段" {role=Accent,fg=ansi:14,bold}
+   span=" │ " {role=Border,fg=ansi:8,dim}
+   span="值               " {role=Accent,fg=ansi:14,bold}
+06 plain="─────┼──────────────────"
+   span="────" {role=Border,fg=ansi:8,dim}
+   span="─┼─" {role=Border,fg=ansi:8,dim}
+   span="─────────────────" {role=Border,fg=ansi:8,dim}
+07 plain="模式 │ structured render"
+   span="模式" {role=TextPrimary}
+   span=" │ " {role=Border,fg=ansi:8,dim}
+   span="structured render" {role=TextPrimary}
+08 plain=""
+09 plain="func main() { fmt.Println(\"hi\") }"
+   span="func" {role=Code.KeywordDeclaration,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="main" {role=Code.NameFunction,fg=#a6e22e}
+   span="()" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="{" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="fmt" {role=Code.NameOther,fg=#a6e22e}
+   span="." {role=Code.Punctuation,fg=#f8f8f2}
+   span="Println" {role=Code.NameFunction,fg=#a6e22e}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}
+[width=120 lines=10]
+00 plain="▶ 渲染状态"
+   span="▶ " {role=Accent,fg=ansi:14,bold}
+   span="渲染状态" {role=TextPrimary,bold}
+01 plain=""
+02 plain="• 完成: 使用 aicli"
+   span="• " {role=Accent,fg=ansi:14,bold}
+   span="完成" {role=TextPrimary,bold}
+   span=": 使用 " {role=TextPrimary}
+   span="aicli" {role=CodeInline,fg=ansi:13,bold}
+03 plain="• 文档"
+   span="• " {role=Accent,fg=ansi:14,bold}
+   span="文档" {role=Link,fg=ansi:14,underline} link="https://example.com/docs"
+04 plain=""
+05 plain="字段 │ 值               "
+   span="字段" {role=Accent,fg=ansi:14,bold}
+   span=" │ " {role=Border,fg=ansi:8,dim}
+   span="值               " {role=Accent,fg=ansi:14,bold}
+06 plain="─────┼──────────────────"
+   span="────" {role=Border,fg=ansi:8,dim}
+   span="─┼─" {role=Border,fg=ansi:8,dim}
+   span="─────────────────" {role=Border,fg=ansi:8,dim}
+07 plain="模式 │ structured render"
+   span="模式" {role=TextPrimary}
+   span=" │ " {role=Border,fg=ansi:8,dim}
+   span="structured render" {role=TextPrimary}
+08 plain=""
+09 plain="func main() { fmt.Println(\"hi\") }"
+   span="func" {role=Code.KeywordDeclaration,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="main" {role=Code.NameFunction,fg=#a6e22e}
+   span="()" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="{" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="fmt" {role=Code.NameOther,fg=#a6e22e}
+   span="." {role=Code.Punctuation,fg=#f8f8f2}
+   span="Println" {role=Code.NameFunction,fg=#a6e22e}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2}
+   span="\"hi\"" {role=Code.LiteralString,fg=#e6db74}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="}" {role=Code.Punctuation,fg=#f8f8f2}

@@ -2,22 +2,16 @@ package commands
 
 import (
 	"bytes"
-	"strings"
-	"testing"
-
-	"github.com/fatih/color"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"strings"
+	"testing"
 )
 
 func TestPrintVisibleChatHistory_RendersRestoredMessagesWithUnifiedToolRenderer(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
@@ -63,11 +57,7 @@ func TestPrintVisibleChatHistory_RendersRestoredMessagesWithUnifiedToolRenderer(
 }
 
 func TestPrintVisibleChatHistory_ReturnsZeroWhenOnlyHiddenSystemPromptExists(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
@@ -90,11 +80,7 @@ func TestPrintVisibleChatHistory_ReturnsZeroWhenOnlyHiddenSystemPromptExists(t *
 }
 
 func TestPrintVisibleChatHistory_UsesUnifiedToolPreviewLimits(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	longOutput := strings.Join([]string{
@@ -131,11 +117,7 @@ func TestPrintVisibleChatHistory_UsesUnifiedToolPreviewLimits(t *testing.T) {
 }
 
 func TestPrintVisibleChatHistory_MatchesLiveCompleteBlockRendering(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	assistant := runtimetypes.Message{
@@ -209,11 +191,7 @@ func TestPrintVisibleChatHistory_MatchesLiveCompleteBlockRendering(t *testing.T)
 }
 
 func TestPrintVisibleChatHistory_PreservesCompleteMessageContent(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	content := "回答：\n\n    保留缩进的代码\n"
@@ -240,11 +218,7 @@ func TestPrintVisibleChatHistory_PreservesCompleteMessageContent(t *testing.T) {
 }
 
 func TestPrintVisibleChatHistory_HandlesNestedMetadataAndUnknownRoles(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	tool := runtimetypes.NewToolMessage("orphan-call", "result 1")
@@ -281,11 +255,7 @@ func TestPrintVisibleChatHistory_HandlesNestedMetadataAndUnknownRoles(t *testing
 }
 
 func TestPrintVisibleChatHistory_RendersReasoningAndToolFailures(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	assistant := runtimetypes.Message{

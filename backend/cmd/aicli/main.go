@@ -72,60 +72,41 @@ func main() {
 			commands.ConfigureAICLILoggerForCLI(cfg, logFilePath)
 		}
 
-		// Theme startup precedence: --theme flag > AICLI_THEME/AICLI_THEME_MODE env > config.
-		// --theme may be either a palette name or a mode token (auto|dark|light|aliases).
+		// Theme startup precedence: CLI flags > environment > config.
 		flagTheme := ""
 		if v, err := rootCmd.Flags().GetString("theme"); err == nil {
 			flagTheme = strings.TrimSpace(v)
 		}
-		envTheme := strings.TrimSpace(os.Getenv("AICLI_THEME"))
-		envThemeMode := strings.TrimSpace(os.Getenv("AICLI_THEME_MODE"))
-		cfgThemeName := ""
-		cfgThemeMode := ""
+		flagSyntax := ""
+		if v, err := rootCmd.Flags().GetString("syntax-theme"); err == nil {
+			flagSyntax = strings.TrimSpace(v)
+		}
+		inputs := startupThemeInputs{
+			flagTheme:       flagTheme,
+			flagSyntax:      flagSyntax,
+			envTheme:        os.Getenv("AICLI_THEME"),
+			envMode:         os.Getenv("AICLI_THEME_MODE"),
+			envSyntax:       os.Getenv("AICLI_THEME_SYNTAX"),
+			envSyntaxLegacy: os.Getenv("AICLI_SYNTAX_THEME"),
+		}
 		if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Theme != nil {
-			cfgThemeName = strings.TrimSpace(cfg.AICLI.Theme.Name)
-			cfgThemeMode = strings.TrimSpace(cfg.AICLI.Theme.Mode)
+			inputs.configPalette = cfg.AICLI.Theme.Name
+			inputs.configMode = cfg.AICLI.Theme.Mode
+			inputs.configSyntax = cfg.AICLI.Theme.Syntax
 		}
-
-		palette := ""
-		mode := ""
-		// 1) Config defaults
-		if cfgThemeName != "" {
-			palette = cfgThemeName
-		}
-		if cfgThemeMode != "" {
-			mode = cfgThemeMode
-		}
-		// 2) Environment overrides
-		if envTheme != "" {
-			if m := ui.NormalizeThemeModeName(envTheme); m != "" && isStartupThemeModeToken(envTheme) {
-				// AICLI_THEME=dark is treated as mode for convenience (same as --theme).
-				mode = m
-			} else {
-				palette = envTheme
-			}
-		}
-		if envThemeMode != "" {
-			mode = envThemeMode
-		}
-		// 3) CLI flag highest priority
-		if flagTheme != "" {
-			if m := ui.NormalizeThemeModeName(flagTheme); m != "" && isStartupThemeModeToken(flagTheme) {
-				mode = m
-			} else {
-				palette = flagTheme
-			}
-		}
-
-		if palette != "" {
-			if err := ui.SetThemePreset(palette); err != nil {
+		selection := resolveStartupTheme(inputs)
+		if selection.palette != "" {
+			if err := ui.SetThemePreset(selection.palette); err != nil {
 				return err
 			}
 		}
-		if mode != "" {
-			if err := ui.SetThemeMode(mode); err != nil {
+		if selection.mode != "" {
+			if err := ui.SetThemeMode(selection.mode); err != nil {
 				return err
 			}
+		}
+		if err := ui.SetSyntaxTheme(selection.syntax); err != nil {
+			return err
 		}
 
 		// 初始化日志系统
@@ -139,6 +120,7 @@ func main() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "配置文件路径（未指定时按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml 顺序查找）")
 	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
 	rootCmd.PersistentFlags().String("theme", "", "输出主题配色或明暗（classic|focus|contrast|mono 或 auto|dark|light；优先级: --theme > AICLI_THEME/AICLI_THEME_MODE > 配置）")
+	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 
 	// config 子命令
@@ -333,4 +315,61 @@ func isStartupThemeModeToken(raw string) bool {
 	default:
 		return false
 	}
+}
+
+type startupThemeInputs struct {
+	flagTheme       string
+	flagSyntax      string
+	envTheme        string
+	envMode         string
+	envSyntax       string
+	envSyntaxLegacy string
+	configPalette   string
+	configMode      string
+	configSyntax    string
+}
+
+type startupThemeSelection struct {
+	palette string
+	mode    string
+	syntax  string
+}
+
+func resolveStartupTheme(in startupThemeInputs) startupThemeSelection {
+	selection := startupThemeSelection{
+		palette: strings.TrimSpace(in.configPalette),
+		mode:    strings.TrimSpace(in.configMode),
+		syntax:  strings.TrimSpace(in.configSyntax),
+	}
+	applyThemeToken := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		if isStartupThemeModeToken(raw) {
+			selection.mode = ui.NormalizeThemeModeName(raw)
+			return
+		}
+		selection.palette = raw
+	}
+
+	applyThemeToken(in.envTheme)
+	if value := strings.TrimSpace(in.envMode); value != "" {
+		selection.mode = value
+	}
+	// AICLI_THEME_SYNTAX is canonical; keep the documented older alias.
+	if value := strings.TrimSpace(in.envSyntaxLegacy); value != "" {
+		selection.syntax = value
+	}
+	if value := strings.TrimSpace(in.envSyntax); value != "" {
+		selection.syntax = value
+	}
+	applyThemeToken(in.flagTheme)
+	if value := strings.TrimSpace(in.flagSyntax); value != "" {
+		selection.syntax = value
+	}
+	if selection.syntax == "" {
+		selection.syntax = "auto"
+	}
+	return selection
 }

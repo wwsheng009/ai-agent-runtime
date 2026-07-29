@@ -2188,6 +2188,53 @@ func TestExecuteShellCommandDetailed_DangerousCommandCancelsOnEOF(t *testing.T) 
 	}
 }
 
+func TestShouldRenderLocalShellDiff(t *testing.T) {
+	unifiedDiff := "diff --git a/app.go b/app.go\n--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old\n+new\n"
+	tests := []struct {
+		name       string
+		command    string
+		capture    runtimeexecutor.CombinedOutputCapture
+		commandErr error
+		want       bool
+	}{
+		{
+			name:    "complete unified git diff",
+			command: "git --no-pager diff -- app.go",
+			capture: runtimeexecutor.CombinedOutputCapture{Output: unifiedDiff},
+			want:    true,
+		},
+		{
+			name:    "non diff command",
+			command: "type patch.txt",
+			capture: runtimeexecutor.CombinedOutputCapture{Output: unifiedDiff},
+		},
+		{
+			name:    "git diff stat output",
+			command: "git diff --stat",
+			capture: runtimeexecutor.CombinedOutputCapture{Output: "app.go | 2 +-\n1 file changed\n"},
+		},
+		{
+			name:    "truncated capture",
+			command: "git diff",
+			capture: runtimeexecutor.CombinedOutputCapture{Output: unifiedDiff, Truncated: true},
+		},
+		{
+			name:       "failed command",
+			command:    "git diff",
+			capture:    runtimeexecutor.CombinedOutputCapture{Output: unifiedDiff},
+			commandErr: errors.New("exit status 1"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRenderLocalShellDiff(tt.command, tt.capture, tt.commandErr); got != tt.want {
+				t.Fatalf("shouldRenderLocalShellDiff() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveChatProviderAndModelName(t *testing.T) {
 	cfg := &config.Config{
 		Providers: config.ProvidersConfig{

@@ -3,16 +3,10 @@ package ui
 import (
 	"strings"
 	"testing"
-
-	"github.com/fatih/color"
 )
 
 func TestPrintWelcomeWithConfig_AlignsMetadataAndHints(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	SetTheme(ThemeAuto)
 
 	output := captureUIStdout(t, func() {

@@ -3,8 +3,6 @@ package ui
 import (
 	"strings"
 	"testing"
-
-	"github.com/fatih/color"
 )
 
 func TestAssistantMessageFormat_MultilineHasNoPrefix(t *testing.T) {
@@ -24,11 +22,7 @@ func TestAssistantMessageFormat_MultilineHasNoPrefix(t *testing.T) {
 }
 
 func TestAssistantMessageFormat_MultilineShowsNoIconPrefix(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 
 	msg := NewMessage(MessageAssistant, "line1\nline2").ShowIcon(true)
 
@@ -46,11 +40,7 @@ func TestAssistantMessageFormat_MultilineShowsNoIconPrefix(t *testing.T) {
 }
 
 func TestMessageFormat_MultilineAlignsContinuationWithIconPrefixAcrossTypes(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 
 	tests := []struct {
 		name        string
@@ -85,11 +75,7 @@ func TestMessageFormat_MultilineAlignsContinuationWithIconPrefixAcrossTypes(t *t
 }
 
 func TestIndentAssistantContent_UsesSameGutterAsAssistantMessage(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 
 	indented := IndentAssistantContent("[thinking] contacting model=gpt-5.2-codex")
 	if !strings.HasPrefix(indented, AssistantContentIndent()) {
@@ -142,5 +128,47 @@ func TestSanitizeTerminalText_NormalizesCRLFAndDropsControls(t *testing.T) {
 
 	if sanitized != "a\nbc    " {
 		t.Fatalf("unexpected sanitized text: %q", sanitized)
+	}
+}
+
+func TestMessageDocument_UserPlainProjection(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	msg := NewMessage(MessageUser, "hello\x1b[31mx").ShowIcon(true)
+	plain := RenderDocumentPlain(msg.Document())
+	if strings.Contains(plain, "\x1b") {
+		t.Fatalf("expected sanitized content, got %q", plain)
+	}
+	if !strings.HasPrefix(plain, "> hello") {
+		t.Fatalf("expected user prefix+body, got %q", plain)
+	}
+}
+
+func TestMessageDocument_TimestampOrder(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	msg := NewMessage(MessageUser, "body").ShowIcon(true).ShowTimestamp(true)
+	formatted := msg.Format()
+	// prefix then [HH:MM:SS] then body
+	if !strings.HasPrefix(formatted, "> [") || !strings.Contains(formatted, "] body") {
+		t.Fatalf("unexpected timestamp layout: %q", formatted)
+	}
+}
+
+func TestStatusDocument_SuccessPlain(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	SetTheme(ThemeAuto)
+
+	st := NewStatus(StatusSuccess, "done\x1b[0m")
+	plain := RenderDocumentPlain(st.Document())
+	if strings.Contains(plain, "\x1b") {
+		t.Fatalf("expected sanitized status, got %q", plain)
+	}
+	if !strings.Contains(plain, "done") {
+		t.Fatalf("expected body, got %q", plain)
+	}
+	theme := GetTheme(ThemeAuto)
+	if !strings.HasPrefix(plain, theme.SuccessIcon) {
+		t.Fatalf("expected success icon prefix, got %q", plain)
 	}
 }

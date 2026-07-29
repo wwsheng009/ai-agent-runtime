@@ -2,17 +2,21 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // StatusItem 状态栏的一项
 type StatusItem struct {
-	Key   string              // 键名
-	Value interface{}         // 值
-	Color func(string) string // 颜色函数
-	Width int                 // 最小宽度
+	Key   string      // 键名
+	Value interface{} // 值
+	Role  style.Role  // 值的语义角色
+	Width int         // 最小宽度（终端单元格）
 }
 
 // StatusBar 状态栏组件
@@ -70,53 +74,48 @@ func (s *StatusBar) SetTheme(theme *Theme) *StatusBar {
 }
 
 // Update 更新状态项
-func (s *StatusBar) Update(key string, value interface{}, colorFunc func(string) string) *StatusBar {
+func (s *StatusBar) Update(key string, value interface{}) *StatusBar {
+	return s.updateItem(key, value, style.RoleTextPrimary, 0, false)
+}
+
+// UpdateRole 使用语义角色更新状态项。
+func (s *StatusBar) UpdateRole(key string, value interface{}, role style.Role) *StatusBar {
+	return s.updateItem(key, value, role, 0, false)
+}
+
+func (s *StatusBar) updateItem(key string, value interface{}, role style.Role, width int, setWidth bool) *StatusBar {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// 查找是否已存在该键
+	if role == "" {
+		role = style.RoleTextPrimary
+	}
 	for _, item := range s.items {
 		if item.Key == key {
 			item.Value = value
-			if colorFunc != nil {
-				item.Color = colorFunc
+			item.Role = role
+			if setWidth {
+				item.Width = width
 			}
 			return s
 		}
 	}
-
-	// 不存在则添加
 	s.items = append(s.items, &StatusItem{
 		Key:   key,
 		Value: value,
-		Color: colorFunc,
+		Role:  role,
+		Width: width,
 	})
 	return s
 }
 
 // UpdateWithWidth 更新状态项并设置宽度
-func (s *StatusBar) UpdateWithWidth(key string, value interface{}, colorFunc func(string) string, width int) *StatusBar {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *StatusBar) UpdateWithWidth(key string, value interface{}, width int) *StatusBar {
+	return s.updateItem(key, value, style.RoleTextPrimary, width, true)
+}
 
-	for _, item := range s.items {
-		if item.Key == key {
-			item.Value = value
-			if colorFunc != nil {
-				item.Color = colorFunc
-			}
-			item.Width = width
-			return s
-		}
-	}
-
-	s.items = append(s.items, &StatusItem{
-		Key:   key,
-		Value: value,
-		Color: colorFunc,
-		Width: width,
-	})
-	return s
+// UpdateWithWidthRole 使用语义角色和终端单元格宽度更新状态项。
+func (s *StatusBar) UpdateWithWidthRole(key string, value interface{}, role style.Role, width int) *StatusBar {
+	return s.updateItem(key, value, role, width, true)
 }
 
 // Remove 移除状态项
@@ -141,6 +140,59 @@ func (s *StatusBar) Clear() *StatusBar {
 	return s
 }
 
+func statusItemLine(item *StatusItem, spaced bool) render.Line {
+	if item == nil {
+		return render.Line{}
+	}
+	key := strings.Join(strings.Fields(SanitizeTerminalText(item.Key)), " ")
+	value := strings.Join(strings.Fields(SanitizeTerminalText(formatValue(item.Value))), " ")
+	separator := ":"
+	if spaced {
+		separator = ": "
+	}
+	role := item.Role
+	if role == "" {
+		role = style.RoleTextPrimary
+	}
+	line := render.Line{Spans: []render.Span{
+		semanticSpan(key, style.RoleMetaLabel, true),
+		semanticSpan(separator, style.RoleTextMuted, false),
+		semanticSpan(value, role, false),
+	}}
+	if item.Width > 0 {
+		line = render.Pad(line, item.Width, render.AlignLeft)
+	}
+	return line
+}
+
+func (s *StatusBar) documentLocked(width int) render.Document {
+	line := render.Line{}
+	for i, item := range s.items {
+		if i > 0 {
+			line.Spans = append(line.Spans, semanticSpan(" | ", style.RoleBorder, false))
+		}
+		line.Spans = append(line.Spans, statusItemLine(item, false).Spans...)
+	}
+	if width > 0 && render.LineWidth(line) > width {
+		line = render.Truncate(line, width, "…")
+	}
+	return render.Document{Blocks: []render.Block{{Kind: render.BlockStatus, Lines: []render.Line{line}}}}
+}
+
+// Document 返回单行状态栏模型，并按终端单元格宽度截断。
+func (s *StatusBar) Document(width int) render.Document {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.documentLocked(width)
+}
+
+func (s *StatusBar) renderDocumentLocked(doc render.Document) string {
+	if s.terminal != nil && s.terminal.driver != nil {
+		return renderDocumentWithThemeProfile(doc, s.theme, s.terminal.driver.ColorProfile())
+	}
+	return renderDocumentWithProfile(doc, s.theme)
+}
+
 // Render 渲染状态栏
 func (s *StatusBar) Render() {
 	s.mu.Lock()
@@ -159,22 +211,11 @@ func (s *StatusBar) Render() {
 		s.terminal.ClearLine()
 
 		if i < len(s.items) {
-			item := s.items[i]
-			value := formatValue(item.Value)
-
-			var display string
-			if item.Color != nil {
-				display = item.Color(fmt.Sprintf("%s: %s", item.Key, value))
-			} else {
-				display = fmt.Sprintf("%s: %s", item.Key, value)
-			}
-
-			// 添加填充
-			if item.Width > 0 && len(display) < item.Width {
-				display = fmt.Sprintf("%-*s", item.Width, display)
-			}
-
-			fmt.Print(display)
+			doc := render.Document{Blocks: []render.Block{{
+				Kind:  render.BlockStatus,
+				Lines: []render.Line{statusItemLine(s.items[i], true)},
+			}}}
+			_, _ = WriteTerminalText(os.Stdout, s.renderDocumentLocked(doc))
 		}
 		s.terminal.ClearLine()
 	}
@@ -201,31 +242,10 @@ func (s *StatusBar) RenderWithLayout() bool {
 		s.terminal.ClearLine()
 	}
 
-	// 构建状态行
-	currentLine := 0
-	for i, item := range s.items {
-		value := formatValue(item.Value)
-		display := fmt.Sprintf("%s:%v", item.Key, value)
-
-		if item.Color != nil {
-			display = item.Color(display)
-		}
-
-		// 检查当前行是否有足够空间
-		if currentLine >= s.height {
-			break // 超出状态栏高度
-		}
-
-		// 简单布局：每个项目用 " | " 分隔
-		if i > 0 && currentLine < s.height {
-			fmt.Print(" | ")
-		}
-
-		fmt.Print(display)
-
-		// 简单判断是否需要换行（实际应该计算实际显示宽度）
-		// 这里简化处理
-	}
+	width := s.terminal.Width()
+	s.terminal.MoveTo(row, 1)
+	_, _ = WriteTerminalText(os.Stdout, s.renderDocumentLocked(s.documentLocked(width)))
+	s.terminal.ClearLine()
 
 	s.terminal.RestoreCursor()
 	return true
@@ -247,19 +267,7 @@ func (s *StatusBar) RenderSimple() {
 	s.terminal.MoveTo(s.row, 1)
 	s.terminal.ClearLine()
 
-	// 构建显示字符串
-	var parts []string
-	for _, item := range s.items {
-		value := formatValue(item.Value)
-		display := fmt.Sprintf("%s:%s", item.Key, value)
-		if item.Color != nil {
-			display = item.Color(display)
-		}
-		parts = append(parts, display)
-	}
-
-	line := strings.Join(parts, " | ")
-	fmt.Print(line)
+	_, _ = WriteTerminalText(os.Stdout, s.renderDocumentLocked(s.documentLocked(s.terminal.Width())))
 	s.terminal.ClearLine()
 
 	// 恢复光标
@@ -307,35 +315,19 @@ func formatValue(value interface{}) string {
 
 // WithDefaultStatus 设置默认状态项
 func (s *StatusBar) WithDefaultStatus() *StatusBar {
-	commandColor := s.theme.CommandColor
-	successColor := s.theme.SuccessColor
-	infoColor := s.theme.InfoColor
-
 	return s.
-		UpdateWithWidth("Model", "gpt-4", func(text string) string {
-			return commandColor.Sprint(text)
-		}, 12).
-		UpdateWithWidth("Tokens", 0, func(text string) string {
-			return successColor.Sprint(text)
-		}, 12).
-		UpdateWithWidth("Msgs", 0, func(text string) string {
-			return infoColor.Sprint(text)
-		}, 8).
-		UpdateWithWidth("Stream", "off", nil, 8)
+		UpdateWithWidthRole("Model", "gpt-4", style.RoleCommand, 12).
+		UpdateWithWidthRole("Tokens", 0, style.RoleSuccess, 12).
+		UpdateWithWidthRole("Msgs", 0, style.RoleInfo, 8).
+		UpdateWithWidthRole("Stream", "off", style.RoleInfo, 8)
 }
 
 // WithAIThinking 设置 AI 思考状态
 func (s *StatusBar) WithAIThinking(thinking bool) *StatusBar {
 	if thinking {
-		warnColor := s.theme.WarningColor
-		return s.Update("Status", "Thinking...", func(text string) string {
-			return warnColor.Sprint(text)
-		})
+		return s.UpdateRole("Status", "Thinking...", style.RoleWarning)
 	}
-	successColor := s.theme.SuccessColor
-	return s.Update("Status", "Ready", func(text string) string {
-		return successColor.Sprint(text)
-	})
+	return s.UpdateRole("Status", "Ready", style.RoleSuccess)
 }
 
 // RenderIfChanged 如果内容有变化则渲染
@@ -345,13 +337,19 @@ func (s *StatusBar) RenderIfChanged() {
 
 // ForceRender 强制渲染
 func (s *StatusBar) ForceRender() {
+	s.mu.Lock()
 	s.force = true
+	s.mu.Unlock()
 	s.Render()
+	s.mu.Lock()
 	s.force = false
+	s.mu.Unlock()
 }
 
 // GetModel 获取当前模型
 func (s *StatusBar) GetModel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, item := range s.items {
 		if item.Key == "Model" {
 			return formatValue(item.Value)
@@ -362,14 +360,13 @@ func (s *StatusBar) GetModel() string {
 
 // SetModel 设置当前模型
 func (s *StatusBar) SetModel(model string) *StatusBar {
-	commandColor := s.theme.CommandColor
-	return s.UpdateWithWidth("Model", model, func(text string) string {
-		return commandColor.Sprint(text)
-	}, 12)
+	return s.UpdateWithWidthRole("Model", model, style.RoleCommand, 12)
 }
 
 // GetTokens 获取 token 数量
 func (s *StatusBar) GetTokens() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, item := range s.items {
 		if item.Key == "Tokens" {
 			if v, ok := item.Value.(int); ok {
@@ -383,14 +380,13 @@ func (s *StatusBar) GetTokens() int {
 
 // SetTokens 设置 token 数量
 func (s *StatusBar) SetTokens(tokens int) *StatusBar {
-	successColor := s.theme.SuccessColor
-	return s.UpdateWithWidth("Tokens", tokens, func(text string) string {
-		return successColor.Sprint(text)
-	}, 12)
+	return s.UpdateWithWidthRole("Tokens", tokens, style.RoleSuccess, 12)
 }
 
 // GetMsgCount 获取消息数量
 func (s *StatusBar) GetMsgCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, item := range s.items {
 		if item.Key == "Msgs" {
 			if v, ok := item.Value.(int); ok {
@@ -404,36 +400,21 @@ func (s *StatusBar) GetMsgCount() int {
 
 // SetMsgCount 设置消息数量
 func (s *StatusBar) SetMsgCount(count int) *StatusBar {
-	infoColor := s.theme.InfoColor
-	return s.UpdateWithWidth("Msgs", count, func(text string) string {
-		return infoColor.Sprint(text)
-	}, 8)
+	return s.UpdateWithWidthRole("Msgs", count, style.RoleInfo, 8)
 }
 
 // SetStreamMode 设置流式模式
 func (s *StatusBar) SetStreamMode(enabled bool) *StatusBar {
 	if enabled {
-		warnColor := s.theme.WarningColor
-		return s.Update("Stream", "on", func(text string) string {
-			return warnColor.Sprint(text)
-		})
+		return s.UpdateRole("Stream", "on", style.RoleWarning)
 	}
-	infoColor := s.theme.InfoColor
-	return s.Update("Stream", "off", func(text string) string {
-		return infoColor.Sprint(text)
-	})
+	return s.UpdateRole("Stream", "off", style.RoleInfo)
 }
 
 // SetThinking 设置 AI 思考状态
 func (s *StatusBar) SetThinking(thinking bool) *StatusBar {
 	if thinking {
-		warnColor := s.theme.WarningColor
-		return s.Update("Status", "Thinking...", func(text string) string {
-			return warnColor.Sprint(text)
-		})
+		return s.UpdateRole("Status", "Thinking...", style.RoleWarning)
 	}
-	successColor := s.theme.SuccessColor
-	return s.Update("Status", "Ready", func(text string) string {
-		return successColor.Sprint(text)
-	})
+	return s.UpdateRole("Status", "Ready", style.RoleSuccess)
 }

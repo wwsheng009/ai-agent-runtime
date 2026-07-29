@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ func loadCachedRuntimeConfig(configPath string) (*runtimecfg.RuntimeConfig, stri
 	info, statErr := os.Stat(configPath)
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
+			// Soft miss: callers may fall back to DefaultRuntimeConfig without
+			// treating a missing optional runtime.yaml as a hard error.
 			return nil, configPath, nil
 		}
 		return nil, configPath, statErr
@@ -99,4 +102,21 @@ func resetChatRuntimeConfigCacheForTest() {
 	chatRuntimeConfigCacheMu.Lock()
 	chatRuntimeConfigCache = map[string]chatRuntimeConfigCacheEntry{}
 	chatRuntimeConfigCacheMu.Unlock()
+}
+
+// formatRuntimeConfigLoadFallback explains why a runtime config load fell back
+// to defaults. loadCachedRuntimeConfig returns (nil, path, nil) when the file
+// is missing, so callers must not print bare %v of a nil error ("<nil>").
+func formatRuntimeConfigLoadFallback(configPath string, err error) string {
+	path := strings.TrimSpace(configPath)
+	if err != nil {
+		if path != "" {
+			return fmt.Sprintf("%s: %v", path, err)
+		}
+		return err.Error()
+	}
+	if path != "" {
+		return fmt.Sprintf("未找到配置文件: %s", path)
+	}
+	return "配置为空"
 }

@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -61,6 +64,22 @@ type chatInteractionCoordinator struct {
 	lastCompletedAsyncLine bool
 	promptAfterBlockGap    bool
 	shutdown               bool
+
+	// Phase 5: in-memory active cell + coalesced frames (viewport model).
+	// Transcript commit still uses the existing write path; this avoids
+	// scrollback spam for future surface painting and tracks stable markdown.
+	activeStream         *ui.ActiveStreamController
+	activeFrameTimer      *time.Timer
+	activeFrameDue        time.Time
+	activeFrameGeneration uint64
+	activeTools           map[string]chatActiveTool
+	activeToolSequence    uint64
+}
+
+type chatActiveTool struct {
+	key      string
+	detail   string
+	sequence uint64
 }
 
 // chatAgentStage describes the agent-specific phase that is more precise than
@@ -174,12 +193,19 @@ func chatAgentStageBlocksReady(stage chatAgentStage) bool {
 }
 
 func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordinator {
+	interactive := session == nil || (!session.NoInteractive && !session.JSONOutput)
+	motion.SetGlobal(motion.NewPolicy(motion.Config{Interactive: interactive}))
+	width := ui.GetTerminalWidth()
+	if width <= 0 {
+		width = 80
+	}
 	return &chatInteractionCoordinator{
 		session:         session,
 		writer:          os.Stdout,
 		streamRuneDelay: 6 * time.Millisecond,
 		maxChunkDelay:   90 * time.Millisecond,
 		promptDelay:     120 * time.Millisecond,
+		activeStream:    ui.NewActiveStreamController(width, ui.ActiveBandRows(ui.GetTerminalHeight())),
 	}
 }
 
@@ -201,6 +227,12 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	}
 	c.surface = surface
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	if c.activeStream != nil && c.activeStream.Active() && c.surfaceOutputActiveLocked() {
+		c.syncActiveStreamViewportLocked()
+		frame, _ := c.activeStream.PaintLines(time.Now(), true)
+		c.syncActiveBandLinesLocked(frame)
+		c.scheduleActiveStreamFrameLocked()
+	}
 }
 
 func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
@@ -298,7 +330,7 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 		c.session.TitleNotifier.SetBaseState(chatTitleStateForSurface(chatSurfaceTitleState(state)))
 	}
 	if c.surface != nil {
-		c.surface.SetStatusLine(buildChatSurfaceStatusLineForWidthAndInputMode(c.session, state, ui.GetTerminalWidth(), c.inputMode))
+		c.surface.SetStatusModel(buildChatSurfaceStatusModelForWidthAndInputMode(c.session, state, ui.GetTerminalWidth(), c.inputMode))
 		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, state, ui.GetTerminalWidth()))
 	}
 }
@@ -541,8 +573,16 @@ func (c *chatInteractionCoordinator) SetAgentStage(stage chatAgentStage) {
 	c.SetAgentStageDetail(stage, "")
 }
 
+// chatAgentStageDetailMaxWidth keeps tool progress richer for ActiveBand.
+// The fixed-bottom status line still width-compacts via full/compact segments.
+const chatAgentStageDetailMaxWidth = 96
+
 // SetAgentStageDetail also exposes the active operation, such as a tool name,
 // while keeping the stage itself available for narrow-terminal fallback.
+//
+// Tool-running details may include progress ("shell 45% downloading"). The
+// wider budget above lets ActiveBand show progress text; status bar fit logic
+// still drops to the compact "执行工具" label on narrow terminals.
 func (c *chatInteractionCoordinator) SetAgentStageDetail(stage chatAgentStage, detail string) {
 	if c == nil {
 		return
@@ -553,15 +593,116 @@ func (c *chatInteractionCoordinator) SetAgentStageDetail(stage chatAgentStage, d
 		return
 	}
 	c.agentStage = normalizeChatAgentStage(stage)
-	c.agentStageDetail = compactStatusValue(strings.TrimSpace(detail), 48)
+	c.agentStageDetail = compactStatusValue(strings.TrimSpace(detail), chatAgentStageDetailMaxWidth)
 	if c.agentStage == chatAgentStageIdle {
 		c.agentStageDetail = ""
 	}
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	// Mirror tool-running into the surface ActiveBand (viewport only; no scrollback).
+	c.syncAgentStageActiveBandLocked()
 }
 
 func (c *chatInteractionCoordinator) ClearAgentStage() {
 	c.SetAgentStage(chatAgentStageIdle)
+}
+
+// SetToolAgentStage projects a runtime tool call into the mutable ActiveBand.
+// Calls are keyed by tool_call_id when available so progress from an older
+// concurrent tool cannot replace or clear the most recently started tool.
+func (c *chatInteractionCoordinator) SetToolAgentStage(callID, detail string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	detail = compactStatusValue(strings.TrimSpace(detail), chatAgentStageDetailMaxWidth)
+	key := activeToolStageKey(callID, detail)
+	if key == "" {
+		return
+	}
+	if c.activeTools == nil {
+		c.activeTools = make(map[string]chatActiveTool)
+	}
+	tool, exists := c.activeTools[key]
+	if !exists {
+		c.activeToolSequence++
+		tool = chatActiveTool{key: key, sequence: c.activeToolSequence}
+	}
+	if detail != "" {
+		tool.detail = detail
+	}
+	c.activeTools[key] = tool
+	c.projectActiveToolStageLocked()
+}
+
+// FinishToolAgentStage removes only the matching call. A late completion for
+// an older tool therefore leaves a newer running tool visible.
+func (c *chatInteractionCoordinator) FinishToolAgentStage(callID, toolName string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown || len(c.activeTools) == 0 {
+		return
+	}
+	key := activeToolStageKey(callID, toolName)
+	if key == "" {
+		return
+	}
+	if _, exists := c.activeTools[key]; !exists {
+		if strings.TrimSpace(callID) != "" {
+			return
+		}
+		// Legacy finish events may omit tool_call_id even when start included
+		// it. In that degraded case remove the newest matching name only.
+		name, _ := splitToolStageDetail(toolName)
+		var match chatActiveTool
+		for _, tool := range c.activeTools {
+			toolName, _ := splitToolStageDetail(tool.detail)
+			if toolName == name && tool.sequence > match.sequence {
+				match = tool
+			}
+		}
+		if match.key == "" {
+			return
+		}
+		key = match.key
+	}
+	delete(c.activeTools, key)
+	c.projectActiveToolStageLocked()
+}
+
+func activeToolStageKey(callID, detail string) string {
+	if callID = strings.TrimSpace(callID); callID != "" {
+		return "call:" + callID
+	}
+	name, _ := splitToolStageDetail(detail)
+	if name == "" {
+		return ""
+	}
+	return "name:" + name
+}
+
+func (c *chatInteractionCoordinator) projectActiveToolStageLocked() {
+	var selected chatActiveTool
+	for _, tool := range c.activeTools {
+		if tool.sequence > selected.sequence {
+			selected = tool
+		}
+	}
+	if selected.sequence == 0 {
+		c.agentStage = chatAgentStagePlanning
+		c.agentStageDetail = ""
+	} else {
+		c.agentStage = chatAgentStageToolRunning
+		c.agentStageDetail = selected.detail
+	}
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	c.syncAgentStageActiveBandLocked()
 }
 
 func (c *chatInteractionCoordinator) AgentStage() chatAgentStage {
@@ -761,22 +902,53 @@ func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
 	return "Ready"
 }
 
-func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
-	return buildChatSurfaceStatusLineForWidth(session, state, ui.GetTerminalWidth())
-}
-
 const chatSurfaceStatusSeparator = " · "
 
 type chatStatusSegment struct {
 	full    string
 	compact string
+	kind    style.StatusSegmentKind
+	role    style.Role
 }
 
-func buildChatSurfaceStatusLineForWidth(session *ChatSession, state string, width int) string {
-	return buildChatSurfaceStatusLineForWidthAndInputMode(session, state, width, chatInputModeForSurfaceState(state))
+type fittedChatStatusSegment struct {
+	chatStatusSegment
+	text string
 }
 
-func buildChatSurfaceStatusLineForWidthAndInputMode(session *ChatSession, state string, width int, inputMode chatInputMode) string {
+func buildChatSurfaceStatusModelForWidthAndInputMode(session *ChatSession, state string, width int, inputMode chatInputMode) style.StatusLineModel {
+	state, width = normalizeChatSurfaceStatusInput(state, width)
+	fitted := fitChatSurfaceStatusSegments(buildChatSurfaceStatusSegments(session, state, inputMode), width)
+	if len(fitted) == 0 {
+		return style.StatusLineModel{State: style.RunReady}
+	}
+
+	model := style.StatusLineModel{HideState: true, Separator: chatSurfaceStatusSeparator}
+	start := 0
+	if fitted[0].kind == style.StatusSegState {
+		model.HideState = false
+		model.State = chatStatusRunState(fitted[0].role)
+		model.StateText = fitted[0].text
+		model.StateRole = fitted[0].role
+		start = 1
+	}
+	for i := start; i < len(fitted); i++ {
+		segment := fitted[i]
+		role := segment.role
+		if role == "" {
+			role = style.RoleTextMuted
+		}
+		model.Segments = append(model.Segments, style.StatusSegment{
+			Kind:     segment.kind,
+			Text:     segment.text,
+			Priority: i,
+			Role:     role,
+		})
+	}
+	return model
+}
+
+func normalizeChatSurfaceStatusInput(state string, width int) (string, int) {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		state = "Ready"
@@ -784,10 +956,22 @@ func buildChatSurfaceStatusLineForWidthAndInputMode(session *ChatSession, state 
 	if width <= 0 {
 		width = 80
 	}
+	return state, width
+}
 
-	segments := buildChatSurfaceStatusSegments(session, state, inputMode)
-	parts := fitChatSurfaceStatusSegments(segments, width)
-	return truncateStatusValue(strings.Join(parts, chatSurfaceStatusSeparator), width)
+func chatStatusRunState(role style.Role) style.RunState {
+	switch role {
+	case style.RoleReasoning:
+		return style.RunThinking
+	case style.RoleTool, style.RoleProgress:
+		return style.RunStreaming
+	case style.RoleApproval, style.RoleWarning:
+		return style.RunWaiting
+	case style.RoleError:
+		return style.RunError
+	default:
+		return style.RunRunning
+	}
 }
 
 func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMode chatInputMode) []chatStatusSegment {
@@ -795,67 +979,73 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 
 	// Critical modal/running hints first so narrow widths keep them.
 	if modal := chatSurfaceModalStatusSegment(state, inputMode); modal.full != "" {
-		segments = append(segments, modal)
+		segments = append(segments, presentChatStatusSegment(modal, style.StatusSegState, chatSurfaceModalStatusRole(state, inputMode)))
 	}
 	queuedCount, _ := queuedInteractiveInputState(session)
 	if queuedCount > 0 {
-		segments = append(segments, chatStatusSegment{
+		segments = append(segments, presentChatStatusSegment(chatStatusSegment{
 			full:    fmt.Sprintf("队列 %d", queuedCount),
 			compact: fmt.Sprintf("队%d", queuedCount),
-		})
+		}, style.StatusSegMode, style.RoleWarning))
 	}
 	// Plan mode is an interactive composer mode rather than a transient agent
 	// stage. Keep its compact ON/OFF state near the front so it remains visible
 	// in the fixed-bottom status bar even when optional diagnostics are dropped.
 	if planSeg := chatSurfacePlanModeStatusSegment(session); planSeg.full != "" {
-		segments = append(segments, planSeg)
+		segments = append(segments, presentChatStatusSegment(planSeg, style.StatusSegMode, style.RoleAccent))
 	}
 	// Codex-style goal indicator: keep near the front so residual active goals
 	// remain visible even when width drops optional diagnostics.
 	if goalSeg := chatSurfaceGoalStatusSegment(session); goalSeg.full != "" {
-		segments = append(segments, goalSeg)
+		segments = append(segments, presentChatStatusSegment(goalSeg, style.StatusSegMode, style.RoleProgress))
 	}
 
 	// Reference diagnostics: model · provider · Context N% · cwd · [project] · branch · window · in · out · Fast
 	if model := chatSurfaceModelStatusSegment(session); model.full != "" {
-		segments = append(segments, model)
+		segments = append(segments, presentChatStatusSegment(model, style.StatusSegModel, style.RoleAccent))
 	}
 	if providerSeg := chatSurfaceProviderStatusSegment(session); providerSeg.full != "" {
-		segments = append(segments, providerSeg)
+		segments = append(segments, presentChatStatusSegment(providerSeg, style.StatusSegMeta, style.RoleTextSecondary))
 	}
 	if contextSeg := chatSurfaceContextUsedStatusSegment(session); contextSeg.full != "" {
-		segments = append(segments, contextSeg)
+		segments = append(segments, presentChatStatusSegment(contextSeg, style.StatusSegUsage, style.RoleProgress))
 	}
 	cwdSeg := chatSurfaceDirectoryStatusSegment(session)
 	if cwdSeg.full != "" {
-		segments = append(segments, cwdSeg)
+		segments = append(segments, presentChatStatusSegment(cwdSeg, style.StatusSegPath, style.RoleTextSecondary))
 	}
 	// Project is only useful when it adds identity beyond the cwd label. At the
 	// repo root, basename(cwd) == project and the status bar would otherwise
 	// render the same name twice (e.g. "ai-agent-runtime · ai-agent-runtime").
 	if projectSeg := chatSurfaceProjectStatusSegment(session); projectSeg.full != "" &&
 		!chatStatusProjectRedundantWithDirectory(cwdSeg, projectSeg) {
-		segments = append(segments, projectSeg)
+		segments = append(segments, presentChatStatusSegment(projectSeg, style.StatusSegPath, style.RoleTextMuted))
 	}
 	if branchSeg := chatSurfaceGitBranchStatusSegment(session); branchSeg.full != "" {
-		segments = append(segments, branchSeg)
+		segments = append(segments, presentChatStatusSegment(branchSeg, style.StatusSegMeta, style.RoleInfo))
 	}
 	if windowSeg := chatSurfaceWindowStatusSegment(session); windowSeg.full != "" {
-		segments = append(segments, windowSeg)
+		segments = append(segments, presentChatStatusSegment(windowSeg, style.StatusSegUsage, style.RoleTextMuted))
 	}
 	if inSeg := chatSurfaceInputTokensStatusSegment(session); inSeg.full != "" {
-		segments = append(segments, inSeg)
+		segments = append(segments, presentChatStatusSegment(inSeg, style.StatusSegUsage, style.RoleTextMuted))
 	}
 	if outSeg := chatSurfaceOutputTokensStatusSegment(session); outSeg.full != "" {
-		segments = append(segments, outSeg)
+		segments = append(segments, presentChatStatusSegment(outSeg, style.StatusSegUsage, style.RoleTextMuted))
 	}
 	if fastSeg := chatSurfaceFastStatusSegment(session); fastSeg.full != "" {
-		segments = append(segments, fastSeg)
+		segments = append(segments, presentChatStatusSegment(fastSeg, style.StatusSegMode, style.RoleAccent))
 	}
 	return segments
 }
 
-func fitChatSurfaceStatusSegments(segments []chatStatusSegment, width int) []string {
+func presentChatStatusSegment(segment chatStatusSegment, kind style.StatusSegmentKind, role style.Role) chatStatusSegment {
+	segment.kind = kind
+	segment.role = role
+	return segment
+}
+
+func fitChatSurfaceStatusSegments(segments []chatStatusSegment, width int) []fittedChatStatusSegment {
 	if len(segments) == 0 {
 		return nil
 	}
@@ -896,7 +1086,14 @@ func fitChatSurfaceStatusSegments(segments []chatStatusSegment, width int) []str
 			parts = parts[:len(parts)-1]
 		}
 	}
-	return parts
+	fitted := make([]fittedChatStatusSegment, 0, len(parts))
+	for i, value := range parts {
+		fitted = append(fitted, fittedChatStatusSegment{
+			chatStatusSegment: segments[i],
+			text:              value,
+		})
+	}
+	return fitted
 }
 
 func chatPlanModeActive(session *ChatSession) bool {
@@ -1140,6 +1337,32 @@ func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatSt
 			return chatStatusSegment{}
 		}
 		return chatStatusSegment{full: display, compact: compactChatSurfaceState(state)}
+	}
+}
+
+func chatSurfaceModalStatusRole(state string, inputMode chatInputMode) style.Role {
+	switch normalizeChatInputMode(inputMode) {
+	case chatInputModeApproval:
+		return style.RoleApproval
+	case chatInputModeAnswer, chatInputModeSelection, chatInputModeConfirmation,
+		chatInputModeSecret, chatInputModePanel:
+		return style.RoleWarning
+	}
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		return style.RoleTool
+	}
+	switch normalized {
+	case "thinking":
+		return style.RoleReasoning
+	case "streaming", "planning", "tool running":
+		return style.RoleTool
+	case "waiting", "awaiting approval", "awaiting answer", "stopping":
+		return style.RoleWarning
+	case "failed", "error":
+		return style.RoleError
+	default:
+		return style.RoleInfo
 	}
 }
 
@@ -1706,7 +1929,7 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(response)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), promptWasVisible && !promptAfterBlockGap)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), promptWasVisible && !promptAfterBlockGap)
 	c.lastCompletedAsyncLine = false
 }
 
@@ -1771,6 +1994,9 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		c.streamTrailingLF = false
 		c.streamLines = 0
 		c.streamBuffer.Reset()
+		if c.activeStream != nil {
+			c.activeStream.BeginAssistant("assistant")
+		}
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
 	delta = normalizeAssistantStreamDelta(c.streamBuffer.String(), delta)
@@ -1793,15 +2019,28 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		}
 	}
 
+	// Phase 5 active cell: track stable markdown / coalesced frames without
+	// writing extra scrollback. Transcript still follows the paths below.
+	// newlyStable is the controller's stable plain cut (full delta for text mode).
+	newlyStable := c.paintActiveStreamLocked(delta, c.streamMode == assistantStreamModeMarkdown)
+
 	if c.shouldLiveStreamOutputLocked() && !c.reasoningActive {
 		if c.streamMode == assistantStreamModeMarkdown {
+			// Keep markdown holdback until finalize so formatted blocks land once.
+			// Surface path already mirrors progress via ActiveBand above.
+			return
+		}
+		// No-surface plain-text live stream: emit already-stable text only.
+		// Text mode treats each delta as stable; empty means nothing new to write.
+		if newlyStable == "" && c.streamRendered {
 			return
 		}
 		if !c.streamRendered {
+			// First activation writes the full classified buffer so far.
 			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 			return
 		}
-		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+		c.writeIndentedStreamingDeltaLocked(newlyStable, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 	}
 }
 
@@ -1883,6 +2122,9 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		finalContent = c.streamBuffer.String()
 	}
 	if finalContent == "" {
+		finalContent = c.finalizeActiveAssistantLocked("", c.streamMode == assistantStreamModeMarkdown)
+	}
+	if finalContent == "" {
 		c.resetStreamLocked()
 		return true
 	}
@@ -1892,6 +2134,9 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 			c.streamRenderedPrefixLen = len(c.streamBuffer.String())
 		}
 		c.streamMode = assistantStreamModeMarkdown
+	}
+	if consolidated := c.finalizeActiveAssistantLocked(finalContent, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
+		finalContent = consolidated
 	}
 	if c.streamMode == assistantStreamModeMarkdown {
 		c.renderFormattedAssistantStreamLocked(finalContent)
@@ -1914,7 +2159,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(finalContent)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), false)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), false)
 	c.resetStreamLocked()
 	return true
 }
@@ -1970,6 +2215,9 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		return
 	}
 	content := c.streamBuffer.String()
+	if consolidated := c.finalizeActiveAssistantLocked(content, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
+		content = consolidated
+	}
 	if c.shouldLiveStreamOutputLocked() {
 		if c.streamMode == assistantStreamModeMarkdown {
 			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
@@ -1992,7 +2240,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		if c.session.Formatter != nil {
 			formatted = c.session.Formatter.Format(content)
 		}
-		c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), false)
+		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), false)
 		c.resetStreamLocked()
 		return
 	}
@@ -2040,6 +2288,31 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	c.lastCompletedAsyncLine = true
 }
 
+// RenderAsyncDocument writes a typed timeline/info document without routing it
+// through the legacy supplement keyword parser. Runtime event bridges should
+// prefer this entry whenever the event already owns its semantic kind/status.
+func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return
+	}
+	if strings.TrimSpace(ui.RenderDocumentPlain(doc)) == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	promptWasVisible := c.promptVisible
+	promptAfterBlockGap := c.promptAfterBlockGap
+	previousAsyncLine := c.lastCompletedAsyncLine
+	if !c.beginMessageLocked() {
+		return
+	}
+	c.writeCompleteBlockLocked(
+		ui.RenderDocumentANSI(doc),
+		promptWasVisible && !promptAfterBlockGap && !previousAsyncLine,
+	)
+	c.lastCompletedAsyncLine = true
+}
+
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(input) == "" {
 		return
@@ -2068,7 +2341,24 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 	c.lastCompletedAsyncLine = false
 }
 
+// ClearPrompt releases the prompt rows that are currently painted so direct
+// output can own the cursor. The composer draft (text + cursor) is kept on
+// purpose: turn boundaries, streaming output and async notices all clear the
+// prompt, and none of them should discard what the user already typed. Callers
+// that really want to drop the draft use DiscardPrompt or ResetPromptState.
 func (c *chatInteractionCoordinator) ClearPrompt() {
+	c.clearPrompt(false)
+}
+
+// DiscardPrompt clears the painted prompt rows and drops the composer draft.
+// It is reserved for aborted reads and legacy inline prompts that take over the
+// current line, where keeping the draft would resurrect text the user can no
+// longer see next to the new prompt.
+func (c *chatInteractionCoordinator) DiscardPrompt() {
+	c.clearPrompt(true)
+}
+
+func (c *chatInteractionCoordinator) clearPrompt(dropDraft bool) {
 	if c == nil {
 		return
 	}
@@ -2082,8 +2372,10 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	}
 	c.promptSeq++
 	c.promptVisible = false
-	c.promptInput = ""
-	c.promptCursor = 0
+	if dropDraft {
+		c.promptInput = ""
+		c.promptCursor = 0
+	}
 	c.promptRenderedOnSurface = false
 	c.promptPasteActive = false
 }
@@ -2251,6 +2543,13 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 	c.promptAfterBlockGap = false
 	c.agentStage = chatAgentStageIdle
 	c.agentStageDetail = ""
+	c.activeTools = nil
+	c.activeToolSequence = 0
+	if c.activeStream != nil && c.activeStream.IsToolActive() {
+		c.stopActiveStreamFrameLocked()
+		c.activeStream.Cancel()
+		c.clearActiveBandLocked()
+	}
 	c.inputModeBase = chatInputModeChat
 	c.inputLease = nil
 	c.inputMode = chatInputModeChat
@@ -2277,6 +2576,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.waitingActive = false
 	c.agentStage = chatAgentStageIdle
 	c.agentStageDetail = ""
+	c.activeTools = nil
 	c.inputModeBase = chatInputModeChat
 	c.inputLease = nil
 	c.inputMode = chatInputModeChat
@@ -2286,6 +2586,10 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.completeBlockOutput = false
 	c.lastCompletedAsyncLine = false
 	c.promptAfterBlockGap = false
+	c.stopActiveStreamFrameLocked()
+	if c.activeStream != nil {
+		c.activeStream.Cancel()
+	}
 	c.surface = nil
 }
 
@@ -2397,7 +2701,7 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
 	}
-	c.writeLineLocked(ui.FormatAssistantMessage(formatted))
+	c.writeLineLocked(ui.FormatAssistantRendered(formatted))
 }
 
 func (c *chatInteractionCoordinator) flushReasoningLocked() {
@@ -2641,7 +2945,7 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 	if c.session != nil && c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), false)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), false)
 }
 
 func (c *chatInteractionCoordinator) unrenderedAssistantStreamSuffixLocked(content string) string {
@@ -2662,7 +2966,33 @@ func (c *chatInteractionCoordinator) unrenderedAssistantStreamSuffixLocked(conte
 	return content
 }
 
+// finalizeActiveAssistantLocked consolidates the mutable viewport source at
+// the same lifecycle boundary as the transcript commit. A non-empty final
+// snapshot is authoritative and first replaces the delta-built source.
+func (c *chatInteractionCoordinator) finalizeActiveAssistantLocked(finalSnapshot string, asMarkdown bool) string {
+	if c == nil || c.activeStream == nil {
+		return ""
+	}
+	c.stopActiveStreamFrameLocked()
+	if !c.activeStream.Active() {
+		c.clearActiveBandLocked()
+		return ""
+	}
+	if c.activeStream.IsToolActive() {
+		c.activeStream.Cancel()
+		c.clearActiveBandLocked()
+		return ""
+	}
+	if finalSnapshot != "" {
+		c.activeStream.SetAssistantSnapshot(finalSnapshot, asMarkdown)
+	}
+	content, _ := c.activeStream.Finalize()
+	c.clearActiveBandLocked()
+	return content
+}
+
 func (c *chatInteractionCoordinator) resetStreamLocked() {
+	c.stopActiveStreamFrameLocked()
 	c.streamingActive = false
 	c.streamRendered = false
 	c.streamMode = assistantStreamModeUnknown
@@ -2671,8 +3001,224 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamLines = 0
 	c.streamDisplayLines = 0
 	c.streamBuffer.Reset()
+	if c.activeStream != nil {
+		// Production completion releases collector holdback before resetting the
+		// viewport. Normal completion consumes this content earlier; interruption
+		// paths still finalize rather than silently discarding the active source.
+		if c.activeStream.Active() && !c.activeStream.IsToolActive() {
+			_, _ = c.activeStream.Finalize()
+		} else {
+			c.activeStream.Cancel()
+		}
+	}
+	c.clearActiveBandLocked()
 	if !c.thinkingActive && !c.reasoningActive {
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	}
+}
+
+// paintActiveStreamLocked updates the Phase 5 active cell model and coalesces
+// a viewport paint. It never writes to the transcript writer. When the fixed
+// bottom surface is enabled, the painted frame is mirrored into ActiveBand.
+// Returns newly-stable plain text from the controller (empty when nothing new
+// is safe to append for an optional no-surface live path).
+func (c *chatInteractionCoordinator) paintActiveStreamLocked(delta string, asMarkdown bool) (newlyStable string) {
+	if c == nil || c.activeStream == nil {
+		return ""
+	}
+	if !c.activeStream.Active() || c.activeStream.IsToolActive() {
+		// Assistant content always owns the band over a stale tool cell.
+		c.activeStream.BeginAssistant("assistant")
+	}
+	c.syncActiveStreamViewportLocked()
+	if delta != "" {
+		newlyStable = c.activeStream.PushAssistantDelta(delta, asMarkdown)
+	} else if asMarkdown {
+		// Recompute stable cut from full buffer on mode upgrades.
+		newlyStable = c.activeStream.SetAssistantSnapshot(c.streamBuffer.String(), true)
+	}
+	frame, changed := c.activeStream.PaintLines(time.Now(), false)
+	if c.surfaceOutputActiveLocked() && changed {
+		c.syncActiveBandLinesLocked(frame)
+	}
+	c.scheduleActiveStreamFrameLocked()
+	return newlyStable
+}
+
+// scheduleActiveStreamFrameLocked arms the single coordinator-owned wakeup
+// used for both coalesced content and activity animation. FrameScheduler stays
+// clock-agnostic; this owner supplies the delayed poll that prevents the last
+// delta in a burst from being stranded inside the FPS window.
+func (c *chatInteractionCoordinator) scheduleActiveStreamFrameLocked() {
+	if c == nil || c.shutdown || c.activeStream == nil || !c.surfaceOutputActiveLocked() {
+		return
+	}
+	now := time.Now()
+	delay, needed := c.activeStream.NextFrameDelay(now)
+	if !needed {
+		return
+	}
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+	due := now.Add(delay)
+	if c.activeFrameTimer != nil {
+		if !due.Before(c.activeFrameDue) {
+			return
+		}
+		c.activeFrameTimer.Stop()
+	}
+	c.activeFrameGeneration++
+	generation := c.activeFrameGeneration
+	c.activeFrameDue = due
+	c.activeFrameTimer = time.AfterFunc(delay, func() {
+		c.paintScheduledActiveStreamFrame(generation)
+	})
+}
+
+func (c *chatInteractionCoordinator) paintScheduledActiveStreamFrame(generation uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if generation != c.activeFrameGeneration {
+		return
+	}
+	c.activeFrameTimer = nil
+	c.activeFrameDue = time.Time{}
+	if c.shutdown || c.activeStream == nil || !c.activeStream.Active() || !c.surfaceOutputActiveLocked() {
+		return
+	}
+	c.syncActiveStreamViewportLocked()
+	frame, changed := c.activeStream.PaintLines(time.Now(), false)
+	if changed {
+		c.syncActiveBandLinesLocked(frame)
+	}
+	c.scheduleActiveStreamFrameLocked()
+}
+
+func (c *chatInteractionCoordinator) stopActiveStreamFrameLocked() {
+	if c == nil {
+		return
+	}
+	c.activeFrameGeneration++
+	if c.activeFrameTimer != nil {
+		c.activeFrameTimer.Stop()
+	}
+	c.activeFrameTimer = nil
+	c.activeFrameDue = time.Time{}
+}
+
+// syncAgentStageActiveBandLocked mirrors agent tool-running into ActiveBand.
+// Assistant/reasoning streams keep ownership of the band while active.
+func (c *chatInteractionCoordinator) syncAgentStageActiveBandLocked() {
+	if c == nil || !c.surfaceOutputActiveLocked() || c.activeStream == nil {
+		return
+	}
+	if c.streamingActive || c.reasoningActive {
+		return
+	}
+	switch c.agentStage {
+	case chatAgentStageToolRunning:
+		name, progress := splitToolStageDetail(c.agentStageDetail)
+		if name == "" {
+			name = "tool"
+		}
+		sameTool := c.activeStream.IsToolActive() && c.activeStream.ToolName() == name
+		// Avoid thrashing identical tool paints on high-frequency progress.
+		if sameTool &&
+			c.activeStream.ToolProgress() == progress {
+			if c.surface != nil && len(c.surface.ActiveBandLines()) > 0 {
+				return
+			}
+		}
+		c.activeStream.SetToolProgress(name, progress)
+		c.syncActiveStreamViewportLocked()
+		force := !sameTool || c.surface == nil || len(c.surface.ActiveBandLines()) == 0
+		frame, changed := c.activeStream.PaintLines(time.Now(), force)
+		if force || changed {
+			c.syncActiveBandLinesLocked(frame)
+		}
+		c.scheduleActiveStreamFrameLocked()
+	default:
+		if c.activeStream.IsToolActive() {
+			c.stopActiveStreamFrameLocked()
+			c.activeStream.Cancel()
+			c.clearActiveBandLocked()
+		}
+	}
+}
+
+// splitToolStageDetail separates a composer stage label into tool name and
+// optional progress text. Runtime progress details are built as
+// "<toolName> <message|percent|partial>" by chatToolProgressStageDetail.
+func splitToolStageDetail(detail string) (name, progress string) {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(detail, " ", 2)
+	name = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		progress = strings.TrimSpace(parts[1])
+	}
+	return name, progress
+}
+
+// syncActiveStreamViewportLocked keeps the active frame buffer sized to the
+// adaptive band budget so terminal resizes are picked up on the next frame.
+// The surface reports cached dimensions, so this stays syscall-free while a
+// stream is running.
+func (c *chatInteractionCoordinator) syncActiveStreamViewportLocked() {
+	if c == nil || c.activeStream == nil {
+		return
+	}
+	var width, rows int
+	if c.surface != nil && c.surface.Enabled() {
+		width, rows = c.surface.ActiveBandViewportSize()
+	} else {
+		width, rows = ui.GetTerminalWidth(), ui.ActiveBandRows(ui.GetTerminalHeight())
+	}
+	c.activeStream.SetViewport(width, rows)
+}
+
+func (c *chatInteractionCoordinator) syncActiveBandLinesLocked(frame []render.Line) {
+	if c == nil || c.surface == nil || !c.surface.Enabled() {
+		return
+	}
+	if strings.TrimSpace((render.PlainBackend{}).Render(render.LinesDoc(frame...))) == "" {
+		c.surface.ClearActiveBand()
+		return
+	}
+	c.surface.SetActiveBandStyled(frame)
+}
+
+func (c *chatInteractionCoordinator) clearActiveBandLocked() {
+	if c == nil || c.surface == nil {
+		return
+	}
+	c.surface.ClearActiveBand()
+}
+
+// RefreshActiveStreamViewport forces a redraw after resize/theme changes.
+func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.activeStream == nil || !c.activeStream.Active() {
+		return
+	}
+	c.activeStream.Resize(ui.GetTerminalWidth(), ui.ActiveBandRows(ui.GetTerminalHeight()))
+	frame, changed := c.activeStream.PaintLines(time.Now(), true)
+	if c.surfaceOutputActiveLocked() {
+		c.syncActiveBandLinesLocked(frame)
+		if !changed {
+			c.surface.RefreshActiveBand()
+		}
+		c.scheduleActiveStreamFrameLocked()
 	}
 }
 
@@ -2691,6 +3237,9 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, s
 	if strings.TrimSpace(rendered) == "" {
 		return
 	}
+	// writeLineLocked terminates the block, so a formatter/passthrough trailing
+	// newline would render as an extra blank row above the prompt.
+	rendered = strings.TrimRight(rendered, "\r\n")
 	if !suppressSeparator && (c.completeBlockOutput || c.promptAfterBlockGap) {
 		c.writeLineLocked("")
 	}

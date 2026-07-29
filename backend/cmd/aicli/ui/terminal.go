@@ -14,10 +14,11 @@ import (
 
 // Terminal 终端控制组件
 type Terminal struct {
-	width  int
-	height int
-	theme  *Theme
-	driver *TerminalDriver
+	width        int
+	height       int
+	theme        *Theme
+	driver       *TerminalDriver
+	sizeOverride bool
 }
 
 // NewTerminal 创建新的终端控制组件
@@ -32,6 +33,9 @@ func NewTerminal() *Terminal {
 
 // updateSize 更新终端尺寸
 func (t *Terminal) updateSize() {
+	if t.sizeOverride {
+		return
+	}
 	if t.driver != nil {
 		t.driver.RefreshCapabilities()
 		if width, height, err := t.driver.Size(); err == nil {
@@ -41,6 +45,23 @@ func (t *Terminal) updateSize() {
 		}
 	}
 	width, height := GetTerminalSize()
+	t.width = width
+	t.height = height
+}
+
+// SetSizeForTest pins a synthetic geometry so tests can exercise layouts for
+// terminal sizes the host cannot provide (probing a pipe always falls back to
+// 80x24). Non-positive values clear the override and resume real probing.
+func (t *Terminal) SetSizeForTest(width, height int) {
+	if t == nil {
+		return
+	}
+	if width <= 0 || height <= 0 {
+		t.sizeOverride = false
+		t.updateSize()
+		return
+	}
+	t.sizeOverride = true
 	t.width = width
 	t.height = height
 }
@@ -265,65 +286,11 @@ func (t *Terminal) NewLine() {
 	fmt.Println()
 }
 
-// PrintAt 在指定位置打印
+// PrintAt 在指定位置打印（经 WriteTerminalText 串行化）
 func (t *Terminal) PrintAt(row, col int, text string) {
 	t.SaveCursor()
 	t.MoveTo(row, col)
-	fmt.Print(text)
-	t.RestoreCursor()
-}
-
-// PrintWithColor 使用指定颜色在指定位置打印
-func (t *Terminal) PrintWithColor(row, col int, colorFunc func(string) string, text string) {
-	t.SaveCursor()
-	t.MoveTo(row, col)
-	fmt.Print(colorFunc(text))
-	t.RestoreCursor()
-}
-
-// PrintRight 在指定行右侧打印
-func (t *Terminal) PrintRight(row int, text string) {
-	t.SaveCursor()
-	t.MoveToRow(row)
-	padding := t.width - len(text)
-	fmt.Printf("%*s%s", padding, "", text)
-	t.RestoreCursor()
-}
-
-// PrintCenter 在指定行居中打印
-func (t *Terminal) PrintCenter(row int, text string) {
-	t.SaveCursor()
-	t.MoveToRow(row)
-	centered := CenterText(text, t.width)
-	fmt.Print(centered)
-	t.RestoreCursor()
-}
-
-// DrawBox 绘制矩形框
-func (t *Terminal) DrawBox(row, col, width, height int, title string) {
-	t.SaveCursor()
-
-	// 顶边
-	t.MoveTo(row, col)
-	fmt.Print("┌")
-	fmt.Print(strings.Repeat("─", width-2))
-	if title != "" && len(title) < width-4 {
-		fmt.Printf("[%s]", title)
-	} else {
-		fmt.Print("─")
-	}
-	fmt.Println("┐")
-
-	// 侧边
-	for i := 1; i < height-1; i++ {
-		t.MoveTo(row+i, col)
-		fmt.Println("│" + strings.Repeat(" ", width-2) + "│")
-	}
-
-	// 底边
-	t.MoveTo(row+height-1, col)
-	fmt.Println("└" + strings.Repeat("─", width-2) + "┘")
-
+	_, _ = WriteTerminalText(os.Stdout, text)
 	t.RestoreCursor()
 }
 

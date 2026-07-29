@@ -70,7 +70,9 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			cancelRead()
 			select {
 			case <-promptChanged:
-				capture.ClearPrompt()
+				// Prompt switches only re-own the prompt rows; the next capture
+				// re-seeds the same draft.
+				capture.PreserveDraft()
 				continue
 			default:
 			}

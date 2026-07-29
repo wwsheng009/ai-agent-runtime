@@ -1,32 +1,36 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+)
 
 func (t *Theme) ColorizeSecondary(text string) string {
-	if t == nil {
-		return text
-	}
-	return t.SecondaryColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleTextSecondary, t)
 }
 
 func (t *Theme) ColorizeMuted(text string) string {
-	if t == nil {
-		return text
-	}
-	return t.MutedColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleTextMuted, t)
 }
 
 func (t *Theme) ColorizeLabel(text string) string {
-	if t == nil {
-		return text
-	}
-	return t.MetaLabelColor.Sprint(text)
+	return RenderRoleTextWithTheme(text, style.RoleMetaLabel, t)
 }
 
 func StyleAssistantSupplementLine(line string) string {
 	return GetTheme(ThemeAuto).StyleAssistantSupplementLine(line)
 }
 
+// FormatAssistantSupplementBlock styles a multi-line assistant supplement.
+//
+// Phase 3/5: prefers typed diff rendering for "• Edited/• Diff" blocks and typed
+// TimelineEvent.Document for known timeline lines whose plain projection
+// matches the original layout. Falls back to legacy per-line styling for
+// bullets, unknown tags, and non-timeline content.
 func FormatAssistantSupplementBlock(text string) string {
 	if text == "" {
 		return ""
@@ -35,11 +39,33 @@ func FormatAssistantSupplementBlock(text string) string {
 	if text == "" {
 		return ""
 	}
+
+	// Structured edit/read-only diff block (colored path only). Plain/NoColor keeps
+	// the original layout via per-line styling so transcripts stay stable.
+	if supplements := diff.ParseSupplementBlocks(text); len(supplements) > 0 {
+		theme := supplementThemeContext()
+		if theme.Terminal.Enabled {
+			opts := diff.DefaultRenderOptions(GetTerminalWidth(), theme)
+			opts.ShowLineNo = true
+			doc := diff.SupplementDocument(supplements, opts)
+			return style.RenderDocument(doc, theme)
+		}
+	}
+
+	// Per-line path: StyleAssistantSupplementLine routes known layout-identical
+	// bracket tags through TimelineEvent.Document; bullets/unknown stay legacy.
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		lines[i] = StyleAssistantSupplementLine(line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// supplementThemeContext resolves the user's palette, syntax theme and the
+// terminal's real color depth instead of assuming focus/dark/TrueColor, so
+// pipes, ANSI-16 terminals and light backgrounds degrade correctly.
+func supplementThemeContext() style.ThemeContext {
+	return CurrentThemeContext()
 }
 
 func normalizeSupplementBlockText(text string) string {
@@ -86,30 +112,111 @@ func (t *Theme) StyleAssistantSupplementLine(line string) string {
 		return line
 	}
 	if isAssistantSupplementDivider(trimmed) {
-		return leading + dividerColorForLine(t, trimmed).Sprint(body)
+		return t.renderSupplementLine(leading, body, dividerRoleForLine(trimmed))
 	}
-	if bullet, tag, rest, ok := splitBulletBracketTag(body); ok {
-		tagColor, bodyColor := t.assistantSupplementColors(tag)
-		return leading + tagColor.Sprint(bullet) + tagColor.Sprint(tag) + bodyColor.Sprint(rest)
+	// Known layout-identical timeline lines (including bullet markers) use
+	// Document role spans. Unknown tags and non-equivalent projections stay
+	// on the stable legacy coloring path below.
+	if styled, ok := renderKnownTimelineSupplementLine(line, t); ok {
+		return styled
+	}
+	if ev, ok := parseSupplementTimeline(line); ok {
+		return t.styleTimelineEvent(leading, body, ev)
 	}
 	if styled, ok := t.styleEditedDiffSupplementLine(leading, body); ok {
 		return styled
 	}
-	if tag, rest, ok := splitBracketTag(body); ok {
-		tagColor, bodyColor := t.assistantSupplementColors(tag)
-		return leading + tagColor.Sprint(tag) + bodyColor.Sprint(rest)
-	}
 	if prefix, rest, ok := splitBulletStatus(body); ok {
-		tagColor, bodyColor := themeColor(t.ToolColor), themeColor(t.SecondaryColor)
-		return leading + tagColor.Sprint(prefix) + bodyColor.Sprint(rest)
+		return t.renderSupplementSpans(leading,
+			semanticSpan(prefix, style.RoleTool, true),
+			semanticSpan(rest, style.RoleTextSecondary, false),
+		)
 	}
 	if strings.HasPrefix(trimmed, "failed:") {
-		return leading + t.ErrorColor.Sprint(body)
+		return t.renderSupplementLine(leading, body, style.RoleError)
 	}
 	if strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t") {
-		return leading + t.ColorizeSecondary(body)
+		return t.renderSupplementLine(leading, body, style.RoleTextSecondary)
 	}
-	return leading + t.ColorizeMuted(body)
+	return t.renderSupplementLine(leading, body, style.RoleTextMuted)
+}
+
+func semanticSpan(text string, role style.Role, bold bool) render.Span {
+	return render.Span{Text: text, Style: render.Style{Role: string(role), Bold: bold}}
+}
+
+func (t *Theme) renderSupplementLine(leading, body string, role style.Role) string {
+	return t.renderSupplementSpans(leading, semanticSpan(body, role, false))
+}
+
+func (t *Theme) renderSupplementSpans(leading string, spans ...render.Span) string {
+	doc := render.SingleLineDoc(spans...)
+	return leading + renderDocumentWithProfile(doc, t)
+}
+
+// renderKnownTimelineSupplementLine styles a timeline line via
+// TimelineEvent.Document when the plain projection matches the source layout.
+// Unknown tags and non-equivalent projections return false so callers keep
+// the legacy path. Bullet markers are preserved via TimelineEvent.Marker.
+func renderKnownTimelineSupplementLine(line string, theme *Theme) (string, bool) {
+	if strings.TrimSpace(line) == "" {
+		return "", false
+	}
+	leading, body := splitLeadingWhitespace(line)
+	if body == "" {
+		return "", false
+	}
+	ev, ok := cell.LegacyTimelineParser(line)
+	if !ok || ev.Kind == cell.TimelineUnknown {
+		return "", false
+	}
+	plain := ev.FormatPlain()
+	if plain != body {
+		return "", false
+	}
+	if theme == nil {
+		return leading + plain, true
+	}
+	return leading + renderDocumentWithProfile(ev.Document(), theme), true
+}
+
+func parseSupplementTimeline(line string) (cell.TimelineEvent, bool) {
+	return cell.LegacyTimelineParser(line)
+}
+
+func (t *Theme) styleTimelineEvent(leading, body string, ev cell.TimelineEvent) string {
+	tagRole, bodyRole := rolesForTimeline(ev)
+	if ev.Status == cell.StatusError {
+		tagRole, bodyRole = style.RoleError, style.RoleError
+	}
+	// Re-split so we color the original tag/bullet text stably.
+	if bullet, tag, rest, ok := splitBulletBracketTag(body); ok {
+		return t.renderSupplementSpans(leading,
+			semanticSpan(bullet, tagRole, true),
+			semanticSpan(tag, tagRole, true),
+			semanticSpan(rest, bodyRole, false),
+		)
+	}
+	if tag, rest, ok := splitBracketTag(body); ok {
+		return t.renderSupplementSpans(leading,
+			semanticSpan(tag, tagRole, true),
+			semanticSpan(rest, bodyRole, false),
+		)
+	}
+	if strings.HasPrefix(strings.TrimLeft(body, " \t"), "• ") {
+		return t.renderSupplementSpans(leading, semanticSpan(body, tagRole, true))
+	}
+	return t.renderSupplementLine(leading, body, tagRole)
+}
+
+func rolesForTimeline(ev cell.TimelineEvent) (style.Role, style.Role) {
+	bodyRole := style.RoleTextSecondary
+	switch ev.Kind {
+	case cell.TimelineTeam, cell.TimelineTask, cell.TimelineProgress,
+		cell.TimelineTip, cell.TimelineInput, cell.TimelineNotice:
+		bodyRole = style.RoleTextMuted
+	}
+	return cell.RoleForKind(ev.Kind), bodyRole
 }
 
 func (t *Theme) styleEditedDiffSupplementLine(leading, body string) (string, bool) {
@@ -117,7 +224,7 @@ func (t *Theme) styleEditedDiffSupplementLine(leading, body string) (string, boo
 		return "", false
 	}
 	if strings.HasPrefix(body, "• Edited ") {
-		return leading + t.ToolColor.Sprint(body), true
+		return t.renderSupplementLine(leading, body, style.RoleTool), true
 	}
 	marker, ok := editedDiffSupplementMarker(body)
 	if !ok {
@@ -125,9 +232,9 @@ func (t *Theme) styleEditedDiffSupplementLine(leading, body string) (string, boo
 	}
 	switch marker {
 	case '+':
-		return leading + t.SuccessColor.Sprint(body), true
+		return t.renderSupplementLine(leading, body, style.RoleSuccess), true
 	case '-':
-		return leading + t.ErrorColor.Sprint(body), true
+		return t.renderSupplementLine(leading, body, style.RoleError), true
 	default:
 		return "", false
 	}
@@ -155,38 +262,6 @@ func editedDiffSupplementMarker(body string) (rune, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func (t *Theme) assistantSupplementColors(tag string) (*ThemeColor, *ThemeColor) {
-	switch strings.ToLower(strings.TrimSpace(tag)) {
-	case "[tool]", "[tool done]", "[tool denied]", "[tools]":
-		return themeColor(t.ToolColor), themeColor(t.SecondaryColor)
-	case "[approval]":
-		return themeColor(t.ApprovalColor), themeColor(t.SecondaryColor)
-	case "[question]":
-		return themeColor(t.InfoColor), themeColor(t.SecondaryColor)
-	case "[reasoning]":
-		return themeColor(t.ReasoningColor), themeColor(t.SecondaryColor)
-	case "[thinking]", "[planning]", "[progress]", "[team]", "[team summary]", "[subagent]", "[task]", "[tip]", "[input]":
-		return themeColor(t.TimelineColor), themeColor(t.MutedColor)
-	default:
-		return themeColor(t.TimelineColor), themeColor(t.SecondaryColor)
-	}
-}
-
-type ThemeColor struct {
-	sprint func(...interface{}) string
-}
-
-func themeColor(c interface{ Sprint(...interface{}) string }) *ThemeColor {
-	return &ThemeColor{sprint: c.Sprint}
-}
-
-func (c *ThemeColor) Sprint(args ...interface{}) string {
-	if c == nil || c.sprint == nil {
-		return ""
-	}
-	return c.sprint(args...)
 }
 
 func splitLeadingWhitespace(text string) (string, string) {
@@ -233,13 +308,13 @@ func isAssistantSupplementDivider(text string) bool {
 	return strings.HasPrefix(text, "──") || strings.HasPrefix(text, "═") || strings.HasPrefix(text, "---")
 }
 
-func dividerColorForLine(theme *Theme, text string) *ThemeColor {
+func dividerRoleForLine(text string) style.Role {
 	switch {
 	case strings.Contains(text, "reasoning"):
-		return themeColor(theme.ReasoningColor)
+		return style.RoleReasoning
 	case strings.Contains(text, "command"):
-		return themeColor(theme.ToolColor)
+		return style.RoleTool
 	default:
-		return themeColor(theme.SeparatorColor)
+		return style.RoleBorder
 	}
 }

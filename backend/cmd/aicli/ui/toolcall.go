@@ -5,7 +5,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/fatih/color"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // ToolCallStatus 工具调用状态
@@ -27,74 +29,64 @@ type ToolCallDisplay struct {
 	Result       string
 }
 
-// toolCallColors 工具调用颜色配置
-var (
-	toolCallNameColor    = color.New(color.FgCyan, color.Bold)
-	toolCallArgColor     = color.New(color.FgHiBlack)
-	toolCallSuccessColor = color.New(color.FgGreen)
-	toolCallErrorColor   = color.New(color.FgRed)
-	toolCallCheckColor   = color.New(color.FgYellow)
-	toolCallDimColor     = color.New(color.FgHiBlack)
-)
-
 const (
-	toolResultPreviewLines  = 4
-	toolResultPreviewBytes  = 1024
+	toolResultPreviewLines   = 4
+	toolResultPreviewBytes   = 1024
 	toolResultPreviewLineLen = 200
 )
 
 // FormatToolCall 格式化工具调用显示
 // 格式: ✓ Shell go build ./...
+//
+// Phase 3: builds a typed cell.ToolCell → Document → ANSI/plain backend.
 func FormatToolCall(display *ToolCallDisplay) string {
-	var sb strings.Builder
+	if display == nil {
+		return ""
+	}
+	tc := toolDisplayToCell(display)
+	doc := tc.Document()
+	theme := CurrentThemeContext()
+	if !theme.Terminal.Enabled || theme.Terminal.Depth == render.ColorNone {
+		return render.PlainBackend{}.Render(doc)
+	}
+	return style.RenderDocument(doc, theme)
+}
 
-	// 状态图标
+// ToolCallDocument returns the structured tool cell without encoding.
+func ToolCallDocument(display *ToolCallDisplay) render.Document {
+	if display == nil {
+		return render.Document{}
+	}
+	return toolDisplayToCell(display).Document()
+}
+
+func toolDisplayToCell(display *ToolCallDisplay) cell.ToolCell {
+	st := cell.StatusPending
 	switch display.Status {
 	case ToolCallSuccess:
-		sb.WriteString(toolCallSuccessColor.Sprint("✓ "))
+		st = cell.StatusSuccess
 	case ToolCallError:
-		sb.WriteString(toolCallErrorColor.Sprint("✗ "))
+		st = cell.StatusError
 	case ToolCallRunning:
-		sb.WriteString(toolCallCheckColor.Sprint("○ "))
+		st = cell.StatusRunning
 	default:
-		sb.WriteString("○ ")
+		st = cell.StatusPending
 	}
-
-	// 工具名称
-	sb.WriteString(toolCallNameColor.Sprint(formatToolFunctionName(display.FunctionName)))
-
-	// 参数摘要（通用处理）
-	argSummary := formatToolArgSummary(display.Arguments)
-	if argSummary != "" {
-		sb.WriteString(" ")
-		sb.WriteString(argSummary)
+	return cell.ToolCell{
+		FunctionName: display.FunctionName,
+		Arguments:    display.Arguments,
+		Status:       st,
+		Error:        display.Error,
+		Result:       display.Result,
+		Preview: cell.PreviewOptions{
+			MaxLines:     6,
+			HeadLines:    4,
+			TailLines:    2,
+			MaxLineWidth: toolResultPreviewLineLen,
+			MaxBytes:     toolResultPreviewBytes,
+			AllowANSI:    false, // untrusted tool/MCP output: never keep raw CSI
+		},
 	}
-
-	// 失败时附加具体错误原因
-	if display.Status == ToolCallError {
-		errText := ""
-		if display.Error != nil {
-			errText = display.Error.Error()
-		} else if strings.TrimSpace(display.Result) != "" {
-			errText = display.Result
-		}
-		errSummary := formatToolErrorSummary(errText)
-		if errSummary != "" {
-			sb.WriteString(" - ")
-			sb.WriteString(toolCallErrorColor.Sprint(errSummary))
-		}
-	}
-
-	// 成功时附加简要输出摘要
-	if display.Status == ToolCallSuccess {
-		lines := formatToolResultSummaryLines(display.Result)
-		for _, line := range lines {
-			sb.WriteString("\n    | ")
-			sb.WriteString(line)
-		}
-	}
-
-	return sb.String()
 }
 
 // FormatToolCallStart 格式化工具调用开始显示
@@ -126,8 +118,8 @@ func FormatToolCallResult(functionName string, args map[string]interface{}, succ
 func formatToolFunctionName(name string) string {
 	// 常见缩写映射（仅保留最常用的）
 	shortNames := map[string]string{
-		"shell":                "Shell",
-		"bash":                 "Shell",
+		"shell":                 "Shell",
+		"bash":                  "Shell",
 		"execute_shell_command": "Shell",
 	}
 
@@ -190,7 +182,7 @@ func formatToolArgValue(val interface{}) string {
 }
 
 func formatToolErrorSummary(errText string) string {
-	trimmed := strings.TrimSpace(errText)
+	trimmed := strings.TrimSpace(SanitizeToolOutput(errText))
 	if trimmed == "" {
 		return ""
 	}
@@ -203,7 +195,9 @@ func formatToolErrorSummary(errText string) string {
 }
 
 func formatToolResultSummaryLines(result string) []string {
-	trimmed := strings.TrimSpace(result)
+	// Strip control sequences before preview so tool output cannot move the
+	// cursor, clear the screen, or inject OSC title/clipboard sequences.
+	trimmed := strings.TrimSpace(SanitizeToolOutput(result))
 	if trimmed == "" {
 		return nil
 	}

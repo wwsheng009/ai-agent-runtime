@@ -1,0 +1,581 @@
+package ui
+
+import (
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
+)
+
+const (
+	activeHighlightMaxBytes = 64 * 1024
+	activeHighlightMaxLines = 2000
+)
+
+// ActiveStreamController owns the in-progress assistant/tool viewport.
+//
+// Scrollback stays clean: deltas update an in-memory BufferBackend and only
+// coalesced frames are exposed via Paint. Finalize returns the content that
+// should be committed once to the transcript.
+type ActiveStreamController struct {
+	mu sync.Mutex
+
+	Scheduler   *render.FrameScheduler
+	Buffer      *render.BufferBackend
+	Policy      motion.Policy
+	Highlighter syntax.Highlighter
+
+	cell       cell.ActiveCell
+	md         markdown.StreamCollector
+	prev       []string
+	prevStyled []render.Line
+	active     bool
+	markdown   bool
+
+	markdownDoc        render.Document
+	markdownDocSource  string
+	markdownDocWidth   int
+	markdownDocTheme   string
+	markdownFrameDoc   render.Document
+	markdownFrameHold  string
+	markdownFrameTitle string
+}
+
+// NewActiveStreamController builds a controller with 30 FPS coalescing.
+func NewActiveStreamController(width, height int) *ActiveStreamController {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = ActiveBandMinRows
+	}
+	c := &ActiveStreamController{
+		Scheduler:   render.NewFrameScheduler(render.DefaultMaxFPS),
+		Buffer:      &render.BufferBackend{Width: width, Height: height},
+		Policy:      motion.Global(),
+		Highlighter: newActiveStreamHighlighter(),
+	}
+	return c
+}
+
+// Active reports whether a stream is in progress.
+func (c *ActiveStreamController) Active() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active
+}
+
+// IsToolActive reports whether the in-progress cell is a running tool.
+func (c *ActiveStreamController) IsToolActive() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active && c.cell.Kind == cell.ActiveTool
+}
+
+// ToolName returns the active tool function name when a tool cell is running.
+func (c *ActiveStreamController) ToolName() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active || c.cell.Kind != cell.ActiveTool {
+		return ""
+	}
+	if c.cell.Tool != nil && c.cell.Tool.FunctionName != "" {
+		return c.cell.Tool.FunctionName
+	}
+	return c.cell.Title
+}
+
+// ToolProgress returns the active tool progress text when a tool cell is running.
+func (c *ActiveStreamController) ToolProgress() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active || c.cell.Kind != cell.ActiveTool || c.cell.Tool == nil {
+		return ""
+	}
+	return c.cell.Tool.Result
+}
+
+// BeginAssistant starts an assistant active cell.
+func (c *ActiveStreamController) BeginAssistant(title string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetLocked()
+	c.active = true
+	c.markdown = false
+	c.cell = cell.ActiveCell{
+		Kind:         cell.ActiveAssistant,
+		Title:        title,
+		ShowActivity: true,
+		UpdatedAt:    time.Now(),
+		Status:       style.RunStreaming,
+	}
+	c.Scheduler.Request("assistant.begin")
+}
+
+// BeginTool starts a running tool active cell.
+func (c *ActiveStreamController) BeginTool(name string, args map[string]interface{}) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetLocked()
+	c.active = true
+	c.cell = cell.RunningToolCell(name, args, time.Now())
+	c.Scheduler.Request("tool.begin")
+}
+
+// SetToolProgress updates an in-progress tool cell in place when the tool name
+// matches; otherwise it starts a new running tool cell. Progress is shown under
+// the tool header in the ActiveBand and never commits to scrollback.
+func (c *ActiveStreamController) SetToolProgress(name, progress string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	progress = strings.TrimSpace(progress)
+	if c.active && c.cell.Kind == cell.ActiveTool && c.cell.Tool != nil && c.cell.Tool.FunctionName == name {
+		if c.cell.Tool.Result == progress {
+			return
+		}
+		c.cell.Tool.Result = progress
+		c.cell.UpdatedAt = time.Now()
+		c.Scheduler.Request("tool.progress")
+		return
+	}
+	c.resetLocked()
+	c.active = true
+	active := cell.RunningToolCell(name, nil, time.Now())
+	if progress != "" && active.Tool != nil {
+		active.Tool.Result = progress
+	}
+	c.cell = active
+	c.Scheduler.Request("tool.begin")
+}
+
+// PushAssistantDelta appends text. When asMarkdown is true, only the stable
+// prefix is shown in the active body; holdback stays dimmed.
+// Returns newly-stable text suitable for optional live transcript append
+// (empty when nothing new is stable).
+func (c *ActiveStreamController) PushAssistantDelta(delta string, asMarkdown bool) (newlyStable string) {
+	if c == nil || delta == "" {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active {
+		c.active = true
+		c.cell = cell.ActiveCell{
+			Kind:         cell.ActiveAssistant,
+			Title:        "assistant",
+			ShowActivity: true,
+			Status:       style.RunStreaming,
+		}
+	}
+	if asMarkdown && !c.markdown && c.cell.Body != "" {
+		// The stream classifier may upgrade from plain text after seeing more
+		// context. Seed the Markdown collector so the active viewport and final
+		// payload retain the already-received prefix.
+		_ = c.md.SetContent(c.cell.Body)
+	}
+	c.markdown = c.markdown || asMarkdown
+	c.cell.UpdatedAt = time.Now()
+	if c.markdown {
+		newlyStable = c.md.Push(delta)
+		c.cell.Body = c.md.Raw()
+		c.cell.Stable = c.md.Stable()
+		c.cell.Holdback = c.md.Holdback()
+	} else {
+		c.cell.Body += delta
+		c.cell.Stable = c.cell.Body
+		c.cell.Holdback = ""
+		newlyStable = delta
+	}
+	c.Scheduler.Request("assistant.delta")
+	return newlyStable
+}
+
+// SetAssistantSnapshot replaces content (for snapshot-style streams).
+func (c *ActiveStreamController) SetAssistantSnapshot(content string, asMarkdown bool) (newlyStable string) {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active {
+		c.active = true
+		c.cell = cell.ActiveCell{
+			Kind:         cell.ActiveAssistant,
+			ShowActivity: true,
+			Status:       style.RunStreaming,
+		}
+	}
+	c.markdown = asMarkdown
+	c.cell.UpdatedAt = time.Now()
+	if asMarkdown {
+		newlyStable = c.md.SetContent(content)
+		c.cell.Body = c.md.Raw()
+		c.cell.Stable = c.md.Stable()
+		c.cell.Holdback = c.md.Holdback()
+	} else {
+		prev := c.cell.Body
+		c.cell.Body = content
+		c.cell.Stable = content
+		if strings.HasPrefix(content, prev) {
+			newlyStable = content[len(prev):]
+		} else {
+			newlyStable = content
+		}
+	}
+	c.Scheduler.Request("assistant.snapshot")
+	return newlyStable
+}
+
+// Paint coalesces and materializes the active buffer.
+// changed is true when visible lines differ from the previous paint.
+// frame is the plain multi-line active region (no transcript commit).
+func (c *ActiveStreamController) Paint(now time.Time, force bool) (frame string, changed bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, changed = c.paintLinesLocked(now, force)
+	return strings.Join(c.Buffer.Lines, "\n"), changed
+}
+
+// PaintLines materializes the active frame without flattening semantic spans.
+// The returned lines are safe structured data; terminal encoding remains the
+// responsibility of the fixed-bottom surface.
+func (c *ActiveStreamController) PaintLines(now time.Time, force bool) (lines []render.Line, changed bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.paintLinesLocked(now, force)
+}
+
+// NextFrameDelay reports when the controller should be polled again. Pending
+// content uses the scheduler's FPS deadline; animated activity uses the motion
+// cadence. Callers should stop polling as soon as the active cell is finalized.
+func (c *ActiveStreamController) NextFrameDelay(now time.Time) (time.Duration, bool) {
+	if c == nil {
+		return 0, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active {
+		return 0, false
+	}
+	delay, needed := c.Scheduler.NextDelay(now)
+	if c.Policy == nil || !c.Policy.NeedsNextFrame() {
+		return delay, needed
+	}
+	motionDelay := c.Policy.Interval()
+	if motionDelay <= 0 {
+		return delay, needed
+	}
+	if !needed || motionDelay < delay {
+		return motionDelay, true
+	}
+	return delay, true
+}
+
+func (c *ActiveStreamController) paintLinesLocked(now time.Time, force bool) ([]render.Line, bool) {
+	if !c.active {
+		return nil, false
+	}
+	emitted := false
+	if force {
+		c.Scheduler.Request("force")
+		emitted = c.Scheduler.ForceConsume(now)
+	} else {
+		// Always try consume; Request may have been set by Push.
+		emitted = c.Scheduler.Consume(now)
+		if !emitted && c.Policy != nil && c.Policy.NeedsNextFrame() {
+			// Motion-only refresh still needs a coalesced slot.
+			c.Scheduler.Request("motion")
+			emitted = c.Scheduler.Consume(now)
+		}
+	}
+	if !emitted && !force {
+		// Still allow reading current buffer without advancing FPS credit when forced path unused.
+		// While the viewport is still filling, do not let FPS coalescing strand a
+		// short stale frame after a burst of deltas. Once full, content-only tail
+		// changes remain coalesced normally.
+		if len(c.prev) > 0 && !c.shouldGrowViewportLocked() {
+			return c.Buffer.StyledSnapshot(), false
+		}
+	}
+	doc := c.activeDocumentLocked(now)
+	_ = c.Buffer.Render(doc)
+	diffs := c.Buffer.Diff(c.prev)
+	styled := c.Buffer.StyledSnapshot()
+	changed := len(diffs) > 0 || !render.LinesEqual(c.prevStyled, styled)
+	c.prev = c.Buffer.Snapshot()
+	c.prevStyled = styled
+	return c.Buffer.StyledSnapshot(), changed
+}
+
+func (c *ActiveStreamController) shouldGrowViewportLocked() bool {
+	if c.Buffer == nil || c.Buffer.Height <= 0 || len(c.prev) >= c.Buffer.Height {
+		return false
+	}
+	content := c.cell.Body
+	if c.markdown {
+		content = c.cell.Stable
+	}
+	if c.cell.Holdback != "" {
+		content += c.cell.Holdback
+	}
+	rows := 1 // active-cell header
+	width := c.Buffer.Width
+	if width <= 0 {
+		width = 80
+	}
+	for _, line := range strings.Split(content, "\n") {
+		lineRows := 1
+		if cells := render.Width(line); cells > width {
+			lineRows = (cells + width - 1) / width
+		}
+		rows += lineRows
+		if rows > len(c.prev) {
+			return true
+		}
+	}
+	return rows > len(c.prev)
+}
+
+func (c *ActiveStreamController) activeDocumentLocked(now time.Time) render.Document {
+	active := c.cell
+	if c.markdown && active.Kind == cell.ActiveAssistant {
+		width := 80
+		if c.Buffer != nil && c.Buffer.Width > 0 {
+			width = c.Buffer.Width
+		}
+		syntaxTheme := CurrentResolvedSyntaxThemeName()
+		if c.Highlighter == nil {
+			c.Highlighter = newActiveStreamHighlighter()
+		}
+		bodyChanged := false
+		if c.markdownDocSource != active.Stable || c.markdownDocWidth != width || c.markdownDocTheme != syntaxTheme {
+			c.markdownDoc = markdown.Render(active.Stable, markdown.Options{
+				Width:                 width,
+				TableMode:             markdown.TableAuto,
+				SyntaxTheme:           syntaxTheme,
+				Hyperlinks:            true,
+				Highlighter:           c.Highlighter,
+				HideHighlightFallback: true,
+			})
+			c.markdownDocSource = active.Stable
+			c.markdownDocWidth = width
+			c.markdownDocTheme = syntaxTheme
+			bodyChanged = true
+		}
+		if bodyChanged || c.markdownFrameDoc.LineCount() == 0 || c.markdownFrameHold != active.Holdback || c.markdownFrameTitle != active.Title {
+			active.BodyDocument = &c.markdownDoc
+			c.markdownFrameDoc = active.Document(now, c.Policy)
+			c.markdownFrameHold = active.Holdback
+			c.markdownFrameTitle = active.Title
+		} else {
+			updateActiveAssistantHeader(&c.markdownFrameDoc, activeAssistantHeader(active, now, c.Policy))
+		}
+		return c.markdownFrameDoc
+	}
+	return active.Document(now, c.Policy)
+}
+
+func newActiveStreamHighlighter() syntax.Highlighter {
+	highlighter := syntax.NewChromaHighlighter()
+	highlighter.Limits = syntax.Limits{
+		MaxBytes: activeHighlightMaxBytes,
+		MaxLines: activeHighlightMaxLines,
+	}
+	return highlighter
+}
+
+func activeAssistantHeader(active cell.ActiveCell, now time.Time, policy motion.Policy) string {
+	title := active.Title
+	if title == "" {
+		title = "assistant"
+	}
+	if !active.ShowActivity {
+		return title
+	}
+	if policy == nil {
+		policy = motion.Global()
+	}
+	marker := policy.ActivityFrame(now)
+	if marker == "" {
+		marker = "•"
+	}
+	return marker + " " + title
+}
+
+func updateActiveAssistantHeader(doc *render.Document, header string) {
+	if doc == nil || len(doc.Blocks) == 0 || len(doc.Blocks[0].Lines) == 0 || len(doc.Blocks[0].Lines[0].Spans) == 0 {
+		return
+	}
+	doc.Blocks[0].Lines[0].Spans[0].Text = header
+}
+
+// NoticeLine returns a single-line status hint for the prompt notice area.
+func (c *ActiveStreamController) NoticeLine(now time.Time) string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active {
+		return ""
+	}
+	marker := "•"
+	if c.Policy != nil {
+		marker = c.Policy.ActivityFrame(now)
+	}
+	switch c.cell.Kind {
+	case cell.ActiveTool:
+		name := c.cell.Title
+		if c.cell.Tool != nil {
+			name = c.cell.Tool.FunctionName
+		}
+		return strings.TrimSpace(marker + " running " + name)
+	case cell.ActiveReasoning:
+		return strings.TrimSpace(marker + " reasoning")
+	default:
+		return strings.TrimSpace(marker + " streaming…")
+	}
+}
+
+// Finalize ends the active stream and returns full content for one transcript write.
+func (c *ActiveStreamController) Finalize() (content string, kind cell.ActiveKind) {
+	if c == nil {
+		return "", cell.ActiveNone
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active {
+		return "", cell.ActiveNone
+	}
+	kind = c.cell.Kind
+	if c.markdown {
+		_ = c.md.Finalize()
+		content = c.md.Raw()
+	} else {
+		content = c.cell.Body
+	}
+	c.resetLocked()
+	return content, kind
+}
+
+// Cancel drops the active cell without returning content.
+func (c *ActiveStreamController) Cancel() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetLocked()
+}
+
+// Resize updates buffer geometry and requests a forced redraw on next Paint(force).
+func (c *ActiveStreamController) Resize(width, height int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if width > 0 {
+		c.Buffer.Width = width
+	}
+	if height > 0 {
+		c.Buffer.Height = height
+	}
+	c.Scheduler.Request("resize")
+}
+
+// SetViewport applies viewport geometry and only requests a redraw when the
+// size actually changed, so callers can sync it on every streaming frame.
+func (c *ActiveStreamController) SetViewport(width, height int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.Buffer == nil {
+		c.mu.Unlock()
+		return
+	}
+	changed := false
+	if width > 0 && c.Buffer.Width != width {
+		c.Buffer.Width = width
+		changed = true
+	}
+	if height > 0 && c.Buffer.Height != height {
+		c.Buffer.Height = height
+		changed = true
+	}
+	c.mu.Unlock()
+	if changed {
+		c.Scheduler.Request("resize")
+	}
+}
+
+// ViewportRows reports the current active viewport height in rows.
+func (c *ActiveStreamController) ViewportRows() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Buffer == nil {
+		return 0
+	}
+	return c.Buffer.Height
+}
+
+func (c *ActiveStreamController) resetLocked() {
+	c.active = false
+	c.markdown = false
+	c.cell = cell.ActiveCell{}
+	c.md.Reset()
+	c.prev = nil
+	c.prevStyled = nil
+	c.markdownDoc = render.Document{}
+	c.markdownDocSource = ""
+	c.markdownDocWidth = 0
+	c.markdownDocTheme = ""
+	c.markdownFrameDoc = render.Document{}
+	c.markdownFrameHold = ""
+	c.markdownFrameTitle = ""
+	if c.Buffer != nil {
+		c.Buffer.Lines = nil
+		c.Buffer.StyledLines = nil
+	}
+}

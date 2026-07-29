@@ -4,14 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"reflect"
-	"strings"
-	"testing"
-	"time"
-
-	"github.com/fatih/color"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -25,6 +17,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
 )
 
 func TestPrepareChatPersistence_UsesProvidedSessionDir(t *testing.T) {
@@ -420,14 +418,12 @@ func TestShouldShowChatSessionStartupPreamble_SkipsInTUI(t *testing.T) {
 
 func TestPresentChatStartupSession_ReplaysHistoryInTUI(t *testing.T) {
 	oldInteractive := chatIsInteractiveTerminal
-	oldNoColor := color.NoColor
 	defer func() {
 		chatIsInteractiveTerminal = oldInteractive
-		color.NoColor = oldNoColor
 	}()
 
 	chatIsInteractiveTerminal = func() bool { return true }
-	color.NoColor = true
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	loaded := runtimechat.NewSession("tester")

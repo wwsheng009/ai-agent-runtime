@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/fatih/color"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
 
 // Palette preset names (axis 2: color scheme).
@@ -163,10 +163,10 @@ func SetThemeMode(mode string) error {
 	}
 
 	themeMutex.Lock()
-	defer themeMutex.Unlock()
-
 	currentThemeMode = ThemeModeFromName(normalized)
 	currentTheme = createTheme(currentThemeMode)
+	themeMutex.Unlock()
+	refreshAutoSyntaxTheme()
 	return nil
 }
 
@@ -196,8 +196,6 @@ func ApplyThemeSelection(palette string, mode string) error {
 	}
 
 	themeMutex.Lock()
-	defer themeMutex.Unlock()
-
 	if normalizedPalette != "" {
 		currentThemeName = normalizedPalette
 	}
@@ -205,6 +203,8 @@ func ApplyThemeSelection(palette string, mode string) error {
 		currentThemeMode = ThemeModeFromName(normalizedMode)
 	}
 	currentTheme = createTheme(currentThemeMode)
+	themeMutex.Unlock()
+	refreshAutoSyntaxTheme()
 	return nil
 }
 
@@ -290,203 +290,6 @@ func FormatThemePreviewSample(theme *Theme) string {
 	if theme == nil {
 		return ""
 	}
-	parts := []string{
-		safeColorSprint(theme.UserColor, "user"),
-		safeColorSprint(theme.AssistantColor, "assistant"),
-		safeColorSprint(theme.ToolColor, "tool"),
-		safeColorSprint(theme.ReasoningColor, "reason"),
-		safeColorSprint(theme.ErrorColor, "err"),
-		safeColorSprint(theme.SuccessColor, "ok"),
-		safeColorSprint(theme.MutedColor, "muted"),
-	}
-	return strings.Join(parts, " ")
-}
-
-func safeColorSprint(c *color.Color, text string) string {
-	if c == nil {
-		return text
-	}
-	return c.Sprint(text)
-}
-
-func applyThemePreset(theme *Theme, presetName string) {
-	if theme == nil {
-		return
-	}
-	presetName = normalizeThemePresetName(presetName)
-	if presetName == "" {
-		presetName = ThemePresetFocus
-	}
-	theme.Name = presetName
-
-	switch presetName {
-	case ThemePresetClassic:
-		applyClassicTheme(theme)
-	case ThemePresetContrast:
-		applyContrastTheme(theme)
-	case ThemePresetMono:
-		applyMonoTheme(theme)
-	default:
-		applyFocusTheme(theme)
-	}
-}
-
-func applyClassicTheme(theme *Theme) {
-	if theme == nil {
-		return
-	}
-	if theme.Type == ThemeLight {
-		// Classic light: traditional magenta/yellow accents on a light base.
-		theme.UserColor = color.New(color.FgBlue, color.Bold)
-		theme.AssistantColor = color.New(color.FgBlack)
-		theme.SystemColor = color.New(color.FgYellow)
-		theme.CommandColor = color.New(color.FgMagenta)
-		theme.OutputColor = color.New(color.Reset)
-		theme.SecondaryColor = color.New(color.FgBlack)
-		theme.MutedColor = color.New(color.FgHiBlack)
-		theme.MetaLabelColor = color.New(color.FgMagenta)
-		theme.TimelineColor = color.New(color.FgHiBlack)
-		theme.ToolColor = color.New(color.FgMagenta)
-		theme.ReasoningColor = color.New(color.FgYellow)
-		theme.ApprovalColor = color.New(color.FgYellow, color.Bold)
-		theme.InfoColor = color.New(color.FgMagenta)
-		theme.SeparatorColor = color.New(color.FgHiBlack)
-		// Status colors keep base light red/yellow/green for semantic clarity.
-		return
-	}
-	// Classic dark: original aicli accent palette layered on dark base.
-	theme.UserColor = color.New(color.FgCyan, color.Bold)
-	theme.AssistantColor = color.New(color.FgGreen)
-	theme.SystemColor = color.New(color.FgHiYellow)
-	theme.CommandColor = color.New(color.FgMagenta)
-	theme.OutputColor = color.New(color.Reset)
-	theme.SecondaryColor = color.New(color.Reset)
-	theme.MutedColor = color.New(color.FgHiBlack)
-	theme.MetaLabelColor = color.New(color.FgMagenta)
-	theme.TimelineColor = color.New(color.FgHiBlack)
-	theme.ToolColor = color.New(color.FgMagenta)
-	theme.ReasoningColor = color.New(color.FgYellow)
-	theme.ApprovalColor = color.New(color.FgYellow, color.Bold)
-	theme.InfoColor = color.New(color.FgMagenta)
-	theme.SeparatorColor = color.New(color.FgHiBlack)
-}
-
-func applyFocusTheme(theme *Theme) {
-	if theme == nil {
-		return
-	}
-
-	if theme.Type == ThemeLight {
-		theme.UserColor = color.New(color.FgBlue, color.Bold)
-		theme.AssistantColor = color.New(color.FgBlack)
-		theme.SystemColor = color.New(color.FgBlue)
-		theme.CommandColor = color.New(color.FgHiBlack)
-		theme.OutputColor = color.New(color.Reset)
-		theme.SecondaryColor = color.New(color.FgBlack)
-		theme.MutedColor = color.New(color.FgHiBlack)
-		theme.MetaLabelColor = color.New(color.FgHiBlack)
-		theme.TimelineColor = color.New(color.FgHiBlack)
-		theme.ToolColor = color.New(color.FgBlue, color.Bold)
-		theme.ReasoningColor = color.New(color.FgYellow)
-		theme.ApprovalColor = color.New(color.FgMagenta, color.Bold)
-		theme.SeparatorColor = color.New(color.FgHiBlack)
-		theme.InfoColor = color.New(color.FgCyan)
-		return
-	}
-
-	theme.UserColor = color.New(color.FgCyan, color.Bold)
-	theme.AssistantColor = color.New(color.FgHiWhite)
-	theme.SystemColor = color.New(color.FgHiBlue)
-	theme.CommandColor = color.New(color.FgHiBlack)
-	theme.OutputColor = color.New(color.Reset)
-	theme.SecondaryColor = color.New(color.FgWhite)
-	theme.MutedColor = color.New(color.FgHiBlack)
-	theme.MetaLabelColor = color.New(color.FgHiBlack)
-	theme.TimelineColor = color.New(color.FgHiBlack)
-	theme.ToolColor = color.New(color.FgHiCyan, color.Bold)
-	theme.ReasoningColor = color.New(color.FgHiYellow)
-	theme.ApprovalColor = color.New(color.FgHiMagenta, color.Bold)
-	theme.SeparatorColor = color.New(color.FgHiBlack)
-	theme.InfoColor = color.New(color.FgHiCyan)
-}
-
-func applyContrastTheme(theme *Theme) {
-	if theme == nil {
-		return
-	}
-
-	if theme.Type == ThemeLight {
-		theme.UserColor = color.New(color.FgBlue, color.Bold)
-		theme.AssistantColor = color.New(color.FgBlack, color.Bold)
-		theme.SystemColor = color.New(color.FgBlue, color.Bold)
-		theme.CommandColor = color.New(color.FgBlue, color.Bold)
-		theme.OutputColor = color.New(color.Reset)
-		theme.SecondaryColor = color.New(color.FgBlack)
-		theme.MutedColor = color.New(color.FgHiBlack)
-		theme.MetaLabelColor = color.New(color.FgBlue)
-		theme.TimelineColor = color.New(color.FgCyan)
-		theme.ToolColor = color.New(color.FgMagenta, color.Bold)
-		theme.ReasoningColor = color.New(color.FgYellow, color.Bold)
-		theme.ApprovalColor = color.New(color.FgRed, color.Bold)
-		theme.SeparatorColor = color.New(color.FgBlue)
-		theme.InfoColor = color.New(color.FgCyan, color.Bold)
-		theme.ErrorColor = color.New(color.FgRed, color.Bold)
-		theme.WarningColor = color.New(color.FgYellow, color.Bold)
-		theme.SuccessColor = color.New(color.FgGreen, color.Bold)
-		theme.ProgressColor = color.New(color.FgGreen, color.Bold)
-		return
-	}
-
-	theme.UserColor = color.New(color.FgHiCyan, color.Bold)
-	theme.AssistantColor = color.New(color.FgHiWhite, color.Bold)
-	theme.SystemColor = color.New(color.FgHiBlue, color.Bold)
-	theme.CommandColor = color.New(color.FgHiBlue, color.Bold)
-	theme.OutputColor = color.New(color.Reset)
-	theme.SecondaryColor = color.New(color.FgHiWhite)
-	theme.MutedColor = color.New(color.FgWhite)
-	theme.MetaLabelColor = color.New(color.FgHiBlue)
-	theme.TimelineColor = color.New(color.FgCyan)
-	theme.ToolColor = color.New(color.FgHiMagenta, color.Bold)
-	theme.ReasoningColor = color.New(color.FgHiYellow, color.Bold)
-	theme.ApprovalColor = color.New(color.FgHiRed, color.Bold)
-	theme.SeparatorColor = color.New(color.FgHiBlue)
-	theme.InfoColor = color.New(color.FgHiCyan, color.Bold)
-	theme.ErrorColor = color.New(color.FgHiRed, color.Bold)
-	theme.WarningColor = color.New(color.FgHiYellow, color.Bold)
-	theme.SuccessColor = color.New(color.FgHiGreen, color.Bold)
-	theme.ProgressColor = color.New(color.FgHiGreen, color.Bold)
-}
-
-func applyMonoTheme(theme *Theme) {
-	if theme == nil {
-		return
-	}
-
-	base := color.New()
-	emphasis := color.New(color.Bold)
-	muted := color.New(color.FgHiBlack)
-	if theme.Type == ThemeLight {
-		// On light backgrounds, plain default fg is fine; keep muted grey.
-		muted = color.New(color.FgHiBlack)
-	}
-
-	theme.UserColor = emphasis
-	theme.AssistantColor = base
-	theme.SystemColor = emphasis
-	theme.CommandColor = base
-	theme.OutputColor = base
-	theme.SecondaryColor = base
-	theme.MutedColor = muted
-	theme.MetaLabelColor = muted
-	theme.TimelineColor = muted
-	theme.ToolColor = emphasis
-	theme.ReasoningColor = emphasis
-	theme.ApprovalColor = emphasis
-	// Status roles stay monochrome (weight only) so mono never leaks base red/green/yellow.
-	theme.ErrorColor = emphasis
-	theme.WarningColor = emphasis
-	theme.SuccessColor = emphasis
-	theme.ProgressColor = emphasis
-	theme.InfoColor = base
-	theme.SeparatorColor = muted
+	doc := render.SingleLineDoc(themePreviewSampleSpans()...)
+	return renderDocumentWithProfile(doc, theme)
 }

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2509,8 +2511,12 @@ func TestBuildSharedChatPromptPreflightCompactor_RetainsFrozenTools(t *testing.T
 	var captured map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id":"chatcmpl-compact","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"Compact summary."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+		// Compact uses Stream(); non-SSE JSON bodies previously combined with
+		// unlimited retries (nil session config => MaxRetries=-1) and hung the
+		// package test for minutes. Serve a minimal OpenAI SSE completion.
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-compact\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Compact summary.\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
 
@@ -2554,6 +2560,47 @@ func TestBuildSharedChatPromptPreflightCompactor_RetainsFrozenTools(t *testing.T
 	require.True(t, ok)
 	assert.Equal(t, "view", function["name"])
 	assert.Equal(t, "none", captured["tool_choice"])
+}
+
+func TestBuildSharedChatPromptPreflightCompactor_NonSSEBodyFallsBackWithoutRetryHang(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		// Deliberately return non-stream JSON so the OpenAI stream parser fails.
+		// Compact must fall back quickly instead of retrying forever.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-compact","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"Compact summary."},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		ProviderName: "shared-provider",
+		Model:        "test-model",
+		Provider: config.Provider{
+			Enabled:      true,
+			Protocol:     "openai",
+			BaseURL:      server.URL,
+			DefaultModel: "test-model",
+		},
+	}
+	compactor := buildSharedChatPromptPreflightCompactor(session, nil)
+	require.NotNil(t, compactor)
+	history := []types.Message{
+		*types.NewUserMessage("Investigate the failure."),
+		*types.NewAssistantMessage(strings.Repeat("Earlier analysis. ", 20)),
+		*types.NewUserMessage("Continue."),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	_, compacted, err := compactor(ctx, history)
+	elapsed := time.Since(started)
+	require.NoError(t, err)
+	require.True(t, compacted, "expected deterministic fallback compaction")
+	require.Less(t, elapsed, 4*time.Second, "compact non-SSE fallback hung: %s", elapsed)
+	require.Equal(t, int32(1), hits.Load(), "expected a single stream attempt without retry storm")
 }
 
 func TestAICLISharedChatExecutor_AutoCompactsHistoryBeforeToolLoop(t *testing.T) {

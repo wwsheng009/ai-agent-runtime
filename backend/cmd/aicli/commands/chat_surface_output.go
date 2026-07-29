@@ -46,6 +46,21 @@ func (o chatPromptOverlay) beginDirectOutput() {
 	}
 }
 
+// beginInlineOutput is the legacy, surface-less variant: the prompt shares the
+// current terminal line with the output that follows, so the draft cannot be
+// repainted afterwards and is dropped instead of silently resurfacing.
+func (o chatPromptOverlay) beginInlineOutput() {
+	if o.session == nil || o.session.NoInteractive || o.session.JSONOutput {
+		return
+	}
+	if o.session.Interaction != nil {
+		o.session.Interaction.DiscardPrompt()
+	}
+	if o.session.Surface != nil {
+		o.session.Surface.BeginOutput()
+	}
+}
+
 func (o chatPromptOverlay) showComposerPreview(prompt string) bool {
 	if !o.surfaceEnabled() {
 		return false
@@ -192,7 +207,7 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 		return prompt, cleanup, true
 	}
 
-	o.beginDirectOutput()
+	o.beginInlineOutput()
 	fmt.Println()
 	for _, line := range lines {
 		if rendered := formatInteractiveSupplementPromptLine(line); rendered != "" {

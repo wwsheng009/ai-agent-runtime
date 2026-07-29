@@ -3,21 +3,15 @@ package commands
 import (
 	"bytes"
 	"context"
-	"strings"
-	"testing"
-
-	"github.com/fatih/color"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"strings"
+	"testing"
 )
 
 func TestHistoryLoadAndResumeCommandsReplayTheSameTranscript(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	history := historyCommandTranscriptFixture()

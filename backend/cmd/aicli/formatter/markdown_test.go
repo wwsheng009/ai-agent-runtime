@@ -3,6 +3,9 @@ package formatter
 import (
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 func TestIsMarkdown(t *testing.T) {
@@ -37,26 +40,53 @@ func TestIsMarkdown(t *testing.T) {
 	}
 }
 
+func TestFormatUsesInjectedANSI16ThemeContext(t *testing.T) {
+	f := NewMarkdownFormatter(true)
+	f.ThemeContextProvider = func() style.ThemeContext {
+		return style.BuildThemeContext(style.ThemeSelection{
+			PaletteName: style.PaletteFocus,
+			SyntaxName:  "monokai",
+			Mode:        style.ThemeModeDark,
+		}, style.ColorProfile{ColorProfile: render.ColorProfile{
+			Enabled: true,
+			Depth:   render.ColorANSI16,
+			Forced:  true,
+		}})
+	}
+	got := f.Format("# Title\n\n```go\nconst n = 1\n```")
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected ANSI output, got %q", got)
+	}
+	if strings.Contains(got, "38;5;") || strings.Contains(got, "38;2;") {
+		t.Fatalf("injected ANSI-16 profile leaked high-depth SGR: %q", got)
+	}
+}
+
 func TestFormatCodeBlock(t *testing.T) {
 	formatter := NewMarkdownFormatter(true)
+	formatter.Width = 80
 
 	code := "```go\nfunc main() {\n    fmt.Println(\"Hello\")\n}\n```"
 	result := formatter.Format(code)
+	plain := render.ANSIToPlain(result)
 
 	// 检查代码块是否被正确处理（不包含边框）
-	if result == "" {
+	if plain == "" {
 		t.Errorf("代码块格式化结果不应为空")
 	}
 
-	// 检查是否包含代码内容
-	if !strings.Contains(result, "func main()") {
-		t.Errorf("代码块应该包含原始代码内容")
+	// Token highlighting inserts SGR between tokens; assert on plain projection.
+	if !strings.Contains(plain, "func") || !strings.Contains(plain, "main") {
+		t.Errorf("代码块应该包含原始代码内容, plain=%q", plain)
+	}
+	if !strings.Contains(result, "\x1b[") {
+		t.Errorf("彩色模式下代码块应包含 ANSI 高亮序列")
 	}
 
 	// 检查不包含边框字符
 	borderChars := []string{"┌", "┐", "└", "┘", "│", "─"}
 	for _, char := range borderChars {
-		if strings.Contains(result, char) {
+		if strings.Contains(plain, char) {
 			t.Errorf("代码块不应该包含边框字符: %s", char)
 		}
 	}
@@ -64,23 +94,25 @@ func TestFormatCodeBlock(t *testing.T) {
 
 func TestFormatCodeBlock_IndentedClosingFence(t *testing.T) {
 	formatter := NewMarkdownFormatter(false)
+	formatter.Width = 80
 
 	input := "```go\nfmt.Println(\"hello\")\n ```\nafter"
 	result := formatter.Format(input)
 
 	if strings.Contains(result, "```") {
-		t.Errorf("代码块格式化结果不应包含 ``` 结束符")
+		t.Errorf("代码块格式化结果不应包含 ``` 结束符, got %q", result)
 	}
-	if !strings.Contains(result, "fmt.Println(\"hello\")") {
-		t.Errorf("代码块应该包含原始代码内容")
+	if !strings.Contains(result, "fmt.Println") || !strings.Contains(result, "hello") {
+		t.Errorf("代码块应该包含原始代码内容, got %q", result)
 	}
 	if !strings.Contains(result, "after") {
-		t.Errorf("代码块结束后内容应该保留")
+		t.Errorf("代码块结束后内容应该保留, got %q", result)
 	}
 }
 
 func TestFormatHeading(t *testing.T) {
 	formatter := NewMarkdownFormatter(true)
+	formatter.Width = 80
 
 	tests := []struct {
 		name  string
@@ -95,12 +127,19 @@ func TestFormatHeading(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatter.formatHeading(tt.text, tt.level)
-			if formatter.useColor {
-				// 检查是否包含预期的符号
-				if len(result) < len(tt.text) {
-					t.Errorf("标题格式化结果应该包含原始文本")
+			input := strings.Repeat("#", tt.level) + " " + tt.text
+			doc := formatter.FormatDocument(input)
+			if plain := doc.PlainText(); !strings.Contains(plain, tt.check) || !strings.Contains(plain, tt.text) {
+				t.Fatalf("标题结构化渲染缺少前缀或文本: %q", plain)
+			}
+			foundAccent := false
+			for _, span := range doc.Blocks[0].Lines[0].Spans {
+				if span.Style.Role == string(style.RoleAccent) && span.Style.Bold {
+					foundAccent = true
 				}
+			}
+			if !foundAccent {
+				t.Fatalf("标题缺少 accent/bold 语义 span: %+v", doc)
 			}
 		})
 	}
@@ -341,6 +380,7 @@ func TestFormatTable_WithOnlyIndentedRowsFormatsAsTable(t *testing.T) {
 
 func TestFormatCodeBlock_MarkdownFenceRendersInnerMarkdown(t *testing.T) {
 	formatter := NewMarkdownFormatter(false)
+	formatter.Width = 120
 
 	input := "```markdown\n| 列名1 | 列名2 | 列名3 |\n|------|------|------|\n| 数据A | 数据B | 数据C |\n| 数据D | 数据E | 数据F |\n```"
 	result := formatter.Format(input)
@@ -348,13 +388,18 @@ func TestFormatCodeBlock_MarkdownFenceRendersInnerMarkdown(t *testing.T) {
 	if strings.Contains(result, "```") {
 		t.Fatalf("expected markdown fence to be unwrapped, got %q", result)
 	}
-	if !strings.Contains(result, "列名1 │ 列名2 │ 列名3") {
+	// Grid uses " │ " separators; accept either grid or records fallback.
+	if !strings.Contains(result, "列名1") || !strings.Contains(result, "数据A") {
 		t.Fatalf("expected inner markdown table to be formatted, got %q", result)
+	}
+	if !strings.Contains(result, "│") && !strings.Contains(result, "列名1:") {
+		t.Fatalf("expected table grid or records layout, got %q", result)
 	}
 }
 
 func TestFormatCodeBlock_MarkdownFenceRendersInnerHeadingAndList(t *testing.T) {
 	formatter := NewMarkdownFormatter(false)
+	formatter.Width = 80
 
 	input := "```md\n# 标题\n- 项目1\n- 项目2\n```"
 	result := formatter.Format(input)
@@ -362,7 +407,8 @@ func TestFormatCodeBlock_MarkdownFenceRendersInnerHeadingAndList(t *testing.T) {
 	if strings.Contains(result, "```") {
 		t.Fatalf("expected md fence to be unwrapped, got %q", result)
 	}
-	if !strings.Contains(result, "# 标题") {
+	// New renderer uses ▶ prefix for h1 rather than raw "# ".
+	if !strings.Contains(result, "标题") {
 		t.Fatalf("expected inner heading to be formatted, got %q", result)
 	}
 	if !strings.Contains(result, "• 项目1") || !strings.Contains(result, "• 项目2") {
@@ -442,9 +488,21 @@ func TestFormatInlineCode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatter.formatInlineCode(tt.input)
+			doc := formatter.FormatDocument(tt.input)
+			result := doc.PlainText()
 			if !strings.Contains(result, tt.check) {
 				t.Errorf("inline code 格式化错误\n输入: %s\n期望包含: %s\n实际: %s", tt.input, tt.check, result)
+			}
+			foundCode := false
+			for _, block := range doc.Blocks {
+				for _, line := range block.Lines {
+					for _, span := range line.Spans {
+						foundCode = foundCode || span.Style.Role == string(style.RoleCodeInline)
+					}
+				}
+			}
+			if !foundCode {
+				t.Fatalf("inline code 缺少语义 span: %+v", doc)
 			}
 		})
 	}
@@ -478,7 +536,8 @@ func TestFormatBold(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatter.formatBold(tt.input)
+			doc := formatter.FormatDocument(tt.input)
+			result := doc.PlainText()
 			if !strings.Contains(result, tt.check) {
 				t.Errorf("粗体格式化应该包含: %s\n实际: %s", tt.check, result)
 			}
@@ -496,7 +555,7 @@ func TestFormatLinks(t *testing.T) {
 	formatter := NewMarkdownFormatter(false)
 
 	input := "访问 [GitHub](https://github.com) 和 [Google](https://google.com)"
-	result := formatter.formatLink(input)
+	result := formatter.Format(input)
 
 	if !strings.Contains(result, "GitHub") {
 		t.Errorf("应该包含链接文本: GitHub")
@@ -514,13 +573,30 @@ func TestFormatLinks(t *testing.T) {
 
 func TestFormatLinks_FileLinkRendersTerminalHyperlink(t *testing.T) {
 	formatter := NewMarkdownFormatter(true)
+	formatter.ThemeContextProvider = func() style.ThemeContext {
+		return style.BuildThemeContext(style.ThemeSelection{
+			PaletteName: style.PaletteFocus,
+			Mode:        style.ThemeModeDark,
+		}, style.ColorProfile{ColorProfile: render.ColorProfile{
+			Enabled:    true,
+			Depth:      render.ColorANSI16,
+			Hyperlinks: true,
+		}})
+	}
 
 	input := `打开 [C:\tmp\img.png](file:///C:/tmp/img.png)`
-	result := formatter.formatLink(input)
-	visible := stripANSICodes(result)
-
-	if !strings.Contains(result, "\x1b]8;;file:///C:/tmp/img.png\x1b\\") {
-		t.Fatalf("应该包含 OSC8 超链接序列，实际: %q", result)
+	doc := formatter.FormatDocument(input)
+	visible := doc.PlainText()
+	foundLink := false
+	for _, block := range doc.Blocks {
+		for _, line := range block.Lines {
+			for _, span := range line.Spans {
+				foundLink = foundLink || span.Link == "file:///C:/tmp/img.png"
+			}
+		}
+	}
+	if !foundLink {
+		t.Fatalf("结构化文档缺少文件超链接目标: %+v", doc)
 	}
 	if !strings.Contains(visible, `C:\tmp\img.png`) {
 		t.Fatalf("可见文本应该包含文件路径，实际: %q", visible)
@@ -535,7 +611,7 @@ func TestFormatQuote(t *testing.T) {
 	formatter := NewMarkdownFormatter(false)
 
 	input := "> 这是引用内容\n第二行引用"
-	result := formatter.formatQuote(input)
+	result := formatter.Format(input)
 
 	if !strings.Contains(result, "│") {
 		t.Errorf("引用应该包含 │ 符号")

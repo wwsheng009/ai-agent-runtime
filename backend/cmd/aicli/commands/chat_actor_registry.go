@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -2316,6 +2317,9 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 	for {
 		if args.MailboxOnly {
 			if events, ok, hasMailboxRows, err := r.listLocalAgentMailboxEvents(readCtx, sessionID, args.AfterSeq, limit); err != nil {
+				if waitMs > 0 && isLocalAgentReadWaitInterrupted(readCtx, err) {
+					return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, true)
+				}
 				return nil, err
 			} else if ok {
 				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
@@ -2324,9 +2328,7 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 				if hasMailboxRows {
 					select {
 					case <-readCtx.Done():
-						result := buildLocalAgentEventsResult(sessionID, nil)
-						result.TimedOut = true
-						return result, nil
+						return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, true)
 					case <-wakeCh:
 					case <-time.After(500 * time.Millisecond):
 					}
@@ -2336,6 +2338,9 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 		}
 		events, err := r.Host.EventStore.ListEvents(readCtx, sessionID, args.AfterSeq, limit)
 		if err != nil {
+			if waitMs > 0 && isLocalAgentReadWaitInterrupted(readCtx, err) {
+				return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, args.MailboxOnly)
+			}
 			return nil, err
 		}
 		if args.MailboxOnly {
@@ -2346,9 +2351,7 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 		}
 		select {
 		case <-readCtx.Done():
-			result := buildLocalAgentEventsResult(sessionID, nil)
-			result.TimedOut = true
-			return result, nil
+			return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, args.MailboxOnly)
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}
@@ -3416,6 +3419,59 @@ func truncateLocalAgentStatusPreview(content string) string {
 		return content
 	}
 	return content[:157] + "..."
+}
+
+// isLocalAgentReadWaitInterrupted reports wait-budget cancellation or SQLite
+// interrupt/lock errors that should surface as soft TimedOut results instead of
+// hard tool failures during read_agent_events waits.
+func isLocalAgentReadWaitInterrupted(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && (stderrors.Is(ctx.Err(), context.Canceled) || stderrors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return true
+	}
+	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	if strings.Contains(message, "sqlite3: interrupted") ||
+		strings.Contains(message, "database operation interrupted") {
+		return true
+	}
+	return team.IsSQLiteLockError(err)
+}
+
+// softTimeoutLocalAgentEvents performs a best-effort final list with the parent
+// context (no wait budget) and returns TimedOut=true when no events are available.
+func (r *localActorRegistry) softTimeoutLocalAgentEvents(ctx context.Context, sessionID string, afterSeq int64, limit int, mailboxOnly bool) (*toolbroker.AgentEventsResult, error) {
+	parentCtx := ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	if mailboxOnly {
+		if events, ok, _, err := r.listLocalAgentMailboxEvents(parentCtx, sessionID, afterSeq, limit); err == nil && ok {
+			if len(events) > 0 {
+				return buildLocalAgentEventsResult(sessionID, events), nil
+			}
+		}
+	}
+	if r != nil && r.Host != nil && r.Host.EventStore != nil {
+		if events, err := r.Host.EventStore.ListEvents(parentCtx, sessionID, afterSeq, limit); err == nil {
+			if mailboxOnly {
+				events = filterLocalAgentMailboxWaitEvents(events)
+			}
+			if len(events) > 0 {
+				return buildLocalAgentEventsResult(sessionID, events), nil
+			}
+		}
+	}
+	result := buildLocalAgentEventsResult(sessionID, nil)
+	result.TimedOut = true
+	return result, nil
 }
 
 func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentEventsResult {

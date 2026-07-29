@@ -3,19 +3,17 @@ package commands
 import (
 	"context"
 	"fmt"
+	"github.com/joho/godotenv"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/fatih/color"
-	"github.com/joho/godotenv"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func TestAICLIChatActorExecutor_LiveAutoStartShowsTeamProgressTimeline(t *testing.T) {
@@ -460,12 +458,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	if os.Getenv("LIVE_AICLI_PROMPT_INTERACTION_TEST") != "1" {
 		t.Skip("set LIVE_AICLI_PROMPT_INTERACTION_TEST=1 to enable live prompt interaction smoke")
 	}
-
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	root := findCommandsRepoRoot(t)

@@ -3,9 +3,10 @@ package ui
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"os"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // InputBox 输入框组件
@@ -69,8 +70,7 @@ func (ib *InputBox) Show() {
 		// 使用布局渲染
 		ib.layout.RenderInputArea(ib.GetPrompt(), "")
 	} else {
-		// 直接打印
-		fmt.Print(ib.theme.UserColor.Sprint(ib.GetPrompt()))
+		writeInputDocument(PromptLineDocument(ib.GetPrompt()), ib.theme)
 	}
 }
 
@@ -107,9 +107,9 @@ func (ib *InputBox) ReadMultiLine() (string, error) {
 		}
 
 		if ib.layout != nil && ib.layout.IsEnabled() {
-			ib.layout.RenderInputArea(fmt.Sprintf("%s", prompt), "")
+			ib.layout.RenderInputArea(prompt, "")
 		} else {
-			fmt.Print(ib.theme.UserColor.Sprintf("%s", prompt))
+			writeInputDocument(PromptLineDocument(prompt), ib.theme)
 		}
 
 		line, err := reader.ReadString('\n')
@@ -284,13 +284,12 @@ func (ib *InputBox) Complete(input string, pos int) (string, []string) {
 	return input, []string{}
 }
 
-// FormatPrompt 格式化带上下文的提示符
+// FormatPrompt 格式化带上下文的提示符（Document + role adapter）
 func (ib *InputBox) FormatPrompt(context string) string {
-	prompt := ib.theme.UserColor.Sprint(ib.GetPrompt())
 	if context != "" {
-		prompt = fmt.Sprintf("%s ", ib.theme.Dimmed(context))
+		return renderInputDocument(promptSpanDocument(context+" ", style.RoleTextMuted), ib.theme)
 	}
-	return prompt
+	return renderInputDocument(PromptLineDocument(ib.GetPrompt()), ib.theme)
 }
 
 // Cursor 移动光标到输入位置

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
@@ -221,7 +220,7 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 
 	if len(normalizedOptions) == 0 {
 		if normalizedCurrent != "" {
-			printChatSelectionLine("  [1] %s %s", normalizedCurrent, ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+			printChatSelectionMutedSuffix("  [1] "+normalizedCurrent+" ", "(当前)")
 		}
 		printChatSelectionBlankLine()
 		return normalizedCurrent
@@ -237,10 +236,11 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 	}
 
 	for i, option := range normalizedOptions {
+		primary := fmt.Sprintf("  [%d] %-*s  ", i+1, maxLabelLen, labels[i])
 		if currentValid && option == currentMatch {
-			printChatSelectionLine("  [%d] %-*s  %s", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+			printChatSelectionMutedSuffix(primary, "(当前)")
 		} else if defaultOption != "" && option == defaultOption {
-			printChatSelectionLine("  [%d] %-*s  %s", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
+			printChatSelectionMutedSuffix(primary, "(默认)")
 		} else {
 			printChatSelectionLine("  [%d] %-*s", i+1, maxLabelLen, labels[i])
 		}

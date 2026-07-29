@@ -258,6 +258,49 @@ func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	}
 }
 
+func TestChatBusyComposerCaptureSeedsAndPreservesDraftAcrossRestarts(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("half typed follow-up")
+
+	capture := newChatBusyComposerCapture(session, "> ", false)
+	hooks := capture.hooks()
+	if hooks.InitialText != "half typed follow-up" || hooks.InitialCursor != len([]rune("half typed follow-up")) {
+		t.Fatalf("expected busy capture to seed the existing draft, got text=%q cursor=%d", hooks.InitialText, hooks.InitialCursor)
+	}
+
+	// A prompt switch (approval popup) or a finished turn only releases the
+	// painted rows; the draft must survive for the next capture/composer.
+	capture.PreserveDraft()
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "half typed follow-up" {
+		t.Fatalf("expected preserved busy draft, got %#v", snapshot)
+	}
+	if next := newChatBusyComposerCapture(session, "> ", false).hooks(); next.InitialText != "half typed follow-up" {
+		t.Fatalf("expected restarted busy capture to re-seed the draft, got %q", next.InitialText)
+	}
+}
+
+func TestBusyDraftSurvivesTurnEndOutputAndFeedsNextComposer(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+
+	// The user types a follow-up while the previous turn is still streaming.
+	busyHooks := newChatBusyComposerCapture(session, "> ", false).hooks()
+	busyHooks.OnChange(ui.LineEditorSnapshot{Text: "下一轮再说这件事", Cursor: 4})
+
+	// Turn end: the streamed answer and the status refresh take over the prompt
+	// rows, then the busy capture is stopped by the finished /llm response.
+	beginDirectInteractiveOutput(session)
+	refreshChatComposerContext(session)
+
+	ready := newChatComposerController(session).hooks()
+	if ready.InitialText != "下一轮再说这件事" || ready.InitialCursor != 4 {
+		t.Fatalf("expected the finished turn to keep the composer draft, got text=%q cursor=%d", ready.InitialText, ready.InitialCursor)
+	}
+}
+
 func TestChatBusyComposerCaptureDoesNotTrackPriorityPrompt(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

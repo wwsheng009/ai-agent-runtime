@@ -228,19 +228,22 @@ input, err := inputBox.Read()
 
 ## 依赖关系
 
-- `github.com/fatih/color` - 颜色支持
-- `stringr` - 字符串处理（如需要）
-- `internal/config` - 配置读取
+- `github.com/rivo/uniseg` - grapheme 与终端 cell width
+- `github.com/yuin/goldmark` - Markdown AST
+- `github.com/alecthomas/chroma/v2` - 代码语法高亮 token
+- `internal/agentconfig` - theme、mode 与 syntax preference 持久化
+
+颜色不再由第三方字符串着色器生成。所有视觉内容统一先构建
+`render.Document`，再由 `style.Resolver` 按 `ColorProfile` 输出
+TrueColor、ANSI-256、ANSI-16 或 Plain。
 
 ## 迁移计划
 
-1. 创建主题和图标定义文件
-2. 创建基础组件（separator, status）
-3. 创建消息渲染组件（message, output）
-4. 创建欢迎和信息显示组件
-5. 修改 chat.go 以使用新组件
-6. 逐步替换现有的 fmt.Printf 调用
-7. 测试和优化
+1. 业务层优先产出 typed cell/event，不拼接颜色字符串
+2. 组件统一返回 `Document`，兼容字符串 API 只允许做最终编码
+3. 终端 surface 复用已协商的 `ThemeContext`，避免逐帧重复探测
+4. unknown timeline 字符串兼容入口逐步迁为 typed event
+5. 在真实 PTY/ConPTY 上完成 resize、退出恢复与四档色深验收
 
 ## 注意事项
 

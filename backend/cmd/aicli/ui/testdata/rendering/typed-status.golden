@@ -1,0 +1,31 @@
+[width=40 lines=1]
+00 plain="Streaming · gpt-5.6-codex · 42k/128k"
+   span="Streaming" {role=Tool,fg=ansi:14,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="gpt-5.6-codex" {role=Accent,fg=ansi:14,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="42k/128k" {role=Progress,fg=ansi:10}
+[width=80 lines=1]
+00 plain="Streaming · gpt-5.6-codex · E:/项目/structured-render · 42k/128k · plan"
+   span="Streaming" {role=Tool,fg=ansi:14,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="gpt-5.6-codex" {role=Accent,fg=ansi:14,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="E:/项目/structured-render" {role=TextMuted,fg=ansi:8,dim}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="42k/128k" {role=Progress,fg=ansi:10}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="plan" {role=Approval,fg=ansi:13,bold}
+[width=120 lines=1]
+00 plain="Streaming · gpt-5.6-codex · E:/项目/structured-render · 42k/128k · plan · 3 tools"
+   span="Streaming" {role=Tool,fg=ansi:14,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="gpt-5.6-codex" {role=Accent,fg=ansi:14,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="E:/项目/structured-render" {role=TextMuted,fg=ansi:8,dim}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="42k/128k" {role=Progress,fg=ansi:10}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="plan" {role=Approval,fg=ansi:13,bold}
+   span=" · " {role=TextMuted,fg=ansi:8,dim}
+   span="3 tools" {role=TextSecondary,fg=ansi:7}

@@ -573,6 +573,12 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		defaultModel = strings.TrimSpace(session.Provider.DefaultModel)
 	}
 	maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(session.Config)
+	// Auto-compact must not inherit "unlimited" retries (config nil / -1).
+	// Local compact already disables per-request retries and falls back to a
+	// deterministic summary; keep the runtime/provider caps finite too.
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 	retryTuning := runtimellm.RetryTuningFromAgentConfig(session.Config)
 	retryRules := runtimellm.RetryRulesFromAgentConfig(session.Config)
 

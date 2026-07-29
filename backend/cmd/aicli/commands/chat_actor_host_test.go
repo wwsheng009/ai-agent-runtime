@@ -594,6 +594,56 @@ func TestLocalChatRuntimeHost_TaskLifecyclePersistsTeammateMailbox(t *testing.T)
 	}
 }
 
+func TestBuildLocalChatAgent_DefaultsCheckpointCaptureOff(t *testing.T) {
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+
+	apiAgent := buildLocalChatAgent(session, host, nil, "", "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+	if apiAgent.CheckpointCaptureEnabled() {
+		t.Fatal("expected checkpoint capture to be disabled by default")
+	}
+	if manager := apiAgent.GetCheckpointManager(); manager != nil {
+		t.Fatalf("expected no capture manager while disabled, got %#v", manager)
+	}
+	if manager := apiAgent.GetCheckpointRestoreManager(); manager == nil {
+		t.Fatal("expected restore manager to remain available while capture is disabled")
+	}
+	if manager := apiAgent.GetCheckpointManager(); manager != nil {
+		t.Fatal("restore access must not re-enable checkpoint capture")
+	}
+}
+
+func TestBuildLocalChatAgent_AppliesCheckpointStorageConfig(t *testing.T) {
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Checkpoint.Enabled = true
+	runtimeConfig.Checkpoint.MaxFileBytes = 12345
+	runtimeConfig.Checkpoint.StoreMode = "full"
+	runtimeConfig.Checkpoint.ConversationSnapshot = true
+	runtimeConfig.Checkpoint.MaxDiffBytes = 2048
+	runtimeConfig.Checkpoint.MaxCheckpointsPerSession = 7
+
+	apiAgent := buildLocalChatAgent(session, host, runtimeConfig, "", "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+	manager := apiAgent.GetCheckpointManager()
+	if manager == nil {
+		t.Fatal("expected enabled checkpoint capture manager")
+	}
+	if manager.MaxFileBytes != 12345 || manager.StoreMode != "full" || !manager.ConversationSnapshot || manager.MaxDiffBytes != 2048 || manager.MaxCheckpointsPerSession != 7 {
+		t.Fatalf("unexpected checkpoint configuration: %#v", manager)
+	}
+}
+
 func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.T) {
 	session := &ChatSession{
 		ReasoningEffort: "medium",

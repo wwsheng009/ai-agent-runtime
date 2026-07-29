@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
@@ -626,12 +627,14 @@ func renderAsyncTeamLaunchNotice(session *ChatSession, previousTeamID string) {
 	if !shouldRenderInteractiveOutput(session) {
 		return
 	}
-	rendered := chatRuntimeTimelineEvent{
-		Line:     prefixExecutionBullet(fmt.Sprintf("[team] %s 已在后台开始执行；我会继续接收进展，并在完成后自动总结结果。", currentTeamID)),
-		DedupKey: "team.started.notice:" + currentTeamID,
-	}
-	if session.RuntimeEventBridge.shouldRenderTimelineEvent(rendered) && session.RuntimeEventBridge.writeLine != nil {
-		session.RuntimeEventBridge.writeLine(rendered.Line)
+	rendered := typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:   cell.TimelineTeam,
+		Status: cell.StatusRunning,
+		Marker: "• ",
+		Title:  fmt.Sprintf("%s 已在后台开始执行；我会继续接收进展，并在完成后自动总结结果。", currentTeamID),
+	}, "team.started.notice:"+currentTeamID)
+	if session.RuntimeEventBridge.shouldRenderTimelineEvent(rendered) {
+		session.RuntimeEventBridge.emitTimelineEvent(rendered)
 	}
 }
 

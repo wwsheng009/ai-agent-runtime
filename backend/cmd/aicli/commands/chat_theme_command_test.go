@@ -136,6 +136,39 @@ func TestHandleThemeCommand_SetPersistsPreference(t *testing.T) {
 	}
 }
 
+func TestHandleThemeCommand_SetSyntaxPersists(t *testing.T) {
+	session, cfgPath := newThemeCommandSession(t)
+	prev := ui.CurrentSyntaxThemeName()
+	t.Cleanup(func() {
+		_ = ui.ApplyThemeSelection(ui.ThemePresetFocus, ui.ThemeModeAuto)
+		_ = ui.SetSyntaxTheme(prev)
+	})
+
+	if quit := handleThemeCommand(session, "/theme syntax dracula", true); quit {
+		t.Fatal("expected /theme syntax not to exit")
+	}
+	if ui.CurrentSyntaxThemeName() != "dracula" {
+		t.Fatalf("syntax=%q", ui.CurrentSyntaxThemeName())
+	}
+	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AICLI == nil || loaded.AICLI.Theme == nil || loaded.AICLI.Theme.Syntax != "dracula" {
+		t.Fatalf("persisted theme=%+v", loaded.AICLI)
+	}
+}
+
+func TestParseThemeCommandRequest_Syntax(t *testing.T) {
+	got, err := parseThemeCommandRequest("/theme syntax monokai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Action != themeCommandSet || got.Syntax != "monokai" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestHandleThemeCommand_SetModePersistsPreference(t *testing.T) {
 	session, cfgPath := newThemeCommandSession(t)
 	t.Cleanup(func() {

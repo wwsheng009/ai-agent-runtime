@@ -1,10 +1,16 @@
 package ui
 
 import (
-	"fmt"
+	"os"
 	"strings"
 	"sync"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
+
+// clearToEOL is the CSI sequence that clears from cursor to end of line.
+const clearToEOL = "\033[K"
 
 // LayoutType 布局类型
 type LayoutType int
@@ -207,6 +213,126 @@ func (l *Layout) StatusArea() *LayoutArea {
 	return l.statusArea
 }
 
+// themeOrDefault returns the layout theme or the process auto theme.
+func (l *Layout) themeOrDefault() *Theme {
+	if l != nil && l.theme != nil {
+		return l.theme
+	}
+	return GetTheme(ThemeAuto)
+}
+
+// ChatChromeDocument builds the muted chat-area placeholder label.
+func (l *Layout) ChatChromeDocument() render.Document {
+	return render.SingleLineDoc(render.Span{
+		Text:  "聊天区域",
+		Style: render.Style{Role: string(style.RoleTextMuted)},
+	})
+}
+
+// SeparatorLineDocument builds the horizontal rule between chat and status areas.
+func (l *Layout) SeparatorLineDocument() render.Document {
+	width := 80
+	if l != nil && l.terminal != nil {
+		if w := l.terminal.Width(); w > 0 {
+			width = w
+		}
+	}
+	fill := "─"
+	if theme := l.themeOrDefault(); theme != nil && theme.Separator != "" {
+		fill = theme.Separator
+	}
+	return style.SeparatorDocument(style.SeparatorModel{
+		Kind:  style.SeparatorRegular,
+		Width: width,
+		Fill:  fill,
+	})
+}
+
+// InputAreaDocument builds the prompt + input Document for the input row.
+// Untrusted input is sanitized so control sequences cannot escape into the TTY.
+func (l *Layout) InputAreaDocument(prompt, input string) render.Document {
+	var spans []render.Span
+	if prompt != "" {
+		spans = append(spans, render.Span{
+			Text:  SanitizeTerminalText(prompt),
+			Style: render.Style{Role: string(style.RoleUser)},
+		})
+	}
+	if input != "" {
+		spans = append(spans, render.Span{
+			Text:  SanitizeTerminalText(input),
+			Style: render.Style{Role: string(style.RoleTextPrimary)},
+		})
+	}
+	if len(spans) == 0 {
+		return render.Document{}
+	}
+	return render.LinesDoc(render.Line{Spans: spans})
+}
+
+// LayoutMessageDocument builds a multi-line plain message Document (sanitized).
+func LayoutMessageDocument(content string) render.Document {
+	safe := SanitizeTerminalText(content)
+	parts := strings.Split(safe, "\n")
+	if len(parts) == 0 {
+		parts = []string{""}
+	}
+	lines := make([]render.Line, 0, len(parts))
+	for _, part := range parts {
+		lines = append(lines, render.Line{
+			Spans: []render.Span{{
+				Text:  part,
+				Style: render.Style{Role: string(style.RoleTextPrimary)},
+			}},
+		})
+	}
+	return render.LinesDoc(lines...)
+}
+
+// FormatInputArea returns the styled prompt+input string without writing.
+func (l *Layout) FormatInputArea(prompt, input string) string {
+	return strings.TrimRight(renderDocumentWithProfile(l.InputAreaDocument(prompt, input), l.themeOrDefault()), "\n")
+}
+
+// FormatChatChrome returns the styled chat-area label without writing.
+func (l *Layout) FormatChatChrome() string {
+	return strings.TrimRight(renderDocumentWithProfile(l.ChatChromeDocument(), l.themeOrDefault()), "\n")
+}
+
+// FormatSeparatorLine returns the styled separator without writing.
+func (l *Layout) FormatSeparatorLine() string {
+	return strings.TrimRight(renderDocumentWithProfile(l.SeparatorLineDocument(), l.themeOrDefault()), "\n")
+}
+
+// FormatMessage returns sanitized multi-line message text without writing.
+func FormatLayoutMessage(content string) string {
+	return strings.TrimRight(renderDocumentWithProfile(LayoutMessageDocument(content), GetTheme(ThemeAuto)), "\n")
+}
+
+func (l *Layout) writeDoc(doc render.Document) {
+	text := renderDocumentWithProfile(doc, l.themeOrDefault())
+	if text == "" {
+		return
+	}
+	_, _ = WriteTerminalText(os.Stdout, text)
+}
+
+func (l *Layout) writeRightAligned(row int, plainWidth int, styled string) {
+	if l == nil || l.terminal == nil {
+		return
+	}
+	width := l.terminal.Width()
+	if width <= 0 {
+		width = 80
+	}
+	pad := width - plainWidth
+	if pad < 0 {
+		pad = 0
+	}
+	l.terminal.MoveToRow(row)
+	_, _ = WriteTerminalText(os.Stdout, strings.Repeat(" ", pad)+styled)
+}
+
 // Render 渲染整个布局
 func (l *Layout) Render() {
 	if !l.enabled {
@@ -223,10 +349,9 @@ func (l *Layout) Render() {
 	// 清屏
 	l.terminal.Clear()
 
-	// 绘制聊天区域边界
+	// 绘制聊天区域边界（Document + role adapter）
 	if l.chatArea != nil {
-		l.terminal.MoveToRow(l.chatArea.Row)
-		l.terminal.PrintRight(l.chatArea.Row, l.theme.Dimmed("聊天区域"))
+		l.writeRightAligned(l.chatArea.Row, DisplayWidth("聊天区域"), l.FormatChatChrome())
 	}
 
 	// 绘制分隔线
@@ -234,11 +359,7 @@ func (l *Layout) Render() {
 		separatorRow := l.statusArea.Row - 1
 		l.terminal.MoveToRow(separatorRow)
 		l.terminal.ClearFromCursor()
-
-		// 绘制分隔线
-		separator := strings.Repeat(l.theme.Separator, l.terminal.Width())
-		fmt.Print(l.theme.SeparatorColor.Sprint(separator))
-		fmt.Print("\033[K") // 清除到行尾
+		_, _ = WriteTerminalText(os.Stdout, l.FormatSeparatorLine()+clearToEOL)
 	}
 
 	// 渲染状态栏
@@ -264,12 +385,12 @@ func (l *Layout) RenderStatusBar() {
 	l.terminal.RestoreCursor()
 }
 
-// RenderInputArea 渲染输入区域
+// RenderInputArea 渲染输入区域（Document + WriteTerminal*）
 func (l *Layout) RenderInputArea(prompt, input string) {
 	if !l.enabled || l.inputArea == nil {
-		// 未启用布局，直接打印
-		if prompt != "" {
-			fmt.Print(prompt)
+		// 未启用布局：仍走 Document 消毒/角色着色，避免 raw ESC 直喷。
+		if prompt != "" || input != "" {
+			l.writeDoc(l.InputAreaDocument(prompt, input))
 		}
 		return
 	}
@@ -280,55 +401,37 @@ func (l *Layout) RenderInputArea(prompt, input string) {
 
 	l.terminal.SaveCursor()
 
-	// 移动到输入区域
 	row := l.inputArea.Row
 	l.terminal.MoveTo(row, 1)
 	l.terminal.ClearFromCursor()
 
-	// 打印提示符和输入
-	if prompt != "" {
-		prompt = l.theme.UserColor.Sprint(prompt)
-		fmt.Print(prompt)
-	}
-	if input != "" {
-		fmt.Print(input)
-	}
+	text := l.FormatInputArea(prompt, input)
+	_, _ = WriteTerminalText(os.Stdout, text+clearToEOL)
 
-	fmt.Print("\033[K") // 清除到行尾
-
-	// 移动光标到输入结束位置
 	l.terminal.RestoreCursor()
 }
 
-// PrintMessage 打印消息到聊天区域
+// PrintMessage 打印消息到聊天区域（先消毒再写出）
 func (l *Layout) PrintMessage(content string) {
+	text := FormatLayoutMessage(content)
 	if !l.enabled {
-		// 未启用布局，直接打印
-		fmt.Println(content)
+		_, _ = WriteTerminalLine(os.Stdout, text)
 		return
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// 保存光标
 	l.terminal.SaveCursor()
-
-	// 处理多行消息
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		fmt.Println(line)
-	}
-
-	// 恢复光标
+	_, _ = WriteTerminalLine(os.Stdout, text)
 	l.terminal.RestoreCursor()
 }
 
-// PrintToChat 在聊天区域指定位置打印
+// PrintToChat 在聊天区域指定位置打印（先消毒再写出）
 func (l *Layout) PrintToChat(row, col int, text string) {
+	safe := SanitizeTerminalText(text)
 	if !l.enabled {
-		// 未启用布局，直接打印
-		fmt.Println(text)
+		_, _ = WriteTerminalLine(os.Stdout, safe)
 		return
 	}
 
@@ -339,10 +442,8 @@ func (l *Layout) PrintToChat(row, col int, text string) {
 		return
 	}
 
-	// 保存光标
 	l.terminal.SaveCursor()
 
-	// 计算实际位置
 	actualRow := l.chatArea.Row + row - 1
 	if actualRow < l.chatArea.Row {
 		actualRow = l.chatArea.Row
@@ -359,10 +460,7 @@ func (l *Layout) PrintToChat(row, col int, text string) {
 		actualCol = l.chatArea.Col + l.chatArea.Width - 1
 	}
 
-	// 在指定位置打印
-	l.terminal.PrintAt(actualRow, actualCol, text)
-
-	// 恢复光标
+	l.terminal.PrintAt(actualRow, actualCol, safe)
 	l.terminal.RestoreCursor()
 }
 
@@ -377,12 +475,11 @@ func (l *Layout) ClearChatArea() {
 
 	l.terminal.SaveCursor()
 
-	// 逐行清除
 	for i := 0; i < l.chatArea.Height; i++ {
 		t := l.terminal
 		t.MoveToRow(l.chatArea.Row + i)
 		t.ClearFromCursor()
-		fmt.Print("\033[K")
+		_, _ = WriteTerminalText(os.Stdout, clearToEOL)
 	}
 
 	l.terminal.RestoreCursor()
@@ -420,15 +517,15 @@ func (l *Layout) GetStatusBar() *StatusBar {
 // UpdateStatus 更新状态栏信息
 func (l *Layout) UpdateStatus(key string, value interface{}) *Layout {
 	if l.statusBar != nil {
-		l.statusBar.Update(key, value, nil)
+		l.statusBar.Update(key, value)
 	}
 	return l
 }
 
-// UpdateStatusWithColor 更新状态栏信息（带颜色）
-func (l *Layout) UpdateStatusWithColor(key string, value interface{}, colorFunc func(string) string) *Layout {
+// UpdateStatusRole 使用语义角色更新状态栏信息。
+func (l *Layout) UpdateStatusRole(key string, value interface{}, role style.Role) *Layout {
 	if l.statusBar != nil {
-		l.statusBar.Update(key, value, colorFunc)
+		l.statusBar.UpdateRole(key, value, role)
 	}
 	return l
 }

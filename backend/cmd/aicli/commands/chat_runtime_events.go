@@ -12,6 +12,10 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
+	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -72,6 +76,7 @@ type chatRuntimeEventBridge struct {
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
 	writeLine                  func(string)
+	writeDocument              func(render.Document) bool
 	writeDelta                 func(string)
 	finalizeDelta              func()
 	completeDelta              func(string) bool
@@ -134,6 +139,13 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				return
 			}
 			fmt.Println(ui.FormatAssistantSupplementBlock(line))
+		},
+		writeDocument: func(doc render.Document) bool {
+			if session == nil || session.Interaction == nil {
+				return false
+			}
+			session.Interaction.RenderAsyncDocument(doc)
+			return true
 		},
 		writeDelta: func(delta string) {
 			if delta == "" {
@@ -1091,7 +1103,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		rendered = chatRuntimeTimelineEvent{}
 	}
 	if rendered.Line != "" && shouldRenderInteractiveOutput(b.session) && b.shouldRenderTimelineEvent(rendered) {
-		b.writeLine(rendered.Line)
+		b.emitTimelineEvent(rendered)
 		renderedSomething = true
 	}
 	if response := b.asyncTeamAssistantResponse(event); response != "" && shouldRenderInteractiveOutput(b.session) {
@@ -1177,13 +1189,21 @@ func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event r
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
 		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
 	case runtimechat.EventToolStarted, "tool.requested":
-		b.session.Interaction.SetAgentStageDetail(chatAgentStageToolRunning, runtimeEventToolName(event))
+		b.session.Interaction.SetToolAgentStage(
+			payloadStringValue(event.Payload["tool_call_id"]),
+			runtimeEventToolName(event),
+		)
 	case "tool.progress":
 		// Light stage detail only — progress is high-frequency and must not
 		// hard-block the composer the way late tool start/finish does.
 		if detail := chatToolProgressStageDetail(event); detail != "" {
-			b.session.Interaction.SetAgentStageDetail(chatAgentStageToolRunning, detail)
+			b.session.Interaction.SetToolAgentStage(payloadStringValue(event.Payload["tool_call_id"]), detail)
 		}
+	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
+		b.session.Interaction.FinishToolAgentStage(
+			payloadStringValue(event.Payload["tool_call_id"]),
+			runtimeEventToolName(event),
+		)
 	}
 }
 
@@ -1739,8 +1759,8 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 	if rendered.Line == "" {
 		return false
 	}
-	if b.shouldRenderTimelineEvent(rendered) && b.writeLine != nil {
-		b.writeLine(rendered.Line)
+	if b.shouldRenderTimelineEvent(rendered) {
+		b.emitTimelineEvent(rendered)
 	}
 	b.renderMu.Lock()
 	b.renderedReasoningFinal = true
@@ -1805,7 +1825,7 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 	}
 	renderedSummary := false
 	if rendered := b.renderAsyncTeamSummaryFallback(event); rendered.Line != "" && b.shouldRenderTimelineEvent(rendered) {
-		b.writeLine(rendered.Line)
+		b.emitTimelineEvent(rendered)
 		renderedSummary = true
 	}
 	if b.HasRenderedAssistantDelta() {
@@ -1845,7 +1865,7 @@ func (b *chatRuntimeEventBridge) handleAsyncTeamAssistantMessage(event runtimeev
 	}
 	renderedSomething := false
 	if rendered := b.renderAsyncTeamSummaryFallback(event); rendered.Line != "" && b.shouldRenderTimelineEvent(rendered) {
-		b.writeLine(rendered.Line)
+		b.emitTimelineEvent(rendered)
 		renderedSomething = true
 	}
 	if response := b.asyncTeamAssistantResponse(event); response != "" {
@@ -1876,8 +1896,8 @@ func (b *chatRuntimeEventBridge) renderReasoningFromAssistantMessage(event runti
 	if rendered.Line == "" {
 		return
 	}
-	if b.shouldRenderTimelineEvent(rendered) && b.writeLine != nil {
-		b.writeLine(rendered.Line)
+	if b.shouldRenderTimelineEvent(rendered) {
+		b.emitTimelineEvent(rendered)
 	}
 	b.renderMu.Lock()
 	b.renderedReasoningFinal = true
@@ -1926,10 +1946,12 @@ func (b *chatRuntimeEventBridge) renderAsyncTeamSummaryFallback(event runtimeeve
 	if content == "" {
 		return chatRuntimeTimelineEvent{}
 	}
-	return chatRuntimeTimelineEvent{
-		Line:     fmt.Sprintf("[team summary] %s %s", teamID, content),
-		DedupKey: "team.summary:" + teamID,
-	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:   cell.TimelineTeam,
+		Status: cell.StatusSuccess,
+		Tag:    "[team summary]",
+		Title:  teamID + " " + content,
+	}, "team.summary:"+teamID)
 }
 
 func (b *chatRuntimeEventBridge) hasRenderedTimelineKey(key string) bool {
@@ -2516,6 +2538,67 @@ type chatRuntimeTimelineEvent struct {
 	Line      string
 	DedupKey  string
 	DebugOnly bool
+	Timeline  *cell.TimelineEvent
+	Document  *render.Document
+}
+
+func typedChatRuntimeTimelineEvent(event cell.TimelineEvent, dedupKey string) chatRuntimeTimelineEvent {
+	doc := event.Document()
+	return chatRuntimeTimelineEvent{
+		Line:     event.FormatPlain(),
+		DedupKey: dedupKey,
+		Timeline: &event,
+		Document: &doc,
+	}
+}
+
+func documentedChatRuntimeTimelineEvent(doc render.Document, dedupKey string) chatRuntimeTimelineEvent {
+	return chatRuntimeTimelineEvent{
+		Line:     render.PlainBackend{}.Render(doc),
+		DedupKey: dedupKey,
+		Document: &doc,
+	}
+}
+
+func chatToolCompletedTimelineEvent(line string) chatRuntimeTimelineEvent {
+	line = strings.TrimRight(strings.ReplaceAll(line, "\r\n", "\n"), "\n")
+	if strings.TrimSpace(line) == "" {
+		return chatRuntimeTimelineEvent{}
+	}
+	// Edited and read-only Diff supplements have a dedicated structured renderer.
+	// Keep this compatibility envelope until the tool result carries FileDiff.
+	if len(uidiff.ParseSupplementBlocks(line)) > 0 {
+		return chatRuntimeTimelineEvent{Line: line}
+	}
+	lines := strings.Split(line, "\n")
+	title := strings.TrimPrefix(lines[0], "• ")
+	if title == lines[0] {
+		return chatRuntimeTimelineEvent{Line: line}
+	}
+	status := cell.StatusSuccess
+	if strings.HasPrefix(title, "Failed ") {
+		status = cell.StatusError
+	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:               cell.TimelineTool,
+		Status:             status,
+		Marker:             "• ",
+		SuppressKindPrefix: true,
+		Title:              title,
+		Details:            lines[1:],
+	}, "")
+}
+
+func (b *chatRuntimeEventBridge) emitTimelineEvent(rendered chatRuntimeTimelineEvent) {
+	if b == nil || strings.TrimSpace(rendered.Line) == "" {
+		return
+	}
+	if rendered.Document != nil && b.writeDocument != nil && b.writeDocument(*rendered.Document) {
+		return
+	}
+	if b.writeLine != nil {
+		b.writeLine(rendered.Line)
+	}
 }
 
 func renderChatRuntimeEvent(event runtimeevents.Event) string {
@@ -2526,12 +2609,6 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	teamID := payloadStringValue(event.Payload["team_id"])
 	switch event.Type {
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
-		if line := chatLLMRequestPromptLayoutHint(event.Payload); line != "" {
-			return chatRuntimeTimelineEvent{
-				Line:     line,
-				DedupKey: llmRequestDedupKey(event, "llm.request.started"),
-			}
-		}
 		return chatRuntimeTimelineEvent{}
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		return renderLLMRequestFinishedTimelineEvent(event)
@@ -2555,20 +2632,46 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	case "planning.started":
 		return chatRuntimeTimelineEvent{}
 	case "planning.completed":
-		return chatRuntimeTimelineEvent{Line: "[planning] completed"}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelinePlanning, Status: cell.StatusSuccess, Title: "completed",
+		}, "")
 	case "subagent.batch.started":
 		return chatRuntimeTimelineEvent{}
 	case "subagent.batch.completed":
-		return chatRuntimeTimelineEvent{Line: "[subagents] completed"}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineTeam, Status: cell.StatusSuccess, Tag: "[subagents]", Title: "completed",
+		}, "")
 	case "subagent.started":
 		return chatRuntimeTimelineEvent{}
 	case "subagent.completed":
-		return chatRuntimeTimelineEvent{Line: renderSubagentCompletedTimelineEvent(event)}
+		return typedChatRuntimeTimelineEvent(renderSubagentCompletedTimelineEvent(event), "")
 	case "subagent.denied":
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] denied %s", payloadStringValue(event.Payload["reason"]))}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: cell.StatusDenied,
+			Tag:    "[subagent]",
+			Title:  fmt.Sprintf("denied %s", payloadStringValue(event.Payload["reason"])),
+		}, "")
 	case "tool.requested":
 		payload := runtimeToolTimelinePayload(event)
-		return chatRuntimeTimelineEvent{Line: appendCompactToolDirectory(renderCompactToolRequestedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])), "", payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), payloadStringValue(payload[toolresult.SourceKey])), payload)}
+		display := compactToolDisplayTextWithSource(
+			firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])),
+			"",
+			payloadStringValue(payload["command_text"]),
+			payloadStringValue(payload["arg_preview"]),
+			payloadStringValue(payload[toolresult.SourceKey]),
+		)
+		if display == "" {
+			return chatRuntimeTimelineEvent{}
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:               cell.TimelineTool,
+			Status:             cell.StatusRunning,
+			Marker:             "• ",
+			SuppressKindPrefix: true,
+			Title:              "Running " + display,
+			Details:            compactToolContextLines(payload),
+		}, "")
 	case "tool.completed":
 		payload := runtimeToolTimelinePayload(event)
 		line := renderCompactToolCompletedWithPayload(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])), "", payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), payloadStringValue(payload[toolresult.SourceKey]), chatToolSummaryLines(payload), payload)
@@ -2577,17 +2680,22 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			rendered = append(rendered, waitingLine)
 		}
 		line = strings.Join(rendered, "\n")
-		return chatRuntimeTimelineEvent{Line: line}
+		return chatToolCompletedTimelineEvent(line)
 	case "tool.denied":
-		lines := []string{fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))}
-		lines = append(lines, compactToolContextLines(event.Payload)...)
-		return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n")}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:    cell.TimelineTool,
+			Status:  cell.StatusDenied,
+			Title:   payloadStringValue(event.Payload["reason"]),
+			Details: compactToolContextLines(event.Payload),
+		}, "")
 	case "tool.progress":
 		return renderToolProgressTimelineEvent(event)
 	case runtimechat.EventApprovalRequested:
 		return renderApprovalRequestedTimelineEvent(event)
 	case runtimechat.EventQuestionAsked:
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[question] %s", payloadStringValue(event.Payload["prompt"]))}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineQuestion, Status: cell.StatusPending, Title: payloadStringValue(event.Payload["prompt"]),
+		}, "")
 	case runtimechat.EventMailboxReceived:
 		messageID := firstNonEmptyChatValue(payloadStringValue(event.Payload["message_id"]), "?")
 		fromAgent := firstNonEmptyChatValue(payloadStringValue(event.Payload["from_agent"]), "?")
@@ -2596,21 +2704,25 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		body := truncateChatRuntimeText(payloadStringValue(event.Payload["body"]), 160)
 		taskID := payloadStringValue(event.Payload["task_id"])
 		if body == "" && taskID == "" && fromAgent == "?" && toAgent == "*" && kind == "info" {
-			return chatRuntimeTimelineEvent{
-				Line: fmt.Sprintf("[mailbox] %s %s",
-					firstNonEmptyChatValue(teamID, "?"),
-					messageID),
-				DedupKey: "mailbox:" + messageID,
-			}
+			return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+				Kind: cell.TimelineNotice, Status: cell.StatusInfo, Tag: "[mailbox]",
+				Title: fmt.Sprintf("%s %s", firstNonEmptyChatValue(teamID, "?"), messageID),
+			}, "mailbox:"+messageID)
 		}
-		line := fmt.Sprintf("[%s] %s -> %s", kind, fromAgent, toAgent)
+		title := fmt.Sprintf("%s -> %s", fromAgent, toAgent)
 		if taskID != "" {
-			line += " " + taskID
+			title += " " + taskID
 		}
 		if body != "" {
-			line += " " + body
+			title += " " + body
 		}
-		return chatRuntimeTimelineEvent{Line: line, DedupKey: "mailbox:" + messageID}
+		status := cell.StatusInfo
+		if strings.EqualFold(kind, "error") || strings.EqualFold(kind, "failed") {
+			status = cell.StatusError
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineNotice, Status: status, Tag: "[" + kind + "]", Title: title,
+		}, "mailbox:"+messageID)
 	case team.TaskRouteResolvedEvent:
 		return renderTaskRouteResolvedTimelineEvent(event, teamID)
 	case "task.started", "task.completed", "task.failed", "task.blocked", "team.task.completed", "team.task.failed", "team.task.blocked":
@@ -2621,127 +2733,142 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		taskID := firstNonEmptyChatValue(payloadStringValue(event.Payload["task_id"]), "?")
 		assignee := payloadStringValue(event.Payload["assignee"])
 		summary := truncateChatRuntimeText(payloadStringValue(event.Payload["summary"]), 160)
-		line := fmt.Sprintf("[task] %s %s", action, taskID)
+		title := fmt.Sprintf("%s %s", action, taskID)
 		if assignee != "" {
-			line += fmt.Sprintf(" @%s", assignee)
+			title += fmt.Sprintf(" @%s", assignee)
 		}
 		if summary != "" {
-			line += " " + summary
+			title += " " + summary
 		}
-		lines := []string{line}
+		details := make([]string, 0, 8)
 		if action == "failed" && strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
-			lines[0] += " [prompt preflight]"
+			title += " [prompt preflight]"
 			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {
-				lines = append(lines, "  原因: "+reason)
+				details = append(details, "  原因: "+reason)
 			}
 			if model := promptPreflightModelSummary(event.Payload); model != "" {
-				lines = append(lines, "  模型: "+model)
+				details = append(details, "  模型: "+model)
 			}
 			if budget := promptPreflightBudgetSourceSummary(event.Payload); budget != "" {
-				lines = append(lines, "  预算: "+budget)
+				details = append(details, "  预算: "+budget)
 			}
 			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
-				lines = append(lines, "  恢复: "+recovery)
+				details = append(details, "  恢复: "+recovery)
 			}
 			if extras := runtimeContextSummaryLines(event.Payload, false); len(extras) > 0 {
-				lines = append(lines, extras...)
+				details = append(details, extras...)
 			}
 		} else if action == "blocked" && strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["replan_error_type"])), "prompt_preflight") {
 			replanPayload := extractPrefixedRuntimePayload(event.Payload, "replan")
 			if reason := promptPreflightReasonSummary(replanPayload); reason != "" {
-				lines = append(lines, "  replan: [prompt preflight] "+reason)
+				details = append(details, "  replan: [prompt preflight] "+reason)
 			}
 			if model := promptPreflightModelSummary(replanPayload); model != "" {
-				lines = append(lines, "  replan 模型: "+model)
+				details = append(details, "  replan 模型: "+model)
 			}
 			if budget := promptPreflightBudgetSourceSummary(replanPayload); budget != "" {
-				lines = append(lines, "  replan 预算: "+budget)
+				details = append(details, "  replan 预算: "+budget)
 			}
 			if recovery := promptPreflightRecoverySummary(replanPayload); recovery != "" {
-				lines = append(lines, "  replan 恢复: "+recovery)
+				details = append(details, "  replan 恢复: "+recovery)
 			}
 			if extras := runtimeContextSummaryLines(replanPayload, false); len(extras) > 0 {
-				lines = append(lines, extras...)
+				details = append(details, extras...)
 			}
 		}
-		return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n"), DedupKey: fmt.Sprintf("%s:%s:%s", strings.TrimSpace(event.Type), teamID, taskID)}
+		eventStatus := cell.StatusSuccess
+		if action == "failed" {
+			eventStatus = cell.StatusError
+		} else if action == "blocked" {
+			eventStatus = cell.StatusDenied
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineTask, Status: eventStatus, Title: title, Details: details,
+		}, fmt.Sprintf("%s:%s:%s", strings.TrimSpace(event.Type), teamID, taskID))
 	case "team.completed":
 		status := firstNonEmptyChatValue(payloadStringValue(event.Payload["status"]), "done")
-		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[team] completed %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
-			DedupKey: fmt.Sprintf("team.completed:%s:%s", teamID, status),
+		eventStatus := cell.StatusSuccess
+		if status == "failed" || status == "canceled" {
+			eventStatus = cell.StatusError
 		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: eventStatus,
+			Title:  fmt.Sprintf("completed %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
+		}, fmt.Sprintf("team.completed:%s:%s", teamID, status))
 	case "team.interrupted":
 		status := firstNonEmptyChatValue(payloadStringValue(event.Payload["status"]), "paused")
-		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[team] interrupted %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
-			DedupKey: fmt.Sprintf("team.interrupted:%s:%s", teamID, status),
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: cell.StatusInfo,
+			Title:  fmt.Sprintf("interrupted %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
+		}, fmt.Sprintf("team.interrupted:%s:%s", teamID, status))
 	case "team.plan.failed", "team.plan.replan_failed", "team.summary.failed":
 		action := strings.TrimSpace(event.Type)
-		headline := "[team] failed"
+		tag := "[team]"
+		title := "failed"
 		switch action {
 		case "team.plan.failed":
-			headline = fmt.Sprintf("[team plan] failed %s", firstNonEmptyChatValue(teamID, "?"))
+			tag = "[team plan]"
+			title = fmt.Sprintf("failed %s", firstNonEmptyChatValue(teamID, "?"))
 		case "team.plan.replan_failed":
-			headline = fmt.Sprintf("[team replan] failed %s", firstNonEmptyChatValue(teamID, "?"))
+			tag = "[team replan]"
+			title = fmt.Sprintf("failed %s", firstNonEmptyChatValue(teamID, "?"))
 			if taskID := strings.TrimSpace(payloadStringValue(event.Payload["task_id"])); taskID != "" {
-				headline += " " + taskID
+				title += " " + taskID
 			}
 		case "team.summary.failed":
-			headline = fmt.Sprintf("[team summary] failed %s", firstNonEmptyChatValue(teamID, "?"))
+			tag = "[team summary]"
+			title = fmt.Sprintf("failed %s", firstNonEmptyChatValue(teamID, "?"))
 		}
-		lines := []string{headline}
+		details := make([]string, 0, 8)
 		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
-			lines[0] += " [prompt preflight]"
+			title += " [prompt preflight]"
 			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {
-				lines = append(lines, "  原因: "+reason)
+				details = append(details, "  原因: "+reason)
 			}
 			if model := promptPreflightModelSummary(event.Payload); model != "" {
-				lines = append(lines, "  模型: "+model)
+				details = append(details, "  模型: "+model)
 			}
 			if budget := promptPreflightBudgetSourceSummary(event.Payload); budget != "" {
-				lines = append(lines, "  预算: "+budget)
+				details = append(details, "  预算: "+budget)
 			}
 			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
-				lines = append(lines, "  恢复: "+recovery)
+				details = append(details, "  恢复: "+recovery)
 			}
 			if extras := runtimeContextSummaryLines(event.Payload, false); len(extras) > 0 {
-				lines = append(lines, extras...)
+				details = append(details, extras...)
 			}
 		} else if summary := truncateChatRuntimeText(payloadStringValue(event.Payload["error"]), 160); summary != "" {
-			lines = append(lines, "  错误: "+summary)
+			details = append(details, "  错误: "+summary)
 		}
-		return chatRuntimeTimelineEvent{
-			Line:     strings.Join(lines, "\n"),
-			DedupKey: fmt.Sprintf("%s:%s:%s", action, teamID, payloadStringValue(event.Payload["task_id"])),
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineTeam, Status: cell.StatusError, Tag: tag, Title: title, Details: details,
+		}, fmt.Sprintf("%s:%s:%s", action, teamID, payloadStringValue(event.Payload["task_id"])))
 	case "team.summary", "team.summary.generated":
 		return renderTeamSummaryTimelineEvent(event, teamID)
 	case chatEventInputQueueDetected:
 		count := intPayloadValue(event.Payload, "queued_input_count")
 		source := firstNonEmptyChatValue(payloadStringValue(event.Payload["source"]), "stdin")
-		line := fmt.Sprintf("[input] queued %d line(s) from %s", count, source)
-		return chatRuntimeTimelineEvent{
-			Line:     line,
-			DedupKey: fmt.Sprintf("input.queue.detected:%s:%d", strings.TrimSpace(event.SessionID), count),
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineInput, Status: cell.StatusInfo,
+			Title: fmt.Sprintf("queued %d line(s) from %s", count, source),
+		}, fmt.Sprintf("input.queue.detected:%s:%d", strings.TrimSpace(event.SessionID), count))
 	case chatEventInputQueueDrained:
-		return chatRuntimeTimelineEvent{
-			Line:     "[input] queued input drained",
-			DedupKey: fmt.Sprintf("input.queue.drained:%s", strings.TrimSpace(event.SessionID)),
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineInput, Status: cell.StatusSuccess, Title: "queued input drained",
+		}, fmt.Sprintf("input.queue.drained:%s", strings.TrimSpace(event.SessionID)))
 	case chatEventInputQueueDiscarded:
 		count := intPayloadValue(event.Payload, "discarded_count")
 		promptKind := payloadStringValue(event.Payload["prompt_kind"])
-		line := fmt.Sprintf("[input] discarded %d queued line(s)", count)
+		title := fmt.Sprintf("discarded %d queued line(s)", count)
 		if promptKind != "" {
-			line += " before " + promptKind
+			title += " before " + promptKind
 		}
-		return chatRuntimeTimelineEvent{
-			Line:     line,
-			DedupKey: fmt.Sprintf("input.queue.discarded:%s:%s:%d", strings.TrimSpace(event.SessionID), promptKind, count),
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineInput, Status: cell.StatusInfo,
+			Title: title,
+		}, fmt.Sprintf("input.queue.discarded:%s:%s:%d", strings.TrimSpace(event.SessionID), promptKind, count))
 	default:
 		return chatRuntimeTimelineEvent{}
 	}
@@ -2812,10 +2939,12 @@ func renderLLMRetryTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineE
 	if len(parts) == 0 {
 		return chatRuntimeTimelineEvent{}
 	}
-	return chatRuntimeTimelineEvent{
-		Line:     "[retry] " + strings.Join(parts, " "),
-		DedupKey: fmt.Sprintf("llm.retry:%s:%s:%d:%s:%s", traceID, stepLabel, attempt, reason, source),
-	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:   cell.TimelineProgress,
+		Status: cell.StatusPending,
+		Tag:    "[retry]",
+		Title:  strings.Join(parts, " "),
+	}, fmt.Sprintf("llm.retry:%s:%s:%d:%s:%s", traceID, stepLabel, attempt, reason, source))
 }
 
 func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
@@ -2824,7 +2953,7 @@ func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntim
 		return chatRuntimeTimelineEvent{}
 	}
 	if !payloadBoolValue(payload, "success") {
-		headline := "[thinking] model error"
+		title := "model error"
 		attributes := make([]string, 0, 2)
 		if code := strings.TrimSpace(payloadStringValue(payload["error_code"])); code != "" {
 			attributes = append(attributes, code)
@@ -2833,35 +2962,32 @@ func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntim
 			attributes = append(attributes, fmt.Sprintf("retryable=%t", payloadBoolValue(payload, "retryable")))
 		}
 		if len(attributes) > 0 {
-			headline += " [" + strings.Join(attributes, ", ") + "]"
+			title += " [" + strings.Join(attributes, ", ") + "]"
 		}
 		if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 240); errText != "" {
-			headline += " " + errText
+			title += " " + errText
 		}
-		lines := []string{headline}
+		details := make([]string, 0, 1)
 		if nextAction := truncateChatRuntimeText(payloadStringValue(payload["next_action"]), 240); nextAction != "" {
-			lines = append(lines, "[action] "+nextAction)
+			details = append(details, "[action] "+nextAction)
 		}
-		return chatRuntimeTimelineEvent{
-			Line:     strings.Join(lines, "\n"),
-			DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineThinking, Status: cell.StatusError, Title: title, Details: details,
+		}, llmRequestDedupKey(event, "llm.request.finished"))
 	}
-	headline := "[thinking] request finished"
+	title := "request finished"
 	if target := strings.TrimSpace(chatLLMRequestTargetSummary(payload)); target != "" {
-		headline += " " + target
+		title += " " + target
 	}
-	lines := []string{headline}
-	if extras := runtimeContextSummaryLines(payload, true); len(extras) > 0 {
-		lines = append(lines, extras...)
-	} else {
+	details := runtimeContextSummaryLines(payload, true)
+	if len(details) == 0 {
 		return chatRuntimeTimelineEvent{}
 	}
-	return chatRuntimeTimelineEvent{
-		Line:      strings.Join(lines, "\n"),
-		DedupKey:  llmRequestDedupKey(event, "llm.request.finished"),
-		DebugOnly: true,
-	}
+	rendered := typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind: cell.TimelineThinking, Status: cell.StatusSuccess, Title: title, Details: details,
+	}, llmRequestDedupKey(event, "llm.request.finished"))
+	rendered.DebugOnly = true
+	return rendered
 }
 
 func runtimeContextSummaryLines(payload map[string]interface{}, includeUsage bool) []string {
@@ -3187,57 +3313,51 @@ func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTim
 
 	switch event.Type {
 	case runtimechat.EventSessionCompactStarted:
-		lines := []string{
-			fmt.Sprintf("[context] session compact started mode=%s phase=%s %s", mode, phase, sessionCompactBudgetSummary(payload)),
-		}
-		if extras := runtimeContextSummaryLines(payload, false); len(extras) > 0 {
-			lines = append(lines, extras...)
-		}
-		return chatRuntimeTimelineEvent{
-			Line:     strings.Join(lines, "\n"),
-			DedupKey: dedupKeyBase,
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:    cell.TimelinePlanning,
+			Status:  cell.StatusRunning,
+			Tag:     "[context]",
+			Title:   fmt.Sprintf("session compact started mode=%s phase=%s %s", mode, phase, sessionCompactBudgetSummary(payload)),
+			Details: runtimeContextSummaryLines(payload, false),
+		}, dedupKeyBase)
 	case runtimechat.EventSessionCompactCompleted:
-		lines := []string{fmt.Sprintf(
-			"[context] session compact completed mode=%s phase=%s token %d -> %d compacted_messages=%d history_messages=%d",
+		title := fmt.Sprintf(
+			"session compact completed mode=%s phase=%s token %d -> %d compacted_messages=%d history_messages=%d",
 			mode,
 			phase,
 			intPayloadValue(payload, "token_before"),
 			intPayloadValue(payload, "token_after"),
 			intPayloadValue(payload, "compacted_messages"),
 			intPayloadValue(payload, "message_count_after"),
-		)}
+		)
 		if checkpointID := truncateChatRuntimeText(payloadStringValue(payload["checkpoint_id"]), 80); checkpointID != "" {
-			lines[0] += " checkpoint_id=" + checkpointID
+			title += " checkpoint_id=" + checkpointID
 		}
 		if generation := intPayloadValue(payload, "compact_generation"); generation > 0 {
-			lines[0] += fmt.Sprintf(" generation=%d", generation)
+			title += fmt.Sprintf(" generation=%d", generation)
 		}
 		if rootTitle := truncateChatRuntimeText(payloadStringValue(payload["compact_root_title"]), 80); rootTitle != "" {
-			lines[0] += " root_title=" + rootTitle
+			title += " root_title=" + rootTitle
 		}
-		if extras := runtimeContextSummaryLines(payload, true); len(extras) > 0 {
-			lines = append(lines, extras...)
-		}
-		return chatRuntimeTimelineEvent{
-			Line:     strings.Join(lines, "\n"),
-			DedupKey: dedupKeyBase,
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelinePlanning, Status: cell.StatusSuccess, Tag: "[context]",
+			Title: title, Details: runtimeContextSummaryLines(payload, true),
+		}, dedupKeyBase)
 	case runtimechat.EventSessionCompactSkipped:
-		return chatRuntimeTimelineEvent{
-			Line:      fmt.Sprintf("[context] session compact skipped mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload)),
-			DedupKey:  dedupKeyBase + ":reason=" + sessionCompactReasonSummary(payload),
-			DebugOnly: true,
-		}
+		rendered := typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelinePlanning, Status: cell.StatusInfo, Tag: "[context]",
+			Title: fmt.Sprintf("session compact skipped mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload)),
+		}, dedupKeyBase+":reason="+sessionCompactReasonSummary(payload))
+		rendered.DebugOnly = true
+		return rendered
 	case runtimechat.EventSessionCompactFailed:
-		line := fmt.Sprintf("[context] session compact failed mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload))
+		title := fmt.Sprintf("session compact failed mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload))
 		if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 160); errText != "" {
-			line += " error=" + errText
+			title += " error=" + errText
 		}
-		return chatRuntimeTimelineEvent{
-			Line:     line,
-			DedupKey: dedupKeyBase + ":failed",
-		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelinePlanning, Status: cell.StatusError, Tag: "[context]", Title: title,
+		}, dedupKeyBase+":failed")
 	default:
 		return chatRuntimeTimelineEvent{}
 	}
@@ -3319,42 +3439,41 @@ func renderPromptPreflightSessionEndTimelineEvent(event runtimeevents.Event) cha
 	promptTokens := intPayloadValue(payload, "prompt_tokens")
 	promptBudget := intPayloadValue(payload, "prompt_budget")
 
-	headline := "[prompt preflight] 本地拦截：请求在发送给模型前因上下文预算超限而终止"
+	title := "本地拦截：请求在发送给模型前因上下文预算超限而终止"
 	if promptTokens > 0 && promptBudget > 0 {
-		headline = fmt.Sprintf("[prompt preflight] 本地拦截：prompt %d > budget %d", promptTokens, promptBudget)
+		title = fmt.Sprintf("本地拦截：prompt %d > budget %d", promptTokens, promptBudget)
 	} else if promptTokens > 0 {
-		headline = fmt.Sprintf("[prompt preflight] 本地拦截：prompt=%d", promptTokens)
+		title = fmt.Sprintf("本地拦截：prompt=%d", promptTokens)
 	}
 
-	lines := []string{headline}
+	details := make([]string, 0, 8)
 	if reason := promptPreflightReasonSummary(payload); reason != "" {
-		lines = append(lines, "  原因: "+reason)
+		details = append(details, "  原因: "+reason)
 	}
 	if suggestion := truncateChatRuntimeText(payloadStringValue(payload["suggested_action"]), 160); suggestion != "" {
-		lines = append(lines, "  建议: "+suggestion)
+		details = append(details, "  建议: "+suggestion)
 	}
 	if model := promptPreflightModelSummary(payload); model != "" {
-		lines = append(lines, "  模型: "+model)
+		details = append(details, "  模型: "+model)
 	}
 	if budget := promptPreflightBudgetSourceSummary(payload); budget != "" {
-		lines = append(lines, "  预算: "+budget)
+		details = append(details, "  预算: "+budget)
 	}
 	if activeTurn := promptPreflightActiveTurnSummary(payload); activeTurn != "" {
-		lines = append(lines, "  active-turn: "+activeTurn)
+		details = append(details, "  active-turn: "+activeTurn)
 	}
 	if recovery := promptPreflightRecoverySummary(payload); recovery != "" {
-		lines = append(lines, "  恢复: "+recovery)
+		details = append(details, "  恢复: "+recovery)
 	}
 	if extras := runtimeContextSummaryLines(payload, false); len(extras) > 0 {
-		lines = append(lines, extras...)
+		details = append(details, extras...)
 	}
 
 	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
 	failureCode := firstNonEmptyChatValue(payloadStringValue(payload["failure_reason_code"]), "prompt_preflight")
-	return chatRuntimeTimelineEvent{
-		Line:     strings.Join(lines, "\n"),
-		DedupKey: fmt.Sprintf("session_end.prompt_preflight:%s:%s:%s", strings.TrimSpace(event.SessionID), traceID, failureCode),
-	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind: cell.TimelineNotice, Status: cell.StatusError, Tag: "[prompt preflight]", Title: title, Details: details,
+	}, fmt.Sprintf("session_end.prompt_preflight:%s:%s:%s", strings.TrimSpace(event.SessionID), traceID, failureCode))
 }
 
 func promptPreflightReasonSummary(payload map[string]interface{}) string {
@@ -3457,43 +3576,45 @@ func teamSummaryFallbackReasonSummary(reason string) string {
 
 func renderTeamSummaryTimelineEvent(event runtimeevents.Event, teamID string) chatRuntimeTimelineEvent {
 	summary := truncateChatRuntimeText(payloadStringValue(event.Payload["summary"]), 200)
-	line := fmt.Sprintf("[team summary] %s", firstNonEmptyChatValue(teamID, "?"))
-	lines := []string{}
-	if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["summary_source"])), "fallback") {
-		line += " [fallback]"
+	title := firstNonEmptyChatValue(teamID, "?")
+	details := make([]string, 0, 8)
+	fallback := strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["summary_source"])), "fallback")
+	status := cell.StatusSuccess
+	if fallback {
+		title += " [fallback]"
+		status = cell.StatusInfo
 		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
-			line += " [prompt preflight]"
+			title += " [prompt preflight]"
+			status = cell.StatusError
 		}
 	}
 	if summary != "" {
-		line += " " + summary
+		title += " " + summary
 	}
-	lines = append(lines, line)
-	if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["summary_source"])), "fallback") {
+	if fallback {
 		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
 			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {
-				lines = append(lines, "  原因: "+reason)
+				details = append(details, "  原因: "+reason)
 			}
 			if model := promptPreflightModelSummary(event.Payload); model != "" {
-				lines = append(lines, "  模型: "+model)
+				details = append(details, "  模型: "+model)
 			}
 			if budget := promptPreflightBudgetSourceSummary(event.Payload); budget != "" {
-				lines = append(lines, "  预算: "+budget)
+				details = append(details, "  预算: "+budget)
 			}
 			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
-				lines = append(lines, "  恢复: "+recovery)
+				details = append(details, "  恢复: "+recovery)
 			}
 			if extras := runtimeContextSummaryLines(event.Payload, false); len(extras) > 0 {
-				lines = append(lines, extras...)
+				details = append(details, extras...)
 			}
 		} else if reason := teamSummaryFallbackReasonSummary(payloadStringValue(event.Payload["fallback_reason"])); reason != "" {
-			lines = append(lines, "  fallback: "+reason)
+			details = append(details, "  fallback: "+reason)
 		}
 	}
-	return chatRuntimeTimelineEvent{
-		Line:     strings.Join(lines, "\n"),
-		DedupKey: fmt.Sprintf("team.summary:%s", teamID),
-	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind: cell.TimelineTeam, Status: status, Tag: "[team summary]", Title: title, Details: details,
+	}, fmt.Sprintf("team.summary:%s", teamID))
 }
 
 func extractPrefixedRuntimePayload(payload map[string]interface{}, prefix string) map[string]interface{} {
@@ -4008,7 +4129,10 @@ func compactToolContextLines(payload map[string]interface{}) []string {
 	if payload == nil {
 		return nil
 	}
-	extras := make([]string, 0, 4)
+	extras := make([]string, 0, 5)
+	if filePath := compactToolDisplaySegment(payloadStringValue(payload["display_file_path"])); filePath != "" {
+		extras = append(extras, "  file_path: "+filePath)
+	}
 	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 160); workdir != "" {
 		extras = append(extras, "  workdir: "+workdir)
 	} else if cwd := truncateChatRuntimeText(payloadStringValue(payload["cwd"]), 160); cwd != "" {
@@ -4160,10 +4284,6 @@ func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {
 	return truncateChatRuntimeText(line, 200)
 }
 
-func chatLLMRequestPromptLayoutHint(payload map[string]interface{}) string {
-	return ""
-}
-
 func formatRuntimeLLMRequestDebugInfo(event runtimeevents.Event) string {
 	switch event.Type {
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
@@ -4300,13 +4420,13 @@ func renderToolProgressTimelineEvent(event runtimeevents.Event) chatRuntimeTimel
 	phase := payloadStringValue(event.Payload["phase"])
 	chunkIndex, hasChunk := payloadFloatValue(event.Payload, "stream_chunk_index")
 
-	label := "• Progress"
+	label := "Progress"
 	if isStream {
-		label = "• Stream"
+		label = "Stream"
 	} else if phase == "start" {
-		label = "• Start"
+		label = "Start"
 	} else if phase == "finish" {
-		label = "• Finish"
+		label = "Finish"
 	}
 	parts := []string{label, toolName}
 	if isStream && channel != "" && channel != "combined" {
@@ -4350,10 +4470,17 @@ func renderToolProgressTimelineEvent(event runtimeevents.Event) chatRuntimeTimel
 	} else if phase != "" {
 		dedup += ":" + phase
 	}
-	return chatRuntimeTimelineEvent{
-		Line:     strings.Join(parts, " "),
-		DedupKey: "tool.progress:" + dedup,
+	status := cell.StatusRunning
+	if phase == "finish" {
+		status = cell.StatusSuccess
 	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:               cell.TimelineProgress,
+		Status:             status,
+		Marker:             "• ",
+		SuppressKindPrefix: true,
+		Title:              strings.Join(parts, " "),
+	}, "tool.progress:"+dedup)
 }
 
 // chatToolProgressStageDetail builds a short composer stage label from progress.
@@ -4389,10 +4516,10 @@ func chatToolProgressStageDetail(event runtimeevents.Event) string {
 	return toolName
 }
 
-func renderSubagentCompletedTimelineEvent(event runtimeevents.Event) string {
+func renderSubagentCompletedTimelineEvent(event runtimeevents.Event) cell.TimelineEvent {
 	payload := event.Payload
 	agentID := firstNonEmptyChatValue(payloadStringValue(payload["agent_id"]), payloadStringValue(payload["role"]), strings.TrimSpace(event.SessionID))
-	parts := []string{fmt.Sprintf("[subagent] completed %s", agentID)}
+	parts := []string{fmt.Sprintf("completed %s", agentID)}
 	if difficulty := strings.TrimSpace(payloadStringValue(payload["difficulty"])); difficulty != "" {
 		parts = append(parts, "difficulty="+difficulty)
 	}
@@ -4417,14 +4544,16 @@ func renderSubagentCompletedTimelineEvent(event runtimeevents.Event) string {
 	if warnings := stringSliceValueAny(payload["route_warnings"]); len(warnings) > 0 {
 		parts = append(parts, "warnings="+strings.Join(warnings, ","))
 	}
-	return strings.Join(parts, " ")
+	return cell.TimelineEvent{
+		Kind: cell.TimelineTask, Status: cell.StatusSuccess, Tag: "[subagent]", Title: strings.Join(parts, " "),
+	}
 }
 
 func renderTaskRouteResolvedTimelineEvent(event runtimeevents.Event, teamID string) chatRuntimeTimelineEvent {
 	payload := event.Payload
 	taskID := firstNonEmptyChatValue(payloadStringValue(payload["task_id"]), "?")
 	assignee := firstNonEmptyChatValue(payloadStringValue(payload["assignee"]), payloadStringValue(payload["agent_id"]))
-	parts := []string{fmt.Sprintf("[task route] resolved %s", taskID)}
+	parts := []string{fmt.Sprintf("resolved %s", taskID)}
 	if assignee != "" {
 		parts = append(parts, "@"+assignee)
 	}
@@ -4462,25 +4591,31 @@ func renderTaskRouteResolvedTimelineEvent(event runtimeevents.Event, teamID stri
 	if warnings := stringSliceValueAny(payload["route_warnings"]); len(warnings) > 0 {
 		parts = append(parts, "warnings="+strings.Join(warnings, ","))
 	}
+	eventStatus := cell.StatusSuccess
 	if routeError := strings.TrimSpace(payloadStringValue(payload["route_error"])); routeError != "" {
 		parts = append(parts, "error="+truncateChatRuntimeText(routeError, 120))
+		eventStatus = cell.StatusError
 	}
-	return chatRuntimeTimelineEvent{
-		Line:     strings.Join(parts, " "),
-		DedupKey: fmt.Sprintf("%s:%s:%s:%d", team.TaskRouteResolvedEvent, teamID, taskID, attempt),
-	}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind: cell.TimelineTask, Status: eventStatus, Tag: "[task route]", Title: strings.Join(parts, " "),
+	}, fmt.Sprintf("%s:%s:%s:%d", team.TaskRouteResolvedEvent, teamID, taskID, attempt))
 }
 
 func renderApprovalRequestedTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
 	payload := event.Payload
 	toolName := firstNonEmptyChatValue(payloadStringValue(payload["tool_name"]), "tool")
-	lines := []string{fmt.Sprintf("[approval] %s", toolName)}
+	details := make([]string, 0, 4)
 	for _, line := range approvalRequestContextLines(payload) {
 		if line = strings.TrimSpace(line); line != "" {
-			lines = append(lines, "  "+line)
+			details = append(details, "  "+line)
 		}
 	}
-	return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n")}
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:    cell.TimelineApproval,
+		Status:  cell.StatusPending,
+		Title:   toolName,
+		Details: details,
+	}, "")
 }
 
 func chatToolPostCommandHint(payload map[string]interface{}) string {
@@ -4522,10 +4657,30 @@ func chatReasoningTimelineEvent(traceID, stepLabel string, block *runtimetypes.R
 	}
 	stepLabel = strings.TrimSpace(stepLabel)
 	keyParts := []string{"assistant.reasoning", strings.TrimSpace(traceID), stepLabel, strings.TrimSpace(block.DisplayText())}
-	return chatRuntimeTimelineEvent{
-		Line:     strings.Join(lines, "\n"),
-		DedupKey: strings.Join(keyParts, ":"),
+	return documentedChatRuntimeTimelineEvent(chatReasoningTimelineDocument(lines), strings.Join(keyParts, ":"))
+}
+
+func chatReasoningTimelineDocument(lines []string) render.Document {
+	rendered := make([]render.Line, 0, len(lines))
+	for index, line := range lines {
+		if index == 0 || index == len(lines)-1 {
+			rendered = append(rendered, render.Line{Spans: []render.Span{{
+				Text: line, Style: render.Style{Role: string(style.RoleReasoning)},
+			}}})
+			continue
+		}
+		if strings.HasPrefix(line, "[reasoning]") {
+			rendered = append(rendered, render.Line{Spans: []render.Span{
+				{Text: "[reasoning]", Style: render.Style{Role: string(style.RoleReasoning), Bold: true}},
+				{Text: strings.TrimPrefix(line, "[reasoning]"), Style: render.Style{Role: string(style.RoleTextMuted)}},
+			}})
+			continue
+		}
+		rendered = append(rendered, render.Line{Spans: []render.Span{{
+			Text: line, Style: render.Style{Role: string(style.RoleTextSecondary)},
+		}}})
 	}
+	return render.LinesDoc(rendered...)
 }
 
 func chatReasoningLines(block *runtimetypes.ReasoningBlock) []string {

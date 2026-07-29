@@ -614,6 +614,8 @@ func (t *configTUI) renderOverview() {
 	fmt.Fprintf(t.writer, "Provider groups:  %d\n", len(t.cfg.ProviderGroups))
 	if t.cfg.AICLI != nil && t.cfg.AICLI.Theme != nil {
 		fmt.Fprintf(t.writer, "Theme:            %s\n", emptyIfBlank(t.cfg.AICLI.Theme.Name))
+		fmt.Fprintf(t.writer, "Theme mode:       %s\n", emptyIfBlank(t.cfg.AICLI.Theme.Mode))
+		fmt.Fprintf(t.writer, "Syntax theme:     %s\n", emptyIfBlank(t.cfg.AICLI.Theme.Syntax))
 	}
 	if t.cfg.AICLI != nil && t.cfg.AICLI.Runtime != nil {
 		fmt.Fprintf(t.writer, "Runtime mode:     %s\n", emptyIfBlank(t.cfg.AICLI.Runtime.Mode))

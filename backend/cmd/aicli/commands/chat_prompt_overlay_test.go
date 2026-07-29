@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/fatih/color"
 )
 
 func TestChatPromptOverlayClearSelectionPopupResetsPromptWithoutSurface(t *testing.T) {
@@ -59,9 +57,7 @@ func TestChatPromptOverlayPendingPasteDraftFallsBackWithoutSurface(t *testing.T)
 }
 
 func TestChatPromptOverlayPriorityPromptFallbackOutputContract(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

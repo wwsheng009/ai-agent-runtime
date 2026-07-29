@@ -12,6 +12,7 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 	root.PersistentFlags().StringP("config", "c", "", "")
 	root.PersistentFlags().StringP("logfile", "l", "", "")
 	root.PersistentFlags().String("theme", "", "")
+	root.PersistentFlags().String("syntax-theme", "", "")
 	root.PersistentFlags().Bool("envelope", false, "")
 
 	chat := &cobra.Command{Use: "chat"}
@@ -39,6 +40,11 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 			name: "only root flags default to chat",
 			args: []string{"--config", "config.yaml", "--theme", "focus"},
 			want: []string{"chat", "--config", "config.yaml", "--theme", "focus"},
+		},
+		{
+			name: "syntax theme flag defaults to chat",
+			args: []string{"--syntax-theme", "dracula"},
+			want: []string{"chat", "--syntax-theme", "dracula"},
 		},
 		{
 			name: "chat flags default to chat",
@@ -114,5 +120,32 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 				t.Fatalf("prependDefaultChatCommand(%v) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveStartupThemePrecedence(t *testing.T) {
+	got := resolveStartupTheme(startupThemeInputs{
+		configPalette:   "classic",
+		configMode:      "light",
+		configSyntax:    "github",
+		envTheme:        "contrast",
+		envMode:         "dark",
+		envSyntaxLegacy: "vim",
+		envSyntax:       "dracula",
+		flagTheme:       "focus",
+		flagSyntax:      "monokai",
+	})
+	if got.palette != "focus" || got.mode != "dark" || got.syntax != "monokai" {
+		t.Fatalf("unexpected startup selection: %+v", got)
+	}
+}
+
+func TestResolveStartupThemeModeTokenAndSyntaxDefault(t *testing.T) {
+	got := resolveStartupTheme(startupThemeInputs{
+		configPalette: "classic",
+		flagTheme:     "light",
+	})
+	if got.palette != "classic" || got.mode != "light" || got.syntax != "auto" {
+		t.Fatalf("unexpected startup selection: %+v", got)
 	}
 }

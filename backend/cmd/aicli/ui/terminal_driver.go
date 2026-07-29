@@ -3,6 +3,8 @@ package ui
 import (
 	"os"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"golang.org/x/term"
 )
 
@@ -20,6 +22,10 @@ type TerminalCapabilities struct {
 	Height          int
 	TerminalName    string
 	MultiplexerName string
+	// ColorEnabled / ColorDepth mirror style.ColorProfile for surface decisions.
+	// Full profile resolution (hyperlinks, background) lives in style.DetectColorProfile.
+	ColorEnabled bool
+	ColorDepth   int // 0=none, 1=ansi16, 2=ansi256, 3=truecolor
 }
 
 // TerminalDriver owns low-level terminal capability detection for aicli UI.
@@ -65,6 +71,16 @@ func (d *TerminalDriver) RefreshCapabilities() TerminalCapabilities {
 		ansi = ansi && vt
 	}
 
+	detectOpts := style.DetectOptions{
+		Interactive:   interactive,
+		ANSICapable:   ansi,
+		ColorOverride: "auto",
+		DepthOverride: "auto",
+	}
+	// Capability refresh only needs depth/enabled; live OSC is deferred to
+	// ColorProfile() so stdin is not queried on every size refresh.
+	profile := style.DetectColorProfile(detectOpts)
+
 	d.caps = TerminalCapabilities{
 		Interactive:     interactive,
 		ANSI:            ansi,
@@ -76,8 +92,42 @@ func (d *TerminalDriver) RefreshCapabilities() TerminalCapabilities {
 		Height:          height,
 		TerminalName:    firstNonEmptyEnv("WT_SESSION", "TERM_PROGRAM", "TERM"),
 		MultiplexerName: firstNonEmptyEnv("ZELLIJ", "TMUX"),
+		ColorEnabled:    profile.Enabled,
+		ColorDepth:      int(profile.Depth),
 	}
 	return d.caps
+}
+
+// ColorProfile returns the structured color profile for this driver.
+// On interactive ANSI terminals, attaches a process-once bounded OSC 10/11
+// probe so DefaultFG/BG and background luminance can be resolved when env
+// offline defaults are absent.
+func (d *TerminalDriver) ColorProfile() style.ColorProfile {
+	caps := d.Capabilities()
+	opts := style.DetectOptions{
+		Interactive:   caps.Interactive,
+		ANSICapable:   caps.ANSI,
+		ColorOverride: "auto",
+		DepthOverride: "auto",
+	}
+	if caps.Interactive && caps.ANSI {
+		opts.OSCProbe = LiveOSCProbe()
+	}
+	return style.DetectColorProfile(opts)
+}
+
+// ColorDepthName returns a stable label for diagnostics.
+func ColorDepthName(depth int) string {
+	switch render.ColorDepth(depth) {
+	case render.ColorTrueColor:
+		return "truecolor"
+	case render.ColorANSI256:
+		return "ansi256"
+	case render.ColorANSI16:
+		return "ansi16"
+	default:
+		return "none"
+	}
 }
 
 func (d *TerminalDriver) Capabilities() TerminalCapabilities {

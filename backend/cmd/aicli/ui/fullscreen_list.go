@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"golang.org/x/term"
 )
 
@@ -32,6 +33,20 @@ type FullScreenListOptions struct {
 	EmptyMessage string
 	ConfirmLabel string
 	Items        []FullScreenListItem
+
+	// Optional Phase 4 hooks. Callers must not fmt.Println from these;
+	// they update session memory / request redraw only.
+	//
+	// OnSelectionChanged fires with the original item index whenever the
+	// highlighted row changes (including the initial frame).
+	OnSelectionChanged func(index int)
+	// OnCancel fires when the user aborts (Esc/q/interrupt).
+	OnCancel func()
+	// OnConfirm runs after Enter on an enabled item. A non-nil error keeps
+	// the list open (caller may set item state); nil accepts and closes.
+	OnConfirm func(index int) error
+	// PreviewForItem, when set, replaces item.Preview for the highlighted row.
+	PreviewForItem func(index int) string
 }
 
 // FullScreenListResult identifies the selected original item index.
@@ -59,9 +74,10 @@ const (
 )
 
 type fullScreenListLoopHooks struct {
-	refreshSize func() (int, int)
-	writeFrame  func(string) error
-	readKey     func(context.Context) (editorKey, bool, error)
+	refreshSize  func() (int, int)
+	writeFrame   func(string) error
+	readKey      func(context.Context) (editorKey, bool, error)
+	colorProfile render.ColorProfile
 }
 
 type fullScreenListLifecycle struct {
@@ -97,6 +113,12 @@ func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullS
 	if _, height := terminal.RefreshSize(); height < minFullScreenListHeight {
 		return FullScreenListResult{}, fullScreenUnavailable("terminal height is too small", nil)
 	}
+	colorProfile := render.NoColorProfile()
+	if terminal.driver != nil {
+		// Resolve any bounded OSC defaults before raw mode starts so the probe
+		// cannot compete with the list's key decoder for stdin.
+		colorProfile = terminal.driver.ColorProfile().ColorProfile
+	}
 
 	rawState, err := term.MakeRaw(int(stdinFile.Fd()))
 	if err != nil {
@@ -114,6 +136,7 @@ func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullS
 		readKey: func(readCtx context.Context) (editorKey, bool, error) {
 			return nextFullScreenListKey(readCtx, reader, &pending, stdinFile)
 		},
+		colorProfile: colorProfile,
 	}
 	lifecycle := fullScreenListLifecycle{
 		writer: writer,
@@ -153,6 +176,7 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 	state := fullScreenListState{}
 	dirty := true
 	lastWidth, lastHeight := -1, -1
+	lastNotifiedIndex := -2 // force initial OnSelectionChanged
 	for {
 		if err := ctx.Err(); err != nil {
 			return FullScreenListResult{}, editorKey{}, err
@@ -163,8 +187,21 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		}
 		matches := fullScreenListMatches(options.Items, state.query)
 		state.clampToEnabled(options.Items, matches, fullScreenListPageSize(height))
+		if len(matches) > 0 {
+			curIdx := matches[state.selected]
+			if curIdx != lastNotifiedIndex {
+				lastNotifiedIndex = curIdx
+				if options.OnSelectionChanged != nil {
+					options.OnSelectionChanged(curIdx)
+				}
+				// Preview may depend on selection; force redraw.
+				dirty = true
+			}
+		}
 		if dirty || width != lastWidth || height != lastHeight {
-			frame := renderFullScreenListFrame(options, state, matches, width, height)
+			frame := renderFullScreenListFrameWithProfile(
+				options, state, matches, width, height, hooks.colorProfile,
+			)
 			if err := hooks.writeFrame(frame); err != nil {
 				return FullScreenListResult{}, editorKey{}, fullScreenUnavailable("write frame", err)
 			}
@@ -181,6 +218,24 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		}
 		result, done := applyFullScreenListKey(&state, key, options.Items, matches, height)
 		if done {
+			if result.Cancelled {
+				if options.OnCancel != nil {
+					options.OnCancel()
+				}
+				return result, key, nil
+			}
+			if options.OnConfirm != nil && result.Index >= 0 {
+				if confErr := options.OnConfirm(result.Index); confErr != nil {
+					// Keep list open; surface error in subtitle if possible.
+					if options.Subtitle == "" {
+						options.Subtitle = confErr.Error()
+					} else {
+						options.Subtitle = confErr.Error()
+					}
+					dirty = true
+					continue
+				}
+			}
 			return result, key, nil
 		}
 		dirty = true
@@ -460,7 +515,13 @@ func trimLastRune(value string) string {
 	return value[:len(value)-size]
 }
 
-func renderFullScreenListFrame(options FullScreenListOptions, state fullScreenListState, matches []int, width, height int) string {
+func renderFullScreenListFrameWithProfile(
+	options FullScreenListOptions,
+	state fullScreenListState,
+	matches []int,
+	width, height int,
+	profile render.ColorProfile,
+) string {
 	if width < 1 {
 		width = 1
 	}
@@ -514,14 +575,44 @@ func renderFullScreenListFrame(options FullScreenListOptions, state fullScreenLi
 	detailRow := listStart + pageSize
 	lines[detailRow].text = strings.Repeat("─", width)
 	if len(matches) > 0 {
-		item := options.Items[matches[state.selected]]
+		itemIndex := matches[state.selected]
+		item := options.Items[itemIndex]
 		preview := strings.TrimSpace(item.Preview)
+		if options.PreviewForItem != nil {
+			if dyn := strings.TrimSpace(options.PreviewForItem(itemIndex)); dyn != "" {
+				preview = dyn
+			}
+		}
 		if preview == "" {
 			preview = strings.TrimSpace(item.Title)
 		}
 		previewLines := wrapFullScreenText(preview, max(1, width-2), previewRows)
+		// Preserve app-rendered SGR previews and explicit line boundaries.
+		if strings.Contains(preview, "\n") || strings.ContainsRune(preview, '\x1b') {
+			raw := strings.Split(preview, "\n")
+			previewLines = raw
+			if len(previewLines) > previewRows {
+				previewLines = previewLines[:previewRows]
+			}
+			for i, pl := range previewLines {
+				if strings.ContainsRune(pl, '\x1b') {
+					previewLines[i] = fitFullScreenPreformattedTextWithProfile(
+						pl, max(1, width-2), profile,
+					)
+				} else {
+					previewLines[i] = fitFullScreenText(pl, max(1, width-2))
+				}
+			}
+		}
 		for index, previewLine := range previewLines {
+			if detailRow+1+index >= height-2 {
+				break
+			}
 			lines[detailRow+1+index].text = "  " + previewLine
+			// Preformatted so ANSI in rich previews is not re-wrapped destructively.
+			if strings.Contains(previewLine, "\x1b") {
+				lines[detailRow+1+index].preformatted = true
+			}
 		}
 	}
 	position := fmt.Sprintf("%d/%d", state.selected+1, len(matches))
@@ -541,7 +632,7 @@ func renderFullScreenListFrame(options FullScreenListOptions, state fullScreenLi
 		builder.WriteString("\x1b[2K")
 		text := line.text
 		if line.preformatted {
-			text = fitFullScreenPreformattedText(text, width)
+			text = fitFullScreenPreformattedTextWithProfile(text, width, profile)
 		} else {
 			text = fitFullScreenText(text, width)
 		}
@@ -654,8 +745,17 @@ func fitFullScreenText(value string, width int) string {
 	return truncateFullScreenText(value, width)
 }
 
-func fitFullScreenPreformattedText(value string, width int) string {
-	return truncateFullScreenText(SanitizeTerminalText(value), width)
+func fitFullScreenPreformattedTextWithProfile(
+	value string,
+	width int,
+	profile render.ColorProfile,
+) string {
+	lines := render.ANSIToLines(value)
+	if len(lines) == 0 {
+		return ""
+	}
+	line := render.Truncate(lines[0], width, "…")
+	return (render.ANSIBackend{Profile: profile}).Render(render.LinesDoc(line))
 }
 
 func wrapFullScreenText(value string, width, limit int) []string {

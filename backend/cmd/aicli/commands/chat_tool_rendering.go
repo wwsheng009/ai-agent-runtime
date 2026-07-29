@@ -3,13 +3,14 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
+	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pathdisplay"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -55,7 +56,7 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	if toolName := strings.TrimSpace(event.ToolName); toolName != "" {
 		payload["tool_name"] = toolName
 	}
-	if preview := summarizeSharedChatToolCallArgs(event.Arguments); preview != "" {
+	if preview := summarizeSharedChatToolCallArgs(event.ToolName, event.Arguments); preview != "" {
 		payload["arg_preview"] = preview
 	}
 	if commandText := summarizeSharedShellToolCommand(event.ToolName, event.Arguments); commandText != "" {
@@ -63,13 +64,18 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	}
 	if workdir := strings.TrimSpace(payloadStringValue(event.Arguments["workdir"])); workdir != "" {
 		payload["workdir"] = workdir
+	} else if workdir := strings.TrimSpace(payloadStringValue(event.Arguments["working_directory"])); workdir != "" {
+		payload["workdir"] = workdir
 	} else if cwd := strings.TrimSpace(payloadStringValue(event.Arguments["cwd"])); cwd != "" {
 		payload["cwd"] = cwd
 	} else if workdir := strings.TrimSpace(payloadStringValue(event.Metadata["workdir"])); workdir != "" {
 		payload["workdir"] = workdir
+	} else if workdir := strings.TrimSpace(payloadStringValue(event.Metadata["working_directory"])); workdir != "" {
+		payload["workdir"] = workdir
 	} else if cwd := strings.TrimSpace(payloadStringValue(event.Metadata["cwd"])); cwd != "" {
 		payload["cwd"] = cwd
 	}
+	copySharedChatDisplayFilePath(payload, event.Arguments)
 	if lines := summarizeSharedChatToolResultLines(event); len(lines) > 0 {
 		payload["summary_lines"] = lines
 		payload["summary"] = strings.Join(lines, "\n")
@@ -78,6 +84,10 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 		payload["render_output"] = output
 		payload["render_output_format"] = "markdown"
 		payload["render_output_untruncated"] = true
+	} else if output := shellDiffSharedToolRenderOutput(event); output != "" {
+		payload["render_output"] = output
+		payload["render_output_format"] = "diff"
+		payload["render_output_untruncated"] = true
 	}
 	if errText := strings.TrimSpace(event.Error); errText != "" {
 		payload["error"] = errText
@@ -85,11 +95,12 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	if source := payloadStringValue(event.Metadata[toolresult.SourceKey]); source != "" {
 		payload[toolresult.SourceKey] = source
 	}
-	for _, key := range []string{"shell_type", "shell_path", "shell_display", "error_code", "next_action"} {
+	for _, key := range []string{"shell_type", "shell_path", "shell_display", "error_code", "next_action", "engine", "execution_backend", "backend_command", "backend_path", "backend_source"} {
 		if value := payloadStringValue(event.Metadata[key]); value != "" {
 			payload[key] = value
 		}
 	}
+	copySharedSearchBackendMetadata(payload, event.Metadata)
 	for _, key := range []string{"ok", "retryable"} {
 		if value, ok := event.Metadata[key]; ok {
 			payload[key] = value
@@ -104,16 +115,51 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	return payload
 }
 
-func summarizeSharedChatToolCallArgs(args map[string]interface{}) string {
+func copySharedChatDisplayFilePath(payload map[string]interface{}, args map[string]interface{}) {
+	if payload == nil {
+		return
+	}
+	_, path := pathdisplay.File(args)
+	if pathdisplay.NeedsOwnLine(path) {
+		payload["display_file_path"] = path
+	}
+}
+
+func copySharedSearchBackendMetadata(payload, metadata map[string]interface{}) {
+	if payload == nil || len(metadata) == 0 {
+		return
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		copySharedSearchBackendMetadata(payload, nested)
+	}
+	for _, key := range []string{"engine", "execution_backend", "backend_command", "backend_path", "backend_source"} {
+		if value := strings.TrimSpace(payloadStringValue(metadata[key])); value != "" {
+			payload[key] = value
+		}
+	}
+	toolName := strings.ToLower(strings.TrimSpace(payloadStringValue(payload["tool_name"])))
+	if payloadStringValue(payload["execution_backend"]) == "" && (toolName == "grep" || toolName == "glob") {
+		if engine := strings.TrimSpace(payloadStringValue(payload["engine"])); engine != "" {
+			payload["execution_backend"] = engine
+		}
+	}
+}
+
+func summarizeSharedChatToolCallArgs(toolName string, args map[string]interface{}) string {
 	if len(args) == 0 {
 		return ""
 	}
+	if preview := summarizeSharedSearchToolCallArgs(toolName, args); preview != "" {
+		return preview
+	}
 
+	fileArgKey, filePath := pathdisplay.File(args)
+	parts := make([]string, 0, len(args))
 	seen := make(map[string]struct{}, len(sharedChatToolPreviewKeys))
 	for _, key := range sharedChatToolPreviewKeys {
 		seen[key] = struct{}{}
-		if preview := formatSharedChatToolArgPreview(key, args[key]); preview != "" {
-			return preview
+		if preview := formatSharedChatToolArgPreviewForArgs(key, args[key], fileArgKey, filePath); preview != "" {
+			parts = append(parts, preview)
 		}
 	}
 
@@ -126,17 +172,91 @@ func summarizeSharedChatToolCallArgs(args map[string]interface{}) string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if preview := formatSharedChatToolArgPreview(key, args[key]); preview != "" {
-			return preview
+		if sharedChatToolArgRenderedSeparately(key) {
+			continue
+		}
+		if preview := formatSharedChatToolArgPreviewForArgs(key, args[key], fileArgKey, filePath); preview != "" {
+			parts = append(parts, preview)
 		}
 	}
-	return ""
+	return truncateChatRuntimeText(strings.Join(parts, " "), 200)
+}
+
+func sharedChatToolArgRenderedSeparately(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "cwd", "workdir", "working_directory":
+		return true
+	default:
+		return false
+	}
+}
+
+func summarizeSharedSearchToolCallArgs(toolName string, args map[string]interface{}) string {
+	var keys []string
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "glob":
+		keys = []string{"pattern", "path", "case_insensitive", "ignore_case", "limit"}
+	case "grep":
+		keys = []string{"patterns", "pattern", "regexp", "paths", "path", "glob", "include", "type", "literal", "ignore_case"}
+	default:
+		return ""
+	}
+
+	parts := make([]string, 0, len(args))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		seen[key] = struct{}{}
+		if preview := formatSharedSearchToolArgPreview(key, args[key]); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
+
+	remainingKeys := make([]string, 0, len(args)-len(parts))
+	for key := range args {
+		if _, ok := seen[key]; ok || sharedChatToolArgRenderedSeparately(key) {
+			continue
+		}
+		remainingKeys = append(remainingKeys, key)
+	}
+	sort.Strings(remainingKeys)
+	for _, key := range remainingKeys {
+		if preview := formatSharedChatToolArgPreview(key, args[key]); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
+	return truncateChatRuntimeText(strings.Join(parts, " "), 200)
+}
+
+func formatSharedSearchToolArgPreview(key string, value interface{}) string {
+	key = strings.TrimSpace(key)
+	if key == "" || value == nil {
+		return ""
+	}
+	text := normalizeSharedChatToolText(renderSharedSearchToolArgValue(value))
+	if text == "" || text == "{}" || text == "[]" {
+		return ""
+	}
+	return key + "=" + text
+}
+
+func renderSharedSearchToolArgValue(value interface{}) string {
+	switch value.(type) {
+	case []string, []interface{}:
+		raw, err := json.Marshal(value)
+		if err == nil {
+			return string(raw)
+		}
+	}
+	return renderSharedChatToolArgValue(value)
 }
 
 func formatSharedChatToolArgPreview(key string, value interface{}) string {
 	key = strings.TrimSpace(key)
 	if key == "" || value == nil {
 		return ""
+	}
+	if sensitiveSharedChatToolArgKey(key) {
+		return key + "=<redacted>"
 	}
 	text := normalizeSharedChatToolText(renderSharedChatToolArgValue(value))
 	if text == "" || text == "{}" || text == "[]" {
@@ -145,15 +265,35 @@ func formatSharedChatToolArgPreview(key string, value interface{}) string {
 	return truncateChatRuntimeText(fmt.Sprintf("%s=%s", key, text), 72)
 }
 
+func formatSharedChatToolArgPreviewForArgs(key string, value interface{}, fileArgKey, filePath string) string {
+	if key == fileArgKey && filePath != "" {
+		if pathdisplay.NeedsOwnLine(filePath) {
+			return ""
+		}
+		value = filePath
+	}
+	return formatSharedChatToolArgPreview(key, value)
+}
+
+func sensitiveSharedChatToolArgKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	for _, marker := range []string{
+		"api_key", "apikey", "access_key", "private_key", "authorization",
+		"credential", "password", "passwd", "secret", "cookie",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return strings.HasSuffix(normalized, "token")
+}
+
 func renderSharedChatToolArgValue(value interface{}) string {
 	switch typed := value.(type) {
 	case string:
 		return typed
 	case bool:
-		if !typed {
-			return ""
-		}
-		return "true"
+		return fmt.Sprintf("%t", typed)
 	case []string:
 		switch len(typed) {
 		case 0:
@@ -181,7 +321,7 @@ func renderSharedChatToolArgValue(value interface{}) string {
 				return strings.TrimPrefix(preview, nestedKey+"=")
 			}
 		}
-		raw, err := json.Marshal(typed)
+		raw, err := json.Marshal(toolresult.CompactAttemptedArgs(typed))
 		if err != nil {
 			return fmt.Sprintf("%v", value)
 		}
@@ -262,7 +402,7 @@ func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, ar
 	if display == "" {
 		return ""
 	}
-	if rendered := renderMarkdownEditedDiffToolOutput(payload); rendered != "" {
+	if rendered := renderStructuredDiffToolOutput(payload); rendered != "" {
 		return rendered
 	}
 	lines := []string{compactToolCompletionTitle(payload, display)}
@@ -282,7 +422,7 @@ func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, ar
 }
 
 func renderMarkdownToolOutput(payload map[string]interface{}) string {
-	if rendered := renderMarkdownEditedDiffToolOutput(payload); rendered != "" {
+	if rendered := renderStructuredDiffToolOutput(payload); rendered != "" {
 		return rendered
 	}
 	lines := renderMarkdownToolOutputLines(payload)
@@ -292,12 +432,14 @@ func renderMarkdownToolOutput(payload map[string]interface{}) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderMarkdownEditedDiffToolOutput(payload map[string]interface{}) string {
-	output, ok := markdownToolOutput(payload)
-	if !ok {
-		return ""
+func renderStructuredDiffToolOutput(payload map[string]interface{}) string {
+	if output, ok := diffToolOutput(payload); ok {
+		return renderDiffOutput(output, "Diff")
 	}
-	return renderEditedDiffOutput(output)
+	if output, ok := markdownToolOutput(payload); ok {
+		return renderDiffOutput(output, "Edited")
+	}
+	return ""
 }
 
 func renderMarkdownToolOutputLines(payload map[string]interface{}) []string {
@@ -316,10 +458,28 @@ func renderMarkdownToolOutputLines(payload map[string]interface{}) []string {
 }
 
 func markdownToolOutput(payload map[string]interface{}) (string, bool) {
-	if payload == nil || !payloadBoolValue(payload, "render_output_untruncated") {
+	if payload == nil {
 		return "", false
 	}
 	if format := strings.TrimSpace(payloadStringValue(payload["render_output_format"])); format != "" && format != "markdown" {
+		return "", false
+	}
+	return untruncatedToolRenderOutput(payload)
+}
+
+func diffToolOutput(payload map[string]interface{}) (string, bool) {
+	if payload == nil {
+		return "", false
+	}
+	format := strings.TrimSpace(payloadStringValue(payload["render_output_format"]))
+	if format != "diff" && format != "unified_diff" {
+		return "", false
+	}
+	return untruncatedToolRenderOutput(payload)
+}
+
+func untruncatedToolRenderOutput(payload map[string]interface{}) (string, bool) {
+	if !payloadBoolValue(payload, "render_output_untruncated") {
 		return "", false
 	}
 	output := strings.TrimRight(strings.ReplaceAll(payloadStringValue(payload["render_output"]), "\r\n", "\n"), "\n")
@@ -329,9 +489,11 @@ func markdownToolOutput(payload map[string]interface{}) (string, bool) {
 	return output, true
 }
 
-var unifiedDiffHunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
-
 func renderEditedDiffOutput(output string) string {
+	return renderDiffOutput(output, "Edited")
+}
+
+func renderDiffOutput(output, label string) string {
 	diff := extractUnifiedDiffOutput(output)
 	if strings.TrimSpace(diff) == "" {
 		return ""
@@ -345,7 +507,7 @@ func renderEditedDiffOutput(output string) string {
 		if fileIndex > 0 {
 			lines = append(lines, "  ")
 		}
-		lines = append(lines, fmt.Sprintf("• Edited %s (+%d -%d)", file.path, file.additions, file.deletions))
+		lines = append(lines, fmt.Sprintf("• %s %s (+%d -%d)", label, file.path, file.additions, file.deletions))
 		for _, line := range file.lines {
 			lines = append(lines, "    "+line)
 		}
@@ -404,6 +566,9 @@ func collectUnifiedDiffLines(lines []string) []string {
 		line := strings.TrimRight(lines[i], "\r")
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "diff --git ") {
+			// A new file starts after the previous hunk. Reset the hunk state
+			// before skipping Git's per-file metadata (index/mode/rename rows).
+			inHunk = false
 			continue
 		}
 		if isUnifiedDiffFileStart(lines, i) {
@@ -442,10 +607,34 @@ func collectUnifiedDiffLines(lines []string) []string {
 			break
 		}
 		if sawDiff && trimmed != "" {
+			if isUnifiedDiffFileMetadata(trimmed) {
+				continue
+			}
 			break
 		}
 	}
 	return out
+}
+
+func isUnifiedDiffFileMetadata(line string) bool {
+	for _, prefix := range []string{
+		"index ",
+		"old mode ",
+		"new mode ",
+		"deleted file mode ",
+		"new file mode ",
+		"similarity index ",
+		"dissimilarity index ",
+		"rename from ",
+		"rename to ",
+		"copy from ",
+		"copy to ",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isUnifiedDiffContinuation(line string) bool {
@@ -467,76 +656,70 @@ type renderedDiffFile struct {
 	lines     []string
 }
 
+// renderedDiffElisionRow marks a gap in the numbered preview: between
+// non-adjacent hunks, or at the end when the parse budget stopped early. The
+// structured renderer keeps it as a meta row, so both transcript forms agree.
+const renderedDiffElisionRow = "      ..."
+
+// parseUnifiedDiffFiles projects a unified diff onto the numbered "• Edited"
+// supplement rows.
+//
+// Parsing is delegated to the ui/diff package so the transcript text and the
+// structured renderer that later re-reads it agree on file boundaries, line
+// numbering and hunk grouping instead of maintaining a second parser here.
 func parseUnifiedDiffFiles(diff string) []renderedDiffFile {
-	rawLines := strings.Split(strings.ReplaceAll(diff, "\r\n", "\n"), "\n")
-	files := make([]renderedDiffFile, 0, 1)
-	var current *renderedDiffFile
-	oldLine := 0
-	newLine := 0
-	hunks := 0
-	for _, raw := range rawLines {
-		line := strings.TrimRight(raw, "\r")
-		switch {
-		case strings.HasPrefix(line, "--- "):
-			if current != nil && (current.path != "" || len(current.lines) > 0) {
-				files = append(files, *current)
+	parsed, truncated := uidiff.ParseUnifiedWithLimit(diff, uidiff.DefaultParseOptions())
+	files := make([]renderedDiffFile, 0, len(parsed))
+	for _, file := range parsed {
+		rendered := renderedDiffFile{path: renderedDiffFilePath(file)}
+		for hunkIndex, hunk := range file.Hunks {
+			if hunkIndex > 0 {
+				rendered.lines = append(rendered.lines, renderedDiffElisionRow)
 			}
-			current = &renderedDiffFile{path: normalizeRenderedDiffPath(strings.TrimSpace(strings.TrimPrefix(line, "--- ")))}
-			oldLine = 0
-			newLine = 0
-			hunks = 0
-		case strings.HasPrefix(line, "+++ "):
-			if current == nil {
-				current = &renderedDiffFile{}
-			}
-			rawPath := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
-			if !isRenderedDiffDevNull(rawPath) {
-				path := normalizeRenderedDiffPath(rawPath)
-				if path == "" {
-					continue
+			for _, row := range hunk.Lines {
+				switch row.Kind {
+				case uidiff.LineAdd:
+					rendered.additions++
+					rendered.lines = append(rendered.lines,
+						formatRenderedDiffLine(0, '+', row.NewLineNo, row.Text))
+				case uidiff.LineDelete:
+					rendered.deletions++
+					rendered.lines = append(rendered.lines,
+						formatRenderedDiffLine(row.OldLineNo, '-', 0, row.Text))
+				case uidiff.LineContext:
+					rendered.lines = append(rendered.lines,
+						formatRenderedDiffLine(row.OldLineNo, ' ', row.NewLineNo, row.Text))
+				default:
+					// Meta rows such as "\ No newline at end of file" carry no
+					// line number and are not part of the numbered preview.
 				}
-				current.path = path
-			}
-		case strings.HasPrefix(line, "@@"):
-			if current == nil {
-				current = &renderedDiffFile{}
-			}
-			if hunks > 0 {
-				current.lines = append(current.lines, "      ...")
-			}
-			hunks++
-			oldLine, newLine = parseUnifiedDiffHunkStart(line)
-		case current != nil && line != "":
-			switch line[0] {
-			case ' ':
-				current.lines = append(current.lines, formatRenderedDiffLine(oldLine, ' ', newLine, strings.TrimPrefix(line, " ")))
-				oldLine++
-				newLine++
-			case '-':
-				current.deletions++
-				current.lines = append(current.lines, formatRenderedDiffLine(oldLine, '-', 0, strings.TrimPrefix(line, "-")))
-				oldLine++
-			case '+':
-				current.additions++
-				current.lines = append(current.lines, formatRenderedDiffLine(0, '+', newLine, strings.TrimPrefix(line, "+")))
-				newLine++
 			}
 		}
+		if rendered.path == "" && len(rendered.lines) == 0 {
+			continue
+		}
+		files = append(files, rendered)
 	}
-	if current != nil && (current.path != "" || len(current.lines) > 0) {
-		files = append(files, *current)
+	// The parse budget can stop mid-diff. Reuse the elision marker so the
+	// preview ends with a visible "there is more" row in both the plain
+	// transcript and the structured re-render, which keeps the marker as a meta
+	// row.
+	if truncated && len(files) > 0 {
+		last := &files[len(files)-1]
+		last.lines = append(last.lines, renderedDiffElisionRow)
 	}
 	return files
 }
 
-func parseUnifiedDiffHunkStart(line string) (int, int) {
-	match := unifiedDiffHunkHeaderPattern.FindStringSubmatch(line)
-	if len(match) != 3 {
-		return 0, 0
+// renderedDiffFilePath prefers the post-edit path and falls back to the
+// pre-edit one for deletions, where the new side is /dev/null.
+func renderedDiffFilePath(file uidiff.FileDiff) string {
+	if !isRenderedDiffDevNull(file.NewPath) {
+		if path := normalizeRenderedDiffPath(file.NewPath); path != "" {
+			return path
+		}
 	}
-	oldStart, _ := strconv.Atoi(match[1])
-	newStart, _ := strconv.Atoi(match[2])
-	return oldStart, newStart
+	return normalizeRenderedDiffPath(file.OldPath)
 }
 
 func normalizeRenderedDiffPath(path string) string {
@@ -573,6 +756,25 @@ func editingSharedToolRenderOutput(toolName string, output string) string {
 		}
 	}
 	return strings.TrimSpace(output)
+}
+
+func shellDiffSharedToolRenderOutput(event runtimechatcore.ChatEvent) string {
+	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(event.ToolName)) ||
+		!runtimeexecutor.IsGitDiffCommand(payloadStringValue(event.Arguments["command"])) ||
+		strings.TrimSpace(event.Error) != "" {
+		return ""
+	}
+	if complete, ok := event.Metadata["output_capture_complete"].(bool); ok && !complete {
+		return ""
+	}
+	if limited, _ := event.Metadata["capture_limit_reached"].(bool); limited {
+		return ""
+	}
+	output := strings.TrimSpace(event.Output)
+	if !runtimeexecutor.LooksLikeUnifiedDiffOutput(output) {
+		return ""
+	}
+	return output
 }
 
 func compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource string) string {
@@ -658,7 +860,22 @@ func compactToolCompletionTitle(payload map[string]interface{}, display string) 
 	if strings.TrimSpace(payloadStringValue(payload["error"])) != "" {
 		status = "Failed"
 	}
-	return "• " + status + " " + display + compactToolDurationSuffix(payload)
+	return "• " + status + " " + display + compactToolBackendSuffix(payload) + compactToolDurationSuffix(payload)
+}
+
+func compactToolBackendSuffix(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	backend := firstNonEmptyChatValue(
+		payloadStringValue(payload["execution_backend"]),
+		payloadStringValue(payload["engine"]),
+	)
+	backend = compactToolDisplaySegment(backend)
+	if backend == "" {
+		return ""
+	}
+	return " via " + truncateChatRuntimeText(backend, 40)
 }
 
 func compactToolDisplaySegment(text string) string {

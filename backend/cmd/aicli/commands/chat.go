@@ -19,6 +19,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -463,8 +464,9 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 
 	resolved, _, err := loadCachedRuntimeConfig(configPath)
 	if err != nil || resolved == nil {
-		fmt.Fprintf(os.Stderr, "Warning: 加载 runtime tools 配置失败，已退回默认 sandbox 配置: %v\n", err)
-		logpkg.Warnf("AICLI runtime tools config load failed: %v", err)
+		reason := formatRuntimeConfigLoadFallback(configPath, err)
+		fmt.Fprintf(os.Stderr, "Warning: 加载 runtime tools 配置失败，已退回默认 sandbox 配置: %s\n", reason)
+		logpkg.Warnf("AICLI runtime tools config load failed: %s", reason)
 		return runtimecfg.DefaultRuntimeConfig()
 	}
 	if session != nil && session.ToolPolicy != nil && session.ToolPolicy.Sandbox != nil {
@@ -486,7 +488,6 @@ func selectProvider(cfg *config.Config) string {
 
 func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 	printChatSelectionSection("选择 Provider")
-	theme := ui.GetTheme(ui.ThemeAuto)
 
 	// 列出可用的 providers
 	var providers []string
@@ -504,8 +505,8 @@ func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 
 	maxNameLen := 0
 	for _, p := range providers {
-		if len(p) > maxNameLen {
-			maxNameLen = len(p)
+		if width := ui.DisplayWidth(p); width > maxNameLen {
+			maxNameLen = width
 		}
 	}
 
@@ -514,19 +515,16 @@ func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 		if provider, ok := cfg.Providers.Items[p]; ok {
 			summary = describeProviderSelection(provider)
 		}
-		if p == cfg.Providers.DefaultProvider {
-			if summary != "" {
-				printChatSelectionLine("  [%d] %-*s  %s %s", i+1, maxNameLen, p, theme.Dimmed(summary), theme.Dimmed("(默认)"))
-			} else {
-				printChatSelectionLine("  [%d] %-*s  %s", i+1, maxNameLen, p, theme.Dimmed("(默认)"))
-			}
-		} else {
-			if summary != "" {
-				printChatSelectionLine("  [%d] %-*s  %s", i+1, maxNameLen, p, theme.Dimmed(summary))
-			} else {
-				printChatSelectionLine("  [%d] %s", i+1, p)
-			}
+		padding := strings.Repeat(" ", maxNameLen-ui.DisplayWidth(p))
+		primary := fmt.Sprintf("  [%d] %s%s", i+1, p, padding)
+		var muted []string
+		if summary != "" {
+			muted = append(muted, "  "+summary)
 		}
+		if p == cfg.Providers.DefaultProvider {
+			muted = append(muted, " (默认)")
+		}
+		printChatSelectionMutedSuffix(primary, muted...)
 	}
 	printChatSelectionBlankLine()
 
@@ -612,7 +610,7 @@ func selectModelWithReader(provider config.Provider, reader *bufio.Reader) strin
 	sort.Strings(provider.SupportedModels)
 	for i, m := range provider.SupportedModels {
 		if m == provider.DefaultModel {
-			printChatSelectionLine("  [%d] %s %s", i+1, m, ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
+			printChatSelectionMutedSuffix(fmt.Sprintf("  [%d] %s ", i+1, m), "(默认)")
 		} else {
 			printChatSelectionLine("  [%d] %s", i+1, m)
 		}
@@ -655,7 +653,12 @@ func selectStreamModeWithReader(reader *bufio.Reader) bool {
 	printChatSelectionSection("选择输出模式")
 
 	printChatSelectionLine("  [1] 普通 (等待完整响应)")
-	printChatSelectionLine("  [2] %s (实时输出) %s", ui.GetTheme(ui.ThemeAuto).SuccessColor.Sprint("流式"), ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
+	printChatSelectionParts(
+		chatPart("  [2] ", style.RoleTextPrimary),
+		chatBoldPart("流式", style.RoleSuccess),
+		chatPart(" (实时输出) ", style.RoleTextPrimary),
+		chatPart("(默认)", style.RoleTextMuted),
+	)
 	printChatSelectionBlankLine()
 
 	for {
@@ -758,8 +761,7 @@ func printChatSessionMetaRow(label, value string) {
 	if strings.TrimSpace(label) == "" {
 		return
 	}
-	theme := ui.GetTheme(ui.ThemeAuto)
-	fmt.Printf("%-*s %s\n", chatSessionMetaLabelWidth, theme.ColorizeLabel(label), theme.ColorizeSecondary(value))
+	printChatSessionInfoRow(os.Stdout, label, value, chatSessionMetaLabelWidth)
 }
 
 // formatChatAgentSourceLine renders "source · path" for the active agentdef/profile agent.

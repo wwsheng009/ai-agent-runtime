@@ -3,15 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	"github.com/fatih/color"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -21,6 +12,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 func TestBuildChatSessionInfo_IncludesEndpointHostAndOperationalMetadata(t *testing.T) {
@@ -141,11 +139,7 @@ func TestBuildChatSessionInfo_UsesConfiguredReasoningCapability(t *testing.T) {
 }
 
 func TestPrintSessionInfo_RendersProviderEndpointDetails(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
@@ -182,11 +176,7 @@ func TestPrintSessionInfo_RendersProviderEndpointDetails(t *testing.T) {
 }
 
 func TestPrintSessionInfo_RendersCompactLineage(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	runtimeSession := runtimechat.NewSession("tester")
@@ -235,11 +225,7 @@ func TestPrintSessionInfo_RendersCompactLineage(t *testing.T) {
 }
 
 func TestPrintSessionInfo_AlignsFollowupMetadataRows(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
@@ -314,11 +300,7 @@ func TestFormatChatAgentSourceLine(t *testing.T) {
 }
 
 func TestPrintSessionInfo_IncludesAgentSource(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	agentPath := filepath.Join(t.TempDir(), ".agents", "agents", "general.md")
@@ -340,11 +322,7 @@ func TestPrintSessionInfo_IncludesAgentSource(t *testing.T) {
 }
 
 func TestPrintSessionInfo_RendersExplicitReasoningCapability(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
@@ -462,11 +440,7 @@ func TestCurrentRuntimeSessionArtifactRootUsesSessionIDWithSQLiteStore(t *testin
 }
 
 func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	sessionDir := t.TempDir()
@@ -511,11 +485,7 @@ func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
 }
 
 func TestPrintCurrentRuntimeSession_ResolvesRelativePathsToAbsolute(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	originalWD, err := os.Getwd()
@@ -570,11 +540,7 @@ func TestPrintCurrentRuntimeSession_ResolvesRelativePathsToAbsolute(t *testing.T
 }
 
 func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() {
-		color.NoColor = oldNoColor
-	}()
+	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
 	baseDir := t.TempDir()

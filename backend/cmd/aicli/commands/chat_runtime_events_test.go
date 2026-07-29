@@ -6,17 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	"github.com/fatih/color"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -30,6 +22,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutIndent(t *testing.T) {
@@ -39,6 +38,95 @@ func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutInde
 	}
 	if !strings.Contains(got, "[approval] query=北京 天气预报 未来 7 天") {
 		t.Fatalf("expected approval content to stay visible, got %q", got)
+	}
+}
+
+func TestRenderChatRuntimeTimelineEventCarriesTypedModel(t *testing.T) {
+	cases := []struct {
+		name     string
+		event    runtimeevents.Event
+		wantLine string
+		wantKind cell.TimelineKind
+	}{
+		{
+			name:     "planning",
+			event:    runtimeevents.Event{Type: "planning.completed"},
+			wantLine: "[planning] completed",
+			wantKind: cell.TimelinePlanning,
+		},
+		{
+			name: "question",
+			event: runtimeevents.Event{Type: runtimechat.EventQuestionAsked, Payload: map[string]interface{}{
+				"prompt": "choose a model",
+			}},
+			wantLine: "[question] choose a model",
+			wantKind: cell.TimelineQuestion,
+		},
+		{
+			name:     "input",
+			event:    runtimeevents.Event{Type: chatEventInputQueueDrained, SessionID: "session-1"},
+			wantLine: "[input] queued input drained",
+			wantKind: cell.TimelineInput,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rendered := renderChatRuntimeTimelineEvent(tc.event)
+			if rendered.Line != tc.wantLine {
+				t.Fatalf("line=%q want=%q", rendered.Line, tc.wantLine)
+			}
+			if rendered.Timeline == nil || rendered.Timeline.Kind != tc.wantKind {
+				t.Fatalf("typed timeline=%+v want kind=%v", rendered.Timeline, tc.wantKind)
+			}
+		})
+	}
+}
+
+func TestChatRuntimeEventBridgeEmitsTypedTimelineWithoutLegacyLineWriter(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	interaction := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	interaction.SetWriter(&output)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.writeLine = func(line string) {
+		t.Fatalf("typed timeline unexpectedly used legacy line writer: %q", line)
+	}
+
+	rendered := renderChatRuntimeTimelineEvent(runtimeevents.Event{Type: "planning.completed"})
+	bridge.emitTimelineEvent(rendered)
+	if got := output.String(); !strings.Contains(got, "[planning] completed") {
+		t.Fatalf("typed timeline was not rendered: %q", got)
+	}
+}
+
+func TestChatToolCompletedTimelineEventUsesTypedDocument(t *testing.T) {
+	line := "• Completed shell go test\n  ok"
+	rendered := chatToolCompletedTimelineEvent(line)
+	if rendered.Line != line || rendered.Timeline == nil || rendered.Document == nil {
+		t.Fatalf("regular completion is not typed: %+v", rendered)
+	}
+	if rendered.Timeline.Status != cell.StatusSuccess {
+		t.Fatalf("status=%v", rendered.Timeline.Status)
+	}
+
+	failed := chatToolCompletedTimelineEvent("• Failed shell\n  exit 1")
+	if failed.Timeline == nil || failed.Timeline.Status != cell.StatusError {
+		t.Fatalf("failed completion status=%+v", failed.Timeline)
+	}
+}
+
+func TestChatReasoningTimelineEventCarriesDocument(t *testing.T) {
+	rendered := chatReasoningTimelineEvent("trace-1", "1", &runtimetypes.ReasoningBlock{
+		Summary:    "inspect the renderer",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	if rendered.Document == nil {
+		t.Fatalf("reasoning event has no document: %+v", rendered)
+	}
+	if !strings.Contains(rendered.Line, "inspect the renderer") {
+		t.Fatalf("reasoning projection=%q", rendered.Line)
 	}
 }
 
@@ -293,6 +381,106 @@ func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 	}
 }
 
+func TestRenderSharedChatToolEvent_ShowsMultipleGenericArgs(t *testing.T) {
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_requested",
+		ToolName: "view",
+		Arguments: map[string]interface{}{
+			"file_path":            "main.go",
+			"offset":               40,
+			"limit":                20,
+			"include_line_numbers": false,
+		},
+	})
+
+	want := "• Running view file_path=main.go include_line_numbers=false limit=20 offset=40"
+	if got != want {
+		t.Fatalf("unexpected shared generic tool render:\nwant: %s\n got: %s", want, got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_PreservesLongFilenameOnOwnLine(t *testing.T) {
+	base := t.TempDir()
+	filename := strings.Repeat("very-long-file-name-", 4) + "component.generated.tsx"
+	absPath := filepath.Join(base, "apps", "portal-modern", "src", filename)
+	displayPath := filepath.Join("apps", "portal-modern", "src", filename)
+
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_requested",
+		ToolName: "view",
+		Arguments: map[string]interface{}{
+			"file_path": absPath,
+			"workdir":   base,
+			"limit":     20,
+		},
+	})
+
+	want := strings.Join([]string{
+		"• Running view limit=20",
+		"  file_path: " + displayPath,
+		"  workdir: " + base,
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected long filename render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+	if !strings.Contains(got, filename) || strings.Contains(got, "...") {
+		t.Fatalf("full filename was not preserved: %q", got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_RedactsSensitiveArgs(t *testing.T) {
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "fetch",
+		Arguments: map[string]interface{}{
+			"url":          "https://example.test",
+			"api_key":      "should-not-leak",
+			"timeout_ms":   3000,
+			"token_budget": 4096,
+		},
+		Output:  "200 OK",
+		Success: true,
+	})
+
+	want := strings.Join([]string{
+		"• Completed fetch url=https://example.test api_key=<redacted> timeout_ms=3000 token_budget=4096",
+		"  200 OK",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected redacted shared tool render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+	if strings.Contains(got, "should-not-leak") {
+		t.Fatalf("sensitive value leaked in shared tool render: %q", got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_ShowsSearchArgsAndBackend(t *testing.T) {
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "grep",
+		Arguments: map[string]interface{}{
+			"patterns": []interface{}{"Popover", "DialogTrigger"},
+			"paths":    []interface{}{"apps/portal-modern/src"},
+			"glob":     "*.tsx",
+			"context":  2,
+		},
+		Output:  "24 matches",
+		Success: true,
+		Metadata: map[string]interface{}{
+			"tool_metadata": map[string]interface{}{"engine": "rg"},
+			"duration_ms":   17,
+		},
+	})
+
+	want := strings.Join([]string{
+		`• Completed grep patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx context=2 via rg in 17ms`,
+		"  24 matches",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected shared search render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestRenderSharedChatToolEvent_RendersTodosListAndUpdateState(t *testing.T) {
 	output := strings.Join([]string{
 		"任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
@@ -487,7 +675,7 @@ func TestRenderSharedChatToolEvent_RendersNamespacedEditDiff(t *testing.T) {
 	}
 }
 
-func TestRenderSharedChatToolEvent_DoesNotTreatShellDiffAsEdit(t *testing.T) {
+func TestRenderSharedChatToolEvent_RendersShellDiffAsReadOnlyDiff(t *testing.T) {
 	diff := strings.Join([]string{
 		"--- a/app.go",
 		"+++ b/app.go",
@@ -506,10 +694,51 @@ func TestRenderSharedChatToolEvent_DoesNotTreatShellDiffAsEdit(t *testing.T) {
 		Success: true,
 	})
 	if strings.Contains(got, "• Edited app.go") {
-		t.Fatalf("expected shell diff to remain tool output, got:\n%s", got)
+		t.Fatalf("read-only shell diff must not be labeled as an edit, got:\n%s", got)
+	}
+	if !strings.Contains(got, "• Diff app.go (+1 -1)") {
+		t.Fatalf("expected structured read-only diff render, got:\n%s", got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_DoesNotRenderTruncatedShellDiff(t *testing.T) {
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "execute_shell_command",
+		Arguments: map[string]interface{}{
+			"command": "git diff",
+		},
+		Output:  "--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old",
+		Success: true,
+		Metadata: map[string]interface{}{
+			"output_capture_complete": false,
+			"capture_limit_reached":   true,
+		},
+	})
+	if strings.Contains(got, "• Diff app.go") {
+		t.Fatalf("truncated shell diff must stay on compact tool output: %s", got)
 	}
 	if !strings.Contains(got, "• Completed git diff") {
-		t.Fatalf("expected shell command render, got:\n%s", got)
+		t.Fatalf("expected compact completion fallback, got: %s", got)
+	}
+}
+
+func TestRenderChatRuntimeEvent_RendersGitDiffPayloadAsReadOnlyDiff(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "bash",
+		Payload: map[string]interface{}{
+			"command_text":              "git diff -- app.go",
+			"render_output_format":      "diff",
+			"render_output_untruncated": true,
+			"render_output":             "--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old\n+new",
+		},
+	})
+	if strings.Contains(got, "• Edited app.go") {
+		t.Fatalf("read-only runtime diff was mislabeled: %s", got)
+	}
+	if !strings.Contains(got, "• Diff app.go (+1 -1)") {
+		t.Fatalf("expected structured runtime diff, got: %s", got)
 	}
 }
 
@@ -701,6 +930,9 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != "• Running ls path=src" {
 		t.Fatalf("unexpected tool requested render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "glob", Payload: map[string]interface{}{"arg_preview": "pattern=**/*.tsx path=apps/portal-modern/src"}}); got != "• Running glob pattern=**/*.tsx path=apps/portal-modern/src" {
+		t.Fatalf("unexpected glob requested render: %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.progress",
 		ToolName: "download",
@@ -794,6 +1026,21 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  统计: 0 个文件, 2 个目录",
 	}, "\n") {
 		t.Fatalf("unexpected tool completed render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "grep",
+		Payload: map[string]interface{}{
+			"arg_preview":       `patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx`,
+			"execution_backend": "rg",
+			"duration_ms":       17,
+			"summary_lines":     []interface{}{"24 matches"},
+		},
+	}); got != strings.Join([]string{
+		`• Completed grep patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx via rg in 17ms`,
+		"  24 matches",
+	}, "\n") {
+		t.Fatalf("unexpected grep backend render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",
@@ -3916,9 +4163,7 @@ func TestShowChatRuntimePriorityPrompt_RendersPromptBlockAndReturnsReadablePromp
 }
 
 func TestRenderChatRuntimePriorityPromptTranscript_PersistsApprovalDetails(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -5222,10 +5467,8 @@ func TestChatRuntimeEventBridge_LogsActorRunToChatLogger(t *testing.T) {
 }
 
 func TestChatRuntimeEventBridge_BeginRunResetsSupplementSeparator(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
+	t.Setenv("NO_COLOR", "1")
 	defer func() {
-		color.NoColor = oldNoColor
 		_ = ui.SetThemePreset(ui.ThemePresetFocus)
 	}()
 

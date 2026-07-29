@@ -1,0 +1,118 @@
+[width=40 lines=7]
+00 plain="• Edited internal/legacy_renderer.go → …"
+   span="• Edited internal/legacy_renderer.go → " {role=Tool,fg=ansi:14,bold}
+   span="…" {role=Tool,fg=ansi:14,bold}
+01 plain="@@ -18,3 +18,3 @@ func renderMessage()"
+   span="@@ -18,3 +18,3 @@ func renderMessage()" {role=TextMuted,fg=ansi:8,dim}
+02 plain="  18 - fmt.Print(color.RedString(\"失败\")" line={bg=#321414}
+   span="  18 " {role=TextMuted,fg=ansi:8,bg=#321414,dim}
+   span="- " {role=Error,fg=ansi:9,bg=#321414,bold}
+   span="fmt" {role=Code.NameOther,fg=#a6e22e,bg=#321414,dim}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="Print" {role=Code.NameFunction,fg=#a6e22e,bg=#321414,dim}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="color" {role=Code.NameOther,fg=#a6e22e,bg=#321414,dim}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="RedString" {role=Code.NameFunction,fg=#a6e22e,bg=#321414,dim}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="\"失败\"" {role=Code.LiteralString,fg=#e6db74,bg=#321414,dim}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+03 plain="       )                                " line={bg=#321414}
+   span="       " {role=TextMuted,fg=ansi:8,bg=#321414,dim}
+   span=")" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="                                " {bg=#321414}
+04 plain="  18 + surface.Write(errorDocument(\"失败" line={bg=#143214}
+   span="  18 " {role=TextMuted,fg=ansi:8,bg=#143214,dim}
+   span="+ " {role=Success,fg=ansi:10,bg=#143214,bold}
+   span="surface" {role=Code.NameOther,fg=#a6e22e,bg=#143214}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="Write" {role=Code.NameFunction,fg=#a6e22e,bg=#143214}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="errorDocument" {role=Code.NameFunction,fg=#a6e22e,bg=#143214}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="\"失败" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+05 plain="       \"))                              " line={bg=#143214}
+   span="       " {role=TextMuted,fg=ansi:8,bg=#143214,dim}
+   span="\"" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+   span="))" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="                              " {bg=#143214}
+06 plain="  19   return nil"
+   span="  19 " {role=TextMuted,fg=ansi:8,dim}
+   span="  " {role=TextMuted,fg=ansi:8,dim}
+   span="return" {role=Code.Keyword,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="nil" {role=Code.KeywordConstant,fg=#66d9ef}
+[width=80 lines=5]
+00 plain="• Edited internal/legacy_renderer.go → internal/structured_renderer.go"
+   span="• Edited internal/legacy_renderer.go → internal/structured_renderer.go" {role=Tool,fg=ansi:14,bold}
+01 plain="@@ -18,3 +18,3 @@ func renderMessage()"
+   span="@@ -18,3 +18,3 @@ func renderMessage()" {role=TextMuted,fg=ansi:8,dim}
+02 plain="  18 - fmt.Print(color.RedString(\"失败\"))                                       " line={bg=#321414}
+   span="  18 " {role=TextMuted,fg=ansi:8,bg=#321414,dim}
+   span="- " {role=Error,fg=ansi:9,bg=#321414,bold}
+   span="fmt" {role=Code.NameOther,fg=#a6e22e,bg=#321414,dim}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="Print" {role=Code.NameFunction,fg=#a6e22e,bg=#321414,dim}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="color" {role=Code.NameOther,fg=#a6e22e,bg=#321414,dim}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="RedString" {role=Code.NameFunction,fg=#a6e22e,bg=#321414,dim}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="\"失败\"" {role=Code.LiteralString,fg=#e6db74,bg=#321414,dim}
+   span="))" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="                                       " {bg=#321414}
+03 plain="  18 + surface.Write(errorDocument(\"失败\"))                                     " line={bg=#143214}
+   span="  18 " {role=TextMuted,fg=ansi:8,bg=#143214,dim}
+   span="+ " {role=Success,fg=ansi:10,bg=#143214,bold}
+   span="surface" {role=Code.NameOther,fg=#a6e22e,bg=#143214}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="Write" {role=Code.NameFunction,fg=#a6e22e,bg=#143214}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="errorDocument" {role=Code.NameFunction,fg=#a6e22e,bg=#143214}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="\"失败\"" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+   span="))" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="                                     " {bg=#143214}
+04 plain="  19   return nil"
+   span="  19 " {role=TextMuted,fg=ansi:8,dim}
+   span="  " {role=TextMuted,fg=ansi:8,dim}
+   span="return" {role=Code.Keyword,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="nil" {role=Code.KeywordConstant,fg=#66d9ef}
+[width=120 lines=5]
+00 plain="• Edited internal/legacy_renderer.go → internal/structured_renderer.go"
+   span="• Edited internal/legacy_renderer.go → internal/structured_renderer.go" {role=Tool,fg=ansi:14,bold}
+01 plain="@@ -18,3 +18,3 @@ func renderMessage()"
+   span="@@ -18,3 +18,3 @@ func renderMessage()" {role=TextMuted,fg=ansi:8,dim}
+02 plain="  18 - fmt.Print(color.RedString(\"失败\"))                                                                               " line={bg=#321414}
+   span="  18 " {role=TextMuted,fg=ansi:8,bg=#321414,dim}
+   span="- " {role=Error,fg=ansi:9,bg=#321414,bold}
+   span="fmt" {role=Code.NameOther,fg=#a6e22e,bg=#321414,dim}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="Print" {role=Code.NameFunction,fg=#a6e22e,bg=#321414,dim}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="color" {role=Code.NameOther,fg=#a6e22e,bg=#321414,dim}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="RedString" {role=Code.NameFunction,fg=#a6e22e,bg=#321414,dim}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="\"失败\"" {role=Code.LiteralString,fg=#e6db74,bg=#321414,dim}
+   span="))" {role=Code.Punctuation,fg=#f8f8f2,bg=#321414,dim}
+   span="                                                                               " {bg=#321414}
+03 plain="  18 + surface.Write(errorDocument(\"失败\"))                                                                             " line={bg=#143214}
+   span="  18 " {role=TextMuted,fg=ansi:8,bg=#143214,dim}
+   span="+ " {role=Success,fg=ansi:10,bg=#143214,bold}
+   span="surface" {role=Code.NameOther,fg=#a6e22e,bg=#143214}
+   span="." {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="Write" {role=Code.NameFunction,fg=#a6e22e,bg=#143214}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="errorDocument" {role=Code.NameFunction,fg=#a6e22e,bg=#143214}
+   span="(" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="\"失败\"" {role=Code.LiteralString,fg=#e6db74,bg=#143214}
+   span="))" {role=Code.Punctuation,fg=#f8f8f2,bg=#143214}
+   span="                                                                             " {bg=#143214}
+04 plain="  19   return nil"
+   span="  19 " {role=TextMuted,fg=ansi:8,dim}
+   span="  " {role=TextMuted,fg=ansi:8,dim}
+   span="return" {role=Code.Keyword,fg=#66d9ef}
+   span=" " {role=Code.TextWhitespace,fg=#f8f8f2}
+   span="nil" {role=Code.KeywordConstant,fg=#66d9ef}

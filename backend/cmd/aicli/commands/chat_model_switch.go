@@ -232,13 +232,12 @@ func promptRuntimeModelSelectionLegacy(session *ChatSession) (string, bool, erro
 	}
 
 	ui.PrintSection("选择模型")
-	theme := ui.GetTheme(ui.ThemeAuto)
 	if currentModel != "" {
-		fmt.Printf("  当前模型: %s\n", theme.Dimmed(currentModel))
+		writeChatMutedSuffix(os.Stdout, "  当前模型: ", currentModel)
 	} else {
 		fmt.Println("  当前模型: (无)")
 	}
-	printRuntimeModelPickerLegacyPage(state, currentMatch, theme)
+	printRuntimeModelPickerLegacyPage(state, currentMatch)
 
 	prompt := runtimeModelPickerLegacyPrompt()
 	ui.PrintEmptyLine()
@@ -267,7 +266,7 @@ func promptRuntimeModelSelectionLegacy(session *ChatSession) (string, bool, erro
 		}
 		ui.PrintWarning("%s", result.Message)
 		if result.Redraw {
-			printRuntimeModelPickerLegacyPage(state, currentMatch, theme)
+			printRuntimeModelPickerLegacyPage(state, currentMatch)
 		}
 	}
 }
@@ -457,7 +456,7 @@ func renderRuntimeModelPickerPopupLines(state runtimeModelPickerState, currentMo
 	)
 }
 
-func printRuntimeModelPickerLegacyPage(state runtimeModelPickerState, currentMatch string, theme *ui.Theme) {
+func printRuntimeModelPickerLegacyPage(state runtimeModelPickerState, currentMatch string) {
 	pageOptions, _, _, total := state.pageWindow()
 	fmt.Printf("\n  %s\n", runtimeModelPickerTitle(state))
 	if total == 0 {
@@ -470,7 +469,7 @@ func printRuntimeModelPickerLegacyPage(state runtimeModelPickerState, currentMat
 		for i, option := range pageOptions {
 			label := padRuntimeSelectionOption(option, maxLen)
 			if strings.EqualFold(option, currentMatch) {
-				fmt.Printf("  [%d] %s  %s\n", i+1, label, theme.Dimmed("(当前)"))
+				writeChatMutedSuffix(os.Stdout, fmt.Sprintf("  [%d] %s  ", i+1, label), "(当前)")
 				continue
 			}
 			fmt.Printf("  [%d] %s\n", i+1, label)
@@ -551,14 +550,13 @@ func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, op
 	}
 
 	ui.PrintSection("选择 reasoning_effort 值")
-	theme := ui.GetTheme(ui.ThemeAuto)
 	switch {
 	case currentEffort == "":
 		fmt.Println("  当前 reasoning_effort: (无)")
 	case currentValid:
-		fmt.Printf("  当前 reasoning_effort: %s %s\n", theme.Dimmed(currentMatch), theme.Dimmed("(当前)"))
+		writeChatMutedSuffix(os.Stdout, "  当前 reasoning_effort: ", currentMatch, " (当前)")
 	default:
-		fmt.Printf("  当前 reasoning_effort: %s %s\n", theme.Dimmed(currentEffort), theme.Dimmed("(当前模型不支持)"))
+		writeChatMutedSuffix(os.Stdout, "  当前 reasoning_effort: ", currentEffort, " (当前模型不支持)")
 	}
 
 	maxLen := 0
@@ -568,11 +566,12 @@ func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, op
 		}
 	}
 	for i, option := range normalizedOptions {
+		primary := fmt.Sprintf("  [%d] %-*s  ", i+1, maxLen, option)
 		switch {
 		case option == currentMatch:
-			fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLen, option, theme.Dimmed("(当前)"))
+			writeChatMutedSuffix(os.Stdout, primary, "(当前)")
 		case defaultOption != "" && option == defaultOption:
-			fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLen, option, theme.Dimmed("(默认)"))
+			writeChatMutedSuffix(os.Stdout, primary, "(默认)")
 		default:
 			fmt.Printf("  [%d] %-*s\n", i+1, maxLen, option)
 		}

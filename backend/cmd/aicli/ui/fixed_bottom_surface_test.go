@@ -2,95 +2,101 @@ package ui
 
 import (
 	"bytes"
+	"fmt"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/fatih/color"
 )
 
-func TestTruncateFixedStatusLineFitsWidth(t *testing.T) {
-	if got := truncateFixedStatusLine("Ready | model mimo", 80); got != "Ready | model mimo" {
-		t.Fatalf("expected status line to remain unchanged, got %q", got)
+func fixedStatusTestContext(theme *Theme) style.ThemeContext {
+	return ThemeContextForTheme(theme, style.ColorProfile{ColorProfile: render.ColorProfile{
+		Enabled: true,
+		Depth:   render.ColorANSI16,
+	}})
+}
+
+func assertANSI16Status(t *testing.T, got, plain string) {
+	t.Helper()
+	if visible := render.ANSIToPlain(got); visible != plain {
+		t.Fatalf("status changed plain text: got %q want %q", visible, plain)
+	}
+	if !strings.ContainsRune(got, '\x1b') {
+		t.Fatalf("status has no ANSI styling: %q", got)
+	}
+	if strings.Contains(got, "\x1b[38;2;") || strings.Contains(got, "\x1b[38;5;") {
+		t.Fatalf("ANSI-16 status contains higher-depth color: %q", got)
 	}
 }
 
-func TestTruncateFixedStatusLineAddsAsciiEllipsis(t *testing.T) {
-	got := truncateFixedStatusLine("Ready | model mimo | provider anthropic", 16)
-	if got != "Ready | model..." {
-		t.Fatalf("unexpected truncated status line: %q", got)
-	}
-	if DisplayWidth(got) > 16 {
-		t.Fatalf("expected truncated status line to fit width, got width=%d text=%q", DisplayWidth(got), got)
-	}
-}
-
-func TestFormatFixedStatusLineColorsStateOnly(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = false
-	defer func() { color.NoColor = oldNoColor }()
-
+func TestFormatFixedStatusModelColorsStateOnly(t *testing.T) {
 	theme := createTheme(ThemeDark)
-	got := formatFixedStatusLine("Ready | model mimo", theme)
-	want := theme.SuccessColor.Sprint("Ready") + theme.Dimmed(" | model mimo")
-	if got != want {
-		t.Fatalf("unexpected formatted status line:\nwant %q\n got %q", want, got)
-	}
-	if !strings.Contains(got, "\x1b[") {
-		t.Fatalf("expected ANSI color sequences, got %q", got)
-	}
+	got := formatFixedStatusModelWithContext(style.StatusLineModel{
+		State:     style.RunReady,
+		Separator: " | ",
+		Segments:  []style.StatusSegment{{Text: "model mimo"}},
+	}, 80, fixedStatusTestContext(theme))
+	assertANSI16Status(t, got, "Ready | model mimo")
 }
 
-func TestFormatFixedStatusLineColorsCodexSeparator(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = false
-	defer func() { color.NoColor = oldNoColor }()
-
+func TestFormatFixedStatusModelColorsCodexSeparator(t *testing.T) {
 	theme := createTheme(ThemeDark)
-	got := formatFixedStatusLine("思考 · gpt-5.4-code high · Context 14% used", theme)
-	want := theme.ReasoningColor.Sprint("思考") + theme.Dimmed(" · gpt-5.4-code high · Context 14% used")
-	if got != want {
-		t.Fatalf("unexpected formatted Codex status line:\nwant %q\n got %q", want, got)
-	}
+	plain := "思考 · gpt-5.4-code high · Context 14% used"
+	got := formatFixedStatusModelWithContext(style.StatusLineModel{
+		State:     style.RunThinking,
+		StateText: "思考",
+		Segments: []style.StatusSegment{
+			{Text: "gpt-5.4-code high", Role: style.RoleAccent},
+			{Text: "Context 14% used", Role: style.RoleProgress},
+		},
+	}, 80, fixedStatusTestContext(theme))
+	assertANSI16Status(t, got, plain)
 }
 
-func TestFormatFixedStatusLineColorsModelFirstLine(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = false
-	defer func() { color.NoColor = oldNoColor }()
-
+func TestFormatFixedStatusModelColorsModelFirstLine(t *testing.T) {
 	theme := createTheme(ThemeDark)
-	got := formatFixedStatusLine("gpt-5.6-sol xhigh · Context 90% used · Fast off", theme)
-	want := theme.InfoColor.Sprint("gpt-5.6-sol xhigh") + theme.Dimmed(" · Context 90% used · Fast off")
-	if got != want {
-		t.Fatalf("unexpected model-first status coloring:\nwant %q\n got %q", want, got)
-	}
+	plain := "gpt-5.6-sol xhigh · Context 90% used · Fast off"
+	got := formatFixedStatusModelWithContext(style.StatusLineModel{
+		HideState: true,
+		Segments: []style.StatusSegment{
+			{Text: "gpt-5.6-sol xhigh", Role: style.RoleAccent},
+			{Text: "Context 90% used", Role: style.RoleProgress},
+			{Text: "Fast off", Role: style.RoleTextMuted},
+		},
+	}, 80, fixedStatusTestContext(theme))
+	assertANSI16Status(t, got, plain)
 }
 
-func TestFormatFixedStatusStateUsesDifferentColors(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = false
-	defer func() { color.NoColor = oldNoColor }()
-
+func TestFormatFixedStatusModelPreservesSegmentRoles(t *testing.T) {
 	theme := createTheme(ThemeDark)
-	cases := map[string]string{
-		"Ready":     theme.SuccessColor.Sprint("Ready"),
-		"Streaming": theme.ToolColor.Sprint("Streaming"),
-		"Thinking":  theme.ReasoningColor.Sprint("Thinking"),
-		"Waiting":   theme.WarningColor.Sprint("Waiting"),
-		"Error":     theme.ErrorColor.Sprint("Error"),
+	model := style.StatusLineModel{
+		HideState: true,
+		Segments: []style.StatusSegment{
+			{Text: "gpt-5.6-sol", Role: style.RoleAccent},
+			{Text: "Context 14% used", Role: style.RoleProgress},
+		},
 	}
-	for state, want := range cases {
-		if got := formatFixedStatusState(state, theme); got != want {
-			t.Fatalf("unexpected color for %s:\nwant %q\n got %q", state, want, got)
+	got := formatFixedStatusModelWithContext(model, 80, fixedStatusTestContext(theme))
+	assertANSI16Status(t, got, "gpt-5.6-sol · Context 14% used")
+}
+
+func TestFormatFixedStatusModelStateUsesDifferentColors(t *testing.T) {
+	ctx := fixedStatusTestContext(createTheme(ThemeDark))
+	seen := map[string]string{}
+	for _, state := range []style.RunState{style.RunReady, style.RunStreaming, style.RunThinking, style.RunWaiting, style.RunError} {
+		got := formatFixedStatusModelWithContext(style.StatusLineModel{State: state}, 80, ctx)
+		assertANSI16Status(t, got, string(state))
+		if prior, ok := seen[got]; ok {
+			t.Fatalf("states %s and %s resolved to identical style %q", prior, state, got)
 		}
+		seen[got] = string(state)
 	}
 }
 
 func TestFixedBottomSurface_ShowPopupClampsToViewportHeight(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	lines := make([]string, 0, 40)
@@ -120,9 +126,7 @@ func TestFixedBottomSurface_ShowPopupClampsToViewportHeight(t *testing.T) {
 }
 
 func TestFixedBottomSurface_ShowPopupReservesInputRowBelowPopup(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 
@@ -154,9 +158,7 @@ func TestFixedBottomSurface_ShowPopupReservesInputRowBelowPopup(t *testing.T) {
 }
 
 func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -301,7 +303,7 @@ func TestFixedBottomSurface_BeginOutputDoesNotRepeatPopupScrollCompensation(t *t
 	}
 }
 
-func TestFixedBottomSurface_ActualOutputInvalidatesPopupScrollCompensation(t *testing.T) {
+func TestFixedBottomSurface_ActualOutputRecomputesPopupScrollCompensation(t *testing.T) {
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
 		surface.ShowPrompt("> ")
@@ -316,15 +318,18 @@ func TestFixedBottomSurface_ActualOutputInvalidatesPopupScrollCompensation(t *te
 		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
 	})
 
-	if !strings.Contains(output, "\x1b[22;1H\n\n") {
-		t.Fatalf("expected actual output to require fresh popup scroll compensation, got %q", output)
+	// The trailing output newline already owns one blank row, so a two-row
+	// popup needs one fresh scroll row rather than replaying the old two rows.
+	if !regexp.MustCompile(`\x1b\[[0-9]+;1H\n`).MatchString(output) {
+		t.Fatalf("expected actual output to require fresh one-row popup compensation, got %q", output)
+	}
+	if strings.Contains(output, "\x1b[22;1H\n\n") {
+		t.Fatalf("expected trailing output blank to absorb one popup row, got %q", output)
 	}
 }
 
 func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -362,9 +367,7 @@ func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
 }
 
 func TestFixedBottomSurface_TrackPromptInputStateRedrawsWhenRowsChange(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -388,9 +391,7 @@ func TestFixedBottomSurface_TrackPromptInputStateRedrawsWhenRowsChange(t *testin
 }
 
 func TestFixedBottomSurface_BoundsMultilinePromptAndFollowsCursor(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -465,9 +466,7 @@ func TestFixedBottomSurface_SetPromptStateUsesDynamicVisibleRowBudget(t *testing
 }
 
 func TestFixedBottomSurface_RendersCursorAdjacentRowsWithinSmallTerminal(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	surface.terminal.height = 10
@@ -492,9 +491,7 @@ func TestFixedBottomSurface_RendersCursorAdjacentRowsWithinSmallTerminal(t *test
 }
 
 func TestFixedBottomSurface_EditorStatusDoesNotReplaceRuntimeNotice(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -510,9 +507,7 @@ func TestFixedBottomSurface_EditorStatusDoesNotReplaceRuntimeNotice(t *testing.T
 }
 
 func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -558,9 +553,7 @@ func TestFixedBottomSurface_WritePromptEditorTextUsesAtomicCursorSequence(t *tes
 }
 
 func TestFixedBottomSurface_SetPromptNoticeLineRendersAbovePrompt(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -611,10 +604,153 @@ func TestFixedBottomSurface_SetPromptNoticeLineRendersAbovePrompt(t *testing.T) 
 	}
 }
 
+func TestFixedBottomSurface_SetActiveBandRendersWithoutScrollbackCommit(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.SetActiveBand([]string{"• assistant", "Hello stable paragraph."}) {
+			t.Fatal("expected SetActiveBand to succeed")
+		}
+	})
+	// status(1) + prompt(1) + active(2) = 4
+	if surface.bottomRowsLocked() != 4 {
+		t.Fatalf("bottomRows=%d want 4; band=%v", surface.bottomRowsLocked(), surface.ActiveBandLines())
+	}
+	if !strings.Contains(output, "Hello stable paragraph.") {
+		t.Fatalf("expected active band content in surface paint, got %q", output)
+	}
+	if got := surface.ActiveBandLines(); len(got) != 2 {
+		t.Fatalf("ActiveBandLines=%v", got)
+	}
+
+	// Cap to the adaptive row budget — keep newest tail.
+	budget := surface.ActiveBandRowBudget()
+	if budget < ActiveBandMinRows {
+		t.Fatalf("row budget %d below minimum", budget)
+	}
+	long := make([]string, 0, budget+3)
+	for i := 0; i < budget+3; i++ {
+		long = append(long, fmt.Sprintf("line-%d", i))
+	}
+	captureUIStdout(t, func() {
+		_ = surface.SetActiveBand(long)
+	})
+	got := surface.ActiveBandLines()
+	if len(got) != budget {
+		t.Fatalf("expected cap %d, got %d %v", budget, len(got), got)
+	}
+	if got[0] != "line-3" || got[len(got)-1] != fmt.Sprintf("line-%d", budget+2) {
+		t.Fatalf("expected newest tail, got %v", got)
+	}
+
+	captureUIStdout(t, func() {
+		if !surface.ClearActiveBand() {
+			t.Fatal("clear failed")
+		}
+	})
+	if surface.bottomRowsLocked() != 2 {
+		t.Fatalf("expected band released, bottomRows=%d", surface.bottomRowsLocked())
+	}
+	if surface.ActiveBandLines() != nil {
+		t.Fatalf("expected nil band after clear")
+	}
+}
+
+func TestFixedBottomSurface_SetActiveBandStyledPreservesRolesAndStripsControls(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("AICLI_COLOR_DEPTH", "truecolor")
+	t.Setenv("FORCE_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	surface.terminal.driver.caps = TerminalCapabilities{Interactive: true, ANSI: true}
+	if profile := surface.terminal.driver.ColorProfile(); !profile.Enabled || profile.Depth != render.ColorTrueColor {
+		t.Fatalf("expected forced truecolor test profile, got %+v", profile)
+	}
+	output := captureUIStdout(t, func() {
+		if !surface.SetActiveBandStyled([]render.Line{
+			{Spans: []render.Span{{Text: "\x1b[2Jassistant", Style: render.Style{Role: string(style.RoleAccent)}}}},
+			{Spans: []render.Span{{Text: "body\x1b]52;c;payload\x07", Style: render.Style{Role: string(style.RoleTextPrimary)}}}},
+			{Spans: []render.Span{{Text: "keyword", Style: render.Style{Role: "Code.Keyword", Foreground: render.RGB(255, 0, 0)}}}},
+		}) {
+			t.Fatal("expected styled active band update to succeed")
+		}
+	})
+
+	if strings.Contains(output, "\x1b[2J") || strings.Contains(output, "\x1b]52;") {
+		t.Fatalf("dangerous active-band controls leaked to terminal: %q", output)
+	}
+	if !regexp.MustCompile(`\x1b\[[0-9;]*m`).MatchString(output) || !strings.Contains(output, "assistant") {
+		t.Fatalf("expected semantic accent SGR styling, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[38;2;255;0;0mkeyword") {
+		t.Fatalf("expected explicit Chroma-style token color, got %q", output)
+	}
+	if got := surface.ActiveBandLines(); len(got) != 3 || got[0] != "assistant" || got[1] != "body" || got[2] != "keyword" {
+		t.Fatalf("unexpected sanitized plain projection: %#v", got)
+	}
+}
+
+func TestFixedBottomSurface_SetActiveBandStyledNoColorEmitsNoSGR(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	output := captureUIStdout(t, func() {
+		_ = surface.SetActiveBandStyled([]render.Line{{Spans: []render.Span{
+			{Text: "assistant", Style: render.Style{Role: string(style.RoleAccent), Bold: true}},
+		}}})
+	})
+	if regexp.MustCompile(`\x1b\[[0-9;]*m`).MatchString(output) {
+		t.Fatalf("NO_COLOR styled active band emitted SGR: %q", output)
+	}
+	if !strings.Contains(output, "assistant") {
+		t.Fatalf("expected visible active content without color, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_RefreshActiveBandRepaintsUnchangedStyledFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		_ = surface.SetActiveBandStyled([]render.Line{{Spans: []render.Span{
+			{Text: "assistant", Style: render.Style{Role: string(style.RoleAccent)}},
+		}}})
+	})
+	output := captureUIStdout(t, func() {
+		if !surface.RefreshActiveBand() {
+			t.Fatal("expected active band refresh to succeed")
+		}
+	})
+	if !strings.Contains(output, "assistant") {
+		t.Fatalf("expected unchanged styled frame to repaint, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ActiveBandWorksWithoutPrompt(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		_ = surface.SetActiveBand([]string{"streaming…", "partial body"})
+	})
+	// status + 2 active rows
+	if surface.bottomRowsLocked() != 3 {
+		t.Fatalf("bottomRows=%d want 3", surface.bottomRowsLocked())
+	}
+	if got := surface.outputBottomRowLocked(); got != 21 {
+		t.Fatalf("output bottom row=%d want 21", got)
+	}
+}
+
 func TestFixedBottomSurface_ShowPopupDoesNotUseCursorSaveRestore(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 
@@ -636,9 +772,7 @@ func TestFixedBottomSurface_ShowPopupDoesNotUseCursorSaveRestore(t *testing.T) {
 }
 
 func TestFixedBottomSurface_ShowPopupPreserveCursorRestoresPromptCursor(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 
@@ -665,9 +799,7 @@ func TestFixedBottomSurface_ShowPopupPreserveCursorRestoresPromptCursor(t *testi
 }
 
 func TestFixedBottomSurface_ClearPopupPreserveCursorRestoresPromptCursor(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -697,9 +829,7 @@ func TestFixedBottomSurface_ClearPopupPreserveCursorRestoresPromptCursor(t *test
 }
 
 func TestFixedBottomSurface_ClearPopupInputPreserveCursorRestoresPromptCursor(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -728,9 +858,7 @@ func TestFixedBottomSurface_ClearPopupInputPreserveCursorRestoresPromptCursor(t 
 }
 
 func TestFixedBottomSurface_ClearPopupForOwnerPreserveCursorKeepsOtherPopup(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -774,9 +902,7 @@ func TestFixedBottomSurface_ClearPopupForOwnerPreserveCursorKeepsOtherPopup(t *t
 }
 
 func TestFixedBottomSurface_OwnerPopupRestoresPreviousPanel(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -810,9 +936,7 @@ func TestFixedBottomSurface_OwnerPopupRestoresPreviousPanel(t *testing.T) {
 }
 
 func TestFixedBottomSurface_OwnedPopupInputRestoresBackgroundPanel(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -842,9 +966,7 @@ func TestFixedBottomSurface_OwnedPopupInputRestoresBackgroundPanel(t *testing.T)
 }
 
 func TestFixedBottomSurface_DelayedOwnedModalCleanupKeepsNewPopup(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -872,9 +994,7 @@ func TestFixedBottomSurface_DelayedOwnedModalCleanupKeepsNewPopup(t *testing.T) 
 }
 
 func TestFixedBottomSurface_PopupHandleCleanupKeepsNewSameOwnerInstance(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	var first, second PopupHandle
@@ -973,9 +1093,7 @@ func TestFixedBottomSurface_PopupHandleViewportSurvivesUpdateAndStackRestore(t *
 }
 
 func TestFixedBottomSurface_LowerPriorityOwnerUpdateDoesNotStealActivePopup(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -1007,13 +1125,15 @@ func TestFixedBottomSurface_LowerPriorityOwnerUpdateDoesNotStealActivePopup(t *t
 	}
 }
 
-func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+func TestFixedBottomSurface_ClearPopupKeepsStatusModel(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
-	surface.statusLine = "Ready | model gpt-4.1"
+	surface.statusModel = &style.StatusLineModel{
+		State:     style.RunReady,
+		Separator: " | ",
+		Segments:  []style.StatusSegment{{Text: "model gpt-4.1"}},
+	}
 
 	output := captureUIStdout(t, func() {
 		surface.ShowPopup([]string{
@@ -1026,8 +1146,8 @@ func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
 		surface.ClearPopup()
 	})
 
-	if surface.statusLine != "Ready | model gpt-4.1" {
-		t.Fatalf("expected status line to remain unchanged, got %q", surface.statusLine)
+	if got := style.StatusLineDocument(*surface.statusModel, 0).PlainText(); got != "Ready | model gpt-4.1" {
+		t.Fatalf("expected status model to remain unchanged, got %q", got)
 	}
 	if surface.popupRenderedRows != 0 {
 		t.Fatalf("expected popup rows to be cleared, got %d", surface.popupRenderedRows)
@@ -1043,15 +1163,17 @@ func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
 	}
 }
 
-func TestFixedBottomSurface_SetStatusLinePreservesCursor(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+func TestFixedBottomSurface_SetStatusModelPreservesCursor(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 
 	output := captureUIStdout(t, func() {
-		surface.SetStatusLine("Ready | Agent Panel")
+		surface.SetStatusModel(style.StatusLineModel{
+			State:     style.RunReady,
+			Separator: " | ",
+			Segments:  []style.StatusSegment{{Text: "Agent Panel"}},
+		})
 	})
 
 	if !strings.Contains(output, cursorSaveSequence) {
@@ -1062,10 +1184,37 @@ func TestFixedBottomSurface_SetStatusLinePreservesCursor(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_SetStatusModelPreservesCursorAndSanitizesText(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	output := captureUIStdout(t, func() {
+		surface.SetStatusModel(style.StatusLineModel{
+			State:     style.RunThinking,
+			StateText: "思考\x1b[2J",
+			Segments: []style.StatusSegment{
+				{Text: "gpt-5.6-sol\nspoof", Role: style.RoleAccent},
+			},
+		})
+	})
+
+	if surface.statusModel == nil {
+		t.Fatal("expected typed status model to be stored")
+	}
+	plain := style.StatusLineDocument(*surface.statusModel, 0).PlainText()
+	if strings.Contains(plain, "\x1b") || strings.Contains(plain, "\n") {
+		t.Fatalf("expected status model text to be single-line and sanitized, got %q", plain)
+	}
+	if !strings.Contains(output, "思考 · gpt-5.6-sol spoof") {
+		t.Fatalf("expected sanitized typed status content, got %q", output)
+	}
+	if !strings.Contains(output, cursorSaveSequence) || !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected typed status update to preserve cursor, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_ShowPopupInputFocusesPromptRow(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 
@@ -1094,9 +1243,7 @@ func TestFixedBottomSurface_ShowPopupInputFocusesPromptRow(t *testing.T) {
 }
 
 func TestFixedBottomSurface_ShowPopupInputPreserveCursorKeepsPromptRow(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -1132,12 +1279,14 @@ func TestFixedBottomSurface_ShowPopupInputPreserveCursorKeepsPromptRow(t *testin
 }
 
 func TestFixedBottomSurface_SetComposerPreviewRendersStandaloneComposerRow(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
-	surface.statusLine = "Ready | composer"
+	surface.statusModel = &style.StatusLineModel{
+		State:     style.RunReady,
+		Separator: " | ",
+		Segments:  []style.StatusSegment{{Text: "composer"}},
+	}
 
 	output := captureUIStdout(t, func() {
 		surface.SetComposerPreview("draft: /model")
@@ -1168,9 +1317,7 @@ func TestFixedBottomSurface_SetComposerPreviewRendersStandaloneComposerRow(t *te
 }
 
 func TestFixedBottomSurface_SetComposerPreviewSuppressesPromptState(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -1204,9 +1351,7 @@ func TestFixedBottomSurface_SetComposerPreviewSuppressesPromptState(t *testing.T
 }
 
 func TestFixedBottomSurface_ClearComposerPreviewLeavesPopupStateIntact(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 	captureUIStdout(t, func() {
@@ -1236,9 +1381,7 @@ func TestFixedBottomSurface_ClearComposerPreviewLeavesPopupStateIntact(t *testin
 }
 
 func TestFixedBottomSurface_ShowPendingPastePreviewRendersPreview(t *testing.T) {
-	oldNoColor := color.NoColor
-	color.NoColor = true
-	defer func() { color.NoColor = oldNoColor }()
+	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
 
@@ -1602,13 +1745,349 @@ func TestBottomPaneSemanticViewportKeepsPriorityPromptContextInSixRows(t *testin
 }
 
 func newTestFixedBottomSurface() *FixedBottomSurface {
+	return newTestFixedBottomSurfaceWithSize(80, 24)
+}
+
+// newTestFixedBottomSurfaceWithSize pins a synthetic geometry so layout tests
+// can cover terminal heights the test host cannot report.
+func newTestFixedBottomSurfaceWithSize(width, height int) *FixedBottomSurface {
 	term := &Terminal{
-		width:  80,
-		height: 24,
 		theme:  GetTheme(ThemeAuto),
 		driver: &TerminalDriver{},
 	}
+	term.SetSizeForTest(width, height)
 	surface := NewFixedBottomSurface(term)
 	surface.enabled = true
 	return surface
+}
+
+func TestActiveBandRowsAdaptsToTerminalHeight(t *testing.T) {
+	cases := []struct {
+		height int
+		want   int
+	}{
+		{height: 0, want: ActiveBandMinRows},
+		{height: 10, want: ActiveBandMinRows},
+		{height: 20, want: ActiveBandMinRows},
+		{height: 24, want: 8},
+		{height: 30, want: 10},
+		{height: 40, want: 13},
+		{height: 60, want: ActiveBandMaxRows},
+		{height: 200, want: ActiveBandMaxRows},
+	}
+	for _, tc := range cases {
+		if got := ActiveBandRows(tc.height); got != tc.want {
+			t.Fatalf("ActiveBandRows(%d)=%d want %d", tc.height, got, tc.want)
+		}
+	}
+}
+
+func TestActiveBandRowsAlwaysLeavesRoomForOutputAndPrompt(t *testing.T) {
+	for height := 1; height <= 120; height++ {
+		rows := ActiveBandRows(height)
+		if rows < ActiveBandMinRows || rows > ActiveBandMaxRows {
+			t.Fatalf("height=%d rows=%d out of [%d,%d]", height, rows, ActiveBandMinRows, ActiveBandMaxRows)
+		}
+		if height > ActiveBandMinRows+activeBandReservedRows && height-rows < activeBandReservedRows {
+			t.Fatalf("height=%d rows=%d leaves only %d rows for output/prompt", height, rows, height-rows)
+		}
+	}
+}
+
+func TestActiveBandRowBudgetFollowsSurfaceTerminal(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	if got, want := surface.ActiveBandRowBudget(), ActiveBandRows(24); got != want {
+		t.Fatalf("budget=%d want %d", got, want)
+	}
+	width, rows := surface.ActiveBandViewportSize()
+	if width != 80 || rows != ActiveBandRows(24) {
+		t.Fatalf("viewport size = %d x %d", width, rows)
+	}
+	surface.terminal.height = 48
+	if got, want := surface.ActiveBandRowBudget(), ActiveBandRows(48); got != want {
+		t.Fatalf("resized budget=%d want %d", got, want)
+	}
+	var nilSurface *FixedBottomSurface
+	if got := nilSurface.ActiveBandRowBudget(); got != ActiveBandMinRows {
+		t.Fatalf("nil surface budget=%d", got)
+	}
+}
+
+func TestBottomPaneStateClampsBandToStateBudget(t *testing.T) {
+	lines := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		lines = append(lines, fmt.Sprintf("row-%d", i))
+	}
+	state := BottomPaneState{ActiveBandLines: lines, ActiveBandMaxRows: 7}
+	if got := state.activeBandVisibleRowCount(); got != 7 {
+		t.Fatalf("visible rows=%d want 7", got)
+	}
+	state.ActiveBandMaxRows = 0
+	if got := state.activeBandVisibleRowCount(); got != 10 {
+		t.Fatalf("fallback visible rows=%d want 10", got)
+	}
+	state.ComposerLine = "draft"
+	if got := state.activeBandVisibleRowCount(); got != 0 {
+		t.Fatalf("composer should hide band, got %d", got)
+	}
+}
+
+func TestSetActiveBandUsesTallerBudgetOnTallTerminal(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	surface.terminal.height = 48
+	lines := make([]string, 0, ActiveBandMaxRows+4)
+	for i := 0; i < ActiveBandMaxRows+4; i++ {
+		lines = append(lines, fmt.Sprintf("line-%d", i))
+	}
+	captureUIStdout(t, func() {
+		_ = surface.SetActiveBand(lines)
+	})
+	got := surface.ActiveBandLines()
+	if len(got) != ActiveBandMaxRows {
+		t.Fatalf("expected %d rows on a 48-row terminal, got %d %v", ActiveBandMaxRows, len(got), got)
+	}
+	if got[len(got)-1] != fmt.Sprintf("line-%d", ActiveBandMaxRows+3) {
+		t.Fatalf("expected newest tail, got %v", got)
+	}
+}
+
+func TestFixedBottomSurface_ReleasedActiveBandScrollsOutputBackDown(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed line\n"); !ok || err != nil {
+			t.Fatalf("expected output write to be handled, ok=%t err=%v", ok, err)
+		}
+		if !surface.SetActiveBand([]string{"• assistant", "streaming", "tail"}) {
+			t.Fatal("expected active band to render")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.ClearActiveBand() {
+			t.Fatal("expected active band to clear")
+		}
+	})
+
+	if !strings.Contains(output, "\x1b[1;22r") {
+		t.Fatalf("expected output region to grow back to row 22, got %q", output)
+	}
+	if want := terminalScrollDownSequence(3); !strings.Contains(output, want) {
+		t.Fatalf("expected freed band rows to scroll output down, got %q", output)
+	}
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("expected pending compensation to be flushed, got %d", surface.pendingScrollDownRows)
+	}
+}
+
+func TestFixedBottomSurface_ActiveBandGrowthAndReleaseScrollSymmetrically(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	grow := captureUIStdout(t, func() {
+		if !surface.SetActiveBand([]string{"• assistant", "streaming"}) {
+			t.Fatal("expected active band to render")
+		}
+	})
+	if !strings.Contains(grow, "\x1b[22;1H\n\n") {
+		t.Fatalf("expected reserved band rows to scroll output up, got %q", grow)
+	}
+
+	release := captureUIStdout(t, func() {
+		if !surface.ClearActiveBand() {
+			t.Fatal("expected active band to clear")
+		}
+	})
+	if want := terminalScrollDownSequence(2); !strings.Contains(release, want) {
+		t.Fatalf("expected released band rows to scroll output back down, got %q", release)
+	}
+}
+
+// TestFixedBottomSurface_TrailingOutputNewlineAbsorbedByBandGrowth pins the
+// mid-stream hole fix: WriteOutput("...\n") parks the cursor on a blank output
+// row. Growing the active band must consume that blank instead of scrolling it
+// into a permanent gap above the band (most visible near ActiveBandMaxRows).
+func TestFixedBottomSurface_TrailingOutputNewlineAbsorbedByBandGrowth(t *testing.T) {
+	height := 48
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+	budget := ActiveBandRows(height)
+	if budget != ActiveBandMaxRows {
+		t.Fatalf("precondition: height %d should budget %d, got %d", height, ActiveBandMaxRows, budget)
+	}
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "prior transcript line\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		if !surface.outputCursorOnBlankRow {
+			t.Fatal("expected trailing newline to mark output cursor on a blank row")
+		}
+	})
+
+	lines := make([]string, 0, budget)
+	for i := 0; i < budget; i++ {
+		lines = append(lines, fmt.Sprintf("band-%02d", i+1))
+	}
+	grow := captureUIStdout(t, func() {
+		if !surface.SetActiveBand(lines) {
+			t.Fatal("expected SetActiveBand")
+		}
+	})
+	if surface.outputCursorOnBlankRow {
+		t.Fatal("band growth should consume the trailing blank marker")
+	}
+
+	// Status-only layout → band(budget)+status grows by `budget` rows, but one
+	// is absorbed from the trailing blank. Scroll therefore pushes budget-1
+	// newlines at the row above the blank (height-2), not at the blank itself.
+	scrollRow := height - 2
+	wantScroll := "\x1b[" + fmt.Sprintf("%d", scrollRow) + ";1H" + strings.Repeat("\n", budget-1)
+	if !strings.Contains(grow, wantScroll) {
+		t.Fatalf("expected growth scroll of %d (budget-1) at row %d, got %q", budget-1, scrollRow, grow)
+	}
+	// Must not scroll the full budget from the pre-band output bottom.
+	fullScroll := "\x1b[" + fmt.Sprintf("%d", height-1) + ";1H" + strings.Repeat("\n", budget)
+	if strings.Contains(grow, fullScroll) {
+		t.Fatalf("growth still scrolled full budget %d; trailing blank was not absorbed: %q", budget, grow)
+	}
+}
+
+func TestFixedBottomSurface_ClosedPopupScrollCompensationFlushesOnNextOutput(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed line\n"); !ok || err != nil {
+			t.Fatalf("expected output write to be handled, ok=%t err=%v", ok, err)
+		}
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
+	})
+
+	closed := captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("command_popup")
+	})
+	if strings.Contains(closed, terminalScrollDownSequence(2)) {
+		t.Fatalf("expected popup close to defer scroll compensation, got %q", closed)
+	}
+	if surface.pendingScrollDownRows < 1 {
+		t.Fatalf("expected pending scroll compensation after popup close, got %d", surface.pendingScrollDownRows)
+	}
+
+	next := captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "next line\n"); !ok || err != nil {
+			t.Fatalf("expected output write to be handled, ok=%t err=%v", ok, err)
+		}
+	})
+	if !strings.Contains(next, terminalScrollDownSequence(2)) {
+		t.Fatalf("expected deferred compensation to flush before the next output, got %q", next)
+	}
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("expected pending compensation to reset, got %d", surface.pendingScrollDownRows)
+	}
+}
+
+func TestFixedBottomSurface_TerminalSizeChangeDropsPendingScrollCompensation(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed line\n"); !ok || err != nil {
+			t.Fatalf("expected output write to be handled, ok=%t err=%v", ok, err)
+		}
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
+		surface.ClearPopupForOwnerPreserveCursor("command_popup")
+	})
+	if surface.pendingScrollDownRows < 1 {
+		t.Fatalf("expected pending compensation before resize, got %d", surface.pendingScrollDownRows)
+	}
+
+	// A layout applied for a different terminal size invalidates the deferred
+	// compensation: absolute rows no longer describe the current viewport.
+	surface.lastHeight = 40
+	next := captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "after resize\n"); !ok || err != nil {
+			t.Fatalf("expected output write to be handled, ok=%t err=%v", ok, err)
+		}
+	})
+	if strings.Contains(next, terminalScrollDownSequence(2)) {
+		t.Fatalf("expected resize to drop stale compensation, got %q", next)
+	}
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("expected pending compensation to reset on resize, got %d", surface.pendingScrollDownRows)
+	}
+}
+
+// TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap pins the band
+// layout invariant: the band must occupy exactly the rows it reserves in
+// bottomRowsLocked, directly above the notice/prompt/status stack. Anchoring it
+// to the output bottom while the prompt is hidden used to paint the band inside
+// the scroll region and leave its reserved rows blank above the status line.
+func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) {
+	heights := []int{24, 40, 60}
+	for _, height := range heights {
+		for _, withPrompt := range []bool{true, false} {
+			bandSizes := []int{1, 2, 3, 6, ActiveBandRows(height)}
+			for _, bandRows := range bandSizes {
+				name := fmt.Sprintf("height=%d/prompt=%t/rows=%d", height, withPrompt, bandRows)
+				t.Run(name, func(t *testing.T) {
+					surface := newTestFixedBottomSurfaceWithSize(80, height)
+					lines := make([]string, 0, bandRows)
+					for i := 0; i < bandRows; i++ {
+						lines = append(lines, fmt.Sprintf("band-%d", i))
+					}
+					captureUIStdout(t, func() {
+						if withPrompt {
+							if !surface.ShowPrompt("> ") {
+								t.Fatal("expected prompt to show")
+							}
+						}
+						if !surface.SetActiveBand(lines) {
+							t.Fatal("expected active band to render")
+						}
+					})
+
+					surface.mu.Lock()
+					defer surface.mu.Unlock()
+					state := surface.bottomPaneStateLocked()
+					activeRows := state.activeBandVisibleRowCount()
+					promptRows := state.promptVisibleRowCount()
+					noticeRows := state.promptNoticeVisibleRowCount()
+					outputBottom := surface.outputBottomRowLocked()
+					statusRow := surface.statusRowLocked()
+					if activeRows != bandRows {
+						t.Fatalf("activeRows=%d want %d", activeRows, bandRows)
+					}
+					if statusRow != height {
+						t.Fatalf("status row=%d want %d (pinned geometry lost)", statusRow, height)
+					}
+					if got, want := surface.promptRenderedStartRow, outputBottom+1; got != want {
+						t.Fatalf("band start row=%d want %d (output bottom %d)", got, want, outputBottom)
+					}
+					wantRows := activeRows + noticeRows + promptRows
+					if surface.promptRenderedRows != wantRows {
+						t.Fatalf("rendered rows=%d want %d", surface.promptRenderedRows, wantRows)
+					}
+					if got, want := surface.promptRenderedStartRow+surface.promptRenderedRows-1, statusRow-1; got != want {
+						t.Fatalf("bottom pane ends at row %d, leaving a blank gap before status row %d", got, want+1)
+					}
+				})
+			}
+		}
+	}
 }

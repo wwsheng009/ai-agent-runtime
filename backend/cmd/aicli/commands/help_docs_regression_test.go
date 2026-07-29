@@ -49,12 +49,23 @@ func TestDoctorCommandHelpMentionsProviderMatrixAndDocs(t *testing.T) {
 	text := cmd.Long + "\n" + cmd.Example
 	for _, want := range []string{
 		"doctor provider",
+		"doctor search",
 		"doctor subagent-route",
 		"aicli doctor provider",
 		"docs/aicli/faq.md",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("doctor help missing %q\n%s", want, text)
+		}
+	}
+	searchCmd, _, err := cmd.Find([]string{"search"})
+	if err != nil {
+		t.Fatalf("Find search: %v", err)
+	}
+	searchText := searchCmd.Long + "\n" + searchCmd.Example
+	for _, want := range []string{"aicli doctor search", "AICLI_RG_PATH", "builtin"} {
+		if !strings.Contains(searchText, want) {
+			t.Fatalf("doctor search help missing %q\n%s", want, searchText)
 		}
 	}
 

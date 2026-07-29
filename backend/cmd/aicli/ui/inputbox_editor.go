@@ -19,6 +19,7 @@ import (
 
 var ErrInteractiveInputInterrupted = errors.New("interactive input interrupted")
 var ErrInteractiveInputExitRequested = errors.New("interactive input exit requested")
+
 // ErrInteractiveInputBacktrackRequested signals bare Esc on an empty composer.
 // Chat may open the user-turn backtrack picker; other callers should treat it as a no-op cancel.
 var ErrInteractiveInputBacktrackRequested = errors.New("interactive input backtrack requested")

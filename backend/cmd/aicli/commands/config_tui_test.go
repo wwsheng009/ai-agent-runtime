@@ -178,7 +178,9 @@ func TestConfigTUI_EditProviderCommonFields(t *testing.T) {
 func TestConfigTUI_LoginProviderUsesProviderLoginTemplates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Fatalf("unexpected Authorization header: %q", got)

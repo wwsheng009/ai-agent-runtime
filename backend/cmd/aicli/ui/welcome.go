@@ -1,8 +1,11 @@
 package ui
 
 import (
-	"fmt"
+	"os"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 const welcomeLabelWidth = 12
@@ -36,113 +39,93 @@ func PrintWelcome() {
 
 // PrintWelcomeWithConfig 使用自定义配置打印欢迎界面
 func PrintWelcomeWithConfig(config *WelcomeConfig) {
+	if config == nil {
+		config = NewWelcomeConfig()
+	}
 	theme := GetTheme(ThemeAuto)
+	doc := WelcomeDocument(config, GetTerminalWidth())
+	_, _ = WriteTerminalText(os.Stdout, "\n"+renderDocumentWithProfile(doc, theme)+"\n")
+}
 
-	fmt.Println()
-
+// WelcomeDocument 构建欢迎页的结构化模型。
+func WelcomeDocument(config *WelcomeConfig, width int) render.Document {
+	if config == nil {
+		config = NewWelcomeConfig()
+	}
+	theme := GetTheme(ThemeAuto)
+	appName := strings.Join(strings.Fields(SanitizeTerminalText(config.AppName)), " ")
+	version := strings.Join(strings.Fields(SanitizeTerminalText(config.Version)), " ")
+	description := strings.Join(strings.Fields(SanitizeTerminalText(config.Description)), " ")
+	var lines []render.Line
+	add := func(spans ...render.Span) { lines = append(lines, render.Line{Spans: spans}) }
+	blank := func() { lines = append(lines, render.Line{}) }
+	hints := func() {
+		add(semanticSpan(theme.InfoIcon+" 快捷操作:", style.RoleInfo, true))
+		for _, hint := range []string{
+			"输入 /help 查看命令帮助",
+			"输入 ! 前缀执行 Shell 命令",
+			"输入 /exit 或 Ctrl+C 退出",
+		} {
+			add(semanticSpan("  "+theme.InfoIcon+" ", style.RoleInfo, false), semanticSpan(hint, style.RoleTextSecondary, false))
+		}
+	}
 	switch config.Style {
 	case "simple":
-		printSimpleWelcome(config, theme)
+		add(semanticSpan(appName, style.RoleSuccess, true))
 	case "ascii":
-		printASCIIWelcome(config, theme)
+		asciiArt := "   _____ __  __  _____ \n  / ____\\ \\/ / |  __ \\\n | |     \\  /  | |__) |\n | |     /  \\  |  ___/ \n | |____/ /\\ \\ | |     \n  \\_____/_/  \\_\\_|     "
+		for _, artLine := range strings.Split(asciiArt, "\n") {
+			add(semanticSpan(artLine, style.RoleSuccess, false))
+		}
+		add(semanticSpan(theme.SuccessIcon+" ", style.RoleSuccess, true), semanticSpan(appName, style.RoleSuccess, true))
+		blank()
+		if config.ShowVersion {
+			add(semanticSpan(version, style.RoleTextMuted, false))
+		}
+		if description != "" {
+			add(semanticSpan(description, style.RoleTextMuted, false))
+		}
+		blank()
+		if config.ShowHint {
+			hints()
+		}
 	default:
-		printDetailedWelcome(config, theme)
+		nameWidth := render.Width(theme.SuccessIcon + " " + appName)
+		if width > 0 && nameWidth > width {
+			nameWidth = width
+		}
+		separator := strings.Repeat("=", nameWidth)
+		add(semanticSpan(separator, style.RoleBorder, false))
+		add(semanticSpan(theme.SuccessIcon+" ", style.RoleSuccess, true), semanticSpan(appName, style.RoleSuccess, true))
+		add(semanticSpan(separator, style.RoleBorder, false))
+		if config.ShowVersion {
+			add(welcomeKeyValueSpans("Version:", version, style.RoleTextMuted)...)
+		}
+		if description != "" {
+			add(welcomeKeyValueSpans("Description:", description, style.RoleTextSecondary)...)
+		}
+		blank()
+		if config.ShowHint {
+			hints()
+		}
 	}
-
-	fmt.Println()
+	return render.Document{Blocks: []render.Block{{Kind: render.BlockCustom, Lines: lines}}}
 }
 
-// printSimpleWelcome 打印简单版欢迎界面
-func printSimpleWelcome(config *WelcomeConfig, theme *Theme) {
-	fmt.Printf("%s\n", theme.SuccessColor.Sprint(config.AppName))
-}
-
-// printDetailedWelcome 打印详细版欢迎界面
-func printDetailedWelcome(config *WelcomeConfig, theme *Theme) {
-	// 应用名称和图标
-	nameWithIcon := fmt.Sprintf("%s %s", theme.SuccessIcon, theme.SuccessColor.Sprint(config.AppName))
-
-	// 分隔线
-	separator := strings.Repeat("=", len(nameWithIcon))
-
-	fmt.Printf("%s\n", separator)
-	fmt.Printf("%s\n", nameWithIcon)
-	fmt.Printf("%s\n", separator)
-
-	// 版本
-	if config.ShowVersion {
-		printWelcomeKeyValue(theme, "Version:", theme.Dimmed(config.Version))
+func welcomeKeyValueSpans(label, value string, role style.Role) []render.Span {
+	label = SanitizeTerminalText(label)
+	pad := welcomeLabelWidth - render.Width(label)
+	if pad < 0 {
+		pad = 0
 	}
-
-	// 描述
-	if config.Description != "" {
-		printWelcomeKeyValue(theme, "Description:", theme.ColorizeSecondary(config.Description))
+	return []render.Span{
+		semanticSpan(label+strings.Repeat(" ", pad), style.RoleMetaLabel, true),
+		semanticSpan(" "+value, role, false),
 	}
-
-	fmt.Println()
-
-	// 提示
-	if config.ShowHint {
-		fmt.Println(theme.InfoColor.Sprint("快捷操作:"))
-		printHint("输入 /help 查看命令帮助", theme)
-		printHint("输入 ! 前缀执行 Shell 命令", theme)
-		printHint("输入 /exit 或 Ctrl+C 退出", theme)
-	}
-
-	fmt.Println()
-}
-
-// printASCIIWelcome 打印 ASCII 艺术字版欢迎界面
-func printASCIIWelcome(config *WelcomeConfig, theme *Theme) {
-	asciiArt := `
-   _____ __  __  _____ 
-  / ____\ \/ / |  __ \
- | |     \  /  | |__) |
- | |     /  \  |  ___/ 
- | |____/ /\ \ | |     
-  \_____/_/  \_\_|     
-`
-
-	fmt.Print(theme.SuccessColor.Sprint(asciiArt))
-	fmt.Printf("%s %s\n\n", theme.SuccessIcon, theme.SuccessColor.Sprint(config.AppName))
-
-	if config.ShowVersion {
-		fmt.Printf("%s\n", theme.Dimmed(config.Version))
-	}
-
-	if config.Description != "" {
-		fmt.Printf("%s\n", theme.Dimmed(config.Description))
-	}
-
-	fmt.Println()
-
-	if config.ShowHint {
-		fmt.Println(theme.InfoColor.Sprintf("%s 快捷操作:", theme.InfoIcon))
-		printHint("输入 /help 查看命令帮助", theme)
-		printHint("输入 ! 前缀执行 Shell 命令", theme)
-		printHint("输入 /exit 或 Ctrl+C 退出", theme)
-	}
-
-	fmt.Println()
-}
-
-// printHint打印提示项
-func printHint(text string, theme *Theme) {
-	prefix := fmt.Sprintf("  %s ", theme.InfoIcon)
-	fmt.Printf("%s%s\n", prefix, theme.ColorizeSecondary(text))
-}
-
-func printWelcomeKeyValue(theme *Theme, label, value string) {
-	if theme == nil {
-		theme = GetTheme(ThemeAuto)
-	}
-	fmt.Printf("%-*s %s\n", welcomeLabelWidth, theme.ColorizeLabel(label), value)
 }
 
 // PrintHelp 打印帮助信息
 func PrintHelp() {
-	theme := GetTheme(ThemeAuto)
-
 	PrintSection("命令帮助")
 
 	helpItems := [][]string{
@@ -163,20 +146,22 @@ func PrintHelp() {
 
 	maxCmdLen := 0
 	for _, item := range helpItems {
-		if len(item[0]) > maxCmdLen {
-			maxCmdLen = len(item[0])
+		if width := render.Width(item[0]); width > maxCmdLen {
+			maxCmdLen = width
 		}
 	}
-
+	lines := make([]render.Line, 0, len(helpItems))
 	for _, item := range helpItems {
-		cmd := theme.CommandColor.Sprint(item[0])
-		desc := theme.Dimmed(item[1])
-		fmt.Printf("  %-*s  %s\n", maxCmdLen, cmd, desc)
+		pad := maxCmdLen - render.Width(item[0])
+		lines = append(lines, render.Line{Spans: []render.Span{
+			semanticSpan("  "+item[0]+strings.Repeat(" ", pad), style.RoleCommand, true),
+			semanticSpan("  "+item[1], style.RoleTextMuted, false),
+		}})
 	}
-
-	fmt.Println()
+	doc := render.Document{Blocks: []render.Block{{Kind: render.BlockList, Lines: lines}}}
+	_, _ = WriteTerminalLine(os.Stdout, renderDocumentWithProfile(doc, GetTheme(ThemeAuto)))
 	PrintInfo("提示: 消息中 / 前缀表示系统命令，! 前缀表示 Shell 命令")
-	fmt.Println()
+	_, _ = WriteTerminalLine(os.Stdout, "")
 }
 
 // PrintGoodbye 打印道别信息
@@ -185,6 +170,10 @@ func PrintGoodbye() {
 
 	PrintEmptyLine()
 	PrintSuccess("感谢使用 AI Gateway CLI！")
-	fmt.Println(theme.InfoIcon, "会话已保存，日志已记录")
+	doc := render.SingleLineDoc(
+		semanticSpan(theme.InfoIcon+" ", style.RoleInfo, false),
+		semanticSpan("会话已保存，日志已记录", style.RoleTextSecondary, false),
+	)
+	_, _ = WriteTerminalLine(os.Stdout, renderDocumentWithProfile(doc, theme))
 	PrintEmptyLine()
 }

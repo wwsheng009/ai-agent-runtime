@@ -1,0 +1,175 @@
+[width=40 lines=12]
+00 plain=""
+01 plain="════════════════════════════════════════"
+   span="════════════════════════════════════════" {role=Border,fg=ansi:8}
+02 plain="ℹ️ Provider:  ( codex_ee )"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Provider:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="( codex_ee )" {role=Success,fg=ansi:10,bold}
+03 plain="   Protocol:  codex"
+   span="   " {role=Info,fg=ansi:12}
+   span="Protocol:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="codex" {role=TextMuted,fg=ansi:8,dim}
+04 plain="   Endpoint:  https://ai.example.com/v1…"
+   span="   " {role=Info,fg=ansi:12}
+   span="Endpoint:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="https://ai.example.com/v1" {role=TextMuted,fg=ansi:8,dim}
+   span="…" {role=TextMuted,fg=ansi:8,dim}
+05 plain="   Auth Keys: 2"
+   span="   " {role=Info,fg=ansi:12}
+   span="Auth Keys:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span="2" {role=TextMuted,fg=ansi:8,dim}
+06 plain="   Timeout:   5m0s"
+   span="   " {role=Info,fg=ansi:12}
+   span="Timeout:" {role=MetaLabel,fg=ansi:8}
+   span="  "
+   span=" "
+   span="5m0s" {role=TextMuted,fg=ansi:8,dim}
+07 plain="ℹ️ Model:     gpt-5.6-codex"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Model:" {role=MetaLabel,fg=ansi:8}
+   span="    "
+   span=" "
+   span="gpt-5.6-codex" {role=Success,fg=ansi:10,bold}
+08 plain="ℹ️ Stream:    on"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Stream:" {role=MetaLabel,fg=ansi:8}
+   span="   "
+   span=" "
+   span="on" {role=Success,fg=ansi:10,bold}
+09 plain="ℹ️ Fast:      on"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Fast:" {role=MetaLabel,fg=ansi:8}
+   span="     "
+   span=" "
+   span="on" {role=Success,fg=ansi:10,bold}
+10 plain="ℹ️ Reasoning: enabled"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Reasoning:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span="enabled" {role=Warning,fg=ansi:11,bold}
+11 plain="════════════════════════════════════════"
+   span="════════════════════════════════════════" {role=Border,fg=ansi:8}
+[width=80 lines=12]
+00 plain=""
+01 plain="════════════════════════════════════════════════════════════════════════════════"
+   span="════════════════════════════════════════════════════════════════════════════════" {role=Border,fg=ansi:8}
+02 plain="ℹ️ Provider:  ( codex_ee )"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Provider:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="( codex_ee )" {role=Success,fg=ansi:10,bold}
+03 plain="   Protocol:  codex"
+   span="   " {role=Info,fg=ansi:12}
+   span="Protocol:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="codex" {role=TextMuted,fg=ansi:8,dim}
+04 plain="   Endpoint:  https://ai.example.com/v1/responses"
+   span="   " {role=Info,fg=ansi:12}
+   span="Endpoint:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="https://ai.example.com/v1/responses" {role=TextMuted,fg=ansi:8,dim}
+05 plain="   Auth Keys: 2"
+   span="   " {role=Info,fg=ansi:12}
+   span="Auth Keys:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span="2" {role=TextMuted,fg=ansi:8,dim}
+06 plain="   Timeout:   5m0s"
+   span="   " {role=Info,fg=ansi:12}
+   span="Timeout:" {role=MetaLabel,fg=ansi:8}
+   span="  "
+   span=" "
+   span="5m0s" {role=TextMuted,fg=ansi:8,dim}
+07 plain="ℹ️ Model:     gpt-5.6-codex"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Model:" {role=MetaLabel,fg=ansi:8}
+   span="    "
+   span=" "
+   span="gpt-5.6-codex" {role=Success,fg=ansi:10,bold}
+08 plain="ℹ️ Stream:    on"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Stream:" {role=MetaLabel,fg=ansi:8}
+   span="   "
+   span=" "
+   span="on" {role=Success,fg=ansi:10,bold}
+09 plain="ℹ️ Fast:      on"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Fast:" {role=MetaLabel,fg=ansi:8}
+   span="     "
+   span=" "
+   span="on" {role=Success,fg=ansi:10,bold}
+10 plain="ℹ️ Reasoning: enabled"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Reasoning:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span="enabled" {role=Warning,fg=ansi:11,bold}
+11 plain="════════════════════════════════════════════════════════════════════════════════"
+   span="════════════════════════════════════════════════════════════════════════════════" {role=Border,fg=ansi:8}
+[width=120 lines=12]
+00 plain=""
+01 plain="════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
+   span="════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════" {role=Border,fg=ansi:8}
+02 plain="ℹ️ Provider:  ( codex_ee )"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Provider:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="( codex_ee )" {role=Success,fg=ansi:10,bold}
+03 plain="   Protocol:  codex"
+   span="   " {role=Info,fg=ansi:12}
+   span="Protocol:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="codex" {role=TextMuted,fg=ansi:8,dim}
+04 plain="   Endpoint:  https://ai.example.com/v1/responses"
+   span="   " {role=Info,fg=ansi:12}
+   span="Endpoint:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span=" "
+   span="https://ai.example.com/v1/responses" {role=TextMuted,fg=ansi:8,dim}
+05 plain="   Auth Keys: 2"
+   span="   " {role=Info,fg=ansi:12}
+   span="Auth Keys:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span="2" {role=TextMuted,fg=ansi:8,dim}
+06 plain="   Timeout:   5m0s"
+   span="   " {role=Info,fg=ansi:12}
+   span="Timeout:" {role=MetaLabel,fg=ansi:8}
+   span="  "
+   span=" "
+   span="5m0s" {role=TextMuted,fg=ansi:8,dim}
+07 plain="ℹ️ Model:     gpt-5.6-codex"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Model:" {role=MetaLabel,fg=ansi:8}
+   span="    "
+   span=" "
+   span="gpt-5.6-codex" {role=Success,fg=ansi:10,bold}
+08 plain="ℹ️ Stream:    on"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Stream:" {role=MetaLabel,fg=ansi:8}
+   span="   "
+   span=" "
+   span="on" {role=Success,fg=ansi:10,bold}
+09 plain="ℹ️ Fast:      on"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Fast:" {role=MetaLabel,fg=ansi:8}
+   span="     "
+   span=" "
+   span="on" {role=Success,fg=ansi:10,bold}
+10 plain="ℹ️ Reasoning: enabled"
+   span="ℹ️ " {role=Info,fg=ansi:12}
+   span="Reasoning:" {role=MetaLabel,fg=ansi:8}
+   span=" "
+   span="enabled" {role=Warning,fg=ansi:11,bold}
+11 plain="════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
+   span="════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════" {role=Border,fg=ansi:8}

@@ -21,6 +21,7 @@ type chatBusyComposerCapture struct {
 	prompt      string
 	trackPrompt bool
 	cancelled   bool
+	initial     ui.LineEditorSnapshot
 }
 
 type chatModalComposerPrompt struct {
@@ -248,11 +249,18 @@ func resetChatComposerPrompt(session *ChatSession) {
 }
 
 func newChatBusyComposerCapture(session *ChatSession, prompt string, priorityPrompt bool) *chatBusyComposerCapture {
-	return &chatBusyComposerCapture{
+	capture := &chatBusyComposerCapture{
 		session:     session,
 		prompt:      prompt,
 		trackPrompt: !priorityPrompt,
 	}
+	// Busy captures are restarted whenever the turn switches prompts (approval,
+	// agent input). Seed the editor with the draft that is already on screen so
+	// a restart never wipes text the user is still typing.
+	if capture.trackPrompt && session != nil && session.Interaction != nil {
+		capture.initial = session.Interaction.PromptInputSnapshot()
+	}
+	return capture
 }
 
 func (c *chatBusyComposerCapture) ReadLine(ctx context.Context) (string, error) {
@@ -264,6 +272,8 @@ func (c *chatBusyComposerCapture) ReadLine(ctx context.Context) (string, error) 
 
 func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
 	return ui.LineEditorHooks{
+		InitialText:           c.initial.Text,
+		InitialCursor:         c.initial.Cursor,
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
@@ -282,6 +292,16 @@ func (c *chatBusyComposerCapture) ClearPrompt() {
 		return
 	}
 	c.session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
+}
+
+// PreserveDraft releases the painted prompt rows but keeps the in-progress
+// draft, so restarting the capture (or ending the turn) re-renders the same
+// text instead of dropping it.
+func (c *chatBusyComposerCapture) PreserveDraft() {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.ClearPrompt()
 }
 
 func (c *chatBusyComposerCapture) onChange(snapshot ui.LineEditorSnapshot) {

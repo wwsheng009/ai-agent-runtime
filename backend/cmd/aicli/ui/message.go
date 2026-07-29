@@ -2,10 +2,14 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 const (
@@ -71,98 +75,122 @@ func (m *Message) ShowIcon(show bool) *Message {
 	return m
 }
 
-// Format 格式化消息
-func (m *Message) Format() string {
-	var prefix string
-	var plainPrefix string
-	var coloredContent string
-	contentPadding := ""
-	safeContent := SanitizeTerminalText(m.content)
-
+// messageChrome returns plain prefix/padding and semantic roles for Document layout.
+// Layout must stay byte-compatible with historical Format() tests (icon + padding widths).
+func (m *Message) messageChrome() (plainPrefix, contentPadding, prefixRole, contentRole string, colorPrefix bool) {
+	theme := m.theme
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
 	switch m.mType {
 	case MessageUser:
+		plainPrefix = "> "
+		contentRole = string(style.RoleUser)
 		if m.showIcon {
-			plainPrefix = "> "
-			prefix = m.theme.UserColor.Sprint("> ")
-		} else {
-			plainPrefix = "> "
-			prefix = "> "
+			prefixRole = string(style.RoleUser)
+			colorPrefix = true
 		}
-		coloredContent = m.theme.ColorizeUser(safeContent)
-
 	case MessageAssistant:
-		plainPrefix = ""
-		prefix = ""
-		coloredContent = m.theme.ColorizeAssistant(safeContent)
-
+		contentRole = string(style.RoleAssistant)
 	case MessageSystem:
+		contentRole = string(style.RoleSystem)
 		if m.showIcon {
-			plainPrefix = m.theme.SystemIcon + " "
-			prefix = m.theme.FormatSystem("")
+			plainPrefix = theme.SystemIcon + " "
 			contentPadding = " "
+			prefixRole = string(style.RoleSystem)
+			colorPrefix = true
 		} else {
 			plainPrefix = "系统> "
-			prefix = "系统> "
 		}
-		coloredContent = m.theme.ColorizeSystem(safeContent)
-
 	case MessageTool:
+		// Tool body stays uncolored (parity with legacy Format).
 		if m.showIcon {
 			plainPrefix = fmt.Sprintf("%s工具> ", GetIcon(IconTool))
-			prefix = fmt.Sprintf("%s工具> ", GetIcon(IconTool))
 			contentPadding = " "
 		} else {
 			plainPrefix = "工具> "
-			prefix = "工具> "
 		}
-		coloredContent = safeContent
-
 	case MessageError:
+		contentRole = string(style.RoleError)
 		if m.showIcon {
-			plainPrefix = m.theme.ErrorIcon + " "
-			prefix = m.theme.FormatError("")
+			plainPrefix = theme.ErrorIcon + " "
 			contentPadding = " "
+			prefixRole = string(style.RoleError)
+			colorPrefix = true
 		} else {
 			plainPrefix = "错误> "
-			prefix = "错误> "
 		}
-		coloredContent = m.theme.ColorizeError(safeContent)
-
 	default:
 		plainPrefix = "> "
-		prefix = "> "
-		coloredContent = safeContent
+	}
+	return plainPrefix, contentPadding, prefixRole, contentRole, colorPrefix
+}
+
+// Document builds a role-tagged message model (sanitized text, no pre-colored ANSI).
+func (m *Message) Document() render.Document {
+	safeContent := SanitizeTerminalText(m.content)
+	plainPrefix, contentPadding, prefixRole, contentRole, colorPrefix := m.messageChrome()
+
+	contentLines := strings.Split(safeContent, "\n")
+	if len(contentLines) == 0 {
+		contentLines = []string{""}
 	}
 
-	result := coloredContent
-
-	// 添加时间戳
-	if m.showTimestamp {
-		timeStr := m.timestamp.Format("15:04:05")
-		result = fmt.Sprintf("[%s] %s", m.theme.Dimmed(timeStr), result)
+	indent := ""
+	if plainPrefix != "" || contentPadding != "" {
+		indent = strings.Repeat(" ", messageDisplayWidth(plainPrefix+contentPadding))
 	}
 
-	// 如果内容很长，添加前缀换行
-	if strings.Contains(safeContent, "\n") {
-		lines := strings.Split(result, "\n")
-		if len(lines) > 0 {
-			lines[0] = prefix + contentPadding + lines[0]
+	lines := make([]render.Line, 0, len(contentLines))
+	for i, contentLine := range contentLines {
+		var spans []render.Span
+		if i == 0 {
+			// Order matches legacy Format: prefix + padding + optional [time] + body.
+			if plainPrefix != "" {
+				sp := render.Span{Text: plainPrefix}
+				if colorPrefix && prefixRole != "" {
+					sp.Style = render.Style{Role: prefixRole}
+				}
+				spans = append(spans, sp)
+			}
+			if contentPadding != "" {
+				spans = append(spans, render.Span{Text: contentPadding})
+			}
+			if m.showTimestamp {
+				timeStr := m.timestamp.Format("15:04:05")
+				spans = append(spans,
+					render.Span{Text: "["},
+					render.Span{Text: timeStr, Style: render.Style{Role: string(style.RoleTextMuted)}},
+					render.Span{Text: "] "},
+				)
+			}
+		} else if indent != "" {
+			spans = append(spans, render.Span{Text: indent})
 		}
-		continuationIndent := strings.Repeat(" ", messageDisplayWidth(plainPrefix+contentPadding))
-		for i := 1; i < len(lines); i++ {
-			lines[i] = continuationIndent + lines[i]
+		sp := render.Span{Text: contentLine}
+		if contentRole != "" {
+			sp.Style = render.Style{Role: contentRole}
 		}
-		result = strings.Join(lines, "\n")
-	} else {
-		result = prefix + contentPadding + result
+		spans = append(spans, sp)
+		lines = append(lines, render.Line{Spans: spans})
 	}
+	return render.LinesDoc(lines...)
+}
 
-	return result
+// Format 格式化消息，并按当前终端能力解析语义颜色。
+func (m *Message) Format() string {
+	doc := m.Document()
+	theme := m.theme
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	return renderDocumentWithProfile(doc, theme)
 }
 
 // Print 打印消息
 func (m *Message) Print() {
-	fmt.Println(m.Format())
+	text := m.Format()
+	_, _ = WriteTerminalLine(os.Stdout, text)
 }
 
 // Printf 格式化并打印消息
@@ -178,8 +206,13 @@ func DisplayUserMessage(content string) {
 	NewMessage(MessageUser, content).Print()
 }
 
-// DisplayAssistantMessage 显示助手消息
+// DisplayAssistantMessage prints an assistant message.
+// Pre-rendered backend output (contains ESC) keeps SGR; raw text is theme-colored.
 func DisplayAssistantMessage(content string) {
+	if strings.ContainsRune(content, '\x1b') {
+		_, _ = WriteTerminalLine(os.Stdout, FormatAssistantRendered(content))
+		return
+	}
 	NewMessage(MessageAssistant, content).Print()
 }
 
@@ -203,9 +236,21 @@ func FormatUserMessage(content string) string {
 	return NewMessage(MessageUser, content).Format()
 }
 
-// FormatAssistantMessage 格式化助手消息
+// FormatAssistantMessage 格式化助手消息。
+// 会对内容做控制序列清理，并套用 Assistant 主题色；不适合已经过
+// markdown/syntax backend 着色的字符串（会丢掉 token 颜色）。
 func FormatAssistantMessage(content string) string {
 	return NewMessage(MessageAssistant, content).Format()
+}
+
+// FormatAssistantRendered 用于已经由 render backend 生成的助手输出。
+// 保留安全的 SGR / OSC 8，剥离光标/清屏等危险序列，不再整段重染色。
+func FormatAssistantRendered(content string) string {
+	if content == "" {
+		return ""
+	}
+	safe := render.SanitizeKeepSGR(content)
+	return IndentAssistantContent(safe)
 }
 
 // FormatSystemMessage 格式化系统消息

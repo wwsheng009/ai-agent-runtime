@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
-	"strings"
+	"os"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // SeparatorType 分隔线类型
@@ -10,10 +12,10 @@ type SeparatorType int
 
 const (
 	SeparatorRegular SeparatorType = iota // 普通分隔线
-	SeparatorThin                           // 细分隔线
-	SeparatorThick                          // 粗分隔线
-	SeparatorDashed                         // 虚线分隔线
-	SeparatorDouble                         // 双线分隔线
+	SeparatorThin                         // 细分隔线
+	SeparatorThick                        // 粗分隔线
+	SeparatorDashed                       // 虚线分隔线
+	SeparatorDouble                       // 双线分隔线
 )
 
 // Separator 分隔线组件
@@ -67,59 +69,51 @@ func (s *Separator) SetTheme(theme *Theme) *Separator {
 
 // Build 构建分隔线字符串
 func (s *Separator) Build() string {
-	var separator string
+	theme := s.theme
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	fill := theme.Separator
+	kind := style.SeparatorRegular
 	switch s.sType {
 	case SeparatorThin:
-		separator = s.theme.Separator
+		fill = theme.Separator
+		kind = style.SeparatorThin
 	case SeparatorThick:
-		separator = s.theme.BorderHorizontal
+		fill = theme.BorderHorizontal
+		kind = style.SeparatorThick
 	case SeparatorDashed:
-		separator = "-"
+		fill = "-"
+		kind = style.SeparatorDashed
 	case SeparatorDouble:
-		separator = "═"
-	default:
-		separator = s.theme.Separator
+		fill = "═"
+		kind = style.SeparatorDouble
 	}
 
-	if s.title == "" {
-		// 无标题，绘制整行
-		return s.theme.SeparatorColor.Sprint(strings.Repeat(separator, s.width))
-	}
-
-	// 有标题，在标题两侧绘制
-	titleLen := len(s.title)
-	if titleLen+2*s.padding >= s.width {
-		// 标题太长，只显示标题
-		return s.theme.SeparatorColor.Sprint(s.title)
-	}
-
-	leftWidth := (s.width - titleLen - 2*s.padding) / 2
-	rightWidth := s.width - titleLen - 2*s.padding - leftWidth
-
-	var builder strings.Builder
-	builder.WriteString(strings.Repeat(separator, leftWidth))
-	builder.WriteString(strings.Repeat(" ", s.padding))
-	builder.WriteString(s.title)
-	builder.WriteString(strings.Repeat(" ", s.padding))
-	builder.WriteString(strings.Repeat(separator, rightWidth))
-
-	return s.theme.SeparatorColor.Sprint(builder.String())
+	doc := style.SeparatorDocument(style.SeparatorModel{
+		Kind:    kind,
+		Width:   s.width,
+		Title:   s.title,
+		Padding: s.padding,
+		Fill:    fill,
+	})
+	return renderDocumentWithProfile(doc, theme)
 }
 
 // Print 打印分隔线
 func (s *Separator) Print() {
-	fmt.Println(s.Build())
+	_, _ = WriteTerminalLine(os.Stdout, s.Build())
 }
 
 // PrintEmptyLine 打印空行
 func PrintEmptyLine() {
-	fmt.Println()
+	_, _ = WriteTerminalLine(os.Stdout, "")
 }
 
 // PrintEmptyLines 打印多行空行
 func PrintEmptyLines(count int) {
 	for i := 0; i < count; i++ {
-		fmt.Println()
+		PrintEmptyLine()
 	}
 }
 

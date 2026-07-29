@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 type ExecEventProcessor interface {
@@ -164,9 +165,15 @@ func (p *HumanEventProcessor) PrintConfigSummary(opts *ExecOptions, model, provi
 	if !p.isTTY {
 		return
 	}
-	fmt.Fprintf(p.writer, "%s %s/%s\n", p.theme.MetaLabelColor.Sprint("Model:"), provider, model)
+	writeChatParts(p.writer, true,
+		chatBoldPart("Model:", style.RoleMetaLabel),
+		chatPart(" "+provider+"/"+model, style.RoleTextSecondary),
+	)
 	if opts != nil && opts.PermissionMode != "" {
-		fmt.Fprintf(p.writer, "%s %s\n", p.theme.MetaLabelColor.Sprint("Permission:"), string(opts.PermissionMode))
+		writeChatParts(p.writer, true,
+			chatBoldPart("Permission:", style.RoleMetaLabel),
+			chatPart(" "+string(opts.PermissionMode), style.RoleTextSecondary),
+		)
 	}
 }
 
@@ -174,18 +181,21 @@ func (p *HumanEventProcessor) OnThreadStarted(event ThreadStartedEvent) {}
 
 func (p *HumanEventProcessor) OnTurnStarted(event TurnStartedEvent) {
 	if p.isTTY {
-		fmt.Fprintf(p.writer, "%s\n", p.theme.MutedColor.Sprint("Thinking..."))
+		writeChatParts(p.writer, true, chatPart("Thinking...", style.RoleTextMuted))
 	}
 }
 
 func (p *HumanEventProcessor) OnTurnCompleted(event TurnCompletedEvent) {
 	if p.isTTY {
-		fmt.Fprint(p.writer, "\r\033[K")
+		_, _ = ui.WriteTerminalText(p.writer, "\r\033[K")
 	}
 }
 
 func (p *HumanEventProcessor) OnTurnFailed(event TurnFailedEvent) {
-	fmt.Fprintf(p.writer, "%s %s\n", p.theme.ErrorColor.Sprint("Error:"), event.Error)
+	writeChatParts(p.writer, true,
+		chatBoldPart("Error:", style.RoleError),
+		chatPart(" "+event.Error, style.RoleTextPrimary),
+	)
 }
 
 func (p *HumanEventProcessor) OnItemStarted(event ItemStartedEvent) {
@@ -193,7 +203,10 @@ func (p *HumanEventProcessor) OnItemStarted(event ItemStartedEvent) {
 		return
 	}
 	if details, ok := event.Details.(ToolCallDetails); ok {
-		fmt.Fprintf(p.writer, "%s %s\n", p.theme.ToolColor.Sprint(p.theme.CommandIcon), details.ToolName)
+		writeChatParts(p.writer, true,
+			chatBoldPart(p.theme.CommandIcon+" ", style.RoleTool),
+			chatPart(details.ToolName, style.RoleTextSecondary),
+		)
 	}
 }
 
@@ -202,15 +215,22 @@ func (p *HumanEventProcessor) OnItemUpdated(event ItemUpdatedEvent) {}
 func (p *HumanEventProcessor) OnItemCompleted(event ItemCompletedEvent) {}
 
 func (p *HumanEventProcessor) OnError(event ErrorEvent) {
-	fmt.Fprintf(p.writer, "%s %s\n", p.theme.ErrorColor.Sprint("Error:"), event.Message)
+	writeChatParts(p.writer, true,
+		chatBoldPart("Error:", style.RoleError),
+		chatPart(" "+event.Message, style.RoleTextPrimary),
+	)
 }
 
 func (p *HumanEventProcessor) OnWarning(message string) {
-	fmt.Fprintf(p.writer, "%s %s\n", p.theme.WarningColor.Sprint("Warning:"), message)
+	writeChatParts(p.writer, true,
+		chatBoldPart("Warning:", style.RoleWarning),
+		chatPart(" "+message, style.RoleTextPrimary),
+	)
 }
 
 func (p *HumanEventProcessor) OnStreamDelta(delta string) {
-	fmt.Fprint(p.writer, delta)
+	doc := ui.RoleTextDocument(delta, style.RoleAssistant)
+	_, _ = ui.WriteTerminalText(p.writer, ui.RenderDocumentANSI(doc))
 }
 
 func (p *HumanEventProcessor) SetFinalMessage(message string) {
@@ -242,7 +262,8 @@ func (p *HumanEventProcessor) PrintFinalOutput(opts *ExecOptions) error {
 	if opts != nil && opts.OutputFormat == "json" {
 		printCommandJSONOutput("exec", opts.JSONEnvelope, result)
 	} else if message != "" {
-		fmt.Fprintln(os.Stdout, message)
+		doc := ui.RoleTextDocument(message, style.RoleAssistant)
+		_, _ = ui.WriteTerminalLine(os.Stdout, ui.RenderDocumentANSI(doc))
 	}
 	return writeExecLastMessageFile(p.lastMessageFile, message, p.OnWarning)
 }

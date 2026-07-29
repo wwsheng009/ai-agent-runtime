@@ -950,7 +950,8 @@ func (l chatInputReadLifecycle) finishMainRead(readErr error) {
 	}
 	if readErr != nil {
 		l.session.lastInteractiveInputQueued = false
-		l.session.Interaction.ClearPrompt()
+		// An aborted read (Ctrl+C / stdin failure) cancels the draft too.
+		l.session.Interaction.DiscardPrompt()
 		return
 	}
 	if l.session.lastInteractiveInputQueued {

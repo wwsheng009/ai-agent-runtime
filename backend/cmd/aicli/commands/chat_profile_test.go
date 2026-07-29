@@ -217,6 +217,47 @@ func TestResolveGlobalRuntimeConfigPath_ResolvesUpwardRelativePath(t *testing.T)
 	}
 }
 
+func TestResolveGlobalRuntimeConfigPath_ResolvesFromExecutableDir(t *testing.T) {
+	root := t.TempDir()
+	runtimeConfig := filepath.Join(root, "backend", "configs", "runtime.yaml")
+	writeTestFile(t, runtimeConfig, "agent:\n  defaultModel: from-exe\n")
+
+	// Place a fake executable under backend/ so resolution walks up to root.
+	fakeExe := filepath.Join(root, "backend", "aicli-test-bin")
+	writeTestFile(t, fakeExe, "#!/bin/sh\n")
+	outside := t.TempDir()
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(outside); err != nil {
+		t.Fatalf("chdir outside repo: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	originalExe := executablePathForTest
+	executablePathForTest = fakeExe
+	t.Cleanup(func() {
+		executablePathForTest = originalExe
+	})
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			ConfigFile: "backend/configs/runtime.yaml",
+		},
+	}
+
+	got := resolveGlobalRuntimeConfigPath(cfg)
+	if got != runtimeConfig {
+		t.Fatalf("unexpected runtime config path: got %q want %q", got, runtimeConfig)
+	}
+}
+
 func TestResolveChatSkillDirs_ResolvesUpwardRelativeSessionAndCLIPaths(t *testing.T) {
 	root := t.TempDir()
 	sessionSkillDir := filepath.Join(root, ".agents", "skills")

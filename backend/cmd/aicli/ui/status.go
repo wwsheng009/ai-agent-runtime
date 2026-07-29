@@ -3,6 +3,9 @@ package ui
 import (
 	"fmt"
 	"os"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // StatusType 状态类型
@@ -18,12 +21,12 @@ const (
 
 // Status 状态显示组件
 type Status struct {
-	theme    *Theme
-	msg      string
-	sType    StatusType
-	newline  bool
-	prefix   string
-	suffix   string
+	theme   *Theme
+	msg     string
+	sType   StatusType
+	newline bool
+	prefix  string
+	suffix  string
 }
 
 // NewStatus 创建新的状态
@@ -60,34 +63,68 @@ func (s *Status) SetSuffix(suffix string) *Status {
 	return s
 }
 
-// Build 构建状态字符串
-func (s *Status) Build() string {
-	var formattedMsg string
+// Document builds a role-tagged status line (message sanitized).
+func (s *Status) Document() render.Document {
+	theme := s.theme
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	safeMsg := SanitizeTerminalText(s.msg)
+
+	var body string
+	var role string
 	switch s.sType {
 	case StatusSuccess:
-		formattedMsg = s.theme.FormatSuccess(s.msg)
+		body = fmt.Sprintf("%s %s", theme.SuccessIcon, safeMsg)
+		role = string(style.RoleSuccess)
 	case StatusError:
-		formattedMsg = s.theme.FormatError(s.msg)
+		body = fmt.Sprintf("%s %s", theme.ErrorIcon, safeMsg)
+		role = string(style.RoleError)
 	case StatusWarning:
-		formattedMsg = s.theme.FormatWarning(s.msg)
+		body = fmt.Sprintf("%s %s", theme.WarningIcon, safeMsg)
+		role = string(style.RoleWarning)
 	case StatusInfo:
-		formattedMsg = s.theme.FormatInfo(s.msg)
+		body = fmt.Sprintf("%s %s", theme.InfoIcon, safeMsg)
+		role = string(style.RoleInfo)
 	case StatusDebug:
-		formattedMsg = fmt.Sprintf("[调试] %s", s.msg)
+		body = fmt.Sprintf("[调试] %s", safeMsg)
 	default:
-		formattedMsg = s.msg
+		body = safeMsg
 	}
 
-	return s.prefix + formattedMsg + s.suffix
+	var spans []render.Span
+	if s.prefix != "" {
+		spans = append(spans, render.Span{Text: s.prefix})
+	}
+	sp := render.Span{Text: body}
+	if role != "" {
+		sp.Style = render.Style{Role: role}
+	}
+	spans = append(spans, sp)
+	if s.suffix != "" {
+		spans = append(spans, render.Span{Text: s.suffix})
+	}
+	return render.LinesDoc(render.Line{Spans: spans})
+}
+
+// Build 构建状态字符串，并按当前终端能力解析语义颜色。
+func (s *Status) Build() string {
+	doc := s.Document()
+	theme := s.theme
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	return renderDocumentWithProfile(doc, theme)
 }
 
 // Print 打印状态
 func (s *Status) Print() {
+	text := s.Build()
 	if s.newline {
-		fmt.Println(s.Build())
-	} else {
-		fmt.Print(s.Build())
+		_, _ = WriteTerminalLine(os.Stdout, text)
+		return
 	}
+	_, _ = WriteTerminalText(os.Stdout, text)
 }
 
 // Printf 格式化打印状态
@@ -126,11 +163,15 @@ func (s *Status) PrintfInfo(format string, args ...interface{}) {
 
 // PrintTo 打印到指定输出流
 func (s *Status) PrintTo(writer *os.File) {
-	if s.newline {
-		fmt.Fprintln(writer, s.Build())
-	} else {
-		fmt.Fprint(writer, s.Build())
+	text := s.Build()
+	if writer == nil {
+		writer = os.Stdout
 	}
+	if s.newline {
+		_, _ = WriteTerminalLine(writer, text)
+		return
+	}
+	_, _ = WriteTerminalText(writer, text)
 }
 
 // 快捷函数
