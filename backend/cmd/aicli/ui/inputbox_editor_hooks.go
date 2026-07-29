@@ -35,8 +35,8 @@ type LineEditorRenderSnapshot struct {
 
 // LineEditorHooks lets the caller observe and intercept editor actions.
 type LineEditorHooks struct {
-	InitialText           string
-	InitialCursor         int
+	InitialText   string
+	InitialCursor int
 	// RedrawInitialText repaints a cached draft before the editor waits for the
 	// next key. Fixed surfaces use this when a restarted composer inherits text
 	// that may be present in state but no longer be present on screen.

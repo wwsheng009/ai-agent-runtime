@@ -2138,7 +2138,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if consolidated := c.finalizeActiveAssistantLocked(finalContent, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
 		finalContent = consolidated
 	}
-	if c.streamMode == assistantStreamModeMarkdown {
+	if c.streamMode == assistantStreamModeMarkdown || c.streamRenderedPrefixLen > 0 {
 		c.renderFormattedAssistantStreamLocked(finalContent)
 		c.resetStreamLocked()
 		return true
@@ -2217,6 +2217,12 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 	content := c.streamBuffer.String()
 	if consolidated := c.finalizeActiveAssistantLocked(content, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
 		content = consolidated
+	}
+	if c.streamRenderedPrefixLen > 0 && content != "" {
+		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+		c.renderFormattedAssistantStreamLocked(content)
+		c.resetStreamLocked()
+		return
 	}
 	if c.shouldLiveStreamOutputLocked() {
 		if c.streamMode == assistantStreamModeMarkdown {
@@ -2697,6 +2703,10 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 		return
 	}
 	content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+	if c.streamRenderedPrefixLen > 0 {
+		c.renderFormattedAssistantStreamLocked(content)
+		return
+	}
 	formatted := content
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
