@@ -45,7 +45,7 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		return nil
 	}
 	normalizedToolName := normalizeToolName(toolName)
-	if p.DeniedTools[toolName] || (normalizedToolName == "search_tool" && p.DeniedTools[normalizedToolName]) {
+	if p.DeniedTools[toolName] || runtimeSearchExplicitlyDenied(p.DeniedTools, normalizedToolName) {
 		return fmt.Errorf("tool denied by execution policy: %s", toolName)
 	}
 	// search_tool is a runtime-owned, read-only catalog projection. It may be
@@ -70,6 +70,18 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		}
 	}
 	return nil
+}
+
+func runtimeSearchExplicitlyDenied(deniedTools map[string]bool, normalizedToolName string) bool {
+	if normalizedToolName != "search_tool" {
+		return false
+	}
+	for name, denied := range deniedTools {
+		if denied && normalizeToolName(name) == "search_tool" {
+			return true
+		}
+	}
+	return false
 }
 
 // AllowToolInfo validates a tool's governance metadata.

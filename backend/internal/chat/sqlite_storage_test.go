@@ -340,6 +340,39 @@ func TestSQLiteSessionStorageEnforcesHardHotMessageLimit(t *testing.T) {
 	require.True(t, loaded.History[0].Metadata.GetBool("session_storage_truncated", false))
 }
 
+func TestSQLiteSessionStoragePreservesCustomToolTransportWhenTruncated(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
+		cfg.MaxHotMessageBytes = 4096
+		cfg.HotHistoryBytes = 8192
+	})
+	session := NewSession("custom-tool-transport-user")
+	require.NoError(t, store.Save(ctx, session))
+
+	raw := strings.Repeat("*** Begin Patch\n+line\n*** End Patch\n", 300)
+	message := *types.NewAssistantMessage("")
+	message.ToolCalls = []types.ToolCall{{
+		ID: "call-patch", Type: "custom_tool_call", Name: "apply_patch",
+		Args: map[string]interface{}{"patch": raw}, RawInput: raw,
+	}}
+	require.NoError(t, store.AddMessage(ctx, session.ID, message))
+
+	loaded, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.History, 1)
+	require.Len(t, loaded.History[0].ToolCalls, 1)
+	stored := loaded.History[0].ToolCalls[0]
+	require.Equal(t, "custom_tool_call", stored.Type)
+	require.NotEmpty(t, stored.RawInput)
+	require.Less(t, len(stored.RawInput), len(raw))
+	require.Equal(t, true, stored.Args["_session_storage_omitted"])
+
+	canonical, err := store.GetRecentMessages(ctx, session.ID, 1)
+	require.NoError(t, err)
+	require.Len(t, canonical, 1)
+	require.Equal(t, raw, canonical[0].ToolCalls[0].RawInput)
+}
+
 func TestSQLiteSessionStoragePreservesFrozenContextMetadataWhenTruncated(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {

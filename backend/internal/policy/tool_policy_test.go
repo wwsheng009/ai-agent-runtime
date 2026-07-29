@@ -76,6 +76,10 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *te
 			t.Fatalf("expected explicit deny to override runtime search allowance for %q", name)
 		}
 	}
+	policy.DeniedTools = map[string]bool{"Search_Tool": true}
+	if err := policy.AllowTool("search_tool"); err == nil {
+		t.Fatal("expected normalized explicit deny to block runtime search")
+	}
 }
 
 func TestToolExecutionPolicy_AllowToolCall_BlocksPathOutsideSandbox(t *testing.T) {

@@ -1212,6 +1212,9 @@ func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedS
 				"_byte_count":              len(arguments),
 			}
 		}
+		if len(bounded.ToolCalls[index].RawInput) > contentBudget/2 {
+			bounded.ToolCalls[index].RawInput = truncateUTF8Middle(bounded.ToolCalls[index].RawInput, contentBudget/2)
+		}
 	}
 	if bounded.Metadata == nil {
 		bounded.Metadata = types.NewMetadata()
@@ -1244,12 +1247,15 @@ func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedS
 			minimal.Metadata["context_turn_id"] = truncateUTF8Middle(turnID, 256)
 		}
 		toolCallLimit := min(len(bounded.ToolCalls), 16)
+		rawInputBudget := max(s.cfg.MaxHotMessageBytes/4/max(toolCallLimit, 1), 64)
 		minimal.ToolCalls = make([]types.ToolCall, 0, toolCallLimit)
 		for index := 0; index < toolCallLimit; index++ {
 			minimal.ToolCalls = append(minimal.ToolCalls, types.ToolCall{
-				ID:   truncateUTF8Middle(bounded.ToolCalls[index].ID, 512),
-				Name: truncateUTF8Middle(bounded.ToolCalls[index].Name, 512),
-				Args: map[string]interface{}{"_session_storage_omitted": true},
+				ID:       truncateUTF8Middle(bounded.ToolCalls[index].ID, 512),
+				Type:     truncateUTF8Middle(bounded.ToolCalls[index].Type, 128),
+				Name:     truncateUTF8Middle(bounded.ToolCalls[index].Name, 512),
+				Args:     map[string]interface{}{"_session_storage_omitted": true},
+				RawInput: truncateUTF8Middle(bounded.ToolCalls[index].RawInput, rawInputBudget),
 			})
 		}
 		bounded = minimal
