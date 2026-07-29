@@ -92,6 +92,35 @@ func TestProjectToolSurfaceWithSearch_SimpleGoalWinsInComputePath(t *testing.T) 
 	require.NotContains(t, toolDefinitionNames(projected), toolkit.ToolSearchName)
 }
 
+func TestSimpleGoalToolNamesSeparatesContentAndFileNameSearch(t *testing.T) {
+	tests := []struct {
+		goal string
+		want string
+	}{
+		{goal: "grep Popover", want: "grep"},
+		{goal: "search Popover", want: "grep"},
+		{goal: "搜索 export Popover", want: "grep"},
+		{goal: "search files for Popover", want: "grep"},
+		{goal: "find references DialogTrigger", want: "grep"},
+		{goal: "搜索文件中包含 Popover", want: "grep"},
+		{goal: "查找包含 DialogContent 的文件", want: "grep"},
+		{goal: "find file named popover.tsx", want: "glob"},
+		{goal: "search files", want: "glob"},
+		{goal: "search files matching *.tsx", want: "glob"},
+		{goal: "search *.tsx", want: "glob"},
+		{goal: "搜索文件 *.tsx", want: "glob"},
+		{goal: "搜索文件", want: "glob"},
+		{goal: "查找文件路径 apps/portal-modern", want: "glob"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.goal, func(t *testing.T) {
+			got := simpleGoalToolNames(tt.goal)
+			require.Equal(t, map[string]bool{tt.want: true}, got)
+		})
+	}
+}
+
 func TestExecuteSearchTool_FindsProjectedTools(t *testing.T) {
 	catalog := []types.ToolDefinition{
 		{Name: "view", Description: "Read local files"},
@@ -164,6 +193,87 @@ func TestReActLoop_GetAvailableTools_AppliesShouldListAndSearchProjection(t *tes
 	simpleNames := toolDefinitionNames(simpleTools)
 	assert.NotContains(t, simpleNames, toolkit.ToolSearchName)
 	assert.Subset(t, []string{"ls", "glob"}, simpleNames)
+}
+
+func TestReActLoop_GetAvailableTools_SessionStableSurfaceIgnoresSimpleGoalProjection(t *testing.T) {
+	agent := &Agent{
+		config:     &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 1},
+		mcpManager: &mockSearchCatalogMCPManager{},
+	}
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
+	snapshot := &testSessionStableToolSurfaceSnapshot{refreshable: true}
+	ctx := WithTurnToolSurfaceSnapshot(context.Background(), snapshot)
+
+	tools, frozen, err := loop.resolveAvailableTools(ctx, "ls files", nil)
+	require.NoError(t, err)
+	require.False(t, frozen)
+	names := toolDefinitionNames(tools)
+	assert.Contains(t, names, "ls")
+	assert.Contains(t, names, "glob")
+	assert.Contains(t, names, "view")
+	assert.Contains(t, names, "grep")
+	assert.Contains(t, names, toolkit.ToolSearchName)
+}
+
+func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBoundary(t *testing.T) {
+	agent := &Agent{
+		config:     &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 1},
+		mcpManager: &mockSearchCatalogMCPManager{},
+	}
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
+	snapshot := &testSessionStableToolSurfaceSnapshot{
+		set:         true,
+		refreshable: true,
+		tools: []types.ToolDefinition{
+			{Name: "glob"},
+			{Name: "ls"},
+		},
+	}
+	ctx := WithTurnToolSurfaceSnapshot(context.Background(), snapshot)
+
+	tools, frozen, err := loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
+	require.NoError(t, err)
+	require.False(t, frozen)
+	names := toolDefinitionNames(tools)
+	assert.Contains(t, names, "view")
+	assert.Contains(t, names, "grep")
+	assert.Contains(t, names, toolkit.ToolSearchName)
+
+	snapshot.refreshable = false
+	tools, frozen, err = loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
+	require.NoError(t, err)
+	require.True(t, frozen)
+	require.ElementsMatch(t, []string{"glob", "ls"}, toolDefinitionNames(tools))
+}
+
+type testSessionStableToolSurfaceSnapshot struct {
+	tools       []types.ToolDefinition
+	set         bool
+	refreshable bool
+}
+
+func (s *testSessionStableToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context) ([]types.ToolDefinition, bool, error) {
+	if err := contextErr(ctx); err != nil {
+		return nil, false, err
+	}
+	return cloneToolDefinitions(s.tools), s.set, nil
+}
+
+func (s *testSessionStableToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context, tools []types.ToolDefinition) error {
+	if err := contextErr(ctx); err != nil {
+		return err
+	}
+	s.tools = cloneToolDefinitions(tools)
+	s.set = true
+	return nil
+}
+
+func (s *testSessionStableToolSurfaceSnapshot) StableAcrossTurns() bool {
+	return true
+}
+
+func (s *testSessionStableToolSurfaceSnapshot) CanRefreshStableToolSurface() bool {
+	return s.refreshable
 }
 
 type mockSearchCatalogMCPManager struct{}

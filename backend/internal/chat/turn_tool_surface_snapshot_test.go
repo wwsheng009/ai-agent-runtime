@@ -163,6 +163,37 @@ func TestRuntimeTurnToolSurfaceSnapshotSaveIsFreezeOnce(t *testing.T) {
 	require.Equal(t, firstFingerprint, state.StableToolSurfaceFingerprint)
 }
 
+func TestRuntimeTurnToolSurfaceSnapshotRefreshesStableSurfaceAtNewTurnBoundary(t *testing.T) {
+	actor := &SessionActor{
+		id: "session-refresh-stable-tools",
+		state: &RuntimeState{
+			SessionID:            "session-refresh-stable-tools",
+			Status:               SessionRunning,
+			CurrentTurnID:        "turn-2",
+			StableToolSurfaceSet: true,
+			StableToolSurface: []types.ToolDefinition{
+				{Name: "glob"},
+				{Name: "ls"},
+			},
+		},
+	}
+	snapshot := actor.turnToolSurfaceSnapshot("turn-2").(*runtimeTurnToolSurfaceSnapshot)
+	require.True(t, snapshot.StableAcrossTurns())
+	require.True(t, snapshot.CanRefreshStableToolSurface())
+
+	require.NoError(t, snapshot.SaveTurnToolSurface(context.Background(), []types.ToolDefinition{
+		{Name: "apply_patch"},
+		{Name: "grep"},
+		{Name: "shell"},
+		{Name: "view"},
+	}))
+
+	state := actor.State()
+	require.Equal(t, []string{"apply_patch", "grep", "shell", "view"}, toolDefinitionNamesForRuntimeTest(state.StableToolSurface))
+	require.Equal(t, []string{"apply_patch", "grep", "shell", "view"}, toolDefinitionNamesForRuntimeTest(state.FrozenTurnTools))
+	require.False(t, snapshot.CanRefreshStableToolSurface())
+}
+
 func TestRuntimeTurnToolSurfaceSnapshotPreservesEmptyParameterProperties(t *testing.T) {
 	actor := &SessionActor{
 		id: "session-stable-tool-schema",
@@ -263,4 +294,12 @@ func TestRuntimeTurnToolSurfaceSnapshotSharesIdenticalStoredSurfaces(t *testing.
 	defer actor.mu.RUnlock()
 	require.Equal(t, "shell", actor.state.StableToolSurface[0].Name)
 	require.True(t, runtimeToolDefinitionsShareBacking(actor.state.StableToolSurface, actor.state.FrozenTurnTools))
+}
+
+func toolDefinitionNamesForRuntimeTest(tools []types.ToolDefinition) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
 }

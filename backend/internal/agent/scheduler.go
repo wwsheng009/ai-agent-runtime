@@ -135,15 +135,25 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 	if s == nil {
 		return nil, fmt.Errorf("subagent scheduler is nil")
 	}
-	if options.Depth > s.config.MaxDepth {
+	// 动态扩展 depth：expert 难度任务允许额外 1 层深度
+	maxDepth := s.config.MaxDepth
+	for _, task := range tasks {
+		if strings.EqualFold(strings.TrimSpace(task.Difficulty), "expert") ||
+			strings.EqualFold(strings.TrimSpace(task.Difficulty), "hard") {
+			maxDepth = s.config.MaxDepth + 1
+			break
+		}
+	}
+	if options.Depth > maxDepth {
 		err := runtimeerrors.Newf(
 			runtimeerrors.ErrAgentSpawnDepthLimit,
-			"subagent spawn depth limit reached before child creation: requested_depth=%d max_depth=%d; next_action=complete_locally_or_use_spawn_team — continue the work in the current agent instead of retrying the same spawn",
-			options.Depth, s.config.MaxDepth,
+			"subagent spawn depth limit reached before child creation: requested_depth=%d effective_max_depth=%d (base=%d, expert+1 extension); next_action=complete_locally_or_use_spawn_team — continue the work in the current agent instead of retrying the same spawn",
+			options.Depth, maxDepth, s.config.MaxDepth,
 		)
 		s.emitSubagentDenied(options, "", "max_depth", err.Error(), map[string]interface{}{
-			"depth":     options.Depth,
-			"max_depth": s.config.MaxDepth,
+			"depth":      options.Depth,
+			"max_depth":  maxDepth,
+			"base_depth": s.config.MaxDepth,
 		})
 		return nil, err
 	}

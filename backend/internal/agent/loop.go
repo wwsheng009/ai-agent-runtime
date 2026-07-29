@@ -1079,15 +1079,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		// prompt caching / tool-call continuity. Use the fixed turn prompt budget
 		// (not step remainingBudget / first-step message size) so the frozen
 		// surface remains budget-safe as active-turn history grows.
-		toolsFrozen := false
-		if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
-			if _, cached, loadErr := snapshot.LoadTurnToolSurface(ctx); loadErr != nil {
-				return "", nil, nil, loadErr
-			} else {
-				toolsFrozen = cached
-			}
-		}
-		availableTools, err = loop.getAvailableTools(ctx, goal, toolWhitelist)
+		var toolsFrozen bool
+		availableTools, toolsFrozen, err = loop.resolveAvailableTools(ctx, goal, toolWhitelist)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -2088,7 +2081,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			pending, _ := checkpointMgr.BeforeMutation(ctx, sessionID, tc.Name, tc.ID, tc.Args)
 			if pending != nil {
 				pending.MessageCount = historyCount
-				pending.Conversation = cloneMessages(historySnapshot)
+				if checkpointMgr.ConversationSnapshot {
+					pending.Conversation = cloneMessages(historySnapshot)
+				}
 				if pendingCheckpoints == nil {
 					pendingCheckpoints = make(map[string]*runtimecheckpoint.PendingCheckpoint, 1)
 				}
@@ -2475,22 +2470,39 @@ func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionR
 
 // getAvailableTools 获取可用工具列表
 func (loop *ReActLoop) getAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, error) {
+	tools, _, err := loop.resolveAvailableTools(ctx, goal, toolWhitelist)
+	return tools, err
+}
+
+func (loop *ReActLoop) resolveAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, bool, error) {
 	if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
 		tools, cached, err := snapshot.LoadTurnToolSurface(ctx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if cached {
-			return cloneToolDefinitions(tools), nil
+			stable, refreshable := sessionStableToolSurfaceState(snapshot)
+			if stable && refreshable && len(toolWhitelist) == 0 && isSimpleGoalProjectedToolSurface(tools) {
+				expanded, expandErr := loop.computeAvailableTools(ctx, goal, toolWhitelist, false)
+				if expandErr != nil {
+					return nil, false, expandErr
+				}
+				if toolSurfaceAddsCapabilities(tools, expanded) {
+					return expanded, false, nil
+				}
+			}
+			return cloneToolDefinitions(tools), true, nil
 		}
-		// Do not freeze yet: the caller freezes a turn-stable surface after the
-		// first budget-aware compaction so later steps never rewrite tools.
-		return loop.computeAvailableTools(ctx, goal, toolWhitelist)
+
+		stable, _ := sessionStableToolSurfaceState(snapshot)
+		tools, err = loop.computeAvailableTools(ctx, goal, toolWhitelist, !stable)
+		return tools, false, err
 	}
-	return loop.computeAvailableTools(ctx, goal, toolWhitelist)
+	tools, err := loop.computeAvailableTools(ctx, goal, toolWhitelist, true)
+	return tools, false, err
 }
 
-func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, error) {
+func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, toolWhitelist []string, allowSimpleGoalProjection bool) ([]types.ToolDefinition, error) {
 	allowed := whitelistSet(toolWhitelist)
 	tools := make([]types.ToolDefinition, 0, 8)
 	seen := make(map[string]bool)
@@ -2552,10 +2564,10 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))
 	tools = filterToolDefinitionsByShouldList(tools, listCtx)
 	tools = optimizeModelToolSurface(tools)
-	// Projection is allowed only while selecting a session's first cache
-	// generation. The snapshot above then preserves this exact result on every
-	// later step and turn; adapters must never project it again.
-	if len(allowed) == 0 && len(simpleGoalToolNames(goal)) > 0 {
+	// Goal-specific projection is safe only for turn-local snapshots such as a
+	// one-shot exec. Session-stable chat snapshots use the task-independent core
+	// surface so the first short prompt cannot remove tools needed in later turns.
+	if allowSimpleGoalProjection && len(allowed) == 0 && len(simpleGoalToolNames(goal)) > 0 {
 		tools = projectSimpleGoalToolSurface(goal, tools)
 	} else {
 		tools = projectToolSurfaceWithSearch(tools, toolkit.DefaultToolSearchThreshold)
@@ -2582,6 +2594,45 @@ func projectSimpleGoalToolSurface(goal string, tools []types.ToolDefinition) []t
 	return projected
 }
 
+func isSimpleGoalProjectedToolSurface(tools []types.ToolDefinition) bool {
+	if len(tools) == 0 || len(tools) > 2 {
+		return false
+	}
+	names := make([]string, 0, len(tools))
+	seen := make(map[string]bool, len(tools))
+	for _, definition := range tools {
+		name := strings.ToLower(strings.TrimSpace(definition.Name))
+		if name == "" || seen[name] {
+			return false
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	switch strings.Join(names, ",") {
+	case "glob,ls", "glob,grep", "glob", "ls", "view", "grep", "shell", "bash", "execute_shell_command":
+		return true
+	default:
+		return false
+	}
+}
+
+func toolSurfaceAddsCapabilities(current []types.ToolDefinition, candidate []types.ToolDefinition) bool {
+	currentNames := make(map[string]bool, len(current))
+	for _, definition := range current {
+		if name := strings.ToLower(strings.TrimSpace(definition.Name)); name != "" {
+			currentNames[name] = true
+		}
+	}
+	for _, definition := range candidate {
+		name := strings.ToLower(strings.TrimSpace(definition.Name))
+		if name != "" && !currentNames[name] {
+			return true
+		}
+	}
+	return false
+}
+
 func simpleGoalToolNames(goal string) map[string]bool {
 	normalized := strings.ToLower(strings.TrimSpace(goal))
 	if normalized == "" || len([]rune(normalized)) > 120 || strings.ContainsAny(normalized, "\n;&|") {
@@ -2601,15 +2652,74 @@ func simpleGoalToolNames(goal string) map[string]bool {
 		strings.HasPrefix(normalized, "show file") || strings.HasPrefix(normalized, "读取文件") ||
 		strings.HasPrefix(normalized, "查看文件"):
 		return map[string]bool{"view": true}
-	case strings.HasPrefix(normalized, "find file") || strings.HasPrefix(normalized, "search files") ||
-		strings.HasPrefix(normalized, "grep ") || strings.HasPrefix(normalized, "搜索文件") ||
-		strings.HasPrefix(normalized, "查找文件"):
-		return map[string]bool{"grep": true, "glob": true}
+	case simpleGoalIsContentSearch(normalized):
+		return map[string]bool{"grep": true}
+	case simpleGoalIsFileNameSearch(normalized):
+		return map[string]bool{"glob": true}
 	case normalized == "pwd" || normalized == "date" || normalized == "whoami" || normalized == "git status":
 		return map[string]bool{"shell": true, "bash": true, "execute_shell_command": true}
 	default:
 		return nil
 	}
+}
+
+func simpleGoalIsContentSearch(normalized string) bool {
+	for _, prefix := range []string{
+		"grep ", "search content", "search text", "search code", "search symbol",
+		"search references", "search usages", "find text", "find symbol",
+		"find references", "find usages", "搜索内容", "搜索文本", "搜索代码",
+		"搜索符号", "搜索引用", "查找内容", "查找文本", "查找代码",
+		"查找符号", "查找引用", "查找包含",
+	} {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	genericSearchPrefix := (strings.HasPrefix(normalized, "search ") || strings.HasPrefix(normalized, "搜索")) &&
+		!strings.HasPrefix(normalized, "search file") && !strings.HasPrefix(normalized, "搜索文件")
+	if genericSearchPrefix && !simpleGoalHasFileNameCue(normalized) {
+		return true
+	}
+
+	ambiguousFilePrefix := strings.HasPrefix(normalized, "find file") ||
+		strings.HasPrefix(normalized, "search file") ||
+		strings.HasPrefix(normalized, "搜索文件") ||
+		strings.HasPrefix(normalized, "查找文件")
+	if !ambiguousFilePrefix || simpleGoalHasFileNameCue(normalized) {
+		return false
+	}
+	for _, cue := range []string{
+		" containing ", " contains ", " content ", " text ", " for ",
+		"中包含", "里的", "中的", "内容", "文本", "引用", "符号",
+	} {
+		if strings.Contains(normalized, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+func simpleGoalIsFileNameSearch(normalized string) bool {
+	if strings.HasPrefix(normalized, "find file") ||
+		strings.HasPrefix(normalized, "search file") ||
+		strings.HasPrefix(normalized, "搜索文件") ||
+		strings.HasPrefix(normalized, "查找文件") {
+		return true
+	}
+	return (strings.HasPrefix(normalized, "search ") || strings.HasPrefix(normalized, "搜索")) &&
+		simpleGoalHasFileNameCue(normalized)
+}
+
+func simpleGoalHasFileNameCue(normalized string) bool {
+	for _, cue := range []string{
+		" named ", " matching ", " extension ", " path ", "*.",
+		"文件名", "名为", "匹配", "后缀", "扩展名", "路径",
+	} {
+		if strings.Contains(normalized, cue) {
+			return true
+		}
+	}
+	return false
 }
 
 func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefinition {

@@ -34,7 +34,7 @@ const (
 	// ErrToolShellCompat marks shell/environment mismatch failures that are
 	// recoverable by changing the command shape (missing utility, wrong shell
 	// dialect, Unix-only pipeline on Windows, etc.). Generic — not tool-name bound.
-	ErrToolShellCompat    ErrorCode = "TOOL_SHELL_COMPAT"
+	ErrToolShellCompat ErrorCode = "TOOL_SHELL_COMPAT"
 	// ErrAgentSpawnDepthLimit marks spawn_agent failures caused by MaxDepth.
 	// Not retryable: continue locally or use spawn_team / an existing agent.
 	ErrAgentSpawnDepthLimit ErrorCode = "SPAWN_DEPTH_LIMIT"
@@ -43,8 +43,15 @@ const (
 	ErrProcessHealthcheck   ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
 
 	// Agent 错误
-	ErrAgentMaxSteps       ErrorCode = "AGENT_MAX_STEPS"
-	ErrAgentPermission     ErrorCode = "AGENT_PERMISSION"
+	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"
+	ErrAgentPermission ErrorCode = "AGENT_PERMISSION"
+	// ErrAgentAlreadyExists marks a deterministic spawn conflict. Retrying the
+	// same explicit child id cannot succeed; callers must reuse/close it or pick
+	// another id.
+	ErrAgentAlreadyExists ErrorCode = "AGENT_ALREADY_EXISTS"
+	// ErrAgentBusy marks send_input attempts that require the caller to wait for
+	// the active run or explicitly request interruption before resubmitting.
+	ErrAgentBusy           ErrorCode = "AGENT_BUSY"
 	ErrContextBudget       ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
 	ErrStreamInterrupted   ErrorCode = "STREAM_INTERRUPTED"
 	ErrUpstreamUnavailable ErrorCode = "UPSTREAM_UNAVAILABLE"

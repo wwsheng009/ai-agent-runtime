@@ -1007,6 +1007,13 @@ func classifyBrokerExecutionError(toolName string, err error) error {
 	lower := strings.ToLower(strings.TrimSpace(err.Error()))
 	code := runtimeerrors.ErrToolBrokerFailure
 	switch {
+	case strings.Contains(lower, "session already exists"):
+		code = runtimeerrors.ErrAgentAlreadyExists
+	case strings.Contains(lower, "session is busy"):
+		code = runtimeerrors.ErrAgentBusy
+	case strings.Contains(lower, "sqlite3: interrupted"),
+		strings.Contains(lower, "database operation interrupted"):
+		code = runtimeerrors.ErrStreamInterrupted
 	case strings.Contains(lower, "not found"):
 		code = runtimeerrors.ErrToolPathNotFound
 	case strings.Contains(lower, "required"), strings.Contains(lower, "invalid "), strings.Contains(lower, "unknown broker tool"):

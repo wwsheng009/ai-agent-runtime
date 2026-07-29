@@ -2104,6 +2104,7 @@ func TestSessionActorRewindConversationRestoresExactSnapshotWhenAvailable(t *tes
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = artifactStore.Close() })
 	checkpointMgr := checkpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &checkpoint.PendingCheckpoint{

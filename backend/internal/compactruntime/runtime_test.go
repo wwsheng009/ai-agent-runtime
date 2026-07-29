@@ -272,6 +272,7 @@ func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t
 	assert.True(t, provider.lastRequest.Stream)
 	assert.Empty(t, provider.lastRequest.ReasoningEffort)
 	assert.Equal(t, "compact", provider.lastRequest.Metadata[llm.MetadataKeyInternalOperation])
+	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableRetries])
 	assert.Equal(t, false, provider.lastRequest.Metadata[llm.MetadataKeyDisableTools])
 	assert.Equal(t, false, provider.lastRequest.Metadata[llm.MetadataKeyDisableMetaTools])
 	assert.Equal(t, "none", provider.lastRequest.Metadata["tool_choice"])

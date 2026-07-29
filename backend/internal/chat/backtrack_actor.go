@@ -286,7 +286,7 @@ func (a *SessionActor) applyBacktrackCodeRestore(ctx context.Context, baseCheckp
 	if a.agent == nil {
 		return nil, fmt.Errorf("agent is not configured"), nil
 	}
-	checkpointMgr := a.agent.GetCheckpointManager()
+	checkpointMgr := a.agent.GetCheckpointRestoreManager()
 	if checkpointMgr == nil {
 		return nil, fmt.Errorf("checkpoint manager is not configured"), nil
 	}
@@ -302,7 +302,7 @@ func (a *SessionActor) listSessionCheckpoints(ctx context.Context) []artifact.Ch
 	if a == nil || a.agent == nil {
 		return nil
 	}
-	mgr := a.agent.GetCheckpointManager()
+	mgr := a.agent.GetCheckpointRestoreManager()
 	if mgr == nil || mgr.Store == nil {
 		return nil
 	}

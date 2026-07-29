@@ -3109,20 +3109,11 @@ func TestReActLoop_Run_MutationHintsTriggerCheckpoint(t *testing.T) {
 	require.NotNil(t, checkpoint)
 	assert.Equal(t, "tool:execute_shell_command", checkpoint.Reason)
 
-	rawFiles, ok := checkpoint.Metadata["files"].([]interface{})
-	require.True(t, ok)
-	found := false
-	for _, item := range rawFiles {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if entry["path"] == targetPath {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "expected checkpoint metadata to include mutated path")
+	assert.Nil(t, checkpoint.Metadata["files"])
+	files, err := store.GetCheckpointFiles(context.Background(), checkpoint.ID)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, filepath.Clean(targetPath), filepath.Clean(files[0].Path))
 }
 
 func TestReActLoop_Run_ShellLikeToolTriggersCheckpointWithoutMutationHints(t *testing.T) {
@@ -3194,22 +3185,13 @@ func TestReActLoop_Run_ShellLikeToolTriggersCheckpointWithoutMutationHints(t *te
 	require.NotNil(t, checkpoint)
 	assert.Equal(t, "tool:execute_shell_command", checkpoint.Reason)
 
-	rawFiles, ok := checkpoint.Metadata["files"].([]interface{})
-	require.True(t, ok)
-	found := false
-	for _, item := range rawFiles {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if entry["path"] == filepath.Clean(targetPath) {
-			found = true
-			assert.Equal(t, "before", entry["before"])
-			assert.Equal(t, "after", entry["after"])
-			break
-		}
-	}
-	assert.True(t, found, "expected checkpoint metadata to include shell-mutated file from cwd fallback")
+	assert.Nil(t, checkpoint.Metadata["files"])
+	files, err := store.GetCheckpointFiles(context.Background(), checkpoint.ID)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, filepath.Clean(targetPath), filepath.Clean(files[0].Path))
+	assert.NotEmpty(t, files[0].BeforeBlobID)
+	assert.Empty(t, files[0].AfterBlobID)
 }
 
 func TestReActLoop_Run_AggregatesUsageAcrossSteps(t *testing.T) {

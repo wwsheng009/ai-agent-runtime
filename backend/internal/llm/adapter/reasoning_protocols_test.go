@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -296,4 +297,121 @@ func TestCodexHandleResponseStreamsReasoningSummaryDelta(t *testing.T) {
 	if strings.Join(textParts, "") != "我来查看文件。" {
 		t.Fatalf("unexpected text deltas: %#v", textParts)
 	}
+}
+
+// Reproduces the real grok/codex stream shape that previously tripled reasoning:
+// delta keeps a trailing '\n', done/recover snapshots restate the same body, and
+// appendMissingCodexText used to treat the whitespace-only mismatch as missing.
+func TestCodexHandleResponseDoesNotDuplicateReasoningWithTrailingNewline(t *testing.T) {
+	adapter := &CodexAdapter{}
+	const reasoning = "The user wants me to continue implementing the plan. Phase 0-2 are done. Next is Phase 3: Typed cell, tool ANSI, and Diff.\n"
+	var reasoningParts []string
+
+	reasoningJSON, err := jsonQuote(reasoning)
+	if err != nil {
+		t.Fatalf("quote reasoning: %v", err)
+	}
+
+	msg, err := adapter.HandleResponse(true, strings.NewReader(strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_dup","model":"grok-4.5"}}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","summary_index":0}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","summary_index":0,"delta":` + reasoningJSON + `}`,
+		"",
+		"event: response.reasoning_summary_text.done",
+		`data: {"type":"response.reasoning_summary_text.done","summary_index":0,"text":` + reasoningJSON + `}`,
+		"",
+		"event: response.reasoning_summary_part.done",
+		`data: {"type":"response.reasoning_summary_part.done","summary_index":0}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[]}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":[{"type":"summary_text","text":` + reasoningJSON + `}]}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","content":[]}}`,
+		"",
+		"event: response.output_text.delta",
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"ok"}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_dup","status":"completed","stop_reason":"end_turn","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":` + reasoningJSON + `}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`,
+		"",
+	}, "\n")), StreamCallbacks{
+		OnReasoning: func(part string) {
+			reasoningParts = append(reasoningParts, part)
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleResponse: %v", err)
+	}
+
+	// Final assistant message trims display text via ReasoningBlock.Summary; the
+// important contract is no duplicated body after done/item/completed recovery.
+	wantStored := strings.TrimSpace(reasoning)
+	got, _ := msg["reasoning_content"].(string)
+	if got != wantStored {
+		t.Fatalf("unexpected reasoning_content:\n got: %q\nwant: %q", got, wantStored)
+	}
+	if count := strings.Count(got, "Phase 0-2 are done"); count != 1 {
+		t.Fatalf("reasoning_content duplicated phrase %d times: %q", count, got)
+	}
+	joined := strings.Join(reasoningParts, "")
+	if joined != reasoning {
+		t.Fatalf("unexpected streamed reasoning:\n got: %q\nwant: %q\nparts: %#v", joined, reasoning, reasoningParts)
+	}
+	if count := strings.Count(joined, "Phase 0-2 are done"); count != 1 {
+		t.Fatalf("streamed reasoning duplicated phrase %d times: %#v", count, reasoningParts)
+	}
+	if len(reasoningParts) != 1 {
+		t.Fatalf("expected a single reasoning emit from deltas, got %#v", reasoningParts)
+	}
+}
+
+func TestAppendMissingCodexTextIgnoresTrailingWhitespaceMismatch(t *testing.T) {
+	var builder strings.Builder
+	var emitted []string
+	emit := func(s string) { emitted = append(emitted, s) }
+
+	builder.WriteString("hello\n")
+	appendMissingCodexText(&builder, "hello", emit)
+	if builder.String() != "hello\n" {
+		t.Fatalf("trimmed done text re-appended body: %q", builder.String())
+	}
+	if len(emitted) != 0 {
+		t.Fatalf("expected no emit on whitespace-only mismatch, got %#v", emitted)
+	}
+
+	appendMissingCodexText(&builder, "hello\n", emit)
+	if builder.String() != "hello\n" {
+		t.Fatalf("exact snapshot re-appended body: %q", builder.String())
+	}
+
+	appendMissingCodexText(&builder, "hello\nworld", emit)
+	if builder.String() != "hello\nworld" {
+		t.Fatalf("expected remainder append, got %q", builder.String())
+	}
+	if strings.Join(emitted, "") != "world" && strings.Join(emitted, "") != "\nworld" {
+		// remainder may be "world" (trimmed path) depending on prefix matching
+		if got := strings.Join(emitted, ""); !strings.HasSuffix(got, "world") {
+			t.Fatalf("unexpected emit remainder: %#v", emitted)
+		}
+	}
+}
+
+func jsonQuote(s string) (string, error) {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

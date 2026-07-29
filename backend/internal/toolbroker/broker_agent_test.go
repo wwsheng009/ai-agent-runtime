@@ -3,12 +3,15 @@ package toolbroker
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
@@ -1360,5 +1363,29 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 	}
 	if controller.lastApprove.ID != "agent-a" {
 		t.Fatalf("expected resolve_agent_approval to reach controller with child id, got %#v", controller.lastApprove)
+	}
+}
+
+func TestClassifyBrokerExecutionErrorAgentLifecycle(t *testing.T) {
+	testCases := []struct {
+		name string
+		err  error
+		code runtimeerrors.ErrorCode
+	}{
+		{name: "already exists", err: fmt.Errorf("session already exists: child-1"), code: runtimeerrors.ErrAgentAlreadyExists},
+		{name: "busy", err: fmt.Errorf("session is busy (running)"), code: runtimeerrors.ErrAgentBusy},
+		{name: "sqlite interrupted", err: fmt.Errorf("sqlite3: interrupted"), code: runtimeerrors.ErrStreamInterrupted},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyBrokerExecutionError("test_tool", tc.err)
+			var runtimeErr *runtimeerrors.RuntimeError
+			if !stderrors.As(err, &runtimeErr) {
+				t.Fatalf("expected RuntimeError, got %T: %v", err, err)
+			}
+			if runtimeErr.Code != tc.code {
+				t.Fatalf("code=%q want %q; err=%v", runtimeErr.Code, tc.code, err)
+			}
+		})
 	}
 }

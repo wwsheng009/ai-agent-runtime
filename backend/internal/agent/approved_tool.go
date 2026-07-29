@@ -190,7 +190,9 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		pending, _ = checkpointMgr.BeforeMutation(ctx, sessionID, call.Name, call.ID, call.Args)
 		if pending != nil {
 			pending.MessageCount = len(history)
-			pending.Conversation = cloneMessages(history)
+			if checkpointMgr.ConversationSnapshot {
+				pending.Conversation = cloneMessages(history)
+			}
 		}
 	}
 

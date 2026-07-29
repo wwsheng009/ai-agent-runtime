@@ -887,7 +887,11 @@ func (a *CodexAdapter) handleOutputTextDelta(state *CodexStreamState, event map[
 }
 
 func (a *CodexAdapter) handleOutputTextDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
-	text := strings.TrimSpace(asCodexString(event["text"]))
+	// Keep raw text so trailing newlines from deltas still match done snapshots.
+	text := asCodexString(event["text"])
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	appendMissingCodexText(&state.Content, text, callbacks.EmitText)
 }
 
@@ -1070,7 +1074,13 @@ func (a *CodexAdapter) handleReasoningTextDelta(state *CodexStreamState, event m
 }
 
 func (a *CodexAdapter) handleReasoningTextDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
-	text := strings.TrimSpace(asCodexString(event["text"]))
+	// Keep raw text (including trailing newlines). TrimSpace here previously broke
+	// appendMissingCodexText matching against delta-accumulated buffers that still
+	// carried a trailing '\n', causing the full reasoning body to be appended again.
+	text := asCodexString(event["text"])
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	appendMissingCodexText(&state.Reasoning, text, callbacks.EmitReasoning)
 }
 
@@ -1082,9 +1092,33 @@ func appendMissingCodexText(builder *strings.Builder, authoritative string, emit
 	if current == authoritative || strings.HasSuffix(current, authoritative) {
 		return
 	}
+	trimCurrent := strings.TrimSpace(current)
+	trimAuth := strings.TrimSpace(authoritative)
+	if trimAuth == "" {
+		return
+	}
+	// Delta streams often keep trailing newlines while done/recover snapshots may
+	// trim them (or the reverse). Treat whitespace-only disagreements as covered
+	// so we never re-emit a full duplicate body.
+	if trimCurrent == trimAuth ||
+		strings.HasPrefix(trimCurrent, trimAuth) ||
+		strings.HasSuffix(trimCurrent, trimAuth) {
+		return
+	}
 	missing := authoritative
 	if strings.HasPrefix(authoritative, current) {
-		missing = strings.TrimPrefix(authoritative, current)
+		missing = authoritative[len(current):]
+	} else if trimCurrent != "" && strings.HasPrefix(trimAuth, trimCurrent) {
+		// current is a whitespace-variant prefix of the authoritative snapshot.
+		remainder := trimAuth[len(trimCurrent):]
+		if remainder == "" {
+			return
+		}
+		if idx := strings.Index(authoritative, remainder); idx >= 0 {
+			missing = authoritative[idx:]
+		} else {
+			missing = remainder
+		}
 	}
 	if missing == "" {
 		return

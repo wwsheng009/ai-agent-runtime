@@ -25,6 +25,7 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"ls":                     {Name: "ls", Kind: types.ToolKindRead, ReadOnly: true},
 	"sourcegraph":            {Name: "sourcegraph", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
 	"web_search":             {Name: "web_search", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
+	"search_tool":            {Name: "search_tool", Kind: types.ToolKindSearch, ReadOnly: true},
 	"fetch":                  {Name: "fetch", Kind: types.ToolKindNetwork, ReadOnly: true, RequiresNet: true},
 	"download":               {Name: "download", Kind: types.ToolKindNetwork, MutatesFS: true, RequiresNet: true},
 	"write":                  {Name: "write", Kind: types.ToolKindEdit, MutatesFS: true},

@@ -15,6 +15,15 @@ type TurnToolSurfaceSnapshot interface {
 	SaveTurnToolSurface(ctx context.Context, tools []types.ToolDefinition) error
 }
 
+// sessionStableToolSurfaceSnapshot is an optional capability implemented by
+// snapshots whose cached schema is reused across multiple user turns. A
+// session-stable surface must not be selected from a goal-specific projection,
+// otherwise the first short prompt can permanently remove tools needed later.
+type sessionStableToolSurfaceSnapshot interface {
+	StableAcrossTurns() bool
+	CanRefreshStableToolSurface() bool
+}
+
 type inMemoryTurnToolSurfaceSnapshot struct {
 	mu    sync.RWMutex
 	set   bool
@@ -63,6 +72,14 @@ func ensureTurnToolSurfaceSnapshot(ctx context.Context) context.Context {
 		return ctx
 	}
 	return WithTurnToolSurfaceSnapshot(ctx, &inMemoryTurnToolSurfaceSnapshot{})
+}
+
+func sessionStableToolSurfaceState(snapshot TurnToolSurfaceSnapshot) (stable bool, refreshable bool) {
+	policy, ok := snapshot.(sessionStableToolSurfaceSnapshot)
+	if !ok || policy == nil || !policy.StableAcrossTurns() {
+		return false, false
+	}
+	return true, policy.CanRefreshStableToolSurface()
 }
 
 func (s *inMemoryTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context) ([]types.ToolDefinition, bool, error) {

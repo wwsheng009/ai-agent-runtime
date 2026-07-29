@@ -483,8 +483,12 @@ func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types
 	tools := cloneToolDefinitions(req.Tools)
 	metadata := map[string]interface{}{
 		llm.MetadataKeyInternalOperation: "compact",
-		"compact_mode":                   ModeLocal,
-		"compact_phase":                  normalizedPhase(req.Phase),
+		// Compact already falls back to a deterministic summary. Unbounded
+		// provider/runtime retries can hang mid-turn (and unit tests) when the
+		// stream fails or returns a non-SSE body.
+		llm.MetadataKeyDisableRetries: true,
+		"compact_mode":                ModeLocal,
+		"compact_phase":               normalizedPhase(req.Phase),
 		// Keep local compact on the same Codex/OpenAI cache route as chat
 		// turns. session_id alone is usually enough for adapters, but set
 		// prompt_cache_key explicitly so other protocols/debug surfaces see it.

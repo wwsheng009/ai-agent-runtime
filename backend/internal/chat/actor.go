@@ -463,7 +463,7 @@ func (a *SessionActor) PreviewCheckpoint(ctx context.Context, checkpointID, mode
 	if checkpointID == "" {
 		return nil, fmt.Errorf("checkpoint id is required")
 	}
-	checkpointMgr := a.agent.GetCheckpointManager()
+	checkpointMgr := a.agent.GetCheckpointRestoreManager()
 	if checkpointMgr == nil {
 		return nil, fmt.Errorf("checkpoint manager is not configured")
 	}
@@ -945,7 +945,7 @@ func (a *SessionActor) handleRewindTo(cmd RewindTo) {
 		},
 	})
 
-	checkpointMgr := a.agent.GetCheckpointManager()
+	checkpointMgr := a.agent.GetCheckpointRestoreManager()
 	if checkpointMgr == nil {
 		cmd.Reply <- RewindResult{Err: fmt.Errorf("checkpoint manager is not configured")}
 		return

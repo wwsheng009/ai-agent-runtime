@@ -25,6 +25,22 @@ func (a *SessionActor) turnToolSurfaceSnapshot(turnID string) agent.TurnToolSurf
 	}
 }
 
+func (s *runtimeTurnToolSurfaceSnapshot) StableAcrossTurns() bool {
+	return true
+}
+
+func (s *runtimeTurnToolSurfaceSnapshot) CanRefreshStableToolSurface() bool {
+	if s == nil || s.actor == nil || s.turnID == "" {
+		return false
+	}
+	s.actor.mu.RLock()
+	defer s.actor.mu.RUnlock()
+	state := s.actor.state
+	return state != nil &&
+		strings.TrimSpace(state.CurrentTurnID) == s.turnID &&
+		!state.FrozenTurnToolsSet
+}
+
 func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context) ([]types.ToolDefinition, bool, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return nil, false, ctx.Err()
@@ -58,8 +74,9 @@ func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context
 	// Session-stable tool schemas are immutable for a prompt-cache lane.
 	// Permission / policy / MCP changes are enforced at execution time; compact
 	// keeps the same surface and disables calls via tool_choice rather than
-	// starting a tool-schema epoch. Capability upgrades become visible only in a
-	// new session or an explicitly-created cache generation.
+	// starting a tool-schema epoch. The agent loop may replace a legacy
+	// goal-projected surface once at a new-turn boundary; other capability changes
+	// still require a new session or an explicitly-created cache generation.
 	return tools, true, nil
 }
 
