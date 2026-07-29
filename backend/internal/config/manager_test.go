@@ -291,3 +291,27 @@ func TestValidateAgentControlConfig(t *testing.T) {
 	cfg.AgentControl.AgentStoreDSN = "file:agent-control-agents?mode=memory&cache=shared"
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 }
+
+func TestDefaultCheckpointConfigUsesLeanOptInStorage(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.False(t, cfg.Checkpoint.Enabled)
+	require.Equal(t, "diff", cfg.Checkpoint.StoreMode)
+	require.False(t, cfg.Checkpoint.ConversationSnapshot)
+	require.Equal(t, int64(64*1024), cfg.Checkpoint.MaxDiffBytes)
+	require.Equal(t, 50, cfg.Checkpoint.MaxCheckpointsPerSession)
+	require.NoError(t, ValidateCheckpointConfig(&cfg.Checkpoint))
+}
+
+func TestValidateCheckpointConfigRejectsInvalidStorageOptions(t *testing.T) {
+	cfg := DefaultRuntimeConfig().Checkpoint
+	cfg.StoreMode = "archive"
+	require.Error(t, ValidateCheckpointConfig(&cfg))
+
+	cfg = DefaultRuntimeConfig().Checkpoint
+	cfg.MaxDiffBytes = -1
+	require.Error(t, ValidateCheckpointConfig(&cfg))
+
+	cfg = DefaultRuntimeConfig().Checkpoint
+	cfg.MaxCheckpointsPerSession = -1
+	require.Error(t, ValidateCheckpointConfig(&cfg))
+}

@@ -21,6 +21,12 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// Store modes control how mutation payloads are persisted.
+const (
+	StoreModeDiff = "diff" // before blobs + hashes (+ optional capped diff); default
+	StoreModeFull = "full" // before+after blobs and fulltext-friendly metadata
+)
+
 // Manager auto-captures checkpoints around mutating tools.
 type Manager struct {
 	Store             *artifact.Store
@@ -28,17 +34,49 @@ type Manager struct {
 	MaxFileBytes      int64
 	MaxDirectoryFiles int
 	MaxDirectoryBytes int64
+
+	// StoreMode is "diff" (default) or "full".
+	StoreMode string
+	// ConversationSnapshot persists full conversation blobs (expensive; off by default).
+	ConversationSnapshot bool
+	// MaxDiffBytes caps optional unified-diff text stored with each file record.
+	MaxDiffBytes int64
+	// MaxCheckpointsPerSession retains only the newest N checkpoints per session (0 = unlimited).
+	MaxCheckpointsPerSession int
 }
 
-// NewManager creates a checkpoint manager.
+// NewManager creates a checkpoint manager with Codex-inspired lean defaults.
 func NewManager(store *artifact.Store, events runtimeevents.Publisher) *Manager {
 	return &Manager{
-		Store:             store,
-		Events:            events,
-		MaxFileBytes:      1 * 1024 * 1024, // 1MB
-		MaxDirectoryFiles: 128,
-		MaxDirectoryBytes: 4 * 1024 * 1024, // 4MB
+		Store:                    store,
+		Events:                   events,
+		MaxFileBytes:             1 * 1024 * 1024, // 1MB
+		MaxDirectoryFiles:        128,
+		MaxDirectoryBytes:        4 * 1024 * 1024, // 4MB
+		StoreMode:                StoreModeDiff,
+		ConversationSnapshot:     false,
+		MaxDiffBytes:             64 * 1024,
+		MaxCheckpointsPerSession: 50,
 	}
+}
+
+func (m *Manager) storeMode() string {
+	if m == nil {
+		return StoreModeDiff
+	}
+	switch strings.ToLower(strings.TrimSpace(m.StoreMode)) {
+	case StoreModeFull:
+		return StoreModeFull
+	default:
+		return StoreModeDiff
+	}
+}
+
+func (m *Manager) maxDiffBytes() int64 {
+	if m == nil || m.MaxDiffBytes <= 0 {
+		return 0
+	}
+	return m.MaxDiffBytes
 }
 
 // BeforeMutation captures pre-mutation file states.
@@ -102,6 +140,11 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 			}
 		}
 	}
+	if maxDiffBytes := m.maxDiffBytes(); maxDiffBytes > 0 {
+		patch = truncateUTF8Bytes(patch, maxDiffBytes)
+	} else {
+		patch = ""
+	}
 	if toolMeta != nil {
 		extraPaths := extractPathsFromToolMeta(toolMeta)
 		if len(extraPaths) > 0 {
@@ -140,6 +183,7 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 
 	files := make([]FileSnapshot, 0, len(pending.Snapshots))
 	fileRecords := make([]artifact.CheckpointFile, 0, len(pending.Snapshots))
+	patchPending := patch
 	for _, path := range pending.Paths {
 		snapshot := pending.Snapshots[path]
 		if snapshot == nil {
@@ -149,7 +193,7 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 		if err != nil {
 			snapshot.Error = err.Error()
 			snapshot.Skipped = true
-			files = append(files, *snapshot)
+			files = append(files, m.metadataSnapshot(*snapshot))
 			continue
 		}
 		info, err := os.Stat(abs)
@@ -157,38 +201,45 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 			if os.IsNotExist(err) {
 				snapshot.AfterExists = false
 				snapshot.Op = opFor(snapshot.BeforeExists, snapshot.AfterExists)
-				files = append(files, *snapshot)
+			} else {
+				snapshot.Error = err.Error()
+				snapshot.Skipped = true
+				files = append(files, m.metadataSnapshot(*snapshot))
 				continue
 			}
-			snapshot.Error = err.Error()
-			snapshot.Skipped = true
-			files = append(files, *snapshot)
-			continue
-		}
-		if info.Size() > m.MaxFileBytes && m.MaxFileBytes > 0 {
+		} else {
+			if info.Size() > m.MaxFileBytes && m.MaxFileBytes > 0 {
+				snapshot.AfterExists = true
+				snapshot.Skipped = true
+				snapshot.Error = fmt.Sprintf("file too large (%d bytes)", info.Size())
+				snapshot.Op = opFor(snapshot.BeforeExists, snapshot.AfterExists)
+				files = append(files, m.metadataSnapshot(*snapshot))
+				continue
+			}
+			content, readErr := os.ReadFile(abs)
+			if readErr != nil {
+				snapshot.AfterExists = true
+				snapshot.Error = readErr.Error()
+				snapshot.Skipped = true
+				files = append(files, m.metadataSnapshot(*snapshot))
+				continue
+			}
 			snapshot.AfterExists = true
-			snapshot.Skipped = true
-			snapshot.Error = fmt.Sprintf("file too large (%d bytes)", info.Size())
+			snapshot.After = string(content)
+			snapshot.AfterHash = hashBytes(content)
 			snapshot.Op = opFor(snapshot.BeforeExists, snapshot.AfterExists)
-			files = append(files, *snapshot)
+		}
+		if snapshot.Op == "update" && snapshot.BeforeHash != "" && snapshot.BeforeHash == snapshot.AfterHash {
 			continue
 		}
-		content, err := os.ReadFile(abs)
-		if err != nil {
-			snapshot.AfterExists = true
-			snapshot.Error = err.Error()
-			snapshot.Skipped = true
-			files = append(files, *snapshot)
+		if snapshot.Op == "noop" {
 			continue
 		}
-		snapshot.AfterExists = true
-		snapshot.After = string(content)
-		snapshot.AfterHash = hashBytes(content)
-		snapshot.Op = opFor(snapshot.BeforeExists, snapshot.AfterExists)
-		if snapshot.Diff == "" && patch != "" {
-			snapshot.Diff = patch
+		if snapshot.Diff == "" && patchPending != "" {
+			snapshot.Diff = patchPending
+			patchPending = ""
 		}
-		files = append(files, *snapshot)
+		files = append(files, m.metadataSnapshot(*snapshot))
 		if snapshot.Skipped {
 			continue
 		}
@@ -200,36 +251,59 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 			DiffText:   snapshot.Diff,
 		}
 		if snapshot.BeforeExists {
-			if blobID, hash, err := m.Store.SaveBlob(ctx, []byte(snapshot.Before)); err == nil {
-				record.BeforeBlobID = blobID
-				if record.BeforeHash == "" {
-					record.BeforeHash = hash
-				}
+			blobID, hash, saveErr := m.Store.SaveBlob(ctx, []byte(snapshot.Before))
+			if saveErr != nil {
+				return "", fmt.Errorf("save before blob for %s: %w", snapshot.Path, saveErr)
+			}
+			record.BeforeBlobID = blobID
+			if record.BeforeHash == "" {
+				record.BeforeHash = hash
 			}
 		}
-		if snapshot.AfterExists {
-			if blobID, hash, err := m.Store.SaveBlob(ctx, []byte(snapshot.After)); err == nil {
-				record.AfterBlobID = blobID
-				if record.AfterHash == "" {
-					record.AfterHash = hash
-				}
+		if snapshot.AfterExists && m.storeMode() == StoreModeFull {
+			blobID, hash, saveErr := m.Store.SaveBlob(ctx, []byte(snapshot.After))
+			if saveErr != nil {
+				return "", fmt.Errorf("save after blob for %s: %w", snapshot.Path, saveErr)
+			}
+			record.AfterBlobID = blobID
+			if record.AfterHash == "" {
+				record.AfterHash = hash
 			}
 		}
 		fileRecords = append(fileRecords, record)
 	}
 
+	hasConversationCapture := m.ConversationSnapshot && (len(pending.Conversation) > 0 || pending.MessageCount == 0)
+	if len(files) == 0 && len(pending.DirectorySnapshotErrors) == 0 && !hasConversationCapture {
+		return "", nil
+	}
+
+	metadataFiles := files
+	if m.storeMode() == StoreModeDiff {
+		metadataFiles = make([]FileSnapshot, 0)
+		for _, snapshot := range files {
+			if snapshot.Skipped {
+				metadataFiles = append(metadataFiles, snapshot)
+			}
+		}
+	}
+	checkpointMetadata := map[string]interface{}{
+		"tool_name":     pending.ToolName,
+		"tool_call_id":  pending.ToolCallID,
+		"store_mode":    m.storeMode(),
+		"file_count":    len(files),
+		"message_count": pending.MessageCount,
+	}
+	if len(metadataFiles) > 0 {
+		checkpointMetadata["files"] = metadataFiles
+	}
 	checkpoint := artifact.Checkpoint{
 		SessionID:    pending.SessionID,
 		Reason:       fmt.Sprintf("tool:%s", strings.ToLower(pending.ToolName)),
 		HistoryHash:  "",
 		MessageCount: pending.MessageCount,
-		Metadata: map[string]interface{}{
-			"tool_name":     pending.ToolName,
-			"tool_call_id":  pending.ToolCallID,
-			"files":         files,
-			"message_count": pending.MessageCount,
-		},
-		CreatedAt: time.Now().UTC(),
+		Metadata:     checkpointMetadata,
+		CreatedAt:    time.Now().UTC(),
 	}
 	traceID := strings.TrimSpace(stringValue(toolMeta["trace_id"]))
 	if traceID != "" {
@@ -248,7 +322,7 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 	if len(pending.DirectorySnapshotErrors) > 0 {
 		checkpoint.Metadata["directory_snapshot_errors"] = append([]string(nil), pending.DirectorySnapshotErrors...)
 	}
-	if len(pending.Conversation) > 0 || pending.MessageCount == 0 {
+	if hasConversationCapture {
 		if blobID, historyHash, err := saveConversationSnapshot(ctx, m.Store, pending.Conversation); err == nil {
 			checkpoint.HistoryHash = historyHash
 			checkpoint.Metadata["conversation_blob_id"] = blobID
@@ -265,7 +339,14 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 		for i := range fileRecords {
 			fileRecords[i].CheckpointID = checkpointID
 		}
-		_ = m.Store.SaveCheckpointFiles(ctx, checkpointID, fileRecords)
+		if err := m.Store.SaveCheckpointFiles(ctx, checkpointID, fileRecords); err != nil {
+			return "", err
+		}
+	}
+	retentionPruned := 0
+	var retentionErr error
+	if m.MaxCheckpointsPerSession > 0 {
+		retentionPruned, retentionErr = m.Store.PruneSessionCheckpoints(ctx, pending.SessionID, m.MaxCheckpointsPerSession)
 	}
 	if m.Events != nil {
 		provenance := SummarizeCheckpointProvenance(&checkpoint)
@@ -275,6 +356,11 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 			"tool_call_id":                   pending.ToolCallID,
 			"file_count":                     len(files),
 			"directory_snapshot_error_count": len(pending.DirectorySnapshotErrors),
+			"retention_keep":                 m.MaxCheckpointsPerSession,
+			"retention_pruned":               retentionPruned,
+		}
+		if retentionErr != nil {
+			payload["retention_error"] = retentionErr.Error()
 		}
 		if traceID != "" {
 			payload["trace_id"] = traceID
@@ -297,7 +383,37 @@ func (m *Manager) AfterMutation(ctx context.Context, pending *PendingCheckpoint,
 			Payload:   payload,
 		})
 	}
+	if retentionErr != nil {
+		return checkpointID, fmt.Errorf("checkpoint stored but retention failed: %w", retentionErr)
+	}
 	return checkpointID, nil
+}
+
+func (m *Manager) metadataSnapshot(snapshot FileSnapshot) FileSnapshot {
+	if m != nil && m.storeMode() == StoreModeFull {
+		return snapshot
+	}
+	// Diff mode keeps no normal file entries here. The canonical compact file
+	// metadata lives in checkpoint_files and the before image in blobs, avoiding
+	// duplicate JSON payloads. This helper is used only for full mode or skipped
+	// capture warnings.
+	snapshot.Before = ""
+	snapshot.After = ""
+	return snapshot
+}
+
+func truncateUTF8Bytes(value string, limit int64) string {
+	if limit <= 0 || int64(len(value)) <= limit {
+		return value
+	}
+	end := int(limit)
+	for end > 0 && end < len(value) && (value[end]&0xc0) == 0x80 {
+		end--
+	}
+	if end <= 0 {
+		return ""
+	}
+	return value[:end]
 }
 
 // Restore applies a checkpoint restore plan for code, conversation, or both.
@@ -602,15 +718,62 @@ func checkpointsAfterTarget(ctx context.Context, store *artifact.Store, target *
 }
 
 func loadCheckpointSnapshots(ctx context.Context, store *artifact.Store, checkpoint artifact.Checkpoint) []FileSnapshot {
-	snapshots := decodeSnapshots(checkpoint.Metadata)
-	if len(snapshots) > 0 {
-		return snapshots
+	metadataSnapshots := decodeSnapshots(checkpoint.Metadata)
+	if store != nil {
+		files, err := store.GetCheckpointFiles(ctx, checkpoint.ID)
+		if err == nil && len(files) > 0 {
+			normalizedSnapshots := snapshotsFromFiles(ctx, store, files)
+			metadataByPath := make(map[string]FileSnapshot, len(metadataSnapshots))
+			for _, snapshot := range metadataSnapshots {
+				if key := checkpointPathKey(snapshot.Path); key != "" {
+					metadataByPath[key] = snapshot
+				}
+			}
+
+			snapshots := make([]FileSnapshot, 0, len(normalizedSnapshots)+len(metadataSnapshots))
+			seen := make(map[string]struct{}, len(normalizedSnapshots))
+			for _, snapshot := range normalizedSnapshots {
+				key := checkpointPathKey(snapshot.Path)
+				if snapshot.Skipped && key != "" {
+					if fallback, ok := metadataByPath[key]; ok && !fallback.Skipped {
+						snapshots = append(snapshots, fallback)
+						seen[key] = struct{}{}
+						continue
+					}
+				}
+				snapshots = append(snapshots, snapshot)
+				if key != "" {
+					seen[key] = struct{}{}
+				}
+			}
+			// Full-mode and legacy metadata can rescue an incomplete normalized row
+			// or a checkpoint whose normalized file transaction was only partial.
+			// Lean diff metadata contains only skipped warnings, so appending unseen
+			// metadata cannot shadow a usable blob-backed record.
+			for _, snapshot := range metadataSnapshots {
+				key := checkpointPathKey(snapshot.Path)
+				if key != "" {
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+				}
+				snapshots = append(snapshots, snapshot)
+			}
+			return snapshots
+		}
 	}
-	files, err := store.GetCheckpointFiles(ctx, checkpoint.ID)
-	if err != nil || len(files) == 0 {
-		return nil
+	// Legacy checkpoints stored full file payloads in metadata. Keep this as a
+	// read-only fallback so existing artifact databases remain restorable.
+	return metadataSnapshots
+}
+
+func checkpointPathKey(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
 	}
-	return snapshotsFromFiles(ctx, store, files)
+	return filepath.Clean(path)
 }
 
 func normalizeMode(mode RestoreMode) RestoreMode {
@@ -676,29 +839,53 @@ func snapshotsFromFiles(ctx context.Context, store *artifact.Store, files []arti
 			AfterHash:  file.AfterHash,
 			Diff:       file.DiffText,
 		}
-		beforeExists := strings.ToLower(strings.TrimSpace(file.Op)) != "create"
-		afterExists := strings.ToLower(strings.TrimSpace(file.Op)) != "delete"
-		if file.BeforeBlobID != "" {
-			if data, err := store.LoadBlob(ctx, file.BeforeBlobID); err == nil && data != nil {
+		op := strings.ToLower(strings.TrimSpace(file.Op))
+		requiresBeforeBlob := false
+		switch op {
+		case "create":
+			snapshot.BeforeExists = false
+			snapshot.AfterExists = true
+		case "update", "modify":
+			requiresBeforeBlob = true
+			snapshot.AfterExists = true
+		case "delete":
+			requiresBeforeBlob = true
+			snapshot.AfterExists = false
+		case "noop":
+			snapshot.Skipped = true
+			snapshot.Error = "checkpoint file operation is noop"
+		default:
+			if strings.TrimSpace(file.BeforeBlobID) == "" {
+				snapshot.Skipped = true
+				snapshot.Error = fmt.Sprintf("unsupported checkpoint file operation %q", file.Op)
+			} else {
+				requiresBeforeBlob = true
+				snapshot.AfterExists = strings.TrimSpace(file.AfterBlobID) != ""
+			}
+		}
+
+		if requiresBeforeBlob {
+			blobID := strings.TrimSpace(file.BeforeBlobID)
+			if blobID == "" {
+				snapshot.Skipped = true
+				snapshot.Error = fmt.Sprintf("missing before blob for %s operation", op)
+			} else if data, err := store.LoadBlob(ctx, blobID); err != nil {
+				snapshot.Skipped = true
+				snapshot.Error = fmt.Sprintf("load before blob: %v", err)
+			} else if data == nil {
+				snapshot.Skipped = true
+				snapshot.Error = "before blob not found"
+			} else {
 				snapshot.Before = string(data)
 				snapshot.BeforeExists = true
-			} else {
-				snapshot.Error = "failed to load before blob"
-				snapshot.Skipped = true
 			}
-		} else {
-			snapshot.BeforeExists = beforeExists
 		}
-		if file.AfterBlobID != "" {
-			if data, err := store.LoadBlob(ctx, file.AfterBlobID); err == nil && data != nil {
+
+		if blobID := strings.TrimSpace(file.AfterBlobID); blobID != "" {
+			if data, err := store.LoadBlob(ctx, blobID); err == nil && data != nil {
 				snapshot.After = string(data)
 				snapshot.AfterExists = true
-			} else {
-				snapshot.Error = "failed to load after blob"
-				snapshot.Skipped = true
 			}
-		} else {
-			snapshot.AfterExists = afterExists
 		}
 		out = append(out, snapshot)
 	}
@@ -844,7 +1031,7 @@ func (m *Manager) backfillConversationSnapshot(ctx context.Context, target *arti
 		if !canBackfillConversationSnapshot(target, len(messages), prefix) {
 			continue
 		}
-		if !previewOnly {
+		if !previewOnly && m.ConversationSnapshot {
 			if err := m.persistConversationBackfill(ctx, target, prefix); err != nil {
 				return prefix, true, err
 			}

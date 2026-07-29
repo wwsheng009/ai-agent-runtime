@@ -45,26 +45,27 @@ type Config struct {
 
 // Agent AI Agent
 type Agent struct {
-	config        *Config
-	skillRouter   *skill.Router
-	skillExec     *skill.Executor
-	mcpManager    skill.MCPManager
-	llmRuntime    *llm.LLMRuntime
-	memory        *memory.Memory
-	planner       *Planner
-	artifacts     *artifact.Store
-	contextMgr    *contextmgr.Manager
-	outputGate    *output.Gateway
-	subagents     *SubagentScheduler
-	toolCatalog   *mcpcatalog.Catalog
-	eventBus      *runtimeevents.Bus
-	promptBuild   *PromptBuilder
-	toolPolicy    *ToolExecutionPolicy
-	toolHooks     ToolHooks
-	permEngine    *PermissionEngine
-	toolBroker    *ToolBroker
-	hookManager   *HookManager
-	checkpointMgr *CheckpointManager
+	config             *Config
+	skillRouter        *skill.Router
+	skillExec          *skill.Executor
+	mcpManager         skill.MCPManager
+	llmRuntime         *llm.LLMRuntime
+	memory             *memory.Memory
+	planner            *Planner
+	artifacts          *artifact.Store
+	contextMgr         *contextmgr.Manager
+	outputGate         *output.Gateway
+	subagents          *SubagentScheduler
+	toolCatalog        *mcpcatalog.Catalog
+	eventBus           *runtimeevents.Bus
+	promptBuild        *PromptBuilder
+	toolPolicy         *ToolExecutionPolicy
+	toolHooks          ToolHooks
+	permEngine         *PermissionEngine
+	toolBroker         *ToolBroker
+	hookManager        *HookManager
+	checkpointMgr      *CheckpointManager
+	checkpointDisabled bool
 
 	mu      sync.RWMutex
 	running bool
@@ -144,21 +145,22 @@ func NewAgentWithLLM(cfg *Config, mcpManager skill.MCPManager, llmRuntime *llm.L
 	toolCatalog := newDefaultToolCatalog(mcpManager)
 
 	return &Agent{
-		config:      cfg,
-		skillRouter: router,
-		skillExec:   executor,
-		mcpManager:  mcpManager,
-		llmRuntime:  llmRuntime,
-		memory:      memory.NewMemory(cfg.MemoryMaxSize),
-		planner:     planner,
-		artifacts:   artifactStore,
-		contextMgr:  contextMgr,
-		outputGate:  outputGate,
-		subagents:   NewSubagentScheduler(nil, SubagentSchedulerConfig{}),
-		toolCatalog: toolCatalog,
-		eventBus:    runtimeevents.NewBus(),
-		promptBuild: NewPromptBuilder(),
-		running:     false,
+		config:             cfg,
+		skillRouter:        router,
+		skillExec:          executor,
+		mcpManager:         mcpManager,
+		llmRuntime:         llmRuntime,
+		memory:             memory.NewMemory(cfg.MemoryMaxSize),
+		planner:            planner,
+		artifacts:          artifactStore,
+		contextMgr:         contextMgr,
+		outputGate:         outputGate,
+		subagents:          NewSubagentScheduler(nil, SubagentSchedulerConfig{}),
+		toolCatalog:        toolCatalog,
+		eventBus:           runtimeevents.NewBus(),
+		promptBuild:        NewPromptBuilder(),
+		checkpointDisabled: true,
+		running:            false,
 		state: AgentState{
 			Running: false,
 			Errors:  make([]string, 0),

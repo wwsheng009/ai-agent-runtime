@@ -190,9 +190,19 @@ type ArtifactConfig struct {
 }
 
 // CheckpointConfig controls checkpoint capture behavior.
+// Enabled defaults to false so file-mutation blobs are opt-in.
+//
+// Storage is Codex-inspired by default when capture is enabled:
+//   - storeMode=diff keeps before blobs + hashes (and optional capped diffs), not after fulltext
+//   - conversationSnapshot=false avoids duplicating session history into artifacts.sqlite
+//   - maxCheckpointsPerSession bounds growth via retention GC after each capture
 type CheckpointConfig struct {
-	Enabled      bool  `yaml:"enabled" json:"enabled"`
-	MaxFileBytes int64 `yaml:"maxFileBytes" json:"maxFileBytes"`
+	Enabled                  bool   `yaml:"enabled" json:"enabled"`
+	MaxFileBytes             int64  `yaml:"maxFileBytes" json:"maxFileBytes"`
+	StoreMode                string `yaml:"storeMode" json:"storeMode"` // "diff" (default) | "full"
+	ConversationSnapshot     bool   `yaml:"conversationSnapshot" json:"conversationSnapshot"`
+	MaxDiffBytes             int64  `yaml:"maxDiffBytes" json:"maxDiffBytes"`
+	MaxCheckpointsPerSession int    `yaml:"maxCheckpointsPerSession" json:"maxCheckpointsPerSession"`
 }
 
 // BackgroundConfig controls background task persistence.
@@ -348,8 +358,12 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		SessionRuntime: SessionRuntimeConfig{},
 		Artifact:       ArtifactConfig{},
 		Checkpoint: CheckpointConfig{
-			Enabled:      true,
-			MaxFileBytes: 1 * 1024 * 1024,
+			Enabled:                  false,
+			MaxFileBytes:             1 * 1024 * 1024,
+			StoreMode:                "diff",
+			ConversationSnapshot:     false,
+			MaxDiffBytes:             64 * 1024,
+			MaxCheckpointsPerSession: 50,
 		},
 		Background: BackgroundConfig{
 			MaxOutputBytes:          1 * 1024 * 1024,
@@ -796,6 +810,16 @@ func ValidateCheckpointConfig(config *CheckpointConfig) error {
 	}
 	if config.MaxFileBytes < 0 {
 		return errors.New(errors.ErrValidationFailed, "checkpoint.maxFileBytes cannot be negative")
+	}
+	if config.MaxDiffBytes < 0 {
+		return errors.New(errors.ErrValidationFailed, "checkpoint.maxDiffBytes cannot be negative")
+	}
+	if config.MaxCheckpointsPerSession < 0 {
+		return errors.New(errors.ErrValidationFailed, "checkpoint.maxCheckpointsPerSession cannot be negative")
+	}
+	mode := strings.ToLower(strings.TrimSpace(config.StoreMode))
+	if mode != "" && mode != "diff" && mode != "full" {
+		return errors.New(errors.ErrValidationFailed, "checkpoint.storeMode must be \"diff\" or \"full\"")
 	}
 	return nil
 }

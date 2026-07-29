@@ -114,12 +114,199 @@ func TestManagerRestoreBothRestoresCodeAndConversationPlan(t *testing.T) {
 	assert.Equal(t, "mid", string(content))
 }
 
+func TestManagerAfterMutationSkipsNoopPath(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	path := filepath.Join(t.TempDir(), "missing.txt")
+	manager := NewManager(store, nil)
+	checkpointID, err := manager.AfterMutation(context.Background(), &PendingCheckpoint{
+		SessionID:  "session-noop",
+		ToolName:   "edit",
+		ToolCallID: "tool-noop",
+		Paths:      []string{path},
+		Snapshots: map[string]*FileSnapshot{
+			path: {Path: path, BeforeExists: false},
+		},
+	}, nil, "")
+	require.NoError(t, err)
+	assert.Empty(t, checkpointID)
+
+	checkpoints, err := store.ListCheckpoints(context.Background(), "session-noop", 0, 0)
+	require.NoError(t, err)
+	assert.Empty(t, checkpoints)
+}
+
+func TestManagerAfterMutationEnforcesSessionRetention(t *testing.T) {
+	ctx := context.Background()
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	require.NoError(t, os.WriteFile(path, []byte("zero"), 0o644))
+	manager := NewManager(store, nil)
+	manager.MaxCheckpointsPerSession = 1
+
+	firstPending, err := manager.BeforeMutation(ctx, "session-retention", "edit", "tool-1", map[string]interface{}{"path": path})
+	require.NoError(t, err)
+	require.NotNil(t, firstPending)
+	require.NoError(t, os.WriteFile(path, []byte("one"), 0o644))
+	firstID, err := manager.AfterMutation(ctx, firstPending, nil, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, firstID)
+
+	secondPending, err := manager.BeforeMutation(ctx, "session-retention", "edit", "tool-2", map[string]interface{}{"path": path})
+	require.NoError(t, err)
+	require.NotNil(t, secondPending)
+	require.NoError(t, os.WriteFile(path, []byte("two"), 0o644))
+	secondID, err := manager.AfterMutation(ctx, secondPending, nil, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, secondID)
+
+	checkpoints, err := store.ListCheckpoints(ctx, "session-retention", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 1)
+	assert.Equal(t, secondID, checkpoints[0].ID)
+	first, err := store.GetCheckpoint(ctx, firstID)
+	require.NoError(t, err)
+	assert.Nil(t, first)
+}
+
+func TestManagerFullModeStoresFullMetadataAndAfterBlob(t *testing.T) {
+	ctx := context.Background()
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	require.NoError(t, os.WriteFile(path, []byte("before"), 0o644))
+	manager := NewManager(store, nil)
+	manager.StoreMode = StoreModeFull
+	manager.MaxDiffBytes = 5
+	pending, err := manager.BeforeMutation(ctx, "session-full", "edit", "tool-full", map[string]interface{}{"path": path})
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	require.NoError(t, os.WriteFile(path, []byte("after"), 0o644))
+
+	checkpointID, err := manager.AfterMutation(ctx, pending, map[string]interface{}{"patch": "123456789"}, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, checkpointID)
+	checkpoint, err := store.GetCheckpoint(ctx, checkpointID)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	files, ok := checkpoint.Metadata["files"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, files, 1)
+	metadataFile, ok := files[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "before", metadataFile["before"])
+	assert.Equal(t, "after", metadataFile["after"])
+	assert.Equal(t, "12345", metadataFile["diff"])
+
+	records, err := store.GetCheckpointFiles(ctx, checkpointID)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.NotEmpty(t, records[0].BeforeBlobID)
+	assert.NotEmpty(t, records[0].AfterBlobID)
+	assert.Equal(t, "12345", records[0].DiffText)
+}
+
+func TestManagerRestoreMissingBeforeBlobDoesNotTruncateFile(t *testing.T) {
+	ctx := context.Background()
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	require.NoError(t, os.WriteFile(path, []byte("current"), 0o644))
+	targetID, err := store.SaveCheckpoint(ctx, artifact.Checkpoint{
+		SessionID: "session-missing-blob",
+		CreatedAt: time.Unix(1, 0).UTC(),
+	})
+	require.NoError(t, err)
+	laterID, err := store.SaveCheckpoint(ctx, artifact.Checkpoint{
+		SessionID: "session-missing-blob",
+		CreatedAt: time.Unix(2, 0).UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SaveCheckpointFiles(ctx, laterID, []artifact.CheckpointFile{{
+		Path:         path,
+		Op:           "update",
+		BeforeBlobID: "blob_missing",
+	}}))
+
+	result, err := NewManager(store, nil).Restore(ctx, RestoreRequest{
+		SessionID:    "session-missing-blob",
+		CheckpointID: targetID,
+		Mode:         RestoreCode,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.AppliedPaths)
+	require.NotEmpty(t, result.Errors)
+	assert.Contains(t, result.Errors[0], "before blob not found")
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "current", string(content))
+}
+
+func TestManagerRestoreIncompleteFileRowFallsBackToLegacyMetadata(t *testing.T) {
+	ctx := context.Background()
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	require.NoError(t, os.WriteFile(path, []byte("current"), 0o644))
+	targetID, err := store.SaveCheckpoint(ctx, artifact.Checkpoint{
+		SessionID: "session-metadata-fallback",
+		CreatedAt: time.Unix(1, 0).UTC(),
+	})
+	require.NoError(t, err)
+	laterID, err := store.SaveCheckpoint(ctx, artifact.Checkpoint{
+		SessionID: "session-metadata-fallback",
+		Metadata: map[string]interface{}{
+			"files": []map[string]interface{}{{
+				"path":          path,
+				"op":            "update",
+				"before":        "legacy-before",
+				"after":         "current",
+				"before_exists": true,
+				"after_exists":  true,
+			}},
+		},
+		CreatedAt: time.Unix(2, 0).UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SaveCheckpointFiles(ctx, laterID, []artifact.CheckpointFile{{
+		Path:         path,
+		Op:           "update",
+		BeforeBlobID: "blob_missing",
+	}}))
+
+	result, err := NewManager(store, nil).Restore(ctx, RestoreRequest{
+		SessionID:    "session-metadata-fallback",
+		CheckpointID: targetID,
+		Mode:         RestoreCode,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, result.AppliedPaths, path)
+	assert.Empty(t, result.Errors)
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-before", string(content))
+}
+
 func TestManagerRestoreConversationReturnsExactSnapshotWhenAvailable(t *testing.T) {
 	store, err := artifact.NewStore(nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
 	manager := NewManager(store, nil)
+	manager.ConversationSnapshot = true
 	pending := &PendingCheckpoint{
 		SessionID:    "session-1",
 		ToolName:     "execute_shell_command",
@@ -157,6 +344,7 @@ func TestManagerPreviewConversationMarksExactSnapshotWhenAvailable(t *testing.T)
 	t.Cleanup(func() { _ = store.Close() })
 
 	manager := NewManager(store, nil)
+	manager.ConversationSnapshot = true
 	pending := &PendingCheckpoint{
 		SessionID:    "session-1",
 		ToolName:     "execute_shell_command",
@@ -190,6 +378,7 @@ func TestManagerRestoreConversationBackfillsLegacyCheckpointFromLaterExactSnapsh
 	t.Cleanup(func() { _ = store.Close() })
 
 	manager := NewManager(store, nil)
+	manager.ConversationSnapshot = true
 	legacyMessages := []runtimetypes.Message{
 		*runtimetypes.NewUserMessage("before"),
 	}
@@ -236,6 +425,60 @@ func TestManagerRestoreConversationBackfillsLegacyCheckpointFromLaterExactSnapsh
 	assert.Equal(t, float64(1), target.Metadata["conversation_message_count"])
 }
 
+func TestManagerRestoreConversationBackfillDoesNotPersistWhenSnapshotsDisabled(t *testing.T) {
+	ctx := context.Background()
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	manager := NewManager(store, nil)
+	manager.ConversationSnapshot = true
+	legacyMessages := []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("before"),
+	}
+	targetID, err := store.SaveCheckpoint(ctx, artifact.Checkpoint{
+		SessionID:    "session-backfill-disabled",
+		Reason:       "tool:edit",
+		HistoryHash:  legacyConversationHash(legacyMessages),
+		MessageCount: 1,
+		Metadata: map[string]interface{}{
+			"message_count": 1,
+		},
+		CreatedAt: time.Now().Add(-1 * time.Minute).UTC(),
+	})
+	require.NoError(t, err)
+
+	_, err = manager.AfterMutation(ctx, &PendingCheckpoint{
+		SessionID:    "session-backfill-disabled",
+		ToolName:     "execute_shell_command",
+		ToolCallID:   "tool_2",
+		MessageCount: 2,
+		Conversation: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("before"),
+			*runtimetypes.NewAssistantMessage("during"),
+		},
+	}, nil, "")
+	require.NoError(t, err)
+
+	manager.ConversationSnapshot = false
+	result, err := manager.Restore(ctx, RestoreRequest{
+		SessionID:    "session-backfill-disabled",
+		CheckpointID: targetID,
+		Mode:         RestoreConversation,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.ConversationExact)
+	require.Len(t, result.ConversationMessages, 1)
+	assert.Equal(t, "before", result.ConversationMessages[0].Content)
+
+	target, err := store.GetCheckpoint(ctx, targetID)
+	require.NoError(t, err)
+	require.NotNil(t, target)
+	_, ok := target.Metadata["conversation_blob_id"]
+	assert.False(t, ok)
+}
+
 func TestManagerPreviewConversationBackfillsLegacyCheckpointWithoutPersisting(t *testing.T) {
 	ctx := context.Background()
 	store, err := artifact.NewStore(nil)
@@ -243,6 +486,7 @@ func TestManagerPreviewConversationBackfillsLegacyCheckpointWithoutPersisting(t 
 	t.Cleanup(func() { _ = store.Close() })
 
 	manager := NewManager(store, nil)
+	manager.ConversationSnapshot = true
 	legacyMessages := []runtimetypes.Message{
 		*runtimetypes.NewUserMessage("before"),
 	}
@@ -295,6 +539,7 @@ func TestManagerRestoreConversationBackfillRequiresMatchingHashOrCount(t *testin
 	t.Cleanup(func() { _ = store.Close() })
 
 	manager := NewManager(store, nil)
+	manager.ConversationSnapshot = true
 	targetID, err := store.SaveCheckpoint(ctx, artifact.Checkpoint{
 		SessionID:    "session-1",
 		Reason:       "tool:edit",
@@ -362,22 +607,17 @@ func TestManagerShellFallbackSnapshotsFilesFromWorkingDirectory(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, checkpoint)
 
-	rawFiles, ok := checkpoint.Metadata["files"].([]interface{})
-	require.True(t, ok)
-	found := false
-	for _, item := range rawFiles {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if entry["path"] == filepath.Clean(path) {
-			found = true
-			assert.Equal(t, "before", entry["before"])
-			assert.Equal(t, "after", entry["after"])
-			break
-		}
-	}
-	assert.True(t, found, "expected checkpoint metadata to include shell-mutated file from cwd fallback")
+	assert.Nil(t, checkpoint.Metadata["files"])
+	assert.Equal(t, float64(1), checkpoint.Metadata["file_count"])
+	fileRecords, err := store.GetCheckpointFiles(context.Background(), checkpointID)
+	require.NoError(t, err)
+	require.Len(t, fileRecords, 1)
+	assert.Equal(t, filepath.Clean(path), filepath.Clean(fileRecords[0].Path))
+	assert.NotEmpty(t, fileRecords[0].BeforeBlobID)
+	assert.Empty(t, fileRecords[0].AfterBlobID)
+	before, err := store.LoadBlob(context.Background(), fileRecords[0].BeforeBlobID)
+	require.NoError(t, err)
+	assert.Equal(t, "before", string(before))
 }
 
 func TestManagerAfterMutation_PublishesCheckpointEventWithTraceAndProvenance(t *testing.T) {

@@ -38,6 +38,7 @@ func TestRestoreSessionCheckpointConversationRewritesSessionHistory(t *testing.T
 		Model: "test-model",
 	}, nil)
 	checkpointMgr := runtimecheckpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &runtimecheckpoint.PendingCheckpoint{
@@ -116,6 +117,7 @@ func TestPreviewSessionCheckpointConversationReportsExactSnapshot(t *testing.T) 
 		Model: "test-model",
 	}, nil)
 	checkpointMgr := runtimecheckpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &runtimecheckpoint.PendingCheckpoint{
@@ -182,6 +184,7 @@ func TestPreviewSessionCheckpointConversationIncludesProvenance(t *testing.T) {
 		Model: "test-model",
 	}, nil)
 	checkpointMgr := runtimecheckpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &runtimecheckpoint.PendingCheckpoint{
@@ -259,6 +262,7 @@ func TestListSessionCheckpointsIncludesConversationExactSummary(t *testing.T) {
 	artifactStore := apiAgent.GetArtifactStore()
 	require.NotNil(t, artifactStore)
 	checkpointMgr := runtimecheckpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &runtimecheckpoint.PendingCheckpoint{
@@ -347,6 +351,7 @@ func TestListSessionCheckpointsIncludesProvenanceSummary(t *testing.T) {
 	artifactStore := apiAgent.GetArtifactStore()
 	require.NotNil(t, artifactStore)
 	checkpointMgr := runtimecheckpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &runtimecheckpoint.PendingCheckpoint{

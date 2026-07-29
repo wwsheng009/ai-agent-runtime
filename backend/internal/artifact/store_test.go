@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewStore_PathBackedIsLazyUntilFirstUse(t *testing.T) {
@@ -309,5 +310,139 @@ func TestStore_CheckpointsPersistAcrossReopen(t *testing.T) {
 	}
 	if string(blob) != "after\n" {
 		t.Fatalf("expected after blob content to persist, got %q", string(blob))
+	}
+}
+
+func TestSaveBlobDeduplicatesByContentHash(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	firstID, firstHash, err := store.SaveBlob(ctx, []byte("same content"))
+	if err != nil {
+		t.Fatalf("save first blob: %v", err)
+	}
+	secondID, secondHash, err := store.SaveBlob(ctx, []byte("same content"))
+	if err != nil {
+		t.Fatalf("save duplicate blob: %v", err)
+	}
+	if firstID == "" || firstID != secondID {
+		t.Fatalf("expected duplicate content to reuse blob id, got %q and %q", firstID, secondID)
+	}
+	if firstHash == "" || firstHash != secondHash {
+		t.Fatalf("expected duplicate content hashes to match, got %q and %q", firstHash, secondHash)
+	}
+}
+
+func TestPruneSessionCheckpointsRemovesOldRowsAndOrphanBlobs(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	oldBlobID, _, err := store.SaveBlob(ctx, []byte("old-only"))
+	if err != nil {
+		t.Fatalf("save old blob: %v", err)
+	}
+	sharedBlobID, _, err := store.SaveBlob(ctx, []byte("shared"))
+	if err != nil {
+		t.Fatalf("save shared blob: %v", err)
+	}
+	oldConversationBlobID, _, err := store.SaveBlob(ctx, []byte("old conversation"))
+	if err != nil {
+		t.Fatalf("save old conversation blob: %v", err)
+	}
+	retainedConversationBlobID, _, err := store.SaveBlob(ctx, []byte("retained conversation"))
+	if err != nil {
+		t.Fatalf("save retained conversation blob: %v", err)
+	}
+	crossSessionConversationBlobID, _, err := store.SaveBlob(ctx, []byte("cross-session conversation"))
+	if err != nil {
+		t.Fatalf("save cross-session conversation blob: %v", err)
+	}
+
+	sharedConversationOldID, err := store.SaveCheckpoint(ctx, Checkpoint{
+		SessionID: "session-prune",
+		Metadata: map[string]interface{}{
+			"conversation_blob_id": crossSessionConversationBlobID,
+		},
+		CreatedAt: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("save old shared-conversation checkpoint: %v", err)
+	}
+	_, err = store.SaveCheckpoint(ctx, Checkpoint{
+		SessionID: "session-other",
+		Metadata: map[string]interface{}{
+			"conversation_blob_id": crossSessionConversationBlobID,
+		},
+		CreatedAt: time.Unix(3, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("save cross-session conversation checkpoint: %v", err)
+	}
+
+	oldID, err := store.SaveCheckpoint(ctx, Checkpoint{
+		SessionID: "session-prune",
+		Metadata: map[string]interface{}{
+			"conversation_blob_id": oldConversationBlobID,
+		},
+		CreatedAt: time.Unix(1, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("save old checkpoint: %v", err)
+	}
+	if err := store.SaveCheckpointFiles(ctx, oldID, []CheckpointFile{{Path: "old.txt", Op: "update", BeforeBlobID: oldBlobID}, {Path: "shared-old.txt", Op: "update", BeforeBlobID: sharedBlobID}}); err != nil {
+		t.Fatalf("save old checkpoint files: %v", err)
+	}
+	newID, err := store.SaveCheckpoint(ctx, Checkpoint{
+		SessionID: "session-prune",
+		Metadata: map[string]interface{}{
+			"conversation_blob_id": retainedConversationBlobID,
+		},
+		CreatedAt: time.Unix(2, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("save new checkpoint: %v", err)
+	}
+	if err := store.SaveCheckpointFiles(ctx, newID, []CheckpointFile{{Path: "shared-new.txt", Op: "update", BeforeBlobID: sharedBlobID}}); err != nil {
+		t.Fatalf("save new checkpoint files: %v", err)
+	}
+
+	pruned, err := store.PruneSessionCheckpoints(ctx, "session-prune", 1)
+	if err != nil {
+		t.Fatalf("prune checkpoints: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("expected two checkpoints pruned, got %d", pruned)
+	}
+	if checkpoint, err := store.GetCheckpoint(ctx, sharedConversationOldID); err != nil || checkpoint != nil {
+		t.Fatalf("expected old shared-conversation checkpoint removed, got %#v err=%v", checkpoint, err)
+	}
+	if checkpoint, err := store.GetCheckpoint(ctx, oldID); err != nil || checkpoint != nil {
+		t.Fatalf("expected old checkpoint removed, got %#v err=%v", checkpoint, err)
+	}
+	if checkpoint, err := store.GetCheckpoint(ctx, newID); err != nil || checkpoint == nil {
+		t.Fatalf("expected new checkpoint retained, got %#v err=%v", checkpoint, err)
+	}
+	if blob, err := store.LoadBlob(ctx, oldBlobID); err != nil || blob != nil {
+		t.Fatalf("expected orphan old blob removed, got %q err=%v", string(blob), err)
+	}
+	if blob, err := store.LoadBlob(ctx, sharedBlobID); err != nil || string(blob) != "shared" {
+		t.Fatalf("expected shared blob retained, got %q err=%v", string(blob), err)
+	}
+	if blob, err := store.LoadBlob(ctx, oldConversationBlobID); err != nil || blob != nil {
+		t.Fatalf("expected old conversation blob removed, got %q err=%v", string(blob), err)
+	}
+	if blob, err := store.LoadBlob(ctx, retainedConversationBlobID); err != nil || string(blob) != "retained conversation" {
+		t.Fatalf("expected retained conversation blob to survive, got %q err=%v", string(blob), err)
+	}
+	if blob, err := store.LoadBlob(ctx, crossSessionConversationBlobID); err != nil || string(blob) != "cross-session conversation" {
+		t.Fatalf("expected cross-session conversation blob to survive, got %q err=%v", string(blob), err)
 	}
 }
