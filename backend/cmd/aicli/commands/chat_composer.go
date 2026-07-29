@@ -88,6 +88,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 	hooks := ui.LineEditorHooks{
 		InitialText:           c.initial.Text,
 		InitialCursor:         c.initial.Cursor,
+		RedrawInitialText:     chatComposerUsesFixedSurface(c.session),
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
@@ -108,6 +109,10 @@ func chatComposerMaxVisibleRows(session *ChatSession) int {
 		return ui.ChatComposerMaxVisibleRows
 	}
 	return session.Surface.PromptInputMaxVisibleRows()
+}
+
+func chatComposerUsesFixedSurface(session *ChatSession) bool {
+	return session != nil && session.Surface != nil && session.Surface.Enabled()
 }
 
 func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
@@ -274,6 +279,7 @@ func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
 	return ui.LineEditorHooks{
 		InitialText:           c.initial.Text,
 		InitialCursor:         c.initial.Cursor,
+		RedrawInitialText:     chatComposerUsesFixedSurface(c.session),
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,

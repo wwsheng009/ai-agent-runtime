@@ -733,6 +733,29 @@ func TestFixedBottomSurface_RefreshActiveBandRepaintsUnchangedStyledFrame(t *tes
 	}
 }
 
+func TestFixedBottomSurface_SetActiveBandRepaintsOnlyChangedRows(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		_ = surface.SetActiveBand([]string{"stable-header", "old-tail", "stable-footer"})
+	})
+	output := captureUIStdout(t, func() {
+		if !surface.SetActiveBand([]string{"stable-header", "new-tail", "stable-footer"}) {
+			t.Fatal("expected differential active band update to succeed")
+		}
+	})
+	if !strings.Contains(output, "new-tail") {
+		t.Fatalf("changed active row was not repainted: %q", output)
+	}
+	if strings.Contains(output, "stable-header") || strings.Contains(output, "stable-footer") || strings.Contains(output, "old-tail") {
+		t.Fatalf("unchanged or stale active rows were unnecessarily repainted: %q", output)
+	}
+	if got := strings.Count(output, "\x1b[K"); got != 1 {
+		t.Fatalf("differential update cleared %d rows, want exactly one: %q", got, output)
+	}
+}
+
 func TestFixedBottomSurface_ActiveBandWorksWithoutPrompt(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 

@@ -631,10 +631,90 @@ func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.
 	if activeBandLinesEqual(s.activeBandLines, normalized) && render.LinesEqual(s.activeBandStyled, styled) {
 		return s.enabled
 	}
+	previousLines := s.activeBandLines
+	previousStyled := s.activeBandStyled
+	previousRows := s.bottomPaneStateLocked().activeBandVisibleRowCount()
+	previousStart := s.promptRenderedStartRow
 	s.activeBandLines = normalized
 	s.activeBandStyled = cloneRenderLines(styled)
 	s.reflowPromptViewportLocked()
+	currentRows := s.bottomPaneStateLocked().activeBandVisibleRowCount()
+	if previousRows == currentRows {
+		if currentRows == 0 {
+			return s.enabled
+		}
+		if previousStart > 0 {
+			return s.repaintActiveBandDiffLocked(previousStart, previousLines, previousStyled)
+		}
+	}
 	return s.repaintActiveBandLocked()
+}
+
+func (s *FixedBottomSurface) repaintActiveBandDiffLocked(start int, previousLines []string, previousStyled []render.Line) bool {
+	if !s.enabled || start < 1 {
+		return false
+	}
+	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
+	WithTerminalWriteLock(func() {
+		if restorePromptCursor {
+			s.terminal.HideCursor()
+			defer s.terminal.ShowCursor()
+		} else {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
+		themeContext := s.activeBandThemeContextLocked()
+		for i, plain := range s.activeBandLines {
+			if activeBandRowEqual(previousLines, previousStyled, s.activeBandLines, s.activeBandStyled, i) {
+				continue
+			}
+			s.renderActiveBandRowLocked(start+i, i, plain, themeContext)
+		}
+		if restorePromptCursor {
+			s.restoreStoredPromptCursorLocked()
+		} else {
+			s.moveToOutputLocked()
+		}
+	})
+	return true
+}
+
+func activeBandRowEqual(previousLines []string, previousStyled []render.Line, currentLines []string, currentStyled []render.Line, index int) bool {
+	if index >= len(previousLines) || index >= len(currentLines) || previousLines[index] != currentLines[index] {
+		return false
+	}
+	previousHasStyle := index < len(previousStyled)
+	currentHasStyle := index < len(currentStyled)
+	if previousHasStyle != currentHasStyle {
+		return false
+	}
+	if !previousHasStyle {
+		return true
+	}
+	return render.LinesEqual(previousStyled[index:index+1], currentStyled[index:index+1])
+}
+
+func (s *FixedBottomSurface) renderActiveBandRowLocked(row, index int, plain string, themeContext style.ThemeContext) {
+	if row < 1 {
+		return
+	}
+	s.terminal.MoveTo(row, 1)
+	s.terminal.ClearLine()
+	if index < len(s.activeBandStyled) {
+		line := s.activeBandStyled[index]
+		if render.LineWidth(line) > s.terminal.Width() {
+			line = render.Truncate(line, s.terminal.Width(), "…")
+		}
+		fmt.Print(style.RenderDocument(render.LinesDoc(line), themeContext))
+		return
+	}
+	plain = truncateFixedPopupLine(plain, s.terminal.Width())
+	if plain != "" {
+		fmt.Print(style.RenderDocument(render.SingleLineDoc(render.Span{
+			Text:  plain,
+			Style: render.Style{Role: string(style.RoleInfo)},
+		}), themeContext))
+	}
 }
 
 // RefreshActiveBand repaints the stored frame after a theme or terminal

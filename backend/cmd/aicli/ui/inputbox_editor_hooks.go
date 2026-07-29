@@ -37,6 +37,10 @@ type LineEditorRenderSnapshot struct {
 type LineEditorHooks struct {
 	InitialText           string
 	InitialCursor         int
+	// RedrawInitialText repaints a cached draft before the editor waits for the
+	// next key. Fixed surfaces use this when a restarted composer inherits text
+	// that may be present in state but no longer be present on screen.
+	RedrawInitialText     bool
 	OnChange              func(LineEditorSnapshot)
 	OnBeforeRedraw        func(LineEditorSnapshot, LineEditorRenderSnapshot)
 	OnBeforeTerminalWrite func(LineEditorSnapshot, LineEditorRenderSnapshot) string
