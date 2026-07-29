@@ -43,6 +43,39 @@ func TestProviderAuthStore_SaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestProviderAuthStore_SaveAndLoadNewAPISystemAccessToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	record := ProviderAuthRecord{
+		KeyType:       AuthKeyTypeNewAPISystemAccessToken,
+		AuthMode:      AuthKeyTypeNewAPISystemAccessToken,
+		AccessToken:   "sys-token",
+		SubjectUserID: "42",
+	}
+	if err := SaveProviderAuthToPath(path, "demo-account", record); err != nil {
+		t.Fatalf("SaveProviderAuthToPath: %v", err)
+	}
+	loaded, err := LoadProviderAuthFromPath(path, "demo-account")
+	if err != nil {
+		t.Fatalf("LoadProviderAuthFromPath: %v", err)
+	}
+	if loaded.KeyType != AuthKeyTypeNewAPISystemAccessToken || loaded.AccessToken != "sys-token" || loaded.SubjectUserID != "42" {
+		t.Fatalf("unexpected loaded record: %+v", loaded)
+	}
+	secret, err := LoadProviderAuthSecretFromPath(path, "demo-account", AuthKeyTypeNewAPISystemAccessToken)
+	if err != nil {
+		t.Fatalf("LoadProviderAuthSecretFromPath: %v", err)
+	}
+	if secret != "sys-token" {
+		t.Fatalf("unexpected secret: %q", secret)
+	}
+	if err := SaveProviderAuthToPath(path, "missing-uid", ProviderAuthRecord{
+		KeyType:     AuthKeyTypeNewAPISystemAccessToken,
+		AccessToken: "sys-token",
+	}); err == nil {
+		t.Fatal("expected subject user id validation error")
+	}
+}
+
 func TestProviderAuthStore_SaveAndLoadAPIKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
 	record := ProviderAuthRecord{

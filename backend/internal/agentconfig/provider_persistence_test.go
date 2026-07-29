@@ -187,6 +187,71 @@ providers:
 	}
 }
 
+func TestUpdateProviderConfig_WritesSiteTypeAndAccount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := "providers:\n  items: {}\n"
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	remaining := 12.34
+	used := 7.66
+	limit := 20.0
+	totalRequests := int64(128)
+	scores := map[string]int{"sub2api": 12, "new-api": 0}
+	account := &ProviderAccountSnapshot{
+		Source:         "v1_usage",
+		Mode:           "quota_limited",
+		Currency:       "USD",
+		QuotaRemaining: &remaining,
+		QuotaUsed:      &used,
+		QuotaLimit:     &limit,
+		PlanName:       "pro",
+		Usage: &ProviderAccountUsage{
+			TotalRequests: &totalRequests,
+			TotalCost:     &used,
+		},
+		FetchedAt: "2026-07-29T12:00:05Z",
+	}
+	updated, err := UpdateProviderConfig(path, ProviderConfigUpdate{
+		Name:               "my-sub2api",
+		Protocol:           stringPtr("openai"),
+		BaseURL:            stringPtr("https://example.com"),
+		SiteType:           stringPtr("sub2api"),
+		SiteTypeConfidence: stringPtr("high"),
+		SiteTypeDetectedAt: stringPtr("2026-07-29T12:00:00Z"),
+		SiteTypeScores:     &scores,
+		Account:            account,
+	})
+	if err != nil {
+		t.Fatalf("UpdateProviderConfig: %v", err)
+	}
+	if updated.SiteType != "sub2api" || updated.Account == nil || updated.Account.QuotaRemaining == nil || *updated.Account.QuotaRemaining != 12.34 {
+		t.Fatalf("unexpected provider account fields: %+v", updated)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"site_type: sub2api",
+		"site_type_confidence: high",
+		"site_type_scores:",
+		"sub2api: 12",
+		"account:",
+		"source: v1_usage",
+		"quota_remaining: 12.34",
+		"total_requests: 128",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in updated file:\n%s", expected, text)
+		}
+	}
+}
+
 func TestUpdateProviderConfig_OAuthRemovesAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

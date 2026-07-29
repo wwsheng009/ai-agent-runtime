@@ -14,6 +14,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
+	"github.com/wwsheng009/ai-agent-runtime/internal/siteaccount"
 )
 
 const (
@@ -61,6 +62,17 @@ type providerLoginRequest struct {
 	ModelCardCatalogPath string
 	DisableModelCards    bool
 	ModelCardsStrict     bool
+
+	// Site type / account snapshot options (best-effort unless RequireAccount).
+	SiteType       string
+	SkipSiteDetect bool
+	SkipAccount    bool
+	RequireAccount bool
+
+	// Optional New-API account credentials (system access token + subject user id).
+	// Token is never written to config.yaml; it is stored via account_auth_ref.
+	NewAPIAccessToken string
+	NewAPIUserID      string
 }
 
 type providerLoginResult struct {
@@ -89,6 +101,15 @@ type providerLoginResult struct {
 	AuthStorePath           string                                    `json:"auth_store_path,omitempty"`
 	APIKeyMasked            string                                    `json:"api_key_masked,omitempty"`
 	SetDefault              bool                                      `json:"set_default"`
+	SiteType                string                                    `json:"site_type,omitempty"`
+	SiteTypeConfidence      string                                    `json:"site_type_confidence,omitempty"`
+	SiteTypeDetectedAt      string                                    `json:"site_type_detected_at,omitempty"`
+	SiteTypeScores          map[string]int                            `json:"site_type_scores,omitempty"`
+	Account                 *config.ProviderAccountSnapshot           `json:"account,omitempty"`
+	AccountView             *siteaccount.AccountView                  `json:"account_view,omitempty"`
+	AccountAuthRef          string                                    `json:"account_auth_ref,omitempty"`
+	BalanceLine             string                                    `json:"balance_line,omitempty"`
+	SiteAccountWarnings     []string                                  `json:"site_account_warnings,omitempty"`
 }
 
 type providerLoginModelCardAppliedInfo struct {
@@ -267,6 +288,11 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	modelCardsSkipped = append(modelCardsSkipped, additionalModelCardsSkipped...)
 	providerConfigs := providerLoginGeneratedProviderInfos(providerName, candidate, primaryGroup, exists, additionalProviders)
 
+	siteAccount, err := enrichProviderLoginSiteAccount(ctx, req, providerName, &candidate, resolvedAPIKey, authMode)
+	if err != nil {
+		return nil, err
+	}
+
 	if !req.DryRun {
 		resolvedConfigPath, err := ensureWritableAICLIConfigPath(cfg, configPath)
 		if err != nil {
@@ -306,6 +332,23 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 			if err := config.SaveProviderAuthToPath(authStorePath, candidate.AuthRef, *oauthRecord); err != nil {
 				return nil, err
 			}
+		}
+		if siteAccount.AccountAuthRecord != nil {
+			accountAuthRef := strings.TrimSpace(siteAccount.AccountAuthRef)
+			if accountAuthRef == "" {
+				accountAuthRef = strings.TrimSpace(candidate.AccountAuthRef)
+			}
+			if accountAuthRef == "" {
+				return nil, fmt.Errorf("account auth ref is missing for new-api account token write")
+			}
+			authStorePath := authStorePathForResult(req, authMode)
+			if strings.TrimSpace(authStorePath) == "" {
+				authStorePath = config.DefaultAuthStorePath()
+			}
+			if err := config.SaveProviderAuthToPath(authStorePath, accountAuthRef, *siteAccount.AccountAuthRecord); err != nil {
+				return nil, err
+			}
+			candidate.AccountAuthRef = accountAuthRef
 		}
 		update := buildProviderPersistenceUpdate(providerName, candidate, loginProtocol, authMode, supportedModels, req.SetDefault, modelsResult.VerifiedAt)
 		persisted, err := config.UpdateProviderConfig(configPath, update)
@@ -358,7 +401,34 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		AuthStorePath:           authStorePathForResult(req, authMode),
 		APIKeyMasked:            maskSecretForDisplay(resolvedAPIKey),
 		SetDefault:              req.SetDefault,
+		SiteType:                firstNonEmptyText(candidate.SiteType, siteAccount.SiteType),
+		SiteTypeConfidence:      firstNonEmptyText(candidate.SiteTypeConfidence, siteAccount.SiteTypeConfidence),
+		SiteTypeDetectedAt:      firstNonEmptyText(candidate.SiteTypeDetectedAt, siteAccount.SiteTypeDetectedAt),
+		SiteTypeScores:          firstNonNilStringIntMap(candidate.SiteTypeScores, siteAccount.SiteTypeScores),
+		Account:                 firstNonNilProviderAccount(candidate.Account, siteAccount.Account),
+		AccountView:             siteAccount.AccountView,
+		AccountAuthRef:          firstNonEmptyText(candidate.AccountAuthRef, siteAccount.AccountAuthRef),
+		BalanceLine:             siteAccount.BalanceLine,
+		SiteAccountWarnings:     append([]string(nil), siteAccount.Warnings...),
 	}, nil
+}
+
+func firstNonNilStringIntMap(values ...map[string]int) map[string]int {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func firstNonNilProviderAccount(values ...*config.ProviderAccountSnapshot) *config.ProviderAccountSnapshot {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func resolveLoginProviderName(req providerLoginRequest, cfg *config.Config) (string, error) {
@@ -2024,6 +2094,33 @@ func buildProviderPersistenceUpdate(providerName string, candidate config.Provid
 	} else {
 		update.APIKey = providerLoginStringValuePtr("")
 		update.AuthRef = providerLoginStringValuePtr("")
+	}
+	if strings.TrimSpace(candidate.SiteType) != "" {
+		update.SiteType = providerLoginStringValuePtr(candidate.SiteType)
+	}
+	if strings.TrimSpace(candidate.SiteTypeConfidence) != "" {
+		update.SiteTypeConfidence = providerLoginStringValuePtr(candidate.SiteTypeConfidence)
+	}
+	if strings.TrimSpace(candidate.SiteTypeDetectedAt) != "" {
+		update.SiteTypeDetectedAt = providerLoginStringValuePtr(candidate.SiteTypeDetectedAt)
+	}
+	if len(candidate.SiteTypeScores) > 0 {
+		scores := cloneStringIntMap(candidate.SiteTypeScores)
+		update.SiteTypeScores = &scores
+	}
+	if strings.TrimSpace(candidate.AccountAuthRef) != "" {
+		update.AccountAuthRef = providerLoginStringValuePtr(candidate.AccountAuthRef)
+	}
+	if candidate.Account != nil {
+		accountCopy := *candidate.Account
+		if candidate.Account.Usage != nil {
+			usageCopy := *candidate.Account.Usage
+			accountCopy.Usage = &usageCopy
+		}
+		if len(candidate.Account.Subscriptions) > 0 {
+			accountCopy.Subscriptions = append([]config.ProviderAccountSubscription(nil), candidate.Account.Subscriptions...)
+		}
+		update.Account = &accountCopy
 	}
 	_ = loginProtocol
 	return update

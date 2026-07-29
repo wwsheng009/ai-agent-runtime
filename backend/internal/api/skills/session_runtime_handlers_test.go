@@ -600,6 +600,7 @@ func TestSubmitSessionRuntimeCommand_RewindReturnsRestoreResult(t *testing.T) {
 		Model: "test-model",
 	}, nil)
 	checkpointMgr := runtimecheckpoint.NewManager(artifactStore, nil)
+	checkpointMgr.ConversationSnapshot = true
 	apiAgent.SetCheckpointManager(checkpointMgr)
 
 	pending := &runtimecheckpoint.PendingCheckpoint{

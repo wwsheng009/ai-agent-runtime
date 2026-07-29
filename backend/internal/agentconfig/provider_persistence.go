@@ -14,25 +14,35 @@ import (
 // ProviderConfigUpdate describes a partial update to providers.items.<name>.
 // Nil fields are not touched, allowing callers to preserve unrelated provider keys.
 type ProviderConfigUpdate struct {
-	Name                   string
-	SetDefaultProvider     bool
-	Enabled                *bool
-	Protocol               *string
-	BaseURL                *string
-	APIPath                *string
-	ForwardURL             *string
-	APIKey                 *string
-	APIKeyRef              *string
-	AuthMode               *string
-	AuthRef                *string
-	ModelsPath             *string
-	ModelsVerifiedAt       *string
-	SupportedModels        *[]string
-	DefaultModel           *string
-	SupportTypes           *[]string
-	MaxTokensLimit         *int
-	EnableImageGeneration  *bool
-	ModelCapabilities      *map[string]ModelCapabilitySpec
+	Name                  string
+	SetDefaultProvider    bool
+	Enabled               *bool
+	Protocol              *string
+	BaseURL               *string
+	APIPath               *string
+	ForwardURL            *string
+	APIKey                *string
+	APIKeyRef             *string
+	AuthMode              *string
+	AuthRef               *string
+	ModelsPath            *string
+	ModelsVerifiedAt      *string
+	SupportedModels       *[]string
+	DefaultModel          *string
+	SupportTypes          *[]string
+	MaxTokensLimit        *int
+	EnableImageGeneration *bool
+	ModelCapabilities     *map[string]ModelCapabilitySpec
+
+	// Site / account snapshot fields.
+	SiteType           *string
+	SiteTypeConfidence *string
+	SiteTypeDetectedAt *string
+	SiteTypeScores     *map[string]int
+	AccountAuthRef     *string
+	// Account is written when non-nil. Use ClearAccount to remove the account node.
+	Account      *ProviderAccountSnapshot
+	ClearAccount bool
 }
 
 // UpdateProviderConfig updates one provider node without rewriting unrelated config sections.
@@ -148,6 +158,88 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 			upsertYAMLMappingValue(node, "model_capabilities", modelCapabilitiesYAMLNode(*update.ModelCapabilities))
 		}
 	}
+	upsertOptionalStringYAMLValue(node, "site_type", update.SiteType)
+	upsertOptionalStringYAMLValue(node, "site_type_confidence", update.SiteTypeConfidence)
+	upsertOptionalStringYAMLValue(node, "site_type_detected_at", update.SiteTypeDetectedAt)
+	if update.SiteTypeScores != nil {
+		if len(*update.SiteTypeScores) == 0 {
+			removeYAMLMappingValue(node, "site_type_scores")
+		} else {
+			upsertYAMLMappingValue(node, "site_type_scores", intMapYAMLNode(*update.SiteTypeScores))
+		}
+	}
+	upsertOptionalStringYAMLValue(node, "account_auth_ref", update.AccountAuthRef)
+	if update.ClearAccount {
+		removeYAMLMappingValue(node, "account")
+	} else if update.Account != nil {
+		upsertYAMLMappingValue(node, "account", providerAccountSnapshotYAMLNode(*update.Account))
+	}
+}
+
+func providerAccountSnapshotYAMLNode(snapshot ProviderAccountSnapshot) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	upsertNonZeroStringYAMLValue(node, "source", snapshot.Source)
+	upsertNonZeroStringYAMLValue(node, "mode", snapshot.Mode)
+	upsertNonZeroStringYAMLValue(node, "currency", snapshot.Currency)
+	upsertOptionalFloatYAMLValue(node, "wallet_balance", snapshot.WalletBalance)
+	upsertOptionalFloatYAMLValue(node, "quota_balance", snapshot.QuotaBalance)
+	upsertOptionalFloatYAMLValue(node, "quota_remaining", snapshot.QuotaRemaining)
+	upsertOptionalFloatYAMLValue(node, "quota_used", snapshot.QuotaUsed)
+	upsertOptionalFloatYAMLValue(node, "quota_limit", snapshot.QuotaLimit)
+	upsertNonZeroStringYAMLValue(node, "quota_display_type", snapshot.QuotaDisplayType)
+	upsertNonZeroStringYAMLValue(node, "quota_display_unit", snapshot.QuotaDisplayUnit)
+	upsertOptionalFloatYAMLValue(node, "quota_display_scale", snapshot.QuotaDisplayScale)
+	upsertNonZeroStringYAMLValue(node, "plan_name", snapshot.PlanName)
+	upsertNonZeroStringYAMLValue(node, "external_user_id", snapshot.ExternalUserID)
+	upsertNonZeroStringYAMLValue(node, "external_username_masked", snapshot.ExternalUsernameMasked)
+	if len(snapshot.Subscriptions) > 0 {
+		upsertYAMLMappingValue(node, "subscriptions", providerAccountSubscriptionsYAMLNode(snapshot.Subscriptions))
+	}
+	if snapshot.Usage != nil {
+		upsertYAMLMappingValue(node, "usage", providerAccountUsageYAMLNode(*snapshot.Usage))
+	}
+	upsertNonZeroStringYAMLValue(node, "fetched_at", snapshot.FetchedAt)
+	if snapshot.Partial {
+		upsertYAMLMappingValue(node, "partial", boolYAMLNode(true))
+	}
+	upsertNonZeroStringYAMLValue(node, "last_error", snapshot.LastError)
+	return node
+}
+
+func providerAccountSubscriptionsYAMLNode(items []ProviderAccountSubscription) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, item := range items {
+		entry := &yaml.Node{Kind: yaml.MappingNode}
+		upsertNonZeroStringYAMLValue(entry, "name", item.Name)
+		upsertNonZeroStringYAMLValue(entry, "status", item.Status)
+		upsertOptionalFloatYAMLValue(entry, "remaining", item.Remaining)
+		upsertNonZeroStringYAMLValue(entry, "period_end", item.PeriodEnd)
+		node.Content = append(node.Content, entry)
+	}
+	return node
+}
+
+func providerAccountUsageYAMLNode(usage ProviderAccountUsage) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	upsertOptionalInt64YAMLValue(node, "total_requests", usage.TotalRequests)
+	upsertOptionalFloatYAMLValue(node, "total_cost", usage.TotalCost)
+	upsertOptionalInt64YAMLValue(node, "today_requests", usage.TodayRequests)
+	upsertOptionalFloatYAMLValue(node, "today_cost", usage.TodayCost)
+	return node
+}
+
+func upsertOptionalFloatYAMLValue(node *yaml.Node, key string, value *float64) {
+	if value == nil {
+		return
+	}
+	upsertYAMLMappingValue(node, key, floatYAMLNode(*value))
+}
+
+func upsertOptionalInt64YAMLValue(node *yaml.Node, key string, value *int64) {
+	if value == nil {
+		return
+	}
+	upsertYAMLMappingValue(node, key, intYAMLNode(int(*value)))
 }
 
 func ensureChildMapping(parent *yaml.Node, key string) *yaml.Node {

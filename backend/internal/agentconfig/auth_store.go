@@ -13,21 +13,23 @@ import (
 const authStoreVersion = 1
 
 const (
-	AuthKeyTypeAPIKey = "api_key"
-	AuthKeyTypeOAuth  = "oauth"
+	AuthKeyTypeAPIKey                   = "api_key"
+	AuthKeyTypeOAuth                    = "oauth"
+	AuthKeyTypeNewAPISystemAccessToken  = "newapi_system_access_token"
 )
 
 // ProviderAuthRecord stores user-level credentials that must not be written to config.yaml.
 type ProviderAuthRecord struct {
-	KeyType      string `json:"key_type,omitempty"`
-	AuthMode     string `json:"auth_mode,omitempty"`
-	APIKey       string `json:"api_key,omitempty"`
-	Issuer       string `json:"issuer,omitempty"`
-	ClientID     string `json:"client_id,omitempty"`
-	IDToken      string `json:"id_token,omitempty"`
-	AccessToken  string `json:"access_token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	UpdatedAt    string `json:"updated_at,omitempty"`
+	KeyType       string `json:"key_type,omitempty"`
+	AuthMode      string `json:"auth_mode,omitempty"`
+	APIKey        string `json:"api_key,omitempty"`
+	Issuer        string `json:"issuer,omitempty"`
+	ClientID      string `json:"client_id,omitempty"`
+	IDToken       string `json:"id_token,omitempty"`
+	AccessToken   string `json:"access_token,omitempty"`
+	RefreshToken  string `json:"refresh_token,omitempty"`
+	SubjectUserID string `json:"subject_user_id,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
 }
 
 type providerAuthStoreDocument struct {
@@ -37,12 +39,14 @@ type providerAuthStoreDocument struct {
 
 func normalizeProviderAuthKeyType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", AuthKeyTypeAPIKey, AuthKeyTypeOAuth:
+	case "", AuthKeyTypeAPIKey, AuthKeyTypeOAuth, AuthKeyTypeNewAPISystemAccessToken:
 		return strings.ToLower(strings.TrimSpace(value))
 	case "apikey", "api-key", "key":
 		return AuthKeyTypeAPIKey
 	case "access_token", "oauth_token", "oauth-access-token":
 		return AuthKeyTypeOAuth
+	case "new-api-system-access-token", "new_api_system_access_token", "newapi-access-token":
+		return AuthKeyTypeNewAPISystemAccessToken
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
@@ -57,9 +61,14 @@ func inferProviderAuthKeyType(record ProviderAuthRecord) string {
 		return AuthKeyTypeAPIKey
 	case AuthKeyTypeOAuth, "chatgpt", "device-code", "device_code":
 		return AuthKeyTypeOAuth
+	case AuthKeyTypeNewAPISystemAccessToken, "new-api-system-access-token", "new_api_system_access_token":
+		return AuthKeyTypeNewAPISystemAccessToken
 	}
 	if strings.TrimSpace(record.APIKey) != "" {
 		return AuthKeyTypeAPIKey
+	}
+	if strings.TrimSpace(record.SubjectUserID) != "" && strings.TrimSpace(record.AccessToken) != "" {
+		return AuthKeyTypeNewAPISystemAccessToken
 	}
 	if strings.TrimSpace(record.AccessToken) != "" || strings.TrimSpace(record.RefreshToken) != "" || strings.TrimSpace(record.IDToken) != "" {
 		return AuthKeyTypeOAuth
@@ -84,6 +93,7 @@ func normalizeProviderAuthRecord(record ProviderAuthRecord) ProviderAuthRecord {
 		record.IDToken = ""
 		record.AccessToken = ""
 		record.RefreshToken = ""
+		record.SubjectUserID = ""
 	case AuthKeyTypeOAuth:
 		record.Issuer = strings.TrimSpace(record.Issuer)
 		record.ClientID = strings.TrimSpace(record.ClientID)
@@ -91,6 +101,15 @@ func normalizeProviderAuthRecord(record ProviderAuthRecord) ProviderAuthRecord {
 		record.AccessToken = strings.TrimSpace(record.AccessToken)
 		record.RefreshToken = strings.TrimSpace(record.RefreshToken)
 		record.APIKey = ""
+		record.SubjectUserID = ""
+	case AuthKeyTypeNewAPISystemAccessToken:
+		record.AccessToken = strings.TrimSpace(record.AccessToken)
+		record.SubjectUserID = strings.TrimSpace(record.SubjectUserID)
+		record.APIKey = ""
+		record.Issuer = ""
+		record.ClientID = ""
+		record.IDToken = ""
+		record.RefreshToken = ""
 	default:
 		record.APIKey = strings.TrimSpace(record.APIKey)
 		record.Issuer = strings.TrimSpace(record.Issuer)
@@ -98,6 +117,7 @@ func normalizeProviderAuthRecord(record ProviderAuthRecord) ProviderAuthRecord {
 		record.IDToken = strings.TrimSpace(record.IDToken)
 		record.AccessToken = strings.TrimSpace(record.AccessToken)
 		record.RefreshToken = strings.TrimSpace(record.RefreshToken)
+		record.SubjectUserID = strings.TrimSpace(record.SubjectUserID)
 	}
 	if strings.TrimSpace(record.UpdatedAt) == "" {
 		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -119,7 +139,7 @@ func providerAuthSecretForKeyType(record ProviderAuthRecord, keyType string) str
 	switch normalizeProviderAuthKeyType(keyType) {
 	case AuthKeyTypeAPIKey:
 		return strings.TrimSpace(record.APIKey)
-	case AuthKeyTypeOAuth:
+	case AuthKeyTypeOAuth, AuthKeyTypeNewAPISystemAccessToken:
 		return strings.TrimSpace(record.AccessToken)
 	default:
 		if secret := strings.TrimSpace(record.APIKey); secret != "" {
@@ -209,8 +229,15 @@ func SaveProviderAuthToPath(path, ref string, record ProviderAuthRecord) error {
 		if strings.TrimSpace(record.AccessToken) == "" {
 			return fmt.Errorf("access token is required for auth ref %q", ref)
 		}
+	case AuthKeyTypeNewAPISystemAccessToken:
+		if strings.TrimSpace(record.AccessToken) == "" {
+			return fmt.Errorf("access token is required for auth ref %q", ref)
+		}
+		if strings.TrimSpace(record.SubjectUserID) == "" {
+			return fmt.Errorf("subject user id is required for auth ref %q", ref)
+		}
 	default:
-		return fmt.Errorf("key type is required for auth ref %q", ref)
+		return fmt.Errorf("unsupported key type %q for auth ref %q", record.KeyType, ref)
 	}
 	document.Providers[ref] = record
 	return writeProviderAuthStore(path, document)

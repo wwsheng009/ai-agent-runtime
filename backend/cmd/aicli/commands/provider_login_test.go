@@ -42,7 +42,9 @@ func seedTestAPIKeyAuth(t *testing.T, dir, ref, apiKey string) {
 func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Fatalf("unexpected Authorization header: %q", got)
@@ -113,7 +115,9 @@ func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 func TestRunProviderLogin_AddsDefaultCodexReasoningEfforts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4-mini"}]}`))
 	}))
@@ -237,7 +241,9 @@ func TestRunProviderLogin_OpenAICompatibleCodexModelsUseCodexTemplate(t *testing
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		parts := make([]string, 0, len(codexModels))
 		for _, model := range codexModels {
@@ -401,7 +407,9 @@ func TestRunProviderLogin_AppliesAnthropicModelCard(t *testing.T) {
 func TestRunProviderLogin_ExplicitAnthropicKeepsAnthropicEndpointForDeepSeekModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/anthropic/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-v4-flash"}]}`))
 	}))
@@ -513,7 +521,9 @@ func TestRunProviderLogin_GroupsModelsByProviderTemplate(t *testing.T) {
 func TestRunProviderLogin_OpenAIImageProtocolUsesImageTemplate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-image" {
 			t.Fatalf("unexpected Authorization header: %q", got)
@@ -575,7 +585,9 @@ func TestRunProviderLogin_OpenAIImageProtocolUsesImageTemplate(t *testing.T) {
 func TestRunProviderLogin_AutoGroupsModelsByMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-sonnet-4-6"},{"id":"gemini-2.5-pro"}]}`))
 	}))
@@ -620,7 +632,9 @@ func TestRunProviderLogin_AutoGroupsModelsByMetadata(t *testing.T) {
 func TestRunProviderLogin_AutoGroupsImageKeywordModelsToOpenAIImage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"custom-image-model"}]}`))
 	}))
@@ -678,7 +692,9 @@ func TestRunProviderLogin_AutoGroupsImageKeywordModelsToOpenAIImage(t *testing.T
 func TestRunProviderLogin_AutoImageKeywordDoesNotOverrideExplicitModelCard(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-image-4-6"}]}`))
 	}))
@@ -719,7 +735,9 @@ func TestRunProviderLogin_AutoImageKeywordDoesNotOverrideExplicitModelCard(t *te
 func TestRunProviderLogin_OpenAIProtocolDoesNotUseAutoImageKeywordHeuristic(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"custom-image-model"}]}`))
 	}))
@@ -761,7 +779,9 @@ func TestRunProviderLogin_OpenAIProtocolDoesNotUseAutoImageKeywordHeuristic(t *t
 func TestRunProviderLogin_AutoGroupsGrokAcrossCompatibleProtocols(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"grok-4.5"},{"id":"claude-sonnet-4-6"}]}`))
 	}))
@@ -830,7 +850,9 @@ func TestRunProviderLogin_AutoGroupsGrokAcrossCompatibleProtocols(t *testing.T) 
 func TestRunProviderLogin_ProtocolChangeReplacesKnownProviderTemplateDefaults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4-6"}]}`))
 	}))
@@ -1274,6 +1296,11 @@ func TestRunProviderLogin_AutoNonInteractiveReportsUnsupportedWithoutModels(t *t
 
 func TestRunProviderLogin_PartialEditPreservesExistingAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer old-key" {
 			t.Fatalf("unexpected Authorization header: %q", got)
 		}
@@ -1346,6 +1373,11 @@ providers:
 
 func TestRunProviderLogin_InteractiveEditPromptsBaseURLAndKeepsBlankAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer old-key" {
 			t.Fatalf("unexpected Authorization header: %q", got)
 		}
@@ -1714,6 +1746,11 @@ func TestRunProviderLogin_InteractiveRejectsGhostDefaultAndInvalidNumber(t *test
 
 func TestRunProviderLogin_CodexAPIKeyWritesCodexProtocol(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			// Allow best-effort site-detect probes without failing the models-focused test.
+			http.NotFound(w, r)
+			return
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-codex" {
 			t.Fatalf("unexpected Authorization header: %q", got)
 		}

@@ -11,24 +11,30 @@ import (
 )
 
 type chatLoginCommandRequest struct {
-	Provider         string
-	Protocol         string
-	Mode             string
-	BaseURL          string
-	APIKey           string
-	ModelsPath       string
-	DefaultModel     string
-	AuthRef          string
-	OAuthIssuer      string
-	OAuthClientID    string
-	ModelCardsPath   string
-	SetDefault       bool
-	DryRun           bool
-	Switch           bool
-	NoModelCards     bool
-	ModelCardsStrict bool
-	TimeoutSec       int
-	OAuthTimeout     int
+	Provider          string
+	Protocol          string
+	Mode              string
+	BaseURL           string
+	APIKey            string
+	ModelsPath        string
+	DefaultModel      string
+	AuthRef           string
+	OAuthIssuer       string
+	OAuthClientID     string
+	ModelCardsPath    string
+	SetDefault        bool
+	DryRun            bool
+	Switch            bool
+	NoModelCards      bool
+	ModelCardsStrict  bool
+	TimeoutSec        int
+	OAuthTimeout      int
+	SiteType          string
+	SkipSiteDetect    bool
+	SkipAccount       bool
+	RequireAccount    bool
+	NewAPIAccessToken string
+	NewAPIUserID      string
 }
 
 func handleLoginCommand(session *ChatSession, command string, noInteractive bool) bool {
@@ -70,6 +76,12 @@ func handleLoginCommand(session *ChatSession, command string, noInteractive bool
 		ModelCardCatalogPath: parsed.ModelCardsPath,
 		DisableModelCards:    parsed.NoModelCards,
 		ModelCardsStrict:     parsed.ModelCardsStrict,
+		SiteType:             parsed.SiteType,
+		SkipSiteDetect:       parsed.SkipSiteDetect,
+		SkipAccount:          parsed.SkipAccount,
+		RequireAccount:       parsed.RequireAccount,
+		NewAPIAccessToken:    parsed.NewAPIAccessToken,
+		NewAPIUserID:         parsed.NewAPIUserID,
 	}
 	if req.Interactive {
 		req.Prompter = chatLoginPrompter{session: session}
@@ -227,6 +239,39 @@ func parseChatLoginCommandRequest(command string) (chatLoginCommandRequest, erro
 				return req, fmt.Errorf("--oauth-timeout 需要正整数秒数")
 			}
 			req.OAuthTimeout = parsed
+		case token == "--site-type":
+			value, next, err := consumeChatLoginValue(tokens, i)
+			if err != nil {
+				return req, err
+			}
+			req.SiteType = value
+			i = next
+		case strings.HasPrefix(token, "--site-type="):
+			req.SiteType = strings.TrimSpace(strings.TrimPrefix(token, "--site-type="))
+		case token == "--newapi-access-token":
+			value, next, err := consumeChatLoginValue(tokens, i)
+			if err != nil {
+				return req, err
+			}
+			req.NewAPIAccessToken = value
+			i = next
+		case strings.HasPrefix(token, "--newapi-access-token="):
+			req.NewAPIAccessToken = strings.TrimSpace(strings.TrimPrefix(token, "--newapi-access-token="))
+		case token == "--newapi-user-id":
+			value, next, err := consumeChatLoginValue(tokens, i)
+			if err != nil {
+				return req, err
+			}
+			req.NewAPIUserID = value
+			i = next
+		case strings.HasPrefix(token, "--newapi-user-id="):
+			req.NewAPIUserID = strings.TrimSpace(strings.TrimPrefix(token, "--newapi-user-id="))
+		case token == "--skip-site-detect":
+			req.SkipSiteDetect = true
+		case token == "--skip-account":
+			req.SkipAccount = true
+		case token == "--require-account":
+			req.RequireAccount = true
 		case token == "--set-default":
 			req.SetDefault = true
 		case token == "--dry-run":

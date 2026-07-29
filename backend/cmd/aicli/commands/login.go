@@ -56,6 +56,12 @@ chat 内也可使用 /login，与本命令共用同一套登录逻辑。
 	cmd.Flags().String("oauth-client-id", "", "Codex OAuth client id")
 	cmd.Flags().Int("oauth-timeout", 900, "Codex OAuth device-code 等待秒数")
 	cmd.Flags().Int("timeout", 60, "models 校验请求超时秒数")
+	cmd.Flags().String("site-type", "auto", "站点类型（auto|new-api|sub2api|unknown）")
+	cmd.Flags().Bool("skip-site-detect", false, "跳过站点类型自动探测")
+	cmd.Flags().Bool("skip-account", false, "跳过账户余额/订阅同步")
+	cmd.Flags().Bool("require-account", false, "账户同步失败时使登录失败（默认 best-effort）")
+	cmd.Flags().String("newapi-access-token", "", "New-API system access token（写入 auth store，不写 config.yaml）")
+	cmd.Flags().String("newapi-user-id", "", "New-API subject user id（New-Api-User）")
 	cmd.Flags().String("output", "", "输出格式（text|json）")
 	cmd.Flags().BoolP("json", "j", false, "以 JSON 格式输出")
 	return cmd
@@ -93,6 +99,12 @@ func HandleLogin(cmd *cobra.Command, configProvider func() *config.Config) {
 		ModelCardCatalogPath: stringFlag(cmd, "model-cards"),
 		DisableModelCards:    boolFlag(cmd, "no-model-cards"),
 		ModelCardsStrict:     boolFlag(cmd, "model-cards-strict"),
+		SiteType:             stringFlag(cmd, "site-type"),
+		SkipSiteDetect:       boolFlag(cmd, "skip-site-detect"),
+		SkipAccount:          boolFlag(cmd, "skip-account"),
+		RequireAccount:       boolFlag(cmd, "require-account"),
+		NewAPIAccessToken:    stringFlag(cmd, "newapi-access-token"),
+		NewAPIUserID:         stringFlag(cmd, "newapi-user-id"),
 	}
 	if req.Interactive {
 		req.Prompter = newCLILoginPrompter()
@@ -179,6 +191,24 @@ func renderLoginCommandResult(result *providerLoginResult, outputOptions structu
 	}
 	if result.AuthStorePath != "" {
 		fmt.Printf("  Auth store:      %s\n", result.AuthStorePath)
+	}
+	if result.SiteType != "" {
+		if result.SiteTypeConfidence != "" {
+			fmt.Printf("  Site type:       %s (%s)\n", result.SiteType, result.SiteTypeConfidence)
+		} else {
+			fmt.Printf("  Site type:       %s\n", result.SiteType)
+		}
+	}
+	if result.BalanceLine != "" {
+		fmt.Printf("  Balance:         %s\n", result.BalanceLine)
+	} else if result.Account != nil && result.Account.Source != "" {
+		fmt.Printf("  Account source:  %s\n", result.Account.Source)
+	}
+	if result.AccountAuthRef != "" {
+		fmt.Printf("  Account auth:    %s\n", result.AccountAuthRef)
+	}
+	for _, warning := range result.SiteAccountWarnings {
+		fmt.Printf("  Warning:         %s\n", warning)
 	}
 }
 

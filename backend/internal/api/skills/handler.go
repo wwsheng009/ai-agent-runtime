@@ -128,6 +128,7 @@ type Handler struct {
 	runtimeConfigResolver          func(UsageScope) *runtimecfg.RuntimeConfig
 	aicliConfigMu                  sync.RWMutex
 	aicliConfig                    *agentconfig.Config
+	siteAccountService             SiteAccountService
 	configDocumentService          ConfigDocumentService
 	serviceControlService          RuntimeServiceControlService
 	fileTransferService            FileTransferService
@@ -4065,15 +4066,16 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		return
 	}
 
-	if config.Checkpoint.Enabled {
-		if manager := a.GetCheckpointManager(); manager != nil {
-			if config.Checkpoint.MaxFileBytes > 0 {
-				manager.MaxFileBytes = config.Checkpoint.MaxFileBytes
-			}
-		}
-	} else {
-		a.SetCheckpointManager(nil)
-	}
+	a.ApplyCheckpointConfig(
+		config.Checkpoint.Enabled,
+		config.Checkpoint.MaxFileBytes,
+		agent.CheckpointStorageOptions{
+			StoreMode:                config.Checkpoint.StoreMode,
+			ConversationSnapshot:     config.Checkpoint.ConversationSnapshot,
+			MaxDiffBytes:             config.Checkpoint.MaxDiffBytes,
+			MaxCheckpointsPerSession: config.Checkpoint.MaxCheckpointsPerSession,
+		},
+	)
 
 	if bgManager := h.getBackgroundManager(config); bgManager != nil {
 		broker := a.GetToolBroker()

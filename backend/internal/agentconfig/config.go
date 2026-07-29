@@ -202,6 +202,53 @@ type Provider struct {
 	// RequestsPerMinute caps the number of provider API calls per rolling minute.
 	// Zero means no client-side rate limiting.
 	RequestsPerMinute int `yaml:"requests_per_minute" mapstructure:"requests_per_minute" json:"requests_per_minute"`
+
+	// Site / account snapshot fields (best-effort cache; not billing authority).
+	SiteType           string                   `yaml:"site_type,omitempty" mapstructure:"site_type" json:"site_type,omitempty"`
+	SiteTypeConfidence string                   `yaml:"site_type_confidence,omitempty" mapstructure:"site_type_confidence" json:"site_type_confidence,omitempty"`
+	SiteTypeDetectedAt string                   `yaml:"site_type_detected_at,omitempty" mapstructure:"site_type_detected_at" json:"site_type_detected_at,omitempty"`
+	SiteTypeScores     map[string]int           `yaml:"site_type_scores,omitempty" mapstructure:"site_type_scores" json:"site_type_scores,omitempty"`
+	AccountAuthRef     string                   `yaml:"account_auth_ref,omitempty" mapstructure:"account_auth_ref" json:"account_auth_ref,omitempty"`
+	Account            *ProviderAccountSnapshot `yaml:"account,omitempty" mapstructure:"account" json:"account,omitempty"`
+}
+
+// ProviderAccountSnapshot is a non-sensitive cached account/balance summary.
+type ProviderAccountSnapshot struct {
+	Source                   string                          `yaml:"source,omitempty" mapstructure:"source" json:"source,omitempty"`
+	Mode                     string                          `yaml:"mode,omitempty" mapstructure:"mode" json:"mode,omitempty"`
+	Currency                 string                          `yaml:"currency,omitempty" mapstructure:"currency" json:"currency,omitempty"`
+	WalletBalance            *float64                        `yaml:"wallet_balance,omitempty" mapstructure:"wallet_balance" json:"wallet_balance,omitempty"`
+	QuotaBalance             *float64                        `yaml:"quota_balance,omitempty" mapstructure:"quota_balance" json:"quota_balance,omitempty"`
+	QuotaRemaining           *float64                        `yaml:"quota_remaining,omitempty" mapstructure:"quota_remaining" json:"quota_remaining,omitempty"`
+	QuotaUsed                *float64                        `yaml:"quota_used,omitempty" mapstructure:"quota_used" json:"quota_used,omitempty"`
+	QuotaLimit               *float64                        `yaml:"quota_limit,omitempty" mapstructure:"quota_limit" json:"quota_limit,omitempty"`
+	QuotaDisplayType         string                          `yaml:"quota_display_type,omitempty" mapstructure:"quota_display_type" json:"quota_display_type,omitempty"`
+	QuotaDisplayUnit         string                          `yaml:"quota_display_unit,omitempty" mapstructure:"quota_display_unit" json:"quota_display_unit,omitempty"`
+	QuotaDisplayScale        *float64                        `yaml:"quota_display_scale,omitempty" mapstructure:"quota_display_scale" json:"quota_display_scale,omitempty"`
+	PlanName                 string                          `yaml:"plan_name,omitempty" mapstructure:"plan_name" json:"plan_name,omitempty"`
+	ExternalUserID           string                          `yaml:"external_user_id,omitempty" mapstructure:"external_user_id" json:"external_user_id,omitempty"`
+	ExternalUsernameMasked   string                          `yaml:"external_username_masked,omitempty" mapstructure:"external_username_masked" json:"external_username_masked,omitempty"`
+	Subscriptions            []ProviderAccountSubscription   `yaml:"subscriptions,omitempty" mapstructure:"subscriptions" json:"subscriptions,omitempty"`
+	Usage                    *ProviderAccountUsage           `yaml:"usage,omitempty" mapstructure:"usage" json:"usage,omitempty"`
+	FetchedAt                string                          `yaml:"fetched_at,omitempty" mapstructure:"fetched_at" json:"fetched_at,omitempty"`
+	Partial                  bool                            `yaml:"partial,omitempty" mapstructure:"partial" json:"partial,omitempty"`
+	LastError                string                          `yaml:"last_error,omitempty" mapstructure:"last_error" json:"last_error,omitempty"`
+}
+
+// ProviderAccountSubscription is a compact subscription cache entry.
+type ProviderAccountSubscription struct {
+	Name      string   `yaml:"name,omitempty" mapstructure:"name" json:"name,omitempty"`
+	Status    string   `yaml:"status,omitempty" mapstructure:"status" json:"status,omitempty"`
+	Remaining *float64 `yaml:"remaining,omitempty" mapstructure:"remaining" json:"remaining,omitempty"`
+	PeriodEnd string   `yaml:"period_end,omitempty" mapstructure:"period_end" json:"period_end,omitempty"`
+}
+
+// ProviderAccountUsage is a compact usage cache entry.
+type ProviderAccountUsage struct {
+	TotalRequests *int64   `yaml:"total_requests,omitempty" mapstructure:"total_requests" json:"total_requests,omitempty"`
+	TotalCost     *float64 `yaml:"total_cost,omitempty" mapstructure:"total_cost" json:"total_cost,omitempty"`
+	TodayRequests *int64   `yaml:"today_requests,omitempty" mapstructure:"today_requests" json:"today_requests,omitempty"`
+	TodayCost     *float64 `yaml:"today_cost,omitempty" mapstructure:"today_cost" json:"today_cost,omitempty"`
 }
 
 // AllowsCodexImageGeneration reports whether this provider explicitly opts into
@@ -418,12 +465,14 @@ type AICLITimeoutConfig struct {
 
 // AICLIThemeConfig holds aicli terminal theme preferences.
 //
-// Two axes (Codex-inspired):
-//   - Name: palette / color scheme (classic|focus|contrast|mono)
+// Three axes (Codex-inspired):
+//   - Name: palette / color scheme (classic|focus|contrast|mono|custom-*)
 //   - Mode: light/dark preference (auto|dark|light)
+//   - Syntax: Chroma syntax theme name (monokai|dracula|...)
 type AICLIThemeConfig struct {
-	Name string `yaml:"name" mapstructure:"name" env:"AICLI_THEME"`
-	Mode string `yaml:"mode,omitempty" mapstructure:"mode" env:"AICLI_THEME_MODE"`
+	Name   string `yaml:"name" mapstructure:"name" env:"AICLI_THEME"`
+	Mode   string `yaml:"mode,omitempty" mapstructure:"mode" env:"AICLI_THEME_MODE"`
+	Syntax string `yaml:"syntax,omitempty" mapstructure:"syntax" env:"AICLI_THEME_SYNTAX"`
 }
 
 // AICLIChatConfig holds aicli chat preference defaults.
