@@ -15,6 +15,10 @@ import "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 // painted blank rows at the screen top on shrink. Here nothing is scrolled — a
 // grow/shrink cycle re-composes from the same owned history, so the top history
 // rows are identical across frames and the Backend diff leaves them untouched.
+//
+// When history is shorter than the output region it is bottom-aligned. This
+// matches transcript semantics: the newest committed row stays adjacent to the
+// active band/prompt, while unused headroom remains above older content.
 func Compose(width, height int, history, bottom [][]vt.Cell) [][]vt.Cell {
 	width, height = clampSize(width, height)
 	frame := blankGrid(width, height)
@@ -37,8 +41,12 @@ func Compose(width, height int, history, bottom [][]vt.Cell) [][]vt.Cell {
 			start = len(history) - outputRows
 		}
 		visible := history[start:]
-		for i := 0; i < len(visible) && i < outputRows; i++ {
-			frame[i] = normalizeRow(visible[i], width)
+		rowStart := outputRows - len(visible)
+		if rowStart < 0 {
+			rowStart = 0
+		}
+		for i := 0; i < len(visible) && rowStart+i < outputRows; i++ {
+			frame[rowStart+i] = normalizeRow(visible[i], width)
 		}
 	}
 	return frame

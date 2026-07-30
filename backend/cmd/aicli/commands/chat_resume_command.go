@@ -186,11 +186,14 @@ func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		session.Interaction.ClearPrompt()
 		session.Interaction.ResetPromptState()
 	}
-	if surfaceEnabled {
+	// Owned path: disable the legacy immediate-mode picker (which resets historyWindow)
+	// so resume doesn't clear committed transcript before replay. Re-enable only if
+	// truly legacy.
+	if surfaceEnabled && !session.Surface.OwnedViewport() {
 		session.Surface.Disable()
 	}
 	defer func() {
-		if surfaceEnabled {
+		if surfaceEnabled && !session.Surface.OwnedViewport() {
 			session.Surface.Enable()
 		}
 		if session != nil && session.Interaction != nil {

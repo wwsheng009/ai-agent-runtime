@@ -106,7 +106,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
-		fmt.Println("会话已加载")
+		// Route through the surface so ownedViewport retains the line in
+		// transcript history. Raw fmt.Println after BeginOutput is invisible to
+		// the double-buffer and leaves density holes on the next WriteOutput.
+		printfDirectInteractiveOutput(session, "会话已加载\n")
 		printCurrentRuntimeSession(session)
 		if hasVisibleChatHistory(session) {
 			// No raw blank separator: printVisibleChatHistory settles surface

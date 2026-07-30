@@ -3,13 +3,15 @@ package ui
 import (
 	"bytes"
 	"fmt"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/viewport"
 )
 
 func fixedStatusTestContext(theme *Theme) style.ThemeContext {
@@ -1835,6 +1837,18 @@ func newTestFixedBottomSurfaceWithSize(width, height int) *FixedBottomSurface {
 	term.SetSizeForTest(width, height)
 	surface := NewFixedBottomSurface(term)
 	surface.enabled = true
+	return surface
+}
+
+// newOwnedTestFixedBottomSurfaceWithSize opts tests into the production
+// full-screen double-buffer renderer. The general helper stays on the legacy
+// renderer because many unit tests intentionally characterize its ANSI
+// capability-fallback protocol.
+func newOwnedTestFixedBottomSurfaceWithSize(width, height int) *FixedBottomSurface {
+	surface := newTestFixedBottomSurfaceWithSize(width, height)
+	surface.ownedViewport = true
+	surface.viewportBackend = viewport.New(width, height)
+	surface.viewportBackend.Invalidate()
 	return surface
 }
 

@@ -322,16 +322,17 @@ func TestPrintChatStatus_WritesThroughFixedBottomSurfaceAfterPromptClear(t *test
 		"Token usage",
 		"Limits",
 		"╰",
-		// WriteOutput normalizes LFs to CRLF for the surface path.
-		"\r\n",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected surface status output to contain %q, got:\n%s", expected, output)
 		}
 	}
-	// CSI Ps T is the deferred shrink flush WriteOutput must emit after ClearPrompt.
-	if !strings.Contains(output, "\x1b[3T") {
-		t.Fatalf("expected WriteOutput to flush pending bottom-reserve shrink before status text, got:\n%q", output)
+	// Owned path recomposes the full frame; assert the content is present and no
+	// multi-row blank hole remains above the status.
+	screen := newScreenVT(80, 24)
+	screen.feed(output)
+	if run, at := maxBlankRunAboveBottom(screen, 24); run > 1 {
+		t.Fatalf("expected no multi-row blank hole after status write, blank run %d at row %d\n%s", run, at, screen.dump())
 	}
 }
 

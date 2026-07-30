@@ -218,13 +218,16 @@ func captureUIStdout(t *testing.T, fn func()) string {
 		os.Stdout = originalStdout
 	}()
 
+	var stdoutData []byte
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		stdoutData, _ = io.ReadAll(reader)
+	}()
+
 	fn()
 
 	_ = writer.Close()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	_ = reader.Close()
-	return string(data)
+	<-readDone
+	return string(stdoutData)
 }

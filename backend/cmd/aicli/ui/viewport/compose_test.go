@@ -77,8 +77,8 @@ func TestCompose_WindowSelectsRecentHistory(t *testing.T) {
 }
 
 // TestCompose_ShortHistoryLeavesHeadroomAboveReserve pins that history shorter
-// than the output region is top-aligned, leaving blank headroom just above the
-// reserve (never blank rows above the content).
+// than the output region is bottom-aligned, leaving blank headroom above the
+// transcript so the newest row remains adjacent to the reserve.
 func TestCompose_ShortHistoryLeavesHeadroomAboveReserve(t *testing.T) {
 	const w, h = 10, 5
 	history := [][]vt.Cell{lineCells(w, "one"), lineCells(w, "two")}
@@ -89,7 +89,7 @@ func TestCompose_ShortHistoryLeavesHeadroomAboveReserve(t *testing.T) {
 	screen := vt.NewScreen(w, h)
 	screen.Feed(b.Flush())
 
-	for i, want := range []string{"one", "two", "", "", "s"} {
+	for i, want := range []string{"", "", "one", "two", "s"} {
 		if got := strings.TrimSpace(screen.Line(i + 1)); got != want {
 			t.Fatalf("row %d=%q want %q\n%s", i+1, got, want, screen.Dump())
 		}

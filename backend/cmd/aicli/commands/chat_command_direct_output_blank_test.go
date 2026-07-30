@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -21,14 +20,9 @@ func rowOf(t *testing.T, screen *screenVT, marker string) int {
 	return rows[0]
 }
 
-// dispatchChatCommand hands the terminal to raw fmt.Print* output: it clears the
-// surface prompt (which defers bottom-reserve shrink compensation) and then the
-// command handler writes through plain stdout, which the surface never sees.
-//
-// If that deferred shrink is still outstanding when the raw bytes land, the
-// later flush (here: the settle inside history replay) scrolls the transcript
-// and leaves a multi-row blank hole between the previous transcript, the command
-// output, and the replayed history — the abnormal blank lines seen on /load.
+// /load used to raw-print after ClearPrompt, which ownedViewport never retained.
+// Production now routes the status line through WriteOutput so the subsequent
+// history replay keeps seed → status → header dense (no multi-row blank hole).
 func TestDispatchChatCommand_RawOutputBeforeHistoryKeepsTranscriptDense(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
@@ -71,12 +65,13 @@ func TestDispatchChatCommand_RawOutputBeforeHistoryKeepsTranscriptDense(t *testi
 		coord.mu.Unlock()
 	}))
 
-	// /load: dispatch clears the prompt, the handler raw-prints its status line,
-	// then replays history through the surface.
+	// /load: dispatch clears the prompt, the handler writes its status line
+	// through WriteOutput (printDirectInteractiveOutput), then replays history
+	// through the surface so both land in the owned transcript densily.
 	screen.feed(captureSurfaceStdout(t, func() {
 		coord.SetWriter(os.Stdout)
 		beginDirectInteractiveOutput(session)
-		fmt.Println("会话已加载")
+		printfDirectInteractiveOutput(session, "会话已加载\n")
 		if count := printVisibleChatHistory(session, "已加载历史会话"); count != 2 {
 			t.Fatalf("expected 2 replayed messages, got %d", count)
 		}

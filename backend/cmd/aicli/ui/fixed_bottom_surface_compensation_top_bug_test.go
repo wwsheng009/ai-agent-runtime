@@ -1,52 +1,61 @@
 package ui
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
-// TestBottomReserveShrinkCompensationDrawsBlanksAtTop characterizes a KNOWN,
-// still-open defect in the immediate-mode bottom-reserve compensation: with the
-// output region full of history, growing the reserve scrolls the top history
-// up/off (irreversible into scrollback) and shrinking it then scrolls the region
-// down (SD), painting blank rows at the SCREEN TOP over where history used to be.
-//
-// This cannot be fixed by tweaking the compensation in place: the shrink SD is
-// load-bearing for the "no blank gap" / "ActiveBand is layout neutral" / live-vs
-// -replay parity invariants (removing it regresses those suites). The correct
-// fix is the owned viewport, which retains history and re-renders it — proven in
-// viewport/TestCompose_GrowShrinkKeepsHistoryAnchored. This test stays RED-in
-// spirit (asserts the current buggy output) until the owned viewport lands, at
-// which point it is inverted to "top must not be blanked".
-func TestBottomReserveShrinkCompensationDrawsBlanksAtTop(t *testing.T) {
-	const width, height = 20, 6
-
+// TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop is the production
+// regression for the former CSI-T compensation bug. A full output viewport is
+// composed from retained history while ActiveBand grows and shrinks; the older
+// top rows must return instead of being replaced by inserted blanks.
+func TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	const width, height = 20, 10
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	screen := vt.NewScreen(width, height)
-	// Fill the output region (rows 1..5) with L1..L5.
-	screen.Feed("L1\r\nL2\r\nL3\r\nL4\r\nL5")
+	feed := func(paint func()) string {
+		t.Helper()
+		output := captureUIStdout(t, paint)
+		screen.Feed(output)
+		return output
+	}
+
+	feed(func() {
+		lines := make([]string, height-1)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("L%d", i+1)
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, strings.Join(lines, "\n")+"\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
 	if got := strings.TrimSpace(screen.Line(1)); got != "L1" {
 		t.Fatalf("precondition: row1=%q want L1\n%s", got, screen.Dump())
 	}
 
-	// Band grows 1 -> 3: the top history scrolls up out of the region.
-	var grow strings.Builder
-	appendOutputScrollUpForBottomReserveGrowthSequence(&grow, height, 1, 3)
-	screen.Feed(grow.String())
-
-	// Band shrinks 3 -> 1: deferred scroll-down compensation of 2 rows.
-	var shrink strings.Builder
-	appendOutputScrollDownForBottomReserveShrinkSequence(&shrink, height, 1, 2)
-	screen.Feed(shrink.String())
-
-	t.Logf("after grow+shrink:\n%s", screen.Dump())
-
-	// Current (buggy) behavior: two blank compensation rows at the top, L1/L2 gone.
-	if strings.TrimSpace(screen.Line(1)) != "" || strings.TrimSpace(screen.Line(2)) != "" {
-		t.Fatalf("expected the repro to show blank rows painted at the top; screen:\n%s", screen.Dump())
+	feed(func() {
+		surface.SetActiveBand([]string{"B1", "B2", "B3"})
+	})
+	shrinkOutput := feed(func() {
+		surface.ClearActiveBand()
+	})
+	if strings.Contains(shrinkOutput, terminalScrollDownSequence(1)) ||
+		strings.Contains(shrinkOutput, terminalScrollDownSequence(2)) ||
+		strings.Contains(shrinkOutput, terminalScrollDownSequence(3)) {
+		t.Fatalf("owned shrink must not emit terminal scroll-down compensation: %q", shrinkOutput)
 	}
-	if strings.Contains(screen.Dump(), "L1") || strings.Contains(screen.Dump(), "L2") {
-		t.Fatalf("expected L1/L2 to have scrolled off; screen:\n%s", screen.Dump())
+	for i := 1; i <= height-1; i++ {
+		want := fmt.Sprintf("L%d", i)
+		if got := strings.TrimSpace(screen.Line(i)); got != want {
+			t.Fatalf("row %d=%q want %q after grow/shrink\n%s", i, got, want, screen.Dump())
+		}
+	}
+	if differences := frameCellDifferences(surface.ComposedFrameForTest(), screen.CellRows(1, height)); differences != 0 {
+		t.Fatalf("production frame differs from owned composition: differences=%d\n%s", differences, screen.Dump())
 	}
 }

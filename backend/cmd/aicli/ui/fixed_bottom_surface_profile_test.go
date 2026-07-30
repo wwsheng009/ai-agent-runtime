@@ -1,9 +1,10 @@
 package ui
 
 import (
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 func TestFixedBottomSurface_TerminalProfileMatrix(t *testing.T) {
@@ -146,11 +147,12 @@ func TestFixedBottomSurface_TerminalProfileMatrix(t *testing.T) {
 			if surface.bottomRowsLocked() != 2 {
 				t.Fatalf("expected status + composer bottom rows for %s, got %d", tc.name, surface.bottomRowsLocked())
 			}
-			if !strings.Contains(output, "draft: /model") {
-				t.Fatalf("expected composer preview in output for %s, got %q", tc.name, output)
+			frame := frameDump(surface.ComposedFrameForTest())
+			if !strings.Contains(frame, "draft: /model") {
+				t.Fatalf("expected composer preview in frame for %s, got\n%s\noutput=%q", tc.name, frame, output)
 			}
-			if !strings.Contains(output, "Ready | "+tc.name) {
-				t.Fatalf("expected status line in output for %s, got %q", tc.name, output)
+			if !strings.Contains(frame, "Ready | "+tc.name) {
+				t.Fatalf("expected status line in frame for %s, got\n%s\noutput=%q", tc.name, frame, output)
 			}
 		})
 	}

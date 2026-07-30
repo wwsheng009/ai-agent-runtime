@@ -25,6 +25,7 @@ const sgrReset = "\x1b[0m"
 type Backend struct {
 	width, height int
 	front, back   [][]vt.Cell
+	forceRepaint  bool
 }
 
 // New builds a Backend with blank front and back buffers.
@@ -49,6 +50,18 @@ func (b *Backend) Resize(width, height int) {
 	b.width, b.height = width, height
 	b.front = blankGrid(width, height)
 	b.back = blankGrid(width, height)
+	b.forceRepaint = true
+}
+
+// Invalidate forgets the physical terminal contents without discarding the
+// staged frame. The next Flush clears and repaints every row, including rows
+// whose target is blank. Surfaces use this after a geometry transition whose
+// host-side scroll cannot be represented by front.
+func (b *Backend) Invalidate() {
+	if b == nil {
+		return
+	}
+	b.forceRepaint = true
 }
 
 // StageFrame overwrites the entire back buffer. Extra rows are ignored; missing
@@ -75,13 +88,43 @@ func (b *Backend) StageRow(row int, cells []vt.Cell) {
 // swaps front=back. When nothing changed it returns "".
 func (b *Backend) Flush() string {
 	var sb strings.Builder
-	for r := 0; r < b.height; r++ {
-		b.diffRow(&sb, r)
+	if b.forceRepaint {
+		for r := 0; r < b.height; r++ {
+			b.emitForcedRow(&sb, r)
+		}
+	} else {
+		for r := 0; r < b.height; r++ {
+			b.diffRow(&sb, r)
+		}
 	}
 	for r := 0; r < b.height; r++ {
 		copy(b.front[r], b.back[r])
 	}
+	b.forceRepaint = false
 	return sb.String()
+}
+
+func (b *Backend) emitForcedRow(sb *strings.Builder, r int) {
+	if sb == nil || r < 0 || r >= b.height {
+		return
+	}
+	// EL gives the VT model canonical empty cells instead of explicit space
+	// glyphs and guarantees stale content to the right of the new row is gone.
+	sb.WriteString("\x1b[")
+	sb.WriteString(strconv.Itoa(r + 1))
+	sb.WriteString(";1H")
+	sb.WriteString(sgrReset)
+	sb.WriteString("\x1b[K")
+
+	hi := -1
+	for c, cell := range b.back[r] {
+		if cell.Text != "" || cell.Cont || len(cell.SGR) > 0 {
+			hi = c
+		}
+	}
+	if hi >= 0 {
+		b.emitRowRangeCoalesced(sb, r, 0, hi)
+	}
 }
 
 // diffRow appends the minimal ANSI to reconcile row r (0-based) into sb.
@@ -104,24 +147,52 @@ func (b *Backend) diffRow(sb *strings.Builder, r int) {
 	for lo > 0 && back[lo].Cont {
 		lo--
 	}
-	// Cursor to (row, col), both 1-based.
+	// Blanking a previously occupied cell cannot use a space glyph: that would
+	// leave Text=" " on the host/vt model while Compose keeps Text="". When any
+	// dirty cell must become a true blank, repaint the whole row with EL so the
+	// physical cells match the owned frame exactly (band/popup shrink path).
+	for c := lo; c <= hi; c++ {
+		if cellBlank(back[c]) && !cellBlank(front[c]) {
+			b.emitForcedRow(sb, r)
+			return
+		}
+	}
+	b.emitRowRangeCoalesced(sb, r, lo, hi)
+}
+
+func cellBlank(c vt.Cell) bool {
+	return c.Text == "" && !c.Cont && len(c.SGR) == 0
+}
+
+// emitRowRangeCoalesced keeps one SGR run active across adjacent cells, so
+// plain text is emitted as a contiguous substring instead of reset-wrapped
+// rune by rune. Both forced and minimal-diff paints use this representation.
+func (b *Backend) emitRowRangeCoalesced(sb *strings.Builder, r, lo, hi int) {
+	if sb == nil || r < 0 || r >= b.height || lo < 0 || hi < lo || hi >= b.width {
+		return
+	}
+	back := b.back[r]
 	sb.WriteString("\x1b[")
 	sb.WriteString(strconv.Itoa(r + 1))
 	sb.WriteByte(';')
 	sb.WriteString(strconv.Itoa(lo + 1))
 	sb.WriteByte('H')
+	var activeSGR []string
+	haveActiveSGR := false
 	for c := lo; c <= hi; c++ {
 		cell := back[c]
 		if cell.Cont {
-			// The lead rune's display width already advanced the cursor over
-			// this column; emitting nothing keeps alignment.
 			continue
 		}
-		sb.WriteString(sgrReset)
-		if len(cell.SGR) > 0 {
-			sb.WriteString("\x1b[")
-			sb.WriteString(strings.Join(cell.SGR, ";"))
-			sb.WriteByte('m')
+		if !haveActiveSGR || !sgrEqual(activeSGR, cell.SGR) {
+			sb.WriteString(sgrReset)
+			if len(cell.SGR) > 0 {
+				sb.WriteString("\x1b[")
+				sb.WriteString(strings.Join(cell.SGR, ";"))
+				sb.WriteByte('m')
+			}
+			activeSGR = cell.SGR
+			haveActiveSGR = true
 		}
 		if cell.Text == "" {
 			sb.WriteByte(' ')
@@ -130,6 +201,18 @@ func (b *Backend) diffRow(sb *strings.Builder, r int) {
 		}
 	}
 	sb.WriteString(sgrReset)
+}
+
+func sgrEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func cellEqual(a, b vt.Cell) bool {

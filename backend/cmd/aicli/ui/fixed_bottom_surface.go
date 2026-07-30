@@ -3,12 +3,14 @@ package ui
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/viewport"
 )
 
 const (
@@ -117,14 +119,18 @@ type FixedBottomSurface struct {
 	outputScrollDebtRows int
 	// historyWindow is the P5.2b/P5.3 owned-viewport foundation: the logical
 	// committed transcript lines (styled source) captured from every scrollback
-	// write, bounded to historyWindowMaxLines. Nothing renders from it yet; a
-	// later slice re-composes it under the bottom band so a band shrink restores
-	// history instead of scrolling (design P5.2b/P5.3). Soft-tail rewrite / clear
-	// / resize reconciliation is deferred to those slices.
+	// write, bounded to historyWindowMaxLines. Reserve shrink uses it only when
+	// the retained physical rows cover the complete output region; otherwise the
+	// terminal scroll fallback is retained so unknown history is never erased.
 	historyWindow []string
 	// historyPartial is true when the last captured write did not end in a
 	// newline, so the next write continues the same logical line.
 	historyPartial bool
+	// historyHandedOff is the number of oldest lines in historyWindow that have
+	// already been inserted into native scrollback. Used to support dual
+	// retention for band-shrink restore (headroom lines stay in both window
+	// and scrollback); lines older than visible must be handed off at once.
+	historyHandedOff int
 	// softOutputLines is the most recent committed output still sitting at the
 	// bottom of the output region. Source-backed resize reflow may rewrite it
 	// in place; geometry changes or overflow trim invalidate safe reflow.
@@ -134,6 +140,10 @@ type FixedBottomSurface struct {
 	lastWidth         int
 	lastHeight        int
 	lastBottomRows    int
+	// ownedViewport is the normal production renderer. The legacy immediate
+	// scroll-region path remains only as an internal capability fallback.
+	ownedViewport   bool
+	viewportBackend *viewport.Backend
 	// lastGeometryProbeAt records the last SyncTerminalGeometry* size probe so
 	// the paint path can throttle GetSize syscalls without missing resizes for
 	// longer than DefaultGeometryProbeMinInterval.
@@ -189,6 +199,13 @@ func (s *FixedBottomSurface) Enable() bool {
 	}
 	s.enabled = true
 	s.testMode = false
+	s.ownedViewport = true
+	s.viewportBackend = viewport.New(s.terminal.Width(), s.terminal.Height())
+	s.viewportBackend.Invalidate()
+	// The legacy surface may have left DECSTBM restricted to the output
+	// region. Owned frames address the whole screen, so reset before the first
+	// frame is composed.
+	s.terminal.ResetScrollRegion()
 	// Codex wraps every frame in a synchronized update; mirror that for the real
 	// interactive surface so multi-step repaints (layout + scroll + content) land
 	// atomically. Test surfaces go through EnableForTest and never flip this on,
@@ -226,6 +243,10 @@ func (s *FixedBottomSurface) EnableForTest(width, height int) {
 	s.terminal.SetSizeForTest(width, height)
 	s.enabled = true
 	s.testMode = true
+	s.ownedViewport = true
+	s.viewportBackend = viewport.New(width, height)
+	s.viewportBackend.Invalidate()
+	s.terminal.ResetScrollRegion()
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = 1
@@ -269,6 +290,8 @@ func (s *FixedBottomSurface) Disable() {
 	s.dynamicStatusModel = nil
 	s.enabled = false
 	s.testMode = false
+	s.ownedViewport = false
+	s.viewportBackend = nil
 	// Stop framing writes once the surface is torn down so any later plain output
 	// path is not wrapped in a dangling synchronized update.
 	SetTerminalSynchronizedFrames(false)
@@ -277,6 +300,7 @@ func (s *FixedBottomSurface) Disable() {
 	s.outputCursorOnBlankRow = false
 	s.outputScrollDebtRows = 0
 	s.invalidateSoftOutputLocked()
+	s.resetOwnedHistoryLocked()
 }
 
 func (s *FixedBottomSurface) clearPopupStateLocked(clearStack bool) {
@@ -533,6 +557,12 @@ func (s *FixedBottomSurface) BeginOutput() {
 	if !s.enabled {
 		return
 	}
+	if s.ownedViewport {
+		// Permanent output must go through WriteOutput so it enters the retained
+		// transcript. BeginOutput remains a compatibility hook for callers that
+		// only need to dismiss transient UI.
+		return
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		// Raw writers (fmt.Println after beginDirectInteractiveOutput) paint at
@@ -628,29 +658,66 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 	var n int
 	var err error
 	WithTerminalWriteLock(func() {
+		if s.ownedViewport {
+			output := normalizeFixedSurfaceOutputText(text)
+			if trackSoft {
+				s.noteSoftOutputLocked(text)
+			} else {
+				s.invalidateSoftOutputLocked()
+			}
+			s.appendHistoryWindowLocked(text)
+			n = len(output)
+			s.outputCursorOnBlankRow = strings.HasSuffix(output, "\n")
+			s.outputScrollDebtRows = 0
+			s.pendingScrollDownRows = 0
+			s.renderOwnedViewportLocked()
+			// Live TTY paint already went through the double-buffer above. Mirror
+			// plain text only to non-stdout writers so buffer/file capture paths
+			// (and tests that assert irreversible scrollback bytes) still see
+			// the drained head without double-painting the interactive screen.
+			if writer != os.Stdout {
+				if wn, werr := io.WriteString(writer, output); werr != nil {
+					err = werr
+					n = wn
+				}
+			}
+			s.restoreStoredPromptCursorLocked()
+			return
+		}
 		s.applyLayoutLocked()
 		s.flushPendingOutputScrollDownLocked()
 		s.flushOutputScrollDebtLocked()
 		s.moveToOutputLocked()
-		n, err = io.WriteString(writer, normalizeFixedSurfaceOutputText(text))
+		output := normalizeFixedSurfaceOutputText(text)
+		n, err = io.WriteString(writer, output)
 		if n > 0 {
-			if trackSoft {
-				s.noteSoftOutputLocked(text)
-			} else {
-				// Foreign/plain writes break 1:1 soft ownership at the surface
-				// boundary so callers cannot forget a second invalidate.
-				s.invalidateSoftOutputLocked()
-			}
 			s.markOutputWrittenLocked()
-			// Owned-viewport foundation: every scrollback write is committed
-			// transcript, so capture it into the history window regardless of the
-			// soft-tail ownership split above.
-			s.appendHistoryWindowLocked(text)
-			// Trailing newline parks the cursor on a blank row at the output
-			// bottom. Later bottom-reserve growth must absorb that blank or it
-			// becomes a visible hole above the active band / prompt.
-			normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
-			s.outputCursorOnBlankRow = strings.HasSuffix(normalized, "\n")
+			fullWrite := err == nil && n == len(output)
+			if fullWrite {
+				if trackSoft {
+					s.noteSoftOutputLocked(text)
+				} else {
+					// Foreign/plain writes break 1:1 soft ownership at the surface
+					// boundary so callers cannot forget a second invalidate.
+					s.invalidateSoftOutputLocked()
+				}
+				s.appendHistoryWindowLocked(text)
+				// Trailing newline parks the cursor on a blank row at the output
+				// bottom. Later bottom-reserve growth must absorb that blank or it
+				// becomes a visible hole above the active band / prompt.
+				s.outputCursorOnBlankRow = strings.HasSuffix(output, "\n")
+			} else {
+				// A short/erroring writer leaves only an unknown byte prefix on
+				// screen. Restart ownership from future writes; once a complete
+				// output region has accumulated, owned restore becomes safe again.
+				s.invalidateSoftOutputLocked()
+				s.resetOwnedHistoryLocked()
+				written := output
+				if n < len(written) {
+					written = written[:n]
+				}
+				s.outputCursorOnBlankRow = strings.HasSuffix(written, "\n")
+			}
 		}
 		s.restoreStoredPromptCursorLocked()
 	})
@@ -782,6 +849,22 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 	for i, line := range newLines {
 		normalized[i] = strings.TrimSuffix(strings.ReplaceAll(line, "\r", ""), "\n")
 	}
+	if s.ownedViewport {
+		if !s.replaceOwnedHistorySuffixLocked(s.softOutputLines, normalized) {
+			s.invalidateSoftOutputLocked()
+			return false
+		}
+		s.softOutputLines = append([]string(nil), normalized...)
+		s.softOutputValid = len(normalized) > 0
+		s.softOutputTrimmed = false
+		s.outputCursorOnBlankRow = false
+		s.outputScrollDebtRows = 0
+		WithTerminalWriteLock(func() {
+			s.renderOwnedViewportLocked()
+			s.restoreStoredPromptCursorLocked()
+		})
+		return true
+	}
 	var rewritten bool
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
@@ -801,6 +884,7 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		}
 		s.terminal.MoveTo(prevStart, 1)
 		if len(normalized) == 0 {
+			s.replaceOwnedHistorySuffixLocked(s.softOutputLines, nil)
 			s.softOutputLines = nil
 			s.softOutputValid = false
 			s.softOutputTrimmed = false
@@ -820,10 +904,14 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		// Match WriteOutput / writeLineLocked: always terminate so the output
 		// cursor parks on a blank row at the region bottom.
 		builder.WriteString("\n")
-		if _, err := io.WriteString(writer, normalizeFixedSurfaceOutputText(builder.String())); err != nil {
+		output := normalizeFixedSurfaceOutputText(builder.String())
+		if n, err := io.WriteString(writer, output); err != nil || n != len(output) {
+			s.invalidateSoftOutputLocked()
+			s.resetOwnedHistoryLocked()
 			rewritten = false
 			return
 		}
+		s.replaceOwnedHistorySuffixLocked(s.softOutputLines, normalized)
 		s.softOutputLines = normalized
 		s.softOutputValid = true
 		s.softOutputTrimmed = false
@@ -910,10 +998,63 @@ func (s *FixedBottomSurface) appendHistoryWindowLocked(text string) {
 		s.historyWindow = append(s.historyWindow, segs...)
 	}
 	s.historyPartial = !endsWithNewline
+	// Owned path only: hand lines older than the visible output region into
+	// native scrollback BEFORE the hard cap (dual-retain headroom for shrink).
+	// Hard-cap trim alone would silently drop lines without host scrollback.
+	if s.ownedViewport {
+		s.commitExcessHistoryToScrollbackLocked()
+	}
+
+	// Safety net for all paths: keep the newest historyWindowMaxLines rows
+	// (matches original bounds test and prevents unbounded memory growth).
 	if len(s.historyWindow) > historyWindowMaxLines {
 		drop := len(s.historyWindow) - historyWindowMaxLines
 		s.historyWindow = append([]string(nil), s.historyWindow[drop:]...)
+		s.historyHandedOff -= drop
+		if s.historyHandedOff < 0 {
+			s.historyHandedOff = 0
+		}
 	}
+}
+
+func (s *FixedBottomSurface) resetOwnedHistoryLocked() {
+	if s == nil {
+		return
+	}
+	s.historyWindow = nil
+	s.historyPartial = false
+	s.historyHandedOff = 0
+}
+
+func (s *FixedBottomSurface) replaceOwnedHistorySuffixLocked(oldLines, newLines []string) bool {
+	if s == nil || s.historyPartial || len(oldLines) > len(s.historyWindow) {
+		s.resetOwnedHistoryLocked()
+		return false
+	}
+	start := len(s.historyWindow) - len(oldLines)
+	for i := range oldLines {
+		if s.historyWindow[start+i] != oldLines[i] {
+			s.resetOwnedHistoryLocked()
+			return false
+		}
+	}
+	replaced := make([]string, 0, start+len(newLines))
+	replaced = append(replaced, s.historyWindow[:start]...)
+	replaced = append(replaced, newLines...)
+	if len(replaced) > historyWindowMaxLines {
+		drop := len(replaced) - historyWindowMaxLines
+		replaced = append([]string(nil), replaced[drop:]...)
+		s.historyHandedOff -= drop
+		if s.historyHandedOff < 0 {
+			s.historyHandedOff = 0
+		}
+	}
+	if s.historyHandedOff > len(replaced) {
+		s.historyHandedOff = len(replaced)
+	}
+	s.historyWindow = replaced
+	s.historyPartial = false
+	return true
 }
 
 // HistoryWindowForTest returns a copy of the captured history window (test-only).
@@ -924,6 +1065,27 @@ func (s *FixedBottomSurface) HistoryWindowForTest() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.historyWindow...)
+}
+
+// HistoryHandedOffForTest returns how many oldest window lines have already been
+// inserted into native scrollback (test-only).
+func (s *FixedBottomSurface) HistoryHandedOffForTest() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.historyHandedOff
+}
+
+// visibleOutputRowsForTest exposes visibleOutputRowsLocked for tests.
+func (s *FixedBottomSurface) visibleOutputRowsForTest() int {
+	if s == nil {
+		return 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.visibleOutputRowsLocked()
 }
 
 func (s *FixedBottomSurface) ShowPrompt(line string) bool {
@@ -1118,6 +1280,10 @@ func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.
 	s.activeBandLines = normalized
 	s.activeBandStyled = cloneRenderLines(styled)
 	s.reflowPromptViewportLocked()
+	if s.ownedViewport {
+		s.repaintActiveBandLocked()
+		return true
+	}
 	currentRows := s.bottomPaneStateLocked().activeBandVisibleRowCount()
 	if previousRows == currentRows {
 		if currentRows == 0 {
@@ -1180,20 +1346,12 @@ func (s *FixedBottomSurface) renderActiveBandRowLocked(row, index int, plain str
 	}
 	s.terminal.MoveTo(row, 1)
 	s.terminal.ClearLine()
+	var styled *render.Line
 	if index < len(s.activeBandStyled) {
-		line := s.activeBandStyled[index]
-		if render.LineWidth(line) > s.terminal.Width() {
-			line = render.Truncate(line, s.terminal.Width(), "…")
-		}
-		fmt.Print(style.RenderDocument(render.LinesDoc(line), themeContext))
-		return
+		styled = &s.activeBandStyled[index]
 	}
-	plain = truncateFixedPopupLine(plain, s.terminal.Width())
-	if plain != "" {
-		fmt.Print(style.RenderDocument(render.SingleLineDoc(render.Span{
-			Text:  plain,
-			Style: render.Style{Role: string(style.RoleInfo)},
-		}), themeContext))
+	if text := formatActiveBandPaintRow(plain, styled, s.terminal.Width(), themeContext); text != "" {
+		fmt.Print(text)
 	}
 }
 
@@ -1220,6 +1378,19 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 		} else {
 			s.terminal.SaveCursor()
 			defer s.terminal.RestoreCursor()
+		}
+		if s.ownedViewport {
+			// One full recompose covers prompt/band/status and restores owned
+			// history into rows freed by a shrink. Legacy multi-pass paint and
+			// scroll-down compensation are not used on this path.
+			s.applyLayoutLocked()
+			s.renderOwnedViewportLocked()
+			if restorePromptCursor {
+				s.restoreStoredPromptCursorLocked()
+			} else {
+				s.moveToOutputLocked()
+			}
+			return
 		}
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -1263,6 +1434,19 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 	s.reflowPromptViewportLocked()
 	if !s.enabled {
 		return false
+	}
+
+	if s.ownedViewport {
+		// Owned frames recompose the full screen from retained history + the
+		// shrunk bottom reserve. No scroll-down compensation is required.
+		// Re-assert trailing blank so shrink restore works. historyPartial is
+		// false when the last write ended with a newline.
+		if !s.historyPartial && len(s.historyWindow) > 0 {
+			s.outputCursorOnBlankRow = true
+		} else {
+			s.outputCursorOnBlankRow = false
+		}
+		return s.repaintActiveBandLocked()
 	}
 
 	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
@@ -2335,6 +2519,11 @@ func (s *FixedBottomSurface) canEnableLocked() bool {
 }
 
 func (s *FixedBottomSurface) applyLayoutLocked() {
+	if s.ownedViewport {
+		width, height := s.terminal.RefreshSize()
+		s.applyOwnedViewportGeometryLocked(width, height)
+		return
+	}
 	var builder strings.Builder
 	s.appendApplyLayoutSequenceLocked(&builder)
 	if builder.Len() > 0 {
@@ -2346,6 +2535,10 @@ func (s *FixedBottomSurface) applyLayoutLocked() {
 // in the same lock hold (e.g. syncTerminalGeometry). Callers that have not just
 // refreshed must use applyLayoutLocked so geometry stays current.
 func (s *FixedBottomSurface) applyLayoutWithSizeLocked(width, height int) {
+	if s.ownedViewport {
+		s.applyOwnedViewportGeometryLocked(width, height)
+		return
+	}
 	var builder strings.Builder
 	s.appendApplyLayoutSequenceWithSizeLocked(&builder, width, height)
 	if builder.Len() > 0 {
@@ -2358,11 +2551,19 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Bu
 		return
 	}
 	width, height := s.terminal.RefreshSize()
+	if s.ownedViewport {
+		s.applyOwnedViewportGeometryLocked(width, height)
+		return
+	}
 	s.appendApplyLayoutSequenceWithSizeLocked(builder, width, height)
 }
 
 func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *strings.Builder, width, height int) {
 	if builder == nil {
+		return
+	}
+	if s.ownedViewport {
+		s.applyOwnedViewportGeometryLocked(width, height)
 		return
 	}
 	if width <= 0 {
@@ -2450,6 +2651,52 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *st
 	builder.WriteString(terminalScrollRegionSequence(1, outputBottomRowForHeight(height, bottomRows)))
 }
 
+func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int) {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	bottomRows := s.effectiveBottomRowsLocked(height)
+	sizeChanged := width != s.lastWidth || height != s.lastHeight
+	bottomChanged := bottomRows != s.lastBottomRows
+	s.lastWidth = width
+	s.lastHeight = height
+	s.lastBottomRows = bottomRows
+	// Owned frames recompose history+bottom from application state, so the
+	// legacy scroll-compensation bookkeeping is inert. Only a real terminal
+	// resize invalidates the trailing-blank marker: band/popup grow-shrink must
+	// keep it so Compose can restore the owned transcript tail.
+	s.scrollCompensatedRows = 0
+	s.pendingScrollDownRows = 0
+	if sizeChanged {
+		s.outputScrollDebtRows = 0
+		s.outputCursorOnBlankRow = false
+	}
+	// Owned frames address absolute rows and must not inherit a narrower legacy
+	// DECSTBM region. Reset before the first/resize repaint so the status row and
+	// other bottom-pane rows are writable in the host terminal and vt.Screen.
+	if sizeChanged || s.viewportBackend == nil {
+		s.terminal.ResetScrollRegion()
+	}
+	if s.viewportBackend == nil {
+		s.viewportBackend = viewport.New(width, height)
+		s.viewportBackend.Invalidate()
+		return
+	}
+	if backendWidth, backendHeight := s.viewportBackend.Size(); backendWidth != width || backendHeight != height {
+		s.viewportBackend.Resize(width, height)
+		return
+	}
+	// Geometry transitions that free or claim reserve rows must force a full
+	// row repaint (EL) so blank margin/history cells stay Text="" rather than
+	// residual space glyphs from the previous band/popup content.
+	if sizeChanged || bottomChanged {
+		s.viewportBackend.Invalidate()
+	}
+}
+
 // appendPendingOutputScrollDownLocked flushes a deferred bottom-reserve shrink
 // compensation. Callers must invoke it only after the freed rows above the
 // prompt have been cleared or repainted, otherwise the moved output lines would
@@ -2460,6 +2707,10 @@ func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *string
 		return
 	}
 	rows := s.pendingScrollDownRows
+	if s.appendOwnedHistoryRestoreForShrinkLocked(builder) {
+		s.pendingScrollDownRows = 0
+		return
+	}
 	s.pendingScrollDownRows = 0
 	height := s.terminal.Height()
 	if height <= 1 {
@@ -2549,16 +2800,14 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 	if !s.enabled {
 		return
 	}
+	if s.ownedViewport {
+		s.renderOwnedViewportLocked()
+		return
+	}
 	state := s.bottomPaneStateLocked()
 	s.terminal.MoveTo(s.statusRowLocked(), 1)
 	s.terminal.ClearLine()
-	width := s.terminal.Width()
-	themeContext := s.activeBandThemeContextLocked()
-	model := style.StatusLineModel{State: style.RunReady}
-	if state.StatusModel != nil {
-		model = *state.StatusModel
-	}
-	fmt.Print(formatFixedStatusModelWithContext(model, width, themeContext))
+	fmt.Print(s.statusPaintTextLocked(state, s.terminal.Width()))
 	s.terminal.ClearLine()
 }
 
@@ -2566,52 +2815,33 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 	if !s.enabled {
 		return
 	}
+	if s.ownedViewport {
+		s.renderOwnedViewportLocked()
+		return
+	}
 	state := s.bottomPaneStateLocked()
-	visibleLines := state.VisiblePopupLines(s.terminal.Height())
-	composerRows := state.composerVisibleRowCount()
-	gapRows := state.popupBottomGapRowCount()
-	rows := len(visibleLines) + composerRows
-	if rows == 0 {
+	plan := s.popupPaintPlanLocked(state, s.terminal.Height())
+	if plan.reservedRows == 0 {
 		if s.popupRenderedRows > 0 {
 			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 			s.clearPopupRenderStateLocked()
 		}
 		return
 	}
-	if s.popupRenderedRows > 0 && (s.popupRenderedRows != rows || s.popupRenderedGapRows != gapRows) {
+	if s.popupRenderedRows > 0 && (s.popupRenderedRows != plan.reservedRows || s.popupRenderedGapRows != plan.gapRows) {
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 		s.clearPopupRenderStateLocked()
 	}
-	startRow := s.popupStartRowLocked(rows, gapRows)
-	if startRow < 1 {
-		startRow = 1
-	}
-	for i, line := range visibleLines {
-		row := startRow + i
-		if row >= s.statusRowLocked() {
-			break
-		}
-		s.terminal.MoveTo(row, 1)
+	for _, paint := range plan.rows {
+		s.terminal.MoveTo(paint.row, 1)
 		s.terminal.ClearLine()
-		line = truncateFixedPopupLine(line, s.terminal.Width())
-		if line != "" {
-			fmt.Print(line)
+		if paint.text != "" {
+			fmt.Print(paint.text)
 		}
 	}
-	if composer := state.composerLineText(); composer != "" {
-		row := startRow + len(visibleLines)
-		if row < s.statusRowLocked() {
-			s.terminal.MoveTo(row, 1)
-			s.terminal.ClearLine()
-			composer = truncateFixedPopupLine(composer, s.terminal.Width())
-			if composer != "" {
-				fmt.Print(composer)
-			}
-		}
-	}
-	s.popupRenderedRows = rows
-	s.popupRenderedGapRows = gapRows
-	s.popupRenderedStartRow = startRow
+	s.popupRenderedRows = plan.reservedRows
+	s.popupRenderedGapRows = plan.gapRows
+	s.popupRenderedStartRow = plan.startRow
 }
 
 func (s *FixedBottomSurface) moveToOutputLocked() {
@@ -2888,17 +3118,16 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if s == nil || s.terminal == nil || !s.enabled {
 		return
 	}
-	state := s.bottomPaneStateLocked()
-	if state.composerVisibleRowCount() > 0 {
+	if s.ownedViewport {
+		s.renderOwnedViewportLocked()
 		return
 	}
-	rows := state.promptVisibleRowCount()
-	noticeRows := state.promptNoticeVisibleRowCount()
-	dynamicRows := state.dynamicStatusVisibleRowCount()
-	activeRows := state.activeBandVisibleRowCount()
-	topMarginRows := state.promptTopMarginRowCount()
-	bottomMarginRows := state.promptBottomMarginRowCount()
-	if rows < 1 && noticeRows < 1 && dynamicRows < 1 && activeRows < 1 {
+	state := s.bottomPaneStateLocked()
+	plan := s.promptPaintPlanLocked(state, s.terminal.Width())
+	if plan.skip {
+		return
+	}
+	if plan.empty {
 		if s.promptRenderedRows > 0 {
 			s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 			s.promptRenderedStartRow = 0
@@ -2906,112 +3135,34 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		}
 		return
 	}
-	if rows > 0 {
-		if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
-			rows = maxRows
-		}
-	}
-	bottom := s.promptBottomRowLocked()
-	if bottom < 1 {
-		bottom = s.statusRowLocked() - 1
-	}
-	if bottom < 1 {
-		return
-	}
 	// Layout bottom-up: [active band][notice][dynamic status][top margin]
 	// [prompt][bottom margin][status]. Margins are reserved only for the main
 	// chat composer, so transient popups and prompt-less streaming stay dense.
-	promptStart := bottom + bottomMarginRows + 1
-	if rows > 0 {
-		promptStart = bottom - rows + 1
-	}
-	topMarginStart := promptStart - topMarginRows
-	dynamicStart := topMarginStart - dynamicRows
-	noticeStart := dynamicStart - noticeRows
-	activeStart := noticeStart - activeRows
-	start := activeStart
-	if start < 1 {
-		start = 1
-	}
-	areaRows := activeRows + noticeRows + dynamicRows + topMarginRows + rows + bottomMarginRows
-	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != start || s.promptRenderedRows != areaRows) {
+	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != plan.startRow || s.promptRenderedRows != plan.areaRows) {
 		s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 	}
 	if clear {
-		s.clearRowsLocked(start, areaRows)
+		s.clearRowsLocked(plan.startRow, plan.areaRows)
 	}
-	activeTheme := s.activeBandThemeContextLocked()
-	if activeRows > 0 {
-		// After a shrink the stored band can exceed the current budget; keep the
-		// newest tail so streaming focus stays on the end of the active cell.
-		band := state.ActiveBandLines
-		styled := state.ActiveBandStyled
-		if len(band) > activeRows {
-			band = band[len(band)-activeRows:]
+	for _, paint := range plan.rows {
+		if paint.row < 1 {
+			continue
 		}
-		if len(styled) > activeRows {
-			styled = styled[len(styled)-activeRows:]
-		}
-		for i := 0; i < activeRows && i < len(band); i++ {
-			row := activeStart + i
-			if row < 1 {
-				continue
-			}
-			s.terminal.MoveTo(row, 1)
-			if i < len(styled) {
-				line := styled[i]
-				if render.LineWidth(line) > s.terminal.Width() {
-					line = render.Truncate(line, s.terminal.Width(), "…")
-				}
-				fmt.Print(style.RenderDocument(render.LinesDoc(line), activeTheme))
-				continue
-			}
-			plain := truncateFixedPopupLine(band[i], s.terminal.Width())
-			if plain != "" {
-				fmt.Print(style.RenderDocument(render.SingleLineDoc(render.Span{
-					Text:  plain,
-					Style: render.Style{Role: string(style.RoleInfo)},
-				}), activeTheme))
-			}
+		s.terminal.MoveTo(paint.row, 1)
+		if paint.text != "" {
+			fmt.Print(paint.text)
 		}
 	}
-	if noticeRows > 0 {
-		noticeLines := state.promptNoticeLines()
-		for i := 0; i < noticeRows && i < len(noticeLines); i++ {
-			row := noticeStart + i
-			if row < 1 {
-				continue
-			}
-			s.terminal.MoveTo(row, 1)
-			notice := truncateFixedPopupLine(noticeLines[i], s.terminal.Width())
-			if notice != "" {
-				fmt.Print(style.RenderDocument(render.SingleLineDoc(render.Span{
-					Text:  notice,
-					Style: render.Style{Role: string(style.RoleTextMuted)},
-				}), activeTheme))
-			}
-		}
+	s.promptRenderedStartRow = plan.startRow
+	s.promptRenderedRows = plan.areaRows
+}
+
+// OwnedViewport reports whether the production owned-viewport renderer is active.
+func (s *FixedBottomSurface) OwnedViewport() bool {
+	if s == nil {
+		return false
 	}
-	if dynamicRows > 0 && state.DynamicStatusModel != nil {
-		s.terminal.MoveTo(dynamicStart, 1)
-		model := *state.DynamicStatusModel
-		fmt.Print(formatFixedStatusModelWithContext(model, s.terminal.Width(), activeTheme))
-	}
-	if rows > 0 {
-		s.terminal.MoveTo(promptStart, 1)
-		viewportText := renderInteractiveInputViewport(
-			s.promptLine,
-			[]rune(s.promptInput),
-			s.terminal.Width(),
-			s.promptViewportStart,
-			rows,
-		)
-		if viewportText != "" {
-			fmt.Print(viewportText)
-		}
-	}
-	s.promptRenderedStartRow = start
-	s.promptRenderedRows = areaRows
+	return s.ownedViewport
 }
 
 func (s *FixedBottomSurface) activeBandThemeContextLocked() style.ThemeContext {
@@ -3615,6 +3766,13 @@ func terminalScrollDownSequence(rows int) string {
 	return fmt.Sprintf("\x1b[%dT", rows)
 }
 
+func terminalResetScrollRegionSequence(height int) string {
+	// Bare CSI r is the portable full-screen reset; keep height for call-site
+	// clarity and future hosts that need an explicit 1;height form.
+	_ = height
+	return "\x1b[r"
+}
+
 func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height int, oldBottomRows int, newBottomRows int) {
 	if builder == nil || height <= 1 || newBottomRows <= oldBottomRows {
 		return
@@ -3711,4 +3869,115 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+// visibleOutputRowsLocked returns the number of rows occupied by the current
+// output region (history + active band + prompt/status margins). This is the
+// maximum number of history rows that can be kept in owned historyWindow before
+// excess must be handed off to native scrollback.
+func (s *FixedBottomSurface) visibleOutputRowsLocked() int {
+	if s == nil || s.terminal == nil {
+		return 1
+	}
+	height := s.terminal.Height()
+	if height < 1 {
+		height = 24
+	}
+	bottomRows := s.effectiveBottomRowsLocked(height)
+	outputBottom := outputBottomRowForHeight(height, bottomRows)
+	return outputBottom
+}
+
+// historyWindowHeadroom is the extra rows kept in historyWindow beyond the
+// current visible output region so that band grow/shrink can restore freed
+// rows from the retained transcript without falling back to CSI T.
+const historyWindowHeadroom = 40
+
+// commitExcessHistoryToScrollbackLocked hands off any history rows older than
+// the current visible output region into native scrollback (once). Dual-retains
+// those lines in historyWindow up to visible+headroom so band-shrink can restore
+// without CSI T. Soft-trims past keepForRestore; hard cap is a memory safety net.
+func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
+	if s == nil || len(s.historyWindow) == 0 {
+		return
+	}
+	visible := s.visibleOutputRowsLocked()
+	if visible < 1 {
+		visible = 1
+	}
+	keepForRestore := visible + historyWindowHeadroom
+	if keepForRestore > historyWindowMaxLines {
+		keepForRestore = historyWindowMaxLines
+	}
+
+	// Any line older than the newest `visible` rows must enter scrollback once.
+	// Headroom lines stay dual-retained in the window for shrink restore.
+	needHandedOff := 0
+	if len(s.historyWindow) > visible {
+		needHandedOff = len(s.historyWindow) - visible
+	}
+	if needHandedOff > s.historyHandedOff {
+		handoff := append([]string(nil), s.historyWindow[s.historyHandedOff:needHandedOff]...)
+		s.insertHistoryLinesLocked(handoff)
+		s.historyHandedOff = needHandedOff
+	}
+
+	// Soft-trim oldest rows past keepForRestore (already handed off when possible).
+	if len(s.historyWindow) > keepForRestore {
+		drop := len(s.historyWindow) - keepForRestore
+		s.historyWindow = append([]string(nil), s.historyWindow[drop:]...)
+		s.historyHandedOff -= drop
+		if s.historyHandedOff < 0 {
+			s.historyHandedOff = 0
+		}
+	}
+}
+
+// insertHistoryLinesLocked is the single primitive for moving history into
+// native scrollback. Cursor-neutral. Codex-aligned DECSTBM path:
+//
+//  1. Limit the scroll region to rows 1..outputBottom (above the bottom band).
+//  2. Park the cursor on the last row of that region.
+//  3. For each history line emit "\r\n" then the line — the LF at the region
+//     bottom scrolls the top of the region into host scrollback without
+//     touching the reserved bottom band.
+//
+// This must be the ONLY path for history to reach scrollback. CSI T (Scroll
+// Down) is wrong: it does not enter scrollback and corrupts the double-buffer
+// front state. Do not write at row 1 of a multi-row region either — that only
+// advances the cursor downward and never scrolls until the region is full.
+func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) {
+	if s == nil || len(rows) == 0 {
+		return
+	}
+	width, height := s.terminal.Width(), s.terminal.Height()
+	if width < 1 || height < 1 {
+		return
+	}
+
+	// Cursor-neutral (save/restore around host scroll sequences).
+	s.terminal.SaveCursor()
+	defer s.terminal.RestoreCursor()
+
+	outputBottom := outputBottomRowForHeight(height, s.bottomRowsLocked())
+	if outputBottom < 1 {
+		outputBottom = 1
+	}
+	var builder strings.Builder
+	// Scroll region covers the owned output area only; bottom band stays fixed.
+	builder.WriteString(terminalScrollRegionSequence(1, outputBottom))
+	// Codex parks at the bottom of the region, then \r\n scrolls a blank line
+	// up before writing content (so the prior viewport top enters scrollback).
+	builder.WriteString(terminalMoveToSequence(outputBottom, 1))
+	for _, line := range rows {
+		builder.WriteString("\r\n")
+		builder.WriteString(line)
+	}
+	builder.WriteString(terminalResetScrollRegionSequence(height))
+	fmt.Print(builder.String())
+
+	// Host scroll mutated physical rows outside Backend; Invalidate so the
+	// next Flush force-repaints instead of diffing against a stale front.
+	if s.viewportBackend != nil {
+		s.viewportBackend.Invalidate()
+	}
 }

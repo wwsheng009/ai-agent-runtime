@@ -1,6 +1,6 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0、P5.1、P5.2a、P5.2b/P5.3-S1 已实施：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口；P5.2b.1 flag 探针已回退；P5.2b/P5.3-S2+ owned 渲染待推进）**
+状态: **implementing（P5.0–P5.3-S2+ 已完成：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口 + `insertHistoryLines` 溢出交接 + 回归；P5.4–P5.7 待推进）**
 
 更新时间: **2026-07-30**
 
@@ -287,10 +287,17 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
   `writeOutput` 单钩子捕获所有 scrollback 写；partial-line coalesce；`historyWindowMaxLines` 上限；
   `HistoryWindowForTest`）。纯 additive、无渲染改动；`ui/...`+`commands`+`build`+`gofmt` 全绿；
   单测 `HistoryWindowCapturesCommittedLines`/`CoalescesPartialLines`/`Bounds`。
-- **S2 底部预留 → cells**：给 status/prompt/popup/ActiveBand 增加只读“出 `[]render.Line`/cells”
-  方法（不改现有直写），影子对照现输出屏幕态。
-- **S3 影子合成校验**：`Compose(历史cells, 底部cells)` 帧 vs 现屏 VT 状态在代表性场景逐行一致
-  （沿用 P5.1/P5.2a 影子手法，零行为改动）。
+- **S2 ✅ 底部预留 → cells（2026-07-30）**：新增只读 `BottomRowsSnapshot() [][]vt.Cell`，
+  由共享 `status/popup/prompt/ActiveBand` paint plan 物化完整底部预留（含显式空 margin/gap、
+  structured style、CJK continuation cell）；现有 immediate-mode writer 仍是生产输出，但改为消费同一 paint plan，
+  避免复制 UI 规则。ANSI 经 `vt.Screen` 结构化解析，不做 ad-hoc stripping；VT 对照测试覆盖 prompt、
+  notice、dynamic status、ActiveBand grow/shrink/diff/clear、popup open/close/composer，以及 SGR+wide cells。
+  `ui/...`、`commands`、`build`、`vet` 全绿。
+- **S3 ✅ 影子合成校验（2026-07-30）**：`HistoryRowsSnapshot()` 按当前宽度将保留的 styled logical history
+  经 `vt.Screen` wrap/materialize；`ComposedFrameForTest()` 调用 `viewport.Compose(historyCells, bottomCells)`，
+  不发任何终端字节。VT 对照覆盖 full history、CJK/wide、dynamic status、ActiveBand grow，以及 popup grow；
+  增长帧与 legacy screen 逐 cell 一致。ActiveBand shrink / popup close 的 shadow delta 被单测明确刻画为旧
+  immediate-mode 补偿造成的差异（底部行仍一致），作为 S4 切换后的反转目标。
 - **S4 切换渲染（默认）**：底部带改走 `Compose`+`Backend.Flush`，删底部带补偿分支；VT 不变量测试
   （`EOSFusionLeavesNoBlankGap` 等）保持绿作为真值，序列级单测迁移为 VT 断言。
 - **S5 收尾**：resize / clear / soft-tail rewrite 与历史窗口对账；把

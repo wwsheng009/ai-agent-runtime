@@ -74,11 +74,15 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 			t.Cleanup(coord.Shutdown)
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
-			coord.SetSurface(surface)
 
 			screen := newScreenVT(width, height)
 
 			streaming := captureSurfaceStdout(t, func() {
+				// SetSurface publishes the initial persistent status frame. Keep
+				// it in the same byte stream that is replayed into screen;
+				// otherwise the owned viewport front buffer legitimately omits
+				// that unchanged row from subsequent minimal diffs.
+				coord.SetSurface(surface)
 				coord.SetWriter(os.Stdout)
 				surface.ShowPrompt("> ")
 				// The chat loop clears the prompt when the user submits, so the

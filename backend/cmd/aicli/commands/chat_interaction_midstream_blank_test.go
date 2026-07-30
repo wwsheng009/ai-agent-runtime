@@ -337,8 +337,9 @@ func TestFixedBottomSurface_EOSFusionLeavesNoBlankGap(t *testing.T) {
 		}
 	})
 	screen.feed(release)
-	if want := fmt.Sprintf("\x1b[%dT", budget); !strings.Contains(release, want) {
-		t.Fatalf("ClearActiveBand should reclaim all %d released band rows, output=%q", budget, release)
+	// Owned path recomposes the full frame; assert the final screen content instead of CSI T.
+	if maxRun, at := maxBlankRunAboveBottom(screen, height); maxRun > 1 {
+		t.Fatalf("after ClearActiveBand, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
 	}
 	if got := len(surface.ActiveBandLines()); got != 0 {
 		t.Fatalf("expected band cleared, still %d lines", got)

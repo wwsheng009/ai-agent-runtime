@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
 func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
@@ -74,7 +75,9 @@ func TestFixedBottomSurface_ComposerMarginsCollapseOnShortTerminal(t *testing.T)
 	if got := surface.bottomRowsLocked(); got != 2 {
 		t.Fatalf("short terminal should reserve only prompt + footer, got %d rows", got)
 	}
-	if !strings.Contains(output, terminalMoveToSequence(9, 1)+"> ") {
-		t.Fatalf("short terminal should keep the prompt adjacent to the footer, got %q", output)
+	screen := vt.NewScreen(80, 10)
+	screen.Feed(output)
+	if got := screen.Line(9); !strings.HasPrefix(got, ">") {
+		t.Fatalf("short terminal should keep the prompt adjacent to the footer, row 9=%q\n%s", got, screen.Dump())
 	}
 }

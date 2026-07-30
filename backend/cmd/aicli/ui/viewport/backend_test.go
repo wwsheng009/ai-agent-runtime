@@ -3,6 +3,7 @@ package viewport
 import (
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
@@ -55,6 +56,54 @@ func TestBackend_NoChangeEmitsNothing(t *testing.T) {
 	b.StageFrame(frame)
 	if got := b.Flush(); got != "" {
 		t.Fatalf("restaging identical content should be empty, got %q", got)
+	}
+}
+
+func TestBackend_InvalidateRepaintsBlankCells(t *testing.T) {
+	b := New(4, 2)
+	b.Invalidate()
+	diff := b.Flush()
+	if diff == "" {
+		t.Fatal("invalidated blank frame must repaint")
+	}
+	screen := vt.NewScreen(4, 2)
+	screen.Feed("stale\x1b[2;1Hold")
+	screen.Feed(diff)
+	if !screen.Blank(1) || !screen.Blank(2) {
+		t.Fatalf("invalidated repaint did not clear stale cells\n%s", screen.Dump())
+	}
+	if got := b.Flush(); got != "" {
+		t.Fatalf("invalidate should be consumed by one flush, got %q", got)
+	}
+}
+
+// TestBackend_DiffBlankingUsesELNotSpaces guards the band/popup shrink path:
+// clearing occupied cells must leave Text="" (via EL), not residual ' ' glyphs
+// that would diverge from Compose's true blank cells.
+func TestBackend_DiffBlankingUsesELNotSpaces(t *testing.T) {
+	b := New(8, 2)
+	b.StageFrame(gridFromFeed(8, 2, "active-1\nactive-2"))
+	if diff := b.Flush(); diff == "" {
+		t.Fatal("expected initial paint")
+	}
+	b.StageFrame(blankGrid(8, 2))
+	diff := b.Flush()
+	if diff == "" {
+		t.Fatal("expected blanking diff")
+	}
+	if !strings.Contains(diff, "\x1b[K") {
+		t.Fatalf("blanking diff must use EL, got %q", diff)
+	}
+	screen := vt.NewScreen(8, 2)
+	screen.Feed("active-1\x1b[2;1Hactive-2")
+	screen.Feed(diff)
+	for row := 1; row <= 2; row++ {
+		for col := 1; col <= 8; col++ {
+			cell := screen.CellAt(row, col)
+			if cell.Text != "" || cell.Cont || len(cell.SGR) > 0 {
+				t.Fatalf("row %d col %d not true-blank after shrink: %+v\n%s", row, col, cell, screen.Dump())
+			}
+		}
 	}
 }
 

@@ -505,17 +505,16 @@ func TestPrintVisibleChatHistory_SettlesSurfaceLayoutDebtBeforeContent(t *testin
 		"已加载历史会话",
 		"继续上次任务",
 		"好的，我先回顾上下文。",
-		// Settle flushes deferred shrink (margins+prompt release → 3 rows).
-		"\x1b[3T",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected history settle/replay to contain %q, got:\n%q", expected, output)
 		}
 	}
-	// Content must still be present after the settle CSI (not lost to layout).
-	idxScroll := strings.Index(output, "\x1b[3T")
-	idxUser := strings.Index(output, "继续上次任务")
-	if idxScroll < 0 || idxUser < 0 || idxUser < idxScroll {
-		t.Fatalf("expected settle scroll-down before history content, scroll=%d content=%d\n%q", idxScroll, idxUser, output)
+	// Owned path recomposes the full frame; assert the content is present and no
+	// multi-row blank hole remains above the status.
+	screen := newScreenVT(80, 24)
+	screen.feed(output)
+	if run, at := maxBlankRunAboveBottom(screen, 24); run > 1 {
+		t.Fatalf("expected no multi-row blank hole after history settle, blank run %d at row %d\n%s", run, at, screen.dump())
 	}
 }
