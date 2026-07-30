@@ -100,6 +100,7 @@ func TestBuildKeepsConversationPrefixStableWhenFactLedgerInjected(t *testing.T) 
 		require.Equal(t, withoutFacts.Messages[i].Content, withFacts.Messages[i].Content)
 	}
 	ledgerMsg := withFacts.Messages[len(withFacts.Messages)-1]
+	require.Equal(t, "developer", ledgerMsg.Role)
 	require.Equal(t, "fact_ledger", ledgerMsg.Metadata.GetString("context_stage", ""))
 	require.Contains(t, ledgerMsg.Content, "Chinese output")
 }
@@ -130,7 +131,9 @@ func TestBuildDoesNotPrependFactLedgerBeforeHistory(t *testing.T) {
 	require.Equal(t, "system", result.Messages[0].Role)
 	require.Equal(t, "user", result.Messages[1].Role)
 	require.Equal(t, "hello", result.Messages[1].Content)
-	require.Equal(t, "fact_ledger", result.Messages[len(result.Messages)-1].Metadata.GetString("context_stage", ""))
+	ledgerMsg := result.Messages[len(result.Messages)-1]
+	require.Equal(t, "developer", ledgerMsg.Role)
+	require.Equal(t, "fact_ledger", ledgerMsg.Metadata.GetString("context_stage", ""))
 }
 
 func TestBuildRehydratesFactLedgerAfterMidTurnCompactHistory(t *testing.T) {
@@ -175,6 +178,7 @@ func TestBuildRehydratesFactLedgerAfterMidTurnCompactHistory(t *testing.T) {
 	require.GreaterOrEqual(t, len(result.Messages), len(history))
 	require.Equal(t, history, result.Messages[:len(history)])
 	ledgerMsg := result.Messages[len(result.Messages)-1]
+	require.Equal(t, "developer", ledgerMsg.Role)
 	require.Equal(t, "fact_ledger", ledgerMsg.Metadata.GetString("context_stage", ""))
 	require.True(t, ledgerMsg.Metadata.GetBool("context_snapshot", false))
 	require.Contains(t, ledgerMsg.Content, "Chinese output")
@@ -193,7 +197,7 @@ func TestBuildSkipsFactLedgerWhenActiveTurnAlreadyHasSnapshot(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	frozen := types.NewAssistantMessage("Verified fact ledger (authoritative over compacted prose):\n- frozen only")
+	frozen := types.NewDeveloperMessage("Verified fact ledger (authoritative over compacted prose):\n- frozen only")
 	frozen.Metadata["context_stage"] = "fact_ledger"
 	frozen.Metadata["context_snapshot"] = true
 	history := []types.Message{
