@@ -365,6 +365,9 @@ func agentEventsCacheSafeSummary(result *AgentEventsResult) string {
 	if result.TimedOut {
 		lines = append(lines, "Read timed out while waiting for new events.")
 	}
+	if nextAction := strings.TrimSpace(result.NextAction); nextAction != "" {
+		lines = append(lines, "Next action: "+nextAction+".")
+	}
 	if len(result.Events) > 0 {
 		types := make([]string, 0, len(result.Events))
 		seen := make(map[string]struct{}, len(result.Events))

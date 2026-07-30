@@ -1,6 +1,6 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0–P5.3-S5 已完成：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口 + `insertHistoryLines` 溢出交接 + 默认 owned 渲染 + 补偿债务 no-op；P5.4–P5.7 待推进）**
+状态: **implementing（P5.0–P5.5 已完成：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口 + `insertHistoryLines` 溢出交接 + 默认 owned 渲染 + 补偿债务 no-op + cell 模型统一 + 宽度感知 `DisplayLines` + S3 收敛 + soft reflow + resize reflow golden；P5.6–P5.7 待推进）**
 
 更新时间: **2026-07-30**
 
@@ -312,12 +312,12 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
   `KeepsToolChainDense`、`MatchesLiveCompleteBlockRendering`、`ReplayIgnores*` 全绿。
 - 回退：flag 切回旧“WriteOutput + 补偿”。
 
-### P5.4 —— cell 模型统一 + 宽度感知 `DisplayLines`
-
-- `assistantTurnTranscript` 收敛为 `assistantStreamCell`；所有 cell 的 `DisplayLines(width)`
-  实现真实换行；viewport 用当前宽合成。移除立即模式补丁（`EmittedDiverged`/`NeedsConsolidation`）。
-- 测试：流式 golden（分块到达顺序无关）、中英混排换行、`assistant` finalize 与 live 一致。
-- 回退：flag（本步较大，建议独立 flag 子开关）。
+### P5.4 —— cell 模型统一 + 宽度感知 `DisplayLines` (completed)
+- [x] P5.4-S1: `assistantStreamCell` + width-aware DisplayLines (raw source, no immediate padding)
+- [x] P5.4-S2: `widthAwareDisplayLines` helper + all 4 historyCell implementations (user/assistant/supplement/document)
+- [x] P5.4-S3: `EmittedDiverged`/`NeedsConsolidation` fields and all debug references removed; `assistantStreamCell` used for finalized assistant turns
+- [x] 流式 golden、中英混排换行、`assistant` finalize 与 live 一致；所有相关测试通过
+- 回退：无（默认 owned viewport 路径）
 
 ### P5.5 —— resize 重排（P4.3 落地）
 
@@ -419,10 +419,9 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 
 ## 11. 建议的最小启动步
 
-**P5.0–P5.3-S5 已完成**（默认 owned 渲染 + 历史交接 + 补偿债务 no-op）。下一步是 **P5.4
-（cell 模型统一 + 宽度感知 `DisplayLines`）**：
+**P5.0–P5.4 已完成**（默认 owned 渲染 + 历史交接 + 补偿债务 no-op + cell 模型统一 + 宽度感知
+`DisplayLines`）。下一步是 **P5.5（resize 重排 / P4.3 落地）**：
 
-- 将 `assistantTurnTranscript` 收敛为 `assistantStreamCell`
-- 所有 cell 的 `DisplayLines(width)` 实现真实换行；viewport 用当前宽合成
-- 移除立即模式补丁（`EmittedDiverged` / `NeedsConsolidation`）
-- 测试：流式 golden、中英混排、`assistant` finalize 与 live 一致
+- 监听 `Terminal.updateSize()`（SIGWINCH/轮询）→ 按新宽重排 viewport 内历史 cell
+- 行数 cap（超过 cap 的历史不重排，直接以旧行呈现，避免抖动）
+- 测试：40/80/120 列 golden；窄→宽→窄往返一致；cap 生效；不触碰已滚出 scrollback

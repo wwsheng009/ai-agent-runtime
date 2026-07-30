@@ -109,11 +109,9 @@ type chatInteractionCoordinator struct {
 	transcript *assistantTurnTranscript
 	// Last-turn transcript debug mirrors survive resetStreamLocked so
 	// DebugSummary remains useful after finalization.
-	streamLastNeedsConsolidation bool
-	streamLastEmittedDiverged    bool
-	streamLastFinalDivergence    assistantFinalDivergence
-	streamLastTranscriptBlocks   int
-	streamLastTranscriptBytes    int
+	streamLastFinalDivergence  assistantFinalDivergence
+	streamLastTranscriptBlocks int
+	streamLastTranscriptBytes  int
 
 	// softEmitted* tracks the source-backed committed tail that still sits in
 	// the surface soft rewrite window. Resize reflow re-formats this range from
@@ -2445,13 +2443,25 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 		return
 	}
 	response = sanitizeInteractiveAsyncTeamLaunchResponse(response)
-	formatted := response
-	if c.session.Formatter != nil {
-		formatted = c.session.Formatter.Format(response)
-	}
 	// Finalized assistant turn routed through the retained-source cell model
-	// (P4.2); byte-identical to writeCompleteBlockLocked(FormatAssistantRendered).
-	c.commitHistoryCellLocked(newAssistantMessageCell(formatted), c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap))
+	// (P5.4): keep raw source on assistantStreamCell so DisplayLines can reflow
+	// at any width. Markdown still goes through the session formatter.
+	var cell historyCell
+	if c.session.Formatter != nil && c.session.Formatter.IsMarkdown(response) {
+		formatFn := func(source string, width int) string {
+			prev := c.session.Formatter.Width
+			if width > 0 {
+				c.session.Formatter.Width = width
+			}
+			out := c.session.Formatter.Format(source)
+			c.session.Formatter.Width = prev
+			return out
+		}
+		cell = newAssistantStreamCellWithFormatter(response, true, formatFn)
+	} else {
+		cell = newAssistantStreamCell(response, false)
+	}
+	c.commitHistoryCellLocked(cell, c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap))
 	c.lastCompletedAsyncLine = false
 }
 
@@ -3133,8 +3143,6 @@ func (c *chatInteractionCoordinator) DebugSummary() string {
 		parts = append(parts,
 			fmt.Sprintf("stream_transcript_blocks=%d", c.streamLastTranscriptBlocks),
 			fmt.Sprintf("stream_transcript_bytes=%d", c.streamLastTranscriptBytes),
-			fmt.Sprintf("stream_needs_consolidation=%t", c.streamLastNeedsConsolidation),
-			fmt.Sprintf("stream_emitted_diverged=%t", c.streamLastEmittedDiverged),
 			fmt.Sprintf("stream_final_divergence=%s", divergenceToken(c.streamLastFinalDivergence)),
 		)
 	}
@@ -3278,6 +3286,33 @@ func (c *chatInteractionCoordinator) currentPromptCursorPositionLocked() (int, i
 }
 
 func (c *chatInteractionCoordinator) clearThinkingLocked() {
+}
+
+// clearActiveRunStateOnInterrupt clears every transient activity flag under one
+// coordinator lock. The Stopping agent stage is intentionally preserved until
+// actor/lease cleanup completes; once that stage is cleared, the derived
+// surface state can therefore transition directly to Ready.
+func (c *chatInteractionCoordinator) clearActiveRunStateOnInterrupt() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	c.thinkingActive = false
+	if c.reasoningActive {
+		c.flushReasoningLocked()
+		c.resetReasoningLocked()
+	}
+	if c.streamingActive {
+		c.flushStreamLocked()
+		c.resetStreamLocked()
+	}
+	c.waitingActive = false
+	clearChatGoalStatusActiveTurnStarted(c.session)
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
 // flushStreamLocked outputs any buffered streaming content before the stream
@@ -3776,8 +3811,6 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	}
 	// Snapshot last-turn transcript debug, then clear live turn state.
 	if c.transcript != nil {
-		c.streamLastNeedsConsolidation = c.transcript.NeedsConsolidation
-		c.streamLastEmittedDiverged = c.transcript.EmittedDiverged
 		c.streamLastFinalDivergence = c.transcript.LastDivergence
 		c.streamLastTranscriptBlocks = len(c.transcript.Blocks)
 		c.streamLastTranscriptBytes = c.transcript.RetainedSourceBytes
@@ -4431,9 +4464,12 @@ func (c *chatInteractionCoordinator) reflowSoftEmittedTailLocked() {
 }
 
 // renderSoftEmittedLinesLocked rebuilds soft-window rows from source only.
-// Content spacing comes from markdownRowsDeltaLocked / buildRenderedAssistantChunk
-// ("" rows). No gapBlank and no completeBlockOutput are consulted — soft reflow
-// must not insert message separators into already-painted history.
+// Content spacing comes from assistantStreamCell.DisplayLines ("" rows from
+// Format spacing). No gapBlank and no completeBlockOutput are consulted — soft
+// reflow must not insert message separators into already-painted history.
+//
+// P5.5: soft reflow uses the same retained-source cell model as finalized
+// assistant turns, so resize reflow and commit share one DisplayLines path.
 func (c *chatInteractionCoordinator) renderSoftEmittedLinesLocked(sourceStart, sourceEnd, width int) []string {
 	if c == nil || sourceEnd <= sourceStart {
 		return nil
@@ -4450,20 +4486,20 @@ func (c *chatInteractionCoordinator) renderSoftEmittedLinesLocked(sourceStart, s
 	}
 	chunk := buffered[sourceStart:sourceEnd]
 	asMarkdown := c.streamMode == assistantStreamModeMarkdown
-	if asMarkdown {
-		prevWidth := 0
-		if c.session != nil && c.session.Formatter != nil {
-			prevWidth = c.session.Formatter.Width
-			c.session.Formatter.Width = width
-			defer func() { c.session.Formatter.Width = prevWidth }()
+	if asMarkdown && c.session != nil && c.session.Formatter != nil {
+		formatFn := func(source string, w int) string {
+			prev := c.session.Formatter.Width
+			if w > 0 {
+				c.session.Formatter.Width = w
+			}
+			out := c.session.Formatter.Format(source)
+			c.session.Formatter.Width = prev
+			return out
 		}
-		return c.markdownRowsDeltaLocked(sourceStart, sourceEnd, chunk)
+		return newAssistantStreamCellWithFormatter(chunk, true, formatFn).DisplayLines(width)
 	}
-	visual := buildRenderedAssistantChunk(chunk)
-	if visual.empty() {
-		return nil
-	}
-	return visual.lines
+	// Plain path: same cell model as finalized assistant turns.
+	return newAssistantStreamCell(chunk, false).DisplayLines(width)
 }
 
 func stringSlicesEqual(a, b []string) bool {
@@ -4978,11 +5014,10 @@ func (c *chatInteractionCoordinator) commitHistoryCellLocked(cell historyCell, g
 	if c == nil || cell == nil {
 		return
 	}
-	// width 0: today's cells render width-independently (the FixedBottomSurface
-	// owns wrapping). A real wrap-aware width is plumbed here only once P5's
-	// owned viewport backend consumes pre-wrapped cell lines; probing terminal
-	// width per commit now would be an unused side effect on a hot path.
-	c.writeRowsLocked(cell.DisplayLines(0), gap)
+	// plumb real width for owned viewport (P5.5 resize reflow): pre-wrapped
+	// cell lines are consumed by the backend, so no immediate-mode padding.
+	width := c.currentStreamEmitWidthLocked()
+	c.writeRowsLocked(cell.DisplayLines(width), gap)
 }
 
 func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {

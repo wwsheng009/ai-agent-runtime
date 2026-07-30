@@ -1771,7 +1771,8 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 					case <-readCtx.Done():
 						result := buildAgentEventsResult(sessionID, nil)
 						result.TimedOut = true
-						return result, nil
+						result.NextAction = ""
+						return toolbroker.FinalizeAgentEventsResult(result), nil
 					case <-wakeCh:
 					case <-time.After(500 * time.Millisecond):
 					}
@@ -1793,7 +1794,8 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 		case <-readCtx.Done():
 			result := buildAgentEventsResult(sessionID, nil)
 			result.TimedOut = true
-			return result, nil
+			result.NextAction = ""
+			return toolbroker.FinalizeAgentEventsResult(result), nil
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}
@@ -2847,7 +2849,7 @@ func buildAgentEventsResult(sessionID string, events []runtimeevents.Event) *too
 		Count:     len(events),
 	}
 	if len(events) == 0 {
-		return result
+		return toolbroker.FinalizeAgentEventsResult(result)
 	}
 	items := make([]toolbroker.AgentEventItem, 0, len(events))
 	var latestSeq int64
@@ -2871,7 +2873,7 @@ func buildAgentEventsResult(sessionID string, events []runtimeevents.Event) *too
 	}
 	result.Events = items
 	result.LatestSeq = latestSeq
-	return result
+	return toolbroker.FinalizeAgentEventsResult(result)
 }
 
 func buildMailboxWaitResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentWaitResult {

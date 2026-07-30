@@ -1207,7 +1207,7 @@ func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 		t.Fatalf("unexpected read_agent_events args: %#v", controller.lastRead)
 	}
 	result, ok := rawResult.(*AgentEventsResult)
-	if !ok || result == nil || result.Count != 1 || result.LatestSeq != 7 {
+	if !ok || result == nil || result.Count != 1 || result.LatestSeq != 7 || result.NextAction == "" {
 		t.Fatalf("unexpected read_agent_events result: %#v", rawResult)
 	}
 	if meta["latest_seq"] != int64(7) && meta["latest_seq"] != 7 {
@@ -1387,5 +1387,37 @@ func TestClassifyBrokerExecutionErrorAgentLifecycle(t *testing.T) {
 				t.Fatalf("code=%q want %q; err=%v", runtimeErr.Code, tc.code, err)
 			}
 		})
+	}
+}
+func TestFinalizeAgentEventsResult(t *testing.T) {
+	result := FinalizeAgentEventsResult(&AgentEventsResult{
+		Count: 0,
+		TimedOut: true,
+	})
+	if result.NextAction != "stop_empty_event_poll: timed out with 0 events; use wait_agent for child readiness, send_message/followup_task for work, or proceed without re-calling the same read_agent_events" {
+		t.Fatalf("unexpected timeout next_action: %#v", result.NextAction)
+	}
+
+	result = FinalizeAgentEventsResult(&AgentEventsResult{
+		Events: []AgentEventItem{{
+			Type:   "approval_requested",
+			Payload: map[string]interface{}{"request_id": "req-1"},
+		}},
+	})
+	if !strings.Contains(result.NextAction, "resolve_pending_approval") {
+		t.Fatalf("approval next_action must take precedence: %#v", result)
+	}
+
+	result = FinalizeAgentEventsResult(&AgentEventsResult{
+		Events: []AgentEventItem{{Type: "assistant_message"}},
+		Count:  1,
+	})
+	if result.NextAction != "consume_events: use returned events now; only re-call read_agent_events with a higher after_seq when new events are needed" {
+		t.Fatalf("events next_action: %#v", result.NextAction)
+	}
+
+	result = FinalizeAgentEventsResult(&AgentEventsResult{Count: 0})
+	if !strings.Contains(result.NextAction, "stop_empty_event_poll") || !strings.Contains(result.NextAction, "do not immediately re-call read_agent_events with the same id") {
+		t.Fatalf("empty non-blocking next_action: %#v", result.NextAction)
 	}
 }

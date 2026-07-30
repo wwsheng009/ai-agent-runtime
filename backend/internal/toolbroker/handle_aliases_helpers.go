@@ -53,6 +53,13 @@ func valueOrEmptyWaitNextAction(result *AgentWaitResult) string {
 	return strings.TrimSpace(result.NextAction)
 }
 
+func valueOrEmptyEventsNextAction(result *AgentEventsResult) string {
+	if result == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.NextAction)
+}
+
 func valueOrZeroWaitSeq(result *AgentWaitResult) int64 {
 	if result == nil {
 		return 0

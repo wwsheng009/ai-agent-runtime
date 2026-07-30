@@ -47,8 +47,9 @@ type assistantTranscriptBlock struct {
 //
 //	emittedEnd <= enqueuedEnd <= len(source)
 //
-// Terminal history cannot be rewritten; NeedsConsolidation records when a final
-// snapshot diverged from already-emitted source so callers avoid double paint.
+// Terminal history cannot be rewritten; the residualAfterEmittedPrefix helper
+// suppresses full replay of corrected bodies when final diverges from already-
+// emitted source.
 type assistantTurnTranscript struct {
 	Source             string
 	FinalSnapshot      string
@@ -58,8 +59,6 @@ type assistantTurnTranscript struct {
 	LastEmitWidth      int
 	Blocks             []assistantTranscriptBlock
 	RetainedSourceBytes int
-	NeedsConsolidation bool
-	EmittedDiverged    bool
 	LastDivergence     assistantFinalDivergence
 }
 
@@ -215,8 +214,7 @@ func (t *assistantTurnTranscript) applyFinalDivergence(kind assistantFinalDiverg
 	t.LastDivergence = kind
 	switch kind {
 	case assistantFinalEmittedDiverged:
-		t.NeedsConsolidation = true
-		t.EmittedDiverged = true
+		// Residual helpers suppress full replay; drop only mutable queue.
 		t.dropPendingBeyondEmitted()
 	case assistantFinalQueueCorrect:
 		t.dropPendingBeyondEmitted()
@@ -225,8 +223,6 @@ func (t *assistantTurnTranscript) applyFinalDivergence(kind assistantFinalDiverg
 		t.EnqueuedEnd = 0
 		t.Blocks = nil
 		t.RetainedSourceBytes = 0
-		t.NeedsConsolidation = false
-		t.EmittedDiverged = false
 	case assistantFinalAppend:
 		// Keep ownership cursors; caller drains or appends residual.
 	}
@@ -239,8 +235,6 @@ func (t *assistantTurnTranscript) debugParts() []string {
 	parts := []string{
 		"stream_transcript_blocks=" + itoaDecimal(len(t.Blocks)),
 		"stream_transcript_bytes=" + itoaDecimal(t.RetainedSourceBytes),
-		"stream_needs_consolidation=" + boolToken(t.NeedsConsolidation),
-		"stream_emitted_diverged=" + boolToken(t.EmittedDiverged),
 		"stream_final_divergence=" + divergenceToken(t.LastDivergence),
 	}
 	return parts

@@ -19,7 +19,12 @@ const (
 
 func (s *ChatSession) interruptLocalRuntimeWorkAsync() chan struct{} {
 	done := make(chan struct{})
-	if s == nil || s.LocalRuntimeHost == nil {
+	if s == nil {
+		close(done)
+		return done
+	}
+	if s.LocalRuntimeHost == nil {
+		s.finishInterruptCleanupUI()
 		close(done)
 		return done
 	}

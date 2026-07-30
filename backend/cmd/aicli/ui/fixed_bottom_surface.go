@@ -1037,9 +1037,22 @@ func (s *FixedBottomSurface) resetOwnedHistoryLocked() {
 }
 
 func (s *FixedBottomSurface) replaceOwnedHistorySuffixLocked(oldLines, newLines []string) bool {
-	if s == nil || s.historyPartial || len(oldLines) > len(s.historyWindow) {
+	if s == nil {
+		return false
+	}
+	if s.historyPartial {
 		s.resetOwnedHistoryLocked()
 		return false
+	}
+	if len(oldLines) > len(s.historyWindow) {
+		if len(s.historyWindow) == 0 && len(oldLines) > 0 {
+			s.historyWindow = append([]string(nil), oldLines...)
+			s.historyPartial = false
+			s.historyHandedOff = 0
+		} else {
+			s.resetOwnedHistoryLocked()
+			return false
+		}
 	}
 	start := len(s.historyWindow) - len(oldLines)
 	for i := range oldLines {

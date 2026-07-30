@@ -384,7 +384,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -557,7 +557,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1851,6 +1851,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err != nil {
 			return nil, nil, err
 		}
+		result = FinalizeAgentEventsResult(result)
 		aliasedResult := aliasAgentEventsResult(result, handleAliases)
 		aliasedSessionID := actualSessionID
 		if aliasedResult != nil {
@@ -1862,6 +1863,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"count":         valueOrZeroEventsCount(result),
 			"latest_seq":    valueOrZeroEventsSeq(result),
 			"timed_out":     result != nil && result.TimedOut,
+			"next_action":   valueOrEmptyEventsNextAction(result),
 		}, agentEventsCacheSafeSummary(aliasedResult)), nil
 
 	case ToolCloseAgent:

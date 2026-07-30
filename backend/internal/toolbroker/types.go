@@ -501,6 +501,48 @@ func agentWaitListContains(agents []AgentStatusResult, target *AgentStatusResult
 	return false
 }
 
+// FinalizeAgentEventsResult adds compact polling guidance so parents do not
+// spin forever on empty read_agent_events results (doom-loop exempt tool).
+func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
+	if result == nil {
+		return nil
+	}
+	if strings.TrimSpace(result.NextAction) != "" {
+		return result
+	}
+	hasApproval := false
+	for _, event := range result.Events {
+		eventType := strings.ToLower(strings.TrimSpace(event.Type))
+		if strings.Contains(eventType, "approval") || strings.Contains(eventType, "waiting_approval") {
+			hasApproval = true
+			break
+		}
+		if payload := event.Payload; payload != nil {
+			if status, ok := payload["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "waiting_approval") {
+				hasApproval = true
+				break
+			}
+			if pending, ok := payload["pending_approval"].(bool); ok && pending {
+				hasApproval = true
+				break
+			}
+		}
+	}
+	switch {
+	case hasApproval:
+		result.NextAction = "resolve_pending_approval: call resolve_agent_approval with allow=true|false; do not re-poll read_agent_events for the same approval"
+	case result.Count > 0:
+		result.NextAction = "consume_events: use returned events now; only re-call read_agent_events with a higher after_seq when new events are needed"
+	case result.TimedOut:
+		result.NextAction = "stop_empty_event_poll: timed out with 0 events; use wait_agent for child readiness, send_message/followup_task for work, or proceed without re-calling the same read_agent_events"
+	default:
+		// Non-blocking empty read (wait_ms=0 or no wait). Explicitly steer away
+		// from tight unchanged polling loops that doom-loop exempts.
+		result.NextAction = "stop_empty_event_poll: 0 events returned; do not immediately re-call read_agent_events with the same id/after_seq. Prefer wait_agent for readiness, or use wait_ms>0 once if waiting for a specific new event"
+	}
+	return result
+}
+
 // FinalizeAgentWaitResult adds compact scheduling guidance shared by local and
 // runtime-server wait implementations.
 func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *AgentWaitResult {
@@ -636,6 +678,7 @@ type AgentEventsResult struct {
 	Count     int              `json:"count"`
 	LatestSeq int64            `json:"latest_seq,omitempty"`
 	TimedOut  bool             `json:"timed_out,omitempty"`
+	NextAction string           `json:"next_action,omitempty"`
 }
 
 // ApplyAgentWorktreeArgs applies a child's worktree isolation changes into the main repo.

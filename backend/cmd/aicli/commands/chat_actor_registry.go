@@ -3471,7 +3471,10 @@ func (r *localActorRegistry) softTimeoutLocalAgentEvents(ctx context.Context, se
 	}
 	result := buildLocalAgentEventsResult(sessionID, nil)
 	result.TimedOut = true
-	return result, nil
+	// buildLocalAgentEventsResult finalizes the empty non-timeout path; re-finalize
+	// after marking TimedOut so timeout-specific next_action wins.
+	result.NextAction = ""
+	return toolbroker.FinalizeAgentEventsResult(result), nil
 }
 
 func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentEventsResult {
@@ -3480,7 +3483,7 @@ func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event)
 		Count:     len(events),
 	}
 	if len(events) == 0 {
-		return result
+		return toolbroker.FinalizeAgentEventsResult(result)
 	}
 	items := make([]toolbroker.AgentEventItem, 0, len(events))
 	var latestSeq int64
@@ -3504,7 +3507,7 @@ func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event)
 	}
 	result.Events = items
 	result.LatestSeq = latestSeq
-	return result
+	return toolbroker.FinalizeAgentEventsResult(result)
 }
 
 func buildLocalAgentMailboxWaitResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentWaitResult {

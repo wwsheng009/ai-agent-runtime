@@ -1,6 +1,9 @@
 package commands
 
 import (
+	"strings"
+	"time"
+
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
@@ -31,10 +34,56 @@ const (
 type historyCell interface {
 	Kind() historyCellKind
 	// DisplayLines returns writeLine-ready rows (block terminator stripped,
-	// internal blank rows kept, CR dropped) for the given output width. width is
-	// reserved for wrap-aware cells; source-only cells that do not wrap here may
-	// ignore it.
+	// internal blank rows kept, CR dropped) for the given output width. When
+	// width > 0, long visual rows are broken with render.Wrap so the owned
+	// viewport can reflow from source without immediate-mode padding.
 	DisplayLines(width int) []string
+}
+
+// widthAwareDisplayLines turns a pre-styled block into writeLine-ready rows and,
+// when width > 0, wraps each visual row with render.Wrap (grapheme-aware, CJK
+// safe). width <= 0 keeps the legacy normalize-only path so existing
+// commitHistoryCellLocked(..., 0) call sites stay byte-identical.
+//
+// Rows that already fit width are returned unchanged (no re-encode) so short
+// content stays byte-identical to the pre-P5.4 normalizeWriteLines path.
+func widthAwareDisplayLines(rendered string, width int) []string {
+	lines := normalizeWriteLines(rendered)
+	if width <= 0 || len(lines) == 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	backend := render.ANSIBackend{}
+	for _, row := range lines {
+		if row == "" {
+			out = append(out, "")
+			continue
+		}
+		parsed := render.ANSIToLines(row)
+		needsWrap := false
+		for _, line := range parsed {
+			if render.LineWidth(line) > width {
+				needsWrap = true
+				break
+			}
+		}
+		if !needsWrap {
+			// Preserve original ANSI bytes when no wrap is required.
+			out = append(out, row)
+			continue
+		}
+		for _, line := range parsed {
+			for _, wrapped := range render.Wrap(line, width, render.WrapOptions{BreakWord: true}) {
+				encoded := backend.RenderLines(render.LinesDoc(wrapped))
+				if len(encoded) == 0 {
+					out = append(out, "")
+					continue
+				}
+				out = append(out, encoded...)
+			}
+		}
+	}
+	return out
 }
 
 // userMessageCell renders a submitted or replayed user message. Its source is
@@ -50,17 +99,15 @@ func newUserMessageCell(source string) userMessageCell {
 func (userMessageCell) Kind() historyCellKind { return historyCellUser }
 
 // DisplayLines mirrors the legacy writeCompleteBlockLocked(FormatUserMessage)
-// pipeline exactly: normalizeWriteLines turns the pre-styled block into
-// writeLine-ready rows. User messages are not wrapped at this layer, so width is
-// ignored for now.
-func (c userMessageCell) DisplayLines(int) []string {
-	return normalizeWriteLines(ui.FormatUserMessage(c.source))
+// pipeline, then applies width-aware wrap when width > 0.
+func (c userMessageCell) DisplayLines(width int) []string {
+	return widthAwareDisplayLines(ui.FormatUserMessage(c.source), width)
 }
 
 // assistantMessageCell renders a finalized assistant turn. It holds the
 // formatter-rendered body (post-markdown ANSI); DisplayLines applies the shared
-// assistant framing exactly like the legacy writeCompleteBlockLocked path.
-// Re-rendering the raw markdown source at a new width is deferred to P4.3.
+// assistant framing exactly like the legacy writeCompleteBlockLocked path, then
+// width-aware wrap when width > 0.
 type assistantMessageCell struct {
 	body string
 }
@@ -71,8 +118,8 @@ func newAssistantMessageCell(body string) assistantMessageCell {
 
 func (assistantMessageCell) Kind() historyCellKind { return historyCellAssistant }
 
-func (c assistantMessageCell) DisplayLines(int) []string {
-	return normalizeWriteLines(ui.FormatAssistantRendered(c.body))
+func (c assistantMessageCell) DisplayLines(width int) []string {
+	return widthAwareDisplayLines(ui.FormatAssistantRendered(c.body), width)
 }
 
 // supplementLineCell renders one async/supplement line (tool feedback, warnings,
@@ -88,13 +135,14 @@ func newSupplementLineCell(line string) supplementLineCell {
 
 func (supplementLineCell) Kind() historyCellKind { return historyCellSupplement }
 
-func (c supplementLineCell) DisplayLines(int) []string {
-	return normalizeWriteLines(ui.FormatAssistantSupplementBlock(c.line))
+func (c supplementLineCell) DisplayLines(width int) []string {
+	return widthAwareDisplayLines(ui.FormatAssistantSupplementBlock(c.line), width)
 }
 
 // asyncDocumentCell renders a typed timeline/tool/info document. It keeps the
 // structured render.Document as its source so a width-aware backend can re-emit
-// it later; DisplayLines matches the legacy writeCompleteBlockLocked(RenderDocumentANSI).
+// it later; DisplayLines matches the legacy writeCompleteBlockLocked(RenderDocumentANSI)
+// then applies width-aware wrap.
 type asyncDocumentCell struct {
 	doc render.Document
 }
@@ -105,6 +153,76 @@ func newAsyncDocumentCell(doc render.Document) asyncDocumentCell {
 
 func (asyncDocumentCell) Kind() historyCellKind { return historyCellTool }
 
-func (c asyncDocumentCell) DisplayLines(int) []string {
-	return normalizeWriteLines(ui.RenderDocumentANSI(c.doc))
+func (c asyncDocumentCell) DisplayLines(width int) []string {
+	return widthAwareDisplayLines(ui.RenderDocumentANSI(c.doc), width)
+}
+
+// toolChainCell represents one tool invocation as a *single dense cell* in the
+// owned viewport. Live Running is redrawn in place (no gap). When the tool
+// completes, one final insertHistoryLines commits the Completed state (with
+// leading empty line if needed). The cell model internally handles previousAsyncLine
+// inference and empty-line following.
+type toolChainCell struct {
+	name   string
+	args   map[string]interface{}
+	status string
+	result string
+}
+
+func newToolChainCell(name string, args map[string]interface{}, _ time.Time) toolChainCell {
+	return toolChainCell{name: name, args: args, status: "Running", result: ""}
+}
+
+func (toolChainCell) Kind() historyCellKind { return historyCellTool }
+
+func (c toolChainCell) DisplayLines(width int) []string {
+	if c.status == "Running" {
+		return widthAwareDisplayLines(ui.FormatAssistantSupplementBlock("• Running "+c.name), width)
+	}
+	// Completed
+	lines := []string{"• Completed " + c.name}
+	if c.result != "" {
+		lines = append(lines, c.result)
+	}
+	return widthAwareDisplayLines(strings.Join(lines, "\n"), width)
+}
+
+// assistantStreamCell is the P5.4 unification of assistantTurnTranscript into
+// the historyCell model. It holds the raw source so DisplayLines can re-render
+// at any width (real line breaks) instead of immediate-mode padding.
+//
+// Live streaming still owns emission cursors on assistantTurnTranscript
+// (EmittedEnd/EnqueuedEnd/Blocks); this cell is the retained-source view used
+// when a turn is committed as history or reflowed at a new width. Immediate-
+// mode divergence flags (EmittedDiverged / NeedsConsolidation) were removed in
+// P5.4-S3; residualAfterEmittedPrefix remains the behavioral residual path.
+type assistantStreamCell struct {
+	source   string
+	markdown bool
+	// optional formatter for width-aware markdown reflow; nil falls back to plain.
+	formatFn func(source string, width int) string
+}
+
+func newAssistantStreamCell(source string, markdown bool) assistantStreamCell {
+	return assistantStreamCell{source: source, markdown: markdown}
+}
+
+func newAssistantStreamCellWithFormatter(source string, markdown bool, formatFn func(string, int) string) assistantStreamCell {
+	return assistantStreamCell{source: source, markdown: markdown, formatFn: formatFn}
+}
+
+func (assistantStreamCell) Kind() historyCellKind { return historyCellAssistant }
+
+func (c assistantStreamCell) DisplayLines(width int) []string {
+	if c.source == "" {
+		return nil
+	}
+	formatted := c.source
+	if c.formatFn != nil {
+		formatted = c.formatFn(c.source, width)
+	} else if c.markdown {
+		// No formatter supplied: keep source as-is (plain path parity).
+		formatted = c.source
+	}
+	return widthAwareDisplayLines(ui.FormatAssistantRendered(formatted), width)
 }

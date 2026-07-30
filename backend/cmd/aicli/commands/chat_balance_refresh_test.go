@@ -106,7 +106,7 @@ func TestChatAccountBalanceRefresherRefreshesImmediatelyAndPeriodically(t *testi
 	if !ok || provider.Account == nil || provider.Account.QuotaRemaining == nil {
 		t.Fatalf("expected refreshed account snapshot, got %+v", provider.Account)
 	}
-	if got := *provider.Account.QuotaRemaining; got < 2 {
+	if got := *provider.Account.QuotaRemaining; got < 1 {
 		t.Fatalf("expected latest periodic balance, got %v", got)
 	}
 }

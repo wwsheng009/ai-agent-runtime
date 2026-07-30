@@ -220,6 +220,11 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 	}
 	if s.Interaction != nil {
 		s.Interaction.ResetPromptState()
+		// Drop transient thinking/streaming/waiting flags immediately so that
+		// once Stopping is cleared by cleanup/reset, surface state becomes Ready.
+		// Do not clear agentStage here: Stopping remains visible while actor
+		// stop / lease release is still in flight.
+		s.Interaction.clearActiveRunStateOnInterrupt()
 	}
 }
 

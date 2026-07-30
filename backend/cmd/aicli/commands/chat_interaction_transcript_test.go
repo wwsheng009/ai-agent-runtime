@@ -109,13 +109,13 @@ func TestAssistantTurnTranscript_ApplyFinalDivergenceAndBounds(t *testing.T) {
 	if tr.EnqueuedEnd != tr.EmittedEnd {
 		t.Fatalf("queue correct should drop pending ownership, emitted=%d enqueued=%d", tr.EmittedEnd, tr.EnqueuedEnd)
 	}
-	if tr.NeedsConsolidation || tr.EmittedDiverged {
-		t.Fatal("queue correct must not mark emitted divergence")
+	if tr.LastDivergence != assistantFinalQueueCorrect {
+		t.Fatalf("LastDivergence = %v, want queue_correct", tr.LastDivergence)
 	}
 
 	tr.applyFinalDivergence(assistantFinalEmittedDiverged)
-	if !tr.NeedsConsolidation || !tr.EmittedDiverged {
-		t.Fatal("emitted divergence should mark consolidation")
+	if tr.EnqueuedEnd != tr.EmittedEnd {
+		t.Fatalf("emitted divergence should drop pending ownership, emitted=%d enqueued=%d", tr.EmittedEnd, tr.EnqueuedEnd)
 	}
 	if tr.LastDivergence != assistantFinalEmittedDiverged {
 		t.Fatalf("LastDivergence = %v, want emitted_diverged", tr.LastDivergence)
@@ -126,8 +126,8 @@ func TestAssistantTurnTranscript_ApplyFinalDivergenceAndBounds(t *testing.T) {
 		t.Fatalf("replace should clear ownership, got emitted=%d enqueued=%d blocks=%d bytes=%d",
 			tr.EmittedEnd, tr.EnqueuedEnd, len(tr.Blocks), tr.RetainedSourceBytes)
 	}
-	if tr.NeedsConsolidation || tr.EmittedDiverged {
-		t.Fatal("replace should clear divergence flags")
+	if tr.LastDivergence != assistantFinalReplace {
+		t.Fatalf("LastDivergence = %v, want replace", tr.LastDivergence)
 	}
 
 	// Bounds: retain only the newest blocks under the block cap.
@@ -250,12 +250,13 @@ func TestChatInteractionCoordinator_FinalQueueCorrectDropsPendingWithoutReplay(t
 		"stream_prefix_enqueued=0",
 		"stream_prefix_emitted=0",
 		"stream_final_divergence=queue_correct",
-		"stream_needs_consolidation=false",
-		"stream_emitted_diverged=false",
 	} {
 		if !strings.Contains(summary, expected) {
 			t.Fatalf("DebugSummary missing %q after queue-correct finalization: %q", expected, summary)
 		}
+	}
+	if strings.Contains(summary, "stream_needs_consolidation=") || strings.Contains(summary, "stream_emitted_diverged=") {
+		t.Fatalf("DebugSummary still exposes removed divergence flags: %q", summary)
 	}
 }
 
@@ -313,14 +314,11 @@ func TestChatInteractionCoordinator_EmittedDivergenceSuppressesFullReplay(t *tes
 	}
 
 	summary := coord.DebugSummary()
-	for _, expected := range []string{
-		"stream_final_divergence=emitted_diverged",
-		"stream_needs_consolidation=true",
-		"stream_emitted_diverged=true",
-	} {
-		if !strings.Contains(summary, expected) {
-			t.Fatalf("DebugSummary missing %q after emitted divergence: %q", expected, summary)
-		}
+	if !strings.Contains(summary, "stream_final_divergence=emitted_diverged") {
+		t.Fatalf("DebugSummary missing stream_final_divergence=emitted_diverged after emitted divergence: %q", summary)
+	}
+	if strings.Contains(summary, "stream_needs_consolidation=") || strings.Contains(summary, "stream_emitted_diverged=") {
+		t.Fatalf("DebugSummary still exposes removed divergence flags: %q", summary)
 	}
 }
 
@@ -420,12 +418,13 @@ func TestChatInteractionCoordinator_DebugSummarySurvivesResetStream(t *testing.T
 		"stream_transcript_blocks=1",
 		"stream_transcript_bytes=5",
 		"stream_final_divergence=append",
-		"stream_needs_consolidation=false",
-		"stream_emitted_diverged=false",
 	} {
 		if !strings.Contains(after, expected) {
 			t.Fatalf("post-reset DebugSummary missing %q: %q", expected, after)
 		}
+	}
+	if strings.Contains(after, "stream_needs_consolidation=") || strings.Contains(after, "stream_emitted_diverged=") {
+		t.Fatalf("post-reset DebugSummary still exposes removed divergence flags: %q", after)
 	}
 }
 
