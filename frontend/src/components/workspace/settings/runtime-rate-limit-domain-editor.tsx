@@ -244,7 +244,7 @@ export function RuntimeRateLimitDomainEditor({
               <Badge>{`algorithm ${rateLimitConfig.algorithm || "--"}`}</Badge>
               <Badge>
                 {t("editor.rateLimit.summary.burstTotal", {
-                  count: totalPathBurst,
+                  total: String(totalPathBurst),
                 })}
               </Badge>
             </SettingsBadgeList>
@@ -470,7 +470,7 @@ export function RuntimeRateLimitDomainEditor({
             </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
               {t("editor.rateLimit.summary.burstTotal", {
-                count: totalPathBurst,
+                total: String(totalPathBurst),
               })}
             </ConfigDomainSummaryBadge>
           </>
@@ -540,7 +540,7 @@ export function RuntimeRateLimitDomainEditor({
           editingApiKeyIndex == null
             ? t("editor.rateLimit.apiKey.dialog.createTitle")
             : t("editor.rateLimit.apiKey.dialog.editTitle", {
-                index: editingApiKeyIndex + 1,
+                index: String(editingApiKeyIndex + 1),
               })
         }
         description={t("editor.rateLimit.apiKey.dialog.description")}

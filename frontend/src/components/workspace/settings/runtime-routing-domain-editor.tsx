@@ -325,7 +325,7 @@ export function RuntimeRoutingDomainEditor({
           editingIndex == null
             ? t("editor.routing.dialog.createTitle")
             : t("editor.routing.dialog.editTitle", {
-                index: editingIndex + 1,
+                index: String(editingIndex + 1),
               })
         }
         description={t("editor.routing.dialog.description")}

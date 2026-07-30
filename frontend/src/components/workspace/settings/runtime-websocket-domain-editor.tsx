@@ -1,4 +1,5 @@
 import { WifiIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -18,6 +19,8 @@ export function RuntimeWebsocketDomainEditor({
   config,
   onChange,
 }: RuntimeWebsocketDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
+
   function update(patch: Partial<RuntimeWebsocketConfigSummary>) {
     onChange({
       ...config,
@@ -35,17 +38,29 @@ export function RuntimeWebsocketDomainEditor({
             </SettingsPanelIcon>
             <div>
               <div className="text-base font-semibold text-[var(--foreground)]">
-                WebSocket 配置
+                {t("editor.websocket.title")}
               </div>
               <div className="mt-1 text-sm text-[var(--muted-foreground)]">
-                维护 Responses WS passthrough、HTTP bridge 和 Realtime WS 的核心配置。
+                {t("editor.websocket.description")}
               </div>
             </div>
           </div>
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "websocket 开" : "websocket 关"}</Badge>
-            <Badge>{config.responsesIngressEnabled ? "responses 开" : "responses 关"}</Badge>
-            <Badge>{config.realtimeIngressEnabled ? "realtime 开" : "realtime 关"}</Badge>
+            <Badge>
+              {config.enabled
+                ? t("editor.websocket.badges.enabledOn")
+                : t("editor.websocket.badges.enabledOff")}
+            </Badge>
+            <Badge>
+              {config.responsesIngressEnabled
+                ? t("editor.websocket.badges.responsesOn")
+                : t("editor.websocket.badges.responsesOff")}
+            </Badge>
+            <Badge>
+              {config.realtimeIngressEnabled
+                ? t("editor.websocket.badges.realtimeOn")
+                : t("editor.websocket.badges.realtimeOff")}
+            </Badge>
           </SettingsBadgeList>
         </div>
       </div>
@@ -53,9 +68,11 @@ export function RuntimeWebsocketDomainEditor({
       <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[13px] font-semibold text-[var(--foreground)]">总开关</div>
+            <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              {t("editor.websocket.master.title")}
+            </div>
             <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-              控制 websocket 模块是否整体启用。
+              {t("editor.websocket.master.description")}
             </div>
           </div>
           <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -65,7 +82,7 @@ export function RuntimeWebsocketDomainEditor({
               checked={config.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
-            启用
+            {t("editor.websocket.enable")}
           </label>
         </div>
       </div>
@@ -74,9 +91,11 @@ export function RuntimeWebsocketDomainEditor({
         <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">Responses WS</div>
+              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                {t("editor.websocket.responses.title")}
+              </div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                管理 `/v1/responses` passthrough、HTTP bridge 和连接池行为。
+                {t("editor.websocket.responses.description")}
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -88,7 +107,7 @@ export function RuntimeWebsocketDomainEditor({
                   update({ responsesIngressEnabled: event.target.checked })
                 }
               />
-              启用 ingress
+              {t("editor.websocket.enableIngress")}
             </label>
           </div>
 
@@ -129,7 +148,9 @@ export function RuntimeWebsocketDomainEditor({
 
             <ConfigFormField
               label="responses.compat_bridge_source_protocols"
-              description="支持换行或逗号输入多个源协议。"
+              description={t(
+                "editor.websocket.responses.compatProtocolsDescription",
+              )}
             >
               <textarea
                 className={`${editorControlClassName} min-h-24 resize-y font-mono`}
@@ -206,9 +227,11 @@ export function RuntimeWebsocketDomainEditor({
         <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">Realtime WS</div>
+              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                {t("editor.websocket.realtime.title")}
+              </div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                管理 `/v1/realtime` ingress、容量和握手失败处理。
+                {t("editor.websocket.realtime.description")}
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -220,7 +243,7 @@ export function RuntimeWebsocketDomainEditor({
                   update({ realtimeIngressEnabled: event.target.checked })
                 }
               />
-              启用 ingress
+              {t("editor.websocket.enableIngress")}
             </label>
           </div>
 

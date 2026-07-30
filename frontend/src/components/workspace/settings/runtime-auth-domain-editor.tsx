@@ -1,4 +1,5 @@
 import { ShieldCheckIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -23,6 +24,8 @@ export function RuntimeAuthDomainEditor({
   authConfig,
   onChange,
 }: RuntimeAuthDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
+
   function update(patch: Partial<RuntimeAuthConfigSummary>) {
     onChange({
       ...authConfig,
@@ -33,45 +36,60 @@ export function RuntimeAuthDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Auth 配置</span>}
+        title={<span className="text-base">{t("editor.auth.title")}</span>}
         icon={
           <SettingsPanelIcon>
             <ShieldCheckIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="用专用表单维护 JWT、管理端和 Access Key 鉴权字段。"
+        description={t("editor.auth.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
-            <Badge>{authConfig.adminAuthEnabled ? "管理端鉴权开" : "管理端鉴权关"}</Badge>
-            <Badge>{authConfig.accessAuthEnabled ? "Access 鉴权开" : "Access 鉴权关"}</Badge>
             <Badge>
-              {authConfig.accessAuthAllowAnonymous ? "允许匿名" : "禁止匿名"}
+              {authConfig.adminAuthEnabled
+                ? t("editor.auth.badges.adminOn")
+                : t("editor.auth.badges.adminOff")}
+            </Badge>
+            <Badge>
+              {authConfig.accessAuthEnabled
+                ? t("editor.auth.badges.accessOn")
+                : t("editor.auth.badges.accessOff")}
+            </Badge>
+            <Badge>
+              {authConfig.accessAuthAllowAnonymous
+                ? t("editor.auth.badges.anonymousAllowed")
+                : t("editor.auth.badges.anonymousDenied")}
             </Badge>
           </SettingsBadgeList>
         }
       />
 
       <SettingsSubsectionCard
-        title="JWT 与会话"
-        description="这组字段通常会被启动环境变量覆盖，适合检查默认值和回退值。"
+        title={t("editor.auth.jwtSession.title")}
+        description={t("editor.auth.jwtSession.description")}
       >
         <div className="grid gap-3 xl:grid-cols-2">
-          <ConfigFormField label="jwt_secret" description="建议生产环境通过 AUTH_JWT_SECRET 注入。">
-              <textarea
-                className={`${editorControlClassName} min-h-28 resize-y font-mono`}
+          <ConfigFormField
+            label="jwt_secret"
+            description={t("editor.auth.fields.jwtSecretDescription")}
+          >
+            <textarea
+              className={`${editorControlClassName} min-h-28 resize-y font-mono`}
               value={authConfig.jwtSecret}
               onChange={(event) => update({ jwtSecret: event.target.value })}
             />
           </ConfigFormField>
           <ConfigFormField
             label="access_key_secret"
-            description="用于 Access Key 的密钥派生和恢复。"
+            description={t("editor.auth.fields.accessKeySecretDescription")}
           >
-              <textarea
-                className={`${editorControlClassName} min-h-28 resize-y font-mono`}
+            <textarea
+              className={`${editorControlClassName} min-h-28 resize-y font-mono`}
               value={authConfig.accessKeySecret}
-              onChange={(event) => update({ accessKeySecret: event.target.value })}
+              onChange={(event) =>
+                update({ accessKeySecret: event.target.value })
+              }
             />
           </ConfigFormField>
           <ConfigFormField label="jwt_expire">
@@ -86,7 +104,9 @@ export function RuntimeAuthDomainEditor({
             <input
               className={editorControlClassName}
               value={authConfig.sessionTimeout}
-              onChange={(event) => update({ sessionTimeout: event.target.value })}
+              onChange={(event) =>
+                update({ sessionTimeout: event.target.value })
+              }
               placeholder="30m"
             />
           </ConfigFormField>
@@ -94,7 +114,9 @@ export function RuntimeAuthDomainEditor({
             <input
               className={editorControlClassName}
               value={authConfig.maxApiCreateTimes}
-              onChange={(event) => update({ maxApiCreateTimes: event.target.value })}
+              onChange={(event) =>
+                update({ maxApiCreateTimes: event.target.value })
+              }
               placeholder="100"
             />
           </ConfigFormField>
@@ -103,8 +125,8 @@ export function RuntimeAuthDomainEditor({
 
       <div className="grid gap-3 xl:grid-cols-2">
         <SettingsSubsectionCard
-          title="管理端鉴权"
-          description="`/admin/*` 的 JWT 与静态 token 配置。"
+          title={t("editor.auth.admin.title")}
+          description={t("editor.auth.admin.description")}
           headerAside={
             <label className={editorSectionToggleClassName}>
               <input
@@ -115,14 +137,16 @@ export function RuntimeAuthDomainEditor({
                   update({ adminAuthEnabled: event.target.checked })
                 }
               />
-              启用
+              {t("editor.auth.enable")}
             </label>
           }
         >
-
-          <ConfigFormField label="admin_token" description="静态管理 token，通常只用于内部环境。">
-              <textarea
-                className={`${editorControlClassName} min-h-28 resize-y font-mono`}
+          <ConfigFormField
+            label="admin_token"
+            description={t("editor.auth.admin.tokenDescription")}
+          >
+            <textarea
+              className={`${editorControlClassName} min-h-28 resize-y font-mono`}
               value={authConfig.adminToken}
               onChange={(event) => update({ adminToken: event.target.value })}
             />
@@ -130,8 +154,8 @@ export function RuntimeAuthDomainEditor({
         </SettingsSubsectionCard>
 
         <SettingsSubsectionCard
-          title="Access 鉴权"
-          description="`/v1/*` 访问密钥鉴权开关和匿名访问策略。"
+          title={t("editor.auth.access.title")}
+          description={t("editor.auth.access.description")}
           headerAside={
             <label className={editorSectionToggleClassName}>
               <input
@@ -142,15 +166,14 @@ export function RuntimeAuthDomainEditor({
                   update({ accessAuthEnabled: event.target.checked })
                 }
               />
-              启用
+              {t("editor.auth.enable")}
             </label>
           }
         >
-
           <SettingsInlineToggleCard
             checked={authConfig.accessAuthAllowAnonymous}
             label="allow_anonymous"
-            description="关闭后，未携带 Access Key 的请求会被直接拒绝。"
+            description={t("editor.auth.access.allowAnonymousDescription")}
             labelClassName="items-start"
             onCheckedChange={(checked) =>
               update({ accessAuthAllowAnonymous: checked })

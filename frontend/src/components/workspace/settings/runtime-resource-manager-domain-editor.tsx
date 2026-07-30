@@ -1,4 +1,5 @@
 import { ActivityIcon, RouteIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -23,6 +24,8 @@ export function RuntimeResourceManagerDomainEditor({
   config,
   onChange,
 }: RuntimeResourceManagerDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
+
   function update(patch: Partial<RuntimeResourceManagerConfigSummary>) {
     onChange({
       ...config,
@@ -33,21 +36,31 @@ export function RuntimeResourceManagerDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Resource Manager 配置</span>}
+        title={<span className="text-base">{t("editor.resourceManager.title")}</span>}
         icon={
           <SettingsPanelIcon>
             <RouteIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="维护 LoadBalanceStageV2 的资源选择策略、健康检查和统计保留配置。"
+        description={t("editor.resourceManager.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "资源管理开" : "资源管理关"}</Badge>
             <Badge>
-              {config.crossProviderKeySelection ? "跨 Provider Key 开" : "跨 Provider Key 关"}
+              {config.enabled
+                ? t("editor.resourceManager.badges.enabledOn")
+                : t("editor.resourceManager.badges.enabledOff")}
             </Badge>
-            <Badge>{config.enableStats ? "统计开" : "统计关"}</Badge>
+            <Badge>
+              {config.crossProviderKeySelection
+                ? t("editor.resourceManager.badges.crossKeyOn")
+                : t("editor.resourceManager.badges.crossKeyOff")}
+            </Badge>
+            <Badge>
+              {config.enableStats
+                ? t("editor.resourceManager.badges.statsOn")
+                : t("editor.resourceManager.badges.statsOff")}
+            </Badge>
           </SettingsBadgeList>
         }
       />
@@ -55,12 +68,12 @@ export function RuntimeResourceManagerDomainEditor({
       <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1fr)]">
         <SettingsMiniToggleCard
           checked={config.enabled}
-          description="控制是否启用新的 ResourceManager 选择路径。"
+          description={t("editor.resourceManager.enabledDescription")}
           label="resource_manager.enabled"
           onCheckedChange={(checked) => update({ enabled: checked })}
         />
 
-        <SettingsSubsectionCard title="默认算法">
+        <SettingsSubsectionCard title={t("editor.resourceManager.defaultAlgorithm")}>
           <div className="grid gap-3 xl:grid-cols-3">
             <ConfigFormField label="default_group_algorithm">
               <input
@@ -97,7 +110,7 @@ export function RuntimeResourceManagerDomainEditor({
 
         <SettingsMiniToggleCard
           checked={config.crossProviderKeySelection}
-          description="控制是否可跨 Provider 直接选择 Group 内全部 Key。"
+          description={t("editor.resourceManager.crossProviderDescription")}
           label="cross_provider_key_selection"
           onCheckedChange={(checked) =>
             update({ crossProviderKeySelection: checked })
@@ -112,7 +125,7 @@ export function RuntimeResourceManagerDomainEditor({
             <ActivityIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="控制健康探测间隔、自动恢复和恢复阈值。"
+        description={t("editor.resourceManager.healthCheck.description")}
         headerAside={
           <label className={editorSectionToggleClassName}>
             <input
@@ -123,7 +136,7 @@ export function RuntimeResourceManagerDomainEditor({
                 update({ healthCheckEnabled: event.target.checked })
               }
             />
-            启用健康检查
+            {t("editor.resourceManager.healthCheck.enable")}
           </label>
         }
       >
@@ -150,7 +163,9 @@ export function RuntimeResourceManagerDomainEditor({
           </ConfigFormField>
           <SettingsMiniToggleCard
             checked={config.healthCheckAutoRecovery}
-            description="控制失败资源是否在成功率恢复后自动回到可用状态。"
+            description={t(
+              "editor.resourceManager.healthCheck.autoRecoveryDescription",
+            )}
             label="health_check.auto_recovery"
             onCheckedChange={(checked) =>
               update({ healthCheckAutoRecovery: checked })
@@ -162,7 +177,7 @@ export function RuntimeResourceManagerDomainEditor({
       <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)]">
         <SettingsMiniToggleCard
           checked={config.enableStats}
-          description="控制是否保留资源管理统计数据。"
+          description={t("editor.resourceManager.statsDescription")}
           label="enable_stats"
           onCheckedChange={(checked) => update({ enableStats: checked })}
         />

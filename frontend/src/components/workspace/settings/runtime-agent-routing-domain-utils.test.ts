@@ -354,6 +354,9 @@ function provider(
   supportedModels: string[],
 ): RuntimeProviderSummary {
   return {
+    account: null,
+    accountAuthRef: "",
+    accountSummary: "",
     apiKey: "",
     apiPath: "",
     baseUrl: "",
@@ -367,6 +370,10 @@ function provider(
     proxyEnabled: false,
     proxySummary: "",
     raw: {},
+    siteType: "",
+    siteTypeConfidence: "",
+    siteTypeDetectedAt: "",
+    siteTypeScores: {},
     supportedModels,
     supportTypes: ["openai"],
     timeout: "300s",

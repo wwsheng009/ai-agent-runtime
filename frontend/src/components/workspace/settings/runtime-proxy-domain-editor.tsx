@@ -1,4 +1,5 @@
 import { RouteIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -22,6 +23,8 @@ export function RuntimeProxyDomainEditor({
   config,
   onChange,
 }: RuntimeProxyDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
+
   function update(patch: Partial<RuntimeProxyConfigSummary>) {
     onChange({
       ...config,
@@ -39,18 +42,24 @@ export function RuntimeProxyDomainEditor({
             </SettingsPanelIcon>
             <div>
               <div className="text-base font-semibold text-[var(--foreground)]">
-                网络代理配置
+                {t("editor.proxy.title")}
               </div>
               <div className="mt-1 text-sm text-[var(--muted-foreground)]">
-                配置 runtime 上游 HTTP/HTTPS/SOCKS5 代理。留空并关闭后，会回退到进程环境变量或直连。
+                {t("editor.proxy.description")}
               </div>
             </div>
           </div>
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "代理开" : "代理关"}</Badge>
+            <Badge>
+              {config.enabled
+                ? t("editor.proxy.badges.enabledOn")
+                : t("editor.proxy.badges.enabledOff")}
+            </Badge>
             <Badge>{summarizeRuntimeProxyConfig(config)}</Badge>
             <Badge>
-              {hasRuntimeProxyConfig(config) ? "显式配置" : "环境变量回退"}
+              {hasRuntimeProxyConfig(config)
+                ? t("editor.proxy.badges.explicit")
+                : t("editor.proxy.badges.envFallback")}
             </Badge>
           </SettingsBadgeList>
         </div>
@@ -59,39 +68,39 @@ export function RuntimeProxyDomainEditor({
       <SettingsInlineToggleCard
         checked={config.enabled}
         label="providers.proxy.enabled"
-        description="总开关。启用后会按下方 URL 走显式代理；关闭且字段留空时，回退到进程环境变量。"
+        description={t("editor.proxy.enabledDescription")}
         onCheckedChange={(checked) => update({ enabled: checked })}
       />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ConfigFormField
           label="providers.proxy.http"
-          description="HTTP 请求代理地址，也可填写 socks5://host:port。"
+          description={t("editor.proxy.httpDescription")}
         >
           <input
             className={editorControlClassName}
             value={config.http}
             onChange={(event) => update({ http: event.target.value })}
-            placeholder="http://127.0.0.1:10810 或 socks5://127.0.0.1:10810"
+            placeholder="http://127.0.0.1:10810 / socks5://127.0.0.1:10810"
           />
         </ConfigFormField>
 
         <ConfigFormField
           label="providers.proxy.https"
-          description="HTTPS 请求代理地址，未填写时会回退使用 HTTP 代理。"
+          description={t("editor.proxy.httpsDescription")}
         >
           <input
             className={editorControlClassName}
             value={config.https}
             onChange={(event) => update({ https: event.target.value })}
-            placeholder="http://127.0.0.1:10810 或 socks5://127.0.0.1:10810"
+            placeholder="http://127.0.0.1:10810 / socks5://127.0.0.1:10810"
           />
         </ConfigFormField>
       </div>
 
       <ConfigFormField
         label="providers.proxy.no_proxy"
-        description="逗号分隔的绕过列表，例如 localhost,127.0.0.1,.internal.example.com。"
+        description={t("editor.proxy.noProxyDescription")}
       >
         <textarea
           className={`${editorControlClassName} min-h-28 resize-y font-mono`}

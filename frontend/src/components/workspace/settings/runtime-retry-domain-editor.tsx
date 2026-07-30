@@ -127,8 +127,8 @@ export function RuntimeRetryDomainEditor({
             </Badge>
             <Badge>
               {t("editor.retry.summary.enabledRules", {
-                enabled: enabledRuleCount,
-                total: rules.length,
+                enabled: String(enabledRuleCount),
+                total: String(rules.length),
               })}
             </Badge>
             <Badge>
@@ -328,7 +328,7 @@ export function RuntimeRetryDomainEditor({
             </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
               {t("editor.retry.summary.defaultRetries", {
-                count: config.defaultMaxRetries || "--",
+                value: config.defaultMaxRetries || "--",
               })}
             </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
@@ -435,7 +435,7 @@ export function RuntimeRetryDomainEditor({
           editingIndex == null
             ? t("editor.retry.dialog.createTitle")
             : t("editor.retry.dialog.editTitle", {
-                index: editingIndex + 1,
+                index: String(editingIndex + 1),
               })
         }
         description={t("editor.retry.dialog.description")}

@@ -5,6 +5,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -70,6 +71,7 @@ export function RuntimeTransformerDomainEditor({
   requestModifiers,
   responseModifiers,
 }: RuntimeTransformerDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [dialogScope, setDialogScope] =
@@ -125,25 +127,35 @@ export function RuntimeTransformerDomainEditor({
         description={description}
         items={items}
         getRowKey={(item) => item.id}
-        emptyState={`当前没有 ${scope === "request" ? "请求" : "响应"} Body 修改器。`}
+        emptyState={
+          scope === "request"
+            ? t("editor.transformer.modifiers.emptyRequest")
+            : t("editor.transformer.modifiers.emptyResponse")
+        }
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${items.length} 条修改器`}</ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
-              {items.length > 0 ? `启用 ${items.filter((item) => item.enabled).length} 条` : "未配置"}
+              {t("editor.transformer.modifiers.count", { count: items.length })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {items.length > 0
+                ? t("editor.transformer.modifiers.enabledCount", {
+                    count: items.filter((item) => item.enabled).length,
+                  })
+                : t("editor.transformer.modifiers.notConfigured")}
             </ConfigDomainSummaryBadge>
           </>
         }
         actions={
           <SettingsAddButton
             size="sm"
-            label="新建修改器"
+            label={t("editor.transformer.modifiers.create")}
             onClick={() => openCreateDialog(scope)}
           />
         }
         columns={[
           {
-            header: "顺序 / 类型",
+            header: t("editor.transformer.columns.orderType"),
             cell: (item) => (
               <div className="min-w-[14rem]">
                 <div className="flex flex-wrap items-center gap-2">
@@ -151,16 +163,22 @@ export function RuntimeTransformerDomainEditor({
                   <div className="font-semibold text-[var(--foreground)]">
                     {item.type || "--"}
                   </div>
-                  <Badge>{item.enabled ? "启用" : "关闭"}</Badge>
+                  <Badge>
+                    {item.enabled
+                      ? t("editor.transformer.badges.enabled")
+                      : t("editor.transformer.badges.disabled")}
+                  </Badge>
                 </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {scope === "request" ? "上游请求前处理" : "客户端响应前处理"}
+                  {scope === "request"
+                    ? t("editor.transformer.scope.requestHint")
+                    : t("editor.transformer.scope.responseHint")}
                 </div>
               </div>
             ),
           },
           {
-            header: "模型范围",
+            header: t("editor.transformer.columns.models"),
             cell: (item) => (
               <div className="min-w-[14rem]">
                 <div>
@@ -168,54 +186,64 @@ export function RuntimeTransformerDomainEditor({
                 </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {item.models.length > 2
-                    ? `共 ${item.models.length} 个模型匹配`
+                    ? t("editor.transformer.models.totalMatch", {
+                        count: item.models.length,
+                      })
                     : item.models.length > 0
-                      ? `${item.models.length} 个模型匹配`
-                      : "未设 models"}
+                      ? t("editor.transformer.models.match", {
+                          count: item.models.length,
+                        })
+                      : t("editor.transformer.models.none")}
                 </div>
               </div>
             ),
           },
           {
-            header: "参数 / 扩展",
+            header: t("editor.transformer.columns.paramsExtra"),
             cell: (item) => (
               <div className="min-w-[12rem]">
-                <div>{`params ${item.paramsKeyCount} 个键`}</div>
+                <div>
+                  {t("editor.transformer.params.keyCount", {
+                    count: item.paramsKeyCount,
+                  })}
+                </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {item.extraFieldCount > 0
-                    ? `${item.extraFieldCount} 个扩展字段`
-                    : "无扩展字段"}
+                    ? t("editor.transformer.extraFields.count", {
+                        count: item.extraFieldCount,
+                      })
+                    : t("editor.transformer.extraFields.none")}
                 </div>
               </div>
             ),
           },
           {
-            header: "操作",
+            header: t("editor.transformer.columns.actions"),
             cell: (item) => (
               <SettingsActionGroup>
                 <SettingsActionButton
                   variant="ghost"
                   icon={<ArrowUpIcon size={14} />}
-                  label="上移"
+                  label={t("editor.transformer.actions.moveUp")}
                   onClick={() => onMoveModifier(scope, item.index, "up")}
                   disabled={item.index === 0}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<ArrowDownIcon size={14} />}
-                  label="下移"
+                  label={t("editor.transformer.actions.moveDown")}
                   onClick={() => onMoveModifier(scope, item.index, "down")}
                   disabled={item.index === items.length - 1}
                 />
                 <SettingsActionButton
                   variant="secondary"
-                  label="编辑"
+                  label={t("editor.transformer.actions.edit")}
                   onClick={() => openEditDialog(item)}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<Trash2Icon size={14} />}
-                  label="删除"
+                  label={t("editor.transformer.actions.delete")}
                   onClick={() => onDeleteModifier(scope, item.index)}
                 />
               </SettingsActionGroup>
@@ -231,26 +259,39 @@ export function RuntimeTransformerDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Transformer 配置</span>}
+        title={<span className="text-base">{t("editor.transformer.title")}</span>}
         icon={
           <SettingsPanelIcon>
             <Settings2Icon size={16} />
           </SettingsPanelIcon>
         }
-        description="维护 HTTPTransformStage 相关开关，以及 request/response Body modifier 列表。"
+        description={t("editor.transformer.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
-            <Badge>{config.httpTransformStageEnabled ? "HTTP Stage 开" : "HTTP Stage 关"}</Badge>
-            <Badge>{`${enabledModifierCount}/${totalModifierCount} 条修改器启用`}</Badge>
-            <Badge>{config.highPerf ? "高性能开" : "高性能关"}</Badge>
+            <Badge>
+              {config.httpTransformStageEnabled
+                ? t("editor.transformer.status.httpStageOn")
+                : t("editor.transformer.status.httpStageOff")}
+            </Badge>
+            <Badge>
+              {t("editor.transformer.summary.enabledModifiers", {
+                enabled: String(enabledModifierCount),
+                total: String(totalModifierCount),
+              })}
+            </Badge>
+            <Badge>
+              {config.highPerf
+                ? t("editor.transformer.status.highPerfOn")
+                : t("editor.transformer.status.highPerfOff")}
+            </Badge>
           </SettingsBadgeList>
         }
       >
         <div className="grid gap-3 xl:grid-cols-4">
           <ToggleCard
             label="high_perf"
-            description="控制是否启用高性能转换路径。"
+            description={t("editor.transformer.toggles.highPerf")}
             checked={config.highPerf}
             onCheckedChange={(checked) =>
               onChangeConfig({ ...config, highPerf: checked })
@@ -258,7 +299,7 @@ export function RuntimeTransformerDomainEditor({
           />
           <ToggleCard
             label="http_transform_stage_enabled"
-            description="控制是否启用完整 HTTPTransformer 体系。"
+            description={t("editor.transformer.toggles.httpTransformStage")}
             checked={config.httpTransformStageEnabled}
             onCheckedChange={(checked) =>
               onChangeConfig({
@@ -269,7 +310,7 @@ export function RuntimeTransformerDomainEditor({
           />
           <ToggleCard
             label="cache_adapters"
-            description="控制适配器实例是否缓存。"
+            description={t("editor.transformer.toggles.cacheAdapters")}
             checked={config.cacheAdapters}
             onCheckedChange={(checked) =>
               onChangeConfig({ ...config, cacheAdapters: checked })
@@ -277,7 +318,7 @@ export function RuntimeTransformerDomainEditor({
           />
           <ToggleCard
             label="stream_null_filter"
-            description="控制流式响应中的 null 字段是否过滤。"
+            description={t("editor.transformer.toggles.streamNullFilter")}
             checked={config.streamNullFilter}
             onCheckedChange={(checked) =>
               onChangeConfig({ ...config, streamNullFilter: checked })
@@ -288,15 +329,15 @@ export function RuntimeTransformerDomainEditor({
 
       {renderModifierTable(
         "request",
-        "Request Body Modifiers",
-        "在请求发往上游前修改 Body，适合禁用参数、覆写参数或角色转换。",
+        t("editor.transformer.requestTable.title"),
+        t("editor.transformer.requestTable.description"),
         requestModifiers,
       )}
 
       {renderModifierTable(
         "response",
-        "Response Body Modifiers",
-        "在响应返回客户端前修改 Body，适合字段过滤和响应裁剪。",
+        t("editor.transformer.responseTable.title"),
+        t("editor.transformer.responseTable.description"),
         responseModifiers,
       )}
 
@@ -305,13 +346,21 @@ export function RuntimeTransformerDomainEditor({
         onClose={() => setDialogOpen(false)}
         title={
           editingIndex == null
-            ? `新建${dialogScope === "request" ? "请求" : "响应"}修改器`
-            : `编辑${dialogScope === "request" ? "请求" : "响应"}修改器 #${editingIndex + 1}`
+            ? dialogScope === "request"
+              ? t("editor.transformer.dialog.createRequestTitle")
+              : t("editor.transformer.dialog.createResponseTitle")
+            : dialogScope === "request"
+              ? t("editor.transformer.dialog.editRequestTitle", {
+                  index: String(editingIndex + 1),
+                })
+              : t("editor.transformer.dialog.editResponseTitle", {
+                  index: String(editingIndex + 1),
+                })
         }
-        description="维护修改器类型、模型范围、params JSON 和未覆盖的扩展字段。"
+        description={t("editor.transformer.dialog.description")}
         footer={
           <SettingsDialogFooter
-            confirmLabel="保存草稿"
+            confirmLabel={t("editor.transformer.actions.saveDraft")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -326,7 +375,7 @@ export function RuntimeTransformerDomainEditor({
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_11rem]">
             <ConfigFormField
               label="type"
-              description="例如 disable_params、override_params、response_field_filter。"
+              description={t("editor.transformer.fields.typeHelp")}
             >
               <input
                 className={editorControlClassName}
@@ -339,7 +388,7 @@ export function RuntimeTransformerDomainEditor({
             </ConfigFormField>
             <ToggleCard
               label="enabled"
-              description="关闭后该修改器仍保留在配置里。"
+              description={t("editor.transformer.fields.enabledHelp")}
               checked={draft.enabled}
               onCheckedChange={(checked) =>
                 setDraft((current) => ({ ...current, enabled: checked }))
@@ -347,7 +396,10 @@ export function RuntimeTransformerDomainEditor({
             />
           </div>
 
-          <ConfigFormField label="models" description="支持换行或逗号分隔。">
+          <ConfigFormField
+            label="models"
+            description={t("editor.transformer.fields.modelsHelp")}
+          >
             <textarea
               className={`${editorControlClassName} min-h-24 resize-y`}
               value={draft.modelsText}
@@ -364,7 +416,7 @@ export function RuntimeTransformerDomainEditor({
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
               label="params JSON"
-              description="写入 modifier.params，必须是 JSON 对象。"
+              description={t("editor.transformer.fields.paramsJsonHelp")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-40 resize-y font-mono`}
@@ -380,8 +432,8 @@ export function RuntimeTransformerDomainEditor({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="扩展字段 JSON"
-              description="保留未被专用表单覆盖的字段，必须是 JSON 对象。"
+              label={t("editor.transformer.fields.extraJson")}
+              description={t("editor.transformer.fields.extraJsonHelp")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-40 resize-y font-mono`}

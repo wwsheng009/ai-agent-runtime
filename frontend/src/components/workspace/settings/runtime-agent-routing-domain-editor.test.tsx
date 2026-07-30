@@ -177,6 +177,9 @@ function routePreviewResult(providerName: string): RuntimeAgentRoutePreviewResul
 
 function provider(name: string, model: string): RuntimeProviderSummary {
   return {
+    account: null,
+    accountAuthRef: "",
+    accountSummary: "",
     apiKey: "",
     apiPath: "",
     baseUrl: "",
@@ -190,6 +193,10 @@ function provider(name: string, model: string): RuntimeProviderSummary {
     proxyEnabled: false,
     proxySummary: "",
     raw: {},
+    siteType: "",
+    siteTypeConfidence: "",
+    siteTypeDetectedAt: "",
+    siteTypeScores: {},
     supportedModels: [model],
     supportTypes: ["openai"],
     timeout: "300s",

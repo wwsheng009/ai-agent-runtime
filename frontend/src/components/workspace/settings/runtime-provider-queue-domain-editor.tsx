@@ -1,5 +1,6 @@
 import { GaugeIcon, TimerIcon, Trash2Icon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -51,6 +52,7 @@ export function RuntimeProviderQueueDomainEditor({
   onSaveProvider,
   providers,
 }: RuntimeProviderQueueDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
@@ -105,26 +107,38 @@ export function RuntimeProviderQueueDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Provider Queue 配置</span>}
+        title={<span className="text-base">{t("editor.providerQueue.title")}</span>}
         icon={
           <SettingsPanelIcon>
             <GaugeIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="维护供应商级并发槽位、溢出策略和排队等待心跳配置。"
+        description={t("editor.providerQueue.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "队列开" : "队列关"}</Badge>
-            <Badge>{`${providers.length} 条 provider 覆盖`}</Badge>
-            <Badge>{`max_concurrency 总和 ${totalMaxConcurrency}`}</Badge>
+            <Badge>
+              {config.enabled
+                ? t("editor.providerQueue.badges.enabledOn")
+                : t("editor.providerQueue.badges.enabledOff")}
+            </Badge>
+            <Badge>
+              {t("editor.providerQueue.badges.providerOverrides", {
+                count: providers.length,
+              })}
+            </Badge>
+            <Badge>
+              {t("editor.providerQueue.badges.maxConcurrencyTotal", {
+                total: String(totalMaxConcurrency),
+              })}
+            </Badge>
           </SettingsBadgeList>
         }
       >
         <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)]">
           <SettingsMiniToggleCard
             checked={config.enabled}
-            description="控制是否启用 provider 级槽位与排队管理。"
+            description={t("editor.providerQueue.enabledDescription")}
             label="provider_queue.enabled"
             onCheckedChange={(checked) =>
               onChangeConfig({ ...config, enabled: checked })
@@ -194,7 +208,7 @@ export function RuntimeProviderQueueDomainEditor({
               <GaugeIcon size={16} />
             </SettingsPanelIcon>
           }
-          description="控制单个 provider 满载时是否尝试切换到同组其它 provider。"
+          description={t("editor.providerQueue.overflow.description")}
           descriptionClassName="mt-1 text-xs leading-5"
           headerAside={
             <label className={editorSectionToggleClassName}>
@@ -206,7 +220,7 @@ export function RuntimeProviderQueueDomainEditor({
                   onChangeConfig({ ...config, overflowEnabled: event.target.checked })
                 }
               />
-              启用溢出
+              {t("editor.providerQueue.overflow.enable")}
             </label>
           }
         >
@@ -245,7 +259,7 @@ export function RuntimeProviderQueueDomainEditor({
               <TimerIcon size={16} />
             </SettingsPanelIcon>
           }
-          description="控制流式请求排队时的心跳保活与最大等待时长。"
+          description={t("editor.providerQueue.waitHeartbeat.description")}
           descriptionClassName="mt-1 text-xs leading-5"
           headerAside={
             <label className={editorSectionToggleClassName}>
@@ -260,7 +274,7 @@ export function RuntimeProviderQueueDomainEditor({
                   })
                 }
               />
-              启用心跳
+              {t("editor.providerQueue.waitHeartbeat.enable")}
             </label>
           }
         >
@@ -306,63 +320,76 @@ export function RuntimeProviderQueueDomainEditor({
       </div>
 
       <ConfigDomainTable
-        title="Provider Overrides"
+        title={t("editor.providerQueue.table.title")}
         titleIcon={GaugeIcon}
-        description="按 provider 名称维护独立槽位配置，覆盖 default_slot 的默认值。"
+        description={t("editor.providerQueue.table.description")}
         items={providers}
         getRowKey={(item) => item.id}
-        emptyState="当前没有 provider 级别的队列覆盖配置。"
+        emptyState={t("editor.providerQueue.table.empty")}
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${providers.length} 条覆盖`}</ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.providerQueue.table.overrideCount", {
+                count: providers.length,
+              })}
+            </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
               {config.defaultMaxConcurrency
-                ? `默认 max ${config.defaultMaxConcurrency}`
-                : "未设默认并发"}
+                ? t("editor.providerQueue.table.defaultMax", {
+                    value: config.defaultMaxConcurrency,
+                  })
+                : t("editor.providerQueue.table.noDefaultMax")}
             </ConfigDomainSummaryBadge>
           </>
         }
         actions={
-          <SettingsAddButton size="sm" label="新建 Provider 覆盖" onClick={openCreateDialog} />
+          <SettingsAddButton
+            size="sm"
+            label={t("editor.providerQueue.actions.create")}
+            onClick={openCreateDialog}
+          />
         }
         columns={[
           {
-            header: "Provider",
+            header: t("editor.providerQueue.table.columns.provider"),
             cell: (item) => (
               <div className="min-w-[12rem]">
                 <div className="font-semibold">{item.provider}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {item.extraFieldCount > 0
-                    ? `${item.extraFieldCount} 个扩展字段`
-                    : "无扩展字段"}
+                    ? t("editor.providerQueue.table.extraFields", {
+                        count: item.extraFieldCount,
+                      })
+                    : t("editor.providerQueue.table.noExtraFields")}
                 </div>
               </div>
             ),
           },
           {
-            header: "槽位配置",
+            header: t("editor.providerQueue.table.columns.slot"),
             cell: (item) => (
               <div className="min-w-[14rem]">
                 <div>{`max ${item.maxConcurrency || "--"} · queue ${item.queueSize || "--"}`}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {item.queueTimeout || "未设 queue_timeout"}
+                  {item.queueTimeout ||
+                    t("editor.providerQueue.table.noQueueTimeout")}
                 </div>
               </div>
             ),
           },
           {
-            header: "操作",
+            header: t("editor.providerQueue.table.columns.actions"),
             cell: (item) => (
               <SettingsActionGroup>
                 <SettingsActionButton
                   variant="secondary"
-                  label="编辑"
+                  label={t("editor.providerQueue.actions.edit")}
                   onClick={() => openEditDialog(item)}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<Trash2Icon size={14} />}
-                  label="删除"
+                  label={t("editor.providerQueue.actions.delete")}
                   onClick={() => onDeleteProvider(item.provider)}
                 />
               </SettingsActionGroup>
@@ -376,11 +403,15 @@ export function RuntimeProviderQueueDomainEditor({
       <ConfigDomainDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        title={editingProvider ? `编辑 ${editingProvider}` : "新建 Provider 队列覆盖"}
-        description="维护 provider_queue.providers 下的单个 provider 覆盖记录。"
+        title={
+          editingProvider
+            ? t("editor.providerQueue.dialog.editTitle", { name: editingProvider })
+            : t("editor.providerQueue.dialog.createTitle")
+        }
+        description={t("editor.providerQueue.dialog.description")}
         footer={
           <SettingsDialogFooter
-            confirmLabel="保存草稿"
+            confirmLabel={t("editor.providerQueue.dialog.save")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -389,9 +420,7 @@ export function RuntimeProviderQueueDomainEditor({
       >
         <div className="space-y-3">
           {dialogError ? (
-            <SettingsNoticeCard tone="warning">
-              {dialogError}
-            </SettingsNoticeCard>
+            <SettingsNoticeCard tone="warning">{dialogError}</SettingsNoticeCard>
           ) : null}
           <div className="grid gap-3 md:grid-cols-2">
             <ConfigFormField label="provider">
@@ -446,8 +475,8 @@ export function RuntimeProviderQueueDomainEditor({
           </div>
 
           <ConfigFormField
-            label="扩展字段 JSON"
-            description="保留未被专用表单覆盖的 provider 级扩展字段。"
+            label={t("editor.providerQueue.fields.extraJson")}
+            description={t("editor.providerQueue.fields.extraJsonDescription")}
           >
             <textarea
               className={`${editorControlClassName} min-h-28 resize-y font-mono`}

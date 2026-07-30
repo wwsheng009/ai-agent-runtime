@@ -1,5 +1,6 @@
 import { GaugeIcon, Trash2Icon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -51,6 +52,7 @@ export function RuntimeConcurrencyDomainEditor({
   onSaveProviderLimit,
   providerLimits,
 }: RuntimeConcurrencyDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
@@ -94,19 +96,31 @@ export function RuntimeConcurrencyDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Concurrency 配置</span>}
+        title={<span className="text-base">{t("editor.concurrency.title")}</span>}
         icon={
           <SettingsPanelIcon>
             <GaugeIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="维护全局并发上限、队列参数，以及 provider 级别的并发限制。"
+        description={t("editor.concurrency.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "并发控制开" : "并发控制关"}</Badge>
-            <Badge>{`provider 限制 ${providerLimits.length} 条`}</Badge>
-            <Badge>{`limit 汇总 ${totalProviderLimit}`}</Badge>
+            <Badge>
+              {config.enabled
+                ? t("editor.concurrency.badges.enabledOn")
+                : t("editor.concurrency.badges.enabledOff")}
+            </Badge>
+            <Badge>
+              {t("editor.concurrency.badges.providerLimitCount", {
+                count: providerLimits.length,
+              })}
+            </Badge>
+            <Badge>
+              {t("editor.concurrency.badges.limitTotal", {
+                total: String(totalProviderLimit),
+              })}
+            </Badge>
           </SettingsBadgeList>
         }
       >
@@ -116,10 +130,14 @@ export function RuntimeConcurrencyDomainEditor({
               concurrency.enabled
             </div>
             <div className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
-              关闭后当前阈值仍会保留在配置里。
+              {t("editor.concurrency.enabledHint")}
             </div>
             <label className={`mt-3 ${editorToggleRowClassName}`}>
-              <span>{config.enabled ? "已启用" : "已关闭"}</span>
+              <span>
+                {config.enabled
+                  ? t("editor.concurrency.enabled")
+                  : t("editor.concurrency.disabled")}
+              </span>
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-[var(--accent-primary)]"
@@ -177,47 +195,57 @@ export function RuntimeConcurrencyDomainEditor({
       </SettingsPanelCard>
 
       <ConfigDomainTable
-        title="Per Provider Limits"
+        title={t("editor.concurrency.table.title")}
         titleIcon={GaugeIcon}
-        description="按 provider 名称维护独立并发上限，常用于区分不同上游容量。"
+        description={t("editor.concurrency.table.description")}
         items={providerLimits}
         getRowKey={(item) => item.id}
-        emptyState="当前没有 provider 级别的并发限制。"
+        emptyState={t("editor.concurrency.table.empty")}
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${providerLimits.length} 条限制`}</ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.concurrency.table.limitCount", {
+                count: providerLimits.length,
+              })}
+            </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
               {config.maxConcurrentRequests
-                ? `全局 ${config.maxConcurrentRequests}`
-                : "未设全局阈值"}
+                ? t("editor.concurrency.table.globalLimit", {
+                    value: config.maxConcurrentRequests,
+                  })
+                : t("editor.concurrency.table.noGlobalLimit")}
             </ConfigDomainSummaryBadge>
           </>
         }
         actions={
-          <SettingsAddButton size="sm" label="新建 provider 限制" onClick={openCreateDialog} />
+          <SettingsAddButton
+            size="sm"
+            label={t("editor.concurrency.actions.create")}
+            onClick={openCreateDialog}
+          />
         }
         columns={[
           {
-            header: "Provider",
+            header: t("editor.concurrency.table.columns.provider"),
             cell: (item) => <div className="font-semibold">{item.provider}</div>,
           },
           {
-            header: "Limit",
+            header: t("editor.concurrency.table.columns.limit"),
             cell: (item) => <div>{item.limit || "--"}</div>,
           },
           {
-            header: "操作",
+            header: t("editor.concurrency.table.columns.actions"),
             cell: (item) => (
               <SettingsActionGroup>
                 <SettingsActionButton
                   variant="secondary"
-                  label="编辑"
+                  label={t("editor.concurrency.actions.edit")}
                   onClick={() => openEditDialog(item)}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<Trash2Icon size={14} />}
-                  label="删除"
+                  label={t("editor.concurrency.actions.delete")}
                   onClick={() => onDeleteProviderLimit(item.provider)}
                 />
               </SettingsActionGroup>
@@ -231,11 +259,15 @@ export function RuntimeConcurrencyDomainEditor({
       <ConfigDomainDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        title={editingProvider ? `编辑 ${editingProvider}` : "新建 provider 并发限制"}
-        description="维护 per_provider_limits 里的单条 provider 并发阈值。"
+        title={
+          editingProvider
+            ? t("editor.concurrency.dialog.editTitle", { name: editingProvider })
+            : t("editor.concurrency.dialog.createTitle")
+        }
+        description={t("editor.concurrency.dialog.description")}
         footer={
           <SettingsDialogFooter
-            confirmLabel="保存草稿"
+            confirmLabel={t("editor.concurrency.dialog.save")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -244,9 +276,7 @@ export function RuntimeConcurrencyDomainEditor({
       >
         <div className="space-y-3">
           {dialogError ? (
-            <SettingsNoticeCard tone="warning">
-              {dialogError}
-            </SettingsNoticeCard>
+            <SettingsNoticeCard tone="warning">{dialogError}</SettingsNoticeCard>
           ) : null}
           <div className="grid gap-3 md:grid-cols-2">
             <ConfigFormField label="provider">

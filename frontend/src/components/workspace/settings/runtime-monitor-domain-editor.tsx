@@ -1,4 +1,5 @@
 import { ActivityIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -20,6 +21,8 @@ export function RuntimeMonitorDomainEditor({
   config,
   onChange,
 }: RuntimeMonitorDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
+
   function update(patch: Partial<RuntimeMonitorConfigSummary>) {
     onChange({
       ...config,
@@ -37,18 +40,34 @@ export function RuntimeMonitorDomainEditor({
             </SettingsPanelIcon>
             <div>
               <div className="text-base font-semibold text-[var(--foreground)]">
-                Monitor 配置
+                {t("editor.monitor.title")}
               </div>
               <div className="mt-1 text-sm text-[var(--muted-foreground)]">
-                维护 metrics、tracing、alert、pprof 和 memory 五组监控配置。
+                {t("editor.monitor.description")}
               </div>
             </div>
           </div>
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "monitor 开" : "monitor 关"}</Badge>
-            <Badge>{config.metricsEnabled ? "metrics 开" : "metrics 关"}</Badge>
-            <Badge>{config.tracingEnabled ? "tracing 开" : "tracing 关"}</Badge>
-            <Badge>{config.alertEnabled ? "alert 开" : "alert 关"}</Badge>
+            <Badge>
+              {config.enabled
+                ? t("editor.monitor.badges.enabledOn")
+                : t("editor.monitor.badges.enabledOff")}
+            </Badge>
+            <Badge>
+              {config.metricsEnabled
+                ? t("editor.monitor.badges.metricsOn")
+                : t("editor.monitor.badges.metricsOff")}
+            </Badge>
+            <Badge>
+              {config.tracingEnabled
+                ? t("editor.monitor.badges.tracingOn")
+                : t("editor.monitor.badges.tracingOff")}
+            </Badge>
+            <Badge>
+              {config.alertEnabled
+                ? t("editor.monitor.badges.alertOn")
+                : t("editor.monitor.badges.alertOff")}
+            </Badge>
           </SettingsBadgeList>
         </div>
       </div>
@@ -56,9 +75,11 @@ export function RuntimeMonitorDomainEditor({
       <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[13px] font-semibold text-[var(--foreground)]">总开关</div>
+            <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              {t("editor.monitor.master.title")}
+            </div>
             <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-              控制监控模块是否整体启用。
+              {t("editor.monitor.master.description")}
             </div>
           </div>
           <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -68,7 +89,7 @@ export function RuntimeMonitorDomainEditor({
               checked={config.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
-            启用
+            {t("editor.monitor.enable")}
           </label>
         </div>
       </div>
@@ -77,9 +98,11 @@ export function RuntimeMonitorDomainEditor({
         <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">Metrics</div>
+              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                {t("editor.monitor.metrics.title")}
+              </div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                Prometheus 指标导出与聚合控制。
+                {t("editor.monitor.metrics.description")}
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -91,7 +114,7 @@ export function RuntimeMonitorDomainEditor({
                   update({ metricsEnabled: event.target.checked })
                 }
               />
-              启用
+              {t("editor.monitor.enable")}
             </label>
           </div>
           <div className="grid gap-3">
@@ -105,7 +128,7 @@ export function RuntimeMonitorDomainEditor({
             <SettingsInlineToggleCard
               checked={config.metricsAggregation}
               label="metrics.aggregation"
-              description="是否启用指标聚合。"
+              description={t("editor.monitor.metrics.aggregationDescription")}
               onCheckedChange={(checked) =>
                 update({ metricsAggregation: checked })
               }
@@ -116,9 +139,11 @@ export function RuntimeMonitorDomainEditor({
         <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">Tracing</div>
+              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                {t("editor.monitor.tracing.title")}
+              </div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                采样、导出器和 OTLP 服务地址。
+                {t("editor.monitor.tracing.description")}
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -130,7 +155,7 @@ export function RuntimeMonitorDomainEditor({
                   update({ tracingEnabled: event.target.checked })
                 }
               />
-              启用
+              {t("editor.monitor.enable")}
             </label>
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -167,9 +192,11 @@ export function RuntimeMonitorDomainEditor({
         <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">Alert</div>
+              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                {t("editor.monitor.alert.title")}
+              </div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                告警 webhook、通道、阈值和严重级别。
+                {t("editor.monitor.alert.description")}
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -179,7 +206,7 @@ export function RuntimeMonitorDomainEditor({
                 checked={config.alertEnabled}
                 onChange={(event) => update({ alertEnabled: event.target.checked })}
               />
-              启用
+              {t("editor.monitor.enable")}
             </label>
           </div>
           <div className="grid gap-3">
@@ -194,7 +221,7 @@ export function RuntimeMonitorDomainEditor({
             </ConfigFormField>
             <ConfigFormField
               label="alert.channels"
-              description="支持换行或逗号输入多个通道。"
+              description={t("editor.monitor.alert.channelsDescription")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-24 resize-y font-mono`}
@@ -229,9 +256,11 @@ export function RuntimeMonitorDomainEditor({
           <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">PProf</div>
+                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                  {t("editor.monitor.pprof.title")}
+                </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  pprof 性能分析与 GC 间隔控制。
+                  {t("editor.monitor.pprof.description")}
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -241,7 +270,7 @@ export function RuntimeMonitorDomainEditor({
                   checked={config.pprofEnabled}
                   onChange={(event) => update({ pprofEnabled: event.target.checked })}
                 />
-                启用
+                {t("editor.monitor.enable")}
               </label>
             </div>
             <div className="grid gap-3 xl:grid-cols-2">
@@ -269,9 +298,11 @@ export function RuntimeMonitorDomainEditor({
           <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">Memory</div>
+                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                  {t("editor.monitor.memory.title")}
+                </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  内存采样频率、阈值和泄露判断。
+                  {t("editor.monitor.memory.description")}
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -281,7 +312,7 @@ export function RuntimeMonitorDomainEditor({
                   checked={config.memoryEnabled}
                   onChange={(event) => update({ memoryEnabled: event.target.checked })}
                 />
-                启用
+                {t("editor.monitor.enable")}
               </label>
             </div>
             <div className="grid gap-3 xl:grid-cols-2">

@@ -1,4 +1,5 @@
 import { ActivityIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -19,6 +20,8 @@ export function RuntimeCircuitBreakerDomainEditor({
   config,
   onChange,
 }: RuntimeCircuitBreakerDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
+
   function update(patch: Partial<RuntimeCircuitBreakerConfigSummary>) {
     onChange({
       ...config,
@@ -29,13 +32,15 @@ export function RuntimeCircuitBreakerDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Circuit Breaker 配置</span>}
+        title={
+          <span className="text-base">{t("editor.circuitBreaker.title")}</span>
+        }
         icon={
           <SettingsPanelIcon>
             <ActivityIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="维护失败阈值、失败率、时间窗口和半开试探参数，避免级联故障。"
+        description={t("editor.circuitBreaker.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
@@ -47,8 +52,8 @@ export function RuntimeCircuitBreakerDomainEditor({
       />
 
       <SettingsSubsectionCard
-        title="失败判定"
-        description="决定何时触发熔断。"
+        title={t("editor.circuitBreaker.failure.title")}
+        description={t("editor.circuitBreaker.failure.description")}
       >
         <div className="grid gap-3 xl:grid-cols-3">
           <ConfigFormField label="failure_threshold">
@@ -80,8 +85,8 @@ export function RuntimeCircuitBreakerDomainEditor({
       </SettingsSubsectionCard>
 
       <SettingsSubsectionCard
-        title="时间与恢复"
-        description="控制滑动窗口、熔断持续时间和半开试探次数。"
+        title={t("editor.circuitBreaker.recovery.title")}
+        description={t("editor.circuitBreaker.recovery.description")}
       >
         <div className="grid gap-3 xl:grid-cols-3">
           <ConfigFormField label="window_duration">

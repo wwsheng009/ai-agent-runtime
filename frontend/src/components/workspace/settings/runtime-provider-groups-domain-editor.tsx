@@ -5,7 +5,9 @@ import {
   RouteIcon,
   Trash2Icon,
 } from "lucide-react";
+import { type TFunction } from "i18next";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -88,6 +90,7 @@ export function RuntimeProviderGroupsDomainEditor({
   onSaveGroup,
   providers,
 }: RuntimeProviderGroupsDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState<string | null>(null);
@@ -243,65 +246,95 @@ export function RuntimeProviderGroupsDomainEditor({
   return (
     <>
       <ConfigDomainTable
-        title="Provider Groups"
+        title={t("editor.providerGroups.title")}
         titleIcon={RouteIcon}
-        description="用列表管理 provider group，用弹出表单维护重试、故障切换、截断策略和成员列表。"
+        description={t("editor.providerGroups.description")}
         items={groups}
         getRowKey={(group) => group.name}
-        emptyState="当前还没有 provider group，可直接新建一组路由池配置。"
+        emptyState={t("editor.providerGroups.emptyState")}
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${groups.length} 个分组`}</ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
-              {`${referencedProviderCount} 个 provider 已被引用`}
+              {t("editor.providerGroups.summary.groups", { count: groups.length })}
             </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
-              {`${providers.length} 个 provider 可选`}
+              {t("editor.providerGroups.summary.referencedProviders", {
+                count: referencedProviderCount,
+              })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.providerGroups.summary.availableProviders", {
+                count: providers.length,
+              })}
             </ConfigDomainSummaryBadge>
             {missingReferencedProviderCount > 0 ? (
               <ConfigDomainSummaryBadge>
-                {`${missingReferencedProviderCount} 个引用待修复`}
+                {t("editor.providerGroups.summary.missingReferences", {
+                  count: missingReferencedProviderCount,
+                })}
               </ConfigDomainSummaryBadge>
             ) : null}
           </>
         }
         actions={
-          <SettingsAddButton size="sm" label="新建分组" onClick={openCreateDialog} />
+          <SettingsAddButton
+            size="sm"
+            label={t("editor.providerGroups.actions.create")}
+            onClick={openCreateDialog}
+          />
         }
         columns={[
           {
-            header: "名称",
+            header: t("editor.providerGroups.columns.name"),
             cell: (group) => (
               <div className="min-w-[11rem]">
                 <div className="font-semibold text-[var(--foreground)]">{group.name}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {group.strategy || "未设 strategy"}
+                  {group.strategy || t("editor.providerGroups.row.noStrategy")}
                 </div>
               </div>
             ),
           },
           {
-            header: "重试策略",
+            header: t("editor.providerGroups.columns.retry"),
             cell: (group) => (
               <div className="min-w-[10rem]">
-                <div>{group.maxRetries ? `${group.maxRetries} 次` : "--"}</div>
+                <div>
+                  {group.maxRetries
+                    ? t("editor.providerGroups.row.retryCount", {
+                        value: group.maxRetries,
+                      })
+                    : "--"}
+                </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {group.retryDelay ? `间隔 ${group.retryDelay}` : "未设 retry_delay"}
+                  {group.retryDelay
+                    ? t("editor.providerGroups.row.retryDelay", {
+                        delay: group.retryDelay,
+                      })
+                    : t("editor.providerGroups.row.noRetryDelay")}
                 </div>
               </div>
             ),
           },
           {
-            header: "故障切换 / 截断",
+            header: t("editor.providerGroups.columns.failoverTruncation"),
             cell: (group) => (
               <div className="flex flex-wrap gap-2">
-                <Badge>{group.failoverEnabled ? "故障切换开" : "故障切换关"}</Badge>
-                <Badge>{group.truncationEnabled ? "截断开" : "截断关"}</Badge>
+                <Badge>
+                  {group.failoverEnabled
+                    ? t("editor.providerGroups.badges.failoverOn")
+                    : t("editor.providerGroups.badges.failoverOff")}
+                </Badge>
+                <Badge>
+                  {group.truncationEnabled
+                    ? t("editor.providerGroups.badges.truncationOn")
+                    : t("editor.providerGroups.badges.truncationOff")}
+                </Badge>
               </div>
             ),
           },
           {
-            header: "成员",
+            header: t("editor.providerGroups.columns.members"),
             cell: (group) => {
               const groupMemberSummary = summarizeMembers(group.providers);
               const missingCount = group.providers.filter(
@@ -319,49 +352,79 @@ export function RuntimeProviderGroupsDomainEditor({
                           key={`${group.name}-${provider.name}-${provider.role}`}
                           member={provider}
                           provider={providerLookup.get(provider.name)}
+                          t={t}
                         />
                       ))
                     ) : (
-                      <Badge>无成员</Badge>
+                      <Badge>{t("editor.providerGroups.row.noMembers")}</Badge>
                     )}
                     {group.providers.length > 4 ? (
                       <Badge>{`+${group.providers.length - 4}`}</Badge>
                     ) : null}
                   </div>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    <Badge>{`${groupMemberSummary.enabledCount}/${groupMemberSummary.namedCount} 启用`}</Badge>
+                    <Badge>
+                      {t("editor.providerGroups.row.enabledRatio", {
+                        enabled: String(groupMemberSummary.enabledCount),
+                        total: String(groupMemberSummary.namedCount),
+                      })}
+                    </Badge>
                     {isGroupPrimaryStandby ? (
                       <>
-                        <Badge>{`${groupMemberSummary.primaryCount} primary`}</Badge>
-                        <Badge>{`${groupMemberSummary.standbyCount} standby`}</Badge>
+                        <Badge>
+                          {t("editor.providerGroups.row.primaryCount", {
+                            count: groupMemberSummary.primaryCount,
+                          })}
+                        </Badge>
+                        <Badge>
+                          {t("editor.providerGroups.row.standbyCount", {
+                            count: groupMemberSummary.standbyCount,
+                          })}
+                        </Badge>
                         {groupMemberSummary.unsetRoleCount > 0 ? (
-                          <Badge>{`${groupMemberSummary.unsetRoleCount} 未设 role`}</Badge>
+                          <Badge>
+                            {t("editor.providerGroups.row.unsetRoleCount", {
+                              count: groupMemberSummary.unsetRoleCount,
+                            })}
+                          </Badge>
                         ) : null}
                       </>
                     ) : null}
                     {group.strategy === "weighted" ? (
-                      <Badge>{`总权重 ${groupMemberSummary.totalWeightText}`}</Badge>
+                      <Badge>
+                        {t("editor.providerGroups.row.totalWeight", {
+                          weight: groupMemberSummary.totalWeightText,
+                        })}
+                      </Badge>
                     ) : null}
                   </div>
                   <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                     {missingCount > 0
-                      ? `${missingCount} 个成员未在当前 provider 列表中找到`
+                      ? t("editor.providerGroups.row.membersMissing", {
+                          count: missingCount,
+                        })
                       : isGroupPrimaryStandby && groupMemberSummary.primaryCount === 0
-                        ? "当前分组没有 primary 成员"
+                        ? t("editor.providerGroups.row.noPrimary")
                         : isGroupPrimaryStandby && groupMemberSummary.primaryCount > 1
-                          ? `当前分组有 ${groupMemberSummary.primaryCount} 个 primary`
-                      : `${group.providerCount} 个成员，均已关联到当前 provider 列表`}
+                          ? t("editor.providerGroups.row.multiplePrimary", {
+                              count: groupMemberSummary.primaryCount,
+                            })
+                          : t("editor.providerGroups.row.membersLinked", {
+                              count: group.providerCount,
+                            })}
                   </div>
                 </div>
               );
             },
           },
           {
-            header: "操作",
+            header: t("editor.providerGroups.columns.actions"),
             cell: (group) => (
               <SettingsActionGroup compact>
                 <SettingsIconActionButton
-                  label={`复制 ${group.name} 配置`}
+                  label={t("editor.providerGroups.actions.copyConfig", {
+                    name: group.name,
+                  })}
                   onClick={() => void handleCopyGroup(group)}
                 >
                   {copiedGroupName === group.name ? (
@@ -371,13 +434,17 @@ export function RuntimeProviderGroupsDomainEditor({
                   )}
                 </SettingsIconActionButton>
                 <SettingsIconActionButton
-                  label={`编辑 ${group.name}`}
+                  label={t("editor.providerGroups.actions.edit", {
+                    name: group.name,
+                  })}
                   onClick={() => openEditDialog(group)}
                 >
                   <PencilIcon size={13} />
                 </SettingsIconActionButton>
                 <SettingsIconActionButton
-                  label={`删除 ${group.name}`}
+                  label={t("editor.providerGroups.actions.delete", {
+                    name: group.name,
+                  })}
                   onClick={() => onDeleteGroup(group.name)}
                 >
                   <Trash2Icon size={13} />
@@ -393,13 +460,19 @@ export function RuntimeProviderGroupsDomainEditor({
       <ConfigDomainDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        title={editingGroupName ? `编辑 Provider Group: ${editingGroupName}` : "新建 Provider Group"}
-        description="基础路由策略、故障切换、截断参数和组成员都在这里维护，未纳入专用字段的扩展配置可通过 JSON 保留。"
+        title={
+          editingGroupName
+            ? t("editor.providerGroups.dialog.editTitle", {
+                name: editingGroupName,
+              })
+            : t("editor.providerGroups.dialog.createTitle")
+        }
+        description={t("editor.providerGroups.dialog.description")}
         footer={
           <SettingsDialogFooter
             buttonSize="sm"
-            note="保存后建议回到预览区检查 `provider_groups` diff。"
-            confirmLabel="保存分组"
+            note={t("editor.providerGroups.dialog.saveNote")}
+            confirmLabel={t("editor.providerGroups.actions.save")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -415,21 +488,30 @@ export function RuntimeProviderGroupsDomainEditor({
           {draftValidationIssues.length > 0 ? (
             <SettingsNoticeCard tone="warning-soft">
               <div className="space-y-1">
-                <div className="font-medium">当前草稿还有待修正的字段：</div>
+                <div className="font-medium">
+                  {t("editor.providerGroups.validation.pendingTitle")}
+                </div>
                 {draftValidationIssues.slice(0, 4).map((issue) => (
                   <div key={`${issue.field}-${issue.memberIndex ?? "root"}-${issue.message}`}>
                     {issue.message}
                   </div>
                 ))}
                 {draftValidationIssues.length > 4 ? (
-                  <div>{`还有 ${draftValidationIssues.length - 4} 条未展示。`}</div>
+                  <div>
+                    {t("editor.providerGroups.validation.moreHidden", {
+                      count: draftValidationIssues.length - 4,
+                    })}
+                  </div>
                 ) : null}
               </div>
             </SettingsNoticeCard>
           ) : null}
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="名称" description="provider_groups 中的唯一标识，用于路由 group 引用。">
+            <ConfigFormField
+              label={t("editor.providerGroups.fields.name")}
+              description={t("editor.providerGroups.fields.nameHelp")}
+            >
               <input
                 className={editorControlClassName}
                 value={draft.name}
@@ -439,9 +521,12 @@ export function RuntimeProviderGroupsDomainEditor({
                 placeholder="openai_group"
               />
             </ConfigFormField>
-            <ConfigFormField label="strategy" description="常见值包括 round_robin、health、random 等。">
+            <ConfigFormField
+              label="strategy"
+              description={t("editor.providerGroups.fields.strategyHelp")}
+            >
               <Select
-                ariaLabel="选择 Provider Group strategy"
+                ariaLabel={t("editor.providerGroups.fields.strategyAria")}
                 value={draft.strategy}
                 onChange={(value) =>
                   setDraft((current) => ({ ...current, strategy: value }))
@@ -449,8 +534,9 @@ export function RuntimeProviderGroupsDomainEditor({
                 options={buildSelectOptionsWithCurrent(
                   providerGroupStrategyOptions,
                   draft.strategy,
+                  t,
                 )}
-                placeholder="选择 strategy"
+                placeholder={t("editor.providerGroups.fields.strategyPlaceholder")}
                 className="w-full"
                 triggerClassName={editorControlClassName}
                 optionClassName="text-sm"
@@ -489,9 +575,11 @@ export function RuntimeProviderGroupsDomainEditor({
             <div className="space-y-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[13px] font-semibold text-[var(--foreground)]">故障切换</div>
+                  <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                    {t("editor.providerGroups.sections.failover")}
+                  </div>
                   <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                    配置 primary/standby 之类的切换策略。
+                    {t("editor.providerGroups.sections.failoverHelp")}
                   </div>
                 </div>
                 <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -506,14 +594,14 @@ export function RuntimeProviderGroupsDomainEditor({
                       }))
                     }
                   />
-                  启用
+                  {t("editor.providerGroups.toggle.enabled")}
                 </label>
               </div>
 
               <div className="grid gap-3">
                 <ConfigFormField label="failover.mode">
                   <Select
-                    ariaLabel="选择 failover.mode"
+                    ariaLabel={t("editor.providerGroups.fields.failoverModeAria")}
                     value={draft.failoverMode}
                     onChange={(value) =>
                       setDraft((current) => ({
@@ -524,8 +612,9 @@ export function RuntimeProviderGroupsDomainEditor({
                     options={buildSelectOptionsWithCurrent(
                       providerGroupFailoverModeOptions,
                       draft.failoverMode,
+                      t,
                     )}
-                    placeholder="选择 failover.mode"
+                    placeholder={t("editor.providerGroups.fields.failoverModePlaceholder")}
                     className="w-full"
                     triggerClassName={editorControlClassName}
                     optionClassName="text-sm"
@@ -533,7 +622,7 @@ export function RuntimeProviderGroupsDomainEditor({
                 </ConfigFormField>
                 <ConfigFormField label="failover.scope">
                   <Select
-                    ariaLabel="选择 failover.scope"
+                    ariaLabel={t("editor.providerGroups.fields.failoverScopeAria")}
                     value={draft.failoverScope}
                     onChange={(value) =>
                       setDraft((current) => ({
@@ -544,8 +633,9 @@ export function RuntimeProviderGroupsDomainEditor({
                     options={buildSelectOptionsWithCurrent(
                       providerGroupFailoverScopeOptions,
                       draft.failoverScope,
+                      t,
                     )}
-                    placeholder="选择 failover.scope"
+                    placeholder={t("editor.providerGroups.fields.failoverScopePlaceholder")}
                     className="w-full"
                     triggerClassName={editorControlClassName}
                     optionClassName="text-sm"
@@ -557,9 +647,11 @@ export function RuntimeProviderGroupsDomainEditor({
             <div className="space-y-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[13px] font-semibold text-[var(--foreground)]">截断重试</div>
+                  <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                    {t("editor.providerGroups.sections.truncation")}
+                  </div>
                   <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                    处理超长上下文时的回退策略。
+                    {t("editor.providerGroups.sections.truncationHelp")}
                   </div>
                 </div>
                 <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -574,7 +666,7 @@ export function RuntimeProviderGroupsDomainEditor({
                       }))
                     }
                   />
-                  启用
+                  {t("editor.providerGroups.toggle.enabled")}
                 </label>
               </div>
 
@@ -601,7 +693,7 @@ export function RuntimeProviderGroupsDomainEditor({
                 <div className="grid gap-3 xl:grid-cols-2">
                   <ConfigFormField label="truncation.strategy">
                     <Select
-                      ariaLabel="选择 truncation.strategy"
+                      ariaLabel={t("editor.providerGroups.fields.truncationStrategyAria")}
                       value={draft.truncationStrategy}
                       onChange={(value) =>
                         setDraft((current) => ({
@@ -612,8 +704,11 @@ export function RuntimeProviderGroupsDomainEditor({
                       options={buildSelectOptionsWithCurrent(
                         providerGroupTruncationStrategyOptions,
                         draft.truncationStrategy,
+                        t,
                       )}
-                      placeholder="选择 truncation.strategy"
+                      placeholder={t(
+                        "editor.providerGroups.fields.truncationStrategyPlaceholder",
+                      )}
                       className="w-full"
                       triggerClassName={editorControlClassName}
                       optionClassName="text-sm"
@@ -646,9 +741,11 @@ export function RuntimeProviderGroupsDomainEditor({
           <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">成员列表</div>
+                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                  {t("editor.providerGroups.sections.members")}
+                </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  直接引用当前 provider 列表；选择后会显示协议、默认模型和启用状态。
+                  {t("editor.providerGroups.sections.membersHelp")}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -659,7 +756,7 @@ export function RuntimeProviderGroupsDomainEditor({
                     onClick={autofillPrimaryStandbyRoles}
                     disabled={missingRoleCount === 0}
                   >
-                    补齐角色
+                    {t("editor.providerGroups.actions.fillRoles")}
                   </Button>
                 ) : null}
                 {draft.strategy.trim() === "weighted" ? (
@@ -669,13 +766,13 @@ export function RuntimeProviderGroupsDomainEditor({
                     onClick={fillMissingMemberWeights}
                     disabled={weightedMissingWeightCount === 0}
                   >
-                    补齐权重
+                    {t("editor.providerGroups.actions.fillWeights")}
                   </Button>
                 ) : null}
                 <SettingsAddButton
                   variant="secondary"
                   size="sm"
-                  label="添加成员"
+                  label={t("editor.providerGroups.actions.addMember")}
                   onClick={() =>
                     setDraft((current) => ({
                       ...current,
@@ -690,26 +787,55 @@ export function RuntimeProviderGroupsDomainEditor({
             </div>
 
             <SettingsNoticeCard tone="muted" className="mt-3">
-              当前 provider 池共 {providers.length} 个可选项。
-              如果 group 中引用了已经删除的 provider，这里会继续显示，但标记为“未在当前列表中找到”。
+              {t("editor.providerGroups.members.poolNotice", {
+                count: providers.length,
+              })}
             </SettingsNoticeCard>
             <div className="mt-3 flex flex-wrap gap-1.5">
-              <Badge>{`${memberSummary.namedCount} 个已选成员`}</Badge>
-              <Badge>{`${memberSummary.enabledCount} 个启用`}</Badge>
+              <Badge>
+                {t("editor.providerGroups.members.selectedCount", {
+                  count: memberSummary.namedCount,
+                })}
+              </Badge>
+              <Badge>
+                {t("editor.providerGroups.members.enabledCount", {
+                  count: memberSummary.enabledCount,
+                })}
+              </Badge>
               {isPrimaryStandbyMode ? (
                 <>
-                  <Badge>{`${memberSummary.primaryCount} 个 primary`}</Badge>
-                  <Badge>{`${memberSummary.standbyCount} 个 standby`}</Badge>
+                  <Badge>
+                    {t("editor.providerGroups.members.primaryCount", {
+                      count: memberSummary.primaryCount,
+                    })}
+                  </Badge>
+                  <Badge>
+                    {t("editor.providerGroups.members.standbyCount", {
+                      count: memberSummary.standbyCount,
+                    })}
+                  </Badge>
                   {memberSummary.unsetRoleCount > 0 ? (
-                    <Badge>{`${memberSummary.unsetRoleCount} 个未设 role`}</Badge>
+                    <Badge>
+                      {t("editor.providerGroups.members.unsetRoleCount", {
+                        count: memberSummary.unsetRoleCount,
+                      })}
+                    </Badge>
                   ) : null}
                 </>
               ) : null}
               {draft.strategy.trim() === "weighted" ? (
                 <>
-                  <Badge>{`总权重 ${memberSummary.totalWeightText}`}</Badge>
+                  <Badge>
+                    {t("editor.providerGroups.row.totalWeight", {
+                      weight: memberSummary.totalWeightText,
+                    })}
+                  </Badge>
                   {memberSummary.numericWeightCount > 0 ? (
-                    <Badge>{`${memberSummary.numericWeightCount} 个数值权重`}</Badge>
+                    <Badge>
+                      {t("editor.providerGroups.members.numericWeightCount", {
+                        count: memberSummary.numericWeightCount,
+                      })}
+                    </Badge>
                   ) : null}
                 </>
               ) : null}
@@ -727,21 +853,27 @@ export function RuntimeProviderGroupsDomainEditor({
                 className="mt-3"
               >
                 {memberSummary.namedCount === 0
-                  ? "当前 failover.mode 为 `primary_standby`，请先添加成员。"
+                  ? t("editor.providerGroups.members.primaryStandby.needMembers")
                   : memberSummary.primaryCount === 0
-                    ? "当前 failover.mode 为 `primary_standby`，但还没有 primary 成员。"
+                    ? t("editor.providerGroups.members.primaryStandby.needPrimary")
                     : memberSummary.primaryCount > 1
-                      ? `当前 failover.mode 为 \`primary_standby\`，已设置 ${memberSummary.primaryCount} 个 primary，建议收敛为 1 个。`
+                      ? t("editor.providerGroups.members.primaryStandby.tooManyPrimary", {
+                          count: memberSummary.primaryCount,
+                        })
                       : missingRoleCount > 0
-                        ? `当前 failover.mode 为 \`primary_standby\`，还有 ${missingRoleCount} 个成员未设置 role，可用“补齐角色”快速补全。`
-                        : "当前 failover.mode 为 `primary_standby`，成员角色已经补齐。"}
+                        ? t("editor.providerGroups.members.primaryStandby.missingRoles", {
+                            count: missingRoleCount,
+                          })
+                        : t("editor.providerGroups.members.primaryStandby.ready")}
               </SettingsNoticeCard>
             ) : null}
             {draft.strategy.trim() === "weighted" ? (
               <SettingsNoticeCard tone="warning-soft" className="mt-3">
                 {weightedMissingWeightCount > 0
-                  ? `当前 strategy 为 \`weighted\`，还有 ${weightedMissingWeightCount} 个成员缺少 weight，可用“补齐权重”快速填成 100。`
-                  : "当前 strategy 为 `weighted`，所有成员都已经填写了 weight。"}
+                  ? t("editor.providerGroups.members.weighted.missingWeights", {
+                      count: weightedMissingWeightCount,
+                    })
+                  : t("editor.providerGroups.members.weighted.ready")}
               </SettingsNoticeCard>
             ) : null}
 
@@ -762,7 +894,7 @@ export function RuntimeProviderGroupsDomainEditor({
                       Enabled
                     </th>
                     <th className="px-3 py-2 text-right app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
-                      操作
+                      {t("editor.providerGroups.columns.actions")}
                     </th>
                   </tr>
                 </thead>
@@ -774,11 +906,22 @@ export function RuntimeProviderGroupsDomainEditor({
                     >
                       <td className="px-3 py-2.5">
                         <Select
-                          ariaLabel={`选择 Provider Group 成员 ${index + 1} 的 provider`}
+                          ariaLabel={t("editor.providerGroups.members.providerAria", {
+                            index: String(index + 1),
+                          })}
                           value={member.name}
                           onChange={(value) => updateDraftMember(index, { name: value })}
-                          options={buildMemberProviderOptions(providers, draft.members, index)}
-                          placeholder={providers.length > 0 ? "选择 provider" : "暂无 provider"}
+                          options={buildMemberProviderOptions(
+                            providers,
+                            draft.members,
+                            index,
+                            t,
+                          )}
+                          placeholder={
+                            providers.length > 0
+                              ? t("editor.providerGroups.members.selectProvider")
+                              : t("editor.providerGroups.members.noProvider")
+                          }
                           className="w-full"
                           triggerClassName={`${getDraftFieldClassName(
                             findDraftIssue(
@@ -799,20 +942,27 @@ export function RuntimeProviderGroupsDomainEditor({
                               : "text-[var(--muted-foreground)]"
                           }`}
                         >
-                          {describeMemberProviderHint(member.name, providerLookup.get(member.name))}
+                          {describeMemberProviderHint(
+                            member.name,
+                            providerLookup.get(member.name),
+                            t,
+                          )}
                         </div>
                       </td>
                       <td className="px-3 py-2.5">
                         <Select
-                          ariaLabel={`选择成员 ${index + 1} 的 role`}
+                          ariaLabel={t("editor.providerGroups.members.roleAria", {
+                            index: String(index + 1),
+                          })}
                           value={member.role}
                           onChange={(value) => updateDraftMember(index, { role: value })}
                           options={buildSelectOptionsWithCurrent(
                             providerGroupMemberRoleOptions,
                             member.role,
+                            t,
                             { includeEmpty: true },
                           )}
-                          placeholder="选择 role"
+                          placeholder={t("editor.providerGroups.members.selectRole")}
                           className="w-full"
                           triggerClassName={`${editorControlClassName} min-w-[10rem]`}
                           optionClassName="text-sm"
@@ -852,12 +1002,14 @@ export function RuntimeProviderGroupsDomainEditor({
                               updateDraftMember(index, { enabled: event.target.checked })
                             }
                           />
-                          启用
+                          {t("editor.providerGroups.toggle.enabled")}
                         </label>
                       </td>
                       <td className="px-3 py-2.5 text-right">
                         <SettingsIconActionButton
-                          label={`删除成员 ${member.name || index + 1}`}
+                          label={t("editor.providerGroups.actions.deleteMember", {
+                            name: member.name || String(index + 1),
+                          })}
                           onClick={() =>
                             setDraft((current) => ({
                               ...current,
@@ -878,14 +1030,14 @@ export function RuntimeProviderGroupsDomainEditor({
 
             {draft.members.length === 0 ? (
               <SettingsEmptyState variant="dashed" className="mt-3 py-4">
-                这个分组还没有成员，保存前至少需要添加一个 provider。
+                {t("editor.providerGroups.members.empty")}
               </SettingsEmptyState>
             ) : null}
           </div>
 
           <ConfigFormField
-            label="扩展字段 JSON"
-            description="保留 health_check 等未纳入专用表单的 root 级字段。"
+            label={t("editor.providerGroups.fields.extraJson")}
+            description={t("editor.providerGroups.fields.extraJsonHelp")}
           >
             <textarea
               className={`${editorControlClassName} min-h-40 resize-y font-mono`}
@@ -904,9 +1056,11 @@ export function RuntimeProviderGroupsDomainEditor({
 function ProviderReferenceBadge({
   member,
   provider,
+  t,
 }: {
   member: RuntimeProviderGroupSummary["providers"][number];
   provider?: RuntimeProviderSummary;
+  t: TFunction<"runtimeConfig">;
 }) {
   const label = [member.name, provider?.protocol || "", member.role || ""]
     .filter(Boolean)
@@ -914,14 +1068,16 @@ function ProviderReferenceBadge({
 
   return (
     <span
-      title={describeMemberProviderHint(member.name, provider)}
+      title={describeMemberProviderHint(member.name, provider, t)}
       className={`inline-flex max-w-full items-center rounded-[0.6rem] border px-2 py-0.5 text-[11px] ${
         provider
           ? "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)]"
           : "border-[#f59e7d]/30 bg-[#f59e7d]/10 text-[#f5c7b8]"
       }`}
     >
-      <span className="truncate">{label || member.name || "未命名成员"}</span>
+      <span className="truncate">
+        {label || member.name || t("editor.providerGroups.row.unnamedMember")}
+      </span>
     </span>
   );
 }
@@ -962,6 +1118,7 @@ function buildMemberProviderOptions(
   providers: RuntimeProviderSummary[],
   members: ProviderGroupMemberDraftInput[],
   currentIndex: number,
+  t: TFunction<"runtimeConfig">,
 ) {
   const usedNamesByOthers = new Set(
     members
@@ -988,7 +1145,7 @@ function buildMemberProviderOptions(
     ...options,
     ...missingNames.map((name) => ({
       value: name,
-      label: `${name} · 当前 group 已引用，但 provider 列表中不存在`,
+      label: t("editor.providerGroups.members.missingProviderOption", { name }),
       disabled: usedNamesByOthers.has(name),
     })),
   ];
@@ -997,6 +1154,7 @@ function buildMemberProviderOptions(
 function buildSelectOptionsWithCurrent(
   options: ReadonlyArray<{ label: string; value: string }>,
   currentValue: string,
+  t: TFunction<"runtimeConfig">,
   config?: {
     includeEmpty?: boolean;
   },
@@ -1010,7 +1168,7 @@ function buildSelectOptionsWithCurrent(
   ) {
     baseOptions.unshift({
       value: "",
-      label: "未设置",
+      label: t("editor.providerGroups.select.unset"),
     });
   }
 
@@ -1021,7 +1179,9 @@ function buildSelectOptionsWithCurrent(
     return [
       {
         value: normalizedCurrentValue,
-        label: `${normalizedCurrentValue} · 当前值`,
+        label: t("editor.providerGroups.select.currentValue", {
+          value: normalizedCurrentValue,
+        }),
       },
       ...baseOptions,
     ];
@@ -1097,23 +1257,26 @@ function summarizeMembers(
 
 function describeMemberProviderHint(
   memberName: string,
-  provider?: RuntimeProviderSummary,
+  provider: RuntimeProviderSummary | undefined,
+  t: TFunction<"runtimeConfig">,
 ) {
   if (!memberName.trim()) {
-    return "从当前 provider 列表选择一个成员。";
+    return t("editor.providerGroups.hint.selectMember");
   }
   if (!provider) {
-    return "该名称未在当前 provider 列表中找到，请检查 provider 配置或重新选择。";
+    return t("editor.providerGroups.hint.notFound");
   }
 
   const parts = [
-    provider.enabled ? "provider 已启用" : "provider 已禁用",
+    provider.enabled
+      ? t("editor.providerGroups.hint.providerEnabled")
+      : t("editor.providerGroups.hint.providerDisabled"),
     provider.protocol,
     provider.defaultModel,
     provider.baseUrl,
   ].filter(Boolean);
 
-  return parts.join(" / ") || "已关联到当前 provider。";
+  return parts.join(" / ") || t("editor.providerGroups.hint.linked");
 }
 
 function createProviderGroupDraftInput(
