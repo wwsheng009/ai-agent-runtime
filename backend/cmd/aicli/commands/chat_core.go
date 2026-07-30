@@ -170,8 +170,7 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 		selection, exposureDetails = stableSharedFunctionSelectionForRequest(session, prompt)
 		exposureReport = buildFunctionExposureReport(catalog, prompt, selection, exposureDetails)
 		if session.SkillsDebug {
-			beginDirectInteractiveOutput(session)
-			fmt.Printf("\n%s\n", formatSkillExposureDebug(exposureReport))
+			printfDirectInteractiveOutput(session, "\n%s\n", formatSkillExposureDebug(exposureReport))
 		}
 	}
 

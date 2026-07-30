@@ -1092,8 +1092,7 @@ func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx conte
 		defer suspension.Restore()
 	}
 	if notice != "" {
-		beginDirectInteractiveOutput(session)
-		ui.PrintWarning("%s", notice)
+		printfDirectInteractiveOutput(session, "%s\n", notice)
 	}
 	readPrompt := prompt
 	renderedOnSurface := showRuntimeComposerPrompt(session, prompt)

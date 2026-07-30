@@ -2114,6 +2114,243 @@ func TestFixedBottomSurface_WriteOutputAfterClearPromptFlushesPendingForPromptRe
 	}
 }
 
+// SettleOutputDebt is the history/resume path: flush ClearPrompt shrink debt
+// BEFORE any transcript content WriteOutput, so layout compensation is not
+// billed to already-final messages. The blank-row flag tracks real geometry
+// after the flushes (false here: no prior trailing blank or absorb debt).
+func TestFixedBottomSurface_SettleOutputDebtFlushesPendingWithoutContent(t *testing.T) {
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		surface.BeginOutput()
+	})
+	if surface.pendingScrollDownRows != 3 {
+		t.Fatalf("expected deferred shrink compensation after clear, got %d", surface.pendingScrollDownRows)
+	}
+
+	settled := captureUIStdout(t, func() {
+		surface.SettleOutputDebt()
+	})
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("SettleOutputDebt should flush pending, got %d", surface.pendingScrollDownRows)
+	}
+	if surface.outputCursorOnBlankRow {
+		t.Fatal("debt-less settle with no prior blank should leave blank-row flag false")
+	}
+	if !strings.Contains(settled, terminalScrollDownSequence(3)) {
+		t.Fatalf("expected settle to emit deferred scroll-down, got %q", settled)
+	}
+	// No transcript payload mixed into the settle sequence.
+	if strings.Contains(settled, "history") || strings.Contains(settled, "assistant") {
+		t.Fatalf("settle must not write transcript content, got %q", settled)
+	}
+
+	// Subsequent content write must not re-emit the already-flushed scroll-down.
+	content := captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "history line one\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
+	if strings.Contains(content, terminalScrollDownSequence(3)) {
+		t.Fatalf("content write must not re-flush settled debt, got %q", content)
+	}
+	if !strings.Contains(content, "history line one") {
+		t.Fatalf("expected history content, got %q", content)
+	}
+}
+
+// When settle pays an absorb debt, the region bottom becomes blank again. Soft
+// rewrites and later band growth must see that blank — not a forced-false flag
+// left over from the pre-debt state.
+func TestFixedBottomSurface_SettleOutputDebtRestoresBlankAfterAbsorbDebt(t *testing.T) {
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed tail row\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		if !surface.SetActiveBand([]string{"• assistant", "streaming"}) {
+			t.Fatal("expected active band")
+		}
+	})
+	if surface.outputScrollDebtRows != 1 {
+		t.Fatalf("expected one absorbed row before settle, got %d", surface.outputScrollDebtRows)
+	}
+	if surface.outputCursorOnBlankRow {
+		t.Fatal("band growth should have consumed the trailing blank marker")
+	}
+
+	settled := captureUIStdout(t, func() {
+		surface.SettleOutputDebt()
+	})
+	if surface.outputScrollDebtRows != 0 {
+		t.Fatalf("settle should pay absorb debt, got %d", surface.outputScrollDebtRows)
+	}
+	if !surface.outputCursorOnBlankRow {
+		t.Fatal("paying absorb debt must leave the region bottom blank")
+	}
+	bottom := outputBottomRowForHeight(height, surface.effectiveBottomRowsLocked(height))
+	repay := terminalMoveToSequence(bottom, 1) + "\n"
+	if !strings.Contains(settled, repay) {
+		t.Fatalf("expected settle to scroll the absorbed row at %d, got %q", bottom, settled)
+	}
+}
+
+// After a content write parks the cursor on a blank row, ClearPrompt defers a
+// shrink. Settle flushes that shrink and must leave the blank flag true so soft
+// rewrites still compute prevStart correctly. (ClearActiveBand flushes pending
+// eagerly, so this uses ClearPrompt — the history/resume path.)
+func TestFixedBottomSurface_SettleOutputDebtPreservesTrailingBlank(t *testing.T) {
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed tail row\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		// Clear while the trailing blank is still parked. A ShowPrompt after the
+		// write would re-absorb that blank into reserve growth and leave the flag
+		// false, which is a different path (absorb debt) already covered above.
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected clear to defer shrink while blank is parked")
+		}
+	})
+	if !surface.outputCursorOnBlankRow {
+		t.Fatal("expected blank-row flag true before debt-less settle: ClearPrompt must not clear a parked blank")
+	}
+	if surface.pendingScrollDownRows < 1 {
+		t.Fatalf("expected deferred shrink after ClearPrompt, got %d", surface.pendingScrollDownRows)
+	}
+
+	captureUIStdout(t, func() {
+		surface.SettleOutputDebt()
+	})
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("settle should flush pending shrink, got %d", surface.pendingScrollDownRows)
+	}
+	if !surface.outputCursorOnBlankRow {
+		t.Fatal("debt-less settle must preserve the trailing blank flag")
+	}
+}
+
+// Absorbing the trailing blank output row is display-only: it parks committed
+// content on the row every writer targets. The debt must be scrolled — never
+// overwritten — before the next byte reaches the output region.
+func TestFixedBottomSurface_AbsorbedBlankRowIsScrolledNotOverwritten(t *testing.T) {
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed tail row\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
+	if !surface.outputCursorOnBlankRow {
+		t.Fatal("trailing newline should park the cursor on a blank row")
+	}
+
+	captureUIStdout(t, func() {
+		if !surface.SetActiveBand([]string{"• assistant", "streaming"}) {
+			t.Fatal("expected active band")
+		}
+	})
+	if surface.outputScrollDebtRows != 1 {
+		t.Fatalf("band growth should record one absorbed row, got %d", surface.outputScrollDebtRows)
+	}
+
+	next := captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "next committed row\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
+	if surface.outputScrollDebtRows != 0 {
+		t.Fatalf("write should settle the absorb debt, got %d", surface.outputScrollDebtRows)
+	}
+	bottom := outputBottomRowForHeight(height, surface.effectiveBottomRowsLocked(height))
+	repay := terminalMoveToSequence(bottom, 1) + "\n"
+	repayAt := strings.Index(next, repay)
+	if repayAt < 0 {
+		t.Fatalf("expected absorb debt scroll at row %d before content, got %q", bottom, next)
+	}
+	if contentAt := strings.Index(next, "next committed row"); contentAt >= 0 && contentAt < repayAt {
+		t.Fatalf("content was written before the debt scroll, got %q", next)
+	}
+}
+
+// A deferred shrink moves the transcript (and its trailing blank row) down
+// inside the output region, so the blank row stays absorbable. Clearing the
+// marker on shrink made the following reserve growth scroll that blank up
+// again, leaving a second empty row between transcript and prompt.
+func TestFixedBottomSurface_ShrinkKeepsTrailingBlankAbsorbable(t *testing.T) {
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed tail row\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		// Submitting input clears the prompt rows: a shrink with a deferred
+		// scroll-down, while the transcript trailing blank stays in the region.
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		if !surface.SetActiveBand([]string{"• assistant", "streaming"}) {
+			t.Fatal("expected active band")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "streamed commit row\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		// Turn end: the band is released and its deferred scroll-down is emitted
+		// inside ClearActiveBand, so nothing is pending afterwards.
+		if !surface.ClearActiveBand() {
+			t.Fatal("expected band clear")
+		}
+	})
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("band release should flush its own compensation, got %d", surface.pendingScrollDownRows)
+	}
+	if !surface.outputCursorOnBlankRow {
+		t.Fatal("shrink must keep the transcript trailing blank row absorbable")
+	}
+
+	// Restoring the prompt grows the reserve again. It must absorb that blank
+	// row instead of scrolling it up into a second empty row above the prompt.
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt restore")
+		}
+	})
+	if surface.outputScrollDebtRows != 1 {
+		t.Fatalf("prompt restore should absorb the trailing blank once, got debt %d", surface.outputScrollDebtRows)
+	}
+}
+
 func TestFixedBottomSurface_BeginOutputRawWriteLeavesPendingAndPromptRestoreCancelsGrowth(t *testing.T) {
 	// Documents the clip failure mode: ClearPrompt + BeginOutput + raw write
 	// leaves pendingScrollDown set, so ShowPrompt cancels growth and the prompt
@@ -2213,6 +2450,52 @@ func TestFixedBottomSurface_TerminalSizeChangeDropsPendingScrollCompensation(t *
 	}
 	if surface.pendingScrollDownRows != 0 {
 		t.Fatalf("expected pending compensation to reset on resize, got %d", surface.pendingScrollDownRows)
+	}
+}
+
+// The absorbed-row debt is absolute geometry too, so a resize must drop it for
+// the same reason it drops a deferred shrink: paying it afterwards would scroll
+// for a blank row the terminal already reflowed away.
+func TestFixedBottomSurface_TerminalSizeChangeDropsAbsorbedRowDebt(t *testing.T) {
+	const height = 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "committed line\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		if !surface.SetActiveBand([]string{"• assistant", "streaming"}) {
+			t.Fatal("expected active band")
+		}
+	})
+	if surface.outputScrollDebtRows != 1 {
+		t.Fatalf("expected one absorbed row before resize, got %d", surface.outputScrollDebtRows)
+	}
+	// Guard against a vacuous assertion: a deferred shrink would block the
+	// repayment on its own, so the debt must be the only outstanding item.
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("expected no deferred shrink before resize, got %d", surface.pendingScrollDownRows)
+	}
+	repay := terminalMoveToSequence(outputBottomRowForHeight(height, surface.effectiveBottomRowsLocked(height)), 1) + "\n"
+
+	// A layout applied for a different terminal size invalidates absolute rows.
+	surface.lastHeight = 40
+	next := captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "after resize\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
+	if strings.Contains(next, repay) {
+		t.Fatalf("expected resize to drop the stale absorb debt, got %q", next)
+	}
+	if surface.outputScrollDebtRows != 0 {
+		t.Fatalf("expected absorb debt to reset on resize, got %d", surface.outputScrollDebtRows)
 	}
 }
 

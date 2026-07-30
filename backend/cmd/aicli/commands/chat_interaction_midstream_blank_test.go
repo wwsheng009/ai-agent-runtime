@@ -14,40 +14,13 @@ import (
 // maxBlankRunAboveBottom returns the largest run of consecutive blank rows in
 // [1, bottomExclusive). bottomExclusive is typically the first bottom-pane row.
 func maxBlankRunAboveBottom(screen *screenVT, bottomExclusive int) (maxRun int, startRow int) {
-	run := 0
-	runStart := 0
-	seenContent := false
-	for row := 1; row < bottomExclusive; row++ {
-		if strings.TrimSpace(screen.line(row)) == "" {
-			if !seenContent {
-				continue
-			}
-			if run == 0 {
-				runStart = row
-			}
-			run++
-			if run > maxRun {
-				maxRun = run
-				startRow = runStart
-			}
-			continue
-		}
-		seenContent = true
-		run = 0
-	}
-	return maxRun, startRow
+	return screen.MaxBlankRun(bottomExclusive)
 }
 
 // gapBetweenLastScrollbackAndBand measures blank rows between the last
 // non-empty row above the band and the first non-empty band row.
 func gapBetweenLastScrollbackAndBand(screen *screenVT, bandStart, bandEnd int) int {
-	lastScrollback := 0
-	for row := bandStart - 1; row >= 1; row-- {
-		if strings.TrimSpace(screen.line(row)) != "" {
-			lastScrollback = row
-			break
-		}
-	}
+	lastScrollback := screen.LastNonBlankRowAbove(bandStart)
 	firstBand := 0
 	for row := bandStart; row <= bandEnd; row++ {
 		if strings.TrimSpace(screen.line(row)) != "" {

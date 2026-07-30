@@ -312,8 +312,7 @@ type chatLoginPrompter struct {
 }
 
 func (p chatLoginPrompter) PrintLine(line string) {
-	beginDirectInteractiveOutput(p.session)
-	fmt.Println(line)
+	printDirectInteractiveOutput(p.session, line+"\n")
 }
 
 func (p chatLoginPrompter) PromptText(label, current string, required bool) (string, error) {

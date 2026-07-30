@@ -261,7 +261,10 @@ func TestChatInteractionCoordinator_PrintPrompt_InsertsBlankLineAfterCompletedBl
 	}
 }
 
-func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapAcrossPromptRedraw(t *testing.T) {
+// A tool chain stays dense even when a prompt was redrawn between the Running
+// and Completed lines: consecutive async lines belong to the same block, so
+// gapForAsyncLine must not insert a separator blank.
+func TestChatInteractionCoordinator_RenderAsyncLine_KeepsToolChainDenseAcrossPromptRedraw(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	coord.promptAdvanceFn = func() bool { return false }
@@ -276,12 +279,14 @@ func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapAcrossPromptRedraw(t
 	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend") {
 		t.Fatalf("expected first tool timeline line, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend\n\n• Completed grep path=E:/projects/ai/ai-agent-runtime/backend") {
-		t.Fatalf("expected second tool timeline line to preserve blank-line gap after prompt redraw, got %q", rendered)
+	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend\n• Completed grep path=E:/projects/ai/ai-agent-runtime/backend") {
+		t.Fatalf("expected tool chain to stay dense across prompt redraw, got %q", rendered)
 	}
 }
 
-func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapWhenPromptVisibleAfterAsyncLine(t *testing.T) {
+// Same contract when the prompt is still marked visible: the Completed line of
+// an in-flight tool chain joins the Running line without a blank.
+func TestChatInteractionCoordinator_RenderAsyncLine_KeepsToolChainDenseWhenPromptVisible(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	coord.promptAdvanceFn = func() bool { return false }
@@ -298,8 +303,8 @@ func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapWhenPromptVisibleAft
 	coord.RenderAsyncLine("• Completed git ls-files --others --exclude-standard in 868ms\n  workdir: E:/projects/ai/ai-agent-runtime")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "  workdir: E:/projects/ai/ai-agent-runtime\n\n• Completed git ls-files --others --exclude-standard in 868ms") {
-		t.Fatalf("expected completed tool timeline line to keep a blank-line gap after prompt clear, got %q", rendered)
+	if !strings.Contains(rendered, "  workdir: E:/projects/ai/ai-agent-runtime\n• Completed git ls-files --others --exclude-standard in 868ms") {
+		t.Fatalf("expected completed tool timeline line to stay dense after prompt clear, got %q", rendered)
 	}
 }
 
@@ -687,7 +692,10 @@ func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(
 	}
 }
 
-func TestChatInteractionCoordinator_RenderAsyncLineSeparatesAdjacentBlocks(t *testing.T) {
+// Adjacent async blocks are one timeline chain, not two messages: they must not
+// be separated by a blank row (that was the source of the doubled blank rows in
+// replayed history and long tool chains).
+func TestChatInteractionCoordinator_RenderAsyncLineKeepsAdjacentBlocksDense(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	var output bytes.Buffer
@@ -697,9 +705,9 @@ func TestChatInteractionCoordinator_RenderAsyncLineSeparatesAdjacentBlocks(t *te
 	coord.RenderAsyncLine("[tool done] second")
 
 	rendered := output.String()
-	expected := ui.FormatAssistantSupplementBlock("[tool done] first") + "\n\n" + ui.FormatAssistantSupplementBlock("[tool done] second")
+	expected := ui.FormatAssistantSupplementBlock("[tool done] first") + "\n" + ui.FormatAssistantSupplementBlock("[tool done] second")
 	if !strings.Contains(rendered, expected) {
-		t.Fatalf("expected blank line between adjacent async blocks, got %q", rendered)
+		t.Fatalf("expected adjacent async blocks to stay dense, got %q", rendered)
 	}
 }
 

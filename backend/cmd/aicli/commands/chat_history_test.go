@@ -2,12 +2,14 @@ package commands
 
 import (
 	"bytes"
+	"os"
+	"strings"
+	"testing"
+
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"strings"
-	"testing"
 )
 
 func TestPrintVisibleChatHistory_RendersRestoredMessagesWithUnifiedToolRenderer(t *testing.T) {
@@ -362,5 +364,158 @@ func TestAICLIMessageHelpers_MaintainRuntimeMirror(t *testing.T) {
 	appendRuntimeMessage(session, *session.Messages[0].Clone())
 	if len(session.Messages) != 2 {
 		t.Fatalf("expected appendRuntimeMessage to update history, got len=%d", len(session.Messages))
+	}
+}
+func TestPrintVisibleChatHistory_HidesFactLedger(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{
+		SystemPromptText: "You are a helpful assistant.",
+	}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are a helpful assistant."),
+		*runtimetypes.NewUserMessage("continue"),
+		{
+			Role:     "assistant",
+			Content:  "Verified fact ledger (authoritative over compacted prose):\n- [workspace] read_agent_events failed {\"error\":\"unknown agent session reference\"}",
+			Metadata: runtimetypes.NewMetadata(),
+		},
+		*runtimetypes.NewUserMessage("next"),
+	})
+
+	rendered := captureStdout(t, func() {
+		count := printVisibleChatHistory(session, "")
+		if count != 2 {
+			t.Fatalf("expected 2 visible user messages, got %d", count)
+		}
+	})
+	if strings.Contains(rendered, "Verified fact ledger") {
+		t.Fatalf("did not expect fact ledger in visible history, got:\n%s", rendered)
+	}
+	for _, expected := range []string{"continue", "next"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestPrintVisibleChatHistory_HidesDeveloperLedger(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{
+		SystemPromptText: "You are a helpful assistant.",
+	}
+	ledger := runtimetypes.NewDeveloperMessage("Verified fact ledger (authoritative over compacted prose):\n- [execution] shell succeeded")
+	ledger.Metadata["context_stage"] = "fact_ledger"
+	ledger.Metadata["context_snapshot"] = true
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are a helpful assistant."),
+		*runtimetypes.NewUserMessage("continue"),
+		*ledger,
+		*runtimetypes.NewUserMessage("next"),
+	})
+
+	rendered := captureStdout(t, func() {
+		count := printVisibleChatHistory(session, "")
+		if count != 2 {
+			t.Fatalf("expected 2 visible user messages, got %d", count)
+		}
+	})
+	if strings.Contains(rendered, "Verified fact ledger") {
+		t.Fatalf("did not expect developer fact ledger in visible history, got:\n%s", rendered)
+	}
+	for _, expected := range []string{"continue", "next"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestPrintVisibleChatHistory_HidesLegacyLedgerEvenWithoutMetadata(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{
+		SystemPromptText: "You are a helpful assistant.",
+	}
+	ledger := runtimetypes.NewAssistantMessage("Verified fact ledger (authoritative over compacted prose):\n- [workspace] read_agent_events failed")
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are a helpful assistant."),
+		*runtimetypes.NewUserMessage("continue"),
+		*ledger,
+		*runtimetypes.NewUserMessage("next"),
+	})
+
+	rendered := captureStdout(t, func() {
+		count := printVisibleChatHistory(session, "")
+		if count != 2 {
+			t.Fatalf("expected 2 visible user messages, got %d", count)
+		}
+	})
+	if strings.Contains(rendered, "Verified fact ledger") {
+		t.Fatalf("did not expect legacy fact ledger without metadata in visible history, got:\n%s", rendered)
+	}
+	for _, expected := range []string{"continue", "next"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, rendered)
+		}
+	}
+}
+
+// History replay must settle ClearPrompt layout debt before content WriteOutput.
+// Otherwise pendingScrollDown flush is billed to the first history message and
+// looks like "compensating already-rendered history with blank rows".
+func TestPrintVisibleChatHistory_SettlesSurfaceLayoutDebtBeforeContent(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	session.Surface = surface
+	coord.SetSurface(surface)
+	coord.promptAdvanceFn = func() bool { return false }
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("继续上次任务"),
+		*runtimetypes.NewAssistantMessage("好的，我先回顾上下文。"),
+	})
+
+	output := captureStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected surface prompt")
+		}
+		coord.promptVisible = true
+		coord.promptRenderedOnSurface = true
+		// Same sequence as resume/startup: clear prompt (creates pending debt),
+		// then replay history. Settle must run before first content write.
+		beginDirectInteractiveOutput(session)
+		count := printVisibleChatHistory(session, "已加载历史会话")
+		if count != 2 {
+			t.Fatalf("expected 2 visible history messages, got %d", count)
+		}
+	})
+
+	for _, expected := range []string{
+		"已加载历史会话",
+		"继续上次任务",
+		"好的，我先回顾上下文。",
+		// Settle flushes deferred shrink (margins+prompt release → 3 rows).
+		"\x1b[3T",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected history settle/replay to contain %q, got:\n%q", expected, output)
+		}
+	}
+	// Content must still be present after the settle CSI (not lost to layout).
+	idxScroll := strings.Index(output, "\x1b[3T")
+	idxUser := strings.Index(output, "继续上次任务")
+	if idxScroll < 0 || idxUser < 0 || idxUser < idxScroll {
+		t.Fatalf("expected settle scroll-down before history content, scroll=%d content=%d\n%q", idxScroll, idxUser, output)
 	}
 }

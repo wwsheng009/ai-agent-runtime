@@ -44,6 +44,13 @@ func (o chatPromptOverlay) beginDirectOutput() {
 	if o.session.Surface != nil {
 		o.session.Surface.BeginOutput()
 	}
+	// Everything after this point may write with plain fmt.Print*, which the
+	// surface never observes. ClearPrompt only defers its bottom-reserve shrink
+	// compensation, so an outstanding deferred scroll-down would flush later —
+	// after the raw bytes already landed — and scroll them away while leaving a
+	// multi-row blank hole (seen as lost command output and blank lines in
+	// replayed history). Settle the debt while the surface still owns the rows.
+	settleInteractiveOutputLayout(o.session)
 }
 
 // beginInlineOutput is the legacy, surface-less variant: the prompt shares the
@@ -59,6 +66,7 @@ func (o chatPromptOverlay) beginInlineOutput() {
 	if o.session.Surface != nil {
 		o.session.Surface.BeginOutput()
 	}
+	settleInteractiveOutputLayout(o.session)
 }
 
 func (o chatPromptOverlay) showComposerPreview(prompt string) bool {
@@ -274,6 +282,21 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 	newChatPromptOverlay(session).beginDirectOutput()
 }
 
+// settleInteractiveOutputLayout flushes deferred bottom-reserve shrink
+// compensation without writing transcript content. History / resume replay
+// must call this after ClearPrompt (or beginDirectInteractiveOutput) and
+// before the first content WriteOutput so layout debt is not billed to
+// already-final messages. No-op when there is no enabled surface.
+func settleInteractiveOutputLayout(session *ChatSession) {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return
+	}
+	if session.Surface == nil || !session.Surface.Enabled() {
+		return
+	}
+	session.Surface.SettleOutputDebt()
+}
+
 // writeDirectInteractiveOutput clears the painted prompt (when present) and
 // writes text through FixedBottomSurface.WriteOutput so deferred bottom-reserve
 // shrink compensation is flushed and scroll bookkeeping stays consistent.
@@ -291,6 +314,24 @@ func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
 	}
 	_, err, handled := session.Surface.WriteOutput(os.Stdout, text)
 	return handled && err == nil
+}
+
+// printDirectInteractiveOutput writes text through the surface when available
+// (flushing ClearPrompt shrink debt + WriteOutput bookkeeping). Falls back to
+// beginDirectInteractiveOutput + writer otherwise. Use for any stdout content
+// that should not leave pendingScrollDown debt for the next write.
+func printDirectInteractiveOutput(session *ChatSession, text string) {
+	if writeDirectInteractiveOutput(session, text) {
+		return
+	}
+	beginDirectInteractiveOutput(session)
+	fmt.Print(text)
+}
+
+// printfDirectInteractiveOutput is a convenience for formatted messages.
+func printfDirectInteractiveOutput(session *ChatSession, format string, args ...any) {
+	text := fmt.Sprintf(format, args...)
+	printDirectInteractiveOutput(session, text)
 }
 
 func showRuntimeComposerPrompt(session *ChatSession, prompt string) bool {

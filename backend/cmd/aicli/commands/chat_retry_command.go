@@ -75,8 +75,9 @@ func renderChatTurnRecoveryHintForError(session *ChatSession, turnErr error) {
 		session.Interaction.RenderAsyncLine(message)
 		return
 	}
-	beginDirectInteractiveOutput(session)
-	ui.PrintInfo("%s", message)
+	// Fall back without Interaction: still route through surface WriteOutput
+	// so ClearPrompt shrink debt is not left for the next content write.
+	printDirectInteractiveOutput(session, ui.NewStatus(ui.StatusInfo, message).Build()+"\n")
 }
 
 func handleRetryCommand(session *ChatSession, command string) bool {

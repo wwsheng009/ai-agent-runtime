@@ -12,16 +12,21 @@ import (
 // The values are intentionally conservative; callers must keep a plain-output
 // fallback for non-TTY, dumb terminals, and legacy Windows consoles.
 type TerminalCapabilities struct {
-	Interactive     bool
-	ANSI            bool
-	ScrollRegion    bool
-	BracketedPaste  bool
-	TerminalTitle   bool
-	VTProcessing    bool
-	Width           int
-	Height          int
-	TerminalName    string
-	MultiplexerName string
+	Interactive    bool
+	ANSI           bool
+	ScrollRegion   bool
+	BracketedPaste bool
+	TerminalTitle  bool
+	VTProcessing   bool
+	// SynchronizedOutput reports whether the terminal is expected to honor the
+	// DEC 2026 synchronized-update mode (\x1b[?2026h / \x1b[?2026l). Codex wraps
+	// every frame in this mode so a multi-step repaint applies atomically; we use
+	// it the same way to remove tearing/flicker in the fixed-bottom surface.
+	SynchronizedOutput bool
+	Width              int
+	Height             int
+	TerminalName       string
+	MultiplexerName    string
 	// ColorEnabled / ColorDepth mirror style.ColorProfile for surface decisions.
 	// Full profile resolution (hyperlinks, background) lives in style.DetectColorProfile.
 	ColorEnabled bool
@@ -82,18 +87,22 @@ func (d *TerminalDriver) RefreshCapabilities() TerminalCapabilities {
 	profile := style.DetectColorProfile(detectOpts)
 
 	d.caps = TerminalCapabilities{
-		Interactive:     interactive,
-		ANSI:            ansi,
-		ScrollRegion:    ansi,
-		BracketedPaste:  ansi,
-		TerminalTitle:   ansi,
-		VTProcessing:    vt,
-		Width:           width,
-		Height:          height,
-		TerminalName:    firstNonEmptyEnv("WT_SESSION", "TERM_PROGRAM", "TERM"),
-		MultiplexerName: firstNonEmptyEnv("ZELLIJ", "TMUX"),
-		ColorEnabled:    profile.Enabled,
-		ColorDepth:      int(profile.Depth),
+		Interactive:    interactive,
+		ANSI:           ansi,
+		ScrollRegion:   ansi,
+		BracketedPaste: ansi,
+		TerminalTitle:  ansi,
+		VTProcessing:   vt,
+		// Synchronized output needs both ANSI parsing and VT processing enabled.
+		// Unsupported terminals silently ignore the unknown DEC private mode, so
+		// this stays safe; a hard opt-out lives in the write-lock env kill switch.
+		SynchronizedOutput: ansi && vt,
+		Width:              width,
+		Height:             height,
+		TerminalName:       firstNonEmptyEnv("WT_SESSION", "TERM_PROGRAM", "TERM"),
+		MultiplexerName:    firstNonEmptyEnv("ZELLIJ", "TMUX"),
+		ColorEnabled:       profile.Enabled,
+		ColorDepth:         int(profile.Depth),
 	}
 	return d.caps
 }

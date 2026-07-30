@@ -65,7 +65,6 @@ func printRuntimeModelState(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	beginDirectInteractiveOutput(session)
 	providerName := strings.TrimSpace(session.ProviderName)
 	if providerName == "" {
 		providerName = "(无)"
@@ -86,11 +85,11 @@ func printRuntimeModelState(session *ChatSession) {
 	if baseURL == "" {
 		baseURL = "(无)"
 	}
-	fmt.Printf("当前 provider: %s\n", providerName)
-	fmt.Printf("当前 protocol: %s\n", protocol)
-	fmt.Printf("当前模型: %s\n", model)
-	fmt.Printf("当前 reasoning_effort: %s\n", reasoning)
-	fmt.Printf("当前 baseURL: %s\n", baseURL)
+	text := fmt.Sprintf(
+		"当前 provider: %s\n当前 protocol: %s\n当前模型: %s\n当前 reasoning_effort: %s\n当前 baseURL: %s\n",
+		providerName, protocol, model, reasoning, baseURL,
+	)
+	printDirectInteractiveOutput(session, text)
 }
 
 func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, interactive bool) (bool, error) {
@@ -112,8 +111,7 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	}
 
 	if !strings.EqualFold(requestedModel, resolvedModel) {
-		beginDirectInteractiveOutput(session)
-		fmt.Printf("提示: 模型已映射 %s -> %s\n", requestedModel, resolvedModel)
+		printfDirectInteractiveOutput(session, "提示: 模型已映射 %s -> %s\n", requestedModel, resolvedModel)
 	}
 
 	reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)

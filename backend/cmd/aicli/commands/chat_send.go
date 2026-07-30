@@ -97,8 +97,9 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session, response) {
 		renderChatResponse(session, response)
 	} else if session.Stream && !noInteractive && !handledByStreamFinalize {
-		beginDirectInteractiveOutput(session)
-		fmt.Println()
+		// Route the trailing blank through the surface so ClearPrompt shrink
+		// debt is flushed here instead of attaching to the next content write.
+		printDirectInteractiveOutput(session, "\n")
 	}
 
 	session.ImagePaths = nil

@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -422,5 +423,54 @@ func TestHandleCommand_ModelPromptKeepsCurrentModelAndUsesPriorityReasoningSelec
 	}
 	if got := runtimeSessionContextString(stored, chatRuntimeContextReasoningEffort); got != "medium" {
 		t.Fatalf("expected stored reasoning effort medium, got %q", got)
+	}
+}
+func TestPrintRuntimeModelState_WritesThroughFixedBottomSurfaceAfterPromptClear(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+
+	session := &ChatSession{
+		ProviderName: "OpenAI-go-away",
+		Provider:     config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
+		Model:        "gpt-5.4-mini",
+		BaseURL:      "http://localhost:8080/v1",
+	}
+
+	output := captureStdout(t, func() {
+		coord := newChatInteractionCoordinator(session)
+		session.Interaction = coord
+		session.Surface = surface
+		coord.SetSurface(surface)
+		// Rebind after stdout swap so ClearPrompt recognizes the interactive
+		// surface writer (writer == os.Stdout) and releases reserved rows.
+		coord.SetWriter(os.Stdout)
+		coord.promptAdvanceFn = func() bool { return false }
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected surface prompt")
+		}
+		coord.promptVisible = true
+		coord.promptRenderedOnSurface = true
+		printRuntimeModelState(session)
+	})
+
+	for _, expected := range []string{
+		"当前 provider: OpenAI-go-away",
+		"当前 protocol: openai",
+		"当前模型: gpt-5.4-mini",
+		"当前 reasoning_effort: (无)",
+		"当前 baseURL: http://localhost:8080/v1",
+		// WriteOutput normalizes LFs to CRLF for the surface path.
+		"\r\n",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected surface model-state output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	// CSI Ps T is the deferred shrink flush WriteOutput must emit after ClearPrompt.
+	if !strings.Contains(output, "\x1b[3T") {
+		t.Fatalf("expected WriteOutput to flush pending bottom-reserve shrink before model text, got:\n%q", output)
 	}
 }

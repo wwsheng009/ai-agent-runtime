@@ -121,7 +121,16 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 	if len(messages) == 0 {
 		return 0
 	}
-	renderer := newAICLITranscriptRenderer(session)
+	// History is already-final content. Settle any ClearPrompt layout debt
+	// (pendingScrollDown / blank-row flag) BEFORE the first content write so
+	// live surface compensation is not attached to transcript replay.
+	settleInteractiveOutputLayout(session)
+	// Replay is a pure content-plane operation: the replay renderer routes user
+	// echo through RenderReplayedUserInput, which never restores the composer, so
+	// replaying already-final history cannot grow the bottom reserve or bill
+	// surface scroll compensation into the transcript. The caller re-shows the
+	// prompt once after replay completes.
+	renderer := newAICLIReplayTranscriptRenderer(session)
 	if strings.TrimSpace(header) != "" {
 		renderer.RenderSupplement(fmt.Sprintf("%s (%d 条消息):", strings.TrimSpace(header), len(messages)))
 	}

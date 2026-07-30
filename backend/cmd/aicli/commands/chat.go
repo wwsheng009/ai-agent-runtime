@@ -946,8 +946,10 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		if !hasVisibleChatHistory(session) {
 			return
 		}
+		// ClearPrompt may leave pendingScrollDown layout debt. Do not raw-print
+		// a blank here (bypasses surface); printVisibleChatHistory settles debt
+		// then owns all content-plane spacing via RenderSupplement / gaps.
 		beginDirectInteractiveOutput(session)
-		fmt.Println()
 		printVisibleChatHistory(session, "已加载历史会话")
 		return
 	}
@@ -1094,8 +1096,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 	for {
 		// 检查二次终止信号
 		if shouldExit.Load() {
-			beginDirectInteractiveOutput(session)
-			fmt.Println()
+			printDirectInteractiveOutput(session, "\n")
 			break
 		}
 
@@ -1107,8 +1108,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		}
 		session.cancelCtx, session.cancelFunc = newChatCancelContext()
 		if shouldExit.Load() {
-			beginDirectInteractiveOutput(session)
-			fmt.Println()
+			printDirectInteractiveOutput(session, "\n")
 			break
 		}
 
@@ -1135,8 +1135,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					continue
 				}
 				if shouldExit.Load() {
-					beginDirectInteractiveOutput(session)
-					fmt.Println()
+					printDirectInteractiveOutput(session, "\n")
 					break
 				}
 				if notice != "" {
@@ -1147,8 +1146,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					}
 				}
 				if shouldExit.Load() {
-					beginDirectInteractiveOutput(session)
-					fmt.Println()
+					printDirectInteractiveOutput(session, "\n")
 					break
 				}
 				if showPrompt {
@@ -1159,8 +1157,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					}
 				}
 				if shouldExit.Load() {
-					beginDirectInteractiveOutput(session)
-					fmt.Println()
+					printDirectInteractiveOutput(session, "\n")
 					break
 				}
 			}
@@ -1169,8 +1166,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			finishChatInteractiveReadPromptState(session, err)
 			if err != nil {
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-					beginDirectInteractiveOutput(session)
-					fmt.Println("正在退出...")
+					printDirectInteractiveOutput(session, "正在退出...\n")
 					break
 				}
 				// Bare Esc on empty composer: open user-turn backtrack picker (Codex-style).
@@ -1181,8 +1177,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				// Ctrl+D (EOF)：交互行编辑器场景静默忽略；队列/普通 reader 场景在输入结束后退出循环，避免空转。
 				if errors.Is(err, io.EOF) {
 					if !shouldUseInteractiveLineEditor(session) {
-						beginDirectInteractiveOutput(session)
-						fmt.Println()
+						printDirectInteractiveOutput(session, "\n")
 						break
 					}
 					continue
@@ -1196,8 +1191,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				if session != nil && session.NoInteractive {
 					exitCommandError("chat", session.OutputFormat, fmt.Errorf("读取输入失败"), nil)
 				}
-				beginDirectInteractiveOutput(session)
-				fmt.Println("\n" + ui.FormatErrorMessage("读取输入失败"))
+				printDirectInteractiveOutput(session, "\n"+ui.FormatErrorMessage("读取输入失败")+"\n")
 				break
 			}
 			input = strings.TrimSpace(normalizeQueuedInputLine(input))

@@ -44,26 +44,26 @@ type chatInteractionCoordinator struct {
 	// false = mid-line content was written without a row terminator
 	// Only writeIndentedStreamingDeltaLocked / residual inline paths set false;
 	// start, reset, writeRows, and closeOpenRow keep/restore true.
-	streamTrailingLF        bool
-	streamLines             int
-	streamDisplayLines      int
-	streamBuffer            strings.Builder
-	streamRuneDelay         time.Duration
-	maxChunkDelay           time.Duration
-	promptDelay             time.Duration
-	promptSeq               uint64
-	promptAdvanceFn         func() bool
-	liveStreamFn            func() bool
-	waitingActive           bool
-	agentStage              chatAgentStage
-	agentStageDetail        string
-	inputMode               chatInputMode
-	inputModeBase           chatInputMode
-	inputLeaseSeq           uint64
-	inputLease              *chatInputModeLease
+	streamTrailingLF   bool
+	streamLines        int
+	streamDisplayLines int
+	streamBuffer       strings.Builder
+	streamRuneDelay    time.Duration
+	maxChunkDelay      time.Duration
+	promptDelay        time.Duration
+	promptSeq          uint64
+	promptAdvanceFn    func() bool
+	liveStreamFn       func() bool
+	waitingActive      bool
+	agentStage         chatAgentStage
+	agentStageDetail   string
+	inputMode          chatInputMode
+	inputModeBase      chatInputMode
+	inputLeaseSeq      uint64
+	inputLease         *chatInputModeLease
 
-	reasoningActive     bool
-	reasoningRendered   bool
+	reasoningActive   bool
+	reasoningRendered bool
 	// reasoningTrailingLF mirrors streamTrailingLF for the reasoning band only.
 	// Kept separate so reasoning/assistant interleave does not share mid-line state.
 	reasoningTrailingLF    bool
@@ -783,12 +783,16 @@ func (c *chatInteractionCoordinator) writeRowsLocked(rows []string, gap blockGap
 	c.promptAfterBlockGap = false
 }
 
-// gapForTopLevelMessage maps the historical suppressSeparator rule for
-// assistant/error one-shots onto an explicit gap. completeBlockOutput is read
-// only here at the message boundary — writeRowsLocked itself never invents a
-// blank from that flag (which is what polluted mid-stream residual paints).
-func (c *chatInteractionCoordinator) gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap bool) blockGap {
-	// Old suppressSeparator = promptWasVisible && !promptAfterBlockGap
+// gapBeforeBlockLocked is the single spacing policy for a new complete block.
+// A block gets one leading blank only when a prior complete block is already on
+// screen (completeBlockOutput) or a prompt gap was already accounted for
+// (promptAfterBlockGap), and no still-visible prompt already separates it. Both
+// the top-level and async boundaries share this core so the spacing truth table
+// lives in exactly one place (P3: deterministic, single-source spacing). It is
+// pinned by TestGapPolicyTruthTable.
+func (c *chatInteractionCoordinator) gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap bool) blockGap {
+	// A block drawn directly under a still-visible prompt does not add its own
+	// leading blank (the prompt row already provides separation).
 	if promptWasVisible && !promptAfterBlockGap {
 		return gapNone
 	}
@@ -798,16 +802,24 @@ func (c *chatInteractionCoordinator) gapForTopLevelMessage(promptWasVisible, pro
 	return gapNone
 }
 
-// gapForAsyncLine is the async/supplement variant of gapForTopLevelMessage.
+// gapForTopLevelMessage maps the historical suppressSeparator rule for
+// assistant/error one-shots onto an explicit gap. completeBlockOutput is read
+// only at the message boundary — writeRowsLocked itself never invents a blank
+// from that flag (which is what polluted mid-stream residual paints).
+func (c *chatInteractionCoordinator) gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap bool) blockGap {
+	return c.gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap)
+}
+
+// gapForAsyncLine is the async/supplement variant. Consecutive async lines
+// belong to the same tool chain (Running->Running->Completed) and must never
+// get a separator blank, even when a prompt was redrawn or still marked visible
+// between them (reinserting a blank here is the tool-chain denseness bug).
+// Otherwise it shares the top-level spacing core.
 func (c *chatInteractionCoordinator) gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine bool) blockGap {
-	// Old suppress = promptWasVisible && !promptAfterBlockGap && !previousAsyncLine
-	if promptWasVisible && !promptAfterBlockGap && !previousAsyncLine {
+	if previousAsyncLine {
 		return gapNone
 	}
-	if c != nil && (c.completeBlockOutput || promptAfterBlockGap) {
-		return gapBlank
-	}
-	return gapNone
+	return c.gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap)
 }
 
 // gapIfPriorComplete inserts a blank only when a prior complete block is on
@@ -2335,7 +2347,9 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(response)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap))
+	// Finalized assistant turn routed through the retained-source cell model
+	// (P4.2); byte-identical to writeCompleteBlockLocked(FormatAssistantRendered).
+	c.commitHistoryCellLocked(newAssistantMessageCell(formatted), c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap))
 	c.lastCompletedAsyncLine = false
 }
 
@@ -2709,8 +2723,10 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(
-		ui.FormatAssistantSupplementBlock(line),
+	// Async/supplement line routed through the cell model (P4.2); byte-identical
+	// to writeCompleteBlockLocked(FormatAssistantSupplementBlock).
+	c.commitHistoryCellLocked(
+		newSupplementLineCell(line),
 		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine),
 	)
 	c.lastCompletedAsyncLine = true
@@ -2734,8 +2750,10 @@ func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(
-		ui.RenderDocumentANSI(doc),
+	// Typed timeline/tool/info document routed through the cell model (P4.2);
+	// byte-identical to writeCompleteBlockLocked(RenderDocumentANSI).
+	c.commitHistoryCellLocked(
+		newAsyncDocumentCell(doc),
 		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine),
 	)
 	c.lastCompletedAsyncLine = true
@@ -2747,6 +2765,28 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.renderUserEchoLocked(input, true)
+}
+
+// RenderReplayedUserInput echoes a user message from already-final history.
+// Unlike the live submit path it never restores the composer, so replaying
+// history cannot grow the bottom reserve and cannot bill surface scroll
+// compensation into the replayed transcript. Replay intent is explicit at the
+// call site instead of a coordinator-wide mode flag (P2: pure replay path).
+func (c *chatInteractionCoordinator) RenderReplayedUserInput(input string) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(input) == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.renderUserEchoLocked(input, false)
+}
+
+// renderUserEchoLocked writes a user-message block. allowPromptRestore gates the
+// live-only composer re-show: the live submit path restores an empty composer
+// when a turn was already armed (StartWaiting), while history replay passes
+// false so the bottom reserve never grows between replayed messages.
+func (c *chatInteractionCoordinator) renderUserEchoLocked(input string, allowPromptRestore bool) {
 	// User echo must free the composer first. Leaving a surface prompt reserved
 	// after the prior turn absorbs its trailing blank into the bottom pane, so
 	// the next WriteOutput lands on the last history row and overwrites it
@@ -2760,12 +2800,18 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	if !c.beginMessageLocked() {
 		return
 	}
-	// User echo sits directly under the cleared prompt; no extra blank.
-	c.writeCompleteBlockLocked(ui.FormatUserMessage(input), gapNone)
+	// User echo sits directly under the cleared prompt; no extra blank. Routed
+	// through the retained-source cell model (P4.1) so the same block can later
+	// be re-rendered at a new width without mutating committed output. This is
+	// behavior-identical to writeCompleteBlockLocked(FormatUserMessage): the cell
+	// returns the same normalizeWriteLines rows.
+	c.commitHistoryCellLocked(newUserMessageCell(input), gapNone)
 	c.lastCompletedAsyncLine = false
-	// StartWaiting may have already armed the turn; restore an empty composer
-	// so queued input can continue above the status line.
-	if wasWaiting && !c.promptVisible && c.writer == os.Stdout && c.surface != nil {
+	// StartWaiting may have already armed the turn; restore an empty composer so
+	// queued input can continue above the status line. Replay passes
+	// allowPromptRestore=false: growing the bottom reserve between replayed
+	// messages would let the surface bill scroll compensation into the transcript.
+	if allowPromptRestore && wasWaiting && !c.promptVisible && c.writer == os.Stdout && c.surface != nil {
 		if c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
 			c.promptVisible = true
 			c.promptRenderedOnSurface = true
@@ -4224,6 +4270,7 @@ func (c *chatInteractionCoordinator) syncSoftEmittedTailToSurfaceLocked() {
 //   - replays irreversible history above the soft window
 //   - routes through writeRowsLocked / gapBlank / completeBlockOutput
 //   - invents cross-message separators while rewriting owned soft rows
+//
 // Failed ownership checks invalidate rather than patching foreign scrollback.
 func (c *chatInteractionCoordinator) reflowSoftEmittedTailLocked() {
 	if c == nil || c.softEmittedSourceEnd <= c.softEmittedSourceStart || len(c.softEmittedLines) == 0 {
@@ -4817,6 +4864,23 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, g
 		return
 	}
 	c.writeRowsLocked(lines, gap)
+}
+
+// commitHistoryCellLocked writes a history cell's rendered rows as one atomic
+// complete block with the given leading gap. It is the cell-model commit seam
+// (P4.1): callers build a typed historyCell (retained source) instead of
+// pre-joining a string, so later sub-steps can reuse the same source for resize
+// reflow. The rows are already normalizeWriteLines-ready, so this matches the
+// legacy writeCompleteBlockLocked pipeline (normalize -> writeRowsLocked).
+func (c *chatInteractionCoordinator) commitHistoryCellLocked(cell historyCell, gap blockGap) {
+	if c == nil || cell == nil {
+		return
+	}
+	// width 0: today's cells render width-independently (the FixedBottomSurface
+	// owns wrapping). A real wrap-aware width is plumbed here only once P5's
+	// owned viewport backend consumes pre-wrapped cell lines; probing terminal
+	// width per commit now would be an unused side effect on a hot path.
+	c.writeRowsLocked(cell.DisplayLines(0), gap)
 }
 
 func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {

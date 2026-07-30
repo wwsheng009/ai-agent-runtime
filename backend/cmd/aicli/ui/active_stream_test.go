@@ -441,3 +441,53 @@ func TestActiveStreamControllerTallViewportShowsMoreStableLines(t *testing.T) {
 		t.Fatalf("tall viewport lost newest content: %q", plain)
 	}
 }
+
+// TestActiveStreamControllerKeepsBlockBlankBeforeHoldback pins live/replay
+// parity at the stable/holdback seam: the collector cuts stable on a blank
+// line, so the mutable tail must keep the block-spacing blank row that
+// markdown.Render produces for the same source once it is complete.
+func TestActiveStreamControllerKeepsBlockBlankBeforeHoldback(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   []string
+	}{
+		{
+			name:   "paragraph boundary",
+			source: "para one.\n\npara two",
+			want:   []string{"para one.", "", "para two"},
+		},
+		{
+			name:   "heading boundary",
+			source: "## Section\n\nbody stream",
+			want:   []string{"▷ Section", "", "body stream"},
+		},
+		{
+			name:   "soft break stays tight",
+			source: "line one\nline two",
+			want:   []string{"line one", "line two"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewActiveStreamController(40, 12)
+			c.BeginAssistant("assistant")
+			c.PushAssistantDelta(tc.source, true)
+			lines, _ := c.PaintLines(time.Now(), true)
+			rows := strings.Split((render.PlainBackend{}).Render(render.LinesDoc(lines...)), "\n")
+			if len(rows) == 0 {
+				t.Fatal("expected painted active band rows")
+			}
+			// Drop the animated header row; compare body rows only.
+			rows = rows[1:]
+			if len(rows) != len(tc.want) {
+				t.Fatalf("row count %d != %d\ngot=%#v\nwant=%#v", len(rows), len(tc.want), rows, tc.want)
+			}
+			for i := range tc.want {
+				if strings.TrimRight(rows[i], " ") != tc.want[i] {
+					t.Fatalf("row[%d]=%q want %q\ngot=%#v", i, rows[i], tc.want[i], rows)
+				}
+			}
+		})
+	}
+}

@@ -215,18 +215,19 @@ func printReasoningEffortCommandStatus(session *ChatSession) {
 		fmt.Println("错误: 当前没有活动会话")
 		return
 	}
-	beginDirectInteractiveOutput(session)
 	reasoning := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	if reasoning == "" {
 		reasoning = "(无)"
 	}
-	fmt.Printf("当前 reasoning_effort: %s\n", reasoning)
+	var b strings.Builder
+	fmt.Fprintf(&b, "当前 reasoning_effort: %s\n", reasoning)
 	catalog := reasoningEffortCatalogForModel(session.Provider, effectiveRuntimeModel(session))
 	if len(catalog.options) == 0 {
-		fmt.Println("可选 reasoning_effort: (未声明)")
-		return
+		b.WriteString("可选 reasoning_effort: (未声明)\n")
+	} else {
+		fmt.Fprintf(&b, "可选 reasoning_effort: %s\n", strings.Join(catalog.options, ", "))
 	}
-	fmt.Printf("可选 reasoning_effort: %s\n", strings.Join(catalog.options, ", "))
+	printDirectInteractiveOutput(session, b.String())
 }
 
 func persistReasoningEffortCommandPreference(session *ChatSession) {

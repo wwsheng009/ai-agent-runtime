@@ -109,7 +109,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("会话已加载")
 		printCurrentRuntimeSession(session)
 		if hasVisibleChatHistory(session) {
-			fmt.Println()
+			// No raw blank separator: printVisibleChatHistory settles surface
+			// layout debt and its header owns the spacing (same rule as
+			// printResumeSuccess). A raw fmt.Println here bypasses the surface
+			// and stacks a second blank row on top of the header gap.
 			printVisibleChatHistory(session, "已加载历史会话")
 		}
 		return false
@@ -1227,10 +1230,11 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 
 	// 检查危险命令
 	if isDangerousCommand(executedCommand) {
-		beginDirectInteractiveOutput(session)
-		fmt.Printf("\n警告: 检测到可能危险的命令: %s\n", executedCommand)
-		fmt.Print("确认执行? (yes/no): ")
-
+		printfDirectInteractiveOutput(session, "\n警告: 检测到可能危险的命令: %s\n", executedCommand)
+		if !showRuntimeComposerPrompt(session, "确认执行? (yes/no): ") {
+			beginDirectInteractiveOutput(session)
+			fmt.Print("确认执行? (yes/no): ")
+		}
 		confirm, err := func() (string, error) {
 			endAction := beginChatTitleAction(session, "Command Approval Required")
 			defer endAction()

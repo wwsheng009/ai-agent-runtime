@@ -468,11 +468,22 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 		t.Fatalf("live post-finalize blank run %d at row %d; screen:\n%s", livePostRun, livePostAt, liveScreen.dump())
 	}
 
-	// Key fragments must appear exactly once on the reconstructed screen.
+	// No fragment may be painted twice (a double-painted stable chunk). Head
+	// fragments are not required to stay visible: a reserved active band scrolls
+	// rows into scrollback while it is up, and those rows are irrecoverable, so
+	// a transcript taller than the output region legitimately loses its first
+	// rows from the screen. Requiring them back on screen only passed while the
+	// absorb path was overwriting committed rows instead of scrolling them.
 	liveDump := liveScreen.dump()
 	for _, frag := range []string{"长回复", "章节 1", "章节 6", "收尾段落。"} {
+		if strings.Count(liveDump, frag) > 1 {
+			t.Fatalf("live screen painted %q %d times, got screen:\n%s",
+				frag, strings.Count(liveDump, frag), liveDump)
+		}
+	}
+	for _, frag := range []string{"章节 6", "收尾段落。"} {
 		if strings.Count(liveDump, frag) != 1 {
-			t.Fatalf("live screen should contain %q exactly once, got screen:\n%s", frag, liveDump)
+			t.Fatalf("live screen should keep tail fragment %q exactly once, got screen:\n%s", frag, liveDump)
 		}
 	}
 
@@ -509,6 +520,11 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 	}
 	histPostGap := promptRow - histLastText - 1
 	histPostRun, _ := maxBlankRunAboveBottom(histScreen, promptRow)
+	// Strongest available oracle: from the bottom anchor upwards, live must be
+	// row-identical to one-shot replay for as long as both still hold the rows
+	// on screen. This catches extra/missing blank rows and shifted content
+	// without depending on how many rows the band cycle scrolled away.
+	assertScreenTailParity(t, liveScreen, histScreen, promptRow)
 
 	// Live must not invent larger layout holes than one-shot history replay.
 	if livePostGap > histPostGap+1 {
@@ -538,6 +554,49 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 
 	t.Logf("layout parity: midGap=%d midRun=%d livePostGap=%d livePostRun=%d histPostGap=%d histPostRun=%d",
 		midGap, midRun, livePostGap, livePostRun, histPostGap, histPostRun)
+}
+
+// assertScreenTailParity compares two reconstructed screens row by row from
+// bottomExclusive-1 upwards. Rows a terminal already scrolled away cannot be
+// recovered, so the comparison stops as soon as either screen runs out of
+// transcript; the overlap must still be long enough to be meaningful.
+func assertScreenTailParity(t *testing.T, live, hist *screenVT, bottomExclusive int) {
+	t.Helper()
+	liveRows := trimmedTranscriptRows(live, bottomExclusive)
+	histRows := trimmedTranscriptRows(hist, bottomExclusive)
+	overlap := len(liveRows)
+	if len(histRows) < overlap {
+		overlap = len(histRows)
+	}
+	if overlap < 20 {
+		t.Fatalf("transcript overlap too small to compare (live=%d hist=%d rows)\nlive:\n%s\nhistory:\n%s",
+			len(liveRows), len(histRows), live.dump(), hist.dump())
+	}
+	for i := 1; i <= overlap; i++ {
+		liveLine := liveRows[len(liveRows)-i]
+		histLine := histRows[len(histRows)-i]
+		if liveLine != histLine {
+			t.Fatalf("live/history diverge %d rows above the bottom anchor: live=%q history=%q\nlive:\n%s\nhistory:\n%s",
+				i, liveLine, histLine, live.dump(), hist.dump())
+		}
+	}
+}
+
+// trimmedTranscriptRows returns transcript rows above bottomExclusive with
+// leading blank rows (already scrolled-away area) removed.
+func trimmedTranscriptRows(screen *screenVT, bottomExclusive int) []string {
+	if screen == nil || bottomExclusive <= 1 {
+		return nil
+	}
+	rows := make([]string, 0, bottomExclusive-1)
+	for row := 1; row < bottomExclusive; row++ {
+		rows = append(rows, screen.line(row))
+	}
+	start := 0
+	for start < len(rows) && strings.TrimSpace(rows[start]) == "" {
+		start++
+	}
+	return rows[start:]
 }
 
 // blankRowsBeforeAnchor counts contiguous blank rows immediately above the
@@ -580,11 +639,11 @@ func TestChatInteractionCoordinator_MarkdownRowsDeltaContract(t *testing.T) {
 	// Cuts sit on blank-line boundaries the same way markdownStableScrollbackCut
 	// advances, so each case is a real stable-commit / residual boundary.
 	type cutCase struct {
-		name                 string
-		start                int
-		end                  int
-		wantLeadingBlankRow  bool
-		wantContains         string
+		name                string
+		start               int
+		end                 int
+		wantLeadingBlankRow bool
+		wantContains        string
 	}
 	cases := []cutCase{
 		{

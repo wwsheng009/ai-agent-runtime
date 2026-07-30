@@ -18,10 +18,21 @@ import (
 // input transport concern. Once a complete block exists, it belongs here.
 type aicliTranscriptRenderer struct {
 	session *ChatSession
+	// replay marks a pure history-replay renderer: user echo must not restore the
+	// live composer (that would grow the bottom reserve and bill surface scroll
+	// compensation into the replayed transcript). Live adapters leave this false.
+	replay bool
 }
 
 func newAICLITranscriptRenderer(session *ChatSession) *aicliTranscriptRenderer {
 	return &aicliTranscriptRenderer{session: session}
+}
+
+// newAICLIReplayTranscriptRenderer builds a renderer for replaying already-final
+// history. It routes user echo through the side-effect-free replay path so
+// replay never touches live prompt/compensation state.
+func newAICLIReplayTranscriptRenderer(session *ChatSession) *aicliTranscriptRenderer {
+	return &aicliTranscriptRenderer{session: session, replay: true}
 }
 
 func (r *aicliTranscriptRenderer) RenderUser(content string) bool {
@@ -29,7 +40,11 @@ func (r *aicliTranscriptRenderer) RenderUser(content string) bool {
 		return false
 	}
 	if r.session.Interaction != nil {
-		r.session.Interaction.RenderSubmittedUserInput(content)
+		if r.replay {
+			r.session.Interaction.RenderReplayedUserInput(content)
+		} else {
+			r.session.Interaction.RenderSubmittedUserInput(content)
+		}
 		return true
 	}
 	ui.DisplayUserMessage(content)

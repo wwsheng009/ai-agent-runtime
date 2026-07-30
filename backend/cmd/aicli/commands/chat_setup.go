@@ -724,8 +724,7 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to save chat logs: %v\n", err)
 		} else if shouldPrintChatSessionPreamble(session) {
-			beginDirectInteractiveOutput(session)
-			fmt.Printf("会话日志已保存到: %s\n", resolveAbsoluteChatPath(session.Logger.logDir))
+			printfDirectInteractiveOutput(session, "会话日志已保存到: %s\n", resolveAbsoluteChatPath(session.Logger.logDir))
 		}
 	}
 }

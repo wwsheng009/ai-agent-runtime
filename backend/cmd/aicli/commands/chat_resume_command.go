@@ -442,24 +442,30 @@ func printResumeSuccess(session *ChatSession) {
 	if session != nil && session.RuntimeSession != nil {
 		turnCount, messageCount := runtimeSessionConversationCounts(session.RuntimeSession)
 		title := runtimeResumeSessionTitle(session.RuntimeSession)
+		var line string
 		if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
-			fmt.Printf("已恢复历史会话: %s（compact #%d · %d轮/%d条消息）\n",
+			line = fmt.Sprintf("已恢复历史会话: %s（compact #%d · %d轮/%d条消息）\n",
 				title,
 				generation,
 				turnCount,
 				messageCount,
 			)
 		} else {
-			fmt.Printf("已恢复历史会话: %s（%d轮/%d条消息）\n",
+			line = fmt.Sprintf("已恢复历史会话: %s（%d轮/%d条消息）\n",
 				title,
 				turnCount,
 				messageCount,
 			)
 		}
+		// Prefer surface WriteOutput so ClearPrompt shrink debt flushes here
+		// instead of attaching to the first history content block.
+		if !writeDirectInteractiveOutput(session, line) {
+			fmt.Print(line)
+		}
 	}
 	printCurrentRuntimeSession(session)
 	if hasVisibleChatHistory(session) {
-		fmt.Println()
+		// No raw fmt.Println: history settles layout then owns spacing via header.
 		printVisibleChatHistory(session, "已加载历史会话")
 	}
 }

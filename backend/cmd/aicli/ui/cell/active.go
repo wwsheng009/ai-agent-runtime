@@ -149,7 +149,7 @@ func (a ActiveCell) assistantDocument(marker string) render.Document {
 	}
 	if a.BodyDocument != nil {
 		blocks = append(blocks, a.BodyDocument.Blocks...)
-	} else {
+	} else if trimRightNewlines(body) != "" {
 		bodyLines := make([]render.Line, 0, strings.Count(body, "\n")+1)
 		for _, row := range strings.Split(trimRightNewlines(body), "\n") {
 			bodyLines = append(bodyLines, render.Line{Spans: []render.Span{{
@@ -171,6 +171,14 @@ func (a ActiveCell) assistantDocument(marker string) render.Document {
 				Text:  row,
 				Style: render.Style{Role: string(style.RoleTextMuted), Dim: true},
 			}}})
+		}
+		// The stable/holdback seam is a source cut, not a layout boundary:
+		// markdown.Render consumed the blank line that closed the last stable
+		// block, so appending the mutable tail directly would glue two blocks
+		// that ApplyBlockSpacing (and history replay) separate with one blank
+		// row. A soft line break inside one block keeps rows tight.
+		if len(blocks) > 1 && strings.TrimSpace(holdback) != "" && endsWithBlankLine(body) {
+			blocks = append(blocks, render.SpacerBlock(1))
 		}
 		blocks = append(blocks, render.Block{Kind: render.BlockCustom, Lines: holdbackLines})
 	}
@@ -200,4 +208,16 @@ func RunningToolCell(name string, args map[string]interface{}, now time.Time) Ac
 
 func trimRightNewlines(s string) string {
 	return strings.TrimRight(s, "\r\n")
+}
+
+// endsWithBlankLine reports whether a Markdown source prefix ends on a blank
+// line, i.e. the next content starts a new block. Trailing spaces and CRLF are
+// treated as whitespace so streamed sources behave like the parser.
+func endsWithBlankLine(source string) bool {
+	trimmed := strings.TrimRight(source, " \t\r")
+	if !strings.HasSuffix(trimmed, "\n") {
+		return false
+	}
+	rest := strings.TrimRight(trimmed[:len(trimmed)-1], " \t\r")
+	return strings.HasSuffix(rest, "\n")
 }

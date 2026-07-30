@@ -4,253 +4,36 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
-// screenVT is a minimal VT100 subset (scroll region, cursor addressing, erase
-// line, index/reverse index) used to reconstruct what the fixed bottom surface
-// actually leaves on screen. Sequence-level assertions cannot catch row math
-// errors such as a band painted above the rows it reserved, so these tests
-// replay the byte stream and inspect the resulting rows.
+// screenVT reconstructs what the fixed bottom surface actually leaves on
+// screen. Sequence-level assertions cannot catch row math errors such as a band
+// painted above the rows it reserved, so these tests replay the byte stream and
+// inspect the resulting rows.
+//
+// The emulator itself lives in ui/vt so the ui package can assert on real
+// screens too; it is display-width aware, tracks SGR per cell and is covered by
+// its own tests. This wrapper only keeps the compact lowercase call sites.
 type screenVT struct {
-	width, height int
-	rows          [][]rune
-	row, col      int
-	top, bottom   int
-	savedRow      int
-	savedCol      int
-	hasSaved      bool
+	*vt.Screen
 }
 
 func newScreenVT(width, height int) *screenVT {
-	v := &screenVT{width: width, height: height, row: 1, col: 1, top: 1, bottom: height}
-	v.rows = make([][]rune, height)
-	for i := range v.rows {
-		v.rows[i] = blankScreenRow(width)
-	}
-	return v
+	return &screenVT{Screen: vt.NewScreen(width, height)}
 }
 
-func blankScreenRow(width int) []rune {
-	row := make([]rune, width)
-	for i := range row {
-		row[i] = ' '
-	}
-	return row
-}
+func (v *screenVT) feed(stream string) { v.Screen.Feed(stream) }
 
-func (v *screenVT) index() {
-	if v.row == v.bottom {
-		copy(v.rows[v.top-1:v.bottom-1], v.rows[v.top:v.bottom])
-		v.rows[v.bottom-1] = blankScreenRow(v.width)
-		return
-	}
-	if v.row < v.height {
-		v.row++
-	}
-}
+func (v *screenVT) line(row int) string { return v.Screen.Line(row) }
 
-func (v *screenVT) reverseIndex() {
-	if v.row == v.top {
-		for i := v.bottom - 1; i > v.top-1; i-- {
-			v.rows[i] = v.rows[i-1]
-		}
-		v.rows[v.top-1] = blankScreenRow(v.width)
-		return
-	}
-	if v.row > 1 {
-		v.row--
-	}
-}
-
-func (v *screenVT) scrollDown(rows int) {
-	if rows < 1 {
-		rows = 1
-	}
-	regionRows := v.bottom - v.top + 1
-	if rows > regionRows {
-		rows = regionRows
-	}
-	for row := v.bottom - 1; row >= v.top-1+rows; row-- {
-		v.rows[row] = v.rows[row-rows]
-	}
-	for row := v.top - 1; row < v.top-1+rows; row++ {
-		v.rows[row] = blankScreenRow(v.width)
-	}
-}
-
-func (v *screenVT) put(r rune) {
-	if v.col > v.width {
-		v.col = 1
-		v.index()
-	}
-	v.rows[v.row-1][v.col-1] = r
-	v.col++
-}
-
-func (v *screenVT) feed(s string) {
-	runes := []rune(s)
-	for i := 0; i < len(runes); i++ {
-		switch runes[i] {
-		case '\r':
-			v.col = 1
-		case '\n':
-			v.index()
-			v.col = 1
-		case 0x1b:
-			i += v.escape(runes[i+1:])
-		default:
-			v.put(runes[i])
-		}
-	}
-}
-
-// escape consumes one escape sequence and reports how many runes it used,
-// excluding the leading ESC.
-func (v *screenVT) escape(rest []rune) int {
-	if len(rest) == 0 {
-		return 0
-	}
-	switch rest[0] {
-	case 'M':
-		v.reverseIndex()
-		return 1
-	case 'D':
-		v.index()
-		return 1
-	case '7':
-		v.savedRow, v.savedCol, v.hasSaved = v.row, v.col, true
-		return 1
-	case '8':
-		if v.hasSaved {
-			v.row, v.col = v.savedRow, v.savedCol
-		}
-		return 1
-	case ']':
-		for i := 1; i < len(rest); i++ {
-			if rest[i] == 0x07 {
-				return i + 1
-			}
-			if rest[i] == 0x1b && i+1 < len(rest) && rest[i+1] == '\\' {
-				return i + 2
-			}
-		}
-		return len(rest)
-	case '[':
-		j := 1
-		for j < len(rest) && (rest[j] == '?' || rest[j] == ';' || (rest[j] >= '0' && rest[j] <= '9')) {
-			j++
-		}
-		if j >= len(rest) {
-			return len(rest)
-		}
-		v.csi(string(rest[1:j]), rest[j])
-		return j + 1
-	}
-	return 1
-}
-
-func (v *screenVT) csi(params string, final rune) {
-	fields := []int{}
-	for _, part := range strings.Split(strings.TrimPrefix(params, "?"), ";") {
-		if part == "" {
-			fields = append(fields, 0)
-			continue
-		}
-		n, err := strconv.Atoi(part)
-		if err != nil {
-			n = 0
-		}
-		fields = append(fields, n)
-	}
-	arg := func(i, def int) int {
-		if i < len(fields) && fields[i] > 0 {
-			return fields[i]
-		}
-		return def
-	}
-	clamp := func(row int) int {
-		if row < 1 {
-			return 1
-		}
-		if row > v.height {
-			return v.height
-		}
-		return row
-	}
-	switch final {
-	case 'r':
-		v.top, v.bottom = clamp(arg(0, 1)), clamp(arg(1, v.height))
-	case 'H', 'f':
-		v.row, v.col = clamp(arg(0, 1)), arg(1, 1)
-	case 'A':
-		v.row = clamp(v.row - arg(0, 1))
-	case 'B':
-		v.row = clamp(v.row + arg(0, 1))
-	case 'C':
-		v.col += arg(0, 1)
-	case 'D':
-		if v.col = v.col - arg(0, 1); v.col < 1 {
-			v.col = 1
-		}
-	case 'T':
-		v.scrollDown(arg(0, 1))
-	case 'K':
-		switch arg(0, 0) {
-		case 1:
-			for i := 0; i < v.col && i < v.width; i++ {
-				v.rows[v.row-1][i] = ' '
-			}
-		case 2:
-			v.rows[v.row-1] = blankScreenRow(v.width)
-		default:
-			for i := v.col - 1; i < v.width; i++ {
-				v.rows[v.row-1][i] = ' '
-			}
-		}
-	case 'J':
-		if arg(0, 0) == 2 {
-			for i := range v.rows {
-				v.rows[i] = blankScreenRow(v.width)
-			}
-			break
-		}
-		for i := v.col - 1; i < v.width; i++ {
-			v.rows[v.row-1][i] = ' '
-		}
-		for i := v.row; i < v.height; i++ {
-			v.rows[i] = blankScreenRow(v.width)
-		}
-	case 's':
-		v.savedRow, v.savedCol, v.hasSaved = v.row, v.col, true
-	case 'u':
-		if v.hasSaved {
-			v.row, v.col = v.savedRow, v.savedCol
-		}
-	}
-}
-
-// line returns the 1-based screen row with trailing padding removed.
-func (v *screenVT) line(row int) string {
-	if row < 1 || row > v.height {
-		return ""
-	}
-	return strings.TrimRight(string(v.rows[row-1]), " ")
-}
-
-func (v *screenVT) dump() string {
-	var b strings.Builder
-	for i := 1; i <= v.height; i++ {
-		fmt.Fprintf(&b, "%02d|%s\n", i, v.line(i))
-	}
-	return b.String()
-}
+func (v *screenVT) dump() string { return v.Screen.Dump() }
 
 func captureSurfaceStdout(t *testing.T, fn func()) string {
 	t.Helper()

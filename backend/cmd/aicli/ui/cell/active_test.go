@@ -79,3 +79,61 @@ func TestRunningToolCellProgressBody(t *testing.T) {
 		t.Fatalf("expected progress body in running tool cell, got %q", plain)
 	}
 }
+
+// TestActiveCellAssistantHoldbackSeamKeepsBlockBlank pins the stable/holdback
+// seam rule: a source cut on a blank line is a block boundary, so the mutable
+// tail must keep the same single blank row that markdown block spacing (and
+// history replay) produces. A soft line break inside one block stays tight.
+func TestActiveCellAssistantHoldbackSeamKeepsBlockBlank(t *testing.T) {
+	p := motion.NewPolicy(motion.Config{Forced: motion.ForceMode(motion.ModeReduced)})
+	cases := []struct {
+		name     string
+		stable   string
+		holdback string
+		want     []string
+	}{
+		{
+			name:     "block boundary inserts one blank",
+			stable:   "para one.\n\n",
+			holdback: "para two",
+			want:     []string{"assistant", "para one.", "", "para two"},
+		},
+		{
+			name:     "crlf block boundary inserts one blank",
+			stable:   "para one.\r\n\r\n",
+			holdback: "para two",
+			want:     []string{"assistant", "para one.", "", "para two"},
+		},
+		{
+			name:     "soft break stays tight",
+			stable:   "line one\n",
+			holdback: "line two",
+			want:     []string{"assistant", "line one", "line two"},
+		},
+		{
+			name:     "holdback only keeps no leading blank",
+			stable:   "",
+			holdback: "partial",
+			want:     []string{"assistant", "partial"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := ActiveCell{
+				Kind:     ActiveAssistant,
+				Title:    "assistant",
+				Stable:   tc.stable,
+				Holdback: tc.holdback,
+			}
+			got := strings.Split(a.FormatPlain(time.Now(), p), "\n")
+			if len(got) != len(tc.want) {
+				t.Fatalf("row count %d != %d\ngot=%#v\nwant=%#v", len(got), len(tc.want), got, tc.want)
+			}
+			for i := range tc.want {
+				if strings.TrimRight(got[i], " ") != tc.want[i] {
+					t.Fatalf("row[%d]=%q want %q\ngot=%#v", i, got[i], tc.want[i], got)
+				}
+			}
+		})
+	}
+}
