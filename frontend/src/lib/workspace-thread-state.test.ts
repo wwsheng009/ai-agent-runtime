@@ -128,6 +128,49 @@ describe("thread-runtime", () => {
     expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
   });
 
+  it("hides fact ledger and other internal prompt-context messages", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 4,
+      history: [
+        {
+          role: "user",
+          content: "continue",
+        },
+        {
+          role: "developer",
+          content:
+            "Verified fact ledger (authoritative over compacted prose):\n- [execution] shell succeeded",
+          metadata: {
+            context_stage: "fact_ledger",
+            context_snapshot: true,
+          },
+        },
+        {
+          role: "assistant",
+          content:
+            "Verified fact ledger (authoritative over compacted prose):\n- legacy assistant leak",
+        },
+        {
+          role: "assistant",
+          content: "real answer",
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.messages).toHaveLength(2);
+    expect(nextThread.messages[0].role).toBe("user");
+    expect(nextThread.messages[0].segments).toEqual([
+      { type: "text", content: "continue" },
+    ]);
+    expect(nextThread.messages[1].role).toBe("assistant");
+    expect(nextThread.messages[1].segments).toEqual([
+      { type: "text", content: "real answer" },
+    ]);
+  });
+
   it("restores persisted related evidence artifacts from session history metadata", () => {
     const response: SessionHistoryResponse = {
       session_id: "session-1",

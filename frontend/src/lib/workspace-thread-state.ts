@@ -875,6 +875,12 @@ function normalizeSessionHistoryMessages(
       return [];
     }
 
+    // Strip internal prompt-context snapshots (fact_ledger, compaction, etc.)
+    // so they never leak into the user-facing thread UI.
+    if (isInternalPromptContextMessage(item)) {
+      return [];
+    }
+
     return [
       {
         role: typeof item.role === "string" ? item.role : "",
@@ -886,6 +892,39 @@ function normalizeSessionHistoryMessages(
       },
     ];
   });
+}
+
+const LEGACY_FACT_LEDGER_HEADER =
+  "Verified fact ledger (authoritative over compacted prose):";
+
+function isInternalPromptContextMessage(item: {
+  role?: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  const metadata =
+    item.metadata && typeof item.metadata === "object" ? item.metadata : null;
+  if (metadata) {
+    if (
+      typeof metadata.context_stage === "string" &&
+      metadata.context_stage.trim() !== ""
+    ) {
+      return true;
+    }
+    if (metadata.context_snapshot === true) {
+      return true;
+    }
+  }
+
+  const role = typeof item.role === "string" ? item.role.toLowerCase().trim() : "";
+  if (role === "developer" || role === "system") {
+    // Developer/system messages are prompt infrastructure, not chat turns.
+    // Keep only explicit user/assistant/tool dialogue in the UI thread.
+    return role === "developer";
+  }
+
+  const content = typeof item.content === "string" ? item.content.trim() : "";
+  return content.startsWith(LEGACY_FACT_LEDGER_HEADER);
 }
 
 function buildHistoryArtifacts(
