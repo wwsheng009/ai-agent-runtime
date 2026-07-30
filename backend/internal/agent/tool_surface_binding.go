@@ -126,7 +126,7 @@ func (a *Agent) CollectToolCatalogDefinitions(ctx context.Context) []types.ToolD
 	}
 
 	if a.GetSubagentScheduler() != nil {
-		if a.GetToolExecutionPolicy() == nil || a.GetToolExecutionPolicy().AllowsDefinition("spawn_subagents") {
+		if shouldExposeSpawnSubagents(a, nil) {
 			definition := spawnSubagentsToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true

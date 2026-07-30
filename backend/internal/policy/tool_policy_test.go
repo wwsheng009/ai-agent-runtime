@@ -82,6 +82,67 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *te
 	}
 }
 
+func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowlist(t *testing.T) {
+	policy := NewToolExecutionPolicy([]string{"view", "grep"}, false)
+	essentials := []string{
+		"enter_plan_mode", "exit_plan_mode", "ask_user_question",
+		"todos", "get_goal", "update_goal",
+		"spawn_agent", "list_agents", "wait_agent", "resolve_agent_approval",
+		"task_output", "search_tool",
+	}
+	for _, name := range essentials {
+		if err := policy.AllowTool(name); err != nil {
+			t.Fatalf("expected runtime-owned essential %q to remain executable under narrow allowlist, got %v", name, err)
+		}
+		if !IsRuntimeOwnedEssentialTool(name) {
+			t.Fatalf("expected %q to be classified as runtime-owned essential", name)
+		}
+	}
+	// Regular toolkit tools still need to be on the allowlist.
+	if err := policy.AllowTool("write"); err == nil {
+		t.Fatal("expected non-essential write tool to remain allowlist-gated")
+	}
+	if err := policy.AllowTool("shell"); err == nil {
+		t.Fatal("expected non-essential shell tool to remain allowlist-gated")
+	}
+	// Explicit deny still wins over essential bypass.
+	policy.DeniedTools = map[string]bool{"Enter_Plan_Mode": true}
+	if err := policy.AllowTool("enter_plan_mode"); err == nil {
+		t.Fatal("expected normalized explicit deny to block enter_plan_mode")
+	}
+}
+
+func TestToolExecutionPolicy_AllowTool_EmptyAllowlistBlocksEssentials(t *testing.T) {
+	// DisableTools synthesizes an enabled empty allowlist; essentials must not
+	// leak through that total-disable surface.
+	policy := NewToolExecutionPolicy([]string{}, false)
+	for _, name := range []string{"search_tool", "get_goal", "update_goal", "spawn_subagents", "todos"} {
+		if err := policy.AllowTool(name); err == nil {
+			t.Fatalf("expected empty allowlist to block essential %q", name)
+		}
+		if policy.AllowsDefinition(name) {
+			t.Fatalf("expected empty allowlist to hide definition for %q", name)
+		}
+	}
+}
+
+func TestToolExecutionPolicy_AllowTool_EssentialStillHonorsCapabilityScope(t *testing.T) {
+	// enter_plan_mode requires CapReadOnly + CapAskUser; network alone is insufficient.
+	policy := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly, CapAskUser, CapNetwork})
+	if err := policy.AllowTool("enter_plan_mode"); err != nil {
+		t.Fatalf("expected enter_plan_mode under read_only+ask_user+network scope, got %v", err)
+	}
+	// Without CapAskUser, enter_plan_mode is still capability-gated (allowlist bypass is not enough).
+	narrow := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly, CapNetwork})
+	if err := narrow.AllowTool("enter_plan_mode"); err == nil {
+		t.Fatal("expected enter_plan_mode to remain capability-gated without CapAskUser")
+	}
+	// Agent management still requires CapAgentManagement.
+	if err := policy.AllowTool("spawn_agent"); err == nil {
+		t.Fatal("expected spawn_agent to remain capability-gated without CapAgentManagement")
+	}
+}
+
 func TestToolExecutionPolicy_AllowToolCall_BlocksPathOutsideSandbox(t *testing.T) {
 	root := t.TempDir()
 	policy := NewToolExecutionPolicy(nil, false)

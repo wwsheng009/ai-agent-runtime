@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -1190,10 +1191,34 @@ func TestBuildLocalChatToolPolicy_AllowsBrokerTeamTools(t *testing.T) {
 		t.Fatal("expected allowlist policy")
 	}
 
-	for _, name := range []string{"bash", "edit", toolbroker.ToolSpawnTeam, toolbroker.ToolReadTaskSpec} {
+	for _, name := range []string{"bash", "edit", agent.SpawnSubagentsToolName, toolbroker.ToolSpawnTeam, toolbroker.ToolReadTaskSpec} {
 		if !policy.AllowedTools[name] {
 			t.Fatalf("expected %q to be allowed, got %#v", name, policy.AllowedTools)
 		}
+	}
+}
+
+func TestBuildLocalChatToolPolicy_DoesNotWidenExplicitAllowlistForScheduler(t *testing.T) {
+	session := &ChatSession{
+		ToolPolicy: runtimepolicy.NewToolExecutionPolicy([]string{"view"}, false),
+	}
+	policy := buildLocalChatToolPolicy(session, stubLocalChatToolSurface{
+		tools: []runtimeskill.ToolInfo{{Name: "view"}},
+	}, nil)
+	if policy == nil {
+		t.Fatal("expected explicit tool policy")
+	}
+	// buildLocalChatToolPolicy must not mutate an explicit profile allowlist map
+	// by inserting scheduler tools. Runtime-owned essentials still execute via
+	// AllowTool bypass; non-essentials stay map-gated.
+	if policy.AllowedTools[agent.SpawnSubagentsToolName] {
+		t.Fatal("expected explicit allowlist map not to be widened with spawn_subagents")
+	}
+	if err := policy.AllowTool(agent.SpawnSubagentsToolName); err != nil {
+		t.Fatalf("expected runtime-essential spawn_subagents to remain executable: %v", err)
+	}
+	if err := policy.AllowTool("write"); err == nil {
+		t.Fatal("expected non-essential write to stay allowlist-gated")
 	}
 }
 

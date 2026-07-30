@@ -45,15 +45,18 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		return nil
 	}
 	normalizedToolName := normalizeToolName(toolName)
-	if p.DeniedTools[toolName] || runtimeSearchExplicitlyDenied(p.DeniedTools, normalizedToolName) {
+	if p.DeniedTools[toolName] || runtimeOwnedEssentialExplicitlyDenied(p.DeniedTools, normalizedToolName) {
 		return fmt.Errorf("tool denied by execution policy: %s", toolName)
 	}
-	// search_tool is a runtime-owned, read-only catalog projection. It may be
-	// injected after an agent allowlist is derived, so the allowlist must not
-	// make a model-visible search surface impossible to execute. Explicit deny
-	// rules and capability/read-only checks below still apply.
-	if p.AllowlistEnabled && !p.AllowedTools[toolName] && normalizedToolName != "search_tool" {
-		return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
+	// Runtime-owned agent essentials (plan mode, goal/todos, collab, search_tool)
+	// may be injected after a *narrow non-empty* product/profile allowlist is
+	// derived. The allowlist must not brick the agent control plane. An empty
+	// allowlist means tools are fully disabled (DisableTools) and essentials
+	// do not bypass. Explicit deny, capability scope, and read-only still apply.
+	if p.AllowlistEnabled && !p.AllowedTools[toolName] {
+		if len(p.AllowedTools) == 0 || !IsRuntimeOwnedEssentialTool(normalizedToolName) {
+			return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
+		}
 	}
 	if err := p.AllowCapabilities(p.resolveCapabilities(EvalRequest{ToolName: toolName})); err != nil {
 		return fmt.Errorf("tool %s: %w", toolName, err)
@@ -72,12 +75,39 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	return nil
 }
 
-func runtimeSearchExplicitlyDenied(deniedTools map[string]bool, normalizedToolName string) bool {
-	if normalizedToolName != "search_tool" {
+// IsRuntimeOwnedEssentialTool reports tools the runtime needs for agent
+// operation (session control, plan mode, collab, catalog search). These bypass
+// allowlist gates so a narrow --allow-tool / profile allowlist cannot brick the
+// agent control plane. Explicit DeniedTools, capability scope, and read-only
+// still apply.
+func IsRuntimeOwnedEssentialTool(toolName string) bool {
+	switch normalizeToolName(toolName) {
+	case "search_tool",
+		"ask_user_question",
+		"enter_plan_mode", "exit_plan_mode",
+		"todos", "get_goal", "read_goal", "update_goal",
+		"background_task", "task_output",
+		"spawn_agent", "spawn_subagents", "spawn_team",
+		"list_agents", "wait_agent", "read_agent_events",
+		"send_message", "send_input", "followup_task",
+		"close_agent", "resume_agent",
+		"apply_agent_worktree", "discard_agent_worktree",
+		"resolve_agent_approval",
+		"wait_team", "send_team_message",
+		"read_mailbox_digest", "read_task_spec", "read_task_context",
+		"report_task_outcome", "block_current_task":
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeOwnedEssentialExplicitlyDenied(deniedTools map[string]bool, normalizedToolName string) bool {
+	if !IsRuntimeOwnedEssentialTool(normalizedToolName) {
 		return false
 	}
 	for name, denied := range deniedTools {
-		if denied && normalizeToolName(name) == "search_tool" {
+		if denied && normalizeToolName(name) == normalizedToolName {
 			return true
 		}
 	}

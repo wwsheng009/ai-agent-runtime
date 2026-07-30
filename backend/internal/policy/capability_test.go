@@ -36,3 +36,19 @@ func TestDefaultCapabilityResolverSeparatesAgentManagementFromObservation(t *tes
 		assert.Equal(t, []Capability{CapReadOnly}, resolver.Resolve(EvalRequest{ToolName: toolName}))
 	}
 }
+
+func TestReadOnlyChildCapabilitiesAllowsControlPlaneNotMutations(t *testing.T) {
+	policy := NewCapabilityScopedToolExecutionPolicy(nil, ReadOnlyChildCapabilities())
+	policy.ReadOnly = true
+
+	for _, toolName := range []string{"view", "spawn_agent", "spawn_team", "ask_user_question", "enter_plan_mode", "send_message"} {
+		if err := policy.AllowTool(toolName); err != nil {
+			t.Fatalf("expected read-only child capabilities to allow %s: %v", toolName, err)
+		}
+	}
+	for _, toolName := range []string{"write", "edit", "shell", "bash", "background_task"} {
+		if err := policy.AllowTool(toolName); err == nil {
+			t.Fatalf("expected read-only child capabilities to block %s", toolName)
+		}
+	}
+}

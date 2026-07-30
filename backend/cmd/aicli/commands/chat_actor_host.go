@@ -428,10 +428,7 @@ func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
 		toolPolicy = toolPolicy.Clone()
 		toolPolicy.ReadOnly = true
 	}
-	toolPolicy.SetCapabilityScope([]runtimepolicy.Capability{
-		runtimepolicy.CapReadOnly,
-		runtimepolicy.CapNetwork,
-	})
+	toolPolicy.SetCapabilityScope(runtimepolicy.ReadOnlyChildCapabilities())
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
 }
 
@@ -852,6 +849,10 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 				allowedTools = runtimeToolNames(toolSurface.ListTools())
 			}
 			allowedTools = append(allowedTools, brokerToolNames(broker.Definitions())...)
+			// The scheduler contributes a runtime-owned tool outside the MCP and
+			// broker catalogs, so include it in the synthesized default policy.
+			// Explicit profile/permissions allowlists are intentionally not widened.
+			allowedTools = append(allowedTools, agent.SpawnSubagentsToolName)
 			if allowedTools == nil {
 				allowedTools = []string{}
 			}

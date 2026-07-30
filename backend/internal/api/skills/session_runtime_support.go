@@ -3106,10 +3106,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 			toolPolicy = toolPolicy.Clone()
 			toolPolicy.ReadOnly = true
 		}
-		toolPolicy.SetCapabilityScope([]runtimepolicy.Capability{
-			runtimepolicy.CapReadOnly,
-			runtimepolicy.CapNetwork,
-		})
+		toolPolicy.SetCapabilityScope(runtimepolicy.ReadOnlyChildCapabilities())
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
 	maxDepth := 0

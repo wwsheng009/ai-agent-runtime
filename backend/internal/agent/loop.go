@@ -2539,7 +2539,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	}
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
-		if len(allowed) == 0 || allowed["spawn_subagents"] {
+		if shouldExposeSpawnSubagents(loop.agent, allowed) {
 			definition := spawnSubagentsToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true

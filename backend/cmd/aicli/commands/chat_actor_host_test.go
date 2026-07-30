@@ -887,13 +887,16 @@ func TestApplyLocalChildReadOnlyPolicyOverridesBypassPermissions(t *testing.T) {
 			t.Fatalf("expected read-only policy to block %s", toolName)
 		}
 	}
-	for _, toolName := range []string{"background_task", "spawn_agent", "spawn_team"} {
-		if err := policy.AllowTool(toolName); err == nil {
-			t.Fatalf("expected read-only child capability scope to block %s", toolName)
-		}
+	// background_task stays out of the read-only child capability surface.
+	if err := policy.AllowTool("background_task"); err == nil {
+		t.Fatal("expected read-only child capability scope to block background_task")
 	}
-	if err := policy.AllowTool("view"); err != nil {
-		t.Fatalf("expected read-only policy to allow view: %v", err)
+	// Control-plane tools must remain usable under read-only children so
+	// investigation/coordination work is not bricked by capability scope.
+	for _, toolName := range []string{"view", "spawn_agent", "spawn_team", "ask_user_question", "enter_plan_mode"} {
+		if err := policy.AllowTool(toolName); err != nil {
+			t.Fatalf("expected read-only child policy to allow %s: %v", toolName, err)
+		}
 	}
 }
 

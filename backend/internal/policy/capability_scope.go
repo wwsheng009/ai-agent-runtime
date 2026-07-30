@@ -14,6 +14,19 @@ func NewCapabilityScopedToolExecutionPolicy(allowedTools []string, capabilities 
 	return policy
 }
 
+// ReadOnlyChildCapabilities is the minimum capability surface for read-only
+// child agents. Write/shell/background stay out of scope (and ReadOnly still
+// blocks write/shell tools), while control-plane tools remain usable:
+// ask_user (plan mode / questions) and agent_management (spawn/collab).
+func ReadOnlyChildCapabilities() []Capability {
+	return []Capability{
+		CapReadOnly,
+		CapNetwork,
+		CapAskUser,
+		CapAgentManagement,
+	}
+}
+
 func (p *ToolExecutionPolicy) SetCapabilityScope(capabilities []Capability) {
 	if p == nil {
 		return

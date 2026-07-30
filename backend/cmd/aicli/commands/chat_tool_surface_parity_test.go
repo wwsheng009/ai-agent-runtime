@@ -96,16 +96,24 @@ func TestChatToolAvailable_RespectsToolPolicy(t *testing.T) {
 	if !chatToolAvailable(session, getGoalFunctionName) {
 		t.Fatal("expected allowlisted get_goal to be available")
 	}
-	if chatToolAvailable(session, updateGoalFunctionName) {
-		t.Fatal("expected non-allowlisted update_goal to be unavailable")
+	// update_goal is a runtime-owned essential: a narrow non-empty allowlist must
+	// not hide the agent control surface.
+	if !chatToolAvailable(session, updateGoalFunctionName) {
+		t.Fatal("expected runtime-essential update_goal to remain available under narrow allowlist")
 	}
 
 	captureStdout(t, func() {
 		handleCommand(session, "/goal policy gated guidance", false)
 	})
 	prompt := renderActiveGoalGuidance(session)
-	if strings.Contains(prompt, "call update_goal") {
-		t.Fatalf("did not expect update_goal guidance when policy blocks it, got %q", prompt)
+	if prompt == "" {
+		t.Fatal("expected active goal guidance after /goal")
+	}
+
+	// Fully disabled tools still hide essentials at the session gate.
+	session.DisableTools = true
+	if chatToolAvailable(session, getGoalFunctionName) || chatToolAvailable(session, updateGoalFunctionName) {
+		t.Fatal("expected DisableTools to hide goal tools including essentials")
 	}
 }
 

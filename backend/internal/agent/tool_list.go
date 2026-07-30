@@ -263,8 +263,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 	}
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
-		if (len(allowed) == 0 || allowed["spawn_subagents"]) &&
-			(loop.agent.GetToolExecutionPolicy() == nil || loop.agent.GetToolExecutionPolicy().AllowsDefinition("spawn_subagents")) {
+		if shouldExposeSpawnSubagents(loop.agent, allowed) {
 			definition := spawnSubagentsToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true

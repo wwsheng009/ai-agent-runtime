@@ -349,6 +349,35 @@ func (a *Agent) SetToolExecutionPolicy(policy *ToolExecutionPolicy) {
 	a.toolPolicy = policy
 }
 
+// hasSubagentScheduler returns true if the agent has (or has created) a
+// SubagentScheduler. Does not trigger lazy creation.
+func (a *Agent) hasSubagentScheduler() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.subagents != nil
+}
+
+// shouldExposeSpawnSubagents returns whether spawn_subagents may appear in
+// the model-visible tool surface. Scheduler presence, optional call whitelist,
+// and execution policy must all agree.
+func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
+	if a == nil || !a.hasSubagentScheduler() {
+		return false
+	}
+	if len(callWhitelist) > 0 && !callWhitelist[SpawnSubagentsToolName] {
+		return false
+	}
+	if policy := a.GetToolExecutionPolicy(); policy != nil && !policy.AllowsDefinition(SpawnSubagentsToolName) {
+		return false
+	}
+	return true
+}
+
+const SpawnSubagentsToolName = "spawn_subagents"
+
 // GetPermissionEngine returns the permission engine.
 func (a *Agent) GetPermissionEngine() *PermissionEngine {
 	a.mu.RLock()
