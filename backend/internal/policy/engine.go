@@ -53,17 +53,19 @@ type HookDispatcher interface {
 //
 // Pipeline order (Iteration A productization):
 //
-//  1. PreToolUse / permission hooks → deny | allow(+patch)
-//  2. ToolExecutionPolicy (capability/tool allow-deny)
+//  1. Permission hooks → deny | modify(args) then continue (never allow-and-stop)
+//  2. ToolExecutionPolicy (capability/tool allow-deny) against final args
 //  3. Rule engine → deny > ask > allow
 //  4. Remembered grants (never for dangerous tools)
 //  5. Taxonomy / shell read-only auto-allow
 //  6. permission_mode policy
-//  7. Callback override
-//  8. Ask handler / headless deny
+//  7. Callback override (patched args re-validated against hard constraints)
+//  8. Ask handler / headless deny (patched args re-validated against hard constraints)
 //
 // bypass_permissions may skip ask/grants flow for mode decisions, but MUST NOT
-// skip hook denials or hard deny rules / policy denials.
+// skip hook denials or hard deny rules / policy denials. Any argument patch
+// produced by a hook, callback, or approval must pass hard constraints before
+// execution; patches never grant execution on their own.
 type Engine struct {
 	Hooks              HookDispatcher
 	Rules              []Rule
@@ -141,13 +143,18 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	if req.ToolName == "" {
 		return Decision{Type: DecisionDeny, Reason: "tool_name_required", Stage: StagePolicy}, nil
 	}
-	if len(req.Capabilities) == 0 {
-		resolver := e.CapabilityResolver
-		if resolver == nil {
-			resolver = DefaultCapabilityResolver{}
-		}
-		req.Capabilities = resolver.Resolve(req)
+	// autoCapabilities tracks whether capabilities were derived here (vs supplied
+	// by the caller). Only auto-derived capabilities are re-resolved after an
+	// argument patch so explicit caller capabilities are never silently changed.
+	autoCapabilities := len(req.Capabilities) == 0
+	if autoCapabilities {
+		req.Capabilities = e.resolveCapabilities(req)
 	}
+
+	// finalPatchedArgs carries the fully-resolved replacement args
+	// (hook → callback → approval) back to the caller for execution.
+	var finalPatchedArgs json.RawMessage
+	patchApplied := false
 
 	mode := req.Mode
 	if mode == "" && e != nil {
@@ -156,7 +163,9 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	mode = normalizeMode(mode)
 	req.Mode = mode
 
-	// 1) Hooks — hard deny always wins, including under bypass.
+	// 1) Permission hook — hard deny always wins (including under bypass). An
+	// arg modification updates req.Args and continues through static policy,
+	// rules, and mode below; it never short-circuits to allow.
 	if e.Hooks != nil {
 		payload := map[string]interface{}{
 			"tool_name": req.ToolName,
@@ -181,45 +190,33 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 			return withStage(Decision{Type: DecisionDeny, Reason: hookDecision.Message}, StageHooks, firstNonEmpty(hookDecision.Message, "hook_denied")), nil
 		}
 		if hookDecision.Action == hooks.DecisionModify && len(hookDecision.PatchedPayload) > 0 {
-			return withStage(Decision{
-				Type:        DecisionAllow,
-				PatchedArgs: hookDecision.PatchedPayload,
-				HookMessage: strings.TrimSpace(hookDecision.Message),
-				HookContext: cloneStringMap(hookDecision.ExtraContext),
-			}, StageHooks, firstNonEmpty(hookDecision.Message, "hook_modified")), nil
+			patchedArgs, patchErr := ApplyPatchedArgs(req.Args, hookDecision.PatchedPayload)
+			if patchErr != nil {
+				return withStage(Decision{Type: DecisionDeny, Reason: patchErr.Error()}, StageHooks, "patched_args_invalid"), nil
+			}
+			req.Args = patchedArgs
+			finalPatchedArgs = hookDecision.PatchedPayload
+			patchApplied = true
+			if autoCapabilities {
+				req.Capabilities = e.resolveCapabilities(req)
+			}
 		}
 		req.Metadata = mergeHookMetadata(req.Metadata, hookDecision)
 	}
 
-	// 2) Static tool/capability policy — hard deny.
-	if e.Policy != nil {
-		if err := e.Policy.AllowCapabilities(req.Capabilities); err != nil {
-			return withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error()), nil
-		}
-		if err := e.Policy.AllowTool(req.ToolName); err != nil {
-			return withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error()), nil
-		}
-		if req.ToolInfo != nil {
-			if err := e.Policy.AllowToolInfo(*req.ToolInfo); err != nil {
-				return withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error()), nil
-			}
-			if err := e.Policy.AllowToolCall(*req.ToolInfo, req.Args); err != nil {
-				return withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error()), nil
-			}
-		}
+	// 2) Static tool/capability policy — hard deny (evaluated against the
+	// possibly hook-modified args).
+	if deny := e.validateStaticPolicy(req); deny != nil {
+		return *deny, nil
 	}
 
 	// 3) Rules — first match wins; deny is hard (not skipped by bypass).
 	var decision Decision
-	for _, rule := range e.Rules {
-		if !rule.Matches(req) {
-			continue
+	if ruleDecision, matched := e.firstMatchingRule(req); matched {
+		decision = ruleDecision
+		if decision.Type == DecisionDeny {
+			return decision, nil
 		}
-		decision = withStage(Decision{Type: rule.Decision, Reason: rule.Reason}, StageRules, firstNonEmpty(rule.Reason, string(rule.Decision)))
-		break
-	}
-	if decision.Type == DecisionDeny {
-		return decision, nil
 	}
 
 	// 4) Remembered grants (skipped under bypass — bypass already allows without ask).
@@ -286,15 +283,194 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 			}
 		}
 		if len(callbackDecision.PatchedArgs) > 0 {
-			decision.PatchedArgs = callbackDecision.PatchedArgs
+			// A callback patch must not bypass hard constraints; re-validate
+			// the replacement args before accepting them.
+			updated, deny := e.applyPatchAndRevalidate(req, callbackDecision.PatchedArgs, autoCapabilities)
+			if deny != nil {
+				return *deny, nil
+			}
+			req = updated
+			finalPatchedArgs = callbackDecision.PatchedArgs
+			patchApplied = true
 		}
 		if callbackDecision.Stage != "" {
 			decision.Stage = callbackDecision.Stage
 		}
 	}
 
+	decision.PatchedArgs = finalPatchedArgs
+	if patchApplied {
+		// Always return the effective full args, rather than a later patch
+		// relative to an earlier patch. The execution caller starts from the
+		// original model args and therefore needs one complete replacement.
+		if encoded, marshalErr := json.Marshal(req.Args); marshalErr != nil {
+			return withStage(Decision{Type: DecisionDeny, Reason: marshalErr.Error()}, StagePolicy, "patched_args_invalid"), nil
+		} else {
+			decision.PatchedArgs = encoded
+		}
+	}
 	decision = applyRequestHookMetadata(decision, req.Metadata)
 	return e.resolveAsk(ctx, decision, req)
+}
+
+// resolveCapabilities returns the capabilities for a request using the engine's
+// resolver (or the default resolver when none is configured).
+func (e *Engine) resolveCapabilities(req EvalRequest) []Capability {
+	var resolver CapabilityResolver
+	if e != nil {
+		resolver = e.CapabilityResolver
+	}
+	if resolver == nil {
+		resolver = DefaultCapabilityResolver{}
+	}
+	return resolver.Resolve(req)
+}
+
+// validateStaticPolicy runs the non-negotiable static tool/capability policy
+// (capability scope, tool allow/deny, tool-info governance, and sandbox
+// path/URL/command checks in AllowToolCall) against the current request args.
+// It returns a deny decision when blocked, or nil when the request passes.
+func (e *Engine) validateStaticPolicy(req EvalRequest) *Decision {
+	if e == nil || e.Policy == nil {
+		return nil
+	}
+	if err := e.Policy.AllowCapabilities(req.Capabilities); err != nil {
+		d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error())
+		return &d
+	}
+	if err := e.Policy.AllowTool(req.ToolName); err != nil {
+		d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error())
+		return &d
+	}
+	if req.ToolInfo != nil {
+		if err := e.Policy.AllowToolInfo(*req.ToolInfo); err != nil {
+			d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error())
+			return &d
+		}
+		if err := e.Policy.AllowToolCall(*req.ToolInfo, req.Args); err != nil {
+			d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error())
+			return &d
+		}
+	}
+	return nil
+}
+
+// firstMatchingRule returns the decision for the first matching static rule.
+func (e *Engine) firstMatchingRule(req EvalRequest) (Decision, bool) {
+	if e == nil {
+		return Decision{}, false
+	}
+	for _, rule := range e.Rules {
+		if !rule.Matches(req) {
+			continue
+		}
+		return withStage(Decision{Type: rule.Decision, Reason: rule.Reason}, StageRules, firstNonEmpty(rule.Reason, string(rule.Decision))), true
+	}
+	return Decision{}, false
+}
+
+// validateHardConstraints re-runs only the non-negotiable checks (static
+// tool/capability policy incl. sandbox, plus hard deny rules) against a patched
+// candidate. It never runs the hook, grants, readonly-auto, permission mode,
+// callback, or the ask handler, so it is safe to call after a callback or
+// approval argument patch without re-triggering approval prompts.
+func (e *Engine) validateHardConstraints(req EvalRequest) *Decision {
+	if deny := e.validateStaticPolicy(req); deny != nil {
+		return deny
+	}
+	if ruleDecision, matched := e.firstMatchingRule(req); matched && ruleDecision.Type == DecisionDeny {
+		return &ruleDecision
+	}
+	return nil
+}
+
+// applyPatchAndRevalidate decodes a full-replacement arg patch, updates
+// req.Args, re-resolves auto-derived capabilities, and enforces hard
+// constraints. On failure it returns a deny decision; on success it returns the
+// updated request.
+func (e *Engine) applyPatchAndRevalidate(req EvalRequest, patched json.RawMessage, autoCapabilities bool) (EvalRequest, *Decision) {
+	patchedArgs, err := ApplyPatchedArgs(req.Args, patched)
+	if err != nil {
+		d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, "patched_args_invalid")
+		return req, &d
+	}
+	req.Args = patchedArgs
+	if autoCapabilities {
+		req.Capabilities = e.resolveCapabilities(req)
+	}
+	if deny := e.validateHardConstraints(req); deny != nil {
+		return req, deny
+	}
+	return req, nil
+}
+
+// ValidateHardConstraints enforces only the non-negotiable checks for an
+// already-approved tool call that is being executed or replayed outside the
+// normal Evaluate flow (for example, ExecuteApprovedToolCall after a restart).
+//
+// It honors a permission-hook hard block and applies a single permission-hook
+// arg modification, then runs static tool/capability policy (including sandbox
+// path/URL/command checks) and hard deny rules. It never runs grants,
+// readonly-auto, permission mode, callback, or the ask handler, so it cannot
+// re-prompt for approval or loop. When a hook modifies args, the replacement is
+// returned via Decision.PatchedArgs.
+func (e *Engine) ValidateHardConstraints(ctx context.Context, req EvalRequest) (Decision, error) {
+	if e == nil {
+		return Decision{Type: DecisionAllow, Stage: StagePolicy, Reason: "no_engine"}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req.ToolName = strings.TrimSpace(req.ToolName)
+	if req.ToolName == "" {
+		return withStage(Decision{Type: DecisionDeny, Reason: "tool_name_required"}, StagePolicy, "tool_name_required"), nil
+	}
+	autoCapabilities := len(req.Capabilities) == 0
+	if autoCapabilities {
+		req.Capabilities = e.resolveCapabilities(req)
+	}
+
+	var patched json.RawMessage
+	if e.Hooks != nil {
+		payload := map[string]interface{}{
+			"tool_name": req.ToolName,
+			"args":      req.Args,
+		}
+		if req.SessionID != "" {
+			payload["session_id"] = req.SessionID
+		}
+		if req.TraceID != "" {
+			payload["trace_id"] = req.TraceID
+		}
+		if req.ToolInfo != nil {
+			payload["mcp_name"] = req.ToolInfo.MCPName
+			payload["trust_level"] = req.ToolInfo.MCPTrustLevel
+			payload["execution_mode"] = req.ToolInfo.ExecutionMode
+		}
+		hookDecision, hookErr := e.Hooks.Dispatch(ctx, hooks.EventPermissionRequest, payload)
+		if hookErr != nil {
+			return withStage(Decision{Type: DecisionDeny, Reason: hookErr.Error()}, StageHooks, hookErr.Error()), hookErr
+		}
+		if hookDecision.Action == hooks.DecisionBlock {
+			return withStage(Decision{Type: DecisionDeny, Reason: hookDecision.Message}, StageHooks, firstNonEmpty(hookDecision.Message, "hook_denied")), nil
+		}
+		if hookDecision.Action == hooks.DecisionModify && len(hookDecision.PatchedPayload) > 0 {
+			updatedArgs, patchErr := ApplyPatchedArgs(req.Args, hookDecision.PatchedPayload)
+			if patchErr != nil {
+				return withStage(Decision{Type: DecisionDeny, Reason: patchErr.Error()}, StageHooks, "patched_args_invalid"), nil
+			}
+			req.Args = updatedArgs
+			patched = hookDecision.PatchedPayload
+			if autoCapabilities {
+				req.Capabilities = e.resolveCapabilities(req)
+			}
+		}
+	}
+
+	if deny := e.validateHardConstraints(req); deny != nil {
+		return *deny, nil
+	}
+	return withStage(Decision{Type: DecisionAllow, PatchedArgs: patched, Reason: "hard_constraints_ok"}, StagePolicy, "hard_constraints_ok"), nil
 }
 
 func (e *Engine) readOnlyAutoDecision(req EvalRequest) (bool, string) {
@@ -420,6 +596,7 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		return withStage(Decision{
 			Type:        DecisionAllow,
 			Reason:      "bypass_permissions",
+			PatchedArgs: decision.PatchedArgs,
 			HookMessage: decision.HookMessage,
 			HookContext: cloneStringMap(decision.HookContext),
 		}, StageMode, "bypass_permissions"), nil
@@ -477,9 +654,33 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	if resp.Remember && e.Grants != nil && !IsDangerousTool(req.ToolName) {
 		_ = e.Grants.Remember(Grant{Tool: req.ToolName, Scope: "session"})
 	}
+	// Preserve any hook/callback patch already carried on the decision; the
+	// approver may replace it, but a missing approval patch must not silently
+	// drop an earlier patch.
+	patchedArgs := decision.PatchedArgs
+	if len(resp.PatchedArgs) > 0 {
+		// An approval-supplied patch must still pass hard constraints (sandbox,
+		// capability, tool policy, hard rules) before it can execute. We do not
+		// re-enter mode/callback/ask, so this cannot loop or re-prompt.
+		revalReq := req
+		updatedArgs, patchErr := ApplyPatchedArgs(req.Args, resp.PatchedArgs)
+		if patchErr != nil {
+			return withStage(Decision{Type: DecisionDeny, Reason: patchErr.Error()}, StageAsk, "patched_args_invalid"), nil
+		}
+		revalReq.Args = updatedArgs
+		if deny := e.validateHardConstraints(revalReq); deny != nil {
+			return *deny, nil
+		}
+		patchedArgs = resp.PatchedArgs
+		if encoded, marshalErr := json.Marshal(revalReq.Args); marshalErr != nil {
+			return withStage(Decision{Type: DecisionDeny, Reason: marshalErr.Error()}, StageAsk, "patched_args_invalid"), nil
+		} else {
+			patchedArgs = encoded
+		}
+	}
 	return withStage(Decision{
 		Type:        DecisionAllow,
-		PatchedArgs: resp.PatchedArgs,
+		PatchedArgs: patchedArgs,
 		HookMessage: decision.HookMessage,
 		HookContext: cloneStringMap(decision.HookContext),
 	}, StageAsk, "approved"), nil

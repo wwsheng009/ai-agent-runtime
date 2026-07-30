@@ -35,9 +35,16 @@ func TestToolExecutionPolicy_AllowToolInfo_AllowsLocalRead(t *testing.T) {
 	}
 }
 
-func TestToolExecutionPolicy_AllowTool_BlocksShellSurfaceInReadOnlyMode(t *testing.T) {
+func TestToolExecutionPolicy_AllowTool_KeepsShellVisibleInReadOnlyMode(t *testing.T) {
 	policy := NewToolExecutionPolicy(nil, true)
-	for _, name := range []string{"shell", "bash", "execute_shell_command", "shell_command", "aicli_exec", "background_task"} {
+	// Shell tools remain definition-visible under read-only; mutation risk is
+	// enforced per-command in AllowToolCall.
+	for _, name := range []string{"shell", "bash", "execute_shell_command", "shell_command", "aicli_exec"} {
+		if err := policy.AllowTool(name); err != nil {
+			t.Fatalf("expected read-only policy to keep shell surface visible for %q, got %v", name, err)
+		}
+	}
+	for _, name := range []string{"background_task"} {
 		if err := policy.AllowTool(name); err == nil {
 			t.Fatalf("expected read-only policy to block %q", name)
 		}

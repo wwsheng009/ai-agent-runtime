@@ -10,6 +10,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -139,6 +140,14 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	if broker := a.GetToolBroker(); broker != nil && broker.IsBrokerTool(call.Name) {
 		loop := NewReActLoop(a, a.llmRuntime, nil)
 		preflightInfo := loop.lookupToolInfoForPreflight(ctx, call.Name, nil)
+		var deny string
+		if call, deny = a.enforceApprovedToolHardConstraints(ctx, sessionID, traceID, call, preflightInfo); deny != "" {
+			result.Error = deny
+			result.Call.Args = call.Args
+			loop.finishToolExecutionOutcome(metadata, call.Name, "", result.Error)
+			return finalize(), nil
+		}
+		result.Call.Args = call.Args
 		decision := loop.prepareToolExecution(metadata, call.Name, call.ID, call.Args, preflightInfo)
 		if !decision.Allow {
 			if decision.SoftEmpty {
@@ -172,6 +181,14 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 
 	loop := NewReActLoop(a, a.llmRuntime, nil)
 	preflightInfo := loop.lookupToolInfoForPreflight(ctx, call.Name, &toolInfo)
+	var deny string
+	if call, deny = a.enforceApprovedToolHardConstraints(ctx, sessionID, traceID, call, &toolInfo); deny != "" {
+		result.Error = deny
+		result.Call.Args = call.Args
+		loop.finishToolExecutionOutcome(metadata, call.Name, "", result.Error)
+		return finalize(), nil
+	}
+	result.Call.Args = call.Args
 	decision := loop.prepareToolExecution(metadata, call.Name, call.ID, call.Args, preflightInfo)
 	if !decision.Allow {
 		if decision.SoftEmpty {
@@ -234,6 +251,57 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		}
 	}
 	return message, nil
+}
+
+// enforceApprovedToolHardConstraints re-validates an already-approved tool call
+// against non-negotiable policy (permission-hook hard block/modify, capability
+// scope, tool allow/deny, sandbox path/URL/command checks, and hard deny rules)
+// without re-prompting for approval. It returns the possibly hook-patched call
+// and a non-empty deny reason when execution must be refused. This closes the
+// gap where approval/hook-patched arguments could otherwise be executed on
+// replay without passing hard boundaries.
+func (a *Agent) enforceApprovedToolHardConstraints(ctx context.Context, sessionID, traceID string, call types.ToolCall, info *runtimeskill.ToolInfo) (types.ToolCall, string) {
+	if engine := a.GetPermissionEngine(); engine != nil {
+		decision, err := engine.ValidateHardConstraints(ctx, runtimepolicy.EvalRequest{
+			SessionID:  sessionID,
+			TraceID:    traceID,
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			ToolInfo:   info,
+			Args:       call.Args,
+			Mode:       permissionModeFromContext(ctx),
+		})
+		if err != nil {
+			return call, err.Error()
+		}
+		if decision.Type == runtimepolicy.DecisionDeny {
+			reason := strings.TrimSpace(decision.Reason)
+			if reason == "" {
+				reason = "denied by execution policy"
+			}
+			return call, reason
+		}
+		if len(decision.PatchedArgs) > 0 {
+			patched, patchErr := runtimepolicy.ApplyPatchedArgs(call.Args, decision.PatchedArgs)
+			if patchErr != nil {
+				return call, patchErr.Error()
+			}
+			call.Args = patched
+		}
+		return call, ""
+	}
+	// No permission engine wired: fall back to the static tool policy so an
+	// approved replay still cannot escape capability/tool/sandbox constraints.
+	if policy := a.GetToolExecutionPolicy(); policy != nil {
+		if info != nil {
+			if err := policy.AllowToolCall(*info, call.Args); err != nil {
+				return call, err.Error()
+			}
+		} else if err := policy.AllowTool(call.Name); err != nil {
+			return call, err.Error()
+		}
+	}
+	return call, ""
 }
 
 func completedBatchToolMessages(history []types.Message, batch []types.ToolCall, currentToolCallID string) []types.Message {

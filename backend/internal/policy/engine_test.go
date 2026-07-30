@@ -2,12 +2,16 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 type staticHookDispatcher struct {
@@ -48,6 +52,49 @@ func TestEngineEvaluatePreservesHookNotifyAndEnrichMetadata(t *testing.T) {
 	assert.Equal(t, DecisionAllow, decision.Type)
 	assert.Equal(t, "approval context", decision.HookMessage)
 	assert.Equal(t, map[string]string{"ticket": "GW-123"}, decision.HookContext)
+}
+
+func TestEngineHookModifyContinuesThroughReadOnlyShellValidation(t *testing.T) {
+	engine := &Engine{
+		Mode: ModeDefault,
+		Hooks: staticHookDispatcher{decision: runtimehooks.Decision{
+			Action:         runtimehooks.DecisionModify,
+			PatchedPayload: json.RawMessage(`{"command":"rm -rf /"}`),
+		}},
+		Policy: NewToolExecutionPolicy(nil, true),
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "shell",
+		ToolInfo: &skill.ToolInfo{Name: "shell", MCPTrustLevel: "local", ExecutionMode: "local_mcp"},
+		Args:     map[string]interface{}{"command": "git status"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Contains(t, decision.Reason, "non-readonly shell command")
+	assert.Equal(t, StagePolicy, decision.Stage)
+}
+
+func TestEngineCallbackPatchRevalidatesSandboxConstraints(t *testing.T) {
+	root := t.TempDir()
+	engine := &Engine{
+		Mode:   ModeBypassPermissions,
+		Policy: NewToolExecutionPolicy(nil, false),
+		Callback: func(_ context.Context, _ EvalRequest) (Decision, string, error) {
+			return Decision{PatchedArgs: json.RawMessage(`{"path":"outside.txt"}`)}, "callback patch", nil
+		},
+	}
+	engine.Policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{filepath.Join(root, "inside")},
+	})
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "read_file",
+		ToolInfo: &skill.ToolInfo{Name: "read_file", MCPTrustLevel: "local", ExecutionMode: "local_mcp"},
+		Args:     map[string]interface{}{"path": filepath.Join(root, "inside", "ok.txt")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Contains(t, decision.Reason, "outside sandbox")
 }
 
 func TestEngineResolveAskAssignsApprovalExpiry(t *testing.T) {

@@ -68,9 +68,10 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		if IsWriteLikeToolName(toolName) {
 			return fmt.Errorf("read-only policy blocks write-like tool: %s", toolName)
 		}
-		if IsShellLikeToolName(toolName) {
-			return fmt.Errorf("read-only policy blocks shell-like tool: %s", toolName)
-		}
+		// Shell-like tools are NOT blocked by name under read-only: a shell tool
+		// can run read-only commands (git status, rg, ls). Whether a specific
+		// invocation is allowed is decided per-command in AllowToolCall, which
+		// hard-denies any command outside the read-only allow table.
 	}
 	return nil
 }
@@ -139,17 +140,35 @@ func (p *ToolExecutionPolicy) AllowToolCall(tool skill.ToolInfo, args map[string
 	if err := p.AllowToolInfo(tool); err != nil {
 		return err
 	}
-	if p == nil || len(args) == 0 {
+	if p == nil {
 		return nil
 	}
 
 	commands := collectCommandArgs(args)
 	if p.ReadOnly {
-		for _, command := range commands {
-			if isShellLikeCommand(command) {
-				return fmt.Errorf("read-only policy blocks shell-like command: %s", command)
+		// Shell-like tools stay visible under read-only; each concrete command
+		// must match the read-only allow table (git status, rg, ls, ...).
+		if IsShellLikeToolName(tool.Name) {
+			if len(commands) == 0 {
+				return fmt.Errorf("read-only policy requires an explicit read-only shell command for %s", tool.Name)
+			}
+			for _, command := range commands {
+				if !IsShellReadOnlyCommand(command) {
+					return fmt.Errorf("read-only policy blocks non-readonly shell command: %s", command)
+				}
+			}
+		} else {
+			// Non-shell tools may still smuggle nested shell interpreters via
+			// command-like args; keep the interpreter block for those paths.
+			for _, command := range commands {
+				if isShellLikeCommand(command) {
+					return fmt.Errorf("read-only policy blocks shell-like command: %s", command)
+				}
 			}
 		}
+	}
+	if len(args) == 0 {
+		return nil
 	}
 
 	if p.Sandbox == nil {

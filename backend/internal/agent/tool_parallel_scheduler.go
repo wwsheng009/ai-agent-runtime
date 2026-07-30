@@ -205,6 +205,46 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 		return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
 	}
 
+	// Parallel eligibility already used static AllowToolCall; still re-run hard
+	// constraints against the final call before execution so engine policy /
+	// permission hooks / hard rules cannot be bypassed by the parallel path.
+	if engine := loop.agent.GetPermissionEngine(); engine != nil {
+		hardDecision, hardErr := engine.ValidateHardConstraints(callCtx, runtimepolicy.EvalRequest{
+			SessionID:  sessionID,
+			TraceID:    traceID,
+			ToolCallID: item.call.ID,
+			ToolName:   item.call.Name,
+			ToolInfo:   &item.toolInfo,
+			Args:       item.call.Args,
+			Mode:       permissionModeFromContext(ctx),
+		})
+		if hardErr != nil {
+			result.Error = hardErr.Error()
+			return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
+		}
+		if hardDecision.Type == runtimepolicy.DecisionDeny {
+			result.Error = hardDecision.Reason
+			if strings.TrimSpace(result.Error) == "" {
+				result.Error = "denied by execution policy"
+			}
+			return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
+		}
+		if len(hardDecision.PatchedArgs) > 0 {
+			patched, patchErr := runtimepolicy.ApplyPatchedArgs(item.call.Args, hardDecision.PatchedArgs)
+			if patchErr != nil {
+				result.Error = patchErr.Error()
+				return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
+			}
+			item.call.Args = patched
+			result.Call.Args = patched
+		}
+	} else if policy := loop.agent.GetToolExecutionPolicy(); policy != nil {
+		if err := policy.AllowToolCall(item.toolInfo, item.call.Args); err != nil {
+			result.Error = err.Error()
+			return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
+		}
+	}
+
 	preflightInfo := loop.lookupToolInfoForPreflight(callCtx, item.call.Name, &item.toolInfo)
 	decision := loop.prepareToolExecution(metadata, item.call.Name, item.call.ID, item.call.Args, preflightInfo)
 	if !decision.Allow {

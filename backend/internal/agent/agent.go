@@ -347,6 +347,12 @@ func (a *Agent) SetToolExecutionPolicy(policy *ToolExecutionPolicy) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.toolPolicy = policy
+	// Keep the permission engine's policy in sync so the model-visible tool
+	// surface (which reads a.toolPolicy) and the execution path (which reads
+	// the engine) can never diverge onto stale policies.
+	if a.permEngine != nil {
+		a.permEngine.Policy = policy
+	}
 }
 
 // hasSubagentScheduler returns true if the agent has (or has created) a
@@ -370,8 +376,17 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 	if len(callWhitelist) > 0 && !callWhitelist[SpawnSubagentsToolName] {
 		return false
 	}
-	if policy := a.GetToolExecutionPolicy(); policy != nil && !policy.AllowsDefinition(SpawnSubagentsToolName) {
-		return false
+	if policy := a.GetToolExecutionPolicy(); policy != nil {
+		// spawn_subagents is a control-plane capability, so direct execution
+		// may use the runtime-essential allowlist bypass. Its model-visible
+		// definition is stricter: an explicit allowlist must opt it in, while
+		// an explicit deny always hides it.
+		if policy.DeniedTools[SpawnSubagentsToolName] {
+			return false
+		}
+		if policy.AllowlistEnabled && !policy.AllowedTools[SpawnSubagentsToolName] {
+			return false
+		}
 	}
 	return true
 }
@@ -390,11 +405,17 @@ func (a *Agent) SetPermissionEngine(engine *PermissionEngine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.permEngine = engine
-	if a.permEngine != nil && a.permEngine.Policy == nil {
-		a.permEngine.Policy = a.toolPolicy
-	}
-	if a.permEngine != nil && a.permEngine.Hooks == nil && a.hookManager != nil {
-		a.permEngine.Hooks = a.hookManager
+	if a.permEngine != nil {
+		// Establish a single effective policy: adopt a policy the engine already
+		// carries, otherwise bind the agent's current policy to the engine.
+		if a.permEngine.Policy != nil {
+			a.toolPolicy = a.permEngine.Policy
+		} else {
+			a.permEngine.Policy = a.toolPolicy
+		}
+		if a.permEngine.Hooks == nil && a.hookManager != nil {
+			a.permEngine.Hooks = a.hookManager
+		}
 	}
 }
 
@@ -442,7 +463,9 @@ func (a *Agent) SetHookManager(manager *HookManager) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.hookManager = manager
-	if a.permEngine != nil && a.permEngine.Hooks == nil && manager != nil {
+	// Explicit manager replacement always mirrors into the permission engine so
+	// permission-request hooks and PreToolUse hooks cannot diverge.
+	if a.permEngine != nil {
 		a.permEngine.Hooks = manager
 	}
 }

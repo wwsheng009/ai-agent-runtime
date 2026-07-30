@@ -28,6 +28,7 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -882,10 +883,22 @@ func TestApplyLocalChildReadOnlyPolicyOverridesBypassPermissions(t *testing.T) {
 	if policy == nil || !policy.ReadOnly {
 		t.Fatalf("expected child read-only execution policy, got %#v", policy)
 	}
-	for _, toolName := range []string{"write_file", "edit", "apply_patch", "append_write", "shell", "bash", "execute_shell_command"} {
+	for _, toolName := range []string{"write_file", "edit", "apply_patch", "append_write"} {
 		if err := policy.AllowTool(toolName); err == nil {
 			t.Fatalf("expected read-only policy to block %s", toolName)
 		}
+	}
+	// Shell tools stay visible under read-only; only non-readonly commands are blocked.
+	for _, toolName := range []string{"shell", "bash", "execute_shell_command"} {
+		if err := policy.AllowTool(toolName); err != nil {
+			t.Fatalf("expected read-only policy to keep shell surface visible for %s: %v", toolName, err)
+		}
+	}
+	if err := policy.AllowToolCall(runtimeskill.ToolInfo{Name: "shell"}, map[string]interface{}{"command": "git status"}); err != nil {
+		t.Fatalf("expected read-only shell git status to be allowed: %v", err)
+	}
+	if err := policy.AllowToolCall(runtimeskill.ToolInfo{Name: "shell"}, map[string]interface{}{"command": "rm -rf /"}); err == nil {
+		t.Fatal("expected read-only shell mutating command to be blocked")
 	}
 	// background_task stays out of the read-only child capability surface.
 	if err := policy.AllowTool("background_task"); err == nil {

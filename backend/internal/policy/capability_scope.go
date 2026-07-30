@@ -15,12 +15,15 @@ func NewCapabilityScopedToolExecutionPolicy(allowedTools []string, capabilities 
 }
 
 // ReadOnlyChildCapabilities is the minimum capability surface for read-only
-// child agents. Write/shell/background stay out of scope (and ReadOnly still
-// blocks write/shell tools), while control-plane tools remain usable:
+// child agents. Write/background stay out of scope and ReadOnly still blocks
+// write-like tools and non-readonly shell commands. CapExecShell remains so
+// clearly read-only shell commands (git status, rg, ls) can reach the
+// argument-level classifier, while control-plane tools remain usable:
 // ask_user (plan mode / questions) and agent_management (spawn/collab).
 func ReadOnlyChildCapabilities() []Capability {
 	return []Capability{
 		CapReadOnly,
+		CapExecShell,
 		CapNetwork,
 		CapAskUser,
 		CapAgentManagement,
@@ -95,7 +98,10 @@ func CapabilitiesForTask(role string, readOnly bool, toolNames, writePaths []str
 	if readOnly {
 		filtered := capabilities[:0]
 		for _, capability := range capabilities {
-			if capability != CapWriteFS && capability != CapExecShell && capability != CapExternalSideEffect {
+			// CapExecShell is kept under read-only so declared shell tools can
+			// still run read-only commands; CapWriteFS / external side effects
+			// remain out of scope regardless of declared tool names.
+			if capability != CapWriteFS && capability != CapExternalSideEffect {
 				filtered = append(filtered, capability)
 			}
 		}

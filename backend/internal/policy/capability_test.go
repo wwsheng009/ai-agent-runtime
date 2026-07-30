@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 func TestDefaultCapabilityResolverTreatsReportTaskOutcomeAsReadOnly(t *testing.T) {
@@ -41,14 +42,21 @@ func TestReadOnlyChildCapabilitiesAllowsControlPlaneNotMutations(t *testing.T) {
 	policy := NewCapabilityScopedToolExecutionPolicy(nil, ReadOnlyChildCapabilities())
 	policy.ReadOnly = true
 
-	for _, toolName := range []string{"view", "spawn_agent", "spawn_team", "ask_user_question", "enter_plan_mode", "send_message"} {
+	for _, toolName := range []string{"view", "shell", "bash", "spawn_agent", "spawn_team", "ask_user_question", "enter_plan_mode", "send_message"} {
 		if err := policy.AllowTool(toolName); err != nil {
 			t.Fatalf("expected read-only child capabilities to allow %s: %v", toolName, err)
 		}
 	}
-	for _, toolName := range []string{"write", "edit", "shell", "bash", "background_task"} {
+	for _, toolName := range []string{"write", "edit", "background_task"} {
 		if err := policy.AllowTool(toolName); err == nil {
 			t.Fatalf("expected read-only child capabilities to block %s", toolName)
 		}
+	}
+
+	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{"command": "git status"}); err != nil {
+		t.Fatalf("expected read-only shell git status to be allowed: %v", err)
+	}
+	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{"command": "rm -rf /"}); err == nil {
+		t.Fatal("expected read-only shell mutating command to be blocked")
 	}
 }
