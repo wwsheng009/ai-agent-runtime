@@ -18,6 +18,7 @@ import (
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/siteaccount"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1548,7 +1549,7 @@ func chatSurfaceAccountBalanceStatusSegment(session *ChatSession) chatStatusSegm
 	if unit == "" {
 		unit = strings.TrimSpace(view.Currency)
 	}
-	value := fmt.Sprintf("%.4g", *view.BalanceValue)
+	value := siteaccount.FormatBalanceAmount(*view.BalanceValue)
 	if unit != "" {
 		value += " " + unit
 	}

@@ -59,6 +59,11 @@ func primaryBalance(snapshot *AccountSnapshot) (string, *float64) {
 	return "", nil
 }
 
+// FormatBalanceAmount formats a balance/money value with exactly two decimal places.
+func FormatBalanceAmount(value float64) string {
+	return fmt.Sprintf("%.2f", value)
+}
+
 // FormatBalanceLine returns a one-line human-readable balance summary.
 func FormatBalanceLine(view AccountView) string {
 	if view.BalanceValue != nil {
@@ -71,9 +76,9 @@ func FormatBalanceLine(view AccountView) string {
 		if source == "" {
 			source = "unknown"
 		}
-		return fmt.Sprintf("%s %.4g %s (%s, source=%s)",
+		return fmt.Sprintf("%s %s %s (%s, source=%s)",
 			firstNonEmpty(view.BalanceLabel, "balance"),
-			*view.BalanceValue,
+			FormatBalanceAmount(*view.BalanceValue),
 			unit,
 			mode,
 			source,

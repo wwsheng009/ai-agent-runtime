@@ -272,7 +272,7 @@ func TestRefreshAccountBalanceStatusReplacesCachedBalance(t *testing.T) {
 	if !strings.Contains(plain, "Bal 25.75 USD") {
 		t.Fatalf("expected refreshed balance in cached footer, got %q", plain)
 	}
-	if strings.Contains(plain, "Bal 1 USD") {
+	if strings.Contains(plain, "Bal 1.00 USD") {
 		t.Fatalf("stale balance remained in cached footer: %q", plain)
 	}
 }

@@ -271,8 +271,8 @@ func TestRunProviderLogin_DetectsSub2APIFromStatusAndSyncsAccount(t *testing.T) 
 	if result.Account == nil || result.Account.WalletBalance == nil || *result.Account.WalletBalance != 5.5 {
 		t.Fatalf("unexpected account: %+v", result.Account)
 	}
-	if !strings.Contains(result.BalanceLine, "5.5") {
-		t.Fatalf("expected balance line with 5.5, got %q", result.BalanceLine)
+	if !strings.Contains(result.BalanceLine, "5.50") {
+		t.Fatalf("expected balance line with 5.50, got %q", result.BalanceLine)
 	}
 }
 

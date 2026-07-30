@@ -83,7 +83,7 @@ func TestRunBalanceCommand_UsesCachedAccount(t *testing.T) {
 	if alpha.Status != "cached" {
 		t.Fatalf("expected cached status, got %q", alpha.Status)
 	}
-	if !strings.Contains(alpha.BalanceLine, "5.5") {
+	if !strings.Contains(alpha.BalanceLine, "5.50") {
 		t.Fatalf("expected cached balance line, got %q", alpha.BalanceLine)
 	}
 }
@@ -126,8 +126,8 @@ func TestBuildChatStatusBalanceValue_FromSessionAccount(t *testing.T) {
 		},
 	}
 	got := buildChatStatusBalanceValue(session)
-	if !strings.Contains(got, "9") {
-		t.Fatalf("expected balance value, got %q", got)
+	if !strings.Contains(got, "9.00") {
+		t.Fatalf("expected balance value with two decimals, got %q", got)
 	}
 	if !strings.Contains(got, "fetched") {
 		t.Fatalf("expected fetched timestamp annotation, got %q", got)
