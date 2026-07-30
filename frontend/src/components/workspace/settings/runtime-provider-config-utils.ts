@@ -1,3 +1,7 @@
+import type { ProviderAccountCache } from "@/types/runtime";
+
+import { formatProviderAccountCacheLine } from "@/api/runtime/siteaccount";
+
 import { inferConfigValueKind } from "./runtime-config-editor-utils";
 import { buildNamedMapConfigSnippet } from "./runtime-config-yaml-utils";
 import {
@@ -21,9 +25,18 @@ const COMMON_PROVIDER_KEYS = new Set([
   "headers",
   "model_mappings",
   "proxy",
+  "site_type",
+  "site_type_confidence",
+  "site_type_detected_at",
+  "site_type_scores",
+  "account_auth_ref",
+  "account",
 ]);
 
 export type RuntimeProviderSummary = {
+  account: ProviderAccountCache | null;
+  accountAuthRef: string;
+  accountSummary: string;
   apiKey: string;
   apiPath: string;
   baseUrl: string;
@@ -37,6 +50,10 @@ export type RuntimeProviderSummary = {
   proxyEnabled: boolean;
   proxySummary: string;
   raw: Record<string, unknown>;
+  siteType: string;
+  siteTypeConfidence: string;
+  siteTypeDetectedAt: string;
+  siteTypeScores: Record<string, number>;
   supportedModels: string[];
   supportTypes: string[];
   timeout: string;
@@ -175,6 +192,7 @@ function buildProviderSummary(
     (key) => !COMMON_PROVIDER_KEYS.has(key),
   ).length;
   const proxyConfig = readRuntimeProxyConfig(raw.proxy);
+  const account = readProviderAccountCache(raw.account);
 
   return {
     name,
@@ -194,7 +212,34 @@ function buildProviderSummary(
     proxyEnabled: proxyConfig.enabled,
     proxySummary: summarizeRuntimeProxyConfig(proxyConfig),
     extraFieldCount,
+    siteType: readStringField(raw.site_type),
+    siteTypeConfidence: readStringField(raw.site_type_confidence),
+    siteTypeDetectedAt: readStringField(raw.site_type_detected_at),
+    siteTypeScores: readNumberRecordField(raw.site_type_scores),
+    accountAuthRef: readStringField(raw.account_auth_ref),
+    account,
+    accountSummary: formatProviderAccountCacheLine(account),
   };
+}
+
+function readProviderAccountCache(value: unknown): ProviderAccountCache | null {
+  if (!isConfigRecord(value)) {
+    return null;
+  }
+  return value as ProviderAccountCache;
+}
+
+function readNumberRecordField(value: unknown): Record<string, number> {
+  if (!isConfigRecord(value)) {
+    return {};
+  }
+  const result: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "number" && Number.isFinite(entry)) {
+      result[key] = entry;
+    }
+  }
+  return result;
 }
 
 function readStringField(value: unknown) {

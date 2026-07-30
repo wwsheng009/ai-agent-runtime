@@ -45,6 +45,47 @@ describe("runtime-provider-config-utils", () => {
     });
   });
 
+  it("lists site type and account cache summary for providers", () => {
+    const summaries = listRuntimeProviderSummaries({
+      providers: {
+        items: {
+          relay: {
+            enabled: true,
+            protocol: "openai",
+            base_url: "https://relay.example.com",
+            site_type: "sub2api",
+            site_type_confidence: "high",
+            site_type_detected_at: "2026-07-29T12:00:00Z",
+            site_type_scores: { sub2api: 8 },
+            account_auth_ref: "providers.relay.account",
+            account: {
+              source: "sub2api",
+              mode: "wallet",
+              currency: "USD",
+              wallet_balance: 42,
+            },
+            retries: 1,
+          },
+        },
+      },
+    });
+
+    expect(summaries[0]).toMatchObject({
+      name: "relay",
+      siteType: "sub2api",
+      siteTypeConfidence: "high",
+      siteTypeDetectedAt: "2026-07-29T12:00:00Z",
+      siteTypeScores: { sub2api: 8 },
+      accountAuthRef: "providers.relay.account",
+      account: {
+        source: "sub2api",
+        wallet_balance: 42,
+      },
+      extraFieldCount: 1,
+    });
+    expect(summaries[0].accountSummary).toContain("wallet");
+  });
+
   it("reads provider proxy summary from provider record", () => {
     const summaries = listRuntimeProviderSummaries({
       providers: {
@@ -138,6 +179,13 @@ describe("runtime-provider-config-utils", () => {
         supportTypes: [],
         timeout: "",
         truncationAdapter: "",
+        siteType: "",
+        siteTypeConfidence: "",
+        siteTypeDetectedAt: "",
+        siteTypeScores: {},
+        accountAuthRef: "",
+        account: null,
+        accountSummary: "",
       }),
     ).toBe(
       [

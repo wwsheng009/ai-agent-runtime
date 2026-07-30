@@ -64,6 +64,7 @@ import {
 } from "./runtime-config-domain-utils";
 import {
   getRuntimeDefaultProvider,
+  getRuntimeProviderRecord,
   isConfigRecord,
   listRuntimeProviderSummaries,
 } from "./runtime-provider-config-utils";
@@ -1383,6 +1384,24 @@ export function BackendConfigSettingsPage() {
       setConfigValueAtPath(current, ["providers", "default_provider"], name),
     );
     setStatusMessage(t("editor.messages.defaultProviderSet", { name }));
+  }
+
+  function handleApplyProviderAccountFields(
+    name: string,
+    fields: Record<string, unknown>,
+  ) {
+    setDraftParsed((current: unknown) => {
+      const provider = getRuntimeProviderRecord(current, name);
+      if (!provider) {
+        return current;
+      }
+      return setConfigValueAtPath(current, ["providers", "items", name], {
+        ...provider,
+        ...fields,
+      });
+    });
+    setError(null);
+    setStatusMessage(t("editor.messages.providerUpdated", { name }));
   }
 
   function handleAgentRoutingChange(
@@ -3403,6 +3422,7 @@ export function BackendConfigSettingsPage() {
               >
                 <RuntimeProviderDomainEditor
                   defaultProvider={defaultProvider}
+                  onApplyProviderAccountFields={handleApplyProviderAccountFields}
                   onDeleteProvider={handleDeleteProvider}
                   onSaveProvider={handleSaveProvider}
                   onSetDefaultProvider={handleSetDefaultProvider}

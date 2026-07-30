@@ -75,6 +75,7 @@ export {
 export {
   getRuntimeBaseUrl,
   isRuntimeApiErrorCode,
+  RuntimeApiError,
 } from "./shared";
 export {
   streamAgentChat,

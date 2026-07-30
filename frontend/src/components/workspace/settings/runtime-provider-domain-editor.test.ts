@@ -27,6 +27,14 @@ function createDraft(overrides?: Partial<ProviderDraftInput>): ProviderDraftInpu
     modelMappingsJson: JSON.stringify({ "*": "deepseek-chat" }),
     extraJson: JSON.stringify({ retries: 3 }),
     setAsDefault: true,
+    siteType: "",
+    siteTypeConfidence: "",
+    siteTypeDetectedAt: "",
+    siteTypeScores: {},
+    accountAuthRef: "",
+    account: null,
+    systemAccessToken: "",
+    subjectUserId: "",
     ...overrides,
   };
 }
@@ -84,5 +92,40 @@ describe("runtime-provider-domain-editor", () => {
 
     expect(result.record).toBeNull();
     expect(result.error).toContain("headers");
+  });
+
+  it("includes site type and account cache fields from the draft", () => {
+    const result = buildProviderRecordFromDraft(
+      createDraft({
+        siteType: "sub2api",
+        siteTypeConfidence: "high",
+        siteTypeDetectedAt: "2026-07-29T00:00:00Z",
+        siteTypeScores: { sub2api: 3, newapi: 1 },
+        accountAuthRef: "deepseek-account",
+        account: {
+          source: "sub2api",
+          mode: "wallet",
+          currency: "USD",
+          wallet_balance: 12.5,
+          fetched_at: "2026-07-29T00:01:00Z",
+        },
+      }),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.record).toMatchObject({
+      site_type: "sub2api",
+      site_type_confidence: "high",
+      site_type_detected_at: "2026-07-29T00:00:00Z",
+      site_type_scores: { sub2api: 3, newapi: 1 },
+      account_auth_ref: "deepseek-account",
+      account: {
+        source: "sub2api",
+        mode: "wallet",
+        currency: "USD",
+        wallet_balance: 12.5,
+        fetched_at: "2026-07-29T00:01:00Z",
+      },
+    });
   });
 });

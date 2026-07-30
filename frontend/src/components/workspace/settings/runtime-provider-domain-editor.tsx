@@ -3,12 +3,24 @@ import {
   CheckIcon,
   CopyIcon,
   PencilIcon,
+  RefreshCwIcon,
   StarIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
+import {
+  buildProviderAccountConfigPatch,
+  detectRuntimeSiteAccount,
+  fetchRuntimeSiteAccount,
+  formatProviderAccountCacheLine,
+  formatSiteAccountBalanceLine,
+  refreshRuntimeProviderAccount,
+  RuntimeApiError,
+} from "@/api/runtime";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 
 import { ConfigDomainDialog } from "./config-domain-dialog";
@@ -49,7 +61,15 @@ const KNOWN_PROVIDER_KEYS = new Set([
   "headers",
   "model_mappings",
   "proxy",
+  "site_type",
+  "site_type_confidence",
+  "site_type_detected_at",
+  "site_type_scores",
+  "account_auth_ref",
+  "account",
 ]);
+
+type AccountAction = "detect" | "fetch" | "refresh" | null;
 
 const providerProtocolOptions = [
   { value: "openai", label: "openai" },
@@ -61,6 +81,10 @@ const providerProtocolOptions = [
 
 type RuntimeProviderDomainEditorProps = {
   defaultProvider: string;
+  onApplyProviderAccountFields?: (
+    name: string,
+    fields: Record<string, unknown>,
+  ) => void;
   onDeleteProvider: (name: string) => void;
   onSaveProvider: (
     draft: ProviderDraftInput,
@@ -72,13 +96,20 @@ type RuntimeProviderDomainEditorProps = {
 
 export function RuntimeProviderDomainEditor({
   defaultProvider,
+  onApplyProviderAccountFields,
   onDeleteProvider,
   onSaveProvider,
   onSetDefaultProvider,
   providers,
 }: RuntimeProviderDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  const [accountBusy, setAccountBusy] = useState<AccountAction>(null);
+  const [accountNotice, setAccountNotice] = useState<string | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [rowBusyName, setRowBusyName] = useState<string | null>(null);
+  const [rowNotice, setRowNotice] = useState<string | null>(null);
   const [editingProviderName, setEditingProviderName] = useState<string | null>(null);
   const [copiedProviderName, setCopiedProviderName] = useState<string | null>(null);
   const [draft, setDraft] = useState<ProviderDraftInput>(() =>
@@ -89,9 +120,22 @@ export function RuntimeProviderDomainEditor({
     () => providers.filter((provider) => provider.enabled).length,
     [providers],
   );
+  const accountSummaryLine = useMemo(
+    () =>
+      formatProviderAccountCacheLine(draft.account) ||
+      (draft.siteType
+        ? `site_type=${draft.siteType}${
+            draft.siteTypeConfidence ? ` (${draft.siteTypeConfidence})` : ""
+          }`
+        : ""),
+    [draft.account, draft.siteType, draft.siteTypeConfidence],
+  );
 
   function openCreateDialog() {
     setDialogError(null);
+    setAccountNotice(null);
+    setAccountError(null);
+    setAccountBusy(null);
     setEditingProviderName(null);
     setDraft(createProviderDraftInput(null, defaultProvider));
     setDialogOpen(true);
@@ -99,6 +143,9 @@ export function RuntimeProviderDomainEditor({
 
   function openEditDialog(provider: RuntimeProviderSummary) {
     setDialogError(null);
+    setAccountNotice(null);
+    setAccountError(null);
+    setAccountBusy(null);
     setEditingProviderName(provider.name);
     setDraft(createProviderDraftInput(provider, defaultProvider));
     setDialogOpen(true);
@@ -127,94 +174,357 @@ export function RuntimeProviderDomainEditor({
     }
   }
 
+  async function handleDetectSiteType() {
+    const baseUrl = draft.baseUrl.trim();
+    if (!baseUrl) {
+      setAccountError(t("editor.providers.account.detectRequiresBaseUrl"));
+      return;
+    }
+
+    setAccountBusy("detect");
+    setAccountError(null);
+    setAccountNotice(null);
+    try {
+      const result = await detectRuntimeSiteAccount({ base_url: baseUrl });
+      const detect = result.detect;
+      setDraft((current) => ({
+        ...current,
+        siteType: detect?.site_type?.trim() || current.siteType,
+        siteTypeConfidence: detect?.confidence?.trim() || current.siteTypeConfidence,
+        siteTypeDetectedAt: detect?.detected_at?.trim() || current.siteTypeDetectedAt,
+        siteTypeScores: detect?.score ?? current.siteTypeScores,
+      }));
+      const warnings =
+        detect?.warnings && detect.warnings.length > 0
+          ? t("editor.providers.account.warningsSuffix", {
+              warnings: detect.warnings.join("; "),
+            })
+          : "";
+      setAccountNotice(
+        t("editor.providers.account.detectSuccess", {
+          siteType: detect?.site_type || "unknown",
+          confidence: detect?.confidence || "n/a",
+          warnings,
+        }),
+      );
+    } catch (error) {
+      setAccountError(
+        describeAccountError(error, t("editor.providers.account.detectFailed")),
+      );
+    } finally {
+      setAccountBusy(null);
+    }
+  }
+
+  async function handleFetchAccount() {
+    const baseUrl = draft.baseUrl.trim();
+    if (!baseUrl) {
+      setAccountError(t("editor.providers.account.fetchRequiresBaseUrl"));
+      return;
+    }
+
+    setAccountBusy("fetch");
+    setAccountError(null);
+    setAccountNotice(null);
+    try {
+      const result = await fetchRuntimeSiteAccount({
+        base_url: baseUrl,
+        site_type: draft.siteType.trim() || undefined,
+        api_key: draft.apiKey.trim() || undefined,
+        system_access_token: draft.systemAccessToken.trim() || undefined,
+        subject_user_id: draft.subjectUserId.trim() || undefined,
+      });
+      if (result.detect?.site_type) {
+        setDraft((current) => ({
+          ...current,
+          siteType: result.detect?.site_type?.trim() || current.siteType,
+          siteTypeConfidence:
+            result.detect?.confidence?.trim() || current.siteTypeConfidence,
+          siteTypeDetectedAt:
+            result.detect?.detected_at?.trim() || current.siteTypeDetectedAt,
+          siteTypeScores: result.detect?.score ?? current.siteTypeScores,
+        }));
+      }
+      const balanceLine =
+        result.balance_line?.trim() ||
+        formatSiteAccountBalanceLine(result.account_view) ||
+        t("editor.providers.account.snapshotWithoutBalance");
+      const warnings =
+        result.warnings && result.warnings.length > 0
+          ? t("editor.providers.account.warningsSuffix", {
+              warnings: result.warnings.join("; "),
+            })
+          : "";
+      setAccountNotice(`${balanceLine}${warnings}`);
+    } catch (error) {
+      setAccountError(
+        describeAccountError(error, t("editor.providers.account.fetchFailed")),
+      );
+    } finally {
+      setAccountBusy(null);
+    }
+  }
+
+  async function handleRefreshProviderAccount(
+    providerName: string,
+    options?: { fromDialog?: boolean },
+  ) {
+    const name = providerName.trim();
+    if (!name) {
+      const message = t("editor.providers.account.refreshRequiresName");
+      if (options?.fromDialog) {
+        setAccountError(message);
+      } else {
+        setRowNotice(message);
+      }
+      return;
+    }
+
+    if (options?.fromDialog) {
+      setAccountBusy("refresh");
+      setAccountError(null);
+      setAccountNotice(null);
+    } else {
+      setRowBusyName(name);
+      setRowNotice(null);
+    }
+
+    try {
+      const result = await refreshRuntimeProviderAccount(name, {
+        site_type: options?.fromDialog ? draft.siteType.trim() || undefined : undefined,
+        api_key: options?.fromDialog ? draft.apiKey.trim() || undefined : undefined,
+        system_access_token: options?.fromDialog
+          ? draft.systemAccessToken.trim() || undefined
+          : undefined,
+        subject_user_id: options?.fromDialog
+          ? draft.subjectUserId.trim() || undefined
+          : undefined,
+        persist: true,
+        save_account_auth: true,
+      });
+      const patch = buildProviderAccountConfigPatch(result);
+      onApplyProviderAccountFields?.(name, patch);
+      if (options?.fromDialog) {
+        setDraft((current) => ({
+          ...current,
+          siteType: result.site_type || current.siteType,
+          siteTypeConfidence:
+            result.site_type_confidence || current.siteTypeConfidence,
+          siteTypeDetectedAt:
+            result.site_type_detected_at || current.siteTypeDetectedAt,
+          siteTypeScores: result.site_type_scores ?? current.siteTypeScores,
+          accountAuthRef: result.account_auth_ref || current.accountAuthRef,
+          account: result.account_cache ?? current.account,
+        }));
+      }
+      const balanceLine =
+        result.balance_line?.trim() ||
+        formatSiteAccountBalanceLine(result.account_view) ||
+        formatProviderAccountCacheLine(result.account_cache) ||
+        t("editor.providers.account.synced");
+      const persisted = result.persisted
+        ? t("editor.providers.account.persisted")
+        : t("editor.providers.account.notPersisted");
+      const warnings =
+        result.warnings && result.warnings.length > 0
+          ? t("editor.providers.account.warningsSuffix", {
+              warnings: result.warnings.join("; "),
+            })
+          : "";
+      const message = t("editor.providers.account.refreshMessage", {
+        name,
+        balanceLine,
+        persisted,
+        warnings,
+      });
+      if (options?.fromDialog) {
+        setAccountNotice(message);
+      } else {
+        setRowNotice(message);
+      }
+    } catch (error) {
+      const message = describeAccountError(
+        error,
+        t("editor.providers.account.refreshFailed", { name }),
+      );
+      if (options?.fromDialog) {
+        setAccountError(message);
+      } else {
+        setRowNotice(message);
+      }
+    } finally {
+      if (options?.fromDialog) {
+        setAccountBusy(null);
+      } else {
+        setRowBusyName(null);
+      }
+    }
+  }
+
   return (
     <>
+      {rowNotice ? (
+        <div className="mb-3">
+          <SettingsNoticeCard tone="warning-soft">{rowNotice}</SettingsNoticeCard>
+        </div>
+      ) : null}
       <ConfigDomainTable
-        title="Providers"
+        title={t("editor.providers.title")}
         titleIcon={BotIcon}
-        description="用表格浏览 provider，用弹出表单编辑高频字段、JSON 附加字段和扩展配置。"
+        description={t("editor.providers.description")}
         items={providers}
         getRowKey={(provider) => provider.name}
-        emptyState="当前还没有 provider，可直接创建一条新的 provider 草稿。"
+        emptyState={t("editor.providers.emptyState")}
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${providers.length} 个 provider`}</ConfigDomainSummaryBadge>
-            <ConfigDomainSummaryBadge>{`${enabledCount} 已启用`}</ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
-              {defaultProvider ? `默认 ${defaultProvider}` : "未设默认"}
+              {t("editor.providers.summary.total", { count: providers.length })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.providers.summary.enabled", { count: enabledCount })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {defaultProvider
+                ? t("editor.providers.summary.defaultNamed", { name: defaultProvider })
+                : t("editor.providers.summary.noDefault")}
             </ConfigDomainSummaryBadge>
           </>
         }
         actions={
-          <SettingsAddButton size="sm" label="新建 provider" onClick={openCreateDialog} />
+          <SettingsAddButton
+            size="sm"
+            label={t("editor.providers.create")}
+            onClick={openCreateDialog}
+          />
         }
         columns={[
           {
-            header: "名称",
+            header: t("editor.providers.columns.name"),
             cell: (provider) => (
               <div className="min-w-[11rem]">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="font-semibold text-[var(--foreground)]">
                     {provider.name}
                   </div>
-                  {provider.name === defaultProvider ? <Badge>default</Badge> : null}
+                  {provider.name === defaultProvider ? (
+                    <Badge>{t("editor.providers.row.defaultBadge")}</Badge>
+                  ) : null}
                 </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {provider.baseUrl || "未设置 base_url"}
+                  {provider.baseUrl || t("editor.providers.row.noBaseUrl")}
                 </div>
               </div>
             ),
           },
           {
-            header: "协议",
+            header: t("editor.providers.columns.protocol"),
             cell: (provider) => (
               <div className="min-w-[7rem]">
                 <div>{provider.protocol || "--"}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {provider.supportTypes.join(", ") || "未设类型"}
+                  {provider.supportTypes.join(", ") || t("editor.providers.row.noSupportTypes")}
                 </div>
               </div>
             ),
           },
           {
-            header: "默认模型",
+            header: t("editor.providers.columns.defaultModel"),
             cell: (provider) => (
               <div className="min-w-[10rem]">
                 <div>{provider.defaultModel || "--"}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {provider.supportedModels.length} 个模型
+                  {t("editor.providers.row.modelCount", {
+                    count: provider.supportedModels.length,
+                  })}
                 </div>
               </div>
             ),
           },
           {
-            header: "状态",
+            header: t("editor.providers.columns.siteBalance"),
+            cell: (provider) => (
+              <div className="min-w-[12rem]">
+                <div className="flex flex-wrap gap-2">
+                  {provider.siteType ? (
+                    <Badge>
+                      {provider.siteType}
+                      {provider.siteTypeConfidence
+                        ? ` · ${provider.siteTypeConfidence}`
+                        : ""}
+                    </Badge>
+                  ) : (
+                    <Badge>{t("editor.providers.row.siteUndetected")}</Badge>
+                  )}
+                </div>
+                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  {provider.accountSummary ||
+                    (provider.accountAuthRef
+                      ? t("editor.providers.row.authRef", {
+                          ref: provider.accountAuthRef,
+                        })
+                      : t("editor.providers.row.noAccountCache"))}
+                </div>
+              </div>
+            ),
+          },
+          {
+            header: t("editor.providers.columns.status"),
             cell: (provider) => (
               <div className="flex flex-wrap gap-2">
-                <Badge>{provider.enabled ? "已启用" : "已禁用"}</Badge>
+                <Badge>
+                  {provider.enabled
+                    ? t("editor.providers.row.enabled")
+                    : t("editor.providers.row.disabled")}
+                </Badge>
                 {provider.hasProxyOverride ? (
-                  <Badge>{provider.proxyEnabled ? "代理覆盖" : "代理已配置"}</Badge>
+                  <Badge>
+                    {provider.proxyEnabled
+                      ? t("editor.providers.row.proxyOverride")
+                      : t("editor.providers.row.proxyConfigured")}
+                  </Badge>
                 ) : null}
                 {provider.extraFieldCount > 0 ? (
-                  <Badge>{`${provider.extraFieldCount} 个扩展字段`}</Badge>
+                  <Badge>
+                    {t("editor.providers.row.extraFields", {
+                      count: provider.extraFieldCount,
+                    })}
+                  </Badge>
                 ) : null}
               </div>
             ),
           },
           {
-            header: "操作",
+            header: t("editor.providers.columns.actions"),
             cell: (provider) => (
               <SettingsActionGroup compact>
                 {provider.name !== defaultProvider ? (
                   <SettingsIconActionButton
-                    label={`设 ${provider.name} 为默认 provider`}
+                    label={t("editor.providers.actions.setDefault", {
+                      name: provider.name,
+                    })}
                     onClick={() => onSetDefaultProvider(provider.name)}
                   >
                     <StarIcon size={13} />
                   </SettingsIconActionButton>
                 ) : null}
                 <SettingsIconActionButton
-                  label={`复制 ${provider.name} 的创建配置`}
+                  label={t("editor.providers.actions.refreshBalance", {
+                    name: provider.name,
+                  })}
+                  onClick={() => void handleRefreshProviderAccount(provider.name)}
+                  disabled={rowBusyName === provider.name}
+                >
+                  <RefreshCwIcon
+                    size={13}
+                    className={
+                      rowBusyName === provider.name ? "animate-spin" : undefined
+                    }
+                  />
+                </SettingsIconActionButton>
+                <SettingsIconActionButton
+                  label={t("editor.providers.actions.copyConfig", {
+                    name: provider.name,
+                  })}
                   onClick={() => void handleCopyProvider(provider)}
                 >
                   {copiedProviderName === provider.name ? (
@@ -224,13 +534,13 @@ export function RuntimeProviderDomainEditor({
                   )}
                 </SettingsIconActionButton>
                 <SettingsIconActionButton
-                  label={`编辑 ${provider.name}`}
+                  label={t("editor.providers.actions.edit", { name: provider.name })}
                   onClick={() => openEditDialog(provider)}
                 >
                   <PencilIcon size={13} />
                 </SettingsIconActionButton>
                 <SettingsIconActionButton
-                  label={`删除 ${provider.name}`}
+                  label={t("editor.providers.actions.delete", { name: provider.name })}
                   onClick={() => onDeleteProvider(provider.name)}
                 >
                   <Trash2Icon size={13} />
@@ -238,7 +548,7 @@ export function RuntimeProviderDomainEditor({
               </SettingsActionGroup>
             ),
             align: "right",
-            className: "w-[9.5rem] min-w-[9.5rem]",
+            className: "w-[11.5rem] min-w-[11.5rem]",
           },
         ]}
       />
@@ -246,13 +556,17 @@ export function RuntimeProviderDomainEditor({
       <ConfigDomainDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        title={editingProviderName ? `编辑 Provider: ${editingProviderName}` : "新建 Provider"}
-        description="主字段使用表单编辑，`headers`、`model_mappings` 和其它扩展字段用 JSON 输入，避免丢失专用配置。"
+        title={
+          editingProviderName
+            ? t("editor.providers.editTitle", { name: editingProviderName })
+            : t("editor.providers.createTitle")
+        }
+        description={t("editor.providers.dialogDescription")}
         footer={
           <SettingsDialogFooter
             buttonSize="sm"
-            note="保存后仍建议先看 diff，再写回 `config.yaml`。"
-            confirmLabel="保存 provider"
+            note={t("editor.providers.saveNote")}
+            confirmLabel={t("editor.providers.saveButton")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -266,17 +580,23 @@ export function RuntimeProviderDomainEditor({
           ) : null}
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="名称" description="provider 唯一标识，用于路由和默认项配置。">
+            <ConfigFormField
+              label={t("editor.providers.fields.name")}
+              description={t("editor.providers.fields.nameDescription")}
+            >
               <input
                 className={editorControlClassName}
                 value={draft.name}
                 onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-                placeholder="provider 名称"
+                placeholder={t("editor.providers.fields.namePlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="协议" description="常见值包括 openai、anthropic、gemini、codex。">
+            <ConfigFormField
+              label={t("editor.providers.fields.protocol")}
+              description={t("editor.providers.fields.protocolDescription")}
+            >
               <Select
-                ariaLabel="Provider 协议"
+                ariaLabel={t("editor.providers.fields.protocolAria")}
                 value={draft.protocol}
                 onChange={(value) =>
                   setDraft((current) => ({ ...current, protocol: value }))
@@ -353,7 +673,10 @@ export function RuntimeProviderDomainEditor({
           </div>
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="supported_models" description="支持用换行或逗号批量输入。">
+            <ConfigFormField
+              label="supported_models"
+              description={t("editor.providers.fields.supportedModelsDescription")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-36 resize-y font-mono`}
                 value={draft.supportedModelsText}
@@ -365,7 +688,10 @@ export function RuntimeProviderDomainEditor({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="support_types" description="协议类型列表，支持换行或逗号输入。">
+            <ConfigFormField
+              label="support_types"
+              description={t("editor.providers.fields.supportTypesDescription")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-36 resize-y font-mono`}
                 value={draft.supportTypesText}
@@ -379,7 +705,10 @@ export function RuntimeProviderDomainEditor({
             </ConfigFormField>
           </div>
 
-          <ConfigFormField label="api_key" description="支持环境变量模板或代理注入占位符。">
+          <ConfigFormField
+            label="api_key"
+            description={t("editor.providers.fields.apiKeyDescription")}
+          >
             <textarea
               className={`${editorControlClassName} min-h-28 resize-y font-mono`}
               value={draft.apiKey}
@@ -389,8 +718,199 @@ export function RuntimeProviderDomainEditor({
             />
           </ConfigFormField>
 
+          <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                  {t("editor.providers.account.title")}
+                </div>
+                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  {t("editor.providers.account.description")}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {draft.siteType ? (
+                  <Badge>
+                    {draft.siteType}
+                    {draft.siteTypeConfidence
+                      ? ` · ${draft.siteTypeConfidence}`
+                      : ""}
+                  </Badge>
+                ) : (
+                  <Badge>{t("editor.providers.account.undetected")}</Badge>
+                )}
+                {draft.accountAuthRef ? (
+                  <Badge>{t("editor.providers.account.authRefBadge")}</Badge>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="grid gap-3 xl:grid-cols-2">
+              <ConfigFormField
+                label="site_type"
+                description={t("editor.providers.account.siteTypeDescription")}
+              >
+                <input
+                  className={editorControlClassName}
+                  value={draft.siteType}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      siteType: event.target.value,
+                    }))
+                  }
+                  placeholder="sub2api / newapi / unknown"
+                />
+              </ConfigFormField>
+              <ConfigFormField
+                label="account_auth_ref"
+                description={t("editor.providers.account.accountAuthRefDescription")}
+              >
+                <input
+                  className={editorControlClassName}
+                  value={draft.accountAuthRef}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      accountAuthRef: event.target.value,
+                    }))
+                  }
+                  placeholder="providers/<name>/account"
+                />
+              </ConfigFormField>
+            </div>
+
+            <div className="mt-3 grid gap-3 xl:grid-cols-2">
+              <ConfigFormField label="site_type_confidence">
+                <input
+                  className={editorControlClassName}
+                  value={draft.siteTypeConfidence}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      siteTypeConfidence: event.target.value,
+                    }))
+                  }
+                  placeholder="high / medium / low"
+                />
+              </ConfigFormField>
+              <ConfigFormField label="site_type_detected_at">
+                <input
+                  className={editorControlClassName}
+                  value={draft.siteTypeDetectedAt}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      siteTypeDetectedAt: event.target.value,
+                    }))
+                  }
+                  placeholder="ISO timestamp"
+                />
+              </ConfigFormField>
+            </div>
+
+            <div className="mt-3 grid gap-3 xl:grid-cols-2">
+              <ConfigFormField
+                label="system_access_token"
+                description={t("editor.providers.account.systemAccessTokenDescription")}
+              >
+                <input
+                  className={editorControlClassName}
+                  type="password"
+                  autoComplete="off"
+                  value={draft.systemAccessToken}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      systemAccessToken: event.target.value,
+                    }))
+                  }
+                  placeholder="NewAPI system access token"
+                />
+              </ConfigFormField>
+              <ConfigFormField
+                label="subject_user_id"
+                description={t("editor.providers.account.subjectUserIdDescription")}
+              >
+                <input
+                  className={editorControlClassName}
+                  value={draft.subjectUserId}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      subjectUserId: event.target.value,
+                    }))
+                  }
+                  placeholder={t("editor.providers.account.subjectUserIdPlaceholder")}
+                />
+              </ConfigFormField>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={accountBusy !== null}
+                onClick={() => void handleDetectSiteType()}
+              >
+                {accountBusy === "detect"
+                  ? t("editor.providers.account.detecting")
+                  : t("editor.providers.account.detect")}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={accountBusy !== null}
+                onClick={() => void handleFetchAccount()}
+              >
+                {accountBusy === "fetch"
+                  ? t("editor.providers.account.fetching")
+                  : t("editor.providers.account.fetch")}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={accountBusy !== null || !editingProviderName}
+                onClick={() =>
+                  void handleRefreshProviderAccount(
+                    editingProviderName || draft.name,
+                    { fromDialog: true },
+                  )
+                }
+              >
+                {accountBusy === "refresh"
+                  ? t("editor.providers.account.refreshing")
+                  : t("editor.providers.account.refresh")}
+              </Button>
+            </div>
+
+            {accountSummaryLine ? (
+              <SettingsNoticeCard tone="muted" className="mt-3">
+                {accountSummaryLine}
+              </SettingsNoticeCard>
+            ) : null}
+            {accountNotice ? (
+              <SettingsNoticeCard tone="neutral" className="mt-3">
+                {accountNotice}
+              </SettingsNoticeCard>
+            ) : null}
+            {accountError ? (
+              <SettingsNoticeCard tone="warning-soft" className="mt-3">
+                {accountError}
+              </SettingsNoticeCard>
+            ) : null}
+            {!editingProviderName ? (
+              <SettingsNoticeCard tone="muted" className="mt-3">
+                {t("editor.providers.account.syncRequiresName")}
+              </SettingsNoticeCard>
+            ) : null}
+          </div>
+
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="headers JSON" description="固定请求头对象，例如组织标识、版本头。">
+            <ConfigFormField
+              label="headers JSON"
+              description={t("editor.providers.fields.headersDescription")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-40 resize-y font-mono`}
                 value={draft.headersJson}
@@ -401,7 +921,7 @@ export function RuntimeProviderDomainEditor({
             </ConfigFormField>
             <ConfigFormField
               label="model_mappings JSON"
-              description="模型映射对象，支持精确或通配符 key。"
+              description={t("editor.providers.fields.modelMappingsDescription")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-40 resize-y font-mono`}
@@ -420,10 +940,10 @@ export function RuntimeProviderDomainEditor({
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-[13px] font-semibold text-[var(--foreground)]">
-                  Provider 级代理覆盖
+                  {t("editor.providers.proxy.title")}
                 </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  可为当前 provider 单独指定 HTTP / HTTPS / SOCKS5 代理，不填则沿用全局代理或环境变量。
+                  {t("editor.providers.proxy.description")}
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
@@ -438,14 +958,14 @@ export function RuntimeProviderDomainEditor({
                     }))
                   }
                 />
-                启用覆盖代理
+                {t("editor.providers.proxy.enable")}
               </label>
             </div>
 
             <div className="grid gap-3 xl:grid-cols-2">
               <ConfigFormField
                 label="proxy.http"
-                description="HTTP 请求代理，也支持 socks5://host:port。"
+                description={t("editor.providers.proxy.httpDescription")}
               >
                 <input
                   className={editorControlClassName}
@@ -456,12 +976,12 @@ export function RuntimeProviderDomainEditor({
                       proxyHttp: event.target.value,
                     }))
                   }
-                  placeholder="http://127.0.0.1:10810 或 socks5://127.0.0.1:10810"
+                  placeholder={t("editor.providers.proxy.proxyPlaceholder")}
                 />
               </ConfigFormField>
               <ConfigFormField
                 label="proxy.https"
-                description="HTTPS 请求代理，未填写时会回退到 HTTP 代理。"
+                description={t("editor.providers.proxy.httpsDescription")}
               >
                 <input
                   className={editorControlClassName}
@@ -472,7 +992,7 @@ export function RuntimeProviderDomainEditor({
                       proxyHttps: event.target.value,
                     }))
                   }
-                  placeholder="http://127.0.0.1:10810 或 socks5://127.0.0.1:10810"
+                  placeholder={t("editor.providers.proxy.proxyPlaceholder")}
                 />
               </ConfigFormField>
             </div>
@@ -480,7 +1000,7 @@ export function RuntimeProviderDomainEditor({
             <div className="mt-3">
               <ConfigFormField
                 label="proxy.no_proxy"
-                description="逗号分隔的绕过列表，例如 localhost,127.0.0.1,.internal.example.com。"
+                description={t("editor.providers.proxy.noProxyDescription")}
               >
                 <textarea
                   className={`${editorControlClassName} min-h-24 resize-y font-mono`}
@@ -498,8 +1018,8 @@ export function RuntimeProviderDomainEditor({
           </div>
 
           <ConfigFormField
-            label="扩展字段 JSON"
-            description="保留未进入专用表单的其它字段，避免移除结构化树后无法编辑。"
+            label={t("editor.providers.fields.extraJson")}
+            description={t("editor.providers.fields.extraJsonDescription")}
           >
             <textarea
               className={`${editorControlClassName} min-h-44 resize-y font-mono`}
@@ -520,7 +1040,7 @@ export function RuntimeProviderDomainEditor({
                   setDraft((current) => ({ ...current, enabled: event.target.checked }))
                 }
               />
-              启用 provider
+              {t("editor.providers.fields.enableProvider")}
             </label>
             <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
               <input
@@ -534,7 +1054,7 @@ export function RuntimeProviderDomainEditor({
                   }))
                 }
               />
-              设为默认 provider
+              {t("editor.providers.fields.setAsDefault")}
             </label>
           </div>
         </div>
@@ -578,6 +1098,14 @@ function createProviderDraftInput(
       modelMappingsJson: JSON.stringify(defaults.model_mappings ?? {}, null, 2),
       extraJson: "{}",
       setAsDefault: defaultProvider === "",
+      siteType: "",
+      siteTypeConfidence: "",
+      siteTypeDetectedAt: "",
+      siteTypeScores: {},
+      accountAuthRef: "",
+      account: null,
+      systemAccessToken: "",
+      subjectUserId: "",
     };
   }
 
@@ -615,5 +1143,24 @@ function createProviderDraftInput(
     ),
     extraJson: JSON.stringify(extraFields, null, 2),
     setAsDefault: provider.name === defaultProvider,
+    siteType: provider.siteType,
+    siteTypeConfidence: provider.siteTypeConfidence,
+    siteTypeDetectedAt: provider.siteTypeDetectedAt,
+    siteTypeScores: { ...provider.siteTypeScores },
+    accountAuthRef: provider.accountAuthRef,
+    account: provider.account,
+    // Secrets stay out of provider config; only prefill non-secret subject id hint.
+    systemAccessToken: "",
+    subjectUserId: provider.account?.external_user_id?.trim() || "",
   };
+}
+
+function describeAccountError(error: unknown, fallback: string) {
+  if (error instanceof RuntimeApiError) {
+    return error.message || fallback;
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+  return fallback;
 }

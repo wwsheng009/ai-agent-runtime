@@ -111,7 +111,10 @@ export function formatProviderAccountCacheLine(
           : `quota (${unit})`;
     const mode = firstNonEmpty(account.mode, "unknown");
     const source = firstNonEmpty(account.source, "unknown");
-    return `${label} ${formatCompactNumber(value)} ${unit} (${mode}, source=${source})`;
+    const fetched = account.fetched_at ? ` @ ${account.fetched_at}` : "";
+    const user = firstNonEmpty(account.external_username_masked, account.external_user_id);
+    const userPart = user ? `, user=${user}` : "";
+    return `${label} ${formatCompactNumber(value)} ${unit} (${mode}, source=${source}${userPart})${fetched}`;
   }
 
   if (account.plan_name) {

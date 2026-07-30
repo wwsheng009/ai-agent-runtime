@@ -1,3 +1,5 @@
+import type { ProviderAccountCache } from "@/types/runtime";
+
 import {
   isConfigRecord,
   normalizeStringArrayInput,
@@ -9,6 +11,8 @@ import {
 } from "./runtime-proxy-domain-utils";
 
 export type ProviderDraftInput = {
+  account: ProviderAccountCache | null;
+  accountAuthRef: string;
   apiKey: string;
   apiPath: string;
   baseUrl: string;
@@ -25,8 +29,16 @@ export type ProviderDraftInput = {
   proxyHttps: string;
   proxyNoProxy: string;
   setAsDefault: boolean;
+  siteType: string;
+  siteTypeConfidence: string;
+  siteTypeDetectedAt: string;
+  siteTypeScores: Record<string, number>;
+  /** Ephemeral NewAPI subject user id; request-only / auth-store via refresh. */
+  subjectUserId: string;
   supportedModelsText: string;
   supportTypesText: string;
+  /** Ephemeral NewAPI system token; never persisted into provider config. */
+  systemAccessToken: string;
   timeout: string;
   truncationAdapter: string;
 };
@@ -65,6 +77,11 @@ export function buildProviderRecordFromDraft(
     ? buildRuntimeProxyRecord(proxyConfig)
     : null;
 
+  const siteType = draft.siteType.trim();
+  const siteTypeConfidence = draft.siteTypeConfidence.trim();
+  const siteTypeDetectedAt = draft.siteTypeDetectedAt.trim();
+  const accountAuthRef = draft.accountAuthRef.trim();
+
   return {
     error: null,
     record: {
@@ -83,6 +100,14 @@ export function buildProviderRecordFromDraft(
       headers: headers.record,
       model_mappings: modelMappings.record,
       ...(proxyRecord ? { proxy: proxyRecord } : {}),
+      ...(siteType ? { site_type: siteType } : {}),
+      ...(siteTypeConfidence ? { site_type_confidence: siteTypeConfidence } : {}),
+      ...(siteTypeDetectedAt ? { site_type_detected_at: siteTypeDetectedAt } : {}),
+      ...(Object.keys(draft.siteTypeScores).length > 0
+        ? { site_type_scores: draft.siteTypeScores }
+        : {}),
+      ...(accountAuthRef ? { account_auth_ref: accountAuthRef } : {}),
+      ...(draft.account ? { account: draft.account } : {}),
     },
   };
 }

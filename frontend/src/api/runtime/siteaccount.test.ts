@@ -34,8 +34,12 @@ describe("siteaccount api helpers", () => {
         quota_display_unit: "USD",
         mode: "quota",
         source: "new-api",
+        external_user_id: "42",
+        fetched_at: "2026-07-29T12:00:00Z",
       }),
-    ).toContain("remaining (USD) 8.5 USD");
+    ).toBe(
+      "remaining (USD) 8.5 USD (quota, source=new-api, user=42) @ 2026-07-29T12:00:00Z",
+    );
 
     expect(
       formatProviderAccountCacheLine({
