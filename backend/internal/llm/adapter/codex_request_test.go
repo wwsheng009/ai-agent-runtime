@@ -650,6 +650,83 @@ func TestCodexHandleResponse_StreamPreservesAllSparseIndexedToolCalls(t *testing
 	}
 }
 
+func TestCodexHandleResponse_StreamMultiReasoningCompactedFinalDoesNotCorruptToolArgs(t *testing.T) {
+	a := &CodexAdapter{}
+	// Live stream keys tools by high output_index after multiple reasoning items.
+	// response.completed often collapses those reasoning items and re-emits the
+	// same tools at lower array offsets. Merging by those compacted offsets used
+	// to collide with earlier stream slots and concatenate incompatible JSON.
+	sseData := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_compact","model":"gpt-5.6-sol"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[]}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_view","call_id":"call_view","name":"view","arguments":""}}`,
+		"",
+		"event: response.function_call_arguments.delta",
+		`data: {"type":"response.function_call_arguments.delta","output_index":2,"call_id":"call_view","delta":"{\"file_path\":\"a.go\"}"}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_view","call_id":"call_view","name":"view","arguments":"{\"file_path\":\"a.go\"}"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","id":"fc_grep","call_id":"call_grep","name":"grep","arguments":""}}`,
+		"",
+		"event: response.function_call_arguments.delta",
+		`data: {"type":"response.function_call_arguments.delta","output_index":3,"call_id":"call_grep","delta":"{\"pattern\":\"TODO\"}"}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":3,"item":{"type":"function_call","id":"fc_grep","call_id":"call_grep","name":"grep","arguments":"{\"pattern\":\"TODO\"}"}}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_compact","status":"completed","stop_reason":"tool_call","output":[{"type":"reasoning","id":"rs_merged","summary":[{"type":"summary_text","text":"plan"}]},{"type":"function_call","id":"fc_view","call_id":"call_view","name":"view","arguments":"{\"file_path\":\"a.go\"}"},{"type":"function_call","id":"fc_grep","call_id":"call_grep","name":"grep","arguments":"{\"pattern\":\"TODO\"}"}]}}`,
+		"",
+	}, "\n")
+
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %T %#v", msg["tool_calls"], msg["tool_calls"])
+	}
+	if toolCalls[0]["id"] != "call_view" || toolCalls[0]["name"] != "view" {
+		t.Fatalf("unexpected first tool call: %#v", toolCalls[0])
+	}
+	if toolCalls[0]["arguments"] != `{"file_path":"a.go"}` {
+		t.Fatalf("view arguments corrupted: %#v", toolCalls[0]["arguments"])
+	}
+	if toolCalls[1]["id"] != "call_grep" || toolCalls[1]["name"] != "grep" {
+		t.Fatalf("unexpected second tool call: %#v", toolCalls[1])
+	}
+	if toolCalls[1]["arguments"] != `{"pattern":"TODO"}` {
+		t.Fatalf("grep arguments corrupted: %#v", toolCalls[1]["arguments"])
+	}
+}
+
+func TestApplyAuthoritativeCodexToolArguments_ReplacesIncompatibleJSON(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"file_path":"a.go"}`)
+	applyAuthoritativeCodexToolArguments(&b, `{"pattern":"TODO"}`)
+	if got := b.String(); got != `{"pattern":"TODO"}` {
+		t.Fatalf("expected authoritative replacement, got %#v", got)
+	}
+
+	b.Reset()
+	b.WriteString(`{"file`)
+	applyAuthoritativeCodexToolArguments(&b, `{"file_path":"a.go"}`)
+	if got := b.String(); got != `{"file_path":"a.go"}` {
+		t.Fatalf("expected compatible prefix extension, got %#v", got)
+	}
+}
+
 func TestCodexHandleResponse_StreamReturnsStandardAssistantMessage(t *testing.T) {
 	a := &CodexAdapter{}
 	sseData := strings.Join([]string{

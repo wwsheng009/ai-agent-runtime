@@ -1129,25 +1129,134 @@ func appendMissingCodexText(builder *strings.Builder, authoritative string, emit
 	}
 }
 
-// handleOutputItemDone 处理 response.output_item.done 事件
-func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
-	index := getIntIndex(event)
-	item, _ := event["item"].(map[string]interface{})
-	itemType, _ := item["type"].(string)
-	if index == -1 && (itemType == "function_call" || itemType == "custom_tool_call") {
-		key := codexToolItemKeyFromItem(item)
-		if key == "" {
-			key = codexToolItemKeyFromEvent(event)
+// applyAuthoritativeCodexToolArguments merges a done/completed tool-argument
+// snapshot into the stream buffer. Compatible prefixes still extend in place;
+// incompatible complete JSON objects replace the buffer so compacted final
+// snapshots cannot concatenate two different tool payloads into invalid JSON.
+func applyAuthoritativeCodexToolArguments(builder *strings.Builder, authoritative string) {
+	if builder == nil {
+		return
+	}
+	if strings.TrimSpace(authoritative) == "" {
+		return
+	}
+	current := builder.String()
+	if current == authoritative {
+		return
+	}
+	if current != "" {
+		if strings.HasPrefix(authoritative, current) ||
+			strings.HasPrefix(current, authoritative) ||
+			strings.HasSuffix(current, authoritative) {
+			appendMissingCodexText(builder, authoritative, nil)
+			return
 		}
-		if existing, ok := state.ToolItemKeys[key]; ok {
-			index = existing
-		} else {
-			index = state.NextSyntheticIndex
-			state.NextSyntheticIndex++
-			if key != "" {
-				state.ToolItemKeys[key] = index
+		trimCurrent := strings.TrimSpace(current)
+		trimAuth := strings.TrimSpace(authoritative)
+		if trimCurrent == trimAuth ||
+			strings.HasPrefix(trimAuth, trimCurrent) ||
+			strings.HasPrefix(trimCurrent, trimAuth) ||
+			strings.HasSuffix(trimCurrent, trimAuth) {
+			appendMissingCodexText(builder, authoritative, nil)
+			return
+		}
+	}
+	if isCodexJSONObjectArguments(authoritative) {
+		builder.Reset()
+		builder.WriteString(authoritative)
+		return
+	}
+	appendMissingCodexText(builder, authoritative, nil)
+}
+
+func isCodexJSONObjectArguments(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed[0] != '{' {
+		return false
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil || decoded == nil {
+		return false
+	}
+	return true
+}
+
+// resolveCodexToolCallSlot selects the stable slot for a function/custom tool
+// call. Identity keys (call_id / item id) always win over output_index so that
+// response.completed recovery merges into stream-created tool calls instead of
+// colliding with them when the final output array is compacted.
+func resolveCodexToolCallSlot(state *CodexStreamState, event map[string]interface{}, item map[string]interface{}) int {
+	if state == nil {
+		return -1
+	}
+	keys := codexToolItemKeys(item)
+	if key := codexToolItemKeyFromEvent(event); key != "" {
+		found := false
+		for _, existing := range keys {
+			if existing == key {
+				found = true
+				break
 			}
 		}
+		if !found {
+			keys = append(keys, key)
+		}
+	}
+	for _, key := range keys {
+		if existing, ok := state.ToolItemKeys[key]; ok {
+			bindCodexToolItemKeys(state, item, existing)
+			if eventKey := codexToolItemKeyFromEvent(event); eventKey != "" {
+				state.ToolItemKeys[eventKey] = existing
+			}
+			return existing
+		}
+	}
+
+	index := getIntIndex(event)
+	if index >= 0 {
+		if tc, exists := state.ToolCalls[index]; exists {
+			itemCallID := strings.TrimSpace(asCodexString(item["call_id"]))
+			if itemCallID != "" && tc.CallID != "" && !strings.EqualFold(tc.CallID, itemCallID) {
+				// Live stream already stored a different tool at this output_index.
+				// Allocate a fresh slot instead of merging unrelated payloads.
+				index = -1
+			}
+		}
+	}
+	if index < 0 {
+		index = state.NextSyntheticIndex
+		state.NextSyntheticIndex++
+	}
+	bindCodexToolItemKeys(state, item, index)
+	if eventKey := codexToolItemKeyFromEvent(event); eventKey != "" {
+		state.ToolItemKeys[eventKey] = index
+	}
+	return index
+}
+
+func bindCodexToolItemKeys(state *CodexStreamState, item map[string]interface{}, index int) {
+	if state == nil {
+		return
+	}
+	for _, key := range codexToolItemKeys(item) {
+		state.ToolItemKeys[key] = index
+	}
+}
+
+// handleOutputItemDone 处理 response.output_item.done 事件
+func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	item, _ := event["item"].(map[string]interface{})
+	itemType, _ := item["type"].(string)
+	index := -1
+	if itemType == "function_call" || itemType == "custom_tool_call" {
+		// Prefer call_id / item id over raw output_index. response.completed often
+		// re-emits a compacted output[] whose array positions no longer match the
+		// live stream output_index values (e.g. multiple reasoning items collapse
+		// into one). Using the compacted index would merge unrelated tool calls
+		// and corrupt JSON arguments.
+		index = resolveCodexToolCallSlot(state, event, item)
+	} else {
+		index = getIntIndex(event)
 	}
 	if index == -1 {
 		if itemType == codexImageGenerationCallType {
@@ -1171,19 +1280,21 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 		if tc.Kind == "" {
 			tc.Kind = itemType
 		}
-		if callID, ok := item["call_id"].(string); ok && tc.CallID == "" {
+		if callID := strings.TrimSpace(asCodexString(item["call_id"])); callID != "" {
 			tc.CallID = callID
 		}
-		if name, ok := item["name"].(string); ok && tc.Name == "" {
+		if name := strings.TrimSpace(asCodexString(item["name"])); name != "" {
+			// Authoritative done/completed snapshots win over any earlier placeholder.
 			tc.Name = name
 		}
 		if itemType == "function_call" {
-			appendMissingCodexText(&tc.Arguments, asCodexString(item["arguments"]), nil)
+			applyAuthoritativeCodexToolArguments(&tc.Arguments, asCodexString(item["arguments"]))
 		} else {
-			appendMissingCodexText(&tc.Arguments, asCodexString(item["input"]), nil)
-			for _, key := range codexToolItemKeys(item) {
-				state.ToolItemKeys[key] = index
-			}
+			applyAuthoritativeCodexToolArguments(&tc.Arguments, asCodexString(item["input"]))
+		}
+		bindCodexToolItemKeys(state, item, index)
+		if key := codexToolItemKeyFromEvent(event); key != "" {
+			state.ToolItemKeys[key] = index
 		}
 	} else if itemType == "message" {
 		a.recoverCodexMessageItem(state, item, callbacks)
@@ -1290,8 +1401,8 @@ func (a *CodexAdapter) recoverCodexFinalOutput(state *CodexStreamState, output [
 	var refusal strings.Builder
 	var reasoning strings.Builder
 	for index, item := range output {
-		event := map[string]interface{}{"output_index": float64(index), "item": item}
-		switch strings.ToLower(strings.TrimSpace(asCodexString(item["type"]))) {
+		itemType := strings.ToLower(strings.TrimSpace(asCodexString(item["type"])))
+		switch itemType {
 		case "message":
 			state.OutputItems[index] = cloneInterfaceMap(item)
 			for _, part := range decodeSliceOfMaps(item["content"]) {
@@ -1320,7 +1431,14 @@ func (a *CodexAdapter) recoverCodexFinalOutput(state *CodexStreamState, output [
 					reasoning.WriteString(asCodexString(part["text"]))
 				}
 			}
+		case "function_call", "custom_tool_call":
+			// Do not pass the compacted array position as output_index. Stream
+			// events already keyed tool calls by live output_index; reusing the
+			// final array offset collides when earlier reasoning/message items
+			// were dropped or merged in the completed snapshot.
+			a.handleOutputItemDone(state, map[string]interface{}{"item": item}, callbacks)
 		default:
+			event := map[string]interface{}{"output_index": float64(index), "item": item}
 			a.handleOutputItemDone(state, event, callbacks)
 		}
 	}
