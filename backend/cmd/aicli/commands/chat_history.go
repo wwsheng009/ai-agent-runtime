@@ -176,11 +176,19 @@ func isVisibleChatHistoryMessage(session *ChatSession, message runtimetypes.Mess
 
 	role := strings.ToLower(strings.TrimSpace(message.Role))
 	content := strings.TrimSpace(message.Content)
+	// Legacy defense: older sessions may have fact ledgers as assistant text with
+	// stripped metadata. Hide the well-known ledger header so "继续" replays stay clean.
+	if isLegacyFactLedgerTranscript(content) {
+		return false
+	}
 	switch role {
 	case "system":
 		if content == "" || (hiddenSystemPrompt != "" && content == hiddenSystemPrompt) || (rawSystemPrompt != "" && content == rawSystemPrompt) {
 			return false
 		}
+	case "developer":
+		// Developer messages are prompt infrastructure, never user-visible chat.
+		return false
 	case "assistant":
 		return content != "" || len(message.ToolCalls) > 0 || (chatReasoningOutputEnabled(session) && finalReasoningBlock(&message) != nil)
 	case "tool":
@@ -189,6 +197,13 @@ func isVisibleChatHistoryMessage(session *ChatSession, message runtimetypes.Mess
 		return content != ""
 	}
 	return true
+}
+
+const legacyFactLedgerHeader = "Verified fact ledger (authoritative over compacted prose):"
+
+func isLegacyFactLedgerTranscript(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	return strings.HasPrefix(trimmed, legacyFactLedgerHeader)
 }
 
 func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message runtimetypes.Message, toolCalls map[string]runtimetypes.ToolCall, toolMetadata map[string]map[string]interface{}) {

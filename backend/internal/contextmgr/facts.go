@@ -155,7 +155,9 @@ func (m *Manager) buildFactLedgerMessage(ctx context.Context, input BuildInput) 
 		evidence = mergeSourceRefs(evidence, fact.EvidenceRefs)
 		factIDs = append(factIDs, fact.FactID)
 	}
-	message := types.NewAssistantMessage(strings.Join(lines, "\n"))
+	// Use developer role so the ledger stays instruction-context, not assistant
+	// transcript / trailing prefill that can leak into the visible chat surface.
+	message := types.NewDeveloperMessage(strings.Join(lines, "\n"))
 	message.Metadata["context_stage"] = "fact_ledger"
 	message.Metadata["goal_id"] = strings.TrimSpace(input.GoalID)
 	message.Metadata["fact_ids"] = factIDs
