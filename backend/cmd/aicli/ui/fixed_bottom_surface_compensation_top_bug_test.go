@@ -59,3 +59,33 @@ func TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop(t *testing.T) {
 		t.Fatalf("production frame differs from owned composition: differences=%d\n%s", differences, screen.Dump())
 	}
 }
+
+// TestOwnedSettleOutputDebtIsPureRecompose pins that SettleOutputDebt on the
+// production owned path does no legacy CSI-T compensation.
+func TestOwnedSettleOutputDebtIsPureRecompose(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		surface.BeginOutput()
+	})
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("owned SettleOutputDebt must not accumulate pending compensation, got %d", surface.pendingScrollDownRows)
+	}
+	settled := captureUIStdout(t, func() {
+		surface.SettleOutputDebt()
+	})
+	if strings.Contains(settled, terminalScrollDownSequence(1)) ||
+		strings.Contains(settled, terminalScrollDownSequence(2)) ||
+		strings.Contains(settled, terminalScrollDownSequence(3)) {
+		t.Fatalf("owned SettleOutputDebt must not emit scroll-down compensation: %q", settled)
+	}
+	if surface.outputCursorOnBlankRow {
+		t.Fatal("owned settle must not set blank-row flag")
+	}
+}

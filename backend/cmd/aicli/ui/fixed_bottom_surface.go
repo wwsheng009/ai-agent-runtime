@@ -381,17 +381,19 @@ func (s *FixedBottomSurface) Enabled() bool {
 	return s.enabled
 }
 
-// SettleOutputDebt flushes any deferred bottom-reserve shrink compensation
-// (pendingScrollDownRows) and any absorbed-row scroll debt.
+// SettleOutputDebt clears layout debt before replaying already-final transcript
+// (history / resume).
 //
-// Use this before replaying already-final transcript (history / resume) so
-// layout debt from ClearPrompt is not attached to the first content WriteOutput.
-// Live mid-stream band/popup growth still uses WriteOutput + outputCursorOnBlankRow
-// absorption for geometry correctness.
+// On the production owned path this is a pure recompose: historyWindow + bottom
+// band are painted together and no CSI-T shrink / absorb-scroll debt exists.
+// On the legacy capability-fallback path it still flushes pendingScrollDownRows
+// and outputScrollDebtRows so ClearPrompt layout debt is not attached to the
+// first content WriteOutput.
 //
-// The blank-row flag is left to the flushes themselves: paying absorb debt parks
-// the cursor on a fresh blank row, and a debt-less settle must keep an existing
-// trailing blank so soft rewrites still compute the soft-tail start correctly.
+// Legacy blank-row bookkeeping is left to the flushes themselves: paying absorb
+// debt parks the cursor on a fresh blank row, and a debt-less settle must keep
+// an existing trailing blank so soft rewrites still compute the soft-tail start
+// correctly.
 func (s *FixedBottomSurface) SettleOutputDebt() {
 	if s == nil || s.terminal == nil {
 		return
@@ -402,6 +404,14 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 		return
 	}
 	WithTerminalWriteLock(func() {
+		if s.ownedViewport {
+			// Owned frames recompose from historyWindow; there is no CSI-T
+			// shrink debt or absorb-scroll debt to flush.
+			s.applyLayoutLocked()
+			s.renderOwnedViewportLocked()
+			s.restoreStoredPromptCursorLocked()
+			return
+		}
 		s.applyLayoutLocked()
 		s.flushPendingOutputScrollDownLocked()
 		// Absorbed rows are live-only geometry debt as well: pay them here so
@@ -2706,6 +2716,13 @@ func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *string
 	if s == nil || s.terminal == nil || builder == nil || s.pendingScrollDownRows < 1 {
 		return
 	}
+	// Production owned path never accumulates pendingScrollDownRows
+	// (applyOwnedViewportGeometryLocked clears them). Keep the legacy
+	// restore/scroll-down path only for capability-fallback surfaces.
+	if s.ownedViewport {
+		s.pendingScrollDownRows = 0
+		return
+	}
 	rows := s.pendingScrollDownRows
 	if s.appendOwnedHistoryRestoreForShrinkLocked(builder) {
 		s.pendingScrollDownRows = 0
@@ -2720,7 +2737,7 @@ func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *string
 }
 
 func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
-	if s == nil || s.pendingScrollDownRows < 1 {
+	if s == nil || s.pendingScrollDownRows < 1 || s.ownedViewport {
 		return
 	}
 	var builder strings.Builder
@@ -2742,6 +2759,12 @@ func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
 // the absorbed row identifiable as the region bottom row again.
 func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Builder) {
 	if s == nil || s.terminal == nil || builder == nil || s.outputScrollDebtRows < 1 {
+		return
+	}
+	// Owned frames recompose the output region; absorb debt is a legacy
+	// immediate-mode scroll bookkeeping concept only.
+	if s.ownedViewport {
+		s.outputScrollDebtRows = 0
 		return
 	}
 	// A deferred shrink means the transcript is not parked at the region bottom
@@ -2772,7 +2795,7 @@ func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Build
 }
 
 func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
-	if s == nil || s.outputScrollDebtRows < 1 {
+	if s == nil || s.outputScrollDebtRows < 1 || s.ownedViewport {
 		return
 	}
 	var builder strings.Builder
@@ -2785,8 +2808,9 @@ func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
 // markOutputWrittenLocked invalidates prior spare-row compensation only after
 // bytes really reach the output region. BeginOutput is also used to position
 // the cursor before transient command popups, so it must not call this method.
+// Owned viewport ignores this: bottom-reserve height is recomposed each frame.
 func (s *FixedBottomSurface) markOutputWrittenLocked() {
-	if s == nil || s.terminal == nil {
+	if s == nil || s.terminal == nil || s.ownedViewport {
 		return
 	}
 	height := s.terminal.Height()

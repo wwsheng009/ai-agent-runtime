@@ -1,6 +1,6 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0–P5.3-S2+ 已完成：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口 + `insertHistoryLines` 溢出交接 + 回归；P5.4–P5.7 待推进）**
+状态: **implementing（P5.0–P5.3-S5 已完成：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口 + `insertHistoryLines` 溢出交接 + 默认 owned 渲染 + 补偿债务 no-op；P5.4–P5.7 待推进）**
 
 更新时间: **2026-07-30**
 
@@ -298,9 +298,9 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
   不发任何终端字节。VT 对照覆盖 full history、CJK/wide、dynamic status、ActiveBand grow，以及 popup grow；
   增长帧与 legacy screen 逐 cell 一致。ActiveBand shrink / popup close 的 shadow delta 被单测明确刻画为旧
   immediate-mode 补偿造成的差异（底部行仍一致），作为 S4 切换后的反转目标。
-- **S4 切换渲染（默认）**：底部带改走 `Compose`+`Backend.Flush`，删底部带补偿分支；VT 不变量测试
+- **S4 切换渲染（默认）**：✅ 底部带改走 `Compose`+`Backend.Flush`，删底部带补偿分支；VT 不变量测试
   （`EOSFusionLeavesNoBlankGap` 等）保持绿作为真值，序列级单测迁移为 VT 断言。
-- **S5 收尾**：resize / clear / soft-tail rewrite 与历史窗口对账；把
+- **S5 收尾**：✅ resize / clear / soft-tail rewrite 与历史窗口对账；把
   `TestBottomReserveShrinkCompensationDrawsBlanksAtTop` 反转为“顶部不得出现补偿空行、历史锚定”回归。
 
 ### P5.3 —— `insertHistoryLines` 唯一原语 + 历史交接
@@ -419,6 +419,10 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 
 ## 11. 建议的最小启动步
 
-**P5.0、P5.1、P5.2a 与 P5.2b/P5.3-S1 已完成**。下一步是 **S2（底部预留输出 cells）**：
-为 status/prompt/popup/ActiveBand 增加只读 cell/line 投影，继续保持旧生产写出不变，并以 `ui/vt`
-影子对照锁定现有屏幕语义。S2 验证完成后再评审 S3/S4 的生产 owned 渲染切换。
+**P5.0–P5.3-S5 已完成**（默认 owned 渲染 + 历史交接 + 补偿债务 no-op）。下一步是 **P5.4
+（cell 模型统一 + 宽度感知 `DisplayLines`）**：
+
+- 将 `assistantTurnTranscript` 收敛为 `assistantStreamCell`
+- 所有 cell 的 `DisplayLines(width)` 实现真实换行；viewport 用当前宽合成
+- 移除立即模式补丁（`EmittedDiverged` / `NeedsConsolidation`）
+- 测试：流式 golden、中英混排、`assistant` finalize 与 live 一致
