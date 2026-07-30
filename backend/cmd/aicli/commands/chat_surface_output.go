@@ -274,6 +274,25 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 	newChatPromptOverlay(session).beginDirectOutput()
 }
 
+// writeDirectInteractiveOutput clears the painted prompt (when present) and
+// writes text through FixedBottomSurface.WriteOutput so deferred bottom-reserve
+// shrink compensation is flushed and scroll bookkeeping stays consistent.
+// Returns false when the session has no enabled surface; callers should fall
+// back to beginDirectInteractiveOutput + plain stdout writes.
+func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
+	if session == nil || text == "" || session.NoInteractive || session.JSONOutput {
+		return false
+	}
+	if session.Surface == nil || !session.Surface.Enabled() {
+		return false
+	}
+	if session.Interaction != nil {
+		session.Interaction.ClearPrompt()
+	}
+	_, err, handled := session.Surface.WriteOutput(os.Stdout, text)
+	return handled && err == nil
+}
+
 func showRuntimeComposerPrompt(session *ChatSession, prompt string) bool {
 	return newChatPromptOverlay(session).showComposerPreview(prompt)
 }

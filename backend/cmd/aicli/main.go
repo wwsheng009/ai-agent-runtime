@@ -187,6 +187,11 @@ func main() {
 		return cfg
 	}))
 
+	// balance 账户余额子命令
+	rootCmd.AddCommand(commands.NewBalanceCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// skill 管理子命令
 	rootCmd.AddCommand(commands.NewSkillCommand())
 

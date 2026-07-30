@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -91,12 +93,30 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		"34 total (21 input + 13 output)",
 		"Limits:",
 		// Capability missing: surface provider default window instead of "unavailable".
-		"256000 context tokens (provider default, active turn 217600)",
+		// Limits text may hard-wrap inside the fixed box; assert stable fragments.
+		"256000 context tokens",
+		"provider default",
+		"217600",
 	}
 	for _, expected := range expectedFragments {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
 		}
+	}
+	// Full limits sentence should still be present once box borders / wrap gaps
+	// are stripped. Hard-wrap inserts "│" between "turn" and "217600)".
+	compactOutput := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return -1
+		case r == '│' || r == '╭' || r == '╮' || r == '╰' || r == '╯' || r == '─':
+			return -1
+		default:
+			return r
+		}
+	}, output)
+	if !strings.Contains(compactOutput, "256000contexttokens(providerdefault,activeturn217600)") {
+		t.Fatalf("expected collapsed limits sentence in status output, got:\n%s", output)
 	}
 	if !strings.Contains(output, "╭") || !strings.Contains(output, "╰") {
 		t.Fatalf("expected boxed status output, got:\n%s", output)
@@ -168,6 +188,150 @@ func TestBuildChatStatusBoxLines_IncludesFastModeOnlyForCodex(t *testing.T) {
 	openaiLines := strings.Join(buildChatStatusBoxLines(openai, chatStatusDefaultContentWidth), "\n")
 	if strings.Contains(openaiLines, "Fast mode:") {
 		t.Fatalf("expected Fast mode omitted for non-codex, got:\n%s", openaiLines)
+	}
+}
+
+func TestBuildChatStatusBoxLines_KeepsLongValuesWithinContentWidth(t *testing.T) {
+	// Use an absolute deep path so Directory resolves to a value longer than the box.
+	longDir := filepath.Join(
+		t.TempDir(),
+		"very",
+		"long",
+		"project",
+		"path",
+		"that",
+		"would",
+		"previously",
+		"expand",
+		"the",
+		"status",
+		"box",
+		"past",
+		"the",
+		"terminal",
+		"width",
+		"and",
+		"make",
+		"borders",
+		"wrap",
+		"midline",
+		"status-workspace",
+	)
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "019de76b-2481-7130-b902-f6166e6d2b96"
+	runtimeSession.Metadata.Title = "检查 aicli chat 中 /status 只渲染一半数据时的超长会话标题为什么会把边框撑破"
+
+	session := &ChatSession{
+		ProviderName:   "OpenAI-go-away",
+		Provider:       config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
+		Model:          "gpt-5.4-mini",
+		BaseURL:        "http://localhost:8080/v1/with/a/very/long/provider/path/that/should-wrap",
+		PermissionMode: runtimepolicy.ModeBypassPermissions,
+		ProfileRoot:    longDir,
+		RuntimeSession: runtimeSession,
+	}
+
+	contentWidth := chatStatusMinimumContentWidth
+	lines := buildChatStatusBoxLines(session, contentWidth)
+	if len(lines) < 3 {
+		t.Fatalf("expected boxed status lines, got %d", len(lines))
+	}
+
+	maxLineWidth := contentWidth + 2 // left and right box borders
+	joined := strings.Join(lines, "\n")
+	// Long values (session id/title, directory) hard-wrap inside the fixed box
+	// width, so identity checks must tolerate mid-token line breaks and box
+	// border glyphs that sit between wrapped segments.
+	compact := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return -1
+		case r == '│' || r == '╭' || r == '╮' || r == '╰' || r == '╯' || r == '─':
+			return -1
+		default:
+			return r
+		}
+	}, joined)
+	for _, expected := range []string{
+		"Directory:",
+		"status-workspace",
+		"Session:",
+		"019de76b-2481-7130-b902-f6166e6d2b96",
+		"只渲染一半数据",
+	} {
+		if strings.Contains(joined, expected) || strings.Contains(compact, expected) {
+			continue
+		}
+		t.Fatalf("expected wrapped status output to retain %q, got:\n%s", expected, joined)
+	}
+
+	var directoryLines int
+	for _, line := range lines {
+		width := ui.DisplayWidth(line)
+		if width > maxLineWidth {
+			t.Fatalf("status line wider than content budget (%d > %d): %q\nfull output:\n%s", width, maxLineWidth, line, joined)
+		}
+		if strings.Contains(line, "Directory:") || (directoryLines > 0 && strings.Contains(line, "status-workspace")) {
+			directoryLines++
+		}
+	}
+	if directoryLines < 2 {
+		t.Fatalf("expected long directory value to wrap across multiple box rows, got:\n%s", joined)
+	}
+}
+
+func TestPrintChatStatus_WritesThroughFixedBottomSurfaceAfterPromptClear(t *testing.T) {
+	// /status must use Surface.WriteOutput after clearing the prompt so deferred
+	// bottom-reserve shrink is flushed. Otherwise restoring the prompt paints
+	// over Token usage / Limits / the bottom border.
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+
+	session := &ChatSession{
+		ProviderName:   "OpenAI-go-away",
+		Provider:       config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
+		Model:          "gpt-5.4-mini",
+		BaseURL:        "http://localhost:8080/v1",
+		PermissionMode: runtimepolicy.ModeBypassPermissions,
+		RuntimeSession: &runtimechat.Session{ID: "019de76b-2481-7130-b902-f6166e6d2b96", State: runtimechat.StateActive},
+	}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	session.Surface = surface
+	coord.SetSurface(surface)
+	coord.promptAdvanceFn = func() bool { return false }
+
+	output := captureStdout(t, func() {
+		// Rebind after stdout swap so ClearPrompt recognizes the interactive
+		// surface writer (writer == os.Stdout) and releases reserved rows.
+		coord.SetWriter(os.Stdout)
+		// Paint a real reserved prompt row, then mark the coordinator so
+		// ClearPrompt releases it (same state as an interactive /status).
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected surface prompt")
+		}
+		coord.promptVisible = true
+		coord.promptRenderedOnSurface = true
+		printChatStatus(session)
+	})
+
+	for _, expected := range []string{
+		"Token usage",
+		"Limits",
+		"╰",
+		// WriteOutput normalizes LFs to CRLF for the surface path.
+		"\r\n",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected surface status output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	// CSI Ps T is the deferred shrink flush WriteOutput must emit after ClearPrompt.
+	if !strings.Contains(output, "\x1b[3T") {
+		t.Fatalf("expected WriteOutput to flush pending bottom-reserve shrink before status text, got:\n%q", output)
 	}
 }
 

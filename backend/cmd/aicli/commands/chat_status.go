@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -55,10 +56,22 @@ func printChatStatus(session *ChatSession) {
 		return
 	}
 
-	beginDirectInteractiveOutput(session)
-
 	contentWidth := resolveChatStatusBoxContentWidth()
-	for _, line := range buildChatStatusBoxLines(session, contentWidth) {
+	lines := buildChatStatusBoxLines(session, contentWidth)
+	text := strings.Join(lines, "\n") + "\n"
+
+	// Fixed-bottom surfaces defer scroll-down when ClearPrompt shrinks the
+	// bottom reserve. Raw fmt.Println after BeginOutput never flushes that
+	// compensation or marks output written, so restoring the prompt cancels
+	// the matching growth scroll and paints over the status box bottom
+	// (Token usage / Limits / bottom border). Write through the surface so
+	// pending shrink is flushed before text lands.
+	if writeDirectInteractiveOutput(session, text) {
+		return
+	}
+
+	beginDirectInteractiveOutput(session)
+	for _, line := range lines {
 		fmt.Println(line)
 	}
 }
@@ -68,9 +81,13 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		contentWidth = chatStatusMinimumContentWidth
 	}
 
+	// contentWidth is a hard layout budget from resolveChatStatusBoxContentWidth
+	// (terminal width capped). Do not expand it to fit long Directory/Session/
+	// Agents.md values: that makes the box wider than the terminal, the shell
+	// wraps mid-border, and /status looks like only half the data rendered.
+	// Long values wrap via buildChatStatusKeyValueLines instead.
 	innerLines := make([]string, 0, 16)
 	headerText := buildChatStatusHeaderText()
-	contentWidth = maxChatStatusContentWidth(contentWidth, ui.DisplayWidth(headerText))
 	innerLines = append(innerLines, headerText)
 	innerLines = append(innerLines, "")
 	rows := []struct {
@@ -79,6 +96,7 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 	}{
 		{Label: "Model", Value: buildChatStatusModelValue(session)},
 		{Label: "Model provider", Value: buildChatStatusProviderValue(session)},
+		{Label: "Account balance", Value: buildChatStatusBalanceValue(session)},
 		{Label: "Directory", Value: buildChatStatusDirectoryValue(session)},
 		{Label: "Permissions", Value: buildChatStatusPermissionsValue(session)},
 		{Label: "Agents.md", Value: buildChatStatusAgentsMarkdownValue(session)},
@@ -114,9 +132,6 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		}{Label: "Limits", Value: buildChatStatusLimitsValue(session)},
 	)
 	for _, row := range rows {
-		contentWidth = maxChatStatusContentWidth(contentWidth, estimateChatStatusRowWidth(row.Label, row.Value))
-	}
-	for _, row := range rows {
 		innerLines = append(innerLines, buildChatStatusKeyValueLines(row.Label, row.Value, contentWidth)...)
 	}
 
@@ -135,26 +150,6 @@ func buildChatStatusHeaderText() string {
 		version = "dev"
 	}
 	return fmt.Sprintf("  >_ %s (%s)", chatStatusAppName, version)
-}
-
-func estimateChatStatusRowWidth(label, value string) int {
-	label = strings.TrimSpace(label)
-	if label == "" {
-		return 0
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		value = "<none>"
-	}
-	line := "  " + fmt.Sprintf("%-*s ", chatStatusLabelWidth, label+":") + value
-	return ui.DisplayWidth(line)
-}
-
-func maxChatStatusContentWidth(current, next int) int {
-	if next > current {
-		return next
-	}
-	return current
 }
 
 func buildChatStatusKeyValueLines(label, value string, contentWidth int) []string {
@@ -298,6 +293,53 @@ func buildChatStatusProviderValue(session *ChatSession) string {
 		return endpoint
 	}
 	return fmt.Sprintf("%s - %s", provider, endpoint)
+}
+
+func buildChatStatusBalanceValue(session *ChatSession) string {
+	if session == nil {
+		return "<none>"
+	}
+	// Prefer the live session provider snapshot; fall back to config cache for the same name.
+	account := session.Provider.Account
+	siteType := strings.TrimSpace(session.Provider.SiteType)
+	confidence := strings.TrimSpace(session.Provider.SiteTypeConfidence)
+	if account == nil && session.Config != nil && session.Config.Providers.Items != nil {
+		name := strings.TrimSpace(session.ProviderName)
+		if name != "" {
+			if cfgProvider, ok := session.Config.Providers.Items[name]; ok {
+				account = cfgProvider.Account
+				if siteType == "" {
+					siteType = strings.TrimSpace(cfgProvider.SiteType)
+				}
+				if confidence == "" {
+					confidence = strings.TrimSpace(cfgProvider.SiteTypeConfidence)
+				}
+			}
+		}
+	}
+	line := formatProviderAccountBalanceLine(account, siteType, confidence)
+	if line == "" {
+		if siteType != "" && !strings.EqualFold(siteType, "unknown") {
+			return fmt.Sprintf("no cached account (%s); run aicli balance --refresh or aicli login --require-account", siteType)
+		}
+		return "<none>"
+	}
+	if account != nil && strings.TrimSpace(account.FetchedAt) != "" {
+		return fmt.Sprintf("%s · fetched %s", line, formatChatStatusLocalTime(account.FetchedAt))
+	}
+	return line
+}
+
+func formatChatStatusLocalTime(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return trimmed
+	}
+	return parsed.In(time.Local).Format("2006-01-02 15:04:05 -07:00")
 }
 
 func buildChatStatusDirectoryValue(session *ChatSession) string {
