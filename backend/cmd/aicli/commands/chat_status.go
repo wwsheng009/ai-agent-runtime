@@ -299,24 +299,9 @@ func buildChatStatusBalanceValue(session *ChatSession) string {
 	if session == nil {
 		return "<none>"
 	}
-	// Prefer the live session provider snapshot; fall back to config cache for the same name.
-	account := session.Provider.Account
-	siteType := strings.TrimSpace(session.Provider.SiteType)
-	confidence := strings.TrimSpace(session.Provider.SiteTypeConfidence)
-	if account == nil && session.Config != nil && session.Config.Providers.Items != nil {
-		name := strings.TrimSpace(session.ProviderName)
-		if name != "" {
-			if cfgProvider, ok := session.Config.Providers.Items[name]; ok {
-				account = cfgProvider.Account
-				if siteType == "" {
-					siteType = strings.TrimSpace(cfgProvider.SiteType)
-				}
-				if confidence == "" {
-					confidence = strings.TrimSpace(cfgProvider.SiteTypeConfidence)
-				}
-			}
-		}
-	}
+	// Prefer the concurrency-safe live refresh snapshot; direct/unit sessions
+	// fall back to the provider/config cache.
+	account, siteType, confidence := currentChatAccountBalance(session)
 	line := formatProviderAccountBalanceLine(account, siteType, confidence)
 	if line == "" {
 		if siteType != "" && !strings.EqualFold(siteType, "unknown") {

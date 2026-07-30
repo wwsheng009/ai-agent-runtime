@@ -105,6 +105,39 @@ func TestEffectiveProviderHeaders_UserAgentProviderOverridesGlobal(t *testing.T)
 	}
 }
 
+func TestInitGlobalConfigLoadsAICLIBalanceRefreshInterval(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  balance:
+    refresh_interval: 45s
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+	if got := EffectiveAICLIBalanceRefreshInterval(cfg); got != 45*time.Second {
+		t.Fatalf("balance refresh interval = %s, want 45s", got)
+	}
+}
+
+func TestEffectiveAICLIBalanceRefreshIntervalDefaultsToOneMinute(t *testing.T) {
+	for _, cfg := range []*Config{
+		nil,
+		{},
+		{AICLI: &AICLIConfig{}},
+		{AICLI: &AICLIConfig{Balance: &AICLIBalanceConfig{}}},
+	} {
+		if got := EffectiveAICLIBalanceRefreshInterval(cfg); got != time.Minute {
+			t.Fatalf("balance refresh interval = %s, want 1m", got)
+		}
+	}
+}
+
 func TestInitGlobalConfigProviderMaxTokenAlias(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	configYAML := `

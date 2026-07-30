@@ -139,6 +139,8 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
 	session.Interaction.SetSurface(surface)
+	initializeChatAccountBalanceRefresh(session)
+	session.Interaction.RefreshStatus("")
 	if profileState != nil && profileState.Active() {
 		session.ProfileReference = profileState.Reference
 		session.ProfileName = profileState.Resolved.ProfileName
@@ -171,6 +173,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 
 	cleanup := func() {
 		mcpmanager.SetStatusOutput(os.Stdout)
+		stopChatAccountBalanceRefresh(session)
 		if session.TitleNotifier != nil {
 			session.TitleNotifier.Close()
 		}

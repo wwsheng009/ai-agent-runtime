@@ -12,6 +12,8 @@ aicli:
     slow_retry_interval: ${AICLI_RETRY_SLOW_INTERVAL:-5s}
   timeout:
     request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
+  balance:
+    refresh_interval: ${AICLI_BALANCE_REFRESH_INTERVAL:-1m}
   chat:
     default_provider: mimo_anthropic
     default_model: mimo-v2.5-pro

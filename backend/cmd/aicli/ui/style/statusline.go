@@ -14,6 +14,7 @@ const (
 	StatusSegModel
 	StatusSegPath
 	StatusSegUsage
+	StatusSegBalance
 	StatusSegMode
 	StatusSegMeta
 )

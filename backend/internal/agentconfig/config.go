@@ -168,37 +168,37 @@ type ModelCapabilitySpec struct {
 
 // Provider holds provider configuration.
 type Provider struct {
-	Enabled                 bool                           `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
-	Type                    string                         `yaml:"type" mapstructure:"type" json:"type"`
-	Protocol                string                         `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
-	BaseURL                 string                         `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
-	APIPath                 string                         `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
-	ForwardURL              string                         `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
-	APIKey                  string                         `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
-	APIKeys                 []string                       `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
-	APIKeyRef               string                         `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
-	AuthMode                string                         `yaml:"auth_mode,omitempty" mapstructure:"auth_mode" json:"auth_mode,omitempty"`
-	AuthRef                 string                         `yaml:"auth_ref,omitempty" mapstructure:"auth_ref" json:"auth_ref,omitempty"`
-	ModelsPath              string                         `yaml:"models_path,omitempty" mapstructure:"models_path" json:"models_path,omitempty"`
-	ModelsVerifiedAt        string                         `yaml:"models_verified_at,omitempty" mapstructure:"models_verified_at" json:"models_verified_at,omitempty"`
-	DefaultModel            string                         `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
-	SupportedModels         []string                       `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
-	Headers                 map[string]string              `yaml:"headers" mapstructure:"headers" json:"headers"`
-	HeaderMappings          map[string]string              `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
-	HeaderMappingRules      []HeaderMappingRule            `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
-	SupportTypes            []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
-	ModelMappings           map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
-	ModelCapabilities       map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
+	Enabled            bool                           `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
+	Type               string                         `yaml:"type" mapstructure:"type" json:"type"`
+	Protocol           string                         `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
+	BaseURL            string                         `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
+	APIPath            string                         `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
+	ForwardURL         string                         `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
+	APIKey             string                         `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
+	APIKeys            []string                       `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
+	APIKeyRef          string                         `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
+	AuthMode           string                         `yaml:"auth_mode,omitempty" mapstructure:"auth_mode" json:"auth_mode,omitempty"`
+	AuthRef            string                         `yaml:"auth_ref,omitempty" mapstructure:"auth_ref" json:"auth_ref,omitempty"`
+	ModelsPath         string                         `yaml:"models_path,omitempty" mapstructure:"models_path" json:"models_path,omitempty"`
+	ModelsVerifiedAt   string                         `yaml:"models_verified_at,omitempty" mapstructure:"models_verified_at" json:"models_verified_at,omitempty"`
+	DefaultModel       string                         `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
+	SupportedModels    []string                       `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
+	Headers            map[string]string              `yaml:"headers" mapstructure:"headers" json:"headers"`
+	HeaderMappings     map[string]string              `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
+	HeaderMappingRules []HeaderMappingRule            `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
+	SupportTypes       []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
+	ModelMappings      map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
+	ModelCapabilities  map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
 	// EnableImageGeneration is the provider-level opt-in for Codex native
 	// image_generation tool injection. When nil or false, requests never
 	// auto-append image_generation even if a model capability advertises it.
 	// Some third-party Codex-compatible sites reject that tool by default.
-	EnableImageGeneration   *bool                          `yaml:"enable_image_generation,omitempty" mapstructure:"enable_image_generation" json:"enable_image_generation,omitempty"`
-	MaxTokensLimit          int                            `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
-	MaxToken                int                            `yaml:"max_token" mapstructure:"max_token" json:"max_token"`
-	SupportsMaxOutputTokens *bool                          `yaml:"supports_max_output_tokens" mapstructure:"supports_max_output_tokens" json:"supports_max_output_tokens"`
-	Timeout                 time.Duration                  `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
-	Proxy                   *ProxyConfig                   `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
+	EnableImageGeneration   *bool         `yaml:"enable_image_generation,omitempty" mapstructure:"enable_image_generation" json:"enable_image_generation,omitempty"`
+	MaxTokensLimit          int           `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
+	MaxToken                int           `yaml:"max_token" mapstructure:"max_token" json:"max_token"`
+	SupportsMaxOutputTokens *bool         `yaml:"supports_max_output_tokens" mapstructure:"supports_max_output_tokens" json:"supports_max_output_tokens"`
+	Timeout                 time.Duration `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
+	Proxy                   *ProxyConfig  `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
 	// RequestsPerMinute caps the number of provider API calls per rolling minute.
 	// Zero means no client-side rate limiting.
 	RequestsPerMinute int `yaml:"requests_per_minute" mapstructure:"requests_per_minute" json:"requests_per_minute"`
@@ -214,25 +214,25 @@ type Provider struct {
 
 // ProviderAccountSnapshot is a non-sensitive cached account/balance summary.
 type ProviderAccountSnapshot struct {
-	Source                   string                          `yaml:"source,omitempty" mapstructure:"source" json:"source,omitempty"`
-	Mode                     string                          `yaml:"mode,omitempty" mapstructure:"mode" json:"mode,omitempty"`
-	Currency                 string                          `yaml:"currency,omitempty" mapstructure:"currency" json:"currency,omitempty"`
-	WalletBalance            *float64                        `yaml:"wallet_balance,omitempty" mapstructure:"wallet_balance" json:"wallet_balance,omitempty"`
-	QuotaBalance             *float64                        `yaml:"quota_balance,omitempty" mapstructure:"quota_balance" json:"quota_balance,omitempty"`
-	QuotaRemaining           *float64                        `yaml:"quota_remaining,omitempty" mapstructure:"quota_remaining" json:"quota_remaining,omitempty"`
-	QuotaUsed                *float64                        `yaml:"quota_used,omitempty" mapstructure:"quota_used" json:"quota_used,omitempty"`
-	QuotaLimit               *float64                        `yaml:"quota_limit,omitempty" mapstructure:"quota_limit" json:"quota_limit,omitempty"`
-	QuotaDisplayType         string                          `yaml:"quota_display_type,omitempty" mapstructure:"quota_display_type" json:"quota_display_type,omitempty"`
-	QuotaDisplayUnit         string                          `yaml:"quota_display_unit,omitempty" mapstructure:"quota_display_unit" json:"quota_display_unit,omitempty"`
-	QuotaDisplayScale        *float64                        `yaml:"quota_display_scale,omitempty" mapstructure:"quota_display_scale" json:"quota_display_scale,omitempty"`
-	PlanName                 string                          `yaml:"plan_name,omitempty" mapstructure:"plan_name" json:"plan_name,omitempty"`
-	ExternalUserID           string                          `yaml:"external_user_id,omitempty" mapstructure:"external_user_id" json:"external_user_id,omitempty"`
-	ExternalUsernameMasked   string                          `yaml:"external_username_masked,omitempty" mapstructure:"external_username_masked" json:"external_username_masked,omitempty"`
-	Subscriptions            []ProviderAccountSubscription   `yaml:"subscriptions,omitempty" mapstructure:"subscriptions" json:"subscriptions,omitempty"`
-	Usage                    *ProviderAccountUsage           `yaml:"usage,omitempty" mapstructure:"usage" json:"usage,omitempty"`
-	FetchedAt                string                          `yaml:"fetched_at,omitempty" mapstructure:"fetched_at" json:"fetched_at,omitempty"`
-	Partial                  bool                            `yaml:"partial,omitempty" mapstructure:"partial" json:"partial,omitempty"`
-	LastError                string                          `yaml:"last_error,omitempty" mapstructure:"last_error" json:"last_error,omitempty"`
+	Source                 string                        `yaml:"source,omitempty" mapstructure:"source" json:"source,omitempty"`
+	Mode                   string                        `yaml:"mode,omitempty" mapstructure:"mode" json:"mode,omitempty"`
+	Currency               string                        `yaml:"currency,omitempty" mapstructure:"currency" json:"currency,omitempty"`
+	WalletBalance          *float64                      `yaml:"wallet_balance,omitempty" mapstructure:"wallet_balance" json:"wallet_balance,omitempty"`
+	QuotaBalance           *float64                      `yaml:"quota_balance,omitempty" mapstructure:"quota_balance" json:"quota_balance,omitempty"`
+	QuotaRemaining         *float64                      `yaml:"quota_remaining,omitempty" mapstructure:"quota_remaining" json:"quota_remaining,omitempty"`
+	QuotaUsed              *float64                      `yaml:"quota_used,omitempty" mapstructure:"quota_used" json:"quota_used,omitempty"`
+	QuotaLimit             *float64                      `yaml:"quota_limit,omitempty" mapstructure:"quota_limit" json:"quota_limit,omitempty"`
+	QuotaDisplayType       string                        `yaml:"quota_display_type,omitempty" mapstructure:"quota_display_type" json:"quota_display_type,omitempty"`
+	QuotaDisplayUnit       string                        `yaml:"quota_display_unit,omitempty" mapstructure:"quota_display_unit" json:"quota_display_unit,omitempty"`
+	QuotaDisplayScale      *float64                      `yaml:"quota_display_scale,omitempty" mapstructure:"quota_display_scale" json:"quota_display_scale,omitempty"`
+	PlanName               string                        `yaml:"plan_name,omitempty" mapstructure:"plan_name" json:"plan_name,omitempty"`
+	ExternalUserID         string                        `yaml:"external_user_id,omitempty" mapstructure:"external_user_id" json:"external_user_id,omitempty"`
+	ExternalUsernameMasked string                        `yaml:"external_username_masked,omitempty" mapstructure:"external_username_masked" json:"external_username_masked,omitempty"`
+	Subscriptions          []ProviderAccountSubscription `yaml:"subscriptions,omitempty" mapstructure:"subscriptions" json:"subscriptions,omitempty"`
+	Usage                  *ProviderAccountUsage         `yaml:"usage,omitempty" mapstructure:"usage" json:"usage,omitempty"`
+	FetchedAt              string                        `yaml:"fetched_at,omitempty" mapstructure:"fetched_at" json:"fetched_at,omitempty"`
+	Partial                bool                          `yaml:"partial,omitempty" mapstructure:"partial" json:"partial,omitempty"`
+	LastError              string                        `yaml:"last_error,omitempty" mapstructure:"last_error" json:"last_error,omitempty"`
 }
 
 // ProviderAccountSubscription is a compact subscription cache entry.
@@ -430,6 +430,7 @@ type AICLIConfig struct {
 	Log        *AICLILogConfig        `yaml:"log" mapstructure:"log"`
 	Retry      *AICLIRetryConfig      `yaml:"retry" mapstructure:"retry"`
 	Timeout    *AICLITimeoutConfig    `yaml:"timeout" mapstructure:"timeout"`
+	Balance    *AICLIBalanceConfig    `yaml:"balance" mapstructure:"balance"`
 	Theme      *AICLIThemeConfig      `yaml:"theme" mapstructure:"theme"`
 	Chat       *AICLIChatConfig       `yaml:"chat" mapstructure:"chat"`
 	Runtime    *AICLIRuntimeConfig    `yaml:"runtime" mapstructure:"runtime"`
@@ -461,6 +462,23 @@ type AICLIRetryConfig struct {
 // AICLITimeoutConfig holds aicli timeout configuration.
 type AICLITimeoutConfig struct {
 	RequestTimeout time.Duration `yaml:"request_timeout" mapstructure:"request_timeout"`
+}
+
+const DefaultAICLIBalanceRefreshInterval = time.Minute
+
+// AICLIBalanceConfig controls live account balance updates in interactive chat.
+type AICLIBalanceConfig struct {
+	RefreshInterval time.Duration `yaml:"refresh_interval" mapstructure:"refresh_interval" env:"AICLI_BALANCE_REFRESH_INTERVAL"`
+}
+
+// EffectiveAICLIBalanceRefreshInterval returns the configured refresh interval.
+// Missing and non-positive values use the one-minute default.
+func EffectiveAICLIBalanceRefreshInterval(cfg *Config) time.Duration {
+	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.Balance == nil ||
+		cfg.AICLI.Balance.RefreshInterval <= 0 {
+		return DefaultAICLIBalanceRefreshInterval
+	}
+	return cfg.AICLI.Balance.RefreshInterval
 }
 
 // AICLIThemeConfig holds aicli terminal theme preferences.

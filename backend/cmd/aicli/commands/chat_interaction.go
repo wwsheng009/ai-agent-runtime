@@ -95,6 +95,9 @@ type chatInteractionCoordinator struct {
 	dynamicStatusStarted  time.Time
 	dynamicStatusTimer    *time.Timer
 	dynamicStatusTimerSeq uint64
+	persistentStatusModel style.StatusLineModel
+	dynamicStatusModel    *style.StatusLineModel
+	statusModelsCached    bool
 	activeTools           map[string]chatActiveTool
 	activeToolSequence    uint64
 
@@ -473,13 +476,82 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 	now := time.Now()
 	c.updateDynamicStatusClockLocked(state, now)
 	if c.surface != nil {
+		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
+		dynamicModel := buildChatDynamicStatusModelForWidthAndInputMode(state, ui.GetTerminalWidth(), c.inputMode, c.dynamicStatusElapsedLocked(now))
+		c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
+		c.dynamicStatusModel = cloneChatStatusLineModelPointer(dynamicModel)
+		c.statusModelsCached = true
 		c.surface.SetStatusModels(
-			buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth()),
-			buildChatDynamicStatusModelForWidthAndInputMode(state, ui.GetTerminalWidth(), c.inputMode, c.dynamicStatusElapsedLocked(now)),
+			persistentModel,
+			dynamicModel,
 		)
 		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, state, ui.GetTerminalWidth()))
 		c.scheduleDynamicStatusTickLocked(now)
 	}
+}
+
+func cloneChatStatusLineModel(model style.StatusLineModel) style.StatusLineModel {
+	model.Segments = append([]style.StatusSegment(nil), model.Segments...)
+	return model
+}
+
+func cloneChatStatusLineModelPointer(model *style.StatusLineModel) *style.StatusLineModel {
+	if model == nil {
+		return nil
+	}
+	cloned := cloneChatStatusLineModel(*model)
+	return &cloned
+}
+
+// RefreshAccountBalanceStatus repaints only the balance projection in the
+// cached persistent model. A timer callback must not rebuild the whole footer:
+// the remaining ChatSession counters and mode fields belong to the foreground
+// interaction lifecycle and are not all guarded for arbitrary background reads.
+func (c *chatInteractionCoordinator) RefreshAccountBalanceStatus() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown || c.surface == nil || !c.statusModelsCached {
+		return
+	}
+
+	model := cloneChatStatusLineModel(c.persistentStatusModel)
+	balance := chatSurfaceAccountBalanceStatusSegment(c.session)
+	segments := make([]style.StatusSegment, 0, len(model.Segments)+1)
+	insertAt := -1
+	for _, segment := range model.Segments {
+		if segment.Kind == style.StatusSegBalance {
+			if insertAt < 0 {
+				insertAt = len(segments)
+			}
+			continue
+		}
+		segments = append(segments, segment)
+		if insertAt < 0 && (segment.Kind == style.StatusSegModel || segment.Kind == style.StatusSegMeta) {
+			insertAt = len(segments)
+		}
+	}
+	if balance.full != "" {
+		segment := style.StatusSegment{
+			Kind: style.StatusSegBalance,
+			Text: balance.compact,
+			Role: style.RoleSuccess,
+		}
+		if insertAt < 0 {
+			insertAt = len(segments)
+		}
+		segments = append(segments, style.StatusSegment{})
+		copy(segments[insertAt+1:], segments[insertAt:])
+		segments[insertAt] = segment
+	}
+	model.Segments = segments
+	for index := range model.Segments {
+		model.Segments[index].Priority = index
+	}
+	c.persistentStatusModel = cloneChatStatusLineModel(model)
+	c.surface.SetStatusModels(model, cloneChatStatusLineModelPointer(c.dynamicStatusModel))
 }
 
 func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(state string, now time.Time) {
@@ -1425,6 +1497,9 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 	if providerSeg := chatSurfaceProviderStatusSegment(session); providerSeg.full != "" {
 		segments = append(segments, presentChatStatusSegment(providerSeg, style.StatusSegMeta, style.RoleTextSecondary))
 	}
+	if balanceSeg := chatSurfaceAccountBalanceStatusSegment(session); balanceSeg.full != "" {
+		segments = append(segments, presentChatStatusSegment(balanceSeg, style.StatusSegBalance, style.RoleSuccess))
+	}
 	if contextSeg := chatSurfaceContextUsedStatusSegment(session); contextSeg.full != "" {
 		segments = append(segments, presentChatStatusSegment(contextSeg, style.StatusSegUsage, style.RoleProgress))
 	}
@@ -1455,6 +1530,32 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 		segments = append(segments, presentChatStatusSegment(fastSeg, style.StatusSegMode, style.RoleAccent))
 	}
 	return segments
+}
+
+func chatSurfaceAccountBalanceStatusSegment(session *ChatSession) chatStatusSegment {
+	account, siteType, confidence := currentChatAccountBalance(session)
+	if account == nil {
+		return chatStatusSegment{}
+	}
+	view := accountViewFromProviderSnapshot(account, siteType, confidence)
+	if view.BalanceValue == nil {
+		if formatProviderAccountBalanceLine(account, siteType, confidence) == "" {
+			return chatStatusSegment{}
+		}
+		return chatStatusSegment{full: "Balance synced", compact: "Bal synced"}
+	}
+	unit := strings.TrimSpace(view.DisplayUnit)
+	if unit == "" {
+		unit = strings.TrimSpace(view.Currency)
+	}
+	value := fmt.Sprintf("%.4g", *view.BalanceValue)
+	if unit != "" {
+		value += " " + unit
+	}
+	return chatStatusSegment{
+		full:    "Balance " + value,
+		compact: "Bal " + value,
+	}
 }
 
 func presentChatStatusSegment(segment chatStatusSegment, kind style.StatusSegmentKind, role style.Role) chatStatusSegment {

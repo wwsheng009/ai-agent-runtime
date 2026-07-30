@@ -301,6 +301,7 @@ func applyChatExecutionContext(session *ChatSession, providerCtx *providerExecut
 
 	session.ProviderName = providerCtx.ProviderName
 	session.Provider = providerCtx.Provider
+	updateChatAccountBalanceProvider(session, providerCtx.ProviderName, providerCtx.Provider)
 	session.Adapter = providerCtx.Adapter
 	session.Model = providerCtx.Model
 	session.ReasoningEffort = runtimetypes.NormalizeReasoningEffort(reasoning)

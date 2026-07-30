@@ -161,6 +161,11 @@ type ChatSession struct {
 	// Codex accrues active-goal elapsed only while an agent turn is running.
 	goalStatusMu                  sync.Mutex
 	goalStatusActiveTurnStartedAt time.Time
+	accountBalanceMu              sync.RWMutex
+	accountBalanceProviderName    string
+	accountBalanceProvider        config.Provider
+	accountBalanceInitialized     bool
+	accountBalanceRefresher       *chatAccountBalanceRefresher
 	priorityPromptMu              sync.Mutex // serializes modal prompts that own the priority input channel
 	queuedInputDrain              bool       // suppress repeated queued-input notices while draining
 	queuedInputEchoed             bool       // queued input was already echoed in the fixed prompt while busy
