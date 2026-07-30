@@ -353,3 +353,75 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 		})
 	}
 }
+
+// TestChatInteractionCoordinator_SubmittedUserInputDoesNotOverwriteHistory
+// pins the submit-path blank-absorption bug: after a completed history line
+// ends with LF, ShowPrompt absorbs that blank into the bottom reserve. If the
+// user echo is written while the prompt is still reserved, WriteOutput lands
+// on the last history row and overwrites it (no newline / visual overlap).
+func TestChatInteractionCoordinator_SubmittedUserInputDoesNotOverwriteHistory(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	const width, height = 80, 24
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	t.Cleanup(coord.Shutdown)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	coord.SetSurface(surface)
+
+	screen := newScreenVT(width, height)
+
+	// Establish layout, write a completed history line (trailing LF), then show the
+	// ready prompt so it absorbs that blank into the bottom reserve — the state
+	// the submit path used to overwrite.
+	seed := captureSurfaceStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		if !surface.ShowPrompt(ui.UserPromptText(0)) {
+			t.Fatal("expected initial ShowPrompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected ClearPromptRows")
+		}
+		coord.RenderAssistant("上一轮助手回复内容")
+		if !surface.ShowPrompt(ui.UserPromptText(0)) {
+			t.Fatal("expected ready ShowPrompt")
+		}
+		coord.mu.Lock()
+		coord.promptVisible = true
+		coord.promptRenderedOnSurface = true
+		coord.waitingActive = true
+		coord.mu.Unlock()
+	})
+	screen.feed(seed)
+
+	if !strings.Contains(screen.dump(), "上一轮助手回复内容") {
+		t.Fatalf("precondition: history must be on screen, got:\n%s", screen.dump())
+	}
+
+	// Bug path: submit echo without an external ClearPromptRows. The coordinator
+	// itself must free the composer before writing the user block.
+	echo := captureSurfaceStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		coord.RenderSubmittedUserInput("用户新问题")
+	})
+	screen.feed(echo)
+
+	dump := screen.dump()
+	if !strings.Contains(dump, "上一轮助手回复内容") {
+		t.Fatalf("user echo must not overwrite prior history, screen:\n%s", dump)
+	}
+	// FormatUserMessage may include icon chrome; match on the user text itself.
+	if !strings.Contains(dump, "用户新问题") {
+		t.Fatalf("expected submitted user text on its own row, screen:\n%s", dump)
+	}
+	// History and user echo must not share a single reconstructed row.
+	for row := 1; row <= height; row++ {
+		line := screen.line(row)
+		if strings.Contains(line, "上一轮助手回复内容") && strings.Contains(line, "用户新问题") {
+			t.Fatalf("history and user echo overlapped on row %d: %q\nscreen:\n%s", row, line, dump)
+		}
+	}
+}

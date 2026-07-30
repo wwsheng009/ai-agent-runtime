@@ -27,8 +27,8 @@ func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
 		)
 	})
 
-	if got := surface.bottomRowsLocked(); got != 3 {
-		t.Fatalf("expected dynamic + prompt + footer rows, got %d", got)
+	if got := surface.bottomRowsLocked(); got != 5 {
+		t.Fatalf("expected dynamic + composer margins + prompt + footer rows, got %d", got)
 	}
 	assertTextPaintedAtRow := func(text string, row int) {
 		t.Helper()
@@ -41,20 +41,40 @@ func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
 			t.Fatalf("expected %q to be painted at row %d, got %q", text, row, output)
 		}
 	}
-	assertTextPaintedAtRow("◦ Analyzing", 22)
-	assertTextPaintedAtRow("> ", 23)
+	assertTextPaintedAtRow("◦ Analyzing", 20)
+	assertTextPaintedAtRow("> ", 22)
 	assertTextPaintedAtRow("Plan OFF", 24)
 }
 
 func TestBottomPaneStateDynamicStatusReservesOneRow(t *testing.T) {
 	state := BottomPaneState{
-		DynamicStatusModel: &style.StatusLineModel{StateText: "◦ Working"},
-		PromptReservedRows: 1,
+		DynamicStatusModel:     &style.StatusLineModel{StateText: "◦ Working"},
+		PromptReservedRows:     1,
+		PromptTopMarginRows:    chatComposerTopMarginRows,
+		PromptBottomMarginRows: chatComposerBottomMarginRows,
 	}
 	if got := state.dynamicStatusVisibleRowCount(); got != 1 {
 		t.Fatalf("dynamic status visible rows=%d, want 1", got)
 	}
-	if got := state.promptAreaVisibleRowCount(); got != 2 {
-		t.Fatalf("prompt area rows=%d, want dynamic + prompt = 2", got)
+	if got := state.promptAreaVisibleRowCount(); got != 4 {
+		t.Fatalf("prompt area rows=%d, want dynamic + margins + prompt = 4", got)
+	}
+}
+
+func TestFixedBottomSurface_ComposerMarginsCollapseOnShortTerminal(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	surface := newTestFixedBottomSurfaceWithSize(80, 10)
+
+	output := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt to render")
+		}
+	})
+
+	if got := surface.bottomRowsLocked(); got != 2 {
+		t.Fatalf("short terminal should reserve only prompt + footer, got %d rows", got)
+	}
+	if !strings.Contains(output, terminalMoveToSequence(9, 1)+"> ") {
+		t.Fatalf("short terminal should keep the prompt adjacent to the footer, got %q", output)
 	}
 }

@@ -627,6 +627,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		runtimeHTTPCapture:         runtimeCapture,
 		lastLocalShellArtifactPath: filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt"),
 		Interaction: &chatInteractionCoordinator{
+			transcript: &assistantTurnTranscript{},
 			promptVisible:       true,
 			promptPasteActive:   true,
 			thinkingActive:      true,
@@ -670,7 +671,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		fmt.Sprintf("%-18s %s", "Permission Mode:", "default"),
 		fmt.Sprintf("%-18s %s", "Approval Reuse:", "team_readonly_shell"),
 		fmt.Sprintf("%-18s %s", "Queued Input:", "0 pending"),
-		fmt.Sprintf("%-18s %s", "Interaction:", "prompt_visible=true prompt_paste_active=true thinking_active=true streaming_active=true reasoning_active=true complete_block_output=true shutdown=false"),
+		fmt.Sprintf("%-18s %s", "Interaction:", "prompt_visible=true prompt_paste_active=true thinking_active=true streaming_active=true reasoning_active=true complete_block_output=true shutdown=false stream_stable_queued=0 stream_prefix_enqueued=0 stream_prefix_emitted=0 stream_transcript_blocks=0 stream_transcript_bytes=0 stream_needs_consolidation=false stream_emitted_diverged=false stream_final_divergence=append"),
 		fmt.Sprintf("%-18s %s", "Agent Target:", "/root/debug-child"),
 		fmt.Sprintf("%-18s %s", "Surface:", "<none>"),
 		"Subagent Routing:",

@@ -2747,12 +2747,30 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// User echo must free the composer first. Leaving a surface prompt reserved
+	// after the prior turn absorbs its trailing blank into the bottom pane, so
+	// the next WriteOutput lands on the last history row and overwrites it
+	// (no newline / visual overlap with history).
+	wasWaiting := c.waitingActive
+	if c.promptVisible {
+		c.clearVisiblePromptLocked()
+		c.promptVisible = false
+		c.promptRenderedOnSurface = false
+	}
 	if !c.beginMessageLocked() {
 		return
 	}
 	// User echo sits directly under the cleared prompt; no extra blank.
 	c.writeCompleteBlockLocked(ui.FormatUserMessage(input), gapNone)
 	c.lastCompletedAsyncLine = false
+	// StartWaiting may have already armed the turn; restore an empty composer
+	// so queued input can continue above the status line.
+	if wasWaiting && !c.promptVisible && c.writer == os.Stdout && c.surface != nil {
+		if c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
+			c.promptVisible = true
+			c.promptRenderedOnSurface = true
+		}
+	}
 }
 
 func (c *chatInteractionCoordinator) RenderError(err error) {
