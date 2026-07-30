@@ -143,8 +143,7 @@ func (f *MarkdownFormatter) Format(text string) string {
 	}
 	theme := f.themeContext(syntaxTheme)
 
-	opts := markdown.DefaultOptions(width, theme)
-	opts.Hyperlinks = false // keep visible URL fallback stable for transcript
+	opts := markdown.AssistantBodyOptions(width, theme)
 	opts.SyntaxTheme = syntaxTheme
 
 	doc := markdown.Render(text, opts)
@@ -171,6 +170,10 @@ func (f *MarkdownFormatter) FormatDocument(text string) render.Document {
 		syntaxTheme = syntax.GlobalDefaultTheme()
 	}
 	theme := f.themeContext(syntaxTheme)
+	// FormatDocument keeps theme hyperlink policy so structured consumers
+	// (OSC 8, tests) can still attach span.Link. Format() uses
+	// AssistantBodyOptions which forces Hyperlinks=false for scrollback plain
+	// parity with ActiveBand.
 	opts := markdown.DefaultOptions(width, theme)
 	opts.SyntaxTheme = syntaxTheme
 	return markdown.Render(text, opts)

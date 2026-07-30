@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fixedStatusTestContext(theme *Theme) style.ThemeContext {
@@ -177,40 +178,40 @@ func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
 		}, "slash_completion")
 	})
 
-	if surface.bottomRowsLocked() != 4 {
-		t.Fatalf("expected prompt + popup rows + status, got %d", surface.bottomRowsLocked())
+	if surface.bottomRowsLocked() != 6 {
+		t.Fatalf("expected composer margins + prompt + popup rows + status, got %d", surface.bottomRowsLocked())
 	}
-	if got := surface.outputBottomRowLocked(); got != 20 {
+	if got := surface.outputBottomRowLocked(); got != 18 {
 		t.Fatalf("expected output region to shift above prompt and popup, got row %d", got)
 	}
-	if got := surface.promptBottomRowLocked(); got != 21 {
+	if got := surface.promptBottomRowLocked(); got != 20 {
 		t.Fatalf("expected prompt row above downward popup, got row %d", got)
 	}
 	if surface.popupRenderedStartRow != 22 {
 		t.Fatalf("expected popup to start below prompt at row 22, got %d", surface.popupRenderedStartRow)
 	}
-	if !strings.Contains(output, "\x1b[1;22r\x1b[1;1H\x1b[22;1H\n\n\x1b[1;20r") {
+	if !strings.Contains(output, "\x1b[1;20r\x1b[1;1H\x1b[20;1H\n\n\x1b[1;18r") {
 		t.Fatalf("expected output region to scroll up before reserving slash popup rows, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[1;20r") {
+	if !strings.Contains(output, "\x1b[1;18r") {
 		t.Fatalf("expected scroll region to shift above prompt and popup, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[21;1H\x1b[K") || !strings.Contains(output, "\x1b[21;1H> /he") {
+	if !strings.Contains(output, "\x1b[20;1H\x1b[K") || !strings.Contains(output, "\x1b[20;1H> /he") {
 		t.Fatalf("expected prompt input row to move above slash popup, got %q", output)
 	}
-	if count := strings.Count(output, "\x1b[21;1H> /he"); count != 1 {
+	if count := strings.Count(output, "\x1b[20;1H> /he"); count != 1 {
 		t.Fatalf("expected slash popup expansion to render prompt input once, got %d in %q", count, output)
 	}
 	if !strings.Contains(output, "\x1b[22;1H\x1b[K命令补全") {
 		t.Fatalf("expected slash popup to render below prompt, got %q", output)
 	}
-	if strings.Contains(output, "\x1b[21;1H\x1b[K命令补全") {
+	if strings.Contains(output, "\x1b[20;1H\x1b[K命令补全") {
 		t.Fatalf("expected slash popup not to render on prompt row, got %q", output)
 	}
 	if strings.Contains(output, cursorSaveSequence) || strings.Contains(output, cursorRestoreSequence) {
 		t.Fatalf("expected downward popup render to move to prompt cursor instead of saved cursor restore, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[21;6H"+cursorShowSequence) {
+	if !strings.HasSuffix(output, "\x1b[20;6H"+cursorShowSequence) {
 		t.Fatalf("expected downward popup render to leave cursor on lifted prompt row, got %q", output)
 	}
 
@@ -219,13 +220,13 @@ func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
 			t.Fatal("expected enabled surface to update lifted prompt input")
 		}
 	})
-	if !strings.Contains(updateOutput, "\x1b[21;1H> /help") {
+	if !strings.Contains(updateOutput, "\x1b[20;1H> /help") {
 		t.Fatalf("expected prompt updates to keep rendering above downward popup, got %q", updateOutput)
 	}
 	if strings.Contains(updateOutput, cursorSaveSequence) || strings.Contains(updateOutput, cursorRestoreSequence) {
 		t.Fatalf("expected prompt updates during downward popup to restore tracked prompt cursor directly, got %q", updateOutput)
 	}
-	if !strings.HasSuffix(updateOutput, "\x1b[21;8H"+cursorShowSequence) {
+	if !strings.HasSuffix(updateOutput, "\x1b[20;8H"+cursorShowSequence) {
 		t.Fatalf("expected prompt update to leave cursor on lifted prompt row, got %q", updateOutput)
 	}
 
@@ -235,18 +236,18 @@ func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
 			"> /help     显示命令帮助",
 		}, "slash_completion")
 	})
-	if strings.Contains(secondOutput, "\n\n") || strings.Contains(secondOutput, "\x1b[1;22r\x1b[1;1H\x1b[22;1H") {
+	if strings.Contains(secondOutput, "\n\n") || strings.Contains(secondOutput, "\x1b[1;20r\x1b[1;1H\x1b[20;1H") {
 		t.Fatalf("expected same slash popup update not to scroll output again, got %q", secondOutput)
 	}
-	if !strings.Contains(secondOutput, "\x1b[21;1H> /help") {
+	if !strings.Contains(secondOutput, "\x1b[20;1H> /help") {
 		t.Fatalf("expected same slash popup update to keep prompt row fixed, got %q", secondOutput)
 	}
-	if !strings.HasSuffix(secondOutput, "\x1b[21;8H"+cursorShowSequence) {
+	if !strings.HasSuffix(secondOutput, "\x1b[20;8H"+cursorShowSequence) {
 		t.Fatalf("expected same slash popup update to leave cursor on lifted prompt row, got %q", secondOutput)
 	}
 
 	prefix, ok := surface.PromptCursorPrefix(0, 7)
-	if !ok || !strings.HasSuffix(prefix, "\x1b[21;8H") {
+	if !ok || !strings.HasSuffix(prefix, "\x1b[20;8H") {
 		t.Fatalf("expected prompt cursor prefix to target row above popup, ok=%t prefix=%q", ok, prefix)
 	}
 
@@ -256,16 +257,16 @@ func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
 	if !strings.Contains(clearOutput, "\x1b[22;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[23;1H\x1b[K") {
 		t.Fatalf("expected downward popup rows to clear, got %q", clearOutput)
 	}
-	if !strings.Contains(clearOutput, "\x1b[21;1H\x1b[K") {
+	if !strings.Contains(clearOutput, "\x1b[20;1H\x1b[K") {
 		t.Fatalf("expected old lifted prompt row to clear when popup closes, got %q", clearOutput)
 	}
-	if !strings.Contains(clearOutput, "\x1b[23;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[23;1H> /help") {
+	if !strings.Contains(clearOutput, "\x1b[22;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[22;1H> /help") {
 		t.Fatalf("expected prompt input row to return below after popup clears, got %q", clearOutput)
 	}
 	if strings.Contains(clearOutput, cursorSaveSequence) || strings.Contains(clearOutput, cursorRestoreSequence) {
 		t.Fatalf("expected downward popup clear to move to relocated prompt cursor instead of saved cursor restore, got %q", clearOutput)
 	}
-	if !strings.HasSuffix(clearOutput, "\x1b[23;8H"+cursorShowSequence) {
+	if !strings.HasSuffix(clearOutput, "\x1b[22;8H"+cursorShowSequence) {
 		t.Fatalf("expected downward popup clear to leave cursor on restored prompt row, got %q", clearOutput)
 	}
 
@@ -275,10 +276,10 @@ func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
 			"> /help",
 		}, "slash_completion")
 	})
-	if strings.Contains(reopenOutput, "\n\n") || strings.Contains(reopenOutput, "\x1b[1;22r\x1b[1;1H\x1b[22;1H") {
+	if strings.Contains(reopenOutput, "\n\n") || strings.Contains(reopenOutput, "\x1b[1;20r\x1b[1;1H\x1b[20;1H") {
 		t.Fatalf("expected reopening slash popup without new output not to scroll output again, got %q", reopenOutput)
 	}
-	if !strings.Contains(reopenOutput, "\x1b[21;1H> /help") {
+	if !strings.Contains(reopenOutput, "\x1b[20;1H> /help") {
 		t.Fatalf("expected reopened slash popup to reuse lifted prompt row, got %q", reopenOutput)
 	}
 }
@@ -348,7 +349,7 @@ func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
 	}
 
 	prefix, ok := surface.PromptCursorPrefix(0, 3)
-	if !ok || !strings.HasSuffix(prefix, "\x1b[23;4H") {
+	if !ok || !strings.HasSuffix(prefix, "\x1b[22;4H") {
 		t.Fatalf("expected prefix to target requested redraw start cursor, ok=%t prefix=%q", ok, prefix)
 	}
 
@@ -358,10 +359,10 @@ func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
 			"> /help     显示命令帮助",
 		}, "slash_completion")
 	})
-	if !strings.Contains(popupOutput, "\x1b[21;1H> /help") {
+	if !strings.Contains(popupOutput, "\x1b[20;1H> /help") {
 		t.Fatalf("expected later popup render to use tracked prompt input, got %q", popupOutput)
 	}
-	if !strings.HasSuffix(popupOutput, "\x1b[21;8H"+cursorShowSequence) {
+	if !strings.HasSuffix(popupOutput, "\x1b[20;8H"+cursorShowSequence) {
 		t.Fatalf("expected later popup render to restore tracked cursor, got %q", popupOutput)
 	}
 }
@@ -382,10 +383,10 @@ func TestFixedBottomSurface_TrackPromptInputStateRedrawsWhenRowsChange(t *testin
 		}
 	})
 
-	if !strings.Contains(output, "\x1b[22;1H> first\r\nsecond") {
+	if !strings.Contains(output, "\x1b[21;1H> first\r\nsecond") {
 		t.Fatalf("expected row growth tracking to redraw multiline prompt input, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[23;7H"+cursorShowSequence) {
+	if !strings.HasSuffix(output, "\x1b[22;7H"+cursorShowSequence) {
 		t.Fatalf("expected row growth tracking to restore prompt cursor, got %q", output)
 	}
 }
@@ -413,7 +414,7 @@ func TestFixedBottomSurface_BoundsMultilinePromptAndFollowsCursor(t *testing.T) 
 	if strings.Contains(output, "> one") || !strings.Contains(output, "three\r\nfour") {
 		t.Fatalf("expected only the cursor-adjacent viewport to render, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[23;6H"+cursorShowSequence) {
+	if !strings.HasSuffix(output, "\x1b[22;6H"+cursorShowSequence) {
 		t.Fatalf("expected cursor on the final visible row, got %q", output)
 	}
 }
@@ -525,10 +526,10 @@ func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(
 	if strings.Contains(output, cursorSaveSequence) || strings.Contains(output, cursorRestoreSequence) {
 		t.Fatalf("expected prompt input update to restore prompt cursor directly, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[23;1H> ") {
+	if !strings.Contains(output, "\x1b[22;1H> ") {
 		t.Fatalf("expected prompt marker to remain rendered, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[23;3H"+cursorShowSequence) {
+	if !strings.HasSuffix(output, "\x1b[22;3H"+cursorShowSequence) {
 		t.Fatalf("expected cursor to return after prompt marker, got %q", output)
 	}
 }
@@ -547,7 +548,7 @@ func TestFixedBottomSurface_WritePromptEditorTextUsesAtomicCursorSequence(t *tes
 		t.Fatal("expected enabled surface to handle the editor write")
 	}
 	got := output.String()
-	if !strings.HasPrefix(got, cursorHideSequence) || !strings.Contains(got, "\x1b[23;3Hdraft") || !strings.HasSuffix(got, cursorShowSequence) {
+	if !strings.HasPrefix(got, cursorHideSequence) || !strings.Contains(got, "\x1b[22;3Hdraft") || !strings.HasSuffix(got, cursorShowSequence) {
 		t.Fatalf("expected one cursor-positioned atomic sequence, got %q", got)
 	}
 }
@@ -569,22 +570,22 @@ func TestFixedBottomSurface_SetPromptNoticeLineRendersAbovePrompt(t *testing.T) 
 		}
 	})
 
-	if surface.bottomRowsLocked() != 4 {
-		t.Fatalf("expected notice + prompt + status rows, got %d", surface.bottomRowsLocked())
+	if surface.bottomRowsLocked() != 6 {
+		t.Fatalf("expected notice + composer margins + prompt + status rows, got %d", surface.bottomRowsLocked())
 	}
-	if got := surface.outputBottomRowLocked(); got != 20 {
+	if got := surface.outputBottomRowLocked(); got != 18 {
 		t.Fatalf("expected output region to leave room for prompt notice, got row %d", got)
 	}
-	if !strings.Contains(output, "\x1b[21;1H") || !strings.Contains(output, "Message to be submitted") {
+	if !strings.Contains(output, "\x1b[19;1H") || !strings.Contains(output, "Message to be submitted") {
 		t.Fatalf("expected prompt notice to render above prompt, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[22;1H") || !strings.Contains(output, "  - queued prompt") {
+	if !strings.Contains(output, "\x1b[20;1H") || !strings.Contains(output, "  - queued prompt") {
 		t.Fatalf("expected queued message list to render below notice title, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[23;1H> ") {
+	if !strings.Contains(output, "\x1b[22;1H> ") {
 		t.Fatalf("expected prompt marker to remain below notice, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[23;3H"+cursorShowSequence) {
+	if !strings.HasSuffix(output, "\x1b[22;3H"+cursorShowSequence) {
 		t.Fatalf("expected cursor to return to prompt after notice render, got %q", output)
 	}
 
@@ -593,13 +594,13 @@ func TestFixedBottomSurface_SetPromptNoticeLineRendersAbovePrompt(t *testing.T) 
 			t.Fatal("expected enabled surface to clear prompt notice")
 		}
 	})
-	if surface.bottomRowsLocked() != 2 {
+	if surface.bottomRowsLocked() != 4 {
 		t.Fatalf("expected notice row to be released, got %d bottom rows", surface.bottomRowsLocked())
 	}
-	if !strings.Contains(clearOutput, "\x1b[21;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[22;1H\x1b[K") {
+	if !strings.Contains(clearOutput, "\x1b[19;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[20;1H\x1b[K") {
 		t.Fatalf("expected previous notice row to clear, got %q", clearOutput)
 	}
-	if !strings.Contains(clearOutput, "\x1b[23;1H> ") {
+	if !strings.Contains(clearOutput, "\x1b[22;1H> ") {
 		t.Fatalf("expected prompt marker to remain rendered after clearing notice, got %q", clearOutput)
 	}
 }
@@ -619,9 +620,9 @@ func TestFixedBottomSurface_SetActiveBandRendersWithoutScrollbackCommit(t *testi
 			t.Fatal("expected SetActiveBand to succeed")
 		}
 	})
-	// status(1) + prompt(1) + active(2) = 4
-	if surface.bottomRowsLocked() != 4 {
-		t.Fatalf("bottomRows=%d want 4; band=%v", surface.bottomRowsLocked(), surface.ActiveBandLines())
+	// status(1) + composer margins(2) + prompt(1) + active(2) = 6
+	if surface.bottomRowsLocked() != 6 {
+		t.Fatalf("bottomRows=%d want 6; band=%v", surface.bottomRowsLocked(), surface.ActiveBandLines())
 	}
 	if !strings.Contains(output, "Hello stable paragraph.") {
 		t.Fatalf("expected active band content in surface paint, got %q", output)
@@ -655,7 +656,7 @@ func TestFixedBottomSurface_SetActiveBandRendersWithoutScrollbackCommit(t *testi
 			t.Fatal("clear failed")
 		}
 	})
-	if surface.bottomRowsLocked() != 2 {
+	if surface.bottomRowsLocked() != 4 {
 		t.Fatalf("expected band released, bottomRows=%d", surface.bottomRowsLocked())
 	}
 	if surface.ActiveBandLines() != nil {
@@ -1519,13 +1520,13 @@ func TestFixedBottomSurface_ShowPromptReservesRowAboveStatus(t *testing.T) {
 		surface.BeginOutput()
 	})
 
-	if !strings.Contains(output, "\x1b[1;22r") {
+	if !strings.Contains(output, "\x1b[1;20r") {
 		t.Fatalf("expected prompt reserve to move scroll bottom above prompt row, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[23;1H> ") {
+	if !strings.Contains(output, "\x1b[22;1H> ") {
 		t.Fatalf("expected prompt to render on row above status, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[22;1H") {
+	if !strings.HasSuffix(output, "\x1b[20;1H") {
 		t.Fatalf("expected BeginOutput to target row above prompt, got %q", output)
 	}
 }
@@ -1547,7 +1548,7 @@ func TestFixedBottomSurface_ClearPromptRowsReleasesPromptReserve(t *testing.T) {
 	if surface.promptReservedRows != 0 {
 		t.Fatal("expected prompt reserve to be released")
 	}
-	if !strings.Contains(output, "\x1b[23;1H\x1b[K") {
+	if !strings.Contains(output, "\x1b[22;1H\x1b[K") {
 		t.Fatalf("expected prompt row to be cleared, got %q", output)
 	}
 	if !strings.Contains(output, "\x1b[1;23r") {
@@ -1576,6 +1577,8 @@ func TestFixedBottomSurface_ResetPromptClearsInputAndKeepsPromptVisible(t *testi
 		t.Fatalf("expected prompt reserve to collapse back to one row, got %d", surface.promptReservedRows)
 	}
 	for _, expected := range []string{
+		"\x1b[19;1H\x1b[K",
+		"\x1b[20;1H\x1b[K",
 		"\x1b[21;1H\x1b[K",
 		"\x1b[22;1H\x1b[K",
 		"\x1b[23;1H\x1b[K",
@@ -1584,10 +1587,10 @@ func TestFixedBottomSurface_ResetPromptClearsInputAndKeepsPromptVisible(t *testi
 			t.Fatalf("expected reset to clear old prompt row %q, got %q", expected, output)
 		}
 	}
-	if !strings.Contains(output, "\x1b[23;1H> ") {
+	if !strings.Contains(output, "\x1b[22;1H> ") {
 		t.Fatalf("expected reset to redraw visible prompt, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[1;22r") {
+	if !strings.Contains(output, "\x1b[1;20r") {
 		t.Fatalf("expected reset to keep one prompt row reserved, got %q", output)
 	}
 }
@@ -1607,10 +1610,10 @@ func TestFixedBottomSurface_SetPromptRowsReservesWrappedInput(t *testing.T) {
 		surface.BeginOutput()
 	})
 
-	if !strings.Contains(output, "\x1b[1;20r") {
+	if !strings.Contains(output, "\x1b[1;18r") {
 		t.Fatalf("expected three prompt rows to move scroll bottom above input block, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[20;1H") {
+	if !strings.HasSuffix(output, "\x1b[18;1H") {
 		t.Fatalf("expected output cursor above reserved prompt rows, got %q", output)
 	}
 }
@@ -1627,13 +1630,13 @@ func TestFixedBottomSurface_WriteOutputUsesOutputRegionWithPromptReserved(t *tes
 		}
 	})
 
-	if !strings.Contains(output, "\x1b[22;1Hreasoning\r\n") {
+	if !strings.Contains(output, "\x1b[20;1Hreasoning\r\n") {
 		t.Fatalf("expected output to be written above prompt row, got %q", output)
 	}
-	if strings.Contains(output, "\x1b[23;1Hreasoning") {
+	if strings.Contains(output, "\x1b[22;1Hreasoning") {
 		t.Fatalf("expected output not to be written on prompt row, got %q", output)
 	}
-	if !strings.HasSuffix(output, "\x1b[23;3H") {
+	if !strings.HasSuffix(output, "\x1b[22;3H") {
 		t.Fatalf("expected cursor to return after visible prompt, got %q", output)
 	}
 }
@@ -1673,7 +1676,7 @@ func TestFixedBottomSurface_WriteOutputRestoresTrackedPromptCursor(t *testing.T)
 		}
 	})
 
-	if !strings.HasSuffix(output, "\x1b[23;8H") {
+	if !strings.HasSuffix(output, "\x1b[22;8H") {
 		t.Fatalf("expected cursor to return to tracked prompt cursor, got %q", output)
 	}
 }
@@ -1947,8 +1950,8 @@ func TestFixedBottomSurface_ReleasedActiveBandScrollsOutputBackDown(t *testing.T
 		}
 	})
 
-	if !strings.Contains(output, "\x1b[1;22r") {
-		t.Fatalf("expected output region to grow back to row 22, got %q", output)
+	if !strings.Contains(output, "\x1b[1;20r") {
+		t.Fatalf("expected output region to grow back to row 20, got %q", output)
 	}
 	if want := terminalScrollDownSequence(3); !strings.Contains(output, want) {
 		t.Fatalf("expected freed band rows to scroll output down, got %q", output)
@@ -1971,7 +1974,7 @@ func TestFixedBottomSurface_ActiveBandGrowthAndReleaseScrollSymmetrically(t *tes
 			t.Fatal("expected active band to render")
 		}
 	})
-	if !strings.Contains(grow, "\x1b[22;1H\n\n") {
+	if !strings.Contains(grow, "\x1b[20;1H\n\n") {
 		t.Fatalf("expected reserved band rows to scroll output up, got %q", grow)
 	}
 
@@ -2037,6 +2040,112 @@ func TestFixedBottomSurface_TrailingOutputNewlineAbsorbedByBandGrowth(t *testing
 	fullScroll := "\x1b[" + fmt.Sprintf("%d", height-1) + ";1H" + strings.Repeat("\n", budget)
 	if strings.Contains(grow, fullScroll) {
 		t.Fatalf("growth still scrolled full budget %d; trailing blank was not absorbed: %q", budget, grow)
+	}
+}
+
+// ClearPrompt shrinks the bottom reserve and defers scroll-down. Multi-line
+// command output (e.g. /status) must WriteOutput so that pending compensation
+// flushes before text lands; otherwise restoring the prompt cancels the
+// matching growth scroll and paints over the box bottom.
+func TestFixedBottomSurface_WriteOutputAfterClearPromptFlushesPendingForPromptRestore(t *testing.T) {
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+	})
+	if surface.pendingScrollDownRows != 3 {
+		t.Fatalf("expected deferred shrink compensation after clear, got %d", surface.pendingScrollDownRows)
+	}
+
+	// BeginOutput alone must NOT flush — that is the bug path used by raw
+	// fmt.Println after beginDirectInteractiveOutput.
+	captureUIStdout(t, func() {
+		surface.BeginOutput()
+	})
+	if surface.pendingScrollDownRows != 3 {
+		t.Fatalf("BeginOutput must leave pending compensation intact, got %d", surface.pendingScrollDownRows)
+	}
+
+	written := captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteOutput(os.Stdout, "╭ status top\n│ Token usage\n│ Limits\n╰ status bottom\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+	})
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("WriteOutput should flush pending shrink compensation, got %d", surface.pendingScrollDownRows)
+	}
+	if !strings.Contains(written, terminalScrollDownSequence(3)) {
+		t.Fatalf("expected deferred scroll-down flush before status text, got %q", written)
+	}
+	for _, fragment := range []string{"Token usage", "Limits", "status bottom"} {
+		if !strings.Contains(written, fragment) {
+			t.Fatalf("expected status fragment %q in surface output, got %q", fragment, written)
+		}
+	}
+
+	// Prompt restore must reclaim the composer and its margin rows without
+	// canceling against stale
+	// pendingScrollDown. WriteOutput left outputCursorOnBlankRow set, so the
+	// first growth row is absorbed from that blank —
+	// that still keeps the status bottom above the prompt. The bug path leaves
+	// pending set and cancels growth entirely instead.
+	restored := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt restore")
+		}
+	})
+	if !strings.Contains(restored, "\x1b[1;20r") {
+		t.Fatalf("expected prompt restore to reserve composer margins and a prompt row (scroll region 1..20), got %q", restored)
+	}
+	if !strings.Contains(restored, "\x1b[22;1H> ") {
+		t.Fatalf("expected prompt to repaint on the reserved row, got %q", restored)
+	}
+	if surface.pendingScrollDownRows != 0 {
+		t.Fatalf("prompt restore should not reintroduce pending compensation, got %d", surface.pendingScrollDownRows)
+	}
+	if surface.lastBottomRows != 4 {
+		t.Fatalf("expected margins+prompt+status bottom reserve of 4, got %d", surface.lastBottomRows)
+	}
+}
+
+func TestFixedBottomSurface_BeginOutputRawWriteLeavesPendingAndPromptRestoreCancelsGrowth(t *testing.T) {
+	// Documents the clip failure mode: ClearPrompt + BeginOutput + raw write
+	// leaves pendingScrollDown set, so ShowPrompt cancels growth and the prompt
+	// row reclaims the last status lines without scrolling them up.
+	height := 24
+	surface := newTestFixedBottomSurfaceWithSize(80, height)
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt")
+		}
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected prompt clear")
+		}
+		surface.BeginOutput()
+		_, _ = fmt.Fprint(os.Stdout, "╭ top\n╰ bottom-should-be-clipped\n")
+	})
+	if surface.pendingScrollDownRows != 3 {
+		t.Fatalf("raw write path should still have pending shrink compensation, got %d", surface.pendingScrollDownRows)
+	}
+
+	restored := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt restore")
+		}
+	})
+	if strings.Contains(restored, "\x1b[23;1H\n") {
+		t.Fatalf("bug-path prompt restore should cancel growth scroll, got %q", restored)
+	}
+	if surface.pendingScrollDownRows != 0 {
+		// Growth canceled against pending; pending should be consumed.
+		t.Fatalf("expected pending to be consumed by canceled growth, got %d", surface.pendingScrollDownRows)
 	}
 }
 
@@ -2107,6 +2216,126 @@ func TestFixedBottomSurface_TerminalSizeChangeDropsPendingScrollCompensation(t *
 	}
 }
 
+func TestFixedBottomSurface_SyncTerminalGeometryPreservesSoftTail(t *testing.T) {
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	var wrote bytes.Buffer
+	captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteSoftTrackedOutput(&wrote, "alpha\nbeta\n"); !ok || err != nil {
+			t.Fatalf("soft write failed: ok=%t err=%v", ok, err)
+		}
+	})
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("expected soft tail after soft-tracked write")
+	}
+	beforeCount := surface.SoftOutputTailLineCount()
+
+	// Stale layout cache + newly pinned terminal size simulates a live resize
+	// probe discovering geometry drift without an intermediate write.
+	surface.lastWidth = 80
+	surface.lastHeight = 24
+	surface.terminal.SetSizeForTest(40, 20)
+
+	var changed bool
+	captureUIStdout(t, func() {
+		changed = surface.SyncTerminalGeometry()
+	})
+	if !changed {
+		t.Fatal("expected SyncTerminalGeometry to report size change")
+	}
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("soft tail must survive geometry sync so source reflow can rewrite it")
+	}
+	if got := surface.SoftOutputTailLineCount(); got != beforeCount {
+		t.Fatalf("soft line count changed across sync: got %d want %d", got, beforeCount)
+	}
+	if surface.lastWidth != 40 || surface.lastHeight != 20 {
+		t.Fatalf("layout cache not updated: last=%dx%d want 40x20", surface.lastWidth, surface.lastHeight)
+	}
+}
+
+func TestFixedBottomSurface_SyncTerminalGeometryThrottledSkipsWithinInterval(t *testing.T) {
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+
+	// Seed the probe clock with an unthrottled sync.
+	captureUIStdout(t, func() {
+		_ = surface.SyncTerminalGeometry()
+	})
+	firstProbe := surface.lastGeometryProbeAt
+	if firstProbe.IsZero() {
+		t.Fatal("expected lastGeometryProbeAt after unthrottled sync")
+	}
+
+	// Pin a new size while still inside the throttle window.
+	surface.lastWidth = 80
+	surface.lastHeight = 24
+	surface.terminal.SetSizeForTest(40, 20)
+
+	var changed, probed bool
+	captureUIStdout(t, func() {
+		changed, probed = surface.SyncTerminalGeometryThrottled(time.Hour)
+	})
+	if probed {
+		t.Fatal("throttled sync must skip while minInterval has not elapsed")
+	}
+	if changed {
+		t.Fatal("skipped probe must not report sizeChanged")
+	}
+	if surface.lastWidth != 80 || surface.lastHeight != 24 {
+		t.Fatalf("layout cache must stay stale across skipped probe: got %dx%d", surface.lastWidth, surface.lastHeight)
+	}
+	if !surface.lastGeometryProbeAt.Equal(firstProbe) {
+		t.Fatal("skipped probe must not advance lastGeometryProbeAt")
+	}
+
+	// Zero interval forces a probe (same contract as SyncTerminalGeometry).
+	captureUIStdout(t, func() {
+		changed, probed = surface.SyncTerminalGeometryThrottled(0)
+	})
+	if !probed {
+		t.Fatal("zero-interval throttled sync must probe")
+	}
+	if !changed {
+		t.Fatal("forced probe must observe the pinned size change")
+	}
+	if surface.lastWidth != 40 || surface.lastHeight != 20 {
+		t.Fatalf("forced probe layout cache: got %dx%d want 40x20", surface.lastWidth, surface.lastHeight)
+	}
+}
+
+// TestFixedBottomSurface_SyncTerminalGeometryProbesSizeOnce guards the paint-
+// path budget: syncTerminalGeometry already called RefreshSize, so applyLayout
+// must reuse that size instead of probing again under the same lock hold.
+func TestFixedBottomSurface_SyncTerminalGeometryProbesSizeOnce(t *testing.T) {
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	term := surface.terminal
+
+	before := term.SizeProbeCountForTest()
+	captureUIStdout(t, func() {
+		_ = surface.SyncTerminalGeometry()
+	})
+	if got := term.SizeProbeCountForTest() - before; got != 1 {
+		t.Fatalf("same-size SyncTerminalGeometry RefreshSize calls: got %d want 1", got)
+	}
+
+	surface.lastWidth = 80
+	surface.lastHeight = 24
+	term.SetSizeForTest(40, 20)
+	before = term.SizeProbeCountForTest()
+	var changed bool
+	captureUIStdout(t, func() {
+		changed = surface.SyncTerminalGeometry()
+	})
+	if !changed {
+		t.Fatal("expected size change on second sync")
+	}
+	if got := term.SizeProbeCountForTest() - before; got != 1 {
+		t.Fatalf("resize SyncTerminalGeometry RefreshSize calls: got %d want 1", got)
+	}
+	if surface.lastWidth != 40 || surface.lastHeight != 20 {
+		t.Fatalf("layout cache: got %dx%d want 40x20", surface.lastWidth, surface.lastHeight)
+	}
+}
+
 // TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap pins the band
 // layout invariant: the band must occupy exactly the rows it reserves in
 // bottomRowsLocked, directly above the notice/prompt/status stack. Anchoring it
@@ -2142,6 +2371,7 @@ func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) 
 					activeRows := state.activeBandVisibleRowCount()
 					promptRows := state.promptVisibleRowCount()
 					noticeRows := state.promptNoticeVisibleRowCount()
+					marginRows := state.promptVerticalMarginRowCount()
 					outputBottom := surface.outputBottomRowLocked()
 					statusRow := surface.statusRowLocked()
 					if activeRows != bandRows {
@@ -2153,7 +2383,7 @@ func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) 
 					if got, want := surface.promptRenderedStartRow, outputBottom+1; got != want {
 						t.Fatalf("band start row=%d want %d (output bottom %d)", got, want, outputBottom)
 					}
-					wantRows := activeRows + noticeRows + promptRows
+					wantRows := activeRows + noticeRows + marginRows + promptRows
 					if surface.promptRenderedRows != wantRows {
 						t.Fatalf("rendered rows=%d want %d", surface.promptRenderedRows, wantRows)
 					}
@@ -2163,5 +2393,258 @@ func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) 
 				})
 			}
 		}
+	}
+}
+
+func TestFixedBottomSurface_WriteSoftTrackedOutputTracksSoftTail(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	var buf bytes.Buffer
+	captureUIStdout(t, func() {
+		n, err, handled := surface.WriteSoftTrackedOutput(&buf, "alpha\nbeta\n")
+		if !handled || err != nil || n <= 0 {
+			t.Fatalf("WriteSoftTrackedOutput failed: handled=%v n=%d err=%v", handled, n, err)
+		}
+	})
+
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("expected soft tail after WriteSoftTrackedOutput")
+	}
+	if surface.SoftOutputTailTrimmed() {
+		t.Fatal("two lines should not trim the soft window")
+	}
+	if got := surface.SoftOutputTailLineCount(); got != 2 {
+		t.Fatalf("soft line count=%d want 2", got)
+	}
+	if got := surface.SoftOutputTailLines(); len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
+		t.Fatalf("soft lines=%#v", got)
+	}
+	if !strings.Contains(buf.String(), "alpha") || !strings.Contains(buf.String(), "beta") {
+		t.Fatalf("writer missing output text: %q", buf.String())
+	}
+}
+
+// Plain WriteOutput must never open or reopen a soft rewrite window: foreign
+// tool/notice rows would otherwise be mistaken for assistant-owned reflow.
+func TestFixedBottomSurface_WriteOutputInvalidatesSoftTail(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	var buf bytes.Buffer
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteSoftTrackedOutput(&buf, "owned\n"); !handled || err != nil {
+			t.Fatalf("seed WriteSoftTrackedOutput: handled=%v err=%v", handled, err)
+		}
+	})
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("precondition: soft tail should exist")
+	}
+
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteOutput(&buf, "foreign tool line\n"); !handled || err != nil {
+			t.Fatalf("WriteOutput: handled=%v err=%v", handled, err)
+		}
+	})
+	if surface.SoftOutputTailValid() || surface.SoftOutputTailLineCount() != 0 {
+		t.Fatalf("plain WriteOutput must drop soft ownership, valid=%v count=%d lines=%#v",
+			surface.SoftOutputTailValid(), surface.SoftOutputTailLineCount(), surface.SoftOutputTailLines())
+	}
+}
+
+// TestFixedBottomSurface_MultiLineWriteOutputAvoidsHoleInjection pins the
+// "• Edited" diff corruption: when writeCompleteBlockLocked emits a
+// multi-line block as one WriteOutput, there is only one applyLayoutLocked
+// call and one growth/shrink cycle per complete block. Per-line writeLineLocked
+// releases the surface lock between rows and lets ActiveBand/status updates
+// insert permanent holes into already-scrolled content.
+func TestFixedBottomSurface_MultiLineWriteOutputAvoidsHoleInjection(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	// Build a multi-line "• Edited" block that looks like a typical tool result.
+	block := strings.Join([]string{
+		"• Edited demo.go (+1 -1)",
+		"  10   func main() {",
+		"  11 - old()",
+		"  11 + new()",
+		"  12   }",
+	}, "\n")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 32)
+	var buf bytes.Buffer
+
+	// Simulate interleaved band growth: write three lines separately (old path)
+	// vs one atomic multi-line block (new path) and capture scroll sequences.
+	captureUIStdout(t, func() {
+		for _, line := range strings.Split(block, "\n") {
+			if _, err, handled := surface.WriteOutput(&buf, line+"\n"); !handled || err != nil {
+				t.Fatalf("per-line WriteOutput failed: handled=%v err=%v", handled, err)
+			}
+		}
+	})
+	perLineScroll := buf.String()
+
+	buf.Reset()
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteOutput(&buf, block+"\n"); !handled || err != nil {
+			t.Fatalf("atomic WriteOutput failed: handled=%v err=%v", handled, err)
+		}
+	})
+	atomicScroll := buf.String()
+
+	// The per-line path can interleave band growth and produce extra scroll-up
+	// sequences (holes). The atomic path applies layout once and should be
+	// cleaner for multi-line tool results.
+	if strings.Count(perLineScroll, "\x1b") > strings.Count(atomicScroll, "\x1b") {
+		t.Fatalf("per-line path produced more scroll sequences (%d) than atomic multi-line (%d); hole injection likely",
+			strings.Count(perLineScroll, "\x1b"), strings.Count(atomicScroll, "\x1b"))
+	}
+	if !strings.Contains(atomicScroll, "demo.go") {
+		t.Fatal("atomic multi-line write should preserve block content")
+	}
+}
+
+func TestFixedBottomSurface_SoftTailTrimsAndBlocksReflowMapping(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 40)
+	var buf bytes.Buffer
+	captureUIStdout(t, func() {
+		for i := 0; i < SoftOutputTailMaxLines+5; i++ {
+			line := fmt.Sprintf("line-%03d\n", i)
+			if _, err, handled := surface.WriteSoftTrackedOutput(&buf, line); !handled || err != nil {
+				t.Fatalf("WriteSoftTrackedOutput %d: handled=%v err=%v", i, handled, err)
+			}
+		}
+	})
+
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("trimmed soft tail should remain valid for local rewrite")
+	}
+	if !surface.SoftOutputTailTrimmed() {
+		t.Fatal("expected soft window to mark trimmed after overflow")
+	}
+	if got := surface.SoftOutputTailLineCount(); got != SoftOutputTailMaxLines {
+		t.Fatalf("soft line count=%d want %d", got, SoftOutputTailMaxLines)
+	}
+	lines := surface.SoftOutputTailLines()
+	if lines[0] != fmt.Sprintf("line-%03d", 5) {
+		t.Fatalf("expected oldest retained line line-005, got %q", lines[0])
+	}
+	if lines[len(lines)-1] != fmt.Sprintf("line-%03d", SoftOutputTailMaxLines+4) {
+		t.Fatalf("expected newest retained line, got %q", lines[len(lines)-1])
+	}
+}
+
+func TestFixedBottomSurface_RewriteSoftOutputTailReplacesRows(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	var buf bytes.Buffer
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteSoftTrackedOutput(&buf, "old-one\nold-two\n"); !handled || err != nil {
+			t.Fatalf("seed WriteSoftTrackedOutput: handled=%v err=%v", handled, err)
+		}
+	})
+	if got := surface.SoftOutputTailLines(); len(got) != 2 {
+		t.Fatalf("seed soft lines=%#v", got)
+	}
+
+	rewritten := captureUIStdout(t, func() {
+		if !surface.RewriteSoftOutputTail(&buf, []string{"new-alpha", "new-beta", "new-gamma"}) {
+			t.Fatal("RewriteSoftOutputTail should succeed for a valid soft window")
+		}
+	})
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("soft tail should stay valid after rewrite")
+	}
+	if surface.SoftOutputTailTrimmed() {
+		t.Fatal("rewrite should clear the trimmed flag")
+	}
+	if got := surface.SoftOutputTailLines(); len(got) != 3 || got[0] != "new-alpha" || got[2] != "new-gamma" {
+		t.Fatalf("rewritten soft lines=%#v", got)
+	}
+	if !strings.Contains(buf.String(), "new-alpha") || !strings.Contains(buf.String(), "new-gamma") {
+		t.Fatalf("rewrite missing new content in writer: %q", buf.String())
+	}
+	// Clearing old rows must use absolute cursor moves.
+	if !strings.Contains(rewritten, "\x1b[") {
+		t.Fatalf("expected ANSI cursor moves while rewriting soft rows, got %q", rewritten)
+	}
+}
+
+func TestFixedBottomSurface_InvalidateAndDisableDropSoftTail(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	var buf bytes.Buffer
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteSoftTrackedOutput(&buf, "keep-in-scrollback\n"); !handled || err != nil {
+			t.Fatalf("WriteSoftTrackedOutput: handled=%v err=%v", handled, err)
+		}
+	})
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("expected soft tail before invalidate")
+	}
+
+	surface.InvalidateSoftOutputTail()
+	if surface.SoftOutputTailValid() || surface.SoftOutputTailLineCount() != 0 {
+		t.Fatalf("invalidate should drop soft ownership, valid=%v count=%d", surface.SoftOutputTailValid(), surface.SoftOutputTailLineCount())
+	}
+
+	// Plain WriteOutput must not reopen the rewrite window after invalidate.
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteOutput(&buf, "again\n"); !handled || err != nil {
+			t.Fatalf("second WriteOutput: handled=%v err=%v", handled, err)
+		}
+	})
+	if surface.SoftOutputTailValid() {
+		t.Fatal("plain WriteOutput must not re-seed soft ownership")
+	}
+
+	// Only the soft-tracked path may re-open the window.
+	captureUIStdout(t, func() {
+		if _, err, handled := surface.WriteSoftTrackedOutput(&buf, "owned-again\n"); !handled || err != nil {
+			t.Fatalf("WriteSoftTrackedOutput re-seed: handled=%v err=%v", handled, err)
+		}
+	})
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("expected soft tail after soft-tracked re-seed")
+	}
+	captureUIStdout(t, func() {
+		surface.Disable()
+	})
+	if surface.SoftOutputTailValid() {
+		t.Fatal("Disable should drop the soft rewrite window")
+	}
+}
+
+func TestFixedBottomSurface_AdoptSoftOutputTailRebasesWindow(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, 40)
+	var buf bytes.Buffer
+	captureUIStdout(t, func() {
+		for i := 0; i < SoftOutputTailMaxLines+3; i++ {
+			line := fmt.Sprintf("keep-%03d\n", i)
+			if _, err, handled := surface.WriteSoftTrackedOutput(&buf, line); !handled || err != nil {
+				t.Fatalf("WriteSoftTrackedOutput %d: handled=%v err=%v", i, handled, err)
+			}
+		}
+	})
+	if !surface.SoftOutputTailTrimmed() {
+		t.Fatal("precondition: soft tail should be trimmed")
+	}
+
+	adopted := []string{"only-a", "only-b"}
+	surface.AdoptSoftOutputTail(adopted)
+	if surface.SoftOutputTailTrimmed() {
+		t.Fatal("adopt should clear trimmed flag for the rebased window")
+	}
+	if got := surface.SoftOutputTailLines(); len(got) != 2 || got[0] != "only-a" || got[1] != "only-b" {
+		t.Fatalf("adopted soft lines=%#v", got)
+	}
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("adopted soft tail should remain valid")
 	}
 }

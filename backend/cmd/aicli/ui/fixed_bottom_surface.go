@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
@@ -23,6 +24,20 @@ const (
 	// activeBandHeightDivisor gives the band roughly one third of the screen
 	// before the ceiling and reserve clamps apply.
 	activeBandHeightDivisor = 3
+	// Keep the main chat composer visually separated from transient activity
+	// above it and the persistent footer below it.
+	chatComposerTopMarginRows           = 1
+	chatComposerBottomMarginRows        = 1
+	chatComposerVerticalMarginMinHeight = 12
+	// DefaultGeometryProbeMinInterval caps how often the live stream paint path
+	// re-probes terminal size. Active cells paint up to ~30 FPS; probing every
+	// frame is unnecessary because human resize events are far slower.
+	DefaultGeometryProbeMinInterval = 100 * time.Millisecond
+	// SoftOutputTailMaxLines bounds the rewriteable committed tail kept at the
+	// bottom of the output region. Older lines fall out of the soft window and
+	// become irreversible scrollback history. Coordinator soft ownership uses
+	// the same cap so source-backed reflow stays 1:1 with the surface window.
+	SoftOutputTailMaxLines = 64
 )
 
 // ActiveBandRows returns the adaptive row budget for the in-progress stream
@@ -43,6 +58,13 @@ func ActiveBandRows(terminalHeight int) int {
 		rows = ActiveBandMinRows
 	}
 	return rows
+}
+
+func chatComposerVerticalMargins(terminalHeight int) (top, bottom int) {
+	if terminalHeight < chatComposerVerticalMarginMinHeight {
+		return 0, 0
+	}
+	return chatComposerTopMarginRows, chatComposerBottomMarginRows
 }
 
 // FixedBottomSurface reserves the last terminal row for lightweight status
@@ -86,9 +108,19 @@ type FixedBottomSurface struct {
 	// Band/popup growth must consume that blank instead of scrolling it into
 	// a permanent gap above the reserved bottom pane.
 	outputCursorOnBlankRow bool
-	lastWidth              int
-	lastHeight             int
-	lastBottomRows         int
+	// softOutputLines is the most recent committed output still sitting at the
+	// bottom of the output region. Source-backed resize reflow may rewrite it
+	// in place; geometry changes or overflow trim invalidate safe reflow.
+	softOutputLines   []string
+	softOutputValid   bool
+	softOutputTrimmed bool
+	lastWidth         int
+	lastHeight        int
+	lastBottomRows    int
+	// lastGeometryProbeAt records the last SyncTerminalGeometry* size probe so
+	// the paint path can throttle GetSize syscalls without missing resizes for
+	// longer than DefaultGeometryProbeMinInterval.
+	lastGeometryProbeAt time.Time
 }
 
 type fixedBottomPopupState struct {
@@ -218,6 +250,7 @@ func (s *FixedBottomSurface) Disable() {
 	s.scrollCompensatedRows = 0
 	s.pendingScrollDownRows = 0
 	s.outputCursorOnBlankRow = false
+	s.invalidateSoftOutputLocked()
 }
 
 func (s *FixedBottomSurface) clearPopupStateLocked(clearStack bool) {
@@ -298,6 +331,69 @@ func (s *FixedBottomSurface) Enabled() bool {
 	return s.enabled
 }
 
+// SyncTerminalGeometry re-probes terminal size and applies scroll-region layout
+// when width, height, or reserved bottom rows change. Returns true when the
+// physical terminal width or height differs from the last applied layout cache
+// (lastWidth/lastHeight). Soft rewrite ownership is intentionally preserved so
+// callers can source-reflow the soft committed tail in place.
+//
+// Explicit refresh paths (theme, command, tests) should call this unthrottled
+// form. The live stream paint path should prefer SyncTerminalGeometryThrottled.
+func (s *FixedBottomSurface) SyncTerminalGeometry() (sizeChanged bool) {
+	sizeChanged, _ = s.syncTerminalGeometry(0)
+	return sizeChanged
+}
+
+// SyncTerminalGeometryThrottled is the paint-path variant of
+// SyncTerminalGeometry. When minInterval has not elapsed since the last probe,
+// it returns (false, false) without touching the terminal. A zero/negative
+// interval forces a probe (same as SyncTerminalGeometry).
+func (s *FixedBottomSurface) SyncTerminalGeometryThrottled(minInterval time.Duration) (sizeChanged, probed bool) {
+	return s.syncTerminalGeometry(minInterval)
+}
+
+func (s *FixedBottomSurface) syncTerminalGeometry(minInterval time.Duration) (sizeChanged, probed bool) {
+	if s == nil || s.terminal == nil {
+		return false, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false, false
+	}
+	now := time.Now()
+	if minInterval > 0 && !s.lastGeometryProbeAt.IsZero() && now.Sub(s.lastGeometryProbeAt) < minInterval {
+		return false, false
+	}
+	s.lastGeometryProbeAt = now
+
+	prevW, prevH := s.lastWidth, s.lastHeight
+	width, height := s.terminal.RefreshSize()
+	if width <= 0 {
+		if prevW > 0 {
+			width = prevW
+		} else {
+			width = s.terminal.Width()
+		}
+	}
+	if height <= 0 {
+		if prevH > 0 {
+			height = prevH
+		} else {
+			height = s.terminal.Height()
+		}
+	}
+	// Compare against the last applied layout, not the pre-refresh terminal
+	// cache: tests may pin a new size via SetSizeForTest while lastWidth still
+	// describes the previous scroll region.
+	sizeChanged = (prevW > 0 && width > 0 && width != prevW) ||
+		(prevH > 0 && height > 0 && height != prevH)
+	// Reuse the just-probed size so applyLayout does not call RefreshSize again
+	// under the same lock hold. Soft tail stays valid across a true resize.
+	s.applyLayoutWithSizeLocked(width, height)
+	return sizeChanged, true
+}
+
 // PromptInputMaxVisibleRows returns the editor viewport budget that keeps one
 // output row, the status row, runtime notices, and a possible editor status
 // visible. Disabled surfaces retain the regular composer limit.
@@ -343,7 +439,8 @@ func (s *FixedBottomSurface) promptInputMaxVisibleRowsLocked() int {
 	if s.dynamicStatusModel != nil {
 		dynamicStatusRows = 1
 	}
-	rows := height - outputRows - statusRows - editorStatusRows - dynamicStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine)) - len(s.activeBandLines)
+	topMarginRows, bottomMarginRows := chatComposerVerticalMargins(height)
+	rows := height - outputRows - statusRows - editorStatusRows - topMarginRows - bottomMarginRows - dynamicStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine)) - len(s.activeBandLines)
 	if rows < 1 {
 		return 1
 	}
@@ -440,7 +537,23 @@ func (s *FixedBottomSurface) WritePromptEditorText(writer io.Writer, rowOffset, 
 // WriteOutput moves the real terminal cursor into the scrollable output region
 // and writes text while holding the terminal write lock. This keeps output
 // writers from racing with the line editor's prompt cursor restoration.
+//
+// Plain output (tool results, notices, system writers) never opens a soft
+// rewrite window: any existing soft tail is invalidated so foreign text cannot
+// be mistaken for assistant-owned reflowable rows. Soft-committed assistant
+// drain must use WriteSoftTrackedOutput instead.
 func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, error, bool) {
+	return s.writeOutput(writer, text, false)
+}
+
+// WriteSoftTrackedOutput is the assistant soft-commit path: identical cursor
+// and layout handling to WriteOutput, but each written row is recorded into
+// the soft rewrite tail so resize/reflow can replace it in place.
+func (s *FixedBottomSurface) WriteSoftTrackedOutput(writer io.Writer, text string) (int, error, bool) {
+	return s.writeOutput(writer, text, true)
+}
+
+func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSoft bool) (int, error, bool) {
 	if s == nil || s.terminal == nil || writer == nil || text == "" {
 		return 0, nil, false
 	}
@@ -457,6 +570,13 @@ func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, er
 		s.moveToOutputLocked()
 		n, err = io.WriteString(writer, normalizeFixedSurfaceOutputText(text))
 		if n > 0 {
+			if trackSoft {
+				s.noteSoftOutputLocked(text)
+			} else {
+				// Foreign/plain writes break 1:1 soft ownership at the surface
+				// boundary so callers cannot forget a second invalidate.
+				s.invalidateSoftOutputLocked()
+			}
 			s.markOutputWrittenLocked()
 			// Trailing newline parks the cursor on a blank row at the output
 			// bottom. Later bottom-reserve growth must absorb that blank or it
@@ -467,6 +587,229 @@ func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, er
 		s.restoreStoredPromptCursorLocked()
 	})
 	return n, err, true
+}
+
+// SoftOutputTailValid reports whether the surface still owns a rewriteable
+// committed tail at the bottom of the output region.
+func (s *FixedBottomSurface) SoftOutputTailValid() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled && s.softOutputValid && len(s.softOutputLines) > 0
+}
+
+// SoftOutputTailTrimmed is true when the soft window dropped older lines. The
+// remaining tail no longer maps 1:1 to a contiguous source range from the
+// start of the turn's committed soft region until the coordinator re-bases
+// ownership onto the retained suffix (see AdoptSoftOutputTail).
+func (s *FixedBottomSurface) SoftOutputTailTrimmed() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.softOutputTrimmed
+}
+
+// SoftOutputTailLineCount returns the number of rewriteable committed lines.
+func (s *FixedBottomSurface) SoftOutputTailLineCount() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.softOutputValid {
+		return 0
+	}
+	return len(s.softOutputLines)
+}
+
+// SoftOutputTailLines returns a copy of the rewriteable committed tail.
+func (s *FixedBottomSurface) SoftOutputTailLines() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.softOutputValid || len(s.softOutputLines) == 0 {
+		return nil
+	}
+	return append([]string(nil), s.softOutputLines...)
+}
+
+// InvalidateSoftOutputTail drops the rewrite window. Irreversible scrollback
+// already contains the bytes; only future commits can form a new soft tail.
+func (s *FixedBottomSurface) InvalidateSoftOutputTail() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invalidateSoftOutputLocked()
+}
+
+// AdoptSoftOutputTail replaces soft-tail bookkeeping without rewriting the
+// terminal. The coordinator calls this after trimming source-backed ownership
+// so the surface window stays 1:1 with the still-reflowable suffix. Older rows
+// remain in irreversible scrollback; only the rewrite window shrinks.
+func (s *FixedBottomSurface) AdoptSoftOutputTail(lines []string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return
+	}
+	if len(lines) == 0 {
+		s.invalidateSoftOutputLocked()
+		return
+	}
+	s.softOutputLines = append([]string(nil), lines...)
+	if len(s.softOutputLines) > SoftOutputTailMaxLines {
+		drop := len(s.softOutputLines) - SoftOutputTailMaxLines
+		s.softOutputLines = append([]string(nil), s.softOutputLines[drop:]...)
+	}
+	s.softOutputValid = true
+	// Rebased window is complete relative to the adopted ownership.
+	s.softOutputTrimmed = false
+}
+
+// RewriteSoftOutputTail replaces the soft committed tail in place from source
+// reflow. Growing the tail scrolls within the output region; shrinking clears
+// leftover rows. Returns false when the soft window is missing or has scrolled
+// out of the visible output region.
+func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []string) bool {
+	if s == nil || s.terminal == nil || writer == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled || !s.softOutputValid || len(s.softOutputLines) == 0 {
+		return false
+	}
+	oldCount := len(s.softOutputLines)
+	onBlank := s.outputCursorOnBlankRow
+	// Capture pre-layout geometry so we clear the rows the soft tail currently
+	// occupies even when this rewrite is triggered by a terminal resize.
+	prevHeight := s.lastHeight
+	prevBottomRows := s.lastBottomRows
+	if prevHeight <= 0 {
+		prevHeight = s.terminal.Height()
+	}
+	if prevBottomRows <= 0 {
+		prevBottomRows = s.effectiveBottomRowsLocked(prevHeight)
+	}
+	prevBottom := outputBottomRowForHeight(prevHeight, prevBottomRows)
+	prevStart := prevBottom - oldCount
+	if !onBlank {
+		prevStart = prevBottom - oldCount + 1
+	}
+	if newLines == nil {
+		newLines = []string{}
+	}
+	normalized := make([]string, len(newLines))
+	for i, line := range newLines {
+		normalized[i] = strings.TrimSuffix(strings.ReplaceAll(line, "\r", ""), "\n")
+	}
+	var rewritten bool
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.flushPendingOutputScrollDownLocked()
+		if prevStart < 1 {
+			s.invalidateSoftOutputLocked()
+			rewritten = false
+			return
+		}
+		clearEnd := prevBottom
+		if clearEnd < prevStart {
+			clearEnd = prevStart
+		}
+		for row := prevStart; row <= clearEnd; row++ {
+			s.terminal.MoveTo(row, 1)
+			s.terminal.ClearLine()
+		}
+		s.terminal.MoveTo(prevStart, 1)
+		if len(normalized) == 0 {
+			s.softOutputLines = nil
+			s.softOutputValid = false
+			s.softOutputTrimmed = false
+			s.outputCursorOnBlankRow = false
+			s.restoreStoredPromptCursorLocked()
+			rewritten = true
+			return
+		}
+		var builder strings.Builder
+		for i, line := range normalized {
+			if i > 0 {
+				builder.WriteString("\n")
+			}
+			builder.WriteString(line)
+		}
+		// Match WriteOutput / writeLineLocked: always terminate so the output
+		// cursor parks on a blank row at the region bottom.
+		builder.WriteString("\n")
+		if _, err := io.WriteString(writer, normalizeFixedSurfaceOutputText(builder.String())); err != nil {
+			rewritten = false
+			return
+		}
+		s.softOutputLines = normalized
+		s.softOutputValid = true
+		s.softOutputTrimmed = false
+		s.outputCursorOnBlankRow = true
+		s.markOutputWrittenLocked()
+		s.restoreStoredPromptCursorLocked()
+		rewritten = true
+	})
+	return rewritten
+}
+
+func (s *FixedBottomSurface) noteSoftOutputLocked(text string) {
+	if s == nil {
+		return
+	}
+	lines := splitSoftOutputLines(text)
+	if len(lines) == 0 {
+		return
+	}
+	s.softOutputLines = append(s.softOutputLines, lines...)
+	if len(s.softOutputLines) > SoftOutputTailMaxLines {
+		drop := len(s.softOutputLines) - SoftOutputTailMaxLines
+		s.softOutputLines = append([]string(nil), s.softOutputLines[drop:]...)
+		s.softOutputTrimmed = true
+	}
+	s.softOutputValid = true
+}
+
+func (s *FixedBottomSurface) invalidateSoftOutputLocked() {
+	if s == nil {
+		return
+	}
+	s.softOutputLines = nil
+	s.softOutputValid = false
+	s.softOutputTrimmed = false
+}
+
+func splitSoftOutputLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	// writeLineLocked always appends a trailing newline. Keep intentional blank
+	// lines, but do not treat the terminator itself as an extra soft row.
+	trimmed := strings.HasSuffix(normalized, "\n")
+	if trimmed {
+		normalized = strings.TrimSuffix(normalized, "\n")
+	}
+	if normalized == "" {
+		if trimmed {
+			return []string{""}
+		}
+		return nil
+	}
+	return strings.Split(normalized, "\n")
 }
 
 func (s *FixedBottomSurface) ShowPrompt(line string) bool {
@@ -1885,11 +2228,29 @@ func (s *FixedBottomSurface) applyLayoutLocked() {
 	}
 }
 
+// applyLayoutWithSizeLocked applies layout using a size that was already probed
+// in the same lock hold (e.g. syncTerminalGeometry). Callers that have not just
+// refreshed must use applyLayoutLocked so geometry stays current.
+func (s *FixedBottomSurface) applyLayoutWithSizeLocked(width, height int) {
+	var builder strings.Builder
+	s.appendApplyLayoutSequenceWithSizeLocked(&builder, width, height)
+	if builder.Len() > 0 {
+		fmt.Print(builder.String())
+	}
+}
+
 func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Builder) {
 	if builder == nil {
 		return
 	}
 	width, height := s.terminal.RefreshSize()
+	s.appendApplyLayoutSequenceWithSizeLocked(builder, width, height)
+}
+
+func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *strings.Builder, width, height int) {
+	if builder == nil {
+		return
+	}
 	if width <= 0 {
 		width = 80
 	}
@@ -1951,6 +2312,9 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Bu
 		s.pendingScrollDownRows = 0
 		s.scrollCompensatedRows = bottomRows
 		s.outputCursorOnBlankRow = false
+		// Soft tail stays valid across resize so source-backed reflow can
+		// rewrite it in place. Callers invalidate explicitly when reflow is
+		// impossible (trimmed window, missing source, or scroll-away).
 	}
 	s.lastWidth = width
 	s.lastHeight = height
@@ -2137,7 +2501,7 @@ func (s *FixedBottomSurface) promptMaxVisibleRowsLocked() int {
 	bottom := s.promptBottomRowLocked()
 	outputBottom := s.outputBottomRowLocked()
 	state := s.bottomPaneStateLocked()
-	rows := bottom - outputBottom - state.dynamicStatusVisibleRowCount() - state.promptNoticeVisibleRowCount() - state.activeBandVisibleRowCount()
+	rows := bottom - outputBottom - state.dynamicStatusVisibleRowCount() - state.promptNoticeVisibleRowCount() - state.activeBandVisibleRowCount() - state.promptTopMarginRowCount()
 	if rows < 1 {
 		return 1
 	}
@@ -2195,7 +2559,7 @@ func (s *FixedBottomSurface) promptBottomRowLocked() int {
 		if rows < 1 {
 			return s.outputBottomRowLocked()
 		}
-		row := s.outputBottomRowLocked() + rows
+		row := s.outputBottomRowLocked() + rows - state.promptBottomMarginRowCount()
 		if row < 1 {
 			return 1
 		}
@@ -2220,7 +2584,7 @@ func (s *FixedBottomSurface) promptBottomRowLocked() int {
 	// stack to the output bottom in that case would paint the band inside the
 	// scroll region and leave its reserved rows blank above the status line.
 	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 || state.dynamicStatusVisibleRowCount() > 0 || state.activeBandVisibleRowCount() > 0 {
-		row := s.statusRowLocked() - 1
+		row := s.statusRowLocked() - 1 - state.promptBottomMarginRowCount()
 		if row < 1 {
 			return 1
 		}
@@ -2238,8 +2602,9 @@ func (s *FixedBottomSurface) statusRowLocked() int {
 }
 
 func (s *FixedBottomSurface) popupStartRowLocked(rows int, gapRows int) int {
-	if s.bottomPaneStateLocked().popupExpandsBelowPrompt() {
-		row := s.promptBottomRowLocked() + 1
+	state := s.bottomPaneStateLocked()
+	if state.popupExpandsBelowPrompt() {
+		row := s.promptBottomRowLocked() + state.promptBottomMarginRowCount() + 1
 		if row < 1 {
 			return 1
 		}
@@ -2324,12 +2689,16 @@ func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
 			rows = maxRows
 		}
 	}
-	rows += state.dynamicStatusVisibleRowCount() + state.promptNoticeVisibleRowCount()
+	rows += state.dynamicStatusVisibleRowCount() + state.promptNoticeVisibleRowCount() + state.promptTopMarginRowCount()
 	startRow := bottom - rows + 1
 	if startRow < 1 {
 		startRow = 1
 	}
-	for row := startRow; row <= bottom; row++ {
+	endRow := bottom + state.promptBottomMarginRowCount()
+	if endRow >= s.statusRowLocked() {
+		endRow = s.statusRowLocked() - 1
+	}
+	for row := startRow; row <= endRow; row++ {
 		s.terminal.MoveTo(row, 1)
 		s.terminal.ClearLine()
 	}
@@ -2347,6 +2716,8 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	noticeRows := state.promptNoticeVisibleRowCount()
 	dynamicRows := state.dynamicStatusVisibleRowCount()
 	activeRows := state.activeBandVisibleRowCount()
+	topMarginRows := state.promptTopMarginRowCount()
+	bottomMarginRows := state.promptBottomMarginRowCount()
 	if rows < 1 && noticeRows < 1 && dynamicRows < 1 && activeRows < 1 {
 		if s.promptRenderedRows > 0 {
 			s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
@@ -2367,41 +2738,22 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if bottom < 1 {
 		return
 	}
-	// Layout bottom-up: [active band][notice][dynamic status][prompt][status].
-	// Keeping the transient activity adjacent to the composer makes the fixed
-	// footer stable while a turn progresses.
-	promptStart := bottom
+	// Layout bottom-up: [active band][notice][dynamic status][top margin]
+	// [prompt][bottom margin][status]. Margins are reserved only for the main
+	// chat composer, so transient popups and prompt-less streaming stay dense.
+	promptStart := bottom + bottomMarginRows + 1
 	if rows > 0 {
 		promptStart = bottom - rows + 1
 	}
-	dynamicStart := promptStart
-	if rows > 0 {
-		dynamicStart = promptStart - dynamicRows
-	} else {
-		dynamicStart = bottom - dynamicRows + 1
-	}
-	if dynamicRows < 1 {
-		dynamicStart = promptStart
-	}
+	topMarginStart := promptStart - topMarginRows
+	dynamicStart := topMarginStart - dynamicRows
 	noticeStart := dynamicStart - noticeRows
-	if dynamicRows < 1 && rows < 1 {
-		noticeStart = bottom - noticeRows + 1
-	}
-	if noticeRows < 1 {
-		noticeStart = dynamicStart
-	}
 	activeStart := noticeStart - activeRows
-	if noticeRows < 1 && dynamicRows < 1 && rows < 1 {
-		activeStart = bottom - activeRows + 1
-	}
-	if activeRows < 1 {
-		activeStart = noticeStart
-	}
 	start := activeStart
 	if start < 1 {
 		start = 1
 	}
-	areaRows := activeRows + noticeRows + dynamicRows + rows
+	areaRows := activeRows + noticeRows + dynamicRows + topMarginRows + rows + bottomMarginRows
 	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != start || s.promptRenderedRows != areaRows) {
 		s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 	}
@@ -2547,6 +2899,8 @@ type BottomPaneState struct {
 	ActiveBandStyled       []render.Line
 	ActiveBandMaxRows      int
 	PromptReservedRows     int
+	PromptTopMarginRows    int
+	PromptBottomMarginRows int
 }
 
 func (s BottomPaneState) composerLineText() string {
@@ -2603,7 +2957,7 @@ func (s BottomPaneState) activeBandVisibleRowCount() int {
 }
 
 func (s BottomPaneState) promptAreaVisibleRowCount() int {
-	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVisibleRowCount()
+	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.promptVisibleRowCount()
 }
 
 func (s BottomPaneState) popupExpandsBelowPrompt() bool {
@@ -2614,7 +2968,7 @@ func (s BottomPaneState) popupTopReservedRowCount() int {
 	if !s.popupExpandsBelowPrompt() {
 		return 0
 	}
-	rows := s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptReservedRowCount()
+	rows := s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.promptReservedRowCount()
 	if rows < 0 {
 		return 0
 	}
@@ -2636,6 +2990,28 @@ func (s BottomPaneState) promptReservedRowCount() int {
 		return 0
 	}
 	return s.PromptReservedRows
+}
+
+func (s BottomPaneState) promptMarginsVisible() bool {
+	return s.composerVisibleRowCount() == 0 && s.promptReservedRowCount() > 0
+}
+
+func (s BottomPaneState) promptTopMarginRowCount() int {
+	if !s.promptMarginsVisible() || s.PromptTopMarginRows < 1 {
+		return 0
+	}
+	return s.PromptTopMarginRows
+}
+
+func (s BottomPaneState) promptBottomMarginRowCount() int {
+	if !s.promptMarginsVisible() || s.PromptBottomMarginRows < 1 {
+		return 0
+	}
+	return s.PromptBottomMarginRows
+}
+
+func (s BottomPaneState) promptVerticalMarginRowCount() int {
+	return s.promptTopMarginRowCount() + s.promptBottomMarginRowCount()
 }
 
 func (s BottomPaneState) promptVisibleRowCount() int {
@@ -2665,7 +3041,7 @@ func (s BottomPaneState) extraPromptReservedRowCount() int {
 }
 
 func (s BottomPaneState) popupBottomGapRowCount() int {
-	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
+	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
 }
 
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
@@ -2905,6 +3281,7 @@ func promptNoticeDisplayLines(line string) []string {
 }
 
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
+	topMarginRows, bottomMarginRows := chatComposerVerticalMargins(s.terminal.Height())
 	state := BottomPaneState{
 		StatusModel:            cloneStatusLineModel(s.statusModel),
 		DynamicStatusModel:     cloneStatusLineModel(s.dynamicStatusModel),
@@ -2919,6 +3296,8 @@ func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 		ActiveBandStyled:       cloneRenderLines(s.activeBandStyled),
 		ActiveBandMaxRows:      s.ActiveBandRowBudget(),
 		PromptReservedRows:     s.promptReservedRows,
+		PromptTopMarginRows:    topMarginRows,
+		PromptBottomMarginRows: bottomMarginRows,
 	}
 	if strings.TrimSpace(s.composerLine) != "" {
 		state.ComposerLine = s.composerLine

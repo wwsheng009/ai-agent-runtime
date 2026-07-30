@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -286,6 +287,8 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 			const width = 80
 			session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
 			coord := newChatInteractionCoordinator(session)
+			coord.stableCommitDelay = time.Hour
+			t.Cleanup(coord.Shutdown)
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
 			coord.SetSurface(surface)
@@ -322,7 +325,7 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 			})
 			screen.feed(final)
 
-			promptRow := height - 1
+			promptRow := height - 2
 			if got := screen.line(promptRow); !strings.HasPrefix(got, ">") {
 				t.Fatalf("expected prompt on row %d, got %q, screen:\n%s", promptRow, got, screen.dump())
 			}
@@ -339,8 +342,8 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 			if lastText == 0 {
 				t.Fatalf("expected committed transcript above the prompt, screen:\n%s", screen.dump())
 			}
-			if gap := promptRow - lastText - 1; gap > 1 {
-				t.Fatalf("expected at most one blank separator row above the prompt, got %d, screen:\n%s",
+			if gap := promptRow - lastText - 1; gap > 2 {
+				t.Fatalf("expected only the composer top margin and one transcript separator above the prompt, got %d blank rows, screen:\n%s",
 					gap, screen.dump())
 			}
 			if got := screen.line(lastText); !strings.Contains(got, "收尾说明。") {

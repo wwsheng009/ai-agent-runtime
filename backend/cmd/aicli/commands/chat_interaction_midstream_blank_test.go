@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -85,6 +86,8 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
 	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = time.Hour
+	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
@@ -123,6 +126,10 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 			content = string(runes[n:])
 			coord.RenderAssistantDelta(chunk)
 		}
+		coord.mu.Lock()
+		coord.stopActiveStableCommitLocked()
+		coord.drainActiveStableCommitLocked(true)
+		coord.mu.Unlock()
 	})
 	screen.feed(streaming)
 
@@ -181,7 +188,7 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 	})
 	screen.feed(final)
 
-	promptRow := height - 1
+	promptRow := height - 2
 	lastText := 0
 	for row := promptRow - 1; row >= 1; row-- {
 		if strings.TrimSpace(screen.line(row)) != "" {
@@ -192,7 +199,7 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 	if lastText == 0 {
 		t.Fatalf("expected finalized transcript, screen:\n%s", screen.dump())
 	}
-	if gap := promptRow - lastText - 1; gap > 1 {
+	if gap := promptRow - lastText - 1; gap > 2 {
 		t.Fatalf("post-finalize gap above prompt = %d, screen:\n%s", gap, screen.dump())
 	}
 }
@@ -392,7 +399,7 @@ func TestFixedBottomSurface_EOSFusionLeavesNoBlankGap(t *testing.T) {
 	})
 	screen.feed(promptOut)
 
-	promptRow := height - 1
+	promptRow := height - 2
 	if got := screen.line(promptRow); !strings.HasPrefix(strings.TrimSpace(got), ">") {
 		t.Fatalf("expected prompt on row %d, got %q, screen:\n%s", promptRow, got, screen.dump())
 	}
@@ -406,12 +413,112 @@ func TestFixedBottomSurface_EOSFusionLeavesNoBlankGap(t *testing.T) {
 	if lastText == 0 {
 		t.Fatalf("expected transcript above prompt, screen:\n%s", screen.dump())
 	}
-	if gap := promptRow - lastText - 1; gap > 1 {
+	if gap := promptRow - lastText - 1; gap > 2 {
 		t.Fatalf("after ShowPrompt, gap above prompt = %d (budget=%d); screen:\n%s",
 			gap, budget, screen.dump())
 	}
 	if maxRun, at := maxBlankRunAboveBottom(screen, promptRow); maxRun >= ui.ActiveBandMinRows {
 		t.Fatalf("after ShowPrompt, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	}
+}
+
+// TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled covers the
+// production failure mode where CommitStablePrefix ran at enqueue time while the
+// animated stable-commit queue still held the lines. With stableCommitManual the
+// queue stays pending; the live band must keep showing that content (no hole)
+// until an explicit drain writes scrollback and then shrinks the band.
+//
+// Plain text is used so a few overflow lines enqueue without tripping catch-up
+// depth (which would auto-drain and hide the pending-queue window).
+func TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled(t *testing.T) {
+	const width = 40
+	height := 24
+	budget := ui.ActiveBandRows(height)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = time.Hour
+	coord.stableCommitManual = true
+	t.Cleanup(coord.Shutdown)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	coord.SetSurface(surface)
+	screen := newScreenVT(width, height)
+
+	seed := captureSurfaceStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		surface.ShowPrompt("> ")
+		surface.ClearPromptRows(1)
+		for i := 1; i <= 10; i++ {
+			coord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
+		}
+	})
+	screen.feed(seed)
+
+	pending := captureSurfaceStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
+		coord.RenderAssistantDelta("eight\n")
+	})
+	screen.feed(pending)
+
+	coord.mu.Lock()
+	queued := len(coord.stableCommitQueue)
+	enqueued := coord.streamEnqueuedPrefixLen
+	emitted := coord.streamRenderedPrefixLen
+	coord.mu.Unlock()
+	if queued == 0 || enqueued <= emitted {
+		t.Fatalf("precondition: expected pending stable queue, queued=%d enqueued=%d emitted=%d",
+			queued, enqueued, emitted)
+	}
+
+	band := surface.ActiveBandLines()
+	if len(band) == 0 {
+		t.Fatalf("pending queue must keep ActiveBand filled, screen:\n%s", screen.dump())
+	}
+	joined := strings.Join(band, "\n")
+	if !strings.Contains(joined, "one") || !strings.Contains(joined, "eight") {
+		t.Fatalf("queued stable rows must remain in ActiveBand until drain, got %q\nscreen:\n%s",
+			joined, screen.dump())
+	}
+
+	statusRow := height
+	bandEnd := statusRow - 1
+	bandStart := bandEnd - len(band) + 1
+	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, bandEnd); gap > 1 {
+		t.Fatalf("pending queue left gap=%d above band (budget=%d); screen:\n%s",
+			gap, budget, screen.dump())
+	}
+	if maxRun, at := maxBlankRunAboveBottom(screen, bandStart); maxRun >= ui.ActiveBandMinRows {
+		t.Fatalf("pending queue left blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	}
+
+	// Drain must move queued lines to scrollback and shrink the band without a hole.
+	drained := captureSurfaceStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		coord.mu.Lock()
+		coord.stopActiveStableCommitLocked()
+		coord.drainActiveStableCommitLocked(true)
+		coord.mu.Unlock()
+	})
+	screen.feed(drained)
+
+	band = surface.ActiveBandLines()
+	joined = strings.Join(band, "\n")
+	if strings.Contains(joined, "one") {
+		t.Fatalf("emitted stable prefix should leave ActiveBand after drain, got %q", joined)
+	}
+	if len(band) == 0 || !strings.Contains(joined, "eight") {
+		// "eight" may still be mutable tail or last retained rows depending on cut.
+		// Require a non-empty band so the viewport did not collapse to a hole.
+		if len(band) == 0 {
+			t.Fatalf("expected mutable tail remaining in band after drain, screen:\n%s", screen.dump())
+		}
+	}
+	bandEnd = statusRow - 1
+	bandStart = bandEnd - len(band) + 1
+	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, bandEnd); gap > 1 {
+		t.Fatalf("after drain, gap above band = %d; screen:\n%s", gap, screen.dump())
 	}
 }
 
@@ -435,6 +542,8 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
 	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = time.Hour
+	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
@@ -529,7 +638,7 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 	})
 	screen.feed(promptOut)
 
-	promptRow := height - 1
+	promptRow := height - 2
 	lastText = 0
 	for row := promptRow - 1; row >= 1; row-- {
 		if strings.TrimSpace(screen.line(row)) != "" {
@@ -540,7 +649,7 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 	if lastText == 0 {
 		t.Fatalf("expected transcript above prompt, screen:\n%s", screen.dump())
 	}
-	if gap := promptRow - lastText - 1; gap > 1 {
+	if gap := promptRow - lastText - 1; gap > 2 {
 		t.Fatalf("after ShowPrompt, gap above prompt = %d; screen:\n%s", gap, screen.dump())
 	}
 	if maxRun, at := maxBlankRunAboveBottom(screen, promptRow); maxRun >= ui.ActiveBandMinRows {

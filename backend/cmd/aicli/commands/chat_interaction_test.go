@@ -2643,6 +2643,8 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
 	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = 5 * time.Millisecond
+	t.Cleanup(coord.Shutdown)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -2652,6 +2654,7 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 
 	coord.RenderAssistantDelta("# Title\n\n")
 	coord.RenderAssistantDelta("Hello stable paragraph.\n")
+	waitForCoordinatorOutputText(t, coord, &output, "Title", time.Second)
 	if !strings.Contains(output.String(), "Title") || strings.Contains(output.String(), "Hello stable paragraph") {
 		t.Fatalf("surface path should commit only the completed markdown block, got %q", output.String())
 	}
@@ -2687,6 +2690,7 @@ func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *tes
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	t.Cleanup(coord.Shutdown)
+	coord.stableCommitDelay = 5 * time.Millisecond
 	coord.activeStream.Policy = motion.NewPolicy(motion.Config{
 		Forced:      motion.ForceMode(motion.ModeOff),
 		Interactive: true,
@@ -2700,6 +2704,7 @@ func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *tes
 	coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
 	coord.RenderAssistantDelta("coalesced-final-row\n")
 	waitForActiveBandText(t, surface, "coalesced-final-row", time.Second)
+	waitForCoordinatorOutputText(t, coord, &output, "one", time.Second)
 	if !strings.Contains(output.String(), "one") || strings.Contains(output.String(), "coalesced-final-row") {
 		t.Fatalf("only overflowed stable rows should enter scrollback before finalize, got %q", output.String())
 	}
@@ -2709,19 +2714,33 @@ func TestChatInteractionCoordinator_ActiveBandPromotesLongMarkdownList(t *testin
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
 	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = time.Hour
+	coord.stableCommitManual = true
+	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(80, 24)
 	coord.SetSurface(surface)
 
 	var output bytes.Buffer
 	coord.SetWriter(&output)
+	catchUp := false
+	pendingAfterBurst := -1
 	captureSurfaceStdout(t, func() {
 		for i := 1; i <= 20; i++ {
 			coord.RenderAssistantDelta(fmt.Sprintf("- item %02d\n", i))
 		}
+		coord.mu.Lock()
+		catchUp = coord.stableCommitCatchUp
+		pendingAfterBurst = len(coord.stableCommitQueue)
+		coord.stopActiveStableCommitLocked()
+		coord.drainActiveStableCommitLocked(true)
+		coord.mu.Unlock()
 	})
+	if !catchUp || pendingAfterBurst != 0 {
+		t.Fatalf("burst should enter catch-up and drain its stable backlog, catch_up=%t pending=%d", catchUp, pendingAfterBurst)
+	}
 
-	committed := output.String()
+	committed := coordinatorOutputString(coord, &output)
 	if !strings.Contains(committed, "item 01") || strings.Contains(committed, "item 20") {
 		t.Fatalf("expected older list items in scrollback and newest item in tail, got %q", committed)
 	}
@@ -2739,6 +2758,137 @@ func TestChatInteractionCoordinator_ActiveBandPromotesLongMarkdownList(t *testin
 		if strings.Count(rendered, want) != 1 {
 			t.Fatalf("list item %q should render exactly once, got %q", want, rendered)
 		}
+	}
+}
+
+func TestChatInteractionCoordinator_StableCommitQueueSeparatesEnqueuedAndEmittedPrefixes(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = time.Hour
+	coord.stableCommitManual = true
+	t.Cleanup(coord.Shutdown)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(40, 24)
+	coord.SetSurface(surface)
+
+	coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
+	coord.RenderAssistantDelta("eight\n")
+
+	coord.mu.Lock()
+	queued := len(coord.stableCommitQueue)
+	enqueuedPrefix := coord.streamEnqueuedPrefixLen
+	emittedPrefix := coord.streamRenderedPrefixLen
+	sequence := coord.stableCommitTimerSeq
+	if coord.stableCommitTimer != nil {
+		coord.stableCommitTimer.Stop()
+		coord.stableCommitTimer = nil
+	}
+	coord.mu.Unlock()
+	if queued == 0 || enqueuedPrefix <= emittedPrefix {
+		t.Fatalf("expected queued stable source ahead of emitted source, queued=%d enqueued=%d emitted=%d", queued, enqueuedPrefix, emittedPrefix)
+	}
+	if got := output.String(); got != "" {
+		t.Fatalf("stable queue wrote before its commit tick: %q", got)
+	}
+	// Queued stable prefix must remain visible in ActiveBand until the commit
+	// tick writes it to scrollback. Hiding the band earlier (CommitStablePrefix
+	// at enqueue time) opens a mid-stream blank hole between transcript and tail.
+	if band := strings.Join(surface.ActiveBandLines(), "\n"); !strings.Contains(band, "one") || !strings.Contains(band, "eight") {
+		t.Fatalf("pending stable queue must stay in ActiveBand until drain, got %q", band)
+	}
+
+	coord.runActiveStableCommitTick(sequence)
+	coord.mu.Lock()
+	emittedPrefix = coord.streamRenderedPrefixLen
+	coord.mu.Unlock()
+	if emittedPrefix != enqueuedPrefix {
+		t.Fatalf("atomic source chunk did not fully advance, emitted=%d enqueued=%d", emittedPrefix, enqueuedPrefix)
+	}
+	if got := output.String(); strings.Count(got, "one") != 1 {
+		t.Fatalf("expected first stable row exactly once after tick, got %q", got)
+	}
+	if band := strings.Join(surface.ActiveBandLines(), "\n"); strings.Contains(band, "one") {
+		t.Fatalf("emitted stable prefix should leave ActiveBand after drain, got %q", band)
+	}
+
+	coord.FinalizeAssistantDelta()
+	rendered := output.String()
+	for _, line := range []string{"one", "two", "three", "four", "five", "six", "seven", "eight"} {
+		if strings.Count(rendered, line) != 1 {
+			t.Fatalf("line %q should render exactly once after finalize, got %q", line, rendered)
+		}
+	}
+}
+
+func TestChatInteractionCoordinator_FinalSnapshotReplacesUnemittedStableQueue(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	coord.stableCommitDelay = time.Hour
+	coord.stableCommitManual = true
+	t.Cleanup(coord.Shutdown)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coord.SetSurface(surface)
+
+	coord.RenderAssistantDelta("- stale item\n")
+	coord.RenderAssistantDelta("- retained item\n")
+	coord.mu.Lock()
+	queued := len(coord.stableCommitQueue)
+	emitted := coord.streamRenderedPrefixLen
+	coord.mu.Unlock()
+	if queued == 0 || emitted != 0 {
+		t.Fatalf("precondition failed: queued=%d emitted=%d", queued, emitted)
+	}
+
+	if !coord.CompleteAssistantResponse("- corrected item\n- retained item\n") {
+		t.Fatal("expected active response completion")
+	}
+	rendered := output.String()
+	if strings.Contains(rendered, "stale item") {
+		t.Fatalf("unemitted stale queue leaked despite authoritative final snapshot: %q", rendered)
+	}
+	if strings.Count(rendered, "corrected item") != 1 || strings.Count(rendered, "retained item") != 1 {
+		t.Fatalf("authoritative final snapshot should render exactly once, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_StableCommitCatchUpUsesHysteresis(t *testing.T) {
+	now := time.Now()
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord.stableCommitQueue = make([]activeStableCommitLine, activeStableCatchUpDepth)
+	for index := range coord.stableCommitQueue {
+		coord.stableCommitQueue[index].enqueuedAt = now
+	}
+	if !coord.activeStableCommitCatchUpLocked(now) || !coord.stableCommitCatchUp {
+		t.Fatal("queue-depth pressure should enter catch-up mode")
+	}
+
+	coord.stableCommitQueue = []activeStableCommitLine{{enqueuedAt: now.Add(activeStableCatchUpExitHold)}}
+	coord.stableCommitBelowExit = now
+	exitAt := now.Add(activeStableCatchUpExitHold)
+	if coord.activeStableCommitCatchUpLocked(exitAt) || coord.stableCommitCatchUp {
+		t.Fatal("sustained low pressure should exit catch-up mode")
+	}
+
+	coord.stableCommitQueue = make([]activeStableCommitLine, activeStableCatchUpDepth)
+	for index := range coord.stableCommitQueue {
+		coord.stableCommitQueue[index].enqueuedAt = exitAt
+	}
+	if coord.activeStableCommitCatchUpLocked(exitAt.Add(10 * time.Millisecond)) {
+		t.Fatal("ordinary backlog should respect the catch-up re-entry hold")
+	}
+
+	coord.stableCommitQueue = make([]activeStableCommitLine, activeStableSevereDepth)
+	for index := range coord.stableCommitQueue {
+		coord.stableCommitQueue[index].enqueuedAt = exitAt
+	}
+	if !coord.activeStableCommitCatchUpLocked(exitAt.Add(20 * time.Millisecond)) {
+		t.Fatal("severe backlog should bypass the catch-up re-entry hold")
 	}
 }
 
@@ -2933,6 +3083,27 @@ func waitForActiveBandText(t *testing.T, surface *ui.FixedBottomSurface, expecte
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func waitForCoordinatorOutputText(t *testing.T, coord *chatInteractionCoordinator, output *bytes.Buffer, expected string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		value := coordinatorOutputString(coord, output)
+		if strings.Contains(value, expected) {
+			return value
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("coordinator output did not contain %q before timeout; got %q", expected, value)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func coordinatorOutputString(coord *chatInteractionCoordinator, output *bytes.Buffer) string {
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	return output.String()
 }
 
 func TestSplitToolStageDetail(t *testing.T) {

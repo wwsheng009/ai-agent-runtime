@@ -5,6 +5,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
@@ -76,6 +77,7 @@ export function RuntimeRoutingDomainEditor({
   routeConfig,
   routes,
 }: RuntimeRoutingDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -122,24 +124,33 @@ export function RuntimeRoutingDomainEditor({
             </SettingsPanelIcon>
             <div>
               <div className="text-base font-semibold text-[var(--foreground)]">
-                Routing 配置
+                {t("editor.routing.title")}
               </div>
               <div className="mt-1 text-sm text-[var(--muted-foreground)]">
-                顶部维护 routing 根配置，下面用表格管理路由规则顺序和匹配条件。
+                {t("editor.routing.description")}
               </div>
             </div>
           </div>
           <SettingsBadgeList>
-            <ConfigDomainSummaryBadge>{`${routes.length} 条路由`}</ConfigDomainSummaryBadge>
-            <ConfigDomainSummaryBadge>{`${protocolCount} 个协议条件`}</ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
-              {routeConfig.failover ? "failover 开" : "failover 关"}
+              {t("editor.routing.summary.routes", { count: routes.length })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.routing.summary.protocols", { count: protocolCount })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {routeConfig.failover
+                ? t("editor.routing.status.failoverOn")
+                : t("editor.routing.status.failoverOff")}
             </ConfigDomainSummaryBadge>
           </SettingsBadgeList>
         </div>
 
         <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_13rem]">
-          <ConfigFormField label="routing.strategy" description="常见值包括 health 等路由策略。">
+          <ConfigFormField
+            label="routing.strategy"
+            description={t("editor.routing.strategyHelp")}
+          >
             <input
               className={editorControlClassName}
               value={routeConfig.strategy}
@@ -156,10 +167,14 @@ export function RuntimeRoutingDomainEditor({
           <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
             <div className="text-[13px] font-semibold text-[var(--foreground)]">routing.failover</div>
             <div className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
-              控制路由层是否允许故障转移。
+              {t("editor.routing.failoverHelp")}
             </div>
             <label className={`mt-3 ${editorToggleRowClassName}`}>
-              <span>{routeConfig.failover ? "已启用" : "已关闭"}</span>
+              <span>
+                {routeConfig.failover
+                  ? t("editor.routing.toggle.enabled")
+                  : t("editor.routing.toggle.disabled")}
+              </span>
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-[var(--accent-primary)]"
@@ -179,23 +194,33 @@ export function RuntimeRoutingDomainEditor({
       <ConfigDomainTable
         title="Routes"
         titleIcon={GitBranchPlusIcon}
-        description="路由顺序会影响命中结果。可以直接在表格里上移、下移规则，再用弹窗编辑匹配条件。"
+        description={t("editor.routing.routes.tableDescription")}
         items={routes}
         getRowKey={(route) => route.id}
-        emptyState="当前还没有路由规则，可直接新建第一条 route。"
+        emptyState={t("editor.routing.routes.empty")}
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${routes.length} 条规则`}</ConfigDomainSummaryBadge>
-            <ConfigDomainSummaryBadge>{`${availableGroups.length} 个 group 可选`}</ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.routing.summary.rules", { count: routes.length })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.routing.summary.availableGroups", {
+                count: availableGroups.length,
+              })}
+            </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>{`strategy ${routeConfig.strategy || "--"}`}</ConfigDomainSummaryBadge>
           </>
         }
         actions={
-          <SettingsAddButton size="sm" label="新建路由" onClick={openCreateDialog} />
+          <SettingsAddButton
+            size="sm"
+            label={t("editor.routing.routes.create")}
+            onClick={openCreateDialog}
+          />
         }
         columns={[
           {
-            header: "顺序 / 匹配",
+            header: t("editor.routing.routes.columns.orderMatch"),
             cell: (route) => (
               <div className="min-w-[14rem]">
                 <div className="flex flex-wrap items-center gap-2">
@@ -211,74 +236,78 @@ export function RuntimeRoutingDomainEditor({
             ),
           },
           {
-            header: "目标分组",
+            header: t("editor.routing.routes.columns.targetGroup"),
             cell: (route) => (
               <div className="min-w-[12rem]">
                 <div>{route.group || "--"}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {route.pipeline
                     ? `pipeline ${route.pipeline}`
-                    : route.protocol || "未设 protocol"}
+                    : route.protocol || t("editor.routing.routes.noProtocol")}
                 </div>
               </div>
             ),
           },
           {
-            header: "模型条件",
+            header: t("editor.routing.routes.columns.modelConditions"),
             cell: (route) => (
               <div className="min-w-[14rem]">
                 <div>{route.matchModels.length > 0 ? route.matchModels.join(", ") : "--"}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {route.excludeModels.length > 0
                     ? `exclude ${route.excludeModels.join(", ")}`
-                    : "无排除条件"}
+                    : t("editor.routing.routes.noExclusions")}
                 </div>
               </div>
             ),
           },
           {
-            header: "优先级 / 扩展",
+            header: t("editor.routing.routes.columns.priorityExtra"),
             cell: (route) => (
               <div className="min-w-[12rem]">
                 <div>{route.priority ? `priority ${route.priority}` : "--"}</div>
                 <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted-foreground)]">
                   {route.pipeline ? <span>{`pipeline ${route.pipeline}`}</span> : null}
                   {route.extraFieldCount > 0 ? (
-                    <span>{`${route.extraFieldCount} 个扩展字段`}</span>
+                    <span>
+                      {t("editor.routing.extraFields.count", {
+                        count: route.extraFieldCount,
+                      })}
+                    </span>
                   ) : (
-                    <span>无扩展字段</span>
+                    <span>{t("editor.routing.extraFields.none")}</span>
                   )}
                 </div>
               </div>
             ),
           },
           {
-            header: "操作",
+            header: t("editor.routing.columns.actions"),
             cell: (route) => (
               <SettingsActionGroup>
                 <SettingsActionButton
                   variant="ghost"
                   icon={<ArrowUpIcon size={14} />}
-                  label="上移"
+                  label={t("editor.routing.actions.moveUp")}
                   onClick={() => onMoveRoute(route.index, "up")}
                   disabled={route.index === 0}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<ArrowDownIcon size={14} />}
-                  label="下移"
+                  label={t("editor.routing.actions.moveDown")}
                   onClick={() => onMoveRoute(route.index, "down")}
                   disabled={route.index === routes.length - 1}
                 />
                 <SettingsActionButton
                   variant="secondary"
-                  label="编辑"
+                  label={t("editor.routing.actions.edit")}
                   onClick={() => openEditDialog(route)}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<Trash2Icon size={14} />}
-                  label="删除"
+                  label={t("editor.routing.actions.delete")}
                   onClick={() => onDeleteRoute(route.index)}
                 />
               </SettingsActionGroup>
@@ -292,13 +321,19 @@ export function RuntimeRoutingDomainEditor({
       <ConfigDomainDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        title={editingIndex == null ? "新建 Route" : `编辑 Route #${editingIndex + 1}`}
-        description="主匹配字段使用表单编辑，模型匹配与扩展字段使用文本区和 JSON，兼顾高频维护和配置完整性。"
+        title={
+          editingIndex == null
+            ? t("editor.routing.dialog.createTitle")
+            : t("editor.routing.dialog.editTitle", {
+                index: editingIndex + 1,
+              })
+        }
+        description={t("editor.routing.dialog.description")}
         footer={
           <SettingsDialogFooter
             buttonSize="sm"
-            note="路由顺序也会影响命中结果，保存后可继续在表格里调整顺序。"
-            confirmLabel="保存路由"
+            note={t("editor.routing.dialog.footerNote")}
+            confirmLabel={t("editor.routing.actions.saveRoute")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -312,7 +347,10 @@ export function RuntimeRoutingDomainEditor({
           ) : null}
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="match_path" description="如 /v1/chat、/v1/messages、/v1/responses。">
+            <ConfigFormField
+              label="match_path"
+              description={t("editor.routing.fields.matchPathHelp")}
+            >
               <input
                 className={editorControlClassName}
                 value={draft.matchPath}
@@ -321,9 +359,12 @@ export function RuntimeRoutingDomainEditor({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="match_type" description="常见值为 prefix、exact、regex。">
+            <ConfigFormField
+              label="match_type"
+              description={t("editor.routing.fields.matchTypeHelp")}
+            >
               <Select
-                ariaLabel="路由匹配类型"
+                ariaLabel={t("editor.routing.fields.matchTypeAria")}
                 value={draft.matchType}
                 onChange={(value) =>
                   setDraft((current) => ({ ...current, matchType: value }))
@@ -334,16 +375,19 @@ export function RuntimeRoutingDomainEditor({
                 optionClassName="text-sm"
               />
             </ConfigFormField>
-            <ConfigFormField label="group" description="路由命中后转发到的 provider group。">
+            <ConfigFormField
+              label="group"
+              description={t("editor.routing.fields.groupHelp")}
+            >
               <div className="space-y-2">
                 <Select
-                  ariaLabel="路由目标分组"
+                  ariaLabel={t("editor.routing.fields.groupAria")}
                   value={draft.group}
                   onChange={(value) =>
                     setDraft((current) => ({ ...current, group: value }))
                   }
                   options={[
-                    { value: "", label: "请选择 group" },
+                    { value: "", label: t("editor.routing.fields.groupPlaceholder") },
                     ...availableGroups.map((groupName) => ({
                       value: groupName,
                       label: groupName,
@@ -359,11 +403,14 @@ export function RuntimeRoutingDomainEditor({
                   onChange={(event) =>
                     setDraft((current) => ({ ...current, group: event.target.value }))
                   }
-                  placeholder="也可以直接输入 group 名称"
+                  placeholder={t("editor.routing.fields.groupInputPlaceholder")}
                 />
               </div>
             </ConfigFormField>
-            <ConfigFormField label="protocol" description="可选，显式限制协议，如 openai、anthropic、codex。">
+            <ConfigFormField
+              label="protocol"
+              description={t("editor.routing.fields.protocolHelp")}
+            >
               <input
                 className={editorControlClassName}
                 value={draft.protocol}
@@ -372,7 +419,10 @@ export function RuntimeRoutingDomainEditor({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="pipeline" description="可选，兼容旧 routing 配置里的 pipeline 目标。">
+            <ConfigFormField
+              label="pipeline"
+              description={t("editor.routing.fields.pipelineHelp")}
+            >
               <input
                 className={editorControlClassName}
                 value={draft.pipeline}
@@ -395,7 +445,10 @@ export function RuntimeRoutingDomainEditor({
           </div>
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="match_models" description="支持换行或逗号输入模型匹配列表。">
+            <ConfigFormField
+              label="match_models"
+              description={t("editor.routing.fields.matchModelsHelp")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-32 resize-y font-mono`}
                 value={draft.matchModelsText}
@@ -409,7 +462,7 @@ export function RuntimeRoutingDomainEditor({
             </ConfigFormField>
             <ConfigFormField
               label="exclude_models"
-              description="支持换行或逗号输入模型排除列表。"
+              description={t("editor.routing.fields.excludeModelsHelp")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-32 resize-y font-mono`}
@@ -424,7 +477,7 @@ export function RuntimeRoutingDomainEditor({
             </ConfigFormField>
             <ConfigFormField
               label="match_model_regexes"
-              description="按行填写正则规则。"
+              description={t("editor.routing.fields.matchModelRegexesHelp")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-32 resize-y font-mono`}
@@ -439,7 +492,7 @@ export function RuntimeRoutingDomainEditor({
             </ConfigFormField>
             <ConfigFormField
               label="exclude_model_regexes"
-              description="按行填写正则排除规则。"
+              description={t("editor.routing.fields.excludeModelRegexesHelp")}
             >
               <textarea
                 className={`${editorControlClassName} min-h-32 resize-y font-mono`}
@@ -455,8 +508,8 @@ export function RuntimeRoutingDomainEditor({
           </div>
 
           <ConfigFormField
-            label="扩展字段 JSON"
-            description="保留未进入专用表单的 route 字段，避免丢配置。"
+            label={t("editor.routing.fields.extraJson")}
+            description={t("editor.routing.fields.extraJsonHelp")}
           >
             <textarea
               className={`${editorControlClassName} min-h-40 resize-y font-mono`}

@@ -426,14 +426,12 @@ func (c *ActiveStreamController) activeDocumentLocked(now time.Time) render.Docu
 		}
 		bodyChanged := false
 		if c.markdownDocSource != active.Stable || c.markdownDocWidth != width || c.markdownDocTheme != syntaxTheme {
-			c.markdownDoc = markdown.Render(active.Stable, markdown.Options{
-				Width:                 width,
-				TableMode:             markdown.TableAuto,
-				SyntaxTheme:           syntaxTheme,
-				Hyperlinks:            true,
-				Highlighter:           c.Highlighter,
-				HideHighlightFallback: true,
-			})
+			// Shared assistant-body contract with Formatter.Format so live
+			// ActiveBand blanks/plain match scrollback history replay.
+			c.markdownDoc = markdown.Render(
+				active.Stable,
+				markdown.ActiveBandBodyOptions(width, syntaxTheme, c.Highlighter),
+			)
 			c.markdownDocSource = active.Stable
 			c.markdownDocWidth = width
 			c.markdownDocTheme = syntaxTheme

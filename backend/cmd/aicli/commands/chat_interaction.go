@@ -22,9 +22,10 @@ import (
 )
 
 type chatInteractionCoordinator struct {
-	session *ChatSession
-	writer  io.Writer
-	surface *ui.FixedBottomSurface
+	session       *ChatSession
+	writer        io.Writer
+	surfaceWriter bool
+	surface       *ui.FixedBottomSurface
 
 	mu                      sync.Mutex
 	promptVisible           bool
@@ -37,6 +38,12 @@ type chatInteractionCoordinator struct {
 	streamRendered          bool
 	streamMode              assistantStreamMode
 	streamRenderedPrefixLen int
+	streamEnqueuedPrefixLen int
+	// streamTrailingLF is the assistant-stream open-row cursor (Phase C).
+	// true  = cursor already at column 0 (row boundary / never opened a row)
+	// false = mid-line content was written without a row terminator
+	// Only writeIndentedStreamingDeltaLocked / residual inline paths set false;
+	// start, reset, writeRows, and closeOpenRow keep/restore true.
 	streamTrailingLF        bool
 	streamLines             int
 	streamDisplayLines      int
@@ -55,8 +62,10 @@ type chatInteractionCoordinator struct {
 	inputLeaseSeq           uint64
 	inputLease              *chatInputModeLease
 
-	reasoningActive        bool
-	reasoningRendered      bool
+	reasoningActive     bool
+	reasoningRendered   bool
+	// reasoningTrailingLF mirrors streamTrailingLF for the reasoning band only.
+	// Kept separate so reasoning/assistant interleave does not share mid-line state.
 	reasoningTrailingLF    bool
 	reasoningMeta          string
 	reasoningBuffer        strings.Builder
@@ -65,18 +74,124 @@ type chatInteractionCoordinator struct {
 	promptAfterBlockGap    bool
 	shutdown               bool
 
-	// Phase 5: in-memory active cell + coalesced frames (viewport model).
-	// Transcript commit still uses the existing write path; this avoids
-	// scrollback spam for future surface painting and tracks stable markdown.
+	// Two-region stream state: the controller owns the mutable ActiveBand while
+	// stable rendered chunks move through a bounded, animated scrollback queue.
+	// Enqueued and emitted source offsets stay distinct so queued content never
+	// reappears in the live tail and finalization can drain without replay.
 	activeStream          *ui.ActiveStreamController
 	activeFrameTimer      *time.Timer
 	activeFrameDue        time.Time
 	activeFrameGeneration uint64
+	stableCommitQueue     []activeStableCommitLine
+	stableCommitTimer     *time.Timer
+	stableCommitTimerSeq  uint64
+	stableCommitDelay     time.Duration
+	stableCommitCatchUp   bool
+	// Synthetic surfaces normally drain synchronously. Queue-policy tests set
+	// this flag to advance commits explicitly without wall-clock timers.
+	stableCommitManual    bool
+	stableCommitBelowExit time.Time
+	stableCommitLastExit  time.Time
 	dynamicStatusStarted  time.Time
 	dynamicStatusTimer    *time.Timer
 	dynamicStatusTimerSeq uint64
 	activeTools           map[string]chatActiveTool
 	activeToolSequence    uint64
+
+	// assistantTurnTranscript is the source-backed authoritative record for the
+	// current assistant turn. It is kept separate from the mutable streamBuffer
+	// so final divergence and resize reflow can reason from source ranges
+	// instead of terminal history.
+	transcript *assistantTurnTranscript
+	// Last-turn transcript debug mirrors survive resetStreamLocked so
+	// DebugSummary remains useful after finalization.
+	streamLastNeedsConsolidation bool
+	streamLastEmittedDiverged    bool
+	streamLastFinalDivergence    assistantFinalDivergence
+	streamLastTranscriptBlocks   int
+	streamLastTranscriptBytes    int
+
+	// softEmitted* tracks the source-backed committed tail that still sits in
+	// the surface soft rewrite window. Resize reflow re-formats this range from
+	// Markdown/plain source and rewrites only those rows; older scrollback stays
+	// irreversible.
+	softEmittedSourceStart int
+	softEmittedSourceEnd   int
+	softEmittedLines       []string
+	softEmittedWidth       int
+	// softEmittedSegments preserves atomic source-chunk boundaries so the soft
+	// window can drop whole older chunks when it hits SoftOutputTailMaxLines
+	// without inventing a mid-chunk source start.
+	softEmittedSegments []softEmittedSegment
+	// softCommitWriting is true while drainActiveStableCommitLocked writes the
+	// soft-committed batch. Foreign writeTextLocked paths clear soft ownership
+	// so tool/notice output cannot pollute the 1:1 rewrite window.
+	softCommitWriting bool
+}
+
+type softEmittedSegment struct {
+	sourceStart int
+	sourceEnd   int
+	lines       []string
+}
+
+type activeStableCommitLine struct {
+	text       string // formatted text ready for writeLineLocked
+	source     string // original Markdown source chunk
+	sourceEnd  int    // absolute end offset in full source
+	enqueuedAt time.Time
+	// commitBand is set on the last rendered line of a source chunk so the
+	// ActiveBand hide (CommitStablePrefix) happens only after scrollback write.
+	// Committing earlier leaves a visible hole while the animated queue drains.
+	commitBand bool
+}
+
+// blockGap is an explicit cross-block separator decision. Content spacing
+// belongs in formatter rows (including "" blank rows); cross-message
+// separation is decided by the caller and never inferred from pollution flags
+// such as completeBlockOutput.
+type blockGap int
+
+const (
+	gapNone blockGap = iota
+	gapBlank
+)
+
+// renderedAssistantChunk is the shared newline-ownership contract for stable
+// enqueue, residual finalize, and soft reflow. Lines never carry trailing LFs;
+// writeLineLocked alone terminates each row. leading structural newlines from
+// Format differentials are resolved in markdownFullPrefixSuffixLocked before
+// this chunk is built (Phase B will replace that strip with rows-delta).
+type renderedAssistantChunk struct {
+	lines []string
+}
+
+func (ch renderedAssistantChunk) empty() bool {
+	return len(ch.lines) == 0 || (len(ch.lines) == 1 && ch.lines[0] == "")
+}
+
+// normalizeWriteLines is the single place that turns a pre-styled block into
+// writeLine-ready rows: strip the block terminator, keep internal blank rows,
+// drop CR. writeCompleteBlock / supplement / user / error paths use this
+// directly; assistant stream paths go through buildRenderedAssistantChunk.
+func normalizeWriteLines(rendered string) []string {
+	rendered = strings.TrimRight(rendered, "\r\n")
+	if rendered == "" {
+		return nil
+	}
+	parts := strings.Split(rendered, "\n")
+	lines := make([]string, len(parts))
+	for i, part := range parts {
+		lines[i] = strings.TrimSuffix(part, "\r")
+	}
+	return lines
+}
+
+// buildRenderedAssistantChunk normalizes a formatter/plain suffix into
+// writeLine-ready rows. FormatAssistantRendered runs once here so enqueue,
+// residual, and soft reflow cannot drift on indent/sanitize.
+func buildRenderedAssistantChunk(rendered string) renderedAssistantChunk {
+	return renderedAssistantChunk{lines: normalizeWriteLines(ui.FormatAssistantRendered(rendered))}
 }
 
 type chatActiveTool struct {
@@ -122,6 +237,18 @@ const (
 	chatInputModeConfirmation chatInputMode = "confirmation"
 	chatInputModeSecret       chatInputMode = "secret_input"
 	chatInputModePanel        chatInputMode = "panel_navigation"
+)
+
+const (
+	activeStableCommitTickDelay  = 33 * time.Millisecond
+	activeStableCatchUpDepth     = 8
+	activeStableCatchUpOldestAge = 120 * time.Millisecond
+	activeStableCatchUpExitDepth = 2
+	activeStableCatchUpExitAge   = 40 * time.Millisecond
+	activeStableCatchUpExitHold  = 250 * time.Millisecond
+	activeStableCatchUpReenter   = 250 * time.Millisecond
+	activeStableSevereDepth      = 64
+	activeStableSevereAge        = 300 * time.Millisecond
 )
 
 func normalizeChatInputMode(mode chatInputMode) chatInputMode {
@@ -203,12 +330,20 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 		width = 80
 	}
 	return &chatInteractionCoordinator{
-		session:         session,
-		writer:          os.Stdout,
-		streamRuneDelay: 6 * time.Millisecond,
-		maxChunkDelay:   90 * time.Millisecond,
-		promptDelay:     120 * time.Millisecond,
-		activeStream:    ui.NewActiveStreamController(width, ui.ActiveBandRows(ui.GetTerminalHeight())),
+		session:           session,
+		writer:            os.Stdout,
+		surfaceWriter:     true,
+		streamRuneDelay:   6 * time.Millisecond,
+		maxChunkDelay:     90 * time.Millisecond,
+		promptDelay:       120 * time.Millisecond,
+		stableCommitDelay: activeStableCommitTickDelay,
+		// Cursor starts at row boundary. Zero-value false would make the first
+		// writeRowsLocked/closeOpenRow inject a phantom blank into history
+		// replay (RenderAssistant) while live streams set this true on start —
+		// the live-vs-replay blank-count skew.
+		streamTrailingLF: true,
+		activeStream:     ui.NewActiveStreamController(width, ui.ActiveBandRows(ui.GetTerminalHeight())),
+		transcript:       &assistantTurnTranscript{},
 	}
 }
 
@@ -216,7 +351,10 @@ func (c *chatInteractionCoordinator) SetWriter(writer io.Writer) {
 	if c == nil || writer == nil {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.writer = writer
+	c.surfaceWriter = writer == os.Stdout
 }
 
 func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) {
@@ -228,13 +366,13 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	if c.shutdown {
 		return
 	}
+	if surface == nil || !surface.Enabled() {
+		c.reconcilePendingStableCommitLocked(c.streamBuffer.String())
+	}
 	c.surface = surface
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	if c.activeStream != nil && c.activeStream.Active() && c.surfaceOutputActiveLocked() {
-		c.syncActiveStreamViewportLocked()
-		frame, _ := c.activeStream.PaintLines(time.Now(), true)
-		c.syncActiveBandLinesLocked(frame)
-		c.scheduleActiveStreamFrameLocked()
+		_ = c.publishActiveStreamFrameLocked(true)
 	}
 }
 
@@ -576,6 +714,12 @@ func (c *chatInteractionCoordinator) writeTextLocked(text string) {
 	if c == nil || c.writer == nil || text == "" {
 		return
 	}
+	// Soft-committed drain re-establishes ownership after its writes. Any other
+	// output (tool results, notices, raw stream fallback) breaks the 1:1 soft
+	// window and must drop rewrite tracking immediately.
+	if !c.softCommitWriting {
+		c.invalidateSoftEmittedOwnershipLocked()
+	}
 	if c.writeSurfaceOutputTextLocked(text) {
 		return
 	}
@@ -586,7 +730,93 @@ func (c *chatInteractionCoordinator) writeLineLocked(text string) {
 	if c == nil || c.writer == nil {
 		return
 	}
+	// Row terminator is owned here. Callers must pass lines without trailing LF
+	// (use normalizeWriteLines / buildRenderedAssistantChunk).
 	c.writeTextLocked(text + "\n")
+}
+
+// closeOpenRowLocked closes a half-written stream row only. It does not insert
+// a cross-block gap; callers that need message separation pass gapBlank to
+// writeRowsLocked / writeCompleteBlockLocked.
+//
+// streamTrailingLF is the single cursor-at-row-start flag for the assistant
+// stream path (Phase C). true = cursor already at column 0 after a row
+// terminator (or never opened a row). false = mid-line content was written
+// without LF. resetStream / stream start keep it true so zero-value false is
+// no longer confused with "open mid-line".
+func (c *chatInteractionCoordinator) closeOpenRowLocked() {
+	if c == nil || c.streamTrailingLF {
+		return
+	}
+	c.writeLineLocked("")
+	c.streamTrailingLF = true
+}
+
+// ensureStreamTerminatedLocked closes an open stream row and records that the
+// row is terminated. Historical call sites often wrote writeLineLocked("")
+// without flipping streamTrailingLF, which let the next boundary inject a
+// second blank. Prefer closeOpenRowLocked for new code; this name remains as
+// the stream-path alias used throughout residual/finalize call sites.
+func (c *chatInteractionCoordinator) ensureStreamTerminatedLocked() {
+	c.closeOpenRowLocked()
+}
+
+// writeRowsLocked is the single complete-block writer: optional explicit gap,
+// then atomic multi-row emission. Gap is never inferred from completeBlockOutput
+// — that flag is only read by gapFor* helpers at top-level message boundaries.
+// Soft stable commits intentionally bypass this path (see drainActiveStableCommitLocked)
+// so closeOpenRow / gapBlank cannot touch already-rendered scrollback.
+func (c *chatInteractionCoordinator) writeRowsLocked(rows []string, gap blockGap) {
+	if c == nil || len(rows) == 0 {
+		return
+	}
+	c.closeOpenRowLocked()
+	if gap == gapBlank {
+		c.writeLineLocked("")
+	}
+	// One write for the whole block: per-row WriteOutput releases the surface
+	// lock between lines and lets ActiveBand/status growth insert permanent
+	// holes into already-scrolled content (visible on long "• Edited" diffs).
+	c.writeTextLocked(strings.Join(rows, "\n") + "\n")
+	c.streamTrailingLF = true
+	c.completeBlockOutput = true
+	c.promptAfterBlockGap = false
+}
+
+// gapForTopLevelMessage maps the historical suppressSeparator rule for
+// assistant/error one-shots onto an explicit gap. completeBlockOutput is read
+// only here at the message boundary — writeRowsLocked itself never invents a
+// blank from that flag (which is what polluted mid-stream residual paints).
+func (c *chatInteractionCoordinator) gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap bool) blockGap {
+	// Old suppressSeparator = promptWasVisible && !promptAfterBlockGap
+	if promptWasVisible && !promptAfterBlockGap {
+		return gapNone
+	}
+	if c != nil && (c.completeBlockOutput || promptAfterBlockGap) {
+		return gapBlank
+	}
+	return gapNone
+}
+
+// gapForAsyncLine is the async/supplement variant of gapForTopLevelMessage.
+func (c *chatInteractionCoordinator) gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine bool) blockGap {
+	// Old suppress = promptWasVisible && !promptAfterBlockGap && !previousAsyncLine
+	if promptWasVisible && !promptAfterBlockGap && !previousAsyncLine {
+		return gapNone
+	}
+	if c != nil && (c.completeBlockOutput || promptAfterBlockGap) {
+		return gapBlank
+	}
+	return gapNone
+}
+
+// gapIfPriorComplete inserts a blank only when a prior complete block is on
+// screen. Used for reasoning supplements that follow assistant content.
+func (c *chatInteractionCoordinator) gapIfPriorComplete() blockGap {
+	if c != nil && c.completeBlockOutput {
+		return gapBlank
+	}
+	return gapNone
 }
 
 func (c *chatInteractionCoordinator) writePromptGapLocked() {
@@ -616,7 +846,7 @@ func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...in
 	if c == nil || c.writer == nil || format == "" {
 		return
 	}
-	if c.writer == os.Stdout && c.surface != nil {
+	if c.surfaceWriter && c.surface != nil {
 		c.writeTextLocked(fmt.Sprintf(format, args...))
 		return
 	}
@@ -624,10 +854,17 @@ func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...in
 }
 
 func (c *chatInteractionCoordinator) writeSurfaceOutputTextLocked(text string) bool {
-	if c == nil || c.writer != os.Stdout || c.surface == nil || text == "" || !c.surfaceOutputActiveLocked() {
+	if c == nil || !c.surfaceWriter || c.surface == nil || text == "" || !c.surfaceOutputActiveLocked() {
 		return false
 	}
-	_, _, handled := c.surface.WriteOutput(c.writer, text)
+	// Soft-commit drain is the only path that may open/extend the rewrite
+	// window. Plain WriteOutput invalidates soft ownership at the surface.
+	var handled bool
+	if c.softCommitWriting {
+		_, _, handled = c.surface.WriteSoftTrackedOutput(c.writer, text)
+	} else {
+		_, _, handled = c.surface.WriteOutput(c.writer, text)
+	}
 	return handled
 }
 
@@ -2098,7 +2335,7 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(response)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), promptWasVisible && !promptAfterBlockGap)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap))
 	c.lastCompletedAsyncLine = false
 }
 
@@ -2118,7 +2355,9 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		}
 		c.reasoningActive = true
 		c.reasoningRendered = false
-		c.reasoningTrailingLF = false
+		// Dividers below end with writeLineLocked, so the cursor is at a row
+		// boundary. Keep reasoningTrailingLF true until a mid-line delta flips it.
+		c.reasoningTrailingLF = true
 		c.reasoningBuffer.Reset()
 		if meta := chatReasoningMetaLine(block); meta != "" {
 			c.reasoningMeta = meta
@@ -2160,7 +2399,10 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		c.streamRendered = false
 		c.streamMode = assistantStreamModeUnknown
 		c.streamRenderedPrefixLen = 0
-		c.streamTrailingLF = false
+		c.streamEnqueuedPrefixLen = 0
+		// Cursor starts at row boundary. First delta (if any) may open a mid-line row
+		// and flip streamTrailingLF=false via writeIndentedStreamingDeltaLocked.
+		c.streamTrailingLF = true
 		c.streamLines = 0
 		c.streamBuffer.Reset()
 		if c.activeStream != nil {
@@ -2181,8 +2423,12 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		if nextMode == assistantStreamModeMarkdown {
 			if previousMode != assistantStreamModeMarkdown && c.streamRendered && c.streamRenderedPrefixLen == 0 {
 				c.streamRenderedPrefixLen = len(previousContent)
+				c.streamEnqueuedPrefixLen = c.streamRenderedPrefixLen
 			}
 			c.streamMode = assistantStreamModeMarkdown
+			if previousMode != assistantStreamModeMarkdown {
+				c.rebuildPendingStableCommitLocked(true)
+			}
 		} else if c.streamMode == assistantStreamModeUnknown && nextMode == assistantStreamModeText {
 			c.streamMode = assistantStreamModeText
 		}
@@ -2301,9 +2547,12 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if c.streamMode != assistantStreamModeMarkdown && c.classifyAssistantStreamModeLocked(finalContent) == assistantStreamModeMarkdown {
 		if c.streamRendered && c.streamRenderedPrefixLen == 0 {
 			c.streamRenderedPrefixLen = len(c.streamBuffer.String())
+			c.streamEnqueuedPrefixLen = c.streamRenderedPrefixLen
 		}
 		c.streamMode = assistantStreamModeMarkdown
+		c.rebuildPendingStableCommitLocked(true)
 	}
+	c.reconcilePendingStableCommitLocked(finalContent)
 	if consolidated := c.finalizeActiveAssistantLocked(finalContent, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
 		finalContent = consolidated
 	}
@@ -2318,8 +2567,8 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 			c.streamBuffer.WriteString(suffix)
 		}
-		if c.streamRendered && !c.streamTrailingLF {
-			c.writeLineLocked("")
+		if c.streamRendered {
+			c.ensureStreamTerminatedLocked()
 		}
 		c.resetStreamLocked()
 		return true
@@ -2328,7 +2577,8 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(finalContent)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), false)
+	// One-shot completion of the same assistant body: no cross-block gap.
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
 	c.resetStreamLocked()
 	return true
 }
@@ -2368,7 +2618,8 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 	}
 	lines := chatReasoningLines(renderBlock)
 	if len(lines) > 0 {
-		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), false)
+		// Reasoning supplement is its own block after the assistant body.
+		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapIfPriorComplete())
 	}
 	c.resetReasoningLocked()
 	return true
@@ -2384,6 +2635,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		return
 	}
 	content := c.streamBuffer.String()
+	c.reconcilePendingStableCommitLocked(content)
 	if consolidated := c.finalizeActiveAssistantLocked(content, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
 		content = consolidated
 	}
@@ -2400,10 +2652,8 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 			c.resetStreamLocked()
 			return
 		}
-		if c.streamRendered && !c.streamTrailingLF {
-			c.writeLineLocked("")
-		}
 		if c.streamRendered {
+			c.ensureStreamTerminatedLocked()
 			c.completeBlockOutput = true
 		}
 		c.resetStreamLocked()
@@ -2415,7 +2665,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		if c.session.Formatter != nil {
 			formatted = c.session.Formatter.Format(content)
 		}
-		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), false)
+		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
 		c.resetStreamLocked()
 		return
 	}
@@ -2442,7 +2692,7 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 	}
 	lines := chatReasoningLines(renderBlock)
 	if len(lines) > 0 {
-		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), false)
+		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapIfPriorComplete())
 	}
 	c.resetReasoningLocked()
 }
@@ -2459,7 +2709,10 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(line), promptWasVisible && !promptAfterBlockGap && !previousAsyncLine)
+	c.writeCompleteBlockLocked(
+		ui.FormatAssistantSupplementBlock(line),
+		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine),
+	)
 	c.lastCompletedAsyncLine = true
 }
 
@@ -2483,7 +2736,7 @@ func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
 	}
 	c.writeCompleteBlockLocked(
 		ui.RenderDocumentANSI(doc),
-		promptWasVisible && !promptAfterBlockGap && !previousAsyncLine,
+		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine),
 	)
 	c.lastCompletedAsyncLine = true
 }
@@ -2497,7 +2750,8 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(ui.FormatUserMessage(input), false)
+	// User echo sits directly under the cleared prompt; no extra blank.
+	c.writeCompleteBlockLocked(ui.FormatUserMessage(input), gapNone)
 	c.lastCompletedAsyncLine = false
 }
 
@@ -2512,7 +2766,10 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)), promptWasVisible && !promptAfterBlockGap)
+	c.writeCompleteBlockLocked(
+		ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)),
+		c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap),
+	)
 	c.lastCompletedAsyncLine = false
 }
 
@@ -2700,6 +2957,20 @@ func (c *chatInteractionCoordinator) DebugSummary() string {
 		fmt.Sprintf("reasoning_active=%t", c.reasoningActive),
 		fmt.Sprintf("complete_block_output=%t", c.completeBlockOutput),
 		fmt.Sprintf("shutdown=%t", c.shutdown),
+		fmt.Sprintf("stream_stable_queued=%d", len(c.stableCommitQueue)),
+		fmt.Sprintf("stream_prefix_enqueued=%d", c.streamEnqueuedPrefixLen),
+		fmt.Sprintf("stream_prefix_emitted=%d", c.streamRenderedPrefixLen),
+	}
+	if c.streamingActive && c.transcript != nil {
+		parts = append(parts, c.transcript.debugParts()...)
+	} else {
+		parts = append(parts,
+			fmt.Sprintf("stream_transcript_blocks=%d", c.streamLastTranscriptBlocks),
+			fmt.Sprintf("stream_transcript_bytes=%d", c.streamLastTranscriptBytes),
+			fmt.Sprintf("stream_needs_consolidation=%t", c.streamLastNeedsConsolidation),
+			fmt.Sprintf("stream_emitted_diverged=%t", c.streamLastEmittedDiverged),
+			fmt.Sprintf("stream_final_divergence=%s", divergenceToken(c.streamLastFinalDivergence)),
+		)
 	}
 	return strings.Join(parts, " ")
 }
@@ -2762,6 +3033,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.lastCompletedAsyncLine = false
 	c.promptAfterBlockGap = false
 	c.stopActiveStreamFrameLocked()
+	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
 	c.dynamicStatusStarted = time.Time{}
 	if c.activeStream != nil {
@@ -2847,13 +3119,12 @@ func (c *chatInteractionCoordinator) clearThinkingLocked() {
 // This prevents text from being silently swallowed when a ReAct loop's
 // intermediate assistant deltas are never finalized via FinalizeAssistantDelta.
 func (c *chatInteractionCoordinator) flushStreamLocked() {
+	c.reconcilePendingStableCommitLocked(c.streamBuffer.String())
 	if c.shouldLiveStreamOutputLocked() {
 		if c.streamMode == assistantStreamModeMarkdown {
 			content := c.streamBuffer.String()
 			if strings.TrimSpace(content) == "" {
-				if !c.streamTrailingLF {
-					c.writeLineLocked("")
-				}
+				c.ensureStreamTerminatedLocked()
 				return
 			}
 			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
@@ -2861,16 +3132,14 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 			return
 		}
 		c.renderBufferedAssistantStreamLocked()
-		if c.streamRendered && !c.streamTrailingLF {
-			c.writeLineLocked("")
+		if c.streamRendered {
+			c.ensureStreamTerminatedLocked()
 		}
 		return
 	}
 	content := c.streamBuffer.String()
 	if strings.TrimSpace(content) == "" {
-		if !c.streamTrailingLF {
-			c.writeLineLocked("")
-		}
+		c.ensureStreamTerminatedLocked()
 		return
 	}
 	content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
@@ -2882,7 +3151,8 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
 	}
-	c.writeLineLocked(ui.FormatAssistantRendered(formatted))
+	// One-shot flush: same row contract as complete blocks (no multi-line blob).
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
 }
 
 func (c *chatInteractionCoordinator) flushReasoningLocked() {
@@ -3059,8 +3329,11 @@ func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
 	if !c.reasoningActive {
 		return
 	}
+	// Close an open reasoning mid-line the same way closeOpenRowLocked does for
+	// the assistant stream — never invent a cross-block gap here.
 	if c.reasoningRendered && !c.reasoningTrailingLF {
 		c.writeLineLocked("")
+		c.reasoningTrailingLF = true
 	}
 	c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("end reasoning")))
 	c.completeBlockOutput = true
@@ -3087,41 +3360,12 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 	if c == nil {
 		return
 	}
+	// Finalize left the band up so reconcile/residual computation had no empty
+	// gap. Release it immediately before the final scrollback paint so the same
+	// source is not dual-painted in ActiveBand and history.
+	c.clearActiveBandLocked()
 	if c.streamRendered && c.streamRenderedPrefixLen > 0 {
-		suffix := c.unrenderedAssistantStreamSuffixLocked(content)
-		if strings.TrimSpace(suffix) == "" {
-			if !c.streamTrailingLF {
-				c.writeLineLocked("")
-			}
-			c.completeBlockOutput = true
-			return
-		}
-		formatted := suffix
-		if c.session != nil && c.session.Formatter != nil {
-			formatted = c.session.Formatter.Format(suffix)
-		}
-		inlineContinuation := !c.streamTrailingLF && !strings.HasPrefix(suffix, "\n") && !strings.Contains(formatted, "\n")
-		// Trim both sides: leading blanks avoid a double gap after a prior
-		// stable commit, trailing blanks must not combine with writeLineLocked's
-		// terminating "\n" into an extra empty row above status/prompt.
-		formatted = strings.Trim(formatted, "\r\n")
-		if strings.TrimSpace(formatted) == "" {
-			if !c.streamTrailingLF {
-				c.writeLineLocked("")
-			}
-			c.completeBlockOutput = true
-			return
-		}
-		if inlineContinuation {
-			c.writeLineLocked(formatted)
-			c.completeBlockOutput = true
-			return
-		}
-		if !c.streamTrailingLF {
-			c.writeLineLocked("")
-		}
-		c.writeLineLocked(ui.IndentAssistantContent(formatted))
-		c.completeBlockOutput = true
+		c.writeResidualFormattedAssistantStreamLocked(content)
 		return
 	}
 
@@ -3129,35 +3373,185 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 	if c.session != nil && c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), false)
+	// First full paint of the assistant body — no cross-block gap.
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+}
+
+// writeResidualFormattedAssistantStreamLocked paints the still-unemitted tail
+// after stable commits. Markdown residuals must use the same full-prefix
+// Format differential as mid-stream stable chunks: Format(suffix-only) drops
+// inter-block spacers (layout never pads before the first block), and Trim of
+// both sides previously erased the blank that history replay keeps.
+func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked(content string) {
+	if c == nil {
+		return
+	}
+	emitted := c.streamRenderedPrefixLen
+	if emitted <= 0 {
+		formatted := content
+		if c.session != nil && c.session.Formatter != nil {
+			formatted = c.session.Formatter.Format(content)
+		}
+		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+		return
+	}
+
+	suffix := c.unrenderedAssistantStreamSuffixLocked(content)
+	if strings.TrimSpace(suffix) == "" {
+		c.ensureStreamTerminatedLocked()
+		c.completeBlockOutput = true
+		return
+	}
+
+	// Absolute prefix Format reads streamBuffer. Final snapshots (and
+	// CompleteAssistantResponse replacements) may differ from the delta buffer,
+	// so align the buffer with the authoritative body before diffing.
+	if c.streamBuffer.String() != content {
+		c.streamBuffer.Reset()
+		c.streamBuffer.WriteString(content)
+	}
+	c.ensureAssistantTranscriptLocked()
+	if c.transcript != nil {
+		c.transcript.Source = content
+	}
+
+	useMarkdownDiff := c.streamMode == assistantStreamModeMarkdown
+	if !useMarkdownDiff && c.session != nil && c.session.Formatter != nil {
+		useMarkdownDiff = c.session.Formatter.IsMarkdown(content)
+	}
+
+	var chunk renderedAssistantChunk
+	if useMarkdownDiff && c.session != nil && c.session.Formatter != nil {
+		// Same row-delta contract as mid-stream stable commits. No leading-\\n
+		// strip: blank ownership lives in "" rows from Format spacing.
+		chunk = renderedAssistantChunk{lines: c.markdownRowsDeltaLocked(emitted, len(content), suffix)}
+	} else {
+		inlineContinuation := !c.streamTrailingLF && !strings.HasPrefix(suffix, "\n") && !strings.Contains(suffix, "\n")
+		if inlineContinuation {
+			// Close the open row with the residual text as a single line.
+			c.writeLineLocked(ui.FormatAssistantRendered(suffix))
+			c.streamTrailingLF = true
+			c.streamRendered = true
+			c.streamRenderedPrefixLen = len(content)
+			c.completeBlockOutput = true
+			return
+		}
+		c.ensureStreamTerminatedLocked()
+		chunk = buildRenderedAssistantChunk(suffix)
+	}
+
+	if chunk.empty() {
+		c.ensureStreamTerminatedLocked()
+		c.streamRenderedPrefixLen = len(content)
+		c.completeBlockOutput = true
+		return
+	}
+	// Live plain/markdown may leave an open mid-row ("This is "). writeRowsLocked
+	// always closeOpenRow first, which would force "This is \nbold\n". Continue the
+	// open row with the first residual row, then emit any remaining rows atomically.
+	if !c.streamTrailingLF {
+		first := chunk.lines[0]
+		rest := chunk.lines[1:]
+		c.writeTextLocked(first)
+		c.writeTextLocked("\n")
+		c.streamTrailingLF = true
+		if len(rest) > 0 {
+			c.writeRowsLocked(rest, gapNone)
+		}
+	} else {
+		// Multi-line residuals (tables, lists, code fences): one atomic WriteOutput
+		// so layout/scroll cannot interleave between rows the way history's
+		// one-shot RenderAssistant never does.
+		c.writeRowsLocked(chunk.lines, gapNone)
+	}
+	c.streamTrailingLF = true
+	c.streamRendered = true
+	c.streamRenderedPrefixLen = len(content)
+	c.completeBlockOutput = true
 }
 
 func (c *chatInteractionCoordinator) unrenderedAssistantStreamSuffixLocked(content string) string {
-	if c == nil || c.streamRenderedPrefixLen <= 0 {
+	if c == nil {
 		return content
 	}
+	source := ""
+	if c.transcript != nil {
+		source = c.transcript.Source
+	}
+	if source == "" {
+		source = c.streamBuffer.String()
+	}
+	// residualAfterEmittedPrefix knows whether emitted source was already
+	// written to terminal and whether final diverged.
+	residual, diverged := residualAfterEmittedPrefix(
+		source,
+		c.streamRenderedPrefixLen,
+		content,
+	)
+	if diverged {
+		// Final snapshot diverged from already-emitted terminal history.
+		// Do not replay full corrected body (would duplicate stale scrollback).
+		// Residual is empty; caller should not paint assistant body.
+		return ""
+	}
+	return residual
+}
+
+func (c *chatInteractionCoordinator) reconcilePendingStableCommitLocked(finalContent string) {
+	if c == nil {
+		return
+	}
+	c.ensureAssistantTranscriptLocked()
 	buffered := c.streamBuffer.String()
-	if c.streamRenderedPrefixLen > len(buffered) {
-		return content
+	c.transcript.syncFromCoordinator(
+		buffered,
+		c.streamRenderedPrefixLen,
+		c.streamEnqueuedPrefixLen,
+		c.streamMode == assistantStreamModeMarkdown,
+	)
+	c.transcript.noteFinalSnapshot(finalContent)
+	kind := classifyAssistantFinalDivergence(
+		buffered,
+		c.streamRenderedPrefixLen,
+		c.streamEnqueuedPrefixLen,
+		finalContent,
+	)
+	c.transcript.applyFinalDivergence(kind)
+	switch kind {
+	case assistantFinalAppend:
+		if len(c.stableCommitQueue) > 0 {
+			c.drainActiveStableCommitLocked(true)
+		}
+	case assistantFinalQueueCorrect, assistantFinalEmittedDiverged, assistantFinalReplace:
+		// Queued-but-unemitted content is still mutable. Drop it and let
+		// residual rendering rebuild from the last emitted source prefix.
+		// Emitted divergence cannot rewrite terminal history; residual helpers
+		// suppress full replay of the corrected body.
+		c.discardPendingStableCommitLocked()
 	}
-	prefix := buffered[:c.streamRenderedPrefixLen]
-	if strings.HasPrefix(content, prefix) {
-		return content[c.streamRenderedPrefixLen:]
-	}
-	if strings.HasPrefix(buffered, prefix) {
-		return buffered[c.streamRenderedPrefixLen:]
-	}
-	return content
 }
 
 // finalizeActiveAssistantLocked consolidates the mutable viewport source at
 // the same lifecycle boundary as the transcript commit. A non-empty final
 // snapshot is authoritative and first replaces the delta-built source.
+func (c *chatInteractionCoordinator) ensureAssistantTranscriptLocked() {
+	if c == nil {
+		return
+	}
+	if c.transcript == nil {
+		c.transcript = &assistantTurnTranscript{}
+	}
+	if c.transcript.Source == "" {
+		c.transcript.Source = c.streamBuffer.String()
+	}
+}
+
 func (c *chatInteractionCoordinator) finalizeActiveAssistantLocked(finalSnapshot string, asMarkdown bool) string {
 	if c == nil || c.activeStream == nil {
 		return ""
 	}
 	c.stopActiveStreamFrameLocked()
+	c.stopActiveStableCommitLocked()
 	if !c.activeStream.Active() {
 		c.clearActiveBandLocked()
 		return ""
@@ -3171,17 +3565,32 @@ func (c *chatInteractionCoordinator) finalizeActiveAssistantLocked(finalSnapshot
 		c.activeStream.SetAssistantSnapshot(finalSnapshot, asMarkdown)
 	}
 	content, _ := c.activeStream.Finalize()
-	c.clearActiveBandLocked()
+	// Keep ActiveBand mounted until the residual/full scrollback paint in the
+	// same lock section. Clearing here opened a visible hole between the live
+	// viewport drop and the first residual writeLine.
 	return content
 }
 
 func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.stopActiveStreamFrameLocked()
+	c.stopActiveStableCommitLocked()
 	c.streamingActive = false
 	c.streamRendered = false
 	c.streamMode = assistantStreamModeUnknown
 	c.streamRenderedPrefixLen = 0
-	c.streamTrailingLF = false
+	c.streamEnqueuedPrefixLen = 0
+	c.stableCommitQueue = nil
+	c.stableCommitCatchUp = false
+	c.stableCommitBelowExit = time.Time{}
+	c.stableCommitLastExit = time.Time{}
+	// Drop both coordinator source ownership and the surface rewrite window.
+	// Leaving surface soft valid after the turn ends would allow a later
+	// foreign/resize path to treat irreversible history as reflowable.
+	c.invalidateSoftEmittedOwnershipLocked()
+	// After a finished stream the terminal is already on a new row. Keep
+	// streamTrailingLF true so closeOpenRowLocked never injects a phantom
+	// blank into already-rendered history.
+	c.streamTrailingLF = true
 	c.streamLines = 0
 	c.streamDisplayLines = 0
 	c.streamBuffer.Reset()
@@ -3198,6 +3607,15 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.clearActiveBandLocked()
 	if !c.thinkingActive && !c.reasoningActive {
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	}
+	// Snapshot last-turn transcript debug, then clear live turn state.
+	if c.transcript != nil {
+		c.streamLastNeedsConsolidation = c.transcript.NeedsConsolidation
+		c.streamLastEmittedDiverged = c.transcript.EmittedDiverged
+		c.streamLastFinalDivergence = c.transcript.LastDivergence
+		c.streamLastTranscriptBlocks = len(c.transcript.Blocks)
+		c.streamLastTranscriptBytes = c.transcript.RetainedSourceBytes
+		c.transcript.reset()
 	}
 }
 
@@ -3222,11 +3640,7 @@ func (c *chatInteractionCoordinator) paintActiveStreamLocked(delta string, asMar
 		newlyStable = c.activeStream.SetAssistantSnapshot(c.streamBuffer.String(), true)
 	}
 	committed := c.commitActiveStableScrollbackLocked(asMarkdown)
-	frame, changed := c.activeStream.PaintLines(time.Now(), committed)
-	if c.surfaceOutputActiveLocked() && changed {
-		c.syncActiveBandLinesLocked(frame)
-	}
-	c.scheduleActiveStreamFrameLocked()
+	_ = c.publishActiveStreamFrameLocked(committed)
 	return newlyStable
 }
 
@@ -3235,48 +3649,665 @@ func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdo
 		return false
 	}
 	stable := c.activeStream.StableContent()
-	if len(stable) <= c.streamRenderedPrefixLen {
+	if c.streamEnqueuedPrefixLen < c.streamRenderedPrefixLen {
+		c.streamEnqueuedPrefixLen = c.streamRenderedPrefixLen
+	}
+	if len(stable) <= c.streamEnqueuedPrefixLen {
 		return false
 	}
 	width, rows := c.surface.ActiveBandViewportSize()
-	cut := plainStableScrollbackCut(stable, c.streamRenderedPrefixLen, width, rows)
+	cut := plainStableScrollbackCut(stable, c.streamEnqueuedPrefixLen, width, rows)
 	if asMarkdown {
 		// Never split a Markdown paragraph. Move completed blocks as soon as a
 		// following block exists, while retaining the newest stable block in the
 		// live viewport even when the source currently ends on a blank line.
-		cut = markdownStableScrollbackCut(stable, c.streamRenderedPrefixLen, len(stable))
+		cut = markdownStableScrollbackCut(stable, c.streamEnqueuedPrefixLen, len(stable))
 	}
-	if cut <= c.streamRenderedPrefixLen || cut > len(stable) {
+	if cut <= c.streamEnqueuedPrefixLen || cut > len(stable) {
 		return false
 	}
-	chunk := stable[c.streamRenderedPrefixLen:cut]
-	wrote := false
+	chunk := stable[c.streamEnqueuedPrefixLen:cut]
+	c.enqueueActiveStableCommitLocked(chunk, cut, asMarkdown)
+	c.streamEnqueuedPrefixLen = cut
+	// Defer CommitStablePrefix until drain writes the chunk to scrollback.
+	// Hiding the band first creates a mid-stream hole while the animated
+	// stable-commit queue (and catch-up hysteresis) still holds the lines.
+	c.drainActiveStableCommitCatchUpLocked()
+	c.scheduleActiveStableCommitLocked()
+	return true
+}
+
+func (c *chatInteractionCoordinator) enqueueActiveStableCommitLocked(chunk string, sourceEnd int, asMarkdown bool) {
+	if c == nil || chunk == "" || sourceEnd <= c.streamRenderedPrefixLen {
+		return
+	}
+	sourceStart := sourceEnd - len(chunk)
+	if sourceStart < 0 {
+		sourceStart = 0
+	}
+	var visual renderedAssistantChunk
 	if asMarkdown {
-		formatted := strings.TrimRight(chunk, "\r\n")
-		if c.session != nil && c.session.Formatter != nil {
-			formatted = strings.TrimRight(c.session.Formatter.Format(chunk), "\r\n")
-		}
-		if strings.TrimSpace(formatted) != "" {
-			// Single trailing newline only. A literal "\n\n" writes one permanent
-			// blank plus a cursor-park blank; when ActiveBand then shrinks, the
-			// park blank is not absorbed (shrink clears outputCursorOnBlankRow),
-			// leaving a mid-stream hole above the live band / status.
-			c.writeLineLocked(ui.FormatAssistantRendered(formatted))
-			wrote = true
-		}
-	} else if chunk != "" {
-		c.writeTextLocked(ui.FormatAssistantRendered(chunk))
-		wrote = true
+		// Row delta of full-prefix Format (same as history replay). Per-chunk
+		// Format drops inter-block blank lines that one-shot Format keeps;
+		// string-level leading-\\n strip is intentionally not used.
+		visual = renderedAssistantChunk{lines: c.markdownRowsDeltaLocked(sourceStart, sourceEnd, chunk)}
+	} else {
+		visual = buildRenderedAssistantChunk(chunk)
 	}
+	if visual.empty() {
+		// Empty visual delta (Format(prev) == Format(full) for this cut).
+		// Advance emitted source ownership so we do not re-enqueue the same
+		// range, but do NOT CommitStablePrefix here: hiding the band before any
+		// scrollback write opens a mid-stream hole while the controller still
+		// paints those source bytes in the live viewport. Band release happens
+		// on the next real drain commitBand or on finalize/clearActiveBand.
+		c.streamRendered = true
+		c.streamRenderedPrefixLen = sourceEnd
+		c.ensureAssistantTranscriptLocked()
+		c.transcript.syncFromCoordinator(
+			c.streamBuffer.String(),
+			c.streamRenderedPrefixLen,
+			c.streamEnqueuedPrefixLen,
+			asMarkdown,
+		)
+		return
+	}
+	now := time.Now()
+	last := len(visual.lines) - 1
+	for index, line := range visual.lines {
+		end := 0
+		commitBand := false
+		if index == last {
+			end = sourceEnd
+			commitBand = true
+		}
+		c.stableCommitQueue = append(c.stableCommitQueue, activeStableCommitLine{
+			text:       line,
+			source:     chunk,
+			sourceEnd:  end,
+			enqueuedAt: now,
+			commitBand: commitBand,
+		})
+	}
+	// Keep transcript enqueued cursor aligned with the stable queue, but do not
+	// record Blocks yet: discard paths may still drop this chunk before any
+	// irreversible scrollback write.
+	c.ensureAssistantTranscriptLocked()
+	c.transcript.syncFromCoordinator(
+		c.streamBuffer.String(),
+		c.streamRenderedPrefixLen,
+		sourceEnd,
+		asMarkdown,
+	)
+}
+
+// markdownStableCommitSuffixLocked returns the row-delta for a stable commit
+// cut. Prefer markdownRowsDeltaLocked directly; this joins rows for any
+// remaining string-shaped call sites.
+func (c *chatInteractionCoordinator) markdownStableCommitSuffixLocked(sourceStart, sourceEnd int, chunk string) string {
+	rows := c.markdownRowsDeltaLocked(sourceStart, sourceEnd, chunk)
+	if len(rows) == 0 {
+		return ""
+	}
+	return strings.Join(rows, "\n")
+}
+
+// markdownRowsDeltaLocked is the shared live/history spacing contract in row
+// space: rows(Format(source[:end])) minus rows(Format(source[:start])).
+// Working in rows after normalizeWriteLines collapses the old
+// "strip one leading \\n when priorWriteEndedWithLF" rule — the first delta
+// row is either content or a single "" blank from ApplyBlockSpacing, never a
+// double-spaced join caused by string-level TrimRight + strip.
+func (c *chatInteractionCoordinator) markdownRowsDeltaLocked(sourceStart, sourceEnd int, chunk string) []string {
+	if c == nil || c.session == nil || c.session.Formatter == nil {
+		return normalizeWriteLines(ui.FormatAssistantRendered(chunk))
+	}
+	buffered := c.streamBuffer.String()
+	if sourceEnd > len(buffered) {
+		sourceEnd = len(buffered)
+	}
+	if sourceStart < 0 {
+		sourceStart = 0
+	}
+	if sourceStart > sourceEnd {
+		sourceStart = sourceEnd
+	}
+	fullRendered := strings.TrimRight(c.session.Formatter.Format(buffered[:sourceEnd]), "\r\n")
+	fullRows := normalizeWriteLines(ui.FormatAssistantRendered(fullRendered))
+	if sourceStart <= 0 {
+		return fullRows
+	}
+	prevRendered := strings.TrimRight(c.session.Formatter.Format(buffered[:sourceStart]), "\r\n")
+	if prevRendered == "" {
+		return fullRows
+	}
+	if !strings.HasPrefix(fullRendered, prevRendered) {
+		// Formatter is not prefix-stable for this cut; fall back to chunk Format
+		// so we never drop or duplicate visible content.
+		return normalizeWriteLines(ui.FormatAssistantRendered(strings.TrimRight(c.session.Formatter.Format(chunk), "\r\n")))
+	}
+	prevRows := normalizeWriteLines(ui.FormatAssistantRendered(prevRendered))
+	if len(prevRows) > len(fullRows) {
+		return fullRows
+	}
+	for i := range prevRows {
+		if fullRows[i] != prevRows[i] {
+			// Style/indent broke row prefixing; fall back to the string suffix
+			// without any leading-\\n strip (rows own the boundary).
+			suffix := fullRendered[len(prevRendered):]
+			return normalizeWriteLines(ui.FormatAssistantRendered(suffix))
+		}
+	}
+	return fullRows[len(prevRows):]
+}
+
+// markdownFullPrefixSuffixLocked joins markdownRowsDeltaLocked for legacy
+// callers/tests. priorWriteEndedWithLF is ignored: row delta replaces strip.
+func (c *chatInteractionCoordinator) markdownFullPrefixSuffixLocked(sourceStart, sourceEnd int, chunk string, priorWriteEndedWithLF bool) string {
+	_ = priorWriteEndedWithLF
+	rows := c.markdownRowsDeltaLocked(sourceStart, sourceEnd, chunk)
+	if len(rows) == 0 {
+		return ""
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (c *chatInteractionCoordinator) drainActiveStableCommitLocked(all bool) bool {
+	if c == nil || len(c.stableCommitQueue) == 0 {
+		return false
+	}
+	count := 1
+	if all {
+		count = len(c.stableCommitQueue)
+	} else {
+		// A formatted source chunk is atomic: source ownership cannot advance
+		// halfway through its rendered lines without risking omissions or replay
+		// if finalization lands between two animation ticks.
+		for count < len(c.stableCommitQueue) && c.stableCommitQueue[count-1].sourceEnd == 0 {
+			count++
+		}
+	}
+	batch := c.stableCommitQueue[:count]
+	prevEmitted := c.streamRenderedPrefixLen
+	emittedLines := make([]string, 0, count)
+	var emittedSourceEnd int
+	var commitSourceEnd int
+	for _, line := range batch {
+		emittedLines = append(emittedLines, line.text)
+		if line.sourceEnd > emittedSourceEnd {
+			emittedSourceEnd = line.sourceEnd
+		}
+		// Collect the farthest band commit; applied only after the atomic
+		// scrollback write so ActiveBand never hides mid-batch.
+		if line.commitBand && line.sourceEnd > commitSourceEnd {
+			commitSourceEnd = line.sourceEnd
+		}
+	}
+	// One WriteOutput for the whole batch. Per-line writeLineLocked used to
+	// release the surface lock between rows so ActiveBand/status growth could
+	// scroll permanent holes into already-committed scrollback — the same class
+	// of live-only blank that residual writeRowsLocked already closed.
+	// Do not route through writeRowsLocked: stable rows are already complete
+	// (no closeOpenRow / gapBlank), matching the historical writeLine loop.
+	c.softCommitWriting = true
+	if len(emittedLines) > 0 {
+		c.writeTextLocked(strings.Join(emittedLines, "\n") + "\n")
+	}
+	c.softCommitWriting = false
+	if emittedSourceEnd > c.streamRenderedPrefixLen {
+		c.streamRenderedPrefixLen = emittedSourceEnd
+	}
+	bandCommitted := false
+	if commitSourceEnd > 0 && c.activeStream != nil {
+		c.activeStream.CommitStablePrefix(commitSourceEnd)
+		bandCommitted = true
+	}
+	c.stableCommitQueue = c.stableCommitQueue[count:]
 	c.streamRendered = true
-	c.streamRenderedPrefixLen = cut
-	if wrote {
-		c.streamTrailingLF = true
-		// Treat promoted stable blocks as completed output so a later finalize
-		// or follow-up block can insert a single separator when needed.
-		c.completeBlockOutput = true
+	c.streamTrailingLF = true
+	c.completeBlockOutput = true
+	// Only irreversible scrollback writes become transcript Blocks. Pending
+	// queue entries that are later discarded never appear here.
+	if emittedSourceEnd > prevEmitted {
+		emitWidth := c.currentStreamEmitWidthLocked()
+		c.ensureAssistantTranscriptLocked()
+		c.transcript.recordEmittedBlock(
+			prevEmitted,
+			emittedSourceEnd,
+			emitWidth,
+			c.streamMode == assistantStreamModeMarkdown,
+			emittedLines,
+		)
+		c.transcript.syncFromCoordinator(
+			c.streamBuffer.String(),
+			c.streamRenderedPrefixLen,
+			c.streamEnqueuedPrefixLen,
+			c.streamMode == assistantStreamModeMarkdown,
+		)
+		// Note soft ownership per atomic source chunk so the soft window can
+		// drop whole older chunks when it hits the surface cap.
+		softStart := prevEmitted
+		softLines := make([]string, 0, len(emittedLines))
+		for _, line := range batch {
+			softLines = append(softLines, line.text)
+			if line.sourceEnd > 0 {
+				c.noteSoftEmittedTailLocked(softStart, line.sourceEnd, emitWidth, softLines)
+				softStart = line.sourceEnd
+				softLines = nil
+			}
+		}
 	}
-	c.activeStream.CommitStablePrefix(cut)
+	if bandCommitted {
+		// Timer-driven drains are outside paintActiveStreamLocked; force a band
+		// repaint so committed lines leave the live viewport immediately.
+		c.refreshActiveBandAfterStableCommitLocked()
+	}
+	return true
+}
+
+func (c *chatInteractionCoordinator) refreshActiveBandAfterStableCommitLocked() {
+	if c == nil || c.activeStream == nil || !c.surfaceOutputActiveLocked() {
+		return
+	}
+	// Timer-driven drains sit outside paintActiveStreamLocked; force a band
+	// repaint so committed lines leave the live viewport immediately and keep
+	// the animation scheduler armed.
+	_ = c.publishActiveStreamFrameLocked(true)
+}
+
+func (c *chatInteractionCoordinator) drainActiveStableCommitCatchUpLocked() bool {
+	if c == nil || len(c.stableCommitQueue) == 0 {
+		return false
+	}
+	now := time.Now()
+	if !c.activeStableCommitCatchUpLocked(now) {
+		return false
+	}
+	drained := c.drainActiveStableCommitLocked(true)
+	if drained && len(c.stableCommitQueue) == 0 && c.stableCommitBelowExit.IsZero() {
+		c.stableCommitBelowExit = now
+	}
+	return drained
+}
+
+func (c *chatInteractionCoordinator) activeStableCommitCatchUpLocked(now time.Time) bool {
+	if c == nil || len(c.stableCommitQueue) == 0 {
+		return false
+	}
+	depth := len(c.stableCommitQueue)
+	oldestAge := now.Sub(c.stableCommitQueue[0].enqueuedAt)
+	if oldestAge < 0 {
+		oldestAge = 0
+	}
+	if !c.stableCommitCatchUp {
+		pressure := depth >= activeStableCatchUpDepth || oldestAge >= activeStableCatchUpOldestAge
+		if !pressure {
+			return false
+		}
+		severe := depth >= activeStableSevereDepth || oldestAge >= activeStableSevereAge
+		if !severe && !c.stableCommitLastExit.IsZero() && now.Sub(c.stableCommitLastExit) < activeStableCatchUpReenter {
+			return false
+		}
+		c.stableCommitCatchUp = true
+		c.stableCommitBelowExit = time.Time{}
+		c.stableCommitLastExit = time.Time{}
+		return true
+	}
+
+	belowExit := depth <= activeStableCatchUpExitDepth && oldestAge <= activeStableCatchUpExitAge
+	if !belowExit {
+		c.stableCommitBelowExit = time.Time{}
+		return true
+	}
+	if c.stableCommitBelowExit.IsZero() {
+		c.stableCommitBelowExit = now
+		return true
+	}
+	if now.Sub(c.stableCommitBelowExit) < activeStableCatchUpExitHold {
+		return true
+	}
+	c.stableCommitCatchUp = false
+	c.stableCommitBelowExit = time.Time{}
+	c.stableCommitLastExit = now
+	return false
+}
+
+func (c *chatInteractionCoordinator) scheduleActiveStableCommitLocked() {
+	if c == nil || c.shutdown || len(c.stableCommitQueue) == 0 || c.stableCommitTimer != nil {
+		return
+	}
+	if c.surface != nil && !c.surface.DynamicStatusTicksEnabled() && !c.stableCommitManual {
+		c.drainActiveStableCommitLocked(false)
+		return
+	}
+	delay := c.stableCommitDelay
+	if delay <= 0 {
+		delay = activeStableCommitTickDelay
+	}
+	c.stableCommitTimerSeq++
+	sequence := c.stableCommitTimerSeq
+	c.stableCommitTimer = time.AfterFunc(delay, func() {
+		c.runActiveStableCommitTick(sequence)
+	})
+}
+
+func (c *chatInteractionCoordinator) runActiveStableCommitTick(sequence uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if sequence != c.stableCommitTimerSeq {
+		return
+	}
+	c.stableCommitTimer = nil
+	if c.shutdown || len(c.stableCommitQueue) == 0 {
+		return
+	}
+	if !c.drainActiveStableCommitCatchUpLocked() {
+		c.drainActiveStableCommitLocked(false)
+	}
+	c.scheduleActiveStableCommitLocked()
+}
+
+func (c *chatInteractionCoordinator) stopActiveStableCommitLocked() {
+	if c == nil {
+		return
+	}
+	c.stableCommitTimerSeq++
+	if c.stableCommitTimer != nil {
+		c.stableCommitTimer.Stop()
+	}
+	c.stableCommitTimer = nil
+}
+
+func (c *chatInteractionCoordinator) discardPendingStableCommitLocked() {
+	if c == nil {
+		return
+	}
+	c.stopActiveStableCommitLocked()
+	c.stableCommitQueue = nil
+	c.streamEnqueuedPrefixLen = c.streamRenderedPrefixLen
+	if c.transcript != nil {
+		c.transcript.dropPendingBeyondEmitted()
+		c.transcript.syncFromCoordinator(
+			c.streamBuffer.String(),
+			c.streamRenderedPrefixLen,
+			c.streamEnqueuedPrefixLen,
+			c.streamMode == assistantStreamModeMarkdown,
+		)
+	}
+}
+
+func (c *chatInteractionCoordinator) rebuildPendingStableCommitLocked(asMarkdown bool) {
+	if c == nil || len(c.stableCommitQueue) == 0 || c.streamEnqueuedPrefixLen <= c.streamRenderedPrefixLen {
+		return
+	}
+	buffered := c.streamBuffer.String()
+	end := c.streamEnqueuedPrefixLen
+	if end > len(buffered) {
+		end = len(buffered)
+	}
+	start := c.streamRenderedPrefixLen
+	if start < 0 || start >= end {
+		c.discardPendingStableCommitLocked()
+		return
+	}
+	c.stopActiveStableCommitLocked()
+	c.stableCommitQueue = nil
+	c.syncFormatterWidthLocked()
+	c.enqueueActiveStableCommitLocked(buffered[start:end], end, asMarkdown)
+	c.streamEnqueuedPrefixLen = end
+	c.drainActiveStableCommitCatchUpLocked()
+	c.scheduleActiveStableCommitLocked()
+}
+
+func (c *chatInteractionCoordinator) currentStreamEmitWidthLocked() int {
+	if c != nil && c.surface != nil {
+		if width, _ := c.surface.ActiveBandViewportSize(); width > 0 {
+			return width
+		}
+	}
+	if width := ui.GetTerminalWidth(); width > 0 {
+		return width
+	}
+	return 80
+}
+
+func (c *chatInteractionCoordinator) syncFormatterWidthLocked() {
+	if c == nil || c.session == nil || c.session.Formatter == nil {
+		return
+	}
+	c.session.Formatter.Width = c.currentStreamEmitWidthLocked()
+}
+
+func (c *chatInteractionCoordinator) noteSoftEmittedTailLocked(sourceStart, sourceEnd, width int, lines []string) {
+	if c == nil || sourceEnd <= sourceStart || len(lines) == 0 {
+		return
+	}
+	if width <= 0 {
+		width = c.currentStreamEmitWidthLocked()
+	}
+	seg := softEmittedSegment{
+		sourceStart: sourceStart,
+		sourceEnd:   sourceEnd,
+		lines:       append([]string(nil), lines...),
+	}
+	// Contiguous extension keeps one rewrite window for the live turn tail,
+	// while still recording atomic chunk boundaries for later window trim.
+	if c.softEmittedSourceEnd == sourceStart && len(c.softEmittedSegments) > 0 {
+		c.softEmittedSegments = append(c.softEmittedSegments, seg)
+	} else if c.softEmittedSourceEnd == sourceStart && len(c.softEmittedLines) > 0 && len(c.softEmittedSegments) == 0 {
+		// Legacy single-range state (tests): promote existing lines then append.
+		c.softEmittedSegments = []softEmittedSegment{{
+			sourceStart: c.softEmittedSourceStart,
+			sourceEnd:   c.softEmittedSourceEnd,
+			lines:       append([]string(nil), c.softEmittedLines...),
+		}, seg}
+	} else {
+		c.softEmittedSegments = []softEmittedSegment{seg}
+	}
+	c.softEmittedWidth = width
+	c.rebuildSoftEmittedFromSegmentsLocked()
+	c.trimSoftEmittedToWindowLocked()
+	c.syncSoftEmittedTailToSurfaceLocked()
+}
+
+func (c *chatInteractionCoordinator) clearSoftEmittedTailLocked() {
+	if c == nil {
+		return
+	}
+	c.softEmittedSourceStart = 0
+	c.softEmittedSourceEnd = 0
+	c.softEmittedLines = nil
+	c.softEmittedWidth = 0
+	c.softEmittedSegments = nil
+}
+
+func (c *chatInteractionCoordinator) invalidateSoftEmittedOwnershipLocked() {
+	if c == nil {
+		return
+	}
+	c.clearSoftEmittedTailLocked()
+	if c.surface != nil {
+		c.surface.InvalidateSoftOutputTail()
+	}
+}
+
+func (c *chatInteractionCoordinator) rebuildSoftEmittedFromSegmentsLocked() {
+	if c == nil {
+		return
+	}
+	if len(c.softEmittedSegments) == 0 {
+		c.softEmittedSourceStart = 0
+		c.softEmittedSourceEnd = 0
+		c.softEmittedLines = nil
+		return
+	}
+	total := 0
+	for _, seg := range c.softEmittedSegments {
+		total += len(seg.lines)
+	}
+	lines := make([]string, 0, total)
+	for _, seg := range c.softEmittedSegments {
+		lines = append(lines, seg.lines...)
+	}
+	c.softEmittedLines = lines
+	c.softEmittedSourceStart = c.softEmittedSegments[0].sourceStart
+	c.softEmittedSourceEnd = c.softEmittedSegments[len(c.softEmittedSegments)-1].sourceEnd
+}
+
+func softEmittedSegmentLineCount(segments []softEmittedSegment) int {
+	total := 0
+	for _, seg := range segments {
+		total += len(seg.lines)
+	}
+	return total
+}
+
+// trimSoftEmittedToWindowLocked drops whole older source chunks until the soft
+// line count fits SoftOutputTailMaxLines. A single atomic chunk larger than the
+// window cannot be partially reflowed, so ownership is cleared in that case.
+func (c *chatInteractionCoordinator) trimSoftEmittedToWindowLocked() {
+	if c == nil {
+		return
+	}
+	maxLines := ui.SoftOutputTailMaxLines
+	if maxLines <= 0 {
+		return
+	}
+	for len(c.softEmittedSegments) > 1 && softEmittedSegmentLineCount(c.softEmittedSegments) > maxLines {
+		c.softEmittedSegments = c.softEmittedSegments[1:]
+	}
+	c.rebuildSoftEmittedFromSegmentsLocked()
+	if len(c.softEmittedLines) > maxLines {
+		// One atomic chunk overflowed the rewrite window. Keep irreversible
+		// scrollback bytes, but do not claim a source-backed soft suffix.
+		c.clearSoftEmittedTailLocked()
+	}
+}
+
+// syncSoftEmittedTailToSurfaceLocked re-bases surface soft tracking onto the
+// coordinator's still-owned suffix so line counts match after a window trim.
+func (c *chatInteractionCoordinator) syncSoftEmittedTailToSurfaceLocked() {
+	if c == nil || !c.surfaceWriter || c.surface == nil || !c.surfaceOutputActiveLocked() {
+		return
+	}
+	if len(c.softEmittedLines) == 0 {
+		c.surface.InvalidateSoftOutputTail()
+		return
+	}
+	c.surface.AdoptSoftOutputTail(c.softEmittedLines)
+}
+
+// reflowSoftEmittedTailLocked re-formats the source-backed soft committed tail
+// at the current terminal width and rewrites only those surface rows (Phase D).
+// It never:
+//   - replays irreversible history above the soft window
+//   - routes through writeRowsLocked / gapBlank / completeBlockOutput
+//   - invents cross-message separators while rewriting owned soft rows
+// Failed ownership checks invalidate rather than patching foreign scrollback.
+func (c *chatInteractionCoordinator) reflowSoftEmittedTailLocked() {
+	if c == nil || c.softEmittedSourceEnd <= c.softEmittedSourceStart || len(c.softEmittedLines) == 0 {
+		return
+	}
+	width := c.currentStreamEmitWidthLocked()
+	if width == c.softEmittedWidth {
+		return
+	}
+	newLines := c.renderSoftEmittedLinesLocked(c.softEmittedSourceStart, c.softEmittedSourceEnd, width)
+	if len(newLines) == 0 {
+		return
+	}
+	// Same rendered lines: only record the new width so later refreshes no-op.
+	if stringSlicesEqual(c.softEmittedLines, newLines) {
+		c.softEmittedWidth = width
+		return
+	}
+
+	// Live surface rewrite requires a 1:1 soft window still parked at the output
+	// bottom. Buffer-only / non-TTY tests keep source bookkeeping without claiming
+	// terminal rows were rewritten.
+	canRewriteSurface := c.surfaceWriter &&
+		c.writer != nil &&
+		c.surface != nil &&
+		c.surfaceOutputActiveLocked() &&
+		c.surface.SoftOutputTailValid() &&
+		c.surface.SoftOutputTailLineCount() == len(c.softEmittedLines)
+	if canRewriteSurface {
+		if !c.surface.RewriteSoftOutputTail(c.writer, newLines) {
+			// Rewrite failed (scrolled away / missing window): drop both sides
+			// so ownership cannot drift between coordinator and surface.
+			c.invalidateSoftEmittedOwnershipLocked()
+			return
+		}
+	} else if c.surfaceWriter && c.surface != nil && c.surfaceOutputActiveLocked() {
+		// Soft window is missing or polluted by foreign output.
+		c.invalidateSoftEmittedOwnershipLocked()
+		return
+	}
+
+	c.softEmittedLines = newLines
+	c.softEmittedWidth = width
+	// Reflow collapses segment boundaries into one range at the new width.
+	if c.softEmittedSourceEnd > c.softEmittedSourceStart {
+		c.softEmittedSegments = []softEmittedSegment{{
+			sourceStart: c.softEmittedSourceStart,
+			sourceEnd:   c.softEmittedSourceEnd,
+			lines:       append([]string(nil), newLines...),
+		}}
+	}
+	c.ensureAssistantTranscriptLocked()
+	if c.transcript != nil {
+		c.transcript.LastEmitWidth = width
+	}
+}
+
+// renderSoftEmittedLinesLocked rebuilds soft-window rows from source only.
+// Content spacing comes from markdownRowsDeltaLocked / buildRenderedAssistantChunk
+// ("" rows). No gapBlank and no completeBlockOutput are consulted — soft reflow
+// must not insert message separators into already-painted history.
+func (c *chatInteractionCoordinator) renderSoftEmittedLinesLocked(sourceStart, sourceEnd, width int) []string {
+	if c == nil || sourceEnd <= sourceStart {
+		return nil
+	}
+	buffered := c.streamBuffer.String()
+	if sourceEnd > len(buffered) {
+		sourceEnd = len(buffered)
+	}
+	if sourceStart < 0 {
+		sourceStart = 0
+	}
+	if sourceStart >= sourceEnd {
+		return nil
+	}
+	chunk := buffered[sourceStart:sourceEnd]
+	asMarkdown := c.streamMode == assistantStreamModeMarkdown
+	if asMarkdown {
+		prevWidth := 0
+		if c.session != nil && c.session.Formatter != nil {
+			prevWidth = c.session.Formatter.Width
+			c.session.Formatter.Width = width
+			defer func() { c.session.Formatter.Width = prevWidth }()
+		}
+		return c.markdownRowsDeltaLocked(sourceStart, sourceEnd, chunk)
+	}
+	visual := buildRenderedAssistantChunk(chunk)
+	if visual.empty() {
+		return nil
+	}
+	return visual.lines
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 
@@ -3511,12 +4542,7 @@ func (c *chatInteractionCoordinator) paintScheduledActiveStreamFrame(generation 
 	if c.shutdown || c.activeStream == nil || !c.activeStream.Active() || !c.surfaceOutputActiveLocked() {
 		return
 	}
-	c.syncActiveStreamViewportLocked()
-	frame, changed := c.activeStream.PaintLines(time.Now(), false)
-	if changed {
-		c.syncActiveBandLinesLocked(frame)
-	}
-	c.scheduleActiveStreamFrameLocked()
+	_ = c.publishActiveStreamFrameLocked(false)
 }
 
 func (c *chatInteractionCoordinator) stopActiveStreamFrameLocked() {
@@ -3555,13 +4581,8 @@ func (c *chatInteractionCoordinator) syncAgentStageActiveBandLocked() {
 			}
 		}
 		c.activeStream.SetToolProgress(name, progress)
-		c.syncActiveStreamViewportLocked()
 		force := !sameTool || c.surface == nil || len(c.surface.ActiveBandLines()) == 0
-		frame, changed := c.activeStream.PaintLines(time.Now(), force)
-		if force || changed {
-			c.syncActiveBandLinesLocked(frame)
-		}
-		c.scheduleActiveStreamFrameLocked()
+		_ = c.publishActiveStreamFrameLocked(force)
 	default:
 		if c.activeStream.IsToolActive() {
 			c.stopActiveStreamFrameLocked()
@@ -3591,6 +4612,10 @@ func splitToolStageDetail(detail string) (name, progress string) {
 // adaptive band budget so terminal resizes are picked up on the next frame.
 // The surface reports cached dimensions, so this stays syscall-free while a
 // stream is running.
+//
+// Production resize path (publishActiveStreamFrameLocked) now triggers
+// geometry probe + soft reflow; this helper still syncs buffer size for
+// direct RefreshActiveStreamViewport calls.
 func (c *chatInteractionCoordinator) syncActiveStreamViewportLocked() {
 	if c == nil || c.activeStream == nil {
 		return
@@ -3602,6 +4627,73 @@ func (c *chatInteractionCoordinator) syncActiveStreamViewportLocked() {
 		width, rows = ui.GetTerminalWidth(), ui.ActiveBandRows(ui.GetTerminalHeight())
 	}
 	c.activeStream.SetViewport(width, rows)
+}
+
+// publishActiveStreamFrameLocked is the single ActiveBand paint entry after the
+// active stream model has been updated. force bypasses frame-scheduler equality
+// so commit/resize/tool-start always re-sync the band; changed frames always
+// re-sync. The animation scheduler is re-armed whenever a surface is active.
+//
+// Production terminal resizes are picked up here: each frame probes geometry
+// and, when width/height changed (or soft width drifted), runs the same soft
+// reflow + stable-queue rebuild path as RefreshActiveStreamViewport.
+func (c *chatInteractionCoordinator) publishActiveStreamFrameLocked(force bool) (changed bool) {
+	if c == nil || c.activeStream == nil {
+		return false
+	}
+	if c.maybeRefreshStreamGeometryLocked() {
+		force = true
+	}
+	c.syncActiveStreamViewportLocked()
+	frame, changed := c.activeStream.PaintLines(time.Now(), force)
+	if c.surfaceOutputActiveLocked() && (force || changed) {
+		c.syncActiveBandLinesLocked(frame)
+	}
+	if c.surfaceOutputActiveLocked() {
+		c.scheduleActiveStreamFrameLocked()
+	}
+	return changed
+}
+
+// maybeRefreshStreamGeometryLocked probes terminal size on the live stream
+// paint path and triggers source-backed soft reflow when geometry drifted.
+// Returns true when a full viewport refresh ran (caller should force paint).
+//
+// Geometry probes are throttled to DefaultGeometryProbeMinInterval so a 30 FPS
+// paint loop does not re-run GetSize every frame. Soft-width drift (layout
+// already updated elsewhere, e.g. EnableForTest / write-path RefreshSize) still
+// forces an immediate reflow without waiting for the probe interval.
+func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
+	if c == nil || c.activeStream == nil || !c.activeStream.Active() {
+		return false
+	}
+	width := c.currentStreamEmitWidthLocked()
+	softNeedsReflow := c.softEmittedSourceEnd > c.softEmittedSourceStart &&
+		len(c.softEmittedLines) > 0 &&
+		c.softEmittedWidth > 0 &&
+		c.softEmittedWidth != width
+
+	sizeChanged := false
+	if c.surface != nil && c.surface.Enabled() {
+		if softNeedsReflow {
+			// Soft ownership already disagrees with the cached layout width —
+			// reflow now; also force an unthrottled probe so layout stays coherent.
+			sizeChanged = c.surface.SyncTerminalGeometry()
+		} else {
+			sizeChanged, _ = c.surface.SyncTerminalGeometryThrottled(ui.DefaultGeometryProbeMinInterval)
+		}
+		// Recompute after a probe may have applied a new scroll-region width.
+		width = c.currentStreamEmitWidthLocked()
+		softNeedsReflow = c.softEmittedSourceEnd > c.softEmittedSourceStart &&
+			len(c.softEmittedLines) > 0 &&
+			c.softEmittedWidth > 0 &&
+			c.softEmittedWidth != width
+	}
+	if !sizeChanged && !softNeedsReflow {
+		return false
+	}
+	c.refreshActiveStreamViewportLocked()
+	return true
 }
 
 func (c *chatInteractionCoordinator) syncActiveBandLinesLocked(frame []render.Line) {
@@ -3623,30 +4715,69 @@ func (c *chatInteractionCoordinator) clearActiveBandLocked() {
 }
 
 // RefreshActiveStreamViewport forces a redraw after resize/theme changes.
+// Source-backed reflow order:
+//  1. probe terminal geometry (production resize entry also runs this via paint)
+//  2. rewrite the soft committed tail still at the output bottom
+//  3. rebuild the still-pending stable queue from source offsets
+//  4. resize ActiveBand and re-cut newly stable content for the new geometry
 func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.surface != nil && c.surface.Enabled() {
+		_ = c.surface.SyncTerminalGeometry()
+	}
 	if c.activeStream == nil || !c.activeStream.Active() {
 		return
 	}
-	c.activeStream.Resize(ui.GetTerminalWidth(), ui.ActiveBandRows(ui.GetTerminalHeight()))
+	c.refreshActiveStreamViewportLocked()
+	// Bypass maybeRefreshStreamGeometryLocked re-entry: geometry was just
+	// synced and soft reflow already ran above.
+	c.syncActiveStreamViewportLocked()
 	frame, changed := c.activeStream.PaintLines(time.Now(), true)
 	if c.surfaceOutputActiveLocked() {
 		c.syncActiveBandLinesLocked(frame)
-		if !changed {
-			c.surface.RefreshActiveBand()
-		}
 		c.scheduleActiveStreamFrameLocked()
 	}
+	// Resize can leave the model frame equal while the physical band still needs
+	// a repaint for the new geometry.
+	if c.surfaceOutputActiveLocked() && !changed {
+		c.surface.RefreshActiveBand()
+	}
+}
+
+// refreshActiveStreamViewportLocked runs soft reflow + stable queue rebuild +
+// ActiveBand resize under the coordinator lock. Callers must already hold c.mu
+// and must have refreshed surface geometry when a live surface is attached.
+func (c *chatInteractionCoordinator) refreshActiveStreamViewportLocked() {
+	if c == nil || c.activeStream == nil || !c.activeStream.Active() {
+		return
+	}
+	asMarkdown := c.streamMode == assistantStreamModeMarkdown
+	c.syncFormatterWidthLocked()
+	c.reflowSoftEmittedTailLocked()
+	c.rebuildPendingStableCommitLocked(asMarkdown)
+	width, rows := c.currentStreamEmitWidthLocked(), ui.ActiveBandRows(ui.GetTerminalHeight())
+	if c.surface != nil && c.surface.Enabled() {
+		if w, r := c.surface.ActiveBandViewportSize(); w > 0 {
+			width = w
+			if r > 0 {
+				rows = r
+			}
+		}
+	}
+	c.activeStream.Resize(width, rows)
+	_ = c.commitActiveStableScrollbackLocked(asMarkdown)
 }
 
 func (c *chatInteractionCoordinator) resetReasoningLocked() {
 	c.reasoningActive = false
 	c.reasoningRendered = false
-	c.reasoningTrailingLF = false
+	// After finalize the terminal is already on a new row (end-reasoning line).
+	// Keep true so a later reopen never confuses zero-value false with mid-line.
+	c.reasoningTrailingLF = true
 	c.reasoningMeta = ""
 	c.reasoningBuffer.Reset()
 	if !c.thinkingActive && !c.streamingActive {
@@ -3654,19 +4785,20 @@ func (c *chatInteractionCoordinator) resetReasoningLocked() {
 	}
 }
 
-func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, suppressSeparator bool) {
+func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, gap blockGap) {
 	if strings.TrimSpace(rendered) == "" {
 		return
 	}
-	// writeLineLocked terminates the block, so a formatter/passthrough trailing
-	// newline would render as an extra blank row above the prompt.
-	rendered = strings.TrimRight(rendered, "\r\n")
-	if !suppressSeparator && (c.completeBlockOutput || c.promptAfterBlockGap) {
-		c.writeLineLocked("")
+	// Pre-styled blocks (assistant/user/error/supplement) may contain internal
+	// newlines. Normalize into writeLine-ready rows first so CR/terminators are
+	// stripped the same way as the stream path. Cross-block separation is an
+	// explicit caller decision (gap); completeBlockOutput must never invent a
+	// blank into already-rendered history.
+	lines := normalizeWriteLines(rendered)
+	if len(lines) == 0 {
+		return
 	}
-	c.writeLineLocked(rendered)
-	c.completeBlockOutput = true
-	c.promptAfterBlockGap = false
+	c.writeRowsLocked(lines, gap)
 }
 
 func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {

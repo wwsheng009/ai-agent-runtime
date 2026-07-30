@@ -4,7 +4,9 @@ import {
   RefreshCcwIcon,
   Trash2Icon,
 } from "lucide-react";
+import { type TFunction } from "i18next";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 
@@ -69,6 +71,7 @@ export function RuntimeRetryDomainEditor({
   onSaveRule,
   rules,
 }: RuntimeRetryDomainEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -107,20 +110,31 @@ export function RuntimeRetryDomainEditor({
   return (
     <div className="space-y-3">
       <SettingsPanelCard
-        title={<span className="text-base">Retry 配置</span>}
+        title={<span className="text-base">{t("editor.retry.title")}</span>}
         icon={
           <SettingsPanelIcon>
             <RefreshCcwIcon size={16} />
           </SettingsPanelIcon>
         }
-        description="维护全局重试默认值、增强策略，以及按顺序匹配的 retry rules。"
+        description={t("editor.retry.description")}
         descriptionClassName="mt-1"
         headerAside={
           <SettingsBadgeList>
-            <Badge>{config.enabled ? "重试开" : "重试关"}</Badge>
-            <Badge>{`${enabledRuleCount}/${rules.length} 条规则启用`}</Badge>
             <Badge>
-              {config.enhancedStrategyEnabled ? "增强策略开" : "增强策略关"}
+              {config.enabled
+                ? t("editor.retry.status.retryOn")
+                : t("editor.retry.status.retryOff")}
+            </Badge>
+            <Badge>
+              {t("editor.retry.summary.enabledRules", {
+                enabled: enabledRuleCount,
+                total: rules.length,
+              })}
+            </Badge>
+            <Badge>
+              {config.enhancedStrategyEnabled
+                ? t("editor.retry.status.enhancedOn")
+                : t("editor.retry.status.enhancedOff")}
             </Badge>
           </SettingsBadgeList>
         }
@@ -131,10 +145,14 @@ export function RuntimeRetryDomainEditor({
               retry.enabled
             </div>
             <div className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
-              关闭后规则仍保留，但运行时不再执行自动重试。
+              {t("editor.retry.enabledHelp")}
             </div>
             <label className={`mt-3 ${editorToggleRowClassName}`}>
-              <span>{config.enabled ? "已启用" : "已关闭"}</span>
+              <span>
+                {config.enabled
+                  ? t("editor.retry.toggle.enabled")
+                  : t("editor.retry.toggle.disabled")}
+              </span>
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-[var(--accent-primary)]"
@@ -146,7 +164,7 @@ export function RuntimeRetryDomainEditor({
             </label>
           </div>
 
-          <SettingsSubsectionCard title="默认策略">
+          <SettingsSubsectionCard title={t("editor.retry.defaultStrategy")}>
             <div className="grid gap-3 xl:grid-cols-3">
               <ConfigFormField label="default_max_retries">
                 <input
@@ -190,7 +208,7 @@ export function RuntimeRetryDomainEditor({
             </div>
           </SettingsSubsectionCard>
 
-          <SettingsSubsectionCard title="摘要">
+          <SettingsSubsectionCard title={t("editor.retry.summaryTitle")}>
             <SettingsBadgeList>
               <Badge>{`default ${config.defaultMaxRetries || "--"}`}</Badge>
               <Badge>{`delay ${config.defaultRetryDelayMs || "--"}ms`}</Badge>
@@ -202,7 +220,7 @@ export function RuntimeRetryDomainEditor({
         <div className="mt-3 grid gap-3 xl:grid-cols-2">
           <SettingsSubsectionCard
             title="invalid_encrypted_content_recovery"
-            description="控制原生 Responses 请求在状态失效时是否剥离客户端状态后重试一次。"
+            description={t("editor.retry.invalidEncrypted.description")}
             headerAside={
               <input
                 type="checkbox"
@@ -220,14 +238,14 @@ export function RuntimeRetryDomainEditor({
           >
             <SettingsNoticeCard>
               {config.invalidEncryptedContentStripClientStateOnce
-                ? "strip_client_state_once 已启用"
-                : "strip_client_state_once 已关闭"}
+                ? t("editor.retry.invalidEncrypted.enabled")
+                : t("editor.retry.invalidEncrypted.disabled")}
             </SettingsNoticeCard>
           </SettingsSubsectionCard>
 
           <SettingsSubsectionCard
             title="enhanced_strategy"
-            description="第几次重试开始做降级和候选剔除，由阈值与评分参数共同决定。"
+            description={t("editor.retry.enhancedStrategy.description")}
             headerAside={
               <input
                 type="checkbox"
@@ -299,25 +317,35 @@ export function RuntimeRetryDomainEditor({
       <ConfigDomainTable
         title="Retry Rules"
         titleIcon={RefreshCcwIcon}
-        description="规则按顺序匹配，第一个命中的 rule 会生效，因此支持直接上移和下移。"
+        description={t("editor.retry.rules.tableDescription")}
         items={rules}
         getRowKey={(rule) => rule.id}
-        emptyState="当前没有 retry rule，可直接新建第一条。"
+        emptyState={t("editor.retry.rules.empty")}
         summary={
           <>
-            <ConfigDomainSummaryBadge>{`${rules.length} 条规则`}</ConfigDomainSummaryBadge>
-            <ConfigDomainSummaryBadge>{`默认 ${config.defaultMaxRetries || "--"} 次`}</ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.retry.summary.rules", { count: rules.length })}
+            </ConfigDomainSummaryBadge>
+            <ConfigDomainSummaryBadge>
+              {t("editor.retry.summary.defaultRetries", {
+                count: config.defaultMaxRetries || "--",
+              })}
+            </ConfigDomainSummaryBadge>
             <ConfigDomainSummaryBadge>
               {config.enhancedStrategyEnabled ? "enhanced on" : "enhanced off"}
             </ConfigDomainSummaryBadge>
           </>
         }
         actions={
-          <SettingsAddButton size="sm" label="新建规则" onClick={openCreateDialog} />
+          <SettingsAddButton
+            size="sm"
+            label={t("editor.retry.rules.create")}
+            onClick={openCreateDialog}
+          />
         }
         columns={[
           {
-            header: "顺序 / 名称",
+            header: t("editor.retry.rules.columns.orderName"),
             cell: (rule) => (
               <div className="min-w-[14rem]">
                 <div className="flex flex-wrap items-center gap-2">
@@ -325,65 +353,71 @@ export function RuntimeRetryDomainEditor({
                   <div className="font-semibold text-[var(--foreground)]">
                     {rule.name || "--"}
                   </div>
-                  <Badge>{rule.enabled ? "启用" : "关闭"}</Badge>
+                  <Badge>
+                    {rule.enabled
+                      ? t("editor.retry.rules.enabled")
+                      : t("editor.retry.rules.disabled")}
+                  </Badge>
                 </div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {rule.description || "未填写 description"}
+                  {rule.description || t("editor.retry.rules.noDescription")}
                 </div>
               </div>
             ),
           },
           {
-            header: "匹配条件",
+            header: t("editor.retry.rules.columns.matchers"),
             cell: (rule) => (
               <div className="min-w-[15rem] text-xs leading-5 text-[var(--muted-foreground)]">
-                {summarizeMatcher(rule).map((line) => (
+                {summarizeMatcher(rule, t).map((line) => (
                   <div key={line}>{line}</div>
                 ))}
               </div>
             ),
           },
           {
-            header: "重试策略",
+            header: t("editor.retry.rules.columns.strategy"),
             cell: (rule) => (
               <div className="min-w-[12rem]">
                 <div>{`max ${rule.maxRetries || "--"} · delay ${rule.retryDelayMs || "--"}ms`}</div>
                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {`backoff ${rule.backoffMultiplier || "--"}`}
                   {rule.extraFieldCount > 0
-                    ? ` · ${rule.extraFieldCount} 个扩展字段`
+                    ? ` · ${t("editor.retry.extraFields.count", {
+                        count: rule.extraFieldCount,
+                      })}`
                     : ""}
                 </div>
               </div>
             ),
           },
           {
-            header: "操作",
+            header: t("editor.retry.columns.actions"),
             cell: (rule) => (
               <SettingsActionGroup>
                 <SettingsActionButton
                   variant="ghost"
                   icon={<ArrowUpIcon size={14} />}
-                  label="上移"
+                  label={t("editor.retry.actions.moveUp")}
                   onClick={() => onMoveRule(rule.index, "up")}
                   disabled={rule.index === 0}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<ArrowDownIcon size={14} />}
-                  label="下移"
+                  label={t("editor.retry.actions.moveDown")}
                   onClick={() => onMoveRule(rule.index, "down")}
                   disabled={rule.index === rules.length - 1}
                 />
                 <SettingsActionButton
                   variant="secondary"
-                  label="编辑"
+                  label={t("editor.retry.actions.edit")}
                   onClick={() => openEditDialog(rule)}
                 />
                 <SettingsActionButton
                   variant="ghost"
                   icon={<Trash2Icon size={14} />}
-                  label="删除"
+                  label={t("editor.retry.actions.delete")}
                   onClick={() => onDeleteRule(rule.index)}
                 />
               </SettingsActionGroup>
@@ -397,11 +431,17 @@ export function RuntimeRetryDomainEditor({
       <ConfigDomainDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        title={editingIndex == null ? "新建 retry 规则" : `编辑规则 #${editingIndex + 1}`}
-        description="维护规则名称、匹配条件和重试参数。未知字段会在保存时继续保留。"
+        title={
+          editingIndex == null
+            ? t("editor.retry.dialog.createTitle")
+            : t("editor.retry.dialog.editTitle", {
+                index: editingIndex + 1,
+              })
+        }
+        description={t("editor.retry.dialog.description")}
         footer={
           <SettingsDialogFooter
-            confirmLabel="保存草稿"
+            confirmLabel={t("editor.retry.actions.saveDraft")}
             onCancel={() => setDialogOpen(false)}
             onConfirm={handleSave}
           />
@@ -427,7 +467,11 @@ export function RuntimeRetryDomainEditor({
             <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
               <div className="text-sm font-semibold text-[var(--foreground)]">enabled</div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
-                <span>{draft.enabled ? "已启用" : "已关闭"}</span>
+                <span>
+                  {draft.enabled
+                    ? t("editor.retry.toggle.enabled")
+                    : t("editor.retry.toggle.disabled")}
+                </span>
                 <input
                   type="checkbox"
                   className="h-4 w-4 accent-[var(--accent-primary)]"
@@ -528,7 +572,10 @@ export function RuntimeRetryDomainEditor({
           </div>
 
           <div className="grid gap-3 md:grid-cols-2">
-            <ConfigFormField label="error_code.codes" description="支持换行或逗号分隔。">
+            <ConfigFormField
+              label="error_code.codes"
+              description={t("editor.retry.fields.listHint")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-28 resize-y`}
                 value={draft.errorCodeCodesText}
@@ -540,7 +587,10 @@ export function RuntimeRetryDomainEditor({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="keyword.values" description="支持换行或逗号分隔。">
+            <ConfigFormField
+              label="keyword.values"
+              description={t("editor.retry.fields.listHint")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-28 resize-y`}
                 value={draft.keywordValuesText}
@@ -555,7 +605,10 @@ export function RuntimeRetryDomainEditor({
           </div>
 
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_11rem]">
-            <ConfigFormField label="keyword.patterns" description="支持换行或逗号分隔。">
+            <ConfigFormField
+              label="keyword.patterns"
+              description={t("editor.retry.fields.listHint")}
+            >
               <textarea
                 className={`${editorControlClassName} min-h-28 resize-y font-mono`}
                 value={draft.keywordPatternsText}
@@ -572,7 +625,11 @@ export function RuntimeRetryDomainEditor({
                 keyword.case_sensitive
               </div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
-                <span>{draft.keywordCaseSensitive ? "区分大小写" : "忽略大小写"}</span>
+                <span>
+                  {draft.keywordCaseSensitive
+                    ? t("editor.retry.caseSensitive.on")
+                    : t("editor.retry.caseSensitive.off")}
+                </span>
                 <input
                   type="checkbox"
                   className="h-4 w-4 accent-[var(--accent-primary)]"
@@ -629,7 +686,10 @@ function createRetryRuleDraft(
   };
 }
 
-function summarizeMatcher(rule: RuntimeRetryRuleSummary) {
+function summarizeMatcher(
+  rule: RuntimeRetryRuleSummary,
+  t: TFunction<"runtimeConfig">,
+) {
   const lines = [
     rule.statusCodeRange ? `status ${rule.statusCodeRange}` : null,
     summarizeTextGroup("codes", rule.errorCodeCodesText),
@@ -638,7 +698,9 @@ function summarizeMatcher(rule: RuntimeRetryRuleSummary) {
     summarizeTextGroup("regex", rule.keywordPatternsText),
   ].filter((value): value is string => Boolean(value));
 
-  return lines.length > 0 ? lines : ["未配置显式匹配条件"];
+  return lines.length > 0
+    ? lines
+    : [t("editor.retry.rules.noExplicitMatchers")];
 }
 
 function summarizeTextGroup(prefix: string, value: string) {

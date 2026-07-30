@@ -14,11 +14,12 @@ import (
 
 // Terminal 终端控制组件
 type Terminal struct {
-	width        int
-	height       int
-	theme        *Theme
-	driver       *TerminalDriver
-	sizeOverride bool
+	width          int
+	height         int
+	theme          *Theme
+	driver         *TerminalDriver
+	sizeOverride   bool
+	sizeProbeCount int // RefreshSize invocations; tests assert paint/layout probe budgets
 }
 
 // NewTerminal 创建新的终端控制组件
@@ -31,14 +32,17 @@ func NewTerminal() *Terminal {
 	return term
 }
 
-// updateSize 更新终端尺寸
+// updateSize 更新终端尺寸。
+//
+// Size-only: full capability refresh (color profile, VT enable, ANSI detect) is
+// reserved for driver construction and explicit Capabilities() callers.
+// Streaming paint / layout probes size frequently and must stay cheap.
 func (t *Terminal) updateSize() {
 	if t.sizeOverride {
 		return
 	}
 	if t.driver != nil {
-		t.driver.RefreshCapabilities()
-		if width, height, err := t.driver.Size(); err == nil {
+		if width, height, err := t.driver.Size(); err == nil && width > 0 && height > 0 {
 			t.width = width
 			t.height = height
 			return
@@ -71,8 +75,18 @@ func (t *Terminal) RefreshSize() (width, height int) {
 	if t == nil {
 		return 80, 24
 	}
+	t.sizeProbeCount++
 	t.updateSize()
 	return t.width, t.height
+}
+
+// SizeProbeCountForTest returns how many times RefreshSize has been called.
+// Used to assert paint/layout paths do not double-probe under one lock hold.
+func (t *Terminal) SizeProbeCountForTest() int {
+	if t == nil {
+		return 0
+	}
+	return t.sizeProbeCount
 }
 
 // Capabilities 返回最近一次探测到的终端能力。
