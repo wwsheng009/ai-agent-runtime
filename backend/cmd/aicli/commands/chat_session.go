@@ -324,7 +324,60 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 		return err
 	}
 	ensureChatSystemPromptMessage(session)
-	return syncRuntimeSessionFromChat(session)
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		return err
+	}
+	// Phase 1: 恢复后回放 canonical 完整转录（session_messages），而不是
+	// 压缩/截断后的热上下文投影（session_prompt_messages）。best-effort：
+	// 后端不支持分页或加载失败时保持投影展示，不阻塞恢复流程。
+	loadResumeCanonicalHistory(session, sessionID)
+	return nil
+}
+
+// loadResumeCanonicalHistory 逐页读取 canonical 完整转录并填充
+// session.ResumeHistory（仅用于展示，不参与模型上下文）。
+// SQLite 等分页后端（SessionStorageHistoryPager）从最新页往前翻页取回全量；
+// 文件/内存等无分页后端保持投影历史不变。
+func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
+	if session == nil || session.SessionManager == nil {
+		return
+	}
+	manager := session.SessionManager
+	if _, ok := manager.GetStorage().(runtimechat.SessionStorageHistoryPager); !ok {
+		return
+	}
+	ctx := context.Background()
+
+	var pages [][]runtimetypes.Message
+	beforeSeq := 0
+	for {
+		page, err := manager.GetHistoryPage(ctx, sessionID, beforeSeq, 0)
+		if err != nil {
+			return
+		}
+		if len(page.Messages) == 0 {
+			break
+		}
+		pages = append(pages, page.Messages)
+		if !page.HasMore {
+			break
+		}
+		beforeSeq = page.NextBeforeSeq
+	}
+	if len(pages) == 0 {
+		return
+	}
+	// pages 从最新页到最早页，页内按 seq 升序；反转页序后展平为
+	// 按时间升序的完整转录。
+	total := 0
+	for _, page := range pages {
+		total += len(page)
+	}
+	messages := make([]runtimetypes.Message, 0, total)
+	for index := len(pages) - 1; index >= 0; index-- {
+		messages = append(messages, pages[index]...)
+	}
+	session.ResumeHistory = messages
 }
 
 func resumeLatestRuntimeConversation(session *ChatSession) error {

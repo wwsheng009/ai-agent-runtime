@@ -769,6 +769,13 @@ func (s *SQLiteSessionStorage) Load(ctx context.Context, sessionID string) (*Ses
 	if session.HeadOffset > len(history) {
 		session.HeadOffset = len(history)
 	}
+	// Lazy legacy-title repair: compaction no longer edits titles and derived
+	// titles are sticky, so repair persisted " · compact #N" markers and
+	// compaction-summary titles on load. The repaired title is persisted on
+	// the next Update (the same lazy-migration model used elsewhere).
+	if needsLegacyTitleRepair(session.Metadata.TitleSource, session.Metadata.Title) {
+		session.refreshDerivedTitle()
+	}
 	return session, nil
 }
 

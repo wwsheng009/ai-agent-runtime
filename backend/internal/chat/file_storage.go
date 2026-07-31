@@ -470,6 +470,9 @@ func (p *fileSessionPreviewText) observe(message types.Message) {
 		return
 	}
 	p.lastContent = summarizeSessionText(content, sessionSummaryLimit)
+	if isContextManagementArtifact(message) {
+		return
+	}
 	switch strings.ToLower(strings.TrimSpace(message.Role)) {
 	case "user":
 		if p.firstUser == "" && !shouldIgnoreDerivedTitleContent(content) {
@@ -499,14 +502,32 @@ func (p *fileSessionPreviewText) apply(metadata *SessionMetadata) {
 		derivedTitle = p.firstOther
 	}
 	title := strings.TrimSpace(metadata.Title)
-	// Manual and compact-inherited titles are sticky; do not re-derive from
-	// compaction summary / first user message on load.
-	if metadata.TitleSource != sessionTitleSourceManual &&
-		metadata.TitleSource != sessionTitleSourceCompact &&
-		(title == "" || metadata.TitleSource == sessionTitleSourceDerived || shouldRepairLegacyDerivedTitle(title)) {
-		metadata.Title = derivedTitle
-		if derivedTitle != "" {
+
+	switch metadata.TitleSource {
+	case sessionTitleSourceManual:
+		// Manual titles are sticky; only trim a stale compact marker.
+		if cleaned, changed := repairCompactTitleMarker(title); changed {
+			metadata.Title = cleaned
+		}
+	case sessionTitleSourceCompact:
+		// Legacy compact titles embed " · compact #N"; compaction no longer
+		// edits titles, so strip the marker and keep the root title.
+		if cleaned, changed := repairCompactTitleMarker(title); changed {
+			metadata.Title = cleaned
 			metadata.TitleSource = sessionTitleSourceDerived
+		}
+	default:
+		// Derived titles are sticky: only re-derive when the stored title is
+		// empty or is legacy pollution (instruction/compact summary).
+		if cleaned, changed := repairCompactTitleMarker(title); changed {
+			metadata.Title = cleaned
+			title = cleaned
+		}
+		if title == "" || shouldRepairLegacyDerivedTitle(title) {
+			metadata.Title = derivedTitle
+			if derivedTitle != "" {
+				metadata.TitleSource = sessionTitleSourceDerived
+			}
 		}
 	}
 	if strings.TrimSpace(metadata.Summary) == "" {

@@ -68,6 +68,11 @@ func appendRuntimeMessage(session *ChatSession, message runtimetypes.Message) {
 		return
 	}
 	session.Messages = append(session.Messages, *message.Clone())
+	// 恢复后的 canonical 展示历史与投影保持同步，使继续对话的新消息
+	// 也能出现在完整历史回放中。
+	if session.ResumeHistory != nil {
+		session.ResumeHistory = append(session.ResumeHistory, *message.Clone())
+	}
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 }
 
@@ -81,6 +86,9 @@ func replaceRuntimeMessages(session *ChatSession, messages []runtimetypes.Messag
 		}
 	}
 	session.Messages = cloneRuntimeMessages(messages)
+	// 上下文整体替换（压缩/恢复）后，旧展示快照不再可信：恢复路径会
+	// 重新从 canonical 转录加载完整历史，压缩路径则保持投影展示。
+	session.ResumeHistory = nil
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	return nil
 }
@@ -146,7 +154,16 @@ func hasVisibleChatHistory(session *ChatSession) bool {
 }
 
 func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
-	if session == nil || len(session.Messages) == 0 {
+	if session == nil {
+		return nil
+	}
+	// 恢复会话后优先回放 canonical 完整转录；未恢复（或后端不支持
+	// canonical 分页）时回退到模型热上下文投影。
+	source := session.Messages
+	if len(session.ResumeHistory) > 0 {
+		source = session.ResumeHistory
+	}
+	if len(source) == 0 {
 		return nil
 	}
 
@@ -156,8 +173,8 @@ func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
 	hiddenSystemPrompt := strings.TrimSpace(composeDurableChatSystemPromptWithGuidance(session))
 	outboundSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 	rawSystemPrompt := strings.TrimSpace(session.SystemPromptText)
-	messages := make([]runtimetypes.Message, 0, len(session.Messages))
-	for _, message := range session.Messages {
+	messages := make([]runtimetypes.Message, 0, len(source))
+	for _, message := range source {
 		if !isVisibleChatHistoryMessage(session, message, hiddenSystemPrompt, rawSystemPrompt) {
 			continue
 		}

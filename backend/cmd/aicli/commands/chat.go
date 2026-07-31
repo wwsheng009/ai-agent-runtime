@@ -59,8 +59,14 @@ type ChatSession struct {
 	Stream                   bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
 	FastMode                        bool
-	BaseURL                         string
-	Messages                        []runtimetypes.Message
+	BaseURL string
+	// Messages 是当前模型热上下文投影（压缩/截断后 ≤ HotHistoryMessages 条）。
+	Messages []runtimetypes.Message
+	// ResumeHistory 是恢复会话后用于展示的 canonical 完整转录
+	// （append-only session_messages 全量回放）。它与 Messages 严格分离：
+	// 模型上下文始终使用 Messages，ResumeHistory 只供用户可见的历史回放
+	// （/resume、启动恢复等），避免把完整长对话塞进模型上下文。
+	ResumeHistory                   []runtimetypes.Message
 	HTTPClient                      *http.Client
 	cancelCtx                       context.Context               // 可取消的上下文
 	cancelFunc                      context.CancelFunc            // 取消函数

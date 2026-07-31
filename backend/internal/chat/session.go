@@ -312,9 +312,12 @@ func (s *Session) CompactRootTitleCandidate() string {
 	return stripCompactTitleMarker(title)
 }
 
-// ApplyCompactTitleLineage records compact parent/root linkage and sets the
-// display title to "{rootTitle} · compact #N". parentSessionID is the session
-// that was compacted to produce the current history (usually the same ID when
+// ApplyCompactTitleLineage records compact parent/root linkage + generation for
+// diagnostics. It intentionally does NOT rewrite the display title: compaction
+// is a model-context operation and must never change what the user sees as the
+// session title. Legacy titles that already embed the old " · compact #N"
+// marker are repaired to their root title. parentSessionID is the session that
+// was compacted to produce the current history (usually the same ID when
 // compact rewrites in place). rootTitleHint should be captured before history
 // rewrite (see CompactRootTitleCandidate); when empty, existing lineage context
 // or the current title is used.
@@ -356,15 +359,37 @@ func (s *Session) ApplyCompactTitleLineage(parentSessionID, rootTitleHint string
 	}
 	generation++
 
-	title := formatCompactChildTitle(rootTitle, generation)
-	s.Metadata.Title = title
-	s.Metadata.TitleSource = sessionTitleSourceCompact
+	// Compaction never rewrites the user-visible title. Repair legacy titles
+	// that still embed the old " · compact #N" marker (manual titles are left
+	// untouched so a user-typed marker survives).
+	if s.Metadata.TitleSource != sessionTitleSourceManual {
+		if cleaned, changed := repairCompactTitleMarker(strings.TrimSpace(s.Metadata.Title)); changed {
+			s.Metadata.Title = cleaned
+			if s.Metadata.TitleSource == sessionTitleSourceCompact {
+				s.Metadata.TitleSource = sessionTitleSourceDerived
+			}
+		}
+	}
 	s.SetContext(ContextCompactRootTitle, rootTitle)
 	s.SetContext(ContextCompactRootSessionID, rootSessionID)
 	s.SetContext(ContextCompactParentSessionID, parentSessionID)
 	s.SetContext(ContextCompactSourceSessionID, parentSessionID)
 	s.SetContext(ContextCompactGeneration, generation)
 	s.UpdatedAt = time.Now()
+}
+
+// repairCompactTitleMarker strips a legacy " · compact #N" marker from a title
+// and reports whether the title changed. Compaction no longer edits titles, so
+// any marker found in persisted data is legacy and can be safely removed.
+func repairCompactTitleMarker(title string) (string, bool) {
+	cleaned := stripCompactTitleMarker(strings.TrimSpace(title))
+	if cleaned == title {
+		return title, false
+	}
+	if cleaned == "" {
+		cleaned = "(untitled)"
+	}
+	return cleaned, true
 }
 
 func formatCompactChildTitle(rootTitle string, generation int) string {
@@ -696,14 +721,36 @@ func (s *Session) refreshDerivedMetadata() {
 }
 
 func (s *Session) refreshDerivedTitle() {
-	derivedTitle := s.derivedTitle()
 	currentTitle := strings.TrimSpace(s.Metadata.Title)
 	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
-	// Manual and compact-inherited titles are sticky across history rewrites
-	// (including ReplaceHistory after compact).
-	if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
+
+	// Manual titles are always sticky across history rewrites.
+	if titleSource == sessionTitleSourceManual {
 		return
 	}
+
+	// Repair legacy " · compact #N" markers: compaction no longer edits titles.
+	// This also migrates titles persisted by the old in-place lineage scheme.
+	if cleaned, changed := repairCompactTitleMarker(currentTitle); changed {
+		s.Metadata.Title = cleaned
+		currentTitle = cleaned
+		if titleSource == sessionTitleSourceCompact {
+			titleSource = sessionTitleSourceDerived
+			s.Metadata.TitleSource = titleSource
+		}
+	}
+	if titleSource == sessionTitleSourceCompact {
+		return
+	}
+
+	// A non-empty derived title is sticky: compaction and other history
+	// rewrites must not re-derive the title from surviving messages. Legacy
+	// titles that are actually compaction summaries are still repaired below.
+	if currentTitle != "" && titleSource == sessionTitleSourceDerived && !shouldRepairLegacyDerivedTitle(currentTitle) {
+		return
+	}
+
+	derivedTitle := s.derivedTitle()
 	if strings.TrimSpace(derivedTitle) == "" {
 		if currentTitle != "" && shouldRepairLegacyDerivedTitle(currentTitle) {
 			s.Metadata.Title = ""
@@ -724,21 +771,46 @@ func (s *Session) effectiveTitle() string {
 	currentTitle := strings.TrimSpace(s.Metadata.Title)
 	derivedTitle := s.derivedTitle()
 	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
-	if currentTitle == "" {
-		if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
-			return ""
+
+	// Manual titles are always sticky.
+	if titleSource == sessionTitleSourceManual {
+		return currentTitle
+	}
+
+	// Legacy compact titles embed " · compact #N"; strip the marker so lists
+	// show the stable root title (compaction no longer edits titles). Manual
+	// titles are excluded above so a user-typed marker survives.
+	if cleaned, changed := repairCompactTitleMarker(currentTitle); changed {
+		currentTitle = cleaned
+		if titleSource == sessionTitleSourceCompact {
+			titleSource = sessionTitleSourceDerived
 		}
+	}
+	if titleSource == sessionTitleSourceCompact {
+		return currentTitle
+	}
+
+	if currentTitle == "" {
 		return derivedTitle
 	}
 
-	if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
+	if titleSource == sessionTitleSourceDerived {
+		// Sticky derived titles: keep the stored title unless it is a legacy
+		// compaction summary that should be repaired to a real message.
+		if shouldRepairLegacyDerivedTitle(currentTitle) {
+			if strings.TrimSpace(derivedTitle) != "" {
+				return derivedTitle
+			}
+			return ""
+		}
 		return currentTitle
 	}
-	if titleSource == sessionTitleSourceDerived || shouldRepairLegacyDerivedTitle(currentTitle) {
+
+	if shouldRepairLegacyDerivedTitle(currentTitle) {
 		if strings.TrimSpace(derivedTitle) != "" {
 			return derivedTitle
 		}
-		if shouldRepairLegacyDerivedTitle(currentTitle) && titleSource != sessionTitleSourceManual && titleSource != sessionTitleSourceCompact {
+		if strings.TrimSpace(currentTitle) != "" {
 			return ""
 		}
 	}
@@ -761,6 +833,9 @@ func (s *Session) titleSourceContent() string {
 			if !strings.EqualFold(strings.TrimSpace(msg.Role), role) {
 				continue
 			}
+			if isContextManagementArtifact(msg) {
+				continue
+			}
 			if content := strings.TrimSpace(msg.Content); content != "" && !shouldIgnoreDerivedTitleContent(content) {
 				return content
 			}
@@ -769,6 +844,9 @@ func (s *Session) titleSourceContent() string {
 
 	for _, msg := range history {
 		if isInstructionMessageRole(msg.Role) || strings.EqualFold(strings.TrimSpace(msg.Role), "tool") {
+			continue
+		}
+		if isContextManagementArtifact(msg) {
 			continue
 		}
 		if content := strings.TrimSpace(msg.Content); content != "" && !shouldIgnoreDerivedTitleContent(content) {
@@ -792,6 +870,39 @@ func shouldRepairLegacyDerivedTitle(title string) bool {
 	return shouldIgnoreDerivedTitleContent(title)
 }
 
+// isContextManagementArtifact reports whether a message is a synthetic
+// context-management artifact (compaction summaries, recall/ledger/workspace
+// snapshots, corrections, todo state, ...) rather than a real conversational
+// message. Such messages must never drive derived titles or previews.
+func isContextManagementArtifact(msg types.Message) bool {
+	if stage := strings.TrimSpace(msg.Metadata.GetString("context_stage", "")); stage != "" {
+		return true
+	}
+	content := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(msg.Content)), " "))
+	return strings.HasPrefix(content, "compacted context from earlier turns:")
+}
+
+// needsLegacyTitleRepair reports whether a persisted title requires the lazy
+// legacy-title repair on load: compact markers ("title · compact #N"), titles
+// derived from compaction summaries, or instruction-pollution titles that
+// survived older writes. Manual titles are always left untouched.
+func needsLegacyTitleRepair(source, title string) bool {
+	if strings.TrimSpace(source) == sessionTitleSourceManual {
+		return false
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	if strings.TrimSpace(source) == sessionTitleSourceCompact {
+		return true
+	}
+	if cleaned := stripCompactTitleMarker(title); cleaned != title {
+		return true
+	}
+	return shouldRepairLegacyDerivedTitle(title)
+}
+
 func shouldIgnoreDerivedTitleContent(content string) bool {
 	if strings.TrimSpace(content) == "" {
 		return false
@@ -813,6 +924,10 @@ func shouldIgnoreDerivedTitleContent(content string) bool {
 	case strings.HasPrefix(normalized, "exit code:") && strings.Contains(normalized, " shell:"):
 		return true
 	case strings.HasPrefix(normalized, "runtime tool result contract:"):
+		return true
+	case strings.HasPrefix(normalized, "compacted context from earlier turns:"):
+		return true
+	case strings.HasPrefix(normalized, "compacted context from earlier turns (continued):"):
 		return true
 	default:
 		return false
