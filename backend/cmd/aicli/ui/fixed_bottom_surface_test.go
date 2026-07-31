@@ -2964,12 +2964,16 @@ func TestFixedBottomSurface_AdoptSoftOutputTailRebasesWindow(t *testing.T) {
 		t.Fatal("precondition: soft tail should be trimmed")
 	}
 
-	adopted := []string{"only-a", "only-b"}
+	history := surface.HistoryWindowForTest()
+	if len(history) < 2 {
+		t.Fatalf("history too short for suffix adoption: %q", history)
+	}
+	adopted := append([]string(nil), history[len(history)-2:]...)
 	surface.AdoptSoftOutputTail(adopted)
 	if surface.SoftOutputTailTrimmed() {
 		t.Fatal("adopt should clear trimmed flag for the rebased window")
 	}
-	if got := surface.SoftOutputTailLines(); len(got) != 2 || got[0] != "only-a" || got[1] != "only-b" {
+	if got := surface.SoftOutputTailLines(); len(got) != 2 || got[0] != adopted[0] || got[1] != adopted[1] {
 		t.Fatalf("adopted soft lines=%#v", got)
 	}
 	if !surface.SoftOutputTailValid() {

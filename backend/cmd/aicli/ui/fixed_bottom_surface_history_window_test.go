@@ -212,6 +212,175 @@ func TestFixedBottomSurface_ActiveBandGrowthHandsNewlyHiddenHistoryToScrollback(
 	}
 }
 
+func TestFixedBottomSurface_SoftPartialWritesCoalesceBeforeRewrite(t *testing.T) {
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
+	captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteSoftTrackedOutput(io.Discard, "foo"); !ok || err != nil {
+			t.Fatalf("first soft write: ok=%t err=%v", ok, err)
+		}
+		if _, err, ok := surface.WriteSoftTrackedOutput(io.Discard, "bar\n"); !ok || err != nil {
+			t.Fatalf("second soft write: ok=%t err=%v", ok, err)
+		}
+	})
+	if got := surface.HistoryWindowForTest(); len(got) != 1 || got[0] != "foobar" {
+		t.Fatalf("history=%q want [foobar]", got)
+	}
+	if got := surface.SoftOutputTailLines(); len(got) != 1 || got[0] != "foobar" {
+		t.Fatalf("soft tail=%q want [foobar]", got)
+	}
+
+	captureUIStdout(t, func() {
+		if !surface.RewriteSoftOutputTail(io.Discard, []string{"replacement"}) {
+			t.Fatal("coalesced soft suffix should remain rewriteable")
+		}
+	})
+	if got := surface.HistoryWindowForTest(); len(got) != 1 || got[0] != "replacement" {
+		t.Fatalf("rewritten history=%q want [replacement]", got)
+	}
+}
+
+func TestFixedBottomSurface_RejectsBogusSoftSuffixWithoutDestroyingHistory(t *testing.T) {
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
+	captureUIStdout(t, func() {
+		if _, err, ok := surface.WriteSoftTrackedOutput(io.Discard, "committed\n"); !ok || err != nil {
+			t.Fatalf("soft write: ok=%t err=%v", ok, err)
+		}
+	})
+	before := strings.Join(surface.HistoryWindowForTest(), "\n")
+
+	surface.AdoptSoftOutputTail([]string{"bogus"})
+	if surface.SoftOutputTailValid() {
+		t.Fatal("non-suffix adoption must not create rewrite ownership")
+	}
+	if surface.RewriteSoftOutputTail(io.Discard, []string{"replacement"}) {
+		t.Fatal("rewrite must fail after non-suffix adoption")
+	}
+	if got := strings.Join(surface.HistoryWindowForTest(), "\n"); got != before {
+		t.Fatalf("failed soft validation mutated history: got %q want %q", got, before)
+	}
+	if frame := frameDump(surface.ComposedFrameForTest()); !strings.Contains(frame, "committed") {
+		t.Fatalf("committed history disappeared from composed frame:\n%s", frame)
+	}
+}
+
+func TestFixedBottomSurface_ActiveBandHandoffFreezesSoftHistory(t *testing.T) {
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+	})
+	visible := surface.visibleOutputRowsForTest()
+	captureUIStdout(t, func() {
+		for i := 0; i < visible; i++ {
+			if _, err, ok := surface.WriteSoftTrackedOutput(io.Discard, fmt.Sprintf("soft-%d\n", i)); !ok || err != nil {
+				t.Fatalf("soft write %d: ok=%t err=%v", i, ok, err)
+			}
+		}
+	})
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("precondition: visible soft history should still be rewriteable")
+	}
+	before := strings.Join(surface.HistoryWindowForTest(), "\n")
+
+	captureUIStdout(t, func() {
+		surface.SetActiveBand([]string{"• Running grep"})
+	})
+	if surface.HistoryHandedOffForTest() < 1 {
+		t.Fatal("precondition: ActiveBand growth should hand history to scrollback")
+	}
+	if surface.SoftOutputTailValid() {
+		t.Fatal("handoff crossing the soft window must freeze rewrite ownership")
+	}
+	if surface.RewriteSoftOutputTail(io.Discard, []string{"tampered"}) {
+		t.Fatal("already handed-off history must not be rewriteable")
+	}
+	if got := strings.Join(surface.HistoryWindowForTest(), "\n"); got != before {
+		t.Fatalf("handoff followed by rewrite changed history: got %q want %q", got, before)
+	}
+}
+
+func TestFixedBottomSurface_WrappedHistoryDefersLogicalLineHandoff(t *testing.T) {
+	const width, height = 12, 20
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+	})
+	visible := surface.visibleOutputRowsForTest()
+	total := visible + 8
+	longLine := strings.Repeat("x", width+5)
+
+	output := captureUIStdout(t, func() {
+		for i := 0; i < total; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("%s-%02d\n", longLine, i))
+		}
+	})
+
+	history := surface.HistoryWindowForTest()
+	if len(surface.HistoryRowsSnapshot()) <= len(history) {
+		t.Fatalf("precondition: wrapped history has physical=%d logical=%d", len(surface.HistoryRowsSnapshot()), len(history))
+	}
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("wrapped logical history advanced handoff boundary to %d", got)
+	}
+	if len(history) != total {
+		t.Fatalf("wrapped history was trimmed before safe handoff: got %d lines want %d", len(history), total)
+	}
+	if sequence := terminalScrollRegionSequence(1, surface.visibleOutputRowsForTest()); strings.Contains(output, sequence) {
+		t.Fatalf("wrapped logical lines must not use row-unsafe native handoff %q", sequence)
+	}
+	for i, line := range history {
+		want := fmt.Sprintf("%s-%02d", longLine, i)
+		if line != want {
+			t.Fatalf("history[%d]=%q want %q", i, line, want)
+		}
+	}
+}
+
+func TestFixedBottomSurface_WrappedHistorySurvivesNormalHardCap(t *testing.T) {
+	const width, height = 12, 20
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
+	total := historyWindowMaxLines + 5
+	longLine := strings.Repeat("界", width)
+
+	surface.mu.Lock()
+	for i := 0; i < total; i++ {
+		surface.appendHistoryWindowLocked(fmt.Sprintf("%s-%03d\n", longLine, i))
+	}
+	surface.mu.Unlock()
+
+	history := surface.HistoryWindowForTest()
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("wrapped history advanced handoff boundary to %d", got)
+	}
+	if len(history) != total {
+		t.Fatalf("unhanded wrapped history was discarded at normal cap: got %d lines want %d", len(history), total)
+	}
+	if history[0] != fmt.Sprintf("%s-%03d", longLine, 0) {
+		t.Fatalf("oldest unhanded line changed: %q", history[0])
+	}
+	if history[len(history)-1] != fmt.Sprintf("%s-%03d", longLine, total-1) {
+		t.Fatalf("newest unhanded line changed: %q", history[len(history)-1])
+	}
+}
+
+func TestFixedBottomSurface_FailedHistoryInsertDoesNotAdvanceBoundary(t *testing.T) {
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
+	surface.mu.Lock()
+	surface.historyWindow = []string{"oldest", "middle", "newest"}
+	surface.terminal.sizeOverride = true
+	surface.terminal.width = 0
+	surface.terminal.height = 3
+	surface.commitExcessHistoryToScrollbackLocked()
+	got := surface.historyHandedOff
+	surface.mu.Unlock()
+
+	if got != 0 {
+		t.Fatalf("invalid terminal geometry advanced handoff boundary to %d", got)
+	}
+	if history := surface.HistoryWindowForTest(); strings.Join(history, "|") != "oldest|middle|newest" {
+		t.Fatalf("failed handoff changed retained history: %q", history)
+	}
+}
+
 // TestFixedBottomSurface_OwnedPathPaintsVisibleHistory pins that committed
 // WriteOutput lines appear in the owned frame's output region (not only the
 // bottom band). This is the "history still not visible" regression.
