@@ -135,17 +135,25 @@ func readBacktrackTurnPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		return nil, nil
 	}
 
-	surfaceEnabled := session != nil && session.Surface != nil && session.Surface.Enabled()
+	var lease ui.ScreenLease
+	if session != nil && session.Surface != nil && session.Surface.Enabled() {
+		// Suspend the primary presenter while the picker owns the alternate
+		// screen; release repaints from retained state.
+		var acquireErr error
+		lease, acquireErr = session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+			Title: "回退到历史 user turn",
+		})
+		if acquireErr != nil && errors.Is(acquireErr, ui.ErrScreenLeaseBusy) {
+			return nil, acquireErr
+		}
+	}
 	if session != nil && session.Interaction != nil {
 		session.Interaction.ClearPrompt()
 		session.Interaction.ResetPromptState()
 	}
-	if surfaceEnabled {
-		session.Surface.Disable()
-	}
 	defer func() {
-		if surfaceEnabled {
-			session.Surface.Enable()
+		if lease != nil {
+			_ = lease.Release(context.Background())
 		}
 		if session != nil && session.Interaction != nil {
 			session.Interaction.ResetPromptState()
@@ -153,13 +161,13 @@ func readBacktrackTurnPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		}
 	}()
 
-	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "回退到历史 user turn",
 		Subtitle:     formatBacktrackPickerSubtitle(len(turns)),
 		EmptyMessage: "没有匹配的 user turn",
 		ConfirmLabel: "回退到选中 turn（截断其后历史）",
 		Items:        items,
-	})
+	}, lease)
 	if err != nil {
 		return nil, err
 	}

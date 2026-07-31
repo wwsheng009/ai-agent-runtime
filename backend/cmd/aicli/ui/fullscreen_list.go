@@ -83,6 +83,11 @@ type fullScreenListLoopHooks struct {
 type fullScreenListLifecycle struct {
 	writer     io.Writer
 	restoreRaw func() error
+	// leaseManaged is true when the caller already holds an alternate-screen
+	// lease whose Acquire/Release owns the DEC 1049 enter/exit sequences. The
+	// list then skips its own screen sequences (writing them twice would
+	// desync the alternate buffer) and keeps stdin raw-mode handling.
+	leaseManaged bool
 }
 
 // CanUseFullScreenList reports whether the current process has an ANSI TTY.
@@ -96,10 +101,19 @@ func CanUseFullScreenList(terminal *Terminal) bool {
 
 // SelectFullScreenList opens an alternate-screen list and restores the terminal on exit.
 func SelectFullScreenList(ctx context.Context, terminal *Terminal, options FullScreenListOptions) (FullScreenListResult, error) {
-	return selectFullScreenList(ctx, terminal, options, os.Stdin, os.Stdout)
+	return selectFullScreenList(ctx, terminal, options, os.Stdin, os.Stdout, false)
 }
 
-func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullScreenListOptions, reader io.Reader, writer io.Writer) (FullScreenListResult, error) {
+// SelectFullScreenListWithLease opens an alternate-screen list while an
+// alternate-screen lease is already active. The lease owns the DEC 1049
+// enter/exit sequences (see FixedBottomSurface.AcquireAlternateScreen), so the
+// list only manages stdin raw mode and the picker frames. Pass the lease the
+// caller acquired; passing nil behaves exactly like SelectFullScreenList.
+func SelectFullScreenListWithLease(ctx context.Context, terminal *Terminal, options FullScreenListOptions, lease ScreenLease) (FullScreenListResult, error) {
+	return selectFullScreenList(ctx, terminal, options, os.Stdin, os.Stdout, lease != nil && lease.Active())
+}
+
+func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullScreenListOptions, reader io.Reader, writer io.Writer, leaseManaged bool) (FullScreenListResult, error) {
 	if terminal == nil || !terminal.SupportsANSI() || reader == nil || writer == nil {
 		return FullScreenListResult{}, ErrFullScreenUnavailable
 	}
@@ -143,6 +157,7 @@ func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullS
 		restoreRaw: func() error {
 			return term.Restore(int(stdinFile.Fd()), rawState)
 		},
+		leaseManaged: leaseManaged,
 	}
 	result, key, err := runFullScreenListSession(ctx, options, hooks, lifecycle)
 	if err == nil && key.kind == editorKeyEnter && shouldDrainTrailingLineFeedAfterSubmit(key, false, nil) {
@@ -253,6 +268,12 @@ func nextFullScreenListKey(ctx context.Context, reader io.Reader, pending *[]byt
 }
 
 func (lifecycle fullScreenListLifecycle) enter() error {
+	if lifecycle.leaseManaged {
+		// The lease already entered the alternate screen atomically with the
+		// primary flush suspension; writing the sequence again would tear the
+		// current alternate buffer.
+		return nil
+	}
 	return writeFullScreenSequences(lifecycle.writer,
 		"\x1b[?1049h",
 		"\x1b[r",
@@ -263,11 +284,16 @@ func (lifecycle fullScreenListLifecycle) enter() error {
 }
 
 func (lifecycle fullScreenListLifecycle) close() error {
-	writeErr := writeFullScreenSequences(lifecycle.writer,
-		"\x1b[?25h",
-		"\x1b[r",
-		"\x1b[?1049l",
-	)
+	var writeErr error
+	if !lifecycle.leaseManaged {
+		// The lease will emit the exit sequence during Release together with
+		// the primary repaint; only stdin raw mode is restored here.
+		writeErr = writeFullScreenSequences(lifecycle.writer,
+			"\x1b[?25h",
+			"\x1b[r",
+			"\x1b[?1049l",
+		)
+	}
 	var rawErr error
 	if lifecycle.restoreRaw != nil {
 		rawErr = lifecycle.restoreRaw()

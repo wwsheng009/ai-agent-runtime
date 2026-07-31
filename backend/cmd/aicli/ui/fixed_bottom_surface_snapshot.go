@@ -70,6 +70,11 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 	if s == nil || s.terminal == nil || !s.enabled || !s.ownedViewport {
 		return
 	}
+	if s.leaseID != 0 {
+		// Alternate-screen lease active: primary flush is suspended; state
+		// is retained and replayed by the release repaint.
+		return
+	}
 	width, height := s.terminal.Width(), s.terminal.Height()
 	if width < 1 {
 		width = 80
@@ -109,6 +114,7 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 	))
 	if diff := s.viewportBackend.Flush(); diff != "" {
 		fmt.Print(diff)
+		s.ownedFrameFlushCount++
 	}
 }
 

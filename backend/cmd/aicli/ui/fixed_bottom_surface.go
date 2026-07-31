@@ -84,10 +84,22 @@ func activeBandTopGap(terminalHeight int) int {
 // FixedBottomSurface reserves the last terminal row for lightweight status
 // while normal chat output scrolls in the region above it.
 type FixedBottomSurface struct {
-	terminal               *Terminal
-	mu                     sync.Mutex
-	enabled                bool
-	testMode               bool
+	terminal *Terminal
+	mu       sync.Mutex
+	enabled  bool
+	testMode bool
+	// leaseID != 0 while an alternate-screen lease (ScreenLease) suspends
+	// primary flushing; leaseMode records the granted screen mode.
+	leaseID   uint64
+	leaseMode ScreenMode
+	// alternateWriter is the byte sink for the DEC 1049 enter/exit sequences
+	// the lease owns. nil means os.Stdout (production). Tests inject a buffer
+	// to assert the sequence boundary around the picker frame.
+	alternateWriter io.Writer
+	// ownedFrameFlushCount counts frames actually emitted by the owned
+	// viewport renderer. Exposed for lease tests that assert flush
+	// suppression while an alternate-screen lease is active.
+	ownedFrameFlushCount   int
 	statusModel            *style.StatusLineModel
 	dynamicStatusModel     *style.StatusLineModel
 	popupLines             []string
@@ -215,6 +227,9 @@ func (s *FixedBottomSurface) Enable() bool {
 	if !s.canEnableLocked() {
 		return false
 	}
+	if s.leaseID != 0 {
+		return false
+	}
 	s.enabled = true
 	s.testMode = false
 	s.ownedViewport = true
@@ -291,14 +306,37 @@ func (s *FixedBottomSurface) Disable() {
 	if !s.enabled {
 		return
 	}
-	WithTerminalWriteLock(func() {
-		s.terminal.SaveCursor()
-		s.terminal.ResetScrollRegion()
-		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-		s.terminal.MoveTo(s.statusRowLocked(), 1)
-		s.terminal.ClearLine()
-		s.terminal.RestoreCursor()
-	})
+	// Process teardown during an active lease must not paint into the
+	// alternate screen; the pending Release becomes a no-op afterwards.
+	leased := s.leaseID != 0
+	if leased {
+		writer := s.alternateWriter
+		if writer == nil {
+			if s.testMode {
+				writer = io.Discard
+			} else {
+				writer = os.Stdout
+			}
+		}
+		// Disable owns teardown when the surface is shut down while a modal
+		// lease is open. Do not invalidate the lease id before emitting the
+		// exit sequence, otherwise the handle's later Release cannot clean up.
+		WithTerminalWriteLock(func() {
+			_ = writeLeaseSequencesLocked(writer, "\x1b[?25h", "\x1b[r", "\x1b[?1049l")
+		})
+		s.leaseID = 0
+		s.leaseMode = ScreenModePrimary
+	}
+	if !leased {
+		WithTerminalWriteLock(func() {
+			s.terminal.SaveCursor()
+			s.terminal.ResetScrollRegion()
+			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+			s.terminal.MoveTo(s.statusRowLocked(), 1)
+			s.terminal.ClearLine()
+			s.terminal.RestoreCursor()
+		})
+	}
 	s.clearPopupRenderStateLocked()
 	s.clearPopupStateLocked(true)
 	s.clearComposerStateLocked()
@@ -419,6 +457,11 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.enabled {
+		return
+	}
+	if s.leaseID != 0 {
+		// Alternate-screen lease active: primary flush is suspended; the
+		// release repaint recomposes the frame from retained state.
 		return
 	}
 	WithTerminalWriteLock(func() {
@@ -612,6 +655,9 @@ func (s *FixedBottomSurface) PromptCursorPrefix(rowOffset, col int) (string, boo
 	if !s.enabled {
 		return "", false
 	}
+	if s.leaseID != 0 {
+		return "", false
+	}
 	var builder strings.Builder
 	s.appendApplyLayoutSequenceLocked(&builder)
 	row, column, ok := s.promptCursorPositionLocked(rowOffset, col)
@@ -634,6 +680,11 @@ func (s *FixedBottomSurface) WritePromptEditorText(writer io.Writer, rowOffset, 
 	defer s.mu.Unlock()
 	if !s.enabled {
 		return false
+	}
+	if s.leaseID != 0 {
+		// The alternate presenter owns physical output. Report handled so
+		// callers do not fall back to an unsynchronized raw editor write.
+		return true
 	}
 	handled := false
 	WithTerminalWriteLock(func() {
@@ -698,6 +749,11 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 			s.outputCursorOnBlankRow = strings.HasSuffix(output, "\n")
 			s.outputScrollDebtRows = 0
 			s.pendingScrollDownRows = 0
+			if s.leaseID != 0 {
+				// Lease active: retain state only; the release repaint
+				// flushes the frame.
+				return
+			}
 			s.renderOwnedViewportLocked()
 			// Live TTY paint already went through the double-buffer above. Mirror
 			// plain text only to non-stdout writers so buffer/file capture paths
@@ -710,6 +766,10 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 				}
 			}
 			s.restoreStoredPromptCursorLocked()
+			return
+		}
+		if s.leaseID != 0 {
+			// Lease active: absorb legacy-mode writes without emitting bytes.
 			return
 		}
 		s.applyLayoutLocked()
@@ -918,6 +978,11 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		s.commitExcessHistoryToScrollbackLocked()
 		s.outputCursorOnBlankRow = false
 		s.outputScrollDebtRows = 0
+		if s.leaseID != 0 {
+			// Retain the rewritten soft tail without touching the alternate
+			// screen. Release will repaint the latest owned frame.
+			return true
+		}
 		WithTerminalWriteLock(func() {
 			s.renderOwnedViewportLocked()
 			s.restoreStoredPromptCursorLocked()
@@ -1238,6 +1303,11 @@ func (s *FixedBottomSurface) ShowPrompt(line string) bool {
 	s.promptReservedRows = 1
 	s.promptViewportStart = 0
 	s.setPromptCursorToLineEndLocked(line)
+	if s.leaseID != 0 {
+		// Retain the updated prompt while the alternate presenter owns the
+		// terminal. Release will repaint it on the primary screen.
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -1443,6 +1513,9 @@ func (s *FixedBottomSurface) repaintActiveBandDiffLocked(start int, previousLine
 	if !s.enabled || start < 1 {
 		return false
 	}
+	if s.leaseID != 0 {
+		return true
+	}
 	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
 	WithTerminalWriteLock(func() {
 		if restorePromptCursor {
@@ -1511,6 +1584,9 @@ func (s *FixedBottomSurface) RefreshActiveBand() bool {
 
 func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 	if !s.enabled {
+		return false
+	}
+	if s.leaseID != 0 {
 		return false
 	}
 	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
@@ -2321,6 +2397,9 @@ func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 	if !s.enabled {
 		return
 	}
+	if s.leaseID != 0 {
+		return
+	}
 	restorePromptCursor := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
 	WithTerminalWriteLock(func() {
 		if restorePromptCursor {
@@ -2667,6 +2746,9 @@ func (s *FixedBottomSurface) applyLayoutLocked() {
 		s.applyOwnedViewportGeometryLocked(width, height)
 		return
 	}
+	if s.leaseID != 0 {
+		return
+	}
 	var builder strings.Builder
 	s.appendApplyLayoutSequenceLocked(&builder)
 	if builder.Len() > 0 {
@@ -2680,6 +2762,9 @@ func (s *FixedBottomSurface) applyLayoutLocked() {
 func (s *FixedBottomSurface) applyLayoutWithSizeLocked(width, height int) {
 	if s.ownedViewport {
 		s.applyOwnedViewportGeometryLocked(width, height)
+		return
+	}
+	if s.leaseID != 0 {
 		return
 	}
 	var builder strings.Builder
@@ -2814,7 +2899,9 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 		// newly hidden rows to native scrollback before the full-frame repaint;
 		// otherwise they exist only in the retained window and appear clipped
 		// until the transient pane shrinks again.
-		s.commitExcessHistoryToScrollbackLocked()
+		if s.leaseID == 0 {
+			s.commitExcessHistoryToScrollbackLocked()
+		}
 	}
 	// Owned frames recompose history+bottom from application state, so the
 	// legacy scroll-compensation bookkeeping is inert. Only a real terminal
@@ -2830,7 +2917,9 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	// DECSTBM region. Reset before the first/resize repaint so the status row and
 	// other bottom-pane rows are writable in the host terminal and vt.Screen.
 	if sizeChanged || s.viewportBackend == nil {
-		s.terminal.ResetScrollRegion()
+		if s.leaseID == 0 {
+			s.terminal.ResetScrollRegion()
+		}
 	}
 	if s.viewportBackend == nil {
 		s.viewportBackend = viewport.New(width, height)
@@ -2879,7 +2968,7 @@ func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *string
 }
 
 func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
-	if s == nil || s.pendingScrollDownRows < 1 || s.ownedViewport {
+	if s == nil || s.pendingScrollDownRows < 1 || s.ownedViewport || s.leaseID != 0 {
 		return
 	}
 	var builder strings.Builder
@@ -2937,7 +3026,7 @@ func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Build
 }
 
 func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
-	if s == nil || s.outputScrollDebtRows < 1 || s.ownedViewport {
+	if s == nil || s.outputScrollDebtRows < 1 || s.ownedViewport || s.leaseID != 0 {
 		return
 	}
 	var builder strings.Builder
@@ -2966,6 +3055,9 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 	if !s.enabled {
 		return
 	}
+	if s.leaseID != 0 {
+		return
+	}
 	if s.ownedViewport {
 		s.renderOwnedViewportLocked()
 		return
@@ -2979,6 +3071,9 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 
 func (s *FixedBottomSurface) renderPopupLocked() {
 	if !s.enabled {
+		return
+	}
+	if s.leaseID != 0 {
 		return
 	}
 	if s.ownedViewport {
@@ -3011,6 +3106,9 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 }
 
 func (s *FixedBottomSurface) moveToOutputLocked() {
+	if s.leaseID != 0 {
+		return
+	}
 	s.terminal.MoveTo(s.outputBottomRowLocked(), 1)
 }
 
@@ -3019,6 +3117,9 @@ func (s *FixedBottomSurface) moveToPromptLocked() {
 }
 
 func (s *FixedBottomSurface) restoreStoredPromptCursorLocked() {
+	if s.leaseID != 0 {
+		return
+	}
 	if s.bottomPaneStateLocked().promptVisibleRowCount() < 1 {
 		return
 	}
@@ -3284,6 +3385,9 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if s == nil || s.terminal == nil || !s.enabled {
 		return
 	}
+	if s.leaseID != 0 {
+		return
+	}
 	if s.ownedViewport {
 		s.renderOwnedViewportLocked()
 		return
@@ -3345,6 +3449,9 @@ func (s *FixedBottomSurface) clearRowsLocked(startRow int, rows int) {
 	if rows < 1 {
 		return
 	}
+	if s.leaseID != 0 {
+		return
+	}
 	if startRow < 1 {
 		startRow = 1
 	}
@@ -3361,6 +3468,9 @@ func (s *FixedBottomSurface) clearRowsLocked(startRow int, rows int) {
 
 func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 	if rows < 1 {
+		return
+	}
+	if s.leaseID != 0 {
 		return
 	}
 	if s.popupRenderedStartRow > 0 {
@@ -4172,7 +4282,7 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 // front state. Do not write at row 1 of a multi-row region either — that only
 // advances the cursor downward and never scrolls until the region is full.
 func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
-	if s == nil || len(rows) == 0 {
+	if s == nil || s.terminal == nil || len(rows) == 0 {
 		return false
 	}
 	width, height := s.terminal.Width(), s.terminal.Height()
