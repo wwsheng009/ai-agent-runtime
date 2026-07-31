@@ -1286,7 +1286,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 					continue
 				}
 			}
-			if echoSubmit {
+			if echoSubmit && (hooks == nil || !hooks.SuppressSubmitEcho) {
 				writeEditorText("\r\n", renderSnapshot())
 			}
 			if onChange != nil {

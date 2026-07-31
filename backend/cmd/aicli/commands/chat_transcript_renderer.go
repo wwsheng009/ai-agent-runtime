@@ -107,6 +107,9 @@ func (r *aicliTranscriptRenderer) RenderToolEvent(event runtimechatcore.ChatEven
 	if r == nil || !shouldRenderInteractiveOutput(r.session) {
 		return false
 	}
+	if r.session.Interaction != nil {
+		return r.session.Interaction.RenderToolChainEvent(event)
+	}
 	rendered := renderSharedChatToolEvent(event)
 	if strings.TrimSpace(rendered) == "" {
 		return false

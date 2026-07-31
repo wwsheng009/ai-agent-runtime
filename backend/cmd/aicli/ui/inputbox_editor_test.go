@@ -1510,6 +1510,47 @@ func TestReadInteractiveLine_RestoresCursorBeforeSubmitEcho(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_SuppressSubmitEchoPreservesSubmitHooksAndCleanup(t *testing.T) {
+	var output bytes.Buffer
+	submitCalls := 0
+	changeCalls := 0
+	lastChange := ""
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("x\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		func(text string) {
+			changeCalls++
+			lastChange = text
+		},
+		&LineEditorHooks{
+			SuppressSubmitEcho: true,
+			OnSubmit: func(LineEditorSnapshot) (LineEditorReplacement, bool) {
+				submitCalls++
+				return LineEditorReplacement{}, false
+			},
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "x" {
+		t.Fatalf("expected submitted line x, got %q", line)
+	}
+	if submitCalls != 1 {
+		t.Fatalf("expected submit hook once, got %d", submitCalls)
+	}
+	if changeCalls == 0 || lastChange != "" {
+		t.Fatalf("expected submit cleanup to publish empty final state, calls=%d last=%q", changeCalls, lastChange)
+	}
+	if strings.Contains(output.String(), "\r\n") {
+		t.Fatalf("expected submit newline echo to be suppressed, got %q", output.String())
+	}
+}
+
 func TestReadInteractiveLine_CtrlDOnEmptyLineRequestsExit(t *testing.T) {
 	var output bytes.Buffer
 	_, err := readInteractiveLine(

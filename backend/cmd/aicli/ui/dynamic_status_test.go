@@ -47,6 +47,37 @@ func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
 	assertTextPaintedAtRow("Plan OFF", 24)
 }
 
+func TestFixedBottomSurface_OwnedComposerWriteKeepsDynamicStatusWhole(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	const width, height = 80, 24
+	surface := newTestFixedBottomSurfaceWithSize(width, height)
+	var editorOutput strings.Builder
+
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected prompt to render")
+		}
+		surface.SetStatusModels(
+			style.StatusLineModel{State: style.RunReady, StateText: "Plan OFF"},
+			&style.StatusLineModel{
+				State:     style.RunThinking,
+				StateText: "◦ Analyzing (1m 41s • esc to interrupt)",
+			},
+		)
+		if !surface.WritePromptEditorText(&editorOutput, 0, 0, "hello") {
+			t.Fatal("expected prompt editor write to be surface-owned")
+		}
+	})
+
+	frame := frameDump(surface.ComposedFrameForTest())
+	if !strings.Contains(frame, "◦ Analyzing (1m 41s • esc to interrupt)") {
+		t.Fatalf("dynamic status was fragmented after composer write:\n%s", frame)
+	}
+	if !strings.Contains(frame, ">") {
+		t.Fatalf("prompt was lost after composer write:\n%s", frame)
+	}
+}
+
 func TestBottomPaneStateDynamicStatusReservesOneRow(t *testing.T) {
 	state := BottomPaneState{
 		DynamicStatusModel:     &style.StatusLineModel{StateText: "◦ Working"},

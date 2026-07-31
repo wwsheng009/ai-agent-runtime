@@ -1986,6 +1986,9 @@ func classifyToolErrorCode(message string) string {
 		return string(runtimeerrors.ErrAgentAlreadyExists)
 	case strings.Contains(lower, "session is busy"):
 		return string(runtimeerrors.ErrAgentBusy)
+	case strings.Contains(lower, "agent session reference not found"),
+		strings.Contains(lower, "unknown agent session reference"):
+		return string(runtimeerrors.ErrAgentSessionNotFound)
 	case strings.Contains(lower, "sqlite3: interrupted"),
 		strings.Contains(lower, "database operation interrupted"):
 		return string(runtimeerrors.ErrStreamInterrupted)
@@ -2054,7 +2057,8 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrToolBrokerFailure,
 		runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck,
 		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission,
-		runtimeerrors.ErrAgentAlreadyExists, runtimeerrors.ErrAgentBusy, runtimeerrors.ErrContextBudget,
+		runtimeerrors.ErrAgentAlreadyExists, runtimeerrors.ErrAgentBusy,
+		runtimeerrors.ErrAgentSessionNotFound, runtimeerrors.ErrContextBudget,
 		runtimeerrors.ErrStreamInterrupted, runtimeerrors.ErrUpstreamUnavailable,
 		runtimeerrors.ErrMemoryFull, runtimeerrors.ErrWorkflowCycle, runtimeerrors.ErrWorkflowStep,
 		runtimeerrors.ErrSkillNotFound, runtimeerrors.ErrSkillLoadFailed, runtimeerrors.ErrInvalidManifest,
@@ -2137,6 +2141,8 @@ func nextActionForToolError(code string, message string) string {
 		return "The requested child id already exists. Reuse the existing child with send_input/followup_task, close it if replacement is intended, or spawn with a different id. Do not retry the same spawn_agent unchanged."
 	case runtimeerrors.ErrAgentBusy:
 		return "The child already has an active run. Use wait_agent/read_agent_events to observe it, send_input with interrupt=true only when replacing that run is intentional, or use followup_task to queue follow-up work. Do not retry the same send_input unchanged."
+	case runtimeerrors.ErrAgentSessionNotFound:
+		return "Use list_agents for the current root session, then retry with an existing child id, session_id, or path. Do not retry the same unknown session reference unchanged."
 	case runtimeerrors.ErrContextBudget:
 		return "Reduce or compact the input and tool output before continuing."
 	case runtimeerrors.ErrAgentRunCanceled:

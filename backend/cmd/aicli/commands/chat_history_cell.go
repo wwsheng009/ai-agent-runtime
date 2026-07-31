@@ -6,6 +6,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 )
 
 // historyCellKind classifies a transcript block. Kind will drive tool-chain
@@ -160,31 +161,43 @@ func (c asyncDocumentCell) DisplayLines(width int) []string {
 // toolChainCell represents one tool invocation as a *single dense cell* in the
 // owned viewport. Live Running is redrawn in place (no gap). When the tool
 // completes, one final insertHistoryLines commits the Completed state (with
-// leading empty line if needed). The cell model internally handles previousAsyncLine
-// inference and empty-line following.
+// leading empty line if needed). The cell holds the ChatEvent so DisplayLines
+// reuses the compact transcript path byte-for-byte.
 type toolChainCell struct {
-	name   string
-	args   map[string]interface{}
-	status string
-	result string
+	event runtimechatcore.ChatEvent
 }
 
 func newToolChainCell(name string, args map[string]interface{}, _ time.Time) toolChainCell {
-	return toolChainCell{name: name, args: args, status: "Running", result: ""}
+	return toolChainCell{event: runtimechatcore.ChatEvent{
+		Type:      runtimechatcore.EventTool,
+		Stage:     "tool_requested",
+		ToolName:  name,
+		Arguments: args,
+	}}
+}
+
+func newToolChainCellFromEvent(event runtimechatcore.ChatEvent) toolChainCell {
+	return toolChainCell{event: event}
+}
+
+func (c toolChainCell) withCompleted(result string, metadata map[string]interface{}) toolChainCell {
+	next := c.event
+	next.Stage = "tool_result"
+	next.Output = result
+	if metadata != nil {
+		next.Metadata = metadata
+	}
+	return toolChainCell{event: next}
 }
 
 func (toolChainCell) Kind() historyCellKind { return historyCellTool }
 
 func (c toolChainCell) DisplayLines(width int) []string {
-	if c.status == "Running" {
-		return widthAwareDisplayLines(ui.FormatAssistantSupplementBlock("• Running "+c.name), width)
+	line := renderSharedChatToolEvent(c.event)
+	if strings.TrimSpace(line) == "" {
+		return nil
 	}
-	// Completed
-	lines := []string{"• Completed " + c.name}
-	if c.result != "" {
-		lines = append(lines, c.result)
-	}
-	return widthAwareDisplayLines(strings.Join(lines, "\n"), width)
+	return widthAwareDisplayLines(ui.FormatAssistantSupplementBlock(line), width)
 }
 
 // assistantStreamCell is the P5.4 unification of assistantTurnTranscript into

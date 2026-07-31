@@ -24,6 +24,34 @@ func TestBuildChatDynamicStatusModelUsesCodexActivityFormat(t *testing.T) {
 	}
 }
 
+func TestBuildChatDynamicStatusModelKeepsCompletedTurnSummary(t *testing.T) {
+	model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		"Ready",
+		160,
+		chatInputModeChat,
+		time.Minute+21*time.Second,
+		true,
+	)
+	if model == nil {
+		t.Fatal("expected a completed dynamic status model")
+	}
+	if plain := style.StatusLineDocument(*model, 160).PlainText(); plain != "Worked for 1m 21s" {
+		t.Fatalf("unexpected completed dynamic status: %q", plain)
+	}
+}
+
+func TestBuildChatDynamicStatusModelOmitsSummaryForInitialReady(t *testing.T) {
+	if model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		"Ready",
+		160,
+		chatInputModeChat,
+		0,
+		false,
+	); model != nil {
+		t.Fatalf("initial Ready must not invent a completion summary: %#v", model)
+	}
+}
+
 func TestBuildChatPersistentStatusModelOmitsTransientState(t *testing.T) {
 	model := buildChatPersistentStatusModelForWidth(&ChatSession{Model: "gpt-5.6-sol"}, 160)
 	plain := strings.ToLower(style.StatusLineDocument(model, 160).PlainText())

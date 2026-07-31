@@ -1011,6 +1011,10 @@ func classifyBrokerExecutionError(toolName string, err error) error {
 		code = runtimeerrors.ErrAgentAlreadyExists
 	case strings.Contains(lower, "session is busy"):
 		code = runtimeerrors.ErrAgentBusy
+	case strings.Contains(lower, "agent session reference not found"),
+		strings.Contains(lower, "unknown agent session reference"),
+		strings.Contains(lower, "agent session not found"):
+		code = runtimeerrors.ErrAgentSessionNotFound
 	case strings.Contains(lower, "sqlite3: interrupted"),
 		strings.Contains(lower, "database operation interrupted"):
 		code = runtimeerrors.ErrStreamInterrupted

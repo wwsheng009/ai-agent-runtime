@@ -26,8 +26,21 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	}()
 	if session.Interaction != nil {
 		session.Interaction.StartWaiting()
-		defer session.Interaction.ClearWaiting()
 	}
+	turnSucceeded := false
+	defer func() {
+		if session.Interaction == nil {
+			return
+		}
+		if turnSucceeded {
+			// The API/actor turn is complete. Freeze the live elapsed clock into
+			// the persistent "Worked for <duration>" summary.
+			session.Interaction.CompleteWaiting()
+		} else {
+			// Failed and interrupted turns must not publish a success summary.
+			session.Interaction.ClearWaiting()
+		}
+	}()
 	stopBusyInputCapture := startBusyQueuedInputCapture(session)
 	defer stopBusyInputCapture()
 	ensureChatSystemPromptMessage(session)
@@ -76,6 +89,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 				reportGoalAutoContinuationWarning(session, continueErr)
 				return response, err
 			}
+			turnSucceeded = true
 			return response, nil
 		}
 		logChatTurnFailureIfUnrecorded(session, userMessage, err)
@@ -85,6 +99,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if continueErr := maybeAutoContinueActiveGoal(ctx, session, executor); continueErr != nil {
 		reportGoalAutoContinuationWarning(session, continueErr)
 	}
+	turnSucceeded = true
 	return response, nil
 }
 

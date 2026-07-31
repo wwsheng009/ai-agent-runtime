@@ -10,8 +10,9 @@ import (
 )
 
 // TestPrintVisibleChatHistory_KeepsToolChainDense asserts consecutive async
-// tool lines (Running/Completed chains) do not get separator blanks between
-// them. Top-level user/assistant blocks still keep a single inter-block blank.
+// Completed tool lines (now the only history rows) do not get separator blanks
+// between them. Top-level user/assistant blocks still keep a single inter-block blank.
+// Running is never in scrollback (viewport-only until complete).
 func TestPrintVisibleChatHistory_KeepsToolChainDense(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
@@ -62,8 +63,6 @@ func TestPrintVisibleChatHistory_KeepsToolChainDense(t *testing.T) {
 		"BLANK",
 		"CONTENT:我先查看目录。",
 		"BLANK",
-		"CONTENT:• Running ls path=docs",
-		"CONTENT:• Running read_file path=docs/README.md",
 		"CONTENT:• Completed ls path=docs",
 		"CONTENT:README.md",
 		"CONTENT:• Completed read_file path=docs/README.md",

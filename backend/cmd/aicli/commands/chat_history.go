@@ -135,9 +135,8 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 		renderer.RenderSupplement(fmt.Sprintf("%s (%d 条消息):", strings.TrimSpace(header), len(messages)))
 	}
 	toolCalls := indexChatHistoryToolCalls(messages)
-	toolMetadata := indexChatHistoryToolMetadata(messages)
 	for index := range messages {
-		renderVisibleChatHistoryMessage(renderer, messages[index], toolCalls, toolMetadata)
+		renderVisibleChatHistoryMessage(renderer, messages[index], toolCalls)
 	}
 	return len(messages)
 }
@@ -215,7 +214,7 @@ func isLegacyFactLedgerTranscript(content string) bool {
 	return strings.HasPrefix(trimmed, legacyFactLedgerHeader)
 }
 
-func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message runtimetypes.Message, toolCalls map[string]runtimetypes.ToolCall, toolMetadata map[string]map[string]interface{}) {
+func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message runtimetypes.Message, toolCalls map[string]runtimetypes.ToolCall) {
 	if renderer == nil {
 		return
 	}
@@ -225,17 +224,9 @@ func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message 
 	case "assistant":
 		renderer.RenderReasoning(finalReasoningBlock(&message))
 		renderer.RenderAssistant(content)
-		for _, call := range message.ToolCalls {
-			metadata := toolMetadata[strings.TrimSpace(call.ID)]
-			renderer.RenderToolEvent(runtimechatcore.ChatEvent{
-				Type:       runtimechatcore.EventTool,
-				Stage:      "tool_requested",
-				ToolName:   call.Name,
-				ToolCallID: call.ID,
-				Arguments:  cloneFunctionSchema(call.Args),
-				Metadata:   cloneFunctionSchema(metadata),
-			})
-		}
+		// P5.6: Running is viewport-only (ActiveBand). History/replay only
+		// emits the final Completed cell once the matching tool message
+		// arrives — never a Running row in scrollback.
 	case "tool":
 		call := toolCalls[strings.TrimSpace(message.ToolCallID)]
 		toolName := firstNonEmptyChatValue(
@@ -272,19 +263,6 @@ func indexChatHistoryToolCalls(messages []runtimetypes.Message) map[string]runti
 			if callID := strings.TrimSpace(call.ID); callID != "" {
 				indexed[callID] = call
 			}
-		}
-	}
-	return indexed
-}
-
-func indexChatHistoryToolMetadata(messages []runtimetypes.Message) map[string]map[string]interface{} {
-	indexed := make(map[string]map[string]interface{})
-	for _, message := range messages {
-		if !strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
-			continue
-		}
-		if callID := strings.TrimSpace(message.ToolCallID); callID != "" {
-			indexed[callID] = chatHistoryToolMetadataMap(message.Metadata)
 		}
 	}
 	return indexed

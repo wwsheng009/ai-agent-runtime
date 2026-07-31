@@ -2110,6 +2110,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	approvalDetach := &approvalDetachState{}
 	runCtx = context.WithValue(runCtx, approvalDetachContextKey{}, approvalDetach)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
+	runCtx = agent.WithTurnID(runCtx, turnID)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
 	a.setActiveCancel(cancel)
 	a.setActiveStripMetadataKeys(stripMetadataKeys)
@@ -2218,6 +2219,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			messagePayload := map[string]interface{}{
 				"turn_id": turnID,
 				"content": result.Output,
+				"mode":    "snapshot",
+			}
+			if streamID := strings.TrimSpace(result.AssistantStreamID); streamID != "" {
+				messagePayload["stream_id"] = streamID
+				messagePayload["sequence"] = result.AssistantStreamSequence + 1
 			}
 			if result.LimitReached {
 				messagePayload["limit_reached"] = true
@@ -2293,7 +2299,34 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 			session = prepared
 		}
 	}
+	// Broker tools persist opaque job/session aliases directly into the parent
+	// session while this actor still owns an older in-memory session snapshot.
+	// Reload that broker-owned context immediately before the actor's full-row
+	// update so the end-of-turn write cannot erase handles created in the turn.
+	latest, err := a.sessionStore.Load(ctx, session.ID)
+	if err != nil {
+		return err
+	}
+	if aliases, ok := latest.GetContext(toolbroker.SessionHandleAliasesContextKey); ok {
+		copiedAliases, err := cloneSessionContextValue(aliases)
+		if err != nil {
+			return fmt.Errorf("clone broker handle aliases: %w", err)
+		}
+		session.SetContext(toolbroker.SessionHandleAliasesContextKey, copiedAliases)
+	}
 	return a.sessionStore.Update(ctx, session)
+}
+
+func cloneSessionContextValue(value interface{}) (interface{}, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var copied interface{}
+	if err := json.Unmarshal(payload, &copied); err != nil {
+		return nil, err
+	}
+	return copied, nil
 }
 
 func (a *SessionActor) loadState(ctx context.Context) error {

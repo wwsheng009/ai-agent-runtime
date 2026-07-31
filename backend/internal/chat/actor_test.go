@@ -123,6 +123,46 @@ func TestAppendSessionActorToolErrorPayloadDistinguishesRecoveredErrors(t *testi
 	require.Equal(t, 1, payload["unrecovered_tool_error_count"])
 }
 
+func TestPersistSessionPreservesBrokerHandleAliasesFromLatestStoredSession(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStorage()
+	session := NewSession("alias-owner")
+	require.NoError(t, store.Save(ctx, session))
+
+	staleActorSession, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	latestBrokerSession, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+
+	aliases := map[string]interface{}{
+		"sessions": map[string]interface{}{
+			"alias_to_actual": map[string]interface{}{
+				"session_ref_test": "child-1",
+			},
+		},
+	}
+	latestBrokerSession.SetContext(toolbroker.SessionHandleAliasesContextKey, aliases)
+	require.NoError(t, store.Update(ctx, latestBrokerSession))
+
+	staleActorSession.Metadata.Title = "actor update"
+	hookPrepared := staleActorSession.Clone()
+	hookPrepared.Metadata.Title = "hook update"
+	actor := &SessionActor{
+		sessionStore: store,
+		persistHook: func(context.Context, *Session) (*Session, error) {
+			return hookPrepared, nil
+		},
+	}
+	require.NoError(t, actor.persistSession(ctx, staleActorSession))
+
+	persisted, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "hook update", persisted.Metadata.Title)
+	got, ok := persisted.GetContext(toolbroker.SessionHandleAliasesContextKey)
+	require.True(t, ok)
+	assert.Equal(t, aliases, got)
+}
+
 func TestSessionActorSubmitPromptReturnsWhenLoopExitsBeforeReply(t *testing.T) {
 	actor := &SessionActor{
 		cmdCh: make(chan Command, 1),

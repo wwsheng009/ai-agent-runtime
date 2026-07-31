@@ -1,6 +1,6 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0–P5.5 已完成：`ui/vt` + `viewport.Backend`/`Compose` + 有界历史窗口 + `insertHistoryLines` 溢出交接 + 默认 owned 渲染 + 补偿债务 no-op + cell 模型统一 + 宽度感知 `DisplayLines` + S3 收敛 + soft reflow + resize reflow golden；P5.6–P5.7 待推进）**
+状态: **implementing（P5.0–P5.5 已完成；P5.6 完成：`toolChainCell` + gap denseness 经 `lastCompletedAsyncLine`；Running live redraw via RenderToolEvent 已接入；KeepsToolChainDense 迁移完成；P5.7 待推进）**
 
 更新时间: **2026-07-30**
 

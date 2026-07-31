@@ -12,7 +12,11 @@ import (
 )
 
 const (
-	sessionHandleAliasesContextKey = "tool_handle_aliases"
+	// SessionHandleAliasesContextKey is the durable parent-session context key
+	// used for opaque broker job and child-session handles.
+	SessionHandleAliasesContextKey = "tool_handle_aliases"
+
+	sessionHandleAliasesContextKey = SessionHandleAliasesContextKey
 	backgroundJobAliasPrefix       = "job_ref_"
 	agentSessionAliasPrefix        = "session_ref_"
 )
@@ -201,6 +205,10 @@ func (s *handleAliasSet) resolve(reference, prefix, label string) (actual string
 		if prefix == backgroundJobAliasPrefix {
 			return "", "", runtimeerrors.Newf(runtimeerrors.ErrJobNotFound, "background job reference not found: %s", reference).
 				WithContext("job_reference", reference)
+		}
+		if prefix == agentSessionAliasPrefix {
+			return "", "", runtimeerrors.Newf(runtimeerrors.ErrAgentSessionNotFound, "agent session reference not found: %s", reference).
+				WithContext("agent_reference", reference)
 		}
 		return "", "", fmt.Errorf("unknown %s reference: %s", label, reference)
 	}

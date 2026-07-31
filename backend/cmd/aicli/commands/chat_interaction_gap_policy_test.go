@@ -49,18 +49,18 @@ func TestGapPolicyTruthTable(t *testing.T) {
 				tc.promptWasVisible, tc.promptAfterBlockGap, tc.completeBlockOutput, gapName(top), gapName(tc.want))
 		}
 
-		// A non-continuation async line matches the core.
-		if async := c.gapForAsyncLine(tc.promptWasVisible, tc.promptAfterBlockGap, false); async != tc.want {
-			t.Fatalf("gapForAsyncLine(pv=%t,pab=%t,cbo=%t,prevAsync=false)=%s want %s",
+		// First async line (no prior async) matches the core gap policy.
+		if async := c.gapForAsyncLine(tc.promptWasVisible, tc.promptAfterBlockGap); async != tc.want {
+			t.Fatalf("gapForAsyncLine(pv=%t,pab=%t,cbo=%t,first)=%s want %s",
 				tc.promptWasVisible, tc.promptAfterBlockGap, tc.completeBlockOutput, gapName(async), gapName(tc.want))
 		}
-
-		// A continuation async line (tool chain) is always dense, regardless of
-		// prompt/complete-block state.
-		if chain := c.gapForAsyncLine(tc.promptWasVisible, tc.promptAfterBlockGap, true); chain != gapNone {
-			t.Fatalf("gapForAsyncLine(pv=%t,pab=%t,cbo=%t,prevAsync=true)=%s want gapNone (tool chain must stay dense)",
+		// Continuation async (tool chain) stays dense via lastCompletedAsyncLine.
+		c.lastCompletedAsyncLine = true
+		if chain := c.gapForAsyncLine(tc.promptWasVisible, tc.promptAfterBlockGap); chain != gapNone {
+			t.Fatalf("gapForAsyncLine(pv=%t,pab=%t,cbo=%t,chain)=%s want gapNone",
 				tc.promptWasVisible, tc.promptAfterBlockGap, tc.completeBlockOutput, gapName(chain))
 		}
+		c.lastCompletedAsyncLine = false
 	}
 }
 
@@ -81,7 +81,7 @@ func TestGapPolicyNilReceiverSafe(t *testing.T) {
 	if got := c.gapBeforeBlockLocked(false, false); got != gapNone {
 		t.Fatalf("nil gapBeforeBlockLocked=%s want gapNone", gapName(got))
 	}
-	if got := c.gapForAsyncLine(false, false, true); got != gapNone {
-		t.Fatalf("nil gapForAsyncLine(prevAsync=true)=%s want gapNone", gapName(got))
+	if got := c.gapForAsyncLine(false, false); got != gapNone {
+		t.Fatalf("nil gapForAsyncLine=%s want gapNone", gapName(got))
 	}
 }

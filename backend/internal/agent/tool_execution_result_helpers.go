@@ -77,6 +77,7 @@ func knownToolOutcomeErrorCode(code string) bool {
 		runtimeerrors.ErrTurnDeadlineExceeded,
 		runtimeerrors.ErrAgentRunCanceled,
 		runtimeerrors.ErrAgentPermission,
+		runtimeerrors.ErrAgentSessionNotFound,
 		runtimeerrors.ErrJobNotFound,
 		runtimeerrors.ErrProcessStartFailed,
 		runtimeerrors.ErrProcessHealthcheck,

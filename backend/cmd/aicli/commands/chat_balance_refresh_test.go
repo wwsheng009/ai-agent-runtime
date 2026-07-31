@@ -255,6 +255,17 @@ func TestRefreshAccountBalanceStatusReplacesCachedBalance(t *testing.T) {
 	session.Interaction = interaction
 	interaction.RefreshStatus("")
 
+	interaction.mu.Lock()
+	beforeModel := cloneChatStatusLineModel(interaction.persistentStatusModel)
+	interaction.mu.Unlock()
+	before := style.StatusLineDocument(beforeModel, 0).PlainText()
+	balancePrefix := "Bal "
+	if strings.Contains(before, "Balance 1.00 USD") {
+		balancePrefix = "Balance "
+	} else if !strings.Contains(before, "Bal 1.00 USD") {
+		t.Fatalf("expected initial balance in cached footer, got %q", before)
+	}
+
 	session.setAccountBalanceProvider("sub2", config.Provider{
 		SiteType: string(siteaccount.SiteTypeSub2API),
 		Account: &config.ProviderAccountSnapshot{
@@ -268,11 +279,62 @@ func TestRefreshAccountBalanceStatusReplacesCachedBalance(t *testing.T) {
 	interaction.mu.Lock()
 	model := cloneChatStatusLineModel(interaction.persistentStatusModel)
 	interaction.mu.Unlock()
-	plain := style.StatusLineDocument(model, 120).PlainText()
-	if !strings.Contains(plain, "Bal 25.75 USD") {
+	plain := style.StatusLineDocument(model, 0).PlainText()
+	refreshedBalance := balancePrefix + "25.75 USD"
+	if !strings.Contains(plain, refreshedBalance) {
 		t.Fatalf("expected refreshed balance in cached footer, got %q", plain)
 	}
-	if strings.Contains(plain, "Bal 1.00 USD") {
+	if strings.Contains(plain, "1.00 USD") {
 		t.Fatalf("stale balance remained in cached footer: %q", plain)
+	}
+	providerAt := strings.Index(plain, "sub2")
+	balanceAt := strings.Index(plain, refreshedBalance)
+	contextAt := strings.Index(plain, "Ctx ")
+	if contextAt < 0 {
+		contextAt = strings.Index(plain, "Context ")
+	}
+	if providerAt < 0 || balanceAt <= providerAt || (contextAt >= 0 && balanceAt >= contextAt) {
+		t.Fatalf("expected provider → balance → context order after refresh, got %q", plain)
+	}
+}
+
+func TestRefreshChatAccountBalanceStatusModelUsesCanonicalOrderAndResponsiveLabel(t *testing.T) {
+	base := style.StatusLineModel{
+		HideState: true,
+		Segments: []style.StatusSegment{
+			{Kind: style.StatusSegMode, Text: "Plan OFF"},
+			{Kind: style.StatusSegModel, Text: "gpt-5.6-sol xhigh"},
+			{Kind: style.StatusSegProvider, Text: "mdkj"},
+			{Kind: style.StatusSegUsage, Text: "Context 42% used"},
+		},
+	}
+	balance := chatStatusSegment{
+		full:    "Balance 170.52 USD",
+		compact: "Bal 170.52 USD",
+	}
+
+	wide := refreshChatAccountBalanceStatusModel(base, balance, 200)
+	if got, want := style.StatusLineDocument(wide, 0).PlainText(),
+		"Plan OFF · gpt-5.6-sol xhigh · mdkj · Balance 170.52 USD · Context 42% used"; got != want {
+		t.Fatalf("unexpected wide refreshed footer:\n got: %q\nwant: %q", got, want)
+	}
+
+	narrow := refreshChatAccountBalanceStatusModel(base, balance, 10)
+	if got, want := style.StatusLineDocument(narrow, 0).PlainText(),
+		"Plan OFF · gpt-5.6-sol xhigh · mdkj · Bal 170.52 USD · Context 42% used"; got != want {
+		t.Fatalf("unexpected narrow refreshed footer:\n got: %q\nwant: %q", got, want)
+	}
+
+	existingFull := cloneChatStatusLineModel(base)
+	existingFull.Segments = append(existingFull.Segments, style.StatusSegment{})
+	copy(existingFull.Segments[4:], existingFull.Segments[3:])
+	existingFull.Segments[3] = style.StatusSegment{
+		Kind: style.StatusSegBalance,
+		Text: "Balance 171.91 USD",
+	}
+	refreshed := refreshChatAccountBalanceStatusModel(existingFull, balance, 10)
+	if got, want := style.StatusLineDocument(refreshed, 0).PlainText(),
+		"Plan OFF · gpt-5.6-sol xhigh · mdkj · Balance 170.52 USD · Context 42% used"; got != want {
+		t.Fatalf("incremental refresh changed the existing label or order:\n got: %q\nwant: %q", got, want)
 	}
 }

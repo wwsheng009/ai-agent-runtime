@@ -44,6 +44,28 @@ func TestChatComposerControllerBuildsCoreHooksWithoutCompletion(t *testing.T) {
 	}
 }
 
+func TestChatComposerControllerSuppressesSubmitEchoOnlyForFixedSurface(t *testing.T) {
+	plainSession := &ChatSession{}
+	plain := newChatComposerController(plainSession).hooks()
+	if plain.SuppressSubmitEcho {
+		t.Fatal("composer without an enabled fixed surface must keep normal submit echo")
+	}
+
+	surfaceSession := &ChatSession{}
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	surfaceSession.Surface = surface
+	fixed := newChatComposerController(surfaceSession).hooks()
+	if !fixed.SuppressSubmitEcho {
+		t.Fatal("fixed-surface composer must suppress raw submit newline echo")
+	}
+
+	busy := (&chatBusyComposerCapture{session: surfaceSession}).hooks()
+	if !busy.SuppressSubmitEcho {
+		t.Fatal("fixed-surface busy composer must suppress raw submit newline echo")
+	}
+}
+
 func TestChatComposerControllerTabTogglesPlanModeAndPreservesDraft(t *testing.T) {
 	session := newPlanCommandSession("")
 	coord := newChatInteractionCoordinator(session)

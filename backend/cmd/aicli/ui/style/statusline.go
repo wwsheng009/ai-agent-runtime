@@ -17,6 +17,10 @@ const (
 	StatusSegBalance
 	StatusSegMode
 	StatusSegMeta
+	// StatusSegProvider distinguishes the provider identity from other metadata
+	// such as the git branch. Incremental status updates use this semantic
+	// anchor to preserve the canonical model → provider → balance order.
+	StatusSegProvider
 )
 
 // RunState is the primary chat/runtime state shown in the status line.

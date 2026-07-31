@@ -51,10 +51,13 @@ const (
 	ErrAgentAlreadyExists ErrorCode = "AGENT_ALREADY_EXISTS"
 	// ErrAgentBusy marks send_input attempts that require the caller to wait for
 	// the active run or explicitly request interruption before resubmitting.
-	ErrAgentBusy           ErrorCode = "AGENT_BUSY"
-	ErrContextBudget       ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
-	ErrStreamInterrupted   ErrorCode = "STREAM_INTERRUPTED"
-	ErrUpstreamUnavailable ErrorCode = "UPSTREAM_UNAVAILABLE"
+	ErrAgentBusy ErrorCode = "AGENT_BUSY"
+	// ErrAgentSessionNotFound marks an opaque session_ref_* that is not present
+	// in the current parent session's durable handle registry.
+	ErrAgentSessionNotFound ErrorCode = "AGENT_SESSION_NOT_FOUND"
+	ErrContextBudget        ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
+	ErrStreamInterrupted    ErrorCode = "STREAM_INTERRUPTED"
+	ErrUpstreamUnavailable  ErrorCode = "UPSTREAM_UNAVAILABLE"
 
 	// 内存错误
 	ErrMemoryFull ErrorCode = "MEMORY_FULL"

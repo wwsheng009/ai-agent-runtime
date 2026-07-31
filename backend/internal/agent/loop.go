@@ -652,6 +652,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.Success = len(pendingFailures) == 0
 			result.Output = action.Content
 			result.Reasoning = action.Reasoning
+			result.AssistantStreamID = action.assistantStreamID
+			result.AssistantStreamSequence = action.assistantStreamSequence
 			result.Steps = step
 			result.Observations = observations
 			result.Duration = *startTime
@@ -1128,6 +1130,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	requestModel := loop.requestModel()
 	logicalTurnID := traceID
 	llmRequestID := "llm_req_" + uuid.NewString()
+	turnID := TurnIDFromContext(ctx)
 
 	// 构建请求
 	req := &llm.LLMRequest{
@@ -1221,11 +1224,14 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			}
 		}
 	}
-	if req.Stream {
-		req.Metadata["stream_id"] = "stream_" + uuid.NewString()
-	}
+	// Every model response owns a stream identity, including non-streaming
+	// calls. This lets the terminal bridge correlate the authoritative final
+	// snapshot with the exact response that produced it.
+	streamID := "stream_" + uuid.NewString()
+	req.Metadata["stream_id"] = streamID
 	callCtx := ctx
 	streamedReasoning := false
+	var assistantSequence atomic.Uint64
 	if req.Stream {
 		callCtx = llm.WithStreamReporter(ctx, func(chunk llm.StreamChunk) {
 			switch chunk.Type {
@@ -1233,11 +1239,21 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if chunk.Content == "" {
 					return
 				}
-				loop.agent.emitRuntimeEvent("assistant_delta", sessionID, "", map[string]interface{}{
-					"trace_id": traceID,
-					"content":  chunk.Content,
-					"delta":    chunk.Content,
-				})
+				payload := map[string]interface{}{
+					"trace_id":        traceID,
+					"logical_turn_id": logicalTurnID,
+					"llm_request_id":  llmRequestID,
+					"stream_id":       streamID,
+					"sequence":        assistantSequence.Add(1),
+					"mode":            "append",
+					"step":            step,
+					"content":         chunk.Content,
+					"delta":           chunk.Content,
+				}
+				if turnID != "" {
+					payload["turn_id"] = turnID
+				}
+				loop.agent.emitRuntimeEvent("assistant_delta", sessionID, "", payload)
 			case llm.EventTypeReasoning:
 				if chunk.Content == "" {
 					return
@@ -1552,6 +1568,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	action.Content = response.Content
 	action.ToolCalls = response.ToolCalls
 	action.Reasoning = response.ReasoningBlock
+	action.assistantStreamID = streamID
+	action.assistantStreamSequence = assistantSequence.Load()
 	if len(response.Metadata) > 0 {
 		action.MessageMetadata = types.NewMetadata()
 		for key, value := range response.Metadata {
@@ -3059,6 +3077,8 @@ type AgentAction struct {
 	MessageMetadata  types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
 	promptHistory    []types.Message
 	toolSchemaTokens int
+	assistantStreamID       string
+	assistantStreamSequence uint64
 }
 
 // Stop 停止循环

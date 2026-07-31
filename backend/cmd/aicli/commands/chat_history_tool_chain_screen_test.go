@@ -23,16 +23,10 @@ func uniqueTranscriptRow(t *testing.T, screen *screenVT, marker string) int {
 }
 
 // TestPrintVisibleChatHistory_ScreenKeepsToolChainDense lifts the tool-chain
-// denseness regression from the content plane (a raw byte buffer) onto the
-// display plane: it replays the same history through a real FixedBottomSurface,
-// feeds the actual ANSI byte stream the surface emits into the VT screen model,
-// and asserts the reconstructed rows keep the Running/Completed chain adjacent
-// with only single-blank separators between top-level blocks.
-//
-// The buffer-only sibling (TestPrintVisibleChatHistory_KeepsToolChainDense)
-// proves the coordinator writes the right text; it cannot prove the surface
-// does not re-inflate the gap while positioning rows / paying scroll debt. This
-// test is the display-plane oracle for that claim.
+// denseness regression from the content plane onto the display plane. Now
+// Running is viewport-only (ActiveBand); history scrollback only contains
+// Completed rows. The chain is still dense (no separator blank between
+// Completed ls and its output, nor between Completed read and its output).
 func TestPrintVisibleChatHistory_ScreenKeepsToolChainDense(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
@@ -93,22 +87,12 @@ func TestPrintVisibleChatHistory_ScreenKeepsToolChainDense(t *testing.T) {
 	rowHeader := uniqueTranscriptRow(t, screen, "已加载历史会话 (5 条消息):")
 	rowUser := uniqueTranscriptRow(t, screen, "查看 docs")
 	rowIntro := uniqueTranscriptRow(t, screen, "我先查看目录。")
-	rowRunLs := uniqueTranscriptRow(t, screen, "Running ls path=docs")
-	rowRunRead := uniqueTranscriptRow(t, screen, "Running read_file path=docs/README.md")
 	rowCompLs := uniqueTranscriptRow(t, screen, "Completed ls path=docs")
 	rowCompRead := uniqueTranscriptRow(t, screen, "Completed read_file path=docs/README.md")
 	rowFinal := uniqueTranscriptRow(t, screen, "目录里有 README。")
 
-	// Dense tool chain: consecutive async lines occupy consecutive rows with no
-	// blank row inserted between them (the core denseness invariant).
-	if rowRunRead != rowRunLs+1 {
-		t.Fatalf("Running lines must be adjacent: ls=%d read=%d\n%s", rowRunLs, rowRunRead, screen.dump())
-	}
-	if rowCompLs != rowRunRead+1 {
-		t.Fatalf("Running->Completed must be adjacent: run=%d comp=%d\n%s", rowRunRead, rowCompLs, screen.dump())
-	}
-	// ls output ("README.md") sits directly under its Completed line, then the
-	// read_file Completed line follows immediately (no separator blank).
+	// Dense tool chain: output sits directly under its Completed header, and the
+	// next Completed follows immediately (no separator blank between tools).
 	if got := strings.TrimSpace(screen.line(rowCompLs + 1)); got != "README.md" {
 		t.Fatalf("expected ls output directly under Completed ls, got %q\n%s", got, screen.dump())
 	}
@@ -116,9 +100,7 @@ func TestPrintVisibleChatHistory_ScreenKeepsToolChainDense(t *testing.T) {
 		t.Fatalf("Completed read_file must follow the ls output row: compLs=%d compRead=%d\n%s",
 			rowCompLs, rowCompRead, screen.dump())
 	}
-	// read_file output ("# Docs") sits directly under its Completed line.
-	rowDocs := rowCompRead + 1
-	if got := strings.TrimSpace(screen.line(rowDocs)); got != "# Docs" {
+	if got := strings.TrimSpace(screen.line(rowCompRead + 1)); got != "# Docs" {
 		t.Fatalf("expected read_file output directly under Completed read_file, got %q\n%s", got, screen.dump())
 	}
 
@@ -132,10 +114,11 @@ func TestPrintVisibleChatHistory_ScreenKeepsToolChainDense(t *testing.T) {
 		t.Fatalf("expected one blank between user echo and assistant intro: user=%d intro=%d\n%s",
 			rowUser, rowIntro, screen.dump())
 	}
-	if rowRunLs != rowIntro+2 {
-		t.Fatalf("expected one blank between assistant intro and first async line: intro=%d run=%d\n%s",
-			rowIntro, rowRunLs, screen.dump())
+	if rowCompLs != rowIntro+2 {
+		t.Fatalf("expected one blank between assistant intro and first async line: intro=%d comp=%d\n%s",
+			rowIntro, rowCompLs, screen.dump())
 	}
+	rowDocs := rowCompRead + 1
 	if rowFinal != rowDocs+2 {
 		t.Fatalf("expected one blank between tool block and trailing assistant: docs=%d final=%d\n%s",
 			rowDocs, rowFinal, screen.dump())

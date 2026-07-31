@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -90,17 +91,19 @@ type chatInteractionCoordinator struct {
 	stableCommitCatchUp   bool
 	// Synthetic surfaces normally drain synchronously. Queue-policy tests set
 	// this flag to advance commits explicitly without wall-clock timers.
-	stableCommitManual    bool
-	stableCommitBelowExit time.Time
-	stableCommitLastExit  time.Time
-	dynamicStatusStarted  time.Time
-	dynamicStatusTimer    *time.Timer
-	dynamicStatusTimerSeq uint64
-	persistentStatusModel style.StatusLineModel
-	dynamicStatusModel    *style.StatusLineModel
-	statusModelsCached    bool
-	activeTools           map[string]chatActiveTool
-	activeToolSequence    uint64
+	stableCommitManual            bool
+	stableCommitBelowExit         time.Time
+	stableCommitLastExit          time.Time
+	dynamicStatusStarted          time.Time
+	dynamicStatusCompletedElapsed time.Duration
+	dynamicStatusCompleted        bool
+	dynamicStatusTimer            *time.Timer
+	dynamicStatusTimerSeq         uint64
+	persistentStatusModel         style.StatusLineModel
+	dynamicStatusModel            *style.StatusLineModel
+	statusModelsCached            bool
+	activeTools                   map[string]chatActiveTool
+	activeToolSequence            uint64
 
 	// assistantTurnTranscript is the source-backed authoritative record for the
 	// current assistant turn. It is kept separate from the mutable streamBuffer
@@ -476,7 +479,13 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 	c.updateDynamicStatusClockLocked(state, now)
 	if c.surface != nil {
 		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
-		dynamicModel := buildChatDynamicStatusModelForWidthAndInputMode(state, ui.GetTerminalWidth(), c.inputMode, c.dynamicStatusElapsedLocked(now))
+		dynamicModel := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+			state,
+			ui.GetTerminalWidth(),
+			c.inputMode,
+			c.dynamicStatusElapsedLocked(now),
+			c.dynamicStatusCompleted,
+		)
 		c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
 		c.dynamicStatusModel = cloneChatStatusLineModelPointer(dynamicModel)
 		c.statusModelsCached = true
@@ -518,28 +527,42 @@ func (c *chatInteractionCoordinator) RefreshAccountBalanceStatus() {
 
 	model := cloneChatStatusLineModel(c.persistentStatusModel)
 	balance := chatSurfaceAccountBalanceStatusSegment(c.session)
+	model = refreshChatAccountBalanceStatusModel(model, balance, ui.GetTerminalWidth())
+	c.persistentStatusModel = cloneChatStatusLineModel(model)
+	c.surface.SetStatusModels(model, cloneChatStatusLineModelPointer(c.dynamicStatusModel))
+}
+
+func refreshChatAccountBalanceStatusModel(model style.StatusLineModel, balance chatStatusSegment, width int) style.StatusLineModel {
 	segments := make([]style.StatusSegment, 0, len(model.Segments)+1)
 	insertAt := -1
+	hadBalance := false
+	useFullText := false
 	for _, segment := range model.Segments {
 		if segment.Kind == style.StatusSegBalance {
 			if insertAt < 0 {
 				insertAt = len(segments)
+				hadBalance = true
+				useFullText = strings.HasPrefix(strings.TrimSpace(segment.Text), "Balance ")
 			}
 			continue
 		}
 		segments = append(segments, segment)
-		if insertAt < 0 && (segment.Kind == style.StatusSegModel || segment.Kind == style.StatusSegMeta) {
-			insertAt = len(segments)
-		}
 	}
 	if balance.full != "" {
+		if insertAt < 0 {
+			insertAt = chatAccountBalanceStatusInsertIndex(segments)
+		}
+		text := balance.compact
+		if text == "" {
+			text = balance.full
+		}
+		if useFullText {
+			text = balance.full
+		}
 		segment := style.StatusSegment{
 			Kind: style.StatusSegBalance,
-			Text: balance.compact,
+			Text: text,
 			Role: style.RoleSuccess,
-		}
-		if insertAt < 0 {
-			insertAt = len(segments)
 		}
 		segments = append(segments, style.StatusSegment{})
 		copy(segments[insertAt+1:], segments[insertAt:])
@@ -549,8 +572,31 @@ func (c *chatInteractionCoordinator) RefreshAccountBalanceStatus() {
 	for index := range model.Segments {
 		model.Segments[index].Priority = index
 	}
-	c.persistentStatusModel = cloneChatStatusLineModel(model)
-	c.surface.SetStatusModels(model, cloneChatStatusLineModelPointer(c.dynamicStatusModel))
+	if !hadBalance && balance.full != "" && insertAt >= 0 && balance.full != model.Segments[insertAt].Text {
+		if width <= 0 {
+			width = 80
+		}
+		candidate := cloneChatStatusLineModel(model)
+		candidate.Segments[insertAt].Text = balance.full
+		if ui.DisplayWidth(style.StatusLineDocument(candidate, 0).PlainText()) <= width {
+			model.Segments[insertAt].Text = balance.full
+		}
+	}
+	return model
+}
+
+func chatAccountBalanceStatusInsertIndex(segments []style.StatusSegment) int {
+	for index, segment := range segments {
+		if segment.Kind == style.StatusSegProvider {
+			return index + 1
+		}
+	}
+	for index, segment := range segments {
+		if segment.Kind == style.StatusSegModel {
+			return index + 1
+		}
+	}
+	return len(segments)
 }
 
 func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(state string, now time.Time) {
@@ -561,10 +607,16 @@ func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(state string
 	}
 	if c.dynamicStatusStarted.IsZero() {
 		c.dynamicStatusStarted = now
+		// Starting a new turn replaces the previous frozen completion summary.
+		c.dynamicStatusCompletedElapsed = 0
+		c.dynamicStatusCompleted = false
 	}
 }
 
 func (c *chatInteractionCoordinator) dynamicStatusElapsedLocked(now time.Time) time.Duration {
+	if c.dynamicStatusCompleted {
+		return c.dynamicStatusCompletedElapsed
+	}
 	if c.dynamicStatusStarted.IsZero() || now.Before(c.dynamicStatusStarted) {
 		return 0
 	}
@@ -601,11 +653,12 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 		return
 	}
 	now := time.Now()
-	c.surface.SetDynamicStatusModel(buildChatDynamicStatusModelForWidthAndInputMode(
+	c.surface.SetDynamicStatusModel(buildChatDynamicStatusModelForWidthInputModeAndCompletion(
 		c.currentSurfaceStateLocked(),
 		ui.GetTerminalWidth(),
 		c.inputMode,
 		c.dynamicStatusElapsedLocked(now),
+		c.dynamicStatusCompleted,
 	))
 	c.scheduleDynamicStatusTickLocked(now)
 }
@@ -881,13 +934,15 @@ func (c *chatInteractionCoordinator) gapForTopLevelMessage(promptWasVisible, pro
 	return c.gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap)
 }
 
-// gapForAsyncLine is the async/supplement variant. Consecutive async lines
-// belong to the same tool chain (Running->Running->Completed) and must never
-// get a separator blank, even when a prompt was redrawn or still marked visible
-// between them (reinserting a blank here is the tool-chain denseness bug).
-// Otherwise it shares the top-level spacing core.
-func (c *chatInteractionCoordinator) gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine bool) blockGap {
-	if previousAsyncLine {
+// gapForAsyncLine is kept as a thin wrapper (P5.6: toolChainCell now handles
+// dense Running/Completed layout and previousAsyncLine inference internally).
+// It will be removed once all paths use toolChainCell exclusively.
+func (c *chatInteractionCoordinator) gapForAsyncLine(promptWasVisible, promptAfterBlockGap bool) blockGap {
+	// Dense chain: consecutive async lines (Running->Running->Completed) stay
+	// adjacent. lastCompletedAsyncLine is the retained denseness flag; the old
+	// previousAsyncLine parameter is gone (P5.6). toolChainCell will eventually
+	// own this fully; until then the coordinator flag keeps chains dense.
+	if c != nil && c.lastCompletedAsyncLine {
 		return gapNone
 	}
 	return c.gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap)
@@ -1246,6 +1301,17 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 }
 
 func (c *chatInteractionCoordinator) ClearWaiting() {
+	c.finishWaiting(false)
+}
+
+// CompleteWaiting freezes the elapsed time for the completed turn and keeps a
+// compact summary above the ready prompt (for example, "Worked for 1m 21s").
+// The next StartWaiting call replaces that summary with live activity.
+func (c *chatInteractionCoordinator) CompleteWaiting() {
+	c.finishWaiting(true)
+}
+
+func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return
 	}
@@ -1253,6 +1319,15 @@ func (c *chatInteractionCoordinator) ClearWaiting() {
 	if c.shutdown || !c.waitingActive {
 		c.mu.Unlock()
 		return
+	}
+	if completed {
+		now := time.Now()
+		elapsed := c.dynamicStatusElapsedLocked(now)
+		c.dynamicStatusCompletedElapsed = elapsed
+		c.dynamicStatusCompleted = true
+	} else {
+		c.dynamicStatusCompletedElapsed = 0
+		c.dynamicStatusCompleted = false
 	}
 	c.waitingActive = false
 	// Codex turn_lifecycle.finish: stop live goal-time accrual.
@@ -1350,7 +1425,22 @@ func buildChatPersistentStatusModelForWidth(session *ChatSession, width int) sty
 }
 
 func buildChatDynamicStatusModelForWidthAndInputMode(state string, width int, inputMode chatInputMode, elapsed time.Duration) *style.StatusLineModel {
+	return buildChatDynamicStatusModelForWidthInputModeAndCompletion(state, width, inputMode, elapsed, false)
+}
+
+func buildChatDynamicStatusModelForWidthInputModeAndCompletion(state string, width int, inputMode chatInputMode, elapsed time.Duration, completed bool) *style.StatusLineModel {
 	state, width = normalizeChatSurfaceStatusInput(state, width)
+	if completed {
+		text := "Worked for " + formatChatDynamicStatusElapsed(elapsed)
+		if ui.DisplayWidth(text) > width {
+			text = compactStatusValue(text, width)
+		}
+		return &style.StatusLineModel{
+			State:     style.RunReady,
+			StateText: text,
+			StateRole: style.RoleSuccess,
+		}
+	}
 	action, role, interruptible := chatDynamicStatusAction(state, inputMode)
 	if action == "" {
 		return nil
@@ -1494,7 +1584,7 @@ func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMod
 		segments = append(segments, presentChatStatusSegment(model, style.StatusSegModel, style.RoleAccent))
 	}
 	if providerSeg := chatSurfaceProviderStatusSegment(session); providerSeg.full != "" {
-		segments = append(segments, presentChatStatusSegment(providerSeg, style.StatusSegMeta, style.RoleTextSecondary))
+		segments = append(segments, presentChatStatusSegment(providerSeg, style.StatusSegProvider, style.RoleTextSecondary))
 	}
 	if balanceSeg := chatSurfaceAccountBalanceStatusSegment(session); balanceSeg.full != "" {
 		segments = append(segments, presentChatStatusSegment(balanceSeg, style.StatusSegBalance, style.RoleSuccess))
@@ -2831,17 +2921,68 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
 	promptAfterBlockGap := c.promptAfterBlockGap
-	previousAsyncLine := c.lastCompletedAsyncLine
 	if !c.beginMessageLocked() {
 		return
 	}
-	// Async/supplement line routed through the cell model (P4.2); byte-identical
-	// to writeCompleteBlockLocked(FormatAssistantSupplementBlock).
+	// Async/supplement line routed through the cell model (P4.2/P5.6). Dense
+	// tool-chain spacing is now owned by the cell (and lastCompletedAsyncLine
+	// for legacy gapBeforeBlock); previousAsyncLine is no longer an explicit
+	// gapForAsyncLine argument.
 	c.commitHistoryCellLocked(
 		newSupplementLineCell(line),
-		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine),
+		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap),
 	)
 	c.lastCompletedAsyncLine = true
+}
+
+// RenderToolChainEvent routes tool_requested / tool_result through toolChainCell
+// (P5.6). Running is a dense cell commit; Completed is the final dense commit for
+// the same tool. Non-tool stages fall back to the pre-rendered supplement path.
+// Returns false when the event produces no visible rows (batch_start/end, empty).
+func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.ChatEvent) bool {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return false
+	}
+	switch strings.TrimSpace(event.Stage) {
+	case "tool_requested":
+		// Running stays in viewport (ActiveBand via SetToolAgentStage /
+		// activeStream). Do NOT commit to history — only commit on final
+		// tool_result so scrollback never contains a Running row.
+		if len(newToolChainCellFromEvent(event).DisplayLines(0)) == 0 {
+			return false
+		}
+		// Mark denseness so the subsequent Completed gap stays gapNone.
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.beginMessageLocked() {
+			return false
+		}
+		c.lastCompletedAsyncLine = true
+		return true
+	case "tool_result":
+		cell := newToolChainCellFromEvent(event)
+		if len(cell.DisplayLines(0)) == 0 {
+			return false
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		promptWasVisible := c.promptVisible
+		promptAfterBlockGap := c.promptAfterBlockGap
+		if !c.beginMessageLocked() {
+			return false
+		}
+		c.commitHistoryCellLocked(cell, c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap))
+		c.lastCompletedAsyncLine = true
+		return true
+	default:
+		// batch_start / batch_end / unknown: keep prior empty-string contract.
+		rendered := renderSharedChatToolEvent(event)
+		if strings.TrimSpace(rendered) == "" {
+			return false
+		}
+		c.RenderAsyncLine(rendered)
+		return true
+	}
 }
 
 // RenderAsyncDocument writes a typed timeline/info document without routing it
@@ -2858,15 +2999,14 @@ func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
 	promptAfterBlockGap := c.promptAfterBlockGap
-	previousAsyncLine := c.lastCompletedAsyncLine
 	if !c.beginMessageLocked() {
 		return
 	}
-	// Typed timeline/tool/info document routed through the cell model (P4.2);
-	// byte-identical to writeCompleteBlockLocked(RenderDocumentANSI).
+	// Typed timeline/tool/info document routed through the cell model (P4.2/P5.6).
+	// Dense chain spacing is owned by the cell + lastCompletedAsyncLine flag.
 	c.commitHistoryCellLocked(
 		newAsyncDocumentCell(doc),
-		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap, previousAsyncLine),
+		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap),
 	)
 	c.lastCompletedAsyncLine = true
 }
@@ -3210,6 +3350,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
 	c.dynamicStatusStarted = time.Time{}
+	c.dynamicStatusCompletedElapsed = 0
+	c.dynamicStatusCompleted = false
 	if c.activeStream != nil {
 		c.activeStream.Cancel()
 	}

@@ -58,4 +58,8 @@ type LineEditorHooks struct {
 	// without restarting the editor.
 	MaxVisibleRows        int
 	ResolveMaxVisibleRows func() int
+	// SuppressSubmitEcho skips the bare \r\n submit echo. Fixed-bottom surfaces
+	// already own the prompt rows and repaint status themselves; emitting a raw
+	// newline would corrupt the adjacent dynamic status line.
+	SuppressSubmitEcho bool
 }

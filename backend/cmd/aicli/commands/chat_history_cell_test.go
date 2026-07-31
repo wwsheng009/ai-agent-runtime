@@ -118,10 +118,9 @@ func TestToolChainCell_DisplayLinesDenseRunningAndCompleted(t *testing.T) {
 	if len(running) == 0 || !strings.Contains(running[0], "Running ls") {
 		t.Fatalf("Running DisplayLines missing marker: %#v", running)
 	}
-	// Complete in place and re-render.
-	cell.status = "Completed"
-	cell.result = "README.md"
-	completed := cell.DisplayLines(80)
+	// Complete in place and re-render via withCompleted.
+	completedCell := cell.withCompleted("README.md", nil)
+	completed := completedCell.DisplayLines(80)
 	joined := strings.Join(completed, "\n")
 	if !strings.Contains(joined, "Completed ls") || !strings.Contains(joined, "README.md") {
 		t.Fatalf("Completed DisplayLines missing content: %#v", completed)

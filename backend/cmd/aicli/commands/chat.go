@@ -1275,9 +1275,6 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			continue
 		}
 
-		if session.Interaction != nil {
-			session.Interaction.StartWaiting()
-		}
 		renderSubmittedUserInputEcho(session, input)
 
 		// 发送消息

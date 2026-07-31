@@ -56,6 +56,12 @@ type chatRuntimeEventBridge struct {
 	renderedReasoningFinal          bool
 	runStarted                      bool
 	runActive                       bool
+	runEpoch                        uint64
+	activeTurnID                    string
+	activeAssistantStreamID         string
+	assistantStreams                map[string]*chatAssistantStreamState
+	retiredAssistantStreams         map[string]struct{}
+	finalAssistantTurns             map[string]struct{}
 	nextRunPrompt                   string
 	activeRunPrompt                 string
 	requestLogState                 map[string]*chatRuntimeRequestLogState
@@ -90,6 +96,16 @@ type chatRuntimeEventBridge struct {
 type chatRuntimeQueuedEvent struct {
 	event runtimeevents.Event
 	size  int64
+	epoch uint64
+}
+
+type chatAssistantStreamState struct {
+	turnID       string
+	streamID     string
+	nextSequence uint64
+	pending      map[uint64]runtimeevents.Event
+	pendingBytes int64
+	tainted      bool
 }
 
 type chatRuntimeRequestLogState struct {
@@ -112,6 +128,8 @@ const chatRuntimeEventSettleWindow = 80 * time.Millisecond
 const chatRuntimeEventQueueByteLimit int64 = 4 << 20
 const chatRuntimeEndRunDrainTimeout = 8 * time.Second
 const chatRuntimeInterruptedEndRunDrainTimeout = 250 * time.Millisecond
+const chatAssistantStreamPendingLimit = 128
+const chatAssistantStreamPendingByteLimit int64 = 1 << 20
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	if session == nil {
@@ -377,11 +395,13 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.renderedReasoningFinal = false
 	b.runStarted = true
 	b.runActive = true
+	b.runEpoch++
+	b.activeTurnID = ""
+	b.activeAssistantStreamID = ""
+	b.assistantStreams = make(map[string]*chatAssistantStreamState)
+	b.retiredAssistantStreams = make(map[string]struct{})
+	b.finalAssistantTurns = make(map[string]struct{})
 	b.renderMu.Unlock()
-	b.progressMu.Lock()
-	b.enqueuedEvents = 0
-	b.processedEvents = 0
-	b.progressMu.Unlock()
 	b.logMu.Lock()
 	b.activeRunPrompt = b.nextRunPrompt
 	b.nextRunPrompt = ""
@@ -500,7 +520,10 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		size = 1
 	}
 	b.reserveEventQueueBytes(size)
-	b.eventQueue <- chatRuntimeQueuedEvent{event: event, size: size}
+	b.renderMu.Lock()
+	epoch := b.runEpoch
+	b.renderMu.Unlock()
+	b.eventQueue <- chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch}
 	b.progressMu.Lock()
 	b.enqueuedEvents++
 	b.progressMu.Unlock()
@@ -508,13 +531,26 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 
 func (b *chatRuntimeEventBridge) run() {
 	for queued := range b.eventQueue {
-		b.handleEvent(queued.event)
+		b.handleQueuedEvent(queued)
 		b.progressMu.Lock()
 		b.processedEvents++
 		b.progressMu.Unlock()
 		queued.event = runtimeevents.Event{}
 		b.releaseEventQueueBytes(queued.size)
 	}
+}
+
+func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent) {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	currentEpoch := b.runEpoch
+	b.renderMu.Unlock()
+	if queued.epoch != currentEpoch {
+		return
+	}
+	b.handleEvent(queued.event)
 }
 
 func (b *chatRuntimeEventBridge) reserveEventQueueBytes(size int64) {

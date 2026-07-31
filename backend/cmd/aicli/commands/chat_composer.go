@@ -95,6 +95,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		OnComplete:            c.onComplete,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
+		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
 	}
 	if c.completion != nil {
 		hooks.OnNavigate = c.onNavigate
@@ -286,6 +287,7 @@ func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
 		OnCancel:              c.onCancel,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
+		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
 	}
 }
 

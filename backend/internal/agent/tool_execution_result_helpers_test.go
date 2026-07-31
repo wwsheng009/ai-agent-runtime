@@ -32,6 +32,12 @@ func TestClassifyGenericToolExecutionError_SpawnDepthLimit(t *testing.T) {
 	}
 }
 
+func TestKnownToolOutcomeErrorCode_AgentSessionNotFound(t *testing.T) {
+	if !knownToolOutcomeErrorCode(string(runtimeerrors.ErrAgentSessionNotFound)) {
+		t.Fatal("AGENT_SESSION_NOT_FOUND must be accepted as structured tool metadata")
+	}
+}
+
 func TestRecordToolExecutionOutcome_PreservesToolAuthoredStaleContext(t *testing.T) {
 	// edit/apply_patch stamp STALE_CONTEXT + next_action in tool metadata while
 	// returning a plain error string. Generic classification must not overwrite

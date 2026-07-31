@@ -2,6 +2,7 @@ package toolbroker
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -219,6 +220,49 @@ func TestUnknownBackgroundAliasUsesStableErrorCode(t *testing.T) {
 	_, _, err := aliases.resolve("job_ref_missing", backgroundJobAliasPrefix, "background job")
 	require.Error(t, err)
 	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
+}
+
+func TestUnknownAgentAliasUsesStableErrorCode(t *testing.T) {
+	const reference = "session_ref_missing"
+	aliases := handleAliasSet{}
+
+	_, _, err := aliases.resolve(reference, agentSessionAliasPrefix, "agent session")
+
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrAgentSessionNotFound))
+	var runtimeErr *runtimeerrors.RuntimeError
+	require.ErrorAs(t, err, &runtimeErr)
+	value, ok := runtimeErr.GetContextValue("agent_reference")
+	require.True(t, ok)
+	assert.Equal(t, reference, value)
+}
+
+func TestBrokerWaitAgentUnknownAliasFailsBeforeControllerWithStableErrorCode(t *testing.T) {
+	const reference = "session_ref_missing"
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{
+		AgentSessions:       controller,
+		SessionContextStore: newFakeSessionContextStore(),
+	}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+		"id":         reference,
+		"timeout_ms": 1000,
+	})
+
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrAgentSessionNotFound))
+	assert.Empty(t, controller.lastWait.ID, "unknown alias must fail before controller wait")
+}
+
+func TestClassifyBrokerExecutionErrorAgentSessionNotFoundFallback(t *testing.T) {
+	for _, message := range []string{
+		"unknown agent session reference: session_ref_missing",
+		"agent session not found: child-missing",
+	} {
+		err := classifyBrokerExecutionError(ToolWaitAgent, errors.New(message))
+		assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrAgentSessionNotFound), "message=%q err=%v", message, err)
+	}
 }
 
 func TestBrokerAgentCacheSafeSummaryOmitsDynamicTurnIDs(t *testing.T) {
