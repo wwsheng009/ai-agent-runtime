@@ -2701,12 +2701,21 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	if height <= 0 {
 		height = 24
 	}
+	previousBottomRows := s.lastBottomRows
 	bottomRows := s.effectiveBottomRowsLocked(height)
 	sizeChanged := width != s.lastWidth || height != s.lastHeight
 	bottomChanged := bottomRows != s.lastBottomRows
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = bottomRows
+	if previousBottomRows > 0 && bottomRows > previousBottomRows {
+		// A growing owned bottom pane (ActiveBand, popup, dynamic status, or
+		// semantic gap) reduces the visible history region immediately. Hand
+		// newly hidden rows to native scrollback before the full-frame repaint;
+		// otherwise they exist only in the retained window and appear clipped
+		// until the transient pane shrinks again.
+		s.commitExcessHistoryToScrollbackLocked()
+	}
 	// Owned frames recompose history+bottom from application state, so the
 	// legacy scroll-compensation bookkeeping is inert. Only a real terminal
 	// resize invalidates the trailing-blank marker: band/popup grow-shrink must

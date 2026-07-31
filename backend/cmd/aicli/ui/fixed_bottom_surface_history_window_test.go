@@ -66,6 +66,7 @@ func TestFixedBottomSurface_HistoryWindowBounds(t *testing.T) {
 		t.Fatalf("first retained history line = %q want line-%d", got[0], wantFirst)
 	}
 }
+
 // TestFixedBottomSurface_OverflowHistoryHandsOffToScrollback pins that when
 // history exceeds the visible output region, the oldest lines are inserted into
 // native scrollback (via insertHistoryLines) once. The window dual-retains up to
@@ -159,6 +160,55 @@ func TestFixedBottomSurface_OffScreenHistoryHandsOffBeforeHeadroom(t *testing.T)
 	}
 	if got := surface.HistoryHandedOffForTest(); got != total-visible {
 		t.Fatalf("historyHandedOff=%d want %d (total-visible)", got, total-visible)
+	}
+}
+
+// TestFixedBottomSurface_ActiveBandGrowthHandsNewlyHiddenHistoryToScrollback
+// pins the reserve-growth variant of the same contract. A transient ActiveBand
+// and its semantic top gap reduce the visible output region; rows displaced by
+// that geometry change must enter host scrollback immediately instead of
+// disappearing until the band is cleared.
+func TestFixedBottomSurface_ActiveBandGrowthHandsNewlyHiddenHistoryToScrollback(t *testing.T) {
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+	})
+	visibleBefore := surface.visibleOutputRowsForTest()
+	if visibleBefore < 4 {
+		t.Fatalf("visible output rows too small: %d", visibleBefore)
+	}
+	captureUIStdout(t, func() {
+		for i := 0; i < visibleBefore; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("reserve-%d\n", i))
+		}
+	})
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("precondition: historyHandedOff=%d want 0", got)
+	}
+
+	output := captureUIStdout(t, func() {
+		surface.SetActiveBand([]string{"• Running grep"})
+	})
+	visibleAfter := surface.visibleOutputRowsForTest()
+	displaced := visibleBefore - visibleAfter
+	if displaced != 2 {
+		t.Fatalf("ActiveBand row + semantic gap displaced %d rows, want 2", displaced)
+	}
+	if got := surface.HistoryHandedOffForTest(); got != displaced {
+		t.Fatalf("historyHandedOff=%d want displaced=%d", got, displaced)
+	}
+	for i := 0; i < displaced; i++ {
+		if want := fmt.Sprintf("reserve-%d", i); !strings.Contains(output, want) {
+			t.Fatalf("newly hidden history %q was not handed to scrollback", want)
+		}
+	}
+
+	captureUIStdout(t, func() {
+		surface.ClearActiveBand()
+	})
+	frame := frameDump(surface.ComposedFrameForTest())
+	if !strings.Contains(frame, "reserve-0") {
+		t.Fatalf("dual-retained history did not return after ActiveBand shrink:\n%s", frame)
 	}
 }
 
