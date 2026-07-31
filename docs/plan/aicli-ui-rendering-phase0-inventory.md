@@ -1,12 +1,13 @@
 # aicli UI Rendering Phase 0 Inventory
 
-状态: **Phase 0 inventory complete**（后续迁移项转入实施审查跟踪）
+状态: **Phase 0 inventory complete（历史基线）**；后续内容渲染迁移转入实施审查，物理 writer/Scene 审计转入统一 TUI 架构计划
 
-更新时间: **2026-07-29**
+更新时间: **2026-07-31**
 
 本文对应 [aicli-ui-ux-rendering-codex-reference-plan.md](./aicli-ui-ux-rendering-codex-reference-plan.md) Phase 0。
-实施后的缺陷收口与剩余项见
-[aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)。
+实施后的内容渲染缺陷收口见 [aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)；owned viewport 当前实现见 [aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)；全量 raw/direct writer、Scene、single-owner 和 terminal lifecycle 审计见 [aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)。
+
+> 本文的 direct `fmt.Print` 列表是 Phase 0 的抽样和内容渲染迁移记录，不是 owned interactive 生命周期的完整 writer allowlist。该范围的可执行 P0 debt inventory / regression fence 位于 `commands/chat_command_result_test.go` 的 `TestChatInteractiveDirectWriterInventory`；详见统一架构计划的“实施状态”和 §14.2。
 
 ## 1. 颜色硬编码与 Sprint 调用
 
@@ -47,9 +48,9 @@
 - `ui/fixed_bottom_surface.go` — surface owner，继续持有光标写入；状态、活动带和 notice 内容均走同一 ThemeContext
 - `ui/statusbar.go` / `ui/progress.go` / `ui/welcome.go` — typed Document + Resolver/profile + `WriteTerminal*`
 - `commands/exec_event_processor.go` — typed semantic parts；stream delta 消毒后按 Assistant role 输出
-- `commands/chat_*.go` — selection/session 彩色内容已结构化；纯业务提示仍可使用线性 plain writer
+- `commands/chat_*.go` — selection/session 彩色内容已结构化；线性 plain writer 仅允许 plain/noninteractive/JSON 或 owned surface 生命周期之外使用，owned interactive 输出必须进入 Scene/presenter
 
-规则：新组件禁止 `fmt.Print` 着色字符串；应 `Document -> backend -> surface`。
+规则：新组件禁止 `fmt.Print` 着色字符串；内容应进入 `Document`。在 owned interactive mode 中进一步要求 `Document/RenderEvent -> Scene -> presenter`，只有 plain/JSON mode 可由线性 backend 直接写 writer。
 
 ## 5. 控制序列安全
 
