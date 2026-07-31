@@ -622,9 +622,9 @@ func TestFixedBottomSurface_SetActiveBandRendersWithoutScrollbackCommit(t *testi
 			t.Fatal("expected SetActiveBand to succeed")
 		}
 	})
-	// status(1) + composer margins(2) + prompt(1) + active(2) = 6
-	if surface.bottomRowsLocked() != 6 {
-		t.Fatalf("bottomRows=%d want 6; band=%v", surface.bottomRowsLocked(), surface.ActiveBandLines())
+	// status(1) + composer margins(2) + prompt(1) + active gap(1) + active(2) = 7
+	if surface.bottomRowsLocked() != 7 {
+		t.Fatalf("bottomRows=%d want 7; band=%v", surface.bottomRowsLocked(), surface.ActiveBandLines())
 	}
 	if !strings.Contains(output, "Hello stable paragraph.") {
 		t.Fatalf("expected active band content in surface paint, got %q", output)
@@ -684,7 +684,7 @@ func TestFixedBottomSurface_DynamicStatusDoesNotOverlapActiveBand(t *testing.T) 
 		}
 	})
 
-	if got, want := surface.promptRenderedStartRow, 21; got != want {
+	if got, want := surface.promptRenderedStartRow, 20; got != want {
 		t.Fatalf("bottom stack start=%d want %d", got, want)
 	}
 	if !strings.Contains(output, "\x1b[21;1Hassistant") || !strings.Contains(output, "\x1b[22;1Hmutable tail") {
@@ -810,6 +810,34 @@ func TestFixedBottomSurface_SetActiveBandRepaintsOnlyChangedRows(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_ActiveBandGapThresholdForcesFullRepaint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	surface := newTestFixedBottomSurfaceWithSize(80, activeBandTopGapMinHeight-1)
+	captureUIStdout(t, func() {
+		_ = surface.SetActiveBand([]string{"stable-header", "old-tail"})
+	})
+	if got := surface.bottomPaneStateLocked().activeBandTopGapRowCount(); got != 0 {
+		t.Fatalf("precondition: short terminal gap=%d want 0", got)
+	}
+
+	surface.terminal.SetSizeForTest(80, activeBandTopGapMinHeight)
+	output := captureUIStdout(t, func() {
+		if !surface.SetActiveBand([]string{"stable-header", "new-tail"}) {
+			t.Fatal("expected ActiveBand update across gap threshold")
+		}
+	})
+	if got := surface.bottomPaneStateLocked().activeBandTopGapRowCount(); got != 1 {
+		t.Fatalf("resized terminal gap=%d want 1", got)
+	}
+	if !strings.Contains(output, "stable-header") || !strings.Contains(output, "new-tail") {
+		t.Fatalf("gap threshold change must repaint the full band, got %q", output)
+	}
+	if strings.Contains(output, "old-tail") {
+		t.Fatalf("full repaint retained stale ActiveBand content: %q", output)
+	}
+}
+
 func TestFixedBottomSurface_ActiveBandWorksWithoutPrompt(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -817,12 +845,12 @@ func TestFixedBottomSurface_ActiveBandWorksWithoutPrompt(t *testing.T) {
 	captureUIStdout(t, func() {
 		_ = surface.SetActiveBand([]string{"streaming…", "partial body"})
 	})
-	// status + 2 active rows
-	if surface.bottomRowsLocked() != 3 {
-		t.Fatalf("bottomRows=%d want 3", surface.bottomRowsLocked())
+	// status + semantic top gap + 2 active rows
+	if surface.bottomRowsLocked() != 4 {
+		t.Fatalf("bottomRows=%d want 4", surface.bottomRowsLocked())
 	}
-	if got := surface.outputBottomRowLocked(); got != 21 {
-		t.Fatalf("output bottom row=%d want 21", got)
+	if got := surface.outputBottomRowLocked(); got != 20 {
+		t.Fatalf("output bottom row=%d want 20", got)
 	}
 }
 
@@ -1967,7 +1995,7 @@ func TestFixedBottomSurface_ReleasedActiveBandScrollsOutputBackDown(t *testing.T
 	if !strings.Contains(output, "\x1b[1;20r") {
 		t.Fatalf("expected output region to grow back to row 20, got %q", output)
 	}
-	if want := terminalScrollDownSequence(3); !strings.Contains(output, want) {
+	if want := terminalScrollDownSequence(4); !strings.Contains(output, want) {
 		t.Fatalf("expected freed band rows to scroll output down, got %q", output)
 	}
 	if surface.pendingScrollDownRows != 0 {
@@ -1988,7 +2016,7 @@ func TestFixedBottomSurface_ActiveBandGrowthAndReleaseScrollSymmetrically(t *tes
 			t.Fatal("expected active band to render")
 		}
 	})
-	if !strings.Contains(grow, "\x1b[20;1H\n\n") {
+	if !strings.Contains(grow, "\x1b[20;1H\n\n\n") {
 		t.Fatalf("expected reserved band rows to scroll output up, got %q", grow)
 	}
 
@@ -1997,7 +2025,7 @@ func TestFixedBottomSurface_ActiveBandGrowthAndReleaseScrollSymmetrically(t *tes
 			t.Fatal("expected active band to clear")
 		}
 	})
-	if want := terminalScrollDownSequence(2); !strings.Contains(release, want) {
+	if want := terminalScrollDownSequence(3); !strings.Contains(release, want) {
 		t.Fatalf("expected released band rows to scroll output back down, got %q", release)
 	}
 }
@@ -2633,12 +2661,11 @@ func TestFixedBottomSurface_SyncTerminalGeometryProbesSizeOnce(t *testing.T) {
 	}
 }
 
-// TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap pins the band
-// layout invariant: the band must occupy exactly the rows it reserves in
-// bottomRowsLocked, directly above the notice/prompt/status stack. Anchoring it
-// to the output bottom while the prompt is hidden used to paint the band inside
-// the scroll region and leave its reserved rows blank above the status line.
-func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) {
+// TestFixedBottomSurface_ActiveBandFillsReservedRowsWithSemanticTopGap pins the
+// band layout invariant: the band plus its explicit top separator occupy
+// exactly the rows reserved in bottomRowsLocked. Anchoring content to the output
+// bottom while the prompt is hidden used to paint it inside the scroll region.
+func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithSemanticTopGap(t *testing.T) {
 	heights := []int{24, 40, 60}
 	for _, height := range heights {
 		for _, withPrompt := range []bool{true, false} {
@@ -2666,6 +2693,7 @@ func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) 
 					defer surface.mu.Unlock()
 					state := surface.bottomPaneStateLocked()
 					activeRows := state.activeBandVisibleRowCount()
+					activeGapRows := state.activeBandTopGapRowCount()
 					promptRows := state.promptVisibleRowCount()
 					noticeRows := state.promptNoticeVisibleRowCount()
 					marginRows := state.promptVerticalMarginRowCount()
@@ -2678,9 +2706,12 @@ func TestFixedBottomSurface_ActiveBandFillsReservedRowsWithoutGap(t *testing.T) 
 						t.Fatalf("status row=%d want %d (pinned geometry lost)", statusRow, height)
 					}
 					if got, want := surface.promptRenderedStartRow, outputBottom+1; got != want {
-						t.Fatalf("band start row=%d want %d (output bottom %d)", got, want, outputBottom)
+						t.Fatalf("band area start row=%d want %d (output bottom %d)", got, want, outputBottom)
 					}
-					wantRows := activeRows + noticeRows + marginRows + promptRows
+					if activeGapRows != 1 {
+						t.Fatalf("active top gap rows=%d want 1", activeGapRows)
+					}
+					wantRows := activeGapRows + activeRows + noticeRows + marginRows + promptRows
 					if surface.promptRenderedRows != wantRows {
 						t.Fatalf("rendered rows=%d want %d", surface.promptRenderedRows, wantRows)
 					}

@@ -29,6 +29,10 @@ type ActiveCell struct {
 	Body     string // raw / plain accumulating content
 	Stable   string // markdown-stable portion when applicable
 	Holdback string
+	// Display overrides the default tool-cell projection for viewport-only
+	// tool rows that already have a canonical shared renderer. It is never
+	// committed to transcript history.
+	Display string
 	// BodyDocument is an optional render-ready projection of Stable. It is
 	// transient viewport state only; Body remains the source used at finalize.
 	BodyDocument *render.Document
@@ -76,6 +80,15 @@ func (a ActiveCell) Document(now time.Time, policy motion.Policy) render.Documen
 		}
 
 	case ActiveTool:
+		if strings.TrimSpace(a.Display) != "" {
+			for _, row := range strings.Split(strings.TrimRight(a.Display, "\r\n"), "\n") {
+				lines = append(lines, render.Line{Spans: []render.Span{{
+					Text:  row,
+					Style: render.Style{Role: string(style.RoleTool)},
+				}}})
+			}
+			break
+		}
 		if a.Tool != nil {
 			return a.Tool.Document()
 		}

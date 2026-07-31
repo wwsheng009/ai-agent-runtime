@@ -114,6 +114,20 @@ func (c *ActiveStreamController) ToolProgress() string {
 	return c.cell.Tool.Result
 }
 
+// ToolDisplay returns the canonical viewport-only display text for an active
+// tool when one was supplied by the shared chat tool renderer.
+func (c *ActiveStreamController) ToolDisplay() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active || c.cell.Kind != cell.ActiveTool {
+		return ""
+	}
+	return c.cell.Display
+}
+
 // BeginAssistant starts an assistant active cell.
 func (c *ActiveStreamController) BeginAssistant(title string) {
 	if c == nil {
@@ -144,6 +158,22 @@ func (c *ActiveStreamController) BeginTool(name string, args map[string]interfac
 	c.resetLocked()
 	c.active = true
 	c.cell = cell.RunningToolCell(name, args, time.Now())
+	c.Scheduler.Request("tool.begin")
+}
+
+// BeginToolDisplay starts a running tool cell using an already-rendered
+// canonical display. The display remains mutable viewport state and is never
+// returned as assistant transcript content.
+func (c *ActiveStreamController) BeginToolDisplay(name string, args map[string]interface{}, display string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetLocked()
+	c.active = true
+	c.cell = cell.RunningToolCell(name, args, time.Now())
+	c.cell.Display = strings.TrimRight(display, "\r\n")
 	c.Scheduler.Request("tool.begin")
 }
 

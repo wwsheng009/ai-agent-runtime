@@ -68,13 +68,11 @@ type chatInteractionCoordinator struct {
 	reasoningRendered bool
 	// reasoningTrailingLF mirrors streamTrailingLF for the reasoning band only.
 	// Kept separate so reasoning/assistant interleave does not share mid-line state.
-	reasoningTrailingLF    bool
-	reasoningMeta          string
-	reasoningBuffer        strings.Builder
-	completeBlockOutput    bool
-	lastCompletedAsyncLine bool
-	promptAfterBlockGap    bool
-	shutdown               bool
+	reasoningTrailingLF bool
+	reasoningMeta       string
+	reasoningBuffer     strings.Builder
+	completeBlockOutput bool
+	shutdown            bool
 
 	// Two-region stream state: the controller owns the mutable ActiveBand while
 	// stable rendered chunks move through a bounded, animated scrollback queue.
@@ -202,6 +200,7 @@ func buildRenderedAssistantChunk(rendered string) renderedAssistantChunk {
 type chatActiveTool struct {
 	key      string
 	detail   string
+	display  string
 	sequence uint64
 }
 
@@ -904,23 +903,16 @@ func (c *chatInteractionCoordinator) writeRowsLocked(rows []string, gap blockGap
 	c.writeTextLocked(strings.Join(rows, "\n") + "\n")
 	c.streamTrailingLF = true
 	c.completeBlockOutput = true
-	c.promptAfterBlockGap = false
 }
 
 // gapBeforeBlockLocked is the single spacing policy for a new complete block.
-// A block gets one leading blank only when a prior complete block is already on
-// screen (completeBlockOutput) or a prompt gap was already accounted for
-// (promptAfterBlockGap), and no still-visible prompt already separates it. Both
-// the top-level and async boundaries share this core so the spacing truth table
-// lives in exactly one place (P3: deterministic, single-source spacing). It is
-// pinned by TestGapPolicyTruthTable.
-func (c *chatInteractionCoordinator) gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap bool) blockGap {
-	// A block drawn directly under a still-visible prompt does not add its own
-	// leading blank (the prompt row already provides separation).
-	if promptWasVisible && !promptAfterBlockGap {
-		return gapNone
-	}
-	if c != nil && (c.completeBlockOutput || promptAfterBlockGap) {
+// Every independently committed cell gets one leading blank when another
+// complete block already precedes it. Intra-cell rows (for example a Completed
+// tool header plus its output preview) remain dense because they are emitted by
+// one DisplayLines call. Running never enters history, so it must not mutate
+// cross-cell spacing state before Completed/Failed is committed.
+func (c *chatInteractionCoordinator) gapBeforeBlockLocked() blockGap {
+	if c != nil && c.completeBlockOutput {
 		return gapBlank
 	}
 	return gapNone
@@ -930,22 +922,15 @@ func (c *chatInteractionCoordinator) gapBeforeBlockLocked(promptWasVisible, prom
 // assistant/error one-shots onto an explicit gap. completeBlockOutput is read
 // only at the message boundary — writeRowsLocked itself never invents a blank
 // from that flag (which is what polluted mid-stream residual paints).
-func (c *chatInteractionCoordinator) gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap bool) blockGap {
-	return c.gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap)
+func (c *chatInteractionCoordinator) gapForTopLevelMessage() blockGap {
+	return c.gapBeforeBlockLocked()
 }
 
-// gapForAsyncLine is kept as a thin wrapper (P5.6: toolChainCell now handles
-// dense Running/Completed layout and previousAsyncLine inference internally).
-// It will be removed once all paths use toolChainCell exclusively.
-func (c *chatInteractionCoordinator) gapForAsyncLine(promptWasVisible, promptAfterBlockGap bool) blockGap {
-	// Dense chain: consecutive async lines (Running->Running->Completed) stay
-	// adjacent. lastCompletedAsyncLine is the retained denseness flag; the old
-	// previousAsyncLine parameter is gone (P5.6). toolChainCell will eventually
-	// own this fully; until then the coordinator flag keeps chains dense.
-	if c != nil && c.lastCompletedAsyncLine {
-		return gapNone
-	}
-	return c.gapBeforeBlockLocked(promptWasVisible, promptAfterBlockGap)
+// gapForEventBlock applies the same boundary rule to tool, timeline and
+// supplement cells. Denseness belongs inside a cell, never across independent
+// events.
+func (c *chatInteractionCoordinator) gapForEventBlock() blockGap {
+	return c.gapBeforeBlockLocked()
 }
 
 // gapIfPriorComplete inserts a blank only when a prior complete block is on
@@ -969,12 +954,6 @@ func (c *chatInteractionCoordinator) preparePromptGapLocked(writeGap bool) {
 	if c == nil {
 		return
 	}
-	if c.lastCompletedAsyncLine {
-		c.promptAfterBlockGap = true
-		c.completeBlockOutput = false
-		return
-	}
-	c.promptAfterBlockGap = false
 	if writeGap {
 		c.writePromptGapLocked()
 	}
@@ -1070,6 +1049,24 @@ func (c *chatInteractionCoordinator) SetToolAgentStage(callID, detail string) {
 	if c.shutdown {
 		return
 	}
+	c.setToolAgentStageLocked(callID, detail, "")
+}
+
+// SetToolAgentStageDisplay projects a canonical shared Running row into the
+// ActiveBand without retaining it in transcript history.
+func (c *chatInteractionCoordinator) SetToolAgentStageDisplay(callID, detail, display string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	c.setToolAgentStageLocked(callID, detail, display)
+}
+
+func (c *chatInteractionCoordinator) setToolAgentStageLocked(callID, detail, display string) {
 	detail = compactStatusValue(strings.TrimSpace(detail), chatAgentStageDetailMaxWidth)
 	key := activeToolStageKey(callID, detail)
 	if key == "" {
@@ -1086,6 +1083,11 @@ func (c *chatInteractionCoordinator) SetToolAgentStage(callID, detail string) {
 	if detail != "" {
 		tool.detail = detail
 	}
+	// Progress updates do not own the canonical requested row. Preserve the
+	// command/source/argument display until the matching final event removes it.
+	if strings.TrimSpace(display) != "" || !exists {
+		tool.display = strings.TrimRight(display, "\r\n")
+	}
 	c.activeTools[key] = tool
 	c.projectActiveToolStageLocked()
 }
@@ -1101,6 +1103,10 @@ func (c *chatInteractionCoordinator) FinishToolAgentStage(callID, toolName strin
 	if c.shutdown || len(c.activeTools) == 0 {
 		return
 	}
+	c.finishToolAgentStageLocked(callID, toolName)
+}
+
+func (c *chatInteractionCoordinator) finishToolAgentStageLocked(callID, toolName string) {
 	key := activeToolStageKey(callID, toolName)
 	if key == "" {
 		return
@@ -1140,12 +1146,7 @@ func activeToolStageKey(callID, detail string) string {
 }
 
 func (c *chatInteractionCoordinator) projectActiveToolStageLocked() {
-	var selected chatActiveTool
-	for _, tool := range c.activeTools {
-		if tool.sequence > selected.sequence {
-			selected = tool
-		}
-	}
+	selected := c.newestActiveToolLocked()
 	if selected.sequence == 0 {
 		c.agentStage = chatAgentStagePlanning
 		c.agentStageDetail = ""
@@ -1155,6 +1156,16 @@ func (c *chatInteractionCoordinator) projectActiveToolStageLocked() {
 	}
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	c.syncAgentStageActiveBandLocked()
+}
+
+func (c *chatInteractionCoordinator) newestActiveToolLocked() chatActiveTool {
+	var selected chatActiveTool
+	for _, tool := range c.activeTools {
+		if tool.sequence > selected.sequence {
+			selected = tool
+		}
+	}
+	return selected
 }
 
 func (c *chatInteractionCoordinator) AgentStage() chatAgentStage {
@@ -2527,8 +2538,6 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	promptWasVisible := c.promptVisible
-	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
@@ -2551,8 +2560,7 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	} else {
 		cell = newAssistantStreamCell(response, false)
 	}
-	c.commitHistoryCellLocked(cell, c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap))
-	c.lastCompletedAsyncLine = false
+	c.commitHistoryCellLocked(cell, c.gapForTopLevelMessage())
 }
 
 func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.ReasoningBlock) {
@@ -2919,25 +2927,20 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	promptWasVisible := c.promptVisible
-	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
-	// Async/supplement line routed through the cell model (P4.2/P5.6). Dense
-	// tool-chain spacing is now owned by the cell (and lastCompletedAsyncLine
-	// for legacy gapBeforeBlock); previousAsyncLine is no longer an explicit
-	// gapForAsyncLine argument.
+	// Each async/supplement event is an independent retained cell. It receives
+	// one block-level separator; multiline content inside the cell stays dense.
 	c.commitHistoryCellLocked(
 		newSupplementLineCell(line),
-		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap),
+		c.gapForEventBlock(),
 	)
-	c.lastCompletedAsyncLine = true
 }
 
 // RenderToolChainEvent routes tool_requested / tool_result through toolChainCell
-// (P5.6). Running is a dense cell commit; Completed is the final dense commit for
-// the same tool. Non-tool stages fall back to the pre-rendered supplement path.
+// (P5.6). Running is viewport-only; Completed/Failed is the one final history
+// cell for that tool. Non-tool stages fall back to the supplement path.
 // Returns false when the event produces no visible rows (batch_start/end, empty).
 func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.ChatEvent) bool {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
@@ -2948,16 +2951,19 @@ func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.
 		// Running stays in viewport (ActiveBand via SetToolAgentStage /
 		// activeStream). Do NOT commit to history — only commit on final
 		// tool_result so scrollback never contains a Running row.
-		if len(newToolChainCellFromEvent(event).DisplayLines(0)) == 0 {
+		rendered := renderSharedChatToolEvent(event)
+		if strings.TrimSpace(rendered) == "" {
 			return false
 		}
-		// Mark denseness so the subsequent Completed gap stays gapNone.
+		// Flush any preceding assistant/reasoning block before the ActiveBand
+		// takes over, but do not mutate history spacing: Running is not a
+		// committed cell.
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if !c.beginMessageLocked() {
 			return false
 		}
-		c.lastCompletedAsyncLine = true
+		c.setToolAgentStageLocked(event.ToolCallID, event.ToolName, rendered)
 		return true
 	case "tool_result":
 		cell := newToolChainCellFromEvent(event)
@@ -2966,13 +2972,11 @@ func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		promptWasVisible := c.promptVisible
-		promptAfterBlockGap := c.promptAfterBlockGap
 		if !c.beginMessageLocked() {
 			return false
 		}
-		c.commitHistoryCellLocked(cell, c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap))
-		c.lastCompletedAsyncLine = true
+		c.finishToolAgentStageLocked(event.ToolCallID, event.ToolName)
+		c.commitHistoryCellLocked(cell, c.gapForEventBlock())
 		return true
 	default:
 		// batch_start / batch_end / unknown: keep prior empty-string contract.
@@ -2997,18 +3001,15 @@ func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	promptWasVisible := c.promptVisible
-	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
-	// Typed timeline/tool/info document routed through the cell model (P4.2/P5.6).
-	// Dense chain spacing is owned by the cell + lastCompletedAsyncLine flag.
+	// Typed timeline/tool/info document routed through the cell model
+	// (P4.2/P5.6). Cross-event spacing is applied at this cell boundary.
 	c.commitHistoryCellLocked(
 		newAsyncDocumentCell(doc),
-		c.gapForAsyncLine(promptWasVisible, promptAfterBlockGap),
+		c.gapForEventBlock(),
 	)
-	c.lastCompletedAsyncLine = true
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
@@ -3058,7 +3059,6 @@ func (c *chatInteractionCoordinator) renderUserEchoLocked(input string, allowPro
 	// behavior-identical to writeCompleteBlockLocked(FormatUserMessage): the cell
 	// returns the same normalizeWriteLines rows.
 	c.commitHistoryCellLocked(newUserMessageCell(input), gapNone)
-	c.lastCompletedAsyncLine = false
 	// StartWaiting may have already armed the turn; restore an empty composer so
 	// queued input can continue above the status line. Replay passes
 	// allowPromptRestore=false: growing the bottom reserve between replayed
@@ -3077,16 +3077,13 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	promptWasVisible := c.promptVisible
-	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
 	c.writeCompleteBlockLocked(
 		ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)),
-		c.gapForTopLevelMessage(promptWasVisible, promptAfterBlockGap),
+		c.gapForTopLevelMessage(),
 	)
-	c.lastCompletedAsyncLine = false
 }
 
 // ClearPrompt releases the prompt rows that are currently painted so direct
@@ -3299,8 +3296,6 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 		return
 	}
 	c.completeBlockOutput = false
-	c.lastCompletedAsyncLine = false
-	c.promptAfterBlockGap = false
 	c.agentStage = chatAgentStageIdle
 	c.agentStageDetail = ""
 	c.activeTools = nil
@@ -3344,8 +3339,6 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.streamingActive = false
 	c.reasoningActive = false
 	c.completeBlockOutput = false
-	c.lastCompletedAsyncLine = false
-	c.promptAfterBlockGap = false
 	c.stopActiveStreamFrameLocked()
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
@@ -4913,11 +4906,21 @@ func (c *chatInteractionCoordinator) syncAgentStageActiveBandLocked() {
 	}
 	switch c.agentStage {
 	case chatAgentStageToolRunning:
+		selected := c.newestActiveToolLocked()
 		name, progress := splitToolStageDetail(c.agentStageDetail)
 		if name == "" {
 			name = "tool"
 		}
 		sameTool := c.activeStream.IsToolActive() && c.activeStream.ToolName() == name
+		if selected.display != "" {
+			sameDisplay := sameTool && c.activeStream.ToolDisplay() == selected.display
+			if sameDisplay && c.surface != nil && len(c.surface.ActiveBandLines()) > 0 {
+				return
+			}
+			c.activeStream.BeginToolDisplay(name, nil, selected.display)
+			_ = c.publishActiveStreamFrameLocked(true)
+			return
+		}
 		// Avoid thrashing identical tool paints on high-frequency progress.
 		if sameTool &&
 			c.activeStream.ToolProgress() == progress {

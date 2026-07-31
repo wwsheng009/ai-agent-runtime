@@ -9,11 +9,11 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-// TestPrintVisibleChatHistory_KeepsToolChainDense asserts consecutive async
-// Completed tool lines (now the only history rows) do not get separator blanks
-// between them. Top-level user/assistant blocks still keep a single inter-block blank.
-// Running is never in scrollback (viewport-only until complete).
-func TestPrintVisibleChatHistory_KeepsToolChainDense(t *testing.T) {
+// TestPrintVisibleChatHistory_SeparatesFinalToolCells asserts that each final
+// tool invocation is an independent retained block. Completed/Failed and their
+// own output remain dense inside the cell, while adjacent tool cells get one
+// separator. Running is never in scrollback (viewport-only until complete).
+func TestPrintVisibleChatHistory_SeparatesFinalToolCells(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
@@ -65,6 +65,7 @@ func TestPrintVisibleChatHistory_KeepsToolChainDense(t *testing.T) {
 		"BLANK",
 		"CONTENT:• Completed ls path=docs",
 		"CONTENT:README.md",
+		"BLANK",
 		"CONTENT:• Completed read_file path=docs/README.md",
 		"CONTENT:# Docs",
 		"BLANK",

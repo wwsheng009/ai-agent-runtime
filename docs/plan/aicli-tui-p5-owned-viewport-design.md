@@ -1,6 +1,6 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0–P5.5 已完成；P5.6 完成：`toolChainCell` + gap denseness 经 `lastCompletedAsyncLine`；Running live redraw via RenderToolEvent 已接入；KeepsToolChainDense 迁移完成；P5.7 待推进）**
+状态: **implementing（P5.0–P5.5 已完成；P5.6 完成：`toolChainCell` 单 cell 内稠密、独立 final tool/event cell 间单空行；Running 通过 ActiveBand live redraw 且不进 history；P5.7 待推进）**
 
 更新时间: **2026-07-30**
 
@@ -25,8 +25,8 @@
 2. **工具链 Running→…→Completed 合并为单个可重绘 cell**（Codex `ExecCell`）——P3b/P4.2b。
 3. **删除两套易回归的状态机**：表面滚动补偿（`scrollCompensatedRows` /
    `pendingScrollDownRows` / `outputCursorOnBlankRow` / `outputScrollDebtRows`）与
-   协程空行/间距标记（`completeBlockOutput` / `lastCompletedAsyncLine` /
-   `promptAfterBlockGap`）。
+   协程空行/间距标记（`lastCompletedAsyncLine` / `promptAfterBlockGap` 已删除；
+   `completeBlockOutput` 暂仅保留为统一 cell 边界判定）。
 
 根因：**当前是立即模式（immediate-mode）**——历史行一旦经 `WriteOutput` 写入终端原生
 scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要 reflow / 原地重绘 tool cell /
@@ -44,7 +44,7 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
   `resize_reflow` 的 cap）。
 - 工具链合并为单个可重绘 cell：Running 阶段在 viewport 内重绘，完成后作为一个 cell
   一次性 `insertHistoryLines`。
-- **删除**两套状态机（§9），空行完全由 cell 内容决定。
+- **删除**两套状态机（§9）；cell 内间距由 cell 内容决定，跨 cell 间距由统一边界策略决定。
 
 ### 1.3 非目标
 
@@ -96,11 +96,12 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
 含义：补偿机制是“**在立即模式下模拟腾行**”的产物；owned viewport 下它整体被
 `insertHistoryLines` + 每帧 diff 取代。
 
-### 2.4 间距/空行状态机（P3a 已单源化，P5 删除其推断需求）
+### 2.4 间距/空行状态机（P3a 已单源化，P5.6 已删除 async-chain 推断）
 
-`cmd/aicli/commands/chat_interaction.go`：`completeBlockOutput` / `lastCompletedAsyncLine` /
-`promptAfterBlockGap`，读取点已在 P3a 收敛到 `gapBeforeBlockLocked`（真值表锁定）。P5 让
-空行成为 cell `DisplayLines` 的一部分后，这些“跨块推断”不再需要。
+`cmd/aicli/commands/chat_interaction.go` 已删除 `lastCompletedAsyncLine`、
+`promptAfterBlockGap` 和 `gapForAsyncLine`。`completeBlockOutput` 只回答“前面是否已有完整
+block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；Running 是 viewport-only，
+不会修改 history spacing。cell 的 `DisplayLines` 只负责 cell 内部稠密布局。
 
 ### 2.5 Codex 参考（概念对齐，非逐行移植）
 
@@ -178,7 +179,7 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
   重绘**（Running→Running→…）。
 - 完成阶段：整链定型为一个 cell，一次 `insertHistoryLines` 进 scrollback。
 - 实时反馈不回退：Running 立即在 viewport 可见；只是它此刻属于“可变 viewport”而非 scrollback。
-- 空行随 cell 内容（链首一个前导空行、链内稠密），删除 `gapForAsyncLine` 的逐行推断需求。
+- Running ActiveBand 与 retained history 之间有一个可折叠的语义 top gap；完成后 final cell 按统一边界策略提交。Completed/Failed 标题与其 output/detail 在单 cell 内稠密，独立 final tool/event cells 之间一个空行。删除 `gapForAsyncLine` 的逐行推断需求。
 
 ### D5. 能力降级与回退
 
@@ -309,7 +310,7 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
   “最近 N 行历史”窗口。删除 `pendingScrollDownRows`/`outputScrollDebtRows`/
   `outputCursorOnBlankRow`/`scrollCompensatedRows`（§9）。
 - 测试：历史与底部带无重叠/无吞行（VT tail parity）；`RawOutputBeforeHistory`、
-  `KeepsToolChainDense`、`MatchesLiveCompleteBlockRendering`、`ReplayIgnores*` 全绿。
+  `SeparatesFinalToolCells`、`MatchesLiveCompleteBlockRendering`、`ReplayIgnores*` 全绿。
 - 回退：flag 切回旧“WriteOutput + 补偿”。
 
 ### P5.4 —— cell 模型统一 + 宽度感知 `DisplayLines` (completed)
@@ -328,10 +329,9 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
 
 ### P5.6 —— 工具链合并单 cell（P3b/P4.2b）
 
-- `toolChainCell` 在 viewport 内重绘 Running；完成后一次 `insertHistoryLines`。空行随 cell。
-- 删除 `gapForAsyncLine` 的逐行 previousAsyncLine 推断（改由 toolChainCell 内部布局）。
-- 测试：`KeepsToolChainDense` 迁移为“单 cell 内稠密 + 链首一空行”；Running 实时可见（VT 在
-  完成前能看到 Running）。
+- `toolChainCell` 在 viewport 内重绘 Running；完成后一次 `insertHistoryLines`。Running 不进入 scrollback，也不修改 history spacing。
+- 删除 `gapForAsyncLine`、`lastCompletedAsyncLine` 和 prompt-gap 的 async-chain 推断；跨 cell 统一为最多一个空行，tool cell 内部保持稠密。
+- 测试覆盖“独立 final tool cells 间单空行 + Completed/Failed 与自身 output 相邻”；Running 实时可见，且 ActiveBand 与 retained history 之间的 top gap 在短终端可折叠。
 - 回退：flag；关闭则回到逐行 supplement（现状）。
 
 ### P5.7 —— 收尾：删旧路径开关 + 文档
@@ -347,7 +347,7 @@ scrollback 就不可再改。代码亦明确承认这一点（见 §2.1）。要
 | --- | --- | --- |
 | 底部带无空洞 | `vt.Screen` + `maxBlankRunAboveBottom` | P5.2+ |
 | 历史/底部带 tail parity | `assertScreenTailParity`（live vs replay） | P5.3+ |
-| 工具链稠密 + 链首单空行 | `KeepsToolChainDense`（迁移版） | P5.6 |
+| final tool/event cell 间单空行 + cell 内稠密 | `SeparatesFinalToolCells` + ActiveBand gap VT/snapshot | P5.6 |
 | live 与 replay 完整块一致 | `MatchesLiveCompleteBlockRendering` | P5.3+ |
 | 回放不触发补偿 | `ReplayIgnoresPromptCompensation` | P5.3+ |
 | 间距真值表 | `TestGapPolicyTruthTable`（逐步淘汰为 cell 布局测试） | P3a→P5.6 |
@@ -380,8 +380,8 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 ## 8. 验收标准（P5 完成即“终局”）
 
 1. resize 窄→宽历史正确重排（cap 内），不触碰已滚出 scrollback。
-2. 工具链为单 cell、Running 实时可见、完成后稠密进历史。
-3. 空行 100% 由 cell 内容决定；`gapForAsyncLine` 逐行推断被移除。
+2. 工具调用为单 cell、Running 实时可见且 viewport-only；final cell 内稠密、与其他 final event cell 间单空行。
+3. cell 内空行由 cell 内容决定，跨 cell 空行由统一边界策略决定；`gapForAsyncLine` 逐行推断被移除。
 4. §9 两套状态机字段全部删除且无回归。
 5. 能力不足时行为与今日立即模式一致（可回退）。
 
@@ -395,8 +395,8 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
   的读写；`appendOutputScrollDownForBottomReserveShrinkSequence` 等补偿序列构造。
 
 协程空行/间距推断（`chat_interaction.go`）：
-- `completeBlockOutput`、`lastCompletedAsyncLine`、`promptAfterBlockGap` 及
-  `gapForAsyncLine`/`gapForTopLevelMessage`/`gapBeforeBlockLocked`（改由 cell 布局）。
+- 已删除 `lastCompletedAsyncLine`、`promptAfterBlockGap` 与 `gapForAsyncLine`；
+  `completeBlockOutput`/`gapBeforeBlockLocked` 暂作为统一跨 cell 边界策略，待 history cell 容器直接持有边界后再删除。
 
 立即模式补丁（`chat_interaction_transcript.go`）：
 - `assistantTurnTranscript.EmittedDiverged` / `NeedsConsolidation` / `RetainedSourceBytes`

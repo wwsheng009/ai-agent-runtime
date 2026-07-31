@@ -61,7 +61,6 @@ func TestAICLITranscriptRenderer_RendersCompleteBlocksWithInteraction(t *testing
 		"> 检查目录",
 		"先确认目录。",
 		"目录如下。",
-		"• Running ls path=docs",
 		"• Completed ls path=docs",
 		"README.md",
 		"可见系统消息",
@@ -76,6 +75,9 @@ func TestAICLITranscriptRenderer_RendersCompleteBlocksWithInteraction(t *testing
 			t.Fatalf("expected %q after the previous block, got:\n%s", expected, rendered)
 		}
 		lastIndex = index
+	}
+	if strings.Contains(rendered, "• Running ls path=docs") {
+		t.Fatalf("Running must remain viewport-only, got retained transcript:\n%s", rendered)
 	}
 }
 

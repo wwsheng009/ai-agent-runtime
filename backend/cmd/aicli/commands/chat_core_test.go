@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -2249,25 +2250,34 @@ func TestAICLIEventRenderer_SharedToolResultUsesSourceLabelsAndTighterFolding(t 
 	}
 }
 
-func TestAICLIEventRenderer_SharedToolRequestedUsesSourceLabels(t *testing.T) {
+func TestAICLIEventRenderer_SharedToolRequestedStaysViewportOnlyAndKeepsSourceLabels(t *testing.T) {
 	session := &ChatSession{Stream: true}
 	session.Interaction = newChatInteractionCoordinator(session)
+	t.Cleanup(session.Interaction.Shutdown)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	session.Interaction.SetSurface(surface)
 
 	renderer := newAICLIEventRenderer(session)
 	renderer.Handle(runtimechatcore.ChatEvent{
-		Type:     runtimechatcore.EventTool,
-		Stage:    "tool_requested",
-		ToolName: "list_mcp_resources",
+		Type:       runtimechatcore.EventTool,
+		Stage:      "tool_requested",
+		ToolName:   "list_mcp_resources",
+		ToolCallID: "call-meta",
 		Metadata: map[string]interface{}{
 			"tool_source": "meta",
 		},
 	})
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "• Running [meta] list_mcp_resources") {
-		t.Fatalf("expected meta label in shared requested render, got %q", rendered)
+	if strings.Contains(rendered, "Running") {
+		t.Fatalf("tool_requested must not enter retained history, got %q", rendered)
+	}
+	lines := surface.ActiveBandLines()
+	if !strings.Contains(strings.Join(lines, "\n"), "• Running [meta] list_mcp_resources") {
+		t.Fatalf("expected ActiveBand to preserve the meta label, got %q", lines)
 	}
 }
 

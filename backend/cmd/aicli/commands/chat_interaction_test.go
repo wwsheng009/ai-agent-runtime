@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -261,10 +262,9 @@ func TestChatInteractionCoordinator_PrintPrompt_InsertsBlankLineAfterCompletedBl
 	}
 }
 
-// A tool chain stays dense even when a prompt was redrawn between the Running
-// and Completed lines: consecutive async lines belong to the same block, so
-// gapForAsyncLine must not insert a separator blank.
-func TestChatInteractionCoordinator_RenderAsyncLine_KeepsToolChainDenseAcrossPromptRedraw(t *testing.T) {
+// Retained async lines are independent event cells, even when a prompt was
+// redrawn between them. Their boundary owns one separator row.
+func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesCellsAcrossPromptRedraw(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	coord.promptAdvanceFn = func() bool { return false }
@@ -279,14 +279,93 @@ func TestChatInteractionCoordinator_RenderAsyncLine_KeepsToolChainDenseAcrossPro
 	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend") {
 		t.Fatalf("expected first tool timeline line, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend\n• Completed grep path=E:/projects/ai/ai-agent-runtime/backend") {
-		t.Fatalf("expected tool chain to stay dense across prompt redraw, got %q", rendered)
+	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend\n\n• Completed grep path=E:/projects/ai/ai-agent-runtime/backend") {
+		t.Fatalf("expected retained event cells to keep one separator across prompt redraw, got %q", rendered)
 	}
 }
 
-// Same contract when the prompt is still marked visible: the Completed line of
-// an in-flight tool chain joins the Running line without a blank.
-func TestChatInteractionCoordinator_RenderAsyncLine_KeepsToolChainDenseWhenPromptVisible(t *testing.T) {
+func TestChatInteractionCoordinator_RenderToolChainEvent_CommitsOnlyFinalCellWithBoundary(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistant("先检查目录。")
+	requested := runtimechatcore.ChatEvent{
+		Type:       runtimechatcore.EventTool,
+		Stage:      "tool_requested",
+		ToolName:   "ls",
+		ToolCallID: "call-1",
+		Arguments:  map[string]interface{}{"path": "docs"},
+	}
+	if !coord.RenderToolChainEvent(requested) {
+		t.Fatal("expected tool_requested to be accepted for the viewport")
+	}
+	if rendered := output.String(); strings.Contains(rendered, "Running ls") {
+		t.Fatalf("Running must remain viewport-only, got history output %q", rendered)
+	}
+
+	completed := requested
+	completed.Stage = "tool_result"
+	completed.Output = "README.md"
+	completed.Success = true
+	if !coord.RenderToolChainEvent(completed) {
+		t.Fatal("expected tool_result to commit its final cell")
+	}
+
+	rendered := stripTerminalDecorations(output.String())
+	if !strings.Contains(rendered, "先检查目录。\n\n• Completed ls path=docs\n  README.md") {
+		t.Fatalf("expected one boundary gap and dense final tool cell, got %q", rendered)
+	}
+	if strings.Contains(rendered, "\n\n  README.md") {
+		t.Fatalf("tool output must stay dense inside the final cell, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderToolChainEvent_SeparatesCompletedAndFailedCells(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	for _, event := range []runtimechatcore.ChatEvent{
+		{
+			Type:       runtimechatcore.EventTool,
+			Stage:      "tool_result",
+			ToolName:   "ls",
+			ToolCallID: "call-ok",
+			Arguments:  map[string]interface{}{"path": "docs"},
+			Output:     "README.md",
+			Success:    true,
+		},
+		{
+			Type:       runtimechatcore.EventTool,
+			Stage:      "tool_result",
+			ToolName:   "shell",
+			ToolCallID: "call-fail",
+			Arguments:  map[string]interface{}{"command": "exit 1"},
+			Error:      "exit status 1",
+			Success:    false,
+		},
+	} {
+		if !coord.RenderToolChainEvent(event) {
+			t.Fatalf("expected final tool event to render: %+v", event)
+		}
+	}
+
+	rendered := stripTerminalDecorations(output.String())
+	if !strings.Contains(rendered, "• Completed ls path=docs\n  README.md\n\n• Failed exit 1\n  failed: exit status 1") {
+		t.Fatalf("expected one cross-cell gap with dense Completed/Failed details, got %q", rendered)
+	}
+	if strings.Contains(rendered, "README.md\n\n\n• Failed") {
+		t.Fatalf("final tool cells must never accumulate multiple separator rows, got %q", rendered)
+	}
+}
+
+// Independent retained async cells keep an explicit separator even if a prompt
+// was visible between them. Dense Running/Completed ownership now lives in the
+// viewport-only tool-chain renderer rather than RenderAsyncLine.
+func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesIndependentCellsWhenPromptVisible(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	coord.promptAdvanceFn = func() bool { return false }
@@ -296,15 +375,13 @@ func TestChatInteractionCoordinator_RenderAsyncLine_KeepsToolChainDenseWhenPromp
 	coord.RenderAsyncLine("• Running git ls-files --others --exclude-standard\n  workdir: E:/projects/ai/ai-agent-runtime")
 	coord.mu.Lock()
 	coord.promptVisible = true
-	coord.promptAfterBlockGap = false
 	coord.completeBlockOutput = true
-	coord.lastCompletedAsyncLine = true
 	coord.mu.Unlock()
 	coord.RenderAsyncLine("• Completed git ls-files --others --exclude-standard in 868ms\n  workdir: E:/projects/ai/ai-agent-runtime")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "  workdir: E:/projects/ai/ai-agent-runtime\n• Completed git ls-files --others --exclude-standard in 868ms") {
-		t.Fatalf("expected completed tool timeline line to stay dense after prompt clear, got %q", rendered)
+	if !strings.Contains(rendered, "  workdir: E:/projects/ai/ai-agent-runtime\n\n• Completed git ls-files --others --exclude-standard in 868ms") {
+		t.Fatalf("expected independent retained cells to keep one separator, got %q", rendered)
 	}
 }
 
@@ -692,10 +769,9 @@ func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(
 	}
 }
 
-// Adjacent async blocks are one timeline chain, not two messages: they must not
-// be separated by a blank row (that was the source of the doubled blank rows in
-// replayed history and long tool chains).
-func TestChatInteractionCoordinator_RenderAsyncLineKeepsAdjacentBlocksDense(t *testing.T) {
+// Adjacent async blocks are independent retained events. Their content stays
+// dense internally, while the cross-cell boundary owns exactly one blank row.
+func TestChatInteractionCoordinator_RenderAsyncLineSeparatesAdjacentBlocks(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	var output bytes.Buffer
@@ -705,9 +781,9 @@ func TestChatInteractionCoordinator_RenderAsyncLineKeepsAdjacentBlocksDense(t *t
 	coord.RenderAsyncLine("[tool done] second")
 
 	rendered := output.String()
-	expected := ui.FormatAssistantSupplementBlock("[tool done] first") + "\n" + ui.FormatAssistantSupplementBlock("[tool done] second")
+	expected := ui.FormatAssistantSupplementBlock("[tool done] first") + "\n\n" + ui.FormatAssistantSupplementBlock("[tool done] second")
 	if !strings.Contains(rendered, expected) {
-		t.Fatalf("expected adjacent async blocks to stay dense, got %q", rendered)
+		t.Fatalf("expected adjacent async blocks to keep one separator, got %q", rendered)
 	}
 }
 

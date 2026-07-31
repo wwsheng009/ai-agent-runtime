@@ -22,12 +22,11 @@ func uniqueTranscriptRow(t *testing.T, screen *screenVT, marker string) int {
 	return rows[0]
 }
 
-// TestPrintVisibleChatHistory_ScreenKeepsToolChainDense lifts the tool-chain
-// denseness regression from the content plane onto the display plane. Now
-// Running is viewport-only (ActiveBand); history scrollback only contains
-// Completed rows. The chain is still dense (no separator blank between
-// Completed ls and its output, nor between Completed read and its output).
-func TestPrintVisibleChatHistory_ScreenKeepsToolChainDense(t *testing.T) {
+// TestPrintVisibleChatHistory_ScreenSeparatesFinalToolCells lifts the tool-cell
+// boundary contract from the content plane onto the display plane. Running is
+// viewport-only (ActiveBand); history scrollback only contains final cells.
+// Each cell is internally dense and adjacent cells have one separator.
+func TestPrintVisibleChatHistory_ScreenSeparatesFinalToolCells(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
 
@@ -91,14 +90,17 @@ func TestPrintVisibleChatHistory_ScreenKeepsToolChainDense(t *testing.T) {
 	rowCompRead := uniqueTranscriptRow(t, screen, "Completed read_file path=docs/README.md")
 	rowFinal := uniqueTranscriptRow(t, screen, "目录里有 README。")
 
-	// Dense tool chain: output sits directly under its Completed header, and the
-	// next Completed follows immediately (no separator blank between tools).
+	// Each tool cell is internally dense, but the next independent final cell
+	// starts after one separator row.
 	if got := strings.TrimSpace(screen.line(rowCompLs + 1)); got != "README.md" {
 		t.Fatalf("expected ls output directly under Completed ls, got %q\n%s", got, screen.dump())
 	}
-	if rowCompRead != rowCompLs+2 {
-		t.Fatalf("Completed read_file must follow the ls output row: compLs=%d compRead=%d\n%s",
+	if rowCompRead != rowCompLs+3 {
+		t.Fatalf("Completed read_file must follow one blank after the ls output: compLs=%d compRead=%d\n%s",
 			rowCompLs, rowCompRead, screen.dump())
+	}
+	if !screen.Blank(rowCompLs + 2) {
+		t.Fatalf("expected a blank row between final tool cells\n%s", screen.dump())
 	}
 	if got := strings.TrimSpace(screen.line(rowCompRead + 1)); got != "# Docs" {
 		t.Fatalf("expected read_file output directly under Completed read_file, got %q\n%s", got, screen.dump())

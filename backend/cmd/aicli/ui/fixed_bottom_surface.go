@@ -31,6 +31,11 @@ const (
 	chatComposerTopMarginRows           = 1
 	chatComposerBottomMarginRows        = 1
 	chatComposerVerticalMarginMinHeight = 12
+	// A visible ActiveBand is a transient event block, so keep one semantic row
+	// between retained history and Running/progress content. Short terminals
+	// collapse the margin before sacrificing usable content.
+	activeBandTopGapRows      = 1
+	activeBandTopGapMinHeight = 12
 	// DefaultGeometryProbeMinInterval caps how often the live stream paint path
 	// re-probes terminal size. Active cells paint up to ~30 FPS; probing every
 	// frame is unnecessary because human resize events are far slower.
@@ -67,6 +72,13 @@ func chatComposerVerticalMargins(terminalHeight int) (top, bottom int) {
 		return 0, 0
 	}
 	return chatComposerTopMarginRows, chatComposerBottomMarginRows
+}
+
+func activeBandTopGap(terminalHeight int) int {
+	if terminalHeight < activeBandTopGapMinHeight {
+		return 0
+	}
+	return activeBandTopGapRows
 }
 
 // FixedBottomSurface reserves the last terminal row for lightweight status
@@ -1298,7 +1310,12 @@ func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.
 	}
 	previousLines := s.activeBandLines
 	previousStyled := s.activeBandStyled
-	previousRows := s.bottomPaneStateLocked().activeBandVisibleRowCount()
+	previousState := s.bottomPaneStateLocked()
+	previousRows := previousState.activeBandVisibleRowCount()
+	previousGapRows := previousState.activeBandTopGapRowCount()
+	if previousRows > 0 && s.lastHeight > 0 {
+		previousGapRows = activeBandTopGap(s.lastHeight)
+	}
 	previousStart := s.promptRenderedStartRow
 	s.activeBandLines = normalized
 	s.activeBandStyled = cloneRenderLines(styled)
@@ -1307,13 +1324,16 @@ func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.
 		s.repaintActiveBandLocked()
 		return true
 	}
-	currentRows := s.bottomPaneStateLocked().activeBandVisibleRowCount()
-	if previousRows == currentRows {
+	currentState := s.bottomPaneStateLocked()
+	currentRows := currentState.activeBandVisibleRowCount()
+	currentGapRows := currentState.activeBandTopGapRowCount()
+	if previousRows == currentRows && previousGapRows == currentGapRows {
 		if currentRows == 0 {
 			return s.enabled
 		}
 		if previousStart > 0 {
-			return s.repaintActiveBandDiffLocked(previousStart, previousLines, previousStyled)
+			previousActiveStart := previousStart + previousGapRows
+			return s.repaintActiveBandDiffLocked(previousActiveStart, previousLines, previousStyled)
 		}
 	}
 	return s.repaintActiveBandLocked()
@@ -2948,7 +2968,7 @@ func (s *FixedBottomSurface) promptMaxVisibleRowsLocked() int {
 	bottom := s.promptBottomRowLocked()
 	outputBottom := s.outputBottomRowLocked()
 	state := s.bottomPaneStateLocked()
-	rows := bottom - outputBottom - state.dynamicStatusVisibleRowCount() - state.promptNoticeVisibleRowCount() - state.activeBandVisibleRowCount() - state.promptTopMarginRowCount()
+	rows := bottom - outputBottom - state.dynamicStatusVisibleRowCount() - state.promptNoticeVisibleRowCount() - state.activeBandLayoutRowCount() - state.promptTopMarginRowCount()
 	if rows < 1 {
 		return 1
 	}
@@ -3266,6 +3286,7 @@ type BottomPaneState struct {
 	ActiveBandLines        []string
 	ActiveBandStyled       []render.Line
 	ActiveBandMaxRows      int
+	ActiveBandTopGapRows   int
 	PromptReservedRows     int
 	PromptTopMarginRows    int
 	PromptBottomMarginRows int
@@ -3324,8 +3345,19 @@ func (s BottomPaneState) activeBandVisibleRowCount() int {
 	return n
 }
 
+func (s BottomPaneState) activeBandTopGapRowCount() int {
+	if s.activeBandVisibleRowCount() < 1 || s.ActiveBandTopGapRows < 1 {
+		return 0
+	}
+	return s.ActiveBandTopGapRows
+}
+
+func (s BottomPaneState) activeBandLayoutRowCount() int {
+	return s.activeBandTopGapRowCount() + s.activeBandVisibleRowCount()
+}
+
 func (s BottomPaneState) promptAreaVisibleRowCount() int {
-	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.promptVisibleRowCount()
+	return s.activeBandLayoutRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.promptVisibleRowCount()
 }
 
 func (s BottomPaneState) popupExpandsBelowPrompt() bool {
@@ -3336,7 +3368,7 @@ func (s BottomPaneState) popupTopReservedRowCount() int {
 	if !s.popupExpandsBelowPrompt() {
 		return 0
 	}
-	rows := s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.promptReservedRowCount()
+	rows := s.activeBandLayoutRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.promptReservedRowCount()
 	if rows < 0 {
 		return 0
 	}
@@ -3409,7 +3441,7 @@ func (s BottomPaneState) extraPromptReservedRowCount() int {
 }
 
 func (s BottomPaneState) popupBottomGapRowCount() int {
-	return s.activeBandVisibleRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
+	return s.activeBandLayoutRowCount() + s.dynamicStatusVisibleRowCount() + s.promptNoticeVisibleRowCount() + s.promptVerticalMarginRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
 }
 
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
@@ -3663,6 +3695,7 @@ func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 		ActiveBandLines:        append([]string(nil), s.activeBandLines...),
 		ActiveBandStyled:       cloneRenderLines(s.activeBandStyled),
 		ActiveBandMaxRows:      s.ActiveBandRowBudget(),
+		ActiveBandTopGapRows:   activeBandTopGap(s.terminal.Height()),
 		PromptReservedRows:     s.promptReservedRows,
 		PromptTopMarginRows:    topMarginRows,
 		PromptBottomMarginRows: bottomMarginRows,
@@ -3907,6 +3940,7 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
+
 // visibleOutputRowsLocked returns the number of rows occupied by the current
 // output region (history + active band + prompt/status margins). This is the
 // maximum number of history rows that can be kept in owned historyWindow before

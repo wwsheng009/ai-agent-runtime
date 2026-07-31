@@ -45,13 +45,15 @@ func TestPrintVisibleChatHistory_RendersRestoredMessagesWithUnifiedToolRenderer(
 		"已加载历史会话 (3 条消息):",
 		"查看当前目录",
 		"我来查看当前目录。",
-		"• Running dir",
 		"• Completed dir",
 		"目录: backend",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
 		}
+	}
+	if strings.Contains(output, "• Running dir") {
+		t.Fatalf("history replay must not reconstruct viewport-only Running, got:\n%s", output)
 	}
 	if strings.Contains(output, "You are a helpful assistant.") {
 		t.Fatalf("did not expect hidden system prompt in output, got:\n%s", output)
@@ -287,13 +289,15 @@ func TestPrintVisibleChatHistory_RendersReasoningAndToolFailures(t *testing.T) {
 	for _, expected := range []string{
 		chatToolDivider("reasoning"),
 		"需要验证失败原因。",
-		"• Running exit 1",
 		"• Failed exit 1",
 		"stderr details",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected replay output to contain %q, got:\n%s", expected, rendered)
 		}
+	}
+	if strings.Contains(rendered, "• Running exit 1") {
+		t.Fatalf("history replay must not reconstruct viewport-only Running, got:\n%s", rendered)
 	}
 	if strings.Count(rendered, "Tool execution failed:") != 0 {
 		t.Fatalf("expected the model-history error prefix to be adapted rather than duplicated, got:\n%s", rendered)

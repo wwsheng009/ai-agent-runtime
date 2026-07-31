@@ -168,6 +168,12 @@ func (s *FixedBottomSurface) historyRowsWithCursorBlankLocked() [][]vt.Cell {
 	if !s.outputCursorOnBlankRow {
 		return rows
 	}
+	// The ActiveBand owns an explicit semantic separator from retained history.
+	// Do not materialize the output cursor's parking blank at the same time, or
+	// the composed frame would show two empty rows before Running/progress.
+	if s.bottomPaneStateLocked().activeBandTopGapRowCount() > 0 {
+		return rows
+	}
 	// Trailing blank is a cursor-parking / absorb bookkeeping marker. Paint it
 	// only when the output region still has headroom; otherwise Compose would
 	// drop the oldest content row to make room for an empty cell (L1 scrolled
@@ -331,6 +337,7 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 	noticeRows := state.promptNoticeVisibleRowCount()
 	dynamicRows := state.dynamicStatusVisibleRowCount()
 	activeRows := state.activeBandVisibleRowCount()
+	activeTopGapRows := state.activeBandTopGapRowCount()
 	topMarginRows := state.promptTopMarginRowCount()
 	bottomMarginRows := state.promptBottomMarginRowCount()
 	if promptRows < 1 && noticeRows < 1 && dynamicRows < 1 && activeRows < 1 {
@@ -357,9 +364,10 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 	dynamicStart := topMarginStart - dynamicRows
 	noticeStart := dynamicStart - noticeRows
 	activeStart := noticeStart - activeRows
+	activeTopGapStart := activeStart - activeTopGapRows
 	plan := fixedBottomPromptPaintPlan{
-		startRow: activeStart,
-		areaRows: activeRows + noticeRows + dynamicRows + topMarginRows + promptRows + bottomMarginRows,
+		startRow: activeTopGapStart,
+		areaRows: activeTopGapRows + activeRows + noticeRows + dynamicRows + topMarginRows + promptRows + bottomMarginRows,
 	}
 	if plan.startRow < 1 {
 		plan.startRow = 1

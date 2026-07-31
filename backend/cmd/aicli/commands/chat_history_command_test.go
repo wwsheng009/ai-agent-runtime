@@ -42,7 +42,6 @@ func TestHistoryLoadAndResumeCommandsReplayTheSameTranscript(t *testing.T) {
 		for _, expected := range []string{
 			"查看 docs",
 			"先确认目录内容。",
-			"• Running Get-ChildItem docs",
 			"• Completed Get-ChildItem docs",
 			"README.md",
 			"• Failed exit 1",
@@ -52,6 +51,9 @@ func TestHistoryLoadAndResumeCommandsReplayTheSameTranscript(t *testing.T) {
 			if !strings.Contains(output, expected) {
 				t.Fatalf("expected %s transcript to contain %q, got:\n%s", command, expected, output)
 			}
+		}
+		if strings.Contains(output, "• Running Get-ChildItem docs") || strings.Contains(output, "• Running exit 1") {
+			t.Fatalf("expected %s replay to exclude viewport-only Running rows, got:\n%s", command, output)
 		}
 	}
 

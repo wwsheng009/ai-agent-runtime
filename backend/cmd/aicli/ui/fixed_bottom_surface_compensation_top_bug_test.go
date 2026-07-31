@@ -41,6 +41,17 @@ func TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop(t *testing.T) {
 	feed(func() {
 		surface.SetActiveBand([]string{"B1", "B2", "B3"})
 	})
+	surface.mu.Lock()
+	shortState := surface.bottomPaneStateLocked()
+	if got := shortState.activeBandTopGapRowCount(); got != 0 {
+		surface.mu.Unlock()
+		t.Fatalf("height %d must collapse ActiveBand top gap, got %d", height, got)
+	}
+	if got := surface.bottomRowsLocked(); got != 4 {
+		surface.mu.Unlock()
+		t.Fatalf("short bottom rows=%d want status(1)+band(3)", got)
+	}
+	surface.mu.Unlock()
 	shrinkOutput := feed(func() {
 		surface.ClearActiveBand()
 	})

@@ -143,6 +143,50 @@ func TestFixedBottomSurface_BottomRowsSnapshotPreservesStyledCells(t *testing.T)
 	}
 }
 
+func TestFixedBottomSurface_ActiveBandHasOneCollapsibleTopGap(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	const width, height = 32, 12
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+		if _, err, ok := surface.WriteOutput(os.Stdout, "history-tail\n"); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
+		if !surface.SetActiveBand([]string{"• Running grep"}) {
+			t.Fatal("expected ActiveBand update")
+		}
+	})
+
+	lines := strings.Split(frameDump(surface.ComposedFrameForTest()), "\n")
+	historyRow, activeRow := -1, -1
+	for row, line := range lines {
+		switch strings.TrimSpace(line) {
+		case "history-tail":
+			historyRow = row
+		case "• Running grep":
+			activeRow = row
+		}
+	}
+	if historyRow < 0 || activeRow < 0 {
+		t.Fatalf("failed to anchor history/ActiveBand rows:\n%s", strings.Join(lines, "\n"))
+	}
+	if activeRow != historyRow+2 || strings.TrimSpace(lines[historyRow+1]) != "" {
+		t.Fatalf("expected exactly one blank before ActiveBand: history=%d active=%d\n%s",
+			historyRow, activeRow, strings.Join(lines, "\n"))
+	}
+	if got := surface.ActiveBandLines(); !reflect.DeepEqual(got, []string{"• Running grep"}) {
+		t.Fatalf("semantic gap must not pollute ActiveBandLines: %q", got)
+	}
+
+	short := newOwnedTestFixedBottomSurfaceWithSize(width, activeBandTopGapMinHeight-1)
+	short.activeBandLines = []string{"• Running grep"}
+	state := short.bottomPaneStateLocked()
+	if got := state.activeBandTopGapRowCount(); got != 0 {
+		t.Fatalf("short terminal must collapse ActiveBand gap, got %d", got)
+	}
+}
+
 func TestFixedBottomSurface_ComposedFrameShadowMatchesLegacyBeforeShrink(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width, height = 32, 24

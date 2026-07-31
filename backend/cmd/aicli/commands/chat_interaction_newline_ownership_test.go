@@ -134,7 +134,6 @@ func TestRenderSoftEmittedLinesLocked_IgnoresCompleteBlockPollution(t *testing.T
 	c := &chatInteractionCoordinator{
 		streamMode:          assistantStreamModeText,
 		completeBlockOutput: true,
-		promptAfterBlockGap: true,
 	}
 	c.streamBuffer.WriteString("alpha\nbeta\n")
 	// Pollution flags must not invent a leading blank row in soft rebuild.
@@ -182,7 +181,6 @@ func TestWriteCompleteBlockLocked_ExplicitGapBlankInsertsOneSeparator(t *testing
 	c := &chatInteractionCoordinator{writer: &buf, streamTrailingLF: true}
 	// Pollution flags must NOT invent a gap; only the explicit gapBlank does.
 	c.completeBlockOutput = true
-	c.promptAfterBlockGap = true
 	c.writeCompleteBlockLocked("next\n", gapNone)
 	if got := buf.String(); got != "next\n" {
 		t.Fatalf("gapNone must not invent blanks from flags; got %q", got)
