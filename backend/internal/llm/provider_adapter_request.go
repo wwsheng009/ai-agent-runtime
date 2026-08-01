@@ -85,6 +85,7 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 			metadata["tool_replay_sanitized"] = true
 			metadata["tool_replay_dropped_messages"] = dropped
 		}
+		messages = compat.NormalizeAnthropicCompatibleMessages(messages)
 	}
 
 	// Tool definitions are part of the provider prompt-cache prefix. Never use a

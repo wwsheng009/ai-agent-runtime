@@ -212,6 +212,17 @@ func (c Chain) NormalizeOpenAICompatibleMessages(messages []map[string]interface
 	return messages
 }
 
+// NormalizeAnthropicCompatibleMessages applies provider-specific Anthropic
+// Messages API message fixes on top of the generic protocol sanitizer.
+func (c Chain) NormalizeAnthropicCompatibleMessages(messages []map[string]interface{}) []map[string]interface{} {
+	for _, adapter := range c.adapters {
+		if normalized, ok := adapter.NormalizeAnthropicCompatibleMessages(c.ctx, messages); ok {
+			messages = normalized
+		}
+	}
+	return messages
+}
+
 // NormalizeToolCallArguments converts empty or null tool arguments to a JSON
 // object literal so OpenAI-compatible providers do not reject the replay.
 func (c Chain) NormalizeToolCallArguments(raw string) string {
@@ -394,6 +405,12 @@ func LoginUsesWildcardReasoningEfforts(ctx Context) bool {
 // compatibility fixes.
 func NormalizeOpenAICompatibleMessages(ctx Context, messages []map[string]interface{}) []map[string]interface{} {
 	return NewChain(ctx).NormalizeOpenAICompatibleMessages(messages)
+}
+
+// NormalizeAnthropicCompatibleMessages applies provider-specific Anthropic
+// Messages API compatibility fixes.
+func NormalizeAnthropicCompatibleMessages(ctx Context, messages []map[string]interface{}) []map[string]interface{} {
+	return NewChain(ctx).NormalizeAnthropicCompatibleMessages(messages)
 }
 
 // NormalizeToolCallArguments normalizes OpenAI-compatible tool call arguments.

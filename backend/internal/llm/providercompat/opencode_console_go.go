@@ -63,6 +63,115 @@ func (openCodeConsoleGoAdapter) NormalizeOpenAICompatibleMessages(ctx Context, m
 	return normalized, true
 }
 
+// NormalizeAnthropicCompatibleMessages adapts outgoing messages to the
+// Anthropic Messages API dialect the Console Go upstream accepts:
+//
+//   - residual (non-leading) system/developer instruction messages are
+//     projected to user text blocks, because Anthropic message roles are
+//     user/assistant only and the upstream rejects unknown roles;
+//   - every user message with a plain-string content is rewritten to a single
+//     text content block, because the upstream rejects the string shorthand
+//     with HTTP 400 while the standard Anthropic Messages API accepts both
+//     shapes (a string is defined as shorthand for one text block).
+//
+// Leading system/developer messages are left untouched so the adapter can fold
+// them into the top-level system field. It copies changed messages and never
+// mutates canonical/runtime history.
+func (openCodeConsoleGoAdapter) NormalizeAnthropicCompatibleMessages(ctx Context, messages []map[string]interface{}) ([]map[string]interface{}, bool) {
+	if ctx.Protocol != "anthropic" || len(messages) == 0 {
+		return messages, false
+	}
+
+	normalized := append([]map[string]interface{}(nil), messages...)
+	inLeadingInstructions := true
+	writeIndex := 0
+	changed := false
+	for _, message := range messages {
+		role, _ := message["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+		isInstruction := role == "system" || role == "developer"
+		if isInstruction && inLeadingInstructions {
+			normalized[writeIndex] = message
+			writeIndex++
+			continue
+		}
+		inLeadingInstructions = false
+
+		switch {
+		case isInstruction:
+			text := anthropicInstructionTextForCompat(message)
+			if text == "" {
+				changed = true
+				continue
+			}
+			updated := cloneMapStringAny(message)
+			updated["role"] = "user"
+			updated["content"] = []map[string]interface{}{
+				{"type": "text", "text": text},
+			}
+			normalized[writeIndex] = updated
+			writeIndex++
+			changed = true
+		case role == "user":
+			content, ok := message["content"].(string)
+			if !ok || strings.TrimSpace(content) == "" {
+				normalized[writeIndex] = message
+				writeIndex++
+				continue
+			}
+			updated := cloneMapStringAny(message)
+			updated["content"] = []map[string]interface{}{
+				{"type": "text", "text": content},
+			}
+			normalized[writeIndex] = updated
+			writeIndex++
+			changed = true
+		default:
+			normalized[writeIndex] = message
+			writeIndex++
+		}
+	}
+	normalized = normalized[:writeIndex]
+	if !changed {
+		return messages, false
+	}
+	return normalized, true
+}
+
+// anthropicInstructionTextForCompat extracts the plain text of a system or
+// developer instruction message, mirroring the adapter's instruction folding.
+func anthropicInstructionTextForCompat(message map[string]interface{}) string {
+	if len(message) == 0 {
+		return ""
+	}
+	switch typed := message["content"].(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []map[string]interface{}:
+		return anthropicInstructionTextBlocksForCompat(typed)
+	case []interface{}:
+		parts := make([]map[string]interface{}, 0, len(typed))
+		for _, raw := range typed {
+			if part, ok := raw.(map[string]interface{}); ok {
+				parts = append(parts, part)
+			}
+		}
+		return anthropicInstructionTextBlocksForCompat(parts)
+	default:
+		return ""
+	}
+}
+
+func anthropicInstructionTextBlocksForCompat(blocks []map[string]interface{}) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if text, ok := block["text"].(string); ok && strings.TrimSpace(text) != "" {
+			parts = append(parts, strings.TrimSpace(text))
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
 // normalizeOpenCodeToolCallsType restores the strict OpenAI enum value
 // "function" on every tool_calls entry. Some upstreams (and raw history replay
 // from legacy providers) emit "function_call"; the OpenCode Console Go gateway

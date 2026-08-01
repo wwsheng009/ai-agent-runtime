@@ -484,3 +484,179 @@ func TestOpenCodeConsoleGo_NormalizeToolCallsTypeCombined(t *testing.T) {
 		t.Fatalf("expected canonical tool_calls type untouched, got %#v", gotType)
 	}
 }
+
+// TestOpenCodeConsoleGo_AnthropicUserStringToTextBlock locks the Console Go
+// wire rule: user messages with a plain-string content are rewritten to a
+// single text content block (the upstream rejects the string shorthand).
+func TestOpenCodeConsoleGo_AnthropicUserStringToTextBlock(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "assistant", "content": "hi there"},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{
+		Protocol: "anthropic",
+		Profile:  openCodeProfile,
+	}, messages)
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(got), got)
+	}
+	blocks, ok := got[0]["content"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected user content as block array, got %#v", got[0]["content"])
+	}
+	if len(blocks) != 1 || blocks[0]["type"] != "text" || blocks[0]["text"] != "hello" {
+		t.Fatalf("expected single text block, got %#v", blocks)
+	}
+	if role, _ := got[0]["role"].(string); role != "user" {
+		t.Fatalf("expected user role preserved, got %#v", got[0]["role"])
+	}
+	if got[1]["content"] != "hi there" {
+		t.Fatalf("expected assistant string content untouched, got %#v", got[1]["content"])
+	}
+	// Canonical history must not be mutated in place.
+	if messages[0]["content"] != "hello" {
+		t.Fatalf("expected original user content intact, got %#v", messages[0]["content"])
+	}
+}
+
+// TestOpenCodeConsoleGo_AnthropicUserArrayPreserved leaves user messages that
+// already use content blocks untouched.
+func TestOpenCodeConsoleGo_AnthropicUserArrayPreserved(t *testing.T) {
+	messages := []map[string]interface{}{
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "already blocks"},
+			},
+		},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{
+		Protocol: "anthropic",
+		Profile:  openCodeProfile,
+	}, messages)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(got))
+	}
+	if _, ok := got[0]["content"].([]map[string]interface{}); !ok {
+		t.Fatalf("expected block array preserved, got %#v", got[0]["content"])
+	}
+}
+
+// TestOpenCodeConsoleGo_AnthropicResidualDeveloperToUserTextBlock projects
+// turn-context developer instructions into user text blocks so the final wire
+// request only contains the official Anthropic roles.
+func TestOpenCodeConsoleGo_AnthropicResidualDeveloperToUserTextBlock(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "system", "content": "Base guardrail"},
+		{"role": "user", "content": "check logs"},
+		{"role": "developer", "content": "Persistent goal.\n\nkeep the prefix stable"},
+		{"role": "assistant", "content": "I will inspect logs."},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{
+		Protocol: "anthropic",
+		Profile:  openCodeProfile,
+	}, messages)
+
+	if len(got) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %#v", len(got), got)
+	}
+	// Leading system stays untouched for adapter system folding.
+	if got[0]["role"] != "system" || got[0]["content"] != "Base guardrail" {
+		t.Fatalf("expected leading system preserved, got %#v", got[0])
+	}
+	// Residual developer becomes a user text block.
+	if role, _ := got[2]["role"].(string); role != "user" {
+		t.Fatalf("expected residual developer projected to user, got %#v", got[2]["role"])
+	}
+	blocks, ok := got[2]["content"].([]map[string]interface{})
+	if !ok || len(blocks) != 1 || blocks[0]["type"] != "text" {
+		t.Fatalf("expected residual developer as text block, got %#v", got[2]["content"])
+	}
+	if blocks[0]["text"] != "Persistent goal.\n\nkeep the prefix stable" {
+		t.Fatalf("expected developer text preserved, got %#v", blocks[0]["text"])
+	}
+	if got[3]["role"] != "assistant" {
+		t.Fatalf("expected assistant trailing message preserved, got %#v", got[3])
+	}
+	// Canonical history untouched.
+	if role, _ := messages[2]["role"].(string); role != "developer" {
+		t.Fatalf("expected canonical developer untouched, got %#v", role)
+	}
+}
+
+// TestOpenCodeConsoleGo_AnthropicResidualSystemToUserTextBlock projects
+// turn-context system instructions into user text blocks as well.
+func TestOpenCodeConsoleGo_AnthropicResidualSystemToUserTextBlock(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "system", "content": "mid-turn system note"},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{
+		Protocol: "anthropic",
+		Profile:  openCodeProfile,
+	}, messages)
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(got), got)
+	}
+	if role, _ := got[1]["role"].(string); role != "user" {
+		t.Fatalf("expected residual system projected to user, got %#v", got[1]["role"])
+	}
+	blocks, ok := got[1]["content"].([]map[string]interface{})
+	if !ok || len(blocks) != 1 || blocks[0]["text"] != "mid-turn system note" {
+		t.Fatalf("expected residual system as text block, got %#v", got[1]["content"])
+	}
+}
+
+// TestOpenCodeConsoleGo_AnthropicEmptyResidualInstructionDropped removes empty
+// residual instructions instead of leaking an empty user message.
+func TestOpenCodeConsoleGo_AnthropicEmptyResidualInstructionDropped(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "developer", "content": "   "},
+		{"role": "assistant", "content": "hi"},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{
+		Protocol: "anthropic",
+		Profile:  openCodeProfile,
+	}, messages)
+
+	if len(got) != 2 {
+		t.Fatalf("expected empty residual instruction dropped, got %d: %#v", len(got), got)
+	}
+	if got[0]["role"] != "user" || got[1]["role"] != "assistant" {
+		t.Fatalf("expected user + assistant remaining, got %#v", got)
+	}
+}
+
+// TestOpenCodeConsoleGo_AnthropicWithoutProfile leaves messages untouched when
+// the Console Go profile is not selected.
+func TestOpenCodeConsoleGo_AnthropicWithoutProfile(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "developer", "content": "goal"},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{Protocol: "anthropic"}, messages)
+	if got[0]["content"] != "hello" {
+		t.Fatalf("expected user string content preserved without profile, got %#v", got[0]["content"])
+	}
+	if got[1]["role"] != "developer" {
+		t.Fatalf("expected developer role preserved without profile, got %#v", got[1]["role"])
+	}
+}
+
+// TestOpenCodeConsoleGo_AnthropicIgnoredForNonAnthropicProtocol verifies the
+// Anthropic rules never run for other protocols.
+func TestOpenCodeConsoleGo_AnthropicIgnoredForNonAnthropicProtocol(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+	}
+	got := NormalizeAnthropicCompatibleMessages(Context{
+		Protocol: "openai",
+		Profile:  openCodeProfile,
+	}, messages)
+	if got[0]["content"] != "hello" {
+		t.Fatalf("expected openai protocol untouched, got %#v", got[0]["content"])
+	}
+}
