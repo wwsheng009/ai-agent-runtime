@@ -18,6 +18,8 @@ func NormalizeAccountView(snapshot *AccountSnapshot, confidence Confidence) Acco
 	view.Mode = snapshot.Mode
 	view.Currency = firstNonEmpty(snapshot.Currency, snapshot.QuotaDisplayUnit)
 	view.WalletBalance = CloneFloat64(snapshot.WalletBalance)
+	view.IsAvailable = CloneBool(snapshot.IsAvailable)
+	view.BalanceDetails = append([]BalanceDetail(nil), snapshot.BalanceDetails...)
 	view.QuotaRemaining = CloneFloat64(snapshot.QuotaRemaining)
 	view.QuotaUsed = CloneFloat64(snapshot.UsedQuota)
 	view.QuotaLimit = CloneFloat64(snapshot.QuotaLimit)

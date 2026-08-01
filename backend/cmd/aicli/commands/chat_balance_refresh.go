@@ -304,12 +304,12 @@ func prepareProviderForPeriodicBalanceRefresh(provider *config.Provider) bool {
 	}
 	siteType := siteaccount.NormalizeSiteType(provider.SiteType)
 	if (siteType == "" || siteType == siteaccount.SiteTypeUnknown) && provider.Account != nil {
-		siteType = siteaccount.NormalizeSiteType(provider.Account.Source)
-		if siteType == siteaccount.SiteTypeSub2API || siteType == siteaccount.SiteTypeNewAPI {
+		siteType = siteaccount.SiteTypeFromAccountSource(provider.Account.Source)
+		if siteaccount.SupportsAccountFetch(siteType) {
 			provider.SiteType = string(siteType)
 		}
 	}
-	return siteType == siteaccount.SiteTypeSub2API || siteType == siteaccount.SiteTypeNewAPI
+	return siteaccount.SupportsAccountFetch(siteType)
 }
 
 func (r *chatAccountBalanceRefresher) Stop() {

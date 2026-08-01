@@ -115,8 +115,8 @@ func enrichProviderLoginSiteAccount(
 	}
 
 	switch siteType {
-	case siteaccount.SiteTypeSub2API:
-		return enrichSub2APIAccount(ctx, req, candidate, client, apiKey, confidence, out)
+	case siteaccount.SiteTypeSub2API, siteaccount.SiteTypeDeepSeek:
+		return enrichAPIKeyAccount(ctx, req, candidate, client, siteType, apiKey, confidence, out)
 	case siteaccount.SiteTypeNewAPI:
 		return enrichNewAPIAccount(ctx, req, providerName, candidate, client, confidence, out)
 	default:
@@ -128,11 +128,12 @@ func enrichProviderLoginSiteAccount(
 	}
 }
 
-func enrichSub2APIAccount(
+func enrichAPIKeyAccount(
 	ctx context.Context,
 	req providerLoginRequest,
 	candidate *config.Provider,
 	client *siteaccount.Client,
+	siteType siteaccount.SiteType,
 	apiKey string,
 	confidence siteaccount.Confidence,
 	out providerLoginSiteAccountOutcome,
@@ -148,7 +149,7 @@ func enrichSub2APIAccount(
 
 	snapshot, fetchErr := client.FetchAccountSnapshot(ctx, siteaccount.FetchInput{
 		BaseURL:  candidate.BaseURL,
-		SiteType: siteaccount.SiteTypeSub2API,
+		SiteType: siteType,
 		Credential: siteaccount.AccountCredential{
 			APIKey: apiKey,
 		},
@@ -321,6 +322,7 @@ func providerAccountSnapshotFromSiteAccount(snapshot *siteaccount.AccountSnapsho
 		Mode:              snapshot.Mode,
 		Currency:          firstNonEmptyText(snapshot.Currency, snapshot.QuotaDisplayUnit),
 		WalletBalance:     siteaccount.CloneFloat64(snapshot.WalletBalance),
+		IsAvailable:       siteaccount.CloneBool(snapshot.IsAvailable),
 		QuotaBalance:      siteaccount.CloneFloat64(snapshot.QuotaBalance),
 		QuotaRemaining:    siteaccount.CloneFloat64(snapshot.QuotaRemaining),
 		QuotaUsed:         siteaccount.CloneFloat64(snapshot.UsedQuota),
@@ -330,6 +332,17 @@ func providerAccountSnapshotFromSiteAccount(snapshot *siteaccount.AccountSnapsho
 		QuotaDisplayScale: siteaccount.CloneFloat64(snapshot.QuotaDisplayScale),
 		PlanName:          snapshot.PlanName,
 		Partial:           snapshot.Partial,
+	}
+	if len(snapshot.BalanceDetails) > 0 {
+		out.BalanceDetails = make([]config.ProviderBalanceDetail, 0, len(snapshot.BalanceDetails))
+		for _, detail := range snapshot.BalanceDetails {
+			out.BalanceDetails = append(out.BalanceDetails, config.ProviderBalanceDetail{
+				Currency:        detail.Currency,
+				TotalBalance:    detail.TotalBalance,
+				GrantedBalance:  detail.GrantedBalance,
+				ToppedUpBalance: detail.ToppedUpBalance,
+			})
+		}
 	}
 	if snapshot.ExternalUser != nil {
 		out.ExternalUserID = strings.TrimSpace(snapshot.ExternalUser.ID)

@@ -143,6 +143,65 @@ func TestLocalSiteAccountServiceRefreshProviderPersists(t *testing.T) {
 	require.Contains(t, text, "account:")
 }
 
+func TestLocalSiteAccountServiceRefreshDeepSeekPersistsBalanceDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/user/balance", r.URL.Path)
+		require.Equal(t, "Bearer sk-deepseek", r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"is_available": true,
+			"balance_infos": []map[string]any{
+				{
+					"currency":          "CNY",
+					"total_balance":     "110.00",
+					"granted_balance":   "10.00",
+					"topped_up_balance": "100.00",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	authPath := filepath.Join(dir, "auth.json")
+	raw := fmt.Sprintf(`providers:
+  default_provider: deepseek
+  items:
+    deepseek:
+      enabled: true
+      protocol: openai
+      base_url: %s/v1
+      api_key: sk-deepseek
+      default_model: deepseek-chat
+`, server.URL)
+	require.NoError(t, os.WriteFile(configPath, []byte(raw), 0o644))
+
+	service := NewLocalSiteAccountService(configPath, authPath)
+	service.SetClient(siteaccount.NewClient(server.Client()))
+	result, err := service.RefreshProvider(context.Background(), "deepseek", skillsapi.SiteAccountRefreshRequest{
+		SiteType:   "deepseek",
+		SkipDetect: true,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Persisted)
+	require.Equal(t, string(siteaccount.SiteTypeDeepSeek), result.SiteType)
+	require.NotNil(t, result.AccountCache)
+	require.NotNil(t, result.AccountCache.IsAvailable)
+	require.True(t, *result.AccountCache.IsAvailable)
+	require.Len(t, result.AccountCache.BalanceDetails, 1)
+	require.Equal(t, 10.0, result.AccountCache.BalanceDetails[0].GrantedBalance)
+	require.Equal(t, 100.0, result.AccountCache.BalanceDetails[0].ToppedUpBalance)
+
+	content, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	text := string(content)
+	require.Contains(t, text, "site_type: deepseek")
+	require.Contains(t, text, "is_available: true")
+	require.Contains(t, text, "balance_details:")
+	require.Contains(t, text, "granted_balance:")
+	require.Contains(t, text, "topped_up_balance:")
+}
+
 func TestLocalSiteAccountServiceRefreshProviderUsesAuthStore(t *testing.T) {
 	var sawAuth bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -153,16 +212,16 @@ func TestLocalSiteAccountServiceRefreshProviderUsesAuthStore(t *testing.T) {
 			require.Equal(t, "99", r.Header.Get("New-Api-User"))
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
-					"id":       99,
-					"username": "alice",
-					"quota":    1000000,
+					"id":         99,
+					"username":   "alice",
+					"quota":      1000000,
 					"used_quota": 250000,
 				},
 			})
 		case "/api/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
-					"quota_per_unit":    500000,
+					"quota_per_unit":     500000,
 					"quota_display_type": "USD",
 				},
 			})

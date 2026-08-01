@@ -15,16 +15,16 @@ const (
 )
 
 type sub2APIUsageResponse struct {
-	Mode      string          `json:"mode"`
-	IsValid   *bool           `json:"isValid"`
-	Status    string          `json:"status"`
-	PlanName  string          `json:"planName"`
-	Unit      string          `json:"unit"`
-	Remaining *float64        `json:"remaining"`
-	Balance   *float64        `json:"balance"`
-	Quota     *sub2APIQuota   `json:"quota"`
-	Subscription json.RawMessage `json:"subscription"`
-	Usage     *sub2APIUsageBlock `json:"usage"`
+	Mode         string             `json:"mode"`
+	IsValid      *bool              `json:"isValid"`
+	Status       string             `json:"status"`
+	PlanName     string             `json:"planName"`
+	Unit         string             `json:"unit"`
+	Remaining    *float64           `json:"remaining"`
+	Balance      *float64           `json:"balance"`
+	Quota        *sub2APIQuota      `json:"quota"`
+	Subscription json.RawMessage    `json:"subscription"`
+	Usage        *sub2APIUsageBlock `json:"usage"`
 }
 
 type sub2APIQuota struct {
@@ -45,13 +45,13 @@ type sub2APIUsageTotals struct {
 }
 
 type sub2APISubscription struct {
-	DailyUsageUSD    *float64   `json:"daily_usage_usd"`
-	WeeklyUsageUSD   *float64   `json:"weekly_usage_usd"`
-	MonthlyUsageUSD  *float64   `json:"monthly_usage_usd"`
-	DailyLimitUSD    *float64   `json:"daily_limit_usd"`
-	WeeklyLimitUSD   *float64   `json:"weekly_limit_usd"`
-	MonthlyLimitUSD  *float64   `json:"monthly_limit_usd"`
-	ExpiresAt        *time.Time `json:"expires_at"`
+	DailyUsageUSD   *float64   `json:"daily_usage_usd"`
+	WeeklyUsageUSD  *float64   `json:"weekly_usage_usd"`
+	MonthlyUsageUSD *float64   `json:"monthly_usage_usd"`
+	DailyLimitUSD   *float64   `json:"daily_limit_usd"`
+	WeeklyLimitUSD  *float64   `json:"weekly_limit_usd"`
+	MonthlyLimitUSD *float64   `json:"monthly_limit_usd"`
+	ExpiresAt       *time.Time `json:"expires_at"`
 }
 
 // FetchAccountSnapshot loads a normalized account snapshot for the given site type.
@@ -59,17 +59,11 @@ func (c *Client) FetchAccountSnapshot(ctx context.Context, input FetchInput) (*A
 	if c == nil {
 		c = NewClient(nil)
 	}
-	siteType := NormalizeSiteType(string(input.SiteType))
-	switch siteType {
-	case SiteTypeSub2API:
-		return c.fetchSub2APIUsage(ctx, input)
-	case SiteTypeNewAPI:
-		return c.fetchNewAPIUserSelf(ctx, input)
-	case SiteTypeUnknown, "":
-		return nil, unsupportedSite(SiteTypeUnknown)
-	default:
-		return nil, unsupportedSite(siteType)
+	registry := c.Registry
+	if registry == nil {
+		registry = DefaultAdapterRegistry()
 	}
+	return registry.Fetch(ctx, c, input)
 }
 
 // FetchAccountSnapshot is a package-level convenience using the default client.
@@ -194,6 +188,8 @@ func NormalizeSiteType(raw string) SiteType {
 		return SiteTypeNewAPI
 	case string(SiteTypeSub2API), "sub2", "sub_2_api":
 		return SiteTypeSub2API
+	case string(SiteTypeDeepSeek), "deep-seek", "deep_seek":
+		return SiteTypeDeepSeek
 	case string(SiteTypeUnknown), "":
 		return SiteTypeUnknown
 	default:
@@ -212,6 +208,8 @@ func ParseSiteTypeFlag(raw string) (SiteType, bool, error) {
 		return SiteTypeNewAPI, false, nil
 	case SiteTypeSub2API:
 		return SiteTypeSub2API, false, nil
+	case SiteTypeDeepSeek:
+		return SiteTypeDeepSeek, false, nil
 	case SiteTypeUnknown:
 		return SiteTypeUnknown, false, nil
 	default:

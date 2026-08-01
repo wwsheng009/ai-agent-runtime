@@ -30,9 +30,24 @@ func TestPrepareProviderForPeriodicBalanceRefresh(t *testing.T) {
 			want:     true,
 		},
 		{
+			name: "deepseek",
+			provider: config.Provider{
+				Protocol: "codex",
+				SiteType: string(siteaccount.SiteTypeDeepSeek),
+			},
+			want: true,
+		},
+		{
 			name: "cached source",
 			provider: config.Provider{Account: &config.ProviderAccountSnapshot{
 				Source: string(siteaccount.SiteTypeSub2API),
+			}},
+			want: true,
+		},
+		{
+			name: "cached deepseek source",
+			provider: config.Provider{Account: &config.ProviderAccountSnapshot{
+				Source: "deepseek_user_balance",
 			}},
 			want: true,
 		},
@@ -108,6 +123,68 @@ func TestChatAccountBalanceRefresherRefreshesImmediatelyAndPeriodically(t *testi
 	}
 	if got := *provider.Account.QuotaRemaining; got < 1 {
 		t.Fatalf("expected latest periodic balance, got %v", got)
+	}
+}
+
+func TestChatAccountBalanceRefresherRefreshesDeepSeekCodexProvider(t *testing.T) {
+	session := &ChatSession{
+		Model:        "deepseek-v4-flash",
+		ProviderName: "deepseek_codex",
+	}
+	balance := 110.0
+	available := true
+	initialProvider := config.Provider{
+		Protocol: "codex",
+		SiteType: string(siteaccount.SiteTypeDeepSeek),
+	}
+	session.setAccountBalanceProvider("deepseek_codex", initialProvider)
+	refresher := newChatAccountBalanceRefresher(session, time.Minute, func(
+		_ context.Context,
+		_ *siteaccount.Client,
+		providerName string,
+		provider *config.Provider,
+		_ time.Duration,
+	) (liveBalanceOutcome, error) {
+		if providerName != "deepseek_codex" {
+			t.Fatalf("provider name = %q", providerName)
+		}
+		if provider.GetProtocol() != "codex" {
+			t.Fatalf("protocol = %q", provider.GetProtocol())
+		}
+		return liveBalanceOutcome{
+			Status:             "ok",
+			SiteType:           string(siteaccount.SiteTypeDeepSeek),
+			SiteTypeConfidence: string(siteaccount.ConfidenceHigh),
+			Account: &config.ProviderAccountSnapshot{
+				Source:        "deepseek_user_balance",
+				Mode:          "wallet",
+				Currency:      "CNY",
+				WalletBalance: &balance,
+				IsAvailable:   &available,
+			},
+		}, nil
+	})
+	t.Cleanup(func() { refresher.cancel() })
+	refresher.setTarget("deepseek_codex", initialProvider, false)
+	session.accountBalanceMu.Lock()
+	session.accountBalanceRefresher = refresher
+	session.accountBalanceMu.Unlock()
+
+	refresher.refreshOnce()
+
+	_, provider, ok := session.accountBalanceSnapshot()
+	if !ok || provider.Account == nil || provider.Account.WalletBalance == nil {
+		t.Fatalf("expected refreshed DeepSeek account snapshot, got %+v", provider.Account)
+	}
+	if got := *provider.Account.WalletBalance; got != balance {
+		t.Fatalf("wallet balance = %v, want %v", got, balance)
+	}
+	if provider.SiteType != string(siteaccount.SiteTypeDeepSeek) {
+		t.Fatalf("site type = %q", provider.SiteType)
+	}
+	line := buildChatSurfaceStatusLineForWidth(session, "Ready", 160)
+	if !strings.Contains(line, "Balance 110.00 CNY") {
+		t.Fatalf("expected DeepSeek balance in footer, got %q", line)
 	}
 }
 

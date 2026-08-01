@@ -25,7 +25,7 @@ func TestDetectSiteType_Sub2API(t *testing.T) {
 			})
 		case "/api/v1/auth/me":
 			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unauthorized"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 401, "message": "unauthorized"})
 		case "/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 		default:
@@ -54,9 +54,9 @@ func TestDetectSiteType_NewAPI(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
 				"data": map[string]any{
-					"version":           "v0.0-test",
-					"system_name":       "New API",
-					"quota_per_unit":    500000,
+					"version":            "v0.0-test",
+					"system_name":        "New API",
+					"quota_per_unit":     500000,
 					"quota_display_type": "USD",
 				},
 			})
@@ -97,6 +97,60 @@ func TestDetectSiteType_Unknown(t *testing.T) {
 	}
 }
 
+func TestDetectSiteType_DeepSeek(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == deepSeekBalancePath {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"missing api key"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	result, err := NewClient(server.Client()).DetectSiteType(context.Background(), DetectInput{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("DetectSiteType: %v", err)
+	}
+	if result.SiteType != SiteTypeDeepSeek || result.Confidence != ConfidenceHigh {
+		t.Fatalf("site type=%q confidence=%q scores=%v", result.SiteType, result.Confidence, result.Score)
+	}
+}
+
+func TestDetectSiteType_DeepSeekWinsOverGenericGatewayResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case deepSeekBalancePath:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"missing api key"}`))
+		case "/api/v1/status", "/api/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "not a site account API"})
+		case "/api/v1/auth/me", "/api/user/self", "/api/user/self/groups":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"missing api key"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewClient(server.Client()).DetectSiteType(context.Background(), DetectInput{BaseURL: server.URL + "/v1/responses"})
+	if err != nil {
+		t.Fatalf("DetectSiteType: %v", err)
+	}
+	if result.SiteType != SiteTypeDeepSeek || result.Confidence != ConfidenceHigh {
+		t.Fatalf("site type=%q confidence=%q scores=%v hits=%v", result.SiteType, result.Confidence, result.Score, result.Hits)
+	}
+	if got, want := result.Score[string(SiteTypeDeepSeek)], 10; got != want {
+		t.Fatalf("DeepSeek score = %d, want %d", got, want)
+	}
+	if got := result.Score[string(SiteTypeSub2API)]; got != 0 {
+		t.Fatalf("Sub2API score = %d, want 0", got)
+	}
+	if got := result.Score[string(SiteTypeNewAPI)]; got != 0 {
+		t.Fatalf("New-API score = %d, want 0", got)
+	}
+}
+
 func TestParseSiteTypeFlag(t *testing.T) {
 	siteType, auto, err := ParseSiteTypeFlag("auto")
 	if err != nil || !auto || siteType != SiteTypeUnknown {
@@ -105,5 +159,9 @@ func TestParseSiteTypeFlag(t *testing.T) {
 	siteType, auto, err = ParseSiteTypeFlag("sub2api")
 	if err != nil || auto || siteType != SiteTypeSub2API {
 		t.Fatalf("sub2api: type=%q auto=%v err=%v", siteType, auto, err)
+	}
+	siteType, auto, err = ParseSiteTypeFlag("deep-seek")
+	if err != nil || auto || siteType != SiteTypeDeepSeek {
+		t.Fatalf("deep-seek: type=%q auto=%v err=%v", siteType, auto, err)
 	}
 }

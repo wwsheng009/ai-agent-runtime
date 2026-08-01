@@ -333,16 +333,16 @@ func refreshProviderAccountBalance(
 	}
 
 	switch siteType {
-	case siteaccount.SiteTypeSub2API:
+	case siteaccount.SiteTypeSub2API, siteaccount.SiteTypeDeepSeek:
 		apiKey := strings.TrimSpace(provider.GetAPIKey())
 		if apiKey == "" {
 			out.Status = "skipped"
 			out.Warning = "api key missing"
-			return out, fmt.Errorf("api key missing for sub2api account refresh")
+			return out, fmt.Errorf("api key missing for %s account refresh", siteType)
 		}
 		snapshot, err := client.FetchAccountSnapshot(ctx, siteaccount.FetchInput{
 			BaseURL:  provider.BaseURL,
-			SiteType: siteaccount.SiteTypeSub2API,
+			SiteType: siteType,
 			Credential: siteaccount.AccountCredential{
 				APIKey: apiKey,
 			},
@@ -532,6 +532,10 @@ func cloneProviderAccountSnapshot(in *config.ProviderAccountSnapshot) *config.Pr
 	}
 	out := *in
 	out.WalletBalance = siteaccount.CloneFloat64(in.WalletBalance)
+	out.IsAvailable = siteaccount.CloneBool(in.IsAvailable)
+	if len(in.BalanceDetails) > 0 {
+		out.BalanceDetails = append([]config.ProviderBalanceDetail(nil), in.BalanceDetails...)
+	}
 	out.QuotaBalance = siteaccount.CloneFloat64(in.QuotaBalance)
 	out.QuotaRemaining = siteaccount.CloneFloat64(in.QuotaRemaining)
 	out.QuotaUsed = siteaccount.CloneFloat64(in.QuotaUsed)

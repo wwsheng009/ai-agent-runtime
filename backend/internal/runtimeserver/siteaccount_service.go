@@ -397,10 +397,10 @@ func resolveFetchCredential(
 ) (siteaccount.AccountCredential, []string, error) {
 	var warnings []string
 	switch siteType {
-	case siteaccount.SiteTypeSub2API:
+	case siteaccount.SiteTypeSub2API, siteaccount.SiteTypeDeepSeek:
 		apiKey := strings.TrimSpace(req.APIKey)
 		if apiKey == "" {
-			return siteaccount.AccountCredential{}, warnings, fmt.Errorf("api_key is required for sub2api account fetch")
+			return siteaccount.AccountCredential{}, warnings, fmt.Errorf("api_key is required for %s account fetch", siteType)
 		}
 		return siteaccount.AccountCredential{APIKey: apiKey}, warnings, nil
 	case siteaccount.SiteTypeNewAPI:
@@ -449,7 +449,7 @@ func resolveProviderRefreshCredential(
 	}
 
 	switch siteType {
-	case siteaccount.SiteTypeSub2API:
+	case siteaccount.SiteTypeSub2API, siteaccount.SiteTypeDeepSeek:
 		if strings.TrimSpace(apiKey) == "" {
 			return siteaccount.AccountCredential{}, authRef, nil, warnings, fmt.Errorf("api key is missing for provider %q", providerName)
 		}
@@ -503,6 +503,7 @@ func providerAccountSnapshotFromSiteAccount(snapshot *siteaccount.AccountSnapsho
 		Mode:              snapshot.Mode,
 		Currency:          firstNonEmptySiteText(snapshot.Currency, snapshot.QuotaDisplayUnit),
 		WalletBalance:     siteaccount.CloneFloat64(snapshot.WalletBalance),
+		IsAvailable:       siteaccount.CloneBool(snapshot.IsAvailable),
 		QuotaBalance:      siteaccount.CloneFloat64(snapshot.QuotaBalance),
 		QuotaRemaining:    siteaccount.CloneFloat64(snapshot.QuotaRemaining),
 		QuotaUsed:         siteaccount.CloneFloat64(snapshot.UsedQuota),
@@ -512,6 +513,17 @@ func providerAccountSnapshotFromSiteAccount(snapshot *siteaccount.AccountSnapsho
 		QuotaDisplayScale: siteaccount.CloneFloat64(snapshot.QuotaDisplayScale),
 		PlanName:          snapshot.PlanName,
 		Partial:           snapshot.Partial,
+	}
+	if len(snapshot.BalanceDetails) > 0 {
+		out.BalanceDetails = make([]agentconfig.ProviderBalanceDetail, 0, len(snapshot.BalanceDetails))
+		for _, detail := range snapshot.BalanceDetails {
+			out.BalanceDetails = append(out.BalanceDetails, agentconfig.ProviderBalanceDetail{
+				Currency:        detail.Currency,
+				TotalBalance:    detail.TotalBalance,
+				GrantedBalance:  detail.GrantedBalance,
+				ToppedUpBalance: detail.ToppedUpBalance,
+			})
+		}
 	}
 	if snapshot.ExternalUser != nil {
 		out.ExternalUserID = strings.TrimSpace(snapshot.ExternalUser.ID)
