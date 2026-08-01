@@ -1,28 +1,27 @@
 package renderengine
 
 import (
+	"bytes"
 	"io"
 	"sync"
 )
 
-// Presenter owns the terminal write path (Stage A first version).
+// Presenter owns the terminal write path.
 //
-// It fixes the "one frame = one batch flush" discipline: every frame's ANSI
-// output must be produced inside a single Flush call, wrapped in the
-// existing terminal write lock and DEC 2026 synchronized-update framing so
-// the emulator applies the whole repaint atomically. Later stages replace
-// the closure body with ScreenModel diff output; the batching contract and
-// the write statistics stay.
+// Each frame is assembled in memory and written to the target exactly once
+// while holding the shared terminal write lock. The lock also supplies DEC
+// 2026 synchronized-update framing when enabled by the live surface, so a
+// repaint cannot be observed half way through.
 //
-// Write statistics are diagnostic counters (flushes, per-frame Write calls,
-// total bytes) that the Stage A acceptance criteria use to prove the frame
-// path no longer emits line-by-line syscalls.
+// Write statistics are diagnostic counters used by frame-path acceptance
+// tests: one Flush is one frame, and one non-empty frame performs one target
+// Write regardless of how many writes the render callback requests.
 type Presenter struct {
-	mu            sync.Mutex
-	flushes       uint64
-	lastFrameWr   int
-	totalWrites   uint64
-	totalBytes    uint64
+	mu          sync.Mutex
+	flushes     uint64
+	lastFrameWr int
+	totalWrites uint64
+	totalBytes  uint64
 }
 
 // NewPresenter creates a Presenter with zeroed statistics.
@@ -30,42 +29,65 @@ func NewPresenter() *Presenter {
 	return &Presenter{}
 }
 
-// Flush runs render inside one terminal write batch. render receives a
-// counting writer so per-frame Write-call counts are tracked. Flush is safe
-// to call from any goroutine; batches are serialized by the terminal write
-// lock (the same lock every TUI write path already holds).
-func (p *Presenter) Flush(w io.Writer, render func(w io.Writer)) {
-	if render == nil {
-		return
+// Flush runs render inside one terminal write batch. render receives an
+// in-memory writer; Flush is safe to call from any goroutine and batches are
+// serialized by the shared terminal write lock.
+func (p *Presenter) Flush(w io.Writer, render func(w io.Writer)) error {
+	if p == nil || w == nil || render == nil {
+		return nil
 	}
-	cw := &countingWriter{w: w}
+	var err error
 	withTerminalWriteLock(func() {
-		render(cw)
+		err = p.flushLocked(w, render)
 	})
-	p.mu.Lock()
-	p.flushes++
-	p.lastFrameWr = cw.writes
-	p.totalWrites += uint64(cw.writes)
-	p.totalBytes += uint64(cw.bytes)
-	p.mu.Unlock()
+	return err
 }
 
 // FlushHoldingLock is Flush for callers that already hold the terminal write
-// lock (the terminal write lock is non-reentrant, so nested Flush would
-// deadlock). Callers MUST already be inside withTerminalWriteLock or on a
-// path that guarantees exclusive write access. Statistics are identical to
-// Flush.
-func (p *Presenter) FlushHoldingLock(w io.Writer, render func(w io.Writer)) {
-	if render == nil {
-		return
+// lock. The lock is non-reentrant, so callers MUST already be inside
+// withTerminalWriteLock or another path that guarantees exclusive terminal
+// access.
+func (p *Presenter) FlushHoldingLock(w io.Writer, render func(w io.Writer)) error {
+	if p == nil || w == nil || render == nil {
+		return nil
 	}
-	cw := &countingWriter{w: w}
-	render(cw)
+	return p.flushLocked(w, render)
+}
+
+// flushLocked assembles one frame and performs at most one target Write. The
+// caller must hold terminalWriteMu when using this helper.
+func (p *Presenter) flushLocked(w io.Writer, render func(w io.Writer)) error {
+	var frame bytes.Buffer
+	render(&frame)
+	if frame.Len() == 0 {
+		p.recordFrame(0, 0)
+		return nil
+	}
+	n, err := w.Write(frame.Bytes())
+	// Retrying a short write would produce a second syscall and violate the
+	// one-frame/one-write contract. The caller owns any error policy.
+	if n < 0 {
+		n = 0
+	}
+	if n > frame.Len() {
+		n = frame.Len()
+	}
+	p.recordFrame(1, n)
+	if err != nil {
+		return err
+	}
+	if n != frame.Len() {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+func (p *Presenter) recordFrame(writes, bytes int) {
 	p.mu.Lock()
 	p.flushes++
-	p.lastFrameWr = cw.writes
-	p.totalWrites += uint64(cw.writes)
-	p.totalBytes += uint64(cw.bytes)
+	p.lastFrameWr = writes
+	p.totalWrites += uint64(writes)
+	p.totalBytes += uint64(bytes)
 	p.mu.Unlock()
 }
 
@@ -76,38 +98,24 @@ func (p *Presenter) FlushCount() uint64 {
 	return p.flushes
 }
 
-// LastFrameWriteCount reports the number of underlying Write calls in the
-// most recent Flush batch (0 before the first Flush).
+// LastFrameWriteCount reports the number of target Write calls in the most
+// recent Flush batch (0 before the first Flush or for an empty frame).
 func (p *Presenter) LastFrameWriteCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.lastFrameWr
 }
 
-// TotalWriteCount reports the cumulative number of underlying Write calls.
+// TotalWriteCount reports the cumulative number of target Write calls.
 func (p *Presenter) TotalWriteCount() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.totalWrites
 }
 
-// TotalBytes reports the cumulative number of bytes written through Flush.
+// TotalBytes reports the cumulative number of bytes accepted by target Write.
 func (p *Presenter) TotalBytes() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.totalBytes
-}
-
-// countingWriter counts Write calls and bytes.
-type countingWriter struct {
-	w      io.Writer
-	writes int
-	bytes  int
-}
-
-func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.writes++
-	c.bytes += n
-	return n, err
 }

@@ -3,6 +3,7 @@ package renderengine
 import (
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
@@ -95,6 +96,54 @@ func TestRenderCacheLRUEviction(t *testing.T) {
 	}
 }
 
+func TestRenderCacheByteBudgetEvictsLeastRecentlyUsedDocument(t *testing.T) {
+	sourceA := "# " + strings.Repeat("a", 512) + "\n"
+	sourceB := "# " + strings.Repeat("b", 512) + "\n"
+	probe := NewRenderCache(4)
+	probe.Render("band", sourceA, bandOptions(80))
+	entryBytes := probe.Bytes()
+	if entryBytes <= 0 {
+		t.Fatal("rendered cache entry has no byte estimate")
+	}
+
+	cache := NewRenderCacheWithBudget(4, entryBytes*2-1)
+	cache.Render("band", sourceA, bandOptions(80))
+	cache.Render("band", sourceB, bandOptions(80))
+	if got, max := cache.Bytes(), cache.MaxBytes(); got > max {
+		t.Fatalf("cache bytes = %d, exceeds budget %d", got, max)
+	}
+	if got := cache.Len(); got != 1 {
+		t.Fatalf("cache entries = %d, want the newest entry only", got)
+	}
+	if _, hit := cache.Render("band", sourceA, bandOptions(80)); hit {
+		t.Fatal("oldest document remained cached after byte-budget eviction")
+	}
+}
+
+func TestRenderCacheSkipsDocumentLargerThanByteBudget(t *testing.T) {
+	source := "# " + strings.Repeat("x", 512) + "\n"
+	probe := NewRenderCache(4)
+	probe.Render("band", source, bandOptions(80))
+	budget := probe.Bytes() - 1
+	if budget <= 0 {
+		t.Fatal("invalid probe cache budget")
+	}
+
+	cache := NewRenderCacheWithBudget(4, budget)
+	if _, hit := cache.Render("band", source, bandOptions(80)); hit {
+		t.Fatal("first oversized document render must miss")
+	}
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("oversized document was cached: %d entries", got)
+	}
+	if got := cache.Bytes(); got != 0 {
+		t.Fatalf("oversized document consumed cache budget: %d bytes", got)
+	}
+	if _, hit := cache.Render("band", source, bandOptions(80)); hit {
+		t.Fatal("oversized document must not become a cache hit")
+	}
+}
+
 func statsOf(c *RenderCache) (int, uint64, uint64, uint64) {
 	h, m, e := c.Stats()
 	return c.Len(), h, m, e
@@ -137,5 +186,33 @@ func TestRenderCacheHitRate(t *testing.T) {
 	c.Render("band", "# other\n", bandOptions(80))
 	if got := c.HitRate(); got != 1.0/3.0 {
 		t.Fatalf("HitRate = %v, want 1/3", got)
+	}
+}
+
+func TestRenderCacheConcurrentMissesPublishSafely(t *testing.T) {
+	c := NewRenderCache(16)
+	source := strings.Repeat("# heading\n\nbody\n", 8)
+	const callers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.Render("band", source, bandOptions(80))
+		}()
+	}
+	wg.Wait()
+	if got := c.Len(); got != 1 {
+		t.Fatalf("cache length = %d, want 1", got)
+	}
+	hits, misses, _ := c.Stats()
+	if misses != 1 {
+		t.Fatalf("cache misses = %d, want 1", misses)
+	}
+	if hits != callers-1 {
+		t.Fatalf("cache hits = %d, want %d", hits, callers-1)
+	}
+	if total := hits + misses; total != callers {
+		t.Fatalf("cache stats total = %d, want %d", total, callers)
 	}
 }

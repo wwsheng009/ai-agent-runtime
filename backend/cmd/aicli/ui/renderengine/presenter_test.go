@@ -2,6 +2,7 @@ package renderengine
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -20,11 +21,11 @@ func TestFlushCountsWritesAndBytes(t *testing.T) {
 	if p.FlushCount() != 1 {
 		t.Fatalf("FlushCount = %d, want 1", p.FlushCount())
 	}
-	if p.LastFrameWriteCount() != 2 {
-		t.Fatalf("LastFrameWriteCount = %d, want 2", p.LastFrameWriteCount())
+	if p.LastFrameWriteCount() != 1 {
+		t.Fatalf("LastFrameWriteCount = %d, want 1", p.LastFrameWriteCount())
 	}
-	if p.TotalWriteCount() != 2 {
-		t.Fatalf("TotalWriteCount = %d, want 2", p.TotalWriteCount())
+	if p.TotalWriteCount() != 1 {
+		t.Fatalf("TotalWriteCount = %d, want 1", p.TotalWriteCount())
 	}
 	if p.TotalBytes() != 11 {
 		t.Fatalf("TotalBytes = %d, want 11", p.TotalBytes())
@@ -78,7 +79,64 @@ func TestFlushMultilineBodyIsOneBatch(t *testing.T) {
 	if p.FlushCount() != 1 {
 		t.Fatalf("FlushCount = %d, want 1 (one batch for a full repaint)", p.FlushCount())
 	}
-	if p.LastFrameWriteCount() != 24 {
-		t.Fatalf("LastFrameWriteCount = %d, want 24", p.LastFrameWriteCount())
+	if p.LastFrameWriteCount() != 1 {
+		t.Fatalf("LastFrameWriteCount = %d, want 1 target write", p.LastFrameWriteCount())
+	}
+}
+
+type recordingWriter struct {
+	bytes.Buffer
+	writes int
+}
+
+func (w *recordingWriter) Write(data []byte) (int, error) {
+	w.writes++
+	return w.Buffer.Write(data)
+}
+
+func TestFlushCoalescesRenderWritesIntoOneTargetWrite(t *testing.T) {
+	p := NewPresenter()
+	target := &recordingWriter{}
+	p.Flush(target, func(w io.Writer) {
+		for _, part := range []string{"one", "-", "frame"} {
+			_, _ = io.WriteString(w, part)
+		}
+	})
+	if target.writes != 1 {
+		t.Fatalf("target writes = %d, want 1", target.writes)
+	}
+	if got := target.String(); got != "one-frame" {
+		t.Fatalf("output = %q, want one-frame", got)
+	}
+}
+
+func TestFlushEmptyFrameDoesNotWriteTarget(t *testing.T) {
+	p := NewPresenter()
+	target := &recordingWriter{}
+	p.Flush(target, func(io.Writer) {})
+	if target.writes != 0 {
+		t.Fatalf("target writes = %d, want 0", target.writes)
+	}
+	if p.FlushCount() != 1 || p.LastFrameWriteCount() != 0 {
+		t.Fatalf("empty frame stats = flushes %d writes %d, want 1/0", p.FlushCount(), p.LastFrameWriteCount())
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
+func TestFlushReportsTargetWriteError(t *testing.T) {
+	p := NewPresenter()
+	err := p.Flush(failingWriter{}, func(w io.Writer) {
+		_, _ = io.WriteString(w, "frame")
+	})
+	if err == nil {
+		t.Fatal("Flush returned nil for target write error")
+	}
+	if p.LastFrameWriteCount() != 1 {
+		t.Fatalf("LastFrameWriteCount = %d, want 1 attempted target write", p.LastFrameWriteCount())
 	}
 }

@@ -387,7 +387,7 @@ func TestFixedBottomSurface_FailedHistoryInsertDoesNotAdvanceBoundary(t *testing
 	surface.terminal.width = 0
 	surface.terminal.height = 3
 	surface.commitExcessHistoryToScrollbackLocked()
-	got := surface.historyHandedOff
+	got := surface.handoffFrontier.Value()
 	surface.mu.Unlock()
 
 	if got != 0 {

@@ -1,8 +1,31 @@
 # aicli TUI 渲染引擎（RenderEngine）模块设计
 
-状态：**proposed（模块级落地设计基线；与 unified plan 的 Scene 终局不冲突，本文聚焦"渲染模块怎么建"）**
+状态：**in progress（A-D 已有增量实现；阶段 E 与 Scene 终局仍未完成）**
 
 更新时间：**2026-08-01**
+
+### 实施审计注记（2026-08-01）
+
+- **阶段 A：基础设施已收口。** coordinator 的四类渲染意图现在经由
+  `renderengine.Engine`/单一 `FramePump` 调度；`Presenter` 会先在内存中聚合
+  ANSI，再对目标 writer 执行一次帧级写入。当前 `FramePump` 已消除 per-key
+  `time.AfterFunc`，并已记录 dirty 位、替换/触发统计和可配置帧间隔；它仍是
+  按最近 deadline 唤醒的调度器，尚未实现完整的 scene snapshot backpressure。
+  `ActiveStreamController` 的默认拉取式帧预算也已迁为
+  `renderengine.FrameGate`/`FrameClock`；旧 `render.FrameScheduler` 只保留为
+  兼容的可注入实现，不再是生产默认路径。
+- **阶段 B-D：生产路径已接入但边界仍是过渡态。** owned viewport、row plan、
+  shared `RenderCache` 均在生产代码中使用；`FixedBottomSurface` 已采用
+  coordinator 共享的 `Engine`；`renderengine.ScreenModel`/`Composer` facade
+  已建立，Engine 现在显式持有 shared `RenderCache` 并注入
+  `ActiveStreamController`；ScreenModel、RowPlan 与 Composer 算法已物理迁入
+  `renderengine`，`ui/viewport` 现为兼容转发层；SceneState 与 legacy surface
+  的终局迁移仍未完成。
+- **阶段 E：已开始但未完成。** `renderengine.HandoffFrontier` 已接管
+  `historyHandedOff` 的单调推进、trim 重基和替换 clamp；
+  `scrollCompensatedRows`、`pendingScrollDownRows`、`outputScrollDebtRows`、
+  `outputCursorOnBlankRow`、soft-output 状态机和 legacy `FixedBottomSurface`
+  渲染入口仍存在；因此本文不能标记为完成，终局目标仍需继续按阶段 E 清单迁移和删除。
 
 适用范围：`backend/cmd/aicli/ui`、`backend/cmd/aicli/commands` 中所有与屏幕渲染、输出、历史、ActiveBand、viewport、status、popup、prompt 相关的代码。
 
@@ -156,11 +179,12 @@ cmd/aicli/ui/renderengine/
   engine.go          Engine 门面：Update/Invalidate/Flush/Resize/Lease 接入
   frame_pump.go      FramePump：单一 ticker、dirty 位、FPS 预算、合并、背压
   scene.go           SceneState：当前权威 UI 状态（与 unified plan TuiScene 对齐的骨架）
-  screen.go          ScreenModel：内存终端网格 + 行所有权表 + 与 ui/vt 的互转
+  screen.go          RowPlan/Compose：行所有权表、布局求解与 ui/vt 互转
+  screen_model.go    ScreenModel：内存终端网格与 front/back diff
   composer.go        Composer：布局求解（行分配、wrap、gap、owner 标注）
   presenter.go       Presenter：diff、批量 ANSI 输出、synchronized update、handoff
   cache.go           RenderCache：markdown Document 缓存、行缓存、样式缓存
-  handoff.go         HandoffFrontier：scrollback 交接边界（单调）
+  handoff_frontier.go HandoffFrontier：scrollback 交接边界（单调）
   ownership.go       行所有权类型与仲裁规则
 ```
 
@@ -168,7 +192,7 @@ cmd/aicli/ui/renderengine/
 
 - `renderengine` **不导入** `commands` 包；`commands` 只通过 Engine 的意图级 API 交互。
 - 包内所有组件**不直接写终端**，终端写入只发生在 `Presenter` 的 `Flush` 中；handoff 字节也由 `Presenter` 统一输出（消灭 `insertHistoryLinesLocked` 的 os.Stdout 硬编码）。
-- `ui/viewport.Backend` 的 front/back diff 逻辑**并入** `screen.go`/`presenter.go`（复用其测试资产），不再维持 shadow mode。
+- `ui/viewport.Backend` 的 front/back diff 逻辑**并入** `screen_model.go`（复用其测试资产），不再维持 shadow mode。
 
 ### 3.3 与现有代码的边界
 
@@ -440,17 +464,25 @@ const (
 
 - 新建 `renderengine` 包骨架（`frame_pump.go`、`engine.go`）；
 - 把 coordinator 的 4 个 timer 收敛为单一 FramePump：timer 回调改为 `Engine.Invalidate(reason)` / dirty 置位，渲染回调集中执行现有各 `paint*`/`repaint*` 方法（**行为不变，只是调度收敛**）；
+- FramePump 维护 `DirtyFlags` 联集、调度替换/触发统计和可配置 `MaxFPS` 帧预算；旧 `Schedule` 调用默认归入 `DirtyExternal`，不破坏兼容路径；
 - Presenter 第一版：收集一帧内所有输出字节，synchronized update 包裹，一次 Write；
-- **验收**：流式场景 syscall 数显著下降；`FrameScheduler` 测试资产迁移到 FramePump；现有 4 组 timer 测试改走 pump 后全绿。
+- **验收**：流式场景 syscall 数显著下降；`FramePump`/`FrameClock` 的合并与帧预算测试通过；现有 4 组 timer 测试改走 pump 后全绿。旧 `FrameScheduler` 测试仍保留，用于验证兼容注入实现。
 
 ### 阶段 B：ScreenModel + Composer 接入 owned 区域（解决被吞/漂移）
 
-**状态：已实施（2026-08-01）**，`ui/viewport`（Backend/Compose）与 `renderOwnedViewportLocked` 生产接入完成。
+**状态：已实施（2026-08-01）**，`ui/renderengine`（ScreenModel/RowPlan/Composer）与 `renderOwnedViewportLocked` 生产接入完成；`ui/viewport` 保留兼容 API。
 
-- `screen.go`/`composer.go` 落地；`renderOwnedViewportLocked` 的合成逻辑搬入 Composer（historyWindow + band 一帧合成改为 ScreenModel 全量合成 + diff）；
-- `ui/viewport.Backend` 的 diff 逻辑并入 Presenter，删除 shadow mode；
+- `screen.go`/`screen_model.go`/`composer.go` 落地；`renderOwnedViewportLocked` 的合成逻辑搬入 Composer（historyWindow + band 一帧合成改为 ScreenModel 全量合成 + diff）；
+- owned surface 已仅使用 `renderengine.ScreenModel`、`PlanRow`、`RowOwner` 和
+  `PlanCells`；双缓冲 diff 与行所有权算法现由 `renderengine` 直接实现，旧
+  `ui/viewport` API 仅作兼容转发；
+- Presenter 保持帧级批量输出职责，ScreenModel 负责 front/back diff；shadow
+  mode 已删除；
+- owned viewport 的完整帧、direct-scroll 后续 diff 和 reconcile 输出统一经由
+  Presenter；即使测试/过渡装配未预先注入 Presenter，`flushHoldingLock` 也会
+  创建兜底实例，不再从 owned 路径退回 `fmt.Print`；
 - reconcile 接入：resize、lease release、finalize、popup 关闭后强制整帧对账；
-- 终端写锁与 DEC 2026 状态下沉到 `renderengine`（`terminal_lock.go`），ui 包转发，避免 ui→renderengine→ui 循环依赖；`renderOwnedViewportLocked` 输出改走 `Presenter.FlushHoldingLock`；
+- 终端写锁与 DEC 2026 状态下沉到 `renderengine`（`terminal_lock.go`），ui 包转发，避免 ui→renderengine→ui 循环依赖；`renderOwnedViewportLocked` 输出改走 Engine 的 `FlushHoldingLock` 门面；
 - popup 清理方法（`ClearPopup*` 族）在 owned 模式下走 reconcile 整帧路径，不再走 legacy 清空分支；
 - 新增公有 `Reconcile()`（`fixed_bottom_surface_snapshot.go`），供 reconciliation 时机调用；
 - **验收**：属性测试"任意事件序列后 reconcile 收敛"通过（`fixed_bottom_surface_reconcile_test.go`：内容事件序列收敛、resize 后收敛、重复 reconcile 幂等）；`TestHistoryWindow*`、`TestFixedBottomSurface*` 全部保持绿；resize 场景的补偿状态机分支测试改为"reconcile 后一致"断言。
@@ -469,13 +501,21 @@ const (
 
 **状态：已实施（2026-08-01）**，`ui/renderengine/cache.go`（RenderCache）与共享缓存接入完成。
 
-- `RenderCache` 落地（`ui/renderengine/cache.go`）：DocKey = 内容 hash（fnv64a）+ width + theme 指纹 + mode；LRU 容量上限（默认 256）+ 源码二次校验防碰撞；命中/未命中/驱逐指标与 `HitRate`；`SharedRenderCache()` 进程级单例；
+- `RenderCache` 落地（`ui/renderengine/cache.go`）：DocKey = 内容 hash（fnv64a）+ width + theme 指纹 + mode；LRU 条目上限（默认 256）和 64 MiB 确定性字节预算（源码/IR 文本/结构估算）+ 源码二次校验防碰撞；命中/未命中/驱逐指标与 `HitRate`；`SharedRenderCache()` 进程级单例；超过总预算按 LRU 驱逐，单个超限文档直接跳过缓存而不清空热条目；
+- `Engine` 显式持有 `SharedRenderCache()`，coordinator 创建 `ActiveStreamController` 时通过 `SetRenderCache` 注入，独立 controller 仍保留 nil fallback 兼容语义；
+- `RenderCache.Render` 的 Markdown/goldmark 慢路径已移出 cache mutex，只在查找、发布和 LRU 更新阶段持锁，避免长文档渲染阻塞其他 stream 的命中读取；
+- 同一 `(DocKey, source)` 的并发 miss 通过 in-flight 合并：只有首个
+  请求执行 `markdown.Render`，其余请求等待发布后按命中重试；`Reset` 使用
+  generation 阻止 reset 前的慢渲染把过期文档回写到新缓存；
 - `ActiveStreamController` 私有 markdown 缓存（`markdownDoc*` 四字段）删除：`activeDocumentLocked` 改走 `bandFormatter`（`Formatter.FormatDocumentCached`），缓存未命中等价旧 bodyChanged 语义；frame 组合缓存（`markdownFrameDoc/Hold/Title`）保留；
 - `Formatter.FormatDocument`/`FormatDocumentCached` 成为唯一 markdown 渲染路径：生产代码 `markdown.Render` 调用点收敛到 `renderengine/cache.go` 一处（其余为测试/基准）；band 差异化只剩 highlighter 注入、`HideHighlightFallback`、`TrustMarkdown` 三个 formatter 选项，mode="band" 与 scrollback 的 "assistant"/"plain" 分组共享同一缓存实例；
 - **验收**：`TestActiveStreamControllerRebuildsMarkdownCacheForSyntaxTheme` 改为断言共享缓存命中/未命中（初始 miss、稳定帧 hit、theme 切换 miss、resize miss），markdown parity 测试不变且全绿；性能量化：`BenchmarkRenderCacheHit` 876ns/op vs `BenchmarkMarkdownRenderRaw` 707µs/op（≈800x），`BenchmarkActiveMarkdownRepaint100KiB` 281µs/op / 60 allocs（初始渲染含一次 goldmark 为 493µs / 2120 allocs，重绘路径不再重复解析）；`ui`/`formatter`/`renderengine` 全量回归通过。
 
 ### 阶段 E：删除补偿状态机与旧入口（终结补丁模式）
 
+- **状态：进行中（2026-08-01）。** `renderengine.HandoffFrontier` 已落地，
+  owned surface 的 handoff 边界不再是裸 `historyHandedOff` 整数；其余 legacy
+  状态机仍需在 capability fallback 收敛后删除。
 - 删除 §6 表中标注"删除"的全部方法/字段：补偿状态机、`insertHistoryLinesLocked` 直写、`repaintActiveBandDiffLocked` 的 prev 逻辑、soft output 状态机、4 个 timer、`FixedBottomSurface` 的渲染方法（facade 只剩 Enable/Disable/Lease 委托）；
 - P0 审计基线（155 组/552 call site）随迁移逐项从基线删除，最终 `tui_unowned_terminal_write_total` 归零；
 - **验收**：`FixedBottomSurface` 体积从 129KB 降到薄 facade；全文搜索 `fmt.Print`/`os.Stdout` 在 owned 路径为 0（plain/json renderer 除外）。

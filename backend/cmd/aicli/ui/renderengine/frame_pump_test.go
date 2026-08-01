@@ -150,7 +150,7 @@ func TestSerialExecution(t *testing.T) {
 func TestScheduleIgnoresInvalidArgs(t *testing.T) {
 	p := NewFramePump()
 	defer p.Shutdown()
-	p.Schedule("", 5*time.Millisecond, func() {})  // empty key
+	p.Schedule("", 5*time.Millisecond, func() {})   // empty key
 	p.Schedule("k", -1*time.Millisecond, func() {}) // negative delay
 	p.Schedule("k2", 5*time.Millisecond, nil)       // nil fn
 	if p.PendingCount() != 0 {
@@ -174,4 +174,67 @@ func TestEngineInvalidateAndCancel(t *testing.T) {
 	// Re-arm after cancel to prove the key is reusable.
 	e.Invalidate("k", "test", 5*time.Millisecond, func() { ran.Store(true) })
 	waitFor(t, time.Second, func() bool { return ran.Load() })
+}
+
+func TestFramePumpTracksDirtyUnionAndReplacement(t *testing.T) {
+	p := NewFramePumpWithConfig(FramePumpConfig{MaxFPS: -1})
+	defer p.Shutdown()
+	p.ScheduleDirty("status", DirtyStatus, time.Hour, func() {})
+	p.ScheduleDirty("prompt", DirtyPrompt, time.Hour, func() {})
+	if got, want := p.Dirty(), DirtyStatus|DirtyPrompt; got != want {
+		t.Fatalf("Dirty = %#x, want %#x", got, want)
+	}
+	p.ScheduleDirty("status", DirtyGeometry, time.Hour, func() {})
+	stats := p.Stats()
+	if stats.Scheduled != 3 || stats.Replaced != 1 || stats.Pending != 2 {
+		t.Fatalf("stats = %+v, want scheduled=3 replaced=1 pending=2", stats)
+	}
+	p.Cancel("status")
+	if got, want := p.Dirty(), DirtyPrompt; got != want {
+		t.Fatalf("Dirty after cancel = %#x, want %#x", got, want)
+	}
+	p.Cancel("prompt")
+	if p.Dirty() != DirtyNone {
+		t.Fatalf("Dirty after cancelling all jobs = %#x, want zero", p.Dirty())
+	}
+}
+
+func TestFramePumpHonorsFrameBudget(t *testing.T) {
+	p := NewFramePumpWithConfig(FramePumpConfig{MaxFPS: 20})
+	defer p.Shutdown()
+	first := make(chan time.Time, 1)
+	second := make(chan time.Time, 1)
+	p.Schedule("first", 0, func() { first <- time.Now() })
+	firstAt := <-first
+	p.Schedule("second", 0, func() { second <- time.Now() })
+	secondAt := <-second
+	if elapsed := secondAt.Sub(firstAt); elapsed < 35*time.Millisecond {
+		t.Fatalf("second frame ran after %v, want at least one budget interval", elapsed)
+	}
+	if stats := p.Stats(); stats.Frames != 2 || stats.Fired != 2 {
+		t.Fatalf("stats = %+v, want two frames and callbacks", stats)
+	}
+}
+
+func TestEngineInvalidateClassifiesReason(t *testing.T) {
+	e := NewEngine()
+	defer e.Shutdown()
+	e.Invalidate("status", "dynamic-status", time.Hour, func() {})
+	e.Invalidate("band", "active-frame", time.Hour, func() {})
+	if got, want := e.Dirty(), DirtyStatus|DirtyBand|DirtyContent; got != want {
+		t.Fatalf("Engine Dirty = %#x, want %#x", got, want)
+	}
+}
+
+func TestFramePumpSetMaxFPSWakesScheduler(t *testing.T) {
+	p := NewFramePumpWithConfig(FramePumpConfig{MaxFPS: -1})
+	defer p.Shutdown()
+	p.SetMaxFPS(25)
+	if got := p.MaxFPS(); got != 25 {
+		t.Fatalf("MaxFPS = %d, want 25", got)
+	}
+	p.SetMaxFPS(0)
+	if got := p.MaxFPS(); got != defaultFrameMaxFPS {
+		t.Fatalf("MaxFPS after zero reset = %d, want %d", got, defaultFrameMaxFPS)
+	}
 }

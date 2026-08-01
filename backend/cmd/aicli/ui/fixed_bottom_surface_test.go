@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -10,9 +11,51 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/viewport"
 )
+
+func TestFixedBottomSurfaceAdoptsEnginePresenter(t *testing.T) {
+	engine := renderengine.NewEngine()
+	t.Cleanup(engine.Shutdown)
+	surface := NewFixedBottomSurface(NewTerminal())
+	surface.SetEngine(engine)
+	if surface.engine != engine {
+		t.Fatal("surface did not retain the adopted render engine")
+	}
+	if surface.presenter != engine.Presenter() {
+		t.Fatal("surface presenter is not owned by the render engine")
+	}
+	legacy := renderengine.NewPresenter()
+	surface.SetPresenter(legacy)
+	if surface.engine != nil || surface.presenter != legacy {
+		t.Fatal("SetPresenter did not switch to the compatibility presenter")
+	}
+}
+
+func TestFixedBottomSurfaceFlushHoldingLockInstallsPresenterFallback(t *testing.T) {
+	surface := &FixedBottomSurface{}
+	var output bytes.Buffer
+	surface.mu.Lock()
+	defer surface.mu.Unlock()
+	WithTerminalWriteLock(func() {
+		if err := surface.flushHoldingLock(&output, func(w io.Writer) {
+			_, _ = io.WriteString(w, "frame")
+		}); err != nil {
+			t.Fatalf("flushHoldingLock returned error: %v", err)
+		}
+	})
+	if surface.presenter == nil {
+		t.Fatal("flushHoldingLock did not install a presenter fallback")
+	}
+	if got := output.String(); got != "frame" {
+		t.Fatalf("fallback presenter output = %q, want %q", got, "frame")
+	}
+	if got := surface.presenter.TotalWriteCount(); got != 1 {
+		t.Fatalf("fallback presenter writes = %d, want 1", got)
+	}
+}
 
 func fixedStatusTestContext(theme *Theme) style.ThemeContext {
 	return ThemeContextForTheme(theme, style.ColorProfile{ColorProfile: render.ColorProfile{

@@ -80,6 +80,7 @@ type chatInteractionCoordinator struct {
 	// Enqueued and emitted source offsets stay distinct so queued content never
 	// reappears in the live tail and finalization can drain without replay.
 	activeStream          *ui.ActiveStreamController
+	renderEngine          *renderengine.Engine
 	framePump             *renderengine.FramePump
 	activeFrameDue        time.Time
 	activeFrameGeneration uint64
@@ -334,6 +335,9 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 	if width <= 0 {
 		width = 80
 	}
+	engine := renderengine.NewEngine()
+	activeStream := ui.NewActiveStreamController(width, ui.ActiveBandRows(ui.GetTerminalHeight()))
+	activeStream.SetRenderCache(engine.Cache())
 	return &chatInteractionCoordinator{
 		session:           session,
 		writer:            os.Stdout,
@@ -342,14 +346,54 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 		maxChunkDelay:     90 * time.Millisecond,
 		promptDelay:       120 * time.Millisecond,
 		stableCommitDelay: activeStableCommitTickDelay,
-		framePump:         renderengine.NewFramePump(),
+		renderEngine:      engine,
+		framePump:         engine.Pump(),
 		// Cursor starts at row boundary. Zero-value false would make the first
 		// writeRowsLocked/closeOpenRow inject a phantom blank into history
 		// replay (RenderAssistant) while live streams set this true on start —
 		// the live-vs-replay blank-count skew.
 		streamTrailingLF: true,
-		activeStream:     ui.NewActiveStreamController(width, ui.ActiveBandRows(ui.GetTerminalHeight())),
+		activeStream:     activeStream,
 		transcript:       &assistantTurnTranscript{},
+	}
+}
+
+// The coordinator keeps the legacy framePump field for compatibility with
+// synthetic tests, while production scheduling goes through Engine's intent
+// facade. These helpers also make hand-built coordinators degrade safely.
+func (c *chatInteractionCoordinator) renderIntentPending(key string) bool {
+	if c == nil {
+		return false
+	}
+	if c.renderEngine != nil {
+		return c.renderEngine.Pending(key)
+	}
+	return c.framePump != nil && c.framePump.Pending(key)
+}
+
+func (c *chatInteractionCoordinator) scheduleRenderIntent(key, reason string, delay time.Duration, fn func()) {
+	if c == nil {
+		return
+	}
+	if c.renderEngine != nil {
+		c.renderEngine.Invalidate(key, reason, delay, fn)
+		return
+	}
+	if c.framePump != nil {
+		c.framePump.Schedule(key, delay, fn)
+	}
+}
+
+func (c *chatInteractionCoordinator) cancelRenderIntent(key string) {
+	if c == nil {
+		return
+	}
+	if c.renderEngine != nil {
+		c.renderEngine.Cancel(key)
+		return
+	}
+	if c.framePump != nil {
+		c.framePump.Cancel(key)
 	}
 }
 
@@ -374,6 +418,9 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	}
 	if surface == nil || !surface.Enabled() {
 		c.reconcilePendingStableCommitLocked(c.streamBuffer.String())
+	}
+	if surface != nil && c.renderEngine != nil {
+		surface.SetEngine(c.renderEngine)
 	}
 	c.surface = surface
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
@@ -625,7 +672,7 @@ func (c *chatInteractionCoordinator) dynamicStatusElapsedLocked(now time.Time) t
 }
 
 func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Time) {
-	if c == nil || c.shutdown || c.dynamicStatusStarted.IsZero() || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.framePump.Pending(renderengine.FrameKeyDynamicStatus) {
+	if c == nil || c.shutdown || c.dynamicStatusStarted.IsZero() || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.renderIntentPending(renderengine.FrameKeyDynamicStatus) {
 		return
 	}
 	elapsed := c.dynamicStatusElapsedLocked(now)
@@ -635,7 +682,7 @@ func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Ti
 	}
 	c.dynamicStatusTimerSeq++
 	sequence := c.dynamicStatusTimerSeq
-	c.framePump.Schedule(renderengine.FrameKeyDynamicStatus, delay, func() {
+	c.scheduleRenderIntent(renderengine.FrameKeyDynamicStatus, "dynamic-status", delay, func() {
 		c.refreshDynamicStatusTick(sequence)
 	})
 }
@@ -668,7 +715,7 @@ func (c *chatInteractionCoordinator) stopDynamicStatusTickLocked() {
 		return
 	}
 	c.dynamicStatusTimerSeq++
-	c.framePump.Cancel(renderengine.FrameKeyDynamicStatus)
+	c.cancelRenderIntent(renderengine.FrameKeyDynamicStatus)
 }
 
 func chatSurfaceTitleState(state string) string {
@@ -3411,7 +3458,11 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.stopActiveStreamFrameLocked()
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
-	c.framePump.Shutdown()
+	if c.renderEngine != nil {
+		c.renderEngine.Shutdown()
+	} else if c.framePump != nil {
+		c.framePump.Shutdown()
+	}
 	c.dynamicStatusStarted = time.Time{}
 	c.dynamicStatusCompletedElapsed = 0
 	c.dynamicStatusCompleted = false
@@ -4407,7 +4458,7 @@ func (c *chatInteractionCoordinator) activeStableCommitCatchUpLocked(now time.Ti
 }
 
 func (c *chatInteractionCoordinator) scheduleActiveStableCommitLocked() {
-	if c == nil || c.shutdown || len(c.stableCommitQueue) == 0 || c.framePump.Pending(renderengine.FrameKeyStableCommit) {
+	if c == nil || c.shutdown || len(c.stableCommitQueue) == 0 || c.renderIntentPending(renderengine.FrameKeyStableCommit) {
 		return
 	}
 	if c.surface != nil && !c.surface.DynamicStatusTicksEnabled() && !c.stableCommitManual {
@@ -4420,7 +4471,7 @@ func (c *chatInteractionCoordinator) scheduleActiveStableCommitLocked() {
 	}
 	c.stableCommitTimerSeq++
 	sequence := c.stableCommitTimerSeq
-	c.framePump.Schedule(renderengine.FrameKeyStableCommit, delay, func() {
+	c.scheduleRenderIntent(renderengine.FrameKeyStableCommit, "stable-commit", delay, func() {
 		c.runActiveStableCommitTick(sequence)
 	})
 }
@@ -4448,7 +4499,7 @@ func (c *chatInteractionCoordinator) stopActiveStableCommitLocked() {
 		return
 	}
 	c.stableCommitTimerSeq++
-	c.framePump.Cancel(renderengine.FrameKeyStableCommit)
+	c.cancelRenderIntent(renderengine.FrameKeyStableCommit)
 }
 
 func (c *chatInteractionCoordinator) discardPendingStableCommitLocked() {
@@ -4932,7 +4983,7 @@ func activeSourceDisplayRows(line string, width int) int {
 }
 
 // scheduleActiveStreamFrameLocked arms the single coordinator-owned wakeup
-// used for both coalesced content and activity animation. FrameScheduler stays
+// used for both coalesced content and activity animation. FrameGate stays
 // clock-agnostic; this owner supplies the delayed poll that prevents the last
 // delta in a burst from being stranded inside the FPS window.
 func (c *chatInteractionCoordinator) scheduleActiveStreamFrameLocked() {
@@ -4948,13 +4999,13 @@ func (c *chatInteractionCoordinator) scheduleActiveStreamFrameLocked() {
 		delay = time.Millisecond
 	}
 	due := now.Add(delay)
-	if c.framePump.Pending(renderengine.FrameKeyActiveFrame) && !due.Before(c.activeFrameDue) {
+	if c.renderIntentPending(renderengine.FrameKeyActiveFrame) && !due.Before(c.activeFrameDue) {
 		return
 	}
 	c.activeFrameGeneration++
 	generation := c.activeFrameGeneration
 	c.activeFrameDue = due
-	c.framePump.Schedule(renderengine.FrameKeyActiveFrame, delay, func() {
+	c.scheduleRenderIntent(renderengine.FrameKeyActiveFrame, "active-frame", delay, func() {
 		c.paintScheduledActiveStreamFrame(generation)
 	})
 }
@@ -4980,7 +5031,7 @@ func (c *chatInteractionCoordinator) stopActiveStreamFrameLocked() {
 		return
 	}
 	c.activeFrameGeneration++
-	c.framePump.Cancel(renderengine.FrameKeyActiveFrame)
+	c.cancelRenderIntent(renderengine.FrameKeyActiveFrame)
 	c.activeFrameDue = time.Time{}
 }
 
@@ -5455,7 +5506,7 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 	delay := c.promptDelay
 	c.mu.Unlock()
 
-	c.framePump.Schedule(renderengine.FrameKeyPrompt, delay, func() {
+	c.scheduleRenderIntent(renderengine.FrameKeyPrompt, "prompt", delay, func() {
 		if !shouldDisplayInteractivePrompt(c.session) {
 			return
 		}

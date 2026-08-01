@@ -28,7 +28,10 @@ const (
 type ActiveStreamController struct {
 	mu sync.Mutex
 
-	Scheduler   *render.FrameScheduler
+	// Scheduler is a compatibility injection point. Production controllers use
+	// the RenderEngine FrameClock; tests may still provide render.FrameScheduler
+	// while callers migrate to the shared frame abstraction.
+	Scheduler   renderengine.FrameGate
 	Buffer      *render.BufferBackend
 	Policy      motion.Policy
 	Highlighter syntax.Highlighter
@@ -60,12 +63,24 @@ func NewActiveStreamController(width, height int) *ActiveStreamController {
 		height = ActiveBandMinRows
 	}
 	c := &ActiveStreamController{
-		Scheduler:   render.NewFrameScheduler(render.DefaultMaxFPS),
+		Scheduler:   renderengine.NewFrameClock(render.DefaultMaxFPS),
 		Buffer:      &render.BufferBackend{Width: width, Height: height},
 		Policy:      motion.Global(),
 		Highlighter: newActiveStreamHighlighter(),
 	}
 	return c
+}
+
+// SetRenderCache adopts the RenderEngine cache for markdown document reuse.
+// A nil cache keeps the historical process-wide fallback used by standalone
+// controllers and tests.
+func (c *ActiveStreamController) SetRenderCache(cache *renderengine.RenderCache) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.markdownCache = cache
+	c.mu.Unlock()
 }
 
 // Active reports whether a stream is in progress.

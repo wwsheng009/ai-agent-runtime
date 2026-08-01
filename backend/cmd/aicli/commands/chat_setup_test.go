@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -545,6 +546,48 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 		t.Fatalf("expected missing explicit context usage to restore as zero, got ctx=%d window=%d turn=%d",
 			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
 	}
+}
+
+func TestRestoreChatPersistenceState_LoadedSessionRestoresCanonicalHistory(t *testing.T) {
+	storage, err := runtimechat.NewSQLiteSessionStorage(runtimechat.DefaultPersistentSessionStorageConfig(t.TempDir()))
+	require.NoError(t, err)
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             24 * time.Hour,
+		MaxHistory:      0,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+	t.Cleanup(manager.Stop)
+
+	ctx := context.Background()
+	runtimeSession, err := manager.Create(ctx, "tester")
+	require.NoError(t, err)
+	const messageCount = 150
+	messages := make([]runtimetypes.Message, 0, messageCount)
+	for i := 0; i < messageCount; i++ {
+		if i%2 == 0 {
+			messages = append(messages, *runtimetypes.NewUserMessage(fmt.Sprintf("user %d", i)))
+		} else {
+			messages = append(messages, *runtimetypes.NewAssistantMessage(fmt.Sprintf("assistant %d", i)))
+		}
+	}
+	runtimeSession.ReplaceHistory(messages)
+	require.NoError(t, storage.Save(ctx, runtimeSession))
+	loaded, err := manager.Get(ctx, runtimeSession.ID)
+	require.NoError(t, err)
+	require.Less(t, len(loaded.History), messageCount, "loaded session should expose the compact prompt projection")
+
+	chatSession := &ChatSession{
+		SessionManager: manager,
+		SessionUserID:  "tester",
+	}
+	require.NoError(t, restoreChatPersistenceState(chatSession, &chatPersistenceState{
+		loadedRuntimeSession: loaded,
+	}, &chatCommandOptions{}))
+	require.Len(t, chatSession.ResumeHistory, messageCount,
+		"bootstrap resume must load canonical history instead of the compact projection")
+	require.Equal(t, "user 0", chatSession.ResumeHistory[0].Content)
+	require.Equal(t, "assistant 149", chatSession.ResumeHistory[messageCount-1].Content)
 }
 
 func TestRestoreChatPersistenceState_LoadedSessionRestoresExplicitContextUsage(t *testing.T) {
