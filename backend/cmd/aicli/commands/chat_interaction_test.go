@@ -2865,10 +2865,6 @@ func TestChatInteractionCoordinator_StableCommitQueueSeparatesEnqueuedAndEmitted
 	enqueuedPrefix := coord.streamEnqueuedPrefixLen
 	emittedPrefix := coord.streamRenderedPrefixLen
 	sequence := coord.stableCommitTimerSeq
-	if coord.stableCommitTimer != nil {
-		coord.stableCommitTimer.Stop()
-		coord.stableCommitTimer = nil
-	}
 	coord.mu.Unlock()
 	if queued == 0 || enqueuedPrefix <= emittedPrefix {
 		t.Fatalf("expected queued stable source ahead of emitted source, queued=%d enqueued=%d emitted=%d", queued, enqueuedPrefix, emittedPrefix)

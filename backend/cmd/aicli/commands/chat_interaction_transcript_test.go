@@ -173,10 +173,6 @@ func TestChatInteractionCoordinator_TranscriptRecordsOnlyOnDrain(t *testing.T) {
 		blocksBefore = len(coord.transcript.Blocks)
 	}
 	sequence := coord.stableCommitTimerSeq
-	if coord.stableCommitTimer != nil {
-		coord.stableCommitTimer.Stop()
-		coord.stableCommitTimer = nil
-	}
 	coord.mu.Unlock()
 
 	if queued == 0 || enqueued <= emitted {
@@ -282,10 +278,6 @@ func TestChatInteractionCoordinator_EmittedDivergenceSuppressesFullReplay(t *tes
 
 	coord.mu.Lock()
 	sequence := coord.stableCommitTimerSeq
-	if coord.stableCommitTimer != nil {
-		coord.stableCommitTimer.Stop()
-		coord.stableCommitTimer = nil
-	}
 	coord.mu.Unlock()
 	coord.runActiveStableCommitTick(sequence)
 
