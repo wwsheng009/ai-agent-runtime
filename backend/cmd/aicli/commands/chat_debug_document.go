@@ -94,11 +94,16 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	builder.meta("Agent Target:", chatDebugValueOrNone(strings.TrimSpace(session.SelectedAgentTarget)))
 	if session.Surface != nil {
 		builder.meta("Surface:", chatDebugBool(session.Surface.Enabled()))
+		if table := session.Surface.RowPlanDebugString(); table != "" {
+			builder.heading("Row Ownership (stage C):")
+			builder.plainLines(strings.Split(strings.TrimSuffix(table, "\n"), "\n"))
+		}
 	} else {
 		builder.meta("Surface:", "<none>")
 	}
 
 	appendChatDebugRoutingLines(&builder, session)
+	appendChatDebugPprofLines(&builder)
 	builder.heading("AgentControl Registry:")
 	builder.plain(chatAgentPanelRegistryLine(session))
 	builder.plainLines(chatAgentControlConsistencyLines(session))

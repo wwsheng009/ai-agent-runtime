@@ -176,6 +176,10 @@ type FixedBottomSurface struct {
 	ownedViewport   bool
 	viewportBackend *viewport.Backend
 	presenter       *renderengine.Presenter
+	// lastRowOwners records the most recent composed frame's per-row owner
+	// annotation (stage C). It is refreshed on every owned frame and exposed
+	// for diagnostics (/debug display) and layout-invariant tests.
+	lastRowOwners []viewport.RowOwner
 	// lastGeometryProbeAt records the last SyncTerminalGeometry* size probe so
 	// the paint path can throttle GetSize syscalls without missing resizes for
 	// longer than DefaultGeometryProbeMinInterval.

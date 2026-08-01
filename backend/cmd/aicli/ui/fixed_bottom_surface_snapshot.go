@@ -108,12 +108,9 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		s.promptRenderedRows = promptPlan.areaRows
 	}
 
-	s.viewportBackend.StageFrame(viewport.Compose(
-		width,
-		height,
-		s.historyRowsWithCursorBlankLocked(),
-		s.bottomRowsSnapshotLocked(),
-	))
+	plan := s.composedPlanLocked(width, height)
+	s.lastRowOwners = planOwnersCopy(plan)
+	s.viewportBackend.StageFrame(viewport.PlanCells(plan))
 	if diff := s.viewportBackend.Flush(); diff != "" {
 		if s.presenter != nil {
 			s.presenter.FlushHoldingLock(os.Stdout, func(w io.Writer) {
@@ -124,6 +121,29 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		}
 		s.ownedFrameFlushCount++
 	}
+}
+
+// composedPlanLocked builds the full-screen owned frame (history + bottom
+// reserve) with per-row ownership annotations, the single authoritative
+// layout of the owned path.
+func (s *FixedBottomSurface) composedPlanLocked(width, height int) []viewport.PlanRow {
+	history := s.historyRowsWithCursorBlankLocked()
+	historyPlan := make([]viewport.PlanRow, len(history))
+	for i := range history {
+		historyPlan[i] = viewport.PlanRow{Owner: viewport.RowOwnerTranscript, Cells: history[i]}
+	}
+	return viewport.ComposePlan(width, height, historyPlan, s.bottomRowsWithOwnersLocked())
+}
+
+func planOwnersCopy(plan []viewport.PlanRow) []viewport.RowOwner {
+	if len(plan) == 0 {
+		return nil
+	}
+	owners := make([]viewport.RowOwner, len(plan))
+	for i, row := range plan {
+		owners[i] = row.Owner
+	}
+	return owners
 }
 
 // reconcileOwnedViewportLocked forces a full-frame repaint so the physical
@@ -162,6 +182,9 @@ func (s *FixedBottomSurface) Reconcile() {
 type fixedBottomPaintRow struct {
 	row  int
 	text string
+	// owner annotates the component that claims this row. It is consumed by
+	// the owned RowPlan (stage C); legacy paint paths ignore it.
+	owner viewport.RowOwner
 }
 
 type fixedBottomPopupPaintPlan struct {
@@ -346,6 +369,14 @@ func (s *FixedBottomSurface) appendOwnedHistoryRestoreForShrinkLocked(builder *s
 }
 
 func (s *FixedBottomSurface) bottomRowsSnapshotLocked() [][]vt.Cell {
+	return viewport.PlanCells(s.bottomRowsWithOwnersLocked())
+}
+
+// bottomRowsWithOwnersLocked materializes the bottom reserve as owned rows
+// (cells + per-row owner). Rows run top-to-bottom from the first reserve row
+// to the status row. Gap rows (margins, popup gaps) are annotated RowOwnerGap
+// so the composed plan covers every physical row with exactly one owner.
+func (s *FixedBottomSurface) bottomRowsWithOwnersLocked() []viewport.PlanRow {
 	width, height := s.terminal.Width(), s.terminal.Height()
 	if width < 1 {
 		width = 80
@@ -355,22 +386,128 @@ func (s *FixedBottomSurface) bottomRowsSnapshotLocked() [][]vt.Cell {
 	}
 
 	state := s.bottomPaneStateLocked()
+	promptPlan := s.promptPaintPlanLocked(state, width)
+	popupPlan := s.popupPaintPlanLocked(state, height)
 	var frame strings.Builder
 	// Only non-empty paint rows are emitted. Reserved blank margins/gaps stay as
 	// true empty cells (Text=""), matching Compose's blankGrid and Backend's EL
 	// clear path. Do not seed spaces here: residual ' ' glyphs diverge from the
 	// owned frame and reintroduce the band/popup shrink cell-mismatch.
-	appendBottomPaintRows(&frame, s.promptPaintPlanLocked(state, width).rows, height)
-	appendBottomPaintRows(&frame, s.popupPaintPlanLocked(state, height).rows, height)
+	appendBottomPaintRows(&frame, promptPlan.rows, height)
+	appendBottomPaintRows(&frame, popupPlan.rows, height)
 	appendBottomPaintRows(&frame, []fixedBottomPaintRow{{
-		row:  s.statusRowLocked(),
-		text: s.statusPaintTextLocked(state, width),
+		row:   s.statusRowLocked(),
+		text:  s.statusPaintTextLocked(state, width),
+		owner: viewport.RowOwnerStatus,
 	}}, height)
 
 	screen := vt.NewScreen(width, height)
 	screen.Feed(frame.String())
 	bottomRows := s.effectiveBottomRowsLocked(height)
-	return screen.CellRows(height-bottomRows+1, height)
+	cells := screen.CellRows(height-bottomRows+1, height)
+	owners := s.bottomOwnerMapLocked(height, popupPlan, promptPlan)
+	plan := make([]viewport.PlanRow, len(cells))
+	for i, row := range cells {
+		rowNo := height - bottomRows + 1 + i
+		plan[i] = viewport.PlanRow{Owner: owners[rowNo], Cells: row}
+	}
+	return plan
+}
+
+// bottomOwnerMapLocked maps physical row numbers (1-based) to the component
+// that owns them. Paint rows carry their owner; reserved blank segments
+// (popup gaps, prompt margins, band top gap) are annotated Gap. Rows outside
+// every declared segment are left unset; the caller treats them as Gap.
+func (s *FixedBottomSurface) bottomOwnerMapLocked(height int, popupPlan fixedBottomPopupPaintPlan, promptPlan fixedBottomPromptPaintPlan) map[int]viewport.RowOwner {
+	owners := make(map[int]viewport.RowOwner)
+	owners[s.statusRowLocked()] = viewport.RowOwnerStatus
+	for _, p := range popupPlan.rows {
+		owners[p.row] = viewport.RowOwnerPopup
+	}
+	for _, p := range promptPlan.rows {
+		if p.owner != viewport.RowOwnerGap {
+			owners[p.row] = p.owner
+		}
+	}
+	if popupPlan.reservedRows > 0 {
+		for r := popupPlan.startRow; r < popupPlan.startRow+popupPlan.reservedRows+popupPlan.gapRows && r <= height; r++ {
+			if _, ok := owners[r]; !ok {
+				owners[r] = viewport.RowOwnerGap
+			}
+		}
+	}
+	if promptPlan.areaRows > 0 {
+		for r := promptPlan.startRow; r < promptPlan.startRow+promptPlan.areaRows && r <= height; r++ {
+			if _, ok := owners[r]; !ok {
+				owners[r] = viewport.RowOwnerGap
+			}
+		}
+	}
+	return owners
+}
+
+// RowOwnersForTest returns a copy of the most recent composed frame's
+// per-row owner table (row 0 = screen row 1). Nil when the owned viewport has
+// never composed a frame or is disabled.
+func (s *FixedBottomSurface) RowOwnersForTest() []viewport.RowOwner {
+	if s == nil || s.terminal == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled || !s.ownedViewport {
+		return nil
+	}
+	width, height := s.terminal.Width(), s.terminal.Height()
+	if width < 1 {
+		width = 80
+	}
+	if height < 1 {
+		height = 24
+	}
+	return planOwnersCopy(s.composedPlanLocked(width, height))
+}
+
+// RowPlanDebugString renders the current row-ownership table for /debug
+// display and diagnostics. Empty when the owned viewport is inactive.
+func (s *FixedBottomSurface) RowPlanDebugString() string {
+	if s == nil || s.terminal == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled || !s.ownedViewport {
+		return ""
+	}
+	width, height := s.terminal.Width(), s.terminal.Height()
+	if width < 1 {
+		width = 80
+	}
+	if height < 1 {
+		height = 24
+	}
+	plan := s.composedPlanLocked(width, height)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Row Ownership (%dx%d):\n", width, height)
+	for i, row := range plan {
+		preview := strings.TrimSpace(render.ANSIToPlain(cellRowPlainText(row.Cells)))
+		if len(preview) > 12 {
+			preview = preview[:12]
+		}
+		fmt.Fprintf(&b, "%3d  %-10s  %s\n", i+1, row.Owner.String(), preview)
+	}
+	return b.String()
+}
+
+func cellRowPlainText(cells []vt.Cell) string {
+	var b strings.Builder
+	for _, cell := range cells {
+		if cell.Cont {
+			continue
+		}
+		b.WriteString(cell.Text)
+	}
+	return b.String()
 }
 
 func appendBottomPaintRows(builder *strings.Builder, rows []fixedBottomPaintRow, height int) {
@@ -408,6 +545,7 @@ func (s *FixedBottomSurface) popupPaintPlanLocked(state BottomPaneState, height 
 		plan.rows = append(plan.rows, fixedBottomPaintRow{
 			row:  row,
 			text: truncateFixedPopupLine(line, s.terminal.Width()),
+			owner: viewport.RowOwnerPopup,
 		})
 	}
 	if composer := state.composerLineText(); composer != "" {
@@ -416,6 +554,7 @@ func (s *FixedBottomSurface) popupPaintPlanLocked(state BottomPaneState, height 
 			plan.rows = append(plan.rows, fixedBottomPaintRow{
 				row:  row,
 				text: truncateFixedPopupLine(composer, s.terminal.Width()),
+				owner: viewport.RowOwnerPopup,
 			})
 		}
 	}
@@ -492,6 +631,7 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 			plan.rows = append(plan.rows, fixedBottomPaintRow{
 				row:  activeStart + i,
 				text: formatActiveBandPaintRow(band[i], styledLine, width, themeContext),
+				owner: viewport.RowOwnerBand,
 			})
 		}
 	}
@@ -506,13 +646,18 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 					Style: render.Style{Role: string(style.RoleTextMuted)},
 				}), themeContext)
 			}
-			plan.rows = append(plan.rows, fixedBottomPaintRow{row: noticeStart + i, text: text})
+			plan.rows = append(plan.rows, fixedBottomPaintRow{
+				row:   noticeStart + i,
+				text:  text,
+				owner: viewport.RowOwnerPrompt,
+			})
 		}
 	}
 	if dynamicRows > 0 && state.DynamicStatusModel != nil {
 		plan.rows = append(plan.rows, fixedBottomPaintRow{
 			row:  dynamicStart,
 			text: formatFixedStatusModelWithContext(*state.DynamicStatusModel, width, themeContext),
+			owner: viewport.RowOwnerStatus,
 		})
 	}
 	if promptRows > 0 {
@@ -525,6 +670,7 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 				s.promptViewportStart,
 				promptRows,
 			),
+			owner: viewport.RowOwnerPrompt,
 		})
 	}
 	return plan
