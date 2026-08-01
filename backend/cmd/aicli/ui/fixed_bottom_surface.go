@@ -128,8 +128,9 @@ type FixedBottomSurface struct {
 	popupRenderedStartRow  int
 	popupReservedRows      int
 	// Legacy immediate-mode compensation remains available for capability
-	// fallback surfaces. Owned viewport rendering recomposes absolute rows and
-	// intentionally keeps these counters at zero.
+	// fallback surfaces. RenderEngine owns the state machine; the four scalar
+	// fields below are compatibility mirrors for diagnostics and old tests.
+	legacyReserve         renderengine.LegacyReserveState
 	scrollCompensatedRows int
 	pendingScrollDownRows int
 	// outputCursorOnBlankRow is true when the last WriteOutput ended on a
@@ -198,6 +199,18 @@ type PopupViewportSpec struct {
 	BodyLines   []string
 	FooterLines []string
 	Anchor      int
+}
+
+// syncLegacyReserveMirrorLocked keeps historical diagnostics/tests compatible
+// while LegacyReserveState remains the production source of truth.
+func (s *FixedBottomSurface) syncLegacyReserveMirrorLocked() {
+	if s == nil {
+		return
+	}
+	s.scrollCompensatedRows = s.legacyReserve.ScrollCompensatedRows
+	s.pendingScrollDownRows = s.legacyReserve.PendingScrollDownRows
+	s.outputScrollDebtRows = s.legacyReserve.OutputScrollDebtRows
+	s.outputCursorOnBlankRow = s.legacyReserve.CursorOnBlankRow
 }
 
 func (h PopupHandle) Valid() bool {
@@ -426,10 +439,8 @@ func (s *FixedBottomSurface) Disable() {
 	// Stop framing writes once the surface is torn down so any later plain output
 	// path is not wrapped in a dangling synchronized update.
 	SetTerminalSynchronizedFrames(false)
-	s.outputCursorOnBlankRow = false
-	s.scrollCompensatedRows = 0
-	s.pendingScrollDownRows = 0
-	s.outputScrollDebtRows = 0
+	s.legacyReserve = renderengine.LegacyReserveState{}
+	s.syncLegacyReserveMirrorLocked()
 	s.invalidateSoftOutputLocked()
 	s.resetOwnedHistoryLocked()
 }
@@ -814,7 +825,8 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 			}
 			s.appendHistoryWindowLocked(text)
 			n = len(output)
-			s.outputCursorOnBlankRow = strings.HasSuffix(output, "\n")
+			s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
+			s.syncLegacyReserveMirrorLocked()
 			if s.leaseID != 0 {
 				// Lease active: retain state only; the release repaint
 				// flushes the frame.
@@ -877,7 +889,7 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 				// Trailing newline parks the cursor on a blank row at the output
 				// bottom. Later bottom-reserve growth must absorb that blank or it
 				// becomes a visible hole above the active band / prompt.
-				s.outputCursorOnBlankRow = strings.HasSuffix(output, "\n")
+				s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
 			} else {
 				// A short/erroring writer leaves only an unknown byte prefix on
 				// screen. Restart ownership from future writes; once a complete
@@ -888,8 +900,9 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 				if n < len(written) {
 					written = written[:n]
 				}
-				s.outputCursorOnBlankRow = strings.HasSuffix(written, "\n")
+				s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(written, "\n")
 			}
+			s.syncLegacyReserveMirrorLocked()
 		}
 		s.restoreStoredPromptCursorLocked()
 	})
@@ -1081,7 +1094,7 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		return false
 	}
 	oldCount := len(softLines)
-	onBlank := s.outputCursorOnBlankRow
+	onBlank := s.legacyReserve.CursorOnBlankRow
 	// Capture pre-layout geometry so we clear the rows the soft tail currently
 	// occupies even when this rewrite is triggered by a terminal resize.
 	prevHeight := s.lastHeight
@@ -1114,7 +1127,8 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			return false
 		}
 		s.softOutput.Replace(normalized)
-		s.outputCursorOnBlankRow = false
+		s.legacyReserve.CursorOnBlankRow = false
+		s.syncLegacyReserveMirrorLocked()
 		if s.leaseID != 0 {
 			// Retain the rewritten soft tail without touching the alternate
 			// screen. Release will repaint the latest owned frame.
@@ -1151,8 +1165,9 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		if len(normalized) == 0 {
 			s.replaceOwnedHistorySuffixLocked(softLines, nil)
 			s.softOutput.Invalidate()
-			s.outputCursorOnBlankRow = false
-			s.outputScrollDebtRows = 0
+			s.legacyReserve.CursorOnBlankRow = false
+			s.legacyReserve.OutputScrollDebtRows = 0
+			s.syncLegacyReserveMirrorLocked()
 			s.restoreStoredPromptCursorLocked()
 			rewritten = true
 			return
@@ -1176,8 +1191,9 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		}
 		s.replaceOwnedHistorySuffixLocked(softLines, normalized)
 		s.softOutput.Replace(normalized)
-		s.outputCursorOnBlankRow = true
-		s.outputScrollDebtRows = 0
+		s.legacyReserve.CursorOnBlankRow = true
+		s.legacyReserve.OutputScrollDebtRows = 0
+		s.syncLegacyReserveMirrorLocked()
 		s.markOutputWrittenLocked()
 		s.restoreStoredPromptCursorLocked()
 		rewritten = true
@@ -1742,10 +1758,11 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		// Re-assert trailing blank so shrink restore works. historyPartial is
 		// false when the last write ended with a newline.
 		if !s.historyPartial && len(s.historyWindow) > 0 {
-			s.outputCursorOnBlankRow = true
+			s.legacyReserve.CursorOnBlankRow = true
 		} else {
-			s.outputCursorOnBlankRow = false
+			s.legacyReserve.CursorOnBlankRow = false
 		}
+		s.syncLegacyReserveMirrorLocked()
 		return s.repaintActiveBandLocked()
 	}
 
@@ -2900,17 +2917,8 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *st
 	if width == lastWidth && height == lastHeight && bottomRows == lastBottomRows {
 		return
 	}
-	state := renderengine.LegacyReserveState{
-		ScrollCompensatedRows: s.scrollCompensatedRows,
-		PendingScrollDownRows: s.pendingScrollDownRows,
-		OutputScrollDebtRows:  s.outputScrollDebtRows,
-		CursorOnBlankRow:      s.outputCursorOnBlankRow,
-	}
-	transition := state.ApplyGeometry(width, height, bottomRows, lastWidth, lastHeight, lastBottomRows)
-	s.scrollCompensatedRows = state.ScrollCompensatedRows
-	s.pendingScrollDownRows = state.PendingScrollDownRows
-	s.outputScrollDebtRows = state.OutputScrollDebtRows
-	s.outputCursorOnBlankRow = state.CursorOnBlankRow
+	transition := s.legacyReserve.ApplyGeometry(width, height, bottomRows, lastWidth, lastHeight, lastBottomRows)
+	s.syncLegacyReserveMirrorLocked()
 	if transition.ScrollUpOldBottomRows > 0 && transition.ScrollUpNewBottomRows > transition.ScrollUpOldBottomRows {
 		appendOutputScrollUpForBottomReserveGrowthSequence(
 			builder,
@@ -2941,10 +2949,10 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	s.lastBottomRows = bottomRows
 	// Owned frames recompose absolute rows; legacy compensation state must not
 	// leak across a capability-path transition.
-	s.scrollCompensatedRows = 0
-	s.pendingScrollDownRows = 0
+	s.legacyReserve.ScrollCompensatedRows = 0
+	s.legacyReserve.PendingScrollDownRows = 0
 	if sizeChanged {
-		s.outputScrollDebtRows = 0
+		s.legacyReserve.OutputScrollDebtRows = 0
 	}
 	if previousBottomRows > 0 && bottomRows > previousBottomRows {
 		// A growing owned bottom pane (ActiveBand, popup, dynamic status, or
@@ -2960,8 +2968,9 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	// band/popup grow-shrink must keep it so Compose can restore the owned
 	// transcript tail.
 	if sizeChanged {
-		s.outputCursorOnBlankRow = false
+		s.legacyReserve.CursorOnBlankRow = false
 	}
+	s.syncLegacyReserveMirrorLocked()
 	// Owned frames address absolute rows and must not inherit a narrower legacy
 	// DECSTBM region. Reset before the first/resize repaint so the status row and
 	// other bottom-pane rows are writable in the host terminal and vt.Screen.
@@ -2990,11 +2999,12 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 // appendPendingOutputScrollDownLocked emits deferred legacy reserve-release
 // compensation. Owned frames never use this path.
 func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *strings.Builder) {
-	if s == nil || s.terminal == nil || builder == nil || s.pendingScrollDownRows < 1 || s.ownedViewport {
+	if s == nil || s.terminal == nil || builder == nil || s.legacyReserve.PendingScrollDownRows < 1 || s.ownedViewport {
 		return
 	}
-	rows := s.pendingScrollDownRows
-	s.pendingScrollDownRows = 0
+	rows := s.legacyReserve.PendingScrollDownRows
+	s.legacyReserve.PendingScrollDownRows = 0
+	s.syncLegacyReserveMirrorLocked()
 	height := s.terminal.Height()
 	if height > 1 {
 		appendOutputScrollDownForBottomReserveShrinkSequence(builder, height, s.effectiveBottomRowsLocked(height), rows)
@@ -3002,7 +3012,7 @@ func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *string
 }
 
 func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
-	if s == nil || s.pendingScrollDownRows < 1 || s.ownedViewport {
+	if s == nil || s.legacyReserve.PendingScrollDownRows < 1 || s.ownedViewport {
 		return
 	}
 	var builder strings.Builder
@@ -3015,11 +3025,12 @@ func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
 // appendOutputScrollDebtLocked pays the row absorbed from a legacy trailing
 // blank before the next write reaches the output bottom.
 func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Builder) {
-	if s == nil || s.terminal == nil || builder == nil || s.outputScrollDebtRows < 1 || s.ownedViewport || s.pendingScrollDownRows > 0 {
+	if s == nil || s.terminal == nil || builder == nil || s.legacyReserve.OutputScrollDebtRows < 1 || s.ownedViewport || s.legacyReserve.PendingScrollDownRows > 0 {
 		return
 	}
-	rows := s.outputScrollDebtRows
-	s.outputScrollDebtRows = 0
+	rows := s.legacyReserve.OutputScrollDebtRows
+	s.legacyReserve.OutputScrollDebtRows = 0
+	s.syncLegacyReserveMirrorLocked()
 	height := s.terminal.Height()
 	if height <= 1 {
 		return
@@ -3030,11 +3041,12 @@ func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Build
 	}
 	builder.WriteString(terminalMoveToSequence(bottom, 1))
 	builder.WriteString(strings.Repeat("\n", rows))
-	s.outputCursorOnBlankRow = true
+	s.legacyReserve.CursorOnBlankRow = true
+	s.syncLegacyReserveMirrorLocked()
 }
 
 func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
-	if s == nil || s.outputScrollDebtRows < 1 || s.ownedViewport {
+	if s == nil || s.legacyReserve.OutputScrollDebtRows < 1 || s.ownedViewport {
 		return
 	}
 	var builder strings.Builder
@@ -3052,14 +3064,8 @@ func (s *FixedBottomSurface) markOutputWrittenLocked() {
 	if height <= 0 {
 		_, height = s.terminal.RefreshSize()
 	}
-	state := renderengine.LegacyReserveState{
-		ScrollCompensatedRows: s.scrollCompensatedRows,
-		PendingScrollDownRows: s.pendingScrollDownRows,
-		OutputScrollDebtRows:  s.outputScrollDebtRows,
-		CursorOnBlankRow:      s.outputCursorOnBlankRow,
-	}
-	state.MarkOutputWritten(s.effectiveBottomRowsLocked(height))
-	s.scrollCompensatedRows = state.ScrollCompensatedRows
+	s.legacyReserve.MarkOutputWritten(s.effectiveBottomRowsLocked(height))
+	s.syncLegacyReserveMirrorLocked()
 }
 
 func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height, oldBottomRows, newBottomRows int) {

@@ -27,8 +27,8 @@
   ownership、hard-cap trim 和 rewrite/adopt 元数据；`renderengine.HandoffPlan`
   与 Presenter 已接管 native scrollback handoff 的 ANSI 聚合。`scrollCompensatedRows`、
   `pendingScrollDownRows`、`outputScrollDebtRows`、`outputCursorOnBlankRow` 的
-  **状态转移决策**现已由 `renderengine.LegacyReserveState` 统一计算，surface
-  字段仍作为过渡期镜像；legacy `FixedBottomSurface` 渲染入口仍存在。因此本文
+  **状态转移决策及状态源**现已由 `renderengine.LegacyReserveState` 统一持有，
+  surface 字段仅作为过渡期兼容镜像；legacy `FixedBottomSurface` 渲染入口仍存在。因此本文
   不能标记为完成，终局目标仍需继续按阶段 E 清单迁移和删除。
 
 适用范围：`backend/cmd/aicli/ui`、`backend/cmd/aicli/commands` 中所有与屏幕渲染、输出、历史、ActiveBand、viewport、status、popup、prompt 相关的代码。
@@ -527,8 +527,8 @@ const (
   owned surface 共享，handoff 边界不再是裸 `historyHandedOff` 整数；
   `SoftOutputState` 已迁入 `renderengine`，`HandoffPlan`/Presenter 已统一
   scrollback handoff 的 cursor-save、DECSTBM、内容写入和 cursor-restore 为单批次
-  输出；`LegacyReserveState` 已接管 reserve 几何变化的纯状态转移，surface 仍同步
-  历史字段供 capability fallback 使用。其余 legacy 补偿输出和 facade 入口仍需在
+  输出；`LegacyReserveState` 已接管 reserve 几何变化的状态源与纯状态转移，surface
+  仅同步历史字段供 capability fallback 测试/诊断使用。其余 legacy 补偿输出和 facade 入口仍需在
   capability fallback 收敛后删除。
 - 删除 §6 表中标注"删除"的全部方法/字段：补偿状态机、`insertHistoryLinesLocked` 直写、`repaintActiveBandDiffLocked` 的 prev 逻辑、soft output 状态机、4 个 timer、`FixedBottomSurface` 的渲染方法（facade 只剩 Enable/Disable/Lease 委托）；
 - P0 审计基线（155 组/552 call site）随迁移逐项从基线删除，最终 `tui_unowned_terminal_write_total` 归零；
