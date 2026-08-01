@@ -299,6 +299,18 @@ func (s *FixedBottomSurface) flushHandoffHoldingLock(writer io.Writer, plan rend
 	return s.presenter.FlushHandoffHoldingLock(writer, plan)
 }
 
+// flushLegacyANSIHoldingLock keeps the capability fallback's layout protocol
+// on the same Presenter batch path as owned frames. Callers already hold the
+// shared terminal write lock.
+func (s *FixedBottomSurface) flushLegacyANSIHoldingLock(sequence string) {
+	if s == nil || sequence == "" {
+		return
+	}
+	_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+		_, _ = io.WriteString(w, sequence)
+	})
+}
+
 func (s *FixedBottomSurface) Enable() bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -2862,7 +2874,7 @@ func (s *FixedBottomSurface) applyLayoutLocked() {
 	var builder strings.Builder
 	s.appendApplyLayoutSequenceLocked(&builder)
 	if builder.Len() > 0 {
-		fmt.Print(builder.String())
+		s.flushLegacyANSIHoldingLock(builder.String())
 	}
 }
 
@@ -2880,7 +2892,7 @@ func (s *FixedBottomSurface) applyLayoutWithSizeLocked(width, height int) {
 	var builder strings.Builder
 	s.appendApplyLayoutSequenceWithSizeLocked(&builder, width, height)
 	if builder.Len() > 0 {
-		fmt.Print(builder.String())
+		s.flushLegacyANSIHoldingLock(builder.String())
 	}
 }
 
@@ -3018,7 +3030,7 @@ func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
 	var builder strings.Builder
 	s.appendPendingOutputScrollDownLocked(&builder)
 	if builder.Len() > 0 {
-		fmt.Print(builder.String())
+		s.flushLegacyANSIHoldingLock(builder.String())
 	}
 }
 
@@ -3047,7 +3059,7 @@ func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
 	var builder strings.Builder
 	s.appendOutputScrollDebtLocked(&builder)
 	if builder.Len() > 0 {
-		fmt.Print(builder.String())
+		s.flushLegacyANSIHoldingLock(builder.String())
 	}
 }
 

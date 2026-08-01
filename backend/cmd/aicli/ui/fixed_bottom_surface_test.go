@@ -763,6 +763,29 @@ func TestFixedBottomSurface_RemovingDynamicStatusReclaimsOutputRow(t *testing.T)
 	}
 }
 
+func TestFixedBottomSurface_LegacyLayoutFlushesThroughPresenter(t *testing.T) {
+	surface := newTestFixedBottomSurfaceWithSize(80, 24)
+	output := captureUIStdout(t, func() {
+		surface.mu.Lock()
+		defer surface.mu.Unlock()
+		WithTerminalWriteLock(func() {
+			surface.applyLayoutLocked()
+		})
+	})
+	if surface.presenter == nil {
+		t.Fatal("legacy layout must create a presenter")
+	}
+	if got := surface.presenter.FlushCount(); got != 1 {
+		t.Fatalf("legacy layout flush count = %d, want 1", got)
+	}
+	if got := surface.presenter.LastFrameWriteCount(); got != 1 {
+		t.Fatalf("legacy layout frame writes = %d, want 1", got)
+	}
+	if !strings.Contains(output, "\x1b[1;") {
+		t.Fatalf("legacy layout missing DECSTBM sequence: %q", output)
+	}
+}
+
 func TestFixedBottomSurface_SetActiveBandStyledPreservesRolesAndStripsControls(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("AICLI_COLOR_DEPTH", "truecolor")
