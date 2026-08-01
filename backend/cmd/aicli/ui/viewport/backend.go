@@ -6,10 +6,12 @@
 // terminal from the front frame to the back frame, swapping front=back. The
 // Backend is render-plane only: it never interprets content, only cells.
 //
-// P5.1 status: SHADOW MODE. No production render path constructs a Backend yet;
-// it is exercised and validated by tests that round-trip its diff through the
-// ui/vt screen model (feed the front frame, then the diff, and assert the screen
-// equals the target frame). Wiring the Backend into FixedBottomSurface is P5.2+.
+// P5.2 status: WIRED. FixedBottomSurface composes each owned frame with
+// Compose and reconciles it through this Backend (renderOwnedViewportLocked);
+// the surface reconciles (full repaint) on resize, lease release, popup close,
+// and the public Reconcile() hook. Tests round-trip the diff through the
+// ui/vt screen model (feed the front frame, then the diff, and assert the
+// screen equals the target frame).
 package viewport
 
 import (

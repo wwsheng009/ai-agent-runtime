@@ -3,8 +3,6 @@ package renderengine
 import (
 	"io"
 	"sync"
-
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
 // Presenter owns the terminal write path (Stage A first version).
@@ -41,9 +39,28 @@ func (p *Presenter) Flush(w io.Writer, render func(w io.Writer)) {
 		return
 	}
 	cw := &countingWriter{w: w}
-	ui.WithTerminalWriteLock(func() {
+	withTerminalWriteLock(func() {
 		render(cw)
 	})
+	p.mu.Lock()
+	p.flushes++
+	p.lastFrameWr = cw.writes
+	p.totalWrites += uint64(cw.writes)
+	p.totalBytes += uint64(cw.bytes)
+	p.mu.Unlock()
+}
+
+// FlushHoldingLock is Flush for callers that already hold the terminal write
+// lock (the terminal write lock is non-reentrant, so nested Flush would
+// deadlock). Callers MUST already be inside withTerminalWriteLock or on a
+// path that guarantees exclusive write access. Statistics are identical to
+// Flush.
+func (p *Presenter) FlushHoldingLock(w io.Writer, render func(w io.Writer)) {
+	if render == nil {
+		return
+	}
+	cw := &countingWriter{w: w}
+	render(cw)
 	p.mu.Lock()
 	p.flushes++
 	p.lastFrameWr = cw.writes

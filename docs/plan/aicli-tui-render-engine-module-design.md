@@ -445,10 +445,15 @@ const (
 
 ### 阶段 B：ScreenModel + Composer 接入 owned 区域（解决被吞/漂移）
 
+**状态：已实施（2026-08-01）**，`ui/viewport`（Backend/Compose）与 `renderOwnedViewportLocked` 生产接入完成。
+
 - `screen.go`/`composer.go` 落地；`renderOwnedViewportLocked` 的合成逻辑搬入 Composer（historyWindow + band 一帧合成改为 ScreenModel 全量合成 + diff）；
 - `ui/viewport.Backend` 的 diff 逻辑并入 Presenter，删除 shadow mode；
 - reconcile 接入：resize、lease release、finalize、popup 关闭后强制整帧对账；
-- **验收**：属性测试"任意事件序列后 reconcile 收敛"通过；`TestHistoryWindow*`、`TestFixedBottomSurface*` 全部保持绿；resize 场景的补偿状态机分支测试改为"reconcile 后一致"断言。
+- 终端写锁与 DEC 2026 状态下沉到 `renderengine`（`terminal_lock.go`），ui 包转发，避免 ui→renderengine→ui 循环依赖；`renderOwnedViewportLocked` 输出改走 `Presenter.FlushHoldingLock`；
+- popup 清理方法（`ClearPopup*` 族）在 owned 模式下走 reconcile 整帧路径，不再走 legacy 清空分支；
+- 新增公有 `Reconcile()`（`fixed_bottom_surface_snapshot.go`），供 reconciliation 时机调用；
+- **验收**：属性测试"任意事件序列后 reconcile 收敛"通过（`fixed_bottom_surface_reconcile_test.go`：内容事件序列收敛、resize 后收敛、重复 reconcile 幂等）；`TestHistoryWindow*`、`TestFixedBottomSurface*` 全部保持绿；resize 场景的补偿状态机分支测试改为"reconcile 后一致"断言。
 
 ### 阶段 C：行所有权仲裁（解决 viewport/历史/ActiveBand 冲突）
 

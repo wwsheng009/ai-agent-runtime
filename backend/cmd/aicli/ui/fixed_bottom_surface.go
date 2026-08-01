@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/viewport"
 )
@@ -174,6 +175,7 @@ type FixedBottomSurface struct {
 	// scroll-region path remains only as an internal capability fallback.
 	ownedViewport   bool
 	viewportBackend *viewport.Backend
+	presenter       *renderengine.Presenter
 	// lastGeometryProbeAt records the last SyncTerminalGeometry* size probe so
 	// the paint path can throttle GetSize syscalls without missing resizes for
 	// longer than DefaultGeometryProbeMinInterval.
@@ -235,6 +237,7 @@ func (s *FixedBottomSurface) Enable() bool {
 	s.ownedViewport = true
 	s.viewportBackend = viewport.New(s.terminal.Width(), s.terminal.Height())
 	s.viewportBackend.Invalidate()
+	s.presenter = renderengine.NewPresenter()
 	// The legacy surface may have left DECSTBM restricted to the output
 	// region. Owned frames address the whole screen, so reset before the first
 	// frame is composed.
@@ -279,6 +282,7 @@ func (s *FixedBottomSurface) EnableForTest(width, height int) {
 	s.ownedViewport = true
 	s.viewportBackend = viewport.New(width, height)
 	s.viewportBackend.Invalidate()
+	s.presenter = renderengine.NewPresenter()
 	s.terminal.ResetScrollRegion()
 	s.lastWidth = width
 	s.lastHeight = height
@@ -348,6 +352,7 @@ func (s *FixedBottomSurface) Disable() {
 	s.testMode = false
 	s.ownedViewport = false
 	s.viewportBackend = nil
+	s.presenter = nil
 	// Stop framing writes once the surface is torn down so any later plain output
 	// path is not wrapped in a dangling synchronized update.
 	SetTerminalSynchronizedFrames(false)
@@ -2203,6 +2208,10 @@ func (s *FixedBottomSurface) ClearPopup() {
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
+		if s.ownedViewport {
+			s.reconcileOwnedViewportLocked()
+			return
+		}
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 		s.clearPopupRenderStateLocked()
 		s.renderStatusLocked()
@@ -2237,6 +2246,10 @@ func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
 			defer s.terminal.RestoreCursor()
 		}
 		s.applyLayoutLocked()
+		if s.ownedViewport {
+			s.reconcileOwnedViewportLocked()
+			return
+		}
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 		s.clearPopupRenderStateLocked()
 		s.renderStatusLocked()
@@ -2282,6 +2295,10 @@ func (s *FixedBottomSurface) ClearPopupForOwnerPreserveCursor(owner string) {
 			defer s.terminal.RestoreCursor()
 		}
 		s.applyLayoutLocked()
+		if s.ownedViewport {
+			s.reconcileOwnedViewportLocked()
+			return
+		}
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
 		s.clearPopupRenderStateLocked()
 		s.renderPopupLocked()
@@ -2320,6 +2337,10 @@ func (s *FixedBottomSurface) ClearPopupHandlePreserveCursor(handle PopupHandle) 
 			defer s.terminal.RestoreCursor()
 		}
 		s.applyLayoutLocked()
+		if s.ownedViewport {
+			s.reconcileOwnedViewportLocked()
+			return
+		}
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
 		s.clearPopupRenderStateLocked()
 		s.renderPopupLocked()

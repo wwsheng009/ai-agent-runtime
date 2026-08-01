@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -113,9 +115,48 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		s.bottomRowsSnapshotLocked(),
 	))
 	if diff := s.viewportBackend.Flush(); diff != "" {
-		fmt.Print(diff)
+		if s.presenter != nil {
+			s.presenter.FlushHoldingLock(os.Stdout, func(w io.Writer) {
+				_, _ = io.WriteString(w, diff)
+			})
+		} else {
+			fmt.Print(diff)
+		}
 		s.ownedFrameFlushCount++
 	}
+}
+
+// reconcileOwnedViewportLocked forces a full-frame repaint so the physical
+// terminal converges on the composed scene even when a previous frame was
+// written outside the double buffer (legacy popup clearing, host-side
+// scroll, geometry transitions). Callers hold the surface lock and the
+// terminal write lock.
+func (s *FixedBottomSurface) reconcileOwnedViewportLocked() {
+	if s == nil || !s.enabled || !s.ownedViewport {
+		return
+	}
+	if s.viewportBackend != nil {
+		s.viewportBackend.Invalidate()
+	}
+	s.renderOwnedViewportLocked()
+}
+
+// Reconcile forces the owned viewport to a full-frame repaint on the next
+// write lock acquisition, repairing any divergence between the double-buffer
+// front frame and the physical terminal. It is the public hook for
+// reconciliation timings that live outside the surface (finalize, phase
+// transitions); surface-internal timings (resize, lease release, popup
+// close) already reconcile inline.
+func (s *FixedBottomSurface) Reconcile() {
+	if s == nil || !s.enabled || !s.ownedViewport {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	WithTerminalWriteLock(func() {
+		s.reconcileOwnedViewportLocked()
+		s.restoreStoredPromptCursorLocked()
+	})
 }
 
 type fixedBottomPaintRow struct {
