@@ -128,19 +128,8 @@ type FixedBottomSurface struct {
 	popupRenderedStartRow  int
 	popupReservedRows      int
 	// Legacy immediate-mode compensation remains available for capability
-	// fallback surfaces. RenderEngine owns the state machine; the four scalar
-	// fields below are compatibility mirrors for diagnostics and old tests.
-	legacyReserve         renderengine.LegacyReserveState
-	scrollCompensatedRows int
-	pendingScrollDownRows int
-	// outputCursorOnBlankRow is true when the last WriteOutput ended on a
-	// trailing newline, leaving the output-region cursor on an empty row.
-	// Band/popup growth must consume that blank instead of scrolling it into
-	// a permanent gap above the reserved bottom pane.
-	outputCursorOnBlankRow bool
-	// outputScrollDebtRows tracks a trailing blank absorbed by legacy reserve
-	// growth. It is paid before the next legacy output write.
-	outputScrollDebtRows int
+	// fallback surfaces, but RenderEngine owns its complete state and planning.
+	legacyReserve renderengine.LegacyReserveState
 	// historyWindow is the P5.2b/P5.3 owned-viewport foundation: the logical
 	// committed transcript lines (styled source) captured from every scrollback
 	// write. It is normally bounded to historyWindowMaxLines, but may temporarily
@@ -199,18 +188,6 @@ type PopupViewportSpec struct {
 	BodyLines   []string
 	FooterLines []string
 	Anchor      int
-}
-
-// syncLegacyReserveMirrorLocked keeps historical diagnostics/tests compatible
-// while LegacyReserveState remains the production source of truth.
-func (s *FixedBottomSurface) syncLegacyReserveMirrorLocked() {
-	if s == nil {
-		return
-	}
-	s.scrollCompensatedRows = s.legacyReserve.ScrollCompensatedRows
-	s.pendingScrollDownRows = s.legacyReserve.PendingScrollDownRows
-	s.outputScrollDebtRows = s.legacyReserve.OutputScrollDebtRows
-	s.outputCursorOnBlankRow = s.legacyReserve.CursorOnBlankRow
 }
 
 func (h PopupHandle) Valid() bool {
@@ -452,7 +429,6 @@ func (s *FixedBottomSurface) Disable() {
 	// path is not wrapped in a dangling synchronized update.
 	SetTerminalSynchronizedFrames(false)
 	s.legacyReserve = renderengine.LegacyReserveState{}
-	s.syncLegacyReserveMirrorLocked()
 	s.invalidateSoftOutputLocked()
 	s.resetOwnedHistoryLocked()
 }
@@ -838,7 +814,6 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 			s.appendHistoryWindowLocked(text)
 			n = len(output)
 			s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
-			s.syncLegacyReserveMirrorLocked()
 			if s.leaseID != 0 {
 				// Lease active: retain state only; the release repaint
 				// flushes the frame.
@@ -914,7 +889,6 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 				}
 				s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(written, "\n")
 			}
-			s.syncLegacyReserveMirrorLocked()
 		}
 		s.restoreStoredPromptCursorLocked()
 	})
@@ -934,7 +908,16 @@ func (s *FixedBottomSurface) shouldAppendDirectLocked() bool {
 	if height < 1 {
 		height = 24
 	}
-	return len(s.expandHistoryLinesLocked(s.historyWindow)) > s.directScrollRegionRowsLocked(height)
+	region := s.directScrollRegionRowsLocked(height)
+	// Logical lines never expand to fewer physical rows, so a window that
+	// already exceeds the scroll region in logical lines cannot fit in the
+	// visible area. Take this lower-bound fast path in steady state instead of
+	// expanding the full retained history on every streaming write (the
+	// subsequent stageOwnedFrameLocked expands it again for rendering).
+	if len(s.historyWindow) > region {
+		return true
+	}
+	return len(s.expandHistoryLinesLocked(s.historyWindow)) > region
 }
 
 // directScrollRegionRowsLocked returns the number of rows available for
@@ -1140,7 +1123,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		}
 		s.softOutput.Replace(normalized)
 		s.legacyReserve.CursorOnBlankRow = false
-		s.syncLegacyReserveMirrorLocked()
 		if s.leaseID != 0 {
 			// Retain the rewritten soft tail without touching the alternate
 			// screen. Release will repaint the latest owned frame.
@@ -1150,7 +1132,11 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			// A growing reflow may move older, non-soft rows beyond the visible
 			// output region. Hand them off before repainting; the preflight above
 			// guarantees the rewritten suffix itself remains mutable.
-			s.commitExcessHistoryToScrollbackLocked()
+			if s.commitExcessHistoryToScrollbackLocked() {
+				// The physical output region scrolled outside the double buffer;
+				// the following diffing Flush must start from a clean slate.
+				s.viewportBackend.Invalidate()
+			}
 			s.renderOwnedViewportLocked()
 			s.restoreStoredPromptCursorLocked()
 		})
@@ -1179,7 +1165,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			s.softOutput.Invalidate()
 			s.legacyReserve.CursorOnBlankRow = false
 			s.legacyReserve.OutputScrollDebtRows = 0
-			s.syncLegacyReserveMirrorLocked()
 			s.restoreStoredPromptCursorLocked()
 			rewritten = true
 			return
@@ -1205,7 +1190,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		s.softOutput.Replace(normalized)
 		s.legacyReserve.CursorOnBlankRow = true
 		s.legacyReserve.OutputScrollDebtRows = 0
-		s.syncLegacyReserveMirrorLocked()
 		s.markOutputWrittenLocked()
 		s.restoreStoredPromptCursorLocked()
 		rewritten = true
@@ -1373,6 +1357,17 @@ func (s *FixedBottomSurface) HistoryHandedOffForTest() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.handoffFrontier.Value()
+}
+
+// LegacyReserveStateForTest returns a copy of the render-engine-owned
+// compatibility fallback state without exposing mutable surface fields.
+func (s *FixedBottomSurface) LegacyReserveStateForTest() renderengine.LegacyReserveState {
+	if s == nil {
+		return renderengine.LegacyReserveState{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.legacyReserve
 }
 
 // visibleOutputRowsForTest exposes visibleOutputRowsLocked for tests.
@@ -1589,97 +1584,16 @@ func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.
 	if activeBandLinesEqual(s.activeBandLines, normalized) && render.LinesEqual(s.activeBandStyled, styled) {
 		return s.enabled
 	}
-	previousLines := s.activeBandLines
-	previousStyled := s.activeBandStyled
-	previousState := s.bottomPaneStateLocked()
-	previousRows := previousState.activeBandVisibleRowCount()
-	previousGapRows := previousState.activeBandTopGapRowCount()
-	if previousRows > 0 && s.lastHeight > 0 {
-		previousGapRows = activeBandTopGap(s.lastHeight)
-	}
-	previousStart := s.promptRenderedStartRow
 	s.activeBandLines = normalized
 	s.activeBandStyled = cloneRenderLines(styled)
 	s.reflowPromptViewportLocked()
-	if s.ownedViewport {
-		s.repaintActiveBandLocked()
-		return true
-	}
-	currentState := s.bottomPaneStateLocked()
-	currentRows := currentState.activeBandVisibleRowCount()
-	currentGapRows := currentState.activeBandTopGapRowCount()
-	if previousRows == currentRows && previousGapRows == currentGapRows {
-		if currentRows == 0 {
-			return s.enabled
-		}
-		if previousStart > 0 {
-			previousActiveStart := previousStart + previousGapRows
-			return s.repaintActiveBandDiffLocked(previousActiveStart, previousLines, previousStyled)
-		}
-	}
-	return s.repaintActiveBandLocked()
-}
-
-func (s *FixedBottomSurface) repaintActiveBandDiffLocked(start int, previousLines []string, previousStyled []render.Line) bool {
-	if !s.enabled || start < 1 {
-		return false
-	}
-	if s.leaseID != 0 {
-		return true
-	}
-	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
-	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		} else {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		themeContext := s.activeBandThemeContextLocked()
-		for i, plain := range s.activeBandLines {
-			if activeBandRowEqual(previousLines, previousStyled, s.activeBandLines, s.activeBandStyled, i) {
-				continue
-			}
-			s.renderActiveBandRowLocked(start+i, i, plain, themeContext)
-		}
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		} else {
-			s.moveToOutputLocked()
-		}
-	})
+	// The per-row prev diff is gone: both the owned and the legacy
+	// capability-fallback path repaint the full composed band. RenderEngine
+	// owns per-cell diffing; the surface must not reimplement row skipping.
+	// repaintActiveBandLocked may return false under an active lease (state is
+	// retained, rendering deferred); the update itself still succeeded.
+	s.repaintActiveBandLocked()
 	return true
-}
-
-func activeBandRowEqual(previousLines []string, previousStyled []render.Line, currentLines []string, currentStyled []render.Line, index int) bool {
-	if index >= len(previousLines) || index >= len(currentLines) || previousLines[index] != currentLines[index] {
-		return false
-	}
-	previousHasStyle := index < len(previousStyled)
-	currentHasStyle := index < len(currentStyled)
-	if previousHasStyle != currentHasStyle {
-		return false
-	}
-	if !previousHasStyle {
-		return true
-	}
-	return render.LinesEqual(previousStyled[index:index+1], currentStyled[index:index+1])
-}
-
-func (s *FixedBottomSurface) renderActiveBandRowLocked(row, index int, plain string, themeContext style.ThemeContext) {
-	if row < 1 {
-		return
-	}
-	s.terminal.MoveTo(row, 1)
-	s.terminal.ClearLine()
-	var styled *render.Line
-	if index < len(s.activeBandStyled) {
-		styled = &s.activeBandStyled[index]
-	}
-	if text := formatActiveBandPaintRow(plain, styled, s.terminal.Width(), themeContext); text != "" {
-		fmt.Print(text)
-	}
 }
 
 // RefreshActiveBand repaints the stored frame after a theme or terminal
@@ -1774,7 +1688,6 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		} else {
 			s.legacyReserve.CursorOnBlankRow = false
 		}
-		s.syncLegacyReserveMirrorLocked()
 		return s.repaintActiveBandLocked()
 	}
 
@@ -2930,7 +2843,6 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *st
 		return
 	}
 	transition := s.legacyReserve.ApplyGeometry(width, height, bottomRows, lastWidth, lastHeight, lastBottomRows)
-	s.syncLegacyReserveMirrorLocked()
 	if transition.ScrollUpOldBottomRows > 0 && transition.ScrollUpNewBottomRows > transition.ScrollUpOldBottomRows {
 		appendOutputScrollUpForBottomReserveGrowthSequence(
 			builder,
@@ -2982,7 +2894,6 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	if sizeChanged {
 		s.legacyReserve.CursorOnBlankRow = false
 	}
-	s.syncLegacyReserveMirrorLocked()
 	// Owned frames address absolute rows and must not inherit a narrower legacy
 	// DECSTBM region. Reset before the first/resize repaint so the status row and
 	// other bottom-pane rows are writable in the host terminal and vt.Screen.
@@ -3016,7 +2927,6 @@ func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *string
 	}
 	rows := s.legacyReserve.PendingScrollDownRows
 	s.legacyReserve.PendingScrollDownRows = 0
-	s.syncLegacyReserveMirrorLocked()
 	height := s.terminal.Height()
 	if height > 1 {
 		appendOutputScrollDownForBottomReserveShrinkSequence(builder, height, s.effectiveBottomRowsLocked(height), rows)
@@ -3042,14 +2952,12 @@ func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Build
 	}
 	rows := s.legacyReserve.OutputScrollDebtRows
 	s.legacyReserve.OutputScrollDebtRows = 0
-	s.syncLegacyReserveMirrorLocked()
 	height := s.terminal.Height()
 	if height <= 1 {
 		return
 	}
 	builder.WriteString(renderengine.LegacyReserveDebtANSI(height, s.effectiveBottomRowsLocked(height), rows))
 	s.legacyReserve.CursorOnBlankRow = true
-	s.syncLegacyReserveMirrorLocked()
 }
 
 func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
@@ -3072,7 +2980,6 @@ func (s *FixedBottomSurface) markOutputWrittenLocked() {
 		_, height = s.terminal.RefreshSize()
 	}
 	s.legacyReserve.MarkOutputWritten(s.effectiveBottomRowsLocked(height))
-	s.syncLegacyReserveMirrorLocked()
 }
 
 func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height, oldBottomRows, newBottomRows int) {
@@ -4196,17 +4103,24 @@ func (s *FixedBottomSurface) historySegmentIsSinglePhysicalRowsLocked(segment []
 // without CSI T. Soft-trims only rows already confirmed in native scrollback;
 // unsafe wrapped rows remain retained even when that temporarily exceeds the
 // normal memory bound.
-func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
+// commitExcessHistoryToScrollbackLocked hands off any history rows older than
+// the current visible output region into native scrollback (once) and reports
+// whether a handoff actually happened. A true result means the terminal's
+// output region scrolled; callers that then repaint through a diffing Flush
+// without CommitRange must Invalidate the viewport backend so the stale front
+// buffer cannot produce a wrong delta.
+func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() bool {
 	if s == nil || s.terminal == nil || len(s.historyWindow) == 0 {
-		return
+		return false
 	}
 	if s.leaseID != 0 {
 		// Alternate-screen lease active: primary flush is suspended and the
 		// leased alternate screen owns the output region. Native scrollback
 		// handoff bytes must not be emitted here; the release repaint replays
 		// retained state and commits pending history then.
-		return
+		return false
 	}
+	handedOff := false
 	visible := s.visibleOutputRowsLocked()
 	if visible < 1 {
 		visible = 1
@@ -4242,14 +4156,14 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 			// immediately re-renders the visible window from styled source.
 			handoff = s.expandHistorySegmentToPhysicalTextLocked(segment)
 			if len(handoff) == 0 {
-				return
+				return false
 			}
 		}
 		if !s.insertHistoryLinesLocked(handoff) {
 			// A failed terminal write must not advance the logical boundary:
 			// doing so would make these rows permanently disappear from future
 			// handoff attempts.
-			return
+			return false
 		}
 		s.handoffFrontier.AdvanceTo(needHandedOff, len(s.historyWindow))
 		if s.softOutput.Valid() && (!softSuffixOwned || s.handoffFrontier.Value() > softStart) {
@@ -4258,6 +4172,7 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 			// can replace already-emitted history with a different rendering.
 			s.invalidateSoftOutputLocked()
 		}
+		handedOff = true
 	}
 
 	// Soft-trim oldest rows past keepForRestore (already handed off when
@@ -4269,11 +4184,12 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 			drop = s.handoffFrontier.Value()
 		}
 		if drop <= 0 {
-			return
+			return handedOff
 		}
 		s.historyWindow = append([]string(nil), s.historyWindow[drop:]...)
 		s.handoffFrontier.TrimPrefix(drop, len(s.historyWindow))
 	}
+	return handedOff
 }
 
 // insertHistoryLinesLocked is the single primitive for moving history into
@@ -4307,12 +4223,6 @@ func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
 	plan := renderengine.NewHandoffPlan(height, outputBottom, rows)
 	if err := s.flushHandoffHoldingLock(os.Stdout, plan); err != nil {
 		return false
-	}
-
-	// Host scroll mutated physical rows outside Backend; Invalidate so the
-	// next Flush force-repaints instead of diffing against a stale front.
-	if s.viewportBackend != nil {
-		s.viewportBackend.Invalidate()
 	}
 	return true
 }

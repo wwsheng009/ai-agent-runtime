@@ -123,6 +123,32 @@ func TestFixedBottomSurface_OverflowHistoryHandsOffToScrollback(t *testing.T) {
 	}
 }
 
+// TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory pins that the
+// log-style append path (history exceeding the visible region) emits only the
+// handoff scroll plus the bottom-pane delta on each write, never a full-screen
+// repaint of the retained history rows. The previous behavior invalidated the
+// viewport backend inside insertHistoryLinesLocked on every handoff, which
+// forced the next Flush to re-emit every history row on every streaming write.
+func TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory(t *testing.T) {
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	// Exceed the visible output region so further writes take the direct-scroll
+	// append path (log-style natural scrolling) instead of full-frame recompose.
+	captureUIStdout(t, func() {
+		for i := 0; i < 30; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
+		}
+	})
+	output := captureUIStdout(t, func() {
+		surface.WriteOutput(io.Discard, "line-30\n")
+	})
+	if strings.Contains(output, "\x1b[1;1H") {
+		t.Fatalf("streaming append repainted history row 1 (full-screen redraw): %q", output)
+	}
+	if !strings.Contains(output, "line-30") {
+		t.Fatalf("new history row missing from append output: %q", output)
+	}
+}
+
 // TestFixedBottomSurface_OffScreenHistoryHandsOffBeforeHeadroom pins the live
 // bug: lines that leave the visible output region must enter native scrollback
 // immediately, even when total history is still within visible+headroom.

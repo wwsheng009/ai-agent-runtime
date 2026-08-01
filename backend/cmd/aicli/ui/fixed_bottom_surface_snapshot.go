@@ -306,7 +306,7 @@ func historyCellsToPlainText(cells []vt.Cell) string {
 
 func (s *FixedBottomSurface) historyRowsWithCursorBlankLocked() [][]vt.Cell {
 	rows := s.historyRowsSnapshotLocked()
-	if !s.outputCursorOnBlankRow {
+	if !s.legacyReserve.CursorOnBlankRow {
 		return rows
 	}
 	// The ActiveBand owns an explicit semantic separator from retained history.

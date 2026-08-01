@@ -758,8 +758,8 @@ func TestFixedBottomSurface_RemovingDynamicStatusReclaimsOutputRow(t *testing.T)
 	if !strings.Contains(output, terminalScrollDownSequence(1)) {
 		t.Fatalf("dynamic status release did not reclaim output row: %q", output)
 	}
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("dynamic status left pending compensation=%d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("dynamic status left pending compensation=%d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 }
 
@@ -856,7 +856,7 @@ func TestFixedBottomSurface_RefreshActiveBandRepaintsUnchangedStyledFrame(t *tes
 	}
 }
 
-func TestFixedBottomSurface_SetActiveBandRepaintsOnlyChangedRows(t *testing.T) {
+func TestFixedBottomSurface_SetActiveBandRepaintsFullBand(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	surface := newTestFixedBottomSurface()
@@ -865,17 +865,17 @@ func TestFixedBottomSurface_SetActiveBandRepaintsOnlyChangedRows(t *testing.T) {
 	})
 	output := captureUIStdout(t, func() {
 		if !surface.SetActiveBand([]string{"stable-header", "new-tail", "stable-footer"}) {
-			t.Fatal("expected differential active band update to succeed")
+			t.Fatal("expected active band update to succeed")
 		}
 	})
+	// The legacy per-row prev diff was deleted (stage E: RenderEngine owns
+	// per-cell diffing), so the fallback path repaints the full composed band:
+	// the changed row must be repainted and the stale row must not survive.
 	if !strings.Contains(output, "new-tail") {
 		t.Fatalf("changed active row was not repainted: %q", output)
 	}
-	if strings.Contains(output, "stable-header") || strings.Contains(output, "stable-footer") || strings.Contains(output, "old-tail") {
-		t.Fatalf("unchanged or stale active rows were unnecessarily repainted: %q", output)
-	}
-	if got := strings.Count(output, "\x1b[K"); got != 1 {
-		t.Fatalf("differential update cleared %d rows, want exactly one: %q", got, output)
+	if strings.Contains(output, "old-tail") {
+		t.Fatalf("stale active row survived the full repaint: %q", output)
 	}
 }
 
@@ -2067,8 +2067,8 @@ func TestFixedBottomSurface_ReleasedActiveBandScrollsOutputBackDown(t *testing.T
 	if want := terminalScrollDownSequence(4); !strings.Contains(output, want) {
 		t.Fatalf("expected freed band rows to scroll output down, got %q", output)
 	}
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("expected pending compensation to be flushed, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("expected pending compensation to be flushed, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 }
 
@@ -2121,7 +2121,7 @@ func TestFixedBottomSurface_TrailingOutputNewlineAbsorbedByBandGrowth(t *testing
 		if _, err, ok := surface.WriteOutput(os.Stdout, "prior transcript line\n"); !ok || err != nil {
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
-		if !surface.outputCursorOnBlankRow {
+		if !surface.LegacyReserveStateForTest().CursorOnBlankRow {
 			t.Fatal("expected trailing newline to mark output cursor on a blank row")
 		}
 	})
@@ -2135,7 +2135,7 @@ func TestFixedBottomSurface_TrailingOutputNewlineAbsorbedByBandGrowth(t *testing
 			t.Fatal("expected SetActiveBand")
 		}
 	})
-	if surface.outputCursorOnBlankRow {
+	if surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("band growth should consume the trailing blank marker")
 	}
 
@@ -2170,8 +2170,8 @@ func TestFixedBottomSurface_WriteOutputAfterClearPromptFlushesPendingForPromptRe
 			t.Fatal("expected prompt clear")
 		}
 	})
-	if surface.pendingScrollDownRows != 3 {
-		t.Fatalf("expected deferred shrink compensation after clear, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 3 {
+		t.Fatalf("expected deferred shrink compensation after clear, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	// BeginOutput alone must NOT flush — that is the bug path used by raw
@@ -2179,8 +2179,8 @@ func TestFixedBottomSurface_WriteOutputAfterClearPromptFlushesPendingForPromptRe
 	captureUIStdout(t, func() {
 		surface.BeginOutput()
 	})
-	if surface.pendingScrollDownRows != 3 {
-		t.Fatalf("BeginOutput must leave pending compensation intact, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 3 {
+		t.Fatalf("BeginOutput must leave pending compensation intact, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	written := captureUIStdout(t, func() {
@@ -2188,8 +2188,8 @@ func TestFixedBottomSurface_WriteOutputAfterClearPromptFlushesPendingForPromptRe
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
 	})
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("WriteOutput should flush pending shrink compensation, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("WriteOutput should flush pending shrink compensation, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 	if !strings.Contains(written, terminalScrollDownSequence(3)) {
 		t.Fatalf("expected deferred scroll-down flush before status text, got %q", written)
@@ -2217,8 +2217,8 @@ func TestFixedBottomSurface_WriteOutputAfterClearPromptFlushesPendingForPromptRe
 	if !strings.Contains(restored, "\x1b[22;1H> ") {
 		t.Fatalf("expected prompt to repaint on the reserved row, got %q", restored)
 	}
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("prompt restore should not reintroduce pending compensation, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("prompt restore should not reintroduce pending compensation, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 	if surface.lastBottomRows != 4 {
 		t.Fatalf("expected margins+prompt+status bottom reserve of 4, got %d", surface.lastBottomRows)
@@ -2242,17 +2242,17 @@ func TestFixedBottomSurface_SettleOutputDebtFlushesPendingWithoutContent(t *test
 		}
 		surface.BeginOutput()
 	})
-	if surface.pendingScrollDownRows != 3 {
-		t.Fatalf("expected deferred shrink compensation after clear, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 3 {
+		t.Fatalf("expected deferred shrink compensation after clear, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	settled := captureUIStdout(t, func() {
 		surface.SettleOutputDebt()
 	})
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("SettleOutputDebt should flush pending, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("SettleOutputDebt should flush pending, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
-	if surface.outputCursorOnBlankRow {
+	if surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("debt-less settle with no prior blank should leave blank-row flag false")
 	}
 	if !strings.Contains(settled, terminalScrollDownSequence(3)) {
@@ -2298,20 +2298,20 @@ func TestFixedBottomSurface_SettleOutputDebtRestoresBlankAfterAbsorbDebt(t *test
 			t.Fatal("expected active band")
 		}
 	})
-	if surface.outputScrollDebtRows != 1 {
-		t.Fatalf("expected one absorbed row before settle, got %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 1 {
+		t.Fatalf("expected one absorbed row before settle, got %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
-	if surface.outputCursorOnBlankRow {
+	if surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("band growth should have consumed the trailing blank marker")
 	}
 
 	settled := captureUIStdout(t, func() {
 		surface.SettleOutputDebt()
 	})
-	if surface.outputScrollDebtRows != 0 {
-		t.Fatalf("settle should pay absorb debt, got %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 0 {
+		t.Fatalf("settle should pay absorb debt, got %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
-	if !surface.outputCursorOnBlankRow {
+	if !surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("paying absorb debt must leave the region bottom blank")
 	}
 	bottom := outputBottomRowForHeight(height, surface.effectiveBottomRowsLocked(height))
@@ -2343,20 +2343,20 @@ func TestFixedBottomSurface_SettleOutputDebtPreservesTrailingBlank(t *testing.T)
 			t.Fatal("expected clear to defer shrink while blank is parked")
 		}
 	})
-	if !surface.outputCursorOnBlankRow {
+	if !surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("expected blank-row flag true before debt-less settle: ClearPrompt must not clear a parked blank")
 	}
-	if surface.pendingScrollDownRows < 1 {
-		t.Fatalf("expected deferred shrink after ClearPrompt, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows < 1 {
+		t.Fatalf("expected deferred shrink after ClearPrompt, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	captureUIStdout(t, func() {
 		surface.SettleOutputDebt()
 	})
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("settle should flush pending shrink, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("settle should flush pending shrink, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
-	if !surface.outputCursorOnBlankRow {
+	if !surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("debt-less settle must preserve the trailing blank flag")
 	}
 }
@@ -2379,7 +2379,7 @@ func TestFixedBottomSurface_AbsorbedBlankRowIsScrolledNotOverwritten(t *testing.
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
 	})
-	if !surface.outputCursorOnBlankRow {
+	if !surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("trailing newline should park the cursor on a blank row")
 	}
 
@@ -2388,8 +2388,8 @@ func TestFixedBottomSurface_AbsorbedBlankRowIsScrolledNotOverwritten(t *testing.
 			t.Fatal("expected active band")
 		}
 	})
-	if surface.outputScrollDebtRows != 1 {
-		t.Fatalf("band growth should record one absorbed row, got %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 1 {
+		t.Fatalf("band growth should record one absorbed row, got %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
 
 	next := captureUIStdout(t, func() {
@@ -2397,8 +2397,8 @@ func TestFixedBottomSurface_AbsorbedBlankRowIsScrolledNotOverwritten(t *testing.
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
 	})
-	if surface.outputScrollDebtRows != 0 {
-		t.Fatalf("write should settle the absorb debt, got %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 0 {
+		t.Fatalf("write should settle the absorb debt, got %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
 	bottom := outputBottomRowForHeight(height, surface.effectiveBottomRowsLocked(height))
 	repay := terminalMoveToSequence(bottom, 1) + "\n"
@@ -2443,10 +2443,10 @@ func TestFixedBottomSurface_ShrinkKeepsTrailingBlankAbsorbable(t *testing.T) {
 			t.Fatal("expected band clear")
 		}
 	})
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("band release should flush its own compensation, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("band release should flush its own compensation, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
-	if !surface.outputCursorOnBlankRow {
+	if !surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("shrink must keep the transcript trailing blank row absorbable")
 	}
 
@@ -2457,8 +2457,8 @@ func TestFixedBottomSurface_ShrinkKeepsTrailingBlankAbsorbable(t *testing.T) {
 			t.Fatal("expected prompt restore")
 		}
 	})
-	if surface.outputScrollDebtRows != 1 {
-		t.Fatalf("prompt restore should absorb the trailing blank once, got debt %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 1 {
+		t.Fatalf("prompt restore should absorb the trailing blank once, got debt %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
 }
 
@@ -2479,8 +2479,8 @@ func TestFixedBottomSurface_BeginOutputRawWriteLeavesPendingAndPromptRestoreCanc
 		surface.BeginOutput()
 		_, _ = fmt.Fprint(os.Stdout, "╭ top\n╰ bottom-should-be-clipped\n")
 	})
-	if surface.pendingScrollDownRows != 3 {
-		t.Fatalf("raw write path should still have pending shrink compensation, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 3 {
+		t.Fatalf("raw write path should still have pending shrink compensation, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	restored := captureUIStdout(t, func() {
@@ -2491,9 +2491,9 @@ func TestFixedBottomSurface_BeginOutputRawWriteLeavesPendingAndPromptRestoreCanc
 	if strings.Contains(restored, "\x1b[23;1H\n") {
 		t.Fatalf("bug-path prompt restore should cancel growth scroll, got %q", restored)
 	}
-	if surface.pendingScrollDownRows != 0 {
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
 		// Growth canceled against pending; pending should be consumed.
-		t.Fatalf("expected pending to be consumed by canceled growth, got %d", surface.pendingScrollDownRows)
+		t.Fatalf("expected pending to be consumed by canceled growth, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 }
 
@@ -2515,8 +2515,8 @@ func TestFixedBottomSurface_ClosedPopupScrollCompensationFlushesOnNextOutput(t *
 	if strings.Contains(closed, terminalScrollDownSequence(2)) {
 		t.Fatalf("expected popup close to defer scroll compensation, got %q", closed)
 	}
-	if surface.pendingScrollDownRows < 1 {
-		t.Fatalf("expected pending scroll compensation after popup close, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows < 1 {
+		t.Fatalf("expected pending scroll compensation after popup close, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	next := captureUIStdout(t, func() {
@@ -2527,8 +2527,8 @@ func TestFixedBottomSurface_ClosedPopupScrollCompensationFlushesOnNextOutput(t *
 	if !strings.Contains(next, terminalScrollDownSequence(2)) {
 		t.Fatalf("expected deferred compensation to flush before the next output, got %q", next)
 	}
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("expected pending compensation to reset, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("expected pending compensation to reset, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 }
 
@@ -2544,8 +2544,8 @@ func TestFixedBottomSurface_TerminalSizeChangeDropsPendingScrollCompensation(t *
 		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
 		surface.ClearPopupForOwnerPreserveCursor("command_popup")
 	})
-	if surface.pendingScrollDownRows < 1 {
-		t.Fatalf("expected pending compensation before resize, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows < 1 {
+		t.Fatalf("expected pending compensation before resize, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 
 	// A layout applied for a different terminal size invalidates the deferred
@@ -2559,8 +2559,8 @@ func TestFixedBottomSurface_TerminalSizeChangeDropsPendingScrollCompensation(t *
 	if strings.Contains(next, terminalScrollDownSequence(2)) {
 		t.Fatalf("expected resize to drop stale compensation, got %q", next)
 	}
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("expected pending compensation to reset on resize, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("expected pending compensation to reset on resize, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 }
 
@@ -2585,13 +2585,13 @@ func TestFixedBottomSurface_TerminalSizeChangeDropsAbsorbedRowDebt(t *testing.T)
 			t.Fatal("expected active band")
 		}
 	})
-	if surface.outputScrollDebtRows != 1 {
-		t.Fatalf("expected one absorbed row before resize, got %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 1 {
+		t.Fatalf("expected one absorbed row before resize, got %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
 	// Guard against a vacuous assertion: a deferred shrink would block the
 	// repayment on its own, so the debt must be the only outstanding item.
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("expected no deferred shrink before resize, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("expected no deferred shrink before resize, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 	repay := terminalMoveToSequence(outputBottomRowForHeight(height, surface.effectiveBottomRowsLocked(height)), 1) + "\n"
 
@@ -2605,8 +2605,8 @@ func TestFixedBottomSurface_TerminalSizeChangeDropsAbsorbedRowDebt(t *testing.T)
 	if strings.Contains(next, repay) {
 		t.Fatalf("expected resize to drop the stale absorb debt, got %q", next)
 	}
-	if surface.outputScrollDebtRows != 0 {
-		t.Fatalf("expected absorb debt to reset on resize, got %d", surface.outputScrollDebtRows)
+	if surface.LegacyReserveStateForTest().OutputScrollDebtRows != 0 {
+		t.Fatalf("expected absorb debt to reset on resize, got %d", surface.LegacyReserveStateForTest().OutputScrollDebtRows)
 	}
 }
 

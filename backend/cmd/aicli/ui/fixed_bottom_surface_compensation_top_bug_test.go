@@ -85,8 +85,8 @@ func TestOwnedSettleOutputDebtIsPureRecompose(t *testing.T) {
 		}
 		surface.BeginOutput()
 	})
-	if surface.pendingScrollDownRows != 0 {
-		t.Fatalf("owned SettleOutputDebt must not accumulate pending compensation, got %d", surface.pendingScrollDownRows)
+	if surface.LegacyReserveStateForTest().PendingScrollDownRows != 0 {
+		t.Fatalf("owned SettleOutputDebt must not accumulate pending compensation, got %d", surface.LegacyReserveStateForTest().PendingScrollDownRows)
 	}
 	settled := captureUIStdout(t, func() {
 		surface.SettleOutputDebt()
@@ -96,7 +96,7 @@ func TestOwnedSettleOutputDebtIsPureRecompose(t *testing.T) {
 		strings.Contains(settled, terminalScrollDownSequence(3)) {
 		t.Fatalf("owned SettleOutputDebt must not emit scroll-down compensation: %q", settled)
 	}
-	if surface.outputCursorOnBlankRow {
+	if surface.LegacyReserveStateForTest().CursorOnBlankRow {
 		t.Fatal("owned settle must not set blank-row flag")
 	}
 }

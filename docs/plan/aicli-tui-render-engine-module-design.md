@@ -2,7 +2,35 @@
 
 状态：**in progress（A-D 已有增量实现；阶段 E 与 Scene 终局仍未完成）**
 
-更新时间：**2026-08-01**
+更新时间：**2026-08-02**
+
+### 实施审计注记（2026-08-02）
+
+- **阶段 E 继续收口：legacy prev diff 已删除。** `setActiveBand` 中调用
+  `repaintActiveBandDiffLocked` 的 per-row prev 对比（`activeBandRowEqual`、
+  `renderActiveBandRowLocked`）已按 §6 表 #5 删除；legacy capability-fallback
+  路径与 owned 路径一致改为全量 `repaintActiveBandLocked`（`renderengine` 负责
+  per-cell diff），surface 不再自行实现行跳过。原
+  `TestFixedBottomSurface_SetActiveBandRepaintsOnlyChangedRows` 改写为
+  `…RepaintsFullBand`（断言变化行重绘、stale 行消失，不再断言"只重绘变化行"）。
+- **残余直写审计：owned 路径 `fmt.Print` 为零。** `renderStatusLocked`/
+  `renderPopupLocked`/`renderPromptRowsLocked`/`clearActiveBand` 的 4 处
+  `fmt.Print` 行级直写全部位于 `!ownedViewport` 分支（owned 早期返回
+  `renderOwnedViewportLocked`），仅 capability fallback 可达；`insertHistoryLinesLocked`/
+  `commitExcessHistoryToScrollbackLocked` 已全部经 `HandoffPlan`+Presenter
+  单批次输出。阶段 E 验收"owned 路径 fmt.Print/os.Stdout 为 0"已满足；
+  legacy 分支的删除仍待 capability fallback 收敛。
+- **流式输出重复渲染修复。** 根因：`insertHistoryLinesLocked` 每次 handoff 后
+  无条件 `viewportBackend.Invalidate()`，而流式输出稳态（历史 > 可见区）每次
+  `WriteOutput` 都会 handoff，导致 `appendOwnedDirectPaintLocked` 的
+  `CommitRange` 同步失效、`Flush` 走 forceRepaint 全量重绘全部历史行。
+  修复：物理滚动原语不再失效前端（滚动后 append 路径自行 CommitRange 同步，
+  语义自洽）；`RewriteSoftOutputTail` 在 handoff 确实滚动物理区时显式
+  `Invalidate`（diff 基准错位）；几何路径保留原有 `sizeChanged||bottomChanged`
+  失效。另将 `shouldAppendDirectLocked` 改为逻辑行下界快速路径（物理行数恒 ≥
+  逻辑行数），稳态流式写不再重复展开全部 retained history。
+  新增 `TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory` 回归
+  （加回旧行为时该测试失败，验证有效）。
 
 ### 实施审计注记（2026-08-01）
 
@@ -525,14 +553,18 @@ const (
 
 ### 阶段 E：删除补偿状态机与旧入口（终结补丁模式）
 
-- **状态：进行中（2026-08-01）。** `Engine.HandoffFrontier()` 已落地并由
+- **状态：进行中（2026-08-02）。** `Engine.HandoffFrontier()` 已落地并由
   owned surface 共享，handoff 边界不再是裸 `historyHandedOff` 整数；
   `SoftOutputState` 已迁入 `renderengine`，`HandoffPlan`/Presenter 已统一
   scrollback handoff 的 cursor-save、DECSTBM、内容写入和 cursor-restore 为单批次
   输出；`LegacyReserveState` 已接管 reserve 几何变化的状态源与纯状态转移，
   `LegacyReserve*ANSI` 已接管 growth/shrink/debt 字节计划；legacy layout、pending
   和 debt 序列现也经 Presenter 单批次输出。surface 仅同步历史字段供 capability
-  fallback 测试/诊断使用。其余 facade 入口仍需在 capability fallback 收敛后删除。
+  fallback 测试/诊断使用。2026-08-02 已删除 `repaintActiveBandDiffLocked` 的
+  prev 对比（`activeBandRowEqual`/`renderActiveBandRowLocked`），legacy 路径与
+  owned 路径一致走全量 repaint；残余 4 处 `fmt.Print` 行级直写经审计全部位于
+  `!ownedViewport` 分支（owned 早期返回 `renderOwnedViewportLocked`），owned
+  路径直写为零。其余 facade 入口仍需在 capability fallback 收敛后删除。
 - 删除 §6 表中标注"删除"的全部方法/字段：补偿状态机、`insertHistoryLinesLocked` 直写、`repaintActiveBandDiffLocked` 的 prev 逻辑、soft output 状态机、4 个 timer、`FixedBottomSurface` 的渲染方法（facade 只剩 Enable/Disable/Lease 委托）；
 - P0 审计基线（155 组/552 call site）随迁移逐项从基线删除，最终 `tui_unowned_terminal_write_total` 归零；
 - **验收**：`FixedBottomSurface` 体积从 129KB 降到薄 facade；全文搜索 `fmt.Print`/`os.Stdout` 在 owned 路径为 0（plain/json renderer 除外）。
