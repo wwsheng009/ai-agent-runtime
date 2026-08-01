@@ -58,9 +58,13 @@ type chatRuntimeEventBridge struct {
 	runActive                       bool
 	runEpoch                        uint64
 	activeTurnID                    string
+	executorTurnID                  string
 	activeAssistantStreamID         string
 	assistantStreams                map[string]*chatAssistantStreamState
 	retiredAssistantStreams         map[string]struct{}
+	retiredTurnIDs                  map[string]struct{}
+	retiredTurnOrder                []string
+	acceptedAssistantFinalTurns     map[string]struct{}
 	finalAssistantTurns             map[string]struct{}
 	nextRunPrompt                   string
 	activeRunPrompt                 string
@@ -130,6 +134,7 @@ const chatRuntimeEndRunDrainTimeout = 8 * time.Second
 const chatRuntimeInterruptedEndRunDrainTimeout = 250 * time.Millisecond
 const chatAssistantStreamPendingLimit = 128
 const chatAssistantStreamPendingByteLimit int64 = 1 << 20
+const chatRetiredTurnLimit = 64
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	if session == nil {
@@ -397,9 +402,14 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.runActive = true
 	b.runEpoch++
 	b.activeTurnID = ""
+	b.executorTurnID = ""
 	b.activeAssistantStreamID = ""
 	b.assistantStreams = make(map[string]*chatAssistantStreamState)
 	b.retiredAssistantStreams = make(map[string]struct{})
+	if b.retiredTurnIDs == nil {
+		b.retiredTurnIDs = make(map[string]struct{})
+	}
+	b.acceptedAssistantFinalTurns = make(map[string]struct{})
 	b.finalAssistantTurns = make(map[string]struct{})
 	b.renderMu.Unlock()
 	b.logMu.Lock()
@@ -430,6 +440,9 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	b.WaitForCurrentEvents(b.endRunDrainTimeout())
 	b.logRunEndFallback()
 	b.renderMu.Lock()
+	if b.activeTurnID != "" {
+		b.retireTurnLocked(b.activeTurnID)
+	}
 	b.runActive = false
 	b.renderMu.Unlock()
 	if b.session != nil && b.session.TitleNotifier != nil {
@@ -450,6 +463,27 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	flushChatSessionLog(b.session)
 	b.writePromptIfIdle()
+}
+
+func (b *chatRuntimeEventBridge) retireTurnLocked(turnID string) {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return
+	}
+	if b.retiredTurnIDs == nil {
+		b.retiredTurnIDs = make(map[string]struct{})
+	}
+	if _, exists := b.retiredTurnIDs[turnID]; exists {
+		return
+	}
+	b.retiredTurnIDs[turnID] = struct{}{}
+	b.retiredTurnOrder = append(b.retiredTurnOrder, turnID)
+	if len(b.retiredTurnOrder) <= chatRetiredTurnLimit {
+		return
+	}
+	oldest := b.retiredTurnOrder[0]
+	b.retiredTurnOrder = append([]string(nil), b.retiredTurnOrder[1:]...)
+	delete(b.retiredTurnIDs, oldest)
 }
 
 func (b *chatRuntimeEventBridge) endRunDrainTimeout() time.Duration {
@@ -548,9 +582,26 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 	currentEpoch := b.runEpoch
 	b.renderMu.Unlock()
 	if queued.epoch != currentEpoch {
+		b.logLateRuntimeEvent(queued.event, "stale local run epoch")
 		return
 	}
 	b.handleEvent(queued.event)
+}
+
+func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, reason string) {
+	if b == nil || b.session == nil {
+		return
+	}
+	if b.session.ExecEventBridge != nil {
+		b.session.ExecEventBridge.HandleRuntimeEvent(event)
+	}
+	payload, _ := json.Marshal(event.Payload)
+	writeSessionDebugInfo(
+		b.session,
+		fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q payload=%s",
+			reason, event.Type, event.SessionID, event.TraceID, payload),
+		false,
+	)
 }
 
 func (b *chatRuntimeEventBridge) reserveEventQueueBytes(size int64) {
@@ -1000,11 +1051,10 @@ func runtimeEventToolName(event runtimeevents.Event) string {
 
 func runtimeToolTimelinePayload(event runtimeevents.Event) map[string]interface{} {
 	toolName := runtimeEventToolName(event)
-	if strings.TrimSpace(toolName) == "" || strings.TrimSpace(payloadStringValue(event.Payload["tool_name"])) != "" {
-		return event.Payload
-	}
 	payload := cloneRuntimeEventLogPayload(event.Payload)
-	payload["tool_name"] = toolName
+	if strings.TrimSpace(toolName) != "" && strings.TrimSpace(payloadStringValue(payload["tool_name"])) == "" {
+		payload["tool_name"] = toolName
+	}
 	return payload
 }
 
@@ -1043,7 +1093,8 @@ func (b *chatRuntimeEventBridge) enrichTimelineEvent(event runtimeevents.Event) 
 		return event
 	}
 	switch event.Type {
-	case runtimechat.EventToolStarted, "tool.requested", runtimechat.EventToolFinished, "tool.completed":
+	case runtimechat.EventToolStarted, "tool.requested",
+		runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
 	default:
 		return event
 	}
@@ -1063,7 +1114,7 @@ func (b *chatRuntimeEventBridge) enrichTimelineEvent(event runtimeevents.Event) 
 			b.toolCallStartedAt[toolCallKey] = timestamp
 			b.renderMu.Unlock()
 		}
-	case runtimechat.EventToolFinished, "tool.completed":
+	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
 		if toolCallKey != "" && intPayloadValue(payload, "duration_ms") <= 0 && !timestamp.IsZero() {
 			var startedAt time.Time
 			b.renderMu.Lock()
@@ -1087,10 +1138,23 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b == nil || b.session == nil {
 		return
 	}
+	b.observePrimaryRunTurn(event)
+	// Logging is append-only observability and may retain stale events. All
+	// mutable UI/transcript paths below remain guarded by turn ownership.
+	b.handleStructuredLogEvent(event)
+	if b.shouldSuppressMismatchedPrimaryTurnEvent(event) {
+		payload, _ := json.Marshal(event.Payload)
+		writeSessionDebugInfo(
+			b.session,
+			fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q payload=%s",
+				"event turn does not match active run", event.Type, event.SessionID, event.TraceID, payload),
+			false,
+		)
+		return
+	}
 	if b.session.ExecEventBridge != nil {
 		b.session.ExecEventBridge.HandleRuntimeEvent(event)
 	}
-	b.handleStructuredLogEvent(event)
 	b.applyLLMRequestStatus(event)
 	b.applySessionCompactStatus(event)
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
@@ -1137,6 +1201,21 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	if rendered.DebugOnly && !isSessionDebugModeEnabled(b.session) {
 		rendered = chatRuntimeTimelineEvent{}
+	}
+	if isRuntimeToolRequestedEventType(event.Type) &&
+		b.isPrimarySessionEvent(event) &&
+		rendered.Line != "" &&
+		shouldRenderInteractiveOutput(b.session) &&
+		b.session.Interaction != nil {
+		b.session.Interaction.SetToolAgentStageDisplay(
+			payloadStringValue(event.Payload["tool_call_id"]),
+			runtimeEventToolName(event),
+			rendered.Line,
+		)
+		// Running belongs exclusively to ActiveBand. The matching final event
+		// remains the single durable history cell.
+		rendered = chatRuntimeTimelineEvent{}
+		renderedSomething = true
 	}
 	if rendered.Line != "" && shouldRenderInteractiveOutput(b.session) && b.shouldRenderTimelineEvent(rendered) {
 		b.emitTimelineEvent(rendered)
@@ -1217,6 +1296,58 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 }
 
+func (b *chatRuntimeEventBridge) observePrimaryRunTurn(event runtimeevents.Event) {
+	if b == nil || event.Type != runtimechat.EventSessionStart || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	if turnID == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if !b.runActive {
+		return
+	}
+	if b.retiredTurnIDs == nil {
+		b.retiredTurnIDs = make(map[string]struct{})
+	}
+	if _, retired := b.retiredTurnIDs[turnID]; retired {
+		return
+	}
+	if b.activeTurnID == "" {
+		b.activeTurnID = turnID
+	}
+}
+
+func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event runtimeevents.Event) bool {
+	if b == nil || !b.isPrimarySessionEvent(event) {
+		return false
+	}
+	// Team/task/mailbox events have their own durable team/task/message
+	// identities and may legitimately arrive after the initiating chat turn.
+	if isTeamLifecycleRuntimeEvent(event.Type) || event.Type == runtimechat.EventMailboxReceived {
+		return false
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	// Once the actor has identified the current run, an identityless primary
+	// event cannot prove ownership. Keep it in runtime logs, but never let it
+	// mutate that run's viewport or transcript. Outside an identified run,
+	// retain compatibility with legacy status events and persisted fixtures.
+	if turnID == "" {
+		return b.runActive && b.activeTurnID != ""
+	}
+	if !b.runActive {
+		return true
+	}
+	if _, retired := b.retiredTurnIDs[turnID]; retired {
+		return true
+	}
+	return b.activeTurnID == "" || b.activeTurnID != turnID
+}
+
 func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event runtimeevents.Event) {
 	if b == nil || b.session == nil || b.session.Interaction == nil || !b.isRunActive() || !b.isPrimarySessionEvent(event) {
 		return
@@ -1251,7 +1382,7 @@ func (b *chatRuntimeEventBridge) updateChatTitleForRuntimeEvent(event runtimeeve
 	case runtimechat.EventToolStarted, "tool.requested":
 		key := runtimeToolCallTimelineKey(event, runtimeToolTimelinePayload(event))
 		b.session.TitleNotifier.SetToolRunning(key, true)
-	case runtimechat.EventToolFinished, "tool.completed":
+	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
 		key := runtimeToolCallTimelineKey(event, runtimeToolTimelinePayload(event))
 		b.session.TitleNotifier.SetToolRunning(key, false)
 	case runtimechat.EventSessionEnd:
@@ -1808,24 +1939,166 @@ func (b *chatRuntimeEventBridge) handleAssistantDelta(event runtimeevents.Event)
 	if b == nil || b.session == nil || event.Type != runtimechat.EventAssistantDelta {
 		return false
 	}
-	if b.HasRenderedAssistantFinal() {
+	ordered, handled := b.orderAssistantDelta(event)
+	if handled && len(ordered) == 0 {
 		return true
 	}
+	if !handled {
+		ordered = []runtimeevents.Event{event}
+	}
+	for _, orderedEvent := range ordered {
+		b.renderAssistantDelta(orderedEvent)
+	}
+	return true
+}
+
+func (b *chatRuntimeEventBridge) renderAssistantDelta(event runtimeevents.Event) {
+	if b.HasRenderedAssistantFinal() {
+		return
+	}
 	if !shouldRenderInteractiveOutput(b.session) || !b.isPrimarySessionEvent(event) {
-		return false
+		return
 	}
 	delta, _ := event.Payload["delta"].(string)
 	if delta == "" {
 		delta, _ = event.Payload["content"].(string)
 	}
 	if delta == "" {
-		return false
+		return
 	}
 	b.markAssistantDeltaRendered(delta)
 	if b.writeDelta != nil {
 		b.writeDelta(delta)
 	}
-	return true
+}
+
+// orderAssistantDelta enforces append-stream ordering before bytes reach the
+// terminal. Events without the new identity fields retain the legacy path so
+// older providers and persisted test fixtures remain compatible.
+func (b *chatRuntimeEventBridge) orderAssistantDelta(event runtimeevents.Event) ([]runtimeevents.Event, bool) {
+	turnID, streamID := assistantEventIdentity(event)
+	sequence, hasSequence := assistantEventSequence(event)
+	if turnID == "" || streamID == "" || !hasSequence || sequence == 0 {
+		return nil, false
+	}
+
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.assistantStreams == nil {
+		b.assistantStreams = make(map[string]*chatAssistantStreamState)
+	}
+	if b.retiredAssistantStreams == nil {
+		b.retiredAssistantStreams = make(map[string]struct{})
+	}
+	if b.retiredTurnIDs == nil {
+		b.retiredTurnIDs = make(map[string]struct{})
+	}
+	if !b.acceptAssistantTurnLocked(turnID) {
+		return nil, true
+	}
+	if _, retired := b.retiredAssistantStreams[streamID]; retired {
+		return nil, true
+	}
+	if b.activeAssistantStreamID != "" && b.activeAssistantStreamID != streamID {
+		b.retiredAssistantStreams[b.activeAssistantStreamID] = struct{}{}
+		delete(b.assistantStreams, b.activeAssistantStreamID)
+	}
+	b.activeAssistantStreamID = streamID
+	state := b.assistantStreams[streamID]
+	if state == nil {
+		state = &chatAssistantStreamState{
+			turnID:       turnID,
+			streamID:     streamID,
+			nextSequence: 1,
+			pending:      make(map[uint64]runtimeevents.Event),
+		}
+		b.assistantStreams[streamID] = state
+	}
+	if state.turnID != turnID || state.tainted || sequence < state.nextSequence {
+		return nil, true
+	}
+	if sequence > state.nextSequence {
+		if _, exists := state.pending[sequence]; exists {
+			return nil, true
+		}
+		size := runtimeevents.ApproximateEventBytes(event)
+		if len(state.pending) >= chatAssistantStreamPendingLimit || size > chatAssistantStreamPendingByteLimit-state.pendingBytes {
+			state.pending = make(map[uint64]runtimeevents.Event)
+			state.pendingBytes = 0
+			state.tainted = true
+			return nil, true
+		}
+		state.pending[sequence] = event
+		state.pendingBytes += size
+		return nil, true
+	}
+
+	ordered := make([]runtimeevents.Event, 0, 1)
+	ordered = append(ordered, event)
+	state.nextSequence++
+	for {
+		pending, ok := state.pending[state.nextSequence]
+		if !ok {
+			break
+		}
+		delete(state.pending, state.nextSequence)
+		state.pendingBytes -= runtimeevents.ApproximateEventBytes(pending)
+		if state.pendingBytes < 0 {
+			state.pendingBytes = 0
+		}
+		ordered = append(ordered, pending)
+		state.nextSequence++
+	}
+	return ordered, true
+}
+
+func assistantEventIdentity(event runtimeevents.Event) (turnID, streamID string) {
+	if event.Payload == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(payloadStringValue(event.Payload["turn_id"])), strings.TrimSpace(payloadStringValue(event.Payload["stream_id"]))
+}
+
+func assistantEventSequence(event runtimeevents.Event) (uint64, bool) {
+	if event.Payload == nil {
+		return 0, false
+	}
+	switch value := event.Payload["sequence"].(type) {
+	case uint64:
+		return value, true
+	case uint:
+		return uint64(value), true
+	case int:
+		if value < 0 {
+			return 0, true
+		}
+		return uint64(value), true
+	case int64:
+		if value < 0 {
+			return 0, true
+		}
+		return uint64(value), true
+	case float64:
+		if value < 0 {
+			return 0, true
+		}
+		return uint64(value), true
+	case json.Number:
+		parsed, err := strconv.ParseUint(string(value), 10, 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func (b *chatRuntimeEventBridge) acceptAssistantTurnLocked(turnID string) bool {
+	if turnID == "" {
+		return true
+	}
+	if _, retired := b.retiredTurnIDs[turnID]; retired {
+		return false
+	}
+	return b.activeTurnID != "" && b.activeTurnID == turnID
 }
 
 func (b *chatRuntimeEventBridge) finalizeAssistantDelta(event runtimeevents.Event) bool {
@@ -1856,6 +2129,9 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 	if b.HasRenderedAssistantFinal() {
 		return b.handleAsyncTeamAssistantMessage(event)
 	}
+	if !b.acceptAssistantFinal(event) {
+		return true
+	}
 	if block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"]); block != nil {
 		b.renderReasoningFromAssistantMessage(event, block)
 	}
@@ -1868,6 +2144,7 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 		content, _ := event.Payload["content"].(string)
 		if strings.TrimSpace(content) != "" && b.completeDelta != nil && b.completeDelta(content) {
 			b.markAssistantFinalRendered(content)
+			b.commitAssistantFinal(event)
 			return true
 		}
 		if strings.TrimSpace(content) != "" && b.hasFinalizedAssistantDelta() {
@@ -1876,9 +2153,14 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 				b.renderResponse(content)
 			}
 			b.markAssistantFinalRendered(content)
+			b.commitAssistantFinal(event)
 			return true
 		}
-		return b.finalizeAssistantDelta(event) || renderedSummary
+		rendered := b.finalizeAssistantDelta(event)
+		if rendered && b.HasRenderedAssistantFinal() {
+			b.commitAssistantFinal(event)
+		}
+		return rendered || renderedSummary
 	}
 	content, _ := event.Payload["content"].(string)
 	if strings.TrimSpace(content) == "" {
@@ -1889,7 +2171,75 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 		b.renderResponse(content)
 	}
 	b.markAssistantFinalRendered(content)
+	b.commitAssistantFinal(event)
 	return true
+}
+
+// acceptAssistantFinal makes turn identity, not response text, the authority
+// for exactly-once final commit. The final snapshot supersedes any buffered
+// out-of-order deltas for its stream.
+func (b *chatRuntimeEventBridge) acceptAssistantFinal(event runtimeevents.Event) bool {
+	turnID, streamID := assistantEventIdentity(event)
+	if turnID == "" {
+		return true
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.retiredTurnIDs == nil {
+		b.retiredTurnIDs = make(map[string]struct{})
+	}
+	if b.acceptedAssistantFinalTurns == nil {
+		b.acceptedAssistantFinalTurns = make(map[string]struct{})
+	}
+	if b.assistantStreams == nil {
+		b.assistantStreams = make(map[string]*chatAssistantStreamState)
+	}
+	if !b.acceptAssistantTurnLocked(turnID) {
+		return false
+	}
+	if _, accepted := b.acceptedAssistantFinalTurns[turnID]; accepted {
+		return false
+	}
+	if streamID != "" {
+		if b.retiredAssistantStreams == nil {
+			b.retiredAssistantStreams = make(map[string]struct{})
+		}
+		if _, retired := b.retiredAssistantStreams[streamID]; retired {
+			return false
+		}
+		if b.activeAssistantStreamID != "" && b.activeAssistantStreamID != streamID {
+			b.retiredAssistantStreams[b.activeAssistantStreamID] = struct{}{}
+			delete(b.assistantStreams, b.activeAssistantStreamID)
+		}
+		b.activeAssistantStreamID = streamID
+		b.retiredAssistantStreams[streamID] = struct{}{}
+		if state := b.assistantStreams[streamID]; state != nil {
+			state.pending = make(map[uint64]runtimeevents.Event)
+			state.pendingBytes = 0
+			delete(b.assistantStreams, streamID)
+		}
+	}
+	b.acceptedAssistantFinalTurns[turnID] = struct{}{}
+	return true
+}
+
+// commitAssistantFinal records durable final ownership only after the terminal
+// renderer has successfully committed the authoritative snapshot. Acceptance
+// alone must not suppress the executor fallback.
+func (b *chatRuntimeEventBridge) commitAssistantFinal(event runtimeevents.Event) {
+	if b == nil {
+		return
+	}
+	turnID, _ := assistantEventIdentity(event)
+	if turnID == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.finalAssistantTurns == nil {
+		b.finalAssistantTurns = make(map[string]struct{})
+	}
+	b.finalAssistantTurns[turnID] = struct{}{}
 }
 
 func (b *chatRuntimeEventBridge) handleAsyncTeamAssistantMessage(event runtimeevents.Event) bool {
@@ -2377,11 +2727,57 @@ func (b *chatRuntimeEventBridge) MarkAssistantFinalRendered() {
 }
 
 func (b *chatRuntimeEventBridge) MarkAssistantFinalResponseRendered(content string) {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	if turnID := strings.TrimSpace(b.executorTurnID); turnID != "" {
+		if b.finalAssistantTurns == nil {
+			b.finalAssistantTurns = make(map[string]struct{})
+		}
+		b.finalAssistantTurns[turnID] = struct{}{}
+	}
+	b.renderMu.Unlock()
 	b.markAssistantFinalRendered(content)
 }
 
 func (b *chatRuntimeEventBridge) HasRenderedAssistantFinalResponse(content string) bool {
+	if b.HasCommittedExecutorTurnFinal() {
+		return true
+	}
 	return b.hasRenderedAssistantContent(content)
+}
+
+// BindExecutorTurn associates the string returned by the actor executor with
+// the same durable turn ID carried by assistant_message.
+func (b *chatRuntimeEventBridge) BindExecutorTurn(turnID string) {
+	if b == nil {
+		return
+	}
+	turnID = strings.TrimSpace(turnID)
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.executorTurnID = turnID
+	if turnID == "" || b.activeTurnID != "" || !b.runActive {
+		return
+	}
+	if _, retired := b.retiredTurnIDs[turnID]; !retired {
+		b.activeTurnID = turnID
+	}
+}
+
+func (b *chatRuntimeEventBridge) HasCommittedExecutorTurnFinal() bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	turnID := strings.TrimSpace(b.executorTurnID)
+	if turnID == "" {
+		return false
+	}
+	_, committed := b.finalAssistantTurns[turnID]
+	return committed
 }
 
 func (b *chatRuntimeEventBridge) hasRenderedReasoningDelta() bool {
@@ -2596,20 +2992,24 @@ func documentedChatRuntimeTimelineEvent(doc render.Document, dedupKey string) ch
 	}
 }
 
-func chatToolCompletedTimelineEvent(line string) chatRuntimeTimelineEvent {
+func chatToolCompletedTimelineEvent(line string, dedupKeys ...string) chatRuntimeTimelineEvent {
 	line = strings.TrimRight(strings.ReplaceAll(line, "\r\n", "\n"), "\n")
 	if strings.TrimSpace(line) == "" {
 		return chatRuntimeTimelineEvent{}
 	}
+	dedupKey := ""
+	if len(dedupKeys) > 0 {
+		dedupKey = strings.TrimSpace(dedupKeys[0])
+	}
 	// Edited and read-only Diff supplements have a dedicated structured renderer.
 	// Keep this compatibility envelope until the tool result carries FileDiff.
 	if len(uidiff.ParseSupplementBlocks(line)) > 0 {
-		return chatRuntimeTimelineEvent{Line: line}
+		return chatRuntimeTimelineEvent{Line: line, DedupKey: dedupKey}
 	}
 	lines := strings.Split(line, "\n")
 	title := strings.TrimPrefix(lines[0], "• ")
 	if title == lines[0] {
-		return chatRuntimeTimelineEvent{Line: line}
+		return chatRuntimeTimelineEvent{Line: line, DedupKey: dedupKey}
 	}
 	status := cell.StatusSuccess
 	if strings.HasPrefix(title, "Failed ") {
@@ -2622,7 +3022,11 @@ func chatToolCompletedTimelineEvent(line string) chatRuntimeTimelineEvent {
 		SuppressKindPrefix: true,
 		Title:              title,
 		Details:            lines[1:],
-	}, "")
+	}, dedupKey)
+}
+
+func isRuntimeToolRequestedEventType(eventType string) bool {
+	return eventType == "tool.requested" || eventType == runtimechat.EventToolStarted
 }
 
 func (b *chatRuntimeEventBridge) emitTimelineEvent(rendered chatRuntimeTimelineEvent) {
@@ -2688,7 +3092,7 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Tag:    "[subagent]",
 			Title:  fmt.Sprintf("denied %s", payloadStringValue(event.Payload["reason"])),
 		}, "")
-	case "tool.requested":
+	case "tool.requested", runtimechat.EventToolStarted:
 		payload := runtimeToolTimelinePayload(event)
 		display := compactToolDisplayTextWithSource(
 			firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])),
@@ -2708,15 +3112,23 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Title:              "Running " + display,
 			Details:            compactToolContextLines(payload),
 		}, "")
-	case "tool.completed":
+	case "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled", runtimechat.EventToolFinished:
 		payload := runtimeToolTimelinePayload(event)
+		if (event.Type == "tool.failed" || event.Type == "tool.cancelled" || event.Type == "tool.canceled") &&
+			strings.TrimSpace(payloadStringValue(payload["error"])) == "" {
+			payload["error"] = firstNonEmptyChatValue(payloadStringValue(payload["reason"]), event.Type)
+		}
 		line := renderCompactToolCompletedWithPayload(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])), "", payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), payloadStringValue(payload[toolresult.SourceKey]), chatToolSummaryLines(payload), payload)
 		rendered := []string{line}
 		if waitingLine := chatToolPostCommandHint(payload); waitingLine != "" {
 			rendered = append(rendered, waitingLine)
 		}
 		line = strings.Join(rendered, "\n")
-		return chatToolCompletedTimelineEvent(line)
+		dedupKey := runtimeToolCallTimelineKey(event, payload)
+		if dedupKey != "" {
+			dedupKey = "tool-final:" + dedupKey
+		}
+		return chatToolCompletedTimelineEvent(line, dedupKey)
 	case "tool.denied":
 		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
 			Kind:    cell.TimelineTool,

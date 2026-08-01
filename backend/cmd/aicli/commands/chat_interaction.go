@@ -102,6 +102,8 @@ type chatInteractionCoordinator struct {
 	statusModelsCached            bool
 	activeTools                   map[string]chatActiveTool
 	activeToolSequence            uint64
+	commandCellSequence           uint64
+	lastCommandCellID             string
 
 	// assistantTurnTranscript is the source-backed authoritative record for the
 	// current assistant turn. It is kept separate from the mutable streamBuffer
@@ -3010,6 +3012,31 @@ func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
 		newAsyncDocumentCell(doc),
 		c.gapForEventBlock(),
 	)
+}
+
+// RenderCommandDocument commits one structured command result as one retained
+// cell. It deliberately has no raw-output fallback: after structured dispatch
+// matches a command, the interaction coordinator remains the only terminal
+// writer for the owned lifecycle.
+func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) bool {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return false
+	}
+	if strings.TrimSpace(ui.RenderDocumentPlain(doc)) == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.beginMessageLocked() {
+		return false
+	}
+	c.commandCellSequence++
+	c.lastCommandCellID = fmt.Sprintf("command:%d", c.commandCellSequence)
+	c.commitHistoryCellLocked(
+		newCommandResultCell(c.lastCommandCellID, c.commandCellSequence, doc),
+		c.gapForEventBlock(),
+	)
+	return true
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {

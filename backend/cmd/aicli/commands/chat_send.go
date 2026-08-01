@@ -108,10 +108,14 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 		return
 	}
 	clearChatTurnRecovery(session)
-	handledByStreamFinalize := finalizeInteractiveActorStreamIfNeeded(session, response)
-	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session, response) {
+	alreadyRendered := wasInteractiveActorResponseAlreadyRendered(session, response)
+	handledByStreamFinalize := false
+	if !alreadyRendered {
+		handledByStreamFinalize = finalizeInteractiveActorStreamIfNeeded(session, response)
+	}
+	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !alreadyRendered {
 		renderChatResponse(session, response)
-	} else if session.Stream && !noInteractive && !handledByStreamFinalize {
+	} else if session.Stream && !noInteractive && !handledByStreamFinalize && !alreadyRendered {
 		// Route the trailing blank through the surface so ClearPrompt shrink
 		// debt is flushed here instead of attaching to the next content write.
 		printDirectInteractiveOutput(session, "\n")

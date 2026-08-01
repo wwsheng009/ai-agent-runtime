@@ -22,6 +22,7 @@ const (
 	historyCellSupplement
 	historyCellReasoning
 	historyCellHeader
+	historyCellCommand
 )
 
 // historyCell is the retained-source view of one transcript block. It is the Go
@@ -155,6 +156,25 @@ func newAsyncDocumentCell(doc render.Document) asyncDocumentCell {
 func (asyncDocumentCell) Kind() historyCellKind { return historyCellTool }
 
 func (c asyncDocumentCell) DisplayLines(width int) []string {
+	return widthAwareDisplayLines(ui.RenderDocumentANSI(c.doc), width)
+}
+
+// commandResultCell is the retained projection of one structured local command.
+// Its identity is allocated once by the coordinator; all RenderBlocks from the
+// command are already merged into doc, so one command produces one atomic cell.
+type commandResultCell struct {
+	id       string
+	sequence uint64
+	doc      render.Document
+}
+
+func newCommandResultCell(id string, sequence uint64, doc render.Document) commandResultCell {
+	return commandResultCell{id: id, sequence: sequence, doc: doc}
+}
+
+func (commandResultCell) Kind() historyCellKind { return historyCellCommand }
+
+func (c commandResultCell) DisplayLines(width int) []string {
 	return widthAwareDisplayLines(ui.RenderDocumentANSI(c.doc), width)
 }
 

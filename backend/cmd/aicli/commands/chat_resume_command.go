@@ -181,20 +181,23 @@ func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		return nil, nil
 	}
 
-	surfaceEnabled := session != nil && session.Surface != nil && session.Surface.Enabled()
+	var lease ui.ScreenLease
+	if session != nil && session.Surface != nil && session.Surface.Enabled() {
+		// Suspend the primary presenter while the picker owns the alternate
+		// screen so status ticks / prompt repaints cannot interleave into it.
+		// Unlike the old Disable()/Enable() dance this preserves retained
+		// history and repaints from the retained scene on release.
+		lease, _ = session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+			Title: "恢复历史会话",
+		})
+	}
 	if session != nil && session.Interaction != nil {
 		session.Interaction.ClearPrompt()
 		session.Interaction.ResetPromptState()
 	}
-	// Owned path: disable the legacy immediate-mode picker (which resets historyWindow)
-	// so resume doesn't clear committed transcript before replay. Re-enable only if
-	// truly legacy.
-	if surfaceEnabled && !session.Surface.OwnedViewport() {
-		session.Surface.Disable()
-	}
 	defer func() {
-		if surfaceEnabled && !session.Surface.OwnedViewport() {
-			session.Surface.Enable()
+		if lease != nil {
+			_ = lease.Release(context.Background())
 		}
 		if session != nil && session.Interaction != nil {
 			session.Interaction.ResetPromptState()
@@ -208,13 +211,13 @@ func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal
 			selectableCount++
 		}
 	}
-	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "恢复历史会话",
 		Subtitle:     formatResumePickerSubtitle(selectableCount, current != nil),
 		EmptyMessage: "没有匹配的历史会话",
 		ConfirmLabel: "恢复选中会话",
 		Items:        items,
-	})
+	}, lease)
 	if err != nil {
 		return nil, err
 	}

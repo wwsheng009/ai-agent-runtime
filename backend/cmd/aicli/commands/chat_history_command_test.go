@@ -119,5 +119,11 @@ func renderHistoryCommandTranscript(t *testing.T, session *ChatSession, command 
 
 func normalizeHistoryCommandTranscriptHeader(output string) string {
 	output = strings.Replace(output, "对话历史", "<history-header>", 1)
-	return strings.Replace(output, "已加载历史会话", "<history-header>", 1)
+	output = strings.Replace(output, "已加载历史会话", "<history-header>", 1)
+	// Structured /load commits a confirmation cell before the replay; drop the
+	// prefix so the comparison covers only the replayed transcript cells.
+	if at := strings.Index(output, "<history-header>"); at > 0 {
+		output = output[at:]
+	}
+	return output
 }

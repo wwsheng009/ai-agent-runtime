@@ -117,6 +117,150 @@ func TestChatToolCompletedTimelineEventUsesTypedDocument(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var history bytes.Buffer
+	interaction.SetWriter(&history)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	interaction.SetSurface(surface)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+
+	requested := runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		ToolName:  "shell",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"command_text": "go test ./...",
+			"tool_source":  "meta",
+		},
+	}
+	bridge.handleEvent(requested)
+	require.NotContains(t, history.String(), "Running")
+	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.progress",
+		SessionID: "lead-session",
+		ToolName:  "shell",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"message":      "package 2/3",
+		},
+	})
+	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
+
+	completed := runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: "lead-session",
+		ToolName:  "shell",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"command_text": "go test ./...",
+			"tool_source":  "meta",
+			"summary_lines": []string{
+				"ok",
+			},
+		},
+	}
+	bridge.handleEvent(completed)
+	bridge.handleEvent(completed)
+	require.NotContains(t, strings.Join(surface.ActiveBandLines(), "\n"), "Running")
+	require.Equal(t, 1, strings.Count(history.String(), "• Completed [meta] go test ./..."))
+
+	failedRequested := requested
+	failedRequested.TraceID = "trace-2"
+	failedRequested.Payload = map[string]interface{}{
+		"turn_id":      "turn-1",
+		"tool_call_id": "call-2",
+		"command_text": "go test ./failed",
+		"tool_source":  "meta",
+	}
+	bridge.handleEvent(failedRequested)
+	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./failed")
+
+	failed := runtimeevents.Event{
+		Type:      "tool.failed",
+		SessionID: "lead-session",
+		ToolName:  "shell",
+		TraceID:   "trace-2",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-2",
+			"command_text": "go test ./failed",
+			"tool_source":  "meta",
+			"reason":       "exit status 1",
+		},
+	}
+	bridge.handleEvent(failed)
+	bridge.handleEvent(failed)
+	require.NotContains(t, strings.Join(surface.ActiveBandLines(), "\n"), "Running")
+	require.Equal(t, 1, strings.Count(history.String(), "• Failed [meta] go test ./failed"))
+}
+
+func TestChatRuntimeEvents_FailedFinalDoesNotSuppressExecutorFallback(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.completeDelta = func(string) bool { return false }
+	bridge.finalizeDelta = func() {}
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"turn_id":   "turn-1",
+			"stream_id": "stream-1",
+			"sequence":  uint64(1),
+			"mode":      "append",
+			"delta":     "partial",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"turn_id":   "turn-1",
+			"stream_id": "stream-1",
+			"sequence":  uint64(2),
+			"mode":      "snapshot",
+			"content":   "authoritative final",
+		},
+	})
+	bridge.BindExecutorTurn("turn-1")
+
+	require.False(t, bridge.HasRenderedAssistantFinal())
+	require.False(t, bridge.HasCommittedExecutorTurnFinal())
+	require.False(t, bridge.HasRenderedAssistantFinalResponse("authoritative final"))
+}
+
 func TestChatReasoningTimelineEventCarriesDocument(t *testing.T) {
 	rendered := chatReasoningTimelineEvent("trace-1", "1", &runtimetypes.ReasoningBlock{
 		Summary:    "inspect the renderer",
@@ -3425,6 +3569,213 @@ func TestChatRuntimeEvents_PreservesWhitespaceInAssistantDelta(t *testing.T) {
 	if len(deltas) != 1 || deltas[0] != " world" {
 		t.Fatalf("expected delta whitespace to be preserved, got %v", deltas)
 	}
+}
+
+func TestChatRuntimeEvents_OrdersAndDeduplicatesIdentifiedAssistantDeltas(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var deltas []string
+	bridge.writeDelta = func(delta string) {
+		deltas = append(deltas, delta)
+	}
+	event := func(sequence uint64, delta string) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "lead-session",
+			Payload: map[string]interface{}{
+				"turn_id":   "turn-1",
+				"stream_id": "stream-1",
+				"sequence":  sequence,
+				"mode":      "append",
+				"delta":     delta,
+			},
+		}
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	bridge.handleEvent(event(2, "B"))
+	require.Empty(t, deltas)
+	bridge.handleEvent(event(1, "A"))
+	bridge.handleEvent(event(2, "duplicate"))
+	bridge.handleEvent(event(3, "C"))
+
+	require.Equal(t, []string{"A", "B", "C"}, deltas)
+}
+
+func TestChatRuntimeEvents_LateOldTurnDeltaCannotRenderInNewRun(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var deltas []string
+	bridge.writeDelta = func(delta string) {
+		deltas = append(deltas, delta)
+	}
+	start := func(turnID string) {
+		bridge.handleEvent(runtimeevents.Event{
+			Type:      runtimechat.EventSessionStart,
+			SessionID: "lead-session",
+			Payload:   map[string]interface{}{"turn_id": turnID},
+		})
+	}
+	delta := func(turnID, streamID, content string) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "lead-session",
+			Payload: map[string]interface{}{
+				"turn_id": turnID, "stream_id": streamID,
+				"sequence": uint64(1), "mode": "append", "delta": content,
+			},
+		}
+	}
+
+	bridge.BeginRun()
+	start("turn-old")
+	bridge.handleEvent(delta("turn-old", "stream-old", "old-before-end"))
+	bridge.EndRun()
+
+	bridge.BeginRun()
+	start("turn-new")
+	bridge.handleEvent(delta("turn-old", "stream-old-late", "must-not-render"))
+	bridge.handleEvent(delta("turn-new", "stream-new", "new"))
+
+	require.Equal(t, []string{"old-before-end", "new"}, deltas)
+}
+
+func TestChatRuntimeEvents_IdentitylessPrimaryEventCannotMutateIdentifiedRun(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	t.Cleanup(session.Interaction.Shutdown)
+	bridge := newChatRuntimeEventBridge(session)
+	questionCalls := 0
+	bridge.askQuestion = func(string, []string, bool) (string, error) {
+		questionCalls++
+		return "must not be used", nil
+	}
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-current"},
+	})
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		ToolName:  "stale_tool",
+		Payload:   map[string]interface{}{"tool_call_id": "old-call"},
+	})
+	require.NotEqual(t, chatAgentStageToolRunning, session.Interaction.AgentStage())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		ToolName:  "current_tool",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-current",
+			"tool_call_id": "current-call",
+		},
+	})
+	require.Equal(t, chatAgentStageToolRunning, session.Interaction.AgentStage())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"turn_id":     "turn-old",
+			"question_id": "old-question",
+			"prompt":      "must not prompt",
+			"required":    true,
+		},
+	})
+	require.Zero(t, questionCalls)
+}
+
+func TestChatRuntimeEvents_FinalCommitUsesTurnIdentityNotContentDigest(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.renderResponse = func(content string) {
+		rendered = append(rendered, content)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1",
+			"sequence": uint64(1), "mode": "snapshot", "content": "runtime final",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1",
+			"sequence": uint64(1), "mode": "snapshot", "content": "duplicate final with different content",
+		},
+	})
+	bridge.BindExecutorTurn("turn-1")
+
+	require.Equal(t, []string{"runtime final"}, rendered)
+	require.True(t, bridge.HasRenderedAssistantFinalResponse("executor result differs slightly"))
+}
+
+func TestFinishSuccessfulChatSend_DoesNotCommitDifferentExecutorTextForFinalizedTurn(t *testing.T) {
+	session := &ChatSession{
+		ChatExecutor:   newAICLIActorChatExecutor(),
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	var rendered []string
+	bridge.renderResponse = func(content string) {
+		rendered = append(rendered, content)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1",
+			"sequence": uint64(1), "mode": "snapshot", "content": "runtime final",
+		},
+	})
+	bridge.BindExecutorTurn("turn-1")
+	bridge.EndRun()
+
+	output := captureStdout(t, func() {
+		finishSuccessfulChatSend(session, "executor result differs slightly", false)
+	})
+	require.Equal(t, []string{"runtime final"}, rendered)
+	require.NotContains(t, output, "executor result differs slightly")
 }
 
 func TestChatRuntimeEvents_WaitForCurrentEventsDrainsQueuedAssistantDelta(t *testing.T) {

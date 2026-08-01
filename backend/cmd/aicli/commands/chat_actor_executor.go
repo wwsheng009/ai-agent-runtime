@@ -110,6 +110,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if result == nil {
 		return "", nil
 	}
+	if bridge := session.RuntimeEventBridge; bridge != nil {
+		bridge.BindExecutorTurn(result.TurnID)
+	}
 	renderAsyncTeamLaunchNotice(session, previousTeamID)
 	response := resolveActorExecutorResponse(result.Output, session, previousAssistant)
 	if response == "" {
@@ -197,6 +200,9 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
 	if result == nil {
 		return "", nil
+	}
+	if bridge := session.RuntimeEventBridge; bridge != nil {
+		bridge.BindExecutorTurn(result.TurnID)
 	}
 	renderAsyncTeamLaunchNotice(session, previousTeamID)
 	response := resolveActorExecutorResponse(result.Output, session, previousAssistant)

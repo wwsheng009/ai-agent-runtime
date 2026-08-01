@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -16,6 +17,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 )
 
 func TestTryExecuteStructuredChatCommandDebugDisplay(t *testing.T) {
@@ -180,12 +183,374 @@ func TestDispatchChatCommandDebugDisplaySurvivesOwnedViewportRepaints(t *testing
 	}
 }
 
+func TestTryExecuteStructuredChatCommandGoal(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+
+	for _, command := range []string{"/goal", "/goal status"} {
+		result, handled, err := tryExecuteStructuredChatCommand(session, command)
+		if err != nil || !handled {
+			t.Fatalf("%s structured match=(%t, %v), want handled", command, handled, err)
+		}
+		if result.SendObjective != "" {
+			t.Fatalf("%s unexpectedly set SendObjective %q", command, result.SendObjective)
+		}
+		plain := ui.RenderDocumentPlain(result.Document())
+		if !strings.Contains(plain, "当前会话未设置 goal") {
+			t.Fatalf("%s document missing empty-goal marker:\n%s", command, plain)
+		}
+	}
+
+	for _, command := range []string{"/goal --json", "/goal status --json", "/goal ship it --json"} {
+		if _, handled, err := tryExecuteStructuredChatCommand(session, command); err != nil || handled {
+			t.Fatalf("%s structured match=(%t, %v), want legacy", command, handled, err)
+		}
+	}
+
+	for _, command := range []string{"/goal clear", "/goal pause", "/goal resume", "/goal complete", "/goal ship it"} {
+		if _, handled, err := tryExecuteStructuredChatCommand(session, command); err != nil || handled {
+			t.Fatalf("%s without persistence structured match=(%t, %v), want legacy", command, handled, err)
+		}
+	}
+
+	persistent, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+
+	result, handled, err := tryExecuteStructuredChatCommand(persistent, "/goal implement structured output")
+	if err != nil || !handled {
+		t.Fatalf("/goal set structured match=(%t, %v), want handled", handled, err)
+	}
+	if result.SendObjective != "implement structured output" {
+		t.Fatalf("/goal set SendObjective=%q, want the objective", result.SendObjective)
+	}
+	plain := ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(plain, "Goal 已设置") || !strings.Contains(plain, "implement structured output") {
+		t.Fatalf("/goal set document missing confirmation or objective:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(persistent, "/goal pause")
+	if err != nil || !handled {
+		t.Fatalf("/goal pause structured match=(%t, %v), want handled", handled, err)
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "Goal 已暂停") {
+		t.Fatalf("/goal pause document missing confirmation:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+	assertGoalStatus(t, persistent, runtimegoal.StatusPaused)
+
+	result, handled, err = tryExecuteStructuredChatCommand(persistent, "/goal complete")
+	if err != nil || !handled {
+		t.Fatalf("/goal complete structured match=(%t, %v), want handled", handled, err)
+	}
+	assertGoalStatus(t, persistent, runtimegoal.StatusComplete)
+
+	if _, handled, err := tryExecuteStructuredChatCommand(persistent, "/goal resume"); err != nil || handled {
+		t.Fatalf("/goal resume after complete structured match=(%t, %v), want legacy rejection", handled, err)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(persistent, "/goal")
+	if err != nil || !handled {
+		t.Fatalf("/goal status after mutations structured match=(%t, %v), want handled", handled, err)
+	}
+	plain = ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(plain, "Goal:") || !strings.Contains(plain, "implement structured output") {
+		t.Fatalf("/goal status document missing goal summary:\n%s", plain)
+	}
+}
+
+func TestTryExecuteStructuredChatCommandMemory(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	root := t.TempDir()
+	session := &ChatSession{
+		ProfileRoot: root,
+		RuntimeSession: &runtimechat.Session{
+			ID: "memory-cmd-test",
+		},
+	}
+
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/memory status")
+	if err != nil || !handled {
+		t.Fatalf("/memory status structured match=(%t, %v), want handled", handled, err)
+	}
+	plain := ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(plain, "项目记忆 root=") || !strings.Contains(plain, "total=0") {
+		t.Fatalf("/memory status document missing root/total:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/memory add Prefer worktree isolation for parallel agents")
+	if err != nil || !handled {
+		t.Fatalf("/memory add structured match=(%t, %v), want handled", handled, err)
+	}
+	plain = ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(plain, "已写入项目记忆") || !strings.Contains(plain, "worktree isolation") {
+		t.Fatalf("/memory add document missing confirmation:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/memory list 5")
+	if err != nil || !handled {
+		t.Fatalf("/memory list structured match=(%t, %v), want handled", handled, err)
+	}
+	plain = ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(plain, "最近 1 条项目记忆") || !strings.Contains(plain, "worktree isolation") {
+		t.Fatalf("/memory list document missing note:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/memory search worktree")
+	if err != nil || !handled {
+		t.Fatalf("/memory search structured match=(%t, %v), want handled", handled, err)
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "worktree") {
+		t.Fatalf("/memory search document missing hit:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+
+	emptyRoot := t.TempDir()
+	emptySession := &ChatSession{
+		ProfileRoot: emptyRoot,
+		RuntimeSession: &runtimechat.Session{
+			ID: "memory-cmd-test-empty",
+		},
+	}
+	result, handled, err = tryExecuteStructuredChatCommand(emptySession, "/memory search anything")
+	if err != nil || !handled {
+		t.Fatalf("/memory search no-hit structured match=(%t, %v), want handled", handled, err)
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "未找到") {
+		t.Fatalf("/memory search no-hit document missing message:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+
+	for _, command := range []string{"/memory add", "/memory search", "/memory bogus"} {
+		if _, handled, err := tryExecuteStructuredChatCommand(session, command); err != nil || handled {
+			t.Fatalf("%s structured match=(%t, %v), want legacy usage", command, handled, err)
+		}
+	}
+	if _, handled, err := tryExecuteStructuredChatCommand(nil, "/memory status"); err != nil || handled {
+		t.Fatalf("nil-session /memory status structured match=(%t, %v), want legacy", handled, err)
+	}
+}
+
+func TestTryExecuteStructuredChatCommandStream(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/stream status")
+	if err != nil || !handled {
+		t.Fatalf("/stream status structured match=(%t, %v), want handled", handled, err)
+	}
+	plain := ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(plain, "当前输出模式: 普通 (normal)") || !strings.Contains(plain, "配置默认: (未设置)") {
+		t.Fatalf("/stream status document missing mode lines:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/stream on")
+	if err != nil || !handled {
+		t.Fatalf("/stream on structured match=(%t, %v), want handled", handled, err)
+	}
+	if !session.Stream {
+		t.Fatal("/stream on did not set session.Stream")
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "已切换到流式模式") {
+		t.Fatalf("/stream on document missing confirmation:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/stream")
+	if err != nil || !handled {
+		t.Fatalf("/stream toggle structured match=(%t, %v), want handled", handled, err)
+	}
+	if session.Stream {
+		t.Fatal("/stream toggle did not flip session.Stream back off")
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "已切换到普通模式") {
+		t.Fatalf("/stream toggle document missing confirmation:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+
+	if _, handled, err := tryExecuteStructuredChatCommand(session, "/stream bogus"); err != nil || handled {
+		t.Fatalf("/stream bogus structured match=(%t, %v), want legacy", handled, err)
+	}
+	if _, handled, err := tryExecuteStructuredChatCommand(nil, "/stream status"); err != nil || handled {
+		t.Fatalf("nil-session /stream status structured match=(%t, %v), want legacy", handled, err)
+	}
+}
+
+func TestDispatchChatCommandGoalDoesNotWriteRawStdout(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	var retained bytes.Buffer
+	coord.SetWriter(&retained)
+	raw := captureStdout(t, func() {
+		if dispatchChatCommand(session, "/goal status", false) {
+			t.Fatal("/goal status unexpectedly requested chat exit")
+		}
+	})
+	if raw != "" {
+		t.Fatalf("structured /goal status wrote raw stdout:\n%q", raw)
+	}
+	if coord.commandCellSequence != 1 {
+		t.Fatalf("structured /goal status committed %d cells, want 1", coord.commandCellSequence)
+	}
+	if count := strings.Count(retained.String(), "当前会话未设置 goal"); count != 1 {
+		t.Fatalf("goal marker count=%d want 1:\n%s", count, retained.String())
+	}
+}
+
+func TestDispatchChatCommandGoalSetCommitsCellThenSendsObjective(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	executor := &fakeChatExecutor{output: "llm accepted goal request"}
+	session.ChatExecutor = executor
+	session.cancelCtx = context.Background()
+
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	var retained bytes.Buffer
+	coord.SetWriter(&retained)
+
+	if dispatchChatCommand(session, "/goal implement request dispatch", false) {
+		t.Fatal("/goal set unexpectedly requested chat exit")
+	}
+	if !executor.called {
+		t.Fatal("expected /goal <objective> to send objective to executor")
+	}
+	if executor.prompt != "implement request dispatch" {
+		t.Fatalf("expected objective prompt, got %q", executor.prompt)
+	}
+	if coord.commandCellSequence != 1 {
+		t.Fatalf("structured /goal set committed %d cells, want 1", coord.commandCellSequence)
+	}
+	if !strings.Contains(retained.String(), "Goal 已设置") {
+		t.Fatalf("confirmation cell missing:\n%s", retained.String())
+	}
+}
+
+func TestDispatchChatCommandMemoryDoesNotWriteRawStdout(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	root := t.TempDir()
+	session := &ChatSession{
+		ProfileRoot: root,
+		RuntimeSession: &runtimechat.Session{
+			ID: "memory-cmd-test",
+		},
+	}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	var retained bytes.Buffer
+	coord.SetWriter(&retained)
+	raw := captureStdout(t, func() {
+		if dispatchChatCommand(session, "/memory add Prefer worktree isolation for parallel agents", false) {
+			t.Fatal("/memory add unexpectedly requested chat exit")
+		}
+	})
+	if raw != "" {
+		t.Fatalf("structured /memory add wrote raw stdout:\n%q", raw)
+	}
+	if coord.commandCellSequence != 1 {
+		t.Fatalf("structured /memory add committed %d cells, want 1", coord.commandCellSequence)
+	}
+	if count := strings.Count(retained.String(), "已写入项目记忆"); count != 1 {
+		t.Fatalf("memory add marker count=%d want 1:\n%s", count, retained.String())
+	}
+}
+
+func TestDispatchChatCommandStreamDoesNotWriteRawStdout(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	var retained bytes.Buffer
+	coord.SetWriter(&retained)
+	raw := captureStdout(t, func() {
+		if dispatchChatCommand(session, "/stream status", false) {
+			t.Fatal("/stream status unexpectedly requested chat exit")
+		}
+	})
+	if raw != "" {
+		t.Fatalf("structured /stream status wrote raw stdout:\n%q", raw)
+	}
+	if coord.commandCellSequence != 1 {
+		t.Fatalf("structured /stream status committed %d cells, want 1", coord.commandCellSequence)
+	}
+	if count := strings.Count(retained.String(), "当前输出模式:"); count != 1 {
+		t.Fatalf("stream marker count=%d want 1:\n%s", count, retained.String())
+	}
+}
+
+func TestDispatchChatCommandStreamSurvivesOwnedViewportRepaints(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	const width, height = 100, 120
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	session := &ChatSession{
+		Surface: surface,
+	}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	coord.SetSurface(surface)
+	screen := newScreenVT(width, height)
+	feed := func(paint func()) {
+		t.Helper()
+		screen.feed(captureSurfaceStdout(t, func() {
+			coord.SetWriter(os.Stdout)
+			paint()
+		}))
+	}
+
+	feed(func() {
+		coord.PrintPrompt()
+	})
+	feed(func() {
+		if dispatchChatCommand(session, "/stream status", false) {
+			t.Fatal("/stream status unexpectedly requested chat exit")
+		}
+	})
+	assertSingleStreamCommandMarker(t, "initial command frame", surface, screen)
+
+	feed(func() {
+		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, nil)
+		surface.ShowPrompt("> ")
+	})
+	assertSingleStreamCommandMarker(t, "status and prompt repaint", surface, screen)
+
+	feed(func() {
+		surface.SetActiveBand([]string{"• Running structured command check", "  retained active row"})
+	})
+	assertSingleStreamCommandMarker(t, "active band growth", surface, screen)
+
+	feed(func() {
+		surface.ClearActiveBand()
+	})
+	assertSingleStreamCommandMarker(t, "active band shrink", surface, screen)
+
+	surface.EnableForTest(88, height)
+	if frame := commandResultFrameText(surface); strings.Count(frame, "当前输出模式:") != 1 {
+		t.Fatalf("resize recompose lost or duplicated stream command marker:\n%s", frame)
+	}
+}
+
 func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	for _, name := range []string{"chat_command_result.go", "chat_debug_document.go"} {
+	for _, name := range []string{
+		"chat_command_result.go",
+		"chat_debug_document.go",
+		"chat_status_document.go",
+		"chat_load_document.go",
+		"chat_goal_document.go",
+		"chat_memory_document.go",
+		"chat_stream_document.go",
+	} {
 		sourcePath := filepath.Join(filepath.Dir(currentFile), name)
 		source, err := os.ReadFile(sourcePath)
 		if err != nil {
@@ -549,6 +914,18 @@ func diffDirectWriterInventory(want []chatDirectWriterInventoryEntry, got []chat
 func assertSingleDebugCommandMarker(t *testing.T, stage string, surface *ui.FixedBottomSurface, screen *screenVT) {
 	t.Helper()
 	const marker = "Mailbox Pending:"
+	frame := commandResultFrameText(surface)
+	if count := strings.Count(frame, marker); count != 1 {
+		t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)
+	}
+	if rows := screen.RowsContaining(marker); len(rows) != 1 {
+		t.Fatalf("%s physical screen marker rows=%v want one:\n%s", stage, rows, screen.dump())
+	}
+}
+
+func assertSingleStreamCommandMarker(t *testing.T, stage string, surface *ui.FixedBottomSurface, screen *screenVT) {
+	t.Helper()
+	const marker = "当前输出模式:"
 	frame := commandResultFrameText(surface)
 	if count := strings.Count(frame, marker); count != 1 {
 		t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)

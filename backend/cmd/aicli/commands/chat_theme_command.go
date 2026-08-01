@@ -478,13 +478,18 @@ func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, 
 	workPalette, workMode, workSyntax := snapPalette, snapMode, snapSyntax
 	confirmed := false
 
-	surfaceEnabled := session != nil && session.Surface != nil && session.Surface.Enabled()
-	if surfaceEnabled {
-		session.Surface.Disable()
+	var lease ui.ScreenLease
+	if session != nil && session.Surface != nil && session.Surface.Enabled() {
+		// Suspend the primary presenter while the picker owns the alternate
+		// screen; live previews render in the picker's own frame, and the
+		// surface repaints with the new theme on release.
+		lease, _ = session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+			Title: "选择主题",
+		})
 	}
 	defer func() {
-		if surfaceEnabled {
-			session.Surface.Enable()
+		if lease != nil {
+			_ = lease.Release(context.Background())
 		}
 		if session != nil && session.Interaction != nil {
 			session.Interaction.ResetPromptState()
@@ -492,7 +497,7 @@ func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, 
 		}
 	}()
 
-	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "选择主题",
 		Subtitle:     "上下移动实时预览 · Esc 取消恢复 · Enter 确认并保存",
 		ConfirmLabel: "应用主题",
@@ -539,7 +544,7 @@ func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, 
 				Compact:     true,
 			})
 		},
-	})
+	}, lease)
 	if err != nil {
 		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
 		_ = ui.SetSyntaxTheme(snapSyntax)

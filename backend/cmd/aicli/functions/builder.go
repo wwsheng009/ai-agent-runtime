@@ -2,8 +2,6 @@ package functions
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"strings"
 
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -122,34 +120,9 @@ func ValidateToolCalls(toolCalls []ToolCall) ([]ToolCall, error) {
 			continue
 		}
 
-		// 没有有效的arguments字段，跳过这个tool call
-		fmt.Printf("[警告] ToolCall %s 没有有效的参数，跳过执行\n", tc.ID)
-	}
-
-	if len(incompleteCalls) > 0 {
-		fmt.Fprintf(os.Stderr, "[错误] 检测到 %d 个不完整的工具调用（可能是流式响应数据损坏），无法执行\n", len(incompleteCalls))
-		for _, tc := range incompleteCalls {
-			if raw, ok := tc.Raw["function"].(map[string]interface{}); ok {
-				if argsStr, ok := raw["arguments"].(string); ok {
-					fmt.Fprintf(os.Stderr, "  - ToolCall %s (%s):\n", tc.ID, tc.Function)
-					fmt.Fprintf(os.Stderr, "    长度: %d 字节\n", len(argsStr))
-					fmt.Fprintf(os.Stderr, "    内容: %s\n", argsStr)
-
-					// 诊断 JSON 结构
-					openBraces := strings.Count(argsStr, "{")
-					closeBraces := strings.Count(argsStr, "}")
-					if openBraces != closeBraces {
-						fmt.Fprintf(os.Stderr, "    ⚠️  大括号不匹配: 开=%d, 闭=%d\n", openBraces, closeBraces)
-					}
-
-					if !strings.HasSuffix(strings.TrimSpace(argsStr), "}") {
-						fmt.Fprintf(os.Stderr, "    ⚠️  JSON 未闭合\n")
-					}
-
-					fmt.Fprintf(os.Stderr, "    💡 建议: 检查网络连接和代理配置，尝试重试请求\n")
-				}
-			}
-		}
+		// No valid arguments: skip this tool call. Callers retain the raw
+		// response and decide how to surface diagnostics; this parsing layer
+		// must not mutate a shared interactive terminal.
 	}
 
 	return validCalls, nil
@@ -203,12 +176,6 @@ func (b *OpenAIFunctionCallBuilder) ExtractToolCalls(result map[string]interface
 func (b *OpenAIFunctionCallBuilder) extractToolCallsFromMessage(msg map[string]interface{}) []ToolCall {
 	toolCalls := []ToolCall{}
 
-	// 调试：打印收到的message
-	if toolCallsRawMap, ok := msg["tool_calls"].([]map[string]interface{}); ok && len(toolCallsRawMap) > 0 {
-		msgJSON, _ := json.Marshal(msg)
-		fmt.Printf("[调试] 收到的message: %s\n", string(msgJSON))
-	}
-
 	// 尝试 []map[string]interface{} 类型
 	if toolCallsRawMap, ok := msg["tool_calls"].([]map[string]interface{}); ok {
 		for _, tcMap := range toolCallsRawMap {
@@ -218,10 +185,6 @@ func (b *OpenAIFunctionCallBuilder) extractToolCallsFromMessage(msg map[string]i
 					// 尝试解析JSON，如果是流式响应中的不完整片段，解析失败是正常的
 					if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
 						// 流式响应中arguments可能分片到达，不完整JSON是预期行为
-						// 只有当arguments看起来像完整JSON但解析失败时才记录警告
-						if strings.HasSuffix(argsStr, "}") || strings.HasSuffix(argsStr, "}") {
-							fmt.Printf("[警告] JSON解析失败: %v, arguments: %s\n", err, argsStr)
-						}
 						// args保持空map，后续如果有完整数据会再次解析
 					}
 				} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
@@ -249,10 +212,6 @@ func (b *OpenAIFunctionCallBuilder) extractToolCallsFromMessage(msg map[string]i
 						// 尝试解析JSON，如果是流式响应中的不完整片段，解析失败是正常的
 						if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
 							// 流式响应中arguments可能分片到达，不完整JSON是预期行为
-							// 只有当arguments看起来像完整JSON但解析失败时才记录警告
-							if strings.HasSuffix(argsStr, "}") || strings.HasSuffix(argsStr, "}") {
-								fmt.Printf("[警告] JSON解析失败: %v, arguments: %s\n", err, argsStr)
-							}
 							// args保持空map，后续如果有完整数据会再次解析
 						}
 					} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {

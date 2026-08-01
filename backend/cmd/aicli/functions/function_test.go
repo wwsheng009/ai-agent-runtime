@@ -203,6 +203,84 @@ func TestFunctionCallBuilders_DefaultNilParametersToObjectSchema(t *testing.T) {
 	}
 }
 
+func TestValidateToolCalls_SkipsInvalidCalls(t *testing.T) {
+	valid, err := ValidateToolCalls([]ToolCall{
+		{
+			ID:       "missing-args",
+			Function: "shell",
+			Raw:      map[string]interface{}{"function": map[string]interface{}{}},
+		},
+		{
+			ID:       "partial-json",
+			Function: "shell",
+			Raw: map[string]interface{}{
+				"function": map[string]interface{}{"arguments": `{"command":"git status"`},
+			},
+		},
+		{
+			ID:       "valid",
+			Function: "shell",
+			Raw: map[string]interface{}{
+				"function": map[string]interface{}{"arguments": `{"command":"git status"}`},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ValidateToolCalls: %v", err)
+	}
+	if len(valid) != 1 || valid[0].ID != "valid" {
+		t.Fatalf("valid calls = %#v, want only valid", valid)
+	}
+}
+
+func TestOpenAIFunctionCallBuilder_ExtractToolCallsKeepsPartialArgumentsSilent(t *testing.T) {
+	builder := &OpenAIFunctionCallBuilder{}
+	calls := builder.ExtractToolCalls(map[string]interface{}{
+		"choices": []map[string]interface{}{{
+			"message": map[string]interface{}{
+				"tool_calls": []map[string]interface{}{{
+					"id": "partial",
+					"function": map[string]interface{}{
+						"name":      "execute_shell_command",
+						"arguments": `{"command":"git status"`,
+					},
+				}},
+			},
+		}},
+	})
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want one parsed raw call", calls)
+	}
+	if calls[0].ID != "partial" || calls[0].Function != "execute_shell_command" {
+		t.Fatalf("unexpected call %#v", calls[0])
+	}
+	if len(calls[0].Args) != 0 {
+		t.Fatalf("partial arguments must not be treated as parsed args: %#v", calls[0].Args)
+	}
+}
+
+func TestFunctionCallBuilder_HasNoDirectTerminalWriter(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(currentFile), "builder.go"))
+	if err != nil {
+		t.Fatalf("read builder.go: %v", err)
+	}
+	for _, forbidden := range []string{
+		"fmt.Print",
+		"os.Stdout",
+		"os.Stderr",
+		"ui.WriteTerminal",
+		"io.WriteString",
+	} {
+		if strings.Contains(string(source), forbidden) {
+			t.Fatalf("function builder must not write directly to a terminal: found %q", forbidden)
+		}
+	}
+}
+
 func TestCodexFunctionCallBuilderPreservesExplicitStrict(t *testing.T) {
 	built := (&CodexFunctionCallBuilder{}).BuildFunctions([]map[string]interface{}{
 		{

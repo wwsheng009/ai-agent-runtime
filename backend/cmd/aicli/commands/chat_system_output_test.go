@@ -3,12 +3,14 @@ package commands
 import (
 	"bytes"
 	"io"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 type fakeChatOutputSurface struct {
@@ -138,6 +140,68 @@ func TestChatSystemOutputWriter_UsesAtomicSurfaceOutputWhenAvailable(t *testing.
 	}
 }
 
+func TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	const width, height = 80, 30
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	screen := newScreenVT(width, height)
+
+	stream := captureSurfaceStdout(t, func() {
+		_, err, handled := surface.WriteOutput(os.Stdout, "seed-transcript-marker\n")
+		if err != nil || !handled {
+			t.Fatalf("seed output: handled=%t err=%v", handled, err)
+		}
+		surface.ShowPrompt("> ")
+		surface.SetActiveBand([]string{"• Running shell tool"})
+
+		// This is the production active-turn output mirror constructor. Its
+		// output must become retained history before the following repaint.
+		mirror := newLimitedChatSystemOutputWriterWithSurface(
+			os.Stdout,
+			surface,
+			maxToolResultPreviewLines,
+			maxToolResultPreviewBytes,
+		)
+		if _, err := mirror.Write([]byte("tool-progress-marker\n")); err != nil {
+			t.Fatalf("mirror write: %v", err)
+		}
+
+		surface.SetStatusModels(style.StatusLineModel{State: style.RunRunning}, nil)
+		surface.SetActiveBand([]string{
+			"• Running shell tool",
+			"  repaint-marker",
+		})
+	})
+	screen.feed(stream)
+
+	for _, marker := range []string{
+		"seed-transcript-marker",
+		"tool-progress-marker",
+		"repaint-marker",
+	} {
+		if rows := screen.RowsContaining(marker); len(rows) != 1 {
+			t.Fatalf("%q physical rows=%v want exactly one:\n%s", marker, rows, screen.dump())
+		}
+		if count := strings.Count(composedSurfaceFrameText(surface), marker); count != 1 {
+			t.Fatalf("%q composed-frame count=%d want 1:\n%s", marker, count, composedSurfaceFrameText(surface))
+		}
+	}
+
+	bottomStart := height - len(surface.BottomRowsSnapshot()) + 1
+	if run, at := maxBlankRunAboveBottom(screen, bottomStart); run > 2 {
+		t.Fatalf("mirror commit followed by repaint left %d blank rows at %d:\n%s", run, at, screen.dump())
+	}
+
+	screen.feed(captureSurfaceStdout(t, func() {
+		surface.ClearActiveBand()
+	}))
+	if rows := screen.RowsContaining("tool-progress-marker"); len(rows) != 1 {
+		t.Fatalf("active-band shrink lost or duplicated mirror output: rows=%v\n%s", rows, screen.dump())
+	}
+}
+
 func TestChatSystemOutputWriter_FlushesPartialLineAfterDelay(t *testing.T) {
 	var output bytes.Buffer
 	writer := newChatSystemOutputWriter(&output).(*chatSystemOutputWriter)
@@ -176,6 +240,19 @@ func TestChatSystemOutputWriter_TreatsCarriageReturnAsProgressLine(t *testing.T)
 			t.Fatalf("expected rendered output to contain %q, got %q", expected, rendered)
 		}
 	}
+}
+
+func composedSurfaceFrameText(surface *ui.FixedBottomSurface) string {
+	var text strings.Builder
+	for _, row := range surface.ComposedFrameForTest() {
+		for _, cell := range row {
+			if !cell.Cont {
+				text.WriteString(cell.Text)
+			}
+		}
+		text.WriteByte('\n')
+	}
+	return text.String()
 }
 
 func TestChatLimitedSystemOutputWriter_TruncatesByLineLimit(t *testing.T) {

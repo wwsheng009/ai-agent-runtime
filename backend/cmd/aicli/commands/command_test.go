@@ -689,19 +689,19 @@ func TestResolveChatReasoningEffort_UsesNVIDIAFallbackCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error for stored unsupported effort, got %v", err)
 	}
-	if effort != "" {
-		t.Fatalf("expected unsupported nvidia effort to be cleared, got %q", effort)
+	if effort != "max" {
+		t.Fatalf("expected custom nvidia effort to be preserved, got %q", effort)
 	}
-	if !strings.Contains(warning, "已清空") {
-		t.Fatalf("expected clear warning, got %q", warning)
+	if warning != "" {
+		t.Fatalf("expected no warning for passthrough effort, got %q", warning)
 	}
 
 	effort, warning, err = resolveChatReasoningEffort(provider, "z-ai/glm4.7", "max", true)
 	if err != nil {
 		t.Fatalf("expected nil error for explicit custom effort, got %v", err)
 	}
-	if effort != "max" || !strings.Contains(warning, "已强制设置") {
-		t.Fatalf("expected effort=max with forced warning, got effort=%q warning=%q", effort, warning)
+	if effort != "max" || warning != "" {
+		t.Fatalf("expected effort=max without local warning, got effort=%q warning=%q", effort, warning)
 	}
 }
 
@@ -715,11 +715,11 @@ func TestResolveChatReasoningEffort_UsesSensenovaFallbackCapability(t *testing.T
 	if err != nil {
 		t.Fatalf("expected nil error for stored unsupported effort, got %v", err)
 	}
-	if effort != "" {
-		t.Fatalf("expected unsupported sensenova effort to be cleared, got %q", effort)
+	if effort != "max" {
+		t.Fatalf("expected custom sensenova effort to be preserved, got %q", effort)
 	}
-	if !strings.Contains(warning, "已清空") {
-		t.Fatalf("expected clear warning, got %q", warning)
+	if warning != "" {
+		t.Fatalf("expected no warning for passthrough effort, got %q", warning)
 	}
 
 	effort, warning, err = resolveChatReasoningEffort(provider, "sensenova-6.7-flash-lite", "high", true)
@@ -734,8 +734,8 @@ func TestResolveChatReasoningEffort_UsesSensenovaFallbackCapability(t *testing.T
 	if err != nil {
 		t.Fatalf("expected nil error for explicit custom effort, got %v", err)
 	}
-	if effort != "xhigh" || !strings.Contains(warning, "已强制设置") {
-		t.Fatalf("expected effort=xhigh with forced warning, got effort=%q warning=%q", effort, warning)
+	if effort != "xhigh" || warning != "" {
+		t.Fatalf("expected effort=xhigh without local warning, got effort=%q warning=%q", effort, warning)
 	}
 }
 
@@ -1562,7 +1562,7 @@ func TestDispatchChatCommand_ClearsInteractivePromptBeforePrinting(t *testing.T)
 		t.Fatal("expected prompt to be visible before dispatch")
 	}
 
-	output := captureStdout(t, func() {
+	raw := captureStdout(t, func() {
 		if quit := dispatchChatCommand(session, "/goal verify interactive command output", false); quit {
 			t.Fatal("expected /goal dispatch not to exit")
 		}
@@ -1571,8 +1571,11 @@ func TestDispatchChatCommand_ClearsInteractivePromptBeforePrinting(t *testing.T)
 	if coord.promptVisible {
 		t.Fatal("expected dispatch to clear prompt before command output")
 	}
-	if !strings.Contains(output, "Goal 已设置") {
-		t.Fatalf("expected goal command output after dispatch, got %q", output)
+	if !strings.Contains(renderedPrompt.String(), "Goal 已设置") {
+		t.Fatalf("expected goal command cell after dispatch, got %q", renderedPrompt.String())
+	}
+	if strings.Contains(raw, "Goal 已设置") {
+		t.Fatalf("structured goal output leaked to raw stdout: %q", raw)
 	}
 }
 

@@ -21,6 +21,34 @@ import (
 )
 
 func dispatchChatCommand(session *ChatSession, command string, noInteractive bool) bool {
+	// Structured commands are resolved before legacy prompt clearing/direct
+	// output. Once matched, they own the command completely and never fall
+	// through to handleCommand or retry through raw stdout.
+	if session == nil || !session.JSONOutput {
+		result, handled, err := tryExecuteStructuredChatCommand(session, command)
+		if handled {
+			if err != nil {
+				result = commandErrorResult(err)
+			}
+			_ = renderChatCommandResult(session, result, noInteractive)
+			if result.ReplayHistory && session != nil {
+				// /load: replay the loaded transcript after the confirmation
+				// cell. The replay renderer owns its cells (one per message)
+				// and falls back to plain output when no surface is present.
+				printVisibleChatHistory(session, "已加载历史会话")
+			}
+			if result.SendObjective != "" && session != nil {
+				// /goal <objective>: stream the objective request through the
+				// normal send pipeline after the confirmation cell commits.
+				// The send error goes through the surface-aware output helper
+				// so it stays visible without bypassing the owned viewport.
+				if err := sendGoalObjectiveRequest(session, result.SendObjective); err != nil {
+					printfDirectInteractiveOutput(session, "错误: %v\n", err)
+				}
+			}
+			return result.Action == CommandQuit
+		}
+	}
 	if !noInteractive {
 		beginDirectInteractiveOutput(session)
 	}

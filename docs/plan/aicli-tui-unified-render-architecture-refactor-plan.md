@@ -2,7 +2,7 @@
 
 状态：**in progress（长期架构基线；P0/P1/P3 已有部分实施，终局 Scene 架构仍待迁移）**
 
-更新时间：**2026-07-31**
+更新时间：**2026-08-01**
 
 适用范围：`backend/cmd/aicli/commands`、`backend/cmd/aicli/ui` 及所有在 chat interactive 生命周期内产生可见输出的 runtime/tool/diagnostic 组件。
 
@@ -20,14 +20,14 @@
 
 ---
 
-## 实施状态（2026-07-31）
+## 实施状态（2026-08-01）
 
 本文的终局 `TuiScene -> Layout/Compose -> TuiPresenter` 尚未整体落地；以下状态仅记录已验证的实施切片，不能将过渡 adapter 误读为终局 single-writer 已完成。
 
 | 阶段 | 当前状态 | 已验证证据 | 仍待完成 |
 | --- | --- | --- | --- |
-| P0 旁路审计 | **进行中** | `TestChatInteractiveDirectWriterInventory` 以 AST 扫描 `commands/chat*.go` 与 `command.go`，固化 **155 个 grouped debt entries / 552 个 call sites**（493 `fmt.Print*`、49 `fmt.Fprint*(os.Std*)`、1 `io.WriteString(os.Std*)`、9 `ui.WriteTerminal*`）；新增 group 或 count 变化默认使测试失败，并报告实际行号。`/debug display` 已有 raw-stdout、atomic command cell 及 repaint/resize VT 回归测试。 | 每条 debt entry 标注 owned-safe/plain-only/startup-shutdown/待迁移 owner；补 active-turn tool/runtime 并发复现与 owner/frame trace；迁移后逐项从基线删除。 |
-| P1 CommandResult | **部分完成** | `/debug display` 已以结构化 `CommandResult` 进入单个 command cell，handler 禁止 direct terminal writer 的测试已覆盖该新式 producer。 | 迁移 `/status`、`/load` 及其余 slash command，删除 `beginDirectInteractiveOutput` 作为通用命令协议。 |
+| P0 旁路审计 | **进行中** | `TestChatInteractiveDirectWriterInventory` 以 AST 扫描 `commands/chat*.go` 与 `command.go`，固化 **155 个 grouped debt entries / 552 个 call sites**（493 `fmt.Print*`、49 `fmt.Fprint*(os.Std*)`、1 `io.WriteString(os.Std*)`、9 `ui.WriteTerminal*`）；新增 group 或 count 变化默认使测试失败，并报告实际行号。`/debug display`、`/status`、`/load`、`/goal`、`/memory` 与 `/stream` 已有 raw-stdout/structured producer fence 及 atomic command-cell 回归；`TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint` 覆盖 active-turn mirror 在 status/ActiveBand 重绘后仍只出现一次。`functions/builder.go` 的遗留 function-call parser 已删除全部 direct writer，并有 source fence 与 malformed-call 语义测试。 | 每条 chat/command debt entry 标注 owned-safe/plain-only/startup-shutdown/待迁移 owner；补 owner/frame trace；迁移后逐项从基线删除。 |
+| P1 CommandResult | **部分完成** | `/debug display`、`/status`、成功 `/load <session-id>`、`/goal`（status/clear/pause/resume/complete/set）、`/memory`（status/add/list/search）与 `/stream`（status/toggle/set）已以结构化 `CommandResult` 进入单个 command cell（`chat_debug_document.go`、`chat_status_document.go`、`chat_load_document.go`、`chat_goal_document.go`、`chat_memory_document.go`、`chat_stream_document.go`）；handler 禁止 direct terminal writer 的测试已覆盖全部新式 producer。`/goal <objective>` 在确认 cell 提交后经 `CommandResult.SendObjective` 走正常 send pipeline 触发 AI 目标请求；`/stream` toggle 复用既有 `persistStreamCommandPreference`。参数错误、持久化/store 错误、`--json` 变体与 nil session 仍走 legacy 路径，以使错误在全部输出模式中可见；成功 `/load` 在确认 cell 后通过 `CommandResult.ReplayHistory` 逐消息回放历史。 | 迁移 `/skills`（selection/modal 交互，留待 order-3 桶）及其余 slash command，删除 `beginDirectInteractiveOutput` 作为通用命令协议。 |
 | P3 ScreenLease | **首批完成** | resume、backtrack、theme fullscreen picker 已通过 `ScreenLease` 取得 alternate screen；主屏 flush suspend、release full repaint、DEC 1049 事务边界均有测试。 | 将 lease 上移到最终 presenter API，补 signal safety 与完整失败注入矩阵。 |
 | P4–P9 Scene 终局 | **未开始整体切换** | owned viewport、front/back diff、history window、ActiveBand 与部分 reflow/handoff 能力已存在。 | SceneController、semantic cell/revision、BoundaryPolicy、统一 runtime/tool event writer、legacy 删除及 PTY/ConPTY 验收。 |
 
@@ -802,6 +802,9 @@ type CommandResult struct {
     Popup   *PopupModel
     Action  CommandAction
     Notice  *StatusModel
+    // ReplayHistory: 仅 /load 类带加载副作用的命令使用；owned interactive
+    // 提交确认 cell 后按逐消息 replay 渲染器回放历史，plain/JSON 投影忽略。
+    ReplayHistory bool
 }
 
 type ChatCommand interface {
@@ -818,6 +821,8 @@ command handler：
 - 多段 debug/status 文档作为一个或多个明确的 top-level block 原子提交。
 
 `/debug display` 是首批迁移样例，但不能成为特例。现有 surface-aware direct output 可作为过渡 adapter，长期仍应返回 `CommandResult`。
+
+`/load` 是副作用型样例：成功输出 = 确认文档（atomic command cell）+ 历史回放（逐消息 cell）。回放不得并入命令文档，否则会破坏 cell 边界与 replay 语义（见 INV-GAP-04 / §8.1）；dispatch 在确认 cell 提交后按 `ReplayHistory` 触发回放，回放渲染器自行选择 surface 或 plain 输出路径。
 
 ### 10.4 Runtime/tool/diagnostic 契约
 
@@ -1097,7 +1102,8 @@ Scene state lock
 
 - `TestChatInteractiveDirectWriterInventory` 对 `commands/chat*.go` 和 `command.go` 做 AST 扫描，覆盖 `fmt.Print*`、`fmt.Fprint*(os.Stdout/os.Stderr)`、直接 `os.Std*.Write*`、`io.WriteString(os.Std*)` 及 `ui.WriteTerminal*`；
 - 当前基线为 155 个 file/function/kind 分组、552 个 call site；新增分组或调用次数变化均默认失败，失败信息包含实际行号；
-- `/debug display` 已验证不写 raw stdout、作为一个 atomic command cell 提交，并在 prompt/status/ActiveBand repaint 与 resize recompose 后不重复或丢失。
+- `/debug display` 与 `/status` 已验证不写 raw stdout、各作为一个 atomic command cell 提交，并在 prompt/status/ActiveBand repaint 与 resize recompose 后不重复或丢失；`/status` 带参数时保留 legacy 报错路径（该报错 message 需在所有模式下可见）。
+- `cmd/aicli/functions/builder.go` 已删除 legacy tool-call parsing 的 `fmt.Print*` / `os.Stderr` diagnostics；解析层静默保留 raw/incomplete call，由上层决定结构化诊断。`TestFunctionCallBuilder_HasNoDirectTerminalWriter` 阻止该库重新取得 terminal sink。
 
 剩余工作项：
 
@@ -1112,7 +1118,7 @@ Scene state lock
 
 优先顺序：
 
-1. `/debug`、`/status`、`/load`，建立结构化命令样板；
+1. `/debug`、`/status`、`/load`，建立结构化命令样板（`/debug display`、`/status`、`/load` 均已迁移；`/load` 确认 cell 采用 `chat_load_document.go`，历史回放经 `CommandResult.ReplayHistory` 在提交后触发）；
 2. `/goal`、`/memory`、`/stream`、`/skills` 等文档型输出；
 3. `/resume`、`/backtrack`、`/theme` 等带 modal/fullscreen action 的命令；
 4. 其余 slash command；
@@ -1209,6 +1215,23 @@ Scene state lock
 - [ ] `outputScrollDebtRows`；
 - [ ] 与旧 immediate scroll region 绑定的补偿分支；
 - [ ] production legacy renderer 可达入口。
+
+### 15.6 Markdown / ActiveBand / 历史消息统一管理现状（2026-08-01 排查结论）
+
+三者**已有统一管理，但统一在「单一引擎 + 单一 writer + 单一 coordinator」，不是「单一 Scene」**；用户观察到的"markdown 单独渲染、与工具事件流覆盖"对应的是仍存在的 raw stdout 旁路与双渲染调用点，而非无管理状态。
+
+已统一的部分：
+
+- **单一 markdown 引擎**：`ui/markdown`（goldmark AST + Chroma → `render.Document`）是唯一内容渲染真源；ActiveBand 直播（`ActiveStreamController.activeDocumentLocked` → `markdown.Render(ActiveBandBodyOptions)`）与历史回放/scrollback（`Formatter.Format` → `AssistantBodyOptions`）共享 `ApplyAssistantBodyContract`（Hyperlinks=false、TableMode=Auto），并有 `TestAssistantBodyEngines_SharedContractParity` 等 parity 测试保证 blank/plain 一致（active_stream.go L458-466、formatter/markdown.go L174-176、assistant_options.go L12-20）。
+- **单一 surface 写入入口**：owned 路径下所有内容经 `FixedBottomSurface.WriteOutput` → `appendHistoryWindowLocked` → `renderOwnedViewportLocked`（historyWindow + ActiveBand 一帧合成）；`WriteSoftTrackedOutput` 单独保留 assistant soft 尾巴供 reflow。
+- **单一 coordinator 互斥入口**（chat_interaction.go）：assistant 流 `paintActiveStreamLocked`、tool 流 `syncAgentStageActiveBandLocked`、稳定前缀滚动提交 `commitActiveStableScrollbackLocked`（用 `session.Formatter.Format` 的 rows delta，与历史 replay 同构）、band 帧 `publishActiveStreamFrameLocked` → `SetActiveBandStyled`。
+- **band 所有权规则已显式化**：`streamingActive || reasoningActive` 时 tool 事件不碰 band（L4931-4932）；assistant 内容总是覆盖 stale tool cell（L3992-3995）；tool 结束 → `Cancel` + `ClearActiveBand`；直播与持久历史共用 `aicliTranscriptRenderer` 与 `Formatter`。
+
+仍存在的分裂点（P4–P9 收敛对象）：
+
+- **双渲染调用点**：live band 用 `markdown.Render(ActiveBandBodyOptions)`（自带 Highlighter、`HideHighlightFallback=true`），scrollback 与历史用 `Formatter.Format`（`AssistantBodyOptions`）——靠 contract + parity 测试对齐，不是同一代码路径；收敛方向是以 `Formatter.FormatDocument` 为结构化真源、band 只做 highlighter/holdback 差异化。
+- **raw stdout 旁路**：P0 inventory 155 组/552 个 call site 直接写终端，绕过 surface 所有权——"下一帧覆盖不在 Scene 中的文字 / raw 输出出现在 ActiveBand 中间"的真源即此（§1.1、§1.4）。
+- **historyWindow 仍是 `[]string`**，无 cell/row identity；gap 由 `completeBlockOutput`/`gapFor*` 按前一次调用推断（历史模型），未切到 `BoundaryPolicy`（INV-GAP-03 未实现）。
 
 ---
 
