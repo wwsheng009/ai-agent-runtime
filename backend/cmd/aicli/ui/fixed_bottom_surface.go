@@ -2900,37 +2900,24 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *st
 	if width == lastWidth && height == lastHeight && bottomRows == lastBottomRows {
 		return
 	}
-	sameSize := width == lastWidth && height == lastHeight
-	compensatedRows := s.scrollCompensatedRows
-	switch {
-	case sameSize && compensatedRows > 0 && bottomRows > compensatedRows:
-		growth := bottomRows - compensatedRows
-		if s.pendingScrollDownRows > 0 {
-			canceled := s.pendingScrollDownRows
-			if canceled > growth {
-				canceled = growth
-			}
-			s.pendingScrollDownRows -= canceled
-			growth -= canceled
-		}
-		scrollGrowth := growth
-		if scrollGrowth > 0 && s.outputCursorOnBlankRow {
-			scrollGrowth--
-			s.outputCursorOnBlankRow = false
-			s.outputScrollDebtRows++
-		}
-		if scrollGrowth > 0 {
-			appendOutputScrollUpForBottomReserveGrowthSequence(builder, height, bottomRows-scrollGrowth, bottomRows)
-		}
-		s.scrollCompensatedRows = bottomRows
-	case sameSize && compensatedRows > 0 && bottomRows < compensatedRows:
-		s.pendingScrollDownRows += compensatedRows - bottomRows
-		s.scrollCompensatedRows = bottomRows
-	case !sameSize || compensatedRows <= 0:
-		s.pendingScrollDownRows = 0
-		s.scrollCompensatedRows = bottomRows
-		s.outputCursorOnBlankRow = false
-		s.outputScrollDebtRows = 0
+	state := renderengine.LegacyReserveState{
+		ScrollCompensatedRows: s.scrollCompensatedRows,
+		PendingScrollDownRows: s.pendingScrollDownRows,
+		OutputScrollDebtRows:  s.outputScrollDebtRows,
+		CursorOnBlankRow:      s.outputCursorOnBlankRow,
+	}
+	transition := state.ApplyGeometry(width, height, bottomRows, lastWidth, lastHeight, lastBottomRows)
+	s.scrollCompensatedRows = state.ScrollCompensatedRows
+	s.pendingScrollDownRows = state.PendingScrollDownRows
+	s.outputScrollDebtRows = state.OutputScrollDebtRows
+	s.outputCursorOnBlankRow = state.CursorOnBlankRow
+	if transition.ScrollUpOldBottomRows > 0 && transition.ScrollUpNewBottomRows > transition.ScrollUpOldBottomRows {
+		appendOutputScrollUpForBottomReserveGrowthSequence(
+			builder,
+			height,
+			transition.ScrollUpOldBottomRows,
+			transition.ScrollUpNewBottomRows,
+		)
 	}
 	s.lastWidth = width
 	s.lastHeight = height
@@ -3065,7 +3052,14 @@ func (s *FixedBottomSurface) markOutputWrittenLocked() {
 	if height <= 0 {
 		_, height = s.terminal.RefreshSize()
 	}
-	s.scrollCompensatedRows = s.effectiveBottomRowsLocked(height)
+	state := renderengine.LegacyReserveState{
+		ScrollCompensatedRows: s.scrollCompensatedRows,
+		PendingScrollDownRows: s.pendingScrollDownRows,
+		OutputScrollDebtRows:  s.outputScrollDebtRows,
+		CursorOnBlankRow:      s.outputCursorOnBlankRow,
+	}
+	state.MarkOutputWritten(s.effectiveBottomRowsLocked(height))
+	s.scrollCompensatedRows = state.ScrollCompensatedRows
 }
 
 func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height, oldBottomRows, newBottomRows int) {

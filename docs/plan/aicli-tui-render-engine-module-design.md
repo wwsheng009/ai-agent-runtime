@@ -26,9 +26,10 @@
   `renderengine.SoftOutputState` 现已接管 soft-output 尾部的 partial 合并、
   ownership、hard-cap trim 和 rewrite/adopt 元数据；`renderengine.HandoffPlan`
   与 Presenter 已接管 native scrollback handoff 的 ANSI 聚合。`scrollCompensatedRows`、
-  `pendingScrollDownRows`、`outputScrollDebtRows`、`outputCursorOnBlankRow` 及
-  legacy `FixedBottomSurface` 渲染入口仍存在；因此本文不能标记为完成，终局目标
-  仍需继续按阶段 E 清单迁移和删除。
+  `pendingScrollDownRows`、`outputScrollDebtRows`、`outputCursorOnBlankRow` 的
+  **状态转移决策**现已由 `renderengine.LegacyReserveState` 统一计算，surface
+  字段仍作为过渡期镜像；legacy `FixedBottomSurface` 渲染入口仍存在。因此本文
+  不能标记为完成，终局目标仍需继续按阶段 E 清单迁移和删除。
 
 适用范围：`backend/cmd/aicli/ui`、`backend/cmd/aicli/commands` 中所有与屏幕渲染、输出、历史、ActiveBand、viewport、status、popup、prompt 相关的代码。
 
@@ -447,7 +448,7 @@ const (
 | # | 现有职责（文件/方法） | 迁往（组件） | 迁移要点 |
 | --- | --- | --- | --- |
 | 1 | 布局与滚动区（`applyLayoutWithSizeLocked`、`appendApplyLayoutSequenceWithSizeLocked`、`refreshTerminalDimensionsLocked`） | Composer + Presenter | 布局成为纯函数；滚动区序列由 Presenter 生成 |
-| 2 | 补偿状态机（`scrollCompensatedRows`/`pendingScrollDownRows`/`outputScrollDebtRows`/`outputCursorOnBlankRow`） | **删除** | 由 §5.3 reconcile 取代 |
+| 2 | 补偿状态机（`scrollCompensatedRows`/`pendingScrollDownRows`/`outputScrollDebtRows`/`outputCursorOnBlankRow`） | LegacyReserveState → **删除** | 状态转移已集中；最终由 §5.3 reconcile 取代 |
 | 3 | 历史窗口（`appendHistoryWindowLocked`、`replaceOwnedHistorySuffixLocked`、`ownedHistorySuffixStartLocked`、`canRewriteOwnedHistorySuffixLocked`） | SceneState（transcript 区） + Composer | `historyWindow []string` 过渡期保留，但只作为 Scene 数据，不再参与行号计算 |
 | 4 | handoff（`commitExcessHistoryToScrollbackLocked`、`historySegmentIsSinglePhysicalRowsLocked`、`insertHistoryLinesLocked`） | HandoffFrontier + HandoffPlan + Presenter | facade 方法暂留；ANSI 直写已移除，计数与 diff 仍需继续收敛 |
 | 5 | ActiveBand（`SetActiveBand`/`SetActiveBandStyled`/`repaintActiveBandDiffLocked`/`RefreshActiveBand`/`ClearActiveBand`/`renderActiveBandRowLocked`） | SceneState（band 区） + Composer + RenderCache | diff 渲染由 ScreenModel 驱动；`repaintActiveBandDiffLocked` 的 prev 对比逻辑删除 |
@@ -526,7 +527,9 @@ const (
   owned surface 共享，handoff 边界不再是裸 `historyHandedOff` 整数；
   `SoftOutputState` 已迁入 `renderengine`，`HandoffPlan`/Presenter 已统一
   scrollback handoff 的 cursor-save、DECSTBM、内容写入和 cursor-restore 为单批次
-  输出。其余 legacy 补偿状态机仍需在 capability fallback 收敛后删除。
+  输出；`LegacyReserveState` 已接管 reserve 几何变化的纯状态转移，surface 仍同步
+  历史字段供 capability fallback 使用。其余 legacy 补偿输出和 facade 入口仍需在
+  capability fallback 收敛后删除。
 - 删除 §6 表中标注"删除"的全部方法/字段：补偿状态机、`insertHistoryLinesLocked` 直写、`repaintActiveBandDiffLocked` 的 prev 逻辑、soft output 状态机、4 个 timer、`FixedBottomSurface` 的渲染方法（facade 只剩 Enable/Disable/Lease 委托）；
 - P0 审计基线（155 组/552 call site）随迁移逐项从基线删除，最终 `tui_unowned_terminal_write_total` 归零；
 - **验收**：`FixedBottomSurface` 体积从 129KB 降到薄 facade；全文搜索 `fmt.Print`/`os.Stdout` 在 owned 路径为 0（plain/json renderer 除外）。
