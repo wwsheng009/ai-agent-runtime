@@ -44,7 +44,7 @@ const (
 	// bottom of the output region. Older lines fall out of the soft window and
 	// become irreversible scrollback history. Coordinator soft ownership uses
 	// the same cap so source-backed reflow stays 1:1 with the surface window.
-	SoftOutputTailMaxLines = 64
+	SoftOutputTailMaxLines = renderengine.DefaultSoftOutputTailMaxLines
 )
 
 // ActiveBandRows returns the adaptive row budget for the in-progress stream
@@ -155,19 +155,13 @@ type FixedBottomSurface struct {
 	// into native scrollback. It keeps the handoff boundary explicit while the
 	// surface still owns legacy capability fallback behavior.
 	handoffFrontier *renderengine.HandoffFrontier
-	// softOutputLines is the most recent committed output still sitting at the
-	// bottom of the output region. Source-backed resize reflow may rewrite it
-	// in place; geometry changes or overflow trim invalidate safe reflow.
-	softOutputLines   []string
-	softOutputValid   bool
-	softOutputTrimmed bool
-	// softOutputPartial mirrors historyPartial for the rewriteable suffix. It is
-	// true only when the last soft-owned logical line has not reached a newline;
-	// later soft fragments must extend that line instead of claiming new rows.
-	softOutputPartial bool
-	lastWidth         int
-	lastHeight        int
-	lastBottomRows    int
+	// softOutput owns the most recent committed output still sitting at the
+	// bottom of the output region. The renderengine component owns partial-line
+	// merging and hard-cap trim; this facade supplies history/geometry checks.
+	softOutput     renderengine.SoftOutputState
+	lastWidth      int
+	lastHeight     int
+	lastBottomRows int
 	// ownedViewport is the normal production renderer. The legacy immediate
 	// scroll-region path remains only as an internal capability fallback.
 	ownedViewport   bool
@@ -818,12 +812,12 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 				// full-frame repaint. If the rewriteable soft tail no longer fits
 				// the scroll region, drop soft ownership so reflow cannot rewrite
 				// rows that scrolled off screen.
-				if trackSoft && s.softOutputValid {
+				if trackSoft && s.softOutput.Valid() {
 					height := s.terminal.Height()
 					if height < 1 {
 						height = 24
 					}
-					if len(s.softOutputLines) > s.directScrollRegionRowsLocked(height) {
+					if s.softOutput.LineCount() > s.directScrollRegionRowsLocked(height) {
 						s.invalidateSoftOutputLocked()
 					}
 				}
@@ -976,7 +970,7 @@ func (s *FixedBottomSurface) SoftOutputTailValid() bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.enabled && s.softOutputValid && len(s.softOutputLines) > 0
+	return s.enabled && s.softOutput.Valid()
 }
 
 // SoftOutputTailTrimmed is true when the soft window dropped older lines. The
@@ -989,7 +983,7 @@ func (s *FixedBottomSurface) SoftOutputTailTrimmed() bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.softOutputTrimmed
+	return s.softOutput.Trimmed()
 }
 
 // SoftOutputTailLineCount returns the number of rewriteable committed lines.
@@ -999,10 +993,7 @@ func (s *FixedBottomSurface) SoftOutputTailLineCount() int {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.softOutputValid {
-		return 0
-	}
-	return len(s.softOutputLines)
+	return s.softOutput.LineCount()
 }
 
 // SoftOutputTailLines returns a copy of the rewriteable committed tail.
@@ -1012,10 +1003,7 @@ func (s *FixedBottomSurface) SoftOutputTailLines() []string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.softOutputValid || len(s.softOutputLines) == 0 {
-		return nil
-	}
-	return append([]string(nil), s.softOutputLines...)
+	return s.softOutput.Lines()
 }
 
 // InvalidateSoftOutputTail drops the rewrite window. Irreversible scrollback
@@ -1067,11 +1055,8 @@ func (s *FixedBottomSurface) AdoptSoftOutputTail(lines []string) {
 		s.historyPartial = false
 		s.handoffFrontier.Reset()
 	}
-	s.softOutputLines = adopted
-	s.softOutputValid = true
 	// Rebased window is complete relative to the adopted ownership.
-	s.softOutputTrimmed = false
-	s.softOutputPartial = false
+	s.softOutput.Adopt(adopted)
 }
 
 // RewriteSoftOutputTail replaces the soft committed tail in place from source
@@ -1084,14 +1069,15 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.enabled || !s.softOutputValid || len(s.softOutputLines) == 0 {
+	if !s.enabled || !s.softOutput.Valid() {
 		return false
 	}
-	if _, ok := s.ownedHistorySuffixStartLocked(s.softOutputLines); !ok {
+	softLines := s.softOutput.Lines()
+	if _, ok := s.ownedHistorySuffixStartLocked(softLines); !ok {
 		s.invalidateSoftOutputLocked()
 		return false
 	}
-	oldCount := len(s.softOutputLines)
+	oldCount := len(softLines)
 	onBlank := s.outputCursorOnBlankRow
 	// Capture pre-layout geometry so we clear the rows the soft tail currently
 	// occupies even when this rewrite is triggered by a terminal resize.
@@ -1116,18 +1102,15 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		normalized[i] = strings.TrimSuffix(strings.ReplaceAll(line, "\r", ""), "\n")
 	}
 	if s.ownedViewport {
-		if !s.testMode && !s.canRewriteOwnedHistorySuffixLocked(s.softOutputLines, normalized) {
+		if !s.testMode && !s.canRewriteOwnedHistorySuffixLocked(softLines, normalized) {
 			s.invalidateSoftOutputLocked()
 			return false
 		}
-		if !s.replaceOwnedHistorySuffixLocked(s.softOutputLines, normalized) {
+		if !s.replaceOwnedHistorySuffixLocked(softLines, normalized) {
 			s.invalidateSoftOutputLocked()
 			return false
 		}
-		s.softOutputLines = append([]string(nil), normalized...)
-		s.softOutputValid = len(normalized) > 0
-		s.softOutputTrimmed = false
-		s.softOutputPartial = false
+		s.softOutput.Replace(normalized)
 		s.outputCursorOnBlankRow = false
 		if s.leaseID != 0 {
 			// Retain the rewritten soft tail without touching the alternate
@@ -1163,11 +1146,8 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		}
 		s.terminal.MoveTo(prevStart, 1)
 		if len(normalized) == 0 {
-			s.replaceOwnedHistorySuffixLocked(s.softOutputLines, nil)
-			s.softOutputLines = nil
-			s.softOutputValid = false
-			s.softOutputTrimmed = false
-			s.softOutputPartial = false
+			s.replaceOwnedHistorySuffixLocked(softLines, nil)
+			s.softOutput.Invalidate()
 			s.outputCursorOnBlankRow = false
 			s.outputScrollDebtRows = 0
 			s.restoreStoredPromptCursorLocked()
@@ -1191,11 +1171,8 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			rewritten = false
 			return
 		}
-		s.replaceOwnedHistorySuffixLocked(s.softOutputLines, normalized)
-		s.softOutputLines = normalized
-		s.softOutputValid = true
-		s.softOutputTrimmed = false
-		s.softOutputPartial = false
+		s.replaceOwnedHistorySuffixLocked(softLines, normalized)
+		s.softOutput.Replace(normalized)
 		s.outputCursorOnBlankRow = true
 		s.outputScrollDebtRows = 0
 		s.markOutputWrittenLocked()
@@ -1209,70 +1186,14 @@ func (s *FixedBottomSurface) noteSoftOutputLocked(text string) {
 	if s == nil {
 		return
 	}
-	lines, partial := splitSoftOutputLines(text)
-	if len(lines) == 0 {
-		return
-	}
-	continuesOwnedPartial := s.historyPartial &&
-		s.softOutputValid &&
-		s.softOutputPartial &&
-		len(s.softOutputLines) > 0
-	continuesForeignPartial := s.historyPartial && !continuesOwnedPartial
-	if continuesOwnedPartial {
-		last := len(s.softOutputLines) - 1
-		s.softOutputLines[last] += lines[0]
-		lines = lines[1:]
-	} else if continuesForeignPartial {
-		// appendHistoryWindowLocked will merge the first segment into a logical
-		// line not wholly owned by this soft window. Never claim or rewrite that
-		// composite line; ownership can restart only after its newline boundary.
-		s.softOutputLines = nil
-		s.softOutputValid = false
-		s.softOutputTrimmed = false
-		s.softOutputPartial = false
-		lines = lines[1:]
-	}
-	addedOwnedSegments := len(lines) > 0
-	s.softOutputLines = append(s.softOutputLines, lines...)
-	if len(s.softOutputLines) > SoftOutputTailMaxLines {
-		drop := len(s.softOutputLines) - SoftOutputTailMaxLines
-		s.softOutputLines = append([]string(nil), s.softOutputLines[drop:]...)
-		s.softOutputTrimmed = true
-	}
-	s.softOutputValid = len(s.softOutputLines) > 0
-	s.softOutputPartial = partial &&
-		s.softOutputValid &&
-		(continuesOwnedPartial || addedOwnedSegments)
+	s.softOutput.Note(text, s.historyPartial)
 }
 
 func (s *FixedBottomSurface) invalidateSoftOutputLocked() {
 	if s == nil {
 		return
 	}
-	s.softOutputLines = nil
-	s.softOutputValid = false
-	s.softOutputTrimmed = false
-	s.softOutputPartial = false
-}
-
-func splitSoftOutputLines(text string) ([]string, bool) {
-	if text == "" {
-		return nil, false
-	}
-	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
-	// writeLineLocked always appends a trailing newline. Keep intentional blank
-	// lines, but do not treat the terminator itself as an extra soft row.
-	endsWithNewline := strings.HasSuffix(normalized, "\n")
-	if endsWithNewline {
-		normalized = strings.TrimSuffix(normalized, "\n")
-	}
-	if normalized == "" {
-		if endsWithNewline {
-			return []string{""}, false
-		}
-		return nil, true
-	}
-	return strings.Split(normalized, "\n"), !endsWithNewline
+	s.softOutput.Invalidate()
 }
 
 // historyWindowMaxLines is the normal retained-history bound. It covers the
@@ -4311,8 +4232,9 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 	}
 	if needHandedOff > s.handoffFrontier.Value() {
 		softStart, softSuffixOwned := 0, false
-		if s.softOutputValid && len(s.softOutputLines) > 0 {
-			softStart, softSuffixOwned = s.ownedHistorySuffixStartLocked(s.softOutputLines)
+		softLines := s.softOutput.Lines()
+		if len(softLines) > 0 {
+			softStart, softSuffixOwned = s.ownedHistorySuffixStartLocked(softLines)
 		}
 		segment := s.historyWindow[s.handoffFrontier.Value():needHandedOff]
 		var handoff []string
@@ -4338,7 +4260,7 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 			return
 		}
 		s.handoffFrontier.AdvanceTo(needHandedOff, len(s.historyWindow))
-		if s.softOutputValid && (!softSuffixOwned || s.handoffFrontier.Value() > softStart) {
+		if s.softOutput.Valid() && (!softSuffixOwned || s.handoffFrontier.Value() > softStart) {
 			// Native scrollback is immutable. Once handoff reaches any part of
 			// the rewrite window, abandon that ownership before a later resize
 			// can replace already-emitted history with a different rendering.
@@ -4384,32 +4306,16 @@ func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
 		return false
 	}
 
-	// Cursor-neutral (save/restore around host scroll sequences).
-	s.terminal.SaveCursor()
-	defer s.terminal.RestoreCursor()
-
 	outputBottom := outputBottomRowForHeight(height, s.bottomRowsLocked())
 	if outputBottom < 1 {
 		outputBottom = 1
 	}
-	var builder strings.Builder
-	// Scroll region covers the owned output area only; bottom band stays fixed.
-	builder.WriteString(terminalScrollRegionSequence(1, outputBottom))
-	// Codex parks at the bottom of the region, then \r\n scrolls a blank line
-	// up before writing content (so the prior viewport top enters scrollback).
-	builder.WriteString(terminalMoveToSequence(outputBottom, 1))
-	for _, line := range rows {
-		builder.WriteString("\r\n")
-		builder.WriteString(line)
-	}
-	builder.WriteString(terminalResetScrollRegionSequence(height))
-	if s.presenterLocked() != nil {
-		if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
-			_, _ = io.WriteString(w, builder.String())
-		}); err != nil {
-			return false
-		}
-	} else if n, err := io.WriteString(os.Stdout, builder.String()); err != nil || n != builder.Len() {
+	// Presenter owns the cursor-neutral DECSTBM bytes and batches them as one
+	// handoff plan, so no Terminal fmt.Print call can interleave with a frame.
+	plan := renderengine.NewHandoffPlan(height, outputBottom, rows)
+	if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+		_, _ = plan.WriteTo(w)
+	}); err != nil {
 		return false
 	}
 

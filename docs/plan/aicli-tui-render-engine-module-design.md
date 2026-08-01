@@ -23,9 +23,12 @@
   的终局迁移仍未完成。
 - **阶段 E：已开始但未完成。** `renderengine.HandoffFrontier` 已接管
   `historyHandedOff` 的单调推进、trim 重基和替换 clamp；
-  `scrollCompensatedRows`、`pendingScrollDownRows`、`outputScrollDebtRows`、
-  `outputCursorOnBlankRow`、soft-output 状态机和 legacy `FixedBottomSurface`
-  渲染入口仍存在；因此本文不能标记为完成，终局目标仍需继续按阶段 E 清单迁移和删除。
+  `renderengine.SoftOutputState` 现已接管 soft-output 尾部的 partial 合并、
+  ownership、hard-cap trim 和 rewrite/adopt 元数据；`renderengine.HandoffPlan`
+  与 Presenter 已接管 native scrollback handoff 的 ANSI 聚合。`scrollCompensatedRows`、
+  `pendingScrollDownRows`、`outputScrollDebtRows`、`outputCursorOnBlankRow` 及
+  legacy `FixedBottomSurface` 渲染入口仍存在；因此本文不能标记为完成，终局目标
+  仍需继续按阶段 E 清单迁移和删除。
 
 适用范围：`backend/cmd/aicli/ui`、`backend/cmd/aicli/commands` 中所有与屏幕渲染、输出、历史、ActiveBand、viewport、status、popup、prompt 相关的代码。
 
@@ -514,8 +517,10 @@ const (
 ### 阶段 E：删除补偿状态机与旧入口（终结补丁模式）
 
 - **状态：进行中（2026-08-01）。** `Engine.HandoffFrontier()` 已落地并由
-  owned surface 共享，handoff 边界不再是裸 `historyHandedOff` 整数；其余 legacy
-  状态机仍需在 capability fallback 收敛后删除。
+  owned surface 共享，handoff 边界不再是裸 `historyHandedOff` 整数；
+  `SoftOutputState` 已迁入 `renderengine`，`HandoffPlan`/Presenter 已统一
+  scrollback handoff 的 cursor-save、DECSTBM、内容写入和 cursor-restore 为单批次
+  输出。其余 legacy 补偿状态机仍需在 capability fallback 收敛后删除。
 - 删除 §6 表中标注"删除"的全部方法/字段：补偿状态机、`insertHistoryLinesLocked` 直写、`repaintActiveBandDiffLocked` 的 prev 逻辑、soft output 状态机、4 个 timer、`FixedBottomSurface` 的渲染方法（facade 只剩 Enable/Disable/Lease 委托）；
 - P0 审计基线（155 组/552 call site）随迁移逐项从基线删除，最终 `tui_unowned_terminal_write_total` 归零；
 - **验收**：`FixedBottomSurface` 体积从 129KB 降到薄 facade；全文搜索 `fmt.Print`/`os.Stdout` 在 owned 路径为 0（plain/json renderer 除外）。

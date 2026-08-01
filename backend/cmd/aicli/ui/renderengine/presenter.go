@@ -54,6 +54,18 @@ func (p *Presenter) FlushHoldingLock(w io.Writer, render func(w io.Writer)) erro
 	return p.flushLocked(w, render)
 }
 
+// FlushHandoffHoldingLock emits one native-scrollback handoff as a presenter
+// batch. Callers must already hold the shared terminal write lock, matching
+// FlushHoldingLock's contract.
+func (p *Presenter) FlushHandoffHoldingLock(w io.Writer, plan HandoffPlan) error {
+	if p == nil || w == nil || plan.Empty() {
+		return nil
+	}
+	return p.FlushHoldingLock(w, func(frame io.Writer) {
+		_, _ = plan.WriteTo(frame)
+	})
+}
+
 // flushLocked assembles one frame and performs at most one target Write. The
 // caller must hold terminalWriteMu when using this helper.
 func (p *Presenter) flushLocked(w io.Writer, render func(w io.Writer)) error {
