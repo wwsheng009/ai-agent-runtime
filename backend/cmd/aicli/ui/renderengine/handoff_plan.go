@@ -58,7 +58,8 @@ func (p HandoffPlan) ANSI() string {
 		builder.WriteString("\r\n")
 		builder.WriteString(row)
 	}
-	builder.WriteString("\x1b[" + strconv.Itoa(p.height) + "r")
+	// Bare CSI r is the portable full-screen DECSTBM reset used by Terminal.
+	builder.WriteString("\x1b[r")
 	builder.WriteString("\x1b[u")
 	return builder.String()
 }

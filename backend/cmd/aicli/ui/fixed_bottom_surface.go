@@ -928,24 +928,15 @@ func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, outp
 		height = 24
 	}
 	regionBottom := s.directScrollRegionRowsLocked(height)
-	var builder strings.Builder
-	// Scroll region covers the history area only; ActiveBand and the bottom
-	// band stay fixed below it.
-	builder.WriteString(terminalScrollRegionSequence(1, regionBottom))
-	builder.WriteString(terminalMoveToSequence(regionBottom, 1))
 	rows := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
-	for _, row := range rows {
-		builder.WriteString("\r\n")
-		builder.WriteString(row)
-	}
-	builder.WriteString(terminalResetScrollRegionSequence(height))
-	// The caller already holds terminalWriteMu through writeOutput. Use the
-	// shared presenter without reacquiring the non-reentrant terminal lock.
+	plan := renderengine.NewHandoffPlan(height, regionBottom, rows)
+	// The caller already holds terminalWriteMu through writeOutput. Reuse the
+	// shared handoff plan/presenter without reacquiring the non-reentrant lock.
 	_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {
-		_, _ = io.WriteString(w, builder.String())
+		_, _ = plan.WriteTo(w)
 	})
 	if writer != os.Stdout {
-		_, _ = io.WriteString(writer, builder.String())
+		_, _ = plan.WriteTo(writer)
 	}
 	// Mirror the scroll into the double buffer: stage the full new frame,
 	// then mark the already-scrolled history rows as committed so Flush only

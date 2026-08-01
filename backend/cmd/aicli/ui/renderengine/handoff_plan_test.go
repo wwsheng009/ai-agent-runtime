@@ -8,7 +8,7 @@ import (
 func TestHandoffPlanANSIIsCursorNeutralAndBounded(t *testing.T) {
 	plan := NewHandoffPlan(20, 13, []string{"one", "two"})
 	got := plan.ANSI()
-	for _, want := range []string{"\x1b[s", "\x1b[1;13r", "\x1b[13;1H", "\r\none", "\r\ntwo", "\x1b[20r", "\x1b[u"} {
+	for _, want := range []string{"\x1b[s", "\x1b[1;13r", "\x1b[13;1H", "\r\none", "\r\ntwo", "\x1b[r", "\x1b[u"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("handoff ANSI %q missing %q", got, want)
 		}
