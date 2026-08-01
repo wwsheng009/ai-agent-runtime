@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
@@ -179,11 +180,18 @@ func TestActiveStreamControllerRebuildsMarkdownCacheForSyntaxTheme(t *testing.T)
 		t.Fatal(err)
 	}
 	c := NewActiveStreamController(60, 8)
+	c.markdownCache = renderengine.NewRenderCache(16)
 	c.BeginAssistant("assistant")
 	c.PushAssistantDelta("```go\nfunc main() {}\n```\n", true)
 	_, _ = c.PaintLines(time.Now(), true)
-	if c.markdownDocTheme != "monokai" {
-		t.Fatalf("unexpected initial markdown cache theme %q", c.markdownDocTheme)
+	if hits, misses, _ := c.markdownCache.Stats(); hits != 0 || misses != 1 {
+		t.Fatalf("initial render: hits=%d misses=%d, want 0/1", hits, misses)
+	}
+
+	// 相同源码 + 宽度 + 主题再次渲染必须命中共享缓存，且结果不变。
+	_, _ = c.PaintLines(time.Now(), true)
+	if hits, _, _ := c.markdownCache.Stats(); hits != 1 {
+		t.Fatalf("stable frame should hit the shared cache, hits=%d", hits)
 	}
 
 	if err := SetSyntaxTheme("github"); err != nil {
@@ -193,13 +201,13 @@ func TestActiveStreamControllerRebuildsMarkdownCacheForSyntaxTheme(t *testing.T)
 	if !changed {
 		t.Fatal("expected token-style-only syntax theme change to mark frame changed")
 	}
-	if c.markdownDocTheme != "github" {
-		t.Fatalf("expected markdown cache rebuild for theme change, got %q", c.markdownDocTheme)
+	if _, misses, _ := c.markdownCache.Stats(); misses != 2 {
+		t.Fatalf("theme change should rebuild via cache miss, misses=%d want 2", misses)
 	}
 	c.Resize(20, 8)
 	lines, _ := c.PaintLines(time.Now(), true)
-	if c.markdownDocWidth != 20 {
-		t.Fatalf("expected markdown cache rebuild for resize, got width %d", c.markdownDocWidth)
+	if _, misses, _ := c.markdownCache.Stats(); misses != 3 {
+		t.Fatalf("resize should rebuild via cache miss, misses=%d want 3", misses)
 	}
 	for _, line := range lines {
 		if width := render.LineWidth(line); width > 20 {

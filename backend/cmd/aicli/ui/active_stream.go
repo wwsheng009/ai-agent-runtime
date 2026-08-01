@@ -5,10 +5,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
 )
@@ -39,10 +41,11 @@ type ActiveStreamController struct {
 	markdown   bool
 	committed  int
 
-	markdownDoc        render.Document
-	markdownDocSource  string
-	markdownDocWidth   int
-	markdownDocTheme   string
+	// markdownCache is the shared RenderCache (阶段 D §4.6). nil falls back
+	// to the process-wide renderengine.SharedRenderCache. Tests inject a
+	// private instance to assert hit/miss accounting.
+	markdownCache *renderengine.RenderCache
+
 	markdownFrameDoc   render.Document
 	markdownFrameHold  string
 	markdownFrameTitle string
@@ -454,21 +457,12 @@ func (c *ActiveStreamController) activeDocumentLocked(now time.Time) render.Docu
 		if c.Highlighter == nil {
 			c.Highlighter = newActiveStreamHighlighter()
 		}
-		bodyChanged := false
-		if c.markdownDocSource != active.Stable || c.markdownDocWidth != width || c.markdownDocTheme != syntaxTheme {
-			// Shared assistant-body contract with Formatter.Format so live
-			// ActiveBand blanks/plain match scrollback history replay.
-			c.markdownDoc = markdown.Render(
-				active.Stable,
-				markdown.ActiveBandBodyOptions(width, syntaxTheme, c.Highlighter),
-			)
-			c.markdownDocSource = active.Stable
-			c.markdownDocWidth = width
-			c.markdownDocTheme = syntaxTheme
-			bodyChanged = true
-		}
-		if bodyChanged || c.markdownFrameDoc.LineCount() == 0 || c.markdownFrameHold != active.Holdback || c.markdownFrameTitle != active.Title {
-			active.BodyDocument = &c.markdownDoc
+		// 阶段 D：band 与 scrollback 走同一条 Formatter 路径，正文文档由
+		// 共享 RenderCache 内容寻址（hash+width+theme+mode）。缓存未命中
+		// 等价于旧实现的 bodyChanged（源码/宽度/主题任一变化）。
+		bodyDoc, hit := c.bandFormatter(width, syntaxTheme).FormatDocumentCached(active.Stable)
+		if !hit || c.markdownFrameDoc.LineCount() == 0 || c.markdownFrameHold != active.Holdback || c.markdownFrameTitle != active.Title {
+			active.BodyDocument = &bodyDoc
 			c.markdownFrameDoc = active.Document(now, c.Policy)
 			c.markdownFrameHold = active.Holdback
 			c.markdownFrameTitle = active.Title
@@ -483,6 +477,29 @@ func (c *ActiveStreamController) activeDocumentLocked(now time.Time) render.Docu
 	}
 	return active.Document(now, c.Policy)
 }
+
+// bandFormatter builds the single shared Formatter render path for the live
+// ActiveBand. Band-specific differences (highlighter throttling, holdback
+// hygiene) stay as formatter options; the RenderCache key keeps mode "band"
+// so band frames and scrollback replay share documents when options match.
+func (c *ActiveStreamController) bandFormatter(width int, syntaxTheme string) *formatter.MarkdownFormatter {
+	f := formatter.NewMarkdownFormatter(true)
+	f.Width = width
+	f.SyntaxTheme = syntaxTheme
+	f.Highlighter = c.Highlighter
+	f.AssistantBody = true
+	f.HideHighlightFallback = true
+	f.TrustMarkdown = true
+	// ActiveBandBodyOptions historically used a zero-value ThemeContext; keep
+	// that contract so cached documents stay identical to the pre-stage-D path.
+	f.ThemeContextProvider = bandThemeContextProvider
+	f.Cache = c.markdownCache
+	return f
+}
+
+// bandThemeContextProvider is package-level so per-frame formatter builds do
+// not allocate a fresh closure.
+var bandThemeContextProvider = func() style.ThemeContext { return style.ThemeContext{} }
 
 func activeSourceSuffix(source string, committed int) string {
 	if committed <= 0 {
@@ -650,10 +667,6 @@ func (c *ActiveStreamController) resetLocked() {
 	c.md.Reset()
 	c.prev = nil
 	c.prevStyled = nil
-	c.markdownDoc = render.Document{}
-	c.markdownDocSource = ""
-	c.markdownDocWidth = 0
-	c.markdownDocTheme = ""
 	c.markdownFrameDoc = render.Document{}
 	c.markdownFrameHold = ""
 	c.markdownFrameTitle = ""

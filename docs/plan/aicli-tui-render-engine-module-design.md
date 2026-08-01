@@ -467,9 +467,12 @@ const (
 
 ### 阶段 D：缓存与单一路径（解决性能与双渲染调用点）
 
-- RenderCache 落地（DocKey = 内容 hash + width + theme + mode），`ActiveStreamController` 私有缓存删除；
-- `Formatter.FormatDocument` 成为唯一 markdown 渲染路径，band 只做 highlighter/holdback 差异化；
-- **验收**：markdown parity 测试不变且共享缓存命中；性能基准（`info_benchmark_test`、`active_stream_benchmark_test`）提升可量化（缓存命中时渲染耗时 ≈ 0）。
+**状态：已实施（2026-08-01）**，`ui/renderengine/cache.go`（RenderCache）与共享缓存接入完成。
+
+- `RenderCache` 落地（`ui/renderengine/cache.go`）：DocKey = 内容 hash（fnv64a）+ width + theme 指纹 + mode；LRU 容量上限（默认 256）+ 源码二次校验防碰撞；命中/未命中/驱逐指标与 `HitRate`；`SharedRenderCache()` 进程级单例；
+- `ActiveStreamController` 私有 markdown 缓存（`markdownDoc*` 四字段）删除：`activeDocumentLocked` 改走 `bandFormatter`（`Formatter.FormatDocumentCached`），缓存未命中等价旧 bodyChanged 语义；frame 组合缓存（`markdownFrameDoc/Hold/Title`）保留；
+- `Formatter.FormatDocument`/`FormatDocumentCached` 成为唯一 markdown 渲染路径：生产代码 `markdown.Render` 调用点收敛到 `renderengine/cache.go` 一处（其余为测试/基准）；band 差异化只剩 highlighter 注入、`HideHighlightFallback`、`TrustMarkdown` 三个 formatter 选项，mode="band" 与 scrollback 的 "assistant"/"plain" 分组共享同一缓存实例；
+- **验收**：`TestActiveStreamControllerRebuildsMarkdownCacheForSyntaxTheme` 改为断言共享缓存命中/未命中（初始 miss、稳定帧 hit、theme 切换 miss、resize miss），markdown parity 测试不变且全绿；性能量化：`BenchmarkRenderCacheHit` 876ns/op vs `BenchmarkMarkdownRenderRaw` 707µs/op（≈800x），`BenchmarkActiveMarkdownRepaint100KiB` 281µs/op / 60 allocs（初始渲染含一次 goldmark 为 493µs / 2120 allocs，重绘路径不再重复解析）；`ui`/`formatter`/`renderengine` 全量回归通过。
 
 ### 阶段 E：删除补偿状态机与旧入口（终结补丁模式）
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
 	"golang.org/x/term"
@@ -22,6 +23,22 @@ type MarkdownFormatter struct {
 	// ThemeContextProvider lets UI owners inject the live palette and terminal
 	// profile without creating a formatter -> ui package import cycle.
 	ThemeContextProvider func() style.ThemeContext
+	// Highlighter overrides the syntax highlighter for assistant-body renders
+	// (nil = syntax.Default). ActiveBand injects a throttled instance here so
+	// the band path stays on the single Formatter render path.
+	Highlighter syntax.Highlighter
+	// AssistantBody applies the shared assistant-body contract (Hyperlinks off,
+	// TableMode auto) used by scrollback replay and the live band.
+	AssistantBody bool
+	// HideHighlightFallback hides large-block skip labels; ActiveBand sets this
+	// so the live viewport stays clean.
+	HideHighlightFallback bool
+	// TrustMarkdown skips IsMarkdown detection; ActiveBand sets this because
+	// its own markdown flag already decided the path.
+	TrustMarkdown bool
+	// Cache is the shared RenderCache (阶段 D). nil falls back to the
+	// process-wide SharedRenderCache; pass an explicit cache to bypass.
+	Cache *renderengine.RenderCache
 }
 
 // NewMarkdownFormatter 创建新的 Markdown 格式化器
@@ -146,7 +163,10 @@ func (f *MarkdownFormatter) Format(text string) string {
 	opts := markdown.AssistantBodyOptions(width, theme)
 	opts.SyntaxTheme = syntaxTheme
 
-	doc := markdown.Render(text, opts)
+	// Same shared RenderCache as FormatDocument/ActiveBand; "plain" mode keeps
+	// this options group (AssistantBodyOptions, Hyperlinks forced off) distinct
+	// from the structured "assistant" group.
+	doc, _ := renderengine.SharedRenderCache().Render("plain", text, opts)
 	if !f.useColor {
 		return render.PlainBackend{}.Render(doc)
 	}
@@ -155,11 +175,19 @@ func (f *MarkdownFormatter) Format(text string) string {
 
 // FormatDocument returns the structured render model without ANSI encoding.
 func (f *MarkdownFormatter) FormatDocument(text string) render.Document {
-	if text == "" || !f.IsMarkdown(text) {
+	doc, _ := f.FormatDocumentCached(text)
+	return doc
+}
+
+// FormatDocumentCached returns the structured render model, serving hits from
+// the shared RenderCache when possible. The bool reports cache hit: false
+// means the document was (re)built this call.
+func (f *MarkdownFormatter) FormatDocumentCached(text string) (render.Document, bool) {
+	if text == "" || (!f.TrustMarkdown && !f.IsMarkdown(text)) {
 		if text == "" {
-			return render.Document{}
+			return render.Document{}, false
 		}
-		return render.SingleLineDoc(render.TextSpan(text))
+		return render.SingleLineDoc(render.TextSpan(text)), false
 	}
 	width := f.Width
 	if width <= 0 {
@@ -176,7 +204,22 @@ func (f *MarkdownFormatter) FormatDocument(text string) render.Document {
 	// parity with ActiveBand.
 	opts := markdown.DefaultOptions(width, theme)
 	opts.SyntaxTheme = syntaxTheme
-	return markdown.Render(text, opts)
+	if f.Highlighter != nil {
+		opts.Highlighter = f.Highlighter
+	}
+	mode := "assistant"
+	if f.AssistantBody {
+		opts.ApplyAssistantBodyContract()
+		mode = "band"
+	}
+	if f.HideHighlightFallback {
+		opts.HideHighlightFallback = true
+	}
+	cache := f.Cache
+	if cache == nil {
+		cache = renderengine.SharedRenderCache()
+	}
+	return cache.Render(mode, text, opts)
 }
 
 func detectFormatterWidth() int {
