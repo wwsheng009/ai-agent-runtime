@@ -272,6 +272,20 @@ func (s *FixedBottomSurface) flushHoldingLock(writer io.Writer, render func(io.W
 	return s.presenter.FlushHoldingLock(writer, render)
 }
 
+func (s *FixedBottomSurface) flushHandoffHoldingLock(writer io.Writer, plan renderengine.HandoffPlan) error {
+	if s == nil {
+		return nil
+	}
+	if s.engine != nil {
+		return s.engine.FlushHandoffHoldingLock(writer, plan)
+	}
+	if presenter := s.presenterLocked(); presenter != nil {
+		return presenter.FlushHandoffHoldingLock(writer, plan)
+	}
+	s.presenter = renderengine.NewPresenter()
+	return s.presenter.FlushHandoffHoldingLock(writer, plan)
+}
+
 func (s *FixedBottomSurface) Enable() bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -932,9 +946,7 @@ func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, outp
 	plan := renderengine.NewHandoffPlan(height, regionBottom, rows)
 	// The caller already holds terminalWriteMu through writeOutput. Reuse the
 	// shared handoff plan/presenter without reacquiring the non-reentrant lock.
-	_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {
-		_, _ = plan.WriteTo(w)
-	})
+	_ = s.flushHandoffHoldingLock(os.Stdout, plan)
 	if writer != os.Stdout {
 		_, _ = plan.WriteTo(writer)
 	}
@@ -4304,9 +4316,7 @@ func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
 	// Presenter owns the cursor-neutral DECSTBM bytes and batches them as one
 	// handoff plan, so no Terminal fmt.Print call can interleave with a frame.
 	plan := renderengine.NewHandoffPlan(height, outputBottom, rows)
-	if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
-		_, _ = plan.WriteTo(w)
-	}); err != nil {
+	if err := s.flushHandoffHoldingLock(os.Stdout, plan); err != nil {
 		return false
 	}
 

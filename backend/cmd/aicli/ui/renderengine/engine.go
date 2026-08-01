@@ -105,6 +105,15 @@ func (e *Engine) FlushHoldingLock(w io.Writer, render func(io.Writer)) error {
 	return e.presenter.FlushHoldingLock(w, render)
 }
 
+// FlushHandoffHoldingLock emits one native-scrollback handoff through the
+// engine-owned Presenter. Callers must already hold the shared terminal lock.
+func (e *Engine) FlushHandoffHoldingLock(w io.Writer, plan HandoffPlan) error {
+	if e == nil || e.presenter == nil {
+		return nil
+	}
+	return e.presenter.FlushHandoffHoldingLock(w, plan)
+}
+
 // Invalidate is the unified render-intent entry point: it coalesces a render
 // callback under key (replacing any pending job for the same key) and arms it
 // after delay. reason is diagnostic only and is reserved for the future frame
