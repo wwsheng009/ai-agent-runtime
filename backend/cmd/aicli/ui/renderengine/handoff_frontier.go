@@ -8,6 +8,11 @@ type HandoffFrontier struct {
 	line int
 }
 
+// NewHandoffFrontier creates an empty handoff boundary for a RenderEngine.
+func NewHandoffFrontier() *HandoffFrontier {
+	return &HandoffFrontier{}
+}
+
 // Value returns the number of leading retained lines already handed off.
 func (f *HandoffFrontier) Value() int {
 	if f == nil {

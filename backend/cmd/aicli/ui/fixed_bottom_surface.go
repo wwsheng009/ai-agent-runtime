@@ -154,7 +154,7 @@ type FixedBottomSurface struct {
 	// handoffFrontier marks the oldest retained history lines already inserted
 	// into native scrollback. It keeps the handoff boundary explicit while the
 	// surface still owns legacy capability fallback behavior.
-	handoffFrontier renderengine.HandoffFrontier
+	handoffFrontier *renderengine.HandoffFrontier
 	// softOutputLines is the most recent committed output still sitting at the
 	// bottom of the output region. Source-backed resize reflow may rewrite it
 	// in place; geometry changes or overflow trim invalidate safe reflow.
@@ -215,7 +215,8 @@ func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
 		term = NewTerminal()
 	}
 	return &FixedBottomSurface{
-		terminal: term,
+		terminal:        term,
+		handoffFrontier: renderengine.NewHandoffFrontier(),
 		statusModel: &style.StatusLineModel{
 			State: style.RunReady,
 		},
@@ -246,6 +247,7 @@ func (s *FixedBottomSurface) SetEngine(engine *renderengine.Engine) {
 	s.mu.Lock()
 	s.engine = engine
 	s.presenter = engine.Presenter()
+	s.handoffFrontier = engine.HandoffFrontier()
 	s.mu.Unlock()
 }
 

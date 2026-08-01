@@ -15,6 +15,7 @@ type Engine struct {
 	presenter *Presenter
 	composer  *Composer
 	cache     *RenderCache
+	handoff   *HandoffFrontier
 }
 
 // NewEngine creates an Engine with a live FramePump.
@@ -24,6 +25,7 @@ func NewEngine() *Engine {
 		presenter: NewPresenter(),
 		composer:  NewComposer(),
 		cache:     SharedRenderCache(),
+		handoff:   NewHandoffFrontier(),
 	}
 }
 
@@ -59,6 +61,19 @@ func (e *Engine) Cache() *RenderCache {
 		return nil
 	}
 	return e.cache
+}
+
+// HandoffFrontier returns the Engine-owned scrollback boundary. The surface
+// and reconcile paths share this instance so handoff progress cannot diverge
+// between presenters using one Engine.
+func (e *Engine) HandoffFrontier() *HandoffFrontier {
+	if e == nil {
+		return nil
+	}
+	if e.handoff == nil {
+		e.handoff = NewHandoffFrontier()
+	}
+	return e.handoff
 }
 
 // NewScreenModel creates a screen model through the Engine boundary. The

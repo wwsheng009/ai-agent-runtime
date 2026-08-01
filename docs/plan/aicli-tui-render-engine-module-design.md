@@ -513,8 +513,8 @@ const (
 
 ### 阶段 E：删除补偿状态机与旧入口（终结补丁模式）
 
-- **状态：进行中（2026-08-01）。** `renderengine.HandoffFrontier` 已落地，
-  owned surface 的 handoff 边界不再是裸 `historyHandedOff` 整数；其余 legacy
+- **状态：进行中（2026-08-01）。** `Engine.HandoffFrontier()` 已落地并由
+  owned surface 共享，handoff 边界不再是裸 `historyHandedOff` 整数；其余 legacy
   状态机仍需在 capability fallback 收敛后删除。
 - 删除 §6 表中标注"删除"的全部方法/字段：补偿状态机、`insertHistoryLinesLocked` 直写、`repaintActiveBandDiffLocked` 的 prev 逻辑、soft output 状态机、4 个 timer、`FixedBottomSurface` 的渲染方法（facade 只剩 Enable/Disable/Lease 委托）；
 - P0 审计基线（155 组/552 call site）随迁移逐项从基线删除，最终 `tui_unowned_terminal_write_total` 归零；

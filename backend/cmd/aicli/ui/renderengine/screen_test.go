@@ -46,3 +46,18 @@ func TestEngineOwnsSharedRenderCache(t *testing.T) {
 		t.Fatal("Engine cache is not the shared RenderCache")
 	}
 }
+
+func TestEngineOwnsHandoffFrontier(t *testing.T) {
+	engine := NewEngine()
+	t.Cleanup(engine.Shutdown)
+	frontier := engine.HandoffFrontier()
+	if frontier == nil {
+		t.Fatal("Engine handoff frontier is nil")
+	}
+	if frontier != engine.HandoffFrontier() {
+		t.Fatal("Engine returned different handoff frontier instances")
+	}
+	if frontier.Value() != 0 {
+		t.Fatalf("new handoff frontier = %d, want 0", frontier.Value())
+	}
+}

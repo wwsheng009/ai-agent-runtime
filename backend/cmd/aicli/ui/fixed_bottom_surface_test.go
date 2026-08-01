@@ -27,6 +27,9 @@ func TestFixedBottomSurfaceAdoptsEnginePresenter(t *testing.T) {
 	if surface.presenter != engine.Presenter() {
 		t.Fatal("surface presenter is not owned by the render engine")
 	}
+	if surface.handoffFrontier != engine.HandoffFrontier() {
+		t.Fatal("surface handoff frontier is not owned by the render engine")
+	}
 	legacy := renderengine.NewPresenter()
 	surface.SetPresenter(legacy)
 	if surface.engine != nil || surface.presenter != legacy {
