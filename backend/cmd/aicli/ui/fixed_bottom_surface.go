@@ -4182,16 +4182,18 @@ func (s *FixedBottomSurface) visibleOutputRowsLocked() int {
 // rows from the retained transcript without falling back to CSI T.
 const historyWindowHeadroom = 40
 
-// historyLinesAreSinglePhysicalRowsLocked reports whether the retained logical
-// history currently materializes 1:1 onto terminal rows. Native scrollback
-// handoff tracks logical indices, so it is only safe while this invariant
-// holds. A future physical-row ownership model can replace this conservative
-// gate without changing the immutable handoff boundary.
-func (s *FixedBottomSurface) historyLinesAreSinglePhysicalRowsLocked() bool {
-	if s == nil || len(s.historyWindow) == 0 {
+// historySegmentIsSinglePhysicalRowsLocked reports whether the given logical
+// history segment materializes 1:1 onto terminal rows at the current width.
+// Native scrollback handoff writes one terminal row per emitted line, so a
+// segment is only row-safe while this invariant holds. Unlike the previous
+// whole-window gate, only the segment being handed off matters: a wrapped
+// line still living in the visible region does not block older rows from
+// reaching scrollback.
+func (s *FixedBottomSurface) historySegmentIsSinglePhysicalRowsLocked(segment []string) bool {
+	if s == nil || len(segment) == 0 {
 		return true
 	}
-	return len(s.historyRowsSnapshotLocked()) == len(s.historyWindow)
+	return len(s.expandHistoryLinesLocked(segment)) == len(segment)
 }
 
 // commitExcessHistoryToScrollbackLocked hands off any history rows older than
@@ -4202,6 +4204,13 @@ func (s *FixedBottomSurface) historyLinesAreSinglePhysicalRowsLocked() bool {
 // normal memory bound.
 func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 	if s == nil || s.terminal == nil || len(s.historyWindow) == 0 {
+		return
+	}
+	if s.leaseID != 0 {
+		// Alternate-screen lease active: primary flush is suspended and the
+		// leased alternate screen owns the output region. Native scrollback
+		// handoff bytes must not be emitted here; the release repaint replays
+		// retained state and commits pending history then.
 		return
 	}
 	visible := s.visibleOutputRowsLocked()
@@ -4224,16 +4233,23 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() {
 		if s.softOutputValid && len(s.softOutputLines) > 0 {
 			softStart, softSuffixOwned = s.ownedHistorySuffixStartLocked(s.softOutputLines)
 		}
-		// A logical line is not necessarily one terminal row. The owned frame
-		// may therefore have its top at the middle of a wrapped line, while the
-		// DECSTBM primitive below can only hand off whole physical rows. Refuse
-		// the operation until the current width can represent every retained
-		// logical line as one physical row; otherwise writing a complete logical
-		// line would scroll/duplicate the wrong history.
-		if !s.historyLinesAreSinglePhysicalRowsLocked() {
-			return
+		segment := s.historyWindow[s.historyHandedOff:needHandedOff]
+		var handoff []string
+		if s.historySegmentIsSinglePhysicalRowsLocked(segment) {
+			// Fast path: every logical line is exactly one terminal row, so
+			// write the styled source verbatim (preserves ANSI styling in
+			// native scrollback).
+			handoff = append([]string(nil), segment...)
+		} else {
+			// Wrapped segment: expand each logical line into its physical
+			// rows so the DECSTBM \r\n scroll count stays 1:1 with the
+			// terminal. Rows are plain text; the owned full-frame repaint
+			// immediately re-renders the visible window from styled source.
+			handoff = s.expandHistorySegmentToPhysicalTextLocked(segment)
+			if len(handoff) == 0 {
+				return
+			}
 		}
-		handoff := append([]string(nil), s.historyWindow[s.historyHandedOff:needHandedOff]...)
 		if !s.insertHistoryLinesLocked(handoff) {
 			// A failed terminal write must not advance the logical boundary:
 			// doing so would make these rows permanently disappear from future

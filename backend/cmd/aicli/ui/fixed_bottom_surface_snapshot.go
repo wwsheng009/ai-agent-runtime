@@ -139,7 +139,16 @@ type fixedBottomPromptPaintPlan struct {
 }
 
 func (s *FixedBottomSurface) historyRowsSnapshotLocked() [][]vt.Cell {
-	if len(s.historyWindow) == 0 {
+	return s.expandHistoryLinesLocked(s.historyWindow)
+}
+
+// expandHistoryLinesLocked materializes logical history lines as terminal
+// physical rows at the current width. ANSI is interpreted by vt.Screen so
+// styles and wide-cell continuations survive wrapping. This is the single
+// expansion primitive shared by the composed frame, the segment single-row
+// gate, and wrapped-segment handoff.
+func (s *FixedBottomSurface) expandHistoryLinesLocked(lines []string) [][]vt.Cell {
+	if len(lines) == 0 {
 		return nil
 	}
 	width := s.terminal.Width()
@@ -150,7 +159,7 @@ func (s *FixedBottomSurface) historyRowsSnapshotLocked() [][]vt.Cell {
 	// control sequences as zero-width, while the extra row per logical line
 	// accounts for its explicit CRLF separator.
 	height := 1
-	for _, line := range s.historyWindow {
+	for _, line := range lines {
 		displayWidth := DisplayWidth(line)
 		if displayWidth < 1 {
 			displayWidth = 1
@@ -158,7 +167,7 @@ func (s *FixedBottomSurface) historyRowsSnapshotLocked() [][]vt.Cell {
 		height += (displayWidth+width-1)/width + 1
 	}
 	screen := vt.NewScreen(width, height)
-	for _, line := range s.historyWindow {
+	for _, line := range lines {
 		screen.Feed(line)
 		screen.Feed("\r\n")
 	}
@@ -167,6 +176,51 @@ func (s *FixedBottomSurface) historyRowsSnapshotLocked() [][]vt.Cell {
 		return nil
 	}
 	return screen.CellRows(1, end)
+}
+
+// expandHistorySegmentToPhysicalTextLocked expands a handoff segment whose
+// logical lines wrap at the current width into physical-row text. Each
+// returned row occupies exactly one terminal row, so the DECSTBM \r\n scroll
+// count stays 1:1 with the terminal. The expansion goes through vt.Screen so
+// wide runes and ANSI-deferred wrapping match real terminal behavior. Filler
+// rows are repainted by the owned full-frame render immediately after handoff,
+// so plain physical text (without re-emitted SGR) is sufficient here.
+func (s *FixedBottomSurface) expandHistorySegmentToPhysicalTextLocked(segment []string) []string {
+	if len(segment) == 0 {
+		return nil
+	}
+	width := s.terminal.Width()
+	if width < 1 {
+		return nil
+	}
+	rows := s.expandHistoryLinesLocked(segment)
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, cells := range rows {
+		out = append(out, historyCellsToPlainText(cells))
+	}
+	return out
+}
+
+// historyCellsToPlainText flattens one physical row of reconstructed cells to
+// plain text, mirroring vt.Screen.Line: wide-run continuation columns are
+// skipped, blank cells become spaces, and trailing blanks are trimmed. The
+// result is exactly one terminal row, so the handoff scroll count stays 1:1.
+func historyCellsToPlainText(cells []vt.Cell) string {
+	var b strings.Builder
+	for _, c := range cells {
+		if c.Cont {
+			continue
+		}
+		if c.Text == "" {
+			b.WriteByte(' ')
+		} else {
+			b.WriteString(c.Text)
+		}
+	}
+	return strings.TrimRight(b.String(), " ")
 }
 
 func (s *FixedBottomSurface) historyRowsWithCursorBlankLocked() [][]vt.Cell {

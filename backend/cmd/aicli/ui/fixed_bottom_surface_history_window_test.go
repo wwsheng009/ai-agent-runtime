@@ -298,7 +298,13 @@ func TestFixedBottomSurface_ActiveBandHandoffFreezesSoftHistory(t *testing.T) {
 	}
 }
 
-func TestFixedBottomSurface_WrappedHistoryDefersLogicalLineHandoff(t *testing.T) {
+// TestFixedBottomSurface_WrappedHistoryHandsOffViaPhysicalExpansion pins the
+// refactor contract: wrapped logical lines must reach native scrollback as
+// expanded physical rows (one terminal row per emitted line) instead of
+// stalling the whole handoff boundary. Previously a wrapped line anywhere in
+// the retained window froze handoff at 0, leaving history neither on screen
+// nor in scrollback and growing the window without bound.
+func TestFixedBottomSurface_WrappedHistoryHandsOffViaPhysicalExpansion(t *testing.T) {
 	const width, height = 12, 20
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	captureUIStdout(t, func() {
@@ -318,14 +324,22 @@ func TestFixedBottomSurface_WrappedHistoryDefersLogicalLineHandoff(t *testing.T)
 	if len(surface.HistoryRowsSnapshot()) <= len(history) {
 		t.Fatalf("precondition: wrapped history has physical=%d logical=%d", len(surface.HistoryRowsSnapshot()), len(history))
 	}
-	if got := surface.HistoryHandedOffForTest(); got != 0 {
-		t.Fatalf("wrapped logical history advanced handoff boundary to %d", got)
+	// Wrapped segment must advance the logical boundary just like a plain one.
+	if got := surface.HistoryHandedOffForTest(); got != total-visible {
+		t.Fatalf("historyHandedOff=%d want %d (total-visible)", got, total-visible)
 	}
+	// Dual-retain: window still holds every logical line (kept for restore).
 	if len(history) != total {
-		t.Fatalf("wrapped history was trimmed before safe handoff: got %d lines want %d", len(history), total)
+		t.Fatalf("wrapped history was trimmed before handoff completed: got %d lines want %d", len(history), total)
 	}
-	if sequence := terminalScrollRegionSequence(1, surface.visibleOutputRowsForTest()); strings.Contains(output, sequence) {
-		t.Fatalf("wrapped logical lines must not use row-unsafe native handoff %q", sequence)
+	// Handoff bytes must be the Codex-aligned DECSTBM path.
+	if !strings.Contains(output, "\x1b[1;") || !strings.Contains(output, "\r\n") {
+		t.Fatalf("expected DECSTBM physical-row handoff sequence; total=%d visible=%d", total, visible)
+	}
+	// The oldest wrapped logical line's first physical row must appear in the
+	// handoff stream (expansion preserves content, not just the boundary).
+	if !strings.Contains(output, strings.Repeat("x", width)) {
+		t.Fatalf("oldest wrapped line's physical rows missing from handoff output")
 	}
 	for i, line := range history {
 		want := fmt.Sprintf("%s-%02d", longLine, i)
@@ -335,27 +349,30 @@ func TestFixedBottomSurface_WrappedHistoryDefersLogicalLineHandoff(t *testing.T)
 	}
 }
 
-func TestFixedBottomSurface_WrappedHistorySurvivesNormalHardCap(t *testing.T) {
+// TestFixedBottomSurface_WrappedHistoryTrimsAtHardCapAfterPhysicalHandoff
+// pins that wrapped history no longer pins the window at its unbounded size:
+// once physical-row handoff completes, the normal soft-trim bound applies even
+// though the retained lines wrap.
+func TestFixedBottomSurface_WrappedHistoryTrimsAtHardCapAfterPhysicalHandoff(t *testing.T) {
 	const width, height = 12, 20
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	total := historyWindowMaxLines + 5
 	longLine := strings.Repeat("界", width)
 
-	surface.mu.Lock()
-	for i := 0; i < total; i++ {
-		surface.appendHistoryWindowLocked(fmt.Sprintf("%s-%03d\n", longLine, i))
-	}
-	surface.mu.Unlock()
+	captureUIStdout(t, func() {
+		surface.mu.Lock()
+		for i := 0; i < total; i++ {
+			surface.appendHistoryWindowLocked(fmt.Sprintf("%s-%03d\n", longLine, i))
+		}
+		surface.mu.Unlock()
+	})
 
 	history := surface.HistoryWindowForTest()
-	if got := surface.HistoryHandedOffForTest(); got != 0 {
-		t.Fatalf("wrapped history advanced handoff boundary to %d", got)
+	if got := surface.HistoryHandedOffForTest(); got == 0 {
+		t.Fatal("wrapped history must hand off via physical expansion")
 	}
-	if len(history) != total {
-		t.Fatalf("unhanded wrapped history was discarded at normal cap: got %d lines want %d", len(history), total)
-	}
-	if history[0] != fmt.Sprintf("%s-%03d", longLine, 0) {
-		t.Fatalf("oldest unhanded line changed: %q", history[0])
+	if len(history) > historyWindowMaxLines {
+		t.Fatalf("wrapped history exceeded hard cap %d: got %d lines", historyWindowMaxLines, len(history))
 	}
 	if history[len(history)-1] != fmt.Sprintf("%s-%03d", longLine, total-1) {
 		t.Fatalf("newest unhanded line changed: %q", history[len(history)-1])
@@ -378,6 +395,54 @@ func TestFixedBottomSurface_FailedHistoryInsertDoesNotAdvanceBoundary(t *testing
 	}
 	if history := surface.HistoryWindowForTest(); strings.Join(history, "|") != "oldest|middle|newest" {
 		t.Fatalf("failed handoff changed retained history: %q", history)
+	}
+}
+
+// TestFixedBottomSurface_WrappedHistoryHandsOffDuringActiveBandGrowth pins
+// the combined handoff-trigger pair that used to strand wrapped history: a
+// narrow terminal wraps retained lines, then an ActiveBand appears and
+// displaces part of the visible region. The newly hidden wrapped rows must
+// reach native scrollback as physical rows instead of being clipped until the
+// band clears.
+func TestFixedBottomSurface_WrappedHistoryHandsOffDuringActiveBandGrowth(t *testing.T) {
+	const width, height = 12, 20
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+	})
+	visibleBefore := surface.visibleOutputRowsForTest()
+	longLine := strings.Repeat("y", width+5)
+	captureUIStdout(t, func() {
+		// Fill the visible region with wrapped lines (no overflow yet).
+		for i := 0; i < visibleBefore; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("%s-%02d\n", longLine, i))
+		}
+	})
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("precondition: historyHandedOff=%d want 0 (no overflow yet)", got)
+	}
+
+	bandOutput := captureUIStdout(t, func() {
+		surface.SetActiveBand([]string{"• Running grep"})
+	})
+	visibleAfter := surface.visibleOutputRowsForTest()
+	displaced := visibleBefore - visibleAfter
+	if displaced < 1 {
+		t.Fatalf("ActiveBand displaced %d rows, want >= 1", displaced)
+	}
+	if got := surface.HistoryHandedOffForTest(); got < displaced {
+		t.Fatalf("historyHandedOff=%d want >= displaced=%d after band growth", got, displaced)
+	}
+	if !strings.Contains(bandOutput, "\x1b[1;") || !strings.Contains(bandOutput, "\r\n") {
+		t.Fatalf("band-growth handoff must use DECSTBM physical-row sequence")
+	}
+	// The displaced oldest wrapped lines must appear in the band-growth output.
+	if !strings.Contains(bandOutput, strings.Repeat("y", width)) {
+		t.Fatalf("newly hidden wrapped rows missing from band-growth handoff")
+	}
+	// Dual-retain: all logical lines remain in the window for shrink restore.
+	if history := surface.HistoryWindowForTest(); len(history) != visibleBefore {
+		t.Fatalf("band growth trimmed retained history: got %d lines want %d", len(history), visibleBefore)
 	}
 }
 

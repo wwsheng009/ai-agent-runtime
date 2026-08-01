@@ -53,5 +53,9 @@ func captureStdoutStderr(t *testing.T, fn func()) (string, string) {
 		t.Fatalf("close stderr reader: %v", err)
 	}
 
-	return string(stdoutData), string(stderrData)
+	// Selection-style prompts never paint terminal frames themselves. Async
+	// sibling tests may still leak motion spinner repaints ("\x1b[s ... \x1b[u")
+	// to the process-wide stdout (see stripAsyncTerminalNoise); strip those
+	// cursor-anchored frames so a real stdout leak still fails the gate.
+	return stripAsyncTerminalNoise(string(stdoutData)), string(stderrData)
 }
