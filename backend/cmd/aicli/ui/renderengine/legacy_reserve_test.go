@@ -2,6 +2,30 @@ package renderengine
 
 import "testing"
 
+func TestLegacyReserveANSIPlansPreserveDECSTBMOrdering(t *testing.T) {
+	if got, want := LegacyReserveScrollUpANSI(24, 3, 6), "\x1b[1;21r\x1b[1;1H\x1b[21;1H\n\n\n"; got != want {
+		t.Fatalf("scroll-up ANSI = %q, want %q", got, want)
+	}
+	if got, want := LegacyReserveScrollDownANSI(24, 3, 3), "\x1b[1;21r\x1b[1;1H\x1b[1;1H\x1b[3T"; got != want {
+		t.Fatalf("scroll-down ANSI = %q, want %q", got, want)
+	}
+	if got, want := LegacyReserveDebtANSI(24, 3, 2), "\x1b[21;1H\n\n"; got != want {
+		t.Fatalf("debt ANSI = %q, want %q", got, want)
+	}
+}
+
+func TestLegacyReserveANSIPlansClampInvalidGeometry(t *testing.T) {
+	if got := LegacyReserveScrollUpANSI(1, 1, 2); got != "" {
+		t.Fatalf("short terminal scroll-up = %q, want empty", got)
+	}
+	if got := LegacyReserveScrollDownANSI(24, 99, 99); got != "\x1b[1;1r\x1b[1;1H\x1b[1;1H\x1b[1T" {
+		t.Fatalf("clamped scroll-down = %q", got)
+	}
+	if got := LegacyReserveDebtANSI(24, 99, 99); got != "\x1b[1;1H\n" {
+		t.Fatalf("clamped debt = %q", got)
+	}
+}
+
 func TestLegacyReserveStateGrowthCancelsPendingAndAbsorbsBlank(t *testing.T) {
 	state := LegacyReserveState{
 		ScrollCompensatedRows: 3,

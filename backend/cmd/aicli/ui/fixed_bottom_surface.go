@@ -3035,12 +3035,7 @@ func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Build
 	if height <= 1 {
 		return
 	}
-	bottom := outputBottomRowForHeight(height, s.effectiveBottomRowsLocked(height))
-	if rows > bottom {
-		rows = bottom
-	}
-	builder.WriteString(terminalMoveToSequence(bottom, 1))
-	builder.WriteString(strings.Repeat("\n", rows))
+	builder.WriteString(renderengine.LegacyReserveDebtANSI(height, s.effectiveBottomRowsLocked(height), rows))
 	s.legacyReserve.CursorOnBlankRow = true
 	s.syncLegacyReserveMirrorLocked()
 }
@@ -3069,35 +3064,17 @@ func (s *FixedBottomSurface) markOutputWrittenLocked() {
 }
 
 func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height, oldBottomRows, newBottomRows int) {
-	if builder == nil || height <= 1 || newBottomRows <= oldBottomRows {
+	if builder == nil {
 		return
 	}
-	oldBottomRows = effectiveBottomRowsForHeight(height, oldBottomRows)
-	newBottomRows = effectiveBottomRowsForHeight(height, newBottomRows)
-	delta := newBottomRows - oldBottomRows
-	if delta <= 0 {
-		return
-	}
-	oldOutputBottom := outputBottomRowForHeight(height, oldBottomRows)
-	if delta > oldOutputBottom {
-		delta = oldOutputBottom
-	}
-	builder.WriteString(terminalScrollRegionSequence(1, oldOutputBottom))
-	builder.WriteString(terminalMoveToSequence(oldOutputBottom, 1))
-	builder.WriteString(strings.Repeat("\n", delta))
+	builder.WriteString(renderengine.LegacyReserveScrollUpANSI(height, oldBottomRows, newBottomRows))
 }
 
 func appendOutputScrollDownForBottomReserveShrinkSequence(builder *strings.Builder, height, bottomRows, rows int) {
-	if builder == nil || height <= 1 || rows < 1 {
+	if builder == nil {
 		return
 	}
-	outputBottom := outputBottomRowForHeight(height, bottomRows)
-	if rows > outputBottom {
-		rows = outputBottom
-	}
-	builder.WriteString(terminalScrollRegionSequence(1, outputBottom))
-	builder.WriteString(terminalMoveToSequence(1, 1))
-	builder.WriteString(terminalScrollDownSequence(rows))
+	builder.WriteString(renderengine.LegacyReserveScrollDownANSI(height, bottomRows, rows))
 }
 
 func (s *FixedBottomSurface) renderStatusLocked() {
