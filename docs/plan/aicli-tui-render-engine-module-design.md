@@ -457,9 +457,13 @@ const (
 
 ### 阶段 C：行所有权仲裁（解决 viewport/历史/ActiveBand 冲突）
 
-- ownership.go 落地；Composer 输出 RowPlan 带 owner 标注；`/debug display` 增加 owner 表视图；
+**状态：已实施（2026-08-01）**，`ui/viewport/rowplan.go`（RowOwner/PlanRow/ComposePlan）与 owned 帧生产路径接入完成。
+
+- `rowplan.go` 落地：`RowOwner` 枚举（Gap/Transcript/Band/Prompt/Popup/Status，零值 Gap）、`PlanRow{Owner,Cells}`、`ComposePlan`（全屏 plan 带每行 owner 标注）；`Compose` 收敛为 `ComposePlan` 的兼容包装（`compose.go` 保留 P5.2 布局注释与语义：历史 bottom-aligned、reserve 占最后 N 行、其余 Gap）；
+- 所有 paint 计划输出 owner：band/notice/dynamic/prompt 行（`promptPaintPlanLocked`）、popup/composer 行（`popupPaintPlanLocked`）、status 行；`bottomRowsWithOwnersLocked` + `bottomOwnerMapLocked` 将 bottom reserve 每个物理行映射到组件 owner，margin/gap 行显式标 Gap——「无未声明行」；
+- `renderOwnedViewportLocked` 改走 `composedPlanLocked`（历史行标 Transcript），刷新 `lastRowOwners`；`/debug display` 增加 Row Ownership (stage C) 表（`RowPlanDebugString`）；`RowOwnersForTest` 供测试取 owner 表；
 - band/prompt/popup/status 全部改为"声明占用行数"，行分配由求解器完成；
-- **验收**：布局不变量测试（owner 全覆盖、无未声明行）；既有 band grow/shrink、popup 开关、status 出现/消失的组合测试全部改走 RowPlan 后通过。
+- **验收**：布局不变量测试通过（`fixed_bottom_surface_ownership_test.go`：owner 全覆盖且每行均为已声明枚举、内容行必有组件 owner（band/popup/notice/prompt/dynamic/status 各归其主）、band gap 行声明为 Gap、owner 表渲染行数=屏高）；既有 band grow/shrink、popup 开关、status 出现/消失的组合测试全部保持绿（ui 包全量回归通过）。
 
 ### 阶段 D：缓存与单一路径（解决性能与双渲染调用点）
 
