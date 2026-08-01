@@ -153,7 +153,17 @@ func (p *ToolExecutionPolicy) AllowToolCall(tool skill.ToolInfo, args map[string
 				return fmt.Errorf("read-only policy requires an explicit read-only shell command for %s", tool.Name)
 			}
 			for _, command := range commands {
-				if !IsShellReadOnlyCommand(command) {
+				assessment := AssessShellReadOnlyCommand(command)
+				if assessment.Allowed {
+					continue
+				}
+				if assessment.Reason == ShellReadOnlyReasonCompound {
+					return fmt.Errorf("read-only policy blocks compound shell command; submit one command per shell.commands entry: %s", command)
+				}
+				if assessment.Reason == ShellReadOnlyReasonDynamicSyntax {
+					return fmt.Errorf("read-only policy blocks shell redirection or dynamic command syntax: %s", command)
+				}
+				if !assessment.Allowed {
 					return fmt.Errorf("read-only policy blocks non-readonly shell command: %s", command)
 				}
 			}
@@ -348,6 +358,7 @@ func collectCommandArgs(args map[string]interface{}) []string {
 		"command":    true,
 		"executable": true,
 		"program":    true,
+		"commands":   true,
 	})
 }
 

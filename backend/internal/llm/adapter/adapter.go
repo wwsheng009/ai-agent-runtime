@@ -8,19 +8,6 @@ import (
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
-// ToolCall 工具调用定义（简化版本，避免依赖 functions 包）
-type ToolCall struct {
-	ID       string           `json:"id"`
-	Function ToolCallFunction `json:"function"`
-	Type     string           `json:"type"`
-}
-
-// ToolCallFunction 工具调用函数
-type ToolCallFunction struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
 // RequestConfig 请求配置
 type RequestConfig struct {
 	Model                  string
@@ -108,10 +95,6 @@ type ProtocolAdapter interface {
 	// toolCalls: ToolCalls 数据（从响应中提取的原始格式）
 	// reasoning: 推理内容
 	BuildAssistantMessage(content string, toolCalls []map[string]interface{}, reasoning string) map[string]interface{}
-
-	// ExtractToolCallsFromRawCalls 从已解析的 tool_calls 数组直接构造 ToolCall 列表
-	// 用于流式响应，避免重新序列化/解析可能造成的问题
-	ExtractToolCallsFromRawCalls(rawCalls []map[string]interface{}) []ToolCall
 
 	// HandleResponse 处理完整响应（流式或非流式）
 	// isStream: 是否为流式请求

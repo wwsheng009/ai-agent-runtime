@@ -481,16 +481,24 @@ func TestCodexBuildRequest_OmitsReasoningConfigWithoutExplicitEffort(t *testing.
 	}
 }
 
-func TestCodexBuildRequest_OmitsReasoningConfigWhenInvalid(t *testing.T) {
+func TestCodexBuildRequest_PreservesConfiguredAndCustomReasoningEffort(t *testing.T) {
 	a := &CodexAdapter{}
-	req := a.BuildRequest(RequestConfig{
-		Model:           "gpt-5.2",
-		Messages:        []map[string]interface{}{{"role": "user", "content": "test"}},
-		ReasoningEffort: "fast",
-	})
+	for _, effort := range []string{"max", " custom-effort "} {
+		t.Run(strings.TrimSpace(effort), func(t *testing.T) {
+			req := a.BuildRequest(RequestConfig{
+				Model:           "gpt-5.2",
+				Messages:        []map[string]interface{}{{"role": "user", "content": "test"}},
+				ReasoningEffort: effort,
+			})
 
-	if _, exists := req["reasoning"]; exists {
-		t.Fatalf("did not expect reasoning config for invalid effort: %#v", req["reasoning"])
+			reasoning, ok := req["reasoning"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected reasoning config for %q, got %#v", effort, req["reasoning"])
+			}
+			if got := reasoning["effort"]; got != strings.TrimSpace(effort) {
+				t.Fatalf("expected reasoning effort %q to be preserved, got %#v", strings.TrimSpace(effort), got)
+			}
+		})
 	}
 }
 
@@ -537,10 +545,14 @@ func TestCodexHandleResponse_StreamWithOutputIndexToolCall(t *testing.T) {
 	if !ok || len(toolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %T %#v", msg["tool_calls"], msg["tool_calls"])
 	}
-	if toolCalls[0]["name"] != "list_mcp_resources" {
+	if toolCalls[0]["type"] != "function" {
+		t.Fatalf("expected function type, got %#v", toolCalls[0])
+	}
+	fn, ok := toolCalls[0]["function"].(map[string]interface{})
+	if !ok || fn["name"] != "list_mcp_resources" {
 		t.Fatalf("unexpected tool name: %#v", toolCalls[0])
 	}
-	if toolCalls[0]["arguments"] != "{}" {
+	if fn["arguments"] != "{}" {
 		t.Fatalf("unexpected tool arguments: %#v", toolCalls[0])
 	}
 }
@@ -579,7 +591,7 @@ func TestCodexHandleResponse_StreamWithCustomToolCall(t *testing.T) {
 	if toolCalls[0]["type"] != "custom_tool_call" {
 		t.Fatalf("expected custom_tool_call type, got %#v", toolCalls[0])
 	}
-	if toolCalls[0]["arguments"] != "*** Begin Patch\n*** End Patch" {
+	if toolCalls[0]["input"] != "*** Begin Patch\n*** End Patch" {
 		t.Fatalf("unexpected custom tool input: %#v", toolCalls[0])
 	}
 }
@@ -645,7 +657,8 @@ func TestCodexHandleResponse_StreamPreservesAllSparseIndexedToolCalls(t *testing
 	if toolCalls[4]["id"] != "call_5" {
 		t.Fatalf("expected last sparse-indexed tool call to be preserved, got %#v", toolCalls[4])
 	}
-	if toolCalls[4]["arguments"] != `{"command":"echo 5"}` {
+	fn, ok := toolCalls[4]["function"].(map[string]interface{})
+	if !ok || fn["arguments"] != `{"command":"echo 5"}` {
 		t.Fatalf("unexpected last tool arguments: %#v", toolCalls[4])
 	}
 }
@@ -697,17 +710,19 @@ func TestCodexHandleResponse_StreamMultiReasoningCompactedFinalDoesNotCorruptToo
 	if !ok || len(toolCalls) != 2 {
 		t.Fatalf("expected 2 tool calls, got %T %#v", msg["tool_calls"], msg["tool_calls"])
 	}
-	if toolCalls[0]["id"] != "call_view" || toolCalls[0]["name"] != "view" {
+	fn0, _ := toolCalls[0]["function"].(map[string]interface{})
+	if toolCalls[0]["id"] != "call_view" || fn0["name"] != "view" {
 		t.Fatalf("unexpected first tool call: %#v", toolCalls[0])
 	}
-	if toolCalls[0]["arguments"] != `{"file_path":"a.go"}` {
-		t.Fatalf("view arguments corrupted: %#v", toolCalls[0]["arguments"])
+	if fn0["arguments"] != `{"file_path":"a.go"}` {
+		t.Fatalf("view arguments corrupted: %#v", toolCalls[0]["function"])
 	}
-	if toolCalls[1]["id"] != "call_grep" || toolCalls[1]["name"] != "grep" {
+	fn1, _ := toolCalls[1]["function"].(map[string]interface{})
+	if toolCalls[1]["id"] != "call_grep" || fn1["name"] != "grep" {
 		t.Fatalf("unexpected second tool call: %#v", toolCalls[1])
 	}
-	if toolCalls[1]["arguments"] != `{"pattern":"TODO"}` {
-		t.Fatalf("grep arguments corrupted: %#v", toolCalls[1]["arguments"])
+	if fn1["arguments"] != `{"pattern":"TODO"}` {
+		t.Fatalf("grep arguments corrupted: %#v", toolCalls[1]["function"])
 	}
 }
 
@@ -886,11 +901,12 @@ func TestCodexHandleResponse_NonStreamFunctionCallOnlyReturnsToolCall(t *testing
 	if !ok || len(toolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %T %#v", msg["tool_calls"], msg["tool_calls"])
 	}
-	if toolCalls[0]["name"] != "spawn_team" {
+	fn, ok := toolCalls[0]["function"].(map[string]interface{})
+	if !ok || fn["name"] != "spawn_team" {
 		t.Fatalf("unexpected tool name: %#v", toolCalls[0])
 	}
-	if _, ok := toolCalls[0]["arguments"].(string); !ok {
-		t.Fatalf("expected string arguments, got %#v", toolCalls[0]["arguments"])
+	if _, ok := fn["arguments"].(string); !ok {
+		t.Fatalf("expected string arguments, got %#v", toolCalls[0])
 	}
 }
 

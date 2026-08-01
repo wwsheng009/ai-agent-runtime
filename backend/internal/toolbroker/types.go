@@ -121,18 +121,21 @@ type WaitTeamEventResult struct {
 
 // WaitTeamResult returns terminal state plus recent durable lifecycle events.
 type WaitTeamResult struct {
-	TeamID          string                 `json:"team_id"`
-	Status          string                 `json:"status"`
-	Terminal        bool                   `json:"terminal"`
-	TimedOut        bool                   `json:"timed_out"`
-	SummaryReady    bool                   `json:"summary_ready"`
-	Summary         string                 `json:"summary,omitempty"`
-	SummarySource   string                 `json:"summary_source,omitempty"`
-	SummaryPayload  map[string]interface{} `json:"summary_payload,omitempty"`
-	SummaryEventSeq int64                  `json:"summary_event_seq,omitempty"`
-	Events          []WaitTeamEventResult  `json:"events,omitempty"`
-	EventCount      int                    `json:"event_count"`
-	LatestSeq       int64                  `json:"latest_seq,omitempty"`
+	TeamID             string                 `json:"team_id"`
+	Status             string                 `json:"status"`
+	Terminal           bool                   `json:"terminal"`
+	TimedOut           bool                   `json:"timed_out"`
+	WaitTimeoutMs      int                    `json:"wait_timeout_ms,omitempty"`
+	ExecutionContinues bool                   `json:"execution_continues,omitempty"`
+	NextAction         string                 `json:"next_action,omitempty"`
+	SummaryReady       bool                   `json:"summary_ready"`
+	Summary            string                 `json:"summary,omitempty"`
+	SummarySource      string                 `json:"summary_source,omitempty"`
+	SummaryPayload     map[string]interface{} `json:"summary_payload,omitempty"`
+	SummaryEventSeq    int64                  `json:"summary_event_seq,omitempty"`
+	Events             []WaitTeamEventResult  `json:"events,omitempty"`
+	EventCount         int                    `json:"event_count"`
+	LatestSeq          int64                  `json:"latest_seq,omitempty"`
 }
 
 // TeamMailboxDispatcher delivers mailbox events to active team sessions.
@@ -334,6 +337,12 @@ type SpawnAgentArgs struct {
 	ReadOnly                 bool     `json:"read_only,omitempty"`
 	ForkContext              *bool    `json:"fork_context,omitempty"`
 	ForkTurns                string   `json:"fork_turns,omitempty"`
+	// Execution supervision timeouts (doc 7.2). Zero means "use operator
+	// default"; a negative value is rejected by the broker.
+	TimeoutSec               int64    `json:"timeout_sec,omitempty"`
+	ProgressTimeoutSec       int64    `json:"progress_timeout_sec,omitempty"`
+	ApprovalTimeoutSec       int64    `json:"approval_timeout_sec,omitempty"`
+	CancelGraceSec           int64    `json:"cancel_grace_sec,omitempty"`
 	DifficultySource         string   `json:"-"`
 	RouteSource              string   `json:"-"`
 	RouteWarnings            []string `json:"-"`
@@ -432,6 +441,11 @@ type AgentStatusResult struct {
 	Created                  bool     `json:"created,omitempty"`
 	Queued                   bool     `json:"queued,omitempty"`
 	TimedOut                 bool     `json:"timed_out,omitempty"`
+	// RunID is the durable execution run identity assigned by the execution
+	// supervisor at spawn time (doc 7.1). Empty when supervision is disabled.
+	RunID                string `json:"run_id,omitempty"`
+	ExecutionDeadlineAt  string `json:"execution_deadline_at,omitempty"`
+	SupervisionPolicy    string `json:"supervision_policy,omitempty"`
 	PendingApproval          bool     `json:"pending_approval,omitempty"`
 	PendingApprovalID        string   `json:"pending_approval_id,omitempty"`
 	PendingApprovalReason    string   `json:"pending_approval_reason,omitempty"`
@@ -452,20 +466,22 @@ type AgentStatusResult struct {
 
 // AgentWaitResult reports the outcome of child-status or mailbox-event wait.
 type AgentWaitResult struct {
-	Agent            *AgentStatusResult  `json:"agent,omitempty"`
-	Agents           []AgentStatusResult `json:"agents,omitempty"`
-	Event            *AgentEventItem     `json:"event,omitempty"`
-	Events           []AgentEventItem    `json:"events,omitempty"`
-	MatchedID        string              `json:"matched_id,omitempty"`
-	MatchedSessionID string              `json:"matched_session_id,omitempty"`
-	LatestSeq        int64               `json:"latest_seq,omitempty"`
-	TimedOut         bool                `json:"timed_out,omitempty"`
-	ReadyCount       int                 `json:"ready_count,omitempty"`
-	PendingCount     int                 `json:"pending_count,omitempty"`
-	ReadyIDs         []string            `json:"ready_ids,omitempty"`
-	PendingIDs       []string            `json:"pending_ids,omitempty"`
-	WaitedMs         int64               `json:"waited_ms,omitempty"`
-	NextAction       string              `json:"next_action,omitempty"`
+	Agent              *AgentStatusResult  `json:"agent,omitempty"`
+	Agents             []AgentStatusResult `json:"agents,omitempty"`
+	Event              *AgentEventItem     `json:"event,omitempty"`
+	Events             []AgentEventItem    `json:"events,omitempty"`
+	MatchedID          string              `json:"matched_id,omitempty"`
+	MatchedSessionID   string              `json:"matched_session_id,omitempty"`
+	LatestSeq          int64               `json:"latest_seq,omitempty"`
+	TimedOut           bool                `json:"timed_out,omitempty"`
+	WaitTimeoutMs      int                 `json:"wait_timeout_ms,omitempty"`
+	ExecutionContinues bool                `json:"execution_continues,omitempty"`
+	ReadyCount         int                 `json:"ready_count,omitempty"`
+	PendingCount       int                 `json:"pending_count,omitempty"`
+	ReadyIDs           []string            `json:"ready_ids,omitempty"`
+	PendingIDs         []string            `json:"pending_ids,omitempty"`
+	WaitedMs           int64               `json:"waited_ms,omitempty"`
+	NextAction         string              `json:"next_action,omitempty"`
 }
 
 // MarshalJSON keeps the legacy matched-agent view without serializing the same
@@ -560,13 +576,14 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 	} else if agentWaitHasPendingApproval(result) {
 		result.NextAction = agentWaitPendingApprovalNextAction(result)
 	} else if result.TimedOut && result.PendingCount > 0 {
-		result.NextAction = "continue_independent_work_before_waiting_again: do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children"
+		result.ExecutionContinues = true
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; pending child execution continues. Do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children"
 	} else if result.ReadyCount > 0 && result.PendingCount > 0 {
 		result.NextAction = "consume_ready_outputs_and_continue_independent_work: use ready child outputs now; keep other independent work moving instead of blocking only on pending agents"
 	} else if result.ReadyCount > 0 {
 		result.NextAction = "consume_ready_outputs: use the returned ready outputs and do not re-wait for already-ready agents"
 	} else if result.TimedOut {
-		result.NextAction = "continue_independent_work_before_waiting_again: wait timed out with no ready agents; do other work or inspect child status before waiting again"
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; do other work or inspect child status before waiting again"
 	}
 	return result
 }

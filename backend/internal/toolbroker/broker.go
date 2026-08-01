@@ -19,6 +19,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -66,6 +67,9 @@ type Broker struct {
 	TeamDispatcher       TeamMailboxDispatcher
 	TeamEvents           *team.TeamEventBus
 	TeamLifecycleChanged func()
+	// ExecutionSupervisor registers durable execution runs for spawned child
+	// sessions (P3). Optional: nil keeps spawn behavior unchanged.
+	ExecutionSupervisor *supervision.ExecutionSupervisor
 }
 
 func withBrokerSourceMetadata(metadata map[string]interface{}) map[string]interface{} {
@@ -1443,6 +1447,21 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["fork_turns"].(string); ok {
 			request.ForkTurns = strings.TrimSpace(value)
 		}
+		if value, ok := args["timeout_sec"].(int64); ok {
+			request.TimeoutSec = value
+		}
+		if value, ok := args["progress_timeout_sec"].(int64); ok {
+			request.ProgressTimeoutSec = value
+		}
+		if value, ok := args["approval_timeout_sec"].(int64); ok {
+			request.ApprovalTimeoutSec = value
+		}
+		if value, ok := args["cancel_grace_sec"].(int64); ok {
+			request.CancelGraceSec = value
+		}
+		if request.TimeoutSec < 0 || request.ProgressTimeoutSec < 0 || request.ApprovalTimeoutSec < 0 || request.CancelGraceSec < 0 {
+			return nil, nil, fmt.Errorf("supervision timeout values must be non-negative")
+		}
 		explicitSessionID := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID)) != ""
 		result, err := b.AgentSessions.Spawn(ctx, strings.TrimSpace(sessionID), request)
 		if err != nil {
@@ -1469,6 +1488,18 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        valueOrEmptyAgentStatus(result),
 			"created":       result != nil && result.Created,
 			"queued":        result != nil && result.Queued,
+		}
+		if b.ExecutionSupervisor != nil && result != nil && result.Created {
+			runID, deadlineAt, runErr := startSpawnExecutionRun(ctx, b.ExecutionSupervisor, strings.TrimSpace(sessionID), request, result)
+			if runErr != nil {
+				metadata["supervision_error"] = runErr.Error()
+			} else if runID != "" {
+				metadata["run_id"] = runID
+				if deadlineAt != "" {
+					metadata["execution_deadline_at"] = deadlineAt
+				}
+				metadata["supervision_policy"] = spawnSupervisionPolicyEnforce
+			}
 		}
 		if result != nil {
 			if provider := strings.TrimSpace(result.Provider); provider != "" {
@@ -2462,12 +2493,15 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, err
 		}
 		return result, attachCacheSafeSummary(map[string]interface{}{
-			"team_id":       result.TeamID,
-			"status":        result.Status,
-			"terminal":      result.Terminal,
-			"summary_ready": result.SummaryReady,
-			"timed_out":     result.TimedOut,
-			"latest_seq":    result.LatestSeq,
+			"team_id":             result.TeamID,
+			"status":              result.Status,
+			"terminal":            result.Terminal,
+			"summary_ready":       result.SummaryReady,
+			"timed_out":           result.TimedOut,
+			"wait_timeout_ms":     result.WaitTimeoutMs,
+			"execution_continues": result.ExecutionContinues,
+			"next_action":         result.NextAction,
+			"latest_seq":          result.LatestSeq,
 		}, waitTeamCacheSafeSummary(result)), nil
 
 	case ToolSendTeamMessage:
@@ -3318,10 +3352,11 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			if ctx.Err() != nil {
 				return WaitTeamResult{}, ctx.Err()
 			}
-			return WaitTeamResult{
-				TeamID:   teamID,
-				TimedOut: true,
-			}, nil
+			result, snapshotErr := b.readWaitTeamSnapshot(ctx, teamID, request)
+			if snapshotErr != nil {
+				result = WaitTeamResult{TeamID: teamID}
+			}
+			return finalizeWaitTeamTimeout(result, request.TimeoutMs), nil
 		default:
 		}
 		result, err := b.readWaitTeamSnapshot(ctx, teamID, request)
@@ -3329,6 +3364,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			return WaitTeamResult{}, err
 		}
 		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.SummaryReady) {
+			result.WaitTimeoutMs = request.TimeoutMs
 			return result, nil
 		}
 		select {
@@ -3336,11 +3372,24 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			if ctx.Err() != nil {
 				return WaitTeamResult{}, ctx.Err()
 			}
-			result.TimedOut = true
-			return result, nil
+			return finalizeWaitTeamTimeout(result, request.TimeoutMs), nil
 		case <-ticker.C:
 		}
 	}
+}
+
+func finalizeWaitTeamTimeout(result WaitTeamResult, timeoutMs int) WaitTeamResult {
+	result.TimedOut = true
+	result.WaitTimeoutMs = timeoutMs
+	result.ExecutionContinues = !result.Terminal
+	if result.ExecutionContinues {
+		result.NextAction = "team execution continues; wait timeout only ended this observation. Continue independent work or inspect current team status before waiting again"
+	} else if result.Terminal && !result.SummaryReady {
+		result.NextAction = "team execution is terminal but summary is not ready; wait again only if the summary is still required"
+	} else {
+		result.NextAction = "consume the terminal team result"
+	}
+	return result
 }
 
 func (b *Broker) waitTeamRequiresSummary(request WaitTeamArgs) bool {

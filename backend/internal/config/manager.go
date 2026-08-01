@@ -162,8 +162,16 @@ type TraceConfig struct {
 
 // TeamConfig configures the team store persistence.
 type TeamConfig struct {
-	StorePath string `yaml:"storePath" json:"storePath"`
-	StoreDSN  string `yaml:"storeDSN" json:"storeDSN"`
+	StorePath    string                 `yaml:"storePath" json:"storePath"`
+	StoreDSN     string                 `yaml:"storeDSN" json:"storeDSN"`
+	Orchestrator TeamOrchestratorConfig `yaml:"orchestrator" json:"orchestrator"`
+}
+
+// TeamOrchestratorConfig controls the host-level loop supervisor.
+type TeamOrchestratorConfig struct {
+	ReconcileInterval time.Duration   `yaml:"reconcileInterval" json:"reconcileInterval"`
+	RestartBackoff    []time.Duration `yaml:"restartBackoff" json:"restartBackoff"`
+	MaxRestartBackoff time.Duration   `yaml:"maxRestartBackoff" json:"maxRestartBackoff"`
 }
 
 // AgentControlConfig configures cross-workflow AgentControl persistence.
@@ -353,7 +361,20 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Trace: TraceConfig{
 			TeamIDLimit: 0,
 		},
-		Team:           TeamConfig{},
+		Team: TeamConfig{
+			Orchestrator: TeamOrchestratorConfig{
+				ReconcileInterval: 5 * time.Second,
+				RestartBackoff: []time.Duration{
+					time.Second,
+					2 * time.Second,
+					5 * time.Second,
+					10 * time.Second,
+					30 * time.Second,
+					time.Minute,
+				},
+				MaxRestartBackoff: 5 * time.Minute,
+			},
+		},
 		AgentControl:   AgentControlConfig{},
 		SessionRuntime: SessionRuntimeConfig{},
 		Artifact:       ArtifactConfig{},
@@ -754,6 +775,17 @@ func ValidateTeamConfig(config *TeamConfig) error {
 	}
 	if strings.TrimSpace(config.StorePath) != "" && strings.TrimSpace(config.StoreDSN) != "" {
 		return errors.New(errors.ErrValidationFailed, "team storePath and storeDSN cannot both be set")
+	}
+	if config.Orchestrator.ReconcileInterval < 0 {
+		return errors.New(errors.ErrValidationFailed, "team.orchestrator.reconcileInterval cannot be negative")
+	}
+	for _, delay := range config.Orchestrator.RestartBackoff {
+		if delay <= 0 {
+			return errors.New(errors.ErrValidationFailed, "team.orchestrator.restartBackoff values must be positive")
+		}
+	}
+	if config.Orchestrator.MaxRestartBackoff < 0 {
+		return errors.New(errors.ErrValidationFailed, "team.orchestrator.maxRestartBackoff cannot be negative")
 	}
 	return nil
 }

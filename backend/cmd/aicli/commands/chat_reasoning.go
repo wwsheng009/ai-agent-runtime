@@ -19,26 +19,10 @@ type reasoningEffortCatalog struct {
 }
 
 func resolveChatReasoningEffort(provider config.Provider, modelName, raw string, explicit bool) (string, string, error) {
-	catalog := reasoningEffortCatalogForModel(provider, modelName)
 	normalized := runtimetypes.NormalizeReasoningEffort(raw)
-
-	if normalized == "" {
-		return "", "", nil
-	}
-
-	if !catalog.supported {
-		return normalized, "", nil
-	}
-
-	if !reasoningEffortAllowed(normalized, catalog.options) {
-		allowed := strings.Join(catalog.options, "|")
-		if explicit {
-			// 允许用户直接设置自定义值，仅显示警告
-			return normalized, fmt.Sprintf("Warning: reasoning_effort %q 不在当前模型声明的可选列表中（%s），已强制设置", normalized, allowed), nil
-		}
-		return "", fmt.Sprintf("Warning: reasoning-effort %q 不在当前模型支持列表中，已清空", normalized), nil
-	}
-
+	// Model cards are an option catalog for the UI. They must not validate or
+	// rewrite user-provided values: providers can add values independently of a
+	// local card release, and the upstream is authoritative for invalid values.
 	return normalized, "", nil
 }
 
@@ -123,20 +107,6 @@ func normalizeReasoningEffortOptions(values []string) []string {
 	return options
 }
 
-func supportedReasoningEffortForRequest(raw string, capability config.ModelCapabilitySpec, hasCapability bool) string {
-	effort := runtimetypes.NormalizeReasoningEffort(raw)
-	if effort == "" {
-		return ""
-	}
-	if !hasCapability || len(capability.ReasoningEfforts) == 0 {
-		return effort
-	}
-	if reasoningEffortAllowed(effort, normalizeReasoningEffortOptions(capability.ReasoningEfforts)) {
-		return effort
-	}
-	return ""
-}
-
 func sortReasoningEffortOptions(options []string) {
 	if len(options) < 2 {
 		return
@@ -179,19 +149,6 @@ func reasoningEffortSortRank(value string) (int, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func reasoningEffortAllowed(value string, options []string) bool {
-	normalized := runtimetypes.NormalizeReasoningEffort(value)
-	if normalized == "" {
-		return false
-	}
-	for _, option := range options {
-		if strings.EqualFold(option, normalized) {
-			return true
-		}
-	}
-	return false
 }
 
 func reasoningEffortOptionMatch(value string, options []string) (string, bool) {
@@ -270,7 +227,7 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 		}
 
 		switch strings.ToLower(normalizedInput) {
-		case "0", "clear", "none", "off", "清空", "无":
+		case "0", "clear", "清空", "无":
 			return ""
 		}
 

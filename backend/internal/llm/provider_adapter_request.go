@@ -14,6 +14,8 @@ type providerAdapterRequestInput struct {
 	ProviderName            string
 	Protocol                string
 	BaseURL                 string
+	APIPath                 string
+	CompatibilityProfile    string
 	Model                   string
 	SupportsMaxOutputTokens *bool
 	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec
@@ -42,6 +44,8 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		ProviderName:            input.ProviderName,
 		Protocol:                input.Protocol,
 		BaseURL:                 input.BaseURL,
+		APIPath:                 input.APIPath,
+		Profile:                 input.CompatibilityProfile,
 		Model:                   input.Model,
 		SupportsMaxOutputTokens: input.SupportsMaxOutputTokens,
 		ConfiguredCapabilities:  input.ModelCapabilities,
@@ -107,7 +111,10 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 	}
 
 	reasoningConfig := resolveRequestReasoningConfig(input.ReasoningEffort, input.Thinking, input.Metadata)
-	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
+	// Model-card efforts describe selectable/default values. Do not turn them
+	// into a wire-level allowlist: callers may explicitly use newer or
+	// provider-specific values before the local card is updated.
+	requestReasoningEffort := reasoningConfig.ReasoningEffort
 	reasoningModel := ReasoningModelEnabled(capability, input.ReasoningModel)
 	reasoningEffortBudgets := input.ReasoningEffortBudgets
 	if len(reasoningEffortBudgets) == 0 && hasCapability {

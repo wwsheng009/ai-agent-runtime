@@ -46,6 +46,63 @@ func TestIsShellReadOnlyCommand(t *testing.T) {
 	assert.True(t, IsShellReadOnlyCommand("git stash list"))
 }
 
+func TestIsShellReadOnlyCommandRejectsMutationFlagsAndOutputFiles(t *testing.T) {
+	for _, command := range []string{
+		"git branch -D feature",
+		"git branch -m old new",
+		"git tag v1.0.0",
+		"git tag -d v1.0.0",
+		"git diff --output=changes.patch",
+		"git log --output=history.txt",
+		"git remote set-head origin -a",
+		"go env -w GOPROXY=https://example.invalid",
+		"go env -u GOPROXY",
+		"go list -mod=mod ./...",
+		"git status & Remove-Item file.txt",
+		"git diff $env:GIT_ARG",
+		"git diff %GIT_ARG%",
+		"git diff !GIT_ARG!",
+		`rg --pre "pwsh -Command Remove-Item marker.txt" pattern .`,
+		"rg --hostname-bin=malicious-helper pattern .",
+		"rg -z pattern archive.gz",
+		"file --compile -m custom.magic",
+		"python help",
+		"node help",
+		"yarn version",
+	} {
+		assert.False(t, IsShellReadOnlyCommand(command), command)
+	}
+}
+
+func TestIsShellReadOnlyCommandAllowsExplicitQueryForms(t *testing.T) {
+	for _, command := range []string{
+		"git branch --list feature",
+		"git branch --show-current",
+		"git tag --list v*",
+		"git tag --verify v1.0.0",
+		"git remote show origin",
+		"git remote get-url origin",
+		"git log --format=%H -5",
+		"go env GOPROXY",
+		"python --version",
+		"node -v",
+		"npm --help",
+		"cargo -V",
+	} {
+		assert.True(t, IsShellReadOnlyCommand(command), command)
+	}
+}
+
+func TestAssessShellReadOnlyCommandReportsCompoundRecoveryReason(t *testing.T) {
+	assessment := AssessShellReadOnlyCommand("git status; git diff")
+	assert.False(t, assessment.Allowed)
+	assert.Equal(t, ShellReadOnlyReasonCompound, assessment.Reason)
+
+	assessment = AssessShellReadOnlyCommand("git status")
+	assert.True(t, assessment.Allowed)
+	assert.Empty(t, assessment.Reason)
+}
+
 func TestMemoryGrantStoreRejectsDangerousTools(t *testing.T) {
 	store := &MemoryGrantStore{}
 	err := store.Remember(Grant{Tool: "shell", Scope: "session"})

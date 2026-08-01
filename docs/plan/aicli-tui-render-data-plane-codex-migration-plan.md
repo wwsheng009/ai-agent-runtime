@@ -1,8 +1,8 @@
 # aicli TUI 渲染面/数据面隔离与 Codex 对齐迁移方案
 
-状态: **implementing（P1、P3a、P4.1、P4.2a、P5.0、P5.1、P5.2a、P5.2b/P5.3-S1 已完成；P2 已完成 user replay 副作用隔离，完整纯提交路径待续；P5.2b.1 flag 探针已回退；P5.2b/P5.3 owned 渲染待推进；P4.3 重排/工具链合一属 P5）**
+状态: **implementing / historical migration record（P1–P5.6 的当前实施结果由 P5 专项文档承接；P2 完整纯提交、direct output、single-owner、fullscreen lease 与 legacy 删除继续由统一长期架构计划推进）**
 
-更新时间: **2026-07-30**
+更新时间: **2026-07-31**
 
 ## 0. 文档定位
 
@@ -14,6 +14,10 @@
 - 渲染专题：[aicli-ui-ux-rendering-codex-reference-plan.md](./aicli-ui-ux-rendering-codex-reference-plan.md)
 - 实施审查：[aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)
 - 数据解耦：[aicli-chat-session-messages-decouple-plan.md](./aicli-chat-session-messages-decouple-plan.md)
+- P5 当前实施真相：[aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)
+- 长期架构基线：[aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)
+
+> 本文保留 P1–P5 的迁移动机、Codex 对照与阶段历史。当前 owned viewport、ActiveBand、history handoff 和 P5.6 gap 行为以 P5 专项文档为准；跨模块的 Scene/Presenter、single physical writer、CommandResult、fullscreen lease 和删除计划以统一长期架构文档为准。
 
 参考实现：`E:\projects\ai\codex\codex-rs\tui`（Rust + ratatui + crossterm）。
 
@@ -31,8 +35,7 @@
 - **B. 内容面 / 数据面**：`streamBuffer`、`transcript.Source/Blocks`、
   `session.Messages` —— 纯源文本，**永不**为了“补布局窟窿”而改写内容。
 
-空行只能通过显式 `blockGap`（`gapNone` / `gapBlank`）插入；`completeBlockOutput`
-等标记不得在流式中途凭空造空行。
+P5.6 当前实现仍通过显式 `blockGap`（`gapNone` / `gapBlank`）和统一入口生成跨 cell 空行，`completeBlockOutput` 仅是过渡边界状态；长期由 `BoundaryPolicy(prev, next)` 取代调用点推断。任何状态都不得在流式中途凭空造空行。
 
 ### 1.2 反复出现的 bug 类（本线索的动机）
 
@@ -57,8 +60,7 @@ Codex 用“保留式 viewport 差分 + 原生 scrollback 不可变提交 + cell
    （`custom_terminal.rs:299-306`）。
 4. **每帧包同步更新（DEC 2026）**：`stdout().sync_update(...)`，viewport 差分 +
    历史 flush + 光标移动原子提交（`tui.rs:898`）。
-5. **cell 自带间距**：块间空行是 cell `display_lines` 里的 `Line::from("")`，不是外部
-   状态机推断（`history_cell/messages.rs:174` 等）。
+5. **间距属于 cell/boundary 模型**：Codex 的部分空行由 cell `display_lines` 表达；aicli 当前约束为 cell 内部稠密、跨 top-level cell 由统一 boundary policy 生成，二者都禁止业务调用点依靠历史布尔状态逐行推断。
 6. **三视图数据模型 + 单一真源**：`display_lines`(屏幕) / `raw_lines`(可复制) /
    `transcript_lines`(导出/overlay)，真源是 `transcript_cells: Vec<Arc<dyn HistoryCell>>`；
    scrollback 是“某一宽度的派生产物”（`history_cell/mod.rs:189-298`,
@@ -72,7 +74,7 @@ Codex 用“保留式 viewport 差分 + 原生 scrollback 不可变提交 + cell
 |---|---|---|---|
 | 帧原子性 | DEC 2026 同步更新 | 无（逐段写，可撕裂） | **P1 ✅** |
 | 回放路径 | 从 cell 纯渲染 + 提交 | 复用实时协程写入路径（含 prompt 副作用） | P2 |
-| 块间空行 | cell 自带 | `blockGap/completeBlockOutput/gapForAsyncLine` 状态机 | P3 |
+| 块间空行 | cell/boundary 模型 | P5.6 已删除 async-chain 推断；`blockGap/completeBlockOutput` 仍为过渡边界实现 | P3/P5.6→统一计划 P6 |
 | 历史数据模型 | `transcript_cells` 单一真源 | `session.Messages` + 分散格式化 | P4 |
 | 底部区渲染 | ratatui 双缓冲差分 | 立即模式手写 + 补偿债务状态机 | P5 |
 | resize 重排 | 从源按新宽度重建（有 cap） | 仅重排 soft tail | P4/P5 |
@@ -228,7 +230,7 @@ Running/Completed 都经 `RenderAsyncLine` 立即写入不可变 scrollback。�
 `ui.GetTerminalWidth()` 探测，而当前 cell 与宽度无关；改为传 `0` 并注释，去掉热路径上的
 无用副作用（`commands` 全包 + `go vet` + `gofmt` 复跑全绿）。
 
-### P5 —— 保留式底部 viewport + 不可变 scrollback（终局）
+### P5 —— 保留式底部 viewport + 不可变 scrollback（owned viewport 范围终局）
 
 目标：把已抽出的 `ui/vt.Screen` 模型用于生产双缓冲后端；底部区经 buffer diff
 增量刷新；历史经单一光标中性 `insertHistoryLines`（DECSTBM 上方腾行）一次性提交，
@@ -238,10 +240,10 @@ Running/Completed 都经 `RenderAsyncLine` 立即写入不可变 scrollback。�
 
 风险：最高。需在 P2-P4 收口后单独立项。
 
-**专项设计文档（持续评审与实施中）**：`docs/plan/aicli-tui-p5-owned-viewport-design.md`
-——含目标架构、关键决策（owned viewport / 单一 `insertHistoryLines` / cell 统一）、分步
-P5.0–P5.7（每步带测试与 feature-flag 回退）、测试矩阵、删除/收敛清单与未决问题。
-P5.0–P5.2a 及 P5.2b/P5.3-S1 已以影子/加法切片实施；生产 scrollback 所有权切换仍须单独评审。
+**专项设计文档（当前实施真相）**：`docs/plan/aicli-tui-p5-owned-viewport-design.md`
+——含目标架构、关键决策（owned viewport / history handoff / cell 统一）、P5.0–P5.7、测试矩阵与删除清单。P5.0–P5.6 已完成；`835386e` 锁定 P5.6 的 tool/event gap 行为；P5.7 待完成 P5 范围旧路径和文档收尾。
+
+**P5 之后的跨模块终局**：`docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`，负责统一 Scene/Presenter、single physical writer、CommandResult/runtime diagnostics、fullscreen lease、exactly-once handoff 强不变量和全局 legacy 删除。
 
 ## 5. 验证与回退策略
 
@@ -273,8 +275,7 @@ P5.0–P5.2a 及 P5.2b/P5.3-S1 已以影子/加法切片实施；生产 scrollba
 
 ## 8. 执行顺序
 
-P1 ✅ → P2 user replay 隔离 ✅ / 完整纯提交待续 → P3a ✅ → P4.1 ✅ → P4.2a ✅ →
-P5.0 ✅（`ui/vt` 抽出）→ P5.1 ✅（`viewport.Backend` 影子 diff）→ P5.2a ✅
-（`Compose` 修复证明，影子）→ P5.2b.1 ✗（flag“清空代替 SD”探针回退）→
-P5.2b/P5.3-S1 ✅（有界历史窗口捕获）→ **S2+ owned 渲染（默认；顶部补偿缺陷的正确修法；
-含 P4.3 重排 + P3b/P4.2b 工具链合一）**。每阶段结束回填本文“状态/进度”。
+P1 ✅ → P2 user replay 隔离 ✅ / 完整纯提交转统一计划 P1–P2 → P3a ✅ → P4.1 ✅ → P4.2a ✅ →
+P5.0–P5.5 ✅（owned viewport、history handoff、cell/width、resize/reflow）→ P5.6 ✅（tool cell 内稠密、独立 final tool/event cell 间单空行、Running viewport-only）→ **P5.7 收尾待推进**。
+
+后续不再在本文扩展新的补偿或 direct-output 特例；统一 Scene/Presenter、single-owner、fullscreen lease、全局 boundary policy、legacy 删除和 PTY/ConPTY 验收按 `aicli-tui-unified-render-architecture-refactor-plan.md` P0–P9 推进。

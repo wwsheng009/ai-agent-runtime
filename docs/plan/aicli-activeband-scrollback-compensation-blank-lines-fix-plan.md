@@ -1,16 +1,17 @@
 # aicli ActiveBand 补偿空行污染历史消息流修复方案
 
-状态: **生产路径已切 owned viewport（P5.2b/P5.3-S5）；补偿空行根因已消除，遗留字段仅服务 legacy 回退**
+状态: **生产路径已切 owned viewport（P5.2b/P5.3-S5）；补偿空行根因已消除，遗留字段仅服务 legacy 回退；跨模块长期收敛已转入统一架构计划**
 
 优先级: **P1（核心交互体验与历史显示正确性）**
 
 创建日期: **2026-07-30**
 
-更新时间: **2026-07-30**
+更新时间: **2026-07-31**
 
 关联方案:
 
-- `docs/plan/aicli-tui-p5-owned-viewport-design.md`
+- `docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`（长期 single-owner、Scene、gap/handoff 与 legacy 删除基线）
+- `docs/plan/aicli-tui-p5-owned-viewport-design.md`（当前 owned viewport/P5.6 实施真相）
 - `docs/plan/aicli-tui-render-data-plane-codex-migration-plan.md`
 - `docs/plan/aicli-ui-rendering-implementation-review.md`
 
@@ -21,9 +22,7 @@
 - `backend/cmd/aicli/commands/chat_interaction.go`
 - `backend/cmd/aicli/ui/viewport/`
 
-> 本文是 ActiveBand/底部预留区域补偿空行问题的专项跟踪文档。它不替代 P5 owned viewport
-> 总体设计，而是单独记录问题表现、已确认根因、生产修复边界、实施任务、验收标准、风险和进度。
-> 后续每个实现切片、验证结果、阻塞项和方案调整都应回填本文。
+> 本文是 ActiveBand/底部预留区域补偿空行问题的专项历史与验收文档，不替代 P5 owned viewport 总体设计。§1–§5 保留问题发现和方案演进；P5 文档记录当前生产实现与 P5.6 行为；统一架构文档承接 raw/direct output、全局 boundary policy、Scene/Presenter、fullscreen lease 和 legacy renderer 删除。本文早期进度日志是当时快照，不能覆盖顶部状态和 2026-07-31 的状态对账。
 
 ---
 
@@ -306,7 +305,7 @@ ActiveBand。长回复结束时，满高度 ActiveBand 可能一次释放 6–14
 
 ### Phase 3：原子化 stable/final 历史交接
 
-状态: **in progress（insertHistoryLines 溢出交接已通；stable/final 事务仍随 P5.4/P5.6 收敛）**
+状态: **partial / transferred（owned handoff 与 P5.6 已落地；stable/final 的统一 Scene transaction 继续由统一架构计划 P4–P7 收敛）**
 
 任务：
 
@@ -325,12 +324,12 @@ ActiveBand。长回复结束时，满高度 ActiveBand 可能一次释放 6–14
 
 ### Phase 4：resize、直接输出和降级路径收口
 
-状态: **partial（S5 已把 owned SettleOutputDebt / flush 债务 no-op；resize reflow 属 P5.5）**
+状态: **partial / transferred（P5.5 resize/reflow 已落地；direct output、fullscreen 与降级路径继续由统一架构计划 P0–P3/P7 收敛）**
 
 任务：
 
 - [x] owned 路径 geometry / soft-tail / band 更新走同一 Compose frame；
-- [x] 审计 `beginDirectInteractiveOutput + fmt.Print*`，可走 surface 时统一使用受控输出 API；
+- [ ] 完成 `beginDirectInteractiveOutput + fmt.Print*` 全量审计；目前仅部分 command/runtime writer 已 surface-aware，剩余项转入统一架构计划 P0–P2；
 - [x] history/resume 在首个消息写入前不再背负旧布局债务（owned SettleOutputDebt 纯 recompose）；
 - [ ] 校验 popup、slash command panel、login/model/skill 选择器退出后的历史锚定；
 - [ ] 为终端 resize 往返、窄宽切换、Windows ConPTY 增加真实终端或录制验证。
@@ -461,20 +460,20 @@ resize generation
 | ID | 工作项 | 状态 | 依赖 | 完成证据/备注 |
 | --- | --- | --- | --- | --- |
 | AB-00 | 根因确认与专项文档 | completed | 无 | 2026-07-30 完成代码、测试和 P5 文档交叉分析 |
-| AB-01 | 最小缺陷复现 | completed | 无 | `TestBottomReserveShrinkCompensationDrawsBlanksAtTop`，当前刻画 buggy output |
-| AB-02 | owned Compose 修复证明 | completed-shadow | 无 | `TestCompose_GrowShrinkKeepsHistoryAnchored` 通过，尚未接生产 |
-| AB-03 | 真实 chat 满屏顶部保留回归 | not started | AB-01 | 需同时断言 oldest marker、bottom gap、prompt row |
-| AB-04 | owned viewport 生产状态设计 | not started | AB-02 | Phase 1 评审产物 |
-| AB-05 | history window 接入生产 Compose | not started | AB-04 | 必须与 bottom pane 合成联合交付 |
-| AB-06 | bottom pane 全量结构化合成 | not started | AB-04 | ActiveBand/prompt/popup/status 单一 frame |
-| AB-07 | stable prefix 原子历史交接 | not started | AB-05, AB-06 | 消除旧 reserve 下先写后缩窗口 |
-| AB-08 | finalize 原子历史交接 | not started | AB-05, AB-06 | residual 与 clear band 同一所有权迁移 |
-| AB-09 | resize/soft-tail 收口 | not started | AB-05 | 不混用新旧 geometry |
-| AB-10 | direct output 路径审计 | not started | AB-06 | 清理 surface 可用时的 raw stdout |
-| AB-11 | 旧补偿状态机删除 | not started | AB-07..AB-10 | 删除或限制旧字段/ANSI 路径 |
-| AB-12 | 自动化全量验证 | not started | AB-11 | ui/commands tests、build、vet |
-| AB-13 | 真实终端验收 | not started | AB-12 | Windows ConPTY + 非 Windows ANSI terminal |
-| AB-14 | 旧缺陷测试反转与文档收尾 | not started | AB-13 | 状态改为 completed 的最后门禁 |
+| AB-01 | 最小缺陷复现 | completed | 无 | 原 buggy test 已完成历史使命并在生产切换后反转 |
+| AB-02 | owned Compose 修复证明 | completed | 无 | `TestCompose_GrowShrinkKeepsHistoryAnchored` 通过并已接生产 |
+| AB-03 | 真实 surface 满屏顶部保留回归 | completed | AB-01 | `TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop` 锁定生产行为 |
+| AB-04 | owned viewport 生产状态设计 | completed | AB-02 | 已由 P5.2b/P5.3 设计和实现承接 |
+| AB-05 | history window 接入生产 Compose | completed | AB-04 | owned history 与 Compose 已进入默认生产路径 |
+| AB-06 | bottom pane 全量结构化合成 | completed | AB-04 | ActiveBand/prompt/popup/status 由 owned frame 合成 |
+| AB-07 | stable prefix 原子历史交接 | transferred | AB-05, AB-06 | 现有 P5 行为保留；统一 Scene transaction 转入长期计划 P4–P7 |
+| AB-08 | finalize 原子历史交接 | transferred | AB-05, AB-06 | mutable/final replace-commit 转入长期计划 P4–P7 |
+| AB-09 | resize/soft-tail 收口 | completed-p5 | AB-05 | P5.5 已完成；semantic cell/source truth 的进一步收敛见长期计划 P7 |
+| AB-10 | direct output 路径审计 | transferred | AB-06 | 转入长期计划 P0–P2，当前不能视为已完成 |
+| AB-11 | 旧补偿/legacy renderer 删除 | transferred | AB-07..AB-10 | 转入长期计划 P8，删除前必须有单一 owner 替代路径 |
+| AB-12 | 自动化全量验证 | transferred | AB-11 | P5 回归已存在；全局 invariant/race/PTY 验收转入长期计划 P9 |
+| AB-13 | 真实终端验收 | transferred | AB-12 | Windows ConPTY + 非 Windows PTY 转入长期计划 P9 |
+| AB-14 | 旧缺陷反转与文档收尾 | partial | AB-13 | 缺陷测试已反转；全局文档/legacy 收尾尚未完成 |
 
 状态枚举：
 
@@ -482,6 +481,9 @@ resize generation
 - `in progress`：正在实施；
 - `blocked`：被依赖、设计或环境阻塞；
 - `completed-shadow`：影子/测试实现完成，但未接生产；
+- `completed-p5`：P5 专项范围完成，但统一 Scene/single-owner 仍有后续；
+- `transferred`：剩余工作已映射到统一架构计划，不再在本文重复维护；
+- `partial`：已有部分证据，但尚未满足完整退出条件；
 - `completed`：完成且具备验收证据。
 
 ---
@@ -515,11 +517,11 @@ resize generation
 - 确认 `historyWindow` 与 viewport backend 尚未接管生产 surface；
 - 建立 AB-00 至 AB-14 工作项和完成门禁。
 
-当前判断：
+当日判断（历史快照，已被 2026-07-31 状态对账取代）：
 
 - 根因置信度：**高，已有代码注释、最小 VT 复现和 P5 设计交叉证明**；
-- 生产修复状态：**未开始**；
-- 下一步：**AB-03，增加真实 chat/surface 满屏历史顶部保留回归，然后进入 AB-04 生产状态设计评审**。
+- 当时生产修复状态：**未开始**；
+- 当时下一步：**AB-03，增加真实 chat/surface 满屏历史顶部保留回归，然后进入 AB-04 生产状态设计评审**。
 
 ### 2026-07-30：TTY 仿真测试审计
 
@@ -546,3 +548,13 @@ go test ./cmd/aicli/commands -run "TestFixedBottomSurface_ActiveBandIsLayoutNeut
 - **TTY 字节流仿真确认问题：是**；
 - **真实 OS PTY/ConPTY 确认问题：目前没有现成测试证据**；
 - 下一项测试工作应是 AB-03：在现有 `screenVT` 基础上增加真实 chat/surface 的“满屏历史顶部保留”失败回归，再决定是否补充 Windows ConPTY/真实终端录制验收。
+
+### 2026-07-31：与 P5.6 和统一长期架构对账
+
+当前状态：
+
+- production 已默认使用 owned viewport；原 `CSI T` grow/shrink 顶部空行缺陷已由 `TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop` 反转并锁定；
+- P5.6 已在 `835386e` 中确认 tool cell 内稠密、独立 final tool/event cell 间单空行，Running 仅在 ActiveBand live redraw；
+- 本文原 AB-04–AB-06 已由 P5 实现完成，AB-09 在 P5 专项范围完成；
+- AB-07/AB-08 的统一 stable/final transaction、AB-10 direct output 审计、AB-11 legacy 删除及 AB-12/AB-13 全局验收，已转入 `aicli-tui-unified-render-architecture-refactor-plan.md`；
+- 2026-07-30 日志中“生产修复未开始”等结论只代表当时快照，不再代表当前生产状态。

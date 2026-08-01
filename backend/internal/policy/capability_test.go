@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,5 +59,18 @@ func TestReadOnlyChildCapabilitiesAllowsControlPlaneNotMutations(t *testing.T) {
 	}
 	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{"command": "rm -rf /"}); err == nil {
 		t.Fatal("expected read-only shell mutating command to be blocked")
+	}
+	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{
+		"command": "git status; git diff",
+	}); err == nil || !strings.Contains(err.Error(), "shell.commands") {
+		t.Fatalf("expected compound command recovery guidance, got %v", err)
+	}
+	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "git status"},
+			map[string]interface{}{"command": "git diff --stat"},
+		},
+	}); err != nil {
+		t.Fatalf("expected structured read-only command batch to be allowed: %v", err)
 	}
 }

@@ -1643,7 +1643,7 @@ func recoverAssistantToolCallsFromReasoning(normalized map[string]interface{}) {
 	if len(recovered) <= len(existing) {
 		return
 	}
-	normalized["tool_calls"] = encodeRuntimeToolCalls(recovered)
+	normalized["tool_calls"] = runtimellm.EncodeRuntimeToolCalls(recovered)
 }
 
 func decodeRuntimeToolCallsFromCodexOutputItems(normalized map[string]interface{}) []runtimetypes.ToolCall {
@@ -1717,7 +1717,7 @@ func aicliMessageFromRuntimeMessage(message runtimetypes.Message) (map[string]in
 		raw["tool_call_id"] = message.ToolCallID
 	}
 	if len(message.ToolCalls) > 0 {
-		raw["tool_calls"] = encodeRuntimeToolCalls(message.ToolCalls)
+		raw["tool_calls"] = runtimellm.EncodeRuntimeToolCalls(message.ToolCalls)
 	}
 	if block := runtimetypes.GetReasoningBlock(message.Metadata); block != nil {
 		if encoded := block.ToMap(); len(encoded) > 0 {
@@ -1838,60 +1838,47 @@ func decodeRuntimeToolCalls(raw interface{}) []runtimetypes.ToolCall {
 			call.Name = name
 		}
 
-		switch args := item["input"].(type) {
-		case map[string]interface{}:
-			call.Args = args
-		case string:
-			call.Args = decodeToolArguments(args)
-		}
-
-		switch args := item["arguments"].(type) {
-		case map[string]interface{}:
-			call.Args = args
-		case string:
-			call.Args = decodeToolArguments(args)
-		}
-
-		if fn, ok := item["function"].(map[string]interface{}); ok {
-			if call.Name == "" {
-				call.Name, _ = fn["name"].(string)
+		if typ, ok := item["type"].(string); ok && strings.EqualFold(strings.TrimSpace(typ), "custom_tool_call") {
+			// codex 扁平 custom 形状：input 是 freeform 原样文本（如 patch），
+			// 不按 JSON 解析，保留 Type + RawInput 以便编码侧原样回写。
+			call.Type = "custom_tool_call"
+			switch input := item["input"].(type) {
+			case string:
+				call.RawInput = input
+			case map[string]interface{}:
+				call.Args = input
 			}
-			switch args := fn["arguments"].(type) {
+		} else {
+			switch args := item["input"].(type) {
 			case map[string]interface{}:
 				call.Args = args
 			case string:
 				call.Args = decodeToolArguments(args)
+			}
+
+			switch args := item["arguments"].(type) {
+			case map[string]interface{}:
+				call.Args = args
+			case string:
+				call.Args = decodeToolArguments(args)
+			}
+
+			if fn, ok := item["function"].(map[string]interface{}); ok {
+				if call.Name == "" {
+					call.Name, _ = fn["name"].(string)
+				}
+				switch args := fn["arguments"].(type) {
+				case map[string]interface{}:
+					call.Args = args
+				case string:
+					call.Args = decodeToolArguments(args)
+				}
 			}
 		}
 
 		if call.Name != "" {
 			result = append(result, call)
 		}
-	}
-	return result
-}
-
-func encodeRuntimeToolCalls(calls []runtimetypes.ToolCall) []map[string]interface{} {
-	if len(calls) == 0 {
-		return nil
-	}
-
-	result := make([]map[string]interface{}, 0, len(calls))
-	for _, call := range calls {
-		argsJSON := "{}"
-		if len(call.Args) > 0 {
-			if data, err := json.Marshal(call.Args); err == nil {
-				argsJSON = string(data)
-			}
-		}
-		result = append(result, map[string]interface{}{
-			"id":   call.ID,
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":      call.Name,
-				"arguments": argsJSON,
-			},
-		})
 	}
 	return result
 }

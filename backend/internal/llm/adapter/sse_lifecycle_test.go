@@ -224,7 +224,8 @@ func TestCodexHandleResponse_RecoversCompletedResponseSnapshot(t *testing.T) {
 		t.Fatalf("final response snapshot was not recovered: %#v", msg)
 	}
 	calls, _ := msg["tool_calls"].([]map[string]interface{})
-	if len(calls) != 1 || calls[0]["name"] != "lookup" || calls[0]["arguments"] != `{"id":1}` {
+	fn, _ := calls[0]["function"].(map[string]interface{})
+	if len(calls) != 1 || calls[0]["id"] != "call_1" || fn["name"] != "lookup" || fn["arguments"] != `{"id":1}` {
 		t.Fatalf("final tool call was not recovered: %#v", calls)
 	}
 }
@@ -372,7 +373,8 @@ func TestCodexHandleResponse_ResolvesFunctionCallWithoutOutputIndex(t *testing.T
 		t.Fatalf("HandleResponse failed: %v", err)
 	}
 	calls, _ := msg["tool_calls"].([]map[string]interface{})
-	if len(calls) != 1 || calls[0]["id"] != "call_1" || calls[0]["name"] != "lookup" || calls[0]["arguments"] != `{"id":1}` {
+	fn, _ := calls[0]["function"].(map[string]interface{})
+	if len(calls) != 1 || calls[0]["id"] != "call_1" || fn["name"] != "lookup" || fn["arguments"] != `{"id":1}` {
 		t.Fatalf("indexless function call was not assembled: %#v", calls)
 	}
 }

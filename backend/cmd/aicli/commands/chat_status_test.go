@@ -134,7 +134,7 @@ func TestBuildChatStatusTokenCountValue_FormatsCumulativeCount(t *testing.T) {
 func TestBuildChatStatusSessionValueIncludesTitleAndCompactGeneration(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.ID = "session-status-1"
-	runtimeSession.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	runtimeSession.Metadata.Title = "检查登录流程为什么失败"
 	runtimeSession.Metadata.Context = map[string]interface{}{
 		runtimechat.ContextCompactGeneration: 2,
 		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
@@ -144,13 +144,13 @@ func TestBuildChatStatusSessionValueIncludesTitleAndCompactGeneration(t *testing
 	got := buildChatStatusSessionValue(session)
 	for _, expected := range []string{
 		"session-status-1",
-		"检查登录流程为什么失败 · compact #2",
+		"检查登录流程为什么失败",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("expected status session value to contain %q, got %q", expected, got)
 		}
 	}
-	// Sticky compact titles already embed the generation badge; do not duplicate it.
+	// Clean title + generation badge: exactly one "compact #2" occurrence.
 	if strings.Count(got, "compact #2") != 1 {
 		t.Fatalf("expected a single compact badge in status session value, got %q", got)
 	}

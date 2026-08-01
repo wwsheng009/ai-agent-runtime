@@ -11,9 +11,11 @@ func (p *ProviderWrapper) providerCompatContext(model string) providercompat.Con
 		return providercompat.Context{Model: model}
 	}
 	return providercompat.Context{
+		ProviderName:            p.config.Name,
 		Protocol:                p.config.Type,
 		BaseURL:                 p.config.BaseURL,
 		APIPath:                 p.config.APIPath,
+		Profile:                 p.config.CompatibilityProfile,
 		Model:                   model,
 		SupportsMaxOutputTokens: p.config.SupportsMaxOutputTokens,
 		ConfiguredCapabilities:  p.config.ModelCapabilities,
@@ -35,15 +37,18 @@ func (p *ProviderWrapper) normalizeStreamReader(model string, reader io.Reader) 
 func gatewayProviderCompatContext(selected *SelectedResource, protocol, model string) providercompat.Context {
 	var supportsMaxOutputTokens *bool
 	apiPath := ""
+	profile := ""
 	if selected != nil && selected.Provider != nil {
 		supportsMaxOutputTokens = selected.Provider.SupportsMaxOutputTokens
 		apiPath = selected.Provider.APIPath
+		profile = compatibilityProfileFromSelected(selected)
 	}
 	return providercompat.Context{
 		ProviderName:            providerNameFromSelected(selected),
 		Protocol:                protocol,
 		BaseURL:                 baseURLFromSelected(selected),
 		APIPath:                 apiPath,
+		Profile:                 profile,
 		Model:                   model,
 		SupportsMaxOutputTokens: supportsMaxOutputTokens,
 		ConfiguredCapabilities:  selectedProviderModelCapabilities(selected),

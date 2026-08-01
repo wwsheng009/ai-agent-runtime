@@ -16,6 +16,9 @@ const (
 	MetadataNextActionKey = "next_action"
 	MetadataToolNameKey   = "tool_name"
 	MetadataToolCallIDKey = "tool_call_id"
+	MetadataPolicyKey     = "policy"
+	MetadataPolicySource  = "policy_source"
+	MetadataOverridable   = "overridable"
 	// MetadataOutcomeKey is a model-facing success/failure disposition that is
 	// richer than ok=true/false alone (empty success vs partial batch failure).
 	MetadataOutcomeKey = "outcome"
@@ -57,6 +60,12 @@ type Diagnostic struct {
 	ErrorCode  string `json:"error_code,omitempty"`
 	Retryable  bool   `json:"retryable,omitempty"`
 	NextAction string `json:"next_action,omitempty"`
+	// Policy identifies the execution-policy layer responsible for a denial.
+	Policy string `json:"policy,omitempty"`
+	// PolicySource identifies where the effective policy originated.
+	PolicySource string `json:"policy_source,omitempty"`
+	// Overridable distinguishes approval-gated denials from hard boundaries.
+	Overridable *bool `json:"overridable,omitempty"`
 	// Outcome is the model-facing disposition: success | empty | partial | failed.
 	Outcome string `json:"outcome,omitempty"`
 	// EmptyResult is true when the tool invocation succeeded with no payload.
@@ -269,6 +278,12 @@ func attachRecoveryHints(diagnostic *Diagnostic, metadata map[string]interface{}
 	}
 	if path := strings.TrimSpace(diagnosticString(metadata, "file_path")); path != "" {
 		diagnostic.FilePath = path
+	}
+	diagnostic.Policy = strings.TrimSpace(diagnosticString(metadata, MetadataPolicyKey))
+	diagnostic.PolicySource = strings.TrimSpace(diagnosticString(metadata, MetadataPolicySource))
+	if overridable, ok := diagnosticBool(metadata, MetadataOverridable); ok {
+		value := overridable
+		diagnostic.Overridable = &value
 	}
 	if offset, ok := diagnosticIntPtr(metadata, "suggested_view_offset"); ok {
 		diagnostic.SuggestedViewOffset = offset
@@ -957,6 +972,15 @@ func ApplyDiagnosticMetadata(metadata map[string]interface{}, diagnostic Diagnos
 	}
 	if diagnostic.ToolCallID != "" {
 		metadata[MetadataToolCallIDKey] = diagnostic.ToolCallID
+	}
+	if policy := strings.TrimSpace(diagnostic.Policy); policy != "" {
+		metadata[MetadataPolicyKey] = policy
+	}
+	if source := strings.TrimSpace(diagnostic.PolicySource); source != "" {
+		metadata[MetadataPolicySource] = source
+	}
+	if diagnostic.Overridable != nil {
+		metadata[MetadataOverridable] = *diagnostic.Overridable
 	}
 	if len(diagnostic.PathCandidates) > 0 {
 		metadata[MetadataPathCandidatesKey] = append([]string(nil), diagnostic.PathCandidates...)
@@ -1956,6 +1980,8 @@ func classifyToolErrorCode(message string) string {
 		strings.Contains(lower, "status 500"), strings.Contains(lower, "status 502"),
 		strings.Contains(lower, "status 503"), strings.Contains(lower, "status 504"):
 		return string(runtimeerrors.ErrAPIServerError)
+	case strings.Contains(lower, "read-only policy"):
+		return string(runtimeerrors.ErrAgentReadOnly)
 	case strings.Contains(lower, "permission denied"), strings.Contains(lower, "access denied"),
 		strings.Contains(lower, "not allowed"), strings.Contains(lower, "read-only"),
 		strings.Contains(lower, "operation not permitted"), strings.Contains(lower, "denied by policy"),
@@ -2056,7 +2082,7 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrToolShellCompat, runtimeerrors.ErrAgentSpawnDepthLimit,
 		runtimeerrors.ErrToolBrokerFailure,
 		runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck,
-		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission,
+		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission, runtimeerrors.ErrAgentReadOnly,
 		runtimeerrors.ErrAgentAlreadyExists, runtimeerrors.ErrAgentBusy,
 		runtimeerrors.ErrAgentSessionNotFound, runtimeerrors.ErrContextBudget,
 		runtimeerrors.ErrStreamInterrupted, runtimeerrors.ErrUpstreamUnavailable,
@@ -2115,6 +2141,18 @@ func nextActionForToolError(code string, message string) string {
 		return "Path not found. Prefer path_candidates when present, or ls/glob under the existing parent directory to discover the correct name; then retry with a confirmed path. Do not retry the same missing path unchanged."
 	case runtimeerrors.ErrToolShellCompat:
 		return DefaultShellCompatNextAction
+	case runtimeerrors.ErrAgentReadOnly:
+		lower := strings.ToLower(message)
+		switch {
+		case strings.Contains(lower, "compound shell command"):
+			return "Read-only policy does not allow shell statement chaining. Put each read-only command in a separate shell.commands entry, or use dedicated view/grep/glob/ls tools. Approval and bypass_permissions cannot override this boundary."
+		case strings.Contains(lower, "redirection or dynamic command syntax"):
+			return "Remove shell redirection, command substitution, or dynamic syntax. Use a dedicated read tool or a single allowlisted read-only command. Approval and bypass_permissions cannot override this boundary."
+		case strings.Contains(lower, "write-like tool"):
+			return "Use an allowed read-only tool, or have the parent create a writable child with read_only=false when mutation is actually required. Approval and bypass_permissions cannot override this boundary."
+		default:
+			return "Use an allowed read-only tool or command. If mutation is required, the parent must create a writable child with read_only=false; approval and bypass_permissions cannot override this boundary."
+		}
 	case runtimeerrors.ErrAgentPermission, runtimeerrors.ErrAPIUnauthorized, runtimeerrors.ErrApprovalExpired:
 		return "Request the required approval or use an allowed tool; do not retry unchanged."
 	case runtimeerrors.ErrToolTimeout, runtimeerrors.ErrTurnDeadlineExceeded:

@@ -2,8 +2,10 @@ package skills
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +18,22 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/teamsupervisor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+type failFirstGetTeamStore struct {
+	team.Store
+	remaining atomic.Int32
+}
+
+func (s *failFirstGetTeamStore) GetTeam(ctx context.Context, id string) (*team.Team, error) {
+	if s != nil && s.remaining.Add(-1) >= 0 {
+		return nil, errors.New("injected orchestrator get team failure")
+	}
+	return s.Store.GetTeam(ctx, id)
+}
 
 type promptPreflightSummarySessionClient struct {
 	result *team.SessionResult
@@ -383,6 +398,24 @@ func TestSyncTeamLifecycleLoopsEnrichesInjectedOrchestratorBeforeStartingLoops(t
 
 	running := handler.teamLifecycleService().HasLoop(teamID)
 	require.True(t, running, "expected team loop to be started for active team")
+	startedEvents := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.orchestrator.loop.started",
+		Limit:     10,
+	})
+	require.NotEmpty(t, startedEvents)
+	assert.Equal(t, "sync_missing_loop", startedEvents[0].Payload["start_reason"])
+
+	require.NoError(t, store.UpdateTeamStatus(context.Background(), teamID, team.TeamStatusPaused))
+	handler.teamLifecycleService().SyncLoops()
+	require.False(t, handler.teamLifecycleService().HasLoop(teamID))
+	stoppedEvents := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.orchestrator.loop.stopped",
+		Limit:     10,
+	})
+	require.NotEmpty(t, stoppedEvents)
+	assert.Equal(t, "team_not_active", stoppedEvents[0].Payload["stop_reason"])
 }
 
 func TestSyncTeamLifecycleLoopsSignalsExistingLoop(t *testing.T) {
@@ -454,6 +487,80 @@ func TestSyncTeamLifecycleLoopsSignalsExistingLoop(t *testing.T) {
 			teammates,
 		)
 	}
+}
+
+func TestTeamLifecycleSupervisorRestartsFailedLoopWithoutExternalSync(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-supervisor-restart-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	teamID, err := store.CreateTeam(context.Background(), team.Team{
+		Status: team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(context.Background(), team.Teammate{
+		ID:     "restart-mate",
+		TeamID: teamID,
+		State:  team.TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	assignee := "restart-mate"
+	leaseUntil := time.Now().UTC().Add(time.Hour)
+	_, err = store.CreateTask(context.Background(), team.Task{
+		TeamID:     teamID,
+		Title:      "keep team active during restart",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	flakyStore := &failFirstGetTeamStore{Store: store}
+	flakyStore.remaining.Store(1)
+	handler := &Handler{
+		teamStore:        flakyStore,
+		teamOrchestrator: team.NewOrchestrator(flakyStore, nil, nil),
+	}
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
+	lifecycle := newHandlerTeamLifecycleService(handler)
+	lifecycle.supervisor = teamsupervisor.New(teamsupervisor.Config{
+		ScanInterval:      10 * time.Millisecond,
+		RestartBackoff:    []time.Duration{15 * time.Millisecond},
+		MaxRestartBackoff: 50 * time.Millisecond,
+		Jitter:            func(delay time.Duration) time.Duration { return delay },
+	}, teamsupervisor.Hooks{
+		DesiredTeams: lifecycle.desiredTeamIDs,
+		RunLoop:      lifecycle.runLoop,
+		OwnerAllowed: lifecycle.ownerAllowed,
+		OnEvent:      lifecycle.publishSupervisorEvent,
+		OnSettled:    lifecycle.ReplayStoredTerminalEvents,
+	})
+	handler.teamLifecycle = lifecycle
+	t.Cleanup(lifecycle.StopAllLoops)
+
+	lifecycle.SyncLoops()
+	require.Eventually(t, func() bool {
+		snapshot := lifecycle.SupervisorSnapshot()
+		return snapshot.RestartTotal >= 1 && lifecycle.HasLoop(teamID)
+	}, time.Second, 10*time.Millisecond)
+
+	errorEvents := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.orchestrator.loop.error",
+		Limit:     10,
+	})
+	require.NotEmpty(t, errorEvents)
+	assert.Equal(t, "injected orchestrator get team failure", errorEvents[0].Payload["error"])
+
+	restartedEvents := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.orchestrator.restarted",
+		Limit:     10,
+	})
+	require.NotEmpty(t, restartedEvents)
+	assert.Equal(t, "restart_backoff_elapsed", restartedEvents[0].Payload["reason"])
 }
 
 func TestTerminalTeamSummaryFallbackPublishesStructuredRuntimeEvents(t *testing.T) {

@@ -1,6 +1,7 @@
 package providercompat
 
 var registeredAdapters = []Adapter{
+	openCodeConsoleGoAdapter{},
 	sensenovaOpenAIAdapter{},
 	nvidiaOpenAIAdapter{},
 	deepSeekOpenAIAdapter{},

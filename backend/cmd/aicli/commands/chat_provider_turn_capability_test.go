@@ -51,7 +51,7 @@ func TestAdapterRequestConfig_PopulatesModelCapabilityFields(t *testing.T) {
 	}
 }
 
-func TestAdapterRequestConfig_OmitsUnsupportedReasoningEffortWhenCapabilityRestrictsIt(t *testing.T) {
+func TestAdapterRequestConfig_PreservesCustomReasoningEffortWhenCapabilityRestrictsIt(t *testing.T) {
 	session := &ChatSession{
 		ProviderName: "nvidia",
 		Provider: config.Provider{
@@ -70,20 +70,20 @@ func TestAdapterRequestConfig_OmitsUnsupportedReasoningEffortWhenCapabilityRestr
 	}
 
 	cfg := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{Stream: true})
-	if cfg.ReasoningEffort != "" {
-		t.Fatalf("expected unsupported reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	if cfg.ReasoningEffort != "max" {
+		t.Fatalf("expected custom reasoning_effort to be preserved, got %q", cfg.ReasoningEffort)
 	}
-	if got := cfg.Metadata["reasoning_effort"]; got != nil {
-		t.Fatalf("expected unsupported reasoning_effort metadata to be omitted, got %#v", got)
+	if got := cfg.Metadata["reasoning_effort"]; got != "max" {
+		t.Fatalf("expected custom reasoning_effort metadata to be preserved, got %#v", got)
 	}
 
 	body := session.Adapter.BuildRequest(cfg)
-	if got := body["reasoning_effort"]; got != nil {
-		t.Fatalf("expected OpenAI request to omit unsupported reasoning_effort, got %#v", got)
+	if got := body["reasoning_effort"]; got != "max" {
+		t.Fatalf("expected OpenAI request to preserve custom reasoning_effort, got %#v", got)
 	}
 }
 
-func TestAdapterRequestConfig_OmitsNVIDIAUnsupportedReasoningEffortWithoutConfiguredCapability(t *testing.T) {
+func TestAdapterRequestConfig_PreservesCustomReasoningEffortWithoutConfiguredCapability(t *testing.T) {
 	session := &ChatSession{
 		ProviderName: "nvidia",
 		Provider: config.Provider{
@@ -97,16 +97,16 @@ func TestAdapterRequestConfig_OmitsNVIDIAUnsupportedReasoningEffortWithoutConfig
 	}
 
 	cfg := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{Stream: true})
-	if cfg.ReasoningEffort != "" {
-		t.Fatalf("expected nvidia unsupported reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	if cfg.ReasoningEffort != "max" {
+		t.Fatalf("expected custom nvidia reasoning_effort to be preserved, got %q", cfg.ReasoningEffort)
 	}
-	if got := cfg.Metadata["reasoning_effort"]; got != nil {
-		t.Fatalf("expected nvidia unsupported reasoning_effort metadata to be omitted, got %#v", got)
+	if got := cfg.Metadata["reasoning_effort"]; got != "max" {
+		t.Fatalf("expected custom nvidia reasoning_effort metadata to be preserved, got %#v", got)
 	}
 
 	body := session.Adapter.BuildRequest(cfg)
-	if got := body["reasoning_effort"]; got != nil {
-		t.Fatalf("expected OpenAI request to omit nvidia unsupported reasoning_effort, got %#v", got)
+	if got := body["reasoning_effort"]; got != "max" {
+		t.Fatalf("expected OpenAI request to preserve custom nvidia reasoning_effort, got %#v", got)
 	}
 }
 

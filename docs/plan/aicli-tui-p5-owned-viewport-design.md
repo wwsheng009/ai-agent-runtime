@@ -1,15 +1,15 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0–P5.5 已完成；P5.6 完成：`toolChainCell` 单 cell 内稠密、独立 final tool/event cell 间单空行；Running 通过 ActiveBand live redraw 且不进 history；P5.7 待推进）**
+状态: **implementing（P5.0–P5.5 已完成；P5.6 已由 `835386e` 完成并锁定：`toolChainCell` 单 cell 内稠密、独立 final tool/event cell 间单空行；Running 通过 ActiveBand live redraw 且不进 history；P5.7 待推进）**
 
-更新时间: **2026-07-30**
+更新时间: **2026-07-31**
 
 关联文档:
+- 长期架构基线: `docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`（Scene、single screen owner、事务式 frame、fullscreen lease 与旧路径删除）
 - 母计划: `docs/plan/aicli-tui-render-data-plane-codex-migration-plan.md`（P1–P4.2a 已完成，本文是其 P5 展开）
 - 相关: `docs/plan/aicli-ui-refactor-codex-inspired-plan.md`
 
-> 本文记录设计、分步、回退、测试矩阵与已实施切片。P5.0–P5.2a 为共享/影子基础设施，
-> P5.2b/P5.3-S1 为加法式历史窗口；生产 scrollback 所有权切换仍属最高风险，须单独评审。
+> 本文是 owned viewport、ActiveBand、history handoff、resize/reflow 和 P5.6 事件块间距行为的当前实施真相，保留各 P5 切片的设计、回退和测试证据。P5.0–P5.6 已落地，P5.7 负责 P5 范围内的旧路径收尾。跨 slash command/runtime diagnostics 的 raw output、统一 Scene/Presenter、fullscreen screen lease 和全局 single-writer 门禁由长期架构文档继续承接；不得仅依据本文较早阶段的过渡描述恢复双 renderer。
 
 ---
 
@@ -336,8 +336,9 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 
 ### P5.7 —— 收尾：删旧路径开关 + 文档
 
-- 观察一版（灰度/自测）稳定后，移除立即模式旧路径与 flag（或保留 env 急停一版）。
-- 回填母计划状态；本文标记 implemented。
+- 观察一版（灰度/自测）稳定后，移除 P5 owned viewport 已替代的立即模式旧路径与 flag（或保留 session-level env 急停一版）。
+- 与 `aicli-tui-unified-render-architecture-refactor-plan.md` 的 P0–P3、P8–P9 对账：P5.7 只删除已经被 Scene/presenter 或明确 plain renderer 替代的路径，不提前删除仍承担降级职责的代码。
+- 回填母计划状态；满足本文 P5 范围验收后标记 implemented。全局 single-owner、CommandResult、fullscreen lease 等长期任务继续由统一架构文档跟踪。
 
 ---
 
@@ -377,7 +378,7 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 
 ---
 
-## 8. 验收标准（P5 完成即“终局”）
+## 8. 验收标准（P5 owned viewport 范围完成；TUI 长期终局见统一架构文档）
 
 1. resize 窄→宽历史正确重排（cap 内），不触碰已滚出 scrollback。
 2. 工具调用为单 cell、Running 实时可见且 viewport-only；final cell 内稠密、与其他 final event cell 间单空行。
@@ -417,11 +418,14 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 
 ---
 
-## 11. 建议的最小启动步
+## 11. 当前下一步
 
-**P5.0–P5.4 已完成**（默认 owned 渲染 + 历史交接 + 补偿债务 no-op + cell 模型统一 + 宽度感知
-`DisplayLines`）。下一步是 **P5.5（resize 重排 / P4.3 落地）**：
+**P5.0–P5.6 已完成**：默认 owned 渲染、历史交接、补偿债务 no-op、cell 模型统一、宽度感知 `DisplayLines`、resize/reflow，以及 P5.6 的 tool/event gap 行为均已落地；`835386e` 进一步锁定了“tool cell 内稠密、独立 final tool/event cell 间单空行、Running 不进 history”。
 
-- 监听 `Terminal.updateSize()`（SIGWINCH/轮询）→ 按新宽重排 viewport 内历史 cell
-- 行数 cap（超过 cap 的历史不重排，直接以旧行呈现，避免抖动）
-- 测试：40/80/120 列 golden；窄→宽→窄往返一致；cap 生效；不触碰已滚出 scrollback
+下一步是 **P5.7 收尾**：
+
+- 对照 §9 删除/收敛清单确认哪些 legacy 字段和路径仍可达；
+- 将 raw stdout/direct output 审计转交统一架构文档 P0–P2，不能把 surface-aware adapter 误判为全局 single-writer 已完成；
+- 将 fullscreen `Disable()/Enable()` 问题转交统一架构文档 P3 screen lease；
+- 对照统一架构文档 P8/P9 完成 renderer 删除、PTY/ConPTY 与强不变量验收；
+- 只有 P5 范围退出条件具备测试证据后，本文才标记 implemented。

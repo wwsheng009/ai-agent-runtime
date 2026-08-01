@@ -207,7 +207,7 @@ func TestProviderWrapper_InternalCompactRequestKeepsToolsWhenExplicitlyEnabled(t
 	require.Equal(t, "none", capturedBody["tool_choice"])
 }
 
-func TestProviderWrapper_CallDropsUnsupportedReasoningEffortFromCapability(t *testing.T) {
+func TestProviderWrapper_CallPreservesCustomReasoningEffortFromCapability(t *testing.T) {
 	var capturedBody map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
@@ -239,7 +239,7 @@ func TestProviderWrapper_CallDropsUnsupportedReasoningEffortFromCapability(t *te
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp.Content)
-	assert.NotContains(t, capturedBody, "reasoning_effort")
+	assert.Equal(t, "max", capturedBody["reasoning_effort"])
 }
 
 func TestProviderWrapper_ConvertRequestUsesNVIDIAFallbackCapability(t *testing.T) {
@@ -264,12 +264,12 @@ func TestProviderWrapper_ConvertRequestUsesNVIDIAFallbackCapability(t *testing.T
 			Content: "hello",
 		}},
 	})
-	if cfg.ReasoningEffort != "" {
-		t.Fatalf("expected unsupported nvidia reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	if cfg.ReasoningEffort != "max" {
+		t.Fatalf("expected custom nvidia reasoning_effort to be preserved, got %q", cfg.ReasoningEffort)
 	}
 
 	body := wrapper.adapter.BuildRequest(cfg)
-	assert.NotContains(t, body, "reasoning_effort")
+	assert.Equal(t, "max", body["reasoning_effort"])
 }
 
 func TestProviderWrapper_ConvertRequestUsesSensenovaFallbackCapability(t *testing.T) {
@@ -288,12 +288,12 @@ func TestProviderWrapper_ConvertRequestUsesSensenovaFallbackCapability(t *testin
 			Content: "hello",
 		}},
 	})
-	if cfg.ReasoningEffort != "" {
-		t.Fatalf("expected unsupported sensenova reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	if cfg.ReasoningEffort != "max" {
+		t.Fatalf("expected custom sensenova reasoning_effort to be preserved, got %q", cfg.ReasoningEffort)
 	}
 
 	body := wrapper.adapter.BuildRequest(cfg)
-	assert.NotContains(t, body, "reasoning_effort")
+	assert.Equal(t, "max", body["reasoning_effort"])
 
 	cfg = wrapper.convertRequest(ChatRequest{
 		Model:           "sensenova-6.7-flash-lite",
@@ -303,8 +303,8 @@ func TestProviderWrapper_ConvertRequestUsesSensenovaFallbackCapability(t *testin
 			Content: "hello",
 		}},
 	})
-	if cfg.ReasoningEffort != "" {
-		t.Fatalf("expected unsupported sensenova reasoning_effort xhigh to be omitted, got %q", cfg.ReasoningEffort)
+	if cfg.ReasoningEffort != "xhigh" {
+		t.Fatalf("expected custom sensenova reasoning_effort xhigh to be preserved, got %q", cfg.ReasoningEffort)
 	}
 
 	cfg = wrapper.convertRequest(ChatRequest{

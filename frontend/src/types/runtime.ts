@@ -1393,6 +1393,8 @@ export type SiteAccountSnapshot = {
   currency?: string;
   mode?: string;
   wallet_balance?: number;
+  is_available?: boolean;
+  balance_details?: SiteAccountBalanceDetail[];
   quota_balance?: number;
   quota_remaining?: number;
   used_quota?: number;
@@ -1405,11 +1407,20 @@ export type SiteAccountSnapshot = {
   errors?: string[];
 };
 
+export type SiteAccountBalanceDetail = {
+  currency: string;
+  total_balance: number;
+  granted_balance: number;
+  topped_up_balance: number;
+};
+
 export type ProviderAccountCache = {
   source?: string;
   mode?: string;
   currency?: string;
   wallet_balance?: number;
+  is_available?: boolean;
+  balance_details?: SiteAccountBalanceDetail[];
   quota_balance?: number;
   quota_remaining?: number;
   quota_used?: number;

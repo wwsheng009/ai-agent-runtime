@@ -77,6 +77,7 @@ type ReActLoop struct {
 	agent                        *Agent
 	llmRuntime                   *llm.LLMRuntime
 	config                       *LoopReActConfig
+	turnID                       string
 	toolExecMemory               *toolexec.Memory
 	parallelToolCallsUnsupported atomic.Bool
 	reasoningEffortUnsupported   atomic.Bool
@@ -332,6 +333,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	if loop.llmRuntime == nil {
 		return nil, errors.New(errors.ErrValidationFailed, "LLM runtime is nil")
 	}
+	loop.turnID = TurnIDFromContext(ctx)
 
 	loop.agent.SetRunning(true)
 	loop.agent.ClearErrors()
@@ -386,7 +388,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}()
 
 	result = &Result{
-		State: loop.agent.GetState(),
+		State:  loop.agent.GetState(),
+		TurnID: TurnIDFromContext(ctx),
 	}
 	totalUsage := &types.TokenUsage{}
 
@@ -448,7 +451,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
 		}
-		loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, 0, SystemReminder{
+		loop.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, 0, SystemReminder{
 			Kind:    ReminderKindOf(*rem),
 			Body:    stripSystemReminderEnvelope(rem.Content),
 			Durable: false,
@@ -617,7 +620,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					if reminderMsg != nil {
 						builder.Add(*reminderMsg)
 						promptBuilder.Add(*reminderMsg)
-						loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, step, SystemReminder{
+						loop.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, step, SystemReminder{
 							Kind:    ReminderKindCompletionRequirement,
 							Body:    stripSystemReminderEnvelope(reminderMsg.Content),
 							Durable: true,
@@ -626,7 +629,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 						return nil, err
 					}
-					loop.agent.emitRuntimeEvent("completion.requirement_recovery", sessionID, "", map[string]interface{}{
+					loop.emitRuntimeEvent("completion.requirement_recovery", sessionID, "", map[string]interface{}{
 						"trace_id":               traceID,
 						"step":                   step,
 						"completion_requirement": completionRequirement,
@@ -686,7 +689,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					if reminderMsg != nil {
 						builder.Add(*reminderMsg)
 						promptBuilder.Add(*reminderMsg)
-						loop.agent.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, step, SystemReminder{
+						loop.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", SystemReminderEventPayload(traceID, step, SystemReminder{
 							Kind:    ReminderKindStopHook,
 							Body:    stripSystemReminderEnvelope(reminderMsg.Content),
 							Durable: true,
@@ -695,7 +698,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 						return nil, err
 					}
-					loop.agent.emitRuntimeEvent("hooks.stop_blocked", sessionID, "", map[string]interface{}{
+					loop.emitRuntimeEvent("hooks.stop_blocked", sessionID, "", map[string]interface{}{
 						"trace_id": traceID,
 						"step":     step,
 						"message":  stopMsg,
@@ -743,8 +746,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if doomObs.EmitWarning {
 			warningPayload := DoomLoopWarningPayload(traceID, step, doomObs)
 			// Dual-emit: legacy subscribers + product doom-loop surface.
-			loop.agent.emitRuntimeEvent(EventRepeatedSemanticCallObserved, sessionID, "", warningPayload)
-			loop.agent.emitRuntimeEvent(EventDoomLoopWarning, sessionID, "", warningPayload)
+			loop.emitRuntimeEvent(EventRepeatedSemanticCallObserved, sessionID, "", warningPayload)
+			loop.emitRuntimeEvent(EventDoomLoopWarning, sessionID, "", warningPayload)
 			observability.RecordDoomLoop("warning")
 		}
 		if doomObs.RepeatCount >= 2 {
@@ -763,7 +766,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 		consecutiveExplorationSteps = nextExplorationStallCount(consecutiveExplorationSteps, action.ToolCalls)
 		if consecutiveExplorationSteps == explorationStallNoticeThreshold {
-			loop.agent.emitRuntimeEvent("tool_loop.exploration_stall_observed", sessionID, "", map[string]interface{}{
+			loop.emitRuntimeEvent("tool_loop.exploration_stall_observed", sessionID, "", map[string]interface{}{
 				"trace_id":                   traceID,
 				"step":                       step,
 				"consecutive_readonly_steps": consecutiveExplorationSteps,
@@ -794,7 +797,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 		if doomObs.ShouldStop {
 			termPayload := DoomLoopTerminationPayload(traceID, step, doomObs)
-			loop.agent.emitRuntimeEvent(EventDoomLoopTerminated, sessionID, "", termPayload)
+			loop.emitRuntimeEvent(EventDoomLoopTerminated, sessionID, "", termPayload)
 			observability.RecordDoomLoop("terminated")
 			result.Success = false
 			result.LimitReached = true
@@ -820,7 +823,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				repeatedToolPromptFingerprint = 1
 			}
 			if repeatedToolPromptFingerprint == 2 {
-				loop.agent.emitRuntimeEvent("tool_loop.repeated_prompt_observed", sessionID, "", map[string]interface{}{
+				loop.emitRuntimeEvent("tool_loop.repeated_prompt_observed", sessionID, "", map[string]interface{}{
 					"trace_id":           traceID,
 					"step":               step,
 					"prompt_fingerprint": fingerprint,
@@ -990,6 +993,22 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	return result, nil
 }
 
+// emitRuntimeEvent stamps every event emitted by this ReAct run with the
+// durable actor turn identity. Trace IDs identify individual model/tool work;
+// they are not sufficient to reject delayed events after the next turn starts.
+func (loop *ReActLoop) emitRuntimeEvent(eventType, sessionID, toolName string, payload map[string]interface{}) {
+	if loop == nil || loop.agent == nil {
+		return
+	}
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+	if turnID := strings.TrimSpace(loop.turnID); turnID != "" {
+		payload["turn_id"] = turnID
+	}
+	loop.agent.emitRuntimeEvent(eventType, sessionID, toolName, payload)
+}
+
 func stepExceedsLimit(maxSteps int, step int) bool {
 	maxSteps = NormalizeMaxSteps(maxSteps)
 	return maxSteps > 0 && step > maxSteps
@@ -1097,7 +1116,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			}
 			toolFingerprint := ToolDefinitionsFingerprint(availableTools)
 			if toolTokensAfter > 0 && toolTokensAfter < toolTokensBefore {
-				loop.agent.emitRuntimeEvent("context.tool_schema.compacted", sessionID, "", map[string]interface{}{
+				loop.emitRuntimeEvent("context.tool_schema.compacted", sessionID, "", map[string]interface{}{
 					"trace_id":                 traceID,
 					"step":                     step,
 					"tool_count":               len(availableTools),
@@ -1107,7 +1126,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					"reason":                   "turn_freeze",
 				})
 			} else if toolFingerprint != "" {
-				loop.agent.emitRuntimeEvent("context.tool_schema.frozen", sessionID, "", map[string]interface{}{
+				loop.emitRuntimeEvent("context.tool_schema.frozen", sessionID, "", map[string]interface{}{
 					"trace_id":                 traceID,
 					"step":                     step,
 					"tool_count":               len(availableTools),
@@ -1253,7 +1272,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if turnID != "" {
 					payload["turn_id"] = turnID
 				}
-				loop.agent.emitRuntimeEvent("assistant_delta", sessionID, "", payload)
+				loop.emitRuntimeEvent("assistant_delta", sessionID, "", payload)
 			case llm.EventTypeReasoning:
 				if chunk.Content == "" {
 					return
@@ -1266,7 +1285,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					Streamable: true,
 					Visibility: types.ReasoningVisibilitySummary,
 				}
-				loop.agent.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
+				loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
 					"trace_id":  traceID,
 					"step":      step,
 					"reasoning": reasoning.ToMap(),
@@ -1275,7 +1294,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if len(chunk.Metadata) == 0 {
 					return
 				}
-				loop.agent.emitRuntimeEvent("assistant.image_progress", sessionID, "", map[string]interface{}{
+				loop.emitRuntimeEvent("assistant.image_progress", sessionID, "", map[string]interface{}{
 					"trace_id": traceID,
 					"step":     step,
 					"image":    chunk.Metadata,
@@ -1369,6 +1388,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		req.Metadata["tool_surface"] = surface
 		requestPayload["tool_surface"] = surface
 	}
+	if effectiveSurface := loop.summarizeEffectiveToolSurface(req.Tools); len(effectiveSurface) > 0 {
+		req.Metadata["effective_tool_surface"] = cloneInterfaceMap(effectiveSurface)
+		requestPayload["effective_tool_surface"] = effectiveSurface
+	}
 	if availability := summarizeToolAvailability(req.Tools); len(availability) > 0 {
 		req.Metadata["tool_availability"] = cloneInterfaceMap(availability)
 		requestPayload["tool_availability"] = availability
@@ -1381,7 +1404,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 		action.Metadata["prompt_fingerprint"] = fingerprint
 	}
-	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
+	loop.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
 	for err != nil {
 		parameter := loop.downgradeUnsupportedProviderRequest(req, err)
@@ -1392,7 +1415,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if parameter == llm.MetadataKeyParallelToolCalls {
 			eventType = "llm.parallel_tool_calls.downgraded"
 		}
-		loop.agent.emitRuntimeEvent(eventType, sessionID, "", map[string]interface{}{
+		loop.emitRuntimeEvent(eventType, sessionID, "", map[string]interface{}{
 			"trace_id": traceID, "logical_turn_id": logicalTurnID, "llm_request_id": llmRequestID,
 			"step": step, "provider": req.Provider, "model": req.Model,
 			"parameter": parameter, "error": err.Error(),
@@ -1410,7 +1433,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			}
 			req.Metadata["max_output_tokens_escalated"] = true
 			req.Metadata["max_output_tokens_previous"] = previous
-			loop.agent.emitRuntimeEvent("llm.max_output_tokens.escalated", sessionID, "", map[string]interface{}{
+			loop.emitRuntimeEvent("llm.max_output_tokens.escalated", sessionID, "", map[string]interface{}{
 				"trace_id":        traceID,
 				"logical_turn_id": logicalTurnID,
 				"llm_request_id":  llmRequestID,
@@ -1472,7 +1495,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				finishedPayload["context_window_tokens"] = value
 			}
 		}
-		loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
+		loop.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 		return "", nil, nil, err
 	}
 	finishedPayload := map[string]interface{}{
@@ -1562,7 +1585,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if usageSource != "" {
 		finishedPayload["usage_source"] = usageSource
 	}
-	loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
+	loop.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 
 	// 解析响应
 	action.Content = response.Content
@@ -1588,7 +1611,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			action.Reasoning.Provider = req.Provider
 		}
 		if !streamedReasoning {
-			loop.agent.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
+			loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
 				"trace_id":  traceID,
 				"step":      step,
 				"reasoning": action.Reasoning.ToMap(),
@@ -1641,7 +1664,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		}
 		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i], loop.agent, sessionID, depth), results[:i])
 		callCtx = loop.agent.withToolProgressReporter(callCtx, sessionID, traceID, tc)
-		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, toolRequestedEventSourcePayload(loop.agent, tc.Name)))
+		loop.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, toolRequestedEventSourcePayload(loop.agent, tc.Name)))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
 			loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
@@ -1793,7 +1816,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
 			}
 			result.Envelope = envelope
-			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 				"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
 			}))
 			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
@@ -1864,7 +1887,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
 			}
 			result.Envelope = envelope
-			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 				"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
 			}))
 			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
@@ -1925,7 +1948,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 					result.Error = "subagent scheduler is not configured"
 					loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_scheduler", result.Error, nil)
 				} else {
-					loop.agent.emitRuntimeEvent("subagent.batch.started", sessionID, tc.Name, map[string]interface{}{
+					loop.emitRuntimeEvent("subagent.batch.started", sessionID, tc.Name, map[string]interface{}{
 						"tool_call_id": tc.ID,
 						"step":         step,
 						"trace_id":     traceID,
@@ -1936,7 +1959,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						ParentToolCallID: tc.ID,
 						Depth:            depth + 1,
 					}, subtasks)
-					loop.agent.emitRuntimeEvent("subagent.batch.completed", sessionID, tc.Name, map[string]interface{}{
+					loop.emitRuntimeEvent("subagent.batch.completed", sessionID, tc.Name, map[string]interface{}{
 						"tool_call_id":   tc.ID,
 						"step":           step,
 						"trace_id":       traceID,
@@ -1971,7 +1994,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				envelope.Metadata["subagent_reports_artifact_id"] = envelope.ArtifactIDs[0]
 			}
 			result.Envelope = envelope
-			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 				"awaiting_model": false,
 				"subagent":       true,
 			}))
@@ -2125,7 +2148,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			envelope.Metadata["gateway_error"] = gatewayErr.Error()
 		}
 		result.Envelope = envelope
-		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+		loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 			"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
 		}))
 		if pendingCheckpoints != nil {
@@ -2178,13 +2201,14 @@ func (loop *ReActLoop) finalizeDeniedToolResult(ctx context.Context, gateway *ou
 	if loop == nil {
 		return result
 	}
+	metadata = loop.enrichDeniedToolMetadata(metadata, result.Error)
 	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
 	if gatewayErr != nil && envelope != nil {
 		envelope.Metadata["gateway_error"] = gatewayErr.Error()
 	}
 	result.Envelope = envelope
 	if loop.agent != nil {
-		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+		loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 			"awaiting_model": false,
 			"denied":         true,
 		}))
@@ -2205,7 +2229,7 @@ func (loop *ReActLoop) finalizeSoftEmptyToolResult(ctx context.Context, gateway 
 	}
 	result.Envelope = envelope
 	if loop.agent != nil {
-		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+		loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 			"awaiting_model": false,
 			"empty_replay":   true,
 		}))
@@ -2222,20 +2246,34 @@ func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step 
 	if loop == nil || loop.agent == nil {
 		return
 	}
+	policyStage := policy
+	errorCode := errors.ErrAgentPermission
+	readOnlyDenied := policy == "read_only" || strings.Contains(strings.ToLower(reason), "read-only policy")
+	if readOnlyDenied {
+		errorCode = errors.ErrAgentReadOnly
+		policy = "read_only"
+	}
 	payload := map[string]interface{}{
 		"tool_call_id": tc.ID,
 		"step":         step,
 		"policy":       policy,
 		"reason":       reason,
 		"trace_id":     traceID,
-		"error_code":   string(errors.ErrAgentPermission),
+		"error_code":   string(errorCode),
 	}
 	diagnostic := toolresult.Diagnose(tc.Name, tc.ID, reason, map[string]interface{}{
-		"error_code": string(errors.ErrAgentPermission),
+		"error_code": string(errorCode),
 	})
 	payload["ok"] = diagnostic.OK
 	payload["retryable"] = diagnostic.Retryable
 	payload["next_action"] = diagnostic.NextAction
+	if readOnlyDenied {
+		payload["policy_source"] = loop.readOnlyPolicySource()
+		payload["overridable"] = false
+		if policyStage != "" && policyStage != policy {
+			payload["policy_stage"] = policyStage
+		}
+	}
 	// Denies are always failed dispositions for offline efficiency scoring.
 	payload[toolresult.MetadataOutcomeKey] = toolresult.OutcomeFailed
 	for key, value := range extra {
@@ -2244,7 +2282,50 @@ func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step 
 		}
 		payload[key] = value
 	}
-	loop.agent.emitRuntimeEvent("tool.denied", sessionID, tc.Name, payload)
+	if readOnlyDenied {
+		// Tool/preflight metadata is untrusted diagnostic context. Reassert the
+		// hard-boundary fields after merging it so a generic permission stamp
+		// cannot make read_only appear approval-overridable.
+		payload["policy"] = "read_only"
+		payload["error_code"] = string(errors.ErrAgentReadOnly)
+		payload["retryable"] = false
+		payload["next_action"] = diagnostic.NextAction
+		payload["policy_source"] = loop.readOnlyPolicySource()
+		payload["overridable"] = false
+	}
+	loop.emitRuntimeEvent("tool.denied", sessionID, tc.Name, payload)
+}
+
+func (loop *ReActLoop) enrichDeniedToolMetadata(metadata map[string]interface{}, reason string) map[string]interface{} {
+	if classifyDeniedPolicy(reason) != "read_only" {
+		return metadata
+	}
+	enriched := cloneInterfaceMap(metadata)
+	if enriched == nil {
+		enriched = make(map[string]interface{})
+	}
+	diagnostic := toolresult.Diagnose("", "", reason, map[string]interface{}{
+		toolresult.MetadataErrorCodeKey: string(errors.ErrAgentReadOnly),
+	})
+	enriched[toolresult.MetadataErrorCodeKey] = string(errors.ErrAgentReadOnly)
+	enriched[toolresult.MetadataRetryableKey] = false
+	enriched[toolresult.MetadataNextActionKey] = diagnostic.NextAction
+	enriched[toolresult.MetadataPolicyKey] = "read_only"
+	enriched[toolresult.MetadataPolicySource] = loop.readOnlyPolicySource()
+	enriched[toolresult.MetadataOverridable] = false
+	enriched[toolresult.MetadataOutcomeKey] = toolresult.OutcomeFailed
+	return enriched
+}
+
+func (loop *ReActLoop) readOnlyPolicySource() string {
+	if loop != nil && loop.agent != nil {
+		if config := loop.agent.GetConfig(); config != nil && config.Options != nil {
+			if source := strings.TrimSpace(fmt.Sprint(config.Options["read_only_source"])); source != "" && source != "<nil>" {
+				return source
+			}
+		}
+	}
+	return "tool_execution_policy"
 }
 
 func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step int, traceID string, result toolExecutionResult, extra map[string]interface{}) {
@@ -2263,6 +2344,9 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 			"error_code",
 			"retryable",
 			"next_action",
+			toolresult.MetadataPolicyKey,
+			toolresult.MetadataPolicySource,
+			toolresult.MetadataOverridable,
 			"ok",
 			toolresult.MetadataOutcomeKey,
 			toolresult.MetadataEmptyResultKey,
@@ -2285,7 +2369,7 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 		}
 		payload[key] = value
 	}
-	loop.agent.emitRuntimeEvent("tool.reduced", sessionID, tc.Name, payload)
+	loop.emitRuntimeEvent("tool.reduced", sessionID, tc.Name, payload)
 }
 
 func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step int, req *llm.LLMRequest) llm.RetryEventReporter {
@@ -2342,7 +2426,7 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 				payload[key] = value
 			}
 		}
-		loop.agent.emitRuntimeEvent("llm.retry", sessionID, "", payload)
+		loop.emitRuntimeEvent("llm.retry", sessionID, "", payload)
 	}
 }
 
@@ -3069,14 +3153,14 @@ func normalizeToolParameters(schema map[string]interface{}) map[string]interface
 
 // AgentAction Agent 行动
 type AgentAction struct {
-	Content          string                 `json:"content" yaml:"content"`
-	ToolCalls        []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
-	Thought          string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
-	Reasoning        *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	MessageMetadata  types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
-	promptHistory    []types.Message
-	toolSchemaTokens int
+	Content                 string                 `json:"content" yaml:"content"`
+	ToolCalls               []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
+	Thought                 string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
+	Reasoning               *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
+	Metadata                map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	MessageMetadata         types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
+	promptHistory           []types.Message
+	toolSchemaTokens        int
 	assistantStreamID       string
 	assistantStreamSequence uint64
 }
@@ -4000,7 +4084,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	startedPayload["message_count"] = len(messages)
 	addRemainingBudgetMetadata(startedPayload, remainingBudget)
 	startedPayload["active_turn_replay"] = true
-	loop.agent.emitRuntimeEvent("context.preflight.started", sessionID, "", startedPayload)
+	loop.emitRuntimeEvent("context.preflight.started", sessionID, "", startedPayload)
 
 	messageBudget := inputBudget - toolSchemaTokens
 	if messageBudget <= 0 {
@@ -4018,7 +4102,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 			failedPayload[key] = value
 			preflightMetadata[key] = value
 		}
-		loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
+		loop.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
 		return nil, preflightMetadata, failureErr
 	}
 	compactedMessages, compacted := historyguard.CompactActiveTurnReplayWithCounter(
@@ -4065,7 +4149,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		compactedPayload["prompt_only"] = true
 		compactedPayload["prompt_cache_epoch_break"] = true
 		compactedPayload["prompt_cache_epoch_reason"] = "active_turn_replay_compaction"
-		loop.agent.emitRuntimeEvent("context.preflight.compacted", sessionID, "", compactedPayload)
+		loop.emitRuntimeEvent("context.preflight.compacted", sessionID, "", compactedPayload)
 		if promptTokensAfter <= inputBudget {
 			return compactedMessages, preflightMetadata, nil
 		}
@@ -4096,7 +4180,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 			failedPayload[key] = value
 			preflightMetadata[key] = value
 		}
-		loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
+		loop.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
 		return nil, preflightMetadata, failureErr
 	}
 
@@ -4125,7 +4209,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		failedPayload[key] = value
 		preflightMetadata[key] = value
 	}
-	loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
+	loop.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
 	return nil, preflightMetadata, failureErr
 }
 
@@ -4166,7 +4250,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	); window > 0 {
 		startedPayload["context_window_tokens"] = window
 	}
-	loop.agent.emitRuntimeEvent("session_compact_started", sessionID, "", startedPayload)
+	loop.emitRuntimeEvent("session_compact_started", sessionID, "", startedPayload)
 
 	if allow, blockMsg := loop.agent.dispatchPreCompactHook(ctx, startedPayload); !allow {
 		skippedPayload := cloneInterfaceMap(startedPayload)
@@ -4174,7 +4258,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		if strings.TrimSpace(blockMsg) != "" {
 			skippedPayload["hook_message"] = strings.TrimSpace(blockMsg)
 		}
-		loop.agent.emitRuntimeEvent("session_compact_skipped", sessionID, "", skippedPayload)
+		loop.emitRuntimeEvent("session_compact_skipped", sessionID, "", skippedPayload)
 		return nil, false, nil
 	}
 
@@ -4199,7 +4283,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		failedPayload["error"] = err.Error()
 		failedPayload["trigger_token_limit"] = status.TriggerTokenLimit
 		failedPayload["max_context_tokens"] = status.MaxContextTokens
-		loop.agent.emitRuntimeEvent("session_compact_failed", sessionID, "", failedPayload)
+		loop.emitRuntimeEvent("session_compact_failed", sessionID, "", failedPayload)
 		return nil, false, err
 	}
 	if result == nil || len(result.ReplacementHistory) == 0 {
@@ -4207,7 +4291,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		skippedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "no_replacement_history")
 		skippedPayload["trigger_token_limit"] = status.TriggerTokenLimit
 		skippedPayload["max_context_tokens"] = status.MaxContextTokens
-		loop.agent.emitRuntimeEvent("session_compact_skipped", sessionID, "", skippedPayload)
+		loop.emitRuntimeEvent("session_compact_skipped", sessionID, "", skippedPayload)
 		return nil, false, nil
 	}
 
@@ -4248,7 +4332,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		completedPayload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
 		completedPayload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
 	}
-	loop.agent.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
+	loop.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
 	loop.agent.dispatchPostCompactHook(ctx, completedPayload)
 
 	return cloneMessageHistory(result.ReplacementHistory), true, nil
@@ -4300,7 +4384,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 	startedPayload["replacement_token_limit"] = replacementTokenLimit
 	startedPayload["prompt_only"] = true
 	startedPayload["durable_history_replaced"] = false
-	loop.agent.emitRuntimeEvent(eventPrefix+".started", sessionID, "", startedPayload)
+	loop.emitRuntimeEvent(eventPrefix+".started", sessionID, "", startedPayload)
 
 	if allow, blockMsg := loop.agent.dispatchPreCompactHook(ctx, startedPayload); !allow {
 		skippedPayload := cloneInterfaceMap(startedPayload)
@@ -4308,7 +4392,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		if strings.TrimSpace(blockMsg) != "" {
 			skippedPayload["hook_message"] = strings.TrimSpace(blockMsg)
 		}
-		loop.agent.emitRuntimeEvent(eventPrefix+".skipped", sessionID, "", skippedPayload)
+		loop.emitRuntimeEvent(eventPrefix+".skipped", sessionID, "", skippedPayload)
 		return nil, nil, false, nil
 	}
 
@@ -4343,7 +4427,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		if err != nil {
 			fallbackPayload["error"] = err.Error()
 		}
-		loop.agent.emitRuntimeEvent(eventPrefix+".fallback", sessionID, "", fallbackPayload)
+		loop.emitRuntimeEvent(eventPrefix+".fallback", sessionID, "", fallbackPayload)
 		compactRequest.Mode = compactruntime.ModeLocal
 		result, status, err = runtime.MaybeCompact(ctx, compactRequest)
 	}
@@ -4351,13 +4435,13 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		failedPayload := cloneInterfaceMap(startedPayload)
 		failedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "semantic_compaction_failed")
 		failedPayload["error"] = err.Error()
-		loop.agent.emitRuntimeEvent(eventPrefix+".failed", sessionID, "", failedPayload)
+		loop.emitRuntimeEvent(eventPrefix+".failed", sessionID, "", failedPayload)
 		return nil, nil, false, err
 	}
 	if result == nil || len(result.ReplacementHistory) == 0 || !compactionRecoveryMadeProgress(loop.llmRuntime, history, result.ReplacementHistory) {
 		skippedPayload := cloneInterfaceMap(startedPayload)
 		skippedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "replacement_did_not_reduce_context")
-		loop.agent.emitRuntimeEvent(eventPrefix+".skipped", sessionID, "", skippedPayload)
+		loop.emitRuntimeEvent(eventPrefix+".skipped", sessionID, "", skippedPayload)
 		return nil, nil, false, nil
 	}
 
@@ -4384,7 +4468,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		completedPayload["usage_completion_tokens"] = result.Usage.CompletionTokens
 		completedPayload["usage_total_tokens"] = result.Usage.TotalTokens
 	}
-	loop.agent.emitRuntimeEvent(eventPrefix+".completed", sessionID, "", completedPayload)
+	loop.emitRuntimeEvent(eventPrefix+".completed", sessionID, "", completedPayload)
 	loop.agent.dispatchPostCompactHook(ctx, completedPayload)
 	return cloneMessageHistory(result.ReplacementHistory), result.Usage, true, nil
 }
@@ -5073,8 +5157,12 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 							"provider":             map[string]interface{}{"type": "string", "description": "Optional provider hint. The local runtime may ignore it unless explicitly allowed."},
 							"reasoning_effort":     map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy."},
 							"thinking_effort":      map[string]interface{}{"type": "string", "description": "Deprecated alias for reasoning_effort."},
-							"tools_whitelist":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"depends_on":           map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"tools_whitelist": map[string]interface{}{
+								"type":        "array",
+								"items":       map[string]interface{}{"type": "string"},
+								"description": "Optional child tool allowlist. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true.",
+							},
+							"depends_on": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 							"patches": map[string]interface{}{
 								"type": "array",
 								"items": map[string]interface{}{
@@ -5089,7 +5177,10 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 							"model":         map[string]interface{}{"type": "string"},
 							"budget_tokens": map[string]interface{}{"type": "integer"},
 							"timeout":       map[string]interface{}{"type": "integer"},
-							"read_only":     map[string]interface{}{"type": "boolean"},
+							"read_only": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Hard child execution boundary. Blocks write-like tools and allows shell only for individually classified read-only commands. Independent of permission_mode; approval and bypass_permissions do not override it.",
+							},
 						},
 						"required": []string{"goal"},
 					},
@@ -5133,6 +5224,43 @@ func summarizeToolAvailability(tools []types.ToolDefinition) map[string]interfac
 
 func summarizeToolSurface(tools []types.ToolDefinition) map[string]interface{} {
 	return runtimeskill.BuildToolSurfaceSummary(tools)
+}
+
+func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinition) map[string]interface{} {
+	if loop == nil || loop.agent == nil || len(tools) == 0 {
+		return nil
+	}
+	policy := loop.agent.GetToolExecutionPolicy()
+	if policy == nil {
+		return nil
+	}
+	allowed := make([]string, 0, len(tools))
+	blocked := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		if policy.AllowsDefinition(name) {
+			allowed = append(allowed, name)
+		} else {
+			blocked = append(blocked, name)
+		}
+	}
+	summary := map[string]interface{}{
+		"catalog_count": len(tools),
+		"count":         len(allowed),
+		"names":         allowed,
+		"read_only":     policy.ReadOnly,
+	}
+	if len(blocked) > 0 {
+		summary["blocked"] = blocked
+	}
+	if policy.ReadOnly {
+		summary["policy_source"] = loop.readOnlyPolicySource()
+		summary["overridable"] = false
+	}
+	return summary
 }
 
 func stringValue(value interface{}) string {

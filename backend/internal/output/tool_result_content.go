@@ -154,6 +154,9 @@ func renderToolResultContract(body string, diagnostic toolresult.Diagnostic) str
 		Retryable               *bool                   `json:"retryable,omitempty"`
 		EmptyResult             *bool                   `json:"empty_result,omitempty"`
 		NextAction              string                  `json:"next_action,omitempty"`
+		Policy                  string                  `json:"policy,omitempty"`
+		PolicySource            string                  `json:"policy_source,omitempty"`
+		Overridable             *bool                   `json:"overridable,omitempty"`
 		PathCandidates          []string                `json:"path_candidates,omitempty"`
 		AttemptedArgs           map[string]interface{}  `json:"attempted_args,omitempty"`
 		RequestedCount          int                     `json:"requested_count,omitempty"`
@@ -174,6 +177,9 @@ func renderToolResultContract(body string, diagnostic toolresult.Diagnostic) str
 		ToolCallID:              diagnostic.ToolCallID,
 		ErrorCode:               diagnostic.ErrorCode,
 		NextAction:              diagnostic.NextAction,
+		Policy:                  diagnostic.Policy,
+		PolicySource:            diagnostic.PolicySource,
+		Overridable:             diagnostic.Overridable,
 		PathCandidates:          append([]string(nil), diagnostic.PathCandidates...),
 		AttemptedArgs:           diagnostic.AttemptedArgs,
 		RequestedCount:          diagnostic.RequestedCount,

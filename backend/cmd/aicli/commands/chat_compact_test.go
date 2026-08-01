@@ -63,7 +63,7 @@ func TestFormatChatCompactReport_SuccessIncludesCompactLineage(t *testing.T) {
 			ReplacementHistory: []types.Message{},
 		},
 		Generation: 2,
-		Title:      "检查登录流程为什么失败 · compact #2",
+		Title:      "检查登录流程为什么失败",
 		RootTitle:  "检查登录流程为什么失败",
 	}
 
@@ -71,7 +71,7 @@ func TestFormatChatCompactReport_SuccessIncludesCompactLineage(t *testing.T) {
 	if !strings.Contains(output, "generation=2") {
 		t.Fatalf("expected generation in compact report, got %q", output)
 	}
-	if !strings.Contains(output, "title=检查登录流程为什么失败 · compact #2") {
+	if !strings.Contains(output, "title=检查登录流程为什么失败") {
 		t.Fatalf("expected title in compact report, got %q", output)
 	}
 	if strings.Contains(output, "root_title=") {
@@ -81,7 +81,7 @@ func TestFormatChatCompactReport_SuccessIncludesCompactLineage(t *testing.T) {
 
 func TestAttachChatCompactLineageReadsRuntimeSession(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
-	runtimeSession.Metadata.Title = "检查登录流程为什么失败 · compact #1"
+	runtimeSession.Metadata.Title = "检查登录流程为什么失败"
 	runtimeSession.Metadata.Context = map[string]interface{}{
 		runtimechat.ContextCompactGeneration: 1,
 		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
@@ -94,7 +94,7 @@ func TestAttachChatCompactLineageReadsRuntimeSession(t *testing.T) {
 	if report.RootTitle != "检查登录流程为什么失败" {
 		t.Fatalf("expected root title, got %q", report.RootTitle)
 	}
-	if report.Title != "检查登录流程为什么失败 · compact #1" {
+	if report.Title != "检查登录流程为什么失败" {
 		t.Fatalf("expected session title, got %q", report.Title)
 	}
 }

@@ -40,6 +40,7 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			APIKey:                  provider.GetAPIKey(),
 			BaseURL:                 provider.BaseURL,
 			APIPath:                 provider.APIPath,
+			CompatibilityProfile:    provider.Compatibility.Profile,
 			Timeout:                 timeout,
 			MaxRetries:              maxRetries,
 			RetryTuning:             retryTuning,

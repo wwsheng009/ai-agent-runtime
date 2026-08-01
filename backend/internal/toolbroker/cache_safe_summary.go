@@ -45,9 +45,12 @@ func waitTeamCacheSafeSummary(result WaitTeamResult) string {
 	if result.Terminal {
 		lines = append(lines, "Team is terminal.")
 	} else if result.TimedOut {
-		lines = append(lines, "Wait timed out before terminal state.")
+		lines = append(lines, "Wait timed out before terminal state; team execution continues.")
 	} else {
 		lines = append(lines, "Team is still running.")
+	}
+	if nextAction := strings.TrimSpace(result.NextAction); nextAction != "" {
+		lines = append(lines, "Next action: "+nextAction+".")
 	}
 	if result.SummaryReady {
 		lines = append(lines, "Summary is ready.")

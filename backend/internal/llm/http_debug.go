@@ -263,9 +263,9 @@ func cloneHTTPDebugValue(value interface{}) interface{} {
 	}
 }
 
-func buildHTTPDebugRequestMetadata(metadata map[string]interface{}, protocol string, requestBody map[string]interface{}) map[string]interface{} {
+func buildHTTPDebugRequestMetadata(metadata map[string]interface{}, protocol, profile string, requestBody map[string]interface{}) map[string]interface{} {
 	cloned := cloneHTTPDebugMetadata(metadata)
-	diagnostics := buildHTTPDebugRequestDiagnostics(protocol, requestBody)
+	diagnostics := buildHTTPDebugRequestDiagnostics(protocol, profile, requestBody)
 	if layout := strings.TrimSpace(fmt.Sprint(metadataValueAny(cloned, "prompt_layout"))); layout != "" && layout != "<nil>" {
 		if diagnostics == nil {
 			diagnostics = make(map[string]interface{}, 2)
@@ -283,7 +283,7 @@ func buildHTTPDebugRequestMetadata(metadata map[string]interface{}, protocol str
 	return cloned
 }
 
-func buildHTTPDebugRequestDiagnostics(protocol string, requestBody map[string]interface{}) map[string]interface{} {
+func buildHTTPDebugRequestDiagnostics(protocol, profile string, requestBody map[string]interface{}) map[string]interface{} {
 	if len(requestBody) == 0 {
 		return nil
 	}
@@ -293,6 +293,9 @@ func buildHTTPDebugRequestDiagnostics(protocol string, requestBody map[string]in
 	}
 	if protocol = strings.TrimSpace(protocol); protocol != "" {
 		diagnostics["protocol"] = protocol
+	}
+	if profile = strings.TrimSpace(profile); profile != "" {
+		diagnostics["compatibility_profile"] = profile
 	}
 
 	cacheSurface := make(map[string]interface{})

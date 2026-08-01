@@ -19,6 +19,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -5023,6 +5024,9 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 			Model:        "test-provider",
 			MaxSteps:     3,
 			SystemPrompt: "You are a helpful assistant.",
+			Options: map[string]interface{}{
+				"read_only_source": "spawn_subagents.read_only",
+			},
 		},
 		skillRouter: &skill.Router{},
 		skillExec:   &skill.Executor{},
@@ -5031,9 +5035,21 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 	agent.SetToolExecutionPolicy(NewToolExecutionPolicy(nil, true))
 	bus := runtimeevents.NewBus()
 	var deniedPolicies []string
+	var deniedCodes []string
+	var deniedSources []string
+	var deniedOverridable []bool
 	bus.Subscribe("tool.denied", func(event runtimeevents.Event) {
 		if policy, ok := event.Payload["policy"].(string); ok {
 			deniedPolicies = append(deniedPolicies, policy)
+		}
+		if code, ok := event.Payload["error_code"].(string); ok {
+			deniedCodes = append(deniedCodes, code)
+		}
+		if source, ok := event.Payload["policy_source"].(string); ok {
+			deniedSources = append(deniedSources, source)
+		}
+		if overridable, ok := event.Payload["overridable"].(bool); ok {
+			deniedOverridable = append(deniedOverridable, overridable)
 		}
 	})
 	var completedOutcomes []string
@@ -5078,8 +5094,17 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 	require.NotEmpty(t, result.Observations)
 	assert.Contains(t, result.Observations[0].Error, "read-only policy blocks write-like tool")
 	assert.Contains(t, deniedPolicies, "read_only")
+	assert.Contains(t, deniedCodes, string(runtimeerrors.ErrAgentReadOnly))
+	assert.Contains(t, deniedSources, "spawn_subagents.read_only")
+	assert.Contains(t, deniedOverridable, false)
 	require.NotEmpty(t, completedOutcomes)
 	assert.Contains(t, completedOutcomes, "failed")
+	require.NotEmpty(t, provider.requests)
+	effectiveSurface, ok := provider.requests[0].Metadata["effective_tool_surface"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, effectiveSurface["read_only"])
+	assert.Equal(t, "spawn_subagents.read_only", effectiveSurface["policy_source"])
+	assert.Contains(t, effectiveSurface["blocked"], "write_file")
 
 	tools, err := loop.getAvailableTools(context.Background(), "write file", nil)
 	require.NoError(t, err)

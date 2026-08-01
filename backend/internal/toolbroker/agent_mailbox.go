@@ -1,6 +1,7 @@
 package toolbroker
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -129,11 +130,14 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			}
 		}
 	}
+	deliveryKey := subagentCompletionDeliveryKey(parentSessionID, childSessionID, sourceEventType, payload)
+	metadata["delivery_key"] = deliveryKey
 	status := "completed"
 	if value, ok := metadata["status"].(string); ok && strings.TrimSpace(value) != "" {
 		status = strings.TrimSpace(value)
 	}
 	return team.MailMessage{
+		ID:        deliveryKey,
 		FromAgent: childSessionID,
 		ToAgent:   "parent",
 		Kind:      SubagentCompletionMailboxKind,
@@ -141,6 +145,30 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 		Metadata:  metadata,
 		CreatedAt: time.Now().UTC(),
 	}
+}
+
+func subagentCompletionDeliveryKey(parentSessionID, childSessionID, sourceEventType string, payload map[string]interface{}) string {
+	terminalIdentity := ""
+	for _, key := range []string{"source_event_seq", "seq", "source_event_trace_id", "source_event_timestamp"} {
+		if payload == nil {
+			break
+		}
+		if value, ok := payload[key]; ok && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			terminalIdentity = key + ":" + strings.TrimSpace(fmt.Sprint(value))
+			break
+		}
+	}
+	if terminalIdentity == "" && payload != nil {
+		terminalIdentity = "status:" + strings.TrimSpace(fmt.Sprint(payload["status"]))
+	}
+	raw := strings.Join([]string{
+		strings.TrimSpace(parentSessionID),
+		strings.TrimSpace(childSessionID),
+		strings.TrimSpace(sourceEventType),
+		terminalIdentity,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("subagent_completion_%x", sum[:16])
 }
 
 // AnnotateSubagentCompletionDisplayMirror marks the legacy subagent.completed

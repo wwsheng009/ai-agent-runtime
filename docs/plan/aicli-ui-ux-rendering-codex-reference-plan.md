@@ -1,13 +1,16 @@
 # aicli UI/UX 渲染逻辑优化方案（参考 Codex TUI）
 
-状态: **Phase 0-5 核心实现完成并经审查收口；终端集成验收待完成**
+状态: **Phase 0-5 内容渲染核心实现完成并经审查收口；物理屏幕所有权与终端集成验收转入统一 TUI 架构计划**
 
-更新时间: **2026-07-29**
+更新时间: **2026-07-31**
 
-实施审查与剩余风险见
-[aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)。
-本文中的 `done (core)` 表示代码骨架和聚焦测试完成，不等于真实 PTY/ConPTY
-矩阵与完整仓库测试已经验收。
+关联文档：
+
+- 实施审查与内容渲染剩余风险：[aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)；
+- owned viewport 当前实现：[aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)；
+- Scene、single screen owner、事务式 frame 与长期验收：[aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)。
+
+本文中的 `done (core)` 表示内容解析、结构化 IR、主题、宽度与聚焦测试完成，不等于 raw/direct output 已全部消除，也不等于真实 PTY/ConPTY 和 fullscreen/scrollback 生命周期已经验收。`render.ApplyBlockSpacing` / `SpacingPolicy` 负责 Markdown/Document 或单个 semantic cell 内部的 block spacing；top-level transcript cells 之间的 gap 由统一架构文档的 `BoundaryPolicy` 管理。
 
 实施进度:
 
@@ -34,7 +37,7 @@
 - 如何在 TrueColor、ANSI-256、ANSI-16、无颜色、亮色和暗色终端中稳定降级；
 - 如何通过结构化快照和终端矩阵避免 UI 回归。
 
-本文不要求立即替换现有 `FixedBottomSurface`，也不建议第一步引入 Bubble Tea、tview 或全屏 alternate screen。推荐先建立独立于 ANSI 字符串的渲染中间层，再让现有线性输出和 fixed-bottom surface 共同消费该中间层。这样可以先修复主题失效、宽度错算、代码无高亮和工具输出不安全等问题，同时为后续 frame renderer 留出稳定接口。
+本文不要求立即替换现有 `FixedBottomSurface`，也不建议第一步引入 Bubble Tea、tview 或全屏 alternate screen。推荐先建立独立于 ANSI 字符串的渲染中间层，再让 plain renderer 和 owned TUI presenter 分别消费该中间层。这里的“共同消费”只指复用 `Document -> Block -> Line -> Span` 内容模型，不表示二者可以在同一 owned interactive session 中同时写物理终端；物理 writer 所有权以统一 TUI 架构计划为准。
 
 ## 2. 执行结论
 
@@ -45,7 +48,7 @@
 3. **渲染模型层**：所有内容先生成 `Block -> Line -> Span`，样式保持为结构化字段，不提前拼入 ANSI。
 4. **主题解析层**：语义配色、语法主题和终端亮暗是三条独立轴，最终由 `ThemeResolver` 合并。
 5. **终端适配层**：统一处理颜色深度、默认前景/背景、Unicode 宽度、超链接、无颜色和 ASCII 降级。
-6. **输出后端层**：短期由 ANSI backend 写入现有 surface，长期可增加 buffer backend 和帧差分，不改上层组件。
+6. **输出后端层**：Plain/JSON mode 使用独立线性 backend；owned interactive mode 由唯一 presenter 消费 buffer/frame 并写终端，不改上层内容组件。
 
 关键设计判断：
 

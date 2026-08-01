@@ -57,8 +57,8 @@ func TestBuildHTTPDebugRequestMetadataAddsStableFingerprints(t *testing.T) {
 		"prompt_cache_key": "session-1",
 	}
 
-	metaFirst := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-1", "prompt_layout": "[base/system]\nSystem prompt"}, "codex", requestBody)
-	metaSecond := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-2", "prompt_layout": "[base/system]\nSystem prompt"}, "codex", requestBody)
+	metaFirst := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-1", "prompt_layout": "[base/system]\nSystem prompt"}, "codex", "opencode-console-go-2026-07", requestBody)
+	metaSecond := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-2", "prompt_layout": "[base/system]\nSystem prompt"}, "codex", "opencode-console-go-2026-07", requestBody)
 
 	debugFirst, ok := metaFirst["_request_debug"].(map[string]interface{})
 	if !ok {
@@ -99,6 +99,12 @@ func TestBuildHTTPDebugRequestMetadataAddsStableFingerprints(t *testing.T) {
 	if debugFirst["prompt_layout_length"] != len("[base/system]\nSystem prompt") {
 		t.Fatalf("expected prompt_layout_length to be populated, got %#v", debugFirst["prompt_layout_length"])
 	}
+	if debugFirst["compatibility_profile"] != "opencode-console-go-2026-07" {
+		t.Fatalf("expected compatibility_profile to be recorded, got %#v", debugFirst["compatibility_profile"])
+	}
+	if debugFirst["protocol"] != "codex" {
+		t.Fatalf("expected protocol=codex, got %#v", debugFirst["protocol"])
+	}
 }
 
 func TestBuildHTTPDebugRequestMetadataDetectsToolOrderChanges(t *testing.T) {
@@ -127,8 +133,8 @@ func TestBuildHTTPDebugRequestMetadataDetectsToolOrderChanges(t *testing.T) {
 		},
 	}
 
-	baseDebug := buildHTTPDebugRequestDiagnostics("openai", base)
-	reorderedDebug := buildHTTPDebugRequestDiagnostics("openai", reordered)
+	baseDebug := buildHTTPDebugRequestDiagnostics("openai", "", base)
+	reorderedDebug := buildHTTPDebugRequestDiagnostics("openai", "", reordered)
 
 	if baseDebug["messages_sha256"] != reorderedDebug["messages_sha256"] {
 		t.Fatalf("expected message fingerprint to stay stable, got %#v / %#v", baseDebug["messages_sha256"], reorderedDebug["messages_sha256"])

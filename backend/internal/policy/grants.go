@@ -8,15 +8,15 @@ import (
 
 // Decision stage identifiers for permission pipeline observability.
 const (
-	StageHooks         = "hooks"
-	StagePolicy        = "policy"
-	StageRules         = "rules"
-	StageGrants        = "grants"
-	StageReadonlyAuto  = "readonly_auto"
-	StageMode          = "mode"
-	StageCallback      = "callback"
-	StageAsk           = "ask"
-	StageHeadlessDeny  = "headless_deny"
+	StageHooks        = "hooks"
+	StagePolicy       = "policy"
+	StageRules        = "rules"
+	StageGrants       = "grants"
+	StageReadonlyAuto = "readonly_auto"
+	StageMode         = "mode"
+	StageCallback     = "callback"
+	StageAsk          = "ask"
+	StageHeadlessDeny = "headless_deny"
 )
 
 // Grant records a remembered allow decision for a tool (and optional pattern).
@@ -213,95 +213,344 @@ func firstStringArg(args map[string]interface{}, keys ...string) (string, bool) 
 	return "", false
 }
 
-// IsShellReadOnlyCommand reports whether a shell/bash command is on the
-// read-only allow table (git status, rg, ls, pwd, etc.).
-func IsShellReadOnlyCommand(command string) bool {
+const (
+	ShellReadOnlyReasonEmpty         = "empty_command"
+	ShellReadOnlyReasonCompound      = "compound_command"
+	ShellReadOnlyReasonDynamicSyntax = "dynamic_shell_syntax"
+	ShellReadOnlyReasonNotAllowed    = "command_not_allowlisted"
+)
+
+// ShellReadOnlyAssessment describes why a shell command is or is not accepted
+// by the read-only execution boundary. The reason is intentionally stable so
+// tool-result recovery can distinguish "split this batch" from a real mutation.
+type ShellReadOnlyAssessment struct {
+	Allowed bool
+	Reason  string
+}
+
+// AssessShellReadOnlyCommand validates one concrete shell command against the
+// read-only allow table. Compound statements are deliberately rejected: callers
+// should submit multiple commands through the shell tool's structured commands
+// array so every entry can be validated independently.
+func AssessShellReadOnlyCommand(command string) ShellReadOnlyAssessment {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return false
+		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonEmpty}
 	}
-	// Reject obvious chaining / redirection that could hide writes.
-	lowerFull := strings.ToLower(command)
-	for _, bad := range []string{"&&", "||", ";", "|", ">", "<", "`", "$(", "\n"} {
+	// Reject obvious chaining first so callers can return a precise recovery
+	// action (use commands=[...], not an approval request).
+	for _, bad := range []string{"&&", "||", "&", ";", "|", "\n", "\r"} {
 		if strings.Contains(command, bad) {
-			// Allow simple pipes only for known read-only pagers? keep strict for v1.
-			_ = lowerFull
-			return false
+			return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonCompound}
 		}
+	}
+	// Redirection and command substitution can smuggle side effects even when
+	// argv[0] itself is a read-only command.
+	for _, bad := range []string{">", "<", "`", "$"} {
+		if strings.Contains(command, bad) {
+			return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonDynamicSyntax}
+		}
+	}
+	// cmd.exe and delayed-expansion shells use paired percent/bang markers for
+	// environment substitution. Reject them conservatively; an expanded value
+	// can inject options or a different path after this classifier runs.
+	if hasPairedShellExpansion(command, '%') || hasPairedShellExpansion(command, '!') {
+		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonDynamicSyntax}
 	}
 
 	fields := splitCommandFields(command)
 	if len(fields) == 0 {
-		return false
+		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonEmpty}
 	}
 	argv0 := strings.ToLower(filepath.Base(fields[0]))
 	argv0 = strings.TrimSuffix(argv0, ".exe")
 	argv0 = strings.TrimSuffix(argv0, ".cmd")
 	argv0 = strings.TrimSuffix(argv0, ".bat")
 
+	allowed := false
 	switch argv0 {
-	case "rg", "grep", "findstr", "ag", "ack":
-		return true
-	case "ls", "dir", "pwd", "get-location", "get-childitem", "gci", "gl", "cat", "type", "get-content", "gc", "head", "tail", "wc", "file", "stat", "which", "where", "where.exe", "echo", "printf":
-		return true
+	case "rg":
+		allowed = isReadOnlyRipgrepCommand(fields[1:])
+	case "grep", "findstr", "ag", "ack":
+		allowed = true
+	case "file":
+		allowed = isReadOnlyFileCommand(fields[1:])
+	case "ls", "dir", "pwd", "get-location", "get-childitem", "gci", "gl", "cat", "type", "get-content", "gc", "head", "tail", "wc", "stat", "which", "where", "where.exe", "echo", "printf":
+		allowed = true
 	case "git":
-		if len(fields) < 2 {
-			return false
-		}
-		sub := strings.ToLower(fields[1])
-		switch sub {
-		case "status", "diff", "log", "show", "branch", "tag", "remote", "rev-parse", "describe", "ls-files", "ls-tree", "blame", "shortlog", "stash":
-			// git stash without drop/pop/apply is still potentially mutating for "stash push"; be conservative:
-			if sub == "stash" && len(fields) > 2 {
-				action := strings.ToLower(fields[2])
-				switch action {
-				case "list", "show":
-					return true
-				default:
-					return false
-				}
-			}
-			if sub == "remote" && len(fields) > 2 {
-				action := strings.ToLower(fields[2])
-				switch action {
-				case "add", "remove", "rm", "rename", "set-url", "prune":
-					return false
-				}
-			}
-			return !containsWriteyGitFlags(fields[2:])
-		default:
-			return false
-		}
+		allowed = isReadOnlyGitCommand(fields[1:])
 	case "go":
-		if len(fields) >= 2 {
-			switch strings.ToLower(fields[1]) {
-			case "env", "list", "version", "doc", "help":
-				return true
-			}
-		}
-		return false
+		allowed = isReadOnlyGoCommand(fields[1:])
 	case "npm", "pnpm", "yarn", "cargo", "python", "python3", "node", "pip", "pip3":
-		// only bare version/help style
-		if len(fields) == 2 {
-			switch strings.ToLower(fields[1]) {
-			case "-v", "--version", "version", "help", "-h", "--help":
-				return true
-			}
+		allowed = isReadOnlyVersionFlag(fields[1:])
+	}
+	if allowed {
+		return ShellReadOnlyAssessment{Allowed: true}
+	}
+	return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonNotAllowed}
+}
+
+func isReadOnlyRipgrepCommand(args []string) bool {
+	for _, raw := range args {
+		arg := strings.ToLower(strings.TrimSpace(raw))
+		switch {
+		case arg == "--pre", strings.HasPrefix(arg, "--pre="):
+			return false
+		case arg == "--hostname-bin", strings.HasPrefix(arg, "--hostname-bin="):
+			return false
+		case arg == "--search-zip", arg == "--zip", hasShortOption(arg, 'z'):
+			// Compressed-file search launches external decompressor binaries.
+			return false
 		}
+	}
+	return true
+}
+
+func isReadOnlyFileCommand(args []string) bool {
+	for _, raw := range args {
+		arg := strings.TrimSpace(raw)
+		lower := strings.ToLower(arg)
+		switch {
+		case lower == "--compile", hasShortOption(arg, 'C'):
+			// file --compile writes a compiled .mgc database.
+			return false
+		case lower == "--uncompress", lower == "--uncompress-noreport",
+			hasShortOption(arg, 'z'), hasShortOption(arg, 'Z'):
+			// Avoid external decompressor execution inside a read-only child.
+			return false
+		}
+	}
+	return true
+}
+
+func isReadOnlyVersionFlag(args []string) bool {
+	if len(args) != 1 {
 		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "-v", "--version", "-h", "--help":
+		return true
 	default:
 		return false
 	}
 }
 
-func containsWriteyGitFlags(args []string) bool {
+func hasShortOption(arg string, option rune) bool {
+	arg = strings.TrimSpace(arg)
+	if len(arg) < 2 || !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		return false
+	}
+	return strings.ContainsRune(arg[1:], option)
+}
+
+func hasPairedShellExpansion(command string, marker rune) bool {
+	return strings.Count(command, string(marker)) >= 2
+}
+
+// IsShellReadOnlyCommand reports whether a shell/bash command is on the
+// read-only allow table (git status, rg, ls, pwd, etc.).
+func IsShellReadOnlyCommand(command string) bool {
+	return AssessShellReadOnlyCommand(command).Allowed
+}
+
+func isReadOnlyGitCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	rest := args[1:]
+	switch sub {
+	case "status":
+		return !containsForbiddenGitReadFlag(rest)
+	case "diff", "log", "show", "blame", "shortlog":
+		return !containsForbiddenGitReadFlag(rest)
+	case "rev-parse", "describe", "ls-files", "ls-tree":
+		return !containsForbiddenGitReadFlag(rest)
+	case "branch":
+		return isReadOnlyGitBranch(rest)
+	case "tag":
+		return isReadOnlyGitTag(rest)
+	case "remote":
+		return isReadOnlyGitRemote(rest)
+	case "stash":
+		if len(rest) == 0 {
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(rest[0])) {
+		case "list", "show":
+			return !containsForbiddenGitReadFlag(rest[1:])
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func containsForbiddenGitReadFlag(args []string) bool {
 	for _, arg := range args {
-		lower := strings.ToLower(arg)
-		if lower == "--am" || lower == "--continue" || lower == "--abort" {
+		lower := strings.ToLower(strings.TrimSpace(arg))
+		switch {
+		case lower == "--am", lower == "--continue", lower == "--abort":
+			return true
+		case lower == "--output", strings.HasPrefix(lower, "--output="):
+			return true
+		case lower == "--ext-diff", lower == "--textconv":
 			return true
 		}
 	}
 	return false
+}
+
+func isReadOnlyGitBranch(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	queryMode := false
+	for _, raw := range args {
+		arg := strings.ToLower(strings.TrimSpace(raw))
+		switch {
+		case arg == "":
+			continue
+		case isGitBranchMutationFlag(arg):
+			return false
+		case arg == "--list", arg == "--show-current",
+			arg == "-a", arg == "--all", arg == "-r", arg == "--remotes",
+			arg == "-v", arg == "-vv", arg == "--verbose",
+			arg == "--contains", strings.HasPrefix(arg, "--contains="),
+			arg == "--no-contains", strings.HasPrefix(arg, "--no-contains="),
+			arg == "--merged", strings.HasPrefix(arg, "--merged="),
+			arg == "--no-merged", strings.HasPrefix(arg, "--no-merged="),
+			arg == "--points-at", strings.HasPrefix(arg, "--points-at="),
+			arg == "--format", strings.HasPrefix(arg, "--format="),
+			arg == "--sort", strings.HasPrefix(arg, "--sort="),
+			arg == "--column", strings.HasPrefix(arg, "--column="),
+			arg == "--no-column", arg == "--color", strings.HasPrefix(arg, "--color="),
+			arg == "--no-color", arg == "--ignore-case",
+			arg == "--abbrev", strings.HasPrefix(arg, "--abbrev="), arg == "--no-abbrev":
+			queryMode = true
+		case strings.HasPrefix(arg, "-"):
+			return false
+		default:
+			// A positional value is a pattern/revision only after an explicit
+			// query selector. Without queryMode, "git branch NAME" creates it.
+			if !queryMode {
+				return false
+			}
+		}
+	}
+	return queryMode
+}
+
+func isGitBranchMutationFlag(arg string) bool {
+	switch {
+	case arg == "-d", arg == "--delete", arg == "-m", arg == "--move",
+		arg == "-c", arg == "--copy", arg == "-f", arg == "--force",
+		arg == "--edit-description", arg == "-u", arg == "--set-upstream-to",
+		strings.HasPrefix(arg, "--set-upstream-to="), arg == "--unset-upstream",
+		arg == "--track", strings.HasPrefix(arg, "--track="), arg == "--no-track",
+		arg == "--recurse-submodules":
+		return true
+	default:
+		return false
+	}
+}
+
+func isReadOnlyGitTag(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	queryMode := false
+	for _, raw := range args {
+		arg := strings.ToLower(strings.TrimSpace(raw))
+		switch {
+		case arg == "":
+			continue
+		case isGitTagMutationFlag(arg):
+			return false
+		case arg == "-l", arg == "--list", arg == "-n", strings.HasPrefix(arg, "-n"),
+			arg == "-v", arg == "--verify",
+			arg == "--contains", strings.HasPrefix(arg, "--contains="),
+			arg == "--no-contains", strings.HasPrefix(arg, "--no-contains="),
+			arg == "--merged", strings.HasPrefix(arg, "--merged="),
+			arg == "--no-merged", strings.HasPrefix(arg, "--no-merged="),
+			arg == "--points-at", strings.HasPrefix(arg, "--points-at="),
+			arg == "--format", strings.HasPrefix(arg, "--format="),
+			arg == "--sort", strings.HasPrefix(arg, "--sort="),
+			arg == "--column", strings.HasPrefix(arg, "--column="),
+			arg == "--no-column", arg == "--color", strings.HasPrefix(arg, "--color="),
+			arg == "--no-color", arg == "--ignore-case":
+			queryMode = true
+		case strings.HasPrefix(arg, "-"):
+			return false
+		default:
+			// Without a query flag, a positional value creates a lightweight tag.
+			if !queryMode {
+				return false
+			}
+		}
+	}
+	return queryMode
+}
+
+func isGitTagMutationFlag(arg string) bool {
+	switch {
+	case arg == "-d", arg == "--delete", arg == "-f", arg == "--force",
+		arg == "-a", arg == "--annotate", arg == "-s", arg == "--sign",
+		arg == "-u", arg == "--local-user", strings.HasPrefix(arg, "--local-user="),
+		arg == "-m", arg == "--message", strings.HasPrefix(arg, "--message="),
+		arg == "--file", strings.HasPrefix(arg, "--file="),
+		arg == "--cleanup", strings.HasPrefix(arg, "--cleanup="),
+		arg == "--create-reflog":
+		return true
+	default:
+		return false
+	}
+}
+
+func isReadOnlyGitRemote(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	action := strings.ToLower(strings.TrimSpace(args[0]))
+	switch action {
+	case "-v", "--verbose":
+		return len(args) == 1
+	case "show", "get-url":
+		return !containsForbiddenGitReadFlag(args[1:])
+	default:
+		return false
+	}
+}
+
+func isReadOnlyGoCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	rest := args[1:]
+	switch sub {
+	case "version", "doc", "help":
+		return true
+	case "env":
+		for _, raw := range rest {
+			arg := strings.ToLower(strings.TrimSpace(raw))
+			if arg == "-w" || arg == "-u" || strings.HasPrefix(arg, "-w=") || strings.HasPrefix(arg, "-u=") {
+				return false
+			}
+		}
+		return true
+	case "list":
+		for _, raw := range rest {
+			arg := strings.ToLower(strings.TrimSpace(raw))
+			if arg == "-mod=mod" || strings.HasPrefix(arg, "-modfile=") || arg == "-modfile" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func splitCommandFields(command string) []string {

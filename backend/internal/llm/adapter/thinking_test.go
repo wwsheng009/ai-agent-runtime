@@ -6,8 +6,9 @@ import (
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
-func TestBuildAnthropicThinkingFromReasoningEffortRequiresExplicitBudgetConfig(t *testing.T) {
-	// When no budgets are configured, should default to adaptive thinking
+func TestBuildAnthropicThinkingFromReasoningEffortPreservesUnmappedValues(t *testing.T) {
+	// When no budgets are configured, default to adaptive thinking and preserve
+	// the provider-defined effort for output_config.
 	adaptive := buildAnthropicThinkingFromReasoningEffort("high", nil)
 	if adaptive == nil {
 		t.Fatal("expected adaptive thinking when no budgets configured")
@@ -35,15 +36,29 @@ func TestBuildAnthropicThinkingFromReasoningEffortRequiresExplicitBudgetConfig(t
 		t.Fatalf("expected budget_tokens 16384, got %#v", thinking.BudgetTokens)
 	}
 
-	disabled := buildAnthropicThinkingFromReasoningEffort("none", nil)
-	if disabled == nil || disabled.Type != "disabled" {
-		t.Fatalf("expected disabled thinking for none, got %#v", disabled)
+	custom := buildAnthropicThinkingFromReasoningEffort(" Provider-Custom ", map[string]int{
+		"high": 16384,
+	})
+	if custom == nil || custom.Type != "adaptive" {
+		t.Fatalf("expected custom effort to use adaptive thinking, got %#v", custom)
+	}
+	if custom.Effort != "Provider-Custom" {
+		t.Fatalf("expected custom effort to be trimmed without rewriting, got %q", custom.Effort)
+	}
+
+	none := buildAnthropicThinkingFromReasoningEffort("none", nil)
+	if none == nil || none.Type != "adaptive" || none.Effort != "none" {
+		t.Fatalf("expected provider-specific none effort to be preserved, got %#v", none)
 	}
 }
 
-func TestBuildGeminiThinkingConfigFromReasoningEffortRequiresExplicitBudgetConfig(t *testing.T) {
-	if got := buildGeminiThinkingConfigFromReasoningEffort("high", nil); got != nil {
-		t.Fatalf("expected nil thinkingConfig without explicit budget config, got %#v", got)
+func TestBuildGeminiThinkingConfigFromReasoningEffortPreservesUnmappedValues(t *testing.T) {
+	fallback := buildGeminiThinkingConfigFromReasoningEffort("Provider-Custom", nil)
+	if got := fallback["thinkingLevel"]; got != "Provider-Custom" {
+		t.Fatalf("expected custom thinkingLevel to be preserved, got %#v", got)
+	}
+	if _, exists := fallback["thinkingBudget"]; exists {
+		t.Fatalf("expected custom effort not to be rewritten as a budget, got %#v", fallback)
 	}
 
 	thinkingConfig := buildGeminiThinkingConfigFromReasoningEffort("high", map[string]int{
@@ -57,6 +72,13 @@ func TestBuildGeminiThinkingConfigFromReasoningEffortRequiresExplicitBudgetConfi
 	}
 	if got := thinkingConfig["thinkingBudget"]; got != 16384 {
 		t.Fatalf("expected thinkingBudget 16384, got %#v", got)
+	}
+
+	unmapped := buildGeminiThinkingConfigFromReasoningEffort(" custom-level ", map[string]int{
+		"high": 16384,
+	})
+	if got := unmapped["thinkingLevel"]; got != "custom-level" {
+		t.Fatalf("expected unmapped effort to reach thinkingLevel, got %#v", got)
 	}
 
 	if got := buildGeminiThinkingConfigFromThinking(&anthropictypes.Thinking{Type: "enabled"}, nil); got != nil {

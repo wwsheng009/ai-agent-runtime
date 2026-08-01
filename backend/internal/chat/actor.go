@@ -868,14 +868,14 @@ func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 			return
 		}
 	}
-	a.publish(runtimeevents.Event{
-		Type:      EventQuestionAnswered,
-		SessionID: a.id,
-		Payload: map[string]interface{}{
-			"question_id": cmd.QuestionID,
-			"answer":      cmd.Answer,
-		},
-	})
+	payload := map[string]interface{}{
+		"question_id": cmd.QuestionID,
+		"answer":      cmd.Answer,
+	}
+	if turnID := strings.TrimSpace(state.CurrentTurnID); turnID != "" {
+		payload["turn_id"] = turnID
+	}
+	a.publish(runtimeevents.Event{Type: EventQuestionAnswered, SessionID: a.id, Payload: payload})
 	cmd.Reply <- nil
 }
 
@@ -1561,6 +1561,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 
 	payload := map[string]interface{}{
 		"session_id": a.id,
+		"turn_id":    turnID,
 		"phase":      compactruntime.PhasePreTurn,
 		"mode":       compactruntime.ModeLocal,
 	}
@@ -1675,13 +1676,13 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 
 	a.reconcileCompactResult(ctx, session, result)
 	originalHistory := history
-	// Capture root title before history rewrite; ReplaceHistory would otherwise
-	// re-derive the title from the compaction summary text.
+	// Capture root title before history rewrite for diagnostic lineage;
+	// ReplaceHistory keeps the sticky derived/manual title unchanged.
 	rootTitleHint := session.CompactRootTitleCandidate()
 	titleSnapshot := snapshotSessionTitleState(session)
 	session.ReplaceHistory(result.ReplacementHistory)
-	// Compact rewrites history in place; preserve root title + parent linkage
-	// so resume lists keep showing the original conversation title with a child marker.
+	// Compact rewrites history in place; record parent/root lineage + generation
+	// as diagnostics without changing the user-visible title.
 	session.ApplyCompactTitleLineage(session.ID, rootTitleHint)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
@@ -1861,13 +1862,13 @@ func (a *SessionActor) runManualCompact(
 
 	a.reconcileCompactResult(ctx, session, result)
 	originalHistory := session.GetMessages()
-	// Capture root title before history rewrite; ReplaceHistory would otherwise
-	// re-derive the title from the compaction summary text.
+	// Capture root title before history rewrite for diagnostic lineage;
+	// ReplaceHistory keeps the sticky derived/manual title unchanged.
 	rootTitleHint := session.CompactRootTitleCandidate()
 	titleSnapshot := snapshotSessionTitleState(session)
 	session.ReplaceHistory(result.ReplacementHistory)
-	// Compact rewrites history in place; preserve root title + parent linkage
-	// so resume lists keep showing the original conversation title with a child marker.
+	// Compact rewrites history in place; record parent/root lineage + generation
+	// as diagnostics without changing the user-visible title.
 	session.ApplyCompactTitleLineage(session.ID, rootTitleHint)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
@@ -2132,6 +2133,12 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
 				}
 			}
+		}
+		if result != nil {
+			// The actor owns the durable turn identity. Stamp it here as the
+			// authoritative fallback even if a custom loop did not propagate
+			// agent.WithTurnID through its Result.
+			result.TurnID = turnID
 		}
 		cancel()
 		a.clearActiveCancel()
@@ -3109,7 +3116,13 @@ func appendApprovalRunMetaPayload(payload map[string]interface{}, state *Runtime
 	if payload == nil {
 		return
 	}
-	if state == nil || state.CurrentRunMeta == nil {
+	if state == nil {
+		return
+	}
+	if turnID := strings.TrimSpace(state.CurrentTurnID); turnID != "" {
+		payload["turn_id"] = turnID
+	}
+	if state.CurrentRunMeta == nil {
 		return
 	}
 	if permissionMode := strings.TrimSpace(state.CurrentRunMeta.PermissionMode); permissionMode != "" {
@@ -3201,15 +3214,25 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 		return "", err
 	}
 	waiter := a.registerQuestionWaiter(req.ID)
+	turnID := agent.TurnIDFromContext(ctx)
+	if turnID == "" {
+		if state := a.StateForInspection(); state != nil {
+			turnID = strings.TrimSpace(state.CurrentTurnID)
+		}
+	}
+	payload := map[string]interface{}{
+		"question_id": req.ID,
+		"prompt":      req.Prompt,
+		"required":    req.Required,
+		"suggestions": req.Suggestions,
+	}
+	if turnID != "" {
+		payload["turn_id"] = turnID
+	}
 	a.publish(runtimeevents.Event{
 		Type:      EventQuestionAsked,
 		SessionID: a.id,
-		Payload: map[string]interface{}{
-			"question_id": req.ID,
-			"prompt":      req.Prompt,
-			"required":    req.Required,
-			"suggestions": req.Suggestions,
-		},
+		Payload:   payload,
 	})
 	select {
 	case answer := <-waiter:

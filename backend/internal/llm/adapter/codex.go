@@ -79,13 +79,6 @@ type CodexToolCall struct {
 	Arguments strings.Builder
 }
 
-var validCodexReasoningEfforts = map[string]struct{}{
-	"low":    {},
-	"medium": {},
-	"high":   {},
-	"xhigh":  {},
-}
-
 // NewCodexStreamState 创建新的 Codex 流式状态
 func NewCodexStreamState() *CodexStreamState {
 	return &CodexStreamState{
@@ -136,7 +129,7 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 	}
 
 	effort := NormalizeCodexReasoningEffort(config.ReasoningEffort)
-	if IsValidCodexReasoningEffort(effort) {
+	if effort != "" {
 		request["reasoning"] = map[string]interface{}{
 			"effort":  effort,
 			"summary": "auto",
@@ -281,12 +274,6 @@ func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]inte
 // NormalizeCodexReasoningEffort 仅去除 Codex reasoning effort 的首尾空白。
 func NormalizeCodexReasoningEffort(effort string) string {
 	return strings.TrimSpace(effort)
-}
-
-// IsValidCodexReasoningEffort 判断是否为支持的 Codex reasoning effort。
-func IsValidCodexReasoningEffort(effort string) bool {
-	_, ok := validCodexReasoningEfforts[NormalizeCodexReasoningEffort(effort)]
-	return ok
 }
 
 // convertMessagesToCodexInput 将 OpenAI 格式的 messages 转换为 Codex 格式的 input 数组。
@@ -3234,7 +3221,9 @@ func (a *CodexAdapter) BuildAssistantMessage(content string, toolCalls []map[str
 	}
 
 	if len(toolCalls) > 0 {
-		msg["tool_calls"] = toolCalls
+		if normalized := NormalizeToolCalls(toolCalls); len(normalized) > 0 {
+			msg["tool_calls"] = normalized
+		}
 	}
 
 	if reasoning != "" {
@@ -3479,64 +3468,6 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 		"name":      name,
 		"arguments": arguments,
 	}
-}
-
-// ExtractToolCallsFromRawCalls 从已解析的 tool_calls 数组直接构造 ToolCall 列表
-func (a *CodexAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interface{}) []ToolCall {
-	if len(rawCalls) == 0 {
-		return nil
-	}
-
-	toolCalls := make([]ToolCall, 0, len(rawCalls))
-	for _, raw := range rawCalls {
-		tc := ToolCall{
-			Type: "function",
-		}
-
-		// ID 字段 (call_id 或 id)
-		if callID, ok := raw["call_id"].(string); ok {
-			tc.ID = callID
-		} else if id, ok := raw["id"].(string); ok {
-			tc.ID = id
-		}
-
-		// Function 和 Args 字段
-		var name string
-		var argsJSON string
-
-		if nameVal, ok := raw["name"].(string); ok {
-			name = nameVal
-		}
-		toolType, _ := raw["type"].(string)
-		toolType = strings.TrimSpace(toolType)
-		if toolType != "" {
-			tc.Type = toolType
-		}
-
-		if argsStr, ok := raw["arguments"].(string); ok {
-			// 直接使用 arguments 字符串（已经是 JSON）
-			argsJSON = argsStr
-		} else if argsMap, ok := raw["arguments"].(map[string]interface{}); ok {
-			// 如果是 map，序列化为 JSON 字符串
-			if jsonBytes, err := json.Marshal(argsMap); err == nil {
-				argsJSON = string(jsonBytes)
-			}
-		}
-		if toolType == "custom_tool_call" {
-			if input, ok := raw["input"].(string); ok {
-				argsJSON = input
-			}
-		}
-
-		tc.Function = ToolCallFunction{
-			Name:      name,
-			Arguments: argsJSON,
-		}
-
-		toolCalls = append(toolCalls, tc)
-	}
-
-	return toolCalls
 }
 
 // AccumulateStreamData 累积流式数据块

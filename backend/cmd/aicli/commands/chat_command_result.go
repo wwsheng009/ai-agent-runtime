@@ -65,7 +65,8 @@ func (r CommandResult) Document() render.Document {
 func tryExecuteStructuredChatCommand(session *ChatSession, command string) (CommandResult, bool, error) {
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/load") &&
-		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") {
+		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
+		!commandMatches(cmdLower, "/title") && !commandMatches(cmdLower, "/rename") {
 		return CommandResult{}, false, nil
 	}
 
@@ -97,6 +98,23 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			Blocks:        []RenderBlock{{Document: buildChatLoadDocument(session)}},
 			Action:        CommandContinue,
 			ReplayHistory: hasVisibleChatHistory(session),
+		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/title") || commandMatches(cmdLower, "/rename") {
+		// A successful title mutation has no interactive prompt/modal behavior,
+		// so it can commit its confirmation as one retained command cell. Keep
+		// missing-argument and no-session errors on the legacy path.
+		title := strings.TrimSpace(extractCommandArgument(command))
+		if title == "" || session == nil || session.RuntimeSession == nil {
+			return CommandResult{}, false, nil
+		}
+		if err := updateChatSessionTitle(session, title); err != nil {
+			return CommandResult{}, true, err
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatTitleUpdatedDocument()}},
+			Action: CommandContinue,
 		}, true, nil
 	}
 

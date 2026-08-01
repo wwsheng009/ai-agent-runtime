@@ -68,7 +68,10 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	if source := resolveToolSourceForRequest(a, call.Name); source != "" {
 		requestedExtra[toolresult.SourceKey] = source
 	}
-	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, 0, traceID, requestedExtra))
+	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, runtimeEventPayloadWithTurnID(
+		ctx,
+		toolRequestedEventPayload(call, 0, traceID, requestedExtra),
+	))
 	ctx = a.withToolProgressReporter(ctx, sessionID, traceID, call)
 
 	finalize := func() *types.Message {
@@ -77,10 +80,13 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 			envelope.Metadata["gateway_error"] = gatewayErr.Error()
 		}
 		result.Envelope = envelope
-		a.emitRuntimeEvent("tool.completed", sessionID, call.Name, toolCompletedEventPayload(result, 0, traceID, map[string]interface{}{
-			"approved":       true,
-			"awaiting_model": true,
-		}))
+		a.emitRuntimeEvent("tool.completed", sessionID, call.Name, runtimeEventPayloadWithTurnID(
+			ctx,
+			toolCompletedEventPayload(result, 0, traceID, map[string]interface{}{
+				"approved":       true,
+				"awaiting_model": true,
+			}),
+		))
 		a.runPostToolUseHooks(ctx, sessionID, result)
 		message := types.NewToolMessage(call.ID, "")
 		message.Content = output.RenderToolResultContentForModel(result.Output, result.Error, envelope)

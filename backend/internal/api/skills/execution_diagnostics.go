@@ -46,9 +46,10 @@ type executionDiagnosticsResult struct {
 }
 
 type executionDiagnosticsTeamResult struct {
-	source     map[string]interface{}
-	teamCounts map[string]int
-	taskCounts map[string]int
+	source             map[string]interface{}
+	teamCounts         map[string]int
+	taskCounts         map[string]int
+	orchestratorCounts map[string]int
 }
 
 type executionDiagnosticsSessionResult struct {
@@ -98,17 +99,19 @@ func (h *Handler) executionDiagnosticsSnapshot(ctx context.Context) map[string]i
 			"agents":     agents.source,
 		},
 		"counts": map[string]interface{}{
-			"sessions":   sessions.sessionCounts,
-			"background": background.counts,
-			"teams":      teams.teamCounts,
-			"team_tasks": teams.taskCounts,
-			"agents":     agents.counts,
-			"approvals":  sessions.approvalCounts,
+			"sessions":           sessions.sessionCounts,
+			"background":         background.counts,
+			"teams":              teams.teamCounts,
+			"team_tasks":         teams.taskCounts,
+			"team_orchestrators": teams.orchestratorCounts,
+			"agents":             agents.counts,
+			"approvals":          sessions.approvalCounts,
 		},
 		"capabilities": map[string]bool{
 			"event_consumer_lag":      false,
 			"goal_todo_consistency":   false,
 			"unified_execution_nodes": false,
+			"team_loop_consistency":   true,
 		},
 	}
 }
@@ -307,6 +310,15 @@ func (h *Handler) teamExecutionDiagnostics(parent context.Context) executionDiag
 		taskCounts: newExecutionDiagnosticsCounts(
 			"pending", "ready", "running", "blocked", "done", "failed", "cancelled",
 		),
+		orchestratorCounts: map[string]int{
+			"active_teams":    0,
+			"live_loops":      0,
+			"loop_gap":        0,
+			"extra_loops":     0,
+			"restart_total":   0,
+			"restart_pending": 0,
+			"degraded_loops":  0,
+		},
 	}
 	if h == nil {
 		result.source = executionDiagnosticsSource("team_store", executionDiagnosticsSourceUnavailable, "not_configured")
@@ -322,7 +334,21 @@ func (h *Handler) teamExecutionDiagnostics(parent context.Context) executionDiag
 	}
 	ctx, cancel := executionDiagnosticsContext(parent)
 	defer cancel()
-	return collectTeamExecutionDiagnostics(ctx, store, result)
+	result = collectTeamExecutionDiagnostics(ctx, store, result)
+	activeTeams := result.teamCounts["active"]
+	supervisor := h.teamLifecycleService().SupervisorSnapshot()
+	liveLoops := supervisor.LoopCount
+	result.orchestratorCounts["active_teams"] = activeTeams
+	result.orchestratorCounts["live_loops"] = liveLoops
+	result.orchestratorCounts["restart_total"] = supervisor.RestartTotal
+	result.orchestratorCounts["restart_pending"] = supervisor.RestartPending
+	result.orchestratorCounts["degraded_loops"] = supervisor.DegradedLoops
+	if activeTeams > liveLoops {
+		result.orchestratorCounts["loop_gap"] = activeTeams - liveLoops
+	} else if liveLoops > activeTeams {
+		result.orchestratorCounts["extra_loops"] = liveLoops - activeTeams
+	}
+	return result
 }
 
 func collectTeamExecutionDiagnostics(

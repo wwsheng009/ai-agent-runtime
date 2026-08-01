@@ -65,11 +65,28 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	}
 	childConfig.Options = cloneAgentOptions(parentConfig.Options)
 	applyRouteOptions(childConfig.Options, decision)
+	if task.ReadOnly {
+		childConfig.Options["read_only"] = true
+		childConfig.Options["read_only_source"] = "spawn_subagents.read_only"
+	}
 
 	if task.ToolsWhitelist == nil {
 		task.ToolsWhitelist = DefaultToolsForRole(task.Role)
 	}
+	childPolicy := parent.GetSubagentScheduler().childPolicy(task)
 	promptTask := taskWithRouteDecision(task, decision)
+	// The prompt must describe the effective inherited boundary, not only the
+	// child's requested flag. A read-only parent cannot be widened by omitting
+	// read_only on a nested child request.
+	if childPolicy != nil && childPolicy.ReadOnly {
+		promptTask.ReadOnly = true
+		childConfig.Options["read_only"] = true
+		if !task.ReadOnly {
+			if _, exists := childConfig.Options["read_only_source"]; !exists {
+				childConfig.Options["read_only_source"] = "parent_tool_execution_policy"
+			}
+		}
+	}
 	childConfig.SystemPrompt = parent.GetPromptBuilder().BuildSubagentPrompt(parentConfig, promptTask)
 
 	childAgent := NewAgentWithLLM(&childConfig, parent.mcpManager, parent.llmRuntime)
@@ -77,19 +94,19 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	childAgent.SetEventBus(parent.GetEventBus())
 	childAgent.SetPromptBuilder(parent.GetPromptBuilder())
 	childAgent.inheritToolHooksFrom(parent)
-	childAgent.SetToolExecutionPolicy(parent.GetSubagentScheduler().childPolicy(task))
+	childAgent.SetToolExecutionPolicy(childPolicy)
 
 	loopConfig := &LoopReActConfig{
-		MaxSteps:               childConfig.MaxSteps,
-		MaxToolCalls:           childConfig.MaxToolCalls,
-		MaxRunDuration:         childConfig.MaxRunDuration,
-		MaxExplorationSteps:    childConfig.MaxExplorationSteps,
-		MaxRepeatedToolCalls:   childConfig.MaxRepeatedToolCalls,
-		EnableThought:          true,
-		EnableToolCalls:        true,
-		Temperature:            childConfig.Temperature,
-		ReasoningEffort:        decision.ReasoningEffort,
-		CompletionRequirement:  NormalizeCompletionRequirement(task.CompletionRequirement),
+		MaxSteps:              childConfig.MaxSteps,
+		MaxToolCalls:          childConfig.MaxToolCalls,
+		MaxRunDuration:        childConfig.MaxRunDuration,
+		MaxExplorationSteps:   childConfig.MaxExplorationSteps,
+		MaxRepeatedToolCalls:  childConfig.MaxRepeatedToolCalls,
+		EnableThought:         true,
+		EnableToolCalls:       true,
+		Temperature:           childConfig.Temperature,
+		ReasoningEffort:       decision.ReasoningEffort,
+		CompletionRequirement: NormalizeCompletionRequirement(task.CompletionRequirement),
 	}
 
 	return ChildAgentSpec{

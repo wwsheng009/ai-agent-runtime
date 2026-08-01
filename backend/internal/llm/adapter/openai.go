@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -292,48 +291,6 @@ func (s *StreamState) getToolCall(index int) *StreamToolCall {
 	return tc
 }
 
-// BuildMessage 构建 AssistantMessage
-func (s *StreamState) BuildMessage() *AssistantMessage {
-	msg := &AssistantMessage{
-		Content: s.Content.String(),
-	}
-	rawToolCalls := s.rawToolCalls()
-	if len(rawToolCalls) == 0 {
-		return msg
-	}
-	for _, tcMap := range rawToolCalls {
-		toolCall := rawToolCallToAssistantToolCall(tcMap)
-		if toolCall == nil {
-			continue
-		}
-		msg.ToolCalls = append(msg.ToolCalls, toolCall)
-	}
-	return msg
-}
-
-// AssistantMessage 表示助手消息
-type AssistantMessage struct {
-	Content   string
-	ToolCalls []*ToolCall
-}
-
-// ParseArguments 解析 StreamToolCall 的参数，自动修复不完整 JSON
-func (tc *StreamToolCall) ParseArguments() map[string]interface{} {
-	return toolargs.DecodeJSON(tc.Args.String())
-}
-
-// ToToolCall 将 StreamToolCall 转换为 ToolCall
-func (tc *StreamToolCall) ToToolCall() *ToolCall {
-	return &ToolCall{
-		ID:   tc.ID,
-		Type: tc.Type,
-		Function: ToolCallFunction{
-			Name:      tc.Name,
-			Arguments: tc.Args.String(),
-		},
-	}
-}
-
 const (
 	toolCallStartTag = "<tool_call>"
 	toolCallEndTag   = "</tool_call>"
@@ -350,35 +307,6 @@ var toolCallMarkupTags = []string{
 	argKeyEndTag,
 	argValueStartTag,
 	argValueEndTag,
-}
-
-func rawToolCallToAssistantToolCall(tcMap map[string]interface{}) *ToolCall {
-	if tcMap == nil {
-		return nil
-	}
-	toolCall := &ToolCall{
-		Type: "function",
-	}
-	if id, ok := tcMap["id"].(string); ok {
-		toolCall.ID = id
-	}
-	if typ, ok := tcMap["type"].(string); ok && typ != "" {
-		toolCall.Type = typ
-	}
-	fn, ok := tcMap["function"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	if name, ok := fn["name"].(string); ok {
-		toolCall.Function.Name = name
-	}
-	if args, ok := fn["arguments"].(string); ok {
-		toolCall.Function.Arguments = args
-	}
-	if toolCall.Function.Name == "" {
-		return nil
-	}
-	return toolCall
 }
 
 func parseToolCallMarkupContent(raw string, final bool, offset int) (string, []map[string]interface{}, string) {
@@ -1103,7 +1031,9 @@ func (a *OpenAIAdapter) BuildAssistantMessage(content string, toolCalls []map[st
 		"content": content,
 	}
 	if len(toolCalls) > 0 {
-		msg["tool_calls"] = toolCalls
+		if normalized := NormalizeToolCalls(toolCalls); len(normalized) > 0 {
+			msg["tool_calls"] = normalized
+		}
 	}
 	if reasoning != "" {
 		msg["reasoning_content"] = reasoning
@@ -1117,37 +1047,6 @@ func (a *OpenAIAdapter) buildAssistantMessageWithReasoningPresence(content strin
 		msg["reasoning_content"] = reasoning
 	}
 	return msg
-}
-
-// ExtractToolCallsFromRawCalls 直接从已解析的 tool_calls 数组构造 ToolCall 列表
-// 用于流式响应，自动修复不完整 JSON
-func (a *OpenAIAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interface{}) []ToolCall {
-	toolCalls := make([]ToolCall, 0, len(rawCalls))
-	for _, tcMap := range rawCalls {
-		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-			args := make(map[string]interface{})
-			if argsStr, ok := fn["arguments"].(string); ok && argsStr != "" {
-				args = toolargs.DecodeJSON(argsStr)
-			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
-				args = argsMap
-			}
-			args = toolargs.Normalize(args)
-
-			id, _ := tcMap["id"].(string)
-			name, _ := fn["name"].(string)
-
-			argsJSON, _ := json.Marshal(args)
-			toolCalls = append(toolCalls, ToolCall{
-				ID: id,
-				Function: ToolCallFunction{
-					Name:      name,
-					Arguments: string(argsJSON),
-				},
-				Type: "function",
-			})
-		}
-	}
-	return toolCalls
 }
 
 // IsReasoningModel is retained for legacy callers only. Request assembly and

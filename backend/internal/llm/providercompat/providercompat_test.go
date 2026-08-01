@@ -1,6 +1,7 @@
 package providercompat
 
 import (
+	"encoding/json"
 	"io"
 	"reflect"
 	"strings"
@@ -194,6 +195,99 @@ func TestPrepareRequestBody_OpenAIToolCallArguments(t *testing.T) {
 	if fn["arguments"] != "{}" {
 		t.Fatalf("expected request body tool arguments to normalize, got %#v", fn["arguments"])
 	}
+}
+
+func TestPrepareRequestBody_OpenAIToolCallTypeNormalization(t *testing.T) {
+	// "function_call" is the Responses API item type. When raw history from a
+	// codex/responses session is replayed to any OpenAI Chat Completions
+	// provider (openai-default, deepseek, nvidia, sensenova, ...), the value
+	// must be coerced to the standard "function" or strict gateways reject the
+	// request with HTTP 400. This is the general-path regression test: no
+	// opencode-console-go profile is involved.
+	t.Run("map slice", func(t *testing.T) {
+		body := map[string]interface{}{
+			"model": "test-model",
+			"messages": []map[string]interface{}{
+				{
+					"role": "assistant",
+					"tool_calls": []map[string]interface{}{
+						{
+							"id":   "call_1",
+							"type": "function_call",
+							"function": map[string]interface{}{
+								"name":      "list_files",
+								"arguments": `{"path":"."}`,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+		messages := normalized["messages"].([]map[string]interface{})
+		toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
+		if got := toolCalls[0]["type"]; got != "function" {
+			t.Fatalf("expected tool_calls[0].type to be coerced to %q, got %#v", "function", got)
+		}
+		// Canonical history must not be mutated.
+		origCalls := body["messages"].([]map[string]interface{})[0]["tool_calls"].([]map[string]interface{})
+		if got := origCalls[0]["type"]; got != "function_call" {
+			t.Fatalf("original history was mutated: type = %#v", got)
+		}
+	})
+
+	t.Run("JSON decoded interface slice", func(t *testing.T) {
+		raw := `{"model":"test-model","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function_call","function":{"name":"list_files","arguments":"{}"}}]}]}`
+		var body map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &body); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+		messages := decodeSliceOfMaps(normalized["messages"])
+		toolCalls := decodeSliceOfMaps(messages[0]["tool_calls"])
+		if got := toolCalls[0]["type"]; got != "function" {
+			t.Fatalf("expected tool_calls[0].type to be coerced to %q, got %#v", "function", got)
+		}
+	})
+
+	t.Run("standard values preserved", func(t *testing.T) {
+		body := map[string]interface{}{
+			"model": "test-model",
+			"messages": []map[string]interface{}{
+				{
+					"role": "assistant",
+					"tool_calls": []map[string]interface{}{
+						{
+							"id":   "call_1",
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      "list_files",
+								"arguments": "{}",
+							},
+						},
+						{
+							"id":    "call_2",
+							"type":  "custom_tool_call",
+							"name":  "my_custom_tool",
+							"input": `{"x":1}`,
+						},
+					},
+				},
+			},
+		}
+
+		normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+		messages := normalized["messages"].([]map[string]interface{})
+		toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
+		if got := toolCalls[0]["type"]; got != "function" {
+			t.Fatalf("expected standard %q preserved, got %#v", "function", got)
+		}
+		if got := toolCalls[1]["type"]; got != "custom_tool_call" {
+			t.Fatalf("expected %q preserved, got %#v", "custom_tool_call", got)
+		}
+	})
 }
 
 func TestPrepareRequestBody_ChatGPTCodexDropsMaxOutputTokens(t *testing.T) {

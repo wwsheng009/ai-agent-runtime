@@ -229,6 +229,46 @@ func TestToolExecutionPolicy_AllowToolCall_BlocksNestedShellCommandInReadOnlyMod
 	}
 }
 
+func TestToolExecutionPolicy_AllowToolCall_ReadOnlyBatchValidatesEveryEntry(t *testing.T) {
+	policy := NewToolExecutionPolicy(nil, true)
+	shellInfo := skill.ToolInfo{
+		Name:          "shell",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+	}
+
+	// Plain-string batch entries must be classified individually: a mutating
+	// entry smuggled next to a read-only object entry is a bypass.
+	err := policy.AllowToolCall(shellInfo, map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "git status"},
+			"rm -rf file.txt",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected plain-string mutating batch entry to be blocked in read-only mode")
+	}
+
+	// All-plain-string batch with only read-only commands must pass.
+	err = policy.AllowToolCall(shellInfo, map[string]interface{}{
+		"commands": []string{"git status", "git diff"},
+	})
+	if err != nil {
+		t.Fatalf("expected read-only plain-string batch to be allowed, got %v", err)
+	}
+
+	// Object-form batch with a mutating entry must be blocked too.
+	err = policy.AllowToolCall(shellInfo, map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "git status"},
+			map[string]interface{}{"cmd": "git commit -m x"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mutating object-form batch entry to be blocked in read-only mode")
+	}
+}
+
 func TestCapabilityScopedPolicyExposesOnlyDeclaredCapabilitySurface(t *testing.T) {
 	policy := NewCapabilityScopedToolExecutionPolicy(nil, []Capability{CapReadOnly, CapNetwork})
 	assert.NoError(t, policy.AllowTool("read_file"))

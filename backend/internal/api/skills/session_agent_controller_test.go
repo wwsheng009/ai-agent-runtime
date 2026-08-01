@@ -21,6 +21,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -1229,3 +1230,72 @@ func (p *sessionAgentBlockingProvider) releaseCall() {
 }
 
 var _ llm.Provider = (*sessionAgentBlockingProvider)(nil)
+
+func TestAPIControllerCompleteSupervisedRunMarksTerminalAndOutbox(t *testing.T) {
+	ctx := context.Background()
+	handler, store, _ := newAPIWakeTestHandler(t, "api-sup-complete")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	handler.SetSessionManager(sessionManager)
+	supervisor := handler.getExecutionSupervisor()
+	require.NotNil(t, supervisor, "supervision store configured, watchdog must be built")
+
+	run, err := supervisor.StartRun(ctx, supervision.RunSpec{
+		SessionID:       "child-run-1",
+		ParentSessionID: "parent-1",
+	})
+	require.NoError(t, err)
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	controller.completeSupervisedRun(ctx, "parent-1", "child-run-1", string(chat.SessionIdle), chat.EventSessionEnd)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, supervision.RunStatusSucceeded, got.Status)
+	require.NotNil(t, got.FinishedAt)
+
+	entries, err := store.ListUndeliveredOutbox(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, run.RunID, entries[0].RunID)
+	require.Equal(t, "parent-1", entries[0].ParentSessionID)
+}
+
+func TestAPIControllerCompleteSupervisedRunInterruptedMapsCanceled(t *testing.T) {
+	ctx := context.Background()
+	handler, store, _ := newAPIWakeTestHandler(t, "api-sup-complete-interrupted")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	handler.SetSessionManager(sessionManager)
+	supervisor := handler.getExecutionSupervisor()
+	require.NotNil(t, supervisor)
+
+	run, err := supervisor.StartRun(ctx, supervision.RunSpec{
+		SessionID:       "child-run-2",
+		ParentSessionID: "parent-2",
+	})
+	require.NoError(t, err)
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	controller.completeSupervisedRun(ctx, "parent-2", "child-run-2", string(chat.SessionStopped), chat.EventSessionInterrupted)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, supervision.RunStatusCanceled, got.Status)
+}
+
+func TestAPIControllerCompleteSupervisedRunNoopWithoutRun(t *testing.T) {
+	ctx := context.Background()
+	handler, store, _ := newAPIWakeTestHandler(t, "api-sup-complete-noop")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	handler.SetSessionManager(sessionManager)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	controller.completeSupervisedRun(ctx, "parent-3", "never-spawned-child", string(chat.SessionIdle), chat.EventSessionEnd)
+	entries, err := store.ListUndeliveredOutbox(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}

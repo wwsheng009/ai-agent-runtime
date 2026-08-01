@@ -29,3 +29,15 @@ func TurnIDFromContext(ctx context.Context) string {
 	turnID, _ := ctx.Value(turnIDContextKey{}).(string)
 	return strings.TrimSpace(turnID)
 }
+
+func runtimeEventPayloadWithTurnID(ctx context.Context, payload map[string]interface{}) map[string]interface{} {
+	turnID := TurnIDFromContext(ctx)
+	if turnID == "" {
+		return payload
+	}
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+	payload["turn_id"] = turnID
+	return payload
+}

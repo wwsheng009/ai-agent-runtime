@@ -77,7 +77,7 @@ func TestFormatResumeSessionCompletionSummaryIncludesCompactBadge(t *testing.T) 
 
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
 	session := runtimechat.NewSession("tester")
-	session.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	session.Metadata.Title = "检查登录流程为什么失败"
 	session.Metadata.Context = map[string]interface{}{
 		runtimechat.ContextCompactGeneration: 2,
 		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
@@ -90,7 +90,7 @@ func TestFormatResumeSessionCompletionSummaryIncludesCompactBadge(t *testing.T) 
 
 	got := formatResumeSessionCompletionSummary(session, now)
 	for _, expected := range []string{
-		"检查登录流程为什么失败 · compact #2",
+		"检查登录流程为什么失败",
 		"1轮/2条消息",
 	} {
 		if !strings.Contains(got, expected) {
@@ -98,7 +98,7 @@ func TestFormatResumeSessionCompletionSummaryIncludesCompactBadge(t *testing.T) 
 		}
 	}
 	if strings.Count(got, "compact #2") != 1 {
-		t.Fatalf("expected sticky compact title not to duplicate badge, got %q", got)
+		t.Fatalf("expected a single compact badge, got %q", got)
 	}
 
 	// Title without embedded marker still gets an explicit badge.

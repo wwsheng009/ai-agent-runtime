@@ -313,6 +313,49 @@ func TestRenderToolResultContentForModel_ExposesActionableFailureContract(t *tes
 	}
 }
 
+func TestRenderToolResultContentForModel_ExposesReadOnlyPolicyContract(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "shell",
+		ToolCallID: "call-read-only",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataPolicyKey:         "read_only",
+			toolresult.MetadataPolicySource:      "spawn_subagents.read_only",
+			toolresult.MetadataOverridable:       false,
+			toolresult.MetadataErrorCodeKey:      "AGENT_READ_ONLY",
+			toolresult.MetadataRetryableKey:      false,
+			toolresult.MetadataNextActionKey:     "Submit each read-only command as a separate shell.commands entry.",
+			toolresult.MetadataToolCallIDKey:     "call-read-only",
+			toolresult.MetadataToolNameKey:       "shell",
+			toolresult.MetadataEmptyResultKey:    false,
+			toolresult.MetadataPartialFailureKey: false,
+			toolresult.MetadataOutcomeKey:        toolresult.OutcomeFailed,
+			toolresult.MetadataAttemptedArgsKey:  map[string]interface{}{"command": "git status; git diff"},
+		},
+	}
+
+	got := RenderToolResultContentForModel(
+		nil,
+		"read-only policy blocks compound shell command; submit one command per shell.commands entry: git status; git diff",
+		envelope,
+	)
+	for _, expected := range []string{
+		`"ok":false`,
+		`"tool_name":"shell"`,
+		`"tool_call_id":"call-read-only"`,
+		`"error_code":"AGENT_READ_ONLY"`,
+		`"retryable":false`,
+		`"policy":"read_only"`,
+		`"policy_source":"spawn_subagents.read_only"`,
+		`"overridable":false`,
+		`"command":"git status; git diff"`,
+		`"next_action":"Submit each read-only command as a separate shell.commands entry."`,
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in model-visible result, got %q", expected, got)
+		}
+	}
+}
+
 func TestRenderToolResultContentForModel_ExposesStaleViewHints(t *testing.T) {
 	snippet := "\tfunc Hello() {\n\t\treturn 1\n\t}"
 	envelope := &Envelope{

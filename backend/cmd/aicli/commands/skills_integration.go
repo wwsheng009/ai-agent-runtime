@@ -987,6 +987,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			APIKey:                provider.GetAPIKey(),
 			BaseURL:               provider.BaseURL,
 			APIPath:               provider.APIPath,
+			CompatibilityProfile:  provider.Compatibility.Profile,
 			Timeout:               timeout,
 			MaxRetries:            maxRetries,
 			RetryTuning:           retryTuning,

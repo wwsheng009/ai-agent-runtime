@@ -359,7 +359,7 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 		reasoningModel = reasoningModel || session.Adapter.IsReasoningModel(session.Model)
 	}
 
-	requestReasoningEffort := supportedReasoningEffortForRequest(session.ReasoningEffort, reasoningCapability, hasCapability)
+	requestReasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	config := adapter.RequestConfig{
 		Model:                  session.Model,
 		Messages:               messages,

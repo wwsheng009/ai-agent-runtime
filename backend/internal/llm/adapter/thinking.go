@@ -24,19 +24,19 @@ func normalizeAnthropicThinkingType(thinkingType string) string {
 }
 
 func normalizeAnthropicThinkingEffort(effort string) string {
-	return strings.ToLower(strings.TrimSpace(effort))
+	// Effort values are provider-defined strings. Normalize only whitespace;
+	// lower-casing would rewrite a manually supplied provider-specific value.
+	return strings.TrimSpace(effort)
 }
 
 func normalizeRuntimeReasoningEffort(effort string) string {
-	return strings.ToLower(strings.TrimSpace(effort))
+	return strings.TrimSpace(effort)
 }
 
 func buildAnthropicThinkingFromReasoningEffort(effort string, budgets map[string]int) *anthropictypes.Thinking {
-	switch normalizeRuntimeReasoningEffort(effort) {
-	case "":
+	normalized := normalizeRuntimeReasoningEffort(effort)
+	if normalized == "" {
 		return nil
-	case "none":
-		return &anthropictypes.Thinking{Type: "disabled"}
 	}
 
 	// Check for adaptive mode (used by Claude 5 / late-4 adaptive thinking)
@@ -46,20 +46,19 @@ func buildAnthropicThinkingFromReasoningEffort(effort string, budgets map[string
 
 	budget, ok := resolveConfiguredReasoningEffortBudget(effort, budgets)
 	if !ok || budget <= 0 {
-		// If a valid effort is specified but no budgets are configured at all,
-		// default to adaptive thinking — let the model decide depth.
-		if len(budgets) == 0 {
-			return &anthropictypes.Thinking{
-				Type:   "adaptive",
-				Effort: normalizeRuntimeReasoningEffort(effort),
-			}
+		// Model-card budgets are a transport hint, not an allowlist. If the
+		// effort is not mapped locally, preserve it in Anthropic's native
+		// adaptive/output_config representation and let the upstream decide
+		// whether the value is supported.
+		return &anthropictypes.Thinking{
+			Type:   "adaptive",
+			Effort: normalized,
 		}
-		return nil
 	}
 
 	return &anthropictypes.Thinking{
 		Type:         "enabled",
-		Effort:       normalizeRuntimeReasoningEffort(effort),
+		Effort:       normalized,
 		BudgetTokens: &budget,
 	}
 }
@@ -78,10 +77,10 @@ func buildAnthropicAdaptiveThinking(effort string, budgets map[string]int) *anth
 	// budget itself is 0 or unspecified — indicating "let the model decide".
 	// In practice this is used for adaptive-thinking Claude models which auto-select depth.
 	for _, key := range []string{normalized, "*", "default"} {
-		if budget, ok := budgets[key]; ok && budget == 0 {
+		if budget, ok := lookupReasoningEffortBudget(budgets, key); ok && budget == 0 {
 			return &anthropictypes.Thinking{
 				Type:   "adaptive",
-				Effort: normalized,
+				Effort: normalizeRuntimeReasoningEffort(effort),
 			}
 		}
 	}
@@ -98,7 +97,7 @@ func resolveConfiguredReasoningEffortBudget(effort string, budgets map[string]in
 	}
 
 	for _, key := range []string{normalized, "*", "default"} {
-		if budget, ok := budgets[key]; ok && budget > 0 {
+		if budget, ok := lookupReasoningEffortBudget(budgets, key); ok && budget > 0 {
 			return budget, true
 		}
 	}
@@ -106,22 +105,37 @@ func resolveConfiguredReasoningEffortBudget(effort string, budgets map[string]in
 	return 0, false
 }
 
+// lookupReasoningEffortBudget matches configuration keys case-insensitively
+// while leaving the original effort value untouched for wire serialization.
+func lookupReasoningEffortBudget(budgets map[string]int, key string) (int, bool) {
+	for configuredKey, budget := range budgets {
+		if strings.EqualFold(strings.TrimSpace(configuredKey), strings.TrimSpace(key)) {
+			return budget, true
+		}
+	}
+	return 0, false
+}
+
 func buildGeminiThinkingConfigFromReasoningEffort(effort string, budgets map[string]int) map[string]interface{} {
-	switch normalizeRuntimeReasoningEffort(effort) {
-	case "":
-		return nil
-	case "none":
+	normalized := normalizeRuntimeReasoningEffort(effort)
+	if normalized == "" {
 		return nil
 	}
 
 	budget, ok := resolveConfiguredReasoningEffortBudget(effort, budgets)
-	if !ok || budget <= 0 {
-		return nil
+	if ok && budget > 0 {
+		return map[string]interface{}{
+			"includeThoughts": true,
+			"thinkingBudget":  budget,
+		}
 	}
 
+	// Gemini models/gateways that expose thinkingLevel accept the provider
+	// effort string directly. Use this fallback instead of dropping an effort
+	// that is newer or more specific than the local budget catalog.
 	return map[string]interface{}{
 		"includeThoughts": true,
-		"thinkingBudget":  budget,
+		"thinkingLevel":   normalized,
 	}
 }
 

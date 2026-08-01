@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
@@ -716,20 +715,8 @@ func (a *AnthropicAdapter) BuildAssistantMessage(content string, toolCalls []map
 	}
 
 	if len(toolCalls) > 0 {
-		normalized := a.ExtractToolCallsFromRawCalls(toolCalls)
-		if len(normalized) > 0 {
-			converted := make([]map[string]interface{}, 0, len(normalized))
-			for _, tc := range normalized {
-				converted = append(converted, map[string]interface{}{
-					"id":   tc.ID,
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      tc.Function.Name,
-						"arguments": tc.Function.Arguments,
-					},
-				})
-			}
-			msg["tool_calls"] = converted
+		if normalized := NormalizeToolCalls(toolCalls); len(normalized) > 0 {
+			msg["tool_calls"] = normalized
 		}
 	}
 
@@ -738,64 +725,6 @@ func (a *AnthropicAdapter) BuildAssistantMessage(content string, toolCalls []map
 	}
 
 	return msg
-}
-
-// ExtractToolCallsFromRawCalls 从已解析的 tool_calls 数组直接构造 ToolCall 列表
-// Anthropic 原生格式：{type: "tool_use", id: string, name: string, input: object}
-// OpenAI 兼容格式：{id: string, type: "function", function: {name: string, arguments: string}}
-func (a *AnthropicAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interface{}) []ToolCall {
-	toolCalls := make([]ToolCall, 0, len(rawCalls))
-
-	for _, tcMap := range rawCalls {
-		// 检查是否是 Anthropic 原生格式
-		if typ, ok := tcMap["type"].(string); ok && typ == "tool_use" {
-			id, _ := tcMap["id"].(string)
-			name, _ := tcMap["name"].(string)
-
-			args := make(map[string]interface{})
-			if input, ok := tcMap["input"].(map[string]interface{}); ok {
-				args = input
-			}
-			args = toolargs.Normalize(args)
-
-			argsJSON, _ := json.Marshal(args)
-			toolCalls = append(toolCalls, ToolCall{
-				ID: id,
-				Function: ToolCallFunction{
-					Name:      name,
-					Arguments: string(argsJSON),
-				},
-				Type: "function",
-			})
-			continue
-		}
-
-		// OpenAI 兼容格式
-		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-			args := make(map[string]interface{})
-			if argsStr, ok := fn["arguments"].(string); ok && argsStr != "" {
-				args = toolargs.DecodeJSON(argsStr)
-			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
-				args = argsMap
-			}
-			args = toolargs.Normalize(args)
-
-			id, _ := tcMap["id"].(string)
-			name, _ := fn["name"].(string)
-
-			argsJSON, _ := json.Marshal(args)
-			toolCalls = append(toolCalls, ToolCall{
-				ID: id,
-				Function: ToolCallFunction{
-					Name:      name,
-					Arguments: string(argsJSON),
-				},
-				Type: "function",
-			})
-		}
-	}
-
-	return toolCalls
 }
 
 // IsReasoningModel 判断是否为推理模型

@@ -830,3 +830,107 @@ func TestGeminiFunctionCallPart_DefaultsEmptyArgsForNoArgToolCall(t *testing.T) 
 		t.Fatalf("expected empty args map, got %#v", args)
 	}
 }
+
+func TestEncodeProviderToolCalls_NormalizesFunctionCallType(t *testing.T) {
+	calls := []ToolCall{
+		{
+			ID:   "call_flat",
+			Type: "function_call", // Responses/codex 协议泄漏的历史值
+			Function: ToolCallFunc{
+				Name:      "list_files",
+				Arguments: `{"path":"."}`,
+			},
+		},
+		{
+			ID:   "call_ok",
+			Type: "function",
+			Function: ToolCallFunc{
+				Name:      "search",
+				Arguments: `{"q":"go"}`,
+			},
+		},
+		{
+			ID:   "call_custom",
+			Type: "custom_tool_call",
+			Function: ToolCallFunc{
+				Name:      "apply_patch",
+				Arguments: "raw input",
+			},
+		},
+	}
+	encoded := encodeProviderToolCalls(calls)
+	if len(encoded) != 3 {
+		t.Fatalf("expected 3 encoded tool calls, got %d: %#v", len(encoded), encoded)
+	}
+	if got := encoded[0]["type"]; got != "function" {
+		t.Errorf("expected function_call to be coerced to %q, got %#v", "function", got)
+	}
+	if got := encoded[1]["type"]; got != "function" {
+		t.Errorf("expected function type preserved, got %#v", got)
+	}
+	if got := encoded[2]["type"]; got != "custom_tool_call" {
+		t.Errorf("expected custom_tool_call preserved, got %#v", got)
+	}
+	if fn, ok := encoded[0]["function"].(map[string]interface{}); !ok || fn["name"] != "list_files" {
+		t.Errorf("expected nested function payload for flat call, got %#v", encoded[0])
+	}
+}
+
+func TestEncodeRuntimeToolCalls_PreservesCustomInput(t *testing.T) {
+	patch := "PATCH-BEGIN\nPATCH-END"
+	calls := []types.ToolCall{
+		{
+			ID:       "call_custom",
+			Type:     "custom_tool_call",
+			Name:     "apply_patch",
+			RawInput: patch,
+		},
+		{
+			ID:   "call_raw_fallback",
+			Type: "custom_tool_call",
+			Name: "apply_patch",
+			Args: map[string]interface{}{"_raw": patch},
+		},
+		{
+			ID:   "call_fn",
+			Type: "function",
+			Name: "search",
+			Args: map[string]interface{}{"q": "go"},
+		},
+		{
+			ID:   "call_nil_args",
+			Name: "noop",
+		},
+		{
+			ID:   "call_null_field",
+			Name: "noop",
+			Args: map[string]interface{}{"value": nil},
+		},
+	}
+
+	encoded := EncodeRuntimeToolCalls(calls)
+	if len(encoded) != 5 {
+		t.Fatalf("expected 5 encoded tool calls, got %d: %#v", len(encoded), encoded)
+	}
+	if got := encoded[0]["type"]; got != "custom_tool_call" {
+		t.Errorf("expected custom type preserved, got %#v", got)
+	}
+	if got := encoded[0]["input"]; got != patch {
+		t.Errorf("expected raw input preserved verbatim, got %#v", got)
+	}
+	if got := encoded[1]["input"]; got != patch {
+		t.Errorf("expected _raw fallback input, got %#v", got)
+	}
+	fn, ok := encoded[2]["function"].(map[string]interface{})
+	if !ok || fn["name"] != "search" || fn["arguments"] != `{"q":"go"}` {
+		t.Errorf("expected nested function payload, got %#v", encoded[2])
+	}
+	fnNil, ok := encoded[3]["function"].(map[string]interface{})
+	if !ok || fnNil["arguments"] != "{}" {
+		t.Errorf("expected nil args coerced to empty object, got %#v", encoded[3])
+	}
+	fnNull, ok := encoded[4]["function"].(map[string]interface{})
+	if !ok || fnNull["arguments"] != `{"value":null}` {
+		t.Errorf("expected null field preserved as-is, got %#v", encoded[4])
+	}
+}

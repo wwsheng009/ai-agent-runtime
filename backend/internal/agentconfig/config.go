@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,6 +34,7 @@ type Config struct {
 	AICLI          *AICLIConfig         `yaml:"aicli" mapstructure:"aicli"`
 	Profiles       *ProfilesConfig      `yaml:"profiles" mapstructure:"profiles"`
 	SkillsRuntime  *SkillsRuntimeConfig `yaml:"skills_runtime" mapstructure:"skills_runtime"`
+	Supervision    supervision.Config   `yaml:"supervision" mapstructure:"supervision"`
 	Log            logger.LogConfig     `yaml:"log" mapstructure:"log"`
 	ConfigFilePath string               `yaml:"-" mapstructure:"-"`
 }
@@ -171,6 +173,7 @@ type Provider struct {
 	Enabled            bool                           `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
 	Type               string                         `yaml:"type" mapstructure:"type" json:"type"`
 	Protocol           string                         `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
+	Compatibility      CompatibilityConfig            `yaml:"compatibility,omitempty" mapstructure:"compatibility" json:"compatibility,omitempty"`
 	BaseURL            string                         `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
 	APIPath            string                         `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
 	ForwardURL         string                         `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
@@ -212,12 +215,50 @@ type Provider struct {
 	Account            *ProviderAccountSnapshot `yaml:"account,omitempty" mapstructure:"account" json:"account,omitempty"`
 }
 
+// CompatibilityConfig selects a versioned, built-in wire dialect profile for a
+// provider endpoint. It intentionally contains no arbitrary request rewrite
+// expression: compatibility behavior remains reviewed Go code.
+type CompatibilityConfig struct {
+	Profile string `yaml:"profile,omitempty" mapstructure:"profile" json:"profile,omitempty"`
+}
+
+const (
+	// CompatibilityProfileStandard explicitly opts out of non-standard wire
+	// transformations. Empty has the same standard behavior until automatic
+	// profile detection is introduced.
+	CompatibilityProfileStandard = "standard"
+	// CompatibilityProfileOpenCodeConsoleGo is the Console Go dialect observed
+	// at the OpenCode endpoint in July 2026.
+	CompatibilityProfileOpenCodeConsoleGo = "opencode-console-go-2026-07"
+)
+
+// ValidateCompatibilityProfile validates the explicitly selected wire dialect
+// against the provider protocol. Empty means the standard protocol dialect.
+func ValidateCompatibilityProfile(protocol, profile string) error {
+	normalizedProfile := strings.ToLower(strings.TrimSpace(profile))
+	switch normalizedProfile {
+	case "", CompatibilityProfileStandard:
+		return nil
+	case CompatibilityProfileOpenCodeConsoleGo:
+		switch strings.ToLower(strings.TrimSpace(protocol)) {
+		case "openai", "codex":
+			return nil
+		default:
+			return fmt.Errorf("profile %q requires protocol openai or codex", profile)
+		}
+	default:
+		return fmt.Errorf("unknown profile %q", profile)
+	}
+}
+
 // ProviderAccountSnapshot is a non-sensitive cached account/balance summary.
 type ProviderAccountSnapshot struct {
 	Source                 string                        `yaml:"source,omitempty" mapstructure:"source" json:"source,omitempty"`
 	Mode                   string                        `yaml:"mode,omitempty" mapstructure:"mode" json:"mode,omitempty"`
 	Currency               string                        `yaml:"currency,omitempty" mapstructure:"currency" json:"currency,omitempty"`
 	WalletBalance          *float64                      `yaml:"wallet_balance,omitempty" mapstructure:"wallet_balance" json:"wallet_balance,omitempty"`
+	IsAvailable            *bool                         `yaml:"is_available,omitempty" mapstructure:"is_available" json:"is_available,omitempty"`
+	BalanceDetails         []ProviderBalanceDetail       `yaml:"balance_details,omitempty" mapstructure:"balance_details" json:"balance_details,omitempty"`
 	QuotaBalance           *float64                      `yaml:"quota_balance,omitempty" mapstructure:"quota_balance" json:"quota_balance,omitempty"`
 	QuotaRemaining         *float64                      `yaml:"quota_remaining,omitempty" mapstructure:"quota_remaining" json:"quota_remaining,omitempty"`
 	QuotaUsed              *float64                      `yaml:"quota_used,omitempty" mapstructure:"quota_used" json:"quota_used,omitempty"`
@@ -233,6 +274,14 @@ type ProviderAccountSnapshot struct {
 	FetchedAt              string                        `yaml:"fetched_at,omitempty" mapstructure:"fetched_at" json:"fetched_at,omitempty"`
 	Partial                bool                          `yaml:"partial,omitempty" mapstructure:"partial" json:"partial,omitempty"`
 	LastError              string                        `yaml:"last_error,omitempty" mapstructure:"last_error" json:"last_error,omitempty"`
+}
+
+// ProviderBalanceDetail preserves a provider's per-currency balance breakdown.
+type ProviderBalanceDetail struct {
+	Currency        string  `yaml:"currency" mapstructure:"currency" json:"currency"`
+	TotalBalance    float64 `yaml:"total_balance" mapstructure:"total_balance" json:"total_balance"`
+	GrantedBalance  float64 `yaml:"granted_balance" mapstructure:"granted_balance" json:"granted_balance"`
+	ToppedUpBalance float64 `yaml:"topped_up_balance" mapstructure:"topped_up_balance" json:"topped_up_balance"`
 }
 
 // ProviderAccountSubscription is a compact subscription cache entry.
@@ -1008,7 +1057,15 @@ func validateLoadedConfig(cfg *Config) error {
 // ValidateConfig validates user-facing configuration that must be checked by
 // both process startup and the runtime-server configuration document API.
 func ValidateConfig(cfg *Config) error {
-	if cfg == nil || cfg.AICLI == nil {
+	if cfg == nil {
+		return nil
+	}
+	for name, provider := range cfg.Providers.Items {
+		if err := validateProviderCompatibilityConfig(name, provider); err != nil {
+			return err
+		}
+	}
+	if cfg.AICLI == nil {
 		return nil
 	}
 	if cfg.AICLI.Subagents != nil && cfg.AICLI.Subagents.Routing != nil {
@@ -1020,6 +1077,17 @@ func ValidateConfig(cfg *Config) error {
 		if err := validateAgentRoutingConfig("aicli.teams.routing", cfg.AICLI.Teams.Routing); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateProviderCompatibilityConfig(providerName string, provider Provider) error {
+	if err := ValidateCompatibilityProfile(provider.GetProtocol(), provider.Compatibility.Profile); err != nil {
+		return fmt.Errorf(
+			"invalid providers.items.%s.compatibility.profile: %w",
+			strings.TrimSpace(providerName),
+			err,
+		)
 	}
 	return nil
 }

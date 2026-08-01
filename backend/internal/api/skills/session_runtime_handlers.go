@@ -679,6 +679,11 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "prompt is required"))
 			return
 		}
+		prompt, err = h.injectSupervisionPreflight(r.Context(), sessionID, prompt, req.RunMeta)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		result, state, err, completed := submitSessionPrompt(actor, r.Context(), prompt, req.RunMeta)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, err)
@@ -700,8 +705,13 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		return
 
 	case "continue", "continue_session":
+		continuationPrompt, err := h.injectSupervisionPreflight(r.Context(), sessionID, req.Prompt, req.RunMeta)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		result, state, err, completed := submitSessionContinue(actor, r.Context(), req.RunMeta, chat.ContinueOption{
-			ContinuationPrompt:   req.Prompt,
+			ContinuationPrompt:   continuationPrompt,
 			ContinuationMetadata: cloneAnyMap(req.ContinuationMetadata),
 			StripMetadataKeys:    append([]string(nil), req.StripMetadataKeys...),
 		})

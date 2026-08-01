@@ -125,9 +125,6 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 			}
 			popupUsed = popupUsed || usedPopup
 			reasoningEffort = selectedReasoning
-		} else if reasoningEffort != "" && !reasoningEffortAllowed(reasoningEffort, catalog.options) {
-			fmt.Fprintf(os.Stderr, "Warning: reasoning_effort %q 不被模型 %s 支持，已清空\n", reasoningEffort, resolvedModel)
-			reasoningEffort = ""
 		}
 	}
 
@@ -597,7 +594,7 @@ func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, op
 		}
 
 		switch strings.ToLower(normalized) {
-		case "0", "clear", "none", "off", "清空", "无":
+		case "0", "clear", "清空", "无":
 			return "", false, nil
 		}
 
@@ -611,6 +608,13 @@ func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, op
 
 		if matched, ok := reasoningEffortOptionMatch(normalized, normalizedOptions); ok {
 			return matched, false, nil
+		}
+
+		// The model card supplies picker options, not a request allowlist.
+		// Keep a manually entered provider-specific value so it can be sent
+		// upstream unchanged (apart from normalization).
+		if normalized != "" {
+			return normalized, false, nil
 		}
 
 		ui.PrintWarning("无效的选择，请重新输入")
@@ -762,7 +766,7 @@ func resolveRuntimeReasoningEffortInput(input, currentMatch string, currentValid
 	}
 
 	switch strings.ToLower(input) {
-	case "0", "clear", "none", "off", "清空", "无":
+	case "0", "clear", "清空", "无":
 		return "", true
 	}
 
@@ -788,11 +792,11 @@ func resolveRuntimeReasoningEffortInput(input, currentMatch string, currentValid
 func reasoningEffortSelectionPrompt(currentValid bool, defaultOption string) string {
 	switch {
 	case currentValid:
-		return "请输入选项 (回车保留当前 / 输入 0 清空): "
+		return "请输入选项 (回车保留当前 / 输入 0 清空 / 可输入自定义值): "
 	case defaultOption != "":
-		return fmt.Sprintf("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
+		return fmt.Sprintf("请输入选项 (回车默认: %s / 输入 0 清空 / 可输入自定义值): ", defaultOption)
 	default:
-		return "请输入选项 (回车清空当前无效值 / 输入 0 清空): "
+		return "请输入选项 (回车清空当前无效值 / 输入 0 清空 / 可输入自定义值): "
 	}
 }
 

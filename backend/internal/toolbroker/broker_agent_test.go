@@ -352,6 +352,7 @@ func TestBuildSubagentCompletionMailboxMessageUsesAgentControlEnvelope(t *testin
 		"usage_total_tokens":     1200,
 	})
 	if message.Kind != SubagentCompletionMailboxKind ||
+		message.ID == "" ||
 		message.FromAgent != "child-1" ||
 		message.ToAgent != "parent" ||
 		message.Body != "Subagent child-1 completed with status idle." ||
@@ -368,6 +369,7 @@ func TestBuildSubagentCompletionMailboxMessageUsesAgentControlEnvelope(t *testin
 		message.Metadata["path"] != "/root/child-1" ||
 		message.Metadata["agent_type"] != "worker" ||
 		message.Metadata["source_event_type"] != "session.end" ||
+		message.Metadata["delivery_key"] != message.ID ||
 		message.Metadata["event_seq"] != int64(9) ||
 		message.Metadata["success"] != true ||
 		message.Metadata["difficulty"] != "hard" ||
@@ -385,6 +387,20 @@ func TestBuildSubagentCompletionMailboxMessageUsesAgentControlEnvelope(t *testin
 	warnings, ok := message.Metadata["route_warnings"].([]string)
 	if !ok || strings.Join(warnings, ",") != "provider_fallback_parent" {
 		t.Fatalf("unexpected route warnings metadata: %#v", message.Metadata["route_warnings"])
+	}
+	replayed := BuildSubagentCompletionMailboxMessage("parent-1", "child-1", "/root/child-1", "worker", "session.end", map[string]interface{}{
+		"status": "idle",
+		"seq":    int64(9),
+	})
+	if replayed.ID != message.ID {
+		t.Fatalf("same terminal event must keep a stable delivery key: first=%q replay=%q", message.ID, replayed.ID)
+	}
+	nextRun := BuildSubagentCompletionMailboxMessage("parent-1", "child-1", "/root/child-1", "worker", "session.end", map[string]interface{}{
+		"status": "idle",
+		"seq":    int64(10),
+	})
+	if nextRun.ID == message.ID {
+		t.Fatalf("different terminal events must not share delivery key: %q", message.ID)
 	}
 }
 
@@ -1102,6 +1118,9 @@ func TestFinalizeAgentWaitResultProvidesSchedulingGuidance(t *testing.T) {
 	if !strings.HasPrefix(result.NextAction, "continue_independent_work_before_waiting_again") {
 		t.Fatalf("unexpected timeout next action: %#v", result)
 	}
+	if !result.ExecutionContinues || !strings.Contains(result.NextAction, "execution continues") {
+		t.Fatalf("wait timeout must state that pending child execution continues: %#v", result)
+	}
 
 	result = FinalizeAgentWaitResult(&AgentWaitResult{
 		Agent: &AgentStatusResult{ID: "child-2", Status: "waiting_approval", PendingApproval: true},
@@ -1391,7 +1410,7 @@ func TestClassifyBrokerExecutionErrorAgentLifecycle(t *testing.T) {
 }
 func TestFinalizeAgentEventsResult(t *testing.T) {
 	result := FinalizeAgentEventsResult(&AgentEventsResult{
-		Count: 0,
+		Count:    0,
 		TimedOut: true,
 	})
 	if result.NextAction != "stop_empty_event_poll: timed out with 0 events; use wait_agent for child readiness, send_message/followup_task for work, or proceed without re-calling the same read_agent_events" {
@@ -1400,7 +1419,7 @@ func TestFinalizeAgentEventsResult(t *testing.T) {
 
 	result = FinalizeAgentEventsResult(&AgentEventsResult{
 		Events: []AgentEventItem{{
-			Type:   "approval_requested",
+			Type:    "approval_requested",
 			Payload: map[string]interface{}{"request_id": "req-1"},
 		}},
 	})

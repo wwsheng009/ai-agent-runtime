@@ -1131,12 +1131,20 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 
 	assistantIndex := -1
 	sessionEndIndex := -1
+	var sessionStartTurnID string
+	var assistantPayload map[string]interface{}
+	var assistantDeltas []runtimeevents.Event
 	var sessionEndPayload map[string]interface{}
 	for index, event := range events {
 		switch event.Type {
+		case EventSessionStart:
+			sessionStartTurnID, _ = event.Payload["turn_id"].(string)
+		case EventAssistantDelta:
+			assistantDeltas = append(assistantDeltas, event)
 		case EventAssistantMessage:
 			if assistantIndex < 0 {
 				assistantIndex = index
+				assistantPayload = event.Payload
 			}
 		case EventSessionEnd:
 			if sessionEndIndex < 0 {
@@ -1149,6 +1157,21 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.GreaterOrEqual(t, assistantIndex, 0)
 	require.GreaterOrEqual(t, sessionEndIndex, 0)
 	require.Less(t, assistantIndex, sessionEndIndex)
+	require.NotEmpty(t, sessionStartTurnID)
+	require.Equal(t, sessionStartTurnID, result.TurnID)
+	require.Equal(t, result.TurnID, assistantPayload["turn_id"])
+	require.Equal(t, "snapshot", assistantPayload["mode"])
+	if len(assistantDeltas) > 0 {
+		streamID, _ := assistantPayload["stream_id"].(string)
+		require.NotEmpty(t, streamID)
+		for index, event := range assistantDeltas {
+			require.Equal(t, result.TurnID, event.Payload["turn_id"])
+			require.Equal(t, streamID, event.Payload["stream_id"])
+			require.Equal(t, "append", event.Payload["mode"])
+			require.EqualValues(t, index+1, event.Payload["sequence"])
+		}
+		require.EqualValues(t, len(assistantDeltas)+1, assistantPayload["sequence"])
+	}
 	require.NotNil(t, result.Usage)
 	require.Equal(t, result.Usage.PromptTokens, sessionEndPayload["usage_prompt_tokens"])
 	require.Equal(t, result.Usage.CompletionTokens, sessionEndPayload["usage_completion_tokens"])
@@ -1335,9 +1358,11 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.Contains(t, updated.History[2].Content, "recent user context")
 	require.Equal(t, 140, runtimeSessionObservedTokenUsage(updated))
 	require.Equal(t, 1, provider.callCount)
-	// Title should inherit pre-compact root title with a child compact marker.
-	require.Equal(t, sessionTitleSourceCompact, updated.Metadata.TitleSource)
-	require.Contains(t, updated.Metadata.Title, " · compact #1")
+	// Compaction must not change the user-visible title: the derived title
+	// stays sticky and generation is tracked as diagnostic context only.
+	require.Equal(t, sessionTitleSourceDerived, updated.Metadata.TitleSource)
+	require.Contains(t, updated.Metadata.Title, "older user context")
+	require.NotContains(t, updated.Metadata.Title, " · compact")
 	require.NotContains(t, updated.Metadata.Title, "Preserve the prior investigation")
 	require.Equal(t, 1, contextIntValue(updated.Metadata.Context, ContextCompactGeneration))
 

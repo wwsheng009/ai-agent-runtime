@@ -14,6 +14,7 @@ type Context struct {
 	Protocol                string
 	BaseURL                 string
 	APIPath                 string
+	Profile                 string
 	Model                   string
 	SupportsMaxOutputTokens *bool
 	ConfiguredCapabilities  map[string]agentconfig.ModelCapabilitySpec
@@ -41,6 +42,7 @@ func normalizeContext(ctx Context) Context {
 	ctx.Protocol = strings.ToLower(strings.TrimSpace(ctx.Protocol))
 	ctx.BaseURL = strings.TrimSpace(ctx.BaseURL)
 	ctx.APIPath = strings.TrimSpace(ctx.APIPath)
+	ctx.Profile = strings.ToLower(strings.TrimSpace(ctx.Profile))
 	ctx.Model = strings.TrimSpace(ctx.Model)
 	return ctx
 }

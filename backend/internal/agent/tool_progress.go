@@ -44,7 +44,7 @@ func (a *Agent) withToolProgressReporter(ctx context.Context, sessionID, traceID
 		if progress.Timestamp.IsZero() {
 			progress.Timestamp = time.Now().UTC()
 		}
-		payload := progress.Payload()
+		payload := runtimeEventPayloadWithTurnID(ctx, progress.Payload())
 		emitName := strings.TrimSpace(string(progress.ToolID))
 		if emitName == "" {
 			emitName = toolName

@@ -235,7 +235,7 @@ func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequ
 		Model:            resolvedModel,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, protocol, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, protocol, compatibilityProfileFromSelected(selected), requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -457,7 +457,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, compatibilityProfileFromSelected(selected), requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -700,7 +700,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, compatibilityProfileFromSelected(selected), requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -977,7 +977,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, compatibilityProfileFromSelected(selected), requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -1253,6 +1253,8 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		ProviderName:            providerNameFromSelected(selected),
 		Protocol:                protocol,
 		BaseURL:                 baseURLFromSelected(selected),
+		APIPath:                 apiPathFromSelected(selected),
+		CompatibilityProfile:    compatibilityProfileFromSelected(selected),
 		Model:                   resolvedModel,
 		SupportsMaxOutputTokens: supportsMaxOutputTokens,
 		ModelCapabilities:       modelCapabilities,
@@ -1476,6 +1478,40 @@ func selectedProviderBaseURL(selected *SelectedResource) string {
 		return strings.TrimSpace(cfg.BaseURL)
 	case agentconfig.Provider:
 		return strings.TrimSpace(cfg.BaseURL)
+	}
+	return ""
+}
+
+func apiPathFromSelected(selected *SelectedResource) string {
+	if selected == nil || selected.Provider == nil {
+		return ""
+	}
+	apiPath := strings.TrimSpace(selected.Provider.APIPath)
+	if apiPath != "" {
+		return apiPath
+	}
+	switch cfg := selected.Provider.Config.(type) {
+	case *agentconfig.Provider:
+		return strings.TrimSpace(cfg.APIPath)
+	case agentconfig.Provider:
+		return strings.TrimSpace(cfg.APIPath)
+	}
+	return ""
+}
+
+func compatibilityProfileFromSelected(selected *SelectedResource) string {
+	if selected == nil || selected.Provider == nil {
+		return ""
+	}
+	profile := strings.TrimSpace(selected.Provider.CompatibilityProfile)
+	if profile != "" {
+		return profile
+	}
+	switch cfg := selected.Provider.Config.(type) {
+	case *agentconfig.Provider:
+		return strings.TrimSpace(cfg.Compatibility.Profile)
+	case agentconfig.Provider:
+		return strings.TrimSpace(cfg.Compatibility.Profile)
 	}
 	return ""
 }

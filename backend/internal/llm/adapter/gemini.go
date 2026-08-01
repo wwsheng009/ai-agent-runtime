@@ -528,72 +528,14 @@ func (a *GeminiAdapter) BuildAssistantMessage(content string, toolCalls []map[st
 		"content": content,
 	}
 	if len(toolCalls) > 0 {
-		msg["tool_calls"] = toolCalls
+		if normalized := NormalizeToolCalls(toolCalls); len(normalized) > 0 {
+			msg["tool_calls"] = normalized
+		}
 	}
 	if reasoning != "" {
 		msg["reasoning_content"] = reasoning
 	}
 	return msg
-}
-
-// ExtractToolCallsFromRawCalls 从已解析的 tool_calls 数组直接构造 ToolCall 列表
-// Gemini 格式：{name: string, args: object} （没有 id，args 是 object 不是 string）
-// OpenAI 格式：{id: string, type: "function", function: {name: string, arguments: string}}
-func (a *GeminiAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interface{}) []ToolCall {
-	toolCalls := make([]ToolCall, 0, len(rawCalls))
-
-	for i, tcMap := range rawCalls {
-		// 检查是否是 Gemini 原生格式（直接有 name 和 args）
-		if name, ok := tcMap["name"].(string); ok {
-			args := make(map[string]interface{})
-
-			// Gemini 的 args 可能是 "args" 或 "arguments"
-			if argsMap, ok := tcMap["args"].(map[string]interface{}); ok {
-				args = argsMap
-			} else if argsMap, ok := tcMap["arguments"].(map[string]interface{}); ok {
-				args = argsMap
-			} else if argsStr, ok := tcMap["arguments"].(string); ok && argsStr != "" {
-				// 兼容已转换为 OpenAI 格式的情况
-				json.Unmarshal([]byte(argsStr), &args)
-			}
-
-			argsJSON, _ := json.Marshal(args)
-			toolCalls = append(toolCalls, ToolCall{
-				ID: fmt.Sprintf("call_%d", i), // Gemini 没有提供 id，生成一个
-				Function: ToolCallFunction{
-					Name:      name,
-					Arguments: string(argsJSON),
-				},
-				Type: "function",
-			})
-			continue
-		}
-
-		// 兼容 OpenAI 格式（从 ToMap 转换后的格式）
-		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-			args := make(map[string]interface{})
-			if argsStr, ok := fn["arguments"].(string); ok && argsStr != "" {
-				json.Unmarshal([]byte(argsStr), &args)
-			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
-				args = argsMap
-			}
-
-			id, _ := tcMap["id"].(string)
-			name, _ := fn["name"].(string)
-
-			argsJSON, _ := json.Marshal(args)
-			toolCalls = append(toolCalls, ToolCall{
-				ID: id,
-				Function: ToolCallFunction{
-					Name:      name,
-					Arguments: string(argsJSON),
-				},
-				Type: "function",
-			})
-		}
-	}
-
-	return toolCalls
 }
 
 // IsReasoningModel 判断是否为推理模型

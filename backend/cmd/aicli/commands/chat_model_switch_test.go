@@ -95,8 +95,54 @@ func TestSelectRuntimeReasoningEffort_DefaultsToFirstOnInitialSelection(t *testi
 	if selected != "high" {
 		t.Fatalf("expected blank input to default to first option high, got %q", selected)
 	}
-	if !strings.Contains(output, "(默认)") || !strings.Contains(output, "请输入选项 (回车默认: high / 输入 0 清空): ") {
+	if !strings.Contains(output, "(默认)") || !strings.Contains(output, "请输入选项 (回车默认: high / 输入 0 清空 / 可输入自定义值): ") {
 		t.Fatalf("expected default-first prompt output, got:\n%s", output)
+	}
+}
+
+func TestSelectRuntimeReasoningEffort_LegacyPreservesCustomValue(t *testing.T) {
+	session := &ChatSession{
+		InputReader: bufio.NewReader(strings.NewReader(" custom-effort \n")),
+	}
+
+	oldShouldDiscard := shouldDiscardPendingInput
+	shouldDiscardPendingInput = func() bool { return false }
+	defer func() {
+		shouldDiscardPendingInput = oldShouldDiscard
+	}()
+
+	selected, usedPopup, err := selectRuntimeReasoningEffort(session, "", []string{"low", "medium"})
+	if err != nil {
+		t.Fatalf("selectRuntimeReasoningEffort: %v", err)
+	}
+	if usedPopup {
+		t.Fatal("expected legacy reasoning selection path without popup")
+	}
+	if selected != "custom-effort" {
+		t.Fatalf("expected custom reasoning effort to be preserved, got %q", selected)
+	}
+}
+
+func TestSelectRuntimeReasoningEffort_LegacyPreservesProviderSpecificValue(t *testing.T) {
+	session := &ChatSession{
+		InputReader: bufio.NewReader(strings.NewReader("none\n")),
+	}
+
+	oldShouldDiscard := shouldDiscardPendingInput
+	shouldDiscardPendingInput = func() bool { return false }
+	defer func() {
+		shouldDiscardPendingInput = oldShouldDiscard
+	}()
+
+	selected, usedPopup, err := selectRuntimeReasoningEffort(session, "", []string{"low", "medium"})
+	if err != nil {
+		t.Fatalf("selectRuntimeReasoningEffort: %v", err)
+	}
+	if usedPopup {
+		t.Fatal("expected legacy reasoning selection path without popup")
+	}
+	if selected != "none" {
+		t.Fatalf("expected provider-specific reasoning effort to be preserved, got %q", selected)
 	}
 }
 
@@ -252,9 +298,15 @@ func TestResolveRuntimeReasoningEffortInput_SupportsBlankDefaultAndClear(t *test
 	if got, ok := resolveRuntimeReasoningEffortInput("medium", "high", true, "", options); !ok || got != "medium" {
 		t.Fatalf("expected custom effort to be accepted, got %q ok=%v", got, ok)
 	}
+	if got, ok := resolveRuntimeReasoningEffortInput("none", "high", true, "", options); !ok || got != "none" {
+		t.Fatalf("expected provider-specific effort none to be accepted, got %q ok=%v", got, ok)
+	}
+	if got, ok := resolveRuntimeReasoningEffortInput("off", "high", true, "", options); !ok || got != "off" {
+		t.Fatalf("expected provider-specific effort off to be accepted, got %q ok=%v", got, ok)
+	}
 }
 
-func TestHandleCommand_ModelSwitchAppliesMappingAndClearsUnsupportedReasoning(t *testing.T) {
+func TestHandleCommand_ModelSwitchAppliesMappingAndPreservesCustomReasoning(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -307,8 +359,8 @@ func TestHandleCommand_ModelSwitchAppliesMappingAndClearsUnsupportedReasoning(t 
 	if session.RequestedModel != "alias-model" || session.EffectiveModel != "canonical-model" {
 		t.Fatalf("expected requested/effective model mapping to remain visible, got requested=%q effective=%q", session.RequestedModel, session.EffectiveModel)
 	}
-	if session.ReasoningEffort != "" {
-		t.Fatalf("expected unsupported reasoning effort to be cleared, got %q", session.ReasoningEffort)
+	if session.ReasoningEffort != "high" {
+		t.Fatalf("expected custom reasoning effort to be preserved, got %q", session.ReasoningEffort)
 	}
 	if session.BaseURL != expectedBaseURL {
 		t.Fatalf("expected base URL %q, got %q", expectedBaseURL, session.BaseURL)
@@ -333,8 +385,8 @@ func TestHandleCommand_ModelSwitchAppliesMappingAndClearsUnsupportedReasoning(t 
 	if got := runtimeSessionContextString(stored, toolbroker.AgentSessionContextRequestedModel); got != "canonical-model" {
 		t.Fatalf("expected stored requested model canonical-model, got %q", got)
 	}
-	if got := runtimeSessionContextString(stored, chatRuntimeContextReasoningEffort); got != "" {
-		t.Fatalf("expected stored reasoning effort to be cleared, got %q", got)
+	if got := runtimeSessionContextString(stored, chatRuntimeContextReasoningEffort); got != "high" {
+		t.Fatalf("expected stored custom reasoning effort to be preserved, got %q", got)
 	}
 }
 

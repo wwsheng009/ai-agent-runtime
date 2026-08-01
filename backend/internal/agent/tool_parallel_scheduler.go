@@ -181,7 +181,7 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 
 	callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, item.call.ID, nil, loop.agent, sessionID, depth), nil)
 	callCtx = loop.agent.withToolProgressReporter(callCtx, sessionID, traceID, item.call)
-	loop.agent.emitRuntimeEvent("tool.requested", sessionID, item.call.Name, toolRequestedEventPayload(item.call, step, traceID, map[string]interface{}{
+	loop.emitRuntimeEvent("tool.requested", sessionID, item.call.Name, toolRequestedEventPayload(item.call, step, traceID, map[string]interface{}{
 		"parallel":           true,
 		"batch_index":        item.index,
 		"batch_size":         len(toolCalls),
@@ -281,7 +281,7 @@ func (loop *ReActLoop) finishParallelToolCall(ctx context.Context, gateway *outp
 	}
 	result.Envelope = envelope
 
-	loop.agent.emitRuntimeEvent("tool.completed", sessionID, result.Call.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+	loop.emitRuntimeEvent("tool.completed", sessionID, result.Call.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 		"awaiting_model": false,
 		"parallel":       true,
 		"batch_index":    item.index,

@@ -593,6 +593,7 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		APIKey:                  session.Provider.GetAPIKey(),
 		BaseURL:                 session.Provider.BaseURL,
 		APIPath:                 session.Provider.APIPath,
+		CompatibilityProfile:    session.Provider.Compatibility.Profile,
 		Timeout:                 session.Provider.Timeout,
 		MaxRetries:              maxRetries,
 		RetryTuning:             retryTuning,

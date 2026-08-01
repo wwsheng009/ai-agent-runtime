@@ -63,6 +63,10 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 	if task.ReadOnly {
 		lines = append(lines, "This is a read-only subagent. Never perform or propose direct workspace mutations.")
 		lines = append(lines, "Prefer findings, evidence, failures, and open questions.")
+		lines = append(lines, "Prefer dedicated read tools such as view, grep, glob, and ls over shell whenever possible.")
+		lines = append(lines, "For shell, submit exactly one command per command field; do not chain commands with ;, &, &&, ||, pipes, redirections, variable expansion, or command substitution.")
+		lines = append(lines, "For multiple read-only shell commands, use the shell commands array so each entry is validated independently.")
+		lines = append(lines, "Read-only is a hard execution boundary and cannot be overridden by approval or bypass_permissions.")
 	} else {
 		lines = append(lines, "This subagent may act as the single writer only if the scheduler permits it.")
 	}

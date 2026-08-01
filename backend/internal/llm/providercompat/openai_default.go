@@ -279,7 +279,7 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 		}
 		mutable := ensureMutable()
 		mutable["function"] = function
-		if _, hasType := mutable["type"]; !hasType {
+		if rawType, hasType := mutable["type"]; !hasType || !isOpenAICompatibleToolCallType(rawType) {
 			mutable["type"] = "function"
 		}
 		return normalized, true
@@ -291,7 +291,7 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 		normalizedFunction["arguments"] = arguments
 		ensureMutable()["function"] = normalizedFunction
 	}
-	if _, hasType := call["type"]; !hasType {
+	if rawType, hasType := call["type"]; !hasType || !isOpenAICompatibleToolCallType(rawType) {
 		ensureMutable()["type"] = "function"
 	}
 	return normalized, changed
@@ -326,7 +326,7 @@ func normalizeOpenAICompatibleStreamToolCall(call map[string]interface{}) (map[s
 		}
 		mutable := ensureMutable()
 		mutable["function"] = function
-		if _, hasType := mutable["type"]; !hasType {
+		if rawType, hasType := mutable["type"]; !hasType || !isOpenAICompatibleToolCallType(rawType) {
 			mutable["type"] = "function"
 		}
 		return normalized, true
@@ -338,10 +338,21 @@ func normalizeOpenAICompatibleStreamToolCall(call map[string]interface{}) (map[s
 		normalizedFunction["arguments"] = arguments
 		ensureMutable()["function"] = normalizedFunction
 	}
-	if _, hasType := call["type"]; !hasType {
+	if rawType, hasType := call["type"]; !hasType || !isOpenAICompatibleToolCallType(rawType) {
 		ensureMutable()["type"] = "function"
 	}
 	return normalized, changed
+}
+
+// isOpenAICompatibleToolCallType reports whether a tool_calls[].type value is
+// already acceptable on the OpenAI Chat Completions wire. The standard enum is
+// "function"; "custom_tool_call" is the project's own extension used by the
+// codex protocol for custom tools and is deliberately left untouched. Any other
+// spelling (notably "function_call", the Responses API item type that leaks in
+// when raw history is replayed) is coerced to "function".
+func isOpenAICompatibleToolCallType(raw interface{}) bool {
+	toolType := strings.ToLower(strings.TrimSpace(stringValue(raw)))
+	return toolType == "function" || toolType == "custom_tool_call"
 }
 
 func normalizeOpenAICompatibleToolArguments(raw interface{}) (string, bool) {

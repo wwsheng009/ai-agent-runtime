@@ -27,9 +27,11 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
+	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
@@ -59,6 +61,9 @@ type localChatRuntimeHost struct {
 	BaseSession        *ChatSession
 	TeamLifecycle      teamLifecycleService
 	ActorRegistry      *localActorRegistry
+	Supervision        *runtimeserver.SupervisionControlPlane
+	supervisionWake    *supervision.WakeConsumer
+	supervisionConfig  supervision.Config
 	cleanupFns         []func()
 	closeOnce          sync.Once
 }
@@ -75,6 +80,106 @@ func (h *localChatRuntimeHost) Close() {
 			}
 		}
 	})
+}
+
+// wireLocalSupervisionExecutor installs the concrete runtime executor after
+// the actor registry (which owns the session hub close adapter) is ready. It
+// is a no-op when the durable control plane is not configured.
+func (h *localChatRuntimeHost) wireLocalSupervisionExecutor() {
+	if h == nil || h.Supervision == nil || h.Supervision.Actions == nil {
+		return
+	}
+	executor := runtimeserver.SupervisionRuntimeExecutor{
+		Store:               h.Supervision.Store,
+		TeamStore:           h.TeamStore,
+		AgentRegistry:       h.AgentRegistryStore,
+		AgentRegistryWriter: h.AgentRegistryStore,
+		CloseAgent: func(ctx context.Context, sessionID string) error {
+			if h == nil || h.ActorRegistry == nil {
+				return fmt.Errorf("actor registry is not ready")
+			}
+			_, err := h.ActorRegistry.Close(ctx, sessionID)
+			return err
+		},
+	}
+	h.Supervision.SetActionExecutor(executor)
+	h.wireLocalSupervisionWakeConsumer()
+}
+
+// wireLocalSupervisionWakeConsumer installs the wake consumer that turns
+// durable critical-lifecycle wakes into real parent turns (doc 6.5). The
+// consumer is invoked only at runnable state-transition points; the parent
+// runnable check prevents a second concurrent turn while the parent is
+// running / waiting approval / waiting input / rewinding.
+func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
+	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil || h.ActorRegistry == nil {
+		return
+	}
+	h.supervisionWake = &supervision.WakeConsumer{
+		Wakes: h.Supervision.Wakes,
+		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
+			if h == nil || h.RuntimeStore == nil {
+				return false
+			}
+			state, err := h.RuntimeStore.LoadState(ctx, parentSessionID)
+			if err != nil || state == nil {
+				// No durable state yet (parent never started a turn): keep
+				// the wake pending until the parent reaches a known state.
+				return false
+			}
+			return !state.Summary().Busy()
+		},
+		Deliver: func(ctx context.Context, parentSessionID string, digest *supervision.Digest, wakeIDs []string) error {
+			if h == nil || h.ActorRegistry == nil {
+				return fmt.Errorf("actor registry is not ready")
+			}
+			// Deliver asynchronously: the caller is a projection / event
+			// handler and must not block on a full parent turn. The wake
+			// prompt only references the lifecycle digest; the digest itself
+			// is injected by the turn preflight (doc 6.5 rule 5).
+			go func() {
+				runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				defer cancel()
+				_, _ = h.ActorRegistry.SubmitPrompt(runCtx, parentSessionID, supervision.AutoWakePrompt, nil)
+			}()
+			return nil
+		},
+	}
+	h.bindSupervisionWakeConsumer()
+}
+
+// bindSupervisionWakeConsumer subscribes the parent root session turn end so
+// wakes accumulated while the parent was busy are drained as soon as the
+// parent becomes idle again (doc 6.5 rule 2 closure).
+func (h *localChatRuntimeHost) bindSupervisionWakeConsumer() {
+	if h == nil || h.supervisionWake == nil || h.EventBus == nil || h.BaseSession == nil || h.BaseSession.RuntimeSession == nil {
+		return
+	}
+	rootSessionID := strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
+	if rootSessionID == "" {
+		return
+	}
+	h.EventBus.SubscribeCancelable(runtimechat.EventSessionEnd, func(event runtimeevents.Event) {
+		if !strings.EqualFold(strings.TrimSpace(event.SessionID), rootSessionID) {
+			return
+		}
+		if event.Type != runtimechat.EventSessionEnd {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID)
+	})
+}
+
+// wakeSupervisedParent drains pending wakes for a parent and delivers one
+// parent turn when the parent is runnable. It is a no-op when the durable
+// control plane is not configured.
+func (h *localChatRuntimeHost) wakeSupervisedParent(ctx context.Context, parentSessionID, rootScopeID string) error {
+	if h == nil || h.supervisionWake == nil {
+		return nil
+	}
+	return h.supervisionWake.MaybeWakeParent(ctx, parentSessionID, "", rootScopeID)
 }
 
 func (h *localChatRuntimeHost) waitForWarmup() {
@@ -139,6 +244,26 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		globalMailboxStore = agentControlRegistry.MailboxStore
 		globalAgentStore = agentControlRegistry.AgentStore
 	}
+	supervisionConfig := cfg.Supervision.WithDefaults()
+	supervisionPlane, err := runtimeserver.BuildSupervisionControlPlane(
+		resolveLocalChatSupervisionDataDir(session, runtimeConfig),
+		supervisionConfig,
+		runtimeserver.SupervisionRuntimeHooks{
+			AgentRegistry: globalAgentStore,
+			TeamStore:     bootstrapManager.TeamStore(),
+		},
+	)
+	if err != nil {
+		_ = bootstrapManager.Stop()
+		closeLocalRuntimeStores(runtimeStore, eventStore)
+		if agentControlRegistry != nil {
+			_ = agentControlRegistry.Close()
+		}
+		if backgroundManager != nil {
+			backgroundManager.Close()
+		}
+		return nil, fmt.Errorf("initialize supervision control plane: %w", err)
+	}
 	configureLocalChatMailboxWriteThrough(globalMailboxStore, runtimeStore, bootstrapManager.TeamStore())
 	eventBus := runtimeevents.NewBusWithRetention(2048)
 	host := &localChatRuntimeHost{
@@ -156,6 +281,8 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		SessionStore:       sessionStore,
 		SessionUser:        session.SessionUserID,
 		BaseSession:        session,
+		Supervision:        supervisionPlane,
+		supervisionConfig:  supervisionConfig,
 	}
 	host.TeamLifecycle = newLocalTeamLifecycleService(host)
 
@@ -170,6 +297,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		host.Orchestrator.MailboxWake = globalMailboxStore
 	}
 	host.ActorRegistry = newLocalActorRegistry(host)
+	host.wireLocalSupervisionExecutor()
 	if host.Orchestrator != nil {
 		mailbox := team.NewMailboxService(host.TeamStore)
 		host.Orchestrator.Mailbox = mailbox
@@ -192,6 +320,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		host.Orchestrator.LeaseManager.Mailbox = mailbox
 	}
 	host.bindTeamLifecycleEvents()
+	host.syncTeamLifecycleLoops()
 	host.SessionHub = runtimechat.NewBoundedSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
 		return host.buildSessionActor(sessionID, session, sessionStore, runtimeConfig, workspaceRoot)
 	})
@@ -223,6 +352,11 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		},
 		func() {
 			host.stopTeamLifecycleLoops()
+		},
+		func() {
+			if supervisionPlane != nil {
+				_ = supervisionPlane.Close()
+			}
 		},
 	}
 
@@ -1135,6 +1269,7 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			APIKey:                session.Provider.GetAPIKey(),
 			BaseURL:               session.Provider.BaseURL,
 			APIPath:               session.Provider.APIPath,
+			CompatibilityProfile:  session.Provider.Compatibility.Profile,
 			Timeout:               session.Provider.Timeout,
 			MaxRetries:            maxRetries,
 			RetryTuning:           retryTuning,
@@ -1319,6 +1454,68 @@ func resolveLocalChatRuntimeStorePath(session *ChatSession, runtimeConfig *runti
 		Mode:       sessionruntime.ModeCLILocal,
 	})
 	return paths.SessionRuntimeStorePath
+}
+
+// resolveLocalChatSupervisionDataDir returns a per-session durable directory
+// for the P2 control plane. Keeping it beside the actor/team stores gives
+// restart recovery the same lifecycle as a local chat runtime.
+func resolveLocalChatSupervisionDataDir(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) string {
+	if session != nil && !session.Ephemeral && strings.TrimSpace(session.SessionDir) != "" {
+		return filepath.Join(session.SessionDir, "runtime", "supervision")
+	}
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath) != "" {
+		return filepath.Join(filepath.Dir(strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath)), "supervision")
+	}
+	return filepath.Join(os.TempDir(), "ai-agent-runtime", "supervision")
+}
+
+// injectLocalSupervisionPreflight is the CLI-equivalent parent/lead turn hook.
+// It deliberately marks a visible digest delivered+seen, never acknowledged.
+// Child worker turns are excluded: only the registered Team lead consumes a
+// Team's inbox; ordinary sessions consume their own root-session inbox.
+func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntimeHost, sessionID, prompt string, runMeta *team.RunMeta) (string, error) {
+	if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
+		return prompt, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return prompt, nil
+	}
+	rootScopeID := sessionID
+	targetTeamID := ""
+	if runMeta != nil && runMeta.Team != nil && strings.TrimSpace(runMeta.Team.TeamID) != "" && host.TeamStore != nil {
+		candidateTeamID := strings.TrimSpace(runMeta.Team.TeamID)
+		if record, err := host.TeamStore.GetTeam(ctx, candidateTeamID); err == nil && record != nil && strings.TrimSpace(record.LeadSessionID) == sessionID {
+			rootScopeID = candidateTeamID
+			targetTeamID = candidateTeamID
+		}
+	}
+	digest, err := supervision.BuildDigest(ctx, host.Supervision.Store, supervision.DigestRequest{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: sessionID,
+		TargetParentTeamID:    targetTeamID,
+		Limit:                 host.supervisionConfig.WithDefaults().DigestMaxItems,
+		IncludeResolvedSince:  true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("build supervision preflight digest: %w", err)
+	}
+	if digest == nil || len(digest.Items) == 0 {
+		return prompt, nil
+	}
+	now := time.Now().UTC()
+	for _, item := range digest.Items {
+		if item.NotificationID == "" {
+			continue
+		}
+		if err := host.Supervision.Store.MarkNotificationDelivered(ctx, item.NotificationID, now); err != nil {
+			return "", fmt.Errorf("mark supervision notification delivered: %w", err)
+		}
+		if err := host.Supervision.Store.MarkNotificationSeen(ctx, item.NotificationID, now); err != nil {
+			return "", fmt.Errorf("mark supervision notification seen: %w", err)
+		}
+	}
+	return strings.TrimSpace(digest.Text) + "\n\n" + prompt, nil
 }
 
 func resolveLocalChatTeamStorePath(session *ChatSession) string {

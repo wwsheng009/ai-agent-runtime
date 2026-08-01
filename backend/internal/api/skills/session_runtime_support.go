@@ -25,6 +25,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -35,6 +36,7 @@ type sessionActorClient struct {
 	store      team.Store
 	eventStore chat.EventStore
 	eventBus   *runtimeevents.Bus
+	handler    *Handler
 }
 
 func (h *Handler) getAgentSessionController() *sessionAgentController {
@@ -59,6 +61,12 @@ func (c *sessionActorClient) submitPrompt(ctx context.Context, sessionID, prompt
 	actor, err := c.hub.GetOrCreate(strings.TrimSpace(sessionID))
 	if err != nil {
 		return nil, err
+	}
+	if c.handler != nil {
+		prompt, err = c.handler.injectSupervisionPreflight(ctx, sessionID, prompt, runMeta)
+		if err != nil {
+			return nil, err
+		}
 	}
 	result, err := actor.SubmitPrompt(ctx, prompt, runMeta, opts...)
 	sessionResult := sessionResultFromActorRun(result, err)
@@ -918,12 +926,16 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 			unsubscribe()
 		}
 		payload := map[string]interface{}{
-			"agent_id":          childSessionID,
-			"session_id":        childSessionID,
-			"parent_session_id": parentSessionID,
-			"path":              childPath,
-			"source_event_type": eventType,
-			"status":            agentCompletionStatus(event),
+			"agent_id":              childSessionID,
+			"session_id":            childSessionID,
+			"parent_session_id":     parentSessionID,
+			"path":                  childPath,
+			"source_event_type":     eventType,
+			"source_event_trace_id": strings.TrimSpace(event.TraceID),
+			"status":                agentCompletionStatus(event),
+		}
+		if !event.Timestamp.IsZero() {
+			payload["source_event_timestamp"] = event.Timestamp.UTC().Format(time.RFC3339Nano)
 		}
 		if childDepth > 0 {
 			payload["depth"] = childDepth
@@ -940,6 +952,8 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 				payload["lifecycle_close_error"] = closeErr.Error()
 			}
 		}
+		c.projectAgentCompletion(context.Background(), parentSessionID, childSessionID, agentCompletionStatus(event), eventType)
+		c.completeSupervisedRun(context.Background(), parentSessionID, childSessionID, agentCompletionStatus(event), eventType)
 		// Keep worktree after completion so parent can apply/discard explicitly.
 		// close_agent still cleans remaining worktrees.
 		annotateAPISpawnWorktreeCompletion(context.Background(), c, childSession, payload)
@@ -966,6 +980,112 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		bus.Publish(mirrored)
 	}
 	unsubscribe = bus.SubscribeCancelable("", handler)
+}
+
+// completeSupervisedRun marks the child's supervised execution run terminal
+// (P3 doc 7.3 mapping): session_end -> succeeded, interrupted/stopped ->
+// canceled, explicit failure -> failed. Best-effort: an absent run (unsupervised
+// spawn, already terminal, store outage) is a no-op and never blocks the
+// established completion mailbox path.
+func (c *sessionAgentController) completeSupervisedRun(ctx context.Context, parentSessionID, childSessionID, completionStatus, sourceEventType string) {
+	if c == nil || c.handler == nil {
+		return
+	}
+	supervisor := c.handler.getExecutionSupervisor()
+	if supervisor == nil || supervisor.Store == nil {
+		return
+	}
+	runs, err := supervisor.Store.ListExecutionRunsBySession(ctx, strings.TrimSpace(childSessionID), 3)
+	if err != nil {
+		return
+	}
+	for _, run := range runs {
+		if run.Terminal() {
+			continue
+		}
+		status := supervision.RunStatusSucceeded
+		switch strings.TrimSpace(completionStatus) {
+		case string(chat.SessionStopped), "interrupted":
+			status = supervision.RunStatusCanceled
+		case "failed", "error":
+			status = supervision.RunStatusFailed
+		}
+		_ = supervisor.CompleteRun(ctx, run.RunID, status, "", "", map[string]interface{}{
+			"source_event_type": sourceEventType,
+			"status":            status,
+		})
+		return
+	}
+}
+
+// projectAgentCompletion bridges normal AgentControl lifecycle events into the
+// durable P2 inbox. It is intentionally best-effort: a supervision-store
+// outage must not prevent the established completion mailbox from reaching the
+// parent.
+func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, parentSessionID, childSessionID, status, sourceEventType string) {
+	if c == nil || c.handler == nil {
+		return
+	}
+	store := c.handler.getSupervisionStore()
+	if store == nil {
+		return
+	}
+	rootScopeID := strings.TrimSpace(parentSessionID)
+	if session, err := c.handler.sessionManager.Get(ctx, childSessionID); err == nil && session != nil {
+		rootScopeID = apiAgentRootSessionID(session, parentSessionID)
+	}
+	if rootScopeID == "" {
+		return
+	}
+	_, _ = supervision.ProjectAgentCompletion(
+		ctx,
+		store,
+		c.handler.getSupervisionWakeScheduler(),
+		rootScopeID,
+		parentSessionID,
+		childSessionID,
+		status,
+		sourceEventType,
+	)
+	// P2 closure: a critical completion must be able to start a parent turn
+	// without an explicit wait. When the parent is still busy the wake stays
+	// durable and the next runnable transition drains it (doc 6.5).
+	_ = c.wakeSupervisedParent(ctx, rootScopeID, parentSessionID)
+}
+
+// wakeSupervisedParent drains pending critical-lifecycle wakes for the
+// parent session and starts one parent turn when the parent is runnable.
+// Busy parents keep the wake durable for the next runnable transition; the
+// natural-turn preflight additionally injects the digest as a fallback.
+func (c *sessionAgentController) wakeSupervisedParent(ctx context.Context, rootScopeID, parentSessionID string) error {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	scheduler := c.handler.getSupervisionWakeScheduler()
+	if scheduler == nil {
+		return nil
+	}
+	consumer := &supervision.WakeConsumer{
+		Wakes: scheduler,
+		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
+			actor := c.apiAgentActor(ctx, parentSessionID)
+			if actor == nil {
+				return false
+			}
+			state, ok := actor.StateSummary()
+			return ok && !state.Busy()
+		},
+		Deliver: func(ctx context.Context, parentSessionID string, digest *supervision.Digest, wakeIDs []string) error {
+			actor := c.apiAgentActor(ctx, parentSessionID)
+			if actor == nil {
+				return fmt.Errorf("parent actor not found")
+			}
+			// SubmitPromptAsync enqueues the wake turn on the actor loop; it
+			// does not block on the full parent turn.
+			return actor.SubmitPromptAsync(ctx, supervision.AutoWakePrompt, c.apiAgentRunMeta(ctx, parentSessionID))
+		},
+	}
+	return consumer.MaybeWakeParent(ctx, parentSessionID, "", rootScopeID)
 }
 
 func (c *sessionAgentController) dispatchAgentHook(event runtimehooks.Event, payload map[string]interface{}) {
@@ -1021,7 +1141,6 @@ func (c *sessionAgentController) deliverSubagentCompletionMailbox(ctx context.Co
 		return team.MailMessage{}, nil
 	}
 	message := toolbroker.BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, childPath, childType, sourceEventType, payload)
-	message.ID = "subagent_completed_" + sanitizeAPIAgentPathSegment(childSessionID)
 	err := chat.DeliverMailboxEventFirst(ctx, c.handler.getSessionEventStore(), c.handler.getRuntimeEventBus(), c.deliverMailboxToActor, parentSessionID, message)
 	return message, err
 }
@@ -1565,11 +1684,12 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
-			Agents:       snapshots,
-			ReadyCount:   readyCount,
-			PendingCount: len(snapshots) - readyCount,
-			ReadyIDs:     readyIDs,
-			PendingIDs:   pendingIDs,
+			Agents:        snapshots,
+			ReadyCount:    readyCount,
+			PendingCount:  len(snapshots) - readyCount,
+			ReadyIDs:      readyIDs,
+			PendingIDs:    pendingIDs,
+			WaitTimeoutMs: int(timeout.Milliseconds()),
 		}
 		if matched != nil {
 			waitResult.Agent = matched

@@ -44,3 +44,29 @@ func TestGeminiBuildRequest_MapsRequiredToolChoiceToAny(t *testing.T) {
 		t.Fatalf("expected Gemini function calling mode ANY, got %#v", toolConfig)
 	}
 }
+
+func TestGeminiBuildRequest_PreservesCustomReasoningEffortOutsideBudgetCatalog(t *testing.T) {
+	req := (&GeminiAdapter{}).BuildRequest(RequestConfig{
+		Model:           "gemini-3.1-pro",
+		Messages:        []map[string]interface{}{{"role": "user", "content": "run it"}},
+		ReasoningEffort: " Provider-Custom ",
+		ReasoningEffortBudgets: map[string]int{
+			"high": 16384,
+		},
+	})
+
+	generationConfig, ok := req["generationConfig"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected generationConfig, got %#v", req)
+	}
+	thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected thinkingConfig, got %#v", generationConfig)
+	}
+	if got := thinkingConfig["thinkingLevel"]; got != "Provider-Custom" {
+		t.Fatalf("expected trimmed custom thinkingLevel, got %#v", got)
+	}
+	if _, exists := thinkingConfig["thinkingBudget"]; exists {
+		t.Fatalf("expected custom effort not to be rewritten as a budget, got %#v", thinkingConfig)
+	}
+}

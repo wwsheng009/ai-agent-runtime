@@ -17,6 +17,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
@@ -109,6 +110,16 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 	claims := h.getTeamClaimsManager()
 	hub := h.getSessionHub()
 	mailboxWakeStore := h.getAgentControlMailboxStore()
+	var (
+		sessionEventStore chat.EventStore
+		runtimeEventBus   *runtimeevents.Bus
+	)
+	if hub != nil {
+		// Session runtime store refresh may configure Team mailbox write-through,
+		// which needs teamStoreMu. Resolve these dependencies before taking it.
+		sessionEventStore = h.getSessionEventStore()
+		runtimeEventBus = h.getRuntimeEventBus()
+	}
 	h.teamStoreMu.Lock()
 	defer h.teamStoreMu.Unlock()
 	if h.teamOrchestrator == nil {
@@ -165,8 +176,9 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 		sessionClient := &sessionActorClient{
 			hub:        hub,
 			store:      store,
-			eventStore: h.getSessionEventStore(),
-			eventBus:   h.getRuntimeEventBus(),
+			eventStore: sessionEventStore,
+			eventBus:   runtimeEventBus,
+			handler:    h,
 		}
 		if orchestrator.Runner == nil {
 			orchestrator.Runner = &team.TeammateRunner{}
@@ -576,6 +588,7 @@ func (h *Handler) CreateTeam(w http.ResponseWriter, r *http.Request) {
 		ID            string `json:"id,omitempty"`
 		WorkspaceID   string `json:"workspace_id,omitempty"`
 		LeadSessionID string `json:"lead_session_id,omitempty"`
+		ParentTeamID  string `json:"parent_team_id,omitempty"`
 		Status        string `json:"status,omitempty"`
 		Strategy      string `json:"strategy,omitempty"`
 		MaxTeammates  int    `json:"max_teammates,omitempty"`
@@ -624,8 +637,52 @@ func (h *Handler) CreateTeam(w http.ResponseWriter, r *http.Request) {
 	if lifecycle := h.teamLifecycleService(); lifecycle != nil {
 		go lifecycle.SyncLoops()
 	}
+	h.recordTeamParentEdge(r.Context(), id, req)
 	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"team": created,
+	})
+}
+
+// recordTeamParentEdge persists the durable parent Team -> child Team edge
+// (doc 6.7 rule 1) when the create request carries a trusted parent_team_id.
+func (h *Handler) recordTeamParentEdge(ctx context.Context, childTeamID string, req struct {
+	ID            string `json:"id,omitempty"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	LeadSessionID string `json:"lead_session_id,omitempty"`
+	ParentTeamID  string `json:"parent_team_id,omitempty"`
+	Status        string `json:"status,omitempty"`
+	Strategy      string `json:"strategy,omitempty"`
+	MaxTeammates  int    `json:"max_teammates,omitempty"`
+	MaxWriters    int    `json:"max_writers,omitempty"`
+}) {
+	if strings.TrimSpace(req.ParentTeamID) == "" {
+		return
+	}
+	supervisionStore := h.getSupervisionStore()
+	if supervisionStore == nil {
+		return
+	}
+	parentTeamID := strings.TrimSpace(req.ParentTeamID)
+	childTeamID = strings.TrimSpace(childTeamID)
+	rootTeamID := parentTeamID
+	// Best-effort: resolve the tree root from the parent's ancestor chain.
+	if ancestors, err := supervisionStore.ListTeamAncestors(ctx, parentTeamID); err == nil && len(ancestors) > 0 {
+		if ancestors[0].RootTeamID != "" {
+			rootTeamID = ancestors[0].RootTeamID
+		}
+	}
+	_, _ = supervisionStore.UpsertTeamEdge(ctx, supervision.TeamEdge{
+		RootScopeID:  rootTeamID,
+		RootTeamID:   rootTeamID,
+		ParentTeamID: parentTeamID,
+		ParentKind:   "team",
+		ParentID:     parentTeamID,
+		ChildTeamID:  childTeamID,
+		Relation:     "nested",
+		CreatedBy:    req.LeadSessionID,
+		CreatedAt:    time.Now().UTC(),
+		Status:       supervision.TeamEdgeStatusActive,
+		Version:      1,
 	})
 }
 
@@ -908,7 +965,7 @@ func (h *Handler) GetTeamFinalSummary(w http.ResponseWriter, r *http.Request) {
 		Store: store,
 	}
 	if hub != nil {
-		planner.Sessions = &sessionActorClient{hub: hub}
+		planner.Sessions = &sessionActorClient{hub: hub, handler: h}
 	}
 	summaryResult, err := planner.FinalSummaryDetailed(r.Context(), teamID)
 	if err != nil {
@@ -2322,7 +2379,7 @@ func (h *Handler) PlanTeamTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	planner := &team.LeadPlanner{
-		Sessions:    &sessionActorClient{hub: hub},
+		Sessions:    &sessionActorClient{hub: hub, handler: h},
 		Store:       store,
 		AutoPersist: autoPersist,
 	}
@@ -3194,7 +3251,7 @@ func (h *Handler) ReplanTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	planner := &team.LeadPlanner{
-		Sessions:    &sessionActorClient{hub: hub},
+		Sessions:    &sessionActorClient{hub: hub, handler: h},
 		Store:       store,
 		AutoPersist: autoPersist,
 	}
@@ -3336,7 +3393,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 		var planner *team.LeadPlanner
 		if hub := h.getSessionHub(); hub != nil {
 			planner = &team.LeadPlanner{
-				Sessions: &sessionActorClient{hub: hub},
+				Sessions: &sessionActorClient{hub: hub, handler: h},
 				Store:    store,
 				Mailbox:  team.NewMailboxService(store),
 			}
@@ -3401,7 +3458,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 		var planner *team.LeadPlanner
 		if hub != nil {
 			planner = &team.LeadPlanner{
-				Sessions:    &sessionActorClient{hub: hub},
+				Sessions:    &sessionActorClient{hub: hub, handler: h},
 				Store:       store,
 				Mailbox:     team.NewMailboxService(store),
 				AutoPersist: true,

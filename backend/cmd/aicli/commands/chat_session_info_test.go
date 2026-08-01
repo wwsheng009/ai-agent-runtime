@@ -181,7 +181,7 @@ func TestPrintSessionInfo_RendersCompactLineage(t *testing.T) {
 
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.ID = "session-compact-1"
-	runtimeSession.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	runtimeSession.Metadata.Title = "检查登录流程为什么失败"
 	runtimeSession.Metadata.Context = map[string]interface{}{
 		runtimechat.ContextCompactGeneration:    2,
 		runtimechat.ContextCompactRootTitle:     "检查登录流程为什么失败",
@@ -213,7 +213,7 @@ func TestPrintSessionInfo_RendersCompactLineage(t *testing.T) {
 	})
 	for _, expected := range []string{
 		"Title:",
-		"检查登录流程为什么失败 · compact #2",
+		"检查登录流程为什么失败",
 		"Compact Gen:       #2",
 		"Compact Root:      检查登录流程为什么失败",
 		"Compact Root ID:   session-compact-1",

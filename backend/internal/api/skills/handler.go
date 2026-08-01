@@ -49,6 +49,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
@@ -147,6 +148,17 @@ type Handler struct {
 	teamOrchestrator   *team.Orchestrator
 	teamClaimsManager  *team.PathClaimManager
 	teamLifecycle      *handlerTeamLifecycleService
+
+	supervisionStoreMu            sync.RWMutex
+	supervisionStore              supervision.Store
+	supervisionActions            *supervision.ActionService
+	supervisionWakes              *supervision.WakeScheduler
+	supervisionDescendantProvider supervision.DescendantProvider
+	supervisionWakeOnce           sync.Once
+
+	executionSupervisorMu   sync.RWMutex
+	executionSupervisor     *supervision.ExecutionSupervisor
+	executionSupervisorStop context.CancelFunc
 
 	agentControlMu               sync.RWMutex
 	agentControlRegistryService  *agentcontrol.RegistryService
@@ -787,6 +799,20 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/teams/{id}/path-claims/check", h.CheckPathClaims).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/{id}/path-claims/prune", h.PrunePathClaims).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/{id}/teammates/sweep", h.SweepTeammates).Methods(http.MethodPost)
+
+	// Supervision control plane (P2: doc 6.2-6.9)
+	runtimeRouter.HandleFunc("/supervision/digest", h.GetSupervisionDigest).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/snapshot", h.GetSupervisionSnapshot).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/actions", h.RequestSupervisionAction).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/actions", h.ListSupervisionActions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/actions/{id}", h.GetSupervisionAction).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/actions/{id}/accept", h.AcceptSupervisionAction).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/actions/{id}/execute", h.ExecuteSupervisionAction).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/notifications/{id}/ack", h.AcknowledgeSupervisionNotification).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/notifications/{id}/defer", h.DeferSupervisionNotification).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/wake", h.ScheduleSupervisionWake).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/team-edges", h.RecordSupervisionTeamEdge).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/team-edges", h.ListSupervisionTeamEdges).Methods(http.MethodGet)
 
 	runtimeRouter.HandleFunc("/skills/{name}", h.GetSkill).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/skills/{name}", h.UpdateSkill).Methods(http.MethodPut)
@@ -3529,6 +3555,7 @@ func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile,
 	h.teamStoreConfigKey = configKey
 	h.teamClaimsManager = nil
 	h.teamOrchestrator = nil
+	h.teamLifecycle = nil
 	h.teamStoreMu.Unlock()
 
 	if oldStore != nil {
@@ -3543,6 +3570,9 @@ func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile,
 		payload["request_id"] = strings.TrimSpace(requestID)
 	}
 	h.publishRuntimeEvent("team.store.reloaded", traceID, payload)
+	if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+		lifecycle.SyncLoops()
+	}
 	return true, nil
 }
 
@@ -4032,6 +4062,7 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
 		}
 		broker.AgentSessions = &sessionAgentController{handler: h}
+		broker.ExecutionSupervisor = h.getExecutionSupervisor()
 	}
 
 	if store := h.getTeamStore(); store != nil {
@@ -4044,6 +4075,7 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
 		}
 		broker.AgentSessions = &sessionAgentController{handler: h}
+		broker.ExecutionSupervisor = h.getExecutionSupervisor()
 		broker.TeamStore = store
 		broker.TeamClaims = h.getTeamClaimsManager()
 		broker.TeamDispatcher = h
@@ -4057,7 +4089,7 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		}
 		if hub := h.getSessionHub(); hub != nil {
 			broker.TeamPlanner = &team.LeadPlanner{
-				Sessions:    &sessionActorClient{hub: hub},
+				Sessions:    &sessionActorClient{hub: hub, handler: h},
 				Store:       store,
 				Mailbox:     team.NewMailboxService(store),
 				AutoPersist: true,
@@ -4094,6 +4126,56 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		}
 		broker.Background = bgManager
 	}
+}
+
+// getExecutionSupervisor lazily builds the P3 child-run watchdog (doc 5.2 /
+// 10): durable run records, deadline/progress scan, interrupt + cancel grace,
+// and terminal completion outbox dispatch into the parent's AgentControl
+// mailbox. It returns nil when the supervision store is not configured, in
+// which case broker spawns keep working without run supervision.
+func (h *Handler) getExecutionSupervisor() *supervision.ExecutionSupervisor {
+	if h == nil {
+		return nil
+	}
+	h.executionSupervisorMu.Lock()
+	defer h.executionSupervisorMu.Unlock()
+	if h.executionSupervisor != nil {
+		return h.executionSupervisor
+	}
+	store := h.getSupervisionStore()
+	runStore, ok := store.(supervision.ExecutionRunStore)
+	if !ok || runStore == nil {
+		return nil
+	}
+	cfg := supervision.DefaultExecutionSupervisorConfig()
+	cfg.Enabled = true
+	supervisor := &supervision.ExecutionSupervisor{
+		Store:       runStore,
+		StoreFull:   store,
+		Wakes:       h.getSupervisionWakeScheduler(),
+		Config:      cfg,
+		Interrupter: toolbroker.AgentSessionRunInterrupter{Controller: &sessionAgentController{handler: h}},
+	}
+	if eventStore := h.getSessionEventStore(); eventStore != nil {
+		mailboxStore := chat.SessionEventMailboxStore{Events: eventStore}
+		supervisor.Dispatcher = toolbroker.CompletionDispatchFunc(func(ctx context.Context, entry supervision.CompletionOutboxEntry) (int64, error) {
+			payload := map[string]interface{}{}
+			if strings.TrimSpace(entry.PayloadJSON) != "" {
+				_ = json.Unmarshal([]byte(entry.PayloadJSON), &payload)
+			}
+			payload["status"] = entry.Status
+			payload["run_id"] = entry.RunID
+			message := toolbroker.BuildSubagentCompletionMailboxMessage(
+				entry.ParentSessionID, entry.SessionID, "", "", "completion_outbox", payload)
+			_, seq, err := mailboxStore.AppendAgentControlMailbox(ctx, entry.ParentSessionID, message)
+			return seq, err
+		})
+	}
+	h.executionSupervisor = supervisor
+	ctx, cancel := context.WithCancel(context.Background())
+	h.executionSupervisorStop = cancel
+	go supervisor.RunLoop(ctx)
+	return supervisor
 }
 
 func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *background.Manager {
@@ -9300,6 +9382,7 @@ func (h *Handler) ReloadRuntimeTeams(w http.ResponseWriter, r *http.Request) {
 		h.teamStoreConfigKey = desiredKey
 		h.teamClaimsManager = nil
 		h.teamOrchestrator = nil
+		h.teamLifecycle = nil
 		h.teamStoreMu.Unlock()
 		if oldStore != nil {
 			_ = oldStore.Close()
@@ -9311,6 +9394,9 @@ func (h *Handler) ReloadRuntimeTeams(w http.ResponseWriter, r *http.Request) {
 			"force":      true,
 			"request_id": requestID,
 		})
+		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+			lifecycle.SyncLoops()
+		}
 	}
 
 	payload := map[string]interface{}{

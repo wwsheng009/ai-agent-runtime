@@ -184,7 +184,7 @@ func TestPersistChatStartupPreferences_SavesInteractiveStreamSelection(t *testin
 	}
 }
 
-func TestPersistChatStartupPreferences_ClearsInvalidPersistedReasoningAndSavesIt(t *testing.T) {
+func TestPersistChatStartupPreferences_DoesNotRewriteConfiguredCustomReasoning(t *testing.T) {
 	cfg, cfgPath := testModelCommandConfig(t)
 	cfg.AICLI.Chat.ReasoningEffort = "ultra"
 	cfg.Providers.Items["alpha"] = agentconfig.Provider{
@@ -212,8 +212,8 @@ func TestPersistChatStartupPreferences_ClearsInvalidPersistedReasoningAndSavesIt
 	if details != nil {
 		t.Fatalf("expected nil details, got %+v", details)
 	}
-	if state.reasoningEffort != "" {
-		t.Fatalf("expected cleared reasoning effort, got %q", state.reasoningEffort)
+	if state.reasoningEffort != "ultra" {
+		t.Fatalf("expected custom reasoning effort to be preserved, got %q", state.reasoningEffort)
 	}
 	persistChatStartupPreferences(cfg, opts, nil, state)
 
@@ -224,12 +224,12 @@ func TestPersistChatStartupPreferences_ClearsInvalidPersistedReasoningAndSavesIt
 	if loaded.AICLI == nil || loaded.AICLI.Chat == nil {
 		t.Fatalf("expected persisted aicli.chat section, got %+v", loaded.AICLI)
 	}
-	if loaded.AICLI.Chat.ReasoningEffort != "" {
-		t.Fatalf("expected cleared reasoning_effort to be saved, got %q", loaded.AICLI.Chat.ReasoningEffort)
+	if loaded.AICLI.Chat.ReasoningEffort != "low" {
+		t.Fatalf("expected unmodified persisted reasoning_effort, got %q", loaded.AICLI.Chat.ReasoningEffort)
 	}
 }
 
-func TestPrepareChatRuntimeStatePreservesRejectedConfiguredReasoningAsRequested(t *testing.T) {
+func TestPrepareChatRuntimeStatePreservesConfiguredCustomReasoning(t *testing.T) {
 	cfg := &agentconfig.Config{
 		Providers: agentconfig.ProvidersConfig{
 			DefaultProvider: "alpha",
@@ -251,8 +251,8 @@ func TestPrepareChatRuntimeStatePreservesRejectedConfiguredReasoningAsRequested(
 	if err != nil {
 		t.Fatalf("prepareChatRuntimeState: %v", err)
 	}
-	if state.requestedReasoningEffort != "ultra" || state.reasoningEffort != "" {
-		t.Fatalf("expected requested reasoning ultra and empty effective reasoning, got requested=%q effective=%q", state.requestedReasoningEffort, state.reasoningEffort)
+	if state.requestedReasoningEffort != "ultra" || state.reasoningEffort != "ultra" {
+		t.Fatalf("expected requested and effective reasoning ultra, got requested=%q effective=%q", state.requestedReasoningEffort, state.reasoningEffort)
 	}
 }
 

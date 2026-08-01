@@ -23,6 +23,7 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -41,7 +42,17 @@ func (r *localActorRegistry) SubmitPrompt(ctx context.Context, sessionID, prompt
 }
 
 func (r *localActorRegistry) submitPrompt(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta, routeOverride *runtimechat.RunRouteOverride) (*team.SessionResult, error) {
-	if r == nil || r.Host == nil || r.Host.SessionHub == nil {
+	if r == nil || r.Host == nil {
+		return nil, fmt.Errorf("session hub not configured")
+	}
+	if r.Host.Supervision != nil {
+		var injectErr error
+		prompt, injectErr = injectLocalSupervisionPreflight(ctx, r.Host, sessionID, prompt, runMeta)
+		if injectErr != nil {
+			return nil, injectErr
+		}
+	}
+	if r.Host.SessionHub == nil {
 		return nil, fmt.Errorf("session hub not configured")
 	}
 	if err := r.ensureSession(ctx, sessionID); err != nil {
@@ -1009,12 +1020,16 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 			unsubscribe()
 		}
 		payload := map[string]interface{}{
-			"agent_id":          childSessionID,
-			"session_id":        childSessionID,
-			"parent_session_id": parentSessionID,
-			"path":              childPath,
-			"source_event_type": eventType,
-			"status":            localAgentCompletionStatus(event),
+			"agent_id":              childSessionID,
+			"session_id":            childSessionID,
+			"parent_session_id":     parentSessionID,
+			"path":                  childPath,
+			"source_event_type":     eventType,
+			"source_event_trace_id": strings.TrimSpace(event.TraceID),
+			"status":                localAgentCompletionStatus(event),
+		}
+		if !event.Timestamp.IsZero() {
+			payload["source_event_timestamp"] = event.Timestamp.UTC().Format(time.RFC3339Nano)
 		}
 		if childDepth > 0 {
 			payload["depth"] = childDepth
@@ -1031,6 +1046,7 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 				payload["lifecycle_close_error"] = closeErr.Error()
 			}
 		}
+		r.projectLocalAgentCompletion(context.Background(), parentSessionID, childSessionID, localAgentCompletionStatus(event), eventType)
 		// Keep worktree after completion so parent can apply/discard explicitly.
 		// close_agent still cleans remaining worktrees.
 		annotateLocalSpawnWorktreeCompletion(context.Background(), r, childSession, payload)
@@ -1057,6 +1073,37 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		r.Host.EventBus.Publish(mirrored)
 	}
 	unsubscribe = r.Host.EventBus.SubscribeCancelable("", handler)
+}
+
+// projectLocalAgentCompletion mirrors the API host bridge. It never turns an
+// otherwise successful completion/mailbox delivery into a runtime failure.
+func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, parentSessionID, childSessionID, status, sourceEventType string) {
+	if r == nil || r.Host == nil || r.Host.Supervision == nil || r.Host.Supervision.Store == nil {
+		return
+	}
+	rootScopeID := strings.TrimSpace(parentSessionID)
+	if r.Host.SessionStore != nil {
+		if session, err := r.Host.SessionStore.Load(ctx, childSessionID); err == nil && session != nil {
+			rootScopeID = localAgentRootSessionID(session, parentSessionID)
+		}
+	}
+	if rootScopeID == "" {
+		return
+	}
+	_, _ = supervision.ProjectAgentCompletion(
+		ctx,
+		r.Host.Supervision.Store,
+		r.Host.Supervision.Wakes,
+		rootScopeID,
+		parentSessionID,
+		childSessionID,
+		status,
+		sourceEventType,
+	)
+	// P2 closure: a critical completion must be able to start a parent turn
+	// without an explicit wait. If the parent is still busy the wake stays
+	// durable and the parent turn-end subscription drains it (doc 6.5).
+	_ = r.Host.wakeSupervisedParent(ctx, parentSessionID, rootScopeID)
 }
 
 func (r *localActorRegistry) dispatchLocalAgentHook(event runtimehooks.Event, payload map[string]interface{}) {
@@ -1108,7 +1155,6 @@ func (r *localActorRegistry) deliverSubagentCompletionMailbox(ctx context.Contex
 		return team.MailMessage{}, nil
 	}
 	message := toolbroker.BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, childPath, childType, sourceEventType, payload)
-	message.ID = "subagent_completed_" + sanitizeLocalAgentPathSegment(childSessionID)
 	err := runtimechat.DeliverMailboxEventFirst(ctx, r.Host.EventStore, r.Host.EventBus, r.deliverMailboxToActor, parentSessionID, message)
 	return message, err
 }
@@ -2126,11 +2172,12 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
-			Agents:       snapshots,
-			ReadyCount:   readyCount,
-			PendingCount: len(snapshots) - readyCount,
-			ReadyIDs:     readyIDs,
-			PendingIDs:   pendingIDs,
+			Agents:        snapshots,
+			ReadyCount:    readyCount,
+			PendingCount:  len(snapshots) - readyCount,
+			ReadyIDs:      readyIDs,
+			PendingIDs:    pendingIDs,
+			WaitTimeoutMs: int(timeout.Milliseconds()),
 		}
 		if matched != nil {
 			waitResult.Agent = matched

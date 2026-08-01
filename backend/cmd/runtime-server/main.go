@@ -760,6 +760,7 @@ type runtimeServerApp struct {
 	bootstrap      *runtimebootstrap.Manager
 	mcpManager     mcpmanager.Manager
 	ledgerStore    io.Closer
+	supervision    *runtimeserver.SupervisionControlPlane
 }
 
 func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string) (*runtimeServerApp, error) {
@@ -865,6 +866,46 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		handler.SetUsageLedgerStore(ledgerStore)
 	}
 
+	// P2 Parent/Lead Supervision Control Plane (doc 6.2-6.9): durable store +
+	// action service + wake scheduler + descendant provider. Real mutation
+	// executors (agentcontrol / team orchestrator) are injected by the aicli
+	// host; until then cancel/close/retry fail durably with a clear result
+	// instead of pretending success.
+	supervisionDataDir := filepath.Join(filepath.Dir(config.DefaultAuthStorePath()), "data", "supervision")
+	supervisionPlane, err := runtimeserver.BuildSupervisionControlPlane(
+		supervisionDataDir,
+		cfg.Supervision.WithDefaults(),
+		runtimeserver.SupervisionRuntimeHooks{
+			TeamStore: bootstrapManager.TeamStore(),
+		},
+	)
+	if err != nil {
+		if ledgerStore != nil {
+			_ = ledgerStore.Close()
+		}
+		if manager != nil {
+			_ = manager.Stop()
+		}
+		_ = bootstrapManager.Stop()
+		return nil, fmt.Errorf("failed to initialize supervision control plane: %w", err)
+	}
+	handler.SetSupervisionStore(supervisionPlane.Store)
+	handler.SetSupervisionActionService(supervisionPlane.Actions)
+	handler.SetSupervisionWakeScheduler(supervisionPlane.Wakes)
+	handler.SetSupervisionDescendantProvider(supervisionPlane.Provider)
+	// Real mutation executor: agent close goes through the API session
+	// controller; team cancel goes through the durable Team store. The
+	// runtime-server host does not own an AgentControl identity graph, so
+	// subtree resolution falls back to the close adapter's own target
+	// resolution and graph persistence is delegated to the controller.
+	supervisionPlane.SetActionExecutor((runtimeserver.SupervisionRuntimeExecutor{
+		Store:     supervisionPlane.Store,
+		TeamStore: bootstrapManager.TeamStore(),
+		CloseAgent: func(ctx context.Context, sessionID string) error {
+			return handler.CloseAgentSessionByID(ctx, sessionID)
+		},
+	}))
+
 	router := mux.NewRouter()
 	router.UseEncodedPath()
 	router.HandleFunc("/healthz", runtimeInfoHandler).Methods(http.MethodGet)
@@ -884,6 +925,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		bootstrap:      bootstrapManager,
 		mcpManager:     manager,
 		ledgerStore:    ledgerStore,
+		supervision:    supervisionPlane,
 	}, nil
 }
 
@@ -943,6 +985,11 @@ func (a *runtimeServerApp) close() {
 	if a.ledgerStore != nil {
 		if err := a.ledgerStore.Close(); err != nil {
 			logger.Warn("Failed to close usage ledger store", logger.Err(err))
+		}
+	}
+	if a.supervision != nil {
+		if err := a.supervision.Close(); err != nil {
+			logger.Warn("Failed to close supervision control plane", logger.Err(err))
 		}
 	}
 }
@@ -1076,6 +1123,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			APIKey:                provider.GetAPIKey(),
 			BaseURL:               provider.BaseURL,
 			APIPath:               provider.APIPath,
+			CompatibilityProfile:  provider.Compatibility.Profile,
 			Timeout:               timeout,
 			MaxRetries:            maxRetries,
 			RetryTuning:           retryTuning,

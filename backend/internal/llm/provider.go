@@ -153,18 +153,22 @@ type ChoiceChunk struct {
 
 // ProviderConfig 提供者配置
 type ProviderConfig struct {
-	Type              string                                     `json:"type"` // openai, anthropic, gemini, codex
-	APIKey            string                                     `json:"apiKey"`
-	BaseURL           string                                     `json:"baseUrl"`
-	APIPath           string                                     `json:"apiPath,omitempty"`
-	Timeout           time.Duration                              `json:"timeout"`
-	MaxRetries        int                                        `json:"maxRetries"`
-	RetryTuning       RetryTuning                                `json:"retryTuning,omitempty"`
-	RetryRules        []RetryRule                                `json:"retryRules,omitempty"`
-	DefaultModel      string                                     `json:"defaultModel,omitempty"`
-	SupportedModels   []string                                   `json:"supportedModels,omitempty"`
-	ModelMappings     map[string]string                          `json:"modelMappings,omitempty"`
-	ModelCapabilities map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
+	// Name is the stable configured provider identity. It is distinct from Type,
+	// which identifies the protocol adapter.
+	Name                 string                                     `json:"name,omitempty"`
+	Type                 string                                     `json:"type"` // openai, anthropic, gemini, codex
+	APIKey               string                                     `json:"apiKey"`
+	BaseURL              string                                     `json:"baseUrl"`
+	APIPath              string                                     `json:"apiPath,omitempty"`
+	CompatibilityProfile string                                     `json:"compatibilityProfile,omitempty"`
+	Timeout              time.Duration                              `json:"timeout"`
+	MaxRetries           int                                        `json:"maxRetries"`
+	RetryTuning          RetryTuning                                `json:"retryTuning,omitempty"`
+	RetryRules           []RetryRule                                `json:"retryRules,omitempty"`
+	DefaultModel         string                                     `json:"defaultModel,omitempty"`
+	SupportedModels      []string                                   `json:"supportedModels,omitempty"`
+	ModelMappings        map[string]string                          `json:"modelMappings,omitempty"`
+	ModelCapabilities    map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
 	// EnableImageGeneration opts into Codex native image_generation injection.
 	// Nil/false keeps the tool out of request payloads by default.
 	EnableImageGeneration   *bool                    `json:"enableImageGeneration,omitempty"`
@@ -333,7 +337,7 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 		Model:            model,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, p.config.Type, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, p.config.Type, p.config.CompatibilityProfile, requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -378,6 +382,9 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 func NewProvider(config *ProviderConfig) (LegacyChatProvider, error) {
 	if config == nil {
 		return nil, fmt.Errorf("provider config is required")
+	}
+	if err := agentconfig.ValidateCompatibilityProfile(config.Type, config.CompatibilityProfile); err != nil {
+		return nil, fmt.Errorf("invalid provider compatibility profile: %w", err)
 	}
 
 	// 创建 ProtocolAdapter
@@ -457,7 +464,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, p.config.CompatibilityProfile, requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -704,7 +711,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, requestBody),
+		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, p.config.CompatibilityProfile, requestBody),
 		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -1132,7 +1139,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			Model:            adapterRequest.Model,
 			Method:           http.MethodPost,
 			URL:              url,
-			RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, p.config.Type, requestBody),
+			RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, p.config.Type, p.config.CompatibilityProfile, requestBody),
 			RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 			RequestBodyBytes: len(bodyBytes),
 			RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
@@ -1492,9 +1499,9 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 	messages := make([]Message, 0, len(req.Messages))
 	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
 	resolvedModel := p.resolveModel(req.Model)
-	capability, hasCapability := ResolveModelCapabilitySpec(resolvedModel, p.modelCapabilities())
+	capability, _ := ResolveModelCapabilitySpec(resolvedModel, p.modelCapabilities())
 	reasoningModel := ReasoningModelEnabled(capability, req.ReasoningModel)
-	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
+	requestReasoningEffort := reasoningConfig.ReasoningEffort
 	for _, msg := range req.Messages {
 		toolCalls := make([]ToolCall, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
@@ -1695,8 +1702,11 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	}
 
 	return buildProviderAdapterRequest(providerAdapterRequestInput{
+		ProviderName:            p.config.Name,
 		Protocol:                p.config.Type,
 		BaseURL:                 p.config.BaseURL,
+		APIPath:                 p.config.APIPath,
+		CompatibilityProfile:    p.config.CompatibilityProfile,
 		Model:                   resolvedModel,
 		SupportsMaxOutputTokens: p.config.SupportsMaxOutputTokens,
 		ModelCapabilities:       p.modelCapabilities(),

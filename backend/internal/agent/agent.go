@@ -92,6 +92,7 @@ type Result struct {
 	Observations              []types.Observation    `json:"observations"`
 	Skill                     string                 `json:"skill,omitempty"`
 	TraceID                   string                 `json:"trace_id,omitempty"`
+	TurnID                    string                 `json:"turn_id,omitempty"`
 	AssistantStreamID         string                 `json:"assistant_stream_id,omitempty"`
 	AssistantStreamSequence   uint64                 `json:"assistant_stream_sequence,omitempty"`
 	State                     AgentState             `json:"state"`

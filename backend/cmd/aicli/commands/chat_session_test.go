@@ -56,6 +56,52 @@ func TestAICLIMessageRoundTripPreservesTypedToolCalls(t *testing.T) {
 	}
 }
 
+func TestAICLIMessageRoundTripPreservesCustomToolCallInput(t *testing.T) {
+	patch := "PATCH-BEGIN\nPATCH-END"
+	raw := map[string]interface{}{
+		"role":    "assistant",
+		"content": "",
+		"tool_calls": []map[string]interface{}{
+			{
+				"id":    "call_patch",
+				"type":  "custom_tool_call",
+				"name":  "apply_patch",
+				"input": patch,
+			},
+		},
+	}
+
+	message, err := runtimeMessageFromAICLIMessage(raw)
+	if err != nil {
+		t.Fatalf("runtimeMessageFromAICLIMessage: %v", err)
+	}
+	if len(message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(message.ToolCalls))
+	}
+	call := message.ToolCalls[0]
+	if call.Type != "custom_tool_call" {
+		t.Fatalf("expected custom type preserved, got %q", call.Type)
+	}
+	if call.RawInput != patch {
+		t.Fatalf("expected raw input preserved verbatim, got %q", call.RawInput)
+	}
+
+	restored, err := aicliMessageFromRuntimeMessage(message)
+	if err != nil {
+		t.Fatalf("aicliMessageFromRuntimeMessage: %v", err)
+	}
+	toolCalls, ok := restored["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected one restored tool call, got %#v", restored["tool_calls"])
+	}
+	if got := toolCalls[0]["type"]; got != "custom_tool_call" {
+		t.Fatalf("expected custom type after round-trip, got %#v", got)
+	}
+	if got := toolCalls[0]["input"]; got != patch {
+		t.Fatalf("expected raw input after round-trip, got %#v", got)
+	}
+}
+
 func TestRuntimeMessageFromAICLIMessage_DecodesAnthropicToolUseInput(t *testing.T) {
 	raw := map[string]interface{}{
 		"role":    "assistant",

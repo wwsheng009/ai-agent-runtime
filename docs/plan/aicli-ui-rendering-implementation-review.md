@@ -1,14 +1,20 @@
 # aicli UI/UX 渲染实施审查
 
-状态: **核心实现已审查并完成高优先级收口，终端集成验证待完成**
+状态: **内容渲染核心已审查并完成高优先级收口；物理终端所有权、history/gap 与终端集成验证由后续专项承接**
 
 审查日期: **2026-07-29**
+
+文档关系更新: **2026-07-31**
 
 关联方案:
 
 - [aicli-ui-ux-rendering-codex-reference-plan.md](./aicli-ui-ux-rendering-codex-reference-plan.md)
 - [aicli-ui-refactor-codex-inspired-plan.md](./aicli-ui-refactor-codex-inspired-plan.md)
 - [aicli-ui-rendering-phase0-inventory.md](./aicli-ui-rendering-phase0-inventory.md)
+- [aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)
+- [aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)
+
+> 本审查的“无需再次重写 TUI”是指不需要推翻已经形成的 `Document -> Block -> Line -> Span`、主题、宽度、Markdown/Diff 和安全解析能力；它不表示 physical screen ownership、raw/direct output、history identity、跨 cell gap、fullscreen lifecycle 和 exactly-once handoff 已经解决。这些跨模块问题分别以 P5 专项文档和统一长期架构文档为准。本文 F32 的 `ApplyBlockSpacing` 只负责 Markdown/Document 或单个 cell 内部间距，不负责 top-level transcript cell 的 `BoundaryPolicy`。
 
 ## 1. 审查结论
 

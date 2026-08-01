@@ -198,9 +198,6 @@ func executeModelCommand(session *ChatSession, request modelCommandRequest, inte
 		if err != nil {
 			return err
 		}
-	} else if reasoning != "" && reasoningEffortCatalogForModel(providerCtx.Provider, providerCtx.Model).supported && !reasoningEffortAllowed(reasoning, reasoningEffortCatalogForModel(providerCtx.Provider, providerCtx.Model).options) {
-		fmt.Fprintf(os.Stderr, "Warning: reasoning_effort %q 不被模型 %s 支持，已清空\n", reasoning, providerCtx.Model)
-		reasoning = ""
 	}
 
 	if request.ReasoningExplicit {

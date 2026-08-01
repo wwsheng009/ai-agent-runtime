@@ -36,6 +36,7 @@ type ProviderResource struct {
 	Type                    string
 	BaseURL                 string
 	APIPath                 string
+	CompatibilityProfile    string
 	Weight                  int
 	Enabled                 bool
 	SupportsMaxOutputTokens *bool

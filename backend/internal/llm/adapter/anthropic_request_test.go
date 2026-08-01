@@ -252,6 +252,45 @@ func TestAnthropicBuildRequest_AdaptiveThinkingGeneratesCorrectBody(t *testing.T
 	}
 }
 
+func TestAnthropicBuildRequest_PreservesCustomReasoningEffortOutsideBudgetCatalog(t *testing.T) {
+	a := &AnthropicAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:           "claude-sonnet-4-6",
+		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
+		ReasoningEffort: " Provider-Custom ",
+		ReasoningEffortBudgets: map[string]int{
+			"high": 16384,
+		},
+	})
+
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	thinking, ok := decoded["thinking"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected adaptive thinking in request, got %#v", decoded["thinking"])
+	}
+	if thinking["type"] != "adaptive" {
+		t.Fatalf("expected adaptive thinking type, got %#v", thinking["type"])
+	}
+	if _, exists := thinking["effort"]; exists {
+		t.Fatalf("expected adaptive thinking not to nest effort, got %#v", thinking)
+	}
+	outputConfig, ok := decoded["output_config"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected output_config in request, got %#v", decoded)
+	}
+	if outputConfig["effort"] != "Provider-Custom" {
+		t.Fatalf("expected trimmed custom output effort, got %#v", outputConfig["effort"])
+	}
+}
+
 func TestAnthropicBuildRequest_ToolChoiceIsPropagated(t *testing.T) {
 	a := &AnthropicAdapter{}
 	req := a.BuildRequest(RequestConfig{

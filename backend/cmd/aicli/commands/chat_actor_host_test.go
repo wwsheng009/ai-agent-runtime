@@ -3617,6 +3617,7 @@ func TestLocalTeamLifecycleService_SyncLoopsFiltersToBaseLeadSession(t *testing.
 	runtimeSession.ID = "current-session"
 	host := &localChatRuntimeHost{
 		TeamStore: store,
+		EventBus:  runtimeevents.NewBusWithRetention(16),
 		BaseSession: &ChatSession{
 			RuntimeSession: runtimeSession,
 		},
@@ -3634,6 +3635,42 @@ func TestLocalTeamLifecycleService_SyncLoopsFiltersToBaseLeadSession(t *testing.
 	}
 	if lifecycle.hasTeamLoop("team-old") {
 		t.Fatal("expected old lead team loop to stay stopped")
+	}
+	recent := host.EventBus.Recent(16)
+	var started runtimeevents.Event
+	for _, event := range recent {
+		if event.Type == "team.orchestrator.loop.started" {
+			started = event
+			break
+		}
+	}
+	if started.Type == "" {
+		t.Fatalf("expected loop started event, got %+v", recent)
+	}
+	if started.Payload["team_id"] != "team-current" || started.Payload["start_reason"] != "sync_missing_loop" {
+		t.Fatalf("unexpected loop started payload: %+v", started.Payload)
+	}
+
+	if err := store.UpdateTeamStatus(context.Background(), "team-current", team.TeamStatusPaused); err != nil {
+		t.Fatalf("UpdateTeamStatus paused: %v", err)
+	}
+	lifecycle.SyncLoops()
+	if lifecycle.hasTeamLoop("team-current") {
+		t.Fatal("expected paused team loop to stop")
+	}
+	recent = host.EventBus.Recent(16)
+	var stopped runtimeevents.Event
+	for _, event := range recent {
+		if event.Type == "team.orchestrator.loop.stopped" && event.Payload["stop_reason"] == "team_not_active" {
+			stopped = event
+			break
+		}
+	}
+	if stopped.Type == "" {
+		t.Fatalf("expected loop stopped event, got %+v", recent)
+	}
+	if stopped.Payload["team_id"] != "team-current" {
+		t.Fatalf("unexpected loop stopped payload: %+v", stopped.Payload)
 	}
 }
 

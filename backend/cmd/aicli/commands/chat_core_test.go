@@ -114,10 +114,6 @@ func (a *recordingProtocolAdapter) BuildAssistantMessage(content string, toolCal
 	return map[string]interface{}{"role": "assistant", "content": content}
 }
 
-func (a *recordingProtocolAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interface{}) []adapter.ToolCall {
-	return nil
-}
-
 func (a *recordingProtocolAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks adapter.StreamCallbacks) (map[string]interface{}, error) {
 	if a.response != nil {
 		return a.response, nil

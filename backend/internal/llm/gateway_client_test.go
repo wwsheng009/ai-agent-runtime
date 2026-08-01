@@ -1096,6 +1096,55 @@ func TestGatewayClient_CallProvider_AnthropicReasoningEffortMapsToThinking(t *te
 	assert.Equal(t, "interleaved-thinking-2025-05-14", capturedBeta)
 }
 
+func TestGatewayClient_CallProvider_AnthropicPreservesCustomReasoningEffort(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "anthropic_ee",
+			Type:    "anthropic",
+			BaseURL: server.URL,
+			ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"claude-sonnet-4-6": {
+					ReasoningEffortBudgets: map[string]int{
+						"high": 16384,
+					},
+				},
+			},
+		},
+		KeyValue: "test-key",
+	}
+
+	resp, err := client.callProvider(context.Background(), selected, "claude-sonnet-4-6", &LLMRequest{
+		Model:           "claude-sonnet-4-6",
+		ReasoningEffort: " Provider-Custom ",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+
+	thinking, ok := capturedBody["thinking"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "adaptive", thinking["type"])
+	_, nestedEffort := thinking["effort"]
+	assert.False(t, nestedEffort, "adaptive thinking must not nest effort")
+
+	outputConfig, ok := capturedBody["output_config"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "Provider-Custom", outputConfig["effort"])
+}
+
 func TestGatewayClient_CallProvider_OpenAIPreservesReasoningEffort(t *testing.T) {
 	var capturedBody map[string]interface{}
 
@@ -1129,7 +1178,7 @@ func TestGatewayClient_CallProvider_OpenAIPreservesReasoningEffort(t *testing.T)
 	assert.Equal(t, "xhigh", capturedBody["reasoning_effort"])
 }
 
-func TestGatewayClient_CallProvider_NVIDIADropsUnsupportedReasoningEffort(t *testing.T) {
+func TestGatewayClient_CallProvider_NVIDIAPreservesCustomReasoningEffort(t *testing.T) {
 	var capturedBody map[string]interface{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1159,7 +1208,7 @@ func TestGatewayClient_CallProvider_NVIDIADropsUnsupportedReasoningEffort(t *tes
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp.Content)
-	assert.NotContains(t, capturedBody, "reasoning_effort")
+	assert.Equal(t, "max", capturedBody["reasoning_effort"])
 }
 
 func TestGatewayClient_CallProvider_UsesConfiguredReasoningModelFlag(t *testing.T) {

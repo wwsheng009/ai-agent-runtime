@@ -458,7 +458,7 @@ func decodeMapAny(raw interface{}) map[string]interface{} {
 
 func runtimeMessageToAdapterMessage(msg types.Message, protocol string, providerHint string) map[string]interface{} {
 	reasoning := reasoningFromMessageMetadata(msg.Metadata)
-	toolCalls := encodeRuntimeToolCalls(msg.ToolCalls)
+	toolCalls := EncodeRuntimeToolCalls(msg.ToolCalls)
 	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, mapFromMetadata(msg.Metadata))
 }
 
@@ -1496,24 +1496,23 @@ func replayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reason
 	}, toolCalls, reasoning)
 }
 
-func encodeRuntimeToolCalls(calls []types.ToolCall) []map[string]interface{} {
+// EncodeRuntimeToolCalls 将运行时 ToolCall 列表编码为统一格式层的 wire 形状：
+// 标准 function 调用输出 OpenAI 嵌套形状，custom 调用输出 codex 扁平
+// {id, type:"custom_tool_call", name, input}（input 为 freeform 原样）。
+// 供 aicli 等外部包复用，避免各包各自维护一份编码实现导致漂移。
+func EncodeRuntimeToolCalls(calls []types.ToolCall) []map[string]interface{} {
 	if len(calls) == 0 {
 		return nil
 	}
 	result := make([]map[string]interface{}, 0, len(calls))
 	for _, call := range calls {
-		if strings.EqualFold(strings.TrimSpace(call.Type), "custom_tool_call") {
-			input := call.RawInput
-			if input == "" {
-				input, _ = call.Args["_raw"].(string)
+		callType := strings.TrimSpace(call.Type)
+		customInput := ""
+		if strings.EqualFold(callType, "custom_tool_call") {
+			customInput = call.RawInput
+			if customInput == "" {
+				customInput, _ = call.Args["_raw"].(string)
 			}
-			result = append(result, map[string]interface{}{
-				"id":    call.ID,
-				"type":  "custom_tool_call",
-				"name":  call.Name,
-				"input": input,
-			})
-			continue
 		}
 		argsJSON := "{}"
 		if len(call.Args) > 0 {
@@ -1521,14 +1520,7 @@ func encodeRuntimeToolCalls(calls []types.ToolCall) []map[string]interface{} {
 				argsJSON = string(argsBytes)
 			}
 		}
-		result = append(result, map[string]interface{}{
-			"id":   call.ID,
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":      call.Name,
-				"arguments": argsJSON,
-			},
-		})
+		result = append(result, encodeUnifiedToolCallShape(call.ID, call.Name, callType, argsJSON, customInput))
 	}
 	return result
 }
@@ -1539,25 +1531,38 @@ func encodeProviderToolCalls(calls []ToolCall) []map[string]interface{} {
 	}
 	result := make([]map[string]interface{}, 0, len(calls))
 	for _, call := range calls {
-		if strings.EqualFold(strings.TrimSpace(call.Type), "custom_tool_call") {
-			result = append(result, map[string]interface{}{
-				"id":    call.ID,
-				"type":  "custom_tool_call",
-				"name":  call.Function.Name,
-				"input": call.Function.Arguments,
-			})
+		callType := strings.TrimSpace(call.Type)
+		if strings.EqualFold(callType, "custom_tool_call") {
+			result = append(result, encodeUnifiedToolCallShape(call.ID, call.Function.Name, "custom_tool_call", "", call.Function.Arguments))
 			continue
 		}
-		result = append(result, map[string]interface{}{
-			"id":   call.ID,
-			"type": call.Type,
-			"function": map[string]interface{}{
-				"name":      call.Function.Name,
-				"arguments": normalizeToolCallArgumentsJSON(call.Function.Arguments),
-			},
-		})
+		// 统一格式层只保留标准枚举：任何其它拼写
+		// （如 Responses 协议的 "function_call"）都收敛为 "function"。
+		result = append(result, encodeUnifiedToolCallShape(call.ID, call.Function.Name, "function", normalizeToolCallArgumentsJSON(call.Function.Arguments), ""))
 	}
 	return result
+}
+
+// encodeUnifiedToolCallShape 构造统一格式层的单条 tool call wire 形状。
+// 标准 function 调用输出 OpenAI 嵌套形状；custom 调用输出 codex 扁平形状，
+// input 为 freeform 原样文本（不按 JSON 解析）。
+func encodeUnifiedToolCallShape(id, name, callType, argsJSON, customInput string) map[string]interface{} {
+	if strings.EqualFold(strings.TrimSpace(callType), "custom_tool_call") {
+		return map[string]interface{}{
+			"id":    id,
+			"type":  "custom_tool_call",
+			"name":  name,
+			"input": customInput,
+		}
+	}
+	return map[string]interface{}{
+		"id":   id,
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      name,
+			"arguments": argsJSON,
+		},
+	}
 }
 
 func normalizeToolCallArgumentsJSON(raw string) string {

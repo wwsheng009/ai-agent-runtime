@@ -45,6 +45,9 @@ const (
 	// Agent 错误
 	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"
 	ErrAgentPermission ErrorCode = "AGENT_PERMISSION"
+	// ErrAgentReadOnly is a non-overridable child/tool execution boundary.
+	// Approval and bypass_permissions cannot widen this policy.
+	ErrAgentReadOnly ErrorCode = "AGENT_READ_ONLY"
 	// ErrAgentAlreadyExists marks a deterministic spawn conflict. Retrying the
 	// same explicit child id cannot succeed; callers must reuse/close it or pick
 	// another id.

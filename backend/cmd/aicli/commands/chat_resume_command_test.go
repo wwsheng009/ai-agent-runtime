@@ -166,7 +166,7 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 	workspace := t.TempDir()
 	session := runtimechat.NewSession("tester")
 	session.ID = "resume-fullscreen"
-	session.Metadata.Title = "Resume full-screen picker · compact #1"
+	session.Metadata.Title = "Resume full-screen picker"
 	session.Metadata.Context = map[string]interface{}{
 		chatRuntimeContextProtocol:           "anthropic",
 		chatRuntimeContextProviderName:       "provider-a",
@@ -186,7 +186,7 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 		t.Fatalf("expected nil sessions to be skipped while preserving selection mapping, got items=%#v selectable=%#v", items, selectable)
 	}
 	item := items[0]
-	if item.Title != "Resume full-screen picker · compact #1" {
+	if item.Title != "Resume full-screen picker" {
 		t.Fatalf("unexpected full-screen title: %q", item.Title)
 	}
 	if item.Disabled {
@@ -302,7 +302,7 @@ func TestRenderRuntimeSessionSummaryLinesIncludesCompactBadge(t *testing.T) {
 	session.ID = "compact-list-1"
 	session.State = runtimechat.StateActive
 	session.UpdatedAt = now.Add(-time.Minute)
-	session.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	session.Metadata.Title = "检查登录流程为什么失败"
 	session.Metadata.Context = map[string]interface{}{
 		chatRuntimeContextProtocol:           "openai",
 		runtimechat.ContextCompactGeneration: 2,
@@ -326,7 +326,7 @@ func TestRenderRuntimeSessionSummaryLinesIncludesCompactBadge(t *testing.T) {
 func TestRenderRuntimeResumeSessionLineIncludesCompactBadge(t *testing.T) {
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.Local)
 	session := runtimechat.NewSession("tester")
-	session.Metadata.Title = "检查登录流程为什么失败 · compact #2"
+	session.Metadata.Title = "检查登录流程为什么失败"
 	session.Metadata.Context = map[string]interface{}{
 		runtimechat.ContextCompactGeneration: 2,
 		runtimechat.ContextCompactRootTitle:  "检查登录流程为什么失败",
@@ -342,11 +342,12 @@ func TestRenderRuntimeResumeSessionLineIncludesCompactBadge(t *testing.T) {
 		t.Fatalf("expected turn/message counts in resume line, got %q", line)
 	}
 	// Format injects a dedicated "  compact #N  " badge between title and counts.
-	// Titles already embed "· compact #N", so require the explicit double-space badge.
+	// Titles stay clean (compaction no longer edits titles), so require the
+	// explicit double-space badge.
 	if !strings.Contains(line, "  compact #2  ") {
 		t.Fatalf("expected compact generation badge in resume line, got %q", line)
 	}
-	titleIndex := strings.Index(line, "检查登录流程为什么失败 · compact #2")
+	titleIndex := strings.Index(line, "检查登录流程为什么失败")
 	badgeIndex := strings.Index(line, "  compact #2  ")
 	countsIndex := strings.Index(line, "1轮/2条消息")
 	if titleIndex < 0 || badgeIndex < 0 || countsIndex < 0 || !(titleIndex < badgeIndex && badgeIndex < countsIndex) {

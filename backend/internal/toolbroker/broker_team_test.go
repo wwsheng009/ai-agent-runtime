@@ -401,6 +401,34 @@ func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T)
 	assert.Equal(t, "async final summary", result.Summary)
 }
 
+func TestBrokerExecuteWaitTeamTimeoutReportsExecutionContinues(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-wait-timeout-continues",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{TeamStore: store}
+	raw, meta, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+		"team_id":    teamID,
+		"timeout_ms": 1,
+	})
+	require.NoError(t, err)
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	assert.True(t, result.TimedOut)
+	assert.False(t, result.Terminal)
+	assert.Equal(t, 1, result.WaitTimeoutMs)
+	assert.True(t, result.ExecutionContinues)
+	assert.Contains(t, result.NextAction, "wait timeout only ended this observation")
+	assert.Equal(t, string(team.TeamStatusActive), result.Status)
+	require.NotNil(t, meta)
+	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "team execution continues")
+}
+
 func TestBrokerExecuteWaitTeamInfersSingleLeadTeam(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()

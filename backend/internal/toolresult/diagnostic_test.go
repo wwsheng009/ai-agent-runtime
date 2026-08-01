@@ -61,6 +61,35 @@ func TestDiagnoseAttachesStaleViewHints(t *testing.T) {
 	}
 }
 
+func TestDiagnoseReadOnlyCompoundCommandIsNonOverridable(t *testing.T) {
+	diagnostic := Diagnose(
+		"shell",
+		"call-readonly",
+		"read-only policy blocks compound shell command; submit one command per shell.commands entry: git status; git diff",
+		map[string]interface{}{
+			"policy":        "read_only",
+			"policy_source": "spawn_subagents.read_only",
+			"overridable":   false,
+		},
+	)
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrAgentReadOnly) {
+		t.Fatalf("error_code=%q want %s", diagnostic.ErrorCode, runtimeerrors.ErrAgentReadOnly)
+	}
+	if diagnostic.Retryable {
+		t.Fatalf("read-only denial must not be retryable: %#v", diagnostic)
+	}
+	if !strings.Contains(diagnostic.NextAction, "shell.commands") ||
+		!strings.Contains(diagnostic.NextAction, "cannot override") {
+		t.Fatalf("expected structured read-only recovery, got %q", diagnostic.NextAction)
+	}
+	if diagnostic.Policy != "read_only" || diagnostic.PolicySource != "spawn_subagents.read_only" {
+		t.Fatalf("unexpected policy provenance: %#v", diagnostic)
+	}
+	if diagnostic.Overridable == nil || *diagnostic.Overridable {
+		t.Fatalf("expected overridable=false, got %#v", diagnostic.Overridable)
+	}
+}
+
 func TestDiagnoseCapsOversizedCurrentSnippet(t *testing.T) {
 	// Oversized multi-line snippet must stay under contract budget and drop the
 	// tail on whole-line boundaries (no mid-line cut when multiple lines fit).

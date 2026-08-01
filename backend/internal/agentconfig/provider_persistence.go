@@ -18,6 +18,7 @@ type ProviderConfigUpdate struct {
 	SetDefaultProvider    bool
 	Enabled               *bool
 	Protocol              *string
+	CompatibilityProfile  *string
 	BaseURL               *string
 	APIPath               *string
 	ForwardURL            *string
@@ -121,6 +122,15 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 		upsertYAMLMappingValue(node, "enabled", boolYAMLNode(*update.Enabled))
 	}
 	upsertRequiredStringYAMLValue(node, "protocol", update.Protocol)
+	if update.CompatibilityProfile != nil {
+		profile := strings.TrimSpace(*update.CompatibilityProfile)
+		if profile == "" {
+			removeYAMLMappingValue(node, "compatibility")
+		} else {
+			compatibility := ensureChildMapping(node, "compatibility")
+			upsertYAMLMappingValue(compatibility, "profile", stringYAMLNode(profile))
+		}
+	}
 	upsertRequiredStringYAMLValue(node, "base_url", update.BaseURL)
 	upsertOptionalStringYAMLValue(node, "api_path", update.APIPath)
 	upsertOptionalStringYAMLValue(node, "forward_url", update.ForwardURL)
@@ -182,6 +192,12 @@ func providerAccountSnapshotYAMLNode(snapshot ProviderAccountSnapshot) *yaml.Nod
 	upsertNonZeroStringYAMLValue(node, "mode", snapshot.Mode)
 	upsertNonZeroStringYAMLValue(node, "currency", snapshot.Currency)
 	upsertOptionalFloatYAMLValue(node, "wallet_balance", snapshot.WalletBalance)
+	if snapshot.IsAvailable != nil {
+		upsertYAMLMappingValue(node, "is_available", boolYAMLNode(*snapshot.IsAvailable))
+	}
+	if len(snapshot.BalanceDetails) > 0 {
+		upsertYAMLMappingValue(node, "balance_details", providerBalanceDetailsYAMLNode(snapshot.BalanceDetails))
+	}
 	upsertOptionalFloatYAMLValue(node, "quota_balance", snapshot.QuotaBalance)
 	upsertOptionalFloatYAMLValue(node, "quota_remaining", snapshot.QuotaRemaining)
 	upsertOptionalFloatYAMLValue(node, "quota_used", snapshot.QuotaUsed)
@@ -203,6 +219,19 @@ func providerAccountSnapshotYAMLNode(snapshot ProviderAccountSnapshot) *yaml.Nod
 		upsertYAMLMappingValue(node, "partial", boolYAMLNode(true))
 	}
 	upsertNonZeroStringYAMLValue(node, "last_error", snapshot.LastError)
+	return node
+}
+
+func providerBalanceDetailsYAMLNode(items []ProviderBalanceDetail) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, item := range items {
+		entry := &yaml.Node{Kind: yaml.MappingNode}
+		upsertNonZeroStringYAMLValue(entry, "currency", item.Currency)
+		upsertYAMLMappingValue(entry, "total_balance", floatYAMLNode(item.TotalBalance))
+		upsertYAMLMappingValue(entry, "granted_balance", floatYAMLNode(item.GrantedBalance))
+		upsertYAMLMappingValue(entry, "topped_up_balance", floatYAMLNode(item.ToppedUpBalance))
+		node.Content = append(node.Content, entry)
+	}
 	return node
 }
 

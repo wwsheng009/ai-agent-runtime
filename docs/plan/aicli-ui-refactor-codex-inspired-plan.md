@@ -1,10 +1,18 @@
 # aicli UI 重构计划：参考 Codex TUI 的分阶段高级能力方案
 
-状态: **implementing**
+状态: **historical roadmap（早期 UI 组件化与交互计划；当前渲染实施状态不再由本文维护）**
 
-更新时间: **2026-05-01**
+更新时间: **2026-07-31**
 
-## 当前实施进度
+当前文档关系：
+
+- 内容渲染 IR、主题、Markdown/Diff 与终端能力：`docs/plan/aicli-ui-ux-rendering-codex-reference-plan.md`；
+- owned viewport、ActiveBand、history handoff 与 P5.6 gap：`docs/plan/aicli-tui-p5-owned-viewport-design.md`；
+- Scene、single physical writer、CommandResult、fullscreen lease 与长期删除计划：`docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`。
+
+> 本文保留 2026-05 阶段的组件、popup/composer/input 设计背景。下述“当前实施进度”是当时快照，其中关于 debug/direct output、legacy 菜单和 surface-aware 输出的描述不能替代 2026-07 的 direct-writer 审计与统一架构强不变量。
+
+## 2026-05-01 实施进度快照
 
 截至 2026-05-01，Phase 0 和 Phase 1 的最小闭环已经开始落地：
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -245,6 +246,53 @@ func TestValidateCatalogConfig(t *testing.T) {
 	cfg.Catalog.Backend = "invalid"
 	err = ValidateRuntimeConfig(cfg)
 	require.Error(t, err)
+}
+
+func TestTeamOrchestratorSupervisorDefaultsAndValidation(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.Equal(t, 5*time.Second, cfg.Team.Orchestrator.ReconcileInterval)
+	require.Equal(t, []time.Duration{
+		time.Second,
+		2 * time.Second,
+		5 * time.Second,
+		10 * time.Second,
+		30 * time.Second,
+		time.Minute,
+	}, cfg.Team.Orchestrator.RestartBackoff)
+	require.Equal(t, 5*time.Minute, cfg.Team.Orchestrator.MaxRestartBackoff)
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Team.Orchestrator.ReconcileInterval = -time.Second
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Team.Orchestrator.RestartBackoff = []time.Duration{time.Second, 0}
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Team.Orchestrator.MaxRestartBackoff = -time.Second
+	require.Error(t, ValidateRuntimeConfig(cfg))
+}
+
+func TestRuntimeManagerLoadsTeamOrchestratorDurationsFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.yaml")
+	data := []byte(`
+team:
+  orchestrator:
+    reconcileInterval: 7s
+    restartBackoff:
+      - 750ms
+      - 3s
+    maxRestartBackoff: 2m
+`)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	rm := NewRuntimeManager(path)
+	require.NoError(t, rm.Load())
+	cfg := rm.Get()
+	require.Equal(t, 7*time.Second, cfg.Team.Orchestrator.ReconcileInterval)
+	require.Equal(t, []time.Duration{750 * time.Millisecond, 3 * time.Second}, cfg.Team.Orchestrator.RestartBackoff)
+	require.Equal(t, 2*time.Minute, cfg.Team.Orchestrator.MaxRestartBackoff)
 }
 
 func TestValidateAgentControlConfig(t *testing.T) {

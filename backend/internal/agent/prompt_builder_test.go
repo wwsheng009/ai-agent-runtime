@@ -21,6 +21,15 @@ func TestPromptBuilder_BuildSubagentPrompt_IncludesParallelToolGuidance(t *testi
 	if !strings.Contains(prompt, "read-only subagent") {
 		t.Fatalf("expected read-only subagent guidance, got:\n%s", prompt)
 	}
+	for _, guidance := range []string{
+		"exactly one command per command field",
+		"shell commands array",
+		"cannot be overridden by approval or bypass_permissions",
+	} {
+		if !strings.Contains(prompt, guidance) {
+			t.Fatalf("expected read-only shell guidance %q, got:\n%s", guidance, prompt)
+		}
+	}
 }
 
 func TestPromptBuilder_BuildSubagentPrompt_IncludesRoutingMetadata(t *testing.T) {
