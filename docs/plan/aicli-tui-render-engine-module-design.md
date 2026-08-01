@@ -55,7 +55,9 @@
 - 双缓冲基础设施（`ui/viewport.Backend`，front/back diff）**已经写好但仍是 SHADOW MODE**，没有生产路径接入；
 - markdown 存在**双渲染调用点**（live band `markdown.Render(ActiveBandBodyOptions)` vs 历史 `Formatter.Format(AssistantBodyOptions)`），靠 parity 测试对齐而不是同一代码路径；
 - 流式绘制在**业务互斥锁内**执行（`ActiveStreamController.paintLinesLocked`），渲染期间输入与输出全部排队；
-- 行级直写终端（`insertHistoryLinesLocked` 硬编码 `io.WriteString(os.Stdout)`），无帧级批量 flush，多 timer 输出可交错。
+- legacy fallback 仍保留行级布局入口；native scrollback 的 handoff 已改由
+  `renderengine.HandoffPlan` + `Presenter` 聚合输出，owned direct-scroll 与历史
+  handoff 共用同一套 DECSTBM 字节生成，但补偿路径尚未完全删除。
 
 用户可观察到的三类症状——**卡顿、markdown 内容被吞、viewport/历史/ActiveBand 互相覆盖**——不是三个独立 bug，而是同一个根因：**没有一个拥有"屏幕模型 + 帧调度 + 全量对账 + 行所有权"的权威渲染模块**。
 
@@ -114,7 +116,11 @@
 
 ### 1.7 行级直写：无帧级批量输出
 
-`insertHistoryLinesLocked`（`fixed_bottom_surface.go` :4328）硬编码 `io.WriteString(os.Stdout)`，按行写；`Terminal` 方法用 `fmt.Print` 直写。对比 codex 的做法：ratatui 每帧 cell diff 后**一次**批量 flush，且由 synchronized update 包裹，杜绝交错。
+`insertHistoryLinesLocked`（`fixed_bottom_surface.go`）现在通过
+`renderengine.HandoffPlan` 生成完整 cursor-save/DECSTBM/内容/cursor-restore 序列，
+并交给 Presenter 一次批量写入；`Terminal` 的 legacy fallback 方法仍可能使用
+`fmt.Print`。对比 codex 的做法：ratatui 每帧 cell diff 后**一次**批量 flush，且由
+synchronized update 包裹，杜绝交错。
 
 ---
 
@@ -443,7 +449,7 @@ const (
 | 1 | 布局与滚动区（`applyLayoutWithSizeLocked`、`appendApplyLayoutSequenceWithSizeLocked`、`refreshTerminalDimensionsLocked`） | Composer + Presenter | 布局成为纯函数；滚动区序列由 Presenter 生成 |
 | 2 | 补偿状态机（`scrollCompensatedRows`/`pendingScrollDownRows`/`outputScrollDebtRows`/`outputCursorOnBlankRow`） | **删除** | 由 §5.3 reconcile 取代 |
 | 3 | 历史窗口（`appendHistoryWindowLocked`、`replaceOwnedHistorySuffixLocked`、`ownedHistorySuffixStartLocked`、`canRewriteOwnedHistorySuffixLocked`） | SceneState（transcript 区） + Composer | `historyWindow []string` 过渡期保留，但只作为 Scene 数据，不再参与行号计算 |
-| 4 | handoff（`commitExcessHistoryToScrollbackLocked`、`historySegmentIsSinglePhysicalRowsLocked`、`insertHistoryLinesLocked`） | HandoffFrontier + Presenter | os.Stdout 直写删除；计数与 diff 同源 |
+| 4 | handoff（`commitExcessHistoryToScrollbackLocked`、`historySegmentIsSinglePhysicalRowsLocked`、`insertHistoryLinesLocked`） | HandoffFrontier + HandoffPlan + Presenter | facade 方法暂留；ANSI 直写已移除，计数与 diff 仍需继续收敛 |
 | 5 | ActiveBand（`SetActiveBand`/`SetActiveBandStyled`/`repaintActiveBandDiffLocked`/`RefreshActiveBand`/`ClearActiveBand`/`renderActiveBandRowLocked`） | SceneState（band 区） + Composer + RenderCache | diff 渲染由 ScreenModel 驱动；`repaintActiveBandDiffLocked` 的 prev 对比逻辑删除 |
 | 6 | prompt（`SetPromptRows`/`TrackPromptInputState`/`reflowPromptViewportLocked`/`renderPromptRowsLocked`/`MoveToPromptCursor`） | SceneState（prompt 区） + Presenter | cursor 意图进入 Scene；Presenter 帧尾统一放置 cursor |
 | 7 | popup（`ShowPopup*`/`BeginPopupInputForOwner*`/`UpdatePopupInputForHandle`/`clearPopupStateLocked` 等约 20 个方法） | SceneState（popup 栈） + Composer | popup 只声明"占用 N 行"，行分配由求解器完成 |
