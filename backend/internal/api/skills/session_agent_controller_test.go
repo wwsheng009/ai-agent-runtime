@@ -1286,6 +1286,62 @@ func TestAPIControllerCompleteSupervisedRunInterruptedMapsCanceled(t *testing.T)
 	require.Equal(t, supervision.RunStatusCanceled, got.Status)
 }
 
+// TestAPIWaitAgentSnapshotAttachesExecutionRunSupervision verifies P6-2:
+// wait_agent/list_agent status snapshots expose the durable execution run
+// supervision fields (run status, attempt, deadlines, heartbeat, progress)
+// so operators can distinguish "still healthy", "waiting approval", "no
+// progress" and "being canceled" from a single view.
+func TestAPIWaitAgentSnapshotAttachesExecutionRunSupervision(t *testing.T) {
+	ctx := context.Background()
+	handler, _, _ := newAPIWakeTestHandler(t, "api-wait-run-sup")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	handler.SetSessionManager(sessionManager)
+	supervisor := handler.getExecutionSupervisor()
+	require.NotNil(t, supervisor)
+
+	// The child session must exist for snapshot() to reach the supervision
+	// enrichment path. GetOrCreate ignores the requested sessionID when the
+	// session is missing, so create the child with an explicit ID instead.
+	root, err := sessionManager.Create(ctx, "parent-sup-1")
+	require.NoError(t, err)
+	child := chat.NewSession(root.UserID)
+	child.ID = "child-sup-1"
+	require.NoError(t, sessionManager.GetStorage().Save(ctx, child))
+
+	run, err := supervisor.StartRun(ctx, supervision.RunSpec{
+		SessionID:       "child-sup-1",
+		ParentSessionID: "parent-sup-1",
+	})
+	require.NoError(t, err)
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	result, err := controller.snapshot(ctx, "child-sup-1")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, run.RunID, result.RunID)
+	assert.Equal(t, supervision.RunStatusQueued, result.RunStatus,
+		"a freshly started run is queued until the supervisor scan activates it")
+	assert.Equal(t, 1, result.Attempt)
+	assert.GreaterOrEqual(t, result.MaxAttempts, 1)
+	assert.NotEmpty(t, result.ExecutionDeadlineAt,
+		"default policy must set an execution deadline on the run")
+
+	// Progress is reflected in the snapshot after RecordExecutionProgress.
+	updated, err := supervisor.RecordProgress(ctx, supervision.RunProgressEvent{
+		RunID: run.RunID,
+		Kind:  "progress",
+	})
+	require.NoError(t, err)
+	require.True(t, updated)
+	result, err = controller.snapshot(ctx, "child-sup-1")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.NotEmpty(t, result.LastProgressAt, "progress must be visible in the snapshot")
+	assert.NotEmpty(t, result.LastHeartbeatAt)
+}
+
 func TestAPIControllerCompleteSupervisedRunNoopWithoutRun(t *testing.T) {
 	ctx := context.Background()
 	handler, store, _ := newAPIWakeTestHandler(t, "api-sup-complete-noop")

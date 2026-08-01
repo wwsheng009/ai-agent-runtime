@@ -401,6 +401,64 @@ func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T)
 	assert.Equal(t, "async final summary", result.Summary)
 }
 
+// TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast verifies P6-1: wait_team
+// returns on the durable team wake event instead of waiting for the fallback
+// poll ticker. The terminal event is written at ~100ms; the fallback ticker
+// only fires at ~1s, so a polling-only implementation would fail the timing
+// assertion below.
+func TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-wait-event-driven",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{
+		TeamStore:   store,
+		TeamPlanner: &team.LeadPlanner{},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(100 * time.Millisecond)
+		_ = store.UpdateTeamStatus(ctx, teamID, team.TeamStatusDone)
+		_, _ = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:   "team.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"status": string(team.TeamStatusDone),
+			},
+		})
+		_, _ = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:   "team.summary",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"summary": "event driven",
+			},
+		})
+	}()
+
+	started := time.Now()
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+		"team_id":    teamID,
+		"timeout_ms": 5000,
+	})
+	require.NoError(t, err)
+	<-done
+	elapsed := time.Since(started)
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	assert.True(t, result.Terminal)
+	assert.False(t, result.TimedOut)
+	assert.True(t, result.SummaryReady)
+	assert.Equal(t, "event driven", result.Summary)
+	assert.Less(t, elapsed, 900*time.Millisecond,
+		"wait_team should return on the wake event, not the fallback ticker")
+}
+
 func TestBrokerExecuteWaitTeamTimeoutReportsExecutionContinues(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()

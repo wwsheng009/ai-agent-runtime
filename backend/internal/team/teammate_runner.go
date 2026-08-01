@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
@@ -99,9 +100,13 @@ type TeammateRunner struct {
 	Context           *ContextBuilder
 	RouteResolver     TaskRouteResolver
 	RouteAudit        TaskRouteAuditSink
+	Claims            *PathClaimManager
 	ContextBudget     int
 	DigestLimit       int
 	HeartbeatInterval time.Duration
+	// LeaseTTL is the task lease length requested on each heartbeat renewal.
+	// Zero defaults to 5 minutes.
+	LeaseTTL time.Duration
 }
 
 const teammateAuxiliaryReadTimeout = 1500 * time.Millisecond
@@ -121,7 +126,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 	if strings.TrimSpace(mate.SessionID) == "" {
 		return nil, fmt.Errorf("teammate session id is required")
 	}
-	stopHeartbeat := r.startHeartbeatLoop(ctx, mate.ID)
+	stopHeartbeat := r.startHeartbeatLoop(ctx, mate.ID, task)
 	defer stopHeartbeat()
 
 	route, strictRouteFailure, routeErr := r.resolveTaskRoute(ctx, team, mate, task)
@@ -358,7 +363,7 @@ func buildStrictRouteFailureResult(route *TaskExecutionRoute, routeErr error) *T
 	}
 }
 
-func (r *TeammateRunner) startHeartbeatLoop(ctx context.Context, teammateID string) func() {
+func (r *TeammateRunner) startHeartbeatLoop(ctx context.Context, teammateID string, task Task) func() {
 	store := r.resolveStore()
 	teammateID = strings.TrimSpace(teammateID)
 	if store == nil || teammateID == "" {
@@ -367,6 +372,18 @@ func (r *TeammateRunner) startHeartbeatLoop(ctx context.Context, teammateID stri
 
 	touch := func() {
 		_ = store.UpdateTeammateHeartbeat(context.Background(), teammateID, time.Now().UTC())
+		if strings.TrimSpace(task.ID) != "" {
+			leaseTTL := r.LeaseTTL
+			if leaseTTL <= 0 {
+				leaseTTL = 5 * time.Minute
+			}
+			_, _ = NewAgentControlTaskRegistry(store).WithClaims(r.Claims).RenewAgentControlTaskLease(context.Background(), agentcontrol.TaskLeaseRenewRequest{
+				ID:           strings.TrimSpace(task.ID),
+				Workflow:     agentcontrol.WorkflowSpawnTeam,
+				LeaseUntil:   time.Now().UTC().Add(leaseTTL),
+				FencingToken: strings.TrimSpace(task.FencingToken),
+			})
+		}
 	}
 	touch()
 

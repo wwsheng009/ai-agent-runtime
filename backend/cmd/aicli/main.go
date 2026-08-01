@@ -18,6 +18,7 @@ var (
 	buildTime   = "unknown"
 	cfg         *config.Config
 	logFilePath string // AICLI 日志文件路径（命令行覆盖）
+	pprofHandle *pprofServerHandle
 )
 
 func main() {
@@ -31,6 +32,13 @@ func main() {
 	}
 
 	commands.SetChatStatusBuildInfo(version, buildTime)
+	// 向 /debug display 暴露 pprof 端点信息（未启用时显示提示）。
+	commands.RegisterChatDebugPprofProvider(func() string {
+		if pprofHandle == nil {
+			return ""
+		}
+		return pprofHandle.URL()
+	})
 
 	// 创建 root 命令
 	rootCmd := &cobra.Command{
@@ -43,6 +51,27 @@ func main() {
 		},
 	}
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// pprof 诊断端点按需启动：--pprof 或 AICLI_PPROF 环境变量显式开启，
+		// 默认监听 127.0.0.1 随机空闲端口，实际地址打印到 stderr。
+		pprofFlag, _ := rootCmd.Flags().GetBool("pprof")
+		pprofEnv := strings.TrimSpace(os.Getenv("AICLI_PPROF"))
+		pprofAddr := ""
+		if pprofFlag {
+			pprofAddr = "127.0.0.1:0" // 默认随机空闲端口
+		}
+		if pprofEnv != "" {
+			// AICLI_PPROF 可携带自定义地址；优先级高于默认随机端口。
+			pprofAddr = pprofEnv
+		}
+		if pprofAddr != "" && pprofHandle == nil {
+			handle, err := startPprofServer(pprofAddr)
+			if err != nil {
+				return fmt.Errorf("failed to start pprof server: %w", err)
+			}
+			pprofHandle = handle
+			fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled: %s\n", handle.URL())
+		}
+
 		if !shouldBootstrapConfigForCommand(cmd, args) {
 			return nil
 		}
@@ -122,6 +151,7 @@ func main() {
 	rootCmd.PersistentFlags().String("theme", "", "输出主题配色或明暗（classic|focus|contrast|mono 或 auto|dark|light；优先级: --theme > AICLI_THEME/AICLI_THEME_MODE > 配置）")
 	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
+	rootCmd.PersistentFlags().Bool("pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
 
 	// config 子命令
 	configCmd := &cobra.Command{
@@ -284,6 +314,9 @@ func main() {
 	// 执行
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
+	}
+	if pprofHandle != nil {
+		_ = pprofHandle.Close()
 	}
 }
 

@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -89,7 +90,19 @@ func (s *handlerTeamLifecycleService) runLoop(ctx context.Context, teamID string
 	if orchestrator == nil {
 		return nil
 	}
-	return orchestrator.RunWithWake(ctx, teamID, wake)
+	err := orchestrator.RunWithWake(ctx, teamID, wake)
+	if errors.Is(err, team.ErrOrchestratorLeaseHeld) {
+		// Another instance holds the durable owner lease. The loop is not
+		// broken: exit quietly and let the next reconcile attempt re-check,
+		// which is how a live backup instance takes over after a crash.
+		s.publishSupervisorEvent(teamsupervisor.Event{
+			Type:   "team.orchestrator.owner_lease_held",
+			TeamID: teamID,
+			Reason: "durable_owner_lease_held_by_another_instance",
+		})
+		return nil
+	}
+	return err
 }
 
 func (s *handlerTeamLifecycleService) SyncLoops() {

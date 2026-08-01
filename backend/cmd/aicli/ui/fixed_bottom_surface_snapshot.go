@@ -77,6 +77,30 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		// is retained and replayed by the release repaint.
 		return
 	}
+	s.stageOwnedFrameLocked()
+	if diff := s.viewportBackend.Flush(); diff != "" {
+		if s.presenter != nil {
+			s.presenter.FlushHoldingLock(os.Stdout, func(w io.Writer) {
+				_, _ = io.WriteString(w, diff)
+			})
+		} else {
+			fmt.Print(diff)
+		}
+		s.ownedFrameFlushCount++
+	}
+}
+
+// stageOwnedFrameLocked materializes the complete application-owned frame
+// into the double-buffer back plane without emitting bytes. It is shared by
+// the full-frame paint (renderOwnedViewportLocked) and the direct-scroll
+// append path (appendOwnedDirectPaintLocked), which stages the same frame but
+// commits the already-scrolled history rows silently before flushing so only
+// the bottom pane delta is emitted. Callers hold the surface lock and the
+// terminal write lock.
+func (s *FixedBottomSurface) stageOwnedFrameLocked() {
+	if s == nil || s.terminal == nil || !s.enabled || !s.ownedViewport {
+		return
+	}
 	width, height := s.terminal.Width(), s.terminal.Height()
 	if width < 1 {
 		width = 80
@@ -111,16 +135,6 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 	plan := s.composedPlanLocked(width, height)
 	s.lastRowOwners = planOwnersCopy(plan)
 	s.viewportBackend.StageFrame(viewport.PlanCells(plan))
-	if diff := s.viewportBackend.Flush(); diff != "" {
-		if s.presenter != nil {
-			s.presenter.FlushHoldingLock(os.Stdout, func(w io.Writer) {
-				_, _ = io.WriteString(w, diff)
-			})
-		} else {
-			fmt.Print(diff)
-		}
-		s.ownedFrameFlushCount++
-	}
 }
 
 // composedPlanLocked builds the full-screen owned frame (history + bottom
@@ -320,54 +334,6 @@ func appendBlankHistoryRow(rows [][]vt.Cell, width int) [][]vt.Cell {
 	return withBlank
 }
 
-// appendOwnedHistoryRestoreForShrinkLocked replaces the visible output region
-// from the retained transcript instead of asking the terminal to scroll it
-// down. CSI T can only insert blank rows; it cannot recover history that reserve
-// growth already pushed into native scrollback.
-//
-// The restore is deliberately all-or-nothing. If the logical tail is partial or
-// the retained physical rows cannot cover the complete output region, callers
-// must keep the legacy scroll-down fallback rather than overwrite foreign or
-// uncaptured terminal history.
-func (s *FixedBottomSurface) appendOwnedHistoryRestoreForShrinkLocked(builder *strings.Builder) bool {
-	if s == nil || s.terminal == nil || builder == nil || s.pendingScrollDownRows < 1 || s.historyPartial {
-		return false
-	}
-	width, height := s.terminal.Width(), s.terminal.Height()
-	if width < 1 {
-		width = 80
-	}
-	if height <= 1 {
-		return false
-	}
-	outputRows := outputBottomRowForHeight(height, s.effectiveBottomRowsLocked(height))
-	if outputRows < 1 {
-		return false
-	}
-	history := s.historyRowsSnapshotLocked()
-	// Match historyRowsWithCursorBlankLocked: only materialize the parking blank
-	// when it fits. A full content fill that ended with "\n" keeps the blank as
-	// a logical absorb flag without pushing the oldest retained row out of the
-	// restore window.
-	if (s.outputCursorOnBlankRow || s.outputScrollDebtRows > 0) && len(history) < outputRows {
-		history = appendBlankHistoryRow(history, width)
-	}
-	if len(history) < outputRows {
-		return false
-	}
-
-	backend := viewport.New(width, outputRows)
-	backend.StageFrame(viewport.Compose(width, outputRows, history, nil))
-	backend.Invalidate()
-	builder.WriteString(backend.Flush())
-
-	if s.outputCursorOnBlankRow || s.outputScrollDebtRows > 0 {
-		s.outputCursorOnBlankRow = true
-		s.outputScrollDebtRows = 0
-	}
-	return true
-}
-
 func (s *FixedBottomSurface) bottomRowsSnapshotLocked() [][]vt.Cell {
 	return viewport.PlanCells(s.bottomRowsWithOwnersLocked())
 }
@@ -543,8 +509,8 @@ func (s *FixedBottomSurface) popupPaintPlanLocked(state BottomPaneState, height 
 			break
 		}
 		plan.rows = append(plan.rows, fixedBottomPaintRow{
-			row:  row,
-			text: truncateFixedPopupLine(line, s.terminal.Width()),
+			row:   row,
+			text:  truncateFixedPopupLine(line, s.terminal.Width()),
 			owner: viewport.RowOwnerPopup,
 		})
 	}
@@ -552,8 +518,8 @@ func (s *FixedBottomSurface) popupPaintPlanLocked(state BottomPaneState, height 
 		row := plan.startRow + len(visibleLines)
 		if row < s.statusRowLocked() {
 			plan.rows = append(plan.rows, fixedBottomPaintRow{
-				row:  row,
-				text: truncateFixedPopupLine(composer, s.terminal.Width()),
+				row:   row,
+				text:  truncateFixedPopupLine(composer, s.terminal.Width()),
 				owner: viewport.RowOwnerPopup,
 			})
 		}
@@ -629,8 +595,8 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 				styledLine = &styled[i]
 			}
 			plan.rows = append(plan.rows, fixedBottomPaintRow{
-				row:  activeStart + i,
-				text: formatActiveBandPaintRow(band[i], styledLine, width, themeContext),
+				row:   activeStart + i,
+				text:  formatActiveBandPaintRow(band[i], styledLine, width, themeContext),
 				owner: viewport.RowOwnerBand,
 			})
 		}
@@ -655,8 +621,8 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 	}
 	if dynamicRows > 0 && state.DynamicStatusModel != nil {
 		plan.rows = append(plan.rows, fixedBottomPaintRow{
-			row:  dynamicStart,
-			text: formatFixedStatusModelWithContext(*state.DynamicStatusModel, width, themeContext),
+			row:   dynamicStart,
+			text:  formatFixedStatusModelWithContext(*state.DynamicStatusModel, width, themeContext),
 			owner: viewport.RowOwnerStatus,
 		})
 	}

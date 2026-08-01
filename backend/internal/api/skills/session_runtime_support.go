@@ -2445,7 +2445,53 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 			}
 		}
 	}
+	c.enrichExecutionRunSupervision(ctx, result)
 	return result, nil
+}
+
+// enrichExecutionRunSupervision attaches the durable execution run supervision
+// fields (P6-2) to a status snapshot: run status, attempt, deadlines, heartbeat
+// and progress timestamps. Best-effort: an absent run store or run record
+// leaves the fields empty without failing the snapshot.
+func (c *sessionAgentController) enrichExecutionRunSupervision(ctx context.Context, result *toolbroker.AgentStatusResult) {
+	if result == nil || result.SessionID == "" || c == nil || c.handler == nil {
+		return
+	}
+	supervisor := c.handler.getExecutionSupervisor()
+	if supervisor == nil || supervisor.Store == nil {
+		return
+	}
+	runs, err := supervisor.Store.ListExecutionRunsBySession(ctx, strings.TrimSpace(result.SessionID), 1)
+	if err != nil || len(runs) == 0 {
+		return
+	}
+	run := runs[0]
+	result.RunID = strings.TrimSpace(run.RunID)
+	result.RunStatus = strings.TrimSpace(run.Status)
+	result.Attempt = run.Attempt
+	result.MaxAttempts = run.MaxAttempts
+	result.RunOwnerID = strings.TrimSpace(run.OwnerID)
+	result.ExecutionDeadlineAt = formatSupervisionTimePtr(run.ExecutionDeadlineAt)
+	result.ProgressDeadlineAt = formatSupervisionTimePtr(run.ProgressDeadlineAt)
+	result.CancelDeadlineAt = formatSupervisionTimePtr(run.CancelDeadlineAt)
+	result.LastHeartbeatAt = formatSupervisionTime(run.LastHeartbeatAt)
+	result.LastProgressAt = formatSupervisionTime(run.LastProgressAt)
+}
+
+// formatSupervisionTime serializes a supervision timestamp for JSON status.
+func formatSupervisionTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// formatSupervisionTimePtr serializes an optional supervision timestamp.
+func formatSupervisionTimePtr(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 func (c *sessionAgentController) enrichAgentTeamProjection(ctx context.Context, session *chat.Session, result *toolbroker.AgentStatusResult) error {

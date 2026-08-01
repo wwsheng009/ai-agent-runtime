@@ -2,10 +2,12 @@ package team
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
@@ -27,6 +29,19 @@ type Orchestrator struct {
 	TickInterval           time.Duration
 	Clock                  func() time.Time
 	ExpertConcurrencyLimit int
+	// OwnerID is this instance's durable orchestrator owner identity. When
+	// empty, a random identity is minted per RunWithWake call.
+	OwnerID string
+	// OwnerInstance is an optional process/instance label recorded in the
+	// owner lease for diagnostics.
+	OwnerInstance string
+	// OwnerLeaseTTL is the team owner lease duration. Defaults to
+	// DefaultOrchestratorLeaseTTL.
+	OwnerLeaseTTL time.Duration
+
+	// Runtime owner lease state populated by RunWithWake.
+	ownerID    string
+	ownerToken string
 }
 
 // NewOrchestrator builds a team orchestrator with defaults.
@@ -62,6 +77,42 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	leaseTTL := o.OwnerLeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultOrchestratorLeaseTTL
+	}
+	ownerID := strings.TrimSpace(o.OwnerID)
+	if ownerID == "" {
+		ownerID = uuid.NewString()
+	}
+	lease, acquired, err := o.Store.AcquireOrchestratorLease(ctx, OrchestratorLease{
+		TeamID:        teamID,
+		OwnerID:       ownerID,
+		OwnerInstance: o.OwnerInstance,
+		FencingToken:  o.ownerToken,
+	}, leaseTTL)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	if !acquired || lease == nil {
+		return ErrOrchestratorLeaseHeld
+	}
+	o.ownerID = ownerID
+	o.ownerToken = lease.FencingToken
+	renewInterval := leaseTTL / 3
+	if renewInterval <= 0 {
+		renewInterval = time.Second
+	}
+	nextRenewAt := o.clockNow().Add(renewInterval)
+	defer func() {
+		if o.ownerToken != "" {
+			_ = o.Store.ReleaseOrchestratorLease(context.Background(), teamID, ownerID, o.ownerToken)
+		}
+	}()
 
 	var (
 		mailboxWake     <-chan agentcontrol.MailboxWakeEvent
@@ -107,6 +158,22 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	}
 
 	for {
+		now := o.clockNow()
+		if now.After(nextRenewAt) {
+			renewed, err := o.Store.RenewOrchestratorLease(ctx, teamID, ownerID, o.ownerToken, leaseTTL)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if !IsSQLiteLockError(err) {
+					return err
+				}
+			} else if !renewed {
+				return ErrOrchestratorLeaseLost
+			} else {
+				nextRenewAt = o.clockNow().Add(renewInterval)
+			}
+		}
 		locked := false
 		team, err := o.Store.GetTeam(ctx, teamID)
 		if err != nil {
@@ -120,6 +187,10 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 		} else if team == nil || team.Status != TeamStatusActive {
 			return nil
 		} else if err := o.tick(ctx, teamID); err != nil {
+			if errors.Is(err, agentcontrol.ErrOrchestratorOwnerMismatch) {
+				// A newer owner holds the lease: stop scheduling entirely.
+				return ErrOrchestratorLeaseLost
+			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -127,6 +198,19 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 				return err
 			}
 			locked = true
+		} else if o.ownerToken != "" {
+			if err := o.Store.MarkOrchestratorTickSuccess(ctx, teamID, o.ownerToken); err != nil {
+				if errors.Is(err, ErrOrchestratorLeaseLost) {
+					return ErrOrchestratorLeaseLost
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if !IsSQLiteLockError(err) {
+					return err
+				}
+				locked = true
+			}
 		}
 		if locked {
 			select {
@@ -215,6 +299,13 @@ func (o *Orchestrator) lastAgentControlTaskWakeSeq(ctx context.Context, teamID s
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		TeamID:   teamID,
 	})
+}
+
+func (o *Orchestrator) clockNow() time.Time {
+	if o != nil && o.Clock != nil {
+		return o.Clock().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (o *Orchestrator) agentControlTaskWakeSource() agentcontrol.TaskWakeSource {
@@ -407,7 +498,7 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		return expertSlots > 0
 	}
 
-	claimAssignment := func(task Task, mate Teammate) bool {
+	claimAssignment := func(task Task, mate Teammate) (bool, error) {
 		leaseUntil := time.Now().UTC().Add(leaseDuration)
 		claimRequest := agentcontrol.TaskClaimRequest{
 			ID:              task.ID,
@@ -416,6 +507,8 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 			Assignee:        mate.ID,
 			LeaseUntil:      leaseUntil,
 			ExpectedVersion: task.Version,
+			OwnerID:         o.ownerID,
+			OwnerToken:      o.ownerToken,
 		}
 		if o.Claims != nil {
 			claimRequest.UsePathClaims = true
@@ -423,9 +516,16 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 			claimRequest.ReadPaths = task.ReadPaths
 			claimRequest.WritePaths = task.WritePaths
 		}
-		_, claimed, err := taskClaimWriter.ClaimAgentControlTask(ctx, claimRequest)
-		if err != nil || !claimed {
-			return false
+		record, claimed, err := taskClaimWriter.ClaimAgentControlTask(ctx, claimRequest)
+		if err != nil {
+			return false, err
+		}
+		if !claimed {
+			return false, nil
+		}
+		if record != nil {
+			task.Attempt = record.Attempt
+			task.FencingToken = record.FencingToken
 		}
 		if !claimRequest.UsePathClaims {
 			_ = o.Store.UpdateTeammateState(ctx, mate.ID, TeammateStateBusy)
@@ -438,7 +538,7 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		if expertSlots > 0 && isExpertTask(task) {
 			expertSlots--
 		}
-		return true
+		return true, nil
 	}
 
 	for _, task := range pinned {
@@ -459,7 +559,9 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		if !canAssignExpert(task) {
 			continue
 		}
-		_ = claimAssignment(task, mate)
+		if _, err := claimAssignment(task, mate); err != nil {
+			return nil, err
+		}
 	}
 
 	available := make([]Teammate, 0, len(idle))
@@ -503,7 +605,9 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		if !canAssignExpert(assignment.Task) {
 			continue
 		}
-		_ = claimAssignment(assignment.Task, assignment.Teammate)
+		if _, err := claimAssignment(assignment.Task, assignment.Teammate); err != nil {
+			return nil, err
+		}
 	}
 
 	return assignments, nil

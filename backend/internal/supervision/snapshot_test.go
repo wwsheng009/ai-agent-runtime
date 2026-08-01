@@ -197,3 +197,115 @@ func TestSnapshot_Clock(t *testing.T) {
 	after := timeNow()
 	require.False(t, after.Before(before))
 }
+
+// TestBuildSnapshot_AttachesExecutionRunFields verifies P6-3: snapshot items
+// for agent sessions carry the durable execution run supervision fields
+// (run id/status, attempt, deadlines, heartbeat and progress timestamps) so
+// operators can judge health from a single view.
+func TestBuildSnapshot_AttachesExecutionRunFields(t *testing.T) {
+	store := newTestStore(t, "supervision-snapshot-run-fields")
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	created, err := store.CreateExecutionRun(ctx, ExecutionRun{
+		RunID:               "run_snap_1",
+		Kind:                RunKindAgentRun,
+		Workflow:            RunWorkflowSpawnAgent,
+		SessionID:           "child-run-snap",
+		AgentID:             "child-run-snap",
+		Attempt:             2,
+		MaxAttempts:         3,
+		Status:              RunStatusRunning,
+		OwnerID:             "owner-1",
+		StartedAt:           now,
+		LastHeartbeatAt:     now.Add(-5 * time.Second),
+		LastProgressAt:      now.Add(-30 * time.Second),
+		ExecutionDeadlineAt: timePtr(now.Add(60 * time.Second)),
+		ProgressDeadlineAt:  timePtr(now.Add(45 * time.Second)),
+		ApprovalDeadlineAt:  timePtr(now.Add(120 * time.Second)),
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	provider := &fakeDescendantProvider{items: []DescendantState{
+		{
+			Kind:               SubjectAgentSession,
+			ID:                 "child-run-snap",
+			ExecutionStatus:    "running",
+			SupervisionState:   SupervisionRunning,
+			HeartbeatAgeMs:     5000,
+			ProgressAgeMs:      30000,
+			ExecutionDeadlineAt: timePtr(now.Add(60 * time.Second)),
+		},
+	}}
+
+	snapshot, err := BuildSnapshot(ctx, store, SnapshotRequest{
+		Scope:    Scope{RootSessionID: "root-session-1"},
+		Provider: provider,
+	})
+	require.NoError(t, err)
+	require.Len(t, snapshot.Descendants, 1)
+
+	item := snapshot.Descendants[0]
+	require.Equal(t, "run_snap_1", item.RunID)
+	require.Equal(t, RunStatusRunning, item.RunStatus)
+	require.Equal(t, 2, item.Attempt)
+	require.Equal(t, 3, item.MaxAttempts)
+	require.Equal(t, "owner-1", item.RunOwnerID)
+	require.NotNil(t, item.ProgressDeadlineAt)
+	require.NotNil(t, item.ApprovalDeadlineAt)
+	require.NotNil(t, item.ExecutionDeadlineAt)
+	require.NotNil(t, item.LastHeartbeatAt)
+	require.NotNil(t, item.LastProgressAt)
+	require.Equal(t, int64(5000), item.HeartbeatAgeMs)
+}
+
+func timePtr(t time.Time) *time.Time {
+	return &t
+}
+
+// TestBuildSnapshot_AfterSeqCursor verifies the durable sequence cursor
+// (doc 6.2 / P6-5): SnapshotSeq is the high-water mark of observed event
+// sequences, NextSeq echoes it for catch-up, and the cursor never moves
+// backwards below AfterSeq so a watcher can resume losslessly.
+func TestBuildSnapshot_AfterSeqCursor(t *testing.T) {
+	store := newTestStore(t, "supervision-snapshot-cursor")
+	ctx := context.Background()
+
+	old := testNotification("child-old", 10)
+	old.SupervisionState = SupervisionTimedOut
+	_, err := store.UpsertNotification(ctx, old)
+	require.NoError(t, err)
+
+	recent := testNotification("child-recent", 20)
+	recent.SupervisionState = SupervisionTimedOut
+	_, err = store.UpsertNotification(ctx, recent)
+	require.NoError(t, err)
+
+	provider := &fakeDescendantProvider{items: []DescendantState{
+		{Kind: SubjectAgentRun, ID: "child-old", ExecutionStatus: "running", SupervisionState: SupervisionTimedOut},
+		{Kind: SubjectAgentRun, ID: "child-recent", ExecutionStatus: "running", SupervisionState: SupervisionTimedOut},
+	}}
+
+	// Watcher already saw seq 15: high-water must still advance to 20.
+	snapshot, err := BuildSnapshot(ctx, store, SnapshotRequest{
+		Scope:    Scope{RootSessionID: "root-session-1"},
+		AfterSeq: 15,
+		Provider: provider,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(20), snapshot.SnapshotSeq)
+	require.Equal(t, int64(20), snapshot.NextSeq)
+
+	// Watcher ahead of the store: cursor must not move backwards.
+	ahead, err := BuildSnapshot(ctx, store, SnapshotRequest{
+		Scope:    Scope{RootSessionID: "root-session-1"},
+		AfterSeq: 25,
+		Provider: provider,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(25), ahead.SnapshotSeq)
+	require.Equal(t, int64(25), ahead.NextSeq)
+}

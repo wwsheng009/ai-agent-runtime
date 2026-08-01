@@ -128,20 +128,11 @@ type FixedBottomSurface struct {
 	popupRenderedGapRows   int
 	popupRenderedStartRow  int
 	popupReservedRows      int
-	scrollCompensatedRows  int
-	pendingScrollDownRows  int
 	// outputCursorOnBlankRow is true when the last WriteOutput ended on a
 	// trailing newline, leaving the output-region cursor on an empty row.
 	// Band/popup growth must consume that blank instead of scrolling it into
 	// a permanent gap above the reserved bottom pane.
 	outputCursorOnBlankRow bool
-	// outputScrollDebtRows counts rows that bottom-reserve growth absorbed from
-	// the trailing blank output row. Absorbing keeps the transcript adjacent to
-	// the reserved band, but it also parks committed content on the output
-	// bottom row, which is the row every writer targets. The debt must be paid
-	// with a scroll before the next byte reaches the output region, otherwise
-	// that write overwrites the last committed transcript line.
-	outputScrollDebtRows int
 	// historyWindow is the P5.2b/P5.3 owned-viewport foundation: the logical
 	// committed transcript lines (styled source) captured from every scrollback
 	// write. It is normally bounded to historyWindowMaxLines, but may temporarily
@@ -360,10 +351,7 @@ func (s *FixedBottomSurface) Disable() {
 	// Stop framing writes once the surface is torn down so any later plain output
 	// path is not wrapped in a dangling synchronized update.
 	SetTerminalSynchronizedFrames(false)
-	s.scrollCompensatedRows = 0
-	s.pendingScrollDownRows = 0
 	s.outputCursorOnBlankRow = false
-	s.outputScrollDebtRows = 0
 	s.invalidateSoftOutputLocked()
 	s.resetOwnedHistoryLocked()
 }
@@ -451,14 +439,9 @@ func (s *FixedBottomSurface) Enabled() bool {
 //
 // On the production owned path this is a pure recompose: historyWindow + bottom
 // band are painted together and no CSI-T shrink / absorb-scroll debt exists.
-// On the legacy capability-fallback path it still flushes pendingScrollDownRows
-// and outputScrollDebtRows so ClearPrompt layout debt is not attached to the
-// first content WriteOutput.
-//
-// Legacy blank-row bookkeeping is left to the flushes themselves: paying absorb
-// debt parks the cursor on a fresh blank row, and a debt-less settle must keep
-// an existing trailing blank so soft rewrites still compute the soft-tail start
-// correctly.
+// On the legacy capability-fallback path it still re-applies layout and parks
+// the cursor at the output region so ClearPrompt layout debt is not attached to
+// the first content WriteOutput.
 func (s *FixedBottomSurface) SettleOutputDebt() {
 	if s == nil || s.terminal == nil {
 		return
@@ -483,11 +466,6 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 			return
 		}
 		s.applyLayoutLocked()
-		s.flushPendingOutputScrollDownLocked()
-		// Absorbed rows are live-only geometry debt as well: pay them here so
-		// the first history write starts from the canonical state (transcript
-		// above, blank region bottom row as the write position).
-		s.flushOutputScrollDebtLocked()
 		s.moveToOutputLocked()
 	})
 }
@@ -646,11 +624,7 @@ func (s *FixedBottomSurface) BeginOutput() {
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		// Raw writers (fmt.Println after beginDirectInteractiveOutput) paint at
-		// the cursor this call parks. A pending absorb debt means that row still
-		// holds committed content, so it has to be scrolled first. The deferred
-		// shrink compensation stays untouched: it is only safe once the freed
-		// rows above the prompt have been repainted.
-		s.flushOutputScrollDebtLocked()
+		// the cursor this call parks.
 		s.moveToOutputLocked()
 	})
 }
@@ -756,14 +730,30 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 			s.appendHistoryWindowLocked(text)
 			n = len(output)
 			s.outputCursorOnBlankRow = strings.HasSuffix(output, "\n")
-			s.outputScrollDebtRows = 0
-			s.pendingScrollDownRows = 0
 			if s.leaseID != 0 {
 				// Lease active: retain state only; the release repaint
 				// flushes the frame.
 				return
 			}
-			s.renderOwnedViewportLocked()
+			if s.shouldAppendDirectLocked() {
+				// History now exceeds the visible region: write through the native
+				// scroll region (log-style natural scrolling) instead of a
+				// full-frame repaint. If the rewriteable soft tail no longer fits
+				// the scroll region, drop soft ownership so reflow cannot rewrite
+				// rows that scrolled off screen.
+				if trackSoft && s.softOutputValid {
+					height := s.terminal.Height()
+					if height < 1 {
+						height = 24
+					}
+					if len(s.softOutputLines) > s.directScrollRegionRowsLocked(height) {
+						s.invalidateSoftOutputLocked()
+					}
+				}
+				s.appendOwnedDirectPaintLocked(writer, output)
+			} else {
+				s.renderOwnedViewportLocked()
+			}
 			// Live TTY paint already went through the double-buffer above. Mirror
 			// plain text only to non-stdout writers so buffer/file capture paths
 			// (and tests that assert irreversible scrollback bytes) still see
@@ -782,13 +772,10 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 			return
 		}
 		s.applyLayoutLocked()
-		s.flushPendingOutputScrollDownLocked()
-		s.flushOutputScrollDebtLocked()
 		s.moveToOutputLocked()
 		output := normalizeFixedSurfaceOutputText(text)
 		n, err = io.WriteString(writer, output)
 		if n > 0 {
-			s.markOutputWrittenLocked()
 			fullWrite := err == nil && n == len(output)
 			if fullWrite {
 				if trackSoft {
@@ -819,6 +806,88 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 		s.restoreStoredPromptCursorLocked()
 	})
 	return n, err, true
+}
+
+// shouldAppendDirectLocked reports whether the committed history now exceeds
+// the visible scroll region, in which case newly written rows should go
+// through the native scroll region (log-style natural scrolling) instead of a
+// full-frame repaint. The history model must already include the pending
+// write (appendHistoryWindowLocked ran before this check).
+func (s *FixedBottomSurface) shouldAppendDirectLocked() bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	height := s.terminal.Height()
+	if height < 1 {
+		height = 24
+	}
+	return len(s.expandHistoryLinesLocked(s.historyWindow)) > s.directScrollRegionRowsLocked(height)
+}
+
+// directScrollRegionRowsLocked returns the number of rows available for
+// natural log scrolling: the output region minus the ActiveBand rows that
+// stay anchored above the prompt. The band is excluded from the scroll region
+// so a commit scroll never displaces the live stream viewport.
+func (s *FixedBottomSurface) directScrollRegionRowsLocked(height int) int {
+	regionBottom := outputBottomRowForHeight(height, s.bottomRowsLocked()) - s.bottomPaneStateLocked().activeBandVisibleRowCount()
+	if regionBottom < 1 {
+		regionBottom = 1
+	}
+	return regionBottom
+}
+
+// appendOwnedDirectPaintLocked writes committed rows through the native
+// scroll region so the terminal scrolls naturally like a log once history
+// exceeds the visible region: each \r\n parks at the region bottom and
+// scrolls the region up one row before the row content is written, exactly
+// like insertHistoryLinesLocked. After the scroll the full frame is staged
+// and the scrolled history rows are committed silently (CommitRange) so the
+// following flush only emits the bottom-pane delta (ActiveBand/prompt/status)
+// instead of repainting the transcript. Callers hold the surface lock and the
+// terminal write lock.
+func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, output string) {
+	if s == nil || s.terminal == nil || output == "" {
+		return
+	}
+	height := s.terminal.Height()
+	if height < 1 {
+		height = 24
+	}
+	regionBottom := s.directScrollRegionRowsLocked(height)
+	var builder strings.Builder
+	// Scroll region covers the history area only; ActiveBand and the bottom
+	// band stay fixed below it.
+	builder.WriteString(terminalScrollRegionSequence(1, regionBottom))
+	builder.WriteString(terminalMoveToSequence(regionBottom, 1))
+	rows := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	for _, row := range rows {
+		builder.WriteString("\r\n")
+		builder.WriteString(row)
+	}
+	builder.WriteString(terminalResetScrollRegionSequence(height))
+	WithTerminalWriteLock(func() {
+		_, _ = io.WriteString(os.Stdout, builder.String())
+	})
+	if writer != os.Stdout {
+		_, _ = io.WriteString(writer, builder.String())
+	}
+	// Mirror the scroll into the double buffer: stage the full new frame,
+	// then mark the already-scrolled history rows as committed so Flush only
+	// emits the bottom-pane delta.
+	s.stageOwnedFrameLocked()
+	if s.viewportBackend != nil {
+		s.viewportBackend.CommitRange(1, regionBottom)
+		if diff := s.viewportBackend.Flush(); diff != "" {
+			if s.presenter != nil {
+				s.presenter.FlushHoldingLock(os.Stdout, func(w io.Writer) {
+					_, _ = io.WriteString(w, diff)
+				})
+			} else {
+				fmt.Print(diff)
+			}
+			s.ownedFrameFlushCount++
+		}
+	}
 }
 
 // SoftOutputTailValid reports whether the surface still owns a rewriteable
@@ -986,7 +1055,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		// guarantees the rewritten suffix itself remains mutable.
 		s.commitExcessHistoryToScrollbackLocked()
 		s.outputCursorOnBlankRow = false
-		s.outputScrollDebtRows = 0
 		if s.leaseID != 0 {
 			// Retain the rewritten soft tail without touching the alternate
 			// screen. Release will repaint the latest owned frame.
@@ -1001,7 +1069,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 	var rewritten bool
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
-		s.flushPendingOutputScrollDownLocked()
 		if prevStart < 1 {
 			s.invalidateSoftOutputLocked()
 			rewritten = false
@@ -1023,7 +1090,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			s.softOutputTrimmed = false
 			s.softOutputPartial = false
 			s.outputCursorOnBlankRow = false
-			s.outputScrollDebtRows = 0
 			s.restoreStoredPromptCursorLocked()
 			rewritten = true
 			return
@@ -1051,10 +1117,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		s.softOutputTrimmed = false
 		s.softOutputPartial = false
 		s.outputCursorOnBlankRow = true
-		// The trailing newline above re-parks the cursor on a blank region
-		// bottom row, which is exactly what an absorb debt owed.
-		s.outputScrollDebtRows = 0
-		s.markOutputWrittenLocked()
 		s.restoreStoredPromptCursorLocked()
 		rewritten = true
 	})
@@ -1297,6 +1359,19 @@ func (s *FixedBottomSurface) visibleOutputRowsForTest() int {
 	return s.visibleOutputRowsLocked()
 }
 
+// VisibleOutputRows returns the number of terminal rows the owned viewport can
+// display before excess committed output must be handed off to native
+// scrollback. Returns 0 when the surface is not enabled, so callers (for
+// example command result rendering) can skip overflow hints.
+func (s *FixedBottomSurface) VisibleOutputRows() int {
+	if s == nil || !s.enabled {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.visibleOutputRowsLocked()
+}
+
 func (s *FixedBottomSurface) ShowPrompt(line string) bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -1392,7 +1467,6 @@ func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -1624,9 +1698,6 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		// Freed band rows are already cleared here, so a deferred shrink
-		// compensation can safely pull the transcript down to the prompt.
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		} else {
@@ -1687,13 +1758,11 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 			defer s.terminal.RestoreCursor()
 		}
 
-		// Emit geometry contraction, stale-pixel cleanup and scroll-down as one
-		// write. This avoids exposing a cleared 14-row band to a later output
-		// write before the transcript has been pulled into the released space.
+		// Emit geometry contraction and stale-pixel cleanup as one write so a
+		// later output write never paints into the cleared band rows.
 		var transition strings.Builder
 		s.appendApplyLayoutSequenceLocked(&transition)
 		appendClearRowsSequence(&transition, oldStart, oldRows)
-		s.appendPendingOutputScrollDownLocked(&transition)
 		if transition.Len() > 0 {
 			fmt.Print(transition.String())
 		}
@@ -2439,10 +2508,6 @@ func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		// Removing the dynamic status row grows the output region just like
-		// releasing ActiveBand. Flush only after its stale pixels are cleared,
-		// otherwise the newly moved transcript row can be erased again.
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -2832,72 +2897,6 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *st
 	if width == lastWidth && height == lastHeight && bottomRows == lastBottomRows {
 		return
 	}
-	sameSize := width == lastWidth && height == lastHeight
-	compensatedRows := s.scrollCompensatedRows
-	switch {
-	case sameSize && compensatedRows > 0 && bottomRows > compensatedRows:
-		// A pending shrink compensation cancels out an immediate re-growth:
-		// content never moved down, so it must not be scrolled up twice.
-		growth := bottomRows - compensatedRows
-		if s.pendingScrollDownRows > 0 {
-			canceled := s.pendingScrollDownRows
-			if canceled > growth {
-				canceled = growth
-			}
-			s.pendingScrollDownRows -= canceled
-			growth -= canceled
-		}
-		scrollGrowth := growth
-		// WriteOutput("...\n") leaves the cursor on an empty output row. The
-		// first reserved row can occupy that blank directly; scrolling it up
-		// would open a permanent hole between scrollback and the active band
-		// (or popup) during a single reply — most visible when the band jumps
-		// toward ActiveBandMaxRows on a tall terminal.
-		if scrollGrowth > 0 && s.outputCursorOnBlankRow {
-			scrollGrowth--
-			s.outputCursorOnBlankRow = false
-			// The absorbed row leaves committed content sitting on the new
-			// output bottom row. Record the debt so the next writer scrolls
-			// before it paints over that line.
-			s.outputScrollDebtRows++
-		}
-		if scrollGrowth > 0 {
-			// When a trailing blank is absorbed, scrollGrowth == growth-1 and
-			// (bottomRows-scrollGrowth) is one past the true previous bottom:
-			// the scroll region ends on the last content row so the blank row
-			// becomes the first newly reserved row instead of a hole above it.
-			// Without absorption, scrollGrowth == growth and this equals the
-			// real previous bottomRows.
-			appendOutputScrollUpForBottomReserveGrowthSequence(builder, height, bottomRows-scrollGrowth, bottomRows)
-		}
-		s.scrollCompensatedRows = bottomRows
-	case sameSize && compensatedRows > 0 && bottomRows < compensatedRows:
-		// Freed reserve rows (a released active band, a closed popup) would
-		// otherwise stay blank between the last committed output line and the
-		// prompt. The scroll itself is deferred until the stale rows above the
-		// prompt have been cleared, so a repaint cannot erase moved content.
-		s.pendingScrollDownRows += compensatedRows - bottomRows
-		s.scrollCompensatedRows = bottomRows
-		// The freed rows sit below the output region bottom, so a repaint only
-		// touches reserved rows. A trailing blank row that belongs to the
-		// transcript stays inside the region and travels with it when the
-		// deferred scroll-down runs, so it must remain absorbable: clearing the
-		// marker here made the next reserve growth scroll that blank up again
-		// and left a second empty row between the transcript and the prompt.
-	case !sameSize || compensatedRows <= 0:
-		s.pendingScrollDownRows = 0
-		s.scrollCompensatedRows = bottomRows
-		s.outputCursorOnBlankRow = false
-		// An absorbed row is described by absolute geometry ("committed content
-		// now sits on the output bottom row"). A resize invalidates that just
-		// like it invalidates a deferred shrink: the terminal reflows rows on
-		// its own, so paying the debt afterwards would scroll for a blank row
-		// that no longer exists and push a real line off the top.
-		s.outputScrollDebtRows = 0
-		// Soft tail stays valid across resize so source-backed reflow can
-		// rewrite it in place. Callers invalidate explicitly when reflow is
-		// impossible (trimmed window, missing source, or scroll-away).
-	}
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = bottomRows
@@ -2928,14 +2927,10 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 			s.commitExcessHistoryToScrollbackLocked()
 		}
 	}
-	// Owned frames recompose history+bottom from application state, so the
-	// legacy scroll-compensation bookkeeping is inert. Only a real terminal
-	// resize invalidates the trailing-blank marker: band/popup grow-shrink must
-	// keep it so Compose can restore the owned transcript tail.
-	s.scrollCompensatedRows = 0
-	s.pendingScrollDownRows = 0
+	// Only a real terminal resize invalidates the trailing-blank marker:
+	// band/popup grow-shrink must keep it so Compose can restore the owned
+	// transcript tail.
 	if sizeChanged {
-		s.outputScrollDebtRows = 0
 		s.outputCursorOnBlankRow = false
 	}
 	// Owned frames address absolute rows and must not inherit a narrower legacy
@@ -2961,119 +2956,6 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	if sizeChanged || bottomChanged {
 		s.viewportBackend.Invalidate()
 	}
-}
-
-// appendPendingOutputScrollDownLocked flushes a deferred bottom-reserve shrink
-// compensation. Callers must invoke it only after the freed rows above the
-// prompt have been cleared or repainted, otherwise the moved output lines would
-// be erased again. BeginOutput must not flush: it only positions the cursor and
-// may be followed by another transient popup instead of real output.
-func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *strings.Builder) {
-	if s == nil || s.terminal == nil || builder == nil || s.pendingScrollDownRows < 1 {
-		return
-	}
-	// Production owned path never accumulates pendingScrollDownRows
-	// (applyOwnedViewportGeometryLocked clears them). Keep the legacy
-	// restore/scroll-down path only for capability-fallback surfaces.
-	if s.ownedViewport {
-		s.pendingScrollDownRows = 0
-		return
-	}
-	rows := s.pendingScrollDownRows
-	if s.appendOwnedHistoryRestoreForShrinkLocked(builder) {
-		s.pendingScrollDownRows = 0
-		return
-	}
-	s.pendingScrollDownRows = 0
-	height := s.terminal.Height()
-	if height <= 1 {
-		return
-	}
-	appendOutputScrollDownForBottomReserveShrinkSequence(builder, height, s.effectiveBottomRowsLocked(height), rows)
-}
-
-func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
-	if s == nil || s.pendingScrollDownRows < 1 || s.ownedViewport || s.leaseID != 0 {
-		return
-	}
-	var builder strings.Builder
-	s.appendPendingOutputScrollDownLocked(&builder)
-	if builder.Len() > 0 {
-		fmt.Print(builder.String())
-	}
-}
-
-// appendOutputScrollDebtLocked pays back rows that bottom-reserve growth
-// absorbed from the trailing blank output row. Absorption is a display-only
-// optimization: it keeps the transcript glued to the reserved band, but the
-// last committed line then occupies the output bottom row that every writer
-// targets. Scrolling here — before any byte lands — is what keeps the absorbed
-// row from being overwritten instead of scrolled.
-//
-// It must run after appendPendingOutputScrollDownLocked: a deferred shrink
-// first restores the transcript to the enlarged region bottom, and only then is
-// the absorbed row identifiable as the region bottom row again.
-func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Builder) {
-	if s == nil || s.terminal == nil || builder == nil || s.outputScrollDebtRows < 1 {
-		return
-	}
-	// Owned frames recompose the output region; absorb debt is a legacy
-	// immediate-mode scroll bookkeeping concept only.
-	if s.ownedViewport {
-		s.outputScrollDebtRows = 0
-		return
-	}
-	// A deferred shrink means the transcript is not parked at the region bottom
-	// yet, so "the absorbed row" cannot be located. Keep the debt: the next
-	// WriteOutput flushes the shrink first and pays it in the right order.
-	if s.pendingScrollDownRows > 0 {
-		return
-	}
-	rows := s.outputScrollDebtRows
-	s.outputScrollDebtRows = 0
-	height := s.terminal.Height()
-	if height <= 1 {
-		return
-	}
-	bottom := outputBottomRowForHeight(height, s.effectiveBottomRowsLocked(height))
-	if bottom < 1 {
-		return
-	}
-	if rows > bottom {
-		rows = bottom
-	}
-	// The active scroll region ends at the output bottom, so a newline emitted
-	// from that row scrolls the transcript instead of stepping into the
-	// reserved bottom pane.
-	builder.WriteString(terminalMoveToSequence(bottom, 1))
-	builder.WriteString(strings.Repeat("\n", rows))
-	s.outputCursorOnBlankRow = true
-}
-
-func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
-	if s == nil || s.outputScrollDebtRows < 1 || s.ownedViewport || s.leaseID != 0 {
-		return
-	}
-	var builder strings.Builder
-	s.appendOutputScrollDebtLocked(&builder)
-	if builder.Len() > 0 {
-		fmt.Print(builder.String())
-	}
-}
-
-// markOutputWrittenLocked invalidates prior spare-row compensation only after
-// bytes really reach the output region. BeginOutput is also used to position
-// the cursor before transient command popups, so it must not call this method.
-// Owned viewport ignores this: bottom-reserve height is recomposed each frame.
-func (s *FixedBottomSurface) markOutputWrittenLocked() {
-	if s == nil || s.terminal == nil || s.ownedViewport {
-		return
-	}
-	height := s.terminal.Height()
-	if height <= 0 {
-		_, height = s.terminal.RefreshSize()
-	}
-	s.scrollCompensatedRows = s.effectiveBottomRowsLocked(height)
 }
 
 func (s *FixedBottomSurface) renderStatusLocked() {
@@ -4085,50 +3967,6 @@ func terminalResetScrollRegionSequence(height int) string {
 	// clarity and future hosts that need an explicit 1;height form.
 	_ = height
 	return "\x1b[r"
-}
-
-func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height int, oldBottomRows int, newBottomRows int) {
-	if builder == nil || height <= 1 || newBottomRows <= oldBottomRows {
-		return
-	}
-	oldBottomRows = effectiveBottomRowsForHeight(height, oldBottomRows)
-	newBottomRows = effectiveBottomRowsForHeight(height, newBottomRows)
-	delta := newBottomRows - oldBottomRows
-	if delta <= 0 {
-		return
-	}
-	oldOutputBottom := outputBottomRowForHeight(height, oldBottomRows)
-	if oldOutputBottom < 1 {
-		return
-	}
-	if delta > oldOutputBottom {
-		delta = oldOutputBottom
-	}
-	builder.WriteString(terminalScrollRegionSequence(1, oldOutputBottom))
-	builder.WriteString(terminalMoveToSequence(oldOutputBottom, 1))
-	builder.WriteString(strings.Repeat("\n", delta))
-}
-
-// appendOutputScrollDownForBottomReserveShrinkSequence mirrors the growth
-// compensation. When reserved bottom rows are released, the output region grows
-// downwards and the freed rows stay blank between the last committed line and
-// the prompt. CSI Ps T scrolls the complete region down in one operation. It is
-// preferable to a burst of one-row RI controls here: the transition is atomic
-// from the terminal's perspective and is reliable through Windows ConPTY.
-func appendOutputScrollDownForBottomReserveShrinkSequence(builder *strings.Builder, height, bottomRows, rows int) {
-	if builder == nil || height <= 1 || rows < 1 {
-		return
-	}
-	outputBottom := outputBottomRowForHeight(height, bottomRows)
-	if outputBottom < 1 {
-		return
-	}
-	if rows > outputBottom {
-		rows = outputBottom
-	}
-	builder.WriteString(terminalScrollRegionSequence(1, outputBottom))
-	builder.WriteString(terminalMoveToSequence(1, 1))
-	builder.WriteString(terminalScrollDownSequence(rows))
 }
 
 func outputBottomRowForHeight(height int, bottomRows int) int {

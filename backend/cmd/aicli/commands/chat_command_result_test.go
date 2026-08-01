@@ -537,6 +537,123 @@ func TestDispatchChatCommandStreamSurvivesOwnedViewportRepaints(t *testing.T) {
 	}
 }
 
+func TestTryExecuteStructuredChatCommandTitle(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "title-command-session"
+	session := &ChatSession{RuntimeSession: runtimeSession}
+
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/title Structured title")
+	if err != nil {
+		t.Fatalf("/title returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("/title was not handled as a structured command")
+	}
+	if runtimeSession.Metadata.Title != "Structured title" {
+		t.Fatalf("title = %q, want Structured title", runtimeSession.Metadata.Title)
+	}
+	if got := ui.RenderDocumentPlain(result.Document()); got != "会话标题已更新" {
+		t.Fatalf("title confirmation = %q, want exact confirmation", got)
+	}
+
+	for _, command := range []string{"/title", "/rename "} {
+		if _, handled, err := tryExecuteStructuredChatCommand(session, command); err != nil || handled {
+			t.Fatalf("%q structured match=(%t, %v), want legacy validation path", command, handled, err)
+		}
+	}
+}
+
+func TestDispatchChatCommandTitleDoesNotWriteRawStdout(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{RuntimeSession: runtimeSession}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	var retained bytes.Buffer
+	coord.SetWriter(&retained)
+	raw := captureStdout(t, func() {
+		if dispatchChatCommand(session, "/title No raw stdout", false) {
+			t.Fatal("/title unexpectedly requested chat exit")
+		}
+	})
+	if raw != "" {
+		t.Fatalf("structured /title wrote raw stdout:\n%q", raw)
+	}
+	if coord.commandCellSequence != 1 {
+		t.Fatalf("structured /title committed %d cells, want 1", coord.commandCellSequence)
+	}
+	if count := strings.Count(retained.String(), "会话标题已更新"); count != 1 {
+		t.Fatalf("title marker count=%d want 1:\n%s", count, retained.String())
+	}
+}
+
+func TestDispatchChatCommandTitleSurvivesOwnedViewportRepaints(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	const width, height = 100, 80
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "title-repaint-session"
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		Surface:        surface,
+	}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	coord.SetSurface(surface)
+	screen := newScreenVT(width, height)
+	feed := func(paint func()) {
+		t.Helper()
+		screen.feed(captureSurfaceStdout(t, func() {
+			coord.SetWriter(os.Stdout)
+			paint()
+		}))
+	}
+	assertSingleTitle := func(stage string) {
+		t.Helper()
+		frame := commandResultFrameText(surface)
+		if count := strings.Count(frame, "会话标题已更新"); count != 1 {
+			t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)
+		}
+		if rows := screen.RowsContaining("会话标题已更新"); len(rows) != 1 {
+			t.Fatalf("%s physical marker rows=%v want one:\n%s", stage, rows, screen.dump())
+		}
+	}
+
+	feed(func() { coord.PrintPrompt() })
+	feed(func() {
+		if dispatchChatCommand(session, "/rename Renamed title", false) {
+			t.Fatal("/rename unexpectedly requested chat exit")
+		}
+	})
+	assertSingleTitle("initial command frame")
+
+	feed(func() {
+		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, nil)
+		surface.ShowPrompt("> ")
+	})
+	assertSingleTitle("status and prompt repaint")
+
+	feed(func() {
+		surface.SetActiveBand([]string{"• Running title command check", "  retained active row"})
+	})
+	assertSingleTitle("active band growth")
+
+	feed(func() { surface.ClearActiveBand() })
+	assertSingleTitle("active band shrink")
+
+	surface.EnableForTest(88, height)
+	assertSingleTitle("resize recompose")
+	if runtimeSession.Metadata.Title != "Renamed title" {
+		t.Fatalf("runtime title = %q, want Renamed title", runtimeSession.Metadata.Title)
+	}
+}
+
 func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -550,6 +667,7 @@ func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 		"chat_goal_document.go",
 		"chat_memory_document.go",
 		"chat_stream_document.go",
+		"chat_title_document.go",
 	} {
 		sourcePath := filepath.Join(filepath.Dir(currentFile), name)
 		source, err := os.ReadFile(sourcePath)
@@ -766,7 +884,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "command.go", Func: "confirmClearConversationHistory", Kind: "fmt.Print", Count: 4},
 		{File: "command.go", Func: "executeShellCommandDetailed", Kind: "fmt.Print", Count: 18},
 		{File: "command.go", Func: "handleApprovalReuseCommand", Kind: "fmt.Print", Count: 4},
-		{File: "command.go", Func: "handleCommand", Kind: "fmt.Print", Count: 37},
+		{File: "command.go", Func: "handleCommand", Kind: "fmt.Print", Count: 35},
 		{File: "command.go", Func: "handleCompactCommand", Kind: "fmt.Print", Count: 4},
 		{File: "command.go", Func: "handleImageAttachmentCommand", Kind: "fmt.Print", Count: 11},
 		{File: "command.go", Func: "handlePermissionModeCommand", Kind: "fmt.Print", Count: 4},

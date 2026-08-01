@@ -138,6 +138,8 @@ func AgentControlTaskRecord(task Task, teammate *Teammate) agentcontrol.TaskReco
 		DifficultyRationale: task.DifficultyRationale,
 		Status:              string(task.Status),
 		Priority:            task.Priority,
+		Attempt:             task.Attempt,
+		FencingToken:        task.FencingToken,
 		CreatedAt:           task.CreatedAt,
 		UpdatedAt:           task.UpdatedAt,
 	}

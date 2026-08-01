@@ -3021,6 +3021,7 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 	if strings.TrimSpace(ui.RenderDocumentPlain(doc)) == "" {
 		return false
 	}
+	doc = c.annotateCommandDocumentOverflow(doc)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.beginMessageLocked() {
@@ -3033,6 +3034,51 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 		c.gapForEventBlock(),
 	)
 	return true
+}
+
+// annotateCommandDocumentOverflow appends a hint block when the command
+// document exceeds the surface's visible output region. The hint sits at the
+// document tail, which stays on screen after the older rows are handed off to
+// native scrollback, so users learn the full output is available by scrolling
+// instead of assuming it was dropped by the viewport renderer.
+func (c *chatInteractionCoordinator) annotateCommandDocumentOverflow(doc render.Document) render.Document {
+	if c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+		return doc
+	}
+	rows := doc.LineCount()
+	visible := c.session.Surface.VisibleOutputRows()
+	if rows <= visible {
+		return doc
+	}
+	hint := fmt.Sprintf("输出共 %d 行，超出屏幕可见区；完整内容已滚入终端滚动缓冲区，请向上滚动查看", rows)
+	doc.Blocks = append(doc.Blocks, render.Block{
+		Lines: []render.Line{{Spans: []render.Span{{Text: hint}}}},
+	})
+	return doc
+}
+
+// assistantOverflowHintLocked returns a scrollback hint line when the final
+// assistant body exceeds the surface's visible output region, or "" when the
+// body fits. Long bodies hand older rows to native scrollback and leave only
+// the tail visible; without the hint the reply looks truncated by the
+// viewport (same contract as annotateCommandDocumentOverflow for command
+// documents, applied to LLM streamed markdown replies).
+func (c *chatInteractionCoordinator) assistantOverflowHintLocked(content string) string {
+	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+		return ""
+	}
+	rows := 0
+	if c.session.Formatter != nil && c.session.Formatter.IsMarkdown(content) {
+		rows = c.session.Formatter.FormatDocument(content).LineCount()
+	}
+	if rows == 0 && content != "" {
+		rows = strings.Count(content, "\n") + 1
+	}
+	visible := c.session.Surface.VisibleOutputRows()
+	if rows <= visible {
+		return ""
+	}
+	return fmt.Sprintf("回复共 %d 行，超出屏幕可见区；完整内容已滚入终端滚动缓冲区，请向上滚动查看", rows)
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
@@ -3733,6 +3779,15 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 	if c.session != nil && c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
 	}
+	// Long bodies hand older rows to native scrollback and leave only the tail
+	// in the visible region; append a hint so the reply is not mistaken for a
+	// truncated render (same contract as command documents).
+	if hint := c.assistantOverflowHintLocked(content); hint != "" {
+		if formatted != "" && !strings.HasSuffix(formatted, "\n") {
+			formatted += "\n"
+		}
+		formatted += hint
+	}
 	// First full paint of the assistant body — no cross-block gap.
 	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
 }
@@ -3746,11 +3801,18 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 	if c == nil {
 		return
 	}
+	hint := c.assistantOverflowHintLocked(content)
 	emitted := c.streamRenderedPrefixLen
 	if emitted <= 0 {
 		formatted := content
 		if c.session != nil && c.session.Formatter != nil {
 			formatted = c.session.Formatter.Format(content)
+		}
+		if hint != "" {
+			if formatted != "" && !strings.HasSuffix(formatted, "\n") {
+				formatted += "\n"
+			}
+			formatted += hint
 		}
 		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
 		return
@@ -3759,6 +3821,9 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 	suffix := c.unrenderedAssistantStreamSuffixLocked(content)
 	if strings.TrimSpace(suffix) == "" {
 		c.ensureStreamTerminatedLocked()
+		if hint != "" {
+			c.writeLineLocked(ui.FormatAssistantRendered(hint))
+		}
 		c.completeBlockOutput = true
 		return
 	}
@@ -3790,6 +3855,9 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 		if inlineContinuation {
 			// Close the open row with the residual text as a single line.
 			c.writeLineLocked(ui.FormatAssistantRendered(suffix))
+			if hint != "" {
+				c.writeLineLocked(ui.FormatAssistantRendered(hint))
+			}
 			c.streamTrailingLF = true
 			c.streamRendered = true
 			c.streamRenderedPrefixLen = len(content)
@@ -3802,9 +3870,17 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 
 	if chunk.empty() {
 		c.ensureStreamTerminatedLocked()
+		if hint != "" {
+			c.writeLineLocked(ui.FormatAssistantRendered(hint))
+		}
 		c.streamRenderedPrefixLen = len(content)
 		c.completeBlockOutput = true
 		return
+	}
+	if hint != "" {
+		// The hint must land after every residual row so it stays in the
+		// visible region after older rows are handed off to scrollback.
+		chunk.lines = append(chunk.lines, hint)
 	}
 	// Live plain/markdown may leave an open mid-row ("This is "). writeRowsLocked
 	// always closeOpenRow first, which would force "This is \nbold\n". Continue the

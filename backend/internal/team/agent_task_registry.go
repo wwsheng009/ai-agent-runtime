@@ -944,6 +944,28 @@ func (r AgentControlTaskRegistry) ClaimAgentControlTask(ctx context.Context, req
 	if request.LeaseUntil.IsZero() {
 		return nil, false, fmt.Errorf("lease_until is required")
 	}
+	if request.OwnerToken != "" {
+		ownerTeamID := request.TeamID
+		if ownerTeamID == "" {
+			existing, err := r.Store.GetTask(ctx, request.ID)
+			if err != nil {
+				return nil, false, err
+			}
+			if existing != nil {
+				ownerTeamID = existing.TeamID
+			}
+		}
+		if ownerTeamID == "" {
+			return nil, false, fmt.Errorf("team id is required for owner-fenced claim")
+		}
+		valid, err := r.Store.ValidateOrchestratorOwner(ctx, ownerTeamID, request.OwnerID, request.OwnerToken)
+		if err != nil {
+			return nil, false, err
+		}
+		if !valid {
+			return nil, false, agentcontrol.ErrOrchestratorOwnerMismatch
+		}
+	}
 
 	claimed := false
 	if request.UsePathClaims {
@@ -1076,19 +1098,31 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTaskTerminal(ctx context.Con
 func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, store *SQLiteStore, request agentcontrol.TaskTerminalUpdateRequest, status TaskStatus, resultRef *string) error {
 	var err error
 	changed := false
+	fencingMismatch := false
+	needsDiagnosis := false
+	fencingToken := strings.TrimSpace(request.FencingToken)
 	for attempt := 0; attempt < 8; attempt++ {
 		err = store.WithImmediateTx(ctx, func(tx *sql.Tx) error {
 			now := time.Now().UTC()
+			where := "WHERE workflow = ? AND task_id = ?"
+			args := []interface{}{
+				string(status), request.Summary, nullableString(resultRef), formatTime(now),
+				agentcontrol.WorkflowSpawnTeam, request.ID,
+			}
+			if fencingToken != "" {
+				where += " AND fencing_token = ?"
+				args = append(args, fencingToken)
+			}
 			result, err := tx.ExecContext(ctx, `
 				UPDATE agent_control_task_records
-				SET status = ?, summary = ?, result_ref = ?, assignee = NULL, session_id = NULL, agent_path = NULL, lease_until = NULL, updated_at = ?
-				WHERE workflow = ? AND task_id = ?
-			`, string(status), request.Summary, nullableString(resultRef), formatTime(now), agentcontrol.WorkflowSpawnTeam, request.ID)
+				SET status = ?, summary = ?, result_ref = ?, assignee = NULL, session_id = NULL, agent_path = NULL, lease_until = NULL, fencing_token = '', updated_at = ?
+				`+where, args...)
 			if err != nil {
 				return fmt.Errorf("update agent control task: %w", err)
 			}
 			affected, _ := result.RowsAffected()
 			if affected == 0 {
+				needsDiagnosis = fencingToken != ""
 				return nil
 			}
 			changed = true
@@ -1112,6 +1146,20 @@ func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, 
 	}
 	if err != nil {
 		return err
+	}
+	// The diagnosis read runs outside the transaction: SQLite uses a single
+	// pooled connection, so reading inside an open IMMEDIATE tx would deadlock.
+	if needsDiagnosis {
+		existing, loadErr := store.getAgentControlTask(ctx, request.ID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if existing != nil && strings.TrimSpace(existing.FencingToken) != fencingToken {
+			fencingMismatch = true
+		}
+	}
+	if fencingMismatch {
+		return agentcontrol.ErrTaskFencingMismatch
 	}
 	if changed {
 		return store.appendTaskSignalForTask(ctx, request.ID, TaskSignalTaskReleased, status)
@@ -1231,6 +1279,18 @@ func (r AgentControlTaskRegistry) ReleaseAgentControlTask(ctx context.Context, r
 	if !isAgentControlWritableTaskStatus(status) {
 		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
 	}
+	if token := strings.TrimSpace(request.FencingToken); token != "" {
+		current, err := r.Store.GetTask(ctx, request.ID)
+		if err != nil {
+			return nil, err
+		}
+		if current == nil {
+			return nil, fmt.Errorf("task not found: %s", request.ID)
+		}
+		if strings.TrimSpace(current.FencingToken) != token {
+			return nil, agentcontrol.ErrTaskFencingMismatch
+		}
+	}
 	if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
 		return nil, err
 	}
@@ -1272,6 +1332,18 @@ func (r AgentControlTaskRegistry) RenewAgentControlTaskLease(ctx context.Context
 	}
 	if request.LeaseUntil.IsZero() {
 		return nil, fmt.Errorf("lease_until is required")
+	}
+	if token := strings.TrimSpace(request.FencingToken); token != "" {
+		current, err := r.Store.GetTask(ctx, request.ID)
+		if err != nil {
+			return nil, err
+		}
+		if current == nil {
+			return nil, fmt.Errorf("task not found: %s", request.ID)
+		}
+		if strings.TrimSpace(current.FencingToken) != token {
+			return nil, agentcontrol.ErrTaskFencingMismatch
+		}
 	}
 	if err := r.Store.RenewTaskLease(ctx, request.ID, request.LeaseUntil); err != nil {
 		return nil, err
@@ -1521,6 +1593,7 @@ func isAgentControlWritableTaskStatus(status TaskStatus) bool {
 		TaskStatusReady,
 		TaskStatusRunning,
 		TaskStatusBlocked,
+		TaskStatusReclaimPending,
 		TaskStatusDone,
 		TaskStatusFailed,
 		TaskStatusCancelled:

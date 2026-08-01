@@ -86,6 +86,28 @@ func (b *Backend) StageRow(row int, cells []vt.Cell) {
 	b.back[row-1] = normalizeRow(cells, b.width)
 }
 
+// CommitRange silently syncs the front buffer from the back buffer for rows
+// [top,bottom] (1-based, inclusive) without emitting any bytes. The surface
+// uses it after a host-side scroll write (native scroll region) has already
+// moved the physical terminal rows: those rows now match the staged back
+// frame, so the next Flush must not diff them again. Rows outside the range
+// are still diffed normally, which lets the caller repaint only the bottom
+// pane (ActiveBand/prompt/status) after the scroll.
+func (b *Backend) CommitRange(top, bottom int) {
+	if b == nil {
+		return
+	}
+	if top < 1 {
+		top = 1
+	}
+	if bottom > b.height {
+		bottom = b.height
+	}
+	for r := top - 1; r < bottom; r++ {
+		copy(b.front[r], b.back[r])
+	}
+}
+
 // Flush diffs front->back, returns the ANSI needed to apply the change, and
 // swaps front=back. When nothing changed it returns "".
 func (b *Backend) Flush() string {

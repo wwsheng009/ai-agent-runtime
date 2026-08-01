@@ -446,6 +446,17 @@ type AgentStatusResult struct {
 	RunID                string `json:"run_id,omitempty"`
 	ExecutionDeadlineAt  string `json:"execution_deadline_at,omitempty"`
 	SupervisionPolicy    string `json:"supervision_policy,omitempty"`
+	// RunStatus is the supervision execution run status (running,
+	// waiting_approval, timed_out, orphaned, ...). More precise than the
+	// session-level Status for diagnosing stalled children.
+	RunStatus           string `json:"run_status,omitempty"`
+	Attempt             int    `json:"attempt,omitempty"`
+	MaxAttempts         int    `json:"max_attempts,omitempty"`
+	RunOwnerID          string `json:"run_owner_id,omitempty"`
+	LastHeartbeatAt     string `json:"last_heartbeat_at,omitempty"`
+	LastProgressAt      string `json:"last_progress_at,omitempty"`
+	ProgressDeadlineAt  string `json:"progress_deadline_at,omitempty"`
+	CancelDeadlineAt    string `json:"cancel_deadline_at,omitempty"`
 	PendingApproval          bool     `json:"pending_approval,omitempty"`
 	PendingApprovalID        string   `json:"pending_approval_id,omitempty"`
 	PendingApprovalReason    string   `json:"pending_approval_reason,omitempty"`

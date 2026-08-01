@@ -3343,7 +3343,26 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(request.TimeoutMs)*time.Millisecond)
 	defer cancel()
 
-	ticker := time.NewTicker(250 * time.Millisecond)
+	// Event-driven path: subscribe to the team lifecycle wake registry so a
+	// durable team event (team.completed / team.summary / task.*) wakes the
+	// wait immediately. A slow fallback ticker remains as a catch-up for
+	// stores without a wake source or for missed notifications.
+	wakeFilter := agentcontrol.WakeFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Kind:     agentcontrol.WakeKindTeam,
+		TeamID:   teamID,
+	}
+	var wakeCh <-chan agentcontrol.WakeEvent
+	var lastWakeSeq int64
+	if ws, ok := b.TeamStore.(agentcontrol.WakeSource); ok {
+		wakeCh, _ = ws.WatchAgentControlWake(waitCtx, wakeFilter)
+		lastWakeSeq, _ = ws.LastAgentControlWakeSeq(waitCtx, wakeFilter)
+	}
+
+	// Fallback poll interval is intentionally long: the event-driven path
+	// covers the normal case, so this ticker only guards against missed wake
+	// notifications or stores without a wake source.
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -3373,6 +3392,15 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 				return WaitTeamResult{}, ctx.Err()
 			}
 			return finalizeWaitTeamTimeout(result, request.TimeoutMs), nil
+		case wake, ok := <-wakeCh:
+			if !ok {
+				wakeCh = nil
+				continue
+			}
+			if wake.Seq > lastWakeSeq {
+				lastWakeSeq = wake.Seq
+			}
+			// Re-read the snapshot immediately with fresh durable data.
 		case <-ticker.C:
 		}
 	}

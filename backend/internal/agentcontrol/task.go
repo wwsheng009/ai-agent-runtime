@@ -2,9 +2,22 @@ package agentcontrol
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
+
+// ErrTaskFencingMismatch reports that an operation carried a fencing token that
+// no longer matches the task's current claim attempt. Callers must treat the
+// operation as stale and refuse to mutate task state (for example a late
+// terminal result from a previous attempt).
+var ErrTaskFencingMismatch = errors.New("task fencing token mismatch")
+
+// ErrOrchestratorOwnerMismatch reports that a claim carried an orchestrator
+// owner token that no longer matches the team's current durable owner lease.
+// The caller is a stale orchestrator instance and must stop claiming tasks and
+// applying terminal state.
+var ErrOrchestratorOwnerMismatch = errors.New("orchestrator owner token mismatch")
 
 // TaskRecord is the storage-neutral AgentControl read model for work assigned
 // to an agent. Workflow implementations can project their native task state
@@ -30,6 +43,8 @@ type TaskRecord struct {
 	FallbackReason       string    `json:"fallback_reason,omitempty"`
 	RouteResolvedAt      time.Time `json:"route_resolved_at,omitempty"`
 	RouteAttempt         int       `json:"route_attempt,omitempty"`
+	Attempt              int       `json:"attempt,omitempty"`
+	FencingToken         string    `json:"fencing_token,omitempty"`
 	Status               string    `json:"status,omitempty"`
 	Priority             int       `json:"priority,omitempty"`
 	CreatedAt            time.Time `json:"created_at,omitempty"`
@@ -256,6 +271,9 @@ type TaskReleaseRequest struct {
 	Workflow string
 	Status   string
 	Summary  string
+	// FencingToken optionally pins the release to the current claim attempt.
+	// When non-empty and mismatched, the release is rejected.
+	FencingToken string
 }
 
 // TaskLeaseRenewRequest describes a task lease renewal through the
@@ -264,6 +282,9 @@ type TaskLeaseRenewRequest struct {
 	ID         string
 	Workflow   string
 	LeaseUntil time.Time
+	// FencingToken pins the renewal to the current claim attempt. When
+	// non-empty and mismatched, the renewal is rejected.
+	FencingToken string
 }
 
 // TaskRetryRequest describes a retry/reclaim transition through the
@@ -274,6 +295,9 @@ type TaskRetryRequest struct {
 	Workflow string
 	Status   string
 	Summary  string
+	// FencingToken is optional. Reclaims are intentionally allowed to proceed
+	// without a token (they are the forced recovery path).
+	FencingToken string
 }
 
 // TaskClaimRequest describes a task claim attempt through the AgentControl
@@ -289,6 +313,13 @@ type TaskClaimRequest struct {
 	WritePaths      []string
 	UsePathClaims   bool
 	WorkspaceRoot   string
+	// OwnerID and OwnerToken fence the claim to the team's current durable
+	// orchestrator owner. When OwnerToken is non-empty and does not match the
+	// team's live owner lease, the claim is rejected with
+	// ErrOrchestratorOwnerMismatch. When empty, the legacy unowned claim path
+	// is preserved for callers that do not participate in owner leases.
+	OwnerID    string
+	OwnerToken string
 }
 
 // TaskTerminalUpdateRequest describes a terminal done/failed task transition
@@ -302,6 +333,9 @@ type TaskTerminalUpdateRequest struct {
 	ResultRef       *string
 	TeammateID      string
 	SkipStateUpdate bool
+	// FencingToken pins the terminal transition to the current claim attempt.
+	// When non-empty and mismatched, the transition is rejected.
+	FencingToken string
 }
 
 // TaskBlockRequest describes a blocked task transition through the
@@ -407,6 +441,7 @@ func (r TaskRecord) Normalize() TaskRecord {
 	r.RouteSource = strings.TrimSpace(r.RouteSource)
 	r.RouteWarnings = trimStringSlice(r.RouteWarnings)
 	r.FallbackReason = strings.TrimSpace(r.FallbackReason)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	r.Status = strings.TrimSpace(r.Status)
 	return r
 }
@@ -548,6 +583,7 @@ func (r TaskReleaseRequest) Normalize() TaskReleaseRequest {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.Status = strings.TrimSpace(r.Status)
 	r.Summary = strings.TrimSpace(r.Summary)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	return r
 }
 
@@ -555,6 +591,7 @@ func (r TaskReleaseRequest) Normalize() TaskReleaseRequest {
 func (r TaskLeaseRenewRequest) Normalize() TaskLeaseRenewRequest {
 	r.ID = strings.TrimSpace(r.ID)
 	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	return r
 }
 
@@ -564,6 +601,7 @@ func (r TaskRetryRequest) Normalize() TaskRetryRequest {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.Status = strings.TrimSpace(r.Status)
 	r.Summary = strings.TrimSpace(r.Summary)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	return r
 }
 
@@ -574,6 +612,8 @@ func (r TaskClaimRequest) Normalize() TaskClaimRequest {
 	r.TeamID = strings.TrimSpace(r.TeamID)
 	r.Assignee = strings.TrimSpace(r.Assignee)
 	r.WorkspaceRoot = strings.TrimSpace(r.WorkspaceRoot)
+	r.OwnerID = strings.TrimSpace(r.OwnerID)
+	r.OwnerToken = strings.TrimSpace(r.OwnerToken)
 	return r
 }
 
@@ -585,6 +625,7 @@ func (r TaskTerminalUpdateRequest) Normalize() TaskTerminalUpdateRequest {
 	r.Status = strings.TrimSpace(r.Status)
 	r.Summary = strings.TrimSpace(r.Summary)
 	r.TeammateID = strings.TrimSpace(r.TeammateID)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	return r
 }
 

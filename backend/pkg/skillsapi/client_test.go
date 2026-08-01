@@ -3171,6 +3171,23 @@ func TestClient_ReclaimExpiredTasks(t *testing.T) {
 	updated, err := store.GetTask(context.Background(), taskID)
 	require.NoError(t, err)
 	require.NotNil(t, updated)
+	assert.Equal(t, team.TaskStatusReclaimPending, updated.Status, "first sweep marks reclaim_pending to give a healthy runner a grace window")
+	assert.Equal(t, 0, updated.RetryCount)
+	require.NotNil(t, updated.Assignee)
+	assert.Equal(t, "mate-1", *updated.Assignee)
+
+	// Phase 2: after the reclaim grace window the task returns to the ready queue.
+	asOf2 := asOf.Add(31 * time.Second)
+	resp2, err := client.ReclaimExpiredTasks(context.Background(), teamID, ReclaimExpiredTasksRequest{
+		Limit: 1,
+		AsOf:  &asOf2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp2.Count)
+
+	updated, err = store.GetTask(context.Background(), taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
 	assert.Equal(t, team.TaskStatusReady, updated.Status)
 	assert.Equal(t, 1, updated.RetryCount)
 	assert.Nil(t, updated.Assignee)

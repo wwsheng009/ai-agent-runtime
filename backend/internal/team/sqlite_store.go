@@ -754,7 +754,7 @@ func (s *SQLiteStore) getAgentControlTask(ctx context.Context, id string) (*Task
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT task_id, team_id, parent_task_id, title, goal, difficulty, difficulty_rationale, status, priority, assignee, lease_until, retry_count,
-			inputs_json, read_paths_json, write_paths_json, deliverables_json, summary, result_ref, version, created_at, updated_at
+			inputs_json, read_paths_json, write_paths_json, deliverables_json, summary, result_ref, version, attempt, fencing_token, created_at, updated_at
 		FROM agent_control_task_records
 		WHERE workflow = ? AND task_id = ?
 	`, agentcontrol.WorkflowSpawnTeam, id)
@@ -787,7 +787,7 @@ func scanTaskRow(row taskRowScanner) (*Task, error) {
 		createdAtRaw    string
 		updatedAtRaw    string
 	)
-	if err := row.Scan(&task.ID, &task.TeamID, &parentID, &task.Title, &task.Goal, &task.Difficulty, &task.DifficultyRationale, &status, &task.Priority, &assigneeRaw, &leaseUntilRaw, &task.RetryCount, &inputsJSON, &readJSON, &writeJSON, &deliverableJSON, &task.Summary, &resultRefRaw, &task.Version, &createdAtRaw, &updatedAtRaw); err != nil {
+	if err := row.Scan(&task.ID, &task.TeamID, &parentID, &task.Title, &task.Goal, &task.Difficulty, &task.DifficultyRationale, &status, &task.Priority, &assigneeRaw, &leaseUntilRaw, &task.RetryCount, &inputsJSON, &readJSON, &writeJSON, &deliverableJSON, &task.Summary, &resultRefRaw, &task.Version, &task.Attempt, &task.FencingToken, &createdAtRaw, &updatedAtRaw); err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
@@ -841,7 +841,7 @@ func (s *SQLiteStore) listAgentControlTasks(ctx context.Context, filter TaskFilt
 	query := strings.Builder{}
 	query.WriteString(`
 		SELECT task_id, team_id, parent_task_id, title, goal, difficulty, difficulty_rationale, status, priority, assignee, lease_until, retry_count,
-			inputs_json, read_paths_json, write_paths_json, deliverables_json, summary, result_ref, version, created_at, updated_at
+			inputs_json, read_paths_json, write_paths_json, deliverables_json, summary, result_ref, version, attempt, fencing_token, created_at, updated_at
 		FROM agent_control_task_records
 	`)
 	clauses := []string{"workflow = ?"}
@@ -1202,7 +1202,8 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 	claimed := false
 	query := `
 		UPDATE agent_control_task_records
-		SET status = ?, assignee = ?, session_id = ?, agent_path = ?, lease_until = ?, version = version + 1, updated_at = ?
+		SET status = ?, assignee = ?, session_id = ?, agent_path = ?, lease_until = ?, version = version + 1,
+			attempt = attempt + 1, fencing_token = lower(hex(randomblob(16))), updated_at = ?
 		WHERE workflow = ? AND task_id = ? AND status = ?
 	`
 	args := []interface{}{
@@ -1292,7 +1293,8 @@ func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, as
 
 		query := `
 			UPDATE agent_control_task_records
-			SET status = ?, assignee = ?, session_id = ?, agent_path = ?, lease_until = ?, version = version + 1, updated_at = ?
+			SET status = ?, assignee = ?, session_id = ?, agent_path = ?, lease_until = ?, version = version + 1,
+				attempt = attempt + 1, fencing_token = lower(hex(randomblob(16))), updated_at = ?
 			WHERE workflow = ? AND task_id = ? AND team_id = ? AND status = ?
 		`
 		args := []interface{}{
@@ -1400,7 +1402,7 @@ func (s *SQLiteStore) ReleaseTask(ctx context.Context, id string, status TaskSta
 	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `
 			UPDATE agent_control_task_records
-			SET status = ?, assignee = NULL, session_id = NULL, agent_path = NULL, lease_until = NULL, updated_at = ?
+			SET status = ?, assignee = NULL, session_id = NULL, agent_path = NULL, lease_until = NULL, fencing_token = '', updated_at = ?
 			WHERE workflow = ? AND task_id = ?
 		`, string(status), formatTime(now), agentcontrol.WorkflowSpawnTeam, id)
 		if err != nil {
@@ -2043,7 +2045,7 @@ func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter ag
 		SELECT task_id, workflow, team_id, parent_task_id, assignee, session_id, agent_path,
 			title, summary, difficulty, difficulty_rationale,
 			route_provider, route_model, route_reasoning_effort, route_source, route_warnings_json,
-			fallback_used, fallback_reason, route_resolved_at, route_attempt,
+			fallback_used, fallback_reason, route_resolved_at, route_attempt, attempt, fencing_token,
 			status, priority, created_at, updated_at
 		FROM agent_control_task_records
 		WHERE ` + strings.Join(clauses, " AND ") + `
@@ -2090,7 +2092,7 @@ func (s *SQLiteStore) getAgentControlTaskRecord(ctx context.Context, workflow, t
 		SELECT task_id, workflow, team_id, parent_task_id, assignee, session_id, agent_path,
 			title, summary, difficulty, difficulty_rationale,
 			route_provider, route_model, route_reasoning_effort, route_source, route_warnings_json,
-			fallback_used, fallback_reason, route_resolved_at, route_attempt,
+			fallback_used, fallback_reason, route_resolved_at, route_attempt, attempt, fencing_token,
 			status, priority, created_at, updated_at
 		FROM agent_control_task_records
 		WHERE workflow = ? AND task_id = ?
@@ -2142,6 +2144,8 @@ func scanAgentControlTaskRecord(row taskRowScanner) (agentcontrol.TaskRecord, er
 		&record.FallbackReason,
 		&routeResolvedAtRaw,
 		&record.RouteAttempt,
+		&record.Attempt,
+		&record.FencingToken,
 		&statusRaw,
 		&record.Priority,
 		&createdAtRaw,
@@ -3892,6 +3896,7 @@ func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int
 	createdAt := formatTime(event.Timestamp)
 
 	var seq int64
+	var wakeEvent agentcontrol.WakeEvent
 	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 			SELECT COALESCE(MAX(seq), 0) + 1 FROM team_events WHERE team_id = ?
@@ -3913,10 +3918,38 @@ func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int
 				return fmt.Errorf("insert agent control task graph event: %w", err)
 			}
 		}
+		// Mirror every durable team lifecycle event into the unified AgentControl
+		// wake registry so event-driven consumers (wait_team, diagnostics) can
+		// react immediately instead of short-interval polling. The wake row is
+		// committed in the same transaction as the team event, so watchers never
+		// observe an event that is not durably visible.
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_control_wake_events (
+				workflow, kind, team_id, team_seq, event_kind, status, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, agentcontrol.WorkflowSpawnTeam, agentcontrol.WakeKindTeam, teamID, seq, eventType, "", createdAt)
+		if err != nil {
+			return fmt.Errorf("insert agent control team wake event: %w", err)
+		}
+		wakeSeq, err := result.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("agent control team wake event id: %w", err)
+		}
+		wakeEvent = agentcontrol.WakeEvent{
+			Seq:       wakeSeq,
+			Workflow:  agentcontrol.WorkflowSpawnTeam,
+			Kind:      agentcontrol.WakeKindTeam,
+			TeamID:    teamID,
+			TeamSeq:   seq,
+			EventKind: eventType,
+			Status:    "",
+			CreatedAt: event.Timestamp,
+		}.Normalize()
 		return nil
 	}); err != nil {
 		return 0, err
 	}
+	s.notifyAgentControlWakeWatchers(wakeEvent)
 	return seq, nil
 }
 
@@ -4614,6 +4647,36 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 				ALTER TABLE agent_control_task_records ADD COLUMN fallback_reason TEXT NOT NULL DEFAULT '';
 				ALTER TABLE agent_control_task_records ADD COLUMN route_resolved_at TEXT;
 				ALTER TABLE agent_control_task_records ADD COLUMN route_attempt INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
+		{
+			Version: 23,
+			Name:    "agent_control_task_fencing",
+			UpSQL: `
+				ALTER TABLE agent_control_task_records ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE agent_control_task_records ADD COLUMN fencing_token TEXT NOT NULL DEFAULT '';
+			`,
+		},
+		{
+			Version: 24,
+			Name:    "orchestrator_owner_leases",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS orchestrator_owner_leases (
+					team_id TEXT PRIMARY KEY,
+					owner_id TEXT NOT NULL,
+					owner_instance TEXT NOT NULL DEFAULT '',
+					lease_until TEXT NOT NULL,
+					fencing_token TEXT NOT NULL DEFAULT '',
+					heartbeat_at TEXT NOT NULL,
+					last_tick_at TEXT NOT NULL DEFAULT '',
+					last_successful_tick_at TEXT NOT NULL DEFAULT '',
+					restart_count INTEGER NOT NULL DEFAULT 0,
+					last_error TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_orchestrator_owner_leases_owner
+				ON orchestrator_owner_leases(owner_id, fencing_token);
 			`,
 		},
 	}

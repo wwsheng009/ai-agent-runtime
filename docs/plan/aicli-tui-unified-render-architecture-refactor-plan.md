@@ -26,8 +26,8 @@
 
 | 阶段 | 当前状态 | 已验证证据 | 仍待完成 |
 | --- | --- | --- | --- |
-| P0 旁路审计 | **进行中** | `TestChatInteractiveDirectWriterInventory` 以 AST 扫描 `commands/chat*.go` 与 `command.go`，固化 **155 个 grouped debt entries / 552 个 call sites**（493 `fmt.Print*`、49 `fmt.Fprint*(os.Std*)`、1 `io.WriteString(os.Std*)`、9 `ui.WriteTerminal*`）；新增 group 或 count 变化默认使测试失败，并报告实际行号。`/debug display`、`/status`、`/load`、`/goal`、`/memory` 与 `/stream` 已有 raw-stdout/structured producer fence 及 atomic command-cell 回归；`TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint` 覆盖 active-turn mirror 在 status/ActiveBand 重绘后仍只出现一次。`functions/builder.go` 的遗留 function-call parser 已删除全部 direct writer，并有 source fence 与 malformed-call 语义测试。 | 每条 chat/command debt entry 标注 owned-safe/plain-only/startup-shutdown/待迁移 owner；补 owner/frame trace；迁移后逐项从基线删除。 |
-| P1 CommandResult | **部分完成** | `/debug display`、`/status`、成功 `/load <session-id>`、`/goal`（status/clear/pause/resume/complete/set）、`/memory`（status/add/list/search）与 `/stream`（status/toggle/set）已以结构化 `CommandResult` 进入单个 command cell（`chat_debug_document.go`、`chat_status_document.go`、`chat_load_document.go`、`chat_goal_document.go`、`chat_memory_document.go`、`chat_stream_document.go`）；handler 禁止 direct terminal writer 的测试已覆盖全部新式 producer。`/goal <objective>` 在确认 cell 提交后经 `CommandResult.SendObjective` 走正常 send pipeline 触发 AI 目标请求；`/stream` toggle 复用既有 `persistStreamCommandPreference`。参数错误、持久化/store 错误、`--json` 变体与 nil session 仍走 legacy 路径，以使错误在全部输出模式中可见；成功 `/load` 在确认 cell 后通过 `CommandResult.ReplayHistory` 逐消息回放历史。 | 迁移 `/skills`（selection/modal 交互，留待 order-3 桶）及其余 slash command，删除 `beginDirectInteractiveOutput` 作为通用命令协议。 |
+| P0 旁路审计 | **进行中** | `TestChatInteractiveDirectWriterInventory` 以 AST 扫描 `commands/chat*.go` 与 `command.go`，固化 **155 个 grouped debt entries / 550 个 call sites**（491 `fmt.Print*`、49 `fmt.Fprint*(os.Std*)`、1 `io.WriteString(os.Std*)`、9 `ui.WriteTerminal*`）；新增 group 或 count 变化默认使测试失败，并报告实际行号。`/debug display`、`/status`、`/load`、`/goal`、`/memory`、`/stream` 与 `/title`/`/rename` 成功路径已有 raw-stdout/structured producer fence 及 atomic command-cell 回归；`TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint` 覆盖 active-turn mirror 在 status/ActiveBand 重绘后仍只出现一次。`functions/builder.go` 的遗留 function-call parser 已删除全部 direct writer，并有 source fence 与 malformed-call 语义测试。 | 每条 chat/command debt entry 标注 owned-safe/plain-only/startup-shutdown/待迁移 owner；补 owner/frame trace；迁移后逐项从基线删除。 |
+| P1 CommandResult | **部分完成** | `/debug display`、`/status`、成功 `/load <session-id>`、`/goal`（status/clear/pause/resume/complete/set）、`/memory`（status/add/list/search）、`/stream`（status/toggle/set）与成功 `/title`/`/rename` 已以结构化 `CommandResult` 进入单个 command cell（另有 `chat_title_document.go`）；handler 禁止 direct terminal writer 的测试已覆盖全部新式 producer。`/goal <objective>` 在确认 cell 提交后经 `CommandResult.SendObjective` 走正常 send pipeline 触发 AI 目标请求；`/stream` toggle 复用既有 `persistStreamCommandPreference`；title mutation 与成功确认 cell 共用 side-effect boundary。参数错误、持久化/store 错误、`--json` 变体与 nil session 仍走 legacy 路径，以使错误在全部输出模式中可见；成功 `/load` 在确认 cell 后通过 `CommandResult.ReplayHistory` 逐消息回放历史。 | 迁移 `/skills`（selection/modal 交互，留待 order-3 桶）及其余 slash command，删除 `beginDirectInteractiveOutput` 作为通用命令协议。 |
 | P3 ScreenLease | **首批完成** | resume、backtrack、theme fullscreen picker 已通过 `ScreenLease` 取得 alternate screen；主屏 flush suspend、release full repaint、DEC 1049 事务边界均有测试。 | 将 lease 上移到最终 presenter API，补 signal safety 与完整失败注入矩阵。 |
 | P4–P9 Scene 终局 | **未开始整体切换** | owned viewport、front/back diff、history window、ActiveBand 与部分 reflow/handoff 能力已存在。 | SceneController、semantic cell/revision、BoundaryPolicy、统一 runtime/tool event writer、legacy 删除及 PTY/ConPTY 验收。 |
 
@@ -1101,8 +1101,8 @@ Scene state lock
 已完成的安全网：
 
 - `TestChatInteractiveDirectWriterInventory` 对 `commands/chat*.go` 和 `command.go` 做 AST 扫描，覆盖 `fmt.Print*`、`fmt.Fprint*(os.Stdout/os.Stderr)`、直接 `os.Std*.Write*`、`io.WriteString(os.Std*)` 及 `ui.WriteTerminal*`；
-- 当前基线为 155 个 file/function/kind 分组、552 个 call site；新增分组或调用次数变化均默认失败，失败信息包含实际行号；
-- `/debug display` 与 `/status` 已验证不写 raw stdout、各作为一个 atomic command cell 提交，并在 prompt/status/ActiveBand repaint 与 resize recompose 后不重复或丢失；`/status` 带参数时保留 legacy 报错路径（该报错 message 需在所有模式下可见）。
+- 当前基线为 155 个 file/function/kind 分组、550 个 call site；新增分组或调用次数变化均默认失败，失败信息包含实际行号；
+- `/debug display`、`/status`、`/load` 与 `/title`/`/rename` 成功路径已验证不写 raw stdout、各作为一个 atomic command cell 提交，并在 prompt/status/ActiveBand repaint 与 resize recompose 后不重复或丢失；参数错误与加载/同步失败保留 legacy 报错路径（错误 message 需在所有模式下可见）。
 - `cmd/aicli/functions/builder.go` 已删除 legacy tool-call parsing 的 `fmt.Print*` / `os.Stderr` diagnostics；解析层静默保留 raw/incomplete call，由上层决定结构化诊断。`TestFunctionCallBuilder_HasNoDirectTerminalWriter` 阻止该库重新取得 terminal sink。
 
 剩余工作项：
@@ -1118,8 +1118,8 @@ Scene state lock
 
 优先顺序：
 
-1. `/debug`、`/status`、`/load`，建立结构化命令样板（`/debug display`、`/status`、`/load` 均已迁移；`/load` 确认 cell 采用 `chat_load_document.go`，历史回放经 `CommandResult.ReplayHistory` 在提交后触发）；
-2. `/goal`、`/memory`、`/stream`、`/skills` 等文档型输出；
+1. `/debug`、`/status`、`/load`、`/title`，建立结构化命令样板（`/debug display`、`/status`、`/load`、`/title`/`/rename` 均已迁移；`/load` 确认 cell 采用 `chat_load_document.go`，历史回放经 `CommandResult.ReplayHistory` 在提交后触发）；
+2. `/goal`、`/memory`、`/stream`、`/skills` 等文档型输出（前三者已迁移，`/skills` 的 selection/modal 仍待迁移）；
 3. `/resume`、`/backtrack`、`/theme` 等带 modal/fullscreen action 的命令；
 4. 其余 slash command；
 5. 删除 `beginDirectInteractiveOutput` 作为通用 command 生命周期协议，仅保留必要的过渡 facade。

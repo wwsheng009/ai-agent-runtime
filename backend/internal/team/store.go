@@ -58,6 +58,13 @@ type Store interface {
 	UpdateTeammateState(ctx context.Context, id string, state TeammateState) error
 	UpdateTeammateHeartbeat(ctx context.Context, id string, heartbeat time.Time) error
 
+	AcquireOrchestratorLease(ctx context.Context, lease OrchestratorLease, leaseTTL time.Duration) (*OrchestratorLease, bool, error)
+	RenewOrchestratorLease(ctx context.Context, teamID, ownerID, token string, leaseTTL time.Duration) (bool, error)
+	MarkOrchestratorTickSuccess(ctx context.Context, teamID, token string) error
+	ReleaseOrchestratorLease(ctx context.Context, teamID, ownerID, token string) error
+	GetOrchestratorLease(ctx context.Context, teamID string) (*OrchestratorLease, error)
+	ValidateOrchestratorOwner(ctx context.Context, teamID, ownerID, token string) (bool, error)
+
 	CreateTask(ctx context.Context, task Task) (string, error)
 	GetTask(ctx context.Context, id string) (*Task, error)
 	ListTasks(ctx context.Context, filter TaskFilter) ([]Task, error)

@@ -5,6 +5,7 @@
 修订记录：
 
 - 2026-07-31：完整性审查修订。补充 fencing token 落地规则、progress 埋点清单、幂等声明机制、审计记录、续跑入口监督、数据保留/GC、索引与性能测试、开放问题章节；修正 `actor.go` lease 引用；将风险等级改为 R0/R1/R2 以消除与实施阶段 P0–P6 的编号歧义。
+- 2026-07-31：P0–P6 实施完成并全量回归通过后的文档闭环修订。§21.1 回写 10 项开放问题的落地决策（9 项已决策、1 项 open）；8.2 补充小节追加 pause 生命周期实施状态注记（深度闭环列为已知限制）。
 
 ## 1. 文档定位
 
@@ -1124,6 +1125,8 @@ last_error
 3. **pause 期间**：Supervisor 对 paused Team 的 task 只做 observe 判定，不执行 reclaim/cancel（避免恢复后状态与动作矛盾）；超过配置的 `pause_max_duration` 后可升级 operator 决定关闭或强制 reclaim。
 4. **与 child Team 关系**：parent Team pause 不自动 pause child Team；child Team 继续由自己的 owner loop 调度，parent 只停止向 child 派发新任务。
 
+**实施状态注记（2026-07-31）**：以上 4 条中，pause 的"停住"语义已落地——`TeamStatusPaused` 是合法持久状态，terminal reconcile 对其不判 terminal、不触发 transition、不启动 loop（`internal/team/terminal_state.go`，含测试用例）；第 4 条（不自动级联 child）与架构一致。但第 1/2/3 条的深度闭环（`pause_reason` 持久化、attempt 的 paused 标记、resume 重新原子 acquire、`pause_max_duration` 升级通道）**未实现**，列为已知限制，决策状态见 21.1 决策 #10。
+
 ### 8.2 增加宿主级 Team loop reconciler
 
 `SyncLoops` 继续作为立即触发入口，同时增加常驻 reconciler，例如每 5 秒检查：
@@ -1824,6 +1827,26 @@ runtime auto-cancel is in progress; duplicate cancel is not allowed
 - operator能从单一视图判断“仍健康、等待审批、无进展、owner丢失、正在回收”；
 - wait timeout与execution timeout在UI和JSON中无歧义。
 
+#### P6 实施状态（2026-08-01）
+
+已完成：
+
+1. `wait_team` 接入 Team event/task wake sequence（事件驱动 + fallback tick）。
+2. `wait_agent` 输出 execution run 监督字段（deadline/heartbeat/progress/attempt）。
+3. `/debug`、diagnostics、TUI 展示 deadline/heartbeat/progress/attempt。
+4. supervisor 告警与 runbook（`internal/supervision/alerts.go` 五类告警 + `docs/plan/supervision-operator-runbook.md`）。
+5. supervision snapshot cursor、preflight digest、critical wake 和 action 诊断完善。
+
+回归结论（`go test -count=1`）：
+
+- `./internal/supervision/...`、`./internal/team/...`、`./pkg/skillsapi/...`、`./cmd/aicli/commands/` 全部通过。
+- 已知预先存在 flaky：`TestPromptStartupSessionSelectionWithReader_RetriesAfterInvalidChoice`
+  （`cmd/aicli/commands`，与 P6 改动无关）：`captureStdoutStderr` 进程级替换
+  `os.Stdout` 时，异步兄弟测试的 motion spinner repaint 帧跨 capture 窗口截断，
+  残留裸 `u` 误报 stdout 泄漏；多包并行（`-p`）下高概率复现、单测通过。
+  已改进 `stripAsyncTerminalNoise` 剥除孤立 `\x1b[u` restore（save 落在窗口外）；
+  彻底修复需让动画帧写入与 capture 窗口互斥或抑制动画 goroutine（外部 ui 库）。
+
 ---
 
 ## 14. 测试计划
@@ -2222,3 +2245,22 @@ wait_agent / wait_team只负责等待观察，不承担保活和恢复；
 
 - 每项决策后回写本文对应小节，保持文档为唯一权威；
 - 未决策项不得进入 enforce 灰度；observe 模式可先行验证但需在验收中标注 open。
+
+### 21.1 决策记录（2026-07-31，P0–P6 实施完成并全量回归通过后回写）
+
+以下 10 项开放问题均已在实施过程中落地为代码决策；除第 10 项外全部按实际实现回写，未留悬空项。代码位置以 `backend/` 相对路径给出。
+
+| # | 决策 | 落地证据 |
+|---|---|---|
+| 1 | fencing token 用 SQLite 内建 `lower(hex(randomblob(16)))` 随机 token，不引入 MAX+1 或独立 sequence 表；task 层 `fencing_token` 列 + CAS `WHERE` 校验，owner lease 层同款 mint/rotate；随机 token 天然预留跨进程扩展（P5 双实例竞争测试覆盖） | `internal/team/sqlite_owner_lease.go`（mint/rotate/续租/release 均带 token 条件）、`internal/team/agent_task_registry.go`（完成态清除 token）、`internal/team/orchestrator_ownership_test.go` |
+| 2 | `execution_runs` 采用独立新表 `supervision_execution_runs` + 完成通知 outbox `supervision_completion_outbox`，不做 AgentControl registry / Team store 的投影；通过 `session_id` / `root_session_id` / `parent_run_id` 关联 | `internal/supervision/sqlite_store.go`（migration v2）、`internal/supervision/execution_store.go`、`internal/supervision/execution_run_hook.go` |
+| 3 | progress 采用"loop 事件埋点 + hook 落库"：只写 `last_progress_at` 与单调递增 `progress_seq`，不逐 step 写库；run 进入终态后 progress 写入幂等忽略 | `internal/supervision/execution_store.go`（RecordProgress）、`internal/agent/loop.go` 埋点 |
+| 4 | 不引入工具级幂等声明 schema（toolbroker types 与 provider adapter 层均不新增字段）；幂等由 completion outbox 的 `IdempotencyKey`（`subagent_completion:<run_id>:<terminal_version>`）+ 动作 CAS 保证；`ActionRetry` 是动作层重新入队语义，不要求工具声明。工具幂等声明按 7.7 留待工具 schema 规范对齐时另行设计 | `internal/supervision/execution_store.go`（outbox 幂等键）、`internal/supervision/action_service.go`（`isMutationAction` / `ActionRetry`） |
+| 5 | critical wake 遇 waiting approval 父会话时写 durable `wake_pending`（insert/claim/resolve 幂等），父会话 turn 结束后由 `DrainRunnable` 立即 drain 触发，不等 approval 结束 | `internal/supervision/wake_scheduler.go`、`internal/supervision/types.go`（`WakePending`）、`internal/supervision/sqlite_store.go` |
+| 6 | cascade 深度显式枚举 `CascadeNone` / `CascadeDescendants`；cascade 仅允许 `cancel_subtree` / `close` / `retry` 三类动作（其余动作带 cascade 直接校验拒绝）；`cancel_subtree` 隐含 descendants，`close` / `retry` 默认仅 target 自身 | `internal/supervision/types.go`（`CascadeMode`）、`internal/supervision/action_service.go`（cascade 校验） |
+| 7 | child Team 的 Lead 切换与接管由独立 owner lease 生命周期负责（P5 新 owner 原子 acquire + 恢复），parent Team 终态不强制要求 child 收敛；parent 终态由 supervision snapshot/rollup digest 汇总 child 状态，child 收敛由自己的 owner loop 推进 | `internal/team/sqlite_owner_lease.go`、`internal/supervision`（Team parent edges，6.1/6.7）、`internal/supervision/rollup` |
+| 8 | 审计仅写状态迁移动作与拒绝路径（CAS 变更、late result 拒绝、owner 接管、cancel/retry 等），observe 判定不逐条写审计，控制 14.5 写放大与 retention | `internal/supervision/execution_store.go`（CAS 条件更新）、`internal/team/agent_task_registry.go`（late result 审计拒绝） |
+| 9 | SQLite 迁移采用顺序版本 migration + `CREATE TABLE IF NOT EXISTS` 幂等建表 + 单写者事务；多实例并发迁移由版本顺序与幂等 DDL 保证，不引入独立锁表 | `internal/supervision/sqlite_store.go`（v1/v2）、`internal/team/sqlite_store.go`（v24 owner lease 表） |
+| 10 | **open（已知限制，未进入 enforce）**：`TeamStatusPaused` 已落地（terminal reconcile 正确停住：不 terminal、不 transition、不启 loop、不写事件），但 8.2 补充设计的 `pause_reason` 持久化、active task attempt 的 paused 标记、resume 重新走原子 acquire、`pause_max_duration` 升级通道均未实现；补实现前 pause 只能通过外部状态迁移进入/退出 | `internal/team/terminal_state.go`、`internal/team/types.go`、`internal/team/terminal_state_test.go`（paused 非终态用例） |
+
+状态汇总：10 项中 9 项已决策并落地，1 项（#10）open 并标注为已知限制；后续若补实现 #10，需先更新 8.2 补充设计与本节决策记录再动代码。

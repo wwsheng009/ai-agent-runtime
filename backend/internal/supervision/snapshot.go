@@ -70,6 +70,19 @@ type SnapshotItem struct {
 	HeartbeatAgeMs     int64              `json:"heartbeat_age_ms,omitempty"`
 	ProgressAgeMs      int64              `json:"progress_age_ms,omitempty"`
 	ExecutionDeadlineAt *time.Time        `json:"execution_deadline_at,omitempty"`
+	// Execution run supervision fields (P6-3): attached from the durable
+	// execution run record so operators see attempt, deadlines, heartbeat and
+	// progress timestamps in one view (doc 10 rule 3).
+	RunID              string     `json:"run_id,omitempty"`
+	RunStatus          string     `json:"run_status,omitempty"`
+	Attempt            int        `json:"attempt,omitempty"`
+	MaxAttempts        int        `json:"max_attempts,omitempty"`
+	RunOwnerID         string     `json:"run_owner_id,omitempty"`
+	ProgressDeadlineAt *time.Time `json:"progress_deadline_at,omitempty"`
+	ApprovalDeadlineAt *time.Time `json:"approval_deadline_at,omitempty"`
+	CancelDeadlineAt   *time.Time `json:"cancel_deadline_at,omitempty"`
+	LastHeartbeatAt    *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastProgressAt     *time.Time `json:"last_progress_at,omitempty"`
 	Reason             string             `json:"reason,omitempty"`
 	AutoAction         *SnapshotAutoAction `json:"auto_action,omitempty"`
 	RecommendedAction  string             `json:"recommended_action,omitempty"`
@@ -104,6 +117,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 	if store == nil {
 		return nil, fmt.Errorf("supervision store is required")
 	}
+	runStore, _ := store.(ExecutionRunStore)
 	snapshot := &Snapshot{
 		Scope:       req.Scope,
 		GeneratedAt: timeNow().UTC(),
@@ -219,6 +233,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 			item.RecommendedAction = "inspect_cancel_result"
 			item.ActionRequired = false
 		}
+		attachExecutionRun(ctx, runStore, &item)
 		snapshot.Descendants = append(snapshot.Descendants, item)
 	}
 
@@ -245,6 +260,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 		if action, ok := actionByTarget[key]; ok {
 			item.AutoAction = &SnapshotAutoAction{Action: action.Action, Status: action.Status, ActionID: action.ActionID}
 		}
+		attachExecutionRun(ctx, runStore, &item)
 		snapshot.Descendants = append(snapshot.Descendants, item)
 	}
 
@@ -307,6 +323,48 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 }
 
 const defaultSnapshotLimit = 200
+
+// attachExecutionRun overlays the durable execution run supervision fields
+// (P6-3) onto a snapshot item when the backing store is also an
+// ExecutionRunStore and a run exists for the descendant session. Best-effort:
+// missing run records or query failures leave the run fields empty without
+// failing the snapshot.
+func attachExecutionRun(ctx context.Context, runStore ExecutionRunStore, item *SnapshotItem) {
+	if runStore == nil || item == nil {
+		return
+	}
+	if item.Kind != SubjectAgentSession && item.Kind != SubjectAgentRun {
+		return
+	}
+	sessionID := strings.TrimSpace(item.ID)
+	if sessionID == "" {
+		return
+	}
+	runs, err := runStore.ListExecutionRunsBySession(ctx, sessionID, 1)
+	if err != nil || len(runs) == 0 {
+		return
+	}
+	run := runs[0]
+	item.RunID = strings.TrimSpace(run.RunID)
+	item.RunStatus = strings.TrimSpace(run.Status)
+	item.Attempt = run.Attempt
+	item.MaxAttempts = run.MaxAttempts
+	item.RunOwnerID = strings.TrimSpace(run.OwnerID)
+	item.ProgressDeadlineAt = run.ProgressDeadlineAt
+	item.ApprovalDeadlineAt = run.ApprovalDeadlineAt
+	item.CancelDeadlineAt = run.CancelDeadlineAt
+	if !run.LastHeartbeatAt.IsZero() {
+		lastHeartbeat := run.LastHeartbeatAt
+		item.LastHeartbeatAt = &lastHeartbeat
+	}
+	if !run.LastProgressAt.IsZero() {
+		lastProgress := run.LastProgressAt
+		item.LastProgressAt = &lastProgress
+	}
+	if item.ExecutionDeadlineAt == nil {
+		item.ExecutionDeadlineAt = run.ExecutionDeadlineAt
+	}
+}
 
 func itemAbnormal(item SnapshotItem) bool {
 	switch item.SupervisionState {

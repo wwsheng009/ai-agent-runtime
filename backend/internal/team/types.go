@@ -48,6 +48,9 @@ const (
 	TaskStatusDone      TaskStatus = "done"
 	TaskStatusFailed    TaskStatus = "failed"
 	TaskStatusCancelled TaskStatus = "cancelled"
+	// TaskStatusReclaimPending marks a task whose lease expired and is waiting
+	// for the reclaim grace window before being returned to the ready queue.
+	TaskStatusReclaimPending TaskStatus = "reclaim_pending"
 )
 
 const (
@@ -131,6 +134,8 @@ type Task struct {
 	Summary             string     `json:"summary,omitempty"`
 	ResultRef           *string    `json:"result_ref,omitempty"`
 	Version             int64      `json:"version"`
+	Attempt             int        `json:"attempt"`
+	FencingToken        string     `json:"fencing_token,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }

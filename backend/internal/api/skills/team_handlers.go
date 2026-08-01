@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,6 +130,18 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 	orchestrator.Store = store
 	orchestrator.Claims = claims
 	orchestrator.ExpertConcurrencyLimit = teamExpertConcurrencyLimit(h.teamRoutingConfig())
+	if orchestrator.OwnerID == "" {
+		h.teamOrchestratorOwnerOnce.Do(func() {
+			h.teamOrchestratorOwnerID = fmt.Sprintf("orchestrator-%s-%d-%s", currentHostname(), os.Getpid(), uuid.NewString()[:8])
+		})
+		orchestrator.OwnerID = h.teamOrchestratorOwnerID
+	}
+	if orchestrator.OwnerInstance == "" {
+		orchestrator.OwnerInstance = fmt.Sprintf("%s:%d", currentHostname(), os.Getpid())
+	}
+	if orchestrator.OwnerLeaseTTL <= 0 {
+		orchestrator.OwnerLeaseTTL = team.DefaultOrchestratorLeaseTTL
+	}
 	applyTeamOrchestratorMailboxWake(orchestrator, mailboxWakeStore)
 
 	mailbox := orchestrator.Mailbox
@@ -196,6 +209,12 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 		}
 		if orchestrator.Runner.RouteAudit == nil {
 			orchestrator.Runner.RouteAudit = newAPITeamTaskRouteAuditSink(store, orchestrator.Events)
+		}
+		if orchestrator.Runner.Claims == nil {
+			orchestrator.Runner.Claims = claims
+		}
+		if orchestrator.Runner.LeaseTTL <= 0 && orchestrator.LeaseDuration > 0 {
+			orchestrator.Runner.LeaseTTL = orchestrator.LeaseDuration
 		}
 		if orchestrator.LeadPlanner == nil {
 			orchestrator.LeadPlanner = &team.LeadPlanner{}
@@ -2072,6 +2091,7 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 		ResultRef       *string `json:"result_ref,omitempty"`
 		TeammateID      string  `json:"teammate_id,omitempty"`
 		SkipStateUpdate bool    `json:"skip_state_update,omitempty"`
+		FencingToken    string  `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -2092,8 +2112,31 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 		ResultRef:       normalizeOptionalString(req.ResultRef),
 		TeammateID:      req.TeammateID,
 		SkipStateUpdate: req.SkipStateUpdate,
+		FencingToken:    req.FencingToken,
 	})
 	if err != nil {
+		if err == agentcontrol.ErrTaskFencingMismatch {
+			// Late result from a stale attempt: audit the rejection and refuse
+			// to mutate the task without failing the whole request path.
+			teamID := strings.TrimSpace(req.TeamID)
+			if teamID == "" {
+				if current, loadErr := store.GetTask(r.Context(), taskID); loadErr == nil && current != nil {
+					teamID = current.TeamID
+				}
+			}
+			if teamID != "" {
+				_, _ = team.NewMailboxService(store).Send(r.Context(), team.MailMessage{
+					TeamID:    teamID,
+					FromAgent: "orchestrator",
+					ToAgent:   "*",
+					Kind:      "warning",
+					Body:      fmt.Sprintf("Rejected late terminal result for task %s: fencing token mismatch (stale attempt).", taskID),
+					TaskID:    &taskID,
+				})
+			}
+			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "task fencing token mismatch: stale attempt result rejected"))
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -4426,7 +4469,7 @@ func (h *Handler) SweepTeammates(w http.ResponseWriter, r *http.Request) {
 			if !includeNeverSeen {
 				continue
 			}
-		} else if asOf.Sub(mate.LastHeartbeat) < offlineAfter {
+		} else if !team.TeammateIsStale(mate, asOf, offlineAfter) {
 			continue
 		}
 		if dryRun {

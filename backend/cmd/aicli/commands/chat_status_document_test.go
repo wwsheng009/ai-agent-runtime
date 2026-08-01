@@ -111,6 +111,13 @@ func stripAsyncTerminalNoise(s string) string {
 	for {
 		start := strings.Index(s, "\x1b[s")
 		if start < 0 {
+			// 孤立 restore（save 落在 capture 窗口之外）：同样是异步
+			// spinner 残留，必须剥掉，否则残留裸 "u" 会误报 stdout 泄漏。
+			if end := strings.Index(s, "\x1b[u"); end >= 0 {
+				b.WriteString(s[:end])
+				s = s[end+2:]
+				continue
+			}
 			b.WriteString(s)
 			break
 		}

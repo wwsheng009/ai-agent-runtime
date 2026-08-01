@@ -11,6 +11,10 @@ const (
 	WakeKindMailbox = "mailbox"
 	// WakeKindTask identifies task lifecycle scheduler wake events.
 	WakeKindTask = "task"
+	// WakeKindTeam identifies team lifecycle wake events (team.completed,
+	// team.summary, and other durable team_events rows). Consumed by
+	// event-driven wait_team and diagnostics instead of short polling.
+	WakeKindTeam = "team"
 )
 
 // WakeFilter identifies a generic AgentControl wake stream. Workflow adapters

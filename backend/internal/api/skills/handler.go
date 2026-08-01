@@ -148,6 +148,8 @@ type Handler struct {
 	teamOrchestrator   *team.Orchestrator
 	teamClaimsManager  *team.PathClaimManager
 	teamLifecycle      *handlerTeamLifecycleService
+	teamOrchestratorOwnerOnce sync.Once
+	teamOrchestratorOwnerID   string
 
 	supervisionStoreMu            sync.RWMutex
 	supervisionStore              supervision.Store

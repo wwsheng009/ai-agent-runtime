@@ -1071,6 +1071,7 @@ func chatAgentGraphLinesAndSelectedSession(session *ChatSession, selected string
 			parts = append(parts, "type="+agent.AgentType)
 		}
 		parts = appendAgentTeamTaskParts(parts, agent)
+		parts = appendAgentRunSupervisionParts(parts, agent)
 		if agent.PendingApproval {
 			parts = append(parts, "approval=pending")
 		}
@@ -1757,6 +1758,26 @@ func chatAgentPanelSummaryAgentLine(agent toolbroker.AgentStatusResult, selected
 	} else if taskID := strings.TrimSpace(agent.CurrentTaskID); taskID != "" {
 		parts = append(parts, "task="+taskID)
 	}
+	// P6-3: compact supervision fields so the panel distinguishes healthy /
+	// no-progress / being-canceled agents without opening the full graph.
+	if agent.RunStatus != "" {
+		parts = append(parts, "run_status="+agent.RunStatus)
+	}
+	if agent.Attempt > 0 || agent.MaxAttempts > 0 {
+		parts = append(parts, fmt.Sprintf("attempt=%d/%d", agent.Attempt, agent.MaxAttempts))
+	}
+	if deadline := chatSupervisionTimeShort(agent.ExecutionDeadlineAt); deadline != "" {
+		parts = append(parts, "exec_deadline="+deadline)
+	}
+	if deadline := chatSupervisionTimeShort(agent.CancelDeadlineAt); deadline != "" {
+		parts = append(parts, "cancel_deadline="+deadline)
+	}
+	if progress := chatSupervisionTimeShort(agent.LastProgressAt); progress != "" {
+		parts = append(parts, "progress="+progress)
+	}
+	if heartbeat := chatSupervisionTimeShort(agent.LastHeartbeatAt); heartbeat != "" {
+		parts = append(parts, "heartbeat="+heartbeat)
+	}
 	return strings.Join(parts, " ")
 }
 
@@ -1941,6 +1962,62 @@ func appendAgentTeamTaskParts(parts []string, agent toolbroker.AgentStatusResult
 		parts = append(parts, "task_status="+agent.CurrentTaskStatus)
 	}
 	return parts
+}
+
+// appendAgentRunSupervisionParts renders the P6-2/P6-3 execution run
+// supervision fields (run status, attempt, deadlines, heartbeat and progress)
+// so operators can distinguish "still healthy", "waiting approval", "no
+// progress" and "being canceled" from the agent graph at a glance.
+func appendAgentRunSupervisionParts(parts []string, agent toolbroker.AgentStatusResult) []string {
+	if agent.RunID != "" {
+		parts = append(parts, "run="+agent.RunID)
+	}
+	if agent.RunStatus != "" {
+		parts = append(parts, "run_status="+agent.RunStatus)
+	}
+	if agent.Attempt > 0 || agent.MaxAttempts > 0 {
+		parts = append(parts, fmt.Sprintf("attempt=%d/%d", agent.Attempt, agent.MaxAttempts))
+	}
+	if deadline := chatSupervisionTimeShort(agent.ExecutionDeadlineAt); deadline != "" {
+		parts = append(parts, "exec_deadline="+deadline)
+	}
+	if deadline := chatSupervisionTimeShort(agent.ProgressDeadlineAt); deadline != "" {
+		parts = append(parts, "progress_deadline="+deadline)
+	}
+	if deadline := chatSupervisionTimeShort(agent.CancelDeadlineAt); deadline != "" {
+		parts = append(parts, "cancel_deadline="+deadline)
+	}
+	if heartbeat := chatSupervisionTimeShort(agent.LastHeartbeatAt); heartbeat != "" {
+		parts = append(parts, "heartbeat="+heartbeat)
+	}
+	if progress := chatSupervisionTimeShort(agent.LastProgressAt); progress != "" {
+		parts = append(parts, "progress="+progress)
+	}
+	return parts
+}
+
+// chatSupervisionTimeShort renders an RFC3339Nano supervision timestamp as a
+// compact relative duration (P6-3): "in 45s", "5m ago", or "" when empty.
+func chatSupervisionTimeShort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return value
+	}
+	d := time.Until(parsed)
+	switch {
+	case d >= time.Minute:
+		return fmt.Sprintf("in %dm", int(d.Minutes()))
+	case d >= 0:
+		return fmt.Sprintf("in %ds", int(d.Seconds()))
+	case d > -time.Minute:
+		return fmt.Sprintf("%ds ago", int(-d.Seconds()))
+	default:
+		return fmt.Sprintf("%dm ago", int(-d.Minutes()))
+	}
 }
 
 func printChatTimeline(session *ChatSession, command string) {

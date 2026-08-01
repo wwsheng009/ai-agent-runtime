@@ -158,17 +158,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			fmt.Println("用法: /title <title> 或 /rename <title>")
 			return false
 		}
-		if session.RuntimeSession == nil {
-			fmt.Println("错误: 当前没有可更新的会话")
-			return false
-		}
-		session.RuntimeSession.UpdateTitle(title)
-		if err := syncRuntimeSessionFromChat(session); err != nil {
+		if err := updateChatSessionTitle(session, title); err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
-		refreshChatTitleMetadata(session)
-		fmt.Println("会话标题已更新")
+		printfDirectInteractiveOutput(session, "会话标题已更新\n")
 		return false
 	}
 	if commandMatches(cmdLower, "/image") {
@@ -380,6 +374,21 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	}
 
 	return false
+}
+
+// updateChatSessionTitle applies a successful /title or /rename mutation. The
+// structured command adapter and the direct compatibility handler share this
+// side-effect boundary; only the caller selects its output projection.
+func updateChatSessionTitle(session *ChatSession, title string) error {
+	if session == nil || session.RuntimeSession == nil {
+		return fmt.Errorf("当前没有可更新的会话")
+	}
+	session.RuntimeSession.UpdateTitle(title)
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		return err
+	}
+	refreshChatTitleMetadata(session)
+	return nil
 }
 
 func confirmClearConversationHistory(session *ChatSession) bool {
