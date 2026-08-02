@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/url"
 	"sort"
@@ -31,6 +32,11 @@ const (
 	codexImageGenerationToolType            = "image_generation"
 	codexImageGenerationCallType            = "image_generation_call"
 	codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
+	// codexSupportsSamplingMetadataKey 控制是否发送 temperature/top_p。
+	// Codex CLI 协议本身没有采样参数,而官方 Responses API 支持;默认不发送,
+	// 仅当上游确认支持(metadata supports_sampling=true)时才透传,避免破坏
+	// 严格校验请求体的 Codex 兼容上游。
+	codexSupportsSamplingMetadataKey = "supports_sampling"
 	codexToolSchemaCompactBytes             = 5000
 	codexToolSchemaCompactDepth             = 3
 )
@@ -53,11 +59,28 @@ type CodexStreamState struct {
 	OutputItems   map[int]map[string]interface{}
 	FinishReason  string
 	Usage         map[string]int64
+	// UsageDetails 保留官方 Responses usage 的明细(input_tokens_details /
+	// output_tokens_details),流式合并时不被丢弃。
+	UsageDetails  map[string]interface{}
 	ErrorCode     string
 	ErrorMessage  string
 	Annotations   []map[string]interface{}
+	// AnnotationDeltas 累积官方 response.output_text.annotation.delta 事件
+	// 的 delta(annotation_index -> 片段)。url_citation 等 annotation 的 url
+	// 字段可能通过 delta 事件流式到达,added 事件中为空串。
+	AnnotationDeltas map[int]string
+	// SafetyItems 累积官方 response.item_safety.* 事件的内容安全过滤信息
+	// (code/reason),供调用方诊断被过滤的输出。
+	SafetyItems []map[string]interface{}
 	UnknownEvents map[string]int
 	ImagePhases   map[string]map[string]struct{}
+
+	// BuiltinToolEvents records official Responses built-in tool events/items
+	// (web_search_call, file_search_call, code_interpreter_call, computer_call,
+	// mcp_call, audio, ...) that this adapter does not execute. They are surfaced
+	// in the result and turned into an explicit error instead of being silently
+	// dropped into UnknownEvents.
+	BuiltinToolEvents map[string]int
 
 	// 追踪当前 output item
 	CurrentItemIndex   int
@@ -86,7 +109,10 @@ func NewCodexStreamState() *CodexStreamState {
 		ToolItemKeys:       make(map[string]int),
 		OutputItems:        make(map[int]map[string]interface{}),
 		Usage:              make(map[string]int64),
+		UsageDetails:       make(map[string]interface{}),
+		AnnotationDeltas:   make(map[int]string),
 		UnknownEvents:      make(map[string]int),
+		BuiltinToolEvents:  make(map[string]int),
 		ImagePhases:        make(map[string]map[string]struct{}),
 		CurrentItemIndex:   -1,
 		NextSyntheticIndex: 1000000,
@@ -109,6 +135,15 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		// so requests should stay stateless across Codex-compatible upstreams.
 		"store": false,
 	}
+	// store / previous_response_id:默认 stateless(store=false)。仅当调用方在
+	// metadata 中显式覆盖 store,或提供 previous_response_id 续接服务端记忆时
+	// 才发送,兼顾官方 Responses 多轮语义与 Codex 兼容上游的严格校验。
+	if store, ok := requestMetadataBool(config.Metadata, "store"); ok {
+		request["store"] = store
+	}
+	if previousResponseID := strings.TrimSpace(stringFromMetadata(config.Metadata, "previous_response_id")); previousResponseID != "" {
+		request["previous_response_id"] = previousResponseID
+	}
 	if instructions != "" {
 		request["instructions"] = instructions
 	}
@@ -119,9 +154,12 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		request["service_tier"] = serviceTier
 	}
 
-	// 设置 max_output_tokens（仅对支持该字段的 Codex 兼容上游发送）
+	// 设置 max_output_tokens（仅对支持该字段的 Codex 兼容上游发送）。
+	// metadata 中的显式值优先,支持官方 Responses 的字符串取值(如 "inf")。
 	if metadataAllowsCodexMaxOutputTokens(config.Metadata) {
-		if config.MaxTokens > 0 {
+		if explicit, ok := codexExplicitMaxOutputTokens(config.Metadata); ok {
+			request["max_output_tokens"] = explicit
+		} else if config.MaxTokens > 0 {
 			request["max_output_tokens"] = config.MaxTokens
 		} else {
 			request["max_output_tokens"] = 4096
@@ -145,7 +183,7 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		if len(tools) > 0 {
 			request["tools"] = tools
 			if config.ToolChoice != nil {
-				request["tool_choice"] = config.ToolChoice
+				request["tool_choice"] = normalizeCodexToolChoice(config.ToolChoice)
 			} else {
 				request["tool_choice"] = "auto"
 			}
@@ -158,7 +196,230 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		}
 	}
 
+	applyCodexResponseTextFormat(request, config)
+	applyCodexSamplingParams(request, config)
+	applyCodexStreamOptions(request, config)
+	applyCodexStop(request, config)
+	applyCodexUser(request, config)
+	applyCodexTruncation(request, config)
+	applyCodexExtraBody(request, config)
+	applyCodexResponseMetadata(request, config)
+
 	return request
+}
+
+// applyCodexResponseTextFormat 将 OpenAI Chat 风格 / Responses 风格的
+// response_format 转换为 Responses API 的 text.format(结构化输出)。
+func applyCodexResponseTextFormat(request map[string]interface{}, config RequestConfig) {
+	raw, ok := openAICompatibleMetadataValue(config.Metadata, "response_format")
+	if !ok {
+		return
+	}
+	responseFormat, ok := raw.(map[string]interface{})
+	if !ok || len(responseFormat) == 0 {
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(asCodexString(responseFormat["type"]))) {
+	case "", "text":
+		// 默认文本输出,无需显式声明 text.format。
+		return
+	case "json_object":
+		// Responses API 没有 json_object 模式,发送该字段会导致上游报错;
+		// 保持默认文本输出。需要强制 JSON 时请使用 json_schema。
+		return
+	case "json_schema":
+		format := buildCodexJSONSchemaFormat(responseFormat)
+		if format == nil {
+			return
+		}
+		request["text"] = map[string]interface{}{"format": format}
+	}
+}
+
+// buildCodexJSONSchemaFormat 同时接受两种 json_schema 形态:
+//   - Chat Completions 风格:{"type":"json_schema","json_schema":{"name":...,"schema":...}}
+//   - Responses 风格:{"type":"json_schema","name":...,"schema":...,"strict":...}
+func buildCodexJSONSchemaFormat(responseFormat map[string]interface{}) map[string]interface{} {
+	schemaSource := responseFormat
+	if nested, ok := responseFormat["json_schema"].(map[string]interface{}); ok && len(nested) > 0 {
+		schemaSource = nested
+	}
+
+	schema, ok := schemaSource["schema"]
+	if !ok || schema == nil {
+		return nil
+	}
+	switch typed := schema.(type) {
+	case map[string]interface{}:
+		if len(typed) == 0 {
+			return nil
+		}
+	case []interface{}:
+		if len(typed) == 0 {
+			return nil
+		}
+	default:
+		return nil
+	}
+
+	format := map[string]interface{}{
+		"type":   "json_schema",
+		"name":   "response_schema",
+		"schema": schema,
+	}
+	if name := strings.TrimSpace(asCodexString(schemaSource["name"])); name != "" {
+		format["name"] = name
+	}
+	if strict, ok := schemaSource["strict"].(bool); ok {
+		format["strict"] = strict
+	}
+	if description := strings.TrimSpace(asCodexString(schemaSource["description"])); description != "" {
+		format["description"] = description
+	}
+	return format
+}
+
+// applyCodexSamplingParams 在 upstream 明确支持时透传 temperature/top_p。
+func applyCodexSamplingParams(request map[string]interface{}, config RequestConfig) {
+	if !metadataAllowsCodexSampling(config.Metadata) {
+		return
+	}
+	if temperature, ok := openAICompatibleMetadataNumber(config.Metadata, "temperature"); ok {
+		request["temperature"] = temperature
+	} else if config.Temperature > 0 {
+		request["temperature"] = config.Temperature
+	}
+	if topP, ok := openAICompatibleMetadataNumber(config.Metadata, "top_p"); ok {
+		request["top_p"] = topP
+	}
+}
+
+func metadataAllowsCodexSampling(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	value, ok := metadata[codexSupportsSamplingMetadataKey]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off":
+			return false
+		}
+	}
+	return false
+}
+
+// applyCodexStreamOptions 透传官方 Responses 的 stream_options(如
+// {"include_usage": true})。仅流式请求时发送,非流式发送会被上游忽略或报错。
+func applyCodexStreamOptions(request map[string]interface{}, config RequestConfig) {
+	if !config.Stream {
+		return
+	}
+	streamOptions, ok := openAICompatibleMetadataObject(config.Metadata, "stream_options")
+	if !ok {
+		return
+	}
+	request["stream_options"] = streamOptions
+}
+
+// applyCodexStop 透传官方 Responses 的 stop 参数(单个字符串或字符串数组)。
+func applyCodexStop(request map[string]interface{}, config RequestConfig) {
+	stop, ok := openAICompatibleMetadataStopValue(config.Metadata["stop"])
+	if !ok {
+		return
+	}
+	request["stop"] = stop
+}
+
+// applyCodexUser 透传官方 Responses 的顶层 user 参数(终端用户标识,用于
+// 审计与安全策略)。
+func applyCodexUser(request map[string]interface{}, config RequestConfig) {
+	if user := strings.TrimSpace(stringFromMetadata(config.Metadata, "user")); user != "" {
+		request["user"] = user
+	}
+}
+
+// applyCodexTruncation 透传官方 Responses 的 truncation 参数(auto/disabled),
+// 仅接受合法取值,避免非法值导致上游 400。
+func applyCodexTruncation(request map[string]interface{}, config RequestConfig) {
+	value := strings.ToLower(strings.TrimSpace(stringFromMetadata(config.Metadata, "truncation")))
+	switch value {
+	case "auto", "disabled":
+		request["truncation"] = value
+	}
+}
+
+// applyCodexExtraBody 合并 metadata 中的 extra_body 到请求顶层,与 OpenAI 层
+// 行为一致:不覆盖已存在的键,便于调用方透传官方 SDK 未建模的扩展字段。
+func applyCodexExtraBody(request map[string]interface{}, config RequestConfig) {
+	extraBody, ok := openAICompatibleMetadataObject(config.Metadata, "extra_body")
+	if !ok {
+		return
+	}
+	mergeOpenAICompatibleExtraBody(request, extraBody)
+}
+
+// codexResponseMetadataReservedKeys 是适配器已消费、不得透传到上游 metadata 的键。
+var codexResponseMetadataReservedKeys = map[string]struct{}{
+	"prompt_cache_key":        {},
+	"session_id":              {},
+	"conversation_id":         {},
+	"service_tier":            {},
+	"supports_max_output_tokens": {},
+	"supports_sampling":          {},
+	"max_output_tokens":          {},
+	"store":                      {},
+	"previous_response_id":       {},
+	"user":                       {},
+	"truncation":                 {},
+	"response_format":            {},
+	"stream_options":             {},
+	"stop":                       {},
+	"top_p":                      {},
+	"temperature":                {},
+	"frequency_penalty":          {},
+	"presence_penalty":           {},
+	"tool_choice":                {},
+	"parallel_tool_calls":        {},
+	"thinking":                   {},
+	"extra_body":                 {},
+}
+
+// applyCodexResponseMetadata 透传上游 Responses API 官方支持的顶层 metadata。
+// 仅透传字符串值,并过滤适配器内部使用的键,避免把内部开关泄漏给上游。
+func applyCodexResponseMetadata(request map[string]interface{}, config RequestConfig) {
+	if len(config.Metadata) == 0 {
+		return
+	}
+	metadata := make(map[string]string, len(config.Metadata))
+	for key, value := range config.Metadata {
+		if isCodexReservedMetadataKey(key) {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			continue
+		}
+		metadata[key] = text
+	}
+	if len(metadata) > 0 {
+		request["metadata"] = metadata
+	}
+}
+
+func isCodexReservedMetadataKey(key string) bool {
+	if _, reserved := codexResponseMetadataReservedKeys[key]; reserved {
+		return true
+	}
+	return strings.HasPrefix(key, "codex_")
 }
 
 func (a *CodexAdapter) resolvePromptCacheKey(config RequestConfig) string {
@@ -172,6 +433,39 @@ func (a *CodexAdapter) resolvePromptCacheKey(config RequestConfig) string {
 		return key
 	}
 	return ""
+}
+
+// normalizeCodexToolChoice 将调用方传入的 tool_choice 归一化为官方 Responses
+// API 形态:
+//   - 字符串("auto"/"none"/"required"/"any")直接透传;
+//   - Responses 风格 {"type":"function","name":"x"} 透传;
+//   - Chat 风格 {"type":"function","function":{"name":"x"}} 展平为
+//     {"type":"function","name":"x"}(Chat 嵌套形态会被严格校验的
+//     Responses 上游以 400 拒绝)。
+func normalizeCodexToolChoice(raw interface{}) interface{} {
+	if raw == nil {
+		return nil
+	}
+	if _, ok := raw.(string); ok {
+		return raw
+	}
+	choice, ok := raw.(map[string]interface{})
+	if !ok || len(choice) == 0 {
+		return raw
+	}
+	choiceType := strings.ToLower(strings.TrimSpace(asCodexString(choice["type"])))
+	if choiceType != "function" {
+		return choice
+	}
+	if name := strings.TrimSpace(asCodexString(choice["name"])); name != "" {
+		return map[string]interface{}{"type": "function", "name": name}
+	}
+	if fnObj, ok := choice["function"].(map[string]interface{}); ok {
+		if name := strings.TrimSpace(asCodexString(fnObj["name"])); name != "" {
+			return map[string]interface{}{"type": "function", "name": name}
+		}
+	}
+	return nil
 }
 
 // resolveCodexServiceTier maps metadata service_tier to the Responses API value.
@@ -231,6 +525,40 @@ func metadataAllowsCodexMaxOutputTokens(metadata map[string]interface{}) bool {
 	return true
 }
 
+// codexExplicitMaxOutputTokens 读取 metadata 中显式声明的 max_output_tokens。
+// 官方 Responses API 除数字外还接受字符串 "inf"(不设上限),因此这里同时
+// 接受数字与字符串,避免把 "inf" 当作非法整数丢弃。
+func codexExplicitMaxOutputTokens(metadata map[string]interface{}) (interface{}, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	raw, ok := metadata["max_output_tokens"]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	switch typed := raw.(type) {
+	case string:
+		value := strings.TrimSpace(typed)
+		if value == "" {
+			return nil, false
+		}
+		return value, true
+	case int:
+		if typed > 0 {
+			return typed, true
+		}
+	case int64:
+		if typed > 0 {
+			return typed, true
+		}
+	case float64:
+		if typed > 0 {
+			return int64(typed), true
+		}
+	}
+	return nil, false
+}
+
 func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]interface{}) (string, []map[string]interface{}) {
 	if len(messages) == 0 {
 		return "", nil
@@ -287,11 +615,18 @@ func NormalizeCodexReasoningEffort(effort string) string {
 func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interface{}) []map[string]interface{} {
 	input := make([]map[string]interface{}, 0, len(messages))
 	toolCallKinds := make(map[string]string)
+	pendingCalls := make([]map[string]interface{}, 0)
 
 	for _, msg := range messages {
 		if outputItems := decodeSliceOfMaps(msg[codexResponseOutputItemsKey]); len(outputItems) > 0 {
+			// 非 tool 消息出现时,先 flush 尚未配对的 function_call,保持
+			// assistant(tool_calls) 之后的相对顺序不被推迟。
+			input = append(input, pendingCalls...)
+			pendingCalls = pendingCalls[:0]
 			registerCodexToolKindsFromOutputItems(toolCallKinds, outputItems)
-			input = append(input, outputItems...)
+			for _, item := range outputItems {
+				input = append(input, ensureCodexInputItemID(item))
+			}
 			continue
 		}
 
@@ -300,14 +635,33 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 
 		switch role {
 		case "user", "assistant", "developer", "system":
+			// 非 tool 消息:先 flush 未配对的 function_call,避免其顺序
+			// 漂移到后续消息之后。
+			input = append(input, pendingCalls...)
+			pendingCalls = pendingCalls[:0]
 			content := extractCodexMessageText(msg)
 			reasoning := extractCodexReasoningText(msg)
+			name := strings.TrimSpace(asCodexString(msg["name"]))
 			if role == "assistant" {
 				if reasoning != "" {
 					input = append(input, buildCodexReasoningItem(reasoning))
 				}
-				if content != "" {
-					input = append(input, buildCodexAssistantMessageItem(content))
+				if parts := extractCodexUserInputParts(msg); len(parts) > 0 {
+					item := map[string]interface{}{
+						"type":    "message",
+						"role":    "assistant",
+						"content": parts,
+					}
+					if name != "" {
+						item["name"] = name
+					}
+					input = append(input, item)
+				} else if content != "" {
+					item := buildCodexAssistantMessageItem(content)
+					if name != "" {
+						item["name"] = name
+					}
+					input = append(input, item)
 				}
 			} else {
 				// Codex input accepts developer messages. Map residual system
@@ -320,6 +674,9 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 				inputItem := map[string]interface{}{
 					"type": "message",
 					"role": inputRole,
+				}
+				if name != "" {
+					inputItem["name"] = name
 				}
 				if role == "user" {
 					if parts := extractCodexUserInputParts(msg); len(parts) > 0 {
@@ -350,7 +707,7 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 					for _, tc := range toolCallsRaw {
 						if item := buildCodexFunctionCallItem(tc); item != nil {
 							registerCodexToolKind(toolCallKinds, item)
-							input = append(input, item)
+							pendingCalls = append(pendingCalls, item)
 						}
 					}
 				}
@@ -358,14 +715,15 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 
 		case "tool":
 			// 处理工具调用结果消息
-			toolCallID, _ := msg["tool_call_id"].(string)
-			content, _ := msg["content"].(string)
+			toolCallID := strings.TrimSpace(asCodexString(msg["tool_call_id"]))
+			content := codexToolMessageContentString(msg["content"])
 			itemType := "function_call_output"
-			if kind := strings.TrimSpace(toolCallKinds[strings.TrimSpace(toolCallID)]); kind == "custom_tool_call" {
+			if kind := strings.TrimSpace(toolCallKinds[toolCallID]); kind == "custom_tool_call" {
 				itemType = "custom_tool_call_output"
 			}
 			item := map[string]interface{}{
 				"type":    itemType,
+				"id":      toolCallID,
 				"call_id": toolCallID,
 				"output":  content,
 			}
@@ -374,11 +732,74 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 					item["name"] = name
 				}
 			}
-			input = append(input, item)
+			// 官方 Responses 要求 function_call 与其 function_call_output 成对
+			// 相邻(fc 后紧跟 fco)。把 fco 插到对应 fc 之后,而不是堆在末尾。
+			if idx := findPendingCodexCall(pendingCalls, toolCallID); idx >= 0 {
+				input = append(input, pendingCalls[idx], item)
+				pendingCalls = append(pendingCalls[:idx], pendingCalls[idx+1:]...)
+			} else {
+				input = append(input, item)
+			}
 		}
 	}
 
+	// 消息中剩余的未配对 function_call(如工具结果缺失的历史)追加到末尾,
+	// 避免整条调用被丢弃。
+	input = append(input, pendingCalls...)
+
 	return input
+}
+
+// findPendingCodexCall 返回 pendingCalls 中第一个 call_id 与 target 匹配的
+// item 索引;未找到返回 -1。
+func findPendingCodexCall(pending []map[string]interface{}, target string) int {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return -1
+	}
+	for i, item := range pending {
+		if strings.TrimSpace(asCodexString(item["call_id"])) == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// codexToolMessageContentString 将 tool 消息的 content 规范为官方
+// function_call_output.output 要求的字符串:字符串原样保留,非字符串
+// (对象/数组等结构化结果)按 JSON 序列化,避免工具结果在回放中丢空。
+func codexToolMessageContentString(raw interface{}) string {
+	switch typed := raw.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	}
+}
+
+// codexToolCallInputString 将 custom_tool_call 的 input 规范为字符串:
+// 官方 Responses 中 custom_tool_call.input 接受任意 JSON 值(通常为对象),
+// 字符串原样保留,非字符串按 JSON 序列化,避免对象/数组输入被
+// fmt.Sprint 打成 "map[...]" 垃圾串后传给上层工具执行。
+func codexToolCallInputString(raw interface{}) string {
+	switch typed := raw.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	}
 }
 
 func registerCodexToolKindsFromOutputItems(kinds map[string]string, items []map[string]interface{}) {
@@ -453,6 +874,9 @@ func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, callbac
 		if err := validateCodexToolCalls(result); err != nil {
 			return nil, err
 		}
+		if err := validateCodexBuiltinToolEvents(result); err != nil {
+			return nil, err
+		}
 		procResult := a.ProcessResponse(result)
 		assistantMsg := attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock)
 		attachCodexResultMetadata(assistantMsg, result)
@@ -473,6 +897,9 @@ func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, callbac
 		if err := validateCodexToolCalls(result); err != nil {
 			return nil, err
 		}
+		if err := validateCodexBuiltinToolEvents(result); err != nil {
+			return nil, err
+		}
 		procResult := a.ProcessResponse(result)
 		assistantMsg := attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock)
 		attachCodexResultMetadata(assistantMsg, result)
@@ -483,6 +910,9 @@ func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, callbac
 		return nil, err
 	}
 	if err := validateCodexToolCalls(result); err != nil {
+		return nil, err
+	}
+	if err := validateCodexBuiltinToolEvents(result); err != nil {
 		return nil, err
 	}
 	procResult := a.ProcessResponse(result)
@@ -521,9 +951,55 @@ func validateCodexToolCalls(result map[string]interface{}) error {
 	return nil
 }
 
+// validateCodexBuiltinToolEvents turns official built-in tool events/items
+// (web_search_call, file_search_call, code_interpreter_call, computer_call,
+// mcp_call, audio, ...) into an explicit error. The adapter cannot execute
+// these tools, so silently dropping them would make the agent appear to hang
+// after the model requested a tool call. Surfacing a named error keeps the
+// failure diagnosable and prevents the unsupported item from being replayed
+// into the next request.
+func validateCodexBuiltinToolEvents(result map[string]interface{}) error {
+	names := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for eventType := range decodeMap(result["sse_builtin_tool_events"]) {
+		add(eventType)
+	}
+	for _, item := range decodeSliceOfMaps(result[codexResponseOutputItemsKey]) {
+		if isCodexBuiltinToolItemType(asCodexString(item["type"])) {
+			add("item:" + strings.TrimSpace(asCodexString(item["type"])))
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	return &codexResponseError{
+		kind:    "codex unsupported built-in tool",
+		code:    "unsupported_builtin_tool",
+		message: fmt.Sprintf("upstream returned built-in tool events/items that this adapter does not execute: %s", strings.Join(names, ", ")),
+	}
+}
+
 func attachCodexResultMetadata(assistantMsg map[string]interface{}, result map[string]interface{}) {
 	if finishReason := strings.TrimSpace(asCodexString(result["finish_reason"])); finishReason != "" {
 		assistantMsg["finish_reason"] = finishReason
+	}
+	// BuildAssistantMessage 只保留 content/tool_calls/reasoning,usage(含
+	// input_tokens_details/output_tokens_details 明细)在这里回填,避免流式
+	// 与包装路径丢失 provider 上报的用量。
+	if usage := result["usage"]; usage != nil {
+		assistantMsg["usage"] = usage
 	}
 	metadata := decodeMap(assistantMsg["metadata"])
 	if annotations := decodeSliceOfMaps(result["annotations"]); len(annotations) > 0 {
@@ -532,11 +1008,23 @@ func attachCodexResultMetadata(assistantMsg map[string]interface{}, result map[s
 		}
 		metadata["annotations"] = annotations
 	}
+	if safetyItems := decodeSliceOfMaps(result["item_safety"]); len(safetyItems) > 0 {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["item_safety"] = safetyItems
+	}
 	if unknownEvents := decodeMap(result["sse_unknown_events"]); len(unknownEvents) > 0 {
 		if metadata == nil {
 			metadata = map[string]interface{}{}
 		}
 		metadata["sse_unknown_events"] = unknownEvents
+	}
+	if builtinToolEvents := decodeMap(result["sse_builtin_tool_events"]); len(builtinToolEvents) > 0 {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["sse_builtin_tool_events"] = builtinToolEvents
 	}
 	refusal := strings.TrimSpace(asCodexString(result["refusal"]))
 	if refusal != "" {
@@ -655,6 +1143,8 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleOutputTextDone(state, event, callbacks)
 	case "response.output_text.annotation.added":
 		a.handleOutputTextAnnotationAdded(state, event)
+	case "response.output_text.annotation.delta":
+		a.handleOutputTextAnnotationDelta(state, event)
 	case "response.content_part.done":
 		a.handleContentPartDone(state, event, callbacks)
 	case "response.refusal.delta":
@@ -691,6 +1181,18 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 	case "response.output_item.done":
 		a.handleOutputItemDone(state, event, callbacks)
 
+	case "response.usage.updated":
+		if usage := decodeMap(event["usage"]); usage != nil {
+			mergeCodexUsage(state, usage)
+		}
+
+	case "response.item_safety.message.delta",
+		"response.item_safety.message.done",
+		"response.item_safety.message.part.added",
+		"response.item_safety.message.part.delta",
+		"response.item_safety.message.part.done":
+		a.handleItemSafetyEvent(state, event)
+
 	case "response.completed":
 		a.handleResponseCompleted(state, event, callbacks)
 
@@ -712,6 +1214,13 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleResponseCompleted(state, event, callbacks)
 
 	default:
+		if isCodexBuiltinToolEventType(eventType) {
+			// Official built-in tool events are recognized but not executable by
+			// this adapter. Record them explicitly so the caller gets a
+			// diagnosable error instead of a silent drop.
+			state.RecordBuiltinToolEvent(eventType)
+			return
+		}
 		state.RecordUnknownEvent(eventType)
 	}
 }
@@ -744,6 +1253,72 @@ func isCodexFailureEventType(eventType string) bool {
 	default:
 		return false
 	}
+}
+
+// codexBuiltinToolEventPrefixes are official Responses streaming events for
+// built-in tools that this adapter does not execute. They are matched by
+// prefix so new sub-events (e.g. response.web_search_call.searching) stay
+// covered without per-event maintenance.
+var codexBuiltinToolEventPrefixes = []string{
+	"response.audio",
+	"response.audio_transcript",
+	"response.code_interpreter_call",
+	"response.file_search_call",
+	"response.web_search_call",
+	"response.mcp_call",
+	"response.mcp_list_tools",
+	"response.computer_call",
+	"response.local_shell_call",
+	"response.shell_call",
+	"response.apply_patch_call",
+	"response.program",
+	"response.tool_search_call",
+}
+
+// codexBuiltinToolItemTypes are official Responses output item types for
+// built-in tools that this adapter does not execute. image_generation_call is
+// excluded: it has dedicated handling in this adapter.
+var codexBuiltinToolItemTypes = map[string]struct{}{
+	"file_search_call":          {},
+	"web_search_call":           {},
+	"code_interpreter_call":     {},
+	"computer_call":             {},
+	"computer_call_output":      {},
+	"local_shell_call":          {},
+	"local_shell_call_output":   {},
+	"shell_call":                {},
+	"shell_call_output":         {},
+	"apply_patch_call":          {},
+	"apply_patch_call_output":   {},
+	"mcp_call":                  {},
+	"mcp_call_output":           {},
+	"mcp_approval_request":      {},
+	"mcp_approval_response":     {},
+	"mcp_list_tools":            {},
+	"program":                   {},
+	"program_output":            {},
+	"function_web_search":       {},
+	"tool_search_call":          {},
+	"tool_search_output":        {},
+	"compaction":                {},
+	"compaction_trigger":        {},
+	"audio":                     {},
+	"audio_output":              {},
+}
+
+func isCodexBuiltinToolEventType(eventType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(eventType))
+	for _, prefix := range codexBuiltinToolEventPrefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexBuiltinToolItemType(itemType string) bool {
+	_, ok := codexBuiltinToolItemTypes[strings.ToLower(strings.TrimSpace(itemType))]
+	return ok
 }
 
 func isCodexDoneEventType(eventType string) bool {
@@ -812,6 +1387,9 @@ func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[
 				index = state.NextSyntheticIndex
 				state.NextSyntheticIndex++
 			}
+		} else if isCodexBuiltinToolItemType(itemType) {
+			index = state.NextSyntheticIndex
+			state.NextSyntheticIndex++
 		} else {
 			return
 		}
@@ -835,17 +1413,29 @@ func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[
 		if callID := strings.TrimSpace(asCodexString(item["call_id"])); tc.CallID == "" {
 			tc.CallID = callID
 		}
+		if tc.CallID == "" {
+			// 部分兼容网关只给 item id 而非 call_id,这里兜底提取。
+			if id := strings.TrimSpace(asCodexString(item["id"])); id != "" {
+				tc.CallID = id
+			}
+		}
 		if name := strings.TrimSpace(asCodexString(item["name"])); tc.Name == "" {
 			tc.Name = name
 		}
 		if itemType == "custom_tool_call" {
-			appendMissingCodexText(&tc.Arguments, asCodexString(item["input"]), nil)
+			appendMissingCodexText(&tc.Arguments, codexToolCallInputString(item["input"]), nil)
 		} else {
 			appendMissingCodexText(&tc.Arguments, asCodexString(item["arguments"]), nil)
 		}
 		for _, key := range codexToolItemKeys(item) {
 			state.ToolItemKeys[key] = index
 		}
+		return
+	}
+
+	if isCodexBuiltinToolItemType(itemType) {
+		state.RecordBuiltinToolEvent(itemType)
+		state.OutputItems[index] = cloneInterfaceMap(item)
 		return
 	}
 
@@ -860,6 +1450,58 @@ func (a *CodexAdapter) handleContentPartAdded(state *CodexStreamState, event map
 		return
 	}
 	state.AddAnnotations(part["annotations"])
+}
+
+// handleOutputTextAnnotationDelta 处理官方 response.output_text.annotation.delta
+// 事件。url_citation 等 annotation 的 url 字段可能通过 delta 事件流式到达
+// (added 事件中 url 为空串),这里按 annotation_index 累积并回填。
+func (a *CodexAdapter) handleOutputTextAnnotationDelta(state *CodexStreamState, event map[string]interface{}) {
+	if state == nil {
+		return
+	}
+	delta := asCodexString(event["delta"])
+	if strings.TrimSpace(delta) == "" {
+		return
+	}
+	index := codexIntValue(event["annotation_index"])
+	if index < 0 {
+		index = codexIntValue(event["index"])
+	}
+	if index < 0 {
+		return
+	}
+	state.ApplyAnnotationDelta(index, delta)
+}
+
+// handleItemSafetyEvent 处理官方 response.item_safety.message.* 事件族
+// (delta/done/part.added/part.delta/part.done)。这些事件携带内容安全过滤
+// 信息(item_safety 数组,含 code/reason),累积后随结果返回,供调用方诊断
+// 被过滤的输出,而不是静默丢弃。
+func (a *CodexAdapter) handleItemSafetyEvent(state *CodexStreamState, event map[string]interface{}) {
+	if state == nil {
+		return
+	}
+	for _, item := range decodeSliceOfMaps(event["item_safety"]) {
+		if len(item) == 0 {
+			continue
+		}
+		state.AddSafetyItem(item)
+	}
+}
+
+// AddSafetyItem 去重追加一条 item_safety 记录(按 code+reason 判重)。
+func (s *CodexStreamState) AddSafetyItem(item map[string]interface{}) {
+	if s == nil || len(item) == 0 {
+		return
+	}
+	code := asCodexString(item["code"])
+	reason := asCodexString(item["reason"])
+	for _, existing := range s.SafetyItems {
+		if asCodexString(existing["code"]) == code && asCodexString(existing["reason"]) == reason {
+			return
+		}
+	}
+	s.SafetyItems = append(s.SafetyItems, cloneInterfaceMap(item))
 }
 
 // handleOutputTextDelta 处理 response.output_text.delta 事件
@@ -965,6 +1607,12 @@ func (a *CodexAdapter) handleFunctionCallArgumentsDone(state *CodexStreamState, 
 	if callID := strings.TrimSpace(asCodexString(event["call_id"])); tc.CallID == "" {
 		tc.CallID = callID
 	}
+	if tc.CallID == "" {
+		// 部分兼容网关只给 item id 而非 call_id。
+		if id := strings.TrimSpace(asCodexString(event["id"])); id != "" {
+			tc.CallID = id
+		}
+	}
 	appendMissingCodexText(&tc.Arguments, asCodexString(event["arguments"]), nil)
 }
 
@@ -1021,10 +1669,18 @@ func (a *CodexAdapter) handleCustomToolCallInputDone(state *CodexStreamState, ev
 	if callID := strings.TrimSpace(asCodexString(event["call_id"])); tc.CallID == "" {
 		tc.CallID = callID
 	}
+	if tc.CallID == "" {
+		if id := strings.TrimSpace(asCodexString(event["id"])); id != "" {
+			tc.CallID = id
+		}
+	}
 	if name := strings.TrimSpace(asCodexString(event["name"])); tc.Name == "" {
 		tc.Name = name
 	}
-	appendMissingCodexText(&tc.Arguments, asCodexString(event["input"]), nil)
+	// done 快照是权威值:对象型 input 直接替换 delta 拼接结果
+	// (避免 "{\"command\":" + 完整对象 拼接成非法 JSON),
+	// 字符串型 input 走前缀兼容/追加兜底。
+	applyAuthoritativeCodexToolArguments(&tc.Arguments, codexToolCallInputString(event["input"]))
 }
 
 // handleReasoningSummaryPartAdded 处理 response.reasoning_summary_part.added 事件
@@ -1246,7 +1902,7 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 		index = getIntIndex(event)
 	}
 	if index == -1 {
-		if itemType == codexImageGenerationCallType {
+		if itemType == codexImageGenerationCallType || isCodexBuiltinToolItemType(itemType) {
 			index = state.CurrentItemIndex
 			if index == -1 {
 				index = state.NextSyntheticIndex
@@ -1277,7 +1933,7 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 		if itemType == "function_call" {
 			applyAuthoritativeCodexToolArguments(&tc.Arguments, asCodexString(item["arguments"]))
 		} else {
-			applyAuthoritativeCodexToolArguments(&tc.Arguments, asCodexString(item["input"]))
+			applyAuthoritativeCodexToolArguments(&tc.Arguments, codexToolCallInputString(item["input"]))
 		}
 		bindCodexToolItemKeys(state, item, index)
 		if key := codexToolItemKeyFromEvent(event); key != "" {
@@ -1297,6 +1953,8 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 			phase = "completed"
 		}
 		a.emitCodexImageProgress(callbacks, state, item, event, phase)
+	} else if isCodexBuiltinToolItemType(itemType) {
+		state.RecordBuiltinToolEvent(itemType)
 	}
 	state.OutputItems[index] = cloneInterfaceMap(item)
 
@@ -1442,6 +2100,11 @@ func mergeCodexUsage(state *CodexStreamState, usage map[string]interface{}) {
 	for _, key := range []string{"input_tokens", "output_tokens", "total_tokens"} {
 		if value, ok := numericValue(usage[key]); ok {
 			state.Usage[key] = int64(value)
+		}
+	}
+	for _, key := range []string{"input_tokens_details", "output_tokens_details"} {
+		if details, ok := usage[key].(map[string]interface{}); ok && len(details) > 0 {
+			state.UsageDetails[key] = details
 		}
 	}
 }
@@ -1818,31 +2481,44 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 		case "function_call":
 			// 提取工具调用
 			tc := make(map[string]interface{})
-			if callID, ok := itemMap["call_id"].(string); ok {
-				tc["id"] = callID
+			callID := strings.TrimSpace(asCodexString(itemMap["call_id"]))
+			if callID == "" {
+				callID = strings.TrimSpace(asCodexString(itemMap["id"]))
 			}
-			if name, ok := itemMap["name"].(string); ok {
-				tc["name"] = name
+			name := strings.TrimSpace(asCodexString(itemMap["name"]))
+			args := strings.TrimSpace(asCodexString(itemMap["arguments"]))
+			if callID == "" {
+				callID = stableCodexCallID(name, args)
 			}
-			if args, ok := itemMap["arguments"].(string); ok {
-				tc["arguments"] = args
-			}
+			tc["id"] = callID
+			tc["name"] = name
+			tc["arguments"] = args
 			toolCalls = append(toolCalls, tc)
 
 		case "custom_tool_call":
 			tc := map[string]interface{}{
 				"type": itemType,
 			}
-			if callID, ok := itemMap["call_id"].(string); ok {
-				tc["id"] = callID
+			callID := strings.TrimSpace(asCodexString(itemMap["call_id"]))
+			if callID == "" {
+				callID = strings.TrimSpace(asCodexString(itemMap["id"]))
 			}
-			if name, ok := itemMap["name"].(string); ok {
-				tc["name"] = name
+			name := strings.TrimSpace(asCodexString(itemMap["name"]))
+			input := strings.TrimSpace(codexToolCallInputString(itemMap["input"]))
+			if input == "" {
+				// 部分网关用 arguments 承载 custom tool 输入,这里回退兜底,
+				// 与 buildCodexFunctionCallItem 的 input/arguments 互用一致。
+				input = strings.TrimSpace(codexToolCallInputString(itemMap["arguments"]))
 			}
-			if input, ok := itemMap["input"].(string); ok {
-				tc["input"] = input
-				tc["arguments"] = input
+			if callID == "" {
+				// Responses 要求 output 侧 item id 非空;缺 call_id/id 时派生
+				// 稳定 id,避免整条 custom tool 调用丢失 id。
+				callID = stableCodexCallID(name, input)
 			}
+			tc["id"] = callID
+			tc["input"] = input
+			tc["arguments"] = input
+			tc["name"] = name
 			toolCalls = append(toolCalls, tc)
 
 		case "reasoning":
@@ -1906,10 +2582,25 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 	}
 
 	if len(s.Usage) > 0 {
-		result["usage"] = s.Usage
+		if len(s.UsageDetails) == 0 {
+			result["usage"] = s.Usage
+		} else {
+			usage := make(map[string]interface{}, len(s.Usage)+len(s.UsageDetails))
+			for key, value := range s.Usage {
+				usage[key] = value
+			}
+			for key, value := range s.UsageDetails {
+				usage[key] = value
+			}
+			result["usage"] = usage
+		}
 	}
+	s.MergeAnnotationDeltas()
 	if len(s.Annotations) > 0 {
 		result["annotations"] = s.Annotations
+	}
+	if len(s.SafetyItems) > 0 {
+		result["item_safety"] = s.SafetyItems
 	}
 	if len(s.UnknownEvents) > 0 {
 		unknownEvents := make(map[string]interface{}, len(s.UnknownEvents))
@@ -1917,6 +2608,13 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 			unknownEvents[eventType] = count
 		}
 		result["sse_unknown_events"] = unknownEvents
+	}
+	if len(s.BuiltinToolEvents) > 0 {
+		builtinToolEvents := make(map[string]interface{}, len(s.BuiltinToolEvents))
+		for eventType, count := range s.BuiltinToolEvents {
+			builtinToolEvents[eventType] = count
+		}
+		result["sse_builtin_tool_events"] = builtinToolEvents
 	}
 
 	// 转换 ToolCalls
@@ -1930,8 +2628,14 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 		toolCalls := make([]map[string]interface{}, 0, len(keys))
 		for _, index := range keys {
 			tc := s.ToolCalls[index]
+			callID := strings.TrimSpace(tc.CallID)
+			if callID == "" {
+				// Responses 要求 output 侧 function_call id 非空;部分兼容
+				// 网关不发 call_id/id,这里派生稳定 id 兜底,保证协议完整。
+				callID = stableCodexCallID(tc.Name, tc.Arguments.String())
+			}
 			call := map[string]interface{}{
-				"id":        tc.CallID,
+				"id":        callID,
 				"name":      tc.Name,
 				"arguments": tc.Arguments.String(),
 			}
@@ -1983,10 +2687,68 @@ func (s *CodexStreamState) AddAnnotation(annotation map[string]interface{}) {
 	for _, existing := range s.Annotations {
 		existingJSON, _ := json.Marshal(existing)
 		if bytes.Equal(existingJSON, encoded) {
+			// 已存在:尝试回填可能先于 added 到达的 delta。
+			if index := codexIntValue(existing["index"]); index >= 0 {
+				s.mergeAnnotationDelta(index)
+			}
 			return
 		}
 	}
 	s.Annotations = append(s.Annotations, cloneInterfaceMap(annotation))
+	if index := codexIntValue(annotation["index"]); index >= 0 {
+		s.mergeAnnotationDelta(index)
+	}
+}
+
+// codexIntValue 读取 event/annotation 中的整数字段,失败返回 -1。
+func codexIntValue(raw interface{}) int {
+	if value, ok := numericValue(raw); ok {
+		return int(value)
+	}
+	return -1
+}
+
+// ApplyAnnotationDelta 累积官方 annotation.delta 片段并回填已注册的
+// annotation(url 字段为空时),多次 delta 按序拼接。
+func (s *CodexStreamState) ApplyAnnotationDelta(index int, delta string) {
+	if s == nil || delta == "" || index < 0 {
+		return
+	}
+	if s.AnnotationDeltas == nil {
+		s.AnnotationDeltas = make(map[int]string)
+	}
+	s.AnnotationDeltas[index] += delta
+	s.mergeAnnotationDelta(index)
+}
+
+// mergeAnnotationDelta 将 index 对应的累积 delta(多段拼接后的权威完整值)
+// 回填到已注册 annotation 的 url 字段:url 为空或与累积 delta 不一致(旧
+// 快照/部分值)时覆盖。保持引用而非副本,确保最终结果可见。
+func (s *CodexStreamState) mergeAnnotationDelta(index int) {
+	delta := s.AnnotationDeltas[index]
+	if strings.TrimSpace(delta) == "" {
+		return
+	}
+	for _, annotation := range s.Annotations {
+		if codexIntValue(annotation["index"]) != index {
+			continue
+		}
+		url, _ := annotation["url"].(string)
+		if strings.TrimSpace(url) == "" || url != delta {
+			annotation["url"] = delta
+		}
+	}
+}
+
+// MergeAnnotationDeltas 在结果组装前把累积的 annotation delta 回填到所有
+// 已注册 annotation(顺序保护:delta 先于 added 到达时)。
+func (s *CodexStreamState) MergeAnnotationDeltas() {
+	if s == nil || len(s.AnnotationDeltas) == 0 {
+		return
+	}
+	for index := range s.AnnotationDeltas {
+		s.mergeAnnotationDelta(index)
+	}
 }
 
 func (s *CodexStreamState) RecordUnknownEvent(eventType string) {
@@ -1998,6 +2760,20 @@ func (s *CodexStreamState) RecordUnknownEvent(eventType string) {
 		eventType = "(missing)"
 	}
 	s.UnknownEvents[eventType]++
+}
+
+// RecordBuiltinToolEvent records an official Responses built-in tool event or
+// item type so the caller can surface a diagnosable unsupported-tool error
+// instead of silently losing the tool call.
+func (s *CodexStreamState) RecordBuiltinToolEvent(eventType string) {
+	if s == nil {
+		return
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return
+	}
+	s.BuiltinToolEvents[eventType]++
 }
 
 func (s *CodexStreamState) SetError(code, message string) {
@@ -3329,26 +4105,148 @@ func normalizeCodexInputPart(part map[string]interface{}) map[string]interface{}
 	}
 	partType, _ := part["type"].(string)
 	switch strings.ToLower(strings.TrimSpace(partType)) {
-	case "input_text", "text", "output_text", "summary_text":
+	case "input_text", "text":
 		text, _ := part["text"].(string)
 		if strings.TrimSpace(text) == "" {
 			return nil
 		}
-		return map[string]interface{}{
+		canonical := map[string]interface{}{
 			"type": "input_text",
 			"text": text,
 		}
+		// 官方 input_text part 支持可选 name(多 agent 场景),保留它。
+		if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+			canonical["name"] = name
+		}
+		return canonical
+	case "output_text", "summary_text":
+		text, _ := part["text"].(string)
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		canonical := map[string]interface{}{
+			"type": "output_text",
+			"text": text,
+		}
+		// 官方允许 output_text part 携带 annotations(url_citation /
+		// file_citation 等),保留它们以便带引用继续对话。
+		if annotations := decodeSliceOfMaps(part["annotations"]); len(annotations) > 0 {
+			canonical["annotations"] = annotations
+		}
+		// 官方 output_text part 支持可选 name(多 agent 场景),保留它。
+		if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+			canonical["name"] = name
+		}
+		return canonical
 	case "input_image", "image_url":
 		imageURL, _ := part["image_url"].(string)
 		if strings.TrimSpace(imageURL) == "" {
 			return nil
 		}
-		return map[string]interface{}{
+		canonical := map[string]interface{}{
 			"type":      "input_image",
 			"image_url": strings.TrimSpace(imageURL),
 		}
+		// 官方 Responses input_image 支持 detail: auto/low/high。
+		if detail := normalizeCodexImageDetail(part["detail"]); detail != "" {
+			canonical["detail"] = detail
+		}
+		// 官方 input_image part 支持可选 name,保留它。
+		if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+			canonical["name"] = name
+		}
+		return canonical
+	case "input_file":
+		// 官方两种形态:
+		//   {"type":"input_file","file_id":"file_..."}
+		//   {"type":"input_file","filename":"...","file_data":"data:..."}
+		fileID := strings.TrimSpace(asCodexString(part["file_id"]))
+		filename := strings.TrimSpace(asCodexString(part["filename"]))
+		fileData := strings.TrimSpace(asCodexString(part["file_data"]))
+		if fileID == "" && filename == "" && fileData == "" {
+			return nil
+		}
+		if fileID != "" && filename == "" && fileData == "" {
+			canonical := map[string]interface{}{
+				"type":    "input_file",
+				"file_id": fileID,
+			}
+			if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+				canonical["name"] = name
+			}
+			return canonical
+		}
+		if filename == "" || !strings.HasPrefix(fileData, "data:") {
+			return nil
+		}
+		canonical := map[string]interface{}{
+			"type":      "input_file",
+			"filename":  filename,
+			"file_data": fileData,
+		}
+		if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+			canonical["name"] = name
+		}
+		return canonical
+	case "input_audio":
+		audio := strings.TrimSpace(asCodexString(part["input_audio"]))
+		if !strings.HasPrefix(audio, "data:audio/") {
+			return nil
+		}
+		canonical := map[string]interface{}{
+			"type":        "input_audio",
+			"input_audio": audio,
+		}
+		if format := strings.ToLower(strings.TrimSpace(asCodexString(part["format"]))); format != "" {
+			canonical["format"] = format
+		}
+		if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+			canonical["name"] = name
+		}
+		return canonical
+	case "input_video":
+		// 官方 Responses input_video 两种形态:
+		//   {"type":"input_video","video_url":"https://..."}
+		//   {"type":"input_video","filename":"...","file_data":"data:video/..."}
+		videoURL := strings.TrimSpace(asCodexString(part["video_url"]))
+		filename := strings.TrimSpace(asCodexString(part["filename"]))
+		fileData := strings.TrimSpace(asCodexString(part["file_data"]))
+		if videoURL != "" && filename == "" && fileData == "" {
+			canonical := map[string]interface{}{
+				"type":      "input_video",
+				"video_url": videoURL,
+			}
+			if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+				canonical["name"] = name
+			}
+			return canonical
+		}
+		if filename == "" || !strings.HasPrefix(fileData, "data:") {
+			return nil
+		}
+		canonical := map[string]interface{}{
+			"type":      "input_video",
+			"filename":  filename,
+			"file_data": fileData,
+		}
+		if name := strings.TrimSpace(asCodexString(part["name"])); name != "" {
+			canonical["name"] = name
+		}
+		return canonical
 	default:
 		return nil
+	}
+}
+
+// normalizeCodexImageDetail 仅透传官方允许的 detail 取值(auto/low/high),
+// 避免非法值导致上游 400。
+func normalizeCodexImageDetail(raw interface{}) string {
+	detail := strings.ToLower(strings.TrimSpace(asCodexString(raw)))
+	switch detail {
+	case "auto", "low", "high":
+		return detail
+	default:
+		return ""
 	}
 }
 
@@ -3394,7 +4292,7 @@ func buildCodexReasoningDetails(reasoning string, outputItems []map[string]inter
 }
 
 func buildCodexReasoningItem(reasoning string) map[string]interface{} {
-	return map[string]interface{}{
+	item := map[string]interface{}{
 		"type": "reasoning",
 		"summary": []map[string]interface{}{
 			{
@@ -3403,6 +4301,29 @@ func buildCodexReasoningItem(reasoning string) map[string]interface{} {
 			},
 		},
 	}
+	item["id"] = stableCodexReasoningTextID(reasoning)
+	return item
+}
+
+// stableCodexReasoningTextID derives a deterministic id from the reasoning
+// text so rebuilt reasoning items keep a stable wire id across steps.
+func stableCodexReasoningTextID(reasoning string) string {
+	hasher := fnv.New64a()
+	hasher.Write([]byte(reasoning))
+	return fmt.Sprintf("reasoning_%x", hasher.Sum64())
+}
+
+// stableCodexCallID derives a deterministic call id from the tool name and
+// arguments so tool-call items keep a non-empty wire id even when the upstream
+// gateway omits call_id/id (Responses output items require a non-empty id).
+// Derived ids are stable across replay of the same call content, so
+// function_call_output round-trips keep matching.
+func stableCodexCallID(name, arguments string) string {
+	hasher := fnv.New64a()
+	hasher.Write([]byte(name))
+	hasher.Write([]byte{0})
+	hasher.Write([]byte(arguments))
+	return fmt.Sprintf("call_%x", hasher.Sum64())
 }
 
 func buildCodexAssistantMessageItem(content string) map[string]interface{} {
@@ -3435,7 +4356,7 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 
 	name, _ := raw["name"].(string)
 	arguments, _ := raw["arguments"].(string)
-	input, _ := raw["input"].(string)
+	input := codexToolCallInputString(raw["input"])
 
 	if fnObj, ok := raw["function"].(map[string]interface{}); ok {
 		if name == "" {
@@ -3446,8 +4367,13 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 		}
 	}
 
-	if callID == "" || name == "" {
+	if name == "" {
+		// 没有名字就无法执行工具,丢弃;缺 call_id 则派生稳定 id 兜底,
+		// 避免把上游缺失字段升级为整条工具调用丢失。
 		return nil
+	}
+	if callID == "" {
+		callID = stableCodexCallID(name, arguments)
 	}
 
 	if toolType == "custom_tool_call" {
@@ -3456,6 +4382,7 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 		}
 		return map[string]interface{}{
 			"type":    "custom_tool_call",
+			"id":      callID,
 			"call_id": callID,
 			"name":    name,
 			"input":   input,
@@ -3464,10 +4391,62 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 
 	return map[string]interface{}{
 		"type":      "function_call",
+		"id":        callID,
 		"call_id":   callID,
 		"name":      name,
 		"arguments": arguments,
 	}
+}
+
+// ensureCodexInputItemID returns the item unchanged when it already carries
+// an id, and otherwise attaches a stable id for wire-mandated item kinds.
+// The Console Go gateway deserializes Responses input items with a mandatory
+// id field and rejects function_call / function_call_output / reasoning items
+// that lack one with HTTP 400. Canonicalized history (which intentionally
+// drops id/status/phase) is replayed through this helper so the wire format
+// always satisfies the upstream contract. Tool-call items reuse call_id;
+// reasoning items derive a content-stable id so prompt-cache prefixes stay
+// byte-identical across steps.
+func ensureCodexInputItemID(item map[string]interface{}) map[string]interface{} {
+	if len(item) == 0 {
+		return item
+	}
+	itemType := strings.TrimSpace(asCodexString(item["type"]))
+	if strings.TrimSpace(asCodexString(item["id"])) != "" {
+		return item
+	}
+	switch itemType {
+	case "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
+		callID := strings.TrimSpace(asCodexString(item["call_id"]))
+		if callID == "" {
+			return item
+		}
+		cloned := cloneInterfaceMap(item)
+		cloned["id"] = callID
+		return cloned
+	case "reasoning":
+		cloned := cloneInterfaceMap(item)
+		cloned["id"] = stableCodexReasoningItemID(item)
+		return cloned
+	default:
+		return item
+	}
+}
+
+// stableCodexReasoningItemID derives a deterministic id from the reasoning
+// item payload (summary + encrypted_content) so replayed reasoning items keep
+// a stable wire id without perturbing prompt-cache prefix continuity.
+func stableCodexReasoningItemID(item map[string]interface{}) string {
+	hasher := fnv.New64a()
+	if summary, ok := item["summary"]; ok {
+		encoded, _ := json.Marshal(summary)
+		hasher.Write(encoded)
+	}
+	hasher.Write([]byte{0})
+	if encrypted, ok := item["encrypted_content"].(string); ok {
+		hasher.Write([]byte(encrypted))
+	}
+	return fmt.Sprintf("reasoning_%x", hasher.Sum64())
 }
 
 // AccumulateStreamData 累积流式数据块

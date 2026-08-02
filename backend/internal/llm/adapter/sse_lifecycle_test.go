@@ -412,3 +412,101 @@ func TestCodexHandleResponse_IncompleteSnapshotRecoversOutputForEscalation(t *te
 		t.Fatalf("incomplete response snapshot was not recovered: %#v", msg)
 	}
 }
+
+func TestCodexHandleResponse_RejectsBuiltinToolStreamEvents(t *testing.T) {
+	_, err := (&CodexAdapter{}).HandleResponse(true, strings.NewReader(strings.Join([]string{
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_1","call_id":"ws_1","status":"in_progress"}}`,
+		"",
+		"event: response.web_search_call.searching",
+		`data: {"type":"response.web_search_call.searching","output_index":0,"item_id":"ws_1"}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"web_search_call","id":"ws_1","call_id":"ws_1","status":"completed"}]}}`,
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err == nil {
+		t.Fatalf("built-in web_search_call stream should be rejected, got nil error")
+	}
+	if !strings.Contains(err.Error(), "unsupported_builtin_tool") {
+		t.Fatalf("expected unsupported_builtin_tool error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "web_search_call") {
+		t.Fatalf("error should name the unsupported tool, got: %v", err)
+	}
+}
+
+func TestCodexHandleResponse_RejectsBuiltinToolItemInCompletedSnapshot(t *testing.T) {
+	_, err := (&CodexAdapter{}).HandleResponse(true, strings.NewReader(strings.Join([]string{
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"file_search_call","id":"fs_1","call_id":"fs_1","status":"completed"},{"type":"message","content":[{"type":"output_text","text":"answer"}]}]}}`,
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err == nil {
+		t.Fatalf("built-in file_search_call item in snapshot should be rejected, got nil error")
+	}
+	if !strings.Contains(err.Error(), "unsupported_builtin_tool") || !strings.Contains(err.Error(), "file_search_call") {
+		t.Fatalf("expected unsupported_builtin_tool naming file_search_call, got: %v", err)
+	}
+}
+
+func TestCodexHandleResponse_RejectsBuiltinToolItemNonStream(t *testing.T) {
+	_, err := (&CodexAdapter{}).HandleResponse(false, strings.NewReader(
+		`{"id":"resp_1","status":"completed","output":[{"type":"web_search_call","id":"ws_1","call_id":"ws_1","status":"completed"}]}`,
+	), StreamCallbacks{})
+	if err == nil {
+		t.Fatalf("built-in web_search_call non-stream output should be rejected, got nil error")
+	}
+	if !strings.Contains(err.Error(), "unsupported_builtin_tool") || !strings.Contains(err.Error(), "web_search_call") {
+		t.Fatalf("expected unsupported_builtin_tool naming web_search_call, got: %v", err)
+	}
+}
+
+func TestCodexHandleResponse_StillRecordsTrulyUnknownEvents(t *testing.T) {
+	msg, err := (&CodexAdapter{}).HandleResponse(true, strings.NewReader(strings.Join([]string{
+		"event: response.future_progress",
+		`data: {"type":"response.future_progress","progress":0.5}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed"}}`,
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("truly unknown events must stay non-fatal: %v", err)
+	}
+	metadata, _ := msg["metadata"].(map[string]interface{})
+	unknown, _ := metadata["sse_unknown_events"].(map[string]interface{})
+	if unknown["response.future_progress"] != 1 {
+		t.Fatalf("unknown event diagnostics missing: %#v", metadata)
+	}
+	if _, exists := metadata["sse_builtin_tool_events"]; exists {
+		t.Fatalf("truly unknown event was misclassified as built-in tool: %#v", metadata)
+	}
+}
+
+func TestCodexHandleResponse_PreservesUsageDetails(t *testing.T) {
+	msg, err := (&CodexAdapter{}).HandleResponse(true, strings.NewReader(strings.Join([]string{
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":80,"text_tokens":40},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":12},"total_tokens":150},"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`,
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+
+	usage, ok := msg["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage map, got %T %#v", msg["usage"], msg["usage"])
+	}
+	if usage["input_tokens"] != int64(120) || usage["output_tokens"] != int64(30) || usage["total_tokens"] != int64(150) {
+		t.Fatalf("unexpected usage counters: %#v", usage)
+	}
+	inputDetails, ok := usage["input_tokens_details"].(map[string]interface{})
+	if !ok || inputDetails["cached_tokens"] != float64(80) {
+		t.Fatalf("input_tokens_details lost: %#v", usage["input_tokens_details"])
+	}
+	outputDetails, ok := usage["output_tokens_details"].(map[string]interface{})
+	if !ok || outputDetails["reasoning_tokens"] != float64(12) {
+		t.Fatalf("output_tokens_details lost: %#v", usage["output_tokens_details"])
+	}
+}
