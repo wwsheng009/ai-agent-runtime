@@ -16,6 +16,7 @@ type Engine struct {
 	composer  *Composer
 	cache     *RenderCache
 	handoff   *HandoffFrontier
+	trace     *PaintTrace
 }
 
 // NewEngine creates an Engine with a live FramePump.
@@ -26,6 +27,7 @@ func NewEngine() *Engine {
 		composer:  NewComposer(),
 		cache:     SharedRenderCache(),
 		handoff:   NewHandoffFrontier(),
+		trace:     NewPaintTrace(),
 	}
 }
 
@@ -74,6 +76,19 @@ func (e *Engine) HandoffFrontier() *HandoffFrontier {
 		e.handoff = NewHandoffFrontier()
 	}
 	return e.handoff
+}
+
+// Trace returns the engine-owned paint reconciliation probe. The owned
+// viewport backend is wired to this instance, so /debug on|off toggles one
+// shared observability authority for the whole render path.
+func (e *Engine) Trace() *PaintTrace {
+	if e == nil {
+		return nil
+	}
+	if e.trace == nil {
+		e.trace = NewPaintTrace()
+	}
+	return e.trace
 }
 
 // NewScreenModel creates a screen model through the Engine boundary. The

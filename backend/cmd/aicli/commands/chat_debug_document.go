@@ -98,6 +98,10 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 			builder.heading("Row Ownership (stage C):")
 			builder.plainLines(strings.Split(strings.TrimSuffix(table, "\n"), "\n"))
 		}
+		if trace := session.Surface.PaintTraceDebugString(); trace != "" {
+			builder.heading("Render Paint Trace:")
+			builder.plainLines(strings.Split(strings.TrimSuffix(trace, "\n"), "\n"))
+		}
 	} else {
 		builder.meta("Surface:", "<none>")
 	}

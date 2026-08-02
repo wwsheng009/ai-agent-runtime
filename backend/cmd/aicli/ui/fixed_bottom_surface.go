@@ -235,6 +235,24 @@ func (s *FixedBottomSurface) SetEngine(engine *renderengine.Engine) {
 	s.mu.Unlock()
 }
 
+// SetPaintTraceEnabled toggles the render-engine paint reconciliation probe
+// (/debug on|off). The probe is observational only: it never influences
+// layout or terminal output. Disabling keeps the accumulated counters so an
+// operator can reproduce a symptom first and inspect the report afterwards
+// with /debug display. Without an engine (synthetic surfaces) this is a
+// no-op.
+func (s *FixedBottomSurface) SetPaintTraceEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	engine := s.engine
+	s.mu.Unlock()
+	if engine != nil {
+		engine.Trace().SetEnabled(enabled)
+	}
+}
+
 func (s *FixedBottomSurface) presenterLocked() *renderengine.Presenter {
 	if s == nil {
 		return nil

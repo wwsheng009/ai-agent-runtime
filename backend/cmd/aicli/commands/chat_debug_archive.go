@@ -171,6 +171,12 @@ func setChatDebugMode(session *ChatSession, enabled bool) {
 		return
 	}
 	session.DebugMode = enabled
+	if session.Surface != nil {
+		// /debug on|off also drives the render paint reconciliation probe so
+		// rendering anomalies (white repaints / missing coverage) are
+		// captured while the symptom is reproduced.
+		session.Surface.SetPaintTraceEnabled(enabled)
+	}
 	warnIfChatSessionSyncFails(session, "toggle debug mode", syncRuntimeSessionFromChat(session))
 	printChatSessionMetaRow("Debug Mode:", chatDebugBool(enabled))
 }

@@ -31,6 +31,24 @@
   逻辑行数），稳态流式写不再重复展开全部 retained history。
   新增 `TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory` 回归
   （加回旧行为时该测试失败，验证有效）。
+- **渲染可观测性：PaintTrace 行级对账探针（/debug on）。** 为终结"问题靠猜"，
+  `/debug on|off` 现在同时驱动 `renderengine.PaintTrace`（Engine 单例，经
+  `FixedBottomSurface.SetPaintTraceEnabled` 转发）。探针挂在 `ScreenModel.Flush`
+  出口，对每帧逐行对账：`needsPaint（内容变化 ∪ forceRepaint）⊆ painted
+  （实际 emit）`，并量化两类异常：
+  - **白重绘（重复渲染）**：行被 emit 但内容与 front 相同。任何全屏
+    `Invalidate`/`Reconcile` 都会以全屏 WhiteEmits 突刺显现——即此前只能靠猜的
+    流式重复渲染症状，现在 `/debug display` 直接给出行号、次数、所属组件
+    （transcript/prompt/band/status…）。
+  - **缺失覆盖**：内容变化但未被 emit 的行（`MissingPaints`）。健康 diff 引擎
+    恒为 0，出现即代表 diff 漏行，可直接定位到行号与 owner。
+  报告经 `/debug display` 的 "Render Paint Trace:" 节输出（`row emits white
+  miss changes lastEmit lastChange owner`）；`/debug off` 停止记录但保留累计，
+  便于先复现后查看。探针纯观测（不参与 layout/diff/输出），零字段补偿。
+  测试：`renderengine/paint_trace_test.go` 含对账不变量测试（确定性序列下
+  MissingPaints 恒 0）；`ui/fixed_bottom_surface_paint_trace_test.go` 断言
+  稳态流式 append 零白重绘、`Reconcile` 白重绘可见；`commands/chat_debug_paint_trace_test.go`
+  覆盖 /debug on/off 接线与 display 节。
 
 ### 实施审计注记（2026-08-01）
 

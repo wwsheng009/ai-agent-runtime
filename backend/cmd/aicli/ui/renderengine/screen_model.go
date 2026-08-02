@@ -16,6 +16,7 @@ type ScreenModel struct {
 	width, height int
 	front, back   [][]vt.Cell
 	forceRepaint  bool
+	trace         *PaintTrace
 }
 
 // NewScreenModel creates a blank owned screen model.
@@ -55,6 +56,22 @@ func (m *ScreenModel) Resize(width, height int) {
 func (m *ScreenModel) Invalidate() {
 	if m != nil {
 		m.forceRepaint = true
+	}
+}
+
+// AttachTrace wires the paint reconciliation probe to this model. The probe
+// is owned by the Engine and may be shared; attaching is idempotent. When no
+// probe is attached, Flush performs no per-row bookkeeping.
+func (m *ScreenModel) AttachTrace(trace *PaintTrace) {
+	if m != nil {
+		m.trace = trace
+	}
+}
+
+// DetachTrace removes the reconciliation probe.
+func (m *ScreenModel) DetachTrace() {
+	if m != nil {
+		m.trace = nil
 	}
 }
 
@@ -106,19 +123,40 @@ func (m *ScreenModel) Flush() string {
 		return ""
 	}
 	var output strings.Builder
+	var events []paintRowEvent
+	if m.trace != nil {
+		events = make([]paintRowEvent, 0, m.height)
+	}
 	if m.forceRepaint {
 		for r := 0; r < m.height; r++ {
 			m.emitForcedRow(&output, r)
+			if events != nil {
+				events = append(events, paintRowEvent{
+					row:     r + 1,
+					changed: !rowCellsEqual(m.front[r], m.back[r]),
+					painted: true,
+				})
+			}
 		}
 	} else {
 		for r := 0; r < m.height; r++ {
-			m.diffRow(&output, r)
+			painted := m.diffRow(&output, r)
+			if events != nil {
+				events = append(events, paintRowEvent{
+					row:     r + 1,
+					changed: !rowCellsEqual(m.front[r], m.back[r]),
+					painted: painted,
+				})
+			}
 		}
 	}
 	for r := 0; r < m.height; r++ {
 		copy(m.front[r], m.back[r])
 	}
 	m.forceRepaint = false
+	if m.trace != nil && len(events) > 0 {
+		m.trace.recordFrame(events, m.height)
+	}
 	return output.String()
 }
 
@@ -143,7 +181,10 @@ func (m *ScreenModel) emitForcedRow(output *strings.Builder, row int) {
 	}
 }
 
-func (m *ScreenModel) diffRow(output *strings.Builder, row int) {
+// diffRow emits the minimal ANSI update for one row and reports whether any
+// terminal bytes were produced for it (painted). A row with no cell
+// difference is not painted.
+func (m *ScreenModel) diffRow(output *strings.Builder, row int) bool {
 	front, back := m.front[row], m.back[row]
 	low, high := -1, -1
 	for column := 0; column < m.width; column++ {
@@ -155,7 +196,7 @@ func (m *ScreenModel) diffRow(output *strings.Builder, row int) {
 		}
 	}
 	if low == -1 {
-		return
+		return false
 	}
 	for low > 0 && back[low].Cont {
 		low--
@@ -163,10 +204,11 @@ func (m *ScreenModel) diffRow(output *strings.Builder, row int) {
 	for column := low; column <= high; column++ {
 		if cellBlank(back[column]) && !cellBlank(front[column]) {
 			m.emitForcedRow(output, row)
-			return
+			return true
 		}
 	}
 	m.emitRowRange(output, row, low, high)
+	return true
 }
 
 func (m *ScreenModel) emitRowRange(output *strings.Builder, row, low, high int) {
@@ -215,6 +257,21 @@ func cellEqual(left, right vt.Cell) bool {
 	}
 	for i := range left.SGR {
 		if left.SGR[i] != right.SGR[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// rowCellsEqual reports whether two full rows are cell-identical. It is used
+// by the paint reconciliation probe to classify emitted rows as content
+// changes versus white repaints.
+func rowCellsEqual(left, right []vt.Cell) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !cellEqual(left[i], right[i]) {
 			return false
 		}
 	}

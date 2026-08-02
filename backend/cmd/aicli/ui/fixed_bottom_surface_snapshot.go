@@ -110,6 +110,11 @@ func (s *FixedBottomSurface) stageOwnedFrameLocked() {
 	} else if backendWidth, backendHeight := s.viewportBackend.Size(); backendWidth != width || backendHeight != height {
 		s.viewportBackend.Resize(width, height)
 	}
+	if s.engine != nil && s.engine.Trace() != nil {
+		// The reconciliation probe is owned by the engine and shared; this
+		// attach is idempotent and survives backend rebuilds on resize.
+		s.viewportBackend.AttachTrace(s.engine.Trace())
+	}
 
 	// Keep the old bookkeeping fields coherent for cursor placement and for
 	// capability fallback after a lifecycle transition. They no longer drive
@@ -466,6 +471,23 @@ func (s *FixedBottomSurface) RowPlanDebugString() string {
 		fmt.Fprintf(&b, "%3d  %-10s  %s\n", i+1, row.Owner.String(), preview)
 	}
 	return b.String()
+}
+
+// PaintTraceDebugString renders the paint reconciliation report collected by
+// the engine-owned probe since the last /debug on. It classifies per row how
+// often it was emitted, how often those emits were white repaints (content
+// unchanged), and whether any content change was left unpainted (missing
+// coverage). Empty when no engine is wired or no events were recorded.
+func (s *FixedBottomSurface) PaintTraceDebugString() string {
+	if s == nil || s.terminal == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled || !s.ownedViewport || s.engine == nil || s.engine.Trace() == nil {
+		return ""
+	}
+	return s.engine.Trace().DebugString(s.lastRowOwners)
 }
 
 func cellRowPlainText(cells []vt.Cell) string {
