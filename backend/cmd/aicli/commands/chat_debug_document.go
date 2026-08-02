@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -115,7 +116,116 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	builder.plainLines(chatAgentGraphLines(session))
 	builder.heading("Mailbox Pending:")
 	builder.plainLines(chatDebugMailboxLines(session))
+	appendChatDebugRenderEncoderLines(&builder, session)
 	return builder.document()
+}
+
+// appendChatDebugRenderEncoderLines 输出统一渲染编码器（双跑模式数据面）
+// 的运行统计与模型快照，用于审计事件→渲染顺序映射是否正确。
+func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	if builder == nil || session == nil {
+		return
+	}
+	bridge := session.RuntimeEventBridge
+	if bridge == nil {
+		return
+	}
+	stats := bridge.renderEncoderStats()
+	builder.heading("Unified Render Encoder:")
+	builder.meta("Encode Count:", strconv.FormatUint(stats.EncodeCount, 10))
+	builder.meta("Append/Upsert/Remove:", fmt.Sprintf("%d / %d / %d", stats.AppendCount, stats.UpsertCount, stats.RemoveCount))
+	builder.meta("Out of Order:", strconv.FormatUint(stats.OutOfOrderCount, 10))
+	builder.meta("Duplicates:", strconv.FormatUint(stats.DuplicateCount, 10))
+	builder.meta("Unknown Types:", strconv.FormatUint(stats.UnknownCount, 10))
+	if tail := bridge.renderModelTail(); tail != nil {
+		builder.meta("Tail:", fmt.Sprintf("%s #%d", tail.ItemID, tail.Seq))
+	}
+	if tail, at, source, count := bridge.lastInteractionAnchor(); tail != nil {
+		builder.meta("Interaction Anchor:", fmt.Sprintf("%s #%d (source=%s count=%d at %s)",
+			tail.ItemID, tail.Seq, source, count, at.Format("15:04:05")))
+	}
+	if path, count, replayed, failures := bridge.eventLogStats(); path != "" {
+		builder.meta("Event Log:", fmt.Sprintf("%s (recorded=%d replayed=%d failures=%d)",
+			chatDebugValueOrNone(path), count, replayed, failures))
+	}
+	model := bridge.renderModelSnapshot()
+	if model == nil || len(model.Items) == 0 {
+		builder.meta("Model Items:", "<none>")
+		return
+	}
+	builder.meta("Model Items:", strconv.Itoa(len(model.Items)))
+	for _, it := range model.Items {
+		if it == nil {
+			continue
+		}
+		head := it.Head
+		if width := 48; ui.DisplayWidth(head) > width {
+			head = ui.TruncateVisible(head, width, "…")
+		}
+		line := fmt.Sprintf("  #%d %s [%s] %s", it.Seq, it.ID, it.Kind, head)
+		if it.CauseID != "" {
+			line += fmt.Sprintf(" (cause %s)", it.CauseID)
+		}
+		builder.plain(line)
+	}
+	// Unified Render Scene（P3：ChangeSet 消费端状态）。与模型快照对照
+	// 审计：CellID 应等于 Item.ID 的数字部分，顺序应等于模型数组顺序。
+	cells, revision, failures, lastErr := bridge.sceneStats()
+	builder.heading("Unified Render Scene:")
+	builder.meta("Cells:", strconv.FormatUint(cells, 10))
+	builder.meta("Revision:", strconv.FormatUint(revision, 10))
+	builder.meta("Apply Failures:", strconv.FormatUint(failures, 10))
+	if lastErr != "" {
+		builder.meta("Last Error:", chatDebugValueOrNone(lastErr))
+	}
+	snap := bridge.sceneSnapshot()
+	if snap == nil {
+		return
+	}
+	// Layout 摘要（P3 双跑审计）：LayoutTranscript 的 gap 行数应等于相邻
+	// 独立 cell 间分隔数（boundary.ResolveGap 规则表），语义行数 = 各 cell
+	// 源文本行之和；渲染层切换后应与旧路径空行序列一致（见
+	// TestRenderLayer_GapParity_LegacyCoordinatorVsLayoutTranscript）。
+	if len(snap.Cells) > 0 {
+		rows := scene.LayoutTranscript(snap.Cells, snap.Revision)
+		gaps := 0
+		for _, r := range rows {
+			if r.Gap > 0 {
+				gaps++
+			}
+		}
+		builder.meta("Layout Rows:", strconv.Itoa(len(rows)))
+		builder.meta("Layout Gaps:", strconv.Itoa(gaps))
+		// 文本投影（切片 8）：RenderText 是渲染层切换后 presenter 应写出
+		// 的最终文本行（gap 行投影为空行）。Text Rows 应与旧路径实际输出
+		// 行数一致（含 gap 空行），供双跑人工对照。
+		builder.meta("Layout Text Rows:", strconv.Itoa(len(scene.RenderText(snap.Cells, snap.Revision))))
+		// 运行时双跑文本对照（切片 9）：coordinator 每个完整块提交时由探针
+		// 把旧路径实际行序列与 RenderText 对应片段逐行对照。Matched 应随
+		// 会话推进持续增长；Missed > 0 时 Last Error 给出首个不一致详情
+		// （块号/行号/两侧文本），供切换前排查。
+		blocks, matched, missed, lastErr := bridge.textParityStats()
+		builder.meta("Text Parity Blocks:", strconv.FormatUint(blocks, 10))
+		builder.meta("Text Parity Matched:", strconv.FormatUint(matched, 10))
+		builder.meta("Text Parity Missed:", strconv.FormatUint(missed, 10))
+		if lastErr != "" {
+			builder.meta("Text Parity Last Error:", chatDebugValueOrNone(lastErr))
+		}
+	}
+	for _, c := range snap.Cells {
+		if c == nil {
+			continue
+		}
+		src := c.Source
+		if width := 48; ui.DisplayWidth(src) > width {
+			src = ui.TruncateVisible(src, width, "…")
+		}
+		line := fmt.Sprintf("  cell-%d [%s] %s", c.ID, c.Kind, src)
+		if c.ChainKey != "" {
+			line += fmt.Sprintf(" (chain %s)", c.ChainKey)
+		}
+		builder.plain(line)
+	}
 }
 
 func appendChatDebugSessionDetails(builder *chatDebugDocumentBuilder, session *ChatSession) {

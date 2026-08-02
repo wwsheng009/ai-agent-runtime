@@ -137,6 +137,13 @@ func executeModelCommand(session *ChatSession, request modelCommandRequest, inte
 	if session == nil {
 		return fmt.Errorf("当前没有活动会话")
 	}
+	// §5.5 用户交互例外：/model 输出捕获触发时刻模型尾部锚点（不进入编码器因果链）。
+	if session.RuntimeEventBridge != nil {
+		session.RuntimeEventBridge.recordInteractionAnchor("model")
+		// /model 输出走 stdout/交互选择，不产生命令 cell；返回前清除
+		// pending 标记，防止残留污染后续普通命令注入。
+		defer session.RuntimeEventBridge.clearPendingInteraction()
+	}
 	if request.ShowStatus && !request.HasMutation() {
 		return nil
 	}

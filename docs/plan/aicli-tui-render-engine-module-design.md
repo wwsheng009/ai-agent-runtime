@@ -90,6 +90,37 @@
   已整体移除（screen_model 字段/API、snapshot 接线），语义定稿：**white =
   完整行相同却重发；tag 值变化 = changed（同步）；Reset 后首帧 = 同步帧，
   不计数**。
+- **渲染可观测性演进补充（行标识 v2：内容寻址 w + 最近帧 star + 显式 resync）。**
+  在上述定稿语义之上，行标识再收口三个点：
+  - **w 改为内容寻址（`WhiteEmitsByHash`）**：tag 的 w 按 `RowTextHash`（宽字符
+    Cont 列跳过、尾随空格裁剪、FNV-1a 32）对**去 tag 后的纯内容**计数，同一
+    内容滚动到新屏幕位置不继承该位置的旧历史（`TestPaintTraceWhiteEmitsByHash`
+    固化：同内容跨行累计、Reset 清零）。`/debug display` 表格保留位置计数
+    `WhiteEmits` 列——**tag 的 w 与表格 WhiteEmits 列在滚动后不再一一对应**
+    （tag 追内容、表格追屏幕行），诊断时以 tag 指纹为准。指纹实现两处共享：
+    surface 端 `RowTextHash(row.Cells)`（compose 后、加 tag 前计算）与探针端
+    `rowContentHash`（`RowTextHash(stripDebugTagPrefix(...))`，strip 掉
+    `[hhhh #NN wN*]` 前缀再 hash）——w/star 变化不再使行自身指纹不稳定。
+  - **star marker（`[hhhh #NN wN*]`）**：tag 尾部 `*` 标记**最近一个已记录帧**
+    的 white 行，把"此刻正在重复渲染"与"生命周期累计"分开；帧不再记 white
+    后星标自然消失。star 只出现在测试/显示帧（`ComposedFrameForTest` 传
+    `withStar=true`），**staged 帧刻意不带 star**——star 是易变属性，若进入
+    staged 帧，其出现/消失会使下一帧全行比较翻转 white 分类（产生额外 tag
+    同步帧）。
+  - **显式 resync（`resyncPending`）**：`Reset()`/`SetEnabled(true)` 置位，
+    下一帧所有 painted 行强制分类为 changed。修掉上文的边界：原语义依赖
+    "Reset 后首帧 tag 从旧值变新值"（w=0 且指纹未变时 tag 不变 → 首帧会被
+    误计 white）；`resyncPending` 使"Reset 同步帧不污染 w 基线"**无条件成立**
+    （`fixed_bottom_surface_paint_trace_test.go` 的 Resync-frame 测试固化：
+    首帧无 `w0*`，随后重复渲染突刺才有 `w1*`）。
+  - 语义不变式保持：**white = 完整行（含 tag）相同却重发**——w 递增后下一帧
+    必为 tag 同步帧（changed），再下一帧才可能再次 white；持续重复渲染的行
+    w 单调递增（每两帧 +1），诊断信号（w 增长 + star）始终有效，计数不受
+    探针自身副作用污染。`stripDebugTagPrefix` 与 surface tag 格式
+    `[hhhh #NN wN*]` 硬编码耦合（13 列起，w/star 使实际宽度增长，截断按
+    渲染后长度自适应）——格式若改动需同步两处，`TestPaintTraceRowTextHash`/
+    滚动计数测试（scroll-me 内容跨两轮 white burst 达 w2）提供格式一致性
+    护栏。
 
 ### 实施审计注记（2026-08-01）
 
@@ -245,6 +276,9 @@ synchronized update 包裹，杜绝交错。
 ### 3.1 总体数据流
 
 ```text
+上游事件流（LLM delta / 工具事件 / 并行输出 / 命令日志）
+        │  统一编码器（EventEncoder，事件 → ChangeSet，见 unified-encoder-plan）
+        ▼
 状态生产者（coordinator / ActiveStreamController / slash command / runtime 事件）
         │  意图级 API：Update(ScenePatch) / Invalidate(reason)
         ▼
@@ -268,6 +302,10 @@ synchronized update 包裹，杜绝交错。
         ▼
    物理终端（主屏或 lease 的 alternate screen）
 ```
+
+### 3.1.1 上游衔接：统一编码器
+
+上图中新增的"统一编码器"层对应 [unified-encoder-plan](./aicli-event-stream-rendering-order-unified-encoder-plan.md) 的 `EventEncoder`：它是**唯一**把上游事件转换为有序、带身份模型的入口（产出 `ChangeSet`，按 `Item.ID` 去重合并，携带 `Seq/CauseID`）。状态生产者（coordinator / ActiveStreamController）从编码器消费 `ChangeSet`，再以意图级 `Update(ScenePatch)` 驱动本引擎；`ScenePatch` 中的 CellID 即 `Item.ID`。本引擎**不负责**事件顺序推断与身份分配（用户交互 `/debug`、`/model` 以编码器 `Tail` 为锚点进入）。配套规格见 [render-model-spec](./aicli-event-stream-rendering-order-render-model-spec.md) 与 [event-encoder-api-design](./aicli-event-stream-rendering-order-event-encoder-api-design.md)。
 
 ### 3.2 模块位置与包边界
 

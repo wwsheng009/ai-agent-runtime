@@ -112,6 +112,9 @@ type managedJob struct {
 	outputMu     sync.Mutex
 	outputOffset int64
 	scheduled    bool
+	// scheduledAt records when the job was handed to a worker goroutine; the
+	// watchdog uses it to reclaim slots that never transition to running.
+	scheduledAt time.Time
 	cancel       context.CancelFunc
 }
 
@@ -326,19 +329,39 @@ func (m *Manager) ReadOutput(ctx context.Context, req TaskOutputArgs) (TaskOutpu
 	logPath := managed.logPath
 	managed.mu.RUnlock()
 
+	pendingDiag := TaskOutputResult{}
+	if status == StatusPending {
+		queuePosition, active, maxConcurrent := m.jobQueueDiagnostics(jobID)
+		pendingDiag = m.pendingQueueDiagnostics(queuePosition, active, maxConcurrent, info.Metadata)
+	}
+
 	if logPath != "" {
 		result, readErr := m.readOutputFromLog(logPath, jobID, status, exitCode, req.Offset, req.Limit)
+		applyPendingQueueDiagnostics(&result, pendingDiag)
 		return decorateTaskOutputResult(result, info), readErr
 	}
 
 	output, nextOffset := managed.output.Read(req.Offset, req.Limit)
-	return decorateTaskOutputResult(TaskOutputResult{
+	result := TaskOutputResult{
 		JobID:      jobID,
 		Status:     string(status),
 		Output:     output,
 		NextOffset: nextOffset,
 		ExitCode:   exitCode,
-	}, info), nil
+	}
+	applyPendingQueueDiagnostics(&result, pendingDiag)
+	return decorateTaskOutputResult(result, info), nil
+}
+
+func applyPendingQueueDiagnostics(result *TaskOutputResult, diag TaskOutputResult) {
+	if result == nil {
+		return
+	}
+	result.QueuePosition = diag.QueuePosition
+	result.ActiveJobs = diag.ActiveJobs
+	result.MaxConcurrent = diag.MaxConcurrent
+	result.SchedulerState = diag.SchedulerState
+	result.NextAction = diag.NextAction
 }
 
 // GetJob returns a background job by id.
@@ -540,6 +563,36 @@ func pathWithinRoot(path, root string) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
+// runJobImpl is a seam used by tests to inject panic/block behavior into
+// runJobSafely; production always routes through (*Manager).runJob.
+var runJobImpl = func(m *Manager, managed *managedJob) {
+	m.runJob(managed)
+}
+
+// runJobSafely runs a job in a worker goroutine and guarantees that a panic
+// can never leak a scheduling slot: the job is failed and its slot released
+// even if the execution path panics before reaching a terminal state.
+func (m *Manager) runJobSafely(managed *managedJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicErr := fmt.Errorf("background job panicked: %v", r)
+			m.failJobWithErrorCode(managed, runtimeerrors.ErrToolBrokerFailure, panicErr)
+			// Defensive: guarantee the slot is released even if the failure
+			// path above itself panicked.
+			managed.mu.Lock()
+			managed.scheduled = false
+			if managed.info.Status == StatusPending {
+				now := time.Now().UTC()
+				managed.info.Status = StatusFailed
+				managed.info.FinishedAt = &now
+			}
+			managed.mu.Unlock()
+			m.notifyDispatcher()
+		}
+	}()
+	runJobImpl(m, managed)
+}
+
 func (m *Manager) runJob(managed *managedJob) {
 	if managed == nil {
 		return
@@ -554,7 +607,7 @@ func (m *Manager) runJob(managed *managedJob) {
 	}
 	req := managed.request
 	managed.mu.Lock()
-	if managed.info.Status == StatusCancelled {
+	if isTerminalStatus(managed.info.Status) {
 		managed.scheduled = false
 		managed.mu.Unlock()
 		m.notifyDispatcher()
@@ -674,7 +727,7 @@ func (m *Manager) acceptStartedProcess(ctx context.Context, managed *managedJob,
 	}
 	startup := normalizeStartupAcceptance(managed.request.Startup)
 	managed.mu.Lock()
-	if managed.info.Status == StatusCancelled {
+	if isTerminalStatus(managed.info.Status) {
 		managed.scheduled = false
 		managed.mu.Unlock()
 		m.notifyDispatcher()
@@ -730,7 +783,7 @@ func (m *Manager) acceptStartedProcess(ctx context.Context, managed *managedJob,
 
 	acceptedAt := time.Now().UTC()
 	managed.mu.Lock()
-	if managed.info.Status == StatusCancelled {
+	if isTerminalStatus(managed.info.Status) {
 		managed.scheduled = false
 		managed.mu.Unlock()
 		m.notifyDispatcher()
@@ -800,7 +853,7 @@ func (m *Manager) completeJob(managed *managedJob, exitCode int) {
 func (m *Manager) completeJobWithMessage(managed *managedJob, exitCode int, message string) {
 	finishedAt := time.Now().UTC()
 	managed.mu.Lock()
-	if managed.info.Status == StatusCancelled {
+	if isTerminalStatus(managed.info.Status) {
 		managed.scheduled = false
 		managed.mu.Unlock()
 		m.notifyDispatcher()
@@ -860,7 +913,7 @@ func (m *Manager) failJobWithCode(managed *managedJob, exitCode int, message str
 func (m *Manager) failJobWithCodeAndError(managed *managedJob, exitCode int, code runtimeerrors.ErrorCode, message string) {
 	finishedAt := time.Now().UTC()
 	managed.mu.Lock()
-	if managed.info.Status == StatusCancelled {
+	if isTerminalStatus(managed.info.Status) {
 		managed.scheduled = false
 		managed.mu.Unlock()
 		m.notifyDispatcher()
@@ -1060,16 +1113,47 @@ func (m *Manager) dispatchLoop() {
 		cleanup = cleanupTicker.C
 		defer cleanupTicker.Stop()
 	}
+	// The watchdog periodically reclaims slots held by jobs that were marked
+	// scheduled but never transitioned to running (e.g. a worker goroutine
+	// panicked or died). Without it, one leaked slot permanently freezes the
+	// queue once MaxConcurrentJobs slots are exhausted.
+	var watchdogTicker *time.Ticker
+	var watchdog <-chan time.Time
+	if m.config.MonitorInterval > 0 {
+		watchdogTicker = time.NewTicker(m.config.MonitorInterval)
+		watchdog = watchdogTicker.C
+		defer watchdogTicker.Stop()
+	}
 	for {
 		select {
 		case <-m.stopCh:
 			return
 		case <-m.dispatchCh:
-			m.dispatchPending()
+			m.dispatchPendingSafely()
+		case <-watchdog:
+			m.reclaimStuckScheduled()
 		case <-cleanup:
 			_, _ = m.Cleanup(context.Background())
 		}
 	}
+}
+
+// dispatchPendingSafely never lets a dispatch panic kill the scheduler loop:
+// the loop goroutine must survive so later notifications can retry dispatch.
+func (m *Manager) dispatchPendingSafely() {
+	defer func() {
+		if r := recover(); r != nil {
+			if m.eventHandler != nil {
+				m.eventHandler(JobEvent{
+					JobID:     "",
+					Type:      "scheduler_panic",
+					Payload:   map[string]interface{}{"error": fmt.Sprintf("dispatch panic: %v", r)},
+					CreatedAt: time.Now().UTC(),
+				})
+			}
+		}
+	}()
+	m.dispatchPending()
 }
 
 func (m *Manager) notifyDispatcher() {
@@ -1127,7 +1211,7 @@ func (m *Manager) dispatchPending() {
 			m.jobWG.Add(1)
 			go func(job *managedJob) {
 				defer m.jobWG.Done()
-				m.runJob(job)
+				m.runJobSafely(job)
 			}(managed)
 		}
 		if !launched {
@@ -1164,6 +1248,89 @@ func (m *Manager) pendingCandidates() (int, []*managedJob) {
 	return m.maxConcurrentJobs - active, pending
 }
 
+// jobQueueDiagnostics reports, for a pending job, its 1-based dispatch queue
+// position (0 when not queued), the number of jobs currently occupying a
+// scheduling slot, and the configured slot capacity. The queue order mirrors
+// dispatchPending: priority desc, then creation time asc.
+func (m *Manager) jobQueueDiagnostics(jobID string) (queuePosition, active, maxConcurrent int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	maxConcurrent = m.maxConcurrentJobs
+	type pendingEntry struct {
+		id       string
+		priority int
+		created  time.Time
+	}
+	pending := make([]pendingEntry, 0)
+	for _, managed := range m.jobs {
+		if managed == nil {
+			continue
+		}
+		managed.mu.RLock()
+		status := managed.info.Status
+		scheduled := managed.scheduled
+		_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
+		priority := managed.info.Priority
+		created := managed.info.CreatedAt
+		id := managed.info.ID
+		managed.mu.RUnlock()
+		if scheduled && waitingForRecovery {
+			continue
+		}
+		if status == StatusRunning || scheduled {
+			active++
+			continue
+		}
+		if status == StatusPending {
+			pending = append(pending, pendingEntry{id: id, priority: priority, created: created})
+		}
+	}
+	sort.SliceStable(pending, func(i, j int) bool {
+		if pending[i].priority != pending[j].priority {
+			return pending[i].priority > pending[j].priority
+		}
+		if !pending[i].created.Equal(pending[j].created) {
+			return pending[i].created.Before(pending[j].created)
+		}
+		return pending[i].id < pending[j].id
+	})
+	for i, entry := range pending {
+		if entry.id == jobID {
+			queuePosition = i + 1
+			break
+		}
+	}
+	return queuePosition, active, maxConcurrent
+}
+
+// pendingQueueDiagnostics builds the caller-facing guidance for a job that is
+// still pending, so LLM/tool callers can distinguish normal queuing from a
+// saturated or recovering queue instead of guessing.
+func (m *Manager) pendingQueueDiagnostics(queuePosition, active, maxConcurrent int, metadata map[string]interface{}) TaskOutputResult {
+	diag := TaskOutputResult{
+		QueuePosition: queuePosition,
+		ActiveJobs:    active,
+		MaxConcurrent: maxConcurrent,
+	}
+	if _, recovering := stringMetadataValue(metadata, backgroundMetaNextRecoveryAt); recovering && queuePosition == 0 {
+		diag.SchedulerState = "recovering"
+		diag.NextAction = "job is in automatic recovery backoff; wait for recovery or query again after next_recovery_at"
+		return diag
+	}
+	switch {
+	case maxConcurrent > 0 && active >= maxConcurrent:
+		diag.SchedulerState = "saturated"
+		diag.NextAction = fmt.Sprintf("queue saturated: %d/%d slots active; wait for a slot to free or cancel a stuck job", active, maxConcurrent)
+	case queuePosition > 1:
+		diag.SchedulerState = "queued"
+		diag.NextAction = fmt.Sprintf("job queued at position %d; retry task_output shortly", queuePosition)
+	default:
+		diag.SchedulerState = "dispatched"
+		diag.NextAction = "job is next in line or starting; retry task_output shortly"
+	}
+	return diag
+}
+
 func (m *Manager) markScheduled(managed *managedJob) bool {
 	if managed == nil {
 		return false
@@ -1174,7 +1341,106 @@ func (m *Manager) markScheduled(managed *managedJob) bool {
 		return false
 	}
 	managed.scheduled = true
+	managed.scheduledAt = time.Now().UTC()
 	return true
+}
+
+// reclaimStuckScheduled is the scheduling watchdog. It scans for jobs that
+// were handed to a worker goroutine (scheduled) but never reached a running
+// or terminal state within the stuck threshold, and reclaims their slots.
+// Without this, a single panicked/dead worker goroutine would hold a slot
+// forever and freeze the queue once MaxConcurrentJobs slots are exhausted.
+func (m *Manager) reclaimStuckScheduled() {
+	if m == nil {
+		return
+	}
+	now := time.Now().UTC()
+	stuck := make([]*managedJob, 0)
+	m.mu.RLock()
+	for _, managed := range m.jobs {
+		if managed == nil {
+			continue
+		}
+		managed.mu.RLock()
+		scheduled := managed.scheduled
+		status := managed.info.Status
+		_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
+		elapsed := now.Sub(managed.scheduledAt)
+		state, _ := stringMetadataValue(managed.info.Metadata, backgroundMetaLaunchState)
+		startup := normalizeStartupAcceptance(managed.request.Startup)
+		managed.mu.RUnlock()
+		if !scheduled || status != StatusPending || waitingForRecovery {
+			continue
+		}
+		threshold := m.scheduledStuckThreshold(state, startup)
+		if elapsed >= threshold {
+			stuck = append(stuck, managed)
+		}
+	}
+	m.mu.RUnlock()
+	for _, managed := range stuck {
+		m.reclaimStuckJob(managed)
+	}
+}
+
+// scheduledStuckThreshold returns how long a job may stay scheduled without
+// transitioning to running before the watchdog reclaims its slot. While the
+// startup probe is accepting (launch_state=accepting) the probe deadline
+// dominates; otherwise HeartbeatTimeout (default 30s) is the budget.
+func (m *Manager) scheduledStuckThreshold(state string, startup StartupAcceptance) time.Duration {
+	if state == launchStateAccepting {
+		// The probe self-terminates within startupProbeTimeout; add a margin
+		// so a busy scheduler never reclaims a legitimately probing job.
+		return startupProbeTimeout(startup) + 5*time.Second
+	}
+	if m.config.HeartbeatTimeout > 0 {
+		return m.config.HeartbeatTimeout
+	}
+	return 30 * time.Second
+}
+
+// reclaimStuckJob fails a job whose worker goroutine never started execution
+// and cancels its context so the goroutine (if alive) can unwind.
+func (m *Manager) reclaimStuckJob(managed *managedJob) {
+	if managed == nil {
+		return
+	}
+	finishedAt := time.Now().UTC()
+	managed.mu.Lock()
+	if !managed.scheduled || managed.info.Status != StatusPending {
+		managed.mu.Unlock()
+		return
+	}
+	_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
+	if waitingForRecovery {
+		managed.mu.Unlock()
+		return
+	}
+	elapsed := time.Since(managed.scheduledAt)
+	message := fmt.Sprintf("scheduler stuck: job scheduled %s ago but never started running", elapsed.Round(time.Second))
+	managed.scheduled = false
+	managed.info.Status = StatusFailed
+	exitCode := -1
+	managed.info.ExitCode = &exitCode
+	managed.info.FinishedAt = &finishedAt
+	managed.info.Message = message
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrToolBrokerFailure)
+	managed.info.Metadata[backgroundMetaLaunchState] = launchStateFailed
+	cancel := managed.cancel
+	managed.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	m.persistManagedJob(managed)
+	m.appendJobEvent(context.Background(), managed.info.ID, "scheduler_stuck", map[string]interface{}{
+		"status":     StatusFailed,
+		"error_code": string(runtimeerrors.ErrToolBrokerFailure),
+		"error":      message,
+	})
+	m.notifyDispatcher()
 }
 
 func (m *Manager) recoverPersistedJobs(ctx context.Context) {

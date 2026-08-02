@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -6294,5 +6296,239 @@ func TestRenderChatRuntimeEventToolDeniedShowsRecoveryAction(t *testing.T) {
 	})
 	if !strings.Contains(got, "diagnostic: AGENT_PERMISSION (retryable=false)") || !strings.Contains(got, "action: Request the required approval") {
 		t.Fatalf("expected denied tool recovery details, got %q", got)
+	}
+}
+
+// TestChatRuntimeEventBridge_InteractionAnchorSnapshotSemantics 验证 §5.5 用户交互
+// 锚点的快照语义：交互触发时刻捕获模型尾部，模型后续增长不影响已记录锚点；
+// 新交互覆盖锚点并指向最新模型尾部。
+func TestChatRuntimeEventBridge_InteractionAnchorSnapshotSemantics(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+
+	// 模型为空：无锚点可捕获。
+	if tail := bridge.recordInteractionAnchor("model"); tail != nil {
+		t.Fatalf("empty model anchor = %+v, want nil", tail)
+	}
+
+	// 编码第一个事件后模型有尾部。
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: "session-1",
+		TraceID:   "trace-1",
+		Payload:   map[string]interface{}{"prompt": "choose a model"},
+	})
+	tail := bridge.recordInteractionAnchor("model")
+	if tail == nil {
+		t.Fatal("anchor after first event is nil")
+	}
+	gotTail, at, source, count := bridge.lastInteractionAnchor()
+	if gotTail == nil || gotTail.ItemID != tail.ItemID || gotTail.Seq != tail.Seq {
+		t.Fatalf("lastInteractionAnchor=%+v want item %s #%d", gotTail, tail.ItemID, tail.Seq)
+	}
+	if at.IsZero() {
+		t.Fatal("anchor time is zero")
+	}
+	if source != "model" || count != 1 {
+		t.Fatalf("source=%q count=%d want model/1", source, count)
+	}
+
+	// 模型继续增长后，已记录锚点保持触发时刻快照。
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "session-1",
+		TraceID:   "trace-2",
+		Payload:   map[string]interface{}{"request_id": "req-1"},
+	})
+	gotTail2, _, _, count2 := bridge.lastInteractionAnchor()
+	if gotTail2 == nil || gotTail2.ItemID != tail.ItemID || gotTail2.Seq != tail.Seq {
+		t.Fatalf("anchor drifted after model growth: got %+v want %+v", gotTail2, tail)
+	}
+	if count2 != 1 {
+		t.Fatalf("count=%d want 1", count2)
+	}
+
+	// 新交互覆盖锚点，指向当前模型尾部。
+	bridge.recordInteractionAnchor("debug")
+	gotTail3, _, source3, count3 := bridge.lastInteractionAnchor()
+	cur := bridge.renderModelTail()
+	if gotTail3 == nil || cur == nil || gotTail3.Seq != cur.Seq || gotTail3.ItemID != cur.ItemID {
+		t.Fatalf("new anchor=%+v want current tail=%+v", gotTail3, cur)
+	}
+	if source3 != "debug" || count3 != 2 {
+		t.Fatalf("source=%q count=%d want debug/2", source3, count3)
+	}
+}
+
+// TestChatDebugDisplayDocumentShowsInteractionAnchor 验证 /debug 文档展示最近
+// 一次用户交互锚点（审计面可见触发时刻的模型尾部）。
+func TestChatDebugDisplayDocumentShowsInteractionAnchor(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{
+		ProviderName: "openai",
+		Model:        "gpt-test",
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: "session-1",
+		TraceID:   "trace-1",
+		Payload:   map[string]interface{}{"prompt": "choose a model"},
+	})
+	bridge.recordInteractionAnchor("model")
+
+	doc := buildChatDebugDisplayDocument(session)
+	plain := ui.RenderDocumentPlain(doc)
+	if !strings.Contains(plain, "Interaction Anchor:") {
+		t.Fatalf("debug document missing Interaction Anchor line:\n%s", plain)
+	}
+}
+
+// TestChatRuntimeEventBridge_InteractionInjectedAtAnchor 固化切片 12 的端到端
+// 语义：/debug、/model 交互输出经 recordInteractionAnchor（触发时刻捕获模型
+// 尾部锚点）+ RenderCommandDocument 提交点（consumePendingInteraction）按
+// 锚定语义注入 Scene —— 交互 cell 出现在锚点 item 之后、模型后续增长 item
+// 之前；无 pending 标记的普通命令仍 append 到模型末尾。
+func TestChatRuntimeEventBridge_InteractionInjectedAtAnchor(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coord := newChatInteractionCoordinator(session)
+	var out bytes.Buffer
+	coord.SetWriter(&out)
+
+	// 事件 1 → item-1（模型尾部锚点）。
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: "session-1",
+		TraceID:   "trace-1",
+		Payload:   map[string]interface{}{"prompt": "choose a model"},
+	})
+	anchor := bridge.recordInteractionAnchor("debug")
+	if anchor == nil || anchor.ItemID != "item-1" {
+		t.Fatalf("anchor = %+v, want item-1", anchor)
+	}
+	// 模型在触发时刻后继续增长 → item-2。
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "session-1",
+		TraceID:   "trace-2",
+		Payload:   map[string]interface{}{"request_id": "req-1"},
+	})
+
+	// /debug 输出提交：pending 交互标记 → 锚定插入（item-1 之后）。
+	if ok := coord.RenderCommandDocument(render.Document{
+		Blocks: []render.Block{
+			{Kind: render.BlockParagraph, Lines: []render.Line{
+				{Spans: []render.Span{{Text: "debug 输出"}}},
+			}},
+		},
+	}); !ok {
+		t.Fatal("RenderCommandDocument returned false")
+	}
+
+	snap := bridge.sceneSnapshot()
+	if len(snap.Cells) != 3 {
+		t.Fatalf("cells = %d, want 3 (item-1, interaction, item-2)", len(snap.Cells))
+	}
+	cells := snap.Cells
+	if cells[0].ID != 1 || cells[2].ID != 2 {
+		t.Fatalf("ids = [%d %d %d], want [1 3 2]", cells[0].ID, cells[1].ID, cells[2].ID)
+	}
+	// 交互 cell 在锚点 item-1 之后、增长 item-2 之前；按 command cell 呈现。
+	if cells[1].ID != 3 || cells[1].Kind != scene.KindCommand || cells[1].Source != "debug 输出" {
+		t.Fatalf("interaction cell = %+v, want item-3 command 'debug 输出'", cells[1])
+	}
+
+	// pending 已消费：下一次普通命令结果 append 到模型末尾（item-2 之后）。
+	if ok := coord.RenderCommandDocument(render.Document{
+		Blocks: []render.Block{
+			{Kind: render.BlockParagraph, Lines: []render.Line{
+				{Spans: []render.Span{{Text: "普通命令"}}},
+			}},
+		},
+	}); !ok {
+		t.Fatal("second RenderCommandDocument returned false")
+	}
+	snap = bridge.sceneSnapshot()
+	if len(snap.Cells) != 4 {
+		t.Fatalf("cells = %d, want 4", len(snap.Cells))
+	}
+	last := snap.Cells[len(snap.Cells)-1]
+	if last.Kind != scene.KindCommand || last.Source != "普通命令" {
+		t.Fatalf("last cell = %+v, want command '普通命令'", last)
+	}
+}
+
+// TestChatRuntimeEventBridge_ReplayRestoresInteraction 固化 replay 幂等恢复：
+// 交互注入记录（interaction + interaction_anchor）与事件行同一全序落盘，
+// 新 bridge replay 后 Scene 重建等价 —— 交互 cell 仍出现在锚点 item 之后、
+// 增长 item 之前（锚点位置按全序重建，不随 replay 漂移到模型末尾）。
+func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	logPath := filepath.Join(t.TempDir(), "runtime-events.jsonl")
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	bridge.eventLogPathOverride = logPath
+	coord := newChatInteractionCoordinator(session)
+	var out bytes.Buffer
+	coord.SetWriter(&out)
+
+	// 实时路径：事件 1 → 锚点 → 事件 2 → /debug 交互输出（锚定插入）。
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: "session-1",
+		TraceID:   "trace-1",
+		Payload:   map[string]interface{}{"prompt": "choose a model"},
+	})
+	bridge.recordInteractionAnchor("debug")
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "session-1",
+		TraceID:   "trace-2",
+		Payload:   map[string]interface{}{"request_id": "req-1"},
+	})
+	if ok := coord.RenderCommandDocument(render.Document{
+		Blocks: []render.Block{
+			{Kind: render.BlockParagraph, Lines: []render.Line{
+				{Spans: []render.Span{{Text: "debug 输出"}}},
+			}},
+		},
+	}); !ok {
+		t.Fatal("RenderCommandDocument returned false")
+	}
+	live := bridge.sceneSnapshot()
+	if len(live.Cells) != 3 || live.Cells[1].ID != 3 {
+		t.Fatalf("live cells = %d, want 3 with interaction at index 1", len(live.Cells))
+	}
+
+	// 新 bridge replay 同一日志：Scene 重建等价（同 cell 序列与顺序）。
+	replayBridge := newChatRuntimeEventBridge(session)
+	replayBridge.eventLogPathOverride = logPath
+	if n, err := replayBridge.replayEventLog(); err != nil || n == 0 {
+		t.Fatalf("replayEventLog = %d, %v", n, err)
+	}
+	replayed := replayBridge.sceneSnapshot()
+	if len(replayed.Cells) != len(live.Cells) {
+		t.Fatalf("replay cells = %d, live = %d", len(replayed.Cells), len(live.Cells))
+	}
+	for i := range live.Cells {
+		if replayed.Cells[i].ID != live.Cells[i].ID ||
+			replayed.Cells[i].Kind != live.Cells[i].Kind ||
+			replayed.Cells[i].Source != live.Cells[i].Source {
+			t.Fatalf("cell %d: replay = %+v, live = %+v", i, replayed.Cells[i], live.Cells[i])
+		}
+	}
+	if replayed.Cells[1].ID != 3 || replayed.Cells[1].Source != "debug 输出" {
+		t.Fatalf("replay interaction cell = %+v, want item-3 'debug 输出'", replayed.Cells[1])
+	}
+	if replayed.Cells[2].ID != 2 {
+		t.Fatalf("replay last cell = %+v, want item-2（交互不漂移到末尾）", replayed.Cells[2])
 	}
 }

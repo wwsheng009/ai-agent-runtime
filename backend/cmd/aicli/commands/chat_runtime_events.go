@@ -1,10 +1,14 @@
 package commands
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +19,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
@@ -95,6 +101,40 @@ type chatRuntimeEventBridge struct {
 	completeReasoning          func(*runtimetypes.ReasoningBlock) bool
 	renderResponse             func(string)
 	writePrompt                func()
+	renderEncoder              *encoding.EventEncoder // 统一渲染编码器（双跑模式数据面）
+	renderScene                *scene.TuiScene        // 统一渲染 Scene（P3：ChangeSet 消费端）
+	renderMapper               *scene.ChangeSetMapper // 绑定 renderScene 的映射器（有状态，复用）
+	sceneMu                    sync.RWMutex           // 保护 renderScene/renderMapper 与 scene 统计
+	sceneApplyFailures         uint64                 // ChangeSet 映射/提交失败次数（诊断）
+	sceneLastError             string                 // 最近一次映射失败原因（诊断）
+	scenePresenterMode         bool                   // AICLI_SCENE_PRESENTER=1：完整块可见行以 Scene 投影为权威（P3 切换）
+	interactionAnchorMu        sync.Mutex
+	interactionAnchor          *encoding.Tail // 最近一次用户交互触发时刻的模型尾部锚点（§5.5）
+	interactionAnchorAt        time.Time
+	interactionAnchorSource    string
+	interactionAnchorCount     uint64
+	// pendingInteraction 是"本次交互命令尚未消费"的标记：recordInteractionAnchor
+	// 设置，RenderCommandDocument 提交点经 submitCommandResult 消费（转
+	// 交互锚定注入）；无 cell 输出的 legacy 路径在命令返回前显式清除，
+	// 防止残留污染下一条普通命令（见 chat_debug_archive.go / chat_model_command.go）。
+	pendingInteractionSource string
+	pendingInteractionTail   *encoding.Tail
+	eventLogMu                 sync.Mutex
+	eventLogPathOverride       string // 测试注入：覆盖日志文件路径
+	eventLogCount              uint64 // 已写入事件数
+	eventLogReplayed           uint64 // 启动时重放事件数
+	eventLogFailures           uint64 // 写入/重放失败次数
+
+	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
+	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
+	// 的对应片段逐行对照。只读旁路审计（不改变任何输出行为），统计供
+	// /debug 审计段展示。
+	textParityMu      sync.Mutex
+	textParityBlocks  uint64 // 已对照的完整块数
+	textParityMatched uint64 // 与 Scene 一致的块数
+	textParityMissed  uint64 // 不一致/无法对照的块数
+	textParityLastErr string // 最近一次不一致详情
+	textParityCell    int    // 已对照的 Scene cell 数（每完整块对应一个 cell）
 }
 
 type chatRuntimeQueuedEvent struct {
@@ -143,16 +183,39 @@ func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge 
 	if session.RuntimeEventBridge == nil {
 		session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
 	}
+	// 渲染层双跑文本对照（切片 9）：bridge 就绪后把探针注入 coordinator 的
+	// 完整块提交点（writeRowsLocked）。coordinator 尚未创建时由构造器接线。
+	if session.Interaction != nil {
+		session.Interaction.SetTextParityProbe(session.RuntimeEventBridge.checkTextParity)
+		session.Interaction.SetBlockSource(session.RuntimeEventBridge.sceneBlockSource())
+	}
 	session.RuntimeEventBridge.start()
 	return session.RuntimeEventBridge
 }
 
+// scenePresenterModeFromEnv 解析 Scene presenter 迁移开关
+// （AICLI_SCENE_PRESENTER=1/true/on/yes，大小写不敏感）。默认关闭：
+// 关闭时可见输出完全保持旧路径（双跑 + 对照探针）；开启时完整块可见行
+// 以 Scene 投影为权威（P3 切换的可回退 feature flag）。
+func scenePresenterModeFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_SCENE_PRESENTER"))) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
 func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
+	renderScene := scene.New()
 	bridge := &chatRuntimeEventBridge{
 		session:             session,
 		eventQueue:          make(chan chatRuntimeQueuedEvent, 512),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
 		rendered:            make(map[string]struct{}),
+		renderEncoder:       encoding.NewEventEncoder(),
+		renderScene:         renderScene,
+		renderMapper:        scene.NewChangeSetMapper(renderScene),
+		scenePresenterMode:  scenePresenterModeFromEnv(),
 		writeLine: func(line string) {
 			if strings.TrimSpace(line) == "" {
 				return
@@ -364,6 +427,9 @@ func (b *chatRuntimeEventBridge) start() {
 		return
 	}
 	b.startOnce.Do(func() {
+		// 事件日志重放：恢复同会话上次运行进入编码器的全部事件，幂等重建渲染模型。
+		// 失败不阻塞启动：计入 failures 供 /debug 审计，进程静默降级为无重放。
+		_, _ = b.replayEventLog()
 		b.startProcessor()
 		b.session.LocalRuntimeHost.EventBus.Subscribe("", b.Handle)
 	})
@@ -586,6 +652,677 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 		return
 	}
 	b.handleEvent(queued.event)
+}
+
+// encodeRenderModelEvent 把事件送入统一渲染编码器（双跑模式数据面）。
+// renderMu 与 submitUserInput 串行化编码器访问：事件循环 goroutine 与
+// coordinator 渲染 goroutine 会并发调用编码器（编码器非线程安全）。
+func (b *chatRuntimeEventBridge) encodeRenderModelEvent(event runtimeevents.Event) {
+	if b == nil || b.renderEncoder == nil {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.Encode(event))
+	b.appendEventLog(event)
+}
+
+// submitUserInput 把用户输入消息注入统一渲染数据面（切片 10）：用户输入
+// 没有 runtime 事件类型（事件流无 user 事件，见 encoder.SubmitUserInput），
+// 由 coordinator 渲染层在用户块提交前直连调用；编码为 KindUser 终态块，
+// 走 applyChangeSet 同一提交路径，并落事件日志（replay 幂等恢复）。
+// renderMu 与事件循环串行化（编码器非线程安全）。
+func (b *chatRuntimeEventBridge) submitUserInput(text string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.SubmitUserInput(text))
+	b.appendUserInputLog(text)
+}
+
+// submitCommand 把本地命令执行结果注入统一渲染数据面（设计文档 §1.3 行
+// 9/10）：命令执行没有 runtime 事件类型，由 coordinator 渲染层在命令结果
+// cell 提交点直连调用；编码为 KindCommand 终态块，走 applyChangeSet 同一
+// 提交路径，并落事件日志（replay 幂等恢复）。
+func (b *chatRuntimeEventBridge) submitCommand(text string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.SubmitCommand(text))
+	b.appendCommandLog(text)
+}
+
+// submitError 把操作错误注入统一渲染数据面（设计文档 §1.3 行 11）：本地
+// 命令/工具错误没有 runtime 事件类型，由 coordinator 渲染层在错误块提交
+// 点直连调用；编码为 KindSystem 终态块（会话/诊断语义），走 applyChangeSet
+// 同一提交路径，并落事件日志（replay 幂等恢复）。
+func (b *chatRuntimeEventBridge) submitError(text string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.SubmitError(text))
+	b.appendErrorLog(text)
+}
+
+// submitUserInteraction 把 /debug、/model 等用户交互输出注入统一渲染数据面
+// （设计文档 §1.3 行 12 / §5.5）：以触发时刻捕获的模型尾部锚点（anchor）
+// 为界插入渲染序列，不进入编码器因果链（不分配 CauseID）。编码为
+// KindUserInteraction 终态块，走 applyChangeSet 同一提交路径，并落事件
+// 日志（replay 幂等恢复；anchor 为值类型副本，重放时按全序重建等价位置）。
+func (b *chatRuntimeEventBridge) submitUserInteraction(text string, anchor *encoding.Tail) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.SubmitUserInteraction(text, anchor))
+	b.appendInteractionLog(text, anchor)
+}
+
+// submitCommandResult 是 RenderCommandDocument 提交点的统一注入入口：
+// 有 pending 交互标记（/debug、/model 等，经 recordInteractionAnchor 登记）
+// 时按交互锚定语义注入；否则按普通命令结果注入（submitCommand）。
+// 锚点为 nil（模型为空时触发）时由编码器退化为 append。
+func (b *chatRuntimeEventBridge) submitCommandResult(text string) {
+	if b == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	if source, tail := b.consumePendingInteraction(); source != "" {
+		b.submitUserInteraction(text, tail)
+		return
+	}
+	b.submitCommand(text)
+}
+
+// applyChangeSet 把编码器产出的 ChangeSet 映射为 SceneTransaction 并提交
+// （路线图 P3：渲染层只消费 ChangeSet）。映射器有状态（chainHeads），
+// 必须按事件顺序在单 goroutine 内串行调用；失败只计数并记录最后错误，
+// 不阻塞事件循环（双跑/旁路模式，旧渲染路径继续输出，切换以快照与
+// 统计审计为准）。Scene 由 sceneMu 保护，/debug 等诊断读可并发取快照。
+func (b *chatRuntimeEventBridge) applyChangeSet(cs *encoding.ChangeSet) {
+	if b == nil || cs == nil {
+		return
+	}
+	b.sceneMu.Lock()
+	defer b.sceneMu.Unlock()
+	if b.renderScene == nil || b.renderMapper == nil {
+		b.renderScene = scene.New()
+		b.renderMapper = scene.NewChangeSetMapper(b.renderScene)
+	}
+	if _, _, err := b.renderMapper.Apply(cs); err != nil {
+		b.sceneApplyFailures++
+		b.sceneLastError = err.Error()
+	}
+}
+
+// eventLogFilePath 返回事件日志文件路径（测试可注入覆盖）。
+func (b *chatRuntimeEventBridge) eventLogFilePath() string {
+	if b == nil {
+		return ""
+	}
+	if b.eventLogPathOverride != "" {
+		return b.eventLogPathOverride
+	}
+	if b.session == nil || b.session.Logger == nil {
+		return ""
+	}
+	sessionDir := b.session.Logger.SessionDirPath()
+	if sessionDir == "" {
+		return ""
+	}
+	return filepath.Join(sessionDir, "runtime-events.jsonl")
+}
+
+// appendEventLog 把事件 JSON 追加到事件日志（best-effort：失败只计数，不阻塞事件循环）。
+// 日志为 append-only，同一会话重启后由 replayEventLog 幂等重建模型。
+func (b *chatRuntimeEventBridge) appendEventLog(event runtimeevents.Event) {
+	if b == nil {
+		return
+	}
+	line, err := json.Marshal(event)
+	if err != nil {
+		b.eventLogMu.Lock()
+		b.eventLogFailures++
+		b.eventLogMu.Unlock()
+		return
+	}
+	b.appendEventLogLine(line)
+}
+
+// eventLogInjection 是事件日志中"直连注入记录"的落盘格式。注入内容没有
+// runtime 事件类型（用户输入 / 命令结果 / 操作错误 / 用户交互输出），以
+// 独立记录行与事件行区分：runtimeevents.Event 的 Type 恒非空，Type 为空
+// 的行即注入记录（见 submitUserInput / submitCommand / submitError /
+// submitUserInteraction）；具体类别由非空字段判别。旧日志的用户输入行
+// （{"user_input": "..."}）仍可解析（字段兼容）。
+type eventLogInjection struct {
+	UserInput         string         `json:"user_input,omitempty"`
+	Command           string         `json:"command,omitempty"`
+	Error             string         `json:"error,omitempty"`
+	Interaction       string         `json:"interaction,omitempty"` // /debug、/model 等交互输出
+	InteractionAnchor *encoding.Tail `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
+}
+
+// appendInjectionLog 把一条注入记录追加到事件日志（与事件行同一全序，
+// 保证 replay 重建顺序与实时路径一致）。
+func (b *chatRuntimeEventBridge) appendInjectionLog(rec eventLogInjection) {
+	if b == nil {
+		return
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		b.eventLogMu.Lock()
+		b.eventLogFailures++
+		b.eventLogMu.Unlock()
+		return
+	}
+	b.appendEventLogLine(line)
+}
+
+// appendUserInputLog 追加用户输入注入记录。
+func (b *chatRuntimeEventBridge) appendUserInputLog(text string) {
+	b.appendInjectionLog(eventLogInjection{UserInput: text})
+}
+
+// appendCommandLog 追加命令结果注入记录。
+func (b *chatRuntimeEventBridge) appendCommandLog(text string) {
+	b.appendInjectionLog(eventLogInjection{Command: text})
+}
+
+// appendErrorLog 追加操作错误注入记录。
+func (b *chatRuntimeEventBridge) appendErrorLog(text string) {
+	b.appendInjectionLog(eventLogInjection{Error: text})
+}
+
+// appendInteractionLog 追加用户交互输出注入记录（含触发时刻锚点；重放时
+// 按全序重建等价插入位置）。
+func (b *chatRuntimeEventBridge) appendInteractionLog(text string, anchor *encoding.Tail) {
+	b.appendInjectionLog(eventLogInjection{Interaction: text, InteractionAnchor: anchor})
+}
+
+// appendEventLogLine 写入单行日志记录（open→append→close）。
+func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
+	if b == nil {
+		return
+	}
+	path := b.eventLogFilePath()
+	if path == "" {
+		return
+	}
+	b.eventLogMu.Lock()
+	defer b.eventLogMu.Unlock()
+	// 每次 open→append→close：不持有长生命周期句柄，避免文件占用
+	// （事件频率低，open/close 开销可忽略）。
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		b.eventLogFailures++
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		b.eventLogFailures++
+		return
+	}
+	b.eventLogCount++
+}
+
+// replayEventLog 从事件日志重放全部记录（事件 + 用户输入，保持全序），
+// 幂等重建渲染模型与 Scene 数据面（重放前模型必须为空，即新 bridge；
+// Scene 同样从空重建，保证恢复后的 Scene 与实时路径等价）。返回重放
+// 记录数；日志不存在时静默返回 0。
+func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
+	if b == nil || b.renderEncoder == nil {
+		return 0, nil
+	}
+	path := b.eventLogFilePath()
+	if path == "" {
+		return 0, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		b.eventLogMu.Lock()
+		b.eventLogFailures++
+		b.eventLogMu.Unlock()
+		return 0, err
+	}
+	type entry struct {
+		event            runtimeevents.Event
+		userInput        string         // 非空表示用户输入注入记录（无 runtime 事件类型）
+		command          string         // 非空表示命令结果注入记录
+		err              string         // 非空表示操作错误注入记录
+		interaction      string         // 非空表示用户交互输出注入记录
+		interactionAnchor *encoding.Tail // 交互输出触发时刻锚点
+	}
+	var entries []entry
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	lineIndex := 0
+	for scanner.Scan() {
+		lineIndex++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var ev runtimeevents.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			b.eventLogMu.Lock()
+			b.eventLogFailures++
+			b.eventLogMu.Unlock()
+			return uint64(lineIndex - 1), fmt.Errorf("event log line %d: %w", lineIndex, err)
+		}
+		if ev.Type == "" {
+			// 注入记录行（runtimeevents.Event 的 Type 恒非空）：按非空
+			// 字段判别类别（用户输入 / 命令结果 / 操作错误 / 交互输出）。
+			var inj eventLogInjection
+			if err := json.Unmarshal([]byte(line), &inj); err != nil {
+				b.eventLogMu.Lock()
+				b.eventLogFailures++
+				b.eventLogMu.Unlock()
+				return uint64(lineIndex - 1), fmt.Errorf("event log line %d: invalid injection record", lineIndex)
+			}
+			switch {
+			case inj.UserInput != "":
+				entries = append(entries, entry{userInput: inj.UserInput})
+			case inj.Command != "":
+				entries = append(entries, entry{command: inj.Command})
+			case inj.Error != "":
+				entries = append(entries, entry{err: inj.Error})
+			case inj.Interaction != "":
+				entries = append(entries, entry{interaction: inj.Interaction, interactionAnchor: inj.InteractionAnchor})
+			default:
+				b.eventLogMu.Lock()
+				b.eventLogFailures++
+				b.eventLogMu.Unlock()
+				return uint64(lineIndex - 1), fmt.Errorf("event log line %d: empty injection record", lineIndex)
+			}
+			continue
+		}
+		entries = append(entries, entry{event: ev})
+	}
+	if err := scanner.Err(); err != nil {
+		b.eventLogMu.Lock()
+		b.eventLogFailures++
+		b.eventLogMu.Unlock()
+		return uint64(len(entries)), err
+	}
+	// 重建 Scene 数据面：与实时路径走同一入口（Encode → ChangeSet →
+	// ChangeSetMapper.Apply）。Replay 内部即逐事件 Encode，但丢弃
+	// ChangeSet，因此这里显式循环以同步驱动 Scene；语义等价。
+	// 注入记录同样经 SubmitUserInput / SubmitCommand / SubmitError →
+	// applyChangeSet 恢复，顺序与实时路径一致（同一日志全序）。
+	b.sceneMu.Lock()
+	b.renderScene = scene.New()
+	b.renderMapper = scene.NewChangeSetMapper(b.renderScene)
+	b.sceneApplyFailures = 0
+	b.sceneLastError = ""
+	b.sceneMu.Unlock()
+	for _, en := range entries {
+		switch {
+		case en.userInput != "":
+			b.applyChangeSet(b.renderEncoder.SubmitUserInput(en.userInput))
+		case en.command != "":
+			b.applyChangeSet(b.renderEncoder.SubmitCommand(en.command))
+		case en.err != "":
+			b.applyChangeSet(b.renderEncoder.SubmitError(en.err))
+		case en.interaction != "":
+			// 交互输出：按全序重建到该行时模型状态与实时注入时刻等价，
+			// 锚点 ItemID 必然存在（实时时 Tail 指向模型尾部项）；锚点
+			// nil（空模型触发）退化为 append，与实时路径一致。
+			b.applyChangeSet(b.renderEncoder.SubmitUserInteraction(en.interaction, en.interactionAnchor))
+		default:
+			b.applyChangeSet(b.renderEncoder.Encode(en.event))
+		}
+	}
+	b.eventLogMu.Lock()
+	b.eventLogReplayed = uint64(len(entries))
+	b.eventLogMu.Unlock()
+	return uint64(len(entries)), nil
+}
+
+// eventLogStats 返回事件日志状态（/debug 诊断用）。
+func (b *chatRuntimeEventBridge) eventLogStats() (path string, count, replayed, failures uint64) {
+	if b == nil {
+		return "", 0, 0, 0
+	}
+	b.eventLogMu.Lock()
+	defer b.eventLogMu.Unlock()
+	return b.eventLogFilePath(), b.eventLogCount, b.eventLogReplayed, b.eventLogFailures
+}
+
+// renderModelSnapshot 返回编码器当前渲染模型快照（/debug 诊断用）。
+func (b *chatRuntimeEventBridge) renderModelSnapshot() *encoding.RenderModel {
+	if b == nil || b.renderEncoder == nil {
+		return nil
+	}
+	return b.renderEncoder.Snapshot()
+}
+
+// renderEncoderStats 返回编码器运行统计（/debug 诊断用）。
+func (b *chatRuntimeEventBridge) renderEncoderStats() encoding.Stats {
+	if b == nil || b.renderEncoder == nil {
+		return encoding.Stats{}
+	}
+	return b.renderEncoder.Stats()
+}
+
+// sceneSnapshot 返回 Scene 不可变快照（/debug 诊断与 presenter 消费前置）。
+// 与 renderModelSnapshot 互补：模型是数据面权威，Scene 是渲染面权威；
+// 双跑模式下二者应逐项一致（身份/顺序/终态）。
+func (b *chatRuntimeEventBridge) sceneSnapshot() *scene.Snapshot {
+	if b == nil {
+		return nil
+	}
+	b.sceneMu.RLock()
+	defer b.sceneMu.RUnlock()
+	if b.renderScene == nil {
+		return nil
+	}
+	return b.renderScene.Snapshot()
+}
+
+// sceneStats 返回 Scene 映射统计（/debug 诊断用）。
+func (b *chatRuntimeEventBridge) sceneStats() (cells, revision, failures uint64, lastErr string) {
+	if b == nil {
+		return 0, 0, 0, ""
+	}
+	b.sceneMu.RLock()
+	defer b.sceneMu.RUnlock()
+	if b.renderScene == nil {
+		return 0, 0, b.sceneApplyFailures, b.sceneLastError
+	}
+	return uint64(b.renderScene.Len()), b.renderScene.Revision(), b.sceneApplyFailures, b.sceneLastError
+}
+
+// checkTextParity 是渲染层双跑文本对照探针（切片 9）的 bridge 侧实现：
+// coordinator 每提交一个完整块（writeRowsLocked）即回调本方法，传入旧路径
+// 实际写出的行序列（含跨块 gap 空行）。本方法按 cell 逐块对照（切片 10）：
+// LayoutTranscript 的 gap 行归属后继 cell，每个完整块对应一个已完成 cell：
+//
+//   - 已对照 cell 数越界（Scene 落后或旧路径超前）→ mismatch；
+//   - 行数不等或逐行不相等 → mismatch；
+//   - 全部相等 → 推进到下一 cell，matched++。
+//
+// user cell 的 legacy 行先剥离样式前缀 "> "（RenderText 只投影语义内容，
+// 样式属于 presenter 层，见 scene.RenderText 约束）；错误块以 KindSystem
+// 呈现，legacy 行剥离错误图标前缀（theme.ErrorIcon + 空格，message.go
+// MessageError chrome），与 user 前缀同理；assistant/tool 等块无样式前缀，
+// 原样对照。
+//
+// 只读旁路审计：不改变任何输出行为；统计经 textParityStats 供 /debug 展示。
+// 对照假设：同会话事件序列下，旧路径完整块序列与 Scene cell 序列一一对应
+// （切片 7/8/10 已固化该等价，含用户输入注入）；流式中间态不经过
+// writeRowsLocked，不会误对照。
+func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
+	if b == nil || len(blockRows) == 0 {
+		return
+	}
+	b.textParityMu.Lock()
+	defer b.textParityMu.Unlock()
+	b.textParityBlocks++
+	snap := b.sceneSnapshot()
+	if snap == nil || len(snap.Cells) == 0 {
+		b.textParityMissed++
+		b.textParityLastErr = fmt.Sprintf("block %d: scene snapshot empty", b.textParityBlocks)
+		return
+	}
+	groups := sceneBlockGroups(snap)
+	if b.textParityCell >= len(groups) {
+		b.textParityMissed++
+		b.textParityLastErr = fmt.Sprintf("block %d: scene cells=%d consumed=%d block=%d (overflow)",
+			b.textParityBlocks, len(groups), b.textParityCell, len(blockRows))
+		return
+	}
+	g := groups[b.textParityCell]
+	wantLines := g.lines
+	if g.kind == scene.KindUser {
+		// 旧路径 user 块的前导 gap 由 prompt 重绘（writePromptGapLocked）
+		// 输出，不在块行内；数据面把该 gap 归属后继 user cell。对照时
+		// 忽略前导 gap 行（gap 行本身不属于 writeRowsLocked 对照范围）。
+		for len(wantLines) > 0 && wantLines[0] == "" {
+			wantLines = wantLines[1:]
+		}
+	}
+	if len(wantLines) != len(blockRows) {
+		b.textParityMissed++
+		b.textParityLastErr = fmt.Sprintf("block %d: cell rows=%d block=%d (row count mismatch)",
+			b.textParityBlocks, len(wantLines), len(blockRows))
+		return
+	}
+	for i, r := range blockRows {
+		if g.kind == scene.KindUser {
+			r = strings.TrimPrefix(r, "> ")
+		}
+		if g.kind == scene.KindSystem {
+			r = strings.TrimPrefix(r, ui.GetTheme(ui.ThemeAuto).ErrorIcon+"  ")
+		}
+		if wantLines[i] != r {
+			b.textParityMissed++
+			b.textParityLastErr = fmt.Sprintf("block %d row %d: legacy=%q scene=%q",
+				b.textParityBlocks, i, r, wantLines[i])
+			return
+		}
+	}
+	b.textParityCell++
+	b.textParityMatched++
+}
+
+// sceneBlockGroup 是 Scene 投影按 cell 分组后的一个完整块行序列
+// （LayoutTranscript gap 行归属后继 cell，§7.4）。
+type sceneBlockGroup struct {
+	kind  scene.CellKind
+	lines []string
+}
+
+// sceneBlockGroups 按 cell 分组 LayoutTranscript 行：gap 行归属后继 cell。
+// 供 checkTextParity（双跑对照探针）与 sceneBlockSource（Scene presenter
+// 模式的完整块行源）共用同一分组语义，保证两态下"Scene 侧块行"定义一致。
+func sceneBlockGroups(snap *scene.Snapshot) []sceneBlockGroup {
+	if snap == nil {
+		return nil
+	}
+	rows := scene.LayoutTranscript(snap.Cells, snap.Revision)
+	var groups []sceneBlockGroup
+	groupByID := make(map[scene.CellID]int)
+	cellKindOf := func(id scene.CellID) scene.CellKind {
+		for _, c := range snap.Cells {
+			if c != nil && c.ID == id {
+				return c.Kind
+			}
+		}
+		return scene.KindSystem
+	}
+	for _, row := range rows {
+		idx, ok := groupByID[row.CellID]
+		if !ok {
+			idx = len(groups)
+			groupByID[row.CellID] = idx
+			groups = append(groups, sceneBlockGroup{kind: cellKindOf(row.CellID)})
+		}
+		groups[idx].lines = append(groups[idx].lines, row.Text)
+	}
+	return groups
+}
+
+// sceneBlockSource 返回 Scene presenter 模式的完整块行源（P3 切换的
+// feature flag 出口）：flag（AICLI_SCENE_PRESENTER）关闭时返回 nil
+// （coordinator 保持旧路径，行为完全不变）；开启时返回按块顺序消费
+// Scene 投影的闭包——writeRowsLocked 的每个完整块可见行 = Scene 对应
+// cell 组的 LayoutTranscript 行（含跨块 gap 空行，user 前导 gap 由
+// prompt 重绘输出故剥离）+ 样式 chrome（user "> "、system ErrorIcon）。
+// 消费前做内容对应校验：入参块行（剥 chrome 与前导 gap 空行）必须与
+// 某个未消费分组的行（剥前导 gap 空行）完全一致才消费该分组——完整块
+// 语义（整 cell 提交）。流式残差/部分提交（内容仅为分组前缀或后缀）与
+// 不相关块一律不消费、不推进，回退旧行；这样部分块不会被整组内容
+// 顶替，后续完整块仍能按内容找到自己的分组。闭包返回空表示 Scene 侧
+// 尚无对应分组（快照缺失/无匹配/分组耗尽），调用方回退旧行并靠探针
+// 报告 mismatch。
+func (b *chatRuntimeEventBridge) sceneBlockSource() func(blockRows []string) []string {
+	if b == nil || !b.scenePresenterMode {
+		return nil
+	}
+	var mu sync.Mutex
+	nextGroup := 0
+	normalizeBlockRows := func(rows []string) []string {
+		if len(rows) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(rows))
+		for i, r := range rows {
+			if i == 0 && r == "" {
+				// 跨块 gap 空行：Scene 分组与旧路径块行都可能带，对照时忽略。
+				continue
+			}
+			r = strings.TrimPrefix(r, "> ")
+			r = strings.TrimPrefix(r, ui.GetTheme(ui.ThemeAuto).ErrorIcon+"  ")
+			out = append(out, r)
+		}
+		return out
+	}
+	rowsEqual := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	return func(blockRows []string) []string {
+		mu.Lock()
+		defer mu.Unlock()
+		snap := b.sceneSnapshot()
+		groups := sceneBlockGroups(snap)
+		want := normalizeBlockRows(blockRows)
+		// 内容对应：从 nextGroup 起找第一个行内容与本次块完全一致的分组。
+		// 找不到（残差/部分提交/快照滞后）→ 不消费不推进，回退旧行。
+		idx := -1
+		for i := nextGroup; i < len(groups); i++ {
+			if rowsEqual(want, normalizeBlockRows(groups[i].lines)) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil
+		}
+		g := groups[idx]
+		nextGroup = idx + 1
+		out := make([]string, 0, len(g.lines))
+		for i, line := range g.lines {
+			if i == 0 && g.kind == scene.KindUser && line == "" {
+				// 与 checkTextParity 对称：旧路径 user 块的前导 gap 由
+				// prompt 重绘（writePromptGapLocked）输出，不在块行内。
+				continue
+			}
+			switch g.kind {
+			case scene.KindUser:
+				out = append(out, "> "+line)
+			case scene.KindSystem:
+				if line == "" {
+					// gap/空白行不加 chrome：旧路径中跨块 gap 由
+					// writeRowsLocked 的 gapBlank 输出为空行，探针
+					// （checkTextParity）对照时 gap 行同样不参与 chrome。
+					out = append(out, line)
+				} else {
+					out = append(out, ui.GetTheme(ui.ThemeAuto).ErrorIcon+"  "+line)
+				}
+			default:
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+}
+
+// textParityStats 返回渲染层文本对照统计（/debug 审计段展示用）。
+func (b *chatRuntimeEventBridge) textParityStats() (blocks, matched, missed uint64, lastErr string) {
+	if b == nil {
+		return 0, 0, 0, ""
+	}
+	b.textParityMu.Lock()
+	defer b.textParityMu.Unlock()
+	return b.textParityBlocks, b.textParityMatched, b.textParityMissed, b.textParityLastErr
+}
+
+// renderModelTail 返回编码器当前尾部锚点（ItemID/Seq）。
+// /debug、/model 等用户交互输出以触发时刻的该锚点为界参与渲染总序
+// （不进入编码器因果链，见统一编码器方案 §5.5）。
+func (b *chatRuntimeEventBridge) renderModelTail() *encoding.Tail {
+	if b == nil || b.renderEncoder == nil {
+		return nil
+	}
+	return b.renderEncoder.Tail()
+}
+
+// recordInteractionAnchor 捕获触发时刻的模型尾部锚点（/debug、/model 等用户交互输出用）。
+// 交互输出不进入编码器因果链，以该锚点为界参与渲染总序（见统一编码器方案 §5.5）。
+// Tail 为值类型副本，模型后续增长不会影响已记录锚点。同时登记 pending
+// 交互标记（供 RenderCommandDocument 提交点按锚定语义注入，见
+// submitCommandResult / consumePendingInteraction）。
+func (b *chatRuntimeEventBridge) recordInteractionAnchor(source string) *encoding.Tail {
+	if b == nil {
+		return nil
+	}
+	tail := b.renderModelTail()
+	b.interactionAnchorMu.Lock()
+	defer b.interactionAnchorMu.Unlock()
+	if tail != nil {
+		b.interactionAnchor = tail
+		b.interactionAnchorAt = time.Now()
+		b.interactionAnchorSource = source
+		b.interactionAnchorCount++
+	}
+	b.pendingInteractionSource = source
+	b.pendingInteractionTail = tail
+	return tail
+}
+
+// consumePendingInteraction 读取并清除 pending 交互标记（RenderCommandDocument
+// 提交点用：有 pending 说明本次命令是 /debug、/model 等交互输出，应按锚点
+// 插入而非普通命令追加）。返回 (source, tail)；无 pending 时 source 为空。
+func (b *chatRuntimeEventBridge) consumePendingInteraction() (string, *encoding.Tail) {
+	if b == nil {
+		return "", nil
+	}
+	b.interactionAnchorMu.Lock()
+	defer b.interactionAnchorMu.Unlock()
+	source := b.pendingInteractionSource
+	tail := b.pendingInteractionTail
+	b.pendingInteractionSource = ""
+	b.pendingInteractionTail = nil
+	return source, tail
+}
+
+// clearPendingInteraction 清除 pending 交互标记（legacy 无 cell 输出路径
+// 用；防止锚点残留污染后续普通命令注入）。
+func (b *chatRuntimeEventBridge) clearPendingInteraction() {
+	if b == nil {
+		return
+	}
+	b.interactionAnchorMu.Lock()
+	defer b.interactionAnchorMu.Unlock()
+	b.pendingInteractionSource = ""
+	b.pendingInteractionTail = nil
+}
+
+// lastInteractionAnchor 返回最近一次用户交互锚点（/debug 诊断展示用）。
+func (b *chatRuntimeEventBridge) lastInteractionAnchor() (tail *encoding.Tail, at time.Time, source string, count uint64) {
+	if b == nil {
+		return nil, time.Time{}, "", 0
+	}
+	b.interactionAnchorMu.Lock()
+	defer b.interactionAnchorMu.Unlock()
+	return b.interactionAnchor, b.interactionAnchorAt, b.interactionAnchorSource, b.interactionAnchorCount
 }
 
 func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, reason string) {
@@ -1160,6 +1897,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
 	}
+	// 编码必须在 ownership/suppression 校验之后：数据面只接收旧 UI 真正
+	// 会渲染的事件，保证 Scene 与可见输出一致、事件日志重放等价。
+	b.encodeRenderModelEvent(event)
 	b.updateComposerAgentStageForRuntimeEvent(event)
 	if isTeamLifecycleRuntimeEvent(event.Type) && strings.TrimSpace(event.SessionID) != "" && !b.shouldAcceptTeamLifecycleRuntimeEvent(event) {
 		return
@@ -2149,7 +2889,10 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 		}
 		if strings.TrimSpace(content) != "" && b.hasFinalizedAssistantDelta() {
 			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
-			if b.renderResponse != nil {
+			// 防重：finalize 已把 delta 内容渲染（文本直播已写屏 / markdown
+			// 收尾已整块提交）时，迟到的终态消息不应整段重渲染——同一正文
+			// 只 commit 最终 ownership（exactly-once），不重复显示。
+			if b.renderResponse != nil && !b.hasRenderedAssistantContent(content) {
 				b.renderResponse(content)
 			}
 			b.markAssistantFinalRendered(content)

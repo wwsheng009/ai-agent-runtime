@@ -105,6 +105,17 @@ type TaskOutputResult struct {
 	StartupAcceptedAt   string `json:"startup_accepted_at,omitempty"`
 	HealthcheckState    string `json:"healthcheck_state,omitempty"`
 	HealthcheckError    string `json:"healthcheck_error,omitempty"`
+	// QueuePosition is the 1-based position of a pending job in the dispatch
+	// queue (0 when the job is not queued). ActiveJobs is the number of jobs
+	// currently occupying a scheduling slot, MaxConcurrent the configured
+	// capacity. SchedulerState is one of dispatched/queued/saturated/
+	// recovering for pending jobs; NextAction gives the caller actionable
+	// guidance (poll again, wait for a slot, or recover).
+	QueuePosition  int    `json:"queue_position,omitempty"`
+	ActiveJobs     int    `json:"active_jobs,omitempty"`
+	MaxConcurrent  int    `json:"max_concurrent,omitempty"`
+	SchedulerState string `json:"scheduler_state,omitempty"`
+	NextAction     string `json:"next_action,omitempty"`
 }
 
 // JobFilter filters background job queries.

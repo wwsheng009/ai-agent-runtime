@@ -8,6 +8,7 @@
 - 长期架构基线: `docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`（Scene、single screen owner、事务式 frame、fullscreen lease 与旧路径删除）
 - 母计划: `docs/plan/aicli-tui-render-data-plane-codex-migration-plan.md`（P1–P4.2a 已完成，本文是其 P5 展开）
 - 相关: `docs/plan/aicli-ui-refactor-codex-inspired-plan.md`
+- 上游数据面: `docs/plan/aicli-event-stream-rendering-order-unified-encoder-plan.md`（事件 → 有序带身份 RenderModel/ChangeSet；本页"cell 模型（数据面）"的**内容源**，cell 身份对应 `Item.ID`）
 
 > 本文是 owned viewport、ActiveBand、history handoff、resize/reflow 和 P5.6 事件块间距行为的当前实施真相，保留各 P5 切片的设计、回退和测试证据。P5.0–P5.6 已落地，P5.7 负责 P5 范围内的旧路径收尾。跨 slash command/runtime diagnostics 的 raw output、统一 Scene/Presenter、fullscreen screen lease 和全局 single-writer 门禁由长期架构文档继续承接；不得仅依据本文较早阶段的过渡描述恢复双 renderer。
 
@@ -143,6 +144,8 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 
 数据流：`event → 更新/新增 cell（数据面）→ 标记 dirty → 合成 back buffer → diff → flush`。
 历史滚出：`cell finalize → insertHistoryLines(cell.DisplayLines(width)) → 从 viewport 顶部移除`。
+
+> **衔接（2026-08-02）**：上行的"数据面"指**渲染层内部**的 cell 状态（本页 P5 范围）；其**内容与身份来源**是上游统一编码器的 `RenderModel/ChangeSet`（`Item.ID` 即 cell 身份，`Item.Head` 即 cell 源内容，见 [unified-encoder-plan](./aicli-event-stream-rendering-order-unified-encoder-plan.md) 与 [render-model-spec](./aicli-event-stream-rendering-order-render-model-spec.md)）。事件不直接新增/更新 cell，先经编码器产出变更集，本页"更新/新增 cell"环节改为消费该变更集。
 
 ---
 

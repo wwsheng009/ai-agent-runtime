@@ -3,6 +3,8 @@ package commands
 import (
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 )
 
 func TestNormalizeWriteLines_StripsBlockTerminatorKeepsInternalBlanks(t *testing.T) {
@@ -132,8 +134,8 @@ func TestRenderSoftEmittedLinesLocked_IgnoresCompleteBlockPollution(t *testing.T
 	t.Parallel()
 
 	c := &chatInteractionCoordinator{
-		streamMode:          assistantStreamModeText,
-		completeBlockOutput: true,
+		streamMode:    assistantStreamModeText,
+		lastBlockMeta: boundary.CellMeta{ID: "prev", Kind: boundary.KindAssistant, TopLevel: true},
 	}
 	c.streamBuffer.WriteString("alpha\nbeta\n")
 	// Pollution flags must not invent a leading blank row in soft rebuild.
@@ -160,14 +162,15 @@ func TestWriteCompleteBlockLocked_EmitsMultiLineAtomically(t *testing.T) {
 
 	var buf strings.Builder
 	c := &chatInteractionCoordinator{writer: &buf, streamTrailingLF: true}
-	c.writeCompleteBlockLocked("line-a\nline-b\n", gapNone)
+	meta := boundary.CellMeta{ID: "block-1", Kind: boundary.KindAssistant, TopLevel: true}
+	c.writeCompleteBlockLocked("line-a\nline-b\n", gapNone, meta)
 	got := buf.String()
 	want := "line-a\nline-b\n"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
-	if !c.completeBlockOutput {
-		t.Fatal("expected completeBlockOutput")
+	if c.lastBlockMeta.ID != meta.ID {
+		t.Fatalf("expected committed block %q, got %q", meta.ID, c.lastBlockMeta.ID)
 	}
 	if !c.streamTrailingLF {
 		t.Fatal("expected streamTrailingLF after complete block")
@@ -179,16 +182,16 @@ func TestWriteCompleteBlockLocked_ExplicitGapBlankInsertsOneSeparator(t *testing
 
 	var buf strings.Builder
 	c := &chatInteractionCoordinator{writer: &buf, streamTrailingLF: true}
-	// Pollution flags must NOT invent a gap; only the explicit gapBlank does.
-	c.completeBlockOutput = true
-	c.writeCompleteBlockLocked("next\n", gapNone)
+	// Boundary state must NOT invent a gap; only the explicit gapBlank does.
+	c.lastBlockMeta = boundary.CellMeta{ID: "prev", Kind: boundary.KindAssistant, TopLevel: true}
+	c.writeCompleteBlockLocked("next\n", gapNone, boundary.CellMeta{ID: "next", Kind: boundary.KindUser, TopLevel: true})
 	if got := buf.String(); got != "next\n" {
 		t.Fatalf("gapNone must not invent blanks from flags; got %q", got)
 	}
 
 	buf.Reset()
 	c = &chatInteractionCoordinator{writer: &buf, streamTrailingLF: true}
-	c.writeCompleteBlockLocked("next\n", gapBlank)
+	c.writeCompleteBlockLocked("next\n", gapBlank, boundary.CellMeta{ID: "next", Kind: boundary.KindUser, TopLevel: true})
 	if got := buf.String(); got != "\nnext\n" {
 		t.Fatalf("gapBlank should insert exactly one separator; got %q", got)
 	}
@@ -209,7 +212,7 @@ func TestWriteCompleteBlockLocked_EditedDiffKeepsDenseRows(t *testing.T) {
 		"  11 + new()",
 		"  12   }",
 	}, "\n")
-	c.writeCompleteBlockLocked(block, gapNone)
+	c.writeCompleteBlockLocked(block, gapNone, boundary.CellMeta{ID: "edited-1", Kind: boundary.KindTool, TopLevel: true})
 	got := buf.String()
 	if !strings.HasSuffix(got, "\n") {
 		t.Fatalf("expected trailing row terminator, got %q", got)

@@ -375,7 +375,6 @@ func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesIndependentCellsWhe
 	coord.RenderAsyncLine("• Running git ls-files --others --exclude-standard\n  workdir: E:/projects/ai/ai-agent-runtime")
 	coord.mu.Lock()
 	coord.promptVisible = true
-	coord.completeBlockOutput = true
 	coord.mu.Unlock()
 	coord.RenderAsyncLine("• Completed git ls-files --others --exclude-standard in 868ms\n  workdir: E:/projects/ai/ai-agent-runtime")
 

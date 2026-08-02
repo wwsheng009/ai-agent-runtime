@@ -16,6 +16,7 @@
 - 数据解耦：[aicli-chat-session-messages-decouple-plan.md](./aicli-chat-session-messages-decouple-plan.md)
 - P5 当前实施真相：[aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)
 - 长期架构基线：[aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)
+- 数据面产生端收敛（事件 → 有序带身份模型，统一编码器）：[aicli-event-stream-rendering-order-unified-encoder-plan.md](./aicli-event-stream-rendering-order-unified-encoder-plan.md) 及配套 [render-model-spec](./aicli-event-stream-rendering-order-render-model-spec.md)、[event-encoder-api-design](./aicli-event-stream-rendering-order-event-encoder-api-design.md)、[migration-roadmap](./aicli-event-stream-rendering-order-migration-roadmap.md)
 
 > 本文保留 P1–P5 的迁移动机、Codex 对照与阶段历史。当前 owned viewport、ActiveBand、history handoff 和 P5.6 gap 行为以 P5 专项文档为准；跨模块的 Scene/Presenter、single physical writer、CommandResult、fullscreen lease 和删除计划以统一长期架构文档为准。
 
@@ -67,6 +68,12 @@ Codex 用“保留式 viewport 差分 + 原生 scrollback 不可变提交 + cell
    `app/history_ui.rs`, `app/resize_reflow.rs:38-45`）。
 7. **resize 用源重建**：宽度变化时按新宽度从 cell 重排可见 scrollback（有行数上限，
    `resize_reflow_cap.rs`）；流式 cell 存 markdown 源，无损重排。
+8. **事件先经统一编码器再进数据面**：`transcript_cells` 的内容不是事件直接写入的，
+   而是 `ThreadHistoryBuilder.handle_event`（`thread_history.rs:321-385`）把全部
+   EventMsg 编码为带 `id` 的 `ThreadItem`（append/upsert 幂等），`transcript`
+   只消费编码后的有序模型。本项目对应机制见
+   [unified-encoder-plan](./aicli-event-stream-rendering-order-unified-encoder-plan.md)：
+   数据面（transcript/历史）的产生端应收敛为统一编码器输出，事件不得旁路直写。
 
 ## 3. 当前架构差距映射
 

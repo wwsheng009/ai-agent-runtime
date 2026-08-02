@@ -1,11 +1,14 @@
 package commands
 
 import (
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 )
 
@@ -35,11 +38,62 @@ const (
 // transcript store plus width-aware reflow.
 type historyCell interface {
 	Kind() historyCellKind
+	// ID 返回信息块身份。编码器接入前由构造器分配过渡 ID（cell-N）；
+	// 终态由统一编码器分配（Item.ID，见 render-model-spec §5.1）。
+	ID() string
+	// Seq 返回提交序号（单调，仅追加语义）。
+	Seq() uint64
+	// Status 返回信息块生命周期状态（pending/running/completed/failed/canceled）。
+	Status() encoding.ItemStatus
+	// CauseID 返回父信息块身份（并行工具输出 → 工具调用；空表示无父）。
+	CauseID() string
 	// DisplayLines returns writeLine-ready rows (block terminator stripped,
 	// internal blank rows kept, CR dropped) for the given output width. When
 	// width > 0, long visual rows are broken with render.Wrap so the owned
 	// viewport can reflow from source without immediate-mode padding.
 	DisplayLines(width int) []string
+}
+
+// cellIdentity 是 historyCell 的过渡身份（render-model-spec §5.1）：
+// 编码器接入前由构造器分配临时 ID/Seq（cell-N），终态由统一编码器
+// 分配 Item.ID/Seq/CauseID。嵌入后方法提升到外层 cell 类型。
+type cellIdentity struct {
+	id      string
+	seq     uint64
+	status  encoding.ItemStatus
+	causeID string
+}
+
+func (c cellIdentity) ID() string                  { return c.id }
+func (c cellIdentity) Seq() uint64                 { return c.seq }
+func (c cellIdentity) Status() encoding.ItemStatus { return c.status }
+func (c cellIdentity) CauseID() string             { return c.causeID }
+
+// withID 覆盖身份（commandResultCell 使用 coordinator 分配的 id/sequence）。
+func (c cellIdentity) withID(id string, seq uint64) cellIdentity {
+	c.id = id
+	c.seq = seq
+	return c
+}
+
+// withStatus 覆盖状态（可变 cell：toolChainCell running → completed）。
+func (c cellIdentity) withStatus(status encoding.ItemStatus) cellIdentity {
+	c.status = status
+	return c
+}
+
+var cellIdentityCounter atomic.Uint64
+
+// newCellIdentity 分配过渡身份：ID 为 cell-N（全局单调），Seq 同源递增。
+// 默认状态 completed（已提交历史的 cell 均为终态；可变 cell 由构造器覆盖）。
+func newCellIdentity(causeID string) cellIdentity {
+	n := cellIdentityCounter.Add(1)
+	return cellIdentity{
+		id:      fmt.Sprintf("cell-%d", n),
+		seq:     n,
+		status:  encoding.StatusCompleted,
+		causeID: causeID,
+	}
 }
 
 // widthAwareDisplayLines turns a pre-styled block into writeLine-ready rows and,
@@ -91,11 +145,12 @@ func widthAwareDisplayLines(rendered string, width int) []string {
 // userMessageCell renders a submitted or replayed user message. Its source is
 // the raw user input, so the rendered rows can be rebuilt at any width.
 type userMessageCell struct {
+	cellIdentity
 	source string
 }
 
 func newUserMessageCell(source string) userMessageCell {
-	return userMessageCell{source: source}
+	return userMessageCell{cellIdentity: newCellIdentity(""), source: source}
 }
 
 func (userMessageCell) Kind() historyCellKind { return historyCellUser }
@@ -111,11 +166,12 @@ func (c userMessageCell) DisplayLines(width int) []string {
 // assistant framing exactly like the legacy writeCompleteBlockLocked path, then
 // width-aware wrap when width > 0.
 type assistantMessageCell struct {
+	cellIdentity
 	body string
 }
 
 func newAssistantMessageCell(body string) assistantMessageCell {
-	return assistantMessageCell{body: body}
+	return assistantMessageCell{cellIdentity: newCellIdentity(""), body: body}
 }
 
 func (assistantMessageCell) Kind() historyCellKind { return historyCellAssistant }
@@ -128,11 +184,12 @@ func (c assistantMessageCell) DisplayLines(width int) []string {
 // reasoning summaries, team/system notices). It mirrors the legacy
 // writeCompleteBlockLocked(FormatAssistantSupplementBlock) pipeline.
 type supplementLineCell struct {
+	cellIdentity
 	line string
 }
 
 func newSupplementLineCell(line string) supplementLineCell {
-	return supplementLineCell{line: line}
+	return supplementLineCell{cellIdentity: newCellIdentity(""), line: line}
 }
 
 func (supplementLineCell) Kind() historyCellKind { return historyCellSupplement }
@@ -146,11 +203,12 @@ func (c supplementLineCell) DisplayLines(width int) []string {
 // it later; DisplayLines matches the legacy writeCompleteBlockLocked(RenderDocumentANSI)
 // then applies width-aware wrap.
 type asyncDocumentCell struct {
+	cellIdentity
 	doc render.Document
 }
 
 func newAsyncDocumentCell(doc render.Document) asyncDocumentCell {
-	return asyncDocumentCell{doc: doc}
+	return asyncDocumentCell{cellIdentity: newCellIdentity(""), doc: doc}
 }
 
 func (asyncDocumentCell) Kind() historyCellKind { return historyCellTool }
@@ -163,13 +221,15 @@ func (c asyncDocumentCell) DisplayLines(width int) []string {
 // Its identity is allocated once by the coordinator; all RenderBlocks from the
 // command are already merged into doc, so one command produces one atomic cell.
 type commandResultCell struct {
-	id       string
-	sequence uint64
-	doc      render.Document
+	cellIdentity
+	doc render.Document
 }
 
 func newCommandResultCell(id string, sequence uint64, doc render.Document) commandResultCell {
-	return commandResultCell{id: id, sequence: sequence, doc: doc}
+	return commandResultCell{
+		cellIdentity: newCellIdentity("").withID(id, sequence),
+		doc:          doc,
+	}
 }
 
 func (commandResultCell) Kind() historyCellKind { return historyCellCommand }
@@ -184,30 +244,34 @@ func (c commandResultCell) DisplayLines(width int) []string {
 // leading empty line if needed). The cell holds the ChatEvent so DisplayLines
 // reuses the compact transcript path byte-for-byte.
 type toolChainCell struct {
+	cellIdentity
 	event runtimechatcore.ChatEvent
 }
 
 func newToolChainCell(name string, args map[string]interface{}, _ time.Time) toolChainCell {
-	return toolChainCell{event: runtimechatcore.ChatEvent{
-		Type:      runtimechatcore.EventTool,
-		Stage:     "tool_requested",
-		ToolName:  name,
-		Arguments: args,
-	}}
+	return toolChainCell{
+		cellIdentity: newCellIdentity("").withStatus(encoding.StatusRunning),
+		event: runtimechatcore.ChatEvent{
+			Type:      runtimechatcore.EventTool,
+			Stage:     "tool_requested",
+			ToolName:  name,
+			Arguments: args,
+		},
+	}
 }
 
 func newToolChainCellFromEvent(event runtimechatcore.ChatEvent) toolChainCell {
-	return toolChainCell{event: event}
+	return toolChainCell{cellIdentity: newCellIdentity("").withStatus(encoding.StatusRunning), event: event}
 }
 
 func (c toolChainCell) withCompleted(result string, metadata map[string]interface{}) toolChainCell {
-	next := c.event
-	next.Stage = "tool_result"
-	next.Output = result
+	c.event.Stage = "tool_result"
+	c.event.Output = result
 	if metadata != nil {
-		next.Metadata = metadata
+		c.event.Metadata = metadata
 	}
-	return toolChainCell{event: next}
+	c.status = encoding.StatusCompleted
+	return c
 }
 
 func (toolChainCell) Kind() historyCellKind { return historyCellTool }
@@ -230,6 +294,7 @@ func (c toolChainCell) DisplayLines(width int) []string {
 // mode divergence flags (EmittedDiverged / NeedsConsolidation) were removed in
 // P5.4-S3; residualAfterEmittedPrefix remains the behavioral residual path.
 type assistantStreamCell struct {
+	cellIdentity
 	source   string
 	markdown bool
 	// optional formatter for width-aware markdown reflow; nil falls back to plain.
@@ -237,11 +302,11 @@ type assistantStreamCell struct {
 }
 
 func newAssistantStreamCell(source string, markdown bool) assistantStreamCell {
-	return assistantStreamCell{source: source, markdown: markdown}
+	return assistantStreamCell{cellIdentity: newCellIdentity(""), source: source, markdown: markdown}
 }
 
 func newAssistantStreamCellWithFormatter(source string, markdown bool, formatFn func(string, int) string) assistantStreamCell {
-	return assistantStreamCell{source: source, markdown: markdown, formatFn: formatFn}
+	return assistantStreamCell{cellIdentity: newCellIdentity(""), source: source, markdown: markdown, formatFn: formatFn}
 }
 
 func (assistantStreamCell) Kind() historyCellKind { return historyCellAssistant }

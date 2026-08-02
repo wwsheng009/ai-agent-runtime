@@ -2,9 +2,46 @@ package renderengine
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
+
+// TextHash4 hashes a row's plain text (trailing blanks trimmed) with FNV-1a
+// 32, returning the full 32-bit value. Identical text always produces the
+// same value, so duplicate rendering of the same content stays recognizable
+// across rows and frames. The hash is content-addressed: a row that scrolls
+// to another screen position keeps its hash.
+func TextHash4(text string) uint32 {
+	trimmed := strings.TrimRight(text, " ")
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(trimmed))
+	return h.Sum32()
+}
+
+// RowTextHash hashes one physical cell row with the same plain-text
+// semantics as the terminal screen: continuation columns of wide runes are
+// skipped, blank cells become spaces, trailing blanks are trimmed, and the
+// remaining text is hashed with TextHash4. ScreenModel.Flush hashes the
+// staged row and the surface hashes the composed plan row with this same
+// function, so the debug tag's content fingerprint and the probe's
+// per-content white counters always agree.
+func RowTextHash(cells []vt.Cell) uint32 {
+	var b strings.Builder
+	for _, c := range cells {
+		if c.Cont {
+			continue
+		}
+		if c.Text == "" {
+			b.WriteByte(' ')
+		} else {
+			b.WriteString(c.Text)
+		}
+	}
+	return TextHash4(b.String())
+}
 
 // PaintTrace is the observability probe for the render path. It is purely
 // diagnostic: it never influences layout, diffing, or terminal output, so it
@@ -32,9 +69,20 @@ import (
 type PaintTrace struct {
 	mu      sync.Mutex
 	enabled bool
-	frames  uint64
-	height  int
-	rows    []RowPaintStat
+	// resyncPending marks the next recorded frame as an explicit resync
+	// (Reset or SetEnabled(true) opened a fresh recording window): every
+	// painted row is classified as a content change so no white counter or
+	// star is attributed to the re-synchronized frame.
+	resyncPending bool
+	frames        uint64
+	height        int
+	rows          []RowPaintStat
+	// byHash accumulates white repaints per content hash (see RowTextHash)
+	// so the on-screen w counter can follow the content across scrolling
+	// instead of inheriting a screen position's history. WhiteEmits stays
+	// position-based for the /debug display table; the row tag uses the
+	// content-addressed counter.
+	byHash map[uint32]uint64
 	// lastFrame is the reconciliation summary of the most recent recorded
 	// frame, the probe's immediate-summary outlet (per-row counters for the
 	// /debug display table come from Stats). It is read-only for callers.
@@ -57,7 +105,8 @@ type RowPaintStat struct {
 
 // paintRowEvent is one row's reconciliation verdict for a single frame.
 type paintRowEvent struct {
-	row     int // 1-based
+	row     int    // 1-based
+	hash    uint32 // plain-text content hash of the staged row (RowTextHash)
 	changed bool
 	painted bool
 }
@@ -125,9 +174,13 @@ func (t *PaintTrace) Reset() {
 	t.frames = 0
 	t.height = 0
 	t.rows = nil
+	t.byHash = nil
 	t.lastFrame = FrameSummary{}
 	t.totalWhite = 0
 	t.totalMissing = 0
+	// The next frame re-syncs the front tags (they were carried over from
+	// before the reset) and must not count as duplicate rendering.
+	t.resyncPending = true
 	t.mu.Unlock()
 }
 
@@ -154,6 +207,20 @@ func (t *PaintTrace) recordFrame(events []paintRowEvent, height int) {
 	if !t.enabled {
 		return
 	}
+	if t.resyncPending {
+		// A fresh recording window re-syncs the committed front tags: the
+		// frame re-emits rows whose tag state was reset, so every painted row
+		// is a content change, not a white repaint. This keeps the resync
+		// frame from polluting the white counters or the star marker. Rows
+		// that were not painted stay unclassified: marking them changed
+		// would turn a healthy silent history into a missing-coverage burst.
+		for i := range events {
+			if events[i].painted {
+				events[i].changed = true
+			}
+		}
+		t.resyncPending = false
+	}
 	t.frames++
 	summary := FrameSummary{Frame: t.frames}
 	if height > t.height {
@@ -178,6 +245,10 @@ func (t *PaintTrace) recordFrame(events []paintRowEvent, height int) {
 		if event.painted && !event.changed {
 			stat.WhiteEmits++
 			t.totalWhite++
+			if t.byHash == nil {
+				t.byHash = make(map[uint32]uint64)
+			}
+			t.byHash[event.hash]++
 			summary.White = append(summary.White, event.row)
 		}
 		if event.changed && !event.painted {
@@ -212,10 +283,11 @@ func (t *PaintTrace) LastFrame() FrameSummary {
 }
 
 // WhiteEmits reports the cumulative white-repaint count for a 1-based screen
-// row (0 for rows that never recorded an event). The surface renders it in
-// the per-row debug tag while /debug on is active, so a row that is being
-// repeatedly re-rendered carries a visible, incrementing counter on the
-// message stream itself.
+// row (0 for rows that never recorded an event). The counter is
+// position-based: it follows the screen row, so after a scroll it reflects
+// the history of the position, not of the content. The /debug display table
+// uses it; the on-screen row tag uses WhiteEmitsByHash instead so the w
+// counter survives scrolling without misleading.
 func (t *PaintTrace) WhiteEmits(row int) uint64 {
 	if t == nil || row < 1 {
 		return 0
@@ -226,6 +298,22 @@ func (t *PaintTrace) WhiteEmits(row int) uint64 {
 		return 0
 	}
 	return t.rows[row-1].WhiteEmits
+}
+
+// WhiteEmitsByHash reports the cumulative white-repaint count for one content
+// hash (see RowTextHash). Unlike WhiteEmits, which counts per screen row and
+// therefore follows a screen position when rows scroll, this counter follows
+// the content: the same row text keeps the same count wherever it appears,
+// so a row scrolled to a new position does not inherit another row's
+// history, and a row whose content changed starts at its own count. Rows
+// without any recorded white repaint report 0.
+func (t *PaintTrace) WhiteEmitsByHash(hash uint32) uint64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.byHash[hash]
 }
 
 // Stats returns a snapshot of the per-row counters for rows that recorded at

@@ -273,6 +273,12 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 	switch strings.ToLower(fields[0]) {
 	case "display", "show", "info":
+		// §5.5 用户交互例外：/debug 输出捕获触发时刻模型尾部锚点（不进入
+		// 编码器因果链）；提交点（submitCommandResult）据此做 Tail 锚定
+		// 插入而非普通命令追加。
+		if session != nil && session.RuntimeEventBridge != nil {
+			session.RuntimeEventBridge.recordInteractionAnchor("debug")
+		}
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: buildChatDebugDisplayDocument(session)}},
 			Action: CommandContinue,

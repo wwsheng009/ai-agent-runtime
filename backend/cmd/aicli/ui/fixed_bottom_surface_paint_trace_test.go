@@ -221,10 +221,11 @@ func rowText(cells []vt.Cell) string {
 	return builder.String()
 }
 
-// debugTagPattern matches a message-row debug tag "[hhhh #NN wN]" and captures
-// the content fingerprint, the 1-based screen row number, and the cumulative
-// white-repaint count.
-var debugTagPattern = regexp.MustCompile(`^\[([0-9a-f]{4}) #(\d+) w(\d+)\]`)
+// debugTagPattern matches a message-row debug tag "[hhhh #NN wN]" (with an
+// optional trailing "*" marking rows white-repainted by the most recent
+// frame) and captures the content fingerprint, the 1-based screen row
+// number, and the cumulative white-repaint count for that content.
+var debugTagPattern = regexp.MustCompile(`^\[([0-9a-f]{4}) #(\d+) w(\d+)\*?\]`)
 
 // firstTaggedRow returns the 1-based screen row of the first row carrying a
 // debug tag, plus its white-repaint count (-1 when no row is tagged).
@@ -424,5 +425,114 @@ func TestPaintDebugRowTagOnMessageRows(t *testing.T) {
 		if debugTagPattern.MatchString(rowText(row)) {
 			t.Fatalf("debug tag survives disable: %q", rowText(row))
 		}
+	}
+}
+
+// TestPaintDebugRowTagWhiteFollowsContentAcrossScroll pins the
+// content-addressed w counter against the misreading this marker series set
+// out to fix: when rows move to new screen positions (new output pushing
+// retained rows down), the w counter must follow the content, not inherit
+// the position's history. A row white-repainted twice keeps w2 wherever it
+// appears; a fresh content that lands at that position starts at w0.
+func TestPaintDebugRowTagWhiteFollowsContentAcrossScroll(t *testing.T) {
+	engine := renderengine.NewEngine()
+	defer engine.Shutdown()
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	surface.SetEngine(engine)
+	surface.SetPaintTraceEnabled(true)
+
+	captureUIStdout(t, func() {
+		surface.WriteOutput(io.Discard, "scroll-me\n")
+		surface.WriteOutput(io.Discard, "fill\n")
+	})
+	engine.Trace().Reset()
+
+	// Two white-repaint bursts on unchanged content (reconciles 2 and 4;
+	// reconciles 1 and 3 are tag-resync frames and must not count): the
+	// scroll-me content reaches w2.
+	captureUIStdout(t, func() { surface.Reconcile() }) // tag resync, no white
+	captureUIStdout(t, func() { surface.Reconcile() }) // white burst -> w1
+	captureUIStdout(t, func() { surface.Reconcile() }) // tag resync
+	captureUIStdout(t, func() { surface.Reconcile() }) // white burst -> w2
+
+	findTag := func(needle string) (rowNo, white int) {
+		t.Helper()
+		for _, row := range surface.ComposedFrameForTest() {
+			text := rowText(row)
+			m := debugTagPattern.FindStringSubmatch(text)
+			if m == nil || !strings.Contains(text, needle) {
+				continue
+			}
+			rowNo, _ = strconv.Atoi(m[2])
+			white, _ = strconv.Atoi(m[3])
+			return rowNo, white
+		}
+		return 0, -1
+	}
+
+	rowBefore, wBefore := findTag("scroll-me")
+	if rowBefore == 0 || wBefore != 2 {
+		t.Fatalf("before scroll: row=%d w=%d, want a tagged row with w=2", rowBefore, wBefore)
+	}
+
+	// Append a new line: the retained rows move to new screen positions.
+	captureUIStdout(t, func() {
+		surface.WriteOutput(io.Discard, "new-line\n")
+	})
+
+	rowAfter, wAfter := findTag("scroll-me")
+	if rowAfter == 0 {
+		t.Fatal("scroll-me row lost its tag after scrolling")
+	}
+	if rowAfter == rowBefore {
+		t.Fatalf("test setup: scroll-me did not move (row %d), append did not reflow", rowAfter)
+	}
+	if wAfter != wBefore {
+		t.Fatalf("w must follow the content across scroll: before=%d after=%d", wBefore, wAfter)
+	}
+
+	// A fresh content at the vacated position must not inherit the
+	// position's white history.
+	if _, wNew := findTag("new-line"); wNew != 0 {
+		t.Fatalf("fresh content must start at w=0, got w=%d", wNew)
+	}
+}
+
+// TestPaintDebugRowTagStarMarksLastFrameWhite pins the "*" marker: after a
+// white-repaint burst the duplicated rows carry "[... wN*]", and once a
+// frame records no white repaint on the row the marker disappears again -
+// "duplicated right now" stays separate from the lifetime count.
+func TestPaintDebugRowTagStarMarksLastFrameWhite(t *testing.T) {
+	engine := renderengine.NewEngine()
+	defer engine.Shutdown()
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	surface.SetEngine(engine)
+	surface.SetPaintTraceEnabled(true)
+
+	captureUIStdout(t, func() {
+		for i := 0; i < 5; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
+		}
+	})
+	engine.Trace().Reset()
+
+	// Resync frame: no white, no star.
+	captureUIStdout(t, func() { surface.Reconcile() })
+	for _, row := range surface.ComposedFrameForTest() {
+		if strings.Contains(rowText(row), "w0*]") {
+			t.Fatalf("resync frame must not mark white rows: %q", rowText(row))
+		}
+	}
+
+	// Duplicate-render burst: white rows carry the star.
+	captureUIStdout(t, func() { surface.Reconcile() })
+	starred := 0
+	for _, row := range surface.ComposedFrameForTest() {
+		if strings.Contains(rowText(row), "w1*]") {
+			starred++
+		}
+	}
+	if starred == 0 {
+		t.Fatal("white-repainted rows must carry the '*' marker after the burst")
 	}
 }

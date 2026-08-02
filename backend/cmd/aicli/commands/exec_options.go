@@ -7,15 +7,15 @@ import (
 )
 
 type ExecOptions struct {
-	Prompt              string
-	PromptFlag          string
-	ProfileFlag         string
-	AgentFlag           string
-	ProviderFlag        string
-	ModelFlag           string
-	MaxTokens           int
-	StreamFlag          bool
-	StreamChanged       bool
+	Prompt        string
+	PromptFlag    string
+	ProfileFlag   string
+	AgentFlag     string
+	ProviderFlag  string
+	ModelFlag     string
+	MaxTokens     int
+	StreamFlag    bool
+	StreamChanged bool
 	// FastFlag / FastChanged mirror Stream: CLI override for Codex Fast mode.
 	// Effective only when the resolved provider protocol is codex.
 	FastFlag            bool
@@ -45,8 +45,8 @@ type ExecOptions struct {
 	ApprovalReuse  chatApprovalReuseMode
 	YoloMode       bool
 	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool product surface.
-	CLIAllowTools  []string
-	CLIDenyTools   []string
+	CLIAllowTools []string
+	CLIDenyTools  []string
 	// TrustGrant is CLI --trust for folder trust durable grant (R2).
 	TrustGrant bool
 

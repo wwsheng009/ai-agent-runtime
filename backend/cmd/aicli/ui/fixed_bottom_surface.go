@@ -968,11 +968,41 @@ func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, outp
 		height = 24
 	}
 	regionBottom := s.directScrollRegionRowsLocked(height)
-	rows := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
-	plan := renderengine.NewHandoffPlan(height, regionBottom, rows)
+	// appendHistoryWindowLocked already handed lines older than the visible
+	// region into native scrollback (frontier = total - visible). Painting the
+	// full output again would scroll those already-rendered lines into the
+	// terminal a second time, duplicating history on screen. Paint only the
+	// rows that have not been handed off yet: the visible tail of the history
+	// window (raw lines, ANSI included, matching the previous split semantics).
+	frontier := s.handoffFrontier.Value()
+	if frontier < 0 {
+		frontier = 0
+	}
+	if frontier >= len(s.historyWindow) {
+		return
+	}
+	rows := s.historyWindow[frontier:]
+	// Paint through the single scroll primitive
+	// (insertHistoryLinesInRegionLocked) with the band-excluding region: the
+	// DECSTBM scroll bytes are constructed in exactly one place
+	// (INV-SCROLL-01: one scroll channel). A wrapped visible tail is expanded
+	// to physical rows with re-emitted SGR so the \r\n scroll count stays 1:1
+	// with terminal rows (INV-SCROLL-02: logical/physical alignment; the
+	// direct-scroll path does not repaint the transcript afterwards, so the
+	// written rows must carry their own styling).
+	paint := rows
+	if !s.historySegmentIsSinglePhysicalRowsLocked(rows) {
+		paint = s.expandHistoryLinesToStyledTextLocked(rows)
+		if len(paint) == 0 {
+			return
+		}
+	}
 	// The caller already holds terminalWriteMu through writeOutput. Reuse the
 	// shared handoff plan/presenter without reacquiring the non-reentrant lock.
-	_ = s.flushHandoffHoldingLock(os.Stdout, plan)
+	plan, ok := s.insertHistoryLinesInRegionLocked(paint, regionBottom)
+	if !ok {
+		return
+	}
 	if writer != os.Stdout {
 		_, _ = plan.WriteTo(writer)
 	}
@@ -1213,6 +1243,69 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		rewritten = true
 	})
 	return rewritten
+}
+
+// ClearCommittedHistoryForReplay wipes the visible rows of the committed
+// history region (the whole output region above the bottom pane) and resets
+// all history bookkeeping, so a post-backtrack replay starts from a clean
+// slate instead of stacking on ghost rows of removed turns.
+//
+// Rows already handed off into native scrollback are physically irreversible
+// and stay where they are; the caller's archive marker is the only
+// distinction for those. A full-region wipe is safe because the replay
+// re-prints every surviving canonical message afterwards.
+//
+// Returns false when the surface is disabled or nothing is committed (fresh
+// session / already cleared). The erase uses the terminal's own writer, like
+// the RewriteSoftOutputTail clear loop.
+func (s *FixedBottomSurface) ClearCommittedHistoryForReplay() bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	if len(s.historyWindow) == 0 && !s.softOutput.Valid() {
+		return false
+	}
+	height := s.lastHeight
+	if height <= 0 {
+		height = s.terminal.Height()
+	}
+	bottom := outputBottomRowForHeight(height, s.effectiveBottomRowsLocked(height))
+	if bottom < 1 {
+		return false
+	}
+	WithTerminalWriteLock(func() {
+		if s.leaseID != 0 {
+			// Lease active: retain state only; the release repaint flushes a
+			// clean frame. Do not emit erase bytes while the surface is leased.
+			s.resetOwnedHistoryLocked()
+			s.invalidateSoftOutputLocked()
+			s.legacyReserve = renderengine.LegacyReserveState{}
+			return
+		}
+		if s.ownedViewport {
+			// The physical output region is being erased out-of-band from the
+			// double buffer; the next diffing Flush must start from a clean
+			// slate so stale committed cells cannot resurface.
+			s.viewportBackend.Invalidate()
+		} else {
+			s.applyLayoutLocked()
+			s.flushPendingOutputScrollDownLocked()
+		}
+		for row := 1; row <= bottom; row++ {
+			s.terminal.MoveTo(row, 1)
+			s.terminal.ClearLine()
+		}
+		s.resetOwnedHistoryLocked()
+		s.invalidateSoftOutputLocked()
+		s.legacyReserve = renderengine.LegacyReserveState{}
+		s.restoreStoredPromptCursorLocked()
+	})
+	return true
 }
 
 func (s *FixedBottomSurface) noteSoftOutputLocked(text string) {
@@ -4213,7 +4306,7 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() bool {
 // insertHistoryLinesLocked is the single primitive for moving history into
 // native scrollback. Cursor-neutral. Codex-aligned DECSTBM path:
 //
-//  1. Limit the scroll region to rows 1..outputBottom (above the bottom band).
+//  1. Limit the scroll region to rows 1..regionBottom (above the bottom band).
 //  2. Park the cursor on the last row of that region.
 //  3. For each history line emit "\r\n" then the line — the LF at the region
 //     bottom scrolls the top of the region into host scrollback without
@@ -4227,20 +4320,37 @@ func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
 	if s == nil || s.terminal == nil || len(rows) == 0 {
 		return false
 	}
+	height := s.terminal.Height()
+	if height < 1 {
+		height = 24
+	}
+	outputBottom := outputBottomRowForHeight(height, s.bottomRowsLocked())
+	_, ok := s.insertHistoryLinesInRegionLocked(rows, outputBottom)
+	return ok
+}
+
+// insertHistoryLinesInRegionLocked is the parameterized scroll-region form of
+// insertHistoryLinesLocked. The default form uses rows 1..outputBottom (above
+// the reserved bottom band); direct-scroll appends pass a narrower region that
+// additionally excludes the ActiveBand so a commit scroll never displaces the
+// live stream viewport. It returns the emitted handoff plan so callers can
+// mirror the identical bytes to non-stdout capture writers.
+func (s *FixedBottomSurface) insertHistoryLinesInRegionLocked(rows []string, regionBottom int) (renderengine.HandoffPlan, bool) {
+	if s == nil || s.terminal == nil || len(rows) == 0 {
+		return renderengine.HandoffPlan{}, false
+	}
 	width, height := s.terminal.Width(), s.terminal.Height()
 	if width < 1 || height < 1 {
-		return false
+		return renderengine.HandoffPlan{}, false
 	}
-
-	outputBottom := outputBottomRowForHeight(height, s.bottomRowsLocked())
-	if outputBottom < 1 {
-		outputBottom = 1
+	if regionBottom < 1 {
+		regionBottom = 1
 	}
 	// Presenter owns the cursor-neutral DECSTBM bytes and batches them as one
 	// handoff plan, so no Terminal fmt.Print call can interleave with a frame.
-	plan := renderengine.NewHandoffPlan(height, outputBottom, rows)
+	plan := renderengine.NewHandoffPlan(height, regionBottom, rows)
 	if err := s.flushHandoffHoldingLock(os.Stdout, plan); err != nil {
-		return false
+		return renderengine.HandoffPlan{}, false
 	}
-	return true
+	return plan, true
 }

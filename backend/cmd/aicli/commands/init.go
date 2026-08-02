@@ -9,10 +9,10 @@ import (
 )
 
 type initCommandResult struct {
-	ConfigPath     string `json:"config_path"`
-	Created        bool   `json:"created"`
-	AlreadyExists  bool   `json:"already_exists"`
-	Message        string `json:"message"`
+	ConfigPath    string `json:"config_path"`
+	Created       bool   `json:"created"`
+	AlreadyExists bool   `json:"already_exists"`
+	Message       string `json:"message"`
 }
 
 // NewInitCommand creates the explicit initialization command for aicli.

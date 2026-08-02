@@ -133,6 +133,7 @@ func (m *ScreenModel) Flush() string {
 			if events != nil {
 				events = append(events, paintRowEvent{
 					row:     r + 1,
+					hash:    rowContentHash(m.back[r]),
 					changed: !m.rowContentEqual(r),
 					painted: true,
 				})
@@ -144,6 +145,7 @@ func (m *ScreenModel) Flush() string {
 			if events != nil {
 				events = append(events, paintRowEvent{
 					row:     r + 1,
+					hash:    rowContentHash(m.back[r]),
 					changed: !m.rowContentEqual(r),
 					painted: painted,
 				})
@@ -158,6 +160,71 @@ func (m *ScreenModel) Flush() string {
 		m.trace.recordFrame(events, m.height)
 	}
 	return output.String()
+}
+
+// rowContentHash returns the plain-text content hash of a staged row with
+// any leading surface debug annotation excluded, so the reconciliation
+// probe's per-content white counters key on the message content itself
+// rather than the volatile debug tag (whose w counter and star marker
+// change exactly when a white repaint is recorded, which would otherwise
+// make the row's own fingerprint unstable).
+func rowContentHash(cells []vt.Cell) uint32 {
+	return RowTextHash(stripDebugTagPrefix(cells))
+}
+
+// stripDebugTagPrefix removes a leading surface debug annotation
+// ("[hhhh #NN wN*]") from the row and returns the remaining cells. Rows
+// without the annotation are returned unchanged. The pattern mirrors the
+// fixed format emitted by the surface's /debug row annotation.
+func stripDebugTagPrefix(cells []vt.Cell) []vt.Cell {
+	if len(cells) < 13 || len(cells[0].Text) != 1 || cells[0].Text != "[" {
+		return cells
+	}
+	i := 1
+	for ; i < 5; i++ { // 4 hex fingerprint digits
+		if len(cells[i].Text) != 1 || !isHexChar(cells[i].Text[0]) {
+			return cells
+		}
+	}
+	if cells[i].Text != " " || cells[i+1].Text != "#" {
+		return cells
+	}
+	i += 2
+	rowDigits := 0
+	for i < len(cells) && len(cells[i].Text) == 1 && isDigitChar(cells[i].Text[0]) {
+		rowDigits++
+		i++
+	}
+	if rowDigits == 0 || i+2 >= len(cells) {
+		return cells
+	}
+	if cells[i].Text != " " || cells[i+1].Text != "w" {
+		return cells
+	}
+	i += 2
+	whiteDigits := 0
+	for i < len(cells) && len(cells[i].Text) == 1 && isDigitChar(cells[i].Text[0]) {
+		whiteDigits++
+		i++
+	}
+	if whiteDigits == 0 {
+		return cells
+	}
+	if i < len(cells) && cells[i].Text == "*" {
+		i++
+	}
+	if i >= len(cells) || cells[i].Text != "]" {
+		return cells
+	}
+	return cells[i+1:]
+}
+
+func isHexChar(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func isDigitChar(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 // rowContentEqual reports whether the staged back row equals the committed

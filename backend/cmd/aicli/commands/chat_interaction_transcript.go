@@ -51,15 +51,15 @@ type assistantTranscriptBlock struct {
 // suppresses full replay of corrected bodies when final diverges from already-
 // emitted source.
 type assistantTurnTranscript struct {
-	Source             string
-	FinalSnapshot      string
-	Markdown           bool
-	EmittedEnd         int
-	EnqueuedEnd        int
-	LastEmitWidth      int
-	Blocks             []assistantTranscriptBlock
+	Source              string
+	FinalSnapshot       string
+	Markdown            bool
+	EmittedEnd          int
+	EnqueuedEnd         int
+	LastEmitWidth       int
+	Blocks              []assistantTranscriptBlock
 	RetainedSourceBytes int
-	LastDivergence     assistantFinalDivergence
+	LastDivergence      assistantFinalDivergence
 }
 
 func (t *assistantTurnTranscript) reset() {

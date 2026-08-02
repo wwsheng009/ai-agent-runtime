@@ -415,3 +415,62 @@ func TestPaintTraceWhiteEmits(t *testing.T) {
 		t.Fatalf("reset must clear counters, row 1 = %d", got)
 	}
 }
+
+// TestPaintTraceWhiteEmitsByHash pins the content-addressed white counter:
+// the same content white-repainted on different rows (for example after a
+// scroll) accumulates on one hash, distinct content accumulates separately,
+// and Reset clears it. This is the counter the on-screen row tag renders, so
+// scrolling cannot make a row inherit another content's white history.
+func TestPaintTraceWhiteEmitsByHash(t *testing.T) {
+	trace := NewPaintTrace()
+	trace.SetEnabled(true)
+	hashA := TextHash4("alpha")
+	hashB := TextHash4("beta")
+	trace.recordFrame([]paintRowEvent{
+		{row: 1, hash: hashA, changed: false, painted: true}, // white A
+		{row: 2, hash: hashB, changed: true, painted: true},  // changed, not white
+	}, 5)
+	trace.recordFrame([]paintRowEvent{
+		{row: 4, hash: hashA, changed: false, painted: true}, // white A at a new position
+		{row: 5, hash: hashB, changed: false, painted: true}, // white B
+	}, 5)
+
+	if got := trace.WhiteEmitsByHash(hashA); got != 2 {
+		t.Fatalf("WhiteEmitsByHash(A) = %d, want 2 (content-addressed across rows)", got)
+	}
+	if got := trace.WhiteEmitsByHash(hashB); got != 1 {
+		t.Fatalf("WhiteEmitsByHash(B) = %d, want 1 (changed emit must not count)", got)
+	}
+	if got := trace.WhiteEmitsByHash(TextHash4("gamma")); got != 0 {
+		t.Fatalf("unknown content = %d, want 0", got)
+	}
+
+	trace.Reset()
+	if got := trace.WhiteEmitsByHash(hashA); got != 0 {
+		t.Fatalf("reset must clear per-content counters: %d", got)
+	}
+}
+
+// TestPaintTraceRowTextHash pins the cell-row hash semantics shared with the
+// surface fingerprint: continuation columns of wide runes are skipped, blank
+// cells become spaces, trailing blanks are trimmed, and identical plain text
+// hashes identically regardless of physical row width.
+func TestPaintTraceRowTextHash(t *testing.T) {
+	wide := []vt.Cell{
+		{Text: "a"},
+		{Text: "b"},
+		{Text: "", Cont: true}, // continuation column of a wide rune
+		{Text: ""},
+		{Text: ""},
+	}
+	narrow := []vt.Cell{{Text: "a"}, {Text: "b"}, {Text: " "}}
+	if RowTextHash(wide) != TextHash4("ab ") {
+		t.Fatalf("RowTextHash must flatten to trimmed plain text: %x", RowTextHash(wide))
+	}
+	if RowTextHash(wide) != RowTextHash(narrow) {
+		t.Fatal("same plain text must hash identically regardless of row width")
+	}
+	if RowTextHash(narrow) == RowTextHash([]vt.Cell{{Text: "ab"}, {Text: "c"}}) {
+		t.Fatal("distinct content must hash differently")
+	}
+}

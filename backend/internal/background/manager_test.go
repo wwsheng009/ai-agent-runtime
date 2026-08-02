@@ -619,3 +619,147 @@ func sanitizeTestLabel(label string) string {
 	}
 	return label
 }
+
+func TestPanicInRunJobFailsJobAndReleasesSlot(t *testing.T) {
+	manager := NewManager(Config{MaxConcurrentJobs: 1})
+	defer manager.Close()
+	ctx := context.Background()
+
+	original := runJobImpl
+	runJobImpl = func(m *Manager, managed *managedJob) { panic("boom") }
+	defer func() { runJobImpl = original }()
+
+	job, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("panic")})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusFailed, backgroundTestTimeout(5*time.Second)))
+
+	current, err := manager.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.Contains(t, current.Message, "panicked")
+	require.Equal(t, string(runtimeerrors.ErrToolBrokerFailure), current.Metadata["error_code"])
+
+	// The panicked goroutine must not leak its scheduling slot.
+	runJobImpl = original
+	second, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("after-panic")})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, second.ID, StatusCompleted, backgroundTestTimeout(5*time.Second)))
+}
+
+func TestWatchdogReclaimsStuckScheduledJob(t *testing.T) {
+	manager := NewManager(Config{
+		MaxConcurrentJobs: 1,
+		MonitorInterval:   20 * time.Millisecond,
+		HeartbeatTimeout:  100 * time.Millisecond,
+	})
+	defer manager.Close()
+	ctx := context.Background()
+
+	original := runJobImpl
+	// Simulate a worker goroutine that never starts the process: it blocks
+	// until the watchdog cancels the job context.
+	runJobImpl = func(m *Manager, managed *managedJob) { <-managed.ctx.Done() }
+	defer func() { runJobImpl = original }()
+
+	job, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("stuck")})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusFailed, backgroundTestTimeout(5*time.Second)))
+
+	current, err := manager.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.Contains(t, current.Message, "scheduler stuck")
+	require.Equal(t, string(runtimeerrors.ErrToolBrokerFailure), current.Metadata["error_code"])
+
+	// The reclaimed slot accepts new work.
+	runJobImpl = original
+	second, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("after-stuck")})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, second.ID, StatusCompleted, backgroundTestTimeout(5*time.Second)))
+}
+
+func TestReadOutputQueueDiagnostics(t *testing.T) {
+	manager := NewManager(Config{MaxConcurrentJobs: 1})
+	defer manager.Close()
+	ctx := context.Background()
+
+	blocking, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{
+		Command: shellDelayCommand(60*time.Second, "blocking"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, blocking.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	queued, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("queued")})
+	require.NoError(t, err)
+	tail, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("tail")})
+	require.NoError(t, err)
+
+	// The only slot is occupied: both new jobs must be pending and diagnosable.
+	queuedOut, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: queued.ID})
+	require.NoError(t, err)
+	require.Equal(t, string(StatusPending), queuedOut.Status)
+	require.Equal(t, 1, queuedOut.QueuePosition)
+	require.Equal(t, 1, queuedOut.ActiveJobs)
+	require.Equal(t, 1, queuedOut.MaxConcurrent)
+	require.Equal(t, "saturated", queuedOut.SchedulerState)
+	require.Contains(t, queuedOut.NextAction, "saturated")
+
+	tailOut, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: tail.ID})
+	require.NoError(t, err)
+	require.Equal(t, string(StatusPending), tailOut.Status)
+	require.Equal(t, 2, tailOut.QueuePosition)
+	// Saturation is the primary signal even for queued jobs behind it.
+	require.Equal(t, "saturated", tailOut.SchedulerState)
+	require.Contains(t, tailOut.NextAction, "saturated")
+
+	// Cancel the blocker: the queue drains in FIFO order.
+	_, err = manager.CancelJob(ctx, blocking.ID)
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, queued.ID, StatusCompleted, backgroundTestTimeout(10*time.Second)))
+	require.NoError(t, waitForJobStatus(ctx, manager, tail.ID, StatusCompleted, backgroundTestTimeout(10*time.Second)))
+
+	doneOut, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: queued.ID})
+	require.NoError(t, err)
+	require.Equal(t, string(StatusCompleted), doneOut.Status)
+	require.Zero(t, doneOut.QueuePosition)
+	require.Empty(t, doneOut.SchedulerState)
+	require.Empty(t, doneOut.NextAction)
+}
+
+func TestJobQueueDiagnosticsOrdering(t *testing.T) {
+	// Bare manager: no live dispatcher/watchdog racing the synthetic jobs.
+	manager := &Manager{
+		jobs:              make(map[string]*managedJob),
+		maxConcurrentJobs: 3,
+	}
+
+	base := time.Now().UTC()
+	mk := func(id string, status JobStatus, scheduled bool, priority int) *managedJob {
+		return &managedJob{
+			ctx:       context.Background(),
+			info:      Job{ID: id, Status: status, Priority: priority, CreatedAt: base},
+			scheduled: scheduled,
+			output:    newOutputBuffer(1024),
+		}
+	}
+	manager.mu.Lock()
+	manager.jobs["running"] = mk("running", StatusRunning, false, 0)
+	manager.jobs["b"] = mk("b", StatusPending, false, 0)
+	manager.jobs["a"] = mk("a", StatusPending, false, 0)
+	manager.jobs["high"] = mk("high", StatusPending, false, 5)
+	manager.mu.Unlock()
+
+	pos, active, max := manager.jobQueueDiagnostics("high")
+	require.Equal(t, 1, pos)
+	require.Equal(t, 1, active)
+	require.Equal(t, 3, max)
+
+	pos, _, _ = manager.jobQueueDiagnostics("a")
+	require.Equal(t, 2, pos)
+	pos, _, _ = manager.jobQueueDiagnostics("b")
+	require.Equal(t, 3, pos)
+	pos, _, _ = manager.jobQueueDiagnostics("running")
+	require.Zero(t, pos)
+}

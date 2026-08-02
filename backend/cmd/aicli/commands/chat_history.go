@@ -158,12 +158,43 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 // clear prompt (defers shrink), settle layout debt, then replay as a pure
 // content-plane operation that cannot grow the bottom reserve. Safe no-op for
 // non-interactive / JSON modes (guards live inside the renderer).
+//
+// Before replaying, the retained visible region (rewriteable soft tail) is
+// cleared so removed turns do not linger as ghost rows under the replay; the
+// archive marker appended to the header tells the user that everything above
+// it is stale. Rows already handed off into native scrollback are physically
+// irreversible and cannot be erased — the marker is the only distinction for
+// those.
 func replayVisibleChatHistoryAfterTruncation(session *ChatSession, header string) int {
 	if session == nil || !hasVisibleChatHistory(session) {
 		return 0
 	}
 	beginDirectInteractiveOutput(session)
+	clearRetainedTranscriptTail(session)
+	if strings.TrimSpace(header) != "" {
+		header = strings.TrimSpace(header) + "：上方旧消息已失效"
+	}
 	return printVisibleChatHistory(session, header)
+}
+
+// clearRetainedTranscriptTail erases the visible rows of the committed
+// history region so a post-backtrack replay starts from a clean viewport
+// instead of stacking on top of ghost rows of removed turns. Rows already
+// handed off into native scrollback are physically irreversible and stay; the
+// archive marker in the replay header is the only distinction for those. It
+// is a no-op when the session has no enabled surface or nothing is committed.
+func clearRetainedTranscriptTail(session *ChatSession) {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return
+	}
+	if session.Surface == nil || !session.Surface.Enabled() {
+		return
+	}
+	// Full-region wipe: replay re-prints every surviving canonical message
+	// afterwards, so clearing the whole visible output region (not just the
+	// narrow soft window, which only ever covers the last assistant chunk) is
+	// the correct retained-visible-region erase for truncation.
+	session.Surface.ClearCommittedHistoryForReplay()
 }
 
 func hasVisibleChatHistory(session *ChatSession) bool {

@@ -243,6 +243,8 @@ type Renderable interface {
 
 `Measure` 和 `Render` 必须共享同一套宽度算法。现有 `FixedBottomSurface` 初期可把 `Document` 交给 ANSI backend 得到字符串，长期 frame renderer 可直接把 span 写入 cell buffer。
 
+> **上游衔接（统一编码器）**：`Renderable` 渲染的输入 `Document` 对应统一编码器模型中 `Item.Head`（RichDocument）的产物——cell 的**身份与渲染顺序由编码器分配**（`Item.ID/Seq`，见 [unified-encoder-plan](./aicli-event-stream-rendering-order-unified-encoder-plan.md) 及 [render-model-spec](./aicli-event-stream-rendering-order-render-model-spec.md)），本层只负责"把内容渲染成 Document/Span"，不负责决定 cell 出现在哪个位置。流式 cell 的多次渲染（`Item.Head` 演进）由渲染层按 `Item.ID` 定位更新，避免重复块。
+
 ### 6.3 兼容层
 
 为了控制改动范围，保留现有公开函数，但让它们变成 adapter：

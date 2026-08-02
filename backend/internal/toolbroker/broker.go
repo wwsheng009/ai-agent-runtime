@@ -1304,6 +1304,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"startup_accepted_at":  output.StartupAcceptedAt,
 			"healthcheck_state":    output.HealthcheckState,
 			"healthcheck_error":    output.HealthcheckError,
+			"queue_position":       int64(output.QueuePosition),
+			"active_jobs":          int64(output.ActiveJobs),
+			"max_concurrent":       int64(output.MaxConcurrent),
+			"scheduler_state":      output.SchedulerState,
+			"next_action":          output.NextAction,
 		} {
 			if textValue, ok := value.(string); ok && strings.TrimSpace(textValue) == "" {
 				continue
@@ -1328,6 +1333,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			ProcessAlive: output.ProcessAlive, StartupProbe: output.StartupProbe,
 			StartupGraceMs: output.StartupGraceMs, StartupAcceptedAt: output.StartupAcceptedAt,
 			HealthcheckState: output.HealthcheckState, HealthcheckError: output.HealthcheckError,
+			QueuePosition: output.QueuePosition, ActiveJobs: output.ActiveJobs,
+			MaxConcurrent: output.MaxConcurrent, SchedulerState: output.SchedulerState,
+			NextAction: output.NextAction,
 		}, outputMetadata, nil
 
 	case ToolSpawnAgent:

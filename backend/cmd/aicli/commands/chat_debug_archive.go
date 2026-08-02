@@ -45,6 +45,13 @@ type chatDebugArchiveManifest struct {
 }
 
 func handleDebugCommand(session *ChatSession, command string) bool {
+	// §5.5 用户交互例外：/debug 输出捕获触发时刻模型尾部锚点（不进入编码器因果链）。
+	if session != nil && session.RuntimeEventBridge != nil {
+		session.RuntimeEventBridge.recordInteractionAnchor("debug")
+		// legacy 路径输出直接打印（不产生命令 cell），无锚定注入消费方；
+		// 返回前清除 pending 标记，防止残留污染后续普通命令注入。
+		defer session.RuntimeEventBridge.clearPendingInteraction()
+	}
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	if arg == "" {
 		printChatDebugModeStatus(session)

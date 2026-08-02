@@ -461,14 +461,14 @@ func TestChatInteractionCoordinator_DrainNotesSoftEmittedTail(t *testing.T) {
 	}
 	// plainStableScrollbackCut only pushes the overflow head out of the band
 	// (bodyRows=7 keeps the newest seven lines). Soft ownership tracks that
- 	// drained head, not the still-live ActiveBand tail.
+	// drained head, not the still-live ActiveBand tail.
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "one") {
 		t.Fatalf("soft lines missing committed overflow head: %q", joined)
 	}
- 	if !strings.Contains(output.String(), "one") {
- 		t.Fatalf("expected scrollback write, got %q", output.String())
- 	}
+	if !strings.Contains(output.String(), "one") {
+		t.Fatalf("expected scrollback write, got %q", output.String())
+	}
 }
 
 func TestChatInteractionCoordinator_SoftEmittedTailReflowsFromSourceOnWidthChange(t *testing.T) {

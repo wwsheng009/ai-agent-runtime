@@ -28,7 +28,7 @@ rules:
 	}
 
 	session := &ChatSession{
-		CLIDenyTools: []string{"shell"},
+		CLIDenyTools:  []string{"shell"},
 		CLIAllowTools: []string{"view"},
 	}
 	applyChatPermissionsOverlay(session, root)

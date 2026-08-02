@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
 	"strings"
@@ -61,7 +60,11 @@ func (s *FixedBottomSurface) ComposedFrameForTest() [][]vt.Cell {
 	// The plan is the single authoritative composed frame (history + bottom
 	// reserve + debug annotations), so tests observe exactly what the
 	// production paint path stages.
-	return renderengine.PlanCells(s.composedPlanLocked(width, height))
+	// The test/display frame re-annotates with the most recent frame's
+	// white rows (star marker); the staged frame carries the annotation
+	// without the star so the star phase never flips the white
+	// classification of the next reconcile.
+	return renderengine.PlanCells(s.composedPlanLocked(width, height, true))
 }
 
 // renderOwnedViewportLocked materializes the complete application-owned frame
@@ -75,6 +78,16 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		// Alternate-screen lease active: primary flush is suspended; state
 		// is retained and replayed by the release repaint.
 		return
+	}
+	// The visible output window may have shrunk (ActiveBand/popup/prompt
+	// growth) since the last write. Full-frame repaints overwrite rows in
+	// place, and overwriting is not scrolling: rows that no longer fit the
+	// window would silently vanish without ever reaching scrollback. Hand
+	// the excess into native scrollback first (DECSTBM \r\n scroll), then
+	// invalidate so the following Flush repaints from a clean slate. This is
+	// a no-op while the window did not shrink (frontier already current).
+	if s.commitExcessHistoryToScrollbackLocked() && s.viewportBackend != nil {
+		s.viewportBackend.Invalidate()
 	}
 	s.stageOwnedFrameLocked()
 	if diff := s.viewportBackend.Flush(); diff != "" {
@@ -132,7 +145,7 @@ func (s *FixedBottomSurface) stageOwnedFrameLocked() {
 		s.promptRenderedRows = promptPlan.areaRows
 	}
 
-	plan := s.composedPlanLocked(width, height)
+	plan := s.composedPlanLocked(width, height, false)
 	s.lastRowOwners = planOwnersCopy(plan)
 	s.viewportBackend.StageFrame(renderengine.PlanCells(plan))
 }
@@ -140,14 +153,14 @@ func (s *FixedBottomSurface) stageOwnedFrameLocked() {
 // composedPlanLocked builds the full-screen owned frame (history + bottom
 // reserve) with per-row ownership annotations, the single authoritative
 // layout of the owned path.
-func (s *FixedBottomSurface) composedPlanLocked(width, height int) []renderengine.PlanRow {
+func (s *FixedBottomSurface) composedPlanLocked(width, height int, debugStars bool) []renderengine.PlanRow {
 	history := s.historyRowsWithCursorBlankLocked()
 	historyPlan := make([]renderengine.PlanRow, len(history))
 	for i := range history {
 		historyPlan[i] = renderengine.PlanRow{Owner: renderengine.RowOwnerTranscript, Cells: history[i]}
 	}
 	plan := s.composerLocked().ComposePlan(width, height, historyPlan, s.bottomRowsWithOwnersLocked())
-	s.annotateDebugRowsLocked(plan, width)
+	s.annotateDebugRowsLocked(plan, width, debugStars)
 	return plan
 }
 
@@ -156,8 +169,11 @@ func (s *FixedBottomSurface) composedPlanLocked(width, height int) []renderengin
 // message content.
 const paintDebugTagSGR = "2"
 
-// debugTagWidth is the fixed width of the per-row tag "[hhhh #NN wN]" (4-hex
-// content fingerprint, 1-based screen row, cumulative white-repaint count).
+// debugTagWidth is the minimum width of the per-row tag "[hhhh #NN wN]"
+// (4-hex content fingerprint, 1-based screen row, cumulative white-repaint
+// count for that content; a trailing "*" marks rows white-repainted by the
+// most recent frame). The w counter and marker make the actual width grow;
+// truncation adapts to the rendered tag length.
 const debugTagWidth = 13 // "[3f9a #05 w0]"
 
 // annotateDebugRowsLocked adds a unique per-row debug tag to the message
@@ -165,14 +181,19 @@ const debugTagWidth = 13 // "[3f9a #05 w0]"
 // active: "[3f9a #05 w0]". The tag maps the screen directly onto the
 // /debug display table (row numbers match), the fingerprint makes identical
 // content instantly recognizable (duplicate rendering of the same row keeps
-// the same fingerprint), and the w counter increments visibly each time the
-// row is white-repainted - so repeated rendering is located on the message
-// stream itself instead of requiring a HUD or table lookup. The tag is a
-// pure annotation of the composed frame: history data is never mutated, and
-// a row that keeps its content keeps its fingerprint, so the white-repaint
-// reconciliation stays honest. Prompt/status/popup rows are left untouched
-// (interaction rows, not message data). Callers hold the surface lock.
-func (s *FixedBottomSurface) annotateDebugRowsLocked(plan []renderengine.PlanRow, width int) {
+// the same fingerprint), and the w counter increments visibly each time that
+// content is white-repainted - so repeated rendering is located on the
+// message stream itself instead of requiring a HUD or table lookup. The
+// counter is content-addressed (WhiteEmitsByHash): a row that scrolls to a
+// new screen position keeps its own w count and does not inherit the
+// position's history, and a trailing "*" marks rows white-repainted by the
+// most recent frame, separating "duplicated right now" from the lifetime
+// count. The tag is a pure annotation of the composed frame: history data is
+// never mutated, and a row that keeps its content keeps its fingerprint, so
+// the white-repaint reconciliation stays honest. Prompt/status/popup rows
+// are left untouched (interaction rows, not message data). Callers hold the
+// surface lock.
+func (s *FixedBottomSurface) annotateDebugRowsLocked(plan []renderengine.PlanRow, width int, withStar bool) {
 	if s == nil || s.engine == nil || s.engine.Trace() == nil || !s.engine.Trace().Enabled() {
 		return
 	}
@@ -183,29 +204,50 @@ func (s *FixedBottomSurface) annotateDebugRowsLocked(plan []renderengine.PlanRow
 		return
 	}
 	trace := s.engine.Trace()
+	var lastWhite []int
+	if withStar {
+		lastWhite = trace.LastFrame().White
+	}
 	for i := range plan {
 		row := &plan[i]
 		if row.Owner != renderengine.RowOwnerTranscript && row.Owner != renderengine.RowOwnerBand {
 			continue
 		}
-		tag := debugRowTag(i+1, historyCellsToPlainText(row.Cells), trace.WhiteEmits(i+1))
+		hash := renderengine.RowTextHash(row.Cells)
+		justWhite := false
+		for _, whiteRow := range lastWhite {
+			if whiteRow == i+1 {
+				justWhite = true
+				break
+			}
+		}
+		tag := debugRowTag(i+1, hash, trace.WhiteEmitsByHash(hash), justWhite)
 		tagCells := debugTagCells(tag)
 		row.Cells = append(tagCells, truncateRowCells(row.Cells, width-len(tagCells))...)
 	}
 }
 
-// debugRowTag builds the "[hhhh #NN wN]" tag for one 1-based screen row.
-func debugRowTag(row int, text string, white uint64) string {
-	return fmt.Sprintf("[%s #%02d w%d]", hash4Hex(text), row, white)
+// debugRowTag builds the "[hhhh #NN wN]" tag for one 1-based screen row: a
+// 4-hex content fingerprint (content-addressed, so scrolling never changes
+// it), the screen row number, and the cumulative white-repaint count for
+// that content. A trailing "*" marks rows that were white-repainted by the
+// most recent recorded frame, separating "duplicated right now" from the
+// lifetime count; the marker disappears once a frame records no white
+// repaint on the row.
+func debugRowTag(row int, hash uint32, white uint64, justWhite bool) string {
+	star := ""
+	if justWhite {
+		star = "*"
+	}
+	return fmt.Sprintf("[%04x #%02d w%d%s]", hash&0xffff, row, white, star)
 }
 
-// hash4Hex returns a 4-hex-digit content fingerprint (truncated FNV-1a 32),
-// stable for identical text so duplicate rendering keeps the same tag.
+// hash4Hex returns the 4-hex-digit content fingerprint (truncated FNV-1a 32)
+// of plain text. It delegates to the render-engine hash so the tag's
+// fingerprint and the probe's per-content white counters share one
+// implementation.
 func hash4Hex(text string) string {
-	trimmed := strings.TrimRight(text, " ")
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(trimmed))
-	return fmt.Sprintf("%04x", h.Sum32()&0xffff)
+	return fmt.Sprintf("%04x", renderengine.TextHash4(text)&0xffff)
 }
 
 // debugTagCells converts the ASCII tag into dim cells, one cell per rune.
@@ -308,7 +350,21 @@ type fixedBottomPromptPaintPlan struct {
 }
 
 func (s *FixedBottomSurface) historyRowsSnapshotLocked() [][]vt.Cell {
-	return s.expandHistoryLinesLocked(s.historyWindow)
+	// Rows already handed into native scrollback must never re-enter the
+	// composed frame: a later full-frame repaint (band/popup/prompt shrink
+	// restore, status refresh) would paint them a second time, leaving the
+	// same row once in native scrollback and once on screen — the duplicate
+	// rendering users see after a band disappears. The frame window starts at
+	// the handoff frontier; scrollback is the single durable copy of older
+	// rows and users reach them by scrolling.
+	window := s.historyWindow
+	if frontier := s.handoffFrontier.Value(); frontier > 0 {
+		if frontier >= len(window) {
+			return nil
+		}
+		window = window[frontier:]
+	}
+	return s.expandHistoryLinesLocked(window)
 }
 
 // expandHistoryLinesLocked materializes logical history lines as terminal
@@ -390,6 +446,89 @@ func historyCellsToPlainText(cells []vt.Cell) string {
 		}
 	}
 	return strings.TrimRight(b.String(), " ")
+}
+
+// expandHistoryLinesToStyledTextLocked expands a visible-tail segment whose
+// logical lines wrap at the current width into physical-row text WITH
+// re-emitted SGR styling. Scrollback handoff can use plain text (the owned
+// full-frame repaint re-renders the visible window from styled source), but
+// the direct-scroll append paints the visible tail through the native scroll
+// region and only flushes the bottom-pane delta afterwards — the transcript is
+// never repainted, so the rows written here must carry their own styling.
+func (s *FixedBottomSurface) expandHistoryLinesToStyledTextLocked(segment []string) []string {
+	if len(segment) == 0 {
+		return nil
+	}
+	width := s.terminal.Width()
+	if width < 1 {
+		return nil
+	}
+	rows := s.expandHistoryLinesLocked(segment)
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, cells := range rows {
+		out = append(out, historyCellsToStyledText(cells))
+	}
+	return out
+}
+
+// historyCellsToStyledText re-emits one physical row of reconstructed cells as
+// ANSI text: SGR changes become CSI m sequences, wide-run continuation columns
+// are skipped, and blank cells become spaces. Trailing blanks are trimmed and
+// the row ends with an SGR reset, so the result is exactly one terminal row
+// with self-contained styling (a trailing styled blank cannot bleed into the
+// next emitted row).
+func historyCellsToStyledText(cells []vt.Cell) string {
+	high := -1
+	for column, cell := range cells {
+		if cell.Text != "" || cell.Cont || len(cell.SGR) > 0 {
+			high = column
+		}
+	}
+	if high < 0 {
+		return ""
+	}
+	var b strings.Builder
+	var activeSGR []string
+	haveActiveSGR := false
+	for column := 0; column <= high; column++ {
+		cell := cells[column]
+		if cell.Cont {
+			continue
+		}
+		if !haveActiveSGR || !sgrEqual(activeSGR, cell.SGR) {
+			b.WriteString("\x1b[0m")
+			if len(cell.SGR) > 0 {
+				b.WriteString("\x1b[")
+				b.WriteString(strings.Join(cell.SGR, ";"))
+				b.WriteByte('m')
+			}
+			activeSGR = cell.SGR
+			haveActiveSGR = true
+		}
+		if cell.Text == "" {
+			b.WriteByte(' ')
+		} else {
+			b.WriteString(cell.Text)
+		}
+	}
+	b.WriteString("\x1b[0m")
+	return b.String()
+}
+
+// sgrEqual reports whether two SGR code lists are identical.
+func sgrEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *FixedBottomSurface) historyRowsWithCursorBlankLocked() [][]vt.Cell {
@@ -522,7 +661,7 @@ func (s *FixedBottomSurface) RowOwnersForTest() []renderengine.RowOwner {
 	if height < 1 {
 		height = 24
 	}
-	return planOwnersCopy(s.composedPlanLocked(width, height))
+	return planOwnersCopy(s.composedPlanLocked(width, height, false))
 }
 
 // RowPlanDebugString renders the current row-ownership table for /debug
@@ -543,7 +682,7 @@ func (s *FixedBottomSurface) RowPlanDebugString() string {
 	if height < 1 {
 		height = 24
 	}
-	plan := s.composedPlanLocked(width, height)
+	plan := s.composedPlanLocked(width, height, false)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Row Ownership (%dx%d):\n", width, height)
 	for i, row := range plan {

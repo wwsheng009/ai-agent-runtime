@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
@@ -72,8 +73,39 @@ type chatInteractionCoordinator struct {
 	reasoningTrailingLF bool
 	reasoningMeta       string
 	reasoningBuffer     strings.Builder
-	completeBlockOutput bool
 	shutdown            bool
+
+	// —— 统一 block boundary 决策状态（切片 11，INV-GAP-03）——
+	// lastBlockMeta 是前一完整块的 boundary 元数据（ID 空 = 尚无完整块）。
+	// gap 决策委托 boundary.ResolveGap 规则表，不再从前一次调用的全局
+	// 布尔（completeBlockOutput）推断；ActiveBand/status/prompt/popup
+	// 与 filtered/empty event 不触碰本状态（INV-GAP-05）。
+	lastBlockMeta boundary.CellMeta
+	// gapPreWritten 表示 prompt 重绘（writePromptGapLocked）已把"下一完整
+	// 块前的语义 gap"提前写出；下一个完整块提交时不再重复写 gap。
+	gapPreWritten bool
+	// streamCellID 是当前 assistant 流的 boundary 身份：同一流内所有
+	// 残差 chunk 共享该 ID（ResolveGap 同 ID → 稠密），与后续独立块不同。
+	streamCellID string
+	// supplementBlockSeq / errorBlockSeq 为无 historyCell 的完整块
+	// （reasoning supplement divider、error 块）分配稳定 boundary ID。
+	supplementBlockSeq uint64
+	errorBlockSeq      uint64
+
+	// textParityFn 是渲染层切换的运行时双跑对照探针（切片 9）：每个完整块
+	// 在 writeRowsLocked 提交后，把"本块实际写出的行序列（含跨块 gap 空行）"
+	// 交给探针。真实运行时由 bridge 注入（对照 Scene 快照 RenderText 的对应
+	// 片段，统计 mismatch 供 /debug 审计）；nil 时完全无行为变化（默认）。
+	textParityFn func(blockRows []string)
+
+	// blockSourceFn 是 Scene presenter 模式的完整块行源（P3 切换）：非 nil
+	// 时，writeRowsLocked 的可见行序列改由该函数返回的行替换——即完整块
+	// 文本以 Scene 投影（LayoutTranscript 分组 + 样式 chrome）为权威，旧
+	// cell source 仅保留交互状态语义。返回空表示 Scene 侧尚无对应分组，
+	// 此时回退旧行（保持可见性，探针会报告 mismatch）。nil（默认）保持
+	// 旧路径不变。由 bridge 在 feature flag（AICLI_SCENE_PRESENTER）开启
+	// 时注入，关闭时注入 nil。
+	blockSourceFn func(blockRows []string) []string
 
 	// Two-region stream state: the controller owns the mutable ActiveBand while
 	// stable rendered chunks move through a bounded, animated scrollback queue.
@@ -338,7 +370,7 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 	engine := renderengine.NewEngine()
 	activeStream := ui.NewActiveStreamController(width, ui.ActiveBandRows(ui.GetTerminalHeight()))
 	activeStream.SetRenderCache(engine.Cache())
-	return &chatInteractionCoordinator{
+	coord := &chatInteractionCoordinator{
 		session:           session,
 		writer:            os.Stdout,
 		surfaceWriter:     true,
@@ -356,6 +388,35 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 		activeStream:     activeStream,
 		transcript:       &assistantTurnTranscript{},
 	}
+	if session != nil && session.RuntimeEventBridge != nil {
+		// 渲染层双跑文本对照（切片 9）：bridge 已存在（事件循环先于交互启动）
+		// 时直接接线；否则由 ensureChatRuntimeEventBridge 在 bridge 创建后注入。
+		coord.textParityFn = session.RuntimeEventBridge.checkTextParity
+		// Scene presenter 模式（AICLI_SCENE_PRESENTER=1）：完整块可见行以
+		// Scene 投影为权威；flag 关闭时 sceneBlockSource 返回 nil，行为不变。
+		coord.blockSourceFn = session.RuntimeEventBridge.sceneBlockSource()
+	}
+	return coord
+}
+
+// SetTextParityProbe 注入渲染层双跑对照探针（切片 9）：每个完整块提交后
+// 回调 blockRows（含跨块 gap 空行）。nil 清除探针。只在启动接线期调用，
+// 不与 writeRowsLocked 并发（探针在 c.mu 内触发）。
+func (c *chatInteractionCoordinator) SetTextParityProbe(fn func(blockRows []string)) {
+	if c == nil {
+		return
+	}
+	c.textParityFn = fn
+}
+
+// SetBlockSource 注入 Scene presenter 模式的完整块行源（P3 切换）。非 nil
+// 时 writeRowsLocked 的行序列以返回值为准；nil 恢复旧路径。只在启动接线期
+// 调用，不与 writeRowsLocked 并发（回调在 c.mu 内触发）。
+func (c *chatInteractionCoordinator) SetBlockSource(fn func(blockRows []string) []string) {
+	if c == nil {
+		return
+	}
+	c.blockSourceFn = fn
 }
 
 // The coordinator keeps the legacy framePump field for compatibility with
@@ -930,69 +991,162 @@ func (c *chatInteractionCoordinator) ensureStreamTerminatedLocked() {
 }
 
 // writeRowsLocked is the single complete-block writer: optional explicit gap,
-// then atomic multi-row emission. Gap is never inferred from completeBlockOutput
-// — that flag is only read by gapFor* helpers at top-level message boundaries.
+// then atomic multi-row emission. meta is the committed block's boundary
+// metadata (INV-GAP-03): the caller resolves gap via gapBeforeBlockLocked(meta)
+// and writeRowsLocked advances the boundary state (lastBlockMeta) on commit.
+// meta.ID == "" keeps boundary state unchanged (intra-cell continuation, e.g.
+// streaming residual chunks still advance via their stream identity instead).
 // Soft stable commits intentionally bypass this path (see drainActiveStableCommitLocked)
 // so closeOpenRow / gapBlank cannot touch already-rendered scrollback.
-func (c *chatInteractionCoordinator) writeRowsLocked(rows []string, gap blockGap) {
+func (c *chatInteractionCoordinator) writeRowsLocked(rows []string, gap blockGap, meta boundary.CellMeta) {
 	if c == nil || len(rows) == 0 {
 		return
 	}
 	c.closeOpenRowLocked()
-	if gap == gapBlank {
+	writeRows := rows
+	writeGap := gap
+	if c.blockSourceFn != nil {
+		// Scene presenter 模式：完整块行序列以 Scene 投影为准。Scene 分组
+		// 已含跨块 gap 行（归后继 cell；user 前导 gap 由 prompt 重绘输出），
+		// 因此本层不再输出 gapBlank，避免空行重复。
+		if replaced := c.blockSourceFn(rows); len(replaced) > 0 {
+			writeRows = replaced
+			writeGap = gapNone
+		}
+	}
+	if writeGap == gapBlank {
 		c.writeLineLocked("")
 	}
 	// One write for the whole block: per-row WriteOutput releases the surface
 	// lock between lines and lets ActiveBand/status growth insert permanent
 	// holes into already-scrolled content (visible on long "• Edited" diffs).
-	c.writeTextLocked(strings.Join(rows, "\n") + "\n")
+	c.writeTextLocked(strings.Join(writeRows, "\n") + "\n")
 	c.streamTrailingLF = true
-	c.completeBlockOutput = true
+	c.markBlockCommittedLocked(meta)
+	// 运行时双跑对照探针（切片 9）：本块实际行序列 = 跨块 gap 空行（若有）
+	// + 内容行。只读旁路审计，不改变任何输出行为。
+	if c.textParityFn != nil {
+		blockRows := writeRows
+		if writeGap == gapBlank {
+			blockRows = make([]string, 0, len(writeRows)+1)
+			blockRows = append(blockRows, "")
+			blockRows = append(blockRows, writeRows...)
+		}
+		c.textParityFn(blockRows)
+	}
 }
 
-// gapBeforeBlockLocked is the single spacing policy for a new complete block.
-// Every independently committed cell gets one leading blank when another
-// complete block already precedes it. Intra-cell rows (for example a Completed
-// tool header plus its output preview) remain dense because they are emitted by
-// one DisplayLines call. Running never enters history, so it must not mutate
+// markBlockCommittedLocked advances the boundary state after a complete block
+// (or the final chunk of a stream) is committed: the block becomes the new
+// "previous" cell for the next ResolveGap decision, and any prompt-pre-written
+// gap is consumed (the next block's leading gap, if any, is a fresh decision).
+func (c *chatInteractionCoordinator) markBlockCommittedLocked(meta boundary.CellMeta) {
+	if c == nil || meta.ID == "" {
+		return
+	}
+	c.lastBlockMeta = meta
+	c.gapPreWritten = false
+}
+
+// resetBlockBoundaryLocked clears boundary state (run reset / shutdown). The
+// next committed block becomes the transcript's first block (no leading gap),
+// matching the legacy completeBlockOutput=false reset semantics.
+func (c *chatInteractionCoordinator) resetBlockBoundaryLocked() {
+	if c == nil {
+		return
+	}
+	c.lastBlockMeta = boundary.CellMeta{}
+	c.gapPreWritten = false
+	c.streamCellID = ""
+}
+
+// cellBoundaryMeta projects a history cell onto the boundary metadata view
+// (INV-GAP-03): stable ID from cell identity, semantic kind from the cell
+// kind, ChainKey from the parent cause (same tool chain stays dense).
+func cellBoundaryMeta(cell historyCell) boundary.CellMeta {
+	kind := boundary.KindSystem
+	if cell != nil {
+		switch cell.Kind() {
+		case historyCellUser:
+			kind = boundary.KindUser
+		case historyCellAssistant, historyCellSupplement:
+			kind = boundary.KindAssistant
+		case historyCellTool:
+			kind = boundary.KindTool
+		case historyCellCommand:
+			kind = boundary.KindCommand
+		}
+	}
+	return boundary.CellMeta{
+		ID:       cell.ID(),
+		Kind:     kind,
+		TopLevel: true,
+		ChainKey: cell.CauseID(),
+	}
+}
+
+// streamBoundaryMetaLocked returns the current assistant stream's boundary
+// identity, allocating one on first use (same stream → same ID → dense chunks).
+func (c *chatInteractionCoordinator) streamBoundaryMetaLocked() boundary.CellMeta {
+	if c.streamCellID == "" {
+		c.streamCellID = fmt.Sprintf("cell-%d", cellIdentityCounter.Add(1))
+	}
+	return boundary.CellMeta{ID: c.streamCellID, Kind: boundary.KindAssistant, TopLevel: true}
+}
+
+// nextSupplementMetaLocked / nextErrorMetaLocked allocate stable boundary IDs
+// for complete blocks that have no historyCell (reasoning supplement divider,
+// error blocks).
+func (c *chatInteractionCoordinator) nextSupplementMetaLocked() boundary.CellMeta {
+	c.supplementBlockSeq++
+	return boundary.CellMeta{
+		ID:       fmt.Sprintf("supplement-%d", c.supplementBlockSeq),
+		Kind:     boundary.KindAssistant,
+		TopLevel: true,
+	}
+}
+
+func (c *chatInteractionCoordinator) nextErrorMetaLocked() boundary.CellMeta {
+	c.errorBlockSeq++
+	return boundary.CellMeta{
+		ID:       fmt.Sprintf("error-%d", c.errorBlockSeq),
+		Kind:     boundary.KindSystem,
+		TopLevel: true,
+	}
+}
+
+// gapBeforeBlockLocked is the single spacing policy for a new complete block
+// (INV-GAP-03): it delegates to the boundary.ResolveGap rule table instead of
+// inferring from a global "previous call" boolean. A prompt-pre-written gap
+// (gapPreWritten) is consumed without writing again; otherwise ResolveGap
+// decides 0/1 gap from the previous committed block's metadata and the next
+// block's metadata. Running never enters history, so it must not mutate
 // cross-cell spacing state before Completed/Failed is committed.
-func (c *chatInteractionCoordinator) gapBeforeBlockLocked() blockGap {
-	if c != nil && c.completeBlockOutput {
+func (c *chatInteractionCoordinator) gapBeforeBlockLocked(next boundary.CellMeta) blockGap {
+	if c == nil {
+		return gapNone
+	}
+	if c.gapPreWritten {
+		return gapNone
+	}
+	if boundary.ResolveGap(c.lastBlockMeta, next) == boundary.GapOne {
 		return gapBlank
 	}
 	return gapNone
 }
 
-// gapForTopLevelMessage maps the historical suppressSeparator rule for
-// assistant/error one-shots onto an explicit gap. completeBlockOutput is read
-// only at the message boundary — writeRowsLocked itself never invents a blank
-// from that flag (which is what polluted mid-stream residual paints).
-func (c *chatInteractionCoordinator) gapForTopLevelMessage() blockGap {
-	return c.gapBeforeBlockLocked()
-}
-
-// gapForEventBlock applies the same boundary rule to tool, timeline and
-// supplement cells. Denseness belongs inside a cell, never across independent
-// events.
-func (c *chatInteractionCoordinator) gapForEventBlock() blockGap {
-	return c.gapBeforeBlockLocked()
-}
-
-// gapIfPriorComplete inserts a blank only when a prior complete block is on
-// screen. Used for reasoning supplements that follow assistant content.
-func (c *chatInteractionCoordinator) gapIfPriorComplete() blockGap {
-	if c != nil && c.completeBlockOutput {
-		return gapBlank
-	}
-	return gapNone
-}
-
+// writePromptGapLocked materializes the pending cross-block gap ahead of a
+// prompt repaint (legacy completeBlockOutput consumption made explicit): when
+// a complete block precedes the prompt and its gap has not been written yet,
+// the blank is emitted now and gapPreWritten is set so the next committed
+// block does not duplicate it. With no previous block (or after a reset) no
+// gap is written and the state is untouched.
 func (c *chatInteractionCoordinator) writePromptGapLocked() {
-	if c == nil || !c.completeBlockOutput {
+	if c == nil || c.lastBlockMeta.ID == "" || c.gapPreWritten {
 		return
 	}
 	c.writeLineLocked("")
-	c.completeBlockOutput = false
+	c.gapPreWritten = true
 }
 
 func (c *chatInteractionCoordinator) preparePromptGapLocked(writeGap bool) {
@@ -2605,7 +2759,8 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	} else {
 		cell = newAssistantStreamCell(response, false)
 	}
-	c.commitHistoryCellLocked(cell, c.gapForTopLevelMessage())
+	meta := cellBoundaryMeta(cell)
+	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
 }
 
 func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.ReasoningBlock) {
@@ -2847,7 +3002,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		formatted = c.session.Formatter.Format(finalContent)
 	}
 	// One-shot completion of the same assistant body: no cross-block gap.
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
 	c.resetStreamLocked()
 	return true
 }
@@ -2888,7 +3043,8 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 	lines := chatReasoningLines(renderBlock)
 	if len(lines) > 0 {
 		// Reasoning supplement is its own block after the assistant body.
-		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapIfPriorComplete())
+		meta := c.nextSupplementMetaLocked()
+		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapBeforeBlockLocked(meta), meta)
 	}
 	c.resetReasoningLocked()
 	return true
@@ -2923,7 +3079,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		}
 		if c.streamRendered {
 			c.ensureStreamTerminatedLocked()
-			c.completeBlockOutput = true
+			c.markBlockCommittedLocked(c.streamBoundaryMetaLocked())
 		}
 		c.resetStreamLocked()
 		return
@@ -2934,7 +3090,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		if c.session.Formatter != nil {
 			formatted = c.session.Formatter.Format(content)
 		}
-		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
 		c.resetStreamLocked()
 		return
 	}
@@ -2961,7 +3117,8 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 	}
 	lines := chatReasoningLines(renderBlock)
 	if len(lines) > 0 {
-		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapIfPriorComplete())
+		meta := c.nextSupplementMetaLocked()
+		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapBeforeBlockLocked(meta), meta)
 	}
 	c.resetReasoningLocked()
 }
@@ -2977,10 +3134,8 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	}
 	// Each async/supplement event is an independent retained cell. It receives
 	// one block-level separator; multiline content inside the cell stays dense.
-	c.commitHistoryCellLocked(
-		newSupplementLineCell(line),
-		c.gapForEventBlock(),
-	)
+	suppCell := newSupplementLineCell(line)
+	c.commitHistoryCellLocked(suppCell, c.gapBeforeBlockLocked(cellBoundaryMeta(suppCell)), cellBoundaryMeta(suppCell))
 }
 
 // RenderToolChainEvent routes tool_requested / tool_result through toolChainCell
@@ -3021,7 +3176,7 @@ func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.
 			return false
 		}
 		c.finishToolAgentStageLocked(event.ToolCallID, event.ToolName)
-		c.commitHistoryCellLocked(cell, c.gapForEventBlock())
+		c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(cellBoundaryMeta(cell)), cellBoundaryMeta(cell))
 		return true
 	default:
 		// batch_start / batch_end / unknown: keep prior empty-string contract.
@@ -3051,10 +3206,8 @@ func (c *chatInteractionCoordinator) RenderAsyncDocument(doc render.Document) {
 	}
 	// Typed timeline/tool/info document routed through the cell model
 	// (P4.2/P5.6). Cross-event spacing is applied at this cell boundary.
-	c.commitHistoryCellLocked(
-		newAsyncDocumentCell(doc),
-		c.gapForEventBlock(),
-	)
+	docCell := newAsyncDocumentCell(doc)
+	c.commitHistoryCellLocked(docCell, c.gapBeforeBlockLocked(cellBoundaryMeta(docCell)), cellBoundaryMeta(docCell))
 }
 
 // RenderCommandDocument commits one structured command result as one retained
@@ -3074,12 +3227,19 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 	if !c.beginMessageLocked() {
 		return false
 	}
+	// 切片 11：命令结果提交前把纯文本投影注入 Scene 数据面（与用户输入
+	// 同一模式），使"完整块序列 == Scene cell 序列"对命令块也成立。
+	// 切片 12（P4）：/debug、/model 等交互命令输出经 pending 交互标记走
+	// Tail 锚定插入（KindUserInteraction），普通命令仍为 KindCommand。
+	// 注入只发生在块真正提交后（beginMessageLocked 已通过），nil bridge
+	// 时零行为（旁路）。
+	if c.session != nil && c.session.RuntimeEventBridge != nil {
+		c.session.RuntimeEventBridge.submitCommandResult(ui.RenderDocumentPlain(doc))
+	}
 	c.commandCellSequence++
 	c.lastCommandCellID = fmt.Sprintf("command:%d", c.commandCellSequence)
-	c.commitHistoryCellLocked(
-		newCommandResultCell(c.lastCommandCellID, c.commandCellSequence, doc),
-		c.gapForEventBlock(),
-	)
+	cmdCell := newCommandResultCell(c.lastCommandCellID, c.commandCellSequence, doc)
+	c.commitHistoryCellLocked(cmdCell, c.gapBeforeBlockLocked(cellBoundaryMeta(cmdCell)), cellBoundaryMeta(cmdCell))
 	return true
 }
 
@@ -3134,7 +3294,7 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.renderUserEchoLocked(input, true)
+	c.renderUserEchoLocked(input, true, true)
 }
 
 // RenderReplayedUserInput echoes a user message from already-final history.
@@ -3148,14 +3308,17 @@ func (c *chatInteractionCoordinator) RenderReplayedUserInput(input string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.renderUserEchoLocked(input, false)
+	c.renderUserEchoLocked(input, false, false)
 }
 
 // renderUserEchoLocked writes a user-message block. allowPromptRestore gates the
 // live-only composer re-show: the live submit path restores an empty composer
 // when a turn was already armed (StartWaiting), while history replay passes
 // false so the bottom reserve never grows between replayed messages.
-func (c *chatInteractionCoordinator) renderUserEchoLocked(input string, allowPromptRestore bool) {
+// injectUserInput 控制是否把用户输入注入统一渲染数据面（切片 10）：
+// live 提交注入（Scene 才有对应 user cell 供 parity 对照与后续切换），
+// 历史回放不注入（回放由 replayEventLog 从事件日志恢复，避免重复 cell）。
+func (c *chatInteractionCoordinator) renderUserEchoLocked(input string, allowPromptRestore bool, injectUserInput bool) {
 	// User echo must free the composer first. Leaving a surface prompt reserved
 	// after the prior turn absorbs its trailing blank into the bottom pane, so
 	// the next WriteOutput lands on the last history row and overwrites it
@@ -3169,12 +3332,20 @@ func (c *chatInteractionCoordinator) renderUserEchoLocked(input string, allowPro
 	if !c.beginMessageLocked() {
 		return
 	}
+	// 切片 10：用户块提交前把输入注入 Scene 数据面（与事件流同一渲染
+	// 模型），使"完整块序列 == Scene cell 序列"对用户块也成立。注入
+	// 只发生在块真正提交后（beginMessageLocked 已通过），nil bridge
+	// 时零行为（旁路）。
+	if injectUserInput && c.session != nil && c.session.RuntimeEventBridge != nil {
+		c.session.RuntimeEventBridge.submitUserInput(input)
+	}
 	// User echo sits directly under the cleared prompt; no extra blank. Routed
 	// through the retained-source cell model (P4.1) so the same block can later
 	// be re-rendered at a new width without mutating committed output. This is
 	// behavior-identical to writeCompleteBlockLocked(FormatUserMessage): the cell
 	// returns the same normalizeWriteLines rows.
-	c.commitHistoryCellLocked(newUserMessageCell(input), gapNone)
+	userCell := newUserMessageCell(input)
+	c.commitHistoryCellLocked(userCell, gapNone, cellBoundaryMeta(userCell))
 	// StartWaiting may have already armed the turn; restore an empty composer so
 	// queued input can continue above the status line. Replay passes
 	// allowPromptRestore=false: growing the bottom reserve between replayed
@@ -3196,9 +3367,16 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 	if !c.beginMessageLocked() {
 		return
 	}
+	// 切片 11：错误块提交前把错误文本注入 Scene 数据面（KindSystem 终态
+	// 块，会话/诊断语义；assistant 流内错误走事件路径，不经此处）。
+	if c.session != nil && c.session.RuntimeEventBridge != nil {
+		c.session.RuntimeEventBridge.submitError(fmt.Sprintf("操作错误: %v", err))
+	}
+	errMeta := c.nextErrorMetaLocked()
 	c.writeCompleteBlockLocked(
 		ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)),
-		c.gapForTopLevelMessage(),
+		c.gapBeforeBlockLocked(errMeta),
+		errMeta,
 	)
 }
 
@@ -3384,7 +3562,7 @@ func (c *chatInteractionCoordinator) DebugSummary() string {
 		fmt.Sprintf("thinking_active=%t", c.thinkingActive),
 		fmt.Sprintf("streaming_active=%t", c.streamingActive),
 		fmt.Sprintf("reasoning_active=%t", c.reasoningActive),
-		fmt.Sprintf("complete_block_output=%t", c.completeBlockOutput),
+		fmt.Sprintf("gap_prewritten=%t", c.gapPreWritten),
 		fmt.Sprintf("shutdown=%t", c.shutdown),
 		fmt.Sprintf("stream_stable_queued=%d", len(c.stableCommitQueue)),
 		fmt.Sprintf("stream_prefix_enqueued=%d", c.streamEnqueuedPrefixLen),
@@ -3411,7 +3589,7 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 	if c.shutdown {
 		return
 	}
-	c.completeBlockOutput = false
+	c.resetBlockBoundaryLocked()
 	c.agentStage = chatAgentStageIdle
 	c.agentStageDetail = ""
 	c.activeTools = nil
@@ -3454,7 +3632,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.thinkingActive = false
 	c.streamingActive = false
 	c.reasoningActive = false
-	c.completeBlockOutput = false
+	c.resetBlockBoundaryLocked()
 	c.stopActiveStreamFrameLocked()
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
@@ -3609,7 +3787,7 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 		formatted = c.session.Formatter.Format(content)
 	}
 	// One-shot flush: same row contract as complete blocks (no multi-line blob).
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
 }
 
 func (c *chatInteractionCoordinator) flushReasoningLocked() {
@@ -3793,7 +3971,7 @@ func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
 		c.reasoningTrailingLF = true
 	}
 	c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("end reasoning")))
-	c.completeBlockOutput = true
+	c.markBlockCommittedLocked(c.nextSupplementMetaLocked())
 	c.resetReasoningLocked()
 	c.renderBufferedAssistantStreamLocked()
 }
@@ -3810,7 +3988,11 @@ func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
 		return
 	}
 	c.writeIndentedStreamingDeltaLocked(content, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
-	c.completeBlockOutput = false
+	// 流式增量已提供块间视觉分隔（增量行本身或随后的终止空行）：下一个
+	// 完整块（如打断插入的 tool_result）不再重复写 gap——旧
+	// completeBlockOutput=false 打断补偿语义的显式化。正常 finalize 的
+	// markBlockCommittedLocked 会清除本标记，恢复规则表决策。
+	c.gapPreWritten = true
 }
 
 func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(content string) {
@@ -3840,7 +4022,7 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 		formatted += hint
 	}
 	// First full paint of the assistant body — no cross-block gap.
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
 }
 
 // writeResidualFormattedAssistantStreamLocked paints the still-unemitted tail
@@ -3865,7 +4047,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 			}
 			formatted += hint
 		}
-		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone)
+		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
 		return
 	}
 
@@ -3875,7 +4057,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 		if hint != "" {
 			c.writeLineLocked(ui.FormatAssistantRendered(hint))
 		}
-		c.completeBlockOutput = true
+		c.markBlockCommittedLocked(c.streamBoundaryMetaLocked())
 		return
 	}
 
@@ -3912,7 +4094,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 			c.streamTrailingLF = true
 			c.streamRendered = true
 			c.streamRenderedPrefixLen = len(content)
-			c.completeBlockOutput = true
+			c.markBlockCommittedLocked(c.streamBoundaryMetaLocked())
 			return
 		}
 		c.ensureStreamTerminatedLocked()
@@ -3925,7 +4107,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 			c.writeLineLocked(ui.FormatAssistantRendered(hint))
 		}
 		c.streamRenderedPrefixLen = len(content)
-		c.completeBlockOutput = true
+		c.markBlockCommittedLocked(c.streamBoundaryMetaLocked())
 		return
 	}
 	if hint != "" {
@@ -3943,18 +4125,17 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 		c.writeTextLocked("\n")
 		c.streamTrailingLF = true
 		if len(rest) > 0 {
-			c.writeRowsLocked(rest, gapNone)
+			c.writeRowsLocked(rest, gapNone, c.streamBoundaryMetaLocked())
 		}
 	} else {
 		// Multi-line residuals (tables, lists, code fences): one atomic WriteOutput
 		// so layout/scroll cannot interleave between rows the way history's
 		// one-shot RenderAssistant never does.
-		c.writeRowsLocked(chunk.lines, gapNone)
+		c.writeRowsLocked(chunk.lines, gapNone, c.streamBoundaryMetaLocked())
 	}
 	c.streamTrailingLF = true
 	c.streamRendered = true
 	c.streamRenderedPrefixLen = len(content)
-	c.completeBlockOutput = true
 }
 
 func (c *chatInteractionCoordinator) unrenderedAssistantStreamSuffixLocked(content string) string {
@@ -4070,6 +4251,7 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.stableCommitCatchUp = false
 	c.stableCommitBelowExit = time.Time{}
 	c.stableCommitLastExit = time.Time{}
+	c.streamCellID = ""
 	// Drop both coordinator source ownership and the surface rewrite window.
 	// Leaving surface soft valid after the turn ends would allow a later
 	// foreign/resize path to treat irreversible history as reflowable.
@@ -4350,7 +4532,7 @@ func (c *chatInteractionCoordinator) drainActiveStableCommitLocked(all bool) boo
 	c.stableCommitQueue = c.stableCommitQueue[count:]
 	c.streamRendered = true
 	c.streamTrailingLF = true
-	c.completeBlockOutput = true
+	c.markBlockCommittedLocked(c.streamBoundaryMetaLocked())
 	// Only irreversible scrollback writes become transcript Blocks. Pending
 	// queue entries that are later discarded never appear here.
 	if emittedSourceEnd > prevEmitted {
@@ -5273,7 +5455,7 @@ func (c *chatInteractionCoordinator) resetReasoningLocked() {
 	}
 }
 
-func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, gap blockGap) {
+func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, gap blockGap, meta boundary.CellMeta) {
 	if strings.TrimSpace(rendered) == "" {
 		return
 	}
@@ -5286,7 +5468,7 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, g
 	if len(lines) == 0 {
 		return
 	}
-	c.writeRowsLocked(lines, gap)
+	c.writeRowsLocked(lines, gap, meta)
 }
 
 // commitHistoryCellLocked writes a history cell's rendered rows as one atomic
@@ -5295,14 +5477,14 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, g
 // pre-joining a string, so later sub-steps can reuse the same source for resize
 // reflow. The rows are already normalizeWriteLines-ready, so this matches the
 // legacy writeCompleteBlockLocked pipeline (normalize -> writeRowsLocked).
-func (c *chatInteractionCoordinator) commitHistoryCellLocked(cell historyCell, gap blockGap) {
+func (c *chatInteractionCoordinator) commitHistoryCellLocked(cell historyCell, gap blockGap, meta boundary.CellMeta) {
 	if c == nil || cell == nil {
 		return
 	}
 	// plumb real width for owned viewport (P5.5 resize reflow): pre-wrapped
 	// cell lines are consumed by the backend, so no immediate-mode padding.
 	width := c.currentStreamEmitWidthLocked()
-	c.writeRowsLocked(cell.DisplayLines(width), gap)
+	c.writeRowsLocked(cell.DisplayLines(width), gap, meta)
 }
 
 func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {
@@ -5330,7 +5512,6 @@ func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, in
 	if delta == "" {
 		return
 	}
-	c.completeBlockOutput = false
 	delta = ui.SanitizeTerminalText(delta)
 	atLineStart := !*rendered || *trailingLF
 	var builder strings.Builder
@@ -5350,6 +5531,10 @@ func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, in
 	if !*rendered && delta != "" {
 		*rendered = true
 	}
+	// 增量写出即"流式块在视觉上已存在"：打断后紧接的独立块（tool_result
+	// 等经 beginMessageLocked 插入）由增量行提供分隔，不再重复写 gap
+	// （旧 completeBlockOutput=false 的等价显式化；INV-GAP-03 打断补偿）。
+	c.gapPreWritten = true
 	c.writeStreamingDeltaLocked(builder.String())
 }
 
