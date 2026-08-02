@@ -35,6 +35,13 @@ type PaintTrace struct {
 	frames  uint64
 	height  int
 	rows    []RowPaintStat
+	// lastFrame is the reconciliation summary of the most recent recorded
+	// frame, consumed by the surface to visualize paint activity live on the
+	// terminal (flash markers for white-repainted rows, HUD counters in the
+	// status row). It is read-only for callers.
+	lastFrame    FrameSummary
+	totalWhite   uint64
+	totalMissing uint64
 }
 
 // RowPaintStat holds the per-row reconciliation counters for one 1-based
@@ -56,6 +63,30 @@ type paintRowEvent struct {
 	painted bool
 }
 
+// FrameSummary is the per-frame reconciliation result of the most recent
+// recorded frame. The surface renders it as on-screen debug information while
+// /debug on is active: rows that were white-repainted (emitted with content
+// identical to the previous frame) get a one-frame reverse-video flash in the
+// next composed frame, and the cumulative counters are shown in the status
+// row. The summary is observational only; consuming it never influences
+// layout or diffing.
+type FrameSummary struct {
+	// Frame is the number of the most recent recorded frame (0 before the
+	// first frame or after re-enable).
+	Frame uint64
+	// PaintedRows is the number of rows emitted by the most recent frame.
+	PaintedRows int
+	// White holds the 1-based rows the most recent frame emitted while their
+	// content was identical to the previous frame (duplicate rendering).
+	White []int
+	// Missing holds the 1-based rows whose content changed but that the most
+	// recent frame did not emit (diff coverage loss).
+	Missing []int
+	// TotalWhite and TotalMissing accumulate across all recorded frames.
+	TotalWhite   uint64
+	TotalMissing uint64
+}
+
 // NewPaintTrace creates a disabled probe with zeroed counters.
 func NewPaintTrace() *PaintTrace {
 	return &PaintTrace{}
@@ -69,6 +100,12 @@ func (t *PaintTrace) SetEnabled(enabled bool) {
 	}
 	t.mu.Lock()
 	t.enabled = enabled
+	if enabled {
+		// A fresh recording window has no "previous frame": clear the last
+		// summary so a stale flash cannot fire from a frame recorded before
+		// the toggle. Cumulative counters are kept for /debug display.
+		t.lastFrame = FrameSummary{}
+	}
 	t.mu.Unlock()
 }
 
@@ -91,6 +128,9 @@ func (t *PaintTrace) Reset() {
 	t.frames = 0
 	t.height = 0
 	t.rows = nil
+	t.lastFrame = FrameSummary{}
+	t.totalWhite = 0
+	t.totalMissing = 0
 	t.mu.Unlock()
 }
 
@@ -118,6 +158,7 @@ func (t *PaintTrace) recordFrame(events []paintRowEvent, height int) {
 		return
 	}
 	t.frames++
+	summary := FrameSummary{Frame: t.frames}
 	if height > t.height {
 		t.height = height
 	}
@@ -135,18 +176,42 @@ func (t *PaintTrace) recordFrame(events []paintRowEvent, height int) {
 		if event.painted {
 			stat.Emits++
 			stat.LastEmitFrame = t.frames
+			summary.PaintedRows++
 		}
 		if event.painted && !event.changed {
 			stat.WhiteEmits++
+			t.totalWhite++
+			summary.White = append(summary.White, event.row)
 		}
 		if event.changed && !event.painted {
 			stat.MissingPaints++
+			t.totalMissing++
+			summary.Missing = append(summary.Missing, event.row)
 		}
 		if event.changed {
 			stat.Changes++
 			stat.LastChangeFrame = t.frames
 		}
 	}
+	summary.TotalWhite = t.totalWhite
+	summary.TotalMissing = t.totalMissing
+	t.lastFrame = summary
+}
+
+// LastFrame returns the reconciliation summary of the most recent recorded
+// frame. The returned slices are owned by the caller. Before any frame is
+// recorded (or right after SetEnabled(true)) the summary is zero-valued with
+// Frame == 0.
+func (t *PaintTrace) LastFrame() FrameSummary {
+	if t == nil {
+		return FrameSummary{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	summary := t.lastFrame
+	summary.White = append([]int(nil), t.lastFrame.White...)
+	summary.Missing = append([]int(nil), t.lastFrame.Missing...)
+	return summary
 }
 
 // Stats returns a snapshot of the per-row counters for rows that recorded at

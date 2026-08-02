@@ -49,6 +49,25 @@
   MissingPaints 恒 0）；`ui/fixed_bottom_surface_paint_trace_test.go` 断言
   稳态流式 append 零白重绘、`Reconcile` 白重绘可见；`commands/chat_debug_paint_trace_test.go`
   覆盖 /debug on/off 接线与 display 节。
+- **渲染可观测性：屏幕级实时可视化（/debug on）。** 纯表格（/debug display）
+  不满足"在屏幕上看"的定位需求，`/debug on` 现在同时在渲染帧上呈现两类信号，
+  全部经既有 composed-frame/diff 管线输出，零布局变更、不触碰滚动热路径：
+  - **白重绘行一帧反显闪光**：`composedPlanLocked` 消费 `PaintTrace.LastFrame()`
+    的 White 行集，对上一帧被白重绘的行追加 SGR 7（反显）标记。全屏
+    `Invalidate`/`Reconcile` 会整屏闪一帧；per-row bug 持续时该行持续闪烁。
+    标记帧本身是真实属性变化（never 被记为新的白重绘），对账计数保持诚实。
+  - **状态行 HUD 计数器**：`statusPaintTextLocked` 在探针启用时追加
+    `paint f=帧 last=上帧行数 w=累计白 m=累计缺 [missRows=...]`（dim 样式），
+    状态行位于 bottom reserve（滚动区外），随普通 diff 更新；窄终端优先保留
+    HUD 段、收缩状态文本。`/debug off` 移除 HUD，闪光与计数立即归零副作用。
+  缺失行（Missing）**不做**补画标记——行未被 emit，补画即补偿 diff 缺陷；
+  只经 HUD 的 missRows 行号列表定位。探针本身仍纯观测；可视化全部在 surface
+  组合层。`ComposedFrameForTest` 改为投影 `composedPlanLocked`（单一权威帧，
+  测试可观察生产路径的调试标注）。测试：
+  `renderengine/paint_trace_test.go` 新增 `LastFrame` 摘要单元测试（白/缺行集、
+  累计、re-enable 清窗防 stale flash）；`ui/fixed_bottom_surface_paint_trace_test.go`
+  新增屏幕级断言（White 行反显可见、flush diff 含 `\x1b[7m`、HUD 段随 on/off
+  出现/消失）。
 
 ### 实施审计注记（2026-08-01）
 

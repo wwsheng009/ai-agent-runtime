@@ -303,3 +303,73 @@ func TestPaintTraceDebugString(t *testing.T) {
 		t.Fatalf("expected 5 report lines, got %d:\n%s", len(lines), report)
 	}
 }
+
+// TestPaintTraceLastFrameSummary pins the on-screen visualization feed: the
+// most recent frame's white-repainted and missing rows, plus the cumulative
+// counters. The surface flashes exactly the White rows on the next composed
+// frame and renders the totals in the status-row HUD, so the summary must be
+// deterministic per frame and reset on re-enable (no stale flash from before
+// a /debug on toggle).
+func TestPaintTraceLastFrameSummary(t *testing.T) {
+	trace := NewPaintTrace()
+	trace.SetEnabled(true)
+	trace.recordFrame([]paintRowEvent{
+		{row: 1, changed: true, painted: true},  // legit change
+		{row: 2, changed: false, painted: true}, // white repaint
+		{row: 3, changed: true, painted: false}, // missing coverage
+	}, 3)
+
+	summary := trace.LastFrame()
+	if summary.Frame != 1 {
+		t.Fatalf("frame = %d, want 1", summary.Frame)
+	}
+	if summary.PaintedRows != 2 {
+		t.Fatalf("painted rows = %d, want 2", summary.PaintedRows)
+	}
+	if summary.TotalWhite != 1 || summary.TotalMissing != 1 {
+		t.Fatalf("totals = white %d miss %d, want 1/1", summary.TotalWhite, summary.TotalMissing)
+	}
+	if len(summary.White) != 1 || summary.White[0] != 2 {
+		t.Fatalf("white rows = %v, want [2]", summary.White)
+	}
+	if len(summary.Missing) != 1 || summary.Missing[0] != 3 {
+		t.Fatalf("missing rows = %v, want [3]", summary.Missing)
+	}
+
+	// A second frame accumulates totals but carries only its own rows.
+	trace.recordFrame([]paintRowEvent{
+		{row: 4, changed: false, painted: true}, // white
+		{row: 5, changed: true, painted: true},  // legit change
+	}, 5)
+	summary = trace.LastFrame()
+	if summary.Frame != 2 || summary.PaintedRows != 2 {
+		t.Fatalf("frame 2 = %#v", summary)
+	}
+	if summary.TotalWhite != 2 || summary.TotalMissing != 1 {
+		t.Fatalf("frame 2 totals = white %d miss %d, want 2/1", summary.TotalWhite, summary.TotalMissing)
+	}
+	if len(summary.White) != 1 || summary.White[0] != 4 {
+		t.Fatalf("frame 2 white rows = %v, want [4]", summary.White)
+	}
+	if len(summary.Missing) != 0 {
+		t.Fatalf("frame 2 missing rows = %v, want none", summary.Missing)
+	}
+
+	// Disabled frames must not advance or update the summary.
+	trace.SetEnabled(false)
+	trace.recordFrame([]paintRowEvent{{row: 1, changed: false, painted: true}}, 5)
+	if summary := trace.LastFrame(); summary.Frame != 2 {
+		t.Fatalf("disabled frame advanced the summary to %#v", summary)
+	}
+
+	// Re-enable opens a fresh window: no previous frame, so a stale flash
+	// cannot fire. Cumulative counters are kept for /debug display.
+	trace.SetEnabled(true)
+	summary = trace.LastFrame()
+	if summary.Frame != 0 || len(summary.White) != 0 || len(summary.Missing) != 0 {
+		t.Fatalf("re-enable must clear the last frame summary, got %#v", summary)
+	}
+	if frames := trace.Frames(); frames != 2 {
+		t.Fatalf("frames = %d, want 2 (counters kept across re-enable)", frames)
+	}
+}
