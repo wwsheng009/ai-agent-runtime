@@ -94,6 +94,11 @@ func handleInteractiveBacktrackSelect(session *ChatSession) bool {
 		fmt.Printf("警告: 回退后同步 CLI 会话失败: %v\n", err)
 	}
 	printChatBacktrackResult(result, false)
+	if result != nil {
+		// 与 /backtrack <N> --apply 一致：把截断后的 canonical 历史重放到
+		// transcript，避免选择回退后界面上仍残留被移除的旧消息。
+		replayVisibleChatHistoryAfterTruncation(session, fmt.Sprintf("已回退到 user turn %d", result.UserTurnIndex))
+	}
 
 	composerPrompt := ""
 	if result != nil {
