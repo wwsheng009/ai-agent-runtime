@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestParseChatBacktrackArgsPreview(t *testing.T) {
@@ -89,4 +91,52 @@ func TestPrintBacktrackTombstoneFormatsSummary(t *testing.T) {
 		AnchorPreview:           "second prompt",
 		BaseCheckpointID:        "chk_base_123456",
 	})
+}
+
+// TestReplayVisibleChatHistoryAfterTruncation guards the fix for "回退后界面上
+// 仍保留旧消息": after a backtrack apply, the truncated canonical history must be
+// replayed into the transcript (resume convention), and removed turns must not
+// appear in the replay output.
+func TestReplayVisibleChatHistoryAfterTruncation(t *testing.T) {
+	session := &ChatSession{SystemPromptText: "Profile system prompt."}
+	// Simulate post-backtrack CLI state: durable + CLI history already truncated
+	// to the anchor turn (system prefix + anchor user message + its reply). The
+	// removed turns only exist above the truncation point and must not replay.
+	require.NoError(t, replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("Profile system prompt."),
+		*runtimetypes.NewUserMessage("锚点问题"),
+		*runtimetypes.NewAssistantMessage("锚点回答"),
+	}))
+
+	var output string
+	output = captureStdout(t, func() {
+		count := replayVisibleChatHistoryAfterTruncation(session, "已回退到 user turn 1")
+		if count != 2 {
+			t.Fatalf("expected 2 replayed visible messages, got %d", count)
+		}
+	})
+
+	for _, expected := range []string{"已回退到 user turn 1", "锚点问题", "锚点回答"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected replay output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	if strings.Contains(output, "被移除的旧消息") {
+		t.Fatalf("replay leaked removed-turn content:\n%s", output)
+	}
+}
+
+func TestReplayVisibleChatHistoryAfterTruncationSkipsSystemOnly(t *testing.T) {
+	session := &ChatSession{SystemPromptText: "Profile system prompt."}
+	require.NoError(t, replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("Profile system prompt."),
+	}))
+	output := captureStdout(t, func() {
+		if count := replayVisibleChatHistoryAfterTruncation(session, "已回退到 user turn 0"); count != 0 {
+			t.Fatalf("expected 0 replayed messages for system-only history, got %d", count)
+		}
+	})
+	if strings.TrimSpace(output) != "" {
+		t.Fatalf("expected empty output for system-only history, got:\n%s", output)
+	}
 }

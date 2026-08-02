@@ -149,6 +149,23 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 	return len(messages)
 }
 
+// replayVisibleChatHistoryAfterTruncation re-renders the already-truncated
+// canonical history into the transcript after backtrack/rewind, so the UI no
+// longer presents removed turns as live state. The surface transcript is
+// append-only, so without this replay the old (now-removed) messages stay on
+// screen and the truncation is invisible. It follows the same "real dispatch
+// path" as resume/startup (beginDirectInteractiveOutput -> printVisibleChatHistory):
+// clear prompt (defers shrink), settle layout debt, then replay as a pure
+// content-plane operation that cannot grow the bottom reserve. Safe no-op for
+// non-interactive / JSON modes (guards live inside the renderer).
+func replayVisibleChatHistoryAfterTruncation(session *ChatSession, header string) int {
+	if session == nil || !hasVisibleChatHistory(session) {
+		return 0
+	}
+	beginDirectInteractiveOutput(session)
+	return printVisibleChatHistory(session, header)
+}
+
 func hasVisibleChatHistory(session *ChatSession) bool {
 	return len(collectVisibleChatHistory(session)) > 0
 }
