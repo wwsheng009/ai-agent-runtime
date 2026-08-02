@@ -102,6 +102,12 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 		fmt.Printf("警告: 回退后同步 CLI 会话失败: %v\n", err)
 	}
 	printChatBacktrackResult(result, false)
+	if result != nil {
+		// Surface transcript 是只追加的：不重放的话，被截断移除的旧消息
+		// 会一直留在界面上，回退看起来"没有生效"。这里按 /resume 的约定
+		// 把截断后的 canonical 历史重放到 transcript。
+		replayVisibleChatHistoryAfterTruncation(session, fmt.Sprintf("已回退到 user turn %d", result.UserTurnIndex))
+	}
 
 	composerPrompt := ""
 	if result != nil {
