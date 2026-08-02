@@ -300,46 +300,119 @@ func containsInt(list []int, want int) bool {
 	return false
 }
 
-// TestPaintHUDOnStatusRow pins the on-screen counter HUD: with /debug on the
-// status row carries the live paint counters (frame, painted rows, cumulative
-// white repaints and missing coverage); with /debug off the status row is
-// untouched, so the debug overlay cannot leak into normal operation.
-func TestPaintHUDOnStatusRow(t *testing.T) {
+// TestPaintDebugAnnotationsLiveOnMessageRows pins the user-facing contract of
+// the on-screen diagnostics: with /debug on the reverse-video markers live on
+// the message stream / history rows, and the status row is byte-identical to
+// normal operation. Debug counters must never leak into the status line.
+func TestPaintDebugAnnotationsLiveOnMessageRows(t *testing.T) {
 	engine := renderengine.NewEngine()
 	defer engine.Shutdown()
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
 	surface.SetEngine(engine)
-
-	// Disabled: no debug segment anywhere on the screen.
-	frame := surface.ComposedFrameForTest()
-	status := rowText(frame[len(frame)-1])
-	if strings.Contains(status, "paint") {
-		t.Fatalf("status row shows paint HUD while trace is disabled: %q", status)
-	}
-
 	surface.SetPaintTraceEnabled(true)
+
 	captureUIStdout(t, func() {
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 10; i++ {
 			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
 		}
 	})
 
-	frame = surface.ComposedFrameForTest()
-	status = rowText(frame[len(frame)-1])
-	for _, want := range []string{"paint", "f=", "w=", "m="} {
-		if !strings.Contains(status, want) {
-			t.Fatalf("status row HUD missing %q: %q", want, status)
-		}
-	}
+	statusBefore := rowText(surface.ComposedFrameForTest()[len(surface.ComposedFrameForTest())-1])
 
-	// Disabling removes the HUD again.
-	surface.SetPaintTraceEnabled(false)
+	// Duplicate-render burst: a full-screen reconcile re-emits the retained
+	// history with unchanged content (white repaints).
 	captureUIStdout(t, func() {
 		surface.Reconcile()
 	})
+
+	frame := surface.ComposedFrameForTest()
+	status := rowText(frame[len(frame)-1])
+	if status != statusBefore {
+		t.Fatalf("status row must not carry debug counters: before=%q after=%q", statusBefore, status)
+	}
+	if strings.Contains(status, "paint") || strings.Contains(status, "f=") {
+		t.Fatalf("status row leaked paint counters: %q", status)
+	}
+
+	// The annotation is on the message rows instead.
+	flashed := 0
+	for _, row := range engine.Trace().LastFrame().White {
+		if row < 1 || row > len(frame) {
+			continue
+		}
+		if !rowHasReverseVideo(frame[row-1]) {
+			t.Fatalf("white-repainted message row %d is not marked on screen", row)
+		}
+		flashed++
+	}
+	if flashed == 0 {
+		t.Fatal("no message row carries the duplicate-render marker")
+	}
+}
+
+// TestPaintFlashMarkerStickyWindow pins the marker retention: after a white
+// repaint the annotation stays on the history rows for a few frames (so it is
+// actually noticeable), and expires once the window passes - a row that is
+// no longer being re-rendered stops flashing.
+func TestPaintFlashMarkerStickyWindow(t *testing.T) {
+	engine := renderengine.NewEngine()
+	defer engine.Shutdown()
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	surface.SetEngine(engine)
+	surface.SetPaintTraceEnabled(true)
+	surface.SetActiveBand([]string{"band-0"})
+
+	captureUIStdout(t, func() {
+		for i := 0; i < 10; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
+		}
+	})
+	engine.Trace().Reset()
+
+	// Frame 1: white-repaint burst over the retained history.
+	captureUIStdout(t, func() {
+		surface.Reconcile()
+	})
+	white := engine.Trace().LastFrame().White
+	if len(white) == 0 {
+		t.Fatal("reconcile must white-repaint rows")
+	}
+	frame := surface.ComposedFrameForTest()
+	for _, row := range white {
+		if row < 1 || row > len(frame) {
+			continue
+		}
+		if !rowHasReverseVideo(frame[row-1]) {
+			t.Fatalf("row %d not marked right after the white repaint", row)
+		}
+	}
+
+	// Frames 2..3 only touch the bottom pane (real changes, no white
+	// repaints): the marker must persist for the sticky window.
+	surface.SetActiveBand([]string{"band-1"})
+	surface.SetActiveBand([]string{"band-2"})
 	frame = surface.ComposedFrameForTest()
-	status = rowText(frame[len(frame)-1])
-	if strings.Contains(status, "paint f=") {
-		t.Fatalf("status row HUD survives disable: %q", status)
+	for _, row := range white {
+		if row < 1 || row > len(frame) {
+			continue
+		}
+		if !rowHasReverseVideo(frame[row-1]) {
+			t.Fatalf("row %d lost its marker within the sticky window", row)
+		}
+	}
+
+	// Enough frames later, without further white repaints, the marker
+	// expires and the history rows return to normal.
+	for i := 3; i < 12; i++ {
+		surface.SetActiveBand([]string{fmt.Sprintf("band-%d", i)})
+	}
+	frame = surface.ComposedFrameForTest()
+	for _, row := range white {
+		if row < 1 || row > len(frame) {
+			continue
+		}
+		if rowHasReverseVideo(frame[row-1]) {
+			t.Fatalf("row %d still marked after the sticky window expired", row)
+		}
 	}
 }

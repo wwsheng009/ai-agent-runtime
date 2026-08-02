@@ -157,25 +157,48 @@ func (s *FixedBottomSurface) composedPlanLocked(width, height int) []renderengin
 // next frame unless the row is white-repainted again (the bug persisting).
 const paintFlashSGR = "7"
 
-// applyPaintFlashLocked marks the rows the previous frame white-repainted
-// (emitted with content identical to the front buffer) with a one-frame
-// reverse-video flash in the composed frame. With /debug on, duplicate
-// rendering becomes visible on the screen itself instead of only in the
-// /debug display table: a full-screen Invalidate/Reconcile flashes the whole
-// retained history for one frame, and a per-row bug keeps that row flashing.
-// Missing rows are never marked here - they were not painted, so painting
-// them (even with a marker) would compensate the diff defect. They are
-// reported by row number in the status-row HUD instead. Callers hold the
+// paintFlashStickyFrames is how many frames a white-repainted row keeps its
+// flash marker after the repaint. A one-frame marker depends on the next
+// frame actually being composed; the sticky window keeps the annotation on
+// the message stream long enough to be noticed, while a row that keeps being
+// white-repainted stays marked indefinitely (its window is refreshed every
+// frame). The marker is an attribute change, never a content change, so the
+// reconciliation counters stay honest.
+const paintFlashStickyFrames = 4
+
+// applyPaintFlashLocked marks the rows that were white-repainted (emitted
+// with content identical to the front buffer) with a reverse-video flash in
+// the composed frame: the most recent frame's white rows plus the sticky
+// window of recently white-repainted rows. With /debug on, duplicate
+// rendering becomes visible on the message stream / history itself instead of
+// only in the /debug display table: a full-screen Invalidate/Reconcile
+// flashes the whole retained history, and a per-row bug keeps that row
+// flashing. Missing rows are never marked here - they were not painted, so
+// painting them (even with a marker) would compensate the diff defect; they
+// are located via /debug display by row number instead. Callers hold the
 // surface lock.
 func (s *FixedBottomSurface) applyPaintFlashLocked(plan []renderengine.PlanRow) {
 	if s == nil || s.engine == nil || s.engine.Trace() == nil || !s.engine.Trace().Enabled() {
 		return
 	}
-	summary := s.engine.Trace().LastFrame()
+	trace := s.engine.Trace()
+	summary := trace.LastFrame()
+	// The sticky window includes the most recent frame's white rows, so the
+	// two sets overlap; mark each row once (a duplicated SGR entry would
+	// render as a doubled "7;7" attribute instead of a clean "7").
+	marked := make(map[int]bool, len(summary.White))
 	for _, row := range summary.White {
-		if row < 1 || row > len(plan) {
+		if row < 1 || row > len(plan) || marked[row] {
 			continue
 		}
+		marked[row] = true
+		markPaintFlashRow(plan[row-1].Cells)
+	}
+	for _, row := range trace.StickyRows(paintFlashStickyFrames) {
+		if row < 1 || row > len(plan) || marked[row] {
+			continue
+		}
+		marked[row] = true
 		markPaintFlashRow(plan[row-1].Cells)
 	}
 }
@@ -596,54 +619,7 @@ func (s *FixedBottomSurface) statusPaintTextLocked(state BottomPaneState, width 
 	if state.StatusModel != nil {
 		model = *state.StatusModel
 	}
-	text := formatFixedStatusModelWithContext(model, width, s.activeBandThemeContextLocked())
-	if s != nil && s.engine != nil && s.engine.Trace() != nil {
-		text = withPaintTraceHUD(text, s.engine.Trace(), width)
-	}
-	return text
-}
-
-// withPaintTraceHUD appends the live paint-reconciliation counters to the
-// status row while /debug on is active: the recorded frame number, the number
-// of rows painted by the most recent frame, and the cumulative white-repaint
-// and missing-coverage counters (with the missing row numbers when any). The
-// status row lives in the bottom reserve, outside the transcript scroll
-// region, so the HUD rides the normal composed-frame diff without touching
-// the scroll hot path. The base status text is shrunk first so the debug
-// segment stays visible on narrow terminals. When the probe is disabled or
-// has no frames yet the base text is returned unchanged apart from a live
-// "idle" indicator once enabled.
-func withPaintTraceHUD(base string, trace *renderengine.PaintTrace, width int) string {
-	if trace == nil || !trace.Enabled() {
-		return base
-	}
-	summary := trace.LastFrame()
-	var hud string
-	if summary.Frame == 0 {
-		hud = "\x1b[2mpaint idle\x1b[0m"
-	} else {
-		hud = fmt.Sprintf("\x1b[2mpaint f=%d last=%d w=%d m=%d\x1b[0m",
-			summary.Frame, summary.PaintedRows, summary.TotalWhite, summary.TotalMissing)
-	}
-	if len(summary.Missing) > 0 {
-		hud += fmt.Sprintf(" \x1b[2mmissRows=%v\x1b[0m", summary.Missing)
-	}
-	if width < 1 {
-		width = 80
-	}
-	hud = " " + hud
-	baseWidth := DisplayWidth(base)
-	hudWidth := DisplayWidth(hud)
-	if baseWidth+hudWidth <= width {
-		return base + hud
-	}
-	// Narrow terminal: prefer the debug segment over the status text so the
-	// paint counters stay visible while diagnosing.
-	room := width - hudWidth
-	if room <= 0 {
-		return truncateFixedPopupLine(hud, width)
-	}
-	return truncateFixedPopupLine(base, room) + hud
+	return formatFixedStatusModelWithContext(model, width, s.activeBandThemeContextLocked())
 }
 
 func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width int) fixedBottomPromptPaintPlan {
