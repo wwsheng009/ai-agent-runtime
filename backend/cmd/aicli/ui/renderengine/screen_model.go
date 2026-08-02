@@ -133,7 +133,7 @@ func (m *ScreenModel) Flush() string {
 			if events != nil {
 				events = append(events, paintRowEvent{
 					row:     r + 1,
-					changed: !rowCellsEqual(m.front[r], m.back[r]),
+					changed: !m.rowContentEqual(r),
 					painted: true,
 				})
 			}
@@ -144,7 +144,7 @@ func (m *ScreenModel) Flush() string {
 			if events != nil {
 				events = append(events, paintRowEvent{
 					row:     r + 1,
-					changed: !rowCellsEqual(m.front[r], m.back[r]),
+					changed: !m.rowContentEqual(r),
 					painted: painted,
 				})
 			}
@@ -158,6 +158,15 @@ func (m *ScreenModel) Flush() string {
 		m.trace.recordFrame(events, m.height)
 	}
 	return output.String()
+}
+
+// rowContentEqual reports whether the staged back row equals the committed
+// front row for reconciliation purposes. The comparison covers the full row:
+// a row whose debug tag advanced differs from the previous frame and is
+// classified as a content change (a tag-sync emit), while a row re-emitted
+// with an identical full row is the duplicate-rendering signal (white).
+func (m *ScreenModel) rowContentEqual(row int) bool {
+	return rowCellsEqual(m.front[row], m.back[row])
 }
 
 func (m *ScreenModel) emitForcedRow(output *strings.Builder, row int) {

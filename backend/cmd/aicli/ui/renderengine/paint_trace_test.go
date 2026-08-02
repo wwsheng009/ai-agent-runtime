@@ -374,12 +374,11 @@ func TestPaintTraceLastFrameSummary(t *testing.T) {
 	}
 }
 
-// TestPaintTraceStickyRows pins the marker window the surface uses to keep
-// the flash visible on the message stream: white-repainted rows stay in the
-// sticky set for window frames after the repaint, expire once the window
-// passes, are refreshed by a new white repaint, and are cleared on re-enable
-// (no stale marker from before a /debug on toggle).
-func TestPaintTraceStickyRows(t *testing.T) {
+// TestPaintTraceWhiteEmits pins the per-row duplicate-render counter that the
+// surface renders in the message-row debug tag: it counts white repaints per
+// 1-based screen row, reports 0 for rows without events, survives disable
+// (cumulative counters are kept), and is cleared by Reset.
+func TestPaintTraceWhiteEmits(t *testing.T) {
 	trace := NewPaintTrace()
 	trace.SetEnabled(true)
 	trace.recordFrame([]paintRowEvent{
@@ -387,48 +386,32 @@ func TestPaintTraceStickyRows(t *testing.T) {
 		{row: 2, changed: true, painted: true},  // legit change
 	}, 5)
 
-	if got := trace.StickyRows(4); len(got) != 1 || got[0] != 1 {
-		t.Fatalf("sticky after frame 1 = %v, want [1]", got)
+	if got := trace.WhiteEmits(1); got != 1 {
+		t.Fatalf("white emits for row 1 = %d, want 1", got)
 	}
-	if got := trace.StickyRows(0); len(got) != 1 || got[0] != 1 {
-		t.Fatalf("sticky with window 0 = %v, want [1]", got)
+	if got := trace.WhiteEmits(2); got != 0 {
+		t.Fatalf("legit change must not count as white: row 2 = %d", got)
 	}
-
-	// Frames 2..3 without new white repaints: row 1 stays within the
-	// 4-frame window.
-	trace.recordFrame([]paintRowEvent{{row: 2, changed: true, painted: true}}, 5)
-	trace.recordFrame([]paintRowEvent{{row: 2, changed: true, painted: true}}, 5)
-	if got := trace.StickyRows(4); len(got) != 1 || got[0] != 1 {
-		t.Fatalf("sticky within window = %v, want [1]", got)
+	if got := trace.WhiteEmits(9); got != 0 {
+		t.Fatalf("row without events = %d, want 0", got)
+	}
+	if got := trace.WhiteEmits(0); got != 0 {
+		t.Fatalf("row 0 = %d, want 0", got)
 	}
 
-	// Frames 4..6 push row 1 past the window: the marker expires.
-	trace.recordFrame([]paintRowEvent{{row: 2, changed: true, painted: true}}, 5)
-	trace.recordFrame([]paintRowEvent{{row: 2, changed: true, painted: true}}, 5)
-	trace.recordFrame([]paintRowEvent{{row: 2, changed: true, painted: true}}, 5)
-	if got := trace.StickyRows(4); len(got) != 0 {
-		t.Fatalf("sticky past the window = %v, want none", got)
+	// A second white repaint on the same row accumulates.
+	trace.recordFrame([]paintRowEvent{{row: 1, changed: false, painted: true}}, 5)
+	if got := trace.WhiteEmits(1); got != 2 {
+		t.Fatalf("white emits for row 1 after second repaint = %d, want 2", got)
 	}
 
-	// A fresh white repaint refreshes the window for its row only.
-	trace.recordFrame([]paintRowEvent{{row: 3, changed: false, painted: true}}, 5)
-	if got := trace.StickyRows(4); len(got) != 1 || got[0] != 3 {
-		t.Fatalf("sticky after refresh = %v, want [3]", got)
-	}
-
-	// Re-enable opens a fresh recording window: no stale sticky rows.
-	trace.SetEnabled(true)
-	if got := trace.StickyRows(4); len(got) != 0 {
-		t.Fatalf("re-enable must clear sticky rows, got %v", got)
-	}
-
-	// Reset clears the sticky set too.
-	trace.recordFrame([]paintRowEvent{{row: 4, changed: false, painted: true}}, 5)
-	if got := trace.StickyRows(4); len(got) != 1 {
-		t.Fatalf("sticky before reset = %v, want [4]", got)
+	// Disabling keeps cumulative counters; Reset clears them.
+	trace.SetEnabled(false)
+	if got := trace.WhiteEmits(1); got != 2 {
+		t.Fatalf("disable must keep counters, row 1 = %d", got)
 	}
 	trace.Reset()
-	if got := trace.StickyRows(4); len(got) != 0 {
-		t.Fatalf("reset must clear sticky rows, got %v", got)
+	if got := trace.WhiteEmits(1); got != 0 {
+		t.Fatalf("reset must clear counters, row 1 = %d", got)
 	}
 }

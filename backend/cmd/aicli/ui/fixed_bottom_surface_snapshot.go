@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"strings"
@@ -146,70 +147,90 @@ func (s *FixedBottomSurface) composedPlanLocked(width, height int) []renderengin
 		historyPlan[i] = renderengine.PlanRow{Owner: renderengine.RowOwnerTranscript, Cells: history[i]}
 	}
 	plan := s.composerLocked().ComposePlan(width, height, historyPlan, s.bottomRowsWithOwnersLocked())
-	s.applyPaintFlashLocked(plan)
+	s.annotateDebugRowsLocked(plan, width)
 	return plan
 }
 
-// paintFlashSGR is the reverse-video attribute used to flash rows that were
-// white-repainted by the previous frame. It is a pure display annotation on
-// the composed frame: the row was already painted, so marking it cannot
-// repair or hide a rendering defect, and the marker disappears again on the
-// next frame unless the row is white-repainted again (the bug persisting).
-const paintFlashSGR = "7"
+// paintDebugTagSGR is the dim attribute applied to the per-row debug tag
+// while /debug on is active, so the tag reads as metadata rather than
+// message content.
+const paintDebugTagSGR = "2"
 
-// paintFlashStickyFrames is how many frames a white-repainted row keeps its
-// flash marker after the repaint. A one-frame marker depends on the next
-// frame actually being composed; the sticky window keeps the annotation on
-// the message stream long enough to be noticed, while a row that keeps being
-// white-repainted stays marked indefinitely (its window is refreshed every
-// frame). The marker is an attribute change, never a content change, so the
-// reconciliation counters stay honest.
-const paintFlashStickyFrames = 4
+// debugTagWidth is the fixed width of the per-row tag "[hhhh #NN wN]" (4-hex
+// content fingerprint, 1-based screen row, cumulative white-repaint count).
+const debugTagWidth = 13 // "[3f9a #05 w0]"
 
-// applyPaintFlashLocked marks the rows that were white-repainted (emitted
-// with content identical to the front buffer) with a reverse-video flash in
-// the composed frame: the most recent frame's white rows plus the sticky
-// window of recently white-repainted rows. With /debug on, duplicate
-// rendering becomes visible on the message stream / history itself instead of
-// only in the /debug display table: a full-screen Invalidate/Reconcile
-// flashes the whole retained history, and a per-row bug keeps that row
-// flashing. Missing rows are never marked here - they were not painted, so
-// painting them (even with a marker) would compensate the diff defect; they
-// are located via /debug display by row number instead. Callers hold the
-// surface lock.
-func (s *FixedBottomSurface) applyPaintFlashLocked(plan []renderengine.PlanRow) {
+// annotateDebugRowsLocked adds a unique per-row debug tag to the message
+// stream / data-flow rows (transcript and active band) while /debug on is
+// active: "[3f9a #05 w0]". The tag maps the screen directly onto the
+// /debug display table (row numbers match), the fingerprint makes identical
+// content instantly recognizable (duplicate rendering of the same row keeps
+// the same fingerprint), and the w counter increments visibly each time the
+// row is white-repainted - so repeated rendering is located on the message
+// stream itself instead of requiring a HUD or table lookup. The tag is a
+// pure annotation of the composed frame: history data is never mutated, and
+// a row that keeps its content keeps its fingerprint, so the white-repaint
+// reconciliation stays honest. Prompt/status/popup rows are left untouched
+// (interaction rows, not message data). Callers hold the surface lock.
+func (s *FixedBottomSurface) annotateDebugRowsLocked(plan []renderengine.PlanRow, width int) {
 	if s == nil || s.engine == nil || s.engine.Trace() == nil || !s.engine.Trace().Enabled() {
 		return
 	}
-	trace := s.engine.Trace()
-	summary := trace.LastFrame()
-	// The sticky window includes the most recent frame's white rows, so the
-	// two sets overlap; mark each row once (a duplicated SGR entry would
-	// render as a doubled "7;7" attribute instead of a clean "7").
-	marked := make(map[int]bool, len(summary.White))
-	for _, row := range summary.White {
-		if row < 1 || row > len(plan) || marked[row] {
-			continue
-		}
-		marked[row] = true
-		markPaintFlashRow(plan[row-1].Cells)
+	if width < 1 {
+		width = 80
 	}
-	for _, row := range trace.StickyRows(paintFlashStickyFrames) {
-		if row < 1 || row > len(plan) || marked[row] {
+	if width <= debugTagWidth {
+		return
+	}
+	trace := s.engine.Trace()
+	for i := range plan {
+		row := &plan[i]
+		if row.Owner != renderengine.RowOwnerTranscript && row.Owner != renderengine.RowOwnerBand {
 			continue
 		}
-		marked[row] = true
-		markPaintFlashRow(plan[row-1].Cells)
+		tag := debugRowTag(i+1, historyCellsToPlainText(row.Cells), trace.WhiteEmits(i+1))
+		tagCells := debugTagCells(tag)
+		row.Cells = append(tagCells, truncateRowCells(row.Cells, width-len(tagCells))...)
 	}
 }
 
-func markPaintFlashRow(cells []vt.Cell) {
-	for i := range cells {
-		if cells[i].Cont {
-			continue
-		}
-		cells[i].SGR = append(append([]string(nil), cells[i].SGR...), paintFlashSGR)
+// debugRowTag builds the "[hhhh #NN wN]" tag for one 1-based screen row.
+func debugRowTag(row int, text string, white uint64) string {
+	return fmt.Sprintf("[%s #%02d w%d]", hash4Hex(text), row, white)
+}
+
+// hash4Hex returns a 4-hex-digit content fingerprint (truncated FNV-1a 32),
+// stable for identical text so duplicate rendering keeps the same tag.
+func hash4Hex(text string) string {
+	trimmed := strings.TrimRight(text, " ")
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(trimmed))
+	return fmt.Sprintf("%04x", h.Sum32()&0xffff)
+}
+
+// debugTagCells converts the ASCII tag into dim cells, one cell per rune.
+func debugTagCells(tag string) []vt.Cell {
+	cells := make([]vt.Cell, 0, len(tag))
+	for _, r := range tag {
+		cells = append(cells, vt.Cell{Text: string(r), SGR: []string{paintDebugTagSGR}})
 	}
+	return cells
+}
+
+// truncateRowCells keeps the first max cells of a row, dropping a dangling
+// continuation cell so a double-width rune is never cut in half.
+func truncateRowCells(cells []vt.Cell, max int) []vt.Cell {
+	if max <= 0 {
+		return nil
+	}
+	if len(cells) <= max {
+		return cells
+	}
+	cut := cells[:max]
+	if cut[len(cut)-1].Cont {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 func (s *FixedBottomSurface) composerLocked() *renderengine.Composer {

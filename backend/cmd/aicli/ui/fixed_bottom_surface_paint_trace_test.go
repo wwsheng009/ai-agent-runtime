@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -124,11 +126,27 @@ func TestPaintTraceWhiteRepaintVisibleOnForceRepaint(t *testing.T) {
 	})
 	engine.Trace().Reset()
 
-	// Simulate the pre-fix behavior: full-screen invalidation on every write.
+	// The first reconcile resyncs the committed front tags: the tag value
+	// changes, so a tagged row's full row differs (a genuine content change,
+	// not duplicate rendering) and must not count as white. Untagged rows
+	// (prompt/status) have nothing to resync; their forced re-emission is a
+	// real white repaint and is allowed to be recorded.
 	captureUIStdout(t, func() {
 		surface.Reconcile()
 	})
+	rowNo, _ := firstTaggedRow(surface.ComposedFrameForTest())
+	if rowNo == 0 {
+		t.Fatal("no message row carries a debug tag")
+	}
+	if white := engine.Trace().WhiteEmits(rowNo); white != 0 {
+		t.Fatalf("tag resync reconcile must not count as white repaints on tagged row %d: %#v", rowNo, engine.Trace().Stats())
+	}
 
+	// The second full-screen reconcile re-emits every retained row with
+	// unchanged content: that duplicate rendering must be visible as white.
+	captureUIStdout(t, func() {
+		surface.Reconcile()
+	})
 	stats := engine.Trace().Stats()
 	var white uint64
 	for _, stat := range stats {
@@ -192,22 +210,6 @@ func TestPaintTraceDebugStringOwnerAnnotation(t *testing.T) {
 	}
 }
 
-// rowHasReverseVideo reports whether any non-continuation cell of the row
-// carries the paint-flash reverse-video attribute ("7" as an exact SGR code).
-func rowHasReverseVideo(cells []vt.Cell) bool {
-	for _, cell := range cells {
-		if cell.Cont {
-			continue
-		}
-		for _, sgr := range cell.SGR {
-			if sgr == paintFlashSGR {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func rowText(cells []vt.Cell) string {
 	var builder strings.Builder
 	for _, cell := range cells {
@@ -219,14 +221,86 @@ func rowText(cells []vt.Cell) string {
 	return builder.String()
 }
 
-// TestPaintFlashMarkersVisibleOnScreen pins the on-screen duplicate-render
-// visualization: after a frame white-repainted the retained history (forced
-// reconcile), the next composed frame carries a reverse-video flash on exactly
-// those rows, and the emitted terminal bytes contain the reverse-video
-// attribute. The flash is one frame: with a healthy renderer the markers
-// disappear again, so the screen itself shows "which rows are being redrawn"
-// instead of only a table in /debug display.
-func TestPaintFlashMarkersVisibleOnScreen(t *testing.T) {
+// debugTagPattern matches a message-row debug tag "[hhhh #NN wN]" and captures
+// the content fingerprint, the 1-based screen row number, and the cumulative
+// white-repaint count.
+var debugTagPattern = regexp.MustCompile(`^\[([0-9a-f]{4}) #(\d+) w(\d+)\]`)
+
+// firstTaggedRow returns the 1-based screen row of the first row carrying a
+// debug tag, plus its white-repaint count (-1 when no row is tagged).
+func firstTaggedRow(frame [][]vt.Cell) (int, int) {
+	for i, row := range frame {
+		if m := debugTagPattern.FindStringSubmatch(rowText(row)); m != nil {
+			n, _ := strconv.Atoi(m[3])
+			return i + 1, n
+		}
+	}
+	return 0, -1
+}
+
+// TestPaintDebugRowTagStableAndDistinct pins the content fingerprint: the
+// same text always hashes to the same tag (so duplicate rendering of a row is
+// instantly recognizable), different text hashes differently, and full-width
+// padding blanks do not affect the fingerprint.
+func TestPaintDebugRowTagStableAndDistinct(t *testing.T) {
+	if hash4Hex("line-0") != hash4Hex("line-0") {
+		t.Fatal("fingerprint must be deterministic for identical text")
+	}
+	if hash4Hex("line-0") != hash4Hex("line-0        ") {
+		t.Fatal("trailing padding blanks must not change the fingerprint")
+	}
+	if hash4Hex("line-0") == hash4Hex("line-1") {
+		t.Fatal("distinct text must hash differently")
+	}
+
+	// Screen level: two identical output lines carry the same fingerprint in
+	// their tags, a different line carries a different one.
+	engine := renderengine.NewEngine()
+	defer engine.Shutdown()
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	surface.SetEngine(engine)
+	surface.SetPaintTraceEnabled(true)
+
+	captureUIStdout(t, func() {
+		surface.WriteOutput(io.Discard, "same-text\n")
+		surface.WriteOutput(io.Discard, "same-text\n")
+		surface.WriteOutput(io.Discard, "other-text\n")
+	})
+
+	frame := surface.ComposedFrameForTest()
+	var sameA, sameB, other string
+	for _, row := range frame {
+		m := debugTagPattern.FindStringSubmatch(rowText(row))
+		if m == nil {
+			continue
+		}
+		text := rowText(row)
+		switch {
+		case strings.Contains(text, "same-text"):
+			if sameA == "" {
+				sameA = m[1]
+			} else {
+				sameB = m[1]
+			}
+		case strings.Contains(text, "other-text"):
+			other = m[1]
+		}
+	}
+	if sameA == "" || sameB == "" || other == "" {
+		t.Fatalf("expected three tagged rows, got sameA=%q sameB=%q other=%q", sameA, sameB, other)
+	}
+	if sameA != sameB {
+		t.Fatalf("identical content must share a fingerprint: %s vs %s", sameA, sameB)
+	}
+	if sameA == other {
+		t.Fatalf("distinct content must hash differently: %s", sameA)
+	}
+}
+
+// TestPaintDebugRowTagWhiteCounterGrows pins the duplicate-render indicator
+// on the message stream itself: the w counter in a row's tag increments
+// visibly each time that row is white-repainted, and the probe agrees.
+func TestPaintDebugRowTagWhiteCounterGrows(t *testing.T) {
 	engine := renderengine.NewEngine()
 	defer engine.Shutdown()
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
@@ -240,179 +314,115 @@ func TestPaintFlashMarkersVisibleOnScreen(t *testing.T) {
 	})
 	engine.Trace().Reset()
 
-	// Reproduce the duplicate-render shape: a full-screen reconcile
-	// re-emits every row with unchanged content (white repaints).
+	rowNo, before := firstTaggedRow(surface.ComposedFrameForTest())
+	if rowNo == 0 {
+		t.Fatal("no message row carries a debug tag")
+	}
+	if before != 0 {
+		t.Fatalf("baseline white count = %d, want 0", before)
+	}
+
+	// First reconcile: resyncs the committed front tags (tag reappears =
+	// content change, not duplicate rendering), so the white counter must
+	// stay at the fresh baseline.
 	captureUIStdout(t, func() {
 		surface.Reconcile()
 	})
-
-	summary := engine.Trace().LastFrame()
-	if len(summary.White) == 0 {
-		t.Fatalf("reconcile must white-repaint rows, summary: %#v", summary)
+	frame := surface.ComposedFrameForTest()
+	m := debugTagPattern.FindStringSubmatch(rowText(frame[rowNo-1]))
+	if m == nil {
+		t.Fatalf("row %d lost its debug tag after the resync reconcile", rowNo)
 	}
+	if resync, _ := strconv.Atoi(m[3]); resync != 0 {
+		t.Fatalf("resync reconcile must not count as white: w=%d", resync)
+	}
+
+	// Second reconcile: duplicate-render burst, a full-screen reconcile
+	// re-emits the retained history with unchanged content. The white
+	// counter on the row must grow visibly and the probe must agree.
+	captureUIStdout(t, func() {
+		surface.Reconcile()
+	})
+	frame = surface.ComposedFrameForTest()
+	m = debugTagPattern.FindStringSubmatch(rowText(frame[rowNo-1]))
+	if m == nil {
+		t.Fatalf("row %d lost its debug tag after the reconcile", rowNo)
+	}
+	after, _ := strconv.Atoi(m[3])
+	if after <= before {
+		t.Fatalf("white counter did not grow on the tagged row: before=%d after=%d", before, after)
+	}
+	if white := engine.Trace().WhiteEmits(rowNo); white == 0 {
+		t.Fatalf("probe recorded no white repaint for row %d", rowNo)
+	}
+}
+
+// TestPaintDebugRowTagOnMessageRows pins the on-screen contract of the
+// diagnostics: with /debug on every message-stream row (transcript + active
+// band) carries a dim "[hhhh #NN wN]" tag whose row number matches the
+// physical screen position (so the screen maps 1:1 onto the /debug display
+// table), while the status row stays untouched - no debug text leaks into
+// the status line.
+func TestPaintDebugRowTagOnMessageRows(t *testing.T) {
+	engine := renderengine.NewEngine()
+	defer engine.Shutdown()
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
+	surface.SetEngine(engine)
+	surface.SetPaintTraceEnabled(true)
+	surface.SetActiveBand([]string{"band-row"})
+
+	captureUIStdout(t, func() {
+		for i := 0; i < 10; i++ {
+			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
+		}
+	})
+
 	frame := surface.ComposedFrameForTest()
 	if len(frame) != 24 {
 		t.Fatalf("composed frame has %d rows, want 24", len(frame))
 	}
-	flashed := 0
-	for _, row := range summary.White {
-		if row < 1 || row > len(frame) {
-			t.Fatalf("white row %d out of frame bounds", row)
-		}
-		if !rowHasReverseVideo(frame[row-1]) {
-			t.Fatalf("white-repainted row %d is not flashed on screen", row)
-		}
-		flashed++
-	}
-	if flashed == 0 {
-		t.Fatal("no row flashed")
-	}
 
-	// The next real flush must emit the reverse-video bytes to the terminal:
-	// the flash is observable live, not only in the /debug display table.
-	diff := captureUIStdout(t, func() {
-		surface.Reconcile()
-	})
-	if !strings.Contains(diff, "\x1b[7m") {
-		t.Fatalf("flushed diff must contain the reverse-video flash bytes")
-	}
-
-	// The flash is a real attribute change: the marker frame is recorded as
-	// changed rows (never as white repaints), so the probe keeps honest
-	// counts instead of double-counting the marker as a new white repaint.
-	nextSummary := engine.Trace().LastFrame()
-	if nextSummary.Frame == summary.Frame {
-		t.Fatalf("second reconcile did not advance the recorded frame")
-	}
-	for _, row := range summary.White {
-		if containsInt(nextSummary.White, row) {
-			t.Fatalf("flash marker on row %d was misclassified as a white repaint", row)
+	tagged := 0
+	bandTagged := false
+	for i, row := range frame {
+		text := rowText(row)
+		m := debugTagPattern.FindStringSubmatch(text)
+		if m == nil {
+			continue
+		}
+		tagged++
+		rowNo, _ := strconv.Atoi(m[2])
+		if rowNo != i+1 {
+			t.Fatalf("row %d tag says #%d - the tag must match the screen position", i+1, rowNo)
+		}
+		if strings.Contains(text, "band-row") {
+			bandTagged = true
 		}
 	}
-}
-
-func containsInt(list []int, want int) bool {
-	for _, item := range list {
-		if item == want {
-			return true
-		}
+	if tagged == 0 {
+		t.Fatal("no message row carries a debug tag")
 	}
-	return false
-}
-
-// TestPaintDebugAnnotationsLiveOnMessageRows pins the user-facing contract of
-// the on-screen diagnostics: with /debug on the reverse-video markers live on
-// the message stream / history rows, and the status row is byte-identical to
-// normal operation. Debug counters must never leak into the status line.
-func TestPaintDebugAnnotationsLiveOnMessageRows(t *testing.T) {
-	engine := renderengine.NewEngine()
-	defer engine.Shutdown()
-	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
-	surface.SetEngine(engine)
-	surface.SetPaintTraceEnabled(true)
-
-	captureUIStdout(t, func() {
-		for i := 0; i < 10; i++ {
-			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
-		}
-	})
-
-	statusBefore := rowText(surface.ComposedFrameForTest()[len(surface.ComposedFrameForTest())-1])
-
-	// Duplicate-render burst: a full-screen reconcile re-emits the retained
-	// history with unchanged content (white repaints).
-	captureUIStdout(t, func() {
-		surface.Reconcile()
-	})
-
-	frame := surface.ComposedFrameForTest()
+	if !bandTagged {
+		t.Fatal("active band row must carry a debug tag too")
+	}
 	status := rowText(frame[len(frame)-1])
-	if status != statusBefore {
-		t.Fatalf("status row must not carry debug counters: before=%q after=%q", statusBefore, status)
+	if debugTagPattern.MatchString(status) {
+		t.Fatalf("status row must not carry a debug tag: %q", status)
 	}
-	if strings.Contains(status, "paint") || strings.Contains(status, "f=") {
-		t.Fatalf("status row leaked paint counters: %q", status)
+	if strings.Contains(status, "paint") || strings.Contains(status, "w=") {
+		t.Fatalf("status row leaked debug counters: %q", status)
 	}
-
-	// The annotation is on the message rows instead.
-	flashed := 0
-	for _, row := range engine.Trace().LastFrame().White {
-		if row < 1 || row > len(frame) {
-			continue
-		}
-		if !rowHasReverseVideo(frame[row-1]) {
-			t.Fatalf("white-repainted message row %d is not marked on screen", row)
-		}
-		flashed++
-	}
-	if flashed == 0 {
-		t.Fatal("no message row carries the duplicate-render marker")
-	}
-}
-
-// TestPaintFlashMarkerStickyWindow pins the marker retention: after a white
-// repaint the annotation stays on the history rows for a few frames (so it is
-// actually noticeable), and expires once the window passes - a row that is
-// no longer being re-rendered stops flashing.
-func TestPaintFlashMarkerStickyWindow(t *testing.T) {
-	engine := renderengine.NewEngine()
-	defer engine.Shutdown()
-	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
-	surface.SetEngine(engine)
-	surface.SetPaintTraceEnabled(true)
-	surface.SetActiveBand([]string{"band-0"})
-
-	captureUIStdout(t, func() {
-		for i := 0; i < 10; i++ {
-			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
-		}
-	})
-	engine.Trace().Reset()
-
-	// Frame 1: white-repaint burst over the retained history.
-	captureUIStdout(t, func() {
-		surface.Reconcile()
-	})
-	white := engine.Trace().LastFrame().White
-	if len(white) == 0 {
-		t.Fatal("reconcile must white-repaint rows")
-	}
-	frame := surface.ComposedFrameForTest()
-	for _, row := range white {
-		if row < 1 || row > len(frame) {
-			continue
-		}
-		if !rowHasReverseVideo(frame[row-1]) {
-			t.Fatalf("row %d not marked right after the white repaint", row)
-		}
+	if !strings.Contains(status, "Ready") {
+		t.Fatalf("status row lost its normal content: %q", status)
 	}
 
-	// Frames 2..3 only touch the bottom pane (real changes, no white
-	// repaints): the marker must persist for the sticky window.
-	surface.SetActiveBand([]string{"band-1"})
-	surface.SetActiveBand([]string{"band-2"})
+	// Disabling the trace removes the tags completely: the message stream
+	// returns to its normal form.
+	surface.SetPaintTraceEnabled(false)
 	frame = surface.ComposedFrameForTest()
-	for _, row := range white {
-		if row < 1 || row > len(frame) {
-			continue
-		}
-		if !rowHasReverseVideo(frame[row-1]) {
-			t.Fatalf("row %d lost its marker within the sticky window", row)
-		}
-	}
-
-	// Enough frames later, without further white repaints, the marker
-	// expires and the history rows return to normal.
-	for i := 3; i < 12; i++ {
-		surface.SetActiveBand([]string{fmt.Sprintf("band-%d", i)})
-	}
-	frame = surface.ComposedFrameForTest()
-	for _, row := range white {
-		if row < 1 || row > len(frame) {
-			continue
-		}
-		if rowHasReverseVideo(frame[row-1]) {
-			t.Fatalf("row %d still marked after the sticky window expired", row)
+	for _, row := range frame {
+		if debugTagPattern.MatchString(rowText(row)) {
+			t.Fatalf("debug tag survives disable: %q", rowText(row))
 		}
 	}
 }

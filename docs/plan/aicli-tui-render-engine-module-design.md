@@ -50,29 +50,46 @@
   稳态流式 append 零白重绘、`Reconcile` 白重绘可见；`commands/chat_debug_paint_trace_test.go`
   覆盖 /debug on/off 接线与 display 节。
 - **渲染可观测性：屏幕级实时可视化（/debug on）。** 纯表格（/debug display）
-  不满足"在屏幕上看"的定位需求，`/debug on` 现在在**消息流/历史行上直接作
-  标注**，全部经既有 composed-frame/diff 管线输出，零布局变更、不触碰滚动热
-  路径：
-  - **白重绘行反显闪光（sticky 窗口）**：`composedPlanLocked` 消费
-    `PaintTrace.LastFrame()` 的 White 行集 + `PaintTrace.StickyRows(window)`
-    （探针内部维护"行号 → 最近白重绘帧号"，窗口 4 帧，随帧号隐式衰减），对
-    被白重绘的消息行追加 SGR 7（反显）标记。全屏 `Invalidate`/`Reconcile`
-    整屏闪烁；per-row bug 持续时该行持续闪烁（窗口被每帧刷新）。sticky 窗口
-    保证标注不依赖"恰好下一帧被组合"——白重绘后数帧内仍可见，人眼可捕获。
-    标记是属性变化（never 被记为新的白重绘），对账计数保持诚实；两集合重叠
-    时每行只标记一次（避免 `7;7` 重复 SGR）。
-  - **状态行保持纯净**：`statusPaintTextLocked` 不携带任何调试段——`/debug on`
-    的计数器只在 `/debug display` 表格里，状态栏文本与正常操作逐字节一致，
-    调试信息不泄漏到状态行。
+  不满足"在屏幕上看"的定位需求，`/debug on` 现在在**消息流/数据流每一行
+  （transcript + active band）上直接加前缀标识**，全部经既有 composed-frame/
+  diff 管线输出，零布局变更、不触碰滚动热路径：
+  - **每行唯一标识 `[3f9a #05 w1]`**：`composedPlanLocked` 对 transcript/band
+    行注入定宽 13 列前缀 = 内容指纹（4-hex：同内容必同指纹，重复渲染同一行
+    一眼可辨）+ 屏幕行号（1-based，与 /debug display 表格行号逐行对应）+
+    该行累计白重绘次数 w。定宽前缀替换等宽内容列（行总宽不变，截断补偿）；
+    前缀以 SGR 2（dim）渲染，与消息内容区分。前缀是注解：`historyCellsToPlainText`
+    指纹在加 tag 前计算，tag 自身不进入指纹。
+  - **w 的语义与对账一致（无自指循环）**：white（重复渲染）= 行被 emit 且
+    **完整行**与 front 相同；tag 值自身变化（如 w 前进）使完整行不同 →
+    判 changed（tag 同步帧，内容未变但行确实被重画了）→ 下一帧收敛，w 不会
+    自我放大。`PaintTrace.Reset()` 后首帧 tag 从旧值变新值同样是 changed
+    （同步帧），**不污染 w 基线**——w 只统计真实重复渲染。屏幕 tag 的 w 与
+    `/debug display` 的 WhiteEmits 列一致（tag 更新滞后一帧：white 发生后
+    下一次 flush 才把新 w 画上，stage/ComposedFrameForTest 立即可见）。
+  - **状态行保持纯净**：`statusPaintTextLocked` 不携带任何调试段——`/debug
+    on` 的计数器只在行标识与 `/debug display` 表格里，状态栏文本与正常操作
+    逐字节一致，调试信息不泄漏到状态行。
   缺失行（Missing）**不做**补画标记——行未被 emit，补画即补偿 diff 缺陷；
   按行号经 `/debug display` 定位。探针本身仍纯观测；可视化全部在 surface
   组合层。`ComposedFrameForTest` 投影 `composedPlanLocked`（单一权威帧，
   测试可观察生产路径的调试标注）。测试：
-  `renderengine/paint_trace_test.go` 新增 `LastFrame` 摘要单元测试与
-  `StickyRows` 窗口测试（进入/过期/刷新/re-enable 清窗防 stale flash）；
-  `ui/fixed_bottom_surface_paint_trace_test.go` 新增屏幕级断言（White 行反显
-  可见、flush diff 含 `\x1b[7m`、sticky 窗口内标注保持且过期消失、状态行与
-  正常操作逐字节一致）。
+  `ui/fixed_bottom_surface_paint_trace_test.go` 新增行标识契约测试：指纹
+  稳定、相同内容共享指纹、不同内容指纹不同（`TestPaintDebugRowTagStableAndDistinct`）；
+  全屏 Reconcile 后 w 在行上可见增长且探针一致（`TestPaintDebugRowTagWhiteCounterGrows`：
+  Reset 后首帧 Reconcile 是 tag 同步帧、w 不涨，第二次 Reconcile 才是重复
+  渲染、w 增长）；`TestPaintTraceWhiteRepaintVisibleOnForceRepaint` 同步帧
+  对带 tag 行不计数 white；流式稳态 append 零白重绘、bottom 行重发记
+  changed 不记 white。
+- **探针分类修正（审计）：ignorePrefix 撤销。** 曾引入 `SetIgnorePrefix`
+  （white/changed 分类忽略 tag 前缀列）以"让 w 增长不掩盖白重绘"，探针实验
+  证明这是**误诊**：分类用完整行比较时本就没有自指循环（white 后 tag 变 →
+  下一帧完整行不同 → 判 changed 同步 → 收敛）；当时观察到的"带 tag 行在
+  Reconcile 后不 white"实为 `Trace().Reset()` 后首帧的 tag 同步帧（front
+  残留旧 w vs stage 新 w0 → 完整行不同 → changed 是**正确**分类，本就不该
+  算重复渲染）。`SetIgnorePrefix` 反而把同步帧误判为 white、污染 w 基线。
+  已整体移除（screen_model 字段/API、snapshot 接线），语义定稿：**white =
+  完整行相同却重发；tag 值变化 = changed（同步）；Reset 后首帧 = 同步帧，
+  不计数**。
 
 ### 实施审计注记（2026-08-01）
 
