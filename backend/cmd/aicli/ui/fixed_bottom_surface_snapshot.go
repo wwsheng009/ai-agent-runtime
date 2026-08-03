@@ -79,16 +79,6 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		// is retained and replayed by the release repaint.
 		return
 	}
-	// The visible output window may have shrunk (ActiveBand/popup/prompt
-	// growth) since the last write. Full-frame repaints overwrite rows in
-	// place, and overwriting is not scrolling: rows that no longer fit the
-	// window would silently vanish without ever reaching scrollback. Hand
-	// the excess into native scrollback first (DECSTBM \r\n scroll), then
-	// invalidate so the following Flush repaints from a clean slate. This is
-	// a no-op while the window did not shrink (frontier already current).
-	if s.commitExcessHistoryToScrollbackLocked() && s.viewportBackend != nil {
-		s.viewportBackend.Invalidate()
-	}
 	s.stageOwnedFrameLocked()
 	if diff := s.viewportBackend.Flush(); diff != "" {
 		_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {

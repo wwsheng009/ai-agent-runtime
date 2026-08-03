@@ -2975,7 +2975,6 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	if height <= 0 {
 		height = 24
 	}
-	previousBottomRows := s.lastBottomRows
 	bottomRows := s.effectiveBottomRowsLocked(height)
 	sizeChanged := width != s.lastWidth || height != s.lastHeight
 	bottomChanged := bottomRows != s.lastBottomRows
@@ -2988,16 +2987,6 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	s.legacyReserve.PendingScrollDownRows = 0
 	if sizeChanged {
 		s.legacyReserve.OutputScrollDebtRows = 0
-	}
-	if previousBottomRows > 0 && bottomRows > previousBottomRows {
-		// A growing owned bottom pane (ActiveBand, popup, dynamic status, or
-		// semantic gap) reduces the visible history region immediately. Hand
-		// newly hidden rows to native scrollback before the full-frame repaint;
-		// otherwise they exist only in the retained window and appear clipped
-		// until the transient pane shrinks again.
-		if s.leaseID == 0 {
-			s.commitExcessHistoryToScrollbackLocked()
-		}
 	}
 	// Only a real terminal resize invalidates the trailing-blank marker:
 	// band/popup grow-shrink must keep it so Compose can restore the owned

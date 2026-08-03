@@ -289,7 +289,12 @@ func TestFixedBottomSurface_RejectsBogusSoftSuffixWithoutDestroyingHistory(t *te
 	}
 }
 
-func TestFixedBottomSurface_ActiveBandHandoffFreezesSoftHistory(t *testing.T) {
+// TestFixedBottomSurface_ActiveBandGrowthDoesNotHandOffSoftHistory pins the
+// Phase 1 contract (D2): ActiveBand growth must not trigger a text handoff.
+// Displaced rows stay in the model so band shrink restores them by repaint;
+// the soft rewrite window therefore never crosses the committed boundary and
+// keeps its ownership.
+func TestFixedBottomSurface_ActiveBandGrowthDoesNotHandOffSoftHistory(t *testing.T) {
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
 	captureUIStdout(t, func() {
 		surface.ShowPrompt("> ")
@@ -305,22 +310,15 @@ func TestFixedBottomSurface_ActiveBandHandoffFreezesSoftHistory(t *testing.T) {
 	if !surface.SoftOutputTailValid() {
 		t.Fatal("precondition: visible soft history should still be rewriteable")
 	}
-	before := strings.Join(surface.HistoryWindowForTest(), "\n")
 
 	captureUIStdout(t, func() {
 		surface.SetActiveBand([]string{"• Running grep"})
 	})
-	if surface.HistoryHandedOffForTest() < 1 {
-		t.Fatal("precondition: ActiveBand growth should hand history to scrollback")
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("ActiveBand growth handed history to scrollback: frontier=%d want 0 (D2: displaced rows stay in the model)", got)
 	}
-	if surface.SoftOutputTailValid() {
-		t.Fatal("handoff crossing the soft window must freeze rewrite ownership")
-	}
-	if surface.RewriteSoftOutputTail(io.Discard, []string{"tampered"}) {
-		t.Fatal("already handed-off history must not be rewriteable")
-	}
-	if got := strings.Join(surface.HistoryWindowForTest(), "\n"); got != before {
-		t.Fatalf("handoff followed by rewrite changed history: got %q want %q", got, before)
+	if !surface.SoftOutputTailValid() {
+		t.Fatal("no committed boundary was crossed, soft rewrite ownership must stay valid")
 	}
 }
 
@@ -424,13 +422,12 @@ func TestFixedBottomSurface_FailedHistoryInsertDoesNotAdvanceBoundary(t *testing
 	}
 }
 
-// TestFixedBottomSurface_WrappedHistoryHandsOffDuringActiveBandGrowth pins
-// the combined handoff-trigger pair that used to strand wrapped history: a
-// narrow terminal wraps retained lines, then an ActiveBand appears and
-// displaces part of the visible region. The newly hidden wrapped rows must
-// reach native scrollback as physical rows instead of being clipped until the
-// band clears.
-func TestFixedBottomSurface_WrappedHistoryHandsOffDuringActiveBandGrowth(t *testing.T) {
+// TestFixedBottomSurface_WrappedHistorySurvivesActiveBandGrowth pins the
+// Phase 1 contract (D2): wrapped rows displaced by ActiveBand growth stay in
+// the retained model instead of being handed off, and the band-shrink
+// repaint restores them. The window keeps every logical line and the frontier
+// never advances on a pure geometry change.
+func TestFixedBottomSurface_WrappedHistorySurvivesActiveBandGrowth(t *testing.T) {
 	const width, height = 12, 20
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	captureUIStdout(t, func() {
@@ -448,7 +445,7 @@ func TestFixedBottomSurface_WrappedHistoryHandsOffDuringActiveBandGrowth(t *test
 		t.Fatalf("precondition: historyHandedOff=%d want 0 (no overflow yet)", got)
 	}
 
-	bandOutput := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		surface.SetActiveBand([]string{"• Running grep"})
 	})
 	visibleAfter := surface.visibleOutputRowsForTest()
@@ -456,19 +453,31 @@ func TestFixedBottomSurface_WrappedHistoryHandsOffDuringActiveBandGrowth(t *test
 	if displaced < 1 {
 		t.Fatalf("ActiveBand displaced %d rows, want >= 1", displaced)
 	}
-	if got := surface.HistoryHandedOffForTest(); got < displaced {
-		t.Fatalf("historyHandedOff=%d want >= displaced=%d after band growth", got, displaced)
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("band growth handed displaced rows to scrollback: frontier=%d want 0 (D2)", got)
 	}
-	if !strings.Contains(bandOutput, "\x1b[1;") || !strings.Contains(bandOutput, "\r\n") {
-		t.Fatalf("band-growth handoff must use DECSTBM physical-row sequence")
-	}
-	// The displaced oldest wrapped lines must appear in the band-growth output.
-	if !strings.Contains(bandOutput, strings.Repeat("y", width)) {
-		t.Fatalf("newly hidden wrapped rows missing from band-growth handoff")
-	}
-	// Dual-retain: all logical lines remain in the window for shrink restore.
+	// Model-retain: every logical line stays for shrink restore.
 	if history := surface.HistoryWindowForTest(); len(history) != visibleBefore {
 		t.Fatalf("band growth trimmed retained history: got %d lines want %d", len(history), visibleBefore)
+	}
+
+	captureUIStdout(t, func() {
+		surface.ClearActiveBand()
+	})
+	// The frontier must never advance on a pure geometry change; the window
+	// still holds every logical line for the repaint restore.
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("band shrink advanced handoff frontier to %d, want 0", got)
+	}
+	if history := surface.HistoryWindowForTest(); len(history) != visibleBefore {
+		t.Fatalf("band shrink trimmed retained history: got %d lines want %d", len(history), visibleBefore)
+	}
+	// The newest wrapped line must be re-materialized after shrink (its
+	// continuation row carries the line marker).
+	frame := frameDump(surface.ComposedFrameForTest())
+	wantNewest := fmt.Sprintf("-%02d", visibleBefore-1)
+	if !strings.Contains(frame, wantNewest) {
+		t.Fatalf("band shrink did not restore newest wrapped line (marker %q); frame=%q", wantNewest, frame)
 	}
 }
 
