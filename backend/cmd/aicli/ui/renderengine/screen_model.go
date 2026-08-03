@@ -98,6 +98,86 @@ func (m *ScreenModel) StageRow(row int, cells []vt.Cell) {
 	m.back[row-1] = normalizeRow(cells, m.width)
 }
 
+// ScrollUp records that the terminal moved the complete owned screen up by
+// count rows. It is the full-screen convenience form of ScrollRegionUp.
+func (m *ScreenModel) ScrollUp(count int) {
+	if m == nil {
+		return
+	}
+	m.ScrollRegionUp(1, m.height, count)
+}
+
+// ScrollDown records that the terminal moved the complete owned screen down by
+// count rows. It is the full-screen convenience form of ScrollRegionDown.
+func (m *ScreenModel) ScrollDown(count int) {
+	if m == nil {
+		return
+	}
+	m.ScrollRegionDown(1, m.height, count)
+}
+
+// ScrollRegionUp mirrors an already-emitted terminal scroll for the inclusive,
+// 1-based row region. Both buffers move together, rows outside the region stay
+// untouched, and newly exposed bottom rows are blank.
+func (m *ScreenModel) ScrollRegionUp(top, bottom, count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	top, bottom, ok := m.clampRegion(top, bottom)
+	if !ok {
+		return
+	}
+	scrollGridRegionUp(m.front, m.width, top-1, bottom, count)
+	scrollGridRegionUp(m.back, m.width, top-1, bottom, count)
+}
+
+// ScrollRegionDown mirrors an already-emitted terminal reverse scroll for the
+// inclusive, 1-based row region. Both buffers move together, rows outside the
+// region stay untouched, and newly exposed top rows are blank.
+func (m *ScreenModel) ScrollRegionDown(top, bottom, count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	top, bottom, ok := m.clampRegion(top, bottom)
+	if !ok {
+		return
+	}
+	scrollGridRegionDown(m.front, m.width, top-1, bottom, count)
+	scrollGridRegionDown(m.back, m.width, top-1, bottom, count)
+}
+
+// ApplyRegionAppend mirrors the exact physical effect of writing rows at the
+// bottom of a DECSTBM region as "\r\n<row>": every row scrolls the region up
+// once, then occupies the newly exposed bottom row. It updates front and back
+// together because the corresponding ANSI has already reached the terminal.
+func (m *ScreenModel) ApplyRegionAppend(top, bottom int, rows [][]vt.Cell) {
+	if m == nil || len(rows) == 0 {
+		return
+	}
+	top, bottom, ok := m.clampRegion(top, bottom)
+	if !ok {
+		return
+	}
+	applyRegionAppend(m.front, m.width, top-1, bottom, rows)
+	applyRegionAppend(m.back, m.width, top-1, bottom, rows)
+}
+
+func (m *ScreenModel) clampRegion(top, bottom int) (int, int, bool) {
+	if m == nil || m.height < 1 {
+		return 0, 0, false
+	}
+	if top < 1 {
+		top = 1
+	}
+	if bottom > m.height {
+		bottom = m.height
+	}
+	if top > bottom {
+		return 0, 0, false
+	}
+	return top, bottom, true
+}
+
 // CommitRange updates front from back without emitting ANSI for an inclusive
 // 1-based row range. It is used after native terminal scrolling has already
 // moved the corresponding owned history rows.
@@ -380,6 +460,51 @@ func blankGrid(width, height int) [][]vt.Cell {
 		grid[row] = make([]vt.Cell, width)
 	}
 	return grid
+}
+
+func scrollGridRegionUp(grid [][]vt.Cell, width, start, end, count int) {
+	if start < 0 || end > len(grid) || start >= end || count <= 0 {
+		return
+	}
+	height := end - start
+	if count > height {
+		count = height
+	}
+	copy(grid[start:end-count], grid[start+count:end])
+	for row := end - count; row < end; row++ {
+		grid[row] = make([]vt.Cell, width)
+	}
+}
+
+func scrollGridRegionDown(grid [][]vt.Cell, width, start, end, count int) {
+	if start < 0 || end > len(grid) || start >= end || count <= 0 {
+		return
+	}
+	height := end - start
+	if count > height {
+		count = height
+	}
+	copy(grid[start+count:end], grid[start:end-count])
+	for row := start; row < start+count; row++ {
+		grid[row] = make([]vt.Cell, width)
+	}
+}
+
+func applyRegionAppend(grid [][]vt.Cell, width, start, end int, rows [][]vt.Cell) {
+	if len(rows) == 0 {
+		return
+	}
+	scrollGridRegionUp(grid, width, start, end, len(rows))
+	regionRows := end - start
+	visible := rows
+	if len(visible) > regionRows {
+		visible = visible[len(visible)-regionRows:]
+	}
+	row := end - len(visible)
+	for _, cells := range visible {
+		grid[row] = normalizeRow(cells, width)
+		row++
+	}
 }
 
 func clampSize(width, height int) (int, int) {
