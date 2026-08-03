@@ -43,6 +43,7 @@ func (c Cell) blank() bool {
 type Screen struct {
 	width, height int
 	rows          [][]Cell
+	scrollback    [][]Cell
 	row, col      int
 	top, bottom   int
 	savedRow      int
@@ -79,8 +80,65 @@ func (s *Screen) CursorRow() int { return s.row }
 // CursorCol reports the 1-based cursor column.
 func (s *Screen) CursorCol() int { return s.col }
 
+// ScrollbackRows returns a deep copy of rows that were pushed above the
+// physical screen by a full-width scroll whose region starts at row 1.
+//
+// Rows displaced by a sub-region whose top is below row 1 are not native
+// terminal scrollback and are deliberately not recorded. Reverse-index and
+// scroll-down insert blank rows; they do not pull rows back from scrollback.
+func (s *Screen) ScrollbackRows() [][]Cell {
+	if s == nil || len(s.scrollback) == 0 {
+		return nil
+	}
+	return cloneRows(s.scrollback)
+}
+
+// ScrollbackLines returns the visible text of ScrollbackRows in commit order.
+func (s *Screen) ScrollbackLines() []string {
+	if s == nil || len(s.scrollback) == 0 {
+		return nil
+	}
+	lines := make([]string, len(s.scrollback))
+	for i, row := range s.scrollback {
+		lines[i] = cellLine(row)
+	}
+	return lines
+}
+
 func blankRow(width int) []Cell {
 	return make([]Cell, width)
+}
+
+func cloneRows(rows [][]Cell) [][]Cell {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([][]Cell, len(rows))
+	for row := range rows {
+		out[row] = make([]Cell, len(rows[row]))
+		for col, cell := range rows[row] {
+			out[row][col] = cell
+			if len(cell.SGR) > 0 {
+				out[row][col].SGR = append([]string(nil), cell.SGR...)
+			}
+		}
+	}
+	return out
+}
+
+func cellLine(row []Cell) string {
+	var b strings.Builder
+	for _, cell := range row {
+		if cell.Cont {
+			continue
+		}
+		if cell.Text == "" {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteString(cell.Text)
+	}
+	return strings.TrimRight(b.String(), " ")
 }
 
 // Feed replays a byte stream onto the screen.
@@ -113,6 +171,7 @@ func (s *Screen) Feed(stream string) {
 // index moves down one row, scrolling the region when already at its bottom.
 func (s *Screen) index() {
 	if s.row == s.bottom {
+		s.recordScrollbackRows(1)
 		copy(s.rows[s.top-1:s.bottom-1], s.rows[s.top:s.bottom])
 		s.rows[s.bottom-1] = blankRow(s.width)
 		return
@@ -150,6 +209,17 @@ func (s *Screen) scrollDown(rows int) {
 	for row := s.top - 1; row < s.top-1+rows; row++ {
 		s.rows[row] = blankRow(s.width)
 	}
+}
+
+func (s *Screen) recordScrollbackRows(count int) {
+	if s == nil || s.top != 1 || count <= 0 {
+		return
+	}
+	regionRows := s.bottom - s.top + 1
+	if count > regionRows {
+		count = regionRows
+	}
+	s.scrollback = append(s.scrollback, cloneRows(s.rows[:count])...)
 }
 
 // put prints one rune using its display width. Zero-width runes (combining
@@ -392,6 +462,7 @@ func (s *Screen) scrollUp(rows int) {
 	if regionRows := s.bottom - s.top + 1; rows > regionRows {
 		rows = regionRows
 	}
+	s.recordScrollbackRows(rows)
 	for row := s.top - 1; row < s.bottom-rows; row++ {
 		s.rows[row] = s.rows[row+rows]
 	}

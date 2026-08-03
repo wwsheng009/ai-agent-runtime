@@ -22,11 +22,12 @@ import (
 // the stale front buffer (which still holds the pre-scroll rows) and repaints
 // the handed-off rows into the visible region a SECOND time.
 //
-// A vt.Screen cannot see this: scrolled-out rows leave the simulated screen,
-// so a restore repaint looks like a fresh appearance. Only byte-stream
-// analysis (each history row text written to the terminal at most once)
-// catches the duplication — the same row exists once in native scrollback and
-// once on screen.
+// vt.Screen records native scrollback rows (N6, ui/vt/screen.go), so the
+// semantic assertion below replays the byte stream and counts each history
+// row in the merged view of (scrollback sequence + screen rows). A row that
+// was already handed off must never be painted again — the same row existing
+// once in native scrollback and once on screen is exactly the duplication
+// this test pins (Phase 0 语义断言，§4.3：字节计数降级为失败诊断)。
 func TestFixedBottomSurface_BandShrinkRestoreNeverReplaysHandedOffHistory(t *testing.T) {
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
 	visible := surface.visibleOutputRowsForTest()
@@ -76,44 +77,15 @@ func TestFixedBottomSurface_BandShrinkRestoreNeverReplaysHandedOffHistory(t *tes
 	// 阶段 5：恢复后追加输出（下一轮流式写入）。
 	write(chunk(52, 3))
 
-	// scrollback 感知断言：每个历史行文本作为完整行内容被写入终端的
-	// 次数至多一次。>1 意味着该行已滚入 scrollback 后又以"行内容"形式
-	// 被重画进可见区 —— 用户看到同一行在 scrollback 与屏幕各一份。
-	duplicates := []string{}
+	// 语义断言（Phase 0，§4.3）：每个历史行文本在「scrollback 序列 + 屏幕
+	// 各行」合并视图中的出现次数 ≤ 1。已 handoff 的行不得再上屏；未 handoff
+	// 的行只在屏幕出现一次。字节级 strings.Count 已降级为失败诊断。
 	raw := stream.String()
+	var allLines []string
 	for i := 0; i <= 55; i++ {
-		lineText := fmt.Sprintf("line-%02d 这是第%02d行的长回复内容", i, i)
-		if n := strings.Count(raw, lineText); n > 1 {
-			duplicates = append(duplicates, fmt.Sprintf("%s ×%d", lineText, n))
-		}
+		allLines = append(allLines, fmt.Sprintf("line-%02d 这是第%02d行的长回复内容", i, i))
 	}
-	if len(duplicates) > 0 {
-		// 诊断：打印第一个重复行的每次出现上下文（定位写入路径）。
-		var diag strings.Builder
-		for i := 0; i <= 55; i++ {
-			lineText := fmt.Sprintf("line-%02d 这是第%02d行的长回复内容", i, i)
-			if strings.Count(raw, lineText) <= 1 {
-				continue
-			}
-			diag.WriteString(fmt.Sprintf("== %s (%d 次) ==\n", lineText, strings.Count(raw, lineText)))
-			idx := 0
-			for k := 0; k < strings.Count(raw, lineText); k++ {
-				pos := strings.Index(raw[idx:], lineText) + idx
-				start := pos - 60
-				if start < 0 {
-					start = 0
-				}
-				end := pos + len(lineText) + 40
-				if end > len(raw) {
-					end = len(raw)
-				}
-				diag.WriteString(fmt.Sprintf("  #%d @%d: %q\n", k+1, pos, strings.ReplaceAll(raw[start:end], "\x1b", "<ESC>")))
-				idx = pos + len(lineText)
-			}
-			break
-		}
-		t.Fatalf("已滚入 scrollback 的历史行被再次渲染上屏（scrollback+屏幕重复）:\n%s\n%s", strings.Join(duplicates, "\n"), diag.String())
-	}
+	assertSemanticLinesAppearAtMost(t, raw, 80, 24, 1, allLines...)
 
 	// 可见区完整性：最新写入必须可见（恢复过程不能弄丢内容）。
 	screen := vt.NewScreen(80, 24)

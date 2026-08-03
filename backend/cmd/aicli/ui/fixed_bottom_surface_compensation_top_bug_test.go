@@ -13,6 +13,14 @@ import (
 // regression for the former CSI-T compensation bug. A full output viewport is
 // composed from retained history while ActiveBand grows and shrinks; the older
 // top rows must return instead of being replaced by inserted blanks.
+//
+// 语义说明（Phase 0，§4.2 规则 3）：本场景**不做**"语义行 ≤1 次"断言——
+// band 出现导致可见区收缩时，顶部行可能被物理滚出（进入终端 scrollback），
+// band 消失时从模型恢复上屏；这两段字节流中同一行出现两次是**设计允许**
+// 的（语义上未 handoff，恢复上屏不算重放）。本测试的语义断言是：
+// (1) 恢复后屏幕 1..9 行必须完整还原 L1..L9（不得顶部空白）；
+// (2) 不得发出 CSI-T 滚动补偿；
+// (3) 生产帧与 vt.Screen 回放零差异。
 func TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width, height = 20, 10
