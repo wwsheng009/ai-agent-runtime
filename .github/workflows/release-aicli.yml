@@ -203,6 +203,32 @@ jobs:
           go build -trimpath -o /tmp/aicli-cgo0-check ${CMD_PATH}
           /tmp/aicli-cgo0-check version
 
+      # E4 hard gate: render packages must be green before any release.
+      # NOTE: as of the semantic red baseline (Phase 0/C0), 4 band-scrollback
+      # semantic tests in ./cmd/aicli/ui fail by design; this gate stays red
+      # until Phase 1 fixes the underlying geometry bug (docs/plan/
+      # aicli-tui-owned-render-simplification-implementation-guide.md §6).
+      - name: Verify aicli render packages (E4 hard gate)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./cmd/aicli/ui/... -count=1
+
+      # C0 dual-run gate: the Scene presenter mode (AICLI_SCENE_PRESENTER=1)
+      # must produce byte-identical output with the legacy render path across
+      # the whole render-layer parity suite, in BOTH process-level env modes.
+      - name: Verify render parity gate - legacy mode (AICLI_SCENE_PRESENTER unset)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1
+
+      - name: Verify render parity gate - Scene presenter mode (AICLI_SCENE_PRESENTER=1)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          AICLI_SCENE_PRESENTER=1 go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     # Hard gate: validate (no-CGO). Soft gate: release-gate (continue-on-error).
