@@ -251,6 +251,24 @@ func TestNormalizeChatComposerReadErrorBacktrackDoesNotInterrupt(t *testing.T) {
 	}
 }
 
+func TestNormalizeChatComposerReadErrorTranscriptKeepsDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("draft")
+
+	err := normalizeChatComposerReadError(session, ui.ErrInteractiveInputTranscriptRequested)
+	if !errors.Is(err, ui.ErrInteractiveInputTranscriptRequested) {
+		t.Fatalf("expected transcript request to pass through, got %v", err)
+	}
+	if session.IsInterrupted() {
+		t.Fatal("transcript pager must not interrupt the session")
+	}
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "draft" {
+		t.Fatalf("transcript pager must preserve the composer draft, got %#v", snapshot)
+	}
+}
+
 func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

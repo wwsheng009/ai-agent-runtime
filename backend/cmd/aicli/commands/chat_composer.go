@@ -93,6 +93,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
 		OnComplete:            c.onComplete,
+		OnTranscriptRequested: c.onTranscriptRequested,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
@@ -219,9 +220,24 @@ func (c *chatComposerController) onCancelPopup(ui.LineEditorSnapshot) bool {
 	return c != nil && c.completion != nil && c.completion.Cancel()
 }
 
+func (c *chatComposerController) onTranscriptRequested(snapshot ui.LineEditorSnapshot) bool {
+	if c == nil || !canOpenChatTranscriptPager(c.session) {
+		return false
+	}
+	// The editor exits raw mode before the alternate pager starts. Persist the
+	// exact text/cursor first so the next composer instance restores the draft.
+	c.onChange(snapshot)
+	return true
+}
+
 func normalizeChatComposerReadError(session *ChatSession, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, ui.ErrInteractiveInputTranscriptRequested) {
+		// The draft remains in Interaction state and must be repainted after the
+		// alternate screen releases. Do not clear prompt ownership here.
+		return ui.ErrInteractiveInputTranscriptRequested
 	}
 	if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 		interruptChatComposerSession(session)

@@ -676,19 +676,32 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.E
 		return false
 	}
 	coordinator := b.session.Interaction
-	if !coordinator.postUIAction(ui.RuntimeEvent{
+	action := ui.RuntimeEvent{
 		Kind: chatUIRuntimeEventActionKind,
 		Payload: chatRuntimeEventUIAction{
 			bridge: b,
 			event:  event,
 		},
-	}) {
-		return false
 	}
-	// Preserve the existing bridge queue's completion contract: EndRun only
-	// observes an event as processed after the actor has applied its reducer
-	// action and all facade updates emitted by that action have settled.
-	coordinator.waitUIActorIdle()
+	for {
+		if coordinator.postUIAction(action) {
+			break
+		}
+		if coordinator.uiActionRejectedAfterShutdown() {
+			return false
+		}
+		if coordinator.uiActor == nil || coordinator.uiActor.Stats().Closed {
+			return false
+		}
+		// A full bounded mailbox is normal backpressure, not a reason to run
+		// the same event through the legacy surface concurrently. The UI actor
+		// will release a slot as soon as it finishes the current action.
+		time.Sleep(time.Millisecond)
+	}
+	// The actor owns the causal order. Waiting for it after every stream chunk
+	// turns one expensive transcript reduction into backpressure on the LLM
+	// callback path. EndRun/WaitForCurrentEvents perform the bounded final drain
+	// once the bridge queue itself has settled.
 	return true
 }
 
@@ -1425,6 +1438,9 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) {
 				lastSeenEnqueued = enqueued
 			}
 			if now.Sub(stableSince) >= chatRuntimeEventSettleWindow {
+				if coordinator := b.sessionInteraction(); coordinator != nil {
+					coordinator.waitUIActorIdleTimeout(time.Until(deadline))
+				}
 				return
 			}
 		} else {
@@ -1436,6 +1452,13 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func (b *chatRuntimeEventBridge) sessionInteraction() *chatInteractionCoordinator {
+	if b == nil || b.session == nil {
+		return nil
+	}
+	return b.session.Interaction
 }
 
 func (b *chatRuntimeEventBridge) handleStructuredLogEvent(event runtimeevents.Event) {
@@ -1832,6 +1855,13 @@ func runtimeEventToolName(event runtimeevents.Event) string {
 	return firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"]))
 }
 
+// runtimeEventHasToolCallIdentity gates mutable tool projections. A tool name
+// alone is not a safe owner because concurrent calls may share it; incomplete
+// legacy events remain visible through the system/timeline fallback instead.
+func runtimeEventHasToolCallIdentity(event runtimeevents.Event) bool {
+	return strings.TrimSpace(payloadStringValue(event.Payload["tool_call_id"])) != ""
+}
+
 func runtimeToolTimelinePayload(event runtimeevents.Event) map[string]interface{} {
 	toolName := runtimeEventToolName(event)
 	payload := cloneRuntimeEventLogPayload(event.Payload)
@@ -1990,6 +2020,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	if isRuntimeToolRequestedEventType(event.Type) &&
 		b.isPrimarySessionEvent(event) &&
+		runtimeEventHasToolCallIdentity(event) &&
 		rendered.Line != "" &&
 		shouldRenderInteractiveOutput(b.session) &&
 		b.session.Interaction != nil {
@@ -2000,6 +2031,19 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		)
 		// Running belongs exclusively to ActiveBand. The matching final event
 		// remains the single durable history cell.
+		rendered = chatRuntimeTimelineEvent{}
+		renderedSomething = true
+	}
+	if event.Type == "tool.progress" &&
+		b.isPrimarySessionEvent(event) &&
+		runtimeEventHasToolCallIdentity(event) &&
+		shouldRenderInteractiveOutput(b.session) &&
+		b.session.Interaction != nil {
+		// A progress event with stable call identity is already represented by
+		// the mutable Scene tool cell and the ActiveBand stage. Emitting its
+		// compact timeline line would create a second visible rendering path and
+		// make progress look like durable history. Identity-less progress keeps
+		// the system fallback above so incomplete events remain observable.
 		rendered = chatRuntimeTimelineEvent{}
 		renderedSomething = true
 	}
@@ -2142,17 +2186,26 @@ func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event r
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
 		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
 	case runtimechat.EventToolStarted, "tool.requested":
+		if !runtimeEventHasToolCallIdentity(event) {
+			return
+		}
 		b.session.Interaction.SetToolAgentStage(
 			payloadStringValue(event.Payload["tool_call_id"]),
 			runtimeEventToolName(event),
 		)
 	case "tool.progress":
+		if !runtimeEventHasToolCallIdentity(event) {
+			return
+		}
 		// Light stage detail only — progress is high-frequency and must not
 		// hard-block the composer the way late tool start/finish does.
 		if detail := chatToolProgressStageDetail(event); detail != "" {
 			b.session.Interaction.SetToolAgentStage(payloadStringValue(event.Payload["tool_call_id"]), detail)
 		}
 	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
+		if !runtimeEventHasToolCallIdentity(event) {
+			return
+		}
 		b.session.Interaction.FinishToolAgentStage(
 			payloadStringValue(event.Payload["tool_call_id"]),
 			runtimeEventToolName(event),
@@ -2166,9 +2219,15 @@ func (b *chatRuntimeEventBridge) updateChatTitleForRuntimeEvent(event runtimeeve
 	}
 	switch event.Type {
 	case runtimechat.EventToolStarted, "tool.requested":
+		if !runtimeEventHasToolCallIdentity(event) {
+			return
+		}
 		key := runtimeToolCallTimelineKey(event, runtimeToolTimelinePayload(event))
 		b.session.TitleNotifier.SetToolRunning(key, true)
 	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
+		if !runtimeEventHasToolCallIdentity(event) {
+			return
+		}
 		key := runtimeToolCallTimelineKey(event, runtimeToolTimelinePayload(event))
 		b.session.TitleNotifier.SetToolRunning(key, false)
 	case runtimechat.EventSessionEnd:

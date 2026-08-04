@@ -15,9 +15,11 @@ package commands
 
 import (
 	"os"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
@@ -81,6 +83,115 @@ func (c *chatInteractionCoordinator) postCausalUIAction(action ui.UIAction) bool
 		return true
 	}
 	return actor.Post(action)
+}
+
+// activeStreamShadowActionLocked creates the migration-only AppState mirror
+// for the currently mounted Scene active cell. It must be called while c.mu is
+// held, but the returned action is posted only after that lock is released.
+// The legacy ActiveStreamController/surface remains the sole production
+// visual owner during this phase.
+func (c *chatInteractionCoordinator) activeStreamShadowActionLocked() ui.UIAction {
+	if c == nil || c.activeStream == nil {
+		return nil
+	}
+	return c.activeSourceShadowActionLocked(c.activeStream.SourceSnapshot())
+}
+
+// activeSourceShadowActionLocked mirrors an arbitrary semantic active source
+// (assistant, reasoning, or running tool) without making rendered rows part of
+// AppState. Callers must hold c.mu and post the returned action after unlock.
+func (c *chatInteractionCoordinator) activeSourceShadowActionLocked(snapshot ui.ActiveStreamSourceSnapshot) ui.UIAction {
+	if c == nil {
+		return nil
+	}
+	// Use the same sync.Once-protected accessor as every other producer. The
+	// actor may be created while c.mu is held; its reducer can only continue
+	// after this method releases c.mu, and the action itself is posted later.
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return nil
+	}
+	current := actor.AppState().Active
+	if current.CellID == 0 || current.Phase == ui.ActiveCellInactive {
+		c.activeCellShadowID = 0
+		c.activeCellShadowRevision = 0
+		return nil
+	}
+	if !snapshot.Active {
+		if c.activeCellShadowID != 0 && current.CellID == c.activeCellShadowID {
+			c.activeCellShadowID = 0
+			c.activeCellShadowRevision = 0
+			return ui.ClearActiveCellAction{}
+		}
+		return nil
+	}
+	action, err := ui.UpdateActiveCellActionFromSourceSnapshot(current, snapshot)
+	if err != nil {
+		// A stale Scene snapshot or a source correction with an incompatible
+		// physical range is ignored until the causal transcript action catches
+		// up. It must never be repaired by guessing an Ack boundary.
+		return nil
+	}
+	if c.activeCellShadowID == current.CellID && c.activeCellShadowRevision >= action.Active.Revision {
+		action.Active.Revision = c.activeCellShadowRevision + 1
+	}
+	c.activeCellShadowID = current.CellID
+	c.activeCellShadowRevision = action.Active.Revision
+	return action
+}
+
+// finalizeActiveCellShadowActionLocked creates the migration-only atomic
+// transcript/active transition for a Scene cell that has already reached a
+// committed phase. It must be called under c.mu, while the coordinator still
+// knows that the legacy stream belongs to this completion boundary. Posting
+// remains the caller's responsibility and must happen after c.mu is released.
+//
+// The active revision is an AppState fence, not the Scene cell revision. A
+// shadow source update can consume a revision even when the corresponding
+// Scene snapshot has the same semantic cell revision, so equality is valid at
+// finalization. The reducer still rejects a stale active fence and requires a
+// committed cell in the supplied immutable Scene snapshot.
+func (c *chatInteractionCoordinator) finalizeActiveCellShadowActionLocked() ui.UIAction {
+	if c == nil || c.session == nil || c.session.RuntimeEventBridge == nil {
+		return nil
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return nil
+	}
+	active := actor.AppState().Active
+	if active.CellID == 0 || active.Phase != ui.ActiveCellMutable || active.Revision == 0 {
+		return nil
+	}
+	snapshot := c.session.RuntimeEventBridge.sceneSnapshot()
+	if !finalizedSceneCellAtOrAfter(snapshot, active.CellID, active.Revision) {
+		return nil
+	}
+	return ui.FinalizeActiveCellAction{
+		Snapshot:               snapshot,
+		ExpectedActiveCellID:   active.CellID,
+		ExpectedActiveRevision: active.Revision,
+	}
+}
+
+// finalizedSceneCellAtOrAfter is intentionally local to the commands adapter:
+// it decides whether a legacy completion may be mirrored into AppState. The
+// reducer repeats the validation before it publishes state, so this check is a
+// producer-side stale-snapshot guard rather than an alternate authority.
+func finalizedSceneCellAtOrAfter(snapshot *scene.Snapshot, id scene.CellID, revision uint64) bool {
+	if snapshot == nil || id == 0 {
+		return false
+	}
+	for _, candidate := range snapshot.Cells {
+		if candidate == nil || candidate.ID != id || candidate.Revision < revision {
+			continue
+		}
+		switch candidate.Phase {
+		case scene.CellCommitted, scene.CellPartiallyHandedOff, scene.CellHandedOff:
+			return true
+		}
+	}
+	return false
 }
 
 // postTranscriptSnapshotFromBridge is the Phase 2 transition bridge for
@@ -260,6 +371,13 @@ func (c *chatInteractionCoordinator) waitUIActorIdle() {
 		return
 	}
 	c.uiActor.WaitIdle()
+}
+
+func (c *chatInteractionCoordinator) waitUIActorIdleTimeout(timeout time.Duration) bool {
+	if c == nil || c.uiActor == nil {
+		return true
+	}
+	return c.uiActor.WaitIdleTimeout(timeout)
 }
 
 // applyTimerAction 把 Timer action 分发到对应定时业务（各业务函数自带

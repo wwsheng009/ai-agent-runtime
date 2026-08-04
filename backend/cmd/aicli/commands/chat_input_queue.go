@@ -948,6 +948,11 @@ func (l chatInputReadLifecycle) finishMainRead(readErr error) {
 	if l.session == nil || l.session.Interaction == nil {
 		return
 	}
+	if errors.Is(readErr, ui.ErrInteractiveInputTranscriptRequested) {
+		// Ctrl+T temporarily transfers physical screen ownership to the pager;
+		// the composer draft remains authoritative and must survive the return.
+		return
+	}
 	if readErr != nil {
 		l.session.lastInteractiveInputQueued = false
 		// An aborted read (Ctrl+C / stdin failure) cancels the draft too.

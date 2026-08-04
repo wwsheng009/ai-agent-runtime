@@ -171,6 +171,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	})
 	interaction.waitUIActorIdle()
 	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
+	require.NotContains(t, history.String(), "Progress")
 
 	completed := runtimeevents.Event{
 		Type:      "tool.completed",
@@ -220,8 +221,168 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	}
 	bridge.handleEvent(failed)
 	bridge.handleEvent(failed)
+	// Runtime event 的 surface 清理经 UI actor 异步应用；与前面的
+	// requested/progress/completed 断言保持同一 drain 边界，避免在 failed
+	// action 尚未消费时读取旧 ActiveBand 投影。
+	interaction.waitUIActorIdle()
 	require.NotContains(t, strings.Join(surface.ActiveBandLines(), "\n"), "Running")
 	require.Equal(t, 1, strings.Count(history.String(), "• Failed [meta] go test ./failed"))
+}
+
+func TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var output bytes.Buffer
+	interaction.SetWriter(&output)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	post := func(event runtimeevents.Event) {
+		t.Helper()
+		if !bridge.postRuntimeEventToUIActor(event) {
+			t.Fatalf("runtime event was not accepted by UI actor: %s", event.Type)
+		}
+		interaction.waitUIActorIdle()
+	}
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	post(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		ToolName:  "shell",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"tool_name":    "shell",
+		},
+	})
+
+	state := interaction.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Kind != scene.KindToolChain {
+		t.Fatalf("requested active state = %#v, want mutable tool chain", state.Active)
+	}
+	if state.Active.Source != "shell" {
+		t.Fatalf("requested active source = %q, want shell", state.Active.Source)
+	}
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Kind != scene.KindToolChain ||
+		state.Transcript.Cells[0].Phase != scene.CellMutable {
+		t.Fatalf("requested transcript = %#v, want one mutable tool cell", state.Transcript.Cells)
+	}
+	if strings.Contains(strings.ToLower(state.Transcript.Cells[0].Source), "running") {
+		t.Fatalf("running viewport label leaked into transcript source: %q", state.Transcript.Cells[0].Source)
+	}
+
+	post(runtimeevents.Event{
+		Type:      "tool.progress",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		ToolName:  "shell",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"message":      "50% complete",
+		},
+	})
+	state = interaction.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "shell\n50% complete" {
+		t.Fatalf("progress active state = %#v, want source-backed update", state.Active)
+	}
+	if strings.Contains(output.String(), "Progress") {
+		t.Fatalf("stable-identity progress leaked into durable output: %q", output.String())
+	}
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != state.Active.Source {
+		t.Fatalf("progress transcript = %#v, want one updated mutable cell", state.Transcript.Cells)
+	}
+
+	completed := runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		ToolName:  "shell",
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"summary_lines": []interface{}{
+				"ok",
+			},
+		},
+	}
+	post(completed)
+	post(completed)
+	state = interaction.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("completed active state = %#v, want inactive", state.Active)
+	}
+	if len(state.Transcript.Cells) != 1 {
+		t.Fatalf("completed transcript cells = %#v, want one merged tool chain", state.Transcript.Cells)
+	}
+	cell := state.Transcript.Cells[0]
+	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted {
+		t.Fatalf("completed cell = %#v, want committed tool chain", cell)
+	}
+	if cell.Source != "shell\n50% complete\nok" {
+		t.Fatalf("completed source = %q, want merged final tool source", cell.Source)
+	}
+	if bridge.renderEncoderStats().DuplicateCount == 0 {
+		t.Fatalf("duplicate completion was not counted by encoder")
+	}
+}
+
+func TestChatRuntimeEventBridge_IdentitylessToolProgressFallsBackToSystem(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var output bytes.Buffer
+	interaction.SetWriter(&output)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	post := func(event runtimeevents.Event) {
+		t.Helper()
+		if !bridge.postRuntimeEventToUIActor(event) {
+			t.Fatalf("runtime event was not accepted by UI actor: %s", event.Type)
+		}
+		interaction.waitUIActorIdle()
+	}
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	post(runtimeevents.Event{
+		Type:      "tool.progress",
+		SessionID: "lead-session",
+		ToolName:  "shell",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1",
+			"message": "legacy progress without call identity",
+		},
+	})
+
+	state := interaction.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("identityless progress mounted active cell: %#v", state.Active)
+	}
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Kind != scene.KindSystem ||
+		!strings.Contains(state.Transcript.Cells[0].Source, "legacy progress without call identity") {
+		t.Fatalf("identityless progress transcript = %#v, want visible system fallback", state.Transcript.Cells)
+	}
+	if !strings.Contains(output.String(), "Progress shell legacy progress without call identity") {
+		t.Fatalf("identityless progress was not rendered visibly: %q", output.String())
+	}
 }
 
 func TestChatRuntimeEvents_FailedFinalDoesNotSuppressExecutorFallback(t *testing.T) {

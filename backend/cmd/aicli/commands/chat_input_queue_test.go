@@ -774,6 +774,19 @@ func TestChatInputReadLifecycleFinishMainReadClearsPromptOnError(t *testing.T) {
 	}
 }
 
+func TestChatInputReadLifecycleFinishMainReadKeepsDraftForTranscriptPager(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("inspect this draft")
+
+	newChatInputReadLifecycle(session).finishMainRead(ui.ErrInteractiveInputTranscriptRequested)
+
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "inspect this draft" {
+		t.Fatalf("transcript pager should preserve prompt state, got %#v", snapshot)
+	}
+}
+
 func TestChatInputReadLifecycleFinishMainReadResetsPromptAfterDirectRead(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

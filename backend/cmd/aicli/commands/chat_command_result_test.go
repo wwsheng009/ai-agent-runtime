@@ -884,7 +884,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "command.go", Func: "confirmClearConversationHistory", Kind: "fmt.Print", Count: 4},
 		{File: "command.go", Func: "executeShellCommandDetailed", Kind: "fmt.Print", Count: 18},
 		{File: "command.go", Func: "handleApprovalReuseCommand", Kind: "fmt.Print", Count: 4},
-		{File: "command.go", Func: "handleCommand", Kind: "fmt.Print", Count: 35},
+		{File: "command.go", Func: "handleCommand", Kind: "fmt.Print", Count: 34},
 		{File: "command.go", Func: "handleCompactCommand", Kind: "fmt.Print", Count: 4},
 		{File: "command.go", Func: "handleImageAttachmentCommand", Kind: "fmt.Print", Count: 11},
 		{File: "command.go", Func: "handlePermissionModeCommand", Kind: "fmt.Print", Count: 4},

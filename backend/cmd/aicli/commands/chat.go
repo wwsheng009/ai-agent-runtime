@@ -1181,6 +1181,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
 			finishChatInteractiveReadPromptState(session, err)
 			if err != nil {
+				if errors.Is(err, ui.ErrInteractiveInputTranscriptRequested) {
+					openChatTranscriptPager(session)
+					continue
+				}
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 					printDirectInteractiveOutput(session, "正在退出...\n")
 					break

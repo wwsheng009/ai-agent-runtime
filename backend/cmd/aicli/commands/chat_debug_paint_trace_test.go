@@ -106,3 +106,36 @@ func TestDebugDisplayNoRenderPaintTraceWithoutEvents(t *testing.T) {
 		t.Errorf("empty trace must explain the no-events state:\n%s", plain)
 	}
 }
+
+// TestDebugDisplayIncludesAppStatePresenterDiagnostics keeps the migration
+// audit surface source-backed: it reports reducer state and an in-memory
+// AppState-to-legacy-frame comparison, without treating historyWindow or the
+// native terminal scrollback as a semantic source.
+func TestDebugDisplayIncludesAppStatePresenterDiagnostics(t *testing.T) {
+	session, _ := newPaintTraceDebugSession(t)
+	coordinator := session.Interaction
+	if coordinator == nil {
+		t.Fatal("test session must install an interaction coordinator")
+	}
+	if !coordinator.postUIAction(ui.Resize{Width: 80, Height: 24, Generation: 1}) {
+		t.Fatal("post resize action")
+	}
+	coordinator.waitUIActorIdle()
+
+	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
+	for _, marker := range []string{
+		"AppState / Presenter Migration:",
+		"UI Revision:",
+		"Layout Generation:",
+		"Geometry:",
+		"Primary Lease:",
+		"History Effects:",
+		"History Projection:",
+		"AppState Frame Parity:",
+		"parity:",
+	} {
+		if !strings.Contains(plain, marker) {
+			t.Errorf("/debug display document missing %q:\n%s", marker, plain)
+		}
+	}
+}

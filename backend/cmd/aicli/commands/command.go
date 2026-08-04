@@ -261,7 +261,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	cmd := cmdLower
 	switch cmd {
 	case "/exit", "/quit", "/q":
-		fmt.Println("再见！")
+		// The owned primary surface must own the farewell row as well. Writing
+		// directly to stdout here lets a pending surface frame repaint over it,
+		// which makes the final command result nondeterministic in a live TTY.
+		printDirectInteractiveOutput(session, "再见！\n")
 		return true
 
 	case "/clear", "/cls":

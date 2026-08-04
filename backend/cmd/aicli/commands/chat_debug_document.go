@@ -106,6 +106,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	} else {
 		builder.meta("Surface:", "<none>")
 	}
+	appendChatDebugAppStatePresenterLines(&builder, session)
 
 	appendChatDebugRoutingLines(&builder, session)
 	appendChatDebugPprofLines(&builder)
@@ -118,6 +119,62 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	builder.plainLines(chatDebugMailboxLines(session))
 	appendChatDebugRenderEncoderLines(&builder, session)
 	return builder.document()
+}
+
+// appendChatDebugAppStatePresenterLines exposes the migration's immutable
+// state/effect boundary without reading historyWindow, ScreenModel, or native
+// scrollback as business data. FrameParityWithAppLayout is observational: it
+// derives AppState layout and compares it in memory with the legacy surface's
+// last composed frame; it never emits terminal bytes.
+func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	if builder == nil || session == nil || session.Interaction == nil || session.Interaction.uiActor == nil {
+		return
+	}
+	state := session.Interaction.uiActor.State()
+	builder.heading("AppState / Presenter Migration:")
+	builder.meta("UI Revision:", strconv.FormatUint(state.Revision, 10))
+	builder.meta("Layout Generation:", strconv.FormatUint(state.LayoutGeneration, 10))
+	builder.meta("Geometry:", fmt.Sprintf("%dx%d (generation %d)", state.Geometry.Width, state.Geometry.Height, state.Geometry.Generation))
+	if state.Lease.Active {
+		builder.meta("Primary Lease:", fmt.Sprintf("active #%d", state.Lease.ID))
+	} else {
+		builder.meta("Primary Lease:", "inactive")
+	}
+	builder.meta("History Effects:", chatDebugHistoryEffectSummary(state.HistoryEffects))
+	if state.HistoryEffects.ProjectionUnknown {
+		builder.meta("History Projection:", "unknown (recovery required)")
+	} else {
+		builder.meta("History Projection:", "known")
+	}
+	if session.Surface == nil {
+		return
+	}
+	builder.heading("AppState Frame Parity:")
+	parity := strings.TrimSuffix(session.Surface.FrameParityWithAppLayout(state.AppState), "\n")
+	if parity == "" {
+		parity = "parity: unavailable"
+	}
+	builder.plainLines(strings.Split(parity, "\n"))
+}
+
+func chatDebugHistoryEffectSummary(effects ui.HistoryEffectQueueState) string {
+	var pending, inFlight, acked, failed, invalidated int
+	for _, entry := range effects.Entries() {
+		switch entry.State {
+		case ui.HistoryCommitPending:
+			pending++
+		case ui.HistoryCommitInFlight:
+			inFlight++
+		case ui.HistoryCommitAcked:
+			acked++
+		case ui.HistoryCommitStateFailed:
+			failed++
+		case ui.HistoryCommitInvalidated:
+			invalidated++
+		}
+	}
+	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d frozen=%t",
+		pending, inFlight, acked, failed, invalidated, effects.Frozen)
 }
 
 // appendChatDebugRenderEncoderLines 输出统一渲染编码器（双跑模式数据面）

@@ -50,6 +50,7 @@ func TestChatRuntimeEventBridge_OrdinaryEventUsesUIActorReducer(t *testing.T) {
 		event: runtimeevents.Event{Type: "planning.completed"},
 		epoch: bridge.runEpoch,
 	})
+	coordinator.waitUIActorIdle()
 
 	if got := output.String(); got == "" {
 		t.Fatal("ordinary runtime event did not render through coordinator")

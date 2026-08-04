@@ -14,9 +14,11 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
@@ -118,8 +120,13 @@ type chatInteractionCoordinator struct {
 	// Enqueued and emitted source offsets stay distinct so queued content never
 	// reappears in the live tail and finalization can drain without replay.
 	activeStream *ui.ActiveStreamController
-	renderEngine *renderengine.Engine
-	framePump    *renderengine.FramePump
+	// activeCellShadowID/Revision fence the migration-only AppState mirror of
+	// ActiveStreamController. They are identity sequencing facts, not terminal
+	// effect cursors; the legacy coordinator remains the production renderer.
+	activeCellShadowID       scene.CellID
+	activeCellShadowRevision uint64
+	renderEngine             *renderengine.Engine
+	framePump                *renderengine.FramePump
 	// UI actor（Phase 1，实施指南任务 2/3/5）：业务 producer 只投递 action，
 	// reducer 经 legacy adapter 生成相同输出。惰性创建，见 ensureUIActor。
 	uiActor               *ui.UIController
@@ -1251,7 +1258,13 @@ func (c *chatInteractionCoordinator) SetAgentStageDetail(stage chatAgentStage, d
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if c.shutdown {
 		return
 	}
@@ -1263,6 +1276,7 @@ func (c *chatInteractionCoordinator) SetAgentStageDetail(stage chatAgentStage, d
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	// Mirror tool-running into the surface ActiveBand (viewport only; no scrollback).
 	c.syncAgentStageActiveBandLocked()
+	activeShadowAction = c.activeStreamShadowActionLocked()
 }
 
 func (c *chatInteractionCoordinator) ClearAgentStage() {
@@ -1277,11 +1291,18 @@ func (c *chatInteractionCoordinator) SetToolAgentStage(callID, detail string) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if c.shutdown {
 		return
 	}
 	c.setToolAgentStageLocked(callID, detail, "")
+	activeShadowAction = c.activeStreamShadowActionLocked()
 }
 
 // SetToolAgentStageDisplay projects a canonical shared Running row into the
@@ -1291,11 +1312,18 @@ func (c *chatInteractionCoordinator) SetToolAgentStageDisplay(callID, detail, di
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if c.shutdown {
 		return
 	}
 	c.setToolAgentStageLocked(callID, detail, display)
+	activeShadowAction = c.activeStreamShadowActionLocked()
 }
 
 func (c *chatInteractionCoordinator) setToolAgentStageLocked(callID, detail, display string) {
@@ -1331,11 +1359,18 @@ func (c *chatInteractionCoordinator) FinishToolAgentStage(callID, toolName strin
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if c.shutdown || len(c.activeTools) == 0 {
 		return
 	}
 	c.finishToolAgentStageLocked(callID, toolName)
+	activeShadowAction = c.activeStreamShadowActionLocked()
 }
 
 func (c *chatInteractionCoordinator) finishToolAgentStageLocked(callID, toolName string) {
@@ -2788,7 +2823,13 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if !c.reasoningActive {
 		if !c.beginMessageLocked() {
 			return
@@ -2820,6 +2861,12 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
 	}
 	c.reasoningBuffer.WriteString(delta)
+	activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{
+		Active:    true,
+		Kind:      cell.ActiveReasoning,
+		Source:    c.reasoningBuffer.String(),
+		StableEnd: c.reasoningBuffer.Len(),
+	})
 }
 
 func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
@@ -2827,7 +2874,20 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			// The coordinator mutex must not be held while entering the bounded
+			// UI mailbox. RenderAssistantDelta is normally called from the
+			// runtime-event reducer, so preserve that action's happens-before
+			// relation through the causal follow-up queue. Outside a reducer the
+			// helper falls back to the normal durable mailbox post.
+			// This is a shadow AppState update only; legacy ActiveBand painting
+			// above remains unchanged.
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if !c.streamingActive {
 		if !c.reasoningActive {
 			if !c.beginMessageLocked() {
@@ -2878,6 +2938,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	// writing extra scrollback. Transcript still follows the paths below.
 	// newlyStable is the controller's stable plain cut (full delta for text mode).
 	newlyStable := c.paintActiveStreamLocked(delta, c.streamMode == assistantStreamModeMarkdown)
+	activeShadowAction = c.activeStreamShadowActionLocked()
 
 	if c.shouldLiveStreamOutputLocked() && !c.reasoningActive {
 		if c.streamMode == assistantStreamModeMarkdown {
@@ -2968,7 +3029,13 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		return false
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if !c.streamingActive {
 		return false
 	}
@@ -2980,6 +3047,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		finalContent = c.finalizeActiveAssistantLocked("", c.streamMode == assistantStreamModeMarkdown)
 	}
 	if finalContent == "" {
+		activeShadowAction = c.finalizeActiveCellShadowActionLocked()
 		c.resetStreamLocked()
 		return true
 	}
@@ -2996,6 +3064,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if consolidated := c.finalizeActiveAssistantLocked(finalContent, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
 		finalContent = consolidated
 	}
+	activeShadowAction = c.finalizeActiveCellShadowActionLocked()
 	if c.streamMode == assistantStreamModeMarkdown || c.streamRenderedPrefixLen > 0 {
 		c.renderFormattedAssistantStreamLocked(finalContent)
 		c.resetStreamLocked()
@@ -3026,7 +3095,13 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 		return false
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if !c.reasoningActive {
 		return false
 	}
@@ -3043,6 +3118,7 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 			c.reasoningBuffer.WriteString(suffix)
 		}
 		c.finalizeReasoningLocked()
+		activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
 		return true
 	}
 	renderBlock := block
@@ -3061,6 +3137,7 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapBeforeBlockLocked(meta), meta)
 	}
 	c.resetReasoningLocked()
+	activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
 	return true
 }
 
@@ -3069,7 +3146,13 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if !c.streamingActive {
 		return
 	}
@@ -3078,6 +3161,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 	if consolidated := c.finalizeActiveAssistantLocked(content, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
 		content = consolidated
 	}
+	activeShadowAction = c.finalizeActiveCellShadowActionLocked()
 	if c.streamRenderedPrefixLen > 0 && content != "" {
 		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
 		c.renderFormattedAssistantStreamLocked(content)
@@ -3112,12 +3196,19 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
 	if !c.reasoningActive {
 		return
 	}
 	if c.shouldLiveStreamOutputLocked() {
 		c.finalizeReasoningLocked()
+		activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
 		return
 	}
 	renderBlock := &runtimetypes.ReasoningBlock{
@@ -3131,6 +3222,7 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapBeforeBlockLocked(meta), meta)
 	}
 	c.resetReasoningLocked()
+	activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
 }
 
 func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
@@ -4359,6 +4451,8 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.stableCommitBelowExit = time.Time{}
 	c.stableCommitLastExit = time.Time{}
 	c.streamCellID = ""
+	c.activeCellShadowID = 0
+	c.activeCellShadowRevision = 0
 	// Drop both coordinator source ownership and the surface rewrite window.
 	// Leaving surface soft valid after the turn ends would allow a later
 	// foreign/resize path to treat irreversible history as reflowable.
