@@ -54,6 +54,47 @@ type ActiveStreamController struct {
 	markdownFrameTitle string
 }
 
+// ActiveStreamSourceSnapshot is a read-only migration view of the controller's
+// semantic source. It intentionally exposes byte boundaries, not rendered rows
+// or BufferBackend state. Tool display is omitted from Source because a running
+// tool is an overlay and must not be mistaken for finalized transcript source.
+type ActiveStreamSourceSnapshot struct {
+	Active       bool
+	Kind         cell.ActiveKind
+	Source       string
+	StableEnd    int
+	CommittedEnd int
+}
+
+// SourceSnapshot provides the only supported read path for a future bridge to
+// construct an ActiveCellState update. It does not advance committed progress
+// and does not expose the mutable cell pointer or terminal frame cache.
+func (c *ActiveStreamController) SourceSnapshot() ActiveStreamSourceSnapshot {
+	if c == nil {
+		return ActiveStreamSourceSnapshot{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active {
+		return ActiveStreamSourceSnapshot{}
+	}
+	snapshot := ActiveStreamSourceSnapshot{
+		Active:       true,
+		Kind:         c.cell.Kind,
+		CommittedEnd: c.committed,
+	}
+	if c.cell.Kind != cell.ActiveAssistant {
+		return snapshot
+	}
+	snapshot.Source = c.cell.Body
+	if c.markdown {
+		snapshot.StableEnd = len(c.md.Stable())
+	} else {
+		snapshot.StableEnd = len(c.cell.Stable)
+	}
+	return snapshot
+}
+
 // NewActiveStreamController builds a controller with 30 FPS coalescing.
 func NewActiveStreamController(width, height int) *ActiveStreamController {
 	if width <= 0 {

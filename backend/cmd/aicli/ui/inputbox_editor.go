@@ -20,6 +20,11 @@ import (
 var ErrInteractiveInputInterrupted = errors.New("interactive input interrupted")
 var ErrInteractiveInputExitRequested = errors.New("interactive input exit requested")
 
+// ErrInteractiveInputTranscriptRequested signals a host-level alternate
+// transcript request. The editor preserves its draft and leaves Ctrl+T as
+// transpose unless a caller explicitly claims the shortcut through hooks.
+var ErrInteractiveInputTranscriptRequested = errors.New("interactive input transcript requested")
+
 // ErrInteractiveInputBacktrackRequested signals bare Esc on an empty composer.
 // Chat may open the user-turn backtrack picker; other callers should treat it as a no-op cancel.
 var ErrInteractiveInputBacktrackRequested = errors.New("interactive input backtrack requested")
@@ -1484,6 +1489,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			yankKilledText()
 		case editorKeyTranspose:
 			flushPasteBurstBeforeModifiedInput()
+			if hooks != nil && hooks.OnTranscriptRequested != nil && hooks.OnTranscriptRequested(snapshot()) {
+				return "", ErrInteractiveInputTranscriptRequested
+			}
 			clearReverseSearchState()
 			transposeChars()
 		case editorKeyBackwardWord:

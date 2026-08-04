@@ -429,6 +429,30 @@ func TestReadInteractiveLine_CtrlTTransposesLastTwoCharacters(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_CtrlTTranscriptHookPreservesDraft(t *testing.T) {
+	var output bytes.Buffer
+	var snapshot LineEditorSnapshot
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("abc\x14"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{OnTranscriptRequested: func(value LineEditorSnapshot) bool {
+			snapshot = value
+			return true
+		}},
+		true,
+		false,
+	)
+	if !errors.Is(err, ErrInteractiveInputTranscriptRequested) {
+		t.Fatalf("error = %v, want transcript request", err)
+	}
+	if line != "" || snapshot.Text != "abc" || snapshot.Cursor != 3 {
+		t.Fatalf("draft was not preserved: line=%q snapshot=%#v", line, snapshot)
+	}
+}
+
 func TestReadInteractiveLine_CtrlRSearchesHistoryAndCyclesBackward(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(

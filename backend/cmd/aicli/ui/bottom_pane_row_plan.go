@@ -21,9 +21,11 @@ type BottomPaneRow struct {
 // intentionally excludes transcript/history rows: those require the future
 // semantic active/history composition and tokenized handoff work.
 type BottomPaneRowPlan struct {
-	Rows            []BottomPaneRow
-	StatusRow       int
-	OutputBottomRow int
+	Rows                []BottomPaneRow
+	StatusRow           int
+	OutputBottomRow     int
+	PromptInputStartRow int
+	PromptInputRows     int
 }
 
 // LayoutBottomPaneRows composes the bottom pane into plain text and ownership
@@ -52,8 +54,11 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 	}
 	firstRow := height - bottomRows + 1
 	outputBottom := height - bottomRows
-	if outputBottom < 1 {
-		outputBottom = 1
+	// A one-row terminal is entirely occupied by the status reserve. Zero is a
+	// valid output boundary here: treating row 1 as both output and status lets
+	// a transcript overwrite the reserve in the full-screen pure layout.
+	if outputBottom < 0 {
+		outputBottom = 0
 	}
 
 	rows := make(map[int]BottomPaneRow, bottomRows)
@@ -82,15 +87,18 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 		setRow(popupStart+len(popupLines), renderengine.RowOwnerPopup, truncateFixedPopupLine(composer, policy.Width))
 	}
 
+	promptInputStart, promptInputRows := 0, 0
 	if bottom.composerVisibleRowCount() == 0 {
-		layoutBottomPanePromptRows(setRow, bottom, policy, height, outputBottom, promptBottom)
+		promptInputStart, promptInputRows = layoutBottomPanePromptRows(setRow, bottom, policy, height, outputBottom, promptBottom)
 	}
 	setRow(statusRow, renderengine.RowOwnerStatus, bottomPaneStatusPlainText(bottom.StatusModel, policy.Width))
 
 	plan := BottomPaneRowPlan{
-		Rows:            make([]BottomPaneRow, 0, bottomRows),
-		StatusRow:       statusRow,
-		OutputBottomRow: outputBottom,
+		Rows:                make([]BottomPaneRow, 0, bottomRows),
+		StatusRow:           statusRow,
+		OutputBottomRow:     outputBottom,
+		PromptInputStartRow: promptInputStart,
+		PromptInputRows:     promptInputRows,
 	}
 	for row := firstRow; row <= statusRow; row++ {
 		plan.Rows = append(plan.Rows, rows[row])
@@ -152,7 +160,7 @@ func clampBottomPaneRow(row, statusRow int) int {
 	return row
 }
 
-func layoutBottomPanePromptRows(setRow func(int, renderengine.RowOwner, string), bottom BottomPaneState, policy BottomPaneGeometryPolicy, height, outputBottom, promptBottom int) {
+func layoutBottomPanePromptRows(setRow func(int, renderengine.RowOwner, string), bottom BottomPaneState, policy BottomPaneGeometryPolicy, height, outputBottom, promptBottom int) (int, int) {
 	promptRows := bottom.promptVisibleRowCount()
 	noticeRows := bottom.promptNoticeVisibleRowCount()
 	dynamicRows := bottom.dynamicStatusVisibleRowCount()
@@ -160,7 +168,7 @@ func layoutBottomPanePromptRows(setRow func(int, renderengine.RowOwner, string),
 	topMarginRows := bottom.promptTopMarginRowCount()
 	bottomMarginRows := bottom.promptBottomMarginRowCount()
 	if promptRows < 1 && noticeRows < 1 && dynamicRows < 1 && activeRows < 1 {
-		return
+		return 0, 0
 	}
 	if promptRows > 0 {
 		maxRows := promptBottom - outputBottom - dynamicRows - noticeRows - bottom.activeBandLayoutRowCount() - topMarginRows
@@ -205,6 +213,10 @@ func layoutBottomPanePromptRows(setRow func(int, renderengine.RowOwner, string),
 		}
 		setRow(promptStart+index, renderengine.RowOwnerPrompt, line)
 	}
+	if promptRows < 1 {
+		return 0, 0
+	}
+	return promptStart, promptRows
 }
 
 func bottomPaneStatusPlainText(model *style.StatusLineModel, width int) string {

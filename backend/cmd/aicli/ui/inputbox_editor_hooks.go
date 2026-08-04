@@ -48,6 +48,10 @@ type LineEditorHooks struct {
 	OnComplete            func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnNavigate            func(LineEditorSnapshot, int) bool
 	OnMove                func(LineEditorSnapshot, int) bool
+	// OnTranscriptRequested may claim Ctrl+T for a host-level read-only
+	// transcript overlay. Returning false preserves the editor's normal
+	// transpose-character behavior, so non-chat editors are unchanged.
+	OnTranscriptRequested func(LineEditorSnapshot) bool
 	OnSubmit              func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnCancelPopup         func(LineEditorSnapshot) bool
 	OnCancel              func(LineEditorSnapshot) bool

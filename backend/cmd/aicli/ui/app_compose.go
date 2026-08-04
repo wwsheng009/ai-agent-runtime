@@ -7,18 +7,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
 
-// AppTextRow 是 ComposeAppTextLayout 输出的一行纯文本帧。Row 为 1-based
-// 终端行号（与 legacy owned frame 的物理行一致），Owner 标记该行归属，
-// Text 为纯文本（无 ANSI、无调试标签）。
-//
-// 它是任务 7 的对齐目标：legacy FixedBottomSurface 的 composed frame 与
-// AppState snapshot 派生帧在此处做纯内存 parity，不涉及任何终端写。
-type AppTextRow struct {
-	Row   int
-	Owner renderengine.RowOwner
-	Text  string
-}
-
 // AppCursor 是帧的输入光标意图。Row 为 1-based 物理行；Col 为 1-based
 // 物理列，0 表示"未知/尚未派生"。它只来自 Bottom.Focus 与已派生的视口
 // 位置，绝不猜测 streaming 的 Stable/Enqueued/Acked 区间。
@@ -29,32 +17,28 @@ type AppCursor struct {
 }
 
 // AppTextLayout 是 ComposeAppTextLayout 的输出：完整屏幕文本帧
-// （transcript + active/bottom/overlay）。行数恒等于 Height，行序与
-// legacy composedPlanLocked 相同（1..Height 升序），因此两者可以直接
-// 按行比较。
+// （transcript + active/bottom/overlay）+ 光标意图。行数恒等于 Height，
+// 行序与 legacy composedPlanLocked 相同（1..Height 升序），因此两者可以
+// 直接按行比较。它是纯内存 shadow 产物，不包含任何终端写。
 type AppTextLayout struct {
 	Width  int
 	Height int
-	Rows   []AppTextRow
+	Rows   []AppScreenRow
 	Cursor *AppCursor
 }
 
-// ComposeAppTextLayout 从 immutable AppLayout 派生完整文本帧。纯函数：
-// 不读 surface mutex、不写 terminal、不推进 effect、不触碰任何实时状态
-// （Layout 铁律）。AppLayout 本身已深拷贝，调用方可安全复用。
-//
-// 行序 bottom-up 对齐 legacy 权威（fixed_bottom_surface_snapshot.go
-// composedPlanLocked / promptPaintPlanLocked / popupPaintPlanLocked）：
-//   - 第 Height 行 = status（RowPlan 已含默认 model 文本）；
-//   - status 之上为 popup 区（VisiblePopupLines + composer 行）；
-//   - 再向上为 prompt 区（band → notice → dynamic status → margins →
-//     prompt 输入行，composer 可见时整体跳过）；
-//   - 剩余 1..OutputBottomRow 由 transcript 语义行尾部对齐填充，
-//     boundary gap 行输出为空行（Owner=Gap）。
-func ComposeAppTextLayout(layout AppLayout) AppTextLayout {
+// ComposeAppTextLayout 从 immutable AppState snapshot 派生完整文本帧。
+// 纯函数：不读 surface mutex、不写 terminal、不推进 effect、不触碰任何
+// 实时状态（Layout 铁律）。行布局完全复用 LayoutAppScreen（含 transcript
+// wrap、mutable cell 排除、bottom pane RowPlan），本层只附加光标意图，
+// 避免出现第二套宽度/换行/行序算法。
+func ComposeAppTextLayout(state AppState) AppTextLayout {
+	layout := LayoutAppState(state)
+	screen := LayoutAppScreen(state)
 	out := AppTextLayout{
-		Width:  layout.Geometry.Width,
-		Height: layout.Geometry.Height,
+		Width:  screen.Geometry.Width,
+		Height: screen.Geometry.Height,
+		Rows:   screen.Rows,
 	}
 	if out.Width < 1 {
 		out.Width = 80
@@ -62,99 +46,54 @@ func ComposeAppTextLayout(layout AppLayout) AppTextLayout {
 	if out.Height < 1 {
 		return out
 	}
-
-	frame := make([]AppTextRow, out.Height)
-	for row := range frame {
-		frame[row] = AppTextRow{Row: row + 1, Owner: renderengine.RowOwnerGap}
-	}
-
-	// Bottom pane：直接复用纯布局 RowPlan（文本行 + Gap 填充行）。
-	plan := layout.Bottom.RowPlan
-	firstRow := plan.OutputBottomRow + 1
-	if firstRow < 1 {
-		firstRow = 1
-	}
-	promptStartRow := 0
-	popupLastRow := 0
-	for _, row := range plan.Rows {
-		if row.Row < firstRow || row.Row > out.Height {
-			continue
-		}
-		if row.Owner == renderengine.RowOwnerPrompt && promptStartRow == 0 {
-			promptStartRow = row.Row
-		}
-		if row.Owner == renderengine.RowOwnerPopup {
-			popupLastRow = row.Row
-		}
-		frame[row.Row-1] = AppTextRow{Row: row.Row, Owner: row.Owner, Text: row.Text}
-	}
-
-	// Transcript：尾部对齐 OutputBottomRow，从下往上填充；超出的最旧
-	// 语义行被丢弃（与 legacy 滚动语义一致）。
-	bottomRow := plan.OutputBottomRow
-	if bottomRow > out.Height-1 {
-		bottomRow = out.Height - 1
-	}
-	if bottomRow < 0 {
-		bottomRow = 0
-	}
-	transcriptRows := layout.Transcript
-	start := len(transcriptRows) - bottomRow
-	if start < 0 {
-		start = 0
-	}
-	for row := 1; row <= bottomRow; row++ {
-		index := start + row - 1
-		owner := renderengine.RowOwnerTranscript
-		text := ""
-		if index >= 0 && index < len(transcriptRows) {
-			text = transcriptRows[index].Text
-			if transcriptRows[index].Gap > 0 {
-				owner = renderengine.RowOwnerGap
-			}
-		}
-		frame[row-1] = AppTextRow{Row: row, Owner: owner, Text: text}
-	}
-
-	out.Rows = frame
-	out.Cursor = composeAppCursor(layout, promptStartRow, popupLastRow)
+	out.Cursor = composeAppCursor(screen.Rows, layout.Bottom.RowPlan, layout.Bottom.State, screen.CursorFocus)
 	return out
 }
 
-// composeAppCursor 派生输入光标意图。promptStartRow 是 RowPlan 中 prompt
-// 输入区第一行（notice 行虽同为 RowOwnerPrompt，但 RowPlan 顺序保证首个
-// Prompt owner 行即 promptStart，见 layoutBottomPanePromptRows）。
+// composeAppCursor 派生输入光标意图（纯布局，无终端读）。
 //
-// 列坐标语义：PromptCursorCol 来自纯布局的视觉位置派生；Col 输出
-// PromptCursorCol+1（1-based 物理列）。若 PromptCursorKnown 为假或列未知，
-// Col 保持 0（未知），由未来 Presenter 阶段补齐物理光标放置。
-func composeAppCursor(layout AppLayout, promptStartRow, popupLastRow int) *AppCursor {
-	bottom := layout.Bottom
-	switch bottom.CursorFocus {
+// Prompt 焦点：prompt 输入区位置来自 RowPlan 的显式 metadata，不能从
+// RowOwnerPrompt 反推，因为 notice/editor context 也使用 Prompt owner。
+// 在输入首行上叠加 PromptCursorRow（0-based 视口内行）得到物理行。Col 输出
+// PromptCursorCol+1（1-based 物理列）；未知列保持 0，由未来 Presenter
+// 阶段补齐物理光标放置。
+//
+// Popup 焦点：光标落在最后一条可见 popup 行，列 = 该行显示宽度 + 1
+// （与 legacy moveToPopupInputLocked 一致）。
+func composeAppCursor(rows []AppScreenRow, plan BottomPaneRowPlan, bottom BottomPaneState, focus BottomFocus) *AppCursor {
+	switch focus {
 	case BottomFocusPrompt:
-		row := promptStartRow
+		if !bottom.PromptCursorKnown || !bottom.PromptVisible {
+			return nil
+		}
+		if plan.PromptInputStartRow < 1 || plan.PromptInputRows < 1 {
+			return nil
+		}
+		row := plan.PromptInputStartRow + bottom.PromptCursorRow
+		if row < plan.PromptInputStartRow {
+			row = plan.PromptInputStartRow
+		}
+		if last := plan.PromptInputStartRow + plan.PromptInputRows - 1; row > last {
+			row = last
+		}
 		col := 0
-		if bottom.State.PromptCursorKnown && bottom.State.PromptCursorRow >= 0 {
-			row += bottom.State.PromptCursorRow
-		}
-		if row < 1 {
-			row = 1
-		}
-		if bottom.State.PromptCursorKnown && bottom.State.PromptCursorCol >= 0 {
-			col = bottom.State.PromptCursorCol + 1
+		if bottom.PromptCursorCol >= 0 {
+			col = bottom.PromptCursorCol + 1
 		}
 		return &AppCursor{Row: row, Col: col, Focus: BottomFocusPrompt}
 	case BottomFocusPopup:
-		if popupLastRow < 1 {
-			return nil
-		}
+		popupLast := 0
 		text := ""
-		for _, row := range bottom.RowPlan.Rows {
-			if row.Row == popupLastRow {
+		for _, row := range rows {
+			if row.Owner == renderengine.RowOwnerPopup {
+				popupLast = row.Row
 				text = row.Text
 			}
 		}
-		return &AppCursor{Row: popupLastRow, Col: DisplayWidth(text) + 1, Focus: BottomFocusPopup}
+		if popupLast < 1 {
+			return nil
+		}
+		return &AppCursor{Row: popupLast, Col: DisplayWidth(text) + 1, Focus: BottomFocusPopup}
 	default:
 		return nil
 	}
@@ -164,10 +103,11 @@ func composeAppCursor(layout AppLayout, promptStartRow, popupLastRow int) *AppCu
 // plan）与 AppState snapshot 派生帧，返回逐行差异的纯文本报告；完全一致时
 // 返回 "parity: identical"。仅做内存比较，不写 terminal，不影响生产渲染。
 //
-// 这是任务 7 的 shadow 钩子：/debug 或测试可调用它验证 AppState 快照是否
+// 这是任务 7 的 shadow 钩子：/debug 或测试调用它验证 AppState 快照是否
 // 完整捕获了 legacy 布局；报告的差异即快照覆盖缺口（例如 legacy history
-// buffer 与 AppState.Transcript 数据源尚未同源时的行数差异）。
-func (s *FixedBottomSurface) FrameParityWithAppLayout(layout AppLayout) string {
+// buffer 与 AppState.Transcript 尚未同源时的行数/文本差异，或 legacy
+// ActiveBand 的样式化渲染与纯文本投影的差异）。
+func (s *FixedBottomSurface) FrameParityWithAppLayout(state AppState) string {
 	if s == nil || s.terminal == nil {
 		return "parity: surface unavailable"
 	}
@@ -184,7 +124,7 @@ func (s *FixedBottomSurface) FrameParityWithAppLayout(layout AppLayout) string {
 		height = 24
 	}
 	legacy := s.composedPlanLocked(width, height, false)
-	derived := ComposeAppTextLayout(layout)
+	derived := ComposeAppTextLayout(state)
 	var b strings.Builder
 	count := 0
 	for row := 1; row <= height; row++ {

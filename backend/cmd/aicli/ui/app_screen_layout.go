@@ -5,6 +5,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
 // AppScreenRow is one row in the pure, plain-text screen-layout shadow. It is
@@ -37,6 +38,7 @@ type AppScreenLayout struct {
 	OutputBottomRow         int
 	CursorFocus             BottomFocus
 	Active                  ActiveCellState
+	ActiveBand              ActiveBandProjection
 	LegacyBandProjection    bool
 	ActiveProjectionPending bool
 }
@@ -55,6 +57,7 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 		Lease:                   layout.Lease,
 		CursorFocus:             layout.Bottom.CursorFocus,
 		Active:                  layout.Active.Clone(),
+		ActiveBand:              layout.ActiveBand.Clone(),
 		LegacyBandProjection:    layout.Bottom.LegacyBandProjection,
 		ActiveProjectionPending: layout.Active.Phase != ActiveCellInactive,
 	}
@@ -78,9 +81,9 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 			Text:  bottom.Text,
 		}
 	}
-	if layout.Bottom.RowPlan.OutputBottomRow > 0 {
-		result.OutputBottomRow = layout.Bottom.RowPlan.OutputBottomRow
-	}
+	// Zero is a valid output boundary when the entire one-row terminal is
+	// occupied by the fixed status reserve.
+	result.OutputBottomRow = layout.Bottom.RowPlan.OutputBottomRow
 	if result.OutputBottomRow < 0 {
 		result.OutputBottomRow = 0
 	}
@@ -138,7 +141,12 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, mutable map[scene.CellID
 		if row.Gap > 0 {
 			for count := 0; count < int(row.Gap); count++ {
 				result = append(result, AppScreenRow{
-					Owner:         renderengine.RowOwnerGap,
+					// A semantic boundary is an empty transcript row, not
+					// unowned bottom-pane headroom. Keeping its physical owner
+					// as Transcript matches the existing owned viewport while
+					// TranscriptGap retains the semantic distinction needed by
+					// later HistoryCommit handling.
+					Owner:         renderengine.RowOwnerTranscript,
 					CellID:        row.CellID,
 					TranscriptGap: true,
 				})
@@ -156,34 +164,64 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, mutable map[scene.CellID
 	return result
 }
 
-// wrapAppScreenText only expands a semantic source line to visible-width rows.
-// It preserves internal and trailing spaces, unlike the bottom overlay's
-// terminal-snapshot parity plan where trailing blank cells are intentionally
-// omitted. Combining and directional-isolate runes have zero display width and
-// stay attached to the current physical row.
+// wrapAppScreenText expands one semantic source line with the same pure VT
+// model used by the legacy owned viewport. This avoids a second, subtly
+// incompatible width algorithm for deferred wrap, wide runes, leading
+// combining marks, tab stops, and SGR/control-sequence parsing. It remains a
+// pure in-memory operation: no live terminal, surface, or projection cache is
+// read. Trailing blank cells are omitted because AppScreenRow.Text represents
+// visible glyphs rather than a terminal-cell buffer.
 func wrapAppScreenText(text string, width int) []string {
-	if width < 1 || text == "" {
-		return []string{text}
+	if width < 1 {
+		width = 80
 	}
-	rows := make([]string, 0, 1)
-	var line strings.Builder
-	used := 0
-	for _, r := range text {
-		runeWidth := DisplayWidth(string(r))
-		if runeWidth > 0 && used > 0 && used+runeWidth > width {
-			rows = append(rows, line.String())
-			line.Reset()
-			used = 0
-		}
-		line.WriteRune(r)
-		if runeWidth > 0 {
-			used += runeWidth
-		}
-		if runeWidth > width {
-			rows = append(rows, line.String())
-			line.Reset()
-			used = 0
-		}
+	// This is only a scratch-screen capacity estimate. VT remains the sole
+	// physical-row expansion rule. Size by display columns rather than source
+	// rune count so a long ordinary line does not allocate width*runeCount
+	// cells.
+	screen := vt.NewScreen(width, appScreenScratchHeight(text, width))
+	screen.Feed(text)
+	screen.Feed("\r\n")
+	end := screen.CursorRow() - 1
+	if end < 1 {
+		return nil
 	}
-	return append(rows, line.String())
+	cells := screen.CellRows(1, end)
+	rows := make([]string, len(cells))
+	for index, row := range cells {
+		rows[index] = appScreenCellRowText(row)
+	}
+	return rows
+}
+
+func appScreenScratchHeight(text string, width int) int {
+	if width < 1 {
+		width = 80
+	}
+	displayWidth := DisplayWidth(text)
+	if displayWidth < 1 {
+		displayWidth = 1
+	}
+	return (displayWidth+width-1)/width + 2
+}
+
+// appScreenCellRowText converts a terminal-cell row into the plain screen
+// shadow. Unlike cellRowPlainText, blank cells before or between glyphs are
+// materialized as spaces because they carry visible column position (for
+// example a source indentation, tab stop, or cursor-relative overwrite).
+// Trailing blanks remain omitted because the row is not a fixed-width cell
+// buffer.
+func appScreenCellRowText(cells []vt.Cell) string {
+	var text strings.Builder
+	for _, cell := range cells {
+		if cell.Cont {
+			continue
+		}
+		if cell.Text == "" {
+			text.WriteByte(' ')
+			continue
+		}
+		text.WriteString(cell.Text)
+	}
+	return strings.TrimRight(text.String(), " ")
 }

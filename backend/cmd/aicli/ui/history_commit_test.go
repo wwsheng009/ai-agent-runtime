@@ -39,6 +39,9 @@ func TestHistoryCommitLedger_AckExactlyOnceByTokenAndRange(t *testing.T) {
 	if !ok || entry.State != HistoryCommitAcked || entry.AckFrame != 99 {
 		t.Fatalf("entry = %+v, found=%t", entry, ok)
 	}
+	if entry.Commit.Lines != nil {
+		t.Fatalf("ack retained delivered payload: %#v", entry.Commit.Lines)
+	}
 }
 
 func TestHistoryCommitLedger_SameTextDifferentIdentityIsAllowed(t *testing.T) {
@@ -55,6 +58,19 @@ func TestHistoryCommitLedger_SameTextDifferentIdentityIsAllowed(t *testing.T) {
 	duplicate.Token = 3
 	if err := ledger.Enqueue(duplicate); !errors.Is(err, ErrDuplicateCommitRange) {
 		t.Fatalf("same identity/range Enqueue = %v, want ErrDuplicateCommitRange", err)
+	}
+}
+
+func TestHistoryCommitLedger_RejectsIncompleteIdentity(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	missingGeneration := testHistoryCommit(1, 41, 0)
+	if err := ledger.Enqueue(missingGeneration); !errors.Is(err, ErrInvalidHistoryCommit) {
+		t.Fatalf("missing layout generation = %v, want ErrInvalidHistoryCommit", err)
+	}
+	emptyDisplay := testHistoryCommit(2, 42, 1)
+	emptyDisplay.DisplayRange = DisplayRange{Start: 3, End: 3}
+	if err := ledger.Enqueue(emptyDisplay); !errors.Is(err, ErrInvalidHistoryCommit) {
+		t.Fatalf("empty display range = %v, want ErrInvalidHistoryCommit", err)
 	}
 }
 
@@ -90,8 +106,37 @@ func TestHistoryCommitLedger_FailurePreservesPartialWriteSignal(t *testing.T) {
 		t.Fatalf("Fail: %v", err)
 	}
 	entry, ok := ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitFailed || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, cause) {
+	if !ok || entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, cause) {
 		t.Fatalf("entry = %+v, found=%t", entry, ok)
+	}
+}
+
+func TestHistoryCommitLedger_SourceLookupKeepsLifecycleWithoutDetachedCopies(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	for token := uint64(1); token <= 64; token++ {
+		commit := testHistoryCommit(token, scene.CellID(token), 2)
+		commit.Lines = make([]render.Line, 16)
+		if err := ledger.Enqueue(commit); err != nil {
+			t.Fatalf("Enqueue(%d): %v", token, err)
+		}
+	}
+	target := testHistoryCommit(1, 1, 2)
+	key := historyCommitSourceIdentity(target)
+	if allocs := testing.AllocsPerRun(100, func() {
+		if !ledger.hasTerminalRecordForSource(key) {
+			t.Fatal("source index lost pending lifecycle")
+		}
+	}); allocs != 0 {
+		t.Fatalf("source lookup allocated %v objects; detached payload copies must stay off the hot path", allocs)
+	}
+	if err := ledger.MarkInFlight(target.Token); err != nil {
+		t.Fatalf("MarkInFlight: %v", err)
+	}
+	if err := ledger.Ack(target.Token, 10, target.LayoutGeneration); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if !ledger.hasTerminalRecordForSource(key) {
+		t.Fatal("acked source lifecycle was lost")
 	}
 }
 

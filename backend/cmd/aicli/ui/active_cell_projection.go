@@ -1,0 +1,116 @@
+package ui
+
+import (
+	"strings"
+	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+)
+
+// ActiveBandProjection is the pure, source-backed display candidate for the
+// mutable primary-cell tail. It deliberately retains a semantic source range
+// instead of a terminal-row cursor: a future presenter can rebuild it after a
+// resize or recovery without consulting an old frame or native scrollback.
+//
+// Lines are the unacknowledged suffix only. Once a range is acknowledged as a
+// history handoff, it must not remain in the live band and become a second
+// independently advancing copy of the same body.
+type ActiveBandProjection struct {
+	CellID      scene.CellID
+	Revision    uint64
+	Kind        scene.CellKind
+	SourceRange SourceRange
+	Lines       []render.Line
+}
+
+func (p ActiveBandProjection) Valid() bool {
+	return p.CellID != 0 && p.SourceRange.Valid() && p.SourceRange.End > p.SourceRange.Start && len(p.Lines) > 0
+}
+
+func (p ActiveBandProjection) Clone() ActiveBandProjection {
+	p.Lines = cloneRenderLines(p.Lines)
+	return p
+}
+
+// ProjectActiveCellBand derives a bounded rich-line view of the currently
+// mutable semantic cell. The range begins at Active.Acked.End, not at Stable or
+// Enqueued: a queued-but-unacknowledged prefix remains visible until the
+// terminal transaction has actually completed. This prevents a handoff race
+// from creating a visible hole.
+//
+// This is a layout helper only. It does not render Markdown, probe a terminal,
+// read a surface cache, or advance any range. The legacy FixedBottomSurface
+// remains the production presenter until the atomic primary-renderer cutover.
+func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) ActiveBandProjection {
+	if active.CellID == 0 || active.Phase == ActiveCellInactive || active.Source == "" {
+		return ActiveBandProjection{}
+	}
+
+	start := active.Acked.End
+	if (active.Acked.End > 0 && active.Acked.Start != 0) || start < 0 || start > len(active.Source) || !activeCellSourceBoundary(active.Source, start) {
+		// A source range is byte-addressed. Do not silently round an invalid
+		// boundary: rounding down duplicates a possibly handed-off rune, while
+		// rounding up hides source that has not been acknowledged.
+		return ActiveBandProjection{}
+	}
+	if start == len(active.Source) {
+		return ActiveBandProjection{}
+	}
+
+	width := geometry.Width
+	if width < 1 {
+		width = 80
+	}
+	rows := activeCellBandRows(active.Source[start:], width)
+	maxRows := ActiveBandRows(geometry.Height)
+	if len(rows) > maxRows {
+		rows = rows[len(rows)-maxRows:]
+	}
+	if len(rows) == 0 {
+		return ActiveBandProjection{}
+	}
+
+	role := appTranscriptRenderRole(active.Kind)
+	lines := make([]render.Line, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, render.Line{Spans: []render.Span{{
+			Text:  row,
+			Style: render.Style{Role: string(role)},
+		}}})
+	}
+	return ActiveBandProjection{
+		CellID:      active.CellID,
+		Revision:    active.Revision,
+		Kind:        active.Kind,
+		SourceRange: SourceRange{Start: start, End: len(active.Source)},
+		Lines:       lines,
+	}
+}
+
+func activeCellSourceBoundary(source string, offset int) bool {
+	if offset == 0 || offset == len(source) {
+		return true
+	}
+	return offset > 0 && offset < len(source) && utf8.RuneStart(source[offset])
+}
+
+// activeCellBandRows expands each logical source row independently. The
+// shared wrapAppScreenText helper is intentionally sized for one scene
+// LayoutRow; passing a multi-line active source straight through it can
+// under-size the scratch VT screen and truncate rows before the band budget is
+// applied. Logical-row expansion preserves all source rows, then the caller
+// selects the viewport tail.
+func activeCellBandRows(source string, width int) []string {
+	logicalRows := strings.Split(source, "\n")
+	rows := make([]string, 0, len(logicalRows))
+	for _, logical := range logicalRows {
+		logical = strings.TrimSuffix(logical, "\r")
+		expanded := wrapAppScreenText(logical, width)
+		if len(expanded) == 0 {
+			expanded = []string{""}
+		}
+		rows = append(rows, expanded...)
+	}
+	return rows
+}

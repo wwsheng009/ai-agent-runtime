@@ -759,6 +759,7 @@ func TestUIController_AppStateSnapshotTracksActorDomainsAndDetaches(t *testing.T
 		SetActiveCellAction{Active: ActiveCellState{
 			CellID:   42,
 			Revision: 9,
+			Kind:     scene.KindAssistant,
 			Phase:    ActiveCellMutable,
 			Source:   "mutable semantic source",
 			Stable:   SourceRange{Start: 0, End: 8},
@@ -793,7 +794,7 @@ func TestUIController_AppStateSnapshotTracksActorDomainsAndDetaches(t *testing.T
 	if state.Transcript.Revision != 7 || len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != "semantic transcript" {
 		t.Fatalf("transcript = %+v", state.Transcript)
 	}
-	if state.Active.CellID != 42 || state.Active.Phase != ActiveCellMutable || state.Active.Source != "mutable semantic source" {
+	if state.Active.CellID != 42 || state.Active.Kind != scene.KindAssistant || state.Active.Phase != ActiveCellMutable || state.Active.Source != "mutable semantic source" {
 		t.Fatalf("active = %+v", state.Active)
 	}
 	if state.Bottom.PromptInput != "draft" || state.Bottom.PromptCursor != 3 || !state.Bottom.PasteActive || !state.Bottom.PromptVisible {
@@ -832,7 +833,7 @@ func TestUIController_TranscriptActionDerivesMutableActiveCell(t *testing.T) {
 	c.WaitIdle()
 
 	state := c.State()
-	if state.Active.CellID != 12 || state.Active.Revision != 3 || state.Active.Phase != ActiveCellMutable || state.Active.Source != "live source" {
+	if state.Active.CellID != 12 || state.Active.Revision != 3 || state.Active.Kind != scene.KindAssistant || state.Active.Phase != ActiveCellMutable || state.Active.Source != "live source" {
 		t.Fatalf("active state = %+v, want mutable semantic cell", state.Active)
 	}
 	if !state.Active.Stable.Valid() || state.Active.Stable != (SourceRange{}) || state.Active.Enqueued != (SourceRange{}) || state.Active.Acked != (SourceRange{}) {
@@ -976,6 +977,12 @@ func TestUIActionClassification(t *testing.T) {
 		{"LeaseAcquired", LeaseAcquired{}, ClassBarrier, ""},
 		{"LeaseReleased", LeaseReleased{}, ClassBarrier, ""},
 		{"EffectResult", EffectResult{}, ClassBarrier, ""},
+		{"BeginHistoryCommit", BeginHistoryCommit{}, ClassBarrier, ""},
+		{"HistoryCommitAcknowledged", HistoryCommitAcknowledged{}, ClassBarrier, ""},
+		{"HistoryCommitFailed", HistoryCommitFailed{}, ClassBarrier, ""},
+		{"HistoryProjectionRecovered", HistoryProjectionRecovered{}, ClassBarrier, ""},
+		{"HistoryProjectionInvalidated", HistoryProjectionInvalidated{}, ClassBarrier, ""},
+		{"HistoryScrollbackReconciled", HistoryScrollbackReconciled{}, ClassBarrier, ""},
 		{"RuntimeEvent", RuntimeEvent{}, ClassDurable, ""},
 		{"InputEvent", InputEvent{}, ClassDurable, ""},
 		{"SetActiveBandAction", SetActiveBandAction{}, ClassDurable, ""},

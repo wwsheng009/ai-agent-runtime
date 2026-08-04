@@ -2,6 +2,7 @@ package ui
 
 import (
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
@@ -59,6 +60,14 @@ type PostActionEffect struct {
 
 func (PostActionEffect) isEffect() {}
 
+// HistoryCommitWakeEffect asks the primary terminal-effect consumer to inspect
+// the newest actor snapshot. It intentionally has no text payload: handing a
+// stale []Line to a worker would let resize or a lease race the reducer. The
+// consumer must select and claim a token from UIController.State instead.
+type HistoryCommitWakeEffect struct{}
+
+func (HistoryCommitWakeEffect) isEffect() {}
+
 // ControllerStats 是 UI actor 的诊断快照（供 /debug 与测试）。
 type ControllerStats struct {
 	Posted        uint64
@@ -103,6 +112,7 @@ type UIController struct {
 	revision      uint64
 	reducerPanics uint64
 	inFlight      bool
+	delivering    bool
 	lastAction    string
 	state         UIControllerState
 }
@@ -269,6 +279,9 @@ func (c *UIController) Run() {
 		c.revision++
 		if !panicked {
 			c.state = reduceUIControllerState(c.state, action, c.revision)
+			if historyCommitWakeNeeded(action, c.state) {
+				effects = append(effects, HistoryCommitWakeEffect{})
+			}
 		} else if len(c.followups) > followupStart {
 			// A reducer panic aborts the current action's causal continuation.
 			// Letting those follow-ups run would publish a partial transaction
@@ -276,9 +289,30 @@ func (c *UIController) Run() {
 			c.followups = c.followups[:followupStart]
 		}
 		c.lastAction = actionClassString(action)
+		c.delivering = true
 		c.mu.Unlock()
 		c.cond.Broadcast()
 		c.deliver(effects)
+		c.mu.Lock()
+		c.delivering = false
+		c.mu.Unlock()
+		c.cond.Broadcast()
+	}
+}
+
+// historyCommitWakeNeeded is evaluated only after the controller has published
+// the action's new AppState. It keeps HistoryCommit scheduling on the reducer
+// side while leaving physical terminal ownership to the injected presenter.
+func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
+	if !state.HistoryEffects.HasPending() {
+		return false
+	}
+	switch action.(type) {
+	case ReplaceTranscriptAction, FinalizeActiveCellAction, Resize,
+		LeaseReleased, HistoryProjectionRecovered, HistoryScrollbackReconciled, HistoryCommitAcknowledged:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -341,17 +375,44 @@ func (c *UIController) Close() {
 	c.cond.Broadcast()
 }
 
-// WaitIdle 阻塞直到队列为空且当前 action 已应用完毕。
-// 用于测试与确定性路径；生产代码不应依赖（producer 只 Post）。
+// WaitIdle 阻塞直到队列为空、当前 action 已应用完毕，并且该 action 的
+// effect callbacks 已派发。它不等待 effect callback 启动的异步工作；那类
+// worker 必须提供自己的受控等待接口。用于测试与确定性路径；生产代码不应
+// 依赖（producer 只 Post）。
 func (c *UIController) WaitIdle() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	for len(c.queue) > 0 || len(c.followups) > 0 || c.inFlight {
+	for len(c.queue) > 0 || len(c.followups) > 0 || c.inFlight || c.delivering {
 		c.cond.Wait()
 	}
 	c.mu.Unlock()
+}
+
+// WaitIdleTimeout is the bounded counterpart used by production drain paths.
+// It deliberately polls the actor state instead of spawning a waiter goroutine
+// that could outlive the timeout while blocked on the condition variable.
+func (c *UIController) WaitIdleTimeout(timeout time.Duration) bool {
+	if c == nil {
+		return true
+	}
+	if timeout <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		c.mu.Lock()
+		idle := len(c.queue) == 0 && len(c.followups) == 0 && !c.inFlight && !c.delivering
+		c.mu.Unlock()
+		if idle {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // Revision 返回已应用的 action 数（AppState Revision 的 Phase 1 来源）。
@@ -419,16 +480,42 @@ func actionClassString(action UIAction) string {
 		return "LeaseAcquired"
 	case LeaseReleased:
 		return "LeaseReleased"
+	case OpenTranscriptOverlay:
+		return "OpenTranscriptOverlay"
+	case CloseTranscriptOverlay:
+		return "CloseTranscriptOverlay"
+	case TranscriptPagerScroll:
+		return "TranscriptPagerScroll"
+	case TranscriptPagerSetFollowBottom:
+		return "TranscriptPagerSetFollowBottom"
 	case EffectResult:
 		return "EffectResult"
+	case BeginHistoryCommit:
+		return "BeginHistoryCommit"
+	case HistoryCommitAcknowledged:
+		return "HistoryCommitAcknowledged"
+	case HistoryCommitFailed:
+		return "HistoryCommitFailed"
+	case HistoryCommitDeferred:
+		return "HistoryCommitDeferred"
+	case HistoryProjectionRecovered:
+		return "HistoryProjectionRecovered"
+	case HistoryProjectionInvalidated:
+		return "HistoryProjectionInvalidated"
+	case HistoryScrollbackReconciled:
+		return "HistoryScrollbackReconciled"
 	case RuntimeEvent:
 		return "RuntimeEvent(" + a.Kind + ")"
 	case ReplaceTranscriptAction:
 		return "ReplaceTranscript"
 	case SetActiveCellAction:
 		return "SetActiveCell"
+	case UpdateActiveCellAction:
+		return "UpdateActiveCell"
 	case ClearActiveCellAction:
 		return "ClearActiveCell"
+	case FinalizeActiveCellAction:
+		return "FinalizeActiveCell"
 	case InputEvent:
 		return "InputEvent"
 	default:

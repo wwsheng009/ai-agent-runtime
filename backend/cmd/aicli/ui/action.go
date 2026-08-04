@@ -149,6 +149,43 @@ func (LeaseReleased) isUIAction()         {}
 func (LeaseReleased) Class() ActionClass  { return ClassBarrier }
 func (LeaseReleased) CoalesceKey() string { return "" }
 
+// OpenTranscriptOverlay and CloseTranscriptOverlay bind the semantic pager to
+// an already acquired ScreenLease. They are barriers because primary/alternate
+// ownership must not be reordered with resize or lease release.
+type OpenTranscriptOverlay struct {
+	LeaseID uint64
+}
+
+func (OpenTranscriptOverlay) isUIAction()         {}
+func (OpenTranscriptOverlay) Class() ActionClass  { return ClassBarrier }
+func (OpenTranscriptOverlay) CoalesceKey() string { return "" }
+
+type CloseTranscriptOverlay struct {
+	LeaseID uint64
+}
+
+func (CloseTranscriptOverlay) isUIAction()         {}
+func (CloseTranscriptOverlay) Class() ActionClass  { return ClassBarrier }
+func (CloseTranscriptOverlay) CoalesceKey() string { return "" }
+
+// TranscriptPagerScroll is a durable user intent. Reducer-side layout derives
+// the resulting anchor from semantic cells at the current geometry.
+type TranscriptPagerScroll struct {
+	Delta int
+}
+
+func (TranscriptPagerScroll) isUIAction()         {}
+func (TranscriptPagerScroll) Class() ActionClass  { return ClassDurable }
+func (TranscriptPagerScroll) CoalesceKey() string { return "" }
+
+type TranscriptPagerSetFollowBottom struct {
+	Follow bool
+}
+
+func (TranscriptPagerSetFollowBottom) isUIAction()         {}
+func (TranscriptPagerSetFollowBottom) Class() ActionClass  { return ClassDurable }
+func (TranscriptPagerSetFollowBottom) CoalesceKey() string { return "" }
+
 // EffectResult 是 terminal effect 的结果回投（实施指南 §3）：
 // Err == nil 视为 Ack（Token 成功），Err != nil 视为 Failed；
 // MayHavePartiallyWritten=true 时不得盲目重放同一 batch，投影进入
@@ -162,6 +199,96 @@ type EffectResult struct {
 func (EffectResult) isUIAction()         {}
 func (EffectResult) Class() ActionClass  { return ClassBarrier }
 func (EffectResult) CoalesceKey() string { return "" }
+
+// BeginHistoryCommit is the presenter's claim on one pending handoff token.
+// It is a barrier so a lease acquisition cannot be reordered after a primary
+// presenter has observed eligibility but before it marks the token in flight.
+type BeginHistoryCommit struct {
+	Token            uint64
+	LayoutGeneration uint64
+}
+
+func (BeginHistoryCommit) isUIAction()         {}
+func (BeginHistoryCommit) Class() ActionClass  { return ClassBarrier }
+func (BeginHistoryCommit) CoalesceKey() string { return "" }
+
+// HistoryCommitAcknowledged and HistoryCommitFailed are the typed effect
+// results for HistoryCommit. Generic EffectResult remains a Phase 1 delivery
+// diagnostic and intentionally cannot advance a semantic handoff frontier.
+type HistoryCommitAcknowledged struct {
+	Token            uint64
+	Frame            uint64
+	LayoutGeneration uint64
+}
+
+func (HistoryCommitAcknowledged) isUIAction()         {}
+func (HistoryCommitAcknowledged) Class() ActionClass  { return ClassBarrier }
+func (HistoryCommitAcknowledged) CoalesceKey() string { return "" }
+
+type HistoryCommitFailed struct {
+	Token                   uint64
+	LayoutGeneration        uint64
+	Err                     error
+	MayHavePartiallyWritten bool
+}
+
+func (HistoryCommitFailed) isUIAction()         {}
+func (HistoryCommitFailed) Class() ActionClass  { return ClassBarrier }
+func (HistoryCommitFailed) CoalesceKey() string { return "" }
+
+// HistoryCommitDeferred returns an in-flight commit to Pending only when its
+// presenter proved that no terminal byte was attempted (for example, primary
+// ownership changed before the terminal transaction began). It is not a
+// failure and must never be used after a write attempt.
+type HistoryCommitDeferred struct {
+	Token            uint64
+	LayoutGeneration uint64
+}
+
+func (HistoryCommitDeferred) isUIAction()         {}
+func (HistoryCommitDeferred) Class() ActionClass  { return ClassBarrier }
+func (HistoryCommitDeferred) CoalesceKey() string { return "" }
+
+// HistoryProjectionRecovered is posted only after a full primary repaint from
+// semantic source establishes a fresh known front-buffer baseline. Recovery is
+// generation-bound so an old frame cannot clear Unknown after a resize.
+type HistoryProjectionRecovered struct {
+	LayoutGeneration uint64
+}
+
+func (HistoryProjectionRecovered) isUIAction()         {}
+func (HistoryProjectionRecovered) Class() ActionClass  { return ClassBarrier }
+func (HistoryProjectionRecovered) CoalesceKey() string { return "" }
+
+// HistoryProjectionInvalidated records a failed viewport transaction that did
+// not necessarily contain a HistoryCommit. It prevents the effect queue from
+// claiming new handoffs until a matching source-backed recovery frame confirms
+// the primary projection again.
+type HistoryProjectionInvalidated struct {
+	LayoutGeneration uint64
+}
+
+func (HistoryProjectionInvalidated) isUIAction()         {}
+func (HistoryProjectionInvalidated) Class() ActionClass  { return ClassBarrier }
+func (HistoryProjectionInvalidated) CoalesceKey() string { return "" }
+
+// HistoryScrollbackReconciled is the explicit terminal-epoch boundary for an
+// unresolved native-scrollback delivery. It may be posted only after the
+// terminal session has been replaced or its scrollback has been reset, and a
+// source-backed primary recovery frame for LayoutGeneration has completed.
+//
+// A repaint alone cannot establish this fact: it restores the visible viewport
+// but cannot tell which old handoff bytes reached native scrollback. Epoch must
+// therefore be monotonic for one physical terminal session and is supplied by
+// the terminal owner, never inferred from a layout revision.
+type HistoryScrollbackReconciled struct {
+	LayoutGeneration uint64
+	TerminalEpoch    uint64
+}
+
+func (HistoryScrollbackReconciled) isUIAction()         {}
+func (HistoryScrollbackReconciled) Class() ActionClass  { return ClassBarrier }
+func (HistoryScrollbackReconciled) CoalesceKey() string { return "" }
 
 // TerminalEffectAck is the typed success result for a terminal transaction.
 // It is an alias-shaped action payload rather than an implicit nil error, so
@@ -233,6 +360,46 @@ func (SetActiveCellAction) isUIAction()         {}
 func (SetActiveCellAction) Class() ActionClass  { return ClassDurable }
 func (SetActiveCellAction) CoalesceKey() string { return "" }
 
+// UpdateActiveCellAction advances one already-mounted mutable cell. It carries
+// a full source snapshot rather than a terminal delta so a coalesced mailbox
+// entry is still self-contained. ExpectedCellID/ExpectedRevision fence a late
+// delta from overwriting a newer turn or finalization.
+//
+// Mutable stream updates are intentionally coalescable by CellID. When several
+// revisions are waiting, the reducer only needs the newest complete source and
+// its range ledger; the merge retains the oldest expected revision so it still
+// validates against the state observed before the queued sequence began.
+type UpdateActiveCellAction struct {
+	ExpectedCellID   scene.CellID
+	ExpectedRevision uint64
+	Active           ActiveCellState
+}
+
+func (UpdateActiveCellAction) isUIAction()        {}
+func (UpdateActiveCellAction) Class() ActionClass { return ClassCoalescable }
+func (a UpdateActiveCellAction) CoalesceKey() string {
+	if a.Active.CellID == 0 {
+		return ""
+	}
+	return updateActiveCellActionKey(a.Active.CellID)
+}
+
+func (a UpdateActiveCellAction) mergeCoalesce(pending UIAction) UIAction {
+	incoming, ok := pending.(UpdateActiveCellAction)
+	if !ok || incoming.Active.CellID != a.Active.CellID {
+		return a
+	}
+	if incoming.Active.Revision <= a.Active.Revision {
+		return a
+	}
+	// The pending action was validated against the state before its first
+	// revision. Preserve that fence while replacing the payload with the latest
+	// full source/range snapshot.
+	incoming.ExpectedCellID = a.ExpectedCellID
+	incoming.ExpectedRevision = a.ExpectedRevision
+	return incoming
+}
+
 // ClearActiveCellAction removes the current mutable semantic cell after a
 // finalized transcript action has been accepted.
 type ClearActiveCellAction struct{}
@@ -240,6 +407,19 @@ type ClearActiveCellAction struct{}
 func (ClearActiveCellAction) isUIAction()         {}
 func (ClearActiveCellAction) Class() ActionClass  { return ClassDurable }
 func (ClearActiveCellAction) CoalesceKey() string { return "" }
+
+// FinalizeActiveCellAction commits a Scene snapshot and clears only the active
+// cell version the producer observed. It prevents an old finalization from
+// deleting a newer mutable cell after backtrack, replace, or a new turn.
+type FinalizeActiveCellAction struct {
+	Snapshot               *scene.Snapshot
+	ExpectedActiveCellID   scene.CellID
+	ExpectedActiveRevision uint64
+}
+
+func (FinalizeActiveCellAction) isUIAction()         {}
+func (FinalizeActiveCellAction) Class() ActionClass  { return ClassDurable }
+func (FinalizeActiveCellAction) CoalesceKey() string { return "" }
 
 // InputEvent 是用户输入事件（键盘/粘贴/IME）。durable：绝不丢弃用户输入。
 // Cursor/PasteActive 保留编辑器快照所需的最小语义；Render 表示该快照

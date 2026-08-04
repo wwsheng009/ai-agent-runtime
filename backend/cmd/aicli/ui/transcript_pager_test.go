@@ -1,0 +1,227 @@
+package ui
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+)
+
+func committedPagerCell(id scene.CellID, source string) scene.TranscriptCell {
+	return scene.TranscriptCell{
+		ID: id, Revision: uint64(id), Kind: scene.KindAssistant,
+		Source: source, Phase: scene.CellCommitted,
+	}
+}
+
+func pagerSnapshot(revision uint64, cells ...scene.TranscriptCell) TranscriptPagerSnapshot {
+	return TranscriptPagerSnapshot{Transcript: TranscriptState{Revision: revision, Cells: cells}}
+}
+
+func TestTranscriptPagerModel_SeparatesMutableTailFromCommittedCells(t *testing.T) {
+	snapshot := pagerSnapshot(4,
+		committedPagerCell(1, "done"),
+		scene.TranscriptCell{ID: 2, Revision: 7, Kind: scene.KindAssistant, Source: "old tail", Phase: scene.CellMutable},
+	)
+	snapshot.Active = ActiveCellState{CellID: 2, Revision: 8, Phase: ActiveCellMutable, Source: "latest tail"}
+	model := NewTranscriptPagerModel(snapshot)
+	if len(model.Cells) != 1 || model.Cells[0].ID != 1 {
+		t.Fatalf("committed cells = %#v, want only cell 1", model.Cells)
+	}
+	if model.LiveTail == nil || model.LiveTail.CellID != 2 || model.LiveTail.Source != "latest tail" {
+		t.Fatalf("live tail = %#v", model.LiveTail)
+	}
+	joined := transcriptPagerRowsText(model.Rows(40))
+	if strings.Count(joined, "latest tail") != 1 || strings.Contains(joined, "old tail") {
+		t.Fatalf("rows did not use one authoritative tail: %q", joined)
+	}
+}
+
+func TestTranscriptPagerState_AppendFollowsBottom(t *testing.T) {
+	model := NewTranscriptPagerModel(pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"),
+	))
+	state := NewTranscriptPagerState()
+	state.Reconcile(model, 40, 2)
+	before := state.Anchor.Offset
+	model = NewTranscriptPagerModel(pagerSnapshot(2,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"), committedPagerCell(3, "three"),
+	))
+	state.Reconcile(model, 40, 2)
+	if !state.FollowBottom || state.Anchor.Offset <= before {
+		t.Fatalf("append must move a bottom-following pager: before=%d after=%d state=%#v", before, state.Anchor.Offset, state)
+	}
+}
+
+func TestTranscriptPagerState_AppendPreservesScrolledAnchor(t *testing.T) {
+	model := NewTranscriptPagerModel(pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"),
+		committedPagerCell(3, "three"), committedPagerCell(4, "four"),
+	))
+	state := NewTranscriptPagerState()
+	state.Reconcile(model, 40, 3)
+	state.Scroll(model, 40, 3, -4)
+	anchor := state.Anchor
+	if state.FollowBottom || anchor.CellID == 0 {
+		t.Fatalf("expected a user-owned anchor after scroll: %#v", state)
+	}
+	model = NewTranscriptPagerModel(pagerSnapshot(2,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"),
+		committedPagerCell(3, "three"), committedPagerCell(4, "four"), committedPagerCell(5, "five"),
+	))
+	state.Reconcile(model, 40, 3)
+	if state.Anchor.CellID != anchor.CellID || state.Anchor.Row != anchor.Row {
+		t.Fatalf("append changed inspected anchor: before=%#v after=%#v", anchor, state.Anchor)
+	}
+}
+
+func TestTranscriptPagerState_ReplacesRemovedAnchorSafely(t *testing.T) {
+	model := NewTranscriptPagerModel(pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"), committedPagerCell(3, "three"),
+	))
+	state := NewTranscriptPagerState()
+	state.Reconcile(model, 40, 2)
+	state.Scroll(model, 40, 2, -4)
+	if state.Anchor.CellID == 0 {
+		t.Fatal("expected initial anchor")
+	}
+	removed := state.Anchor.CellID
+	model = NewTranscriptPagerModel(pagerSnapshot(2, committedPagerCell(1, "one"), committedPagerCell(3, "three")))
+	state.Reconcile(model, 40, 2)
+	if state.Anchor.CellID == removed {
+		t.Fatalf("removed anchor %d was retained", removed)
+	}
+	if state.Anchor.Offset < 0 || state.Anchor.Offset > transcriptPagerMaxOffset(len(model.Rows(40)), 2) {
+		t.Fatalf("fallback offset out of bounds: %#v", state.Anchor)
+	}
+}
+
+func TestTranscriptPagerState_ReflowKeepsCellAnchor(t *testing.T) {
+	model := NewTranscriptPagerModel(pagerSnapshot(1,
+		committedPagerCell(1, "a long source that wraps over several visual rows"),
+		committedPagerCell(2, "second"),
+	))
+	state := NewTranscriptPagerState()
+	state.Reconcile(model, 12, 2)
+	state.Scroll(model, 12, 2, -1)
+	anchor := state.Anchor
+	state.Reconcile(model, 28, 2)
+	if state.Anchor.CellID != anchor.CellID {
+		t.Fatalf("resize lost cell anchor: before=%#v after=%#v", anchor, state.Anchor)
+	}
+	if state.Anchor.LayoutGeneration <= anchor.LayoutGeneration {
+		t.Fatalf("resize did not advance layout generation: before=%#v after=%#v", anchor, state.Anchor)
+	}
+}
+
+func TestTranscriptPagerModel_FinalizationReplacesTailExactlyOnce(t *testing.T) {
+	before := pagerSnapshot(1, scene.TranscriptCell{ID: 8, Revision: 2, Kind: scene.KindAssistant, Source: "partial", Phase: scene.CellMutable})
+	before.Active = ActiveCellState{CellID: 8, Revision: 2, Phase: ActiveCellMutable, Source: "partial"}
+	after := pagerSnapshot(2, committedPagerCell(8, "final answer"))
+	beforeModel := NewTranscriptPagerModel(before)
+	afterModel := NewTranscriptPagerModel(after)
+	if beforeModel.LiveTail == nil || afterModel.LiveTail != nil || len(afterModel.Cells) != 1 {
+		t.Fatalf("unexpected finalization models: before=%#v after=%#v", beforeModel, afterModel)
+	}
+	if got := strings.Count(transcriptPagerRowsText(afterModel.Rows(40)), "final answer"); got != 1 {
+		t.Fatalf("finalized content rendered %d times", got)
+	}
+}
+
+func TestApplyTranscriptPagerKey_CtrlTClosesAndUpScrolls(t *testing.T) {
+	model := NewTranscriptPagerModel(pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"), committedPagerCell(3, "three"),
+	))
+	state := NewTranscriptPagerState()
+	state.Reconcile(model, 40, 2)
+	before := state.Anchor.Offset
+	if applyTranscriptPagerKey(&state, model, 40, 5, editorKey{kind: editorKeyUp}) {
+		t.Fatal("up must not close pager")
+	}
+	if state.Anchor.Offset >= before {
+		t.Fatalf("up did not scroll: before=%d after=%d", before, state.Anchor.Offset)
+	}
+	if !applyTranscriptPagerKey(&state, model, 40, 5, editorKey{kind: editorKeyTranspose}) {
+		t.Fatal("Ctrl+T must close pager")
+	}
+}
+
+func TestRunTranscriptPagerLoop_RefreshesCommittedSnapshotBeforeClose(t *testing.T) {
+	snapshotCalls := 0
+	keyCalls := 0
+	frames := make([]string, 0, 2)
+	err := runTranscriptPagerLoop(context.Background(), transcriptPagerLoopHooks{
+		refreshSize: func() (int, int) { return 40, 8 },
+		snapshot: func() TranscriptPagerSnapshot {
+			snapshotCalls++
+			if snapshotCalls == 1 {
+				return pagerSnapshot(1, committedPagerCell(1, "first"))
+			}
+			return pagerSnapshot(2, committedPagerCell(1, "first"), committedPagerCell(2, "second"))
+		},
+		writeFrame: func(frame string) error {
+			frames = append(frames, frame)
+			return nil
+		},
+		readKey: func(context.Context) (editorKey, bool, error) {
+			keyCalls++
+			if keyCalls == 1 {
+				return editorKey{}, false, nil
+			}
+			return editorKey{kind: editorKeyTranspose}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runTranscriptPagerLoop: %v", err)
+	}
+	if len(frames) != 2 || !strings.Contains(frames[1], "second") {
+		t.Fatalf("pager did not render replacement snapshot: %#v", frames)
+	}
+}
+
+func TestTranscriptOverlayReducer_SynchronizesLeaseAndTranscript(t *testing.T) {
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: 40, Height: 12}, 1)
+	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 9}, 2)
+	state = reduceUIControllerState(state, OpenTranscriptOverlay{LeaseID: 9}, 3)
+	if !state.TranscriptOverlay.Active || state.TranscriptOverlay.LeaseID != 9 {
+		t.Fatalf("overlay was not opened: %#v", state.TranscriptOverlay)
+	}
+	cell := committedPagerCell(1, "committed")
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+		Revision: 4, Cells: []*scene.TranscriptCell{&cell},
+	}}, 4)
+	if state.TranscriptOverlay.Pager.Anchor.CellID != 1 {
+		t.Fatalf("pager did not receive transcript replacement: %#v", state.TranscriptOverlay.Pager)
+	}
+	state = reduceUIControllerState(state, LeaseReleased{LeaseID: 9}, 5)
+	if state.TranscriptOverlay.Active || state.Lease.Active {
+		t.Fatalf("lease release did not clear overlay: lease=%#v overlay=%#v", state.Lease, state.TranscriptOverlay)
+	}
+}
+
+func TestFinalizeActiveCellAction_RejectsStaleActiveVersion(t *testing.T) {
+	state := UIControllerState{AppState: AppState{
+		Transcript: TranscriptState{Revision: 1, Cells: []scene.TranscriptCell{{
+			ID: 4, Revision: 2, Kind: scene.KindAssistant, Source: "partial", Phase: scene.CellMutable,
+		}}},
+		Active: ActiveCellState{CellID: 4, Revision: 3, Phase: ActiveCellMutable, Source: "newer"},
+	}}
+	final := committedPagerCell(4, "final")
+	state = reduceUIControllerState(state, FinalizeActiveCellAction{
+		Snapshot:             &scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{&final}},
+		ExpectedActiveCellID: 4, ExpectedActiveRevision: 2,
+	}, 1)
+	if state.Active.Revision != 3 || state.Transcript.Revision != 1 {
+		t.Fatalf("stale finalization modified state: %#v", state.AppState)
+	}
+}
+
+func transcriptPagerRowsText(rows []TranscriptPagerRow) string {
+	parts := make([]string, 0, len(rows))
+	for _, row := range rows {
+		parts = append(parts, row.Text)
+	}
+	return strings.Join(parts, "\n")
+}

@@ -65,9 +65,12 @@ func (p HandoffPlan) ANSI() string {
 }
 
 // WriteTo writes the complete handoff sequence to an in-memory or test writer.
-func (p HandoffPlan) WriteTo(w io.Writer) (int, error) {
+// The int64 result follows io.WriterTo so vet and generic io consumers can use
+// the plan without an adapter.
+func (p HandoffPlan) WriteTo(w io.Writer) (int64, error) {
 	if w == nil {
 		return 0, nil
 	}
-	return io.WriteString(w, p.ANSI())
+	n, err := io.WriteString(w, p.ANSI())
+	return int64(n), err
 }

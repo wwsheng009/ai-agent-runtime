@@ -3956,7 +3956,21 @@ func (s *FixedBottomSurface) OwnedViewport() bool {
 	if s == nil {
 		return false
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.ownedViewport
+}
+
+// HasActivePopup reports whether another bottom-pane interaction currently
+// owns input. Fullscreen transcript entry uses it to avoid stealing approval,
+// completion, or modal composer input from the primary screen.
+func (s *FixedBottomSurface) HasActivePopup() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.popupLines) > 0 || s.popupOwner != "" || s.popupInstance != 0 || len(s.popupStack) > 0
 }
 
 func (s *FixedBottomSurface) activeBandThemeContextLocked() style.ThemeContext {

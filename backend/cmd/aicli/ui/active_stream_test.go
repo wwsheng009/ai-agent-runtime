@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
@@ -497,5 +498,66 @@ func TestActiveStreamControllerKeepsBlockBlankBeforeHoldback(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestActiveStreamControllerSourceSnapshotAssistantRanges(t *testing.T) {
+	c := NewActiveStreamController(40, 6)
+	c.BeginAssistant("assistant")
+	c.PushAssistantDelta("stable prefix\n", false)
+	snapshot := c.SourceSnapshot()
+	if !snapshot.Active || snapshot.Kind != cell.ActiveAssistant {
+		t.Fatalf("assistant snapshot identity = %+v", snapshot)
+	}
+	if snapshot.Source != "stable prefix\n" || snapshot.StableEnd != len(snapshot.Source) || snapshot.CommittedEnd != 0 {
+		t.Fatalf("assistant snapshot = %+v", snapshot)
+	}
+
+	c.CommitStablePrefix(len("stable prefix\n"))
+	snapshot = c.SourceSnapshot()
+	if snapshot.Source != "stable prefix\n" || snapshot.StableEnd != len(snapshot.Source) || snapshot.CommittedEnd != len(snapshot.Source) {
+		t.Fatalf("committed assistant snapshot = %+v", snapshot)
+	}
+
+	content, kind := c.Finalize()
+	if content != "stable prefix\n" || kind != cell.ActiveAssistant {
+		t.Fatalf("finalize = %q/%v", content, kind)
+	}
+	if snapshot = c.SourceSnapshot(); snapshot.Active {
+		t.Fatalf("finalized controller still reports active snapshot: %+v", snapshot)
+	}
+}
+
+func TestActiveStreamControllerSourceSnapshotPreservesMarkdownHoldback(t *testing.T) {
+	c := NewActiveStreamController(40, 6)
+	c.BeginAssistant("assistant")
+	c.PushAssistantDelta("#", true)
+
+	snapshot := c.SourceSnapshot()
+	if !snapshot.Active || snapshot.Kind != cell.ActiveAssistant || snapshot.Source != "#" {
+		t.Fatalf("markdown snapshot identity/source = %+v", snapshot)
+	}
+	if snapshot.StableEnd != 0 || snapshot.CommittedEnd != 0 {
+		t.Fatalf("unfinished markdown was incorrectly made handoff-eligible: %+v", snapshot)
+	}
+}
+
+func TestActiveStreamControllerSourceSnapshotToolOmitsDisplay(t *testing.T) {
+	c := NewActiveStreamController(40, 6)
+	c.BeginToolDisplay("shell", map[string]interface{}{"command": "dir"}, "running: dir")
+	snapshot := c.SourceSnapshot()
+	if !snapshot.Active || snapshot.Kind != cell.ActiveTool {
+		t.Fatalf("tool snapshot identity = %+v", snapshot)
+	}
+	if snapshot.Source != "" || snapshot.StableEnd != 0 || snapshot.CommittedEnd != 0 {
+		t.Fatalf("tool display leaked into source snapshot: %+v", snapshot)
+	}
+	if got := c.ToolDisplay(); got != "running: dir" {
+		t.Fatalf("ToolDisplay=%q", got)
+	}
+
+	c.Cancel()
+	if snapshot = c.SourceSnapshot(); snapshot != (ActiveStreamSourceSnapshot{}) {
+		t.Fatalf("cancelled controller snapshot = %+v", snapshot)
 	}
 }

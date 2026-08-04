@@ -3,19 +3,22 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 var (
-	ErrInvalidHistoryCommit  = errors.New("invalid history commit")
-	ErrDuplicateCommitToken  = errors.New("duplicate history commit token")
-	ErrDuplicateCommitRange  = errors.New("duplicate history commit range")
-	ErrCommitNotPending      = errors.New("history commit is not pending")
-	ErrCommitNotInFlight     = errors.New("history commit is not in flight")
-	ErrDuplicateCommitAck    = errors.New("duplicate history commit acknowledgement")
-	ErrStaleLayoutGeneration = errors.New("stale history commit layout generation")
+	ErrInvalidHistoryCommit    = errors.New("invalid history commit")
+	ErrDuplicateCommitToken    = errors.New("duplicate history commit token")
+	ErrDuplicateCommitRange    = errors.New("duplicate history commit range")
+	ErrCommitNotPending        = errors.New("history commit is not pending")
+	ErrCommitNotInFlight       = errors.New("history commit is not in flight")
+	ErrHistoryCommitOutOfOrder = errors.New("history commit is not the oldest eligible effect")
+	ErrDuplicateCommitAck      = errors.New("duplicate history commit acknowledgement")
+	ErrStaleLayoutGeneration   = errors.New("stale history commit layout generation")
+	ErrCommitSourceChanged     = errors.New("history commit source identity changed")
 )
 
 // SourceRange identifies a half-open range in one semantic cell source.
@@ -54,7 +57,9 @@ type HistoryCommit struct {
 }
 
 func (c HistoryCommit) Valid() bool {
-	return c.Token != 0 && c.CellID != 0 && c.SourceRange.Valid() && c.DisplayRange.Valid()
+	return c.Token != 0 && c.CellID != 0 && c.LayoutGeneration != 0 &&
+		c.SourceRange.Valid() && c.SourceRange.End > c.SourceRange.Start &&
+		c.DisplayRange.Valid() && c.DisplayRange.End > c.DisplayRange.Start
 }
 
 func (c HistoryCommit) Clone() HistoryCommit {
@@ -70,7 +75,8 @@ const (
 	HistoryCommitPending HistoryCommitState = iota
 	HistoryCommitInFlight
 	HistoryCommitAcked
-	HistoryCommitFailed
+	HistoryCommitStateFailed
+	HistoryCommitInvalidated
 )
 
 func (s HistoryCommitState) String() string {
@@ -81,8 +87,10 @@ func (s HistoryCommitState) String() string {
 		return "in_flight"
 	case HistoryCommitAcked:
 		return "acked"
-	case HistoryCommitFailed:
+	case HistoryCommitStateFailed:
 		return "failed"
+	case HistoryCommitInvalidated:
+		return "invalidated"
 	default:
 		return "unknown"
 	}
@@ -112,6 +120,22 @@ type historyCommitRangeKey struct {
 	layoutGeneration uint64
 }
 
+type historyCommitSourceKey struct {
+	cellID      scene.CellID
+	revision    uint64
+	sourceStart int
+	sourceEnd   int
+}
+
+func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
+	return historyCommitSourceKey{
+		cellID:      commit.CellID,
+		revision:    commit.Revision,
+		sourceStart: commit.SourceRange.Start,
+		sourceEnd:   commit.SourceRange.End,
+	}
+}
+
 func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 	return historyCommitRangeKey{
 		cellID:           c.CellID,
@@ -127,20 +151,32 @@ func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 // HistoryCommitLedger is reducer-owned effect progress. It deliberately has
 // no terminal I/O and does not infer identity from line text or hashes.
 type HistoryCommitLedger struct {
-	byToken map[uint64]HistoryCommitEntry
-	byRange map[historyCommitRangeKey]uint64
+	byToken      map[uint64]HistoryCommitEntry
+	byRange      map[historyCommitRangeKey]uint64
+	bySource     map[historyCommitSourceKey]map[uint64]struct{}
+	pendingCount int
 }
 
 func NewHistoryCommitLedger() *HistoryCommitLedger {
 	return &HistoryCommitLedger{
-		byToken: make(map[uint64]HistoryCommitEntry),
-		byRange: make(map[historyCommitRangeKey]uint64),
+		byToken:  make(map[uint64]HistoryCommitEntry),
+		byRange:  make(map[historyCommitRangeKey]uint64),
+		bySource: make(map[historyCommitSourceKey]map[uint64]struct{}),
 	}
 }
 
 func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	if l == nil {
 		return fmt.Errorf("%w: nil ledger", ErrInvalidHistoryCommit)
+	}
+	if l.byToken == nil {
+		l.byToken = make(map[uint64]HistoryCommitEntry)
+	}
+	if l.byRange == nil {
+		l.byRange = make(map[historyCommitRangeKey]uint64)
+	}
+	if l.bySource == nil {
+		l.bySource = make(map[historyCommitSourceKey]map[uint64]struct{})
 	}
 	if !commit.Valid() {
 		return ErrInvalidHistoryCommit
@@ -154,6 +190,12 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	}
 	l.byToken[commit.Token] = HistoryCommitEntry{Commit: commit.Clone(), State: HistoryCommitPending}
 	l.byRange[key] = commit.Token
+	sourceKey := historyCommitSourceIdentity(commit)
+	if l.bySource[sourceKey] == nil {
+		l.bySource[sourceKey] = make(map[uint64]struct{})
+	}
+	l.bySource[sourceKey][commit.Token] = struct{}{}
+	l.pendingCount++
 	return nil
 }
 
@@ -164,7 +206,77 @@ func (l *HistoryCommitLedger) MarkInFlight(token uint64) error {
 	}
 	entry.State = HistoryCommitInFlight
 	l.byToken[token] = entry
+	l.pendingCount--
 	return nil
+}
+
+// DeferInFlight returns an effect to Pending only when its presenter did not
+// begin a terminal write. The token and immutable payload remain unchanged, so
+// retrying after a lease/recovery boundary cannot mint a second handoff.
+func (l *HistoryCommitLedger) DeferInFlight(token uint64) error {
+	entry, ok := l.entry(token)
+	if !ok || entry.State != HistoryCommitInFlight {
+		return ErrCommitNotInFlight
+	}
+	entry.State = HistoryCommitPending
+	entry.AckFrame = 0
+	entry.Failure = nil
+	entry.MayHavePartiallyWritten = false
+	l.byToken[token] = entry
+	l.pendingCount++
+	return nil
+}
+
+// RebasePending updates only the display payload of an unstarted effect after
+// a layout generation change. Token and semantic source identity are retained;
+// resize therefore never creates a second history handoff token.
+func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCommit) error {
+	entry, ok := l.entry(token)
+	if !ok || entry.State != HistoryCommitPending {
+		return ErrCommitNotPending
+	}
+	current := entry.Commit
+	if current.CellID != replacement.CellID || current.Revision != replacement.Revision ||
+		current.SourceRange != replacement.SourceRange {
+		return ErrCommitSourceChanged
+	}
+	replacement.Token = token
+	if !replacement.Valid() {
+		return ErrInvalidHistoryCommit
+	}
+	oldKey := historyCommitKey(current)
+	newKey := historyCommitKey(replacement)
+	if existing, exists := l.byRange[newKey]; exists && existing != token {
+		return ErrDuplicateCommitRange
+	}
+	delete(l.byRange, oldKey)
+	entry.Commit = replacement.Clone()
+	l.byToken[token] = entry
+	l.byRange[newKey] = token
+	return nil
+}
+
+// Invalidate prevents a pending or in-flight effect from being consumed after
+// transcript replacement. An in-flight invalidation means terminal bytes may
+// already have reached the old projection and therefore requires recovery.
+func (l *HistoryCommitLedger) Invalidate(token uint64) (wasInFlight bool, err error) {
+	entry, ok := l.entry(token)
+	if !ok || (entry.State != HistoryCommitPending && entry.State != HistoryCommitInFlight) {
+		return false, ErrCommitNotPending
+	}
+	wasInFlight = entry.State == HistoryCommitInFlight
+	entry.State = HistoryCommitInvalidated
+	// An in-flight transaction can already have written a prefix before a
+	// semantic replacement or geometry barrier reaches the actor. Preserve that
+	// fact on the ledger entry so later planning never treats this identity as a
+	// harmless pending cancellation.
+	if wasInFlight {
+		entry.MayHavePartiallyWritten = true
+	} else {
+		l.pendingCount--
+	}
+	l.byToken[token] = entry
+	return wasInFlight, nil
 }
 
 // Ack accepts a terminal effect only for the layout generation that produced
@@ -188,6 +300,9 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	entry.AckFrame = frame
 	entry.Failure = nil
 	entry.MayHavePartiallyWritten = false
+	// The semantic transcript remains authoritative after delivery. The effect
+	// payload is retained only until its terminal transaction is acknowledged.
+	entry.Commit.Lines = nil
 	l.byToken[token] = entry
 	return nil
 }
@@ -197,7 +312,7 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 	if !ok || entry.State != HistoryCommitInFlight {
 		return ErrCommitNotInFlight
 	}
-	entry.State = HistoryCommitFailed
+	entry.State = HistoryCommitStateFailed
 	entry.Failure = err
 	entry.MayHavePartiallyWritten = mayHavePartiallyWritten
 	l.byToken[token] = entry
@@ -207,6 +322,118 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 func (l *HistoryCommitLedger) Entry(token uint64) (HistoryCommitEntry, bool) {
 	entry, ok := l.entry(token)
 	return entry.Clone(), ok
+}
+
+// Entries returns a token-ordered detached ledger view. Ordering is part of
+// the terminal-effect contract: a presenter must consume the oldest eligible
+// pending commit before newer history ranges.
+func (l *HistoryCommitLedger) Entries() []HistoryCommitEntry {
+	if l == nil || len(l.byToken) == 0 {
+		return nil
+	}
+	tokens := l.orderedTokens()
+	entries := make([]HistoryCommitEntry, 0, len(tokens))
+	for _, token := range tokens {
+		entry := l.byToken[token]
+		entries = append(entries, entry.Clone())
+	}
+	return entries
+}
+
+// HasPending is allocation-free and is intended for scheduler decisions. The
+// detached Entries view is deliberately reserved for diagnostics and callers
+// that actually need payload ownership.
+func (l *HistoryCommitLedger) HasPending() bool {
+	return l != nil && l.pendingCount > 0
+}
+
+func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSourceKey) bool {
+	if l == nil {
+		return false
+	}
+	for token := range l.bySource[key] {
+		entry, ok := l.byToken[token]
+		if !ok {
+			continue
+		}
+		switch entry.State {
+		case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked, HistoryCommitStateFailed:
+			return true
+		case HistoryCommitInvalidated:
+			if entry.MayHavePartiallyWritten {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (l *HistoryCommitLedger) hasUnresolvedTerminalDelivery() bool {
+	if l == nil {
+		return false
+	}
+	for _, entry := range l.byToken {
+		switch entry.State {
+		case HistoryCommitStateFailed:
+			return true
+		case HistoryCommitInvalidated:
+			if entry.MayHavePartiallyWritten {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (l *HistoryCommitLedger) hasOlderPendingOrInFlight(token uint64) bool {
+	if l == nil {
+		return false
+	}
+	for earlierToken, entry := range l.byToken {
+		if earlierToken >= token {
+			continue
+		}
+		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *HistoryCommitLedger) orderedTokens() []uint64 {
+	if l == nil || len(l.byToken) == 0 {
+		return nil
+	}
+	tokens := make([]uint64, 0, len(l.byToken))
+	for token := range l.byToken {
+		tokens = append(tokens, token)
+	}
+	sort.Slice(tokens, func(i, j int) bool { return tokens[i] < tokens[j] })
+	return tokens
+}
+
+// Clone returns an independent ledger. AppState snapshots must never retain
+// actor-owned maps or render-line slices.
+func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
+	clone := NewHistoryCommitLedger()
+	if l == nil {
+		return clone
+	}
+	for token, entry := range l.byToken {
+		clone.byToken[token] = entry.Clone()
+	}
+	for key, token := range l.byRange {
+		clone.byRange[key] = token
+	}
+	for key, tokens := range l.bySource {
+		cloneTokens := make(map[uint64]struct{}, len(tokens))
+		for token := range tokens {
+			cloneTokens[token] = struct{}{}
+		}
+		clone.bySource[key] = cloneTokens
+	}
+	clone.pendingCount = l.pendingCount
+	return clone
 }
 
 func (l *HistoryCommitLedger) entry(token uint64) (HistoryCommitEntry, bool) {

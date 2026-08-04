@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
@@ -52,10 +54,20 @@ type EffectResultState struct {
 }
 
 func reduceUIControllerState(state UIControllerState, action UIAction, revision uint64) UIControllerState {
-	state = state.Clone()
+	// UIController invokes this reducer while holding exclusive ownership of its
+	// state. Cloning here used to duplicate the complete transcript and history
+	// ledger for every runtime event, even when the action immediately replaced
+	// that snapshot. Public readers still receive a detached copy through State
+	// and AppState; reducer-local transitions can safely update this owned value.
 	state.AppState.Revision = revision
 	switch a := action.(type) {
 	case Resize:
+		// Applied resize reports are causally ordered by their measured
+		// generation. Never let a delayed probe roll Geometry/Layout backwards
+		// and make an old history effect look current again.
+		if a.Generation != 0 && a.Generation < state.Geometry.Generation {
+			break
+		}
 		geometryChanged := false
 		if a.Width > 0 {
 			geometryChanged = geometryChanged || state.Geometry.Width != a.Width
@@ -65,37 +77,149 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			geometryChanged = geometryChanged || state.Geometry.Height != a.Height
 			state.Geometry.Height = a.Height
 		}
-		if a.Generation != 0 {
+		generationChanged := false
+		if a.Generation > state.Geometry.Generation {
 			state.Geometry.Generation = a.Generation
 			state.LayoutGeneration = a.Generation
+			generationChanged = true
 		} else if geometryChanged {
 			state.Geometry.Generation++
 			state.LayoutGeneration = state.Geometry.Generation
+			generationChanged = true
+		}
+		if geometryChanged || generationChanged {
+			rebasePendingHistoryEffects(&state)
+			refreshTranscriptOverlayPager(&state)
 		}
 	case LeaseAcquired:
 		if a.LeaseID != 0 {
 			state.Lease = LeaseState{ID: a.LeaseID, Active: true}
+			state.HistoryEffects.Frozen = true
 		}
 	case LeaseReleased:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
 			state.Lease = LeaseState{}
+			state.HistoryEffects.Frozen = false
+			if state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == a.LeaseID {
+				state.TranscriptOverlay = TranscriptOverlayState{}
+			}
+		}
+	case OpenTranscriptOverlay:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.TranscriptOverlay.Active = true
+			state.TranscriptOverlay.LeaseID = a.LeaseID
+			state.TranscriptOverlay.Pager = NewTranscriptPagerState()
+			refreshTranscriptOverlayPager(&state)
+		}
+	case CloseTranscriptOverlay:
+		if a.LeaseID != 0 && state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == a.LeaseID {
+			state.TranscriptOverlay = TranscriptOverlayState{}
+		}
+	case TranscriptPagerScroll:
+		if state.TranscriptOverlay.Active {
+			model, width, rows := transcriptOverlayPagerInputs(state)
+			state.TranscriptOverlay.Pager.Scroll(model, width, rows, a.Delta)
+		}
+	case TranscriptPagerSetFollowBottom:
+		if state.TranscriptOverlay.Active {
+			model, width, rows := transcriptOverlayPagerInputs(state)
+			state.TranscriptOverlay.Pager.SetFollowBottom(model, width, rows, a.Follow)
 		}
 	case EffectResult:
 		state.Effects.Count++
 		state.Effects.Last = a
+	case BeginHistoryCommit:
+		if a.LayoutGeneration != state.LayoutGeneration {
+			state.HistoryEffects.ProjectionUnknown = true
+			break
+		}
+		if err := state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration); errors.Is(err, ErrStaleLayoutGeneration) {
+			state.HistoryEffects.ProjectionUnknown = true
+		}
+	case HistoryCommitAcknowledged:
+		if a.LayoutGeneration != state.LayoutGeneration {
+			state.HistoryEffects.ProjectionUnknown = true
+			break
+		}
+		if err := state.HistoryEffects.ack(a.Token, a.Frame, a.LayoutGeneration); errors.Is(err, ErrStaleLayoutGeneration) {
+			state.HistoryEffects.ProjectionUnknown = true
+		}
+	case HistoryCommitFailed:
+		if a.LayoutGeneration != state.LayoutGeneration {
+			state.HistoryEffects.ProjectionUnknown = true
+			break
+		}
+		if err := state.HistoryEffects.fail(a.Token, a.LayoutGeneration, a.Err, a.MayHavePartiallyWritten); errors.Is(err, ErrStaleLayoutGeneration) {
+			state.HistoryEffects.ProjectionUnknown = true
+		}
+	case HistoryCommitDeferred:
+		// Deferred explicitly means that the terminal transaction did not
+		// start. A stale deferred callback is harmless and must not clear or
+		// overwrite a newer Unknown/recovery state.
+		if a.LayoutGeneration == state.LayoutGeneration {
+			_ = state.HistoryEffects.deferInFlight(a.Token, a.LayoutGeneration)
+		}
+	case HistoryProjectionRecovered:
+		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.LayoutGeneration {
+			state.HistoryEffects.markProjectionKnown()
+		}
+	case HistoryProjectionInvalidated:
+		if a.LayoutGeneration == state.LayoutGeneration {
+			state.HistoryEffects.ProjectionUnknown = true
+		}
+	case HistoryScrollbackReconciled:
+		// A visible-frame recovery is insufficient to resolve a possibly
+		// partial native-scrollback handoff. Only the terminal owner can post
+		// this stronger epoch barrier after reset/replacement and a confirmed
+		// source-backed recovery frame. Replan every eligible semantic range
+		// under fresh tokens; never reinterpret old delivery as Acked.
+		if !state.Lease.Active && !state.HistoryEffects.Frozen && !state.HistoryEffects.ProjectionUnknown &&
+			a.LayoutGeneration == state.LayoutGeneration && state.HistoryEffects.reconcileScrollback(a.TerminalEpoch) {
+			syncHistoryEffectsForTranscript(&state)
+		}
 	case DrawRequested:
 		state.LastDraw = a
 	case ReplaceTranscriptAction:
 		state.Transcript = NewTranscriptState(a.Snapshot)
-		if active, ok := ActiveCellFromTranscript(state.Transcript); ok {
-			state.Active = active
-		} else {
-			state.Active = ActiveCellState{}
-		}
+		state.Active = reconcileTranscriptActiveCell(state.Active, state.Transcript)
+		syncHistoryEffectsForTranscript(&state)
+		refreshTranscriptOverlayPager(&state)
 	case SetActiveCellAction:
-		state.Active = a.Active.Clone()
+		if a.Active.Phase == ActiveCellInactive {
+			state.Active = ActiveCellState{}
+			refreshTranscriptOverlayPager(&state)
+			break
+		}
+		// Mounting a new cell is a durable boundary, but it must not install a
+		// malformed range ledger. Scene-derived all-zero ranges remain valid
+		// during migration; populated ranges use the same invariant as updates.
+		if a.Active.ValidateStreamingRanges() == nil {
+			state.Active = a.Active.Clone()
+			refreshTranscriptOverlayPager(&state)
+		}
+	case UpdateActiveCellAction:
+		// Mutable stream updates are the one place where latest-wins coalescing
+		// is safe. The reducer still validates the original cell/revision fence
+		// and the complete source-range invariant before publishing the snapshot.
+		if reduceActiveCellUpdate(&state, a) == nil {
+			refreshTranscriptOverlayPager(&state)
+		}
 	case ClearActiveCellAction:
 		state.Active = ActiveCellState{}
+		refreshTranscriptOverlayPager(&state)
+	case FinalizeActiveCellAction:
+		if state.Active.CellID == a.ExpectedActiveCellID &&
+			state.Active.Revision == a.ExpectedActiveRevision &&
+			finalizedCellInSnapshot(a.Snapshot, a.ExpectedActiveCellID, a.ExpectedActiveRevision) {
+			state.Transcript = NewTranscriptState(a.Snapshot)
+			if active, ok := ActiveCellFromTranscript(state.Transcript); ok {
+				state.Active = active
+			} else {
+				state.Active = ActiveCellState{}
+			}
+			syncHistoryEffectsForTranscript(&state)
+			refreshTranscriptOverlayPager(&state)
+		}
 	case InputEvent:
 		state.Bottom.PromptInput = a.Text
 		state.Bottom.PromptCursor = a.Cursor
@@ -197,6 +321,53 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	return state
 }
 
+// reconcileTranscriptActiveCell merges a semantic Scene snapshot with the
+// migration-only streaming ledger already published by the actor. Scene owns
+// cell identity/source/revision, while Stable/Enqueued/Acked are physical
+// handoff progress and are therefore absent from ReplaceTranscriptAction.
+// When both views describe the same mutable source, dropping the ledger on
+// every runtime-event snapshot would make a shadow update disappear before a
+// presenter can consume it. Keep the newer/equal semantic active cell in that
+// case; a newer Scene source or a finalized/removed cell still replaces it.
+func reconcileTranscriptActiveCell(current ActiveCellState, transcript TranscriptState) ActiveCellState {
+	next, ok := ActiveCellFromTranscript(transcript)
+	if !ok {
+		return ActiveCellState{}
+	}
+	if current.CellID == 0 || current.Phase == ActiveCellInactive || current.CellID != next.CellID {
+		return next
+	}
+	if current.Revision > next.Revision {
+		return current.Clone()
+	}
+	if current.Revision == next.Revision &&
+		current.Kind == next.Kind && current.Source == next.Source {
+		return current.Clone()
+	}
+	return next
+}
+
+func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expectedRevision uint64) bool {
+	if snapshot == nil || id == 0 {
+		return false
+	}
+	for _, cell := range snapshot.Cells {
+		// ActiveCellState.Revision is a reducer-side source fence. During the
+		// migration a shadow update may consume the same numeric revision as
+		// the final Scene mutation, so equality is valid here. The exact active
+		// fence is checked by the caller before this helper runs; a strictly
+		// older Scene cell remains stale.
+		if cell == nil || cell.ID != id || cell.Revision < expectedRevision {
+			continue
+		}
+		switch cell.Phase {
+		case scene.CellCommitted, scene.CellPartiallyHandedOff, scene.CellHandedOff:
+			return true
+		}
+	}
+	return false
+}
+
 func cloneControllerStatusModel(model *style.StatusLineModel) *style.StatusLineModel {
 	if model == nil {
 		return nil
@@ -278,4 +449,27 @@ func clearControllerPromptState(bottom *BottomPaneState) {
 	bottom.PromptRowsOverride = 0
 	bottom.PromptVisible = false
 	bottom.PromptReservedRows = 0
+}
+
+func refreshTranscriptOverlayPager(state *UIControllerState) {
+	if state == nil || !state.TranscriptOverlay.Active {
+		return
+	}
+	model, width, rows := transcriptOverlayPagerInputs(*state)
+	state.TranscriptOverlay.Pager.Reconcile(model, width, rows)
+}
+
+func transcriptOverlayPagerInputs(state UIControllerState) (TranscriptPagerModel, int, int) {
+	width := state.Geometry.Width
+	if width < 1 {
+		width = 80
+	}
+	height := state.Geometry.Height
+	if height < 1 {
+		height = minFullScreenListHeight
+	}
+	return NewTranscriptPagerModel(TranscriptPagerSnapshot{
+		Transcript: state.Transcript,
+		Active:     state.Active,
+	}), width, transcriptPagerViewportRows(height)
 }

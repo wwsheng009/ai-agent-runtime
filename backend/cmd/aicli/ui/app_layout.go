@@ -12,6 +12,7 @@ type AppLayout struct {
 	Lease            LeaseState
 	Transcript       []scene.LayoutRow
 	Active           ActiveCellState
+	ActiveBand       ActiveBandProjection
 	Bottom           BottomPaneLayout
 }
 
@@ -39,13 +40,21 @@ type BottomPaneLayout struct {
 // from one immutable AppState snapshot. It must remain free of terminal I/O,
 // live surface reads, effects, timers, and mutable global state.
 //
-// ActiveBand is explicitly marked LegacyBandProjection while the Phase 2
-// adapter still receives it from old facade actions. Once streaming source is
-// fully migrated, this input is replaced by a display projection of Active.
+// A legacy ActiveBand facade input wins during the migration so AppState shadow
+// frames retain existing visual parity. When that input is absent, the mutable
+// ActiveCell source supplies the band projection directly. In either case the
+// selected display source is singular: Layout never overlays both bodies.
 func LayoutAppState(state AppState) AppLayout {
 	state = state.Clone()
 	height := state.Geometry.Height
-	bottom := DeriveBottomPaneState(state.Bottom, state.Geometry)
+	legacyBand := len(state.Bottom.ActiveBandLines) > 0 || len(state.Bottom.ActiveBandStyled) > 0
+	activeBand := ProjectActiveCellBand(state.Active, state.Geometry)
+	bottomSource := state.Bottom.Clone()
+	if !legacyBand && activeBand.Valid() {
+		bottomSource.ActiveBandLines = nil
+		bottomSource.ActiveBandStyled = cloneRenderLines(activeBand.Lines)
+	}
+	bottom := DeriveBottomPaneState(bottomSource, state.Geometry)
 
 	layout := AppLayout{
 		Revision:         state.Revision,
@@ -54,6 +63,7 @@ func LayoutAppState(state AppState) AppLayout {
 		Lease:            state.Lease,
 		Transcript:       scene.LayoutTranscript(state.Transcript.Snapshot().Cells, state.LayoutGeneration),
 		Active:           state.Active.Clone(),
+		ActiveBand:       activeBand.Clone(),
 		Bottom: BottomPaneLayout{
 			State:                bottom,
 			StatusRows:           bottom.statusVisibleRowCount(),
@@ -68,7 +78,7 @@ func LayoutAppState(state AppState) AppLayout {
 			VisiblePromptLines:   VisiblePromptInputLines(bottom, state.Geometry),
 			RowPlan:              LayoutBottomPaneRows(bottom, state.Geometry),
 			CursorFocus:          bottom.Focus,
-			LegacyBandProjection: len(bottom.ActiveBandLines) > 0 || len(bottom.ActiveBandStyled) > 0,
+			LegacyBandProjection: legacyBand,
 		},
 	}
 	return layout

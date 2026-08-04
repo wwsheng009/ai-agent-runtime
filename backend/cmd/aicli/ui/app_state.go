@@ -13,14 +13,15 @@ import (
 // and Bottom contains overlays only. Terminal/front-buffer state is deliberately
 // absent: it is a physical projection cache, never UI business truth.
 type AppState struct {
-	Revision         uint64
-	Transcript       TranscriptState
-	Active           ActiveCellState
-	Bottom           BottomPaneState
-	Geometry         GeometryState
-	Lease            LeaseState
+	Revision          uint64
+	Transcript        TranscriptState
+	Active            ActiveCellState
+	Bottom            BottomPaneState
+	Geometry          GeometryState
+	Lease             LeaseState
+	HistoryEffects    HistoryEffectQueueState
 	TranscriptOverlay TranscriptOverlayState
-	LayoutGeneration uint64
+	LayoutGeneration  uint64
 }
 
 // Clone returns an independent immutable snapshot suitable for layout,
@@ -30,6 +31,7 @@ func (s AppState) Clone() AppState {
 	s.Transcript = s.Transcript.Clone()
 	s.Active = s.Active.Clone()
 	s.Bottom = s.Bottom.Clone()
+	s.HistoryEffects = s.HistoryEffects.Clone()
 	s.TranscriptOverlay = s.TranscriptOverlay.Clone()
 	return s
 }
@@ -109,6 +111,7 @@ const (
 type ActiveCellState struct {
 	CellID   scene.CellID
 	Revision uint64
+	Kind     scene.CellKind
 	Phase    ActiveCellPhase
 	Source   string
 	Stable   SourceRange
@@ -134,8 +137,10 @@ func (s TranscriptOverlayState) Clone() TranscriptOverlayState {
 
 // ActiveCellFromTranscript derives the currently mutable semantic cell from a
 // transcript snapshot. It deliberately leaves Stable/Enqueued/Acked at zero:
-// Scene owns cell revision and source, while Phase 5 will introduce the single
-// streaming-range owner rather than guessing effect progress from display text.
+// Scene owns cell kind, revision and source. The pure ActiveBand projection
+// consumes this semantic record when no legacy facade band is present; Phase 5
+// will introduce the single streaming-range owner rather than guessing effect
+// progress from display text.
 func ActiveCellFromTranscript(transcript TranscriptState) (ActiveCellState, bool) {
 	for index := len(transcript.Cells) - 1; index >= 0; index-- {
 		cell := transcript.Cells[index]
@@ -145,6 +150,7 @@ func ActiveCellFromTranscript(transcript TranscriptState) (ActiveCellState, bool
 		return ActiveCellState{
 			CellID:   cell.ID,
 			Revision: cell.Revision,
+			Kind:     cell.Kind,
 			Phase:    ActiveCellMutable,
 			Source:   cell.Source,
 		}, true
