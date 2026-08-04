@@ -29,10 +29,10 @@ type EventEncoder struct {
 	nextSeq      uint64 // 提交序号单调分配
 	clock        uint64 // 编码器时钟（每事件 +1）
 	revisions    map[string]uint64
-	assistantBy  map[string]*Item  // streamKey(turnID/streamID) -> 当前 assistant item
-	reasoningBy  map[string]*Item  // streamKey -> 当前 reasoning item（独立于 assistant）
-	toolByID     map[string]*Item  // payload tool_call_id -> tool_call item
-	toolOutputBy map[string]map[string]struct{} // callID -> 已提交 output 文本（幂等）
+	assistantBy  map[string]*Item                 // streamKey(turnID/streamID) -> 当前 assistant item
+	reasoningBy  map[string]*Item                 // streamKey -> 当前 reasoning item（独立于 assistant）
+	toolByID     map[string]*Item                 // payload tool_call_id -> tool_call item
+	toolOutputBy map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
 	streamOrder  map[string]*assistantStreamOrder // streamKey -> delta 有序提交状态
 	stats        Stats
 }
@@ -296,6 +296,18 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 	case runtimechat.EventToolFinished:
 		return opToolFinished
 
+	// Legacy runtime tool events carry the same call identity as the typed
+	// chatcore events. When that identity is present they can therefore share
+	// the mutable tool-cell lifecycle instead of becoming unrelated system
+	// cells. The apply methods retain a system fallback for incomplete legacy
+	// payloads so information is never silently discarded.
+	case "tool.requested":
+		return opToolStarted
+	case "tool.progress":
+		return opToolProgress
+	case "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
+		return opToolFinished
+
 	case runtimechat.EventCheckpointCreated,
 		runtimechat.EventRewindStarted,
 		runtimechat.EventRewindFinished,
@@ -321,13 +333,13 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 // knownLegacyEventTypePrefixes 是 agent/skills 层直接 emit、未经 chatcore
 // 类型转换的事件类型前缀（如 tool.requested、subagent.started、llm.retry、
 // team.task.completed、context.preflight.started、patch.applied）。这些事件
-// 经事件总线全量进入编码器，作为已知呈现事件以 system 块参与渲染模型
-// （与 timeline 渲染路径一致），不属"未知类型"。
+// 经事件总线全量进入编码器，作为已知呈现事件参与渲染模型，不属"未知类型"。
 //
-// 注意：它们对应的 chatcore 类型（如 tool_started / assistant_reasoning）
-// 仍走各自的 op 映射；legacy 版一律归 system，避免与 chatcore 事件产生
-// 双块/索引冲突（例如 tool.requested 若映射为 opToolStarted，会与
-// tool_started 争用 toolByID 索引导致工具块重复）。
+// 大多数 legacy 事件仍归 system；带稳定 tool_call_id 的 tool.requested /
+// tool.progress / tool.completed（以及失败、取消变体）例外，按与 chatcore
+// tool_started/tool_finished 相同的 mutable tool-cell 生命周期编码。缺少
+// call identity 的 legacy tool 事件仍由 applyTool* 保守降级为 system，避免
+// 把不完整事件绑定到错误工具或与 typed 事件产生重复链。
 var knownLegacyEventTypePrefixes = []string{
 	"assistant.",
 	"context.preflight.",
@@ -392,6 +404,7 @@ const (
 	opLLMStarted               // LLM 请求开始：append assistant pending
 	opLLMFinished              // LLM 请求结束：upsert 终态
 	opToolStarted              // 工具调用发起：append tool_call（分配 CauseID）
+	opToolProgress             // 工具运行进度：upsert 同一 mutable tool_call
 	opToolFinished             // 工具完成：upsert tool_call 终态 + append tool_output
 )
 
@@ -414,6 +427,8 @@ func (e *EventEncoder) apply(o op, ev runtimeevents.Event, cs *ChangeSet) {
 		e.applyLLMFinished(ev, cs)
 	case opToolStarted:
 		e.applyToolStarted(ev, cs)
+	case opToolProgress:
+		e.applyToolProgress(ev, cs)
 	case opToolFinished:
 		e.applyToolFinished(ev, cs)
 	}
@@ -745,6 +760,14 @@ func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
 
 func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 	callID := toolCallID(ev)
+	name := payloadString(ev.Payload["tool_name"], ev.ToolName)
+	if callID == "" || name == "" {
+		// A mutable tool cell must have both a stable call identity and a
+		// readable semantic head. Without either, later progress/final events
+		// cannot be attached safely, so preserve the event as a system fallback.
+		e.applySystem(ev, cs)
+		return
+	}
 	if callID != "" {
 		if it := e.toolByID[callID]; it != nil {
 			if !it.Status.Terminal() {
@@ -755,7 +778,6 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 			// 已完成调用后同 callID 重新发起：视为新调用，允许新建。
 		}
 	}
-	name := payloadString(ev.Payload["tool_name"], ev.ToolName)
 	it := e.appendItem(KindToolCall, "", name)
 	if callID != "" {
 		e.toolByID[callID] = it
@@ -763,9 +785,46 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 	e.change(cs, OpAppend, it)
 }
 
+func (e *EventEncoder) applyToolProgress(ev runtimeevents.Event, cs *ChangeSet) {
+	callID := toolCallID(ev)
+	it := e.toolByID[callID]
+	if callID == "" || it == nil || it.Status.Terminal() {
+		e.applySystem(ev, cs)
+		return
+	}
+	detail := toolProgressText(ev)
+	if detail == "" {
+		return
+	}
+	u, changed := e.upsertItem(it.ID, KindToolCall, func(t *Item) bool {
+		name := payloadString(ev.Payload["tool_name"], ev.ToolName)
+		next := name
+		if next == "" {
+			next = t.Head
+			if newline := strings.IndexByte(next, '\n'); newline >= 0 {
+				next = next[:newline]
+			}
+		}
+		next += "\n" + detail
+		if t.Head == next {
+			return false
+		}
+		t.Head = next
+		t.Status = StatusRunning
+		return true
+	})
+	if changed {
+		e.change(cs, OpUpsert, u)
+	}
+}
+
 func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) {
 	callID := toolCallID(ev)
 	it := e.toolByID[callID]
+	if callID == "" || it == nil {
+		e.applySystem(ev, cs)
+		return
+	}
 	if it != nil {
 		u, changed := e.upsertItem(it.ID, KindToolCall, func(t *Item) bool {
 			if t.Status.Terminal() {
@@ -778,14 +837,11 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 			e.change(cs, OpUpsert, u)
 		}
 	}
-	output := payloadString(ev.Payload["output"], "")
+	output := toolFinishedText(ev)
 	if output == "" {
 		return
 	}
-	cause := ""
-	if it != nil {
-		cause = it.ID
-	}
+	cause := it.ID
 	// 幂等：同 callID 同文本的重复 output 只提交一次（重放/重复 final 场景）。
 	if e.toolOutputBy == nil {
 		e.toolOutputBy = make(map[string]map[string]struct{})
@@ -861,6 +917,56 @@ func toolCallID(ev runtimeevents.Event) string {
 	return payloadString(ev.Payload["tool_call_id"], "")
 }
 
+func toolProgressText(ev runtimeevents.Event) string {
+	for _, key := range []string{"message", "progress", "detail", "status"} {
+		if value := payloadString(ev.Payload[key], ""); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func toolFinishedText(ev runtimeevents.Event) string {
+	for _, key := range []string{"output", "result", "summary"} {
+		if value := payloadString(ev.Payload[key], ""); value != "" {
+			return value
+		}
+	}
+	if lines := payloadStringSlice(ev.Payload["summary_lines"]); len(lines) > 0 {
+		return strings.Join(lines, "\n")
+	}
+	for _, key := range []string{"error", "reason"} {
+		if value := payloadString(ev.Payload[key], ""); value != "" {
+			return value
+		}
+	}
+	switch ev.Type {
+	case "tool.failed":
+		return "failed"
+	case "tool.cancelled", "tool.canceled":
+		return "cancelled"
+	default:
+		return ""
+	}
+}
+
+func payloadStringSlice(value interface{}) []string {
+	switch values := value.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []interface{}:
+		result := make([]string, 0, len(values))
+		for _, item := range values {
+			if text := payloadString(item, ""); text != "" {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
 func systemHead(ev runtimeevents.Event) string {
 	head := payloadString(ev.Payload["message"], "")
 	if head != "" {
@@ -929,4 +1035,3 @@ func assistantSequence(payload map[string]interface{}) (uint64, bool) {
 		return 0, false
 	}
 }
-

@@ -284,6 +284,63 @@ func TestEncodeToolIdempotent(t *testing.T) {
 	}
 }
 
+func TestEncodeLegacyToolLifecycleUsesCallIdentity(t *testing.T) {
+	e := NewEventEncoder()
+	requested := event("tool.requested", map[string]interface{}{
+		"tool_call_id": "legacy-call-1",
+		"tool_name":    "shell",
+	})
+	if cs := e.Encode(requested); len(cs.Changes) != 1 || cs.Changes[0].Op != OpAppend {
+		t.Fatalf("requested changes = %+v, want one append", cs.Changes)
+	}
+	model := e.Snapshot()
+	if len(model.Items) != 1 || model.Items[0].Kind != KindToolCall || model.Items[0].Status != StatusPending {
+		t.Fatalf("requested model = %+v, want one mutable tool call", model.Items)
+	}
+
+	progress := event("tool.progress", map[string]interface{}{
+		"tool_call_id": "legacy-call-1",
+		"message":      "50% complete",
+	})
+	if cs := e.Encode(progress); len(cs.Changes) != 1 || cs.Changes[0].Op != OpUpsert {
+		t.Fatalf("progress changes = %+v, want one upsert", cs.Changes)
+	}
+	if got := e.Snapshot().Items[0].Head; got != "shell\n50% complete" {
+		t.Fatalf("progress head = %q, want source-backed tool summary", got)
+	}
+
+	completed := event("tool.completed", map[string]interface{}{
+		"tool_call_id":  "legacy-call-1",
+		"summary_lines": []interface{}{"ok", "2 files"},
+	})
+	if cs := e.Encode(completed); len(cs.Changes) != 2 {
+		t.Fatalf("completed changes = %+v, want tool finalize + output", cs.Changes)
+	}
+	model = e.Snapshot()
+	if len(model.Items) != 2 || model.Items[0].Status != StatusCompleted || model.Items[1].Kind != KindToolOutput || model.Items[1].CauseID != model.Items[0].ID {
+		t.Fatalf("completed model = %+v, want finalized tool chain", model.Items)
+	}
+}
+
+func TestEncodeLegacyToolStartWithoutIdentityFallsBackToSystem(t *testing.T) {
+	for name, payload := range map[string]map[string]interface{}{
+		"missing call id":   {"tool_name": "shell"},
+		"missing tool name": {"tool_call_id": "orphan-call"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := NewEventEncoder()
+			cs := e.Encode(event("tool.requested", payload))
+			if cs == nil || len(cs.Changes) != 1 || cs.Changes[0].Item.Kind != KindSystem {
+				t.Fatalf("changes = %+v, want one system fallback", cs)
+			}
+			model := e.Snapshot()
+			if len(model.Items) != 1 || model.Items[0].Kind != KindSystem {
+				t.Fatalf("model = %+v, want one system item", model.Items)
+			}
+		})
+	}
+}
+
 // TestEncodeReplay 验证重放：Reset 后按相同事件序列重放，模型等价。
 func TestEncodeReplay(t *testing.T) {
 	evs := []runtimeevents.Event{
@@ -533,8 +590,11 @@ func TestEncodeSilentSystemEventTypes(t *testing.T) {
 }
 
 // TestEncodeExhaustiveKnownLegacyEventTypes 穷举 agent/skills 层 legacy 事件
-// 类型：全部识别为已知 system 呈现事件（UnknownCount == 0）且不 panic。
-// 这保证 /debug 的 "Unknown Types:" 统计只反映真正未知的类型。
+// 类型：全部识别为已知事件（UnknownCount == 0）且不 panic。该 fixture
+// 刻意不提供 tool_call_id/tool_name，因此 tool lifecycle 项按 incomplete
+// payload 的 system fallback 断言；带完整身份的 mutable tool-cell 路径由
+// TestEncodeLegacyToolLifecycleUsesCallIdentity 覆盖。这样 /debug 的
+// "Unknown Types:" 统计只反映真正未知的类型。
 func TestEncodeExhaustiveKnownLegacyEventTypes(t *testing.T) {
 	for _, typ := range knownLegacyEventTypes() {
 		t.Run(typ, func(t *testing.T) {
