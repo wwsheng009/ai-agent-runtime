@@ -83,6 +83,8 @@ func settleBandFrame(coord *chatInteractionCoordinator) {
 	coord.drainActiveStableCommitLocked(true)
 	_ = coord.publishActiveStreamFrameLocked(true)
 	coord.mu.Unlock()
+	// Phase 1：facade action 由 UI actor 异步应用，等排空后再断言。
+	coord.waitUIActorIdle()
 }
 
 // TestChatInteractionCoordinator_MidStreamScreenRowsMatchReplayRows is the

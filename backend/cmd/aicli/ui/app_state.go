@@ -1,0 +1,186 @@
+package ui
+
+import (
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+)
+
+// AppState is the immutable-state shape consumed by the Phase 2 layout and
+// presenter path. During migration UIController owns every populated field;
+// legacy adapters may still be the physical presenter until Phase 3.
+//
+// Transcript retains semantic cells, Active retains mutable semantic source,
+// and Bottom contains overlays only. Terminal/front-buffer state is deliberately
+// absent: it is a physical projection cache, never UI business truth.
+type AppState struct {
+	Revision         uint64
+	Transcript       TranscriptState
+	Active           ActiveCellState
+	Bottom           BottomPaneState
+	Geometry         GeometryState
+	Lease            LeaseState
+	TranscriptOverlay TranscriptOverlayState
+	LayoutGeneration uint64
+}
+
+// Clone returns an independent immutable snapshot suitable for layout,
+// diagnostics, or tests. Callers must never receive actor-owned slices or
+// status-model pointers directly.
+func (s AppState) Clone() AppState {
+	s.Transcript = s.Transcript.Clone()
+	s.Active = s.Active.Clone()
+	s.Bottom = s.Bottom.Clone()
+	s.TranscriptOverlay = s.TranscriptOverlay.Clone()
+	return s
+}
+
+// TranscriptState is the semantic transcript part of AppState. It intentionally
+// stores cells rather than rendered terminal rows, so resize/replay derives a
+// new layout from source instead of reverse-engineering a viewport.
+type TranscriptState struct {
+	Revision uint64
+	Cells    []scene.TranscriptCell
+}
+
+// NewTranscriptState snapshots the transcript data plane into an AppState
+// value. Nil means an empty transcript, not an unknown terminal projection.
+func NewTranscriptState(snapshot *scene.Snapshot) TranscriptState {
+	if snapshot == nil {
+		return TranscriptState{}
+	}
+	state := TranscriptState{
+		Revision: snapshot.Revision,
+		Cells:    make([]scene.TranscriptCell, 0, len(snapshot.Cells)),
+	}
+	for _, cell := range snapshot.Cells {
+		if cell == nil {
+			continue
+		}
+		state.Cells = append(state.Cells, cloneTranscriptCell(*cell))
+	}
+	return state
+}
+
+func (s TranscriptState) Clone() TranscriptState {
+	clone := make([]scene.TranscriptCell, len(s.Cells))
+	for index := range s.Cells {
+		clone[index] = cloneTranscriptCell(s.Cells[index])
+	}
+	s.Cells = clone
+	return s
+}
+
+// Snapshot converts the value back into the scene package's read-only view.
+// It copies every cell so a layout consumer cannot modify AppState memory.
+func (s TranscriptState) Snapshot() *scene.Snapshot {
+	snapshot := &scene.Snapshot{
+		Revision: s.Revision,
+		Cells:    make([]*scene.TranscriptCell, 0, len(s.Cells)),
+	}
+	for index := range s.Cells {
+		cell := cloneTranscriptCell(s.Cells[index])
+		snapshot.Cells = append(snapshot.Cells, &cell)
+	}
+	return snapshot
+}
+
+func cloneTranscriptCell(cell scene.TranscriptCell) scene.TranscriptCell {
+	if cell.FinalizedAt != nil {
+		finalizedAt := *cell.FinalizedAt
+		cell.FinalizedAt = &finalizedAt
+	}
+	return cell
+}
+
+// ActiveCellPhase tracks semantic mutable-cell lifecycle. It is intentionally
+// separate from transcript CellPhase because an active cell has not necessarily
+// been finalized into transcript history yet.
+type ActiveCellPhase uint8
+
+const (
+	ActiveCellInactive ActiveCellPhase = iota
+	ActiveCellMutable
+	ActiveCellFinalizing
+)
+
+// ActiveCellState is the sole future semantic source for an in-progress
+// assistant/reasoning/tool cell. Display rows and ActiveBand are derived by
+// Layout; they are never used as its source.
+type ActiveCellState struct {
+	CellID   scene.CellID
+	Revision uint64
+	Phase    ActiveCellPhase
+	Source   string
+	Stable   SourceRange
+	Enqueued SourceRange
+	Acked    SourceRange
+}
+
+func (s ActiveCellState) Clone() ActiveCellState { return s }
+
+// TranscriptOverlayState is the logical ownership record for the read-only
+// alternate-screen transcript pager. The ScreenLease owns terminal transport;
+// this state records which semantic view is entitled to consume that lease.
+type TranscriptOverlayState struct {
+	Active  bool
+	LeaseID uint64
+	Pager   TranscriptPagerState
+}
+
+func (s TranscriptOverlayState) Clone() TranscriptOverlayState {
+	s.Pager = s.Pager.Clone()
+	return s
+}
+
+// ActiveCellFromTranscript derives the currently mutable semantic cell from a
+// transcript snapshot. It deliberately leaves Stable/Enqueued/Acked at zero:
+// Scene owns cell revision and source, while Phase 5 will introduce the single
+// streaming-range owner rather than guessing effect progress from display text.
+func ActiveCellFromTranscript(transcript TranscriptState) (ActiveCellState, bool) {
+	for index := len(transcript.Cells) - 1; index >= 0; index-- {
+		cell := transcript.Cells[index]
+		if cell.Phase != scene.CellMutable {
+			continue
+		}
+		return ActiveCellState{
+			CellID:   cell.ID,
+			Revision: cell.Revision,
+			Phase:    ActiveCellMutable,
+			Source:   cell.Source,
+		}, true
+	}
+	return ActiveCellState{}, false
+}
+
+// BottomFocus describes which overlay owns the intended input cursor. The
+// actual cursor movement remains a presenter concern and is not stored here.
+type BottomFocus uint8
+
+const (
+	BottomFocusNone BottomFocus = iota
+	BottomFocusPrompt
+	BottomFocusPopup
+)
+
+// Clone returns a detached bottom-pane snapshot. BottomPaneState is also used
+// by the legacy surface composer, so keeping its copy operation here avoids
+// a second near-identical bottom state model during migration.
+func (s BottomPaneState) Clone() BottomPaneState {
+	s.StatusModel = cloneAppStateStatusModel(s.StatusModel)
+	s.DynamicStatusModel = cloneAppStateStatusModel(s.DynamicStatusModel)
+	s.PopupLines = append([]string(nil), s.PopupLines...)
+	s.PopupStack = clonePopupLayers(s.PopupStack)
+	s.PopupViewport = clonePopupViewportSpec(s.PopupViewport)
+	s.ActiveBandLines = append([]string(nil), s.ActiveBandLines...)
+	s.ActiveBandStyled = cloneRenderLines(s.ActiveBandStyled)
+	return s
+}
+
+func cloneAppStateStatusModel(model *style.StatusLineModel) *style.StatusLineModel {
+	if model == nil {
+		return nil
+	}
+	clone := *model
+	clone.Segments = append([]style.StatusSegment(nil), model.Segments...)
+	return &clone
+}

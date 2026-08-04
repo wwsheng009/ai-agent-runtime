@@ -2271,6 +2271,7 @@ func TestAICLIEventRenderer_SharedToolRequestedStaysViewportOnlyAndKeepsSourceLa
 	if strings.Contains(rendered, "Running") {
 		t.Fatalf("tool_requested must not enter retained history, got %q", rendered)
 	}
+	session.Interaction.waitUIActorIdle()
 	lines := surface.ActiveBandLines()
 	if !strings.Contains(strings.Join(lines, "\n"), "• Running [meta] list_mcp_resources") {
 		t.Fatalf("expected ActiveBand to preserve the meta label, got %q", lines)

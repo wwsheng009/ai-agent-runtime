@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -30,19 +31,24 @@ type chatInteractionCoordinator struct {
 	writer        io.Writer
 	surfaceWriter bool
 	surface       *ui.FixedBottomSurface
+	// uiSurface 是 actor 侧（reduceUIAction）读取 surface 的原子指针：
+	// reducer 不得持有 c.mu 获取 surface（生产者可能在持 c.mu 时投递
+	// durable action，mailbox 满时避免锁环）；surface 自带锁。
+	uiSurface atomic.Pointer[ui.FixedBottomSurface]
 
-	mu                      sync.Mutex
-	promptVisible           bool
-	promptInput             string
-	promptCursor            int
-	promptRenderedOnSurface bool
-	promptPasteActive       bool
-	thinkingActive          bool
-	streamingActive         bool
-	streamRendered          bool
-	streamMode              assistantStreamMode
-	streamRenderedPrefixLen int
-	streamEnqueuedPrefixLen int
+	mu                            sync.Mutex
+	promptVisible                 bool
+	promptInput                   string
+	promptCursor                  int
+	promptRenderedOnSurface       bool
+	promptPasteActive             bool
+	thinkingActive                bool
+	streamingActive               bool
+	streamRendered                bool
+	streamMode                    assistantStreamMode
+	finalizingAssistantProjection bool
+	streamRenderedPrefixLen       int
+	streamEnqueuedPrefixLen       int
 	// streamTrailingLF is the assistant-stream open-row cursor (Phase C).
 	// true  = cursor already at column 0 (row boundary / never opened a row)
 	// false = mid-line content was written without a row terminator
@@ -111,9 +117,13 @@ type chatInteractionCoordinator struct {
 	// stable rendered chunks move through a bounded, animated scrollback queue.
 	// Enqueued and emitted source offsets stay distinct so queued content never
 	// reappears in the live tail and finalization can drain without replay.
-	activeStream          *ui.ActiveStreamController
-	renderEngine          *renderengine.Engine
-	framePump             *renderengine.FramePump
+	activeStream *ui.ActiveStreamController
+	renderEngine *renderengine.Engine
+	framePump    *renderengine.FramePump
+	// UI actor（Phase 1，实施指南任务 2/3/5）：业务 producer 只投递 action，
+	// reducer 经 legacy adapter 生成相同输出。惰性创建，见 ensureUIActor。
+	uiActor               *ui.UIController
+	uiActorOnce           sync.Once
 	activeFrameDue        time.Time
 	activeFrameGeneration uint64
 	stableCommitQueue     []activeStableCommitLine
@@ -483,7 +493,29 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	if surface != nil && c.renderEngine != nil {
 		surface.SetEngine(c.renderEngine)
 	}
+	previousSurface := c.surface
 	c.surface = surface
+	if c.session != nil {
+		// The coordinator and session must reference the same physical surface.
+		// Command/prompt overlays resolve their surface from ChatSession while
+		// transcript writes resolve it from the coordinator; allowing those
+		// references to diverge creates a raw stdout writer beside the owned
+		// viewport and replays already-rendered rows during modal transitions.
+		c.session.Surface = surface
+	}
+	if previousSurface != nil && previousSurface != surface {
+		previousSurface.SetUIActorPoster(nil)
+	}
+	if surface != nil {
+		// Phase 1 任务 4 生产接线：facade 组（band/status/prompt/popup）
+		// 内部只投递 action，由 UI actor 经 Apply 同步应用。
+		// Surface facade calls made by a RuntimeEvent reducer must not block while
+		// posting back into that same bounded mailbox. The dedicated route turns
+		// them into ordered actor follow-ups; all external facade calls still use
+		// the normal mailbox path.
+		surface.SetUIActorPoster(c.postSurfaceFacadeAction)
+	}
+	c.uiSurface.Store(surface)
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	if c.activeStream != nil && c.activeStream.Active() && c.surfaceOutputActiveLocked() {
 		_ = c.publishActiveStreamFrameLocked(true)
@@ -744,7 +776,8 @@ func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Ti
 	c.dynamicStatusTimerSeq++
 	sequence := c.dynamicStatusTimerSeq
 	c.scheduleRenderIntent(renderengine.FrameKeyDynamicStatus, "dynamic-status", delay, func() {
-		c.refreshDynamicStatusTick(sequence)
+		// Phase 1（IR-11）：回调只投递 action，业务在 reducer 内执行。
+		c.postUIAction(ui.Timer{Key: renderengine.FrameKeyDynamicStatus, Generation: sequence})
 	})
 }
 
@@ -2741,24 +2774,7 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 		return
 	}
 	response = sanitizeInteractiveAsyncTeamLaunchResponse(response)
-	// Finalized assistant turn routed through the retained-source cell model
-	// (P5.4): keep raw source on assistantStreamCell so DisplayLines can reflow
-	// at any width. Markdown still goes through the session formatter.
-	var cell historyCell
-	if c.session.Formatter != nil && c.session.Formatter.IsMarkdown(response) {
-		formatFn := func(source string, width int) string {
-			prev := c.session.Formatter.Width
-			if width > 0 {
-				c.session.Formatter.Width = width
-			}
-			out := c.session.Formatter.Format(source)
-			c.session.Formatter.Width = prev
-			return out
-		}
-		cell = newAssistantStreamCellWithFormatter(response, true, formatFn)
-	} else {
-		cell = newAssistantStreamCell(response, false)
-	}
+	cell := c.finalAssistantCellLocked(response)
 	meta := cellBoundaryMeta(cell)
 	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
 }
@@ -2997,12 +3013,10 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		c.resetStreamLocked()
 		return true
 	}
-	formatted := finalContent
-	if c.session.Formatter != nil {
-		formatted = c.session.Formatter.Format(finalContent)
-	}
-	// One-shot completion of the same assistant body: no cross-block gap.
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
+	// Completion without prior streaming still uses the finalized cell policy.
+	// This keeps direct completion, RenderAssistant and markdown stream
+	// finalization on one DisplayLines projection.
+	c.writeFinalAssistantCellLocked(finalContent)
 	c.resetStreamLocked()
 	return true
 }
@@ -3086,11 +3100,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 	}
 	if content != "" {
 		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
-		formatted := content
-		if c.session.Formatter != nil {
-			formatted = c.session.Formatter.Format(content)
-		}
-		c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
+		c.writeFinalAssistantCellLocked(content)
 		c.resetStreamLocked()
 		return
 	}
@@ -3223,10 +3233,11 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 	}
 	doc = c.annotateCommandDocumentOverflow(doc)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !c.beginMessageLocked() {
+		c.mu.Unlock()
 		return false
 	}
+	bridge := c.session.RuntimeEventBridge
 	// 切片 11：命令结果提交前把纯文本投影注入 Scene 数据面（与用户输入
 	// 同一模式），使"完整块序列 == Scene cell 序列"对命令块也成立。
 	// 切片 12（P4）：/debug、/model 等交互命令输出经 pending 交互标记走
@@ -3240,6 +3251,11 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 	c.lastCommandCellID = fmt.Sprintf("command:%d", c.commandCellSequence)
 	cmdCell := newCommandResultCell(c.lastCommandCellID, c.commandCellSequence, doc)
 	c.commitHistoryCellLocked(cmdCell, c.gapBeforeBlockLocked(cellBoundaryMeta(cmdCell)), cellBoundaryMeta(cmdCell))
+	c.mu.Unlock()
+	// submitCommandResult uses the same Scene mapper as runtime events. Keep
+	// the AppState mirror outside c.mu so bounded mailbox backpressure cannot
+	// form a coordinator/actor lock wait.
+	c.postTranscriptSnapshotFromBridge(bridge)
 	return true
 }
 
@@ -3264,28 +3280,75 @@ func (c *chatInteractionCoordinator) annotateCommandDocumentOverflow(doc render.
 	return doc
 }
 
-// assistantOverflowHintLocked returns a scrollback hint line when the final
-// assistant body exceeds the surface's visible output region, or "" when the
-// body fits. Long bodies hand older rows to native scrollback and leave only
-// the tail visible; without the hint the reply looks truncated by the
-// viewport (same contract as annotateCommandDocumentOverflow for command
-// documents, applied to LLM streamed markdown replies).
-func (c *chatInteractionCoordinator) assistantOverflowHintLocked(content string) string {
-	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
-		return ""
+// finalAssistantCellLocked is the sole display policy constructor for a
+// finalized assistant source. The overflow notice belongs to the retained
+// cell's derived rows rather than any live or replay output path, so every
+// entry point emits the same projection at a given geometry.
+func (c *chatInteractionCoordinator) finalAssistantCellLocked(content string) assistantStreamCell {
+	markdown := c != nil && c.session != nil && c.session.Formatter != nil && c.session.Formatter.IsMarkdown(content)
+	var cell assistantStreamCell
+	if markdown {
+		formatFn := func(source string, width int) string {
+			formatter := c.session.Formatter
+			previousWidth := formatter.Width
+			if width > 0 {
+				formatter.Width = width
+			}
+			formatted := formatter.Format(source)
+			formatter.Width = previousWidth
+			return formatted
+		}
+		cell = newAssistantStreamCellWithFormatter(content, true, formatFn)
+	} else {
+		cell = newAssistantStreamCell(content, false)
 	}
-	rows := 0
-	if c.session.Formatter != nil && c.session.Formatter.IsMarkdown(content) {
-		rows = c.session.Formatter.FormatDocument(content).LineCount()
+	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() || c.finalizingAssistantProjection {
+		return cell
 	}
-	if rows == 0 && content != "" {
-		rows = strings.Count(content, "\n") + 1
-	}
+	rows := c.assistantBodyDisplayRowsLocked(content, cell)
 	visible := c.session.Surface.VisibleOutputRows()
 	if rows <= visible {
-		return ""
+		return cell
 	}
-	return fmt.Sprintf("回复共 %d 行，超出屏幕可见区；完整内容已滚入终端滚动缓冲区，请向上滚动查看", rows)
+	return cell.withTrailingDisplayLine(fmt.Sprintf("回复共 %d 行，超出屏幕可见区；完整内容已滚入终端滚动缓冲区，请向上滚动查看", rows))
+}
+
+// assistantBodyDisplayRowsLocked counts the body under the established
+// overflow-policy contract. Markdown documents retain their formatter block
+// rows (including structural blank rows); plain output uses source rows. The
+// count is intentionally shared by all final paths, while DisplayLines remains
+// the sole source of the actual terminal rows.
+func (c *chatInteractionCoordinator) assistantBodyDisplayRowsLocked(content string, cell assistantStreamCell) int {
+	if c != nil && c.session != nil && c.session.Formatter != nil && cell.markdown {
+		return c.session.Formatter.FormatDocument(content).LineCount()
+	}
+	if content == "" {
+		return 0
+	}
+	return strings.Count(content, "\n") + 1
+}
+
+// writeFinalAssistantCellLocked keeps legacy stream finalization on the same
+// retained-source projection as RenderAssistant. It remains an adapter until
+// Phase 5 moves the complete transaction into AppState/Scene.
+func (c *chatInteractionCoordinator) writeFinalAssistantCellLocked(content string) {
+	if c == nil || content == "" {
+		return
+	}
+	cell := c.finalAssistantCellLocked(content)
+	width := c.currentStreamEmitWidthLocked()
+	if !c.surfaceOutputActiveLocked() {
+		// Buffered/plain writers historically delegate width to the formatter
+		// itself. Supplying the terminal fallback width here would introduce
+		// physical wrapping into snapshot-style deltas that have no owned
+		// viewport, changing their text identity before any presenter exists.
+		width = 0
+	}
+	c.writeRowsLocked(cell.DisplayLines(width), gapNone, c.streamBoundaryMetaLocked())
+}
+
+func (c *chatInteractionCoordinator) finalAssistantOverflowHintLocked(content string) string {
+	return c.finalAssistantCellLocked(content).trailingDisplayLine
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
@@ -3293,8 +3356,13 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	bridge := c.session.RuntimeEventBridge
 	c.renderUserEchoLocked(input, true, true)
+	c.mu.Unlock()
+	// submitUserInput mutates Scene while the legacy coordinator lock is held.
+	// Publish the complete immutable Scene only after unlocking: Post may apply
+	// backpressure, and the actor reducer is allowed to take c.mu.
+	c.postTranscriptSnapshotFromBridge(bridge)
 }
 
 // RenderReplayedUserInput echoes a user message from already-final history.
@@ -3363,10 +3431,11 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !c.beginMessageLocked() {
+		c.mu.Unlock()
 		return
 	}
+	bridge := c.session.RuntimeEventBridge
 	// 切片 11：错误块提交前把错误文本注入 Scene 数据面（KindSystem 终态
 	// 块，会话/诊断语义；assistant 流内错误走事件路径，不经此处）。
 	if c.session != nil && c.session.RuntimeEventBridge != nil {
@@ -3378,6 +3447,8 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 		c.gapBeforeBlockLocked(errMeta),
 		errMeta,
 	)
+	c.mu.Unlock()
+	c.postTranscriptSnapshotFromBridge(bridge)
 }
 
 // ClearPrompt releases the prompt rows that are currently painted so direct
@@ -3469,6 +3540,25 @@ func (c *chatInteractionCoordinator) RenderPromptInputSnapshot(snapshot ui.LineE
 	if c == nil {
 		return
 	}
+	if c.postUIAction(ui.InputEvent{
+		Text:        snapshot.Text,
+		Cursor:      snapshot.Cursor,
+		PasteActive: snapshot.PasteActive,
+		Render:      true,
+	}) {
+		c.waitUIActorIdle()
+		return
+	}
+	c.renderPromptInputSnapshotNow(snapshot)
+}
+
+// renderPromptInputSnapshotNow is the reducer-side prompt projection path.
+// The public entry above must be used by input producers so the snapshot and
+// physical prompt update share the UI action order.
+func (c *chatInteractionCoordinator) renderPromptInputSnapshotNow(snapshot ui.LineEditorSnapshot) {
+	if c == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.shutdown {
@@ -3487,6 +3577,26 @@ func (c *chatInteractionCoordinator) RenderPromptInputSnapshot(snapshot ui.LineE
 }
 
 func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {
+	if c == nil {
+		return
+	}
+	if c.postUIAction(ui.InputEvent{
+		Text:        snapshot.Text,
+		Cursor:      snapshot.Cursor,
+		PasteActive: snapshot.PasteActive,
+	}) {
+		// The line editor obtains its cursor prefix immediately after OnChange.
+		// Waiting here keeps that read ordered after this durable input action.
+		c.waitUIActorIdle()
+		return
+	}
+	c.setPromptInputSnapshotNow(snapshot)
+}
+
+// setPromptInputSnapshotNow is the reducer-side semantic snapshot update.
+// TrackPromptInputState intentionally does not write terminal bytes; a later
+// RenderPromptInputSnapshot action owns the physical prompt projection.
+func (c *chatInteractionCoordinator) setPromptInputSnapshotNow(snapshot ui.LineEditorSnapshot) {
 	if c == nil {
 		return
 	}
@@ -3611,8 +3721,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.shutdown {
+		c.mu.Unlock()
 		return
 	}
 	c.shutdown = true
@@ -3636,6 +3746,12 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.stopActiveStreamFrameLocked()
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
+	c.mu.Unlock()
+	// Phase 1：关闭 UI actor（停止接受新 action，Run 排空后退出）。
+	// Must be outside c.mu: an in-flight reducer needs this mutex to observe
+	// shutdown before its terminal-facing adapter can return.
+	c.closeUIActor()
+	c.mu.Lock()
 	if c.renderEngine != nil {
 		c.renderEngine.Shutdown()
 	} else if c.framePump != nil {
@@ -3648,6 +3764,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 		c.activeStream.Cancel()
 	}
 	c.surface = nil
+	c.uiSurface.Store(nil)
+	c.mu.Unlock()
 }
 
 func (c *chatInteractionCoordinator) beginMessageLocked() bool {
@@ -3782,12 +3900,7 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 		c.renderFormattedAssistantStreamLocked(content)
 		return
 	}
-	formatted := content
-	if c.session.Formatter != nil {
-		formatted = c.session.Formatter.Format(content)
-	}
-	// One-shot flush: same row contract as complete blocks (no multi-line blob).
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
+	c.writeFinalAssistantCellLocked(content)
 }
 
 func (c *chatInteractionCoordinator) flushReasoningLocked() {
@@ -3999,30 +4112,24 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 	if c == nil {
 		return
 	}
-	// Finalize left the band up so reconcile/residual computation had no empty
-	// gap. Release it immediately before the final scrollback paint so the same
-	// source is not dual-painted in ActiveBand and history.
-	c.clearActiveBandLocked()
+	// Finalization crosses from transient projection to permanent history. The
+	// release must be ordered before the history write and fence queued stale
+	// band paints, otherwise a delayed actor action can restore the old band
+	// against the completed cell's geometry.
+	if c.surface != nil {
+		c.surface.ReleaseActiveBandForFinalizedOutput()
+	}
 	if c.streamRendered && c.streamRenderedPrefixLen > 0 {
+		c.finalizingAssistantProjection = true
+		defer func() { c.finalizingAssistantProjection = false }()
 		c.writeResidualFormattedAssistantStreamLocked(content)
 		return
 	}
 
-	formatted := content
-	if c.session != nil && c.session.Formatter != nil {
-		formatted = c.session.Formatter.Format(content)
-	}
-	// Long bodies hand older rows to native scrollback and leave only the tail
-	// in the visible region; append a hint so the reply is not mistaken for a
-	// truncated render (same contract as command documents).
-	if hint := c.assistantOverflowHintLocked(content); hint != "" {
-		if formatted != "" && !strings.HasSuffix(formatted, "\n") {
-			formatted += "\n"
-		}
-		formatted += hint
-	}
-	// First full paint of the assistant body — no cross-block gap.
-	c.writeCompleteBlockLocked(ui.FormatAssistantRendered(formatted), gapNone, c.streamBoundaryMetaLocked())
+	// First full paint of the assistant body. Reuse the finalized retained cell
+	// so the source, markdown formatter, width reflow, and overflow tail match
+	// one-shot RenderAssistant exactly.
+	c.writeFinalAssistantCellLocked(content)
 }
 
 // writeResidualFormattedAssistantStreamLocked paints the still-unemitted tail
@@ -4034,7 +4141,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 	if c == nil {
 		return
 	}
-	hint := c.assistantOverflowHintLocked(content)
+	hint := c.finalAssistantOverflowHintLocked(content)
 	emitted := c.streamRenderedPrefixLen
 	if emitted <= 0 {
 		formatted := content
@@ -4654,7 +4761,8 @@ func (c *chatInteractionCoordinator) scheduleActiveStableCommitLocked() {
 	c.stableCommitTimerSeq++
 	sequence := c.stableCommitTimerSeq
 	c.scheduleRenderIntent(renderengine.FrameKeyStableCommit, "stable-commit", delay, func() {
-		c.runActiveStableCommitTick(sequence)
+		// Phase 1（IR-11）：回调只投递 action，业务在 reducer 内执行。
+		c.postUIAction(ui.Timer{Key: renderengine.FrameKeyStableCommit, Generation: sequence})
 	})
 }
 
@@ -5188,7 +5296,15 @@ func (c *chatInteractionCoordinator) scheduleActiveStreamFrameLocked() {
 	generation := c.activeFrameGeneration
 	c.activeFrameDue = due
 	c.scheduleRenderIntent(renderengine.FrameKeyActiveFrame, "active-frame", delay, func() {
-		c.paintScheduledActiveStreamFrame(generation)
+		// A frame deadline is only an intent. The pump posts the coalescable
+		// DrawRequested action; the reducer is the only place that reads active
+		// stream state and paints the retained ActiveBand.
+		c.postUIAction(ui.DrawRequested{
+			Key:        renderengine.FrameKeyActiveFrame,
+			Reason:     "active-frame",
+			Dirty:      renderengine.DirtyBand,
+			Generation: generation,
+		})
 	})
 }
 
@@ -5344,13 +5460,18 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 		c.softEmittedWidth != width
 
 	sizeChanged := false
+	geometryProbed := false
 	if c.surface != nil && c.surface.Enabled() {
 		if softNeedsReflow {
 			// Soft ownership already disagrees with the cached layout width —
 			// reflow now; also force an unthrottled probe so layout stays coherent.
 			sizeChanged = c.surface.SyncTerminalGeometry()
+			geometryProbed = true
 		} else {
-			sizeChanged, _ = c.surface.SyncTerminalGeometryThrottled(ui.DefaultGeometryProbeMinInterval)
+			sizeChanged, geometryProbed = c.surface.SyncTerminalGeometryThrottled(ui.DefaultGeometryProbeMinInterval)
+		}
+		if geometryProbed {
+			c.reportMeasuredSurfaceGeometryLocked()
 		}
 		// Recompute after a probe may have applied a new scroll-region width.
 		width = c.currentStreamEmitWidthLocked()
@@ -5384,13 +5505,29 @@ func (c *chatInteractionCoordinator) clearActiveBandLocked() {
 	c.surface.ClearActiveBand()
 }
 
-// RefreshActiveStreamViewport forces a redraw after resize/theme changes.
+// RefreshActiveStreamViewport requests a geometry barrier after resize/theme
+// changes. The reducer owns the terminal probe, source-backed reflow and
+// repaint as one ordered legacy-adapter action; callers retain the historical
+// synchronous completion contract by waiting for that action to settle.
+func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
+	if c == nil {
+		return
+	}
+	if c.postUIAction(ui.Resize{}) {
+		c.waitUIActorIdle()
+		return
+	}
+	c.refreshActiveStreamViewportNow()
+}
+
+// refreshActiveStreamViewportNow is the reducer-side implementation of
+// RefreshActiveStreamViewport. It must not be called by a normal producer.
 // Source-backed reflow order:
 //  1. probe terminal geometry (production resize entry also runs this via paint)
 //  2. rewrite the soft committed tail still at the output bottom
 //  3. rebuild the still-pending stable queue from source offsets
 //  4. resize ActiveBand and re-cut newly stable content for the new geometry
-func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
+func (c *chatInteractionCoordinator) refreshActiveStreamViewportNow() {
 	if c == nil {
 		return
 	}
@@ -5398,6 +5535,7 @@ func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
 	defer c.mu.Unlock()
 	if c.surface != nil && c.surface.Enabled() {
 		_ = c.surface.SyncTerminalGeometry()
+		c.reportMeasuredSurfaceGeometryLocked()
 	}
 	if c.activeStream == nil || !c.activeStream.Active() {
 		return
@@ -5416,6 +5554,22 @@ func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
 	if c.surfaceOutputActiveLocked() && !changed {
 		c.surface.RefreshActiveBand()
 	}
+}
+
+// reportMeasuredSurfaceGeometryLocked sends the result of a completed legacy
+// surface probe back through the actor as a barrier. It never asks the surface
+// to probe, and therefore cannot make AppState/Layout depend on a surface read.
+// Callers already hold c.mu; PostFollowup avoids blocking the reducer on its
+// own bounded external mailbox.
+func (c *chatInteractionCoordinator) reportMeasuredSurfaceGeometryLocked() {
+	if c == nil || c.surface == nil {
+		return
+	}
+	width, height, ok := c.surface.MeasuredGeometry()
+	if !ok {
+		return
+	}
+	_ = c.postCausalUIAction(ui.Resize{Width: width, Height: height, Applied: true})
 }
 
 // refreshActiveStreamViewportLocked runs soft reflow + stable queue rebuild +
@@ -5691,39 +5845,9 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 	delay := c.promptDelay
 	c.mu.Unlock()
 
+	// Phase 1（IR-11）：回调只投递 action，绘制移入 reducer
+	// （paintScheduledPromptFrame，chat_ui_actor.go）。
 	c.scheduleRenderIntent(renderengine.FrameKeyPrompt, "prompt", delay, func() {
-		if !shouldDisplayInteractivePrompt(c.session) {
-			return
-		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.shutdown {
-			return
-		}
-		if seq != c.promptSeq {
-			return
-		}
-		if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
-			return
-		}
-		prompt := formatSessionUserPrompt(c.session)
-		if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
-			c.promptVisible = true
-			c.promptRenderedOnSurface = true
-			c.preparePromptGapLocked(false)
-			if c.promptInput != "" {
-				rows := c.currentPromptDisplayRowsLocked()
-				cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-				c.surface.SetPromptInputState(prompt, c.promptInput, rows, cursorRow, cursorCol)
-			}
-			return
-		}
-		c.promptRenderedOnSurface = false
-		c.preparePromptGapLocked(true)
-		c.writeTextLocked(prompt)
-		if c.promptInput != "" {
-			c.writeTextLocked(c.promptInput)
-		}
-		c.promptVisible = true
+		c.postUIAction(ui.Timer{Key: renderengine.FrameKeyPrompt, Generation: seq})
 	})
 }

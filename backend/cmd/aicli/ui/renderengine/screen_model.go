@@ -9,6 +9,23 @@ import (
 
 const sgrReset = "\x1b[0m"
 
+// ProjectionValidity describes whether the front buffer is still a trustworthy
+// physical-terminal projection. It is deliberately independent of the staged
+// semantic back frame.
+type ProjectionValidity uint8
+
+const (
+	ProjectionUnknown ProjectionValidity = iota
+	ProjectionKnown
+)
+
+func (v ProjectionValidity) String() string {
+	if v == ProjectionKnown {
+		return "known"
+	}
+	return "unknown"
+}
+
 // ScreenModel is a double-buffered cell grid for an owned terminal region.
 // The front buffer represents the last known terminal frame, and the back
 // buffer is the next composed frame. Flush emits their minimal ANSI diff.
@@ -16,6 +33,7 @@ type ScreenModel struct {
 	width, height int
 	front, back   [][]vt.Cell
 	forceRepaint  bool
+	projection    ProjectionValidity
 	trace         *PaintTrace
 }
 
@@ -23,10 +41,11 @@ type ScreenModel struct {
 func NewScreenModel(width, height int) *ScreenModel {
 	width, height = clampSize(width, height)
 	return &ScreenModel{
-		width:  width,
-		height: height,
-		front:  blankGrid(width, height),
-		back:   blankGrid(width, height),
+		width:      width,
+		height:     height,
+		front:      blankGrid(width, height),
+		back:       blankGrid(width, height),
+		projection: ProjectionKnown,
 	}
 }
 
@@ -36,6 +55,14 @@ func (m *ScreenModel) Size() (int, int) {
 		return 0, 0
 	}
 	return m.width, m.height
+}
+
+// ProjectionValidity reports whether incremental diffing may rely on front.
+func (m *ScreenModel) ProjectionValidity() ProjectionValidity {
+	if m == nil {
+		return ProjectionUnknown
+	}
+	return m.projection
 }
 
 // Resize discards both physical buffers and makes the next Flush repaint the
@@ -49,6 +76,7 @@ func (m *ScreenModel) Resize(width, height int) {
 	m.front = blankGrid(width, height)
 	m.back = blankGrid(width, height)
 	m.forceRepaint = true
+	m.projection = ProjectionUnknown
 }
 
 // Invalidate forgets the physical terminal state while preserving the staged
@@ -56,6 +84,26 @@ func (m *ScreenModel) Resize(width, height int) {
 func (m *ScreenModel) Invalidate() {
 	if m != nil {
 		m.forceRepaint = true
+		m.projection = ProjectionUnknown
+	}
+}
+
+// ClearForceRepaint drops a pending full repaint after the caller has
+// re-synchronized the committed front buffer with the terminal (for example
+// ApplyRegionAppend mirrors an already-emitted scroll). The following diffing
+// Flush then proceeds row-wise; rows the caller did not touch are still
+// reconciled against the staged back frame.
+func (m *ScreenModel) ClearForceRepaint() {
+	if m != nil && m.projection == ProjectionKnown {
+		m.forceRepaint = false
+	}
+}
+
+// MarkKnown accepts an externally completed terminal transaction whose exact
+// physical effect has already been mirrored into front/back.
+func (m *ScreenModel) MarkKnown() {
+	if m != nil {
+		m.projection = ProjectionKnown
 	}
 }
 
@@ -196,9 +244,21 @@ func (m *ScreenModel) CommitRange(top, bottom int) {
 	}
 }
 
-// Flush returns the ANSI diff that transforms the front frame into the staged
-// back frame, then commits back as the new front frame.
+// Flush is the compatibility API for callers that synchronously consume the
+// returned bytes themselves. New terminal transactions must use
+// PrepareFlush, then call ConfirmFlush only after the target accepted the
+// entire frame (or MarkWriteFailed for a short/erroring write).
 func (m *ScreenModel) Flush() string {
+	output := m.PrepareFlush()
+	m.ConfirmFlush()
+	return output
+}
+
+// PrepareFlush builds the ANSI diff and advances the tentative front frame,
+// but leaves its physical projection Unknown until ConfirmFlush. A later
+// MarkWriteFailed therefore turns the following transaction into a recovery
+// full repaint rather than allowing an unsafe incremental diff.
+func (m *ScreenModel) PrepareFlush() string {
 	if m == nil {
 		return ""
 	}
@@ -207,7 +267,7 @@ func (m *ScreenModel) Flush() string {
 	if m.trace != nil {
 		events = make([]paintRowEvent, 0, m.height)
 	}
-	if m.forceRepaint {
+	if m.forceRepaint || m.projection != ProjectionKnown {
 		for r := 0; r < m.height; r++ {
 			m.emitForcedRow(&output, r)
 			if events != nil {
@@ -236,10 +296,32 @@ func (m *ScreenModel) Flush() string {
 		copy(m.front[r], m.back[r])
 	}
 	m.forceRepaint = false
+	// The bytes have not reached a terminal yet. Keep the physical projection
+	// unknown until the presenter confirms a complete target write.
+	m.projection = ProjectionUnknown
 	if m.trace != nil && len(events) > 0 {
 		m.trace.recordFrame(events, m.height)
 	}
 	return output.String()
+}
+
+// ConfirmFlush marks the tentative front commit as physically known. It is a
+// no-op for nil models and is intentionally separate from Flush so a failed
+// terminal write cannot be mistaken for a rendered frame.
+func (m *ScreenModel) ConfirmFlush() {
+	if m != nil {
+		m.projection = ProjectionKnown
+	}
+}
+
+// MarkWriteFailed invalidates the physical projection after a zero-byte,
+// short, or erroring terminal write. The staged semantic back frame remains
+// intact for the recovery transaction.
+func (m *ScreenModel) MarkWriteFailed() {
+	if m != nil {
+		m.projection = ProjectionUnknown
+		m.forceRepaint = true
+	}
 }
 
 // rowContentHash returns the plain-text content hash of a staged row with

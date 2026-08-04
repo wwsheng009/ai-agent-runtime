@@ -85,6 +85,7 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 				coord.SetSurface(surface)
 				coord.SetWriter(os.Stdout)
 				surface.ShowPrompt("> ")
+				coord.waitUIActorIdle()
 				// The chat loop clears the prompt when the user submits, so the
 				// band renders while no prompt rows are reserved.
 				surface.ClearPromptRows(1)
@@ -94,6 +95,9 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 						coord.RenderAssistantDelta(chunk)
 					}
 				}
+				// Phase 1：facade action 由 UI actor 异步应用，capture 结束前等
+				// actor 排空，保证重放字节流包含完整渲染。
+				coord.waitUIActorIdle()
 			})
 			screen.feed(streaming)
 
@@ -109,6 +113,7 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 				coord.SetWriter(os.Stdout)
 				coord.FinalizeAssistantDelta()
 				surface.ShowPrompt("> ")
+				coord.waitUIActorIdle()
 			})
 			screen.feed(final)
 

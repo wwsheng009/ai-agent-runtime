@@ -140,3 +140,27 @@ func TestFlushReportsTargetWriteError(t *testing.T) {
 		t.Fatalf("LastFrameWriteCount = %d, want 1 attempted target write", p.LastFrameWriteCount())
 	}
 }
+
+type shortWriter struct {
+	n int
+}
+
+func (w shortWriter) Write(data []byte) (int, error) {
+	if w.n > len(data) {
+		return len(data), nil
+	}
+	return w.n, nil
+}
+
+func TestFlushReportsShortWriteWithoutRetry(t *testing.T) {
+	p := NewPresenter()
+	err := p.Flush(shortWriter{n: 2}, func(w io.Writer) {
+		_, _ = io.WriteString(w, "frame")
+	})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Flush error = %v, want io.ErrShortWrite", err)
+	}
+	if p.LastFrameWriteCount() != 1 || p.TotalBytes() != 2 {
+		t.Fatalf("stats after short write: writes=%d bytes=%d, want 1/2", p.LastFrameWriteCount(), p.TotalBytes())
+	}
+}

@@ -80,11 +80,19 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 		return
 	}
 	s.stageOwnedFrameLocked()
-	if diff := s.viewportBackend.Flush(); diff != "" {
-		_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+	if diff := s.viewportBackend.PrepareFlush(); diff != "" {
+		if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
 			_, _ = io.WriteString(w, diff)
-		})
-		s.ownedFrameFlushCount++
+		}); err != nil {
+			s.viewportBackend.MarkWriteFailed()
+		} else {
+			s.viewportBackend.ConfirmFlush()
+			s.ownedFrameFlushCount++
+		}
+	} else if s.viewportBackend.ProjectionValidity() == renderengine.ProjectionUnknown {
+		// An empty recovery diff is possible only for an empty frame; it is
+		// nevertheless the full projection of that frame.
+		s.viewportBackend.ConfirmFlush()
 	}
 }
 
@@ -332,11 +340,13 @@ type fixedBottomPopupPaintPlan struct {
 }
 
 type fixedBottomPromptPaintPlan struct {
-	skip     bool
-	empty    bool
-	startRow int
-	areaRows int
-	rows     []fixedBottomPaintRow
+	skip        bool
+	empty       bool
+	startRow    int
+	areaRows    int
+	promptStart int
+	promptRows  int
+	rows        []fixedBottomPaintRow
 }
 
 func (s *FixedBottomSurface) historyRowsSnapshotLocked() [][]vt.Cell {
@@ -591,7 +601,7 @@ func (s *FixedBottomSurface) bottomRowsWithOwnersLocked() []renderengine.PlanRow
 	screen.Feed(frame.String())
 	bottomRows := s.effectiveBottomRowsLocked(height)
 	cells := screen.CellRows(height-bottomRows+1, height)
-	owners := s.bottomOwnerMapLocked(height, popupPlan, promptPlan)
+	owners := s.bottomOwnerMapLocked(height, state, popupPlan, promptPlan)
 	plan := make([]renderengine.PlanRow, len(cells))
 	for i, row := range cells {
 		rowNo := height - bottomRows + 1 + i
@@ -604,15 +614,32 @@ func (s *FixedBottomSurface) bottomRowsWithOwnersLocked() []renderengine.PlanRow
 // that owns them. Paint rows carry their owner; reserved blank segments
 // (popup gaps, prompt margins, band top gap) are annotated Gap. Rows outside
 // every declared segment are left unset; the caller treats them as Gap.
-func (s *FixedBottomSurface) bottomOwnerMapLocked(height int, popupPlan fixedBottomPopupPaintPlan, promptPlan fixedBottomPromptPaintPlan) map[int]renderengine.RowOwner {
+func (s *FixedBottomSurface) bottomOwnerMapLocked(height int, state BottomPaneState, popupPlan fixedBottomPopupPaintPlan, promptPlan fixedBottomPromptPaintPlan) map[int]renderengine.RowOwner {
 	owners := make(map[int]renderengine.RowOwner)
 	owners[s.statusRowLocked()] = renderengine.RowOwnerStatus
 	for _, p := range popupPlan.rows {
 		owners[p.row] = renderengine.RowOwnerPopup
 	}
 	for _, p := range promptPlan.rows {
-		if p.owner != renderengine.RowOwnerGap {
+		// A plan reserves a blank prompt-input gap while a popup is shown even
+		// when the chat prompt is not active. That row is a Gap, not a Prompt
+		// owner: no prompt cells were painted there. Keep the annotation tied to
+		// actual text so the legacy snapshot and pure bottom row plan share the
+		// same ownership contract.
+		if p.owner != renderengine.RowOwnerGap && p.text != "" {
 			owners[p.row] = p.owner
+		}
+	}
+	// renderInteractiveInputViewport writes a multi-row prompt as one terminal
+	// text operation containing CRLF separators. Its first row is present in
+	// promptPlan.rows, but every occupied viewport row must receive the same
+	// Prompt owner or the physical text/owner snapshots disagree after a long
+	// draft reflows.
+	if state.PromptVisible && promptPlan.promptRows > 0 {
+		for row := promptPlan.promptStart; row < promptPlan.promptStart+promptPlan.promptRows && row <= height; row++ {
+			if row >= 1 {
+				owners[row] = renderengine.RowOwnerPrompt
+			}
 		}
 	}
 	if popupPlan.reservedRows > 0 {
@@ -809,8 +836,10 @@ func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width 
 	activeStart := noticeStart - activeRows
 	activeTopGapStart := activeStart - activeTopGapRows
 	plan := fixedBottomPromptPaintPlan{
-		startRow: activeTopGapStart,
-		areaRows: activeTopGapRows + activeRows + noticeRows + dynamicRows + topMarginRows + promptRows + bottomMarginRows,
+		startRow:    activeTopGapStart,
+		areaRows:    activeTopGapRows + activeRows + noticeRows + dynamicRows + topMarginRows + promptRows + bottomMarginRows,
+		promptStart: promptStart,
+		promptRows:  promptRows,
 	}
 	if plan.startRow < 1 {
 		plan.startRow = 1

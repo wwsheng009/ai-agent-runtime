@@ -295,8 +295,9 @@ func (c toolChainCell) DisplayLines(width int) []string {
 // P5.4-S3; residualAfterEmittedPrefix remains the behavioral residual path.
 type assistantStreamCell struct {
 	cellIdentity
-	source   string
-	markdown bool
+	source              string
+	markdown            bool
+	trailingDisplayLine string
 	// optional formatter for width-aware markdown reflow; nil falls back to plain.
 	formatFn func(source string, width int) string
 }
@@ -307,6 +308,15 @@ func newAssistantStreamCell(source string, markdown bool) assistantStreamCell {
 
 func newAssistantStreamCellWithFormatter(source string, markdown bool, formatFn func(string, int) string) assistantStreamCell {
 	return assistantStreamCell{cellIdentity: newCellIdentity(""), source: source, markdown: markdown, formatFn: formatFn}
+}
+
+// withTrailingDisplayLine attaches display-only policy output to the same
+// semantic cell. It is deliberately not appended by an output call site: live
+// finalization and one-shot replay must derive the identical tail from this
+// cell at the same width.
+func (c assistantStreamCell) withTrailingDisplayLine(line string) assistantStreamCell {
+	c.trailingDisplayLine = line
+	return c
 }
 
 func (assistantStreamCell) Kind() historyCellKind { return historyCellAssistant }
@@ -321,6 +331,12 @@ func (c assistantStreamCell) DisplayLines(width int) []string {
 	} else if c.markdown {
 		// No formatter supplied: keep source as-is (plain path parity).
 		formatted = c.source
+	}
+	if c.trailingDisplayLine != "" {
+		if formatted != "" && !strings.HasSuffix(formatted, "\n") {
+			formatted += "\n"
+		}
+		formatted += c.trailingDisplayLine
 	}
 	return widthAwareDisplayLines(ui.FormatAssistantRendered(formatted), width)
 }

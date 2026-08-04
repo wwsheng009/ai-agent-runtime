@@ -388,16 +388,18 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 	t.Cleanup(liveCoord.Shutdown)
 	liveSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	liveSurface.EnableForTest(width, height)
-	liveCoord.SetSurface(liveSurface)
 	liveScreen := newScreenVT(width, height)
 
 	seed := captureSurfaceStdout(t, func() {
+		liveCoord.SetSurface(liveSurface)
 		liveCoord.SetWriter(os.Stdout)
 		liveSurface.ShowPrompt("> ")
+		liveCoord.waitUIActorIdle()
 		liveSurface.ClearPromptRows(1)
 		for i := 1; i <= 8; i++ {
 			liveCoord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
 		}
+		liveCoord.waitUIActorIdle()
 	})
 	liveScreen.feed(seed)
 
@@ -420,6 +422,8 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 		liveCoord.stopActiveStableCommitLocked()
 		liveCoord.drainActiveStableCommitLocked(true)
 		liveCoord.mu.Unlock()
+		// Phase 1：等 UI actor 把最后一批 facade action 应用到 surface。
+		liveCoord.waitUIActorIdle()
 	})
 	liveScreen.feed(streaming)
 
@@ -445,6 +449,7 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 		liveCoord.SetWriter(os.Stdout)
 		liveCoord.FinalizeAssistantDelta()
 		liveSurface.ShowPrompt("> ")
+		liveCoord.waitUIActorIdle()
 	})
 	liveScreen.feed(finalized)
 
@@ -493,18 +498,20 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 	t.Cleanup(histCoord.Shutdown)
 	histSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	histSurface.EnableForTest(width, height)
-	histCoord.SetSurface(histSurface)
 	histScreen := newScreenVT(width, height)
 
 	histOut := captureSurfaceStdout(t, func() {
+		histCoord.SetSurface(histSurface)
 		histCoord.SetWriter(os.Stdout)
 		histSurface.ShowPrompt("> ")
+		histCoord.waitUIActorIdle()
 		histSurface.ClearPromptRows(1)
 		for i := 1; i <= 8; i++ {
 			histCoord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
 		}
 		histCoord.RenderAssistant(src)
 		histSurface.ShowPrompt("> ")
+		histCoord.waitUIActorIdle()
 	})
 	histScreen.feed(histOut)
 

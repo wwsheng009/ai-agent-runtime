@@ -189,12 +189,11 @@ func TestFixedBottomSurface_OffScreenHistoryHandsOffBeforeHeadroom(t *testing.T)
 	}
 }
 
-// TestFixedBottomSurface_ActiveBandGrowthHandsNewlyHiddenHistoryToScrollback
-// pins the reserve-growth variant of the same contract. A transient ActiveBand
-// and its semantic top gap reduce the visible output region; rows displaced by
-// that geometry change must enter host scrollback immediately instead of
-// disappearing until the band is cleared.
-func TestFixedBottomSurface_ActiveBandGrowthHandsNewlyHiddenHistoryToScrollback(t *testing.T) {
+// TestFixedBottomSurface_ActiveBandGrowthDoesNotCreateHistoryHandoff pins the
+// migration invariant: geometry changes only alter the viewport. They must not
+// append history into native scrollback; Phase 4 finalization will enqueue a
+// typed HistoryCommit instead.
+func TestFixedBottomSurface_ActiveBandGrowthDoesNotCreateHistoryHandoff(t *testing.T) {
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
 	captureUIStdout(t, func() {
 		surface.ShowPrompt("> ")
@@ -220,13 +219,17 @@ func TestFixedBottomSurface_ActiveBandGrowthHandsNewlyHiddenHistoryToScrollback(
 	if displaced != 2 {
 		t.Fatalf("ActiveBand row + semantic gap displaced %d rows, want 2", displaced)
 	}
-	if got := surface.HistoryHandedOffForTest(); got != displaced {
-		t.Fatalf("historyHandedOff=%d want displaced=%d", got, displaced)
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("geometry growth advanced history handoff to %d, want 0", got)
 	}
-	for i := 0; i < displaced; i++ {
-		if want := fmt.Sprintf("reserve-%d", i); !strings.Contains(output, want) {
-			t.Fatalf("newly hidden history %q was not handed to scrollback", want)
-		}
+	// Full-frame repaint may legitimately restage retained transcript rows.
+	// A native scrollback handoff has the distinct HandoffPlan prefix below;
+	// geometry must not emit that effect protocol.
+	if strings.Contains(output, "\x1b[s\x1b[1;") {
+		t.Fatalf("geometry growth emitted native scrollback handoff bytes: %q", output)
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != visibleBefore {
+		t.Fatalf("geometry growth trimmed retained history to %d, want %d", len(got), visibleBefore)
 	}
 
 	captureUIStdout(t, func() {
@@ -384,11 +387,13 @@ func TestFixedBottomSurface_WrappedHistoryTrimsAtHardCapAfterPhysicalHandoff(t *
 	longLine := strings.Repeat("界", width)
 
 	captureUIStdout(t, func() {
-		surface.mu.Lock()
+		var text strings.Builder
 		for i := 0; i < total; i++ {
-			surface.appendHistoryWindowLocked(fmt.Sprintf("%s-%03d\n", longLine, i))
+			text.WriteString(fmt.Sprintf("%s-%03d\n", longLine, i))
 		}
-		surface.mu.Unlock()
+		if _, err, ok := surface.WriteOutput(io.Discard, text.String()); !ok || err != nil {
+			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+		}
 	})
 
 	history := surface.HistoryWindowForTest()

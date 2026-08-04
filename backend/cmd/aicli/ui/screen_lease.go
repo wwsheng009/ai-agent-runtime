@@ -123,12 +123,14 @@ func (s *FixedBottomSurface) AcquireAlternateScreen(_ context.Context, req Fulls
 		return nil, fmt.Errorf("%w: no terminal", ErrFullScreenUnavailable)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.enabled {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: surface is not enabled", ErrFullScreenUnavailable)
 	}
 	if s.leaseID != 0 {
-		return nil, fmt.Errorf("%w: lease id=%d still active", ErrScreenLeaseBusy, s.leaseID)
+		activeLeaseID := s.leaseID
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: lease id=%d still active", ErrScreenLeaseBusy, activeLeaseID)
 	}
 	writer := s.alternateWriter
 	if writer == nil {
@@ -165,9 +167,16 @@ func (s *FixedBottomSurface) AcquireAlternateScreen(_ context.Context, req Fulls
 				"\x1b[?1049l",
 			)
 		})
+		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: enter alternate screen: %v", ErrFullScreenUnavailable, enterErr)
 	}
-	return &fullscreenLease{surface: s, id: s.leaseID, mode: ScreenModeAlternate}, nil
+	leaseID := s.leaseID
+	s.mu.Unlock()
+	// Lease transport has completed. Notify the UI actor only after releasing
+	// the surface mutex so mailbox backpressure cannot hold the surface lock.
+	// A surface without an attached actor simply retains its legacy behaviour.
+	s.postFacadeAction(LeaseAcquired{LeaseID: leaseID})
+	return &fullscreenLease{surface: s, id: leaseID, mode: ScreenModeAlternate}, nil
 }
 
 // writeLeaseSequencesLocked writes terminal sequences while the caller already
@@ -222,13 +231,15 @@ func (s *FixedBottomSurface) releaseAlternateScreen(_ context.Context, id uint64
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.leaseID != id {
+		s.mu.Unlock()
 		return nil
 	}
 	s.leaseID = 0
 	s.leaseMode = ScreenModePrimary
 	if !s.enabled || s.terminal == nil {
+		s.mu.Unlock()
+		s.postFacadeAction(LeaseReleased{LeaseID: id})
 		return nil
 	}
 	writer := s.alternateWriter
@@ -265,5 +276,10 @@ func (s *FixedBottomSurface) releaseAlternateScreen(_ context.Context, id uint64
 		s.renderPromptRowsLocked(true)
 		s.moveToOutputLocked()
 	})
+	s.mu.Unlock()
+	// The release repaint completed inside the lease transaction. This action
+	// is a logical barrier for the coordinator; it never duplicates that repaint
+	// or advances any history handoff state.
+	s.postFacadeAction(LeaseReleased{LeaseID: id})
 	return exitErr
 }

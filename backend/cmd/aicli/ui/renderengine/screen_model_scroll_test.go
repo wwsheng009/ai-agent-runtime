@@ -15,6 +15,7 @@ func TestScreenModelScrollUpSynchronizesBuffersAndOnlyPaintsNewRows(t *testing.T
 	if output := model.Flush(); output == "" {
 		t.Fatal("initial frame did not paint")
 	}
+	model.ConfirmFlush()
 
 	model.ScrollUp(2)
 	assertScreenModelBuffers(t, model, testGrid(8, 4, "three", "four", "", ""))
@@ -30,10 +31,38 @@ func TestScreenModelScrollUpSynchronizesBuffersAndOnlyPaintsNewRows(t *testing.T
 	}
 }
 
+func TestScreenModelUnknownProjectionForcesRecoveryBeforeIncrementalDiff(t *testing.T) {
+	model := NewScreenModel(8, 3)
+	model.StageFrame(testGrid(8, 3, "one", "two", "three"))
+	if output := model.Flush(); output == "" {
+		t.Fatal("initial frame did not paint")
+	}
+	model.ConfirmFlush()
+	if got := model.ProjectionValidity(); got != ProjectionKnown {
+		t.Fatalf("projection after full flush = %v, want known", got)
+	}
+
+	model.Invalidate()
+	if got := model.ProjectionValidity(); got != ProjectionUnknown {
+		t.Fatalf("projection after invalidation = %v, want unknown", got)
+	}
+	model.MarkWriteFailed()
+	// A physical-scroll mirror is unsafe until a recovery paint succeeds.
+	model.ScrollUp(1)
+	if output := model.Flush(); !strings.Contains(output, "\x1b[1;1H") || !strings.Contains(output, "\x1b[2;1H") {
+		t.Fatalf("unknown projection must force full recovery, got %q", output)
+	}
+	model.ConfirmFlush()
+	if got := model.ProjectionValidity(); got != ProjectionKnown {
+		t.Fatalf("projection after recovery = %v, want known", got)
+	}
+}
+
 func TestScreenModelScrollDownSynchronizesBuffersAndOnlyPaintsNewRows(t *testing.T) {
 	model := NewScreenModel(8, 4)
 	model.StageFrame(testGrid(8, 4, "one", "two", "three", "four"))
 	model.Flush()
+	model.ConfirmFlush()
 
 	model.ScrollDown(2)
 	assertScreenModelBuffers(t, model, testGrid(8, 4, "", "", "one", "two"))
@@ -53,6 +82,7 @@ func TestScreenModelScrollMovesPendingFrontBackDifference(t *testing.T) {
 	model := NewScreenModel(8, 4)
 	model.StageFrame(testGrid(8, 4, "one", "two", "three", "four"))
 	model.Flush()
+	model.ConfirmFlush()
 
 	model.StageRow(4, testRow(8, "pending"))
 	model.ScrollUp(1)
@@ -90,6 +120,7 @@ func TestScreenModelScrollHandlesCountsOutsideViewport(t *testing.T) {
 			original := testGrid(6, 3, "one", "two", "three")
 			model.StageFrame(original)
 			model.Flush()
+			model.ConfirmFlush()
 
 			tt.apply(model, tt.count)
 
@@ -113,6 +144,7 @@ func TestScreenModelScrollRegionLeavesBottomPaneUntouched(t *testing.T) {
 	model := NewScreenModel(8, 5)
 	model.StageFrame(testGrid(8, 5, "one", "two", "three", "prompt", "status"))
 	model.Flush()
+	model.ConfirmFlush()
 
 	model.ScrollRegionUp(1, 3, 1)
 	assertScreenModelBuffers(t, model, testGrid(8, 5, "two", "three", "", "prompt", "status"))
@@ -131,11 +163,37 @@ func TestScreenModelApplyRegionAppendMirrorsTerminalBytes(t *testing.T) {
 	model := NewScreenModel(8, 5)
 	model.StageFrame(testGrid(8, 5, "one", "two", "three", "prompt", "status"))
 	model.Flush()
+	model.ConfirmFlush()
 
 	model.ApplyRegionAppend(1, 3, testGrid(8, 2, "four", "five"))
 	assertScreenModelBuffers(t, model, testGrid(8, 5, "three", "four", "five", "prompt", "status"))
 	if output := model.Flush(); output != "" {
 		t.Fatalf("mirrored terminal append must not repaint, got %q", output)
+	}
+}
+
+func TestScreenModelWriteFailureRequiresRecoveryBeforeDiff(t *testing.T) {
+	model := NewScreenModel(8, 3)
+	model.StageFrame(testGrid(8, 3, "one", "two", "three"))
+	if output := model.PrepareFlush(); output == "" {
+		t.Fatal("initial frame did not paint")
+	}
+	if got := model.ProjectionValidity(); got != ProjectionUnknown {
+		t.Fatalf("prepared frame projection = %v, want unknown", got)
+	}
+	model.MarkWriteFailed()
+
+	model.StageRow(3, testRow(8, "changed"))
+	output := model.Flush()
+	for _, row := range []int{1, 2, 3} {
+		marker := "\x1b[" + strconv.Itoa(row) + ";1H"
+		if !strings.Contains(output, marker) {
+			t.Fatalf("row %d missing from recovery frame: %q", row, output)
+		}
+	}
+	model.ConfirmFlush()
+	if got := model.ProjectionValidity(); got != ProjectionKnown {
+		t.Fatalf("ConfirmFlush projection = %v, want known", got)
 	}
 }
 

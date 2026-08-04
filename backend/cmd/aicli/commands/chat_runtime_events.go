@@ -119,11 +119,11 @@ type chatRuntimeEventBridge struct {
 	// 防止残留污染下一条普通命令（见 chat_debug_archive.go / chat_model_command.go）。
 	pendingInteractionSource string
 	pendingInteractionTail   *encoding.Tail
-	eventLogMu                 sync.Mutex
-	eventLogPathOverride       string // 测试注入：覆盖日志文件路径
-	eventLogCount              uint64 // 已写入事件数
-	eventLogReplayed           uint64 // 启动时重放事件数
-	eventLogFailures           uint64 // 写入/重放失败次数
+	eventLogMu               sync.Mutex
+	eventLogPathOverride     string // 测试注入：覆盖日志文件路径
+	eventLogCount            uint64 // 已写入事件数
+	eventLogReplayed         uint64 // 启动时重放事件数
+	eventLogFailures         uint64 // 写入/重放失败次数
 
 	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
 	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
@@ -651,7 +651,45 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 		b.logLateRuntimeEvent(queued.event, "stale local run epoch")
 		return
 	}
+	// Phase 1: keep the bridge queue as the bounded runtime ingress, but let
+	// the UI actor serialize ordinary runtime-driven UI mutations with timer and
+	// surface actions. Approval/question events remain on this worker for now:
+	// their legacy prompt adapters synchronously own stdin and must first be
+	// split into explicit effects before they can safely enter the reducer.
+	if !runtimeEventRequiresLegacyInteraction(queued.event) && b.postRuntimeEventToUIActor(queued.event) {
+		return
+	}
 	b.handleEvent(queued.event)
+}
+
+func runtimeEventRequiresLegacyInteraction(event runtimeevents.Event) bool {
+	switch event.Type {
+	case runtimechat.EventApprovalRequested, runtimechat.EventQuestionAsked:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.Event) bool {
+	if b == nil || b.session == nil || b.session.Interaction == nil {
+		return false
+	}
+	coordinator := b.session.Interaction
+	if !coordinator.postUIAction(ui.RuntimeEvent{
+		Kind: chatUIRuntimeEventActionKind,
+		Payload: chatRuntimeEventUIAction{
+			bridge: b,
+			event:  event,
+		},
+	}) {
+		return false
+	}
+	// Preserve the existing bridge queue's completion contract: EndRun only
+	// observes an event as processed after the actor has applied its reducer
+	// action and all facade updates emitted by that action have settled.
+	coordinator.waitUIActorIdle()
+	return true
 }
 
 // encodeRenderModelEvent 把事件送入统一渲染编码器（双跑模式数据面）。
@@ -805,7 +843,7 @@ type eventLogInjection struct {
 	UserInput         string         `json:"user_input,omitempty"`
 	Command           string         `json:"command,omitempty"`
 	Error             string         `json:"error,omitempty"`
-	Interaction       string         `json:"interaction,omitempty"` // /debug、/model 等交互输出
+	Interaction       string         `json:"interaction,omitempty"`        // /debug、/model 等交互输出
 	InteractionAnchor *encoding.Tail `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
 }
 
@@ -895,11 +933,11 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		return 0, err
 	}
 	type entry struct {
-		event            runtimeevents.Event
-		userInput        string         // 非空表示用户输入注入记录（无 runtime 事件类型）
-		command          string         // 非空表示命令结果注入记录
-		err              string         // 非空表示操作错误注入记录
-		interaction      string         // 非空表示用户交互输出注入记录
+		event             runtimeevents.Event
+		userInput         string         // 非空表示用户输入注入记录（无 runtime 事件类型）
+		command           string         // 非空表示命令结果注入记录
+		err               string         // 非空表示操作错误注入记录
+		interaction       string         // 非空表示用户交互输出注入记录
 		interactionAnchor *encoding.Tail // 交互输出触发时刻锚点
 	}
 	var entries []entry
@@ -984,6 +1022,14 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 	b.eventLogMu.Lock()
 	b.eventLogReplayed = uint64(len(entries))
 	b.eventLogMu.Unlock()
+	// Replay rebuilds the same semantic Scene used by live runtime events. Once
+	// the reconstruction is complete, publish one immutable snapshot through
+	// the UI actor so AppState does not retain a pre-replay transcript. This is
+	// a data-plane bridge only: the legacy replay presenter remains unchanged
+	// until the later Compose/TerminalSession migration.
+	if b.session != nil && b.session.Interaction != nil {
+		b.session.Interaction.postTranscriptSnapshotFromBridge(b)
+	}
 	return uint64(len(entries)), nil
 }
 

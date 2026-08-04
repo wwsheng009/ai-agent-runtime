@@ -8,14 +8,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
-// ==== 语义行 ID 记账断言工具（owned-render-simplification Phase 0，G7/G8）====
+// ==== 物理屏幕诊断工具（owned-render-simplification Phase 0）====
 //
-// 语义定义（方案 §4.2/§4.3）：行文本的"语义出现次数"= 该行在
-// 「native scrollback 序列 + 当前屏幕各行」合并视图中的出现次数。
-// 与字节级 strings.Count 断言的差异：
-//   - 字节断言会把"同一内容的合法重绘"（SGR 包裹差异、原位覆盖）误报为重复；
-//   - 语义记账只关心内容级重复——已提交进 scrollback 的行不得再出现在屏幕上
-//     （测试 1 场景），未提交的行出现在屏幕至多一次。
+// `HistoryCommitLedger`（history_commit.go）是 handoff exactly-once 的权威
+// 测试账本：身份来自 Token + CellID + Revision + SourceRange + DisplayRange
+// + LayoutGeneration，绝不来自文本。这里保留 vt 回放，仅用于观察最终物理
+// 屏幕/scrollback；文本相同的合法重绘或不同 CellID 的同文内容不得被它误判。
 //
 // 依赖：vt.Screen 已扩展 scrollback 记录（N6，ui/vt/screen.go recordScrollbackRows，
 // 仅记录 full-width region 即 top==1 的滚动；sub-region 滚动不记录）。
@@ -43,9 +41,9 @@ func semanticLineCounts(t *testing.T, width, height int, raw string) map[string]
 	return counts
 }
 
-// assertSemanticLinesAppearAtMost 断言 lines 中每个语义行的出现次数 ≤ max。
-// 失败时对每个重复行打印其在原始字节流中的出现上下文（辅助诊断；字节
-// 计数已降级为诊断信息，不再作为断言本身）。
+// assertSemanticLinesAppearAtMost 是历史回归的物理显示诊断断言，而非
+// HistoryCommit exactly-once 判据。调用点必须为每一行提供唯一测试标记；
+// token/range 行为由 HistoryCommitLedger 测试覆盖。
 func assertSemanticLinesAppearAtMost(t *testing.T, raw string, width, height, max int, lines ...string) {
 	t.Helper()
 	if max < 1 {

@@ -480,6 +480,7 @@ func TestPrintVisibleChatHistory_SettlesSurfaceLayoutDebtBeforeContent(t *testin
 
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	session.Surface = surface
 	coord.SetSurface(surface)
@@ -494,6 +495,7 @@ func TestPrintVisibleChatHistory_SettlesSurfaceLayoutDebtBeforeContent(t *testin
 		if !surface.ShowPrompt("> ") {
 			t.Fatal("expected surface prompt")
 		}
+		coord.waitUIActorIdle()
 		coord.promptVisible = true
 		coord.promptRenderedOnSurface = true
 		// Same sequence as resume/startup: clear prompt (creates pending debt),

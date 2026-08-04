@@ -155,6 +155,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	}
 	bridge.handleEvent(requested)
 	require.NotContains(t, history.String(), "Running")
+	interaction.waitUIActorIdle()
 	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
 
 	bridge.handleEvent(runtimeevents.Event{
@@ -168,6 +169,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 			"message":      "package 2/3",
 		},
 	})
+	interaction.waitUIActorIdle()
 	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
 
 	completed := runtimeevents.Event{
@@ -187,6 +189,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	}
 	bridge.handleEvent(completed)
 	bridge.handleEvent(completed)
+	interaction.waitUIActorIdle()
 	require.NotContains(t, strings.Join(surface.ActiveBandLines(), "\n"), "Running")
 	require.Equal(t, 1, strings.Count(history.String(), "• Completed [meta] go test ./..."))
 
@@ -199,6 +202,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 		"tool_source":  "meta",
 	}
 	bridge.handleEvent(failedRequested)
+	interaction.waitUIActorIdle()
 	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./failed")
 
 	failed := runtimeevents.Event{

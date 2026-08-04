@@ -166,6 +166,13 @@ type FixedBottomSurface struct {
 	// the paint path can throttle GetSize syscalls without missing resizes for
 	// longer than DefaultGeometryProbeMinInterval.
 	lastGeometryProbeAt time.Time
+	// uiPoster 是 UI actor 投递入口（Phase 1，实施指南任务 4）：非 nil 时
+	// facade 组内部只投递 action；reducer 经 Apply 同步应用，输出不变。
+	uiPoster func(UIAction) bool
+	// activeBandGeneration fences queued transient paints. Finalization advances
+	// it before committing permanent history, so a stale actor action cannot
+	// remount a completed stream after the commit transaction.
+	activeBandGeneration uint64
 }
 
 type fixedBottomPopupState struct {
@@ -199,8 +206,9 @@ func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
 		term = NewTerminal()
 	}
 	return &FixedBottomSurface{
-		terminal:        term,
-		handoffFrontier: renderengine.NewHandoffFrontier(),
+		terminal:             term,
+		handoffFrontier:      renderengine.NewHandoffFrontier(),
+		activeBandGeneration: 1,
 		statusModel: &style.StatusLineModel{
 			State: style.RunReady,
 		},
@@ -588,6 +596,23 @@ func (s *FixedBottomSurface) SyncTerminalGeometryThrottled(minInterval time.Dura
 	return s.syncTerminalGeometry(minInterval)
 }
 
+// MeasuredGeometry returns the most recently applied terminal dimensions
+// without issuing a terminal query or writing any bytes. It is the narrow
+// legacy-adapter bridge used to report a completed geometry probe back to the
+// UI actor; Layout must consume the resulting Resize action, never this method.
+func (s *FixedBottomSurface) MeasuredGeometry() (width, height int, ok bool) {
+	if s == nil || s.terminal == nil {
+		return 0, 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return 0, 0, false
+	}
+	width, height = s.terminal.Width(), s.terminal.Height()
+	return width, height, width > 0 && height > 0
+}
+
 func (s *FixedBottomSurface) syncTerminalGeometry(minInterval time.Duration) (sizeChanged, probed bool) {
 	if s == nil || s.terminal == nil {
 		return false, false
@@ -950,15 +975,19 @@ func (s *FixedBottomSurface) directScrollRegionRowsLocked(height int) int {
 	return regionBottom
 }
 
-// appendOwnedDirectPaintLocked writes committed rows through the native
-// scroll region so the terminal scrolls naturally like a log once history
-// exceeds the visible region: each \r\n parks at the region bottom and
-// scrolls the region up one row before the row content is written, exactly
-// like insertHistoryLinesLocked. After the scroll the full frame is staged
-// and the scrolled history rows are committed silently (CommitRange) so the
-// following flush only emits the bottom-pane delta (ActiveBand/prompt/status)
-// instead of repainting the transcript. Callers hold the surface lock and the
-// terminal write lock.
+// appendOwnedDirectPaintLocked writes the rows this write added through the
+// native scroll region so the terminal scrolls naturally like a log once
+// history exceeds the visible region: each \r\n parks at the region bottom
+// and scrolls the region up one row before the row content is written,
+// exactly like insertHistoryLinesLocked. The scroll is the single text entry
+// into native scrollback: rows pushed off the top are the only rows that
+// enter it, and only the newly added rows are ever re-emitted (single scroll
+// channel, INV-SCROLL-01). The handoff frontier advances as bookkeeping for
+// the composed-frame window; the double buffer is mirrored with
+// ApplyRegionAppend instead of a CommitRange coverage compensation (D6) so
+// the following flush only emits the bottom-pane delta
+// (ActiveBand/prompt/status). Callers hold the surface lock and the terminal
+// write lock.
 func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, output string) {
 	if s == nil || s.terminal == nil || output == "" {
 		return
@@ -968,20 +997,19 @@ func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, outp
 		height = 24
 	}
 	regionBottom := s.directScrollRegionRowsLocked(height)
-	// appendHistoryWindowLocked already handed lines older than the visible
-	// region into native scrollback (frontier = total - visible). Painting the
-	// full output again would scroll those already-rendered lines into the
-	// terminal a second time, duplicating history on screen. Paint only the
-	// rows that have not been handed off yet: the visible tail of the history
-	// window (raw lines, ANSI included, matching the previous split semantics).
-	frontier := s.handoffFrontier.Value()
-	if frontier < 0 {
-		frontier = 0
-	}
-	if frontier >= len(s.historyWindow) {
+	// Paint only the rows this write added (appendHistoryWindowLocked already
+	// captured them; partial-line coalescing may have merged the first segment
+	// into the previous retained row, so take the window tail). Rows already
+	// on screen or in scrollback are never re-emitted.
+	added := len(strings.Split(strings.TrimSuffix(output, "\n"), "\n"))
+	if added < 1 {
 		return
 	}
-	rows := s.historyWindow[frontier:]
+	window := s.historyWindow
+	if added > len(window) {
+		added = len(window)
+	}
+	rows := window[len(window)-added:]
 	// Paint through the single scroll primitive
 	// (insertHistoryLinesInRegionLocked) with the band-excluding region: the
 	// DECSTBM scroll bytes are constructed in exactly one place
@@ -1006,16 +1034,55 @@ func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, outp
 	if writer != os.Stdout {
 		_, _ = plan.WriteTo(writer)
 	}
-	// Mirror the scroll into the double buffer: stage the full new frame,
-	// then mark the already-scrolled history rows as committed so Flush only
-	// emits the bottom-pane delta.
+	// The terminal scrolled once per painted physical row; rows pushed off the
+	// top entered native scrollback. Advance the frontier (bookkeeping for the
+	// composed-frame window: rows older than the visible tail are reached by
+	// native scrollback only and never re-painted).
+	visible := s.visibleOutputRowsLocked()
+	if visible < 1 {
+		visible = 1
+	}
+	if keep := len(s.historyWindow) - visible; keep > 0 {
+		s.handoffFrontier.AdvanceTo(keep, len(s.historyWindow))
+	}
+	// Dual-retain bound (Phase 2 transitional form of the D9 trim): drop
+	// already-handed-off rows past visible+headroom so the retained window
+	// stays bounded until the mutableRows rework removes headroom semantics.
+	keepForRestore := visible + historyWindowHeadroom
+	if keepForRestore > historyWindowMaxLines {
+		keepForRestore = historyWindowMaxLines
+	}
+	s.softTrimRetainedHistoryLocked(keepForRestore)
+	// Mirror the scroll into the double buffer with the same region semantics
+	// the terminal applied: front and back move together so the diffing Flush
+	// below only emits the bottom-pane delta (D6 removes the CommitRange
+	// coverage compensation for known scrolls).
+	if s.viewportBackend == nil {
+		width := s.terminal.Width()
+		if width < 1 {
+			width = 80
+		}
+		s.viewportBackend = renderengine.NewScreenModel(width, height)
+	}
+	if cells := s.expandHistoryLinesLocked(rows); len(cells) > 0 {
+		s.viewportBackend.ApplyRegionAppend(1, regionBottom, cells)
+	}
+	// The handoff presenter completed before this physical mirror is applied.
+	// It is therefore safe to use the mirrored front/back for the following
+	// bottom-pane diff even when this was the first owned output write.
+	s.viewportBackend.MarkKnown()
+	// The scroll region of front/back now mirrors the terminal exactly; a
+	// stale full-repaint flag (e.g. from backend creation) must not force a
+	// second emission of the rows the scroll just painted.
+	s.viewportBackend.ClearForceRepaint()
 	s.stageOwnedFrameLocked()
-	if s.viewportBackend != nil {
-		s.viewportBackend.CommitRange(1, regionBottom)
-		if diff := s.viewportBackend.Flush(); diff != "" {
-			_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {
-				_, _ = io.WriteString(w, diff)
-			})
+	if diff := s.viewportBackend.PrepareFlush(); diff != "" {
+		if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+			_, _ = io.WriteString(w, diff)
+		}); err != nil {
+			s.viewportBackend.MarkWriteFailed()
+		} else {
+			s.viewportBackend.ConfirmFlush()
 			s.ownedFrameFlushCount++
 		}
 	}
@@ -1349,12 +1416,6 @@ func (s *FixedBottomSurface) appendHistoryWindowLocked(text string) {
 		s.historyWindow = append(s.historyWindow, segs...)
 	}
 	s.historyPartial = !endsWithNewline
-	// Owned path only: hand lines older than the visible output region into
-	// native scrollback BEFORE the hard cap (dual-retain headroom for shrink).
-	// Hard-cap trim alone would silently drop lines without host scrollback.
-	if s.ownedViewport {
-		s.commitExcessHistoryToScrollbackLocked()
-	}
 
 	// Safety net for all paths: keep the newest historyWindowMaxLines rows
 	// (matches original bounds test and prevents unbounded memory growth).
@@ -1504,7 +1565,129 @@ func (s *FixedBottomSurface) VisibleOutputRows() int {
 	return s.visibleOutputRowsLocked()
 }
 
+// SetUIActorPoster 注入 UI actor 投递入口（Phase 1，实施指南任务 4）。
+// 非 nil 时，所有 public BottomPane facade（band/status/prompt/editor/
+// composer/popup）内部只投递 action（不直接 mutation），由 reducer 经
+// Apply 调用同步实现生成相同输出（任务 5）。
+// nil 恢复同步路径（legacy 测试与未接线环境行为不变）。
+func (s *FixedBottomSurface) SetUIActorPoster(poster func(UIAction) bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uiPoster = poster
+}
+
+// postFacadeAction 是 facade 组的统一投递入口：未接线（uiPoster == nil）
+// 时返回 false，调用方回退同步实现。
+func (s *FixedBottomSurface) postFacadeAction(a UIAction) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	poster := s.uiPoster
+	s.mu.Unlock()
+	if poster == nil {
+		return false
+	}
+	return poster(a)
+}
+
+// Apply 是 Phase 1 legacy adapter 的 action 应用入口（任务 5）：reducer
+// 端调用，直接执行同步实现（不经 poster，避免再入队），输出与改造前一致。
+// 未识别的 action 返回 false。必须在 UI actor goroutine（或独占 surface
+// 的路径）内调用。
+func (s *FixedBottomSurface) Apply(action UIAction) bool {
+	switch a := action.(type) {
+	case SetActiveBandAction:
+		if !s.activeBandActionCurrent(a.Generation) {
+			return true
+		}
+		if a.RawLines != nil {
+			return s.setActiveBandImpl(a.RawLines)
+		}
+		return s.setActiveBandStyledImpl(a.Lines)
+	case ClearActiveBandAction:
+		if !s.activeBandActionCurrent(a.Generation) {
+			return true
+		}
+		return s.clearActiveBand()
+	case SetStatusModelsAction:
+		s.setStatusModelsImpl(a.Status, a.Dynamic)
+		return true
+	case SetStatusModelAction:
+		s.setStatusModelImpl(a.Status)
+		return true
+	case SetDynamicStatusModelAction:
+		s.setDynamicStatusModelImpl(a.Dynamic)
+		return true
+	case ShowPromptAction:
+		return s.showPromptImpl(a.Line)
+	case ClearPromptRowsAction:
+		return s.clearPromptRowsImpl(a.Rows)
+	case SetPromptStateAction:
+		return s.setPromptInputStateImpl(a.Line, a.Input, a.Rows, a.CursorRow, a.CursorCol)
+	case TrackPromptInputAction:
+		return s.trackPromptInputStateImpl(a.Line, a.Input, a.Rows, a.CursorRow, a.CursorCol)
+	case ResetPromptAction:
+		return s.resetPromptImpl(a.Line, a.Rows)
+	case SetPromptRowsAction:
+		return s.setPromptRowsImpl(a.Rows)
+	case SetPromptNoticeAction:
+		return s.setPromptNoticeLineImpl(a.Line)
+	case SetPromptEditorStatusAction:
+		return s.setPromptEditorStatusLineImpl(a.Line)
+	case SetComposerPreviewAction:
+		s.setComposerPreviewImpl(a.Line)
+		return true
+	case ClearComposerPreviewAction:
+		s.clearComposerPreviewImpl()
+		return true
+	case ShowPopupAction:
+		if a.Handle != nil && a.Handle.Valid() {
+			return s.beginPopupInputForHandleImpl(a.Lines, a.Prompt, *a.Handle, a.Viewport)
+		}
+		if a.Input || a.Prompt != "" {
+			s.showPopupInputForOwnerImpl(a.Lines, a.Prompt, a.Owner, a.PreserveCursor)
+			return true
+		}
+		if a.PreserveCursor {
+			s.showPopupPreserveCursorForOwner(a.Lines, a.Owner, a.BelowPrompt)
+			return true
+		}
+		s.showPopupImpl(a.Lines)
+		return true
+	case ClearPopupAction:
+		if a.Handle != nil && a.Handle.Valid() {
+			s.clearPopupHandlePreserveCursorImpl(*a.Handle)
+			return true
+		}
+		if a.Owner != "" {
+			s.clearPopupForOwnerPreserveCursorImpl(a.Owner)
+			return true
+		}
+		if a.PreserveCursor {
+			s.clearPopupPreserveCursorImpl()
+			return true
+		}
+		s.clearPopupImpl()
+		return true
+	case UpdatePopupAction:
+		return s.updatePopupInputForHandleImpl(a.Handle, a.Lines, a.Prompt, a.PreserveCursor)
+	}
+	return false
+}
+
 func (s *FixedBottomSurface) ShowPrompt(line string) bool {
+	if s.postFacadeAction(ShowPromptAction{Line: line}) {
+		return true
+	}
+	return s.showPromptImpl(line)
+}
+
+// showPromptImpl 是 ShowPrompt 的同步实现（legacy adapter 的调用目标）。
+func (s *FixedBottomSurface) showPromptImpl(line string) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1535,6 +1718,14 @@ func (s *FixedBottomSurface) ShowPrompt(line string) bool {
 }
 
 func (s *FixedBottomSurface) ResetPrompt(line string, rows int) bool {
+	if s.postFacadeAction(ResetPromptAction{Line: line, Rows: rows}) {
+		return true
+	}
+	return s.resetPromptImpl(line, rows)
+}
+
+// resetPromptImpl is the reducer-side synchronous ResetPrompt adapter.
+func (s *FixedBottomSurface) resetPromptImpl(line string, rows int) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1565,6 +1756,14 @@ func (s *FixedBottomSurface) ResetPrompt(line string, rows int) bool {
 }
 
 func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
+	if s.postFacadeAction(SetPromptRowsAction{Rows: rows}) {
+		return true
+	}
+	return s.setPromptRowsImpl(rows)
+}
+
+// setPromptRowsImpl is the reducer-side synchronous SetPromptRows adapter.
+func (s *FixedBottomSurface) setPromptRowsImpl(rows int) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1608,6 +1807,14 @@ func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
 }
 
 func (s *FixedBottomSurface) SetPromptNoticeLine(line string) bool {
+	if s.postFacadeAction(SetPromptNoticeAction{Line: line}) {
+		return true
+	}
+	return s.setPromptNoticeLineImpl(line)
+}
+
+// setPromptNoticeLineImpl is the reducer-side synchronous notice adapter.
+func (s *FixedBottomSurface) setPromptNoticeLineImpl(line string) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1647,6 +1854,14 @@ func (s *FixedBottomSurface) SetPromptNoticeLine(line string) bool {
 // Lines are sanitized and capped to the adaptive row budget. Empty clears it.
 // This never writes into scrollback; callers commit final content separately.
 func (s *FixedBottomSurface) SetActiveBand(lines []string) bool {
+	if s.postFacadeAction(s.newSetActiveBandAction(nil, lines)) {
+		return true
+	}
+	return s.setActiveBandImpl(lines)
+}
+
+// setActiveBandImpl 是 SetActiveBand 的同步实现（legacy adapter 调用目标）。
+func (s *FixedBottomSurface) setActiveBandImpl(lines []string) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1658,6 +1873,24 @@ func (s *FixedBottomSurface) SetActiveBand(lines []string) bool {
 // Text is sanitized and width-limited before storage; only semantic styles
 // generated by the application reach the terminal rendering adapter.
 func (s *FixedBottomSurface) SetActiveBandStyled(lines []render.Line) bool {
+	if s.postFacadeAction(s.newSetActiveBandAction(lines, nil)) {
+		return true
+	}
+	return s.setActiveBandStyledImpl(lines)
+}
+
+func (s *FixedBottomSurface) newSetActiveBandAction(lines []render.Line, rawLines []string) SetActiveBandAction {
+	if s == nil {
+		return SetActiveBandAction{Lines: lines, RawLines: rawLines}
+	}
+	s.mu.Lock()
+	generation := s.activeBandGeneration
+	s.mu.Unlock()
+	return SetActiveBandAction{Lines: lines, RawLines: rawLines, Generation: generation}
+}
+
+// setActiveBandStyledImpl 是 SetActiveBandStyled 的同步实现。
+func (s *FixedBottomSurface) setActiveBandStyledImpl(lines []render.Line) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1763,7 +1996,21 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 
 // ClearActiveBand removes the in-progress stream viewport.
 func (s *FixedBottomSurface) ClearActiveBand() bool {
+	if s.postFacadeAction(s.newClearActiveBandAction()) {
+		return true
+	}
 	return s.clearActiveBand()
+}
+
+func (s *FixedBottomSurface) newClearActiveBandAction() ClearActiveBandAction {
+	if s == nil {
+		return ClearActiveBandAction{}
+	}
+	s.mu.Lock()
+	s.activeBandGeneration++
+	generation := s.activeBandGeneration
+	s.mu.Unlock()
+	return ClearActiveBandAction{Generation: generation}
 }
 
 // clearActiveBand releases the active viewport as one terminal-space
@@ -1951,6 +2198,16 @@ func cloneRenderLines(lines []render.Line) []render.Line {
 // multiline draft. It is kept separate from runtime notices so queue and
 // approval feedback cannot be overwritten by cursor movement.
 func (s *FixedBottomSurface) SetPromptEditorStatusLine(line string) bool {
+	if s.postFacadeAction(SetPromptEditorStatusAction{Line: line}) {
+		return true
+	}
+	return s.setPromptEditorStatusLineImpl(line)
+}
+
+// setPromptEditorStatusLineImpl is the reducer-side synchronous editor-status
+// adapter. The public facade only posts its semantic intent when an actor is
+// attached.
+func (s *FixedBottomSurface) setPromptEditorStatusLineImpl(line string) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -1995,6 +2252,17 @@ func normalizeFixedPromptInputState(line string, input string, rows int, cursorR
 }
 
 func (s *FixedBottomSurface) TrackPromptInputState(line string, input string, rows int, cursorRow int, cursorCol int) bool {
+	if s.postFacadeAction(TrackPromptInputAction{
+		Line: line, Input: input, Rows: rows, CursorRow: cursorRow, CursorCol: cursorCol,
+	}) {
+		return true
+	}
+	return s.trackPromptInputStateImpl(line, input, rows, cursorRow, cursorCol)
+}
+
+// trackPromptInputStateImpl keeps the legacy incremental editor repaint
+// policy. SetPromptInputState remains the explicit full prompt projection.
+func (s *FixedBottomSurface) trackPromptInputStateImpl(line string, input string, rows int, cursorRow int, cursorCol int) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -2023,6 +2291,14 @@ func (s *FixedBottomSurface) TrackPromptInputState(line string, input string, ro
 }
 
 func (s *FixedBottomSurface) SetPromptInputState(line string, input string, rows int, cursorRow int, cursorCol int) bool {
+	if s.postFacadeAction(SetPromptStateAction{Line: line, Input: input, Rows: rows, CursorRow: cursorRow, CursorCol: cursorCol}) {
+		return true
+	}
+	return s.setPromptInputStateImpl(line, input, rows, cursorRow, cursorCol)
+}
+
+// setPromptInputStateImpl 是 SetPromptInputState 的同步实现。
+func (s *FixedBottomSurface) setPromptInputStateImpl(line string, input string, rows int, cursorRow int, cursorCol int) bool {
 	if s == nil || s.terminal == nil {
 		return false
 	}
@@ -2109,6 +2385,19 @@ func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
 	if rows < 1 {
 		rows = 1
 	}
+	// ShowPrompt 走 actor 队列后，紧随的 ClearPromptRows 必须同队列排队，
+	// 否则同步清除对尚未渲染的 prompt 无效（mid-stream 残留 prompt 行）。
+	if s.postFacadeAction(ClearPromptRowsAction{Rows: rows}) {
+		return true
+	}
+	return s.clearPromptRowsImpl(rows)
+}
+
+// clearPromptRowsImpl 是 ClearPromptRows 的同步实现（legacy adapter 调用目标）。
+func (s *FixedBottomSurface) clearPromptRowsImpl(rows int) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.enabled {
@@ -2135,6 +2424,14 @@ func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
 }
 
 func (s *FixedBottomSurface) ShowPopup(lines []string) {
+	if s.postFacadeAction(ShowPopupAction{Lines: lines}) {
+		return
+	}
+	s.showPopupImpl(lines)
+}
+
+// showPopupImpl 是 ShowPopup 的同步实现（legacy adapter 调用目标）。
+func (s *FixedBottomSurface) showPopupImpl(lines []string) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2154,14 +2451,23 @@ func (s *FixedBottomSurface) ShowPopup(lines []string) {
 }
 
 func (s *FixedBottomSurface) ShowPopupPreserveCursor(lines []string) {
+	if s.postFacadeAction(ShowPopupAction{Lines: lines, PreserveCursor: true}) {
+		return
+	}
 	s.ShowPopupPreserveCursorForOwner(lines, "")
 }
 
 func (s *FixedBottomSurface) ShowPopupPreserveCursorForOwner(lines []string, owner string) {
+	if s.postFacadeAction(ShowPopupAction{Lines: lines, PreserveCursor: true, Owner: owner}) {
+		return
+	}
 	s.showPopupPreserveCursorForOwner(lines, owner, false)
 }
 
 func (s *FixedBottomSurface) ShowPopupPreserveCursorForOwnerBelowPrompt(lines []string, owner string) {
+	if s.postFacadeAction(ShowPopupAction{Lines: lines, PreserveCursor: true, Owner: owner, BelowPrompt: true}) {
+		return
+	}
 	s.showPopupPreserveCursorForOwner(lines, owner, true)
 }
 
@@ -2227,14 +2533,43 @@ func (s *FixedBottomSurface) beginPopupInputForOwner(lines []string, prompt stri
 	}
 	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.nextPopupInstance++
 	if s.nextPopupInstance == 0 {
 		s.nextPopupInstance++
 	}
 	handle := PopupHandle{owner: owner, instance: s.nextPopupInstance}
-	if !s.beginPopupInstanceLocked(cloneAndSanitizePopupLines(lines), prompt, handle, viewport) || !s.enabled {
+	s.mu.Unlock()
+
+	// The handle is allocated before posting. This preserves the synchronous
+	// API without letting an external popup caller mutate the surface directly:
+	// later Update/Clear actions carry the same token and therefore stay FIFO
+	// behind this begin action.
+	if s.postFacadeAction(ShowPopupAction{
+		Lines:    lines,
+		Owner:    owner,
+		Prompt:   prompt,
+		Input:    true,
+		Handle:   &handle,
+		Viewport: clonePopupViewportSpec(viewport),
+	}) {
 		return handle
+	}
+	_ = s.beginPopupInputForHandleImpl(lines, prompt, handle, viewport)
+	return handle
+}
+
+// beginPopupInputForHandleImpl is the reducer-side counterpart of
+// beginPopupInputForOwner. The token has already been allocated at the facade
+// boundary, so this function never generates identity or re-enters the actor.
+func (s *FixedBottomSurface) beginPopupInputForHandleImpl(lines []string, prompt string, handle PopupHandle, viewport *PopupViewportSpec) bool {
+	if s == nil || s.terminal == nil || !handle.Valid() {
+		return false
+	}
+	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.beginPopupInstanceLocked(cloneAndSanitizePopupLines(lines), prompt, handle, viewport) || !s.enabled {
+		return true
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
@@ -2242,10 +2577,26 @@ func (s *FixedBottomSurface) beginPopupInputForOwner(lines []string, prompt stri
 		s.renderStatusLocked()
 		s.moveToPopupInputLocked()
 	})
-	return handle
+	return true
 }
 
 func (s *FixedBottomSurface) UpdatePopupInputForHandle(handle PopupHandle, lines []string, prompt string, preserveCursor bool) bool {
+	if s == nil || s.terminal == nil || !handle.Valid() {
+		return false
+	}
+	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
+	if s.postFacadeAction(UpdatePopupAction{
+		Handle:         handle,
+		Lines:          lines,
+		Prompt:         prompt,
+		PreserveCursor: preserveCursor,
+	}) {
+		return true
+	}
+	return s.updatePopupInputForHandleImpl(handle, lines, prompt, preserveCursor)
+}
+
+func (s *FixedBottomSurface) updatePopupInputForHandleImpl(handle PopupHandle, lines []string, prompt string, preserveCursor bool) bool {
 	if s == nil || s.terminal == nil || !handle.Valid() {
 		return false
 	}
@@ -2272,6 +2623,23 @@ func (s *FixedBottomSurface) UpdatePopupInputForHandle(handle PopupHandle, lines
 }
 
 func (s *FixedBottomSurface) showPopupInputForOwner(lines []string, prompt string, owner string, preserveCursor bool) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
+	if s.postFacadeAction(ShowPopupAction{
+		Lines:          lines,
+		PreserveCursor: preserveCursor,
+		Owner:          owner,
+		Prompt:         prompt,
+		Input:          true,
+	}) {
+		return
+	}
+	s.showPopupInputForOwnerImpl(lines, prompt, owner, preserveCursor)
+}
+
+func (s *FixedBottomSurface) showPopupInputForOwnerImpl(lines []string, prompt string, owner string, preserveCursor bool) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2320,6 +2688,14 @@ func (s *FixedBottomSurface) ClearPendingPastePreview() {
 }
 
 func (s *FixedBottomSurface) ClearPopup() {
+	if s.postFacadeAction(ClearPopupAction{}) {
+		return
+	}
+	s.clearPopupImpl()
+}
+
+// clearPopupImpl 是 ClearPopup 的同步实现（legacy adapter 调用目标）。
+func (s *FixedBottomSurface) clearPopupImpl() {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2349,6 +2725,14 @@ func (s *FixedBottomSurface) ClearPopup() {
 }
 
 func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
+	if s.postFacadeAction(ClearPopupAction{PreserveCursor: true}) {
+		return
+	}
+	s.clearPopupPreserveCursorImpl()
+}
+
+// clearPopupPreserveCursorImpl 是 ClearPopupPreserveCursor 的同步实现。
+func (s *FixedBottomSurface) clearPopupPreserveCursorImpl() {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2389,6 +2773,20 @@ func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
 }
 
 func (s *FixedBottomSurface) ClearPopupForOwnerPreserveCursor(owner string) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return
+	}
+	if s.postFacadeAction(ClearPopupAction{PreserveCursor: true, Owner: owner}) {
+		return
+	}
+	s.clearPopupForOwnerPreserveCursorImpl(owner)
+}
+
+func (s *FixedBottomSurface) clearPopupForOwnerPreserveCursorImpl(owner string) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2442,6 +2840,16 @@ func (s *FixedBottomSurface) ClearPopupHandlePreserveCursor(handle PopupHandle) 
 	if s == nil || s.terminal == nil || !handle.Valid() {
 		return
 	}
+	if s.postFacadeAction(ClearPopupAction{PreserveCursor: true, Handle: &handle}) {
+		return
+	}
+	s.clearPopupHandlePreserveCursorImpl(handle)
+}
+
+func (s *FixedBottomSurface) clearPopupHandlePreserveCursorImpl(handle PopupHandle) {
+	if s == nil || s.terminal == nil || !handle.Valid() {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.popupOwner != handle.owner || s.popupInstance != handle.instance {
@@ -2482,6 +2890,15 @@ func (s *FixedBottomSurface) ClearPopupHandlePreserveCursor(handle PopupHandle) 
 
 // SetStatusModel updates the status row from structured semantic data.
 func (s *FixedBottomSurface) SetStatusModel(model style.StatusLineModel) {
+	if s.postFacadeAction(SetStatusModelAction{Status: model}) {
+		return
+	}
+	s.setStatusModelImpl(model)
+}
+
+// setStatusModelImpl is the reducer-side synchronous persistent-status
+// adapter. It deliberately leaves the dynamic row unchanged.
+func (s *FixedBottomSurface) setStatusModelImpl(model style.StatusLineModel) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2500,6 +2917,15 @@ func (s *FixedBottomSurface) SetStatusModel(model style.StatusLineModel) {
 // above the prompt. Passing nil removes the row; the persistent diagnostics
 // remain in the terminal's final status row.
 func (s *FixedBottomSurface) SetDynamicStatusModel(model *style.StatusLineModel) {
+	if s.postFacadeAction(SetDynamicStatusModelAction{Dynamic: cloneStatusLineModel(model)}) {
+		return
+	}
+	s.setDynamicStatusModelImpl(model)
+}
+
+// setDynamicStatusModelImpl is the reducer-side synchronous dynamic-status
+// adapter. It deliberately leaves the persistent footer unchanged.
+func (s *FixedBottomSurface) setDynamicStatusModelImpl(model *style.StatusLineModel) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2520,6 +2946,14 @@ func (s *FixedBottomSurface) SetDynamicStatusModel(model *style.StatusLineModel)
 // SetStatusModels updates the persistent footer and transient activity row in
 // one paint, avoiding a visible intermediate frame during state transitions.
 func (s *FixedBottomSurface) SetStatusModels(status style.StatusLineModel, dynamic *style.StatusLineModel) {
+	if s.postFacadeAction(SetStatusModelsAction{Status: status, Dynamic: dynamic}) {
+		return
+	}
+	s.setStatusModelsImpl(status, dynamic)
+}
+
+// setStatusModelsImpl 是 SetStatusModels 的同步实现（legacy adapter 调用目标）。
+func (s *FixedBottomSurface) setStatusModelsImpl(status style.StatusLineModel, dynamic *style.StatusLineModel) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2608,6 +3042,15 @@ func cloneStatusLineModel(model *style.StatusLineModel) *style.StatusLineModel {
 // SetComposerPreview 在底部固定区额外保留一行 composer 预览。
 // 这是一条过渡能力，用来承载 transient prompt / future composer。
 func (s *FixedBottomSurface) SetComposerPreview(line string) {
+	if s.postFacadeAction(SetComposerPreviewAction{Line: line}) {
+		return
+	}
+	s.setComposerPreviewImpl(line)
+}
+
+// setComposerPreviewImpl is the reducer-side synchronous composer-preview
+// adapter. The preview is an overlay transition, never transcript content.
+func (s *FixedBottomSurface) setComposerPreviewImpl(line string) {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2631,6 +3074,15 @@ func (s *FixedBottomSurface) SetComposerPreview(line string) {
 
 // ClearComposerPreview 清理底部 composer 预览。
 func (s *FixedBottomSurface) ClearComposerPreview() {
+	if s.postFacadeAction(ClearComposerPreviewAction{}) {
+		return
+	}
+	s.clearComposerPreviewImpl()
+}
+
+// clearComposerPreviewImpl is the reducer-side synchronous composer cleanup
+// adapter. It intentionally retains any active or suspended popup layer.
+func (s *FixedBottomSurface) clearComposerPreviewImpl() {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -2870,6 +3322,33 @@ func popupOwnerPriority(owner string) int {
 	default:
 		return 10
 	}
+}
+
+func (s *FixedBottomSurface) activeBandActionCurrent(generation uint64) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Zero is the compatibility generation used by direct Apply callers in
+	// existing tests and migration adapters. Facade-originated actions always
+	// carry a non-zero/current generation and are fenced after finalization.
+	return generation == 0 || generation == s.activeBandGeneration
+}
+
+// ReleaseActiveBandForFinalizedOutput synchronously removes the transient
+// projection and fences all previously queued band paints. It is intentionally
+// narrower than a generic facade escape hatch: only the terminal transaction
+// that immediately commits a finalized transcript cell may use it during the
+// Phase 1 legacy-adapter transition.
+func (s *FixedBottomSurface) ReleaseActiveBandForFinalizedOutput() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	s.activeBandGeneration++
+	s.mu.Unlock()
+	return s.clearActiveBand()
 }
 
 func (s *FixedBottomSurface) canEnableLocked() bool {
@@ -3537,10 +4016,37 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 }
 
 type BottomPaneState struct {
-	StatusModel            *style.StatusLineModel
-	DynamicStatusModel     *style.StatusLineModel
-	PopupLines             []string
-	PopupOwner             string
+	StatusModel        *style.StatusLineModel
+	DynamicStatusModel *style.StatusLineModel
+	// Prompt fields are semantic overlay inputs. Row allocation remains pure
+	// BottomPaneState derivation; physical cursor placement belongs to the
+	// presenter. They are also populated in AppState during the Phase 2 bridge.
+	PromptLine  string
+	PromptInput string
+	// PromptCursor is the logical rune offset supplied by InputEvent. The
+	// visual cursor fields below are derived from it and geometry by Layout.
+	PromptCursor            int
+	PromptCursorKnown       bool
+	PromptCursorAbsoluteRow int
+	PromptCursorRow         int
+	PromptCursorCol         int
+	PromptTotalRows         int
+	PromptViewportStart     int
+	// PromptRowsOverride is a legacy explicit reservation request. Zero means
+	// derive the viewport from PromptInput; a positive value is retained across
+	// resize so Layout does not mistake a clipped display allocation for source.
+	PromptRowsOverride int
+	PromptVisible      bool
+	PasteActive        bool
+	Focus              BottomFocus
+	PopupLines         []string
+	PopupOwner         string
+	// PopupInstance identifies a BeginPopupInputForOwner* token. The active
+	// popup is represented by the fields above; PopupStack retains suspended
+	// layers so closing a modal can be derived from AppState rather than old
+	// terminal pixels.
+	PopupInstance          uint64
+	PopupStack             []PopupLayer
 	PopupBelowPrompt       bool
 	PopupReservedRows      int
 	PopupViewport          *PopupViewportSpec
@@ -3556,12 +4062,48 @@ type BottomPaneState struct {
 	PromptBottomMarginRows int
 }
 
+// PopupLayer is the semantic state of one suspended bottom-pane overlay. It
+// contains no physical row/cursor cache, so it can be restored by pure Layout
+// after another popup closes or a terminal repaint/resize occurs.
+type PopupLayer struct {
+	Lines        []string
+	Owner        string
+	Instance     uint64
+	Viewport     *PopupViewportSpec
+	ComposerLine string
+	BelowPrompt  bool
+	ReservedRows int
+}
+
+func clonePopupLayers(layers []PopupLayer) []PopupLayer {
+	if len(layers) == 0 {
+		return nil
+	}
+	clone := make([]PopupLayer, len(layers))
+	for index, layer := range layers {
+		clone[index] = layer
+		clone[index].Lines = append([]string(nil), layer.Lines...)
+		clone[index].Viewport = clonePopupViewportSpec(layer.Viewport)
+	}
+	return clone
+}
+
 func (s BottomPaneState) composerLineText() string {
 	return strings.TrimSpace(s.ComposerLine)
 }
 
 func (s BottomPaneState) composerVisibleRowCount() int {
 	if strings.TrimSpace(s.ComposerLine) == "" {
+		return 0
+	}
+	return 1
+}
+
+func (s BottomPaneState) statusVisibleRowCount() int {
+	if s.StatusModel == nil {
+		return 0
+	}
+	if strings.TrimSpace(style.StatusLineDocument(*s.StatusModel, 0).PlainText()) == "" {
 		return 0
 	}
 	return 1
@@ -3947,25 +4489,51 @@ func promptNoticeDisplayLines(line string) []string {
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	topMarginRows, bottomMarginRows := chatComposerVerticalMargins(s.terminal.Height())
 	state := BottomPaneState{
-		StatusModel:            cloneStatusLineModel(s.statusModel),
-		DynamicStatusModel:     cloneStatusLineModel(s.dynamicStatusModel),
-		PopupLines:             append([]string(nil), s.popupLines...),
-		PopupOwner:             s.popupOwner,
-		PopupBelowPrompt:       s.popupBelowPrompt,
-		PopupReservedRows:      s.popupReservedRows,
-		PopupViewport:          clonePopupViewportSpec(s.popupViewport),
-		PromptNoticeLine:       s.promptNoticeLine,
-		PromptEditorStatusLine: s.promptEditorStatusLine,
-		ActiveBandLines:        append([]string(nil), s.activeBandLines...),
-		ActiveBandStyled:       cloneRenderLines(s.activeBandStyled),
-		ActiveBandMaxRows:      s.ActiveBandRowBudget(),
-		ActiveBandTopGapRows:   activeBandTopGap(s.terminal.Height()),
-		PromptReservedRows:     s.promptReservedRows,
-		PromptTopMarginRows:    topMarginRows,
-		PromptBottomMarginRows: bottomMarginRows,
+		StatusModel:             cloneStatusLineModel(s.statusModel),
+		DynamicStatusModel:      cloneStatusLineModel(s.dynamicStatusModel),
+		PromptLine:              s.promptLine,
+		PromptInput:             s.promptInput,
+		PromptCursorAbsoluteRow: s.promptViewportStart + s.promptCursorRow,
+		PromptCursorRow:         s.promptCursorRow,
+		PromptCursorCol:         s.promptCursorCol,
+		PromptViewportStart:     s.promptViewportStart,
+		PromptVisible:           strings.TrimSpace(s.promptLine) != "" && s.promptReservedRows > 0,
+		PasteActive:             false,
+		PopupLines:              append([]string(nil), s.popupLines...),
+		PopupOwner:              s.popupOwner,
+		PopupInstance:           s.popupInstance,
+		PopupBelowPrompt:        s.popupBelowPrompt,
+		PopupReservedRows:       s.popupReservedRows,
+		PopupViewport:           clonePopupViewportSpec(s.popupViewport),
+		ComposerLine:            s.composerLine,
+		PromptNoticeLine:        s.promptNoticeLine,
+		PromptEditorStatusLine:  s.promptEditorStatusLine,
+		ActiveBandLines:         append([]string(nil), s.activeBandLines...),
+		ActiveBandStyled:        cloneRenderLines(s.activeBandStyled),
+		ActiveBandMaxRows:       s.ActiveBandRowBudget(),
+		ActiveBandTopGapRows:    activeBandTopGap(s.terminal.Height()),
+		PromptReservedRows:      s.promptReservedRows,
+		PromptTopMarginRows:     topMarginRows,
+		PromptBottomMarginRows:  bottomMarginRows,
 	}
-	if strings.TrimSpace(s.composerLine) != "" {
-		state.ComposerLine = s.composerLine
+	if len(s.popupStack) > 0 {
+		state.PopupStack = make([]PopupLayer, 0, len(s.popupStack))
+		for _, popup := range s.popupStack {
+			state.PopupStack = append(state.PopupStack, PopupLayer{
+				Lines:        append([]string(nil), popup.lines...),
+				Owner:        popup.owner,
+				Instance:     popup.instance,
+				Viewport:     clonePopupViewportSpec(popup.viewport),
+				ComposerLine: popup.composerLine,
+				BelowPrompt:  popup.popupBelowPrompt,
+				ReservedRows: popup.popupReservedRows,
+			})
+		}
+	}
+	if len(state.PopupLines) > 0 || strings.TrimSpace(state.ComposerLine) != "" {
+		state.Focus = BottomFocusPopup
+	} else if state.PromptVisible {
+		state.Focus = BottomFocusPrompt
 	}
 	return state
 }
@@ -4275,21 +4843,30 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() bool {
 		handedOff = true
 	}
 
-	// Soft-trim oldest rows past keepForRestore (already handed off when
-	// possible). Never trim an unhanded row: when physical-row handoff is
-	// deferred for a wrapped line, those rows are the only durable copy.
-	if len(s.historyWindow) > keepForRestore {
-		drop := len(s.historyWindow) - keepForRestore
-		if drop > s.handoffFrontier.Value() {
-			drop = s.handoffFrontier.Value()
-		}
-		if drop <= 0 {
-			return handedOff
-		}
-		s.historyWindow = append([]string(nil), s.historyWindow[drop:]...)
-		s.handoffFrontier.TrimPrefix(drop, len(s.historyWindow))
-	}
+	s.softTrimRetainedHistoryLocked(keepForRestore)
 	return handedOff
+}
+
+// softTrimRetainedHistoryLocked drops the oldest retained rows past keep,
+// limited to rows already handed into native scrollback. Never trim an
+// unhanded row: when physical-row handoff is deferred for a wrapped line,
+// those rows are the only durable copy.
+func (s *FixedBottomSurface) softTrimRetainedHistoryLocked(keep int) {
+	if s == nil || keep < 0 {
+		return
+	}
+	if len(s.historyWindow) <= keep {
+		return
+	}
+	drop := len(s.historyWindow) - keep
+	if drop > s.handoffFrontier.Value() {
+		drop = s.handoffFrontier.Value()
+	}
+	if drop <= 0 {
+		return
+	}
+	s.historyWindow = append([]string(nil), s.historyWindow[drop:]...)
+	s.handoffFrontier.TrimPrefix(drop, len(s.historyWindow))
 }
 
 // insertHistoryLinesLocked is the single primitive for moving history into

@@ -310,7 +310,18 @@ func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
 		return false
 	}
 	if session.Interaction != nil {
+		// ShowPrompt issued by a non-reducer producer (e.g. the test's direct
+		// surface.ShowPrompt) is applied by the UI actor asynchronously.
+		// Settle any in-flight prompt render before ClearPrompt, otherwise the
+		// prompt-clear facade post queues against a surface whose prompt rows
+		// are not yet reserved and the prompt can resurface in the output.
+		session.Interaction.waitUIActorIdle()
 		session.Interaction.ClearPrompt()
+		// ClearPrompt is a facade action once a surface is actor-owned. The
+		// following WriteOutput is a legacy direct writer, so it must not race
+		// ahead of the queued prompt-clear layout transition; otherwise output
+		// is composed against the old bottom reserve and leaves a blank hole.
+		session.Interaction.waitUIActorIdle()
 	}
 	_, err, handled := session.Surface.WriteOutput(os.Stdout, text)
 	return handled && err == nil

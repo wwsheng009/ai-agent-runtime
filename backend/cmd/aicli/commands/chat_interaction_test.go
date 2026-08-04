@@ -2745,6 +2745,7 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 		t.Fatal("expected active stream controller to be active")
 	}
 	coord.RefreshActiveStreamViewport()
+	coord.waitUIActorIdle()
 	band := surface.ActiveBandLines()
 	if len(band) == 0 {
 		t.Fatal("expected active band lines on enabled surface")
@@ -2755,6 +2756,7 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 	}
 
 	coord.FinalizeAssistantDelta()
+	coord.waitUIActorIdle()
 	if coord.activeStream.Active() {
 		t.Fatal("active stream should clear after finalize")
 	}
@@ -2819,6 +2821,7 @@ func TestChatInteractionCoordinator_ActiveBandPromotesLongMarkdownList(t *testin
 		coord.drainActiveStableCommitLocked(true)
 		coord.mu.Unlock()
 	})
+	coord.waitUIActorIdle()
 	if !catchUp || pendingAfterBurst != 0 {
 		t.Fatalf("burst should enter catch-up and drain its stable backlog, catch_up=%t pending=%d", catchUp, pendingAfterBurst)
 	}
@@ -2874,6 +2877,7 @@ func TestChatInteractionCoordinator_StableCommitQueueSeparatesEnqueuedAndEmitted
 	// Queued stable prefix must remain visible in ActiveBand until the commit
 	// tick writes it to scrollback. Hiding the band earlier (CommitStablePrefix
 	// at enqueue time) opens a mid-stream blank hole between transcript and tail.
+	coord.waitUIActorIdle()
 	if band := strings.Join(surface.ActiveBandLines(), "\n"); !strings.Contains(band, "one") || !strings.Contains(band, "eight") {
 		t.Fatalf("pending stable queue must stay in ActiveBand until drain, got %q", band)
 	}
@@ -2888,6 +2892,7 @@ func TestChatInteractionCoordinator_StableCommitQueueSeparatesEnqueuedAndEmitted
 	if got := output.String(); strings.Count(got, "one") != 1 {
 		t.Fatalf("expected first stable row exactly once after tick, got %q", got)
 	}
+	coord.waitUIActorIdle()
 	if band := strings.Join(surface.ActiveBandLines(), "\n"); strings.Contains(band, "one") {
 		t.Fatalf("emitted stable prefix should leave ActiveBand after drain, got %q", band)
 	}
@@ -3032,6 +3037,7 @@ func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
 	if output.String() != "" {
 		t.Fatalf("tool active band must not write scrollback, got %q", output.String())
 	}
+	coord.waitUIActorIdle()
 	band := surface.ActiveBandLines()
 	if len(band) == 0 {
 		t.Fatal("expected tool-running active band lines")
@@ -3046,17 +3052,20 @@ func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
 
 	// Progress with same detail should not thrash or clear the band.
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+	coord.waitUIActorIdle()
 	if len(surface.ActiveBandLines()) == 0 {
 		t.Fatal("expected band to remain after identical tool progress")
 	}
 
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "view_file")
+	coord.waitUIActorIdle()
 	joined = strings.Join(surface.ActiveBandLines(), "\n")
 	if !strings.Contains(strings.ToLower(joined), "view") && !strings.Contains(joined, "view_file") {
 		t.Fatalf("expected updated tool name in active band, got %q", joined)
 	}
 
 	coord.ClearAgentStage()
+	coord.waitUIActorIdle()
 	if len(surface.ActiveBandLines()) != 0 {
 		t.Fatalf("expected active band cleared after idle stage, got %v", surface.ActiveBandLines())
 	}
@@ -3075,6 +3084,7 @@ func TestChatInteractionCoordinator_ToolFinishIsScopedByCallID(t *testing.T) {
 	coord.SetToolAgentStage("call-1", "shell compiling")
 	coord.SetToolAgentStage("call-2", "view reading")
 	coord.FinishToolAgentStage("call-1", "shell")
+	coord.waitUIActorIdle()
 	joined := strings.Join(surface.ActiveBandLines(), "\n")
 	if !strings.Contains(strings.ToLower(joined), "view") || strings.Contains(strings.ToLower(joined), "shell") {
 		t.Fatalf("late finish for old call cleared or replaced newer tool: %q", joined)
@@ -3084,6 +3094,7 @@ func TestChatInteractionCoordinator_ToolFinishIsScopedByCallID(t *testing.T) {
 	}
 
 	coord.FinishToolAgentStage("call-2", "view")
+	coord.waitUIActorIdle()
 	if len(surface.ActiveBandLines()) != 0 || coord.activeStream.IsToolActive() {
 		t.Fatalf("finishing last call should clear ActiveBand, got %v", surface.ActiveBandLines())
 	}
@@ -3106,6 +3117,7 @@ func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) 
 	if output.String() != "" {
 		t.Fatalf("tool progress band must not write scrollback, got %q", output.String())
 	}
+	coord.waitUIActorIdle()
 	joined := strings.Join(surface.ActiveBandLines(), "\n")
 	if !strings.Contains(strings.ToLower(joined), "shell") {
 		t.Fatalf("expected tool name in band, got %q", joined)
@@ -3139,11 +3151,13 @@ func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) 
 
 	// Identical name+progress should keep the band without clearing.
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell 45% downloading")
+	coord.waitUIActorIdle()
 	if len(surface.ActiveBandLines()) == 0 {
 		t.Fatal("identical progress must keep active band")
 	}
 
 	coord.ClearAgentStage()
+	coord.waitUIActorIdle()
 	if len(surface.ActiveBandLines()) != 0 {
 		t.Fatalf("expected band cleared after idle, got %v", surface.ActiveBandLines())
 	}
@@ -3270,12 +3284,14 @@ func TestChatInteractionCoordinator_ToolBandYieldsToAssistantStream(t *testing.T
 	coord.SetSurface(surface)
 
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+	coord.waitUIActorIdle()
 	if len(surface.ActiveBandLines()) == 0 {
 		t.Fatal("expected tool band before assistant stream")
 	}
 
 	coord.RenderAssistantDelta("Hello stable plain response.\n")
 	coord.RefreshActiveStreamViewport()
+	coord.waitUIActorIdle()
 	if coord.activeStream.IsToolActive() {
 		t.Fatal("assistant stream should replace tool cell")
 	}
@@ -3287,6 +3303,7 @@ func TestChatInteractionCoordinator_ToolBandYieldsToAssistantStream(t *testing.T
 
 	// Tool stage updates must not clobber an in-progress assistant band.
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "other_tool")
+	coord.waitUIActorIdle()
 	joined = strings.Join(surface.ActiveBandLines(), "\n")
 	if coord.activeStream.IsToolActive() {
 		t.Fatal("tool stage must not replace active assistant stream cell")

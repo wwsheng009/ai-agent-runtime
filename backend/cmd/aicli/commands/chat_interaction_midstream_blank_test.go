@@ -103,6 +103,7 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 		coord.stopActiveStableCommitLocked()
 		coord.drainActiveStableCommitLocked(true)
 		coord.mu.Unlock()
+		coord.waitUIActorIdle()
 	})
 	screen.feed(streaming)
 
@@ -433,6 +434,7 @@ func TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled(t *testing
 		coord.SetWriter(os.Stdout)
 		coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
 		coord.RenderAssistantDelta("eight\n")
+		coord.waitUIActorIdle()
 	})
 	screen.feed(pending)
 
@@ -474,6 +476,7 @@ func TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled(t *testing
 		coord.stopActiveStableCommitLocked()
 		coord.drainActiveStableCommitLocked(true)
 		coord.mu.Unlock()
+		coord.waitUIActorIdle()
 	})
 	screen.feed(drained)
 
@@ -545,6 +548,7 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 			coord.RenderAssistantDelta(string(runes[:n]))
 			content = string(runes[n:])
 		}
+		coord.waitUIActorIdle()
 	})
 	screen.feed(streaming)
 	band := surface.ActiveBandLines()
@@ -560,6 +564,7 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 	finalized := captureSurfaceStdout(t, func() {
 		coord.SetWriter(os.Stdout)
 		coord.FinalizeAssistantDelta()
+		coord.waitUIActorIdle()
 	})
 	screen.feed(finalized)
 	if got := len(surface.ActiveBandLines()); got != 0 {

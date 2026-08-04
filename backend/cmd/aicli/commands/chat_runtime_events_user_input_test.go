@@ -173,6 +173,11 @@ func TestRenderLayer_Scene_ReplayRestoresUserInput(t *testing.T) {
 // 提交（RenderSubmittedUserInput）才注入。两者输出行为均不变。
 func TestRenderLayer_UserInput_ReplayPathDoesNotInject(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	// 本测试断言旧路径（非 Scene presenter）的跨块空行输出；外部环境若
+	// 设置了 AICLI_SCENE_PRESENTER=1，coordinator 会切换到 Scene 投影并
+	// 吞掉 replay 路径的空行，因此显式固定该开关（t.Setenv 进程级，顺序
+	// 测试间自动恢复）。
+	t.Setenv("AICLI_SCENE_PRESENTER", "")
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}

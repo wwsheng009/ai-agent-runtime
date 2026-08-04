@@ -53,6 +53,7 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 			t.Fatalf("sendMessage: %v", err)
 		}
 
+		coord.waitUIActorIdle()
 		afterAPI := frameText()
 		if !strings.Contains(afterAPI, "Worked for ") {
 			t.Fatalf("API completion did not freeze the work summary:\n%s", afterAPI)
@@ -65,6 +66,7 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 		}
 
 		finishSuccessfulChatSend(session, response, false)
+		coord.waitUIActorIdle()
 		afterFinalize := frameText()
 		if !strings.Contains(afterFinalize, "final assistant response") {
 			t.Fatalf("final response was not committed before activity cleared:\n%s", afterFinalize)
