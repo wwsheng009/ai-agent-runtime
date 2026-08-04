@@ -1,6 +1,6 @@
 # aicli TUI transcript overlay、渲染模式与历史交接实施方案
 
-状态：**proposed migration sub-plan（受 unified architecture 约束；不得独立启用第二个 terminal writer）**
+状态：**in progress migration sub-plan（受 unified architecture 约束；不得独立启用第二个 terminal writer）**
 
 日期：2026-08-04
 
@@ -29,6 +29,18 @@
 因此，分离对象是**语义生命周期与物理 presentation mode**，不是“普通消息”与“特定事件”的业务类型。主屏和 pager 可共享同一个 immutable AppState snapshot 与 render IR，但任何时刻只能有一个 ScreenOwner 向同一 TTY 写 ANSI/光标/scroll-region 字节。
 
 本文新增 `Ctrl+T` transcript pager 的产品/交互目标和实施顺序，不改变已有 `BoundaryPolicy`、`HistoryEffectQueue`、ScreenLease、Scene 或 Presenter 的终局职责。
+
+### 0.1 当前实施切片（2026-08-04）
+
+- 已完成：`TranscriptPagerModel/State` 从 `TranscriptState + ActiveCellState` 派生；mutable cell 只作为 render-only live tail，pager 不读取 `historyWindow`、`ScreenModel` 或 native scrollback。
+- 已完成：pager 以 `CellID + cell-local visual row + layout generation` 维护锚点；append 时 bottom-follow 保持跟随，检查历史时保留锚点，replace/remove/resize 安全重定位。
+- 已完成：`Ctrl+T` 仅在 owned interactive chat、无 popup、无现有 lease 时打开 `ScreenLease` 管理的 alternate pager；关闭后由 lease 对 primary 做完整 retained-state repaint，composer 草稿不丢失。
+- 已完成：UI actor 增加 overlay/scroll/finalize 的 typed action 与 reducer 状态，lease release 会清理对应 overlay；stale finalization 不得清除较新的 active cell。
+- 已完成：`HistoryCommit` reducer data plane 为 finalized cell 的 physical display range 分配 token；resize 只 rebase Pending payload，lease 冻结 Begin，Ack/Fail/Deferred 通过 typed barrier 回投，in-flight replacement/resize 与 writer failure 均转为显式 recovery 状态。
+- 已完成：`HistoryCommitWakeEffect` 与 `HistoryCommitExecutor` 形成可注入的单一 effect-consumer seam。它按 token 顺序 claim 后才调用 terminal sink；`Deferred` 必须证明尚未写任何字节，短写/错误不会盲目重试，未解决的早期 terminal delivery 会阻止后续 range 越过它。
+- 已完成：`ComposeAppRenderFrame` 从同一 `AppState` 保留 viewport-sized structured `render.Line`：transcript cell kind、ActiveBand 的 typed line 与 status document 不再在 frame seam 降为无样式字符串；每一 rich row 与原 `AppScreenRow.Text` 做 plain-text parity。eligible finalized `HistoryCommit` 复用相同 transcript role-tagged line，不再把 handoff 降成无样式字符串。未安装的 `TerminalSession` 已消费这份 rich frame（显式 `ThemeContext`，无全局终端 probe）并实现 `HistoryCommitSink`/`FlushTransaction` 前置契约；它也用同一 theme 解析 history line。它只接受已确认、同 generation、非 lease 的 primary projection，将已有 `render.Line` 经共同 `ANSIBackend` 编码为 cursor-neutral `HandoffPlan`；已 claim 的 history 可在同一次 Presenter write 中严格先于 viewport diff 和 cursor，完整写入后才确认 front 并镜像 scroll-region append。短写、错误或 writer panic 均保守地使 projection Unknown，no-write 条件只返回 Deferred。
+- 已完成（shadow fallback）：`ActiveCellState` 携带 Scene kind；`ProjectActiveCellBand` 从 mutable source 的未 Ack prefix 后缀生成 bounded role-tagged lines。`LayoutAppState` 只在没有 legacy facade band 时使用这份 source-backed projection，legacy band 存在时保持它为唯一显示来源。该选择规则防止 active source 与 legacy projection 在同一帧重复，同时为最终 primary presenter 提供无 legacy 输入时的纯布局路径；它不接生产 terminal、也不替代尚未收敛的 active-stream range owner。
+- 未完成：生产 `TerminalSession/TuiPresenter` 尚未接管该 sink；`FixedBottomSurface.historyWindow` 仍是唯一 legacy production handoff writer。因此当前代码**没有**让新 executor 与旧 handoff 同时写 terminal；切换必须以整条 primary presenter transaction 替换旧路径。
 
 ---
 
