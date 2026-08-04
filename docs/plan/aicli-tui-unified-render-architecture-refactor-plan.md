@@ -1,14 +1,18 @@
-# aicli TUI 统一 Scene、单屏所有者与事务式渲染长期重构设计
+# aicli TUI 统一 AppState/Scene、单屏所有者与事务式渲染长期重构设计
 
-状态：**in progress（长期架构基线；P0/P1/P3 已有部分实施，P4–P9 数据层/映射/消费端已落地，渲染层切换仍待迁移）**
+状态：**approved target architecture / implementing（唯一规范性终局；transcript Scene 数据面与 Phase 1 UI actor/action adapter 已部分落地，统一 AppState、effect queue 与 Presenter 所有权切换尚未完成）**
 
-更新时间：**2026-08-02**
+更新时间：**2026-08-04**
 
 适用范围：`backend/cmd/aicli/commands`、`backend/cmd/aicli/ui` 及所有在 chat interactive 生命周期内产生可见输出的 runtime/tool/diagnostic 组件。
 
 关联文档（按职责分层）：
 
 - 当前 owned viewport 实施基线：`docs/plan/aicli-tui-p5-owned-viewport-design.md`；
+- owned rendering 迁移子计划：`docs/plan/aicli-tui-owned-render-simplification-plan.md`；
+- owned rendering 实施契约：`docs/plan/aicli-tui-owned-render-simplification-implementation-guide.md`；
+- transcript overlay、RendererMode 与 history handoff 的实施子计划：`docs/plan/aicli-tui-transcript-overlay-renderer-mode-plan.md`；
+- owned rendering 评审与 disposition：`docs/analysis/aicli-tui-owned-render-simplification-plan-review.md`；
 - 渲染面/数据面迁移母计划：`docs/plan/aicli-tui-render-data-plane-codex-migration-plan.md`；
 - ActiveBand/scroll compensation 专项历史：`docs/plan/aicli-activeband-scrollback-compensation-blank-lines-fix-plan.md`；
 - 内容、样式、Markdown、Diff 与结构化渲染 IR：`docs/plan/aicli-ui-ux-rendering-codex-reference-plan.md`；
@@ -17,13 +21,17 @@
 - Phase 0 渲染路径和组件清点：`docs/plan/aicli-ui-rendering-phase0-inventory.md`；
 - 上游事件统一编码器（事件 → 有序带身份模型，本计划 §6 事件/事务/排序规则的输入源）：`docs/plan/aicli-event-stream-rendering-order-unified-encoder-plan.md` 及配套 [render-model-spec](./aicli-event-stream-rendering-order-render-model-spec.md)、[event-encoder-api-design](./aicli-event-stream-rendering-order-event-encoder-api-design.md)、[migration-roadmap](./aicli-event-stream-rendering-order-migration-roadmap.md)。
 
-> 本文不是 `/debug display` 的局部修复说明，也不否定已有 P1–P5 工作。P5 文档继续作为 owned viewport、ActiveBand、history handoff 和 P5.6 gap 行为的当前实施真相；UI/UX reference 与 implementation review 继续作为内容渲染 IR、主题和安全边界的真相。本文在这些成果之上定义跨模块的长期终局：物理屏幕所有权、Scene 数据模型、事件与 frame 事务、history/cell/gap 规则、fullscreen 生命周期、scrollback handoff 以及旧路径删除计划。若历史文档中的过渡方案与本文强不变量冲突，以“同一交互会话只有一个物理屏幕所有者”为最终收敛方向。
+> 本文不是 `/debug display` 的局部修复说明，也不否定已有 P1–P5 工作。P5 文档只记录 owned viewport 的历史实施事实和已知缺陷，不再定义终局；owned-render-simplification 文档只在与本文一致的范围内作为迁移子计划。本文是跨模块唯一规范源：物理屏幕所有权、AppState/Scene、事件与 effect、frame 事务、history/cell/gap、fullscreen、scrollback handoff 以及旧路径删除均以本文为准。任何子计划若引入全局 `Frame mode -> Scrollback mode`、无类型 `committedBoundary int`、依赖 native scrollback 拉回，或把 `ScreenModel` 提升为业务真相源，均视为与本文冲突，不得实施。
 
 ---
 
-## 实施状态（2026-08-02）
+## 实施状态（2026-08-03）
 
-本文的终局 `TuiScene -> Layout/Compose -> TuiPresenter` 尚未整体落地；以下状态仅记录已验证的实施切片，不能将过渡 adapter 误读为终局 single-writer 已完成。
+本文的终局 `AppState -> Layout/Compose -> TuiPresenter` 尚未整体落地；以下状态仅记录已验证的实施切片，不能将 transcript-only Scene 或过渡 adapter 误读为终局 single-writer 已完成。
+
+> **状态口径**：P4–P9 是目标阶段区间，不是一个可整体标记为“已落地”的功能。当前已完成 transcript Scene、ChangeSet 映射、文本投影、shadow/parity 探针、**Phase 1 UI actor/action adapter 的首批接线**，以及 **Phase 2 AppState snapshot 的首批投影**：普通 runtime event、input snapshot、explicit resize、lease barrier、surface facade 和 FramePump 的 `Timer`/`DrawRequested` 意图均经过 `UIController`；普通 runtime event 的 Scene snapshot 及其 mutable semantic cell 可经 causal action 进入 AppState，live user submit、structured command result、local error 也在释放 coordinator mutex 后投递同一完整 snapshot，事件日志 replay 成功重建 Scene 后亦投递一次 snapshot；`LayoutAppState` 已可从该 snapshot 纯派生 transcript boundary rows 和 bottom allocation，不读取 terminal/surface mutex 或推进 effect。popup owner/priority、suspended `PopupStack` 和 tokenized `PopupHandle` 的 begin/update/clear 已走 durable facade action，并在 `BottomPaneState` 以相同纯 transition 保留恢复语义，handle 在 begin action 入队前分配，后续同 token 操作保持 FIFO。本轮进一步将 prompt reset/rows/notice/editor、incremental input tracking、单独 persistent/dynamic status 与 composer preview 纳入同一 action/reducer state，并由 Apply/sync parity 与 snapshot isolation 回归约束；`UpdatePopupAction` 也已进入 coordinator adapter。reducer 触发 facade 时使用 causal follow-up queue，不因 bounded external mailbox 满而 self-wait；reducer panic 会丢弃本 action 新增的 causal child，避免半 action 提交。生产可见状态仍由 coordinator、`FixedBottomSurface`、ActiveStream 与 Scene 多处维护；审批/问答仍为同步 legacy interaction exception，`EffectResult` 尚无 TerminalSession/effect queue source。ActiveBand 仍是 legacy projection input，同步 cursor-move helper、完整 focus policy 和全部 producer 尚未收敛到 AppState；physical Compose、Presenter、history Ack 也尚未完成。因而当前总体状态仍是 **partial data-plane implementation**。
+
+> **Phase 2 本轮增量（2026-08-04）**：已建立纯 `BottomPaneGeometryPolicy`，以 `BottomPaneState + GeometryState` 重算 ActiveBand budget/gap、prompt/composer margin、popup budget 和长草稿 viewport；prompt snapshot 记录逻辑 cursor、absolute visual row、total rows 与 viewport start，`LayoutAppState` 可在 resize 后只从语义 source 重新测量可见 text rows。`LayoutBottomPaneRows` 已形成 bottom reserve plain text/owner plan，并以单行/多行 prompt、popup/composer、短终端压力与 geometry cycle 和 legacy snapshot 做初步 parity；新增 `LayoutAppScreen` screen-row shadow，将 retained transcript identity/gap 与 bottom overlay 放进同一 plain viewport，并排除 mutable cell 防止 active/band 重复；legacy owner map 覆盖真实多行 prompt 文本，但不再把 popup 的空输入 gap 标为 Prompt。legacy surface 完成 probe 后以 `Resize{Applied:true}` causal barrier 回投测得尺寸，只有真实变化才推进 generation，回投不触发二次 probe/reflow。该数据桥不等于 physical Compose、全屏 legacy text/owner parity、TerminalSession 或唯一 terminal writer 已完成。
 
 | 阶段 | 当前状态 | 已验证证据 | 仍待完成 |
 | --- | --- | --- | --- |
@@ -56,7 +64,7 @@ P0 inventory 是迁移债务账本和 regression fence，**不是**对 raw termi
 ```text
 多个业务生产者
   -> 一个有序 RenderEvent 队列
-  -> 一个权威 TuiScene
+  -> 一个权威 AppState（包含 transcript Scene）
   -> 一个 Layout/Compose 流程
   -> 一个 TuiPresenter
   -> 一个物理 TerminalWriter
@@ -66,7 +74,7 @@ P0 inventory 是迁移债务账本和 regression fence，**不是**对 raw termi
 
 本文的核心决策为：
 
-1. `TuiScene` 是交互 UI 的唯一状态真相，终端屏幕和 Backend front buffer 都不是业务数据源；
+1. `AppState` 是交互 UI 的唯一状态真相，现有 `TuiScene` 是其中的 transcript 子状态；终端屏幕和 Backend front buffer 都不是业务数据源；
 2. 所有永久 transcript 输出都以有稳定身份的 semantic cell 存储，显示行由 `DisplayLines(width)` 派生；
 3. cell 内部默认稠密，cell 之间的 gap 由单一 boundary policy 计算，gap 不由调用点自行拼接空行；
 4. mutable cell 的 update/finalize 是 replace/commit transaction，不得通过“再 append 一份 final 文本”完成；
@@ -214,7 +222,7 @@ raw 路径不会同步：
 
 ### 3.2 Scene 与 history 不变量
 
-- **INV-SCENE-01**：`TuiScene` 是交互 UI 的唯一权威状态；物理屏幕、VT snapshot、Backend front 都是派生缓存。
+- **INV-SCENE-01**：`AppState` 是交互 UI 的唯一权威状态；transcript Scene 是其子状态，物理屏幕、VT snapshot、Backend front 都是派生缓存。
 - **INV-SCENE-02**：每个 transcript cell 有不可复用的 `CellID` 和单调递增 `Sequence`。
 - **INV-SCENE-03**：mutable update 必须携带匹配的 `CellID` 与更大的 `Revision`；旧 revision 不得覆盖新 revision。
 - **INV-SCENE-04**：finalize 是同一 cell 的状态迁移，不是 append 新 cell。
@@ -231,7 +239,7 @@ raw 路径不会同步：
 ### 3.4 frame 与失败恢复不变量
 
 - **INV-FRAME-01**：一个 Scene transaction 要么完整应用，要么不应用；不能提交半个 tool/event block。
-- **INV-FRAME-02**：一次 presenter frame 只能基于一个不可变 Scene snapshot 和一个 terminal size generation。
+- **INV-FRAME-02**：一次 presenter frame 只能基于一个不可变 AppState snapshot 和一个 terminal size generation。
 - **INV-FRAME-03**：front buffer 只在 terminal flush 全部成功后更新。
 - **INV-FRAME-04**：partial/failed write 后 front buffer 必须失效，下一次使用 full repaint；不得继续基于未知物理屏幕做 diff。
 - **INV-FRAME-05**：frame 完成后的物理 cursor 必须等于 snapshot 中的 `CursorIntent`。
@@ -288,7 +296,7 @@ raw 路径不会同步：
 | 组件 | 负责 | 不负责 |
 | --- | --- | --- |
 | `SceneController` | 串行消费事件、校验 revision、事务式修改 Scene | ANSI、终端坐标、直接输出 |
-| `TuiScene` | semantic cells、overlay state、生命周期与 generation | 终端 I/O、diff 算法 |
+| `AppState` | transcript Scene、active/bottom/geometry/lease 状态与 generation | 终端 I/O、diff 算法 |
 | `LayoutEngine` | 按 width/theme 将 source 转为 display rows，测量各 layer | 修改 Scene、写终端 |
 | `Compositor` | 将可见 history、ActiveBand、status、prompt、popup 合成为 frame | 业务事件排序、stdout |
 | `TuiPresenter` | front/back、diff、cursor、同步更新、flush、失败失效 | 业务 cell gap 决策 |
@@ -329,16 +337,62 @@ ui/screenlease/  primary/alternate ownership
 commands/        CommandResult 与 scene adapter，不含 ANSI/stdout
 ```
 
+### 4.5 目标运行范式与状态分层（规范性补充）
+
+终局采用 **actor 单事件循环 + 单向数据流 reducer + retained AppState + command/effect queue + transactional presenter**。`FramePump` 只能合并 draw intent，不能执行会重新读取和修改业务状态的任意 callback。
+
+```text
+Runtime / Input / Resize / Timer / Lease / EffectResult
+                         |
+                    UIAction mailbox
+                         |
+              UIController / Reducer（唯一写者）
+                 | AppState snapshot
+                 | TerminalEffect queue
+                 | dirty/frame request
+                         |
+                  Pure Layout/Compose
+                         |
+              FramePlan + CursorPlan + EffectPlan
+                         |
+              TerminalSession transaction
+                         |
+                  Ack/Fail UIAction
+```
+
+状态必须按职责分开，不能再统一命名为 `history`：
+
+| 状态 | 内容 | 所有权 |
+| --- | --- | --- |
+| `TranscriptState` | semantic cells、稳定 ID、revision、finalization | reducer 唯一写 |
+| `ActiveCellState` | 当前 assistant/reasoning/tool 的 mutable source 与 stable range | reducer 唯一写 |
+| `BottomPaneState` | ActiveBand 的派生展示、status、prompt、popup、focus | reducer 唯一写 |
+| `GeometryState` | terminal size、viewport rect、layout generation | reducer 唯一写 |
+| `LeaseState` | primary/alternate ownership 与 barrier | reducer 唯一写 |
+| `TerminalProjectionState` | front/back、cursor、scroll region、Known/Unknown | presenter 独占 |
+| `HistoryEffectQueue` | tokenized pending/in-flight/acked handoff | reducer 生成，presenter 执行 |
+
+`ActiveCellState` 是流式文本的语义源；ActiveBand 只是 Layout 根据 active cell、工具进度和 bottom-pane policy 生成的可见投影。不得同时在 ActiveBand buffer 与 mutable transcript cell 中维护两份可独立推进的正文。
+
+语义生命周期与物理交接生命周期必须分离：
+
+```text
+Semantic:   Mutable -> Finalized
+Projection: Retained -> CommitPending -> InFlight -> AckedHandedOff
+```
+
+cell `Revision` 解决内容版本；effect cursor 解决“已排队/已写入/已确认”的副作用进度。二者不能互相替代。允许一个 streaming controller 保存类型明确的 `enqueued`/`acked` source range，但禁止 coordinator、surface 和 presenter 分别保存同一范围的平行游标。
+
 重构期间可保留 `FixedBottomSurface` 作为 facade，但其内部职责必须逐步委托给上述组件；最终 facade 不再同时维护业务状态、terminal mutation 和补偿状态机。
 
 ---
 
-## 5. Scene 数据模型
+## 5. AppState 与 Scene 数据模型
 
-### 5.1 顶层 Scene
+### 5.1 顶层 AppState
 
 ```go
-type TuiScene struct {
+type AppState struct {
     Revision        uint64
     EventSequence   uint64
     Transcript      TranscriptState
@@ -352,6 +406,8 @@ type TuiScene struct {
     Fullscreen      FullscreenState
 }
 ```
+
+本文早期使用“顶层 `TuiScene`”表示全部 UI 状态；为避免与当前 `ui/scene.TuiScene`（仅 transcript cells）混淆，终局统一称 `AppState`。现有 `ui/scene.TuiScene` 迁移后成为 `AppState.Transcript` 的实现或被 `TranscriptState` 包装，不得继续同时声称自己包含全部 overlay/geometry/lease 状态。
 
 职责边界：
 
@@ -385,11 +441,11 @@ type CellPhase uint8
 
 const (
     CellMutable CellPhase = iota
-    CellCommitted
-    CellPartiallyHandedOff
-    CellHandedOff
+    CellFinalized
 )
 ```
+
+`CellPhase` 只描述语义可变性。`CommitPending/InFlight/AckedHandedOff` 属于 `HistoryEffectQueue`/`TerminalProjectionState`，不得写回成另一套业务内容状态。当前代码中的 `CellCommitted/CellPartiallyHandedOff/CellHandedOff` 是过渡实现，迁移时拆分；在拆分完成前不得由这些 phase 决定是否丢弃 semantic source。
 
 `Kind` 至少区分：
 
@@ -409,7 +465,7 @@ const (
 - 创建 cell 时分配 `CellID`，整个 live → final → replay/persist 映射期间不变；
 - `Sequence` 只在创建 top-level cell 时增加，update/finalize 不增加；
 - 每次 mutable update 增加 `Revision`；过期 update 可被安全丢弃；
-- finalization 将 `CellMutable` 转为 `CellCommitted`，并在同一 transaction 中移出 ActiveBand 或替换 mutable projection；
+- finalization 将 `CellMutable` 转为 `CellFinalized`，并在同一 transaction 中清除 active projection；
 - 不允许用文本相等判断“是否已经输出”，文本相同不代表相同 cell，文本不同也不代表需要新 append。
 
 ### 5.4 ActiveBand 的边界
@@ -476,11 +532,15 @@ Validate
   -> Reduce to candidate Scene
   -> Check invariants
   -> Commit Scene revision
+  -> Enqueue terminal effects / mark dirty
   -> Produce immutable snapshot
+  -> frame scheduler coalesces draw intent
   -> Layout/Compose
-  -> Presenter flush
-  -> Commit front/handoff metadata
+  -> Presenter transaction
+  -> Ack/Fail 作为新 UIAction 返回 reducer
 ```
+
+Scene commit 与 terminal flush 不是同一个事务：Scene transaction 保证业务状态原子；Presenter transaction 保证单次物理写原子。front buffer、handoff frontier 和 effect ack 只能在完整写成功后推进。失败时 reducer 保留未确认 effect，Presenter 将 projection 标记为 `Unknown`，下一帧执行 recovery barrier + full repaint。
 
 如果事件涉及“final assistant + final tool chain + clear ActiveBand + update status”，应允许作为一个 `SceneTransaction` 批量提交，确保用户永远看不到中间状态。
 
@@ -597,11 +657,19 @@ BoundaryKey = (PrevCellID, NextCellID, PolicyVersion)
 Created
   -> Mutable (optional, revision 1..N)
   -> Finalizing
-  -> Committed
-  -> Retained Tail
-  -> Partially Handed Off (仅超大 cell/分片场景)
-  -> Handed Off
+  -> Finalized
 ```
+
+对应的 display projection 独立经历：
+
+```text
+Retained
+  -> CommitPending
+  -> InFlight
+  -> AckedHandedOff
+```
+
+超大 cell 的部分交接只更新 projection record，不改变 semantic cell phase。这样 resize/replay 仍能从 source truth 生成内容，而 Presenter 可以独立证明某个 display range 是否已经写入 native scrollback。
 
 一般 cell 应在完整 committed 后按 cell 边界交接。超大单 cell 若必须分片，分片必须具有稳定身份：
 
@@ -624,7 +692,7 @@ Finalization 必须在一个 transaction 内完成：
 ```text
 validate expected revision
   -> replace mutable source with final source
-  -> set phase committed
+  -> set phase finalized
   -> clear corresponding ActiveBand projection
   -> recompute boundary/layout
   -> compose one frame
@@ -666,7 +734,7 @@ type HandoffRecord struct {
 
 流程：
 
-1. 从 Scene snapshot 选择 committed 且超出 retained headroom 的最老 range；
+1. 从 AppState snapshot 选择 finalized、仍属 retained projection 且满足容量策略的最老 range；geometry change 不参与 eligibility；
 2. 生成唯一 handoff token；
 3. presenter 在拥有主屏时执行 cursor-neutral history insertion；
 4. terminal flush 全部成功后提交 record 和 frontier；
@@ -739,7 +807,7 @@ type LayoutInput struct {
 7. cursor intent
 ```
 
-popup 可以遮盖下层，但关闭 popup 后必须从同一 Scene snapshot 重画下层，不得依赖“恢复之前终端字符”。
+popup 可以遮盖下层，但关闭 popup 后必须从同一 AppState snapshot 重画下层，不得依赖“恢复之前终端字符”。
 
 ### 9.3 Presenter frame transaction
 
@@ -923,7 +991,7 @@ Release：
 2. 退出 alternate screen 并恢复基础 terminal mode；
 3. primary front buffer 标记 invalid；
 4. 处理最新 resize generation；
-5. 从最新 Scene snapshot full repaint；
+5. 从最新 AppState snapshot full repaint；
 6. 恢复 primary flush。
 
 ### 11.3 异常安全
@@ -1009,7 +1077,7 @@ handoff 只能在以下条件同时满足时执行：
 - 当前无 fullscreen lease 切换；
 - presenter 可以在一个 frame transaction 中完成 insert + redraw + cursor restore。
 
-ActiveBand grow/shrink 时，优先从 retained headroom 恢复，不回退到已 handoff range。若 headroom 不足，允许可预测地减少可见历史，但不能伪造或重复 native scrollback。
+ActiveBand grow/shrink 只是 viewport layout 变化，不得生成 history commit effect，也不得推进 handoff cursor。收缩后从仍属 `Retained` 的 semantic projection 重新 compose；绝不从 native scrollback 拉回。若 retained projection 受容量策略限制，允许可预测地减少可见历史，但不能以任意固定 `headroom`、文本重写或重复 handoff 补偿。
 
 ### 12.4 Scrollback 与 Scene 的关系
 
@@ -1029,7 +1097,7 @@ Physical screen               输出目标、永不作为数据源
 
 ### 13.1 单 UI owner
 
-推荐使用单 SceneController/UI goroutine 串行执行：
+目标态必须使用单 `UIController` actor 串行执行：
 
 - event reduce；
 - transaction commit；
@@ -1040,7 +1108,7 @@ Physical screen               输出目标、永不作为数据源
 
 runtime、tool、network、timer goroutine 只投递 event。这样可将大量跨字段 mutex 不变量收敛为事件顺序不变量。
 
-若因为现有结构暂时必须保留 mutex，仍应保持锁顺序：
+迁移期间若现有 adapter 暂时必须保留 mutex，仍应保持锁顺序：
 
 ```text
 Scene state lock
@@ -1050,6 +1118,8 @@ Scene state lock
 ```
 
 不得在 terminal write lock 内调用可能回调业务层、等待队列或获取 Scene lock 的代码。
+
+`FramePump` 的 callback 只能向 UI mailbox 投递 `DrawRequested`/timer action；不得直接获取 coordinator/surface 锁、修改 AppState 或调用 flush。最终只有 UI actor 能创建 snapshot 和启动 presenter transaction。
 
 ### 13.2 Frame 调度
 
@@ -1092,8 +1162,8 @@ Scene state lock
 | P1 | 统一 slash command 输出 | `CommandResult`、command adapter、迁移高风险命令 | P0 | command handler 不直接 stdout/terminal |
 | P2 | 清理 runtime/tool diagnostics | `RenderEventWriter`、logger 分流、active-turn writer 迁移 | P0 | active turn 无 raw stdout/stderr |
 | P3 | 引入 screen lease | lease manager、fullscreen suspend/resume、异常恢复 | P0 | fullscreen 不再 Disable/Enable surface |
-| P4 | 拆分 Scene/Layout/Presenter | SceneController、snapshot、presenter facade | P0–P3 | 单一 Scene revision 驱动 frame |
-| P5 | 统一 semantic cell | stable ID/revision、mutable finalize、replay adapter | P4 | live/replay/finalize 同一 cell 模型 |
+| P4 | 建立 UI actor 与状态入口 | `UIAction` mailbox、Reducer、effect result action、legacy adapter | P0–P3 | 业务 callback 不再直接 mutation + flush |
+| P5 | 统一 AppState/semantic cell | transcript/active/bottom state、stable ID/revision、replay adapter | P4 | live/replay/finalize/overlay 由同一 snapshot 驱动 |
 | P6 | 统一 boundary/gap | `BoundaryPolicy`、规则表测试、删除 gap helper | P5 | gap 只由 policy 生成 |
 | P7 | 完成 reflow/handoff | source-aware layout、handoff record/frontier | P4–P6 | resize/handoff exactly-once |
 | P8 | 删除 legacy 与补偿状态机 | 删除旧 renderer、raw adapter、旧 flags | P1–P7 | production 只有一个 owner/presenter |
@@ -1147,11 +1217,13 @@ Scene state lock
 
 ### 14.6 P4–P6：核心模型切换
 
+- 先建立 `UIAction`/`UIController` 单一入口；现有 coordinator/surface setter 只作为投递 action 的 adapter；
 - 将 `FixedBottomSurface` 变为 facade，内部委托 SceneController/Layout/Presenter；
 - 为现有 history output 生成稳定 cell identity；
-- 将 ActiveBand running/final 合并为 cell lifecycle；
+- 将 mutable source 收进 `ActiveCellState`，ActiveBand 只保留派生 projection；
 - replay/resume 直接建立 cell sequence；
 - 用 `BoundaryPolicy` 替换 `completeBlockOutput`/`gapFor*` 推断；
+- 引入 tokenized terminal effect queue，write 成功后以 ack action 推进 projection；
 - 设置 feature flag 只选择旧或新 presenter，禁止双写；可 shadow compose 比较 frame。
 
 ### 14.7 P7：Resize/Reflow/Handoff
@@ -1406,7 +1478,7 @@ flush_bytes / diff_cells / frame_latency
 
 ### 19.1 架构验收
 
-- [ ] `TuiScene` 是 transcript 与所有 bottom/overlay state 的唯一权威来源；
+- [ ] `AppState` 是 transcript、active、bottom、geometry 与 lease 的唯一权威来源；
 - [ ] SceneController 串行提交 mutation，frame 使用不可变 snapshot；
 - [ ] owned interactive 模式只有一个 terminal owner；
 - [ ] presenter 之外没有可达的业务 terminal primitive；

@@ -16,6 +16,7 @@
 - 数据解耦：[aicli-chat-session-messages-decouple-plan.md](./aicli-chat-session-messages-decouple-plan.md)
 - P5 当前实施真相：[aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)
 - 长期架构基线：[aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)
+- transcript pager、渲染模式和 scrollback handoff 实施：[aicli-tui-transcript-overlay-renderer-mode-plan.md](./aicli-tui-transcript-overlay-renderer-mode-plan.md)
 - 数据面产生端收敛（事件 → 有序带身份模型，统一编码器）：[aicli-event-stream-rendering-order-unified-encoder-plan.md](./aicli-event-stream-rendering-order-unified-encoder-plan.md) 及配套 [render-model-spec](./aicli-event-stream-rendering-order-render-model-spec.md)、[event-encoder-api-design](./aicli-event-stream-rendering-order-event-encoder-api-design.md)、[migration-roadmap](./aicli-event-stream-rendering-order-migration-roadmap.md)
 
 > 本文保留 P1–P5 的迁移动机、Codex 对照与阶段历史。当前 owned viewport、ActiveBand、history handoff 和 P5.6 gap 行为以 P5 专项文档为准；跨模块的 Scene/Presenter、single physical writer、CommandResult、fullscreen lease 和删除计划以统一长期架构文档为准。

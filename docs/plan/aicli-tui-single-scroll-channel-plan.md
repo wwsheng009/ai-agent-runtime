@@ -14,6 +14,7 @@
 - owned viewport 当前实施真相：`docs/plan/aicli-tui-p5-owned-viewport-design.md`；
 - ActiveBand/scroll compensation 专项历史：`docs/plan/aicli-activeband-scrollback-compensation-blank-lines-fix-plan.md`；
 - 渲染引擎模块设计：`docs/plan/aicli-tui-render-engine-module-design.md`。
+- primary/alternate RendererMode、transcript pager 与 history handoff 实施：`docs/plan/aicli-tui-transcript-overlay-renderer-mode-plan.md`。
 
 > 本文不否定已有 P5 实施与已修复的重复 bug（`appendOwnedDirectPaintLocked` 尊重 `handoffFrontier` 的补丁）。方案 B 是对该补丁的**正规化固化**——把"直写必须尊重账本"的隐式约定变成"只有一个滚动通道"的结构保证；方案 A 则是消除账本本身。
 

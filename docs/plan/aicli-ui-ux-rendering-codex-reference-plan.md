@@ -9,6 +9,7 @@
 - 实施审查与内容渲染剩余风险：[aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)；
 - owned viewport 当前实现：[aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)；
 - Scene、single screen owner、事务式 frame 与长期验收：[aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)。
+- 主界面/scrollback/`Ctrl+T` transcript pager 的 RendererMode 与实施顺序：[aicli-tui-transcript-overlay-renderer-mode-plan.md](./aicli-tui-transcript-overlay-renderer-mode-plan.md)。
 
 本文中的 `done (core)` 表示内容解析、结构化 IR、主题、宽度与聚焦测试完成，不等于 raw/direct output 已全部消除，也不等于真实 PTY/ConPTY 和 fullscreen/scrollback 生命周期已经验收。`render.ApplyBlockSpacing` / `SpacingPolicy` 负责 Markdown/Document 或单个 semantic cell 内部的 block spacing；top-level transcript cells 之间的 gap 由统一架构文档的 `BoundaryPolicy` 管理。
 

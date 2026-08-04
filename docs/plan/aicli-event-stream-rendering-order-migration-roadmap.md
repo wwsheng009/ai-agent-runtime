@@ -30,6 +30,7 @@
 | 既有文档 | 与本方案的分工 | 本方案提供的输入 |
 | --- | --- | --- |
 | [aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md) | 渲染面长期终局：Scene 数据模型、事件事务、screen 所有权、history/cell/gap 规则 | `Item`（带 `ID/Seq/Status`）、`ChangeSet`（事务输入）、Tail 锚点 |
+| [aicli-tui-transcript-overlay-renderer-mode-plan.md](./aicli-tui-transcript-overlay-renderer-mode-plan.md) | primary/alternate RendererMode、`Ctrl+T` transcript pager 与 history handoff 的实施顺序 | 完整 transcript cell、mutable active cell 的 revision/source range |
 | [aicli-tui-render-engine-module-design.md](./aicli-tui-render-engine-module-design.md) | 渲染引擎模块：FramePump、ScreenModel、Presenter、行所有权 | `ChangeSet` → `Update(ScenePatch)` 的标准输入；CellID 由 `Item.ID` 提供 |
 | [aicli-ui-ux-rendering-codex-reference-plan.md](./aicli-ui-ux-rendering-codex-reference-plan.md) | 内容渲染 IR：Document/Block/Span、主题、ANSI 安全 | `Item.Head`（RichDocument）→ `Renderable` 的输入 |
 | [aicli-tui-render-data-plane-codex-migration-plan.md](./aicli-tui-render-data-plane-codex-migration-plan.md) | 渲染面/数据面隔离历史与 P1–P5 实施记录 | 数据面（transcript）的**产生端**收敛：事件不再直接进 transcript，先经编码器 |

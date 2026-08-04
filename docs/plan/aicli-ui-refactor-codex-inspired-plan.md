@@ -9,6 +9,7 @@
 - 内容渲染 IR、主题、Markdown/Diff 与终端能力：`docs/plan/aicli-ui-ux-rendering-codex-reference-plan.md`；
 - owned viewport、ActiveBand、history handoff 与 P5.6 gap：`docs/plan/aicli-tui-p5-owned-viewport-design.md`；
 - Scene、single physical writer、CommandResult、fullscreen lease 与长期删除计划：`docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`；
+- 主界面/scrollback/`Ctrl+T` transcript pager 的渲染模式与后续实施：`docs/plan/aicli-tui-transcript-overlay-renderer-mode-plan.md`；
 - 数据面统一编码器（事件 → 有序带身份 RenderModel/ChangeSet）：`docs/plan/aicli-event-stream-rendering-order-unified-encoder-plan.md`（含配套 [渲染模型规格](./aicli-event-stream-rendering-order-render-model-spec.md)、[编码器接口设计](./aicli-event-stream-rendering-order-event-encoder-api-design.md)、[迁移路线图](./aicli-event-stream-rendering-order-migration-roadmap.md)）。本文中的"事件驱动与限频刷新"只负责**何时重绘**；内容**位置/身份/因果**由编码器决定。
 
 > 本文保留 2026-05 阶段的组件、popup/composer/input 设计背景。下述“当前实施进度”是当时快照，其中关于 debug/direct output、legacy 菜单和 surface-aware 输出的描述不能替代 2026-07 的 direct-writer 审计与统一架构强不变量。

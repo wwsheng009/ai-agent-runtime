@@ -1,16 +1,19 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **implementing（P5.0–P5.5 已完成；P5.6 已由 `835386e` 完成并锁定：`toolChainCell` 单 cell 内稠密、独立 final tool/event cell 间单空行；Running 通过 ActiveBand live redraw 且不进 history；P5.7 待推进）**
+状态: **historical/as-built baseline with known defects（P5.0–P5.6 功能切片已接线，但 P5.3 handoff 与 P5 总体验收未完成；目标架构已由 unified plan 接管）**
 
-更新时间: **2026-07-31**
+更新时间: **2026-08-03**
 
 关联文档:
 - 长期架构基线: `docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`（Scene、single screen owner、事务式 frame、fullscreen lease 与旧路径删除）
+- transcript pager、RendererMode 与 history handoff 的后续实施：`docs/plan/aicli-tui-transcript-overlay-renderer-mode-plan.md`（primary/alternate 所有权边界；本文不定义其终局）
 - 母计划: `docs/plan/aicli-tui-render-data-plane-codex-migration-plan.md`（P1–P4.2a 已完成，本文是其 P5 展开）
 - 相关: `docs/plan/aicli-ui-refactor-codex-inspired-plan.md`
 - 上游数据面: `docs/plan/aicli-event-stream-rendering-order-unified-encoder-plan.md`（事件 → 有序带身份 RenderModel/ChangeSet；本页"cell 模型（数据面）"的**内容源**，cell 身份对应 `Item.ID`）
 
-> 本文是 owned viewport、ActiveBand、history handoff、resize/reflow 和 P5.6 事件块间距行为的当前实施真相，保留各 P5 切片的设计、回退和测试证据。P5.0–P5.6 已落地，P5.7 负责 P5 范围内的旧路径收尾。跨 slash command/runtime diagnostics 的 raw output、统一 Scene/Presenter、fullscreen screen lease 和全局 single-writer 门禁由长期架构文档继续承接；不得仅依据本文较早阶段的过渡描述恢复双 renderer。
+> 本文只记录 owned viewport、ActiveBand、history handoff、resize/reflow 和 P5.6 gap 的历史实施事实，不再定义终局。P5.0–P5.6 的若干功能已接线，但 `historyWindow/headroom/handoffFrontier/commitExcess` 仍共同参与正确性，重复 handoff 专项测试仍未通过，因此不能把“切片已接线”解释为“P5 退出条件已满足”。跨模块目标、状态所有权和迁移顺序统一以 `aicli-tui-unified-render-architecture-refactor-plan.md` 为准。
+
+> **禁止作为新实现依据的过渡决策**：全局 Frame/Scrollback mode、无类型 `committedBoundary int`、几何变化驱动 history commit、依赖 RI/SD 从 native scrollback 拉回、以 `ScreenModel` 代替 semantic source truth。相关故障分析可以复用，但新实现必须走 unified plan 的 UI actor + AppState + tokenized effect + transactional Presenter。
 
 ---
 
@@ -114,7 +117,7 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 
 ---
 
-## 3. 目标架构
+## 3. 原 P5 目标架构（historical，非当前终局）
 
 ```
              ┌───────────────────────── 终端物理屏 ─────────────────────────┐
@@ -149,7 +152,7 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 
 ---
 
-## 4. 关键设计决策
+## 4. 原 P5 设计决策（historical）
 
 ### D1. viewport 后端如何“拥有”
 
@@ -199,7 +202,7 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 
 ---
 
-## 5. 分步实施（每步独立可测、可回退，顺序依赖前一步）
+## 5. 历史分步实施记录
 
 > 原则：每步 gofmt + `go build` + 目标包全测 + `go vet` 全绿方可进入下一步；任何一步都保持
 > “能力不足即回退旧路径”。VT 断言（`vt.Screen`）作为主回归。
@@ -307,7 +310,7 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 - **S5 收尾**：✅ resize / clear / soft-tail rewrite 与历史窗口对账；把
   `TestBottomReserveShrinkCompensationDrawsBlanksAtTop` 反转为“顶部不得出现补偿空行、历史锚定”回归。
 
-### P5.3 —— `insertHistoryLines` 唯一原语 + 历史交接
+### P5.3 ⚠ 部分落地、验收未通过 —— `insertHistoryLines` 唯一原语 + 历史交接
 
 - 历史 cell 定型时改用 `insertHistoryLines(cell.DisplayLines(width))`；viewport 顶部维护
   “最近 N 行历史”窗口。删除 `pendingScrollDownRows`/`outputScrollDebtRows`/
@@ -323,14 +326,14 @@ block”，由 `gapBeforeBlockLocked` 统一生成最多一个跨 cell 空行；
 - [x] 流式 golden、中英混排换行、`assistant` finalize 与 live 一致；所有相关测试通过
 - 回退：无（默认 owned viewport 路径）
 
-### P5.5 —— resize 重排（P4.3 落地）
+### P5.5 ⚠ 部分落地、仍依赖旧保留状态 —— resize 重排（P4.3）
 
 - 监听 `Terminal.updateSize()`（SIGWINCH/轮询）→ 按新宽重排 viewport 内历史 cell，带**行数
   cap**（超过 cap 的历史不重排，直接以旧行呈现，避免抖动，对齐 Codex `resize_reflow`）。
 - 测试：40/80/120 列 golden；窄→宽→窄往返一致；cap 生效；不触碰已滚出 scrollback。
 - 回退：flag；关闭则 resize 仅重排底部带（现状行为）。
 
-### P5.6 —— 工具链合并单 cell（P3b/P4.2b）
+### P5.6 ✅ 内容/gap 行为已落地 —— 工具链合并单 cell（P3b/P4.2b）
 
 - `toolChainCell` 在 viewport 内重绘 Running；完成后一次 `insertHistoryLines`。Running 不进入 scrollback，也不修改 history spacing。
 - 删除 `gapForAsyncLine`、`lastCompletedAsyncLine` 和 prompt-gap 的 async-chain 推断；跨 cell 统一为最多一个空行，tool cell 内部保持稠密。
@@ -383,6 +386,8 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 
 ## 8. 验收标准（P5 owned viewport 范围完成；TUI 长期终局见统一架构文档）
 
+> **当前判定：未满足。** 以下条目保留为历史 P5 验收基线，不代表当前完成。尤其 §9 中的 handoff/headroom/legacy 状态仍存在，重复 handoff 专项仍失败；后续不再单独按 P5 结构补齐，而是在 unified plan 的 P4–P8 迁移中以 tokenized projection effect 替代。
+
 1. resize 窄→宽历史正确重排（cap 内），不触碰已滚出 scrollback。
 2. 工具调用为单 cell、Running 实时可见且 viewport-only；final cell 内稠密、与其他 final event cell 间单空行。
 3. cell 内空行由 cell 内容决定，跨 cell 空行由统一边界策略决定；`gapForAsyncLine` 逐行推断被移除。
@@ -423,12 +428,11 @@ flake，P5 期间若复现应先隔离确认再排除（不得作为 P5 回归�
 
 ## 11. 当前下一步
 
-**P5.0–P5.6 已完成**：默认 owned 渲染、历史交接、补偿债务 no-op、cell 模型统一、宽度感知 `DisplayLines`、resize/reflow，以及 P5.6 的 tool/event gap 行为均已落地；`835386e` 进一步锁定了“tool cell 内稠密、独立 final tool/event cell 间单空行、Running 不进 history”。
+P5 不再独立推进新的状态机。下一步统一转入长期架构计划：
 
-下一步是 **P5.7 收尾**：
-
-- 对照 §9 删除/收敛清单确认哪些 legacy 字段和路径仍可达；
-- 将 raw stdout/direct output 审计转交统一架构文档 P0–P2，不能把 surface-aware adapter 误判为全局 single-writer 已完成；
-- 将 fullscreen `Disable()/Enable()` 问题转交统一架构文档 P3 screen lease；
-- 对照统一架构文档 P8/P9 完成 renderer 删除、PTY/ConPTY 与强不变量验收；
-- 只有 P5 范围退出条件具备测试证据后，本文才标记 implemented。
+- 先建立 `UIAction` mailbox 和 UIController 单一写者，现有 surface setter 退化为 adapter；
+- 将 transcript、active cell、ActiveBand projection、prompt/status/popup 收进统一 AppState；
+- 以 tokenized `HistoryCommit` effect 替换 `commitExcess + frontier + headroom + Invalidate`；
+- 几何变化只更新布局并 compose，不推进 handoff，不从 native scrollback 拉回；
+- 完成 Presenter ownership、Known/Unknown recovery 和 ack/failure 注入后，再删除 §9 遗留符号；
+- P5 文档保持 historical 状态，不再改标 implemented；最终验收只在 unified plan P9 记录。

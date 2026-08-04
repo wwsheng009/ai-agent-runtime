@@ -1,248 +1,361 @@
-# aicli TUI 渲染简化：实施指导（施工契约）
+# aicli TUI owned 渲染简化：实施契约
 
-> 上位文档：`docs/plan/aicli-tui-owned-render-simplification-plan.md`（what/why，方案）
-> 评审文档：`docs/analysis/aicli-tui-owned-render-simplification-plan-review.md`（缺口 G1-G8）
-> 本文档：**how + 约束 + 验收**。回答"每一步做什么、不许做什么、做到什么程度算完成"。
-> 并行专项：`docs/plan/aicli-tui-scene-presenter-convergence-design.md`（C0-C4：AICLI_SCENE_PRESENTER 双跑收敛 → 单一 Scene 渲染，本指导 Phase 2/6 引用）
-> 状态：**起草（待评审通过后执行）**
-> 适用范围：`backend/cmd/aicli/ui/` + `backend/cmd/aicli/commands/` 的渲染相关改动
+上位规范：`docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`
 
----
+专项方案：`docs/plan/aicli-tui-owned-render-simplification-plan.md`
 
-## 0. 使用方式（先读这里）
+transcript pager/模式切换实施子计划：`docs/plan/aicli-tui-transcript-overlay-renderer-mode-plan.md`
 
-本文档不是又一份方案，而是**逐条可对照检查的施工契约**。每个实施提交前，必须逐条过一遍：
+评审：`docs/analysis/aicli-tui-owned-render-simplification-plan-review.md`
 
-1. **§2 铁律**：本次改动是否违反任何一条？（违反 = 立即停手，改设计，不许带着违规提交）
-2. **§4 阶段清单**：本次改动属于哪个阶段的哪个任务？（不属于任何已批准任务 = 不许动）
-3. **§5 提交纪律**：测试是否先于实现更新？提交粒度是否满足？
-4. **§6 门禁命令**：本地是否全绿？
-5. **§8 红线**：是否触发了必须回滚的红线？
+状态：**approved execution contract / implementation not complete**
 
-任何"顺手重构"、任何"先改代码再补测试"、任何"新增第 N 套账本"都不在本契约允许范围内。
+日期：2026-08-03
 
----
+适用范围：`backend/cmd/aicli/ui/`、`backend/cmd/aicli/commands/` 的 owned interactive 渲染路径。
 
-## 1. 总目标与范围
+## 0. 使用规则
 
-### 1.1 目标（一句话）
+本文只定义施工顺序、允许的中间态、门禁与完成定义。设计决策只在上位规范和专项方案中修改，实施者不得在代码中临时发明第三套所有权模型。
 
-把"**一份数组三份所有权 + 提交→失效→猜测→补偿**"简化为"**两处物理所有者（committed scrollback / mutable tail） + 单一提交器（AppendNewRows / ScrollExistingRows）+ 单调 committedBoundary**"，并最终让 **Scene/historyCell 语义源成为唯一权威**（AICLI_SCENE_PRESENTER 从 flag 变为默认）。
+每个提交必须：
 
-### 1.2 范围边界
+1. 属于一个阶段和一个可独立验证的任务；
+2. 先明确权威状态与 effect owner；
+3. 附带相应测试或保持既有 parity；
+4. 不让两个 production presenter 同时写 terminal；
+5. 不删除用户已有的工作树实验或无关改动；
+6. 在 Windows 上控制补丁/命令长度，长改动按函数和文件分块。
 
-| 在范围内 | 不在范围内（只读，禁止改动） |
-|---|---|
-| historyWindow / handoff / softOutput / committedBoundary 相关（D1-D9、N1-N5） | prompt / composer / popup / status 行布局逻辑 |
-| 两个专项失败测试 + vt.Screen 语义断言工具（N6） | ScreenLease（DEC 1049）主流程 |
-| `historyCell` 迁移（user-echo 已过 → assistant/tool/supplement） | `chat_runtime_events.go` 事件桥的业务逻辑（只允许动 Scene presenter flag 的切换点） |
-| FramePump 调度收敛（L4，Phase 6） | 输入事件系统、SSE 消费、会话持久化 |
-| `/debug` 观测字段（committedBoundary/mode/mutableTail） | terminal write lock、批量 flush 机制 |
+阶段可以拆为多个小提交，不要求“单阶段单提交”。不允许跳过 UI owner/AppState 阶段，直接实现新的 handoff boundary。
 
----
+## 1. 目标与非目标
 
-## 2. 铁律（不可违反的不变量）
+### 1.1 目标
 
-每一条都是对当前 bug 根因的直接禁止。**新增违反铁律的代码 = 提交被拒**。
+- 所有 UI mutation 经 `UIAction` mailbox 和单一 reducer；
+- transcript、active cell、bottom pane、geometry、lease 形成一个 AppState snapshot；
+- Layout/Compose 为纯派生；
+- Presenter/TerminalSession 是唯一物理 writer；
+- history handoff 使用 tokenized effect 和 Ack/Fail；
+- terminal projection 显式 Known/Unknown；
+- streaming 只有一个 typed queued/acked source-range owner；
+- 删除 `commitExcess/headroom/frontier` 补偿链和旧 production renderer。
 
-| # | 铁律 | 违反的判定方式（代码审查时对照） |
-|---|---|---|
-| IR-1 | **一行文本的字节流出现次数 ≤ 1（跨提交原子性）**：任何已进入 scrollback 的行，不得因滚动/恢复/重绘再次出现在输出流中 | `vt.Screen` 回放 + 语义行 ID 记账断言（Phase 0 落地后成为 hard gate） |
-| IR-2 | **不得新增任何"账本/补偿"状态**：禁止新增 handoffFrontier 类、headroom 类、reserve-debt 类、字符级 prefix-len 类字段。需要对齐时只用 `committedBoundary`（行级单调）或 Scene cell `Revision` | grep 新增 struct 字段：`*Frontier*`、`*Headroom*`、`*Debt*`、`*PrefixLen*` |
-| IR-3 | **单一提交器**：所有向 scrollback/终端的文本写入必须收敛到 `AppendNewRows`（新内容）与 `ScrollExistingRows`（纯平移）。禁止新增 `insertHistoryLines*` / `writeSurfaceOutputText*` 类直写调用点 | grep 生产代码中的 `\r\n` 构造点与 `WriteString` 调用，逐一归属到两个原语 |
-| IR-4 | **ScreenModel 是唯一渲染状态所有者**：surface 上不得存在与模型重复的行缓存（`historyWindow` 是 Phase 3 前的过渡态，转换完成后删除）；softOutput 只允许存在于 mutable tail 内（INV-S5） | /debug 对比 ScreenModel front 与 surface 行缓存的一致性 |
-| IR-5 | **几何变化 = 模型平移**：band 出现/消失、bottom 增减一律走 `ScrollExistingRows`（screen_model.go:103-137 已有 ScrollUp/Down/ScrollRegionUp/Down，只缺接线）。禁止用文本提交模拟滚动（方案 D2 的删除目标） | grep `commitExcessHistoryToScrollbackLocked` 调用点：Phase 1 后只允许剩 0 个 |
-| IR-6 | **resize/reflow 允许重发，禁止增量补偿**：重建代价已知且可封顶（Codex 式 source replay）；任何"补偿性文本提交"都是 bug | 评审 diff：出现"重发文本修复空白"的提交 = 违规 |
-| IR-7 | **语义先于字节**：测试断言以"语义行出现次数"为准，字节计数降级为辅助诊断。禁止用改断言的方式掩盖实现缺陷（语义澄清须按方案 §4.2 规则书面记录） | 测试 diff 审查 |
-| IR-8 | **不扩大范围**：改动必须属于当前阶段的任务清单。prompt/popup/status/lease 相关文件（除非清单点名）只读 | 提交 diff 的文件清单 vs 阶段任务文件白名单 |
-| IR-9 | **flag 是唯一开关**：Scene presenter 权威切换只能通过 `AICLI_SCENE_PRESENTER`（chat_runtime_events.go:196-206，默认关，双跑对照）。禁止在阶段 0-4 悄悄把权威切走 | 审查默认值/环境变量读取点 |
-| IR-10 | **cursor 是状态不是序列**：不得新增 cursorHide/cursorShow/move 操作序列；光标位置在 flush 末尾作为状态更新（对齐 Codex `last_known_cursor_pos`） | grep 新增 `\x1b[?25` 序列 |
+### 1.2 非目标
 
----
+- 不重写 JSON/plain/noninteractive renderer；
+- 不依赖第三方 TUI 框架；
+- 不把 prompt/status/popup 写进 transcript；
+- 不承诺终端字节中的相同文本永不因 repaint/reflow 重发；
+- 不把 native scrollback 变成可查询数据库；
+- 不以 RI/SD 拉回作为正确性前提；
+- 不在迁移中顺手改产品文案、主题或 Markdown 视觉规范。
 
-## 3. 现状勘误（实施前必须更新的既有认知）
+## 2. 施工铁律
 
-以下事实与方案 §9 复核记录不一致，**实施者不得按过期信息行动**：
+| ID | 铁律 | 审查方法 |
+| --- | --- | --- |
+| IR-1 | AppState 只有 UIController reducer 一个写者 | producer 只能 `Post(UIAction)` |
+| IR-2 | terminal bytes 只有 Presenter/TerminalSession 一个 writer | AST inventory + terminal writer fence |
+| IR-3 | semantic source、effect progress、physical projection 是三种状态 | 类型和包边界不可混用 |
+| IR-4 | geometry mutation 不生成 HistoryCommit | reducer effect 测试 |
+| IR-5 | history effect 必须有 Token/CellID/Revision/Range/Generation | 禁止裸 `[]string` boundary |
+| IR-6 | 只有完整写成功后的 Ack 推进 front/projection | short-write/failure 测试 |
+| IR-7 | projection Unknown 时禁止 incremental diff | recovery barrier 测试 |
+| IR-8 | Scene revision 不替代 queued/acked effect range | streaming invariant 测试 |
+| IR-9 | ActiveBand 是 projection，正文源只在 ActiveCell/Transcript | snapshot ownership 审查 |
+| IR-10 | repaint 可重发字节；exactly-once 以 token/range 判断 | 禁止文本 hash 作为权威断言 |
+| IR-11 | FramePump callback 只投递 action | callback source fence |
+| IR-12 | resize/replay 从 semantic source 派生 | 禁止从 front/VT/terminal 反推 |
 
-| # | 过期认知（方案 §9） | 实测现状（2026-08-03） | 对实施的影响 |
-|---|---|---|---|
-| E1 | "ScreenModel 现有 API 无 ScrollUp/ScrollDown，N1 为真实新增" | `screen_model.go:103/112/122/137` 已有 `ScrollUp/ScrollDown/ScrollRegionUp/ScrollRegionDown`，且有 `screen_model_scroll_test.go` | **N1 不是新增，是接线**：阶段 1 只做调用点切换 + 语义核对 |
-| E2 | Scene 是"未接线的未来" | `AICLI_SCENE_PRESENTER` flag + 双跑模式已生产落地（`chat_runtime_events.go:196-206`）；`historyCell` 接口 + `cellIdentity`（ID/Seq/CauseID）+ `DisplayLines(width)` 已落地（`chat_history_cell.go:39-55`），P4.1 user-echo 已路由 | 阶段 2-3 的"Scene 接线"实际是"打开开关 + 完成剩余 block 迁移"，不是从零开始 |
-| E3 | 阶段 0 只需改两个测试 | ui 包另有 3 个 `zz_` 前缀诊断测试（`zz_diag_duplicate_probe_test.go`、`zz_probe_reconcile_test.go`、`zz_dump_stream_test.go`），`chat_*` 侧有 20+ 个 blank/parity/identity/invariant 类测试（`chat_interaction_live_vs_replay_blank_test.go` 25KB、`chat_interaction_midstream_blank_test.go` 22KB、`chat_surface_reserve_scroll_invariant_test.go` 15.6KB 等） | 阶段 0 必须盘点这批测试的断言语义，逐个标注"保留/改写/删除"；`zz_` 文件在阶段 5 删除 |
-| E4 | CI hard gate 覆盖渲染 | `release-aicli.yml` validate job **不含 `cmd/aicli/ui`**，仅 soft gate 覆盖 | 阶段 0 一并补 hard gate（§6 门禁） |
-| E5 | —（新增） | `chat_runtime_events_test.go` 223KB 是 commands 包最大测试文件，内含大量 parity 断言 | 任何影响 Scene presenter 双跑的改动，必须同时跑通该文件，否则 flag 打开即回归 |
+## 3. 必须落地的核心类型
 
----
+命名可按仓库风格调整，语义不可弱化：
 
-## 4. 阶段执行计划（入口 → 任务 → 出口）
+```go
+type UIAction interface{ isUIAction() }
 
-> 每阶段独立提交、独立可回滚。**阶段之间不得并行**（R6 half-mode 风险）。方案 §7 的阶段 0-5 保留，此处补齐每阶段的入口/出口与任务分解，并新增 Phase 6（L3/L4 收敛，来自评审报告 G2/G3）。
+type AppState struct {
+    Revision   uint64
+    Transcript TranscriptState
+    Active     ActiveCellState
+    Bottom     BottomPaneState
+    Geometry   GeometryState
+    Lease      LeaseState
+}
 
-### Phase 0：测试语义改造（先行，单独提交）
+type ProjectionValidity uint8
+const (
+    ProjectionUnknown ProjectionValidity = iota
+    ProjectionKnown
+)
 
-**入口**：无（首个提交）。
-**任务**：
+type HistoryCommit struct {
+    Token            uint64
+    CellID           scene.CellID
+    Revision         uint64
+    SourceRange      SourceRange
+    DisplayRange     DisplayRange
+    LayoutGeneration uint64
+    Lines            []render.Line
+}
+```
 
-1. 扩展 `vt.Screen` 保留滚出行（N6）：`ui/vt/screen.go` 的 `index()`/`reverseIndex()` 当前丢弃/清空滚出行（`fixed_bottom_surface_band_restore_duplicate_test.go:25` 注释自述 "A vt.Screen cannot see this"）。扩展后回放可断言 scrollback 序列。
-2. 建立**语义行 ID 记账断言工具**（评审 G7/G8）：每个测试可声明"行 X 在字节流中出现 ≤ N 次"；同时暴露进程级重复计数（INV-S1 计数器）供 `/debug` 与 CI 断言。
-3. 改写两个专项测试为语义断言（方案 §4.3）：
-   - `TestFixedBottomSurface_BandShrinkRestoreNeverReplaysHandedOffHistory`
-   - `TestBottomReserveShrinkRestoresHistoryWithoutBlanktingTop`
-4. **盘点并标注**（E3）：`fixed_bottom_surface_*` 的 6 处 cap/headroom 断言（`fixed_bottom_surface_history_window_test.go`）、`chat_interaction_live_vs_replay_blank_test.go`、`chat_interaction_midstream_blank_test.go`、`chat_surface_reserve_scroll_invariant_test.go` 的断言语义，输出"保留/改写/删除"清单（写进本阶段提交说明）。
-5. CI 补强（E4）：`release-aicli.yml` validate job 增加 `go test ./cmd/aicli/ui/... -count=1`（windows-only 文件由 build tag 排除）。
+effect result 必须作为 action 返回：
 
-**出口（通过标准）**：
+```go
+type TerminalEffectAck struct { Token uint64; Frame uint64 }
+type TerminalEffectFailed struct { Token uint64; Err error; MayHavePartiallyWritten bool }
+```
 
-- 两专项测试仍失败（或部分转黄），但失败原因已符合 §4.2 语义（不再是被陈旧断言误伤）；
-- 语义行 ID 断言工具可独立运行：`go test ./cmd/aicli/ui/ -run TestSemanticLineLedger -v` 绿；
-- `zz_` 文件清单已列入阶段 5 删除计划。
+`MayHavePartiallyWritten=true` 时不得盲目重放同一 batch。projection 进入 Unknown，由 recovery policy 决定 clear/rebuild/controlled teardown。
 
-### Phase 1：几何变化去文本提交
+## 4. 阶段执行
 
-**入口**：Phase 0 已提交。
-**任务**：
+### Phase 0：测试语义与安全网
 
-1. `applyOwnedViewportGeometryLocked`（fixed_bottom_surface.go:2971/2999/3028）：bottom 增长从 `commitExcessHistoryToScrollbackLocked` 改为 `ScrollExistingRows` 模型平移 + 终端滚动序列（R1：行数以**物理行**计算，复用 `expandHistoryLinesLocked` 思路；R4：不依赖 RI/SD 拉回，统一"模型平移 + diff 重画恢复行"）。
-2. 删除 D2/D6：`CommitRange(1, regionBottom)` 对已知滚动的覆盖补偿（`appendOwnedDirectPaintLocked` 尾部）。
-3. 阶段 1 结尾（提交前）：grep 确认 `commitExcessHistoryToScrollbackLocked` 调用点归零（IR-5）。
+**任务**
 
-**出口**：测试 2 绿；测试 1 的 `@3354` 类重复消失（只剩 diff 猜测类，Phase 2 处理）。
+1. 为测试引入稳定的 `CellID/CommitToken/Range` ledger；测试样本可使用唯一文本辅助定位，但不得以文本本身作为身份。
+2. 保留并改造：
+   - `TestFixedBottomSurface_BandShrinkRestoreNeverReplaysHandedOffHistory`；
+   - `TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop`。
+3. `vt.Screen` 可记录 scrollback/effect 序列；不实现或依赖“RI/SD 从 native scrollback 拉回 semantic row”。
+4. 增加 fake writer：零写失败、部分写失败、成功、重复 Ack、stale generation。
+5. 将 `go test ./cmd/aicli/ui/... -count=1` 加入 CI hard gate。
+6. 盘点 `zz_` 诊断测试，标记保留至哪个阶段，不在本阶段删除。
 
-### Phase 2：单调提交器 AppendNewRows
+**出口**
 
-**入口**：Phase 1 已提交。
-**任务**：
+- 测试可区分 viewport repaint、resize replay、history handoff；
+- 当前重复 bug 仍可稳定复现；
+- fault injection 基础设施可独立运行；
+- 没有生产行为变化。
 
-1. `AppendNewRows` 成为唯一文本写入入口：直写路径（`appendOwnedDirectPaintLocked`）、全帧路径（`renderOwnedViewportLocked`）、reflow 路径（`RewriteSoftOutputTail` owned 分支）全部收敛；删除 D3/D4/D5（Invalidate 补偿、直写路径独立 frontier 计算与窄区变体、正常路径 Invalidate 重建补偿）。
-2. 在**双跑对照确认 parity 之后**，把 `AICLI_SCENE_PRESENTER` 对完整块可见行的权威切换纳入本阶段验证面（跑通 E5 的 `chat_runtime_events_test.go` 全量）。双跑门禁化（C0）与完整块强权威（C1）见 `aicli-tui-scene-presenter-convergence-design.md`；**C1 必须排在本阶段（Phase 1-4）全部完成后执行**（mismatch 即错误会把旧路径重复渲染 bug 暴露成红）。
-3. 提交前核对 IR-3：grep 生产代码中所有 `\r\n` 文本构造点，逐一归属 `AppendNewRows` / `ScrollExistingRows`。
+### Phase 1：UI actor 与 action adapter
 
-**出口**：测试 1 绿（`@1749` 类 diff 重复消失）；两专项测试全绿。
+**任务**
 
-### Phase 3：删除双保留与 trim
+1. 新增 bounded UI mailbox 和 `UIController.Run`；定义 durable、coalescable、barrier action 分类。
+2. RuntimeEvent、Input、Resize、Timer、Lease、DrawRequested、EffectResult 统一投递 action。
+3. 将 `FramePump.Schedule*` callback 改为只 `Post` action；禁止 callback 直接获取 coordinator/surface lock。
+4. 现有 `SetActiveBandStyled/ClearActiveBand/SetStatusModels/prompt/popup` 保留为 facade，但内部只投递 action。
+5. reducer 初期可调用 legacy adapter 生成相同输出，确保行为不变；terminal writer 仍只有一条 production 路径。
+6. 增加 action replay、coalescing、barrier、shutdown 和 starvation 测试。
 
-**入口**：Phase 2 已提交。
-**任务**：
+**实施快照（2026-08-03，partial）**
 
-1. D1：`keepForRestore = visible + historyWindowHeadroom`（:4195）删除——可恢复性由"模型持有全部 mutable 行"保证。
-2. D8/D9：legacy reserve debt、`historyWindow → mutableRows` 整体 commit 语义；删除 `historyWindowMaxLines=400` 安全网（超可见容量即整体 commit，方案 §9-3）。
-3. **同步迁移测试**（方案 §9-4）：`fixed_bottom_surface_history_window_test.go` 的 6 处 cap/headroom 断言删除，改写为 `committedBoundary` 单调 + `mutableRows` 有界断言。
-4. **historyCell 迁移推进**（E2）：assistant/tool/supplement block 路由到 `historyCell.DisplayLines(width)`，替换 `Formatter.Format` 的独立渲染调用点（评审 G2 的"双渲染调用点"收敛第一步）。
+- `ui.UIController`、bounded mailbox、durable/coalescable/barrier 分类及 replay/coalescing/barrier/shutdown/starvation 测试已落地；controller-owned transition snapshot 记录 geometry/lease/draw/effect-result barrier facts（明确不是完整 AppState）。普通 runtime event、editor input snapshot、显式 resize、四类 FramePump 到期回调和 surface facade 已进入 action 顺序。
+- active-stream 帧到期现在产生 coalescable `DrawRequested`；dynamic-status、stable-commit、prompt 仍使用 typed `Timer`。callback 本身不再获取 coordinator/surface 锁或执行业务 mutation。
+- `ScreenLease` acquire/release 在既有 DEC 1049 物理事务成功后投递 `LeaseAcquired`/`LeaseReleased` barrier；reducer 只记录 Phase 1 logical lease adapter，尚未把 transport 移入 TerminalSession。
+- `EffectResult` 已有 barrier reducer 入口和回归测试，但没有 production `TerminalSession` 或 tokenized `HistoryCommit` source；不得把该账本误读为 Ack/failure recovery 已完成。
+- `RuntimeEvent` reducer 触发 surface facade 时，facade action 进入 controller 的 causal follow-up queue：它们在当前 action 后、下一个外部 mailbox action 前分别按 revision 处理，不占用 external mailbox 容量。这样 mailbox 已满时 reducer 不会等待自身恢复消费；外部 facade 仍按正常 bounded `Post` 路径投递。该机制只解决 Phase 1 legacy adapter 的 re-entry/backpressure，不把 legacy coordinator mutation 误称为终局 reducer/AppState。
+- 审批、问答仍是明确的 legacy synchronous exception：它们的 stdin/modal 流程尚未拆成 interaction effect/result，不能在 reducer 内等待。`waitUIActorIdle` 仅用于既有同步边界和测试，不能从 reducer 调用。
+- 当前 surface/coordinator legacy adapter 仍会写 terminal；这不是 Phase 3 Presenter ownership，也不构成 AppState/纯 Layout 完成信号。
+- facade 接线以 `FixedBottomSurface.SetUIActorPoster` + `postFacadeAction` 统一投递。除仍需同步光标定位的 `SetPromptCursor`/`MoveToPromptCursor` helper 外，ActiveBand、三种 status 更新、prompt 展示/重置/行数/notice/editor/input tracking、composer preview，以及 popup 的 begin/update/clear 都已由 typed action 经 `surface.Apply` legacy adapter 同步应用；`UpdatePopupAction` 也已进入 coordinator reducer。曾暴露 `ShowPrompt→ClearPromptRows` 异步配对回归（ShowPrompt 先异步、紧随的同步 ClearPromptRows 对尚未渲染的 prompt 失效导致 mid-stream prompt 残留），已通过把 `ClearPromptRows` 一并接入 facade 队列修复，并补 facade_action_test 接线和同步输出 parity 断言。
+- 分层回归（2026-08-03 终验）：`go test ./cmd/aicli/ui/... -count=1` 全绿；`go test ./cmd/aicli/commands/... -count=1` 仅剩 1 个已知 pre-existing 失败 `TestRenderLayer_UserInput_ReplayPathDoesNotInject`（基线与接线后均失败，见测试基线清单）；`RetriesAfterInvalidChoice` 系列与 `ReplayVisibleChatHistoryAfterTruncationSkipsSystemOnly` 为 pre-existing 跨测试 stdout spinner 泄漏（`\x1b[s…\x1b[u`）的随机 flaky 受害者（单独/连跑 PASS，`stripAsyncTerminalNoise` 与泄漏源均存在于 HEAD 基线）；`go build ./cmd/aicli/...` 与 `git diff --check` 通过。`go vet ./cmd/aicli/...` 仍被既有 `ui/renderengine/handoff_plan.go:68` 的 `WriteTo` 签名告警阻断，本轮未改该无关债务。
 
-**出口**：`go test ./cmd/aicli/ui/... -count=1` 全绿；`/debug` 显示 `committedBoundary` 单调。
+**出口**
 
-### Phase 4：组帧收缩
+- 业务 producer 不直接 mutation surface；
+- 每个 frame 有单一 action/revision 顺序；
+- FramePump 不再是任意 callback executor；
+- 现有 visual/VT/parity 测试保持。
 
-**入口**：Phase 3 已提交。
-**任务**：
+### Phase 2：统一 AppState 与纯布局
 
-1. D7：`composedPlanLocked`（`fixed_bottom_surface_snapshot.go:156`）从"无条件全量历史组帧"改为只消费 `mutableTail`（boundary 之后）。
-2. N5：Frame/Scrollback 分支清晰化；`frameMode` 双路径并存允许保留到本阶段结束（R6），但调用点已全部收敛。
+**任务**
 
-**出口**：全量测试 + `/debug` 观测（paint trace 每帧行数 = mutableTail 行数）；流式输出下 CPU/GC 可观测下降（`active_stream_benchmark_test.go` 对照）。
+1. 以现有 `ui/scene` transcript 为组成部分建立完整 AppState，不再把 transcript-only Scene 直接宣称为全部 UI 状态。
+2. 新增 `ActiveCellState`：raw semantic source、revision、stable range、stream phase；ActiveBand 只由 Layout 派生。
+3. 新增 `BottomPaneState`：status、prompt/editor、popup stack、focus；统一 row allocation、overlay priority 和 cursor intent。
+4. geometry/lease 进入 AppState；每个 snapshot 携带 terminal/layout generation。
+5. Layout/Compose 不读取实时 mutex state，不写 terminal，不推进 effect。
+6. 将 `scene.FlushPolicy` 接到统一 frame scheduler，而不是 setter 内同步 flush。
+7. 建立旧 path vs AppState snapshot 的 frame/text parity，仅比较内存结果。
 
-### Phase 5：清理
+**实施快照（2026-08-04，partial）**
 
-**入口**：Phase 4 已提交。
-**任务**：
+- `ui.AppState` 已建立 `Transcript`、`Active`、`Bottom`、`Geometry`、`Lease`、`LayoutGeneration` 的可深拷贝快照形状；`UIControllerState` 嵌入该 state，不再平行保存一份 geometry/lease。`UIController.AppState()` 只返回脱离 actor 内存的 snapshot，供后续纯 Layout 消费。
+- 普通 runtime event 完成既有 ChangeSet -> Scene mapping 后，将 `scene.Snapshot` 作为当前 RuntimeEvent 的 causal `ReplaceTranscriptAction` 交回 actor；它不从 terminal、ScreenModel 或 historyWindow 反推正文。Scene mutable cell 暂可派生 `ActiveCellState` 的 `CellID/Revision/Source`，但 `Stable/Enqueued/Acked` range 保持未知零值，不能猜测或复制 coordinator 的 streaming cursor。
+- live user submit、structured command result 与 local error 这三类非 runtime Scene producer 完成 legacy coordinator 写入并**释放 `c.mu` 后**，也会投递同一 `ReplaceTranscriptAction`；这避免 bounded mailbox backpressure 与 reducer 获取 coordinator mutex 形成锁等待。它们投递完整 immutable Scene snapshot，因此 AppState 不会落后于这三类 direct injection。事件日志 `replayEventLog` 成功重建 Scene 后也只投递一次完整 snapshot，使重放后的 AppState 不会保留旧 transcript；其他尚未枚举的 producer 仍待逐项迁移。
+- 已进入 actor 的 input/status/prompt/popup/legacy ActiveBand facade action 会更新 `AppState.Bottom`。本轮补齐 prompt reset/rows/notice/editor、incremental input tracking、单独 persistent/dynamic status 与 composer preview 的状态迁移，并以 `Apply`/同步 facade 字节 parity 和 AppState snapshot 回归固化。popup 的 owner/priority、suspended `PopupStack`、tokenized `PopupHandle` begin/update/clear 已有纯 state transition，并且 `BeginPopupInputForOwner*` 先分配 token 再投递 durable action，后续 update/clear 因 FIFO 排在 begin 之后；`AppState()` 深拷贝 stack。它仍是 legacy surface adapter，而不是最终 popup/presenter owner：仍有同步 cursor-move helper、完整 focus policy 和所有 producer 待收敛。ActiveBand 仍标为 legacy projection input，尚不是从 `ActiveCellState` 纯派生的最终实现。
+- `ui.LayoutAppState(AppState)` 已提供纯内存 layout snapshot：它从 semantic transcript 调用 `scene.LayoutTranscript` 派生 boundary rows，并计算 bottom pane 的 status/prompt/popup/legacy-band row allocation 与 cursor focus。该函数不读取 surface mutex、terminal、ScreenModel 或 effect progress；目前只形成 layout 数据，不生成 physical frame/diff。
+- 本轮补齐纯布局的 geometry 输入契约：`BottomPaneGeometryPolicy` 只由 `BottomPaneState + GeometryState` 计算 ActiveBand 尾部预算/顶部间隔、composer margin、popup 预算及 prompt 最大可见行；长草稿保存 logical cursor、absolute visual row、total rows 与 viewport start，`LayoutAppState` 在 width/height generation 改变时从 prompt source 重算可见 text rows，绝不从 surface cursor cache 反读。`LayoutBottomPaneRows` 已生成不含 ANSI 的 bottom reserve row/owner/text plan，并对普通、多行 prompt、popup/composer、短终端压力、窄宽/宽屏切换和同一语义状态的 geometry 循环建立 legacy snapshot parity。新增 `LayoutAppScreen` 纯 screen-row shadow，把 retained transcript 的 CellID/gap 与 bottom owner plan 放进一个 viewport-sized plain layout；mutable cell 明确排除，避免将 active source 与 legacy band 双重纳入。legacy owner map 现在只把实际 prompt 文本 viewport 标为 Prompt，popup 的空输入占位仍是 Gap；诊断快照同时携带 prompt 的 absolute row 与 viewport start，避免将相对 cursor 行误作 geometry-independent source。legacy probe 完成后以 `Resize{Applied:true}` causal barrier 回投已测宽高；reducer 仅在实际几何变化时递增 `Geometry.Generation/LayoutGeneration`，且该回投不再次 probe 或 reflow。新增纯派生、prompt resize reflow、generation、bottom matrix、screen-layout 与 coordinator bridge 回归。
+- follow-up 若所属 reducer panic 会被整个丢弃，防止父 action 未提交而 facade/Scene child action 单独提交。该原子性只覆盖 controller action continuation，不等于完整 Scene transaction/terminal transaction 已完成。
+- 尚未实现 physical `Compose`/frame parity 的 production shadow、完整 screen-row ownership/text parity、所有 Scene producer action 化、TerminalSession 或 HistoryCommit effect queue；`FixedBottomSurface` 仍为 legacy physical adapter。`Resize{Applied:true}` 只是 legacy probe 到 AppState 的数据桥，不是 Presenter 几何 transaction。
 
-1. 删除 `HandoffFrontier.TrimPrefix/Clamp`（handoff_frontier.go:48/60）、legacy reserve debt 残留、未用导出符号（`go vet` + 未用符号扫描）。
-2. 删除 3 个 `zz_` 诊断测试文件（E3）。
-3. 文档同步：`aicli-tui-single-scroll-channel-plan.md` 标记为被本方案取代；更新本方案 §9 的 E1-E5 勘误。
+**出口**
 
-**出口**：`go vet ./cmd/aicli/ui/...` + 全量测试干净；diff 只增不删的符号清单为 0。
+- 一个 snapshot 可以完整生成 history/active/bottom/overlay/cursor；
+- ActiveBand buffer 不再是独立正文真相源；
+- popup 关闭可从 snapshot 恢复下层；
+- resize frame 不混用不同 generation。
 
-### Phase 6（评审新增）：L3/L4 收敛
+### Phase 3：TerminalSession 与投影恢复
 
-> 来源：评审报告 G2（coordinator 五副本 + 三套账本）、G3（四时钟调度）。方案原 §7 不含此阶段——**本阶段才是"历史消息重复渲染"在用户侧的最后闭环**。若不做，问题仍在。
-> **本阶段与 Scene presenter 收敛 C2（mutable tail Scene 化）合并执行**，完整定义见 `aicli-tui-scene-presenter-convergence-design.md`；执行顺序：owned Phase 0 → C0 → Phase 1-4 → C1 → Phase 5 → C2+Phase 6 → C3 → C4。
+**任务**
 
-**入口**：Phase 5 已提交；`AICLI_SCENE_PRESENTER` 默认开启观察 ≥ 1 个发布周期。
-**任务**：
+1. 将 `ScreenModel` 尺寸收敛为 owned viewport area；它只表示 physical projection cache。
+2. Presenter 持有 front/back、cursor、scroll region、projection validity 和 frame generation。
+3. 固定 transaction 顺序：lease/generation -> geometry -> history effects -> viewport diff -> cursor。
+4. terminal 完整写成功后才 commit front；短写/错误立即标 Unknown。
+5. Unknown 状态下一帧执行 recovery barrier/full repaint；resize、lease release、capability change 都可显式触发 Unknown。
+6. normal geometry diff 可以内部使用 scroll 优化，但必须与 full repaint 等价，且优化失败可关闭。
+7. 为 cursor、wide cell、SGR、DECSTBM reset、synchronized update 增加 effect-level 测试。
 
-1. **L3-1 删除字符级账本**：`streamEnqueuedPrefixLen` / `streamRenderedPrefixLen` 删除，改由 Scene cell `Revision` 对齐（`chat_interaction.go` 中同步 `streamLastFinalDivergence` 等）。
-2. **L3-2 收敛双渲染调用点**：`commitActiveStableScrollbackLocked`（:4314）的 live band 稳定前缀提交与历史 replay 统一从 `historyCell.DisplayLines(width)` 取源；删除 `writeSurfaceOutputTextLocked`（:1172）直写路径（若 Phase 3 未完成）。
-3. **L3-3 单真相源**：`streamBuffer` / `ActiveStreamController` 缓冲不再作为渲染源（只保留为背压/节流），渲染源 = Scene 快照。
-4. **L4-1 调度收敛**：`FrameKeyActiveFrame/DynamicStatus/Prompt/StableCommit` 四个 key 收敛为单一帧调度（dirty 分类保留，时钟唯一）；`scheduleActiveStableCommitLocked` / `drainActiveStableCommitCatchUpLocked` 并入统一帧循环。
-5. **L4-2 事件流**：input / render-intent / SSE 输出 / lease 事件合并为单一事件队列（仿 Codex `TuiEventStream`），reducer 单一入口。
+**出口**
 
-**出口**：全量 `go test ./...` 绿；`chat_runtime_events_test.go`（223KB）全绿；双跑 parity 断言零偏差；`/debug` 显示渲染源 = Scene revision（非 buffer 副本）。
+- 所有 ANSI 由 TerminalSession 产生；
+- partial write 不会把 front 标成成功；
+- Unknown 后不做 incremental diff；
+- ScreenModel 不再被业务层读取为 history source。
 
----
+### Phase 4：确认式 history handoff
 
-## 5. 提交纪律（每个提交必须满足）
+**任务**
 
-1. **测试先行**：每个任务先写/改语义断言（Phase 0 工具之上），再动实现。提交里实现与断言同 commit，禁止"先实现后补测试"。
-2. **单阶段单提交**：一个提交只属于一个阶段的一个任务。混合两个任务 = 拆开再提交。
-3. **提交信息模板**：`render(owned): P<n>-<task> <动词> <对象>`，如 `render(owned): P1-1 replace commitExcess with ScrollExistingRows in applyOwnedViewportGeometryLocked`。提交说明必须附：阶段、铁律自检结果、E1-E5 勘误引用。
-4. **文件白名单**：提交 diff 的文件必须全部落在当前阶段任务的文件清单内（§1.2 范围边界 + 阶段任务）。范围外文件出现在 diff = 提交被拒。
-5. **禁止携带**：格式化无关代码、重构未点名符号、修改注释语言风格。
+1. 为 eligible finalized display range 创建唯一 `HistoryCommit`；effect 进入 Pending，不同步推进 cell/frontier。
+2. Presenter 将 Pending 标 InFlight 并在 frame transaction 中执行；成功返回 Ack，失败返回 Failed。
+3. reducer 处理 Ack 后记录 `Token + CellID + Revision + Range + Generation`，再释放 effect payload。
+4. geometry action 不创建 effect；删除 band/popup/prompt 路径中的 `commitExcessHistoryToScrollbackLocked`。
+5. 删除固定 `historyWindowHeadroom` 和 `HandoffFrontier.TrimPrefix/Clamp` 的 correctness 职责。
+6. 将 `appendOwnedDirectPaintLocked` 与 full-frame path 收敛到同一个 effect/frame plan。
+7. 不使用字符串相等决定是否重试/去重。
 
----
+**出口**
 
-## 6. 回归门禁（本地提交前与 CI 命令）
+- 两个专项测试通过；
+- 同一 token/range 最多一个 Ack；
+- band grow/shrink 不改变 effect queue；
+- stale revision/generation effect 被 reducer 拒绝；
+- failure/partial-write 恢复测试通过。
+
+### Phase 5：streaming 与 Scene 权威收敛
+
+**任务**
+
+1. 将 assistant/reasoning/tool-running delta 统一更新 `ActiveCellState`/Scene mutable cell。
+2. 建立一个 streaming range owner，明确 `raw source`、`stable boundary`、`enqueued range`、`acked range`。
+3. 删除 coordinator、assistant transcript、soft output 和 surface 中对同一 source range 的平行游标；不得为了删字段而丢失 queued-but-unacked 区间。
+4. stable tail 的 HistoryCommit source 来自同一 semantic cell/Layout；不再单独调用另一套 Formatter pipeline。
+5. finalization 作为一个 reducer transaction：校验 revision、更新 final source、标 Finalized、清 active projection、生成 eligible effect、request frame。
+6. live/replay/resume/resize 使用同一 DisplayLines/Layout；AICLI Scene flag 只做 session-level presenter 选择，最终删除。
+
+**出口**
+
+- 可见正文 100% 来自 AppState snapshot；
+- final 不通过 append 第二份文本完成；
+- streaming invariant 为 `acked <= enqueued <= stable <= source`；
+- parity、cancel、delta/final race、tool/reasoning 测试通过。
+
+### Phase 6：删除、性能与真实终端验收
+
+**任务**
+
+1. 删除 production legacy immediate renderer、raw adapter、旧 Scene fallback/flag。
+2. 删除不可达的 `historyWindow/headroom/handoffFrontier/commitExcess/legacyReserve` 和诊断 `zz_` 文件。
+3. 保留 plain/JSON renderer，但 renderer mode 只在 session 初始化选择。
+4. 跑全量、race、fault injection、benchmark；修复新增泄漏、锁反转和 starvation。
+5. 人工验证 Windows Terminal + ConPTY，以及至少一种非 Windows PTY：stream、band、popup、resize、fullscreen、400+ 行、退出恢复。
+6. 更新母计划状态、P8/P9 删除清单和 runbook。
+
+**出口**
+
+- 满足 §8 DoD；
+- production 只有 AppState -> Layout -> Presenter 路径；
+- emergency 回退若暂留，只能在 session 启动时选择完整 renderer，不能运行时双写。
+
+## 5. 提交纪律
+
+1. 一个提交只做一个可描述的 ownership/state/effect 变化；阶段可拆多提交。
+2. 测试与实现可在同一提交，但测试意图必须先明确，不能通过弱化语义掩盖失败。
+3. 新旧 adapter 并存时，提交说明必须写明哪一方是 production authority、哪一方只 shadow。
+4. 删除旧状态必须在替代路径和 fault tests 通过后进行。
+5. 不要求为了形式一次性重命名/移动大文件；优先小切片和可回滚 facade。
+6. 不把 benchmark 波动当 correctness；也不能以 correctness 为由接受无界 Layout/GC 回退。
+
+推荐提交信息：
+
+```text
+render(ui): P1 post geometry changes through UIController
+render(scene): P2 derive active band from ActiveCellState
+render(presenter): P3 invalidate projection on partial write
+render(history): P4 ack tokenized history commits
+```
+
+## 6. 回归门禁
+
+在 `backend/` 下执行：
 
 ```powershell
-# 本地快速门禁（每提交前）
 go build ./cmd/aicli/...
 go vet ./cmd/aicli/ui/... ./cmd/aicli/commands/...
-go test ./cmd/aicli/ui/... -count=1          # 阶段 0 后必须全绿（或按阶段出口标注的例外）
-go test ./cmd/aicli/commands/ -run 'TestFixedBottomSurface|TestBottomReserve|TestChatInteraction|TestChatRuntimeEvents' -count=1
-
-# 语义断言专项
-go test ./cmd/aicli/ui/ -run TestSemanticLineLedger -count=1 -v
-
-# 双跑 parity（E5，Phase 2 后每次涉及 presenter 的提交）
-go test ./cmd/aicli/commands/ -run TestChatRuntimeEvents -count=1
-
-# 基准对照（Phase 4 前后）
-go test ./cmd/aicli/ui/ -run '^$' -bench 'ActiveStream|Compose' -benchmem
+go test ./cmd/aicli/ui/... -count=1
+go test ./cmd/aicli/commands/... -count=1
+go test -race ./cmd/aicli/ui/... ./cmd/aicli/commands/...
 ```
 
-CI：阶段 0 提交时同步把 `go test ./cmd/aicli/ui/... -count=1` 加入 `release-aicli.yml` validate job（E4，hard gate）。软门禁 `verify-release.ps1` 保持 `go test ./... -count=1` 不变。
+阶段专项：
 
-## 7. 禁止清单（Do NOT）
+```powershell
+# handoff / geometry
+go test ./cmd/aicli/ui -run 'BandShrink|BottomReserve|HistoryCommit|Projection' -count=1 -v
 
-| # | 禁止 | 原因（对应根因） |
-|---|---|---|
-| DN-1 | 新增任何 `*Frontier*` / `*Headroom*` / `*Debt*` / `*PrefixLen*` 状态字段 | IR-2：账本 = 重复渲染的机制来源 |
-| DN-2 | 新增 `zz_` 前缀测试文件，或延长既有 `zz_` 文件寿命 | 诊断探测是病症不是治疗；Phase 5 删除 |
-| DN-3 | 拷贝 `historyWindow` 数据到新结构（迁移 = 替换，不是并行拷贝） | 五副本问题的产生方式 |
-| DN-4 | 修改 `chat_runtime_events.go` 中非 flag 切换点的业务逻辑 | 事件桥是独立子系统，超出本契约范围 |
-| DN-5 | 删除/绕过 `renderengine.WithTerminalWriteLock` | 单一 writer 是全局门禁，动它 = 并发回归 |
-| DN-6 | 用字节计数断言"无重复"作为新测试的通过条件 | §4.2 语义已裁定：字节计数只做辅助诊断 |
-| DN-7 | 在 Phase 6 之前合并/删除 `stableCommitQueue` 之外的调度器 | 四时钟收敛是 L4 专项，提前动 = 无法归因 |
-| DN-8 | 以"性能优化"为名跳过阶段顺序（如提前删 headroom） | 每阶段依赖前一阶段出口，跳步 = half-mode 回归 |
-| DN-9 | 修改 `AICLI_SCENE_PRESENTER` 默认值 | flag 切换是 Phase 6 入口决策，需发布周期观察 |
+# Scene / event / streaming
+go test ./cmd/aicli/commands -run 'ChatRuntimeEvents|RenderLayer|ActiveStream|Interaction' -count=1
 
-## 8. 风险红线（触发即停下，回滚到上一阶段提交）
+# fault injection
+go test ./cmd/aicli/ui/... -run 'ShortWrite|WriterFailure|Unknown|DuplicateAck|StaleGeneration' -count=1
 
-| 红线 | 触发条件 | 动作 |
-|---|---|---|
-| RZ-1 | 两个专项测试在任一阶段出口未达到该阶段通过标准 | 不回滚代码，先查语义断言是否正确（IR-7），确认断言正确则回滚实现 |
-| RZ-2 | `vt.Screen` 回放出现"语义行重复计数 > 1"而实现自称已收敛 | 立即停止本阶段，回滚到上一绿提交 |
-| RZ-3 | 打开 `AICLI_SCENE_PRESENTER` 后 parity 断言偏差（`chat_runtime_events_test.go` 失败） | flag 默认回关，修复后重开 |
-| RZ-4 | 任一提交 diff 包含范围外文件（§1.2） | 该提交作废，拆分重提 |
-| RZ-5 | 阶段 1 后 grep 仍发现 `commitExcessHistoryToScrollbackLocked` 调用点 | 视为 IR-5 违反，禁止进入阶段 2 |
-
-## 9. 完成定义（DoD，整个迁移的验收）
-
-1. `go test ./... -count=1` 全绿（含 ui 包 hard gate）。
-2. 两个专项测试以语义断言通过；`/debug` 显示 `committedBoundary` 单调、paint trace 只含 mutable tail。
-3. grep 验证：无 `commitExcessHistoryToScrollbackLocked` 调用点；无 `streamEnqueuedPrefixLen`/`streamRenderedPrefixLen`；无 `zz_` 文件；`historyWindow`/`historyWindowHeadroom`/`historyWindowMaxLines` 符号不存在。
-4. `AICLI_SCENE_PRESENTER` 开启时，渲染源为 Scene 快照（/debug 可见 revision 单调），`chat_runtime_events_test.go` 全绿。
-5. 人工验收（scripts/validate-multi-agent-real-terminal.ps1 模式）：Windows Terminal 下 band 出现/消失、400+ 行连续滚动、shrink/grow、resize/reflow 无重复、无顶部空白、光标位置正确。
-6. 文档同步完成（E1-E5 勘误入库，single-scroll-channel 方案标记取代）。
-
-## 10. 执行顺序备忘（给实施者/后续 agent）
-
-```
-owned Phase 0（语义先行，单独提交）→ C0（双跑门禁化）
-→ Phase 1（平移替代文本提交）→ Phase 2（单调提交器）→ Phase 3（删双保留，historyCell 推进）→ Phase 4（组帧收缩）
-→ C1（完整块强权威，mismatch 即错误）
-→ Phase 5（清理）
-→ C2 + Phase 6（mutable tail Scene 化 + L3 单真相源 + L4 单时钟单事件流，合并执行）
-→ C3（flag 默认开启，观察 ≥ 1 发布周期）→ C4（删 flag 删旧路径）
+# benchmark（Phase 2 前记录，Phase 6 对照）
+go test ./cmd/aicli/ui/... -run '^$' -bench 'ActiveStream|Layout|Compose|Presenter' -benchmem
 ```
 
-> C0-C4 定义见 `aicli-tui-scene-presenter-convergence-design.md`。任何阶段不得跳序；任何提交不得违反 §2 铁律与 §7 禁止清单。
+若仓库已有与本任务无关的全量测试失败，必须记录并用目标包/专项证明本改动；不得删除或跳过新增的 owned-render hard gate。
+
+## 7. 禁止清单
+
+- 禁止新增无单位 `committedBoundary int`、文本 hash frontier 或固定恢复 headroom；
+- 禁止把 `ScreenModel`/terminal/VT 当 semantic source；
+- 禁止 geometry setter 直接调用 history insertion；
+- 禁止 FramePump/timer callback 直接 mutation + flush；
+- 禁止用 Scene revision 代替 terminal effect Ack；
+- 禁止删除全部 prefix/source-range 状态而没有 queued/acked 等价物；
+- 禁止 partial write 后继续基于旧 front diff；
+- 禁止依赖 RI/SD 从 scrollback 拉回；
+- 禁止 shadow presenter 写 terminal；
+- 禁止运行时在 legacy/Scene presenter 之间切换并共享同一屏幕；
+- 禁止以字符串出现次数作为通用 exactly-once 指标；
+- 禁止提前删除 legacy 使中间阶段失去唯一 production path。
+
+## 8. 完成定义
+
+1. 所有 UI producer 只投递 action；UIController 是 AppState 唯一写者。
+2. 一个 snapshot 完整表达 transcript、active、bottom、geometry、lease、cursor intent。
+3. ActiveBand 不保存独立正文；popup/status/prompt 不修改 transcript boundary。
+4. Presenter 是唯一 terminal writer，front 只在完整成功后更新。
+5. projection 具备 Known/Unknown，短写和 lease/resize barrier 可恢复。
+6. history commit 使用 Token/CellID/Revision/Range/Generation，只有 Ack 推进。
+7. geometry change 不创建 commit effect；两个专项测试通过。
+8. streaming 只有一个 queued/acked range owner，finalization 是单一 reducer transaction。
+9. live/replay/resume/resize 使用同一 semantic source/Layout。
+10. production legacy renderer、raw writer、旧补偿状态和临时 flag 已删除或不可达。
+11. ui/commands 全量、race、fault injection、benchmark 和真实终端清单通过。
+12. `/debug` 可观测 AppState revision、layout generation、projection validity、pending/inflight/acked tokens。
+
+## 9. 阻断与回退
+
+出现以下任一情况立即停止进入下一阶段：
+
+- 同一时刻出现两个 production terminal writer；
+- reducer 外仍有新增 AppState mutation；
+- partial write 后 front 被错误提交；
+- band geometry action 生成 history effect；
+- queued-but-unacked stable range 丢失或重复进入 active tail；
+- effect 没有 token/range/generation；
+- Scene shadow mismatch 被静默吞掉；
+- 测试只能依靠 native scrollback pullback 才通过。
+
+回退以完整阶段/adapter authority 为边界：关闭新 adapter 时必须整条 session 回到旧 renderer，不能保留新 reducer 状态却让旧 presenter继续写同一屏幕。已经 Ack 的 native scrollback effect 不可“撤销”；回退时依赖 semantic source 做 controlled rebuild，而不是逆向滚动终端。

@@ -1,9 +1,11 @@
 # aicli Scene presenter 双跑收敛设计：AICLI_SCENE_PRESENTER → 单一 Scene 渲染
 
-> 上位：`docs/plan/aicli-tui-owned-render-simplification-implementation-guide.md`（本文是其中 C0-C4 收敛阶段的完整定义，被 Phase 2/3/6 引用）
-> 关联：`aicli-tui-unified-render-architecture-refactor-plan.md`（母计划 P3 切换）、`aicli-tui-owned-render-simplification-plan.md`（L2 简化）
-> 状态：**proposed（待评审）**
+> 原上位：`docs/plan/aicli-tui-owned-render-simplification-implementation-guide.md`
+> 关联：`aicli-tui-unified-render-architecture-refactor-plan.md`（母计划 P3 切换）、`aicli-tui-owned-render-simplification-plan.md`（L2 简化）、`aicli-tui-transcript-overlay-renderer-mode-plan.md`（primary/alternate renderer 与 transcript pager 实施）
+> 状态：**superseded（C0-C4 有效目标已合并进 unified plan 与 owned implementation guide Phase 1-6；本文只保留历史设计记录，不得独立执行）**
 > 日期：2026-08-03
+
+> **维护说明**：2026-08-03 评审确认，先完成旧 L2 `committedBoundary/ScrollExistingRows` 再做 Scene C2 会制造第二套中间状态，且“发布周期后再建立单事件流”的顺序错误。新的规范顺序是先建立 UI actor/AppState，再引入 Presenter effect/ack 和 tokenized handoff，随后收敛 streaming，最后删除 flag/旧 renderer。执行以新版 implementation guide 为准。
 
 ---
 

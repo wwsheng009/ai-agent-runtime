@@ -5,7 +5,7 @@
 更新时间: **2026-07-31**
 
 本文对应 [aicli-ui-ux-rendering-codex-reference-plan.md](./aicli-ui-ux-rendering-codex-reference-plan.md) Phase 0。
-实施后的内容渲染缺陷收口见 [aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)；owned viewport 当前实现见 [aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)；全量 raw/direct writer、Scene、single-owner 和 terminal lifecycle 审计见 [aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)。
+实施后的内容渲染缺陷收口见 [aicli-ui-rendering-implementation-review.md](./aicli-ui-rendering-implementation-review.md)；owned viewport 当前实现见 [aicli-tui-p5-owned-viewport-design.md](./aicli-tui-p5-owned-viewport-design.md)；全量 raw/direct writer、Scene、single-owner 和 terminal lifecycle 审计见 [aicli-tui-unified-render-architecture-refactor-plan.md](./aicli-tui-unified-render-architecture-refactor-plan.md)；主界面、scrollback handoff 和 `Ctrl+T` pager 的具体迁移见 [aicli-tui-transcript-overlay-renderer-mode-plan.md](./aicli-tui-transcript-overlay-renderer-mode-plan.md)。
 
 > 本文的 direct `fmt.Print` 列表是 Phase 0 的抽样和内容渲染迁移记录，不是 owned interactive 生命周期的完整 writer allowlist。该范围的可执行 P0 debt inventory / regression fence 位于 `commands/chat_command_result_test.go` 的 `TestChatInteractiveDirectWriterInventory`；详见统一架构计划的“实施状态”和 §14.2。
 
