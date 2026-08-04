@@ -814,8 +814,10 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	}
 
 	var responseBuffer bytes.Buffer
-	streamReader := p.normalizeStreamReader(adapterRequest.Model, io.TeeReader(resp.Body, &responseBuffer))
+	streamReader := p.normalizeStreamReadCloser(adapterRequest.Model, newTeeReadCloser(resp.Body, &responseBuffer))
+	defer streamReader.Close()
 	assistantMsg, err := p.adapter.HandleResponse(true, streamReader, callbacks)
+	_ = streamReader.Close()
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 	if err == nil {
 		assistantMsg = p.normalizeAssistantMessage(adapterRequest.Model, assistantMsg)
@@ -1280,8 +1282,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		}
 
 		var responseBuffer bytes.Buffer
-		streamReader := p.normalizeStreamReader(adapterRequest.Model, io.TeeReader(resp.Body, &responseBuffer))
+		streamReader := p.normalizeStreamReadCloser(adapterRequest.Model, newTeeReadCloser(resp.Body, &responseBuffer))
+		defer streamReader.Close()
 		assistantMsg, handleErr := p.adapter.HandleResponse(true, streamReader, callbacks)
+		_ = streamReader.Close()
 		resp.Body.Close()
 		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 
@@ -1746,7 +1750,11 @@ func (p *ProviderWrapper) HandleResponse(isStream bool, respBody io.Reader, call
 		model = p.config.DefaultModel
 	}
 	if isStream {
-		respBody = p.normalizeStreamReader(model, respBody)
+		streamReader := p.normalizeStreamReadCloser(model, respBody)
+		if streamReader != nil {
+			defer streamReader.Close()
+			respBody = streamReader
+		}
 	}
 	assistantMsg, err := p.adapter.HandleResponse(isStream, respBody, callbacks)
 	if err != nil {

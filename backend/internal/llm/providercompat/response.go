@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -49,15 +50,24 @@ func NormalizeStreamChunk(ctx Context, chunk map[string]interface{}) map[string]
 // NormalizeStreamReader wraps an SSE stream and normalizes each data JSON chunk
 // as it is read. Non-SSE lines and non-JSON data payloads pass through.
 func NormalizeStreamReader(ctx Context, reader io.Reader) io.Reader {
+	return NormalizeStreamReadCloser(ctx, reader)
+}
+
+// NormalizeStreamReadCloser is the lifecycle-aware form of
+// NormalizeStreamReader. Closing the returned reader unblocks a normalizer
+// goroutine that is waiting to write into its pipe and closes the source when
+// the source exposes an io.Closer.
+func NormalizeStreamReadCloser(ctx Context, reader io.Reader) io.ReadCloser {
 	if reader == nil {
 		return nil
 	}
 	chain := NewChain(ctx)
 	if len(chain.adapters) == 0 {
-		return reader
+		return &passthroughReadCloser{Reader: reader, source: closerFor(reader)}
 	}
 
 	pipeReader, pipeWriter := io.Pipe()
+	result := &normalizedStreamReadCloser{PipeReader: pipeReader, source: closerFor(reader)}
 	go func() {
 		scanner := bufio.NewScanner(reader)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 20*1024*1024)
@@ -86,7 +96,54 @@ func NormalizeStreamReader(ctx Context, reader io.Reader) io.Reader {
 		}
 		_ = pipeWriter.Close()
 	}()
-	return pipeReader
+	return result
+}
+
+type passthroughReadCloser struct {
+	io.Reader
+	source io.Closer
+	once   sync.Once
+	err    error
+}
+
+func (r *passthroughReadCloser) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.once.Do(func() {
+		if r.source != nil {
+			r.err = r.source.Close()
+		}
+	})
+	return r.err
+}
+
+type normalizedStreamReadCloser struct {
+	*io.PipeReader
+	source io.Closer
+	once   sync.Once
+	err    error
+}
+
+func (r *normalizedStreamReadCloser) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.once.Do(func() {
+		pipeErr := r.PipeReader.Close()
+		if r.source != nil {
+			r.err = r.source.Close()
+		}
+		if r.err == nil {
+			r.err = pipeErr
+		}
+	})
+	return r.err
+}
+
+func closerFor(reader io.Reader) io.Closer {
+	closer, _ := reader.(io.Closer)
+	return closer
 }
 
 func processResultFromAssistantMessage(message map[string]interface{}) (*llmadapter.ProcessResult, bool) {

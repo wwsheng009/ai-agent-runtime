@@ -5,7 +5,9 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -465,6 +467,36 @@ func TestNormalizeStreamChunk_OpenAIKeepsEmptyToolArgumentDelta(t *testing.T) {
 	if got := fn["arguments"]; got != "" {
 		t.Fatalf("expected empty stream argument delta to stay empty, got %#v", got)
 	}
+}
+
+func TestNormalizeStreamReadCloser_ClosesSourceWhenConsumerStops(t *testing.T) {
+	source := &closeTrackingReader{
+		Reader: strings.NewReader("data: {\"choices\":[{\"delta\":{\"reasoning\":\"think\"}}]}\n\n"),
+		closed: make(chan struct{}),
+	}
+	reader := NormalizeStreamReadCloser(Context{Protocol: "openai"}, source)
+	if reader == nil {
+		t.Fatal("NormalizeStreamReadCloser returned nil")
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-source.closed:
+	case <-time.After(time.Second):
+		t.Fatal("closing normalized reader did not close source")
+	}
+}
+
+type closeTrackingReader struct {
+	io.Reader
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (r *closeTrackingReader) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
 }
 
 func TestReplayableOpenAIReasoningContent(t *testing.T) {

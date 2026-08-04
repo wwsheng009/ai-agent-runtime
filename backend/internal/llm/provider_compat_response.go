@@ -34,6 +34,29 @@ func (p *ProviderWrapper) normalizeStreamReader(model string, reader io.Reader) 
 	return providercompat.NormalizeStreamReader(p.providerCompatContext(model), reader)
 }
 
+func (p *ProviderWrapper) normalizeStreamReadCloser(model string, reader io.Reader) io.ReadCloser {
+	return providercompat.NormalizeStreamReadCloser(p.providerCompatContext(model), reader)
+}
+
+type teeReadCloser struct {
+	io.Reader
+	source io.Closer
+}
+
+func newTeeReadCloser(source io.ReadCloser, dst io.Writer) io.ReadCloser {
+	if source == nil {
+		return nil
+	}
+	return &teeReadCloser{Reader: io.TeeReader(source, dst), source: source}
+}
+
+func (r *teeReadCloser) Close() error {
+	if r == nil || r.source == nil {
+		return nil
+	}
+	return r.source.Close()
+}
+
 func gatewayProviderCompatContext(selected *SelectedResource, protocol, model string) providercompat.Context {
 	var supportsMaxOutputTokens *bool
 	apiPath := ""
@@ -65,4 +88,8 @@ func prepareGatewayRequestBody(selected *SelectedResource, protocol, model strin
 
 func normalizeGatewayStreamReader(selected *SelectedResource, protocol, model string, reader io.Reader) io.Reader {
 	return providercompat.NormalizeStreamReader(gatewayProviderCompatContext(selected, protocol, model), reader)
+}
+
+func normalizeGatewayStreamReadCloser(selected *SelectedResource, protocol, model string, reader io.Reader) io.ReadCloser {
+	return providercompat.NormalizeStreamReadCloser(gatewayProviderCompatContext(selected, protocol, model), reader)
 }

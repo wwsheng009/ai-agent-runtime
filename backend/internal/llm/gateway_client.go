@@ -816,8 +816,10 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		},
 	}
 	var responseBuffer bytes.Buffer
-	streamReader := normalizeGatewayStreamReader(selected, protocol, adapterRequest.Model, io.TeeReader(httpResp.Body, &responseBuffer))
+	streamReader := normalizeGatewayStreamReadCloser(selected, protocol, adapterRequest.Model, newTeeReadCloser(httpResp.Body, &responseBuffer))
+	defer streamReader.Close()
 	assistantMsg, err := adpt.HandleResponse(true, streamReader, callbacks)
+	_ = streamReader.Close()
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 	if err == nil {
 		assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
@@ -1100,8 +1102,10 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		}
 
 		// 使用 adapter 处理流式响应
-		streamReader := normalizeGatewayStreamReader(selected, protocol, adapterRequest.Model, io.TeeReader(httpResp.Body, &responseBuffer))
+		streamReader := normalizeGatewayStreamReadCloser(selected, protocol, adapterRequest.Model, newTeeReadCloser(httpResp.Body, &responseBuffer))
+		defer streamReader.Close()
 		assistantMsg, err := adpt.HandleResponse(true, streamReader, callbacks)
+		_ = streamReader.Close()
 		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 		if err == nil {
 			assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
