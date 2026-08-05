@@ -142,27 +142,27 @@ type ChatSession struct {
 	// PermissionsOverlay is the merged project file + CLI permission product surface.
 	PermissionsOverlay runtimepolicy.PermissionsOverlay
 	// FolderTrust is the workspace trust resolution for project-scope plugins/hooks/MCP (R2).
-	FolderTrust                foldertrust.Resolution
-	ApprovalReuseMode          chatApprovalReuseMode   // local actor/team approval reuse policy
-	ActiveTeam                 *chatTeamBinding        // ambient team binding across turns
-	SelectedAgentTarget        string                  // explicit /agents target used by /agents send/followup
-	RuntimeEventBridge         *chatRuntimeEventBridge // actor runtime event bridge
-	ExecEventBridge            headlessEventBridge     // optional headless exec/ACP event bridge
-	ActorFirstReady            bool                    // actor-first executor established for this session
-	ChatExecutor               aicliChatExecutor       // 当前会话的统一 turn executor
-	LocalRuntimeHost           *localChatRuntimeHost   // actor-first local runtime host
-	actorWarmupMu              sync.Mutex
-	actorWarmup                *chatActorWarmup
-	Interaction                *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
-	Surface                    *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	FolderTrust         foldertrust.Resolution
+	ApprovalReuseMode   chatApprovalReuseMode   // local actor/team approval reuse policy
+	ActiveTeam          *chatTeamBinding        // ambient team binding across turns
+	SelectedAgentTarget string                  // explicit /agents target used by /agents send/followup
+	RuntimeEventBridge  *chatRuntimeEventBridge // actor runtime event bridge
+	ExecEventBridge     headlessEventBridge     // optional headless exec/ACP event bridge
+	ActorFirstReady     bool                    // actor-first executor established for this session
+	ChatExecutor        aicliChatExecutor       // 当前会话的统一 turn executor
+	LocalRuntimeHost    *localChatRuntimeHost   // actor-first local runtime host
+	actorWarmupMu       sync.Mutex
+	actorWarmup         *chatActorWarmup
+	Interaction         *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
+	Surface             *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
 	// TerminalSession is the sole physical writer for the unified interactive
 	// renderer. Surface remains only as a compatibility state facade while the
 	// session is active; it must not emit terminal bytes in that mode.
 	TerminalSession            *ui.TerminalSession
 	TerminalSessionExecutor    *ui.TerminalSessionExecutor
-	TitleNotifier              *chatTitleNotifier          // terminal window/tab title notification sink
-	SoundNotifier              *chatSoundNotifier          // lightweight terminal bell notification sink
-	runtimeHTTPCapture         *chatRuntimeHTTPCapture     // recent runtime HTTP response diagnostics
+	TitleNotifier              *chatTitleNotifier      // terminal window/tab title notification sink
+	SoundNotifier              *chatSoundNotifier      // lightweight terminal bell notification sink
+	runtimeHTTPCapture         *chatRuntimeHTTPCapture // recent runtime HTTP response diagnostics
 	localShellArtifactMu       sync.Mutex
 	localShellArtifactCounter  int
 	lastLocalShellArtifactPath string
@@ -1156,8 +1156,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		var input string
 		var err error
 
-		// 非交互模式下使用初始消息
-		if noInteractive && initialMessage != "" {
+		// CLI 启动消息在 TUI 初始化和历史恢复完成后优先提交一次。
+		// 交互模式提交完成后继续下一轮输入；非交互模式在本轮结束后退出。
+		if initialMessage != "" {
 			input = initialMessage
 			// 使用后清空，避免循环发送
 			initialMessage = ""

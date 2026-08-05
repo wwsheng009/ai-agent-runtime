@@ -197,6 +197,25 @@ func TestScreenModelWriteFailureRequiresRecoveryBeforeDiff(t *testing.T) {
 	}
 }
 
+func TestScreenModelCloneIsIndependentTransactionalCandidate(t *testing.T) {
+	model := NewScreenModel(4, 2)
+	model.StageFrame([][]vt.Cell{{{Text: "a", SGR: []string{"1"}}}, {{Text: "b"}}})
+	_ = model.PrepareFlush()
+	model.ConfirmFlush()
+
+	candidate := model.Clone()
+	candidate.front[0][0].Text = "changed"
+	candidate.front[0][0].SGR[0] = "2"
+	candidate.Resize(6, 3)
+	if width, height := model.Size(); width != 4 || height != 2 {
+		t.Fatalf("candidate resize mutated confirmed model: %dx%d", width, height)
+	}
+	if model.front[0][0].Text != "a" || model.front[0][0].SGR[0] != "1" ||
+		model.ProjectionValidity() != ProjectionKnown {
+		t.Fatalf("candidate mutation escaped clone: %#v", model.front[0][0])
+	}
+}
+
 func assertScreenModelBuffers(t *testing.T, model *ScreenModel, want [][]vt.Cell) {
 	t.Helper()
 	if !reflect.DeepEqual(model.front, want) {

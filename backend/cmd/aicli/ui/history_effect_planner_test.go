@@ -120,4 +120,264 @@ func TestPlanMutableActiveCellHistoryCommits(t *testing.T) {
 			t.Fatalf("first resumed handoff row = %q, want mutable-row-010", commits[0].Lines[0].Spans[0].Text)
 		}
 	})
+
+	t.Run("one long logical line hands off complete wrapped rows", func(t *testing.T) {
+		source := strings.Repeat("x", 80*12)
+		active := newActive(source, 0)
+		commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
+		if len(commits) == 0 {
+			t.Fatal("wrapped single-line overflow created no stable handoff")
+		}
+		if commits[0].SourceRange != (SourceRange{Start: 0, End: 80}) ||
+			len(commits[0].Lines) != 1 || renderLineText(commits[0].Lines[0]) != strings.Repeat("x", 80) {
+			t.Fatalf("first wrapped handoff = %#v", commits[0])
+		}
+		last := commits[len(commits)-1]
+		if last.SourceRange.End >= len(source) || last.SourceRange.End <= last.SourceRange.Start {
+			t.Fatalf("wrapped handoff consumed the live tail or used an empty range: %#v", last)
+		}
+	})
+}
+
+func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
+	lines := make([]string, 18)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("epoch-row-%03d", index)
+	}
+	source := strings.Join(lines, "\n")
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: 80, Height: 12, Generation: 1}, 1)
+	state = reduceUIControllerState(state, SetSemanticActiveCellProjectionAction{Enabled: true}, 2)
+	state = reduceUIControllerState(state, SetActiveCellAction{Active: ActiveCellState{
+		CellID: 91, Revision: 1, Kind: scene.KindAssistant,
+		Phase: ActiveCellMutable, Source: source,
+	}}, 3)
+
+	entries := state.HistoryEffects.Entries()
+	if len(entries) == 0 || state.Active.Enqueued.End == 0 || state.Active.Acked.End != 0 {
+		t.Fatalf("initial active handoff was not queued without ack: active=%+v effects=%+v", state.Active, entries)
+	}
+	if !historyCommitWakeNeeded(SetActiveCellAction{}, state) ||
+		!historyCommitWakeNeeded(UpdateActiveCellAction{}, state) {
+		t.Fatal("active Set/Update did not wake the terminal history consumer")
+	}
+	first := entries[0].Commit
+	if first.Origin != HistoryCommitActive {
+		t.Fatalf("initial effect origin = %v, want active", first.Origin)
+	}
+
+	nextSource := source + "\nepoch-row-018\nepoch-row-019"
+	state = reduceUIControllerState(state, UpdateActiveCellAction{
+		ExpectedCellID: 91, ExpectedRevision: 1,
+		Active: ActiveCellState{
+			CellID: 91, Revision: 2, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: nextSource,
+			Stable: state.Active.Stable, Enqueued: state.Active.Enqueued, Acked: state.Active.Acked,
+		},
+	}, 4)
+	entry := historyCommitEntry(t, state, first.Token)
+	if entry.State != HistoryCommitPending || entry.Commit.Token != first.Token || state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("append-only revision invalidated stable effect identity: entry=%+v state=%+v", entry, state.HistoryEffects)
+	}
+
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: first.Token, LayoutGeneration: state.LayoutGeneration,
+	}, 5)
+	thirdSource := nextSource + "\nepoch-row-020"
+	state = reduceUIControllerState(state, UpdateActiveCellAction{
+		ExpectedCellID: 91, ExpectedRevision: 2,
+		Active: ActiveCellState{
+			CellID: 91, Revision: 3, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: thirdSource,
+			Stable: state.Active.Stable, Enqueued: state.Active.Enqueued, Acked: state.Active.Acked,
+		},
+	}, 6)
+	entry = historyCommitEntry(t, state, first.Token)
+	if entry.State != HistoryCommitInFlight || state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("append-only revision invalidated in-flight stable effect: entry=%+v", entry)
+	}
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
+		Token: first.Token, Frame: 1, LayoutGeneration: state.LayoutGeneration,
+	}, 7)
+	if state.Active.Acked.End != first.SourceRange.End {
+		t.Fatalf("ack frontier=%d, want first stable range end %d", state.Active.Acked.End, first.SourceRange.End)
+	}
+}
+
+func TestFinalizeActiveCellPlansOnlyUnacknowledgedResidentTail(t *testing.T) {
+	const width, height = 100, 24
+	markers := make([]string, 40)
+	for index := range markers {
+		markers[index] = fmt.Sprintf("FINALIZED-SUFFIX-%02d terminal history validation", index+1)
+	}
+	source := "Terminal scrollback keeps completed rows in the host buffer.\n\n" +
+		"FINALIZED-SUFFIX-REASONING\n\n" + strings.Join(markers, "\n")
+
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: width, Height: height, Generation: 1}, 1)
+	state = reduceUIControllerState(state, SetSemanticActiveCellProjectionAction{Enabled: true}, 2)
+	state = reduceUIControllerState(state, SetActiveCellAction{Active: ActiveCellState{
+		CellID: 71, Revision: 40, Kind: scene.KindAssistant,
+		Phase: ActiveCellMutable, Source: source,
+	}}, 3)
+
+	activeEntries := state.HistoryEffects.Entries()
+	wantPrefixRows := 4 + 32
+	if len(activeEntries) != wantPrefixRows {
+		t.Fatalf("active overflow entries = %d, want %d", len(activeEntries), wantPrefixRows)
+	}
+	for index, entry := range activeEntries {
+		state = reduceUIControllerState(state, BeginHistoryCommit{
+			Token: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration,
+		}, uint64(4+index*2))
+		state = reduceUIControllerState(state, HistoryCommitAcknowledged{
+			Token: entry.Commit.Token, Frame: uint64(index + 1), LayoutGeneration: state.LayoutGeneration,
+		}, uint64(5+index*2))
+	}
+	if state.Active.Acked.End == 0 || state.Active.Acked.End >= len(source) {
+		t.Fatalf("active ack frontier = %+v, want delivered prefix and resident suffix", state.Active.Acked)
+	}
+
+	state = reduceUIControllerState(state, FinalizeActiveCellAction{
+		Snapshot: &scene.Snapshot{Revision: 41, Cells: []*scene.TranscriptCell{{
+			ID: 71, Revision: 41, Kind: scene.KindAssistant,
+			Source: source, Phase: scene.CellCommitted,
+		}}},
+		ExpectedActiveCellID: 71, ExpectedActiveRevision: 40,
+		ExpectedSceneRevision: 41,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	}, 100)
+
+	var transcriptRows []string
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.Origin != HistoryCommitTranscript || entry.State != HistoryCommitPending {
+			continue
+		}
+		for _, line := range entry.Commit.Lines {
+			transcriptRows = append(transcriptRows, renderLineText(line))
+		}
+	}
+	wantTail := markers[32:]
+	if got, want := strings.Join(transcriptRows, "\n"), strings.Join(wantTail, "\n"); got != want {
+		t.Fatalf("finalized transcript tail = %q, want %q\neffects=%#v", got, want, state.HistoryEffects.Entries())
+	}
+}
+
+func TestPlanPlainCellHistoryCommitsMapsInternalAndTrailingBlankRows(t *testing.T) {
+	const source = "first\n\nlast\n"
+	state := AppState{
+		Geometry:         GeometryState{Width: 80, Height: 24, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
+			ID: 72, Revision: 1, Kind: scene.KindAssistant,
+			Source: source, Phase: scene.CellCommitted,
+		}}}),
+	}
+
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) != 4 {
+		t.Fatalf("blank-line commits = %d, want 4: %#v", len(commits), commits)
+	}
+	gotRows := make([]string, 0, len(commits))
+	for _, commit := range commits {
+		if !commit.SourceRange.Valid() || commit.SourceRange.End <= commit.SourceRange.Start {
+			t.Fatalf("blank-line commit has empty source identity: %#v", commit)
+		}
+		gotRows = append(gotRows, renderLineText(commit.Lines[0]))
+	}
+	if got, want := strings.Join(gotRows, "|"), "first||last|"; got != want {
+		t.Fatalf("plain blank projection = %q, want %q", got, want)
+	}
+	last := commits[len(commits)-1]
+	if last.SourceRange != (SourceRange{Start: len(source) - 1, End: len(source)}) || last.FragmentID == 0 {
+		t.Fatalf("trailing blank identity = range %+v fragment %d", last.SourceRange, last.FragmentID)
+	}
+}
+
+func TestPlanEligibleHistoryCommitsRespectsCanonicalMutableFrontier(t *testing.T) {
+	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
+	assistantLines := make([]string, 24)
+	for index := range assistantLines {
+		assistantLines[index] = fmt.Sprintf("assistant-after-reasoning-%02d", index+1)
+	}
+	assistantSource := strings.Join(assistantLines, "\n")
+	state := AppState{
+		Geometry:                     geometry,
+		LayoutGeneration:             1,
+		SemanticActiveCellProjection: true,
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Revision: 3, Kind: scene.KindSupplement, Source: "reasoning still mutable", Phase: scene.CellMutable},
+			{ID: 2, Sequence: 2, Revision: 8, Kind: scene.KindAssistant, Source: assistantSource, Phase: scene.CellMutable},
+		}}),
+		Active: ActiveCellState{
+			CellID: 2, Revision: 8, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: assistantSource,
+			Stable: SourceRange{Start: 0, End: len(assistantSource)},
+		},
+	}
+
+	if commits := planEligibleHistoryCommits(state); len(commits) != 0 {
+		t.Fatalf("assistant crossed preceding mutable reasoning: %#v", commits)
+	}
+
+	state.Transcript = NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
+		{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindSupplement, Source: "reasoning still mutable", Phase: scene.CellCommitted},
+		{ID: 2, Sequence: 2, Revision: 8, Kind: scene.KindAssistant, Source: assistantSource, Phase: scene.CellMutable},
+	}})
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) == 0 || commits[0].CellID != 1 {
+		t.Fatalf("canonical frontier did not begin with reasoning: %#v", commits)
+	}
+	seenAssistant := false
+	for _, commit := range commits {
+		if commit.CellID == 2 {
+			seenAssistant = true
+		}
+		if seenAssistant && commit.CellID == 1 {
+			t.Fatalf("reasoning appeared after assistant commit: %#v", commits)
+		}
+	}
+}
+
+func TestPlanEligibleHistoryCommitsStopsAtFirstMutableCell(t *testing.T) {
+	state := AppState{
+		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
+			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindSupplement, Source: "mutable barrier", Phase: scene.CellMutable},
+			{ID: 3, Sequence: 3, Revision: 1, Kind: scene.KindAssistant, Source: "finalized but blocked", Phase: scene.CellCommitted},
+		}}),
+	}
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) == 0 {
+		t.Fatal("committed canonical prefix produced no history commit")
+	}
+	for _, commit := range commits {
+		if commit.CellID != 1 {
+			t.Fatalf("commit crossed mutable barrier: %#v", commits)
+		}
+	}
+}
+
+func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T) {
+	state := AppState{
+		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
+			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindSupplement, Source: "", Phase: scene.CellMutable},
+			{ID: 3, Sequence: 3, Revision: 1, Kind: scene.KindAssistant, Source: "must remain blocked", Phase: scene.CellCommitted},
+		}}),
+	}
+
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) == 0 {
+		t.Fatal("committed prefix produced no history commit")
+	}
+	for _, commit := range commits {
+		if commit.CellID != 1 {
+			t.Fatalf("commit crossed empty mutable barrier: %#v", commits)
+		}
+	}
 }

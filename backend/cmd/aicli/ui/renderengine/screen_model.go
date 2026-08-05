@@ -65,6 +65,19 @@ func (m *ScreenModel) ProjectionValidity() ProjectionValidity {
 	return m.projection
 }
 
+// Clone returns an independent transactional candidate. Terminal presenters
+// can resize, stage, and prepare a flush on the clone without consuming the
+// last confirmed front buffer before the target accepts every byte.
+func (m *ScreenModel) Clone() *ScreenModel {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+	clone.front = cloneCellGrid(m.front)
+	clone.back = cloneCellGrid(m.back)
+	return &clone
+}
+
 // Resize discards both physical buffers and makes the next Flush repaint the
 // complete frame. Source-backed content remains owned by the composer.
 func (m *ScreenModel) Resize(width, height int) {
@@ -562,6 +575,21 @@ func blankGrid(width, height int) [][]vt.Cell {
 		grid[row] = make([]vt.Cell, width)
 	}
 	return grid
+}
+
+func cloneCellGrid(source [][]vt.Cell) [][]vt.Cell {
+	if len(source) == 0 {
+		return nil
+	}
+	clone := make([][]vt.Cell, len(source))
+	for row := range source {
+		clone[row] = make([]vt.Cell, len(source[row]))
+		for column, cell := range source[row] {
+			clone[row][column] = cell
+			clone[row][column].SGR = append([]string(nil), cell.SGR...)
+		}
+	}
+	return clone
 }
 
 func scrollGridRegionUp(grid [][]vt.Cell, width, start, end, count int) {

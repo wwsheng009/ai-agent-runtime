@@ -1,8 +1,8 @@
 # aicli TUI 统一 AppState/Scene、单屏所有者与事务式渲染长期重构设计
 
-状态：**approved target architecture / implementing（唯一规范性终局；interactive chat 的 primary presenter/terminal owner 已完成切换，AppState/Scene、history handoff、producer 覆盖与跨终端验收仍在分阶段收敛）**
+状态：**approved target architecture / core inline rendering implemented（唯一规范性终局；legacy/producer cleanup 继续）**
 
-更新时间：**2026-08-05**
+更新时间：**2026-08-06**
 
 适用范围：`backend/cmd/aicli/commands`、`backend/cmd/aicli/ui` 及所有在 chat interactive 生命周期内产生可见输出的 runtime/tool/diagnostic 组件。
 
@@ -25,11 +25,19 @@
 
 ---
 
-## 实施状态（2026-08-05）
+## 实施状态（2026-08-06）
 
-本文的终局 `AppState -> Layout/Compose -> TuiPresenter` 尚未整体落地；但 interactive chat 已完成 primary physical writer 的所有权切换：`FixedBottomSurface` 的物理写入被单向 fence，`TerminalSessionPresenter` 是唯一 primary writer，`ScreenLease` 的 DEC 1049 transport 也委派给同一 presenter。以下状态仍不能把未完成的 Scene/producer/history 迁移误读为终局已全部完成。
+> **2026-08-06 权威验收结论（覆盖本文所有早期阶段快照）**：核心 inline rendering 目标已经在 production interactive 路径落地并通过真实 provider + Windows Terminal 验收。验收 run 为 `output/aicli-terminal-e2e/opencode-wt-1176ea6f5afc4fa597964cc30b50a984`：40/40 assistant marker 在 UI Automation `DocumentRange` 中各出现一次且严格有序，marker 01 已滚出 visible range 但仍可从 native scrollback 读取，marker 40 可见；reasoning 语义内容正常显示，其独立 sentinel 位于 marker 01 之前且只出现一次；仅 raw `assistant.reasoning`、`llm.request.started`、`llm.request.finished` 协议标签未泄漏；异常非语义空行数为 0；`/exit` 经精确目标 console 输入后 runner exit code 为 0，forced cleanup 为 0。该 run 使用 `--prompt` 自动提交首轮，并验证真实 `opencode.ai/deepseek-v4-flash/max` 路由 artifact。
 
-> **Primary history 不变量（2026-08-05）**：正常 primary frame 必须始终从 `AppState.Transcript` 渲染当前容量内最新的 finalized display-row tail。`ActiveBand` 只能占用独立 bottom-pane 行，不能替代、清空或遮蔽全部 retained transcript viewport。`Ctrl+T`/`/history` 只提供完整 semantic transcript 的 alternate pager，绝不是主界面历史显示的替代路径。首次或不连续的历史导入必须在同一 terminal transaction 中按“eligible history prefix -> retained primary tail”建立 native scrollback；不得把已逐出 primary 的 range 再写到 viewport 底部，否则实际滚出的将是当前 tail 而不是历史内容。
+> 本轮关闭了两个仅靠普通 viewport snapshot 难以发现的真实缺陷。第一，plain source 的内部/尾随空行过去没有非空 source identity，导致 finalized suffix planner 在跳过已 Ack active prefix 后放弃整个剩余提交；现在空行映射到 newline byte range，并用 fragment identity 区分尾随空行。第二，首次产生 native scrollback 后 resident history 仍按 bottom alignment 重排，capacity 增长会在 scrollback 与 resident tail 之间插入物理 headroom；现在 history 在首次真实 overflow 后切为 sticky top alignment，resize shrink/grow 和 alternate round-trip 均保持连续。两者都已有 production-chain、terminal-session 与真实 TTY 回归，不能退化为基于字符串、单屏截图或 whole-screen repaint 的实现。
+
+> **终态事件边界**：成功的 `llm.request.finished` 只代表 transport request 已结束，不得提前关闭 assistant stream。只有 authoritative `assistant_message` 可以提交正常成功响应的最终正文；request 失败、interrupt、session end 或 run-end fallback 才可立即收尾未闭合 stream。该顺序保证 request boundary 后到达的 final 仍能生成 `FinalizeActiveCellAction`，并把最后 coalesced tail exactly-once 交接到 history。
+
+> **最新收口状态（2026-08-05，覆盖本节后续历史快照）**：interactive primary 的核心物理机制已落地为 `AppState/Scene -> Layout/Compose -> TerminalSessionPresenter`，并采用 Codex 同类的 inline 模式：顶部 `1..OutputBottomRow` 是 terminal-owned history region，底部是 application-owned mutable viewport。finalized transcript 全部经 tokenized `HistoryCommit` 插入顶部区域，较早行进入 native scrollback，最新 tail 留在当前主界面；mutable active 的 stable overflow prefix 在 finalize 前即可交接，Ack 后才从 live tail 移除，finalize 不重复。`ScreenModel` 只缓存 bottom inline viewport，不能清除或 diff history region。Markdown history 保留结构化 IR。zero-byte writer failure 可恢复后重试同 token，partial write fail closed。完整 `./cmd/aicli/...`、UI race、vet 和真实宿主 probe 已通过：WezTerm/ConPTY 84/84 history marker 唯一，Windows Terminal synthetic UI Automation 72/72 增量历史唯一；真实 provider Windows Terminal E2E 由 `--prompt` 自动提交首轮，40/40 响应 marker exactly-once，首行进入 scrollback、末行可见，reasoning 正文正常显示且 raw `assistant.reasoning` 标签未泄漏。
+
+> 尚未完成的是 compatibility state/legacy 算法删除、剩余 producer 与同步 interaction effect 化、跨更多终端宿主的验收；这些工作不得改变已经闭合的 single-writer、inline viewport 和 native-history 契约。本节后续将 `TerminalSession` 称为未安装、将 `FixedBottomSurface` 称为 production writer、或要求 whole-screen transcript repaint 的内容均是 pre-cutover 施工记录，不具有当前规范性。
+
+> **Primary history 不变量（2026-08-05）**：正常 primary 必须始终显示当前容量内最新的 finalized display-row tail，并允许较早内容从同一顶部区域进入原生 scrollback。该 tail 由 terminal history insertion 的物理结果保留，不再由 whole-screen `ScreenModel` 重画。`ActiveBand`、prompt、status、popup 只能占用 bottom inline viewport，不能替代、清空或地址化 history region。`Ctrl+T`/`/history` 只提供完整 semantic transcript 的 alternate pager，绝不是主界面历史显示的替代路径。首次或不连续历史导入必须在一次 terminal transaction 中按 viewport boundary transition、ordered history insert、viewport diff、cursor restore 执行。
 
 > **状态口径**：P4–P9 是目标阶段区间，不是一个可整体标记为“已落地”的功能。当前已完成 transcript Scene、ChangeSet 映射、文本投影、shadow/parity 探针、**Phase 1 UI actor/action adapter 的首批接线**，以及 **Phase 2 AppState snapshot 的首批投影**：普通 runtime event、input snapshot、explicit resize、lease barrier、surface facade 和 FramePump 的 `Timer`/`DrawRequested` 意图均经过 `UIController`；普通 runtime event 的 Scene snapshot 及其 mutable semantic cell 可经 causal action 进入 AppState，live user submit、structured command result、local error 也在释放 coordinator mutex 后投递同一完整 snapshot，事件日志 replay 成功重建 Scene 后亦投递一次 snapshot；`LayoutAppState` 已可从该 snapshot 纯派生 transcript boundary rows 和 bottom allocation，不读取 terminal/surface mutex 或推进 effect。popup owner/priority、suspended `PopupStack` 和 tokenized `PopupHandle` 的 begin/update/clear 已走 durable facade action，并在 `BottomPaneState` 以相同纯 transition 保留恢复语义，handle 在 begin action 入队前分配，后续同 token 操作保持 FIFO。本轮进一步将 prompt reset/rows/notice/editor、incremental input tracking、单独 persistent/dynamic status 与 composer preview 纳入同一 action/reducer state，并由 Apply/sync parity 与 snapshot isolation 回归约束；`UpdatePopupAction` 也已进入 coordinator adapter。reducer 触发 facade 时使用 causal follow-up queue，不因 bounded external mailbox 满而 self-wait；新代码通过短生命周期 `ReducerContext` capability 投递，过渡 facade 则校验实际 reducer goroutine，外部 producer 不会因全局 `inFlight` 而插队；reducer panic 会丢弃本 action 新增的 causal child，避免半 action 提交。生产可见状态仍由 coordinator、`FixedBottomSurface`、ActiveStream 与 Scene 多处维护；审批/问答仍为同步 legacy interaction exception，`EffectResult` 尚无 TerminalSession/effect queue source。ActiveBand 仍是 legacy projection input，同步 cursor-move helper、完整 focus policy 和全部 producer 尚未收敛到 AppState；physical Compose、Presenter、history Ack 也尚未完成。因而当前总体状态仍是 **partial data-plane implementation**。
 

@@ -746,12 +746,22 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 		b.logLateRuntimeEvent(queued.event, "stale local run epoch")
 		return
 	}
-	// Phase 1: keep the bridge queue as the bounded runtime ingress, but let
-	// the UI actor serialize ordinary runtime-driven UI mutations with timer and
-	// surface actions. Approval/question events remain on this worker for now:
-	// their legacy prompt adapters synchronously own stdin and must first be
-	// split into explicit effects before they can safely enter the reducer.
-	if !runtimeEventRequiresLegacyInteraction(queued.event) && b.postRuntimeEventToUIActor(queued.event) {
+	// Keep the bridge queue as the bounded runtime ingress, but let the UI actor
+	// serialize ordinary runtime-driven UI mutations with timer and surface
+	// actions. Approval/question events still have to execute on this worker
+	// because their legacy prompt adapters synchronously own stdin. Before that
+	// exception runs, drain every earlier actor action posted by this queue. A
+	// mutex alone does not preserve mailbox order: without this barrier a later
+	// approval can enter the encoder/Scene while an earlier assistant/tool event
+	// is still waiting in the actor mailbox.
+	if runtimeEventRequiresLegacyInteraction(queued.event) {
+		if coordinator := b.sessionInteraction(); coordinator != nil {
+			coordinator.waitUIActorIdle()
+		}
+		b.handleEvent(queued.event)
+		return
+	}
+	if b.postRuntimeEventToUIActor(queued.event) {
 		return
 	}
 	b.handleEvent(queued.event)
@@ -3081,16 +3091,26 @@ func (b *chatRuntimeEventBridge) shouldFlushReasoningOnSessionEnd(event runtimee
 }
 
 // shouldFinalizeAssistantDeltaOnTerminalEvent closes coordinator-local stream
-// bookkeeping after the encoder has committed the same Scene cell. Both
-// llm.request.finished and session end are valid terminal boundaries when an
-// assistant.message is absent; neither may leave a stale Active cell or fall
-// back to legacy output.
+// bookkeeping only after the encoder has committed the same Scene cell.
+// A successful llm.request.finished is merely a transport boundary: production
+// publishes the authoritative assistant.message afterward. Resetting the
+// coordinator there makes that final unable to emit its fenced
+// FinalizeActiveCellAction, leaving the last coalesced delta tail outside native
+// history. Failed requests and session termination do close the Scene cell and
+// may therefore finalize the coordinator immediately.
 func (b *chatRuntimeEventBridge) shouldFinalizeAssistantDeltaOnTerminalEvent(event runtimeevents.Event) bool {
 	if b == nil || b.session == nil {
 		return false
 	}
 	switch event.Type {
-	case runtimechat.EventLLMRequestFinished, "llm.request.finished", runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
+		if _, reported := event.Payload["success"]; reported && !payloadBoolValue(event.Payload, "success") {
+			break
+		}
+		if strings.TrimSpace(payloadStringValue(event.Payload["error"])) == "" {
+			return false
+		}
+	case runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
 	default:
 		return false
 	}

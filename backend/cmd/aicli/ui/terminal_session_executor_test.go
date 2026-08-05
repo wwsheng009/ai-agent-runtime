@@ -166,8 +166,8 @@ func TestTerminalSessionExecutorFrameFailureInvalidatesThenRecoversWithoutBlindH
 	executor.Request()
 	executor.WaitIdle()
 	state = controller.State()
-	if state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("successful source-backed recovery did not restore known projection")
+	if !state.HistoryEffects.ProjectionUnknown {
+		t.Fatal("bottom viewport repaint incorrectly recovered partial native history")
 	}
 	entry = historyCommitEntry(t, state, firstToken)
 	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten {
@@ -177,8 +177,47 @@ func TestTerminalSessionExecutorFrameFailureInvalidatesThenRecoversWithoutBlindH
 	executor.Request()
 	executor.WaitIdle()
 	entry = historyCommitEntry(t, controller.State(), firstToken)
-	if entry.State != HistoryCommitStateFailed {
-		t.Fatalf("unreconciled partial bootstrap was retried: %#v", entry)
+	if entry.State != HistoryCommitStateFailed || !controller.State().HistoryEffects.ProjectionUnknown {
+		t.Fatalf("unreconciled partial bootstrap changed state: entry=%#v writes=%d", entry, writer.writes)
+	}
+}
+
+func TestTerminalSessionExecutorZeroByteWriterErrorRecoversAndRetriesSameToken(t *testing.T) {
+	controller := newHistoryExecutorController(t, nil)
+	postHistoryEffectFixture(t, controller, 20)
+	controller.WaitIdle()
+	firstToken := controller.State().HistoryEffects.Entries()[0].Commit.Token
+
+	writeErr := errors.New("terminal unavailable")
+	writer := &terminalSessionShortWriter{zeroError: writeErr, failZero: 1}
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	executor.Request()
+	executor.WaitIdle()
+	state := controller.State()
+	entry := historyCommitEntry(t, state, firstToken)
+	if entry.State != HistoryCommitPending || entry.Commit.Token != firstToken ||
+		entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
+		t.Fatalf("zero-byte failure was not retained as retryable: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
+	}
+
+	// Recovery is viewport-only: it must establish a known cache before the
+	// irreversible history token can be claimed again.
+	executor.Request()
+	executor.WaitIdle()
+	state = controller.State()
+	entry = historyCommitEntry(t, state, firstToken)
+	if entry.State != HistoryCommitPending || state.HistoryEffects.ProjectionUnknown || writer.writes != 2 {
+		t.Fatalf("viewport recovery changed or failed to unblock token: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
+	}
+
+	executor.Request()
+	executor.WaitIdle()
+	state = controller.State()
+	entry = historyCommitEntry(t, state, firstToken)
+	if entry.State != HistoryCommitAcked || entry.Commit.Token != firstToken || entry.AckFrame == 0 || writer.writes != 3 {
+		t.Fatalf("same token was not acknowledged after retry: entry=%#v writes=%d", entry, writer.writes)
 	}
 }
 

@@ -180,8 +180,7 @@ func (s TranscriptOverlayState) Clone() TranscriptOverlayState {
 // will introduce the single streaming-range owner rather than guessing effect
 // progress from display text.
 func ActiveCellFromTranscript(transcript TranscriptState) (ActiveCellState, bool) {
-	for index := len(transcript.Cells) - 1; index >= 0; index-- {
-		cell := transcript.Cells[index]
+	for _, cell := range transcript.Cells {
 		if cell.Phase != scene.CellMutable {
 			continue
 		}

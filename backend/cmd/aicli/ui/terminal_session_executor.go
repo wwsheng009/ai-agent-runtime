@@ -118,16 +118,24 @@ func (e *TerminalSessionExecutor) run() {
 	}
 }
 
-// runOne returns true only when one history token was acknowledged. That lets
-// the next oldest token run after actor publication while a frame-only repaint,
-// Deferred handoff, or any error waits for a later explicit wake instead of
-// spinning on the terminal.
+// runOne returns true when reducer publication exposes immediate ordered work:
+// either one history token was acknowledged or a successful scrollback reset
+// replanned the canonical transcript under a fresh terminal epoch. Frame-only
+// repaint, Deferred handoff, and errors otherwise wait for an explicit wake.
 func (e *TerminalSessionExecutor) runOne() bool {
 	if e == nil || e.controller == nil || e.session == nil {
 		return false
 	}
 	e.controller.WaitIdle()
 	state := e.controller.State()
+	if state.HistoryEffects.ProjectionUnknown {
+		// Projection recovery is viewport-only. Do it before claiming another
+		// irreversible history range; HistoryProjectionRecovered will publish a
+		// fresh wake when ordered Pending work may proceed.
+		plan := ComposeTerminalTransactionPlan(state.AppState, nil)
+		result := e.session.FlushTransaction(plan)
+		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+	}
 	var claimed *HistoryCommit
 	if pending := state.HistoryEffects.Pending(); len(pending) > 0 {
 		candidate := pending[0]
@@ -162,10 +170,9 @@ func terminalSessionClaimedCommit(state UIControllerState, token uint64) (Histor
 }
 
 // terminalSessionBootstrapCommits returns the current oldest contiguous
-// pending suffix together with the claimed first token. TerminalSession uses
-// it only when its physical viewport cannot prove that the claimed range is
-// already the outgoing top row (initial load, resume, or a discontinuous
-// history import). The reducer still owns acknowledgement of every token.
+// pending suffix together with the claimed first token. TerminalSession can
+// insert this ordered batch directly above the inline viewport in one write;
+// the reducer still validates and acknowledges every token atomically.
 func terminalSessionBootstrapCommits(state UIControllerState, claimed *HistoryCommit) []HistoryCommit {
 	if claimed == nil {
 		return nil
@@ -202,6 +209,12 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 		switch {
 		case history.Deferred && history.Err == nil && !history.MayHavePartiallyWritten:
 			_ = e.controller.Post(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
+		case history.Err != nil && result.Frame.Err != nil && !history.MayHavePartiallyWritten:
+			// The terminal transaction was attempted, but the writer proved that
+			// zero bytes reached the host. Keep the same token retryable. The frame
+			// error below invalidates the viewport cache; after a source-backed
+			// recovery, HistoryProjectionRecovered wakes this Pending handoff.
+			_ = e.controller.Post(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
 		case history.MayHavePartiallyWritten && history.Err == nil:
 			_ = e.controller.Post(HistoryCommitFailed{
 				Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration,
@@ -234,10 +247,23 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 		e.controller.WaitIdle()
 		return false
 	}
-	if result.Frame.FullRepaint {
+	// A bottom-viewport repaint is not proof that the independently owned top
+	// history projection recovered. Publish the reducer barrier only when the
+	// terminal owner confirms both facts; partial history writes remain
+	// fail-closed until an explicit scrollback reconciliation.
+	if result.Frame.FullRepaint && e.session.ProjectionState().HistoryKnown {
 		_ = e.controller.Post(HistoryProjectionRecovered{LayoutGeneration: generation})
 	}
+	if result.ScrollbackReset && result.TerminalEpoch != 0 {
+		_ = e.controller.Post(HistoryScrollbackReconciled{
+			LayoutGeneration: generation,
+			TerminalEpoch:    result.TerminalEpoch,
+		})
+	}
 	e.controller.WaitIdle()
+	if result.ScrollbackReset {
+		return e.controller.State().HistoryEffects.HasPending()
+	}
 	if !historyAcknowledged || claimed == nil {
 		return false
 	}

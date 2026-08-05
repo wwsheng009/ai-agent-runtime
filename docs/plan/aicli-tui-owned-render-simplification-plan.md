@@ -1,14 +1,24 @@
 # aicli TUI owned 渲染简化方案：统一状态、单事件循环与确认式 Presenter
 
-状态：**approved migration sub-plan（受 unified architecture 约束；尚未实施完成）**
+状态：**core render cutover implemented / real TTY verified（compatibility cleanup 继续）**
 
-日期：2026-08-04
+日期：2026-08-06
 
 上位规范：`docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`
 
 关联实施子计划：`docs/plan/aicli-tui-transcript-overlay-renderer-mode-plan.md`（明确 primary/alternate renderer ownership、`Ctrl+T` pager 与 history handoff 的边界；不替代本文的 state/effect 收敛）。
 
 > **实施状态更新（2026-08-05）**：本方案中的 direct cutover 已对 interactive TTY 生效。生产 terminal bytes 只经 `TerminalSessionPresenter/TerminalSession`，legacy `FixedBottomSurface` 已不可逆 fence；旧 `AICLI_TUI=legacy/plain/off/0` interactive escape hatch 已删除。`Scene -> AppState` 已承担 assistant active/final、direct local output、MCP/tool final 与 persisted history reconcile，避免旧 history/ActiveBand 的重复生产渲染。本文保留的旧链路图与“当前基线”仅用于解释故障根因，不表示它们仍是 interactive production path；删除 compatibility state、审批/问答 effect 化、异常 finalization 和真实终端验收仍未完成。
+
+> **inline viewport 终局更正（2026-08-05）**：primary 不再采用 whole-screen `ScreenModel` 重画 transcript tail。所有 finalized display rows，以及 mutable active 中已经稳定且超出 band 的前缀，均由 reducer-owned tokenized `HistoryCommit` 插入物理顶部区域 `1..OutputBottomRow`；该区域顶部锚定，溢出直接进入终端原生 scrollback，最新历史自然保留在当前主界面的顶部区域。`ScreenModel` 只缓存并 diff `OutputBottomRow+1..terminalHeight` 的 bottom inline viewport，其中包含 active tail、prompt、status 和 popup。viewport diff 不能寻址或清除 history region。active Ack 后才从 live projection 扣除前缀，finalize 通过结构化 payload 证明并跳过已交接范围，因此不重复、不裁切；Markdown handoff 保留 rich `render.Line`，不回退 raw Markdown。零字节 writer error 保留同一 token 等待 recovery 后重试；可能部分写入则 fail closed，禁止盲重放。
+
+> **验收证据（2026-08-06）**：`go test ./cmd/aicli/... -count=1`、`go test -race ./cmd/aicli/ui ./cmd/aicli/commands -count=1`、`go vet ./cmd/aicli/ui ./cmd/aicli/commands` 均通过。真实 WezTerm/ConPTY pane 中直接运行 TTY probe，并由宿主 `wezterm cli get-text` 独立读取 scrollback：84 条历史 marker 全部存在且各一次，最早行可从负行 scrollback 读取，prompt/status 未进入 scrollback。`scripts/test-aicli-windows-terminal-e2e.ps1` 通过 UI Automation TextPattern 独立验证 72 条 synthetic 增量历史全部唯一。`scripts/test-aicli-opencode-windows-terminal-e2e.ps1` 使用真实 opencode.ai provider，并由 CLI `--prompt` 自动提交首轮而非键盘注入；40/40 响应 marker 在宿主 `DocumentRange` 中各一次，首行已滚出可见区但仍在 scrollback，末行可见。reasoning 语义内容在 final answer 前正常显示；未出现的只是 raw `assistant.reasoning` 事件标签。`/exit` 与 runner exit code 0 均获确认。本文后续任何“whole-screen renderer”“retained transcript tail 由 ScreenModel 重画”或“TerminalSession 未安装”的段落均只属于历史施工记录，不再是实施依据。
+
+> **最终实机证据（2026-08-06）**：上述真实 provider 结论由 run `output/aicli-terminal-e2e/opencode-wt-1176ea6f5afc4fa597964cc30b50a984` 固化。除 40/40 marker exactly-once 外，该 manifest 还要求严格递增、marker 01 `full=true/visible=false`、marker 40 visible、reasoning sentinel 在 marker 01 前且单例、三个 raw runtime event label 均不存在、异常空行数 0、路由 artifact 完整、三次 UIA snapshot 稳定、runner exit code 0、forced cleanup 0。测试 harness 使用 executable path + run ID 精确定位 aicli 子进程，并通过独立 console helper 写 `/exit`，失败时不放宽退出门禁。
+
+> **补充根因与永久约束（2026-08-06）**：D1-D9/N1-N6 的设计还需要两个实现级不变量才能真正闭合。其一，每个需要交接的 display row（包括内部空行和尾随空行）必须具有非空、可比较的 source/fragment identity，否则 `Acked` prefix 后的 finalized suffix 可能被整体漏交；plain source 现以 newline byte range 和 fragment ID 表达这些空行。其二，一旦已有语义 history 进入 native scrollback，resident tail 必须 sticky top-aligned；capacity 变化不能重新 bottom-align，否则会在 scrollback 与主屏 tail 之间制造非语义空白。resize rebuild、partial/zero write 和 alternate-screen 往返分别有明确的 alignment/projection 状态转换与测试。
+
+> **成功终态的事件顺序（2026-08-06）**：`llm.request.finished` 是 transport boundary，不是 assistant semantic final。成功请求必须保持 active stream，直到 authoritative `assistant_message` 完成 Scene finalization 和未 Ack tail 的 history handoff；失败 request、interrupt、session end 与 run-end fallback 才可提前关闭。禁止再以 request-finished 替代最终消息，否则最后一段 coalesced assistant 内容可能留在 active viewport 而没有进入 native history。
 
 ## 0. 文档定位与结论
 
@@ -23,7 +33,7 @@
 5. 一个 transactional Presenter 独占终端，并以 Ack/Fail action 回报结果；
 6. `TerminalProjectionState` 显式区分 `Known/Unknown`，失败后从 AppState 恢复。
 
-**主界面历史契约**：normal primary frame 必须展示 `TranscriptState` 中可容纳的最新 finalized display-row tail；它不是只展示当前 assistant/reasoning 的页面。`ActiveBand` 只能使用 bottom-pane 的独立行，不能覆盖或替换 retained transcript viewport。`Ctrl+T`/`/history` 是完整 transcript 的补充 pager，不得作为主屏历史缺失的替代方案。首次/不连续 history reconcile 必须以 `eligible prefix -> retained tail` 的同一 terminal transaction 建立 scrollback；把 prefix 再写进 viewport 底部会滚出错误的当前 tail，属于禁止的 handoff 协议。
+**主界面历史契约**：normal primary 必须形成一条连续物理信息流。最新 finalized rows 保留在顶部 history region，较早 rows 由同一区域滚入 native scrollback；主界面不是只显示当前 assistant/reasoning 的单屏画布。`ActiveBand` 只能使用 bottom inline viewport，不能覆盖、清除或替换 history region。`Ctrl+T`/`/history` 是完整 transcript 的补充 pager，不得作为主屏历史缺失的替代方案。首次/不连续 history reconcile 必须先在内存中准备有序 commit batch，再在同一 terminal transaction 中执行 viewport boundary transition、顶部 history insert、bottom viewport diff 和 cursor restore；禁止重新用 whole-screen frame 绘制 finalized transcript。
 
 本方案明确否决以下旧候选：
 
@@ -239,6 +249,18 @@ ActiveBand/prompt/popup/status 的行数变化只产生 `GeometryChanged`/state 
 ## 6. 迁移阶段
 
 每阶段允许拆成多个小提交；阶段出口必须保持 production 只有一个 terminal writer。shadow compare 只比较内存 snapshot/frame，禁止双写终端。
+
+以下状态表是 2026-08-06 的权威 phase disposition；各 Phase 下保留的 `partial`、`未安装`、`legacy writer` 描述是当时施工快照，不能覆盖本表。
+
+| Phase | 当前状态 | 判定 |
+| --- | --- | --- |
+| 0 语义基线与故障注入 | **核心完成，门禁持续扩展** | 重复、空行、final tail、scrollback continuity、writer failure 和生产链路测试已覆盖；长会话/更多宿主矩阵继续补充 |
+| 1 UI actor 单一入口 | **核心完成，interaction cleanup 继续** | primary render/effect 已串行化；approval/question 等同步 legacy interaction 仍待 typed effect 化 |
+| 2 AppState/Scene | **primary 核心完成，producer cleanup 继续** | assistant/reasoning/tool/history 与 bottom state 已进入统一 snapshot；剩余 raw producer 和 compatibility mirror 待删除 |
+| 3 TerminalSession | **核心完成** | production primary 已切换到唯一 Presenter/TerminalSession writer，Known/Unknown 与 transaction recovery 已落地 |
+| 4 tokenized history handoff | **核心完成** | active/final history 以 typed token/range Ack，内部空行和 top-aligned resident tail 已闭合 |
+| 5 streaming 单源化 | **核心路径完成，旧状态删除继续** | authoritative final、未 Ack tail、Markdown IR 和 exactly-once 已验证；平行 compatibility cursor/state 仍须收敛 |
+| 6 删除与验收 | **进行中** | 完整 Go/race/vet 与真实 Windows Terminal/provider 已通过；legacy 算法删除、更多终端宿主及长会话组合矩阵未完成 |
 
 ### Phase 0：语义基线与故障注入
 

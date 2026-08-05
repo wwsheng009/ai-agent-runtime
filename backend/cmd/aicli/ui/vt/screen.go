@@ -414,10 +414,14 @@ func (s *Screen) csi(params string, final rune) {
 			for row := 1; row < s.row; row++ {
 				s.rows[row-1] = blankRow(s.width)
 			}
-		case 2, 3:
+		case 2:
 			for row := range s.rows {
 				s.rows[row] = blankRow(s.width)
 			}
+		case 3:
+			// XTerm ED3 purges saved lines without erasing the visible page.
+			// Callers that need both effects emit ED2 followed by ED3.
+			s.scrollback = nil
 		default:
 			s.clearCells(s.row, s.col, s.width)
 			for row := s.row + 1; row <= s.height; row++ {

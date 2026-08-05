@@ -25,18 +25,22 @@ const (
 // 并发：非线程安全。由事件消费侧（chatRuntimeEventBridge 的单 goroutine
 // 事件循环）独占调用。
 type EventEncoder struct {
-	model        *RenderModel
-	nextItemID   uint64 // item-{n} 单调分配
-	nextSeq      uint64 // 提交序号单调分配
-	clock        uint64 // 编码器时钟（每事件 +1）
-	revisions    map[string]uint64
-	assistantBy  map[string]*Item                 // streamKey(turnID/streamID) -> 当前 assistant item
-	reasoningBy  map[string]*Item                 // streamKey -> 当前 reasoning item（独立于 assistant）
-	toolByID     map[string]*Item                 // payload tool_call_id -> tool_call item
-	toolOutputBy map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
-	priorityBy   map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
-	streamOrder  map[string]*assistantStreamOrder // streamKey -> delta 有序提交状态
-	stats        Stats
+	model                *RenderModel
+	nextItemID           uint64 // item-{n} 单调分配
+	nextSeq              uint64 // 提交序号单调分配
+	clock                uint64 // 编码器时钟（每事件 +1）
+	revisions            map[string]uint64
+	assistantBy          map[string]*Item                 // canonical request key -> 当前 assistant item
+	reasoningBy          map[string]*Item                 // canonical request key -> 当前 reasoning item
+	requestAliases       map[string]string                // transport/logical alias -> canonical request key
+	latestRequestByScope map[string]string                // turn/logical-turn/trace scope -> 最新 request key
+	requestFinished      map[string]bool                  // request key -> 已收到 request finished
+	requestFailureBy     map[string]*Item                 // request key -> 已提交的可见 failure cell
+	toolByID             map[string]*Item                 // payload tool_call_id -> tool_call item
+	toolOutputBy         map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
+	priorityBy           map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
+	streamOrder          map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
+	stats                Stats
 }
 
 // assistantStreamOrder 维护单条 assistant 流的 delta 有序提交状态
@@ -62,14 +66,18 @@ type priorityPromptState struct {
 // NewEventEncoder 创建空编码器。
 func NewEventEncoder() *EventEncoder {
 	return &EventEncoder{
-		model:        &RenderModel{},
-		revisions:    make(map[string]uint64),
-		assistantBy:  make(map[string]*Item),
-		reasoningBy:  make(map[string]*Item),
-		toolByID:     make(map[string]*Item),
-		toolOutputBy: make(map[string]map[string]struct{}),
-		priorityBy:   make(map[string]*priorityPromptState),
-		streamOrder:  make(map[string]*assistantStreamOrder),
+		model:                &RenderModel{},
+		revisions:            make(map[string]uint64),
+		assistantBy:          make(map[string]*Item),
+		reasoningBy:          make(map[string]*Item),
+		requestAliases:       make(map[string]string),
+		latestRequestByScope: make(map[string]string),
+		requestFinished:      make(map[string]bool),
+		requestFailureBy:     make(map[string]*Item),
+		toolByID:             make(map[string]*Item),
+		toolOutputBy:         make(map[string]map[string]struct{}),
+		priorityBy:           make(map[string]*priorityPromptState),
+		streamOrder:          make(map[string]*assistantStreamOrder),
 	}
 }
 
@@ -444,6 +452,10 @@ func (e *EventEncoder) Reset() {
 	e.revisions = make(map[string]uint64)
 	e.assistantBy = make(map[string]*Item)
 	e.reasoningBy = make(map[string]*Item)
+	e.requestAliases = make(map[string]string)
+	e.latestRequestByScope = make(map[string]string)
+	e.requestFinished = make(map[string]bool)
+	e.requestFailureBy = make(map[string]*Item)
 	e.toolByID = make(map[string]*Item)
 	e.toolOutputBy = make(map[string]map[string]struct{})
 	e.priorityBy = make(map[string]*priorityPromptState)
@@ -490,10 +502,10 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 	case runtimechat.EventAssistantMessage:
 		return opAssistantFinal
 
-	case runtimechat.EventLLMRequestStarted:
+	case runtimechat.EventLLMRequestStarted, "llm.request.started":
 		return opLLMStarted
 
-	case runtimechat.EventLLMRequestFinished:
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		return opLLMFinished
 
 	case runtimechat.EventToolStarted,
@@ -578,8 +590,9 @@ func isKnownLegacyEventType(eventType string) bool {
 // 变更（EncodeCount 仍计入：事件被消费；UnknownCount 不计：属已知类型），
 // 与旧路径可见行为严格一致（checkTextParity 亦依赖该对齐）。
 //
-// 注意：llm.retry / llm.request.finished / response.* 等在旧路径有（或
-// 部分有）可见 timeline 输出，不在此列；其 Scene 内容对齐属 P3 映射项。
+// 注意：llm.retry / response.* 等在旧路径有（或部分有）可见 timeline
+// 输出，不在此列；typed/dotted request lifecycle is classified above and
+// mutates stream state without creating a system cell.
 func isSilentSystemEventType(eventType string) bool {
 	switch eventType {
 	case runtimechat.EventSessionStart,
@@ -587,7 +600,6 @@ func isSilentSystemEventType(eventType string) bool {
 		runtimechat.EventSessionInterrupted,
 		runtimechat.EventSessionCompactSkipped,
 		runtimechat.EventContextReconciled,
-		"llm.request.started",
 		"planning.started",
 		"subagent.batch.started",
 		"subagent.started",
@@ -610,8 +622,8 @@ const (
 	opReasoning                   // reasoning：append/upsert 当前 assistant 下
 	opAssistantDelta              // assistant delta：upsert 当前流
 	opAssistantFinal              // assistant 完成：upsert 终态
-	opLLMStarted                  // LLM 请求开始：append assistant pending
-	opLLMFinished                 // LLM 请求结束：upsert 终态
+	opLLMStarted                  // LLM 请求开始：登记流身份，不创建可见占位
+	opLLMFinished                 // LLM 请求结束：成功等待 final，失败终结并呈现错误
 	opSessionEnd                  // 会话终止：收尾所有未完成的流式项（不产生 system 行）
 	opToolStarted                 // 工具调用发起：append tool_call（分配 CauseID）
 	opToolProgress                // 工具运行进度：upsert 同一 mutable tool_call
@@ -886,7 +898,7 @@ func (e *EventEncoder) applyPriorityResolved(ev runtimeevents.Event, _ *ChangeSe
 
 func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	text, streamDelta := reasoningText(ev)
-	key := reasoningKey(ev)
+	key := e.resolveAssistantRequestKey(ev)
 	// reasoning 拥有独立索引：绝不允许覆盖 assistant Item 的内容或状态
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
@@ -944,33 +956,30 @@ func appendReasoningDelta(existing, incoming string) string {
 	return existing + incoming
 }
 
-func (e *EventEncoder) applyLLMStarted(ev runtimeevents.Event, cs *ChangeSet) {
-	key := streamKey(ev)
-	// delta 先于 llm_started 到达时已创建块：复用而非再 append，
-	// 保证"同一流 = 一个 assistant Item"的模型不变量。
-	if it := e.assistantBy[key]; it != nil {
-		if !it.Status.Terminal() {
-			e.stats.DuplicateCount++
-			return
-		}
-		// 终态后同流重新启动（重试/新请求）：允许新建块。
-	}
-	it := e.appendItem(KindAssistant, "", "")
-	e.assistantBy[key] = it
-	e.change(cs, OpAppend, it)
+func (e *EventEncoder) applyLLMStarted(ev runtimeevents.Event, _ *ChangeSet) {
+	// Request-start is lifecycle metadata, not transcript content. In
+	// particular it must not reserve an empty assistant position before the
+	// first reasoning delta. The first non-empty assistant delta/final creates
+	// the visible item at its true canonical position.
+	e.beginAssistantRequest(ev)
 }
 
 func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet) {
-	key := streamKey(ev)
+	key := e.resolveAssistantRequestKey(ev)
 	delta := payloadString(ev.Payload["delta"], "")
 	if delta == "" {
 		delta = payloadString(ev.Payload["content"], "")
 	}
+	if delta == "" {
+		return
+	}
+	e.finalizeReasoningBeforeAssistant(key, cs)
 	seq, hasSeq := assistantSequence(ev.Payload)
 	it := e.assistantBy[key]
 	if it == nil {
-		// 缺失起点（delta 先于 llm_started）：创建空 assistant 块，
-		// 后续 llm_started 复用；继续走重排逻辑，本段 delta 同样入序。
+		// The first visible delta creates the assistant after any completed
+		// reasoning item. Continue through the reorder path so sequenced chunks
+		// retain their existing semantics.
 		it = e.appendItem(KindAssistant, "", "")
 		e.assistantBy[key] = it
 		e.change(cs, OpAppend, it)
@@ -982,9 +991,6 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 	}
 	// legacy 路径：无 sequence 身份时按到达顺序直接拼接（兼容旧 provider）。
 	if !hasSeq || seq == 0 {
-		if delta == "" {
-			return
-		}
 		u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
 			if t.Head == "" {
 				t.Head = delta
@@ -1060,8 +1066,9 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 }
 
 func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet) {
-	key := streamKey(ev)
+	key := e.resolveAssistantRequestKey(ev)
 	text := payloadString(ev.Payload["content"], payloadString(ev.Payload["message"], ""))
+	e.finalizeReasoningBeforeAssistant(key, cs)
 	it := e.assistantBy[key]
 	if it == nil {
 		it = e.appendItem(KindAssistant, "", text)
@@ -1090,34 +1097,125 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 }
 
 func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
-	key := streamKey(ev)
-	it := e.assistantBy[key]
-	if it != nil {
-		// 流结束：补拼乱序缓冲中尚未提交的 delta（幂等：空则无操作）。
+	key := e.resolveAssistantRequestKey(ev)
+	if key != "" {
+		e.requestFinished[key] = true
+	}
+
+	if llmRequestFailed(ev) {
+		// A failed request has no authoritative assistant.message to wait for.
+		// Preserve any partial body, close it as failed, then append one readable
+		// semantic error. The raw lifecycle event name is never transcript data.
+		e.finalizeRequestStream(key, StatusFailed, cs)
+		e.appendLLMRequestFailure(key, ev, cs)
+		return
+	}
+
+	// Success is only a transport boundary. Production emits the authoritative
+	// assistant.message after llm.request.finished, and that final snapshot may
+	// omit step while retaining stream_id. Flush buffered deltas and close the
+	// reasoning predecessor, but keep assistant mutable until assistant.message
+	// (or the session/EndRun fallback) commits it.
+	e.finalizeReasoning(key, StatusCompleted, cs)
+	if it := e.assistantBy[key]; it != nil && !it.Status.Terminal() {
 		e.flushAssistantStream(key, it, cs)
-		u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
-			if t.Status.Terminal() {
-				return false
-			}
-			t.Status = StatusCompleted
-			return true
-		})
-		if changed {
-			e.change(cs, OpUpsert, u)
+	}
+}
+
+func (e *EventEncoder) finalizeReasoningBeforeAssistant(key string, cs *ChangeSet) {
+	e.finalizeReasoning(key, StatusCompleted, cs)
+}
+
+func (e *EventEncoder) finalizeReasoning(key string, status ItemStatus, cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	if !status.Terminal() {
+		status = StatusCompleted
+	}
+	r := e.reasoningBy[key]
+	if r == nil || r.Status.Terminal() {
+		return
+	}
+	if u, changed := e.upsertItem(r.ID, KindReasoning, func(t *Item) bool {
+		t.Status = status
+		return true
+	}); changed {
+		e.change(cs, OpUpsert, u)
+	}
+}
+
+func (e *EventEncoder) finalizeRequestStream(key string, status ItemStatus, cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	if !status.Terminal() {
+		status = StatusCompleted
+	}
+	// Keep transcript order deterministic: the reasoning predecessor reaches
+	// terminal state before the assistant partial and its following error cell.
+	e.finalizeReasoning(key, status, cs)
+	it := e.assistantBy[key]
+	if it == nil || it.Status.Terminal() {
+		return
+	}
+	e.flushAssistantStream(key, it, cs)
+	if u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
+		t.Status = status
+		return true
+	}); changed {
+		e.change(cs, OpUpsert, u)
+	}
+}
+
+func (e *EventEncoder) appendLLMRequestFailure(key string, ev runtimeevents.Event, cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	if key != "" {
+		if e.requestFailureBy[key] != nil {
+			e.stats.DuplicateCount++
+			return
 		}
 	}
-	// LLM 请求结束同时终结同流 reasoning 块（无专门 reasoning final 事件）。
-	if r := e.reasoningBy[key]; r != nil {
-		if u, changed := e.upsertItem(r.ID, KindReasoning, func(t *Item) bool {
-			if t.Status.Terminal() {
-				return false
-			}
-			t.Status = StatusCompleted
-			return true
-		}); changed {
-			e.change(cs, OpUpsert, u)
-		}
+	it := e.appendItem(KindSystem, "", llmRequestFailureHead(ev))
+	it.Status = StatusCompleted
+	e.change(cs, OpAppend, it)
+	if key != "" {
+		e.requestFailureBy[key] = it
 	}
+}
+
+func llmRequestFailed(ev runtimeevents.Event) bool {
+	if ev.Payload == nil {
+		return false
+	}
+	if value, reported := ev.Payload["success"]; reported && !payloadBoolValue(value) {
+		return true
+	}
+	return strings.TrimSpace(payloadString(ev.Payload["error"], "")) != ""
+}
+
+func llmRequestFailureHead(ev runtimeevents.Event) string {
+	payload := ev.Payload
+	title := "model error"
+	attributes := make([]string, 0, 2)
+	if code := strings.TrimSpace(payloadString(payload["error_code"], "")); code != "" {
+		attributes = append(attributes, code)
+	}
+	if value, reported := payload["retryable"]; reported {
+		attributes = append(attributes, "retryable="+strconv.FormatBool(payloadBoolValue(value)))
+	}
+	if len(attributes) > 0 {
+		title += " [" + strings.Join(attributes, ", ") + "]"
+	}
+	if message := strings.TrimSpace(payloadString(payload["error"], "")); message != "" {
+		title += " " + message
+	}
+	if nextAction := strings.TrimSpace(payloadString(payload["next_action"], "")); nextAction != "" {
+		title += "\n[action] " + nextAction
+	}
+	return title
 }
 
 // FinalizeOpenStreams closes every mutable assistant/reasoning item without
@@ -1358,23 +1456,222 @@ func (e *EventEncoder) flushAssistantStream(key string, it *Item, cs *ChangeSet)
 
 // ---- 辅助 ----
 
-// streamKey 构造 assistant 流身份键（turnID/streamID），与
-// assistantEventIdentity 的语义一致。
-func streamKey(ev runtimeevents.Event) string {
-	turnID := payloadString(ev.Payload["turn_id"], "")
-	streamID := payloadString(ev.Payload["stream_id"], "")
-	if streamID == "" {
-		streamID = payloadString(ev.Payload["trace_id"], "")
-	}
-	if turnID == "" && streamID == "" {
-		return ""
-	}
-	return turnID + "/" + streamID
+// assistantRequestIdentity describes every identity shape emitted for one LLM
+// request. Production reasoning has turn+step but no stream_id; deltas and the
+// request lifecycle have both; assistant_message has turn+stream_id but no
+// step. A stateless key cannot join all three shapes without either splitting
+// one response or merging multiple ReAct steps.
+type assistantRequestIdentity struct {
+	scopes    []string
+	step      string
+	streamID  string
+	requestID string
 }
 
-// reasoningKey 与 streamKey 同源（reasoning 挂到当前 assistant 流）。
-func reasoningKey(ev runtimeevents.Event) string {
-	return streamKey(ev)
+const anonymousAssistantRequestScope = "\x00anonymous-assistant-request"
+
+func (id assistantRequestIdentity) anonymous() bool {
+	return len(id.scopes) == 0 && id.step == "" && id.streamID == "" && id.requestID == ""
+}
+
+func assistantRequestIdentityFromEvent(ev runtimeevents.Event) assistantRequestIdentity {
+	id := assistantRequestIdentity{
+		step:      strings.TrimSpace(payloadString(ev.Payload["step"], "")),
+		streamID:  strings.TrimSpace(payloadString(ev.Payload["stream_id"], "")),
+		requestID: strings.TrimSpace(payloadString(ev.Payload["llm_request_id"], "")),
+	}
+	for _, scope := range []string{
+		payloadString(ev.Payload["turn_id"], ""),
+		payloadString(ev.Payload["logical_turn_id"], ""),
+		payloadString(ev.Payload["trace_id"], ""),
+		ev.TraceID,
+	} {
+		id.scopes = appendUniqueIdentity(id.scopes, scope)
+	}
+	return id
+}
+
+func appendUniqueIdentity(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func (id assistantRequestIdentity) strongAliases() []string {
+	aliases := make([]string, 0, 2)
+	if id.requestID != "" {
+		aliases = append(aliases, "request:"+id.requestID)
+	}
+	if id.streamID != "" {
+		aliases = append(aliases, "stream:"+id.streamID)
+	}
+	return aliases
+}
+
+func (id assistantRequestIdentity) stepAliases() []string {
+	if id.step == "" {
+		return nil
+	}
+	aliases := make([]string, 0, len(id.scopes))
+	for _, scope := range id.scopes {
+		aliases = append(aliases, "step:"+scope+"/"+id.step)
+	}
+	return aliases
+}
+
+func (id assistantRequestIdentity) allAliases() []string {
+	return append(id.strongAliases(), id.stepAliases()...)
+}
+
+func (id assistantRequestIdentity) newCanonicalKey(clock uint64) string {
+	if steps := id.stepAliases(); len(steps) > 0 {
+		return steps[0]
+	}
+	if strong := id.strongAliases(); len(strong) > 0 {
+		return strong[0]
+	}
+	if len(id.scopes) > 0 {
+		return "scope:" + id.scopes[0]
+	}
+	return "anonymous:" + strconv.FormatUint(clock, 10)
+}
+
+func (e *EventEncoder) resolveAssistantRequestKey(ev runtimeevents.Event) string {
+	id := assistantRequestIdentityFromEvent(ev)
+	if id.anonymous() {
+		key := e.latestRequestByScope[anonymousAssistantRequestScope]
+		if key != "" && anonymousEventStartsNewRequest(ev, e.assistantBy[key], e.reasoningBy[key]) {
+			key = ""
+		}
+		if key == "" {
+			key = id.newCanonicalKey(e.clock)
+			e.latestRequestByScope[anonymousAssistantRequestScope] = key
+		}
+		return key
+	}
+	key := e.lookupAssistantRequestAlias(id.strongAliases())
+	if key == "" {
+		key = e.lookupAssistantRequestAlias(id.stepAliases())
+	}
+	// A final snapshot is allowed to omit both step and a previously observed
+	// stream alias. The latest request in the same logical turn is then the only
+	// sound association; step-bearing events never use this fallback.
+	if key == "" && id.step == "" {
+		for _, scope := range id.scopes {
+			if latest := e.latestRequestByScope[scope]; latest != "" {
+				key = latest
+				break
+			}
+		}
+	}
+	if key == "" {
+		key = id.newCanonicalKey(e.clock)
+	}
+	e.bindAssistantRequestAliases(key, id.allAliases(), false)
+	e.rememberLatestAssistantRequest(id, key, false)
+	return key
+}
+
+func (e *EventEncoder) beginAssistantRequest(ev runtimeevents.Event) string {
+	id := assistantRequestIdentityFromEvent(ev)
+	if id.anonymous() {
+		key := e.latestRequestByScope[anonymousAssistantRequestScope]
+		if key == "" || anonymousRequestTerminal(e.assistantBy[key], e.reasoningBy[key]) {
+			key = id.newCanonicalKey(e.clock)
+			e.latestRequestByScope[anonymousAssistantRequestScope] = key
+		}
+		e.requestFinished[key] = false
+		return key
+	}
+	if key := e.lookupAssistantRequestAlias(id.strongAliases()); key != "" {
+		e.bindAssistantRequestAliases(key, id.stepAliases(), false)
+		e.rememberLatestAssistantRequest(id, key, true)
+		return key
+	}
+
+	stepKey := e.lookupAssistantRequestAlias(id.stepAliases())
+	if stepKey != "" && !e.requestFinished[stepKey] {
+		e.bindAssistantRequestAliases(stepKey, id.strongAliases(), false)
+		e.rememberLatestAssistantRequest(id, stepKey, true)
+		return stepKey
+	}
+
+	key := id.newCanonicalKey(e.clock)
+	if stepKey != "" {
+		// A new transport/request identity for an already-finished step is a
+		// retry, not a continuation of its terminal cell. Prefer a strong alias
+		// as the new canonical key and repoint only the logical step aliases.
+		if strong := id.strongAliases(); len(strong) > 0 {
+			key = strong[0]
+		} else {
+			key += "#" + strconv.FormatUint(e.clock, 10)
+		}
+	}
+	e.bindAssistantRequestAliases(key, id.strongAliases(), false)
+	e.bindAssistantRequestAliases(key, id.stepAliases(), stepKey != "")
+	e.requestFinished[key] = false
+	e.rememberLatestAssistantRequest(id, key, true)
+	return key
+}
+
+func anonymousRequestTerminal(assistant, reasoning *Item) bool {
+	return (assistant != nil && assistant.Status.Terminal()) ||
+		(assistant == nil && reasoning != nil && reasoning.Status.Terminal())
+}
+
+func anonymousEventStartsNewRequest(ev runtimeevents.Event, assistant, reasoning *Item) bool {
+	if !anonymousRequestTerminal(assistant, reasoning) {
+		return false
+	}
+	return ev.Type == runtimechat.EventAssistantDelta ||
+		ev.Type == runtimechat.EventAssistantReasoning || ev.Type == "assistant.reasoning"
+}
+
+func (e *EventEncoder) lookupAssistantRequestAlias(aliases []string) string {
+	if e == nil {
+		return ""
+	}
+	for _, alias := range aliases {
+		if key := e.requestAliases[alias]; key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+func (e *EventEncoder) bindAssistantRequestAliases(key string, aliases []string, replace bool) {
+	if e == nil || key == "" {
+		return
+	}
+	if e.requestAliases == nil {
+		e.requestAliases = make(map[string]string)
+	}
+	for _, alias := range aliases {
+		if alias == "" {
+			continue
+		}
+		if current := e.requestAliases[alias]; current == "" || current == key || replace {
+			e.requestAliases[alias] = key
+		}
+	}
+}
+
+func (e *EventEncoder) rememberLatestAssistantRequest(id assistantRequestIdentity, key string, force bool) {
+	if e == nil || key == "" {
+		return
+	}
+	for _, scope := range id.scopes {
+		if force || id.step != "" || e.latestRequestByScope[scope] == "" {
+			e.latestRequestByScope[scope] = key
+		}
+	}
 }
 
 func toolCallID(ev runtimeevents.Event) string {

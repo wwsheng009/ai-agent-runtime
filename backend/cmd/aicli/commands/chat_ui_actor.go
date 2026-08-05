@@ -565,36 +565,40 @@ func (c *chatInteractionCoordinator) finalizeActiveCellShadowActionLocked() ui.U
 		return nil
 	}
 	snapshot := c.session.RuntimeEventBridge.sceneSnapshot()
-	if !finalizedSceneCellAtOrAfter(snapshot, active.CellID, active.Revision, active.Kind) {
+	sceneRevision, ok := finalizedSceneCellRevision(snapshot, active.CellID, active.Kind)
+	if !ok {
 		return nil
 	}
 	return ui.FinalizeActiveCellAction{
 		Snapshot:                snapshot,
 		ExpectedActiveCellID:    active.CellID,
 		ExpectedActiveRevision:  active.Revision,
+		ExpectedSceneRevision:   sceneRevision,
 		ExpectedActiveKind:      active.Kind,
 		ExpectedActiveKindKnown: true,
 	}
 }
 
-// finalizedSceneCellAtOrAfter is intentionally local to the commands adapter:
+// finalizedSceneCellRevision is intentionally local to the commands adapter:
 // it decides whether a legacy completion may be mirrored into AppState. The
 // reducer repeats the validation before it publishes state, so this check is a
 // producer-side stale-snapshot guard rather than an alternate authority.
-func finalizedSceneCellAtOrAfter(snapshot *scene.Snapshot, id scene.CellID, revision uint64, kind scene.CellKind) bool {
+// Scene and Active revisions are separate version domains; the returned Scene
+// revision is carried as its own immutable snapshot fence.
+func finalizedSceneCellRevision(snapshot *scene.Snapshot, id scene.CellID, kind scene.CellKind) (uint64, bool) {
 	if snapshot == nil || id == 0 {
-		return false
+		return 0, false
 	}
 	for _, candidate := range snapshot.Cells {
-		if candidate == nil || candidate.ID != id || candidate.Revision < revision || candidate.Kind != kind {
+		if candidate == nil || candidate.ID != id || candidate.Kind != kind {
 			continue
 		}
 		switch candidate.Phase {
 		case scene.CellCommitted, scene.CellPartiallyHandedOff, scene.CellHandedOff:
-			return true
+			return candidate.Revision, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // postTranscriptSnapshotFromBridge is the Phase 2 transition bridge for

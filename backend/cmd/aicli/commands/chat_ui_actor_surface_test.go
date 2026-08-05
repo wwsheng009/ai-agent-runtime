@@ -548,21 +548,33 @@ func awaitUnifiedPresenterIdle(t *testing.T, coordinator *chatInteractionCoordin
 	presenter.WaitIdle()
 }
 
-// A terminal runtime sequence is allowed to omit assistant.message. The
-// unified path must still resolve the Scene-owned mutable cell exactly once;
-// it must never leave an Active tail behind or revive FixedBottomSurface.
+// A terminal runtime sequence is allowed to omit assistant.message. Successful
+// request-finished is only a transport boundary because production may publish
+// the authoritative final immediately afterward; EndRun/session-end owns the
+// missing-final fallback and must resolve the Scene mutable cell exactly once.
 func TestChatInteractionCoordinatorUnifiedAssistantStreamTerminalBoundaries(t *testing.T) {
 	tests := []struct {
 		name      string
 		terminate func(*ChatSession, *chatRuntimeEventBridge, *chatInteractionCoordinator)
 	}{
 		{
-			name: "llm finished without final message",
+			name: "llm finished then end run fallback without final message",
 			terminate: func(_ *ChatSession, bridge *chatRuntimeEventBridge, coordinator *chatInteractionCoordinator) {
 				bridge.handleEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, Payload: map[string]interface{}{
 					"turn_id": "turn-terminal", "stream_id": "stream-terminal", "success": true,
 				}})
 				coordinator.postTranscriptSnapshotFromBridge(bridge)
+				coordinator.waitUIActorIdle()
+				if active := coordinator.uiActor.AppState().Active; active.Phase != ui.ActiveCellMutable {
+					t.Fatalf("request-finished prematurely finalized active assistant: %+v", active)
+				}
+				coordinator.mu.Lock()
+				streamingActive := coordinator.streamingActive
+				coordinator.mu.Unlock()
+				if !streamingActive {
+					t.Fatal("request-finished prematurely reset coordinator stream before authoritative assistant.message")
+				}
+				bridge.EndRun()
 			},
 		},
 		{

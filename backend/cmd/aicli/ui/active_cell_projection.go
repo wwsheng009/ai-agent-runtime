@@ -65,11 +65,18 @@ func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) Activ
 		width = 80
 	}
 	var lines []render.Line
-	if active.Kind == scene.KindAssistant && start == 0 && markdown.LooksLikeMarkdown(active.Source) {
-		doc := markdown.Render(active.Source, markdown.AssistantBodyOptions(width, style.ThemeContext{}))
-		lines = activeMarkdownBandLines(doc)
+	markdownSource := active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source)
+	if markdownSource {
+		var projected bool
+		lines, projected = activeMarkdownSuffixLines(active.Source, start, width)
+		if !projected {
+			// A changed block context must never downgrade the live viewport to
+			// raw Markdown. Keep a rich full-source tail visible while the effect
+			// lifecycle takes the conservative recovery path.
+			lines = activeMarkdownBandLines(markdown.Render(active.Source, markdown.AssistantBodyOptions(width, style.ThemeContext{})))
+		}
 	}
-	if len(lines) == 0 {
+	if len(lines) == 0 && !markdownSource {
 		rows := activeCellBandRows(active.Source[start:], width)
 		role := appTranscriptRenderRole(active.Kind)
 		lines = make([]render.Line, 0, len(rows))
@@ -94,6 +101,25 @@ func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) Activ
 		SourceRange: SourceRange{Start: start, End: len(active.Source)},
 		Lines:       lines,
 	}
+}
+
+// activeMarkdownSuffixLines renders from the complete source so a handed-off
+// prefix cannot strip list/fence/table context from the remaining rich tail.
+// The stable-prefix contract requires the old rendering to remain an exact
+// line prefix; if it does not, callers conservatively keep the source live.
+func activeMarkdownSuffixLines(source string, start, width int) ([]render.Line, bool) {
+	if start < 0 || start > len(source) || !activeCellSourceBoundary(source, start) {
+		return nil, false
+	}
+	full := activeMarkdownBandLines(markdown.Render(source, markdown.AssistantBodyOptions(width, style.ThemeContext{})))
+	if start == 0 {
+		return full, true
+	}
+	prefix := activeMarkdownBandLines(markdown.Render(source[:start], markdown.AssistantBodyOptions(width, style.ThemeContext{})))
+	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
+		return nil, false
+	}
+	return cloneRenderLines(full[len(prefix):]), true
 }
 
 func activeMarkdownBandLines(doc render.Document) []render.Line {

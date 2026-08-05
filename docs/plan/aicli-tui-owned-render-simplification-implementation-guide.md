@@ -8,13 +8,19 @@ transcript pager/模式切换实施子计划：`docs/plan/aicli-tui-transcript-o
 
 评审：`docs/analysis/aicli-tui-owned-render-simplification-plan-review.md`
 
-状态：**approved execution contract / direct cutover in progress**
+状态：**approved execution contract / core inline cutover implemented and TTY verified**
 
-日期：2026-08-04
+日期：2026-08-06
 
 适用范围：`backend/cmd/aicli/ui/`、`backend/cmd/aicli/commands/` 的 owned interactive 渲染路径。
 
 > **当前实施口径（2026-08-05）**：interactive TTY 的 primary writer 已直接切到 `TerminalSessionPresenter`，`FixedBottomSurface` 的 physical write 已单向 fence，且 `AICLI_TUI=legacy/plain/off/0` 不再能选择旧 interactive renderer。assistant active/final、local/direct output、MCP notice、tool final result 与 persisted history reconcile 均已进入 `Scene -> AppState -> TerminalSession`；`ScreenLease` 的 alternate transport 也使用同一 writer。本文早期“未安装 presenter / legacy 是唯一 writer / shadow adapter”描述仅保留历史施工上下文，以母计划 §15.7–15.8 为准。
+
+> **当前施工基线（2026-08-06，覆盖后文旧阶段快照）**：生产 primary 已改为 `top native-history region + bottom inline viewport`。finalized transcript 的全部 display rows 和 mutable active 的稳定 overflow prefix 通过 reducer-owned `HistoryCommit` 插入 `1..OutputBottomRow`；`ScreenModel` 只能持有 `OutputBottomRow+1..terminalHeight`，不能重绘 history。内部空行与 trailing empty row 均持有稳定 `SourceRange/FragmentID`；finalize 只提交尚未 Ack 的 tail。active 使用 `Stable/Enqueued/Acked` 连续 source range，只有 Ack 才从 live tail 隐藏；Markdown handoff 保持结构化 IR。native scrollback 首次溢出后，resident tail 必须 sticky top-aligned。一次事务顺序固定为 viewport boundary transition、history insert、viewport diff、cursor。零字节失败在 recovery 后重试同一 token，partial write 保持 Unknown 且不得盲重试。
+
+> **验证基线**：`go test ./cmd/aicli/... -count=1`、`go test -race ./cmd/aicli/ui ./cmd/aicli/commands -count=1`、`go vet ./cmd/aicli/ui ./cmd/aicli/commands` 均通过。真实 provider Windows Terminal E2E manifest 位于 `output/aicli-terminal-e2e/opencode-wt-1176ea6f5afc4fa597964cc30b50a984/manifest.json`：40 个 marker 恰一次、严格有序且连续，reasoning 语义内容位于 final answer 前，仅 raw runtime event 标签未泄漏；退出使用 `AttachConsole+WriteConsoleInputW`，helper/runner code 均为 0、forced cleanup 为 0。此 run 不等同于 compatibility cleanup、全宿主矩阵或长会话验收完成。后文 whole-screen、retained-frame 或未安装 seam 的文字仅为历史，不得恢复。
+
+> **事件终态契约**：成功的 `llm.request.finished` 只关闭 transport request，不关闭 assistant active stream。authoritative `assistant_message` 到达后才执行正常 finalization；失败 request、interrupt、session end 或 run-end fallback 才可提前收尾。这个顺序与 `FinalizeActiveCellAction` 和 HistoryCommit 的 exactly-once handoff 共用同一门禁。
 
 ## 0. 使用规则
 
@@ -71,8 +77,12 @@ transcript pager/模式切换实施子计划：`docs/plan/aicli-tui-transcript-o
 | IR-11 | FramePump callback 只投递 action | callback source fence |
 | IR-12 | resize/replay 从 semantic source 派生 | 禁止从 front/VT/terminal 反推 |
 | IR-13 | 编辑器逐键回调不得等待 actor drain 或 mailbox 容量 | actor 阻塞/满邮箱输入回归 |
-| IR-14 | primary 必须保留 finalized transcript tail；pager 不得替代该可见性 | VT 最终屏幕断言 |
-| IR-15 | 不连续 history bootstrap 物理顺序必须为 prefix 后接 retained tail；批量 Ack 必须由 reducer 校验 | VT scrollback + batch-token 回归 |
+| IR-14 | primary 顶部 history region 必须保留最新 finalized tail；pager 不得替代该可见性 | VT + 真实宿主 scrollback 断言 |
+| IR-15 | 不连续 history bootstrap 必须把全部 finalized rows 作为有序 effect batch 插入顶部区域；批量 Ack 必须由 reducer 校验 | scrollback + visible tail + batch-token 回归 |
+| IR-16 | `ScreenModel` 只能缓存 bottom inline viewport，任何 viewport diff 都不得清除或寻址 history region | CUP/ED/whole-clear fence 测试 |
+| IR-17 | writer 明确零字节失败可用同 token 重试；可能 partial write 必须 Unknown/fail-closed | zero-write retry + short-write no-retry 测试 |
+| IR-18 | finalized plain source 的内部空行和 trailing empty row 必须保留稳定 `SourceRange/FragmentID`；finalize 只能提交未 Ack tail | source identity + finalize no-replay 测试 |
+| IR-19 | native scrollback 溢出后，resident history tail 必须 sticky top-aligned；scrollback/viewport 边界不得产生非语义空白断层 | VT + 真实宿主连续性断言 |
 
 ## 3. 必须落地的核心类型
 
@@ -98,6 +108,7 @@ const (
 
 type HistoryCommit struct {
     Token            uint64
+    Origin           HistoryCommitOrigin // Transcript 或 Active
     CellID           scene.CellID
     Revision         uint64
     SourceRange      SourceRange
@@ -117,6 +128,8 @@ type TerminalEffectFailed struct { Token uint64; Err error; MayHavePartiallyWrit
 `MayHavePartiallyWritten=true` 时不得盲目重放同一 batch。projection 进入 Unknown，由 recovery policy 决定 clear/rebuild/controlled teardown。
 
 ## 4. 阶段执行
+
+> **2026-08-06 disposition**：Phase 3/4 的 production writer 与 tokenized handoff 核心已完成；Phase 0-2/5 的 primary rendering 核心已实施，但 producer、同步 interaction 和 compatibility state 清理继续；Phase 6 已通过完整 Go/race/vet 与一次真实 Windows Terminal/provider 验收，legacy 删除、更多宿主和长会话矩阵仍在进行。详细状态以专项方案 §6 表格为准。下列“未安装”“legacy writer”“bug 仍红”等语句是逐阶段施工时的入口/出口描述，不是当前状态。
 
 ### Phase 0：测试语义与安全网
 
@@ -280,7 +293,7 @@ type TerminalEffectFailed struct { Token uint64; Err error; MayHavePartiallyWrit
 2. 建立一个 streaming range owner，明确 `raw source`、`stable boundary`、`enqueued range`、`acked range`。
 3. 删除 coordinator、assistant transcript、soft output 和 surface 中对同一 source range 的平行游标；不得为了删字段而丢失 queued-but-unacked 区间。
 4. stable tail 的 HistoryCommit source 来自同一 semantic cell/Layout；不再单独调用另一套 Formatter pipeline。
-5. finalization 作为一个 reducer transaction：校验 revision、更新 final source、标 Finalized、清 active projection、生成 eligible effect、request frame。
+5. finalization 作为一个 reducer transaction：校验 revision、更新 final source、标 Finalized、清 active projection、仅为未 Ack tail 生成 eligible effect、request frame；finalized plain source 的内部空行和 trailing empty row 必须继续携带稳定 `SourceRange/FragmentID`。
 6. live/replay/resume/resize 使用同一 DisplayLines/Layout；AICLI Scene flag 只做 session-level presenter 选择，最终删除。
 
 **出口**
@@ -298,7 +311,7 @@ type TerminalEffectFailed struct { Token uint64; Err error; MayHavePartiallyWrit
 2. 删除不可达的 `historyWindow/headroom/handoffFrontier/commitExcess/legacyReserve` 和诊断 `zz_` 文件。
 3. 保留 plain/JSON renderer，但 renderer mode 只在 session 初始化选择。
 4. 跑全量、race、fault injection、benchmark；修复新增泄漏、锁反转和 starvation。
-5. 人工验证 Windows Terminal + ConPTY，以及至少一种非 Windows PTY：stream、band、popup、resize、fullscreen、400+ 行、退出恢复。
+5. 已通过一次真实 Windows Terminal/ConPTY provider E2E（见 §0 manifest）；继续验证至少一种非 Windows PTY，以及 Windows 的长会话、resize/fullscreen/400+ 行组合矩阵和退出恢复，不能把单次已通过 run 误报为全矩阵完成。
 6. 更新母计划状态、P8/P9 删除清单和 runbook。
 
 **出口**
@@ -335,7 +348,15 @@ go vet ./cmd/aicli/ui/... ./cmd/aicli/commands/...
 go test ./cmd/aicli/ui/... -count=1
 go test ./cmd/aicli/commands/... -count=1
 go test -race ./cmd/aicli/ui/... ./cmd/aicli/commands/...
+
+# 真实 Windows Terminal buffer/scrollback（在 backend 目录执行）
+pwsh -File ..\scripts\test-aicli-windows-terminal-e2e.ps1 -TimeoutSeconds 45
+
+# 真实 provider + 真实 Windows Terminal；测试 prompt 由 --prompt 启动参数自动提交
+pwsh -File ..\scripts\test-aicli-opencode-windows-terminal-e2e.ps1 -TimeoutSeconds 180
 ```
+
+真实 provider 脚本不得通过 `SendInput`、剪贴板或 UI Automation 注入测试 prompt；这些机制只能用于完成断言后的 `/exit` 清理。runner 生成的命令行必须显式包含单一 `--prompt`，并在退出码文件出现后才报告完整 PASS。
 
 阶段专项：
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -93,13 +94,19 @@ type TerminalTransactionPlan struct {
 	Frame            TerminalFramePlan
 	History          *HistoryCommit
 	BootstrapHistory []HistoryCommit
+	// TerminalEpoch is the reducer-confirmed scrollback generation. A replaced
+	// TerminalSession advances from this value instead of restarting at one.
+	TerminalEpoch uint64
 }
 
 // ComposeTerminalTransactionPlan derives an immutable frame and optionally
 // attaches one already-claimed HistoryCommit. The commit is cloned because its
 // render lines are reducer-owned payload until the eventual Ack.
 func ComposeTerminalTransactionPlan(state AppState, history *HistoryCommit, bootstrapHistory ...[]HistoryCommit) TerminalTransactionPlan {
-	plan := TerminalTransactionPlan{Frame: ComposeTerminalFramePlan(state)}
+	plan := TerminalTransactionPlan{
+		Frame:         ComposeTerminalFramePlan(state),
+		TerminalEpoch: state.HistoryEffects.TerminalEpoch,
+	}
 	if history != nil {
 		clone := history.Clone()
 		plan.History = &clone
@@ -151,12 +158,35 @@ func cloneHistoryCommits(commits []HistoryCommit) []HistoryCommit {
 // a business-data source.
 type TerminalProjectionState struct {
 	Geometry         GeometryState
+	Viewport         ViewportArea
+	HistoryRows      int
+	HistoryKnown     bool
 	LayoutGeneration uint64
 	Lease            LeaseState
 	OutputBottomRow  int
 	Frame            uint64
+	TerminalEpoch    uint64
 	Validity         renderengine.ProjectionValidity
 	Cursor           *AppCursor
+}
+
+// ViewportArea is the only mutable primary-screen region owned by
+// TerminalSession. Top is a 1-based physical terminal row. Finalized history
+// lives in rows 1..Top-1 and is inserted there through the terminal's native
+// scroll mechanism; it is deliberately absent from ScreenModel.
+type ViewportArea struct {
+	Top    int
+	Height int
+	Width  int
+}
+
+func (a ViewportArea) bottom() int {
+	return a.Top + a.Height - 1
+}
+
+func (a ViewportArea) validFor(geometry GeometryState) bool {
+	return a.Width == geometry.Width && a.Width > 0 && a.Height >= 0 &&
+		a.Top >= 1 && a.Top <= geometry.Height+1 && a.bottom() <= geometry.Height
 }
 
 // TerminalFrameResult reports the outcome of one viewport transaction. A
@@ -173,26 +203,50 @@ type TerminalFrameResult struct {
 // delivery. A history Deferred result proves no history bytes were attempted;
 // the frame may still have completed a recovery repaint in that transaction.
 type TerminalTransactionResult struct {
-	Frame   TerminalFrameResult
-	History *HistoryCommitResult
+	Frame           TerminalFrameResult
+	History         *HistoryCommitResult
+	ScrollbackReset bool
+	TerminalEpoch   uint64
 }
 
-// TerminalSession owns one physical primary-viewport projection cache. The
+// TerminalSession owns one physical bottom-inline viewport projection cache. The
 // mutex serializes mutable front/back/cursor state; Presenter additionally
 // serializes each terminal write with the repository-wide terminal lock. The
 // unified chat path installs TerminalSession through TerminalSessionPresenter;
 // FixedBottomSurface remains only a compatibility state facade in that mode.
 type TerminalSession struct {
-	mu           sync.Mutex
-	writer       io.Writer
-	presenter    *renderengine.Presenter
-	screen       *renderengine.ScreenModel
-	geometry     GeometryState
-	generation   uint64
-	lease        LeaseState
-	outputBottom int
-	frame        uint64
-	cursor       *AppCursor
+	mu        sync.Mutex
+	writer    io.Writer
+	presenter *renderengine.Presenter
+	screen    *renderengine.ScreenModel
+	geometry  GeometryState
+	viewport  ViewportArea
+	// viewportBoundaryKnown proves that viewport was confirmed on a terminal
+	// with viewportTerminalHeight rows. It is separate from the cell cache:
+	// theme/lease recovery can invalidate content while DEC 1049 still preserves
+	// the primary boundary, whereas a partial primary write invalidates both.
+	viewportBoundaryKnown  bool
+	viewportTerminalHeight int
+	generation             uint64
+	lease                  LeaseState
+	outputBottom           int
+	// historyTailRows is the bounded physical projection currently resident in
+	// rows 1..outputBottom, oldest first. It excludes native scrollback and,
+	// critically, excludes unused blank headroom. This is display-only cache:
+	// semantic recovery still comes from AppState/Scene.
+	historyTailRows []string
+	// historyTopAligned becomes sticky after this session has moved a semantic
+	// row into native scrollback. From that point the resident tail must begin
+	// at physical row one, otherwise later viewport contraction would insert
+	// blank headroom between scrollback and the same semantic message. Before
+	// the first overflow, bottom alignment keeps a short transcript near the
+	// composer without creating non-semantic scrollback.
+	historyTopAligned        bool
+	historyProjectionKnown   bool
+	historyProjectionStarted bool
+	frame                    uint64
+	terminalEpoch            uint64
+	cursor                   *AppCursor
 	// alternateLeaseID records actual DEC 1049 transport ownership. It is
 	// deliberately independent of AppState.Lease because the physical enter
 	// completes before LeaseAcquired is posted to the actor, and the physical
@@ -239,10 +293,14 @@ func (s *TerminalSession) projectionStateLocked() TerminalProjectionState {
 	}
 	return TerminalProjectionState{
 		Geometry:         s.geometry,
+		Viewport:         s.viewport,
+		HistoryRows:      len(s.historyTailRows),
+		HistoryKnown:     s.historyProjectionKnown,
 		LayoutGeneration: s.generation,
 		Lease:            s.lease,
 		OutputBottomRow:  s.outputBottom,
 		Frame:            s.frame,
+		TerminalEpoch:    s.terminalEpoch,
 		Validity:         validity,
 		Cursor:           cloneTerminalCursor(s.cursor),
 	}
@@ -297,14 +355,20 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 
 	enter := s.writeTerminalBytesLocked("\x1b[?1049h\x1b[r\x1b[?25l\x1b[2J\x1b[H")
 	if enter.Err != nil {
-		// A partial enter leaves both the terminal buffer and our front cache
-		// unknowable. Best-effort rollback is still useful, but cannot restore
-		// a Known projection and must not grant the lease.
-		if s.screen != nil {
-			s.screen.Invalidate()
+		rollback := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
+		// A proven zero-byte enter followed by a complete rollback preserves the
+		// primary buffer. Any partial transport loses buffer ownership proof.
+		if enter.MayHavePartiallyWritten || (rollback.Err != nil && rollback.MayHavePartiallyWritten) {
+			if s.screen != nil {
+				s.screen.Invalidate()
+			}
+			s.viewportBoundaryKnown = false
+			s.historyTailRows = nil
+			s.historyTopAligned = false
+			s.historyProjectionKnown = false
+			s.historyProjectionStarted = true
 		}
 		s.cursor = nil
-		rollback := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
 		return errors.Join(enter.Err, rollback.Err)
 	}
 
@@ -345,9 +409,10 @@ func (s *TerminalSession) WriteAlternateScreen(leaseID uint64, bytes string) err
 
 // ExitAlternateScreen restores the primary buffer and invalidates the cached
 // primary projection. The next AppState-derived transaction must therefore be
-// a full recovery repaint. Exit clears physical ownership even on an I/O
-// error: retrying DEC 1049 blindly after a partial write could corrupt a later
-// fullscreen session more severely than treating the projection as Unknown.
+// a full recovery repaint. A proven zero-byte failure retains the lease for an
+// exact retry. A partial write clears local ownership and makes the primary
+// projection Unknown because blindly retrying DEC 1049 could corrupt a later
+// fullscreen session.
 func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 	if s == nil || leaseID == 0 {
 		return ErrTerminalAlternateScreenLease
@@ -362,12 +427,24 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 	}
 
 	write := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
+	if write.Err != nil && !write.MayHavePartiallyWritten {
+		// No exit byte reached the host, so the same physical alternate lease is
+		// still active and may be retried without guessing buffer ownership.
+		return write.Err
+	}
 	s.alternateLeaseID = 0
 	s.lease = LeaseState{}
 	if s.screen != nil {
 		s.screen.Invalidate()
 	}
 	s.cursor = nil
+	if write.Err != nil {
+		s.viewportBoundaryKnown = false
+		s.historyTailRows = nil
+		s.historyTopAligned = false
+		s.historyProjectionKnown = false
+		s.historyProjectionStarted = true
+	}
 	return write.Err
 }
 
@@ -426,11 +503,11 @@ func (s *TerminalSession) Flush(plan TerminalFramePlan) TerminalFrameResult {
 	return s.FlushTransaction(TerminalTransactionPlan{Frame: plan}).Frame
 }
 
-// FlushTransaction is the Phase 3 physical transaction boundary:
-// lease/generation -> geometry -> optional history handoff -> viewport diff ->
-// cursor -> one complete target write -> front confirmation. History is
-// deferred, rather than replayed against an Unknown cache, while this call
-// establishes the required source-backed recovery frame.
+// FlushTransaction is the physical transaction boundary:
+// lease/generation -> geometry -> viewport-boundary transition -> optional
+// history insert -> viewport diff -> cursor -> one complete target write ->
+// front confirmation. History is independent of the mutable viewport cache,
+// so a startup/resize recovery can insert both in the same atomic write.
 //
 // The unified chat setup installs this only after FixedBottomSurface has been
 // fenced from physical output. It must never be connected beside the legacy
@@ -462,141 +539,192 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	}
 
 	if s.alternateLeaseID != 0 || frame.Lease.Active {
-		s.geometry = frame.Geometry
-		s.generation = frame.LayoutGeneration
 		if s.alternateLeaseID != 0 {
 			s.lease = LeaseState{ID: s.alternateLeaseID, Active: true}
 		} else {
 			s.lease = frame.Lease
 		}
-		s.outputBottom = frame.OutputBottomRow
 		s.cursor = nil
 		result := TerminalFrameResult{Frame: s.frame, Deferred: true}
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
 	}
 
-	// A handoff needs an already-confirmed physical frame at the same geometry.
-	// Resize and lease release make that proof unavailable, so establish a full
-	// recovery frame now and leave the reducer-owned token Pending for a later
-	// transaction.
-	projectionKnown := s.screen.ProjectionValidity() == renderengine.ProjectionKnown
+	area := terminalFrameViewportArea(frame)
+	if !area.validFor(frame.Geometry) {
+		result := TerminalFrameResult{Frame: s.frame, Err: ErrInvalidTerminalFrame}
+		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
+	}
+	initializeHistoryProjection := !s.historyProjectionStarted && s.frame == 0 &&
+		!s.viewportBoundaryKnown && s.viewport.Top == 0
+	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
+		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
+	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild
+	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
+	projectionKnown := hadKnownProjection
+	candidateScreen := s.screen.Clone()
+	if candidateScreen == nil {
+		result := TerminalFrameResult{Frame: s.frame, Err: ErrTerminalWriterMissing}
+		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Err: ErrTerminalWriterMissing})
+	}
 	if s.lease.Active {
-		s.screen.Invalidate()
+		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
-	s.lease = frame.Lease
-	if width, height := s.screen.Size(); width != frame.Geometry.Width || height != frame.Geometry.Height {
-		s.screen.Resize(frame.Geometry.Width, frame.Geometry.Height)
+	if resizeRebuild {
+		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
-	s.geometry = frame.Geometry
-	s.generation = frame.LayoutGeneration
-	s.outputBottom = frame.OutputBottomRow
+	modelHeight := area.Height
+	if modelHeight < 1 {
+		modelHeight = 1
+	}
+	if width, height := candidateScreen.Size(); width != area.Width || height != modelHeight || s.viewport != area {
+		candidateScreen.Resize(area.Width, modelHeight)
+		projectionKnown = false
+	}
 
-	fullRepaint := s.screen.ProjectionValidity() != renderengine.ProjectionKnown
-	rows, err := terminalFrameCells(frame.Rows, frame.RenderRows, frame.Geometry.Width, frame.Geometry.Height, s.frameTheme)
+	fullRepaint := !projectionKnown
+	rows, err := terminalViewportCells(frame, area, s.frameTheme)
 	if err != nil {
 		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
 	}
 	historyResult := (*HistoryCommitResult)(nil)
 	historyBytes := ""
-	var historyCells [][]vt.Cell
 	var delivered []HistoryCommit
+	historyInsertedRows := 0
+	var historyInsertedPayload []string
 	if plan.History != nil {
 		result := HistoryCommitResult{Deferred: true}
-		if !projectionKnown && s.outputBottom > 0 && plan.History.LayoutGeneration == s.generation && len(plan.BootstrapHistory) > 0 {
-			bootstrapRows, bootstrapCells, bootstrapErr := terminalHistoryBootstrapRows(plan.BootstrapHistory, frame, s.frameTheme)
-			if bootstrapErr != nil {
-				result = HistoryCommitResult{Err: bootstrapErr}
-			} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, bootstrapRows); handoff.Empty() {
+		if historyProjectionWritable && frame.OutputBottomRow > 0 && plan.History.LayoutGeneration == frame.LayoutGeneration {
+			commits := terminalHistoryTransactionCommits(plan.History, plan.BootstrapHistory)
+			candidateRows, _, historyErr := terminalHistoryCommitRows(commits, s.frameTheme, frame.Geometry.Width)
+			if historyErr != nil {
+				result = HistoryCommitResult{Err: historyErr}
+			} else if len(candidateRows) == 0 {
 				result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 			} else {
-				// A host only guarantees global terminal scrollback for a full-screen
-				// scroll. Bootstrap appends semantic history followed by one complete
-				// target frame, which pushes the history into native scrollback while
-				// leaving the target frame as the visible physical tail.
-				historyBytes = handoff.ANSI()
-				historyCells = bootstrapCells
-				delivered = cloneHistoryCommits(plan.BootstrapHistory)
-				result = HistoryCommitResult{}
-			}
-		} else if projectionKnown && s.outputBottom > 0 && plan.History.LayoutGeneration == s.generation {
-			candidateRows, candidateCells, err := terminalHistoryHandoffRows(plan.History.Lines, s.frameTheme, s.geometry.Width)
-			if err != nil {
-				result = HistoryCommitResult{Err: err}
-			} else if s.screen.RegionPrefixEquals(1, s.outputBottom, candidateCells) {
-				// The outgoing semantic range is already the physical prefix of the
-				// current screen. Push it through the full terminal height so real
-				// ConPTY hosts commit it to global scrollback; blank rows avoid
-				// replaying the entering transcript tail before the source-backed
-				// frame repaint below.
-				blankRows, blankCells := terminalBlankHandoffRows(len(candidateRows), s.geometry.Width)
-				if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, blankRows); handoff.Empty() {
-					result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
-				} else {
-					historyBytes = handoff.ANSI()
-					historyCells = blankCells
-					result = HistoryCommitResult{}
-				}
-			} else if len(plan.BootstrapHistory) > 0 {
-				bootstrapRows, bootstrapCells, bootstrapErr := terminalHistoryBootstrapRows(plan.BootstrapHistory, frame, s.frameTheme)
-				if bootstrapErr != nil {
-					result = HistoryCommitResult{Err: bootstrapErr}
-				} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, bootstrapRows); handoff.Empty() {
-					result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
-				} else {
-					// Bootstrap appends a full target frame after semantic history. That
-					// guarantees the prefix crosses the real terminal's top boundary,
-					// while the target frame itself remains visible rather than being
-					// duplicated in native scrollback.
-					historyBytes = handoff.ANSI()
-					historyCells = bootstrapCells
-					delivered = cloneHistoryCommits(plan.BootstrapHistory)
-					result = HistoryCommitResult{}
-				}
-			} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.outputBottom, candidateRows); handoff.Empty() {
-				// Compatibility callers that do not supply the AppState-derived
-				// bootstrap batch retain the original isolated sink behavior.
-				// Unified TerminalSessionExecutor always supplies a batch, so this
-				// path cannot define production history ownership.
-				result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
-			} else {
-				historyBytes = handoff.ANSI()
-				historyCells = candidateCells
+				historyInsertedRows = len(candidateRows)
+				historyInsertedPayload = append([]string(nil), candidateRows...)
+				delivered = cloneHistoryCommits(commits)
 				result = HistoryCommitResult{}
 			}
 		}
 		historyResult = &result
 	}
-	if historyBytes != "" {
-		// Handoffs always scroll the full physical terminal. Mirror that state
-		// before diffing the source-backed frame; a failed write below invalidates
-		// this tentative cache mutation.
-		s.screen.ApplyRegionAppend(1, s.geometry.Height, historyCells)
+	viewportBytes := ""
+	if area.Height > 0 {
+		candidateScreen.StageFrame(rows)
+		prepared := candidateScreen.PrepareFlush()
+		viewportBytes, err = terminalOffsetViewportANSI(prepared, area)
+		if err != nil {
+			result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
+			return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
+		}
 	}
-	s.screen.StageFrame(rows)
-	bytes := historyBytes + s.screen.PrepareFlush()
+	// Reconcile the boundary before history insertion. Expansion scrolls the
+	// old history region only when semantic rows actually overflow the smaller
+	// capacity; contraction clears former viewport rows so prompt/status can
+	// never become history.
+	transitionBytes := ""
+	nextHistoryTopAligned := s.historyTopAligned
+	// A terminal-height resize has already changed the host's physical row
+	// mapping and native scrollback. Old absolute viewport coordinates are no
+	// longer a valid scroll-region boundary; replaying that transition can
+	// include the new prompt/status rows and leak them into history. Trust the
+	// host resize, then source-repaint only the new bottom viewport.
+	if resizeRebuild {
+		transitionBytes = terminalResetScrollbackANSI()
+		nextHistoryTopAligned = false
+	} else if initializeHistoryProjection {
+		transitionBytes = terminalClearHistoryRegionANSI(frame.OutputBottomRow)
+		nextHistoryTopAligned = false
+	} else if s.historyProjectionKnown && s.viewportBoundaryKnown && s.viewportTerminalHeight == frame.Geometry.Height {
+		transitionBytes, nextHistoryTopAligned = terminalViewportTransitionANSI(
+			s.viewport, area, frame.Geometry.Height, s.historyTailRows, nextHistoryTopAligned,
+		)
+	}
+	// After expansion the history region may have less capacity. Retain its
+	// semantic suffix before appending new commits. History insertion itself is
+	// occupancy-aware: an underfilled region is repainted without scrolling;
+	// overflow uses HandoffPlan only for rows that must actually cross row one.
+	baseHistoryTail := terminalRetainHistoryTailRows(s.historyTailRows, frame.OutputBottomRow)
+	if resizeRebuild {
+		baseHistoryTail = nil
+	}
+	if historyInsertedRows > 0 {
+		historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
+			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
+		)
+	}
+	bytes := transitionBytes + historyBytes + viewportBytes
 	if cursor := terminalCursorSequence(frame.Cursor, frame.Geometry.Width, frame.Geometry.Height); cursor != "" {
 		bytes += cursor
 	}
 	if write := s.writeTerminalBytesLocked(bytes); write.Err != nil {
-		s.screen.MarkWriteFailed()
-		s.cursor = nil
+		if write.MayHavePartiallyWritten {
+			// The target consumed an unknown prefix. Preserve no incremental
+			// viewport proof, but keep the last confirmed scalar snapshot so the
+			// next source frame replays the complete candidate transition.
+			s.screen.Invalidate()
+			s.cursor = nil
+			geometryChanged := s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height
+			if geometryChanged || transitionBytes != "" {
+				s.viewportBoundaryKnown = false
+			}
+			if geometryChanged || transitionBytes != "" || historyBytes != "" {
+				s.historyTailRows = nil
+				s.historyTopAligned = false
+				s.historyProjectionKnown = false
+				s.historyProjectionStarted = true
+			}
+		}
 		frameResult := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: write.Err}
 		if historyResult != nil && historyBytes != "" {
 			*historyResult = HistoryCommitResult{Err: write.Err, MayHavePartiallyWritten: write.MayHavePartiallyWritten}
 		}
 		return TerminalTransactionResult{Frame: frameResult, History: historyResult}
 	}
-	s.screen.ConfirmFlush()
+	candidateScreen.ConfirmFlush()
+	s.screen = candidateScreen
+	s.geometry = frame.Geometry
+	s.generation = frame.LayoutGeneration
+	s.lease = frame.Lease
+	s.outputBottom = frame.OutputBottomRow
+	s.viewport = area
+	s.viewportBoundaryKnown = true
+	s.viewportTerminalHeight = frame.Geometry.Height
+	if resizeRebuild {
+		s.historyProjectionStarted = true
+		s.historyProjectionKnown = true
+		s.historyTailRows = nil
+		if plan.TerminalEpoch > s.terminalEpoch {
+			s.terminalEpoch = plan.TerminalEpoch
+		}
+		s.terminalEpoch++
+	} else if initializeHistoryProjection {
+		s.historyProjectionStarted = true
+		s.historyProjectionKnown = true
+	}
+	if s.historyProjectionKnown {
+		s.historyTailRows = baseHistoryTail
+		s.historyTopAligned = nextHistoryTopAligned
+		if historyInsertedRows > 0 {
+			s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
+		}
+	}
 	s.cursor = cloneTerminalCursor(frame.Cursor)
 	s.frame++
 	frameResult := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint}
 	if historyResult != nil && historyBytes != "" {
 		*historyResult = HistoryCommitResult{Frame: s.frame, Delivered: delivered}
 	}
-	return TerminalTransactionResult{Frame: frameResult, History: historyResult}
+	return TerminalTransactionResult{
+		Frame:           frameResult,
+		History:         historyResult,
+		ScrollbackReset: resizeRebuild,
+		TerminalEpoch:   s.terminalEpoch,
+	}
 }
 
 func terminalTransactionWithHistory(frame TerminalFrameResult, history *HistoryCommit, result HistoryCommitResult) TerminalTransactionResult {
@@ -604,6 +732,25 @@ func terminalTransactionWithHistory(frame TerminalFrameResult, history *HistoryC
 		return TerminalTransactionResult{Frame: frame}
 	}
 	return TerminalTransactionResult{Frame: frame, History: &result}
+}
+
+func terminalFrameViewportArea(frame TerminalFramePlan) ViewportArea {
+	return ViewportArea{
+		Top:    frame.OutputBottomRow + 1,
+		Height: frame.Geometry.Height - frame.OutputBottomRow,
+		Width:  frame.Geometry.Width,
+	}
+}
+
+func terminalViewportCells(frame TerminalFramePlan, area ViewportArea, theme style.ThemeContext) ([][]vt.Cell, error) {
+	if !area.validFor(frame.Geometry) {
+		return nil, ErrInvalidTerminalFrame
+	}
+	rows, err := terminalFrameCells(frame.Rows, frame.RenderRows, frame.Geometry.Width, frame.Geometry.Height, theme)
+	if err != nil || area.Height == 0 {
+		return nil, err
+	}
+	return rows[area.Top-1:], nil
 }
 
 // CommitHistory implements HistoryCommitSink for the unified one-writer
@@ -631,40 +778,47 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 		return HistoryCommitResult{Err: ErrTerminalWriterMissing}
 	}
 	if s.lease.Active || s.generation == 0 || commit.LayoutGeneration != s.generation ||
-		s.outputBottom < 1 || s.screen.ProjectionValidity() != renderengine.ProjectionKnown {
+		s.outputBottom < 1 || !s.historyProjectionKnown ||
+		s.screen.ProjectionValidity() != renderengine.ProjectionKnown {
 		// No primary transaction has begun. The executor may return this token
 		// to Pending without inventing a retry identity or marking projection
 		// failure; a later source-backed frame/recovery owns the wake-up.
 		return HistoryCommitResult{Deferred: true}
 	}
 
-	rows, cells, err := terminalHistoryHandoffRows(commit.Lines, s.frameTheme, s.geometry.Width)
+	rows, _, err := terminalHistoryHandoffRows(commit.Lines, s.frameTheme, s.geometry.Width)
 	if err != nil {
 		return HistoryCommitResult{Err: err}
 	}
-	// Do not use the fixed-bottom subregion here. Some real terminal hosts
-	// render DECSTBM correctly but do not add rows from a subregion to their
-	// global scrollback. A full-screen scroll is the portable native-history
-	// boundary; the next source-backed frame restores fixed bottom rows.
-	plan := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, rows)
-	if plan.Empty() {
+	// The top-anchored region ends immediately above the inline viewport. Since
+	// its top margin is physical row one, overflow becomes native scrollback;
+	// prompt/status rows below outputBottom never participate in the scroll.
+	bytes, nextHistoryTopAligned := terminalHistoryInsertionANSI(
+		s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
+	)
+	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
-	write := s.writeTerminalBytesLocked(plan.ANSI())
+	write := s.writeTerminalBytesLocked(bytes)
 	if write.Err != nil {
 		s.screen.MarkWriteFailed()
 		s.cursor = nil
+		if write.MayHavePartiallyWritten {
+			s.viewportBoundaryKnown = false
+			s.historyTailRows = nil
+			s.historyTopAligned = false
+			s.historyProjectionKnown = false
+			s.historyProjectionStarted = true
+		}
 		return HistoryCommitResult{
 			Err:                     write.Err,
 			MayHavePartiallyWritten: write.MayHavePartiallyWritten,
 		}
 	}
 
-	// HandoffPlan appends each encoded display row at the bottom of the exact
-	// DECSTBM region. Mirror the successful physical scroll in the cache before
-	// another frame uses its front buffer. No terminal/source data is read back.
-	s.screen.ApplyRegionAppend(1, s.outputBottom, cells)
 	s.frame++
+	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
+	s.historyTopAligned = nextHistoryTopAligned
 	return HistoryCommitResult{Frame: s.frame}
 }
 
@@ -698,82 +852,261 @@ func terminalHistoryHandoffRows(lines []render.Line, theme style.ThemeContext, w
 	return rows, cells, nil
 }
 
-// terminalFrameOutputLines returns the source-backed render lines in the
-// primary output region. It never reads the front buffer; callers use it only
-// to prepare a physical append that makes an already-proven front prefix leave
-// the terminal viewport.
-func terminalFrameOutputLines(frame TerminalFramePlan, count int) ([]render.Line, error) {
-	if count < 1 || count > frame.OutputBottomRow || frame.OutputBottomRow > len(frame.Rows) {
-		return nil, ErrInvalidHistoryHandoff
+func terminalHistoryTransactionCommits(claimed *HistoryCommit, bootstrap []HistoryCommit) []HistoryCommit {
+	if claimed == nil {
+		return nil
 	}
-	start := frame.OutputBottomRow - count
-	lines := make([]render.Line, 0, count)
-	for index := start; index < frame.OutputBottomRow; index++ {
-		if len(frame.RenderRows) == len(frame.Rows) {
-			lines = append(lines, cloneAppRenderLine(frame.RenderRows[index]))
-			continue
-		}
-		lines = append(lines, appPlainRenderLine(frame.Rows[index].Text))
+	if len(bootstrap) > 0 && bootstrap[0].Token == claimed.Token &&
+		bootstrap[0].LayoutGeneration == claimed.LayoutGeneration &&
+		historyCommitPresentationEqual(bootstrap[0], *claimed) {
+		return cloneHistoryCommits(bootstrap)
 	}
-	return lines, nil
+	return []HistoryCommit{claimed.Clone()}
 }
 
-func terminalFrameIncomingHandoffRows(frame TerminalFramePlan, count int, theme style.ThemeContext) ([]string, [][]vt.Cell, error) {
-	lines, err := terminalFrameOutputLines(frame, count)
-	if err != nil {
-		return nil, nil, err
-	}
-	return terminalHistoryHandoffRows(lines, theme, frame.Geometry.Width)
-}
-
-func terminalBlankHandoffRows(count, width int) ([]string, [][]vt.Cell) {
-	if count < 1 || width < 1 {
-		return nil, nil
-	}
-	rows := make([]string, count)
-	cells := make([][]vt.Cell, count)
-	for index := range cells {
-		cells[index] = make([]vt.Cell, width)
-	}
-	return rows, cells
-}
-
-// terminalHistoryBootstrapRows writes all pending semantic history before one
-// complete target frame. The full frame forces the history prefix through a
-// real terminal's global top boundary, while it itself remains on screen.
-func terminalHistoryBootstrapRows(history []HistoryCommit, frame TerminalFramePlan, theme style.ThemeContext) ([]string, [][]vt.Cell, error) {
-	if len(history) == 0 || frame.Geometry.Height < 1 || len(frame.Rows) != frame.Geometry.Height {
+func terminalHistoryCommitRows(commits []HistoryCommit, theme style.ThemeContext, width int) ([]string, [][]vt.Cell, error) {
+	if len(commits) == 0 {
 		return nil, nil, ErrInvalidHistoryHandoff
 	}
 	lines := make([]render.Line, 0)
-	for _, commit := range history {
-		if !commit.Valid() {
+	generation := commits[0].LayoutGeneration
+	previousToken := uint64(0)
+	for _, commit := range commits {
+		if !commit.Valid() || commit.LayoutGeneration != generation ||
+			(previousToken != 0 && commit.Token <= previousToken) {
 			return nil, nil, ErrInvalidHistoryHandoff
 		}
 		lines = append(lines, cloneRenderLines(commit.Lines)...)
+		previousToken = commit.Token
 	}
-	tail, err := terminalFrameScreenLines(frame)
-	if err != nil {
-		return nil, nil, err
-	}
-	lines = append(lines, tail...)
-	return terminalHistoryHandoffRows(lines, theme, frame.Geometry.Width)
+	return terminalHistoryHandoffRows(lines, theme, width)
 }
 
-func terminalFrameScreenLines(frame TerminalFramePlan) ([]render.Line, error) {
-	if frame.Geometry.Width < 1 || frame.Geometry.Height < 1 || len(frame.Rows) != frame.Geometry.Height ||
-		(len(frame.RenderRows) != 0 && len(frame.RenderRows) != len(frame.Rows)) {
-		return nil, ErrInvalidHistoryHandoff
+// terminalOffsetViewportANSI maps ScreenModel's viewport-relative CUP
+// coordinates onto physical terminal rows. Every CUP is fenced to area even
+// when its top is row one; all other complete CSI sequences pass through.
+func terminalOffsetViewportANSI(value string, area ViewportArea) (string, error) {
+	if value == "" {
+		return value, nil
 	}
-	lines := make([]render.Line, 0, len(frame.Rows))
-	for index := range frame.Rows {
-		if len(frame.RenderRows) == len(frame.Rows) {
-			lines = append(lines, cloneAppRenderLine(frame.RenderRows[index]))
+	if area.Top < 1 || area.Height < 1 || area.Width < 1 {
+		return "", ErrInvalidTerminalFrame
+	}
+	var output strings.Builder
+	for index := 0; index < len(value); {
+		if value[index] != '\x1b' || index+1 >= len(value) || value[index+1] != '[' {
+			output.WriteByte(value[index])
+			index++
 			continue
 		}
-		lines = append(lines, appPlainRenderLine(frame.Rows[index].Text))
+		end := index + 2
+		for end < len(value) && (value[end] < 0x40 || value[end] > 0x7e) {
+			end++
+		}
+		if end >= len(value) {
+			return "", ErrInvalidTerminalFrame
+		}
+		final := value[end]
+		if final != 'H' && final != 'f' {
+			output.WriteString(value[index : end+1])
+			index = end + 1
+			continue
+		}
+		parameters := strings.Split(value[index+2:end], ";")
+		if len(parameters) == 0 || len(parameters) > 2 {
+			return "", ErrInvalidTerminalFrame
+		}
+		row := 1
+		if parameters[0] != "" {
+			parsed, err := strconv.Atoi(parameters[0])
+			if err != nil || parsed < 1 || parsed > area.Height {
+				return "", ErrInvalidTerminalFrame
+			}
+			row = parsed
+		}
+		column := 1
+		if len(parameters) == 2 && parameters[1] != "" {
+			parsed, err := strconv.Atoi(parameters[1])
+			if err != nil || parsed < 1 || parsed > area.Width {
+				return "", ErrInvalidTerminalFrame
+			}
+			column = parsed
+		}
+		output.WriteString("\x1b[")
+		output.WriteString(strconv.Itoa(area.Top + row - 1))
+		if len(parameters) == 2 {
+			output.WriteByte(';')
+			if parameters[1] != "" {
+				output.WriteString(strconv.Itoa(column))
+			}
+		}
+		output.WriteByte(final)
+		index = end + 1
 	}
-	return lines, nil
+	return output.String(), nil
+}
+
+func terminalViewportTransitionANSI(previous, next ViewportArea, physicalHeight int, historyTailRows []string, topAligned bool) (string, bool) {
+	if previous.Height <= 0 || previous == next || physicalHeight < 1 {
+		return "", topAligned
+	}
+	oldCapacity, newCapacity := previous.Top-1, next.Top-1
+	if oldCapacity < 1 || newCapacity < 0 {
+		return "", topAligned
+	}
+	resident := len(historyTailRows)
+	if resident > oldCapacity {
+		resident = oldCapacity
+	}
+
+	if newCapacity < oldCapacity {
+		if topAligned {
+			overflow := resident - newCapacity
+			if overflow <= 0 {
+				return "", true
+			}
+			return renderengine.NewHandoffPlan(
+				physicalHeight, oldCapacity, make([]string, overflow),
+			).ANSI(), true
+		}
+		delta := oldCapacity - newCapacity
+		blankHeadroom := oldCapacity - resident
+		shift := delta
+		if shift > blankHeadroom {
+			shift = blankHeadroom
+		}
+		var output strings.Builder
+		// Delete only unused headroom inside the old bounded region. CSI M
+		// shifts resident rows upward but, unlike LF at row one, never appends
+		// the deleted blank line to native scrollback.
+		if shift > 0 && resident > 0 {
+			output.WriteString(terminalHistoryDeleteLinesANSI(oldCapacity, 1, shift))
+		}
+		overflow := resident - newCapacity
+		if overflow > 0 {
+			output.WriteString(renderengine.NewHandoffPlan(
+				physicalHeight, oldCapacity, make([]string, overflow),
+			).ANSI())
+		}
+		return output.String(), overflow > 0
+	}
+	if newCapacity == oldCapacity {
+		return "", topAligned
+	}
+
+	var output strings.Builder
+	// Rows newly transferred from the inline viewport are cleared before any
+	// line insertion, so prompt/status content can never become history.
+	for row := oldCapacity + 1; row <= newCapacity && row <= physicalHeight; row++ {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
+	}
+	if resident > 0 && !topAligned {
+		start := oldCapacity - resident + 1
+		output.WriteString(terminalHistoryInsertLinesANSI(newCapacity, start, newCapacity-oldCapacity))
+	}
+	return output.String(), topAligned
+}
+
+func terminalRetainHistoryTailRows(rows []string, capacity int) []string {
+	if capacity <= 0 || len(rows) == 0 {
+		return nil
+	}
+	if len(rows) > capacity {
+		rows = rows[len(rows)-capacity:]
+	}
+	return append([]string(nil), rows...)
+}
+
+func terminalAppendHistoryTailRows(current, inserted []string, capacity int) []string {
+	if capacity <= 0 {
+		return nil
+	}
+	combined := make([]string, 0, len(current)+len(inserted))
+	combined = append(combined, current...)
+	combined = append(combined, inserted...)
+	return terminalRetainHistoryTailRows(combined, capacity)
+}
+
+// terminalHistoryInsertionANSI appends semantic history without placing blank
+// headroom inside one continuous native-history stream. Before the first
+// overflow, a short resident tail stays bottom-aligned near the composer. Once
+// overflow has reached native scrollback, the resident suffix is top-aligned;
+// any later capacity growth remains below the suffix and new rows fill it in
+// document order. Only rows beyond the physical capacity use LF.
+func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []string, topAligned bool) (string, bool) {
+	if height < 1 || capacity < 1 || len(inserted) == 0 {
+		return "", topAligned
+	}
+	if capacity > height {
+		capacity = height
+	}
+	resident = terminalRetainHistoryTailRows(resident, capacity)
+	fill := capacity - len(resident)
+	if fill > len(inserted) {
+		fill = len(inserted)
+	}
+	var output strings.Builder
+	if fill > 0 {
+		output.WriteString("\x1b[s")
+		fmt.Fprintf(&output, "\x1b[1;%dr", capacity)
+		if len(resident) > 0 && !topAligned {
+			start := capacity - len(resident) - fill + 1
+			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[%dM", start, fill)
+		}
+		start := capacity - fill + 1
+		if topAligned {
+			start = len(resident) + 1
+		}
+		for index, row := range inserted[:fill] {
+			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", start+index)
+			output.WriteString(row)
+		}
+		output.WriteString("\x1b[r\x1b[u")
+	}
+	if fill < len(inserted) {
+		output.WriteString(renderengine.NewHandoffPlan(height, capacity, inserted[fill:]).ANSI())
+		topAligned = true
+	}
+	return output.String(), topAligned
+}
+
+func terminalHistoryDeleteLinesANSI(capacity, row, count int) string {
+	if capacity < 1 || row < 1 || row > capacity || count < 1 {
+		return ""
+	}
+	var output strings.Builder
+	output.WriteString("\x1b[s")
+	fmt.Fprintf(&output, "\x1b[1;%dr\x1b[%d;1H\x1b[%dM", capacity, row, count)
+	output.WriteString("\x1b[r\x1b[u")
+	return output.String()
+}
+
+func terminalClearHistoryRegionANSI(capacity int) string {
+	if capacity < 1 {
+		return ""
+	}
+	var output strings.Builder
+	output.WriteString("\x1b[s\x1b[r")
+	for row := 1; row <= capacity; row++ {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
+	}
+	output.WriteString("\x1b[u")
+	return output.String()
+}
+
+func terminalResetScrollbackANSI() string {
+	return "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
+}
+
+func terminalHistoryInsertLinesANSI(capacity, row, count int) string {
+	if capacity < 1 || row < 1 || row > capacity || count < 1 {
+		return ""
+	}
+	var output strings.Builder
+	output.WriteString("\x1b[s")
+	fmt.Fprintf(&output, "\x1b[1;%dr\x1b[%d;1H\x1b[%dL", capacity, row, count)
+	output.WriteString("\x1b[r\x1b[u")
+	return output.String()
 }
 
 type terminalWriteResult struct {

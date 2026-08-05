@@ -18,6 +18,7 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 	chat := &cobra.Command{Use: "chat"}
 	chat.Flags().StringP("provider", "p", "", "")
 	chat.Flags().StringP("model", "m", "", "")
+	chat.Flags().String("prompt", "", "")
 	chat.Flags().StringP("message", "M", "", "")
 	chat.Flags().BoolP("stream", "s", false, "")
 	chat.Flags().Bool("no-interactive", false, "")
@@ -50,6 +51,16 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 			name: "chat flags default to chat",
 			args: []string{"-M", "hello", "--no-interactive"},
 			want: []string{"chat", "-M", "hello", "--no-interactive"},
+		},
+		{
+			name: "startup prompt defaults to chat",
+			args: []string{"--prompt", "inspect project"},
+			want: []string{"chat", "--prompt", "inspect project"},
+		},
+		{
+			name: "startup prompt keeps provider shorthand",
+			args: []string{"-p", "codex", "--prompt", "inspect project"},
+			want: []string{"chat", "-p", "codex", "--prompt", "inspect project"},
 		},
 		{
 			name: "mixed root and chat flags default to chat",

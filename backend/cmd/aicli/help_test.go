@@ -13,6 +13,8 @@ func TestRootCommandHelpMentionsOnboardingDocs(t *testing.T) {
 	for _, want := range []string{
 		"aicli init --global",
 		"aicli login --provider openai",
+		"aicli --prompt \"检查当前项目\"",
+		"aicli chat --prompt \"检查当前项目\"",
 		"aicli resume",
 		"aicli doctor provider",
 		"docs/aicli/quickstart.md",

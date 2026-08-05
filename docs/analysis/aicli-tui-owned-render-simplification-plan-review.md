@@ -4,9 +4,25 @@
 
 对照：`docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md` 与 `E:\projects\ai\codex\codex-rs\tui\src`
 
-状态：**completed（原 2026-08-02 架构方案 rejected；2026-08-03 修订版 accepted as migration sub-plan）**
+状态：**completed / post-cutover verified（原方案 rejected；修订方案已实施并完成核心实机验收）**
 
-日期：2026-08-04
+日期：2026-08-06
+
+## 0. 2026-08-06 实施后复评
+
+本节是当前权威结论，覆盖后文 2026-08-04 对“尚未安装”“仍由 legacy writer 负责”的施工期描述。修订方案的核心目标已经落地：production interactive terminal 只有 `TerminalSessionPresenter/TerminalSession` 一个 physical writer；`AppState/Scene` 是语义来源；tokenized `HistoryEffectQueue` 管理交接；top terminal-owned history region 与 bottom application-owned inline viewport 分离；`ScreenModel` 不再持有或重画 finalized history；active stable prefix 只有 Ack 后才从 live projection 移除；finalize 只提交未 Ack suffix；Markdown 交接保留结构化 IR。
+
+真实 provider Windows Terminal run `output/aicli-terminal-e2e/opencode-wt-1176ea6f5afc4fa597964cc30b50a984` 给出端到端证据：40/40 finalized marker 各一次且严格有序，marker 01 在完整 `DocumentRange` 但不在 visible range，marker 40 可见，reasoning sentinel 位于首 marker 前且只出现一次，raw runtime event 标签未泄漏，异常空行数为 0，三次 UIA snapshot 稳定，`/exit` 后 runner exit code 为 0，forced cleanup 为 0。`--prompt` 与 `chat --prompt` 的首次自动提交、交互继续和 `--no-interactive` 退出边界均有命令级回归。
+
+这里的 reasoning 结论是“语义内容正常显示且顺序正确”；未出现的是 raw `assistant.reasoning` 事件名称，不是 reasoning 正文本身。
+
+实施后又发现并关闭两个原评审未充分具体化的缺口：
+
+1. finalized plain source 的内部空行曾没有非空 source identity，导致 Ack prefix 后的 suffix planner 放弃整个 cell；现以 newline byte range 与 fragment identity 表达内部/尾随空行。
+2. native scrollback 已发生后，resident history 继续 bottom-align 会在 capacity 增长时把空 headroom 插入连续信息流；现首次真实 overflow 后切为 sticky top alignment，并覆盖 shrink/grow、alternate-screen round-trip、partial/zero write 与 resize rebuild。
+3. 成功的 `llm.request.finished` 曾被误当作 assistant semantic final，提前重置 active stream，使稍后到达的 authoritative `assistant_message` 无法提交最后 coalesced tail；现成功 request-finished 只作为 transport boundary，失败、interrupt、session end 和 run-end fallback 才可提前收尾。
+
+因此 G1-G12 对核心 render path 的 disposition 为 **implemented and verified**，而不是继续停留在 proposed/implementing。仍在进行的 compatibility state 删除、剩余 producer/同步 interaction effect 化、更多 terminal host 与长会话矩阵属于后续工程清理，不允许重新引入旧 whole-screen viewport、多个 writer、geometry-driven commit 或无类型 frontier。
 
 ## 1. 结论
 
@@ -26,7 +42,9 @@
 
 因此修订版可作为迁移子计划批准，但不得脱离母计划独立改变终局。
 
-## 2. 当前实现判断
+## 2. 2026-08-04 pre-cutover 实现判断（历史）
+
+> 本节保留评审时的迁移依据，不描述 2026-08-06 production 状态；当前结论只取本文 §0。
 
 ### 2.1 多个状态源仍在生产路径
 
@@ -151,3 +169,5 @@ Codex 值得迁移的不是某条 ANSI 序列，而是职责和时间顺序：
 2026-08-03 修订方案：**批准为统一架构下的迁移子计划。** 它现在覆盖了用户关心的历史重复、状态管理、屏幕管理、组件协调和事件流，不再通过另一套局部边界状态机绕过 Scene/UI owner。
 
 剩余风险主要在实现而非文档方向：Go 现有 coordinator/surface 体量大，actor adapter 阶段必须保证视觉行为不变；terminal short write 的“不确定是否部分生效”需要明确 recovery 策略；streaming queued/acked range 必须集中但不能被粗暴删除。这些均已进入方案测试矩阵和阶段出口。
+
+2026-08-06 实施后 disposition：**核心 render cutover accepted and verified。** G1-G12 的架构门禁已在 production path 落地，short/zero write、active prefix/final suffix、空白 source row、sticky top alignment、resize/alternate round-trip 及真实 Windows Terminal native scrollback 均有回归证据。未完成项仅按母计划继续做 compatibility/producer cleanup 和更广宿主矩阵，不再阻塞本专项核心目标状态。

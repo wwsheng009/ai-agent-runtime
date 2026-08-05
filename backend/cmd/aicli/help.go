@@ -38,7 +38,9 @@ const rootCommandExampleHelp = `  # 首次使用
 
   # 交互式聊天（默认）
   aicli
+  aicli --prompt "检查当前项目"            # 自动提交一次，完成后继续交互
   aicli chat
+  aicli chat --prompt "检查当前项目"
   aicli chat --provider openai --model gpt-4.1
   aicli resume
   aicli resume session_xxx

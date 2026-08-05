@@ -39,6 +39,17 @@ type DisplayRange struct {
 	End   int
 }
 
+// HistoryCommitOrigin distinguishes immutable transcript history from a
+// stable prefix handed off while its semantic cell is still mutable. Active
+// effects deliberately survive append-only source revisions; transcript
+// effects retain the exact finalized revision as part of their identity.
+type HistoryCommitOrigin uint8
+
+const (
+	HistoryCommitTranscript HistoryCommitOrigin = iota
+	HistoryCommitActive
+)
+
 func (r DisplayRange) Valid() bool {
 	return r.Start >= 0 && r.End >= r.Start
 }
@@ -48,6 +59,7 @@ func (r DisplayRange) Valid() bool {
 // layout generation are all required; text is payload, never identity.
 type HistoryCommit struct {
 	Token       uint64
+	Origin      HistoryCommitOrigin
 	CellID      scene.CellID
 	Revision    uint64
 	SourceRange SourceRange
@@ -61,7 +73,8 @@ type HistoryCommit struct {
 }
 
 func (c HistoryCommit) Valid() bool {
-	return c.Token != 0 && c.CellID != 0 && c.LayoutGeneration != 0 &&
+	return c.Token != 0 && c.Origin <= HistoryCommitActive &&
+		c.CellID != 0 && c.LayoutGeneration != 0 &&
 		c.SourceRange.Valid() && c.SourceRange.End > c.SourceRange.Start &&
 		c.DisplayRange.Valid() && c.DisplayRange.End > c.DisplayRange.Start
 }
@@ -115,6 +128,7 @@ func (e HistoryCommitEntry) Clone() HistoryCommitEntry {
 }
 
 type historyCommitRangeKey struct {
+	origin           HistoryCommitOrigin
 	cellID           scene.CellID
 	revision         uint64
 	sourceStart      int
@@ -126,6 +140,7 @@ type historyCommitRangeKey struct {
 }
 
 type historyCommitSourceKey struct {
+	origin      HistoryCommitOrigin
 	cellID      scene.CellID
 	revision    uint64
 	sourceStart int
@@ -134,9 +149,16 @@ type historyCommitSourceKey struct {
 }
 
 func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
+	revision := commit.Revision
+	if commit.Origin == HistoryCommitActive {
+		// Mutable source revisions are delivery fences, not new semantic cells.
+		// An append-only update must not mint the same stable range again.
+		revision = 0
+	}
 	return historyCommitSourceKey{
+		origin:      commit.Origin,
 		cellID:      commit.CellID,
-		revision:    commit.Revision,
+		revision:    revision,
 		sourceStart: commit.SourceRange.Start,
 		sourceEnd:   commit.SourceRange.End,
 		fragmentID:  commit.FragmentID,
@@ -145,6 +167,7 @@ func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
 
 func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 	return historyCommitRangeKey{
+		origin:           c.Origin,
 		cellID:           c.CellID,
 		revision:         c.Revision,
 		sourceStart:      c.SourceRange.Start,
@@ -193,8 +216,11 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 		return ErrDuplicateCommitToken
 	}
 	key := historyCommitKey(commit)
-	if _, exists := l.byRange[key]; exists {
-		return ErrDuplicateCommitRange
+	if token, exists := l.byRange[key]; exists {
+		previous := l.byToken[token]
+		if previous.State != HistoryCommitInvalidated || previous.MayHavePartiallyWritten {
+			return ErrDuplicateCommitRange
+		}
 	}
 	l.byToken[commit.Token] = HistoryCommitEntry{Commit: commit.Clone(), State: HistoryCommitPending}
 	l.byRange[key] = commit.Token
@@ -244,7 +270,8 @@ func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCom
 		return ErrCommitNotPending
 	}
 	current := entry.Commit
-	if current.CellID != replacement.CellID || current.Revision != replacement.Revision ||
+	if current.Origin != replacement.Origin || current.CellID != replacement.CellID ||
+		(current.Origin != HistoryCommitActive && current.Revision != replacement.Revision) ||
 		current.SourceRange != replacement.SourceRange || current.FragmentID != replacement.FragmentID {
 		return ErrCommitSourceChanged
 	}
@@ -308,9 +335,12 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	entry.AckFrame = frame
 	entry.Failure = nil
 	entry.MayHavePartiallyWritten = false
-	// The semantic transcript remains authoritative after delivery. The effect
-	// payload is retained only until its terminal transaction is acknowledged.
-	entry.Commit.Lines = nil
+	// Finalized transcript source can always rebuild its payload. A mutable
+	// handoff retains its small delivered fragment until finalization so the
+	// finalized planner can prove and skip that already-physical rich prefix.
+	if entry.Commit.Origin == HistoryCommitTranscript {
+		entry.Commit.Lines = nil
+	}
 	l.byToken[token] = entry
 	return nil
 }

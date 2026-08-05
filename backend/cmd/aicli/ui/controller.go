@@ -460,7 +460,9 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 		return false
 	}
 	switch action.(type) {
-	case ReplaceTranscriptAction, FinalizeActiveCellAction, Resize,
+	case ReplaceTranscriptAction, SetActiveCellAction, UpdateActiveCellAction,
+		SetSemanticActiveCellProjectionAction,
+		FinalizeActiveCellAction, Resize,
 		LeaseReleased, HistoryProjectionRecovered, HistoryScrollbackReconciled,
 		HistoryCommitAcknowledged, HistoryCommitsAcknowledged:
 		return true

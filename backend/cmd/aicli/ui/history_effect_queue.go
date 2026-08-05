@@ -114,8 +114,10 @@ func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
 	}
 	for _, entry := range s.ledger.byToken {
 		current := entry.Commit
-		if entry.State != HistoryCommitPending || current.CellID != commit.CellID ||
-			current.Revision != commit.Revision || current.SourceRange != commit.SourceRange ||
+		if entry.State != HistoryCommitPending || current.Origin != commit.Origin ||
+			current.CellID != commit.CellID ||
+			(current.Origin != HistoryCommitActive && current.Revision != commit.Revision) ||
+			current.SourceRange != commit.SourceRange ||
 			current.FragmentID != commit.FragmentID {
 			continue
 		}
@@ -154,8 +156,21 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 	if s == nil || s.ledger == nil || len(commits) == 0 {
 		return ErrCommitNotInFlight
 	}
+	if s.Frozen {
+		return ErrHistoryCommitFrozen
+	}
+	if s.ProjectionUnknown {
+		return ErrHistoryProjectionUnknown
+	}
+	if s.hasUnresolvedTerminalDelivery() {
+		return ErrHistoryCommitRecoveryPending
+	}
+
+	// Validate the complete delivered snapshot before changing any entry. The
+	// terminal wrote this batch atomically, so a concurrent semantic rebase of
+	// a later Pending token must not leave an Acked prefix and a retryable tail.
 	previousToken := uint64(0)
-	for _, commit := range commits {
+	for index, commit := range commits {
 		if commit.LayoutGeneration != generation || commit.Token == 0 || (previousToken != 0 && commit.Token <= previousToken) {
 			return ErrStaleLayoutGeneration
 		}
@@ -163,19 +178,51 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 		if !ok || !historyCommitPresentationEqual(entry.Commit, commit) {
 			return ErrCommitSourceChanged
 		}
-		if entry.State == HistoryCommitPending {
-			if err := s.markInFlight(commit.Token, generation); err != nil {
+		if (index == 0 && entry.State != HistoryCommitInFlight) ||
+			(index > 0 && entry.State != HistoryCommitPending) {
+			return ErrCommitNotInFlight
+		}
+		previousToken = commit.Token
+	}
+
+	for index, commit := range commits {
+		if index > 0 {
+			if err := s.ledger.MarkInFlight(commit.Token); err != nil {
 				return err
 			}
-		} else if entry.State != HistoryCommitInFlight {
-			return ErrCommitNotInFlight
 		}
 		if err := s.ack(commit.Token, frame, generation); err != nil {
 			return err
 		}
-		previousToken = commit.Token
 	}
 	return nil
+}
+
+// markDeliveredBatchUnresolved records that the terminal may have accepted
+// every row from a batch whose actor snapshot could no longer be acknowledged.
+// None of those tokens may become retryable after a viewport-only recovery.
+func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []HistoryCommit, cause error) {
+	if s == nil || s.ledger == nil {
+		return
+	}
+	for _, delivered := range commits {
+		entry, ok := s.ledger.byToken[delivered.Token]
+		if !ok || entry.State == HistoryCommitAcked {
+			continue
+		}
+		switch entry.State {
+		case HistoryCommitPending:
+			s.ledger.pendingCount--
+			entry.State = HistoryCommitStateFailed
+		case HistoryCommitInFlight, HistoryCommitStateFailed:
+			entry.State = HistoryCommitStateFailed
+		case HistoryCommitInvalidated:
+			// Keep the invalidated identity, but strengthen its physical fact.
+		}
+		entry.Failure = cause
+		entry.MayHavePartiallyWritten = true
+		s.ledger.byToken[delivered.Token] = entry
+	}
 }
 
 func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error {

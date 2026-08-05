@@ -131,6 +131,46 @@ func TestLayoutAppScreenExcludesMutableTranscriptFromRetainedRows(t *testing.T) 
 	}
 }
 
+func TestLayoutAppScreenExcludesCanonicalSuffixAfterMutableBarrier(t *testing.T) {
+	state := AppState{
+		Geometry: GeometryState{Width: 40, Height: 8},
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: "visible prefix", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
+			{ID: 2, Sequence: 2, Kind: scene.KindSupplement, Source: "reasoning barrier", Phase: scene.CellMutable, Boundary: boundary.BoundaryNormal},
+			{ID: 3, Sequence: 3, Kind: scene.KindAssistant, Source: "blocked finalized assistant", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
+			{ID: 4, Sequence: 4, Kind: scene.KindSystem, Source: "blocked system", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
+		}}),
+		Active: ActiveCellState{CellID: 2, Revision: 1, Kind: scene.KindSupplement, Phase: ActiveCellMutable, Source: "reasoning barrier"},
+	}
+
+	plan := LayoutAppScreen(state)
+	for _, row := range plan.Rows {
+		if row.CellID == 2 || row.CellID == 3 || row.CellID == 4 ||
+			row.Text == "blocked finalized assistant" || row.Text == "blocked system" {
+			t.Fatalf("canonical suffix crossed mutable barrier: %+v", plan.Rows)
+		}
+	}
+	seenPrefix := false
+	for _, row := range plan.Rows {
+		seenPrefix = seenPrefix || row.CellID == 1 && row.Text == "visible prefix"
+	}
+	if !seenPrefix {
+		t.Fatalf("finalized prefix was not retained: %+v", plan.Rows)
+	}
+}
+
+func TestActiveCellFromTranscriptSelectsFirstCanonicalMutableCell(t *testing.T) {
+	transcript := NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+		{ID: 10, Sequence: 1, Kind: scene.KindSupplement, Revision: 2, Source: "reasoning first", Phase: scene.CellMutable},
+		{ID: 11, Sequence: 2, Kind: scene.KindAssistant, Revision: 3, Source: "assistant later", Phase: scene.CellMutable},
+	}})
+
+	active, ok := ActiveCellFromTranscript(transcript)
+	if !ok || active.CellID != 10 || active.Kind != scene.KindSupplement || active.Source != "reasoning first" {
+		t.Fatalf("active = %+v, ok=%v; want first canonical mutable cell", active, ok)
+	}
+}
+
 func TestLayoutAppScreenSemanticActiveProjectionRejectsLegacyBandPayload(t *testing.T) {
 	state := AppState{
 		Geometry:                     GeometryState{Width: 40, Height: 8},

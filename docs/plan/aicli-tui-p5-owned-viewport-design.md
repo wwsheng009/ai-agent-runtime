@@ -1,8 +1,8 @@
 # P5 专项设计：aicli 保留式底部 viewport + 不可变 scrollback（owned viewport backend）
 
-状态: **historical/as-built baseline with known defects（P5.0–P5.6 功能切片已接线，但 P5.3 handoff 与 P5 总体验收未完成；目标架构已由 unified plan 接管）**
+状态: **historical/superseded baseline（缺陷机制已由 unified inline viewport 替换）**
 
-更新时间: **2026-08-03**
+更新时间: **2026-08-06**
 
 关联文档:
 - 长期架构基线: `docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md`（Scene、single screen owner、事务式 frame、fullscreen lease 与旧路径删除）
@@ -12,6 +12,12 @@
 - 上游数据面: `docs/plan/aicli-event-stream-rendering-order-unified-encoder-plan.md`（事件 → 有序带身份 RenderModel/ChangeSet；本页"cell 模型（数据面）"的**内容源**，cell 身份对应 `Item.ID`）
 
 > 本文只记录 owned viewport、ActiveBand、history handoff、resize/reflow 和 P5.6 gap 的历史实施事实，不再定义终局。P5.0–P5.6 的若干功能已接线，但 `historyWindow/headroom/handoffFrontier/commitExcess` 仍共同参与正确性，重复 handoff 专项测试仍未通过，因此不能把“切片已接线”解释为“P5 退出条件已满足”。跨模块目标、状态所有权和迁移顺序统一以 `aicli-tui-unified-render-architecture-refactor-plan.md` 为准。
+
+> **后继实现状态（2026-08-05）**：本文记录的 whole-screen owned viewport、`historyWindow/headroom/handoffFrontier/commitExcess` 不再是 interactive production 机制。当前 `TerminalSession` 仅拥有 bottom inline viewport 的 `ScreenModel`；finalized rows 与 mutable stable overflow 使用 reducer-owned tokenized effects 插入顶部 terminal history region，形成当前可见历史 tail 与 native scrollback。viewport diff 被物理 fence 在 bottom region，prompt/status/popup 不会进入 scrollback；active finalize 和 rich Markdown 已有 exactly-once 回归，真实 WezTerm/ConPTY scrollback probe 已通过。后续不得从本文恢复 whole-screen redraw、geometry-driven handoff 或 legacy frontier。
+
+> **2026-08-06 最终 disposition**：P5 文中 `historyWindow/headroom/handoffFrontier/commitExcess` 组合机制只保留为历史故障样本，已经不是待完成设计，也不得用于修补 production。后继 inline 机制已通过真实 Windows Terminal/provider run `opencode-wt-1176ea6f5afc4fa597964cc30b50a984`：40 条 finalized marker exactly-once，最早行位于 native scrollback、最新行位于主界面、异常空行 0、正常 `/exit` 后进程退出码 0。真实回归进一步证明 P5 的两类隐蔽缺陷：无 source identity 的内部空行会阻断 final suffix handoff；native overflow 后继续 bottom-align resident tail 会在容量增长时制造中间 headroom。后继实现分别采用 newline-backed fragment identity 与 sticky top-aligned resident history；P5 不再有独立实施阶段，其后续清理统一由母计划管理。
+
+> 该实机 run 同时确认 reasoning 语义内容在 final answer 前正常显示；仅 raw `assistant.reasoning` 协议标签未泄漏。成功的 `llm.request.finished` 在后继实现中只表示 transport boundary，必须等待 authoritative `assistant_message` 才完成正常 assistant finalization。
 
 > **禁止作为新实现依据的过渡决策**：全局 Frame/Scrollback mode、无类型 `committedBoundary int`、几何变化驱动 history commit、依赖 RI/SD 从 native scrollback 拉回、以 `ScreenModel` 代替 semantic source truth。相关故障分析可以复用，但新实现必须走 unified plan 的 UI actor + AppState + tokenized effect + transactional Presenter。
 

@@ -484,6 +484,10 @@ type FinalizeActiveCellAction struct {
 	Snapshot               *scene.Snapshot
 	ExpectedActiveCellID   scene.CellID
 	ExpectedActiveRevision uint64
+	// ExpectedSceneRevision fences the committed Scene cell independently from
+	// ExpectedActiveRevision. Active revisions are reducer-local source fences
+	// and must never be compared numerically with Scene cell revisions.
+	ExpectedSceneRevision uint64
 	// ExpectedActiveKind is an optional semantic-kind fence. CellKind's zero
 	// value is KindUser, so ExpectedActiveKindKnown is required to distinguish
 	// an intentionally supplied kind from early migration actions that did not

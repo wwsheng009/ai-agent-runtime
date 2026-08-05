@@ -171,11 +171,17 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			}
 		}
 	case HistoryCommitsAcknowledged:
-		if a.LayoutGeneration != state.LayoutGeneration ||
-			state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration) != nil {
+		var ackErr error
+		if a.LayoutGeneration != state.LayoutGeneration {
+			ackErr = ErrStaleLayoutGeneration
+		} else {
+			ackErr = state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration)
+		}
+		if ackErr != nil {
 			// A batch that no longer matches the reducer snapshot may have
-			// reached native scrollback. Do not advance a partial prefix or
-			// attempt a blind retry against an unknown physical projection.
+			// reached native scrollback in full. Quarantine every delivered
+			// token so viewport recovery cannot expose a retryable suffix.
+			state.HistoryEffects.markDeliveredBatchUnresolved(a.Commits, ackErr)
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if len(a.Commits) > 0 {
 			advanceActiveCellLedgerOnAck(&state, a.Commits)
@@ -211,6 +217,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// under fresh tokens; never reinterpret old delivery as Acked.
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && !state.HistoryEffects.ProjectionUnknown &&
 			a.LayoutGeneration == state.LayoutGeneration && state.HistoryEffects.reconcileScrollback(a.TerminalEpoch) {
+			resetActiveHistoryProgressForTerminalEpoch(&state)
 			syncHistoryEffectsForTranscript(&state)
 		}
 	case DrawRequested:
@@ -218,6 +225,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case ReplaceTranscriptAction:
 		state.Transcript = NewTranscriptState(a.Snapshot)
 		state.Active = reconcileTranscriptActiveCell(state.Active, state.Transcript)
+		if state.SemanticActiveCellProjection && state.Active.Phase == ActiveCellMutable {
+			state.Active = normalizeActiveStableRange(state.Active, state.Active.Enqueued.End)
+		}
 		syncHistoryEffectsForTranscript(&state)
 		refreshTranscriptOverlayPager(&state)
 	case SetActiveCellAction:
@@ -229,8 +239,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// Mounting a new cell is a durable boundary, but it must not install a
 		// malformed range ledger. Scene-derived all-zero ranges remain valid
 		// during migration; populated ranges use the same invariant as updates.
-		if a.Active.ValidateStreamingRanges() == nil {
-			state.Active = a.Active.Clone()
+		next := a.Active.Clone()
+		if state.SemanticActiveCellProjection {
+			next = normalizeActiveStableRange(next, next.Enqueued.End)
+		}
+		if next.ValidateStreamingRanges() == nil {
+			state.Active = next
 			syncHistoryEffectsForTranscript(&state)
 			refreshTranscriptOverlayPager(&state)
 		}
@@ -251,7 +265,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		if state.Active.CellID == a.ExpectedActiveCellID &&
 			state.Active.Revision == a.ExpectedActiveRevision &&
 			(!a.ExpectedActiveKindKnown || state.Active.Kind == a.ExpectedActiveKind) &&
-			finalizedCellInSnapshot(a.Snapshot, a.ExpectedActiveCellID, a.ExpectedActiveRevision, a.ExpectedActiveKind, a.ExpectedActiveKindKnown) {
+			finalizedCellInSnapshot(a.Snapshot, a.ExpectedActiveCellID, a.ExpectedSceneRevision, a.ExpectedActiveKind, a.ExpectedActiveKindKnown) {
 			state.Transcript = NewTranscriptState(a.Snapshot)
 			if active, ok := ActiveCellFromTranscript(state.Transcript); ok {
 				state.Active = active
@@ -292,6 +306,10 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			// deliberately ignored below while semantic projection is active.
 			state.Bottom.ActiveBandLines = nil
 			state.Bottom.ActiveBandStyled = nil
+			if state.Active.Phase == ActiveCellMutable {
+				state.Active = normalizeActiveStableRange(state.Active, state.Active.Enqueued.End)
+				syncHistoryEffectsForTranscript(&state)
+			}
 		}
 	case SetStatusModelsAction:
 		state.Bottom.StatusModel = normalizeControllerStatusModel(a.Status)
@@ -377,6 +395,18 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	return state
 }
 
+func resetActiveHistoryProgressForTerminalEpoch(state *UIControllerState) {
+	if state == nil || state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 {
+		return
+	}
+	if state.Active.Enqueued == (SourceRange{}) && state.Active.Acked == (SourceRange{}) {
+		return
+	}
+	state.Active.Revision++
+	state.Active.Enqueued = SourceRange{}
+	state.Active.Acked = SourceRange{}
+}
+
 // advanceActiveCellLedgerOnAck moves the active source boundary only after a
 // history handoff has physically crossed the writer (single HistoryCommitAcknowledged
 // or the batched HistoryCommitsAcknowledged delivery). The band projection then
@@ -389,25 +419,28 @@ func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCom
 	if state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 || len(commits) == 0 {
 		return
 	}
-	var maxEnd int
-	for _, commit := range commits {
-		if commit.CellID != state.Active.CellID ||
-			commit.Revision != state.Active.Revision ||
-			commit.SourceRange.Start < state.Active.Acked.End {
-			continue
+	frontier := state.Active.Acked.End
+	for {
+		advanced := false
+		for _, commit := range commits {
+			if commit.Origin != HistoryCommitActive ||
+				commit.CellID != state.Active.CellID ||
+				commit.SourceRange.Start > frontier ||
+				commit.SourceRange.End <= frontier ||
+				commit.SourceRange.End > state.Active.Enqueued.End {
+				continue
+			}
+			frontier = commit.SourceRange.End
+			advanced = true
 		}
-		if commit.SourceRange.End > maxEnd {
-			maxEnd = commit.SourceRange.End
+		if !advanced {
+			break
 		}
 	}
-	if maxEnd <= state.Active.Acked.End {
+	if frontier <= state.Active.Acked.End {
 		return
 	}
-	next, err := MarkActiveEnqueued(state.Active, maxEnd)
-	if err != nil {
-		return
-	}
-	next, err = MarkActiveAcked(next, maxEnd)
+	next, err := MarkActiveAcked(state.Active, frontier)
 	if err != nil {
 		return
 	}
@@ -440,17 +473,13 @@ func reconcileTranscriptActiveCell(current ActiveCellState, transcript Transcrip
 	return next
 }
 
-func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expectedRevision uint64, expectedKind scene.CellKind, expectedKindKnown bool) bool {
+func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expectedSceneRevision uint64, expectedKind scene.CellKind, expectedKindKnown bool) bool {
 	if snapshot == nil || id == 0 {
 		return false
 	}
 	for _, cell := range snapshot.Cells {
-		// ActiveCellState.Revision is a reducer-side source fence. During the
-		// migration a shadow update may consume the same numeric revision as
-		// the final Scene mutation, so equality is valid here. The exact active
-		// fence is checked by the caller before this helper runs; a strictly
-		// older Scene cell remains stale.
-		if cell == nil || cell.ID != id || cell.Revision < expectedRevision ||
+		if cell == nil || cell.ID != id ||
+			(expectedSceneRevision != 0 && cell.Revision != expectedSceneRevision) ||
 			(expectedKindKnown && cell.Kind != expectedKind) {
 			continue
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
@@ -55,6 +56,36 @@ func (s ActiveCellState) ValidateStreamingRanges() error {
 
 func sourceRangePrefix(source, prefix string) bool {
 	return prefix == "" || strings.HasPrefix(source, prefix)
+}
+
+// deriveActiveStableEnd rebuilds the largest source prefix whose presentation
+// no longer depends on an incomplete trailing Markdown construct. Scene owns
+// the raw mutable source but does not carry renderer progress, so the reducer
+// derives this boundary instead of leaving production Active.Stable at zero.
+func deriveActiveStableEnd(source string) int {
+	if source == "" {
+		return 0
+	}
+	if !markdown.LooksLikeMarkdown(source) {
+		return len(source)
+	}
+	var collector markdown.StreamCollector
+	_ = collector.SetContent(source)
+	return len(collector.Stable())
+}
+
+func normalizeActiveStableRange(active ActiveCellState, minimum int) ActiveCellState {
+	stableEnd := deriveActiveStableEnd(active.Source)
+	if active.Stable.Start == 0 && active.Stable.End > stableEnd {
+		// An adapter with a stronger streaming parser may explicitly release a
+		// prefix. Never move a producer-owned stable boundary backwards.
+		stableEnd = active.Stable.End
+	}
+	if minimum > stableEnd {
+		stableEnd = minimum
+	}
+	active.Stable = SourceRange{Start: 0, End: stableEnd}
+	return active
 }
 
 // AdvanceActiveSource applies one source revision to the same mutable cell.
@@ -116,9 +147,6 @@ func reduceActiveCellUpdate(state *UIControllerState, action UpdateActiveCellAct
 		return ErrStaleActiveCellUpdate
 	}
 	next := action.Active.Clone()
-	if err := next.ValidateStreamingRanges(); err != nil {
-		return err
-	}
 	if next.CellID == 0 || next.Phase == ActiveCellInactive {
 		return ErrInvalidActiveCellRanges
 	}
@@ -126,6 +154,12 @@ func reduceActiveCellUpdate(state *UIControllerState, action UpdateActiveCellAct
 	if current.CellID == 0 {
 		if action.ExpectedCellID != 0 || action.ExpectedRevision != 0 {
 			return ErrStaleActiveCellUpdate
+		}
+		if state.SemanticActiveCellProjection {
+			next = normalizeActiveStableRange(next, next.Enqueued.End)
+		}
+		if err := next.ValidateStreamingRanges(); err != nil {
+			return err
 		}
 		state.Active = next
 		return nil
@@ -135,15 +169,28 @@ func reduceActiveCellUpdate(state *UIControllerState, action UpdateActiveCellAct
 		return ErrStaleActiveCellUpdate
 	}
 	if !sourceRangePrefix(next.Source, current.Source) {
-		// A correction/replacement invalidates byte offsets owned by the previous
-		// source. Never preserve a cursor that could duplicate or hide content.
+		// Pending bytes can be safely rebased before a write, but acknowledged
+		// bytes are already native scrollback. Preserve that physical frontier
+		// only when the correction leaves its exact source prefix unchanged.
+		ackedEnd := current.Acked.End
+		if ackedEnd > len(next.Source) ||
+			(ackedEnd > 0 && next.Source[:ackedEnd] != current.Source[:ackedEnd]) {
+			state.HistoryEffects.ProjectionUnknown = true
+			ackedEnd = 0
+		}
+		next.Acked = SourceRange{Start: 0, End: ackedEnd}
+		next.Enqueued = next.Acked
 		next.Stable = SourceRange{}
-		next.Enqueued = SourceRange{}
-		next.Acked = SourceRange{}
 	} else if !next.StreamingRangesKnown() && current.StreamingRangesKnown() {
 		// A producer may omit ranges only for a Scene-derived snapshot. An
 		// active update cannot erase a known queued-but-unacked range.
 		return ErrInvalidActiveCellRanges
+	}
+	if state.SemanticActiveCellProjection {
+		next = normalizeActiveStableRange(next, next.Enqueued.End)
+	}
+	if err := next.ValidateStreamingRanges(); err != nil {
+		return err
 	}
 	state.Active = next
 	return nil

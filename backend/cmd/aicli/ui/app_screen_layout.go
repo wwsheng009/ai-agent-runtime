@@ -102,8 +102,8 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 		result.OutputBottomRow = height
 	}
 
-	mutable := mutableTranscriptCellIDs(state.Transcript)
-	transcript := layoutTranscriptScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), mutable, width)
+	excluded := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
+	transcript := layoutTranscriptScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), excluded, width)
 	if len(transcript) > result.OutputBottomRow {
 		transcript = transcript[len(transcript)-result.OutputBottomRow:]
 	}
@@ -130,6 +130,28 @@ func mutableTranscriptCellIDs(transcript TranscriptState) map[scene.CellID]struc
 	var ids map[scene.CellID]struct{}
 	for _, cell := range transcript.Cells {
 		if cell.Phase != scene.CellMutable {
+			continue
+		}
+		if ids == nil {
+			ids = make(map[scene.CellID]struct{})
+		}
+		ids[cell.ID] = struct{}{}
+	}
+	return ids
+}
+
+// transcriptSuffixCellIDsFromFirstMutable keeps the inline viewport behind the
+// same canonical ordering barrier as native-history commits. Once a mutable
+// cell is encountered, that cell and every later cell stay out of the retained
+// transcript projection until the barrier finalizes.
+func transcriptSuffixCellIDsFromFirstMutable(transcript TranscriptState) map[scene.CellID]struct{} {
+	var ids map[scene.CellID]struct{}
+	blocked := false
+	for _, cell := range transcript.Cells {
+		if !blocked && cell.Phase == scene.CellMutable {
+			blocked = true
+		}
+		if !blocked {
 			continue
 		}
 		if ids == nil {

@@ -24,7 +24,7 @@ type chatCommandOptions struct {
 	FastFlag               bool
 	FastChanged            bool
 	NoInteractive          bool
-	Message                string
+	Message                string // resolved startup prompt; --message is an alias of --prompt
 	ImagePaths             []string
 	LogDir                 string
 	RequestTimeoutFlag     string
@@ -73,6 +73,28 @@ type chatCommandOptions struct {
 	SessionFeaturesRequested bool
 }
 
+func resolveChatInitialPrompt(cmd *cobra.Command) (string, error) {
+	flags := cmd.Flags()
+	prompt, message := "", ""
+	promptChanged, messageChanged := false, false
+	if flags.Lookup("prompt") != nil {
+		prompt, _ = flags.GetString("prompt")
+		promptChanged = flags.Changed("prompt")
+	}
+	if flags.Lookup("message") != nil {
+		message, _ = flags.GetString("message")
+		messageChanged = flags.Changed("message")
+	}
+
+	if promptChanged && messageChanged && prompt != message {
+		return "", fmt.Errorf("--prompt 与 --message 指定了不同的启动消息")
+	}
+	if promptChanged {
+		return prompt, nil
+	}
+	return message, nil
+}
+
 func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatCommandOptions, error) {
 	if cmd == nil {
 		return nil, fmt.Errorf("chat command is nil")
@@ -90,7 +112,10 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		fastChanged = cmd.Flags().Changed("fast")
 	}
 	noInteractive, _ := cmd.Flags().GetBool("no-interactive")
-	message, _ := cmd.Flags().GetString("message")
+	message, err := resolveChatInitialPrompt(cmd)
+	if err != nil {
+		return nil, err
+	}
 	imagePaths, _ := cmd.Flags().GetStringSlice("image")
 	logDir, _ := cmd.Flags().GetString("log-dir")
 	requestTimeoutFlag, _ := cmd.Flags().GetString("request-timeout")

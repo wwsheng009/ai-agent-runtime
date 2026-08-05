@@ -178,6 +178,49 @@ func TestHistoryEffectsReducer_BootstrapBatchAcknowledgesOrderedPendingRangesAto
 	}
 }
 
+func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBatch(t *testing.T) {
+	state := historyEffectTestState(t, 2)
+	entries := state.HistoryEffects.Entries()
+	if len(entries) < 3 {
+		t.Fatalf("fixture entries = %#v, want at least three", entries)
+	}
+	commits := []HistoryCommit{
+		entries[0].Commit.Clone(),
+		entries[1].Commit.Clone(),
+		entries[2].Commit.Clone(),
+	}
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: commits[0].Token, LayoutGeneration: state.LayoutGeneration,
+	}, 3)
+
+	// Simulate a semantic/layout action rebasing a later token while the old
+	// bootstrap snapshot is already crossing the terminal writer.
+	rebased := commits[1].Clone()
+	rebased.Lines = []render.Line{{Spans: []render.Span{{Text: "rebased payload"}}}}
+	if err := state.HistoryEffects.rebasePending(rebased); err != nil {
+		t.Fatalf("rebase pending bootstrap token: %v", err)
+	}
+	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
+		Commits: commits, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+	}, 4)
+
+	for _, commit := range commits {
+		entry := historyCommitEntry(t, state, commit.Token)
+		if entry.State != HistoryCommitStateFailed || entry.AckFrame != 0 ||
+			!entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrCommitSourceChanged) {
+			t.Fatalf("mismatched delivered token %d was not quarantined: %#v", commit.Token, entry)
+		}
+	}
+	if !state.HistoryEffects.ProjectionUnknown || len(state.HistoryEffects.Pending()) != 0 {
+		t.Fatalf("mismatched batch remained retryable: %#v", state.HistoryEffects)
+	}
+
+	state = reduceUIControllerState(state, HistoryProjectionRecovered{LayoutGeneration: state.LayoutGeneration}, 5)
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
+		t.Fatalf("viewport-only recovery exposed an unresolved batch: %#v", state.HistoryEffects)
+	}
+}
+
 func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 4, Height: 4, Generation: 1},
@@ -188,8 +231,8 @@ func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 		}}),
 	}
 	commits := planEligibleHistoryCommits(state)
-	if len(commits) != 2 {
-		t.Fatalf("physical wrapped eligibility = %#v, want two row fragments for cell 1", commits)
+	if len(commits) != 4 {
+		t.Fatalf("physical wrapped eligibility = %#v, want all four finalized row fragments", commits)
 	}
 	want := []struct {
 		source  SourceRange
@@ -224,8 +267,8 @@ func TestPlanEligibleHistoryCommits_SplitsUnbrokenPlainLineAtPrimaryBoundary(t *
 	}
 
 	commits := planEligibleHistoryCommits(state)
-	if len(commits) != 1 {
-		t.Fatalf("unbroken overflow commits = %#v, want first wrapped row", commits)
+	if len(commits) != 3 {
+		t.Fatalf("unbroken finalized commits = %#v, want every wrapped row", commits)
 	}
 	got := commits[0]
 	if got.SourceRange != (SourceRange{Start: 0, End: 4}) || got.DisplayRange != (DisplayRange{Start: 0, End: 1}) {
@@ -245,7 +288,7 @@ func TestHistoryEffectsReducer_UnbrokenLineHandoffsEachRowOnce(t *testing.T) {
 	state = reduceUIControllerState(state, Resize{Width: 4, Height: 3, Generation: 1}, 1)
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{Cells: []*scene.TranscriptCell{cell}}}, 2)
 	entries := state.HistoryEffects.Entries()
-	if len(entries) != 1 || entries[0].Commit.SourceRange != (SourceRange{Start: 0, End: 4}) {
+	if len(entries) != 3 || entries[0].Commit.SourceRange != (SourceRange{Start: 0, End: 4}) {
 		t.Fatalf("initial unbroken-line history = %#v", entries)
 	}
 	first := entries[0].Commit
@@ -265,10 +308,11 @@ func TestHistoryEffectsReducer_UnbrokenLineHandoffsEachRowOnce(t *testing.T) {
 			rowRanges[entry.Commit.SourceRange]++
 		}
 	}
-	if rowRanges[SourceRange{Start: 0, End: 4}] != 1 || rowRanges[SourceRange{Start: 4, End: 8}] != 1 {
+	if rowRanges[SourceRange{Start: 0, End: 4}] != 1 || rowRanges[SourceRange{Start: 4, End: 8}] != 1 ||
+		rowRanges[SourceRange{Start: 8, End: 12}] != 1 {
 		t.Fatalf("unbroken line did not advance by one non-duplicated row: %#v", entries)
 	}
-	if len(rowRanges) != 2 {
+	if len(rowRanges) != 3 {
 		t.Fatalf("unbroken line minted duplicate or skipped ranges: %#v", entries)
 	}
 }
@@ -282,8 +326,8 @@ func TestPlanEligibleHistoryCommits_SplitsCJKWrappedRowsAtByteBoundaries(t *test
 		}}),
 	}
 	commits := planEligibleHistoryCommits(state)
-	if len(commits) != 1 {
-		t.Fatalf("CJK overflow commits = %#v, want first display row", commits)
+	if len(commits) != 3 {
+		t.Fatalf("CJK finalized commits = %#v, want every display row", commits)
 	}
 	got := commits[0]
 	if got.SourceRange != (SourceRange{Start: 0, End: len("甲乙")}) || got.DisplayRange != (DisplayRange{Start: 0, End: 1}) {
@@ -340,8 +384,8 @@ func TestPlanEligibleHistoryCommits_SegmentsOversizedFinalizedPlainCell(t *testi
 	}
 
 	commits := planEligibleHistoryCommits(state)
-	if len(commits) != 2 {
-		t.Fatalf("oversized finalized cell commits = %#v, want two invisible source-line segments", commits)
+	if len(commits) != 7 {
+		t.Fatalf("oversized finalized cell commits = %#v, want all source-line segments", commits)
 	}
 	wantRanges := []struct {
 		source  SourceRange

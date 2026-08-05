@@ -826,12 +826,15 @@ func TestPrintVisibleChatHistory_UnifiedOversizedMarkdownPreservesScrollbackAndP
 	if len(state.HistoryEffects.Entries()) == 0 {
 		t.Fatal("oversized Markdown cell did not create history handoff entries")
 	}
-	if !strings.Contains(terminal.String(), fmt.Sprintf("\x1b[1;%dr", height)) {
-		t.Fatalf("unified history writer did not emit a full-terminal scroll region: %q", terminal.String())
+	layout := ui.LayoutAppScreen(state.AppState)
+	if !strings.Contains(terminal.String(), fmt.Sprintf("\x1b[1;%dr", layout.OutputBottomRow)) {
+		t.Fatalf("unified history writer did not emit the top history scroll region: %q", terminal.String())
+	}
+	if strings.Contains(terminal.String(), fmt.Sprintf("\x1b[1;%dr", height)) {
+		t.Fatalf("history scroll region included the bottom inline viewport: %q", terminal.String())
 	}
 	screen := newScreenVT(width, height)
 	screen.feed(terminal.String())
-	layout := ui.LayoutAppScreen(state.AppState)
 	primary := strings.Join(screen.Lines(1, layout.OutputBottomRow), "\n")
 	scrollback := strings.Join(screen.ScrollbackLines(), "\n")
 	if !strings.Contains(primary, "markdown-history-16") {

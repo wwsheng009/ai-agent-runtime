@@ -400,19 +400,20 @@ aicli doctor subagent-route --role writer --difficulty hard
 # 交互式聊天（默认）
 aicli
 aicli --provider CODEX_04 --model gpt-5.4-mini
+aicli --prompt "检查当前项目"             # 自动提交一次，完成后继续留在交互界面
 
 # 显式进入 chat（与直接运行 aicli 等价）
 aicli chat --provider CODEX_04 --model gpt-5.4-mini
 
 # 非交互 chat / session 恢复 / 图片输入
-aicli chat --no-interactive --message "summarize this repo"
+aicli chat --no-interactive --prompt "summarize this repo"
 aicli resume                              # 顶层恢复当前工作目录的最近会话（等价 aicli chat --resume）
 aicli resume --cwd=false                  # 跨工作目录恢复最近会话
 aicli resume session_xxx                  # 顶层加载指定会话（等价 aicli chat --session）
 aicli chat --resume                       # 兼容写法：恢复当前工作目录的最近会话
 aicli chat --session session_xxx          # 兼容写法：加载指定会话
 aicli chat --list-sessions --session-state active --session-provider CODEX_04 --session-query runtime --session-limit 20
-aicli chat --image ./screenshot.png --message "describe this screenshot"
+aicli chat --image ./screenshot.png --prompt "describe this screenshot"
 
 # chat 中查看当前请求会暴露哪些 functions / skills
 /functions 帮我生成一张图片
@@ -453,7 +454,8 @@ aicli --help
 | 类别 | 参数 | 说明 |
 |---|---|---|
 | provider/model | `--provider`、`--model`、`--reasoning-effort` | 指定本轮 chat 的 provider、模型和 reasoning effort |
-| 非交互 | `--message`、`--no-interactive`、`--request-timeout` | 一次性发送消息并退出，适合脚本 |
+| 启动消息 | `--prompt`、`-M/--message` | 初始化和历史恢复后自动提交一次；`--message` 是兼容别名；两者同时使用时值必须相同 |
+| 非交互 | `--no-interactive`、`--request-timeout` | 启动消息完成后退出，适合脚本 |
 | session | `--session`、`--resume`、`--list-sessions` | 加载指定 session、恢复最近 session 或列出历史 |
 | session 过滤 | `--cwd`、`--session-state`、`--session-provider`、`--session-model`、`--session-query`、`--session-limit` | 默认按当前工作目录筛选；使用 `--cwd=false` 查看全部目录，或叠加其他筛选条件 |
 | skills/tools | `--skills-dir`、`--skills-mode`、`--skills-debug`、`--tools-debug` | 控制 skills 暴露、路由和调试输出 |

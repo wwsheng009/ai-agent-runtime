@@ -31,6 +31,7 @@ const ChatCommandLongHelp = `与 AI 模型进行交互式对话。
 
 // ChatCommandExampleHelp is the example help text for `aicli chat`.
 const ChatCommandExampleHelp = `  aicli chat                              # 交互式聊天
+  aicli chat --prompt "检查当前项目"        # 启动后自动提交，并继续留在交互界面
   aicli chat --profile dev                  # 使用命名 profile
   aicli chat --profile ./profiles/dev --agent coder
   aicli chat --agent explore              # portable agentdef（无需 profile）
@@ -45,7 +46,7 @@ const ChatCommandExampleHelp = `  aicli chat                              # 交�
   aicli resume                            # 顶层恢复当前工作目录的最近会话
   aicli resume --cwd=false                # 顶层跨工作目录恢复最近会话
   aicli resume session_xxx                # 顶层加载指定会话
-  aicli chat --no-interactive --message "Hello"  # 非交互模式
+  aicli chat --no-interactive --prompt "Hello"  # 非交互模式
   aicli chat --no-interactive --output json -M "Hello"  # JSON 输出
 
   # chat 内斜杠命令
@@ -89,7 +90,8 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("no-interactive", false, "非交互模式（单次请求）")
 	cmd.Flags().String("output", "", "非交互模式输出格式（text|json）")
 	cmd.Flags().BoolP("json", "j", false, "兼容选项：等价于 --output json")
-	cmd.Flags().StringP("message", "M", "", "非交互模式下发送的消息")
+	cmd.Flags().String("prompt", "", "启动后自动提交的消息（交互模式提交后继续留在界面）")
+	cmd.Flags().StringP("message", "M", "", "兼容选项：等价于 --prompt")
 	cmd.Flags().StringP("log-dir", "", defaultChatLogDir, fmt.Sprintf("保存会话日志到指定目录（默认: %s）", defaultChatLogDir))
 	cmd.Flags().String("request-timeout", "", "单次请求超时（例如 60s、2m，留空使用配置）")
 	cmd.Flags().String("reasoning-effort", "", "当前模型配置显式支持的 reasoning_effort 值（留空则不注入，由配置和交互流程决定）")

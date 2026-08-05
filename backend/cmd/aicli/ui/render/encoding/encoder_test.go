@@ -1,6 +1,8 @@
 package encoding
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -212,35 +214,47 @@ func TestEncodeOutOfOrder(t *testing.T) {
 }
 
 // TestEncodeReasoningIndependentOfAssistant 验证 reasoning 与 assistant 是
-// 两个独立 Item：reasoning 内容绝不覆盖 assistant 块，且 LLM 请求结束时
-// 两者都进入终态。
+// 两个独立 Item：reasoning 内容绝不覆盖 assistant 块；成功 request finished
+// 只关闭 reasoning，assistant 等待后到的权威 final。
 func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	e := NewEventEncoder()
-	e.Encode(llmStarted())
+	if cs := e.Encode(llmStarted()); len(cs.Changes) != 0 {
+		t.Fatalf("llm_started changes = %+v, want no visible placeholder", cs.Changes)
+	}
 	e.Encode(event(runtimechat.EventAssistantReasoning, map[string]interface{}{
 		"turn_id": "turn-1", "stream_id": "stream-1", "text": "thinking...",
 	}))
-	e.Encode(assistantDelta("Hello", 1))
+	cs := e.Encode(assistantDelta("Hello", 1))
+	if len(cs.Changes) != 3 || cs.Changes[0].Item.Kind != KindReasoning ||
+		cs.Changes[0].Item.Status != StatusCompleted || cs.Changes[1].Op != OpAppend ||
+		cs.Changes[1].Item.Kind != KindAssistant || cs.Changes[2].Op != OpUpsert ||
+		cs.Changes[2].Item.Kind != KindAssistant {
+		t.Fatalf("reasoning -> assistant boundary changes = %+v", cs.Changes)
+	}
 	m := e.Snapshot()
 	if len(m.Items) != 2 {
 		t.Fatalf("items = %d, want 2 (reasoning + assistant)", len(m.Items))
 	}
-	// llm_started 先建 assistant 块（空 Head，渲染层跳过空块），
-	// reasoning 随后 append；两者互不覆盖。
-	if m.Items[0].Kind != KindAssistant || m.Items[0].Head != "Hello" {
-		t.Fatalf("items[0] = %+v, want assistant with Hello", m.Items[0])
+	if m.Items[0].Kind != KindReasoning || m.Items[0].Head != "thinking..." || m.Items[0].Status != StatusCompleted {
+		t.Fatalf("items[0] = %+v, want completed reasoning", m.Items[0])
 	}
-	if m.Items[1].Kind != KindReasoning || m.Items[1].Head != "thinking..." {
-		t.Fatalf("items[1] = %+v, want reasoning with thinking...", m.Items[1])
+	if m.Items[1].Kind != KindAssistant || m.Items[1].Head != "Hello" {
+		t.Fatalf("items[1] = %+v, want assistant with Hello", m.Items[1])
 	}
-	// LLM 请求结束：reasoning 与 assistant 均终态
-	e.Encode(llmFinished())
+	// request finished 先于 assistant_message：不得提前提交 assistant。
+	if cs := e.Encode(llmFinished()); len(cs.Changes) != 0 {
+		t.Fatalf("successful llm_finished changes = %+v, want no assistant finalization", cs.Changes)
+	}
 	m2 := e.Snapshot()
 	if m2.Items[0].Status != StatusCompleted {
 		t.Fatalf("reasoning status = %s, want completed", m2.Items[0].Status)
 	}
-	if m2.Items[1].Status != StatusCompleted {
-		t.Fatalf("assistant status = %s, want completed", m2.Items[1].Status)
+	if m2.Items[1].Status != StatusRunning {
+		t.Fatalf("assistant status = %s, want running until final", m2.Items[1].Status)
+	}
+	e.Encode(assistantFinal("Hello"))
+	if got := e.Snapshot().Items[1].Status; got != StatusCompleted {
+		t.Fatalf("assistant status after final = %s, want completed", got)
 	}
 }
 
@@ -451,12 +465,121 @@ func TestEncodeUnknownEvent(t *testing.T) {
 func TestChangeSetOrder(t *testing.T) {
 	e := NewEventEncoder()
 	cs := e.Encode(llmStarted())
-	if len(cs.Changes) != 1 || cs.Changes[0].Op != OpAppend || cs.Changes[0].Revision != 1 {
-		t.Fatalf("llm_started changes = %+v, want 1 append rev=1", cs.Changes)
+	if len(cs.Changes) != 0 || len(e.Snapshot().Items) != 0 {
+		t.Fatalf("llm_started changes = %+v model=%+v, want no visible item", cs.Changes, e.Snapshot().Items)
 	}
 	cs = e.Encode(assistantDelta("a", 1))
-	if len(cs.Changes) != 1 || cs.Changes[0].Op != OpUpsert || cs.Changes[0].Revision != 2 {
-		t.Fatalf("delta changes = %+v, want 1 upsert rev=2", cs.Changes)
+	if len(cs.Changes) != 2 || cs.Changes[0].Op != OpAppend || cs.Changes[0].Revision != 1 ||
+		cs.Changes[1].Op != OpUpsert || cs.Changes[1].Revision != 2 {
+		t.Fatalf("delta changes = %+v, want append rev=1 then upsert rev=2", cs.Changes)
+	}
+}
+
+func TestEncodeProductionDottedLifecyclePreservesReasoningBeforeAssistant(t *testing.T) {
+	e := NewEventEncoder()
+	traceID := "trace-production-order"
+	turnID := "turn-production-order"
+	streamID := "stream-production-order"
+	e.Encode(runtimeevents.Event{Type: "llm.request.started", TraceID: traceID, Payload: map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": streamID, "step": 1,
+	}})
+	e.Encode(runtimeevents.Event{Type: "assistant.reasoning", TraceID: traceID, Payload: map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "step": 1,
+		"reasoning": map[string]interface{}{"format": "stream_delta", "summary": "reasoning first"},
+	}})
+	cs := e.Encode(runtimeevents.Event{Type: runtimechat.EventAssistantDelta, TraceID: traceID, Payload: map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
+		"step": 1, "sequence": uint64(1), "delta": "assistant second",
+	}})
+	if len(cs.Changes) != 3 || cs.Changes[0].Item.Kind != KindReasoning ||
+		cs.Changes[0].Item.Status != StatusCompleted || cs.Changes[1].Op != OpAppend ||
+		cs.Changes[1].Item.Kind != KindAssistant || cs.Changes[2].Op != OpUpsert ||
+		cs.Changes[2].Item.Kind != KindAssistant {
+		t.Fatalf("first assistant delta changes = %+v", cs.Changes)
+	}
+	if cs := e.Encode(runtimeevents.Event{Type: "llm.request.finished", TraceID: traceID, Payload: map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": streamID, "step": 1, "success": true,
+	}}); len(cs.Changes) != 0 {
+		t.Fatalf("successful dotted finished changes = %+v, want lifecycle-only update", cs.Changes)
+	}
+	if cs := e.Encode(runtimeevents.Event{Type: runtimechat.EventAssistantMessage, TraceID: traceID, Payload: map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
+		"content": "assistant second",
+	}}); len(cs.Changes) != 1 || cs.Changes[0].Op != OpUpsert ||
+		cs.Changes[0].Item.Kind != KindAssistant || cs.Changes[0].Item.Status != StatusCompleted {
+		t.Fatalf("authoritative final changes = %+v", cs.Changes)
+	}
+
+	model := e.Snapshot()
+	if len(model.Items) != 2 || model.Items[0].Kind != KindReasoning || model.Items[0].Head != "reasoning first" ||
+		model.Items[1].Kind != KindAssistant || model.Items[1].Head != "assistant second" {
+		t.Fatalf("production item order = %+v", model.Items)
+	}
+	for _, item := range model.Items {
+		if item.Head == "llm.request.finished" || item.Head == "assistant.reasoning" {
+			t.Fatalf("raw lifecycle label leaked into model: %+v", model.Items)
+		}
+	}
+}
+
+func TestEncodeRequestAliasesKeepReActStepsDistinct(t *testing.T) {
+	e := NewEventEncoder()
+	for step := 1; step <= 2; step++ {
+		streamID := fmt.Sprintf("stream-step-%d", step)
+		body := fmt.Sprintf("answer-step-%d", step)
+		e.Encode(event("llm.request.started", map[string]interface{}{
+			"turn_id": "shared-turn", "stream_id": streamID, "step": step,
+		}))
+		e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+			"turn_id": "shared-turn", "stream_id": streamID, "step": step,
+			"sequence": uint64(1), "delta": body,
+		}))
+		e.Encode(event("llm.request.finished", map[string]interface{}{
+			"turn_id": "shared-turn", "stream_id": streamID, "step": step, "success": true,
+		}))
+		e.Encode(event(runtimechat.EventAssistantMessage, map[string]interface{}{
+			"turn_id": "shared-turn", "stream_id": streamID, "content": body,
+		}))
+	}
+	model := e.Snapshot()
+	if len(model.Items) != 2 || model.Items[0].Head != "answer-step-1" ||
+		model.Items[1].Head != "answer-step-2" || model.Items[0].ID == model.Items[1].ID {
+		t.Fatalf("multi-step request aliases merged or duplicated cells: %+v", model.Items)
+	}
+	for _, item := range model.Items {
+		if item.Kind != KindAssistant || item.Status != StatusCompleted {
+			t.Fatalf("multi-step assistant not committed independently: %+v", item)
+		}
+	}
+}
+
+func TestEncodeFailedDottedRequestPreservesPartialAndReadableError(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(event("llm.request.started", map[string]interface{}{
+		"turn_id": "failed-turn", "stream_id": "failed-stream", "step": 1,
+	}))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"turn_id": "failed-turn", "stream_id": "failed-stream", "step": 1,
+		"sequence": uint64(1), "delta": "partial answer",
+	}))
+	finished := event("llm.request.finished", map[string]interface{}{
+		"turn_id": "failed-turn", "stream_id": "failed-stream", "step": 1,
+		"success": false, "error": "provider unavailable", "error_code": "503", "retryable": true,
+	})
+	cs := e.Encode(finished)
+	if len(cs.Changes) != 2 || cs.Changes[0].Op != OpUpsert ||
+		cs.Changes[0].Item.Kind != KindAssistant || cs.Changes[0].Item.Status != StatusFailed ||
+		cs.Changes[1].Op != OpAppend || cs.Changes[1].Item.Kind != KindSystem {
+		t.Fatalf("failed request changes = %+v", cs.Changes)
+	}
+	model := e.Snapshot()
+	if len(model.Items) != 2 || model.Items[0].Head != "partial answer" ||
+		model.Items[0].Status != StatusFailed || !strings.Contains(model.Items[1].Head, "provider unavailable") ||
+		strings.Contains(model.Items[1].Head, "llm.request.finished") {
+		t.Fatalf("failed request model = %+v", model.Items)
+	}
+	if duplicate := e.Encode(finished); len(duplicate.Changes) != 0 {
+		t.Fatalf("duplicate failed lifecycle appended output: %+v", duplicate.Changes)
 	}
 }
 
@@ -551,15 +674,15 @@ func TestEncodeUnknownTypeFallsBackToSystem(t *testing.T) {
 // 编码器的 legacy 事件类型（未走 chatcore 类型转换）。它们属已知呈现事件
 // （system 块），不应计入 UnknownCount；新增 emit 类型时必须补本表，
 // 否则 TestEncodeExhaustiveKnownLegacyEventTypes 失败。仅内部生命周期/
-// 遥测类型（llm.request.started、planning.started、subagent.started 等）
-// 不在此表：它们走 isSilentSystemEventType 静默分类（零可见输出，见
-// TestEncodeSilentSystemEventTypes），新增此类事件应补静默表而非本表。
+// 遥测类型（planning.started、subagent.started 等）不在此表：它们走
+// isSilentSystemEventType 静默分类（零可见输出，见
+// TestEncodeSilentSystemEventTypes）。LLM request dotted lifecycle 与 typed
+// lifecycle 共用流状态操作，由生产顺序测试单独覆盖。
 func knownLegacyEventTypes() []string {
 	return []string{
 		"context.preflight.started",
 		"context.preflight.compacted",
 		"context.preflight.failed",
-		"llm.request.finished",
 		"llm.retry",
 		"patch.decision",
 		"patch.applied",
@@ -592,7 +715,6 @@ func silentSystemEventTypes() []string {
 		runtimechat.EventSessionInterrupted,
 		runtimechat.EventSessionCompactSkipped,
 		runtimechat.EventContextReconciled,
-		"llm.request.started",
 		"planning.started",
 		"subagent.batch.started",
 		"subagent.started",

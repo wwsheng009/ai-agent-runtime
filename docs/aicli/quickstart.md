@@ -212,11 +212,11 @@ aicli chat --provider openai --model gpt-4.1 --reasoning-effort medium
 ```bash
 # 1) 交互：在仓库根目录打开 chat，让 agent 帮你看代码
 cd /path/to/your/repo
-aicli
-# 然后输入：总结这个仓库的目录结构，并指出入口命令
+aicli --prompt "总结这个仓库的目录结构，并指出入口命令"
+# 启动消息完成后仍停留在交互界面，可继续输入
 
 # 2) 非交互：一条命令拿结果（脚本 / 管道友好）
-aicli chat --no-interactive --message "用 bullet 总结当前目录 README 的要点"
+aicli chat --no-interactive --prompt "用 bullet 总结当前目录 README 的要点"
 
 # 3) Headless / CI 风格
 aicli exec "解释 backend/cmd/aicli 的职责"
@@ -248,7 +248,7 @@ aicli doctor provider
 aicli doctor provider --provider openai --model gpt-4.1
 
 # 非交互 / CI
-aicli chat --no-interactive --message "summarize this repo"
+aicli chat --no-interactive --prompt "summarize this repo"
 aicli exec "解释这段代码的作用"
 
 # 配置查看

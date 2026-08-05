@@ -1,6 +1,9 @@
 package vt
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestScreenWideRunesUseTwoColumns(t *testing.T) {
 	s := NewScreen(10, 3)
@@ -45,6 +48,22 @@ func TestScreenDeferredWrapMatchesTerminal(t *testing.T) {
 	s2.Feed("abcdZ")
 	if got, want := s2.Line(2), "Z"; got != want {
 		t.Fatalf("row2=%q want %q\n%s", got, want, s2.Dump())
+	}
+}
+
+func TestScreenED3PurgesScrollbackWithoutErasingVisiblePage(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.Feed("old\r\nvisible\r\n")
+	if len(s.ScrollbackLines()) == 0 {
+		t.Fatal("fixture produced no scrollback")
+	}
+	visible := s.Lines(1, 2)
+	s.Feed("\x1b[3J")
+	if got := s.ScrollbackLines(); len(got) != 0 {
+		t.Fatalf("ED3 retained scrollback: %#v", got)
+	}
+	if got := s.Lines(1, 2); !reflect.DeepEqual(got, visible) {
+		t.Fatalf("ED3 erased visible page: got=%#v want=%#v", got, visible)
 	}
 }
 
