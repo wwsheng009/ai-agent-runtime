@@ -337,7 +337,9 @@ func (c *chatSlashCompletionController) renderLocked() {
 		return
 	}
 	if c.isPopupBlockedLocked() {
-		c.clearPopupLocked()
+		if c.renderedSignature != "" {
+			c.clearPopupLocked()
+		}
 		c.renderedSignature = ""
 		c.surfaceEnabled = false
 		return
@@ -348,7 +350,13 @@ func (c *chatSlashCompletionController) renderLocked() {
 	c.surfaceEnabled = true
 
 	if len(lines) == 0 {
-		c.clearPopupLocked()
+		// Normal chat text is the common path. Do not enqueue a durable
+		// ClearPopup action for every keystroke when no completion popup was
+		// rendered; that action would reintroduce mailbox backpressure into
+		// the editor callback.
+		if c.renderedSignature != "" {
+			c.clearPopupLocked()
+		}
 		c.renderedSignature = ""
 		return
 	}

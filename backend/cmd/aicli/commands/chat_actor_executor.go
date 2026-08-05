@@ -13,7 +13,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -22,6 +21,22 @@ import (
 )
 
 type aicliActorChatExecutor struct{}
+
+// prepareAICLIActorRuntimeContext keeps the actor path's output ownership in
+// the runtime event bridge. Agent tool execution binds a stable
+// tool_call_id-scoped progress reporter before invoking shell-like tools; the
+// bridge projects those tool.progress events into ActiveBand and suppresses
+// their timeline cells. Installing an additional raw OutputMirror here would
+// write the same bytes directly into FixedBottomSurface history, after which
+// tool.completed commits a second normalized result cell. The actor path
+// therefore carries only execution context; direct/legacy tool execution uses
+// withLiveChatToolOutput's fenced ActiveBand-only writer instead.
+func prepareAICLIActorRuntimeContext(ctx context.Context, session *ChatSession) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return generatedImageToolContext(ctx, session)
+}
 
 func newAICLIActorChatExecutor() aicliChatExecutor {
 	return &aicliActorChatExecutor{}
@@ -44,13 +59,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if err := ensureChatRuntimeSessionPersisted(session); err != nil {
 		return "", fmt.Errorf("persist runtime session: %w", err)
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx = generatedImageToolContext(ctx, session)
-	if shouldRenderInteractiveOutput(session) {
-		ctx = runtimeexecutor.WithOutputMirror(ctx, newLimitedChatSystemOutputWriterWithSurface(os.Stdout, session.Surface, maxToolResultPreviewLines, maxToolResultPreviewBytes))
-	}
+	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
 	actor, err := chatActorForSession(ctx, session)
 	if err != nil {
@@ -137,13 +146,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
 		return "", fmt.Errorf("local runtime host is not configured")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx = generatedImageToolContext(ctx, session)
-	if shouldRenderInteractiveOutput(session) {
-		ctx = runtimeexecutor.WithOutputMirror(ctx, newLimitedChatSystemOutputWriterWithSurface(os.Stdout, session.Surface, maxToolResultPreviewLines, maxToolResultPreviewBytes))
-	}
+	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
 	actor, err := chatActorForSession(ctx, session)
 	if err != nil {

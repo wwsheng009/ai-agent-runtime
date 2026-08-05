@@ -48,8 +48,10 @@ type chatRuntimeEventBridge struct {
 	progressMu                      sync.Mutex
 	runErr                          error
 	rendered                        map[string]struct{}
+	historySeedSeen                 map[string]struct{}
 	approvalGrants                  map[string]time.Time
 	permissionHintShown             bool
+	priorityTranscriptTarget        chatRuntimePriorityTranscriptTarget
 	renderedAssistantDelta          bool
 	renderedAssistantDeltaFinalized bool
 	renderedAssistantDeltaContent   strings.Builder
@@ -167,6 +169,19 @@ type chatApprovalAnswer struct {
 	Reuse   bool
 }
 
+// chatRuntimePriorityTranscriptTarget carries the identity of the control
+// event currently blocked on synchronous stdin. It is deliberately scoped to
+// the bridge worker exception: it lets the retained prompt transcript finalize
+// the already-encoded Scene item instead of appending a second cell.
+type chatRuntimePriorityTranscriptTarget struct {
+	eventType  string
+	requestKey string
+}
+
+func (t chatRuntimePriorityTranscriptTarget) valid() bool {
+	return strings.TrimSpace(t.eventType) != "" && strings.TrimSpace(t.requestKey) != ""
+}
+
 const chatApprovalGrantTTL = 10 * time.Minute
 const chatRuntimeEventSettleWindow = 80 * time.Millisecond
 const chatRuntimeEventQueueByteLimit int64 = 4 << 20
@@ -212,6 +227,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		eventQueue:          make(chan chatRuntimeQueuedEvent, 512),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
 		rendered:            make(map[string]struct{}),
+		historySeedSeen:     make(map[string]struct{}),
 		renderEncoder:       encoding.NewEventEncoder(),
 		renderScene:         renderScene,
 		renderMapper:        scene.NewChangeSetMapper(renderScene),
@@ -379,7 +395,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			lines = append(lines, questionPriorityPromptLines(prompt, normalizedSuggestions)...)
 			promptLine := questionAnswerPrompt(required, len(normalizedSuggestions) > 0)
 			for {
-				readPrompt, cleanupPrompt, _ := showChatRuntimePriorityPrompt(session, lines, promptLine)
+				readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
 				text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 				cleanupPrompt()
 				if err != nil {
@@ -389,6 +405,9 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				if required && answer == "" {
 					lines = upsertPriorityPromptValidationLine(lines, "[提问] 此问题为必答项", "[提问] 此问题为必答项，请输入回答。")
 					continue
+				}
+				if transientPrompt {
+					renderChatRuntimePriorityPromptTranscript(session, lines, promptLine, answer)
 				}
 				return answer, nil
 			}
@@ -504,6 +523,7 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		return
 	}
 	b.WaitForCurrentEvents(b.endRunDrainTimeout())
+	b.finalizeOpenUnifiedStreamsAtRunEnd()
 	b.logRunEndFallback()
 	b.renderMu.Lock()
 	if b.activeTurnID != "" {
@@ -529,6 +549,51 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	flushChatSessionLog(b.session)
 	b.writePromptIfIdle()
+}
+
+// finalizeOpenUnifiedStreamsAtRunEnd is the fail-closed terminal boundary for
+// runtimes that return through cancellation/error handling without publishing
+// a final assistant.message, llm.request.finished, or session.end event. The
+// encoder mutates the existing semantic item in place and the coordinator only
+// receives semantic actions; no legacy surface/raw-terminal fallback exists.
+func (b *chatRuntimeEventBridge) finalizeOpenUnifiedStreamsAtRunEnd() {
+	if b == nil || b.renderEncoder == nil {
+		return
+	}
+	status := encoding.StatusCompleted
+	eventType := runtimechat.EventSessionEnd
+	payload := map[string]interface{}{"success": true, "source": "bridge_end_run"}
+	if b.session != nil && b.session.IsInterrupted() {
+		status = encoding.StatusCanceled
+		eventType = runtimechat.EventSessionInterrupted
+		payload["success"] = false
+		payload["error"] = "run interrupted"
+	} else if runErr := b.RunError(); runErr != nil {
+		status = encoding.StatusFailed
+		payload["success"] = false
+		payload["error"] = runErr.Error()
+	}
+
+	b.renderMu.Lock()
+	changes := b.renderEncoder.FinalizeOpenStreams(status)
+	changed := changes != nil && len(changes.Changes) > 0
+	if changed {
+		b.applyChangeSet(changes)
+		b.appendEventLog(runtimeevents.Event{
+			Type:      eventType,
+			Timestamp: time.Now().UTC(),
+			Payload:   payload,
+		})
+	}
+	b.renderMu.Unlock()
+	if !changed || b.session == nil || b.session.Interaction == nil || !b.session.Interaction.UnifiedRendererEnabled() {
+		return
+	}
+	// The Scene is committed before this callback. It can therefore emit the
+	// fenced FinalizeActiveCellAction, reset coordinator-local compatibility
+	// bookkeeping, and never write the partial body a second time.
+	b.session.Interaction.FinalizeAssistantDelta()
+	b.session.Interaction.postTranscriptSnapshotFromBridge(b)
 }
 
 func (b *chatRuntimeEventBridge) retireTurnLocked(turnID string) {
@@ -733,6 +798,18 @@ func (b *chatRuntimeEventBridge) submitUserInput(text string) {
 	b.appendUserInputLog(text)
 }
 
+// submitAssistant 把没有 runtime assistant 终态事件的 direct response 接入
+// Scene 数据面。runtime event path 已经 Encode 的回复不得调用该入口。
+func (b *chatRuntimeEventBridge) submitAssistant(text string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.SubmitAssistant(text))
+	b.appendAssistantLog(text)
+}
+
 // submitCommand 把本地命令执行结果注入统一渲染数据面（设计文档 §1.3 行
 // 9/10）：命令执行没有 runtime 事件类型，由 coordinator 渲染层在命令结果
 // cell 提交点直连调用；编码为 KindCommand 终态块，走 applyChangeSet 同一
@@ -759,6 +836,171 @@ func (b *chatRuntimeEventBridge) submitError(text string) {
 	defer b.renderMu.Unlock()
 	b.applyChangeSet(b.renderEncoder.SubmitError(text))
 	b.appendErrorLog(text)
+}
+
+// submitSupplement 把没有 runtime 事件对应物的本地补充接入统一 Scene
+// 数据面。runtime event bridge 已经先 Encode 的事件不得走此入口，否则会
+// 在 Scene 中产生第二个 semantic cell。
+func (b *chatRuntimeEventBridge) submitSupplement(text string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.applyChangeSet(b.renderEncoder.SubmitSupplement(text))
+	b.appendSupplementLog(text)
+}
+
+func (b *chatRuntimeEventBridge) sessionInteractionSnapshot() {
+	if b != nil && b.session != nil && b.session.Interaction != nil {
+		b.session.Interaction.postTranscriptSnapshotFromBridge(b)
+	}
+}
+
+// submitPriorityTranscript finalizes the mutable Scene item created by the
+// matching approval/question runtime event. It returns false for a missing or
+// already-finalized target; callers must then use a generic local supplement
+// only when no runtime target exists.
+func (b *chatRuntimeEventBridge) submitPriorityTranscript(eventType, requestKey, text string) bool {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	cs := b.renderEncoder.SubmitPriorityPromptTranscript(eventType, requestKey, text)
+	if cs == nil || len(cs.Changes) == 0 {
+		return false
+	}
+	b.applyChangeSet(cs)
+	b.appendPriorityTranscriptLog(eventType, requestKey, text)
+	return true
+}
+
+func (b *chatRuntimeEventBridge) currentPriorityTranscriptTarget() chatRuntimePriorityTranscriptTarget {
+	if b == nil {
+		return chatRuntimePriorityTranscriptTarget{}
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.priorityTranscriptTarget
+}
+
+func (b *chatRuntimeEventBridge) setPriorityTranscriptTarget(event runtimeevents.Event) chatRuntimePriorityTranscriptTarget {
+	if b == nil {
+		return chatRuntimePriorityTranscriptTarget{}
+	}
+	target := chatRuntimePriorityTranscriptTarget{
+		eventType:  event.Type,
+		requestKey: encoding.PriorityPromptRequestKey(event),
+	}
+	b.renderMu.Lock()
+	b.priorityTranscriptTarget = target
+	b.renderMu.Unlock()
+	return target
+}
+
+func (b *chatRuntimeEventBridge) clearPriorityTranscriptTarget(target chatRuntimePriorityTranscriptTarget) {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	if b.priorityTranscriptTarget == target {
+		b.priorityTranscriptTarget = chatRuntimePriorityTranscriptTarget{}
+	}
+	b.renderMu.Unlock()
+}
+
+// submitToolRequested 将 chat-core 的 direct tool 请求接入统一编码器。
+// 与 runtime event 一样，编码器负责稳定 call identity 与 mutable chain
+// 生命周期；调用方不得再为同一请求调用 submitSupplement。
+func (b *chatRuntimeEventBridge) submitToolRequested(toolCallID, toolName string, args map[string]interface{}) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := cloneRuntimeEventLogPayload(args)
+	payload["tool_call_id"] = strings.TrimSpace(toolCallID)
+	payload["tool_name"] = strings.TrimSpace(toolName)
+	event := runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolCall(toolCallID, toolName, args))
+	b.appendEventLog(event)
+}
+
+// submitToolProgress 更新 direct tool 的 mutable source。进度没有独立
+// committed cell，不产生额外 transcript boundary。
+func (b *chatRuntimeEventBridge) submitToolProgress(toolCallID, toolName, progress string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(progress) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	event := runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: toolName,
+		Payload:  map[string]interface{}{"tool_call_id": strings.TrimSpace(toolCallID), "tool_name": strings.TrimSpace(toolName), "progress": progress},
+	}
+	b.applyChangeSet(b.renderEncoder.SubmitToolProgress(toolCallID, toolName, progress))
+	b.appendEventLog(event)
+}
+
+// submitToolResult 完成 direct tool chain。结果与请求共享一个 Scene cell，
+// 并由 Encode 路径落入同一 runtime event log，replay 时不再另造 supplement。
+func (b *chatRuntimeEventBridge) submitToolResult(toolCallID, toolName, output, toolErr string, success bool) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := map[string]interface{}{
+		"tool_call_id": strings.TrimSpace(toolCallID),
+		"tool_name":    strings.TrimSpace(toolName),
+		"success":      success,
+	}
+	if strings.TrimSpace(output) != "" {
+		payload["output"] = output
+	}
+	if strings.TrimSpace(toolErr) != "" {
+		payload["error"] = toolErr
+	}
+	typeName := "tool.completed"
+	if !success {
+		typeName = "tool.failed"
+	}
+	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolResult(toolCallID, toolName, output, toolErr, success))
+	b.appendEventLog(event)
+}
+
+// submitToolResultDisplay completes a chat-core tool from its already
+// normalized transcript block. The raw result remains in the event log for
+// diagnostics, while display_head is the authoritative transcript source used
+// by both live Scene mapping and replay.
+func (b *chatRuntimeEventBridge) submitToolResultDisplay(toolCallID, toolName, output, toolErr string, success bool, display string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(display) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := map[string]interface{}{
+		"tool_call_id": strings.TrimSpace(toolCallID),
+		"tool_name":    strings.TrimSpace(toolName),
+		"success":      success,
+		"display_head": display,
+	}
+	if strings.TrimSpace(output) != "" {
+		payload["output"] = output
+	}
+	if strings.TrimSpace(toolErr) != "" {
+		payload["error"] = toolErr
+	}
+	typeName := "tool.completed"
+	if !success {
+		typeName = "tool.failed"
+	}
+	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(toolCallID, display))
+	b.appendEventLog(event)
 }
 
 // submitUserInteraction 把 /debug、/model 等用户交互输出注入统一渲染数据面
@@ -847,17 +1089,22 @@ func (b *chatRuntimeEventBridge) appendEventLog(event runtimeevents.Event) {
 }
 
 // eventLogInjection 是事件日志中"直连注入记录"的落盘格式。注入内容没有
-// runtime 事件类型（用户输入 / 命令结果 / 操作错误 / 用户交互输出），以
+// runtime 事件类型（用户输入 / direct assistant / 命令结果 / 操作错误 / 本地补充 / 用户交互输出），以
 // 独立记录行与事件行区分：runtimeevents.Event 的 Type 恒非空，Type 为空
 // 的行即注入记录（见 submitUserInput / submitCommand / submitError /
 // submitUserInteraction）；具体类别由非空字段判别。旧日志的用户输入行
 // （{"user_input": "..."}）仍可解析（字段兼容）。
 type eventLogInjection struct {
-	UserInput         string         `json:"user_input,omitempty"`
-	Command           string         `json:"command,omitempty"`
-	Error             string         `json:"error,omitempty"`
-	Interaction       string         `json:"interaction,omitempty"`        // /debug、/model 等交互输出
-	InteractionAnchor *encoding.Tail `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
+	UserInput          string         `json:"user_input,omitempty"`
+	Assistant          string         `json:"assistant,omitempty"`
+	Command            string         `json:"command,omitempty"`
+	Error              string         `json:"error,omitempty"`
+	Supplement         string         `json:"supplement,omitempty"`
+	PriorityKind       string         `json:"priority_kind,omitempty"`
+	PriorityKey        string         `json:"priority_key,omitempty"`
+	PriorityTranscript string         `json:"priority_transcript,omitempty"`
+	Interaction        string         `json:"interaction,omitempty"`        // /debug、/model 等交互输出
+	InteractionAnchor  *encoding.Tail `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
 }
 
 // appendInjectionLog 把一条注入记录追加到事件日志（与事件行同一全序，
@@ -881,6 +1128,11 @@ func (b *chatRuntimeEventBridge) appendUserInputLog(text string) {
 	b.appendInjectionLog(eventLogInjection{UserInput: text})
 }
 
+// appendAssistantLog 追加 direct assistant 终态注入记录。
+func (b *chatRuntimeEventBridge) appendAssistantLog(text string) {
+	b.appendInjectionLog(eventLogInjection{Assistant: text})
+}
+
 // appendCommandLog 追加命令结果注入记录。
 func (b *chatRuntimeEventBridge) appendCommandLog(text string) {
 	b.appendInjectionLog(eventLogInjection{Command: text})
@@ -889,6 +1141,22 @@ func (b *chatRuntimeEventBridge) appendCommandLog(text string) {
 // appendErrorLog 追加操作错误注入记录。
 func (b *chatRuntimeEventBridge) appendErrorLog(text string) {
 	b.appendInjectionLog(eventLogInjection{Error: text})
+}
+
+// appendSupplementLog 追加本地补充注入记录。
+func (b *chatRuntimeEventBridge) appendSupplementLog(text string) {
+	b.appendInjectionLog(eventLogInjection{Supplement: text})
+}
+
+// appendPriorityTranscriptLog records completion of the already-encoded
+// approval/question item. Replay uses the request identity to update that
+// item rather than append a duplicate transcript cell.
+func (b *chatRuntimeEventBridge) appendPriorityTranscriptLog(eventType, requestKey, text string) {
+	b.appendInjectionLog(eventLogInjection{
+		PriorityKind:       eventType,
+		PriorityKey:        requestKey,
+		PriorityTranscript: text,
+	})
 }
 
 // appendInteractionLog 追加用户交互输出注入记录（含触发时刻锚点；重放时
@@ -946,12 +1214,17 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		return 0, err
 	}
 	type entry struct {
-		event             runtimeevents.Event
-		userInput         string         // 非空表示用户输入注入记录（无 runtime 事件类型）
-		command           string         // 非空表示命令结果注入记录
-		err               string         // 非空表示操作错误注入记录
-		interaction       string         // 非空表示用户交互输出注入记录
-		interactionAnchor *encoding.Tail // 交互输出触发时刻锚点
+		event              runtimeevents.Event
+		userInput          string         // 非空表示用户输入注入记录（无 runtime 事件类型）
+		assistant          string         // 非空表示 direct assistant 终态注入记录
+		command            string         // 非空表示命令结果注入记录
+		err                string         // 非空表示操作错误注入记录
+		supplement         string         // 非空表示本地补充注入记录
+		priorityKind       string         // approval_requested/question_asked
+		priorityKey        string         // request_id/question_id-derived key
+		priorityTranscript string         // retained prompt + answer
+		interaction        string         // 非空表示用户交互输出注入记录
+		interactionAnchor  *encoding.Tail // 交互输出触发时刻锚点
 	}
 	var entries []entry
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -982,10 +1255,19 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 			switch {
 			case inj.UserInput != "":
 				entries = append(entries, entry{userInput: inj.UserInput})
+			case inj.Assistant != "":
+				entries = append(entries, entry{assistant: inj.Assistant})
 			case inj.Command != "":
 				entries = append(entries, entry{command: inj.Command})
 			case inj.Error != "":
 				entries = append(entries, entry{err: inj.Error})
+			case inj.Supplement != "":
+				entries = append(entries, entry{supplement: inj.Supplement})
+			case inj.PriorityKind != "" && inj.PriorityKey != "" && inj.PriorityTranscript != "":
+				entries = append(entries, entry{
+					priorityKind: inj.PriorityKind, priorityKey: inj.PriorityKey,
+					priorityTranscript: inj.PriorityTranscript,
+				})
 			case inj.Interaction != "":
 				entries = append(entries, entry{interaction: inj.Interaction, interactionAnchor: inj.InteractionAnchor})
 			default:
@@ -1019,10 +1301,18 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		switch {
 		case en.userInput != "":
 			b.applyChangeSet(b.renderEncoder.SubmitUserInput(en.userInput))
+		case en.assistant != "":
+			b.applyChangeSet(b.renderEncoder.SubmitAssistant(en.assistant))
 		case en.command != "":
 			b.applyChangeSet(b.renderEncoder.SubmitCommand(en.command))
 		case en.err != "":
 			b.applyChangeSet(b.renderEncoder.SubmitError(en.err))
+		case en.supplement != "":
+			b.applyChangeSet(b.renderEncoder.SubmitSupplement(en.supplement))
+		case en.priorityKind != "" && en.priorityKey != "" && en.priorityTranscript != "":
+			b.applyChangeSet(b.renderEncoder.SubmitPriorityPromptTranscript(
+				en.priorityKind, en.priorityKey, en.priorityTranscript,
+			))
 		case en.interaction != "":
 			// 交互输出：按全序重建到该行时模型状态与实时注入时刻等价，
 			// 锚点 ItemID 必然存在（实时时 Tail 指向模型尾部项）；锚点
@@ -1995,7 +2285,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		return
 	}
 	flushedReasoning := b.shouldFlushReasoningOnSessionEnd(event)
-	flushedAssistant := b.shouldFlushAssistantDeltaOnSessionEnd(event)
+	flushedAssistant := b.shouldFinalizeAssistantDeltaOnTerminalEvent(event)
 	if (flushedReasoning || flushedAssistant) && !isPromptPreflightSessionEndEvent(event) {
 		return
 	}
@@ -2080,14 +2370,16 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		}
 		reason, _ := event.Payload["reason"].(string)
 		b.maybeRenderPermissionModeHint(reason)
-		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" && b.writeLine != nil {
-			b.writeLine(hint)
+		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" {
+			b.renderLocalApprovalSupplement(hint)
 		}
+		priorityTarget := b.setPriorityTranscriptTarget(event)
 		answer, askErr := func() (chatApprovalAnswer, error) {
 			endAction := beginChatTitleAction(b.session, "Approval Required")
 			defer endAction()
 			return b.askApproval(approval, approvalContextLines)
 		}()
+		b.clearPriorityTranscriptTarget(priorityTarget)
 		if askErr != nil {
 			b.setRunError(askErr)
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
@@ -2110,11 +2402,13 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
 		}
+		priorityTarget := b.setPriorityTranscriptTarget(event)
 		answer, askErr := func() (string, error) {
 			endAction := beginChatTitleAction(b.session, "Input Required")
 			defer endAction()
 			return b.askQuestion(prompt, suggestions, required)
 		}()
+		b.clearPriorityTranscriptTarget(priorityTarget)
 		if askErr != nil {
 			b.setRunError(askErr)
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
@@ -2666,7 +2960,17 @@ func renderChatRuntimePriorityPromptTranscript(session *ChatSession, lines []str
 	if len(transcriptLines) == 0 {
 		return
 	}
-	session.Interaction.RenderAsyncLine(strings.Join(transcriptLines, "\n"))
+	transcript := strings.Join(transcriptLines, "\n")
+	if bridge := session.RuntimeEventBridge; bridge != nil {
+		if target := bridge.currentPriorityTranscriptTarget(); target.valid() {
+			session.Interaction.RenderPriorityPromptTranscript(transcript, target)
+			return
+		}
+	}
+	// Slash-command confirmations also reuse this display helper but do not
+	// have a runtime approval/question event. They are genuine direct output
+	// and therefore require their own typed supplement injection.
+	session.Interaction.RenderLocalSupplement(transcript)
 }
 
 func (b *chatRuntimeEventBridge) shouldSuppressApprovalTimeline(event runtimeevents.Event) bool {
@@ -2712,13 +3016,18 @@ func (b *chatRuntimeEventBridge) shouldFlushReasoningOnSessionEnd(event runtimee
 	return true
 }
 
-// shouldFlushAssistantDeltaOnSessionEnd flushes any buffered streaming delta
-// when the session ends (EventSessionEnd) without a preceding
-// EventAssistantMessage. In a ReAct loop the runtime only emits
-// EventAssistantMessage after the entire loop completes, so intermediate
-// text deltas from earlier turns would otherwise be silently dropped.
-func (b *chatRuntimeEventBridge) shouldFlushAssistantDeltaOnSessionEnd(event runtimeevents.Event) bool {
-	if b == nil || b.session == nil || event.Type != runtimechat.EventSessionEnd {
+// shouldFinalizeAssistantDeltaOnTerminalEvent closes coordinator-local stream
+// bookkeeping after the encoder has committed the same Scene cell. Both
+// llm.request.finished and session end are valid terminal boundaries when an
+// assistant.message is absent; neither may leave a stale Active cell or fall
+// back to legacy output.
+func (b *chatRuntimeEventBridge) shouldFinalizeAssistantDeltaOnTerminalEvent(event runtimeevents.Event) bool {
+	if b == nil || b.session == nil {
+		return false
+	}
+	switch event.Type {
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished", runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+	default:
 		return false
 	}
 	if !b.HasRenderedAssistantDelta() || b.HasRenderedAssistantFinal() || b.hasFinalizedAssistantDelta() {
@@ -3387,7 +3696,7 @@ func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 	b.permissionHintShown = true
 	b.renderMu.Unlock()
 
-	b.writeLine(fmt.Sprintf(
+	b.renderLocalApprovalSupplement(fmt.Sprintf(
 		"[tip] 当前 permission-mode=%s。若你信任当前会话，可用 --yolo（等价于 --permission-mode bypass_permissions）关闭审批；--approval-reuse=%s 可减少重复只读审批（shell/网络搜索等）。",
 		chatRuntimePermissionModeLabel(b.session),
 		formatChatApprovalReuseMode(b.session.ApprovalReuseMode),
@@ -3775,7 +4084,7 @@ func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID,
 }
 
 func (b *chatRuntimeEventBridge) renderApprovalDecision(approval *runtimechat.ApprovalRequest, allowed bool) {
-	if b == nil || b.writeLine == nil || approval == nil {
+	if b == nil || approval == nil {
 		return
 	}
 	status := "denied"
@@ -3786,7 +4095,24 @@ func (b *chatRuntimeEventBridge) renderApprovalDecision(approval *runtimechat.Ap
 	if toolName == "" {
 		toolName = "tool"
 	}
-	b.writeLine(fmt.Sprintf("[approval] %s: %s", status, toolName))
+	b.renderLocalApprovalSupplement(fmt.Sprintf("[approval] %s: %s", status, toolName))
+}
+
+// renderLocalApprovalSupplement is for visible local consequences of a
+// runtime approval that have no distinct runtime event source: permission
+// guidance, reuse hints, and the locally chosen decision. It must not use
+// RenderAsyncLine because the request event has already been encoded.
+func (b *chatRuntimeEventBridge) renderLocalApprovalSupplement(line string) {
+	if b == nil || strings.TrimSpace(line) == "" {
+		return
+	}
+	if b.session != nil && b.session.Interaction != nil && !b.session.NoInteractive && !b.session.JSONOutput {
+		b.session.Interaction.RenderLocalSupplement(line)
+		return
+	}
+	if b.writeLine != nil {
+		b.writeLine(line)
+	}
 }
 
 func (b *chatRuntimeEventBridge) resolveQuestion(ctx context.Context, sessionID, questionID, answer string) error {

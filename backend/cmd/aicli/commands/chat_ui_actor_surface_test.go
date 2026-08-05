@@ -5,10 +5,16 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
@@ -34,6 +40,501 @@ func TestChatInteractionCoordinatorSetSurfaceKeepsSessionSurfaceInSync(t *testin
 	if session.Surface != nil {
 		t.Fatal("session surface must clear with coordinator surface")
 	}
+}
+
+func TestChatInteractionCoordinatorUnifiedRendererUsesOnlyPrimaryPresenter(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	// Setup normally fences this before coordinator wiring. Doing it here keeps
+	// this unit test from emitting legacy surface bytes to the test terminal.
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach a primary presenter")
+	}
+	if surface.PhysicalWritesEnabled() {
+		t.Fatal("legacy surface writer remained enabled after presenter attach")
+	}
+	surface.SetPhysicalWritesEnabled(true)
+	if surface.PhysicalWritesEnabled() {
+		t.Fatal("unified presenter fence allowed legacy writer re-enable")
+	}
+	if session.TerminalSession == nil || session.TerminalSessionExecutor == nil {
+		t.Fatal("chat session did not publish primary terminal ownership")
+	}
+	if coordinator.uiActor == nil || !coordinator.uiActor.AppState().SemanticActiveCellProjection {
+		t.Fatal("unified renderer did not fence AppState against legacy ActiveBand projection")
+	}
+
+	coordinator.RequestUnifiedFrame()
+	coordinator.waitUIActorIdle()
+	coordinator.mu.Lock()
+	presenter := coordinator.primaryPresenter
+	coordinator.mu.Unlock()
+	if presenter == nil {
+		t.Fatal("coordinator lost its primary presenter")
+	}
+	presenter.WaitIdle()
+	if output.Len() == 0 {
+		t.Fatal("primary presenter did not emit the initial frame")
+	}
+}
+
+// Ctrl+T's transcript pager must borrow the primary terminal owner rather than
+// use FixedBottomSurface as a second DEC 1049 writer. This exercises the
+// coordinator wiring, not just ScreenLease's standalone transport adapter.
+func TestChatInteractionCoordinatorUnifiedScreenLeaseUsesPresenterTransport(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if session.TerminalSession == nil {
+		t.Fatal("unified renderer did not publish a terminal session")
+	}
+	baselineFrame := session.TerminalSession.ProjectionState().Frame
+	output.Reset()
+
+	lease, err := surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{Title: "Transcript"})
+	if err != nil {
+		t.Fatalf("AcquireAlternateScreen: %v", err)
+	}
+	if !strings.Contains(output.String(), "\x1b[?1049h") {
+		t.Fatalf("presenter did not enter alternate screen: %q", output.String())
+	}
+	if session.TerminalSession == nil || session.TerminalSession.AlternateScreenLeaseID() != lease.ID() {
+		t.Fatalf("terminal session alternate owner = %v, want lease %d", session.TerminalSession, lease.ID())
+	}
+	coordinator.waitUIActorIdle()
+	if state := coordinator.uiActor.AppState(); !state.Lease.Active || state.Lease.ID != lease.ID() {
+		t.Fatalf("lease acquire did not reach AppState: %+v", state.Lease)
+	}
+	if !coordinator.postUIAction(ui.OpenTranscriptOverlay{LeaseID: lease.ID()}) {
+		t.Fatal("failed to open the actor-owned transcript overlay")
+	}
+	coordinator.waitUIActorIdle()
+	if overlay := coordinator.uiActor.AppState().TranscriptOverlay; !overlay.Active || overlay.LeaseID != lease.ID() {
+		t.Fatalf("transcript overlay did not bind to lease: %+v", overlay)
+	}
+
+	writer, ok := lease.(ui.AlternateScreenLeaseWriter)
+	if !ok {
+		t.Fatalf("unified lease did not expose alternate writer: %T", lease)
+	}
+	const pagerFrame = "pager-frame-from-presenter"
+	if err := writer.WriteAlternateScreen(pagerFrame); err != nil {
+		t.Fatalf("WriteAlternateScreen: %v", err)
+	}
+	if !strings.Contains(output.String(), pagerFrame) {
+		t.Fatalf("pager frame bypassed terminal session: %q", output.String())
+	}
+
+	if !coordinator.postUIAction(ui.CloseTranscriptOverlay{LeaseID: lease.ID()}) {
+		t.Fatal("failed to close the actor-owned transcript overlay")
+	}
+	if err := lease.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if session.TerminalSession.AlternateScreenLeaseID() != 0 {
+		t.Fatalf("terminal session retained alternate lease %d", session.TerminalSession.AlternateScreenLeaseID())
+	}
+	if state := coordinator.uiActor.AppState(); state.Lease.Active || state.Lease.ID != 0 {
+		t.Fatalf("lease release did not reach AppState: %+v", state.Lease)
+	}
+	if overlay := coordinator.uiActor.AppState().TranscriptOverlay; overlay.Active || overlay.LeaseID != 0 {
+		t.Fatalf("transcript overlay remained after release: %+v", overlay)
+	}
+	if !strings.Contains(output.String(), "\x1b[?1049l") {
+		t.Fatalf("presenter did not exit alternate screen: %q", output.String())
+	}
+	if frame := session.TerminalSession.ProjectionState().Frame; frame <= baselineFrame {
+		t.Fatalf("lease release did not recover a primary presenter frame: got %d, baseline %d", frame, baselineFrame)
+	}
+	if surface.PhysicalWritesEnabled() {
+		t.Fatal("alternate-screen lifecycle reopened the legacy surface writer")
+	}
+}
+
+func TestChatInteractionCoordinatorRejectsPresenterBesideLegacyWriter(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coordinator.Shutdown)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	coordinator.SetSurface(surface)
+	if !surface.PhysicalWritesEnabled() {
+		t.Fatal("test requires an active legacy writer")
+	}
+
+	actor := coordinator.ensureUIActor()
+	presenter := ui.NewTerminalSessionPresenter(actor, &bytes.Buffer{}, func() (int, int, bool) {
+		return 48, 14, true
+	})
+	if coordinator.SetPrimaryPresenter(presenter) {
+		presenter.Close()
+		t.Fatal("presenter attached beside an active legacy terminal writer")
+	}
+}
+
+func TestChatInteractionCoordinatorUnifiedEditorWriteNeverFallsBackToRawWriter(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var presenterOutput bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&presenterOutput) {
+		t.Fatal("unified renderer did not attach")
+	}
+
+	var rawEditorOutput bytes.Buffer
+	if !coordinator.WritePromptEditorText(&rawEditorOutput, 0, 0, "draft") {
+		t.Fatal("unified editor write was not claimed")
+	}
+	if rawEditorOutput.Len() != 0 {
+		t.Fatalf("unified editor emitted raw terminal bytes: %q", rawEditorOutput.String())
+	}
+
+	coordinator.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: "draft", Cursor: 5})
+	coordinator.waitUIActorIdle()
+	coordinator.mu.Lock()
+	presenter := coordinator.primaryPresenter
+	coordinator.mu.Unlock()
+	if presenter != nil {
+		presenter.WaitIdle()
+	}
+	state := coordinator.uiActor.AppState()
+	if state.Bottom.PromptInput != "draft" || state.Bottom.PromptCursor != 5 {
+		t.Fatalf("InputEvent did not reach presenter state: %+v", state.Bottom)
+	}
+}
+
+// This is the cutover fence: a surface facade action must update AppState and
+// reach the TerminalSession presenter, but must not re-enter FixedBottomSurface
+// through Apply. Physical-write fencing alone is insufficient because Apply
+// would leave the old surface as a competing screen-state authority.
+func TestChatInteractionCoordinatorUnifiedFacadeActionBypassesLegacySurfaceApply(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	coordinator.SetSurface(surface)
+
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+	if surface.PhysicalWritesEnabled() {
+		t.Fatal("legacy surface writer was not fenced during direct cutover")
+	}
+
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("prompt facade action was rejected")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	output.Reset()
+
+	const notice = "unified-facade-notice"
+	if !surface.SetPromptNoticeLine(notice) {
+		t.Fatal("notice facade action was rejected")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if state.Bottom.PromptNoticeLine != notice {
+		t.Fatalf("facade action did not update AppState: %+v", state.Bottom)
+	}
+	if fixedSurfaceRowsContain(surface.BottomRowsSnapshot(), notice) {
+		t.Fatalf("legacy surface Apply consumed unified facade action: %q", notice)
+	}
+	if !strings.Contains(output.String(), notice) {
+		t.Fatalf("primary TerminalSession did not render facade state: %q", output.String())
+	}
+}
+
+// Local output has historically taken the most error-prone path: it is not
+// backed by a RuntimeEvent and previously committed directly into the owned
+// viewport/historyWindow. In unified mode it must first become Scene/AppState
+// data and the TerminalSession must be the sole byte producer.
+func TestChatInteractionCoordinatorUnifiedLocalTranscriptUsesTerminalSessionOnly(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	coordinator.SetSurface(surface)
+
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+	if surface.PhysicalWritesEnabled() {
+		t.Fatal("legacy surface writer remained enabled")
+	}
+	output.Reset()
+
+	const assistant = "unified-local-assistant"
+	const supplement = "unified-local-supplement"
+	const command = "unified-local-command"
+	coordinator.RenderLocalAssistant(assistant)
+	coordinator.RenderLocalSupplement(supplement)
+	if ok := coordinator.RenderCommandDocument(render.Document{Blocks: []render.Block{{
+		Lines: []render.Line{{Spans: []render.Span{{Text: command}}}},
+	}}}); !ok {
+		t.Fatal("RenderCommandDocument returned false")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if len(state.Transcript.Cells) != 3 {
+		t.Fatalf("transcript cells = %d, want assistant + supplement + command", len(state.Transcript.Cells))
+	}
+	for _, want := range []string{assistant, supplement, command} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("TerminalSession output missing %q: %q", want, output.String())
+		}
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified local transcript populated legacy historyWindow: %#v", got)
+	}
+	if session.TerminalSession == nil || session.TerminalSession.ProjectionState().Frame == 0 {
+		t.Fatal("TerminalSession did not own the transcript frame")
+	}
+}
+
+// Streaming is the critical cutover case: the active body must advance from
+// the mutable Scene cell, not from ActiveStreamController or a facade band,
+// and the final Scene transition must use FinalizeActiveCellAction.
+func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	coordinator.SetSurface(surface)
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+
+	start := runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, Payload: map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1",
+	}}
+	bridge.encodeRenderModelEvent(start)
+	coordinator.postTranscriptSnapshotFromBridge(bridge)
+	coordinator.waitUIActorIdle()
+
+	delta := runtimeevents.Event{Type: runtimechat.EventAssistantDelta, Payload: map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1", "sequence": uint64(1), "delta": "scene streamed body",
+	}}
+	bridge.encodeRenderModelEvent(delta)
+	coordinator.RenderAssistantDelta("scene streamed body")
+	coordinator.postTranscriptSnapshotFromBridge(bridge)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "scene streamed body" {
+		t.Fatalf("stream did not advance Scene-backed active cell: %+v", state.Active)
+	}
+	if got := surface.ActiveBandLines(); len(got) != 0 {
+		t.Fatalf("unified assistant stream populated legacy ActiveBand: %#v", got)
+	}
+	if !strings.Contains(output.String(), "scene streamed body") {
+		t.Fatalf("TerminalSession frame omitted Scene active body: %q", output.String())
+	}
+
+	final := runtimeevents.Event{Type: runtimechat.EventAssistantMessage, Payload: map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1", "content": "authoritative final body",
+	}}
+	bridge.encodeRenderModelEvent(final)
+	if !coordinator.CompleteAssistantResponse("authoritative final body") {
+		t.Fatal("unified stream completion was not claimed")
+	}
+	// Runtime-event reduction posts this snapshot immediately after the
+	// coordinator callback. Mirror that causal follow-up in this focused test.
+	coordinator.postTranscriptSnapshotFromBridge(bridge)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state = coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("finalized stream left an active visual source: %+v", state.Active)
+	}
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != "authoritative final body" {
+		t.Fatalf("final Scene cell not committed exactly through transcript: %+v", state.Transcript)
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified stream wrote legacy historyWindow: %#v", got)
+	}
+}
+
+func awaitUnifiedPresenterIdle(t *testing.T, coordinator *chatInteractionCoordinator) {
+	t.Helper()
+	coordinator.mu.Lock()
+	presenter := coordinator.primaryPresenter
+	coordinator.mu.Unlock()
+	if presenter == nil {
+		t.Fatal("unified primary presenter is missing")
+	}
+	presenter.WaitIdle()
+}
+
+// A terminal runtime sequence is allowed to omit assistant.message. The
+// unified path must still resolve the Scene-owned mutable cell exactly once;
+// it must never leave an Active tail behind or revive FixedBottomSurface.
+func TestChatInteractionCoordinatorUnifiedAssistantStreamTerminalBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		terminate func(*ChatSession, *chatRuntimeEventBridge, *chatInteractionCoordinator)
+	}{
+		{
+			name: "llm finished without final message",
+			terminate: func(_ *ChatSession, bridge *chatRuntimeEventBridge, coordinator *chatInteractionCoordinator) {
+				bridge.handleEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, Payload: map[string]interface{}{
+					"turn_id": "turn-terminal", "stream_id": "stream-terminal", "success": true,
+				}})
+				coordinator.postTranscriptSnapshotFromBridge(bridge)
+			},
+		},
+		{
+			name: "provider error session end",
+			terminate: func(_ *ChatSession, bridge *chatRuntimeEventBridge, coordinator *chatInteractionCoordinator) {
+				bridge.handleEvent(runtimeevents.Event{Type: runtimechat.EventSessionEnd, Payload: map[string]interface{}{
+					"success": false, "error": "provider disconnected",
+				}})
+				coordinator.postTranscriptSnapshotFromBridge(bridge)
+			},
+		},
+		{
+			name: "context cancellation reaches end run without session end",
+			terminate: func(_ *ChatSession, bridge *chatRuntimeEventBridge, _ *chatInteractionCoordinator) {
+				bridge.setRunError(context.Canceled)
+				bridge.EndRun()
+			},
+		},
+		{
+			name: "user interrupt reaches end run without session end",
+			terminate: func(session *ChatSession, bridge *chatRuntimeEventBridge, _ *chatInteractionCoordinator) {
+				session.interrupted.Store(true)
+				bridge.EndRun()
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := &ChatSession{}
+			bridge := newChatRuntimeEventBridge(session)
+			session.RuntimeEventBridge = bridge
+			coordinator := newChatInteractionCoordinator(session)
+			t.Cleanup(coordinator.Shutdown)
+			session.Interaction = coordinator
+
+			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+			surface.EnableForTest(48, 14)
+			coordinator.SetSurface(surface)
+			var output bytes.Buffer
+			if !coordinator.enableUnifiedRendererWithWriter(&output) {
+				t.Fatal("unified renderer did not attach")
+			}
+
+			bridge.BeginRun()
+			bridge.encodeRenderModelEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, Payload: map[string]interface{}{
+				"turn_id": "turn-terminal", "stream_id": "stream-terminal",
+			}})
+			coordinator.postTranscriptSnapshotFromBridge(bridge)
+			coordinator.waitUIActorIdle()
+
+			const partial = "partial assistant output"
+			bridge.encodeRenderModelEvent(runtimeevents.Event{Type: runtimechat.EventAssistantDelta, Payload: map[string]interface{}{
+				"turn_id": "turn-terminal", "stream_id": "stream-terminal", "sequence": uint64(1), "delta": partial,
+			}})
+			coordinator.RenderAssistantDelta(partial)
+			// The runtime bridge sets this before invoking the coordinator. Keep
+			// the focused test on that real terminal-event path.
+			bridge.markAssistantDeltaRendered(partial)
+			coordinator.postTranscriptSnapshotFromBridge(bridge)
+			coordinator.waitUIActorIdle()
+
+			if active := coordinator.uiActor.AppState().Active; active.Phase != ui.ActiveCellMutable {
+				t.Fatalf("precondition active=%+v, want mutable Scene cell", active)
+			}
+			test.terminate(session, bridge, coordinator)
+			coordinator.waitUIActorIdle()
+			awaitUnifiedPresenterIdle(t, coordinator)
+
+			state := coordinator.uiActor.AppState()
+			if state.Active.Phase != ui.ActiveCellInactive {
+				t.Fatalf("terminal boundary left active cell=%+v", state.Active)
+			}
+			if len(state.Transcript.Cells) != 1 {
+				t.Fatalf("transcript cells=%d, want exactly one finalized partial cell", len(state.Transcript.Cells))
+			}
+			cell := state.Transcript.Cells[0]
+			if cell.Source != partial || cell.Phase != scene.CellCommitted {
+				t.Fatalf("terminal partial cell=%+v, want committed source=%q", cell, partial)
+			}
+			if strings.Count(output.String(), partial) > 2 {
+				t.Fatalf("partial body was replayed through a duplicate writer: %q", output.String())
+			}
+			if history := surface.HistoryWindowForTest(); len(history) != 0 {
+				t.Fatalf("terminal boundary populated legacy historyWindow: %#v", history)
+			}
+			if activeBand := surface.ActiveBandLines(); len(activeBand) != 0 {
+				t.Fatalf("terminal boundary repopulated legacy active band: %#v", activeBand)
+			}
+		})
+	}
+}
+
+func fixedSurfaceRowsContain(rows [][]vt.Cell, text string) bool {
+	var builder strings.Builder
+	for _, row := range rows {
+		for _, cell := range row {
+			builder.WriteString(cell.Text)
+		}
+		builder.WriteByte('\n')
+	}
+	return strings.Contains(builder.String(), text)
 }
 
 func TestChatRuntimeEventBridge_OrdinaryEventUsesUIActorReducer(t *testing.T) {
@@ -189,7 +690,7 @@ func TestChatInteractionCoordinatorRefreshReportsMeasuredGeometryToAppState(t *t
 	})
 }
 
-func TestChatInteractionCoordinatorPromptInputUsesDurableInputAction(t *testing.T) {
+func TestChatInteractionCoordinatorPromptInputUsesSequencedInputAction(t *testing.T) {
 	session := &ChatSession{}
 	coordinator := newChatInteractionCoordinator(session)
 	t.Cleanup(coordinator.Shutdown)
@@ -200,13 +701,243 @@ func TestChatInteractionCoordinatorPromptInputUsesDurableInputAction(t *testing.
 		Cursor:      5,
 		PasteActive: true,
 	})
+	coordinator.waitUIActorIdle()
 	snapshot := coordinator.PromptInputSnapshot()
 	if snapshot.Text != "draft input" || snapshot.Cursor != 5 || !snapshot.PasteActive {
 		t.Fatalf("prompt snapshot was not applied by reducer: %+v", snapshot)
 	}
 	stats := coordinator.uiActor.Stats()
 	if stats.Processed != 1 || stats.LastAction != "InputEvent" {
-		t.Fatalf("prompt input did not use one durable InputEvent: %+v", stats)
+		t.Fatalf("prompt input did not use one sequenced InputEvent: %+v", stats)
+	}
+}
+
+func TestChatInteractionCoordinatorPromptInputNeverWaitsForActorDrain(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	blocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocker) }) }
+	entered := make(chan struct{})
+	first := true
+	actor := ui.NewUIController(ui.UIControllerConfig{}, ui.ReducerFunc(func(uint64, ui.UIAction) []ui.Effect {
+		if first {
+			first = false
+			close(entered)
+			<-blocker
+		}
+		return nil
+	}), nil)
+	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	go actor.Run()
+	t.Cleanup(func() {
+		release()
+		coordinator.Shutdown()
+	})
+
+	if !coordinator.postUIAction(ui.Timer{Key: "test.block"}) {
+		t.Fatal("failed to post blocking actor action")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("actor did not enter blocking reducer")
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		coordinator.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: "responsive", Cursor: 10})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("prompt input waited for an unrelated actor action")
+	}
+}
+
+func TestChatInteractionCoordinatorPromptInputNeverWaitsForCoordinatorRenderLock(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coordinator.Shutdown)
+
+	coordinator.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			coordinator.mu.Unlock()
+		}
+	}()
+
+	returned := make(chan struct{})
+	go func() {
+		coordinator.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: "render lock responsive", Cursor: 22})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("prompt input waited for coordinator render lock")
+	}
+	if snapshot := coordinator.PromptInputSnapshot(); snapshot.Text != "render lock responsive" || snapshot.Cursor != 22 {
+		t.Fatalf("editor cache did not publish under coordinator render lock: %+v", snapshot)
+	}
+
+	coordinator.mu.Unlock()
+	locked = false
+	coordinator.waitUIActorIdle()
+	if snapshot := coordinator.PromptInputSnapshot(); snapshot.Text != "render lock responsive" || snapshot.Cursor != 22 {
+		t.Fatalf("prompt draft was not retained after render lock release: %+v", snapshot)
+	}
+}
+
+func TestChatInteractionCoordinatorPromptInputNeverWaitsForFullMailbox(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	blocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocker) }) }
+	entered := make(chan struct{})
+	first := true
+	actor := ui.NewUIController(ui.UIControllerConfig{MailboxSize: 1}, ui.ReducerFunc(func(revision uint64, action ui.UIAction) []ui.Effect {
+		if first {
+			first = false
+			close(entered)
+			<-blocker
+		}
+		return coordinator.reduceUIAction(revision, action)
+	}), nil)
+	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	go actor.Run()
+	t.Cleanup(func() {
+		release()
+		coordinator.Shutdown()
+	})
+
+	if !coordinator.postUIAction(ui.Timer{Key: "test.block"}) {
+		t.Fatal("failed to post blocking actor action")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("actor did not enter blocking reducer")
+	}
+	if !coordinator.postUIAction(ui.LeaseAcquired{LeaseID: 1}) {
+		t.Fatal("failed to fill actor mailbox")
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		coordinator.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: "mailbox responsive", Cursor: 18})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("prompt input waited for a full actor mailbox")
+	}
+
+	release()
+	deadline := time.Now().Add(time.Second)
+	for actor.Stats().Processed < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if stats := actor.Stats(); stats.Processed < 3 {
+		t.Fatalf("deferred prompt snapshot was not eventually reduced: %+v", stats)
+	}
+}
+
+func TestChatInteractionCoordinatorPromptEditorStatusNeverWaitsForFullMailbox(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	blocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocker) }) }
+	entered := make(chan struct{})
+	first := true
+	actor := ui.NewUIController(ui.UIControllerConfig{MailboxSize: 1}, ui.ReducerFunc(func(uint64, ui.UIAction) []ui.Effect {
+		if first {
+			first = false
+			close(entered)
+			<-blocker
+		}
+		return nil
+	}), nil)
+	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	go actor.Run()
+	t.Cleanup(func() {
+		release()
+		coordinator.Shutdown()
+	})
+
+	if !coordinator.postUIAction(ui.Timer{Key: "test.status-block"}) {
+		t.Fatal("failed to post blocking actor action")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("actor did not enter blocking reducer")
+	}
+	if !coordinator.postUIAction(ui.LeaseAcquired{LeaseID: 1}) {
+		t.Fatal("failed to fill actor mailbox")
+	}
+
+	returned := make(chan bool, 1)
+	go func() {
+		returned <- coordinator.postSurfaceFacadeAction(ui.SetPromptEditorStatusAction{Line: "多行 2/3"})
+	}()
+	select {
+	case ok := <-returned:
+		if !ok {
+			t.Fatal("editor status action was rejected")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("editor status waited for a full actor mailbox")
+	}
+
+	release()
+	deadline := time.Now().Add(time.Second)
+	for actor.Stats().Processed < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if stats := actor.Stats(); stats.Processed < 3 {
+		t.Fatalf("deferred editor status was not eventually reduced: %+v", stats)
+	}
+}
+
+func TestChatInteractionCoordinatorPromptResetRejectsQueuedSnapshot(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	blocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocker) }) }
+	entered := make(chan struct{})
+	first := true
+	actor := ui.NewUIController(ui.UIControllerConfig{}, ui.ReducerFunc(func(revision uint64, action ui.UIAction) []ui.Effect {
+		if first {
+			first = false
+			close(entered)
+			<-blocker
+		}
+		return coordinator.reduceUIAction(revision, action)
+	}), nil)
+	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	go actor.Run()
+	t.Cleanup(func() {
+		release()
+		coordinator.Shutdown()
+	})
+
+	if !coordinator.postUIAction(ui.Timer{Key: "test.block"}) {
+		t.Fatal("failed to post blocking actor action")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("actor did not enter blocking reducer")
+	}
+	coordinator.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: "stale draft", Cursor: 11})
+	coordinator.ResetPromptState()
+
+	release()
+	coordinator.waitUIActorIdle()
+	if snapshot := coordinator.PromptInputSnapshot(); snapshot.Text != "" || snapshot.Cursor != 0 || snapshot.PasteActive {
+		t.Fatalf("queued pre-reset input resurrected the draft: %+v", snapshot)
 	}
 }
 

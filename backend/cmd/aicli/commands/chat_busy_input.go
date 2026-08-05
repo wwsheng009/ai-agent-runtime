@@ -141,10 +141,10 @@ func renderBusyInputRouteFeedback(session *ChatSession, input string, result cha
 	command := strings.TrimSpace(normalizeQueuedInputLine(input))
 	fields := strings.Fields(command)
 	if len(fields) == 2 && strings.EqualFold(fields[0], "/queue") && strings.EqualFold(fields[1], "clear") {
-		session.Interaction.RenderAsyncLine("[input] Agent 正在运行，无法执行 /queue clear；现有队列保持不变。请等待状态回到 Ready 后再次执行。")
+		session.Interaction.RenderLocalSupplement("[input] Agent 正在运行，无法执行 /queue clear；现有队列保持不变。请等待状态回到 Ready 后再次执行。")
 		return
 	}
-	session.Interaction.RenderAsyncLine(fmt.Sprintf(
+	session.Interaction.RenderLocalSupplement(fmt.Sprintf(
 		"[input] Agent 正在运行，slash 命令 %q 未执行，也未加入消息队列；请等待状态回到 Ready 后重试。",
 		command,
 	))

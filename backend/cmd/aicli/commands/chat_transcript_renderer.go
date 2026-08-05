@@ -85,7 +85,11 @@ func (r *aicliTranscriptRenderer) RenderSupplement(content string) bool {
 		return false
 	}
 	if r.session.Interaction != nil {
-		r.session.Interaction.RenderAsyncLine(content)
+		if r.replay {
+			r.session.Interaction.RenderAsyncLine(content)
+		} else {
+			r.session.Interaction.RenderLocalSupplement(content)
+		}
 		return true
 	}
 	fmt.Println(ui.FormatAssistantSupplementBlock(content))
@@ -108,6 +112,9 @@ func (r *aicliTranscriptRenderer) RenderToolEvent(event runtimechatcore.ChatEven
 		return false
 	}
 	if r.session.Interaction != nil {
+		if r.replay {
+			return r.session.Interaction.RenderReplayedToolChainEvent(event)
+		}
 		return r.session.Interaction.RenderToolChainEvent(event)
 	}
 	rendered := renderSharedChatToolEvent(event)

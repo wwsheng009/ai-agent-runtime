@@ -6566,24 +6566,16 @@ func TestChatRuntimeEventBridge_InteractionInjectedAtAnchor(t *testing.T) {
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 
-	// 事件 1 → item-1（模型尾部锚点）。
-	bridge.encodeRenderModelEvent(runtimeevents.Event{
-		Type:      runtimechat.EventQuestionAsked,
-		SessionID: "session-1",
-		TraceID:   "trace-1",
-		Payload:   map[string]interface{}{"prompt": "choose a model"},
-	})
+	// A committed supplement supplies the model tail. Priority requests are
+	// intentionally pending identities now, not visible placeholder items, so
+	// they cannot be used as an interaction-anchor target.
+	bridge.submitSupplement("first visible event")
 	anchor := bridge.recordInteractionAnchor("debug")
 	if anchor == nil || anchor.ItemID != "item-1" {
 		t.Fatalf("anchor = %+v, want item-1", anchor)
 	}
 	// 模型在触发时刻后继续增长 → item-2。
-	bridge.encodeRenderModelEvent(runtimeevents.Event{
-		Type:      runtimechat.EventApprovalRequested,
-		SessionID: "session-1",
-		TraceID:   "trace-2",
-		Payload:   map[string]interface{}{"request_id": "req-1"},
-	})
+	bridge.submitSupplement("second visible event")
 
 	// /debug 输出提交：pending 交互标记 → 锚定插入（item-1 之后）。
 	if ok := coord.RenderCommandDocument(render.Document{
@@ -6645,20 +6637,12 @@ func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 
-	// 实时路径：事件 1 → 锚点 → 事件 2 → /debug 交互输出（锚定插入）。
-	bridge.encodeRenderModelEvent(runtimeevents.Event{
-		Type:      runtimechat.EventQuestionAsked,
-		SessionID: "session-1",
-		TraceID:   "trace-1",
-		Payload:   map[string]interface{}{"prompt": "choose a model"},
-	})
+	// 实时路径：item-1 → 锚点 → item-2 → /debug 交互输出（锚定插入）。
+	// Priority requests are pending lifecycle state rather than Scene items,
+	// therefore a committed supplement provides the deterministic anchor.
+	bridge.submitSupplement("first visible event")
 	bridge.recordInteractionAnchor("debug")
-	bridge.encodeRenderModelEvent(runtimeevents.Event{
-		Type:      runtimechat.EventApprovalRequested,
-		SessionID: "session-1",
-		TraceID:   "trace-2",
-		Payload:   map[string]interface{}{"request_id": "req-1"},
-	})
+	bridge.submitSupplement("second visible event")
 	if ok := coord.RenderCommandDocument(render.Document{
 		Blocks: []render.Block{
 			{Kind: render.BlockParagraph, Lines: []render.Line{

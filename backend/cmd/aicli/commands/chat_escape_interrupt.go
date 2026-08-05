@@ -54,7 +54,7 @@ func renderChatEscapeInterruptNotice(session *ChatSession) {
 		return
 	}
 	if session.Interaction != nil {
-		session.Interaction.RenderAsyncLine("已中断 - ESC 取消当前操作")
+		session.Interaction.RenderLocalSupplement("已中断 - ESC 取消当前操作")
 		return
 	}
 	printDirectInteractiveOutput(session, ui.NewStatus(ui.StatusInfo, "已中断 - ESC 取消当前操作").Build()+"\n")

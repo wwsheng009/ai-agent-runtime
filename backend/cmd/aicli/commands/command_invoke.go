@@ -683,7 +683,7 @@ func renderDirectInvocationLine(session *ChatSession, line string) {
 		return
 	}
 	if session != nil && session.Interaction != nil && !session.NoInteractive && !session.JSONOutput {
-		session.Interaction.RenderAsyncLine(line)
+		session.Interaction.RenderLocalSupplement(line)
 		return
 	}
 	fmt.Println(line)

@@ -38,6 +38,15 @@ func (o chatPromptOverlay) beginDirectOutput() {
 	if o.session == nil || o.session.NoInteractive || o.session.JSONOutput {
 		return
 	}
+	if unifiedDirectInteractiveOutput(o.session) {
+		// The unified primary owns the frame and cursor transaction. Clearing the
+		// prompt remains a reducer action, but legacy reserve bookkeeping must not
+		// run beside TerminalSession.
+		if o.session.Interaction != nil {
+			o.session.Interaction.ClearPrompt()
+		}
+		return
+	}
 	if o.session.Interaction != nil {
 		o.session.Interaction.ClearPrompt()
 	}
@@ -282,6 +291,20 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 	newChatPromptOverlay(session).beginDirectOutput()
 }
 
+// unifiedDirectInteractiveOutput reports whether this session has crossed the
+// one-way TerminalSession ownership boundary. TerminalSession fields make the
+// failure mode explicit during teardown: losing Interaction must never revive
+// a raw writer while the unified primary is (or was) the terminal owner.
+func unifiedDirectInteractiveOutput(session *ChatSession) bool {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return false
+	}
+	if session.Interaction != nil && session.Interaction.UnifiedRendererEnabled() {
+		return true
+	}
+	return session.TerminalSession != nil || session.TerminalSessionExecutor != nil
+}
+
 // settleInteractiveOutputLayout flushes deferred bottom-reserve shrink
 // compensation without writing transcript content. History / resume replay
 // must call this after ClearPrompt (or beginDirectInteractiveOutput) and
@@ -289,6 +312,9 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 // already-final messages. No-op when there is no enabled surface.
 func settleInteractiveOutputLayout(session *ChatSession) {
 	if session == nil || session.NoInteractive || session.JSONOutput {
+		return
+	}
+	if unifiedDirectInteractiveOutput(session) {
 		return
 	}
 	if session.Surface == nil || !session.Surface.Enabled() {
@@ -300,10 +326,18 @@ func settleInteractiveOutputLayout(session *ChatSession) {
 // writeDirectInteractiveOutput clears the painted prompt (when present) and
 // writes text through FixedBottomSurface.WriteOutput so deferred bottom-reserve
 // shrink compensation is flushed and scroll bookkeeping stays consistent.
-// Returns false when the session has no enabled surface; callers should fall
-// back to beginDirectInteractiveOutput + plain stdout writes.
+// In unified mode it instead submits sanitized semantic content through Scene /
+// AppState. Returns true for a unified session even when its Interaction has
+// already disappeared, so callers cannot fall back to a second terminal writer.
+// Legacy sessions return false when no enabled surface is available.
 func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
-	if session == nil || text == "" || session.NoInteractive || session.JSONOutput {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return false
+	}
+	if unifiedDirectInteractiveOutput(session) {
+		return submitUnifiedDirectInteractiveOutput(session, text)
+	}
+	if text == "" {
 		return false
 	}
 	if session.Surface == nil || !session.Surface.Enabled() {
@@ -327,11 +361,46 @@ func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
 	return handled && err == nil
 }
 
+// submitUnifiedDirectInteractiveOutput turns former direct terminal text into
+// a Scene-backed supplement. The input is sanitized before it reaches the
+// semantic model because its old callers frequently pass preformatted ANSI
+// messages. Newline-only output deliberately produces no transcript cell.
+//
+// A missing Interaction after TerminalSession ownership has been established
+// is fail-closed. Reporting success prevents every legacy caller from using
+// its stdout fallback and creating a competing writer during shutdown races.
+func submitUnifiedDirectInteractiveOutput(session *ChatSession, text string) bool {
+	if session == nil {
+		return false
+	}
+	content := ui.SanitizeTerminalText(text)
+	if strings.TrimSpace(content) == "" {
+		return true
+	}
+	interaction := session.Interaction
+	if interaction == nil {
+		return true
+	}
+	// RenderLocalSupplement is Scene-backed only when the bridge exists. Ensure
+	// it before publishing so a direct output path cannot be silently dropped
+	// merely because it runs before the normal runtime executor initialization.
+	if ensureChatRuntimeEventBridge(session) == nil {
+		return true
+	}
+	interaction.ClearPrompt()
+	interaction.RenderLocalSupplement(content)
+	return true
+}
+
 // printDirectInteractiveOutput writes text through the surface when available
-// (flushing ClearPrompt shrink debt + WriteOutput bookkeeping). Falls back to
-// beginDirectInteractiveOutput + writer otherwise. Use for any stdout content
-// that should not leave pendingScrollDown debt for the next write.
+// (flushing ClearPrompt shrink debt + WriteOutput bookkeeping). Unified
+// sessions submit semantic Scene content instead and never use the stdout
+// fallback. Legacy sessions retain their existing fallback behavior.
 func printDirectInteractiveOutput(session *ChatSession, text string) {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = submitUnifiedDirectInteractiveOutput(session, text)
+		return
+	}
 	if writeDirectInteractiveOutput(session, text) {
 		return
 	}
@@ -408,7 +477,7 @@ func writeChatLogSaveError(session *ChatSession, err error) {
 	}
 	message := fmt.Sprintf("[日志保存失败] %v", err)
 	if shouldRenderInteractiveOutput(session) && session.Interaction != nil {
-		session.Interaction.RenderAsyncLine(message)
+		session.Interaction.RenderLocalSupplement(message)
 		return
 	}
 	fmt.Fprint(os.Stderr, message)

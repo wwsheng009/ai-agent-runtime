@@ -158,7 +158,7 @@ func reportGoalAutoContinuationWarning(session *ChatSession, err error) {
 		return
 	}
 	if session.Interaction != nil {
-		session.Interaction.RenderAsyncLine(message)
+		session.Interaction.RenderLocalSupplement(message)
 		return
 	}
 	fmt.Println(message)
@@ -174,7 +174,7 @@ func reportGoalAutoContinuationLimitReached(session *ChatSession, limit int) {
 		return
 	}
 	if session.Interaction != nil {
-		session.Interaction.RenderAsyncLine(message)
+		session.Interaction.RenderLocalSupplement(message)
 		return
 	}
 	fmt.Println(message)

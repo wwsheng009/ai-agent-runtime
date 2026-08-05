@@ -38,19 +38,39 @@ type chatInteractionCoordinator struct {
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
 	uiSurface atomic.Pointer[ui.FixedBottomSurface]
 
-	mu                            sync.Mutex
-	promptVisible                 bool
-	promptInput                   string
-	promptCursor                  int
-	promptRenderedOnSurface       bool
-	promptPasteActive             bool
-	thinkingActive                bool
-	streamingActive               bool
-	streamRendered                bool
-	streamMode                    assistantStreamMode
-	finalizingAssistantProjection bool
-	streamRenderedPrefixLen       int
-	streamEnqueuedPrefixLen       int
+	mu            sync.Mutex
+	promptVisible bool
+	// promptInputMu protects the editor-facing draft independently from c.mu.
+	// Runtime rendering can hold c.mu while formatting or writing terminal
+	// bytes; a per-key editor callback must never wait for that work merely to
+	// retain its latest text/cursor snapshot.
+	promptInputMu     sync.RWMutex
+	promptInput       string
+	promptCursor      int
+	promptInputSeq    uint64
+	promptPasteActive bool
+	promptInputClosed atomic.Bool
+	// promptInputDispatch* holds the newest input snapshot that could not be
+	// admitted to the bounded actor mailbox immediately. It is a separate
+	// ingress retry state, never a second terminal writer.
+	promptInputDispatchMu      sync.Mutex
+	promptInputDispatchPending *ui.InputEvent
+	promptInputDispatchRunning bool
+	// promptEditorStatusDispatch* is the non-blocking ingress for the
+	// coalescable editor context line. It is separate from the input snapshot
+	// because the latter carries cursor/paste semantics while this action is a
+	// pure latest-wins presentation hint.
+	promptEditorStatusDispatchMu      sync.Mutex
+	promptEditorStatusDispatchPending *ui.SetPromptEditorStatusAction
+	promptEditorStatusDispatchRunning bool
+	promptRenderedOnSurface           bool
+	thinkingActive                    bool
+	streamingActive                   bool
+	streamRendered                    bool
+	streamMode                        assistantStreamMode
+	finalizingAssistantProjection     bool
+	streamRenderedPrefixLen           int
+	streamEnqueuedPrefixLen           int
 	// streamTrailingLF is the assistant-stream open-row cursor (Phase C).
 	// true  = cursor already at column 0 (row boundary / never opened a row)
 	// false = mid-line content was written without a row terminator
@@ -129,8 +149,18 @@ type chatInteractionCoordinator struct {
 	framePump                *renderengine.FramePump
 	// UI actor（Phase 1，实施指南任务 2/3/5）：业务 producer 只投递 action，
 	// reducer 经 legacy adapter 生成相同输出。惰性创建，见 ensureUIActor。
-	uiActor               *ui.UIController
-	uiActorOnce           sync.Once
+	uiActor     *ui.UIController
+	uiActorOnce sync.Once
+	// unifiedRenderer selects the AppState -> TerminalSession primary path.
+	// FixedBottomSurface may remain enabled as a compatibility state facade, but
+	// its physical writer is fenced before primaryPresenter is attached.
+	// Tests that do not enable this switch retain the legacy writer.
+	unifiedRenderer  bool
+	primaryPresenter *ui.TerminalSessionPresenter
+	terminalSession  *ui.TerminalSession
+	// terminalExecutor remains a diagnostic compatibility alias. New code must
+	// use primaryPresenter so effect binding and shutdown stay paired.
+	terminalExecutor      *ui.TerminalSessionExecutor
 	activeFrameDue        time.Time
 	activeFrameGeneration uint64
 	stableCommitQueue     []activeStableCommitLine
@@ -494,6 +524,15 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	if c.shutdown {
 		return
 	}
+	if c.unifiedRenderer && surface != nil {
+		// A replacement facade must never revive its legacy terminal writer
+		// after the presenter has become the primary physical owner.
+		if c.primaryPresenter != nil {
+			surface.FencePhysicalWrites()
+		} else if surface.PhysicalWritesEnabled() {
+			surface.SetPhysicalWritesEnabled(false)
+		}
+	}
 	if surface == nil || !surface.Enabled() {
 		c.reconcilePendingStableCommitLocked(c.streamBuffer.String())
 	}
@@ -512,6 +551,7 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	}
 	if previousSurface != nil && previousSurface != surface {
 		previousSurface.SetUIActorPoster(nil)
+		previousSurface.SetAlternateScreenLeaseTransport(nil)
 	}
 	if surface != nil {
 		// Phase 1 任务 4 生产接线：facade 组（band/status/prompt/popup）
@@ -521,12 +561,88 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 		// them into ordered actor follow-ups; all external facade calls still use
 		// the normal mailbox path.
 		surface.SetUIActorPoster(c.postSurfaceFacadeAction)
+		if c.primaryPresenter != nil {
+			surface.SetAlternateScreenLeaseTransport(c.primaryPresenter)
+		}
 	}
 	c.uiSurface.Store(surface)
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	if c.activeStream != nil && c.activeStream.Active() && c.surfaceOutputActiveLocked() {
 		_ = c.publishActiveStreamFrameLocked(true)
 	}
+}
+
+// SetPrimaryPresenter attaches the sole physical terminal presenter after the
+// legacy FixedBottomSurface writer has been fenced. It is deliberately a
+// coordinator-level operation: accepting a presenter while an enabled legacy
+// surface can still write would create a split primary terminal authority.
+func (c *chatInteractionCoordinator) SetPrimaryPresenter(presenter *ui.TerminalSessionPresenter) bool {
+	if c == nil || presenter == nil {
+		return false
+	}
+	c.mu.Lock()
+	if c.shutdown || (c.surface != nil && c.surface.PhysicalWritesEnabled()) {
+		c.mu.Unlock()
+		return false
+	}
+	if c.primaryPresenter == presenter {
+		c.mu.Unlock()
+		return true
+	}
+	if c.primaryPresenter != nil {
+		// A live primary owner cannot be replaced in place. The physical fence is
+		// deliberately one-way after cutover, so replacement must use a complete
+		// session teardown/rebuild rather than leave any interval with zero or
+		// two terminal writers.
+		c.mu.Unlock()
+		return false
+	}
+	if !presenter.Attach() {
+		c.mu.Unlock()
+		return false
+	}
+	c.primaryPresenter = presenter
+	c.unifiedRenderer = true
+	c.terminalSession = presenter.Session()
+	c.terminalExecutor = presenter.Executor()
+	if c.session != nil {
+		c.session.TerminalSession = c.terminalSession
+		c.session.TerminalSessionExecutor = c.terminalExecutor
+	}
+	surface := c.surface
+	c.mu.Unlock()
+	if surface != nil {
+		surface.FencePhysicalWrites()
+		surface.SetAlternateScreenLeaseTransport(presenter)
+	}
+	presenter.Request()
+	return true
+}
+
+// primaryTerminalGeometry is a read-only geometry bridge for the presenter.
+// It deliberately reads only the surface's cached terminal dimensions; layout
+// and terminal writes remain exclusively in the actor/presenter path.
+func (c *chatInteractionCoordinator) primaryTerminalGeometry() (width, height int, ok bool) {
+	if c == nil {
+		return 0, 0, false
+	}
+	c.mu.Lock()
+	surface := c.surface
+	shutdown := c.shutdown
+	c.mu.Unlock()
+	if shutdown {
+		return 0, 0, false
+	}
+	if surface != nil {
+		if width, height, ok = surface.TerminalGeometry(); ok {
+			return width, height, true
+		}
+	}
+	width, height = ui.GetTerminalWidth(), ui.GetTerminalHeight()
+	if width < 1 || height < 1 {
+		return 0, 0, false
+	}
+	return width, height, true
 }
 
 func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
@@ -575,7 +691,8 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 		return
 	}
 	c.promptSeq++
-	c.promptPasteActive = false
+	c.setPromptPasteActive(false)
+	draft := c.promptInputSnapshotState()
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
@@ -584,18 +701,18 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 		c.promptVisible = true
 		c.promptRenderedOnSurface = true
 		c.preparePromptGapLocked(false)
-		if c.promptInput != "" {
+		if draft.text != "" {
 			rows := c.currentPromptDisplayRowsLocked()
 			cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-			c.surface.SetPromptInputState(prompt, c.promptInput, rows, cursorRow, cursorCol)
+			c.surface.SetPromptInputState(prompt, draft.text, rows, cursorRow, cursorCol)
 		}
 		return
 	}
 	c.promptRenderedOnSurface = false
 	c.preparePromptGapLocked(true)
 	c.writeTextLocked(prompt)
-	if c.promptInput != "" {
-		c.writeTextLocked(c.promptInput)
+	if draft.text != "" {
+		c.writeTextLocked(draft.text)
 	}
 	c.promptVisible = true
 }
@@ -983,6 +1100,13 @@ func (c *chatInteractionCoordinator) writeTextLocked(text string) {
 	if c == nil || c.writer == nil || text == "" {
 		return
 	}
+	if c.unifiedRenderer {
+		// Unified production content is published through Scene/AppState and
+		// emitted only by TerminalSessionExecutor. This guard makes every
+		// remaining legacy immediate-mode helper fail closed instead of mutating
+		// FixedBottomSurface history or writing raw stdout.
+		return
+	}
 	// Soft-committed drain re-establishes ownership after its writes. Any other
 	// output (tool results, notices, raw stream fallback) breaks the 1:1 soft
 	// window and must drop rewrite tracking immediately.
@@ -1202,6 +1326,9 @@ func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...in
 	if c == nil || c.writer == nil || format == "" {
 		return
 	}
+	if c.unifiedRenderer {
+		return
+	}
 	if c.surfaceWriter && c.surface != nil {
 		c.writeTextLocked(fmt.Sprintf(format, args...))
 		return
@@ -1210,7 +1337,7 @@ func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...in
 }
 
 func (c *chatInteractionCoordinator) writeSurfaceOutputTextLocked(text string) bool {
-	if c == nil || !c.surfaceWriter || c.surface == nil || text == "" || !c.surfaceOutputActiveLocked() {
+	if c == nil || c.unifiedRenderer || !c.surfaceWriter || c.surface == nil || text == "" || !c.surfaceOutputActiveLocked() {
 		return false
 	}
 	// Soft-commit drain is the only path that may open/extend the rewrite
@@ -1547,7 +1674,8 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 	if c.shutdown {
 		return
 	}
-	c.promptPasteActive = false
+	c.setPromptPasteActive(false)
+	draft := c.promptInputSnapshotState()
 	if c.writer == os.Stdout && c.surface != nil {
 		if c.promptVisible && c.promptRenderedOnSurface {
 			if c.surface.ResetPrompt(formatSessionUserPrompt(c.session), 1) {
@@ -1562,10 +1690,10 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 		c.promptVisible = false
 		c.promptRenderedOnSurface = false
 	}
-	if c.promptVisible && c.promptRenderedOnSurface && c.promptInput != "" && c.writer == os.Stdout && c.surface != nil {
+	if c.promptVisible && c.promptRenderedOnSurface && draft.text != "" && c.writer == os.Stdout && c.surface != nil {
 		rows := c.currentPromptDisplayRowsLocked()
 		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), c.promptInput, rows, cursorRow, cursorCol)
+		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), draft.text, rows, cursorRow, cursorCol)
 	}
 	c.waitingActive = true
 	// Codex turn_lifecycle.start: begin live goal-time accrual for this turn.
@@ -2814,6 +2942,31 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
 }
 
+// RenderLocalAssistant commits a final response produced outside the runtime
+// event bridge (for example a legacy non-stream executor). Runtime assistant
+// events continue to use RenderAssistant through the projection-only callback;
+// calling both paths for one response would duplicate the Scene cell.
+func (c *chatInteractionCoordinator) RenderLocalAssistant(response string) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(response) == "" {
+		return
+	}
+	c.mu.Lock()
+	if !c.beginMessageLocked() {
+		c.mu.Unlock()
+		return
+	}
+	bridge := c.session.RuntimeEventBridge
+	response = sanitizeInteractiveAsyncTeamLaunchResponse(response)
+	if bridge != nil {
+		bridge.submitAssistant(response)
+	}
+	cell := c.finalAssistantCellLocked(response)
+	meta := cellBoundaryMeta(cell)
+	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
+	c.mu.Unlock()
+	c.postTranscriptSnapshotFromBridge(bridge)
+}
+
 func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.ReasoningBlock) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || block == nil {
 		return
@@ -2905,7 +3058,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		c.streamTrailingLF = true
 		c.streamLines = 0
 		c.streamBuffer.Reset()
-		if c.activeStream != nil {
+		if !c.unifiedRenderer && c.activeStream != nil {
 			c.activeStream.BeginAssistant("assistant")
 		}
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
@@ -2918,6 +3071,14 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	previousMode := c.streamMode
 	c.streamBuffer.WriteString(delta)
 	c.streamLines += strings.Count(delta, "\n")
+	if c.unifiedRenderer {
+		// The runtime event has already advanced the mutable Scene cell before
+		// it reaches this callback. Do not create an ActiveStreamController
+		// projection or legacy ActiveBand frame: the Scene snapshot and the
+		// fenced AppState update below are the only visual source.
+		activeShadowAction = c.unifiedSceneActiveCellActionLocked()
+		return
+	}
 	if c.streamMode != assistantStreamModeMarkdown {
 		nextMode := c.classifyAssistantStreamModeLocked(c.streamBuffer.String())
 		if nextMode == assistantStreamModeMarkdown {
@@ -3039,6 +3200,15 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if !c.streamingActive {
 		return false
 	}
+	if c.unifiedRenderer {
+		// assistant.message has already committed the final Scene cell before
+		// this callback. Finalize through the actor fence only; legacy stable
+		// queues, ActiveStreamController, and ActiveBand must not replay the
+		// body into a second visual owner.
+		activeShadowAction = c.finalizeActiveCellShadowActionLocked()
+		c.resetStreamLocked()
+		return true
+	}
 	finalContent := response
 	if strings.TrimSpace(finalContent) == "" {
 		finalContent = c.streamBuffer.String()
@@ -3156,6 +3326,14 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 	if !c.streamingActive {
 		return
 	}
+	if c.unifiedRenderer {
+		// Session-end and tool-boundary flushes use the same Scene finalization
+		// boundary as an assistant.message. A missing/late final snapshot is
+		// fail-closed rather than falling back to legacy terminal output.
+		activeShadowAction = c.finalizeActiveCellShadowActionLocked()
+		c.resetStreamLocked()
+		return
+	}
 	content := c.streamBuffer.String()
 	c.reconcilePendingStableCommitLocked(content)
 	if consolidated := c.finalizeActiveAssistantLocked(content, c.streamMode == assistantStreamModeMarkdown); consolidated != "" {
@@ -3240,14 +3418,73 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	c.commitHistoryCellLocked(suppCell, c.gapBeforeBlockLocked(cellBoundaryMeta(suppCell)), cellBoundaryMeta(suppCell))
 }
 
+// RenderLocalSupplement 提交一个没有 runtime event 对应物的本地补充。
+// RenderAsyncLine 保留给已经由 chatRuntimeEventBridge.Encode 映射过的事件
+// 和 legacy 兼容调用；两者不能混用，否则同一 timeline event 会产生重复
+// Scene cell。该方法只在 coordinator 解锁后发布 Scene snapshot。
+func (c *chatInteractionCoordinator) RenderLocalSupplement(line string) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(line) == "" {
+		return
+	}
+	c.mu.Lock()
+	if !c.beginMessageLocked() {
+		c.mu.Unlock()
+		return
+	}
+	bridge := c.session.RuntimeEventBridge
+	if bridge != nil {
+		bridge.submitSupplement(line)
+	}
+	suppCell := newSupplementLineCell(line)
+	c.commitHistoryCellLocked(suppCell, c.gapBeforeBlockLocked(cellBoundaryMeta(suppCell)), cellBoundaryMeta(suppCell))
+	c.mu.Unlock()
+	c.postTranscriptSnapshotFromBridge(bridge)
+}
+
+// RenderPriorityPromptTranscript completes the Scene item created by a
+// runtime approval/question request while preserving the existing legacy
+// retained block. A missing target is deliberately not guessed: the caller
+// falls back to RenderLocalSupplement for non-runtime confirmations.
+func (c *chatInteractionCoordinator) RenderPriorityPromptTranscript(line string, target chatRuntimePriorityTranscriptTarget) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(line) == "" {
+		return
+	}
+	c.mu.Lock()
+	if !c.beginMessageLocked() {
+		c.mu.Unlock()
+		return
+	}
+	bridge := c.session.RuntimeEventBridge
+	if bridge != nil && target.valid() {
+		bridge.submitPriorityTranscript(target.eventType, target.requestKey, line)
+	}
+	suppCell := newSupplementLineCell(line)
+	c.commitHistoryCellLocked(suppCell, c.gapBeforeBlockLocked(cellBoundaryMeta(suppCell)), cellBoundaryMeta(suppCell))
+	c.mu.Unlock()
+	c.postTranscriptSnapshotFromBridge(bridge)
+}
+
 // RenderToolChainEvent routes tool_requested / tool_result through toolChainCell
 // (P5.6). Running is viewport-only; Completed/Failed is the one final history
 // cell for that tool. Non-tool stages fall back to the supplement path.
 // Returns false when the event produces no visible rows (batch_start/end, empty).
 func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.ChatEvent) bool {
+	return c.renderToolChainEvent(event, true)
+}
+
+// RenderReplayedToolChainEvent is the projection-only history path. Persisted
+// tool results are already represented by the replayed event log/canonical
+// history; injecting them into the live encoder here would create a second
+// Scene chain on every Ctrl+T/startup replay.
+func (c *chatInteractionCoordinator) RenderReplayedToolChainEvent(event runtimechatcore.ChatEvent) bool {
+	return c.renderToolChainEvent(event, false)
+}
+
+func (c *chatInteractionCoordinator) renderToolChainEvent(event runtimechatcore.ChatEvent, inject bool) bool {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return false
 	}
+	bridge := c.session.RuntimeEventBridge
 	switch strings.TrimSpace(event.Stage) {
 	case "tool_requested":
 		// Running stays in viewport (ActiveBand via SetToolAgentStage /
@@ -3261,11 +3498,21 @@ func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.
 		// takes over, but do not mutate history spacing: Running is not a
 		// committed cell.
 		c.mu.Lock()
-		defer c.mu.Unlock()
 		if !c.beginMessageLocked() {
+			c.mu.Unlock()
 			return false
 		}
+		if inject && bridge != nil {
+			// Commit the semantic chain before the complete legacy block is
+			// emitted. This keeps the existing Scene text-parity probe from
+			// observing a direct tool result one cell behind.
+			bridge.submitToolRequested(event.ToolCallID, event.ToolName, event.Arguments)
+		}
 		c.setToolAgentStageLocked(event.ToolCallID, event.ToolName, rendered)
+		c.mu.Unlock()
+		if inject && bridge != nil {
+			c.postTranscriptSnapshotFromBridge(bridge)
+		}
 		return true
 	case "tool_result":
 		cell := newToolChainCellFromEvent(event)
@@ -3273,12 +3520,28 @@ func (c *chatInteractionCoordinator) RenderToolChainEvent(event runtimechatcore.
 			return false
 		}
 		c.mu.Lock()
-		defer c.mu.Unlock()
 		if !c.beginMessageLocked() {
+			c.mu.Unlock()
 			return false
+		}
+		if inject && bridge != nil {
+			// See tool_requested above: Scene must lead the legacy completed
+			// write so the shadow text probe consumes the same final chain.
+			bridge.submitToolResultDisplay(
+				event.ToolCallID,
+				event.ToolName,
+				event.Output,
+				event.Error,
+				event.Success,
+				renderSharedChatToolEvent(event),
+			)
 		}
 		c.finishToolAgentStageLocked(event.ToolCallID, event.ToolName)
 		c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(cellBoundaryMeta(cell)), cellBoundaryMeta(cell))
+		c.mu.Unlock()
+		if inject && bridge != nil {
+			c.postTranscriptSnapshotFromBridge(bridge)
+		}
 		return true
 	default:
 		// batch_start / batch_end / unknown: keep prior empty-string contract.
@@ -3575,11 +3838,10 @@ func (c *chatInteractionCoordinator) clearPrompt(dropDraft bool) {
 	c.promptSeq++
 	c.promptVisible = false
 	if dropDraft {
-		c.promptInput = ""
-		c.promptCursor = 0
+		c.clearPromptInputDispatchThrough(c.clearPromptInputState(true))
 	}
 	c.promptRenderedOnSurface = false
-	c.promptPasteActive = false
+	c.setPromptPasteActive(false)
 }
 
 func (c *chatInteractionCoordinator) ResetPromptState() {
@@ -3592,22 +3854,17 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 		return
 	}
 	c.promptSeq++
+	c.clearPromptInputDispatchThrough(c.clearPromptInputState(true))
 	if c.promptSurfaceActiveLocked() {
 		rows := c.currentPromptDisplayRowsLocked()
 		if c.surface.ResetPrompt(formatSessionUserPrompt(c.session), rows) {
 			c.promptVisible = true
-			c.promptInput = ""
-			c.promptCursor = 0
 			c.promptRenderedOnSurface = true
-			c.promptPasteActive = false
 			return
 		}
 	}
 	c.promptVisible = false
-	c.promptInput = ""
-	c.promptCursor = 0
 	c.promptRenderedOnSurface = false
-	c.promptPasteActive = false
 }
 
 func (c *chatInteractionCoordinator) SetPromptInput(input string) {
@@ -3618,13 +3875,12 @@ func (c *chatInteractionCoordinator) PromptInputSnapshot() ui.LineEditorSnapshot
 	if c == nil {
 		return ui.LineEditorSnapshot{}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	draft := c.promptInputSnapshotState()
 	return ui.LineEditorSnapshot{
-		Text:        c.promptInput,
-		Cursor:      c.promptCursor,
+		Text:        draft.text,
+		Cursor:      draft.cursor,
 		Prompt:      formatSessionUserPrompt(c.session),
-		PasteActive: c.promptPasteActive,
+		PasteActive: draft.pasteActive,
 	}
 }
 
@@ -3632,13 +3888,20 @@ func (c *chatInteractionCoordinator) RenderPromptInputSnapshot(snapshot ui.LineE
 	if c == nil {
 		return
 	}
-	if c.postUIAction(ui.InputEvent{
+	// Keep the editor-facing semantic draft current synchronously. The actor
+	// action below owns the ordered surface/AppState projection, but the line
+	// editor must not wait for that projection before accepting the next rune.
+	sequence := c.recordPromptInputSnapshot(snapshot)
+	if c.postPromptInputAction(ui.InputEvent{
 		Text:        snapshot.Text,
 		Cursor:      snapshot.Cursor,
 		PasteActive: snapshot.PasteActive,
 		Render:      true,
+		Sequence:    sequence,
 	}) {
-		c.waitUIActorIdle()
+		// This is called from the line editor's per-key callback. Do not wait
+		// for unrelated runtime work already executing in the actor: doing so
+		// freezes keyboard input while the mailbox drains.
 		return
 	}
 	c.renderPromptInputSnapshotNow(snapshot)
@@ -3648,6 +3911,39 @@ func (c *chatInteractionCoordinator) RenderPromptInputSnapshot(snapshot ui.LineE
 // The public entry above must be used by input producers so the snapshot and
 // physical prompt update share the UI action order.
 func (c *chatInteractionCoordinator) renderPromptInputSnapshotNow(snapshot ui.LineEditorSnapshot) {
+	c.applyPromptInputSnapshotNow(snapshot, 0, true)
+}
+
+func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {
+	if c == nil {
+		return
+	}
+	// The coordinator-side draft is a responsive input cache, not a terminal
+	// projection. Publish it before enqueueing so PromptInputSnapshot callers
+	// never observe an empty/old draft while the actor is busy.
+	sequence := c.recordPromptInputSnapshot(snapshot)
+	if c.postPromptInputAction(ui.InputEvent{
+		Text:        snapshot.Text,
+		Cursor:      snapshot.Cursor,
+		PasteActive: snapshot.PasteActive,
+		Sequence:    sequence,
+	}) {
+		// Keep the editor responsive under actor backpressure. The editor owns
+		// its immediate cursor/text state; the actor asynchronously publishes
+		// the retained prompt snapshot for the surface and AppState.
+		return
+	}
+	c.setPromptInputSnapshotNow(snapshot)
+}
+
+// setPromptInputSnapshotNow is the reducer-side semantic snapshot update.
+// TrackPromptInputState intentionally does not write terminal bytes; a later
+// RenderPromptInputSnapshot action owns the physical prompt projection.
+func (c *chatInteractionCoordinator) setPromptInputSnapshotNow(snapshot ui.LineEditorSnapshot) {
+	c.applyPromptInputSnapshotNow(snapshot, 0, false)
+}
+
+func (c *chatInteractionCoordinator) applyPromptInputSnapshotNow(snapshot ui.LineEditorSnapshot, sequence uint64, render bool) {
 	if c == nil {
 		return
 	}
@@ -3658,61 +3954,105 @@ func (c *chatInteractionCoordinator) renderPromptInputSnapshotNow(snapshot ui.Li
 	}
 	input := strings.ReplaceAll(snapshot.Text, "\r\n", "\n")
 	input = strings.ReplaceAll(input, "\r", "\n")
+	c.promptInputMu.Lock()
+	if sequence != 0 && sequence < c.promptInputSeq {
+		c.promptInputMu.Unlock()
+		return
+	}
 	c.promptInput = input
 	c.promptCursor = clampPromptCursor(snapshot.Cursor, input)
 	c.promptPasteActive = snapshot.PasteActive
+	if sequence > c.promptInputSeq {
+		c.promptInputSeq = sequence
+	}
+	c.promptInputMu.Unlock()
 	if c.promptVisible && c.promptRenderedOnSurface && c.writer == os.Stdout && c.surface != nil {
 		rows := c.currentPromptDisplayRowsLocked()
 		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+		if render {
+			c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+		} else {
+			c.surface.TrackPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+		}
 	}
 }
 
-func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {
+// recordPromptInputSnapshot updates only the coordinator's editor-facing
+// semantic draft. It deliberately performs no terminal I/O; the actor's
+// InputEvent reducer remains the ordered physical projection path.
+func (c *chatInteractionCoordinator) recordPromptInputSnapshot(snapshot ui.LineEditorSnapshot) uint64 {
 	if c == nil {
-		return
+		return 0
 	}
-	if c.postUIAction(ui.InputEvent{
-		Text:        snapshot.Text,
-		Cursor:      snapshot.Cursor,
-		PasteActive: snapshot.PasteActive,
-	}) {
-		// The line editor obtains its cursor prefix immediately after OnChange.
-		// Waiting here keeps that read ordered after this durable input action.
-		c.waitUIActorIdle()
-		return
-	}
-	c.setPromptInputSnapshotNow(snapshot)
-}
-
-// setPromptInputSnapshotNow is the reducer-side semantic snapshot update.
-// TrackPromptInputState intentionally does not write terminal bytes; a later
-// RenderPromptInputSnapshot action owns the physical prompt projection.
-func (c *chatInteractionCoordinator) setPromptInputSnapshotNow(snapshot ui.LineEditorSnapshot) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	input := strings.ReplaceAll(snapshot.Text, "\r\n", "\n")
 	input = strings.ReplaceAll(input, "\r", "\n")
+	if c.promptInputClosed.Load() {
+		return 0
+	}
+	c.promptInputMu.Lock()
+	defer c.promptInputMu.Unlock()
+	if c.promptInputClosed.Load() {
+		return 0
+	}
+	c.promptInputSeq++
 	c.promptInput = input
 	c.promptCursor = clampPromptCursor(snapshot.Cursor, input)
 	c.promptPasteActive = snapshot.PasteActive
-	if c.promptVisible && c.promptRenderedOnSurface && c.writer == os.Stdout && c.surface != nil {
-		rows := c.currentPromptDisplayRowsLocked()
-		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-		c.surface.TrackPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+	return c.promptInputSeq
+}
+
+// clearPromptInputState clears the editor-facing draft and, when invalidate is
+// true, prevents an already queued snapshot from resurrecting it. It never
+// takes c.mu, so reset/shutdown can invalidate the editor cache without
+// extending a terminal/render critical section.
+func (c *chatInteractionCoordinator) clearPromptInputState(invalidate bool) uint64 {
+	if c == nil {
+		return 0
 	}
+	c.promptInputMu.Lock()
+	defer c.promptInputMu.Unlock()
+	if invalidate {
+		c.promptInputSeq++
+	}
+	c.promptInput = ""
+	c.promptCursor = 0
+	c.promptPasteActive = false
+	return c.promptInputSeq
+}
+
+type chatPromptInputState struct {
+	text        string
+	cursor      int
+	pasteActive bool
+}
+
+func (c *chatInteractionCoordinator) promptInputSnapshotState() chatPromptInputState {
+	if c == nil {
+		return chatPromptInputState{}
+	}
+	c.promptInputMu.RLock()
+	defer c.promptInputMu.RUnlock()
+	return chatPromptInputState{
+		text:        c.promptInput,
+		cursor:      c.promptCursor,
+		pasteActive: c.promptPasteActive,
+	}
+}
+
+func (c *chatInteractionCoordinator) setPromptPasteActive(active bool) {
+	if c == nil {
+		return
+	}
+	c.promptInputMu.Lock()
+	c.promptPasteActive = active
+	c.promptInputMu.Unlock()
 }
 
 func (c *chatInteractionCoordinator) IsPromptPasteActive() bool {
 	if c == nil {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.promptPasteActive
+	return c.promptInputSnapshotState().pasteActive
 }
 
 func (c *chatInteractionCoordinator) RestorePromptCursor(rowOffset, col int) {
@@ -3730,6 +4070,12 @@ func (c *chatInteractionCoordinator) PromptCursorPrefix(rowOffset, col int) stri
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.unifiedRenderer && c.primaryPresenter != nil {
+		// InputEvent is already queued by the composer hook. The presenter will
+		// render its cursor in the next frame; exposing a legacy prefix here
+		// would let a fallback editor path submit unsynchronized bytes.
+		return ""
+	}
 	if !c.promptSurfaceActiveLocked() {
 		return ""
 	}
@@ -3746,6 +4092,11 @@ func (c *chatInteractionCoordinator) WritePromptEditorText(writer io.Writer, row
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.unifiedRenderer && c.primaryPresenter != nil {
+		// Claim the editor write without touching the terminal. Returning false
+		// would make InputBox fall back to a raw writer beside TerminalSession.
+		return true
+	}
 	if !c.promptSurfaceActiveLocked() {
 		return false
 	}
@@ -3758,9 +4109,10 @@ func (c *chatInteractionCoordinator) DebugSummary() string {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	draft := c.promptInputSnapshotState()
 	parts := []string{
 		fmt.Sprintf("prompt_visible=%t", c.promptVisible),
-		fmt.Sprintf("prompt_paste_active=%t", c.promptPasteActive),
+		fmt.Sprintf("prompt_paste_active=%t", draft.pasteActive),
 		fmt.Sprintf("thinking_active=%t", c.thinkingActive),
 		fmt.Sprintf("streaming_active=%t", c.streamingActive),
 		fmt.Sprintf("reasoning_active=%t", c.reasoningActive),
@@ -3818,12 +4170,14 @@ func (c *chatInteractionCoordinator) Shutdown() {
 		return
 	}
 	c.shutdown = true
+	c.promptInputClosed.Store(true)
 	c.promptSeq++
+	c.clearPromptInputDispatchThrough(c.clearPromptInputState(true))
+	c.promptEditorStatusDispatchMu.Lock()
+	c.promptEditorStatusDispatchPending = nil
+	c.promptEditorStatusDispatchMu.Unlock()
 	c.promptVisible = false
-	c.promptInput = ""
-	c.promptCursor = 0
 	c.promptRenderedOnSurface = false
-	c.promptPasteActive = false
 	c.waitingActive = false
 	c.agentStage = chatAgentStageIdle
 	c.agentStageDetail = ""
@@ -3839,9 +4193,10 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
 	c.mu.Unlock()
-	// Phase 1：关闭 UI actor（停止接受新 action，Run 排空后退出）。
-	// Must be outside c.mu: an in-flight reducer needs this mutex to observe
-	// shutdown before its terminal-facing adapter can return.
+	// Stop the presenter before closing the actor. closeUIActor first detaches
+	// the effect consumer, then drains its worker, so no callback can emit after
+	// the primary terminal authority has been released. It must run outside
+	// c.mu because an in-flight reducer may still need that mutex to return.
 	c.closeUIActor()
 	c.mu.Lock()
 	if c.renderEngine != nil {
@@ -3857,6 +4212,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	}
 	c.surface = nil
 	c.uiSurface.Store(nil)
+	c.terminalSession = nil
+	c.terminalExecutor = nil
 	c.mu.Unlock()
 }
 
@@ -3876,6 +4233,13 @@ func (c *chatInteractionCoordinator) beginMessageLocked() bool {
 	if c.streamingActive {
 		c.flushStreamLocked()
 		c.resetStreamLocked()
+	}
+	if c.unifiedRenderer {
+		// Scene/AppState owns the transcript transition once TerminalSession is
+		// primary. Do not enter FixedBottomSurface's legacy output lifecycle:
+		// even a physically fenced BeginOutput would retain a second reserve
+		// bookkeeping owner beside the semantic transaction.
+		return true
 	}
 	if c.promptSurfaceActiveLocked() {
 		return true
@@ -3926,7 +4290,8 @@ func (c *chatInteractionCoordinator) currentPromptCursorPositionLocked() (int, i
 	if termWidth <= 0 {
 		termWidth = 80
 	}
-	return interactivePromptCursorPosition(promptDisplayText(c.session), c.promptInput, c.promptCursor, termWidth)
+	draft := c.promptInputSnapshotState()
+	return interactivePromptCursorPosition(promptDisplayText(c.session), draft.text, draft.cursor, termWidth)
 }
 
 func (c *chatInteractionCoordinator) clearThinkingLocked() {
@@ -3964,6 +4329,12 @@ func (c *chatInteractionCoordinator) clearActiveRunStateOnInterrupt() {
 // This prevents text from being silently swallowed when a ReAct loop's
 // intermediate assistant deltas are never finalized via FinalizeAssistantDelta.
 func (c *chatInteractionCoordinator) flushStreamLocked() {
+	if c != nil && c.unifiedRenderer {
+		// The semantic Scene cell remains the recoverable source until its
+		// runtime finalization arrives. Never flush it through the legacy
+		// stream writer merely because another coordinator transition begins.
+		return
+	}
 	c.reconcilePendingStableCommitLocked(c.streamBuffer.String())
 	if c.shouldLiveStreamOutputLocked() {
 		if c.streamMode == assistantStreamModeMarkdown {
@@ -4019,7 +4390,8 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 		return
 	}
 	promptText := promptDisplayText(c.session)
-	promptLine := promptText + c.promptInput
+	draft := c.promptInputSnapshotState()
+	promptLine := promptText + draft.text
 	if c.shouldAdvanceAfterPromptLocked() {
 		c.writeTextLocked("\r\n")
 		c.promptRenderedOnSurface = false
@@ -4037,7 +4409,7 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	// 先从当前编辑光标所在行回到输入起始行，再逐行清理
 	// prompt/input 曾占用的区域。
 	var builder strings.Builder
-	if cursorRow := interactivePromptCursorRow(promptText, c.promptInput, c.promptCursor, termWidth); cursorRow > 0 {
+	if cursorRow := interactivePromptCursorRow(promptText, draft.text, draft.cursor, termWidth); cursorRow > 0 {
 		fmt.Fprintf(&builder, "\x1b[%dA", cursorRow)
 	}
 	builder.WriteString(clearPromptDisplayRowsSequence(rows))
@@ -4053,7 +4425,8 @@ func (c *chatInteractionCoordinator) currentPromptDisplayRowsLocked() int {
 	if termWidth <= 0 {
 		termWidth = 80
 	}
-	return interactivePromptDisplayRows(promptDisplayText(c.session)+c.promptInput, termWidth)
+	draft := c.promptInputSnapshotState()
+	return interactivePromptDisplayRows(promptDisplayText(c.session)+draft.text, termWidth)
 }
 
 func clearPromptDisplayRows(writer io.Writer, rows int) {
@@ -4439,6 +4812,10 @@ func (c *chatInteractionCoordinator) finalizeActiveAssistantLocked(finalSnapshot
 }
 
 func (c *chatInteractionCoordinator) resetStreamLocked() {
+	if c != nil && c.unifiedRenderer {
+		c.resetUnifiedStreamLocked()
+		return
+	}
 	c.stopActiveStreamFrameLocked()
 	c.stopActiveStableCommitLocked()
 	c.streamingActive = false
@@ -4479,6 +4856,47 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
 	// Snapshot last-turn transcript debug, then clear live turn state.
+	if c.transcript != nil {
+		c.streamLastFinalDivergence = c.transcript.LastDivergence
+		c.streamLastTranscriptBlocks = len(c.transcript.Blocks)
+		c.streamLastTranscriptBytes = c.transcript.RetainedSourceBytes
+		c.transcript.reset()
+	}
+}
+
+// resetUnifiedStreamLocked clears compatibility bookkeeping after a semantic
+// active-cell finalization. It intentionally does not touch FixedBottomSurface
+// or ActiveBand state: the unified UI controller owns the current frame and a
+// legacy clear/repaint would reintroduce a second screen owner.
+func (c *chatInteractionCoordinator) resetUnifiedStreamLocked() {
+	if c == nil {
+		return
+	}
+	c.stopActiveStreamFrameLocked()
+	c.stopActiveStableCommitLocked()
+	c.streamingActive = false
+	c.streamRendered = false
+	c.streamMode = assistantStreamModeUnknown
+	c.streamRenderedPrefixLen = 0
+	c.streamEnqueuedPrefixLen = 0
+	c.stableCommitQueue = nil
+	c.stableCommitCatchUp = false
+	c.stableCommitBelowExit = time.Time{}
+	c.stableCommitLastExit = time.Time{}
+	c.streamCellID = ""
+	c.activeCellShadowID = 0
+	c.activeCellShadowRevision = 0
+	c.clearSoftEmittedTailLocked()
+	c.streamTrailingLF = true
+	c.streamLines = 0
+	c.streamDisplayLines = 0
+	c.streamBuffer.Reset()
+	if c.activeStream != nil {
+		c.activeStream.Cancel()
+	}
+	if !c.thinkingActive && !c.reasoningActive {
+		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	}
 	if c.transcript != nil {
 		c.streamLastFinalDivergence = c.transcript.LastDivergence
 		c.streamLastTranscriptBlocks = len(c.transcript.Blocks)
@@ -5371,7 +5789,7 @@ func activeSourceDisplayRows(line string, width int) int {
 // clock-agnostic; this owner supplies the delayed poll that prevents the last
 // delta in a burst from being stranded inside the FPS window.
 func (c *chatInteractionCoordinator) scheduleActiveStreamFrameLocked() {
-	if c == nil || c.shutdown || c.activeStream == nil || !c.surfaceOutputActiveLocked() {
+	if c == nil || c.shutdown || c.unifiedRenderer || c.activeStream == nil || !c.surfaceOutputActiveLocked() {
 		return
 	}
 	now := time.Now()
@@ -5412,7 +5830,7 @@ func (c *chatInteractionCoordinator) paintScheduledActiveStreamFrame(generation 
 		return
 	}
 	c.activeFrameDue = time.Time{}
-	if c.shutdown || c.activeStream == nil || !c.activeStream.Active() || !c.surfaceOutputActiveLocked() {
+	if c.shutdown || c.unifiedRenderer || c.activeStream == nil || !c.activeStream.Active() || !c.surfaceOutputActiveLocked() {
 		return
 	}
 	_ = c.publishActiveStreamFrameLocked(false)
@@ -5727,6 +6145,13 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, g
 // legacy writeCompleteBlockLocked pipeline (normalize -> writeRowsLocked).
 func (c *chatInteractionCoordinator) commitHistoryCellLocked(cell historyCell, gap blockGap, meta boundary.CellMeta) {
 	if c == nil || cell == nil {
+		return
+	}
+	if c.unifiedRenderer {
+		// The canonical Scene cell has already been submitted by the caller or
+		// its runtime event. Do not mirror it into historyWindow: the reducer's
+		// HistoryEffectQueue owns the only history handoff for this session.
+		c.markBlockCommittedLocked(meta)
 		return
 	}
 	// plumb real width for owned viewport (P5.5 resize reflow): pre-wrapped

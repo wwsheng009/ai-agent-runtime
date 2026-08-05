@@ -35,6 +35,10 @@ func openChatTranscriptPager(session *ChatSession) {
 		return
 	}
 	if session.Interaction != nil {
+		// Publish the latest semantic scene before opening the overlay. The
+		// pager itself must read only actor-owned AppState after this barrier;
+		// it must not race a Scene snapshot against a separate scroll state.
+		session.Interaction.postTranscriptSnapshotFromBridge(session.RuntimeEventBridge)
 		_ = session.Interaction.postUIAction(ui.OpenTranscriptOverlay{LeaseID: lease.ID()})
 	}
 	defer func() {
@@ -45,33 +49,30 @@ func openChatTranscriptPager(session *ChatSession) {
 	}()
 
 	_ = ui.RunTranscriptPagerWithLease(context.Background(), resumeFullScreenTerminal(session), ui.TranscriptPagerOptions{
-		Snapshot: func() ui.TranscriptPagerSnapshot {
-			return chatTranscriptPagerSnapshot(session)
+		View: func() ui.TranscriptPagerView {
+			return chatTranscriptPagerView(session, lease.ID())
+		},
+		PostAction: func(action ui.UIAction) bool {
+			if session == nil || session.Interaction == nil {
+				return false
+			}
+			return session.Interaction.postUIAction(action)
 		},
 	}, lease)
 }
 
-func chatTranscriptPagerSnapshot(session *ChatSession) ui.TranscriptPagerSnapshot {
-	var transcript ui.TranscriptState
-	if session != nil && session.RuntimeEventBridge != nil {
-		transcript = ui.NewTranscriptState(session.RuntimeEventBridge.sceneSnapshot())
+func chatTranscriptPagerView(session *ChatSession, leaseID uint64) ui.TranscriptPagerView {
+	if session == nil || session.Interaction == nil || session.Interaction.uiActor == nil {
+		return ui.TranscriptPagerView{}
 	}
-	active, activeOK := ui.ActiveCellFromTranscript(transcript)
-	if session != nil && session.Interaction != nil && session.Interaction.uiActor != nil {
-		state := session.Interaction.uiActor.AppState()
-		if transcript.Revision == 0 && state.Transcript.Revision != 0 {
-			transcript = state.Transcript
-			active = state.Active
-			activeOK = active.Phase != ui.ActiveCellInactive
-		}
-		if state.Active.Phase != ui.ActiveCellInactive &&
-			activeOK && state.Active.CellID == active.CellID && state.Active.Revision >= active.Revision {
-			active = state.Active
-			activeOK = true
-		}
-	}
-	if !activeOK {
+	state := session.Interaction.uiActor.AppState()
+	active := state.Active
+	if active.Phase == ui.ActiveCellInactive {
 		active = ui.ActiveCellState{}
 	}
-	return ui.TranscriptPagerSnapshot{Transcript: transcript, Active: active}
+	return ui.TranscriptPagerView{
+		Snapshot:   ui.TranscriptPagerSnapshot{Transcript: state.Transcript, Active: active},
+		Pager:      state.TranscriptOverlay.Pager,
+		PagerKnown: state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == leaseID,
+	}
 }

@@ -22,6 +22,12 @@ type chatDebugDocumentBuilder struct {
 	lines []render.Line
 }
 
+// chatDebugRenderEncoderItemCap 限制 /debug display 中 Unified Render
+// Encoder/Scene 逐项列表的打印数量。长会话会产生上万条 cell（例如每条
+// assistant.reasoning 事件一个 system cell），全量打印会刷屏；诊断只需要
+// 尾部最新项 + 计数即可，完整快照仍可通过统计行与 export 拿到。
+const chatDebugRenderEncoderItemCap = 20
+
 func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	if session == nil {
 		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))
@@ -211,7 +217,12 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 		return
 	}
 	builder.meta("Model Items:", strconv.Itoa(len(model.Items)))
-	for _, it := range model.Items {
+	startItem := 0
+	if len(model.Items) > chatDebugRenderEncoderItemCap {
+		startItem = len(model.Items) - chatDebugRenderEncoderItemCap
+		builder.plain(fmt.Sprintf("  … showing last %d of %d items", chatDebugRenderEncoderItemCap, len(model.Items)))
+	}
+	for _, it := range model.Items[startItem:] {
 		if it == nil {
 			continue
 		}
@@ -269,7 +280,12 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 			builder.meta("Text Parity Last Error:", chatDebugValueOrNone(lastErr))
 		}
 	}
-	for _, c := range snap.Cells {
+	startCell := 0
+	if len(snap.Cells) > chatDebugRenderEncoderItemCap {
+		startCell = len(snap.Cells) - chatDebugRenderEncoderItemCap
+		builder.plain(fmt.Sprintf("  … showing last %d of %d cells", chatDebugRenderEncoderItemCap, len(snap.Cells)))
+	}
+	for _, c := range snap.Cells[startCell:] {
 		if c == nil {
 			continue
 		}

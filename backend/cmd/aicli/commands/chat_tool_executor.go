@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -51,7 +52,7 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 	writeSessionDebugInfo(session, formatToolExecutionStartDebug(toolCallFromRuntime(call)), true)
 
 	ctx = generatedImageToolContext(ctx, session)
-	ctx = withLiveChatToolOutput(ctx, session, call.Name)
+	ctx = withLiveChatToolOutput(ctx, session, call.ID, call.Name)
 	catalog := ensureFunctionCatalog(session)
 	output, meta, err := catalog.ExecuteFunctionWithMeta(ctx, call.Name, call.Args)
 	if err != nil {
@@ -74,8 +75,39 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 	return result
 }
 
-func withLiveChatToolOutput(ctx context.Context, session *ChatSession, toolName string) context.Context {
+// withLiveChatToolOutput attaches a scoped ActiveBand-only raw-output mirror.
+// The final tool_result retains the sole durable transcript/Scene cell. A
+// unified session must have a stable call ID for the raw mirror: without one,
+// the bytes are suppressed rather than escaping through a second terminal
+// writer or being attributed to a concurrent tool.
+func withLiveChatToolOutput(ctx context.Context, session *ChatSession, toolCallID, toolName string) context.Context {
 	if !shouldRenderInteractiveOutput(session) || !runtimepolicy.IsShellLikeToolName(toolName) {
+		return ctx
+	}
+	interaction := session.Interaction
+	if interaction != nil && strings.TrimSpace(toolCallID) != "" {
+		// chatLiveToolOutputWriter never consumes its writer or surface when a
+		// stable ActiveBand owner exists. Passing io.Discard/nil in unified mode
+		// still makes the no-direct-write invariant explicit and testable.
+		writer := io.Writer(os.Stdout)
+		var surface chatOutputSurface = session.Surface
+		if interaction.UnifiedRendererEnabled() {
+			writer = io.Discard
+			surface = nil
+		}
+		return runtimeexecutor.WithOutputMirror(ctx, newLimitedChatToolOutputWriter(
+			writer,
+			surface,
+			interaction,
+			toolCallID,
+			toolName,
+			maxToolResultPreviewLines,
+			maxToolResultPreviewBytes,
+		))
+	}
+	if interaction != nil && interaction.UnifiedRendererEnabled() {
+		// The retained tool result will still arrive through the typed runtime
+		// event. Do not manufacture an identity-less raw transcript mirror.
 		return ctx
 	}
 	beginDirectInteractiveOutput(session)

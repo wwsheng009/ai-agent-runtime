@@ -72,7 +72,7 @@ func renderChatTurnRecoveryHintForError(session *ChatSession, turnErr error) {
 		message = "恢复建议: 当前会话仍被其他执行器占用；请切回对应终端完成或退出该会话，或等待租约释放后再输入 /retry。/retry 只恢复草稿，不会强制抢占仍存活的会话。"
 	}
 	if session.Interaction != nil {
-		session.Interaction.RenderAsyncLine(message)
+		session.Interaction.RenderLocalSupplement(message)
 		return
 	}
 	// Fall back without Interaction: still route through surface WriteOutput

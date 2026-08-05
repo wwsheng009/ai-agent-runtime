@@ -342,6 +342,40 @@ func TestChatSlashCompletionControllerCancel(t *testing.T) {
 	}
 }
 
+func TestChatSlashCompletionControllerDoesNotClearAbsentPopupPerKeystroke(t *testing.T) {
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	var actions []ui.UIAction
+	surface.SetUIActorPoster(func(action ui.UIAction) bool {
+		actions = append(actions, action)
+		return true
+	})
+	controller := newChatSlashCompletionController(&ChatSession{Surface: surface})
+
+	controller.UpdateAt("hello", 5)
+	if len(actions) != 0 {
+		t.Fatalf("normal text enqueued popup action: %#v", actions)
+	}
+	controller.UpdateAt("/m", 2)
+	if len(actions) != 1 {
+		t.Fatalf("slash completion actions = %d, want one show", len(actions))
+	}
+	if _, ok := actions[0].(ui.ShowPopupAction); !ok {
+		t.Fatalf("first action = %T, want ShowPopupAction", actions[0])
+	}
+	controller.UpdateAt("hello", 5)
+	if len(actions) != 2 {
+		t.Fatalf("popup dismissal actions = %d, want show + one clear", len(actions))
+	}
+	if _, ok := actions[1].(ui.ClearPopupAction); !ok {
+		t.Fatalf("second action = %T, want ClearPopupAction", actions[1])
+	}
+	controller.UpdateAt("world", 5)
+	if len(actions) != 2 {
+		t.Fatalf("absent popup was cleared repeatedly: %#v", actions)
+	}
+}
+
 func TestRenderSlashCommandCompletionPopup(t *testing.T) {
 	t.Parallel()
 

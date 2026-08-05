@@ -351,28 +351,35 @@ func TestPresentChatSession_WritesStartupPreambleAndSkillsToStderr(t *testing.T)
 	}
 }
 
-func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testing.T) {
+func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndIgnoresLegacyEscapeHatch(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+	chatIsInteractiveTerminal = func() bool { return true }
+
 	if shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "json"}) {
 		t.Fatal("expected JSON output to disable interactive UI")
 	}
 
-	t.Setenv("AICLI_TUI", "legacy")
-	if shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "interactive"}) {
-		t.Fatal("expected AICLI_TUI=legacy to disable interactive UI")
+	for _, legacyValue := range []string{"0", "off", "legacy", "plain"} {
+		t.Setenv("AICLI_TUI", legacyValue)
+		if !shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "interactive"}) {
+			t.Fatalf("AICLI_TUI=%q must not restore the retired legacy interactive renderer", legacyValue)
+		}
 	}
 }
 
-func TestShouldInitializeChatKeyHandler_IndependentFromLegacyTUI(t *testing.T) {
+func TestShouldInitializeChatKeyHandler_InteractiveTTY(t *testing.T) {
 	oldInteractive := chatIsInteractiveTerminal
 	defer func() {
 		chatIsInteractiveTerminal = oldInteractive
 	}()
 
 	chatIsInteractiveTerminal = func() bool { return true }
-	t.Setenv("AICLI_TUI", "legacy")
 
 	if !shouldInitializeChatKeyHandler(&chatCommandOptions{OutputFormat: "interactive"}) {
-		t.Fatal("expected interactive TTY chat to initialize ESC key handler even when TUI is disabled")
+		t.Fatal("expected interactive TTY chat to initialize ESC key handler")
 	}
 	if shouldInitializeChatKeyHandler(&chatCommandOptions{OutputFormat: "json"}) {
 		t.Fatal("expected JSON output to disable ESC key handler")
@@ -394,7 +401,7 @@ func TestShouldShowChatStartupBanner_SkipsInTUI(t *testing.T) {
 	}
 }
 
-func TestShouldShowChatStartupBanner_ShowsInLegacyInteractiveMode(t *testing.T) {
+func TestShouldShowChatStartupBanner_ShowsWhenTTYIsUnavailable(t *testing.T) {
 	oldInteractive := chatIsInteractiveTerminal
 	defer func() {
 		chatIsInteractiveTerminal = oldInteractive
@@ -402,7 +409,7 @@ func TestShouldShowChatStartupBanner_ShowsInLegacyInteractiveMode(t *testing.T) 
 
 	chatIsInteractiveTerminal = func() bool { return false }
 	if !shouldShowChatStartupBanner(&chatCommandOptions{OutputFormat: "interactive"}) {
-		t.Fatal("expected startup banner to show in legacy interactive mode")
+		t.Fatal("expected startup banner to show when the interactive TTY is unavailable")
 	}
 }
 

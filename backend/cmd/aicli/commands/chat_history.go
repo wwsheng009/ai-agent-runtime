@@ -129,6 +129,25 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 	if len(messages) == 0 {
 		return 0
 	}
+	if session != nil && session.Interaction != nil && session.Interaction.UnifiedRendererEnabled() {
+		// Unified production history is semantic input to AppState. Never replay
+		// persisted rows through the compatibility surface, because that path is
+		// physically fenced and would otherwise silently drop the conversation.
+		bridge := ensureChatRuntimeEventBridge(session)
+		if bridge != nil {
+			seedHeader := ""
+			if strings.TrimSpace(header) != "" {
+				seedHeader = fmt.Sprintf("%s (%d 条消息):", strings.TrimSpace(header), len(messages))
+			}
+			// Runtime event logs are deliberately best-effort and can cover only a
+			// suffix/subset of a persisted conversation. Reconcile every time
+			// against canonical visible history; the bridge owns stable identities
+			// so this remains idempotent and never falls back to surface replay.
+			bridge.seedPersistedHistory(messages, seedHeader)
+			session.Interaction.RequestUnifiedFrame()
+		}
+		return len(messages)
+	}
 	// History is already-final content. Settle any ClearPrompt layout debt
 	// (pendingScrollDown / blank-row flag) BEFORE the first content write so
 	// live surface compensation is not attached to transcript replay.

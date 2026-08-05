@@ -58,8 +58,8 @@ type ChatSession struct {
 	HTTPDebug                bool
 	Stream                   bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
-	FastMode                        bool
-	BaseURL string
+	FastMode bool
+	BaseURL  string
 	// Messages 是当前模型热上下文投影（压缩/截断后 ≤ HotHistoryMessages 条）。
 	Messages []runtimetypes.Message
 	// ResumeHistory 是恢复会话后用于展示的 canonical 完整转录
@@ -155,6 +155,11 @@ type ChatSession struct {
 	actorWarmup                *chatActorWarmup
 	Interaction                *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
 	Surface                    *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	// TerminalSession is the sole physical writer for the unified interactive
+	// renderer. Surface remains only as a compatibility state facade while the
+	// session is active; it must not emit terminal bytes in that mode.
+	TerminalSession            *ui.TerminalSession
+	TerminalSessionExecutor    *ui.TerminalSessionExecutor
 	TitleNotifier              *chatTitleNotifier          // terminal window/tab title notification sink
 	SoundNotifier              *chatSoundNotifier          // lightweight terminal bell notification sink
 	runtimeHTTPCapture         *chatRuntimeHTTPCapture     // recent runtime HTTP response diagnostics
@@ -1081,6 +1086,13 @@ func renderChatResponse(session *ChatSession, response string) {
 		fmt.Println(response)
 		return
 	}
+	if session.Interaction != nil {
+		// This fallback has no runtime assistant event to encode. Keep it out
+		// of RenderAssistant, which is also the projection callback for events
+		// that have already entered Scene through chatRuntimeEventBridge.
+		session.Interaction.RenderLocalAssistant(response)
+		return
+	}
 	newAICLITranscriptRenderer(session).RenderAssistant(response)
 }
 
@@ -1156,7 +1168,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				}
 				if notice != "" {
 					if session.Interaction != nil {
-						session.Interaction.RenderAsyncLine(notice)
+						session.Interaction.RenderLocalSupplement(notice)
 					} else {
 						fmt.Println(notice)
 					}
@@ -1263,7 +1275,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		if strings.HasPrefix(input, "/") {
 			if !chatInputCommandAllowed(session, input) {
 				if session != nil && session.Interaction != nil {
-					session.Interaction.RenderAsyncLine("[input] 当前状态不是 Ready，暂不接受 slash 命令；请等待 Ready 后重试。")
+					session.Interaction.RenderLocalSupplement("[input] 当前状态不是 Ready，暂不接受 slash 命令；请等待 Ready 后重试。")
 				}
 				continue
 			}

@@ -14,7 +14,9 @@ package commands
 //     回调不再直接拿 coordinator/surface lock（任务 3，IR-11）。
 
 import (
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -41,10 +43,98 @@ func (c *chatInteractionCoordinator) ensureUIActor() *ui.UIController {
 		return nil
 	}
 	c.uiActorOnce.Do(func() {
-		c.uiActor = ui.NewUIController(ui.UIControllerConfig{}, ui.ReducerFunc(c.reduceUIAction), nil)
+		// The physical effect consumer is attached by TerminalSessionPresenter
+		// only after the legacy surface writer has been fenced. Starting with a
+		// nil consumer makes actor construction incapable of creating a second
+		// terminal writer.
+		c.uiActor = ui.NewUIController(ui.UIControllerConfig{}, ui.ContextualReducerFunc(c.reduceUIActionWithContext), nil)
 		go c.uiActor.Run()
 	})
 	return c.uiActor
+}
+
+// EnableUnifiedRenderer installs the session-level production authority. The
+// retained FixedBottomSurface becomes a state facade only; its physical writer
+// is fenced before TerminalSessionPresenter attaches to the UI actor.
+func (c *chatInteractionCoordinator) EnableUnifiedRenderer() bool {
+	return c.enableUnifiedRendererWithWriter(os.Stdout)
+}
+
+func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.Writer) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	if c.shutdown {
+		c.mu.Unlock()
+		return false
+	}
+	if c.primaryPresenter != nil {
+		c.mu.Unlock()
+		return true
+	}
+	surface := c.surface
+	c.unifiedRenderer = true
+	c.mu.Unlock()
+	if writer == nil {
+		writer = os.Stdout
+	}
+	if surface != nil {
+		// No physical surface operation may race the forthcoming presenter
+		// attach. Logical facade state remains available to existing adapters.
+		surface.SetPhysicalWritesEnabled(false)
+	}
+
+	actor := c.ensureUIActor()
+	if actor == nil {
+		c.mu.Lock()
+		c.unifiedRenderer = false
+		c.mu.Unlock()
+		return false
+	}
+	// Establish the semantic active-cell projection before a physical presenter
+	// can consume effects. This is a one-way production authority boundary: a
+	// delayed ActiveBand facade action must not replace a Scene mutable cell in
+	// the first unified frame.
+	if !actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
+		c.mu.Lock()
+		c.unifiedRenderer = false
+		c.mu.Unlock()
+		return false
+	}
+	actor.WaitIdle()
+	presenter := ui.NewTerminalSessionPresenter(actor, writer, c.primaryTerminalGeometry)
+	if c.SetPrimaryPresenter(presenter) {
+		return true
+	}
+	c.mu.Lock()
+	if c.primaryPresenter == nil {
+		c.unifiedRenderer = false
+	}
+	c.mu.Unlock()
+	return false
+}
+
+func (c *chatInteractionCoordinator) UnifiedRendererEnabled() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.unifiedRenderer
+}
+
+func (c *chatInteractionCoordinator) RequestUnifiedFrame() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	presenter := c.primaryPresenter
+	unified := c.unifiedRenderer
+	c.mu.Unlock()
+	if unified && presenter != nil {
+		presenter.Request()
+	}
 }
 
 // postUIAction 投递一个 action 到 UI actor。actor 尚未初始化（或已关闭）
@@ -57,23 +147,250 @@ func (c *chatInteractionCoordinator) postUIAction(action ui.UIAction) bool {
 	return actor.Post(action)
 }
 
+// postPromptInputAction is the non-blocking editor ingress. Input snapshots
+// are complete latest-wins values, so a full actor mailbox must not make the
+// line editor wait behind runtime/terminal work. When TryPost cannot admit the
+// snapshot, one retry loop retains only the newest value and eventually posts
+// it after the actor makes progress. The reducer remains the sole physical
+// prompt writer.
+func (c *chatInteractionCoordinator) postPromptInputAction(action ui.InputEvent) bool {
+	if c == nil {
+		return false
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return false
+	}
+
+	// Fold any previously deferred render intent into this newer snapshot
+	// before attempting admission. This prevents a later semantic-only update
+	// from accidentally clearing an earlier Render=true request.
+	c.promptInputDispatchMu.Lock()
+	if pending := c.promptInputDispatchPending; pending != nil && pending.Sequence <= action.Sequence {
+		action.Render = action.Render || pending.Render
+		c.promptInputDispatchPending = nil
+	}
+	c.promptInputDispatchMu.Unlock()
+
+	if actor.TryPost(action) {
+		c.clearPromptInputDispatchThrough(action.Sequence)
+		return true
+	}
+	if actor.Stats().Closed {
+		return false
+	}
+
+	c.promptInputDispatchMu.Lock()
+	if pending := c.promptInputDispatchPending; pending == nil || pending.Sequence <= action.Sequence {
+		if pending != nil {
+			action.Render = action.Render || pending.Render
+		}
+		copy := action
+		c.promptInputDispatchPending = &copy
+	}
+	start := !c.promptInputDispatchRunning
+	if start {
+		c.promptInputDispatchRunning = true
+	}
+	c.promptInputDispatchMu.Unlock()
+	if start {
+		go c.flushPromptInputDispatch(actor)
+	}
+	return true
+}
+
+func (c *chatInteractionCoordinator) clearPromptInputDispatchThrough(sequence uint64) {
+	if c == nil {
+		return
+	}
+	c.promptInputDispatchMu.Lock()
+	if pending := c.promptInputDispatchPending; pending != nil && pending.Sequence <= sequence {
+		c.promptInputDispatchPending = nil
+	}
+	c.promptInputDispatchMu.Unlock()
+}
+
+func (c *chatInteractionCoordinator) flushPromptInputDispatch(actor *ui.UIController) {
+	if c == nil || actor == nil {
+		return
+	}
+	defer func() {
+		c.mu.Lock()
+		shutdown := c.shutdown
+		c.mu.Unlock()
+		c.promptInputDispatchMu.Lock()
+		c.promptInputDispatchRunning = false
+		restart := !shutdown && c.promptInputDispatchPending != nil
+		if restart {
+			c.promptInputDispatchRunning = true
+		}
+		c.promptInputDispatchMu.Unlock()
+		if restart {
+			go c.flushPromptInputDispatch(actor)
+		}
+	}()
+
+	for {
+		c.mu.Lock()
+		shutdown := c.shutdown
+		c.mu.Unlock()
+		if shutdown {
+			c.promptInputDispatchMu.Lock()
+			c.promptInputDispatchPending = nil
+			c.promptInputDispatchMu.Unlock()
+			return
+		}
+
+		c.promptInputDispatchMu.Lock()
+		pending := c.promptInputDispatchPending
+		if pending == nil {
+			c.promptInputDispatchMu.Unlock()
+			return
+		}
+		action := *pending
+		c.promptInputDispatchMu.Unlock()
+
+		if actor.TryPost(action) {
+			c.clearPromptInputDispatchThrough(action.Sequence)
+			continue
+		}
+		if actor.Stats().Closed {
+			c.promptInputDispatchMu.Lock()
+			c.promptInputDispatchPending = nil
+			c.promptInputDispatchMu.Unlock()
+			return
+		}
+		// TryPost is intentionally non-blocking. A short retry lets the actor
+		// drain without allocating one goroutine per editor callback.
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // postSurfaceFacadeAction is the surface-only action entry. A facade reached
-// from a runtime reducer is a causal consequence of the current action, so it
-// must use the controller's internal follow-up queue instead of blocking on
-// the bounded external mailbox that this reducer is currently draining. Calls
-// made outside a reducer retain the normal Post semantics.
+// synchronously by the legacy reducer adapter is accepted as a checked legacy
+// follow-up; an external producer cannot claim that lane merely because a
+// reducer happens to be in flight and instead uses normal mailbox FIFO.
 //
 // PostFollowup intentionally keeps a follow-up as a separately reduced action
 // (and therefore a separately visible revision); it is not a direct surface
 // mutation shortcut.
 func (c *chatInteractionCoordinator) postSurfaceFacadeAction(action ui.UIAction) bool {
-	return c.postCausalUIAction(action)
+	if c == nil || action == nil {
+		return false
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return false
+	}
+	// A reducer-side facade must remain a causal child. This checked legacy
+	// path is non-blocking even when the bounded external mailbox is full.
+	if actor.PostFollowup(action) {
+		return true
+	}
+	if status, ok := action.(ui.SetPromptEditorStatusAction); ok {
+		return c.postPromptEditorStatusAction(actor, status)
+	}
+	// Durable facade actions retain normal mailbox backpressure outside the
+	// editor status path. They cannot be accepted as a follow-up by a foreign
+	// producer merely because another reducer is in flight.
+	return actor.Post(action)
+}
+
+func (c *chatInteractionCoordinator) postPromptEditorStatusAction(actor *ui.UIController, action ui.SetPromptEditorStatusAction) bool {
+	if c == nil || actor == nil {
+		return false
+	}
+	if actor.TryPost(action) {
+		c.clearPromptEditorStatusDispatch(action)
+		return true
+	}
+	if actor.Stats().Closed {
+		return false
+	}
+	c.promptEditorStatusDispatchMu.Lock()
+	copy := action
+	c.promptEditorStatusDispatchPending = &copy
+	start := !c.promptEditorStatusDispatchRunning
+	if start {
+		c.promptEditorStatusDispatchRunning = true
+	}
+	c.promptEditorStatusDispatchMu.Unlock()
+	if start {
+		go c.flushPromptEditorStatusDispatch(actor)
+	}
+	return true
+}
+
+func (c *chatInteractionCoordinator) clearPromptEditorStatusDispatch(action ui.SetPromptEditorStatusAction) {
+	if c == nil {
+		return
+	}
+	c.promptEditorStatusDispatchMu.Lock()
+	if pending := c.promptEditorStatusDispatchPending; pending != nil && pending.Line == action.Line {
+		c.promptEditorStatusDispatchPending = nil
+	}
+	c.promptEditorStatusDispatchMu.Unlock()
+}
+
+func (c *chatInteractionCoordinator) flushPromptEditorStatusDispatch(actor *ui.UIController) {
+	if c == nil || actor == nil {
+		return
+	}
+	defer func() {
+		c.mu.Lock()
+		shutdown := c.shutdown
+		c.mu.Unlock()
+		c.promptEditorStatusDispatchMu.Lock()
+		c.promptEditorStatusDispatchRunning = false
+		pending := c.promptEditorStatusDispatchPending != nil
+		c.promptEditorStatusDispatchMu.Unlock()
+		if pending && !shutdown {
+			c.promptEditorStatusDispatchMu.Lock()
+			if !c.promptEditorStatusDispatchRunning {
+				c.promptEditorStatusDispatchRunning = true
+				go c.flushPromptEditorStatusDispatch(actor)
+			}
+			c.promptEditorStatusDispatchMu.Unlock()
+		}
+	}()
+
+	for {
+		c.mu.Lock()
+		shutdown := c.shutdown
+		c.mu.Unlock()
+		if shutdown {
+			c.promptEditorStatusDispatchMu.Lock()
+			c.promptEditorStatusDispatchPending = nil
+			c.promptEditorStatusDispatchMu.Unlock()
+			return
+		}
+		c.promptEditorStatusDispatchMu.Lock()
+		pending := c.promptEditorStatusDispatchPending
+		if pending == nil {
+			c.promptEditorStatusDispatchMu.Unlock()
+			return
+		}
+		action := *pending
+		c.promptEditorStatusDispatchMu.Unlock()
+		if actor.TryPost(action) {
+			c.clearPromptEditorStatusDispatch(action)
+			continue
+		}
+		if actor.Stats().Closed {
+			c.promptEditorStatusDispatchMu.Lock()
+			c.promptEditorStatusDispatchPending = nil
+			c.promptEditorStatusDispatchMu.Unlock()
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // postCausalUIAction preserves the current reducer's happens-before relation
-// for semantic snapshots and facade actions. It is intentionally not the
-// default producer API: normal producers must still use postUIAction so their
-// durable backpressure remains visible at the ingress boundary.
+// for legacy facade call chains. UIController validates that PostFollowup is
+// called by its actual reducer goroutine; external producers therefore fall
+// back to normal FIFO even while a reducer is in flight. New code should use
+// postCausalUIActionWithContext and pass its explicit ReducerContext.
 func (c *chatInteractionCoordinator) postCausalUIAction(action ui.UIAction) bool {
 	actor := c.ensureUIActor()
 	if actor == nil {
@@ -85,24 +402,48 @@ func (c *chatInteractionCoordinator) postCausalUIAction(action ui.UIAction) bool
 	return actor.Post(action)
 }
 
-// activeStreamShadowActionLocked creates the migration-only AppState mirror
-// for the currently mounted Scene active cell. It must be called while c.mu is
-// held, but the returned action is posted only after that lock is released.
-// The legacy ActiveStreamController/surface remains the sole production
-// visual owner during this phase.
+// postCausalUIActionWithContext is the typed migration path for reducer code.
+// Its capability expires when the current reducer returns, so a retained or
+// externally invoked context cannot insert a follow-up ahead of mailbox work.
+func (c *chatInteractionCoordinator) postCausalUIActionWithContext(context *ui.ReducerContext, action ui.UIAction) bool {
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return false
+	}
+	if context != nil {
+		return context.PostFollowup(action)
+	}
+	return c.postCausalUIAction(action)
+}
+
+// activeStreamShadowActionLocked creates the AppState active-cell update for
+// the currently mounted stream. Legacy sessions still map the retained
+// ActiveStreamController source. Unified sessions deliberately read the
+// already-updated Scene snapshot instead: rendered ActiveBand rows are never a
+// source of truth for a production frame.
 func (c *chatInteractionCoordinator) activeStreamShadowActionLocked() ui.UIAction {
-	if c == nil || c.activeStream == nil {
+	if c == nil {
+		return nil
+	}
+	if c.unifiedRenderer {
+		return c.unifiedSceneActiveCellActionLocked()
+	}
+	if c.activeStream == nil {
 		return nil
 	}
 	return c.activeSourceShadowActionLocked(c.activeStream.SourceSnapshot())
 }
 
-// activeSourceShadowActionLocked mirrors an arbitrary semantic active source
-// (assistant, reasoning, or running tool) without making rendered rows part of
-// AppState. Callers must hold c.mu and post the returned action after unlock.
+// activeSourceShadowActionLocked maps a legacy active-stream source into the
+// AppState update shape. Unified sessions never accept this controller-local
+// source as a production input; they use unifiedSceneActiveCellActionLocked so
+// Scene remains the single semantic owner.
 func (c *chatInteractionCoordinator) activeSourceShadowActionLocked(snapshot ui.ActiveStreamSourceSnapshot) ui.UIAction {
 	if c == nil {
 		return nil
+	}
+	if c.unifiedRenderer {
+		return c.unifiedSceneActiveCellActionLocked()
 	}
 	// Use the same sync.Once-protected accessor as every other producer. The
 	// actor may be created while c.mu is held; its reducer can only continue
@@ -121,7 +462,11 @@ func (c *chatInteractionCoordinator) activeSourceShadowActionLocked(snapshot ui.
 		if c.activeCellShadowID != 0 && current.CellID == c.activeCellShadowID {
 			c.activeCellShadowID = 0
 			c.activeCellShadowRevision = 0
-			return ui.ClearActiveCellAction{}
+			return ui.ClearActiveCellAction{
+				ExpectedCellID:    current.CellID,
+				ExpectedKind:      current.Kind,
+				ExpectedKindKnown: true,
+			}
 		}
 		return nil
 	}
@@ -138,6 +483,62 @@ func (c *chatInteractionCoordinator) activeSourceShadowActionLocked(snapshot ui.
 	c.activeCellShadowID = current.CellID
 	c.activeCellShadowRevision = action.Active.Revision
 	return action
+}
+
+// unifiedSceneActiveCellActionLocked advances an already-mounted AppState
+// active cell from the current Scene snapshot. The runtime encoder has applied
+// the semantic event before it invokes the coordinator callback, so this path
+// never reconstructs content from ActiveStreamController, ActiveBand rows, or
+// terminal state. A first mount is intentionally left to the following
+// ReplaceTranscriptAction, which carries the immutable Scene snapshot.
+//
+// Callers hold c.mu and post the returned action only after releasing it.
+func (c *chatInteractionCoordinator) unifiedSceneActiveCellActionLocked() ui.UIAction {
+	if c == nil || c.session == nil || c.session.RuntimeEventBridge == nil {
+		return nil
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return nil
+	}
+	snapshot := c.session.RuntimeEventBridge.sceneSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	next, ok := ui.ActiveCellFromTranscript(ui.NewTranscriptState(snapshot))
+	if !ok || next.Phase != ui.ActiveCellMutable {
+		return nil
+	}
+	current := actor.AppState().Active
+	if current.CellID == 0 || current.Phase != ui.ActiveCellMutable || current.CellID != next.CellID || current.Kind != next.Kind {
+		// ReplaceTranscriptAction mounts a new Scene cell atomically. Guessing
+		// an identity here would permit an old stream update to overwrite it.
+		return nil
+	}
+	if current.Source == next.Source {
+		return nil
+	}
+
+	// Active.Revision is a reducer-side source fence, separate from Scene's
+	// cell revision. Preserve confirmed effect ranges for append-only source
+	// updates; a non-prefix correction must reset all byte offsets.
+	next.Revision = current.Revision + 1
+	next.Stable = current.Stable
+	next.Enqueued = current.Enqueued
+	next.Acked = current.Acked
+	if !strings.HasPrefix(next.Source, current.Source) {
+		next.Stable = ui.SourceRange{}
+		next.Enqueued = ui.SourceRange{}
+		next.Acked = ui.SourceRange{}
+	}
+	if err := next.ValidateStreamingRanges(); err != nil {
+		return nil
+	}
+	return ui.UpdateActiveCellAction{
+		ExpectedCellID:   current.CellID,
+		ExpectedRevision: current.Revision,
+		Active:           next,
+	}
 }
 
 // finalizeActiveCellShadowActionLocked creates the migration-only atomic
@@ -164,13 +565,15 @@ func (c *chatInteractionCoordinator) finalizeActiveCellShadowActionLocked() ui.U
 		return nil
 	}
 	snapshot := c.session.RuntimeEventBridge.sceneSnapshot()
-	if !finalizedSceneCellAtOrAfter(snapshot, active.CellID, active.Revision) {
+	if !finalizedSceneCellAtOrAfter(snapshot, active.CellID, active.Revision, active.Kind) {
 		return nil
 	}
 	return ui.FinalizeActiveCellAction{
-		Snapshot:               snapshot,
-		ExpectedActiveCellID:   active.CellID,
-		ExpectedActiveRevision: active.Revision,
+		Snapshot:                snapshot,
+		ExpectedActiveCellID:    active.CellID,
+		ExpectedActiveRevision:  active.Revision,
+		ExpectedActiveKind:      active.Kind,
+		ExpectedActiveKindKnown: true,
 	}
 }
 
@@ -178,12 +581,12 @@ func (c *chatInteractionCoordinator) finalizeActiveCellShadowActionLocked() ui.U
 // it decides whether a legacy completion may be mirrored into AppState. The
 // reducer repeats the validation before it publishes state, so this check is a
 // producer-side stale-snapshot guard rather than an alternate authority.
-func finalizedSceneCellAtOrAfter(snapshot *scene.Snapshot, id scene.CellID, revision uint64) bool {
+func finalizedSceneCellAtOrAfter(snapshot *scene.Snapshot, id scene.CellID, revision uint64, kind scene.CellKind) bool {
 	if snapshot == nil || id == 0 {
 		return false
 	}
 	for _, candidate := range snapshot.Cells {
-		if candidate == nil || candidate.ID != id || candidate.Revision < revision {
+		if candidate == nil || candidate.ID != id || candidate.Revision < revision || candidate.Kind != kind {
 			continue
 		}
 		switch candidate.Phase {
@@ -218,6 +621,26 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 		return
 	}
 	c.uiActorOnce.Do(func() {}) // 确保 Once 已消费，避免之后误建
+	c.mu.Lock()
+	presenter := c.primaryPresenter
+	surface := c.surface
+	c.primaryPresenter = nil
+	c.terminalSession = nil
+	c.terminalExecutor = nil
+	if c.session != nil {
+		c.session.TerminalSession = nil
+		c.session.TerminalSessionExecutor = nil
+	}
+	c.mu.Unlock()
+	// Detach the controller callback and drain terminal work before closing the
+	// actor. This ordering prevents an accepted effect from writing after the
+	// chat session has released primary terminal ownership.
+	if presenter != nil {
+		presenter.Close()
+	}
+	if surface != nil {
+		surface.SetAlternateScreenLeaseTransport(nil)
+	}
 	if c.uiActor != nil {
 		c.uiActor.Close()
 		c.uiActor.WaitIdle()
@@ -233,6 +656,13 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 // prompt 会同步等待 stdin；待拆为 effect/result action 后再纳入 reducer。
 // EffectResult 已有 action 入口与诊断账本，但尚无 TerminalSession/effect queue。
 func (c *chatInteractionCoordinator) reduceUIAction(revision uint64, action ui.UIAction) []ui.Effect {
+	return c.reduceUIActionWithContext(revision, action, nil)
+}
+
+// reduceUIActionWithContext is the contextual reducer entry. The existing
+// facade adapter remains in place during migration, but direct actor-side
+// consequences now receive an explicit reducer-scoped follow-up capability.
+func (c *chatInteractionCoordinator) reduceUIActionWithContext(revision uint64, action ui.UIAction, context *ui.ReducerContext) []ui.Effect {
 	if c == nil || c.uiActionRejectedAfterShutdown() {
 		return nil
 	}
@@ -240,7 +670,7 @@ func (c *chatInteractionCoordinator) reduceUIAction(revision uint64, action ui.U
 	case ui.Timer:
 		c.applyTimerAction(act)
 	case ui.RuntimeEvent:
-		c.applyRuntimeEventAction(act)
+		c.applyRuntimeEventActionWithContext(act, context)
 	case ui.InputEvent:
 		c.applyInputEvent(act)
 	case ui.Resize:
@@ -250,7 +680,9 @@ func (c *chatInteractionCoordinator) reduceUIAction(revision uint64, action ui.U
 		// actions. Their terminal semantics remain Phase 3/4 work, so this
 		// legacy coordinator adapter intentionally performs no extra mutation.
 	case ui.DrawRequested:
-		c.applyDrawRequested(act)
+		if !c.UnifiedRendererEnabled() {
+			c.applyDrawRequested(act)
+		}
 	case ui.SetActiveBandAction, ui.ClearActiveBandAction,
 		ui.SetStatusModelsAction, ui.SetStatusModelAction, ui.SetDynamicStatusModelAction,
 		ui.ShowPromptAction, ui.ClearPromptRowsAction, ui.SetPromptStateAction,
@@ -258,19 +690,31 @@ func (c *chatInteractionCoordinator) reduceUIAction(revision uint64, action ui.U
 		ui.SetPromptNoticeAction, ui.SetPromptEditorStatusAction,
 		ui.SetComposerPreviewAction, ui.ClearComposerPreviewAction,
 		ui.ShowPopupAction, ui.ClearPopupAction, ui.UpdatePopupAction:
-		// Phase 1 任务 4/5：facade action 经 legacy adapter（surface.Apply）
-		// 同步应用，输出与改造前一致。注意：Apply 不能在持有 c.mu 时调用
-		// （生产者可能在持 c.mu 时投递 action，避免锁环）；surface 自带锁。
-		if surface := c.uiSurface.Load(); surface != nil {
-			surface.Apply(action)
+		// In the unified session UIController has already incorporated this
+		// action into AppState. Calling the facade's legacy Apply path here would
+		// recreate a second mutable screen owner even when its writer is fenced.
+		if !c.UnifiedRendererEnabled() {
+			if surface := c.uiSurface.Load(); surface != nil {
+				surface.Apply(action)
+			}
 		}
 	default:
 		// Phase 2+ 扩展；P1 其余 action 为定义性类型，尚未接线。
+	}
+	if c.unifiedRenderer {
+		// Every state transition that can affect the visible frame wakes the
+		// single terminal transaction. The executor coalesces these requests and
+		// composes from the newest immutable AppState snapshot.
+		return []ui.Effect{ui.FlushEffect{Dirty: renderengine.DirtyContent | renderengine.DirtyBand | renderengine.DirtyStatus}}
 	}
 	return nil
 }
 
 func (c *chatInteractionCoordinator) applyRuntimeEventAction(action ui.RuntimeEvent) {
+	c.applyRuntimeEventActionWithContext(action, nil)
+}
+
+func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action ui.RuntimeEvent, context *ui.ReducerContext) {
 	if c == nil || action.Kind != chatUIRuntimeEventActionKind {
 		return
 	}
@@ -290,7 +734,7 @@ func (c *chatInteractionCoordinator) applyRuntimeEventAction(action ui.RuntimeEv
 	// causal follow-up of this RuntimeEvent. This never derives transcript from
 	// the terminal, ScreenModel, or legacy historyWindow.
 	if snapshot := payload.bridge.sceneSnapshot(); snapshot != nil {
-		c.postCausalUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot})
+		c.postCausalUIActionWithContext(context, ui.ReplaceTranscriptAction{Snapshot: snapshot})
 	}
 }
 
@@ -303,11 +747,7 @@ func (c *chatInteractionCoordinator) applyInputEvent(action ui.InputEvent) {
 		Cursor:      action.Cursor,
 		PasteActive: action.PasteActive,
 	}
-	if action.Render {
-		c.renderPromptInputSnapshotNow(snapshot)
-		return
-	}
-	c.setPromptInputSnapshotNow(snapshot)
+	c.applyPromptInputSnapshotNow(snapshot, action.Sequence, action.Render)
 }
 
 // applyResizeAction is the Phase 1 geometry barrier adapter. The current
@@ -416,22 +856,23 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 		return
 	}
 	prompt := formatSessionUserPrompt(c.session)
+	draft := c.promptInputSnapshotState()
 	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 		c.promptVisible = true
 		c.promptRenderedOnSurface = true
 		c.preparePromptGapLocked(false)
-		if c.promptInput != "" {
+		if draft.text != "" {
 			rows := c.currentPromptDisplayRowsLocked()
 			cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-			c.surface.SetPromptInputState(prompt, c.promptInput, rows, cursorRow, cursorCol)
+			c.surface.SetPromptInputState(prompt, draft.text, rows, cursorRow, cursorCol)
 		}
 		return
 	}
 	c.promptRenderedOnSurface = false
 	c.preparePromptGapLocked(true)
 	c.writeTextLocked(prompt)
-	if c.promptInput != "" {
-		c.writeTextLocked(c.promptInput)
+	if draft.text != "" {
+		c.writeTextLocked(draft.text)
 	}
 	c.promptVisible = true
 }

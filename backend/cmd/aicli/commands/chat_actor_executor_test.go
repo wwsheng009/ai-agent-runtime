@@ -5,10 +5,18 @@ import (
 	"testing"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
+
+func TestPrepareAICLIActorRuntimeContextDoesNotAttachRetainedOutputMirror(t *testing.T) {
+	ctx := prepareAICLIActorRuntimeContext(context.Background(), &ChatSession{})
+	if mirror := runtimeexecutor.OutputMirrorFromContext(ctx); mirror != nil {
+		t.Fatalf("actor runtime context attached raw output mirror %T; runtime tool.progress owns ActiveBand", mirror)
+	}
+}
 
 func TestRenderAsyncTeamLaunchNotice_RendersForNewRunningTeam(t *testing.T) {
 	session := &ChatSession{

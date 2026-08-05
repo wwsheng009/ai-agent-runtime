@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +38,42 @@ func (s *fakeAtomicChatOutputSurface) WriteOutput(writer io.Writer, text string)
 	return n, err, true
 }
 
+type fakeChatToolOutputStageSink struct {
+	mu      sync.Mutex
+	callIDs []string
+	details []string
+}
+
+func (s *fakeChatToolOutputStageSink) SetToolAgentStage(callID, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.callIDs = append(s.callIDs, callID)
+	s.details = append(s.details, detail)
+}
+
+func (s *fakeChatToolOutputStageSink) snapshot() (callIDs, details []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.callIDs...), append([]string(nil), s.details...)
+}
+
+type fakeChatSupplementSink struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (s *fakeChatSupplementSink) RenderLocalSupplement(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lines = append(s.lines, line)
+}
+
+func (s *fakeChatSupplementSink) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lines...)
+}
+
 func TestChatSystemOutputWriter_IndentsEachCompletedLine(t *testing.T) {
 	var output bytes.Buffer
 	writer := newChatSystemOutputWriter(&output)
@@ -52,6 +90,41 @@ func TestChatSystemOutputWriter_IndentsEachCompletedLine(t *testing.T) {
 		if !bytes.Contains([]byte(rendered), []byte(expected)) {
 			t.Fatalf("expected rendered output to contain %q, got %q", expected, rendered)
 		}
+	}
+}
+
+func TestChatSystemOutputWriter_SemanticSinkPublishesRawLinesWithoutTerminalWriter(t *testing.T) {
+	sink := &fakeChatSupplementSink{}
+	writer := newChatSystemOutputWriterWithSemanticSink(sink)
+
+	if _, err := writer.Write([]byte("[Manager] MCP started\n\n[Manager] loaded tools\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := sink.snapshot()
+	want := []string{"[Manager] MCP started", "[Manager] loaded tools"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("semantic lines=%q, want %q", got, want)
+	}
+	for _, line := range got {
+		if strings.Contains(line, "\x1b[") || strings.Contains(line, "  ") {
+			t.Fatalf("semantic line contains immediate-mode formatting: %q", line)
+		}
+	}
+}
+
+func TestChatLimitedSystemOutputWriter_SemanticSinkRetainsLimitPolicy(t *testing.T) {
+	sink := &fakeChatSupplementSink{}
+	writer := newLimitedChatSystemOutputWriterWithSemanticSink(sink, 1, 1024)
+
+	if _, err := writer.Write([]byte("first\nsecond\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := sink.snapshot()
+	want := []string{"first", chatLiveToolOutputLimitNotice}
+	if !slices.Equal(got, want) {
+		t.Fatalf("semantic limited lines=%q, want %q", got, want)
 	}
 }
 
@@ -203,7 +276,10 @@ func TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint(t *
 }
 
 func TestChatSystemOutputWriter_FlushesPartialLineAfterDelay(t *testing.T) {
-	var output bytes.Buffer
+	// The partial flush runs from the writer's timer goroutine. Use the
+	// package's synchronized test buffer so polling the observable output does
+	// not race with that write under -race.
+	var output synchronizedBuffer
 	writer := newChatSystemOutputWriter(&output).(*chatSystemOutputWriter)
 	writer.partialFlushDelay = 10 * time.Millisecond
 
@@ -291,5 +367,58 @@ func TestChatLimitedSystemOutputWriter_TruncatesSingleLongLineByByteLimit(t *tes
 	}
 	if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock(chatLiveToolOutputLimitNotice)) {
 		t.Fatalf("expected truncation notice, got %q", rendered)
+	}
+}
+
+func TestChatLiveToolOutputWriter_UsesActiveStageWithoutCommittingRawBytes(t *testing.T) {
+	var output bytes.Buffer
+	sink := &fakeChatToolOutputStageSink{}
+	writer := newLimitedChatToolOutputWriter(&output, nil, sink, "call-shell-1", "execute_shell_command", 8, 1024)
+
+	if _, err := writer.Write([]byte("raw-tool-marker\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("raw live tool output entered retained writer: %q", output.String())
+	}
+	callIDs, details := sink.snapshot()
+	if len(callIDs) == 0 || callIDs[len(callIDs)-1] != "call-shell-1" {
+		t.Fatalf("stage owner call IDs=%v, want stable tool call", callIDs)
+	}
+	if len(details) == 0 || !strings.Contains(details[len(details)-1], "raw-tool-marker") {
+		t.Fatalf("stage details=%v, want raw marker", details)
+	}
+}
+
+func TestChatLiveToolOutputWriter_LimitNoticeStaysInActiveStage(t *testing.T) {
+	var output bytes.Buffer
+	sink := &fakeChatToolOutputStageSink{}
+	writer := newLimitedChatToolOutputWriter(&output, nil, sink, "call-shell-2", "shell", 1, 1024)
+
+	if _, err := writer.Write([]byte("first\nsecond\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("limit notice or raw bytes entered retained writer: %q", output.String())
+	}
+	_, details := sink.snapshot()
+	if len(details) == 0 || !strings.Contains(strings.Join(details, "\\n"), chatLiveToolOutputLimitNotice) {
+		t.Fatalf("active stage details=%v, want limit notice", details)
+	}
+}
+
+func TestChatLiveToolOutputWriter_WithoutStableOwnerFallsBackToRetainedWriter(t *testing.T) {
+	var output bytes.Buffer
+	sink := &fakeChatToolOutputStageSink{}
+	writer := newLimitedChatToolOutputWriter(&output, nil, sink, "", "shell", 8, 1024)
+
+	if _, ok := writer.(*chatLimitedSystemOutputWriter); !ok {
+		t.Fatalf("identity-less mirror type=%T, want retained compatibility writer", writer)
+	}
+	if _, err := writer.Write([]byte("fallback-marker\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(output.String(), ui.FormatAssistantSupplementBlock("fallback-marker")) {
+		t.Fatalf("identity-less output was lost: %q", output.String())
 	}
 }

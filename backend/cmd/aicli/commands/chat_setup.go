@@ -66,6 +66,10 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		layout.Enable()
 		inputBox = ui.NewInputBox(layout)
 		surface = ui.NewFixedBottomSurface(layout.Terminal())
+		// The compatibility facade still needs its geometry and logical state,
+		// but an interactive production session must never let it emit even the
+		// initial legacy frame. TerminalSession becomes the only writer below.
+		surface.SetPhysicalWritesEnabled(false)
 		if !surface.Enable() {
 			surface = nil
 		}
@@ -139,6 +143,28 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
 	session.Interaction.SetSurface(surface)
+	if shouldInitializeChatInteractiveUI(opts) {
+		// This is an authority transition, not a feature flag. Never continue an
+		// interactive session with a fenced legacy writer and no TerminalSession.
+		if !session.Interaction.EnableUnifiedRenderer() {
+			mcpmanager.SetStatusOutput(os.Stdout)
+			if surface != nil {
+				surface.Disable()
+			}
+			if layout != nil {
+				layout.Disable()
+			}
+			if keyHandler != nil {
+				keyHandler.Stop()
+			}
+			return nil, nil, fmt.Errorf("initialize unified terminal renderer")
+		}
+		// MCP bootstrap/status output is semantic transcript input in the unified
+		// session. Do not leave the old system writer pointed at a physically
+		// fenced surface, because that would silently discard notices or create a
+		// raw stdout bypass when the fence changes.
+		mcpmanager.SetStatusOutput(newChatSystemOutputWriterWithSemanticSink(session.Interaction))
+	}
 	initializeChatAccountBalanceRefresh(session)
 	session.Interaction.RefreshStatus("")
 	if profileState != nil && profileState.Active() {
@@ -210,10 +236,10 @@ func shouldInitializeChatInteractiveUI(opts *chatCommandOptions) bool {
 	if opts == nil || opts.NoInteractive || opts.OutputFormat == "json" {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_TUI"))) {
-	case "0", "false", "off", "legacy", "plain":
-		return false
-	}
+	// An interactive TTY has one production renderer: TerminalSession. The old
+	// AICLI_TUI=legacy/plain escape hatch created a second, known-broken screen
+	// authority and is intentionally retired. Plain and JSON remain explicit
+	// non-interactive output modes rather than an in-session renderer fallback.
 	return chatIsInteractiveTerminal()
 }
 
