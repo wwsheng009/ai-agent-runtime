@@ -116,12 +116,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.TranscriptOverlay = TranscriptOverlayState{}
 		}
 	case TranscriptPagerScroll:
-		if state.TranscriptOverlay.Active {
+		if state.TranscriptOverlay.Active && transcriptPagerLeaseMatches(state.TranscriptOverlay, a.LeaseID) {
 			model, width, rows := transcriptOverlayPagerInputs(state)
 			state.TranscriptOverlay.Pager.Scroll(model, width, rows, a.Delta)
 		}
 	case TranscriptPagerSetFollowBottom:
-		if state.TranscriptOverlay.Active {
+		if state.TranscriptOverlay.Active && transcriptPagerLeaseMatches(state.TranscriptOverlay, a.LeaseID) {
 			model, width, rows := transcriptOverlayPagerInputs(state)
 			state.TranscriptOverlay.Pager.SetFollowBottom(model, width, rows, a.Follow)
 		}
@@ -205,12 +205,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ClearActiveCellAction:
-		state.Active = ActiveCellState{}
-		refreshTranscriptOverlayPager(&state)
+		if clearActiveCellMatches(state.Active, a) {
+			state.Active = ActiveCellState{}
+			refreshTranscriptOverlayPager(&state)
+		}
 	case FinalizeActiveCellAction:
 		if state.Active.CellID == a.ExpectedActiveCellID &&
 			state.Active.Revision == a.ExpectedActiveRevision &&
-			finalizedCellInSnapshot(a.Snapshot, a.ExpectedActiveCellID, a.ExpectedActiveRevision) {
+			(!a.ExpectedActiveKindKnown || state.Active.Kind == a.ExpectedActiveKind) &&
+			finalizedCellInSnapshot(a.Snapshot, a.ExpectedActiveCellID, a.ExpectedActiveRevision, a.ExpectedActiveKind, a.ExpectedActiveKindKnown) {
 			state.Transcript = NewTranscriptState(a.Snapshot)
 			if active, ok := ActiveCellFromTranscript(state.Transcript); ok {
 				state.Active = active
@@ -228,6 +231,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		state.Bottom.PasteActive = a.PasteActive
 		state.Bottom.Focus = BottomFocusPrompt
 	case SetActiveBandAction:
+		if state.SemanticActiveCellProjection {
+			// Unified production frames derive their mutable body exclusively
+			// from Active. Keeping a facade payload here would let a delayed
+			// legacy frame replace the Scene source after the cutover.
+			break
+		}
 		state.Bottom.ActiveBandStyled = cloneRenderLines(a.Lines)
 		if a.RawLines != nil {
 			state.Bottom.ActiveBandLines = append([]string(nil), a.RawLines...)
@@ -237,6 +246,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case ClearActiveBandAction:
 		state.Bottom.ActiveBandLines = nil
 		state.Bottom.ActiveBandStyled = nil
+	case SetSemanticActiveCellProjectionAction:
+		state.SemanticActiveCellProjection = a.Enabled
+		if a.Enabled {
+			// A frame must never retain an old facade payload across the
+			// renderer authority boundary. Subsequent facade actions are
+			// deliberately ignored below while semantic projection is active.
+			state.Bottom.ActiveBandLines = nil
+			state.Bottom.ActiveBandStyled = nil
+		}
 	case SetStatusModelsAction:
 		state.Bottom.StatusModel = normalizeControllerStatusModel(a.Status)
 		state.Bottom.DynamicStatusModel = normalizeControllerDynamicStatusModel(a.Dynamic)
@@ -347,7 +365,7 @@ func reconcileTranscriptActiveCell(current ActiveCellState, transcript Transcrip
 	return next
 }
 
-func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expectedRevision uint64) bool {
+func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expectedRevision uint64, expectedKind scene.CellKind, expectedKindKnown bool) bool {
 	if snapshot == nil || id == 0 {
 		return false
 	}
@@ -357,7 +375,8 @@ func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expected
 		// the final Scene mutation, so equality is valid here. The exact active
 		// fence is checked by the caller before this helper runs; a strictly
 		// older Scene cell remains stale.
-		if cell == nil || cell.ID != id || cell.Revision < expectedRevision {
+		if cell == nil || cell.ID != id || cell.Revision < expectedRevision ||
+			(expectedKindKnown && cell.Kind != expectedKind) {
 			continue
 		}
 		switch cell.Phase {
@@ -366,6 +385,13 @@ func finalizedCellInSnapshot(snapshot *scene.Snapshot, id scene.CellID, expected
 		}
 	}
 	return false
+}
+
+func clearActiveCellMatches(active ActiveCellState, action ClearActiveCellAction) bool {
+	if action.ExpectedCellID != 0 && active.CellID != action.ExpectedCellID {
+		return false
+	}
+	return !action.ExpectedKindKnown || active.Kind == action.ExpectedKind
 }
 
 func cloneControllerStatusModel(model *style.StatusLineModel) *style.StatusLineModel {
@@ -472,4 +498,11 @@ func transcriptOverlayPagerInputs(state UIControllerState) (TranscriptPagerModel
 		Transcript: state.Transcript,
 		Active:     state.Active,
 	}), width, transcriptPagerViewportRows(height)
+}
+
+// transcriptPagerLeaseMatches accepts a zero lease only for migration tests
+// and compatibility callers. The live alternate-screen pager always supplies
+// its lease id, so stale input cannot mutate a newer overlay.
+func transcriptPagerLeaseMatches(overlay TranscriptOverlayState, leaseID uint64) bool {
+	return leaseID == 0 || overlay.LeaseID == leaseID
 }

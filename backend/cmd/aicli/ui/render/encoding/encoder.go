@@ -33,6 +33,7 @@ type EventEncoder struct {
 	reasoningBy  map[string]*Item                 // streamKey -> 当前 reasoning item（独立于 assistant）
 	toolByID     map[string]*Item                 // payload tool_call_id -> tool_call item
 	toolOutputBy map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
+	priorityBy   map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
 	streamOrder  map[string]*assistantStreamOrder // streamKey -> delta 有序提交状态
 	stats        Stats
 }
@@ -47,6 +48,16 @@ type assistantStreamOrder struct {
 	tainted     bool
 }
 
+// priorityPromptState tracks the synchronous interaction identity separately
+// from retained transcript items. A request is not durable terminal content:
+// only the completed prompt transcript may enter RenderModel, at the position
+// where the legacy history block is actually committed.
+type priorityPromptState struct {
+	requested bool
+	resolved  bool
+	item      *Item
+}
+
 // NewEventEncoder 创建空编码器。
 func NewEventEncoder() *EventEncoder {
 	return &EventEncoder{
@@ -56,6 +67,7 @@ func NewEventEncoder() *EventEncoder {
 		reasoningBy:  make(map[string]*Item),
 		toolByID:     make(map[string]*Item),
 		toolOutputBy: make(map[string]map[string]struct{}),
+		priorityBy:   make(map[string]*priorityPromptState),
 		streamOrder:  make(map[string]*assistantStreamOrder),
 	}
 }
@@ -102,6 +114,34 @@ func (e *EventEncoder) SubmitUserInput(text string) *ChangeSet {
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
 	it := e.appendItem(KindUser, "", text)
+	it.Status = StatusCompleted
+	e.change(cs, OpAppend, it)
+	if e.model.Tail == nil {
+		e.model.Tail = &Tail{}
+	}
+	if len(e.model.Items) > 0 {
+		last := e.model.Items[len(e.model.Items)-1]
+		e.model.Tail.ItemID = last.ID
+		e.model.Tail.Seq = last.Seq
+	} else {
+		e.model.Tail.ItemID = ""
+		e.model.Tail.Seq = 0
+	}
+	cs.Tail = e.model.Tail
+	return cs
+}
+
+// SubmitAssistant 把没有 runtime assistant 终态事件的本地最终回复提交为
+// completed assistant 块。正常 runtime assistant 仍必须经 Encode，调用方
+// 不得把同一回复同时走两个入口。
+func (e *EventEncoder) SubmitAssistant(text string) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	it := e.appendItem(KindAssistant, "", text)
 	it.Status = StatusCompleted
 	e.change(cs, OpAppend, it)
 	if e.model.Tail == nil {
@@ -176,6 +216,157 @@ func (e *EventEncoder) SubmitError(text string) *ChangeSet {
 	}
 	cs.Tail = e.model.Tail
 	return cs
+}
+
+// SubmitSupplement 把没有对应 runtime 事件的本地补充提交为独立终态
+// supplement 块。它与 RenderAsyncLine 的 legacy surface 投影一一对应，
+// 但不冒充 system/error 语义；调用方必须只在该内容尚未由 Encode 映射时
+// 使用，避免 runtime event + direct supplement 双重注入。
+func (e *EventEncoder) SubmitSupplement(text string) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	it := e.appendItem(KindSupplement, "", text)
+	it.Status = StatusCompleted
+	e.change(cs, OpAppend, it)
+	if e.model.Tail == nil {
+		e.model.Tail = &Tail{}
+	}
+	if len(e.model.Items) > 0 {
+		last := e.model.Items[len(e.model.Items)-1]
+		e.model.Tail.ItemID = last.ID
+		e.model.Tail.Seq = last.Seq
+	} else {
+		e.model.Tail.ItemID = ""
+		e.model.Tail.Seq = 0
+	}
+	cs.Tail = e.model.Tail
+	return cs
+}
+
+// SubmitPriorityPromptTranscript commits the one retained semantic item for a
+// previously observed approval/question request. The request itself is only
+// pending interaction identity and never occupies a RenderModel position.
+// This makes the completed transcript appear after any local hint that was
+// physically committed while stdin was pending. A resolved event may arrive
+// first; it records lifecycle state but does not discard a late transcript.
+func (e *EventEncoder) SubmitPriorityPromptTranscript(eventType, requestKey, text string) *ChangeSet {
+	if e == nil || strings.TrimSpace(requestKey) == "" || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	key := PriorityPromptKey(eventType, requestKey)
+	if key == "" {
+		return nil
+	}
+	state := e.priorityBy[key]
+	if state == nil || !state.requested || state.item != nil {
+		if state != nil && state.item != nil {
+			e.stats.DuplicateCount++
+		}
+		return nil
+	}
+
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	it := e.appendItem(KindPriorityPrompt, "", text)
+	it.Status = StatusCompleted
+	state.item = it
+	e.change(cs, OpAppend, it)
+	if e.model.Tail == nil {
+		e.model.Tail = &Tail{}
+	}
+	e.model.Tail.ItemID = it.ID
+	e.model.Tail.Seq = it.Seq
+	cs.Tail = e.model.Tail
+	return cs
+}
+
+// SubmitToolCall 提交一个没有 runtime 事件外层包装的工具请求。
+//
+// chat-core 的 legacy tool loop 直接产生 ChatEvent；调用方仍必须提供
+// 稳定 toolCallID，才能让请求、进度和结果归并到同一个 mutable tool cell。
+// 该 helper 与 Encode(runtimeevents.Event{Type:"tool.requested"}) 完全同义，
+// 只是把 direct producer 的语义约束收口在编码器 API 内。
+func (e *EventEncoder) SubmitToolCall(toolCallID, toolName string, args map[string]interface{}) *ChangeSet {
+	if e == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
+		return nil
+	}
+	payload := make(map[string]interface{}, len(args)+2)
+	for key, value := range args {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		payload[key] = value
+	}
+	// Call identity and readable name are protocol-owned fields: direct
+	// argument maps must never override them, otherwise live/replay could map
+	// the same tool result to different chains.
+	payload["tool_call_id"] = strings.TrimSpace(toolCallID)
+	payload["tool_name"] = strings.TrimSpace(toolName)
+	return e.Encode(runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload})
+}
+
+// SubmitToolProgress 更新一个 direct tool call 的 source。没有稳定身份或
+// 未知 call 时编码器会按既有 legacy 规则降级为 system，避免错误绑定。
+func (e *EventEncoder) SubmitToolProgress(toolCallID, toolName, progress string) *ChangeSet {
+	if e == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(progress) == "" {
+		return nil
+	}
+	return e.Encode(runtimeevents.Event{
+		Type:     "tool.progress",
+		ToolName: toolName,
+		Payload: map[string]interface{}{
+			"tool_call_id": strings.TrimSpace(toolCallID),
+			"tool_name":    strings.TrimSpace(toolName),
+			"progress":     progress,
+		},
+	})
+}
+
+// SubmitToolResult 提交 direct tool call 的唯一终态结果。output/error 会
+// 由同一 tool-chain cell 合并；重复同文本结果由编码器幂等去重。
+func (e *EventEncoder) SubmitToolResult(toolCallID, toolName, output, toolErr string, success bool) *ChangeSet {
+	if e == nil || strings.TrimSpace(toolCallID) == "" {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"tool_call_id": strings.TrimSpace(toolCallID),
+		"tool_name":    strings.TrimSpace(toolName),
+		"success":      success,
+	}
+	if strings.TrimSpace(output) != "" {
+		payload["output"] = output
+	}
+	if strings.TrimSpace(toolErr) != "" {
+		payload["error"] = toolErr
+	}
+	typeName := "tool.completed"
+	if !success {
+		typeName = "tool.failed"
+	}
+	return e.Encode(runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload})
+}
+
+// SubmitToolResultDisplay finalizes a direct tool chain from its canonical
+// transcript projection. Some legacy chat-core tools only expose a completed
+// display block rather than a structured raw result. Keeping that one display
+// head on the tool-call item preserves exact Scene/legacy/replay parity without
+// pretending that it is a separate supplement cell.
+func (e *EventEncoder) SubmitToolResultDisplay(toolCallID, display string) *ChangeSet {
+	if e == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(display) == "" {
+		return nil
+	}
+	return e.Encode(runtimeevents.Event{
+		Type: "tool.completed",
+		Payload: map[string]interface{}{
+			"tool_call_id": strings.TrimSpace(toolCallID),
+			"display_head": display,
+		},
+	})
 }
 
 // SubmitUserInteraction 把 /debug、/model 等用户交互输出提交为终态
@@ -254,6 +445,7 @@ func (e *EventEncoder) Reset() {
 	e.reasoningBy = make(map[string]*Item)
 	e.toolByID = make(map[string]*Item)
 	e.toolOutputBy = make(map[string]map[string]struct{})
+	e.priorityBy = make(map[string]*priorityPromptState)
 	e.streamOrder = make(map[string]*assistantStreamOrder)
 	e.stats = Stats{}
 }
@@ -261,18 +453,28 @@ func (e *EventEncoder) Reset() {
 // classify 把事件类型映射为编码操作（append/upsert/remove），并解析出
 // 目标 Item 的身份与内容。对应设计文档 §3 事件→操作映射表。
 func (e *EventEncoder) classify(ev runtimeevents.Event) op {
+	// A terminal session event is intentionally visually silent, but it is not
+	// semantically inert: a provider failure, context cancellation, or user
+	// interrupt can end a run without an assistant.message / llm.finished.
+	// Close every open streamed item in place so the Scene never retains a
+	// mutable tail after the owning run is gone.
+	if ev.Type == runtimechat.EventSessionEnd || ev.Type == runtimechat.EventSessionInterrupted {
+		return opSessionEnd
+	}
 	if isSilentSystemEventType(ev.Type) {
 		return opNone
 	}
 	switch ev.Type {
 	case runtimechat.EventSessionCompactStarted,
 		runtimechat.EventSessionCompactCompleted,
-		runtimechat.EventSessionCompactFailed,
-		runtimechat.EventApprovalRequested,
-		runtimechat.EventApprovalResolved,
-		runtimechat.EventQuestionAsked,
-		runtimechat.EventQuestionAnswered:
+		runtimechat.EventSessionCompactFailed:
 		return opSystem
+
+	case runtimechat.EventApprovalRequested, runtimechat.EventQuestionAsked:
+		return opPriorityRequested
+
+	case runtimechat.EventApprovalResolved, runtimechat.EventQuestionAnswered:
+		return opPriorityResolved
 
 	case runtimechat.EventAssistantReasoning:
 		return opReasoning
@@ -396,16 +598,19 @@ func isSilentSystemEventType(eventType string) bool {
 type op int
 
 const (
-	opNone           op = iota // 静默事件：不产生任何变更（内部生命周期/遥测）
-	opSystem                   // 系统/会话事件：append 独立 system 块
-	opReasoning                // reasoning：append/upsert 当前 assistant 下
-	opAssistantDelta           // assistant delta：upsert 当前流
-	opAssistantFinal           // assistant 完成：upsert 终态
-	opLLMStarted               // LLM 请求开始：append assistant pending
-	opLLMFinished              // LLM 请求结束：upsert 终态
-	opToolStarted              // 工具调用发起：append tool_call（分配 CauseID）
-	opToolProgress             // 工具运行进度：upsert 同一 mutable tool_call
-	opToolFinished             // 工具完成：upsert tool_call 终态 + append tool_output
+	opNone              op = iota // 静默事件：不产生任何变更（内部生命周期/遥测）
+	opSystem                      // 系统/会话事件：append 独立 system 块
+	opPriorityRequested           // approval/question：登记 pending prompt identity，不产生 Scene item
+	opPriorityResolved            // approval/question 终态：记录 resolution，保留晚到 transcript identity
+	opReasoning                   // reasoning：append/upsert 当前 assistant 下
+	opAssistantDelta              // assistant delta：upsert 当前流
+	opAssistantFinal              // assistant 完成：upsert 终态
+	opLLMStarted                  // LLM 请求开始：append assistant pending
+	opLLMFinished                 // LLM 请求结束：upsert 终态
+	opSessionEnd                  // 会话终止：收尾所有未完成的流式项（不产生 system 行）
+	opToolStarted                 // 工具调用发起：append tool_call（分配 CauseID）
+	opToolProgress                // 工具运行进度：upsert 同一 mutable tool_call
+	opToolFinished                // 工具完成：upsert tool_call 终态 + append tool_output
 )
 
 // apply 执行一次编码操作。
@@ -415,6 +620,10 @@ func (e *EventEncoder) apply(o op, ev runtimeevents.Event, cs *ChangeSet) {
 		// 静默：内部生命周期/遥测事件不产生变更（旧路径同样零可见输出）。
 	case opSystem:
 		e.applySystem(ev, cs)
+	case opPriorityRequested:
+		e.applyPriorityRequested(ev, cs)
+	case opPriorityResolved:
+		e.applyPriorityResolved(ev, cs)
 	case opReasoning:
 		e.applyReasoning(ev, cs)
 	case opAssistantDelta:
@@ -425,6 +634,8 @@ func (e *EventEncoder) apply(o op, ev runtimeevents.Event, cs *ChangeSet) {
 		e.applyLLMStarted(ev, cs)
 	case opLLMFinished:
 		e.applyLLMFinished(ev, cs)
+	case opSessionEnd:
+		e.applySessionEnd(ev, cs)
 	case opToolStarted:
 		e.applyToolStarted(ev, cs)
 	case opToolProgress:
@@ -442,6 +653,24 @@ func (e *EventEncoder) nextID() string {
 func (e *EventEncoder) nextSeqValue() uint64 {
 	e.nextSeq++
 	return e.nextSeq
+}
+
+func (e *EventEncoder) updateTail(cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	if e.model.Tail == nil {
+		e.model.Tail = &Tail{}
+	}
+	if len(e.model.Items) > 0 {
+		last := e.model.Items[len(e.model.Items)-1]
+		e.model.Tail.ItemID = last.ID
+		e.model.Tail.Seq = last.Seq
+	} else {
+		e.model.Tail.ItemID = ""
+		e.model.Tail.Seq = 0
+	}
+	cs.Tail = e.model.Tail
 }
 
 // appendItem 追加新 Item 并记录变更。
@@ -556,6 +785,98 @@ func (e *EventEncoder) changeAfter(cs *ChangeSet, o Op, it *Item, afterID string
 func (e *EventEncoder) applySystem(ev runtimeevents.Event, cs *ChangeSet) {
 	it := e.appendItem(KindSystem, "", systemHead(ev))
 	e.change(cs, OpAppend, it)
+}
+
+// PriorityPromptKey returns the canonical key shared by the requested event,
+// the synchronous prompt transcript, and the resolved event. Runtime actors
+// assign request_id/question_id; the fallback keeps compatibility events
+// observable without binding different event types to each other.
+func PriorityPromptKey(eventType, requestKey string) string {
+	eventType = strings.TrimSpace(eventType)
+	requestKey = strings.TrimSpace(requestKey)
+	switch eventType {
+	case runtimechat.EventApprovalResolved:
+		eventType = runtimechat.EventApprovalRequested
+	case runtimechat.EventQuestionAnswered:
+		eventType = runtimechat.EventQuestionAsked
+	}
+	if requestKey == "" {
+		return ""
+	}
+	switch eventType {
+	case runtimechat.EventApprovalRequested, runtimechat.EventQuestionAsked:
+		return eventType + "\x00" + requestKey
+	default:
+		return ""
+	}
+}
+
+// PriorityPromptRequestKey derives the request component of a runtime
+// approval/question key. It is exported so the bridge can carry the exact
+// request identity across the synchronous stdin exception without duplicating
+// the fallback algorithm.
+func PriorityPromptRequestKey(ev runtimeevents.Event) string {
+	requestKey := ""
+	switch ev.Type {
+	case runtimechat.EventApprovalRequested, runtimechat.EventApprovalResolved:
+		requestKey = payloadString(ev.Payload["request_id"], "")
+		if requestKey == "" {
+			requestKey = strings.Join([]string{
+				strings.TrimSpace(ev.SessionID),
+				strings.TrimSpace(ev.TraceID),
+				payloadString(ev.Payload["tool_name"], ev.ToolName),
+				payloadString(ev.Payload["reason"], ""),
+			}, "\x1f")
+		}
+	case runtimechat.EventQuestionAsked, runtimechat.EventQuestionAnswered:
+		requestKey = payloadString(ev.Payload["question_id"], "")
+		if requestKey == "" {
+			requestKey = strings.Join([]string{
+				strings.TrimSpace(ev.SessionID),
+				strings.TrimSpace(ev.TraceID),
+				payloadString(ev.Payload["prompt"], ""),
+			}, "\x1f")
+		}
+	}
+	return requestKey
+}
+
+func priorityPromptKeyForEvent(ev runtimeevents.Event) string {
+	return PriorityPromptKey(ev.Type, PriorityPromptRequestKey(ev))
+}
+
+func (e *EventEncoder) applyPriorityRequested(ev runtimeevents.Event, _ *ChangeSet) {
+	key := priorityPromptKeyForEvent(ev)
+	if key == "" {
+		return
+	}
+	state := e.priorityBy[key]
+	if state == nil {
+		state = &priorityPromptState{}
+		e.priorityBy[key] = state
+	}
+	if state.requested {
+		e.stats.DuplicateCount++
+		return
+	}
+	state.requested = true
+}
+
+func (e *EventEncoder) applyPriorityResolved(ev runtimeevents.Event, _ *ChangeSet) {
+	key := priorityPromptKeyForEvent(ev)
+	if key == "" {
+		return
+	}
+	state := e.priorityBy[key]
+	if state == nil {
+		state = &priorityPromptState{}
+		e.priorityBy[key] = state
+	}
+	if state.resolved {
+		e.stats.DuplicateCount++
+		return
+	}
+	state.resolved = true
 }
 
 func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
@@ -758,6 +1079,98 @@ func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
 	}
 }
 
+// FinalizeOpenStreams closes every mutable assistant/reasoning item without
+// appending another transcript entry. It is the terminal boundary for runs
+// whose provider never emits a per-request completion event. The caller owns
+// encoder serialization and may invoke it repeatedly; terminal items are
+// skipped, so it is idempotent.
+func (e *EventEncoder) FinalizeOpenStreams(status ItemStatus) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	e.finalizeOpenStreams(status, cs)
+	e.updateTail(cs)
+	return cs
+}
+
+// applySessionEnd is deliberately silent in the visible RenderModel. It only
+// resolves mutable stream ownership, preserving received partial content in
+// the existing cell rather than re-emitting it through a fallback renderer.
+func (e *EventEncoder) applySessionEnd(ev runtimeevents.Event, cs *ChangeSet) {
+	e.finalizeOpenStreams(sessionEndItemStatus(ev), cs)
+}
+
+func (e *EventEncoder) finalizeOpenStreams(status ItemStatus, cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	if !status.Terminal() {
+		status = StatusCompleted
+	}
+	assistantKeys := make([]string, 0, len(e.assistantBy))
+	for key := range e.assistantBy {
+		assistantKeys = append(assistantKeys, key)
+	}
+	sort.Strings(assistantKeys)
+	for _, key := range assistantKeys {
+		it := e.assistantBy[key]
+		if it == nil || it.Status.Terminal() {
+			continue
+		}
+		e.flushAssistantStream(key, it, cs)
+		u, changed := e.upsertItem(it.ID, KindAssistant, func(item *Item) bool {
+			if item.Status.Terminal() {
+				return false
+			}
+			item.Status = status
+			return true
+		})
+		if changed {
+			e.change(cs, OpUpsert, u)
+		}
+	}
+
+	reasoningKeys := make([]string, 0, len(e.reasoningBy))
+	for key := range e.reasoningBy {
+		reasoningKeys = append(reasoningKeys, key)
+	}
+	sort.Strings(reasoningKeys)
+	for _, key := range reasoningKeys {
+		it := e.reasoningBy[key]
+		if it == nil || it.Status.Terminal() {
+			continue
+		}
+		u, changed := e.upsertItem(it.ID, KindReasoning, func(item *Item) bool {
+			if item.Status.Terminal() {
+				return false
+			}
+			item.Status = status
+			return true
+		})
+		if changed {
+			e.change(cs, OpUpsert, u)
+		}
+	}
+}
+
+func sessionEndItemStatus(ev runtimeevents.Event) ItemStatus {
+	if ev.Type == runtimechat.EventSessionInterrupted {
+		return StatusCanceled
+	}
+	if ev.Payload != nil {
+		if _, reported := ev.Payload["success"]; reported && !payloadBoolValue(ev.Payload["success"]) {
+			return StatusFailed
+		}
+		if strings.TrimSpace(payloadString(ev.Payload["error"], "")) != "" {
+			return StatusFailed
+		}
+	}
+	return StatusCompleted
+}
+
 func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 	callID := toolCallID(ev)
 	name := payloadString(ev.Payload["tool_name"], ev.ToolName)
@@ -825,10 +1238,14 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 		e.applySystem(ev, cs)
 		return
 	}
+	displayHead := payloadString(ev.Payload["display_head"], "")
 	if it != nil {
 		u, changed := e.upsertItem(it.ID, KindToolCall, func(t *Item) bool {
 			if t.Status.Terminal() {
 				return false
+			}
+			if displayHead != "" {
+				t.Head = displayHead
 			}
 			t.Status = StatusCompleted
 			return true
@@ -836,6 +1253,12 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 		if changed {
 			e.change(cs, OpUpsert, u)
 		}
+	}
+	// A direct legacy tool has already normalized its final response into one
+	// display head. Do not append raw output a second time: that would both
+	// change the final cell text and create a duplicate visible result on replay.
+	if displayHead != "" {
+		return
 	}
 	output := toolFinishedText(ev)
 	if output == "" {
@@ -947,6 +1370,24 @@ func toolFinishedText(ev runtimeevents.Event) string {
 		return "cancelled"
 	default:
 		return ""
+	}
+}
+
+func payloadBoolValue(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return err == nil && parsed
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	case int64:
+		return typed != 0
+	default:
+		return false
 	}
 }
 

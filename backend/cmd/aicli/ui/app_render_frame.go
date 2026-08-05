@@ -41,15 +41,13 @@ type AppRenderFrame struct {
 // reads only the supplied AppState and process-independent rendering helpers;
 // it never reads FixedBottomSurface/historyWindow/ScreenModel or emits bytes.
 func ComposeAppRenderFrame(state AppState) AppRenderFrame {
-	state = state.Clone()
 	screen := LayoutAppScreen(state)
-	text := ComposeAppTextLayout(state)
-	layout := LayoutAppState(state)
+	text := composeAppTextLayoutFromScreen(screen)
 	transcript := make(map[scene.CellID]scene.TranscriptCell, len(state.Transcript.Cells))
 	for _, cell := range state.Transcript.Cells {
 		transcript[cell.ID] = cell
 	}
-	bottomLines := appBottomRenderLines(layout)
+	bottomLines := appBottomRenderLines(screen.bottom, screen.Geometry.Width)
 
 	frame := AppRenderFrame{
 		Revision:         screen.Revision,
@@ -114,17 +112,16 @@ func appTranscriptRenderRole(kind scene.CellKind) style.Role {
 // appBottomRenderLines retains the structured sources already available in
 // BottomPaneState. Rows without a structured source deliberately stay plain;
 // the eventual presenter must not invent style by inspecting legacy ANSI.
-func appBottomRenderLines(layout AppLayout) map[int]render.Line {
-	plan := layout.Bottom.RowPlan
+func appBottomRenderLines(bottom BottomPaneLayout, width int) map[int]render.Line {
+	plan := bottom.RowPlan
 	if len(plan.Rows) == 0 {
 		return nil
 	}
-	width := layout.Geometry.Width
 	if width < 1 {
 		width = 80
 	}
 	lines := make(map[int]render.Line, len(plan.Rows))
-	band := cloneRenderLines(layout.Bottom.State.ActiveBandStyled)
+	band := cloneRenderLines(bottom.State.ActiveBandStyled)
 	bandRows := 0
 	for _, row := range plan.Rows {
 		if row.Owner == renderengine.RowOwnerBand {
@@ -143,9 +140,9 @@ func appBottomRenderLines(layout AppLayout) map[int]render.Line {
 			}
 			bandIndex++
 		case row.Owner == renderengine.RowOwnerStatus && row.Row == plan.StatusRow:
-			lines[row.Row] = appStatusRenderLine(layout.Bottom.State.StatusModel, width, row.Text)
+			lines[row.Row] = appStatusRenderLine(bottom.State.StatusModel, width, row.Text)
 		case row.Owner == renderengine.RowOwnerStatus:
-			lines[row.Row] = appStatusRenderLine(layout.Bottom.State.DynamicStatusModel, width, row.Text)
+			lines[row.Row] = appStatusRenderLine(bottom.State.DynamicStatusModel, width, row.Text)
 		}
 	}
 	return lines

@@ -61,8 +61,10 @@ func TestMapBasicKinds(t *testing.T) {
 		{encoding.KindUser, KindUser},
 		{encoding.KindAssistant, KindAssistant},
 		{encoding.KindReasoning, KindSupplement},
+		{encoding.KindSupplement, KindSupplement},
 		{encoding.KindCommand, KindCommand},
 		{encoding.KindSystem, KindSystem},
+		{encoding.KindPriorityPrompt, KindSupplement},
 		{encoding.KindUserInteraction, KindCommand}, // /debug、/model 输出按 command cell 呈现
 	}
 	for i, k := range kinds {
@@ -98,7 +100,8 @@ func TestMapBasicKinds(t *testing.T) {
 		wantPhase := CellMutable
 		if !streamedKind(k.itemKind) {
 			// 一次性 kind（user/command/system/user_interaction）编码器不产
-			// 后续 upsert，append 即终态（与编码器事实一致）。
+			// 后续 upsert，append 即终态（与编码器事实一致）。PriorityPrompt
+			// also arrives only after the synchronous transcript is complete.
 			wantPhase = CellCommitted
 		}
 		if ap.Cell.Phase != wantPhase {

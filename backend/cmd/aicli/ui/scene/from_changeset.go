@@ -406,7 +406,7 @@ func (m *ChangeSetMapper) current(id CellID, pending map[CellID]pendingCell) (pe
 //
 //	KindUser → KindUser；KindAssistant → KindAssistant；KindReasoning → KindSupplement
 //	KindToolCall/KindToolOutput → KindToolChain；KindCommand → KindCommand
-//	KindSystem → KindSystem；KindUserInteraction → KindCommand
+//	KindSystem → KindSystem；KindPriorityPrompt → KindSupplement；KindUserInteraction → KindCommand
 //	（/debug、/model 输出按 command cell 呈现，与既有 /debug display 实现一致）
 //	未知 → KindDiagnostic（降级，内容保持可见，记 FallbackCount）
 func (m *ChangeSetMapper) cellKind(it *encoding.Item) CellKind {
@@ -417,12 +417,16 @@ func (m *ChangeSetMapper) cellKind(it *encoding.Item) CellKind {
 		return KindAssistant
 	case encoding.KindReasoning:
 		return KindSupplement
+	case encoding.KindSupplement:
+		return KindSupplement
 	case encoding.KindToolCall, encoding.KindToolOutput:
 		return KindToolChain
 	case encoding.KindCommand:
 		return KindCommand
 	case encoding.KindSystem:
 		return KindSystem
+	case encoding.KindPriorityPrompt:
+		return KindSupplement
 	case encoding.KindUserInteraction:
 		return KindCommand
 	default:
@@ -437,7 +441,10 @@ func (m *ChangeSetMapper) cellKind(it *encoding.Item) CellKind {
 // upsert，保持 mutable 会滞留可更新状态（与编码器事实不符）。
 func streamedKind(k encoding.ItemKind) bool {
 	switch k {
-	case encoding.KindAssistant, encoding.KindReasoning, encoding.KindToolCall, encoding.KindToolOutput:
+	case encoding.KindAssistant,
+		encoding.KindReasoning,
+		encoding.KindToolCall,
+		encoding.KindToolOutput:
 		return true
 	default:
 		return false

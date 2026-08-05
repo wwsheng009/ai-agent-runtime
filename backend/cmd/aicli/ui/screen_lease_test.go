@@ -1,14 +1,37 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
+
+type terminalSessionLeaseTransportForTest struct {
+	session    *TerminalSession
+	recoveries int
+}
+
+func (t *terminalSessionLeaseTransportForTest) EnterAlternateScreen(leaseID uint64) error {
+	return t.session.EnterAlternateScreen(leaseID)
+}
+
+func (t *terminalSessionLeaseTransportForTest) WriteAlternateScreen(leaseID uint64, value string) error {
+	return t.session.WriteAlternateScreen(leaseID, value)
+}
+
+func (t *terminalSessionLeaseTransportForTest) ExitAlternateScreen(leaseID uint64) error {
+	return t.session.ExitAlternateScreen(leaseID)
+}
+
+func (t *terminalSessionLeaseTransportForTest) RequestPrimaryRecovery() {
+	t.recoveries++
+}
 
 // TestFixedBottomSurface_AcquireAlternateScreenLifecycle covers the lease
 // contract: acquire, single-lease invariant, idempotent release, and reuse.
@@ -70,6 +93,94 @@ func TestFixedBottomSurface_AcquireRejectsDisabledSurface(t *testing.T) {
 	var nilSurface *FixedBottomSurface
 	if _, err := nilSurface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "x"}); err == nil {
 		t.Fatalf("expected error for nil surface")
+	}
+}
+
+func TestFixedBottomSurface_FencedLeaseUsesTerminalSessionTransport(t *testing.T) {
+	surface := NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+	legacy := &errorWriter{}
+	surface.alternateWriter = legacy
+
+	var output bytes.Buffer
+	terminalSession := NewTerminalSession(&output)
+	base := terminalSessionPlan(1, 80, 24, 20, LeaseState{})
+	if result := terminalSession.Flush(base); result.Err != nil || !result.FullRepaint {
+		t.Fatalf("initial terminal frame = %#v", result)
+	}
+	transport := &terminalSessionLeaseTransportForTest{session: terminalSession}
+	surface.SetAlternateScreenLeaseTransport(transport)
+
+	var actions []UIAction
+	surface.SetUIActorPoster(func(action UIAction) bool {
+		actions = append(actions, action)
+		return true
+	})
+
+	lease, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "unified"})
+	if err != nil {
+		t.Fatalf("AcquireAlternateScreen: %v", err)
+	}
+	if output.Len() == 0 || !strings.Contains(output.String(), "\x1b[?1049h") {
+		t.Fatalf("TerminalSession did not emit DEC 1049 enter: %q", output.String())
+	}
+	if legacy.String() != "" {
+		t.Fatalf("fenced surface wrote enter bytes directly: %q", legacy.String())
+	}
+	if terminalSession.AlternateScreenLeaseID() != lease.ID() {
+		t.Fatalf("terminal session lease = %d, want %d", terminalSession.AlternateScreenLeaseID(), lease.ID())
+	}
+
+	if _, ok := lease.(AlternateScreenLeaseWriter); !ok {
+		t.Fatalf("unified lease does not expose alternate writer: %T", lease)
+	}
+	if err := writeLeaseManagedFullScreenText(lease, legacy, "pager-frame"); err != nil {
+		t.Fatalf("writeLeaseManagedFullScreenText: %v", err)
+	}
+	if !strings.Contains(output.String(), "pager-frame") {
+		t.Fatalf("pager content bypassed terminal session: %q", output.String())
+	}
+	if legacy.String() != "" {
+		t.Fatalf("fenced surface wrote pager bytes directly: %q", legacy.String())
+	}
+
+	if err := lease.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if terminalSession.AlternateScreenLeaseID() != 0 {
+		t.Fatalf("terminal alternate lease remained active: %d", terminalSession.AlternateScreenLeaseID())
+	}
+	if transport.recoveries != 1 {
+		t.Fatalf("recovery requests = %d, want 1", transport.recoveries)
+	}
+	if terminalSession.ProjectionState().Validity != renderengine.ProjectionUnknown {
+		t.Fatalf("release did not invalidate terminal projection: %#v", terminalSession.ProjectionState())
+	}
+	if legacy.String() != "" {
+		t.Fatalf("fenced surface wrote exit bytes directly: %q", legacy.String())
+	}
+	if len(actions) != 2 {
+		t.Fatalf("lease actions = %#v, want acquire/release", actions)
+	}
+	if _, ok := actions[0].(LeaseAcquired); !ok {
+		t.Fatalf("first action = %T, want LeaseAcquired", actions[0])
+	}
+	if _, ok := actions[1].(LeaseReleased); !ok {
+		t.Fatalf("second action = %T, want LeaseReleased", actions[1])
+	}
+}
+
+func TestFixedBottomSurface_FencedLeaseFailsClosedWithoutTerminalTransport(t *testing.T) {
+	surface := NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+
+	if _, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "unwired"}); !errors.Is(err, ErrFullScreenUnavailable) {
+		t.Fatalf("fenced acquire error = %v, want ErrFullScreenUnavailable", err)
+	}
+	if surface.LeaseActive() {
+		t.Fatal("failed unified acquire left a logical lease active")
 	}
 }
 

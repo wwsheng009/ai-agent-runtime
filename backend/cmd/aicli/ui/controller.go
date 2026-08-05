@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"runtime"
 	"sync"
 	"time"
 
@@ -13,6 +14,13 @@ type UIControllerConfig struct {
 	MailboxSize int
 }
 
+// EffectConsumer receives effects after the reducer has published the
+// corresponding AppState revision. Consumers must perform terminal work
+// outside the reducer goroutine and post typed results back through UIAction.
+// A nil consumer deliberately disables delivery, which is useful for plain
+// and test-only controllers.
+type EffectConsumer func(Effect)
+
 func (c UIControllerConfig) mailboxCap() int {
 	if c.MailboxSize <= 0 {
 		return 256
@@ -24,10 +32,42 @@ func (c UIControllerConfig) mailboxCap() int {
 // legacy adapter：调用现有 surface/coordinator 路径生成相同输出，
 // 保证行为不变（实施指南 Phase 1 任务 5）。
 //
-// Apply 返回的 []Effect 由 controller 按序投递给 effect sink；
+// Apply 返回的 []Effect 除 PostActionEffect 外由 controller 按序投递给
+// effect sink；PostActionEffect 会作为当前 action 的 causal child 重新入队。
 // revision 是 action 应用前的当前 revision（0 起始，每次应用 +1）。
 type Reducer interface {
 	Apply(revision uint64, action UIAction) []Effect
+}
+
+// ContextualReducer is the reducer form for code that needs to emit a causal
+// action while applying the current action. ReducerContext is valid only for
+// this synchronous ApplyWithContext call and cannot be used by an external
+// producer to bypass mailbox FIFO.
+//
+// Reducer is deliberately kept as the base interface so Phase 1 adapters and
+// existing callers can migrate incrementally.
+type ContextualReducer interface {
+	Reducer
+	ApplyWithContext(revision uint64, action UIAction, context *ReducerContext) []Effect
+}
+
+// ReducerContext carries the controller-issued capability for the action that
+// is currently being reduced. It is intentionally not constructible outside
+// this package: PostFollowup validates both the active transaction and the
+// reducer goroutine before accepting an action.
+type ReducerContext struct {
+	controller *UIController
+	token      *reducerTransaction
+}
+
+// PostFollowup appends an action after the current reducer action and before
+// the next external mailbox item. It is non-blocking and is the only API that
+// should be used by newly migrated reducer code for this purpose.
+func (c *ReducerContext) PostFollowup(action UIAction) bool {
+	if c == nil || c.controller == nil || c.token == nil {
+		return false
+	}
+	return c.controller.postFollowupWithToken(c.token, action)
 }
 
 // ReducerFunc 是 Reducer 的函数形态。
@@ -36,6 +76,21 @@ type ReducerFunc func(revision uint64, action UIAction) []Effect
 // Apply 实现 Reducer。
 func (f ReducerFunc) Apply(revision uint64, action UIAction) []Effect {
 	return f(revision, action)
+}
+
+// ContextualReducerFunc is ContextualReducer's function form.
+type ContextualReducerFunc func(revision uint64, action UIAction, context *ReducerContext) []Effect
+
+// Apply keeps ContextualReducerFunc usable anywhere a legacy Reducer is
+// expected. UIController detects its contextual form and calls
+// ApplyWithContext instead.
+func (f ContextualReducerFunc) Apply(revision uint64, action UIAction) []Effect {
+	return f(revision, action, nil)
+}
+
+// ApplyWithContext implements ContextualReducer.
+func (f ContextualReducerFunc) ApplyWithContext(revision uint64, action UIAction, context *ReducerContext) []Effect {
+	return f(revision, action, context)
 }
 
 // Effect 是 reducer 输出到 effect sink 的结果单元。
@@ -53,7 +108,10 @@ type FlushEffect struct {
 
 func (FlushEffect) isEffect() {}
 
-// PostActionEffect 请求把 follow-up action 重新投递（reducer 内再入队）。
+// PostActionEffect requests a controller-owned causal follow-up. It is
+// consumed by UIController after the parent reducer returns, not delivered to
+// the external effect sink. This gives new reducers an effect-based migration
+// path when threading ReducerContext through a legacy call chain is awkward.
 type PostActionEffect struct {
 	Action UIAction
 }
@@ -112,9 +170,19 @@ type UIController struct {
 	revision      uint64
 	reducerPanics uint64
 	inFlight      bool
-	delivering    bool
-	lastAction    string
-	state         UIControllerState
+	// activeTransaction is the capability currently issued to Run's reducer
+	// invocation. legacyReducerGID supports only the pre-context facade
+	// adapter during migration; unlike the former inFlight-only check it
+	// cannot be claimed by a different producer goroutine.
+	activeTransaction *reducerTransaction
+	legacyReducerGID  uint64
+	delivering        bool
+	lastAction        string
+	state             UIControllerState
+}
+
+type reducerTransaction struct {
+	goroutineID uint64
 }
 
 // NewUIController 创建 UI actor。reducer 为 nil 时 action 只记账不应用
@@ -128,6 +196,25 @@ func NewUIController(cfg UIControllerConfig, reducer Reducer, onEffect func(Effe
 	}
 	c.cond = sync.NewCond(&c.mu)
 	return c
+}
+
+// SetEffectConsumer installs or replaces the physical-effect consumer after
+// controller construction. Chat setup creates the actor lazily, while the
+// terminal owner may only become available after the session has negotiated
+// its writer and geometry source. The assignment is synchronized with
+// delivery; an in-flight callback keeps the consumer snapshot it already
+// acquired, and future effects use the new consumer.
+func (c *UIController) SetEffectConsumer(consumer EffectConsumer) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.onEffect = consumer
+	return true
 }
 
 // Post 投递一个 action。closed 后返回 false。durable/barrier 在 mailbox
@@ -211,14 +298,16 @@ func (c *UIController) TryPost(action UIAction) bool {
 	return true
 }
 
-// PostFollowup accepts an action emitted while the controller is applying an
-// already accepted action. It is the only non-blocking path for legacy facade
-// adapters invoked by a reducer: using Post there can self-deadlock when the
-// bounded external mailbox is full and the current reducer is its consumer.
+// PostFollowup accepts an action emitted synchronously by the current reducer.
+// New reducer code must use ReducerContext.PostFollowup instead. This legacy
+// adapter remains for deep facade call chains that have not yet received an
+// explicit context; it verifies the controller's reducer goroutine rather
+// than treating the process-wide inFlight flag as proof of causality.
 //
 // Follow-ups are durable, ordered after the current action and before the next
-// external mailbox action. They receive their own reducer revision. Callers
-// outside an active reducer receive false and must use Post instead.
+// external mailbox action. They receive their own reducer revision. Calls from
+// any other goroutine, including an external producer that races an in-flight
+// reducer, receive false and must use Post instead.
 //
 // Close deliberately does not reject an in-flight action's follow-up. Close
 // drains the causal consequences of accepted work before Run exits.
@@ -226,8 +315,39 @@ func (c *UIController) PostFollowup(action UIAction) bool {
 	if c == nil || action == nil {
 		return false
 	}
+	return c.postFollowupFromLegacyReducer(action)
+}
+
+func (c *UIController) postFollowupFromLegacyReducer(action UIAction) bool {
+	if c == nil || action == nil {
+		return false
+	}
+	callerGID := currentGoroutineID()
+	if callerGID == 0 {
+		return false
+	}
 	c.mu.Lock()
-	if !c.inFlight {
+	if !c.inFlight || c.activeTransaction == nil || c.legacyReducerGID != callerGID {
+		c.mu.Unlock()
+		return false
+	}
+	c.followups = append(c.followups, action)
+	c.posted++
+	c.mu.Unlock()
+	c.cond.Broadcast()
+	return true
+}
+
+func (c *UIController) postFollowupWithToken(token *reducerTransaction, action UIAction) bool {
+	if c == nil || token == nil || action == nil {
+		return false
+	}
+	callerGID := currentGoroutineID()
+	if callerGID == 0 || callerGID != token.goroutineID {
+		return false
+	}
+	c.mu.Lock()
+	if !c.inFlight || c.activeTransaction != token {
 		c.mu.Unlock()
 		return false
 	}
@@ -265,19 +385,27 @@ func (c *UIController) Run() {
 			c.reindexCoalesceLocked()
 		}
 		c.inFlight = true
+		transaction := &reducerTransaction{
+			goroutineID: currentGoroutineID(),
+		}
+		c.activeTransaction = transaction
+		c.legacyReducerGID = transaction.goroutineID
 		rev := c.revision
 		// Follow-ups already queued here belong to earlier causal siblings. A
 		// panicking reducer may only discard actions it emitted after this point.
 		followupStart := len(c.followups)
 		c.mu.Unlock()
 
-		effects, panicked := c.apply(action, rev)
+		effects, panicked := c.apply(action, rev, &ReducerContext{controller: c, token: transaction})
 
 		c.mu.Lock()
 		c.inFlight = false
+		c.activeTransaction = nil
+		c.legacyReducerGID = 0
 		c.processed++
 		c.revision++
 		if !panicked {
+			effects = c.collectPostActionEffectsLocked(effects)
 			c.state = reduceUIControllerState(c.state, action, c.revision)
 			if historyCommitWakeNeeded(action, c.state) {
 				effects = append(effects, HistoryCommitWakeEffect{})
@@ -300,6 +428,30 @@ func (c *UIController) Run() {
 	}
 }
 
+// collectPostActionEffectsLocked transfers reducer-declared causal children
+// into the same follow-up lane as ReducerContext.PostFollowup. The caller
+// holds c.mu after a successful reducer return, so the children remain after
+// direct follow-ups emitted by that reducer and before the next external item.
+func (c *UIController) collectPostActionEffectsLocked(effects []Effect) []Effect {
+	if len(effects) == 0 {
+		return nil
+	}
+	deliver := make([]Effect, 0, len(effects))
+	for _, effect := range effects {
+		post, ok := effect.(PostActionEffect)
+		if !ok {
+			deliver = append(deliver, effect)
+			continue
+		}
+		if post.Action == nil {
+			continue
+		}
+		c.followups = append(c.followups, post.Action)
+		c.posted++
+	}
+	return deliver
+}
+
 // historyCommitWakeNeeded is evaluated only after the controller has published
 // the action's new AppState. It keeps HistoryCommit scheduling on the reducer
 // side while leaving physical terminal ownership to the injected presenter.
@@ -317,7 +469,7 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 }
 
 // apply 调用 reducer 并捕获 panic。
-func (c *UIController) apply(action UIAction, rev uint64) (effects []Effect, panicked bool) {
+func (c *UIController) apply(action UIAction, rev uint64, context *ReducerContext) (effects []Effect, panicked bool) {
 	if c.reducer == nil {
 		return nil, false
 	}
@@ -330,19 +482,49 @@ func (c *UIController) apply(action UIAction, rev uint64) (effects []Effect, pan
 			panicked = true
 		}
 	}()
+	if reducer, ok := c.reducer.(ContextualReducer); ok {
+		return reducer.ApplyWithContext(rev, action, context), false
+	}
 	return c.reducer.Apply(rev, action), false
+}
+
+// currentGoroutineID is a narrow compatibility fence for legacy facade
+// callbacks. Go intentionally has no public goroutine identifier, so new code
+// must use ReducerContext rather than depend on this helper. The parser only
+// consumes runtime.Stack's stable header prefix and returns zero on failure.
+func currentGoroutineID() uint64 {
+	var buffer [64]byte
+	n := runtime.Stack(buffer[:], false)
+	const prefix = "goroutine "
+	if n <= len(prefix) || string(buffer[:len(prefix)]) != prefix {
+		return 0
+	}
+	var id uint64
+	for _, b := range buffer[len(prefix):n] {
+		if b < '0' || b > '9' {
+			break
+		}
+		id = id*10 + uint64(b-'0')
+	}
+	return id
 }
 
 // deliver 按序投递 effect。
 func (c *UIController) deliver(effects []Effect) {
-	if c.onEffect == nil {
+	if c == nil || len(effects) == 0 {
+		return
+	}
+	c.mu.Lock()
+	consumer := c.onEffect
+	c.mu.Unlock()
+	if consumer == nil {
 		return
 	}
 	for _, e := range effects {
 		if e == nil {
 			continue
 		}
-		c.onEffect(e)
+		consumer(e)
 	}
 }
 

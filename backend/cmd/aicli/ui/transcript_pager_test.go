@@ -180,6 +180,153 @@ func TestRunTranscriptPagerLoop_RefreshesCommittedSnapshotBeforeClose(t *testing
 	}
 }
 
+func TestRunTranscriptPagerLoop_UsesActorPagerIntentAndLeaseFence(t *testing.T) {
+	snapshot := pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"), committedPagerCell(3, "three"),
+	)
+	model := NewTranscriptPagerModel(snapshot)
+	actorState := NewTranscriptPagerState()
+	actorState.Reconcile(model, 40, 5)
+	frames := make([]string, 0, 2)
+	var posted []UIAction
+	keyCalls := 0
+	err := runTranscriptPagerLoop(context.Background(), transcriptPagerLoopHooks{
+		refreshSize: func() (int, int) { return 40, 8 },
+		snapshot:    func() TranscriptPagerSnapshot { return snapshot },
+		viewState:   func() (TranscriptPagerState, bool) { return actorState, true },
+		leaseID:     17,
+		postAction: func(action UIAction) bool {
+			posted = append(posted, action)
+			scroll, ok := action.(TranscriptPagerScroll)
+			if !ok {
+				t.Fatalf("pager action = %T, want TranscriptPagerScroll", action)
+			}
+			if scroll.LeaseID != 17 || scroll.Delta != -1 {
+				t.Fatalf("pager action = %#v, want lease=17 delta=-1", scroll)
+			}
+			actorState.Scroll(model, 40, 5, scroll.Delta)
+			return true
+		},
+		writeFrame: func(frame string) error {
+			frames = append(frames, frame)
+			return nil
+		},
+		readKey: func(context.Context) (editorKey, bool, error) {
+			keyCalls++
+			if keyCalls == 1 {
+				return editorKey{kind: editorKeyUp}, true, nil
+			}
+			return editorKey{kind: editorKeyTranspose}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runTranscriptPagerLoop: %v", err)
+	}
+	if len(posted) != 1 || actorState.FollowBottom {
+		t.Fatalf("actor-owned pager state was not updated: posted=%#v state=%#v", posted, actorState)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("frame count = %d, want 2", len(frames))
+	}
+}
+
+func TestRunTranscriptPagerLoop_RedrawsDelayedActorPagerState(t *testing.T) {
+	snapshot := pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"), committedPagerCell(3, "three"),
+	)
+	model := NewTranscriptPagerModel(snapshot)
+	actorState := NewTranscriptPagerState()
+	actorState.Reconcile(model, 40, 5)
+	frames := make([]string, 0, 3)
+	postCalls := 0
+	keyCalls := 0
+	viewReads := 0
+	err := runTranscriptPagerLoop(context.Background(), transcriptPagerLoopHooks{
+		refreshSize: func() (int, int) { return 40, 8 },
+		view: func() TranscriptPagerView {
+			viewReads++
+			return TranscriptPagerView{
+				Snapshot:   snapshot,
+				Pager:      actorState,
+				PagerKnown: true,
+			}
+		},
+		leaseID: 17,
+		postAction: func(action UIAction) bool {
+			postCalls++
+			if _, ok := action.(TranscriptPagerScroll); !ok {
+				t.Fatalf("pager action = %T, want TranscriptPagerScroll", action)
+			}
+			// Posting only enqueues work. Keep the actor state unchanged here to
+			// model a reducer that runs after this input iteration.
+			return true
+		},
+		writeFrame: func(frame string) error {
+			frames = append(frames, frame)
+			return nil
+		},
+		readKey: func(context.Context) (editorKey, bool, error) {
+			keyCalls++
+			switch keyCalls {
+			case 1:
+				return editorKey{kind: editorKeyUp}, true, nil
+			case 2:
+				actorState.Scroll(model, 40, 5, -1)
+				return editorKey{}, false, nil
+			default:
+				return editorKey{kind: editorKeyTranspose}, true, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("runTranscriptPagerLoop: %v", err)
+	}
+	if postCalls != 1 || viewReads < 3 || actorState.FollowBottom {
+		t.Fatalf("delayed actor state was not applied: posts=%d reads=%d state=%#v", postCalls, viewReads, actorState)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frame count = %d, want redraw after delayed actor state", len(frames))
+	}
+	if frames[1] == frames[2] {
+		t.Fatalf("actor pager anchor changed without a replacement frame: %#v", frames)
+	}
+}
+
+func TestRunTranscriptPagerLoop_ActorViewWithoutPosterRemainsReadOnly(t *testing.T) {
+	snapshot := pagerSnapshot(1,
+		committedPagerCell(1, "one"), committedPagerCell(2, "two"), committedPagerCell(3, "three"),
+	)
+	model := NewTranscriptPagerModel(snapshot)
+	actorState := NewTranscriptPagerState()
+	actorState.Reconcile(model, 40, 5)
+	before := actorState
+	frames := 0
+	keyCalls := 0
+	err := runTranscriptPagerLoop(context.Background(), transcriptPagerLoopHooks{
+		refreshSize: func() (int, int) { return 40, 8 },
+		view: func() TranscriptPagerView {
+			return TranscriptPagerView{Snapshot: snapshot, Pager: actorState, PagerKnown: true}
+		},
+		writeFrame: func(string) error {
+			frames++
+			return nil
+		},
+		readKey: func(context.Context) (editorKey, bool, error) {
+			keyCalls++
+			if keyCalls == 1 {
+				return editorKey{kind: editorKeyUp}, true, nil
+			}
+			return editorKey{kind: editorKeyTranspose}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runTranscriptPagerLoop: %v", err)
+	}
+	if actorState != before || frames != 1 {
+		t.Fatalf("read-only actor pager acquired local scroll state: before=%#v after=%#v frames=%d", before, actorState, frames)
+	}
+}
+
 func TestTranscriptOverlayReducer_SynchronizesLeaseAndTranscript(t *testing.T) {
 	state := UIControllerState{}
 	state = reduceUIControllerState(state, Resize{Width: 40, Height: 12}, 1)
@@ -198,6 +345,32 @@ func TestTranscriptOverlayReducer_SynchronizesLeaseAndTranscript(t *testing.T) {
 	state = reduceUIControllerState(state, LeaseReleased{LeaseID: 9}, 5)
 	if state.TranscriptOverlay.Active || state.Lease.Active {
 		t.Fatalf("lease release did not clear overlay: lease=%#v overlay=%#v", state.Lease, state.TranscriptOverlay)
+	}
+}
+
+func TestTranscriptOverlayReducer_RejectsStaleLeasePagerIntent(t *testing.T) {
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: 40, Height: 12}, 1)
+	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 9}, 2)
+	state = reduceUIControllerState(state, OpenTranscriptOverlay{LeaseID: 9}, 3)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+		Revision: 4,
+		Cells: []*scene.TranscriptCell{
+			ptrPagerCell(committedPagerCell(1, "one")),
+			ptrPagerCell(committedPagerCell(2, "two")),
+			ptrPagerCell(committedPagerCell(3, "three")),
+			ptrPagerCell(committedPagerCell(4, "four")),
+			ptrPagerCell(committedPagerCell(5, "five")),
+		},
+	}}, 4)
+	before := state.TranscriptOverlay.Pager
+	state = reduceUIControllerState(state, TranscriptPagerScroll{LeaseID: 8, Delta: -1}, 5)
+	if state.TranscriptOverlay.Pager != before {
+		t.Fatalf("stale lease changed pager: before=%#v after=%#v", before, state.TranscriptOverlay.Pager)
+	}
+	state = reduceUIControllerState(state, TranscriptPagerScroll{LeaseID: 9, Delta: -1}, 6)
+	if state.TranscriptOverlay.Pager.FollowBottom {
+		t.Fatalf("current lease scroll did not update pager: %#v", state.TranscriptOverlay.Pager)
 	}
 }
 
@@ -224,4 +397,8 @@ func transcriptPagerRowsText(rows []TranscriptPagerRow) string {
 		parts = append(parts, row.Text)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func ptrPagerCell(cell scene.TranscriptCell) *scene.TranscriptCell {
+	return &cell
 }

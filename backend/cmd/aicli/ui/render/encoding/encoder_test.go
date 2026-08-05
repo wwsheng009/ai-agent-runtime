@@ -644,6 +644,18 @@ func TestSubmitCommand(t *testing.T) {
 	}
 }
 
+func TestSubmitAssistant(t *testing.T) {
+	e := NewEventEncoder()
+	cs := e.SubmitAssistant("legacy final response")
+	if cs == nil || len(cs.Changes) != 1 {
+		t.Fatalf("changes = %+v, want 1 append", cs)
+	}
+	it := e.Snapshot().Items[0]
+	if it.Kind != KindAssistant || it.Status != StatusCompleted || it.Head != "legacy final response" {
+		t.Fatalf("item = %+v, want completed assistant", it)
+	}
+}
+
 // TestSubmitError 固化 SubmitError 契约：操作错误作为一次性终态 system 块
 // （KindSystem + StatusCompleted）append（会话/诊断语义），不与 assistant
 // 流状态机交互；错误文本原样保留。
@@ -663,6 +675,182 @@ func TestSubmitError(t *testing.T) {
 	// 终态 append 后不允许再 upsert：ChangeSet 不含对它的后续变更。
 	if st := e.Stats(); st.EncodeCount != 1 || st.DuplicateCount != 0 {
 		t.Fatalf("stats = %+v, want EncodeCount=1 DuplicateCount=0", st)
+	}
+}
+
+// TestSubmitSupplement 固化无 runtime 事件的本地补充契约：它必须保留
+// supplement 语义，不能借用 error/system API，并且作为一次性终态推进 Tail。
+func TestSubmitSupplement(t *testing.T) {
+	e := NewEventEncoder()
+	e.SubmitUserInput("U1")
+	cs := e.SubmitSupplement("[retry] retrying request")
+	if cs == nil || len(cs.Changes) != 1 {
+		t.Fatalf("changes = %+v, want 1 append", cs)
+	}
+	it := e.Snapshot().Items[len(e.Snapshot().Items)-1]
+	if it.Kind != KindSupplement || it.Status != StatusCompleted {
+		t.Fatalf("item = %+v, want KindSupplement completed", it)
+	}
+	if it.Head != "[retry] retrying request" {
+		t.Fatalf("head = %q", it.Head)
+	}
+	if tl := e.Tail(); tl == nil || tl.ItemID != it.ID {
+		t.Fatalf("tail = %+v, want ItemID %q", tl, it.ID)
+	}
+	if st := e.Stats(); st.EncodeCount != 2 {
+		t.Fatalf("stats = %+v, want EncodeCount=2", st)
+	}
+}
+
+func TestPriorityPromptTranscriptLifecycleOrdering(t *testing.T) {
+	requested := event(runtimechat.EventApprovalRequested, map[string]interface{}{
+		"request_id": "approval-1",
+		"tool_name":  "execute_shell_command",
+	})
+	resolved := event(runtimechat.EventApprovalResolved, map[string]interface{}{
+		"request_id": "approval-1",
+		"allowed":    true,
+	})
+	transcript := "[审批] 工具：execute_shell_command\n[审批] 请选择： 1"
+
+	tests := []struct {
+		name string
+		run  func(*EventEncoder)
+	}{
+		{
+			name: "request resolved transcript",
+			run: func(e *EventEncoder) {
+				e.Encode(requested)
+				e.Encode(resolved)
+				mustPriorityTranscriptChange(t, e.SubmitPriorityPromptTranscript(
+					runtimechat.EventApprovalRequested, "approval-1", transcript), transcript)
+			},
+		},
+		{
+			name: "resolved request transcript",
+			run: func(e *EventEncoder) {
+				if cs := e.Encode(resolved); len(cs.Changes) != 0 {
+					t.Fatalf("early resolved changes = %+v, want none", cs.Changes)
+				}
+				e.Encode(requested)
+				mustPriorityTranscriptChange(t, e.SubmitPriorityPromptTranscript(
+					runtimechat.EventApprovalRequested, "approval-1", transcript), transcript)
+			},
+		},
+		{
+			name: "request transcript resolved",
+			run: func(e *EventEncoder) {
+				e.Encode(requested)
+				mustPriorityTranscriptChange(t, e.SubmitPriorityPromptTranscript(
+					runtimechat.EventApprovalRequested, "approval-1", transcript), transcript)
+				if cs := e.Encode(resolved); len(cs.Changes) != 0 {
+					t.Fatalf("resolved changes = %+v, want none", cs.Changes)
+				}
+			},
+		},
+		{
+			name: "duplicate request before transcript",
+			run: func(e *EventEncoder) {
+				e.Encode(requested)
+				if cs := e.Encode(requested); len(cs.Changes) != 0 {
+					t.Fatalf("duplicate request changes = %+v, want none", cs.Changes)
+				}
+				mustPriorityTranscriptChange(t, e.SubmitPriorityPromptTranscript(
+					runtimechat.EventApprovalRequested, "approval-1", transcript), transcript)
+			},
+		},
+		{
+			name: "duplicate resolved after transcript",
+			run: func(e *EventEncoder) {
+				e.Encode(requested)
+				mustPriorityTranscriptChange(t, e.SubmitPriorityPromptTranscript(
+					runtimechat.EventApprovalRequested, "approval-1", transcript), transcript)
+				e.Encode(resolved)
+				if cs := e.Encode(resolved); len(cs.Changes) != 0 {
+					t.Fatalf("duplicate resolved changes = %+v, want none", cs.Changes)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			e := NewEventEncoder()
+			test.run(e)
+			model := e.Snapshot()
+			if len(model.Items) != 1 || model.Items[0].Kind != KindPriorityPrompt ||
+				model.Items[0].Status != StatusCompleted || model.Items[0].Head != transcript {
+				t.Fatalf("model = %+v, want one completed priority transcript", model.Items)
+			}
+			if duplicate := e.SubmitPriorityPromptTranscript(
+				runtimechat.EventApprovalRequested, "approval-1", transcript); duplicate != nil {
+				t.Fatalf("duplicate transcript = %+v, want nil", duplicate)
+			}
+		})
+	}
+}
+
+func mustPriorityTranscriptChange(t *testing.T, cs *ChangeSet, transcript string) {
+	t.Helper()
+	if cs == nil || len(cs.Changes) != 1 || cs.Changes[0].Op != OpAppend ||
+		cs.Changes[0].Item.Kind != KindPriorityPrompt ||
+		cs.Changes[0].Item.Status != StatusCompleted || cs.Changes[0].Item.Head != transcript {
+		t.Fatalf("transcript changes = %+v, want one completed append", cs)
+	}
+}
+
+func TestPriorityRequestAndResolutionDoNotCreatePlaceholderItem(t *testing.T) {
+	e := NewEventEncoder()
+	for _, ev := range []runtimeevents.Event{
+		event(runtimechat.EventQuestionAsked, map[string]interface{}{
+			"question_id": "question-1", "prompt": "choose a model",
+		}),
+		event(runtimechat.EventQuestionAnswered, map[string]interface{}{
+			"question_id": "question-1", "answer": "gpt-test",
+		}),
+	} {
+		if cs := e.Encode(ev); len(cs.Changes) != 0 {
+			t.Fatalf("priority lifecycle event created visible changes: %+v", cs.Changes)
+		}
+	}
+	if got := e.Snapshot(); len(got.Items) != 0 {
+		t.Fatalf("priority lifecycle created placeholder items: %+v", got.Items)
+	}
+}
+
+func TestSubmitToolLifecycleUsesOneMutableChain(t *testing.T) {
+	e := NewEventEncoder()
+	if e.SubmitToolCall("call-direct", "read_file", map[string]interface{}{"path": "a.go"}) == nil {
+		t.Fatal("SubmitToolCall returned nil")
+	}
+	if e.SubmitToolProgress("call-direct", "read_file", "reading") == nil {
+		t.Fatal("SubmitToolProgress returned nil")
+	}
+	if e.SubmitToolResult("call-direct", "read_file", "file content", "", true) == nil {
+		t.Fatal("SubmitToolResult returned nil")
+	}
+	// A duplicate final is idempotent and must not append a second chain/output.
+	e.SubmitToolResult("call-direct", "read_file", "file content", "", true)
+	m := e.Snapshot()
+	if len(m.Items) != 2 {
+		t.Fatalf("items=%d want one call plus one output, model=%+v", len(m.Items), m.Items)
+	}
+	if m.Items[0].Kind != KindToolCall || m.Items[0].Status != StatusCompleted {
+		t.Fatalf("call item=%+v want completed tool_call", m.Items[0])
+	}
+	if m.Items[1].Kind != KindToolOutput || m.Items[1].CauseID != m.Items[0].ID || m.Items[1].Head != "file content" {
+		t.Fatalf("output item=%+v want output caused by call", m.Items[1])
+	}
+
+	direct := NewEventEncoder()
+	direct.SubmitToolCall("call-display", "read_file", map[string]interface{}{"path": "a.go"})
+	direct.SubmitToolResultDisplay("call-display", "• Completed read_file path=a.go")
+	directModel := direct.Snapshot()
+	if len(directModel.Items) != 1 {
+		t.Fatalf("display result items=%d want one finalized chain", len(directModel.Items))
+	}
+	if item := directModel.Items[0]; item.Kind != KindToolCall || item.Status != StatusCompleted || item.Head != "• Completed read_file path=a.go" {
+		t.Fatalf("display result item=%+v want completed display-head chain", item)
 	}
 }
 

@@ -27,6 +27,26 @@ func (s TranscriptPagerSnapshot) Clone() TranscriptPagerSnapshot {
 	return s
 }
 
+// TranscriptPagerView is one coherent actor-owned read for the alternate
+// screen. It intentionally keeps semantic content and user-owned pager state
+// together: reading them from separate AppState snapshots can pair a new
+// anchor with an older transcript during a concurrent runtime update.
+//
+// PagerKnown is false while a lease has not yet opened its overlay or after it
+// has closed. The pager then retains transient local state only for that
+// interval; it never writes that state back outside a durable actor action.
+type TranscriptPagerView struct {
+	Snapshot   TranscriptPagerSnapshot
+	Pager      TranscriptPagerState
+	PagerKnown bool
+}
+
+func (v TranscriptPagerView) Clone() TranscriptPagerView {
+	v.Snapshot = v.Snapshot.Clone()
+	v.Pager = v.Pager.Clone()
+	return v
+}
+
 // TranscriptPagerModel is a detached projection of semantic transcript state.
 // Mutable Scene cells are represented only by LiveTail, so finalization cannot
 // duplicate a cell between committed history and the active band projection.
@@ -398,12 +418,30 @@ func transcriptPagerPosition(offset, total int) string {
 // Snapshot must return a coherent semantic snapshot and must not read terminal
 // state or a legacy history-window projection.
 type TranscriptPagerOptions struct {
+	// View supplies one coherent AppState-derived content/scroll snapshot. The
+	// production chat pager uses it so content and anchor share one actor read.
+	// When provided, View takes precedence over Snapshot and ViewState.
+	View func() TranscriptPagerView
+	// Snapshot supplies the immutable semantic document. In the production chat
+	// path prefer View; standalone callers may use this compatibility seam.
+	// It must never read a surface/history-window projection.
 	Snapshot func() TranscriptPagerSnapshot
+	// ViewState supplies the actor-owned scroll anchor for the current lease.
+	// When absent, the pager retains a local state only for standalone callers
+	// and deterministic tests.
+	ViewState func() (TranscriptPagerState, bool)
+	// PostAction submits durable pager input to the UI actor. A configured
+	// ViewState without PostAction is intentionally read-only.
+	PostAction func(UIAction) bool
 }
 
 type transcriptPagerLoopHooks struct {
 	refreshSize func() (int, int)
+	view        func() TranscriptPagerView
 	snapshot    func() TranscriptPagerSnapshot
+	viewState   func() (TranscriptPagerState, bool)
+	postAction  func(UIAction) bool
+	leaseID     uint64
 	writeFrame  func(string) error
 	readKey     func(context.Context) (editorKey, bool, error)
 }
@@ -421,11 +459,20 @@ const transcriptPagerPollInterval = 75 * time.Millisecond
 // and leaves alternate screen itself. A pager never writes into the primary
 // buffer while an alternate lease is held.
 func RunTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, lease ScreenLease) error {
-	return runTranscriptPager(ctx, terminal, options, os.Stdin, os.Stdout, lease != nil && lease.Active())
+	leaseID := uint64(0)
+	leaseManaged := lease != nil && lease.Active()
+	if leaseManaged {
+		leaseID = lease.ID()
+	}
+	return runTranscriptPagerWithLease(ctx, terminal, options, os.Stdin, os.Stdout, lease, leaseManaged, leaseID)
 }
 
-func runTranscriptPager(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, reader io.Reader, writer io.Writer, leaseManaged bool) error {
-	if terminal == nil || !terminal.SupportsANSI() || options.Snapshot == nil || reader == nil || writer == nil {
+func runTranscriptPager(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, reader io.Reader, writer io.Writer, leaseManaged bool, leaseID uint64) error {
+	return runTranscriptPagerWithLease(ctx, terminal, options, reader, writer, nil, leaseManaged, leaseID)
+}
+
+func runTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, reader io.Reader, writer io.Writer, lease ScreenLease, leaseManaged bool, leaseID uint64) error {
+	if terminal == nil || !terminal.SupportsANSI() || (options.View == nil && options.Snapshot == nil) || reader == nil || writer == nil {
 		return ErrFullScreenUnavailable
 	}
 	stdinFile, _ := reader.(*os.File)
@@ -444,9 +491,13 @@ func runTranscriptPager(ctx context.Context, terminal *Terminal, options Transcr
 	defer func() { storeInteractiveInputCarryover(pending) }()
 	hooks := transcriptPagerLoopHooks{
 		refreshSize: terminal.RefreshSize,
+		view:        options.View,
 		snapshot:    options.Snapshot,
+		viewState:   options.ViewState,
+		postAction:  options.PostAction,
+		leaseID:     leaseID,
 		writeFrame: func(frame string) error {
-			return writeFullScreenText(writer, frame)
+			return writeLeaseManagedFullScreenText(lease, writer, frame)
 		},
 		readKey: func(readCtx context.Context) (editorKey, bool, error) {
 			pollCtx, cancel := context.WithTimeout(readCtx, transcriptPagerPollInterval)
@@ -496,7 +547,7 @@ func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if hooks.refreshSize == nil || hooks.snapshot == nil || hooks.writeFrame == nil || hooks.readKey == nil {
+	if hooks.refreshSize == nil || (hooks.view == nil && hooks.snapshot == nil) || hooks.writeFrame == nil || hooks.readKey == nil {
 		return fullScreenUnavailable("transcript pager is not configured", nil)
 	}
 	state := NewTranscriptPagerState()
@@ -505,6 +556,8 @@ func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks)
 	lastLiveID := scene.CellID(0)
 	lastLiveRevision := ^uint64(0)
 	lastLiveSource := ""
+	lastViewState := TranscriptPagerState{}
+	hasLastViewState := false
 	dirty := true
 	for {
 		if err := ctx.Err(); err != nil {
@@ -514,17 +567,35 @@ func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks)
 		if height < minFullScreenListHeight {
 			return fullScreenUnavailable("terminal height is too small", nil)
 		}
-		snapshot := hooks.snapshot().Clone()
+		view := TranscriptPagerView{}
+		if hooks.view != nil {
+			view = hooks.view().Clone()
+		} else {
+			view.Snapshot = hooks.snapshot().Clone()
+			if hooks.viewState != nil {
+				view.Pager, view.PagerKnown = hooks.viewState()
+			}
+		}
+		snapshot := view.Snapshot
 		model := NewTranscriptPagerModel(snapshot)
+		viewState := view.Pager
+		hasViewState := view.PagerKnown
+		if hasViewState {
+			state = viewState
+		}
+		viewStateChanged := hasViewState != hasLastViewState ||
+			(hasViewState && viewState != lastViewState)
 		liveID, liveRevision, liveSource := transcriptPagerLiveTailKey(model.LiveTail)
 		if dirty || width != lastWidth || height != lastHeight || model.Revision != lastRevision ||
-			liveID != lastLiveID || liveRevision != lastLiveRevision || liveSource != lastLiveSource {
+			liveID != lastLiveID || liveRevision != lastLiveRevision || liveSource != lastLiveSource ||
+			viewStateChanged {
 			state.Reconcile(model, width, transcriptPagerViewportRows(height))
 			if err := hooks.writeFrame(renderTranscriptPagerFrame(model, state, width, height)); err != nil {
 				return fullScreenUnavailable("write frame", err)
 			}
 			lastWidth, lastHeight, lastRevision = width, height, model.Revision
 			lastLiveID, lastLiveRevision, lastLiveSource = liveID, liveRevision, liveSource
+			lastViewState, hasLastViewState = viewState, hasViewState
 			dirty = false
 		}
 		key, ok, err := hooks.readKey(ctx)
@@ -532,6 +603,27 @@ func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks)
 			return err
 		}
 		if !ok {
+			continue
+		}
+		if transcriptPagerKeyCloses(key) {
+			return nil
+		}
+		if hooks.postAction != nil {
+			if action := transcriptPagerIntentForKey(hooks.leaseID, model, width, height, key); action != nil {
+				if !hooks.postAction(action) {
+					return fullScreenUnavailable("post transcript pager action", errors.New("ui actor is closed"))
+				}
+				// The actor is the production authority. The next iteration reads
+				// its published anchor instead of mutating a second durable state.
+				dirty = true
+				continue
+			}
+		}
+		// An actor-backed view is never allowed to fall back to a second
+		// writable scroll state. If its action poster is unavailable, preserve
+		// the published view until close instead of making a transient local
+		// scroll that would race the next actor snapshot.
+		if hooks.view != nil || hooks.viewState != nil {
 			continue
 		}
 		if applyTranscriptPagerKey(&state, model, width, height, key) {
@@ -546,6 +638,47 @@ func transcriptPagerLiveTailKey(live *TranscriptPagerLiveTail) (scene.CellID, ui
 		return 0, 0, ""
 	}
 	return live.CellID, live.Revision, live.Source
+}
+
+func transcriptPagerIntentForKey(leaseID uint64, model TranscriptPagerModel, width, height int, key editorKey) UIAction {
+	viewportRows := transcriptPagerViewportRows(height)
+	switch key.kind {
+	case editorKeyUp:
+		return TranscriptPagerScroll{LeaseID: leaseID, Delta: -1}
+	case editorKeyDown:
+		return TranscriptPagerScroll{LeaseID: leaseID, Delta: 1}
+	case editorKeyPageUp, editorKeyLeft:
+		return TranscriptPagerScroll{LeaseID: leaseID, Delta: -viewportRows}
+	case editorKeyPageDown, editorKeyRight:
+		return TranscriptPagerScroll{LeaseID: leaseID, Delta: viewportRows}
+	case editorKeyHome:
+		return TranscriptPagerScroll{LeaseID: leaseID, Delta: -len(model.Rows(max(1, width)))}
+	case editorKeyEnd:
+		return TranscriptPagerSetFollowBottom{LeaseID: leaseID, Follow: true}
+	case editorKeyRune:
+		switch key.r {
+		case 'j':
+			return TranscriptPagerScroll{LeaseID: leaseID, Delta: 1}
+		case 'k':
+			return TranscriptPagerScroll{LeaseID: leaseID, Delta: -1}
+		case 'g':
+			return TranscriptPagerScroll{LeaseID: leaseID, Delta: -len(model.Rows(max(1, width)))}
+		case 'G':
+			return TranscriptPagerSetFollowBottom{LeaseID: leaseID, Follow: true}
+		}
+	}
+	return nil
+}
+
+func transcriptPagerKeyCloses(key editorKey) bool {
+	switch key.kind {
+	case editorKeyCancelPopup, editorKeyInterrupt, editorKeyEOF, editorKeyTranspose:
+		return true
+	case editorKeyRune:
+		return key.r == 'q' || key.r == 'Q'
+	default:
+		return false
+	}
 }
 
 func applyTranscriptPagerKey(state *TranscriptPagerState, model TranscriptPagerModel, width, height int, key editorKey) bool {

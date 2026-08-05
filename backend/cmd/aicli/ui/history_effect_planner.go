@@ -85,17 +85,35 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 		return
 	}
 	candidates := planEligibleHistoryCommits(state.AppState)
-	valid := make(map[historyCommitSourceKey]struct{}, len(candidates))
+	valid := make(map[historyCommitSourceKey]HistoryCommit, len(candidates))
 	for _, candidate := range candidates {
-		valid[historyCommitSourceIdentity(candidate)] = struct{}{}
+		valid[historyCommitSourceIdentity(candidate)] = candidate
 	}
 	if ledger := state.HistoryEffects.ledger; ledger != nil {
 		for _, entry := range ledger.byToken {
-			if entry.State != HistoryCommitPending && entry.State != HistoryCommitInFlight {
-				continue
-			}
-			if _, exists := valid[historyCommitSourceIdentity(entry.Commit)]; !exists {
-				_ = state.HistoryEffects.invalidate(entry.Commit.Token)
+			candidate, exists := valid[historyCommitSourceIdentity(entry.Commit)]
+			switch entry.State {
+			case HistoryCommitPending:
+				if !exists {
+					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
+					continue
+				}
+				// A semantic snapshot can retain the same cell source while
+				// changing a preceding boundary/gap. The token remains the
+				// same unstarted effect, but its display payload must be rebased
+				// before a presenter can write the old physical rows.
+				if !historyCommitPresentationEqual(entry.Commit, candidate) {
+					if err := ledger.RebasePending(entry.Commit.Token, candidate); err != nil {
+						state.HistoryEffects.ProjectionUnknown = true
+					}
+				}
+			case HistoryCommitInFlight:
+				// Once a terminal transaction was claimed, a changed display
+				// payload may already be partially written. Never let its old
+				// acknowledgement prove delivery for the new semantic layout.
+				if !exists || !historyCommitPresentationEqual(entry.Commit, candidate) {
+					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
+				}
 			}
 		}
 	}
@@ -108,6 +126,19 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 			state.HistoryEffects.ProjectionUnknown = true
 		}
 	}
+}
+
+// historyCommitPresentationEqual compares every non-token field that can
+// affect terminal bytes. Token is reducer-owned delivery identity and is
+// intentionally omitted so a pending effect can retain its identity while its
+// current-layout display payload is safely rebased before any write begins.
+func historyCommitPresentationEqual(current, candidate HistoryCommit) bool {
+	return current.CellID == candidate.CellID &&
+		current.Revision == candidate.Revision &&
+		current.SourceRange == candidate.SourceRange &&
+		current.DisplayRange == candidate.DisplayRange &&
+		current.LayoutGeneration == candidate.LayoutGeneration &&
+		render.LinesEqual(current.Lines, candidate.Lines)
 }
 
 func rebasePendingHistoryEffects(state *UIControllerState) {

@@ -110,10 +110,18 @@ func SelectFullScreenList(ctx context.Context, terminal *Terminal, options FullS
 // list only manages stdin raw mode and the picker frames. Pass the lease the
 // caller acquired; passing nil behaves exactly like SelectFullScreenList.
 func SelectFullScreenListWithLease(ctx context.Context, terminal *Terminal, options FullScreenListOptions, lease ScreenLease) (FullScreenListResult, error) {
-	return selectFullScreenList(ctx, terminal, options, os.Stdin, os.Stdout, lease != nil && lease.Active())
+	return selectFullScreenListWithLease(ctx, terminal, options, os.Stdin, os.Stdout, lease)
 }
 
 func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullScreenListOptions, reader io.Reader, writer io.Writer, leaseManaged bool) (FullScreenListResult, error) {
+	return selectFullScreenListWithLeaseState(ctx, terminal, options, reader, writer, nil, leaseManaged)
+}
+
+func selectFullScreenListWithLease(ctx context.Context, terminal *Terminal, options FullScreenListOptions, reader io.Reader, writer io.Writer, lease ScreenLease) (FullScreenListResult, error) {
+	return selectFullScreenListWithLeaseState(ctx, terminal, options, reader, writer, lease, lease != nil && lease.Active())
+}
+
+func selectFullScreenListWithLeaseState(ctx context.Context, terminal *Terminal, options FullScreenListOptions, reader io.Reader, writer io.Writer, lease ScreenLease, leaseManaged bool) (FullScreenListResult, error) {
 	if terminal == nil || !terminal.SupportsANSI() || reader == nil || writer == nil {
 		return FullScreenListResult{}, ErrFullScreenUnavailable
 	}
@@ -145,7 +153,7 @@ func selectFullScreenList(ctx context.Context, terminal *Terminal, options FullS
 	hooks := fullScreenListLoopHooks{
 		refreshSize: terminal.RefreshSize,
 		writeFrame: func(frame string) error {
-			return writeFullScreenText(writer, frame)
+			return writeLeaseManagedFullScreenText(lease, writer, frame)
 		},
 		readKey: func(readCtx context.Context) (editorKey, bool, error) {
 			return nextFullScreenListKey(readCtx, reader, &pending, stdinFile)

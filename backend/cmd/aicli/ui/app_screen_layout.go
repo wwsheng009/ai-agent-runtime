@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
@@ -41,13 +42,15 @@ type AppScreenLayout struct {
 	ActiveBand              ActiveBandProjection
 	LegacyBandProjection    bool
 	ActiveProjectionPending bool
+	// bottom is retained so Compose can derive cursor intent without running
+	// the full bottom-pane layout a second time.
+	bottom BottomPaneLayout
 }
 
 // LayoutAppScreen derives a complete plain screen-row layout from one
 // immutable AppState snapshot. It must never inspect FixedBottomSurface,
 // ScreenModel, terminal state, or effect/projection progress.
 func LayoutAppScreen(state AppState) AppScreenLayout {
-	state = state.Clone()
 	layout := LayoutAppState(state)
 	height := layout.Geometry.Height
 	result := AppScreenLayout{
@@ -60,6 +63,7 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 		ActiveBand:              layout.ActiveBand.Clone(),
 		LegacyBandProjection:    layout.Bottom.LegacyBandProjection,
 		ActiveProjectionPending: layout.Active.Phase != ActiveCellInactive,
+		bottom:                  layout.Bottom,
 	}
 	if height < 1 {
 		return result
@@ -175,6 +179,75 @@ func wrapAppScreenText(text string, width int) []string {
 	if width < 1 {
 		width = 80
 	}
+	if rows, ok := wrapPlainAppScreenText(text, width); ok {
+		return rows
+	}
+	return wrapVTAppScreenText(text, width)
+}
+
+// wrapPlainAppScreenText handles the overwhelmingly common transcript case
+// without constructing a width-by-height VT cell matrix. It deliberately
+// declines control sequences, tabs, and runes wider than the viewport because
+// those cases depend on the full VT state machine below.
+func wrapPlainAppScreenText(text string, width int) ([]string, bool) {
+	if text == "" {
+		return nil, false
+	}
+	if isPlainASCII(text) {
+		rows := make([]string, 0, (len(text)+width-1)/width)
+		for start := 0; start < len(text); start += width {
+			end := start + width
+			if end > len(text) {
+				end = len(text)
+			}
+			rows = append(rows, text[start:end])
+		}
+		return rows, true
+	}
+
+	rows := make([]string, 0, 1)
+	line := strings.Builder{}
+	used := 0
+	for _, r := range text {
+		if r < 0x20 || r == 0x7f {
+			return nil, false
+		}
+		runeWidth := render.Width(string(r))
+		if runeWidth > width {
+			return nil, false
+		}
+		if runeWidth == 0 {
+			// VT drops a leading combining mark because there is no cell to
+			// attach it to. Otherwise the mark remains part of the prior cell.
+			if line.Len() > 0 {
+				line.WriteRune(r)
+			}
+			continue
+		}
+		if used > 0 && used+runeWidth > width {
+			rows = append(rows, line.String())
+			line = strings.Builder{}
+			used = 0
+		}
+		line.WriteRune(r)
+		used += runeWidth
+	}
+	if line.Len() > 0 || len(rows) == 0 {
+		rows = append(rows, line.String())
+	}
+	return rows, true
+}
+
+func isPlainASCII(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] < 0x20 || text[index] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func wrapVTAppScreenText(text string, width int) []string {
 	// This is only a scratch-screen capacity estimate. VT remains the sole
 	// physical-row expansion rule. Size by display columns rather than source
 	// rune count so a long ordinary line does not allocate width*runeCount
@@ -186,12 +259,7 @@ func wrapAppScreenText(text string, width int) []string {
 	if end < 1 {
 		return nil
 	}
-	cells := screen.CellRows(1, end)
-	rows := make([]string, len(cells))
-	for index, row := range cells {
-		rows[index] = appScreenCellRowText(row)
-	}
-	return rows
+	return screen.Lines(1, end)
 }
 
 func appScreenScratchHeight(text string, width int) int {

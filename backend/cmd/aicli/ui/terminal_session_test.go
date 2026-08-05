@@ -182,6 +182,59 @@ func TestTerminalSessionLeaseReleaseForcesPrimaryRecovery(t *testing.T) {
 	}
 }
 
+func TestTerminalSessionAlternateScreenOwnsTransportAndForcesRecovery(t *testing.T) {
+	var output bytes.Buffer
+	session := NewTerminalSession(&output)
+	base := terminalSessionPlan(1, 20, 6, 4, LeaseState{})
+	if result := session.Flush(base); result.Err != nil || !result.FullRepaint {
+		t.Fatalf("base flush = %#v", result)
+	}
+	beforeLease := output.Len()
+
+	if err := session.EnterAlternateScreen(77); err != nil {
+		t.Fatalf("EnterAlternateScreen: %v", err)
+	}
+	if session.AlternateScreenLeaseID() != 77 {
+		t.Fatalf("alternate lease id = %d, want 77", session.AlternateScreenLeaseID())
+	}
+	enterOutput := output.String()[beforeLease:]
+	for _, want := range []string{"\x1b[?1049h", "\x1b[?25l", "\x1b[2J"} {
+		if !strings.Contains(enterOutput, want) {
+			t.Fatalf("enter transport missing %q in %q", want, enterOutput)
+		}
+	}
+
+	beforeDeferred := output.Len()
+	if result := session.Flush(base); result.Err != nil || !result.Deferred {
+		t.Fatalf("primary frame during alternate lease = %#v", result)
+	}
+	if output.Len() != beforeDeferred {
+		t.Fatalf("primary frame wrote while alternate lease active: %d -> %d", beforeDeferred, output.Len())
+	}
+	if err := session.WriteAlternateScreen(77, "pager-frame"); err != nil {
+		t.Fatalf("WriteAlternateScreen: %v", err)
+	}
+	if !strings.Contains(output.String(), "pager-frame") {
+		t.Fatalf("alternate frame did not use terminal session output: %q", output.String())
+	}
+	if err := session.ExitAlternateScreen(77); err != nil {
+		t.Fatalf("ExitAlternateScreen: %v", err)
+	}
+	if session.AlternateScreenLeaseID() != 0 {
+		t.Fatalf("alternate lease remained active: %d", session.AlternateScreenLeaseID())
+	}
+	if state := session.ProjectionState(); state.Validity != renderengine.ProjectionUnknown {
+		t.Fatalf("exit must invalidate primary projection: %#v", state)
+	}
+	if !strings.Contains(output.String(), "\x1b[?1049l") {
+		t.Fatalf("exit transport missing DEC 1049 exit: %q", output.String())
+	}
+
+	if result := session.Flush(base); result.Err != nil || result.Deferred || !result.FullRepaint {
+		t.Fatalf("primary recovery after alternate lease = %#v", result)
+	}
+}
+
 type terminalSessionShortWriter struct {
 	short  bool
 	panic  bool
@@ -314,6 +367,38 @@ func TestTerminalSessionTransactionBatchesHistoryViewportAndCursor(t *testing.T)
 	cursor := strings.LastIndex(ansi, "\x1b[5;3H")
 	if handoff < 0 || viewport < handoff || cursor < viewport {
 		t.Fatalf("transaction order was not handoff -> viewport -> cursor: %q", ansi)
+	}
+}
+
+func TestTerminalSessionTransactionDefersPreparedHistoryWhenFramePreflightFails(t *testing.T) {
+	var output bytes.Buffer
+	session := NewTerminalSession(&output)
+	base := terminalSessionPlan(1, 20, 6, 4, LeaseState{})
+	if result := session.Flush(base); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	invalid := terminalSessionPlan(1, 20, 6, 4, LeaseState{})
+	invalid.RenderRows = make([]render.Line, len(invalid.Rows))
+	for index, row := range invalid.Rows {
+		invalid.RenderRows[index] = render.Line{Spans: []render.Span{{Text: row.Text}}}
+	}
+	invalid.RenderRows[0] = render.Line{Spans: []render.Span{{Text: "different"}}}
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "older row"}}})
+	output.Reset()
+
+	result := session.FlushTransaction(TerminalTransactionPlan{Frame: invalid, History: &commit})
+	if !errors.Is(result.Frame.Err, ErrInvalidTerminalFrame) || result.Frame.Frame != 1 {
+		t.Fatalf("invalid transaction frame = %#v", result.Frame)
+	}
+	if result.History == nil || !result.History.Deferred || result.History.Err != nil || result.History.Frame != 0 {
+		t.Fatalf("prepared history was acknowledged before frame write: %#v", result.History)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("frame preflight failure wrote terminal bytes: %q", output.String())
+	}
+	if state := session.ProjectionState(); state.Validity != renderengine.ProjectionKnown || state.Frame != 1 {
+		t.Fatalf("preflight failure changed confirmed projection: %#v", state)
 	}
 }
 

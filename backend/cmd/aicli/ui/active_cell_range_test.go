@@ -301,3 +301,53 @@ func TestFinalizeActiveCellAcceptsEqualSceneRevisionForShadowFence(t *testing.T)
 		t.Fatalf("equal-revision finalization was rejected: %+v", state.AppState)
 	}
 }
+
+func TestFinalizeActiveCellRejectsMismatchedSemanticKind(t *testing.T) {
+	active := activeRangeFixture("partial", 3, 7, 0, 0)
+	active.CellID = 12
+	state := UIControllerState{AppState: AppState{
+		Transcript: TranscriptState{Revision: 2, Cells: []scene.TranscriptCell{{
+			ID: 12, Revision: 3, Kind: scene.KindAssistant, Source: "partial", Phase: scene.CellMutable,
+		}}},
+		Active: active,
+	}}
+
+	state = reduceUIControllerState(state, FinalizeActiveCellAction{
+		ExpectedActiveCellID: 12, ExpectedActiveRevision: 3, ExpectedActiveKind: scene.KindAssistant, ExpectedActiveKindKnown: true,
+		Snapshot: &scene.Snapshot{Revision: 3, Cells: []*scene.TranscriptCell{{
+			ID: 12, Revision: 3, Kind: scene.KindToolChain, Source: "wrong cell", Phase: scene.CellCommitted,
+		}}},
+	}, 3)
+	if state.Active != active || state.Transcript.Cells[0].Phase != scene.CellMutable {
+		t.Fatalf("mismatched final kind modified state: %+v", state.AppState)
+	}
+}
+
+func TestClearActiveCellActionFencesDelayedShadowCompletion(t *testing.T) {
+	active := activeRangeFixture("newer", 4, 5, 0, 0)
+	state := UIControllerState{AppState: AppState{Active: active}}
+
+	state = reduceUIControllerState(state, ClearActiveCellAction{
+		ExpectedCellID: 8, ExpectedKind: scene.KindAssistant, ExpectedKindKnown: true,
+	}, 1)
+	if state.Active != active {
+		t.Fatalf("different-cell clear erased newer active state: %+v", state.Active)
+	}
+
+	state = reduceUIControllerState(state, ClearActiveCellAction{
+		ExpectedCellID: active.CellID, ExpectedKind: scene.KindToolChain, ExpectedKindKnown: true,
+	}, 2)
+	if state.Active != active {
+		t.Fatalf("different-kind clear erased newer active state: %+v", state.Active)
+	}
+
+	// The clear owns this semantic cell, not an exact source revision. A
+	// coalesced same-cell update may have advanced revision before completion
+	// reaches the reducer and must not leave an orphaned active projection.
+	state = reduceUIControllerState(state, ClearActiveCellAction{
+		ExpectedCellID: active.CellID, ExpectedKind: active.Kind, ExpectedKindKnown: true,
+	}, 3)
+	if state.Active != (ActiveCellState{}) {
+		t.Fatalf("matching shadow clear did not remove active state: %+v", state.Active)
+	}
+}

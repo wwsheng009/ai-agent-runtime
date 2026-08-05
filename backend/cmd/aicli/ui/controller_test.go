@@ -105,6 +105,48 @@ func TestUIController_FIFOOrderAndRevision(t *testing.T) {
 	}
 }
 
+func TestUIController_LateBoundEffectConsumerReceivesPublishedEffects(t *testing.T) {
+	var mu sync.Mutex
+	var got []Effect
+	c := NewUIController(UIControllerConfig{}, ReducerFunc(func(_ uint64, action UIAction) []Effect {
+		if _, ok := action.(DrawRequested); ok {
+			return []Effect{FlushEffect{}}
+		}
+		return nil
+	}), nil)
+	if !c.SetEffectConsumer(func(effect Effect) {
+		mu.Lock()
+		got = append(got, effect)
+		mu.Unlock()
+	}) {
+		t.Fatal("late effect consumer was not attached")
+	}
+	go c.Run()
+	defer c.Close()
+	if !c.Post(DrawRequested{Key: "late-bind"}) {
+		t.Fatal("failed to post draw request")
+	}
+	c.WaitIdle()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("effect count = %d, want 1", len(got))
+	}
+	if _, ok := got[0].(FlushEffect); !ok {
+		t.Fatalf("effect = %T, want FlushEffect", got[0])
+	}
+}
+
+func TestUIController_LateBoundEffectConsumerCannotAttachAfterClose(t *testing.T) {
+	c := NewUIController(UIControllerConfig{}, nil, nil)
+	go c.Run()
+	c.Close()
+	if c.SetEffectConsumer(func(Effect) {}) {
+		t.Fatal("closed controller accepted an effect consumer")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Coalescing：同 key 合并（dirty 并集 + latest-wins），不同 key 各自保留
 // ---------------------------------------------------------------------------
@@ -162,6 +204,31 @@ func TestUIController_CoalescableNoKeyNeverMerged(t *testing.T) {
 	}
 	if stats := c.Stats(); stats.Dropped != 0 {
 		t.Errorf("stats.Dropped = %d, want 0", stats.Dropped)
+	}
+}
+
+func TestUIController_PromptEditorStatusCoalescesToLatestValue(t *testing.T) {
+	c, rec := newP1Controller(t, 1)
+	if !c.Post(SetPromptEditorStatusAction{Line: "多行 1/2"}) {
+		t.Fatal("failed to post first editor status")
+	}
+	if !c.Post(SetPromptEditorStatusAction{Line: "多行 2/2"}) {
+		t.Fatal("failed to coalesce editor status")
+	}
+	go c.Run()
+	defer c.Close()
+	c.WaitIdle()
+
+	applied, _ := rec.snapshot()
+	if len(applied) != 1 {
+		t.Fatalf("applied = %d, want one coalesced editor status", len(applied))
+	}
+	status, ok := applied[0].action.(SetPromptEditorStatusAction)
+	if !ok || status.Line != "多行 2/2" {
+		t.Fatalf("applied action = %#v, want latest editor status", applied[0].action)
+	}
+	if stats := c.Stats(); stats.Posted != 2 || stats.Dropped != 1 {
+		t.Fatalf("stats = %+v, want one merged status", stats)
 	}
 }
 
@@ -382,6 +449,113 @@ func TestUIController_FollowupRejectsOutsideReducer(t *testing.T) {
 	defer c.Close()
 	if c.PostFollowup(RuntimeEvent{Kind: "outside"}) {
 		t.Fatal("follow-up must be rejected outside an active reducer")
+	}
+}
+
+func TestUIController_ExternalFollowupCannotOvertakeQueuedMailboxAction(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	followupResult := make(chan bool, 1)
+	externalDone := make(chan bool, 1)
+	rec := &p1Recorder{}
+	var c *UIController
+	c = NewUIController(UIControllerConfig{MailboxSize: 1}, ReducerFunc(func(rev uint64, action UIAction) []Effect {
+		rec.apply(rev, action)
+		if event, ok := action.(RuntimeEvent); ok && event.Kind == "A" {
+			close(started)
+			<-release
+		}
+		return nil
+	}), nil)
+	go c.Run()
+	defer c.Close()
+
+	if !c.Post(RuntimeEvent{Kind: "A"}) {
+		t.Fatal("failed to post parent action")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parent reducer did not start")
+	}
+	if !c.Post(RuntimeEvent{Kind: "B"}) {
+		t.Fatal("failed to queue the earlier external action")
+	}
+	go func() {
+		followupResult <- c.PostFollowup(RuntimeEvent{Kind: "must-not-overtake"})
+		externalDone <- c.Post(RuntimeEvent{Kind: "C"})
+	}()
+	select {
+	case accepted := <-followupResult:
+		if accepted {
+			t.Fatal("external producer incorrectly entered the reducer follow-up lane")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("external follow-up attempt did not return")
+	}
+	close(release)
+	select {
+	case ok := <-externalDone:
+		if !ok {
+			t.Fatal("external FIFO post was rejected")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("external FIFO post did not drain")
+	}
+	c.WaitIdle()
+
+	got := rec.appliedKinds()
+	want := []string{"RuntimeEvent(A)", "RuntimeEvent(B)", "RuntimeEvent(C)"}
+	if len(got) != len(want) {
+		t.Fatalf("applied = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("applied = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestUIController_ContextualFollowupUsesBoundedCapability(t *testing.T) {
+	var retained *ReducerContext
+	contextPosted := make(chan bool, 1)
+	rec := &p1Recorder{}
+	c := NewUIController(UIControllerConfig{MailboxSize: 1}, ContextualReducerFunc(func(rev uint64, action UIAction, context *ReducerContext) []Effect {
+		rec.apply(rev, action)
+		if event, ok := action.(RuntimeEvent); ok && event.Kind == "A" {
+			retained = context
+			contextPosted <- context.PostFollowup(RuntimeEvent{Kind: "child"})
+		}
+		return nil
+	}), nil)
+	go c.Run()
+	defer c.Close()
+
+	if !c.Post(RuntimeEvent{Kind: "A"}) || !c.Post(RuntimeEvent{Kind: "B"}) {
+		t.Fatal("failed to post contextual test actions")
+	}
+	select {
+	case ok := <-contextPosted:
+		if !ok {
+			t.Fatal("contextual reducer follow-up was rejected")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("contextual reducer did not emit its follow-up")
+	}
+	c.WaitIdle()
+	if retained == nil || retained.PostFollowup(RuntimeEvent{Kind: "late"}) {
+		t.Fatal("expired reducer context accepted a delayed follow-up")
+	}
+
+	got := rec.appliedKinds()
+	want := []string{"RuntimeEvent(A)", "RuntimeEvent(child)", "RuntimeEvent(B)"}
+	if len(got) != len(want) {
+		t.Fatalf("applied = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("applied = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -644,6 +818,7 @@ func TestUIController_ReducerPanicRecovered(t *testing.T) {
 func TestUIController_EffectsDeliveredInOrder(t *testing.T) {
 	rec := &p1Recorder{}
 	reducer := ReducerFunc(func(rev uint64, a UIAction) []Effect {
+		rec.apply(rev, a)
 		switch a.(type) {
 		case RuntimeEvent:
 			return []Effect{FlushEffect{Dirty: renderengine.DirtyContent}}
@@ -664,13 +839,48 @@ func TestUIController_EffectsDeliveredInOrder(t *testing.T) {
 	if len(effects) != 2 {
 		t.Fatalf("effects = %d, want 2", len(effects))
 	}
-	if _, ok := effects[0].(FlushEffect); !ok {
-		t.Errorf("effects[0] = %T, want FlushEffect", effects[0])
+	for i, effect := range effects {
+		if _, ok := effect.(FlushEffect); !ok {
+			t.Errorf("effects[%d] = %T, want FlushEffect", i, effect)
+		}
 	}
-	if pe, ok := effects[1].(PostActionEffect); !ok {
-		t.Errorf("effects[1] = %T, want PostActionEffect", effects[1])
-	} else if _, ok := pe.Action.(RuntimeEvent); !ok {
-		t.Errorf("PostActionEffect.Action = %T, want RuntimeEvent", pe.Action)
+	got := rec.appliedKinds()
+	want := []string{"RuntimeEvent(evt)", "DrawRequested(frame)", "RuntimeEvent(followup)"}
+	if len(got) != len(want) {
+		t.Fatalf("applied = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("applied = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestUIController_PostActionEffectPrecedesNextExternalMailboxAction(t *testing.T) {
+	rec := &p1Recorder{}
+	c := NewUIController(UIControllerConfig{MailboxSize: 1}, ReducerFunc(func(rev uint64, action UIAction) []Effect {
+		rec.apply(rev, action)
+		if event, ok := action.(RuntimeEvent); ok && event.Kind == "A" {
+			return []Effect{PostActionEffect{Action: RuntimeEvent{Kind: "child"}}}
+		}
+		return nil
+	}), nil)
+	go c.Run()
+	defer c.Close()
+
+	if !c.Post(RuntimeEvent{Kind: "A"}) || !c.Post(RuntimeEvent{Kind: "B"}) {
+		t.Fatal("failed to post test actions")
+	}
+	c.WaitIdle()
+	got := rec.appliedKinds()
+	want := []string{"RuntimeEvent(A)", "RuntimeEvent(child)", "RuntimeEvent(B)"}
+	if len(got) != len(want) {
+		t.Fatalf("applied = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("applied = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -996,7 +1206,7 @@ func TestUIActionClassification(t *testing.T) {
 		{"ResetPromptAction", ResetPromptAction{}, ClassDurable, ""},
 		{"SetPromptRowsAction", SetPromptRowsAction{}, ClassDurable, ""},
 		{"SetPromptNoticeAction", SetPromptNoticeAction{}, ClassDurable, ""},
-		{"SetPromptEditorStatusAction", SetPromptEditorStatusAction{}, ClassDurable, ""},
+		{"SetPromptEditorStatusAction", SetPromptEditorStatusAction{}, ClassCoalescable, "prompt-editor-status"},
 		{"SetComposerPreviewAction", SetComposerPreviewAction{}, ClassDurable, ""},
 		{"ClearComposerPreviewAction", ClearComposerPreviewAction{}, ClassDurable, ""},
 		{"ShowPopupAction", ShowPopupAction{}, ClassDurable, ""},
@@ -1012,5 +1222,25 @@ func TestUIActionClassification(t *testing.T) {
 				t.Errorf("CoalesceKey() = %q, want %q", got, tc.key)
 			}
 		})
+	}
+}
+
+func TestInputEventSequenceMergeKeepsNewestDraftAndRenderIntent(t *testing.T) {
+	if got := (InputEvent{Sequence: 1}).Class(); got != ClassCoalescable {
+		t.Fatalf("sequenced InputEvent class = %v, want coalescable", got)
+	}
+	if got := (InputEvent{Sequence: 1}).CoalesceKey(); got != "prompt-input" {
+		t.Fatalf("sequenced InputEvent key = %q, want prompt-input", got)
+	}
+	if got := (InputEvent{}).Class(); got != ClassDurable {
+		t.Fatalf("legacy InputEvent class = %v, want durable", got)
+	}
+	merged := mergeActions(
+		InputEvent{Text: "old", Cursor: 3, Render: true, Sequence: 1},
+		InputEvent{Text: "new", Cursor: 3, Sequence: 2},
+	)
+	got, ok := merged.(InputEvent)
+	if !ok || got.Text != "new" || got.Sequence != 2 || !got.Render {
+		t.Fatalf("merged InputEvent = %#v, want newest text with preserved render", merged)
 	}
 }

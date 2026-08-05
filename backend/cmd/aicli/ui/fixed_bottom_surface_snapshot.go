@@ -74,6 +74,12 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 	if s == nil || s.terminal == nil || !s.enabled || !s.ownedViewport {
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// The surface remains a logical compatibility projection while the
+		// unified TerminalSession owns physical output. Do not stage/flush a
+		// second terminal projection here.
+		return
+	}
 	if s.leaseID != 0 {
 		// Alternate-screen lease active: primary flush is suspended; state
 		// is retained and replayed by the release repaint.
@@ -318,6 +324,9 @@ func (s *FixedBottomSurface) Reconcile() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.physicalWritesEnabledLocked() {
+		return
+	}
 	WithTerminalWriteLock(func() {
 		s.reconcileOwnedViewportLocked()
 		s.restoreStoredPromptCursorLocked()

@@ -131,6 +131,40 @@ func TestLayoutAppScreenExcludesMutableTranscriptFromRetainedRows(t *testing.T) 
 	}
 }
 
+func TestLayoutAppScreenSemanticActiveProjectionRejectsLegacyBandPayload(t *testing.T) {
+	state := AppState{
+		Geometry:                     GeometryState{Width: 40, Height: 8},
+		SemanticActiveCellProjection: true,
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 17, Sequence: 1, Kind: scene.KindAssistant, Revision: 2, Source: "scene mutable body", Phase: scene.CellMutable, Boundary: boundary.BoundaryNormal},
+		}}),
+		Active: ActiveCellState{
+			CellID: 17, Revision: 2, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: "scene mutable body",
+		},
+		Bottom: BottomPaneState{
+			StatusModel:     &style.StatusLineModel{State: style.RunStreaming, StateText: "Streaming"},
+			ActiveBandLines: []string{"legacy display payload"},
+		},
+	}
+
+	plan := LayoutAppScreen(state)
+	if plan.LegacyBandProjection {
+		t.Fatalf("unified plan selected legacy ActiveBand: %+v", plan)
+	}
+	var sceneBody, legacyBody bool
+	for _, row := range plan.Rows {
+		if row.Owner != renderengine.RowOwnerBand {
+			continue
+		}
+		sceneBody = sceneBody || row.Text == "scene mutable body"
+		legacyBody = legacyBody || row.Text == "legacy display payload"
+	}
+	if !sceneBody || legacyBody {
+		t.Fatalf("band source was not exclusive: rows=%+v", plan.Rows)
+	}
+}
+
 func TestLayoutAppScreen_PlainOwnerTextParityWithLegacyOwnedViewport(t *testing.T) {
 	const (
 		width  = 16
@@ -408,6 +442,51 @@ func TestWrapAppScreenTextMatchesOwnedVTExpansion(t *testing.T) {
 				t.Fatalf("rows = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWrapPlainAppScreenTextMatchesVTExpansion(t *testing.T) {
+	cases := []struct {
+		name  string
+		width int
+		text  string
+	}{
+		{name: "ascii wraps", width: 4, text: "abcdefghijkl"},
+		{name: "single column ascii", width: 1, text: "abc"},
+		{name: "wide runes", width: 4, text: "甲乙丙丁"},
+		{name: "wide rune wraps", width: 3, text: "甲乙丙"},
+		{name: "combining marks", width: 4, text: "e\u0301e\u0301e\u0301"},
+		{name: "leading combining mark", width: 4, text: "\u0301e"},
+		{name: "emoji sequence", width: 5, text: "👩‍💻x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := wrapPlainAppScreenText(tc.text, tc.width)
+			if !ok {
+				t.Fatal("plain path unexpectedly declined plain text")
+			}
+			if want := wrapVTAppScreenText(tc.text, tc.width); !reflect.DeepEqual(got, want) {
+				t.Fatalf("rows = %#v, want VT %#v", got, want)
+			}
+		})
+	}
+}
+
+func BenchmarkWrapAppScreenTextPlainTranscript(b *testing.B) {
+	text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 32)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		_ = wrapAppScreenText(text, 80)
+	}
+}
+
+func BenchmarkWrapVTAppScreenTextPlainTranscript(b *testing.B) {
+	text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 32)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		_ = wrapVTAppScreenText(text, 80)
 	}
 }
 

@@ -171,6 +171,26 @@ func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 	}
 }
 
+func BenchmarkPlanEligibleHistoryCommitsPlainTranscript(b *testing.B) {
+	cells := make([]*scene.TranscriptCell, 0, 96)
+	for id := scene.CellID(1); id <= 96; id++ {
+		cells = append(cells, &scene.TranscriptCell{
+			ID: id, Revision: 1, Kind: scene.KindAssistant,
+			Source: "The quick brown fox jumps over the lazy dog.", Phase: scene.CellCommitted,
+		})
+	}
+	state := AppState{
+		Geometry:         GeometryState{Width: 100, Height: 24, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript:       NewTranscriptState(&scene.Snapshot{Cells: cells}),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		_ = planEligibleHistoryCommits(state)
+	}
+}
+
 func TestHistoryEffectsReducer_TranscriptOnlyMintsAndResizeOnlyRebases(t *testing.T) {
 	state := UIControllerState{}
 	state = reduceUIControllerState(state, Resize{Width: 80, Height: 10, Generation: 5}, 1)
@@ -233,6 +253,57 @@ func TestHistoryEffectsReducer_LeaseFreezesAndReplacementInvalidatesPending(t *t
 	state = reduceUIControllerState(state, LeaseReleased{LeaseID: 12}, 6)
 	if state.HistoryEffects.Frozen {
 		t.Fatal("lease release left history queue frozen")
+	}
+}
+
+func TestHistoryEffectsReducer_TranscriptBoundaryChangeRebasesPendingHandoff(t *testing.T) {
+	state, token := historyEffectBoundaryChangeState(t)
+	before := historyCommitEntry(t, state, token)
+	if before.State != HistoryCommitPending || len(before.Commit.Lines) != 2 || len(before.Commit.Lines[0].Spans) != 0 {
+		t.Fatalf("fixture did not retain boundary gap in pending payload: %#v", before)
+	}
+
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: historyEffectBoundaryChangedSnapshot(state)}, 3)
+	after := historyCommitEntry(t, state, token)
+	if after.State != HistoryCommitPending || after.Commit.Token != token {
+		t.Fatalf("boundary-only replacement changed pending delivery identity: before=%#v after=%#v", before, after)
+	}
+	if after.Commit.DisplayRange == before.Commit.DisplayRange || len(after.Commit.Lines) != 1 ||
+		len(after.Commit.Lines[0].Spans) != 1 || after.Commit.Lines[0].Spans[0].Text != "candidate" {
+		t.Fatalf("pending payload retained stale boundary rows: before=%#v after=%#v", before, after)
+	}
+	if state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("unstarted payload rebase unnecessarily invalidated projection: %#v", state.HistoryEffects)
+	}
+}
+
+func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandoff(t *testing.T) {
+	state, token := historyEffectBoundaryChangeState(t)
+	if !state.HistoryEffects.HasPending() {
+		t.Fatal("fixture did not expose pending history")
+	}
+	// Native scrollback is ordered; retire any older eligible cells so the
+	// candidate can be the token currently in flight for this test.
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.Token >= token || entry.State != HistoryCommitPending {
+			continue
+		}
+		state = reduceUIControllerState(state, BeginHistoryCommit{Token: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration}, 3)
+		state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: entry.Commit.Token, Frame: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration}, 3)
+	}
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: state.LayoutGeneration}, 3)
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitInFlight {
+		t.Fatalf("begin history = %#v", entry)
+	}
+	beforeToken := state.HistoryEffects.NextToken
+
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: historyEffectBoundaryChangedSnapshot(state)}, 4)
+	entry := historyCommitEntry(t, state, token)
+	if entry.State != HistoryCommitInvalidated || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("changed in-flight payload was not fail-closed: entry=%#v state=%#v", entry, state.HistoryEffects)
+	}
+	if state.HistoryEffects.NextToken != beforeToken || state.HistoryEffects.HasPending() {
+		t.Fatalf("in-flight invalidation minted or exposed a duplicate handoff: next=%d->%d pending=%#v", beforeToken, state.HistoryEffects.NextToken, state.HistoryEffects.Pending())
 	}
 }
 
@@ -365,6 +436,40 @@ func historyEffectTestState(t *testing.T, generation uint64) UIControllerState {
 		t.Fatal("expected eligible history effects")
 	}
 	return state
+}
+
+func historyEffectBoundaryChangeState(t *testing.T) (UIControllerState, uint64) {
+	t.Helper()
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: 80, Height: 6, Generation: 2}, 1)
+	cells := []*scene.TranscriptCell{
+		{ID: 1, Sequence: 1, Kind: scene.KindAssistant, Source: "first", Revision: 1, Phase: scene.CellCommitted},
+		// The candidate has a stable chain identity, while its predecessor
+		// initially does not. That leaves one derived boundary row in the
+		// pending display payload without changing candidate source identity.
+		{ID: 2, Sequence: 2, Kind: scene.KindToolChain, ChainKey: "chain", Source: "candidate", Revision: 1, Phase: scene.CellCommitted},
+	}
+	for id := scene.CellID(3); id <= 10; id++ {
+		cells = append(cells, &scene.TranscriptCell{ID: id, Sequence: uint64(id), Kind: scene.KindAssistant, Source: "tail", Revision: 1, Phase: scene.CellCommitted})
+	}
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{Revision: 1, Cells: cells}}, 2)
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.CellID == 2 {
+			return state, entry.Commit.Token
+		}
+	}
+	t.Fatalf("candidate handoff was not eligible: %#v", state.HistoryEffects.Entries())
+	return UIControllerState{}, 0
+}
+
+func historyEffectBoundaryChangedSnapshot(state UIControllerState) *scene.Snapshot {
+	snapshot := state.Transcript.Snapshot()
+	if len(snapshot.Cells) > 0 {
+		// Keeping the candidate source/revision intact but joining its
+		// predecessor's chain removes the boundary display row before it.
+		snapshot.Cells[0].ChainKey = "chain"
+	}
+	return snapshot
 }
 
 func historyCommitEntry(t *testing.T, state UIControllerState, token uint64) HistoryCommitEntry {

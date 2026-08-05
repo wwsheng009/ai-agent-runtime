@@ -33,8 +33,11 @@ type AppTextLayout struct {
 // wrap、mutable cell 排除、bottom pane RowPlan），本层只附加光标意图，
 // 避免出现第二套宽度/换行/行序算法。
 func ComposeAppTextLayout(state AppState) AppTextLayout {
-	layout := LayoutAppState(state)
 	screen := LayoutAppScreen(state)
+	return composeAppTextLayoutFromScreen(screen)
+}
+
+func composeAppTextLayoutFromScreen(screen AppScreenLayout) AppTextLayout {
 	out := AppTextLayout{
 		Width:  screen.Geometry.Width,
 		Height: screen.Geometry.Height,
@@ -46,7 +49,7 @@ func ComposeAppTextLayout(state AppState) AppTextLayout {
 	if out.Height < 1 {
 		return out
 	}
-	out.Cursor = composeAppCursor(screen.Rows, layout.Bottom.RowPlan, layout.Bottom.State, screen.CursorFocus)
+	out.Cursor = composeAppCursor(screen.Rows, screen.bottom.RowPlan, screen.bottom.State, screen.CursorFocus)
 	return out
 }
 

@@ -88,6 +88,19 @@ type FixedBottomSurface struct {
 	mu       sync.Mutex
 	enabled  bool
 	testMode bool
+	// physicalWritesEnabled is the surface-level writer fence used by the
+	// unified renderer cutover. A disabled fence keeps all semantic/layout
+	// state in this compatibility adapter up to date, but prevents it from
+	// submitting terminal bytes that belong to the unified presenter.
+	// physicalWritesConfigured preserves zero-value compatibility for tests and
+	// small synthetic surfaces: before the first explicit setter call, the
+	// historical default remains enabled.
+	physicalWritesEnabled    bool
+	physicalWritesConfigured bool
+	// physicalWritesLockedOff is installed after a unified presenter has
+	// attached. It makes the session fence one-way so compatibility code cannot
+	// revive a second primary terminal writer later in the chat lifecycle.
+	physicalWritesLockedOff bool
 	// leaseID != 0 while an alternate-screen lease (ScreenLease) suspends
 	// primary flushing; leaseMode records the granted screen mode.
 	leaseID   uint64
@@ -96,6 +109,11 @@ type FixedBottomSurface struct {
 	// the lease owns. nil means os.Stdout (production). Tests inject a buffer
 	// to assert the sequence boundary around the picker frame.
 	alternateWriter io.Writer
+	// alternateTransport is installed only after the unified primary presenter
+	// has become the sole physical writer. With the surface fence disabled,
+	// ScreenLease delegates DEC 1049 and fullscreen frame bytes to this
+	// transport instead of retaining a second terminal writer.
+	alternateTransport AlternateScreenLeaseTransport
 	// ownedFrameFlushCount counts frames actually emitted by the owned
 	// viewport renderer. Exposed for lease tests that assert flush
 	// suppression while an alternate-screen lease is active.
@@ -206,13 +224,83 @@ func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
 		term = NewTerminal()
 	}
 	return &FixedBottomSurface{
-		terminal:             term,
-		handoffFrontier:      renderengine.NewHandoffFrontier(),
-		activeBandGeneration: 1,
+		terminal:                 term,
+		physicalWritesEnabled:    true,
+		physicalWritesConfigured: true,
+		handoffFrontier:          renderengine.NewHandoffFrontier(),
+		activeBandGeneration:     1,
 		statusModel: &style.StatusLineModel{
 			State: style.RunReady,
 		},
 	}
+}
+
+// PhysicalWritesEnabled reports whether this surface may submit bytes to the
+// terminal. The default is true, including for a zero-value surface created by
+// tests or compatibility code. Unified production mode sets this to false once
+// TerminalSession becomes the sole physical writer.
+func (s *FixedBottomSurface) PhysicalWritesEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.physicalWritesEnabledLocked()
+}
+
+// SetPhysicalWritesEnabled toggles the legacy surface writer fence. Disabling
+// the fence intentionally does not clear retained transcript, active-band,
+// prompt, or geometry state; those values remain available to compatibility
+// snapshots while all physical terminal effects are delegated elsewhere.
+func (s *FixedBottomSurface) SetPhysicalWritesEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if enabled && s.physicalWritesLockedOff {
+		s.mu.Unlock()
+		return
+	}
+	s.physicalWritesEnabled = enabled
+	s.physicalWritesConfigured = true
+	s.mu.Unlock()
+}
+
+// FencePhysicalWrites permanently disables this surface's terminal writer for
+// the rest of its lifetime. It is called only after TerminalSessionPresenter
+// is live; the surface still retains compatibility state and lease metadata.
+func (s *FixedBottomSurface) FencePhysicalWrites() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.physicalWritesEnabled = false
+	s.physicalWritesConfigured = true
+	s.physicalWritesLockedOff = true
+	s.mu.Unlock()
+}
+
+// SetAlternateScreenLeaseTransport installs the unified terminal authority
+// used while PhysicalWritesEnabled is false. Passing nil intentionally makes
+// fullscreen acquisition fail closed instead of silently sending pager bytes
+// to os.Stdout beside the primary TerminalSession.
+func (s *FixedBottomSurface) SetAlternateScreenLeaseTransport(transport AlternateScreenLeaseTransport) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.alternateTransport = transport
+	s.mu.Unlock()
+}
+
+func (s *FixedBottomSurface) physicalWritesEnabledLocked() bool {
+	if s == nil {
+		return false
+	}
+	if !s.physicalWritesConfigured {
+		return true
+	}
+	return s.physicalWritesEnabled
 }
 
 // SetPresenter adopts the render engine's shared batch presenter. Keeping the
@@ -275,6 +363,9 @@ func (s *FixedBottomSurface) flushHoldingLock(writer io.Writer, render func(io.W
 	if s == nil {
 		return nil
 	}
+	if !s.physicalWritesEnabledLocked() {
+		return nil
+	}
 	if s.engine != nil {
 		return s.engine.FlushHoldingLock(writer, render)
 	}
@@ -290,6 +381,9 @@ func (s *FixedBottomSurface) flushHoldingLock(writer io.Writer, render func(io.W
 
 func (s *FixedBottomSurface) flushHandoffHoldingLock(writer io.Writer, plan renderengine.HandoffPlan) error {
 	if s == nil {
+		return nil
+	}
+	if !s.physicalWritesEnabledLocked() {
 		return nil
 	}
 	if s.engine != nil {
@@ -334,22 +428,23 @@ func (s *FixedBottomSurface) Enable() bool {
 	if s.presenterLocked() == nil {
 		s.presenter = renderengine.NewPresenter()
 	}
-	// The legacy surface may have left DECSTBM restricted to the output
-	// region. Owned frames address the whole screen, so reset before the first
-	// frame is composed.
-	s.terminal.ResetScrollRegion()
-	// Codex wraps every frame in a synchronized update; mirror that for the real
-	// interactive surface so multi-step repaints (layout + scroll + content) land
-	// atomically. Test surfaces go through EnableForTest and never flip this on,
-	// keeping byte-exact rendering assertions unchanged.
-	SetTerminalSynchronizedFrames(s.terminal.Capabilities().SynchronizedOutput)
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		s.moveToOutputLocked()
-	})
+	if s.physicalWritesEnabledLocked() {
+		// The legacy surface may have left DECSTBM restricted to the output
+		// region. Owned frames address the whole screen, so reset before the first
+		// frame is composed.
+		s.terminal.ResetScrollRegion()
+		// Codex wraps every frame in a synchronized update; mirror that for the
+		// real interactive surface so multi-step repaints (layout + scroll +
+		// content) land atomically.
+		SetTerminalSynchronizedFrames(s.terminal.Capabilities().SynchronizedOutput)
+		WithTerminalWriteLock(func() {
+			s.applyLayoutLocked()
+			s.renderPopupLocked()
+			s.renderStatusLocked()
+			s.renderPromptRowsLocked(true)
+			s.moveToOutputLocked()
+		})
+	}
 	return true
 }
 
@@ -412,6 +507,7 @@ func (s *FixedBottomSurface) Disable() {
 	// alternate screen; the pending Release becomes a no-op afterwards.
 	leased := s.leaseID != 0
 	if leased {
+		leaseID := s.leaseID
 		writer := s.alternateWriter
 		if writer == nil {
 			if s.testMode {
@@ -423,21 +519,30 @@ func (s *FixedBottomSurface) Disable() {
 		// Disable owns teardown when the surface is shut down while a modal
 		// lease is open. Do not invalidate the lease id before emitting the
 		// exit sequence, otherwise the handle's later Release cannot clean up.
-		WithTerminalWriteLock(func() {
-			_ = writeLeaseSequencesLocked(writer, "\x1b[?25h", "\x1b[r", "\x1b[?1049l")
-		})
+		if s.physicalWritesEnabledLocked() {
+			WithTerminalWriteLock(func() {
+				_ = writeLeaseSequencesLocked(writer, "\x1b[?25h", "\x1b[r", "\x1b[?1049l")
+			})
+		} else if transport := s.alternateTransport; transport != nil {
+			// The compatibility facade may be torn down while a unified pager is
+			// open. It still must ask TerminalSession to leave DEC 1049; doing
+			// nothing here would strand the process in the alternate buffer.
+			_ = transport.ExitAlternateScreen(leaseID)
+		}
 		s.leaseID = 0
 		s.leaseMode = ScreenModePrimary
 	}
 	if !leased {
-		WithTerminalWriteLock(func() {
-			s.terminal.SaveCursor()
-			s.terminal.ResetScrollRegion()
-			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.terminal.MoveTo(s.statusRowLocked(), 1)
-			s.terminal.ClearLine()
-			s.terminal.RestoreCursor()
-		})
+		if s.physicalWritesEnabledLocked() {
+			WithTerminalWriteLock(func() {
+				s.terminal.SaveCursor()
+				s.terminal.ResetScrollRegion()
+				s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+				s.terminal.MoveTo(s.statusRowLocked(), 1)
+				s.terminal.ClearLine()
+				s.terminal.RestoreCursor()
+			})
+		}
 	}
 	s.clearPopupRenderStateLocked()
 	s.clearPopupStateLocked(true)
@@ -537,6 +642,23 @@ func (s *FixedBottomSurface) Enabled() bool {
 	return s.enabled
 }
 
+// TerminalGeometry returns the most recently known primary-terminal geometry
+// without emitting bytes or applying layout. It is the only surface datum the
+// unified presenter may read while the surface is retained as a compatibility
+// state facade.
+func (s *FixedBottomSurface) TerminalGeometry() (width, height int, ok bool) {
+	if s == nil || s.terminal == nil {
+		return 0, 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return 0, 0, false
+	}
+	width, height = s.terminal.Width(), s.terminal.Height()
+	return width, height, width > 0 && height > 0
+}
+
 // SettleOutputDebt clears layout debt before replaying already-final transcript
 // (history / resume).
 //
@@ -557,6 +679,17 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 	if s.leaseID != 0 {
 		// Alternate-screen lease active: primary flush is suspended; the
 		// release repaint recomposes the frame from retained state.
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Keep geometry/debt bookkeeping coherent for the compatibility surface,
+		// but do not let this legacy maintenance hook move the real cursor or
+		// flush a scroll-region sequence while TerminalSession owns the writer.
+		s.applyLayoutLocked()
+		if !s.ownedViewport {
+			s.flushPendingOutputScrollDownLocked()
+			s.flushOutputScrollDebtLocked()
+		}
 		return
 	}
 	WithTerminalWriteLock(func() {
@@ -762,7 +895,7 @@ func (s *FixedBottomSurface) PromptCursorPrefix(rowOffset, col int) (string, boo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.enabled {
+	if !s.enabled || !s.physicalWritesEnabledLocked() {
 		return "", false
 	}
 	if s.leaseID != 0 {
@@ -790,6 +923,12 @@ func (s *FixedBottomSurface) WritePromptEditorText(writer io.Writer, rowOffset, 
 	defer s.mu.Unlock()
 	if !s.enabled {
 		return false
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// The unified presenter receives the corresponding InputEvent and owns
+		// the following frame/cursor update. Report this as handled so the line
+		// editor never falls back to an unsynchronized raw stdout write.
+		return true
 	}
 	if s.leaseID != 0 {
 		// The alternate presenter owns physical output. Report handled so
@@ -843,6 +982,21 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 	defer s.mu.Unlock()
 	if !s.enabled {
 		return 0, nil, false
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Treat the semantic write as consumed while retaining exactly the state
+		// needed by snapshots/recovery. No caller-provided writer is touched: a
+		// bytes.Buffer is still a physical observation point for tests and must be
+		// fenced just like os.Stdout.
+		output := normalizeFixedSurfaceOutputText(text)
+		if trackSoft {
+			s.noteSoftOutputLocked(text)
+		} else {
+			s.invalidateSoftOutputLocked()
+		}
+		s.appendHistoryWindowLocked(text)
+		s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
+		return len(output), nil, true
 	}
 	var n int
 	var err error
@@ -1237,6 +1391,11 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			return false
 		}
 		s.softOutput.Replace(normalized)
+		if !s.physicalWritesEnabledLocked() {
+			// Source-backed reflow remains committed in the logical history; the
+			// unified presenter will render the replacement from its next frame.
+			return true
+		}
 		s.legacyReserve.CursorOnBlankRow = false
 		if s.leaseID != 0 {
 			// Retain the rewritten soft tail without touching the alternate
@@ -1255,6 +1414,14 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			s.renderOwnedViewportLocked()
 			s.restoreStoredPromptCursorLocked()
 		})
+		return true
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Keep ownership metadata synchronized without allowing this legacy
+		// rewrite path to emit cursor/clear/write bytes into the unified screen.
+		s.replaceOwnedHistorySuffixLocked(softLines, normalized)
+		s.softOutput.Replace(normalized)
+		s.legacyReserve.CursorOnBlankRow = false
 		return true
 	}
 	var rewritten bool
@@ -1957,6 +2124,12 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 	}
 	if s.leaseID != 0 {
 		return false
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Active-band state was already updated by setActiveBand; suppress only
+		// the legacy repaint side effect. The unified frame pump will render the
+		// same state through TerminalSession.
+		return true
 	}
 	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
 	WithTerminalWriteLock(func() {
@@ -3477,7 +3650,7 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	// DECSTBM region. Reset before the first/resize repaint so the status row and
 	// other bottom-pane rows are writable in the host terminal and vt.Screen.
 	if sizeChanged || s.viewportBackend == nil {
-		if s.leaseID == 0 {
+		if s.leaseID == 0 && s.physicalWritesEnabledLocked() {
 			s.terminal.ResetScrollRegion()
 		}
 	}
@@ -4917,6 +5090,11 @@ func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
 // mirror the identical bytes to non-stdout capture writers.
 func (s *FixedBottomSurface) insertHistoryLinesInRegionLocked(rows []string, regionBottom int) (renderengine.HandoffPlan, bool) {
 	if s == nil || s.terminal == nil || len(rows) == 0 {
+		return renderengine.HandoffPlan{}, false
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Native scrollback is a physical effect. Retain the source rows and do
+		// not advance handoff frontiers while the unified presenter is active.
 		return renderengine.HandoffPlan{}, false
 	}
 	width, height := s.terminal.Width(), s.terminal.Height()

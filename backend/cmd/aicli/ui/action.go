@@ -14,10 +14,11 @@ var ErrUIActionEffectFailed = errors.New("ui terminal effect failed")
 // ActionClass 是 UIAction 的投递分类（实施指南 Phase 1 任务 1：
 // durable / coalescable / barrier 三分法）。
 //
-//   - ClassDurable：内容性 action（RuntimeEvent、Input、facade 变更），
-//     绝不丢弃；mailbox 满时生产者背压等待。
-//   - ClassCoalescable：意图性 action（DrawRequested、Timer），
-//     同 key 待处理时合并/替换为最新（latest-wins），可安全丢弃旧意图。
+//   - ClassDurable：内容性 action（RuntimeEvent、legacy Input、facade
+//     变更），绝不丢弃；mailbox 满时生产者背压等待。
+//   - ClassCoalescable：意图性 action（DrawRequested、Timer、带 Sequence
+//     的编辑器快照、editor status），同 key 待处理时合并/替换为最新（latest-wins），
+//     可安全跳过已经被完整新快照覆盖的旧中间状态。
 //   - ClassBarrier：顺序性 action（Resize、Lease、EffectResult），
 //     按入队顺序在其之前的所有 action 之后执行，本身不参与合并。
 type ActionClass uint8
@@ -171,7 +172,10 @@ func (CloseTranscriptOverlay) CoalesceKey() string { return "" }
 // TranscriptPagerScroll is a durable user intent. Reducer-side layout derives
 // the resulting anchor from semantic cells at the current geometry.
 type TranscriptPagerScroll struct {
-	Delta int
+	// LeaseID fences a delayed pager input against a later overlay opened with
+	// a different alternate-screen lease.
+	LeaseID uint64
+	Delta   int
 }
 
 func (TranscriptPagerScroll) isUIAction()         {}
@@ -179,7 +183,10 @@ func (TranscriptPagerScroll) Class() ActionClass  { return ClassDurable }
 func (TranscriptPagerScroll) CoalesceKey() string { return "" }
 
 type TranscriptPagerSetFollowBottom struct {
-	Follow bool
+	// LeaseID fences a delayed pager input against a later overlay opened with
+	// a different alternate-screen lease.
+	LeaseID uint64
+	Follow  bool
 }
 
 func (TranscriptPagerSetFollowBottom) isUIAction()         {}
@@ -400,9 +407,17 @@ func (a UpdateActiveCellAction) mergeCoalesce(pending UIAction) UIAction {
 	return incoming
 }
 
-// ClearActiveCellAction removes the current mutable semantic cell after a
-// finalized transcript action has been accepted.
-type ClearActiveCellAction struct{}
+// ClearActiveCellAction removes a mutable semantic cell. Legacy callers may
+// leave ExpectedCellID unset for an unconditional clear, but asynchronous
+// shadow producers must supply CellID and Kind so a delayed completion cannot
+// erase a newer turn's active cell. Revision is intentionally not an exact
+// fence here: finalization owns the entire semantic cell generation and must
+// clear a queued same-cell source update that reached the reducer first.
+type ClearActiveCellAction struct {
+	ExpectedCellID    scene.CellID
+	ExpectedKind      scene.CellKind
+	ExpectedKindKnown bool
+}
 
 func (ClearActiveCellAction) isUIAction()         {}
 func (ClearActiveCellAction) Class() ActionClass  { return ClassDurable }
@@ -415,13 +430,22 @@ type FinalizeActiveCellAction struct {
 	Snapshot               *scene.Snapshot
 	ExpectedActiveCellID   scene.CellID
 	ExpectedActiveRevision uint64
+	// ExpectedActiveKind is an optional semantic-kind fence. CellKind's zero
+	// value is KindUser, so ExpectedActiveKindKnown is required to distinguish
+	// an intentionally supplied kind from early migration actions that did not
+	// carry this fence.
+	ExpectedActiveKind      scene.CellKind
+	ExpectedActiveKindKnown bool
 }
 
 func (FinalizeActiveCellAction) isUIAction()         {}
 func (FinalizeActiveCellAction) Class() ActionClass  { return ClassDurable }
 func (FinalizeActiveCellAction) CoalesceKey() string { return "" }
 
-// InputEvent 是用户输入事件（键盘/粘贴/IME）。durable：绝不丢弃用户输入。
+// InputEvent 是编辑器的最新输入快照（键盘/粘贴/IME）。由协调器分配
+// Sequence 的生产事件采用 latest-wins 合并：编辑器每次回调都携带完整
+// Text/Cursor，因此合并旧快照不会丢失用户已经输入的语义，只会跳过过时
+// 的中间绘制。Sequence=0 保留给旧测试/调用方，仍按 durable FIFO 处理。
 // Cursor/PasteActive 保留编辑器快照所需的最小语义；Render 表示该快照
 // 应立即投影到已显示的 prompt，而非只更新下一次编辑器绘制的状态。
 // 注意与 Input（输入框组件）区分。
@@ -430,11 +454,37 @@ type InputEvent struct {
 	Cursor      int
 	PasteActive bool
 	Render      bool
+	// Sequence is allocated by the editor-facing coordinator cache. Zero is
+	// retained for legacy/test callers; non-zero actions are latest-wins fenced
+	// so an older queued action cannot roll back a newer draft.
+	Sequence uint64
 }
 
-func (InputEvent) isUIAction()         {}
-func (InputEvent) Class() ActionClass  { return ClassDurable }
-func (InputEvent) CoalesceKey() string { return "" }
+func (InputEvent) isUIAction() {}
+func (a InputEvent) Class() ActionClass {
+	if a.Sequence != 0 {
+		return ClassCoalescable
+	}
+	return ClassDurable
+}
+func (a InputEvent) CoalesceKey() string {
+	if a.Sequence != 0 {
+		return "prompt-input"
+	}
+	return ""
+}
+
+// mergeCoalesce keeps the newest semantic snapshot while preserving a render
+// request from an older snapshot. A Render=true callback must not disappear
+// merely because a non-render semantic update arrived before the actor ran.
+func (a InputEvent) mergeCoalesce(incomingAction UIAction) UIAction {
+	incoming, ok := incomingAction.(InputEvent)
+	if !ok {
+		return incomingAction
+	}
+	incoming.Render = incoming.Render || a.Render
+	return incoming
+}
 
 // ---------------------------------------------------------------------------
 // Facade 变更类（durable）——Phase 1 任务 4：
@@ -461,6 +511,18 @@ type ClearActiveBandAction struct {
 func (ClearActiveBandAction) isUIAction()         {}
 func (ClearActiveBandAction) Class() ActionClass  { return ClassDurable }
 func (ClearActiveBandAction) CoalesceKey() string { return "" }
+
+// SetSemanticActiveCellProjectionAction selects the Scene/AppState active
+// cell as the exclusive mutable-band source. It is a renderer-lifecycle
+// barrier: after enabling it, legacy SetActiveBandAction payloads remain
+// compatibility inputs but cannot become part of a production frame.
+type SetSemanticActiveCellProjectionAction struct {
+	Enabled bool
+}
+
+func (SetSemanticActiveCellProjectionAction) isUIAction()         {}
+func (SetSemanticActiveCellProjectionAction) Class() ActionClass  { return ClassBarrier }
+func (SetSemanticActiveCellProjectionAction) CoalesceKey() string { return "" }
 
 // SetStatusModelsAction 对应 SetStatusModels。
 type SetStatusModelsAction struct {
@@ -569,7 +631,8 @@ func (SetPromptRowsAction) CoalesceKey() string { return "" }
 // SetPromptNoticeAction and SetPromptEditorStatusAction update the two
 // independently-owned prompt context lines. They must not overwrite each
 // other because status/timer updates and editor movement run on different
-// producer paths.
+// producer paths. Editor status itself is a complete latest-wins value, so it
+// may coalesce without delaying a per-key editor callback.
 type SetPromptNoticeAction struct {
 	Line string
 }
@@ -583,8 +646,8 @@ type SetPromptEditorStatusAction struct {
 }
 
 func (SetPromptEditorStatusAction) isUIAction()         {}
-func (SetPromptEditorStatusAction) Class() ActionClass  { return ClassDurable }
-func (SetPromptEditorStatusAction) CoalesceKey() string { return "" }
+func (SetPromptEditorStatusAction) Class() ActionClass  { return ClassCoalescable }
+func (SetPromptEditorStatusAction) CoalesceKey() string { return "prompt-editor-status" }
 
 // SetComposerPreviewAction/ClearComposerPreviewAction retain the legacy
 // transitional composer API as an ordered BottomPane intent. They are not a

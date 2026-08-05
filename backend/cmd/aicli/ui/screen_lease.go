@@ -50,6 +50,27 @@ type ScreenLease interface {
 	Release(context.Context) error
 }
 
+// AlternateScreenLeaseWriter is implemented by a ScreenLease whose fullscreen
+// content must travel through the terminal authority that entered DEC 1049.
+// Callers such as the transcript pager type-assert this optional capability;
+// legacy leases retain their existing writer behavior while unified leases
+// cannot fall back to raw os.Stdout.
+type AlternateScreenLeaseWriter interface {
+	WriteAlternateScreen(string) error
+}
+
+// AlternateScreenLeaseTransport is the sole physical owner used by a fenced
+// FixedBottomSurface. TerminalSessionPresenter implements this interface, so
+// DEC 1049 enter/exit and fullscreen frames share the unified terminal writer
+// and Release can schedule a source-backed primary recovery only after the
+// LeaseReleased action has been posted.
+type AlternateScreenLeaseTransport interface {
+	EnterAlternateScreen(leaseID uint64) error
+	WriteAlternateScreen(leaseID uint64, value string) error
+	ExitAlternateScreen(leaseID uint64) error
+	RequestPrimaryRecovery()
+}
+
 // FullscreenRequest describes an alternate-screen session.
 type FullscreenRequest struct {
 	// Title is a short human-readable label for diagnostics.
@@ -62,6 +83,13 @@ type fullscreenLease struct {
 	mode     ScreenMode
 	mu       sync.Mutex
 	released bool
+}
+
+func (l *fullscreenLease) WriteAlternateScreen(value string) error {
+	if l == nil || l.surface == nil {
+		return ErrFullScreenUnavailable
+	}
+	return l.surface.writeAlternateScreen(l.id, value)
 }
 
 func (l *fullscreenLease) ID() uint64 {
@@ -132,6 +160,29 @@ func (s *FixedBottomSurface) AcquireAlternateScreen(_ context.Context, req Fulls
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: lease id=%d still active", ErrScreenLeaseBusy, activeLeaseID)
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// In unified mode there is no compatibility fallback: granting a logical
+		// lease without a TerminalSession transport would let the pager write raw
+		// stdout into an un-entered or differently-owned screen.
+		transport := s.alternateTransport
+		if transport == nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("%w: unified alternate-screen transport is unavailable", ErrFullScreenUnavailable)
+		}
+		leaseID := leaseCounter.Add(1)
+		// Keep the surface mutex through the enter transaction. This prevents a
+		// concurrent Acquire/Disable from observing or tearing down a half-entered
+		// lease; TerminalSession has its own lock against primary frame writes.
+		if err := transport.EnterAlternateScreen(leaseID); err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("%w: enter unified alternate screen: %v", ErrFullScreenUnavailable, err)
+		}
+		s.leaseID = leaseID
+		s.leaseMode = ScreenModeAlternate
+		s.mu.Unlock()
+		s.postFacadeAction(LeaseAcquired{LeaseID: leaseID})
+		return &fullscreenLease{surface: s, id: leaseID, mode: ScreenModeAlternate}, nil
+	}
 	writer := s.alternateWriter
 	if writer == nil {
 		if s.testMode {
@@ -197,6 +248,57 @@ func writeLeaseSequencesLocked(writer io.Writer, sequences ...string) error {
 	return writeErr
 }
 
+// writeAlternateScreen routes fullscreen content through the same owner that
+// acquired the lease. In unified mode a missing transport is an explicit
+// failure rather than a raw stdout fallback; that is the physical-writer fence
+// which keeps pager frames out of the primary terminal projection path.
+func (s *FixedBottomSurface) writeAlternateScreen(id uint64, value string) error {
+	if s == nil || id == 0 {
+		return ErrFullScreenUnavailable
+	}
+	s.mu.Lock()
+	if s.leaseID != id || !s.enabled {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: alternate-screen lease is no longer active", ErrFullScreenUnavailable)
+	}
+	if !s.physicalWritesEnabledLocked() {
+		transport := s.alternateTransport
+		s.mu.Unlock()
+		if transport == nil {
+			return fmt.Errorf("%w: unified alternate-screen transport is unavailable", ErrFullScreenUnavailable)
+		}
+		return transport.WriteAlternateScreen(id, value)
+	}
+	writer := s.alternateWriter
+	if writer == nil {
+		if s.testMode {
+			writer = io.Discard
+		} else {
+			writer = os.Stdout
+		}
+	}
+	// Keep legacy content output serialized with Release. The unified branch
+	// above uses TerminalSession's own mutex and presenter lock instead.
+	err := writeFullScreenText(writer, value)
+	s.mu.Unlock()
+	return err
+}
+
+// writeLeaseManagedFullScreenText keeps modal frame bytes with their lease
+// owner. Do not wrap AlternateScreenLeaseWriter in io.Writer and pass it to
+// writeFullScreenText: that helper takes the global terminal lock, while the
+// unified TerminalSession then takes its Presenter lock, which would recurse
+// on the non-reentrant lock. The transport writes directly through its own
+// transaction boundary instead.
+func writeLeaseManagedFullScreenText(lease ScreenLease, fallback io.Writer, value string) error {
+	if lease != nil && lease.Active() {
+		if writer, ok := lease.(AlternateScreenLeaseWriter); ok {
+			return writer.WriteAlternateScreen(value)
+		}
+	}
+	return writeFullScreenText(fallback, value)
+}
+
 // LeaseActive reports whether an alternate-screen lease currently suspends
 // primary flushing.
 func (s *FixedBottomSurface) LeaseActive() bool {
@@ -241,6 +343,25 @@ func (s *FixedBottomSurface) releaseAlternateScreen(_ context.Context, id uint64
 		s.mu.Unlock()
 		s.postFacadeAction(LeaseReleased{LeaseID: id})
 		return nil
+	}
+	if !s.physicalWritesEnabledLocked() {
+		transport := s.alternateTransport
+		s.mu.Unlock()
+		if transport == nil {
+			s.postFacadeAction(LeaseReleased{LeaseID: id})
+			return fmt.Errorf("%w: unified alternate-screen transport is unavailable", ErrFullScreenUnavailable)
+		}
+		exitErr := transport.ExitAlternateScreen(id)
+		// Publish the logical barrier only after the terminal transport has
+		// invalidated its primary projection. A concurrently requested executor
+		// frame therefore cannot observe an unleased AppState while DEC 1049 is
+		// still active.
+		s.postFacadeAction(LeaseReleased{LeaseID: id})
+		// Request after the barrier post. TerminalSessionExecutor waits for the
+		// actor to become idle before composing, so it observes LeaseReleased and
+		// emits the mandatory source-backed recovery frame, never a legacy repaint.
+		transport.RequestPrimaryRecovery()
+		return exitErr
 	}
 	writer := s.alternateWriter
 	if writer == nil {

@@ -19,6 +19,13 @@ var (
 	ErrTerminalWriterMissing = errors.New("terminal session writer is unavailable")
 	ErrTerminalWriterPanic   = errors.New("terminal session writer panicked")
 	ErrInvalidHistoryHandoff = errors.New("invalid terminal history handoff")
+	// ErrTerminalAlternateScreenBusy proves that a different fullscreen owner
+	// still controls this physical terminal session. The caller must release
+	// that lease rather than emit a second DEC 1049 enter sequence.
+	ErrTerminalAlternateScreenBusy = errors.New("terminal alternate-screen lease is already active")
+	// ErrTerminalAlternateScreenLease rejects a stale or fabricated lease id
+	// before it can write into a fullscreen buffer it does not own.
+	ErrTerminalAlternateScreenLease = errors.New("terminal alternate-screen lease is not active")
 )
 
 // TerminalFramePlan is the physical-frame input derived from exactly one
@@ -26,9 +33,9 @@ var (
 // ownership progress: those remain respectively in TerminalSession and the
 // reducer-owned HistoryEffectQueue.
 //
-// This is intentionally a Phase 3 seam. It is not installed into the legacy
-// FixedBottomSurface yet, because doing so before the one-writer cutover would
-// make the old historyWindow and this session write the primary terminal.
+// In unified interactive mode this is the only primary-frame input consumed
+// by TerminalSessionPresenter. FixedBottomSurface may still retain compatibility
+// state, but its physical writer is fenced before the presenter attaches.
 type TerminalFramePlan struct {
 	LayoutGeneration uint64
 	Geometry         GeometryState
@@ -148,9 +155,9 @@ type TerminalTransactionResult struct {
 
 // TerminalSession owns one physical primary-viewport projection cache. The
 // mutex serializes mutable front/back/cursor state; Presenter additionally
-// serializes the eventual terminal write with the repository-wide terminal
-// lock. TerminalSession is currently testable but deliberately uninstalled in
-// production while FixedBottomSurface remains the legacy writer.
+// serializes each terminal write with the repository-wide terminal lock. The
+// unified chat path installs TerminalSession through TerminalSessionPresenter;
+// FixedBottomSurface remains only a compatibility state facade in that mode.
 type TerminalSession struct {
 	mu           sync.Mutex
 	writer       io.Writer
@@ -162,8 +169,15 @@ type TerminalSession struct {
 	outputBottom int
 	frame        uint64
 	cursor       *AppCursor
-	colorProfile render.ColorProfile
-	frameTheme   style.ThemeContext
+	// alternateLeaseID records actual DEC 1049 transport ownership. It is
+	// deliberately independent of AppState.Lease because the physical enter
+	// completes before LeaseAcquired is posted to the actor, and the physical
+	// exit completes before LeaseReleased is reduced. FlushTransaction checks
+	// it directly so no stale AppState snapshot can write a primary frame into
+	// the alternate buffer during either transition.
+	alternateLeaseID uint64
+	colorProfile     render.ColorProfile
+	frameTheme       style.ThemeContext
 }
 
 var _ HistoryCommitSink = (*TerminalSession)(nil)
@@ -224,6 +238,115 @@ func (s *TerminalSession) InvalidateProjection() {
 	s.cursor = nil
 }
 
+// AlternateScreenLeaseID reports the current physical DEC 1049 owner. It is
+// an operational diagnostic only; semantic lease truth remains in AppState.
+func (s *TerminalSession) AlternateScreenLeaseID() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.alternateLeaseID
+}
+
+// EnterAlternateScreen moves the one terminal writer into DEC 1049 alternate
+// screen mode. It is intentionally part of TerminalSession, not
+// FixedBottomSurface: once the unified renderer is selected, all terminal
+// control bytes must pass through this owner and its Presenter lock.
+//
+// The caller posts LeaseAcquired only after this method succeeds. Holding the
+// session mutex across the transport write closes the race where an old actor
+// snapshot could otherwise flush a primary frame after DEC 1049 entered but
+// before the lease barrier reached the reducer.
+func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
+	if s == nil || leaseID == 0 {
+		return ErrTerminalAlternateScreenLease
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writer == nil || s.presenter == nil || s.screen == nil {
+		return ErrTerminalWriterMissing
+	}
+	if s.alternateLeaseID != 0 {
+		return fmt.Errorf("%w: lease id=%d", ErrTerminalAlternateScreenBusy, s.alternateLeaseID)
+	}
+
+	enter := s.writeTerminalBytesLocked("\x1b[?1049h\x1b[r\x1b[?25l\x1b[2J\x1b[H")
+	if enter.Err != nil {
+		// A partial enter leaves both the terminal buffer and our front cache
+		// unknowable. Best-effort rollback is still useful, but cannot restore
+		// a Known projection and must not grant the lease.
+		if s.screen != nil {
+			s.screen.Invalidate()
+		}
+		s.cursor = nil
+		rollback := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
+		return errors.Join(enter.Err, rollback.Err)
+	}
+
+	s.alternateLeaseID = leaseID
+	s.lease = LeaseState{ID: leaseID, Active: true}
+	// The primary front buffer belongs to the restored primary screen after
+	// exit, not to the freshly-cleared alternate screen. Never diff against it.
+	s.screen.Invalidate()
+	s.cursor = nil
+	return nil
+}
+
+// WriteAlternateScreen writes fullscreen presenter bytes through the same
+// TerminalSession writer and global presenter lock as every primary frame.
+// It rejects writes outside the active lease so pager/list code cannot become
+// a raw stdout bypass after its modal lifecycle has ended.
+func (s *TerminalSession) WriteAlternateScreen(leaseID uint64, bytes string) error {
+	if s == nil || leaseID == 0 {
+		return ErrTerminalAlternateScreenLease
+	}
+	if bytes == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.alternateLeaseID != leaseID {
+		return fmt.Errorf("%w: want id=%d active id=%d", ErrTerminalAlternateScreenLease, leaseID, s.alternateLeaseID)
+	}
+	write := s.writeTerminalBytesLocked(bytes)
+	if write.Err != nil {
+		if s.screen != nil {
+			s.screen.Invalidate()
+		}
+		s.cursor = nil
+	}
+	return write.Err
+}
+
+// ExitAlternateScreen restores the primary buffer and invalidates the cached
+// primary projection. The next AppState-derived transaction must therefore be
+// a full recovery repaint. Exit clears physical ownership even on an I/O
+// error: retrying DEC 1049 blindly after a partial write could corrupt a later
+// fullscreen session more severely than treating the projection as Unknown.
+func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
+	if s == nil || leaseID == 0 {
+		return ErrTerminalAlternateScreenLease
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.alternateLeaseID == 0 {
+		return nil
+	}
+	if s.alternateLeaseID != leaseID {
+		return fmt.Errorf("%w: want id=%d active id=%d", ErrTerminalAlternateScreenLease, leaseID, s.alternateLeaseID)
+	}
+
+	write := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
+	s.alternateLeaseID = 0
+	s.lease = LeaseState{}
+	if s.screen != nil {
+		s.screen.Invalidate()
+	}
+	s.cursor = nil
+	return write.Err
+}
+
 // SetColorProfile replaces the negotiated ANSI encoding profile used for
 // HistoryCommit payloads. A profile change changes physical bytes, so the
 // existing frame cache becomes unsafe for incremental presentation until the
@@ -265,9 +388,9 @@ func (s *TerminalSession) SetThemeContext(theme style.ThemeContext) {
 	s.cursor = nil
 }
 
-// FlushAppState is the convenience form for the eventual presenter call site.
-// It remains pure on the input side: all composition occurs before terminal
-// bytes are prepared, and no AppState field is modified.
+// FlushAppState is the convenience form for a presenter call site. It remains
+// pure on the input side: all composition occurs before terminal bytes are
+// prepared, and no AppState field is modified.
 func (s *TerminalSession) FlushAppState(state AppState) TerminalFrameResult {
 	return s.Flush(ComposeTerminalFramePlan(state))
 }
@@ -285,8 +408,8 @@ func (s *TerminalSession) Flush(plan TerminalFramePlan) TerminalFrameResult {
 // deferred, rather than replayed against an Unknown cache, while this call
 // establishes the required source-backed recovery frame.
 //
-// This remains a non-production seam until FixedBottomSurface is replaced in
-// one cutover. In particular it must not be connected beside the legacy
+// The unified chat setup installs this only after FixedBottomSurface has been
+// fenced from physical output. It must never be connected beside the legacy
 // historyWindow handoff path.
 func (s *TerminalSession) FlushTransaction(plan TerminalTransactionPlan) TerminalTransactionResult {
 	plan = plan.Clone()
@@ -314,10 +437,14 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
 	}
 
-	if frame.Lease.Active {
+	if s.alternateLeaseID != 0 || frame.Lease.Active {
 		s.geometry = frame.Geometry
 		s.generation = frame.LayoutGeneration
-		s.lease = frame.Lease
+		if s.alternateLeaseID != 0 {
+			s.lease = LeaseState{ID: s.alternateLeaseID, Active: true}
+		} else {
+			s.lease = frame.Lease
+		}
 		s.outputBottom = frame.OutputBottomRow
 		s.cursor = nil
 		result := TerminalFrameResult{Frame: s.frame, Deferred: true}
@@ -365,6 +492,13 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 
 	rows, err := terminalFrameCells(frame.Rows, frame.RenderRows, frame.Geometry.Width, frame.Geometry.Height, s.frameTheme)
 	if err != nil {
+		// The transaction has not entered its write section yet. A prepared
+		// handoff therefore remains unstarted: acknowledging it here would
+		// advance the reducer even though none of its scrollback bytes reached
+		// the terminal.
+		if historyResult != nil && historyBytes != "" {
+			*historyResult = HistoryCommitResult{Deferred: true}
+		}
 		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
 		return TerminalTransactionResult{Frame: result, History: historyResult}
 	}

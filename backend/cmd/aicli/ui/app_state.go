@@ -13,15 +13,20 @@ import (
 // and Bottom contains overlays only. Terminal/front-buffer state is deliberately
 // absent: it is a physical projection cache, never UI business truth.
 type AppState struct {
-	Revision          uint64
-	Transcript        TranscriptState
-	Active            ActiveCellState
-	Bottom            BottomPaneState
-	Geometry          GeometryState
-	Lease             LeaseState
-	HistoryEffects    HistoryEffectQueueState
-	TranscriptOverlay TranscriptOverlayState
-	LayoutGeneration  uint64
+	Revision   uint64
+	Transcript TranscriptState
+	Active     ActiveCellState
+	// SemanticActiveCellProjection makes Active the only visual source for the
+	// mutable bottom band. It is enabled by the unified primary renderer; the
+	// retained ActiveBand facade then remains compatibility state only and must
+	// not replace or duplicate the Scene-backed active cell.
+	SemanticActiveCellProjection bool
+	Bottom                       BottomPaneState
+	Geometry                     GeometryState
+	Lease                        LeaseState
+	HistoryEffects               HistoryEffectQueueState
+	TranscriptOverlay            TranscriptOverlayState
+	LayoutGeneration             uint64
 }
 
 // Clone returns an independent immutable snapshot suitable for layout,
@@ -70,6 +75,21 @@ func (s TranscriptState) Clone() TranscriptState {
 	}
 	s.Cells = clone
 	return s
+}
+
+// LayoutRows derives semantic transcript rows without first cloning every
+// cell. scene.LayoutTranscript only reads its input and returns detached row
+// values, so the temporary pointer slice is sufficient isolation for this
+// synchronous layout operation.
+func (s TranscriptState) LayoutRows(policyVersion uint64) []scene.LayoutRow {
+	if len(s.Cells) == 0 {
+		return nil
+	}
+	cells := make([]*scene.TranscriptCell, len(s.Cells))
+	for index := range s.Cells {
+		cells[index] = &s.Cells[index]
+	}
+	return scene.LayoutTranscript(cells, policyVersion)
 }
 
 // Snapshot converts the value back into the scene package's read-only view.

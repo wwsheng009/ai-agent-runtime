@@ -11,11 +11,11 @@ import (
 // would risk an untracked terminal write.
 var ErrTerminalTransactionMissingResult = errors.New("terminal transaction omitted claimed history result")
 
-// TerminalSessionExecutor is the non-production bridge that exercises the
-// intended one-writer flow against a UIController and TerminalSession. It is
-// deliberately not connected to FixedBottomSurface, runtime events, or the
-// live terminal. Doing that before the legacy writer is removed would make two
-// owners append to native scrollback.
+// TerminalSessionExecutor is the bounded physical worker used by
+// TerminalSessionPresenter. It claims one reducer-owned history token, derives
+// one immutable AppState frame and commits the combined transaction. It never
+// reads FixedBottomSurface state or accepts runtime callbacks directly; the
+// presenter is its only production lifecycle/effect boundary.
 //
 // The executor is actor-safe: it claims one reducer-owned token, reads the
 // resulting immutable AppState, performs one TerminalTransactionPlan write
@@ -36,14 +36,11 @@ func NewTerminalSessionExecutor(controller *UIController, session *TerminalSessi
 	return &TerminalSessionExecutor{controller: controller, session: session}
 }
 
-// HandleEffect is the future presenter-side effect adapter. It deliberately
-// accepts only render/history wake intents and coalesces them into one worker;
-// it does not inspect legacy surface state or write terminal bytes itself.
-//
-// This method is not registered by the current chat runtime. Registering it
-// beside FixedBottomSurface would create a second primary writer. It exists so
-// the eventual full-renderer cutover can use the same actor effect contract
-// already exercised by this non-production executor.
+// HandleEffect is the presenter-side effect adapter. It accepts only
+// render/history wake intents and coalesces them into one worker; it does not
+// inspect legacy surface state or write terminal bytes from the actor callback.
+// TerminalSessionPresenter registers it only after the legacy surface writer
+// has been fenced.
 func (e *TerminalSessionExecutor) HandleEffect(effect Effect) {
 	if e == nil || effect == nil {
 		return

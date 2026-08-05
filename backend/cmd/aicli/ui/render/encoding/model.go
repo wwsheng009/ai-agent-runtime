@@ -15,9 +15,14 @@ package encoding
 type ItemKind string
 
 const (
-	KindUser            ItemKind = "user"             // 用户消息
-	KindAssistant       ItemKind = "assistant"        // assistant 流式消息
-	KindReasoning       ItemKind = "reasoning"        // reasoning 块
+	KindUser       ItemKind = "user"       // 用户消息
+	KindAssistant  ItemKind = "assistant"  // assistant 流式消息
+	KindReasoning  ItemKind = "reasoning"  // reasoning 块
+	KindSupplement ItemKind = "supplement" // 无 runtime 事件的本地补充
+	// KindPriorityPrompt is the completed retained transcript for a runtime
+	// approval/question that synchronously owns stdin. The request identity is
+	// tracked outside RenderModel; only the final visible transcript is appended.
+	KindPriorityPrompt  ItemKind = "priority_prompt"
 	KindToolCall        ItemKind = "tool_call"        // 工具调用（CauseID 宿主）
 	KindToolOutput      ItemKind = "tool_output"      // 工具输出（CauseID 指向 ToolCall）
 	KindCommand         ItemKind = "command"          // 本地命令执行
