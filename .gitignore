@@ -27,6 +27,9 @@ frontend/.env.local
 *.swp
 *.swo
 
+# Reasonix tooling
+reasonix.toml
+
 # OS
 .DS_Store
 Thumbs.db
