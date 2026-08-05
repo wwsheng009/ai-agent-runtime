@@ -20,6 +20,10 @@ type HistoryCommitResult struct {
 	Err                     error
 	MayHavePartiallyWritten bool
 	Deferred                bool
+	// Delivered is populated only by a single bootstrap transaction that wrote
+	// several pending ranges in order. The UI reducer validates and advances
+	// the batch atomically; TerminalSession never retains an effect ledger.
+	Delivered []HistoryCommit
 }
 
 // HistoryCommitSink is the terminal-effect boundary used by the primary

@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
 func terminalSessionPlan(generation uint64, width, height, outputBottom int, lease LeaseState) TerminalFramePlan {
@@ -63,6 +64,91 @@ func TestTerminalSessionFlushCommitsOnlyAfterCompleteWrite(t *testing.T) {
 	}
 	if output.Len() != before {
 		t.Fatalf("unchanged frame wrote bytes: before=%d after=%d", before, output.Len())
+	}
+}
+
+// Once the physical primary frame is known, an outgoing retained row already
+// exists at the top of the terminal output region. Scrolling it into native
+// history requires appending the target frame's entering suffix, not printing
+// the outgoing row again at the bottom. The latter duplicates the visible tail
+// and loses the actual historical prefix.
+func TestTerminalSessionTransactionScrollsOutgoingPrimaryPrefixWithIncomingTargetSuffix(t *testing.T) {
+	var output bytes.Buffer
+	session := NewTerminalSession(&output)
+	initial := terminalSessionPlan(1, 24, 5, 3, LeaseState{})
+	initial.Rows[0].Text = "outgoing history"
+	initial.Rows[1].Text = "retained middle"
+	initial.Rows[2].Text = "retained latest"
+	initial.Rows[3].Text = "> prompt"
+	initial.Rows[4].Text = "status"
+	if result := session.Flush(initial); result.Err != nil || !result.FullRepaint {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	target := initial
+	target.Rows = append([]AppScreenRow(nil), initial.Rows...)
+	target.Rows[0].Text = "retained middle"
+	target.Rows[1].Text = "retained latest"
+	target.Rows[2].Text = "incoming target suffix"
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "outgoing history"}}})
+	result := session.FlushTransaction(TerminalTransactionPlan{Frame: target, History: &commit})
+	if result.Frame.Err != nil || result.History == nil || result.History.Err != nil || result.History.Deferred || result.History.Frame == 0 {
+		t.Fatalf("transaction = %#v", result)
+	}
+
+	screen := vt.NewScreen(24, 5)
+	screen.Feed(output.String())
+	if !strings.Contains(output.String(), "\x1b[1;5r") || strings.Contains(output.String(), "\x1b[1;3r") {
+		t.Fatalf("bootstrap did not use full terminal scroll region: %q", output.String())
+	}
+	if scrollback := strings.Join(screen.ScrollbackLines(), "\n"); !strings.Contains(scrollback, "outgoing history") {
+		t.Fatalf("outgoing primary prefix did not reach scrollback:\n%s", screen.Dump())
+	}
+	if got := screen.Lines(1, 3); strings.Join(got, "\n") != "retained middle\nretained latest\nincoming target suffix" {
+		t.Fatalf("primary output after handoff = %#v, screen:\n%s", got, screen.Dump())
+	}
+}
+
+// Bootstrap has no confirmed outgoing transcript rows in the physical frame.
+// It must therefore append the retained target tail after the history prefix;
+// otherwise a short prefix only replaces blank/old rows and is overwritten by
+// the frame diff before it ever reaches native scrollback.
+func TestTerminalSessionBootstrapHandoffPushesShortHistoryPrefixIntoScrollback(t *testing.T) {
+	var output bytes.Buffer
+	session := NewTerminalSession(&output)
+	initial := terminalSessionPlan(1, 24, 5, 3, LeaseState{})
+	initial.Rows[0].Text = "old frame one"
+	initial.Rows[1].Text = "old frame two"
+	initial.Rows[2].Text = "old frame three"
+	if result := session.Flush(initial); result.Err != nil || !result.FullRepaint {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	target := initial
+	target.Rows = append([]AppScreenRow(nil), initial.Rows...)
+	target.Rows[0].Text = "retained tail one"
+	target.Rows[1].Text = "retained tail two"
+	target.Rows[2].Text = "retained tail three"
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "bootstrap history prefix"}}})
+	result := session.FlushTransaction(TerminalTransactionPlan{
+		Frame:            target,
+		History:          &commit,
+		BootstrapHistory: []HistoryCommit{commit},
+	})
+	if result.Frame.Err != nil || result.History == nil || result.History.Err != nil || result.History.Deferred {
+		t.Fatalf("bootstrap transaction frame=%#v history=%+v", result.Frame, result.History)
+	}
+	if len(result.History.Delivered) != 1 || result.History.Delivered[0].Token != commit.Token {
+		t.Fatalf("bootstrap delivery = %#v, want commit token %d", result.History.Delivered, commit.Token)
+	}
+
+	screen := vt.NewScreen(24, 5)
+	screen.Feed(output.String())
+	if scrollback := strings.Join(screen.ScrollbackLines(), "\n"); !strings.Contains(scrollback, "bootstrap history prefix") {
+		t.Fatalf("bootstrap prefix did not reach native scrollback:\n%s", screen.Dump())
+	}
+	if got := strings.Join(screen.Lines(1, 3), "\n"); got != "retained tail one\nretained tail two\nretained tail three" {
+		t.Fatalf("primary output after bootstrap = %q, screen:\n%s", got, screen.Dump())
 	}
 }
 
@@ -444,7 +530,7 @@ func TestTerminalSessionCommitHistoryUsesRichHandoffAndUpdatesFrame(t *testing.T
 		t.Fatalf("history handoff = %#v", result)
 	}
 	ansi := output.String()
-	for _, want := range []string{"\x1b[s", "\x1b[1;6r", "\x1b[6;1H", "\r\n", "rich handoff", "\x1b[1;38;2;10;20;30m", "\x1b[r", "\x1b[u"} {
+	for _, want := range []string{"\x1b[s", "\x1b[1;8r", "\x1b[8;1H", "\r\n", "rich handoff", "\x1b[1;38;2;10;20;30m", "\x1b[r", "\x1b[u"} {
 		if !strings.Contains(ansi, want) {
 			t.Fatalf("handoff bytes missing %q: %q", want, ansi)
 		}

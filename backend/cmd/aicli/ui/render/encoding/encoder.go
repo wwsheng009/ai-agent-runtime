@@ -9,6 +9,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // 单流 delta 乱序重排缓冲上限（与旧终端 orderAssistantDelta 同规格）：
@@ -476,7 +477,11 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 	case runtimechat.EventApprovalResolved, runtimechat.EventQuestionAnswered:
 		return opPriorityResolved
 
-	case runtimechat.EventAssistantReasoning:
+	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
+		// The local ReAct loop emits the dotted event name while the chat
+		// actor emits EventAssistantReasoning. Both carry the same typed
+		// reasoning payload and must produce one KindReasoning item rather
+		// than a fallback system row containing only "assistant.reasoning".
 		return opReasoning
 
 	case runtimechat.EventAssistantDelta:
@@ -880,16 +885,20 @@ func (e *EventEncoder) applyPriorityResolved(ev runtimeevents.Event, _ *ChangeSe
 }
 
 func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
-	text := payloadString(ev.Payload["text"], payloadString(ev.Payload["summary"], ""))
+	text, streamDelta := reasoningText(ev)
 	key := reasoningKey(ev)
 	// reasoning 拥有独立索引：绝不允许覆盖 assistant Item 的内容或状态
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
-			if t.Head == text {
+			next := text
+			if streamDelta {
+				next = appendReasoningDelta(t.Head, text)
+			}
+			if t.Head == next {
 				return false
 			}
-			t.Head = text
+			t.Head = next
 			t.Status = StatusRunning
 			return true
 		})
@@ -901,6 +910,38 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	it := e.appendItem(KindReasoning, "", text)
 	e.reasoningBy[key] = it
 	e.change(cs, OpAppend, it)
+}
+
+// reasoningText accepts both the compact encoder payload and the typed nested
+// ReasoningBlock emitted by the local agent loop. The latter is the production
+// shape for "assistant.reasoning"; treating it as a system event previously
+// leaked only the event type into the TUI and discarded its visible thought.
+func reasoningText(ev runtimeevents.Event) (text string, streamDelta bool) {
+	text = payloadString(ev.Payload["text"], payloadString(ev.Payload["summary"], ""))
+	if block := runtimetypes.ReasoningBlockFromMap(ev.Payload["reasoning"]); block != nil {
+		if display := block.RawDisplayText(); display != "" {
+			text = display
+		}
+		streamDelta = strings.EqualFold(strings.TrimSpace(block.Format), "stream_delta")
+	}
+	return text, streamDelta
+}
+
+// appendReasoningDelta accepts both provider delta chunks and providers which
+// repeat a full snapshot in each event. It is deliberately local to the
+// encoder: the semantic Scene must receive the same monotonic visible body as
+// the live reasoning presenter.
+func appendReasoningDelta(existing, incoming string) string {
+	if incoming == "" || incoming == existing {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if strings.HasPrefix(incoming, existing) {
+		return incoming
+	}
+	return existing + incoming
 }
 
 func (e *EventEncoder) applyLLMStarted(ev runtimeevents.Event, cs *ChangeSet) {

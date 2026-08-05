@@ -4,8 +4,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // ActiveBandProjection is the pure, source-backed display candidate for the
@@ -39,9 +41,9 @@ func (p ActiveBandProjection) Clone() ActiveBandProjection {
 // terminal transaction has actually completed. This prevents a handoff race
 // from creating a visible hole.
 //
-// This is a layout helper only. It does not render Markdown, probe a terminal,
-// read a surface cache, or advance any range. The legacy FixedBottomSurface
-// remains the production presenter until the atomic primary-renderer cutover.
+// This is a layout helper only. It uses the same pure structured Markdown
+// projection as committed assistant transcript cells, but never probes a
+// terminal, reads a surface cache, or advances a source range.
 func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) ActiveBandProjection {
 	if active.CellID == 0 || active.Phase == ActiveCellInactive || active.Source == "" {
 		return ActiveBandProjection{}
@@ -62,22 +64,28 @@ func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) Activ
 	if width < 1 {
 		width = 80
 	}
-	rows := activeCellBandRows(active.Source[start:], width)
+	var lines []render.Line
+	if active.Kind == scene.KindAssistant && start == 0 && markdown.LooksLikeMarkdown(active.Source) {
+		doc := markdown.Render(active.Source, markdown.AssistantBodyOptions(width, style.ThemeContext{}))
+		lines = activeMarkdownBandLines(doc)
+	}
+	if len(lines) == 0 {
+		rows := activeCellBandRows(active.Source[start:], width)
+		role := appTranscriptRenderRole(active.Kind)
+		lines = make([]render.Line, 0, len(rows))
+		for _, row := range rows {
+			lines = append(lines, render.Line{Spans: []render.Span{{
+				Text:  row,
+				Style: render.Style{Role: string(role)},
+			}}})
+		}
+	}
 	maxRows := ActiveBandRows(geometry.Height)
-	if len(rows) > maxRows {
-		rows = rows[len(rows)-maxRows:]
+	if len(lines) > maxRows {
+		lines = lines[len(lines)-maxRows:]
 	}
-	if len(rows) == 0 {
+	if len(lines) == 0 {
 		return ActiveBandProjection{}
-	}
-
-	role := appTranscriptRenderRole(active.Kind)
-	lines := make([]render.Line, 0, len(rows))
-	for _, row := range rows {
-		lines = append(lines, render.Line{Spans: []render.Span{{
-			Text:  row,
-			Style: render.Style{Role: string(role)},
-		}}})
 	}
 	return ActiveBandProjection{
 		CellID:      active.CellID,
@@ -86,6 +94,19 @@ func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) Activ
 		SourceRange: SourceRange{Start: start, End: len(active.Source)},
 		Lines:       lines,
 	}
+}
+
+func activeMarkdownBandLines(doc render.Document) []render.Line {
+	if len(doc.Blocks) == 0 {
+		return nil
+	}
+	lines := make([]render.Line, 0, doc.LineCount())
+	for _, block := range doc.Blocks {
+		for _, line := range block.Lines {
+			lines = append(lines, cloneAppRenderLine(line))
+		}
+	}
+	return lines
 }
 
 func activeCellSourceBoundary(source string, offset int) bool {

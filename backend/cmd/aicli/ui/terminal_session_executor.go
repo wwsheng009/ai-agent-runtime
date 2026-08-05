@@ -145,7 +145,8 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		claimed = &commit
 	}
 
-	plan := ComposeTerminalTransactionPlan(state.AppState, claimed)
+	bootstrap := terminalSessionBootstrapCommits(state, claimed)
+	plan := ComposeTerminalTransactionPlan(state.AppState, claimed, bootstrap)
 	result := e.session.FlushTransaction(plan)
 	return e.publishResult(plan.Frame.LayoutGeneration, claimed, result)
 }
@@ -158,6 +159,34 @@ func terminalSessionClaimedCommit(state UIControllerState, token uint64) (Histor
 		}
 	}
 	return HistoryCommit{}, false
+}
+
+// terminalSessionBootstrapCommits returns the current oldest contiguous
+// pending suffix together with the claimed first token. TerminalSession uses
+// it only when its physical viewport cannot prove that the claimed range is
+// already the outgoing top row (initial load, resume, or a discontinuous
+// history import). The reducer still owns acknowledgement of every token.
+func terminalSessionBootstrapCommits(state UIControllerState, claimed *HistoryCommit) []HistoryCommit {
+	if claimed == nil {
+		return nil
+	}
+	commits := make([]HistoryCommit, 0)
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.LayoutGeneration != state.LayoutGeneration {
+			continue
+		}
+		if entry.Commit.Token == claimed.Token && entry.State == HistoryCommitInFlight {
+			commits = append(commits, entry.Commit.Clone())
+			continue
+		}
+		if len(commits) > 0 && entry.State == HistoryCommitPending {
+			commits = append(commits, entry.Commit.Clone())
+		}
+	}
+	if len(commits) == 0 || commits[0].Token != claimed.Token {
+		return nil
+	}
+	return commits
 }
 
 func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *HistoryCommit, result TerminalTransactionResult) bool {
@@ -184,7 +213,11 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 				Err: history.Err, MayHavePartiallyWritten: history.MayHavePartiallyWritten,
 			})
 		default:
-			if e.controller.Post(HistoryCommitAcknowledged{
+			if len(history.Delivered) > 0 {
+				historyAcknowledged = e.controller.Post(HistoryCommitsAcknowledged{
+					Commits: history.Delivered, Frame: history.Frame, LayoutGeneration: claimed.LayoutGeneration,
+				})
+			} else if e.controller.Post(HistoryCommitAcknowledged{
 				Token: claimed.Token, Frame: history.Frame, LayoutGeneration: claimed.LayoutGeneration,
 			}) {
 				historyAcknowledged = true

@@ -77,6 +77,29 @@ func TestProjectActiveCellBandUsesViewportTailAndRejectsUnsafeRangeBoundary(t *t
 	}
 }
 
+func TestProjectActiveCellBandRendersAssistantMarkdown(t *testing.T) {
+	active := ActiveCellState{
+		CellID:   27,
+		Revision: 1,
+		Kind:     scene.KindAssistant,
+		Phase:    ActiveCellMutable,
+		Source:   "# Live heading\n\n- **one**\n- `two`",
+	}
+	projection := ProjectActiveCellBand(active, GeometryState{Width: 40, Height: 16})
+	if !projection.Valid() {
+		t.Fatalf("markdown projection = %+v", projection)
+	}
+	plain := render.PlainBackend{}.Render(render.LinesDoc(projection.Lines...))
+	for _, want := range []string{"Live heading", "one", "two"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("active markdown projection missing %q: %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "# Live heading") || strings.Contains(plain, "**one**") {
+		t.Fatalf("active projection retained raw markdown: %q", plain)
+	}
+}
+
 func TestLayoutAppStateUsesActiveProjectionOnlyWithoutLegacyBand(t *testing.T) {
 	state := AppState{
 		Geometry: GeometryState{Width: 40, Height: 16},

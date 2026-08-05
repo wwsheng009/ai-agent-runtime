@@ -169,6 +169,46 @@ func (CloseTranscriptOverlay) isUIAction()         {}
 func (CloseTranscriptOverlay) Class() ActionClass  { return ClassBarrier }
 func (CloseTranscriptOverlay) CoalesceKey() string { return "" }
 
+// OpenResumePicker and CloseResumePicker bind the session selector to an
+// already acquired ScreenLease. The fullscreen list keeps its navigation
+// state locally, while AppState records ownership so delayed close/release
+// actions cannot affect a later alternate-screen interaction.
+type OpenResumePicker struct {
+	LeaseID uint64
+}
+
+func (OpenResumePicker) isUIAction()         {}
+func (OpenResumePicker) Class() ActionClass  { return ClassBarrier }
+func (OpenResumePicker) CoalesceKey() string { return "" }
+
+type CloseResumePicker struct {
+	LeaseID uint64
+}
+
+func (CloseResumePicker) isUIAction()         {}
+func (CloseResumePicker) Class() ActionClass  { return ClassBarrier }
+func (CloseResumePicker) CoalesceKey() string { return "" }
+
+// OpenBacktrackPicker and CloseBacktrackPicker bind the destructive history
+// selector to its ScreenLease. The picker owns only transient list state; the
+// actor retains the lease identity so stale lifecycle actions cannot clear a
+// newer modal or resume the primary presenter early.
+type OpenBacktrackPicker struct {
+	LeaseID uint64
+}
+
+func (OpenBacktrackPicker) isUIAction()         {}
+func (OpenBacktrackPicker) Class() ActionClass  { return ClassBarrier }
+func (OpenBacktrackPicker) CoalesceKey() string { return "" }
+
+type CloseBacktrackPicker struct {
+	LeaseID uint64
+}
+
+func (CloseBacktrackPicker) isUIAction()         {}
+func (CloseBacktrackPicker) Class() ActionClass  { return ClassBarrier }
+func (CloseBacktrackPicker) CoalesceKey() string { return "" }
+
 // TranscriptPagerScroll is a durable user intent. Reducer-side layout derives
 // the resulting anchor from semantic cells at the current geometry.
 type TranscriptPagerScroll struct {
@@ -231,6 +271,20 @@ type HistoryCommitAcknowledged struct {
 func (HistoryCommitAcknowledged) isUIAction()         {}
 func (HistoryCommitAcknowledged) Class() ActionClass  { return ClassBarrier }
 func (HistoryCommitAcknowledged) CoalesceKey() string { return "" }
+
+// HistoryCommitsAcknowledged records one bootstrap terminal transaction that
+// delivered several oldest pending history ranges in physical order. The
+// reducer validates every immutable commit identity before advancing any
+// token; this prevents TerminalSession from becoming a second effect ledger.
+type HistoryCommitsAcknowledged struct {
+	Commits          []HistoryCommit
+	Frame            uint64
+	LayoutGeneration uint64
+}
+
+func (HistoryCommitsAcknowledged) isUIAction()         {}
+func (HistoryCommitsAcknowledged) Class() ActionClass  { return ClassBarrier }
+func (HistoryCommitsAcknowledged) CoalesceKey() string { return "" }
 
 type HistoryCommitFailed struct {
 	Token                   uint64

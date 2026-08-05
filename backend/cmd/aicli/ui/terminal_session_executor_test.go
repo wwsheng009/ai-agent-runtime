@@ -7,7 +7,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
 
-func TestTerminalSessionExecutorRecoversThenAcknowledgesOrderedHistory(t *testing.T) {
+func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTransaction(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	postHistoryEffectFixture(t, controller, 20)
 	controller.WaitIdle()
@@ -24,25 +24,22 @@ func TestTerminalSessionExecutorRecoversThenAcknowledgesOrderedHistory(t *testin
 
 	state := controller.State()
 	first := historyCommitEntry(t, state, before[0].Commit.Token)
-	if first.State != HistoryCommitPending || state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
-		t.Fatalf("initial recovery did not defer first handoff cleanly: entry=%#v unknown=%t writes=%d", first, state.HistoryEffects.ProjectionUnknown, writer.writes)
+	if first.State != HistoryCommitAcked || state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
+		t.Fatalf("initial bootstrap did not atomically hand off history: entry=%#v unknown=%t writes=%d", first, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
 
-	// The recovery frame is Known now. A later explicit wake claims the oldest
-	// token and drains only after each Ack is published back to the actor.
-	executor.Request()
-	executor.WaitIdle()
-	state = controller.State()
+	// A complete bootstrap is one physical transaction: it must not first paint
+	// a single-screen-only frame and rely on a later subregion handoff.
 	entries := state.HistoryEffects.Entries()
 	if len(entries) != len(before) {
-		t.Fatalf("history inventory changed across presenter recovery: before=%d after=%d", len(before), len(entries))
+		t.Fatalf("history inventory changed across presenter bootstrap: before=%d after=%d", len(before), len(entries))
 	}
 	for index, entry := range entries {
 		if entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
-			t.Fatalf("entry[%d] was not acknowledged after recovery: %#v", index, entry)
+			t.Fatalf("entry[%d] was not acknowledged after bootstrap: %#v", index, entry)
 		}
-		if index > 0 && entry.AckFrame <= entries[index-1].AckFrame {
-			t.Fatalf("ack frames were not ordered: previous=%#v current=%#v", entries[index-1], entry)
+		if index > 0 && entry.AckFrame < entries[index-1].AckFrame {
+			t.Fatalf("ack frames regressed: previous=%#v current=%#v", entries[index-1], entry)
 		}
 	}
 }
@@ -71,12 +68,12 @@ func TestTerminalSessionExecutorConsumesActorWakeAndDrainsOrderedHistory(t *test
 		if entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
 			t.Fatalf("entry[%d] was not acknowledged through actor wake: %#v", index, entry)
 		}
-		if index > 0 && entry.AckFrame <= entries[index-1].AckFrame {
-			t.Fatalf("ack frame order lost through actor wake: previous=%#v current=%#v", entries[index-1], entry)
+		if index > 0 && entry.AckFrame < entries[index-1].AckFrame {
+			t.Fatalf("ack frame order regressed through actor wake: previous=%#v current=%#v", entries[index-1], entry)
 		}
 	}
-	if writer.writes < 2 {
-		t.Fatalf("expected recovery plus history transactions, writes=%d", writer.writes)
+	if writer.writes != 1 {
+		t.Fatalf("expected one atomic bootstrap transaction, writes=%d", writer.writes)
 	}
 }
 
@@ -140,10 +137,10 @@ func TestTerminalSessionExecutorConsumesControllerWakeWithoutExtraFrame(t *testi
 			t.Fatalf("wake-driven drain left entry unresolved: %#v", entry)
 		}
 	}
-	// The initial source-backed recovery and every handoff are physical writes.
-	// A final no-op frame would be a worker-loop regression.
-	if writer.writes != len(entries)+1 {
-		t.Fatalf("writes = %d, want recovery + each history effect = %d", writer.writes, len(entries)+1)
+	// A write per token, or an initial screen-only recovery followed by a
+	// subregion handoff, would recreate the host-dependent scrollback bug.
+	if writer.writes != 1 {
+		t.Fatalf("writes = %d, want one atomic bootstrap transaction", writer.writes)
 	}
 }
 
@@ -161,8 +158,8 @@ func TestTerminalSessionExecutorFrameFailureInvalidatesThenRecoversWithoutBlindH
 
 	state := controller.State()
 	entry := historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitPending || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
-		t.Fatalf("failed recovery frame did not preserve pending history: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
+	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
+		t.Fatalf("failed bootstrap did not fail closed: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
 
 	writer.short = false
@@ -173,15 +170,15 @@ func TestTerminalSessionExecutorFrameFailureInvalidatesThenRecoversWithoutBlindH
 		t.Fatal("successful source-backed recovery did not restore known projection")
 	}
 	entry = historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitPending {
-		t.Fatalf("recovery blindly handed off pending token: %#v", entry)
+	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten {
+		t.Fatalf("recovery changed failed bootstrap delivery: %#v", entry)
 	}
 
 	executor.Request()
 	executor.WaitIdle()
 	entry = historyCommitEntry(t, controller.State(), firstToken)
-	if entry.State != HistoryCommitAcked {
-		t.Fatalf("post-recovery handoff did not acknowledge original token: %#v", entry)
+	if entry.State != HistoryCommitStateFailed {
+		t.Fatalf("unreconciled partial bootstrap was retried: %#v", entry)
 	}
 }
 

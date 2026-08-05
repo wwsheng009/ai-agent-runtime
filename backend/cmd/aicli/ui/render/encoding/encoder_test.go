@@ -244,6 +244,46 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	}
 }
 
+// The local ReAct loop emits the dotted legacy event name with a nested
+// ReasoningBlock. Keep that production shape on the reasoning route: falling
+// back to opSystem renders the literal event type and loses the thought body.
+func TestEncodeDottedAssistantReasoningUsesNestedTypedPayload(t *testing.T) {
+	e := NewEventEncoder()
+	first := event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-reasoning",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": "first thought. ",
+		},
+	})
+	second := event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-reasoning",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": "second thought.",
+		},
+	})
+	e.Encode(first)
+	e.Encode(second)
+
+	model := e.Snapshot()
+	if len(model.Items) != 1 {
+		t.Fatalf("items = %d, want one reasoning item: %#v", len(model.Items), model.Items)
+	}
+	item := model.Items[0]
+	if item.Kind != KindReasoning || item.Head != "first thought. second thought." {
+		t.Fatalf("reasoning item = %+v", item)
+	}
+	if item.Status != StatusRunning {
+		t.Fatalf("reasoning status = %s, want running", item.Status)
+	}
+
+	e.Encode(event(runtimechat.EventSessionEnd, nil))
+	if got := e.Snapshot().Items[0].Status; got != StatusCompleted {
+		t.Fatalf("reasoning status after session end = %s, want completed", got)
+	}
+}
+
 // TestEncodeTerminalStateFrozen 验证终态保护：assistant final 后到达的
 // delta 被丢弃，状态不会被改回 running。
 func TestEncodeTerminalStateFrozen(t *testing.T) {
@@ -516,7 +556,6 @@ func TestEncodeUnknownTypeFallsBackToSystem(t *testing.T) {
 // TestEncodeSilentSystemEventTypes），新增此类事件应补静默表而非本表。
 func knownLegacyEventTypes() []string {
 	return []string{
-		"assistant.reasoning",
 		"context.preflight.started",
 		"context.preflight.compacted",
 		"context.preflight.failed",

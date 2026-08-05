@@ -231,20 +231,27 @@ func printReasoningEffortCommandStatus(session *ChatSession) {
 }
 
 func persistReasoningEffortCommandPreference(session *ChatSession) {
+	if err := saveReasoningEffortCommandPreference(session); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+}
+
+// saveReasoningEffortCommandPreference persists the setting without selecting
+// a terminal projection. Unified command results surface any error in their
+// atomic cell; the legacy wrapper above retains its stderr warning.
+func saveReasoningEffortCommandPreference(session *ChatSession) error {
 	if session == nil || session.Config == nil {
-		return
+		return nil
 	}
 	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 保存 /reasoning_effort 偏好失败: %v\n", err)
-		return
+		return fmt.Errorf("保存 /reasoning_effort 偏好失败: %w", err)
 	}
 	value := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
 		ReasoningEffort: stringValuePtr(value),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 保存 /reasoning_effort 偏好失败: %v\n", err)
-		return
+		return fmt.Errorf("保存 /reasoning_effort 偏好失败: %w", err)
 	}
 	if session.Config.AICLI == nil {
 		session.Config.AICLI = &config.AICLIConfig{}
@@ -253,4 +260,5 @@ func persistReasoningEffortCommandPreference(session *ChatSession) {
 		session.Config.AICLI.Chat = &config.AICLIChatConfig{}
 	}
 	session.Config.AICLI.Chat.ReasoningEffort = value
+	return nil
 }

@@ -777,6 +777,12 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 	if r.session.ExecEventBridge != nil {
 		r.session.ExecEventBridge.HandleChatCoreEvent(event)
 	}
+	// TerminalSession ownership survives coordinator teardown. The runtime event
+	// bridge above must still observe the semantic event, but this compatibility
+	// renderer must not reopen its stdout branches afterwards.
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
+		return
+	}
 	switch event.Type {
 	case runtimechatcore.EventPlanning:
 		if !r.session.Stream || !shouldRenderChatReasoning(r.session) {
@@ -854,6 +860,9 @@ func (r *aicliEventRenderer) Finalize(response *runtimechatcore.ChatResult, fina
 	if r == nil || r.session == nil {
 		return
 	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
+		return
+	}
 
 	reasoningBlock := finalReasoningBlock(finalMessage)
 	if reasoningBlock != nil && shouldRenderChatReasoning(r.session) && !r.session.Stream {
@@ -923,6 +932,10 @@ func (r *aicliEventRenderer) clearSpinner() {
 		r.spinnerCleared = true
 		return
 	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
+		r.spinnerCleared = true
+		return
+	}
 	fmt.Print("\r   \r")
 	r.spinnerCleared = true
 }
@@ -938,6 +951,10 @@ func (r *aicliEventRenderer) flushAssistantTurnForToolBatch() {
 			r.reasoningOpen = false
 		}
 		r.session.Interaction.FinalizeAssistantDelta()
+		r.resetAssistantStreamState()
+		return
+	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
 		r.resetAssistantStreamState()
 		return
 	}

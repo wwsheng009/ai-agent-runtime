@@ -45,6 +45,14 @@ type chatDebugArchiveManifest struct {
 }
 
 func handleDebugCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		result, handled := tryExecuteStructuredDebugCommand(session, command)
+		if !handled {
+			result = commandTextResult("错误: /debug " + strings.TrimSpace(extractCommandArgument(command)) + " 尚未迁移到统一渲染命令通道。")
+		}
+		_ = renderChatCommandResult(session, result, false)
+		return false
+	}
 	// §5.5 用户交互例外：/debug 输出捕获触发时刻模型尾部锚点（不进入编码器因果链）。
 	if session != nil && session.RuntimeEventBridge != nil {
 		session.RuntimeEventBridge.recordInteractionAnchor("debug")
@@ -200,7 +208,11 @@ func printChatDebugModeStatus(session *ChatSession) {
 }
 
 func printChatDebugUsage() {
-	fmt.Println("用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>]")
+	fmt.Println(chatDebugUsageText())
+}
+
+func chatDebugUsageText() string {
+	return "用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>]"
 }
 
 func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) (*chatDebugArchiveResult, error) {

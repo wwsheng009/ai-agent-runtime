@@ -128,21 +128,27 @@ func printFastCommandStatus(session *ChatSession) {
 }
 
 func persistFastCommandPreference(session *ChatSession) {
+	if err := saveFastCommandPreference(session); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+}
+
+// saveFastCommandPreference persists the setting without emitting terminal
+// output. The structured command path owns diagnostics as a semantic result.
+func saveFastCommandPreference(session *ChatSession) error {
 	if session == nil || session.Config == nil {
-		return
+		return nil
 	}
 	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 保存 /fast 偏好失败: %v\n", err)
-		return
+		return fmt.Errorf("保存 /fast 偏好失败: %w", err)
 	}
 	value := session.FastMode
 	innerPtr := &value
 	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
 		FastMode: &innerPtr,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 保存 /fast 偏好失败: %v\n", err)
-		return
+		return fmt.Errorf("保存 /fast 偏好失败: %w", err)
 	}
 	if session.Config.AICLI == nil {
 		session.Config.AICLI = &config.AICLIConfig{}
@@ -152,4 +158,5 @@ func persistFastCommandPreference(session *ChatSession) {
 	}
 	fastCopy := value
 	session.Config.AICLI.Chat.FastMode = &fastCopy
+	return nil
 }

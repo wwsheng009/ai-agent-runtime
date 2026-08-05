@@ -76,3 +76,23 @@ func TestUnifiedDirectInteractiveOutputFailsClosedWithoutInteraction(t *testing.
 		t.Fatalf("missing Interaction revived raw stdout writer: %q", raw)
 	}
 }
+
+func TestUnifiedTeardownBlocksDirectToolAndShellCompatibilityEntrypoints(t *testing.T) {
+	var terminal bytes.Buffer
+	session := &ChatSession{
+		TerminalSession: ui.NewTerminalSession(&terminal),
+	}
+
+	if handleDirectFunctionCommand(session, "/call example") {
+		t.Fatal("direct function command unexpectedly requested exit")
+	}
+	if handleDirectSkillCommand(session, "/skill example prompt") {
+		t.Fatal("direct skill command unexpectedly requested exit")
+	}
+	if _, err := executeShellCommandDetailed(session, "echo must-not-run"); err == nil {
+		t.Fatal("unified shell compatibility entrypoint was not rejected")
+	}
+	if terminal.Len() != 0 {
+		t.Fatalf("teardown compatibility entrypoint wrote TerminalSession bytes: %q", terminal.String())
+	}
+}

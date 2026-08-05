@@ -348,6 +348,48 @@ func TestTranscriptOverlayReducer_SynchronizesLeaseAndTranscript(t *testing.T) {
 	}
 }
 
+func TestResumePickerReducer_BindsAndClearsLeaseOwnership(t *testing.T) {
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 9}, 1)
+	state = reduceUIControllerState(state, OpenResumePicker{LeaseID: 8}, 2)
+	if state.ResumePicker.Active {
+		t.Fatalf("stale picker open acquired ownership: %#v", state.ResumePicker)
+	}
+	state = reduceUIControllerState(state, OpenResumePicker{LeaseID: 9}, 3)
+	if !state.ResumePicker.Active || state.ResumePicker.LeaseID != 9 {
+		t.Fatalf("picker was not bound to active lease: %#v", state.ResumePicker)
+	}
+	state = reduceUIControllerState(state, CloseResumePicker{LeaseID: 8}, 4)
+	if !state.ResumePicker.Active {
+		t.Fatalf("stale picker close cleared active state: %#v", state.ResumePicker)
+	}
+	state = reduceUIControllerState(state, LeaseReleased{LeaseID: 9}, 5)
+	if state.ResumePicker.Active || state.Lease.Active {
+		t.Fatalf("lease release did not clear picker state: lease=%#v picker=%#v", state.Lease, state.ResumePicker)
+	}
+}
+
+func TestBacktrackPickerReducer_BindsAndClearsLeaseOwnership(t *testing.T) {
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 12}, 1)
+	state = reduceUIControllerState(state, OpenBacktrackPicker{LeaseID: 11}, 2)
+	if state.BacktrackPicker.Active {
+		t.Fatalf("stale backtrack picker open acquired ownership: %#v", state.BacktrackPicker)
+	}
+	state = reduceUIControllerState(state, OpenBacktrackPicker{LeaseID: 12}, 3)
+	if !state.BacktrackPicker.Active || state.BacktrackPicker.LeaseID != 12 {
+		t.Fatalf("backtrack picker was not bound to active lease: %#v", state.BacktrackPicker)
+	}
+	state = reduceUIControllerState(state, CloseBacktrackPicker{LeaseID: 11}, 4)
+	if !state.BacktrackPicker.Active {
+		t.Fatalf("stale backtrack picker close cleared active state: %#v", state.BacktrackPicker)
+	}
+	state = reduceUIControllerState(state, LeaseReleased{LeaseID: 12}, 5)
+	if state.BacktrackPicker.Active {
+		t.Fatalf("lease release did not clear backtrack picker: %#v", state.BacktrackPicker)
+	}
+}
+
 func TestTranscriptOverlayReducer_RejectsStaleLeasePagerIntent(t *testing.T) {
 	state := UIControllerState{}
 	state = reduceUIControllerState(state, Resize{Width: 40, Height: 12}, 1)

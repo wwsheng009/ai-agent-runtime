@@ -305,6 +305,14 @@ func unifiedDirectInteractiveOutput(session *ChatSession) bool {
 	return session.TerminalSession != nil || session.TerminalSessionExecutor != nil
 }
 
+// unifiedInteractiveOutputMustFailClosed identifies teardown/race states in
+// which the unified terminal authority still exists but its coordinator has
+// already gone away. Producers must claim and drop their output here; they
+// must never revive a raw stdout writer after TerminalSession ownership.
+func unifiedInteractiveOutputMustFailClosed(session *ChatSession) bool {
+	return unifiedDirectInteractiveOutput(session) && session.Interaction == nil
+}
+
 // settleInteractiveOutputLayout flushes deferred bottom-reserve shrink
 // compensation without writing transcript content. History / resume replay
 // must call this after ClearPrompt (or beginDirectInteractiveOutput) and
@@ -412,6 +420,26 @@ func printDirectInteractiveOutput(session *ChatSession, text string) {
 func printfDirectInteractiveOutput(session *ChatSession, format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
 	printDirectInteractiveOutput(session, text)
+}
+
+// printChatCommandOutput is the compatibility boundary for finite slash-command
+// results. A unified session submits the whole document as one semantic
+// supplement, while plain and legacy sessions retain their existing terminal
+// projection. Command handlers must not call fmt.Print* directly for this
+// class of output: that bypasses TerminalSession after primary ownership has
+// transferred.
+func printChatCommandOutput(session *ChatSession, text string) {
+	if text == "" {
+		return
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	printDirectInteractiveOutput(session, text)
+}
+
+func printfChatCommandOutput(session *ChatSession, format string, args ...any) {
+	printChatCommandOutput(session, fmt.Sprintf(format, args...))
 }
 
 func showRuntimeComposerPrompt(session *ChatSession, prompt string) bool {

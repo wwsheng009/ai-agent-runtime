@@ -126,21 +126,28 @@ func printStreamCommandStatus(session *ChatSession) {
 }
 
 func persistStreamCommandPreference(session *ChatSession) {
+	if err := saveStreamCommandPreference(session); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+}
+
+// saveStreamCommandPreference persists the setting without choosing a terminal
+// projection. Structured commands turn an error into a command-cell warning;
+// the legacy wrapper above preserves the historic stderr projection.
+func saveStreamCommandPreference(session *ChatSession) error {
 	if session == nil || session.Config == nil {
-		return
+		return nil
 	}
 	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 保存 /stream 偏好失败: %v\n", err)
-		return
+		return fmt.Errorf("保存 /stream 偏好失败: %w", err)
 	}
 	value := session.Stream
 	innerPtr := &value
 	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
 		Stream: &innerPtr,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 保存 /stream 偏好失败: %v\n", err)
-		return
+		return fmt.Errorf("保存 /stream 偏好失败: %w", err)
 	}
 	if session.Config.AICLI == nil {
 		session.Config.AICLI = &config.AICLIConfig{}
@@ -150,4 +157,5 @@ func persistStreamCommandPreference(session *ChatSession) {
 	}
 	streamCopy := value
 	session.Config.AICLI.Chat.Stream = &streamCopy
+	return nil
 }

@@ -403,7 +403,7 @@ func (s *FixedBottomSurface) flushLegacyANSIHoldingLock(sequence string) {
 	if s == nil || sequence == "" {
 		return
 	}
-	_ = s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+	_ = s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {
 		_, _ = io.WriteString(w, sequence)
 	})
 }
@@ -1231,7 +1231,7 @@ func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, outp
 	s.viewportBackend.ClearForceRepaint()
 	s.stageOwnedFrameLocked()
 	if diff := s.viewportBackend.PrepareFlush(); diff != "" {
-		if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+		if err := s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {
 			_, _ = io.WriteString(w, diff)
 		}); err != nil {
 			s.viewportBackend.MarkWriteFailed()
@@ -2238,7 +2238,7 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		s.appendApplyLayoutSequenceLocked(&transition)
 		appendClearRowsSequence(&transition, oldStart, oldRows)
 		if transition.Len() > 0 {
-			fmt.Print(transition.String())
+			fmt.Fprint(TerminalOutput(), transition.String())
 		}
 
 		// The old coordinates are invalid after scroll-down. The following
@@ -3762,7 +3762,7 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 	state := s.bottomPaneStateLocked()
 	s.terminal.MoveTo(s.statusRowLocked(), 1)
 	s.terminal.ClearLine()
-	fmt.Print(s.statusPaintTextLocked(state, s.terminal.Width()))
+	fmt.Fprint(TerminalOutput(), s.statusPaintTextLocked(state, s.terminal.Width()))
 	s.terminal.ClearLine()
 }
 
@@ -3794,7 +3794,7 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 		s.terminal.MoveTo(paint.row, 1)
 		s.terminal.ClearLine()
 		if paint.text != "" {
-			fmt.Print(paint.text)
+			fmt.Fprint(TerminalOutput(), paint.text)
 		}
 	}
 	s.popupRenderedRows = plan.reservedRows
@@ -4117,7 +4117,7 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		}
 		s.terminal.MoveTo(paint.row, 1)
 		if paint.text != "" {
-			fmt.Print(paint.text)
+			fmt.Fprint(TerminalOutput(), paint.text)
 		}
 	}
 	s.promptRenderedStartRow = plan.startRow
@@ -5107,7 +5107,7 @@ func (s *FixedBottomSurface) insertHistoryLinesInRegionLocked(rows []string, reg
 	// Presenter owns the cursor-neutral DECSTBM bytes and batches them as one
 	// handoff plan, so no Terminal fmt.Print call can interleave with a frame.
 	plan := renderengine.NewHandoffPlan(height, regionBottom, rows)
-	if err := s.flushHandoffHoldingLock(os.Stdout, plan); err != nil {
+	if err := s.flushHandoffHoldingLock(TerminalOutput(), plan); err != nil {
 		return renderengine.HandoffPlan{}, false
 	}
 	return plan, true

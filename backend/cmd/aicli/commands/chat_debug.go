@@ -188,6 +188,10 @@ func chatRouteProfileSummary(profile config.AICLISubagentRouteProfile) string {
 }
 
 func printChatAgents(session *ChatSession) {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredAgentsCommand(session, "/agents"), false)
+		return
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return
@@ -199,6 +203,10 @@ func printChatAgents(session *ChatSession) {
 }
 
 func handleChatAgentsCommand(session *ChatSession, command string) {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredAgentsCommand(session, command), false)
+		return
+	}
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	verb := strings.ToLower(firstChatAgentsArgToken(arg))
 	switch verb {
@@ -231,6 +239,21 @@ func handleChatAgentsCommand(session *ChatSession, command string) {
 	default:
 		printChatAgents(session)
 	}
+}
+
+// executeStructuredAgentsCommand accepts only the finite agent-graph snapshot.
+// Picker, delivery, target mutation, panel, and routing branches have their
+// own input/effect lifecycles and cannot be represented as a static cell.
+func executeStructuredAgentsCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	if strings.TrimSpace(extractCommandArgument(command)) != "" {
+		return commandTextResult("错误: /agents 的交互、发送和路由子命令尚未迁移到统一渲染命令通道。")
+	}
+	lines := []string{"Agent Graph:"}
+	lines = append(lines, chatAgentGraphLines(session)...)
+	return commandTextResult(strings.Join(lines, "\n"))
 }
 
 func firstChatAgentsArgToken(argument string) string {
@@ -2021,32 +2044,72 @@ func chatSupervisionTimeShort(value string) string {
 }
 
 func printChatTimeline(session *ChatSession, command string) {
-	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredTimelineCommand(session, command), false)
 		return
 	}
-	fmt.Println("Collab Timeline:")
-	for _, line := range chatTimelineCommandLines(session, command) {
-		fmt.Println(line)
+	text := "错误: 当前没有活动会话"
+	if session != nil {
+		text = chatTimelineCommandText(session, command)
 	}
+	fmt.Println(text)
+}
+
+// executeStructuredTimelineCommand projects the read-only team timeline as a
+// finite command cell. It deliberately has no follow/watch mode, so no
+// background producer or terminal owner is introduced by this migration.
+func executeStructuredTimelineCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	return commandTextResult(chatTimelineCommandText(session, command))
+}
+
+func chatTimelineCommandText(session *ChatSession, command string) string {
+	lines := []string{"Collab Timeline:"}
+	lines = append(lines, chatTimelineCommandLines(session, command)...)
+	return strings.Join(lines, "\n")
 }
 
 func printChatCollab(session *ChatSession, command string) {
-	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredCollabCommand(session, command), false)
 		return
 	}
+	text := "错误: 当前没有活动会话"
+	if session != nil {
+		text = chatCollabCommandText(session, command)
+	}
+	fmt.Println(text)
+}
+
+// executeStructuredCollabCommand accepts the finite mailbox snapshot only.
+// The follow/watch branch waits for subsequent runtime state and therefore
+// remains explicitly unavailable until it has a typed effect/result stream.
+func executeStructuredCollabCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	opts := parseChatCollabCommandConfig(command, 20)
+	if opts.Follow {
+		return commandTextResult("错误: /collab follow 需要持续观察 effect，尚未迁移到统一渲染命令通道。")
+	}
+	return commandTextResult(chatCollabCommandText(session, command))
+}
+
+func chatCollabCommandText(session *ChatSession, command string) string {
 	target, _ := parseChatCollabTargetAndLimit(command, 20)
+	heading := "Parent Mailbox Timeline:"
 	if isChatCollabAllTarget(target) {
-		fmt.Println("All Mailbox Timelines:")
+		heading = "All Mailbox Timelines:"
 	} else if strings.TrimSpace(target) == "" {
-		fmt.Println("Parent Mailbox Timeline:")
+		heading = "Parent Mailbox Timeline:"
 	} else {
-		fmt.Println("Agent Mailbox Timeline:")
+		heading = "Agent Mailbox Timeline:"
 	}
-	for _, line := range chatCollabCommandLines(session, command) {
-		fmt.Println(line)
-	}
+	lines := []string{heading}
+	lines = append(lines, chatCollabCommandLines(session, command)...)
+	return strings.Join(lines, "\n")
 }
 
 func parseChatTimelineLimit(command string, fallback int) int {

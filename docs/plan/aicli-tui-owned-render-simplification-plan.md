@@ -23,6 +23,8 @@
 5. 一个 transactional Presenter 独占终端，并以 Ack/Fail action 回报结果；
 6. `TerminalProjectionState` 显式区分 `Known/Unknown`，失败后从 AppState 恢复。
 
+**主界面历史契约**：normal primary frame 必须展示 `TranscriptState` 中可容纳的最新 finalized display-row tail；它不是只展示当前 assistant/reasoning 的页面。`ActiveBand` 只能使用 bottom-pane 的独立行，不能覆盖或替换 retained transcript viewport。`Ctrl+T`/`/history` 是完整 transcript 的补充 pager，不得作为主屏历史缺失的替代方案。首次/不连续 history reconcile 必须以 `eligible prefix -> retained tail` 的同一 terminal transaction 建立 scrollback；把 prefix 再写进 viewport 底部会滚出错误的当前 tail，属于禁止的 handoff 协议。
+
 本方案明确否决以下旧候选：
 
 - 全局 `Frame mode -> Scrollback mode`；
@@ -272,7 +274,9 @@ ActiveBand/prompt/popup/status 的行数变化只产生 `GeometryChanged`/state 
 - prompt/status/popup/focus/geometry/lease 进入同一 snapshot；
 - `FlushPolicy` 真正驱动统一 frame scheduler。
 
-**实际进度（2026-08-04，Phase 2 partial）**
+**历史实施记录（2026-08-04，Phase 2 partial）**
+
+> 本节记录 direct cutover 之前的实施快照。2026-08-05 起 interactive TTY 的当前所有权以本文开头的实施状态更新和母计划 §15.7/§15.8 为准：`TerminalSessionPresenter` 已是唯一 primary writer；下列“shadow”“未安装”和 legacy writer 表述不再描述当前 production path。
 
 - `ui.AppState` 和 `UIController.AppState()` 已提供深拷贝 snapshot；controller transition state 嵌入该 AppState，geometry/lease 不再在 transition ledger 之外保存第二份字段。
 - runtime Scene snapshot 在普通 `RuntimeEvent` reducer 完成 ChangeSet mapping 后，经 causal `ReplaceTranscriptAction` 进入 actor；mutable Scene cell 只派生 active semantic `CellID/Revision/Source`，不猜测 stable/enqueued/acked range。
@@ -297,6 +301,8 @@ ActiveBand/prompt/popup/status 的行数变化只产生 `GeometryChanged`/state 
 出口：coordinator/surface 不再各自保存可独立推进的 UI 正文和 bottom component 状态。
 
 ### Phase 3：TerminalSession 与 effect queue
+
+> 以下是 direct cutover 前的 Phase 3 实施快照。当前 interactive TTY 中，`TerminalSessionPresenter/TerminalSessionExecutor` 已接入 runtime，独占 primary terminal transaction；`FixedBottomSurface` 的 physical write 与 legacy history handoff 已被 fence。保留本段是为了说明 effect queue、Known/Unknown、recovery 和 tokenized history 的演化约束，而不是把 `TerminalSession` 重新降级为“未安装”的 shadow seam。其余 compatibility state、完整 producer 收敛和 legacy 删除仍是后续硬门禁。
 
 当前已完成 effect queue 的 reducer/data-plane、注入 sink executor，以及一个未安装的 `TerminalSession` viewport/history-sink seam。`ComposeAppRenderFrame` 先从 AppState 生成 rich `render.Line` row（transcript kind role、typed ActiveBand、status document）并与 `AppScreenRow.Text` 做逐行 plain parity；`ComposeTerminalFramePlan` 同时保留两份投影，session 拒绝 rich/text 不一致的 frame。该 session 已覆盖 private front/back projection、Known/Unknown、generation、lease defer/release full repaint、cursor、explicit ThemeContext/profile transition 和 short-write/panic recovery；它可在已确认的同 generation、未 resize、非 lease primary 上通过 `TerminalTransactionPlan` 把结构化 `HistoryCommit.Lines` 经共同 `ANSIBackend + HandoffPlan`、viewport diff 与 cursor 合成为一次 target write，成功后镜像物理 scroll append；Unknown/resize/lease 时 history 严格 Deferred、frame 仅完成 recovery。未安装的 `TerminalSessionExecutor` 已把 controller claim -> immutable snapshot -> transaction -> Deferred/Ack/Failed + projection invalidated/recovered 的因果回投固定为 worker seam，覆盖 recovery 后再 handoff，仍不接 live runtime。失败/in-flight invalidation 后，`HistoryScrollbackReconciled` 只接受由 future terminal owner 在 scrollback reset/replacement 与确认恢复后发出的单调 epoch，并据此丢弃旧 ledger、重新从 semantic source mint token；普通 repaint 仍不能跳过未知 delivery。隔离 `HistoryCommitSink` 仍只作单 effect fault seam。但它未接 runtime/`FixedBottomSurface`，production executor、single-writer 切换与 legacy handoff 删除仍是硬门禁，不能因这些类型和测试已存在而跳过。
 

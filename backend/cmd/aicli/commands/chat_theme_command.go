@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
@@ -135,8 +136,194 @@ func isThemeModeToken(raw string) bool {
 	}
 }
 
+// executeStructuredThemeQueryCommand claims the finite, read-only /theme
+// reports for an owned interactive terminal. It deliberately declines picker
+// and mutation variants: those require typed UI/effect transactions so no
+// legacy fullscreen prompt or global-theme repaint can interleave with the
+// TerminalSession presenter.
+func executeStructuredThemeQueryCommand(session *ChatSession, command string) (CommandResult, bool) {
+	request, err := parseThemeCommandRequest(command)
+	if err != nil {
+		return commandTextResult(themeCommandUsageText(err)), true
+	}
+
+	switch request.Action {
+	case themeCommandStatus:
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatThemeStatusDocument(session)}},
+			Action: CommandContinue,
+		}, true
+	case themeCommandList:
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatThemeListDocument(session)}},
+			Action: CommandContinue,
+		}, true
+	case themeCommandPreview:
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatThemePreviewDocument()}},
+			Action: CommandContinue,
+		}, true
+	default:
+		return CommandResult{}, false
+	}
+}
+
+func themeCommandUsageText(err error) string {
+	lines := []string{
+		"错误: " + err.Error(),
+		"用法: /theme [mode|palette|list|status|preview|select]",
+		"  明暗: " + strings.Join(ui.SupportedThemeModeNames(), "|"),
+		"  配色: " + strings.Join(ui.SupportedThemePresetNames(), "|"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+// buildChatThemeStatusDocument is the structured projection of the legacy
+// status report. Sample swatches are intentionally represented by plain
+// semantic labels here: preserving a pre-encoded ANSI sample would let an
+// obsolete theme leak through the presenter after a later theme change.
+func buildChatThemeStatusDocument(session *ChatSession) render.Document {
+	mode := ui.CurrentThemeModeName()
+	palette := ui.CurrentThemeName()
+	lines := make([]string, 0, 8)
+
+	modeLine := "当前明暗: " + mode
+	if mode == ui.ThemeModeAuto {
+		modeLine += " (实际: " + ui.CurrentThemeResolvedModeName() + ")"
+	}
+	if description := ui.ThemeModeDescription(mode); description != "" {
+		modeLine += " — " + description
+	}
+	lines = append(lines, modeLine)
+
+	paletteLine := "当前配色: " + palette
+	if description := ui.ThemePresetDescription(palette); description != "" {
+		paletteLine += " — " + description
+	}
+	lines = append(lines,
+		paletteLine,
+		"当前语法: "+ui.CurrentSyntaxThemeName(),
+		"可选明暗: "+strings.Join(ui.SupportedThemeModeNames(), ", "),
+		"可选配色: "+strings.Join(ui.SupportedThemePresetNames(), ", "),
+		"可选语法: "+strings.Join(ui.CuratedSyntaxThemeNames(), ", "),
+		"预览: user asst system tool think err ok dim",
+		themeConfigDefaultsText(session),
+	)
+	return textLinesDocument(lines)
+}
+
+// buildChatThemeListDocument is the terminal-neutral projection of the legacy
+// options report. No string has been ANSI-encoded, so the presenter resolves
+// styles only once with the frame's current theme/profile.
+func buildChatThemeListDocument(session *ChatSession) render.Document {
+	currentMode := ui.CurrentThemeModeName()
+	currentPalette := ui.CurrentThemeName()
+	lines := []string{"明暗模式:"}
+	for _, name := range ui.SupportedThemeModeNames() {
+		marker := ""
+		if name == currentMode {
+			marker = " (当前)"
+		}
+		line := "  - " + name + marker
+		if description := ui.ThemeModeDescription(name); description != "" {
+			line += " — " + description
+		}
+		lines = append(lines, line)
+	}
+
+	lines = append(lines, "配色方案:")
+	for _, name := range ui.SupportedThemePresetNames() {
+		marker := ""
+		if name == currentPalette {
+			marker = " (当前)"
+		}
+		line := "  - " + name + marker
+		if description := ui.ThemePresetDescription(name); description != "" {
+			line += " — " + description
+		}
+		lines = append(lines, line, "      user asst system tool think err ok dim")
+	}
+	lines = append(lines, themeConfigDefaultsText(session))
+	return textLinesDocument(lines)
+}
+
+// buildChatThemePreviewDocument retains syntax and diff spans in the command
+// cell. TerminalSessionPresenter resolves those spans at frame composition,
+// rather than accepting FormatThemePreviewRich's pre-encoded ANSI bytes.
+func buildChatThemePreviewDocument() render.Document {
+	mode := ui.CurrentThemeModeName()
+	palette := ui.CurrentThemeName()
+	resolved := ui.CurrentThemeResolvedModeName()
+	syntax := ui.CurrentSyntaxThemeName()
+	header := "主题预览: mode=" + mode
+	if mode == ui.ThemeModeAuto {
+		header += " (实际: " + resolved + ")"
+	}
+	header += " palette=" + palette + " syntax=" + syntax
+
+	doc := render.SingleLineDoc(render.TextSpan(header))
+	preview := ui.ThemePreviewDocument(ui.ThemePreviewOptions{
+		Width:       ui.GetTerminalWidth(),
+		Palette:     palette,
+		Mode:        mode,
+		SyntaxTheme: syntax,
+		Compact:     false,
+	})
+	doc.Blocks = append(doc.Blocks, preview.Blocks...)
+
+	lines := []string{"各配色（按当前有效明暗）:"}
+	for _, name := range ui.SupportedThemePresetNames() {
+		marker := ""
+		if name == palette {
+			marker = " *"
+		}
+		lines = append(lines, "  "+name+marker+": user asst system tool think err ok dim")
+	}
+	doc.Blocks = append(doc.Blocks, textLinesDocument(lines).Blocks...)
+	return doc
+}
+
+func themeConfigDefaultsText(session *ChatSession) string {
+	if session == nil || session.Config == nil || session.Config.AICLI == nil || session.Config.AICLI.Theme == nil {
+		return "配置默认: (未设置)"
+	}
+	cfg := session.Config.AICLI.Theme
+	configuredName := strings.TrimSpace(cfg.Name)
+	configuredMode := strings.TrimSpace(cfg.Mode)
+	if configuredName == "" && configuredMode == "" {
+		return "配置默认: (未设置)"
+	}
+
+	parts := make([]string, 0, 2)
+	if configuredMode != "" {
+		if normalized := ui.NormalizeThemeModeName(configuredMode); normalized != "" {
+			parts = append(parts, "mode="+normalized)
+		} else {
+			parts = append(parts, "mode="+configuredMode+" (无效)")
+		}
+	}
+	if configuredName != "" {
+		if normalized := ui.NormalizeThemePresetName(configuredName); normalized != "" {
+			parts = append(parts, "palette="+normalized)
+		} else {
+			parts = append(parts, "palette="+configuredName+" (无效)")
+		}
+	}
+	return "配置默认: " + strings.Join(parts, ", ")
+}
+
 // handleThemeCommand switches the aicli terminal theme and persists preferences.
 func handleThemeCommand(session *ChatSession, command string, noInteractive bool) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredThemeQueryCommand(session, command); handled {
+			_ = renderChatCommandResult(session, result, false)
+			return false
+		}
+		return rejectUnifiedInteractiveLegacyCommand(session, "/theme")
+	}
+	if rejectUnifiedInteractiveLegacyCommand(session, "/theme") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -144,10 +331,7 @@ func handleThemeCommand(session *ChatSession, command string, noInteractive bool
 
 	req, err := parseThemeCommandRequest(command)
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-		fmt.Println("用法: /theme [mode|palette|list|status|preview|select]")
-		fmt.Printf("  明暗: %s\n", strings.Join(ui.SupportedThemeModeNames(), "|"))
-		fmt.Printf("  配色: %s\n", strings.Join(ui.SupportedThemePresetNames(), "|"))
+		fmt.Println(themeCommandUsageText(err))
 		return false
 	}
 

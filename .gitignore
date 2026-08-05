@@ -16,6 +16,9 @@ backend/vendor/
 .aicli/
 _baseline-check/
 
+# Reasonix tool local state (session/topic metadata)
+.reasonix/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

@@ -1,10 +1,14 @@
 package commands
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -27,6 +31,139 @@ func TestParseChatBacktrackArgsApplySubmit(t *testing.T) {
 	require.True(t, req.AutoSubmit)
 	require.False(t, req.PreviewOnly)
 	require.Equal(t, runtimechat.BacktrackModeConversation, req.Mode)
+}
+
+func TestBacktrackPickerCommandResultHasNoTranscriptDocument(t *testing.T) {
+	result := newBacktrackPickerCommandResult()
+	if result.OpenBacktrackPicker == nil {
+		t.Fatal("backtrack picker result is missing its typed effect")
+	}
+	if result.Action != CommandContinue {
+		t.Fatalf("backtrack picker action=%v want CommandContinue", result.Action)
+	}
+	if got := result.Document(); len(got.Blocks) != 0 {
+		t.Fatalf("backtrack picker unexpectedly committed a transcript document: %#v", got)
+	}
+}
+
+func TestStructuredBacktrackApplyCarriesTypedMutationEffect(t *testing.T) {
+	result, handled := executeStructuredBacktrackQueryCommand(&ChatSession{}, `/backtrack 3 --both --edit "revised" --submit`)
+	if !handled {
+		t.Fatal("direct backtrack apply was not claimed by the structured dispatcher")
+	}
+	if result.ApplyBacktrack == nil {
+		t.Fatal("direct backtrack apply is missing its typed mutation effect")
+	}
+	if got := result.Document(); len(got.Blocks) != 0 {
+		t.Fatalf("backtrack apply unexpectedly committed a pre-mutation document: %#v", got)
+	}
+	request := result.ApplyBacktrack.Request
+	if request.UserTurnIndex == nil || *request.UserTurnIndex != 3 {
+		t.Fatalf("typed request user turn = %#v, want 3", request.UserTurnIndex)
+	}
+	if request.Mode != runtimechat.BacktrackModeBoth || request.EditPrompt != "revised" || !request.AutoSubmit || request.PreviewOnly {
+		t.Fatalf("typed request = %#v, want both/revised/submit/apply", request)
+	}
+}
+
+func TestStructuredRewindApplyRemainsFenced(t *testing.T) {
+	if _, handled := executeStructuredBacktrackQueryCommand(&ChatSession{}, "/rewind 3 --apply"); handled {
+		t.Fatal("numeric /rewind unexpectedly entered backtrack apply transaction")
+	}
+}
+
+func TestApplySelectedBacktrackReplacesUnifiedCanonicalTranscript(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ctx := context.Background()
+	storage := runtimechat.NewInMemoryStorage()
+	persisted := runtimechat.NewSession("backtrack-apply-user")
+	persisted.ID = "unified-backtrack-apply"
+	persisted.AddMessage(*runtimetypes.NewUserMessage("surviving prompt"))
+	persisted.AddMessage(*runtimetypes.NewAssistantMessage("surviving answer"))
+	persisted.AddMessage(*runtimetypes.NewUserMessage("removed prompt"))
+	persisted.AddMessage(*runtimetypes.NewAssistantMessage("removed answer"))
+	if err := storage.Save(ctx, persisted); err != nil {
+		t.Fatalf("save backtrack fixture: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, nil)
+	t.Cleanup(manager.Stop)
+	hub := runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+		return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
+			Agent:        runtimeagent.NewAgent(&runtimeagent.Config{Name: "backtrack-apply"}, nil),
+			SessionStore: storage,
+			StateStore:   runtimechat.NewInMemoryRuntimeStore(8),
+		})
+	})
+	t.Cleanup(hub.StopAll)
+
+	session := &ChatSession{
+		SessionManager:   manager,
+		RuntimeSession:   persisted,
+		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
+	}
+	if err := replaceRuntimeMessages(session, persisted.GetMessages()); err != nil {
+		t.Fatalf("seed canonical messages: %v", err)
+	}
+	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(88, 30)
+	interaction.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !interaction.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+	printVisibleChatHistory(session, "")
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+	terminal.Reset()
+
+	actor, err := chatActorForSession(ctx, session)
+	if err != nil {
+		t.Fatalf("get backtrack actor: %v", err)
+	}
+	turns, err := actor.ListTurns(ctx)
+	if err != nil || len(turns) != 2 {
+		t.Fatalf("list turns = (%#v, %v), want two turns", turns, err)
+	}
+	applySelectedBacktrack(session, actor, ctx, turns[1], runtimechat.BacktrackModeConversation)
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+
+	state := interaction.uiActor.AppState()
+	var transcript strings.Builder
+	for _, cell := range state.Transcript.Cells {
+		transcript.WriteString(cell.Source)
+		transcript.WriteByte('\n')
+	}
+	got := transcript.String()
+	for _, want := range []string{
+		"已回退到 user turn 1：上方旧消息已失效",
+		"surviving prompt",
+		"backtrack apply: turn=1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("unified backtrack transcript is missing %q:\n%s", want, got)
+		}
+	}
+	for _, cell := range state.Transcript.Cells {
+		if strings.Contains(cell.Source, "backtrack apply:") {
+			continue
+		}
+		for _, removed := range []string{"removed prompt", "removed answer"} {
+			if strings.Contains(cell.Source, removed) {
+				t.Fatalf("truncated content remained in canonical Scene cell as %q: %#v", removed, cell)
+			}
+		}
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified backtrack populated legacy historyWindow: %#v", got)
+	}
+	if !strings.Contains(terminal.String(), "backtrack apply: turn=1") {
+		t.Fatalf("TerminalSession did not render backtrack result: %q", terminal.String())
+	}
 }
 
 func TestParseChatBacktrackArgsRejectsUnknown(t *testing.T) {
@@ -70,6 +207,16 @@ func TestHandleInteractiveBacktrackSelectNonInteractive(t *testing.T) {
 	session := &ChatSession{NoInteractive: true}
 	// Should not panic; returns false without opening a picker.
 	require.False(t, handleInteractiveBacktrackSelect(session))
+}
+
+func TestHandleInteractiveBacktrackSelectUnifiedTeardownFailsClosed(t *testing.T) {
+	session := &ChatSession{TerminalSession: ui.NewTerminalSession(&bytes.Buffer{})}
+	raw := captureStdout(t, func() {
+		require.False(t, handleInteractiveBacktrackSelect(session))
+	})
+	if raw != "" {
+		t.Fatalf("unified backtrack shortcut revived legacy stdout: %q", raw)
+	}
 }
 
 func TestHandleBacktrackAuditListMissingRuntime(t *testing.T) {

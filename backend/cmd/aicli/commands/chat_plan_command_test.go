@@ -1,9 +1,11 @@
 package commands
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
@@ -179,6 +181,68 @@ func TestHandlePlanCommand_ExitWithoutActiveRequiresPlanMode(t *testing.T) {
 	}
 	if session.PermissionMode != runtimepolicy.ModeDefault {
 		t.Fatalf("expected default after bare plan quit, got %s", session.PermissionMode)
+	}
+}
+
+func TestDispatchPlanCommandStaysOnUnifiedTerminalSession(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := newPlanCommandSession(runtimepolicy.ModeDefault)
+	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(88, 24)
+	interaction.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !interaction.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+	terminal.Reset()
+
+	for _, command := range []string{
+		"/plan",
+		"/plan enter docs/feature-plan.md",
+		"/plan request_changes add a handoff regression",
+		"/plan approve ready",
+	} {
+		if dispatchChatCommand(session, command, false) {
+			t.Fatalf("%s unexpectedly requested chat exit", command)
+		}
+	}
+	if handlePlanCommand(session, "/plan status") {
+		t.Fatal("direct unified /plan entry unexpectedly requested chat exit")
+	}
+
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+	state := interaction.uiActor.AppState()
+	var transcript strings.Builder
+	for _, cell := range state.Transcript.Cells {
+		transcript.WriteString(cell.Source)
+		transcript.WriteByte('\n')
+	}
+	for _, marker := range []string{
+		"plan mode: inactive",
+		"已进入 plan mode",
+		"保持 plan mode",
+		"已批准计划并退出 plan mode",
+	} {
+		if !strings.Contains(transcript.String(), marker) {
+			t.Fatalf("semantic transcript is missing %q:\n%s", marker, transcript.String())
+		}
+	}
+	if strings.Contains(transcript.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("/plan was still rejected by the unified command gate:\n%s", transcript.String())
+	}
+	if !strings.Contains(terminal.String(), "plan mode: inactive") {
+		t.Fatalf("TerminalSession did not render the direct unified /plan result: %q", terminal.String())
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified /plan populated legacy historyWindow: %#v", got)
 	}
 }
 

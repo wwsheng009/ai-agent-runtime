@@ -25,6 +25,10 @@ import (
 //	/plan quit [notes]             exit quit
 //	/plan off                      alias of exit quit
 func handlePlanCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredPlanCommand(session, command), false)
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -88,6 +92,99 @@ func handlePlanCommand(session *ChatSession, command string) bool {
 	}
 }
 
+type chatPlanModeMutationResult struct {
+	State   planmode.State
+	SyncErr error
+}
+
+// executeStructuredPlanCommand is the unified-TTY projection of /plan. It
+// performs the same mutation as the plain handler but returns all user-visible
+// output, including persistence failures, as one semantic command result.
+func executeStructuredPlanCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+
+	arg := strings.TrimSpace(extractCommandArgument(command))
+	if arg == "" || strings.EqualFold(firstToken(arg), "status") {
+		return commandTextResult(planModeStatusText(session))
+	}
+
+	verb, rest := splitFirstToken(arg)
+	switch strings.ToLower(verb) {
+	case "enter", "on", "start":
+		result, err := enterChatPlanModeWithResult(session, strings.TrimSpace(rest))
+		if err != nil {
+			return commandErrorResult(err)
+		}
+		return planModeMutationCommandResult(result, formatPlanModeEntered(result.State, true))
+	case "exit":
+		decisionToken, notes := splitFirstToken(rest)
+		if strings.TrimSpace(decisionToken) == "" {
+			return commandTextResult("用法: /plan exit <approve|request_changes|quit> [notes]")
+		}
+		return executeStructuredPlanModeExit(session, decisionToken, notes)
+	case "approve", "approved", "yes", "y":
+		return executeStructuredPlanModeExit(session, "approve", rest)
+	case "request_changes", "request-changes", "changes", "revise":
+		return executeStructuredPlanModeExit(session, "request_changes", rest)
+	case "quit", "cancel", "abort", "off", "no", "n":
+		return executeStructuredPlanModeExit(session, "quit", rest)
+	default:
+		if looksLikePlanPath(verb) && rest == "" {
+			result, err := enterChatPlanModeWithResult(session, verb)
+			if err != nil {
+				return commandErrorResult(err)
+			}
+			return planModeMutationCommandResult(result, formatPlanModeEntered(result.State, false))
+		}
+		return commandTextResult("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>]")
+	}
+}
+
+func executeStructuredPlanModeExit(session *ChatSession, decisionToken, notes string) CommandResult {
+	result, err := exitChatPlanModeWithResult(session, decisionToken, notes)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	return planModeMutationCommandResult(result, formatPlanModeExited(session, result.State))
+}
+
+func planModeMutationCommandResult(result chatPlanModeMutationResult, message string) CommandResult {
+	if result.SyncErr == nil {
+		return commandTextResult(message)
+	}
+	return commandResultWithWarnings(
+		buildChatPlainTextCommandDocument(message),
+		fmt.Errorf("保存 plan mode 后同步会话失败: %w", result.SyncErr),
+	)
+}
+
+func formatPlanModeEntered(state planmode.State, includeWrites bool) string {
+	message := fmt.Sprintf("提示: 已进入 plan mode（plan=%s, previous=%s",
+		state.PlanPath,
+		firstNonEmptyChatValue(state.PreviousMode, string(runtimepolicy.ModeDefault)),
+	)
+	if includeWrites {
+		message += ", writes=" + strings.Join(state.WriteAllowPaths, ", ")
+	}
+	return message + "）"
+}
+
+func formatPlanModeExited(session *ChatSession, state planmode.State) string {
+	mode := string(session.PermissionMode)
+	switch state.ExitDecision {
+	case planmode.ExitApprove:
+		return fmt.Sprintf("提示: 已批准计划并退出 plan mode（permission-mode=%s）", mode)
+	case planmode.ExitRequestChanges:
+		return fmt.Sprintf("提示: 已请求修改计划；保持 plan mode（permission-mode=%s, plan=%s）", mode, state.PlanPath)
+	case planmode.ExitQuit:
+		return fmt.Sprintf("提示: 已退出 plan mode（permission-mode=%s）", mode)
+	default:
+		return fmt.Sprintf("提示: plan mode 已更新（permission-mode=%s）", mode)
+	}
+}
+
 func exitChatPlanModeCommand(session *ChatSession, decisionToken, notes string) bool {
 	if err := exitChatPlanMode(session, decisionToken, notes); err != nil {
 		fmt.Printf("错误: %v\n", err)
@@ -109,8 +206,17 @@ func exitChatPlanModeCommand(session *ChatSession, decisionToken, notes string) 
 }
 
 func enterChatPlanMode(session *ChatSession, planPath string) error {
+	result, err := enterChatPlanModeWithResult(session, planPath)
+	if err != nil {
+		return err
+	}
+	warnIfChatSessionSyncFails(session, "enter plan mode", result.SyncErr)
+	return nil
+}
+
+func enterChatPlanModeWithResult(session *ChatSession, planPath string) (chatPlanModeMutationResult, error) {
 	if session == nil {
-		return fmt.Errorf("当前没有活动会话")
+		return chatPlanModeMutationResult{}, fmt.Errorf("当前没有活动会话")
 	}
 	ensureChatPlanModeRuntimeSession(session)
 
@@ -132,14 +238,23 @@ func enterChatPlanMode(session *ChatSession, planPath string) error {
 	state := planmode.Enter(previousMode, planPath)
 	saveChatPlanMode(session, state)
 	applyChatPlanPermissionMode(session, runtimepolicy.ModePlan)
-	warnIfChatSessionSyncFails(session, "enter plan mode", syncRuntimeSessionFromChat(session))
+	syncErr := syncRuntimeSessionFromChat(session)
 	refreshChatComposerContext(session)
-	return nil
+	return chatPlanModeMutationResult{State: loadChatPlanMode(session), SyncErr: syncErr}, nil
 }
 
 func exitChatPlanMode(session *ChatSession, decisionToken, notes string) error {
+	result, err := exitChatPlanModeWithResult(session, decisionToken, notes)
+	if err != nil {
+		return err
+	}
+	warnIfChatSessionSyncFails(session, "exit plan mode", result.SyncErr)
+	return nil
+}
+
+func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes string) (chatPlanModeMutationResult, error) {
 	if session == nil {
-		return fmt.Errorf("当前没有活动会话")
+		return chatPlanModeMutationResult{}, fmt.Errorf("当前没有活动会话")
 	}
 	ensureChatPlanModeRuntimeSession(session)
 
@@ -147,14 +262,14 @@ func exitChatPlanMode(session *ChatSession, decisionToken, notes string) error {
 	if !planmode.IsActive(current) && current.Status != planmode.StatusExited {
 		// Allow exit even if user only set permission-mode=plan via /mode.
 		if session.PermissionMode != runtimepolicy.ModePlan {
-			return fmt.Errorf("当前不在 plan mode；先执行 /plan enter")
+			return chatPlanModeMutationResult{}, fmt.Errorf("当前不在 plan mode；先执行 /plan enter")
 		}
 		current = planmode.Enter(string(runtimepolicy.ModeDefault), planmode.DefaultPlanPath)
 	}
 
 	exited, err := planmode.Exit(current, planmode.ExitDecision(decisionToken), notes)
 	if err != nil {
-		return err
+		return chatPlanModeMutationResult{}, err
 	}
 
 	resume := planmode.ResumeModeAfterExit(exited)
@@ -174,9 +289,9 @@ func exitChatPlanMode(session *ChatSession, decisionToken, notes string) error {
 		applyChatPlanPermissionMode(session, mode)
 	}
 
-	warnIfChatSessionSyncFails(session, "exit plan mode", syncRuntimeSessionFromChat(session))
+	syncErr := syncRuntimeSessionFromChat(session)
 	refreshChatComposerContext(session)
-	return nil
+	return chatPlanModeMutationResult{State: loadChatPlanMode(session), SyncErr: syncErr}, nil
 }
 
 func toggleChatPlanMode(session *ChatSession) error {
@@ -233,6 +348,7 @@ func ensureChatPlanModeRuntimeSession(session *ChatSession) {
 				Context: map[string]interface{}{},
 			},
 		}
+		updateChatRuntimeEventBridgePrimarySession(session)
 		return
 	}
 	if session.RuntimeSession.Metadata.Context == nil {
@@ -241,40 +357,47 @@ func ensureChatPlanModeRuntimeSession(session *ChatSession) {
 }
 
 func printPlanModeStatus(session *ChatSession) {
+	fmt.Println(planModeStatusText(session))
+}
+
+func planModeStatusText(session *ChatSession) string {
 	state := loadChatPlanMode(session)
 	mode := string(runtimepolicy.ModeDefault)
 	if session != nil && strings.TrimSpace(string(session.PermissionMode)) != "" {
 		mode = string(session.PermissionMode)
 	}
 	active := planmode.IsActive(state) || mode == string(runtimepolicy.ModePlan)
-	fmt.Printf("plan mode: %s\n", map[bool]string{true: "active", false: "inactive"}[active])
-	fmt.Printf("  permission-mode: %s\n", mode)
+	lines := []string{
+		fmt.Sprintf("plan mode: %s", map[bool]string{true: "active", false: "inactive"}[active]),
+		fmt.Sprintf("  permission-mode: %s", mode),
+	}
 	if state.PlanPath != "" {
-		fmt.Printf("  plan path: %s\n", state.PlanPath)
+		lines = append(lines, "  plan path: "+state.PlanPath)
 	} else if active {
-		fmt.Printf("  plan path: %s\n", planmode.DefaultPlanPath)
+		lines = append(lines, "  plan path: "+planmode.DefaultPlanPath)
 	}
 	if len(state.WriteAllowPaths) > 0 {
-		fmt.Printf("  write allow: %s\n", strings.Join(state.WriteAllowPaths, ", "))
+		lines = append(lines, "  write allow: "+strings.Join(state.WriteAllowPaths, ", "))
 	} else if active {
-		fmt.Printf("  write allow: %s\n", strings.Join(planmode.DefaultWriteAllowPaths(), ", "))
+		lines = append(lines, "  write allow: "+strings.Join(planmode.DefaultWriteAllowPaths(), ", "))
 	}
 	if state.PreviousMode != "" {
-		fmt.Printf("  previous mode: %s\n", state.PreviousMode)
+		lines = append(lines, "  previous mode: "+state.PreviousMode)
 	}
 	if state.EnteredAt != "" {
-		fmt.Printf("  entered at: %s\n", state.EnteredAt)
+		lines = append(lines, "  entered at: "+state.EnteredAt)
 	}
 	if state.ExitDecision != "" {
-		fmt.Printf("  last exit decision: %s\n", state.ExitDecision)
+		lines = append(lines, "  last exit decision: "+string(state.ExitDecision))
 	}
 	if state.Notes != "" {
-		fmt.Printf("  notes: %s\n", state.Notes)
+		lines = append(lines, "  notes: "+state.Notes)
 	}
 	if state.PendingExitRequest {
-		fmt.Println("  pending exit request: true")
+		lines = append(lines, "  pending exit request: true")
 	}
-	fmt.Println("用法: /plan enter [path] | /plan exit <approve|request_changes|quit>")
+	lines = append(lines, "用法: /plan enter [path] | /plan exit <approve|request_changes|quit>")
+	return strings.Join(lines, "\n")
 }
 
 func firstToken(text string) string {

@@ -336,6 +336,76 @@ func TestChatInteractionCoordinatorUnifiedLocalTranscriptUsesTerminalSessionOnly
 	}
 }
 
+// TerminalSession ownership is a hard command cutover. Migrated commands may
+// render a semantic document; every retained legacy command must instead be
+// rejected as a Scene cell, never execute its old raw writer/modal path.
+func TestDispatchChatCommandUnifiedCommandGateUsesTerminalSessionOnly(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 18)
+	coordinator.SetSurface(surface)
+
+	var presenterOutput bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&presenterOutput) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	presenterOutput.Reset()
+
+	// Do not replace os.Stdout here. The package deliberately runs a number of
+	// terminal/presenter tests in parallel, and process-global stdout capture
+	// would attribute their asynchronous ANSI paint traffic to this command.
+	// The assertions below use the owned terminal's observable state instead:
+	// every result must reach the Scene and the attached TerminalSession, while
+	// the fenced legacy surface must remain untouched.
+	dispatchChatCommand(session, "/help", false)
+	dispatchChatCommand(session, "/queue", false)
+	dispatchChatCommand(session, "/attach clear", false)
+	dispatchChatCommand(session, "/permission-mode", false)
+	dispatchChatCommand(session, "/approval-reuse", false)
+	dispatchChatCommand(session, "/not-a-command", false)
+	dispatchChatCommand(session, "/shell", false)
+	dispatchChatCommand(session, "/call", false)
+	dispatchChatCommand(session, "/model", false)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	var transcript strings.Builder
+	for _, cell := range state.Transcript.Cells {
+		transcript.WriteString(cell.Source)
+		transcript.WriteByte('\n')
+	}
+	for _, want := range []string{
+		"可用命令:",
+		"当前 queued input: 0 pending",
+		"已清空 0 个待发送图片附件",
+		"当前 permission-mode:",
+		"当前 approval-reuse:",
+		"错误: /not-a-command 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
+		"错误: /shell 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
+		"错误: /call 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
+		"错误: /model 正在迁移到统一渲染器，已拒绝旧终端直写",
+	} {
+		if !strings.Contains(transcript.String(), want) {
+			t.Fatalf("semantic transcript missing %q: %+v", want, state.Transcript)
+		}
+	}
+	if !strings.Contains(presenterOutput.String(), "错误: /model 正在迁移到统一渲染器，已拒绝旧终端直写") {
+		t.Fatalf("TerminalSession did not render latest command result: %q", presenterOutput.String())
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified finite command output populated legacy historyWindow: %#v", got)
+	}
+}
+
 // Streaming is the critical cutover case: the active body must advance from
 // the mutable Scene cell, not from ActiveStreamController or a facade band,
 // and the final Scene transition must use FinalizeActiveCellAction.
@@ -404,6 +474,66 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
 		t.Fatalf("unified stream wrote legacy historyWindow: %#v", got)
+	}
+}
+
+// The local ReAct loop's production reasoning event is "assistant.reasoning"
+// with a nested ReasoningBlock. This verifies the full unified route keeps the
+// thought text, the assistant body and Markdown presentation in the one
+// TerminalSession-owned frame instead of exposing the raw event name.
+func TestChatInteractionCoordinatorUnifiedRendersDottedReasoningAndMarkdown(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(56, 18)
+	coordinator.SetSurface(surface)
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+
+	bridge.encodeRenderModelEvent(runtimeevents.Event{Type: "assistant.reasoning", Payload: map[string]interface{}{
+		"trace_id": "trace-markdown",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": "visible reasoning body",
+		},
+	}})
+	bridge.encodeRenderModelEvent(runtimeevents.Event{Type: runtimechat.EventAssistantMessage, Payload: map[string]interface{}{
+		"trace_id": "trace-markdown",
+		"content":  "# Rendered answer\n\n- **complete**\n- `code`",
+	}})
+	coordinator.postTranscriptSnapshotFromBridge(bridge)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if len(state.Transcript.Cells) != 2 {
+		t.Fatalf("transcript cells = %d, want reasoning + assistant: %#v", len(state.Transcript.Cells), state.Transcript.Cells)
+	}
+	var transcript strings.Builder
+	for _, cell := range state.Transcript.Cells {
+		transcript.WriteString(cell.Source)
+		transcript.WriteByte('\n')
+	}
+	if strings.Contains(transcript.String(), "assistant.reasoning") || !strings.Contains(transcript.String(), "visible reasoning body") {
+		t.Fatalf("reasoning scene projection is wrong: %q", transcript.String())
+	}
+	for _, want := range []string{"visible reasoning body", "Rendered answer", "complete", "code"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("TerminalSession output missing %q: %q", want, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "# Rendered answer") || strings.Contains(output.String(), "**complete**") {
+		t.Fatalf("TerminalSession emitted raw Markdown: %q", output.String())
+	}
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified renderer populated legacy historyWindow: %#v", got)
 	}
 }
 

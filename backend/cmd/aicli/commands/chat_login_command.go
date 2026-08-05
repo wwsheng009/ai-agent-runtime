@@ -38,6 +38,9 @@ type chatLoginCommandRequest struct {
 }
 
 func handleLoginCommand(session *ChatSession, command string, noInteractive bool) bool {
+	if rejectUnifiedInteractiveLegacyCommand(session, "/login") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false

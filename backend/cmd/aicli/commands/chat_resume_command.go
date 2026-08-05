@@ -24,6 +24,23 @@ import (
 //
 // The function never exits the chat loop, mirroring the rest of the slash commands.
 func handleResumeCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredResumeCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenResumePicker != nil {
+				openChatResumePicker(session, *result.OpenResumePicker)
+				return false
+			}
+			if renderErr == nil && result.ReplayHistory {
+				printVisibleChatHistory(session, "已加载历史会话")
+			}
+			return false
+		}
+		return rejectUnifiedInteractiveLegacyCommand(session, "/resume")
+	}
+	if rejectUnifiedInteractiveLegacyCommand(session, "/resume") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -59,6 +76,182 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 	}
 	printResumeSuccess(session)
 	return false
+}
+
+// executeStructuredResumeCommand recognizes direct resume targets and typed
+// picker requests. Both bare /resume and /resume --cwd are alternate-screen
+// effects; direct latest and explicit-id restore have a finite side effect
+// followed by one confirmation cell and semantic history replay.
+func executeStructuredResumeCommand(session *ChatSession, command string) (CommandResult, bool) {
+	argument := strings.TrimSpace(extractCommandArgument(command))
+	if argument == "" {
+		if !canOpenChatResumePicker(session) {
+			return CommandResult{}, false
+		}
+		return newResumePickerCommandResult(session.SessionFilter), true
+	}
+
+	baseFilter := ChatSessionListFilter{}
+	if session != nil {
+		baseFilter = session.SessionFilter
+	}
+	target, filter, err := parseResumeCommandArgument(argument, baseFilter, session)
+	if err != nil {
+		return commandErrorResult(err), true
+	}
+	if strings.TrimSpace(target) == "" {
+		// `/resume --cwd` retains bare picker semantics after resolving its
+		// filter. Carry that filter in the typed request; never reinterpret it as
+		// `latest` or fall through to the legacy line reader.
+		if !canOpenChatResumePicker(session) {
+			return CommandResult{}, false
+		}
+		return newResumePickerCommandResult(filter), true
+	}
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
+	}
+	if session.SessionManager == nil {
+		return commandErrorResult(fmt.Errorf("会话管理未启用")), true
+	}
+
+	previousFilter := session.SessionFilter
+	session.SessionFilter = filter
+	defer func() { session.SessionFilter = previousFilter }()
+
+	switch strings.ToLower(target) {
+	case "latest", "last", "--latest", "-l":
+		if err := resumeLatestRuntimeConversation(session); err != nil {
+			if errors.Is(err, runtimechat.ErrSessionNotFound) {
+				return commandTextResult("当前没有其他可恢复的历史会话"), true
+			}
+			return commandErrorResult(err), true
+		}
+		// The direct latest path has the same semantic replay contract as an
+		// explicit /resume <id>. Populate the canonical display history before
+		// returning control to CommandResult dispatch.
+		loadResumeCanonicalHistory(session, currentRuntimeSessionID(session))
+		return CommandResult{
+			Blocks:        []RenderBlock{{Document: buildChatResumeDocument(session)}},
+			Action:        CommandContinue,
+			ReplayHistory: hasVisibleChatHistory(session),
+		}, true
+	}
+
+	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, target) {
+		return commandTextResult("当前已经在该会话中，无需恢复"), true
+	}
+	if err := loadRuntimeConversation(session, target); err != nil {
+		return commandErrorResult(err), true
+	}
+	return CommandResult{
+		Blocks:        []RenderBlock{{Document: buildChatResumeDocument(session)}},
+		Action:        CommandContinue,
+		ReplayHistory: hasVisibleChatHistory(session),
+	}, true
+}
+
+func newResumePickerCommandResult(filter ChatSessionListFilter) CommandResult {
+	return CommandResult{
+		Action:           CommandContinue,
+		OpenResumePicker: &ResumePickerRequest{Filter: filter},
+	}
+}
+
+// canOpenChatResumePicker keeps bare /resume strictly inside the unified
+// alternate-screen contract. When any prerequisite is absent dispatch leaves
+// the command behind the fail-closed gate instead of reviving the legacy
+// line-reader fallback.
+func canOpenChatResumePicker(session *ChatSession) bool {
+	if session == nil || session.NoInteractive || session.JSONOutput ||
+		session.Interaction == nil || session.SessionManager == nil || session.Surface == nil {
+		return false
+	}
+	if !session.Surface.Enabled() || !session.Surface.OwnedViewport() ||
+		session.Surface.LeaseActive() || session.Surface.HasActivePopup() {
+		return false
+	}
+	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
+}
+
+// openChatResumePicker runs the lease-bound fullscreen selector after the
+// command result has crossed the dispatch boundary. The picker itself has no
+// retained text cell: cancellation/error/selection becomes a command result
+// only after alternate-screen ownership is released, so the primary presenter
+// never sees an overlapping modal and transcript transaction.
+func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
+	if !canOpenChatResumePicker(session) {
+		return
+	}
+
+	currentID := currentRuntimeSessionID(session)
+	current := currentRuntimeSessionForResumeList(session)
+	sessions, err := listResumeCandidateChatSessions(session.SessionManager, session.SessionUserID, request.Filter, currentID)
+	if err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(err), false)
+		return
+	}
+	if len(sessions) == 0 {
+		_ = renderChatCommandResult(session, commandTextResult("当前没有其他可恢复的历史会话"), false)
+		return
+	}
+
+	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+		Title: "恢复历史会话",
+	})
+	if err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开会话选择器失败: %w", err)), false)
+		return
+	}
+	if !session.Interaction.postUIAction(ui.OpenResumePicker{LeaseID: lease.ID()}) {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器状态未提交")), false)
+		return
+	}
+	// The first fullscreen frame must observe its logical lease state. This is
+	// a modal lifecycle barrier, not a per-keystroke wait; list navigation reads
+	// raw input while the primary presenter remains suspended by the lease.
+	session.Interaction.waitUIActorIdle()
+
+	items, selectable := buildResumeFullScreenItems(sessions, current, time.Now())
+	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
+		Title:        "恢复历史会话",
+		Subtitle:     formatResumePickerSubtitle(len(sessions), current != nil),
+		EmptyMessage: "没有匹配的历史会话",
+		ConfirmLabel: "恢复选中会话",
+		Items:        items,
+	}, lease)
+
+	_ = session.Interaction.postUIAction(ui.CloseResumePicker{LeaseID: lease.ID()})
+	releaseErr := lease.Release(context.Background())
+	// LeaseReleased is the ordering point for the primary recovery frame. Wait
+	// only for this one lifecycle transition before mounting restored history.
+	session.Interaction.waitUIActorIdle()
+
+	if releaseErr != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭会话选择器失败: %w", releaseErr)), false)
+		return
+	}
+	if pickErr != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器失败: %w", pickErr)), false)
+		return
+	}
+	if picked.Cancelled || picked.Index < 0 || picked.Index >= len(selectable) || selectable[picked.Index] == nil {
+		_ = renderChatCommandResult(session, commandTextResult("已取消恢复，当前会话保持不变"), false)
+		return
+	}
+	if err := loadRuntimeConversation(session, selectable[picked.Index].ID); err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(err), false)
+		return
+	}
+	result := CommandResult{
+		Blocks:        []RenderBlock{{Document: buildChatResumeDocument(session)}},
+		Action:        CommandContinue,
+		ReplayHistory: hasVisibleChatHistory(session),
+	}
+	if err := renderChatCommandResult(session, result, false); err == nil && result.ReplayHistory {
+		printVisibleChatHistory(session, "已加载历史会话")
+	}
 }
 
 func parseResumeCommandArgument(argument string, filter ChatSessionListFilter, session *ChatSession) (string, ChatSessionListFilter, error) {

@@ -64,8 +64,6 @@ func buildChatSlashHelpLines() []string {
 	return lines
 }
 
-func printChatSlashHelp() {
-	for _, line := range buildChatSlashHelpLines() {
-		fmt.Println(line)
-	}
+func printChatSlashHelp(session *ChatSession) {
+	printChatCommandOutput(session, strings.Join(buildChatSlashHelpLines(), "\n"))
 }

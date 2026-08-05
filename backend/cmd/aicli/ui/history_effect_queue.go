@@ -115,7 +115,8 @@ func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
 	for _, entry := range s.ledger.byToken {
 		current := entry.Commit
 		if entry.State != HistoryCommitPending || current.CellID != commit.CellID ||
-			current.Revision != commit.Revision || current.SourceRange != commit.SourceRange {
+			current.Revision != commit.Revision || current.SourceRange != commit.SourceRange ||
+			current.FragmentID != commit.FragmentID {
 			continue
 		}
 		return s.ledger.RebasePending(current.Token, commit)
@@ -142,6 +143,39 @@ func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 		return ErrCommitNotInFlight
 	}
 	return s.ledger.Ack(token, frame, generation)
+}
+
+// ackBatch confirms an ordered bootstrap transaction. The first commit was
+// claimed before terminal I/O; later commits remain Pending until the same
+// successful write proves their delivery. Advancing them here preserves the
+// ledger's normal oldest-first ordering without giving TerminalSession effect
+// ownership or accepting a stale batch after a semantic replacement.
+func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, generation uint64) error {
+	if s == nil || s.ledger == nil || len(commits) == 0 {
+		return ErrCommitNotInFlight
+	}
+	previousToken := uint64(0)
+	for _, commit := range commits {
+		if commit.LayoutGeneration != generation || commit.Token == 0 || (previousToken != 0 && commit.Token <= previousToken) {
+			return ErrStaleLayoutGeneration
+		}
+		entry, ok := s.ledger.Entry(commit.Token)
+		if !ok || !historyCommitPresentationEqual(entry.Commit, commit) {
+			return ErrCommitSourceChanged
+		}
+		if entry.State == HistoryCommitPending {
+			if err := s.markInFlight(commit.Token, generation); err != nil {
+				return err
+			}
+		} else if entry.State != HistoryCommitInFlight {
+			return ErrCommitNotInFlight
+		}
+		if err := s.ack(commit.Token, frame, generation); err != nil {
+			return err
+		}
+		previousToken = commit.Token
+	}
+	return nil
 }
 
 func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error {

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
@@ -141,5 +142,43 @@ func TestComposeAppRenderFrameUsesSourceBackedActiveBandFallback(t *testing.T) {
 	}
 	if bandRows != 1 {
 		t.Fatalf("source-backed active band rows = %d, want 1", bandRows)
+	}
+}
+
+func TestComposeAppRenderFrameRendersCommittedAssistantMarkdown(t *testing.T) {
+	state := AppState{
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: 40, Height: 12, Generation: 1},
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{{
+			ID: 1, Sequence: 1, Kind: scene.KindAssistant,
+			Source: "# Rendered heading\n\n- **finished**\n- `code`",
+			Phase:  scene.CellCommitted, Boundary: boundary.BoundaryNormal,
+		}}}),
+		Bottom: BottomPaneState{StatusModel: &style.StatusLineModel{State: style.RunReady, StateText: "Ready"}},
+	}
+
+	frame := ComposeAppRenderFrame(state)
+	var visible []string
+	var structured bool
+	for _, row := range frame.Rows {
+		if row.Screen.Owner != renderengine.RowOwnerTranscript || row.Screen.TranscriptGap {
+			continue
+		}
+		visible = append(visible, row.Screen.Text)
+		if len(row.Line.Spans) > 0 && row.Line.Spans[0].Style.Role != string(style.RoleAssistant) {
+			structured = true
+		}
+	}
+	rendered := strings.Join(visible, "\n")
+	for _, want := range []string{"Rendered heading", "finished", "code"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("markdown transcript missing %q: %q", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "# Rendered heading") || strings.Contains(rendered, "**finished**") {
+		t.Fatalf("raw markdown leaked into committed transcript: %q", rendered)
+	}
+	if !structured {
+		t.Fatalf("markdown transcript did not retain structured render spans: %#v", frame.Rows)
 	}
 }

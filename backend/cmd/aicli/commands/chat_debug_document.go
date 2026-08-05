@@ -28,6 +28,142 @@ type chatDebugDocumentBuilder struct {
 // 尾部最新项 + 计数即可，完整快照仍可通过统计行与 export 拿到。
 const chatDebugRenderEncoderItemCap = 20
 
+// buildChatDebugModeStatusDocument projects the finite /debug status report
+// without consulting a terminal sink.
+func buildChatDebugModeStatusDocument(session *ChatSession) render.Document {
+	if session == nil {
+		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))
+	}
+	var builder chatDebugDocumentBuilder
+	builder.meta("Debug Mode:", chatDebugBool(session.DebugMode))
+	builder.meta("HTTP Debug:", chatDebugBool(session.HTTPDebug))
+	builder.meta("Skills Debug:", chatDebugBool(session.SkillsDebug))
+	builder.plain(chatDebugUsageText())
+	return builder.document()
+}
+
+func buildChatDebugModeMutationDocument(enabled bool) render.Document {
+	var builder chatDebugDocumentBuilder
+	builder.meta("Debug Mode:", chatDebugBool(enabled))
+	return builder.document()
+}
+
+func buildChatDebugArchiveDocument(result *chatDebugArchiveResult) render.Document {
+	if result == nil {
+		return render.SingleLineDoc(render.RoleSpan("错误: debug 打包未返回结果", string(style.RoleError)))
+	}
+	var builder chatDebugDocumentBuilder
+	builder.heading("Debug 文件已打包")
+	builder.meta("Archive:", chatDebugValueOrNone(result.Path))
+	builder.meta("Files:", fmt.Sprintf("%d", result.FileCount))
+	if len(result.Missing) > 0 {
+		builder.meta("Missing:", fmt.Sprintf("%d", len(result.Missing)))
+	}
+	if len(result.Skipped) > 0 {
+		builder.meta("Skipped:", fmt.Sprintf("%d", len(result.Skipped)))
+	}
+	return builder.document()
+}
+
+// buildChatDebugRoutingDocument is the read-only counterpart to the legacy
+// routing summary printer. It is deliberately a snapshot: routing mutation
+// and dry-run controls have their own effect lifecycles and do not pass here.
+func buildChatDebugRoutingDocument(session *ChatSession) render.Document {
+	var builder chatDebugDocumentBuilder
+	appendChatDebugRoutingSummary(&builder, session)
+	return builder.document()
+}
+
+func appendChatDebugRoutingSummary(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	if builder == nil {
+		return
+	}
+	if session == nil {
+		builder.heading("Subagent Routing:")
+		builder.meta("Routing:", "<no session>")
+		return
+	}
+	appendChatDebugRoutingConfig(builder, "Subagent Routing:", localChatSubagentRoutingConfig(session), "subagent")
+	teamSource := "subagent_inherited"
+	if session.Config != nil && session.Config.AICLI != nil && session.Config.AICLI.Teams != nil && session.Config.AICLI.Teams.Routing != nil {
+		teamSource = "team_independent"
+	}
+	appendChatDebugRoutingConfig(builder, "Team Routing:", localChatTeamRoutingConfig(session), teamSource)
+}
+
+func appendChatDebugRoutingConfig(builder *chatDebugDocumentBuilder, title string, routing *config.AICLISubagentRoutingConfig, source string) {
+	if builder == nil {
+		return
+	}
+	builder.heading(title)
+	if strings.TrimSpace(source) != "" {
+		builder.meta("Routing Source:", source)
+	}
+	builder.meta("Routing Enabled:", chatDebugBool(modelrouting.RoutingEnabled(routing)))
+	builder.meta("Compatibility:", modelrouting.CompatibilityMode(routing))
+	builder.meta("Default Difficulty:", modelrouting.DefaultDifficulty(routing))
+	builder.meta("Inherit Parent:", chatDebugBool(modelrouting.InheritParentWhenMissing(routing)))
+	builder.meta("Validate Models:", chatDebugBool(modelrouting.ValidateModelCapabilities(routing)))
+	builder.meta("Reasoning Policy:", modelrouting.UnsupportedReasoningPolicy(routing))
+	if routing == nil {
+		builder.meta("Levels:", "<none>")
+		builder.meta("Roles:", "<none>")
+		return
+	}
+	builder.meta("Provider Override:", chatDebugBool(routing.AllowExplicitProviderOverride))
+	builder.meta("Model Override:", chatDebugBool(routing.AllowExplicitModelOverride))
+	builder.meta("Reasoning Override:", chatDebugBool(routing.AllowExplicitReasoningOverride))
+	builder.meta("Expert Limit:", strconv.Itoa(routing.MaxExpertConcurrency))
+	if len(routing.AllowedProviderOverrides) > 0 {
+		builder.meta("Allowed Providers:", strings.Join(routing.AllowedProviderOverrides, ", "))
+	}
+	if len(routing.AllowedModelOverrides) > 0 {
+		builder.meta("Allowed Models:", strings.Join(routing.AllowedModelOverrides, ", "))
+	}
+	appendChatDebugRoutingLevels(builder, routing.Levels)
+	appendChatDebugRoutingRoles(builder, routing.Roles)
+}
+
+func appendChatDebugRoutingLevels(builder *chatDebugDocumentBuilder, levels map[string]config.AICLISubagentRouteProfile) {
+	if len(levels) == 0 {
+		builder.meta("Levels:", "<none>")
+		return
+	}
+	keys := make([]string, 0, len(levels))
+	for key := range levels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	builder.meta("Levels:", fmt.Sprintf("%d configured", len(keys)))
+	for _, key := range keys {
+		builder.plain(fmt.Sprintf("  - %s: %s", key, chatRouteProfileSummary(levels[key])))
+	}
+}
+
+func appendChatDebugRoutingRoles(builder *chatDebugDocumentBuilder, roles map[string]map[string]config.AICLISubagentRouteProfile) {
+	if len(roles) == 0 {
+		builder.meta("Roles:", "<none>")
+		return
+	}
+	roleNames := make([]string, 0, len(roles))
+	for role := range roles {
+		roleNames = append(roleNames, role)
+	}
+	sort.Strings(roleNames)
+	builder.meta("Roles:", fmt.Sprintf("%d configured", len(roleNames)))
+	for _, role := range roleNames {
+		levels := roles[role]
+		levelNames := make([]string, 0, len(levels))
+		for level := range levels {
+			levelNames = append(levelNames, level)
+		}
+		sort.Strings(levelNames)
+		for _, level := range levelNames {
+			builder.plain(fmt.Sprintf("  - %s.%s: %s", role, level, chatRouteProfileSummary(levels[level])))
+		}
+	}
+}
+
 func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	if session == nil {
 		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))

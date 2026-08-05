@@ -17,11 +17,20 @@ func captureStatusBarStdout(t *testing.T, fn func()) string {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stdout = writer
-	defer func() {
+	restoreTerminalOutput := SetTerminalOutputForTesting(writer)
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restoreTerminalOutput()
 		os.Stdout = oldStdout
-	}()
+		restored = true
+	}
+	defer restore()
 
 	fn()
+	restore()
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}

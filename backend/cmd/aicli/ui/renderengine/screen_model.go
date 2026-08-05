@@ -210,6 +210,26 @@ func (m *ScreenModel) ApplyRegionAppend(top, bottom int, rows [][]vt.Cell) {
 	applyRegionAppend(m.back, m.width, top-1, bottom, rows)
 }
 
+// RegionPrefixEquals reports whether the current confirmed physical front
+// begins with rows in an owned inclusive region. It is a projection-cache
+// proof used only to choose a terminal scroll operation; callers must never
+// recover semantic transcript content from this cache.
+func (m *ScreenModel) RegionPrefixEquals(top, bottom int, rows [][]vt.Cell) bool {
+	if m == nil || m.projection != ProjectionKnown || len(rows) == 0 {
+		return false
+	}
+	top, bottom, ok := m.clampRegion(top, bottom)
+	if !ok || len(rows) > bottom-top+1 {
+		return false
+	}
+	for index, row := range rows {
+		if !rowCellsEqual(m.front[top-1+index], normalizeRow(row, m.width)) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *ScreenModel) clampRegion(top, bottom int) (int, int, bool) {
 	if m == nil || m.height < 1 {
 		return 0, 0, false

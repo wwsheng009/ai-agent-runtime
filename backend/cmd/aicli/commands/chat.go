@@ -957,14 +957,15 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 	if showPreamble {
 		presentChatSession(session)
 	}
-	if loadedRuntimeSession == nil || !shouldPrintChatSessionPreamble(session) {
+	if !shouldPrintChatSessionPreamble(session) {
 		return
 	}
+	hasHistory := hasVisibleChatHistory(session)
 
 	// Legacy/plain interactive path already printed full meta via presentChatSession;
 	// only append the transcript when visible history exists.
 	if showPreamble {
-		if !hasVisibleChatHistory(session) {
+		if !hasHistory {
 			return
 		}
 		// ClearPrompt may leave pendingScrollDown layout debt. Do not raw-print
@@ -975,10 +976,22 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		return
 	}
 
-	// TUI path: skip welcome/meta preamble, but still surface resume status +
-	// history so CLI resume matches in-chat `/resume` visibility.
-	beginDirectInteractiveOutput(session)
-	printResumeSuccess(session)
+	// A restored runtime handle is metadata, not the source-of-truth gate for
+	// transcript visibility. Canonical Messages/ResumeHistory can already be
+	// present when a runtime host is unavailable or its startup handle was not
+	// retained. In that case, the main primary viewport must still receive the
+	// finalized history; otherwise it degenerates into a reasoning-only screen.
+	if loadedRuntimeSession != nil {
+		// TUI path: skip welcome/meta preamble, but still surface resume status +
+		// history so CLI resume matches in-chat `/resume` visibility.
+		beginDirectInteractiveOutput(session)
+		printResumeSuccess(session)
+		return
+	}
+	if hasHistory {
+		beginDirectInteractiveOutput(session)
+		printVisibleChatHistory(session, "已加载历史会话")
+	}
 }
 
 type chatResponsePayload struct {
@@ -1157,7 +1170,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					}
 					if session != nil && session.Interaction != nil {
 						session.Interaction.RenderError(err)
-					} else {
+					} else if !unifiedInteractiveOutputMustFailClosed(session) {
 						ui.PrintError("操作错误: %v", err)
 					}
 					continue
@@ -1169,7 +1182,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				if notice != "" {
 					if session.Interaction != nil {
 						session.Interaction.RenderLocalSupplement(notice)
-					} else {
+					} else if !unifiedInteractiveOutputMustFailClosed(session) {
 						fmt.Println(notice)
 					}
 				}
@@ -1180,7 +1193,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				if showPrompt {
 					if session.Interaction != nil {
 						session.Interaction.PrintPrompt()
-					} else {
+					} else if !unifiedInteractiveOutputMustFailClosed(session) {
 						fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 					}
 				}
@@ -1235,6 +1248,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if session.IsInterrupted() {
 				continue
 			}
+			if rejectUnmigratedUnifiedChatCommand(session, "/shell") {
+				continue
+			}
 
 			result, err := executeShellCommandDetailed(session, input)
 			if err != nil {
@@ -1247,7 +1263,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				}
 				if session != nil && session.Interaction != nil {
 					session.Interaction.RenderError(err)
-				} else {
+				} else if !unifiedInteractiveOutputMustFailClosed(session) {
 					ui.PrintError("操作错误: %v", err)
 				}
 				continue
@@ -1262,7 +1278,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				}
 				if session != nil && session.Interaction != nil {
 					session.Interaction.RenderError(err)
-				} else {
+				} else if !unifiedInteractiveOutputMustFailClosed(session) {
 					ui.PrintError("操作错误: %v", err)
 				}
 				continue
@@ -1316,7 +1332,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			}
 			if session != nil && session.Interaction != nil {
 				session.Interaction.RenderError(err)
-			} else {
+			} else if !unifiedInteractiveOutputMustFailClosed(session) {
 				ui.PrintError("操作错误: %v", err)
 			}
 			renderChatTurnRecoveryHintForError(session, err)

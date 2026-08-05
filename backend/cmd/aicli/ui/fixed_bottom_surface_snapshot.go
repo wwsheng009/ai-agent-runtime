@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -87,7 +86,7 @@ func (s *FixedBottomSurface) renderOwnedViewportLocked() {
 	}
 	s.stageOwnedFrameLocked()
 	if diff := s.viewportBackend.PrepareFlush(); diff != "" {
-		if err := s.flushHoldingLock(os.Stdout, func(w io.Writer) {
+		if err := s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {
 			_, _ = io.WriteString(w, diff)
 		}); err != nil {
 			s.viewportBackend.MarkWriteFailed()

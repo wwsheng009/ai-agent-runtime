@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
 
 const (
@@ -14,7 +15,58 @@ const (
 	skillExecutionPrompt        = "请输入 prompt (q取消): "
 )
 
+// executeStructuredSkillCatalogCommand recognizes explicit, finite catalog
+// queries for a TerminalSession-owned chat. A bare /skills command stays out
+// of this path because the legacy behavior immediately starts a picker and
+// eventually executes a skill; treating it as a static report would silently
+// change the command contract.
+func executeStructuredSkillCatalogCommand(session *ChatSession, command string) (CommandResult, bool) {
+	query, jsonOutput := extractCommandArgumentOptions(command)
+	query = strings.TrimSpace(query)
+	if jsonOutput || query == "" {
+		return CommandResult{}, false
+	}
+	explicitList := false
+	if strings.EqualFold(query, "list") || strings.EqualFold(query, "ls") || strings.EqualFold(query, "status") {
+		query = ""
+		explicitList = true
+	}
+	if query == "" && !explicitList {
+		return CommandResult{}, false
+	}
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
+	}
+
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil || catalog.Registry() == nil {
+		return commandTextResult("错误: Function Catalog: 未初始化"), true
+	}
+	report := buildFunctionCatalogReport(catalog)
+	if report == nil {
+		return commandTextResult("错误: Function Catalog: 未初始化"), true
+	}
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: buildChatSkillCatalogDocument(filterSkillCatalogEntries(report.Skills, query), query)}},
+		Action: CommandContinue,
+	}, true
+}
+
+func buildChatSkillCatalogDocument(skills []aicliFunctionDescriptorReport, query string) render.Document {
+	return textLinesDocument(buildSkillCatalogLines(skills, query, ""))
+}
+
 func handleSkillsMenuCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredSkillCatalogCommand(session, command); handled {
+			_ = renderChatCommandResult(session, result, false)
+			return false
+		}
+		return rejectUnifiedInteractiveLegacyCommand(session, "/skills")
+	}
+	if rejectUnifiedInteractiveLegacyCommand(session, "/skills") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false

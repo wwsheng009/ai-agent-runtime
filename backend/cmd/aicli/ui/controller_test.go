@@ -1189,6 +1189,7 @@ func TestUIActionClassification(t *testing.T) {
 		{"EffectResult", EffectResult{}, ClassBarrier, ""},
 		{"BeginHistoryCommit", BeginHistoryCommit{}, ClassBarrier, ""},
 		{"HistoryCommitAcknowledged", HistoryCommitAcknowledged{}, ClassBarrier, ""},
+		{"HistoryCommitsAcknowledged", HistoryCommitsAcknowledged{}, ClassBarrier, ""},
 		{"HistoryCommitFailed", HistoryCommitFailed{}, ClassBarrier, ""},
 		{"HistoryProjectionRecovered", HistoryProjectionRecovered{}, ClassBarrier, ""},
 		{"HistoryProjectionInvalidated", HistoryProjectionInvalidated{}, ClassBarrier, ""},

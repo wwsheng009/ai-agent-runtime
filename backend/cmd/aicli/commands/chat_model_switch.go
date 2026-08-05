@@ -31,6 +31,17 @@ type runtimeModelPickerResult struct {
 }
 
 func handleModelCommand(session *ChatSession, command string, noInteractive bool) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		request, err := parseModelCommandRequest(command)
+		if err == nil && request.ShowStatus && !request.HasMutation() {
+			_ = renderChatCommandResult(session, commandTextResult(runtimeModelStateText(session)), false)
+			return false
+		}
+		return rejectUnifiedInteractiveLegacyCommand(session, "/model")
+	}
+	if rejectUnifiedInteractiveLegacyCommand(session, "/model") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -62,8 +73,19 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 }
 
 func printRuntimeModelState(session *ChatSession) {
-	if session == nil {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, commandTextResult(runtimeModelStateText(session)), false)
 		return
+	}
+	printDirectInteractiveOutput(session, runtimeModelStateText(session)+"\n")
+}
+
+// runtimeModelStateText is shared by the plain presenter and the structured
+// /model status command. Keeping this pure projection separate prevents a
+// status query from re-entering the model picker or terminal writer.
+func runtimeModelStateText(session *ChatSession) string {
+	if session == nil {
+		return "错误: 当前没有活动会话"
 	}
 	providerName := strings.TrimSpace(session.ProviderName)
 	if providerName == "" {
@@ -85,11 +107,10 @@ func printRuntimeModelState(session *ChatSession) {
 	if baseURL == "" {
 		baseURL = "(无)"
 	}
-	text := fmt.Sprintf(
-		"当前 provider: %s\n当前 protocol: %s\n当前模型: %s\n当前 reasoning_effort: %s\n当前 baseURL: %s\n",
+	return fmt.Sprintf(
+		"当前 provider: %s\n当前 protocol: %s\n当前模型: %s\n当前 reasoning_effort: %s\n当前 baseURL: %s",
 		providerName, protocol, model, reasoning, baseURL,
 	)
-	printDirectInteractiveOutput(session, text)
 }
 
 func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, interactive bool) (bool, error) {

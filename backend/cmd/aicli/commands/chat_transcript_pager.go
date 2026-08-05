@@ -40,6 +40,11 @@ func openChatTranscriptPager(session *ChatSession) {
 		// it must not race a Scene snapshot against a separate scroll state.
 		session.Interaction.postTranscriptSnapshotFromBridge(session.RuntimeEventBridge)
 		_ = session.Interaction.postUIAction(ui.OpenTranscriptOverlay{LeaseID: lease.ID()})
+		// The first pager frame must observe the canonical snapshot and its
+		// actor-owned pager state together. Without this barrier, a just-issued
+		// /history can open against the pre-reconcile Scene and appear empty for
+		// its initial paint.
+		session.Interaction.waitUIActorIdle()
 	}
 	defer func() {
 		if session.Interaction != nil {

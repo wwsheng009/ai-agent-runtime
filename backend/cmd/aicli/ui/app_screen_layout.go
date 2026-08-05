@@ -3,9 +3,11 @@ package ui
 import (
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
@@ -19,12 +21,17 @@ type AppScreenRow struct {
 	Text          string
 	CellID        scene.CellID
 	TranscriptGap bool
+	// RenderLine is populated only when a semantic transcript cell needs a
+	// structured presentation (currently assistant Markdown). Text remains the
+	// plain physical-row projection used by layout and cursor calculations.
+	RenderLine render.Line
 }
 
 // AppScreenLayout combines the committed transcript tail and BottomPane row
-// plan into one viewport-sized plain-text layout. It is a Phase 2 shadow
-// artifact only: Presenter/TerminalSession must still create physical frames,
-// ANSI diffs, and cursor writes in later phases.
+// plan into one viewport-sized, terminal-neutral layout. The unified primary
+// presenter consumes the frame derived from this layout; this type itself
+// deliberately remains free of ANSI bytes, front-buffer mutation, cursor I/O,
+// and terminal writes.
 //
 // A mutable Active cell is deliberately excluded from Transcript rows. During
 // the migration it is still displayed by the explicitly marked legacy band
@@ -96,7 +103,7 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 	}
 
 	mutable := mutableTranscriptCellIDs(state.Transcript)
-	transcript := layoutTranscriptScreenRows(layout.Transcript, mutable, width)
+	transcript := layoutTranscriptScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), mutable, width)
 	if len(transcript) > result.OutputBottomRow {
 		transcript = transcript[len(transcript)-result.OutputBottomRow:]
 	}
@@ -133,12 +140,25 @@ func mutableTranscriptCellIDs(transcript TranscriptState) map[scene.CellID]struc
 	return ids
 }
 
-func layoutTranscriptScreenRows(rows []scene.LayoutRow, mutable map[scene.CellID]struct{}, width int) []AppScreenRow {
+func transcriptCellsByID(transcript TranscriptState) map[scene.CellID]scene.TranscriptCell {
+	if len(transcript.Cells) == 0 {
+		return nil
+	}
+	cells := make(map[scene.CellID]scene.TranscriptCell, len(transcript.Cells))
+	for _, cell := range transcript.Cells {
+		cells[cell.ID] = cell
+	}
+	return cells
+}
+
+func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int) []AppScreenRow {
 	if len(rows) == 0 {
 		return nil
 	}
 	result := make([]AppScreenRow, 0, len(rows))
-	for _, row := range rows {
+	renderedMarkdown := make(map[scene.CellID]struct{})
+	for index := 0; index < len(rows); index++ {
+		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
 			continue
 		}
@@ -157,6 +177,14 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, mutable map[scene.CellID
 			}
 			continue
 		}
+		if _, rendered := renderedMarkdown[row.CellID]; rendered {
+			continue
+		}
+		if cell, found := cells[row.CellID]; found && cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source) {
+			result = append(result, markdownTranscriptScreenRows(cell, width)...)
+			renderedMarkdown[row.CellID] = struct{}{}
+			continue
+		}
 		for _, line := range wrapAppScreenText(row.Text, width) {
 			result = append(result, AppScreenRow{
 				Owner:  renderengine.RowOwnerTranscript,
@@ -166,6 +194,26 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, mutable map[scene.CellID
 		}
 	}
 	return result
+}
+
+func markdownTranscriptScreenRows(cell scene.TranscriptCell, width int) []AppScreenRow {
+	doc := markdown.Render(cell.Source, markdown.AssistantBodyOptions(width, style.ThemeContext{}))
+	if len(doc.Blocks) == 0 {
+		return nil
+	}
+	rows := make([]AppScreenRow, 0, doc.LineCount())
+	for _, block := range doc.Blocks {
+		for _, line := range block.Lines {
+			rendered := cloneAppRenderLine(line)
+			rows = append(rows, AppScreenRow{
+				Owner:      renderengine.RowOwnerTranscript,
+				Text:       render.PlainBackend{}.Render(render.LinesDoc(rendered)),
+				CellID:     cell.ID,
+				RenderLine: rendered,
+			})
+		}
+	}
+	return rows
 }
 
 // wrapAppScreenText expands one semantic source line with the same pure VT

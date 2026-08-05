@@ -33,6 +33,44 @@ func buildChatLoadDocument(session *ChatSession) render.Document {
 	return builder.document()
 }
 
+// buildChatResumeDocument is the no-terminal projection of a successful
+// non-picker /resume. Like /load it keeps the confirmation separate from the
+// subsequently replayed history cells, but retains the resume-specific title
+// and conversation summary of the compatibility command.
+func buildChatResumeDocument(session *ChatSession) render.Document {
+	if session == nil {
+		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))
+	}
+	if session.RuntimeSession == nil {
+		return render.SingleLineDoc(render.RoleSpan("错误: 会话恢复失败", string(style.RoleError)))
+	}
+	turnCount, messageCount := runtimeSessionConversationCounts(session.RuntimeSession)
+	title := runtimeResumeSessionTitle(session.RuntimeSession)
+	var heading string
+	if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
+		heading = fmt.Sprintf("已恢复历史会话: %s（compact #%d · %d轮/%d条消息）", title, generation, turnCount, messageCount)
+	} else {
+		heading = fmt.Sprintf("已恢复历史会话: %s（%d轮/%d条消息）", title, turnCount, messageCount)
+	}
+	var builder chatDebugDocumentBuilder
+	builder.heading(heading)
+	appendChatLoadSessionMeta(&builder, session)
+	return builder.document()
+}
+
+// buildChatCurrentSessionDocument is the semantic projection for /session.
+// It shares the metadata rows with /load so the two session entry points
+// cannot drift while the unified renderer owns the terminal.
+func buildChatCurrentSessionDocument(session *ChatSession) render.Document {
+	if session == nil || session.RuntimeSession == nil {
+		return render.SingleLineDoc(render.RoleSpan("当前没有持久化会话", string(style.RoleError)))
+	}
+	var builder chatDebugDocumentBuilder
+	builder.heading("当前会话")
+	appendChatLoadSessionMeta(&builder, session)
+	return builder.document()
+}
+
 func appendChatLoadSessionMeta(builder *chatDebugDocumentBuilder, session *ChatSession) {
 	if session == nil || session.RuntimeSession == nil {
 		return

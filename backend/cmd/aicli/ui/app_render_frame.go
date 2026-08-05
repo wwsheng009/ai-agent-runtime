@@ -77,7 +77,13 @@ func ComposeAppRenderFrame(state AppState) AppRenderFrame {
 }
 
 func appTranscriptRenderLine(row AppScreenRow, cells map[scene.CellID]scene.TranscriptCell) render.Line {
-	if row.TranscriptGap || row.Text == "" {
+	if row.TranscriptGap {
+		return render.Line{}
+	}
+	if len(row.RenderLine.Spans) > 0 {
+		return cloneAppRenderLine(row.RenderLine)
+	}
+	if row.Text == "" {
 		return render.Line{}
 	}
 	cell, ok := cells[row.CellID]

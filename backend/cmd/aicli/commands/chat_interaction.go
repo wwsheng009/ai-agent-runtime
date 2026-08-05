@@ -520,8 +520,8 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.shutdown {
+		c.mu.Unlock()
 		return
 	}
 	if c.unifiedRenderer && surface != nil {
@@ -569,6 +569,18 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	if c.activeStream != nil && c.activeStream.Active() && c.surfaceOutputActiveLocked() {
 		_ = c.publishActiveStreamFrameLocked(true)
+	}
+	// Mounting a surface establishes its initial bottom-pane projection. The
+	// facade posts that projection to the UI actor, so SetSurface must not
+	// return while a prior terminal owner can still apply the initial frame.
+	// Besides making the mount boundary deterministic, this closes the window
+	// in which a caller could replace a terminal writer while the actor still
+	// owns a queued physical legacy paint. This is a one-time mount barrier,
+	// not a producer-side synchronization path for streaming or editor input.
+	actor := c.uiActor
+	c.mu.Unlock()
+	if actor != nil {
+		actor.WaitIdle()
 	}
 }
 
@@ -3586,13 +3598,17 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 	if strings.TrimSpace(ui.RenderDocumentPlain(doc)) == "" {
 		return false
 	}
+	// Command dispatch can run before a provider/runtime executor has created
+	// its bridge. Create the semantic owner here rather than committing only to
+	// the compatibility history buffer, otherwise an early unified command
+	// would be missing from the AppState snapshot that TerminalSession paints.
+	bridge := ensureChatRuntimeEventBridge(c.session)
 	doc = c.annotateCommandDocumentOverflow(doc)
 	c.mu.Lock()
 	if !c.beginMessageLocked() {
 		c.mu.Unlock()
 		return false
 	}
-	bridge := c.session.RuntimeEventBridge
 	// 切片 11：命令结果提交前把纯文本投影注入 Scene 数据面（与用户输入
 	// 同一模式），使"完整块序列 == Scene cell 序列"对命令块也成立。
 	// 切片 12（P4）：/debug、/model 等交互命令输出经 pending 交互标记走

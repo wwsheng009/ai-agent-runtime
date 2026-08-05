@@ -2546,6 +2546,7 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("pipe: %v", err)
 	}
 	os.Stdout = writer
+	restoreTerminalOutput := ui.SetTerminalOutputForTesting(writer)
 
 	type readResult struct {
 		data []byte
@@ -2558,8 +2559,17 @@ func captureStdout(t *testing.T, fn func()) string {
 	}()
 
 	writerClosed := false
-	defer func() {
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restoreTerminalOutput()
 		os.Stdout = originalStdout
+		restored = true
+	}
+	defer func() {
+		restore()
 		if !writerClosed {
 			_ = writer.Close()
 		}
@@ -2568,7 +2578,7 @@ func captureStdout(t *testing.T, fn func()) string {
 
 	fn()
 
-	os.Stdout = originalStdout
+	restore()
 	writerClosed = true
 	_ = writer.Close()
 	result := <-readDone

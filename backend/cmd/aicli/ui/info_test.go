@@ -214,9 +214,17 @@ func captureUIStdout(t *testing.T, fn func()) string {
 		t.Fatalf("pipe: %v", err)
 	}
 	os.Stdout = writer
-	defer func() {
+	restoreTerminalOutput := SetTerminalOutputForTesting(writer)
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restoreTerminalOutput()
 		os.Stdout = originalStdout
-	}()
+		restored = true
+	}
+	defer restore()
 
 	var stdoutData []byte
 	readDone := make(chan struct{})
@@ -227,6 +235,7 @@ func captureUIStdout(t *testing.T, fn func()) string {
 
 	fn()
 
+	restore()
 	_ = writer.Close()
 	<-readDone
 	return string(stdoutData)

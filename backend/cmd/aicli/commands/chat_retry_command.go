@@ -81,6 +81,15 @@ func renderChatTurnRecoveryHintForError(session *ChatSession, turnErr error) {
 }
 
 func handleRetryCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		result := executeStructuredRetryCommand(session, command)
+		if err := renderChatCommandResult(session, result, false); err == nil && result.RestoreComposerDraft != "" {
+			if restoreErr := restoreChatRetryDraft(session, result.RestoreComposerDraft); restoreErr != nil {
+				_ = renderChatCommandResult(session, commandErrorResult(restoreErr), false)
+			}
+		}
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -114,6 +123,47 @@ func handleRetryCommand(session *ChatSession, command string) bool {
 		fmt.Println("已恢复上一条失败消息到输入区，请检查后按 Enter 发送；当前未执行任何操作。")
 	}
 	return false
+}
+
+// executeStructuredRetryCommand returns the recovery report plus a typed
+// post-commit Composer draft effect. It never sends the prompt and it never
+// owns a terminal writer; recovery remains deliberately conservative around
+// interrupted turns that may already have invoked tools.
+func executeStructuredRetryCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	if strings.TrimSpace(extractCommandArgument(command)) != "" {
+		return commandTextResult("错误: /retry 不接受参数\n用法: /retry")
+	}
+	if session.NoInteractive || session.JSONOutput {
+		return commandTextResult("错误: /retry 仅用于交互式 Composer；它只恢复草稿，不会自动发送")
+	}
+	recovery := chatTurnRecoverySnapshot(session)
+	if recovery == nil {
+		return commandTextResult("当前没有可恢复的失败或中断消息")
+	}
+	if recovery.SessionID != currentRuntimeSessionID(session) {
+		clearChatTurnRecovery(session)
+		return commandTextResult("当前会话已切换，不能恢复其他会话中的失败消息")
+	}
+	prompt := strings.TrimSpace(recovery.Prompt)
+	if prompt == "" {
+		return commandErrorResult(fmt.Errorf("失败消息内容为空，无法恢复"))
+	}
+	if session.Interaction == nil {
+		return commandErrorResult(fmt.Errorf("当前终端不支持安全恢复可编辑草稿"))
+	}
+	if existing := strings.TrimSpace(session.Interaction.PromptInputSnapshot().Text); existing != "" {
+		return commandErrorResult(fmt.Errorf("输入区已有草稿，未覆盖现有内容"))
+	}
+	message := "已恢复上一条失败消息到输入区，请检查后按 Enter 发送；当前未执行任何操作。"
+	if recovery.Interrupted {
+		message = "已恢复上一条中断消息。工具可能已部分执行，请检查草稿后再按 Enter 发送；当前未执行任何操作。"
+	}
+	result := commandTextResult(message)
+	result.RestoreComposerDraft = prompt
+	return result
 }
 
 func restoreChatRetryDraft(session *ChatSession, prompt string) error {

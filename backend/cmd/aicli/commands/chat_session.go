@@ -173,6 +173,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoredRuntimeSession.History = session.Messages
 	restoredRuntimeSession.HistoryLoaded = runtimeSession.HistoryLoaded
 	session.RuntimeSession = restoredRuntimeSession
+	updateChatRuntimeEventBridgePrimarySession(session)
 	clearChatTurnRecovery(session)
 	if !strings.EqualFold(strings.TrimSpace(previousSessionID), strings.TrimSpace(runtimeSession.ID)) {
 		resetStableSharedToolSurface(session)
@@ -224,6 +225,7 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
 	session.RuntimeSession = runtimeSession
+	updateChatRuntimeEventBridgePrimarySession(session)
 	// Only local lazy SQLite stores defer the empty-shell Save. Remote/runtime
 	// server and eager backends keep the previous Create+Save semantics so
 	// session IDs are immediately durable and listable.
@@ -585,6 +587,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	session.Messages = runtimeSession.History
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	session.RuntimeSession = runtimeSession
+	updateChatRuntimeEventBridgePrimarySession(session)
 	return nil
 }
 
@@ -606,6 +609,13 @@ func warnIfChatSessionSyncFails(session *ChatSession, operation string, err erro
 }
 
 func printCurrentRuntimeSession(session *ChatSession) {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatCurrentSessionDocument(session)}},
+			Action: CommandContinue,
+		}, false)
+		return
+	}
 	if session == nil || session.RuntimeSession == nil {
 		return
 	}
@@ -690,6 +700,50 @@ func printChatSessionSummaries(manager *runtimechat.SessionManager, userID, curr
 			fmt.Println(line)
 		}
 	}
+	return nil
+}
+
+// printCurrentChatSessionSummaries keeps /sessions on the semantic output path
+// after TerminalSession has become the primary owner. The historical helper
+// above remains a plain/startup projection used before interactive ownership
+// exists and by compatibility callers that intentionally write to stdout.
+func printCurrentChatSessionSummaries(session *ChatSession, filter ChatSessionListFilter) error {
+	if session == nil {
+		return fmt.Errorf("当前没有活动会话")
+	}
+	if !unifiedDirectInteractiveOutput(session) {
+		return printChatSessionSummaries(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), filter)
+	}
+	if session.SessionManager == nil {
+		return fmt.Errorf("会话管理未启用")
+	}
+
+	sessions, err := listFilteredChatSessionsExcluding(session.SessionManager, session.SessionUserID, filter, currentRuntimeSessionID(session))
+	if err != nil {
+		return err
+	}
+	lines := make([]string, 0, len(sessions)*2+1)
+	if len(sessions) == 0 {
+		if currentRuntimeSessionID(session) != "" {
+			lines = append(lines, "暂无其他历史会话")
+		} else {
+			lines = append(lines, "暂无可用会话")
+		}
+	} else {
+		if currentRuntimeSessionID(session) != "" {
+			lines = append(lines, "历史会话:")
+		} else {
+			lines = append(lines, "可用会话:")
+		}
+		now := time.Now()
+		for _, item := range sessions {
+			if item == nil {
+				continue
+			}
+			lines = append(lines, clampSessionSummaryLines(renderRuntimeSessionSummaryLines(item, now), ui.GetTerminalWidth())...)
+		}
+	}
+	printChatCommandOutput(session, strings.Join(lines, "\n"))
 	return nil
 }
 
@@ -1030,6 +1084,17 @@ func currentRuntimeSessionID(session *ChatSession) string {
 		return ""
 	}
 	return session.RuntimeSession.ID
+}
+
+// updateChatRuntimeEventBridgePrimarySession publishes the current runtime
+// session identity to the asynchronous event bridge. The bridge deliberately
+// routes with this protected value instead of dereferencing ChatSession's
+// mutable RuntimeSession pointer from its worker goroutine.
+func updateChatRuntimeEventBridgePrimarySession(session *ChatSession) {
+	if session == nil || session.RuntimeEventBridge == nil {
+		return
+	}
+	session.RuntimeEventBridge.setPrimarySessionID(currentRuntimeSessionID(session))
 }
 
 func runtimeSessionCreatedAt(session *ChatSession) time.Time {

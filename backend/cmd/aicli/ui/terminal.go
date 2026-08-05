@@ -114,7 +114,7 @@ func (t *Terminal) Height() int {
 
 // Clear 清屏
 func (t *Terminal) Clear() {
-	fmt.Print("\033[2J")
+	fmt.Fprint(TerminalOutput(), "\033[2J")
 	t.MoveTo(1, 1)
 }
 
@@ -129,17 +129,17 @@ func (t *Terminal) ClearIfSupported() bool {
 
 // ClearFromCursor 从光标到行尾清除
 func (t *Terminal) ClearFromCursor() {
-	fmt.Print("\033[K")
+	fmt.Fprint(TerminalOutput(), "\033[K")
 }
 
 // ClearFromCursorToEnd 从光标到屏幕结尾清除
 func (t *Terminal) ClearFromCursorToEnd() {
-	fmt.Print("\033[0J")
+	fmt.Fprint(TerminalOutput(), "\033[0J")
 }
 
 // ClearLine 清除当前行光标之后的内容。
 func (t *Terminal) ClearLine() {
-	fmt.Print("\033[K")
+	fmt.Fprint(TerminalOutput(), "\033[K")
 }
 
 // MoveTo 移动光标到指定行列（1-based）
@@ -150,7 +150,7 @@ func (t *Terminal) MoveTo(row, col int) {
 	if col < 1 {
 		col = 1
 	}
-	fmt.Printf("\033[%d;%dH", row, col)
+	fmt.Fprintf(TerminalOutput(), "\033[%d;%dH", row, col)
 }
 
 // MoveToRow 移动光标到指定行
@@ -163,7 +163,7 @@ func (t *Terminal) MoveUp(n int) {
 	if n < 1 {
 		n = 1
 	}
-	fmt.Printf("\033[%dA", n)
+	fmt.Fprintf(TerminalOutput(), "\033[%dA", n)
 }
 
 // MoveDown 向下移动 n 行
@@ -171,7 +171,7 @@ func (t *Terminal) MoveDown(n int) {
 	if n < 1 {
 		n = 1
 	}
-	fmt.Printf("\033[%dB", n)
+	fmt.Fprintf(TerminalOutput(), "\033[%dB", n)
 }
 
 // MoveLeft 向左移动 n 列
@@ -179,7 +179,7 @@ func (t *Terminal) MoveLeft(n int) {
 	if n < 1 {
 		n = 1
 	}
-	fmt.Printf("\033[%dD", n)
+	fmt.Fprintf(TerminalOutput(), "\033[%dD", n)
 }
 
 // MoveRight 向右移动 n 列
@@ -187,47 +187,47 @@ func (t *Terminal) MoveRight(n int) {
 	if n < 1 {
 		n = 1
 	}
-	fmt.Printf("\033[%dC", n)
+	fmt.Fprintf(TerminalOutput(), "\033[%dC", n)
 }
 
 // SaveCursor 保存光标位置
 func (t *Terminal) SaveCursor() {
-	fmt.Print("\033[s")
+	fmt.Fprint(TerminalOutput(), "\033[s")
 }
 
 // RestoreCursor 恢复光标位置
 func (t *Terminal) RestoreCursor() {
-	fmt.Print("\033[u")
+	fmt.Fprint(TerminalOutput(), "\033[u")
 }
 
 // HideCursor 隐藏光标
 func (t *Terminal) HideCursor() {
-	fmt.Print("\033[?25l")
+	fmt.Fprint(TerminalOutput(), "\033[?25l")
 }
 
 // ShowCursor 显示光标
 func (t *Terminal) ShowCursor() {
-	fmt.Print("\033[?25h")
+	fmt.Fprint(TerminalOutput(), "\033[?25h")
 }
 
 // EnableAltScreen 启用备用屏幕（避免历史记录滚动）
 func (t *Terminal) EnableAltScreen() {
-	fmt.Print("\033[?1049h")
+	fmt.Fprint(TerminalOutput(), "\033[?1049h")
 }
 
 // DisableAltScreen 禁用备用屏幕
 func (t *Terminal) DisableAltScreen() {
-	fmt.Print("\033[?1049l")
+	fmt.Fprint(TerminalOutput(), "\033[?1049l")
 }
 
 // EnableLineWrap 启用自动换行
 func (t *Terminal) EnableLineWrap() {
-	fmt.Print("\033[?7h")
+	fmt.Fprint(TerminalOutput(), "\033[?7h")
 }
 
 // DisableLineWrap 禁用自动换行
 func (t *Terminal) DisableLineWrap() {
-	fmt.Print("\033[?7l")
+	fmt.Fprint(TerminalOutput(), "\033[?7l")
 }
 
 // SetScrollRegion 设置终端滚动区域（1-based，包含 top/bottom）。
@@ -238,46 +238,46 @@ func (t *Terminal) SetScrollRegion(top, bottom int) {
 	if bottom < top {
 		bottom = top
 	}
-	fmt.Printf("\033[%d;%dr", top, bottom)
+	fmt.Fprintf(TerminalOutput(), "\033[%d;%dr", top, bottom)
 	t.MoveTo(top, 1)
 }
 
 // ResetScrollRegion 恢复整屏为滚动区域。
 func (t *Terminal) ResetScrollRegion() {
-	fmt.Print("\033[r")
+	fmt.Fprint(TerminalOutput(), "\033[r")
 }
 
 // EnableBracketedPaste 启用 bracketed paste。
 func (t *Terminal) EnableBracketedPaste() {
-	fmt.Print("\033[?2004h")
+	fmt.Fprint(TerminalOutput(), "\033[?2004h")
 }
 
 // DisableBracketedPaste 关闭 bracketed paste。
 func (t *Terminal) DisableBracketedPaste() {
-	fmt.Print("\033[?2004l")
+	fmt.Fprint(TerminalOutput(), "\033[?2004l")
 }
 
 // EnableFocusChange 启用终端 focus in/out 事件（CSI ?1004）。
 // 支持的终端会在窗口获得/失去焦点时发送 \x1b[I / \x1b[O。
 func (t *Terminal) EnableFocusChange() {
-	fmt.Print("\033[?1004h")
+	fmt.Fprint(TerminalOutput(), "\033[?1004h")
 }
 
 // DisableFocusChange 关闭终端 focus in/out 事件。
 func (t *Terminal) DisableFocusChange() {
-	fmt.Print("\033[?1004l")
+	fmt.Fprint(TerminalOutput(), "\033[?1004l")
 }
 
 // SetTitle 设置终端标题。
 func (t *Terminal) SetTitle(title string) {
 	title = strings.ReplaceAll(title, "\x1b", "")
 	title = strings.ReplaceAll(title, "\a", "")
-	fmt.Printf("\033]0;%s\a", title)
+	fmt.Fprintf(TerminalOutput(), "\033]0;%s\a", title)
 }
 
 // ClearTitle 清空由应用设置的终端标题。
 func (t *Terminal) ClearTitle() {
-	fmt.Print("\033]0;\a")
+	fmt.Fprint(TerminalOutput(), "\033]0;\a")
 }
 
 // CleanupOnExit 恢复终端状态并可选清屏。
@@ -297,14 +297,14 @@ func (t *Terminal) CleanupOnExit(clear bool) {
 
 // NewLine 插入新行
 func (t *Terminal) NewLine() {
-	fmt.Println()
+	fmt.Fprintln(TerminalOutput())
 }
 
 // PrintAt 在指定位置打印（经 WriteTerminalText 串行化）
 func (t *Terminal) PrintAt(row, col int, text string) {
 	t.SaveCursor()
 	t.MoveTo(row, col)
-	_, _ = WriteTerminalText(os.Stdout, text)
+	_, _ = WriteTerminalText(TerminalOutput(), text)
 	t.RestoreCursor()
 }
 
@@ -331,15 +331,15 @@ func SetupTerminal() (cleanup func()) {
 	// 设置清理函数
 	cleanup = func() {
 		// 恢复光标
-		fmt.Print("\033[?25h")
+		fmt.Fprint(TerminalOutput(), "\033[?25h")
 		// 恢复滚动区域
-		fmt.Print("\033[r")
+		fmt.Fprint(TerminalOutput(), "\033[r")
 		// 关闭 bracketed paste
-		fmt.Print("\033[?2004l")
+		fmt.Fprint(TerminalOutput(), "\033[?2004l")
 		// 关闭 focus change reporting
-		fmt.Print("\033[?1004l")
+		fmt.Fprint(TerminalOutput(), "\033[?1004l")
 		// 禁用备用屏幕
-		fmt.Print("\033[?1049l")
+		fmt.Fprint(TerminalOutput(), "\033[?1049l")
 	}
 
 	return cleanup

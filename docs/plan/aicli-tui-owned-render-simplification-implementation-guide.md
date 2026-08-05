@@ -71,6 +71,8 @@ transcript pager/模式切换实施子计划：`docs/plan/aicli-tui-transcript-o
 | IR-11 | FramePump callback 只投递 action | callback source fence |
 | IR-12 | resize/replay 从 semantic source 派生 | 禁止从 front/VT/terminal 反推 |
 | IR-13 | 编辑器逐键回调不得等待 actor drain 或 mailbox 容量 | actor 阻塞/满邮箱输入回归 |
+| IR-14 | primary 必须保留 finalized transcript tail；pager 不得替代该可见性 | VT 最终屏幕断言 |
+| IR-15 | 不连续 history bootstrap 物理顺序必须为 prefix 后接 retained tail；批量 Ack 必须由 reducer 校验 | VT scrollback + batch-token 回归 |
 
 ## 3. 必须落地的核心类型
 
@@ -128,6 +130,7 @@ type TerminalEffectFailed struct { Token uint64; Err error; MayHavePartiallyWrit
 4. 增加 fake writer：零写失败、部分写失败、成功、重复 Ack、stale generation。
 5. 将 `go test ./cmd/aicli/ui/... -count=1` 加入 CI hard gate。
 6. 盘点 `zz_` 诊断测试，标记保留至哪个阶段，不在本阶段删除。
+7. 为 persisted multi-turn history、active reasoning、Markdown、单个超大 cell 增加 VT 最终主屏断言：output region 必须有 retained tail，bottom pane 必须有 active band，overflow prefix 必须在 modeled scrollback。
 
 **出口**
 

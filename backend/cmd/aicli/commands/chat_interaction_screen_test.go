@@ -43,16 +43,25 @@ func captureSurfaceStdout(t *testing.T, fn func()) string {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stdout = writer
+	restoreTerminalOutput := ui.SetTerminalOutputForTesting(writer)
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restoreTerminalOutput()
+		os.Stdout = original
+		restored = true
+	}
 	done := make(chan string, 1)
 	go func() {
 		var buf bytes.Buffer
 		_, _ = buf.ReadFrom(reader)
 		done <- buf.String()
 	}()
-	defer func() {
-		os.Stdout = original
-	}()
+	defer restore()
 	fn()
+	restore()
 	_ = writer.Close()
 	return <-done
 }

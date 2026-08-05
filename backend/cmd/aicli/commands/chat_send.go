@@ -56,7 +56,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if !session.NoInteractive && shouldShowInitialThinkingIndicator(session, executor) {
 		if session.Interaction != nil {
 			session.Interaction.StartThinking()
-		} else {
+		} else if !unifiedInteractiveOutputMustFailClosed(session) {
 			fmt.Print("助手正在思考...")
 		}
 	}
@@ -76,7 +76,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	response, err := executor.Execute(ctx, session, userMessage)
 	if session.Interaction != nil {
 		session.Interaction.ClearThinking()
-	} else if err != nil && !session.NoInteractive {
+	} else if err != nil && !session.NoInteractive && !unifiedInteractiveOutputMustFailClosed(session) {
 		fmt.Print("\r   \r")
 	}
 	if err != nil {

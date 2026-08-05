@@ -47,6 +47,9 @@ func (r *aicliTranscriptRenderer) RenderUser(content string) bool {
 		}
 		return true
 	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
+		return true
+	}
 	ui.DisplayUserMessage(content)
 	return true
 }
@@ -57,6 +60,9 @@ func (r *aicliTranscriptRenderer) RenderAssistant(content string) bool {
 	}
 	if r.session.Interaction != nil {
 		r.session.Interaction.RenderAssistant(content)
+		return true
+	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
 		return true
 	}
 	formatted := content
@@ -76,6 +82,9 @@ func (r *aicliTranscriptRenderer) RenderSystem(content string) bool {
 		r.session.Interaction.RenderAsyncLine(ui.FormatSystemMessage(content))
 		return true
 	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
+		return true
+	}
 	ui.DisplaySystemMessage(content)
 	return true
 }
@@ -90,6 +99,9 @@ func (r *aicliTranscriptRenderer) RenderSupplement(content string) bool {
 		} else {
 			r.session.Interaction.RenderLocalSupplement(content)
 		}
+		return true
+	}
+	if unifiedInteractiveOutputMustFailClosed(r.session) {
 		return true
 	}
 	fmt.Println(ui.FormatAssistantSupplementBlock(content))

@@ -17,6 +17,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 )
@@ -65,6 +66,45 @@ func TestTryExecuteStructuredChatCommandDebugDisplay(t *testing.T) {
 			t.Fatalf("%s structured match=(%t, %v), want legacy", command, handled, err)
 		}
 	}
+}
+
+func TestTryExecuteStructuredChatCommandMigratesFiniteComposerCommands(t *testing.T) {
+	session := &ChatSession{
+		PermissionMode:    "default",
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+		ImagePaths:        []string{"first.png", "second.png"},
+	}
+
+	assertDocument := func(command, want string) {
+		t.Helper()
+		result, handled, err := tryExecuteStructuredChatCommand(session, command)
+		if err != nil || !handled {
+			t.Fatalf("%s structured match=(%t, %v), want handled", command, handled, err)
+		}
+		if got := ui.RenderDocumentPlain(result.Document()); !strings.Contains(got, want) {
+			t.Fatalf("%s document missing %q: %q", command, want, got)
+		}
+	}
+
+	assertDocument("/queue", "当前 queued input: 0 pending")
+	assertDocument("/attach", "待发送图片附件 (2):")
+	assertDocument("/attach remove 1", "已移除图片附件: first.png")
+	if got := session.ImagePaths; len(got) != 1 || got[0] != "second.png" {
+		t.Fatalf("/attach remove left paths=%#v", got)
+	}
+	assertDocument("/attach clear", "已清空 1 个待发送图片附件")
+	if len(session.ImagePaths) != 0 {
+		t.Fatalf("/attach clear left paths=%#v", session.ImagePaths)
+	}
+
+	assertDocument("/permission-mode", "当前 permission-mode: default")
+	assertDocument("/permission-mode plan", "已切换到 permission-mode=plan")
+	if session.PermissionMode != "plan" {
+		t.Fatalf("permission mode=%q want plan", session.PermissionMode)
+	}
+	assertDocument("/permission-mode bypass_permissions", "需要确认交互")
+	assertDocument("/approval-reuse", "当前 approval-reuse: session_readonly_shell")
+	assertDocument("/approval-reuse off", "已切换到 approval-reuse=off")
 }
 
 func TestCommandResultMergesBlocksIntoOneAtomicCommandCell(t *testing.T) {
@@ -123,6 +163,76 @@ func TestDispatchChatCommandDebugDisplayDoesNotWriteRawStdout(t *testing.T) {
 	}
 	if !strings.Contains(output, "Mailbox Pending:") {
 		t.Fatalf("atomic debug cell is missing its tail:\n%s", output)
+	}
+}
+
+func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 20)
+	surface.SetPhysicalWritesEnabled(false)
+	coord.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !coord.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+	terminal.Reset()
+
+	commands := []struct {
+		input string
+		name  string
+	}{
+		{input: "/rewind 0", name: "/backtrack"},
+		{input: "/resume", name: "/resume"},
+		{input: "/model", name: "/model"},
+		{input: "/theme", name: "/theme"},
+		{input: "/skills", name: "/skills"},
+		{input: "/export", name: "/export"},
+		{input: "/login", name: "/login"},
+		{input: "/agents panel", name: "/agents 的交互、发送和路由子命令尚未迁移到统一渲染命令通道。"},
+	}
+	raw := captureStdout(t, func() {
+		for _, test := range commands {
+			if dispatchChatCommand(session, test.input, false) {
+				t.Fatalf("%s unexpectedly requested chat exit", test.input)
+			}
+		}
+	})
+	if raw != "" {
+		t.Fatalf("unified legacy command fence wrote raw stdout:\n%q", raw)
+	}
+
+	coord.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coord)
+	if got := surface.HistoryWindowForTest(); len(got) != 0 {
+		t.Fatalf("unified command fence populated legacy historyWindow: %#v", got)
+	}
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != len(commands) {
+		count := 0
+		if snapshot != nil {
+			count = len(snapshot.Cells)
+		}
+		t.Fatalf("semantic command cells=%d want %d", count, len(commands))
+	}
+	for index, test := range commands {
+		marker := "错误: " + test.name + " 正在迁移到统一渲染器，已拒绝旧终端直写"
+		if test.input == "/agents panel" {
+			marker = "错误: " + test.name
+		}
+		if !strings.Contains(snapshot.Cells[index].Source, marker) {
+			t.Fatalf("cell[%d] for %s did not contain fence marker %q: %+v", index, test.input, marker, snapshot.Cells[index])
+		}
+	}
+	if !strings.Contains(terminal.String(), "已拒绝旧终端直写") {
+		t.Fatalf("TerminalSession did not render the semantic fence: %q", terminal.String())
 	}
 }
 
@@ -362,11 +472,150 @@ func TestTryExecuteStructuredChatCommandStream(t *testing.T) {
 		t.Fatalf("/stream toggle document missing confirmation:\n%s", ui.RenderDocumentPlain(result.Document()))
 	}
 
-	if _, handled, err := tryExecuteStructuredChatCommand(session, "/stream bogus"); err != nil || handled {
-		t.Fatalf("/stream bogus structured match=(%t, %v), want legacy", handled, err)
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/stream bogus")
+	if err != nil || !handled {
+		t.Fatalf("/stream bogus structured match=(%t, %v), want handled", handled, err)
 	}
-	if _, handled, err := tryExecuteStructuredChatCommand(nil, "/stream status"); err != nil || handled {
-		t.Fatalf("nil-session /stream status structured match=(%t, %v), want legacy", handled, err)
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "用法: /stream") {
+		t.Fatalf("/stream bogus document missing usage:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+	result, handled, err = tryExecuteStructuredChatCommand(nil, "/stream status")
+	if err != nil || !handled {
+		t.Fatalf("nil-session /stream status structured match=(%t, %v), want handled", handled, err)
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "当前没有活动会话") {
+		t.Fatalf("nil-session /stream document missing error:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+}
+
+func TestTryExecuteStructuredChatCommandFastAndReasoning(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	fast, cfgPath := newFastCommandSession(t, "codex")
+	result, handled, err := tryExecuteStructuredChatCommand(fast, "/fast on")
+	if err != nil || !handled {
+		t.Fatalf("/fast on structured match=(%t, %v), want handled", handled, err)
+	}
+	if !fast.FastMode {
+		t.Fatal("/fast on did not set FastMode")
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "已开启 Fast 模式") {
+		t.Fatalf("/fast on document missing confirmation:\n%s", plain)
+	}
+	if stored := loadFastModePreference(t, cfgPath); stored == nil || !*stored {
+		t.Fatalf("/fast on did not persist fast_mode=true: %#v", stored)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(fast, "/fast status")
+	if err != nil || !handled {
+		t.Fatalf("/fast status structured match=(%t, %v), want handled", handled, err)
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "当前 Fast 模式: on") {
+		t.Fatalf("/fast status document missing mode:\n%s", plain)
+	}
+
+	unsupported := &ChatSession{}
+	result, handled, err = tryExecuteStructuredChatCommand(unsupported, "/fast on")
+	if err != nil || !handled {
+		t.Fatalf("unsupported /fast structured match=(%t, %v), want handled", handled, err)
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "仅支持 codex") {
+		t.Fatalf("unsupported /fast document missing protocol error:\n%s", plain)
+	}
+
+	reasoning := &ChatSession{SuppressReasoningOutput: true}
+	result, handled, err = tryExecuteStructuredChatCommand(reasoning, "/reasoning on")
+	if err != nil || !handled {
+		t.Fatalf("/reasoning on structured match=(%t, %v), want handled", handled, err)
+	}
+	if reasoning.SuppressReasoningOutput {
+		t.Fatal("/reasoning on did not enable reasoning output")
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "当前 reasoning: on") {
+		t.Fatalf("/reasoning on document missing status:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(reasoning, "/reasoning invalid")
+	if err != nil || !handled {
+		t.Fatalf("invalid /reasoning structured match=(%t, %v), want handled", handled, err)
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "用法: /reasoning") {
+		t.Fatalf("invalid /reasoning document missing usage:\n%s", plain)
+	}
+}
+
+func TestTryExecuteStructuredChatCommandReasoningEffort(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	cfg, cfgPath := testModelCommandConfig(t)
+	session := &ChatSession{
+		ProviderName:    "beta",
+		Provider:        cfg.Providers.Items["beta"],
+		Model:           "beta-model",
+		ReasoningEffort: "low",
+		Config:          cfg,
+	}
+
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/reasoning_effort max")
+	if err != nil || !handled {
+		t.Fatalf("/reasoning_effort max structured match=(%t, %v), want handled", handled, err)
+	}
+	if session.ReasoningEffort != "max" {
+		t.Fatalf("reasoning effort=%q want max", session.ReasoningEffort)
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "当前 reasoning_effort: max") {
+		t.Fatalf("set document missing status:\n%s", plain)
+	}
+	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.AICLI == nil || loaded.AICLI.Chat == nil || loaded.AICLI.Chat.ReasoningEffort != "max" {
+		t.Fatalf("structured set did not persist max: %+v", loaded.AICLI)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/reasoning-effort clear")
+	if err != nil || !handled {
+		t.Fatalf("/reasoning-effort clear structured match=(%t, %v), want handled", handled, err)
+	}
+	if session.ReasoningEffort != "" {
+		t.Fatalf("reasoning effort=%q want empty", session.ReasoningEffort)
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "当前 reasoning_effort: (无)") {
+		t.Fatalf("clear document missing status:\n%s", plain)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/reasoning_effort select")
+	if err != nil || !handled {
+		t.Fatalf("/reasoning_effort select structured match=(%t, %v), want handled", handled, err)
+	}
+	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "需要选择器交互") {
+		t.Fatalf("select document missing migration guard:\n%s", plain)
+	}
+}
+
+func TestDispatchChatCommandFiniteModesDoNotWriteRawStdout(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	var retained bytes.Buffer
+	coord.SetWriter(&retained)
+	raw := captureStdout(t, func() {
+		for _, command := range []string{"/stream status", "/s", "/n", "/fast status", "/reasoning off", "/reasoning_effort status"} {
+			if dispatchChatCommand(session, command, false) {
+				t.Fatalf("%s unexpectedly requested chat exit", command)
+			}
+		}
+	})
+	if raw != "" {
+		t.Fatalf("finite mode commands wrote raw stdout:\n%q", raw)
+	}
+	for _, marker := range []string{"当前输出模式:", "已切换到流式模式", "已切换到普通模式", "当前 Fast 模式:", "当前 reasoning: off", "当前 reasoning_effort:"} {
+		if count := strings.Count(retained.String(), marker); count != 1 {
+			t.Fatalf("marker %q count=%d want 1:\n%s", marker, count, retained.String())
+		}
 	}
 }
 
@@ -662,12 +911,16 @@ func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 	for _, name := range []string{
 		"chat_command_result.go",
 		"chat_debug_document.go",
+		"chat_fast_document.go",
 		"chat_status_document.go",
 		"chat_load_document.go",
 		"chat_goal_document.go",
 		"chat_memory_document.go",
+		"chat_reasoning_document.go",
+		"chat_simple_command_document.go",
 		"chat_stream_document.go",
 		"chat_title_document.go",
+		"chat_unified_command_gate.go",
 	} {
 		sourcePath := filepath.Join(filepath.Dir(currentFile), name)
 		source, err := os.ReadFile(sourcePath)
@@ -766,7 +1019,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_debug.go", Func: "printChatAgentPanel", Kind: "fmt.Print", Count: 4},
 		{File: "chat_debug.go", Func: "printChatAgentRoutingUsage", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatAgents", Kind: "fmt.Print", Count: 3},
-		{File: "chat_debug.go", Func: "printChatCollab", Kind: "fmt.Print", Count: 5},
+		{File: "chat_debug.go", Func: "printChatCollab", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatDebugAgentControl", Kind: "fmt.Print", Count: 3},
 		{File: "chat_debug.go", Func: "printChatDebugAgentGraph", Kind: "fmt.Print", Count: 2},
 		{File: "chat_debug.go", Func: "printChatDebugMailbox", Kind: "fmt.Print", Count: 2},
@@ -774,7 +1027,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_debug.go", Func: "printChatRouteLevels", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatRouteRoles", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatRoutingConfigSummary", Kind: "fmt.Print", Count: 1},
-		{File: "chat_debug.go", Func: "printChatTimeline", Kind: "fmt.Print", Count: 3},
+		{File: "chat_debug.go", Func: "printChatTimeline", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "readChatAgentPickerChoice", Kind: "fmt.Print", Count: 5},
 		{File: "chat_debug_archive.go", Func: "handleDebugCommand", Kind: "fmt.Print", Count: 2},
 		{File: "chat_debug_archive.go", Func: "printChatDebugArchiveResult", Kind: "fmt.Print", Count: 1},
@@ -788,10 +1041,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_export_command.go", Func: "readExportFormatChoice", Kind: "fmt.Print", Count: 3},
 		{File: "chat_export_command.go", Func: "readExportMenuChoice", Kind: "fmt.Print", Count: 3},
 		{File: "chat_fast_command.go", Func: "applyFastCommand", Kind: "fmt.Print", Count: 6},
-		{File: "chat_fast_command.go", Func: "persistFastCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 2},
+		{File: "chat_fast_command.go", Func: "persistFastCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_fast_command.go", Func: "printFastCommandStatus", Kind: "fmt.Print", Count: 6},
 		{File: "chat_folder_trust.go", Func: "handleTrustCommand", Kind: "fmt.Print", Count: 5},
-		{File: "chat_folder_trust.go", Func: "printFolderTrustStatus", Kind: "fmt.Print", Count: 4},
+		{File: "chat_folder_trust.go", Func: "printFolderTrustStatus", Kind: "fmt.Print", Count: 1},
 		{File: "chat_goal_auto_continue.go", Func: "reportGoalAutoContinuationLimitReached", Kind: "fmt.Print", Count: 1},
 		{File: "chat_goal_auto_continue.go", Func: "reportGoalAutoContinuationWarning", Kind: "fmt.Print", Count: 1},
 		{File: "chat_http.go", Func: "emitRetryNotice", Kind: "fmt.Print", Count: 1},
@@ -819,13 +1072,13 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_model_switch.go", Func: "selectRuntimeReasoningEffortLegacy", Kind: "fmt.Print", Count: 5},
 		{File: "chat_plan_command.go", Func: "exitChatPlanModeCommand", Kind: "fmt.Print", Count: 5},
 		{File: "chat_plan_command.go", Func: "handlePlanCommand", Kind: "fmt.Print", Count: 7},
-		{File: "chat_plan_command.go", Func: "printPlanModeStatus", Kind: "fmt.Print", Count: 12},
+		{File: "chat_plan_command.go", Func: "printPlanModeStatus", Kind: "fmt.Print", Count: 1},
 		{File: "chat_preferences.go", Func: "persistChatPreferencesIfNeeded", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		{File: "chat_provider_turn.go", Func: "method Complete", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		{File: "chat_reasoning_command.go", Func: "applyReasoningCommand", Kind: "fmt.Print", Count: 3},
 		{File: "chat_reasoning_command.go", Func: "applyReasoningEffortCommandSelection", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_reasoning_command.go", Func: "handleReasoningEffortCommand", Kind: "fmt.Print", Count: 7},
-		{File: "chat_reasoning_command.go", Func: "persistReasoningEffortCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 2},
+		{File: "chat_reasoning_command.go", Func: "persistReasoningEffortCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_reasoning_command.go", Func: "printReasoningCommandStatus", Kind: "fmt.Print", Count: 2},
 		{File: "chat_reasoning_command.go", Func: "printReasoningEffortCommandStatus", Kind: "fmt.Print", Count: 1},
 		{File: "chat_resume_command.go", Func: "handleResumeCommand", Kind: "fmt.Print", Count: 5},
@@ -854,13 +1107,12 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_skills_command.go", Func: "printSkillCatalogReport", Kind: "fmt.Print", Count: 1},
 		{File: "chat_skills_command.go", Func: "promptSkillCatalogSelection", Kind: "fmt.Print", Count: 1},
 		{File: "chat_skills_command.go", Func: "promptSkillExecutionInput", Kind: "fmt.Print", Count: 1},
-		{File: "chat_slash_help.go", Func: "printChatSlashHelp", Kind: "fmt.Print", Count: 1},
 		{File: "chat_startup_timing.go", Func: "method flush", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		{File: "chat_status.go", Func: "handleStatusCommand", Kind: "fmt.Print", Count: 2},
 		{File: "chat_status.go", Func: "printChatStatus", Kind: "fmt.Print", Count: 2},
 		{File: "chat_stream_command.go", Func: "applyStreamCommand", Kind: "fmt.Print", Count: 5},
 		{File: "chat_stream_command.go", Func: "applyStreamShortcut", Kind: "fmt.Print", Count: 3},
-		{File: "chat_stream_command.go", Func: "persistStreamCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 2},
+		{File: "chat_stream_command.go", Func: "persistStreamCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_stream_command.go", Func: "printStreamCommandStatus", Kind: "fmt.Print", Count: 5},
 		{File: "chat_surface_output.go", Func: "method showPriorityPrompt", Kind: "fmt.Print", Count: 3},
 		{File: "chat_surface_output.go", Func: "printDirectInteractiveOutput", Kind: "fmt.Print", Count: 1},
@@ -870,7 +1122,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_system_output.go", Func: "method writeOutputTextLocked", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_team_binding.go", Func: "validateAmbientTeamBinding", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		{File: "chat_theme_command.go", Func: "applyThemeCommandSelection", Kind: "fmt.Print", Count: 2},
-		{File: "chat_theme_command.go", Func: "handleThemeCommand", Kind: "fmt.Print", Count: 9},
+		{File: "chat_theme_command.go", Func: "handleThemeCommand", Kind: "fmt.Print", Count: 6},
 		{File: "chat_theme_command.go", Func: "persistThemeCommandPreference", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		{File: "chat_theme_command.go", Func: "printThemeCommandList", Kind: "fmt.Print", Count: 8},
 		{File: "chat_theme_command.go", Func: "printThemeCommandPreview", Kind: "fmt.Print", Count: 6},
@@ -880,16 +1132,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_transcript_renderer.go", Func: "method RenderSupplement", Kind: "fmt.Print", Count: 1},
 		{File: "chat_unix.go", Func: "setupSignalHandler", Kind: "fmt.Print", Count: 3},
 		{File: "chat_windows.go", Func: "setupSignalHandler", Kind: "fmt.Print", Count: 2},
-		{File: "command.go", Func: "confirmBypassPermissionModeChange", Kind: "fmt.Print", Count: 4},
-		{File: "command.go", Func: "confirmClearConversationHistory", Kind: "fmt.Print", Count: 4},
 		{File: "command.go", Func: "executeShellCommandDetailed", Kind: "fmt.Print", Count: 18},
-		{File: "command.go", Func: "handleApprovalReuseCommand", Kind: "fmt.Print", Count: 4},
-		{File: "command.go", Func: "handleCommand", Kind: "fmt.Print", Count: 34},
-		{File: "command.go", Func: "handleCompactCommand", Kind: "fmt.Print", Count: 4},
-		{File: "command.go", Func: "handleImageAttachmentCommand", Kind: "fmt.Print", Count: 11},
-		{File: "command.go", Func: "handlePermissionModeCommand", Kind: "fmt.Print", Count: 4},
-		{File: "command.go", Func: "handleQueueCommand", Kind: "fmt.Print", Count: 5},
-		{File: "command.go", Func: "printApprovalReuseStatus", Kind: "fmt.Print", Count: 5},
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -50,6 +52,19 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 	}
 
 	b.renderMu.Lock()
+	b.seedPersistedHistoryLocked(units, header)
+	b.renderMu.Unlock()
+	b.sessionInteractionSnapshot()
+}
+
+// seedPersistedHistoryLocked is the render-transaction half of history seed.
+// It exists so destructive transcript replacement can rebuild the encoder and
+// Scene under the same renderMu ownership before publishing one new snapshot.
+func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHistorySeedUnit, header string) {
+	if b == nil || b.renderEncoder == nil ||
+		(len(units) == 0 && strings.TrimSpace(header) == "") {
+		return
+	}
 	if b.historySeedSeen == nil {
 		b.historySeedSeen = make(map[string]struct{})
 	}
@@ -80,8 +95,60 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 		unit.apply(b)
 		b.historySeedSeen[unit.identity] = struct{}{}
 	}
+}
+
+// replaceCanonicalHistoryProjection rebuilds the owned transcript from the
+// post-mutation canonical history. Backtrack removes durable conversation
+// content, so append-only reconciliation is incorrect: old Scene cells must
+// disappear before the surviving canonical cells and follow-up command result
+// are committed. The caller has already completed the domain mutation and no
+// active model run may be rendering into this bridge.
+//
+// The history-reset marker is persisted in the runtime event log. On a later
+// startup replay it discards pre-backtrack event rows before reseeding this
+// canonical snapshot, preventing deleted turns from returning to the Scene.
+func (b *chatRuntimeEventBridge) replaceCanonicalHistoryProjection(messages []runtimetypes.Message, header string) bool {
+	if b == nil {
+		return false
+	}
+	units := buildPersistedHistorySeedUnits(messages)
+	b.renderMu.Lock()
+	if b.runActive {
+		b.renderMu.Unlock()
+		return false
+	}
+	b.resetCanonicalHistoryProjectionLocked()
+	b.seedPersistedHistoryLocked(units, header)
+	b.appendHistoryResetLog(messages, header)
 	b.renderMu.Unlock()
 	b.sessionInteractionSnapshot()
+	return true
+}
+
+// resetCanonicalHistoryProjectionLocked clears all derived render state. It
+// intentionally does not infer a suffix from display rows: the caller supplies
+// canonical source and the next seed recreates stable semantic identities.
+// Caller must hold renderMu.
+func (b *chatRuntimeEventBridge) resetCanonicalHistoryProjectionLocked() {
+	if b == nil {
+		return
+	}
+	b.renderEncoder = encoding.NewEventEncoder()
+	b.historySeedSeen = make(map[string]struct{})
+	b.interactionAnchorMu.Lock()
+	b.interactionAnchor = nil
+	b.interactionAnchorAt = time.Time{}
+	b.interactionAnchorSource = ""
+	b.pendingInteractionSource = ""
+	b.pendingInteractionTail = nil
+	b.interactionAnchorMu.Unlock()
+
+	b.sceneMu.Lock()
+	b.renderScene = scene.New()
+	b.renderMapper = scene.NewChangeSetMapper(b.renderScene)
+	b.sceneApplyFailures = 0
+	b.sceneLastError = ""
+	b.sceneMu.Unlock()
 }
 
 func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persistedHistorySeedUnit {

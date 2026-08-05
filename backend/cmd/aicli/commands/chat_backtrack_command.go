@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
@@ -25,6 +26,22 @@ import (
 //
 // Alias: /rewind with a numeric first arg routes here (checkpoint ids stay on future restore path).
 func handleBacktrackCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredBacktrackQueryCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenBacktrackPicker != nil {
+				openChatBacktrackPicker(session, *result.OpenBacktrackPicker)
+			}
+			if renderErr == nil && result.ApplyBacktrack != nil {
+				applyUnifiedBacktrackRequest(session, result.ApplyBacktrack.Request)
+			}
+			return false
+		}
+		return rejectUnifiedInteractiveLegacyCommand(session, "/backtrack")
+	}
+	if rejectUnifiedInteractiveLegacyCommand(session, "/backtrack") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -155,7 +172,172 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 	return false
 }
 
+// executeStructuredBacktrackQueryCommand accepts finite read-only reports and
+// typed backtrack effects. Direct --apply/--submit carries its fully parsed
+// request to dispatch, which runs the destructive canonical-replacement
+// transaction without ever falling through to the legacy stdout handler.
+func executeStructuredBacktrackQueryCommand(session *ChatSession, command string) (CommandResult, bool) {
+	args := strings.TrimSpace(extractCommandArgument(command))
+	first := strings.ToLower(firstToken(args))
+	// Preserve /rewind's legacy checkpoint-id namespace until that command has
+	// its own semantic action model. Only its established list alias is a safe
+	// read-only projection here.
+	if commandMatches(strings.ToLower(strings.TrimSpace(command)), "/rewind") && first != "list" && first != "ls" {
+		return CommandResult{}, false
+	}
+	if args == "" || first == "select" || first == "pick" || first == "ui" {
+		if commandMatches(strings.ToLower(strings.TrimSpace(command)), "/backtrack") && canOpenChatBacktrackPicker(session) {
+			return newBacktrackPickerCommandResult(), true
+		}
+		return CommandResult{}, false
+	}
+
+	if first == "list" || first == "ls" {
+		return executeStructuredBacktrackTurnsQuery(session), true
+	}
+	if first == "audit" || first == "tombstones" || first == "history" {
+		return executeStructuredBacktrackAuditQuery(session), true
+	}
+
+	req, apply, err := parseChatBacktrackArgs(args)
+	if err != nil {
+		if commandMatches(strings.ToLower(strings.TrimSpace(command)), "/rewind") {
+			return CommandResult{}, false
+		}
+		return commandTextResult(buildBacktrackUsageText(err)), true
+	}
+	if apply {
+		return CommandResult{
+			Action:         CommandContinue,
+			ApplyBacktrack: &BacktrackApplyRequest{Request: req},
+		}, true
+	}
+	return executeStructuredBacktrackPreviewQuery(session, req), true
+}
+
+func newBacktrackPickerCommandResult() CommandResult {
+	return CommandResult{
+		Action:              CommandContinue,
+		OpenBacktrackPicker: &BacktrackPickerRequest{},
+	}
+}
+
+func executeStructuredBacktrackTurnsQuery(session *ChatSession) CommandResult {
+	actor, err := backtrackQueryActor(session)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	turns, err := actor.ListTurns(backtrackQueryContext(session))
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: buildChatBacktrackTurnsDocument(turns)}},
+		Action: CommandContinue,
+	}
+}
+
+func executeStructuredBacktrackAuditQuery(session *ChatSession) CommandResult {
+	actor, err := backtrackQueryActor(session)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	entries, err := actor.ListBacktrackAudit(backtrackQueryContext(session))
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: buildChatBacktrackAuditDocument(entries)}},
+		Action: CommandContinue,
+	}
+}
+
+func executeStructuredBacktrackPreviewQuery(session *ChatSession, req runtimechat.BacktrackRequest) CommandResult {
+	actor, err := backtrackQueryActor(session)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	result, err := actor.PreviewBacktrack(backtrackQueryContext(session), req)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: buildChatBacktrackPreviewDocument(result)}},
+		Action: CommandContinue,
+	}
+}
+
+func backtrackQueryContext(session *ChatSession) context.Context {
+	if session != nil && session.cancelCtx != nil {
+		return session.cancelCtx
+	}
+	return context.Background()
+}
+
+func backtrackQueryActor(session *ChatSession) (*runtimechat.SessionActor, error) {
+	if session == nil {
+		return nil, fmt.Errorf("当前没有活动会话")
+	}
+	if session.RuntimeSession == nil {
+		return nil, fmt.Errorf("当前没有可回退的持久化会话")
+	}
+	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		return nil, fmt.Errorf("当前会话未初始化本地 runtime host，无法读取 backtrack 信息")
+	}
+	return chatActorForSession(backtrackQueryContext(session), session)
+}
+
+func buildChatBacktrackTurnsDocument(turns []runtimechat.UserTurn) render.Document {
+	if len(turns) == 0 {
+		return render.SingleLineDoc(render.TextSpan("当前会话没有可回退的 user turn"))
+	}
+	lines := []string{fmt.Sprintf("User turns（共 %d，0-based index）:", len(turns))}
+	for _, turn := range turns {
+		flags := make([]string, 0, 2)
+		if turn.HasLaterMutation {
+			flags = append(flags, "has_later_mutation")
+		}
+		if turn.BaseCheckpointID != "" {
+			flags = append(flags, "base_chk="+shortID(turn.BaseCheckpointID))
+		}
+		flagText := ""
+		if len(flags) > 0 {
+			flagText = " [" + strings.Join(flags, ", ") + "]"
+		}
+		lines = append(lines, fmt.Sprintf("  [%d] msg#%d%s %s", turn.Index, turn.MessageIndex, flagText, turn.Preview))
+	}
+	lines = append(lines, "用法: /backtrack <index> [--apply] [--both] [--edit \"...\"] [--submit]")
+	return textLinesDocument(lines)
+}
+
+func buildChatBacktrackAuditDocument(entries []runtimechat.BacktrackTombstone) render.Document {
+	if len(entries) == 0 {
+		return render.SingleLineDoc(render.TextSpan("backtrack audit: (empty)"))
+	}
+	lines := []string{fmt.Sprintf("backtrack audit: %d entries", len(entries))}
+	for index, entry := range entries {
+		lines = append(lines, formatBacktrackTombstoneLines(index, entry)...)
+	}
+	return textLinesDocument(lines)
+}
+
+func buildChatBacktrackPreviewDocument(result *runtimechat.BacktrackResult) render.Document {
+	lines := formatChatBacktrackResultLines(result, true)
+	lines = append(lines, "提示: 加上 --apply 执行截断；--both 同时恢复文件；--submit 自动发送编辑后的提示")
+	return textLinesDocument(lines)
+}
+
+func buildBacktrackUsageText(err error) string {
+	lines := []string{"错误: " + err.Error()}
+	lines = append(lines, backtrackUsageLines()...)
+	return strings.Join(lines, "\n")
+}
+
 func listChatBacktrackTurns(session *ChatSession) error {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredBacktrackTurnsQuery(session), false)
+		return nil
+	}
 	ctx := session.cancelCtx
 	if ctx == nil {
 		ctx = context.Background()
@@ -294,6 +476,10 @@ func tokenizeBacktrackArgs(args string) []string {
 }
 
 func handleBacktrackAuditList(session *ChatSession) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredBacktrackAuditQuery(session), false)
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -355,6 +541,32 @@ func printBacktrackTombstone(index int, entry runtimechat.BacktrackTombstone) {
 	}
 }
 
+func formatBacktrackTombstoneLines(index int, entry runtimechat.BacktrackTombstone) []string {
+	when := entry.CreatedAt.UTC().Format(time.RFC3339)
+	if entry.CreatedAt.IsZero() {
+		when = "-"
+	}
+	lines := []string{fmt.Sprintf(
+		"  [%d] %s mode=%s turn=%d msg#%d removed_msgs=%d removed_turns=%d truncate_to=%d",
+		index,
+		shortID(entry.ID),
+		entry.Mode,
+		entry.UserTurnIndex,
+		entry.MessageIndex,
+		entry.RemovedMessageCount,
+		entry.RemovedUserTurns,
+		entry.TruncatedToMessageCount,
+	)}
+	lines = append(lines, "      at="+when)
+	if anchor := strings.TrimSpace(entry.AnchorPreview); anchor != "" {
+		lines = append(lines, "      anchor: "+summarizeMemoryNote(anchor, 100))
+	}
+	if entry.BaseCheckpointID != "" {
+		lines = append(lines, "      base_checkpoint: "+shortID(entry.BaseCheckpointID))
+	}
+	return lines
+}
+
 func printChatBacktrackResult(result *runtimechat.BacktrackResult, preview bool) {
 	if result == nil {
 		return
@@ -409,6 +621,64 @@ func printChatBacktrackResult(result *runtimechat.BacktrackResult, preview bool)
 	}
 }
 
+func formatChatBacktrackResultLines(result *runtimechat.BacktrackResult, preview bool) []string {
+	if result == nil {
+		return nil
+	}
+	kind := "apply"
+	if preview || result.PreviewOnly {
+		kind = "preview"
+	}
+	lines := []string{fmt.Sprintf(
+		"backtrack %s: turn=%d msg#%d mode=%s truncate_to=%d removed_msgs=%d removed_turns=%d",
+		kind,
+		result.UserTurnIndex,
+		result.MessageIndex,
+		result.Mode,
+		result.TruncatedToMessageCount,
+		result.RemovedMessageCount,
+		result.RemovedUserTurns,
+	)}
+	if result.AnchorPreview != "" {
+		lines = append(lines, "  anchor: "+result.AnchorPreview)
+	}
+	if edited := strings.TrimSpace(result.EditedPrompt); edited != "" {
+		lines = append(lines, "  edit: "+summarizeMemoryNote(edited, 120))
+	}
+	if composer := strings.TrimSpace(result.ComposerPrompt); composer != "" {
+		lines = append(lines, "  composer: "+summarizeMemoryNote(composer, 120))
+	}
+	if result.BaseCheckpointID != "" {
+		lines = append(lines, "  base_checkpoint: "+shortID(result.BaseCheckpointID))
+	}
+	if result.Tombstone != nil {
+		lines = append(lines, fmt.Sprintf(
+			"  tombstone: %s removed_msgs=%d removed_turns=%d",
+			shortID(result.Tombstone.ID),
+			result.Tombstone.RemovedMessageCount,
+			result.Tombstone.RemovedUserTurns,
+		))
+	}
+	if result.CodeRestore != nil {
+		lines = append(lines, fmt.Sprintf(
+			"  code_restore: chk=%s applied=%d errors=%d",
+			shortID(result.CodeRestore.CheckpointID),
+			len(result.CodeRestore.AppliedPaths),
+			len(result.CodeRestore.Errors),
+		))
+		for _, path := range result.CodeRestore.AppliedPaths {
+			lines = append(lines, "    + "+path)
+		}
+		for _, err := range result.CodeRestore.Errors {
+			lines = append(lines, "    ! "+err)
+		}
+	}
+	for _, warning := range result.Warnings {
+		lines = append(lines, "  warning: "+warning)
+	}
+	return lines
+}
+
 func printBacktrackUsage() {
 	fmt.Println("用法:")
 	fmt.Println("  /backtrack                 # 交互选择（Esc 空输入等价）")
@@ -417,6 +687,18 @@ func printBacktrackUsage() {
 	fmt.Println("  /backtrack audit           # 列出 durable tombstone 审计摘要")
 	fmt.Println("  /backtrack <user_turn_index> [--apply] [--both|--code] [--edit \"text\"] [--submit]")
 	fmt.Println("  /rewind <user_turn_index> ...   # 数字参数时等价于 /backtrack")
+}
+
+func backtrackUsageLines() []string {
+	return []string{
+		"用法:",
+		"  /backtrack                 # 交互选择（Esc 空输入等价）",
+		"  /backtrack list            # 列出 user turns",
+		"  /backtrack select          # 强制打开选择器",
+		"  /backtrack audit           # 列出 durable tombstone 审计摘要",
+		"  /backtrack <user_turn_index> [--apply] [--both|--code] [--edit \"text\"] [--submit]",
+		"  /rewind <user_turn_index> ...   # 数字参数时等价于 /backtrack",
+	}
 }
 
 func shortID(id string) string {

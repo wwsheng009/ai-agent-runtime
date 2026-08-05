@@ -57,11 +57,12 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		keyHandler *ui.KeyHandler
 		surface    *ui.FixedBottomSurface
 	)
+	interactiveUI := shouldInitializeChatInteractiveUI(opts)
 	if shouldInitializeChatKeyHandler(opts) {
 		keyHandler = ui.NewKeyHandler()
 		keyHandler.Start()
 	}
-	if shouldInitializeChatInteractiveUI(opts) {
+	if interactiveUI {
 		layout = ui.NewLayout(ui.LayoutAdvanced)
 		layout.Enable()
 		inputBox = ui.NewInputBox(layout)
@@ -71,7 +72,17 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		// initial legacy frame. TerminalSession becomes the only writer below.
 		surface.SetPhysicalWritesEnabled(false)
 		if !surface.Enable() {
-			surface = nil
+			// A TTY alone is insufficient for the owned renderer: the primary
+			// transaction requires ANSI plus DECSTBM scroll-region support and a
+			// confirmed geometry source. Continuing with a nil facade would attach
+			// TerminalSession against fallback dimensions, which can lose the
+			// retained history tail and native-scrollback handoff. Do not revive the
+			// retired legacy writer as a fallback for this one-way cutover.
+			layout.Disable()
+			if keyHandler != nil {
+				keyHandler.Stop()
+			}
+			return nil, nil, fmt.Errorf("initialize unified terminal renderer: terminal does not support ANSI scroll-region rendering")
 		}
 	}
 	if opts.NoInteractive || opts.OutputFormat == "json" {
@@ -142,10 +153,19 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		ImagePaths:               opts.ImagePaths,
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
+	// The compatibility facade is already physically fenced above, so it is
+	// safe to mount its geometry and semantic bottom-pane inputs before the
+	// primary presenter attaches. Doing so makes the first TerminalSession frame
+	// use the real terminal dimensions instead of the global 80x24 fallback.
+	// SetSurface cannot revive the legacy writer: its physical-write fence is
+	// established before Enable and is made permanent by presenter attachment.
 	session.Interaction.SetSurface(surface)
-	if shouldInitializeChatInteractiveUI(opts) {
+	if interactiveUI {
 		// This is an authority transition, not a feature flag. Never continue an
 		// interactive session with a fenced legacy writer and no TerminalSession.
+		// The already-mounted compatibility facade contributes geometry and
+		// semantic bottom-pane state only; TerminalSession becomes the sole
+		// physical terminal owner below.
 		if !session.Interaction.EnableUnifiedRenderer() {
 			mcpmanager.SetStatusOutput(os.Stdout)
 			if surface != nil {

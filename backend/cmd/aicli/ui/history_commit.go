@@ -47,10 +47,14 @@ func (r DisplayRange) Valid() bool {
 // into native scrollback. Token, cell identity, revision, both ranges, and
 // layout generation are all required; text is payload, never identity.
 type HistoryCommit struct {
-	Token            uint64
-	CellID           scene.CellID
-	Revision         uint64
-	SourceRange      SourceRange
+	Token       uint64
+	CellID      scene.CellID
+	Revision    uint64
+	SourceRange SourceRange
+	// FragmentID is zero for source-preserving commits. Rich renderers use a
+	// stable non-zero ordinal to identify a physical presentation fragment when
+	// a single semantic source range produces several display rows.
+	FragmentID       uint64
 	DisplayRange     DisplayRange
 	LayoutGeneration uint64
 	Lines            []render.Line
@@ -115,6 +119,7 @@ type historyCommitRangeKey struct {
 	revision         uint64
 	sourceStart      int
 	sourceEnd        int
+	fragmentID       uint64
 	displayStart     int
 	displayEnd       int
 	layoutGeneration uint64
@@ -125,6 +130,7 @@ type historyCommitSourceKey struct {
 	revision    uint64
 	sourceStart int
 	sourceEnd   int
+	fragmentID  uint64
 }
 
 func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
@@ -133,6 +139,7 @@ func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
 		revision:    commit.Revision,
 		sourceStart: commit.SourceRange.Start,
 		sourceEnd:   commit.SourceRange.End,
+		fragmentID:  commit.FragmentID,
 	}
 }
 
@@ -142,6 +149,7 @@ func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 		revision:         c.Revision,
 		sourceStart:      c.SourceRange.Start,
 		sourceEnd:        c.SourceRange.End,
+		fragmentID:       c.FragmentID,
 		displayStart:     c.DisplayRange.Start,
 		displayEnd:       c.DisplayRange.End,
 		layoutGeneration: c.LayoutGeneration,
@@ -237,7 +245,7 @@ func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCom
 	}
 	current := entry.Commit
 	if current.CellID != replacement.CellID || current.Revision != replacement.Revision ||
-		current.SourceRange != replacement.SourceRange {
+		current.SourceRange != replacement.SourceRange || current.FragmentID != replacement.FragmentID {
 		return ErrCommitSourceChanged
 	}
 	replacement.Token = token

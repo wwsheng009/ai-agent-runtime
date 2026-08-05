@@ -90,24 +90,36 @@ func (p TerminalFramePlan) Valid() bool {
 // transaction boundary for an already-claimed HistoryCommit and one AppState
 // derived viewport frame.
 type TerminalTransactionPlan struct {
-	Frame   TerminalFramePlan
-	History *HistoryCommit
+	Frame            TerminalFramePlan
+	History          *HistoryCommit
+	BootstrapHistory []HistoryCommit
 }
 
 // ComposeTerminalTransactionPlan derives an immutable frame and optionally
 // attaches one already-claimed HistoryCommit. The commit is cloned because its
 // render lines are reducer-owned payload until the eventual Ack.
-func ComposeTerminalTransactionPlan(state AppState, history *HistoryCommit) TerminalTransactionPlan {
+func ComposeTerminalTransactionPlan(state AppState, history *HistoryCommit, bootstrapHistory ...[]HistoryCommit) TerminalTransactionPlan {
 	plan := TerminalTransactionPlan{Frame: ComposeTerminalFramePlan(state)}
 	if history != nil {
 		clone := history.Clone()
 		plan.History = &clone
 	}
+	if len(bootstrapHistory) > 0 && len(bootstrapHistory[0]) > 0 {
+		plan.BootstrapHistory = cloneHistoryCommits(bootstrapHistory[0])
+	}
 	return plan
 }
 
 func (p TerminalTransactionPlan) Valid() bool {
-	return p.Frame.Valid() && (p.History == nil || p.History.Valid())
+	if !p.Frame.Valid() || (p.History != nil && !p.History.Valid()) {
+		return false
+	}
+	for _, commit := range p.BootstrapHistory {
+		if !commit.Valid() {
+			return false
+		}
+	}
+	return true
 }
 
 func (p TerminalTransactionPlan) Clone() TerminalTransactionPlan {
@@ -118,7 +130,19 @@ func (p TerminalTransactionPlan) Clone() TerminalTransactionPlan {
 		clone := p.History.Clone()
 		p.History = &clone
 	}
+	p.BootstrapHistory = cloneHistoryCommits(p.BootstrapHistory)
 	return p
+}
+
+func cloneHistoryCommits(commits []HistoryCommit) []HistoryCommit {
+	if len(commits) == 0 {
+		return nil
+	}
+	clone := make([]HistoryCommit, len(commits))
+	for index, commit := range commits {
+		clone[index] = commit.Clone()
+	}
+	return clone
 }
 
 // TerminalProjectionState is the TerminalSession-owned physical cache
@@ -470,43 +494,86 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	s.outputBottom = frame.OutputBottomRow
 
 	fullRepaint := s.screen.ProjectionValidity() != renderengine.ProjectionKnown
+	rows, err := terminalFrameCells(frame.Rows, frame.RenderRows, frame.Geometry.Width, frame.Geometry.Height, s.frameTheme)
+	if err != nil {
+		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
+		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
+	}
 	historyResult := (*HistoryCommitResult)(nil)
 	historyBytes := ""
 	var historyCells [][]vt.Cell
+	var delivered []HistoryCommit
 	if plan.History != nil {
 		result := HistoryCommitResult{Deferred: true}
-		if projectionKnown && s.outputBottom > 0 && plan.History.LayoutGeneration == s.generation {
-			rows, cells, err := terminalHistoryHandoffRows(plan.History.Lines, s.frameTheme, s.geometry.Width)
+		if !projectionKnown && s.outputBottom > 0 && plan.History.LayoutGeneration == s.generation && len(plan.BootstrapHistory) > 0 {
+			bootstrapRows, bootstrapCells, bootstrapErr := terminalHistoryBootstrapRows(plan.BootstrapHistory, frame, s.frameTheme)
+			if bootstrapErr != nil {
+				result = HistoryCommitResult{Err: bootstrapErr}
+			} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, bootstrapRows); handoff.Empty() {
+				result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
+			} else {
+				// A host only guarantees global terminal scrollback for a full-screen
+				// scroll. Bootstrap appends semantic history followed by one complete
+				// target frame, which pushes the history into native scrollback while
+				// leaving the target frame as the visible physical tail.
+				historyBytes = handoff.ANSI()
+				historyCells = bootstrapCells
+				delivered = cloneHistoryCommits(plan.BootstrapHistory)
+				result = HistoryCommitResult{}
+			}
+		} else if projectionKnown && s.outputBottom > 0 && plan.History.LayoutGeneration == s.generation {
+			candidateRows, candidateCells, err := terminalHistoryHandoffRows(plan.History.Lines, s.frameTheme, s.geometry.Width)
 			if err != nil {
 				result = HistoryCommitResult{Err: err}
-			} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.outputBottom, rows); handoff.Empty() {
+			} else if s.screen.RegionPrefixEquals(1, s.outputBottom, candidateCells) {
+				// The outgoing semantic range is already the physical prefix of the
+				// current screen. Push it through the full terminal height so real
+				// ConPTY hosts commit it to global scrollback; blank rows avoid
+				// replaying the entering transcript tail before the source-backed
+				// frame repaint below.
+				blankRows, blankCells := terminalBlankHandoffRows(len(candidateRows), s.geometry.Width)
+				if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, blankRows); handoff.Empty() {
+					result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
+				} else {
+					historyBytes = handoff.ANSI()
+					historyCells = blankCells
+					result = HistoryCommitResult{}
+				}
+			} else if len(plan.BootstrapHistory) > 0 {
+				bootstrapRows, bootstrapCells, bootstrapErr := terminalHistoryBootstrapRows(plan.BootstrapHistory, frame, s.frameTheme)
+				if bootstrapErr != nil {
+					result = HistoryCommitResult{Err: bootstrapErr}
+				} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, bootstrapRows); handoff.Empty() {
+					result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
+				} else {
+					// Bootstrap appends a full target frame after semantic history. That
+					// guarantees the prefix crosses the real terminal's top boundary,
+					// while the target frame itself remains visible rather than being
+					// duplicated in native scrollback.
+					historyBytes = handoff.ANSI()
+					historyCells = bootstrapCells
+					delivered = cloneHistoryCommits(plan.BootstrapHistory)
+					result = HistoryCommitResult{}
+				}
+			} else if handoff := renderengine.NewHandoffPlan(s.geometry.Height, s.outputBottom, candidateRows); handoff.Empty() {
+				// Compatibility callers that do not supply the AppState-derived
+				// bootstrap batch retain the original isolated sink behavior.
+				// Unified TerminalSessionExecutor always supplies a batch, so this
+				// path cannot define production history ownership.
 				result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 			} else {
 				historyBytes = handoff.ANSI()
-				historyCells = cells
+				historyCells = candidateCells
 				result = HistoryCommitResult{}
 			}
 		}
 		historyResult = &result
 	}
-
-	rows, err := terminalFrameCells(frame.Rows, frame.RenderRows, frame.Geometry.Width, frame.Geometry.Height, s.frameTheme)
-	if err != nil {
-		// The transaction has not entered its write section yet. A prepared
-		// handoff therefore remains unstarted: acknowledging it here would
-		// advance the reducer even though none of its scrollback bytes reached
-		// the terminal.
-		if historyResult != nil && historyBytes != "" {
-			*historyResult = HistoryCommitResult{Deferred: true}
-		}
-		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
-		return TerminalTransactionResult{Frame: result, History: historyResult}
-	}
 	if historyBytes != "" {
-		// Match the handoff before diffing the next semantic viewport. This
-		// cache mutation is tentative until the one assembled write succeeds;
-		// any error below marks it Unknown and forces source-backed recovery.
-		s.screen.ApplyRegionAppend(1, s.outputBottom, historyCells)
+		// Handoffs always scroll the full physical terminal. Mirror that state
+		// before diffing the source-backed frame; a failed write below invalidates
+		// this tentative cache mutation.
+		s.screen.ApplyRegionAppend(1, s.geometry.Height, historyCells)
 	}
 	s.screen.StageFrame(rows)
 	bytes := historyBytes + s.screen.PrepareFlush()
@@ -527,7 +594,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	s.frame++
 	frameResult := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint}
 	if historyResult != nil && historyBytes != "" {
-		*historyResult = HistoryCommitResult{Frame: s.frame}
+		*historyResult = HistoryCommitResult{Frame: s.frame, Delivered: delivered}
 	}
 	return TerminalTransactionResult{Frame: frameResult, History: historyResult}
 }
@@ -539,10 +606,11 @@ func terminalTransactionWithHistory(frame TerminalFrameResult, history *HistoryC
 	return TerminalTransactionResult{Frame: frame, History: &result}
 }
 
-// CommitHistory implements HistoryCommitSink for the eventual one-writer
-// primary presenter. It intentionally has no FixedBottomSurface adapter: that
-// surface still owns legacy historyWindow handoff in production, and wiring
-// both paths would duplicate native scrollback.
+// CommitHistory implements HistoryCommitSink for the unified one-writer
+// primary presenter. It intentionally has no FixedBottomSurface adapter: the
+// compatibility surface is physically fenced in owned interactive sessions,
+// and wiring its legacy historyWindow handoff here would duplicate native
+// scrollback.
 //
 // The commit is accepted only when this session has a confirmed projection for
 // the exact layout generation. A lease, an incomplete recovery frame, or a
@@ -574,7 +642,11 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 	if err != nil {
 		return HistoryCommitResult{Err: err}
 	}
-	plan := renderengine.NewHandoffPlan(s.geometry.Height, s.outputBottom, rows)
+	// Do not use the fixed-bottom subregion here. Some real terminal hosts
+	// render DECSTBM correctly but do not add rows from a subregion to their
+	// global scrollback. A full-screen scroll is the portable native-history
+	// boundary; the next source-backed frame restores fixed bottom rows.
+	plan := renderengine.NewHandoffPlan(s.geometry.Height, s.geometry.Height, rows)
 	if plan.Empty() {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
@@ -624,6 +696,84 @@ func terminalHistoryHandoffRows(lines []render.Line, theme style.ThemeContext, w
 		cells[index] = screen.CellRows(1, 1)[0]
 	}
 	return rows, cells, nil
+}
+
+// terminalFrameOutputLines returns the source-backed render lines in the
+// primary output region. It never reads the front buffer; callers use it only
+// to prepare a physical append that makes an already-proven front prefix leave
+// the terminal viewport.
+func terminalFrameOutputLines(frame TerminalFramePlan, count int) ([]render.Line, error) {
+	if count < 1 || count > frame.OutputBottomRow || frame.OutputBottomRow > len(frame.Rows) {
+		return nil, ErrInvalidHistoryHandoff
+	}
+	start := frame.OutputBottomRow - count
+	lines := make([]render.Line, 0, count)
+	for index := start; index < frame.OutputBottomRow; index++ {
+		if len(frame.RenderRows) == len(frame.Rows) {
+			lines = append(lines, cloneAppRenderLine(frame.RenderRows[index]))
+			continue
+		}
+		lines = append(lines, appPlainRenderLine(frame.Rows[index].Text))
+	}
+	return lines, nil
+}
+
+func terminalFrameIncomingHandoffRows(frame TerminalFramePlan, count int, theme style.ThemeContext) ([]string, [][]vt.Cell, error) {
+	lines, err := terminalFrameOutputLines(frame, count)
+	if err != nil {
+		return nil, nil, err
+	}
+	return terminalHistoryHandoffRows(lines, theme, frame.Geometry.Width)
+}
+
+func terminalBlankHandoffRows(count, width int) ([]string, [][]vt.Cell) {
+	if count < 1 || width < 1 {
+		return nil, nil
+	}
+	rows := make([]string, count)
+	cells := make([][]vt.Cell, count)
+	for index := range cells {
+		cells[index] = make([]vt.Cell, width)
+	}
+	return rows, cells
+}
+
+// terminalHistoryBootstrapRows writes all pending semantic history before one
+// complete target frame. The full frame forces the history prefix through a
+// real terminal's global top boundary, while it itself remains on screen.
+func terminalHistoryBootstrapRows(history []HistoryCommit, frame TerminalFramePlan, theme style.ThemeContext) ([]string, [][]vt.Cell, error) {
+	if len(history) == 0 || frame.Geometry.Height < 1 || len(frame.Rows) != frame.Geometry.Height {
+		return nil, nil, ErrInvalidHistoryHandoff
+	}
+	lines := make([]render.Line, 0)
+	for _, commit := range history {
+		if !commit.Valid() {
+			return nil, nil, ErrInvalidHistoryHandoff
+		}
+		lines = append(lines, cloneRenderLines(commit.Lines)...)
+	}
+	tail, err := terminalFrameScreenLines(frame)
+	if err != nil {
+		return nil, nil, err
+	}
+	lines = append(lines, tail...)
+	return terminalHistoryHandoffRows(lines, theme, frame.Geometry.Width)
+}
+
+func terminalFrameScreenLines(frame TerminalFramePlan) ([]render.Line, error) {
+	if frame.Geometry.Width < 1 || frame.Geometry.Height < 1 || len(frame.Rows) != frame.Geometry.Height ||
+		(len(frame.RenderRows) != 0 && len(frame.RenderRows) != len(frame.Rows)) {
+		return nil, ErrInvalidHistoryHandoff
+	}
+	lines := make([]render.Line, 0, len(frame.Rows))
+	for index := range frame.Rows {
+		if len(frame.RenderRows) == len(frame.Rows) {
+			lines = append(lines, cloneAppRenderLine(frame.RenderRows[index]))
+			continue
+		}
+		lines = append(lines, appPlainRenderLine(frame.Rows[index].Text))
+	}
+	return lines, nil
 }
 
 type terminalWriteResult struct {

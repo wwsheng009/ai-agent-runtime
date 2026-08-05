@@ -2,8 +2,10 @@ package ui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
@@ -148,6 +150,34 @@ func TestHistoryEffectQueue_ReconcileScrollbackRetiresOnlyAProvenTerminalEpoch(t
 	}
 }
 
+func TestHistoryEffectsReducer_BootstrapBatchAcknowledgesOrderedPendingRangesAtomically(t *testing.T) {
+	state := historyEffectTestState(t, 2)
+	entries := state.HistoryEffects.Entries()
+	if len(entries) < 3 {
+		t.Fatalf("fixture entries = %#v, want at least three", entries)
+	}
+	commits := []HistoryCommit{
+		entries[0].Commit.Clone(),
+		entries[1].Commit.Clone(),
+		entries[2].Commit.Clone(),
+	}
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: commits[0].Token, LayoutGeneration: state.LayoutGeneration,
+	}, 3)
+	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
+		Commits: commits, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+	}, 4)
+	for _, commit := range commits {
+		entry := historyCommitEntry(t, state, commit.Token)
+		if entry.State != HistoryCommitAcked || entry.AckFrame != 9 || entry.Commit.Lines != nil {
+			t.Fatalf("bootstrap token %d was not atomically acknowledged: %#v", commit.Token, entry)
+		}
+	}
+	if state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("valid bootstrap batch invalidated projection: %#v", state.HistoryEffects)
+	}
+}
+
 func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 4, Height: 4, Generation: 1},
@@ -158,15 +188,176 @@ func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 		}}),
 	}
 	commits := planEligibleHistoryCommits(state)
-	if len(commits) != 1 || commits[0].CellID != 1 {
-		t.Fatalf("physical wrapped eligibility = %#v, want only cell 1", commits)
+	if len(commits) != 2 {
+		t.Fatalf("physical wrapped eligibility = %#v, want two row fragments for cell 1", commits)
 	}
-	if commits[0].DisplayRange != (DisplayRange{Start: 0, End: 2}) || len(commits[0].Lines) != 2 {
-		t.Fatalf("physical display payload = %#v", commits[0])
+	want := []struct {
+		source  SourceRange
+		display DisplayRange
+		text    string
+	}{
+		{source: SourceRange{Start: 0, End: 4}, display: DisplayRange{Start: 0, End: 1}, text: "1234"},
+		{source: SourceRange{Start: 4, End: 6}, display: DisplayRange{Start: 1, End: 2}, text: "56"},
 	}
-	for index, line := range commits[0].Lines {
+	for index, expected := range want {
+		commit := commits[index]
+		if commit.CellID != 1 || commit.SourceRange != expected.source || commit.DisplayRange != expected.display {
+			t.Fatalf("history row fragment %d = %#v, want source=%+v display=%+v", index, commit, expected.source, expected.display)
+		}
+		if len(commit.Lines) != 1 || len(commit.Lines[0].Spans) != 1 || commit.Lines[0].Spans[0].Text != expected.text {
+			t.Fatalf("history row fragment %d payload = %#v, want %q", index, commit.Lines, expected.text)
+		}
+		line := commit.Lines[0]
 		if len(line.Spans) != 1 || line.Spans[0].Style.Role != string(style.RoleAssistant) {
 			t.Fatalf("history display line %d lost assistant render role: %#v", index+1, line)
+		}
+	}
+}
+
+func TestPlanEligibleHistoryCommits_SplitsUnbrokenPlainLineAtPrimaryBoundary(t *testing.T) {
+	state := AppState{
+		Geometry:         GeometryState{Width: 4, Height: 3, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "abcdefghijkl", Phase: scene.CellCommitted},
+		}}),
+	}
+
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) != 1 {
+		t.Fatalf("unbroken overflow commits = %#v, want first wrapped row", commits)
+	}
+	got := commits[0]
+	if got.SourceRange != (SourceRange{Start: 0, End: 4}) || got.DisplayRange != (DisplayRange{Start: 0, End: 1}) {
+		t.Fatalf("unbroken overflow identity = %#v", got)
+	}
+	if len(got.Lines) != 1 || len(got.Lines[0].Spans) != 1 || got.Lines[0].Spans[0].Text != "abcd" {
+		t.Fatalf("unbroken overflow payload = %#v", got.Lines)
+	}
+}
+
+func TestHistoryEffectsReducer_UnbrokenLineHandoffsEachRowOnce(t *testing.T) {
+	cell := &scene.TranscriptCell{
+		ID: 1, Revision: 1, Kind: scene.KindAssistant,
+		Source: "abcdefghijkl", Phase: scene.CellCommitted,
+	}
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: 4, Height: 3, Generation: 1}, 1)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{Cells: []*scene.TranscriptCell{cell}}}, 2)
+	entries := state.HistoryEffects.Entries()
+	if len(entries) != 1 || entries[0].Commit.SourceRange != (SourceRange{Start: 0, End: 4}) {
+		t.Fatalf("initial unbroken-line history = %#v", entries)
+	}
+	first := entries[0].Commit
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: first.Token, LayoutGeneration: 1}, 3)
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: first.Token, Frame: 1, LayoutGeneration: 1}, 4)
+
+	state = reduceUIControllerState(state, Resize{Width: 4, Height: 4, Generation: 2}, 5)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{Cells: []*scene.TranscriptCell{
+		cell,
+		{ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "tail", Phase: scene.CellCommitted},
+	}}}, 6)
+
+	entries = state.HistoryEffects.Entries()
+	rowRanges := make(map[SourceRange]int)
+	for _, entry := range entries {
+		if entry.Commit.CellID == 1 {
+			rowRanges[entry.Commit.SourceRange]++
+		}
+	}
+	if rowRanges[SourceRange{Start: 0, End: 4}] != 1 || rowRanges[SourceRange{Start: 4, End: 8}] != 1 {
+		t.Fatalf("unbroken line did not advance by one non-duplicated row: %#v", entries)
+	}
+	if len(rowRanges) != 2 {
+		t.Fatalf("unbroken line minted duplicate or skipped ranges: %#v", entries)
+	}
+}
+
+func TestPlanEligibleHistoryCommits_SplitsCJKWrappedRowsAtByteBoundaries(t *testing.T) {
+	state := AppState{
+		Geometry:         GeometryState{Width: 4, Height: 3, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "甲乙丙丁己", Phase: scene.CellCommitted},
+		}}),
+	}
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) != 1 {
+		t.Fatalf("CJK overflow commits = %#v, want first display row", commits)
+	}
+	got := commits[0]
+	if got.SourceRange != (SourceRange{Start: 0, End: len("甲乙")}) || got.DisplayRange != (DisplayRange{Start: 0, End: 1}) {
+		t.Fatalf("CJK source/display boundary = %#v", got)
+	}
+	if len(got.Lines) != 1 || len(got.Lines[0].Spans) != 1 || got.Lines[0].Spans[0].Text != "甲乙" {
+		t.Fatalf("CJK display payload = %#v", got.Lines)
+	}
+}
+
+func TestPlanEligibleHistoryCommits_SplitsMarkdownRowsAtPrimaryBoundary(t *testing.T) {
+	const source = "# markdown heading\n\n- **markdown-history-01**\n- **markdown-history-02**\n- **markdown-history-03**\n- **markdown-history-04**\n- **markdown-history-05**"
+	state := AppState{
+		Geometry:         GeometryState{Width: 48, Height: 4, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted},
+		}}),
+	}
+
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) == 0 {
+		t.Fatal("overflowed Markdown did not create history fragments")
+	}
+	seenFragments := make(map[uint64]struct{}, len(commits))
+	for _, commit := range commits {
+		if commit.SourceRange != (SourceRange{Start: 0, End: len(source)}) || commit.FragmentID == 0 {
+			t.Fatalf("Markdown fragment identity = %#v", commit)
+		}
+		if _, duplicate := seenFragments[commit.FragmentID]; duplicate {
+			t.Fatalf("duplicate Markdown renderer fragment %d: %#v", commit.FragmentID, commits)
+		}
+		seenFragments[commit.FragmentID] = struct{}{}
+		payload := render.PlainBackend{}.Render(render.LinesDoc(commit.Lines...))
+		if strings.Contains(payload, "**") || strings.Contains(payload, "# markdown") {
+			t.Fatalf("Markdown history payload leaked raw source: %q", payload)
+		}
+	}
+}
+
+// A finalized cell can be taller than the retained primary viewport. Its
+// invisible prefix must still become tokenized history; limiting eligibility
+// to whole cells leaves that prefix in neither the primary frame nor native
+// scrollback. Plain source lines provide stable source boundaries for the
+// initial segmented-handoff implementation.
+func TestPlanEligibleHistoryCommits_SegmentsOversizedFinalizedPlainCell(t *testing.T) {
+	const source = "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh"
+	state := AppState{
+		Geometry:         GeometryState{Width: 80, Height: 6, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted},
+		}}),
+	}
+
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) != 2 {
+		t.Fatalf("oversized finalized cell commits = %#v, want two invisible source-line segments", commits)
+	}
+	wantRanges := []struct {
+		source  SourceRange
+		display DisplayRange
+		text    string
+	}{
+		{source: SourceRange{Start: 0, End: 6}, display: DisplayRange{Start: 0, End: 1}, text: "first"},
+		{source: SourceRange{Start: 6, End: 13}, display: DisplayRange{Start: 1, End: 2}, text: "second"},
+	}
+	for index, want := range wantRanges {
+		got := commits[index]
+		if got.CellID != 1 || got.Revision != 1 || got.SourceRange != want.source || got.DisplayRange != want.display {
+			t.Fatalf("commit[%d] identity = %#v, want source=%+v display=%+v", index, got, want.source, want.display)
+		}
+		if len(got.Lines) != 1 || len(got.Lines[0].Spans) != 1 || got.Lines[0].Spans[0].Text != want.text {
+			t.Fatalf("commit[%d] render payload = %#v, want %q", index, got.Lines, want.text)
 		}
 	}
 }

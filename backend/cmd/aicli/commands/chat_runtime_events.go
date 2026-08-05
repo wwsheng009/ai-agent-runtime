@@ -35,6 +35,8 @@ import (
 
 type chatRuntimeEventBridge struct {
 	session                         *ChatSession
+	primarySessionMu                sync.RWMutex
+	primarySessionID                string
 	startOnce                       sync.Once
 	processorOnce                   sync.Once
 	eventQueue                      chan chatRuntimeQueuedEvent
@@ -224,6 +226,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	renderScene := scene.New()
 	bridge := &chatRuntimeEventBridge{
 		session:             session,
+		primarySessionID:    currentRuntimeSessionID(session),
 		eventQueue:          make(chan chatRuntimeQueuedEvent, 512),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
 		rendered:            make(map[string]struct{}),
@@ -240,11 +243,17 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				session.Interaction.RenderAsyncLine(line)
 				return
 			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return
+			}
 			fmt.Println(ui.FormatAssistantSupplementBlock(line))
 		},
 		writeDocument: func(doc render.Document) bool {
-			if session == nil || session.Interaction == nil {
+			if session == nil {
 				return false
+			}
+			if session.Interaction == nil {
+				return unifiedInteractiveOutputMustFailClosed(session)
 			}
 			session.Interaction.RenderAsyncDocument(doc)
 			return true
@@ -257,6 +266,9 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				session.Interaction.RenderAssistantDelta(delta)
 				return
 			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return
+			}
 			fmt.Print(delta)
 		},
 		finalizeDelta: func() {
@@ -264,11 +276,17 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				session.Interaction.FinalizeAssistantDelta()
 				return
 			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return
+			}
 			fmt.Println()
 		},
 		completeDelta: func(content string) bool {
 			if session != nil && session.Interaction != nil {
 				return session.Interaction.CompleteAssistantResponse(content)
+			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return true
 			}
 			return false
 		},
@@ -278,6 +296,9 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 			if session != nil && session.Interaction != nil {
 				session.Interaction.RenderReasoningDelta(block)
+				return
+			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
 				return
 			}
 			lines := chatReasoningLines(block)
@@ -294,6 +315,9 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		completeReasoning: func(block *runtimetypes.ReasoningBlock) bool {
 			if session != nil && session.Interaction != nil {
 				return session.Interaction.CompleteReasoningResponse(block)
+			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return true
 			}
 			return false
 		},
@@ -323,9 +347,15 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				session.Interaction.PrintPrompt()
 				return
 			}
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return
+			}
 			fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 		},
 		askApproval: func(approval *runtimechat.ApprovalRequest, contextLines []string) (chatApprovalAnswer, error) {
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return chatApprovalAnswer{}, fmt.Errorf("unified terminal session is unavailable")
+			}
 			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval)
 			defer restoreStage()
 			lines := make([]string, 0, 10)
@@ -381,6 +411,9 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 		},
 		askQuestion: func(prompt string, suggestions []string, required bool) (string, error) {
+			if unifiedInteractiveOutputMustFailClosed(session) {
+				return "", fmt.Errorf("unified terminal session is unavailable")
+			}
 			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer)
 			defer restoreStage()
 			normalizedSuggestions := normalizedQuestionSuggestions(suggestions)
@@ -638,10 +671,7 @@ func (b *chatRuntimeEventBridge) logRunEndFallback() {
 	if b == nil || b.session == nil || b.session.Logger == nil {
 		return
 	}
-	sessionID := ""
-	if b.session.RuntimeSession != nil {
-		sessionID = strings.TrimSpace(b.session.RuntimeSession.ID)
-	}
+	sessionID := b.primaryRuntimeSessionID()
 	payload := map[string]interface{}{"success": true, "source": "bridge_end_run"}
 	if runErr := b.RunError(); runErr != nil {
 		payload["success"] = false
@@ -1095,16 +1125,41 @@ func (b *chatRuntimeEventBridge) appendEventLog(event runtimeevents.Event) {
 // submitUserInteraction）；具体类别由非空字段判别。旧日志的用户输入行
 // （{"user_input": "..."}）仍可解析（字段兼容）。
 type eventLogInjection struct {
-	UserInput          string         `json:"user_input,omitempty"`
-	Assistant          string         `json:"assistant,omitempty"`
-	Command            string         `json:"command,omitempty"`
-	Error              string         `json:"error,omitempty"`
-	Supplement         string         `json:"supplement,omitempty"`
-	PriorityKind       string         `json:"priority_kind,omitempty"`
-	PriorityKey        string         `json:"priority_key,omitempty"`
-	PriorityTranscript string         `json:"priority_transcript,omitempty"`
-	Interaction        string         `json:"interaction,omitempty"`        // /debug、/model 等交互输出
-	InteractionAnchor  *encoding.Tail `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
+	// HistoryReset is a durable projection boundary for destructive mutations
+	// such as backtrack. Earlier append-only event rows remain in the file for
+	// audit, but replay must discard their derived model/Scene before seeding
+	// the supplied canonical history.
+	HistoryReset       bool                   `json:"history_reset,omitempty"`
+	History            []runtimetypes.Message `json:"history,omitempty"`
+	HistoryResetHeader string                 `json:"history_reset_header,omitempty"`
+	UserInput          string                 `json:"user_input,omitempty"`
+	Assistant          string                 `json:"assistant,omitempty"`
+	Command            string                 `json:"command,omitempty"`
+	Error              string                 `json:"error,omitempty"`
+	Supplement         string                 `json:"supplement,omitempty"`
+	PriorityKind       string                 `json:"priority_kind,omitempty"`
+	PriorityKey        string                 `json:"priority_key,omitempty"`
+	PriorityTranscript string                 `json:"priority_transcript,omitempty"`
+	Interaction        string                 `json:"interaction,omitempty"`        // /debug、/model 等交互输出
+	InteractionAnchor  *encoding.Tail         `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
+}
+
+// appendHistoryResetLog persists a canonical transcript boundary. Caller must
+// hold renderMu so a later command/result injection is ordered after the
+// replacement marker in both the live Scene and the event log.
+func (b *chatRuntimeEventBridge) appendHistoryResetLog(messages []runtimetypes.Message, header string) {
+	if b == nil {
+		return
+	}
+	history := make([]runtimetypes.Message, 0, len(messages))
+	for _, message := range messages {
+		history = append(history, *message.Clone())
+	}
+	b.appendInjectionLog(eventLogInjection{
+		HistoryReset:       true,
+		History:            history,
+		HistoryResetHeader: header,
+	})
 }
 
 // appendInjectionLog 把一条注入记录追加到事件日志（与事件行同一全序，
@@ -1214,6 +1269,9 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		return 0, err
 	}
 	type entry struct {
+		historyReset       bool
+		history            []runtimetypes.Message
+		historyResetHeader string
 		event              runtimeevents.Event
 		userInput          string         // 非空表示用户输入注入记录（无 runtime 事件类型）
 		assistant          string         // 非空表示 direct assistant 终态注入记录
@@ -1253,6 +1311,12 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 				return uint64(lineIndex - 1), fmt.Errorf("event log line %d: invalid injection record", lineIndex)
 			}
 			switch {
+			case inj.HistoryReset:
+				entries = append(entries, entry{
+					historyReset:       true,
+					history:            inj.History,
+					historyResetHeader: inj.HistoryResetHeader,
+				})
 			case inj.UserInput != "":
 				entries = append(entries, entry{userInput: inj.UserInput})
 			case inj.Assistant != "":
@@ -1291,14 +1355,13 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 	// ChangeSet，因此这里显式循环以同步驱动 Scene；语义等价。
 	// 注入记录同样经 SubmitUserInput / SubmitCommand / SubmitError →
 	// applyChangeSet 恢复，顺序与实时路径一致（同一日志全序）。
-	b.sceneMu.Lock()
-	b.renderScene = scene.New()
-	b.renderMapper = scene.NewChangeSetMapper(b.renderScene)
-	b.sceneApplyFailures = 0
-	b.sceneLastError = ""
-	b.sceneMu.Unlock()
+	b.renderMu.Lock()
+	b.resetCanonicalHistoryProjectionLocked()
 	for _, en := range entries {
 		switch {
+		case en.historyReset:
+			b.resetCanonicalHistoryProjectionLocked()
+			b.seedPersistedHistoryLocked(buildPersistedHistorySeedUnits(en.history), en.historyResetHeader)
 		case en.userInput != "":
 			b.applyChangeSet(b.renderEncoder.SubmitUserInput(en.userInput))
 		case en.assistant != "":
@@ -1322,6 +1385,7 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 			b.applyChangeSet(b.renderEncoder.Encode(en.event))
 		}
 	}
+	b.renderMu.Unlock()
 	b.eventLogMu.Lock()
 	b.eventLogReplayed = uint64(len(entries))
 	b.eventLogMu.Unlock()
@@ -3471,7 +3535,7 @@ func (b *chatRuntimeEventBridge) renderAsyncTeamSummaryFallback(event runtimeeve
 	if b == nil || b.session == nil || event.Type != runtimechat.EventAssistantMessage {
 		return chatRuntimeTimelineEvent{}
 	}
-	if b.session.RuntimeSession == nil || strings.TrimSpace(event.SessionID) != strings.TrimSpace(b.session.RuntimeSession.ID) {
+	if !b.matchesPrimarySessionID(event.SessionID) {
 		return chatRuntimeTimelineEvent{}
 	}
 	if b.session.ActiveTeam == nil || strings.TrimSpace(b.session.ActiveTeam.TeamID) == "" {
@@ -3956,10 +4020,43 @@ func (b *chatRuntimeEventBridge) hasRenderedReasoningFinal() bool {
 }
 
 func (b *chatRuntimeEventBridge) isPrimarySessionEvent(event runtimeevents.Event) bool {
-	if b == nil || b.session == nil || b.session.RuntimeSession == nil {
+	if b == nil {
 		return false
 	}
-	return strings.TrimSpace(event.SessionID) == strings.TrimSpace(b.session.RuntimeSession.ID)
+	return b.matchesPrimarySessionID(event.SessionID)
+}
+
+// setPrimarySessionID updates the event bridge's immutable routing identity
+// when the mutable ChatSession runtime projection is replaced. Runtime events
+// are processed asynchronously, so they must never read RuntimeSession
+// directly while a command is restoring or switching the session.
+func (b *chatRuntimeEventBridge) setPrimarySessionID(sessionID string) {
+	if b == nil {
+		return
+	}
+	b.primarySessionMu.Lock()
+	b.primarySessionID = strings.TrimSpace(sessionID)
+	b.primarySessionMu.Unlock()
+}
+
+func (b *chatRuntimeEventBridge) matchesPrimarySessionID(sessionID string) bool {
+	if b == nil {
+		return false
+	}
+	b.primarySessionMu.RLock()
+	primarySessionID := b.primarySessionID
+	b.primarySessionMu.RUnlock()
+	return primarySessionID != "" && strings.TrimSpace(sessionID) == primarySessionID
+}
+
+func (b *chatRuntimeEventBridge) primaryRuntimeSessionID() string {
+	if b == nil {
+		return ""
+	}
+	b.primarySessionMu.RLock()
+	primarySessionID := b.primarySessionID
+	b.primarySessionMu.RUnlock()
+	return primarySessionID
 }
 
 func isTeamLifecycleRuntimeEvent(eventType string) bool {
@@ -4004,7 +4101,7 @@ func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.
 	if b == nil || b.session == nil || event.Type != runtimechat.EventAssistantMessage {
 		return ""
 	}
-	if b.session.RuntimeSession == nil || strings.TrimSpace(event.SessionID) != strings.TrimSpace(b.session.RuntimeSession.ID) {
+	if !b.matchesPrimarySessionID(event.SessionID) {
 		return ""
 	}
 	if b.session.ActiveTeam == nil || strings.TrimSpace(b.session.ActiveTeam.TeamID) == "" {
@@ -4049,8 +4146,8 @@ func (b *chatRuntimeEventBridge) writePromptIfIdle() {
 	if !shouldDisplayInteractivePrompt(b.session) {
 		return
 	}
-	if b.session.RuntimeSession != nil && b.session.LocalRuntimeHost != nil && b.session.LocalRuntimeHost.RuntimeStore != nil {
-		state, err := b.session.LocalRuntimeHost.RuntimeStore.LoadState(context.Background(), strings.TrimSpace(b.session.RuntimeSession.ID))
+	if sessionID := b.primaryRuntimeSessionID(); sessionID != "" && b.session.LocalRuntimeHost != nil && b.session.LocalRuntimeHost.RuntimeStore != nil {
+		state, err := b.session.LocalRuntimeHost.RuntimeStore.LoadState(context.Background(), sessionID)
 		if err == nil && state != nil && state.Status != runtimechat.SessionIdle {
 			return
 		}

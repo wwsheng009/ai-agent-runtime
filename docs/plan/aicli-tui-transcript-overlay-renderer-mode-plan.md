@@ -58,7 +58,7 @@
 
 - owned interactive 生命周期中，禁止业务 handler 旁路 Presenter 直接写 stdout/stderr；
 - 历史交接与 ActiveBand/prompt/status/popup 的几何变化解耦；
-- 主界面展示可变 tail，同时使完整历史可独立滚动浏览；
+- 主界面展示可容纳的最新 finalized transcript tail，并在独立 bottom-pane 行展示可变 active tail；完整历史可独立滚动浏览；
 - alternate screen 不与 primary frame 同时写同一物理屏幕；
 - resize、replay、overlay close 都从 semantic source 重建，而不从 `ScreenModel`、VT snapshot 或 native scrollback 反推；
 - `Ctrl+T` 打开时不会遗漏正在运行的工具或流式回复，也不会把该内容再次作为 committed history 插入。

@@ -103,6 +103,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == a.LeaseID {
 				state.TranscriptOverlay = TranscriptOverlayState{}
 			}
+			if state.ResumePicker.Active && state.ResumePicker.LeaseID == a.LeaseID {
+				state.ResumePicker = ResumePickerState{}
+			}
+			if state.BacktrackPicker.Active && state.BacktrackPicker.LeaseID == a.LeaseID {
+				state.BacktrackPicker = BacktrackPickerState{}
+			}
 		}
 	case OpenTranscriptOverlay:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
@@ -114,6 +120,22 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseTranscriptOverlay:
 		if a.LeaseID != 0 && state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == a.LeaseID {
 			state.TranscriptOverlay = TranscriptOverlayState{}
+		}
+	case OpenResumePicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.ResumePicker = ResumePickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseResumePicker:
+		if a.LeaseID != 0 && state.ResumePicker.Active && state.ResumePicker.LeaseID == a.LeaseID {
+			state.ResumePicker = ResumePickerState{}
+		}
+	case OpenBacktrackPicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.BacktrackPicker = BacktrackPickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseBacktrackPicker:
+		if a.LeaseID != 0 && state.BacktrackPicker.Active && state.BacktrackPicker.LeaseID == a.LeaseID {
+			state.BacktrackPicker = BacktrackPickerState{}
 		}
 	case TranscriptPagerScroll:
 		if state.TranscriptOverlay.Active && transcriptPagerLeaseMatches(state.TranscriptOverlay, a.LeaseID) {
@@ -143,6 +165,20 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		}
 		if err := state.HistoryEffects.ack(a.Token, a.Frame, a.LayoutGeneration); errors.Is(err, ErrStaleLayoutGeneration) {
 			state.HistoryEffects.ProjectionUnknown = true
+		} else if err == nil {
+			if entry, ok := state.HistoryEffects.ledger.Entry(a.Token); ok {
+				advanceActiveCellLedgerOnAck(&state, []HistoryCommit{entry.Commit})
+			}
+		}
+	case HistoryCommitsAcknowledged:
+		if a.LayoutGeneration != state.LayoutGeneration ||
+			state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration) != nil {
+			// A batch that no longer matches the reducer snapshot may have
+			// reached native scrollback. Do not advance a partial prefix or
+			// attempt a blind retry against an unknown physical projection.
+			state.HistoryEffects.ProjectionUnknown = true
+		} else if len(a.Commits) > 0 {
+			advanceActiveCellLedgerOnAck(&state, a.Commits)
 		}
 	case HistoryCommitFailed:
 		if a.LayoutGeneration != state.LayoutGeneration {
@@ -195,6 +231,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// during migration; populated ranges use the same invariant as updates.
 		if a.Active.ValidateStreamingRanges() == nil {
 			state.Active = a.Active.Clone()
+			syncHistoryEffectsForTranscript(&state)
 			refreshTranscriptOverlayPager(&state)
 		}
 	case UpdateActiveCellAction:
@@ -202,6 +239,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// is safe. The reducer still validates the original cell/revision fence
 		// and the complete source-range invariant before publishing the snapshot.
 		if reduceActiveCellUpdate(&state, a) == nil {
+			syncHistoryEffectsForTranscript(&state)
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ClearActiveCellAction:
@@ -337,6 +375,43 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		state.Bottom.applyPopupUpdate(a)
 	}
 	return state
+}
+
+// advanceActiveCellLedgerOnAck moves the active source boundary only after a
+// history handoff has physically crossed the writer (single HistoryCommitAcknowledged
+// or the batched HistoryCommitsAcknowledged delivery). The band projection then
+// resumes from the acknowledged source offset instead of repainting rows that
+// already reached native scrollback. Only commits enqueued for the live mutable
+// cell advance the ledger; finalized transcript deliveries are identity-distinct
+// and leave the active ranges untouched (their Stable ledger is zeroed on
+// finalize, so MarkActiveEnqueued rejects them by invariant).
+func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCommit) {
+	if state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 || len(commits) == 0 {
+		return
+	}
+	var maxEnd int
+	for _, commit := range commits {
+		if commit.CellID != state.Active.CellID ||
+			commit.Revision != state.Active.Revision ||
+			commit.SourceRange.Start < state.Active.Acked.End {
+			continue
+		}
+		if commit.SourceRange.End > maxEnd {
+			maxEnd = commit.SourceRange.End
+		}
+	}
+	if maxEnd <= state.Active.Acked.End {
+		return
+	}
+	next, err := MarkActiveEnqueued(state.Active, maxEnd)
+	if err != nil {
+		return
+	}
+	next, err = MarkActiveAcked(next, maxEnd)
+	if err != nil {
+		return
+	}
+	state.Active = next
 }
 
 // reconcileTranscriptActiveCell merges a semantic Scene snapshot with the

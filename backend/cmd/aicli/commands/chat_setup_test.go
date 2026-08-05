@@ -247,6 +247,41 @@ func TestBuildChatSession_NoInteractive(t *testing.T) {
 	}
 }
 
+func TestBuildChatSession_FailsClosedWithoutOwnedRendererCapabilities(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	chatIsInteractiveTerminal = func() bool { return true }
+	defer func() { chatIsInteractiveTerminal = oldInteractive }()
+	// FixedBottomSurface explicitly rejects Zellij because its DECSTBM behavior
+	// is not safe for the owned primary transaction. This makes the capability
+	// failure deterministic even when `go test` itself has a real TTY.
+	t.Setenv("ZELLIJ", "test-unsupported-owned-renderer")
+
+	runtimeState := &chatRuntimeState{
+		providerName:    "codex_ee",
+		provider:        config.Provider{Enabled: true, Protocol: "codex", BaseURL: "https://example.com"},
+		adapter:         &adapter.CodexAdapter{},
+		modelName:       "gpt-5.2-code",
+		reasoningEffort: "medium",
+		shouldStream:    true,
+		baseURL:         "https://example.com/v1/responses",
+		retryCfg:        defaultRetryConfig(),
+		requestTimeout:  30 * time.Second,
+	}
+	session, cleanup, err := buildChatSession(
+		&config.Config{},
+		&chatCommandOptions{OutputFormat: "interactive", DisableTools: true},
+		nil,
+		&chatPersistenceState{sessionUserID: "tester", resolvedSessionDir: t.TempDir()},
+		runtimeState,
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not support ANSI scroll-region") {
+		t.Fatalf("buildChatSession error = %v, want unsupported owned renderer", err)
+	}
+	if session != nil || cleanup != nil {
+		t.Fatalf("unsupported owned renderer must not publish a partial session: session=%+v cleanup=%v", session, cleanup != nil)
+	}
+}
+
 func TestBuildChatFinalCleanup_ClearsScreenAndStopsPromptRedraw(t *testing.T) {
 	cleanupCalls := 0
 

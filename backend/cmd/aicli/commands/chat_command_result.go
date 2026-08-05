@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // CommandAction describes the lifecycle action requested by a structured chat
@@ -28,6 +31,30 @@ type RenderBlock struct {
 	Document render.Document
 }
 
+// ResumePickerRequest is the immutable query carried by the typed /resume
+// picker effect. It deliberately captures the parsed filter before dispatch:
+// the alternate-screen interaction must not borrow mutable session filter state
+// while it owns a ScreenLease.
+type ResumePickerRequest struct {
+	Filter ChatSessionListFilter
+}
+
+// BacktrackPickerRequest marks the destructive user-turn selection effect.
+// It intentionally carries no mutable transcript data: turns are loaded after
+// dispatch, and the eventual mutation is derived from the selected stable
+// MessageID only after alternate-screen ownership has been released.
+type BacktrackPickerRequest struct{}
+
+// BacktrackApplyRequest is the immutable direct-mutation effect for
+// `/backtrack <index> --apply|--submit`. The request is parsed before command
+// dispatch and executed only after the unified command gate has claimed the
+// command, so the legacy handler cannot regain ownership of the terminal.
+// The domain mutation itself is followed by canonical Scene replacement and a
+// single retained result cell in applyUnifiedBacktrackRequest.
+type BacktrackApplyRequest struct {
+	Request runtimechat.BacktrackRequest
+}
+
 // CommandResult is the renderer-neutral result of a local chat command.
 type CommandResult struct {
 	Blocks []RenderBlock
@@ -39,6 +66,27 @@ type CommandResult struct {
 	// Plain/JSON/noninteractive projections ignore the flag; the replay
 	// renderer falls back to plain output on its own.
 	ReplayHistory bool
+	// OpenTranscript opens the read-only semantic transcript pager after the
+	// command has reconciled canonical history into Scene/AppState. It is used
+	// only by the unified interactive /history command; replaying an already
+	// mounted transcript would duplicate rows instead of giving the user a
+	// navigable history view.
+	OpenTranscript bool
+	// OpenResumePicker requests the typed alternate-screen session picker. It
+	// has no document payload: the picker borrows a ScreenLease, publishes its
+	// lease-bound state through the UI actor, and only its final result becomes
+	// a retained command/replay transaction. The request owns its parsed filter
+	// so `/resume --cwd` cannot fall back to a legacy line-reader path.
+	OpenResumePicker *ResumePickerRequest
+	// OpenBacktrackPicker requests the lease-bound user-turn picker. It has no
+	// rendered document because selection, cancellation and a destructive apply
+	// are committed only after the alternate screen is released and the primary
+	// presenter has recovered.
+	OpenBacktrackPicker *BacktrackPickerRequest
+	// ApplyBacktrack requests the direct destructive transaction. It has no
+	// document payload: the mutation must rebuild canonical history before its
+	// result cell is committed, and submit/draft effects run only afterwards.
+	ApplyBacktrack *BacktrackApplyRequest
 	// SendObjective requests a chat send of the given objective after the
 	// command cell is committed. Only /goal-set-style commands set it: the
 	// confirmation document stays the atomic command cell, while the objective
@@ -47,6 +95,11 @@ type CommandResult struct {
 	// the send for every projection that entered the structured path (JSON
 	// mode still uses the legacy handler).
 	SendObjective string
+	// RestoreComposerDraft restores a failed-turn prompt after the command cell
+	// is committed. This is a typed post-commit UI effect, not terminal output:
+	// the actor remains the only composer renderer and refuses to overwrite a
+	// draft that appeared while the command result was being committed.
+	RestoreComposerDraft string
 }
 
 // Document merges all command fragments without rendering them. This is the
@@ -64,10 +117,223 @@ func (r CommandResult) Document() render.Document {
 // legacy stdout handler.
 func tryExecuteStructuredChatCommand(session *ChatSession, command string) (CommandResult, bool, error) {
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
+	// /model status is a finite read-only report. It has to be recognized
+	// before the broad /model picker fence below; every other /model variant
+	// remains fenced until its typed picker/mutation effects are available.
+	if commandMatches(cmdLower, "/model") && unifiedDirectInteractiveOutput(session) {
+		if request, err := parseModelCommandRequest(command); err == nil && request.ShowStatus && !request.HasMutation() {
+			return commandTextResult(runtimeModelStateText(session)), true, nil
+		}
+	}
+	// Theme queries are finite, read-only documents. They must be recognized
+	// before the broad /theme picker/mutation fence; selection and mutation
+	// variants remain fenced until they have typed UI effects and a repaint
+	// transaction owned by TerminalSessionPresenter.
+	if commandMatches(cmdLower, "/theme") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredThemeQueryCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	// /skills becomes a read-only catalog query only when its arguments make
+	// that intent explicit. Bare /skills still opens the legacy selection and
+	// execution flow, so it remains fenced until that flow has typed UI actions.
+	if commandMatches(cmdLower, "/skills") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredSkillCatalogCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	// The backtrack picker and apply path are effects, but list/audit/preview
+	// requests are finite read-only reports. Claim only those reports here; a
+	// bare command, selection request, or any mutation keeps the unified fence.
+	if (commandMatches(cmdLower, "/backtrack") || commandMatches(cmdLower, "/rewind")) && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredBacktrackQueryCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	// A direct /resume target has no picker interaction: it can restore the
+	// canonical session, commit one semantic confirmation cell, then replay
+	// history through the existing CommandResult post-commit boundary. Bare
+	// /resume and its workspace-filtered form are typed picker effects; direct
+	// target restore remains a finite CommandResult + history replay.
+	if commandMatches(cmdLower, "/resume") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredResumeCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	// The unified interactive session has no legacy terminal writer. Commands
+	// whose old implementation still owns a raw prompt, a fullscreen picker, or
+	// Direct terminal output must be claimed here before dispatch clears the prompt or
+	// reaches handleCommand. Plain, JSON and --no-interactive projections keep
+	// their established command implementations until those commands receive a
+	// native semantic interaction model.
+	if result, fenced := unifiedInteractiveLegacyCommandFence(session, cmdLower); fenced {
+		return result, true, nil
+	}
+	if commandMatches(cmdLower, "/trust") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredTrustCommand(session, command), true, nil
+	}
+	if commandMatches(cmdLower, "/agents") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredAgentsCommand(session, command), true, nil
+	}
+	if commandMatches(cmdLower, "/compact") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredCompactCommand(session, command), true, nil
+	}
+	if commandMatches(cmdLower, "/retry") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredRetryCommand(session, command), true, nil
+	}
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
-		!commandMatches(cmdLower, "/title") && !commandMatches(cmdLower, "/rename") {
+		cmdLower != "/s" && cmdLower != "/n" && !commandMatches(cmdLower, "/fast") && !commandMatches(cmdLower, "/reasoning") &&
+		!commandMatches(cmdLower, "/reasoning_effort") && !commandMatches(cmdLower, "/reasoning-effort") &&
+		!commandMatches(cmdLower, "/title") && !commandMatches(cmdLower, "/rename") && !commandMatches(cmdLower, "/function") &&
+		!commandMatches(cmdLower, "/describe") && !commandMatches(cmdLower, "/functions") && !commandMatches(cmdLower, "/catalog") &&
+		!commandMatches(cmdLower, "/sessions") && !commandMatches(cmdLower, "/help") && !commandMatches(cmdLower, "/?") &&
+		!commandMatches(cmdLower, "/new") && cmdLower != "/session" && !commandMatches(cmdLower, "/history") && !commandMatches(cmdLower, "/h") &&
+		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, "/attach") &&
+		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
+		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") &&
+		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") {
 		return CommandResult{}, false, nil
+	}
+
+	// Pure slash-command documents are deliberately recognized before the
+	// legacy handler calls beginDirectInteractiveOutput. This keeps finite
+	// output on the semantic command-cell path and prevents legacy terminal-write
+	// helpers (session rows in particular) from reaching a unified terminal.
+	if commandMatches(cmdLower, "/help") || commandMatches(cmdLower, "/?") {
+		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+			return CommandResult{}, false, nil
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatSlashHelpDocument()}},
+			Action: CommandContinue,
+		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/queue") {
+		return executeStructuredQueueCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/attach") {
+		return executeStructuredAttachmentCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
+		return executeStructuredPermissionModeCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/approval-reuse") {
+		return executeStructuredApprovalReuseCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/plan") {
+		return executeStructuredPlanCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/timeline") {
+		return executeStructuredTimelineCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/collab") {
+		return executeStructuredCollabCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/function") || commandMatches(cmdLower, "/describe") {
+		name, jsonOutput := extractCommandArgumentOptions(command)
+		if name == "" {
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatPlainTextCommandDocument("错误: 需要指定 function 名称\n用法: /function <name> [--json] 或 /describe <name> [--json]")}},
+				Action: CommandContinue,
+			}, true, nil
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatFunctionDescriptorDocument(session, name, jsonOutput)}},
+			Action: CommandContinue,
+		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/functions") || commandMatches(cmdLower, "/catalog") {
+		prompt, jsonOutput := extractCommandArgumentOptions(command)
+		if prompt == "" && jsonOutput {
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatFunctionCatalogDocument(session, true)}},
+				Action: CommandContinue,
+			}, true, nil
+		}
+		if prompt == "" {
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatPlainTextCommandDocument("错误: 需要提供 prompt 预览最终暴露集合\n用法: /functions <prompt> [--json] 或 /catalog <prompt> [--json]")}},
+				Action: CommandContinue,
+			}, true, nil
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatFunctionExposureDocument(session, prompt, jsonOutput)}},
+			Action: CommandContinue,
+		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/sessions") {
+		if session == nil {
+			return CommandResult{}, true, fmt.Errorf("会话管理未启用")
+		}
+		filter := session.SessionFilter
+		filter.Query = strings.TrimSpace(extractCommandArgument(command))
+		doc, err := buildChatSessionSummariesDocument(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), filter)
+		if err != nil {
+			return CommandResult{}, true, err
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: doc}},
+			Action: CommandContinue,
+		}, true, nil
+	}
+
+	if cmdLower == "/session" {
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatCurrentSessionDocument(session)}},
+			Action: CommandContinue,
+		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/new") {
+		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+			return CommandResult{}, false, nil
+		}
+		if session == nil {
+			return CommandResult{}, true, fmt.Errorf("会话管理未启用")
+		}
+		if err := createNewRuntimeConversation(session, ""); err != nil {
+			return CommandResult{}, true, err
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatNewSessionDocument(session)}},
+			Action: CommandContinue,
+		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/history") || commandMatches(cmdLower, "/h") {
+		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+			return CommandResult{}, false, nil
+		}
+		// A unified session already owns one canonical Scene transcript. Replaying
+		// those same cells into the primary viewport would either duplicate them
+		// or be a no-op after idempotent reconcile. Seed any just-restored history
+		// and open the semantic pager instead, so /history is an actual history
+		// reader rather than a one-time startup side effect.
+		if unifiedDirectInteractiveOutput(session) && hasVisibleChatHistory(session) {
+			printVisibleChatHistory(session, "")
+			return CommandResult{Action: CommandContinue, OpenTranscript: true}, true, nil
+		}
+		// Plain/noninteractive projections retain the established replay behavior.
+		// Claim it here so the unified command gate never sends /history to a
+		// legacy handler merely to show its empty-state message.
+		if printVisibleChatHistory(session, "对话历史") != 0 {
+			return CommandResult{}, true, nil
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan("当前会话暂无历史消息"))}},
+			Action: CommandContinue,
+		}, true, nil
 	}
 
 	if commandMatches(cmdLower, "/status") {
@@ -231,61 +497,510 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 
 	if commandMatches(cmdLower, "/stream") {
-		// 成功路径结构化：toggle/set/status 均为文档输出；参数解析错误与
-		// nil session 保持 legacy（错误消息需在所有模式可见）。/s /n 快捷
-		// 别名仍走 legacy（独立 handler）。
-		if session == nil {
-			return CommandResult{}, false, nil
-		}
-		req, err := parseStreamCommandRequest(command)
-		if err != nil {
-			return CommandResult{}, false, nil
-		}
-		if req.Action == streamCommandStatus {
-			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatStreamStatusDocument(session)}},
-				Action: CommandContinue,
-			}, true, nil
-		}
-		previous := session.Stream
-		switch req.Action {
-		case streamCommandToggle:
-			session.Stream = !session.Stream
-		case streamCommandSet:
-			session.Stream = req.Value
-		}
-		warnIfChatSessionSyncFails(session, "toggle stream", syncRuntimeSessionFromChat(session))
-		if session.Interaction != nil {
-			session.Interaction.RefreshStatus("")
-		}
-		if previous != session.Stream {
-			persistStreamCommandPreference(session)
-		}
-		return CommandResult{
-			Blocks: []RenderBlock{{Document: buildChatStreamToggleDocument(session)}},
-			Action: CommandContinue,
-		}, true, nil
+		return executeStructuredStreamCommand(session, command, nil), true, nil
 	}
 
-	fields := strings.Fields(strings.TrimSpace(extractCommandArgument(command)))
-	if len(fields) != 1 {
-		return CommandResult{}, false, nil
+	if cmdLower == "/s" || cmdLower == "/n" {
+		stream := cmdLower == "/s"
+		return executeStructuredStreamCommand(session, command, &stream), true, nil
 	}
-	switch strings.ToLower(fields[0]) {
-	case "display", "show", "info":
-		// §5.5 用户交互例外：/debug 输出捕获触发时刻模型尾部锚点（不进入
-		// 编码器因果链）；提交点（submitCommandResult）据此做 Tail 锚定
-		// 插入而非普通命令追加。
+
+	if commandMatches(cmdLower, "/fast") {
+		return executeStructuredFastCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/reasoning") {
+		return executeStructuredReasoningCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/reasoning_effort") || commandMatches(cmdLower, "/reasoning-effort") {
+		return executeStructuredReasoningEffortCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/debug") {
+		if unifiedDirectInteractiveOutput(session) {
+			result, handled := tryExecuteStructuredDebugCommand(session, command)
+			return result, handled, nil
+		}
+		fields := strings.Fields(strings.TrimSpace(extractCommandArgument(command)))
+		if len(fields) == 1 {
+			switch strings.ToLower(fields[0]) {
+			case "display", "show", "info":
+				// Keep the existing non-unified projection compatible. The
+				// unified branch above handles all read-only variants through
+				// the CommandResult/Scene pipeline.
+				if session != nil && session.RuntimeEventBridge != nil {
+					session.RuntimeEventBridge.recordInteractionAnchor("debug")
+				}
+				return CommandResult{
+					Blocks: []RenderBlock{{Document: buildChatDebugDisplayDocument(session)}},
+					Action: CommandContinue,
+				}, true, nil
+			}
+		}
+	}
+
+	return CommandResult{}, false, nil
+}
+
+// tryExecuteStructuredDebugCommand retains finite diagnostics, debug toggles,
+// and archive export as one semantic command transaction. None of these
+// variants owns a prompt, a background stream, or an alternate screen.
+func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (CommandResult, bool) {
+	action, opts, err := parseChatDebugCommand(extractCommandArgument(command))
+	if err != nil {
+		if unifiedDirectInteractiveOutput(session) {
+			return commandTextResult("错误: " + err.Error() + "\n" + chatDebugUsageText()), true
+		}
+		return CommandResult{}, false
+	}
+
+	switch action {
+	case "on", "off":
+		return executeStructuredDebugModeCommand(session, action == "on"), true
+	case "status":
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatDebugModeStatusDocument(session)}},
+			Action: CommandContinue,
+		}, true
+	case "routing":
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatDebugRoutingDocument(session)}},
+			Action: CommandContinue,
+		}, true
+	case "display":
+		// §5.5 debug display captures the model-tail interaction anchor. The
+		// command submission point uses it for tail-anchored insertion rather
+		// than appending an unrelated ordinary command cell.
 		if session != nil && session.RuntimeEventBridge != nil {
 			session.RuntimeEventBridge.recordInteractionAnchor("debug")
 		}
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: buildChatDebugDisplayDocument(session)}},
 			Action: CommandContinue,
-		}, true, nil
+		}, true
+	case "export":
+		result, err := exportChatDebugArchive(session, opts)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatDebugArchiveDocument(result)}},
+			Action: CommandContinue,
+		}, true
 	default:
-		return CommandResult{}, false, nil
+		return CommandResult{}, false
 	}
+}
+
+func executeStructuredDebugModeCommand(session *ChatSession, enabled bool) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	session.DebugMode = enabled
+	if session.Surface != nil {
+		session.Surface.SetPaintTraceEnabled(enabled)
+	}
+	var warnings []error
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		warnings = append(warnings, fmt.Errorf("切换 debug mode 后同步会话失败: %w", err))
+	}
+	return commandResultWithWarnings(buildChatDebugModeMutationDocument(enabled), warnings...)
+}
+
+// unifiedInteractiveLegacyCommandFence turns an unported interactive command
+// into one retained semantic command cell. It is deliberately a deny-list for
+// the remaining complex flows, rather than an environment toggle: once a
+// TerminalSession owns the TTY, execution may not revive a legacy prompt,
+// alternate-screen writer, or raw stdout output.
+func unifiedInteractiveLegacyCommandFence(session *ChatSession, command string) (CommandResult, bool) {
+	if !unifiedDirectInteractiveOutput(session) {
+		return CommandResult{}, false
+	}
+
+	commandName := ""
+	switch {
+	case commandMatches(command, "/backtrack"), commandMatches(command, "/rewind"):
+		commandName = "/backtrack"
+	case commandMatches(command, "/resume"):
+		commandName = "/resume"
+	case commandMatches(command, "/model"):
+		commandName = "/model"
+	case commandMatches(command, "/theme"):
+		commandName = "/theme"
+	case commandMatches(command, "/skills"):
+		commandName = "/skills"
+	case commandMatches(command, "/export"):
+		commandName = "/export"
+	case commandMatches(command, "/login"):
+		commandName = "/login"
+	default:
+		return CommandResult{}, false
+	}
+
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan(
+			fmt.Sprintf("错误: %s 正在迁移到统一渲染器，已拒绝旧终端直写", commandName),
+		))}},
+		Action: CommandContinue,
+	}, true
+}
+
+// rejectUnifiedInteractiveLegacyCommand protects direct handler invocations
+// outside dispatch (for example Esc-triggered backtrack selection). A missing
+// coordinator after TerminalSession ownership is intentionally treated as
+// handled: renderChatCommandResult then fails closed instead of using stdout.
+func rejectUnifiedInteractiveLegacyCommand(session *ChatSession, command string) bool {
+	result, fenced := unifiedInteractiveLegacyCommandFence(session, command)
+	if !fenced {
+		return false
+	}
+	_ = renderChatCommandResult(session, result, false)
+	return true
+}
+
+func executeStructuredQueueCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	switch strings.ToLower(strings.TrimSpace(extractCommandArgument(command))) {
+	case "", "status":
+		count, draining := queuedInteractiveInputState(session)
+		state := fmt.Sprintf("%d pending", count)
+		if draining {
+			state += " (draining)"
+		}
+		return commandTextResult("当前 queued input: " + state)
+	case "clear":
+		discarded := discardPendingInteractiveInput(session)
+		refreshChatComposerContext(session)
+		return commandTextResult(fmt.Sprintf("已清空 queued input: %d", discarded))
+	default:
+		return commandTextResult("错误: /queue 仅支持空参数或 clear\n用法: /queue 或 /queue clear")
+	}
+}
+
+func executeStructuredAttachmentCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	arg := strings.TrimSpace(extractCommandArgument(command))
+	if arg == "" {
+		if len(session.ImagePaths) == 0 {
+			return commandTextResult("当前无待发送图片附件")
+		}
+		lines := []string{fmt.Sprintf("待发送图片附件 (%d):", len(session.ImagePaths))}
+		for index, path := range session.ImagePaths {
+			lines = append(lines, fmt.Sprintf("  [%d] %s", index+1, path))
+		}
+		return commandTextResult(strings.Join(lines, "\n"))
+	}
+	if strings.EqualFold(arg, "clear") {
+		count := len(session.ImagePaths)
+		session.ImagePaths = nil
+		refreshChatComposerContext(session)
+		return commandTextResult(fmt.Sprintf("已清空 %d 个待发送图片附件", count))
+	}
+	if strings.HasPrefix(strings.ToLower(arg), "remove ") {
+		if len(session.ImagePaths) == 0 {
+			return commandTextResult("错误: 当前没有可移除的图片附件")
+		}
+		index, err := strconv.Atoi(strings.TrimSpace(arg[len("remove "):]))
+		if err != nil || index < 1 || index > len(session.ImagePaths) {
+			return commandTextResult(fmt.Sprintf("错误: 附件序号无效，可选范围为 1-%d", len(session.ImagePaths)))
+		}
+		removed := session.ImagePaths[index-1]
+		session.ImagePaths = append(session.ImagePaths[:index-1], session.ImagePaths[index:]...)
+		refreshChatComposerContext(session)
+		return commandTextResult(fmt.Sprintf("已移除图片附件: %s (当前剩余 %d 个)", removed, len(session.ImagePaths)))
+	}
+	path := strings.Trim(arg, `"'`)
+	if warnings := llm.ValidateLocalInputImagePaths([]string{path}); len(warnings) > 0 {
+		return commandTextResult(fmt.Sprintf("错误: 无法添加图片附件 %q；请确认文件存在、可读且为支持的非 SVG 图片", path))
+	}
+	for _, existing := range session.ImagePaths {
+		if strings.EqualFold(strings.TrimSpace(existing), path) {
+			return commandTextResult(fmt.Sprintf("提示: 图片附件已存在: %s", path))
+		}
+	}
+	session.ImagePaths = append(session.ImagePaths, path)
+	refreshChatComposerContext(session)
+	return commandTextResult(fmt.Sprintf("已添加图片附件: %s (当前共 %d 个)", path, len(session.ImagePaths)))
+}
+
+// executeStructuredCompactCommand keeps the synchronous compact mutation and
+// its outcome in one Scene-backed command transaction. Compact has no prompt,
+// picker, or long-lived terminal effect; the report is therefore safe to
+// commit after runtime state and title metadata have been reconciled.
+func executeStructuredCompactCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	mode, err := normalizeChatCompactMode(extractCommandArgument(command))
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	report, compactErr := runManualChatCompact(session, mode)
+	if report != nil {
+		applyChatCompactContextUsage(session, report.Result, report.Status, true)
+		if report.Result != nil {
+			refreshChatTitleMetadata(session)
+		}
+	}
+	if compactErr != nil {
+		if report == nil {
+			return commandErrorResult(compactErr)
+		}
+		return commandTextResult(formatChatCompactReport(report) + "\n错误: " + compactErr.Error())
+	}
+	return commandTextResult(formatChatCompactReport(report))
+}
+
+func executeStructuredPermissionModeCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	value := strings.TrimSpace(extractCommandArgument(command))
+	if value == "" {
+		return commandTextResult(fmt.Sprintf("当前 permission-mode: %s", session.PermissionMode))
+	}
+	mode, err := parseChatPermissionMode(value, false)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	if mode == "bypass_permissions" {
+		return commandTextResult("错误: /permission-mode bypass_permissions 需要确认交互，尚未迁移到统一渲染命令通道。")
+	}
+	session.PermissionMode = mode
+	session.RequestedPermissionMode = string(mode)
+	session.EffectivePermissionMode = string(mode)
+	if session.ActiveTeam != nil {
+		session.ActiveTeam.PermissionMode = mode
+	}
+	message := fmt.Sprintf("提示: 已切换到 permission-mode=%s", mode)
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		message += fmt.Sprintf("\n警告: 切换 permission mode 后同步会话失败: %v", err)
+	}
+	return commandTextResult(message)
+}
+
+func executeStructuredApprovalReuseCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	value := strings.ToLower(strings.TrimSpace(extractCommandArgument(command)))
+	if value == "" || value == "status" || value == "list" {
+		lines := []string{fmt.Sprintf("当前 approval-reuse: %s", formatChatApprovalReuseMode(session.ApprovalReuseMode))}
+		if session.RuntimeEventBridge != nil {
+			grants := session.RuntimeEventBridge.approvalGrantStatusLines(time.Now())
+			if len(grants) > 0 {
+				lines = append(lines, fmt.Sprintf("生效中的审批复用授权: %d", len(grants)))
+				lines = append(lines, grants...)
+				lines = append(lines, "使用 /approval-reuse clear 可立即撤销全部授权")
+				return commandTextResult(strings.Join(lines, "\n"))
+			}
+		}
+		lines = append(lines, "当前没有生效的审批复用授权")
+		return commandTextResult(strings.Join(lines, "\n"))
+	}
+	if value == "clear" || value == "revoke" {
+		cleared := 0
+		if session.RuntimeEventBridge != nil {
+			cleared = session.RuntimeEventBridge.clearApprovalGrants()
+		}
+		return commandTextResult(fmt.Sprintf("已撤销 approval-reuse 授权: %d", cleared))
+	}
+	mode, err := parseChatApprovalReuseMode(value)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	session.ApprovalReuseMode = mode
+	cleared := 0
+	if session.RuntimeEventBridge != nil {
+		cleared = session.RuntimeEventBridge.clearApprovalGrants()
+	}
+	message := fmt.Sprintf("提示: 已切换到 approval-reuse=%s；已撤销旧作用域授权 %d 条", formatChatApprovalReuseMode(mode), cleared)
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		message += fmt.Sprintf("\n警告: 切换 approval reuse 后同步会话失败: %v", err)
+	}
+	return commandTextResult(message)
+}
+
+func executeStructuredStreamCommand(session *ChatSession, command string, forced *bool) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	req := streamCommandRequest{}
+	if forced != nil {
+		req = streamCommandRequest{Action: streamCommandSet, Value: *forced}
+	} else {
+		parsed, err := parseStreamCommandRequest(command)
+		if err != nil {
+			return commandTextResult(fmt.Sprintf("错误: %v\n用法: /stream [on|off|toggle|status]", err))
+		}
+		req = parsed
+	}
+	if req.Action == streamCommandStatus {
+		return commandResultWithWarnings(buildChatStreamStatusDocument(session))
+	}
+
+	previous := session.Stream
+	if req.Action == streamCommandToggle {
+		session.Stream = !session.Stream
+	} else {
+		session.Stream = req.Value
+	}
+	var warnings []error
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		warnings = append(warnings, fmt.Errorf("切换 stream 后同步会话失败: %w", err))
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+	if previous != session.Stream {
+		if err := saveStreamCommandPreference(session); err != nil {
+			warnings = append(warnings, err)
+		}
+	}
+	return commandResultWithWarnings(buildChatStreamToggleDocument(session), warnings...)
+}
+
+func executeStructuredFastCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	req, err := parseFastCommandRequest(command)
+	if err != nil {
+		return commandTextResult(fmt.Sprintf("错误: %v\n用法: /fast [on|off|toggle|status]", err))
+	}
+	if req.Action == fastCommandStatus {
+		return commandResultWithWarnings(buildChatFastStatusDocument(session))
+	}
+	if !chatSessionSupportsFastMode(session) {
+		protocol := strings.TrimSpace(session.Provider.GetProtocol())
+		if protocol == "" {
+			protocol = "(unknown)"
+		}
+		return commandTextResult(fmt.Sprintf("错误: Fast 模式仅支持 codex 协议（当前: %s）", protocol))
+	}
+
+	previous := session.FastMode
+	if req.Action == fastCommandToggle {
+		session.FastMode = !session.FastMode
+	} else {
+		session.FastMode = req.Value
+	}
+	var warnings []error
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		warnings = append(warnings, fmt.Errorf("切换 fast 后同步会话失败: %w", err))
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+	if previous != session.FastMode {
+		if err := saveFastCommandPreference(session); err != nil {
+			warnings = append(warnings, err)
+		}
+	}
+	return commandResultWithWarnings(buildChatFastToggleDocument(session), warnings...)
+}
+
+func executeStructuredReasoningCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	req, err := parseReasoningCommandRequest(command)
+	if err != nil {
+		return commandTextResult(fmt.Sprintf("错误: %v\n用法: /reasoning [on|off|status]", err))
+	}
+	if req.Action == reasoningCommandSet {
+		session.SuppressReasoningOutput = !req.Value
+		if session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+	}
+	return commandResultWithWarnings(buildChatReasoningStatusDocument(session))
+}
+
+func executeStructuredReasoningEffortCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	req, err := parseReasoningEffortCommandRequest(command)
+	if err != nil {
+		return commandTextResult(fmt.Sprintf("错误: %v\n用法: /reasoning_effort [status|select|clear|<value>]", err))
+	}
+	switch req.Action {
+	case reasoningEffortCommandStatus:
+		return commandResultWithWarnings(buildChatReasoningEffortStatusDocument(session))
+	case reasoningEffortCommandSelect:
+		return commandTextResult("错误: /reasoning_effort select 需要选择器交互，尚未迁移到统一渲染命令通道。")
+	case reasoningEffortCommandClear, reasoningEffortCommandSet:
+		raw := req.Value
+		explicit := req.Action == reasoningEffortCommandSet
+		warnings, err := applyStructuredReasoningEffortSelection(session, raw, explicit)
+		if err != nil {
+			return commandErrorResult(err)
+		}
+		return commandResultWithWarnings(buildChatReasoningEffortStatusDocument(session), warnings...)
+	default:
+		return commandTextResult("错误: 无法识别的 reasoning_effort 操作")
+	}
+}
+
+// applyStructuredReasoningEffortSelection shares the legacy mutation semantics
+// while returning every non-fatal diagnostic to the CommandResult path. It
+// must not invoke the legacy warning helpers because unified sessions have no
+// stderr writer.
+func applyStructuredReasoningEffortSelection(session *ChatSession, raw string, explicit bool) ([]error, error) {
+	if session == nil {
+		return nil, fmt.Errorf("当前没有活动会话")
+	}
+	reasoning := runtimetypes.NormalizeReasoningEffort(raw)
+	var warnings []error
+	if reasoning != "" {
+		resolved, warning, err := resolveChatReasoningEffort(session.Provider, effectiveRuntimeModel(session), reasoning, explicit)
+		if err != nil {
+			return nil, err
+		}
+		if warning != "" {
+			warnings = append(warnings, fmt.Errorf("%s", warning))
+		}
+		reasoning = resolved
+	}
+
+	session.ReasoningEffort = reasoning
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		warnings = append(warnings, fmt.Errorf("切换 reasoning_effort 后同步会话失败: %w", err))
+	}
+	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+		warnings = append(warnings, fmt.Errorf("切换 reasoning_effort 后刷新本地 runtime 失败: %w", err))
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+	if err := saveReasoningEffortCommandPreference(session); err != nil {
+		warnings = append(warnings, err)
+	}
+	return warnings, nil
+}
+
+func commandTextResult(text string) CommandResult {
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: buildChatPlainTextCommandDocument(text)}},
+		Action: CommandContinue,
+	}
+}
+
+func commandResultWithWarnings(doc render.Document, warnings ...error) CommandResult {
+	blocks := []RenderBlock{{Document: doc}}
+	for _, warning := range warnings {
+		if warning == nil {
+			continue
+		}
+		blocks = append(blocks, RenderBlock{Document: buildChatPlainTextCommandDocument("警告: " + warning.Error())})
+	}
+	return CommandResult{Blocks: blocks, Action: CommandContinue}
 }
 
 func executeStructuredGoalClear(session *ChatSession) (CommandResult, bool) {

@@ -30,12 +30,36 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 			if err != nil {
 				result = commandErrorResult(err)
 			}
-			_ = renderChatCommandResult(session, result, noInteractive)
+			renderErr := renderChatCommandResult(session, result, noInteractive)
 			if result.ReplayHistory && session != nil {
 				// /load: replay the loaded transcript after the confirmation
 				// cell. The replay renderer owns its cells (one per message)
 				// and falls back to plain output when no surface is present.
 				printVisibleChatHistory(session, "已加载历史会话")
+			}
+			if result.OpenTranscript && session != nil {
+				// /history in the unified TUI is a view operation over the already
+				// canonical Scene transcript. The pager borrows TerminalSession's
+				// alternate-screen lease; it never replays duplicate terminal rows.
+				openChatTranscriptPager(session)
+			}
+			if renderErr == nil && result.OpenResumePicker != nil && session != nil {
+				// /resume is a typed alternate-screen picker effect. Its final
+				// selection is committed only after ScreenLease release, preserving
+				// one physical terminal owner throughout the modal lifecycle.
+				openChatResumePicker(session, *result.OpenResumePicker)
+			}
+			if renderErr == nil && result.OpenBacktrackPicker != nil && session != nil {
+				// The backtrack picker mutates canonical transcript state only after
+				// ScreenLease release. Its replacement transaction therefore never
+				// overlaps the alternate-screen frame or primary repaint recovery.
+				openChatBacktrackPicker(session, *result.OpenBacktrackPicker)
+			}
+			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
+				// Direct backtrack apply has no alternate screen, but it still owns
+				// the same destructive transaction: actor mutation, canonical Scene
+				// replacement, one result cell, then submit/draft mutation.
+				applyUnifiedBacktrackRequest(session, result.ApplyBacktrack.Request)
 			}
 			if result.SendObjective != "" && session != nil {
 				// /goal <objective>: stream the objective request through the
@@ -46,8 +70,24 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 					printfDirectInteractiveOutput(session, "错误: %v\n", err)
 				}
 			}
+			if renderErr == nil && result.RestoreComposerDraft != "" && session != nil {
+				// /retry is a command-cell result followed by a Composer mutation.
+				// Keep that effect after the command commit so retained transcript
+				// order and the actor-owned prompt state never interleave.
+				if err := restoreChatRetryDraft(session, result.RestoreComposerDraft); err != nil {
+					_ = renderChatCommandResult(session, commandErrorResult(err), noInteractive)
+				}
+			}
 			return result.Action == CommandQuit
 		}
+	}
+	// TerminalSession ownership is a one-way renderer cutover. Do not route an
+	// unstructured command into handleCommand here: several retained handlers
+	// still contain direct stdout writes and legacy modal/surface lifecycles.
+	// The gate emits a typed Scene-backed result (or exits) and fail-closes the
+	// command until it has an explicit CommandResult/UI-action migration.
+	if unifiedDirectInteractiveOutput(session) {
+		return dispatchUnmigratedUnifiedChatCommand(session, command)
 	}
 	if !noInteractive {
 		beginDirectInteractiveOutput(session)
@@ -62,21 +102,19 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/shell") || commandMatches(cmdLower, "/cmd") {
 		argument := extractCommandArgument(command)
 		if strings.TrimSpace(argument) == "" {
-			fmt.Println("错误: 需要指定 shell 命令")
-			fmt.Println("用法: /shell [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
-			fmt.Println("      /cmd   [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
+			printChatCommandOutput(session, "错误: 需要指定 shell 命令\n用法: /shell [--output-bytes-cap <bytes> | --disable-output-cap] <命令>\n      /cmd   [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
 			return false
 		}
 		result, err := executeShellCommandDetailed(session, argument)
 		if err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
 		// 将命令输出作为消息发送给 AI
 		aiInput := buildShellCommandAIInput(result)
 		response, err := sendMessage(session, aiInput)
 		if err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
 		finishSuccessfulChatSend(session, response, noInteractive)
@@ -85,25 +123,23 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/function") || commandMatches(cmdLower, "/describe") {
 		name, jsonOutput := extractCommandArgumentOptions(command)
 		if name == "" {
-			fmt.Println("错误: 需要指定 function 名称")
-			fmt.Println("用法: /function <name> [--json] 或 /describe <name> [--json]")
+			printChatCommandOutput(session, "错误: 需要指定 function 名称\n用法: /function <name> [--json] 或 /describe <name> [--json]")
 			return false
 		}
-		fmt.Println(formatFunctionDescriptor(session, name, jsonOutput))
+		printChatCommandOutput(session, formatFunctionDescriptor(session, name, jsonOutput))
 		return false
 	}
 	if commandMatches(cmdLower, "/functions") || commandMatches(cmdLower, "/catalog") {
 		prompt, jsonOutput := extractCommandArgumentOptions(command)
 		if prompt == "" && jsonOutput {
-			fmt.Println(formatFunctionCatalogSummary(session, true))
+			printChatCommandOutput(session, formatFunctionCatalogSummary(session, true))
 			return false
 		}
 		if prompt == "" {
-			fmt.Println("错误: 需要提供 prompt 预览最终暴露集合")
-			fmt.Println("用法: /functions <prompt> [--json] 或 /catalog <prompt> [--json]")
+			printChatCommandOutput(session, "错误: 需要提供 prompt 预览最终暴露集合\n用法: /functions <prompt> [--json] 或 /catalog <prompt> [--json]")
 			return false
 		}
-		fmt.Println(formatFunctionExposurePreview(session, prompt, jsonOutput))
+		printChatCommandOutput(session, formatFunctionExposurePreview(session, prompt, jsonOutput))
 		return false
 	}
 	if commandMatches(cmdLower, "/call") || commandMatches(cmdLower, "/tool") {
@@ -118,20 +154,19 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/sessions") {
 		filter := session.SessionFilter
 		filter.Query = strings.TrimSpace(extractCommandArgument(command))
-		if err := printChatSessionSummaries(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), filter); err != nil {
-			fmt.Printf("错误: %v\n", err)
+		if err := printCurrentChatSessionSummaries(session, filter); err != nil {
+			printfChatCommandOutput(session, "错误: %v", err)
 		}
 		return false
 	}
 	if commandMatches(cmdLower, "/load") {
 		sessionID := extractCommandArgument(command)
 		if strings.TrimSpace(sessionID) == "" {
-			fmt.Println("错误: 需要指定会话 ID")
-			fmt.Println("用法: /load <session-id>")
+			printChatCommandOutput(session, "错误: 需要指定会话 ID\n用法: /load <session-id>")
 			return false
 		}
 		if err := loadRuntimeConversation(session, sessionID); err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
 		// Route through the surface so ownedViewport retains the line in
@@ -154,12 +189,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/title") || commandMatches(cmdLower, "/rename") {
 		title := extractCommandArgument(command)
 		if strings.TrimSpace(title) == "" {
-			fmt.Println("错误: 需要指定会话标题")
-			fmt.Println("用法: /title <title> 或 /rename <title>")
+			printChatCommandOutput(session, "错误: 需要指定会话标题\n用法: /title <title> 或 /rename <title>")
 			return false
 		}
 		if err := updateChatSessionTitle(session, title); err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
 		printfDirectInteractiveOutput(session, "会话标题已更新\n")
@@ -195,8 +229,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		if arg == "" || strings.EqualFold(firstToken(arg), "list") || strings.EqualFold(firstToken(arg), "ls") {
 			return handleBacktrackCommand(session, "/backtrack "+arg)
 		}
-		fmt.Println("提示: /rewind <checkpoint_id> 尚未接线；数字参数请用 /backtrack <user_turn_index>")
-		fmt.Println("用法: /backtrack [list|<index> --apply|--both|--edit|--submit]")
+		printChatCommandOutput(session, "提示: /rewind <checkpoint_id> 尚未接线；数字参数请用 /backtrack <user_turn_index>\n用法: /backtrack [list|<index> --apply|--both|--edit|--submit]")
 		return false
 	}
 	if commandMatches(cmdLower, "/model") {
@@ -272,7 +305,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			return false
 		}
 		if err := replaceRuntimeMessages(session, nil); err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
 		clearChatTurnRecovery(session)
@@ -282,20 +315,20 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		resetChatConversationTokenUsage(session)
 		ensureChatSystemPromptMessage(session)
 		if err := syncRuntimeSessionFromChat(session); err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
 		if session.Interaction != nil {
 			session.Interaction.RefreshStatus("")
 		}
-		fmt.Println("当前会话历史已清空")
+		printChatCommandOutput(session, "当前会话历史已清空")
 
 	case "/new":
 		if err := createNewRuntimeConversation(session, ""); err != nil {
-			fmt.Printf("错误: %v\n", err)
+			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
-		fmt.Println("已创建新会话")
+		printChatCommandOutput(session, "已创建新会话")
 		printCurrentRuntimeSession(session)
 
 	case "/s":
@@ -306,15 +339,15 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 
 	case "/history", "/h":
 		if printVisibleChatHistory(session, "对话历史") == 0 {
-			fmt.Println("当前会话暂无历史消息")
+			printChatCommandOutput(session, "当前会话暂无历史消息")
 		}
 
 	case "/functions", "/catalog":
-		fmt.Println(formatFunctionCatalogSummary(session, false))
+		printChatCommandOutput(session, formatFunctionCatalogSummary(session, false))
 
 	case "/session":
 		if session.RuntimeSession == nil {
-			fmt.Println("当前没有持久化会话")
+			printChatCommandOutput(session, "当前没有持久化会话")
 			return false
 		}
 		printCurrentRuntimeSession(session)
@@ -341,13 +374,13 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return handleCompactCommand(session, command)
 
 	case "/sessions":
-		if err := printChatSessionSummaries(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), session.SessionFilter); err != nil {
-			fmt.Printf("错误: %v\n", err)
+		if err := printCurrentChatSessionSummaries(session, session.SessionFilter); err != nil {
+			printfChatCommandOutput(session, "错误: %v", err)
 		}
 
 	case "/yolo":
 		if session == nil {
-			fmt.Println("错误: 当前没有活动会话")
+			printChatCommandOutput(session, "错误: 当前没有活动会话")
 			return false
 		}
 		if !confirmBypassPermissionModeChange(session, "/yolo") {
@@ -360,7 +393,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			session.ActiveTeam.PermissionMode = session.PermissionMode
 		}
 		warnIfChatSessionSyncFails(session, "toggle permission mode", syncRuntimeSessionFromChat(session))
-		fmt.Println("提示: 已切换到 permission-mode=bypass_permissions（等价于 --yolo）")
+		printChatCommandOutput(session, "提示: 已切换到 permission-mode=bypass_permissions（等价于 --yolo）")
 
 	case "/image":
 		handleImageGenerationCommand(session, cmd)
@@ -369,11 +402,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		handleImageAttachmentCommand(session, cmd)
 
 	case "/help", "/?":
-		printChatSlashHelp()
+		printChatSlashHelp(session)
 
 	default:
-		fmt.Printf("错误: 未知命令: %s\n", cmd)
-		fmt.Println("输入 /help 查看可用命令")
+		printfChatCommandOutput(session, "错误: 未知命令: %s\n输入 /help 查看可用命令", cmd)
 	}
 
 	return false
@@ -412,10 +444,7 @@ func confirmClearConversationHistory(session *ChatSession) bool {
 		"[会话] Goal、会话配置、团队绑定和本地文件不会被删除。",
 	}
 	if session.NoInteractive {
-		for _, line := range lines {
-			fmt.Println(line)
-		}
-		fmt.Println("错误: 非交互模式不能确认清空会话历史")
+		printChatCommandOutput(session, strings.Join(append(lines, "错误: 非交互模式不能确认清空会话历史"), "\n"))
 		return false
 	}
 
@@ -426,7 +455,7 @@ func confirmClearConversationHistory(session *ChatSession) bool {
 	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 	cleanupPrompt()
 	if err != nil {
-		fmt.Println("已取消，会话历史未清空")
+		printChatCommandOutput(session, "已取消，会话历史未清空")
 		return false
 	}
 	text = strings.TrimSpace(normalizeQueuedInputLine(text))
@@ -434,7 +463,7 @@ func confirmClearConversationHistory(session *ChatSession) bool {
 		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
 	}
 	if text != "clear" {
-		fmt.Println("已取消，会话历史未清空")
+		printChatCommandOutput(session, "已取消，会话历史未清空")
 		return false
 	}
 	return true
@@ -442,17 +471,17 @@ func confirmClearConversationHistory(session *ChatSession) bool {
 
 func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+		printChatCommandOutput(session, "错误: 当前没有活动会话")
 		return false
 	}
 	value := extractCommandArgument(command)
 	if strings.TrimSpace(value) == "" {
-		fmt.Printf("当前 permission-mode: %s\n", session.PermissionMode)
+		printfChatCommandOutput(session, "当前 permission-mode: %s", session.PermissionMode)
 		return false
 	}
 	mode, err := parseChatPermissionMode(value, false)
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
+		printfChatCommandOutput(session, "错误: %v", err)
 		return false
 	}
 	if mode == "bypass_permissions" && !confirmBypassPermissionModeChange(session, "/permission-mode") {
@@ -465,7 +494,7 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 		session.ActiveTeam.PermissionMode = mode
 	}
 	warnIfChatSessionSyncFails(session, "toggle permission mode", syncRuntimeSessionFromChat(session))
-	fmt.Printf("提示: 已切换到 permission-mode=%s\n", mode)
+	printfChatCommandOutput(session, "提示: 已切换到 permission-mode=%s", mode)
 	return false
 }
 
@@ -496,10 +525,7 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 		lines = append(lines, "[权限] 来源："+source)
 	}
 	if session.NoInteractive {
-		for _, line := range lines {
-			fmt.Println(line)
-		}
-		fmt.Println("错误: 非交互模式不能在会话内确认 bypass_permissions；请改用启动参数显式配置")
+		printChatCommandOutput(session, strings.Join(append(lines, "错误: 非交互模式不能在会话内确认 bypass_permissions；请改用启动参数显式配置"), "\n"))
 		return false
 	}
 
@@ -514,7 +540,7 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 	}()
 	cleanupPrompt()
 	if err != nil {
-		fmt.Printf("已取消，permission-mode 保持为 %s\n", currentMode)
+		printfChatCommandOutput(session, "已取消，permission-mode 保持为 %s", currentMode)
 		return false
 	}
 	text = strings.TrimSpace(normalizeQueuedInputLine(text))
@@ -522,7 +548,7 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
 	}
 	if text != "bypass_permissions" {
-		fmt.Printf("已取消，permission-mode 保持为 %s\n", currentMode)
+		printfChatCommandOutput(session, "已取消，permission-mode 保持为 %s", currentMode)
 		return false
 	}
 	return true
@@ -530,19 +556,20 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 
 func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+		printChatCommandOutput(session, "错误: 当前没有活动会话")
 		return false
 	}
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	if arg == "" {
 		// /attach with no argument: list current attachments
 		if len(session.ImagePaths) == 0 {
-			fmt.Println("当前无待发送图片附件")
+			printChatCommandOutput(session, "当前无待发送图片附件")
 		} else {
-			fmt.Printf("待发送图片附件 (%d):\n", len(session.ImagePaths))
+			lines := []string{fmt.Sprintf("待发送图片附件 (%d):", len(session.ImagePaths))}
 			for i, path := range session.ImagePaths {
-				fmt.Printf("  [%d] %s\n", i+1, path)
+				lines = append(lines, fmt.Sprintf("  [%d] %s", i+1, path))
 			}
+			printChatCommandOutput(session, strings.Join(lines, "\n"))
 		}
 		return false
 	}
@@ -550,47 +577,47 @@ func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 		count := len(session.ImagePaths)
 		session.ImagePaths = nil
 		refreshChatComposerContext(session)
-		fmt.Printf("已清空 %d 个待发送图片附件\n", count)
+		printfChatCommandOutput(session, "已清空 %d 个待发送图片附件", count)
 		return false
 	}
 	if strings.HasPrefix(strings.ToLower(arg), "remove ") {
 		if len(session.ImagePaths) == 0 {
-			fmt.Println("错误: 当前没有可移除的图片附件")
+			printChatCommandOutput(session, "错误: 当前没有可移除的图片附件")
 			return false
 		}
 		indexText := strings.TrimSpace(arg[len("remove "):])
 		index, err := strconv.Atoi(indexText)
 		if err != nil || index < 1 || index > len(session.ImagePaths) {
-			fmt.Printf("错误: 附件序号无效，可选范围为 1-%d\n", len(session.ImagePaths))
+			printfChatCommandOutput(session, "错误: 附件序号无效，可选范围为 1-%d", len(session.ImagePaths))
 			return false
 		}
 		removed := session.ImagePaths[index-1]
 		session.ImagePaths = append(session.ImagePaths[:index-1], session.ImagePaths[index:]...)
 		refreshChatComposerContext(session)
-		fmt.Printf("已移除图片附件: %s (当前剩余 %d 个)\n", removed, len(session.ImagePaths))
+		printfChatCommandOutput(session, "已移除图片附件: %s (当前剩余 %d 个)", removed, len(session.ImagePaths))
 		return false
 	}
 	// /attach <path>: add image path
 	path := strings.Trim(strings.TrimSpace(arg), `"'`)
 	if warnings := llm.ValidateLocalInputImagePaths([]string{path}); len(warnings) > 0 {
-		fmt.Printf("错误: 无法添加图片附件 %q；请确认文件存在、可读且为支持的非 SVG 图片\n", path)
+		printfChatCommandOutput(session, "错误: 无法添加图片附件 %q；请确认文件存在、可读且为支持的非 SVG 图片", path)
 		return false
 	}
 	for _, existing := range session.ImagePaths {
 		if strings.EqualFold(strings.TrimSpace(existing), path) {
-			fmt.Printf("提示: 图片附件已存在: %s\n", path)
+			printfChatCommandOutput(session, "提示: 图片附件已存在: %s", path)
 			return false
 		}
 	}
 	session.ImagePaths = append(session.ImagePaths, path)
 	refreshChatComposerContext(session)
-	fmt.Printf("已添加图片附件: %s (当前共 %d 个)\n", path, len(session.ImagePaths))
+	printfChatCommandOutput(session, "已添加图片附件: %s (当前共 %d 个)", path, len(session.ImagePaths))
 	return false
 }
 
 func handleQueueCommand(session *ChatSession, command string) bool {
 	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+		printChatCommandOutput(session, "错误: 当前没有活动会话")
 		return false
 	}
 	arg := strings.ToLower(strings.TrimSpace(extractCommandArgument(command)))
@@ -601,28 +628,31 @@ func handleQueueCommand(session *ChatSession, command string) bool {
 		if draining {
 			state += " (draining)"
 		}
-		fmt.Printf("当前 queued input: %s\n", state)
+		printfChatCommandOutput(session, "当前 queued input: %s", state)
 		return false
 	case "clear":
 		discarded := discardPendingInteractiveInput(session)
 		refreshChatComposerContext(session)
-		fmt.Printf("已清空 queued input: %d\n", discarded)
+		printfChatCommandOutput(session, "已清空 queued input: %d", discarded)
 		return false
 	default:
-		fmt.Println("错误: /queue 仅支持空参数或 clear")
-		fmt.Println("用法: /queue 或 /queue clear")
+		printChatCommandOutput(session, "错误: /queue 仅支持空参数或 clear\n用法: /queue 或 /queue clear")
 		return false
 	}
 }
 
 func handleCompactCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredCompactCommand(session, command), false)
+		return false
+	}
 	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+		printChatCommandOutput(session, "错误: 当前没有活动会话")
 		return false
 	}
 	mode, err := normalizeChatCompactMode(extractCommandArgument(command))
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
+		printfChatCommandOutput(session, "错误: %v", err)
 		return false
 	}
 
@@ -634,17 +664,17 @@ func handleCompactCommand(session *ChatSession, command string) bool {
 		if report.Result != nil {
 			refreshChatTitleMetadata(session)
 		}
-		fmt.Println(formatChatCompactReport(report))
+		printChatCommandOutput(session, formatChatCompactReport(report))
 	}
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
+		printfChatCommandOutput(session, "错误: %v", err)
 	}
 	return false
 }
 
 func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 	if session == nil {
-		fmt.Println("错误: 当前没有活动会话")
+		printChatCommandOutput(session, "错误: 当前没有活动会话")
 		return false
 	}
 	value := extractCommandArgument(command)
@@ -658,12 +688,12 @@ func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 		if session.RuntimeEventBridge != nil {
 			cleared = session.RuntimeEventBridge.clearApprovalGrants()
 		}
-		fmt.Printf("已撤销 approval-reuse 授权: %d\n", cleared)
+		printfChatCommandOutput(session, "已撤销 approval-reuse 授权: %d", cleared)
 		return false
 	}
 	mode, err := parseChatApprovalReuseMode(value)
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
+		printfChatCommandOutput(session, "错误: %v", err)
 		return false
 	}
 	session.ApprovalReuseMode = mode
@@ -672,7 +702,7 @@ func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 		cleared = session.RuntimeEventBridge.clearApprovalGrants()
 	}
 	warnIfChatSessionSyncFails(session, "toggle approval reuse", syncRuntimeSessionFromChat(session))
-	fmt.Printf("提示: 已切换到 approval-reuse=%s；已撤销旧作用域授权 %d 条\n", formatChatApprovalReuseMode(mode), cleared)
+	printfChatCommandOutput(session, "提示: 已切换到 approval-reuse=%s；已撤销旧作用域授权 %d 条", formatChatApprovalReuseMode(mode), cleared)
 	return false
 }
 
@@ -680,20 +710,20 @@ func printApprovalReuseStatus(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	fmt.Printf("当前 approval-reuse: %s\n", formatChatApprovalReuseMode(session.ApprovalReuseMode))
-	lines := []string(nil)
+	lines := []string{fmt.Sprintf("当前 approval-reuse: %s", formatChatApprovalReuseMode(session.ApprovalReuseMode))}
+	grantLines := []string(nil)
 	if session.RuntimeEventBridge != nil {
-		lines = session.RuntimeEventBridge.approvalGrantStatusLines(time.Now())
+		grantLines = session.RuntimeEventBridge.approvalGrantStatusLines(time.Now())
 	}
-	if len(lines) == 0 {
-		fmt.Println("当前没有生效的审批复用授权")
+	if len(grantLines) == 0 {
+		lines = append(lines, "当前没有生效的审批复用授权")
+		printChatCommandOutput(session, strings.Join(lines, "\n"))
 		return
 	}
-	fmt.Printf("生效中的审批复用授权: %d\n", len(lines))
-	for _, line := range lines {
-		fmt.Println(line)
-	}
-	fmt.Println("使用 /approval-reuse clear 可立即撤销全部授权")
+	lines = append(lines, fmt.Sprintf("生效中的审批复用授权: %d", len(grantLines)))
+	lines = append(lines, grantLines...)
+	lines = append(lines, "使用 /approval-reuse clear 可立即撤销全部授权")
+	printChatCommandOutput(session, strings.Join(lines, "\n"))
 }
 
 func commandMatches(commandLower, name string) bool {
@@ -1263,6 +1293,9 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 	result := shellCommandResult{
 		ExecutedCommand: executedCommand,
 		Config:          cfg,
+	}
+	if unifiedDirectInteractiveOutput(session) {
+		return result, fmt.Errorf("interactive shell command is not migrated to the unified renderer")
 	}
 	bufferGitDiffOutput := runtimeexecutor.IsGitDiffCommand(executedCommand)
 	gitDiffRenderBufferLimit := runtimeexecutor.DefaultRetainedOutputBytes

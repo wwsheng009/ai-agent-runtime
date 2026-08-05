@@ -60,6 +60,9 @@ type chatExportResult struct {
 }
 
 func handleExportCommand(session *ChatSession, command string) bool {
+	if rejectUnifiedInteractiveLegacyCommand(session, "/export") {
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false

@@ -14,9 +14,9 @@ import (
 // Resolved early (before profile / plugin discovery) so project-scope gates apply
 // consistently to plugins, hooks, and MCP loaders.
 var (
-	processFolderTrustMu     sync.RWMutex
-	processFolderTrust       foldertrust.Resolution
-	processFolderTrustReady  bool
+	processFolderTrustMu    sync.RWMutex
+	processFolderTrust      foldertrust.Resolution
+	processFolderTrustReady bool
 )
 
 // ensureProcessFolderTrust resolves folder trust once for this process (idempotent).
@@ -150,6 +150,10 @@ func applyChatFolderTrust(session *ChatSession, res foldertrust.Resolution) {
 
 // handleTrustCommand implements /trust [status].
 func handleTrustCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		_ = renderChatCommandResult(session, executeStructuredTrustCommand(session, command), false)
+		return false
+	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -199,20 +203,44 @@ func handleTrustCommand(session *ChatSession, command string) bool {
 	return false
 }
 
+// executeStructuredTrustCommand exposes the read-only trust state through the
+// unified command pipeline. Granting trust writes a durable security decision,
+// so it remains unavailable until a typed confirmation effect can express the
+// user's intent without reviving the legacy terminal prompt path.
+func executeStructuredTrustCommand(session *ChatSession, command string) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	arg := strings.ToLower(strings.TrimSpace(extractCommandArgument(command)))
+	switch arg {
+	case "", "status":
+		return commandTextResult(folderTrustStatusText(session))
+	case "grant", "yes", "y":
+		return commandTextResult("错误: /trust grant 需要确认交互，尚未迁移到统一渲染命令通道。\n" + folderTrustStatusText(session))
+	default:
+		return commandTextResult("用法: /trust [status|grant]\n" + folderTrustStatusText(session))
+	}
+}
+
 func printFolderTrustStatus(session *ChatSession) {
+	fmt.Println(folderTrustStatusText(session))
+}
+
+func folderTrustStatusText(session *ChatSession) string {
 	var res foldertrust.Resolution
 	if session != nil && (session.FolderTrust.WorkspaceKey != "" || session.FolderTrust.FeatureEnabled || session.FolderTrust.Source != "") {
 		res = session.FolderTrust
 	} else {
 		res = currentFolderTrust()
 	}
-	fmt.Printf("Folder trust: %s\n", foldertrust.FormatSummary(res))
+	lines := []string{"Folder trust: " + foldertrust.FormatSummary(res)}
 	if res.StorePath != "" {
-		fmt.Printf("  Store: %s\n", res.StorePath)
+		lines = append(lines, "  Store: "+res.StorePath)
 	}
 	if !res.FeatureEnabled {
-		fmt.Println("  Hint: set AICLI_FOLDER_TRUST=1 to enable project plugin/hooks/MCP gating")
+		lines = append(lines, "  Hint: set AICLI_FOLDER_TRUST=1 to enable project plugin/hooks/MCP gating")
 	} else if !res.Trusted {
-		fmt.Println("  Hint: run /trust grant or start with --trust to allow project-scope configs")
+		lines = append(lines, "  Hint: run /trust grant or start with --trust to allow project-scope configs")
 	}
+	return strings.Join(lines, "\n")
 }

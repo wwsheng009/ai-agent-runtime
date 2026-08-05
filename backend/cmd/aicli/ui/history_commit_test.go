@@ -61,6 +61,27 @@ func TestHistoryCommitLedger_SameTextDifferentIdentityIsAllowed(t *testing.T) {
 	}
 }
 
+func TestHistoryCommitLedger_RichFragmentsShareSourceWithoutColliding(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	first := testHistoryCommit(1, 41, 8)
+	first.SourceRange = SourceRange{Start: 0, End: 40}
+	first.FragmentID = 1
+	first.DisplayRange = DisplayRange{Start: 0, End: 1}
+	second := first
+	second.Token = 2
+	second.FragmentID = 2
+	second.DisplayRange = DisplayRange{Start: 1, End: 2}
+	if err := ledger.Enqueue(first); err != nil {
+		t.Fatalf("first rich fragment Enqueue: %v", err)
+	}
+	if err := ledger.Enqueue(second); err != nil {
+		t.Fatalf("second rich fragment Enqueue: %v", err)
+	}
+	if got := len(ledger.Entries()); got != 2 {
+		t.Fatalf("rich fragment entries=%d want 2", got)
+	}
+}
+
 func TestHistoryCommitLedger_RejectsIncompleteIdentity(t *testing.T) {
 	ledger := NewHistoryCommitLedger()
 	missingGeneration := testHistoryCommit(1, 41, 0)

@@ -461,7 +461,8 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 	}
 	switch action.(type) {
 	case ReplaceTranscriptAction, FinalizeActiveCellAction, Resize,
-		LeaseReleased, HistoryProjectionRecovered, HistoryScrollbackReconciled, HistoryCommitAcknowledged:
+		LeaseReleased, HistoryProjectionRecovered, HistoryScrollbackReconciled,
+		HistoryCommitAcknowledged, HistoryCommitsAcknowledged:
 		return true
 	default:
 		return false
@@ -666,6 +667,14 @@ func actionClassString(action UIAction) string {
 		return "OpenTranscriptOverlay"
 	case CloseTranscriptOverlay:
 		return "CloseTranscriptOverlay"
+	case OpenResumePicker:
+		return "OpenResumePicker"
+	case CloseResumePicker:
+		return "CloseResumePicker"
+	case OpenBacktrackPicker:
+		return "OpenBacktrackPicker"
+	case CloseBacktrackPicker:
+		return "CloseBacktrackPicker"
 	case TranscriptPagerScroll:
 		return "TranscriptPagerScroll"
 	case TranscriptPagerSetFollowBottom:
@@ -676,6 +685,8 @@ func actionClassString(action UIAction) string {
 		return "BeginHistoryCommit"
 	case HistoryCommitAcknowledged:
 		return "HistoryCommitAcknowledged"
+	case HistoryCommitsAcknowledged:
+		return "HistoryCommitsAcknowledged"
 	case HistoryCommitFailed:
 		return "HistoryCommitFailed"
 	case HistoryCommitDeferred:

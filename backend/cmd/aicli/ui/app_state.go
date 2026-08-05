@@ -26,6 +26,8 @@ type AppState struct {
 	Lease                        LeaseState
 	HistoryEffects               HistoryEffectQueueState
 	TranscriptOverlay            TranscriptOverlayState
+	ResumePicker                 ResumePickerState
+	BacktrackPicker              BacktrackPickerState
 	LayoutGeneration             uint64
 }
 
@@ -148,6 +150,22 @@ type TranscriptOverlayState struct {
 	Active  bool
 	LeaseID uint64
 	Pager   TranscriptPagerState
+}
+
+// ResumePickerState records only alternate-screen ownership. Item matching,
+// keyboard navigation and preview rendering are ephemeral to the picker; they
+// must not become a second transcript or terminal projection model.
+type ResumePickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// BacktrackPickerState intentionally holds only alternate-screen ownership.
+// Navigation, search and the selected row remain local to the fullscreen list;
+// an eventual mutation is committed only after lease release.
+type BacktrackPickerState struct {
+	Active  bool
+	LeaseID uint64
 }
 
 func (s TranscriptOverlayState) Clone() TranscriptOverlayState {
