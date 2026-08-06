@@ -15,54 +15,28 @@ const (
 	skillExecutionPrompt        = "请输入 prompt (q取消): "
 )
 
-// executeStructuredSkillCatalogCommand recognizes explicit, finite catalog
-// queries for a TerminalSession-owned chat. A bare /skills command stays out
-// of this path because the legacy behavior immediately starts a picker and
-// eventually executes a skill; treating it as a static report would silently
-// change the command contract.
-func executeStructuredSkillCatalogCommand(session *ChatSession, command string) (CommandResult, bool) {
-	query, jsonOutput := extractCommandArgumentOptions(command)
-	query = strings.TrimSpace(query)
-	if jsonOutput || query == "" {
-		return CommandResult{}, false
-	}
-	explicitList := false
-	if strings.EqualFold(query, "list") || strings.EqualFold(query, "ls") || strings.EqualFold(query, "status") {
-		query = ""
-		explicitList = true
-	}
-	if query == "" && !explicitList {
-		return CommandResult{}, false
-	}
-	if session == nil {
-		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
-	}
-
-	catalog := ensureFunctionCatalog(session)
-	if catalog == nil || catalog.Registry() == nil {
-		return commandTextResult("错误: Function Catalog: 未初始化"), true
-	}
-	report := buildFunctionCatalogReport(catalog)
-	if report == nil {
-		return commandTextResult("错误: Function Catalog: 未初始化"), true
-	}
-	return CommandResult{
-		Blocks: []RenderBlock{{Document: buildChatSkillCatalogDocument(filterSkillCatalogEntries(report.Skills, query), query)}},
-		Action: CommandContinue,
-	}, true
-}
-
 func buildChatSkillCatalogDocument(skills []aicliFunctionDescriptorReport, query string) render.Document {
 	return textLinesDocument(buildSkillCatalogLines(skills, query, ""))
 }
 
 func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
-		if result, handled := executeStructuredSkillCatalogCommand(session, command); handled {
-			_ = renderChatCommandResult(session, result, false)
+		if result, handled := executeStructuredSkillsMenuCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenSkillPicker != nil {
+				openChatSkillPicker(session, *result.OpenSkillPicker)
+			}
+			if renderErr == nil && result.RestoreComposerDraft != "" {
+				_ = restoreChatRetryDraft(session, result.RestoreComposerDraft)
+			}
 			return false
 		}
-		return rejectUnifiedInteractiveLegacyCommand(session, "/skills")
+		// executeStructuredSkillsMenuCommand handles every /skills variant today,
+		// so this branch is defensive. The deny-list fence no longer contains
+		// /skills (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
+		// would fail open into the legacy stdout handler; fail closed instead.
+		_ = renderChatCommandResult(session, commandTextResult("错误: /skills 变体无法通过统一渲染命令通道处理"), false)
+		return false
 	}
 	if rejectUnifiedInteractiveLegacyCommand(session, "/skills") {
 		return false

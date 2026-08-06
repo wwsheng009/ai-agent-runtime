@@ -632,3 +632,24 @@ func TestMapAppendAfterID(t *testing.T) {
 		t.Fatalf("mutation type = %T, want *AppendCell", tx2.Mutations[0])
 	}
 }
+
+func TestMapAppendBeforeID(t *testing.T) {
+	s := New()
+	m := NewChangeSetMapper(s)
+	assistant := mkItem(encoding.KindAssistant, "item-1", "", encoding.StatusRunning, "assistant")
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		{Op: encoding.OpAppend, Item: assistant, Revision: 1},
+	}}); err != nil {
+		t.Fatalf("append assistant: %v", err)
+	}
+	reasoning := mkItem(encoding.KindReasoning, "item-2", "", encoding.StatusPending, "reasoning")
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		{Op: encoding.OpAppend, Item: reasoning, Revision: 1, BeforeID: "item-1"},
+	}}); err != nil {
+		t.Fatalf("insert reasoning before assistant: %v", err)
+	}
+	cells := s.Cells()
+	if len(cells) != 2 || cells[0].ID != 2 || cells[0].Source != "reasoning" || cells[1].ID != 1 || cells[1].Source != "assistant" {
+		t.Fatalf("before insertion order = %+v", cells)
+	}
+}

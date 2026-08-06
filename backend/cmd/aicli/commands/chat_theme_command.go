@@ -136,38 +136,6 @@ func isThemeModeToken(raw string) bool {
 	}
 }
 
-// executeStructuredThemeQueryCommand claims the finite, read-only /theme
-// reports for an owned interactive terminal. It deliberately declines picker
-// and mutation variants: those require typed UI/effect transactions so no
-// legacy fullscreen prompt or global-theme repaint can interleave with the
-// TerminalSession presenter.
-func executeStructuredThemeQueryCommand(session *ChatSession, command string) (CommandResult, bool) {
-	request, err := parseThemeCommandRequest(command)
-	if err != nil {
-		return commandTextResult(themeCommandUsageText(err)), true
-	}
-
-	switch request.Action {
-	case themeCommandStatus:
-		return CommandResult{
-			Blocks: []RenderBlock{{Document: buildChatThemeStatusDocument(session)}},
-			Action: CommandContinue,
-		}, true
-	case themeCommandList:
-		return CommandResult{
-			Blocks: []RenderBlock{{Document: buildChatThemeListDocument(session)}},
-			Action: CommandContinue,
-		}, true
-	case themeCommandPreview:
-		return CommandResult{
-			Blocks: []RenderBlock{{Document: buildChatThemePreviewDocument()}},
-			Action: CommandContinue,
-		}, true
-	default:
-		return CommandResult{}, false
-	}
-}
-
 func themeCommandUsageText(err error) string {
 	lines := []string{
 		"错误: " + err.Error(),
@@ -315,11 +283,19 @@ func themeConfigDefaultsText(session *ChatSession) string {
 // handleThemeCommand switches the aicli terminal theme and persists preferences.
 func handleThemeCommand(session *ChatSession, command string, noInteractive bool) bool {
 	if unifiedDirectInteractiveOutput(session) {
-		if result, handled := executeStructuredThemeQueryCommand(session, command); handled {
-			_ = renderChatCommandResult(session, result, false)
+		if result, handled := executeStructuredThemeCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenThemePicker != nil {
+				openChatThemePicker(session, *result.OpenThemePicker)
+			}
 			return false
 		}
-		return rejectUnifiedInteractiveLegacyCommand(session, "/theme")
+		// executeStructuredThemeCommand handles every /theme variant today, so
+		// this branch is defensive. The deny-list fence no longer contains
+		// /theme (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
+		// would fail open into the legacy stdout handler; fail closed instead.
+		_ = renderChatCommandResult(session, commandTextResult("错误: /theme 变体无法通过统一渲染命令通道处理"), false)
+		return false
 	}
 	if rejectUnifiedInteractiveLegacyCommand(session, "/theme") {
 		return false
@@ -587,76 +563,7 @@ func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, 
 	snapMode := ui.CurrentThemeModeName()
 	snapSyntax := ui.CurrentSyntaxThemeName()
 
-	type themePickKind int
-	const (
-		pickPalette themePickKind = iota
-		pickMode
-		pickSyntax
-	)
-	type themePick struct {
-		kind  themePickKind
-		value string
-	}
-
-	var picks []themePick
-	items := make([]ui.FullScreenListItem, 0, 32)
-	// Section: modes
-	items = append(items, ui.FullScreenListItem{
-		Title:      "── 明暗模式 ──",
-		Disabled:   true,
-		SearchText: "mode",
-	})
-	picks = append(picks, themePick{}) // placeholder aligned? better track only enabled
-	// Rebuild with index map for enabled only.
-	items = items[:0]
-	picks = picks[:0]
-
-	for _, name := range ui.SupportedThemeModeNames() {
-		desc := ui.ThemeModeDescription(name)
-		title := name
-		if desc != "" {
-			title = name + " — " + desc
-		}
-		if name == snapMode {
-			title += " (当前)"
-		}
-		items = append(items, ui.FullScreenListItem{
-			Title:      title,
-			Detail:     "mode",
-			SearchText: "mode " + name + " " + desc,
-			Preview:    ui.FormatThemePreviewSample(ui.BuildThemePreview(snapPalette, name)),
-		})
-		picks = append(picks, themePick{kind: pickMode, value: name})
-	}
-	for _, name := range ui.SupportedThemePresetNames() {
-		desc := ui.ThemePresetDescription(name)
-		title := name
-		if desc != "" {
-			title = name + " — " + desc
-		}
-		if name == snapPalette {
-			title += " (当前)"
-		}
-		items = append(items, ui.FullScreenListItem{
-			Title:      title,
-			Detail:     "palette · light/dark compatible",
-			SearchText: "palette " + name + " " + desc,
-			Preview:    ui.FormatThemePreviewSample(ui.BuildThemePreview(name, snapMode)),
-		})
-		picks = append(picks, themePick{kind: pickPalette, value: name})
-	}
-	for _, name := range ui.CuratedSyntaxThemeNames() {
-		title := name + " — 语法高亮"
-		if name == snapSyntax {
-			title += " (当前)"
-		}
-		items = append(items, ui.FullScreenListItem{
-			Title:      title,
-			Detail:     "syntax · builtin",
-			SearchText: "syntax " + name,
-		})
-		picks = append(picks, themePick{kind: pickSyntax, value: name})
-	}
+	items, picks := buildThemePickerFullScreenItems(snapPalette, snapMode, snapSyntax)
 
 	// Working selection accumulates axes during browsing; cancel restores snap.
 	workPalette, workMode, workSyntax := snapPalette, snapMode, snapSyntax
@@ -740,6 +647,74 @@ func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, 
 		return "", "", "", false, nil
 	}
 	return workPalette, workMode, workSyntax, true, nil
+}
+
+type themePickKind int
+
+const (
+	pickPalette themePickKind = iota
+	pickMode
+	pickSyntax
+)
+
+type themePick struct {
+	kind  themePickKind
+	value string
+}
+
+// buildThemePickerFullScreenItems builds the mode/palette/syntax rows shared by
+// the legacy and unified fullscreen theme pickers. picks is index-aligned with
+// items; the caller maps FullScreenListResult.Index back through it.
+func buildThemePickerFullScreenItems(snapPalette, snapMode, snapSyntax string) ([]ui.FullScreenListItem, []themePick) {
+	items := make([]ui.FullScreenListItem, 0, 32)
+	picks := make([]themePick, 0, 32)
+	for _, name := range ui.SupportedThemeModeNames() {
+		desc := ui.ThemeModeDescription(name)
+		title := name
+		if desc != "" {
+			title = name + " — " + desc
+		}
+		if name == snapMode {
+			title += " (当前)"
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     "mode",
+			SearchText: "mode " + name + " " + desc,
+			Preview:    ui.FormatThemePreviewSample(ui.BuildThemePreview(snapPalette, name)),
+		})
+		picks = append(picks, themePick{kind: pickMode, value: name})
+	}
+	for _, name := range ui.SupportedThemePresetNames() {
+		desc := ui.ThemePresetDescription(name)
+		title := name
+		if desc != "" {
+			title = name + " — " + desc
+		}
+		if name == snapPalette {
+			title += " (当前)"
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     "palette · light/dark compatible",
+			SearchText: "palette " + name + " " + desc,
+			Preview:    ui.FormatThemePreviewSample(ui.BuildThemePreview(name, snapMode)),
+		})
+		picks = append(picks, themePick{kind: pickPalette, value: name})
+	}
+	for _, name := range ui.CuratedSyntaxThemeNames() {
+		title := name + " — 语法高亮"
+		if name == snapSyntax {
+			title += " (当前)"
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     "syntax · builtin",
+			SearchText: "syntax " + name,
+		})
+		picks = append(picks, themePick{kind: pickSyntax, value: name})
+	}
+	return items, picks
 }
 
 func selectThemeWithReader(session *ChatSession, reader *bufio.Reader) (palette string, mode string, err error) {

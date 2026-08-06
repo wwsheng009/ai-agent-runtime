@@ -114,6 +114,281 @@ func TestDottedLifecycleProjectsMarkdownExactlyOnceIntoNativeHistory(t *testing.
 	}
 }
 
+// The local ReAct producer can emit a successful request boundary before a
+// non-streamed reasoning summary. The semantic/physical order must still be
+// reasoning followed by the authoritative assistant final.
+func TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal(t *testing.T) {
+	const width, height = 96, 18
+	const (
+		sessionID = "session-late-reasoning"
+		turnID    = "turn-late-reasoning"
+		streamID  = "stream-late-reasoning"
+		reasoning = "LATE-REASONING-BEFORE-FINAL"
+		answer    = "LATE-ASSISTANT-FINAL"
+	)
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var physical bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&physical) {
+		t.Fatal("unified renderer did not attach")
+	}
+	bridge.startProcessor()
+	defer close(bridge.eventQueue)
+	bridge.BeginRun()
+
+	for _, event := range []runtimeevents.Event{
+		{Type: runtimechat.EventSessionStart, SessionID: sessionID, Payload: map[string]interface{}{"turn_id": turnID}},
+		{Type: runtimechat.EventLLMRequestStarted, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1,
+		}},
+		{Type: runtimechat.EventAssistantDelta, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1, "sequence": uint64(1), "delta": answer,
+		}},
+		{Type: runtimechat.EventLLMRequestFinished, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1, "success": true,
+		}},
+		{Type: "assistant.reasoning", SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1,
+			"reasoning": map[string]interface{}{"format": "summary", "summary": reasoning},
+		}},
+		{Type: runtimechat.EventAssistantMessage, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "content": answer,
+		}},
+		{Type: runtimechat.EventSessionEnd, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "success": true,
+		}},
+	} {
+		bridge.Handle(event)
+	}
+	bridge.WaitForCurrentEvents(5 * time.Second)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("late reasoning flow retained mutable active: %+v", state.Active)
+	}
+	if len(state.Transcript.Cells) != 2 || state.Transcript.Cells[0].Kind != scene.KindSupplement ||
+		state.Transcript.Cells[0].Source != reasoning || state.Transcript.Cells[1].Kind != scene.KindAssistant ||
+		state.Transcript.Cells[1].Source != answer || state.Transcript.Cells[1].Phase != scene.CellCommitted {
+		t.Fatalf("late reasoning/final semantic order = %+v", state.Transcript.Cells)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
+		t.Fatalf("late reasoning history did not settle: %+v", state.HistoryEffects)
+	}
+
+	screen := vt.NewScreen(width, height)
+	screen.Feed(physical.String())
+	projected := strings.Join(append(screen.ScrollbackLines(), screen.Lines(1, height)...), "\n")
+	reasoningAt, answerAt := strings.Index(projected, reasoning), strings.Index(projected, answer)
+	if reasoningAt < 0 || answerAt < 0 || reasoningAt >= answerAt {
+		t.Fatalf("physical order reasoning=%d final=%d\n%s", reasoningAt, answerAt, screen.Dump())
+	}
+	for _, marker := range []string{reasoning, answer} {
+		if count := strings.Count(projected, marker); count != 1 {
+			t.Fatalf("physical marker %q count=%d\n%s", marker, count, screen.Dump())
+		}
+	}
+}
+
+func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.T) {
+	const width, height = 96, 18
+	const (
+		sessionID = "session-late-reasoning-long"
+		turnID    = "turn-late-reasoning-long"
+		streamID  = "stream-late-reasoning-long"
+		reasoning = "LATE-LONG-REASONING-BEFORE-ANSWER"
+	)
+	markers := make([]string, 40)
+	lines := make([]string, len(markers))
+	for index := range markers {
+		markers[index] = fmt.Sprintf("LATE-LONG-ANSWER-%02d", index+1)
+		lines[index] = markers[index] + " native history ordering"
+	}
+	answer := strings.Join(lines, "\n")
+
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var physical bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&physical) {
+		t.Fatal("unified renderer did not attach")
+	}
+	bridge.startProcessor()
+	defer close(bridge.eventQueue)
+	bridge.BeginRun()
+
+	for _, event := range []runtimeevents.Event{
+		{Type: runtimechat.EventSessionStart, SessionID: sessionID, Payload: map[string]interface{}{"turn_id": turnID}},
+		{Type: runtimechat.EventLLMRequestStarted, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1,
+		}},
+		{Type: runtimechat.EventAssistantDelta, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1, "sequence": uint64(1), "delta": answer,
+		}},
+		{Type: runtimechat.EventLLMRequestFinished, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1, "success": true,
+		}},
+	} {
+		bridge.Handle(event)
+	}
+	bridge.WaitForCurrentEvents(5 * time.Second)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	streaming := coordinator.uiActor.AppState()
+	if streaming.Active.Phase != ui.ActiveCellMutable || streaming.Active.Kind != scene.KindAssistant ||
+		streaming.Active.Source != answer {
+		t.Fatalf("long assistant is not the resident active cell: %+v", streaming.Active)
+	}
+	if streaming.Active.Acked.End != 0 {
+		t.Fatalf("assistant crossed native-history ordering barrier before late reasoning: active=%+v effects=%+v",
+			streaming.Active, streaming.HistoryEffects.Entries())
+	}
+	if len(streaming.Transcript.Cells) != 2 || streaming.Transcript.Cells[0].Kind != scene.KindSupplement ||
+		streaming.Transcript.Cells[0].Source != "" || streaming.Transcript.Cells[0].Phase != scene.CellMutable ||
+		streaming.Transcript.Cells[1].Kind != scene.KindAssistant {
+		t.Fatalf("missing empty reasoning ordering barrier: %+v", streaming.Transcript.Cells)
+	}
+
+	for _, event := range []runtimeevents.Event{
+		{Type: "assistant.reasoning", SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "step": 1,
+			"reasoning": map[string]interface{}{"format": "summary", "summary": reasoning},
+		}},
+		{Type: runtimechat.EventAssistantMessage, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "content": answer,
+		}},
+		{Type: runtimechat.EventSessionEnd, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "success": true,
+		}},
+	} {
+		bridge.Handle(event)
+	}
+	bridge.WaitForCurrentEvents(5 * time.Second)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	final := coordinator.uiActor.AppState()
+	if len(final.Transcript.Cells) != 2 || final.Transcript.Cells[0].Source != reasoning ||
+		final.Transcript.Cells[1].Source != answer || final.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("late reasoning long-flow semantic order = %+v active=%+v", final.Transcript.Cells, final.Active)
+	}
+	for _, entry := range final.HistoryEffects.Entries() {
+		if entry.State == ui.HistoryCommitPending || entry.State == ui.HistoryCommitInFlight ||
+			entry.State == ui.HistoryCommitStateFailed || entry.MayHavePartiallyWritten {
+			t.Fatalf("late reasoning history effect not settled: %#v", entry)
+		}
+	}
+	screen := vt.NewScreen(width, height)
+	screen.Feed(physical.String())
+	projected := strings.Join(append(screen.ScrollbackLines(), screen.Lines(1, height)...), "\n")
+	if reasoningAt, answerAt := strings.Index(projected, reasoning), strings.Index(projected, markers[0]); reasoningAt < 0 || answerAt < 0 || reasoningAt >= answerAt {
+		t.Fatalf("late long physical order reasoning=%d answer=%d\n%s", reasoningAt, answerAt, screen.Dump())
+	}
+	for _, marker := range markers {
+		if count := strings.Count(projected, marker); count != 1 {
+			t.Fatalf("late long marker %q count=%d\n%s", marker, count, screen.Dump())
+		}
+	}
+}
+
+func TestSessionEndFinalizesOrphanMutableToolExactlyOnce(t *testing.T) {
+	const width, height = 96, 18
+	const (
+		sessionID = "session-orphan-tool"
+		turnID    = "turn-orphan-tool"
+		callID    = "call-orphan-tool"
+		toolHead  = "ORPHAN-TOOL-COMMAND"
+	)
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var physical bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&physical) {
+		t.Fatal("unified renderer did not attach")
+	}
+	bridge.startProcessor()
+	defer close(bridge.eventQueue)
+	bridge.BeginRun()
+
+	for _, event := range []runtimeevents.Event{
+		{Type: runtimechat.EventSessionStart, SessionID: sessionID, Payload: map[string]interface{}{"turn_id": turnID}},
+		{Type: "tool.requested", SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "tool_call_id": callID, "tool_name": "shell", "command_text": toolHead,
+		}},
+		{Type: "tool.progress", SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "tool_call_id": callID, "tool_name": "shell", "message": "orphan progress",
+		}},
+		{Type: runtimechat.EventSessionEnd, SessionID: sessionID, Payload: map[string]interface{}{
+			"turn_id": turnID, "success": false, "error": "provider ended without tool terminal event",
+		}},
+	} {
+		bridge.Handle(event)
+	}
+	bridge.WaitForCurrentEvents(5 * time.Second)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("session.end retained orphan tool active: %+v", state.Active)
+	}
+	if coordinator.AgentStage() == chatAgentStageToolRunning || len(coordinator.activeTools) != 0 {
+		t.Fatalf("session.end retained coordinator tool stage: stage=%q tools=%+v", coordinator.AgentStage(), coordinator.activeTools)
+	}
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Kind != scene.KindToolChain ||
+		state.Transcript.Cells[0].Phase != scene.CellCommitted || !strings.Contains(state.Transcript.Cells[0].Source, toolHead) {
+		t.Fatalf("orphan tool did not converge to one committed chain: %+v", state.Transcript.Cells)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
+		t.Fatalf("orphan tool history did not settle: %+v", state.HistoryEffects)
+	}
+
+	screen := vt.NewScreen(width, height)
+	screen.Feed(physical.String())
+	projected := strings.Join(append(screen.ScrollbackLines(), screen.Lines(1, height)...), "\n")
+	if count := strings.Count(projected, toolHead); count != 1 {
+		t.Fatalf("orphan tool physical count=%d\n%s", count, screen.Dump())
+	}
+	for _, raw := range []string{"tool.requested", "tool.progress", "session_end"} {
+		if strings.Contains(projected, raw) {
+			t.Fatalf("raw lifecycle %q leaked\n%s", raw, screen.Dump())
+		}
+	}
+}
+
 // Production delivers the successful request boundary before assistant_message.
 // The bridge must keep the coordinator stream alive until that authoritative
 // final reaches the actor; otherwise the last coalesced delta tail can disappear

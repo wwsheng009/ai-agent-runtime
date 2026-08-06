@@ -163,6 +163,59 @@ func TestMutableActiveFinalizePreservesExactlyOncePhysicalFlow(t *testing.T) {
 	assertPhysicalMarkersExactlyOnce(t, h.physical.String(), width, height, markers)
 }
 
+func TestAuthoritativeFinalCorrectionReplacesAckedNativePrefixExactlyOnce(t *testing.T) {
+	const width, height = 72, 12
+	oldMarkers := make([]string, 30)
+	finalMarkers := make([]string, 30)
+	for index := range finalMarkers {
+		oldMarkers[index] = fmt.Sprintf("STALE-ACTIVE-%03d", index)
+		finalMarkers[index] = fmt.Sprintf("FINAL-CORRECT-%03d", index)
+	}
+	oldSource := strings.Join(oldMarkers, "\n")
+	finalSource := strings.Join(finalMarkers, "\n")
+
+	h := newNativeScrollbackRegressionHarness(t)
+	h.post(t,
+		Resize{Width: width, Height: height, Generation: 1},
+		SetSemanticActiveCellProjectionAction{Enabled: true},
+		SetActiveCellAction{Active: ActiveCellState{
+			CellID: 72, Revision: 4, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: oldSource,
+			Stable: SourceRange{Start: 0, End: len(oldSource)},
+		}},
+	)
+	h.flush()
+	if h.controller.State().Active.Acked.End == 0 {
+		t.Fatal("fixture did not hand off the stale mutable prefix")
+	}
+
+	finalCell := &scene.TranscriptCell{
+		ID: 72, Revision: 5, Kind: scene.KindAssistant,
+		Source: finalSource, Phase: scene.CellCommitted,
+	}
+	h.post(t, FinalizeActiveCellAction{
+		Snapshot:             regressionCommittedSnapshot(5, finalCell),
+		ExpectedActiveCellID: 72, ExpectedActiveRevision: 4,
+		ExpectedSceneRevision: 5,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	})
+	h.flush()
+
+	raw := h.physical.String()
+	if !strings.Contains(raw, "\x1b[3J") {
+		t.Fatalf("authoritative correction did not reset stale scrollback: %q", raw)
+	}
+	assertPhysicalMarkersExactlyOnce(t, raw, width, height, finalMarkers)
+	screen := vt.NewScreen(width, height)
+	screen.Feed(raw)
+	physical := strings.Join(append(screen.ScrollbackLines(), screen.Lines(0, height)...), "\n")
+	for _, marker := range oldMarkers {
+		if strings.Contains(physical, marker) {
+			t.Fatalf("stale mutable marker survived authoritative reset: %q", marker)
+		}
+	}
+}
+
 // Mutable Markdown cannot fall back to raw source rows when its stable prefix
 // leaves the inline viewport. The handoff payload must remain renderer-owned
 // rich IR while the newest rendered rows stay live at the bottom.

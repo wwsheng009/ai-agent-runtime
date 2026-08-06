@@ -1,11 +1,68 @@
 package ui
 
 import (
+	"bytes"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
+
+type terminalSessionBlockingWriter struct {
+	mu        sync.Mutex
+	writes    [][]byte
+	started   chan int
+	release   chan struct{}
+	closeOnce sync.Once
+}
+
+func newTerminalSessionBlockingWriter() *terminalSessionBlockingWriter {
+	return &terminalSessionBlockingWriter{
+		started: make(chan int, 8),
+		release: make(chan struct{}, 8),
+	}
+}
+
+func (w *terminalSessionBlockingWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	w.writes = append(w.writes, append([]byte(nil), data...))
+	index := len(w.writes)
+	w.mu.Unlock()
+	w.started <- index
+	<-w.release
+	return len(data), nil
+}
+
+func (w *terminalSessionBlockingWriter) waitStarted(t *testing.T, want int) []byte {
+	t.Helper()
+	select {
+	case got := <-w.started:
+		if got != want {
+			t.Fatalf("write index = %d, want %d", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for write %d", want)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.writes[want-1]...)
+}
+
+func (w *terminalSessionBlockingWriter) allow() {
+	w.release <- struct{}{}
+}
+
+func (w *terminalSessionBlockingWriter) unblock() {
+	w.closeOnce.Do(func() { close(w.release) })
+}
+
+func (w *terminalSessionBlockingWriter) writeCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.writes)
+}
 
 func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTransaction(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
@@ -144,7 +201,137 @@ func TestTerminalSessionExecutorConsumesControllerWakeWithoutExtraFrame(t *testi
 	}
 }
 
-func TestTerminalSessionExecutorFrameFailureInvalidatesThenRecoversWithoutBlindHandoff(t *testing.T) {
+func TestTerminalSessionExecutorResizeRacingInFlightHistoryReconcilesAndDrains(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	controller := newHistoryExecutorController(t, func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	writer := newTerminalSessionBlockingWriter()
+	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(func() {
+		writer.unblock()
+		executor.Close()
+	})
+
+	postHistoryEffectFixture(t, controller, 20)
+	firstWrite := writer.waitStarted(t, 1)
+	controller.WaitIdle()
+	beforeResize := controller.State()
+	oldNextToken := beforeResize.HistoryEffects.NextToken
+	oldToken := beforeResize.HistoryEffects.Entries()[0].Commit.Token
+	if entry := historyCommitEntry(t, beforeResize, oldToken); entry.State != HistoryCommitInFlight {
+		t.Fatalf("blocked history token = %#v, want in flight", entry)
+	}
+	if bytes.Contains(firstWrite, []byte("\x1b[3J")) {
+		t.Fatalf("initial history transaction unexpectedly reset scrollback: %q", firstWrite)
+	}
+
+	if !controller.Post(Resize{Width: 80, Height: 12, Generation: 5}) {
+		t.Fatal("post racing Resize")
+	}
+	controller.WaitIdle()
+	resized := controller.State()
+	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitInvalidated || !entry.MayHavePartiallyWritten {
+		t.Fatalf("resize did not quarantine in-flight history: %#v", entry)
+	}
+	if !resized.HistoryEffects.ProjectionUnknown {
+		t.Fatal("resize race did not invalidate history projection")
+	}
+	writer.allow()
+	resetWrite := writer.waitStarted(t, 2)
+	if !bytes.Contains(resetWrite, []byte("\x1b[3J")) {
+		t.Fatalf("current-generation recovery did not reset scrollback: %q", resetWrite)
+	}
+	writer.allow()
+	freshWrite := writer.waitStarted(t, 3)
+	if bytes.Contains(freshWrite, []byte("\x1b[3J")) {
+		t.Fatalf("fresh history drain repeated scrollback reset: %q", freshWrite)
+	}
+	writer.allow()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	state := controller.State()
+	assertTerminalSessionExecutorRecoveredHistory(t, state, oldToken, oldNextToken)
+	if state.LayoutGeneration != 5 || state.HistoryEffects.TerminalEpoch == 0 || writer.writeCount() != 3 {
+		t.Fatalf("resize recovery state = generation %d epoch %d writes %d", state.LayoutGeneration, state.HistoryEffects.TerminalEpoch, writer.writeCount())
+	}
+}
+
+func TestTerminalSessionExecutorSecondResizeRacingScrollbackResetStillRecovers(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	controller := newHistoryExecutorController(t, func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	writer := newTerminalSessionBlockingWriter()
+	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(func() {
+		writer.unblock()
+		executor.Close()
+	})
+
+	postHistoryEffectFixture(t, controller, 20)
+	writer.waitStarted(t, 1)
+	controller.WaitIdle()
+	beforeResize := controller.State()
+	oldNextToken := beforeResize.HistoryEffects.NextToken
+	oldToken := beforeResize.HistoryEffects.Entries()[0].Commit.Token
+
+	if !controller.Post(Resize{Width: 80, Height: 12, Generation: 5}) {
+		t.Fatal("post first racing Resize")
+	}
+	controller.WaitIdle()
+	writer.allow()
+	firstReset := writer.waitStarted(t, 2)
+	if !bytes.Contains(firstReset, []byte("\x1b[3J")) {
+		t.Fatalf("first recovery omitted scrollback reset: %q", firstReset)
+	}
+
+	if !controller.Post(Resize{Width: 80, Height: 14, Generation: 6}) {
+		t.Fatal("post second racing Resize")
+	}
+	controller.WaitIdle()
+	writer.allow()
+	secondReset := writer.waitStarted(t, 3)
+	if !bytes.Contains(secondReset, []byte("\x1b[3J")) {
+		t.Fatalf("second current-generation recovery omitted scrollback reset: %q", secondReset)
+	}
+	writer.allow()
+	writer.waitStarted(t, 4)
+	writer.allow()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	state := controller.State()
+	assertTerminalSessionExecutorRecoveredHistory(t, state, oldToken, oldNextToken)
+	if state.LayoutGeneration != 6 || state.HistoryEffects.TerminalEpoch < 2 || writer.writeCount() != 4 {
+		t.Fatalf("second resize recovery state = generation %d epoch %d writes %d", state.LayoutGeneration, state.HistoryEffects.TerminalEpoch, writer.writeCount())
+	}
+}
+
+func assertTerminalSessionExecutorRecoveredHistory(t *testing.T, state UIControllerState, oldToken, oldNextToken uint64) {
+	t.Helper()
+	if state.HistoryEffects.ProjectionUnknown {
+		t.Fatal("history projection remained unknown after scrollback reconciliation")
+	}
+	if state.HistoryEffects.NextToken <= oldNextToken {
+		t.Fatalf("fresh epoch did not advance tokens: next=%d old=%d", state.HistoryEffects.NextToken, oldNextToken)
+	}
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.Token == oldToken {
+			t.Fatalf("retired token survived reconciliation: %#v", entry)
+		}
+		if entry.Commit.Token <= oldNextToken || entry.State != HistoryCommitAcked || entry.AckFrame == 0 || entry.MayHavePartiallyWritten {
+			t.Fatalf("fresh history entry unresolved after drain: %#v", entry)
+		}
+	}
+}
+
+func TestTerminalSessionExecutorFrameFailureReconcilesWithoutBlindHandoff(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	postHistoryEffectFixture(t, controller, 20)
 	controller.WaitIdle()
@@ -166,19 +353,51 @@ func TestTerminalSessionExecutorFrameFailureInvalidatesThenRecoversWithoutBlindH
 	executor.Request()
 	executor.WaitIdle()
 	state = controller.State()
-	if !state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("bottom viewport repaint incorrectly recovered partial native history")
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.TerminalEpoch == 0 {
+		t.Fatalf("partial native history did not establish a fresh terminal epoch: %#v", state.HistoryEffects)
 	}
-	entry = historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten {
-		t.Fatalf("recovery changed failed bootstrap delivery: %#v", entry)
+	for _, current := range state.HistoryEffects.Entries() {
+		if current.Commit.Token == firstToken || current.State != HistoryCommitAcked || current.MayHavePartiallyWritten {
+			t.Fatalf("scrollback reconciliation left stale delivery: %#v", current)
+		}
 	}
+	if !bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("recovery did not replace uncertain scrollback: %q", writer.bytes.String())
+	}
+}
 
+func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	controller := newHistoryExecutorController(t, func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	writer := &terminalSessionShortWriter{short: true}
+	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	postHistoryEffectFixture(t, controller, 20)
+	controller.WaitIdle()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	writer.short = false
 	executor.Request()
 	executor.WaitIdle()
-	entry = historyCommitEntry(t, controller.State(), firstToken)
-	if entry.State != HistoryCommitStateFailed || !controller.State().HistoryEffects.ProjectionUnknown {
-		t.Fatalf("unreconciled partial bootstrap changed state: entry=%#v writes=%d", entry, writer.writes)
+	controller.WaitIdle()
+
+	state := controller.State()
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.TerminalEpoch == 0 {
+		t.Fatalf("partial history did not reconcile without resize: effects=%#v writes=%d", state.HistoryEffects, writer.writes)
+	}
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.State != HistoryCommitAcked || entry.MayHavePartiallyWritten {
+			t.Fatalf("replanned history remained unresolved: %#v", entry)
+		}
+	}
+	if !bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("recovery never reset uncertain native scrollback: %q", writer.bytes.String())
 	}
 }
 

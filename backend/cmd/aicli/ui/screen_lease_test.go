@@ -15,6 +15,7 @@ import (
 type terminalSessionLeaseTransportForTest struct {
 	session    *TerminalSession
 	recoveries int
+	exitErr    error
 }
 
 func (t *terminalSessionLeaseTransportForTest) EnterAlternateScreen(leaseID uint64) error {
@@ -26,6 +27,11 @@ func (t *terminalSessionLeaseTransportForTest) WriteAlternateScreen(leaseID uint
 }
 
 func (t *terminalSessionLeaseTransportForTest) ExitAlternateScreen(leaseID uint64) error {
+	if t.exitErr != nil {
+		err := t.exitErr
+		t.exitErr = nil
+		return err
+	}
 	return t.session.ExitAlternateScreen(leaseID)
 }
 
@@ -168,6 +174,63 @@ func TestFixedBottomSurface_FencedLeaseUsesTerminalSessionTransport(t *testing.T
 	}
 	if _, ok := actions[1].(LeaseReleased); !ok {
 		t.Fatalf("second action = %T, want LeaseReleased", actions[1])
+	}
+}
+
+func TestFixedBottomSurface_FailedUnifiedExitRetainsRetryableLease(t *testing.T) {
+	surface := NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+	session := NewTerminalSession(&bytes.Buffer{})
+	transport := &terminalSessionLeaseTransportForTest{session: session, exitErr: errors.New("exit unavailable")}
+	surface.SetAlternateScreenLeaseTransport(transport)
+	var actions []UIAction
+	surface.SetUIActorPoster(func(action UIAction) bool {
+		actions = append(actions, action)
+		return true
+	})
+
+	lease, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "retry"})
+	if err != nil {
+		t.Fatalf("AcquireAlternateScreen: %v", err)
+	}
+	if err := lease.Release(context.Background()); err == nil {
+		t.Fatal("first release unexpectedly succeeded")
+	}
+	if !lease.Active() || !surface.LeaseActive() || session.AlternateScreenLeaseID() != lease.ID() {
+		t.Fatalf("failed exit lost lease: active=%t surface=%t physical=%d", lease.Active(), surface.LeaseActive(), session.AlternateScreenLeaseID())
+	}
+	if len(actions) != 1 || transport.recoveries != 0 {
+		t.Fatalf("failed exit published release/recovery: actions=%#v recoveries=%d", actions, transport.recoveries)
+	}
+
+	if err := lease.Release(context.Background()); err != nil {
+		t.Fatalf("retry release: %v", err)
+	}
+	if lease.Active() || surface.LeaseActive() || session.AlternateScreenLeaseID() != 0 {
+		t.Fatalf("successful retry retained lease: active=%t surface=%t physical=%d", lease.Active(), surface.LeaseActive(), session.AlternateScreenLeaseID())
+	}
+	if len(actions) != 2 || transport.recoveries != 1 {
+		t.Fatalf("successful retry barrier = actions=%#v recoveries=%d", actions, transport.recoveries)
+	}
+}
+
+func TestFixedBottomSurface_ReleaseActiveAlternateScreenUsesTransportBeforeDetach(t *testing.T) {
+	surface := NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+	session := NewTerminalSession(&bytes.Buffer{})
+	transport := &terminalSessionLeaseTransportForTest{session: session}
+	surface.SetAlternateScreenLeaseTransport(transport)
+	lease, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "shutdown"})
+	if err != nil {
+		t.Fatalf("AcquireAlternateScreen: %v", err)
+	}
+	if err := surface.ReleaseActiveAlternateScreen(context.Background()); err != nil {
+		t.Fatalf("ReleaseActiveAlternateScreen: %v", err)
+	}
+	if surface.LeaseActive() || lease.Active() || session.AlternateScreenLeaseID() != 0 {
+		t.Fatalf("teardown release retained lease: surface=%t handle=%t physical=%d", surface.LeaseActive(), lease.Active(), session.AlternateScreenLeaseID())
 	}
 }
 

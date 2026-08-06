@@ -44,9 +44,48 @@ func (p ActiveBandProjection) Clone() ActiveBandProjection {
 // This is a layout helper only. It uses the same pure structured Markdown
 // projection as committed assistant transcript cells, but never probes a
 // terminal, reads a surface cache, or advances a source range.
+
 func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) ActiveBandProjection {
+	return ProjectActiveCellBandWithTheme(active, geometry, style.ThemeContext{})
+}
+
+func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometryState, theme style.ThemeContext) ActiveBandProjection {
 	if active.CellID == 0 || active.Phase == ActiveCellInactive || active.Source == "" {
 		return ActiveBandProjection{}
+	}
+
+	// 工具执行中（Scene tool chain 处于 mutable 阶段）：无论 Acked 边界
+	// 如何，ActiveBand 投影一行 "• Running <命令摘要>"。这对齐旧版
+	// chat_tool_rendering 的 Running 行，让"开始执行工具"在真实 TUI
+	// （semantic active-cell projection）里重新可见；工具完成后 cell 提交，
+	// ActiveCellFromTranscript 不再返回它，Running 行随之消失（保持
+	// viewport-only 语义，不进 transcript）。
+	if active.Kind == scene.KindToolChain && active.Phase == ActiveCellMutable {
+		head := activeCellRunningToolBandHead(active.Source)
+		if head == "" {
+			return ActiveBandProjection{}
+		}
+		width := geometry.Width
+		if width < 1 {
+			width = 80
+		}
+		// head 首行在 started 阶段已带 "• Running " 前缀（数据层 Running
+		// 标记），投影不重复加；旧 head（无前缀）仍按原逻辑补齐。
+		row := head
+		if !strings.HasPrefix(row, "• Running ") {
+			row = "• Running " + row
+		}
+		row = TruncateVisible(row, width, "…")
+		return ActiveBandProjection{
+			CellID:      active.CellID,
+			Revision:    active.Revision,
+			Kind:        active.Kind,
+			SourceRange: SourceRange{Start: 0, End: len(active.Source)},
+			Lines: []render.Line{{Spans: []render.Span{{
+				Text:  row,
+				Style: render.Style{Role: string(style.RoleTextSecondary), Bold: true},
+			}}}},
+		}
 	}
 
 	start := active.Acked.End
@@ -68,12 +107,12 @@ func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) Activ
 	markdownSource := active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source)
 	if markdownSource {
 		var projected bool
-		lines, projected = activeMarkdownSuffixLines(active.Source, start, width)
+		lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme)
 		if !projected {
 			// A changed block context must never downgrade the live viewport to
 			// raw Markdown. Keep a rich full-source tail visible while the effect
 			// lifecycle takes the conservative recovery path.
-			lines = activeMarkdownBandLines(markdown.Render(active.Source, markdown.AssistantBodyOptions(width, style.ThemeContext{})))
+			lines = activeMarkdownBandLines(markdown.Render(active.Source, markdown.AssistantBodyOptions(width, theme)))
 		}
 	}
 	if len(lines) == 0 && !markdownSource {
@@ -103,19 +142,32 @@ func ProjectActiveCellBand(active ActiveCellState, geometry GeometryState) Activ
 	}
 }
 
-// activeMarkdownSuffixLines renders from the complete source so a handed-off
-// prefix cannot strip list/fence/table context from the remaining rich tail.
+// activeCellRunningToolBandHead 提取 tool cell Source 的首行作为 ActiveBand
+// Running 行的命令摘要（progress/output 行不进入 Running 行）。
+func activeCellRunningToolBandHead(source string) string {
+	head := strings.TrimSpace(source)
+	if newline := strings.IndexByte(head, '\n'); newline >= 0 {
+		head = strings.TrimSpace(head[:newline])
+	}
+	return head
+}
+
+// activeMarkdownSuffixLines renders from the complete source so a handed-off// prefix cannot strip list/fence/table context from the remaining rich tail.
 // The stable-prefix contract requires the old rendering to remain an exact
 // line prefix; if it does not, callers conservatively keep the source live.
-func activeMarkdownSuffixLines(source string, start, width int) ([]render.Line, bool) {
+func activeMarkdownSuffixLines(source string, start, width int, themes ...style.ThemeContext) ([]render.Line, bool) {
 	if start < 0 || start > len(source) || !activeCellSourceBoundary(source, start) {
 		return nil, false
 	}
-	full := activeMarkdownBandLines(markdown.Render(source, markdown.AssistantBodyOptions(width, style.ThemeContext{})))
+	theme := style.ThemeContext{}
+	if len(themes) > 0 {
+		theme = themes[0]
+	}
+	full := activeMarkdownBandLines(markdown.Render(source, markdown.AssistantBodyOptions(width, theme)))
 	if start == 0 {
 		return full, true
 	}
-	prefix := activeMarkdownBandLines(markdown.Render(source[:start], markdown.AssistantBodyOptions(width, style.ThemeContext{})))
+	prefix := activeMarkdownBandLines(markdown.Render(source[:start], markdown.AssistantBodyOptions(width, theme)))
 	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
 		return nil, false
 	}

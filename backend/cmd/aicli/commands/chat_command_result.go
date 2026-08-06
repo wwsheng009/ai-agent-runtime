@@ -55,6 +55,29 @@ type BacktrackApplyRequest struct {
 	Request runtimechat.BacktrackRequest
 }
 
+// ModelPickerRequest is the immutable query carried by the typed /model
+// picker effect. It captures the already-parsed explicit provider/model before
+// dispatch: the alternate-screen interaction must not borrow mutable session
+// state while it owns a ScreenLease. Empty Provider/Model mean the picker must
+// ask for that stage; NeedReasoning requests the reasoning-effort stage when
+// the interactive mutation did not pin a value and the model card supports it.
+type ModelPickerRequest struct {
+	Provider      string
+	Model         string
+	NeedReasoning bool
+}
+
+// ThemePickerRequest marks the live-preview theme selection effect. It carries
+// no mutable state: the picker snapshots the current theme axes and only its
+// confirmed result becomes a unified apply + result cell after lease release.
+type ThemePickerRequest struct{}
+
+// SkillPickerRequest marks the skill selection effect. It carries no mutable
+// state: the picker lists the function catalog after dispatch, and the
+// confirmed skill becomes a composer draft (via RestoreComposerDraft) only
+// after alternate-screen ownership has been released.
+type SkillPickerRequest struct{}
+
 // CommandResult is the renderer-neutral result of a local chat command.
 type CommandResult struct {
 	Blocks []RenderBlock
@@ -83,6 +106,20 @@ type CommandResult struct {
 	// are committed only after the alternate screen is released and the primary
 	// presenter has recovered.
 	OpenBacktrackPicker *BacktrackPickerRequest
+	// OpenModelPicker requests the lease-bound provider→model→reasoning picker.
+	// It has no document payload: each stage borrows the same alternate screen,
+	// and the eventual mutation is applied only after lease release and primary
+	// presenter recovery, mirroring the backtrack picker contract.
+	OpenModelPicker *ModelPickerRequest
+	// OpenThemePicker requests the lease-bound live-preview theme selector. It
+	// has no document payload: browsing mutates only the working theme snapshot
+	// inside the picker, and the confirmed result is applied after lease release
+	// and primary presenter recovery.
+	OpenThemePicker *ThemePickerRequest
+	// OpenSkillPicker requests the lease-bound skill selector. It has no
+	// document payload: the confirmed skill becomes a composer draft
+	// (`/skill <name> `) only after lease release and primary presenter recovery.
+	OpenSkillPicker *SkillPickerRequest
 	// ApplyBacktrack requests the direct destructive transaction. It has no
 	// document payload: the mutation must rebuild canonical history before its
 	// result cell is committed, and submit/draft effects run only afterwards.
@@ -117,28 +154,36 @@ func (r CommandResult) Document() render.Document {
 // legacy stdout handler.
 func tryExecuteStructuredChatCommand(session *ChatSession, command string) (CommandResult, bool, error) {
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
-	// /model status is a finite read-only report. It has to be recognized
-	// before the broad /model picker fence below; every other /model variant
-	// remains fenced until its typed picker/mutation effects are available.
+	// /model is fully migrated: status is a finite read-only report, bare /model
+	// opens the typed provider→model→reasoning picker, and explicit mutations
+	// apply through the unified command cell. It must be recognized before the
+	// broad /model legacy fence so no variant can revive the terminal writer.
 	if commandMatches(cmdLower, "/model") && unifiedDirectInteractiveOutput(session) {
-		if request, err := parseModelCommandRequest(command); err == nil && request.ShowStatus && !request.HasMutation() {
-			return commandTextResult(runtimeModelStateText(session)), true, nil
-		}
-	}
-	// Theme queries are finite, read-only documents. They must be recognized
-	// before the broad /theme picker/mutation fence; selection and mutation
-	// variants remain fenced until they have typed UI effects and a repaint
-	// transaction owned by TerminalSessionPresenter.
-	if commandMatches(cmdLower, "/theme") && unifiedDirectInteractiveOutput(session) {
-		if result, handled := executeStructuredThemeQueryCommand(session, command); handled {
+		if result, handled := executeStructuredModelCommand(session, command); handled {
 			return result, true, nil
 		}
 	}
-	// /skills becomes a read-only catalog query only when its arguments make
-	// that intent explicit. Bare /skills still opens the legacy selection and
-	// execution flow, so it remains fenced until that flow has typed UI actions.
+	// /theme is fully migrated: read-only queries stay finite documents, select
+	// opens the typed live-preview picker, and explicit set variants apply
+	// through the unified command cell. It must be recognized before the broad
+	// /theme legacy fence so no variant can revive the terminal writer.
+	if commandMatches(cmdLower, "/theme") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredThemeCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	// /skills is fully migrated: explicit list queries stay finite documents,
+	// bare /skills and /skills select open the typed picker (whose confirmed
+	// selection becomes a composer draft), and /skill <name> <prompt> executes
+	// through the unified command cell. Both must be recognized before the broad
+	// legacy fence so no variant can revive the terminal writer.
 	if commandMatches(cmdLower, "/skills") && unifiedDirectInteractiveOutput(session) {
-		if result, handled := executeStructuredSkillCatalogCommand(session, command); handled {
+		if result, handled := executeStructuredSkillsMenuCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	if commandMatches(cmdLower, "/skill") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredSkillCommand(session, command); handled {
 			return result, true, nil
 		}
 	}
@@ -624,12 +669,6 @@ func unifiedInteractiveLegacyCommandFence(session *ChatSession, command string) 
 		commandName = "/backtrack"
 	case commandMatches(command, "/resume"):
 		commandName = "/resume"
-	case commandMatches(command, "/model"):
-		commandName = "/model"
-	case commandMatches(command, "/theme"):
-		commandName = "/theme"
-	case commandMatches(command, "/skills"):
-		commandName = "/skills"
 	case commandMatches(command, "/export"):
 		commandName = "/export"
 	case commandMatches(command, "/login"):

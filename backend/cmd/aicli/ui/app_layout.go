@@ -45,7 +45,7 @@ type BottomPaneLayout struct {
 // SemanticActiveCellProjection, which makes the mutable Scene/AppState cell the
 // exclusive band source. In either mode Layout never overlays both bodies.
 func LayoutAppState(state AppState) AppLayout {
-	activeBand := ProjectActiveCellBand(state.Active, state.Geometry)
+	activeBand := ProjectActiveCellBandWithTheme(state.Active, state.Geometry, state.Theme)
 	legacyBand := !state.SemanticActiveCellProjection && hasLegacyActiveBand(state.Bottom)
 	bottom := layoutBottomPane(state, activeBand, legacyBand)
 

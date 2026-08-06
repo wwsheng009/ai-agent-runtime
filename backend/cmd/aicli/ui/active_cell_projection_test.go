@@ -77,8 +77,57 @@ func TestProjectActiveCellBandUsesViewportTailAndRejectsUnsafeRangeBoundary(t *t
 	}
 }
 
-func TestProjectActiveCellBandRendersAssistantMarkdown(t *testing.T) {
+func TestProjectActiveCellBandRendersToolRunningRow(t *testing.T) {
+	// 工具执行中（tool chain 处于 mutable 阶段）：ActiveBand 必须投影一行
+	// "• Running <命令摘要>"，即使整个 Source 已 Acked（短命令常被立即
+	// 确认）——真实 TUI（semantic active-cell projection）里 Running 行
+	// 依赖这条路径重新可见。
 	active := ActiveCellState{
+		CellID:   23,
+		Revision: 7,
+		Kind:     scene.KindToolChain,
+		Phase:    ActiveCellMutable,
+		Source:   "ping -n 4 127.0.0.1 >nul & echo hello",
+		Acked:    SourceRange{Start: 0, End: len("ping -n 4 127.0.0.1 >nul & echo hello")},
+	}
+	projection := ProjectActiveCellBand(active, GeometryState{Width: 80, Height: 24})
+	if !projection.Valid() {
+		t.Fatalf("projection = %+v, want valid tool Running row", projection)
+	}
+	if projection.CellID != active.CellID || projection.Revision != active.Revision || projection.Kind != scene.KindToolChain {
+		t.Fatalf("projection identity = %+v, want active identity", projection)
+	}
+	plain := render.PlainBackend{}.Render(render.LinesDoc(projection.Lines...))
+	if plain != "• Running ping -n 4 127.0.0.1 >nul & echo hello" {
+		t.Fatalf("projected plain = %q, want tool Running row", plain)
+	}
+	if len(projection.Lines) != 1 || len(projection.Lines[0].Spans) != 1 || !projection.Lines[0].Spans[0].Style.Bold {
+		t.Fatalf("running row style = %#v, want single bold span", projection.Lines)
+	}
+}
+
+func TestProjectActiveCellBandRendersToolRunningRowTruncatesHead(t *testing.T) {
+	active := ActiveCellState{
+		CellID:   24,
+		Revision: 1,
+		Kind:     scene.KindToolChain,
+		Phase:    ActiveCellMutable,
+		Source:   "ping -n 4 127.0.0.1 >nul & echo hello",
+	}
+	projection := ProjectActiveCellBand(active, GeometryState{Width: 24, Height: 24})
+	if !projection.Valid() {
+		t.Fatalf("projection = %+v, want truncated tool Running row", projection)
+	}
+	plain := render.PlainBackend{}.Render(render.LinesDoc(projection.Lines...))
+	if len(plain) >= len("• Running ping -n 4 127.0.0.1 >nul & echo hello") {
+		t.Fatalf("projected plain = %q, want truncated to geometry width", plain)
+	}
+	if !strings.HasPrefix(plain, "• Running ") {
+		t.Fatalf("projected plain = %q, want Running prefix preserved", plain)
+	}
+}
+
+func TestProjectActiveCellBandRendersAssistantMarkdown(t *testing.T) {	active := ActiveCellState{
 		CellID:   27,
 		Revision: 1,
 		Kind:     scene.KindAssistant,

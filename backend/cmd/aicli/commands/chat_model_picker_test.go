@@ -1,154 +1,197 @@
 package commands
 
 import (
-	"bufio"
-	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
-func TestNewRuntimeModelPickerStateStartsOnPreferredPage(t *testing.T) {
-	options := make([]string, 0, 25)
-	for i := 1; i <= 25; i++ {
-		options = append(options, fmt.Sprintf("model_%02d", i))
-	}
-
-	state := newRuntimeModelPickerState(options, "model_23", 10)
-	items, page, pageCount, total := state.pageWindow()
-	if page != 2 || pageCount != 3 || total != 25 {
-		t.Fatalf("unexpected page window: page=%d pageCount=%d total=%d", page, pageCount, total)
-	}
-	if len(items) != 5 || items[0] != "model_21" || items[2] != "model_23" {
-		t.Fatalf("expected preferred model page, got %#v", items)
-	}
-}
-
-func TestApplyRuntimeModelPickerInputPagesAndSelectsCurrentPageNumber(t *testing.T) {
-	options := make([]string, 0, 23)
-	for i := 1; i <= 23; i++ {
-		options = append(options, fmt.Sprintf("model_%02d", i))
-	}
-	state := newRuntimeModelPickerState(options, "model_01", 10)
-
-	state, result := applyRuntimeModelPickerInput(state, "n", "model_01")
-	if result.Done || !result.Redraw || state.Page != 1 {
-		t.Fatalf("expected next page redraw, state=%+v result=%+v", state, result)
-	}
-
-	_, result = applyRuntimeModelPickerInput(state, "2", "model_11")
-	if !result.Done || result.Selected != "model_12" {
-		t.Fatalf("expected current-page item 2 to select model_12, got %+v", result)
-	}
-}
-
-func TestApplyRuntimeModelPickerInputSearchesAndClears(t *testing.T) {
-	options := []string{"claude-sonnet", "gpt-4.1", "gpt-4.1-mini", "gpt-5", "qwen-max"}
-	state := newRuntimeModelPickerState(options, "qwen-max", 2)
-
-	state, result := applyRuntimeModelPickerInput(state, "/gpt", "qwen-max")
-	if result.Done || !result.Redraw || state.Filter != "gpt" || state.Page != 0 {
-		t.Fatalf("expected model search redraw, state=%+v result=%+v", state, result)
-	}
-	items, page, pageCount, total := state.pageWindow()
-	if page != 0 || pageCount != 2 || total != 3 {
-		t.Fatalf("unexpected filtered window: items=%#v page=%d pageCount=%d total=%d", items, page, pageCount, total)
-	}
-	if len(items) != 2 || items[0] != "gpt-5" || items[1] != "gpt-4.1" {
-		t.Fatalf("expected ranked gpt matches on first page, got %#v", items)
-	}
-
-	state, result = applyRuntimeModelPickerInput(state, "c", "gpt-4.1")
-	if result.Done || !result.Redraw || state.Filter != "" {
-		t.Fatalf("expected search clear redraw, state=%+v result=%+v", state, result)
-	}
-	_, page, pageCount, total = state.pageWindow()
-	if page != 2 || pageCount != 3 || total != len(options) {
-		t.Fatalf("expected clear to restore preferred model page, page=%d pageCount=%d total=%d", page, pageCount, total)
-	}
-}
-
-func TestApplyRuntimeModelPickerInputSupportsFuzzyCustomAndReservedNames(t *testing.T) {
-	state := newRuntimeModelPickerState([]string{"deepseek-v3", "n", "qwen-max"}, "qwen-max", 10)
-
-	_, result := applyRuntimeModelPickerInput(state, "deep", "qwen-max")
-	if !result.Done || result.Selected != "deepseek-v3" {
-		t.Fatalf("expected unique fuzzy search to select deepseek-v3, got %+v", result)
-	}
-
-	_, result = applyRuntimeModelPickerInput(state, "n", "qwen-max")
-	if !result.Done || result.Selected != "n" {
-		t.Fatalf("expected exact model named n to win over next-page command, got %+v", result)
-	}
-
-	_, result = applyRuntimeModelPickerInput(state, "custom-preview", "qwen-max")
-	if !result.Done || result.Selected != "custom-preview" {
-		t.Fatalf("expected unmatched text to remain a custom model, got %+v", result)
-	}
-
-	_, result = applyRuntimeModelPickerInput(state, "+next", "qwen-max")
-	if !result.Done || result.Selected != "next" {
-		t.Fatalf("expected +name to force a reserved custom model name, got %+v", result)
-	}
-}
-
-func TestRenderRuntimeModelPickerPopupLinesShowsOnlyCurrentPage(t *testing.T) {
-	options := make([]string, 0, 12)
-	for i := 1; i <= 12; i++ {
-		options = append(options, fmt.Sprintf("model_%02d", i))
-	}
-	state := newRuntimeModelPickerState(options, "model_01", 5)
-	lines := renderRuntimeModelPickerPopupLines(state, "model_01", "model_01", "", "", 0)
-	rendered := strings.Join(lines, "\n")
-
-	for _, expected := range []string{"共 12", "第 1/3 页", "model_01", "model_05", "n/p 翻页", "编号按当前页", "+模型名"} {
-		if !strings.Contains(rendered, expected) {
-			t.Fatalf("expected popup to contain %q, got:\n%s", expected, rendered)
-		}
-	}
-	if strings.Contains(rendered, "model_06") || strings.Contains(rendered, "model_12") {
-		t.Fatalf("expected popup to be limited to first page, got:\n%s", rendered)
-	}
-}
-
-func TestPromptRuntimeModelSelectionLegacySearchesPagesAndSelectsCurrentPageNumber(t *testing.T) {
-	models := make([]string, 0, 15)
-	for i := 1; i <= 15; i++ {
-		models = append(models, fmt.Sprintf("model_%02d", i))
-	}
+func TestExecuteStructuredModelCommandStatusStaysReadOnly(t *testing.T) {
 	session := &ChatSession{
-		Provider: config.Provider{
-			DefaultModel:    "model_01",
-			SupportedModels: models,
-		},
-		Model:       "model_01",
-		InputReader: bufio.NewReader(strings.NewReader("n\n2\n")),
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
 	}
-
-	oldShouldDiscard := shouldDiscardPendingInput
-	shouldDiscardPendingInput = func() bool { return false }
-	defer func() { shouldDiscardPendingInput = oldShouldDiscard }()
-
-	var selected string
-	output := captureStdout(t, func() {
-		var err error
-		var usedPopup bool
-		selected, usedPopup, err = promptRuntimeModelSelection(session)
-		if err != nil {
-			t.Fatalf("promptRuntimeModelSelection: %v", err)
-		}
-		if usedPopup {
-			t.Fatal("expected legacy model selection path without popup")
-		}
-	})
-
-	if selected != "model_12" {
-		t.Fatalf("expected second item on page 2, got %q", selected)
+	result, handled := executeStructuredModelCommand(session, "/model status")
+	if !handled {
+		t.Fatal("/model status was not handled by the structured executor")
 	}
-	for _, expected := range []string{"第 1/2 页", "第 2/2 页", "model_11", "model_15", "n/p 翻页"} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("expected legacy output to contain %q, got:\n%s", expected, output)
+	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
+	if !strings.Contains(text, "当前 provider: alpha") || !strings.Contains(text, "当前模型: gpt-4.1") {
+		t.Fatalf("/model status document missing state, got:\n%s", text)
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("/model status must not open the picker: %#v", result.OpenModelPicker)
+	}
+}
+
+func TestExecuteStructuredModelCommandBareWithoutSurfaceDegradesToStatus(t *testing.T) {
+	// No interaction/surface on this session: canOpenChatModelPicker fails, so
+	// bare /model must degrade to the read-only status document instead of a
+	// legacy prompt or the migration fence.
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+		PermissionMode:  runtimepolicy.ModeDefault,
+	}
+	result, handled := executeStructuredModelCommand(session, "/model")
+	if !handled {
+		t.Fatal("bare /model was not handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("bare /model without a picker-capable surface must not request the typed picker, got %#v", result.OpenModelPicker)
+	}
+	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
+	if !strings.Contains(text, "当前 provider: alpha") || !strings.Contains(text, "当前模型: gpt-4.1") {
+		t.Fatalf("bare /model must degrade to the status document, got:\n%s", text)
+	}
+}
+
+func TestModelPickerRequestCarriesReasoningStage(t *testing.T) {
+	// The reasoning-only mutation variant pins provider/model and asks only for
+	// the reasoning stage; this mirrors the immutable-request contract of the
+	// resume/backtrack pickers.
+	request := ModelPickerRequest{
+		Provider:      "alpha",
+		Model:         "gpt-4.1-mini",
+		NeedReasoning: true,
+	}
+	if !request.NeedReasoning {
+		t.Fatal("reasoning-only picker request lost the NeedReasoning flag")
+	}
+	if request.Provider != "alpha" || request.Model != "gpt-4.1-mini" {
+		t.Fatalf("reasoning-only picker request must preserve pinned provider/model, got %#v", request)
+	}
+}
+
+func TestExecuteStructuredModelCommandExplicitMutationAppliesDirectly(t *testing.T) {
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+		PermissionMode:  runtimepolicy.ModeDefault,
+	}
+	result, handled := executeStructuredModelCommand(session, "/model --model gpt-4.1-mini -r low")
+	if !handled {
+		t.Fatal("explicit mutation was not handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("explicit mutation must not open the picker, got %#v", result.OpenModelPicker)
+	}
+	if session.Model != "gpt-4.1-mini" {
+		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
+	}
+	if session.ReasoningEffort != "low" {
+		t.Fatalf("expected reasoning effort low, got %q", session.ReasoningEffort)
+	}
+	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
+	if !strings.Contains(text, "当前模型: gpt-4.1-mini") {
+		t.Fatalf("mutation result document missing new model, got:\n%s", text)
+	}
+}
+
+func TestExecuteStructuredModelCommandModelPinnedWithoutReasoningDegradesWithoutSurface(t *testing.T) {
+	// ModelExplicit without reasoning normally requests the reasoning picker,
+	// but on this session canOpenChatModelPicker fails (no surface), so the
+	// mutation degrades to a direct apply that keeps the current reasoning.
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+		PermissionMode:  runtimepolicy.ModeDefault,
+	}
+	result, handled := executeStructuredModelCommand(session, "/model --model gpt-4.1-mini")
+	if !handled {
+		t.Fatal("/model --model was not handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("without a picker-capable surface the mutation must not open the picker, got %#v", result.OpenModelPicker)
+	}
+	if session.Model != "gpt-4.1-mini" {
+		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
+	}
+	if session.ReasoningEffort != "medium" {
+		t.Fatalf("degraded apply must keep the current reasoning, got %q", session.ReasoningEffort)
+	}
+}
+
+func TestExecuteStructuredModelCommandClearReasoningAppliesDirectly(t *testing.T) {
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+		PermissionMode:  runtimepolicy.ModeDefault,
+	}
+	result, handled := executeStructuredModelCommand(session, "/model --clear-reasoning")
+	if !handled {
+		t.Fatal("/model --clear-reasoning was not handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("clear-reasoning must not open the picker, got %#v", result.OpenModelPicker)
+	}
+	if session.ReasoningEffort != "" {
+		t.Fatalf("expected cleared reasoning effort, got %q", session.ReasoningEffort)
+	}
+	if session.Model != "gpt-4.1" {
+		t.Fatalf("clear-reasoning must not change the model, got %q", session.Model)
+	}
+}
+
+func TestExecuteStructuredModelCommandInvalidArgsReportError(t *testing.T) {
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+	}
+	result, handled := executeStructuredModelCommand(session, "/model --bogus-flag")
+	if !handled {
+		t.Fatal("invalid /model args must be handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("invalid args must not open the picker, got %#v", result.OpenModelPicker)
+	}
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "未知的 /model 参数") {
+		t.Fatalf("invalid args must report the parse error, got:\n%s", ui.RenderDocumentPlain(result.Document()))
+	}
+}
+
+func TestModelPickerModelOptionsDeduplicateAndSort(t *testing.T) {
+	provider := config.Provider{
+		DefaultModel:    "gpt-4.1",
+		SupportedModels: []string{"gpt-4.1-mini", "gpt-4.1", "gpt-5"},
+	}
+	options := modelPickerModelOptions(provider, "gpt-4.1")
+	seen := map[string]bool{}
+	for _, option := range options {
+		if seen[option] {
+			t.Fatalf("duplicate model option %q in %#v", option, options)
 		}
+		seen[option] = true
+	}
+	if len(options) != 3 {
+		t.Fatalf("expected 3 deduplicated models, got %#v", options)
+	}
+	if options[0] != "gpt-4.1" {
+		t.Fatalf("expected current model first, got %#v", options)
+	}
+}
+
+func TestCanOpenChatModelPickerRequiresUnifiedSurface(t *testing.T) {
+	if canOpenChatModelPicker(nil) {
+		t.Fatal("nil session must not open the model picker")
+	}
+	session := &ChatSession{ProviderName: "alpha"}
+	if canOpenChatModelPicker(session) {
+		t.Fatal("bare session without interaction/surface must not open the model picker")
 	}
 }

@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 )
 
@@ -89,11 +90,13 @@ func NewChangeSetMapper(s *TuiScene) *ChangeSetMapper {
 // tool_call upsert 终态），Revision 计算必须基于"本事务内已应用的
 // 最新值"，而不是 Scene 的提交前值。
 type pendingCell struct {
-	kind     CellKind
-	chainKey string
-	revision uint64
-	phase    CellPhase
-	source   string
+	kind                 CellKind
+	chainKey             string
+	revision             uint64
+	phase                CellPhase
+	source               string
+	presentation         TranscriptPresentation
+	historyCommitBlocked bool
 	// finalizeAtEnd 标记 tool_call 本批次到达终态但尚未产出 FinalizeCell：
 	// 编码器 applyToolFinished 一次产出 [upsert(tool_call 终态),
 	// append(tool_output)]，若立即 finalize，随后 tool_output 合并进链首
@@ -140,7 +143,10 @@ func (m *ChangeSetMapper) Map(cs *encoding.ChangeSet) (SceneTransaction, error) 
 		// Revision 取 p.revision+1：同批合并（UpdateCell）可能已把 cell
 		// revision 推进到 p.revision，finalize 必须严格大于当前
 		// （INV-SCENE-03；UpdateCell 之后执行 finalize，见 INV-SCENE-04）。
-		tx.Mutations = append(tx.Mutations, &FinalizeCell{ID: id, Revision: p.revision + 1, Source: p.source})
+		tx.Mutations = append(tx.Mutations, &FinalizeCell{
+			ID: id, Revision: p.revision + 1, Source: p.source,
+			Presentation: p.presentation, HistoryCommitBlocked: false,
+		})
 		p.phase = CellCommitted
 		p.finalizeAtEnd = false
 		pending[id] = p
@@ -187,7 +193,7 @@ func (m *ChangeSetMapper) mapChange(ch encoding.ItemChange, pending map[CellID]p
 
 	switch ch.Op {
 	case encoding.OpAppend:
-		return m.mapAppend(id, it, ch.AfterID, pending)
+		return m.mapAppend(id, it, ch.AfterID, ch.BeforeID, pending)
 
 	case encoding.OpUpsert:
 		return m.mapUpsert(id, it, pending)
@@ -212,7 +218,7 @@ func (m *ChangeSetMapper) mapChange(ch encoding.ItemChange, pending map[CellID]p
 
 // mapAppend 处理 OpAppend；afterID 非空时为 Tail 锚定插入（编码器
 // SubmitUserInteraction 的锚点，见 ItemChange.AfterID）。
-func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID string, pending map[CellID]pendingCell) (CellMutation, bool, error) {
+func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID, beforeID string, pending map[CellID]pendingCell) (CellMutation, bool, error) {
 	// tool 输出归组：有 CauseID 且链首 cell 存在时合并进链首
 	// （§7.3：tool events 在 cell 内，不创建新边界）。
 	if it.Kind == encoding.KindToolOutput && it.CauseID != "" {
@@ -224,11 +230,13 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID string
 
 	kind := m.cellKind(it)
 	cell := TranscriptCell{
-		ID:         id,
-		Kind:       kind,
-		Source:     it.Head,
-		Revision:   1, // 编码器 append 修订号为 1（render-model-spec §4.2）
-		Provenance: "changeset:" + string(it.Kind),
+		ID:                   id,
+		Kind:                 kind,
+		Source:               it.Head,
+		Presentation:         presentationFromEncoding(it.Presentation),
+		HistoryCommitBlocked: it.HistoryCommitBlocked,
+		Revision:             1, // 编码器 append 修订号为 1（render-model-spec §4.2）
+		Provenance:           "changeset:" + string(it.Kind),
 	}
 	if it.Kind == encoding.KindToolCall {
 		// tool_call 是链首：以 Item.ID 为归组键。
@@ -246,6 +254,16 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID string
 		cell.Phase = CellCommitted
 	}
 	var mu CellMutation = &AppendCell{Cell: cell}
+	if beforeID != "" {
+		anchorCell, err := CellIDFromItemID(beforeID)
+		if err != nil {
+			return nil, false, fmt.Errorf("changeset: invalid before anchor item id %q: %v", beforeID, err)
+		}
+		if _, ok := m.scene.Cell(anchorCell); !ok {
+			return nil, false, fmt.Errorf("changeset: before anchor cell %d (item %q) not found", anchorCell, beforeID)
+		}
+		mu = &InsertCellBefore{Before: anchorCell, Cell: cell}
+	}
 	if it.Kind != encoding.KindToolOutput && afterID != "" {
 		// Tail 锚定插入（KindUserInteraction，设计文档 §1.3 行 12）：在
 		// 锚点 cell 之后插入而非追加到末尾。锚点目标必须已提交（历史
@@ -259,7 +277,11 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID string
 		}
 		mu = &InsertCell{After: anchorCell, Cell: cell}
 	}
-	pending[id] = pendingCell{kind: kind, chainKey: cell.ChainKey, revision: 1, phase: cell.Phase, source: it.Head}
+	pending[id] = pendingCell{
+		kind: kind, chainKey: cell.ChainKey, revision: 1, phase: cell.Phase,
+		source: it.Head, presentation: cell.Presentation,
+		historyCommitBlocked: cell.HistoryCommitBlocked,
+	}
 	return mu, false, nil
 }
 
@@ -321,15 +343,22 @@ func (m *ChangeSetMapper) mapUpsert(id CellID, it *encoding.Item, pending map[Ce
 		// mutable 并打标记，批次结束统一产出 FinalizeCell（见 Map）。
 		pending[id] = pendingCell{
 			kind: cur.kind, chainKey: cur.chainKey, revision: next,
-			phase: CellMutable, source: newSource, finalizeAtEnd: true,
+			phase: CellMutable, source: newSource,
+			presentation: presentationFromEncoding(it.Presentation),
+			historyCommitBlocked: false, finalizeAtEnd: true,
 		}
 		return nil, false, nil
 	}
 
-	mu := &UpdateCell{ID: id, Revision: next, Source: newSource}
+	presentation := presentationFromEncoding(it.Presentation)
+	mu := &UpdateCell{
+		ID: id, Revision: next, Source: newSource, Presentation: presentation,
+		HistoryCommitBlocked: it.HistoryCommitBlocked,
+	}
 	pending[id] = pendingCell{
 		kind: cur.kind, chainKey: cur.chainKey, revision: next,
-		phase: CellMutable, source: newSource, finalizeAtEnd: cur.finalizeAtEnd,
+		phase: CellMutable, source: newSource, presentation: presentation,
+		historyCommitBlocked: it.HistoryCommitBlocked, finalizeAtEnd: cur.finalizeAtEnd,
 	}
 	return mu, true, nil
 }
@@ -344,14 +373,22 @@ func (m *ChangeSetMapper) mergeOutput(target *TranscriptCell, outID CellID, it *
 		source += it.Head
 	}
 	rev := target.Revision + 1
-	mu := &UpdateCell{ID: target.ID, Revision: rev, Source: source}
+	presentation := target.Presentation
+	if mapped := presentationFromEncoding(it.Presentation); mapped.Kind != PresentationPlain {
+		presentation = mapped
+	}
+	mu := &UpdateCell{
+		ID: target.ID, Revision: rev, Source: source, Presentation: presentation,
+		HistoryCommitBlocked: target.HistoryCommitBlocked,
+	}
 	finalizeAtEnd := false
 	if p, ok := pending[target.ID]; ok {
 		finalizeAtEnd = p.finalizeAtEnd // 保留终态标记（合并发生在 finalize 之前）
 	}
 	pending[target.ID] = pendingCell{
 		kind: target.Kind, chainKey: target.ChainKey, revision: rev,
-		phase: target.Phase, source: source, finalizeAtEnd: finalizeAtEnd,
+		phase: target.Phase, source: source, presentation: presentation,
+		historyCommitBlocked: target.HistoryCommitBlocked, finalizeAtEnd: finalizeAtEnd,
 	}
 	// 归组键（outID）不创建 cell；留占位以防同批后续 upsert 命中
 	// （正常不会发生，编码器按 (ID, Revision) 去重合并）。
@@ -381,7 +418,11 @@ func (m *ChangeSetMapper) chainTarget(causeID string, pending map[CellID]pending
 		if p.kind != KindToolChain || p.chainKey != causeID {
 			return nil, false
 		}
-		return &TranscriptCell{ID: cid, Kind: p.kind, ChainKey: p.chainKey, Revision: p.revision, Phase: p.phase, Source: p.source}, true
+		return &TranscriptCell{
+			ID: cid, Kind: p.kind, ChainKey: p.chainKey, Revision: p.revision,
+			Phase: p.phase, Source: p.source, Presentation: p.presentation,
+			HistoryCommitBlocked: p.historyCommitBlocked,
+		}, true
 	}
 	cell, ok := m.scene.Cell(cid)
 	if !ok || cell.Kind != KindToolChain || cell.ChainKey != causeID {
@@ -399,7 +440,27 @@ func (m *ChangeSetMapper) current(id CellID, pending map[CellID]pendingCell) (pe
 	if !ok {
 		return pendingCell{}, false
 	}
-	return pendingCell{kind: cell.Kind, chainKey: cell.ChainKey, revision: cell.Revision, phase: cell.Phase, source: cell.Source}, true
+	return pendingCell{
+		kind: cell.Kind, chainKey: cell.ChainKey, revision: cell.Revision,
+		phase: cell.Phase, source: cell.Source, presentation: cell.Presentation,
+		historyCommitBlocked: cell.HistoryCommitBlocked,
+	}, true
+}
+
+func presentationFromEncoding(source encoding.Presentation) TranscriptPresentation {
+	presentation := TranscriptPresentation{Document: source.Document.Clone()}
+	switch source.Kind {
+	case encoding.PresentationAssistantMarkdown:
+		presentation.Kind = PresentationAssistantMarkdown
+	case encoding.PresentationDiffSupplement:
+		presentation.Kind = PresentationDiffSupplement
+	case encoding.PresentationDocument:
+		presentation.Kind = PresentationDocument
+	default:
+		presentation.Kind = PresentationPlain
+		presentation.Document = render.Document{}
+	}
+	return presentation
 }
 
 // cellKind 把 ItemKind 映射为 Scene CellKind（render-model-spec §5 表格）。

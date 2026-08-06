@@ -11,6 +11,32 @@
 // 转换为模型的入口，渲染层只消费模型（或增量变更集）。
 package encoding
 
+import "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+
+// PresentationKind selects the width/theme-aware projection for an Item.
+// Head remains the semantic/plain compatibility source used by text parity.
+type PresentationKind uint8
+
+const (
+	PresentationPlain PresentationKind = iota
+	PresentationAssistantMarkdown
+	PresentationDiffSupplement
+	PresentationDocument
+)
+
+// Presentation carries structured content without embedding terminal ANSI.
+// Document is populated only for PresentationDocument; Markdown and diff keep
+// their canonical source in Item.Head and are re-derived after resize/theme.
+type Presentation struct {
+	Kind     PresentationKind
+	Document render.Document
+}
+
+func (p Presentation) Clone() Presentation {
+	p.Document = p.Document.Clone()
+	return p
+}
+
 // ItemKind 信息块类型（编码层统一枚举，对应渲染层 historyCellKind）。
 type ItemKind string
 
@@ -50,14 +76,19 @@ func (s ItemStatus) Terminal() bool {
 // Item 是渲染模型的最小信息块，对应 Codex ThreadItem。
 // ID/Seq/Created/Updated 全部由编码器分配；渲染层只读。
 type Item struct {
-	ID      string     // 全局唯一，编码器单调分配："item-{n}"
-	Seq     uint64     // 提交序号（单调、仅追加语义）
-	Kind    ItemKind   // 信息块类型
-	CauseID string     // 父事件 id（工具输出 -> 工具调用 id）；"" 表示 top-level
-	Status  ItemStatus // 生命周期状态
-	Head    string     // 当前渲染内容快照（流式增量的最新文本）
-	Created uint64     // 创建时的编码器时钟
-	Updated uint64     // 最近一次 upsert 的编码器时钟
+	ID           string       // 全局唯一，编码器单调分配："item-{n}"
+	Seq          uint64       // 提交序号（单调、仅追加语义）
+	Kind         ItemKind     // 信息块类型
+	CauseID      string       // 父事件 id（工具输出 -> 工具调用 id）；"" 表示 top-level
+	Status       ItemStatus   // 生命周期状态
+	Head         string       // 当前渲染内容快照（流式增量的最新文本）
+	// HistoryCommitBlocked is a physical-order fence, not visible content.
+	// It keeps a mutable assistant prefix out of native scrollback while a
+	// reasoning predecessor may still arrive late.
+	HistoryCommitBlocked bool
+	Presentation Presentation // structured presentation descriptor
+	Created      uint64       // 创建时的编码器时钟
+	Updated      uint64       // 最近一次 upsert 的编码器时钟
 }
 
 // Tail 是模型尾部指针：/debug、/model 等用户交互输出以此为锚点参与总序。
@@ -84,6 +115,7 @@ func (m *RenderModel) Clone() *RenderModel {
 			continue
 		}
 		cp := *it
+		cp.Presentation = it.Presentation.Clone()
 		out.Items = append(out.Items, &cp)
 	}
 	if m.Tail != nil {
@@ -123,6 +155,7 @@ type ItemChange struct {
 	AfterID  string // 锚定插入：OpAppend 且非空时表示插入到该 Item 之后
 	// （/debug、/model 等用户交互输出的 Tail 锚定语义，设计文档 §1.3 行 12；
 	// 空表示追加到模型末尾）。
+	BeforeID string // 语义前置插入：OpAppend 且非空时插入到该 Item 之前
 }
 
 // ChangeSet 是编码器一次 Encode 的增量输出（对应 Codex ThreadHistoryChangeSet）。

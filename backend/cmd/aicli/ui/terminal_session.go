@@ -39,6 +39,7 @@ var (
 // state, but its physical writer is fenced before the presenter attaches.
 type TerminalFramePlan struct {
 	LayoutGeneration uint64
+	Theme            style.ThemeContext
 	Geometry         GeometryState
 	Lease            LeaseState
 	OutputBottomRow  int
@@ -64,6 +65,7 @@ func ComposeTerminalFramePlan(state AppState) TerminalFramePlan {
 	}
 	return TerminalFramePlan{
 		LayoutGeneration: frame.LayoutGeneration,
+		Theme:            cloneThemeContext(state.Theme),
 		Geometry:         frame.Geometry,
 		Lease:            frame.Lease,
 		OutputBottomRow:  frame.OutputBottomRow,
@@ -94,6 +96,9 @@ type TerminalTransactionPlan struct {
 	Frame            TerminalFramePlan
 	History          *HistoryCommit
 	BootstrapHistory []HistoryCommit
+	// ResetScrollback requests a source-backed replacement of an uncertain
+	// native-scrollback projection in the current layout generation.
+	ResetScrollback bool
 	// TerminalEpoch is the reducer-confirmed scrollback generation. A replaced
 	// TerminalSession advances from this value instead of restarting at one.
 	TerminalEpoch uint64
@@ -117,6 +122,12 @@ func ComposeTerminalTransactionPlan(state AppState, history *HistoryCommit, boot
 	return plan
 }
 
+func ComposeScrollbackReconciliationPlan(state AppState) TerminalTransactionPlan {
+	plan := ComposeTerminalTransactionPlan(state, nil)
+	plan.ResetScrollback = true
+	return plan
+}
+
 func (p TerminalTransactionPlan) Valid() bool {
 	if !p.Frame.Valid() || (p.History != nil && !p.History.Valid()) {
 		return false
@@ -130,6 +141,7 @@ func (p TerminalTransactionPlan) Valid() bool {
 }
 
 func (p TerminalTransactionPlan) Clone() TerminalTransactionPlan {
+	p.Frame.Theme = cloneThemeContext(p.Frame.Theme)
 	p.Frame.Rows = cloneTerminalFrameRows(p.Frame.Rows)
 	p.Frame.RenderRows = cloneRenderLines(p.Frame.RenderRows)
 	p.Frame.Cursor = cloneTerminalCursor(p.Frame.Cursor)
@@ -558,7 +570,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 		!s.viewportBoundaryKnown && s.viewport.Top == 0
 	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
 		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
-	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild
+	forceScrollbackReset := plan.ResetScrollback
+	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild && !forceScrollbackReset
 	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
 	projectionKnown := hadKnownProjection
 	candidateScreen := s.screen.Clone()
@@ -570,7 +583,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
-	if resizeRebuild {
+	if resizeRebuild || forceScrollbackReset {
 		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
@@ -584,7 +597,11 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	}
 
 	fullRepaint := !projectionKnown
-	rows, err := terminalViewportCells(frame, area, s.frameTheme)
+	theme := frame.Theme
+	if theme.Palette.Styles == nil {
+		theme = s.frameTheme
+	}
+	rows, err := terminalViewportCells(frame, area, theme)
 	if err != nil {
 		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
@@ -598,7 +615,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 		result := HistoryCommitResult{Deferred: true}
 		if historyProjectionWritable && frame.OutputBottomRow > 0 && plan.History.LayoutGeneration == frame.LayoutGeneration {
 			commits := terminalHistoryTransactionCommits(plan.History, plan.BootstrapHistory)
-			candidateRows, _, historyErr := terminalHistoryCommitRows(commits, s.frameTheme, frame.Geometry.Width)
+			candidateRows, _, historyErr := terminalHistoryCommitRows(commits, theme, frame.Geometry.Width)
 			if historyErr != nil {
 				result = HistoryCommitResult{Err: historyErr}
 			} else if len(candidateRows) == 0 {
@@ -633,7 +650,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	// longer a valid scroll-region boundary; replaying that transition can
 	// include the new prompt/status rows and leak them into history. Trust the
 	// host resize, then source-repaint only the new bottom viewport.
-	if resizeRebuild {
+	if resizeRebuild || forceScrollbackReset {
 		transitionBytes = terminalResetScrollbackANSI()
 		nextHistoryTopAligned = false
 	} else if initializeHistoryProjection {
@@ -649,7 +666,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	// occupancy-aware: an underfilled region is repainted without scrolling;
 	// overflow uses HandoffPlan only for rows that must actually cross row one.
 	baseHistoryTail := terminalRetainHistoryTailRows(s.historyTailRows, frame.OutputBottomRow)
-	if resizeRebuild {
+	if resizeRebuild || forceScrollbackReset {
 		baseHistoryTail = nil
 	}
 	if historyInsertedRows > 0 {
@@ -694,7 +711,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	s.viewport = area
 	s.viewportBoundaryKnown = true
 	s.viewportTerminalHeight = frame.Geometry.Height
-	if resizeRebuild {
+	if resizeRebuild || forceScrollbackReset {
 		s.historyProjectionStarted = true
 		s.historyProjectionKnown = true
 		s.historyTailRows = nil
@@ -722,7 +739,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	return TerminalTransactionResult{
 		Frame:           frameResult,
 		History:         historyResult,
-		ScrollbackReset: resizeRebuild,
+		ScrollbackReset: resizeRebuild || forceScrollbackReset,
 		TerminalEpoch:   s.terminalEpoch,
 	}
 }

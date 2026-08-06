@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
@@ -103,7 +104,7 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 	}
 
 	excluded := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
-	transcript := layoutTranscriptScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), excluded, width)
+	transcript := layoutTranscriptScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), excluded, width, state.Theme)
 	if len(transcript) > result.OutputBottomRow {
 		transcript = transcript[len(transcript)-result.OutputBottomRow:]
 	}
@@ -173,12 +174,16 @@ func transcriptCellsByID(transcript TranscriptState) map[scene.CellID]scene.Tran
 	return cells
 }
 
-func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int) []AppScreenRow {
+func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, themes ...style.ThemeContext) []AppScreenRow {
 	if len(rows) == 0 {
 		return nil
 	}
 	result := make([]AppScreenRow, 0, len(rows))
-	renderedMarkdown := make(map[scene.CellID]struct{})
+	renderedStructured := make(map[scene.CellID]struct{})
+	theme := style.ThemeContext{}
+	if len(themes) > 0 {
+		theme = themes[0]
+	}
 	for index := 0; index < len(rows); index++ {
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
@@ -199,12 +204,12 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 			}
 			continue
 		}
-		if _, rendered := renderedMarkdown[row.CellID]; rendered {
+		if _, rendered := renderedStructured[row.CellID]; rendered {
 			continue
 		}
-		if cell, found := cells[row.CellID]; found && cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source) {
-			result = append(result, markdownTranscriptScreenRows(cell, width)...)
-			renderedMarkdown[row.CellID] = struct{}{}
+		if cell, found := cells[row.CellID]; found && cellUsesStructuredPresentation(cell) {
+			result = append(result, structuredTranscriptScreenRows(cell, width, theme)...)
+			renderedStructured[row.CellID] = struct{}{}
 			continue
 		}
 		for _, line := range wrapAppScreenText(row.Text, width) {
@@ -218,22 +223,37 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 	return result
 }
 
-func markdownTranscriptScreenRows(cell scene.TranscriptCell, width int) []AppScreenRow {
-	doc := markdown.Render(cell.Source, markdown.AssistantBodyOptions(width, style.ThemeContext{}))
+func cellUsesStructuredPresentation(cell scene.TranscriptCell) bool {
+	if cell.Presentation.Kind != scene.PresentationPlain {
+		return true
+	}
+	return cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source)
+}
+
+func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {
+	var doc render.Document
+	switch cell.Presentation.Kind {
+	case scene.PresentationDocument:
+		doc = cell.Presentation.Document.Clone()
+	case scene.PresentationDiffSupplement:
+		doc = uidiff.RenderText(cell.Source, uidiff.DefaultRenderOptions(width, theme))
+	case scene.PresentationAssistantMarkdown:
+		doc = markdown.Render(cell.Source, markdown.AssistantBodyOptions(width, theme))
+	default:
+		doc = markdown.Render(cell.Source, markdown.AssistantBodyOptions(width, theme))
+	}
 	if len(doc.Blocks) == 0 {
 		return nil
 	}
-	rows := make([]AppScreenRow, 0, doc.LineCount())
-	for _, block := range doc.Blocks {
-		for _, line := range block.Lines {
-			rendered := cloneAppRenderLine(line)
-			rows = append(rows, AppScreenRow{
-				Owner:      renderengine.RowOwnerTranscript,
-				Text:       render.PlainBackend{}.Render(render.LinesDoc(rendered)),
-				CellID:     cell.ID,
-				RenderLine: rendered,
-			})
-		}
+	buffer := render.BufferBackend{Width: width}
+	lines := buffer.Layout(doc)
+	rows := make([]AppScreenRow, 0, len(lines))
+	for _, line := range lines {
+		rendered := cloneAppRenderLine(line)
+		rows = append(rows, AppScreenRow{
+			Owner: renderengine.RowOwnerTranscript, Text: render.PlainBackend{}.Render(render.LinesDoc(rendered)),
+			CellID: cell.ID, RenderLine: rendered,
+		})
 	}
 	return rows
 }

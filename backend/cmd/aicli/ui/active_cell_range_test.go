@@ -302,6 +302,30 @@ func TestFinalizeActiveCellAcceptsEqualSceneRevisionForShadowFence(t *testing.T)
 	}
 }
 
+func TestFinalizeActiveCellCorrectionRequiresScrollbackReconciliation(t *testing.T) {
+	active := activeRangeFixture("old-prefix\nresident-tail", 3, len("old-prefix\nresident-tail"), len("old-prefix"), len("old-prefix"))
+	state := UIControllerState{AppState: AppState{
+		Transcript: TranscriptState{Revision: 2, Cells: []scene.TranscriptCell{{
+			ID: 7, Revision: 3, Kind: scene.KindAssistant, Source: active.Source, Phase: scene.CellMutable,
+		}}},
+		Active: active,
+	}}
+
+	state = reduceUIControllerState(state, FinalizeActiveCellAction{
+		ExpectedActiveCellID: 7, ExpectedActiveRevision: 3,
+		Snapshot: &scene.Snapshot{Revision: 4, Cells: []*scene.TranscriptCell{{
+			ID: 7, Revision: 4, Kind: scene.KindAssistant, Source: "correct-prefix\nresident-tail", Phase: scene.CellCommitted,
+		}}},
+	}, 4)
+
+	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("authoritative correction reused acknowledged bytes: %#v", state.HistoryEffects)
+	}
+	if state.Active != (ActiveCellState{}) || state.Transcript.Cells[0].Source != "correct-prefix\nresident-tail" {
+		t.Fatalf("authoritative final was not committed: %+v", state.AppState)
+	}
+}
+
 func TestFinalizeActiveCellRejectsMismatchedSemanticKind(t *testing.T) {
 	active := activeRangeFixture("partial", 3, 7, 0, 0)
 	active.CellID = 12

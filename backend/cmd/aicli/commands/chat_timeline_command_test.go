@@ -442,11 +442,17 @@ func TestModelStatusCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 		transcript.WriteString(cell.Source)
 		transcript.WriteByte('\n')
 	}
-	if strings.Count(transcript.String(), "当前 provider: alpha") != 2 {
-		t.Fatalf("expected dispatch and direct model-status cells, got:\n%s", transcript.String())
+	if strings.Count(transcript.String(), "当前 provider: alpha") != 3 {
+		t.Fatalf("expected dispatch status, direct status and bare-fallback status cells, got:\n%s", transcript.String())
 	}
-	if !strings.Contains(transcript.String(), "错误: /model 正在迁移到统一渲染器") {
-		t.Fatalf("model picker branch was not fenced:\n%s", transcript.String())
+	// Bare /model has no interactive picker on this non-TTY test terminal, so it
+	// degrades to the read-only status document instead of a legacy prompt or
+	// the old migration fence.
+	if !strings.Contains(transcript.String(), "当前模型: gpt-test") {
+		t.Fatalf("bare /model did not fall back to the status document:\n%s", transcript.String())
+	}
+	if strings.Contains(transcript.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("bare /model still reports the migration fence:\n%s", transcript.String())
 	}
 	if !strings.Contains(terminal.String(), "当前 provider: alpha") {
 		t.Fatalf("TerminalSession did not render /model status: %q", terminal.String())
@@ -511,11 +517,17 @@ func TestThemeQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 		"明暗模式:",
 		"主题预览: mode=dark",
 		"func Hello(n int) string",
-		"错误: /theme 正在迁移到统一渲染器，已拒绝旧终端直写",
+		"当前配色:",
 	} {
 		if !strings.Contains(transcript.String(), marker) {
 			t.Fatalf("theme semantic transcript is missing %q:\n%s", marker, transcript.String())
 		}
+	}
+	// /theme select has no interactive picker on this non-TTY test terminal, so
+	// it degrades to the read-only status document instead of a legacy prompt
+	// or the old migration fence.
+	if strings.Contains(transcript.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("/theme still reports the migration fence:\n%s", transcript.String())
 	}
 	if strings.Contains(transcript.String(), "\x1b[") {
 		t.Fatalf("theme document retained pre-encoded ANSI bytes:\n%q", transcript.String())
@@ -577,17 +589,22 @@ func TestSkillCatalogQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 		transcript.WriteString(cell.Source)
 		transcript.WriteByte('\n')
 	}
-	if count := strings.Count(transcript.String(), "Skill Catalog: total=1"); count != 3 {
-		t.Fatalf("expected dispatch, list, and direct catalog cells; count=%d:\n%s", count, transcript.String())
+	if count := strings.Count(transcript.String(), "Skill Catalog: total=1"); count != 4 {
+		t.Fatalf("expected dispatch, list, direct, and bare-fallback catalog cells; count=%d:\n%s", count, transcript.String())
 	}
 	for _, marker := range []string{
 		"Filter: image",
 		"imagegen",
-		"错误: /skills 正在迁移到统一渲染器，已拒绝旧终端直写",
 	} {
 		if !strings.Contains(transcript.String(), marker) {
 			t.Fatalf("skills semantic transcript is missing %q:\n%s", marker, transcript.String())
 		}
+	}
+	// Bare /skills has no interactive picker on this non-TTY test terminal, so
+	// it degrades to the read-only catalog report instead of a legacy prompt or
+	// the old migration fence.
+	if strings.Contains(transcript.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("bare /skills still reports the migration fence:\n%s", transcript.String())
 	}
 	if !strings.Contains(terminal.String(), "Skill Catalog: total=1") {
 		t.Fatalf("TerminalSession did not render /skills catalog: %q", terminal.String())

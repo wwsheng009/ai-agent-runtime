@@ -224,8 +224,8 @@ func TestRenderLayer_C0_ToolStageDoesNotSkewParity(t *testing.T) {
 			toolCells = append(toolCells, c.Source)
 		}
 	}
-	if len(toolCells) != 1 || toolCells[0] != "view" {
-		t.Fatalf("tool cells = %v, want [view]", toolCells)
+	if len(toolCells) != 1 || toolCells[0] != "• Completed view in 5ms" {
+		t.Fatalf("tool cells = %v, want [• Completed view in 5ms]", toolCells)
 	}
 
 	// 2)+3) 探针统计：完整块 2 个全部 matched；tool 阶段零偏差。

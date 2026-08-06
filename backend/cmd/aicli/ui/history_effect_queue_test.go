@@ -569,6 +569,31 @@ func TestHistoryEffectsReducer_ResizeInvalidatesInFlightAndRequiresRecovery(t *t
 	}
 }
 
+func TestHistoryEffectsReducer_BatchAckAcceptedWhenLeaseArrivesAfterTerminalWrite(t *testing.T) {
+	state := historyEffectTestState(t, 2)
+	pending := state.HistoryEffects.Pending()
+	if len(pending) < 2 {
+		t.Fatalf("fixture pending commits = %d, want at least 2", len(pending))
+	}
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: pending[0].Token, LayoutGeneration: state.LayoutGeneration,
+	}, 3)
+	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 44}, 4)
+	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
+		Commits: pending, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+	}, 5)
+
+	if !state.Lease.Active || !state.HistoryEffects.Frozen || state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("late lease changed acknowledgement safety: lease=%#v effects=%#v", state.Lease, state.HistoryEffects)
+	}
+	for index, commit := range pending {
+		entry := historyCommitEntry(t, state, commit.Token)
+		if entry.State != HistoryCommitAcked || entry.AckFrame != 9 || entry.MayHavePartiallyWritten {
+			t.Fatalf("delivered entry[%d] rejected after lease barrier: %#v", index, entry)
+		}
+	}
+}
+
 func TestHistoryEffectsReducer_ScrollbackReconciliationRequiresRecoveryAndReplansFreshTokens(t *testing.T) {
 	state := historyEffectTestState(t, 2)
 	oldEntries := state.HistoryEffects.Entries()
@@ -581,6 +606,9 @@ func TestHistoryEffectsReducer_ScrollbackReconciliationRequiresRecoveryAndReplan
 	if !state.HistoryEffects.ProjectionUnknown {
 		t.Fatal("failed handoff did not require recovery")
 	}
+	if !state.HistoryEffects.ReconciliationRequired {
+		t.Fatal("possibly written handoff did not request scrollback reconciliation")
+	}
 
 	// The reset claim is not a substitute for a current source-backed frame.
 	state = reduceUIControllerState(state, HistoryScrollbackReconciled{LayoutGeneration: 2, TerminalEpoch: 1}, 5)
@@ -592,6 +620,9 @@ func TestHistoryEffectsReducer_ScrollbackReconciliationRequiresRecoveryAndReplan
 	entries := state.HistoryEffects.Entries()
 	if state.HistoryEffects.TerminalEpoch != 1 || len(entries) == 0 || state.HistoryEffects.NextToken <= oldNextToken {
 		t.Fatalf("reconciliation did not mint a fresh epoch: epoch=%d next=%d entries=%#v", state.HistoryEffects.TerminalEpoch, state.HistoryEffects.NextToken, entries)
+	}
+	if state.HistoryEffects.ReconciliationRequired {
+		t.Fatal("fresh terminal epoch retained reconciliation intent")
 	}
 	for _, entry := range entries {
 		if entry.Commit.Token <= oldNextToken || entry.State != HistoryCommitPending {
@@ -627,6 +658,32 @@ func TestHistoryEffectsReducer_AckedSourceIsNotMintedAgainAfterResize(t *testing
 	entry := historyCommitEntry(t, state, token)
 	if entry.State != HistoryCommitAcked || entry.Commit.Lines != nil {
 		t.Fatalf("acked source was changed or retained payload: %#v", entry)
+	}
+}
+
+func TestHistoryEffectsReducer_InsertionBeforeAckedHistoryRequiresScrollbackReconciliation(t *testing.T) {
+	state := historyEffectTestState(t, 2)
+	first := state.HistoryEffects.Entries()[0].Commit
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: first.Token, LayoutGeneration: state.LayoutGeneration,
+	}, 3)
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
+		Token: first.Token, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+	}, 4)
+
+	snapshot := state.Transcript.Snapshot()
+	reasoning := &scene.TranscriptCell{
+		ID: 99, Revision: 1, Kind: scene.KindSupplement,
+		Source: "late reasoning before delivered assistant", Phase: scene.CellCommitted,
+	}
+	snapshot.Cells = append([]*scene.TranscriptCell{reasoning}, snapshot.Cells...)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, 5)
+
+	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("semantic predecessor reused already-acked physical order: %#v", state.HistoryEffects)
+	}
+	if len(state.Transcript.Cells) == 0 || state.Transcript.Cells[0].ID != reasoning.ID {
+		t.Fatalf("semantic insertion was not retained for source-backed replay: %+v", state.Transcript.Cells)
 	}
 }
 

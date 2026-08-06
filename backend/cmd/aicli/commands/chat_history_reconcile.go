@@ -134,6 +134,12 @@ func (b *chatRuntimeEventBridge) resetCanonicalHistoryProjectionLocked() {
 		return
 	}
 	b.renderEncoder = encoding.NewEventEncoder()
+	// bridge 构造时启用了 reasoning ordering barrier（chat_runtime_events.go
+	// newChatRuntimeEventBridge）；重建 encoder 必须恢复同一配置，否则
+	// replayEventLog 重放出的 Scene 与 live 路径（assistant.message 的
+	// barrier 解除 upsert）不一致，破坏 replay 等价（live/replay cell
+	// Revision 漂移）。
+	b.renderEncoder.EnableReasoningOrderingBarrier(true)
 	b.historySeedSeen = make(map[string]struct{})
 	b.interactionAnchorMu.Lock()
 	b.interactionAnchor = nil

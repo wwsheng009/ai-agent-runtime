@@ -446,6 +446,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 		},
 	}
+	bridge.renderEncoder.EnableReasoningOrderingBarrier(true)
 	bridge.eventQueueCond = sync.NewCond(&bridge.eventQueueMu)
 	return bridge
 }
@@ -855,13 +856,20 @@ func (b *chatRuntimeEventBridge) submitAssistant(text string) {
 // cell 提交点直连调用；编码为 KindCommand 终态块，走 applyChangeSet 同一
 // 提交路径，并落事件日志（replay 幂等恢复）。
 func (b *chatRuntimeEventBridge) submitCommand(text string) {
+	b.submitCommandDocument(text, render.Document{})
+}
+
+// submitCommandDocument preserves the structured command IR across the
+// encoder/Scene boundary. The plain head remains the compatibility projection
+// used by parity probes and old event-log readers.
+func (b *chatRuntimeEventBridge) submitCommandDocument(text string, document render.Document) {
 	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
 		return
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	b.applyChangeSet(b.renderEncoder.SubmitCommand(text))
-	b.appendCommandLog(text)
+	b.applyChangeSet(b.renderEncoder.SubmitCommandDocument(text, document))
+	b.appendCommandLogDocument(text, document)
 }
 
 // submitError 把操作错误注入统一渲染数据面（设计文档 §1.3 行 11）：本地
@@ -1049,28 +1057,36 @@ func (b *chatRuntimeEventBridge) submitToolResultDisplay(toolCallID, toolName, o
 // KindUserInteraction 终态块，走 applyChangeSet 同一提交路径，并落事件
 // 日志（replay 幂等恢复；anchor 为值类型副本，重放时按全序重建等价位置）。
 func (b *chatRuntimeEventBridge) submitUserInteraction(text string, anchor *encoding.Tail) {
+	b.submitUserInteractionDocument(text, render.Document{}, anchor)
+}
+
+func (b *chatRuntimeEventBridge) submitUserInteractionDocument(text string, document render.Document, anchor *encoding.Tail) {
 	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
 		return
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	b.applyChangeSet(b.renderEncoder.SubmitUserInteraction(text, anchor))
-	b.appendInteractionLog(text, anchor)
+	b.applyChangeSet(b.renderEncoder.SubmitUserInteractionDocument(text, document, anchor))
+	b.appendInteractionLogDocument(text, document, anchor)
 }
 
 // submitCommandResult 是 RenderCommandDocument 提交点的统一注入入口：
 // 有 pending 交互标记（/debug、/model 等，经 recordInteractionAnchor 登记）
 // 时按交互锚定语义注入；否则按普通命令结果注入（submitCommand）。
 // 锚点为 nil（模型为空时触发）时由编码器退化为 append。
-func (b *chatRuntimeEventBridge) submitCommandResult(text string) {
+func (b *chatRuntimeEventBridge) submitCommandResult(text string, documents ...render.Document) {
 	if b == nil || strings.TrimSpace(text) == "" {
 		return
 	}
+	document := render.Document{}
+	if len(documents) > 0 {
+		document = documents[0].Clone()
+	}
 	if source, tail := b.consumePendingInteraction(); source != "" {
-		b.submitUserInteraction(text, tail)
+		b.submitUserInteractionDocument(text, document, tail)
 		return
 	}
-	b.submitCommand(text)
+	b.submitCommandDocument(text, document)
 }
 
 // applyChangeSet 把编码器产出的 ChangeSet 映射为 SceneTransaction 并提交
@@ -1152,6 +1168,10 @@ type eventLogInjection struct {
 	PriorityTranscript string                 `json:"priority_transcript,omitempty"`
 	Interaction        string                 `json:"interaction,omitempty"`        // /debug、/model 等交互输出
 	InteractionAnchor  *encoding.Tail         `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
+	// Document is the terminal-neutral render IR for command/interaction
+	// injections. It is optional for backward compatibility with old JSONL
+	// records that only persisted the plain text projection.
+	Document *render.Document `json:"document,omitempty"`
 }
 
 // appendHistoryResetLog persists a canonical transcript boundary. Caller must
@@ -1200,7 +1220,16 @@ func (b *chatRuntimeEventBridge) appendAssistantLog(text string) {
 
 // appendCommandLog 追加命令结果注入记录。
 func (b *chatRuntimeEventBridge) appendCommandLog(text string) {
-	b.appendInjectionLog(eventLogInjection{Command: text})
+	b.appendCommandLogDocument(text, render.Document{})
+}
+
+func (b *chatRuntimeEventBridge) appendCommandLogDocument(text string, document render.Document) {
+	rec := eventLogInjection{Command: text}
+	if len(document.Blocks) > 0 {
+		doc := document.Clone()
+		rec.Document = &doc
+	}
+	b.appendInjectionLog(rec)
 }
 
 // appendErrorLog 追加操作错误注入记录。
@@ -1227,7 +1256,16 @@ func (b *chatRuntimeEventBridge) appendPriorityTranscriptLog(eventType, requestK
 // appendInteractionLog 追加用户交互输出注入记录（含触发时刻锚点；重放时
 // 按全序重建等价插入位置）。
 func (b *chatRuntimeEventBridge) appendInteractionLog(text string, anchor *encoding.Tail) {
-	b.appendInjectionLog(eventLogInjection{Interaction: text, InteractionAnchor: anchor})
+	b.appendInteractionLogDocument(text, render.Document{}, anchor)
+}
+
+func (b *chatRuntimeEventBridge) appendInteractionLogDocument(text string, document render.Document, anchor *encoding.Tail) {
+	rec := eventLogInjection{Interaction: text, InteractionAnchor: anchor}
+	if len(document.Blocks) > 0 {
+		doc := document.Clone()
+		rec.Document = &doc
+	}
+	b.appendInjectionLog(rec)
 }
 
 // appendEventLogLine 写入单行日志记录（open→append→close）。
@@ -1283,16 +1321,17 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		history            []runtimetypes.Message
 		historyResetHeader string
 		event              runtimeevents.Event
-		userInput          string         // 非空表示用户输入注入记录（无 runtime 事件类型）
-		assistant          string         // 非空表示 direct assistant 终态注入记录
-		command            string         // 非空表示命令结果注入记录
-		err                string         // 非空表示操作错误注入记录
-		supplement         string         // 非空表示本地补充注入记录
-		priorityKind       string         // approval_requested/question_asked
-		priorityKey        string         // request_id/question_id-derived key
-		priorityTranscript string         // retained prompt + answer
-		interaction        string         // 非空表示用户交互输出注入记录
-		interactionAnchor  *encoding.Tail // 交互输出触发时刻锚点
+		userInput          string          // 非空表示用户输入注入记录（无 runtime 事件类型）
+		assistant          string          // 非空表示 direct assistant 终态注入记录
+		command            string          // 非空表示命令结果注入记录
+		err                string          // 非空表示操作错误注入记录
+		supplement         string          // 非空表示本地补充注入记录
+		priorityKind       string          // approval_requested/question_asked
+		priorityKey        string          // request_id/question_id-derived key
+		priorityTranscript string          // retained prompt + answer
+		interaction        string          // 非空表示用户交互输出注入记录
+		interactionAnchor  *encoding.Tail  // 交互输出触发时刻锚点
+		document           render.Document // 可选结构化 command/interaction IR
 	}
 	var entries []entry
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -1332,7 +1371,11 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 			case inj.Assistant != "":
 				entries = append(entries, entry{assistant: inj.Assistant})
 			case inj.Command != "":
-				entries = append(entries, entry{command: inj.Command})
+				en := entry{command: inj.Command}
+				if inj.Document != nil {
+					en.document = inj.Document.Clone()
+				}
+				entries = append(entries, en)
 			case inj.Error != "":
 				entries = append(entries, entry{err: inj.Error})
 			case inj.Supplement != "":
@@ -1343,7 +1386,11 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 					priorityTranscript: inj.PriorityTranscript,
 				})
 			case inj.Interaction != "":
-				entries = append(entries, entry{interaction: inj.Interaction, interactionAnchor: inj.InteractionAnchor})
+				en := entry{interaction: inj.Interaction, interactionAnchor: inj.InteractionAnchor}
+				if inj.Document != nil {
+					en.document = inj.Document.Clone()
+				}
+				entries = append(entries, en)
 			default:
 				b.eventLogMu.Lock()
 				b.eventLogFailures++
@@ -1377,7 +1424,7 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		case en.assistant != "":
 			b.applyChangeSet(b.renderEncoder.SubmitAssistant(en.assistant))
 		case en.command != "":
-			b.applyChangeSet(b.renderEncoder.SubmitCommand(en.command))
+			b.applyChangeSet(b.renderEncoder.SubmitCommandDocument(en.command, en.document))
 		case en.err != "":
 			b.applyChangeSet(b.renderEncoder.SubmitError(en.err))
 		case en.supplement != "":
@@ -1390,7 +1437,7 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 			// 交互输出：按全序重建到该行时模型状态与实时注入时刻等价，
 			// 锚点 ItemID 必然存在（实时时 Tail 指向模型尾部项）；锚点
 			// nil（空模型触发）退化为 append，与实时路径一致。
-			b.applyChangeSet(b.renderEncoder.SubmitUserInteraction(en.interaction, en.interactionAnchor))
+			b.applyChangeSet(b.renderEncoder.SubmitUserInteractionDocument(en.interaction, en.document, en.interactionAnchor))
 		default:
 			b.applyChangeSet(b.renderEncoder.Encode(en.event))
 		}
@@ -2255,6 +2302,58 @@ func runtimeToolExecutionSummaryCall(event runtimeevents.Event) aicliToolExecuti
 	return summary
 }
 
+// isRuntimeToolTerminalEventType 判断事件是否属于工具调用终态（完成/失败/
+// 取消），这些事件会携带调用时长并触发调用后渲染。
+func isRuntimeToolTerminalEventType(eventType string) bool {
+	switch eventType {
+	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
+		return true
+	}
+	return false
+}
+
+// enrichRuntimeToolDuration 在 Scene 数据面编码之前为工具终态事件注入
+// duration_ms（从 toolCallStartedAt 记录的调用起始时刻与事件时间戳之差）。
+// enrichTimelineEvent 也在计算该值，但发生在 encodeRenderModelEvent 之后，
+// 只服务 timeline 渲染；本方法复用同一 startedAt 账本，使 encoder 的
+// toolCallCompletedTitle 也能恢复 "in 5ms" 时长后缀。消费后删除 startedAt，
+// 与 enrichTimelineEvent 的消费语义保持一致（避免 map 残留）。
+func (b *chatRuntimeEventBridge) enrichRuntimeToolDuration(event runtimeevents.Event) runtimeevents.Event {
+	if b == nil {
+		return event
+	}
+	switch event.Type {
+	case runtimechat.EventToolFinished, "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
+	default:
+		return event
+	}
+	payload := cloneRuntimeEventLogPayload(runtimeToolTimelinePayload(event))
+	if intPayloadValue(payload, "duration_ms") > 0 {
+		return event
+	}
+	toolCallKey := runtimeToolCallTimelineKey(event, payload)
+	timestamp := runtimeEventExplicitTimestamp(event)
+	if toolCallKey == "" || timestamp.IsZero() {
+		return event
+	}
+	var startedAt time.Time
+	b.renderMu.Lock()
+	if b.toolCallStartedAt != nil {
+		startedAt = b.toolCallStartedAt[toolCallKey]
+		delete(b.toolCallStartedAt, toolCallKey)
+	}
+	b.renderMu.Unlock()
+	if startedAt.IsZero() {
+		return event
+	}
+	if durationMs := runtimeEventDurationMs(startedAt, timestamp); durationMs > 0 {
+		enriched := cloneRuntimeEventLogPayload(event.Payload)
+		enriched["duration_ms"] = durationMs
+		event.Payload = enriched
+	}
+	return event
+}
+
 func runtimeToolCallTimelineKey(event runtimeevents.Event, payload map[string]interface{}) string {
 	toolCallID := strings.TrimSpace(payloadStringValue(payload["tool_call_id"]))
 	if toolCallID == "" {
@@ -2339,6 +2438,13 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	// 编码必须在 ownership/suppression 校验之后：数据面只接收旧 UI 真正
 	// 会渲染的事件，保证 Scene 与可见输出一致、事件日志重放等价。
+	// 工具调用时长（duration_ms）由 enrichTimelineEvent 在编码之后才计算
+	// （服务 timeline 渲染），导致 Scene 数据面拿不到调用后标题的
+	// "in 5ms" 时长细节；这里在编码前为 tool 终态事件先行注入，对齐旧
+	// compactToolCompletionTitle 的完整调用后渲染。
+	if isRuntimeToolTerminalEventType(event.Type) {
+		event = b.enrichRuntimeToolDuration(event)
+	}
 	b.encodeRenderModelEvent(event)
 	b.updateComposerAgentStageForRuntimeEvent(event)
 	if isTeamLifecycleRuntimeEvent(event.Type) && strings.TrimSpace(event.SessionID) != "" && !b.shouldAcceptTeamLifecycleRuntimeEvent(event) {
@@ -2578,6 +2684,8 @@ func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event r
 			payloadStringValue(event.Payload["tool_call_id"]),
 			runtimeEventToolName(event),
 		)
+	case runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+		b.session.Interaction.ClearRuntimeToolAgentStages()
 	}
 }
 

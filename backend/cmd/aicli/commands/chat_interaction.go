@@ -1512,6 +1512,30 @@ func (c *chatInteractionCoordinator) FinishToolAgentStage(callID, toolName strin
 	activeShadowAction = c.activeStreamShadowActionLocked()
 }
 
+// ClearRuntimeToolAgentStages closes coordinator-local tool projection when a
+// run terminates without publishing every per-tool terminal event. Scene owns
+// the durable tool cells; this method only releases the transient composer and
+// ActiveBand bookkeeping so no orphan Running state survives session.end.
+func (c *chatInteractionCoordinator) ClearRuntimeToolAgentStages() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	var activeShadowAction ui.UIAction
+	defer func() {
+		c.mu.Unlock()
+		if activeShadowAction != nil {
+			_ = c.postCausalUIAction(activeShadowAction)
+		}
+	}()
+	if c.shutdown {
+		return
+	}
+	c.activeTools = nil
+	c.projectActiveToolStageLocked()
+	activeShadowAction = c.activeStreamShadowActionLocked()
+}
+
 func (c *chatInteractionCoordinator) finishToolAgentStageLocked(callID, toolName string) {
 	key := activeToolStageKey(callID, toolName)
 	if key == "" {
@@ -3616,7 +3640,7 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 	// 注入只发生在块真正提交后（beginMessageLocked 已通过），nil bridge
 	// 时零行为（旁路）。
 	if c.session != nil && c.session.RuntimeEventBridge != nil {
-		c.session.RuntimeEventBridge.submitCommandResult(ui.RenderDocumentPlain(doc))
+		c.session.RuntimeEventBridge.submitCommandResult(ui.RenderDocumentPlain(doc), doc)
 	}
 	c.commandCellSequence++
 	c.lastCommandCellID = fmt.Sprintf("command:%d", c.commandCellSequence)
@@ -3728,6 +3752,14 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	}
 	c.mu.Lock()
 	bridge := c.session.RuntimeEventBridge
+	if bridge == nil {
+		// 新会话首次提交发生在 actor 启动之前：bridge 尚未创建，用户输入
+		// 的 Scene 注入（submitUserInput）与快照发布（postTranscriptSnapshot
+		// FromBridge）都会旁路，导致第一条 prompt 完全不渲染。unified 模式下
+		// 旧 history 已 fenced，Scene 是唯一渲染路径，必须在此补齐 bridge。
+		// ensure 幂等：已创建时直接复用，start() 仅订阅 EventBus 不回调。
+		bridge = ensureChatRuntimeEventBridge(c.session)
+	}
 	c.renderUserEchoLocked(input, true, true)
 	c.mu.Unlock()
 	// submitUserInput mutates Scene while the legacy coordinator lock is held.
@@ -6041,11 +6073,19 @@ func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
 	if c == nil {
 		return
 	}
+	c.mu.Lock()
+	unified := c.unifiedRenderer
+	c.mu.Unlock()
+	if unified {
+		_ = c.postUIAction(ui.SetThemeContextAction{Theme: ui.CurrentThemeContext()})
+	}
 	if c.postUIAction(ui.Resize{}) {
 		c.waitUIActorIdle()
+		c.RequestUnifiedFrame()
 		return
 	}
 	c.refreshActiveStreamViewportNow()
+	c.RequestUnifiedFrame()
 }
 
 // refreshActiveStreamViewportNow is the reducer-side implementation of

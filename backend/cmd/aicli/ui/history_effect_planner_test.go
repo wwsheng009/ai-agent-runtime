@@ -139,6 +139,40 @@ func TestPlanMutableActiveCellHistoryCommits(t *testing.T) {
 	})
 }
 
+func TestCanonicalHistoryFrontierNoLongerBlockedAfterOrphanToolFinalization(t *testing.T) {
+	tool := scene.TranscriptCell{
+		ID: 1, Revision: 1, Kind: scene.KindToolChain, Source: "shell command", Phase: scene.CellMutable,
+	}
+	answer := scene.TranscriptCell{
+		ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "final answer", Phase: scene.CellCommitted,
+	}
+	state := AppState{
+		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
+		LayoutGeneration: 1,
+		Transcript:       TranscriptState{Revision: 1, Cells: []scene.TranscriptCell{tool, answer}},
+	}
+	if commits := planEligibleHistoryCommits(state); len(commits) != 0 {
+		t.Fatalf("mutable orphan tool did not hold the ordering frontier: %#v", commits)
+	}
+
+	state.Transcript.Revision++
+	state.Transcript.Cells[0].Revision++
+	state.Transcript.Cells[0].Phase = scene.CellCommitted
+	commits := planEligibleHistoryCommits(state)
+	if len(commits) == 0 {
+		t.Fatal("terminalized orphan tool left a permanent history frontier")
+	}
+	foundAnswer := false
+	for _, commit := range commits {
+		if commit.CellID == answer.ID {
+			foundAnswer = true
+		}
+	}
+	if !foundAnswer {
+		t.Fatalf("history after orphan tool omitted later finalized answer: %#v", commits)
+	}
+}
+
 func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 	lines := make([]string, 18)
 	for index := range lines {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
 
 // CellID 是 transcript cell 的稳定身份（unified plan §5.2）。
@@ -66,10 +67,10 @@ func (k CellKind) String() string {
 type CellPhase uint8
 
 const (
-	CellMutable           CellPhase = iota // 可更新（streaming/tool running）
-	CellCommitted                          // 已提交（finalize 后）
-	CellPartiallyHandedOff                 // 超大 cell 分片交接中
-	CellHandedOff                          // 已交 native scrollback
+	CellMutable            CellPhase = iota // 可更新（streaming/tool running）
+	CellCommitted                           // 已提交（finalize 后）
+	CellPartiallyHandedOff                  // 超大 cell 分片交接中
+	CellHandedOff                           // 已交 native scrollback
 )
 
 func (p CellPhase) String() string {
@@ -87,6 +88,27 @@ func (p CellPhase) String() string {
 	}
 }
 
+// PresentationKind selects the pure projection used by layout. Source remains
+// the canonical text/replay value; rich presentations never store ANSI bytes.
+type PresentationKind uint8
+
+const (
+	PresentationPlain PresentationKind = iota
+	PresentationAssistantMarkdown
+	PresentationDiffSupplement
+	PresentationDocument
+)
+
+type TranscriptPresentation struct {
+	Kind     PresentationKind
+	Document render.Document
+}
+
+func (p TranscriptPresentation) Clone() TranscriptPresentation {
+	p.Document = p.Document.Clone()
+	return p
+}
+
 // TranscriptCell 是 Scene 的最小语义单元（unified plan §5.2）。
 //
 // Source 保存语义内容（当前为 string 最小投影；RichDocument 落地后替换），
@@ -97,17 +119,22 @@ func (p CellPhase) String() string {
 // 投影 boundary.CellMeta 使用）：非空表示该 cell 是某 tool-chain 的内部
 // 成员，不推进 Sequence、与同链成员稠密衔接（§7.3 规则表）。
 type TranscriptCell struct {
-	ID          CellID
-	Sequence    uint64 // 只在创建 top-level cell 时增加（§5.3）
-	Kind        CellKind
-	Source      string
-	Revision    uint64
-	Phase       CellPhase
-	Boundary    boundary.BoundaryClass
-	Provenance  string
-	ChainKey    string // tool-chain 归组键；"" = top-level 独立 cell
-	CreatedAt   time.Time
-	FinalizedAt *time.Time
+	ID           CellID
+	Sequence     uint64 // 只在创建 top-level cell 时增加（§5.3）
+	Kind         CellKind
+	Source       string
+	Presentation TranscriptPresentation
+	// HistoryCommitBlocked is projection metadata for a mutable assistant. It
+	// never creates a visible row; the history planner treats it as an ordering
+	// fence until a possible reasoning predecessor has been resolved.
+	HistoryCommitBlocked bool
+	Revision     uint64
+	Phase        CellPhase
+	Boundary     boundary.BoundaryClass
+	Provenance   string
+	ChainKey     string // tool-chain 归组键；"" = top-level 独立 cell
+	CreatedAt    time.Time
+	FinalizedAt  *time.Time
 }
 
 // BoundaryMeta 把 cell 投影为 boundary 决策所需的元数据视图。
@@ -146,12 +173,12 @@ func (c *TranscriptCell) BoundaryMeta() boundary.CellMeta {
 // 是 overlay，不参与 transcript sequence 与 boundary state（INV-SCENE-05）。
 // 所有变更经 ApplyCellMutation / 事务提交发生，外部不得直接改 Cells。
 type TuiScene struct {
-	cells     []*TranscriptCell
-	nextID    uint64
-	nextSeq   uint64
-	revision  uint64 // Scene revision：每次事务提交 +1
-	byID      map[CellID]*TranscriptCell
-	byChain   map[string]*TranscriptCell // ChainKey -> 链首 cell（仅供校验）
+	cells    []*TranscriptCell
+	nextID   uint64
+	nextSeq  uint64
+	revision uint64 // Scene revision：每次事务提交 +1
+	byID     map[CellID]*TranscriptCell
+	byChain  map[string]*TranscriptCell // ChainKey -> 链首 cell（仅供校验）
 }
 
 // New 创建空 Scene。
@@ -160,6 +187,15 @@ func New() *TuiScene {
 		byID:    make(map[CellID]*TranscriptCell),
 		byChain: make(map[string]*TranscriptCell),
 	}
+}
+
+func cloneCell(cell TranscriptCell) TranscriptCell {
+	if cell.FinalizedAt != nil {
+		finalizedAt := *cell.FinalizedAt
+		cell.FinalizedAt = &finalizedAt
+	}
+	cell.Presentation = cell.Presentation.Clone()
+	return cell
 }
 
 // Cells 返回有序 cell 副本（渲染顺序 = 数组顺序，对齐 Codex Thread 模型）。
@@ -172,7 +208,7 @@ func (s *TuiScene) Cells() []*TranscriptCell {
 		if c == nil {
 			continue
 		}
-		cp := *c
+		cp := cloneCell(*c)
 		out = append(out, &cp)
 	}
 	return out
@@ -187,7 +223,7 @@ func (s *TuiScene) Cell(id CellID) (*TranscriptCell, bool) {
 	if !ok || c == nil {
 		return nil, false
 	}
-	cp := *c
+	cp := cloneCell(*c)
 	return &cp, true
 }
 
@@ -235,10 +271,10 @@ type Snapshot struct {
 
 // AppendCell 追加一个新 cell（unified plan §6.1）。
 //
-// - ID 为空时由 Scene 分配（NextID）；非空时校验全局唯一（INV-SCENE-02）；
-// - top-level cell（ChainKey == ""）分配单调 Sequence；
-//   tool-chain 内部成员不推进 Sequence（§5.3）；
-// - 若 Kind 为 tool-chain 且 ChainKey 非空，登记为链首。
+//   - ID 为空时由 Scene 分配（NextID）；非空时校验全局唯一（INV-SCENE-02）；
+//   - top-level cell（ChainKey == ""）分配单调 Sequence；
+//     tool-chain 内部成员不推进 Sequence（§5.3）；
+//   - 若 Kind 为 tool-chain 且 ChainKey 非空，登记为链首。
 type AppendCell struct {
 	Cell TranscriptCell
 }
@@ -247,29 +283,38 @@ type AppendCell struct {
 // ItemChange.AfterID 语义，设计文档 §1.3 行 12：/debug、/model 交互输出
 // 以触发时刻模型尾部为锚点参与渲染总序）。
 //
-// - After 必须存在（锚点目标）；不存在时显式失败（INV-FRAME-01 回滚），
-//   锚点缺失的退化由编码器完成（SubmitUserInteraction 退化为 append）；
-// - 其余规则与 AppendCell 一致：ID 唯一（INV-SCENE-02）、top-level 分配
-//   单调 Sequence、ChainKey 登记。
+//   - After 必须存在（锚点目标）；不存在时显式失败（INV-FRAME-01 回滚），
+//     锚点缺失的退化由编码器完成（SubmitUserInteraction 退化为 append）；
+//   - 其余规则与 AppendCell 一致：ID 唯一（INV-SCENE-02）、top-level 分配
+//     单调 Sequence、ChainKey 登记。
 type InsertCell struct {
 	After CellID // 锚点 cell（插入到其后）
 	Cell  TranscriptCell
 }
 
+type InsertCellBefore struct {
+	Before CellID
+	Cell   TranscriptCell
+}
+
 // UpdateCell 按 ID 更新既有 mutable cell（unified plan §6.1）。
 // Revision 必须大于当前（INV-SCENE-03），旧 revision 不得覆盖新 revision。
 type UpdateCell struct {
-	ID       CellID
-	Revision uint64
-	Source   string
+	ID                   CellID
+	Revision             uint64
+	Source               string
+	Presentation         TranscriptPresentation
+	HistoryCommitBlocked bool
 }
 
 // FinalizeCell 把 mutable cell 转为 committed（unified plan §6.1）。
 // finalize 是同一 cell 的状态迁移，不是 append 新 cell（INV-SCENE-04）。
 type FinalizeCell struct {
-	ID       CellID
-	Revision uint64
-	Source   string
+	ID                   CellID
+	Revision             uint64
+	Source               string
+	Presentation         TranscriptPresentation
+	HistoryCommitBlocked bool
 }
 
 // RemoveMutableCell 按 ID 移除 mutable cell（unified plan §6.1）。
@@ -289,6 +334,8 @@ func (s *TuiScene) ApplyCellMutation(m CellMutation) (*TranscriptCell, error) {
 		return s.append(m)
 	case *InsertCell:
 		return s.insert(m)
+	case *InsertCellBefore:
+		return s.insertBefore(m)
 	case *UpdateCell:
 		return s.update(m)
 	case *FinalizeCell:
@@ -330,7 +377,7 @@ func (s *TuiScene) append(m *AppendCell) (*TranscriptCell, error) {
 		}
 		s.byChain[cell.ChainKey] = &cell
 	}
-	cp := cell
+	cp := cloneCell(cell)
 	s.cells = append(s.cells, &cp)
 	s.byID[cp.ID] = &cp
 	return &cp, nil
@@ -369,7 +416,7 @@ func (s *TuiScene) insert(m *InsertCell) (*TranscriptCell, error) {
 		}
 		s.byChain[cell.ChainKey] = &cell
 	}
-	cp := cell
+	cp := cloneCell(cell)
 	at := -1
 	for i, c := range s.cells {
 		if c.ID == m.After {
@@ -383,6 +430,52 @@ func (s *TuiScene) insert(m *InsertCell) (*TranscriptCell, error) {
 	s.cells = append(s.cells, nil)
 	copy(s.cells[at+2:], s.cells[at+1:])
 	s.cells[at+1] = &cp
+	s.byID[cp.ID] = &cp
+	return &cp, nil
+}
+
+func (s *TuiScene) insertBefore(m *InsertCellBefore) (*TranscriptCell, error) {
+	if m == nil {
+		return nil, fmt.Errorf("insert before: nil mutation")
+	}
+	if anchor, ok := s.byID[m.Before]; !ok || anchor == nil {
+		return nil, fmt.Errorf("insert before: anchor cell %d not found", m.Before)
+	}
+	cell := m.Cell
+	if cell.ID == 0 {
+		cell.ID = s.NextID()
+	}
+	if _, exists := s.byID[cell.ID]; exists {
+		return nil, fmt.Errorf("duplicate cell id %d (INV-SCENE-02)", cell.ID)
+	}
+	now := time.Now().UTC()
+	if cell.CreatedAt.IsZero() {
+		cell.CreatedAt = now
+	}
+	if cell.Sequence == 0 && cell.ChainKey == "" {
+		s.nextSeq++
+		cell.Sequence = s.nextSeq
+	}
+	if cell.ChainKey != "" {
+		if _, exists := s.byChain[cell.ChainKey]; exists {
+			return nil, fmt.Errorf("duplicate chain key %q", cell.ChainKey)
+		}
+		s.byChain[cell.ChainKey] = &cell
+	}
+	cp := cloneCell(cell)
+	at := -1
+	for i, candidate := range s.cells {
+		if candidate.ID == m.Before {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return nil, fmt.Errorf("insert before: anchor cell %d missing from ordered cells", m.Before)
+	}
+	s.cells = append(s.cells, nil)
+	copy(s.cells[at+1:], s.cells[at:])
+	s.cells[at] = &cp
 	s.byID[cp.ID] = &cp
 	return &cp, nil
 }
@@ -402,8 +495,10 @@ func (s *TuiScene) update(m *UpdateCell) (*TranscriptCell, error) {
 		return nil, fmt.Errorf("update: stale revision %d <= %d (INV-SCENE-03)", m.Revision, c.Revision)
 	}
 	c.Source = m.Source
+	c.Presentation = m.Presentation.Clone()
+	c.HistoryCommitBlocked = m.HistoryCommitBlocked
 	c.Revision = m.Revision
-	cp := *c
+	cp := cloneCell(*c)
 	return &cp, nil
 }
 
@@ -422,11 +517,13 @@ func (s *TuiScene) finalize(m *FinalizeCell) (*TranscriptCell, error) {
 		return nil, fmt.Errorf("finalize: stale revision %d <= %d (INV-SCENE-03)", m.Revision, c.Revision)
 	}
 	c.Source = m.Source
+	c.Presentation = m.Presentation.Clone()
+	c.HistoryCommitBlocked = m.HistoryCommitBlocked
 	c.Revision = m.Revision
 	c.Phase = CellCommitted
 	now := time.Now().UTC()
 	c.FinalizedAt = &now
-	cp := *c
+	cp := cloneCell(*c)
 	return &cp, nil
 }
 
@@ -451,6 +548,6 @@ func (s *TuiScene) remove(m *RemoveMutableCell) (*TranscriptCell, error) {
 			break
 		}
 	}
-	cp := *c
+	cp := cloneCell(*c)
 	return &cp, nil
 }

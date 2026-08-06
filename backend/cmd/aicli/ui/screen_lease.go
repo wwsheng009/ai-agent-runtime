@@ -125,12 +125,17 @@ func (l *fullscreenLease) Release(ctx context.Context) error {
 		l.mu.Unlock()
 		return nil
 	}
-	l.released = true
-	l.mu.Unlock()
 	if l.surface == nil {
+		l.released = true
+		l.mu.Unlock()
 		return nil
 	}
-	return l.surface.releaseAlternateScreen(ctx, l.id)
+	err := l.surface.releaseAlternateScreen(ctx, l.id)
+	if err == nil {
+		l.released = true
+	}
+	l.mu.Unlock()
+	return err
 }
 
 // leaseCounter hands out unique lease ids process-wide.
@@ -321,6 +326,22 @@ func (s *FixedBottomSurface) LeaseOwned(id uint64) bool {
 	return s.leaseID == id
 }
 
+// ReleaseActiveAlternateScreen is the process-teardown form of ScreenLease
+// release. It keeps the unified transport installed until DEC 1049 exit has
+// completed, then publishes the same logical release barrier as a live handle.
+func (s *FixedBottomSurface) ReleaseActiveAlternateScreen(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	id := s.leaseID
+	s.mu.Unlock()
+	if id == 0 {
+		return nil
+	}
+	return s.releaseAlternateScreen(ctx, id)
+}
+
 // releaseAlternateScreen ends the lease identified by id and repaints the
 // primary surface from retained state. It is idempotent: releasing an unknown
 // or already-released id is a no-op.
@@ -337,9 +358,9 @@ func (s *FixedBottomSurface) releaseAlternateScreen(_ context.Context, id uint64
 		s.mu.Unlock()
 		return nil
 	}
-	s.leaseID = 0
-	s.leaseMode = ScreenModePrimary
 	if !s.enabled || s.terminal == nil {
+		s.leaseID = 0
+		s.leaseMode = ScreenModePrimary
 		s.mu.Unlock()
 		s.postFacadeAction(LeaseReleased{LeaseID: id})
 		return nil
@@ -348,10 +369,20 @@ func (s *FixedBottomSurface) releaseAlternateScreen(_ context.Context, id uint64
 		transport := s.alternateTransport
 		s.mu.Unlock()
 		if transport == nil {
-			s.postFacadeAction(LeaseReleased{LeaseID: id})
 			return fmt.Errorf("%w: unified alternate-screen transport is unavailable", ErrFullScreenUnavailable)
 		}
 		exitErr := transport.ExitAlternateScreen(id)
+		if exitErr != nil {
+			return exitErr
+		}
+		s.mu.Lock()
+		if s.leaseID != id {
+			s.mu.Unlock()
+			return nil
+		}
+		s.leaseID = 0
+		s.leaseMode = ScreenModePrimary
+		s.mu.Unlock()
 		// Publish the logical barrier only after the terminal transport has
 		// invalidated its primary projection. A concurrently requested executor
 		// frame therefore cannot observe an unleased AppState while DEC 1049 is
@@ -361,8 +392,10 @@ func (s *FixedBottomSurface) releaseAlternateScreen(_ context.Context, id uint64
 		// actor to become idle before composing, so it observes LeaseReleased and
 		// emits the mandatory source-backed recovery frame, never a legacy repaint.
 		transport.RequestPrimaryRecovery()
-		return exitErr
+		return nil
 	}
+	s.leaseID = 0
+	s.leaseMode = ScreenModePrimary
 	writer := s.alternateWriter
 	if writer == nil {
 		if s.testMode {

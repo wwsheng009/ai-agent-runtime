@@ -7,6 +7,22 @@ type Document struct {
 	Blocks []Block
 }
 
+// Clone returns a fully detached document. Documents cross actor, Scene and
+// replay boundaries, so copying only the top-level slice would let a producer
+// mutate rows or spans already owned by an immutable snapshot.
+func (d Document) Clone() Document {
+	out := Document{Blocks: make([]Block, len(d.Blocks))}
+	for blockIndex, block := range d.Blocks {
+		out.Blocks[blockIndex] = block
+		out.Blocks[blockIndex].Lines = make([]Line, len(block.Lines))
+		for lineIndex, line := range block.Lines {
+			out.Blocks[blockIndex].Lines[lineIndex] = line
+			out.Blocks[blockIndex].Lines[lineIndex].Spans = append([]Span(nil), line.Spans...)
+		}
+	}
+	return out
+}
+
 // BlockKind classifies a block for layout policies.
 type BlockKind int
 

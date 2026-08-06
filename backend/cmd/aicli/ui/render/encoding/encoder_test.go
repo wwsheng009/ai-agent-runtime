@@ -298,6 +298,28 @@ func TestEncodeDottedAssistantReasoningUsesNestedTypedPayload(t *testing.T) {
 	}
 }
 
+func TestEncodeSessionEndFinalizesOpenToolCell(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(toolStarted("call-orphan", "shell"))
+	before := e.Snapshot()
+	if len(before.Items) != 1 || before.Items[0].Kind != KindToolCall || before.Items[0].Status.Terminal() {
+		t.Fatalf("open tool fixture = %+v", before.Items)
+	}
+
+	cs := e.Encode(event(runtimechat.EventSessionEnd, map[string]interface{}{"success": true}))
+	if len(cs.Changes) != 1 || cs.Changes[0].Op != OpUpsert ||
+		cs.Changes[0].Item.ID != before.Items[0].ID || cs.Changes[0].Item.Status != StatusCompleted {
+		t.Fatalf("session-end tool finalization = %+v", cs.Changes)
+	}
+	after := e.Snapshot()
+	if len(after.Items) != 1 || after.Items[0].Status != StatusCompleted {
+		t.Fatalf("tool remained mutable after session end: %+v", after.Items)
+	}
+	if duplicate := e.Encode(event(runtimechat.EventSessionEnd, map[string]interface{}{"success": true})); len(duplicate.Changes) != 0 {
+		t.Fatalf("repeated session end re-finalized tool: %+v", duplicate.Changes)
+	}
+}
+
 // TestEncodeTerminalStateFrozen 验证终态保护：assistant final 后到达的
 // delta 被丢弃，状态不会被改回 running。
 func TestEncodeTerminalStateFrozen(t *testing.T) {
@@ -359,7 +381,7 @@ func TestEncodeLegacyToolLifecycleUsesCallIdentity(t *testing.T) {
 	if cs := e.Encode(progress); len(cs.Changes) != 1 || cs.Changes[0].Op != OpUpsert {
 		t.Fatalf("progress changes = %+v, want one upsert", cs.Changes)
 	}
-	if got := e.Snapshot().Items[0].Head; got != "shell\n50% complete" {
+	if got := e.Snapshot().Items[0].Head; got != "• Running shell\n50% complete" {
 		t.Fatalf("progress head = %q, want source-backed tool summary", got)
 	}
 
@@ -374,6 +396,104 @@ func TestEncodeLegacyToolLifecycleUsesCallIdentity(t *testing.T) {
 	if len(model.Items) != 2 || model.Items[0].Status != StatusCompleted || model.Items[1].Kind != KindToolOutput || model.Items[1].CauseID != model.Items[0].ID {
 		t.Fatalf("completed model = %+v, want finalized tool chain", model.Items)
 	}
+}
+
+// TestEncodeToolCallDisplayHeadRestoresLegacyDetails 验证工具调用前/调用后
+// 渲染细节恢复（对齐旧 compactToolDisplayTextWithSource /
+// compactToolCompletionTitle）：
+//   - 调用前：tool cell head 显示命令文本（shell）或参数预览（其他工具），
+//     带 [meta]/[mcp] 来源前缀，无细节时退化为工具名；
+//   - progress 保留 started 建立的 display，不被 payload tool_name 重置；
+//   - 调用后：head 更新为 "• Completed/Failed <display>[ via <backend>]
+//     [ in <duration>]"，首行替换标题、保留 progress 细节行。
+func TestEncodeToolCallDisplayHeadRestoresLegacyDetails(t *testing.T) {
+	cases := []struct {
+		name  string
+		event runtimeevents.Event
+		want  string
+	}{
+		{
+			name:  "shell 命令文本",
+			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c1", "tool_name": "shell", "command_text": "echo hello"}),
+			want:  "• Running echo hello",
+		},
+		{
+			name:  "shell 命令预览回退",
+			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c2", "tool_name": "bash", "arg_preview": "command=ls -la"}),
+			want:  "• Running ls -la",
+		},
+		{
+			name:  "非 shell 参数预览",
+			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c3", "tool_name": "read_file", "arg_preview": "path=a.go"}),
+			want:  "• Running read_file path=a.go",
+		},
+		{
+			name:  "来源前缀",
+			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c4", "tool_name": "bash", "command_text": "go test ./...", "tool_source": "meta"}),
+			want:  "• Running [meta] go test ./...",
+		},
+		{
+			name:  "无细节回退工具名",
+			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c5", "tool_name": "shell"}),
+			want:  "• Running shell",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := NewEventEncoder()
+			e.Encode(tc.event)
+			got := e.Snapshot().Items[0].Head
+			if got != tc.want {
+				t.Fatalf("started head = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("progress 保留调用前 display", func(t *testing.T) {
+		e := NewEventEncoder()
+		e.Encode(event("tool.requested", map[string]interface{}{"tool_call_id": "p1", "tool_name": "shell", "command_text": "echo hello"}))
+		e.Encode(event("tool.progress", map[string]interface{}{"tool_call_id": "p1", "message": "50% complete"}))
+		if got := e.Snapshot().Items[0].Head; got != "• Running echo hello\n50% complete" {
+			t.Fatalf("progress head = %q, want running 前缀保留", got)
+		}
+	})
+
+	t.Run("completed 标题", func(t *testing.T) {
+		e := NewEventEncoder()
+		e.Encode(event("tool.requested", map[string]interface{}{"tool_call_id": "f1", "tool_name": "shell", "command_text": "echo hello"}))
+		e.Encode(event("tool.completed", map[string]interface{}{"tool_call_id": "f1", "logical_tool": "shell", "output": "hello", "execution_backend": "pwsh"}))
+		if got := e.Snapshot().Items[0].Head; got != "• Completed echo hello via pwsh" {
+			t.Fatalf("completed head = %q", got)
+		}
+	})
+
+	t.Run("failed 标题", func(t *testing.T) {
+		e := NewEventEncoder()
+		e.Encode(event("tool.requested", map[string]interface{}{"tool_call_id": "f2", "tool_name": "read_file", "arg_preview": "path=a.go"}))
+		e.Encode(event("tool.failed", map[string]interface{}{"tool_call_id": "f2", "logical_tool": "read_file", "error": "not found"}))
+		if got := e.Snapshot().Items[0].Head; got != "• Failed read_file path=a.go" {
+			t.Fatalf("failed head = %q", got)
+		}
+	})
+
+	t.Run("duration 后缀", func(t *testing.T) {
+		e := NewEventEncoder()
+		e.Encode(event("tool.requested", map[string]interface{}{"tool_call_id": "f3", "tool_name": "view"}))
+		e.Encode(event("tool.completed", map[string]interface{}{"tool_call_id": "f3", "logical_tool": "view", "duration_ms": uint64(5)}))
+		if got := e.Snapshot().Items[0].Head; got != "• Completed view in 5ms" {
+			t.Fatalf("duration head = %q", got)
+		}
+	})
+
+	t.Run("completed 保留 progress 细节行", func(t *testing.T) {
+		e := NewEventEncoder()
+		e.Encode(event("tool.requested", map[string]interface{}{"tool_call_id": "f4", "tool_name": "shell"}))
+		e.Encode(event("tool.progress", map[string]interface{}{"tool_call_id": "f4", "message": "50% complete"}))
+		e.Encode(event("tool.completed", map[string]interface{}{"tool_call_id": "f4", "logical_tool": "shell", "output": "ok"}))
+		if got := e.Snapshot().Items[0].Head; got != "• Completed shell\n50% complete" {
+			t.Fatalf("completed head = %q, want 标题 + progress 行", got)
+		}
+	})
 }
 
 func TestEncodeLegacyToolStartWithoutIdentityFallsBackToSystem(t *testing.T) {
@@ -519,6 +639,35 @@ func TestEncodeProductionDottedLifecyclePreservesReasoningBeforeAssistant(t *tes
 		if item.Head == "llm.request.finished" || item.Head == "assistant.reasoning" {
 			t.Fatalf("raw lifecycle label leaked into model: %+v", model.Items)
 		}
+	}
+}
+
+func TestEncodeLateReasoningAfterSuccessfulBoundaryInsertsBeforeMutableAssistant(t *testing.T) {
+	e := NewEventEncoder()
+	identity := map[string]interface{}{
+		"turn_id": "late-turn", "stream_id": "late-stream", "step": 1,
+	}
+	e.Encode(event("llm.request.started", identity))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"turn_id": "late-turn", "stream_id": "late-stream", "step": 1,
+		"sequence": uint64(1), "delta": "assistant final",
+	}))
+	e.Encode(event("llm.request.finished", map[string]interface{}{
+		"turn_id": "late-turn", "stream_id": "late-stream", "step": 1, "success": true,
+	}))
+	cs := e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"turn_id": "late-turn", "stream_id": "late-stream", "step": 1,
+		"reasoning": map[string]interface{}{"format": "summary", "summary": "late reasoning"},
+	}))
+	if len(cs.Changes) != 1 || cs.Changes[0].Op != OpAppend || cs.Changes[0].Item.Kind != KindReasoning {
+		t.Fatalf("late reasoning changes = %+v", cs.Changes)
+	}
+	if cs.Changes[0].BeforeID != "item-1" || cs.Changes[0].AfterID != "" {
+		t.Fatalf("late reasoning anchor = before %q after %q, want before item-1", cs.Changes[0].BeforeID, cs.Changes[0].AfterID)
+	}
+	model := e.Snapshot()
+	if len(model.Items) != 2 || model.Items[0].Kind != KindReasoning || model.Items[1].Kind != KindAssistant {
+		t.Fatalf("late reasoning model order = %+v", model.Items)
 	}
 }
 
@@ -674,8 +823,8 @@ func TestEncodeUnknownTypeFallsBackToSystem(t *testing.T) {
 // 编码器的 legacy 事件类型（未走 chatcore 类型转换）。它们属已知呈现事件
 // （system 块），不应计入 UnknownCount；新增 emit 类型时必须补本表，
 // 否则 TestEncodeExhaustiveKnownLegacyEventTypes 失败。仅内部生命周期/
-// 遥测类型（planning.started、subagent.started 等）不在此表：它们走
-// isSilentSystemEventType 静默分类（零可见输出，见
+// 遥测类型（planning.started、subagent.started、tool.reduced 等）不在此
+// 表：它们走 isSilentSystemEventType 静默分类（零可见输出，见
 // TestEncodeSilentSystemEventTypes）。LLM request dotted lifecycle 与 typed
 // lifecycle 共用流状态操作，由生产顺序测试单独覆盖。
 func knownLegacyEventTypes() []string {
@@ -695,7 +844,6 @@ func knownLegacyEventTypes() []string {
 		"tool.progress",
 		"tool.completed",
 		"tool.denied",
-		"tool.reduced",
 		"planning.completed",
 		"team.completed",
 		"team.interrupted",
@@ -721,6 +869,7 @@ func silentSystemEventTypes() []string {
 		"task.started",
 		"team.task.started",
 		"context.tool_schema.frozen",
+		"tool.reduced",
 	}
 }
 

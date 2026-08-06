@@ -6,9 +6,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimetoolresult "github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -25,22 +30,34 @@ const (
 // 并发：非线程安全。由事件消费侧（chatRuntimeEventBridge 的单 goroutine
 // 事件循环）独占调用。
 type EventEncoder struct {
-	model                *RenderModel
-	nextItemID           uint64 // item-{n} 单调分配
-	nextSeq              uint64 // 提交序号单调分配
-	clock                uint64 // 编码器时钟（每事件 +1）
-	revisions            map[string]uint64
-	assistantBy          map[string]*Item                 // canonical request key -> 当前 assistant item
-	reasoningBy          map[string]*Item                 // canonical request key -> 当前 reasoning item
-	requestAliases       map[string]string                // transport/logical alias -> canonical request key
-	latestRequestByScope map[string]string                // turn/logical-turn/trace scope -> 最新 request key
-	requestFinished      map[string]bool                  // request key -> 已收到 request finished
-	requestFailureBy     map[string]*Item                 // request key -> 已提交的可见 failure cell
-	toolByID             map[string]*Item                 // payload tool_call_id -> tool_call item
-	toolOutputBy         map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
-	priorityBy           map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
-	streamOrder          map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
-	stats                Stats
+	model                  *RenderModel
+	nextItemID             uint64 // item-{n} 单调分配
+	nextSeq                uint64 // 提交序号单调分配
+	clock                  uint64 // 编码器时钟（每事件 +1）
+	revisions              map[string]uint64
+	assistantBy            map[string]*Item                 // canonical request key -> 当前 assistant item
+	reasoningBy            map[string]*Item                 // canonical request key -> 当前 reasoning item
+	reasoningBarriers      map[string]bool                  // request key -> assistant native-history ordering fence
+	requestAliases         map[string]string                // transport/logical alias -> canonical request key
+	latestRequestByScope   map[string]string                // turn/logical-turn/trace scope -> 最新 request key
+	requestFinished        map[string]bool                  // request key -> 已收到 request finished
+	requestFailureBy       map[string]*Item                 // request key -> 已提交的可见 failure cell
+	toolByID               map[string]*Item                 // payload tool_call_id -> tool_call item
+	toolOutputBy           map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
+	priorityBy             map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
+	streamOrder            map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
+	orderingBarrierEnabled bool                             // production bridge reserves a hidden reasoning predecessor
+	stats                  Stats
+}
+
+// EnableReasoningOrderingBarrier enables the physical ordering barrier used by
+// the live bridge. Direct encoder consumers retain the historical compact model
+// unless they explicitly opt in, which keeps replay fixtures and compatibility
+// callers free of an implementation-only placeholder.
+func (e *EventEncoder) EnableReasoningOrderingBarrier(enabled bool) {
+	if e != nil {
+		e.orderingBarrierEnabled = enabled
+	}
 }
 
 // assistantStreamOrder 维护单条 assistant 流的 delta 有序提交状态
@@ -70,6 +87,7 @@ func NewEventEncoder() *EventEncoder {
 		revisions:            make(map[string]uint64),
 		assistantBy:          make(map[string]*Item),
 		reasoningBy:          make(map[string]*Item),
+		reasoningBarriers:    make(map[string]bool),
 		requestAliases:       make(map[string]string),
 		latestRequestByScope: make(map[string]string),
 		requestFinished:      make(map[string]bool),
@@ -151,6 +169,7 @@ func (e *EventEncoder) SubmitAssistant(text string) *ChangeSet {
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
 	it := e.appendItem(KindAssistant, "", text)
+	setAssistantPresentation(it)
 	it.Status = StatusCompleted
 	e.change(cs, OpAppend, it)
 	if e.model.Tail == nil {
@@ -174,6 +193,12 @@ func (e *EventEncoder) SubmitAssistant(text string) *ChangeSet {
 // 会话 transcript 的数据面内容。块为一次性终态（StatusCompleted，append
 // 即终态提交），与切片 7 parity 基线一致。
 func (e *EventEncoder) SubmitCommand(text string) *ChangeSet {
+	return e.SubmitCommandDocument(text, render.Document{})
+}
+
+// SubmitCommandDocument retains a command's structured render IR while Head
+// remains the stable plain projection used by logs and text-parity checks.
+func (e *EventEncoder) SubmitCommandDocument(text string, document render.Document) *ChangeSet {
 	if e == nil {
 		return nil
 	}
@@ -181,6 +206,9 @@ func (e *EventEncoder) SubmitCommand(text string) *ChangeSet {
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
 	it := e.appendItem(KindCommand, "", text)
+	if len(document.Blocks) > 0 {
+		it.Presentation = Presentation{Kind: PresentationDocument, Document: document.Clone()}
+	}
 	it.Status = StatusCompleted
 	e.change(cs, OpAppend, it)
 	if e.model.Tail == nil {
@@ -390,6 +418,10 @@ func (e *EventEncoder) SubmitToolResultDisplay(toolCallID, display string) *Chan
 // 交互输出不推进 Tail（Tail 由正常事件与用户/命令/错误注入推进，交互块
 // 不参与因果链）；cs.Tail 返回插入前的模型尾部。
 func (e *EventEncoder) SubmitUserInteraction(text string, anchor *Tail) *ChangeSet {
+	return e.SubmitUserInteractionDocument(text, render.Document{}, anchor)
+}
+
+func (e *EventEncoder) SubmitUserInteractionDocument(text string, document render.Document, anchor *Tail) *ChangeSet {
 	if e == nil {
 		return nil
 	}
@@ -397,6 +429,9 @@ func (e *EventEncoder) SubmitUserInteraction(text string, anchor *Tail) *ChangeS
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
 	it, afterID := e.insertItemAfter(anchor, KindUserInteraction, text)
+	if len(document.Blocks) > 0 {
+		it.Presentation = Presentation{Kind: PresentationDocument, Document: document.Clone()}
+	}
 	it.Status = StatusCompleted
 	e.changeAfter(cs, OpAppend, it, afterID)
 	cs.Tail = e.model.Tail
@@ -452,6 +487,7 @@ func (e *EventEncoder) Reset() {
 	e.revisions = make(map[string]uint64)
 	e.assistantBy = make(map[string]*Item)
 	e.reasoningBy = make(map[string]*Item)
+	e.reasoningBarriers = make(map[string]bool)
 	e.requestAliases = make(map[string]string)
 	e.latestRequestByScope = make(map[string]string)
 	e.requestFinished = make(map[string]bool)
@@ -586,9 +622,14 @@ func isKnownLegacyEventType(eventType string) bool {
 // 可见 transcript 从不显示它们；Scene 投影若为它们创建 system cell，会
 // 以 "❌ <type>" 形式把内部事件泄漏到可见输出（真实会话中的
 // session_start / session_compact_skipped / llm.request.started /
-// context.tool_schema.frozen 等）。编码器对静默事件不产生任何 Item 与
-// 变更（EncodeCount 仍计入：事件被消费；UnknownCount 不计：属已知类型），
-// 与旧路径可见行为严格一致（checkTextParity 亦依赖该对齐）。
+// context.tool_schema.frozen / tool.reduced 等）。编码器对静默事件不产生
+// 任何 Item 与变更（EncodeCount 仍计入：事件被消费；UnknownCount 不计：
+// 属已知类型），与旧路径可见行为严格一致（checkTextParity 亦依赖该对齐）。
+//
+// tool.reduced 是 reducer 在 tool.completed 之后补充的遥测事件（payload
+// 仅为 reducer 名、artifact 计数等元信息，无 tool 输出内容），对应的
+// mutable tool cell 已由 tool.requested/tool.completed 完成终态；若将其
+// 渲染为 system cell，会把字面 "tool.reduced" 泄漏到可见 transcript。
 //
 // 注意：llm.retry / response.* 等在旧路径有（或部分有）可见 timeline
 // 输出，不在此列；typed/dotted request lifecycle is classified above and
@@ -605,7 +646,8 @@ func isSilentSystemEventType(eventType string) bool {
 		"subagent.started",
 		"task.started",
 		"team.task.started",
-		"context.tool_schema.frozen":
+		"context.tool_schema.frozen",
+		"tool.reduced":
 		return true
 	}
 	return false
@@ -742,6 +784,38 @@ func (e *EventEncoder) insertItemAfter(anchor *Tail, kind ItemKind, head string)
 	return it, ""
 }
 
+// insertItemBefore 把新 Item 插入到 anchorID 对应 Item 之前（reasoning
+// 需要排在 assistant final 之前，见 applyReasoning）。anchor 不存在时退化
+// 为 append。Seq 仍为单调创建序号（渲染顺序 = 模型数组顺序）。
+func (e *EventEncoder) insertItemBefore(anchorID string, kind ItemKind, head string) *Item {
+	it := &Item{
+		ID:      e.nextID(),
+		Seq:     e.nextSeqValue(),
+		Kind:    kind,
+		Status:  StatusPending,
+		Head:    head,
+		Created: e.clock,
+		Updated: e.clock,
+	}
+	if anchorID != "" {
+		for i, existing := range e.model.Items {
+			if existing.ID == anchorID {
+				rest := make([]*Item, len(e.model.Items)-i)
+				copy(rest, e.model.Items[i:])
+				e.model.Items = append(e.model.Items[:i], it)
+				e.model.Items = append(e.model.Items, rest...)
+				e.revisions[it.ID] = 1
+				e.stats.AppendCount++
+				return it
+			}
+		}
+	}
+	e.model.Items = append(e.model.Items, it)
+	e.revisions[it.ID] = 1
+	e.stats.AppendCount++
+	return it
+}
+
 // upsertItem 按 ID 更新既有 Item；找不到时退化为 append（乱序免疫）。
 // mutate 返回 false 表示内容无变化（幂等跳过，不产生变更）。
 // 返回 (Item, changed)：changed=false 时调用方不得追加变更记录。
@@ -785,22 +859,38 @@ func (e *EventEncoder) removeItem(id string, cs *ChangeSet) {
 
 func (e *EventEncoder) change(cs *ChangeSet, o Op, it *Item) {
 	rev := e.revisions[it.ID]
-	cp := *it
-	cs.Changes = append(cs.Changes, ItemChange{Op: o, Item: &cp, Revision: rev})
+	cs.Changes = append(cs.Changes, ItemChange{Op: o, Item: cloneItem(it), Revision: rev})
 }
 
 // changeAfter 与 change 同语义，额外携带锚定插入目标（AfterID 非空时
 // 渲染层在目标 cell 之后插入，见 ItemChange.AfterID）。
 func (e *EventEncoder) changeAfter(cs *ChangeSet, o Op, it *Item, afterID string) {
 	rev := e.revisions[it.ID]
-	cp := *it
-	cs.Changes = append(cs.Changes, ItemChange{Op: o, Item: &cp, Revision: rev, AfterID: afterID})
+	cs.Changes = append(cs.Changes, ItemChange{Op: o, Item: cloneItem(it), Revision: rev, AfterID: afterID})
+}
+
+func (e *EventEncoder) changeBefore(cs *ChangeSet, o Op, it *Item, beforeID string) {
+	rev := e.revisions[it.ID]
+	cs.Changes = append(cs.Changes, ItemChange{Op: o, Item: cloneItem(it), Revision: rev, BeforeID: beforeID})
+}
+
+func cloneItem(item *Item) *Item {
+	if item == nil {
+		return nil
+	}
+	clone := *item
+	clone.Presentation = item.Presentation.Clone()
+	return &clone
 }
 
 // ---- 具体操作 ----
 
 func (e *EventEncoder) applySystem(ev runtimeevents.Event, cs *ChangeSet) {
-	it := e.appendItem(KindSystem, "", systemHead(ev))
+	head := systemHead(ev)
+	it := e.appendItem(KindSystem, "", head)
+	if looksLikeDiffPresentation(head) {
+		it.Presentation.Kind = PresentationDiffSupplement
+	}
 	e.change(cs, OpAppend, it)
 }
 
@@ -899,6 +989,9 @@ func (e *EventEncoder) applyPriorityResolved(ev runtimeevents.Event, _ *ChangeSe
 func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	text, streamDelta := reasoningText(ev)
 	key := e.resolveAssistantRequestKey(ev)
+	if text == "" {
+		return
+	}
 	// reasoning 拥有独立索引：绝不允许覆盖 assistant Item 的内容或状态
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
@@ -917,11 +1010,64 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 		if changed {
 			e.change(cs, OpUpsert, u)
 		}
+		e.removeReasoningBarrier(key, cs)
 		return
 	}
-	it := e.appendItem(KindReasoning, "", text)
+	var it *Item
+	if assistant := e.assistantBy[key]; assistant != nil {
+		it = e.insertItemBefore(assistant.ID, KindReasoning, text)
+		e.changeBefore(cs, OpAppend, it, assistant.ID)
+	} else {
+		it = e.appendItem(KindReasoning, "", text)
+		e.change(cs, OpAppend, it)
+	}
 	e.reasoningBy[key] = it
-	e.change(cs, OpAppend, it)
+	e.removeReasoningBarrier(key, cs)
+}
+
+func (e *EventEncoder) markReasoningBarrier(key string, assistant *Item, cs *ChangeSet) {
+	if e == nil || key == "" || assistant == nil || e.reasoningBy[key] != nil || cs == nil {
+		return
+	}
+	e.reasoningBarriers[key] = true
+	assistant.HistoryCommitBlocked = true
+	// 空 reasoning 占位 cell：native-history ordering fence 的语义位置。
+	// 迟到的 reasoning（assistant.reasoning 事件）经 reasoningBy 命中并
+	// 填充此占位；authoritative final 提交时占位即最终 reasoning 内容。
+	// 占位插在 assistant 之前（模型数组 insertItemBefore + Scene 锚定
+	// InsertCellBefore），保证 Scene 渲染顺序 reasoning -> assistant。
+	placeholder := e.insertItemBefore(assistant.ID, KindReasoning, "")
+	e.reasoningBy[key] = placeholder
+	e.changeBefore(cs, OpAppend, placeholder, assistant.ID)
+}
+
+func (e *EventEncoder) removeReasoningBarrier(key string, cs *ChangeSet) bool {
+	if e == nil || cs == nil || key == "" || !e.reasoningBarriers[key] {
+		return false
+	}
+	delete(e.reasoningBarriers, key)
+	assistant := e.assistantBy[key]
+	if assistant == nil || !assistant.HistoryCommitBlocked {
+		return false
+	}
+	u, changed := e.upsertItem(assistant.ID, KindAssistant, func(t *Item) bool {
+		if !t.HistoryCommitBlocked {
+			return false
+		}
+		t.HistoryCommitBlocked = false
+		return true
+	})
+	if changed {
+		e.change(cs, OpUpsert, u)
+	}
+	// 空占位（barrier 的语义位置）从未被迟到的 reasoning 填充：它不是持久
+	// 内容，barrier 解除时必须移除，否则会成为空白 supplement cell。
+	if placeholder := e.reasoningBy[key]; placeholder != nil &&
+		placeholder.Kind == KindReasoning && strings.TrimSpace(placeholder.Head) == "" {
+		delete(e.reasoningBy, key)
+		e.removeItem(placeholder.ID, cs)
+	}
+	return changed
 }
 
 // reasoningText accepts both the compact encoder payload and the typed nested
@@ -973,16 +1119,31 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 	if delta == "" {
 		return
 	}
-	e.finalizeReasoningBeforeAssistant(key, cs)
+	if current := e.assistantBy[key]; current != nil && current.Status.Terminal() {
+		// A delta arriving after the authoritative final belongs to a retired
+		// request. Do not create a fresh ordering barrier (or a duplicate
+		// assistant cell) for it.
+		e.stats.DuplicateCount++
+		return
+	}
 	seq, hasSeq := assistantSequence(ev.Payload)
 	it := e.assistantBy[key]
 	if it == nil {
 		// The first visible delta creates the assistant after any completed
-		// reasoning item. Continue through the reorder path so sequenced chunks
-		// retain their existing semantics.
+		// reasoning item. Finalize a pending reasoning first so the change
+		// order mirrors the semantic render order (reasoning completed upsert
+		// precedes the assistant append); otherwise the Scene mapper would
+		// materialize the assistant cell before the reasoning cell.
+		if e.reasoningBy[key] != nil && !e.reasoningBarriers[key] {
+			e.finalizeReasoningBeforeAssistant(key, cs)
+		}
 		it = e.appendItem(KindAssistant, "", "")
+		setAssistantPresentation(it)
 		e.assistantBy[key] = it
 		e.change(cs, OpAppend, it)
+	}
+	if e.reasoningBy[key] != nil && !e.reasoningBarriers[key] {
+		e.finalizeReasoningBeforeAssistant(key, cs)
 	}
 	if it.Status.Terminal() {
 		// final 后到达的 delta：丢弃（对齐旧终端 HasRenderedAssistantFinal）。
@@ -998,6 +1159,7 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 				t.Head += delta
 			}
 			t.Status = StatusRunning
+			setAssistantPresentation(t)
 			return true
 		})
 		if changed {
@@ -1058,6 +1220,7 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 			t.Head += head
 		}
 		t.Status = StatusRunning
+		setAssistantPresentation(t)
 		return true
 	})
 	if changed {
@@ -1068,10 +1231,12 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet) {
 	key := e.resolveAssistantRequestKey(ev)
 	text := payloadString(ev.Payload["content"], payloadString(ev.Payload["message"], ""))
+	e.removeReasoningBarrier(key, cs)
 	e.finalizeReasoningBeforeAssistant(key, cs)
 	it := e.assistantBy[key]
 	if it == nil {
 		it = e.appendItem(KindAssistant, "", text)
+		setAssistantPresentation(it)
 		it.Status = StatusCompleted // 孤儿 final：直接终态（不保持 pending）
 		e.assistantBy[key] = it
 		e.change(cs, OpAppend, it)
@@ -1087,6 +1252,9 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 		}
 		if t.Status != StatusCompleted {
 			t.Status = StatusCompleted
+			changed = true
+		}
+		if setAssistantPresentation(t) {
 			changed = true
 		}
 		return changed
@@ -1116,7 +1284,20 @@ func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
 	// omit step while retaining stream_id. Flush buffered deltas and close the
 	// reasoning predecessor, but keep assistant mutable until assistant.message
 	// (or the session/EndRun fallback) commits it.
-	e.finalizeReasoning(key, StatusCompleted, cs)
+	// native-history ordering fence：request finished 后、authoritative final
+	// 未到、reasoning 也未到——此时可能收到迟到的 reasoning（assistant.
+	// reasoning 事件）。在 assistant 前保留一个空 reasoning 占位 cell（经
+	// reasoningBy 命中并在 reasoning 到达时填充），并阻塞 assistant 提交
+	// native history；assistant.message 提交时解除。
+	if e.orderingBarrierEnabled {
+		if assistant := e.assistantBy[key]; assistant != nil && !assistant.Status.Terminal() &&
+			e.reasoningBy[key] == nil && e.requestFinished[key] {
+			e.markReasoningBarrier(key, assistant, cs)
+		}
+	}
+	if !e.reasoningBarriers[key] {
+		e.finalizeReasoning(key, StatusCompleted, cs)
+	}
 	if it := e.assistantBy[key]; it != nil && !it.Status.Terminal() {
 		e.flushAssistantStream(key, it, cs)
 	}
@@ -1154,7 +1335,12 @@ func (e *EventEncoder) finalizeRequestStream(key string, status ItemStatus, cs *
 	}
 	// Keep transcript order deterministic: the reasoning predecessor reaches
 	// terminal state before the assistant partial and its following error cell.
-	e.finalizeReasoning(key, status, cs)
+	if e.removeReasoningBarrier(key, cs) {
+		// An empty barrier is an ordering aid only and must never become a
+		// durable blank transcript cell on request failure.
+	} else {
+		e.finalizeReasoning(key, status, cs)
+	}
 	it := e.assistantBy[key]
 	if it == nil || it.Status.Terminal() {
 		return
@@ -1259,6 +1445,7 @@ func (e *EventEncoder) finalizeOpenStreams(status ItemStatus, cs *ChangeSet) {
 		if it == nil || it.Status.Terminal() {
 			continue
 		}
+		e.removeReasoningBarrier(key, cs)
 		e.flushAssistantStream(key, it, cs)
 		u, changed := e.upsertItem(it.ID, KindAssistant, func(item *Item) bool {
 			if item.Status.Terminal() {
@@ -1283,6 +1470,28 @@ func (e *EventEncoder) finalizeOpenStreams(status ItemStatus, cs *ChangeSet) {
 			continue
 		}
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(item *Item) bool {
+			if item.Status.Terminal() {
+				return false
+			}
+			item.Status = status
+			return true
+		})
+		if changed {
+			e.change(cs, OpUpsert, u)
+		}
+	}
+
+	toolIDs := make([]string, 0, len(e.toolByID))
+	for callID := range e.toolByID {
+		toolIDs = append(toolIDs, callID)
+	}
+	sort.Strings(toolIDs)
+	for _, callID := range toolIDs {
+		it := e.toolByID[callID]
+		if it == nil || it.Status.Terminal() {
+			continue
+		}
+		u, changed := e.upsertItem(it.ID, KindToolCall, func(item *Item) bool {
 			if item.Status.Terminal() {
 				return false
 			}
@@ -1330,7 +1539,17 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 			// 已完成调用后同 callID 重新发起：视为新调用，允许新建。
 		}
 	}
-	it := e.appendItem(KindToolCall, "", name)
+	head := toolCallDisplayHead(ev)
+	if head == "" {
+		head = name
+	}
+	// 执行中 head 带 "• Running " 前缀（对齐旧 chat_tool_rendering 的
+	// Running 行）：transcript 里工具开始执行即有可见状态；完成后由
+	// applyToolFinished 替换首行为 "• Completed/Failed ..."。
+	if !strings.HasPrefix(head, "• ") {
+		head = "• Running " + head
+	}
+	it := e.appendItem(KindToolCall, "", head)
 	if callID != "" {
 		e.toolByID[callID] = it
 	}
@@ -1349,13 +1568,11 @@ func (e *EventEncoder) applyToolProgress(ev runtimeevents.Event, cs *ChangeSet) 
 		return
 	}
 	u, changed := e.upsertItem(it.ID, KindToolCall, func(t *Item) bool {
-		name := payloadString(ev.Payload["tool_name"], ev.ToolName)
-		next := name
-		if next == "" {
-			next = t.Head
-			if newline := strings.IndexByte(next, '\n'); newline >= 0 {
-				next = next[:newline]
-			}
+		// progress 基于 started 建立的 display head（首行）追加，避免被
+		// payload tool_name 重置而丢失命令/参数摘要细节。
+		next := t.Head
+		if newline := strings.IndexByte(next, '\n'); newline >= 0 {
+			next = next[:newline]
 		}
 		next += "\n" + detail
 		if t.Head == next {
@@ -1385,6 +1602,18 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 			}
 			if displayHead != "" {
 				t.Head = displayHead
+			} else if title := toolCallCompletedTitle(ev, t.Head); title != "" {
+				// 无 display_head（direct legacy 投影）时恢复旧渲染的调用后
+				// 标题（• Completed/Failed <display>[ via <backend>][ in <dur>]），
+				// 首行替换为标题，保留 progress 阶段累积的细节行（不丢信息）。
+				if newline := strings.IndexByte(t.Head, '\n'); newline >= 0 {
+					t.Head = title + t.Head[newline:]
+				} else {
+					t.Head = title
+				}
+			}
+			if looksLikeDiffPresentation(t.Head) {
+				t.Presentation.Kind = PresentationDiffSupplement
 			}
 			t.Status = StatusCompleted
 			return true
@@ -1419,8 +1648,35 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 	}
 	seen[output] = struct{}{}
 	out := e.appendItem(KindToolOutput, cause, output)
+	if looksLikeDiffPresentation(output) {
+		out.Presentation.Kind = PresentationDiffSupplement
+	}
 	out.Status = StatusCompleted // 工具输出一次性完成（终态语义）
 	e.change(cs, OpAppend, out)
+}
+
+// looksLikeDiffPresentation recognizes the canonical textual formats accepted
+// by ui/diff.RenderText. It deliberately records only semantic intent; width,
+// syntax theme and terminal color depth are resolved later by layout.
+func looksLikeDiffPresentation(text string) bool {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "• Edited ") || strings.HasPrefix(line, "• Diff ") {
+			return true
+		}
+	}
+	if strings.HasPrefix(trimmed, "diff --git ") || strings.Contains(trimmed, "\ndiff --git ") {
+		return true
+	}
+	return strings.Contains("\n"+trimmed, "\n--- ") &&
+		strings.Contains("\n"+trimmed, "\n+++ ") &&
+		strings.Contains("\n"+trimmed, "\n@@ ")
 }
 
 // flushAssistantStream 在流结束事件（assistant final / llm finished）时
@@ -1447,11 +1703,33 @@ func (e *EventEncoder) flushAssistantStream(key string, it *Item, cs *ChangeSet)
 	}
 	u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
 		t.Head += tail
+		setAssistantPresentation(t)
 		return true
 	})
 	if changed {
 		e.change(cs, OpUpsert, u)
 	}
+}
+
+// setAssistantPresentation keeps the semantic source and its renderer contract
+// aligned throughout streaming and finalization. Ordinary multi-line prose is
+// source-preserving plain text; only actual Markdown enters the structured
+// renderer. Mixing those contracts would make an acknowledged active prefix
+// differ from the finalized cell and cause the same message to be handed off
+// to native history twice.
+func setAssistantPresentation(it *Item) bool {
+	if it == nil {
+		return false
+	}
+	next := PresentationPlain
+	if markdown.LooksLikeMarkdown(it.Head) {
+		next = PresentationAssistantMarkdown
+	}
+	if it.Presentation.Kind == next && len(it.Presentation.Document.Blocks) == 0 {
+		return false
+	}
+	it.Presentation = Presentation{Kind: next}
+	return true
 }
 
 // ---- 辅助 ----
@@ -1709,6 +1987,166 @@ func toolFinishedText(ev runtimeevents.Event) string {
 	default:
 		return ""
 	}
+}
+
+// toolCallDisplayHead 构建工具调用期间（Running/调用前）tool cell 的可读
+// 语义头。对齐旧 compactToolDisplayTextWithSource 的文本格式：
+//   - shell 类工具显示命令文本（command_text，其次 arg_preview 的 command= 摘要）
+//   - 其他工具显示 "工具名 + arg_preview"
+//   - 无细节时退化为工具名
+//   - 带 [meta]/[mcp]/[broker] 来源前缀
+func toolCallDisplayHead(ev runtimeevents.Event) string {
+	name := toolCallName(ev)
+	if name == "" {
+		return ""
+	}
+	commandText := chatToolDisplaySegment(payloadString(ev.Payload["command_text"], ""))
+	argPreview := chatToolDisplaySegment(payloadString(ev.Payload["arg_preview"], ""))
+	display := ""
+	if runtimepolicy.IsShellLikeToolName(name) {
+		if command := firstNonEmptyChatToolSegment(commandText, chatToolCommandFromPreview(argPreview)); command != "" {
+			display = command
+		}
+	} else if argPreview != "" {
+		display = name + " " + argPreview
+	}
+	if display == "" {
+		display = name
+	}
+	display = truncateChatToolText(display, 200)
+	if source := payloadString(ev.Payload[runtimetoolresult.SourceKey], ""); source != "" {
+		if prefix := chatToolSourcePrefix(source); prefix != "" {
+			return prefix + display
+		}
+	}
+	return display
+}
+
+// toolCallCompletedTitle 构建工具调用完成后的 tool cell 终态标题（调用后
+// 渲染）。对齐旧 compactToolCompletionTitle："• Completed <display>
+// [via <backend>][ in <duration>]"，error 非空时为 "• Failed"。
+// display 优先取 head 首行（started 建立的调用前摘要，含命令/参数细节），
+// 无 head 时回退从 payload 重建。无 display 时返回空，保持既有 head。
+func toolCallCompletedTitle(ev runtimeevents.Event, head string) string {
+	display := ""
+	if head != "" {
+		display = head
+		if newline := strings.IndexByte(display, '\n'); newline >= 0 {
+			display = display[:newline]
+		}
+		// started 建立的 head 首行带 "• Running " 前缀，构造终态标题前剥掉，
+		// 避免产出 "• Completed • Running ..."。
+		display = strings.TrimSpace(strings.TrimPrefix(display, "• Running "))
+	}
+	if display == "" {
+		display = toolCallDisplayHead(ev)
+	}
+	if display == "" {
+		return ""
+	}
+	status := "Completed"
+	if strings.TrimSpace(payloadString(ev.Payload["error"], "")) != "" {
+		status = "Failed"
+	}
+	title := "• " + status + " " + display
+	if backend := chatToolBackendSuffix(ev); backend != "" {
+		title += backend
+	}
+	if durationSuffix := chatToolDurationSuffix(ev); durationSuffix != "" {
+		title += durationSuffix
+	}
+	return title
+}
+
+// toolCallName 优先 payload 的 tool_name（chat actor 通道），其次
+// logical_tool（agent runtime 通道），最后事件携带的 ToolName。
+func toolCallName(ev runtimeevents.Event) string {
+	return payloadString(ev.Payload["tool_name"], payloadString(ev.Payload["logical_tool"], ev.ToolName))
+}
+
+func chatToolDisplaySegment(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func chatToolCommandFromPreview(argPreview string) string {
+	argPreview = strings.TrimSpace(argPreview)
+	if !strings.HasPrefix(argPreview, "command=") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(argPreview, "command="))
+}
+
+func firstNonEmptyChatToolSegment(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func truncateChatToolText(text string, limit int) string {
+	if limit <= 0 || len([]rune(text)) <= limit {
+		return text
+	}
+	return strings.TrimSpace(string([]rune(text)[:limit])) + "..."
+}
+
+func chatToolSourcePrefix(source string) string {
+	switch runtimetoolresult.NormalizeSource(source) {
+	case runtimetoolresult.SourceMeta:
+		return "[meta] "
+	case runtimetoolresult.SourceMCP:
+		return "[mcp] "
+	case runtimetoolresult.SourceBroker:
+		return "[broker] "
+	default:
+		return ""
+	}
+}
+
+func chatToolBackendSuffix(ev runtimeevents.Event) string {
+	backend := payloadString(ev.Payload["execution_backend"], "")
+	if backend == "" {
+		backend = payloadString(ev.Payload["engine"], "")
+	}
+	backend = chatToolDisplaySegment(backend)
+	if backend == "" {
+		return ""
+	}
+	return " via " + truncateChatToolText(backend, 40)
+}
+
+func chatToolDurationSuffix(ev runtimeevents.Event) string {
+	durationMs := payloadInt64Value(ev.Payload["duration_ms"])
+	if durationMs <= 0 {
+		return ""
+	}
+	return " in " + (time.Duration(durationMs) * time.Millisecond).String()
+}
+
+func payloadInt64Value(value interface{}) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case uint64:
+		return int64(typed)
+	case uint32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func payloadBoolValue(value interface{}) bool {

@@ -12,7 +12,7 @@
 
 本节是当前权威结论，覆盖后文 2026-08-04 对“尚未安装”“仍由 legacy writer 负责”的施工期描述。修订方案的核心目标已经落地：production interactive terminal 只有 `TerminalSessionPresenter/TerminalSession` 一个 physical writer；`AppState/Scene` 是语义来源；tokenized `HistoryEffectQueue` 管理交接；top terminal-owned history region 与 bottom application-owned inline viewport 分离；`ScreenModel` 不再持有或重画 finalized history；active stable prefix 只有 Ack 后才从 live projection 移除；finalize 只提交未 Ack suffix；Markdown 交接保留结构化 IR。
 
-真实 provider Windows Terminal run `output/aicli-terminal-e2e/opencode-wt-1176ea6f5afc4fa597964cc30b50a984` 给出端到端证据：40/40 finalized marker 各一次且严格有序，marker 01 在完整 `DocumentRange` 但不在 visible range，marker 40 可见，reasoning sentinel 位于首 marker 前且只出现一次，raw runtime event 标签未泄漏，异常空行数为 0，三次 UIA snapshot 稳定，`/exit` 后 runner exit code 为 0，forced cleanup 为 0。`--prompt` 与 `chat --prompt` 的首次自动提交、交互继续和 `--no-interactive` 退出边界均有命令级回归。
+真实 provider Windows Terminal run `output/aicli-terminal-e2e/opencode-wt-7347d2bf0b0346c1ba975085b3c8b2eb/manifest.json` 给出端到端证据：40/40 finalized marker 各一次、严格有序且连续，marker 01 在完整 `DocumentRange` 但不在 visible range，marker 40 可见；provider chat artifact 中唯一 reasoning summary 的完整非空白内容在 `DocumentRange` 中恰好投影一次并位于首 marker 前；raw runtime event 标签未泄漏，异常空行数为 0，三次 UIA snapshot 稳定。`/exit` 通过按 executable path + run ID 精确定位的 `AttachConsole+WriteConsoleInputW` helper 发出，helper/runner code 均为 0，forced cleanup 为 0。`--prompt` 与 `chat --prompt` 的首次自动提交、交互继续和 `--no-interactive` 退出边界均有命令级回归。
 
 这里的 reasoning 结论是“语义内容正常显示且顺序正确”；未出现的是 raw `assistant.reasoning` 事件名称，不是 reasoning 正文本身。
 

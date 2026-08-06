@@ -482,6 +482,60 @@ function Get-ProviderRouteEvidence {
     }
 }
 
+function Get-ReasoningProjectionEvidence {
+    param(
+        [Parameter(Mandatory)][string]$LogRoot,
+        [Parameter(Mandatory)][string]$Document,
+        [Parameter(Mandatory)][string]$FirstMarker
+    )
+    $records = [Collections.Generic.List[object]]::new()
+    $parseErrors = [Collections.Generic.List[string]]::new()
+    # UIA exposes terminal hard wraps as physical newlines, including wraps in
+    # the middle of a token. Whitespace-insensitive matching preserves all
+    # non-whitespace content while avoiding a false mismatch at those wraps.
+    $normalizedDocument = [regex]::Replace($Document, '\s+', '')
+    $normalizedMarker = [regex]::Replace($FirstMarker, '\s+', '')
+    $files = @(Get-ChildItem -LiteralPath $LogRoot -Recurse -File -Filter 'chat_*.json' -ErrorAction SilentlyContinue | Sort-Object FullName)
+    foreach ($file in $files) {
+        try {
+            $payload = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+            foreach ($message in @($payload.messages)) {
+                if (-not [string]::Equals([string]$message.message_type, 'response', [StringComparison]::OrdinalIgnoreCase)) { continue }
+                $summary = Get-JsonPathString $message @('content', 'reasoning', 'summary')
+                if ([string]::IsNullOrWhiteSpace($summary)) { continue }
+                $normalizedSummary = [regex]::Replace($summary, '\s+', '')
+                $projectionMatchCount = [regex]::Matches(
+                    $normalizedDocument,
+                    [regex]::Escape($normalizedSummary),
+                    [Text.RegularExpressions.RegexOptions]::CultureInvariant
+                ).Count
+                $documentIndex = $normalizedDocument.IndexOf($normalizedSummary, [StringComparison]::Ordinal)
+                $searchAfterSummary = if ($documentIndex -ge 0) { $documentIndex + $normalizedSummary.Length } else { 0 }
+                $markerIndex = $normalizedDocument.IndexOf($normalizedMarker, $searchAfterSummary, [StringComparison]::Ordinal)
+                $records.Add([ordered]@{
+                    path = $file.FullName
+                    summary_characters = $summary.Length
+                    summary_sha256 = Get-TextSha256 $summary
+                    projection_match_count = $projectionMatchCount
+                    projected_exactly_once = $projectionMatchCount -eq 1
+                    normalized_document_index = $documentIndex
+                    before_first_marker = $documentIndex -ge 0 -and $markerIndex -ge $searchAfterSummary
+                })
+            }
+        } catch {
+            $parseErrors.Add("$($file.FullName): $($_.Exception.Message)")
+        }
+    }
+    $invalidCount = @($records | Where-Object { -not $_.projected_exactly_once -or -not $_.before_first_marker }).Count
+    return [pscustomobject]@{
+        Found = $records.Count -gt 0
+        Valid = $records.Count -eq 1 -and $invalidCount -eq 0 -and $parseErrors.Count -eq 0
+        RecordCount = $records.Count
+        Records = @($records)
+        ParseErrors = @($parseErrors)
+    }
+}
+
 function Get-MarkerBlankLineViolations {
     param(
         [Parameter(Mandatory)][string]$Document,
@@ -576,6 +630,40 @@ function Test-AicliTerminalE2EHelpers {
     if ($blankViolations.Count -ne 1 -or $blankViolations[0].after_marker -ne 1 -or $blankViolations[0].before_marker -ne 2) {
         throw "helper self-test failed: marker blank-line violation was not detected"
     }
+    $reasoningFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("aicli-reasoning-fixture-" + [Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $reasoningFixtureRoot -Force | Out-Null
+        $reasoningSummary = "reasoning alpha`nreasoning beta"
+        $reasoningPayload = [ordered]@{
+            messages = @([ordered]@{
+                message_type = "response"
+                content = [ordered]@{ reasoning = [ordered]@{ summary = $reasoningSummary } }
+            })
+        }
+        Write-Utf8NoBom -Path (Join-Path $reasoningFixtureRoot "chat_fixture.json") `
+            -Value ($reasoningPayload | ConvertTo-Json -Depth 6)
+        $hardWrappedReasoning = "reasoning al`r`npha`r`nreasoning beta"
+        $projected = Get-ReasoningProjectionEvidence -LogRoot $reasoningFixtureRoot `
+            -Document ($hardWrappedReasoning + "`r`n" + $fixtureLines[1]) -FirstMarker "$fixturePrefix-01"
+        if (-not $projected.Valid -or $projected.RecordCount -ne 1 -or
+            $projected.Records[0].projection_match_count -ne 1 -or
+            -not $projected.Records[0].before_first_marker) {
+            throw "helper self-test failed: provider reasoning projection was not recognized"
+        }
+        $duplicatedProjection = Get-ReasoningProjectionEvidence -LogRoot $reasoningFixtureRoot `
+            -Document ($hardWrappedReasoning + "`r`n" + $hardWrappedReasoning + "`r`n" + $fixtureLines[1]) `
+            -FirstMarker "$fixturePrefix-01"
+        if ($duplicatedProjection.Valid -or $duplicatedProjection.Records[0].projection_match_count -ne 2) {
+            throw "helper self-test failed: duplicate provider reasoning projection was accepted"
+        }
+        $lateProjection = Get-ReasoningProjectionEvidence -LogRoot $reasoningFixtureRoot `
+            -Document ($fixtureLines[1] + "`r`n" + $hardWrappedReasoning) -FirstMarker "$fixturePrefix-01"
+        if ($lateProjection.Valid -or $lateProjection.Records[0].before_first_marker) {
+            throw "helper self-test failed: provider reasoning after final marker was accepted"
+        }
+    } finally {
+        Remove-Item -LiteralPath $reasoningFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
     $readyFixture = ">`r`n`r`nPlan OFF · deepseek-v4-f... max · opencode.ai"
     if (-not (Test-ReadyPromptVisible $readyFixture)) {
         throw "helper self-test failed: restored prompt/idle footer was not recognized"
@@ -632,6 +720,7 @@ $stableSamples = 0
 $exactlyOnce = 0
 $statusEvidence = Get-ReadyPromptEvidence -VisibleText "" -ExpectedProvider $expectedProvider -ExpectedModel $expectedModel -ExpectedReasoningEffort $expectedReasoningEffort
 $routeEvidence = [pscustomobject]@{ Found = $false; Valid = $false; RecordCount = 0; Records = @(); ParseErrors = @() }
+$reasoningProjectionEvidence = [pscustomobject]@{ Found = $false; Valid = $false; RecordCount = 0; Records = @(); ParseErrors = @() }
 $markerResults = @()
 $markerIndicesStrictlyIncreasing = $false
 $reasoningEvidence = [pscustomobject]@{ Found = $false; Unique = $false; Text = ""; Index = -1; LineNumber = -1; MatchCount = 0 }
@@ -806,6 +895,7 @@ try {
     $markerIndicesStrictlyIncreasing = $indicesIncreasing
 
     $firstMarker = $runPrefix + "-01"
+    $reasoningProjectionEvidence = Get-ReasoningProjectionEvidence -LogRoot $chatLogDir -Document $document -FirstMarker $firstMarker
     $firstMarkerEvidence = Get-StandaloneMarkerEvidence -Document $document -Marker $firstMarker
     $firstVisibleEvidence = Get-StandaloneMarkerEvidence -Document $visible -Marker $firstMarker
     $lastVisibleEvidence = Get-StandaloneMarkerEvidence -Document $visible -Marker $lastMarker
@@ -842,6 +932,9 @@ try {
     }
     if (-not $routeEvidence.Valid) {
         $failures.Add("provider request artifacts do not prove the expected provider/model/reasoning-effort route")
+    }
+    if (-not $reasoningProjectionEvidence.Valid) {
+        $failures.Add("provider reasoning summary artifact was not projected exactly once before marker 01")
     }
     if ($rawReasoningLabel) {
         $failures.Add("raw assistant.reasoning text leaked into terminal output")
@@ -1004,6 +1097,13 @@ try {
             route_records = @($routeEvidence.Records)
             route_parse_errors = @($routeEvidence.ParseErrors)
         }
+        reasoning_projection = [ordered]@{
+            artifact_found = $reasoningProjectionEvidence.Found
+            valid = $reasoningProjectionEvidence.Valid
+            artifact_count = $reasoningProjectionEvidence.RecordCount
+            records = @($reasoningProjectionEvidence.Records)
+            parse_errors = @($reasoningProjectionEvidence.ParseErrors)
+        }
         terminal = [ordered]@{
             process_id = $terminalPID
             process_name = $terminalProcessName
@@ -1050,6 +1150,7 @@ try {
             expected_model_visible = $statusEvidence.ModelVisible
             expected_reasoning_effort_visible = $statusEvidence.ReasoningEffortVisible
             provider_route_artifacts_valid = $routeEvidence.Valid
+            provider_reasoning_summary_projected = $reasoningProjectionEvidence.Valid
             reasoning_before_marker_01 = [bool]($reasoningEvidence.Found -and $reasoningEvidence.Unique -and $reasoningEvidence.Index -lt $firstMarkerIndex)
             reasoning_document_index = [int]$reasoningEvidence.Index
             reasoning_document_line = [int]$reasoningEvidence.LineNumber
@@ -1115,6 +1216,7 @@ Write-Host "Scrollback: marker01 full=True visible=False | marker40 visible=True
 Write-Host "Completion: request_completed=True | ready_prompt_restored=True"
 Write-Host "UIA evidence: stable=$($snapshotEvidence.Stable) samples=$($snapshotEvidence.ConsecutiveStableSamples) document_sha256=$($snapshotEvidence.DocumentSHA256) visible_sha256=$($snapshotEvidence.VisibleSHA256)"
 Write-Host "Ordering: reasoning_before_marker01=True | marker_indices_strictly_increasing=True"
+Write-Host "Reasoning: provider summary artifact projected before marker01=True"
 Write-Host "Raw protocol labels: assistant.reasoning=False | llm.request.started=False | llm.request.finished=False"
 Write-Host "Abnormal marker blank-line gaps: 0"
 Write-Host "Exit: /exit sent=True confirmed=True | runner_exit_code=$runnerExitCode | observed_after=$runnerExitObservedAfter"

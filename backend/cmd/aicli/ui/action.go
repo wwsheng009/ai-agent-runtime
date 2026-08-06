@@ -209,6 +209,66 @@ func (CloseBacktrackPicker) isUIAction()         {}
 func (CloseBacktrackPicker) Class() ActionClass  { return ClassBarrier }
 func (CloseBacktrackPicker) CoalesceKey() string { return "" }
 
+// OpenModelPicker and CloseModelPicker bind the provider→model→reasoning
+// selector to its ScreenLease. The picker owns only transient list state; the
+// actor retains the lease identity so stale lifecycle actions cannot clear a
+// newer modal or resume the primary presenter early.
+type OpenModelPicker struct {
+	LeaseID uint64
+}
+
+func (OpenModelPicker) isUIAction()         {}
+func (OpenModelPicker) Class() ActionClass  { return ClassBarrier }
+func (OpenModelPicker) CoalesceKey() string { return "" }
+
+type CloseModelPicker struct {
+	LeaseID uint64
+}
+
+func (CloseModelPicker) isUIAction()         {}
+func (CloseModelPicker) Class() ActionClass  { return ClassBarrier }
+func (CloseModelPicker) CoalesceKey() string { return "" }
+
+// OpenThemePicker and CloseThemePicker bind the live-preview theme selector to
+// its ScreenLease. The picker owns only the working theme snapshot; the actor
+// retains the lease identity so stale lifecycle actions cannot clear a newer
+// modal or resume the primary presenter early.
+type OpenThemePicker struct {
+	LeaseID uint64
+}
+
+func (OpenThemePicker) isUIAction()         {}
+func (OpenThemePicker) Class() ActionClass  { return ClassBarrier }
+func (OpenThemePicker) CoalesceKey() string { return "" }
+
+type CloseThemePicker struct {
+	LeaseID uint64
+}
+
+func (CloseThemePicker) isUIAction()         {}
+func (CloseThemePicker) Class() ActionClass  { return ClassBarrier }
+func (CloseThemePicker) CoalesceKey() string { return "" }
+
+// OpenSkillPicker and CloseSkillPicker bind the skill selector to its
+// ScreenLease. The picker owns only transient list state; the actor retains
+// the lease identity so stale lifecycle actions cannot clear a newer modal or
+// resume the primary presenter early.
+type OpenSkillPicker struct {
+	LeaseID uint64
+}
+
+func (OpenSkillPicker) isUIAction()         {}
+func (OpenSkillPicker) Class() ActionClass  { return ClassBarrier }
+func (OpenSkillPicker) CoalesceKey() string { return "" }
+
+type CloseSkillPicker struct {
+	LeaseID uint64
+}
+
+func (CloseSkillPicker) isUIAction()         {}
+func (CloseSkillPicker) Class() ActionClass  { return ClassBarrier }
+func (CloseSkillPicker) CoalesceKey() string { return "" }
+
 // TranscriptPagerScroll is a durable user intent. Reducer-side layout derives
 // the resulting anchor from semantic cells at the current geometry.
 type TranscriptPagerScroll struct {
@@ -409,6 +469,18 @@ type ReplaceTranscriptAction struct {
 func (ReplaceTranscriptAction) isUIAction()         {}
 func (ReplaceTranscriptAction) Class() ActionClass  { return ClassDurable }
 func (ReplaceTranscriptAction) CoalesceKey() string { return "" }
+
+// SetThemeContextAction installs the immutable theme/capability snapshot used
+// by every width-aware projection and by the physical writer. It is a barrier:
+// no content action already queued before a theme change may be rendered with
+// a partially updated global/presenter theme.
+type SetThemeContextAction struct {
+	Theme style.ThemeContext
+}
+
+func (SetThemeContextAction) isUIAction()         {}
+func (SetThemeContextAction) Class() ActionClass  { return ClassBarrier }
+func (SetThemeContextAction) CoalesceKey() string { return "" }
 
 // SetActiveCellAction replaces the semantic mutable active-cell snapshot. Its
 // Source and source ranges are authoritative; ActiveBand display rows remain a

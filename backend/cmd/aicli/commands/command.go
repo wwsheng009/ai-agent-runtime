@@ -55,6 +55,24 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// overlaps the alternate-screen frame or primary repaint recovery.
 				openChatBacktrackPicker(session, *result.OpenBacktrackPicker)
 			}
+			if renderErr == nil && result.OpenModelPicker != nil && session != nil {
+				// /model picker: provider→model→reasoning stages share one alternate
+				// screen; the apply step runs only after ScreenLease release, keeping
+				// one physical terminal owner throughout the modal lifecycle.
+				openChatModelPicker(session, *result.OpenModelPicker)
+			}
+			if renderErr == nil && result.OpenThemePicker != nil && session != nil {
+				// /theme select is a typed live-preview picker effect; the confirmed
+				// theme is applied only after ScreenLease release and primary
+				// presenter recovery.
+				openChatThemePicker(session, *result.OpenThemePicker)
+			}
+			if renderErr == nil && result.OpenSkillPicker != nil && session != nil {
+				// /skills select is a typed picker effect; the confirmed skill
+				// becomes a composer draft only after ScreenLease release and
+				// primary presenter recovery.
+				openChatSkillPicker(session, *result.OpenSkillPicker)
+			}
 			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
 				// Direct backtrack apply has no alternate screen, but it still owns
 				// the same destructive transaction: actor mutation, canonical Scene

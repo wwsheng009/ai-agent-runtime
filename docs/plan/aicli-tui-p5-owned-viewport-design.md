@@ -19,6 +19,8 @@
 
 > 该实机 run 同时确认 reasoning 语义内容在 final answer 前正常显示；仅 raw `assistant.reasoning` 协议标签未泄漏。成功的 `llm.request.finished` 在后继实现中只表示 transport boundary，必须等待 authoritative `assistant_message` 才完成正常 assistant finalization。
 
+> **强化验收（2026-08-06）**：后续 run `output/aicli-terminal-e2e/opencode-wt-7347d2bf0b0346c1ba975085b3c8b2eb/manifest.json` 不再用 final answer 中的 sentinel 间接代表 reasoning，而是从 provider chat artifact 读取唯一 reasoning summary，确认其完整非空白内容在 Windows Terminal `DocumentRange` 中恰好投影一次并位于 marker 01 前。该 run 同样满足 40/40 marker exactly-once、连续无异常空行、首行进入 scrollback、末行可见和正常退出。
+
 > **禁止作为新实现依据的过渡决策**：全局 Frame/Scrollback mode、无类型 `committedBoundary int`、几何变化驱动 history commit、依赖 RI/SD 从 native scrollback 拉回、以 `ScreenModel` 代替 semantic source truth。相关故障分析可以复用，但新实现必须走 unified plan 的 UI actor + AppState + tokenized effect + transactional Presenter。
 
 ---

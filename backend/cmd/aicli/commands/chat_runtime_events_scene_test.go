@@ -103,8 +103,8 @@ func TestChatRuntimeEventBridge_SceneFollowsModelOrder(t *testing.T) {
 	if cells[2].ID != 3 || cells[2].Kind != scene.KindToolChain || cells[2].ChainKey != "item-3" {
 		t.Fatalf("cell[2]=%+v want tool_chain cell-3 chain item-3", cells[2])
 	}
-	if cells[2].Source != "read_file\nfile content" {
-		t.Fatalf("cell[2].Source=%q want %q", cells[2].Source, "read_file\nfile content")
+	if cells[2].Source != "• Completed read_file\nfile content" {
+		t.Fatalf("cell[2].Source=%q want %q", cells[2].Source, "• Completed read_file\nfile content")
 	}
 	// 顺序 = 模型数组顺序：模型为 [item-1, item-2, item-3, item-4]，Scene
 	// 合并 tool_output 进链首后仍保持 [cell-1, cell-2, cell-3]。

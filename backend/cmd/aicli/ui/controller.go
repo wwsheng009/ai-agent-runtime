@@ -456,11 +456,26 @@ func (c *UIController) collectPostActionEffectsLocked(effects []Effect) []Effect
 // the action's new AppState. It keeps HistoryCommit scheduling on the reducer
 // side while leaving physical terminal ownership to the injected presenter.
 func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
+	if state.HistoryEffects.ProjectionUnknown && state.HistoryEffects.ReconciliationRequired {
+		switch action.(type) {
+		case HistoryCommitFailed, HistoryCommitsAcknowledged,
+			UpdateActiveCellAction, FinalizeActiveCellAction:
+			return true
+		}
+	}
+	if _, resized := action.(Resize); resized &&
+		(state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.hasUnresolvedTerminalDelivery()) {
+		// Resize can invalidate an in-flight token, which deliberately makes
+		// HasPending false. The same barrier must still wake the terminal owner
+		// so it can rebuild the current generation and reconcile scrollback;
+		// relying on an unrelated reducer FlushEffect leaves the queue frozen.
+		return true
+	}
 	if !state.HistoryEffects.HasPending() {
 		return false
 	}
 	switch action.(type) {
-	case ReplaceTranscriptAction, SetActiveCellAction, UpdateActiveCellAction,
+	case ReplaceTranscriptAction, SetThemeContextAction, SetActiveCellAction, UpdateActiveCellAction,
 		SetSemanticActiveCellProjectionAction,
 		FinalizeActiveCellAction, Resize,
 		LeaseReleased, HistoryProjectionRecovered, HistoryScrollbackReconciled,
@@ -677,6 +692,18 @@ func actionClassString(action UIAction) string {
 		return "OpenBacktrackPicker"
 	case CloseBacktrackPicker:
 		return "CloseBacktrackPicker"
+	case OpenModelPicker:
+		return "OpenModelPicker"
+	case CloseModelPicker:
+		return "CloseModelPicker"
+	case OpenThemePicker:
+		return "OpenThemePicker"
+	case CloseThemePicker:
+		return "CloseThemePicker"
+	case OpenSkillPicker:
+		return "OpenSkillPicker"
+	case CloseSkillPicker:
+		return "CloseSkillPicker"
 	case TranscriptPagerScroll:
 		return "TranscriptPagerScroll"
 	case TranscriptPagerSetFollowBottom:
@@ -703,6 +730,8 @@ func actionClassString(action UIAction) string {
 		return "RuntimeEvent(" + a.Kind + ")"
 	case ReplaceTranscriptAction:
 		return "ReplaceTranscript"
+	case SetThemeContextAction:
+		return "SetThemeContext"
 	case SetActiveCellAction:
 		return "SetActiveCell"
 	case UpdateActiveCellAction:

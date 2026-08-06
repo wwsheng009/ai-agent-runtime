@@ -914,7 +914,7 @@ func TestSeedPersistedHistory_ImportsFinalToolChainOnce(t *testing.T) {
 		t.Fatalf("scene cells=%d want one committed tool chain", count)
 	}
 	cell := snapshot.Cells[0]
-	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted || cell.Source != "read_file\nREADME contents" {
+	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted || cell.Source != "• Completed read_file\nREADME contents" {
 		t.Fatalf("tool history cell=%+v", cell)
 	}
 

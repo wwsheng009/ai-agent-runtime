@@ -154,6 +154,10 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 		},
 	}
 	bridge.handleEvent(requested)
+	// writer（旧 timeline 通道）不接收 Scene tool cell 文本：tool 链事件
+	// 的 timeline 行被置空（Running 属于 Scene/ActiveBand），故 writer 层
+	// 不含 Running；Scene 层（用户可见 transcript）的执行中 Running 标记
+	// 由 TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell 断言。
 	require.NotContains(t, history.String(), "Running")
 	interaction.waitUIActorIdle()
 	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
@@ -271,15 +275,15 @@ func TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell(t *testing.T
 	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Kind != scene.KindToolChain {
 		t.Fatalf("requested active state = %#v, want mutable tool chain", state.Active)
 	}
-	if state.Active.Source != "shell" {
-		t.Fatalf("requested active source = %q, want shell", state.Active.Source)
+	if state.Active.Source != "• Running shell" {
+		t.Fatalf("requested active source = %q, want running shell", state.Active.Source)
 	}
 	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Kind != scene.KindToolChain ||
 		state.Transcript.Cells[0].Phase != scene.CellMutable {
 		t.Fatalf("requested transcript = %#v, want one mutable tool cell", state.Transcript.Cells)
 	}
-	if strings.Contains(strings.ToLower(state.Transcript.Cells[0].Source), "running") {
-		t.Fatalf("running viewport label leaked into transcript source: %q", state.Transcript.Cells[0].Source)
+	if state.Transcript.Cells[0].Source != "• Running shell" {
+		t.Fatalf("running label missing from mutable transcript source: %q", state.Transcript.Cells[0].Source)
 	}
 
 	post(runtimeevents.Event{
@@ -294,7 +298,7 @@ func TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell(t *testing.T
 		},
 	})
 	state = interaction.uiActor.AppState()
-	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "shell\n50% complete" {
+	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "• Running shell\n50% complete" {
 		t.Fatalf("progress active state = %#v, want source-backed update", state.Active)
 	}
 	if strings.Contains(output.String(), "Progress") {
@@ -330,11 +334,245 @@ func TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell(t *testing.T
 	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted {
 		t.Fatalf("completed cell = %#v, want committed tool chain", cell)
 	}
-	if cell.Source != "shell\n50% complete\nok" {
+	if cell.Source != "• Completed shell\n50% complete\nok" {
 		t.Fatalf("completed source = %q, want merged final tool source", cell.Source)
 	}
 	if bridge.renderEncoderStats().DuplicateCount == 0 {
 		t.Fatalf("duplicate completion was not counted by encoder")
+	}
+}
+
+func TestChatRuntimeEventBridge_ToolDurationInjectedIntoSceneTitle(t *testing.T) {
+	// Scene 数据面在 enrichTimelineEvent 之前编码，duration_ms 必须由
+	// enrichRuntimeToolDuration 先行注入，调用后标题才能恢复 "in 5ms" 时长。
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var output bytes.Buffer
+	interaction.SetWriter(&output)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	post := func(event runtimeevents.Event) {
+		t.Helper()
+		if !bridge.postRuntimeEventToUIActor(event) {
+			t.Fatalf("runtime event was not accepted by UI actor: %s", event.Type)
+		}
+		interaction.waitUIActorIdle()
+	}
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	start := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	post(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		ToolName:  "shell",
+		Timestamp: start,
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+			"tool_name":    "shell",
+			"command_text": "go test ./...",
+		},
+	})
+	state := interaction.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellMutable {
+		t.Fatalf("requested active state = %#v, want mutable tool chain", state.Active)
+	}
+	if !strings.Contains(state.Active.Source, "go test ./...") {
+		t.Fatalf("started head lost command text: %q", state.Active.Source)
+	}
+	post(runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		ToolName:  "shell",
+		Timestamp: start.Add(1500 * time.Millisecond),
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-1",
+		},
+	})
+	state = interaction.uiActor.AppState()
+	if len(state.Transcript.Cells) != 1 {
+		t.Fatalf("completed transcript cells = %#v, want one merged tool chain", state.Transcript.Cells)
+	}
+	cell := state.Transcript.Cells[0]
+	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted {
+		t.Fatalf("completed cell = %#v, want committed tool chain", cell)
+	}
+	if !strings.Contains(cell.Source, "• Completed go test ./... in 1.5s") {
+		t.Fatalf("completed title missing duration suffix, got %q", cell.Source)
+	}
+	if strings.Contains(cell.Source, "Running") {
+		t.Fatalf("running viewport label leaked into transcript source: %q", cell.Source)
+	}
+}
+
+func TestChatRuntimeEventBridge_ActiveBandRunningRowSurvivesRealAgentEvent(t *testing.T) {
+	// 复刻真实会话事件（aicli chat --yolo 真实运行时日志的 payload 形状）：
+	// 带 timestamp / turn_id / session_id / agent_name / tool_source="toolkit"。
+	// 验证 ActiveBand 的 "• Running <命令>" 行仍被设置——真实会话里曾观察到
+	// ActiveBand 回退为 "◦ Running shell"，本测试锁定该路径。
+	t.Setenv("NO_COLOR", "1")
+	sessionID := "session_20260806091242_KRdCDvPw"
+	turnID := "turn_74d87b4a-1d5b-48fe-b5c3-61265bbe4efc"
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: sessionID},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var history bytes.Buffer
+	interaction.SetWriter(&history)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	interaction.SetSurface(surface)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: sessionID,
+		Payload:   map[string]interface{}{"turn_id": turnID},
+	})
+	requestedAt := time.Date(2026, 8, 6, 1, 12, 50, 280890900, time.UTC)
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: sessionID,
+		TraceID:   "trace_6622cf5a-1ffc-4ea2-9e22-dcf819f39471",
+		AgentName: "aicli-chat",
+		ToolName:  "shell",
+		Timestamp: requestedAt,
+		Payload: map[string]interface{}{
+			"arg_preview":  "command=ping -n 4 127.0.0.1 >nul & echo hello",
+			"command_text": "ping -n 4 127.0.0.1 >nul & echo hello",
+			"logical_tool": "shell",
+			"step":         1,
+			"tool_call_id": "call_00_tGemdE0YTAZchgRcXN9O4053",
+			"tool_source":  "toolkit",
+			"trace_id":     "trace_6622cf5a-1ffc-4ea2-9e22-dcf819f39471",
+			"turn_id":      turnID,
+		},
+	})
+	interaction.waitUIActorIdle()
+	band := strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(band, "• Running ping -n 4 127.0.0.1 >nul & echo hello") {
+		t.Fatalf("ActiveBand running row degraded to fallback, got %q", band)
+	}
+}
+
+func TestChatRuntimeEventBridge_ActiveBandRunningRowFullReplay(t *testing.T) {
+	// 用真实会话的完整 runtime-events.jsonl（含 session_start / llm.request
+	// / assistant.reasoning 流 / tool.requested / tool.progress / tool.completed）
+	// 逐事件回放到 bridge，验证 ActiveBand 的 "• Running <命令>" 行最终出现。
+	// 真实 TUI 里曾只观察到 status 行 "◦ Running shell"，本测试锁定事件链
+	// 层面不存在回退。
+	eventLog := os.Getenv("AICLI_E2E_RUNTIME_EVENTS_JSONL")
+	if eventLog == "" {
+		t.Skip("AICLI_E2E_RUNTIME_EVENTS_JSONL 未设置，跳过完整回放")
+	}
+	raw, err := os.ReadFile(eventLog)
+	if err != nil {
+		t.Fatalf("read event log: %v", err)
+	}
+	var events []runtimeevents.Event
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev runtimeevents.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+		events = append(events, ev)
+	}
+	if len(events) == 0 {
+		t.Fatal("empty event log")
+	}
+	t.Setenv("NO_COLOR", "1")
+	sessionID := ""
+	for _, ev := range events {
+		if ev.Type == runtimechat.EventSessionStart {
+			sessionID = ev.SessionID
+			break
+		}
+	}
+	if sessionID == "" {
+		t.Fatal("no session_start in event log")
+	}
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: sessionID},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var history bytes.Buffer
+	interaction.SetWriter(&history)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(100, 40)
+	interaction.SetSurface(surface)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	requestedSeen := false
+	bandAtRequested := ""
+	for _, ev := range events {
+		bridge.handleEvent(ev)
+		if ev.Type == "tool.requested" {
+			requestedSeen = true
+			interaction.waitUIActorIdle()
+			bandAtRequested = strings.Join(surface.ActiveBandLines(), "\n")
+		}
+	}
+	interaction.waitUIActorIdle()
+	if !requestedSeen {
+		t.Fatal("no tool.requested in event log")
+	}
+	if !strings.Contains(bandAtRequested, "• Running ping -n 4 127.0.0.1 >nul & echo hello") {
+		t.Fatalf("ActiveBand running row missing right after tool.requested, got %q", bandAtRequested)
+	}
+}
+
+func TestChatInteractionCoordinator_FirstSubmittedUserInputRendersWithLateBridge(t *testing.T) {
+	// 新会话首次提交：actor 尚未启动，RuntimeEventBridge 为 nil。用户输入
+	// 必须通过 ensureChatRuntimeEventBridge 补齐 bridge，使 Scene 注入与
+	// 快照发布生效（否则第一条 prompt 完全不渲染——unified 模式下旧
+	// history 已 fenced，Scene 是唯一路径）。
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var output bytes.Buffer
+	interaction.SetWriter(&output)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	interaction.SetSurface(surface)
+	session.Interaction = interaction
+	if session.RuntimeEventBridge != nil {
+		t.Fatal("precondition: bridge must be nil for a fresh session")
+	}
+	interaction.RenderSubmittedUserInput("hello world")
+	interaction.waitUIActorIdle()
+	state := interaction.uiActor.AppState()
+	if len(state.Transcript.Cells) == 0 {
+		t.Fatalf("first user input produced no transcript cell: %+v", state.Transcript.Cells)
+	}
+	cell := state.Transcript.Cells[0]
+	if cell.Kind != scene.KindUser || !strings.Contains(cell.Source, "hello world") {
+		t.Fatalf("first user input cell = %#v, want user cell with prompt", cell)
+	}
+	if session.RuntimeEventBridge == nil {
+		t.Fatal("bridge was not created by first submitted user input")
 	}
 }
 

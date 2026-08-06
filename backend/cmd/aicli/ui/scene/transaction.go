@@ -10,6 +10,7 @@ type CellMutation interface {
 
 func (*AppendCell) mutation()        {}
 func (*InsertCell) mutation()        {}
+func (*InsertCellBefore) mutation()  {}
 func (*UpdateCell) mutation()        {}
 func (*FinalizeCell) mutation()      {}
 func (*RemoveMutableCell) mutation() {}
@@ -19,9 +20,9 @@ func (*RemoveMutableCell) mutation() {}
 type FlushPolicy uint8
 
 const (
-	FlushImmediate FlushPolicy = iota // 提交后立即 flush（默认）
-	FlushCoalescable                  // 可合并：status/mutable update 等可延迟
-	FlushNoPrimaryDuringLease         // fullscreen lease 期间不 flush 主屏
+	FlushImmediate            FlushPolicy = iota // 提交后立即 flush（默认）
+	FlushCoalescable                             // 可合并：status/mutable update 等可延迟
+	FlushNoPrimaryDuringLease                    // fullscreen lease 期间不 flush 主屏
 )
 
 // SceneTransaction 是一次原子提交（unified plan §6.2 / INV-FRAME-01）：
@@ -87,7 +88,7 @@ func (c *SceneController) restore(snap *Snapshot) {
 	c.scene.byID = make(map[CellID]*TranscriptCell)
 	c.scene.byChain = make(map[string]*TranscriptCell)
 	for _, c0 := range snap.Cells {
-		cp := *c0
+		cp := cloneCell(*c0)
 		c.scene.cells = append(c.scene.cells, &cp)
 		c.scene.byID[cp.ID] = &cp
 		if cp.ChainKey != "" {

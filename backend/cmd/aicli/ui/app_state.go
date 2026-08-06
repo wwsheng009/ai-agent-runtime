@@ -1,6 +1,10 @@
 package ui
 
 import (
+	"reflect"
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
@@ -14,6 +18,7 @@ import (
 // absent: it is a physical projection cache, never UI business truth.
 type AppState struct {
 	Revision   uint64
+	Theme      style.ThemeContext
 	Transcript TranscriptState
 	Active     ActiveCellState
 	// SemanticActiveCellProjection makes Active the only visual source for the
@@ -28,6 +33,9 @@ type AppState struct {
 	TranscriptOverlay            TranscriptOverlayState
 	ResumePicker                 ResumePickerState
 	BacktrackPicker              BacktrackPickerState
+	ModelPicker                  ModelPickerState
+	ThemePicker                  ThemePickerState
+	SkillPicker                  SkillPickerState
 	LayoutGeneration             uint64
 }
 
@@ -35,6 +43,7 @@ type AppState struct {
 // diagnostics, or tests. Callers must never receive actor-owned slices or
 // status-model pointers directly.
 func (s AppState) Clone() AppState {
+	s.Theme = cloneThemeContext(s.Theme)
 	s.Transcript = s.Transcript.Clone()
 	s.Active = s.Active.Clone()
 	s.Bottom = s.Bottom.Clone()
@@ -113,7 +122,31 @@ func cloneTranscriptCell(cell scene.TranscriptCell) scene.TranscriptCell {
 		finalizedAt := *cell.FinalizedAt
 		cell.FinalizedAt = &finalizedAt
 	}
+	cell.Presentation = cell.Presentation.Clone()
 	return cell
+}
+
+func cloneThemeContext(theme style.ThemeContext) style.ThemeContext {
+	if theme.Palette.Styles != nil {
+		styles := make(map[style.Role]render.Style, len(theme.Palette.Styles))
+		for role, value := range theme.Palette.Styles {
+			styles[role] = value
+		}
+		theme.Palette.Styles = styles
+	}
+	if theme.Terminal.DefaultFG != nil {
+		value := *theme.Terminal.DefaultFG
+		theme.Terminal.DefaultFG = &value
+	}
+	if theme.Terminal.DefaultBG != nil {
+		value := *theme.Terminal.DefaultBG
+		theme.Terminal.DefaultBG = &value
+	}
+	return theme
+}
+
+func themeContextEqual(left, right style.ThemeContext) bool {
+	return reflect.DeepEqual(left, right)
 }
 
 // ActiveCellPhase tracks semantic mutable-cell lifecycle. It is intentionally
@@ -131,14 +164,15 @@ const (
 // assistant/reasoning/tool cell. Display rows and ActiveBand are derived by
 // Layout; they are never used as its source.
 type ActiveCellState struct {
-	CellID   scene.CellID
-	Revision uint64
-	Kind     scene.CellKind
-	Phase    ActiveCellPhase
-	Source   string
-	Stable   SourceRange
-	Enqueued SourceRange
-	Acked    SourceRange
+	CellID               scene.CellID
+	Revision             uint64
+	Kind                 scene.CellKind
+	Phase                ActiveCellPhase
+	Source               string
+	HistoryCommitBlocked bool
+	Stable               SourceRange
+	Enqueued             SourceRange
+	Acked                SourceRange
 }
 
 func (s ActiveCellState) Clone() ActiveCellState { return s }
@@ -168,6 +202,30 @@ type BacktrackPickerState struct {
 	LeaseID uint64
 }
 
+// ModelPickerState intentionally holds only alternate-screen ownership.
+// Navigation, search and the selected row remain local to the fullscreen list;
+// the provider→model→reasoning mutation is committed only after lease release.
+type ModelPickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// ThemePickerState intentionally holds only alternate-screen ownership.
+// Navigation and the working theme snapshot remain local to the fullscreen
+// list; the confirmed theme is applied only after lease release.
+type ThemePickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// SkillPickerState intentionally holds only alternate-screen ownership.
+// Navigation, search and the selected row remain local to the fullscreen list;
+// the confirmed skill becomes a composer draft only after lease release.
+type SkillPickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
 func (s TranscriptOverlayState) Clone() TranscriptOverlayState {
 	s.Pager = s.Pager.Clone()
 	return s
@@ -184,12 +242,20 @@ func ActiveCellFromTranscript(transcript TranscriptState) (ActiveCellState, bool
 		if cell.Phase != scene.CellMutable {
 			continue
 		}
+		// 跳过空的 reasoning 占位 cell（native-history ordering fence 的
+		// 语义位置，见 encoder.markReasoningBarrier）：它只是迟到 reasoning
+		// 的占位，不是流式主体；有实质内容的 mutable cell（assistant /
+		// 工具链）才是 Active 的驻留源。
+		if cell.Kind == scene.KindSupplement && strings.TrimSpace(cell.Source) == "" {
+			continue
+		}
 		return ActiveCellState{
-			CellID:   cell.ID,
-			Revision: cell.Revision,
-			Kind:     cell.Kind,
-			Phase:    ActiveCellMutable,
-			Source:   cell.Source,
+			CellID:               cell.ID,
+			Revision:             cell.Revision,
+			Kind:                 cell.Kind,
+			Phase:                ActiveCellMutable,
+			Source:               cell.Source,
+			HistoryCommitBlocked: cell.HistoryCommitBlocked,
 		}, true
 	}
 	return ActiveCellState{}, false

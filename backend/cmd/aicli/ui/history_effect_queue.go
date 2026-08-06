@@ -16,11 +16,12 @@ var (
 // queue records only terminal delivery state and can be discarded/rebuilt with
 // a controlled projection recovery.
 type HistoryEffectQueueState struct {
-	NextToken         uint64
-	TerminalEpoch     uint64
-	Frozen            bool
-	ProjectionUnknown bool
-	ledger            *HistoryCommitLedger
+	NextToken              uint64
+	TerminalEpoch          uint64
+	Frozen                 bool
+	ProjectionUnknown      bool
+	ReconciliationRequired bool
+	ledger                 *HistoryCommitLedger
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
@@ -136,6 +137,7 @@ func (s *HistoryEffectQueueState) invalidate(token uint64) error {
 	}
 	if wasInFlight {
 		s.ProjectionUnknown = true
+		s.ReconciliationRequired = true
 	}
 	return nil
 }
@@ -155,9 +157,6 @@ func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, generation uint64) error {
 	if s == nil || s.ledger == nil || len(commits) == 0 {
 		return ErrCommitNotInFlight
-	}
-	if s.Frozen {
-		return ErrHistoryCommitFrozen
 	}
 	if s.ProjectionUnknown {
 		return ErrHistoryProjectionUnknown
@@ -223,6 +222,7 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		entry.MayHavePartiallyWritten = true
 		s.ledger.byToken[delivered.Token] = entry
 	}
+	s.ReconciliationRequired = true
 }
 
 func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error {
@@ -251,6 +251,7 @@ func (s *HistoryEffectQueueState) fail(token, generation uint64, err error, mayH
 	// no longer prove which bytes reached the terminal. Recovery must repaint
 	// from semantic source instead of blind retrying the same handoff batch.
 	s.ProjectionUnknown = true
+	s.ReconciliationRequired = true
 	return nil
 }
 
@@ -277,6 +278,7 @@ func (s *HistoryEffectQueueState) reconcileScrollback(epoch uint64) bool {
 	}
 	s.TerminalEpoch = epoch
 	s.ledger = NewHistoryCommitLedger()
+	s.ReconciliationRequired = false
 	return true
 }
 

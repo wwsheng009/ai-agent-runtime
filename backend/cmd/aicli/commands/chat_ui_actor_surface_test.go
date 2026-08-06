@@ -175,6 +175,67 @@ func TestChatInteractionCoordinatorUnifiedScreenLeaseUsesPresenterTransport(t *t
 	}
 }
 
+type shutdownExitRetryWriter struct {
+	bytes.Buffer
+	failExit int
+}
+
+func (w *shutdownExitRetryWriter) Write(data []byte) (int, error) {
+	if bytes.Contains(data, []byte("\x1b[?1049l")) && w.failExit > 0 {
+		w.failExit--
+		return 0, errors.New("transient alternate-screen exit failure")
+	}
+	return w.Buffer.Write(data)
+}
+
+// Shutdown must keep the presenter transport attached until a retryable
+// alternate-screen exit succeeds. Detaching after the first zero-byte error
+// leaves the host in DEC 1049 with no remaining owner for the exit sequence.
+func TestChatInteractionCoordinatorShutdownRetriesAlternateExitBeforeDetach(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(48, 14)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+
+	writer := &shutdownExitRetryWriter{failExit: 1}
+	if !coordinator.enableUnifiedRendererWithWriter(writer) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	terminal := session.TerminalSession
+	if terminal == nil {
+		t.Fatal("unified renderer did not publish terminal session")
+	}
+
+	lease, err := surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{Title: "shutdown retry"})
+	if err != nil {
+		t.Fatalf("AcquireAlternateScreen: %v", err)
+	}
+	if terminal.AlternateScreenLeaseID() != lease.ID() {
+		t.Fatalf("terminal lease=%d, want %d", terminal.AlternateScreenLeaseID(), lease.ID())
+	}
+
+	coordinator.Shutdown()
+	if terminal.AlternateScreenLeaseID() != 0 {
+		t.Fatalf("shutdown detached before alternate exit retry: lease=%d", terminal.AlternateScreenLeaseID())
+	}
+	if surface.LeaseActive() || lease.Active() {
+		t.Fatalf("shutdown retained logical lease after successful retry: surface=%t lease=%t", surface.LeaseActive(), lease.Active())
+	}
+	if writer.failExit != 0 {
+		t.Fatalf("shutdown did not exercise the transient exit failure: remaining=%d", writer.failExit)
+	}
+	if !strings.Contains(writer.String(), "\x1b[?1049l") {
+		t.Fatalf("shutdown did not emit alternate-screen exit: %q", writer.String())
+	}
+}
+
 func TestChatInteractionCoordinatorRejectsPresenterBesideLegacyWriter(t *testing.T) {
 	coordinator := newChatInteractionCoordinator(&ChatSession{})
 	t.Cleanup(coordinator.Shutdown)
@@ -392,13 +453,13 @@ func TestDispatchChatCommandUnifiedCommandGateUsesTerminalSessionOnly(t *testing
 		"错误: /not-a-command 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
 		"错误: /shell 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
 		"错误: /call 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
-		"错误: /model 正在迁移到统一渲染器，已拒绝旧终端直写",
+		"当前 provider:",
 	} {
 		if !strings.Contains(transcript.String(), want) {
 			t.Fatalf("semantic transcript missing %q: %+v", want, state.Transcript)
 		}
 	}
-	if !strings.Contains(presenterOutput.String(), "错误: /model 正在迁移到统一渲染器，已拒绝旧终端直写") {
+	if !strings.Contains(presenterOutput.String(), "当前 provider:") {
 		t.Fatalf("TerminalSession did not render latest command result: %q", presenterOutput.String())
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {

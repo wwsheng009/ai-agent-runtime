@@ -6,6 +6,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // planEligibleHistoryCommits selects finalized display ranges above the retained
@@ -21,7 +22,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	frontierCells, frontierActive := canonicalHistoryCommitFrontier(state)
 	var activeCommits []HistoryCommit
 	if state.SemanticActiveCellProjection && frontierActive {
-		activeCommits = planMutableActiveCellHistoryCommits(state.Active, state.Geometry, state.LayoutGeneration)
+		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.LayoutGeneration, state.Theme)
 	}
 	layout := LayoutAppState(state)
 	width := layout.Geometry.Width
@@ -32,7 +33,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
 	// its physical rows are still visible in the primary viewport.
 	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(layout.Transcript, byID, mutableTranscriptCellIDs(state.Transcript), width)
+	rows := layoutTranscriptScreenRows(layout.Transcript, byID, mutableTranscriptCellIDs(state.Transcript), width, state.Theme)
 	if len(rows) == 0 {
 		return activeCommits
 	}
@@ -52,7 +53,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 		_, beforeFrontier := frontierCells[cellID]
 		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
 			skipRows := activeAckedRenderedPrefixRows(state.HistoryEffects, cellID, rows[start:end], byID)
-			if cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source) {
+			if cellUsesStructuredPresentation(cell) {
 				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, state.LayoutGeneration, byID)...)
 			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, state.LayoutGeneration, byID); mapped {
 				commits = append(commits, segments...)
@@ -74,14 +75,16 @@ func canonicalHistoryCommitFrontier(state AppState) (map[scene.CellID]struct{}, 
 	eligible := make(map[scene.CellID]struct{})
 	for _, cell := range state.Transcript.Cells {
 		if !cellIsFinalizedForHistory(cell) {
-			return eligible, state.Active.Phase == ActiveCellMutable && state.Active.CellID == cell.ID
+			return eligible, state.Active.Phase == ActiveCellMutable &&
+				state.Active.CellID == cell.ID && !state.Active.HistoryCommitBlocked
 		}
 		if cell.Source == "" {
 			continue
 		}
 		eligible[cell.ID] = struct{}{}
 	}
-	return eligible, state.Active.Phase == ActiveCellMutable && state.Active.CellID != 0
+	return eligible, state.Active.Phase == ActiveCellMutable &&
+		state.Active.CellID != 0 && !state.Active.HistoryCommitBlocked
 }
 
 // activeAckedRenderedPrefixRows proves how many leading finalized rows already
@@ -146,13 +149,17 @@ func renderLineText(line render.Line) string {
 // planPlainCellHistoryCommits. Markdown is committed as one structured stable
 // source fragment because its rendered rows are not byte-bijective.
 func planMutableActiveCellHistoryCommits(active ActiveCellState, geometry GeometryState, generation uint64) []HistoryCommit {
-	if active.Phase != ActiveCellMutable || active.CellID == 0 ||
+	return planMutableActiveCellHistoryCommitsWithTheme(active, geometry, generation, style.ThemeContext{})
+}
+
+func planMutableActiveCellHistoryCommitsWithTheme(active ActiveCellState, geometry GeometryState, generation uint64, theme style.ThemeContext) []HistoryCommit {
+	if active.Phase != ActiveCellMutable || active.CellID == 0 || active.HistoryCommitBlocked ||
 		(active.Kind != scene.KindAssistant && active.Kind != scene.KindSupplement) || active.Source == "" ||
 		geometry.Width < 1 || geometry.Height < 1 {
 		return nil
 	}
 	if active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source) {
-		return planMutableMarkdownHistoryCommit(active, geometry, generation)
+		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
 	}
 	start := active.Acked.End
 	if start < 0 || start > len(active.Source) || !activeCellSourceBoundary(active.Source, start) {
@@ -244,14 +251,14 @@ func planMutableActiveCellHistoryCommits(active ActiveCellState, geometry Geomet
 	return commits
 }
 
-func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryState, generation uint64) []HistoryCommit {
+func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryState, generation uint64, theme style.ThemeContext) []HistoryCommit {
 	start, stableEnd := active.Acked.End, active.Stable.End
 	if start < 0 || stableEnd <= start || stableEnd > len(active.Source) ||
 		!activeCellSourceBoundary(active.Source, start) ||
 		!activeCellSourceBoundary(active.Source, stableEnd) {
 		return nil
 	}
-	live, ok := activeMarkdownSuffixLines(active.Source, start, geometry.Width)
+	live, ok := activeMarkdownSuffixLines(active.Source, start, geometry.Width, theme)
 	if !ok || len(live) <= ActiveBandRows(geometry.Height) {
 		return nil
 	}
@@ -262,7 +269,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 		if candidateEnd <= commitEnd || candidateEnd > stableEnd {
 			continue
 		}
-		candidateLines, projected := activeMarkdownSuffixLines(active.Source[:candidateEnd], start, geometry.Width)
+		candidateLines, projected := activeMarkdownSuffixLines(active.Source[:candidateEnd], start, geometry.Width, theme)
 		if !projected || len(candidateLines) == 0 || len(candidateLines) > maxCommitRows ||
 			!render.LinesEqual(candidateLines, live[:len(candidateLines)]) {
 			continue
@@ -282,7 +289,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 	commits := make([]HistoryCommit, 0, len(boundaries))
 	sourceStart, displayStart := start, 0
 	for _, sourceEnd := range boundaries {
-		lines, projected := activeMarkdownSuffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width)
+		lines, projected := activeMarkdownSuffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width, theme)
 		if !projected || len(lines) == 0 || displayStart+len(lines) > len(live) ||
 			!render.LinesEqual(lines, live[displayStart:displayStart+len(lines)]) {
 			return nil

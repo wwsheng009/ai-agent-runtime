@@ -32,12 +32,19 @@ type runtimeModelPickerResult struct {
 
 func handleModelCommand(session *ChatSession, command string, noInteractive bool) bool {
 	if unifiedDirectInteractiveOutput(session) {
-		request, err := parseModelCommandRequest(command)
-		if err == nil && request.ShowStatus && !request.HasMutation() {
-			_ = renderChatCommandResult(session, commandTextResult(runtimeModelStateText(session)), false)
+		if result, handled := executeStructuredModelCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenModelPicker != nil {
+				openChatModelPicker(session, *result.OpenModelPicker)
+			}
 			return false
 		}
-		return rejectUnifiedInteractiveLegacyCommand(session, "/model")
+		// executeStructuredModelCommand handles every /model variant today, so
+		// this branch is defensive. The deny-list fence no longer contains
+		// /model (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
+		// would fail open into the legacy stdout handler; fail closed instead.
+		_ = renderChatCommandResult(session, commandTextResult("错误: /model 变体无法通过统一渲染命令通道处理"), false)
+		return false
 	}
 	if rejectUnifiedInteractiveLegacyCommand(session, "/model") {
 		return false

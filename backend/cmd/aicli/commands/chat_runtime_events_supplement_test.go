@@ -385,7 +385,7 @@ func TestChatInteractionCoordinator_DirectToolLifecycleProjectsOneSceneCell(t *t
 	if requestedSnapshot == nil || len(requestedSnapshot.Cells) != 1 {
 		t.Fatalf("requested Scene=%+v want one mutable chain", requestedSnapshot)
 	}
-	if cell := requestedSnapshot.Cells[0]; cell.Kind != scene.KindToolChain || cell.Phase != scene.CellMutable || cell.Source != "read_file" {
+	if cell := requestedSnapshot.Cells[0]; cell.Kind != scene.KindToolChain || cell.Phase != scene.CellMutable || cell.Source != "• Running read_file" {
 		t.Fatalf("requested cell=%+v want mutable read_file chain", cell)
 	}
 

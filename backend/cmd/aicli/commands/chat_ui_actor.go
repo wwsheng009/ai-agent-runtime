@@ -14,6 +14,7 @@ package commands
 //     回调不再直接拿 coordinator/surface lock（任务 3，IR-11）。
 
 import (
+	"context"
 	"io"
 	"os"
 	"strings"
@@ -96,7 +97,8 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	// can consume effects. This is a one-way production authority boundary: a
 	// delayed ActiveBand facade action must not replace a Scene mutable cell in
 	// the first unified frame.
-	if !actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
+	if !actor.Post(ui.SetThemeContextAction{Theme: ui.CurrentThemeContext()}) ||
+		!actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
 		c.mu.Lock()
 		c.unifiedRenderer = false
 		c.mu.Unlock()
@@ -636,6 +638,32 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 		c.session.TerminalSessionExecutor = nil
 	}
 	c.mu.Unlock()
+	// Leave DEC 1049 while the unified transport and presenter are still alive.
+	// Surface cleanup runs later, after closeUIActor, and cannot restore the
+	// primary buffer once this transport has been detached.
+	if surface != nil {
+		// A zero-byte transport failure is explicitly retryable: TerminalSession
+		// retains the physical lease until at least one exit byte is accepted.
+		// Do the bounded retry while the presenter is still attached; detaching
+		// after the first error would strand DEC 1049 with no owner capable of
+		// issuing the retry. The loop is intentionally short and synchronous so
+		// shutdown remains deterministic and never starts a background writer.
+		var releaseErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			releaseErr = surface.ReleaseActiveAlternateScreen(context.Background())
+			if releaseErr == nil {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		// A persistent transport error is deliberately not converted into a
+		// logical LeaseReleased event. The surface/TerminalSession pair retain
+		// their lease until the transport succeeds, making the failure visible to
+		// diagnostics instead of silently switching to primary rendering.
+		_ = releaseErr
+	}
 	// Detach the controller callback and drain terminal work before closing the
 	// actor. This ordering prevents an accepted effect from writing after the
 	// chat session has released primary terminal ownership.

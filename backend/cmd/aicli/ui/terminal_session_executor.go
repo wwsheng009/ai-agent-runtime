@@ -129,10 +129,13 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	e.controller.WaitIdle()
 	state := e.controller.State()
 	if state.HistoryEffects.ProjectionUnknown {
-		// Projection recovery is viewport-only. Do it before claiming another
-		// irreversible history range; HistoryProjectionRecovered will publish a
-		// fresh wake when ordered Pending work may proceed.
+		// A possibly written history range cannot be repaired by repainting only
+		// the bottom viewport. Replace scrollback from semantic source first;
+		// zero-byte viewport failures still use the cheaper repaint-only path.
 		plan := ComposeTerminalTransactionPlan(state.AppState, nil)
+		if state.HistoryEffects.ReconciliationRequired {
+			plan = ComposeScrollbackReconciliationPlan(state.AppState)
+		}
 		result := e.session.FlushTransaction(plan)
 		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 	}

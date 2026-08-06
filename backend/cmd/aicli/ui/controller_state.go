@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -109,6 +110,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.BacktrackPicker.Active && state.BacktrackPicker.LeaseID == a.LeaseID {
 				state.BacktrackPicker = BacktrackPickerState{}
 			}
+			if state.ModelPicker.Active && state.ModelPicker.LeaseID == a.LeaseID {
+				state.ModelPicker = ModelPickerState{}
+			}
+			if state.ThemePicker.Active && state.ThemePicker.LeaseID == a.LeaseID {
+				state.ThemePicker = ThemePickerState{}
+			}
+			if state.SkillPicker.Active && state.SkillPicker.LeaseID == a.LeaseID {
+				state.SkillPicker = SkillPickerState{}
+			}
 		}
 	case OpenTranscriptOverlay:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
@@ -136,6 +146,30 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseBacktrackPicker:
 		if a.LeaseID != 0 && state.BacktrackPicker.Active && state.BacktrackPicker.LeaseID == a.LeaseID {
 			state.BacktrackPicker = BacktrackPickerState{}
+		}
+	case OpenModelPicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.ModelPicker = ModelPickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseModelPicker:
+		if a.LeaseID != 0 && state.ModelPicker.Active && state.ModelPicker.LeaseID == a.LeaseID {
+			state.ModelPicker = ModelPickerState{}
+		}
+	case OpenThemePicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.ThemePicker = ThemePickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseThemePicker:
+		if a.LeaseID != 0 && state.ThemePicker.Active && state.ThemePicker.LeaseID == a.LeaseID {
+			state.ThemePicker = ThemePickerState{}
+		}
+	case OpenSkillPicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.SkillPicker = SkillPickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseSkillPicker:
+		if a.LeaseID != 0 && state.SkillPicker.Active && state.SkillPicker.LeaseID == a.LeaseID {
+			state.SkillPicker = SkillPickerState{}
 		}
 	case TranscriptPagerScroll:
 		if state.TranscriptOverlay.Active && transcriptPagerLeaseMatches(state.TranscriptOverlay, a.LeaseID) {
@@ -222,8 +256,25 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		}
 	case DrawRequested:
 		state.LastDraw = a
+	case SetThemeContextAction:
+		next := cloneThemeContext(a.Theme)
+		if !themeContextEqual(state.Theme, next) {
+			state.Theme = next
+			state.Geometry.Generation++
+			if state.Geometry.Generation == 0 {
+				state.Geometry.Generation = 1
+			}
+			state.LayoutGeneration = state.Geometry.Generation
+			rebasePendingHistoryEffects(&state)
+			refreshTranscriptOverlayPager(&state)
+		}
 	case ReplaceTranscriptAction:
-		state.Transcript = NewTranscriptState(a.Snapshot)
+		nextTranscript := NewTranscriptState(a.Snapshot)
+		if transcriptReplacementInvalidatesAckedHistory(state.Transcript, nextTranscript, state.HistoryEffects) {
+			state.HistoryEffects.ProjectionUnknown = true
+			state.HistoryEffects.ReconciliationRequired = true
+		}
+		state.Transcript = nextTranscript
 		state.Active = reconcileTranscriptActiveCell(state.Active, state.Transcript)
 		if state.SemanticActiveCellProjection && state.Active.Phase == ActiveCellMutable {
 			state.Active = normalizeActiveStableRange(state.Active, state.Active.Enqueued.End)
@@ -266,6 +317,10 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.Active.Revision == a.ExpectedActiveRevision &&
 			(!a.ExpectedActiveKindKnown || state.Active.Kind == a.ExpectedActiveKind) &&
 			finalizedCellInSnapshot(a.Snapshot, a.ExpectedActiveCellID, a.ExpectedSceneRevision, a.ExpectedActiveKind, a.ExpectedActiveKindKnown) {
+			if finalizedActiveCorrectionTouchesAckedPrefix(state.Active, a.Snapshot) {
+				state.HistoryEffects.ProjectionUnknown = true
+				state.HistoryEffects.ReconciliationRequired = true
+			}
 			state.Transcript = NewTranscriptState(a.Snapshot)
 			if active, ok := ActiveCellFromTranscript(state.Transcript); ok {
 				state.Active = active
@@ -393,6 +448,88 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		state.Bottom.applyPopupUpdate(a)
 	}
 	return state
+}
+
+func finalizedActiveCorrectionTouchesAckedPrefix(active ActiveCellState, snapshot *scene.Snapshot) bool {
+	if snapshot == nil || active.CellID == 0 || active.Acked.End == 0 {
+		return false
+	}
+	for _, cell := range snapshot.Cells {
+		if cell == nil || cell.ID != active.CellID {
+			continue
+		}
+		end := active.Acked.End
+		return end > len(active.Source) || end > len(cell.Source) || active.Source[:end] != cell.Source[:end]
+	}
+	return false
+}
+
+// transcriptReplacementInvalidatesAckedHistory detects semantic insertions,
+// removals, reorders, and corrections that move ahead of bytes already
+// confirmed in native scrollback. A viewport repaint cannot repair that
+// ordering: the terminal owner must purge the old scrollback epoch and replay
+// the current Scene. Appending or extending content after the acknowledged
+// prefix remains incremental and does not trigger reconciliation.
+func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState, effects HistoryEffectQueueState) bool {
+	ackedByCell := make(map[scene.CellID][]HistoryCommit)
+	for _, entry := range effects.Entries() {
+		if entry.State != HistoryCommitAcked {
+			continue
+		}
+		ackedByCell[entry.Commit.CellID] = append(ackedByCell[entry.Commit.CellID], entry.Commit)
+	}
+	if len(ackedByCell) == 0 {
+		return false
+	}
+
+	previousIndex := transcriptCellIndexes(previous)
+	nextIndex := transcriptCellIndexes(next)
+	for cellID, commits := range ackedByCell {
+		oldAt, oldOK := previousIndex[cellID]
+		newAt, newOK := nextIndex[cellID]
+		if !oldOK || !newOK {
+			return true
+		}
+		if !transcriptSemanticPrefixEqual(previous.Cells[:oldAt], next.Cells[:newAt]) {
+			return true
+		}
+
+		oldCell := previous.Cells[oldAt]
+		newCell := next.Cells[newAt]
+		if oldCell.Kind != newCell.Kind || !reflect.DeepEqual(oldCell.Presentation, newCell.Presentation) {
+			return true
+		}
+		for _, commit := range commits {
+			start, end := commit.SourceRange.Start, commit.SourceRange.End
+			if start < 0 || end < start || end > len(oldCell.Source) || end > len(newCell.Source) ||
+				oldCell.Source[start:end] != newCell.Source[start:end] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func transcriptCellIndexes(transcript TranscriptState) map[scene.CellID]int {
+	indexes := make(map[scene.CellID]int, len(transcript.Cells))
+	for index, cell := range transcript.Cells {
+		indexes[cell.ID] = index
+	}
+	return indexes
+}
+
+func transcriptSemanticPrefixEqual(previous, next []scene.TranscriptCell) bool {
+	if len(previous) != len(next) {
+		return false
+	}
+	for index := range previous {
+		left, right := previous[index], next[index]
+		if left.ID != right.ID || left.Kind != right.Kind || left.Source != right.Source ||
+			!reflect.DeepEqual(left.Presentation, right.Presentation) {
+			return false
+		}
+	}
+	return true
 }
 
 func resetActiveHistoryProgressForTerminalEpoch(state *UIControllerState) {
