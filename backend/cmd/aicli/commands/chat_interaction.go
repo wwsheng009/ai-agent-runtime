@@ -1927,6 +1927,14 @@ func chatDynamicStatusAction(state string, inputMode chatInputMode) (string, sty
 		}
 		return "Running " + detail, style.RoleTool, true
 	}
+	if strings.HasPrefix(normalized, "retrying ") {
+		// llm.retry 的动态状态详情：状态行显示 "◦ Retrying step=1 attempt=2/3 ..."。
+		detail := compactStatusValue(strings.TrimSpace(state[len("retrying "):]), chatAgentStageDetailMaxWidth)
+		if detail == "" {
+			detail = "request"
+		}
+		return "Retrying " + detail, style.RoleWarning, true
+	}
 	switch normalized {
 	case "waiting", "thinking", "planning":
 		return "Analyzing", style.RoleReasoning, true

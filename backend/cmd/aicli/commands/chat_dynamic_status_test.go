@@ -24,6 +24,22 @@ func TestBuildChatDynamicStatusModelUsesCodexActivityFormat(t *testing.T) {
 	}
 }
 
+func TestBuildChatDynamicStatusModelRendersRetryDetail(t *testing.T) {
+	model := buildChatDynamicStatusModelForWidthAndInputMode(
+		"retrying step=1 attempt=2/3 reason=rate_limit delay=500ms",
+		160,
+		chatInputModeChat,
+		time.Second,
+	)
+	if model == nil {
+		t.Fatal("expected an active retry dynamic status model")
+	}
+	plain := style.StatusLineDocument(*model, 160).PlainText()
+	if !strings.Contains(plain, "◦ Retrying step=1 attempt=2/3 reason=rate_limit delay=500ms") {
+		t.Fatalf("unexpected retry dynamic status: %q", plain)
+	}
+}
+
 func TestBuildChatDynamicStatusModelKeepsCompletedTurnSummary(t *testing.T) {
 	model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
 		"Ready",

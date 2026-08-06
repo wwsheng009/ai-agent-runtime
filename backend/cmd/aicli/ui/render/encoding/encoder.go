@@ -563,6 +563,11 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 	case "tool.completed", "tool.failed", "tool.cancelled", "tool.canceled":
 		return opToolFinished
 
+	case "llm.retry":
+		// 重试是过程状态：重试信息由 bridge 渲染在动态数据状态区域
+		// （handleEvent 的 RefreshStatus），不产生 transcript/system cell。
+		return opNone
+
 	case runtimechat.EventCheckpointCreated,
 		runtimechat.EventRewindStarted,
 		runtimechat.EventRewindFinished,

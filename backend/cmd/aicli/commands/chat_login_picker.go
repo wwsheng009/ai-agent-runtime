@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
 
@@ -17,6 +18,13 @@ import (
 func executeStructuredLoginCommand(session *ChatSession, command string) (CommandResult, bool) {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
+	}
+	// The prompter routes through the unified composer only when a surface is
+	// enabled; without one its fallback would write prompts straight to stdout.
+	// Fail closed instead of reviving a raw writer under TerminalSession.
+	if unifiedDirectInteractiveOutput(session) &&
+		(session.Surface == nil || !session.Surface.Enabled()) {
+		return commandErrorResult(fmt.Errorf("当前统一终端缺少可用 surface，无法安全进行交互式登录；请使用非交互参数（--api-key/--provider）重试")), true
 	}
 	parsed, err := parseChatLoginCommandRequest(command)
 	if err != nil {
@@ -64,8 +72,14 @@ func executeStructuredLoginCommand(session *ChatSession, command string) (Comman
 		return commandErrorResult(err), true
 	}
 
-	warnings := refreshUnifiedLoginSession(session, result, parsed.Switch)
-	return commandResultWithWarnings(buildChatLoginResultDocument(result), warnings...), true
+	warnings, notice := refreshUnifiedLoginSession(session, result, parsed.Switch)
+	doc := buildChatLoginResultDocument(result)
+	if notice != "" {
+		lines := strings.Split(strings.TrimRight(ui.RenderDocumentPlain(doc), "\n"), "\n")
+		lines = append(lines, notice)
+		doc = textLinesDocument(lines)
+	}
+	return commandResultWithWarnings(doc, warnings...), true
 }
 
 // buildChatLoginResultDocument is the terminal-neutral projection of the legacy
@@ -165,21 +179,23 @@ func buildChatLoginResultDocument(result *providerLoginResult) render.Document {
 }
 
 // refreshUnifiedLoginSession applies the post-login session refresh without
-// writing to stdout; failures and the success notice are returned as warnings.
-func refreshUnifiedLoginSession(session *ChatSession, result *providerLoginResult, switchProvider bool) []error {
+// writing to stdout. Failures are returned as warnings; the success notice is
+// an ordinary informational line appended to the result document (not a
+// warning, which would render with a "警告:" prefix).
+func refreshUnifiedLoginSession(session *ChatSession, result *providerLoginResult, switchProvider bool) ([]error, string) {
 	if session == nil || result == nil || result.DryRun {
-		return nil
+		return nil, ""
 	}
 	shouldRefresh := switchProvider || strings.EqualFold(strings.TrimSpace(session.ProviderName), strings.TrimSpace(result.ProviderName))
 	if !shouldRefresh {
-		return nil
+		return nil, ""
 	}
 	providerCtx, _, err := resolveModelCommandExecutionContext(session, result.ProviderName, result.DefaultModel)
 	if err != nil {
-		return []error{fmt.Errorf("登录成功，但刷新当前会话失败: %w", err)}
+		return []error{fmt.Errorf("登录成功，但刷新当前会话失败: %w", err)}, ""
 	}
 	if err := applyModelCommandSelection(session, providerCtx, providerCtx.RequestedModel, session.ReasoningEffort); err != nil {
-		return []error{fmt.Errorf("登录成功，但刷新当前会话失败: %w", err)}
+		return []error{fmt.Errorf("登录成功，但刷新当前会话失败: %w", err)}, ""
 	}
-	return []error{fmt.Errorf("当前 chat 会话已刷新到最新 provider 配置")}
+	return nil, "当前 chat 会话已刷新到最新 provider 配置"
 }

@@ -2485,6 +2485,17 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			rendered = b.renderAsyncTeamSummaryFallback(event)
 		}
 	}
+	// llm.retry：重试信息渲染在动态数据状态区域（composer 上方状态行），
+	// 不进入 timeline/transcript（重试是过程状态，非持久历史）。格式复用
+	// 旧 renderLLMRetryTimelineEvent 的重试详情（step/attempt/reason 等），
+	// 由 chatDynamicStatusAction 的 "retrying <detail>" 分支呈现。
+	if event.Type == "llm.retry" {
+		if parts := chatLLMRetryParts(event); len(parts) > 0 &&
+			shouldRenderInteractiveOutput(b.session) && b.session.Interaction != nil {
+			b.session.Interaction.RefreshStatus("retrying " + strings.Join(parts, " "))
+		}
+		rendered = chatRuntimeTimelineEvent{}
+	}
 	if rendered.DebugOnly && !isSessionDebugModeEnabled(b.session) {
 		rendered = chatRuntimeTimelineEvent{}
 	}
@@ -4731,11 +4742,37 @@ func llmRequestDedupKey(event runtimeevents.Event, eventType string) string {
 }
 
 func renderLLMRetryTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
-	payload := event.Payload
-	if payload == nil {
+	parts := chatLLMRetryParts(event)
+	if len(parts) == 0 {
 		return chatRuntimeTimelineEvent{}
 	}
+	payload := event.Payload
 	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
+	stepLabel := payloadStringValue(payload["step"])
+	if stepLabel == "" {
+		if step := intPayloadValue(payload, "step"); step > 0 {
+			stepLabel = fmt.Sprintf("%d", step)
+		}
+	}
+	attempt := intPayloadValue(payload, "attempt")
+	reason := strings.TrimSpace(payloadStringValue(payload["retry_reason"]))
+	source := strings.TrimSpace(payloadStringValue(payload["source"]))
+	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+		Kind:   cell.TimelineProgress,
+		Status: cell.StatusPending,
+		Tag:    "[retry]",
+		Title:  strings.Join(parts, " "),
+	}, fmt.Sprintf("llm.retry:%s:%s:%d:%s:%s", traceID, stepLabel, attempt, reason, source))
+}
+
+// chatLLMRetryParts 提取 llm.retry 事件的重试详情片段（step/provider/
+// model/attempt/reason/delay/source/error）。timeline 标题与动态状态行的
+// 重试信息共用同一构造，保证两处格式一致。
+func chatLLMRetryParts(event runtimeevents.Event) []string {
+	payload := event.Payload
+	if payload == nil {
+		return nil
+	}
 	stepLabel := payloadStringValue(payload["step"])
 	if stepLabel == "" {
 		if step := intPayloadValue(payload, "step"); step > 0 {
@@ -4783,15 +4820,7 @@ func renderLLMRetryTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineE
 	if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 120); errText != "" {
 		parts = append(parts, "error="+errText)
 	}
-	if len(parts) == 0 {
-		return chatRuntimeTimelineEvent{}
-	}
-	return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
-		Kind:   cell.TimelineProgress,
-		Status: cell.StatusPending,
-		Tag:    "[retry]",
-		Title:  strings.Join(parts, " "),
-	}, fmt.Sprintf("llm.retry:%s:%s:%d:%s:%s", traceID, stepLabel, attempt, reason, source))
+	return parts
 }
 
 func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {

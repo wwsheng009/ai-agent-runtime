@@ -913,6 +913,17 @@ func TestEncodeExhaustiveKnownLegacyEventTypes(t *testing.T) {
 		t.Run(typ, func(t *testing.T) {
 			e := NewEventEncoder()
 			cs := e.Encode(event(typ, map[string]interface{}{"message": "probe"}))
+			if typ == "llm.retry" {
+				// 重试是过程状态：重试信息由 bridge 渲染在动态数据状态区域，
+				// encoder 静默（不产生 transcript/system cell）。
+				if len(cs.Changes) != 0 {
+					t.Fatalf("%s: 重试应静默，got %d changes", typ, len(cs.Changes))
+				}
+				if u := e.Stats().UnknownCount; u != 0 {
+					t.Fatalf("%s: UnknownCount = %d, want 0（已知 legacy 类型不应计未知）", typ, u)
+				}
+				return
+			}
 			if len(cs.Changes) == 0 {
 				t.Fatalf("%s: 变更集为空", typ)
 			}

@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -573,6 +574,54 @@ func TestChatInteractionCoordinator_FirstSubmittedUserInputRendersWithLateBridge
 	}
 	if session.RuntimeEventBridge == nil {
 		t.Fatal("bridge was not created by first submitted user input")
+	}
+}
+
+func TestChatRuntimeEventBridge_LLMRetryRendersDynamicStatus(t *testing.T) {
+	// llm.retry 渲染在动态数据状态区域：RefreshStatus("retrying ...") 更新
+	// 状态行（composer 上方），不产生 timeline/transcript 行（重试是过程
+	// 状态，非持久历史）。
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var history bytes.Buffer
+	interaction.SetWriter(&history)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(120, 10)
+	interaction.SetSurface(surface)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.retry",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "step": 1, "attempt": 2, "max_attempts": 3,
+			"retry_reason": "rate_limit", "retry_delay_ms": 500,
+		},
+	})
+	interaction.waitUIActorIdle()
+	if got := history.String(); strings.Contains(got, "retry") || strings.Contains(got, "llm") {
+		t.Fatalf("retry leaked into durable history: %q", got)
+	}
+	interaction.mu.Lock()
+	model := interaction.dynamicStatusModel
+	interaction.mu.Unlock()
+	if model == nil {
+		t.Fatal("retry did not set the dynamic status model")
+	}
+	plain := style.StatusLineDocument(*model, 160).PlainText()
+	if !strings.Contains(plain, "Retrying step=1 attempt=2/3") || !strings.Contains(plain, "reason=rate_limit") {
+		t.Fatalf("unexpected retry dynamic status: %q", plain)
 	}
 }
 
