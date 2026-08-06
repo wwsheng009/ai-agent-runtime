@@ -191,7 +191,6 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 	}{
 		{input: "/rewind 0", name: "/backtrack"},
 		{input: "/resume", name: "/resume"},
-		{input: "/login", name: "/login"},
 		{input: "/agents panel", name: "/agents 的交互、发送和路由子命令尚未迁移到统一渲染命令通道。"},
 	}
 	raw := captureStdout(t, func() {

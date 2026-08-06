@@ -55,7 +55,7 @@ func TestDottedLifecycleProjectsMarkdownExactlyOnceIntoNativeHistory(t *testing.
 	if snapshot == nil || len(snapshot.Cells) != 2 {
 		t.Fatalf("bridge scene cells=%d, want reasoning + one assistant", len(snapshot.Cells))
 	}
-	if snapshot.Cells[0].Kind != scene.KindSupplement || !strings.HasSuffix(snapshot.Cells[0].Source, "BRIDGE-REASONING-SENTINEL") ||
+	if snapshot.Cells[0].Kind != scene.KindSupplement || !strings.Contains(snapshot.Cells[0].Source, "BRIDGE-REASONING-SENTINEL") ||
 		snapshot.Cells[1].Kind != scene.KindAssistant || snapshot.Cells[1].Source != answer ||
 		snapshot.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("bridge scene did not preserve canonical reasoning/assistant order: %+v", snapshot.Cells)
@@ -181,7 +181,7 @@ func TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal(t *te
 		t.Fatalf("late reasoning flow retained mutable active: %+v", state.Active)
 	}
 	if len(state.Transcript.Cells) != 2 || state.Transcript.Cells[0].Kind != scene.KindSupplement ||
-		!strings.HasSuffix(state.Transcript.Cells[0].Source, reasoning) || state.Transcript.Cells[1].Kind != scene.KindAssistant ||
+		!strings.Contains(state.Transcript.Cells[0].Source, reasoning) || state.Transcript.Cells[1].Kind != scene.KindAssistant ||
 		state.Transcript.Cells[1].Source != answer || state.Transcript.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("late reasoning/final semantic order = %+v", state.Transcript.Cells)
 	}
@@ -291,7 +291,7 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	final := coordinator.uiActor.AppState()
-	if len(final.Transcript.Cells) != 2 || !strings.HasSuffix(final.Transcript.Cells[0].Source, reasoning) ||
+	if len(final.Transcript.Cells) != 2 || !strings.Contains(final.Transcript.Cells[0].Source, reasoning) ||
 		final.Transcript.Cells[1].Source != answer || final.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("late reasoning long-flow semantic order = %+v active=%+v", final.Transcript.Cells, final.Active)
 	}
@@ -629,7 +629,7 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 	if final.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("authoritative final retained mutable ownership: %+v", final.Active)
 	}
-	if len(final.Transcript.Cells) != 2 || !strings.HasSuffix(final.Transcript.Cells[0].Source, reasoning) ||
+	if len(final.Transcript.Cells) != 2 || !strings.Contains(final.Transcript.Cells[0].Source, reasoning) ||
 		final.Transcript.Cells[1].Source != answer || final.Transcript.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("authoritative final transcript lost reasoning/assistant order: %+v", final.Transcript)
 	}

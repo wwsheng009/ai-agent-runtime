@@ -1041,6 +1041,16 @@ func reasoningDividerLine() string {
 	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
 }
 
+// reasoningEndDividerLine 返回思考链的结束分隔线（与开始分隔线对称，
+// 标识 reasoning 块在 transcript 中的结束边界）。
+func reasoningEndDividerLine() string {
+	const width = 72
+	content := " end reasoning "
+	left := (width - len([]rune(content))) / 2
+	right := width - len([]rune(content)) - left
+	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
+}
+
 // markReasoningBarrier 创建空 reasoning 占位 cell：native-history ordering
 // fence 的语义位置。
 func (e *EventEncoder) markReasoningBarrier(key string, assistant *Item, cs *ChangeSet) {
@@ -1337,8 +1347,18 @@ func (e *EventEncoder) finalizeReasoning(key string, status ItemStatus, cs *Chan
 		return
 	}
 	if u, changed := e.upsertItem(r.ID, KindReasoning, func(t *Item) bool {
-		t.Status = status
-		return true
+		changed := false
+		if t.Status != status {
+			t.Status = status
+			changed = true
+		}
+		// 思考链结束标识：finalize 时在内容末尾追加结束分隔线（幂等，
+		// 与开始分隔线对称，避免重复 finalize 叠加）。
+		if !strings.Contains(t.Head, " end reasoning ") {
+			t.Head = strings.TrimRight(t.Head, "\n") + "\n" + reasoningEndDividerLine()
+			changed = true
+		}
+		return changed
 	}); changed {
 		e.change(cs, OpUpsert, u)
 	}

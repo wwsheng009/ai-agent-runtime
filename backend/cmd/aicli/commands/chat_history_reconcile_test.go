@@ -406,7 +406,7 @@ func TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsi
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.AppState()
-	if state.Active.Phase != ui.ActiveCellMutable || !strings.HasSuffix(state.Active.Source, activeReasoning) {
+	if state.Active.Phase != ui.ActiveCellMutable || !strings.Contains(state.Active.Source, activeReasoning) {
 		t.Fatalf("active reasoning was not projected from AppState: %+v", state.Active)
 	}
 	acked := 0
@@ -505,7 +505,7 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 	if state.Geometry.Width != width || state.Geometry.Height != height || state.LayoutGeneration == 0 {
 		t.Fatalf("startup geometry did not come from mounted surface: %+v", state.AppState.Geometry)
 	}
-	if state.Active.Phase != ui.ActiveCellMutable || !strings.HasSuffix(state.Active.Source, "startup active reasoning remains visible") {
+	if state.Active.Phase != ui.ActiveCellMutable || !strings.Contains(state.Active.Source, "startup active reasoning remains visible") {
 		t.Fatalf("startup reasoning did not remain semantic active content: %+v", state.Active)
 	}
 	assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, "startup history user 6", 1)
@@ -657,7 +657,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	if state.Geometry.Width != width || state.Geometry.Height != height || state.LayoutGeneration == 0 {
 		t.Fatalf("startup geometry did not come from mounted surface: %+v", state.AppState.Geometry)
 	}
-	if state.Active.Phase != ui.ActiveCellMutable || !strings.HasSuffix(state.Active.Source, "live reasoning after replay remains visible") {
+	if state.Active.Phase != ui.ActiveCellMutable || !strings.Contains(state.Active.Source, "live reasoning after replay remains visible") {
 		t.Fatalf("live EventBus reasoning was not projected to the active band: %+v", state.Active)
 	}
 	if len(state.AppState.Transcript.Cells) != len(messages)+1 {

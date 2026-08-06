@@ -38,6 +38,18 @@ type chatLoginCommandRequest struct {
 }
 
 func handleLoginCommand(session *ChatSession, command string, noInteractive bool) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredLoginCommand(session, command); handled {
+			_ = renderChatCommandResult(session, result, false)
+			return false
+		}
+		// executeStructuredLoginCommand handles every /login variant today, so
+		// this branch is defensive. The deny-list fence no longer contains
+		// /login (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
+		// would fail open into the legacy stdout handler; fail closed instead.
+		_ = renderChatCommandResult(session, commandTextResult("错误: /login 变体无法通过统一渲染命令通道处理"), false)
+		return false
+	}
 	if rejectUnifiedInteractiveLegacyCommand(session, "/login") {
 		return false
 	}

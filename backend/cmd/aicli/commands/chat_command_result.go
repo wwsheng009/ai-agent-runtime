@@ -205,6 +205,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			return result, true, nil
 		}
 	}
+	// /login is fully migrated: the prompter already routes through the unified
+	// composer, and the result is rendered as one unified command cell. It must
+	// be recognized before the broad /login legacy fence so no variant can
+	// revive the terminal writer.
+	if commandMatches(cmdLower, "/login") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredLoginCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
 	// The backtrack picker and apply path are effects, but list/audit/preview
 	// requests are finite read-only reports. Claim only those reports here; a
 	// bare command, selection request, or any mutation keeps the unified fence.
@@ -687,8 +696,6 @@ func unifiedInteractiveLegacyCommandFence(session *ChatSession, command string) 
 		commandName = "/backtrack"
 	case commandMatches(command, "/resume"):
 		commandName = "/resume"
-	case commandMatches(command, "/login"):
-		commandName = "/login"
 	default:
 		return CommandResult{}, false
 	}

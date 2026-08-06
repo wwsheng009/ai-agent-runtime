@@ -235,8 +235,8 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	if len(m.Items) != 2 {
 		t.Fatalf("items = %d, want 2 (reasoning + assistant)", len(m.Items))
 	}
-	if m.Items[0].Kind != KindReasoning || !strings.HasSuffix(m.Items[0].Head, "thinking...") || !strings.Contains(m.Items[0].Head, " reasoning ") || m.Items[0].Status != StatusCompleted {
-		t.Fatalf("items[0] = %+v, want completed reasoning with divider", m.Items[0])
+	if m.Items[0].Kind != KindReasoning || !strings.Contains(m.Items[0].Head, "thinking...") || !strings.Contains(m.Items[0].Head, " reasoning ") || !strings.Contains(m.Items[0].Head, " end reasoning ") || m.Items[0].Status != StatusCompleted {
+		t.Fatalf("items[0] = %+v, want completed reasoning with dividers", m.Items[0])
 	}
 	if m.Items[1].Kind != KindAssistant || m.Items[1].Head != "Hello" {
 		t.Fatalf("items[1] = %+v, want assistant with Hello", m.Items[1])
@@ -634,7 +634,7 @@ func TestEncodeProductionDottedLifecyclePreservesReasoningBeforeAssistant(t *tes
 	}
 
 	model := e.Snapshot()
-	if len(model.Items) != 2 || model.Items[0].Kind != KindReasoning || !strings.HasSuffix(model.Items[0].Head, "reasoning first") ||
+	if len(model.Items) != 2 || model.Items[0].Kind != KindReasoning || !strings.Contains(model.Items[0].Head, "reasoning first") ||
 		model.Items[1].Kind != KindAssistant || model.Items[1].Head != "assistant second" {
 		t.Fatalf("production item order = %+v", model.Items)
 	}
