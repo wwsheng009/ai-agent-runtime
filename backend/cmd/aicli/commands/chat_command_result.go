@@ -78,6 +78,11 @@ type ThemePickerRequest struct{}
 // after alternate-screen ownership has been released.
 type SkillPickerRequest struct{}
 
+// ExportPickerRequest marks the export session/format selection effect. It
+// carries no mutable state: the picker lists candidate sessions after dispatch,
+// and the export runs only after alternate-screen ownership is released.
+type ExportPickerRequest struct{}
+
 // CommandResult is the renderer-neutral result of a local chat command.
 type CommandResult struct {
 	Blocks []RenderBlock
@@ -120,6 +125,10 @@ type CommandResult struct {
 	// document payload: the confirmed skill becomes a composer draft
 	// (`/skill <name> `) only after lease release and primary presenter recovery.
 	OpenSkillPicker *SkillPickerRequest
+	// OpenExportPicker requests the lease-bound export session/format selector.
+	// It has no document payload: the export runs only after lease release and
+	// primary presenter recovery.
+	OpenExportPicker *ExportPickerRequest
 	// ApplyBacktrack requests the direct destructive transaction. It has no
 	// document payload: the mutation must rebuild canonical history before its
 	// result cell is committed, and submit/draft effects run only afterwards.
@@ -184,6 +193,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 	if commandMatches(cmdLower, "/skill") && unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredSkillCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
+	// /export is fully migrated: explicit targets/formats apply through the
+	// unified command cell, and bare /export opens the typed session/format
+	// picker. It must be recognized before the broad /export legacy fence so no
+	// variant can revive the terminal writer.
+	if commandMatches(cmdLower, "/export") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredExportCommand(session, command); handled {
 			return result, true, nil
 		}
 	}
@@ -669,8 +687,6 @@ func unifiedInteractiveLegacyCommandFence(session *ChatSession, command string) 
 		commandName = "/backtrack"
 	case commandMatches(command, "/resume"):
 		commandName = "/resume"
-	case commandMatches(command, "/export"):
-		commandName = "/export"
 	case commandMatches(command, "/login"):
 		commandName = "/login"
 	default:

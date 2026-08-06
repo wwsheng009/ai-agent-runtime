@@ -704,6 +704,10 @@ func actionClassString(action UIAction) string {
 		return "OpenSkillPicker"
 	case CloseSkillPicker:
 		return "CloseSkillPicker"
+	case OpenExportPicker:
+		return "OpenExportPicker"
+	case CloseExportPicker:
+		return "CloseExportPicker"
 	case TranscriptPagerScroll:
 		return "TranscriptPagerScroll"
 	case TranscriptPagerSetFollowBottom:

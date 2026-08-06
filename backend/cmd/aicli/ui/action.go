@@ -269,6 +269,26 @@ func (CloseSkillPicker) isUIAction()         {}
 func (CloseSkillPicker) Class() ActionClass  { return ClassBarrier }
 func (CloseSkillPicker) CoalesceKey() string { return "" }
 
+// OpenExportPicker and CloseExportPicker bind the export session/format
+// selector to its ScreenLease. The picker owns only transient list state; the
+// actor retains the lease identity so stale lifecycle actions cannot clear a
+// newer modal or resume the primary presenter early.
+type OpenExportPicker struct {
+	LeaseID uint64
+}
+
+func (OpenExportPicker) isUIAction()         {}
+func (OpenExportPicker) Class() ActionClass  { return ClassBarrier }
+func (OpenExportPicker) CoalesceKey() string { return "" }
+
+type CloseExportPicker struct {
+	LeaseID uint64
+}
+
+func (CloseExportPicker) isUIAction()         {}
+func (CloseExportPicker) Class() ActionClass  { return ClassBarrier }
+func (CloseExportPicker) CoalesceKey() string { return "" }
+
 // TranscriptPagerScroll is a durable user intent. Reducer-side layout derives
 // the resulting anchor from semantic cells at the current geometry.
 type TranscriptPagerScroll struct {

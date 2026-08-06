@@ -119,6 +119,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.SkillPicker.Active && state.SkillPicker.LeaseID == a.LeaseID {
 				state.SkillPicker = SkillPickerState{}
 			}
+			if state.ExportPicker.Active && state.ExportPicker.LeaseID == a.LeaseID {
+				state.ExportPicker = ExportPickerState{}
+			}
 		}
 	case OpenTranscriptOverlay:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
@@ -170,6 +173,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseSkillPicker:
 		if a.LeaseID != 0 && state.SkillPicker.Active && state.SkillPicker.LeaseID == a.LeaseID {
 			state.SkillPicker = SkillPickerState{}
+		}
+	case OpenExportPicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.ExportPicker = ExportPickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseExportPicker:
+		if a.LeaseID != 0 && state.ExportPicker.Active && state.ExportPicker.LeaseID == a.LeaseID {
+			state.ExportPicker = ExportPickerState{}
 		}
 	case TranscriptPagerScroll:
 		if state.TranscriptOverlay.Active && transcriptPagerLeaseMatches(state.TranscriptOverlay, a.LeaseID) {

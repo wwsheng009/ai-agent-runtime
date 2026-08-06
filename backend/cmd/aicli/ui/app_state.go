@@ -36,6 +36,7 @@ type AppState struct {
 	ModelPicker                  ModelPickerState
 	ThemePicker                  ThemePickerState
 	SkillPicker                  SkillPickerState
+	ExportPicker                 ExportPickerState
 	LayoutGeneration             uint64
 }
 
@@ -222,6 +223,14 @@ type ThemePickerState struct {
 // Navigation, search and the selected row remain local to the fullscreen list;
 // the confirmed skill becomes a composer draft only after lease release.
 type SkillPickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// ExportPickerState intentionally holds only alternate-screen ownership.
+// Navigation, search and the selected row remain local to the fullscreen list;
+// the export runs only after lease release.
+type ExportPickerState struct {
 	Active  bool
 	LeaseID uint64
 }

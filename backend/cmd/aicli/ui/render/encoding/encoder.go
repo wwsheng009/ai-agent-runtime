@@ -997,7 +997,11 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	if it := e.reasoningBy[key]; it != nil {
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
 			next := text
-			if streamDelta {
+			if strings.TrimSpace(t.Head) == "" {
+				// 占位/空 reasoning（barrier 或空文本）：首行先写思考链分隔线，
+				// 保证每个 reasoning cell 都有可辨识的渲染边界。
+				next = reasoningDividerLine() + "\n" + text
+			} else if streamDelta {
 				next = appendReasoningDelta(t.Head, text)
 			}
 			if t.Head == next {
@@ -1014,17 +1018,31 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 		return
 	}
 	var it *Item
+	head := reasoningDividerLine() + "\n" + text
 	if assistant := e.assistantBy[key]; assistant != nil {
-		it = e.insertItemBefore(assistant.ID, KindReasoning, text)
+		it = e.insertItemBefore(assistant.ID, KindReasoning, head)
 		e.changeBefore(cs, OpAppend, it, assistant.ID)
 	} else {
-		it = e.appendItem(KindReasoning, "", text)
+		it = e.appendItem(KindReasoning, "", head)
 		e.change(cs, OpAppend, it)
 	}
 	e.reasoningBy[key] = it
 	e.removeReasoningBarrier(key, cs)
 }
 
+// reasoningDividerLine 返回思考链的分隔线（对齐旧版 chatToolDivider：
+// " reasoning " 居中、─ 填充到 72 列）。unified 数据面用它给 reasoning
+// cell 的首行加分隔标识，与旧 timeline 路径的渲染格式保持一致。
+func reasoningDividerLine() string {
+	const width = 72
+	content := " reasoning "
+	left := (width - len([]rune(content))) / 2
+	right := width - len([]rune(content)) - left
+	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
+}
+
+// markReasoningBarrier 创建空 reasoning 占位 cell：native-history ordering
+// fence 的语义位置。
 func (e *EventEncoder) markReasoningBarrier(key string, assistant *Item, cs *ChangeSet) {
 	if e == nil || key == "" || assistant == nil || e.reasoningBy[key] != nil || cs == nil {
 		return

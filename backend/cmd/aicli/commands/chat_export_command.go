@@ -60,6 +60,21 @@ type chatExportResult struct {
 }
 
 func handleExportCommand(session *ChatSession, command string) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredExportCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenExportPicker != nil {
+				openChatExportPicker(session, *result.OpenExportPicker)
+			}
+			return false
+		}
+		// executeStructuredExportCommand handles every /export variant today, so
+		// this branch is defensive. The deny-list fence no longer contains
+		// /export (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
+		// would fail open into the legacy stdout handler; fail closed instead.
+		_ = renderChatCommandResult(session, commandTextResult("错误: /export 变体无法通过统一渲染命令通道处理"), false)
+		return false
+	}
 	if rejectUnifiedInteractiveLegacyCommand(session, "/export") {
 		return false
 	}

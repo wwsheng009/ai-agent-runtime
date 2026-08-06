@@ -73,6 +73,12 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// primary presenter recovery.
 				openChatSkillPicker(session, *result.OpenSkillPicker)
 			}
+			if renderErr == nil && result.OpenExportPicker != nil && session != nil {
+				// /export bare is a typed picker effect; the export file write
+				// runs only after ScreenLease release and primary presenter
+				// recovery.
+				openChatExportPicker(session, *result.OpenExportPicker)
+			}
 			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
 				// Direct backtrack apply has no alternate screen, but it still owns
 				// the same destructive transaction: actor mutation, canonical Scene
