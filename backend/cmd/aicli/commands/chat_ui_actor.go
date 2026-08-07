@@ -270,8 +270,9 @@ func (c *chatInteractionCoordinator) flushPromptInputDispatch(actor *ui.UIContro
 
 // postSurfaceFacadeAction is the surface-only action entry. A facade reached
 // synchronously by the legacy reducer adapter is accepted as a checked legacy
-// follow-up; an external producer cannot claim that lane merely because a
-// reducer happens to be in flight and instead uses normal mailbox FIFO.
+// follow-up. A non-reducer call uses the controller's deferred FIFO lane rather
+// than waiting for bounded capacity, because the caller may hold c.mu while the
+// reducer needs that same lock.
 //
 // PostFollowup intentionally keeps a follow-up as a separately reduced action
 // (and therefore a separately visible revision); it is not a direct surface
@@ -292,10 +293,12 @@ func (c *chatInteractionCoordinator) postSurfaceFacadeAction(action ui.UIAction)
 	if status, ok := action.(ui.SetPromptEditorStatusAction); ok {
 		return c.postPromptEditorStatusAction(actor, status)
 	}
-	// Durable facade actions retain normal mailbox backpressure outside the
-	// editor status path. They cannot be accepted as a follow-up by a foreign
-	// producer merely because another reducer is in flight.
-	return actor.Post(action)
+	// A facade call can be reached while its producer holds c.mu. The reducer
+	// also reads that mutex, so waiting here for a full bounded mailbox would
+	// create a lock cycle. Keep the action in the controller's FIFO, but admit it
+	// through the internal deferred lane; external runtime events retain normal
+	// Post backpressure.
+	return actor.PostDeferred(action)
 }
 
 func (c *chatInteractionCoordinator) postPromptEditorStatusAction(actor *ui.UIController, action ui.SetPromptEditorStatusAction) bool {

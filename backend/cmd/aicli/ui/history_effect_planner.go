@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"sort"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -37,6 +38,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	if len(rows) == 0 {
 		return activeCommits
 	}
+	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
 	// The primary frame now owns only the mutable/bottom inline viewport.
 	// Finalized transcript rows all belong to native terminal history; retaining
 	// a screen-sized transcript tail here would make those rows disappear as
@@ -52,7 +54,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 		cell, found := byID[cellID]
 		_, beforeFrontier := frontierCells[cellID]
 		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
-			skipRows := activeAckedRenderedPrefixRows(state.HistoryEffects, cellID, rows[start:end], byID)
+			skipRows := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], byID)
 			if cellUsesStructuredPresentation(cell) {
 				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, state.LayoutGeneration, byID)...)
 			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, state.LayoutGeneration, byID); mapped {
@@ -64,6 +66,18 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 		start = end
 	}
 	return append(commits, activeCommits...)
+}
+
+// ackedActiveHistoryCommitIndex is a planner-local, read-only view of the
+// retained mutable-cell payloads needed when that cell becomes finalized. The
+// ledger maintains token order per active cell, so planning never asks Entries
+// for a sorted, deeply cloned copy of the complete ledger.
+type ackedActiveHistoryCommitIndex struct {
+	ledger *HistoryCommitLedger
+}
+
+func indexAckedActiveHistoryCommits(effects HistoryEffectQueueState) ackedActiveHistoryCommitIndex {
+	return ackedActiveHistoryCommitIndex{ledger: effects.ledger}
 }
 
 // canonicalHistoryCommitFrontier enforces the transcript's single physical
@@ -91,10 +105,16 @@ func canonicalHistoryCommitFrontier(state AppState) (map[scene.CellID]struct{}, 
 // crossed the terminal while the same cell was mutable. History planning uses
 // the retained structured payload, not text hashes, and only accepts a
 // contiguous source prefix whose lines still match the finalized projection.
-func activeAckedRenderedPrefixRows(effects HistoryEffectQueueState, cellID scene.CellID, rows []AppScreenRow, byID map[scene.CellID]scene.TranscriptCell) int {
-	frontier := 0
-	delivered := make([]render.Line, 0)
-	for _, entry := range effects.Entries() {
+func activeAckedRenderedPrefixRows(index ackedActiveHistoryCommitIndex, cellID scene.CellID, rows []AppScreenRow, byID map[scene.CellID]scene.TranscriptCell) int {
+	if index.ledger == nil {
+		return 0
+	}
+	frontier, matched, rowIndex := 0, 0, 0
+	for _, token := range index.ledger.activeTokensByCell[cellID] {
+		entry, exists := index.ledger.byToken[token]
+		if !exists {
+			continue
+		}
 		commit := entry.Commit
 		if entry.State != HistoryCommitAcked || commit.Origin != HistoryCommitActive ||
 			commit.CellID != cellID || commit.SourceRange.Start > frontier ||
@@ -102,22 +122,18 @@ func activeAckedRenderedPrefixRows(effects HistoryEffectQueueState, cellID scene
 			continue
 		}
 		frontier = commit.SourceRange.End
-		delivered = append(delivered, commit.Lines...)
-	}
-	if frontier == 0 || len(delivered) == 0 {
-		return 0
-	}
-	matched := 0
-	for _, row := range rows {
-		if row.TranscriptGap {
-			continue
+		for _, line := range commit.Lines {
+			for rowIndex < len(rows) && rows[rowIndex].TranscriptGap {
+				rowIndex++
+			}
+			if rowIndex >= len(rows) || !historyRenderLineEquivalent(line, appTranscriptRenderLine(rows[rowIndex], byID)) {
+				return 0
+			}
+			matched++
+			rowIndex++
 		}
-		if matched >= len(delivered) || !historyRenderLineEquivalent(delivered[matched], appTranscriptRenderLine(row, byID)) {
-			break
-		}
-		matched++
 	}
-	if matched != len(delivered) {
+	if frontier == 0 || matched == 0 {
 		return 0
 	}
 	return matched
@@ -572,19 +588,40 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	if state == nil {
 		return
 	}
-	candidates := planEligibleHistoryCommits(state.AppState)
+	syncHistoryEffectCandidates(state, planEligibleHistoryCommits(state.AppState), 0)
+}
+
+// syncHistoryEffectsForActiveCell is the hot path for append-only stream
+// updates. The finalized transcript prefix and its physical rows cannot change
+// while the same cell remains mutable, so rebuilding it here only burns CPU
+// and allocations. Reconcile just this cell's active handoff candidates.
+func syncHistoryEffectsForActiveCell(state *UIControllerState) {
+	if state == nil || !state.SemanticActiveCellProjection ||
+		state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 {
+		return
+	}
+	candidates := planMutableActiveCellHistoryCommitsWithTheme(
+		state.Active, state.Geometry, state.LayoutGeneration, state.Theme,
+	)
+	syncHistoryEffectCandidates(state, candidates, state.Active.CellID)
+}
+
+// syncHistoryEffectCandidates reconciles a planned candidate set with the
+// reducer-owned ledger. scopeCellID is zero for a complete transcript plan;
+// otherwise only active entries for that cell are touched.
+func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryCommit, scopeCellID scene.CellID) {
 	valid := make(map[historyCommitSourceKey]HistoryCommit, len(candidates))
 	for _, candidate := range candidates {
 		valid[historyCommitSourceIdentity(candidate)] = candidate
 	}
 	if ledger := state.HistoryEffects.ledger; ledger != nil {
-		for _, entry := range ledger.byToken {
+		reconcile := func(entry HistoryCommitEntry) {
 			candidate, exists := valid[historyCommitSourceIdentity(entry.Commit)]
 			switch entry.State {
 			case HistoryCommitPending:
 				if !exists {
 					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
-					continue
+					return
 				}
 				// A semantic snapshot can retain the same cell source while
 				// changing a preceding boundary/gap. The token remains the
@@ -601,6 +638,17 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 				// acknowledgement prove delivery for the new semantic layout.
 				if !exists || !historyCommitPresentationEqual(entry.Commit, candidate) {
 					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
+				}
+			}
+		}
+		if scopeCellID == 0 {
+			for _, entry := range ledger.byToken {
+				reconcile(entry)
+			}
+		} else {
+			for _, token := range ledger.activeTokensByCell[scopeCellID] {
+				if entry, exists := ledger.byToken[token]; exists {
+					reconcile(entry)
 				}
 			}
 		}
@@ -639,23 +687,37 @@ func advanceActiveCellEnqueuedFromEffects(state *UIControllerState) {
 		return
 	}
 	frontier := state.Active.Enqueued.End
-	for {
-		advanced := false
-		for _, entry := range state.HistoryEffects.Entries() {
-			commit := entry.Commit
-			if commit.Origin != HistoryCommitActive || commit.CellID != state.Active.CellID ||
-				commit.SourceRange.Start > frontier || commit.SourceRange.End <= frontier ||
-				commit.SourceRange.End > state.Active.Stable.End {
-				continue
-			}
-			switch entry.State {
-			case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked, HistoryCommitStateFailed:
-				frontier = commit.SourceRange.End
-				advanced = true
-			}
+	commits := make([]HistoryCommit, 0)
+	for _, token := range state.HistoryEffects.ledger.activeTokensByCell[state.Active.CellID] {
+		entry, exists := state.HistoryEffects.ledger.byToken[token]
+		if !exists {
+			continue
 		}
-		if !advanced {
+		commit := entry.Commit
+		if commit.Origin != HistoryCommitActive || commit.CellID != state.Active.CellID ||
+			commit.SourceRange.End <= frontier || commit.SourceRange.End > state.Active.Stable.End {
+			continue
+		}
+		switch entry.State {
+		case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked, HistoryCommitStateFailed:
+			commits = append(commits, commit)
+		}
+	}
+	sort.Slice(commits, func(i, j int) bool {
+		if commits[i].SourceRange.Start != commits[j].SourceRange.Start {
+			return commits[i].SourceRange.Start < commits[j].SourceRange.Start
+		}
+		if commits[i].SourceRange.End != commits[j].SourceRange.End {
+			return commits[i].SourceRange.End < commits[j].SourceRange.End
+		}
+		return commits[i].Token < commits[j].Token
+	})
+	for _, commit := range commits {
+		if commit.SourceRange.Start > frontier {
 			break
+		}
+		if commit.SourceRange.End > frontier {
+			frontier = commit.SourceRange.End
 		}
 	}
 	if frontier <= state.Active.Enqueued.End {

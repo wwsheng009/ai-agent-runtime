@@ -22,6 +22,9 @@ func TestUnifiedDirectInteractiveOutputUsesSceneAndNeverFallsBackToSurfaceOrStdo
 	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
 		t.Fatal("unified renderer did not attach")
 	}
+	// The presenter's executor flushes the attach-time frame asynchronously;
+	// wait for it before resetting so Reset cannot race the writer goroutine.
+	awaitUnifiedPresenterIdle(t, coordinator)
 	terminal.Reset()
 
 	const visible = "unified direct notice"

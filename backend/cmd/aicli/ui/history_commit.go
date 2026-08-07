@@ -182,17 +182,19 @@ func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 // HistoryCommitLedger is reducer-owned effect progress. It deliberately has
 // no terminal I/O and does not infer identity from line text or hashes.
 type HistoryCommitLedger struct {
-	byToken      map[uint64]HistoryCommitEntry
-	byRange      map[historyCommitRangeKey]uint64
-	bySource     map[historyCommitSourceKey]map[uint64]struct{}
-	pendingCount int
+	byToken            map[uint64]HistoryCommitEntry
+	byRange            map[historyCommitRangeKey]uint64
+	bySource           map[historyCommitSourceKey]map[uint64]struct{}
+	activeTokensByCell map[scene.CellID][]uint64
+	pendingCount       int
 }
 
 func NewHistoryCommitLedger() *HistoryCommitLedger {
 	return &HistoryCommitLedger{
-		byToken:  make(map[uint64]HistoryCommitEntry),
-		byRange:  make(map[historyCommitRangeKey]uint64),
-		bySource: make(map[historyCommitSourceKey]map[uint64]struct{}),
+		byToken:            make(map[uint64]HistoryCommitEntry),
+		byRange:            make(map[historyCommitRangeKey]uint64),
+		bySource:           make(map[historyCommitSourceKey]map[uint64]struct{}),
+		activeTokensByCell: make(map[scene.CellID][]uint64),
 	}
 }
 
@@ -208,6 +210,9 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	}
 	if l.bySource == nil {
 		l.bySource = make(map[historyCommitSourceKey]map[uint64]struct{})
+	}
+	if l.activeTokensByCell == nil {
+		l.activeTokensByCell = make(map[scene.CellID][]uint64)
 	}
 	if !commit.Valid() {
 		return ErrInvalidHistoryCommit
@@ -229,6 +234,14 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 		l.bySource[sourceKey] = make(map[uint64]struct{})
 	}
 	l.bySource[sourceKey][commit.Token] = struct{}{}
+	if commit.Origin == HistoryCommitActive {
+		tokens := l.activeTokensByCell[commit.CellID]
+		at := sort.Search(len(tokens), func(index int) bool { return tokens[index] >= commit.Token })
+		tokens = append(tokens, 0)
+		copy(tokens[at+1:], tokens[at:])
+		tokens[at] = commit.Token
+		l.activeTokensByCell[commit.CellID] = tokens
+	}
 	l.pendingCount++
 	return nil
 }
@@ -469,6 +482,9 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 			cloneTokens[token] = struct{}{}
 		}
 		clone.bySource[key] = cloneTokens
+	}
+	for cellID, tokens := range l.activeTokensByCell {
+		clone.activeTokensByCell[cellID] = append([]uint64(nil), tokens...)
 	}
 	clone.pendingCount = l.pendingCount
 	return clone

@@ -298,6 +298,48 @@ func (c *UIController) TryPost(action UIAction) bool {
 	return true
 }
 
+// PostDeferred appends an internal, already-derived UI action without waiting
+// for external mailbox capacity. It preserves FIFO by using the same queue as
+// Post, so work accepted earlier remains ahead of it and later bounded
+// producers cannot overtake it.
+//
+// This is a narrow lock-order escape hatch for facade projections produced
+// while their owner may hold a mutex that the reducer also needs. External
+// runtime events must continue to use Post/TryPost so the configured mailbox
+// remains their backpressure boundary. The queue may temporarily exceed cap;
+// only internal projection adapters should call this method.
+func (c *UIController) PostDeferred(action UIAction) bool {
+	if c == nil || action == nil {
+		return false
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return false
+	}
+	if action.Class() == ClassCoalescable {
+		if key := action.CoalesceKey(); key != "" {
+			if idx, ok := c.coalesce[key]; ok && idx < len(c.queue) {
+				c.queue[idx] = mergeActions(c.queue[idx], action)
+				c.posted++
+				c.dropped++
+				c.mu.Unlock()
+				return true
+			}
+		}
+	}
+	c.queue = append(c.queue, action)
+	if action.Class() == ClassCoalescable {
+		if key := action.CoalesceKey(); key != "" {
+			c.coalesce[key] = len(c.queue) - 1
+		}
+	}
+	c.posted++
+	c.mu.Unlock()
+	c.cond.Broadcast()
+	return true
+}
+
 // PostFollowup accepts an action emitted synchronously by the current reducer.
 // New reducer code must use ReducerContext.PostFollowup instead. This legacy
 // adapter remains for deep facade call chains that have not yet received an

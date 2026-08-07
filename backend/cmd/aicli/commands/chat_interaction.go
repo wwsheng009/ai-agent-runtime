@@ -102,6 +102,10 @@ type chatInteractionCoordinator struct {
 	reasoningMeta       string
 	reasoningBuffer     strings.Builder
 	shutdown            bool
+	// shutdownPublished mirrors shutdown for lock-free presenter probes. The
+	// coordinator mutex cannot be used by primaryTerminalGeometry because that
+	// probe runs on the actor's effect-delivery path.
+	shutdownPublished atomic.Bool
 
 	// —— 统一 block boundary 决策状态（切片 11，INV-GAP-03）——
 	// lastBlockMeta 是前一完整块的 boundary 元数据（ID 空 = 尚无完整块）。
@@ -556,10 +560,10 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	if surface != nil {
 		// Phase 1 任务 4 生产接线：facade 组（band/status/prompt/popup）
 		// 内部只投递 action，由 UI actor 经 Apply 同步应用。
-		// Surface facade calls made by a RuntimeEvent reducer must not block while
-		// posting back into that same bounded mailbox. The dedicated route turns
-		// them into ordered actor follow-ups; all external facade calls still use
-		// the normal mailbox path.
+		// Surface facade calls are projected back into the actor. Reducer-owned
+		// calls use the causal follow-up lane; calls reached while the coordinator
+		// lock is held use the non-blocking deferred FIFO lane so they cannot wait
+		// on the actor's bounded mailbox.
 		surface.SetUIActorPoster(c.postSurfaceFacadeAction)
 		if c.primaryPresenter != nil {
 			surface.SetAlternateScreenLeaseTransport(c.primaryPresenter)
@@ -638,13 +642,14 @@ func (c *chatInteractionCoordinator) primaryTerminalGeometry() (width, height in
 	if c == nil {
 		return 0, 0, false
 	}
-	c.mu.Lock()
-	surface := c.surface
-	shutdown := c.shutdown
-	c.mu.Unlock()
-	if shutdown {
+	if c.shutdownPublished.Load() {
 		return 0, 0, false
 	}
+	// This probe is called synchronously from UIController's effect delivery
+	// path. It must stay independent of c.mu so actor progress can never depend
+	// on a producer-side coordinator lock. uiSurface is published atomically when
+	// SetSurface changes ownership and cleared during shutdown.
+	surface := c.uiSurface.Load()
 	if surface != nil {
 		if width, height, ok = surface.TerminalGeometry(); ok {
 			return width, height, true
@@ -4225,7 +4230,12 @@ func (c *chatInteractionCoordinator) Shutdown() {
 		c.mu.Unlock()
 		return
 	}
+	c.shutdownPublished.Store(true)
 	c.shutdown = true
+	// primaryTerminalGeometry is intentionally lock-free because it runs from
+	// the actor's effect path. Publish shutdown before draining the actor so a
+	// concurrent probe cannot acquire a stale compatibility surface.
+	c.uiSurface.Store(nil)
 	c.promptInputClosed.Store(true)
 	c.promptSeq++
 	c.clearPromptInputDispatchThrough(c.clearPromptInputState(true))
@@ -4267,7 +4277,6 @@ func (c *chatInteractionCoordinator) Shutdown() {
 		c.activeStream.Cancel()
 	}
 	c.surface = nil
-	c.uiSurface.Store(nil)
 	c.terminalSession = nil
 	c.terminalExecutor = nil
 	c.mu.Unlock()

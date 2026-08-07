@@ -444,6 +444,41 @@ func TestUIController_FollowupBypassesFullExternalMailbox(t *testing.T) {
 	}
 }
 
+func TestUIController_PostDeferredPreservesFIFOBeyondMailboxCapacity(t *testing.T) {
+	c := NewUIController(UIControllerConfig{MailboxSize: 1}, nil, nil)
+	defer c.Close()
+
+	if !c.Post(RuntimeEvent{Kind: "external"}) {
+		t.Fatal("failed to post external action")
+	}
+	if !c.PostDeferred(SetStatusModelsAction{}) {
+		t.Fatal("failed to post deferred facade action")
+	}
+	if stats := c.Stats(); stats.Pending != 2 {
+		t.Fatalf("pending = %d, want deferred action to remain in FIFO queue", stats.Pending)
+	}
+	if c.TryPost(RuntimeEvent{Kind: "external-after-deferred"}) {
+		t.Fatal("deferred facade action must not open a capacity slot for external TryPost")
+	}
+
+	var applied []UIAction
+	c.reducer = ReducerFunc(func(_ uint64, action UIAction) []Effect {
+		applied = append(applied, action)
+		return nil
+	})
+	go c.Run()
+	c.WaitIdle()
+	if len(applied) != 2 {
+		t.Fatalf("applied = %#v, want two actions", applied)
+	}
+	if event, ok := applied[0].(RuntimeEvent); !ok || event.Kind != "external" {
+		t.Fatalf("applied[0] = %#v, want external runtime event", applied[0])
+	}
+	if _, ok := applied[1].(SetStatusModelsAction); !ok {
+		t.Fatalf("applied[1] = %T, want deferred facade action", applied[1])
+	}
+}
+
 func TestUIController_FollowupRejectsOutsideReducer(t *testing.T) {
 	c, _ := newP1Controller(t, 1)
 	defer c.Close()

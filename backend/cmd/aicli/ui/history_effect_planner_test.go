@@ -415,3 +415,93 @@ func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T)
 		}
 	}
 }
+
+func TestSyncHistoryEffectsForActiveCellLeavesTranscriptEntriesUntouched(t *testing.T) {
+	state := UIControllerState{AppState: AppState{
+		Geometry:                     GeometryState{Width: 80, Height: 24, Generation: 1},
+		LayoutGeneration:             1,
+		SemanticActiveCellProjection: true,
+		Active: ActiveCellState{
+			CellID: 91, Revision: 2, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: "short active source",
+		},
+	}}
+	commit := testHistoryCommit(1, 41, 1)
+	state.HistoryEffects.ledger = NewHistoryCommitLedger()
+	if err := state.HistoryEffects.ledger.Enqueue(commit); err != nil {
+		t.Fatalf("enqueue transcript effect: %v", err)
+	}
+	state.HistoryEffects.NextToken = commit.Token
+
+	syncHistoryEffectsForActiveCell(&state)
+
+	entry, ok := state.HistoryEffects.ledger.Entry(commit.Token)
+	if !ok || entry.State != HistoryCommitPending {
+		t.Fatalf("active-only sync changed unrelated transcript effect: entry=%+v found=%t", entry, ok)
+	}
+}
+
+func TestTranscriptReplacementOnlyUpdatesActive(t *testing.T) {
+	previous := NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
+		{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "prompt", Phase: scene.CellCommitted},
+		{ID: 2, Sequence: 2, Revision: 3, Kind: scene.KindAssistant, Source: "partial", Phase: scene.CellMutable},
+	}})
+	active := ActiveCellState{CellID: 2, Revision: 3, Kind: scene.KindAssistant, Phase: ActiveCellMutable, Source: "partial"}
+	next := previous.Clone()
+	next.Revision++
+	next.Cells[1].Revision++
+	next.Cells[1].Source += " response"
+	if !transcriptReplacementOnlyUpdatesActive(previous, next, active) {
+		t.Fatal("append-only mutable snapshot was not recognized as active-only")
+	}
+
+	changedFinalized := next.Clone()
+	changedFinalized.Cells[0].Source = "corrected prompt"
+	if transcriptReplacementOnlyUpdatesActive(previous, changedFinalized, active) {
+		t.Fatal("finalized-cell correction was incorrectly classified as active-only")
+	}
+	finalized := next.Clone()
+	finalized.Cells[1].Phase = scene.CellCommitted
+	if transcriptReplacementOnlyUpdatesActive(previous, finalized, active) {
+		t.Fatal("active finalization was incorrectly classified as active-only")
+	}
+}
+
+func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
+	const finalizedCells = 256
+	cells := make([]*scene.TranscriptCell, 0, finalizedCells+1)
+	for id := scene.CellID(1); id <= finalizedCells; id++ {
+		cells = append(cells, &scene.TranscriptCell{
+			ID: id, Sequence: uint64(id), Revision: 1, Kind: scene.KindAssistant,
+			Source: "The quick brown fox jumps over the lazy dog.", Phase: scene.CellCommitted,
+		})
+	}
+	activeID := scene.CellID(finalizedCells + 1)
+	cells = append(cells, &scene.TranscriptCell{
+		ID: activeID, Sequence: uint64(activeID), Revision: 2, Kind: scene.KindAssistant,
+		Source: "short active source", Phase: scene.CellMutable,
+	})
+	snapshot := &scene.Snapshot{Revision: 2, Cells: cells}
+	state := UIControllerState{AppState: AppState{
+		Geometry:                     GeometryState{Width: 100, Height: 24, Generation: 1},
+		LayoutGeneration:             1,
+		SemanticActiveCellProjection: true,
+		Transcript:                   NewTranscriptState(snapshot),
+		Active: ActiveCellState{
+			CellID: activeID, Revision: 2, Kind: scene.KindAssistant,
+			Phase: ActiveCellMutable, Source: "short active source",
+		},
+	}}
+	state.HistoryEffects.ledger = NewHistoryCommitLedger()
+	for token := uint64(1); token <= 8192; token++ {
+		commit := testHistoryCommit(token, scene.CellID(token%finalizedCells+1), 1)
+		state.HistoryEffects.ledger.byToken[token] = HistoryCommitEntry{Commit: commit, State: HistoryCommitPending}
+	}
+	state.HistoryEffects.NextToken = 8192
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, uint64(index+1))
+	}
+}

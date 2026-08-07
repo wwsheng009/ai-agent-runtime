@@ -281,7 +281,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		}
 	case ReplaceTranscriptAction:
 		nextTranscript := NewTranscriptState(a.Snapshot)
-		if transcriptReplacementInvalidatesAckedHistory(state.Transcript, nextTranscript, state.HistoryEffects) {
+		activeOnly := state.SemanticActiveCellProjection &&
+			transcriptReplacementOnlyUpdatesActive(state.Transcript, nextTranscript, state.Active)
+		invalidatesAcked := false
+		if activeOnly {
+			invalidatesAcked = activeReplacementInvalidatesAckedHistory(state.Active, nextTranscript)
+		} else {
+			invalidatesAcked = transcriptReplacementInvalidatesAckedHistory(state.Transcript, nextTranscript, state.HistoryEffects)
+		}
+		if invalidatesAcked {
 			state.HistoryEffects.ProjectionUnknown = true
 			state.HistoryEffects.ReconciliationRequired = true
 		}
@@ -290,7 +298,11 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		if state.SemanticActiveCellProjection && state.Active.Phase == ActiveCellMutable {
 			state.Active = normalizeActiveStableRange(state.Active, state.Active.Enqueued.End)
 		}
-		syncHistoryEffectsForTranscript(&state)
+		if activeOnly && !invalidatesAcked && state.Active.Phase == ActiveCellMutable {
+			syncHistoryEffectsForActiveCell(&state)
+		} else {
+			syncHistoryEffectsForTranscript(&state)
+		}
 		refreshTranscriptOverlayPager(&state)
 	case SetActiveCellAction:
 		if a.Active.Phase == ActiveCellInactive {
@@ -315,7 +327,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// is safe. The reducer still validates the original cell/revision fence
 		// and the complete source-range invariant before publishing the snapshot.
 		if reduceActiveCellUpdate(&state, a) == nil {
-			syncHistoryEffectsForTranscript(&state)
+			// Updating the mounted mutable source cannot alter the finalized
+			// transcript prefix. Keep the unified high-frequency stream path
+			// independent of full Markdown/transcript layout; legacy projection
+			// still uses the complete planner because its source may differ.
+			if state.SemanticActiveCellProjection {
+				syncHistoryEffectsForActiveCell(&state)
+			} else {
+				syncHistoryEffectsForTranscript(&state)
+			}
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ClearActiveCellAction:
@@ -482,8 +502,11 @@ func finalizedActiveCorrectionTouchesAckedPrefix(active ActiveCellState, snapsho
 // the current Scene. Appending or extending content after the acknowledged
 // prefix remains incremental and does not trigger reconciliation.
 func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState, effects HistoryEffectQueueState) bool {
+	if effects.ledger == nil {
+		return false
+	}
 	ackedByCell := make(map[scene.CellID][]HistoryCommit)
-	for _, entry := range effects.Entries() {
+	for _, entry := range effects.ledger.byToken {
 		if entry.State != HistoryCommitAcked {
 			continue
 		}
@@ -539,6 +562,51 @@ func transcriptSemanticPrefixEqual(previous, next []scene.TranscriptCell) bool {
 			!reflect.DeepEqual(left.Presentation, right.Presentation) {
 			return false
 		}
+	}
+	return true
+}
+
+// transcriptReplacementOnlyUpdatesActive recognizes the full Scene snapshots
+// emitted after each stream delta. The snapshots are still installed as the
+// semantic source of truth, but when every non-active cell is byte-for-byte
+// unchanged there is no reason to lay out the finalized transcript again.
+func transcriptReplacementOnlyUpdatesActive(previous, next TranscriptState, active ActiveCellState) bool {
+	if active.CellID == 0 || active.Phase != ActiveCellMutable || len(previous.Cells) != len(next.Cells) {
+		return false
+	}
+	found := false
+	for index := range previous.Cells {
+		left, right := previous.Cells[index], next.Cells[index]
+		if left.ID != active.CellID && right.ID != active.CellID {
+			if !reflect.DeepEqual(left, right) {
+				return false
+			}
+			continue
+		}
+		if found || left.ID != active.CellID || right.ID != active.CellID ||
+			left.Phase != scene.CellMutable || right.Phase != scene.CellMutable ||
+			left.Sequence != right.Sequence || left.Kind != right.Kind ||
+			left.HistoryCommitBlocked != right.HistoryCommitBlocked ||
+			left.Boundary != right.Boundary || left.Provenance != right.Provenance ||
+			left.ChainKey != right.ChainKey {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
+func activeReplacementInvalidatesAckedHistory(active ActiveCellState, next TranscriptState) bool {
+	if active.CellID == 0 || active.Acked.End == 0 {
+		return false
+	}
+	for _, cell := range next.Cells {
+		if cell.ID != active.CellID {
+			continue
+		}
+		end := active.Acked.End
+		return end > len(active.Source) || end > len(cell.Source) ||
+			active.Source[:end] != cell.Source[:end]
 	}
 	return true
 }
