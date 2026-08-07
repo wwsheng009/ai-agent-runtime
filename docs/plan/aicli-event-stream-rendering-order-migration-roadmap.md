@@ -1,7 +1,7 @@
 # 统一渲染编码器：迁移路线图与既有渲染计划的衔接
 
-> 状态：方案草稿（待评审）
-> 日期：2026-08-02
+> 状态：**实施中（P1/P2 已落地且测试全绿；P3 渲染层切换与旧路径删除未完成；P4 锚点 partial）**
+> 日期：2026-08-02（2026-08-07 状态更新）
 > 上位方案：[aicli-event-stream-rendering-order-unified-encoder-plan.md](./aicli-event-stream-rendering-order-unified-encoder-plan.md)
 > 配套文档：[渲染模型数据结构规格](./aicli-event-stream-rendering-order-render-model-spec.md) ｜ [EventEncoder 接口设计](./aicli-event-stream-rendering-order-event-encoder-api-design.md)
 
@@ -148,6 +148,14 @@
   切片 9 探针 + 切片 10 用户输入通道使真实数据面 cell 序列 == coordinator
   完整块序列对全部 top-level 块（含用户输入）成立，UI 主渲染仍走双跑模式
   旧路径）。
+  - **口径澄清（2026-08-07）**：此处"双跑"指**数据面**——渲染面物理 writer
+    已由 unified plan（2026-08-06 收口）切换为 `TerminalSessionPresenter`
+    （legacy `FixedBottomSurface` 已 fence、`AICLI_TUI=legacy` escape hatch
+    已删除、真实 provider E2E 40/40 marker 验收通过），但 presenter 的
+    写出行源仍来自旧 Interaction 数据路径（经 compatibility facade），
+    `EventEncoder → ChangeSet → Scene` 仍为影子面；`orderAssistantDelta`
+    与 `AICLI_SCENE_PRESENTER`（默认关闭）双份状态机未删除，属本阶段
+    剩余工作。
 - **验证**：既有 UI 行为回归（历史顺序、工具链空行、assistant 流式、
   并行工具交错）；乱序注入测试证明 UI 顺序由模型保证。
 

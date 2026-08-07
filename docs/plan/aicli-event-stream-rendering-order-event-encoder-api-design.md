@@ -1,7 +1,7 @@
 # 统一渲染编码器：EventEncoder 接口与事件→操作映射设计
 
-> 状态：方案草稿（待评审）
-> 日期：2026-08-02
+> 状态：**实施中（P1/P2 已落地且测试全绿；P3 渲染层切换与旧路径删除未完成；P4 锚点 partial）**
+> 日期：2026-08-02（2026-08-07 状态更新）
 > 上位方案：[aicli-event-stream-rendering-order-unified-encoder-plan.md](./aicli-event-stream-rendering-order-unified-encoder-plan.md)
 > 配套文档：[渲染模型数据结构规格](./aicli-event-stream-rendering-order-render-model-spec.md) ｜ [迁移路线图](./aicli-event-stream-rendering-order-migration-roadmap.md)
 > 参考：Codex `protocol/thread_history.rs`（`ThreadHistoryBuilder`）

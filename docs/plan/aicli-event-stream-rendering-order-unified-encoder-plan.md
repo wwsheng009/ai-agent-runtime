@@ -1,7 +1,7 @@
 # 统一渲染编码器：事件流渲染顺序保证方案
 
-> 状态：方案草稿（待评审）
-> 日期：2026-08-02
+> 状态：**实施中（P1/P2 已落地且测试全绿；P3 渲染层切换与旧路径删除未完成；P4 锚点 partial）**
+> 日期：2026-08-02（2026-08-07 状态更新）
 > 范围：aicli 渲染管线（chat_runtime_events / chat_history_cell / chat_interaction）
 > 参考：Codex 实现（`E:\projects\ai\codex\codex-rs`）
 

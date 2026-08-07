@@ -1,7 +1,7 @@
 # 统一渲染编码器：渲染模型（RenderModel / Item）数据结构规格
 
-> 状态：方案草稿（待评审）
-> 日期：2026-08-02
+> 状态：**实施中（P1/P2 已落地且测试全绿；P3 渲染层切换与旧路径删除未完成；P4 锚点 partial）**
+> 日期：2026-08-02（2026-08-07 状态更新）
 > 上位方案：[aicli-event-stream-rendering-order-unified-encoder-plan.md](./aicli-event-stream-rendering-order-unified-encoder-plan.md)
 > 配套文档：[EventEncoder 接口设计](./aicli-event-stream-rendering-order-event-encoder-api-design.md) ｜ [迁移路线图](./aicli-event-stream-rendering-order-migration-roadmap.md)
 > 参考：Codex `app-server-protocol/src/protocol/v2/item.rs`、`protocol/thread_history.rs`

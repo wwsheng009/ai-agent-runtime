@@ -8,8 +8,18 @@
 > - `aicli-event-stream-rendering-order-render-model-spec.md`
 > - `aicli-event-stream-rendering-order-unified-encoder-plan.md`
 >
-> 结论快照：2026-08-02 12:54 初版；**2026-08-02 15:30 复审更新；2026-08-02 16:30 第三轮更新**。
+> 结论快照：2026-08-02 12:54 初版；**2026-08-02 15:30 复审更新；2026-08-02 16:30 第三轮更新；2026-08-07 复审更新**。
 > 总体状态：**编码器层（P1/P2）落地完成且测试全绿；命令/error 注入已补（切片 11）；生产 UI 仍未切换到统一编码器（P3 未完成），整体为 `partial`，最终验收未通过。**
+>
+> 2026-08-07 复审注记（对齐 unified plan 2026-08-06 收口）：**渲染面物理 writer 已由
+> `docs/plan/aicli-tui-unified-render-architecture-refactor-plan.md` 收口为
+> `TerminalSessionPresenter`（legacy `FixedBottomSurface` 已 fence，`AICLI_TUI=legacy`
+> escape hatch 已删除，真实 provider + Windows Terminal E2E 40/40 marker exactly-once）。
+> 但这是"渲染面单写者"的闭合，**不改变本文 P3 的数据面结论**：presenter 的写出行源
+> 仍来自旧 Interaction 数据路径（经 compatibility facade），`EventEncoder → ChangeSet → Scene`
+> 仍是影子面；`orderAssistantDelta`（chat_runtime_events.go:3299/3335）与 `AICLI_SCENE_PRESENTER`
+> flag（chat_runtime_events.go:218，默认关闭）并存，双份状态机未删除。Tail 锚定插入、
+> 用户输入数据面通道、命令/error 注入均已落地并有测试（见 §2/§4.3/§4.4）。
 
 ## 1. 背景
 
@@ -114,26 +124,26 @@
 
 ### 工作树卫生
 
-- [ ] `git diff --check` 失败：`backend/internal/background/manager.go` 存在大量尾随空白（范围外变更，但需清理后才能干净提交）。
-- [ ] **垃圾文件**：`backend/test_commands_out.txt`（测试输出遗留）应删除。
-- [ ] **文档未入库**：四份方案文档 + 本待办文件均为 untracked，未形成稳定基线。
+- [x] `git diff --check` 失败：`backend/internal/background/manager.go` 存在大量尾随空白（范围外变更，但需清理后才能干净提交）。—— **已解决（2026-08-07 确认 `git diff --check` 干净）**
+- [x] **垃圾文件**：`backend/test_commands_out.txt`（测试输出遗留）应删除。—— **已删除（2026-08-07 确认）**
+- [x] **文档未入库**：四份方案文档 + 本待办文件均为 untracked，未形成稳定基线。—— **已入库（提交 135a072）**
 
 ## 7. 风险与观察
 
 - [ ] **双事实源风险（最高，未消除）**：Encoder/Scene（影子面）与旧 Interaction（可见面）双路径并存；目前乱序语义已对齐，但任何基于单侧证据的"已切换"结论都不可信。
 - [ ] **旧路径双份状态机**：旧 `orderAssistantDelta` 与新 encoder 乱序缓冲并存，语义对齐但冗余——删除属 P3。
-- [ ] **工作区并发变更**：审计期间存在另一写入者（paint-trace 诊断改造、编码器实现均在工作树中演进）；paint_trace.go / screen_model.go / fixed_bottom_surface_paint_trace_test.go 当前为未提交修改。
-- [ ] **文档未入库**：方案文档与代码现状存在漂移（§2 乱序语义、§4.1 用户/one-shot 注入），需在合入前同步。
-- [ ] **后台任务队列异常**：本轮启动的 `go test ./cmd/aicli/commands` 后台任务一直处于 queued 未启动，改为前台执行完成（约 45s）。
+- [x] **工作区并发变更**：审计期间存在另一写入者（paint-trace 诊断改造、编码器实现均在工作树中演进）；paint_trace.go / screen_model.go / fixed_bottom_surface_paint_trace_test.go 当前为未提交修改。—— **均已提交，工作树干净（2026-08-07 确认）**
+- [x] **文档未入库**：方案文档与代码现状存在漂移（§2 乱序语义、§4.1 用户/one-shot 注入），需在合入前同步。—— **已同步并入库（提交 135a072）**
+- [x] **后台任务队列异常**：本轮启动的 `go test ./cmd/aicli/commands` 后台任务一直处于 queued 未启动，改为前台执行完成（约 45s）。—— 一次性观察，无遗留。
 
 ## 8. 建议执行顺序（复审更新）
 
 1. ~~统一乱序语义~~（代码已统一 ABC；API 文档 §4.2 已同步；剩余：三方 golden 对拍测试）。
 2. ~~reasoning 索引 / 终态保护 / 幂等 / suppression 顺序~~（已完成，测试全绿）。
 3. ~~命令注入（SubmitCommand + KindCommand）与 error 注入（SubmitError + KindSystem）~~（已完成：encoder API + bridge 注入 + replay 日志 + live-parity/replay/零行为测试）。
-4. 实现 Tail 锚定插入与真实 UI replay。
-5. 添加 feature flag，切换真实 Scene presenter。
+4. ~~实现 Tail 锚定插入与真实 UI replay~~（已完成：§2 `[x]` 与 §4.3 P4 `[x]`）。
+5. 切换真实 Scene presenter 为唯一数据源（`AICLI_SCENE_PRESENTER` flag 已存在且默认关闭——代码 chat_runtime_events.go:218；**切换本身未完成**，见 §4.3 P3）。
 6. 删除旧路径（orderAssistantDelta、raw-event terminal 写入、completeBlockOutput/gapBeforeBlockLocked）。
 7. 实现 ChangeAccumulator、明确 Replay 契约、补齐事件穷举测试与迁移开关测试。
 8. ~~修复 paint-debug 测试失败~~（369e863 + resyncPending 修复，ui 包已全绿）。
-9. 清理：删除 `test_commands_out.txt`、修复 manager.go 尾随空白、同步四份文档并入库（git add + 评审）。
+9. ~~清理：删除 `test_commands_out.txt`、修复 manager.go 尾随空白、同步四份文档并入库（git add + 评审）。~~（2026-08-07 确认全部完成：垃圾文件已删、diff-check 干净、文档已入库 135a072）
