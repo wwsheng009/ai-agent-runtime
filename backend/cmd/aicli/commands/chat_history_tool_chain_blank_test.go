@@ -64,10 +64,10 @@ func TestPrintVisibleChatHistory_SeparatesFinalToolCells(t *testing.T) {
 		"CONTENT:• 我先查看目录。",
 		"BLANK",
 		"CONTENT:• Completed ls path=docs",
-		"CONTENT:README.md",
+		"CONTENT:└  README.md",
 		"BLANK",
 		"CONTENT:• Completed read_file path=docs/README.md",
-		"CONTENT:# Docs",
+		"CONTENT:└  # Docs",
 		"BLANK",
 		"CONTENT:• 目录里有 README。",
 	}

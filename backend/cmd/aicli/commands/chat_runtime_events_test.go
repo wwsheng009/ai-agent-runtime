@@ -971,9 +971,9 @@ func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 
 	want := strings.Join([]string{
 		"• Completed git status",
-		"  workdir: E:/projects/ai/ai-agent-runtime",
-		`  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
-		"  On branch main",
+		"  │  workdir: E:/projects/ai/ai-agent-runtime",
+		`  │  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+		"  └  On branch main",
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected shared chat tool render: %q", got)
@@ -1043,7 +1043,7 @@ func TestRenderSharedChatToolEvent_RedactsSensitiveArgs(t *testing.T) {
 
 	want := strings.Join([]string{
 		"• Completed fetch url=https://example.test api_key=<redacted> timeout_ms=3000 token_budget=4096",
-		"  200 OK",
+		"  └  200 OK",
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected redacted shared tool render:\nwant:\n%s\n\ngot:\n%s", want, got)
@@ -1073,7 +1073,7 @@ func TestRenderSharedChatToolEvent_ShowsSearchArgsAndBackend(t *testing.T) {
 
 	want := strings.Join([]string{
 		`• Completed grep patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx context=2 via rg in 17ms`,
-		"  24 matches",
+		"  └  24 matches",
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected shared search render:\nwant:\n%s\n\ngot:\n%s", want, got)
@@ -1102,12 +1102,12 @@ func TestRenderSharedChatToolEvent_RendersTodosListAndUpdateState(t *testing.T) 
 
 	want := strings.Join([]string{
 		"• Completed todos todos=[3]",
-		"  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
-		"  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
-		"  当前任务列表:",
-		"  1. [待处理] 分析需求 (新增)",
-		"  2. [进行中] 修改实现 (新增)",
-		"  3. [待处理] 运行测试 (新增)",
+		"  │  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"  │  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"  │  当前任务列表:",
+		"  │  1. [待处理] 分析需求 (新增)",
+		"  │  2. [进行中] 修改实现 (新增)",
+		"  └  3. [待处理] 运行测试 (新增)",
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected todos render:\nwant:\n%s\n\ngot:\n%s", want, got)
@@ -1133,12 +1133,12 @@ func TestRenderChatRuntimeEvent_RendersTodosListFromEventToolName(t *testing.T) 
 
 	want := strings.Join([]string{
 		"• Completed todos todos=[3]",
-		"  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
-		"  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
-		"  当前任务列表:",
-		"  1. [待处理] 分析需求 (新增)",
-		"  2. [进行中] 修改实现 (新增)",
-		"  3. [待处理] 运行测试 (新增)",
+		"  │  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"  │  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"  │  当前任务列表:",
+		"  │  1. [待处理] 分析需求 (新增)",
+		"  │  2. [进行中] 修改实现 (新增)",
+		"  └  3. [待处理] 运行测试 (新增)",
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected runtime todos render:\nwant:\n%s\n\ngot:\n%s", want, got)
@@ -1620,9 +1620,9 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed ls path=src",
-		"  目录: src",
-		"  📁 a/ · 📁 b/",
-		"  统计: 0 个文件, 2 个目录",
+		"  │  目录: src",
+		"  │  📁 a/ · 📁 b/",
+		"  └  统计: 0 个文件, 2 个目录",
 	}, "\n") {
 		t.Fatalf("unexpected tool completed render: %q", got)
 	}
@@ -1637,7 +1637,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		`• Completed grep patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx via rg in 17ms`,
-		"  24 matches",
+		"  └  24 matches",
 	}, "\n") {
 		t.Fatalf("unexpected grep backend render: %q", got)
 	}
@@ -1677,10 +1677,10 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed edit file_path=sample.txt in 250ms",
-		"  workdir: E:/projects/ai/ai-agent-runtime",
-		"  shell: pwsh",
-		"  updated",
-		"  ok",
+		"  │  workdir: E:/projects/ai/ai-agent-runtime",
+		"  │  shell: pwsh",
+		"  │  updated",
+		"  └  ok",
 	}, "\n") {
 		t.Fatalf("unexpected markdown tool context render: %q", got)
 	}
@@ -1695,7 +1695,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Failed git status",
-		"  failed: exit status 128",
+		"  └  failed: exit status 128",
 	}, "\n") {
 		t.Fatalf("unexpected failed tool render: %q", got)
 	}
@@ -1709,7 +1709,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed git status in 1.5s",
-		"  On branch main",
+		"  └  On branch main",
 	}, "\n") {
 		t.Fatalf("unexpected completed tool duration render: %q", got)
 	}
@@ -1724,9 +1724,9 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed git status",
-		"  workdir: E:/projects/ai/ai-agent-runtime",
-		`  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
-		"  On branch main",
+		"  │  workdir: E:/projects/ai/ai-agent-runtime",
+		`  │  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+		"  └  On branch main",
 	}, "\n") {
 		t.Fatalf("unexpected completed tool workdir render: %q", got)
 	}
@@ -1740,7 +1740,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
-		"  (no output)",
+		"  └  (no output)",
 	}, "\n") {
 		t.Fatalf("unexpected no-output shell tool render: %q", got)
 	}
@@ -1754,7 +1754,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed web_search query=天气预报",
-		"  返回 10 条结果",
+		"  └  返回 10 条结果",
 	}, "\n") {
 		t.Fatalf("unexpected tool render: %q", got)
 	}
@@ -1767,8 +1767,8 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed [meta] list_mcp_resources",
-		"  server=docs resources=12",
-		"  next_cursor=cursor-1",
+		"  │  server=docs resources=12",
+		"  └  next_cursor=cursor-1",
 	}, "\n") {
 		t.Fatalf("unexpected meta tool render: %q", got)
 	}
@@ -1782,8 +1782,8 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed [mcp] remote_search query=golang tools",
-		"  result 1",
-		"  result 2",
+		"  │  result 1",
+		"  └  result 2",
 	}, "\n") {
 		t.Fatalf("unexpected mcp tool render: %q", got)
 	}
@@ -1797,8 +1797,8 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		"• Completed [broker] background_task command=git status",
-		"  job_id=job-1",
-		"  status=queued",
+		"  │  job_id=job-1",
+		"  └  status=queued",
 	}, "\n") {
 		t.Fatalf("unexpected broker tool render: %q", got)
 	}
@@ -2825,7 +2825,7 @@ func TestChatRuntimeEvents_InjectsToolDurationFromRequestedAndCompletedTimestamp
 	if !containsAllChatTimelineLines(rendered,
 		"• Running git diff --stat",
 		"• Completed git diff --stat in 1.5s",
-		"changed 2 files",
+		"└  changed 2 files",
 	) {
 		t.Fatalf("expected completed tool timeline with injected duration, got %v", rendered)
 	}
@@ -2869,7 +2869,7 @@ func TestChatRuntimeEvents_DoesNotInjectToolDurationWithoutEventTimestamps(t *te
 	}
 	if !containsAllChatTimelineLines(rendered,
 		"• Completed git diff --stat",
-		"changed 2 files",
+		"└  changed 2 files",
 	) {
 		t.Fatalf("expected completed tool timeline without duration, got %v", rendered)
 	}
@@ -2924,7 +2924,7 @@ func TestChatRuntimeEvents_ToolDurationIsScopedBySessionAndTrace(t *testing.T) {
 
 	if !containsAllChatTimelineLines(rendered,
 		"• Completed git diff --stat in 1.5s",
-		"changed 2 files",
+		"└  changed 2 files",
 	) {
 		t.Fatalf("expected lead tool duration to use lead start event, got %v", rendered)
 	}

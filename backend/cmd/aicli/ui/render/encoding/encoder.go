@@ -1766,12 +1766,44 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 		return
 	}
 	seen[output] = struct{}{}
-	out := e.appendItem(KindToolOutput, cause, output)
+	// 普通文本工具输出树形化（中间行竖线 "│"、末行收尾符号 "└"），
+	// 与 legacy 工具块结果形态一致；diff 与 markdown 输出保留自身结构。
+	treeText := output
+	if !looksLikeDiffPresentation(output) && !markdown.LooksLikeMarkdown(output) {
+		treeText = indentToolOutputTree(output)
+	}
+	out := e.appendItem(KindToolOutput, cause, treeText)
 	if looksLikeDiffPresentation(output) {
 		out.Presentation.Kind = PresentationDiffSupplement
 	}
 	out.Status = StatusCompleted // 工具输出一次性完成（终态语义）
 	e.change(cs, OpAppend, out)
+}
+
+// indentToolOutputTree 把工具输出文本行树形化：从第一行到倒数第二行用竖线
+// "│" 前缀、最后一行用收尾符号 "└"（对齐 legacy 工具块树形结果块与期望的
+// "● Read(...) / └ 27 lines" 形态）。单行输出保持原样。
+func indentToolOutputTree(output string) string {
+	lines := strings.Split(output, "\n")
+	if len(lines) <= 1 {
+		return output
+	}
+	var b strings.Builder
+	b.Grow(len(output) + 6*len(lines))
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		marker := "│"
+		if i == len(lines)-1 {
+			marker = "└"
+		}
+		b.WriteString("  ")
+		b.WriteString(marker)
+		b.WriteString("  ")
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // looksLikeDiffPresentation recognizes the canonical textual formats accepted

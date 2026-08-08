@@ -409,16 +409,36 @@ func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, ar
 	lines = append(lines, compactToolContextLines(payload)...)
 	if renderedLines := renderMarkdownToolOutputLines(payload); len(renderedLines) > 0 {
 		lines = append(lines, renderedLines...)
-		return strings.Join(lines, "\n")
+		return strings.Join(indentToolResultTree(lines), "\n")
 	}
 	outputLines := compactToolOutputLines(summaryLines)
 	if len(outputLines) == 0 {
 		outputLines = []string{"(no output)"}
 	}
 	for _, line := range outputLines {
-		lines = append(lines, "  "+line)
+		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(indentToolResultTree(lines), "\n")
+}
+
+// indentToolResultTree 把工具结果块应用内部层级缩进（树形结果块）：
+// 首行是工具执行摘要（marker 顶格），内容行从第二行起整体缩进 2 空格，
+// 中间行用竖线 "│" 标记、最后一行用收尾符号 "└" 标记。内容行自带的一层
+// "  " 前缀先剥掉，再统一挂树形标记，保证 "  └  27 lines" 形态对齐。
+func indentToolResultTree(lines []string) []string {
+	if len(lines) <= 1 {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	out = append(out, lines[0])
+	for i := 1; i < len(lines); i++ {
+		marker := "│"
+		if i == len(lines)-1 {
+			marker = "└"
+		}
+		out = append(out, "  "+marker+"  "+strings.TrimPrefix(lines[i], "  "))
+	}
+	return out
 }
 
 func renderMarkdownToolOutput(payload map[string]interface{}) string {

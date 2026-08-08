@@ -319,7 +319,7 @@ func TestChatInteractionCoordinator_RenderToolChainEvent_CommitsOnlyFinalCellWit
 	}
 
 	rendered := stripTerminalDecorations(output.String())
-	if !strings.Contains(rendered, "先检查目录。\n\n• Completed ls path=docs\n  README.md") {
+	if !strings.Contains(rendered, "先检查目录。\n\n• Completed ls path=docs\n  └  README.md") {
 		t.Fatalf("expected one boundary gap and dense final tool cell, got %q", rendered)
 	}
 	if strings.Contains(rendered, "\n\n  README.md") {
@@ -359,7 +359,7 @@ func TestChatInteractionCoordinator_RenderToolChainEvent_SeparatesCompletedAndFa
 	}
 
 	rendered := stripTerminalDecorations(output.String())
-	if !strings.Contains(rendered, "• Completed ls path=docs\n  README.md\n\n• Failed exit 1\n  failed: exit status 1") {
+	if !strings.Contains(rendered, "• Completed ls path=docs\n  └  README.md\n\n• Failed exit 1\n  └  failed: exit status 1") {
 		t.Fatalf("expected one cross-cell gap with dense Completed/Failed details, got %q", rendered)
 	}
 	if strings.Contains(rendered, "README.md\n\n\n• Failed") {

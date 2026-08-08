@@ -92,7 +92,7 @@ func TestPrintVisibleChatHistory_ScreenSeparatesFinalToolCells(t *testing.T) {
 
 	// Each tool cell is internally dense, but the next independent final cell
 	// starts after one separator row.
-	if got := strings.TrimSpace(screen.line(rowCompLs + 1)); got != "README.md" {
+	if got := strings.TrimSpace(screen.line(rowCompLs + 1)); got != "└  README.md" {
 		t.Fatalf("expected ls output directly under Completed ls, got %q\n%s", got, screen.dump())
 	}
 	if rowCompRead != rowCompLs+3 {
@@ -102,7 +102,7 @@ func TestPrintVisibleChatHistory_ScreenSeparatesFinalToolCells(t *testing.T) {
 	if !screen.Blank(rowCompLs + 2) {
 		t.Fatalf("expected a blank row between final tool cells\n%s", screen.dump())
 	}
-	if got := strings.TrimSpace(screen.line(rowCompRead + 1)); got != "# Docs" {
+	if got := strings.TrimSpace(screen.line(rowCompRead + 1)); got != "└  # Docs" {
 		t.Fatalf("expected read_file output directly under Completed read_file, got %q\n%s", got, screen.dump())
 	}
 
