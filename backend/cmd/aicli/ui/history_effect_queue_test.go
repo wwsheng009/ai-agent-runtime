@@ -457,6 +457,26 @@ func TestHistoryEffectsReducer_TranscriptOnlyMintsAndResizeOnlyRebases(t *testin
 	}
 }
 
+func TestHistoryEffectsReducer_StaleBeginClaimDoesNotInvalidateProjection(t *testing.T) {
+	state := historyEffectTestState(t, 2)
+	pending := state.HistoryEffects.Pending()
+	if len(pending) == 0 {
+		t.Fatal("fixture has no pending history commit")
+	}
+	token := pending[0].Token
+
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: token, LayoutGeneration: state.LayoutGeneration - 1,
+	}, 3)
+	entry := historyCommitEntry(t, state, token)
+	if entry.State != HistoryCommitPending {
+		t.Fatalf("stale begin changed pending token state: %#v", entry)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("non-writing stale claim invalidated projection: %#v", state.HistoryEffects)
+	}
+}
+
 func TestHistoryEffectsReducer_LeaseFreezesAndReplacementInvalidatesPending(t *testing.T) {
 	state := UIControllerState{}
 	state = reduceUIControllerState(state, Resize{Width: 80, Height: 10, Generation: 2}, 1)

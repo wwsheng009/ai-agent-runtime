@@ -196,12 +196,13 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		state.Effects.Count++
 		state.Effects.Last = a
 	case BeginHistoryCommit:
-		if a.LayoutGeneration != state.LayoutGeneration {
-			state.HistoryEffects.ProjectionUnknown = true
-			break
-		}
-		if err := state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration); errors.Is(err, ErrStaleLayoutGeneration) {
-			state.HistoryEffects.ProjectionUnknown = true
+		// Begin is only a reducer-side claim attempt; no terminal bytes have
+		// crossed the writer yet. A resize/rebase can make its token or generation
+		// stale while the action is queued. Ignore that harmless claim miss and let
+		// the current schedule wake the presenter; marking ProjectionUnknown here
+		// would create an endless recovery/reclaim loop for the same stale token.
+		if a.LayoutGeneration == state.LayoutGeneration {
+			_ = state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration)
 		}
 	case HistoryCommitAcknowledged:
 		if a.LayoutGeneration != state.LayoutGeneration {
@@ -280,9 +281,23 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ReplaceTranscriptAction:
-		nextTranscript := NewTranscriptState(a.Snapshot)
-		activeOnly := state.SemanticActiveCellProjection &&
-			transcriptReplacementOnlyUpdatesActive(state.Transcript, nextTranscript, state.Active)
+		// RuntimeEvent currently publishes the authoritative Scene snapshot even
+		// when its ChangeSet is empty. Trust the Scene's exact provenance/version
+		// fence before cloning cells or replanning native history. SceneID prevents
+		// replay/backtrack rebuilds with coincident revisions from being skipped.
+		if transcriptSnapshotAlreadyInstalled(state.Transcript, a.Snapshot) {
+			break
+		}
+		var nextTranscript TranscriptState
+		activeOnly := false
+		if state.SemanticActiveCellProjection {
+			nextTranscript, activeOnly = transcriptReplacementActiveOnlySnapshot(state.Transcript, a.Snapshot, state.Active)
+		}
+		if !activeOnly {
+			nextTranscript = NewTranscriptState(a.Snapshot)
+			activeOnly = state.SemanticActiveCellProjection &&
+				transcriptReplacementOnlyUpdatesActive(state.Transcript, nextTranscript, state.Active)
+		}
 		invalidatesAcked := false
 		if activeOnly {
 			invalidatesAcked = activeReplacementInvalidatesAckedHistory(state.Active, nextTranscript)
@@ -518,14 +533,25 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 
 	previousIndex := transcriptCellIndexes(previous)
 	nextIndex := transcriptCellIndexes(next)
+	// Prefix comparisons: for every acked cell the original code compared
+	// previous.Cells[:oldAt] with next.Cells[:newAt]. When positions are
+	// unchanged (oldAt == newAt) every such comparison is a prefix of the same
+	// two arrays, so the largest prefix equality implies all smaller ones —
+	// one comparison suffices instead of one per acked cell. Any position
+	// change makes the two prefix slices differ in length, so it already
+	// invalidates the acknowledged history.
+	maxPrefix := -1
 	for cellID, commits := range ackedByCell {
 		oldAt, oldOK := previousIndex[cellID]
 		newAt, newOK := nextIndex[cellID]
 		if !oldOK || !newOK {
 			return true
 		}
-		if !transcriptSemanticPrefixEqual(previous.Cells[:oldAt], next.Cells[:newAt]) {
+		if oldAt != newAt {
 			return true
+		}
+		if oldAt > maxPrefix {
+			maxPrefix = oldAt
 		}
 
 		oldCell := previous.Cells[oldAt]
@@ -540,6 +566,9 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 				return true
 			}
 		}
+	}
+	if maxPrefix >= 0 && !transcriptSemanticPrefixEqual(previous.Cells[:maxPrefix], next.Cells[:maxPrefix]) {
+		return true
 	}
 	return false
 }
@@ -564,6 +593,67 @@ func transcriptSemanticPrefixEqual(previous, next []scene.TranscriptCell) bool {
 		}
 	}
 	return true
+}
+
+// transcriptReplacementActiveOnlySnapshot uses the Scene COW/version contract
+// before materializing a complete TranscriptState. Every non-active cell with
+// the same ID/revision belongs to the same immutable Scene object; only the one
+// active cell needs to be detached into actor-owned state.
+func transcriptReplacementActiveOnlySnapshot(previous TranscriptState, snapshot *scene.Snapshot, active ActiveCellState) (TranscriptState, bool) {
+	if snapshot == nil || snapshot.SceneID == 0 || snapshot.SceneID != previous.SceneID ||
+		active.CellID == 0 || active.Phase != ActiveCellMutable {
+		return TranscriptState{}, false
+	}
+	activeAt := -1
+	var activeCandidate *scene.TranscriptCell
+	nextIndex := 0
+	for _, candidate := range snapshot.Cells {
+		if candidate == nil {
+			continue
+		}
+		if nextIndex >= len(previous.Cells) {
+			return TranscriptState{}, false
+		}
+		current := previous.Cells[nextIndex]
+		if candidate.ID == active.CellID {
+			if activeAt >= 0 || current.ID != active.CellID || current.Phase != scene.CellMutable ||
+				candidate.Phase != scene.CellMutable || !transcriptCellStaticMetadataEqual(current, *candidate) {
+				return TranscriptState{}, false
+			}
+			activeAt = nextIndex
+			activeCandidate = candidate
+		} else if !transcriptCellVersionEqual(current, *candidate) {
+			return TranscriptState{}, false
+		}
+		nextIndex++
+	}
+	if activeAt < 0 || nextIndex != len(previous.Cells) {
+		return TranscriptState{}, false
+	}
+
+	next := previous
+	next.SceneID = snapshot.SceneID
+	next.Revision = snapshot.Revision
+	next.ContentVersion = snapshot.ContentVersion
+	next.Cells[activeAt] = cloneTranscriptCell(*activeCandidate)
+	return next, true
+}
+
+func transcriptCellVersionEqual(left, right scene.TranscriptCell) bool {
+	return left.Revision == right.Revision && transcriptCellStaticMetadataEqual(left, right)
+}
+
+func transcriptCellStaticMetadataEqual(left, right scene.TranscriptCell) bool {
+	if left.ID != right.ID || left.Sequence != right.Sequence || left.Kind != right.Kind ||
+		left.Phase != right.Phase || left.HistoryCommitBlocked != right.HistoryCommitBlocked ||
+		left.Boundary != right.Boundary || left.Provenance != right.Provenance ||
+		left.ChainKey != right.ChainKey || left.CreatedAt != right.CreatedAt {
+		return false
+	}
+	if left.FinalizedAt == nil || right.FinalizedAt == nil {
+		return left.FinalizedAt == nil && right.FinalizedAt == nil
+	}
+	return left.FinalizedAt.Equal(*right.FinalizedAt)
 }
 
 // transcriptReplacementOnlyUpdatesActive recognizes the full Scene snapshots
@@ -594,6 +684,11 @@ func transcriptReplacementOnlyUpdatesActive(previous, next TranscriptState, acti
 		found = true
 	}
 	return found
+}
+
+func transcriptSnapshotAlreadyInstalled(current TranscriptState, snapshot *scene.Snapshot) bool {
+	return snapshot != nil && snapshot.SceneID != 0 && current.SceneID == snapshot.SceneID &&
+		current.Revision == snapshot.Revision && current.ContentVersion == snapshot.ContentVersion
 }
 
 func activeReplacementInvalidatesAckedHistory(active ActiveCellState, next TranscriptState) bool {

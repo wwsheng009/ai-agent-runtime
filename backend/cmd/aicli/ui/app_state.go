@@ -57,8 +57,10 @@ func (s AppState) Clone() AppState {
 // stores cells rather than rendered terminal rows, so resize/replay derives a
 // new layout from source instead of reverse-engineering a viewport.
 type TranscriptState struct {
-	Revision uint64
-	Cells    []scene.TranscriptCell
+	SceneID        uint64
+	Revision       uint64
+	ContentVersion uint64
+	Cells          []scene.TranscriptCell
 }
 
 // NewTranscriptState snapshots the transcript data plane into an AppState
@@ -68,8 +70,10 @@ func NewTranscriptState(snapshot *scene.Snapshot) TranscriptState {
 		return TranscriptState{}
 	}
 	state := TranscriptState{
-		Revision: snapshot.Revision,
-		Cells:    make([]scene.TranscriptCell, 0, len(snapshot.Cells)),
+		SceneID:        snapshot.SceneID,
+		Revision:       snapshot.Revision,
+		ContentVersion: snapshot.ContentVersion,
+		Cells:          make([]scene.TranscriptCell, 0, len(snapshot.Cells)),
 	}
 	for _, cell := range snapshot.Cells {
 		if cell == nil {
@@ -108,8 +112,10 @@ func (s TranscriptState) LayoutRows(policyVersion uint64) []scene.LayoutRow {
 // It copies every cell so a layout consumer cannot modify AppState memory.
 func (s TranscriptState) Snapshot() *scene.Snapshot {
 	snapshot := &scene.Snapshot{
-		Revision: s.Revision,
-		Cells:    make([]*scene.TranscriptCell, 0, len(s.Cells)),
+		SceneID:        s.SceneID,
+		Revision:       s.Revision,
+		ContentVersion: s.ContentVersion,
+		Cells:          make([]*scene.TranscriptCell, 0, len(s.Cells)),
 	}
 	for index := range s.Cells {
 		cell := cloneTranscriptCell(s.Cells[index])
@@ -248,26 +254,47 @@ func (s TranscriptOverlayState) Clone() TranscriptOverlayState {
 // progress from display text.
 func ActiveCellFromTranscript(transcript TranscriptState) (ActiveCellState, bool) {
 	for _, cell := range transcript.Cells {
-		if cell.Phase != scene.CellMutable {
-			continue
+		if active, ok := activeCellFromTranscriptCell(&cell); ok {
+			return active, true
 		}
-		// 跳过空的 reasoning 占位 cell（native-history ordering fence 的
-		// 语义位置，见 encoder.markReasoningBarrier）：它只是迟到 reasoning
-		// 的占位，不是流式主体；有实质内容的 mutable cell（assistant /
-		// 工具链）才是 Active 的驻留源。
-		if cell.Kind == scene.KindSupplement && strings.TrimSpace(cell.Source) == "" {
-			continue
-		}
-		return ActiveCellState{
-			CellID:               cell.ID,
-			Revision:             cell.Revision,
-			Kind:                 cell.Kind,
-			Phase:                ActiveCellMutable,
-			Source:               cell.Source,
-			HistoryCommitBlocked: cell.HistoryCommitBlocked,
-		}, true
 	}
 	return ActiveCellState{}, false
+}
+
+// ActiveCellFromSnapshot derives the mutable semantic cell directly from an
+// already detached Scene snapshot. Runtime-event adapters use this narrow
+// projection on the streaming hot path; converting the complete snapshot into
+// TranscriptState first would clone every finalized cell and its presentation
+// on every delta merely to read one active source.
+func ActiveCellFromSnapshot(snapshot *scene.Snapshot) (ActiveCellState, bool) {
+	if snapshot == nil {
+		return ActiveCellState{}, false
+	}
+	for _, cell := range snapshot.Cells {
+		if active, ok := activeCellFromTranscriptCell(cell); ok {
+			return active, true
+		}
+	}
+	return ActiveCellState{}, false
+}
+
+func activeCellFromTranscriptCell(cell *scene.TranscriptCell) (ActiveCellState, bool) {
+	if cell == nil || cell.Phase != scene.CellMutable {
+		return ActiveCellState{}, false
+	}
+	// Skip the empty reasoning placeholder used as a native-history ordering
+	// fence; it is not the mutable body shown in the active band.
+	if cell.Kind == scene.KindSupplement && strings.TrimSpace(cell.Source) == "" {
+		return ActiveCellState{}, false
+	}
+	return ActiveCellState{
+		CellID:               cell.ID,
+		Revision:             cell.Revision,
+		Kind:                 cell.Kind,
+		Phase:                ActiveCellMutable,
+		Source:               cell.Source,
+		HistoryCommitBlocked: cell.HistoryCommitBlocked,
+	}, true
 }
 
 // BottomFocus describes which overlay owns the intended input cursor. The

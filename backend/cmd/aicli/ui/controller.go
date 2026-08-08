@@ -710,6 +710,19 @@ func (c *UIController) AppState() AppState {
 	return c.state.AppState.Clone()
 }
 
+// ActiveCellState returns only the reducer-owned mutable-cell projection.
+// ActiveCellState contains value fields and immutable strings, so copying it
+// under the controller mutex is enough isolation; callers must not pay for a
+// full transcript/history clone when an adapter only needs the active fence.
+func (c *UIController) ActiveCellState() ActiveCellState {
+	if c == nil {
+		return ActiveCellState{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Active.Clone()
+}
+
 func actionClassString(action UIAction) string {
 	switch a := action.(type) {
 	case DrawRequested:

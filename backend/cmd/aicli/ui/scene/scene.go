@@ -16,11 +16,14 @@ package scene
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
+
+var sceneIDCounter atomic.Uint64
 
 // CellID 是 transcript cell 的稳定身份（unified plan §5.2）。
 // 创建时分配，整个 live -> final -> replay/persist 映射期间不变（INV-SCENE-02）。
@@ -128,13 +131,13 @@ type TranscriptCell struct {
 	// never creates a visible row; the history planner treats it as an ordering
 	// fence until a possible reasoning predecessor has been resolved.
 	HistoryCommitBlocked bool
-	Revision     uint64
-	Phase        CellPhase
-	Boundary     boundary.BoundaryClass
-	Provenance   string
-	ChainKey     string // tool-chain 归组键；"" = top-level 独立 cell
-	CreatedAt    time.Time
-	FinalizedAt  *time.Time
+	Revision             uint64
+	Phase                CellPhase
+	Boundary             boundary.BoundaryClass
+	Provenance           string
+	ChainKey             string // tool-chain 归组键；"" = top-level 独立 cell
+	CreatedAt            time.Time
+	FinalizedAt          *time.Time
 }
 
 // BoundaryMeta 把 cell 投影为 boundary 决策所需的元数据视图。
@@ -173,17 +176,21 @@ func (c *TranscriptCell) BoundaryMeta() boundary.CellMeta {
 // 是 overlay，不参与 transcript sequence 与 boundary state（INV-SCENE-05）。
 // 所有变更经 ApplyCellMutation / 事务提交发生，外部不得直接改 Cells。
 type TuiScene struct {
-	cells    []*TranscriptCell
-	nextID   uint64
-	nextSeq  uint64
-	revision uint64 // Scene revision：每次事务提交 +1
-	byID     map[CellID]*TranscriptCell
-	byChain  map[string]*TranscriptCell // ChainKey -> 链首 cell（仅供校验）
+	id             uint64
+	cells          []*TranscriptCell
+	nextID         uint64
+	nextSeq        uint64
+	revision       uint64 // Scene revision：每次事务提交 +1
+	contentVersion uint64 // 每次成功 cell mutation +1，仅用于快照变更检测
+	lastSnapshot   *Snapshot
+	byID           map[CellID]*TranscriptCell
+	byChain        map[string]*TranscriptCell // ChainKey -> 链首 cell（仅供校验）
 }
 
 // New 创建空 Scene。
 func New() *TuiScene {
 	return &TuiScene{
+		id:      sceneIDCounter.Add(1),
 		byID:    make(map[CellID]*TranscriptCell),
 		byChain: make(map[string]*TranscriptCell),
 	}
@@ -198,7 +205,11 @@ func cloneCell(cell TranscriptCell) TranscriptCell {
 	return cell
 }
 
-// Cells 返回有序 cell 副本（渲染顺序 = 数组顺序，对齐 Codex Thread 模型）。
+// Cells 返回有序 cell 引用切片（渲染顺序 = 数组顺序，对齐 Codex Thread 模型）。
+//
+// scene 采用 copy-on-write（update/finalize 替换 cell 对象而非原地修改），
+// 因此返回的 cell 对象对已发布快照是不可变的：调用方必须只读消费，
+// 任何修改必须经 ApplyCellMutation 走事务（INV-SCENE-01）。
 func (s *TuiScene) Cells() []*TranscriptCell {
 	if s == nil {
 		return nil
@@ -208,13 +219,12 @@ func (s *TuiScene) Cells() []*TranscriptCell {
 		if c == nil {
 			continue
 		}
-		cp := cloneCell(*c)
-		out = append(out, &cp)
+		out = append(out, c)
 	}
 	return out
 }
 
-// Cell 按 ID 查询（返回副本）。
+// Cell 按 ID 查询。COW 语义下返回只读引用（调用方不得修改）。
 func (s *TuiScene) Cell(id CellID) (*TranscriptCell, bool) {
 	if s == nil {
 		return nil, false
@@ -223,8 +233,7 @@ func (s *TuiScene) Cell(id CellID) (*TranscriptCell, bool) {
 	if !ok || c == nil {
 		return nil, false
 	}
-	cp := cloneCell(*c)
-	return &cp, true
+	return c, true
 }
 
 // Len 返回 cell 总数。
@@ -253,20 +262,41 @@ func (s *TuiScene) NextID() CellID {
 }
 
 // Snapshot 返回不可变快照（presenter/layout 只读消费）。
+//
+// COW 不变量：快照引用的 cell 对象此后不被任何 mutation 修改
+// （update/finalize 替换指针，remove 仅删除引用），因此快照可在
+// 释放 scene 锁后安全消费，也保证了事务回滚（SceneController.restore）
+// 看到的是事务前的 cell 状态。
 func (s *TuiScene) Snapshot() *Snapshot {
 	if s == nil {
 		return &Snapshot{}
 	}
-	return &Snapshot{
-		Revision: s.revision,
-		Cells:    s.Cells(),
+	if s.lastSnapshot != nil && s.lastSnapshot.Revision == s.revision &&
+		s.lastSnapshot.ContentVersion == s.contentVersion {
+		return s.lastSnapshot
 	}
+	s.lastSnapshot = &Snapshot{
+		SceneID:        s.id,
+		Revision:       s.revision,
+		ContentVersion: s.contentVersion,
+		Cells:          s.Cells(),
+	}
+	return s.lastSnapshot
 }
 
 // Snapshot 是 Scene 的不可变视图。
 type Snapshot struct {
+	// SceneID is an opaque process-local source identity. It distinguishes a
+	// rebuilt/replayed Scene from an older Scene that happens to have the same
+	// transaction revision.
+	SceneID uint64
+	// Revision is the public transaction revision used by replay diagnostics.
 	Revision uint64
-	Cells    []*TranscriptCell
+	// ContentVersion advances for every successful cell mutation, including
+	// direct single-mutation tests that intentionally do not advance Revision.
+	// SceneID + Revision + ContentVersion is therefore an exact no-op fence.
+	ContentVersion uint64
+	Cells          []*TranscriptCell
 }
 
 // AppendCell 追加一个新 cell（unified plan §6.1）。
@@ -329,22 +359,32 @@ func (s *TuiScene) ApplyCellMutation(m CellMutation) (*TranscriptCell, error) {
 	if s == nil {
 		return nil, fmt.Errorf("nil scene")
 	}
+	var (
+		cell *TranscriptCell
+		err  error
+	)
 	switch m := m.(type) {
 	case *AppendCell:
-		return s.append(m)
+		cell, err = s.append(m)
 	case *InsertCell:
-		return s.insert(m)
+		cell, err = s.insert(m)
 	case *InsertCellBefore:
-		return s.insertBefore(m)
+		cell, err = s.insertBefore(m)
 	case *UpdateCell:
-		return s.update(m)
+		cell, err = s.update(m)
 	case *FinalizeCell:
-		return s.finalize(m)
+		cell, err = s.finalize(m)
 	case *RemoveMutableCell:
-		return s.remove(m)
+		cell, err = s.remove(m)
 	default:
 		return nil, fmt.Errorf("unknown cell mutation %T", m)
 	}
+	if err != nil {
+		return nil, err
+	}
+	s.contentVersion++
+	s.lastSnapshot = nil
+	return cell, nil
 }
 
 func (s *TuiScene) append(m *AppendCell) (*TranscriptCell, error) {
@@ -494,11 +534,15 @@ func (s *TuiScene) update(m *UpdateCell) (*TranscriptCell, error) {
 	if m.Revision <= c.Revision {
 		return nil, fmt.Errorf("update: stale revision %d <= %d (INV-SCENE-03)", m.Revision, c.Revision)
 	}
-	c.Source = m.Source
-	c.Presentation = m.Presentation.Clone()
-	c.HistoryCommitBlocked = m.HistoryCommitBlocked
-	c.Revision = m.Revision
-	cp := cloneCell(*c)
+	// Copy-on-write: 不修改已发布快照引用的 cell 对象，
+	// 而是替换 scene 的引用为新对象（旧对象保持不可变）。
+	nc := *c
+	nc.Source = m.Source
+	nc.Presentation = m.Presentation.Clone()
+	nc.HistoryCommitBlocked = m.HistoryCommitBlocked
+	nc.Revision = m.Revision
+	s.replaceCell(&nc)
+	cp := cloneCell(nc)
 	return &cp, nil
 }
 
@@ -516,15 +560,31 @@ func (s *TuiScene) finalize(m *FinalizeCell) (*TranscriptCell, error) {
 	if m.Revision <= c.Revision {
 		return nil, fmt.Errorf("finalize: stale revision %d <= %d (INV-SCENE-03)", m.Revision, c.Revision)
 	}
-	c.Source = m.Source
-	c.Presentation = m.Presentation.Clone()
-	c.HistoryCommitBlocked = m.HistoryCommitBlocked
-	c.Revision = m.Revision
-	c.Phase = CellCommitted
+	// Copy-on-write: 与 update 一致，替换引用而非原地修改。
+	nc := *c
+	nc.Source = m.Source
+	nc.Presentation = m.Presentation.Clone()
+	nc.HistoryCommitBlocked = m.HistoryCommitBlocked
+	nc.Revision = m.Revision
+	nc.Phase = CellCommitted
 	now := time.Now().UTC()
-	c.FinalizedAt = &now
-	cp := cloneCell(*c)
+	nc.FinalizedAt = &now
+	s.replaceCell(&nc)
+	cp := cloneCell(nc)
 	return &cp, nil
+}
+
+// replaceCell 把 scene 对某 cell 的引用原子地切换到新对象（copy-on-write）。
+// 调用方必须在持有 scene 写锁（SceneController 事务内）时调用；
+// 已发布快照仍引用旧对象，不受影响。
+func (s *TuiScene) replaceCell(nc *TranscriptCell) {
+	s.byID[nc.ID] = nc
+	for i, cc := range s.cells {
+		if cc.ID == nc.ID {
+			s.cells[i] = nc
+			return
+		}
+	}
 }
 
 func (s *TuiScene) remove(m *RemoveMutableCell) (*TranscriptCell, error) {

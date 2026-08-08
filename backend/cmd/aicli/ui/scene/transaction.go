@@ -96,6 +96,8 @@ func (c *SceneController) restore(snap *Snapshot) {
 		}
 	}
 	c.scene.revision = snap.Revision
+	c.scene.contentVersion = snap.ContentVersion
+	c.scene.lastSnapshot = nil
 	// nextID/nextSeq 不因回滚而回退（单调性由 ID/Sequence 保证，
 	// 分配过的 ID 不复用——INV-SCENE-02 只要求不复用已存在的 ID）。
 }

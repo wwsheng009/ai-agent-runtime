@@ -162,12 +162,17 @@ func TestSceneSnapshotIsImmutableCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := s.Snapshot()
-	// 修改快照副本不影响 Scene。
-	snap.Cells[0].Source = "mutated"
-	if c, _ := s.Cell(1); c.Source != "u" {
-		t.Fatalf("scene source mutated via snapshot: %q", c.Source)
+	// COW：已发布快照引用的 cell 不被后续 mutation 修改。
+	if _, err := s.ApplyCellMutation(&UpdateCell{ID: 1, Source: "updated", Revision: 2}); err != nil {
+		t.Fatal(err)
 	}
-	// Scene 继续变更后，旧快照保持原 revision。
+	if got := snap.Cells[0].Source; got != "u" {
+		t.Fatalf("snapshot cell source = %q, want %q (COW violated)", got, "u")
+	}
+	if got, _ := s.Cell(1); got.Source != "updated" {
+		t.Fatalf("scene cell source = %q, want %q", got.Source, "updated")
+	}
+	// Scene 继续变更后，旧快照保持原 revision 与 cell 集合。
 	if _, err := s.ApplyCellMutation(&AppendCell{Cell: newTestCell(2, KindAssistant, "a")}); err != nil {
 		t.Fatal(err)
 	}

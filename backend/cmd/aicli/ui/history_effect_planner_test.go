@@ -481,7 +481,7 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 		ID: activeID, Sequence: uint64(activeID), Revision: 2, Kind: scene.KindAssistant,
 		Source: "short active source", Phase: scene.CellMutable,
 	})
-	snapshot := &scene.Snapshot{Revision: 2, Cells: cells}
+	snapshot := &scene.Snapshot{SceneID: 1, Revision: 2, ContentVersion: 1, Cells: cells}
 	state := UIControllerState{AppState: AppState{
 		Geometry:                     GeometryState{Width: 100, Height: 24, Generation: 1},
 		LayoutGeneration:             1,
@@ -502,6 +502,9 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
+		snapshot.Revision++
+		snapshot.ContentVersion++
+		cells[len(cells)-1].Revision++
 		state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, uint64(index+1))
 	}
 }
