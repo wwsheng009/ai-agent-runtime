@@ -1572,6 +1572,13 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 		e.applySystem(ev, cs)
 		return
 	}
+	// A ReAct request that returns tool calls normally has no authoritative
+	// assistant.message for this intermediate step. llm.request.finished is
+	// only a transport boundary, so the assistant cell is otherwise left
+	// mutable forever and becomes the first history barrier for every later
+	// round. Close that request before mounting the tool cell; the final
+	// assistant.message of the whole turn is correlated to its own step key.
+	e.finalizeAssistantRequestBeforeTool(ev, cs)
 	if callID != "" {
 		if it := e.toolByID[callID]; it != nil {
 			if !it.Status.Terminal() {
@@ -1597,6 +1604,23 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 		e.toolByID[callID] = it
 	}
 	e.change(cs, OpAppend, it)
+}
+
+func (e *EventEncoder) finalizeAssistantRequestBeforeTool(ev runtimeevents.Event, cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	key := e.resolveAssistantRequestKey(ev)
+	if key == "" || !e.requestFinished[key] {
+		return
+	}
+	if assistant := e.assistantBy[key]; assistant != nil && !assistant.Status.Terminal() {
+		e.finalizeRequestStream(key, StatusCompleted, cs)
+		return
+	}
+	if reasoning := e.reasoningBy[key]; reasoning != nil && !reasoning.Status.Terminal() {
+		e.finalizeReasoning(key, StatusCompleted, cs)
+	}
 }
 
 func (e *EventEncoder) applyToolProgress(ev runtimeevents.Event, cs *ChangeSet) {

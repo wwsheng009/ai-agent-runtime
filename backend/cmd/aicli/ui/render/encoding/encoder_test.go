@@ -705,6 +705,69 @@ func TestEncodeRequestAliasesKeepReActStepsDistinct(t *testing.T) {
 	}
 }
 
+func TestEncodeReActToolBoundaryFinalizesIntermediateAssistant(t *testing.T) {
+	e := NewEventEncoder()
+	traceID := "react-tool-boundary"
+	turnID := "react-turn"
+	stream1 := "react-stream-1"
+	stream2 := "react-stream-2"
+
+	e.Encode(event("llm.request.started", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream1, "step": 1,
+	}))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream1,
+		"step": 1, "sequence": uint64(1), "delta": "intermediate tool plan",
+	}))
+	e.Encode(event("llm.request.finished", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream1, "step": 1, "success": true,
+	}))
+
+	start := event("tool.requested", map[string]interface{}{
+		"trace_id": traceID, "step": 1, "tool_call_id": "react-call-1", "tool_name": "read_file",
+	})
+	cs := e.Encode(start)
+	if len(cs.Changes) != 2 || cs.Changes[0].Op != OpUpsert ||
+		cs.Changes[0].Item.Kind != KindAssistant || cs.Changes[0].Item.Status != StatusCompleted ||
+		cs.Changes[1].Op != OpAppend || cs.Changes[1].Item.Kind != KindToolCall {
+		t.Fatalf("tool boundary changes = %+v, want assistant finalize then tool append", cs.Changes)
+	}
+	model := e.Snapshot()
+	if len(model.Items) != 2 || model.Items[0].Status != StatusCompleted ||
+		model.Items[1].Kind != KindToolCall || model.Items[1].Status.Terminal() {
+		t.Fatalf("intermediate request remained mutable across tool boundary: %+v", model.Items)
+	}
+
+	e.Encode(event("tool.completed", map[string]interface{}{
+		"tool_call_id": "react-call-1", "output": "file content",
+	}))
+	e.Encode(event("llm.request.started", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream2, "step": 2,
+	}))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream2,
+		"step": 2, "sequence": uint64(1), "delta": "final answer",
+	}))
+	e.Encode(event("llm.request.finished", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream2, "step": 2, "success": true,
+	}))
+	e.Encode(event(runtimechat.EventAssistantMessage, map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": stream2, "content": "final answer",
+	}))
+
+	model = e.Snapshot()
+	if len(model.Items) != 4 {
+		t.Fatalf("ReAct model items = %d, want assistant + tool call + output + assistant: %+v", len(model.Items), model.Items)
+	}
+	if model.Items[0].Kind != KindAssistant || model.Items[0].Status != StatusCompleted ||
+		model.Items[1].Kind != KindToolCall || model.Items[1].Status != StatusCompleted ||
+		model.Items[2].Kind != KindToolOutput || model.Items[2].Status != StatusCompleted ||
+		model.Items[3].Kind != KindAssistant || model.Items[3].Status != StatusCompleted ||
+		model.Items[3].Head != "final answer" {
+		t.Fatalf("ReAct model did not converge after tool boundary: %+v", model.Items)
+	}
+}
+
 func TestEncodeFailedDottedRequestPreservesPartialAndReadableError(t *testing.T) {
 	e := NewEventEncoder()
 	e.Encode(event("llm.request.started", map[string]interface{}{
