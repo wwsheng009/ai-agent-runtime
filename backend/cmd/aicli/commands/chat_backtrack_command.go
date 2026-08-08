@@ -176,18 +176,29 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 // typed backtrack effects. Direct --apply/--submit carries its fully parsed
 // request to dispatch, which runs the destructive canonical-replacement
 // transaction without ever falling through to the legacy stdout handler.
+// Bare /backtrack and its selection aliases open the typed picker when the
+// surface allows it, and otherwise degrade to the finite turn list instead of
+// the legacy migration fence (mirroring /skills' catalog degradation).
 func executeStructuredBacktrackQueryCommand(session *ChatSession, command string) (CommandResult, bool) {
 	args := strings.TrimSpace(extractCommandArgument(command))
 	first := strings.ToLower(firstToken(args))
+	isBacktrack := commandMatches(strings.ToLower(strings.TrimSpace(command)), "/backtrack")
 	// Preserve /rewind's legacy checkpoint-id namespace until that command has
 	// its own semantic action model. Only its established list alias is a safe
 	// read-only projection here.
-	if commandMatches(strings.ToLower(strings.TrimSpace(command)), "/rewind") && first != "list" && first != "ls" {
+	if !isBacktrack && first != "list" && first != "ls" {
 		return CommandResult{}, false
 	}
 	if args == "" || first == "select" || first == "pick" || first == "ui" {
-		if commandMatches(strings.ToLower(strings.TrimSpace(command)), "/backtrack") && canOpenChatBacktrackPicker(session) {
-			return newBacktrackPickerCommandResult(), true
+		if isBacktrack {
+			if canOpenChatBacktrackPicker(session) {
+				return newBacktrackPickerCommandResult(), true
+			}
+			// No picker surface (non-TTY, run active, popup/lease held, or
+			// runtime host not ready): degrade to the finite read-only turn
+			// list so the bare command stays on the unified command cell
+			// instead of being rejected as an unmigrated legacy writer.
+			return executeStructuredBacktrackTurnsQuery(session), true
 		}
 		return CommandResult{}, false
 	}

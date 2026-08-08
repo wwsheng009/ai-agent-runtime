@@ -215,8 +215,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		}
 	}
 	// The backtrack picker and apply path are effects, but list/audit/preview
-	// requests are finite read-only reports. Claim only those reports here; a
-	// bare command, selection request, or any mutation keeps the unified fence.
+	// requests are finite read-only reports, and bare /backtrack degrades to
+	// the turn list when the picker is unavailable. Claim those here; only the
+	// /rewind checkpoint-id namespace keeps the unified fence.
 	if (commandMatches(cmdLower, "/backtrack") || commandMatches(cmdLower, "/rewind")) && unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredBacktrackQueryCommand(session, command); handled {
 			return result, true, nil

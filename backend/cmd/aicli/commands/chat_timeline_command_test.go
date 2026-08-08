@@ -656,6 +656,7 @@ func TestBacktrackQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 	terminal.Reset()
 
 	for _, command := range []string{
+		"/backtrack",
 		"/backtrack list",
 		"/backtrack audit",
 		`/backtrack 1 --edit "second revised"`,
@@ -684,6 +685,29 @@ func TestBacktrackQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 		if !strings.Contains(queryTranscript.String(), marker) {
 			t.Fatalf("backtrack query semantic transcript is missing %q:\n%s", marker, queryTranscript.String())
 		}
+	}
+	if strings.Contains(queryTranscript.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("bare /backtrack hit the migration fence instead of degrading to the turn list:\n%s", queryTranscript.String())
+	}
+	// Bare Esc on the empty composer is the backtrack shortcut; on this non-TTY
+	// surface it must degrade to the turn list like bare /backtrack instead of
+	// the legacy migration fence.
+	if handleInteractiveBacktrackSelect(session) {
+		t.Fatal("Esc backtrack shortcut unexpectedly requested chat exit")
+	}
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+	escState := interaction.uiActor.AppState()
+	var escTranscript strings.Builder
+	for _, cell := range escState.Transcript.Cells {
+		escTranscript.WriteString(cell.Source)
+		escTranscript.WriteByte('\n')
+	}
+	if !strings.Contains(escTranscript.String(), "[1] msg#2 second prompt") {
+		t.Fatalf("Esc backtrack did not render the turn list:\n%s", escTranscript.String())
+	}
+	if strings.Contains(escTranscript.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("Esc backtrack hit the migration fence instead of degrading to the turn list:\n%s", escTranscript.String())
 	}
 	if dispatchChatCommand(session, "/backtrack 1 --apply", false) {
 		t.Fatal("/backtrack apply unexpectedly requested chat exit")
