@@ -4,6 +4,7 @@ backend/aicli
 /aicli
 /aicli.exe
 backend/*.exe
+backend/**/*.exe
 backend/*.exe~
 backend/*.dll
 backend/*.so
@@ -54,6 +55,7 @@ backend/internal/webui/dist/*
 
 # Temp
 tmp/
+.tmp/
 backend/.tmp/
 .backups/
 .env
