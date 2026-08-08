@@ -112,11 +112,11 @@ func (r *aicliTranscriptRenderer) RenderReasoning(block *runtimetypes.ReasoningB
 	if r == nil || !shouldRenderChatReasoning(r.session) || block == nil {
 		return false
 	}
-	lines := chatReasoningLines(block)
-	if len(lines) == 0 {
+	rendered := chatReasoningRenderText(block, r.session.Formatter)
+	if rendered == "" {
 		return false
 	}
-	return r.RenderSupplement(strings.Join(lines, "\n"))
+	return r.RenderSupplement(rendered)
 }
 
 func (r *aicliTranscriptRenderer) RenderToolEvent(event runtimechatcore.ChatEvent) bool {

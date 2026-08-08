@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -6966,5 +6967,53 @@ func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
 	}
 	if replayed.Cells[2].ID != 2 {
 		t.Fatalf("replay last cell = %+v, want item-2（交互不漂移到末尾）", replayed.Cells[2])
+	}
+}
+
+func TestChatReasoningRenderText_RendersMarkdown(t *testing.T) {
+	md := formatter.NewMarkdownFormatter(false)
+	block := &runtimetypes.ReasoningBlock{
+		Summary:    "先分析一下。\n\n**关键点**：\n- 第一项\n- 第二项\n\n```go\nfmt.Println(\"hi\")\n```",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	}
+	rendered := chatReasoningRenderText(block, md)
+	for _, marker := range []string{"**", "```"} {
+		if strings.Contains(rendered, marker) {
+			t.Fatalf("markdown 标记 %q 未被解析：%q", marker, rendered)
+		}
+	}
+	for _, want := range []string{"关键点", "fmt.Println(\"hi\")", "• 第一项", "• 第二项"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("渲染结果丢失 %q：%q", want, rendered)
+		}
+	}
+	if !strings.Contains(rendered, chatToolDivider("reasoning")) ||
+		!strings.Contains(rendered, chatToolDivider("end reasoning")) {
+		t.Fatalf("缺少 reasoning divider：%q", rendered)
+	}
+
+	// 非 markdown 内容保持与 chatReasoningLines 完全一致的纯文本输出。
+	plain := &runtimetypes.ReasoningBlock{
+		Summary:    "一行普通文本。",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	}
+	if got := strings.Join(chatReasoningLines(plain), "\n"); got != chatReasoningRenderText(plain, md) {
+		t.Fatalf("纯文本路径不一致：chatReasoningLines=%q chatReasoningRenderText=%q", got, chatReasoningRenderText(plain, md))
+	}
+
+	// nil formatter 时同样回退到纯文本路径（保留原始 markdown 文本）。
+	if got := chatReasoningRenderText(block, nil); !strings.Contains(got, "**") {
+		t.Fatalf("nil formatter 应保持原始文本：%q", got)
+	}
+}
+
+func TestChatReasoningRenderContent_IndentAndEmptyLines(t *testing.T) {
+	md := formatter.NewMarkdownFormatter(false)
+	got := chatReasoningRenderContent("**a**\n\nb", md, "  ")
+	if got != "  a\n\n  b" {
+		t.Fatalf("渲染内容缩进/空行处理异常：%q", got)
+	}
+	if got := chatReasoningRenderContent("", md, "  "); got != "" {
+		t.Fatalf("空内容应返回空串：%q", got)
 	}
 }

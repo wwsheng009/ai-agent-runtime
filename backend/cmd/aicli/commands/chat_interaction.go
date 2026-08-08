@@ -96,6 +96,10 @@ type chatInteractionCoordinator struct {
 
 	reasoningActive   bool
 	reasoningRendered bool
+	// reasoningMarkdownMode is set when live streaming detected that the
+	// reasoning content classifies as markdown; the scrollback is then held
+	// back and the whole document is rendered once at finalize time.
+	reasoningMarkdownMode bool
 	// reasoningTrailingLF mirrors streamTrailingLF for the reasoning band only.
 	// Kept separate so reasoning/assistant interleave does not share mid-line state.
 	reasoningTrailingLF bool
@@ -279,6 +283,12 @@ func normalizeWriteLines(rendered string) []string {
 // writeLine-ready rows. FormatAssistantRendered runs once here so enqueue,
 // residual, and soft reflow cannot drift on indent/sanitize.
 func buildRenderedAssistantChunk(rendered string) renderedAssistantChunk {
+	if strings.TrimSpace(rendered) == "" {
+		// Whitespace-only suffixes (terminators, indentation leftovers) carry no
+		// visible assistant content. FormatAssistantRendered would turn them into
+		// indent-only rows; keep the chunk empty so the stream contract holds.
+		return renderedAssistantChunk{}
+	}
 	return renderedAssistantChunk{lines: normalizeWriteLines(ui.FormatAssistantRendered(rendered))}
 }
 
@@ -3038,6 +3048,7 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		}
 		c.reasoningActive = true
 		c.reasoningRendered = false
+		c.reasoningMarkdownMode = false
 		// Dividers below end with writeLineLocked, so the cursor is at a row
 		// boundary. Keep reasoningTrailingLF true until a mid-line delta flips it.
 		c.reasoningTrailingLF = true
@@ -3059,8 +3070,17 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 	if delta == "" {
 		return
 	}
+	fullContent := c.reasoningBuffer.String() + delta
 	if c.shouldLiveStreamOutputLocked() {
-		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
+		// Markdown reasoning can only be rendered from a complete document;
+		// incremental deltas would leave spans/fences open. Once the content
+		// classifies as markdown, hold the scrollback and render the whole
+		// document once at finalize time (mirrors the assistant stream policy).
+		if !c.reasoningRendered && !c.reasoningMarkdownMode && c.classifyAssistantStreamModeLocked(fullContent) == assistantStreamModeMarkdown {
+			c.reasoningMarkdownMode = true
+		} else if !c.reasoningMarkdownMode {
+			c.writeIndentedStreamingDeltaLocked(delta, "", ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
+		}
 	}
 	c.reasoningBuffer.WriteString(delta)
 	activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{
@@ -3163,10 +3183,10 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		}
 		if !c.streamRendered {
 			// First activation writes the full classified buffer so far.
-			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 			return
 		}
-		c.writeIndentedStreamingDeltaLocked(newlyStable, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+		c.writeIndentedStreamingDeltaLocked(newlyStable, ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 	}
 }
 
@@ -3292,7 +3312,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if c.shouldLiveStreamOutputLocked() {
 		suffix := resolveStreamCompletionSuffix(c.streamBuffer.String(), finalContent)
 		if suffix != "" {
-			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 			c.streamBuffer.WriteString(suffix)
 		}
 		if c.streamRendered {
@@ -3331,10 +3351,21 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 		}
 	}
 	if c.shouldLiveStreamOutputLocked() {
-		suffix := resolveStreamCompletionSuffix(c.reasoningBuffer.String(), finalText)
-		if suffix != "" {
-			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
-			c.reasoningBuffer.WriteString(suffix)
+		if c.reasoningMarkdownMode {
+			// The scrollback was held back because the content is markdown;
+			// render the complete document now, then close the block.
+			rendered := chatReasoningRenderContent(finalText, c.session.Formatter, ui.AssistantContentIndent()+"  ")
+			if rendered != "" {
+				c.writeLineLocked(rendered)
+				c.reasoningRendered = true
+				c.reasoningTrailingLF = true
+			}
+		} else {
+			suffix := resolveStreamCompletionSuffix(c.reasoningBuffer.String(), finalText)
+			if suffix != "" {
+				c.writeIndentedStreamingDeltaLocked(suffix, "", ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
+				c.reasoningBuffer.WriteString(suffix)
+			}
 		}
 		c.finalizeReasoningLocked()
 		activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
@@ -3349,11 +3380,11 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 			ReplayRequired: false,
 		}
 	}
-	lines := chatReasoningLines(renderBlock)
-	if len(lines) > 0 {
+	rendered := chatReasoningRenderText(renderBlock, c.session.Formatter)
+	if rendered != "" {
 		// Reasoning supplement is its own block after the assistant body.
 		meta := c.nextSupplementMetaLocked()
-		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapBeforeBlockLocked(meta), meta)
+		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(rendered), c.gapBeforeBlockLocked(meta), meta)
 	}
 	c.resetReasoningLocked()
 	activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
@@ -3434,6 +3465,16 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 		return
 	}
 	if c.shouldLiveStreamOutputLocked() {
+		if c.reasoningMarkdownMode {
+			// The scrollback was held back because the content is markdown;
+			// render the complete document now, then close the block.
+			rendered := chatReasoningRenderContent(c.reasoningBuffer.String(), c.session.Formatter, ui.AssistantContentIndent()+"  ")
+			if rendered != "" {
+				c.writeLineLocked(rendered)
+				c.reasoningRendered = true
+				c.reasoningTrailingLF = true
+			}
+		}
 		c.finalizeReasoningLocked()
 		activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
 		return
@@ -3443,10 +3484,10 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 		Visibility: runtimetypes.ReasoningVisibilitySummary,
 		Streamable: true,
 	}
-	lines := chatReasoningLines(renderBlock)
-	if len(lines) > 0 {
+	rendered := chatReasoningRenderText(renderBlock, c.session.Formatter)
+	if rendered != "" {
 		meta := c.nextSupplementMetaLocked()
-		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")), c.gapBeforeBlockLocked(meta), meta)
+		c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(rendered), c.gapBeforeBlockLocked(meta), meta)
 	}
 	c.resetReasoningLocked()
 	activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
@@ -4436,6 +4477,16 @@ func (c *chatInteractionCoordinator) flushReasoningLocked() {
 		return
 	}
 	if c.shouldLiveStreamOutputLocked() {
+		if c.reasoningMarkdownMode {
+			// The scrollback was held back because the content is markdown;
+			// render the complete document now, then close the block.
+			rendered := chatReasoningRenderContent(c.reasoningBuffer.String(), c.session.Formatter, ui.AssistantContentIndent()+"  ")
+			if rendered != "" {
+				c.writeLineLocked(rendered)
+				c.reasoningRendered = true
+				c.reasoningTrailingLF = true
+			}
+		}
 		c.finalizeReasoningLocked()
 		return
 	}
@@ -4444,9 +4495,9 @@ func (c *chatInteractionCoordinator) flushReasoningLocked() {
 		Visibility: runtimetypes.ReasoningVisibilitySummary,
 		Streamable: true,
 	}
-	lines := chatReasoningLines(renderBlock)
-	if len(lines) > 0 {
-		c.writeLineLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")))
+	rendered := chatReasoningRenderText(renderBlock, c.session.Formatter)
+	if rendered != "" {
+		c.writeLineLocked(ui.FormatAssistantSupplementBlock(rendered))
 	}
 }
 
@@ -4630,7 +4681,7 @@ func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
 	if c.streamMode == assistantStreamModeMarkdown {
 		return
 	}
-	c.writeIndentedStreamingDeltaLocked(content, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+	c.writeIndentedStreamingDeltaLocked(content, ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 	// 流式增量已提供块间视觉分隔（增量行本身或随后的终止空行）：下一个
 	// 完整块（如打断插入的 tool_result）不再重复写 gap——旧
 	// completeBlockOutput=false 打断补偿语义的显式化。正常 finalize 的
@@ -4724,7 +4775,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 		inlineContinuation := !c.streamTrailingLF && !strings.HasPrefix(suffix, "\n") && !strings.Contains(suffix, "\n")
 		if inlineContinuation {
 			// Close the open row with the residual text as a single line.
-			c.writeLineLocked(ui.FormatAssistantRendered(suffix))
+			c.writeLineLocked(stripAssistantContinuationIndent(ui.FormatAssistantRendered(suffix)))
 			if hint != "" {
 				c.writeLineLocked(ui.FormatAssistantRendered(hint))
 			}
@@ -4756,7 +4807,7 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 	// always closeOpenRow first, which would force "This is \nbold\n". Continue the
 	// open row with the first residual row, then emit any remaining rows atomically.
 	if !c.streamTrailingLF {
-		first := chunk.lines[0]
+		first := stripAssistantContinuationIndent(chunk.lines[0])
 		rest := chunk.lines[1:]
 		c.writeTextLocked(first)
 		c.writeTextLocked("\n")
@@ -4773,6 +4824,18 @@ func (c *chatInteractionCoordinator) writeResidualFormattedAssistantStreamLocked
 	c.streamTrailingLF = true
 	c.streamRendered = true
 	c.streamRenderedPrefixLen = len(content)
+}
+
+// stripAssistantContinuationIndent removes the single block indent that
+// FormatAssistantRendered prepends to a row when that row continues the
+// still-open first line ("This is " + inline markdown/plain residual). The
+// marker/indent chrome belongs to line starts only; an inline suffix must not
+// create a mid-line gap ("This is   bold") on the shared terminal row.
+func stripAssistantContinuationIndent(row string) string {
+	if row == "" {
+		return row
+	}
+	return strings.TrimPrefix(row, ui.AssistantContentIndent())
 }
 
 func (c *chatInteractionCoordinator) unrenderedAssistantStreamSuffixLocked(content string) string {
@@ -6184,6 +6247,7 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportLocked() {
 func (c *chatInteractionCoordinator) resetReasoningLocked() {
 	c.reasoningActive = false
 	c.reasoningRendered = false
+	c.reasoningMarkdownMode = false
 	// After finalize the terminal is already on a new row (end-reasoning line).
 	// Keep true so a later reopen never confuses zero-value false with mid-line.
 	c.reasoningTrailingLF = true
@@ -6254,7 +6318,12 @@ func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {
 	return stdoutInfo.Mode()&os.ModeCharDevice == 0
 }
 
-func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, indent string, rendered *bool, trailingLF *bool) {
+// writeIndentedStreamingDeltaLocked writes a streaming delta with per-line
+// prefixes. The very first visible line uses firstLine (assistant event blocks
+// carry the "• " stream marker there); every following line uses indent
+// (the marker's display-width gutter). Pass firstLine == "" to indent every
+// line uniformly (reasoning blocks keep their legacy look).
+func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, firstLine, indent string, rendered *bool, trailingLF *bool) {
 	if delta == "" {
 		return
 	}
@@ -6264,7 +6333,11 @@ func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, in
 	builder.Grow(len(delta) + len(indent)*2)
 	for _, r := range []rune(delta) {
 		if atLineStart && r != '\n' {
-			builder.WriteString(indent)
+			if !*rendered && firstLine != "" {
+				builder.WriteString(firstLine)
+			} else {
+				builder.WriteString(indent)
+			}
 			atLineStart = false
 			*rendered = true
 		}

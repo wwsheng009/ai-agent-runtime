@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -505,22 +506,26 @@ func TestActiveStreamControllerSourceSnapshotAssistantRanges(t *testing.T) {
 	c := NewActiveStreamController(40, 6)
 	c.BeginAssistant("assistant")
 	c.PushAssistantDelta("stable prefix\n", false)
+	const rawSource = "stable prefix\n"
+	chromedSource := boundary.FormatAssistantBlockChrome(rawSource)
 	snapshot := c.SourceSnapshot()
 	if !snapshot.Active || snapshot.Kind != cell.ActiveAssistant {
 		t.Fatalf("assistant snapshot identity = %+v", snapshot)
 	}
-	if snapshot.Source != "stable prefix\n" || snapshot.StableEnd != len(snapshot.Source) || snapshot.CommittedEnd != 0 {
+	// Source 是展示文本（含事件块 chrome），StableEnd 是原始内容坐标；
+	// 两者不再相等（chrome 只属于展示层）。
+	if snapshot.Source != chromedSource || snapshot.StableEnd != len(rawSource) || snapshot.CommittedEnd != 0 {
 		t.Fatalf("assistant snapshot = %+v", snapshot)
 	}
 
-	c.CommitStablePrefix(len("stable prefix\n"))
+	c.CommitStablePrefix(len(rawSource))
 	snapshot = c.SourceSnapshot()
-	if snapshot.Source != "stable prefix\n" || snapshot.StableEnd != len(snapshot.Source) || snapshot.CommittedEnd != len(snapshot.Source) {
+	if snapshot.Source != chromedSource || snapshot.StableEnd != len(rawSource) || snapshot.CommittedEnd != len(rawSource) {
 		t.Fatalf("committed assistant snapshot = %+v", snapshot)
 	}
 
 	content, kind := c.Finalize()
-	if content != "stable prefix\n" || kind != cell.ActiveAssistant {
+	if content != rawSource || kind != cell.ActiveAssistant {
 		t.Fatalf("finalize = %q/%v", content, kind)
 	}
 	if snapshot = c.SourceSnapshot(); snapshot.Active {

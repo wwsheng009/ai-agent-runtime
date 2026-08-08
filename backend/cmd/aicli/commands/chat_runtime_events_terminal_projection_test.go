@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -182,7 +183,7 @@ func TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal(t *te
 	}
 	if len(state.Transcript.Cells) != 2 || state.Transcript.Cells[0].Kind != scene.KindSupplement ||
 		!strings.Contains(state.Transcript.Cells[0].Source, reasoning) || state.Transcript.Cells[1].Kind != scene.KindAssistant ||
-		state.Transcript.Cells[1].Source != answer || state.Transcript.Cells[1].Phase != scene.CellCommitted {
+		state.Transcript.Cells[1].Source != boundary.FormatAssistantBlockChrome(answer) || state.Transcript.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("late reasoning/final semantic order = %+v", state.Transcript.Cells)
 	}
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
@@ -259,7 +260,7 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 
 	streaming := coordinator.uiActor.AppState()
 	if streaming.Active.Phase != ui.ActiveCellMutable || streaming.Active.Kind != scene.KindAssistant ||
-		streaming.Active.Source != answer {
+		streaming.Active.Source != boundary.FormatAssistantBlockChrome(answer) {
 		t.Fatalf("long assistant is not the resident active cell: %+v", streaming.Active)
 	}
 	if streaming.Active.Acked.End != 0 {
@@ -292,7 +293,7 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 
 	final := coordinator.uiActor.AppState()
 	if len(final.Transcript.Cells) != 2 || !strings.Contains(final.Transcript.Cells[0].Source, reasoning) ||
-		final.Transcript.Cells[1].Source != answer || final.Active.Phase != ui.ActiveCellInactive {
+		final.Transcript.Cells[1].Source != boundary.FormatAssistantBlockChrome(answer) || final.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("late reasoning long-flow semantic order = %+v active=%+v", final.Transcript.Cells, final.Active)
 	}
 	for _, entry := range final.HistoryEffects.Entries() {
@@ -470,7 +471,7 @@ func TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory(t *test
 	if state.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("authoritative final left active cell mounted: %+v", state.Active)
 	}
-	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != answer ||
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != boundary.FormatAssistantBlockChrome(answer) ||
 		state.Transcript.Cells[0].Phase != scene.CellCommitted {
 		t.Fatalf("committed transcript lost authoritative final: %+v", state.Transcript.Cells)
 	}
@@ -598,7 +599,7 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	streaming := coordinator.uiActor.AppState()
-	if streaming.Active.Phase != ui.ActiveCellMutable || streaming.Active.Source != answer {
+	if streaming.Active.Phase != ui.ActiveCellMutable || streaming.Active.Source != boundary.FormatAssistantBlockChrome(answer) {
 		t.Fatalf("streaming active source was not canonical: %+v", streaming.Active)
 	}
 	if streaming.Active.Stable.End != len(answer) || streaming.Active.Enqueued.End < streaming.Active.Acked.End {
@@ -630,16 +631,19 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 		t.Fatalf("authoritative final retained mutable ownership: %+v", final.Active)
 	}
 	if len(final.Transcript.Cells) != 2 || !strings.Contains(final.Transcript.Cells[0].Source, reasoning) ||
-		final.Transcript.Cells[1].Source != answer || final.Transcript.Cells[1].Phase != scene.CellCommitted {
+		final.Transcript.Cells[1].Source != boundary.FormatAssistantBlockChrome(answer) || final.Transcript.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("authoritative final transcript lost reasoning/assistant order: %+v", final.Transcript)
 	}
 	if final.HistoryEffects.ProjectionUnknown || final.HistoryEffects.HasPending() {
 		t.Fatalf("final history delivery did not settle: %+v", final.HistoryEffects)
 	}
 	tailAcknowledged := false
+	// HistoryCommit.SourceRange 是 cell.Source（chrome 后展示文本）的字节
+	// 区间；流式 ledger（Stable/Enqueued/Acked）才是原始内容坐标。
+	chromedAnswer := boundary.FormatAssistantBlockChrome(answer)
 	for _, entry := range final.HistoryEffects.Entries() {
 		if entry.State == ui.HistoryCommitAcked && entry.Commit.CellID == streaming.Active.CellID &&
-			entry.Commit.SourceRange.End == len(answer) {
+			entry.Commit.SourceRange.End == len(chromedAnswer) {
 			tailAcknowledged = true
 			break
 		}

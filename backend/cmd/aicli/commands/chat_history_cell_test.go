@@ -64,7 +64,9 @@ func TestUserMessageCell_DisplayLinesWrapsNarrowWidth(t *testing.T) {
 }
 
 // TestAssistantMessageCell_DisplayLinesMatchLegacyPipeline pins the assistant
-// one-shot cell (P4.2) against writeCompleteBlockLocked(FormatAssistantRendered).
+// one-shot cell (P4.2) against the unified plain-block chrome
+// (FormatAssistantBlockChrome) — the plain stream cell and the one-shot
+// reference must project the identical rows.
 func TestAssistantMessageCell_DisplayLinesMatchLegacyPipeline(t *testing.T) {
 	bodies := []string{
 		"just text",
@@ -77,7 +79,7 @@ func TestAssistantMessageCell_DisplayLinesMatchLegacyPipeline(t *testing.T) {
 		if cell.Kind() != historyCellAssistant {
 			t.Fatalf("Kind()=%d want historyCellAssistant", cell.Kind())
 		}
-		want := normalizeWriteLines(ui.FormatAssistantRendered(body))
+		want := normalizeWriteLines(ui.FormatAssistantBlockChrome(body))
 		for _, width := range []int{0, 40, 80, 120} {
 			if got := cell.DisplayLines(width); !reflect.DeepEqual(got, want) {
 				t.Fatalf("assistant DisplayLines(width=%d) for %q\n got %#v\nwant %#v", width, body, got, want)

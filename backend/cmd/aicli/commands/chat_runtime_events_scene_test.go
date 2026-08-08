@@ -93,8 +93,8 @@ func TestChatRuntimeEventBridge_SceneFollowsModelOrder(t *testing.T) {
 		t.Fatalf("cell[0].Phase=%v want committed", cells[0].Phase)
 	}
 	// assistant 流式合并 + 终态（item-2）
-	if cells[1].ID != 2 || cells[1].Kind != scene.KindAssistant || cells[1].Source != "你好" {
-		t.Fatalf("cell[1]=%+v want assistant cell-2 %q", cells[1], "你好")
+	if cells[1].ID != 2 || cells[1].Kind != scene.KindAssistant || cells[1].Source != "• 你好" {
+		t.Fatalf("cell[1]=%+v want assistant cell-2 %q", cells[1], "• 你好")
 	}
 	if cells[1].Phase != scene.CellCommitted || cells[1].ChainKey != "" {
 		t.Fatalf("cell[1].Phase=%v ChainKey=%q want committed/top-level", cells[1].Phase, cells[1].ChainKey)
@@ -224,13 +224,18 @@ func TestChatRuntimeEventBridge_SceneConsistentUnderOutOfOrderDeltas(t *testing.
 	}
 	// 每个 cell 的 Source 与对应模型 Item.Head 一致；顺序 = 模型数组顺序。
 	for i := range cells {
-		if cells[i].Source != model.Items[i].Head {
+		want := model.Items[i].Head
+		if cells[i].Kind == scene.KindAssistant {
+			// assistant source 带统一 chrome（assistantCellSource）。
+			want = "• " + want
+		}
+		if cells[i].Source != want {
 			t.Fatalf("cell[%d].Source=%q want model Head %q", i, cells[i].Source, model.Items[i].Head)
 		}
 	}
 	// 同流乱序按 sequence 有序提交：C(3) 缓存，A(1)+B(2) 提交后补 C -> ABC。
-	if cells[1].Source != "ABC" {
-		t.Fatalf("assistant Source=%q want ABC (sequence order)", cells[1].Source)
+	if cells[1].Source != "• ABC" {
+		t.Fatalf("assistant Source=%q want %q (sequence order)", cells[1].Source, "• ABC")
 	}
 	// 编码器统计到乱序（诊断面），Scene 面无失败。
 	if stats := bridge.renderEncoderStats(); stats.OutOfOrderCount == 0 {
@@ -238,5 +243,82 @@ func TestChatRuntimeEventBridge_SceneConsistentUnderOutOfOrderDeltas(t *testing.
 	}
 	if got := strings.ToLower(cells[1].Kind.String()); got != "assistant" {
 		t.Fatalf("cell[1] kind=%q want assistant", got)
+	}
+}
+
+func TestChatRuntimeEventBridge_ReActToolBoundaryDoesNotLeaveOldMutableAssistant(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	traceID, turnID := "trace-react-boundary", "turn-react-boundary"
+	post := func(eventType string, payload map[string]interface{}) {
+		t.Helper()
+		bridge.encodeRenderModelEvent(runtimeevents.Event{Type: eventType, Payload: payload})
+	}
+
+	post("llm.request.started", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": "stream-1", "step": 1,
+	})
+	post(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": "stream-1",
+		"step": 1, "sequence": uint64(1), "delta": "intermediate plan",
+	})
+	post("llm.request.finished", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": "stream-1", "step": 1, "success": true,
+	})
+	post("tool.requested", map[string]interface{}{
+		"trace_id": traceID, "step": 1, "tool_call_id": "call-1", "tool_name": "read_file",
+	})
+
+	cells := bridgeSceneCells(t, bridge)
+	if len(cells) != 2 || cells[0].Kind != scene.KindAssistant || cells[0].Phase != scene.CellCommitted ||
+		cells[1].Kind != scene.KindToolChain || cells[1].Phase != scene.CellMutable {
+		t.Fatalf("tool boundary scene = %+v, want committed assistant followed by mutable tool", cells)
+	}
+
+	post("tool.completed", map[string]interface{}{
+		"trace_id": traceID, "step": 1, "tool_call_id": "call-1", "output": "file content",
+	})
+	post("llm.request.started", map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": "stream-2", "step": 2,
+	})
+	post(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"trace_id": traceID, "turn_id": turnID, "stream_id": "stream-2",
+		"step": 2, "sequence": uint64(1), "delta": "next round",
+	})
+
+	cells = bridgeSceneCells(t, bridge)
+	if len(cells) != 3 || cells[0].Phase != scene.CellCommitted ||
+		cells[1].Phase != scene.CellCommitted || cells[2].Kind != scene.KindAssistant ||
+		cells[2].Phase != scene.CellMutable || cells[2].Source != "• next round" {
+		t.Fatalf("next ReAct round scene = %+v, want only newest assistant mutable", cells)
+	}
+}
+
+func TestChatRuntimeEventBridge_ReActToolBoundaryFinalizesReasoningOnlyStep(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	traceID := "trace-reasoning-tool-boundary"
+	for _, event := range []runtimeevents.Event{
+		{Type: "llm.request.started", Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": "turn-reasoning", "stream_id": "stream-reasoning", "step": 1,
+		}},
+		{Type: "llm.request.finished", Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": "turn-reasoning", "stream_id": "stream-reasoning", "step": 1, "success": true,
+		}},
+		{Type: "assistant.reasoning", Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": "turn-reasoning", "step": 1,
+			"reasoning": map[string]interface{}{"format": "summary", "summary": "inspect before tool"},
+		}},
+		{Type: "tool.requested", Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": "turn-reasoning", "step": 1,
+			"tool_call_id": "reasoning-call-1", "tool_name": "read_file",
+		}},
+	} {
+		bridge.encodeRenderModelEvent(event)
+	}
+
+	cells := bridgeSceneCells(t, bridge)
+	if len(cells) != 2 || cells[0].Kind != scene.KindSupplement ||
+		cells[0].Phase != scene.CellCommitted || !strings.Contains(cells[0].Source, "inspect before tool") ||
+		cells[1].Kind != scene.KindToolChain || cells[1].Phase != scene.CellMutable {
+		t.Fatalf("reasoning-only tool boundary scene = %+v, want committed reasoning followed by mutable tool", cells)
 	}
 }

@@ -61,7 +61,7 @@ func TestPrintVisibleChatHistory_SeparatesFinalToolCells(t *testing.T) {
 		"CONTENT:已加载历史会话 (5 条消息):",
 		"CONTENT:> 查看 docs",
 		"BLANK",
-		"CONTENT:我先查看目录。",
+		"CONTENT:• 我先查看目录。",
 		"BLANK",
 		"CONTENT:• Completed ls path=docs",
 		"CONTENT:README.md",
@@ -69,7 +69,7 @@ func TestPrintVisibleChatHistory_SeparatesFinalToolCells(t *testing.T) {
 		"CONTENT:• Completed read_file path=docs/README.md",
 		"CONTENT:# Docs",
 		"BLANK",
-		"CONTENT:目录里有 README。",
+		"CONTENT:• 目录里有 README。",
 	}
 	if len(skeleton) != len(want) {
 		t.Fatalf("skeleton length mismatch: got %d want %d\ngot:\n%s\nwant:\n%s\nraw:\n%s",

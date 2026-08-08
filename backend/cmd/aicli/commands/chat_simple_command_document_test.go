@@ -134,7 +134,7 @@ func TestTryExecuteStructuredChatCommandHistoryOpensUnifiedTranscriptView(t *tes
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.AppState()
-	for _, want := range []string{"show prior work", "prior answer"} {
+	for _, want := range []string{"show prior work", "• prior answer"} {
 		found := false
 		for _, cell := range state.Transcript.Cells {
 			if cell.Source == want {

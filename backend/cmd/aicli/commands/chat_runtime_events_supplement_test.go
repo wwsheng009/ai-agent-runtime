@@ -95,7 +95,7 @@ func TestChatInteractionCoordinator_LocalAssistantProjectsTranscript(t *testing.
 		t.Fatalf("scene cells = %+v, want one direct assistant", snapshot)
 	}
 	cell := snapshot.Cells[0]
-	if cell.Kind != scene.KindAssistant || cell.Source != "legacy final response" || cell.Phase != scene.CellCommitted {
+	if cell.Kind != scene.KindAssistant || cell.Source != "• legacy final response" || cell.Phase != scene.CellCommitted {
 		t.Fatalf("scene cell = %+v, want committed assistant", cell)
 	}
 }
@@ -173,7 +173,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresLocalAssistant(t *testing.T) {
 		t.Fatalf("replayed cells = %+v, want one", snapshot)
 	}
 	cell := snapshot.Cells[0]
-	if cell.Kind != scene.KindAssistant || cell.Source != "legacy executor response" || cell.Phase != scene.CellCommitted {
+	if cell.Kind != scene.KindAssistant || cell.Source != "• legacy executor response" || cell.Phase != scene.CellCommitted {
 		t.Fatalf("replayed cell = %+v, want completed assistant", cell)
 	}
 }

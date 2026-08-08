@@ -37,9 +37,21 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 )
+
+// assistantCellSource 为纯文本 assistant cell 应用统一事件块 chrome
+// （首行 "• " 标识 + 续行缩进），与 legacy history cell 的输出一致，保证
+// 渲染层切换的文本 parity。markdown assistant 保持原始 source，由
+// presenter 负责格式化（烤进 "• " 会破坏 markdown 结构）。
+func assistantCellSource(it *encoding.Item) string {
+	if it.Kind == encoding.KindAssistant && presentationFromEncoding(it.Presentation).Kind == PresentationPlain {
+		return boundary.FormatAssistantBlockChrome(it.Head)
+	}
+	return it.Head
+}
 
 // CellIDFromItemID 把编码器分配的 Item.ID（"item-{n}"，见 render-model-spec
 // §4.1）解析为稳定 CellID。这是身份映射的唯一规则：本层不分配身份
@@ -232,7 +244,7 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID, befor
 	cell := TranscriptCell{
 		ID:                   id,
 		Kind:                 kind,
-		Source:               it.Head,
+		Source:               assistantCellSource(it),
 		Presentation:         presentationFromEncoding(it.Presentation),
 		HistoryCommitBlocked: it.HistoryCommitBlocked,
 		Revision:             1, // 编码器 append 修订号为 1（render-model-spec §4.2）
@@ -279,7 +291,7 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID, befor
 	}
 	pending[id] = pendingCell{
 		kind: kind, chainKey: cell.ChainKey, revision: 1, phase: cell.Phase,
-		source: it.Head, presentation: cell.Presentation,
+		source: assistantCellSource(it), presentation: cell.Presentation,
 		historyCommitBlocked: cell.HistoryCommitBlocked,
 	}
 	return mu, false, nil
@@ -307,7 +319,7 @@ func (m *ChangeSetMapper) mapUpsert(id CellID, it *encoding.Item, pending map[Ce
 	next := cur.revision + 1
 	// upsert 的 Item 是编码器产出的完整最新快照（render-model-spec §4.2：
 	// 同一 Item 多次更新已去重合并为最新 Head），非 tool_call 直接采用。
-	newSource := it.Head
+	newSource := assistantCellSource(it)
 	if it.Kind == encoding.KindToolCall {
 		// tool_call 自身文本：Head 恒定（编码器事实）时保留 cur.source
 		// （含已合并输出）；演进时（防御路径）拆分旧 call 部分、保留

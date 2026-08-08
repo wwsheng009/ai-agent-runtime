@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
@@ -301,11 +302,15 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			if unifiedInteractiveOutputMustFailClosed(session) {
 				return
 			}
-			lines := chatReasoningLines(block)
-			if len(lines) == 0 {
+			var markdownFormatter *formatter.MarkdownFormatter
+			if session != nil {
+				markdownFormatter = session.Formatter
+			}
+			rendered := chatReasoningRenderText(block, markdownFormatter)
+			if rendered == "" {
 				return
 			}
-			fmt.Println(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")))
+			fmt.Println(ui.FormatAssistantSupplementBlock(rendered))
 		},
 		finalizeReasoning: func() {
 			if session != nil && session.Interaction != nil {
@@ -6560,34 +6565,77 @@ func chatReasoningTimelineDocument(lines []string) render.Document {
 }
 
 func chatReasoningLines(block *runtimetypes.ReasoningBlock) []string {
-	if block == nil {
+	rendered := chatReasoningRenderText(block, nil)
+	if rendered == "" {
 		return nil
 	}
-	if !chatReasoningHasVisibleContent(block) {
-		return nil
+	return strings.Split(rendered, "\n")
+}
+
+// chatReasoningRenderText renders a complete reasoning supplement block
+// (divider + meta + content + end divider). When the block's visible text
+// looks like markdown, it is parsed and styled via the provided formatter
+// instead of being emitted as trimmed plain-text lines.
+func chatReasoningRenderText(block *runtimetypes.ReasoningBlock, formatter *formatter.MarkdownFormatter) string {
+	if block == nil || !chatReasoningHasVisibleContent(block) {
+		return ""
 	}
 	lines := []string{chatToolDivider("reasoning")}
-	meta := chatReasoningMetaLine(block)
-	if meta != "" {
+	if meta := chatReasoningMetaLine(block); meta != "" {
 		lines = append(lines, meta)
 	}
-	display := strings.TrimSpace(block.DisplayText())
-	if display != "" {
-		for _, line := range strings.Split(strings.ReplaceAll(display, "\r\n", "\n"), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			lines = append(lines, "  "+truncateChatRuntimeText(trimmed, 160))
-		}
+	if content := chatReasoningRenderContent(block.DisplayText(), formatter, "  "); content != "" {
+		lines = append(lines, content)
 	} else if strings.TrimSpace(block.OpaqueState) != "" {
 		lines = append(lines, "  provider 返回了不可显示的 reasoning state，已保留续接信息。")
 	}
 	if len(lines) == 1 {
-		return nil
+		return ""
 	}
 	lines = append(lines, chatToolDivider("end reasoning"))
-	return lines
+	return strings.Join(lines, "\n")
+}
+
+// chatReasoningRenderContent renders the reasoning block's visible text.
+// When the content looks like markdown it is parsed and styled with the
+// provided formatter; otherwise it falls back to the legacy trimmed
+// plain-text lines. Every non-empty output line receives the caller-chosen
+// indent so the markdown document keeps the same visual alignment as the
+// plain-text path. Markdown rendering needs the whole document (fenced code
+// blocks, multi-line spans), so the ANSI output is not re-split, trimmed or
+// truncated per line.
+func chatReasoningRenderContent(display string, formatter *formatter.MarkdownFormatter, indent string) string {
+	display = strings.TrimSpace(display)
+	if display == "" {
+		return ""
+	}
+	if formatter != nil && formatter.IsMarkdown(display) {
+		rendered := strings.TrimRight(formatter.Format(display), "\n")
+		if rendered == "" {
+			return ""
+		}
+		lines := strings.Split(rendered, "\n")
+		var builder strings.Builder
+		for i, line := range lines {
+			if i > 0 {
+				builder.WriteString("\n")
+			}
+			if line != "" {
+				builder.WriteString(indent)
+				builder.WriteString(line)
+			}
+		}
+		return builder.String()
+	}
+	var lines []string
+	for _, line := range strings.Split(strings.ReplaceAll(display, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lines = append(lines, indent+truncateChatRuntimeText(trimmed, 160))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func chatReasoningHasVisibleContent(block *runtimetypes.ReasoningBlock) bool {

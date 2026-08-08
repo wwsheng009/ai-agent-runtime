@@ -91,7 +91,12 @@ func TestMapBasicKinds(t *testing.T) {
 		if ap.Cell.ChainKey != "" {
 			t.Errorf("%s: chain key = %q, want \"\" (top-level)", k.itemKind, ap.Cell.ChainKey)
 		}
-		if ap.Cell.Source != "hello" {
+		wantSource := "hello"
+		if k.itemKind == encoding.KindAssistant {
+			// assistant source 经 assistantCellSource 统一 chrome（"• " 首行标识）。
+			wantSource = "• hello"
+		}
+		if ap.Cell.Source != wantSource {
 			t.Errorf("%s: source = %q", k.itemKind, ap.Cell.Source)
 		}
 		if ap.Cell.Revision != 1 {
@@ -649,7 +654,7 @@ func TestMapAppendBeforeID(t *testing.T) {
 		t.Fatalf("insert reasoning before assistant: %v", err)
 	}
 	cells := s.Cells()
-	if len(cells) != 2 || cells[0].ID != 2 || cells[0].Source != "reasoning" || cells[1].ID != 1 || cells[1].Source != "assistant" {
+	if len(cells) != 2 || cells[0].ID != 2 || cells[0].Source != "reasoning" || cells[1].ID != 1 || cells[1].Source != "• assistant" {
 		t.Fatalf("before insertion order = %+v", cells)
 	}
 }

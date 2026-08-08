@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestAssistantMessageFormat_MultilineHasNoPrefix(t *testing.T) {
+func TestAssistantMessageFormat_MarkerIsIndependentOfIconToggle(t *testing.T) {
 	msg := NewMessage(MessageAssistant, "line1\nline2").ShowIcon(false)
 
 	formatted := msg.Format()
@@ -13,15 +13,15 @@ func TestAssistantMessageFormat_MultilineHasNoPrefix(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d: %q", len(lines), formatted)
 	}
-	if lines[0] != "line1" {
-		t.Fatalf("expected first line without prefix, got %q", lines[0])
+	if lines[0] != AssistantStreamMarker()+"line1" {
+		t.Fatalf("expected stream marker regardless of icon toggle, got %q", lines[0])
 	}
-	if lines[1] != "line2" {
-		t.Fatalf("expected second line without indent, got %q", lines[1])
+	if lines[1] != AssistantContentIndent()+"line2" {
+		t.Fatalf("expected continuation indent regardless of icon toggle, got %q", lines[1])
 	}
 }
 
-func TestAssistantMessageFormat_MultilineShowsNoIconPrefix(t *testing.T) {
+func TestAssistantMessageFormat_MultilineShowsStreamMarkerAndIndent(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	msg := NewMessage(MessageAssistant, "line1\nline2").ShowIcon(true)
@@ -31,11 +31,11 @@ func TestAssistantMessageFormat_MultilineShowsNoIconPrefix(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d: %q", len(lines), formatted)
 	}
-	if lines[0] != "line1" {
-		t.Fatalf("expected first line without icon prefix, got %q", lines[0])
+	if lines[0] != AssistantStreamMarker()+"line1" {
+		t.Fatalf("expected first line with stream marker, got %q", lines[0])
 	}
-	if lines[1] != "line2" {
-		t.Fatalf("expected second line without icon indent, got %q", lines[1])
+	if lines[1] != AssistantContentIndent()+"line2" {
+		t.Fatalf("expected second line with continuation indent, got %q", lines[1])
 	}
 }
 
@@ -52,6 +52,9 @@ func TestMessageFormat_MultilineAlignsContinuationWithIconPrefixAcrossTypes(t *t
 		{"system", MessageSystem, "ℹ️  ", "ℹ️ "},
 		{"tool", MessageTool, "🔧工具>  ", "🔧工具> "},
 		{"error", MessageError, "❌  ", "❌ "},
+		// assistant 的 plainPrefix 不带尾随空格：测试公式按 "prefix+1 空格"
+		// 推导续行 gutter，而真实 gutter 是 "• " 的显示宽度（2 列）。
+		{"assistant", MessageAssistant, AssistantStreamMarker(), "•"},
 	}
 
 	for _, tt := range tests {
@@ -81,8 +84,11 @@ func TestIndentAssistantContent_UsesSameGutterAsAssistantMessage(t *testing.T) {
 	if !strings.HasPrefix(indented, AssistantContentIndent()) {
 		t.Fatalf("expected assistant indent prefix, got %q", indented)
 	}
-	if AssistantContentIndent() != "" {
-		t.Fatalf("expected assistant indent to be empty when assistant has no prefix, got %q", AssistantContentIndent())
+	if got, want := AssistantContentIndent(), strings.Repeat(" ", messageDisplayWidth(AssistantStreamMarker())); got != want {
+		t.Fatalf("expected assistant indent to equal the stream marker gutter, got %q want %q", got, want)
+	}
+	if AssistantContentIndent() == "" {
+		t.Fatal("expected assistant indent to be non-empty now that assistant carries a stream marker")
 	}
 }
 

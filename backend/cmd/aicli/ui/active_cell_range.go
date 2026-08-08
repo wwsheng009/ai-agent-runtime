@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -62,15 +63,23 @@ func sourceRangePrefix(source, prefix string) bool {
 // no longer depends on an incomplete trailing Markdown construct. Scene owns
 // the raw mutable source but does not carry renderer progress, so the reducer
 // derives this boundary instead of leaving production Active.Stable at zero.
+//
+// The returned offset is measured in the original content coordinate system:
+// assistant event-block chrome (首行 "• " + 续行缩进) is stripped before
+// detection, because the chrome is display text, not transcript content.
+// Streaming ledger ranges are raw-content byte offsets (history commits
+// compare against len(原始内容)), so deriving against the chromed Source would
+// shift every stable prefix by the chrome length.
 func deriveActiveStableEnd(source string) int {
 	if source == "" {
 		return 0
 	}
-	if !markdown.LooksLikeMarkdown(source) {
-		return len(source)
+	raw, _ := boundary.StripAssistantBlockChrome(source)
+	if !markdown.LooksLikeMarkdown(raw) {
+		return len(raw)
 	}
 	var collector markdown.StreamCollector
-	_ = collector.SetContent(source)
+	_ = collector.SetContent(raw)
 	return len(collector.Stable())
 }
 

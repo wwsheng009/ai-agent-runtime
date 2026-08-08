@@ -92,7 +92,7 @@ func TestRenderLayer_TextParity_ToolChainRenderText(t *testing.T) {
 		t.Fatalf("scene cells=%d want 3", len(snap.Cells))
 	}
 	lines := scene.RenderText(snap.Cells, snap.Revision)
-	want := []string{"session compacted", "", "你好", "", "• Completed read_file", "file content"}
+	want := []string{"session compacted", "", "• 你好", "", "• Completed read_file", "file content"}
 	if len(lines) != len(want) {
 		t.Fatalf("lines=%d want %d\n got=%q", len(lines), len(want), lines)
 	}

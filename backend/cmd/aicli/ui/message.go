@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
@@ -92,6 +93,13 @@ func (m *Message) messageChrome() (plainPrefix, contentPadding, prefixRole, cont
 		}
 	case MessageAssistant:
 		contentRole = string(style.RoleAssistant)
+		// 每个事件流统一带块标识：assistant 正文首行以 "• " 开头（对齐
+		// 工具块的 "• Running/• Completed"），续行按该标识宽度缩进。
+		plainPrefix = AssistantStreamMarker()
+		if m.showIcon {
+			prefixRole = string(style.RoleAssistant)
+			colorPrefix = true
+		}
 	case MessageSystem:
 		contentRole = string(style.RoleSystem)
 		if m.showIcon {
@@ -245,12 +253,14 @@ func FormatAssistantMessage(content string) string {
 
 // FormatAssistantRendered 用于已经由 render backend 生成的助手输出。
 // 保留安全的 SGR / OSC 8，剥离光标/清屏等危险序列，不再整段重染色。
+// 这里不叠加块缩进：markdown 行增量契约依赖 "" 空行与原始行文本
+// （缩进会破坏 blank-ownership），纯文本块的 chrome 由
+// FormatAssistantBlockChrome / streaming 路径显式负责。
 func FormatAssistantRendered(content string) string {
 	if content == "" {
 		return ""
 	}
-	safe := render.SanitizeKeepSGR(content)
-	return IndentAssistantContent(safe)
+	return render.SanitizeKeepSGR(content)
 }
 
 // FormatSystemMessage 格式化系统消息
@@ -269,16 +279,27 @@ func FormatErrorMessage(content string) string {
 }
 
 func AssistantContentIndent() string {
-	return ""
+	// 续行缩进 = assistant 块标识的显示宽度（"• " 为 2 列）。
+	// 实现位于 boundary（ui/scene 等上层需要同一份 chrome，避免循环依赖）。
+	return boundary.AssistantContentIndent()
+}
+
+// AssistantStreamMarker 返回 assistant 事件块的统一首行标识。
+// 事件流（assistant 正文 / 工具运行 / 工具完成）各自带标识，正文块与
+// 工具块共用 "• "，便于滚动回看时快速区分事件边界。
+func AssistantStreamMarker() string {
+	return boundary.AssistantStreamMarker()
+}
+
+// FormatAssistantBlockChrome 把纯文本 assistant 块渲染为带统一 chrome 的
+// 事件块：首行 "• " 标识，后续行按标识宽度缩进。markdown 正文不走此路径
+// （保持 markdown 结构原样，仅由 IndentAssistantContent 统一缩进）。
+func FormatAssistantBlockChrome(content string) string {
+	return boundary.FormatAssistantBlockChrome(content)
 }
 
 func IndentAssistantContent(content string) string {
-	indent := AssistantContentIndent()
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		lines[i] = indent + line
-	}
-	return strings.Join(lines, "\n")
+	return boundary.IndentAssistantContent(content)
 }
 
 func DisplayWidth(text string) int {

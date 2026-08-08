@@ -46,6 +46,11 @@ func (b *synchronizedBuffer) String() string {
 	return b.buf.String()
 }
 
+// testOutputBuffer 是一个简单的 writer，用于捕获并断言渲染输出。
+type testOutputBuffer struct {
+	bytes.Buffer
+}
+
 func TestChatInteractionCoordinator_RendersPromptAndAsyncLineOnSameWriter(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -3588,7 +3593,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_StreamsImmediatelyWhenL
 	coord.RenderAssistantDelta("Hello")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.AssistantContentIndent()+"Hello") {
+	if !strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello") {
 		t.Fatalf("expected live stream output immediately, got %q", rendered)
 	}
 	if strings.Contains(rendered, "\n") {
@@ -3755,7 +3760,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitesp
 	coord.RenderAssistantDelta(" Next")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.AssistantContentIndent()+"Hello world. Next") {
+	if !strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello world. Next") {
 		t.Fatalf("expected streamed assistant text to preserve leading whitespace, got %q", rendered)
 	}
 }
@@ -3902,7 +3907,7 @@ func TestChatInteractionCoordinator_DefersAssistantTextUntilReasoningCompletes(t
 	if !strings.Contains(rendered, ui.AssistantContentIndent()+"  先确认问题。 即可。") {
 		t.Fatalf("expected reasoning chunks to stay contiguous, got %q", rendered)
 	}
-	if !strings.Contains(rendered, chatToolDivider("end reasoning")+"\n"+ui.AssistantContentIndent()+"Hello") {
+	if !strings.Contains(rendered, chatToolDivider("end reasoning")+"\n"+ui.AssistantStreamMarker()+"Hello") {
 		t.Fatalf("expected buffered assistant text after reasoning block, got %q", rendered)
 	}
 }
@@ -4129,5 +4134,80 @@ func (w *terminalCaptureWriter) clearScreenFromCursor() {
 	w.clearLineFromCursor()
 	if w.row+1 < len(w.rows) {
 		w.rows = w.rows[:w.row+1]
+	}
+}
+
+func TestChatInteractionCoordinator_RenderReasoningDelta_HoldsBackMarkdownStream(t *testing.T) {
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	var output testOutputBuffer
+	coord.SetWriter(&output)
+	coord.liveStreamFn = func() bool { return true }
+
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Format:     "stream_delta",
+		Summary:    "**分析**一下",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+		Streamable: true,
+	})
+	if strings.Contains(output.String(), "分析") {
+		t.Fatalf("markdown reasoning 不应实时写出（应 holdback）：%q", output.String())
+	}
+
+	coord.FinalizeReasoningDelta()
+	got := output.String()
+	if !strings.Contains(got, "分析") {
+		t.Fatalf("finalize 后应渲染完整 reasoning 内容：%q", got)
+	}
+	if strings.Contains(got, "**") {
+		t.Fatalf("markdown 标记未被解析：%q", got)
+	}
+	if !strings.Contains(got, chatToolDivider("end reasoning")) {
+		t.Fatalf("缺少 end reasoning divider：%q", got)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsPlainTextWhenNotMarkdown(t *testing.T) {
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	var output testOutputBuffer
+	coord.SetWriter(&output)
+	coord.liveStreamFn = func() bool { return true }
+
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Format:     "stream_delta",
+		Summary:    "先输出 reasoning，再输出正文。",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+		Streamable: true,
+	})
+	// 非 markdown 内容保持实时输出（既有契约）。
+	if !strings.Contains(output.String(), "先输出 reasoning，再输出正文。") {
+		t.Fatalf("非 markdown reasoning 应实时输出：%q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_CompleteReasoningResponse_NonLive_RendersMarkdown(t *testing.T) {
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	var output testOutputBuffer
+	coord.SetWriter(&output)
+
+	coord.reasoningActive = true
+	coord.CompleteReasoningResponse(&runtimetypes.ReasoningBlock{
+		Summary:    "结论：**正确**。\n\n- 原因一\n- 原因二",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	got := output.String()
+	for _, want := range []string{"结论：", "正确", "• 原因一", "• 原因二"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("非 live 渲染缺少 %q：%q", want, got)
+		}
+	}
+	if strings.Contains(got, "**") {
+		t.Fatalf("markdown 标记未被解析：%q", got)
+	}
+	if !strings.Contains(got, chatToolDivider("reasoning")) ||
+		!strings.Contains(got, chatToolDivider("end reasoning")) {
+		t.Fatalf("缺少 reasoning divider：%q", got)
 	}
 }
