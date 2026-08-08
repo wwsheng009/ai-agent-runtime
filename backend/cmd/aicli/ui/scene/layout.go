@@ -69,7 +69,7 @@ func LayoutTranscript(cells []*TranscriptCell, policyVersion uint64) []LayoutRow
 			}
 		}
 		prev = c
-		for _, line := range splitSourceLines(c.Source) {
+		for _, line := range layoutSplitSourceLines(c) {
 			rows = append(rows, LayoutRow{CellID: c.ID, Text: line, Index: index})
 			index++
 		}

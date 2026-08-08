@@ -25,8 +25,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	if state.SemanticActiveCellProjection && frontierActive {
 		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.LayoutGeneration, state.Theme)
 	}
-	layout := LayoutAppState(state)
-	width := layout.Geometry.Width
+	width := state.Geometry.Width
 	if width < 1 {
 		width = 80
 	}
@@ -34,7 +33,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
 	// its physical rows are still visible in the primary viewport.
 	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(layout.Transcript, byID, mutableTranscriptCellIDs(state.Transcript), width, state.Theme)
+	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(state.LayoutGeneration), byID, mutableTranscriptCellIDs(state.Transcript), width, state.Theme)
 	if len(rows) == 0 {
 		return activeCommits
 	}
@@ -57,7 +56,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 			skipRows := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], byID)
 			if cellUsesStructuredPresentation(cell) {
 				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, state.LayoutGeneration, byID)...)
-			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, state.LayoutGeneration, byID); mapped {
+			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, themeFingerprint(state.Theme), state.LayoutGeneration, byID); mapped {
 				commits = append(commits, segments...)
 			} else if skipRows == 0 && end <= firstVisible {
 				commits = append(commits, wholeCellHistoryCommit(cell, rows[start:end], start, end, state.LayoutGeneration, byID))
@@ -427,7 +426,7 @@ func sourceLineRanges(source string) []sourceLineRange {
 //
 // Markdown is handled by planMarkdownCellHistoryCommits because its renderer
 // can add/remove physical rows and therefore has no source-byte fragment map.
-func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows, width int, generation uint64, byID map[scene.CellID]scene.TranscriptCell) ([]HistoryCommit, bool) {
+func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows, width int, themeFp string, generation uint64, byID map[scene.CellID]scene.TranscriptCell) ([]HistoryCommit, bool) {
 	lineRanges := sourceLineRanges(cell.Source)
 	if len(lineRanges) == 0 {
 		return nil, false
@@ -439,9 +438,29 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 		leadingGaps++
 	}
 	row = leadingGaps
-	commits := make([]HistoryCommit, 0, len(rows))
-	contentRow := 0
-	for index, sourceLine := range lineRanges {
+
+	// 缓存命中路径：复用 wrap/source 映射/物化 Lines，仅做轻量对齐校验
+	// 与动态字段（DisplayRange / LayoutGeneration / skipRows）组装，把每
+	// 次 delta 的全量重新 wrap + clone 降为 O(Δ)。
+	key := planCacheKeyFor(cell, width, themeFp)
+	cached := sharedHistoryPlan.get(key)
+	if cached != nil && leadingGaps+len(cached) == len(rows) {
+		aligned := true
+		for i, pr := range cached {
+			r := rows[leadingGaps+i]
+			if r.TranscriptGap || r.Text != pr.text {
+				aligned = false
+				break
+			}
+		}
+		if aligned {
+			return assemblePlainHistoryCommits(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation), true
+		}
+	}
+
+	// miss：全量构建物理行（wrap + source 映射 + 物化 Lines）。
+	physical := make([]planPhysicalRow, 0, len(rows)-leadingGaps)
+	for _, sourceLine := range lineRanges {
 		var (
 			wrapped     []string
 			sourceRows  []SourceRange
@@ -474,34 +493,13 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 				return nil, false
 			}
 		}
-
 		for offset, sourceRange := range sourceRows {
-			contentRow++
-			if contentRow <= skipRows {
-				continue
-			}
-			start := row + offset
-			if index == 0 && offset == 0 {
-				// A cell boundary gap is a display artifact belonging to the
-				// first source row, not an independent zero-width effect.
-				start = 0
-			}
-			end := row + offset + 1
-			if displayStart+end > firstVisible {
-				continue
-			}
-			lines := make([]render.Line, 0, end-start)
-			for _, displayRow := range rows[start:end] {
-				lines = append(lines, appTranscriptRenderLine(displayRow, byID))
-			}
-			commits = append(commits, HistoryCommit{
-				CellID:           cell.ID,
-				Revision:         cell.Revision,
-				SourceRange:      sourceRange,
-				FragmentID:       fragmentIDs[offset],
-				DisplayRange:     DisplayRange{Start: displayStart + start, End: displayStart + end},
-				LayoutGeneration: generation,
-				Lines:            lines,
+			globalRow := row + offset
+			physical = append(physical, planPhysicalRow{
+				text:     rows[globalRow].Text,
+				source:   sourceRange,
+				fragment: fragmentIDs[offset],
+				line:     appTranscriptRenderLine(rows[globalRow], byID),
 			})
 		}
 		row += len(wrapped)
@@ -509,7 +507,53 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 	if row != len(rows) {
 		return nil, false
 	}
-	return commits, true
+	sharedHistoryPlan.put(key, physical)
+	return assemblePlainHistoryCommits(cell, physical, leadingGaps, displayStart, firstVisible, skipRows, generation), true
+}
+
+// assemblePlainHistoryCommits 按当前动态状态把物理行组装为 HistoryCommit：
+// skipRows 跳过已 acked 前缀，DisplayRange 按全局行下标偏移，LayoutGeneration
+// 取当前值。lines 共享物理行底层（只读消费，零拷贝）。
+func assemblePlainHistoryCommits(cell scene.TranscriptCell, physical []planPhysicalRow, leadingGaps, displayStart, firstVisible, skipRows int, generation uint64) []HistoryCommit {
+	commits := make([]HistoryCommit, 0, len(physical))
+	for i, pr := range physical {
+		if i < skipRows {
+			continue
+		}
+		start := leadingGaps + i
+		if i == 0 {
+			// A cell boundary gap is a display artifact belonging to the
+			// first source row, not an independent zero-width effect.
+			start = 0
+		}
+		end := leadingGaps + i + 1
+		if displayStart+end > firstVisible {
+			continue
+		}
+		lines := make([]render.Line, 0, end-start)
+		if start < leadingGaps {
+			for k := start; k < leadingGaps; k++ {
+				lines = append(lines, render.Line{})
+			}
+		}
+		contentStart := start - leadingGaps
+		if contentStart < 0 {
+			contentStart = 0
+		}
+		for _, pr := range physical[contentStart : i+1] {
+			lines = append(lines, pr.line)
+		}
+		commits = append(commits, HistoryCommit{
+			CellID:           cell.ID,
+			Revision:         cell.Revision,
+			SourceRange:      pr.source,
+			FragmentID:       pr.fragment,
+			DisplayRange:     DisplayRange{Start: displayStart + start, End: displayStart + end},
+			LayoutGeneration: generation,
+			Lines:            lines,
+		})
+	}
+	return commits
 }
 
 func plainBlankSourceIdentity(source string, line sourceLineRange) (SourceRange, uint64, bool) {
@@ -543,7 +587,7 @@ func plainWrappedSourceRanges(sourceLine sourceLineRange, width int) ([]string, 
 	start := 0
 	used := 0
 	for offset, value := range sourceLine.Text {
-		glyphWidth := render.Width(string(value))
+		glyphWidth := render.RuneWidth(value)
 		if glyphWidth == 0 {
 			if offset == start && used == 0 {
 				return nil, nil, false

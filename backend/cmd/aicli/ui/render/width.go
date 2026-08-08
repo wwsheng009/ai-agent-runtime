@@ -44,6 +44,73 @@ func SpanWidth(span Span) int {
 	return Width(span.Text)
 }
 
+// RuneWidth returns the terminal cell width of a single rune. It is exactly
+// equivalent to Width(string(r)) but avoids the per-call string allocation and
+// the full grapheme iteration uniseg runs even for one rune. Hot paths that
+// wrap or measure text rune by rune (transcript layout, status line wrapping)
+// should use this instead of Width(string(r)).
+func RuneWidth(r rune) int {
+	if r == 0 {
+		return 0
+	}
+	if r < 0x20 || r == 0x7f {
+		return 0
+	}
+	if r < 0x80 {
+		return 1
+	}
+	// Marks and format controls occupy no cell (matches uniseg Extend/ZWJ and
+	// the pre-uniseg zero-width fallback).
+	if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
+		return 0
+	}
+	// Common East Asian Wide/Fullwidth ranges (matches uniseg's
+	// propertyEastAsianWidth W/F classification). Kept conservative: anything
+	// not listed falls through to uniseg so ambiguous/regional-indicator/emoji
+	// runes keep uniseg's exact width.
+	if eastAsianWideRune(r) {
+		return 2
+	}
+	return uniseg.StringWidth(string(r))
+}
+
+// eastAsianWideRune reports whether r is in a high-confidence East Asian
+// Wide/Fullwidth interval. Every interval here is classified W or F by
+// Unicode EastAsianWidth, so returning 2 can never disagree with uniseg.
+// Conservative by design: intervals with any non-W/F character (e.g. the
+// 0x2E80-0x303E symbols block or KATAKANA MIDDLE DOT U+30FB, both Ambiguous)
+// are left to the uniseg fallback in RuneWidth — missing the fast path only
+// costs a little time, never correctness.
+func eastAsianWideRune(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115f: // Hangul Jamo
+		return true
+	case r >= 0x3041 && r <= 0x3096: // Hiragana (marks 0x3099-0x309A handled before this)
+		return true
+	case r >= 0x309b && r <= 0x309f: // Hiragana digraphs
+		return true
+	case r >= 0x30a1 && r <= 0x30fa: // Katakana, excluding U+30FB (Ambiguous)
+		return true
+	case r >= 0x3400 && r <= 0x4dbf: // CJK Unified Ideographs Extension A
+		return true
+	case r >= 0x4e00 && r <= 0x9fff: // CJK Unified Ideographs
+		return true
+	case r >= 0xac00 && r <= 0xd7a3: // Hangul Syllables
+		return true
+	case r >= 0xf900 && r <= 0xfaff: // CJK Compatibility Ideographs
+		return true
+	case r >= 0xff01 && r <= 0xff60: // Fullwidth Forms (U+FF00 is unassigned)
+		return true
+	case r >= 0xffe0 && r <= 0xffe6: // Fullwidth Signs
+		return true
+	case r >= 0x20000 && r <= 0x2fffd: // CJK Unified Ideographs Extension B+
+		return true
+	case r >= 0x30000 && r <= 0x3fffd:
+		return true
+	}
+	return false
+}
+
 // ExpandTabs replaces tab characters with spaces up to the next tab stop.
 // Callers that measure or wrap content with tabs should normalize first so
 // column math matches what the terminal finally prints.

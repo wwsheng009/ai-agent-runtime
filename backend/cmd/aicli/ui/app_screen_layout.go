@@ -184,6 +184,8 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 	if len(themes) > 0 {
 		theme = themes[0]
 	}
+	fp := themeFingerprint(theme)
+	cache := sharedCellRows
 	for index := 0; index < len(rows); index++ {
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
@@ -208,19 +210,63 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 			continue
 		}
 		if cell, found := cells[row.CellID]; found && cellUsesStructuredPresentation(cell) {
-			result = append(result, structuredTranscriptScreenRows(cell, width, theme)...)
+			key := cellLayoutKeyFor(cell, width, fp)
+			cached := cache.get(key)
+			if cached == nil {
+				cached = structuredTranscriptScreenRows(cell, width, theme)
+				cache.put(key, cached)
+			}
+			result = appendCachedCellRows(result, row.CellID, cached)
 			renderedStructured[row.CellID] = struct{}{}
 			continue
 		}
+		// Plain cell：收集该 cell 的连续语义行（不含 gap），整体 wrap 并
+		// 按内容键缓存，避免每个 cell 每次 reduce 重复 wrap。
+		start := index
+		for index < len(rows) && rows[index].CellID == row.CellID && rows[index].Gap == 0 {
+			index++
+		}
+		var cellRows []AppScreenRow
+		if cell, found := cells[row.CellID]; found {
+			key := cellLayoutKeyFor(cell, width, fp)
+			cached := cache.get(key)
+			if cached == nil {
+				cached = wrapPlainCellRows(rows[start:index], row.CellID, width)
+				cache.put(key, cached)
+			}
+			cellRows = cached
+		} else {
+			cellRows = wrapPlainCellRows(rows[start:index], row.CellID, width)
+		}
+		result = appendCachedCellRows(result, row.CellID, cellRows)
+		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
+	}
+	return result
+}
+
+func appendCachedCellRows(result []AppScreenRow, cellID scene.CellID, rows []AppScreenRow) []AppScreenRow {
+	start := len(result)
+	result = append(result, rows...)
+	for index := start; index < len(result); index++ {
+		result[index].CellID = cellID
+	}
+	return result
+}
+
+// wrapPlainCellRows 把 cell 的连续语义行逐行 wrap 成 AppScreenRow。输出与
+// 逐行 wrap 完全一致（同一 wrapAppScreenText 语义），仅用于缓存封装。
+func wrapPlainCellRows(layoutRows []scene.LayoutRow, cellID scene.CellID, width int) []AppScreenRow {
+	var rows []AppScreenRow
+	for _, row := range layoutRows {
 		for _, line := range wrapAppScreenText(row.Text, width) {
-			result = append(result, AppScreenRow{
+			rows = append(rows, AppScreenRow{
 				Owner:  renderengine.RowOwnerTranscript,
 				Text:   line,
-				CellID: row.CellID,
+				CellID: cellID,
 			})
 		}
 	}
-	return result
+	return rows
 }
 
 func cellUsesStructuredPresentation(cell scene.TranscriptCell) bool {
@@ -238,9 +284,11 @@ func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme 
 	case scene.PresentationDiffSupplement:
 		doc = uidiff.RenderText(cell.Source, uidiff.DefaultRenderOptions(width, theme))
 	case scene.PresentationAssistantMarkdown:
-		doc = markdown.Render(cell.Source, markdown.AssistantBodyOptions(width, theme))
+		doc, _ = renderengine.SharedRenderCache().Render("assistant", cell.Source, markdown.AssistantBodyOptions(width, theme))
+		doc = doc.Clone()
 	default:
-		doc = markdown.Render(cell.Source, markdown.AssistantBodyOptions(width, theme))
+		doc, _ = renderengine.SharedRenderCache().Render("assistant", cell.Source, markdown.AssistantBodyOptions(width, theme))
+		doc = doc.Clone()
 	}
 	if len(doc.Blocks) == 0 {
 		return nil
@@ -302,7 +350,7 @@ func wrapPlainAppScreenText(text string, width int) ([]string, bool) {
 		if r < 0x20 || r == 0x7f {
 			return nil, false
 		}
-		runeWidth := render.Width(string(r))
+		runeWidth := render.RuneWidth(r)
 		if runeWidth > width {
 			return nil, false
 		}

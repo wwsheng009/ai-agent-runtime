@@ -1,6 +1,11 @@
 package render
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestWidthASCIIAndCJK(t *testing.T) {
 	if got := Width("abc"); got != 3 {
@@ -8,6 +13,75 @@ func TestWidthASCIIAndCJK(t *testing.T) {
 	}
 	if got := Width("中文"); got != 4 {
 		t.Fatalf("cjk width=%d want 4", got)
+	}
+}
+
+// TestRuneWidthMatchesWidth asserts RuneWidth agrees with Width(string(r))
+// for every valid rune. Width(string(r)) is the reference implementation;
+// RuneWidth is the fast path used by hot wrapping loops, so any divergence
+// would change wrapping behavior.
+func TestRuneWidthMatchesWidth(t *testing.T) {
+	var mismatches []string
+	for r := rune(0); r <= utf8.MaxRune; r++ {
+		if r >= 0xd800 && r <= 0xdfff {
+			continue // surrogate range is not valid runes
+		}
+		want := Width(string(r))
+		if got := RuneWidth(r); got != want {
+			if len(mismatches) < 30 {
+				mismatches = append(mismatches, fmt.Sprintf("U+%04X: RuneWidth=%d Width=%d", r, got, want))
+			}
+		}
+	}
+	if len(mismatches) > 0 {
+		t.Fatalf("%d mismatches, first 30:\n%s", len(mismatches), strings.Join(mismatches, "\n"))
+	}
+}
+
+func TestRuneWidthKnownValues(t *testing.T) {
+	cases := []struct {
+		r    rune
+		want int
+	}{
+		{0, 0},
+		{'\n', 0},
+		{'a', 1},
+		{'中', 2},
+		{0x2e3a, 3}, // TWO-EM DASH (uniseg special case)
+		{0x2e3b, 4}, // THREE-EM DASH
+		{0x200d, 0}, // ZERO WIDTH JOINER
+		{0x0301, 0}, // COMBINING ACUTE ACCENT
+		{0xfe0f, 0}, // VARIATION SELECTOR-16
+		{0x1f3fb, 0}, // EMOJI MODIFIER FITZPATRICK
+		{0x1f1e6, 2}, // REGIONAL INDICATOR A
+		{0x1f600, 2}, // GRINNING FACE (emoji presentation)
+	}
+	for _, c := range cases {
+		if got := RuneWidth(c.r); got != c.want {
+			t.Errorf("RuneWidth(%U)=%d want %d", c.r, got, c.want)
+		}
+	}
+}
+
+func BenchmarkRuneWidthCJK(b *testing.B) {
+	s := "中文测试文本用于测量逐字符宽度计算的性能表现"
+	rs := []rune(s)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, r := range rs {
+			RuneWidth(r)
+		}
+	}
+}
+
+func BenchmarkWidthSingleRuneCJK(b *testing.B) {
+	s := "中文测试文本用于测量逐字符宽度计算的性能表现"
+	rs := []rune(s)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, r := range rs {
+			Width(string(r))
+		}
 	}
 }
 
