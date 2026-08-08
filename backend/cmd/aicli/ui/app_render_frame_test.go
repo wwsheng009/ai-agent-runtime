@@ -93,6 +93,44 @@ func TestComposeAppRenderFrameDetachesStructuredLines(t *testing.T) {
 	}
 }
 
+func TestComposeAppRenderFrameNormalizesStructuredBandTrailingSpaces(t *testing.T) {
+	state := AppState{
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: 40, Height: 12, Generation: 1},
+		Bottom: BottomPaneState{
+			ActiveBandStyled: []render.Line{
+				{Spans: []render.Span{{Text: "first", Style: render.Style{Role: string(style.RoleAssistant)}}}},
+				{Spans: []render.Span{{Text: "  ", Style: render.Style{Role: string(style.RoleAssistant)}}}},
+				{Spans: []render.Span{
+					{Text: "last", Style: render.Style{Role: string(style.RoleAssistant)}},
+					{Text: "   ", Style: render.Style{Role: string(style.RoleTextMuted)}},
+				}},
+			},
+			StatusModel: &style.StatusLineModel{State: style.RunStreaming, StateText: "Working"},
+		},
+	}
+
+	frame := ComposeAppRenderFrame(state)
+	bandRows := 0
+	for _, row := range frame.Rows {
+		if row.Screen.Owner != renderengine.RowOwnerBand {
+			continue
+		}
+		bandRows++
+		plain := (render.PlainBackend{}).Render(render.LinesDoc(row.Line))
+		if plain != row.Screen.Text {
+			t.Fatalf("band row %d structured text = %q, want %q", row.Screen.Row, plain, row.Screen.Text)
+		}
+	}
+	if bandRows != 3 {
+		t.Fatalf("band rows = %d, want 3", bandRows)
+	}
+	plan := ComposeTerminalFramePlan(state)
+	if _, err := terminalFrameCells(plan.Rows, plan.RenderRows, 40, 12, plan.Theme); err != nil {
+		t.Fatalf("normalized structured frame was rejected: %v", err)
+	}
+}
+
 func TestAppTranscriptRenderRoleCoversCellKinds(t *testing.T) {
 	cases := []struct {
 		kind scene.CellKind

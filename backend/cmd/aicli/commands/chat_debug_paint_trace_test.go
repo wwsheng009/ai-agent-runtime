@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -121,6 +122,15 @@ func TestDebugDisplayIncludesAppStatePresenterDiagnostics(t *testing.T) {
 		t.Fatal("post resize action")
 	}
 	coordinator.waitUIActorIdle()
+	var terminalOutput bytes.Buffer
+	session.TerminalSession = ui.NewTerminalSession(&terminalOutput)
+	appState := coordinator.uiActor.AppState()
+	if result := session.TerminalSession.FlushTransaction(ui.ComposeTerminalTransactionPlan(appState, nil)); result.Frame.Err != nil {
+		t.Fatalf("initial terminal projection: %v", result.Frame.Err)
+	}
+	if result := session.TerminalSession.FlushTransaction(ui.ComposeScrollbackReconciliationPlan(appState)); result.Frame.Err != nil {
+		t.Fatalf("terminal reconciliation projection: %v", result.Frame.Err)
+	}
 
 	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
 	for _, marker := range []string{
@@ -131,6 +141,14 @@ func TestDebugDisplayIncludesAppStatePresenterDiagnostics(t *testing.T) {
 		"Primary Lease:",
 		"History Effects:",
 		"History Projection:",
+		"TerminalSession Projection:",
+		"Projection Validity:",
+		"Terminal Geometry:",
+		"Mutable Viewport:",
+		"Resident History:",
+		"Terminal Epoch:",
+		"Scrollback Resets:",
+		"count=1 last=reconciliation",
 		"AppState Frame Parity:",
 		"parity:",
 	} {

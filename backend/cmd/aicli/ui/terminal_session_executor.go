@@ -127,76 +127,67 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		return false
 	}
 	e.controller.WaitIdle()
-	state := e.controller.State()
-	if state.HistoryEffects.ProjectionUnknown {
+	schedule := e.controller.terminalSessionSchedule()
+	if schedule.projectionUnknown {
+		snapshot := e.controller.terminalSessionSnapshot(0)
+		if !snapshot.projectionUnknown {
+			// The schedule changed after the first scalar read. Run one fresh
+			// pass instead of relying on a possibly coalesced wake to flush it.
+			return true
+		}
 		// A possibly written history range cannot be repaired by repainting only
 		// the bottom viewport. Replace scrollback from semantic source first;
 		// zero-byte viewport failures still use the cheaper repaint-only path.
-		plan := ComposeTerminalTransactionPlan(state.AppState, nil)
-		if state.HistoryEffects.ReconciliationRequired {
-			plan = ComposeScrollbackReconciliationPlan(state.AppState)
+		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
+		if snapshot.reconciliationRequired {
+			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
 		}
 		result := e.session.FlushTransaction(plan)
 		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 	}
-	var claimed *HistoryCommit
-	if pending := state.HistoryEffects.Pending(); len(pending) > 0 {
-		candidate := pending[0]
+	claimedToken := uint64(0)
+	if schedule.pendingToken != 0 {
 		if !e.controller.Post(BeginHistoryCommit{
-			Token: candidate.Token, LayoutGeneration: candidate.LayoutGeneration,
+			Token: schedule.pendingToken, LayoutGeneration: schedule.pendingGeneration,
 		}) {
 			return false
 		}
 		e.controller.WaitIdle()
-		state = e.controller.State()
-		commit, ok := terminalSessionClaimedCommit(state, candidate.Token)
-		if !ok {
-			return false
-		}
-		claimed = &commit
+		claimedToken = schedule.pendingToken
 	}
 
-	bootstrap := terminalSessionBootstrapCommits(state, claimed)
-	plan := ComposeTerminalTransactionPlan(state.AppState, claimed, bootstrap)
+	snapshot := e.controller.terminalSessionSnapshot(claimedToken)
+	if claimedToken == 0 && snapshot.projectionUnknown {
+		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
+		if snapshot.reconciliationRequired {
+			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
+		}
+		result := e.session.FlushTransaction(plan)
+		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+	}
+	if claimedToken != 0 && snapshot.claimed == nil {
+		// BeginHistoryCommit is queued behind any reducer actions that raced the
+		// scalar schedule read. If one of those actions replaced the candidate or
+		// invalidated the projection, consume that actionable state immediately:
+		// its wake may already have been coalesced into this running worker. A
+		// frozen/leased queue intentionally exposes no pending token, while the
+		// unchanged token can mean an older in-flight ordering fence; neither case
+		// should spin the executor.
+		latest := e.controller.terminalSessionSchedule()
+		return terminalSessionClaimMissRequiresRetry(schedule, latest)
+	}
+	plan := composeTerminalViewportTransactionPlan(snapshot.appState, snapshot.claimed, snapshot.bootstrap)
 	result := e.session.FlushTransaction(plan)
-	return e.publishResult(plan.Frame.LayoutGeneration, claimed, result)
+	return e.publishResult(plan.Frame.LayoutGeneration, snapshot.claimed, result)
 }
 
-func terminalSessionClaimedCommit(state UIControllerState, token uint64) (HistoryCommit, bool) {
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Token == token && entry.State == HistoryCommitInFlight &&
-			entry.Commit.LayoutGeneration == state.LayoutGeneration {
-			return entry.Commit.Clone(), true
-		}
+func terminalSessionClaimMissRequiresRetry(claimed, latest terminalSessionScheduleSnapshot) bool {
+	if latest.projectionUnknown {
+		return true
 	}
-	return HistoryCommit{}, false
-}
-
-// terminalSessionBootstrapCommits returns the current oldest contiguous
-// pending suffix together with the claimed first token. TerminalSession can
-// insert this ordered batch directly above the inline viewport in one write;
-// the reducer still validates and acknowledges every token atomically.
-func terminalSessionBootstrapCommits(state UIControllerState, claimed *HistoryCommit) []HistoryCommit {
-	if claimed == nil {
-		return nil
-	}
-	commits := make([]HistoryCommit, 0)
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.LayoutGeneration != state.LayoutGeneration {
-			continue
-		}
-		if entry.Commit.Token == claimed.Token && entry.State == HistoryCommitInFlight {
-			commits = append(commits, entry.Commit.Clone())
-			continue
-		}
-		if len(commits) > 0 && entry.State == HistoryCommitPending {
-			commits = append(commits, entry.Commit.Clone())
-		}
-	}
-	if len(commits) == 0 || commits[0].Token != claimed.Token {
-		return nil
-	}
-	return commits
+	return latest.pendingToken != 0 &&
+		(latest.pendingToken != claimed.pendingToken ||
+			latest.pendingGeneration != claimed.pendingGeneration)
 }
 
 func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *HistoryCommit, result TerminalTransactionResult) bool {
@@ -265,11 +256,10 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	}
 	e.controller.WaitIdle()
 	if result.ScrollbackReset {
-		return e.controller.State().HistoryEffects.HasPending()
+		return e.controller.terminalSessionHasPending()
 	}
 	if !historyAcknowledged || claimed == nil {
 		return false
 	}
-	state := e.controller.State()
-	return historyCommitAcked(state, claimed.Token) && len(state.HistoryEffects.Pending()) > 0
+	return e.controller.terminalSessionCommitAckedAndHasPending(claimed.Token)
 }

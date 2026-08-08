@@ -18,6 +18,85 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
+func TestUnifiedRendererActionNeedsFlushDoesNotSelfRetryDeliveryBookkeeping(t *testing.T) {
+	noFlush := []ui.UIAction{
+		ui.BeginHistoryCommit{},
+		ui.HistoryCommitFailed{},
+		ui.HistoryCommitDeferred{},
+		ui.HistoryProjectionInvalidated{},
+		ui.HistoryProjectionRecovered{},
+	}
+	for _, action := range noFlush {
+		if unifiedRendererActionNeedsFlush(action) {
+			t.Errorf("%T unexpectedly requested a generic frame", action)
+		}
+	}
+	for _, action := range []ui.UIAction{ui.UpdateActiveCellAction{}, ui.HistoryCommitAcknowledged{}, ui.HistoryScrollbackReconciled{}} {
+		if !unifiedRendererActionNeedsFlush(action) {
+			t.Errorf("%T omitted a visible/current-state frame", action)
+		}
+	}
+}
+
+type persistentTerminalErrorWriter struct {
+	mu     sync.Mutex
+	writes int
+}
+
+func (w *persistentTerminalErrorWriter) Write([]byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	w.mu.Unlock()
+	return 0, errors.New("persistent terminal failure")
+}
+
+func (w *persistentTerminalErrorWriter) writeCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes
+}
+
+func TestUnifiedRendererPersistentFrameErrorDoesNotSelfWake(t *testing.T) {
+	session := &ChatSession{Stream: true}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+
+	writer := &persistentTerminalErrorWriter{}
+	if !coordinator.enableUnifiedRendererWithWriter(writer) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.mu.Lock()
+	presenter := coordinator.primaryPresenter
+	coordinator.mu.Unlock()
+	if presenter == nil {
+		t.Fatal("unified presenter is missing")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		presenter.WaitIdle()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("persistent frame error kept self-waking the presenter")
+	}
+	coordinator.waitUIActorIdle()
+	// Initial attach and its causally posted geometry barrier may coalesce into
+	// one request or race as two. Neither failed attempt may manufacture a third.
+	if writes := writer.writeCount(); writes < 1 || writes > 2 {
+		t.Fatalf("persistent frame error attempts = %d, want one or two bounded setup attempts", writes)
+	}
+	if state := coordinator.uiActor.State(); !state.HistoryEffects.ProjectionUnknown {
+		t.Fatal("terminal frame error did not invalidate the logical projection")
+	}
+}
+
 func TestChatInteractionCoordinatorSetSurfaceKeepsSessionSurfaceInSync(t *testing.T) {
 	session := &ChatSession{}
 	coordinator := newChatInteractionCoordinator(session)
@@ -503,7 +582,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.AppState()
-	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "scene streamed body" {
+	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "• scene streamed body" {
 		t.Fatalf("stream did not advance Scene-backed active cell: %+v", state.Active)
 	}
 	if got := surface.ActiveBandLines(); len(got) != 0 {
@@ -530,7 +609,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *
 	if state.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("finalized stream left an active visual source: %+v", state.Active)
 	}
-	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != "authoritative final body" {
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != "• authoritative final body" {
 		t.Fatalf("final Scene cell not committed exactly through transcript: %+v", state.Transcript)
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
@@ -713,7 +792,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamTerminalBoundaries(t *t
 				t.Fatalf("transcript cells=%d, want exactly one finalized partial cell", len(state.Transcript.Cells))
 			}
 			cell := state.Transcript.Cells[0]
-			if cell.Source != partial || cell.Phase != scene.CellCommitted {
+			if cell.Source != "• "+partial || cell.Phase != scene.CellCommitted {
 				t.Fatalf("terminal partial cell=%+v, want committed source=%q", cell, partial)
 			}
 			if strings.Count(output.String(), partial) > 2 {

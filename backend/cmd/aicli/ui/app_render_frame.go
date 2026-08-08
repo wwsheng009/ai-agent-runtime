@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
@@ -142,7 +144,12 @@ func appBottomRenderLines(bottom BottomPaneLayout, width int) map[int]render.Lin
 		switch {
 		case row.Owner == renderengine.RowOwnerBand:
 			if bandIndex < len(band) {
-				lines[row.Row] = cloneAppRenderLine(band[bandIndex])
+				// BottomPaneRowPlan models terminal cell ownership and removes
+				// trailing ASCII spaces. Apply the same normalization to the rich
+				// line while retaining styles on visible spans; otherwise a Markdown
+				// indentation-only blank line has structured text "  " but plain
+				// screen text "", and TerminalSession correctly rejects the frame.
+				lines[row.Row] = trimAppRenderLineRightSpaces(band[bandIndex])
 			}
 			bandIndex++
 		case row.Owner == renderengine.RowOwnerStatus && row.Row == plan.StatusRow:
@@ -152,6 +159,19 @@ func appBottomRenderLines(bottom BottomPaneLayout, width int) map[int]render.Lin
 		}
 	}
 	return lines
+}
+
+func trimAppRenderLineRightSpaces(line render.Line) render.Line {
+	line = cloneAppRenderLine(line)
+	for index := len(line.Spans) - 1; index >= 0; index-- {
+		line.Spans[index].Text = strings.TrimRight(line.Spans[index].Text, " ")
+		if line.Spans[index].Text != "" {
+			line.Spans = line.Spans[:index+1]
+			return line
+		}
+	}
+	line.Spans = nil
+	return line
 }
 
 func appStatusRenderLine(model *style.StatusLineModel, width int, fallback string) render.Line {

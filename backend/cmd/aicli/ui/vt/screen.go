@@ -68,6 +68,25 @@ func NewScreen(width, height int) *Screen {
 	return s
 }
 
+// Reset clears the screen contents and cursor/scroll state for reuse while
+// keeping the allocated row buffers, so callers that replay many single-line
+// streams (e.g. history handoff) do not allocate a fresh width×height matrix
+// per line. The screen behaves exactly as if newly constructed.
+func (s *Screen) Reset() {
+	for i := range s.rows {
+		row := s.rows[i]
+		for j := range row {
+			row[j] = Cell{}
+		}
+	}
+	s.scrollback = s.scrollback[:0]
+	s.row, s.col = 1, 1
+	s.top, s.bottom = 1, s.height
+	s.sgr = s.sgr[:0]
+	s.savedRow, s.savedCol = 0, 0
+	s.hasSaved = false
+}
+
 // Width reports the screen width in cells.
 func (s *Screen) Width() int { return s.width }
 
@@ -227,7 +246,7 @@ func (s *Screen) recordScrollbackRows(count int) {
 // a column, and double-width runes claim a continuation cell so wrapping and
 // row reconstruction match a real terminal.
 func (s *Screen) put(r rune) {
-	width := render.Width(string(r))
+	width := render.RuneWidth(r)
 	if width <= 0 {
 		s.attachZeroWidth(r)
 		return

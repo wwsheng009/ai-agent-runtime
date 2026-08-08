@@ -689,6 +689,51 @@ func TestComposeTerminalFramePlanCarriesStructuredFrameRows(t *testing.T) {
 	t.Fatal("composed plan did not contain the user transcript row")
 }
 
+func TestComposeTerminalTransactionPlanRetainsCompleteFrameContract(t *testing.T) {
+	plan := ComposeTerminalTransactionPlan(composeFixtureState(), nil)
+	if !plan.Valid() {
+		t.Fatalf("composed transaction plan is invalid: %#v", plan)
+	}
+	for _, row := range plan.Frame.Rows {
+		if row.CellID == 1 {
+			return
+		}
+	}
+	t.Fatal("exported transaction composer omitted finalized transcript rows")
+}
+
+func TestTerminalSessionProjectionTracksCompletedScrollbackResets(t *testing.T) {
+	var output bytes.Buffer
+	session := NewTerminalSession(&output)
+	initial := terminalSessionPlan(1, 24, 6, 4, LeaseState{})
+	if result := session.Flush(initial); result.Err != nil {
+		t.Fatalf("initial flush = %#v", result)
+	}
+	if state := session.ProjectionState(); state.ScrollbackResetCount != 0 || state.LastScrollbackResetReason != "" {
+		t.Fatalf("initial projection reported a reset: %#v", state)
+	}
+
+	resized := terminalSessionPlan(2, 30, 8, 6, LeaseState{})
+	if result := session.Flush(resized); result.Err != nil {
+		t.Fatalf("resize flush = %#v", result)
+	}
+	state := session.ProjectionState()
+	if state.ScrollbackResetCount != 1 || state.LastScrollbackResetReason != "resize" || state.TerminalEpoch != 1 {
+		t.Fatalf("resize reset diagnostics = %#v", state)
+	}
+
+	result := session.FlushTransaction(TerminalTransactionPlan{
+		Frame: resized, ResetScrollback: true, TerminalEpoch: state.TerminalEpoch,
+	})
+	if result.Frame.Err != nil || !result.ScrollbackReset {
+		t.Fatalf("reconciliation reset = %#v", result)
+	}
+	state = session.ProjectionState()
+	if state.ScrollbackResetCount != 2 || state.LastScrollbackResetReason != "reconciliation" || state.TerminalEpoch != 2 {
+		t.Fatalf("reconciliation reset diagnostics = %#v", state)
+	}
+}
+
 func TestTerminalSessionStructuredFrameRetainsRoleStyle(t *testing.T) {
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)

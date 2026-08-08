@@ -108,8 +108,20 @@ type TerminalTransactionPlan struct {
 // attaches one already-claimed HistoryCommit. The commit is cloned because its
 // render lines are reducer-owned payload until the eventual Ack.
 func ComposeTerminalTransactionPlan(state AppState, history *HistoryCommit, bootstrapHistory ...[]HistoryCommit) TerminalTransactionPlan {
+	return composeTerminalTransactionPlan(ComposeTerminalFramePlan(state), state, history, bootstrapHistory...)
+}
+
+// composeTerminalViewportTransactionPlan is the unified primary-session hot
+// path. The exported composer retains its complete-frame contract for debug,
+// tests and non-session callers; only the native-scrollback owner may omit the
+// finalized transcript from the mutable viewport.
+func composeTerminalViewportTransactionPlan(state AppState, history *HistoryCommit, bootstrapHistory ...[]HistoryCommit) TerminalTransactionPlan {
+	return composeTerminalTransactionPlan(composeTerminalViewportFramePlan(state), state, history, bootstrapHistory...)
+}
+
+func composeTerminalTransactionPlan(frame TerminalFramePlan, state AppState, history *HistoryCommit, bootstrapHistory ...[]HistoryCommit) TerminalTransactionPlan {
 	plan := TerminalTransactionPlan{
-		Frame:         ComposeTerminalFramePlan(state),
+		Frame:         frame,
 		TerminalEpoch: state.HistoryEffects.TerminalEpoch,
 	}
 	if history != nil {
@@ -122,8 +134,25 @@ func ComposeTerminalTransactionPlan(state AppState, history *HistoryCommit, boot
 	return plan
 }
 
+// composeTerminalViewportFramePlan omits finalized transcript cells from the
+// mutable primary-frame projection. In unified mode those rows are delivered
+// exclusively by tokenized HistoryCommit effects and retained by the terminal
+// itself; laying out the complete transcript again for every streaming delta
+// only allocates a discarded top region. Active, prompt, popup and status state
+// remain intact because they live outside TranscriptState.
+func composeTerminalViewportFramePlan(state AppState) TerminalFramePlan {
+	state.Transcript = TranscriptState{}
+	return ComposeTerminalFramePlan(state)
+}
+
 func ComposeScrollbackReconciliationPlan(state AppState) TerminalTransactionPlan {
 	plan := ComposeTerminalTransactionPlan(state, nil)
+	plan.ResetScrollback = true
+	return plan
+}
+
+func composeTerminalViewportScrollbackReconciliationPlan(state AppState) TerminalTransactionPlan {
+	plan := composeTerminalViewportTransactionPlan(state, nil)
 	plan.ResetScrollback = true
 	return plan
 }
@@ -169,17 +198,19 @@ func cloneHistoryCommits(commits []HistoryCommit) []HistoryCommit {
 // history source; callers can observe validity without treating ScreenModel as
 // a business-data source.
 type TerminalProjectionState struct {
-	Geometry         GeometryState
-	Viewport         ViewportArea
-	HistoryRows      int
-	HistoryKnown     bool
-	LayoutGeneration uint64
-	Lease            LeaseState
-	OutputBottomRow  int
-	Frame            uint64
-	TerminalEpoch    uint64
-	Validity         renderengine.ProjectionValidity
-	Cursor           *AppCursor
+	Geometry                  GeometryState
+	Viewport                  ViewportArea
+	HistoryRows               int
+	HistoryKnown              bool
+	LayoutGeneration          uint64
+	Lease                     LeaseState
+	OutputBottomRow           int
+	Frame                     uint64
+	TerminalEpoch             uint64
+	ScrollbackResetCount      uint64
+	LastScrollbackResetReason string
+	Validity                  renderengine.ProjectionValidity
+	Cursor                    *AppCursor
 }
 
 // ViewportArea is the only mutable primary-screen region owned by
@@ -253,12 +284,14 @@ type TerminalSession struct {
 	// blank headroom between scrollback and the same semantic message. Before
 	// the first overflow, bottom alignment keeps a short transcript near the
 	// composer without creating non-semantic scrollback.
-	historyTopAligned        bool
-	historyProjectionKnown   bool
-	historyProjectionStarted bool
-	frame                    uint64
-	terminalEpoch            uint64
-	cursor                   *AppCursor
+	historyTopAligned         bool
+	historyProjectionKnown    bool
+	historyProjectionStarted  bool
+	frame                     uint64
+	terminalEpoch             uint64
+	scrollbackResetCount      uint64
+	lastScrollbackResetReason string
+	cursor                    *AppCursor
 	// alternateLeaseID records actual DEC 1049 transport ownership. It is
 	// deliberately independent of AppState.Lease because the physical enter
 	// completes before LeaseAcquired is posted to the actor, and the physical
@@ -304,17 +337,19 @@ func (s *TerminalSession) projectionStateLocked() TerminalProjectionState {
 		validity = s.screen.ProjectionValidity()
 	}
 	return TerminalProjectionState{
-		Geometry:         s.geometry,
-		Viewport:         s.viewport,
-		HistoryRows:      len(s.historyTailRows),
-		HistoryKnown:     s.historyProjectionKnown,
-		LayoutGeneration: s.generation,
-		Lease:            s.lease,
-		OutputBottomRow:  s.outputBottom,
-		Frame:            s.frame,
-		TerminalEpoch:    s.terminalEpoch,
-		Validity:         validity,
-		Cursor:           cloneTerminalCursor(s.cursor),
+		Geometry:                  s.geometry,
+		Viewport:                  s.viewport,
+		HistoryRows:               len(s.historyTailRows),
+		HistoryKnown:              s.historyProjectionKnown,
+		LayoutGeneration:          s.generation,
+		Lease:                     s.lease,
+		OutputBottomRow:           s.outputBottom,
+		Frame:                     s.frame,
+		TerminalEpoch:             s.terminalEpoch,
+		ScrollbackResetCount:      s.scrollbackResetCount,
+		LastScrollbackResetReason: s.lastScrollbackResetReason,
+		Validity:                  validity,
+		Cursor:                    cloneTerminalCursor(s.cursor),
 	}
 }
 
@@ -571,6 +606,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
 		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
 	forceScrollbackReset := plan.ResetScrollback
+	scrollbackResetReason := terminalScrollbackResetReason(resizeRebuild, forceScrollbackReset)
 	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild && !forceScrollbackReset
 	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
 	projectionKnown := hadKnownProjection
@@ -719,6 +755,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 			s.terminalEpoch = plan.TerminalEpoch
 		}
 		s.terminalEpoch++
+		s.scrollbackResetCount++
+		s.lastScrollbackResetReason = scrollbackResetReason
 	} else if initializeHistoryProjection {
 		s.historyProjectionStarted = true
 		s.historyProjectionKnown = true
@@ -741,6 +779,19 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 		History:         historyResult,
 		ScrollbackReset: resizeRebuild || forceScrollbackReset,
 		TerminalEpoch:   s.terminalEpoch,
+	}
+}
+
+func terminalScrollbackResetReason(resize, reconciliation bool) string {
+	switch {
+	case resize && reconciliation:
+		return "resize+reconciliation"
+	case resize:
+		return "resize"
+	case reconciliation:
+		return "reconciliation"
+	default:
+		return ""
 	}
 }
 
@@ -858,11 +909,12 @@ func terminalHistoryHandoffRows(lines []render.Line, theme style.ThemeContext, w
 		return nil, nil, ErrInvalidHistoryHandoff
 	}
 	cells := make([][]vt.Cell, len(rows))
+	screen := vt.NewScreen(width, 2)
 	for index, row := range rows {
 		if strings.ContainsAny(row, "\r\n") {
 			return nil, nil, fmt.Errorf("%w: encoded row %d contains a line control", ErrInvalidHistoryHandoff, index+1)
 		}
-		screen := vt.NewScreen(width, 2)
+		screen.Reset()
 		screen.Feed(row)
 		cells[index] = screen.CellRows(1, 1)[0]
 	}

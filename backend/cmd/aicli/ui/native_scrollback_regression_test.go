@@ -339,6 +339,89 @@ func TestStartupMultiScreenHistoryKeepsPromptAndStatusOutOfScrollback(t *testing
 	assertPhysicalMarkersExactlyOnce(t, h.physical.String(), width, height, markers)
 }
 
+func TestLongLivedRealtimeFramesPreserveNativeHistoryWithoutScrollbackReset(t *testing.T) {
+	const (
+		width          = 78
+		height         = 16
+		finalizedCount = 80
+		activeCount    = 60
+	)
+	h := newNativeScrollbackRegressionHarness(t)
+	h.post(t,
+		Resize{Width: width, Height: height, Generation: 1},
+		SetSemanticActiveCellProjectionAction{Enabled: true},
+		ShowPromptAction{Line: "> "},
+	)
+
+	markers := make([]string, 0, finalizedCount+activeCount)
+	cells := make([]*scene.TranscriptCell, 0, finalizedCount+1)
+	for index := 0; index < finalizedCount; index++ {
+		marker := fmt.Sprintf("LONG-HISTORY-%03d", index)
+		markers = append(markers, marker)
+		cells = append(cells, &scene.TranscriptCell{
+			ID: scene.CellID(index + 1), Sequence: uint64(index + 1), Revision: 1,
+			Kind: scene.KindRuntimeEvent, Source: marker, Phase: scene.CellCommitted,
+		})
+		if (index+1)%8 != 0 {
+			continue
+		}
+		before := h.physical.Len()
+		h.post(t, ReplaceTranscriptAction{Snapshot: regressionCommittedSnapshot(uint64(index+1), cells...)})
+		h.flush()
+		if chunk := h.physical.String()[before:]; strings.Contains(chunk, "\x1b[3J") {
+			t.Fatalf("stable finalized batch %d unexpectedly reset native scrollback: %q", index/8, chunk)
+		}
+	}
+
+	activeID := scene.CellID(finalizedCount + 1)
+	var source string
+	for index := 0; index < activeCount; index++ {
+		marker := fmt.Sprintf("LONG-REALTIME-%03d", index)
+		markers = append(markers, marker)
+		source += marker + "\n"
+		before := h.physical.Len()
+		if index == 0 {
+			h.post(t, SetActiveCellAction{Active: ActiveCellState{
+				CellID: activeID, Revision: 1, Kind: scene.KindAssistant,
+				Phase: ActiveCellMutable, Source: source,
+				Stable: SourceRange{Start: 0, End: len(source)},
+			}})
+		} else {
+			current := h.controller.ActiveCellState()
+			next := current.Clone()
+			next.Revision++
+			next.Source = source
+			next.Stable = SourceRange{Start: 0, End: len(source)}
+			h.post(t, UpdateActiveCellAction{
+				ExpectedCellID: current.CellID, ExpectedRevision: current.Revision, Active: next,
+			})
+		}
+		h.flush()
+		if chunk := h.physical.String()[before:]; strings.Contains(chunk, "\x1b[3J") {
+			t.Fatalf("realtime update %d unexpectedly reset native scrollback: %q", index, chunk)
+		}
+	}
+
+	active := h.controller.ActiveCellState()
+	finalCell := &scene.TranscriptCell{
+		ID: activeID, Sequence: uint64(activeID), Revision: active.Revision + 1,
+		Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted,
+	}
+	finalCells := append(append([]*scene.TranscriptCell(nil), cells...), finalCell)
+	before := h.physical.Len()
+	h.post(t, FinalizeActiveCellAction{
+		Snapshot:             regressionCommittedSnapshot(uint64(finalizedCount+activeCount+1), finalCells...),
+		ExpectedActiveCellID: activeID, ExpectedActiveRevision: active.Revision,
+		ExpectedSceneRevision: finalCell.Revision,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	})
+	h.flush()
+	if chunk := h.physical.String()[before:]; strings.Contains(chunk, "\x1b[3J") {
+		t.Fatalf("append-only finalization unexpectedly reset native scrollback: %q", chunk)
+	}
+	assertPhysicalMarkersExactlyOnce(t, h.physical.String(), width, height, markers)
+}
+
 var absoluteCUPPattern = regexp.MustCompile("\\x1b\\[([0-9]+);([0-9]+)H")
 
 func assertNoWholeDisplayClear(t *testing.T, raw string) {

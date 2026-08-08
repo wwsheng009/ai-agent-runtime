@@ -288,6 +288,20 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	} else {
 		builder.meta("History Projection:", "known")
 	}
+	if session.TerminalSession != nil {
+		projection := session.TerminalSession.ProjectionState()
+		resetReason := projection.LastScrollbackResetReason
+		if resetReason == "" {
+			resetReason = "<none>"
+		}
+		builder.heading("TerminalSession Projection:")
+		builder.meta("Projection Validity:", projection.Validity.String())
+		builder.meta("Terminal Geometry:", fmt.Sprintf("%dx%d (generation %d)", projection.Geometry.Width, projection.Geometry.Height, projection.LayoutGeneration))
+		builder.meta("Mutable Viewport:", fmt.Sprintf("top=%d height=%d width=%d", projection.Viewport.Top, projection.Viewport.Height, projection.Viewport.Width))
+		builder.meta("Resident History:", fmt.Sprintf("rows=%d known=%t", projection.HistoryRows, projection.HistoryKnown))
+		builder.meta("Terminal Epoch:", strconv.FormatUint(projection.TerminalEpoch, 10))
+		builder.meta("Scrollback Resets:", fmt.Sprintf("count=%d last=%s", projection.ScrollbackResetCount, resetReason))
+	}
 	if session.Surface == nil {
 		return
 	}

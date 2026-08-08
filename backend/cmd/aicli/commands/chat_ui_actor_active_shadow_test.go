@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -71,8 +72,8 @@ func TestRenderAssistantDelta_ShadowUsesCausalFollowup(t *testing.T) {
 	}
 	actor.WaitIdle()
 	state := actor.AppState().Active
-	if state.CellID != 7 || state.Revision != 2 || state.Source != "abc" {
-		t.Fatalf("shadow follow-up state = %#v, want cell 7 rev 2 source abc", state)
+	if state.CellID != 7 || state.Revision != 2 || state.Source != boundary.FormatAssistantBlockChrome("abc") {
+		t.Fatalf("shadow follow-up state = %#v, want cell 7 rev 2 source %q", state, boundary.FormatAssistantBlockChrome("abc"))
 	}
 }
 
@@ -172,7 +173,7 @@ func TestActiveStreamShadowActionMirrorsMountedSceneCell(t *testing.T) {
 	if update.ExpectedCellID != 7 || update.ExpectedRevision != 1 {
 		t.Fatalf("shadow fence = %d/%d", update.ExpectedCellID, update.ExpectedRevision)
 	}
-	if update.Active.Revision != 2 || update.Active.Source != "abc" || update.Active.Kind != scene.KindAssistant {
+	if update.Active.Revision != 2 || update.Active.Source != boundary.FormatAssistantBlockChrome("abc") || update.Active.Kind != scene.KindAssistant {
 		t.Fatalf("shadow payload = %+v", update.Active)
 	}
 	if update.Active.Acked.End != 0 || update.Active.Enqueued.End != 0 {
@@ -184,7 +185,7 @@ func TestActiveStreamShadowActionMirrorsMountedSceneCell(t *testing.T) {
 	}
 	actor.WaitIdle()
 	state := actor.AppState().Active
-	if state.Source != "abc" || state.Revision != 2 || state.CellID != 7 {
+	if state.Source != boundary.FormatAssistantBlockChrome("abc") || state.Revision != 2 || state.CellID != 7 {
 		t.Fatalf("AppState active after shadow update = %+v", state)
 	}
 
@@ -237,7 +238,7 @@ func TestRenderAssistantDeltaPostsShadowActionAfterCoordinatorUnlock(t *testing.
 	coordinator.RenderAssistantDelta("shadowed source")
 	coordinator.waitUIActorIdle()
 	active := actor.AppState().Active
-	if active.CellID != 11 || active.Revision != 4 || active.Source != "shadowed source" {
+	if active.CellID != 11 || active.Revision != 4 || active.Source != boundary.FormatAssistantBlockChrome("shadowed source") {
 		t.Fatalf("AppState active after coordinator delta = %+v", active)
 	}
 	if active.Acked.End != 0 || active.Enqueued.End != 0 {
@@ -289,7 +290,7 @@ func TestCompleteAssistantResponsePostsFinalizationShadowTransaction(t *testing.
 	if state.Active != (ui.ActiveCellState{}) {
 		t.Fatalf("finalization left active shadow cell mounted: %+v", state.Active)
 	}
-	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Phase != scene.CellCommitted || state.Transcript.Cells[0].Source != "final" {
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Phase != scene.CellCommitted || state.Transcript.Cells[0].Source != "• final" {
 		t.Fatalf("finalization shadow transcript = %+v", state.Transcript)
 	}
 }
@@ -366,7 +367,7 @@ func TestRuntimeDeltaSnapshotDoesNotEraseShadowStreamingLedger(t *testing.T) {
 		},
 	})
 	state := coordinator.uiActor.AppState()
-	if state.Active.Source != "hello" || state.Active.Phase != ui.ActiveCellMutable {
+	if state.Active.Source != "• hello" || state.Active.Phase != ui.ActiveCellMutable {
 		t.Fatalf("first delta active state = %+v", state.Active)
 	}
 
@@ -379,7 +380,7 @@ func TestRuntimeDeltaSnapshotDoesNotEraseShadowStreamingLedger(t *testing.T) {
 		},
 	})
 	state = coordinator.uiActor.AppState()
-	if state.Active.Source != "hello world" || state.Active.Revision == 0 {
+	if state.Active.Source != "• hello world" || state.Active.Revision == 0 {
 		t.Fatalf("second delta active state = %+v", state.Active)
 	}
 	if state.Active.Stable.End != len("hello world") {

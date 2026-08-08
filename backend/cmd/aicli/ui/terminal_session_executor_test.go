@@ -64,6 +64,48 @@ func (w *terminalSessionBlockingWriter) writeCount() int {
 	return len(w.writes)
 }
 
+func TestTerminalSessionClaimMissRequiresRetryOnlyForActionableScheduleChange(t *testing.T) {
+	claimed := terminalSessionScheduleSnapshot{pendingToken: 7, pendingGeneration: 3}
+	tests := []struct {
+		name   string
+		latest terminalSessionScheduleSnapshot
+		want   bool
+	}{
+		{
+			name:   "projection invalidated after claim was scheduled",
+			latest: terminalSessionScheduleSnapshot{projectionUnknown: true},
+			want:   true,
+		},
+		{
+			name:   "a replacement token is ready",
+			latest: terminalSessionScheduleSnapshot{pendingToken: 8, pendingGeneration: 3},
+			want:   true,
+		},
+		{
+			name:   "the candidate was rebased to a new generation",
+			latest: terminalSessionScheduleSnapshot{pendingToken: 7, pendingGeneration: 4},
+			want:   true,
+		},
+		{
+			name:   "lease or freeze removed actionable work",
+			latest: terminalSessionScheduleSnapshot{},
+			want:   false,
+		},
+		{
+			name:   "unchanged candidate remains behind an ordering fence",
+			latest: claimed,
+			want:   false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := terminalSessionClaimMissRequiresRetry(claimed, test.latest); got != test.want {
+				t.Fatalf("retry = %t, want %t; latest=%#v", got, test.want, test.latest)
+			}
+		})
+	}
+}
+
 func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTransaction(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	postHistoryEffectFixture(t, controller, 20)

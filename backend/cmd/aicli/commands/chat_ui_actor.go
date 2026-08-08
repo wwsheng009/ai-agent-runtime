@@ -457,7 +457,7 @@ func (c *chatInteractionCoordinator) activeSourceShadowActionLocked(snapshot ui.
 	if actor == nil {
 		return nil
 	}
-	current := actor.AppState().Active
+	current := actor.ActiveCellState()
 	if current.CellID == 0 || current.Phase == ui.ActiveCellInactive {
 		c.activeCellShadowID = 0
 		c.activeCellShadowRevision = 0
@@ -510,11 +510,11 @@ func (c *chatInteractionCoordinator) unifiedSceneActiveCellActionLocked() ui.UIA
 	if snapshot == nil {
 		return nil
 	}
-	next, ok := ui.ActiveCellFromTranscript(ui.NewTranscriptState(snapshot))
+	next, ok := ui.ActiveCellFromSnapshot(snapshot)
 	if !ok || next.Phase != ui.ActiveCellMutable {
 		return nil
 	}
-	current := actor.AppState().Active
+	current := actor.ActiveCellState()
 	if current.CellID == 0 || current.Phase != ui.ActiveCellMutable || current.CellID != next.CellID || current.Kind != next.Kind {
 		// ReplaceTranscriptAction mounts a new Scene cell atomically. Guessing
 		// an identity here would permit an old stream update to overwrite it.
@@ -565,7 +565,7 @@ func (c *chatInteractionCoordinator) finalizeActiveCellShadowActionLocked() ui.U
 	if actor == nil {
 		return nil
 	}
-	active := actor.AppState().Active
+	active := actor.ActiveCellState()
 	if active.CellID == 0 || active.Phase != ui.ActiveCellMutable || active.Revision == 0 {
 		return nil
 	}
@@ -736,13 +736,30 @@ func (c *chatInteractionCoordinator) reduceUIActionWithContext(revision uint64, 
 	default:
 		// Phase 2+ 扩展；P1 其余 action 为定义性类型，尚未接线。
 	}
-	if c.unifiedRenderer {
+	if c.unifiedRenderer && unifiedRendererActionNeedsFlush(action) {
 		// Every state transition that can affect the visible frame wakes the
 		// single terminal transaction. The executor coalesces these requests and
 		// composes from the newest immutable AppState snapshot.
 		return []ui.Effect{ui.FlushEffect{Dirty: renderengine.DirtyContent | renderengine.DirtyBand | renderengine.DirtyStatus}}
 	}
 	return nil
+}
+
+func unifiedRendererActionNeedsFlush(action ui.UIAction) bool {
+	switch action.(type) {
+	case ui.BeginHistoryCommit,
+		ui.HistoryCommitFailed,
+		ui.HistoryCommitDeferred,
+		ui.HistoryProjectionInvalidated,
+		ui.HistoryProjectionRecovered:
+		// These actions update terminal-delivery bookkeeping only. The UI
+		// controller emits a typed HistoryCommitWakeEffect when recovery or a
+		// pending handoff is actually actionable; retrying the same failed frame
+		// from a generic FlushEffect would spin forever on a persistent error.
+		return false
+	default:
+		return true
+	}
 }
 
 func (c *chatInteractionCoordinator) applyRuntimeEventAction(action ui.RuntimeEvent) {
