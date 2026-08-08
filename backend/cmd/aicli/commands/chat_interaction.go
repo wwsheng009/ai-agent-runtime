@@ -3820,6 +3820,13 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	// Publish the complete immutable Scene only after unlocking: Post may apply
 	// backpressure, and the actor reducer is allowed to take c.mu.
 	c.postTranscriptSnapshotFromBridge(bridge)
+	// Unified 模式下 legacy surface.ShowPrompt 已被物理 fence，AppState 的
+	// composer 状态只能经 action 更新。提交后立即恢复空提示符：否则渲染帧
+	// 仍显示已提交的输入（看起来像"prompt 没发出去"），直到 LLM 响应刷新
+	// 才一起出现。ShowPromptAction 清空 PromptInput 并置空提示符行。
+	if c.UnifiedRendererEnabled() {
+		_ = c.postUIAction(ui.ShowPromptAction{Line: formatSessionUserPrompt(c.session)})
+	}
 }
 
 // RenderReplayedUserInput echoes a user message from already-final history.
