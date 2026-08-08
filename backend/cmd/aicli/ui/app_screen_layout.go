@@ -273,10 +273,44 @@ func cellUsesStructuredPresentation(cell scene.TranscriptCell) bool {
 	if cell.Presentation.Kind != scene.PresentationPlain {
 		return true
 	}
+	if cell.Kind == scene.KindSupplement {
+		// reasoning / priority prompt 等补充块：编码器已打 markdown
+		// presentation 标记时走结构化渲染；旧快照（无标记）按正文启发式兜底。
+		return supplementBodyLooksLikeMarkdown(cell.Source)
+	}
 	return cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source)
 }
 
+// splitReasoningSupplementSource 把 reasoning supplement 的 Source 拆分为
+// 首分隔线、正文、尾分隔线。非 reasoning 的 supplement（如 priority
+// prompt）没有分隔线，整体作为正文返回。
+func splitReasoningSupplementSource(source string) (head, body, tail string) {
+	lines := strings.Split(source, "\n")
+	if len(lines) == 0 {
+		return "", source, ""
+	}
+	if isAssistantSupplementDivider(strings.TrimSpace(lines[0])) {
+		head = lines[0]
+		lines = lines[1:]
+	}
+	if len(lines) > 0 && isAssistantSupplementDivider(strings.TrimSpace(lines[len(lines)-1])) {
+		tail = lines[len(lines)-1]
+		lines = lines[:len(lines)-1]
+	}
+	return head, strings.Join(lines, "\n"), tail
+}
+
+// supplementBodyLooksLikeMarkdown 对 supplement 去分隔线后的正文做 markdown
+// 启发式检测（分隔线行本身不匹配任何 markdown 模式）。
+func supplementBodyLooksLikeMarkdown(source string) bool {
+	_, body, _ := splitReasoningSupplementSource(source)
+	return markdown.LooksLikeMarkdown(body)
+}
+
 func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {
+	if cell.Kind == scene.KindSupplement {
+		return reasoningSupplementScreenRows(cell, width, theme)
+	}
 	var doc render.Document
 	switch cell.Presentation.Kind {
 	case scene.PresentationDocument:
@@ -290,6 +324,12 @@ func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme 
 		doc, _ = renderengine.SharedRenderCache().Render("assistant", cell.Source, markdown.AssistantBodyOptions(width, theme))
 		doc = doc.Clone()
 	}
+	return documentScreenRows(doc, cell, width, theme)
+}
+
+// documentScreenRows 把结构化文档 layout 成 AppScreenRow 序列（带
+// RenderLine，供 Compose/HistoryCommit 保留样式）。
+func documentScreenRows(doc render.Document, cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {
 	if len(doc.Blocks) == 0 {
 		return nil
 	}
@@ -301,6 +341,53 @@ func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme 
 		rows = append(rows, AppScreenRow{
 			Owner: renderengine.RowOwnerTranscript, Text: render.PlainBackend{}.Render(render.LinesDoc(rendered)),
 			CellID: cell.ID, RenderLine: rendered,
+		})
+	}
+	return rows
+}
+
+// reasoningSupplementScreenRows 渲染 reasoning supplement cell：首/尾分隔线
+// 单独保留 reasoning 样式，正文按 markdown 启发式走结构化渲染（与 assistant
+// 正文同规格）或纯文本。非 reasoning 的 supplement（如 priority prompt）
+// 无分隔线，整体按正文渲染。
+func reasoningSupplementScreenRows(cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {
+	head, body, tail := splitReasoningSupplementSource(cell.Source)
+	var rows []AppScreenRow
+	if head != "" {
+		rows = append(rows, supplementDividerScreenRows(head, cell.ID, width)...)
+	}
+	if strings.TrimSpace(body) != "" {
+		var doc render.Document
+		if markdown.LooksLikeMarkdown(body) {
+			doc, _ = renderengine.SharedRenderCache().Render("assistant", body, markdown.AssistantBodyOptions(width, theme))
+		} else {
+			doc = markdown.Render(body, markdown.AssistantBodyOptions(width, theme))
+		}
+		doc = doc.Clone()
+		rows = append(rows, documentScreenRows(doc, cell, width, theme)...)
+	}
+	if tail != "" {
+		rows = append(rows, supplementDividerScreenRows(tail, cell.ID, width)...)
+	}
+	return rows
+}
+
+// supplementDividerScreenRows 把 supplement 分隔线按 width wrap 成带
+// reasoning 角色的结构化行（对齐旧版 dividerRoleForLine 的 reasoning 分支）。
+func supplementDividerScreenRows(text string, cellID scene.CellID, width int) []AppScreenRow {
+	if width < 1 {
+		width = 80
+	}
+	segments := wrapAppScreenText(text, width)
+	rows := make([]AppScreenRow, 0, len(segments))
+	for _, segment := range segments {
+		line := render.Line{Spans: []render.Span{{
+			Text:  segment,
+			Style: render.Style{Role: string(style.RoleReasoning)},
+		}}}
+		rows = append(rows, AppScreenRow{
+			Owner: renderengine.RowOwnerTranscript, Text: segment,
+			CellID: cellID, RenderLine: line,
 		})
 	}
 	return rows

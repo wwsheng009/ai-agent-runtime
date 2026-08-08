@@ -104,7 +104,7 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 		width = 80
 	}
 	var lines []render.Line
-	markdownSource := active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source)
+	markdownSource := (active.Kind == scene.KindAssistant || active.Kind == scene.KindSupplement) && markdown.LooksLikeMarkdown(active.Source)
 	if markdownSource {
 		var projected bool
 		lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme)

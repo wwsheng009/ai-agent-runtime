@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
@@ -261,6 +262,52 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	}
 }
 
+// TestEncodeReasoningMarkdownPresentation 验证 reasoning cell 的渲染契约：
+// 正文（去分隔线后）命中 markdown 启发式时打 PresentationAssistantMarkdown，
+// 纯文本保持 PresentationPlain；流式增长中可从 plain 升级为 markdown。
+func TestEncodeReasoningMarkdownPresentation(t *testing.T) {
+	reasoning := func(text string) {
+		t.Helper()
+		e := NewEventEncoder()
+		e.Encode(event(runtimechat.EventAssistantReasoning, map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "text": text,
+		}))
+		e.Encode(assistantDelta("answer", 1))
+		e.Encode(assistantFinal("answer"))
+		item := e.Snapshot().Items[0]
+		if item.Kind != KindReasoning {
+			t.Fatalf("items[0].Kind = %s, want reasoning", item.Kind)
+		}
+		want := PresentationPlain
+		if markdown.LooksLikeMarkdown(text) {
+			want = PresentationAssistantMarkdown
+		}
+		if item.Presentation.Kind != want {
+			t.Fatalf("reasoning %q presentation = %v, want %v (head=%q)",
+				text, item.Presentation.Kind, want, item.Head)
+		}
+	}
+	reasoning("thinking...")
+	reasoning("- **one**\n- two")
+	reasoning("# Heading\n\nplain body")
+
+	// 流式增长：先纯文本后 markdown → 最终升级为 markdown。
+	e := NewEventEncoder()
+	e.Encode(event(runtimechat.EventAssistantReasoning, map[string]interface{}{
+		"turn_id": "turn-2", "stream_id": "stream-2", "text": "first pass",
+	}))
+	e.Encode(event(runtimechat.EventAssistantReasoning, map[string]interface{}{
+		"turn_id": "turn-2", "stream_id": "stream-2", "text": "\n\n**bold** conclusion",
+	}))
+	e.Encode(assistantDelta("answer", 2))
+	e.Encode(assistantFinal("answer"))
+	item := e.Snapshot().Items[0]
+	if item.Presentation.Kind != PresentationAssistantMarkdown {
+		t.Fatalf("streamed reasoning presentation = %v, want markdown (head=%q)",
+			item.Presentation.Kind, item.Head)
+	}
+}
+
 // The local ReAct loop emits the dotted legacy event name with a nested
 // ReasoningBlock. Keep that production shape on the reasoning route: falling
 // back to opSystem renders the literal event type and loses the thought body.
@@ -439,6 +486,11 @@ func TestEncodeToolCallDisplayHeadRestoresLegacyDetails(t *testing.T) {
 			name:  "无细节回退工具名",
 			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c5", "tool_name": "shell"}),
 			want:  "• Running shell",
+		},
+		{
+			name:  "agent logical_tool 回退",
+			event: event("tool.requested", map[string]interface{}{"tool_call_id": "c6", "logical_tool": "read_file", "arg_preview": "path=a.go"}),
+			want:  "• Running read_file path=a.go",
 		},
 	}
 	for _, tc := range cases {

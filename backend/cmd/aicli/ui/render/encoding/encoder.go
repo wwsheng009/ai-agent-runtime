@@ -1001,19 +1001,20 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
-			next := text
+			nextHead := text
 			if strings.TrimSpace(t.Head) == "" {
 				// 占位/空 reasoning（barrier 或空文本）：首行先写思考链分隔线，
 				// 保证每个 reasoning cell 都有可辨识的渲染边界。
-				next = reasoningDividerLine() + "\n" + text
+				nextHead = reasoningDividerLine() + "\n" + text
 			} else if streamDelta {
-				next = appendReasoningDelta(t.Head, text)
+				nextHead = appendReasoningDelta(t.Head, text)
 			}
-			if t.Head == next {
+			if t.Head == nextHead {
 				return false
 			}
-			t.Head = next
+			t.Head = nextHead
 			t.Status = StatusRunning
+			setReasoningPresentation(t)
 			return true
 		})
 		if changed {
@@ -1026,13 +1027,64 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	head := reasoningDividerLine() + "\n" + text
 	if assistant := e.assistantBy[key]; assistant != nil {
 		it = e.insertItemBefore(assistant.ID, KindReasoning, head)
+		setReasoningPresentation(it)
 		e.changeBefore(cs, OpAppend, it, assistant.ID)
 	} else {
 		it = e.appendItem(KindReasoning, "", head)
+		setReasoningPresentation(it)
 		e.change(cs, OpAppend, it)
 	}
 	e.reasoningBy[key] = it
 	e.removeReasoningBarrier(key, cs)
+}
+
+// setReasoningPresentation 让 reasoning cell 的渲染契约与已累计正文对齐：
+// 正文（去除首/尾分隔线后的可见思考内容）命中 markdown 启发式时走结构化
+// markdown 渲染，否则保持纯文本。分隔线行永不参与 markdown 检测或渲染，
+// 由渲染层（structuredTranscriptScreenRows / reasoningSupplementScreenRows）
+// 单独拆分并保留 reasoning 样式。
+func setReasoningPresentation(it *Item) bool {
+	if it == nil {
+		return false
+	}
+	next := PresentationPlain
+	if reasoningBodyLooksLikeMarkdown(it.Head) {
+		next = PresentationAssistantMarkdown
+	}
+	if it.Presentation.Kind == next && len(it.Presentation.Document.Blocks) == 0 {
+		return false
+	}
+	it.Presentation = Presentation{Kind: next}
+	return true
+}
+
+// reasoningBodyLooksLikeMarkdown 对 reasoning cell 去除分隔线后的正文做
+// markdown 启发式检测（分隔线行本身不匹配任何 markdown 模式，直接对完整
+// Head 检测也安全，这里显式剥离是为了与渲染层的拆分语义保持一致）。
+func reasoningBodyLooksLikeMarkdown(head string) bool {
+	return markdown.LooksLikeMarkdown(reasoningBodySource(head))
+}
+
+// reasoningBodySource 返回 reasoning cell 去除首/尾分隔线后的正文。
+func reasoningBodySource(head string) string {
+	lines := strings.Split(head, "\n")
+	if len(lines) == 0 {
+		return head
+	}
+	if isReasoningDividerLine(lines[0]) {
+		lines = lines[1:]
+	}
+	if len(lines) > 0 && isReasoningDividerLine(lines[len(lines)-1]) {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isReasoningDividerLine 识别 reasoning 分隔线（与 reasoningDividerLine /
+// reasoningEndDividerLine 的生成格式一致：─/═/--- 开头）。
+func isReasoningDividerLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "──") || strings.HasPrefix(trimmed, "═") || strings.HasPrefix(trimmed, "---")
 }
 
 // reasoningDividerLine 返回思考链的分隔线（对齐旧版 chatToolDivider：
@@ -1564,7 +1616,7 @@ func sessionEndItemStatus(ev runtimeevents.Event) ItemStatus {
 
 func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 	callID := toolCallID(ev)
-	name := payloadString(ev.Payload["tool_name"], ev.ToolName)
+	name := payloadString(ev.Payload["tool_name"], payloadString(ev.Payload["logical_tool"], ev.ToolName))
 	if callID == "" || name == "" {
 		// A mutable tool cell must have both a stable call identity and a
 		// readable semantic head. Without either, later progress/final events

@@ -127,7 +127,8 @@ func TestProjectActiveCellBandRendersToolRunningRowTruncatesHead(t *testing.T) {
 	}
 }
 
-func TestProjectActiveCellBandRendersAssistantMarkdown(t *testing.T) {	active := ActiveCellState{
+func TestProjectActiveCellBandRendersAssistantMarkdown(t *testing.T) {
+	active := ActiveCellState{
 		CellID:   27,
 		Revision: 1,
 		Kind:     scene.KindAssistant,
@@ -146,6 +147,55 @@ func TestProjectActiveCellBandRendersAssistantMarkdown(t *testing.T) {	active :=
 	}
 	if strings.Contains(plain, "# Live heading") || strings.Contains(plain, "**one**") {
 		t.Fatalf("active projection retained raw markdown: %q", plain)
+	}
+}
+
+// TestProjectActiveCellBandRendersSupplementMarkdown 验证 reasoning 等
+// supplement 补充块在 live band 中同样走结构化 markdown 渲染（对齐
+// assistant 正文），而不是逐行纯文本。
+func TestProjectActiveCellBandRendersSupplementMarkdown(t *testing.T) {
+	active := ActiveCellState{
+		CellID:   28,
+		Revision: 2,
+		Kind:     scene.KindSupplement,
+		Phase:    ActiveCellMutable,
+		Source:   "─── reasoning ───\n# Heading\n\n- **one**\n- `two`",
+	}
+	projection := ProjectActiveCellBand(active, GeometryState{Width: 40, Height: 16})
+	if !projection.Valid() {
+		t.Fatalf("supplement markdown projection = %+v", projection)
+	}
+	plain := render.PlainBackend{}.Render(render.LinesDoc(projection.Lines...))
+	for _, want := range []string{"Heading", "one", "two"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("supplement markdown projection missing %q: %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "# Heading") || strings.Contains(plain, "**one**") {
+		t.Fatalf("supplement projection retained raw markdown: %q", plain)
+	}
+}
+
+// TestProjectActiveCellBandKeepsSupplementPlainTextWithoutMarkdown 验证
+// 非 markdown 的 supplement（纯文本思考）保持原有纯文本 + 角色渲染。
+func TestProjectActiveCellBandKeepsSupplementPlainTextWithoutMarkdown(t *testing.T) {
+	active := ActiveCellState{
+		CellID:   29,
+		Revision: 1,
+		Kind:     scene.KindSupplement,
+		Phase:    ActiveCellMutable,
+		Source:   "─── reasoning ───\nplain thinking text",
+	}
+	projection := ProjectActiveCellBand(active, GeometryState{Width: 40, Height: 16})
+	if !projection.Valid() {
+		t.Fatalf("supplement plain projection = %+v", projection)
+	}
+	plain := render.PlainBackend{}.Render(render.LinesDoc(projection.Lines...))
+	if !strings.Contains(plain, "plain thinking text") {
+		t.Fatalf("supplement plain projection missing body: %q", plain)
+	}
+	if !strings.Contains(plain, "reasoning") {
+		t.Fatalf("supplement plain projection missing divider marker: %q", plain)
 	}
 }
 
