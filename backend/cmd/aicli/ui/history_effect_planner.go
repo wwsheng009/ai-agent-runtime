@@ -227,7 +227,7 @@ func planMutableActiveCellHistoryCommitsWithTheme(active ActiveCellState, geomet
 			displayRow++
 			continue
 		}
-		wrapped, sourceRows, mapped := plainWrappedSourceRanges(absolute, width)
+		wrapped, sourceRows, mapped := plainWrappedSourceRanges(absolute, width, false)
 		if !mapped || len(wrapped) == 0 || len(sourceRows) != len(wrapped) {
 			return nil
 		}
@@ -493,7 +493,7 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 				fragmentIDs = []uint64{fragmentID}
 			}
 		} else {
-			wrapped, sourceRows, mapped = plainWrappedSourceRanges(sourceLine, width)
+			wrapped, sourceRows, mapped = plainWrappedSourceRanges(sourceLine, width, cell.Kind == scene.KindUser)
 			fragmentIDs = make([]uint64, len(sourceRows))
 		}
 		if !mapped || len(wrapped) == 0 || row+len(wrapped) > len(rows) {
@@ -586,13 +586,23 @@ func plainBlankSourceIdentity(source string, line sourceLineRange) (SourceRange,
 // only the source-preserving wrapper path. Control-sequence/tab cases continue
 // to use the conservative whole-cell fallback because their terminal state is
 // not bijective with source bytes.
-func plainWrappedSourceRanges(sourceLine sourceLineRange, width int) ([]string, []SourceRange, bool) {
-	wrapped, ok := wrapPlainAppScreenText(sourceLine.Text, width)
-	if !ok || len(wrapped) == 0 {
-		return nil, nil, false
-	}
+// userMessage 为 true 时按用户 prompt 消息处理：内容按 width-2 预算 wrap，
+// 与布局层 wrapPlainCellRows 对用户消息的 wrap 保持一致（渲染层会为每行
+// 追加 "> " 前缀）。
+func plainWrappedSourceRanges(sourceLine sourceLineRange, width int, userMessage bool) ([]string, []SourceRange, bool) {
 	if width < 1 {
 		width = 80
+	}
+	wrapWidth := width
+	if userMessage {
+		wrapWidth = width - 2
+		if wrapWidth < 1 {
+			wrapWidth = 1
+		}
+	}
+	wrapped, ok := wrapPlainAppScreenText(sourceLine.Text, wrapWidth)
+	if !ok || len(wrapped) == 0 {
+		return nil, nil, false
 	}
 	ranges := make([]SourceRange, 0, len(wrapped))
 	start := 0
@@ -605,10 +615,10 @@ func plainWrappedSourceRanges(sourceLine sourceLineRange, width int) ([]string, 
 			}
 			continue
 		}
-		if glyphWidth > width {
+		if glyphWidth > wrapWidth {
 			return nil, nil, false
 		}
-		if used > 0 && used+glyphWidth > width {
+		if used > 0 && used+glyphWidth > wrapWidth {
 			ranges = append(ranges, SourceRange{Start: sourceLine.Source.Start + start, End: sourceLine.Source.Start + offset})
 			start = offset
 			used = 0

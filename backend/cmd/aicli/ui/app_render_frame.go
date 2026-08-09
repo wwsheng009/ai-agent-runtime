@@ -88,12 +88,20 @@ func appTranscriptRenderLine(row AppScreenRow, cells map[scene.CellID]scene.Tran
 	if row.Text == "" {
 		return render.Line{}
 	}
+	text := row.Text
+	if row.UserMessage {
+		// 用户 prompt 消息：每个显示行前加 "> " 前缀，与 Scene presenter
+		// 投影（sceneBlockSource 对用户块每行加 "> "）一致，用于在视觉上
+		// 区分用户信息与 LLM 信息。布局层已按 width-2 为前缀预留宽度，
+		// 因此加前缀后行不会超宽。
+		text = userMessagePrefix + text
+	}
 	cell, ok := cells[row.CellID]
 	if !ok {
-		return appPlainRenderLine(row.Text)
+		return appPlainRenderLine(text)
 	}
 	return render.Line{Spans: []render.Span{{
-		Text:  row.Text,
+		Text:  text,
 		Style: render.Style{Role: string(appTranscriptRenderRole(cell.Kind))},
 	}}}
 }

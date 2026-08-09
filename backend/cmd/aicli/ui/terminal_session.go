@@ -1267,7 +1267,11 @@ func terminalFrameCells(rows []AppScreenRow, renderRows []render.Line, width, he
 			line := renderRows[index]
 			plain := (render.PlainBackend{}).Render(render.LinesDoc(line))
 			if plain != row.Text {
-				return nil, fmt.Errorf("%w: structured row %d plain text %q differs from text row %q", ErrInvalidTerminalFrame, index+1, plain, row.Text)
+				// 用户 prompt 消息的渲染行允许带 "> " 前缀（区分用户信息与
+				// LLM 信息），其余角色要求渲染行与布局行严格一致。
+				if !(row.UserMessage && plain == userMessagePrefix+row.Text) {
+					return nil, fmt.Errorf("%w: structured row %d plain text %q differs from text row %q", ErrInvalidTerminalFrame, index+1, plain, row.Text)
+				}
 			}
 			text = style.RenderDocument(render.LinesDoc(line), theme)
 		}

@@ -22,6 +22,10 @@ type AppScreenRow struct {
 	Text          string
 	CellID        scene.CellID
 	TranscriptGap bool
+	// UserMessage 标记该行属于用户 prompt 消息块。布局文本（Text）保持纯
+	// 内容（与 legacy retained parity 一致），渲染层通过该标记在输出时加
+	// "> " 前缀，用于区分用户信息与 LLM 信息。
+	UserMessage bool
 	// RenderLine is populated only when a semantic transcript cell needs a
 	// structured presentation (currently assistant Markdown). Text remains the
 	// plain physical-row projection used by layout and cursor calculations.
@@ -231,12 +235,12 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 			key := cellLayoutKeyFor(cell, width, fp)
 			cached := cache.get(key)
 			if cached == nil {
-				cached = wrapPlainCellRows(rows[start:index], row.CellID, width)
+				cached = wrapPlainCellRows(rows[start:index], row.CellID, width, cell.Kind == scene.KindUser)
 				cache.put(key, cached)
 			}
 			cellRows = cached
 		} else {
-			cellRows = wrapPlainCellRows(rows[start:index], row.CellID, width)
+			cellRows = wrapPlainCellRows(rows[start:index], row.CellID, width, false)
 		}
 		result = appendCachedCellRows(result, row.CellID, cellRows)
 		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
@@ -253,16 +257,32 @@ func appendCachedCellRows(result []AppScreenRow, cellID scene.CellID, rows []App
 	return result
 }
 
+// userMessagePrefix 是统一渲染器中用户消息块的每行前缀（与旧路径
+// FormatUserMessage 的 chrome 前缀同为引用风格 "> "），用于在视觉上
+// 区分用户信息与 LLM 信息。
+const userMessagePrefix = "> "
+
 // wrapPlainCellRows 把 cell 的连续语义行逐行 wrap 成 AppScreenRow。输出与
 // 逐行 wrap 完全一致（同一 wrapAppScreenText 语义），仅用于缓存封装。
-func wrapPlainCellRows(layoutRows []scene.LayoutRow, cellID scene.CellID, width int) []AppScreenRow {
+// userMessage 为 true 时（用户 prompt 消息）内容按 width-2 预算 wrap，为
+// 渲染层每行追加的 "> " 前缀预留 2 列，避免满宽行加前缀后被终端截断；
+// 文本仍保持纯内容片段（无前缀），parity 与 history planner 校验不变。
+func wrapPlainCellRows(layoutRows []scene.LayoutRow, cellID scene.CellID, width int, userMessage bool) []AppScreenRow {
 	var rows []AppScreenRow
 	for _, row := range layoutRows {
-		for _, line := range wrapAppScreenText(row.Text, width) {
+		wrapWidth := width
+		if userMessage {
+			wrapWidth = width - 2
+			if wrapWidth < 1 {
+				wrapWidth = 1
+			}
+		}
+		for _, line := range wrapAppScreenText(row.Text, wrapWidth) {
 			rows = append(rows, AppScreenRow{
-				Owner:  renderengine.RowOwnerTranscript,
-				Text:   line,
-				CellID: cellID,
+				Owner:       renderengine.RowOwnerTranscript,
+				Text:        line,
+				CellID:      cellID,
+				UserMessage: userMessage,
 			})
 		}
 	}
