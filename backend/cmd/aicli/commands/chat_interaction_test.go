@@ -4211,3 +4211,85 @@ func TestChatInteractionCoordinator_CompleteReasoningResponse_NonLive_RendersMar
 		t.Fatalf("缺少 reasoning divider：%q", got)
 	}
 }
+
+// TestChatInteractionCoordinator_CompleteReasoningResponse_NoDuplicateAfterLiveFlip
+// is the regression for "reasoning rendered twice — one raw, one formatted".
+// The delta stream starts in text mode (first chunk has no markdown markers)
+// and prints raw increments; then shouldLiveStreamOutputLocked flips false
+// (surface mounts mid-stream / live-stream support goes away). The final
+// CompleteReasoningResponse must NOT re-render the whole document formatted —
+// it appends only the not-yet-streamed tail and closes the block, so the
+// reasoning appears exactly once.
+func TestChatInteractionCoordinator_CompleteReasoningResponse_NoDuplicateAfterLiveFlip(t *testing.T) {
+	firstHalf := strings.Join([]string{
+		"Good. Key modules all exist:",
+		"- `backend/internal/acp` ✅",
+		"- `backend/internal/agentdef` ✅",
+		"- `backend/internal/hooks` ✅",
+		"- `backend/internal/isolation` ✅",
+		"- `backend/internal/memorystore` ✅",
+		"- `backend/internal/planmode` ✅",
+		"- `backend/internal/plugins` ✅",
+		"- `backend/internal/policy` ✅",
+		"- `backend/internal/toolprotocol` ✅",
+		"",
+		"And `.agents/agents/explore.md`, `general.md`, `plan.md` exist. `examples/profiles/coding/` exists.",
+		"",
+	}, "\n")
+
+	complete := firstHalf + strings.Join([]string{
+		"Now let me verify deeper:",
+		"1. backend/internal/isolation/worktree subdirectory",
+		"2. backend/internal/executor/sandbox_profile.go, os_sandbox.go",
+		"3. backend/internal/agent/doom_loop.go",
+		"4. backend/internal/toolkit/listable.go, search.go, search_tool.go",
+		"5. backend/internal/agentdef files",
+		"6. backend/internal/planmode files",
+		"7. backend/internal/plugins files",
+		"8. backend/internal/acp files",
+		"9. CLI commands: aicli plugin, aicli agent stdio, /plan, /memory",
+		"10. Frontend: use-runtime-plan-mode, artifact-panel-plan-surface",
+		"11. Git log for recent commits",
+		"",
+		"Let me batch these checks.",
+	}, "\n")
+
+	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
+	coord := newChatInteractionCoordinator(session)
+	var output testOutputBuffer
+	coord.SetWriter(&output)
+	coord.liveStreamFn = func() bool { return true }
+
+	// delta 1: plain-text lead (no markdown markers) -> streamed raw.
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Format: "stream_delta", Summary: "Good. Key modules all exist:", Streamable: true, Visibility: "summary",
+	})
+	// delta 2: markdown body; the markdown flip is blocked because
+	// reasoningRendered is already true, so it keeps streaming raw increments.
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Format: "stream_delta", Summary: firstHalf, Streamable: true, Visibility: "summary",
+	})
+	if !strings.Contains(output.String(), "backend/internal/acp") {
+		t.Fatalf("expected raw streamed reasoning, got %q", output.String())
+	}
+
+	// Live-stream capability disappears before the final event.
+	coord.liveStreamFn = func() bool { return false }
+	coord.CompleteReasoningResponse(&runtimetypes.ReasoningBlock{
+		Summary: complete, Visibility: "summary",
+	})
+
+	got := output.String()
+	// Exactly one reasoning block: raw streamed increments + single closing
+	// divider. No second formatted re-render.
+	if count := strings.Count(got, chatToolDivider("reasoning")); count != 1 {
+		t.Fatalf("reasoning block rendered %d times (duplicate render), want 1:\n%s", count, got)
+	}
+	if strings.Contains(got, "• backend/internal/acp") {
+		t.Fatalf("formatted bullet list duplicated after live flip:\n%s", got)
+	}
+	// The tail that was never streamed must still appear (no content loss).
+	if !strings.Contains(got, "Let me batch these checks.") {
+		t.Fatalf("unstreamed tail lost after live flip:\n%s", got)
+	}
+}

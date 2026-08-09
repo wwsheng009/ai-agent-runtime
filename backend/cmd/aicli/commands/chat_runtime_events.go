@@ -2495,6 +2495,11 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	// 旧 renderLLMRetryTimelineEvent 的重试详情（step/attempt/reason 等），
 	// 由 chatDynamicStatusAction 的 "retrying <detail>" 分支呈现。
 	if event.Type == "llm.retry" {
+		// Retry is live process state, only meaningful while the run is active.
+		// A late retry event (for example published without a turn_id by an
+		// async LLM retry callback after the run settled) must not re-arm the
+		// status line: it would wipe the frozen "Worked for ..." completion
+		// summary and flip the state icon back to running.
 		if parts := chatLLMRetryParts(event); len(parts) > 0 &&
 			shouldRenderInteractiveOutput(b.session) && b.session.Interaction != nil {
 			b.session.Interaction.RefreshStatus("retrying " + strings.Join(parts, " "))
@@ -3276,6 +3281,11 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 			b.renderMu.Unlock()
 			return true
 		}
+		// completeReasoning 失败（reasoning 已提前 reset/flush）：增量已渲染，
+		// 不得重放完整内容当新 delta 或再走 timeline，避免双份输出。
+		if b.hasRenderedReasoningDelta() {
+			return true
+		}
 	}
 	if block.Streamable && display != "" && b.writeReasoningDelta != nil && b.session.Interaction != nil && b.session.Interaction.SupportsLiveStream() {
 		b.renderMu.Lock()
@@ -3640,6 +3650,12 @@ func (b *chatRuntimeEventBridge) renderReasoningFromAssistantMessage(event runti
 			b.renderMu.Lock()
 			b.renderedReasoningFinal = true
 			b.renderMu.Unlock()
+			return
+		}
+		// completeReasoning 失败（如 reasoning 已提前 reset/flush）：该内容
+		// 已经以流式增量或 flush 完整渲染过，不得再走 timeline 完整渲染
+		// 造成同一 reasoning 双份输出。
+		if b.hasRenderedReasoningDelta() {
 			return
 		}
 	}

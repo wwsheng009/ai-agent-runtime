@@ -3380,6 +3380,20 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 			ReplayRequired: false,
 		}
 	}
+	if c.reasoningRendered {
+		// Reasoning was already streamed as raw increments while live output
+		// was active. If live-stream capability flips off mid-block (surface
+		// mounts, writer changes), do NOT re-render the whole document here —
+		// that duplicates the streamed text as a second formatted block.
+		// Instead append only the not-yet-streamed tail, then close the block.
+		suffix := resolveStreamCompletionSuffix(c.reasoningBuffer.String(), finalText)
+		if suffix != "" {
+			c.writeIndentedStreamingDeltaLocked(suffix, "", ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
+			c.reasoningBuffer.WriteString(suffix)
+		}
+		c.finalizeReasoningLocked()
+		return true
+	}
 	rendered := chatReasoningRenderText(renderBlock, c.session.Formatter)
 	if rendered != "" {
 		// Reasoning supplement is its own block after the assistant body.
@@ -3475,6 +3489,13 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 				c.reasoningTrailingLF = true
 			}
 		}
+		c.finalizeReasoningLocked()
+		activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
+		return
+	}
+	if c.reasoningRendered {
+		// Already streamed raw increments (live output flipped off mid-block):
+		// close the block without re-rendering the whole document.
 		c.finalizeReasoningLocked()
 		activeShadowAction = c.activeSourceShadowActionLocked(ui.ActiveStreamSourceSnapshot{})
 		return
@@ -4494,6 +4515,12 @@ func (c *chatInteractionCoordinator) flushReasoningLocked() {
 				c.reasoningTrailingLF = true
 			}
 		}
+		c.finalizeReasoningLocked()
+		return
+	}
+	if c.reasoningRendered {
+		// Already streamed raw increments (live output flipped off mid-block):
+		// close the block without re-rendering the whole document.
 		c.finalizeReasoningLocked()
 		return
 	}
