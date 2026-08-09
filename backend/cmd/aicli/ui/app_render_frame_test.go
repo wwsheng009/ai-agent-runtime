@@ -46,7 +46,11 @@ func TestComposeAppRenderFramePreservesTextFrameAndStructuredSources(t *testing.
 			t.Fatalf("row %d screen identity diverged\nrender=%+v\ntext  =%+v", index+1, row.Screen, plain.Rows[index])
 		}
 		if got := (render.PlainBackend{}).Render(render.LinesDoc(row.Line)); got != row.Screen.Text {
-			t.Fatalf("row %d structured plain text = %q, want %q", index+1, got, row.Screen.Text)
+			// 用户 prompt 消息的渲染行带 "> " 前缀（区分用户信息与 LLM 信息）。
+			prefixed := userMessagePrefix + row.Screen.Text
+			if !(row.Screen.UserMessage && got == prefixed) {
+				t.Fatalf("row %d structured plain text = %q, want %q", index+1, got, row.Screen.Text)
+			}
 		}
 		if row.Screen.Owner == renderengine.RowOwnerTranscript && !row.Screen.TranscriptGap && len(row.Line.Spans) > 0 {
 			roles[row.Screen.CellID] = row.Line.Spans[0].Style.Role

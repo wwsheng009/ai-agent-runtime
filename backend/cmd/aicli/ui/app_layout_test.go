@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
@@ -81,8 +82,8 @@ func TestLayoutAppScreenCombinesTranscriptTailAndBottomWithoutTerminal(t *testin
 	}
 	want := []AppScreenRow{
 		{Row: 1, Owner: renderengine.RowOwnerGap},
-		{Row: 2, Owner: renderengine.RowOwnerTranscript, Text: "abcde", CellID: 1},
-		{Row: 3, Owner: renderengine.RowOwnerTranscript, Text: "F", CellID: 1},
+		{Row: 2, Owner: renderengine.RowOwnerTranscript, Text: "abc", CellID: 1, UserMessage: true},
+		{Row: 3, Owner: renderengine.RowOwnerTranscript, Text: "deF", CellID: 1, UserMessage: true},
 		{Row: 4, Owner: renderengine.RowOwnerTranscript, CellID: 2, TranscriptGap: true},
 		{Row: 5, Owner: renderengine.RowOwnerTranscript, Text: "甲乙x", CellID: 2},
 		{Row: 6, Owner: renderengine.RowOwnerTranscript, Text: "y", CellID: 2},
@@ -319,7 +320,9 @@ func TestLayoutAppScreen_PlainOwnerTextParityMatrix(t *testing.T) {
 				{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: "abcde", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
 				{ID: 2, Sequence: 2, Kind: scene.KindAssistant, Source: "\u0301e", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
 			},
-			history: []string{"abcde", "", "\u0301e"},
+			// 用户消息在 unified 布局按 width-2=3 预算 wrap（为渲染层 "> "
+			// 前缀预留宽度），故 legacy retained 对比数据为 wrap 片段。
+			history: []string{"abc", "de", "", "\u0301e"},
 		},
 		{
 			name:   "popup-with-unowned-input-gap",
@@ -449,16 +452,36 @@ func assertAppScreenLegacyParityLocked(t *testing.T, surface *FixedBottomSurface
 	if len(pure.Rows) != len(legacy) {
 		t.Fatalf("screen row count: pure=%d legacy=%d", len(pure.Rows), len(legacy))
 	}
+	// 用户消息在 unified 布局按 width-2 wrap（为渲染层 "> " 前缀预留 2 列），
+	// legacy 侧按 width wrap；词边界可能差 2 列，逐行文本不匹配但内容流一致。
+	// 对连续的用户消息行做拼接等价比较，其余行严格逐行比较。
+	userPure, userLegacy := "", ""
+	flushUserStream := func() {
+		if userPure == "" && userLegacy == "" {
+			return
+		}
+		if userPure != userLegacy {
+			t.Fatalf("user message content stream: pure=%q legacy=%q", userPure, userLegacy)
+		}
+		userPure, userLegacy = "", ""
+	}
 	for index, legacyRow := range legacy {
 		got := pure.Rows[index]
 		if got.Row != index+1 || got.Owner != legacyRow.Owner {
 			t.Fatalf("row %d ownership: pure=%+v legacy=%s", index+1, got, legacyRow.Owner)
 		}
 		wantText := appScreenCellRowText(legacyRow.Cells)
+		if got.UserMessage {
+			userPure += got.Text
+			userLegacy += strings.TrimPrefix(wantText, userMessagePrefix)
+			continue
+		}
+		flushUserStream()
 		if got.Text != wantText {
 			t.Fatalf("row %d text: pure=%q legacy=%q", index+1, got.Text, wantText)
 		}
 	}
+	flushUserStream()
 }
 
 func TestWrapAppScreenTextMatchesOwnedVTExpansion(t *testing.T) {
@@ -534,5 +557,69 @@ func TestAppScreenScratchHeightUsesDisplayWidthInsteadOfRuneCount(t *testing.T) 
 	text := strings.Repeat("x", 10_000)
 	if got, want := appScreenScratchHeight(text, 80), 127; got != want {
 		t.Fatalf("scratch height = %d, want %d", got, want)
+	}
+}
+
+func TestUserMessagePrefixReservesWidthAndPrefixesEveryLine(t *testing.T) {
+	// 超宽用户消息：宽度 10 时按 width-2=8 预算 wrap，渲染层每行加 "> "
+	// 前缀后仍不超宽（避免满宽行加前缀后被终端截断）。
+	width := 10
+	source := "abcdefghijklmnopqrstuvwxyz" // 26 个 ASCII 字符
+	state := AppState{
+		Revision:         1,
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: width, Height: 8, Generation: 1},
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: source, Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
+		}}),
+		Bottom: BottomPaneState{
+			StatusModel: &style.StatusLineModel{State: style.RunReady, StateText: "Ready"},
+		},
+	}
+
+	layout := LayoutAppScreen(state)
+	var userRows []AppScreenRow
+	for _, row := range layout.Rows {
+		if row.UserMessage {
+			userRows = append(userRows, row)
+		}
+	}
+	if len(userRows) == 0 {
+		t.Fatalf("layout contains no user message rows: %+v", layout.Rows)
+	}
+	joined := ""
+	for _, row := range userRows {
+		if strings.HasPrefix(row.Text, userMessagePrefix) {
+			t.Fatalf("layout text must stay unprefixed (parity contract), got %q", row.Text)
+		}
+		if render.Width(row.Text) > width-2 {
+			t.Fatalf("user layout row %q exceeds content width %d", row.Text, width-2)
+		}
+		joined += row.Text
+	}
+	if joined != source {
+		t.Fatalf("wrapped user content %q != source %q", joined, source)
+	}
+
+	// 渲染层：每个显示行带 "> " 前缀，且渲染后不超宽。
+	frame := ComposeAppRenderFrame(state)
+	rendered := ""
+	for index := range frame.Rows {
+		row := frame.Rows[index]
+		if !row.Screen.UserMessage {
+			continue
+		}
+		plain := (render.PlainBackend{}).Render(render.LinesDoc(row.Line))
+		want := userMessagePrefix + row.Screen.Text
+		if plain != want {
+			t.Fatalf("row %d render plain = %q, want %q", index+1, plain, want)
+		}
+		if render.Width(plain) > width {
+			t.Fatalf("row %d render width %d exceeds terminal width %d: %q", index+1, render.Width(plain), width, plain)
+		}
+		rendered += strings.TrimPrefix(plain, userMessagePrefix)
+	}
+	if rendered != source {
+		t.Fatalf("rendered user content %q != source %q", rendered, source)
 	}
 }

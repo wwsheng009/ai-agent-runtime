@@ -36,8 +36,8 @@ func TestUnifiedPromptRendersImmediatelyWithoutLLMResponse(t *testing.T) {
 	awaitUnifiedPresenterIdle(t, coord)
 
 	got := terminal.String()
-	if !strings.Contains(got, "你好，请立即显示我") {
-		t.Fatalf("prompt 未立即渲染（LLM 响应未到时）:\n%q", got)
+	if !strings.Contains(got, "> 你好，请立即显示我") {
+		t.Fatalf("prompt 未立即渲染或缺少 '> ' 前缀（LLM 响应未到时）:\n%q", got)
 	}
 	snapshot := bridge.sceneSnapshot()
 	if snapshot == nil || len(snapshot.Cells) == 0 {

@@ -675,7 +675,11 @@ func TestComposeTerminalFramePlanCarriesStructuredFrameRows(t *testing.T) {
 	for index := range plan.Rows {
 		plain := (render.PlainBackend{}).Render(render.LinesDoc(plan.RenderRows[index]))
 		if plain != plan.Rows[index].Text {
-			t.Fatalf("row %d structured text = %q, want %q", index+1, plain, plan.Rows[index].Text)
+			// 用户 prompt 消息的渲染行带 "> " 前缀（区分用户信息与 LLM 信息）。
+			prefixed := userMessagePrefix + plan.Rows[index].Text
+			if !(plan.Rows[index].UserMessage && plain == prefixed) {
+				t.Fatalf("row %d structured text = %q, want %q", index+1, plain, plan.Rows[index].Text)
+			}
 		}
 	}
 	for index, row := range plan.Rows {
