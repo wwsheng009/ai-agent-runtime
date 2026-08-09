@@ -406,6 +406,15 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 			state.snapToEnabled(items, matches, -1)
 		case '/':
 			state.searching = true
+		default:
+			// 直接输入即搜索：非导航可打印字符立即进入搜索模式，
+			// 恢复 legacy picker “输入关键词即过滤”的体验。搜索以
+			// j/k/g/G/q 开头的词时先按 / 再输入即可。
+			if key.r >= 32 && key.r != 127 {
+				state.searching = true
+				state.query = string(key.r)
+				state.selected, state.offset = 0, 0
+			}
 		}
 	}
 	state.clampToEnabled(items, matches, pageSize)
@@ -504,17 +513,6 @@ func fullScreenListItemDisabled(items []FullScreenListItem, index int) bool {
 		return true
 	}
 	return items[index].Disabled
-}
-
-func fullScreenListMatches(items []FullScreenListItem, query string) []int {
-	query = strings.ToLower(strings.TrimSpace(query))
-	matches := make([]int, 0, len(items))
-	for index, item := range items {
-		if query == "" || strings.Contains(strings.ToLower(strings.Join([]string{item.Title, item.Detail, item.Preview, item.SearchText}, " ")), query) {
-			matches = append(matches, index)
-		}
-	}
-	return matches
 }
 
 func fullScreenListPageSize(height int) int {
@@ -653,9 +651,9 @@ func renderFullScreenListFrameWithProfile(
 	if len(matches) == 0 {
 		position = "0/0"
 	}
-	lines[height-2].text = fmt.Sprintf("  %s  ↑↓/j/k 移动  PgUp/PgDn 翻页  Home/End 首尾  / 搜索", position)
+	lines[height-2].text = fmt.Sprintf("  %s  ↑↓/j/k 移动  PgUp/PgDn 翻页  Home/End 首尾  输入字符搜索", position)
 	if state.searching {
-		lines[height-1].text = "  输入关键词进行筛选  Backspace 删除  Esc 清除/退出搜索  Enter " + fullScreenListConfirmLabel(options)
+		lines[height-1].text = "  输入关键词进行筛选（模糊匹配）  Backspace 删除  Esc 清除/退出搜索  Enter " + fullScreenListConfirmLabel(options)
 	} else {
 		lines[height-1].text = "  Enter " + fullScreenListConfirmLabel(options) + "  Esc/q 取消"
 	}

@@ -435,3 +435,148 @@ func TestFullScreenListNumbersEnabledMatchesContiguously(t *testing.T) {
 		t.Fatalf("expected Enter to return original item index 3, got %#v done=%v", result, done)
 	}
 }
+
+func TestFullScreenListImmediateSearchKey(t *testing.T) {
+	items := []FullScreenListItem{
+		{Title: "Build release", SearchText: "session-one"},
+		{Title: "Fix resume", SearchText: "session-two"},
+		{Title: "Review docs", SearchText: "session-three"},
+	}
+	all := fullScreenListMatches(items, "")
+	state := fullScreenListState{selected: 2}
+
+	// 非导航可打印字符直接进入搜索模式，并作为首字符查询。
+	_, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'r'}, items, all, 24)
+	if done || !state.searching || state.query != "r" {
+		t.Fatalf("expected printable rune to start immediate search, got searching=%v query=%q done=%v", state.searching, state.query, done)
+	}
+	matches := fullScreenListMatches(items, state.query)
+	if len(matches) != 3 {
+		t.Fatalf("expected three items to match 'r', got %v", matches)
+	}
+	// 进入搜索后导航键字符也应进入查询（legacy 输入行语义）。
+	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'e'}, items, matches, 24)
+	if !state.searching || state.query != "re" {
+		t.Fatalf("expected rune inside search to append to query, got %q", state.query)
+	}
+
+	// 导航键不触发搜索。
+	for _, r := range []rune{'j', 'k', 'g', 'G'} {
+		state = fullScreenListState{}
+		_, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: r}, items, all, 24)
+		if done || state.searching {
+			t.Fatalf("expected navigation rune %q not to start search, got searching=%v done=%v", r, state.searching, done)
+		}
+	}
+	// 'q' 是退出键：取消且不进入搜索。
+	state = fullScreenListState{}
+	result, done := applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: 'q'}, items, all, 24)
+	if !done || !result.Cancelled || state.searching {
+		t.Fatalf("expected 'q' to cancel without starting search, got %#v done=%v searching=%v", result, done, state.searching)
+	}
+
+	// '/' 显式进入搜索并保持空查询。
+	state = fullScreenListState{}
+	_, _ = applyFullScreenListKey(&state, editorKey{kind: editorKeyRune, r: '/'}, items, all, 24)
+	if !state.searching || state.query != "" {
+		t.Fatalf("expected '/' to enter search with empty query, got %#v", state)
+	}
+}
+
+func TestFullScreenListFuzzyMatchRanksByRelevance(t *testing.T) {
+	items := []FullScreenListItem{
+		{Title: "gpt-4o", SearchText: "model gpt-4o"},
+		{Title: "gpt-4o-mini", SearchText: "model gpt-4o-mini"},
+		{Title: "claude-sonnet", SearchText: "model claude-sonnet"},
+		{Title: "deepseek-v3", SearchText: "model deepseek-v3"},
+	}
+
+	// “gpt4” 不是任何名称的子串，但通过子序列命中 gpt-4o / gpt-4o-mini，
+	// 且更短的 gpt-4o 排在最前（legacy fuzzy 语义）。
+	matches := fullScreenListMatches(items, "gpt4")
+	if len(matches) != 2 || matches[0] != 0 || matches[1] != 1 {
+		t.Fatalf("expected subsequence match ranked [0 1], got %v", matches)
+	}
+
+	// 精确/前缀匹配排在子序列匹配之前。
+	items = append(items, FullScreenListItem{Title: "gpt4x", SearchText: "model gpt4x"})
+	matches = fullScreenListMatches(items, "gpt4")
+	if len(matches) != 3 || matches[0] != 4 {
+		t.Fatalf("expected exact 'gpt4x' ranked first, got %v", matches)
+	}
+
+	// 输入完整名称时字段级精确匹配恢复生效（拼接串方案下 exact 分支会失效）。
+	matches = fullScreenListMatches(items, "gpt-4o")
+	if len(matches) != 2 || matches[0] != 0 || matches[1] != 1 {
+		t.Fatalf("expected exact title match ranked first, got %v", matches)
+	}
+
+	// 子序列不跨字段：Title 末尾字符与 Preview 开头字符拼不成假阳性。
+	items = []FullScreenListItem{
+		{Title: "abc", Preview: "xyz"},
+		{Title: "def", Preview: "uvw"},
+	}
+	matches = fullScreenListMatches(items, "cx")
+	if len(matches) != 0 {
+		t.Fatalf("expected no cross-field subsequence false positive, got %v", matches)
+	}
+	// 同一 token 在单个字段内仍是子序列匹配。
+	items = []FullScreenListItem{
+		{Title: "abcxyz", SearchText: "model abcxyz"},
+	}
+	matches = fullScreenListMatches(items, "cx")
+	if len(matches) != 1 || matches[0] != 0 {
+		t.Fatalf("expected in-field subsequence match, got %v", matches)
+	}
+
+	// 全空 item 不匹配任何非空查询。
+	items = []FullScreenListItem{
+		{Title: "real", SearchText: "model real"},
+		{},
+	}
+	matches = fullScreenListMatches(items, "real")
+	if len(matches) != 1 || matches[0] != 0 {
+		t.Fatalf("expected empty item excluded, got %v", matches)
+	}
+
+	// 多 token 可分布在不同的字段（Title 命中其一、SearchText 命中其二）。
+	items = []FullScreenListItem{
+		{Title: "alpha", SearchText: "model beta"},
+		{Title: "alpha beta", SearchText: ""},
+	}
+	matches = fullScreenListMatches(items, "alpha beta")
+	if len(matches) != 2 || matches[0] != 0 || matches[1] != 1 {
+		t.Fatalf("expected cross-field multi-token match, got %v", matches)
+	}
+}
+
+func TestFullScreenListMultiTokenSearch(t *testing.T) {
+	items := []FullScreenListItem{
+		{Title: "claude-3-5-sonnet", SearchText: "model claude-3-5-sonnet"},
+		{Title: "claude-opus", SearchText: "model claude-opus"},
+		{Title: "deepseek-r1", SearchText: "model deepseek-r1"},
+	}
+
+	matches := fullScreenListMatches(items, "claude sonnet")
+	if len(matches) != 1 || matches[0] != 0 {
+		t.Fatalf("expected multi-token query to require all tokens, got %v", matches)
+	}
+
+	matches = fullScreenListMatches(items, "claude opus")
+	if len(matches) != 1 || matches[0] != 1 {
+		t.Fatalf("expected 'claude opus' to match claude-opus, got %v", matches)
+	}
+
+	// 空查询与纯空白查询保持原顺序。
+	for _, q := range []string{"", "   "} {
+		matches = fullScreenListMatches(items, q)
+		if len(matches) != len(items) {
+			t.Fatalf("expected empty query %q to return all items, got %v", q, matches)
+		}
+		for i, index := range matches {
+			if index != i {
+				t.Fatalf("expected empty query %q to keep original order, got %v", q, matches)
+			}
+		}
+	}
+}
