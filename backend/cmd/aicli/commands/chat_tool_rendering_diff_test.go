@@ -11,8 +11,7 @@ import (
 // TestRenderEditedDiffOutput_KeepsHeaderLikeAddedLines covers an added line
 // whose own text begins with "++ ". The local parser used to read the raw
 // "+++ ..." row as a file header and silently retargeted the whole diff.
-func TestRenderEditedDiffOutput_KeepsHeaderLikeAddedLines(t *testing.T) {
-	output := strings.Join([]string{
+func TestRenderEditedDiffOutput_KeepsHeaderLikeAddedLines(t *testing.T) {	output := strings.Join([]string{
 		"--- a/notes.md",
 		"+++ b/notes.md",
 		"@@ -1,2 +1,3 @@",
@@ -110,5 +109,81 @@ func TestRenderEditedDiffOutput_MarksBudgetTruncation(t *testing.T) {
 	// Header + parsed rows (the @@ line consumes one unit of the budget) + marker.
 	if got, want := len(lines), 1+(budget-1)+1; got != want {
 		t.Fatalf("preview lines=%d, want %d", got, want)
+	}
+}
+
+// TestExtractFencedDiff_IgnoresMarkdownFencesInsideDiffBody is the regression
+// for "git diff renders only the start": a Markdown code fence inside the diff
+// body (context row " ```go", or add/delete rows "-```"/"+```") used to be
+// mistaken for the closing ```diff fence, truncating the diff at the first
+// inner fence and dropping every later hunk. Only a BARE ``` line closes.
+func TestExtractFencedDiff_IgnoresMarkdownFencesInsideDiffBody(t *testing.T) {
+	output := strings.Join([]string{
+		"补丁已应用：修改 1；影响 1 个路径",
+		"",
+		"文件差异:",
+		"```diff",
+		"--- a/README.md",
+		"+++ b/README.md",
+		"@@ -1,7 +1,7 @@",
+		" # Title",
+		" ",
+		" ```go",
+		"-func old() {}",
+		"+func new() {}",
+		" ```",
+		" body",
+		"```",
+		"",
+	}, "\n")
+
+	got := extractFencedDiff(output)
+	for _, want := range []string{
+		"--- a/README.md",
+		"@@ -1,7 +1,7 @@",
+		"-func old() {}",
+		"+func new() {}",
+		" body",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("extracted diff missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "\n---\n") {
+		t.Fatalf("unexpected trailing content in extracted diff:\n%s", got)
+	}
+}
+
+// TestRenderEditedDiffOutput_MarkdownFenceKeepsEveryHunk renders the full
+// apply_patch-style fenced diff even when the edited file contains ``` rows.
+func TestRenderEditedDiffOutput_MarkdownFenceKeepsEveryHunk(t *testing.T) {
+	output := strings.Join([]string{
+		"补丁已应用：修改 1；影响 1 个路径",
+		"",
+		"文件差异:",
+		"```diff",
+		"--- a/README.md",
+		"+++ b/README.md",
+		"@@ -1,7 +1,7 @@",
+		" # Title",
+		" ",
+		" ```go",
+		"-func old() {}",
+		"+func new() {}",
+		" ```",
+		" body",
+		"```",
+		"",
+	}, "\n")
+
+	got := renderEditedDiffOutput(output)
+	for _, want := range []string{
+		"• Edited README.md",
+		"- func old() {}",
+		"+ func new() {}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("render lost %q:\n%s", want, got)
+		}
 	}
 }

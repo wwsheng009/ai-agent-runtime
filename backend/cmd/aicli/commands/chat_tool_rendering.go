@@ -535,19 +535,36 @@ func renderDiffOutput(output, label string) string {
 	return strings.Join(lines, "\n")
 }
 
+// extractFencedDiff pulls the body of the first ```diff fenced block out of a
+// tool output like apply_patch's "文件差异:\n```diff\n...\n```".
+//
+// The closing fence must be a BARE ``` line (no leading space, + or - prefix).
+// Diff body rows always carry a unified-diff prefix (" ", "+", "-", "@@") or
+// are empty context lines, so a Markdown code fence inside the diff body
+// (" ```go" context row, "-```"/"+```" add/delete row) must not be mistaken
+// for the closing fence — that used to truncate the diff at the first inner
+// fence and silently drop every later hunk ("only the start renders").
 func extractFencedDiff(output string) string {
 	normalized := strings.ReplaceAll(output, "\r\n", "\n")
-	start := strings.Index(normalized, "```diff")
+	lines := strings.Split(normalized, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```diff") {
+			start = i
+			break
+		}
+	}
 	if start < 0 {
 		return ""
 	}
-	rest := normalized[start+len("```diff"):]
-	rest = strings.TrimPrefix(rest, "\n")
-	end := strings.Index(rest, "```")
-	if end >= 0 {
-		rest = rest[:end]
+	var out []string
+	for _, line := range lines[start+1:] {
+		if strings.HasPrefix(line, "```") {
+			break
+		}
+		out = append(out, line)
 	}
-	return strings.Trim(rest, "\n")
+	return strings.Trim(strings.Join(out, "\n"), "\n")
 }
 
 func extractUnifiedDiffOutput(output string) string {
