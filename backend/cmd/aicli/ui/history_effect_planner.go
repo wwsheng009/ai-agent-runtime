@@ -176,6 +176,9 @@ func planMutableActiveCellHistoryCommitsWithTheme(active ActiveCellState, geomet
 	if active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source) {
 		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
 	}
+	if active.Kind == scene.KindSupplement && supplementBodyLooksLikeMarkdown(active.Source) {
+		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
+	}
 	start := active.Acked.End
 	if start < 0 || start > len(active.Source) || !activeCellSourceBoundary(active.Source, start) {
 		return nil
@@ -273,7 +276,15 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 		!activeCellSourceBoundary(active.Source, stableEnd) {
 		return nil
 	}
-	live, ok := activeMarkdownSuffixLines(active.Source, start, geometry.Width, theme)
+	suffixLines := activeMarkdownSuffixLines
+	if active.Kind == scene.KindSupplement {
+		// Reasoning supplements render their divider rows separately from the
+		// markdown body (same as the finalize commit), so the handoff rows must
+		// use the same projection or the acked-prefix matcher fails and the
+		// whole cell is re-committed (duplicate reasoning in scrollback).
+		suffixLines = activeReasoningMarkdownSuffixLines
+	}
+	live, ok := suffixLines(active.Source, start, geometry.Width, theme)
 	if !ok || len(live) <= ActiveBandRows(geometry.Height) {
 		return nil
 	}
@@ -284,7 +295,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 		if candidateEnd <= commitEnd || candidateEnd > stableEnd {
 			continue
 		}
-		candidateLines, projected := activeMarkdownSuffixLines(active.Source[:candidateEnd], start, geometry.Width, theme)
+		candidateLines, projected := suffixLines(active.Source[:candidateEnd], start, geometry.Width, theme)
 		if !projected || len(candidateLines) == 0 || len(candidateLines) > maxCommitRows ||
 			!render.LinesEqual(candidateLines, live[:len(candidateLines)]) {
 			continue
@@ -304,7 +315,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 	commits := make([]HistoryCommit, 0, len(boundaries))
 	sourceStart, displayStart := start, 0
 	for _, sourceEnd := range boundaries {
-		lines, projected := activeMarkdownSuffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width, theme)
+		lines, projected := suffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width, theme)
 		if !projected || len(lines) == 0 || displayStart+len(lines) > len(live) ||
 			!render.LinesEqual(lines, live[displayStart:displayStart+len(lines)]) {
 			return nil

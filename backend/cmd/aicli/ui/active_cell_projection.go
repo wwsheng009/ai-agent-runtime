@@ -174,6 +174,64 @@ func activeMarkdownSuffixLines(source string, start, width int, themes ...style.
 	return cloneRenderLines(full[len(prefix):]), true
 }
 
+// activeReasoningMarkdownSuffixLines is the reasoning (KindSupplement)
+// counterpart of activeMarkdownSuffixLines. It renders the supplement the
+// same way the finalized commit does — divider lines as their own
+// reasoning-styled rows, body through the markdown pipeline — so the mutable
+// handoff rows are byte- and style-identical to the finalize commit. Routing
+// reasoning through the plain assistant path used to hand off raw markdown
+// source rows ("- `x`") while finalize committed formatted rows ("• x"),
+// making the acked-prefix matcher fail and re-committing the whole cell.
+func activeReasoningMarkdownSuffixLines(source string, start, width int, themes ...style.ThemeContext) ([]render.Line, bool) {
+	if start < 0 || start > len(source) || !activeCellSourceBoundary(source, start) {
+		return nil, false
+	}
+	theme := style.ThemeContext{}
+	if len(themes) > 0 {
+		theme = themes[0]
+	}
+	full := activeReasoningMarkdownBandLines(source, width, theme)
+	if start == 0 {
+		return full, true
+	}
+	prefix := activeReasoningMarkdownBandLines(source[:start], width, theme)
+	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
+		return nil, false
+	}
+	return cloneRenderLines(full[len(prefix):]), true
+}
+
+// activeReasoningMarkdownBandLines renders a reasoning supplement source the
+// same way reasoningSupplementScreenRows does: leading/trailing divider rows
+// get the reasoning role, the body goes through the markdown pipeline.
+func activeReasoningMarkdownBandLines(source string, width int, theme style.ThemeContext) []render.Line {
+	head, body, tail := splitReasoningSupplementSource(source)
+	var lines []render.Line
+	if head != "" {
+		lines = append(lines, reasoningDividerBandLines(head, width)...)
+	}
+	if strings.TrimSpace(body) != "" {
+		lines = append(lines, activeMarkdownBandLines(markdown.Render(body, markdown.AssistantBodyOptions(width, theme)))...)
+	}
+	if tail != "" {
+		lines = append(lines, reasoningDividerBandLines(tail, width)...)
+	}
+	return lines
+}
+
+// reasoningDividerBandLines wraps a supplement divider line into
+// reasoning-styled rows, mirroring supplementDividerScreenRows.
+func reasoningDividerBandLines(text string, width int) []render.Line {
+	segments := wrapAppScreenText(text, width)
+	lines := make([]render.Line, 0, len(segments))
+	for _, segment := range segments {
+		lines = append(lines, render.Line{Spans: []render.Span{{
+			Text: segment, Style: render.Style{Role: string(style.RoleReasoning)},
+		}}})
+	}
+	return lines
+}
+
 func activeMarkdownBandLines(doc render.Document) []render.Line {
 	if len(doc.Blocks) == 0 {
 		return nil

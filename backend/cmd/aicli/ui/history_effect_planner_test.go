@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // TestPlanMutableActiveCellHistoryCommits covers the overflow handoff planner
@@ -506,5 +507,101 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 		snapshot.ContentVersion++
 		cells[len(cells)-1].Revision++
 		state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, uint64(index+1))
+	}
+}
+
+// TestPlanMutableReasoningHistoryCommitMatchesFinalizeFormat is the regression
+// for "reasoning renders halfway raw then switches to formatted markdown".
+// A mutable reasoning (KindSupplement) cell whose markdown body overflows the
+// ActiveBand must hand off the SAME formatted rows that the finalize commit
+// produces. Before the fix, planMutableActiveCellHistoryCommits routed
+// KindSupplement through the plain path (raw "- `x`" rows) while the finalize
+// commit rendered markdown ("• x") — the acked-prefix matcher then failed and
+// the whole cell was re-committed, duplicating the reasoning in scrollback.
+func TestPlanMutableReasoningHistoryCommitMatchesFinalizeFormat(t *testing.T) {
+	bodyLines := make([]string, 0, 30)
+	bodyLines = append(bodyLines, "Good. Key modules all exist:")
+	for i := 0; i < 14; i++ {
+		bodyLines = append(bodyLines, fmt.Sprintf("- `backend/internal/module%02d` ✅", i))
+	}
+	bodyLines = append(bodyLines, "", "And `.agents/agents/explore.md`, `general.md`, `plan.md` exist.", "")
+	body := strings.Join(bodyLines, "\n")
+	source := "── reasoning ──\n" + body
+
+	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
+	active := ActiveCellState{
+		CellID: 1, Revision: 3, Kind: scene.KindSupplement,
+		Phase:  ActiveCellMutable,
+		Source: source,
+		Stable: SourceRange{Start: 0, End: len(source)},
+		Acked:  SourceRange{Start: 0, End: 0},
+	}
+
+	commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
+	if len(commits) == 0 {
+		t.Fatalf("long reasoning should hand off overflow rows, got no commits")
+	}
+	for _, c := range commits {
+		for _, line := range c.Lines {
+			if strings.Contains(renderLineText(line), "- `backend/internal/module") {
+				t.Fatalf("BUG: mutable reasoning handoff emits RAW markdown rows; finalize re-commits formatted and duplicates: %#v", c)
+			}
+		}
+	}
+}
+
+// TestPlanReasoningAckedPrefixMatchesFinalize proves the formatted handoff
+// rows are recognized by the acked-prefix matcher, so the finalized cell only
+// commits the remaining tail instead of the whole cell (duplicate render).
+func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
+	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
+	bodyLines := make([]string, 0, 30)
+	bodyLines = append(bodyLines, "Good. Key modules all exist:")
+	for i := 0; i < 20; i++ {
+		bodyLines = append(bodyLines, fmt.Sprintf("- `backend/internal/module%02d` ✅", i))
+	}
+	bodyLines = append(bodyLines, "", "And `.agents/agents/explore.md`, `general.md`, `plan.md` exist.", "")
+	body := strings.Join(bodyLines, "\n")
+	source := "── reasoning ──\n" + body
+
+	active := ActiveCellState{
+		CellID: 1, Revision: 3, Kind: scene.KindSupplement,
+		Phase:  ActiveCellMutable,
+		Source: source,
+		Stable: SourceRange{Start: 0, End: len(source)},
+		Acked:  SourceRange{Start: 0, End: 0},
+	}
+	commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
+	if len(commits) == 0 {
+		t.Fatal("long reasoning should hand off overflow rows")
+	}
+
+	ledger := NewHistoryCommitLedger()
+	for i := range commits {
+		commits[i].Token = uint64(i + 1)
+		if err := ledger.Enqueue(commits[i]); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if err := ledger.MarkInFlight(commits[i].Token); err != nil {
+			t.Fatalf("mark in-flight: %v", err)
+		}
+		if err := ledger.Ack(commits[i].Token, 1, 1); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+	}
+
+	state := AppState{
+		Geometry:         geometry,
+		LayoutGeneration: 1,
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindSupplement, Source: source, Phase: scene.CellCommitted},
+		}}),
+		HistoryEffects: HistoryEffectQueueState{ledger: ledger},
+	}
+	byID := transcriptCellsByID(state.Transcript)
+	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
+	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
+	if matched := activeAckedRenderedPrefixRows(acked, 1, rows, byID); matched == 0 {
+		t.Fatalf("BUG: acked handoff rows do not match finalize rows — whole cell re-committed (duplicate reasoning)")
 	}
 }
