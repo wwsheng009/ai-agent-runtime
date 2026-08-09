@@ -1591,12 +1591,45 @@ func (e *EventEncoder) finalizeOpenStreams(status ItemStatus, cs *ChangeSet) {
 				return false
 			}
 			item.Status = status
+			item.Head = finalizeToolHeadAtRunEnd(item.Head, status)
 			return true
 		})
 		if changed {
 			e.change(cs, OpUpsert, u)
 		}
 	}
+}
+
+// finalizeToolHeadAtRunEnd 将 run 结束时仍未收到 tool.completed/failed 事件的
+// 工具行从执行中态（"• Running ..."）转为终态标题（"• Completed ..."），避免
+// 状态栏/transcript 在 turn 完成后残留 running 图标。与 applyToolFinished 的
+// 区别：finalizeOpenStreams 没有事件 payload，无法附加 duration/backend 后缀，
+// 因此只重建首行并保留 progress 累积的细节行；非 "• Running ..." 形态的 head
+// （如直接以 display_head 建立的 head）保持原样，仅推进状态机。
+func finalizeToolHeadAtRunEnd(head string, status ItemStatus) string {
+	if head == "" {
+		return head
+	}
+	label := "Completed"
+	switch status {
+	case StatusCanceled:
+		label = "Canceled"
+	case StatusFailed:
+		label = "Failed"
+	}
+	first, rest := head, ""
+	if newline := strings.IndexByte(first, '\n'); newline >= 0 {
+		first, rest = first[:newline], first[newline:]
+	}
+	trimmed := strings.TrimSpace(first)
+	if !strings.HasPrefix(trimmed, "• Running ") {
+		return head
+	}
+	display := strings.TrimSpace(strings.TrimPrefix(trimmed, "• Running "))
+	if display == "" {
+		return head
+	}
+	return "• " + label + " " + display + rest
 }
 
 func sessionEndItemStatus(ev runtimeevents.Event) ItemStatus {

@@ -7017,3 +7017,79 @@ func TestChatReasoningRenderContent_IndentAndEmptyLines(t *testing.T) {
 		t.Fatalf("空内容应返回空串：%q", got)
 	}
 }
+
+// TestChatRuntimeEventBridge_RunEndResolvesOpenToolRunningHead 复刻用户报告的
+// 不同步场景：turn 已完成（状态栏已显示 "Worked for ..."），但某个工具在
+// session_end 时仍未收到 tool.completed/failed 事件。回归前 finalizeOpenStreams
+// 只推进工具行状态、head 首行保持 "• Running <命令>"，导致 transcript /
+// ActiveBand 在响应完成后仍残留 running 图标。
+func TestChatRuntimeEventBridge_RunEndResolvesOpenToolRunningHead(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "open-tool-run"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	var history bytes.Buffer
+	interaction.SetWriter(&history)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(100, 40)
+	interaction.SetSurface(surface)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	post := func(event runtimeevents.Event) {
+		t.Helper()
+		if !bridge.postRuntimeEventToUIActor(event) {
+			t.Fatalf("runtime event was not accepted by UI actor: %s", event.Type)
+		}
+		interaction.waitUIActorIdle()
+	}
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "open-tool-run",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	start := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	post(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "open-tool-run",
+		TraceID:   "trace-open",
+		ToolName:  "shell",
+		Timestamp: start,
+		Payload: map[string]interface{}{
+			"turn_id":      "turn-1",
+			"tool_call_id": "call-open",
+			"tool_name":    "shell",
+			"command_text": "go test ./...",
+		},
+	})
+	band := strings.Join(surface.ActiveBandLines(), "\n")
+	if !strings.Contains(band, "• Running go test ./...") {
+		t.Fatalf("precondition: ActiveBand running row missing, got %q", band)
+	}
+	// turn 结束：session_end 到达但工具没有 completed/failed 事件。
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "open-tool-run",
+		TraceID:   "trace-open",
+		Timestamp: start.Add(42 * time.Second),
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	state := interaction.uiActor.AppState()
+	if len(state.Transcript.Cells) == 0 {
+		t.Fatalf("session_end produced no transcript cell: %+v", state.Transcript.Cells)
+	}
+	cell := state.Transcript.Cells[0]
+	if strings.Contains(cell.Source, "Running") {
+		t.Fatalf("running indicator leaked into finalized transcript source: %q", cell.Source)
+	}
+	if !strings.Contains(cell.Source, "• Completed go test ./...") {
+		t.Fatalf("finalized tool head missing completion label, got %q", cell.Source)
+	}
+	band = strings.Join(surface.ActiveBandLines(), "\n")
+	if strings.Contains(band, "• Running ") {
+		t.Fatalf("ActiveBand still shows running row after session_end: %q", band)
+	}
+}

@@ -1376,3 +1376,77 @@ func TestSubmitCommandErrorNilReceiver(t *testing.T) {
 		t.Fatalf("nil SubmitUserInteraction: cs=%+v", cs)
 	}
 }
+
+// TestFinalizeOpenStreamsResolvesToolRunningHead 验证 run 结束时仍未收到
+// tool.completed/failed 事件的工具行会被 finalize 为终态标题（剥掉 head 首行
+// 的 "• Running " 前缀），避免状态栏/transcript 在 turn 完成后残留 running
+// 图标。回归：finalizeOpenStreams 之前只推进 item.Status，head 保持
+// "• Running ..." 不变。
+func TestFinalizeOpenStreamsResolvesToolRunningHead(t *testing.T) {
+	tests := []struct {
+		name   string
+		status ItemStatus
+		want   string
+	}{
+		{name: "completed", status: StatusCompleted, want: "• Completed echo hello\n50% complete"},
+		{name: "failed", status: StatusFailed, want: "• Failed echo hello\n50% complete"},
+		{name: "canceled", status: StatusCanceled, want: "• Canceled echo hello\n50% complete"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := NewEventEncoder()
+			e.Encode(event("tool.requested", map[string]interface{}{
+				"tool_call_id": "c1", "tool_name": "shell", "command_text": "echo hello",
+			}))
+			e.Encode(event("tool.progress", map[string]interface{}{
+				"tool_call_id": "c1", "message": "50% complete",
+			}))
+			if got := e.Snapshot().Items[0].Head; got != "• Running echo hello\n50% complete" {
+				t.Fatalf("pre-finalize head = %q, want running head", got)
+			}
+			e.FinalizeOpenStreams(tc.status)
+			items := e.Snapshot().Items
+			if len(items) == 0 {
+				t.Fatalf("no items after finalize")
+			}
+			if items[0].Status != tc.status {
+				t.Fatalf("status = %q, want %q", items[0].Status, tc.status)
+			}
+			if got := items[0].Head; got != tc.want {
+				t.Fatalf("head = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(items[0].Head, "• Running ") {
+				t.Fatalf("head still contains running prefix: %q", items[0].Head)
+			}
+			// 幂等：再次 finalize 不再改变内容。
+			e.FinalizeOpenStreams(StatusFailed)
+			if got := e.Snapshot().Items[0].Head; got != tc.want {
+				t.Fatalf("idempotent head = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFinalizeToolHeadAtRunEnd 单测 finalizeToolHeadAtRunEnd 的形态保持：
+// 非 "• Running " 形态的 head（如直接以 display_head 建立的已完成标题）在
+// finalize 时保持原样，仅由调用方推进状态机，不误改内容。
+func TestFinalizeToolHeadAtRunEnd(t *testing.T) {
+	if got := finalizeToolHeadAtRunEnd("plain head", StatusCompleted); got != "plain head" {
+		t.Fatalf("non-running head mutated: %q", got)
+	}
+	if got := finalizeToolHeadAtRunEnd("", StatusCompleted); got != "" {
+		t.Fatalf("empty head mutated: %q", got)
+	}
+	if got := finalizeToolHeadAtRunEnd("• Running ", StatusCompleted); got != "• Running " {
+		t.Fatalf("display-less running head mutated: %q", got)
+	}
+	if got := finalizeToolHeadAtRunEnd("• Running echo hello\n50% complete", StatusCompleted); got != "• Completed echo hello\n50% complete" {
+		t.Fatalf("completed head = %q", got)
+	}
+	if got := finalizeToolHeadAtRunEnd("• Running echo hello", StatusCanceled); got != "• Canceled echo hello" {
+		t.Fatalf("canceled head = %q", got)
+	}
+	if got := finalizeToolHeadAtRunEnd("• Running echo hello", StatusFailed); got != "• Failed echo hello" {
+		t.Fatalf("failed head = %q", got)
+	}
+}
