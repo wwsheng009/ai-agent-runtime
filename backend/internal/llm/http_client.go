@@ -12,6 +12,7 @@ func newProviderHTTPClient(
 	timeout time.Duration,
 	proxyCfg *agentconfig.ProxyConfig,
 	stream bool,
+	opts ...runtimehttpclient.ProviderHTTPClientOptions,
 ) *http.Client {
-	return runtimehttpclient.NewProviderHTTPClient(timeout, proxyCfg, stream)
+	return runtimehttpclient.NewProviderHTTPClient(timeout, proxyCfg, stream, opts...)
 }

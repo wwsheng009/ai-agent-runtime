@@ -14,11 +14,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 )
 
 // ToolDescriptor describes a tool available to the runtime.
@@ -75,22 +77,26 @@ func (m *Manager) ListTools() []ToolDescriptor {
 	toolsList := make([]ToolDescriptor, 0)
 
 	if m.mcp != nil {
-		for _, info := range m.mcp.ListTools() {
-			if !info.Enabled || info.Tool == nil {
+		mcpTools := m.mcp.ListTools()
+		callableNames := mcpregistry.CallableToolNames(mcpTools)
+		for index, info := range mcpTools {
+			if info == nil || !info.Enabled || info.Tool == nil {
 				continue
 			}
 			if m.shouldPreferLocalToolkit(info.MCPName, info.Tool.Name) {
 				continue
 			}
-			if _, exists := seen[info.Tool.Name]; exists {
+			callableName := callableNames[index]
+			if _, exists := seen[callableName]; exists {
 				continue
 			}
-			seen[info.Tool.Name] = struct{}{}
+			seen[callableName] = struct{}{}
+			metadata := withMCPIdentity(cloneMetadataMap(info.Metadata), info, callableName)
 			toolsList = append(toolsList, ToolDescriptor{
-				Name:        info.Tool.Name,
+				Name:        callableName,
 				Description: info.Tool.Description,
 				Parameters:  normalizeParameters(info.Tool.InputSchema),
-				Metadata:    cloneMetadataMap(info.Metadata),
+				Metadata:    metadata,
 			})
 		}
 	}
@@ -106,10 +112,14 @@ func (m *Manager) ListTools() []ToolDescriptor {
 			if provider, ok := tool.(toolkit.ToolDefinitionMetadataProvider); ok {
 				metadata = provider.DefinitionMetadata()
 			}
+			parameters, exists := m.toolkit.ParameterSchema(name)
+			if !exists {
+				parameters = normalizeParameters(nil)
+			}
 			toolsList = append(toolsList, ToolDescriptor{
 				Name:        name,
 				Description: tool.Description(),
-				Parameters:  normalizeParameters(tool.Parameters()),
+				Parameters:  parameters,
 				Metadata:    cloneMetadataMap(metadata),
 			})
 		}
@@ -176,8 +186,11 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 	}
 
 	if m.mcp != nil {
-		info, err := m.mcp.FindTool(name)
-		if err == nil && info != nil {
+		info, findErr := m.mcp.FindTool(name)
+		if findErr != nil && mcpregistry.IsAmbiguousToolError(findErr) {
+			return "", nil, findErr
+		}
+		if findErr == nil && info != nil && info.Tool != nil {
 			if m.shouldPreferLocalToolkit(info.MCPName, lookupName) && m.toolkit != nil {
 				if tool, ok := m.toolkit.Get(lookupName); ok {
 					result, execErr := tool.Execute(ctx, normalizeToolkitToolArgs(lookupName, args))
@@ -189,12 +202,14 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 			}
 			if toolprotocol.HasReporter(ctx) {
 				toolprotocol.ReportPhase(ctx, toolprotocol.PhaseStart, "mcp call started", map[string]interface{}{
-					"tool_name": name,
-					"mcp_name":  info.MCPName,
-					"source":    toolresult.SourceMCP,
+					"tool_name":     name,
+					"raw_tool_name": info.Tool.Name,
+					"mcp_name":      info.MCPName,
+					"source":        toolresult.SourceMCP,
 				})
 			}
-			result, callErr := m.mcp.CallTool(ctx, info.MCPName, name, args)
+			executionName := mcpregistry.ExecutionLookupName(info, m.mcp.ListTools())
+			result, callErr := m.mcp.CallTool(ctx, info.MCPName, executionName, args)
 			if callErr != nil {
 				if toolprotocol.HasReporter(ctx) {
 					toolprotocol.ReportPhase(ctx, toolprotocol.PhaseFinish, "mcp call failed", map[string]interface{}{
@@ -203,9 +218,10 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 						"source":    toolresult.SourceMCP,
 					})
 				}
-				return "", nil, callErr
+				return "", withMCPIdentity(nil, info, name), callErr
 			}
 			output, metadata, formatErr := formatMCPResultWithSource(result, toolresult.SourceMCP)
+			metadata = withMCPIdentity(metadata, info, name)
 			if strings.TrimSpace(output) != "" {
 				toolprotocol.ReportTextStream(ctx, output, toolprotocol.StreamChannelCombined)
 			}
@@ -215,9 +231,10 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 					finishMsg = "mcp call failed"
 				}
 				toolprotocol.ReportPhase(ctx, toolprotocol.PhaseFinish, finishMsg, map[string]interface{}{
-					"tool_name": name,
-					"mcp_name":  info.MCPName,
-					"source":    toolresult.SourceMCP,
+					"tool_name":     name,
+					"raw_tool_name": info.Tool.Name,
+					"mcp_name":      info.MCPName,
+					"source":        toolresult.SourceMCP,
 				})
 			}
 			return output, metadata, formatErr
@@ -257,6 +274,9 @@ func (m *Manager) resolveToolSource(name string) string {
 			if m.shouldPreferLocalToolkit(info.MCPName, lookupName) {
 				return toolresult.SourceToolkit
 			}
+			return toolresult.SourceMCP
+		}
+		if mcpregistry.IsAmbiguousToolError(err) {
 			return toolresult.SourceMCP
 		}
 	}
@@ -489,6 +509,20 @@ func cloneMetadataMap(input map[string]any) map[string]interface{} {
 	return cloned
 }
 
+func withMCPIdentity(metadata map[string]interface{}, info *mcpregistry.ToolInfo, callableName string) map[string]interface{} {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	if info == nil || info.Tool == nil {
+		return metadata
+	}
+	metadata["mcp_name"] = info.MCPName
+	metadata["mcp_raw_tool_name"] = info.Tool.Name
+	metadata["mcp_canonical_name"] = mcpregistry.CanonicalToolName(info.MCPName, info.Tool.Name)
+	metadata["tool_callable_name"] = strings.TrimSpace(callableName)
+	return metadata
+}
+
 func (m *Manager) metaToolDescriptor() *ToolDescriptor {
 	meta := adapter.BuildMCPMetaTools()
 	if len(meta) == 0 {
@@ -603,26 +637,16 @@ func formatResources(resources []*protocol.Resource) []map[string]interface{} {
 }
 
 func normalizeParameters(schema map[string]interface{}) map[string]interface{} {
-	if schema == nil {
-		return map[string]interface{}{
-			"type":                 "object",
-			"additionalProperties": false,
-		}
+	normalized, _, err := toolschema.Canonicalize(schema)
+	if err == nil {
+		return normalized
 	}
-
-	normalized := make(map[string]interface{}, len(schema)+1)
-	for key, value := range schema {
-		normalized[key] = value
+	// Definitions from trusted legacy adapters may still be malformed. Preserve
+	// their shape for diagnostics; external MCP definitions are rejected by the
+	// registry before reaching this projection.
+	fallback := cloneMetadataMap(schema)
+	if fallback == nil {
+		fallback = map[string]interface{}{}
 	}
-
-	if _, ok := normalized["type"]; !ok {
-		normalized["type"] = "object"
-	}
-	if paramType, ok := normalized["type"].(string); ok && paramType == "object" {
-		if _, ok := normalized["additionalProperties"]; !ok {
-			normalized["additionalProperties"] = false
-		}
-	}
-
-	return normalized
+	return fallback
 }

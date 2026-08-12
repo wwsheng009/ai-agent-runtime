@@ -12,8 +12,10 @@ import (
 )
 
 type fakeManager struct {
-	result *protocol.CallToolResult
-	tools  []*mcpregistry.ToolInfo
+	result     *protocol.CallToolResult
+	tools      []*mcpregistry.ToolInfo
+	calledMCP  string
+	calledTool string
 }
 
 func (f *fakeManager) LoadConfig(configPath string) error { return nil }
@@ -36,6 +38,8 @@ func (f *fakeManager) FindTool(toolName string) (*mcpregistry.ToolInfo, error) {
 	}, nil
 }
 func (f *fakeManager) CallTool(ctx context.Context, mcpName, toolName string, args map[string]interface{}) (*protocol.CallToolResult, error) {
+	f.calledMCP = mcpName
+	f.calledTool = toolName
 	return f.result, nil
 }
 func (f *fakeManager) ListResources(ctx context.Context, mcpName string, cursor *string) (*protocol.ListResourcesResult, error) {
@@ -133,5 +137,57 @@ func TestMCPAdapter_ListTools_PreservesDefinitionMetadata(t *testing.T) {
 	}
 	if got := tools[0].Metadata["supports_parallel"]; got != true {
 		t.Fatalf("expected supports_parallel=true, got %#v", got)
+	}
+}
+
+func TestMCPAdapter_CallToolWithMetaHonorsExplicitServer(t *testing.T) {
+	manager := &fakeManager{
+		result: &protocol.CallToolResult{Content: []protocol.Content{{Type: "text", Text: "docs result"}}},
+	}
+	adapter := NewMCPAdapter(manager)
+
+	if _, _, err := adapter.CallToolWithMeta(context.Background(), "docs", "search", nil); err != nil {
+		t.Fatalf("explicit server call failed: %v", err)
+	}
+	if manager.calledMCP != "docs" || manager.calledTool != "search" {
+		t.Fatalf("explicit server was ignored: mcp=%q tool=%q", manager.calledMCP, manager.calledTool)
+	}
+}
+
+func TestMCPAdapter_CallToolWithMetaPrefersCanonicalIdentityOverRawAlias(t *testing.T) {
+	manager := &fakeManager{
+		result: &protocol.CallToolResult{},
+		tools: []*mcpregistry.ToolInfo{
+			{MCPName: "docs", Enabled: true, Tool: &protocol.Tool{Name: "mcp__docs__search"}},
+			{MCPName: "docs", Enabled: true, Tool: &protocol.Tool{Name: "search"}},
+			{MCPName: "issues", Enabled: true, Tool: &protocol.Tool{Name: "search"}},
+		},
+	}
+	adapter := NewMCPAdapter(manager)
+
+	if _, _, err := adapter.CallToolWithMeta(context.Background(), "docs", "mcp__docs__search", nil); err != nil {
+		t.Fatalf("canonical call failed: %v", err)
+	}
+	if manager.calledMCP != "docs" || manager.calledTool != "search" {
+		t.Fatalf("canonical identity was shadowed by raw alias: mcp=%q tool=%q", manager.calledMCP, manager.calledTool)
+	}
+}
+
+func TestMCPAdapter_CallToolWithMetaKeepsCanonicalShapedRawToolAddressable(t *testing.T) {
+	manager := &fakeManager{
+		result: &protocol.CallToolResult{},
+		tools: []*mcpregistry.ToolInfo{
+			{MCPName: "docs", Enabled: true, Tool: &protocol.Tool{Name: "mcp__docs__search"}},
+			{MCPName: "docs", Enabled: true, Tool: &protocol.Tool{Name: "search"}},
+		},
+	}
+	adapter := NewMCPAdapter(manager)
+
+	shadowCanonicalName := "mcp__docs__mcp__docs__search"
+	if _, _, err := adapter.CallToolWithMeta(context.Background(), "docs", shadowCanonicalName, nil); err != nil {
+		t.Fatalf("shadowing raw tool call failed: %v", err)
+	}
+	if manager.calledMCP != "docs" || manager.calledTool != shadowCanonicalName {
+		t.Fatalf("shadowing raw tool lost its identity: mcp=%q tool=%q", manager.calledMCP, manager.calledTool)
 	}
 }

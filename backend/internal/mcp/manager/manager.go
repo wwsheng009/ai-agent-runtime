@@ -84,6 +84,12 @@ type ObservableManager interface {
 	AddLifecycleObserver(LifecycleObserver)
 }
 
+// QuarantineReporter exposes invalid MCP definitions without adding them to
+// the callable tool inventory.
+type QuarantineReporter interface {
+	ListQuarantinedTools() []registry.QuarantinedToolInfo
+}
+
 // manager MCP 管理器实现
 type manager struct {
 	cfg       *config.Config
@@ -256,11 +262,35 @@ func (m *manager) loadTools(ctx context.Context, cli client.Client, mcpName stri
 		return
 	}
 
+	loadedCount := 0
+	quarantinedCount := 0
 	for _, tool := range tools {
-		m.registry.RegisterTool(mcpName, tool, true)
+		if registerErr := m.registry.RegisterTool(mcpName, tool, true); registerErr != nil {
+			quarantinedCount++
+			toolName := ""
+			if tool != nil {
+				toolName = tool.Name
+			}
+			payload := map[string]interface{}{
+				"tool_name":      toolName,
+				"canonical_name": registry.CanonicalToolName(mcpName, toolName),
+				"error":          registerErr.Error(),
+			}
+			for _, quarantined := range m.registry.ListQuarantinedTools() {
+				if quarantined.MCPName == mcpName && quarantined.ToolName == strings.TrimSpace(toolName) {
+					payload["schema_hash"] = quarantined.SchemaHash
+					break
+				}
+			}
+			m.emitLifecycleEvent(ctx, "mcp.tool.quarantined", mcpName, payload)
+			continue
+		}
+		loadedCount++
 	}
 	m.emitLifecycleEvent(ctx, "mcp.tools.loaded", mcpName, map[string]interface{}{
-		"tool_count": len(tools),
+		"tool_count":        loadedCount,
+		"advertised_count":  len(tools),
+		"quarantined_count": quarantinedCount,
 	})
 }
 
@@ -297,8 +327,34 @@ func (m *manager) ListTools() []*registry.ToolInfo {
 	return m.registry.ListTools()
 }
 
+// ListQuarantinedTools returns invalid definitions retained for diagnostics.
+func (m *manager) ListQuarantinedTools() []registry.QuarantinedToolInfo {
+	return m.registry.ListQuarantinedTools()
+}
+
 // CallTool 调用工具
 func (m *manager) CallTool(ctx context.Context, mcpName, toolName string, args map[string]interface{}) (*protocol.CallToolResult, error) {
+	var (
+		info *registry.ToolInfo
+		err  error
+	)
+	if strings.TrimSpace(mcpName) == "" {
+		info, err = m.registry.ResolveTool(toolName)
+	} else {
+		info, err = m.registry.ResolveToolForMCP(mcpName, toolName)
+	}
+	if err == nil {
+		mcpName = info.MCPName
+		toolName = info.Tool.Name
+	} else {
+		if strings.TrimSpace(mcpName) == "" || strings.HasPrefix(strings.TrimSpace(toolName), "mcp__") {
+			return nil, err
+		}
+		if _, registeredErr := m.registry.GetTool(mcpName, toolName); registeredErr == nil {
+			return nil, err
+		}
+	}
+
 	// 获取客户端
 	cli, err := m.registry.GetClient(mcpName)
 	if err != nil {
@@ -331,13 +387,7 @@ func (m *manager) ListResources(ctx context.Context, mcpName string, cursor *str
 
 // FindTool 查找工具
 func (m *manager) FindTool(toolName string) (*registry.ToolInfo, error) {
-	// 遍历所有 MCP 查找工具
-	for _, info := range m.registry.ListTools() {
-		if info.Tool.Name == toolName {
-			return info, nil
-		}
-	}
-	return nil, fmt.Errorf("工具不存在: %s", toolName)
+	return m.registry.ResolveTool(toolName)
 }
 
 // SetMCPEnabled 启用/禁用 MCP

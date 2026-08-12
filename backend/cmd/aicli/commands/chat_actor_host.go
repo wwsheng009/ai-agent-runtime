@@ -1283,6 +1283,8 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			HeaderMappings:        cloneStringMap(session.Provider.HeaderMappings),
 			Proxy:                 session.Provider.Proxy.Clone(),
 			RequestsPerMinute:     session.Provider.RequestsPerMinute,
+			StreamReadTimeout:     runtimellm.ProviderStreamReadTimeoutFromAgentConfig(session.Config),
+			ResponseHeaderTimeout: runtimellm.ProviderResponseHeaderTimeoutFromAgentConfig(session.Config),
 		})
 		if buildErr != nil {
 			return buildErr

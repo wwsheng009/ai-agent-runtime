@@ -32,6 +32,10 @@ type GatewayClient struct {
 	retryTuning    RetryTuning
 	retryRules     []RetryRule
 
+	// streamReadTimeout 流式读取的空闲超时；<=0 表示不启用（默认）。
+	// 只对"该有数据却没有数据"的空闲窗口生效，不影响持续产出数据的长任务。
+	streamReadTimeout time.Duration
+
 	// HTTP 客户端
 	httpClient *http.Client
 
@@ -106,6 +110,20 @@ func (c *GatewayClient) SetTimeout(timeout time.Duration) {
 	if c.httpClient != nil {
 		c.httpClient.Timeout = timeout
 	}
+}
+
+// SetStreamReadTimeout 设置流式读取的空闲超时。<=0 表示不启用。
+// 只对"该有数据却没有数据"的空闲窗口生效，不影响持续产出数据的长任务。
+func (c *GatewayClient) SetStreamReadTimeout(timeout time.Duration) {
+	c.streamReadTimeout = timeout
+}
+
+// StreamReadTimeout 返回当前流式读取空闲超时（0 表示未启用）。
+func (c *GatewayClient) StreamReadTimeout() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.streamReadTimeout
 }
 
 // SetMaxRetries 设置最大重试次数
@@ -762,6 +780,14 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
+	}
+
+	// Guard the streaming read against upstreams that stop producing bytes:
+	// a stuck connection would otherwise block the whole turn forever. Only
+	// idle (no data at all) trips the timeout; slow-but-active streams keep
+	// refreshing it, so long-running legitimate tasks are unaffected.
+	if c.streamReadTimeout > 0 {
+		httpResp.Body = wrapStreamIdleTimeout(httpResp.Body, c.streamReadTimeout)
 	}
 
 	emissionState := &streamEmissionState{}

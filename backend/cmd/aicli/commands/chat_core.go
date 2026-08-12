@@ -609,6 +609,8 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		SupportsMaxOutputTokens: session.Provider.SupportsMaxOutputTokens,
 		Proxy:                   session.Provider.Proxy.Clone(),
 		RequestsPerMinute:       session.Provider.RequestsPerMinute,
+		StreamReadTimeout:       runtimellm.ProviderStreamReadTimeoutFromAgentConfig(session.Config),
+		ResponseHeaderTimeout:   runtimellm.ProviderResponseHeaderTimeoutFromAgentConfig(session.Config),
 	})
 	if err != nil {
 		return nil, err

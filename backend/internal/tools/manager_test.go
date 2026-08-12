@@ -37,6 +37,10 @@ type toolkitSuccessToolStub struct {
 	metadata   map[string]interface{}
 }
 
+type toolkitCountingSchemaTool struct {
+	parameterCalls int
+}
+
 func (s toolkitErrorToolStub) Name() string { return s.name }
 
 func (s toolkitErrorToolStub) Description() string { return "toolkit error stub" }
@@ -80,6 +84,51 @@ func (s toolkitSuccessToolStub) Execute(ctx context.Context, params map[string]i
 }
 
 func (s toolkitSuccessToolStub) CanDirectCall() bool { return true }
+
+func (s *toolkitCountingSchemaTool) Name() string        { return "counting_schema" }
+func (s *toolkitCountingSchemaTool) Description() string { return "counting schema" }
+func (s *toolkitCountingSchemaTool) Version() string     { return "test" }
+func (s *toolkitCountingSchemaTool) CanDirectCall() bool { return true }
+func (s *toolkitCountingSchemaTool) Parameters() map[string]interface{} {
+	s.parameterCalls++
+	return map[string]interface{}{"properties": map[string]interface{}{}}
+}
+func (s *toolkitCountingSchemaTool) Execute(context.Context, map[string]interface{}) (*toolkit.ToolResult, error) {
+	return &toolkit.ToolResult{Success: true}, nil
+}
+
+func TestManagerListToolsUsesToolkitSchemaSnapshot(t *testing.T) {
+	tool := &toolkitCountingSchemaTool{}
+	toolRegistry := toolkit.NewRegistry()
+	if err := toolRegistry.Register(tool); err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{toolkit: toolRegistry}
+
+	first := manager.ListTools()
+	second := manager.ListTools()
+	if tool.parameterCalls != 1 {
+		t.Fatalf("Parameters called after registration: %d", tool.parameterCalls)
+	}
+	var firstDescriptor, secondDescriptor *ToolDescriptor
+	for index := range first {
+		if first[index].Name == tool.Name() {
+			firstDescriptor = &first[index]
+		}
+	}
+	for index := range second {
+		if second[index].Name == tool.Name() {
+			secondDescriptor = &second[index]
+		}
+	}
+	if firstDescriptor == nil || secondDescriptor == nil || firstDescriptor.Parameters["type"] != "object" {
+		t.Fatalf("unexpected toolkit projection: first=%#v second=%#v", first, second)
+	}
+	firstDescriptor.Parameters["type"] = "array"
+	if secondDescriptor.Parameters["type"] != "object" {
+		t.Fatalf("manager projections share mutable schema state: %#v", secondDescriptor.Parameters)
+	}
+}
 
 func TestNewDefaultManagerWithRuntimeConfig_AppliesSandboxToLocalTools(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -656,6 +705,32 @@ func TestAgentAdapter_FindTool_PrefersRuntimeManagerCollisionResolution(t *testi
 	}
 }
 
+func TestManager_MCPNameCollisionUsesCanonicalNamesAndFailsClosed(t *testing.T) {
+	mcp := newCollidingMCPManager(t)
+	runtimeManager := NewDefaultManager(mcp)
+	adapter := NewAgentAdapter(runtimeManager)
+
+	for _, name := range []string{"mcp__docs__search", "mcp__issues__search"} {
+		info, err := adapter.FindTool(name)
+		if err != nil {
+			t.Fatalf("FindTool(%q) failed: %v", name, err)
+		}
+		if info.Name != name || info.MCPName == "" {
+			t.Fatalf("unexpected canonical tool info for %q: %#v", name, info)
+		}
+	}
+	if _, err := runtimeManager.Execute(context.Background(), "search", map[string]interface{}{}); !registry.IsAmbiguousToolError(err) {
+		t.Fatalf("expected ambiguous short name to fail closed, got %v", err)
+	}
+	output, err := runtimeManager.Execute(context.Background(), "mcp__issues__search", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("canonical execution failed: %v", err)
+	}
+	if output != "issues:search" || mcp.calledTool != "search" || mcp.calledMCP != "issues" {
+		t.Fatalf("canonical call was not routed to raw target: output=%q mcp=%q tool=%q", output, mcp.calledMCP, mcp.calledTool)
+	}
+}
+
 func TestAgentAdapter_FindTool_PrefersLocalToolkitOverToolkitMCP(t *testing.T) {
 	manager := NewDefaultManager(newToolkitShadowMCPManager())
 	adapter := NewAgentAdapter(manager)
@@ -879,6 +954,38 @@ func TestFormatMCPResult_PreservesErrorText(t *testing.T) {
 
 type stubMCPManager struct {
 	lastArgs map[string]interface{}
+}
+
+type collidingMCPManager struct {
+	stubMCPManager
+	registry   *registry.Registry
+	calledMCP  string
+	calledTool string
+}
+
+func newCollidingMCPManager(t *testing.T) *collidingMCPManager {
+	t.Helper()
+	reg := registry.NewRegistry()
+	for _, server := range []string{"docs", "issues"} {
+		if err := reg.RegisterTool(server, &protocol.Tool{Name: "search"}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &collidingMCPManager{registry: reg}
+}
+
+func (m *collidingMCPManager) ListTools() []*registry.ToolInfo {
+	return m.registry.ListTools()
+}
+
+func (m *collidingMCPManager) FindTool(name string) (*registry.ToolInfo, error) {
+	return m.registry.ResolveTool(name)
+}
+
+func (m *collidingMCPManager) CallTool(_ context.Context, mcpName, toolName string, _ map[string]interface{}) (*protocol.CallToolResult, error) {
+	m.calledMCP = mcpName
+	m.calledTool = toolName
+	return &protocol.CallToolResult{Content: []protocol.Content{{Type: "text", Text: mcpName + ":" + toolName}}}, nil
 }
 
 func newStubMCPManager() *stubMCPManager {

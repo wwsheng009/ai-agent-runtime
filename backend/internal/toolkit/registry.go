@@ -5,33 +5,49 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 )
 
 // Registry 工具注册表
 type Registry struct {
-	tools map[string]Tool
-	mu    sync.RWMutex
+	tools          map[string]Tool
+	schemas        map[string]map[string]interface{}
+	schemaRevision atomic.Uint64
+	mu             sync.RWMutex
 }
 
 // NewRegistry 创建新的注册表
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]Tool),
+		tools:   make(map[string]Tool),
+		schemas: make(map[string]map[string]interface{}),
 	}
 }
 
 // Register 注册工具
 func (r *Registry) Register(tool Tool) error {
+	if tool == nil {
+		return fmt.Errorf("tool is nil")
+	}
+	name := tool.Name()
+	canonicalSchema, _, err := toolschema.CanonicalizeAndValidate(tool.Parameters())
+	if err != nil {
+		return fmt.Errorf("tool %q has invalid parameters schema: %w", name, err)
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if existing, exists := r.tools[tool.Name()]; exists {
-		return fmt.Errorf("tool '%s' already registered (existing: %s)", tool.Name(), existing.Name())
+	if existing, exists := r.tools[name]; exists {
+		return fmt.Errorf("tool '%s' already registered (existing: %s)", name, existing.Name())
 	}
 
-	r.tools[tool.Name()] = tool
+	r.tools[name] = tool
+	r.schemas[name] = canonicalSchema
+	r.schemaRevision.Add(1)
 	return nil
 }
 
@@ -45,7 +61,36 @@ func (r *Registry) Unregister(name string) error {
 	}
 
 	delete(r.tools, name)
+	delete(r.schemas, name)
+	r.schemaRevision.Add(1)
 	return nil
+}
+
+// SchemaRevision changes whenever the model-visible toolkit contract changes.
+func (r *Registry) SchemaRevision() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.schemaRevision.Load()
+}
+
+// ParameterSchema returns an isolated copy of the schema captured at
+// registration time.
+func (r *Registry) ParameterSchema(name string) (map[string]interface{}, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.RLock()
+	cached, exists := r.schemas[name]
+	r.mu.RUnlock()
+	if !exists {
+		return nil, false
+	}
+	cloned, err := toolschema.Clone(cached)
+	if err != nil {
+		return nil, false
+	}
+	return cloned, true
 }
 
 // Get 获取工具
@@ -115,10 +160,14 @@ func (r *Registry) GetToolSchemasForContext(listCtx ListToolsContext) []map[stri
 	tools := r.ListForContext(listCtx)
 	schemas := make([]map[string]interface{}, 0, len(tools))
 	for _, tool := range tools {
+		parameters, exists := r.ParameterSchema(tool.Name())
+		if !exists {
+			parameters = map[string]interface{}{}
+		}
 		schema := map[string]interface{}{
 			"name":        tool.Name(),
 			"description": tool.Description(),
-			"parameters":  tool.Parameters(),
+			"parameters":  parameters,
 		}
 		if provider, ok := tool.(ToolDefinitionMetadataProvider); ok {
 			if metadata := provider.DefinitionMetadata(); len(metadata) > 0 {

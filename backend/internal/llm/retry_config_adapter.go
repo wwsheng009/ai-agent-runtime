@@ -82,3 +82,23 @@ func ProviderMaxRetriesFromAgentConfig(cfg *agentconfig.Config) int {
 	}
 	return maxRetries
 }
+
+// ProviderStreamReadTimeoutFromAgentConfig resolves the streaming idle timeout
+// (chunk-level, "no data for N") from the global HTTP timeout config. Returns 0
+// when unset, meaning the idle guard is disabled.
+func ProviderStreamReadTimeoutFromAgentConfig(cfg *agentconfig.Config) time.Duration {
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Providers.HTTPTimeout.StreamReadTimeout
+}
+
+// ProviderResponseHeaderTimeoutFromAgentConfig resolves the response-header
+// wait bound from the global HTTP timeout config. Returns 0 when unset,
+// meaning no explicit response-header deadline is applied.
+func ProviderResponseHeaderTimeoutFromAgentConfig(cfg *agentconfig.Config) time.Duration {
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Providers.HTTPTimeout.ResponseHeaderTimeout
+}

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -524,13 +525,13 @@ func TestMakeToolKey(t *testing.T) {
 	reg := NewRegistry()
 
 	key := reg.makeToolKey("mcp1", "tool1")
-	if key != "mcp1_tool1" {
-		t.Errorf("Expected key 'mcp1_tool1', got %s", key)
+	if key != "mcp1\x00tool1" {
+		t.Errorf("Expected collision-safe key, got %q", key)
 	}
 
 	key = reg.makeToolKey("my_mcp", "myTool")
-	if key != "my_mcp_myTool" {
-		t.Errorf("Expected key 'my_mcp_myTool', got %s", key)
+	if key != "my_mcp\x00myTool" {
+		t.Errorf("Expected collision-safe key, got %q", key)
 	}
 }
 
@@ -597,5 +598,211 @@ func TestMultipleMCPsSameToolName(t *testing.T) {
 
 	if !mcps["mcp1"] || !mcps["mcp2"] {
 		t.Error("Expected tools from both mcp1 and mcp2")
+	}
+}
+
+func TestRegisterToolCanonicalizesSchemaWithoutMutatingCaller(t *testing.T) {
+	reg := NewRegistry()
+	schema := map[string]interface{}{
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{"type": "string"},
+		},
+		"required": true,
+	}
+	tool := &protocol.Tool{Name: "search", InputSchema: schema}
+
+	if err := reg.RegisterTool("docs", tool, true); err != nil {
+		t.Fatalf("RegisterTool failed: %v", err)
+	}
+	info, err := reg.GetTool("docs", "search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Tool.InputSchema["type"] != "object" {
+		t.Fatalf("expected canonical object schema, got %#v", info.Tool.InputSchema)
+	}
+	if _, exists := info.Tool.InputSchema["required"]; exists {
+		t.Fatalf("expected invalid required marker to be repaired: %#v", info.Tool.InputSchema)
+	}
+	if _, exists := schema["type"]; exists {
+		t.Fatal("registration mutated caller-owned schema")
+	}
+	if info.Metadata["tool_schema_hash"] == "" {
+		t.Fatalf("expected schema hash metadata, got %#v", info.Metadata)
+	}
+	info.Tool.InputSchema["type"] = "array"
+	info.Metadata["tool_schema_hash"] = "mutated"
+	again, err := reg.GetTool("docs", "search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Tool.InputSchema["type"] != "object" || again.Metadata["tool_schema_hash"] == "mutated" {
+		t.Fatalf("registry exposed mutable contract state: %#v", again)
+	}
+}
+
+func TestRegisterToolQuarantinesInvalidSchema(t *testing.T) {
+	reg := NewRegistry()
+	err := reg.RegisterTool("docs", &protocol.Tool{
+		Name: "bad",
+		InputSchema: map[string]interface{}{
+			"type": "array",
+		},
+	}, true)
+	if err == nil {
+		t.Fatal("expected invalid root schema to fail registration")
+	}
+	if got := reg.ListTools(); len(got) != 0 {
+		t.Fatalf("quarantined tool leaked into callable inventory: %#v", got)
+	}
+	quarantined := reg.ListQuarantinedTools()
+	if len(quarantined) != 1 || quarantined[0].ToolName != "bad" || quarantined[0].SchemaHash == "" {
+		t.Fatalf("unexpected quarantine diagnostics: %#v", quarantined)
+	}
+}
+
+func TestResolveToolFailsClosedForAmbiguousShortName(t *testing.T) {
+	reg := NewRegistry()
+	for _, server := range []string{"docs", "issues"} {
+		if err := reg.RegisterTool(server, &protocol.Tool{Name: "search"}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := reg.ResolveTool("search"); !IsAmbiguousToolError(err) {
+		t.Fatalf("expected ambiguous short-name error, got %v", err)
+	}
+	info, err := reg.ResolveTool("mcp__issues__search")
+	if err != nil {
+		t.Fatalf("canonical resolution failed: %v", err)
+	}
+	if info.MCPName != "issues" || info.Tool.Name != "search" {
+		t.Fatalf("resolved wrong target: %#v", info)
+	}
+
+	tools := reg.ListTools()
+	names := CallableToolNames(tools)
+	if len(names) != 2 || names[0] != "mcp__docs__search" || names[1] != "mcp__issues__search" {
+		t.Fatalf("unexpected callable names: %#v", names)
+	}
+}
+
+func TestCallableToolNamesAvoidRawNameShadowingCanonicalIdentity(t *testing.T) {
+	reg := NewRegistry()
+	registrations := []struct {
+		server string
+		name   string
+	}{
+		{server: "docs", name: "search"},
+		{server: "legacy", name: "mcp__docs__search"},
+	}
+	for _, registration := range registrations {
+		if err := reg.RegisterTool(registration.server, &protocol.Tool{Name: registration.name}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tools := reg.ListTools()
+	names := CallableToolNames(tools)
+	got := make(map[string]string, len(tools))
+	for index, info := range tools {
+		got[info.MCPName] = names[index]
+	}
+	if got["docs"] != "search" {
+		t.Fatalf("unexpected docs callable name: %q", got["docs"])
+	}
+	if got["legacy"] != "mcp__legacy__mcp__docs__search" {
+		t.Fatalf("raw alias shadowed another canonical identity: %q", got["legacy"])
+	}
+
+	info, err := reg.ResolveTool(got["legacy"])
+	if err != nil {
+		t.Fatalf("projected legacy name did not resolve: %v", err)
+	}
+	if info.MCPName != "legacy" || info.Tool.Name != "mcp__docs__search" {
+		t.Fatalf("projected name resolved to wrong target: %#v", info)
+	}
+}
+
+func TestResolveToolForMCPPrefersCanonicalIdentityOverRawAlias(t *testing.T) {
+	reg := NewRegistry()
+	for _, name := range []string{"mcp__docs__search", "search"} {
+		if err := reg.RegisterTool("docs", &protocol.Tool{Name: name}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	info, err := reg.ResolveToolForMCP("docs", "mcp__docs__search")
+	if err != nil {
+		t.Fatalf("canonical resolution failed: %v", err)
+	}
+	if info.Tool.Name != "search" {
+		t.Fatalf("raw alias shadowed canonical identity: %#v", info)
+	}
+	shadow, err := reg.ResolveToolForMCP("docs", "mcp__docs__mcp__docs__search")
+	if err != nil || shadow.Tool.Name != "mcp__docs__search" {
+		t.Fatalf("shadowing raw tool was not addressable by its own canonical identity: info=%#v err=%v", shadow, err)
+	}
+	if got := ExecutionLookupName(shadow, reg.ListTools()); got != "mcp__docs__mcp__docs__search" {
+		t.Fatalf("shadowing raw tool received unsafe execution lookup name %q", got)
+	}
+}
+
+func TestRegistryKeysAndCanonicalNamesDoNotSilentlyCollide(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.RegisterTool("a_b", &protocol.Tool{Name: "c"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RegisterTool("a", &protocol.Tool{Name: "b_c"}, true); err != nil {
+		t.Fatalf("length-ambiguous legacy key should no longer collide: %v", err)
+	}
+	if got := len(reg.ListTools()); got != 2 {
+		t.Fatalf("expected both independently keyed tools, got %d", got)
+	}
+
+	if err := reg.RegisterTool("server.name", &protocol.Tool{Name: "lookup"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RegisterTool("server_name", &protocol.Tool{Name: "lookup"}, true); err != nil {
+		t.Fatalf("sanitized server names should remain distinct: %v", err)
+	}
+	dotted := CanonicalToolName("server.name", "lookup")
+	underscored := CanonicalToolName("server_name", "lookup")
+	if dotted == underscored || !strings.HasPrefix(dotted, "mcp__server_name_") {
+		t.Fatalf("special-character normalization is not collision safe: %q vs %q", dotted, underscored)
+	}
+	for _, name := range []string{dotted, underscored} {
+		if _, err := reg.ResolveTool(name); err != nil {
+			t.Fatalf("canonical name %q did not resolve: %v", name, err)
+		}
+	}
+}
+
+func TestCallableToolNamesCanonicalizeProviderUnsafeAndLongNames(t *testing.T) {
+	reg := NewRegistry()
+	unsafeName := "search.files"
+	longName := strings.Repeat("long_name_", 10)
+	for _, name := range []string{unsafeName, longName} {
+		if err := reg.RegisterTool("documentation server", &protocol.Tool{Name: name}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tools := reg.ListTools()
+	callableNames := CallableToolNames(tools)
+	for index, callableName := range callableNames {
+		if !providerToolNamePattern.MatchString(callableName) {
+			t.Fatalf("provider-unsafe callable name %q", callableName)
+		}
+		if len(callableName) > maxCanonicalToolNameLength {
+			t.Fatalf("callable name exceeds provider limit: %d %q", len(callableName), callableName)
+		}
+		resolved, err := reg.ResolveTool(callableName)
+		if err != nil || resolved.Tool.Name != tools[index].Tool.Name {
+			t.Fatalf("callable name did not round-trip: name=%q info=%#v err=%v", callableName, resolved, err)
+		}
+	}
+	if callableNames[0] == callableNames[1] {
+		t.Fatalf("distinct unsafe names collapsed to one identity: %#v", callableNames)
 	}
 }

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -14,13 +15,14 @@ func (s *managerToolSource) ListTools() []skill.ToolInfo {
 		return nil
 	}
 	tools := s.manager.ListTools()
+	callableNames := mcpregistry.CallableToolNames(tools)
 	out := make([]skill.ToolInfo, 0, len(tools))
-	for _, tool := range tools {
+	for index, tool := range tools {
 		if tool == nil || tool.Tool == nil {
 			continue
 		}
 		out = append(out, skill.ToolInfo{
-			Name:        tool.Tool.Name,
+			Name:        callableNames[index],
 			Description: tool.Tool.Description,
 			InputSchema: cloneSchema(tool.Tool.InputSchema),
 			Metadata:    cloneSchema(tool.Metadata),

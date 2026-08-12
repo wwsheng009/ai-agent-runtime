@@ -33,6 +33,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -3129,26 +3130,11 @@ func firstSpawnTaskID(args map[string]interface{}) string {
 }
 
 func normalizeToolParameters(schema map[string]interface{}) map[string]interface{} {
-	if len(schema) == 0 {
-		return map[string]interface{}{
-			"type":                 "object",
-			"additionalProperties": false,
-		}
+	normalized, _, err := toolschema.Canonicalize(schema)
+	if err == nil {
+		return normalized
 	}
-
-	normalized := make(map[string]interface{}, len(schema)+1)
-	for key, value := range schema {
-		normalized[key] = value
-	}
-	if _, ok := normalized["type"]; !ok {
-		normalized["type"] = "object"
-	}
-	if paramType, ok := normalized["type"].(string); ok && paramType == "object" {
-		if _, ok := normalized["additionalProperties"]; !ok {
-			normalized["additionalProperties"] = false
-		}
-	}
-	return normalized
+	return cloneInterfaceMap(schema)
 }
 
 // AgentAction Agent 行动

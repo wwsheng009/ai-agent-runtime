@@ -444,6 +444,8 @@ func TestChatInteractionCoordinatorUnifiedLocalTranscriptUsesTerminalSessionOnly
 	if surface.PhysicalWritesEnabled() {
 		t.Fatal("legacy surface writer remained enabled")
 	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
 	output.Reset()
 
 	const assistant = "unified-local-assistant"
@@ -1280,5 +1282,124 @@ func TestChatInteractionCoordinatorEffectResultUsesBarrierAction(t *testing.T) {
 	}
 	if stats := coordinator.uiActor.Stats(); stats.LastAction != "EffectResult" {
 		t.Fatalf("effect result was not reduced as a barrier: %+v", stats)
+	}
+}
+
+// High-frequency ordered stream events must drain through the bounded bridge
+// queue and UI actor mailbox without wedging the run. A successful
+// llm.request.finished is only a transport boundary: the composer must stay
+// streaming until the authoritative assistant.message/session.end and the
+// sendMessage EndRun + CompleteWaiting lifecycle resolve it to Ready.
+func TestChatInteractionCoordinatorUnifiedHighFrequencyStreamDrainsToReady(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "high-frequency-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	coordinator.SetSurface(surface)
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	bridge.startOnce.Do(func() {})
+	go bridge.run()
+	t.Cleanup(func() { close(bridge.eventQueue) })
+
+	coordinator.StartWaiting()
+	bridge.BeginRun()
+
+	sessionID := session.RuntimeSession.ID
+	const turnID = "turn-high-frequency"
+	const streamID = "stream-high-frequency"
+	const deltaCount = 1024
+
+	post := func(eventType string, eventPayload map[string]interface{}) {
+		t.Helper()
+		bridge.Handle(runtimeevents.Event{
+			Type:      eventType,
+			SessionID: sessionID,
+			Payload:   eventPayload,
+		})
+	}
+
+	post(runtimechat.EventSessionStart, map[string]interface{}{"turn_id": turnID})
+	post(runtimechat.EventLLMRequestStarted, map[string]interface{}{
+		"turn_id": turnID, "stream_id": streamID,
+	})
+	for sequence := uint64(1); sequence <= deltaCount; sequence++ {
+		post(runtimechat.EventAssistantDelta, map[string]interface{}{
+			"turn_id": turnID, "stream_id": streamID, "sequence": sequence, "delta": "chunk ",
+		})
+	}
+	post(runtimechat.EventLLMRequestFinished, map[string]interface{}{
+		"turn_id": turnID, "stream_id": streamID, "success": true,
+	})
+
+	bridge.WaitForCurrentEvents(5 * time.Second)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellMutable {
+		t.Fatalf("llm.request.finished prematurely finalized active cell: %+v", state.Active)
+	}
+	coordinator.mu.Lock()
+	streamingActive := coordinator.streamingActive
+	coordinator.mu.Unlock()
+	if !streamingActive {
+		t.Fatal("llm.request.finished prematurely reset the stream before assistant.message")
+	}
+	if coordinator.AgentStage() != chatAgentStagePlanning {
+		t.Fatalf("agent stage after llm.request.finished = %q, want planning", coordinator.AgentStage())
+	}
+	if coordinator.IsReady() {
+		t.Fatal("llm.request.finished made the composer ready before EndRun")
+	}
+
+	const finalAnswer = "authoritative final answer"
+	post(runtimechat.EventAssistantMessage, map[string]interface{}{
+		"turn_id": turnID, "stream_id": streamID, "content": finalAnswer,
+	})
+	post(runtimechat.EventSessionEnd, map[string]interface{}{
+		"turn_id": turnID, "success": true,
+	})
+	bridge.EndRun()
+	coordinator.CompleteWaiting()
+
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	if coordinator.AgentStage() != chatAgentStageIdle {
+		t.Fatalf("agent stage after EndRun = %q, want idle", coordinator.AgentStage())
+	}
+	if !coordinator.IsReady() {
+		t.Fatal("composer did not return to Ready after EndRun + CompleteWaiting")
+	}
+	state = coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("run left active cell %+v, want inactive", state.Active)
+	}
+	bridge.progressMu.Lock()
+	enqueued := bridge.enqueuedEvents
+	processed := bridge.processedEvents
+	bridge.progressMu.Unlock()
+	if processed < enqueued {
+		t.Fatalf("bridge worker did not drain its queue: processed=%d enqueued=%d", processed, enqueued)
+	}
+	if stats := coordinator.uiActor.Stats(); stats.Pending != 0 {
+		t.Fatalf("UI actor still has %d pending actions", stats.Pending)
+	}
+	if !strings.Contains(output.String(), finalAnswer) {
+		t.Fatalf("TerminalSession output missing final answer: %q", output.String())
 	}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -28,7 +29,7 @@ func (a *MCPAdapter) FindTool(toolName string) (ToolInfo, error) {
 	}
 
 	return ToolInfo{
-		Name:             info.Tool.Name,
+		Name:             mcpregistry.CallableToolName(info, a.manager.ListTools()),
 		Description:      info.Tool.Description,
 		InputSchema:      cloneInputSchema(info.Tool.InputSchema),
 		Metadata:         cloneMeta(info.Metadata),
@@ -52,15 +53,64 @@ func (a *MCPAdapter) CallToolWithMeta(ctx interface{}, mcpName, toolName string,
 	if !ok || callCtx == nil {
 		callCtx = context.Background()
 	}
+	mcpName = strings.TrimSpace(mcpName)
+	toolName = strings.TrimSpace(toolName)
 
-	// 使用 toolName 作为参数调用（mcpName 可以忽略或用于路由）
-	result, err := a.manager.CallTool(callCtx, mcpName, toolName, args)
+	var info *mcpregistry.ToolInfo
+	if mcpName != "" {
+		tools := a.manager.ListTools()
+		info = findExplicitMCPTool(tools, mcpName, toolName)
+		if info == nil {
+			candidate, findErr := a.manager.FindTool(toolName)
+			if findErr == nil && matchesExplicitMCPTool(candidate, mcpName, toolName) {
+				info = candidate
+			}
+		}
+	} else {
+		var resolveErr error
+		info, resolveErr = a.manager.FindTool(toolName)
+		if resolveErr != nil {
+			return nil, nil, resolveErr
+		}
+	}
+	callMCPName, callToolName := mcpName, toolName
+	if info != nil && info.Tool != nil {
+		callMCPName = info.MCPName
+		callToolName = mcpregistry.ExecutionLookupName(info, a.manager.ListTools())
+	}
+	result, err := a.manager.CallTool(callCtx, callMCPName, callToolName, args)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// 提取文本内容和 metadata
-	return a.extractToolResult(result)
+	output, metadata, extractErr := a.extractToolResult(result)
+	if info != nil {
+		metadata = withMCPToolIdentity(metadata, info, toolName)
+	} else {
+		metadata = withRequestedMCPToolIdentity(metadata, mcpName, toolName)
+	}
+	return output, metadata, extractErr
+}
+
+func findExplicitMCPTool(tools []*mcpregistry.ToolInfo, mcpName, toolName string) *mcpregistry.ToolInfo {
+	for _, info := range tools {
+		if info != nil && info.Tool != nil && info.MCPName == mcpName &&
+			mcpregistry.CanonicalToolName(info.MCPName, info.Tool.Name) == toolName {
+			return info
+		}
+	}
+	for _, info := range tools {
+		if info != nil && info.Tool != nil && info.MCPName == mcpName && info.Tool.Name == toolName {
+			return info
+		}
+	}
+	return nil
+}
+
+func matchesExplicitMCPTool(info *mcpregistry.ToolInfo, mcpName, toolName string) bool {
+	return info != nil && info.Tool != nil && info.MCPName == mcpName &&
+		(info.Tool.Name == toolName || mcpregistry.CanonicalToolName(info.MCPName, info.Tool.Name) == toolName)
 }
 
 // extractToolResult 提取文本内容和 metadata。
@@ -90,14 +140,15 @@ func (a *MCPAdapter) extractToolResult(result *protocol.CallToolResult) (string,
 // ListTools 列出工具
 func (a *MCPAdapter) ListTools() []ToolInfo {
 	tools := a.manager.ListTools()
+	callableNames := mcpregistry.CallableToolNames(tools)
 	result := make([]ToolInfo, len(tools))
 
 	for i, t := range tools {
 		result[i] = ToolInfo{
-			Name:             t.Tool.Name,
+			Name:             callableNames[i],
 			Description:      t.Tool.Description,
 			InputSchema:      cloneInputSchema(t.Tool.InputSchema),
-			Metadata:         cloneMeta(t.Metadata),
+			Metadata:         withMCPToolIdentity(cloneMeta(t.Metadata), t, callableNames[i]),
 			MCPName:          t.MCPName,
 			MaxParallelCalls: a.resolveMaxParallelCalls(t.MCPName),
 			MCPTrustLevel:    a.resolveTrustLevel(t.MCPName),
@@ -145,6 +196,31 @@ func cloneMeta(meta map[string]any) map[string]interface{} {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func withMCPToolIdentity(metadata map[string]interface{}, info *mcpregistry.ToolInfo, callableName string) map[string]interface{} {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	if info == nil || info.Tool == nil {
+		return metadata
+	}
+	metadata["mcp_name"] = info.MCPName
+	metadata["mcp_raw_tool_name"] = info.Tool.Name
+	metadata["mcp_canonical_name"] = mcpregistry.CanonicalToolName(info.MCPName, info.Tool.Name)
+	metadata["tool_callable_name"] = strings.TrimSpace(callableName)
+	return metadata
+}
+
+func withRequestedMCPToolIdentity(metadata map[string]interface{}, mcpName, toolName string) map[string]interface{} {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata["mcp_name"] = mcpName
+	metadata["mcp_raw_tool_name"] = toolName
+	metadata["mcp_canonical_name"] = mcpregistry.CanonicalToolName(mcpName, toolName)
+	metadata["tool_callable_name"] = toolName
+	return metadata
 }
 
 // GetManager 获取底层 Manager

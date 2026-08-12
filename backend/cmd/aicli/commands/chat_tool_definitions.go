@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -67,31 +68,9 @@ func sortToolDefinitions(definitions []runtimetypes.ToolDefinition) {
 }
 
 func cloneToolParametersSchema(parameters map[string]interface{}) map[string]interface{} {
-	cloned := cloneFunctionSchema(parameters)
-	if len(cloned) == 0 {
-		return map[string]interface{}{
-			"type":                 "object",
-			"properties":           map[string]interface{}{},
-			"additionalProperties": false,
-		}
+	canonical, _, err := toolschema.Canonicalize(parameters)
+	if err == nil {
+		return canonical
 	}
-	if _, ok := cloned["type"]; !ok {
-		cloned["type"] = "object"
-	}
-	normalizeToolParametersObjectSchema(cloned)
-	return cloned
-}
-
-func normalizeToolParametersObjectSchema(schema map[string]interface{}) {
-	if schema == nil {
-		return
-	}
-	if schemaType, _ := schema["type"].(string); schemaType != "object" {
-		return
-	}
-	if properties, exists := schema["properties"]; exists {
-		if _, ok := properties.(map[string]interface{}); !ok {
-			schema["properties"] = map[string]interface{}{}
-		}
-	}
+	return cloneFunctionSchema(parameters)
 }

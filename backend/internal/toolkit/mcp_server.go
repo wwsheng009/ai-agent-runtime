@@ -34,12 +34,16 @@ func (s *ToolkitMCPServer) registerTools() {
 	for _, tool := range s.registry.List() {
 		// 为每个工具创建闭包捕获
 		t := tool
+		inputSchema, exists := s.registry.ParameterSchema(t.Name())
+		if !exists {
+			continue
+		}
 
 		// 构建 MCP Tool 定义
 		mcpTool := &mcp.Tool{
 			Name:        t.Name(),
 			Description: t.Description(),
-			InputSchema: t.Parameters(),
+			InputSchema: inputSchema,
 		}
 
 		// 注册到 MCP Server

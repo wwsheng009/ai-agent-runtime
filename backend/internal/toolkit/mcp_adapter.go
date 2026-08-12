@@ -8,7 +8,8 @@ import (
 
 // MCPAdapter 将 Tool 适配为 MCP Tool 格式
 type MCPAdapter struct {
-	tool Tool
+	tool        Tool
+	inputSchema map[string]interface{}
 }
 
 // NewMCPAdapter 创建 MCP 适配器
@@ -18,10 +19,14 @@ func NewMCPAdapter(tool Tool) MCPAdapter {
 
 // ToMCPTool 转换为 MCP Tool 格式
 func (a *MCPAdapter) ToMCPTool() *protocol.Tool {
+	inputSchema := a.inputSchema
+	if inputSchema == nil {
+		inputSchema = a.tool.Parameters()
+	}
 	tool := &protocol.Tool{
 		Name:        a.tool.Name(),
 		Description: a.tool.Description(),
-		InputSchema: a.tool.Parameters(),
+		InputSchema: inputSchema,
 	}
 	if provider, ok := a.tool.(ToolDefinitionMetadataProvider); ok {
 		if metadata := provider.DefinitionMetadata(); len(metadata) > 0 {
@@ -69,7 +74,11 @@ func RegistryToMCPToolsForContext(registry *Registry, listCtx ListToolsContext) 
 	tools := registry.ListForContext(listCtx)
 	mcpTools := make([]*protocol.Tool, 0, len(tools))
 	for _, tool := range tools {
-		adapter := NewMCPAdapter(tool)
+		inputSchema, exists := registry.ParameterSchema(tool.Name())
+		if !exists {
+			continue
+		}
+		adapter := MCPAdapter{tool: tool, inputSchema: inputSchema}
 		mcpTools = append(mcpTools, adapter.ToMCPTool())
 	}
 	return mcpTools

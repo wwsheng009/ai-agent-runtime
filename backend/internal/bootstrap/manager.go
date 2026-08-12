@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -194,12 +195,12 @@ func (m *Manager) buildLLMRuntime(gatewayProviderName string) (*llm.LLMRuntime, 
 	}
 
 	llmConfig := &llm.RuntimeConfig{
-		DefaultProvider: m.config.Agent.DefaultProvider,
-		DefaultModel:    defaultModel,
-		DefaultTimeout:  m.config.Agent.Timeout,
+		DefaultProvider:   m.config.Agent.DefaultProvider,
+		DefaultModel:      defaultModel,
+		DefaultTimeout:    m.config.Agent.Timeout,
+		StreamReadTimeout: firstProviderStreamReadTimeout(m.providerConfigs),
 	}
 	llmConfig.MaxRetries, llmConfig.RetryTuning, llmConfig.RetryRules = runtimeRetryConfigFromProviderConfigs(m.providerConfigs)
-
 	if m.resourceManager != nil && len(m.providerConfigs) == 0 {
 		if strings.TrimSpace(llmConfig.DefaultProvider) == "" {
 			llmConfig.DefaultProvider = providerName
@@ -387,6 +388,26 @@ func runtimeRetryConfigFromProviderConfigs(providerConfigs map[string]*llm.Provi
 		return maxRetries, providerConfig.RetryTuning, cloneRetryRules(providerConfig.RetryRules)
 	}
 	return -1, llm.RetryTuning{}, nil
+}
+
+// firstProviderStreamReadTimeout returns the first non-zero StreamReadTimeout
+// found in the provider configs. Deterministic ordering (sorted names) keeps
+// the result stable across calls.
+func firstProviderStreamReadTimeout(providerConfigs map[string]*llm.ProviderConfig) time.Duration {
+	if len(providerConfigs) == 0 {
+		return 0
+	}
+	names := make([]string, 0, len(providerConfigs))
+	for name := range providerConfigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if pc := providerConfigs[name]; pc != nil && pc.StreamReadTimeout > 0 {
+			return pc.StreamReadTimeout
+		}
+	}
+	return 0
 }
 
 func collectProviderAliases(providerConfig *llm.ProviderConfig, provider llm.ModelCatalogProvider) []string {

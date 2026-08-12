@@ -23,6 +23,10 @@ type RuntimeConfig struct {
 	RetryRules      []RetryRule       `yaml:"retryRules,omitempty" json:"retryRules,omitempty"`
 	Providers       map[string]string `yaml:"providers" json:"providers"` // provider name -> type
 	HealthCheck     HealthCheckConfig `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
+
+	// StreamReadTimeout 流式读取的空闲超时；<=0 表示不启用（默认）。
+	// 只对"该有数据却没有数据"的空闲窗口生效，不影响持续产出数据的长任务。
+	StreamReadTimeout time.Duration `yaml:"streamReadTimeout,omitempty" json:"streamReadTimeout,omitempty"`
 }
 
 // LLMRuntime LLM 运行时
@@ -253,6 +257,7 @@ func (r *LLMRuntime) RegisterGatewayClient(name string, resourceManager Resource
 		gatewayClient.SetMaxRetries(r.config.MaxRetries)
 		gatewayClient.SetRetryTuning(r.config.RetryTuning)
 		gatewayClient.SetRetryRules(r.config.RetryRules)
+		gatewayClient.SetStreamReadTimeout(r.config.StreamReadTimeout)
 	}
 
 	return r.RegisterProvider(name, gatewayClient)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	runtimehttpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -178,6 +179,13 @@ type ProviderConfig struct {
 	SupportsMaxOutputTokens *bool                    `json:"supportsMaxOutputTokens,omitempty"`
 	Proxy                   *agentconfig.ProxyConfig `json:"proxy,omitempty"`
 	RequestsPerMinute       int                      `json:"requestsPerMinute,omitempty"`
+
+	// StreamReadTimeout 流式读取的空闲超时；<=0 表示不启用（默认）。
+	// 只对"该有数据却没有数据"的空闲窗口生效，不影响持续产出数据的长任务。
+	StreamReadTimeout time.Duration `json:"-"`
+	// ResponseHeaderTimeout 上游响应头的等待上限；<=0 表示不启用。
+	// 覆盖"连接已建立但服务端不返回任何响应头"的挂起场景。
+	ResponseHeaderTimeout time.Duration `json:"-"`
 }
 
 // tokenBucketLimiter implements a simple sliding-window rate limiter.
@@ -254,6 +262,14 @@ func (p *ProviderWrapper) ListModelCapabilities() map[string]agentconfig.ModelCa
 		return nil
 	}
 	return CloneModelCapabilityMap(p.config.ModelCapabilities)
+}
+
+// streamReadTimeout returns the configured streaming idle timeout (0 = disabled).
+func (p *ProviderWrapper) streamReadTimeout() time.Duration {
+	if p == nil || p.config == nil {
+		return 0
+	}
+	return p.config.StreamReadTimeout
 }
 
 // DefaultModelName returns the provider-level default model from its config.
@@ -407,12 +423,18 @@ func NewProvider(config *ProviderConfig) (LegacyChatProvider, error) {
 func newProviderWrapperHTTPClients(config *ProviderConfig) (*http.Client, *http.Client) {
 	var timeout time.Duration
 	var proxy *agentconfig.ProxyConfig
+	var opts []runtimehttpclient.ProviderHTTPClientOptions
 	if config != nil {
 		timeout = config.Timeout
 		proxy = config.Proxy
+		if config.ResponseHeaderTimeout > 0 {
+			opts = append(opts, runtimehttpclient.ProviderHTTPClientOptions{
+				ResponseHeaderTimeout: config.ResponseHeaderTimeout,
+			})
+		}
 	}
 
-	client := newProviderHTTPClient(timeout, proxy, false)
+	client := newProviderHTTPClient(timeout, proxy, false, opts...)
 	streamClient := &http.Client{
 		Transport: client.Transport,
 	}
@@ -814,7 +836,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	}
 
 	var responseBuffer bytes.Buffer
-	streamReader := p.normalizeStreamReadCloser(adapterRequest.Model, newTeeReadCloser(resp.Body, &responseBuffer))
+	streamReader := p.normalizeStreamReadCloser(adapterRequest.Model, newTeeReadCloser(wrapStreamIdleTimeout(resp.Body, p.streamReadTimeout()), &responseBuffer))
 	defer streamReader.Close()
 	assistantMsg, err := p.adapter.HandleResponse(true, streamReader, callbacks)
 	_ = streamReader.Close()
@@ -1282,7 +1304,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		}
 
 		var responseBuffer bytes.Buffer
-		streamReader := p.normalizeStreamReadCloser(adapterRequest.Model, newTeeReadCloser(resp.Body, &responseBuffer))
+		streamReader := p.normalizeStreamReadCloser(adapterRequest.Model, newTeeReadCloser(wrapStreamIdleTimeout(resp.Body, p.streamReadTimeout()), &responseBuffer))
 		defer streamReader.Close()
 		assistantMsg, handleErr := p.adapter.HandleResponse(true, streamReader, callbacks)
 		_ = streamReader.Close()
