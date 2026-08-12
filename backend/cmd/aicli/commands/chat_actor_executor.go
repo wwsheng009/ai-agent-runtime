@@ -99,7 +99,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		if waitTimeout < 8*time.Second {
 			waitTimeout = 8 * time.Second
 		}
-		bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout))
+		if !bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout)) {
+			writeSessionDebugInfo(session, "[runtime-event] actor executor drain timeout before prompt result", false)
+		}
 		if runErr := bridge.RunError(); runErr != nil {
 			logActorExecutorFailureIfUnrecorded(session, prompt, runErr)
 			warnIfChatSessionSyncFails(session, "actor runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
@@ -185,7 +187,9 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 				waitTimeout = 8 * time.Second
 			}
 		}
-		bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout))
+		if !bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout)) {
+			writeSessionDebugInfo(session, "[runtime-event] actor executor drain timeout before goal continuation result", false)
+		}
 		if runErr := bridge.RunError(); runErr != nil {
 			warnIfChatSessionSyncFails(session, "actor goal continuation runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
 			warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
@@ -321,8 +325,8 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 		return nil
 	}
 	runMeta := &team.RunMeta{}
-	if session.PermissionMode != "" {
-		runMeta.PermissionMode = string(session.PermissionMode)
+	if permissionMode := chatSessionPermissionMode(session); permissionMode != "" {
+		runMeta.PermissionMode = string(permissionMode)
 	}
 	if session.RuntimeSession != nil {
 		// Ordinary interactive/child sessions never own a Team completion
@@ -360,10 +364,11 @@ func shouldPropagateTeamRunMeta(session *ChatSession, binding *chatTeamBinding) 
 	if interactiveTeamPendingByTeamID(session, binding.TeamID) {
 		return true
 	}
-	if session == nil || session.ActiveTeam == nil {
+	activeTeam := chatSessionActiveTeam(session)
+	if session == nil || activeTeam == nil {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(session.ActiveTeam.TeamID), strings.TrimSpace(binding.TeamID)) {
+	if !strings.EqualFold(strings.TrimSpace(activeTeam.TeamID), strings.TrimSpace(binding.TeamID)) {
 		return false
 	}
 	return session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil
@@ -648,10 +653,11 @@ func renderAsyncTeamLaunchNotice(session *ChatSession, previousTeamID string) {
 }
 
 func activeTeamID(session *ChatSession) string {
-	if session == nil || session.ActiveTeam == nil {
+	activeTeam := chatSessionActiveTeam(session)
+	if activeTeam == nil {
 		return ""
 	}
-	return strings.TrimSpace(session.ActiveTeam.TeamID)
+	return strings.TrimSpace(activeTeam.TeamID)
 }
 
 func latestAssistantResponseText(session *ChatSession) string {

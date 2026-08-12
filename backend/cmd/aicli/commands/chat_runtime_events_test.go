@@ -953,6 +953,51 @@ func TestChatRuntimeEventBridge_SessionCompactCompletedResetsContextUsageToToken
 	}
 }
 
+func TestChatRuntimeEventBridge_SessionCompactCompletedRestoresRuntimeStateWithoutReentrantDeadlock(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), nil)
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "tester")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	session := &ChatSession{
+		RuntimeSession:          runtimeSession,
+		SessionManager:          manager,
+		Provider:                config.Provider{Protocol: "test"},
+		ProviderName:            "test-provider",
+		Model:                   "test-model",
+		TokenCount:              9999,
+		ContextTokenCount:       23099,
+		TurnContextTokenCount:   24299,
+		ContextWindowTokenCount: 270000,
+		NoInteractive:           true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	done := make(chan struct{})
+	go func() {
+		bridge.handleEvent(runtimeevents.Event{
+			Type:      runtimechat.EventSessionCompactCompleted,
+			SessionID: runtimeSession.ID,
+			Payload: map[string]interface{}{
+				"token_after":        1200,
+				"max_context_tokens": 270000,
+			},
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("compact completed handler deadlocked while restoring runtime context")
+	}
+	if session.RuntimeSession == nil || session.RuntimeSession.ID != runtimeSession.ID {
+		t.Fatalf("expected runtime session restore to keep session id, got %#v", session.RuntimeSession)
+	}
+	if session.runtimeSessionUnpersisted {
+		t.Fatal("expected compact completion to restore the runtime session into the CLI session")
+	}
+}
+
 func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
 		Stage:    "tool_result",
@@ -3664,6 +3709,122 @@ func TestChatRuntimeEvents_WaitForCurrentEventsWaitsForLateArrivingEvents(t *tes
 	}
 	if elapsed < 20*time.Millisecond {
 		t.Fatalf("expected wait to stay pending for late event arrival, got %v", elapsed)
+	}
+}
+
+func TestChatRuntimeEvents_WaitForCurrentEventsReportsTimeout(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.progressMu.Lock()
+	bridge.enqueuedEvents = 1
+	bridge.processedEvents = 0
+	bridge.progressMu.Unlock()
+	if bridge.WaitForCurrentEvents(50 * time.Millisecond) {
+		t.Fatal("WaitForCurrentEvents returned true while an event was never processed")
+	}
+}
+
+func TestChatRuntimeEvents_WaitForCurrentEventsReportsSettled(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.progressMu.Lock()
+	bridge.enqueuedEvents = 1
+	bridge.processedEvents = 1
+	bridge.progressMu.Unlock()
+	if !bridge.WaitForCurrentEvents(300 * time.Millisecond) {
+		t.Fatal("WaitForCurrentEvents returned false after the queue settled")
+	}
+}
+
+func TestChatRuntimeEvents_NextRunEpochRejectsLateQueuedEventAndAmbientRunEndEventsStillRender(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	handled := 0
+	bridge.writeLine = func(string) { handled++ }
+
+	bridge.BeginRun()
+	firstEpoch := bridge.runEpoch
+	bridge.EndRun()
+	if !bridge.isRunEpochCurrent(firstEpoch) {
+		t.Fatal("ambient run-end events must remain current until the next run begins")
+	}
+
+	bridge.handleQueuedEvent(chatRuntimeQueuedEvent{
+		event: runtimeevents.Event{Type: "planning.completed"},
+		epoch: firstEpoch,
+	})
+	if handled != 1 {
+		t.Fatalf("ambient run-end event was not handled: %d", handled)
+	}
+
+	bridge.BeginRun()
+	nextEpoch := bridge.runEpoch
+	if nextEpoch == firstEpoch || !bridge.isRunEpochCurrent(nextEpoch) {
+		t.Fatal("run epoch did not advance")
+	}
+	bridge.handleQueuedEvent(chatRuntimeQueuedEvent{
+		event: runtimeevents.Event{Type: "planning.completed"},
+		epoch: firstEpoch,
+	})
+	if handled != 1 {
+		t.Fatalf("late queued event from previous run was handled: %d", handled)
+	}
+	bridge.handleQueuedEvent(chatRuntimeQueuedEvent{
+		event: runtimeevents.Event{Type: "planning.completed"},
+		epoch: nextEpoch,
+	})
+	if handled != 2 {
+		t.Fatalf("next run event was not handled: %d", handled)
+	}
+}
+
+func TestChatRuntimeEvents_NextRunEpochDropsActorRuntimeActionsWhileRunEndActionsStayValid(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	var output bytes.Buffer
+	coordinator.SetWriter(&output)
+	bridge := newChatRuntimeEventBridge(session)
+
+	runtimeAction := func(epoch uint64) ui.RuntimeEvent {
+		return ui.RuntimeEvent{
+			Kind: chatUIRuntimeEventActionKind,
+			Payload: chatRuntimeEventUIAction{
+				bridge: bridge,
+				event:  runtimeevents.Event{Type: "planning.completed"},
+				epoch:  epoch,
+			},
+		}
+	}
+
+	bridge.BeginRun()
+	epoch := bridge.runEpoch
+	coordinator.applyRuntimeEventAction(runtimeAction(epoch))
+	coordinator.waitUIActorIdle()
+	firstLen := output.Len()
+	if firstLen == 0 {
+		t.Fatal("active run event did not render")
+	}
+
+	bridge.EndRun()
+	before := output.Len()
+	coordinator.applyRuntimeEventAction(runtimeAction(epoch))
+	coordinator.waitUIActorIdle()
+	if output.Len() <= before {
+		t.Fatalf("ambient run-end action did not render: %q", output.String())
+	}
+	before = output.Len()
+
+	bridge.BeginRun()
+	nextEpoch := bridge.runEpoch
+	coordinator.applyRuntimeEventAction(runtimeAction(epoch))
+	coordinator.waitUIActorIdle()
+	if output.Len() != before {
+		t.Fatalf("previous run epoch action mutated next run output: %q", output.String())
+	}
+	coordinator.applyRuntimeEventAction(runtimeAction(nextEpoch))
+	coordinator.waitUIActorIdle()
+	if output.Len() <= before {
+		t.Fatal("next run event did not render")
 	}
 }
 

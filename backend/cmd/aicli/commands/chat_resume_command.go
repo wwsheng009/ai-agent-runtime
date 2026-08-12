@@ -211,7 +211,11 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 	// The first fullscreen frame must observe its logical lease state. This is
 	// a modal lifecycle barrier, not a per-keystroke wait; list navigation reads
 	// raw input while the primary presenter remains suspended by the lease.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("open resume picker") {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器渲染未就绪")), false)
+		return
+	}
 
 	items, selectable := buildResumeFullScreenItems(sessions, current, time.Now())
 	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
@@ -226,7 +230,10 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 	releaseErr := lease.Release(context.Background())
 	// LeaseReleased is the ordering point for the primary recovery frame. Wait
 	// only for this one lifecycle transition before mounting restored history.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("close resume picker") {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器关闭未就绪")), false)
+		return
+	}
 
 	if releaseErr != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭会话选择器失败: %w", releaseErr)), false)

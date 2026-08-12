@@ -86,7 +86,11 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 	}
 	// Lifecycle barrier only: the first list frame sees the matching actor
 	// state. Key navigation stays local to the fullscreen list.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("open export picker") {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("导出选择器渲染未就绪")), false)
+		return
+	}
 
 	// Stage 1: pick the target session.
 	current := currentRuntimeSessionForResumeList(session)
@@ -125,7 +129,10 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 	releaseErr := lease.Release(context.Background())
 	// LeaseReleased is the primary recovery barrier. Do not write files until
 	// the actor has observed it.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("close export picker") {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("导出选择器关闭未就绪")), false)
+		return
+	}
 
 	if releaseErr != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭导出选择器失败: %w", releaseErr)), false)
@@ -161,7 +168,7 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 func closeExportPickerLease(session *ChatSession, lease ui.ScreenLease) {
 	_ = session.Interaction.postUIAction(ui.CloseExportPicker{LeaseID: lease.ID()})
 	_ = lease.Release(context.Background())
-	session.Interaction.waitUIActorIdle()
+	session.Interaction.waitUIActorIdleBounded("close export picker")
 }
 
 // buildExportSessionFullScreenItems builds export rows for the session picker.
@@ -216,7 +223,7 @@ func executeStructuredExportCommand(session *ChatSession, command string) (Comma
 	}
 	if !opts.ExplicitTarget && canOpenChatExportPicker(session) {
 		return CommandResult{
-			Action:         CommandContinue,
+			Action:           CommandContinue,
 			OpenExportPicker: &ExportPickerRequest{},
 		}, true
 	}

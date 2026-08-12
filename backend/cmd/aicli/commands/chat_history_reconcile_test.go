@@ -638,6 +638,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	// This reaches the live EventBus subscription established by bridge.start,
 	// rather than injecting directly into the Scene. It is deliberately mutable
 	// so the final frame must compose active reasoning below the history tail.
+	bridge.BeginRun()
 	eventBus.Publish(runtimeevents.Event{
 		Type:      "assistant.reasoning",
 		SessionID: runtimeSession.ID,

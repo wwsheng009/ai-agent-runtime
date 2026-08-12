@@ -153,8 +153,13 @@ type ChatSession struct {
 	LocalRuntimeHost    *localChatRuntimeHost   // actor-first local runtime host
 	actorWarmupMu       sync.Mutex
 	actorWarmup         *chatActorWarmup
-	Interaction         *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
-	Surface             *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	// runtimeCtxMu guards the runtime-context fields that the event bridge
+	// reads while the actor/executor restores them from a runtime session:
+	// DebugMode, PermissionMode, ApprovalReuseMode, SelectedAgentTarget,
+	// RequestedPermissionMode, EffectivePermissionMode and ActiveTeam.
+	runtimeCtxMu sync.RWMutex
+	Interaction  *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
+	Surface      *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
 	// TerminalSession is the sole physical writer for the unified interactive
 	// renderer. Surface remains only as a compatibility state facade while the
 	// session is active; it must not emit terminal bytes in that mode.
@@ -732,8 +737,9 @@ func printSessionInfo(session *ChatSession) {
 		printChatSessionMetaRow("Reasoning Output:", "off")
 	}
 	if session.LocalRuntimeHost != nil {
-		printChatSessionMetaRow("Permission Mode:", string(session.PermissionMode))
-		printChatSessionMetaRow("Approval Reuse:", formatChatApprovalReuseMode(session.ApprovalReuseMode))
+		ctx := snapshotChatRuntimeContext(session)
+		printChatSessionMetaRow("Permission Mode:", string(ctx.PermissionMode))
+		printChatSessionMetaRow("Approval Reuse:", formatChatApprovalReuseMode(ctx.ApprovalReuseMode))
 	}
 	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
 		value := fmt.Sprintf("%d pending", queuedCount)
@@ -1055,8 +1061,9 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 	payload.EffectiveModel = strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model))
 	payload.RequestedReasoningEffort = runtimetypes.NormalizeReasoningEffort(firstNonEmptyChatValue(session.RequestedReasoningEffort, session.ReasoningEffort))
 	payload.EffectiveReasoningEffort = runtimetypes.NormalizeReasoningEffort(firstNonEmptyChatValue(session.EffectiveReasoningEffort, session.ReasoningEffort))
-	payload.RequestedPermissionMode = strings.TrimSpace(firstNonEmptyChatValue(session.RequestedPermissionMode, string(session.PermissionMode)))
-	payload.EffectivePermissionMode = strings.TrimSpace(firstNonEmptyChatValue(session.EffectivePermissionMode, string(session.PermissionMode)))
+	ctx := snapshotChatRuntimeContext(session)
+	payload.RequestedPermissionMode = strings.TrimSpace(firstNonEmptyChatValue(ctx.RequestedPermissionMode, string(ctx.PermissionMode)))
+	payload.EffectivePermissionMode = strings.TrimSpace(firstNonEmptyChatValue(ctx.EffectivePermissionMode, string(ctx.PermissionMode)))
 	payload.RouteWarnings = append([]string(nil), session.RouteWarnings...)
 	payload.FallbackUsed = session.FallbackUsed
 	payload.FallbackReason = strings.TrimSpace(session.FallbackReason)

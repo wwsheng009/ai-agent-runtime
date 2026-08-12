@@ -163,9 +163,10 @@ type chatInteractionCoordinator struct {
 	// FixedBottomSurface may remain enabled as a compatibility state facade, but
 	// its physical writer is fenced before primaryPresenter is attached.
 	// Tests that do not enable this switch retain the legacy writer.
-	unifiedRenderer  bool
-	primaryPresenter *ui.TerminalSessionPresenter
-	terminalSession  *ui.TerminalSession
+	unifiedRenderer         bool
+	terminalWritesAbandoned bool
+	primaryPresenter        *ui.TerminalSessionPresenter
+	terminalSession         *ui.TerminalSession
 	// terminalExecutor remains a diagnostic compatibility alias. New code must
 	// use primaryPresenter so effect binding and shutdown stay paired.
 	terminalExecutor      *ui.TerminalSessionExecutor
@@ -928,7 +929,7 @@ func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Ti
 	sequence := c.dynamicStatusTimerSeq
 	c.scheduleRenderIntent(renderengine.FrameKeyDynamicStatus, "dynamic-status", delay, func() {
 		// Phase 1（IR-11）：回调只投递 action，业务在 reducer 内执行。
-		c.postUIAction(ui.Timer{Key: renderengine.FrameKeyDynamicStatus, Generation: sequence})
+		c.postScheduledUIAction(ui.Timer{Key: renderengine.FrameKeyDynamicStatus, Generation: sequence})
 	})
 }
 
@@ -2173,7 +2174,7 @@ func chatPlanModeActive(session *ChatSession) bool {
 	if session == nil {
 		return false
 	}
-	return session.PermissionMode == runtimepolicy.ModePlan || planmode.IsActive(loadChatPlanMode(session))
+	return chatSessionPermissionMode(session) == runtimepolicy.ModePlan || planmode.IsActive(loadChatPlanMode(session))
 }
 
 func chatSurfacePlanModeStatusSegment(session *ChatSession) chatStatusSegment {
@@ -5436,7 +5437,7 @@ func (c *chatInteractionCoordinator) scheduleActiveStableCommitLocked() {
 	sequence := c.stableCommitTimerSeq
 	c.scheduleRenderIntent(renderengine.FrameKeyStableCommit, "stable-commit", delay, func() {
 		// Phase 1（IR-11）：回调只投递 action，业务在 reducer 内执行。
-		c.postUIAction(ui.Timer{Key: renderengine.FrameKeyStableCommit, Generation: sequence})
+		c.postScheduledUIAction(ui.Timer{Key: renderengine.FrameKeyStableCommit, Generation: sequence})
 	})
 }
 
@@ -5973,7 +5974,7 @@ func (c *chatInteractionCoordinator) scheduleActiveStreamFrameLocked() {
 		// A frame deadline is only an intent. The pump posts the coalescable
 		// DrawRequested action; the reducer is the only place that reads active
 		// stream state and paints the retained ActiveBand.
-		c.postUIAction(ui.DrawRequested{
+		c.postScheduledUIAction(ui.DrawRequested{
 			Key:        renderengine.FrameKeyActiveFrame,
 			Reason:     "active-frame",
 			Dirty:      renderengine.DirtyBand,
@@ -6194,7 +6195,9 @@ func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
 		_ = c.postUIAction(ui.SetThemeContextAction{Theme: ui.CurrentThemeContext()})
 	}
 	if c.postUIAction(ui.Resize{}) {
-		c.waitUIActorIdle()
+		if !c.waitUIActorIdleBounded("RefreshActiveStreamViewport") {
+			return
+		}
 		c.RequestUnifiedFrame()
 		return
 	}
@@ -6547,6 +6550,6 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 	// Phase 1（IR-11）：回调只投递 action，绘制移入 reducer
 	// （paintScheduledPromptFrame，chat_ui_actor.go）。
 	c.scheduleRenderIntent(renderengine.FrameKeyPrompt, "prompt", delay, func() {
-		c.postUIAction(ui.Timer{Key: renderengine.FrameKeyPrompt, Generation: seq})
+		c.postScheduledUIAction(ui.Timer{Key: renderengine.FrameKeyPrompt, Generation: seq})
 	})
 }

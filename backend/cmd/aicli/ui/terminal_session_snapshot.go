@@ -1,9 +1,12 @@
 package ui
 
 type terminalSessionScheduleSnapshot struct {
-	projectionUnknown bool
-	pendingToken      uint64
-	pendingGeneration uint64
+	projectionUnknown      bool
+	reconciliationRequired bool
+	recoveryActionable     bool
+	pendingToken           uint64
+	pendingGeneration      uint64
+	stateRevision          uint64
 }
 
 type terminalSessionControllerSnapshot struct {
@@ -24,7 +27,12 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	effects := c.state.HistoryEffects
-	snapshot := terminalSessionScheduleSnapshot{projectionUnknown: effects.ProjectionUnknown}
+	snapshot := terminalSessionScheduleSnapshot{
+		projectionUnknown:      effects.ProjectionUnknown,
+		reconciliationRequired: effects.ReconciliationRequired,
+		recoveryActionable:     terminalHistoryRecoveryActionable(c.state),
+		stateRevision:          c.revision,
+	}
 	if !effects.HasPending() || effects.ledger == nil {
 		return snapshot
 	}
@@ -113,6 +121,30 @@ func (c *UIController) terminalSessionHasPending() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state.HistoryEffects.HasPending()
+}
+
+// terminalSessionHasActionableWork reports whether the executor may continue
+// immediately after one transaction: an eligible pending history token or a
+// lease/freeze-unblocked recovery obligation. Executor-published actions advance
+// the actor revision, so revision comparison cannot distinguish them from
+// external frame intents; coalesced presenter requests already own the
+// external-wake path through Request().
+func (c *UIController) terminalSessionHasActionableWork() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.HistoryEffects.HasPending() || terminalHistoryRecoveryActionable(c.state)
+}
+
+// terminalHistoryRecoveryActionable distinguishes a recovery obligation from
+// work that may execute now. Alternate-screen leases and frozen history queues
+// retain the obligation but must not make the executor spin on Deferred plans.
+func terminalHistoryRecoveryActionable(state UIControllerState) bool {
+	effects := state.HistoryEffects
+	return !state.Lease.Active && !effects.Frozen &&
+		(effects.ProjectionUnknown || effects.ReconciliationRequired)
 }
 
 func (c *UIController) terminalSessionCommitAckedAndHasPending(token uint64) bool {

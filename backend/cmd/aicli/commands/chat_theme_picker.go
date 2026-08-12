@@ -56,7 +56,11 @@ func openChatThemePicker(session *ChatSession, _ ThemePickerRequest) {
 	}
 	// Lifecycle barrier only: the first list frame sees the matching actor
 	// state. Key navigation stays local to the fullscreen list.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("open theme picker") {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("主题选择器渲染未就绪")), false)
+		return
+	}
 
 	items, picks := buildThemePickerFullScreenItems(snapPalette, snapMode, snapSyntax)
 	workPalette, workMode, workSyntax := snapPalette, snapMode, snapSyntax
@@ -114,7 +118,12 @@ func openChatThemePicker(session *ChatSession, _ ThemePickerRequest) {
 	releaseErr := lease.Release(context.Background())
 	// LeaseReleased is the primary recovery barrier. Do not apply the theme or
 	// mutate session state until the actor has observed it.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("close theme picker") {
+		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
+		_ = ui.SetSyntaxTheme(snapSyntax)
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("主题选择器关闭未就绪")), false)
+		return
+	}
 
 	if releaseErr != nil {
 		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
@@ -180,7 +189,7 @@ func executeStructuredThemeCommand(session *ChatSession, command string) (Comman
 			}, true
 		}
 		return CommandResult{
-			Action:        CommandContinue,
+			Action:          CommandContinue,
 			OpenThemePicker: &ThemePickerRequest{},
 		}, true
 	case themeCommandSet:

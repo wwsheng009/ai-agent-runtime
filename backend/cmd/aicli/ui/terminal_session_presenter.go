@@ -3,7 +3,10 @@ package ui
 import (
 	"io"
 	"sync"
+	"time"
 )
+
+const terminalWriterAbortGrace = 2 * time.Second
 
 // TerminalGeometryProbe reads the dimensions negotiated by the terminal
 // owner. It must not write terminal bytes. The presenter turns a changed
@@ -149,22 +152,58 @@ func (p *TerminalSessionPresenter) WaitIdle() {
 // terminal worker. It must be called before UIController.Close so no effect
 // callback can outlive the terminal writer.
 func (p *TerminalSessionPresenter) Close() {
+	_ = p.CloseTimeout(0)
+}
+
+// CloseTimeout is the bounded shutdown entry point. It first lets a healthy
+// worker finish. If the worker is still blocked after timeout, it aborts the
+// session writer (which releases the global terminal lock) and waits a short
+// grace period for the worker to publish its failure result. A false return
+// means the process must treat the terminal as abandoned.
+func (p *TerminalSessionPresenter) CloseTimeout(timeout time.Duration) bool {
 	if p == nil {
-		return
+		return true
 	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return
+		// A repeated close must not claim success just because the first call
+		// already set the closed flag. The physical worker may still be blocked
+		// on the underlying writer, so re-check its bounded drain result.
+		if p.executor == nil {
+			return true
+		}
+		return p.executor.CloseTimeout(timeout)
 	}
 	p.closed = true
+	session := (*TerminalSession)(nil)
+	if p.executor != nil {
+		session = p.executor.session
+	}
 	p.mu.Unlock()
 	if p.controller != nil {
 		_ = p.controller.SetEffectConsumer(nil)
 	}
-	if p.executor != nil {
-		p.executor.Close()
+	if p.executor == nil {
+		return true
 	}
+	if p.executor.CloseTimeout(timeout) {
+		return true
+	}
+	if session != nil {
+		_ = session.AbortTerminalWrite()
+	}
+	return p.executor.CloseTimeout(terminalWriterAbortGrace)
+}
+
+// AbortTerminalWrite interrupts an in-flight physical write so a bounded
+// CloseTimeout can finish. It is idempotent and safe to call from a shutdown
+// watchdog while the blocked write still holds the session mutex.
+func (p *TerminalSessionPresenter) AbortTerminalWrite() error {
+	if p == nil || p.executor == nil || p.executor.session == nil {
+		return nil
+	}
+	return p.executor.session.AbortTerminalWrite()
 }
 
 // Session exposes the physical projection object for lifecycle code that must

@@ -460,7 +460,7 @@ func sessionSelectedAgentTarget(session *ChatSession) string {
 	if session == nil {
 		return ""
 	}
-	return strings.TrimSpace(session.SelectedAgentTarget)
+	return strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 }
 
 func completeModelSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {

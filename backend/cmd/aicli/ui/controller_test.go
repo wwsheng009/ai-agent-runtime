@@ -479,6 +479,32 @@ func TestUIController_PostDeferredPreservesFIFOBeyondMailboxCapacity(t *testing.
 	}
 }
 
+func TestUIController_PostDeferredStatsTrackOverflowAndMerge(t *testing.T) {
+	c := NewUIController(UIControllerConfig{MailboxSize: 2}, nil, nil)
+	defer c.Close()
+
+	if !c.PostDeferred(DrawRequested{Key: "scheduled.a"}) {
+		t.Fatal("first deferred draw rejected")
+	}
+	if !c.PostDeferred(DrawRequested{Key: "scheduled.a"}) {
+		t.Fatal("coalescable deferred draw rejected")
+	}
+	if !c.PostDeferred(DrawRequested{Key: "scheduled.b"}) {
+		t.Fatal("second-key deferred draw rejected")
+	}
+	if !c.PostDeferred(DrawRequested{Key: "scheduled.c"}) {
+		t.Fatal("third-key deferred draw rejected")
+	}
+
+	stats := c.Stats()
+	if stats.DeferredPosted != 4 || stats.DeferredMerged != 1 {
+		t.Fatalf("deferred counters = %+v, want posted=4 merged=1", stats)
+	}
+	if stats.Pending != 3 || stats.PeakPending != 3 || stats.CapacityOverflow != 1 {
+		t.Fatalf("deferred queue stats = %+v, want pending=3 peak=3 overflow=1", stats)
+	}
+}
+
 func TestUIController_FollowupRejectsOutsideReducer(t *testing.T) {
 	c, _ := newP1Controller(t, 1)
 	defer c.Close()
@@ -1278,5 +1304,34 @@ func TestInputEventSequenceMergeKeepsNewestDraftAndRenderIntent(t *testing.T) {
 	got, ok := merged.(InputEvent)
 	if !ok || got.Text != "new" || got.Sequence != 2 || !got.Render {
 		t.Fatalf("merged InputEvent = %#v, want newest text with preserved render", merged)
+	}
+}
+
+func TestHistoryCommitWakeNeededForStandaloneScrollbackReconciliation(t *testing.T) {
+	state := UIControllerState{}
+	state.HistoryEffects.ProjectionUnknown = false
+	state.HistoryEffects.ReconciliationRequired = true
+
+	if !historyCommitWakeNeeded(HistoryProjectionRecovered{}, state) {
+		t.Fatal("HistoryProjectionRecovered did not wake a known viewport with outstanding reconciliation")
+	}
+	if !historyCommitWakeNeeded(FinalizeActiveCellAction{}, state) {
+		t.Fatal("finalize did not wake a known viewport with outstanding reconciliation")
+	}
+
+	state.Lease.Active = true
+	if historyCommitWakeNeeded(HistoryProjectionRecovered{}, state) {
+		t.Fatal("lease-active state must not wake an executor that cannot run")
+	}
+	state.Lease.Active = false
+	state.HistoryEffects.Frozen = true
+	if historyCommitWakeNeeded(HistoryProjectionRecovered{}, state) {
+		t.Fatal("frozen history must not wake an executor that cannot run")
+	}
+
+	state.HistoryEffects.Frozen = false
+	state.HistoryEffects.ReconciliationRequired = false
+	if historyCommitWakeNeeded(HistoryProjectionRecovered{}, state) {
+		t.Fatal("known reconciled state should not wake on recovery publication")
 	}
 }

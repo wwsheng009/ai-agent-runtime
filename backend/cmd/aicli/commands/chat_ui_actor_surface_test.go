@@ -1128,6 +1128,61 @@ func TestChatInteractionCoordinatorPromptInputNeverWaitsForFullMailbox(t *testin
 	}
 }
 
+func TestChatInteractionCoordinatorPostScheduledUIActionNeverWaitsForFullMailbox(t *testing.T) {
+	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	blocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocker) }) }
+	entered := make(chan struct{})
+	first := true
+	actor := ui.NewUIController(ui.UIControllerConfig{MailboxSize: 1}, ui.ReducerFunc(func(revision uint64, action ui.UIAction) []ui.Effect {
+		if first {
+			first = false
+			close(entered)
+			<-blocker
+		}
+		return coordinator.reduceUIAction(revision, action)
+	}), nil)
+	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	go actor.Run()
+	t.Cleanup(func() {
+		release()
+		coordinator.Shutdown()
+	})
+
+	if !coordinator.postUIAction(ui.Timer{Key: "test.scheduled-block"}) {
+		t.Fatal("failed to post blocking actor action")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("actor did not enter blocking reducer")
+	}
+	if !coordinator.postUIAction(ui.LeaseAcquired{LeaseID: 1}) {
+		t.Fatal("failed to fill actor mailbox")
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		coordinator.postScheduledUIAction(ui.Timer{Key: "scheduled.a", Generation: 1})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("scheduled UI action waited for a full actor mailbox")
+	}
+
+	release()
+	deadline := time.Now().Add(time.Second)
+	for actor.Stats().Processed < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if stats := actor.Stats(); stats.Processed < 3 || stats.DeferredPosted != 1 || stats.CapacityOverflow != 1 {
+		t.Fatalf("scheduled action was not tracked as deferred: %+v", stats)
+	}
+}
+
 func TestChatInteractionCoordinatorPromptEditorStatusNeverWaitsForFullMailbox(t *testing.T) {
 	coordinator := newChatInteractionCoordinator(&ChatSession{})
 	blocker := make(chan struct{})

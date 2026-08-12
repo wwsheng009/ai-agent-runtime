@@ -553,8 +553,8 @@ func restoreLocalRuntimeHostTeamState(session *ChatSession) {
 		warnIfChatSessionSyncFails(session, "restore ambient team binding", syncRuntimeSessionFromChat(session))
 	}
 	validateAmbientTeamBinding(session, session.LocalRuntimeHost.TeamStore)
-	if session.ActiveTeam != nil && strings.TrimSpace(session.ActiveTeam.TeamID) != "" {
-		session.LocalRuntimeHost.replayStoredTerminalTeamLifecycleEvents(session.ActiveTeam.TeamID)
+	if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
+		session.LocalRuntimeHost.replayStoredTerminalTeamLifecycleEvents(activeTeam.TeamID)
 	}
 	warnIfChatSessionSyncFails(session, "sync ambient team lifecycle state", syncAmbientTeamLifecycleState(session))
 	session.LocalRuntimeHost.syncTeamLifecycleLoops()
@@ -636,8 +636,9 @@ func printChatSessionPreamble(session *ChatSession) {
 		printChatSessionInfoRow(os.Stderr, "Reasoning Effort:", reasoningEffort, chatSessionMetaLabelWidth)
 	}
 	if session.LocalRuntimeHost != nil {
-		printChatSessionInfoRow(os.Stderr, "Permission Mode:", string(session.PermissionMode), chatSessionMetaLabelWidth)
-		printChatSessionInfoRow(os.Stderr, "Approval Reuse:", formatChatApprovalReuseMode(session.ApprovalReuseMode), chatSessionMetaLabelWidth)
+		ctx := snapshotChatRuntimeContext(session)
+		printChatSessionInfoRow(os.Stderr, "Permission Mode:", string(ctx.PermissionMode), chatSessionMetaLabelWidth)
+		printChatSessionInfoRow(os.Stderr, "Approval Reuse:", formatChatApprovalReuseMode(ctx.ApprovalReuseMode), chatSessionMetaLabelWidth)
 	}
 	if summary := runtimepolicy.FormatPermissionsOverlaySummary(session.PermissionsOverlay); summary != "" && summary != "<none>" {
 		printChatSessionInfoRow(os.Stderr, "Permission Rules:", summary, chatSessionMetaLabelWidth)

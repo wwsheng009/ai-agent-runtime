@@ -670,7 +670,7 @@ func executeStructuredDebugModeCommand(session *ChatSession, enabled bool) Comma
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
 	}
-	session.DebugMode = enabled
+	setChatDebugModeState(session, enabled)
 	if session.Surface != nil {
 		session.Surface.SetPaintTraceEnabled(enabled)
 	}
@@ -825,7 +825,7 @@ func executeStructuredPermissionModeCommand(session *ChatSession, command string
 	}
 	value := strings.TrimSpace(extractCommandArgument(command))
 	if value == "" {
-		return commandTextResult(fmt.Sprintf("当前 permission-mode: %s", session.PermissionMode))
+		return commandTextResult(fmt.Sprintf("当前 permission-mode: %s", chatSessionPermissionMode(session)))
 	}
 	mode, err := parseChatPermissionMode(value, false)
 	if err != nil {
@@ -834,12 +834,7 @@ func executeStructuredPermissionModeCommand(session *ChatSession, command string
 	if mode == "bypass_permissions" {
 		return commandTextResult("错误: /permission-mode bypass_permissions 需要确认交互，尚未迁移到统一渲染命令通道。")
 	}
-	session.PermissionMode = mode
-	session.RequestedPermissionMode = string(mode)
-	session.EffectivePermissionMode = string(mode)
-	if session.ActiveTeam != nil {
-		session.ActiveTeam.PermissionMode = mode
-	}
+	setChatPermissionMode(session, mode)
 	message := fmt.Sprintf("提示: 已切换到 permission-mode=%s", mode)
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		message += fmt.Sprintf("\n警告: 切换 permission mode 后同步会话失败: %v", err)
@@ -853,7 +848,7 @@ func executeStructuredApprovalReuseCommand(session *ChatSession, command string)
 	}
 	value := strings.ToLower(strings.TrimSpace(extractCommandArgument(command)))
 	if value == "" || value == "status" || value == "list" {
-		lines := []string{fmt.Sprintf("当前 approval-reuse: %s", formatChatApprovalReuseMode(session.ApprovalReuseMode))}
+		lines := []string{fmt.Sprintf("当前 approval-reuse: %s", formatChatApprovalReuseMode(chatSessionApprovalReuseMode(session)))}
 		if session.RuntimeEventBridge != nil {
 			grants := session.RuntimeEventBridge.approvalGrantStatusLines(time.Now())
 			if len(grants) > 0 {
@@ -877,7 +872,7 @@ func executeStructuredApprovalReuseCommand(session *ChatSession, command string)
 	if err != nil {
 		return commandErrorResult(err)
 	}
-	session.ApprovalReuseMode = mode
+	setChatApprovalReuseMode(session, mode)
 	cleared := 0
 	if session.RuntimeEventBridge != nil {
 		cleared = session.RuntimeEventBridge.clearApprovalGrants()

@@ -202,7 +202,11 @@ func openChatBacktrackPicker(session *ChatSession, _ BacktrackPickerRequest) {
 	// Lifecycle barrier only: the first list frame sees the matching actor
 	// state. Key navigation stays local to the fullscreen list and never waits
 	// on the primary renderer.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("open backtrack picker") {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("回退选择器渲染未就绪")), false)
+		return
+	}
 
 	picked, pickErr := ui.SelectFullScreenListWithLease(ctx, resumeFullScreenTerminal(session), ui.FullScreenListOptions{
 		Title:        "回退到历史 user turn",
@@ -230,7 +234,10 @@ func openChatBacktrackPicker(session *ChatSession, _ BacktrackPickerRequest) {
 	// LeaseReleased is the primary recovery barrier. Do not mutate the Scene
 	// until the actor has observed it, otherwise a replacement frame could race
 	// the final alternate-screen exit/recovery transaction.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("close backtrack picker") {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("回退选择器关闭未就绪")), false)
+		return
+	}
 
 	if releaseErr != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭回退选择器失败: %w", releaseErr)), false)

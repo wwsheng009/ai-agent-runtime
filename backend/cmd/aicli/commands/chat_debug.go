@@ -458,14 +458,15 @@ func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger 
 		return fmt.Errorf("agent registry not configured")
 	}
 	target, message := parseChatAgentMessageCommand(argument)
-	if target != "" && strings.TrimSpace(session.SelectedAgentTarget) != "" {
+	selectedTarget := chatSessionSelectedAgentTarget(session)
+	if target != "" && strings.TrimSpace(selectedTarget) != "" {
 		if _, err := resolveChatAgentTarget(session, target); err != nil {
 			message = strings.TrimSpace(strings.TrimSpace(target) + " " + strings.TrimSpace(message))
 			target = ""
 		}
 	}
 	if target == "" {
-		target = strings.TrimSpace(session.SelectedAgentTarget)
+		target = strings.TrimSpace(selectedTarget)
 	}
 	if target == "" || message == "" {
 		if trigger {
@@ -544,7 +545,7 @@ func handleChatAgentTargetCommand(session *ChatSession, argument string) error {
 	}
 	target := strings.TrimSpace(fields[1])
 	if strings.EqualFold(target, "clear") || strings.EqualFold(target, "none") {
-		session.SelectedAgentTarget = ""
+		setChatSelectedAgentTarget(session, "")
 		warnIfChatSessionSyncFails(session, "clear selected agent target", syncRuntimeSessionFromChat(session))
 		fmt.Println("Selected Agent Target: <none>")
 		return nil
@@ -553,14 +554,16 @@ func handleChatAgentTargetCommand(session *ChatSession, argument string) error {
 	if err != nil {
 		return err
 	}
-	session.SelectedAgentTarget = firstNonEmptyChatValue(resolved.Path, resolved.SessionID, resolved.ID)
+	targetValue := firstNonEmptyChatValue(resolved.Path, resolved.SessionID, resolved.ID)
+	setChatSelectedAgentTarget(session, targetValue)
 	warnIfChatSessionSyncFails(session, "set selected agent target", syncRuntimeSessionFromChat(session))
-	fmt.Printf("Selected Agent Target: %s\n", session.SelectedAgentTarget)
+	fmt.Printf("Selected Agent Target: %s\n", targetValue)
 	return nil
 }
 
 func chatAgentTargetLines(session *ChatSession) []string {
-	selected := strings.TrimSpace(session.SelectedAgentTarget)
+	selectedTarget := chatSessionSelectedAgentTarget(session)
+	selected := strings.TrimSpace(selectedTarget)
 	if selected == "" {
 		selected = "<none>"
 	}
@@ -575,7 +578,7 @@ func chatAgentTargetLines(session *ChatSession) []string {
 	lines = append(lines, "Agent Targets:")
 	for index, agent := range agents {
 		marker := " "
-		if chatAgentTargetMatchesSelected(session.SelectedAgentTarget, agent) {
+		if chatAgentTargetMatchesSelected(selectedTarget, agent) {
 			marker = "*"
 		}
 		lines = append(lines, fmt.Sprintf("  [%d] %s %s", index+1, marker, chatAgentPickerOptionLine(agent)))
@@ -620,7 +623,7 @@ func pickChatAgent(session *ChatSession) error {
 	if err != nil || selected == nil {
 		return err
 	}
-	session.SelectedAgentTarget = firstNonEmptyChatValue(selected.Path, selected.SessionID, selected.ID)
+	setChatSelectedAgentTarget(session, firstNonEmptyChatValue(selected.Path, selected.SessionID, selected.ID))
 	warnIfChatSessionSyncFails(session, "set selected agent target", syncRuntimeSessionFromChat(session))
 	fmt.Println("Selected Agent:")
 	for _, line := range chatAgentPickerSelectionLines(*selected) {
@@ -1052,7 +1055,7 @@ func chatDebugAgentGraphLines(session *ChatSession) []string {
 func chatAgentGraphLines(session *ChatSession) []string {
 	selected := ""
 	if session != nil {
-		selected = strings.TrimSpace(session.SelectedAgentTarget)
+		selected = strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 	}
 	lines, _ := chatAgentGraphLinesAndSelectedSession(session, selected)
 	return lines
@@ -1171,8 +1174,9 @@ func chatAgentPanelLoadingLines(session *ChatSession) []string {
 		"  loading=true",
 	}
 	selected := "<none>"
-	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
-		selected = strings.TrimSpace(session.SelectedAgentTarget)
+	selectedTarget := chatSessionSelectedAgentTarget(session)
+	if session != nil && strings.TrimSpace(selectedTarget) != "" {
+		selected = strings.TrimSpace(selectedTarget)
 	}
 	lines = append(lines, "  selected="+selected)
 	if session != nil && session.RuntimeSession != nil {
@@ -1270,7 +1274,7 @@ func applyChatAgentPanelNavigation(session *ChatSession, opts chatAgentPanelOpti
 		if err != nil {
 			return false, err
 		}
-		session.SelectedAgentTarget = firstNonEmptyChatValue(resolved.Path, resolved.SessionID, resolved.ID)
+		setChatSelectedAgentTarget(session, firstNonEmptyChatValue(resolved.Path, resolved.SessionID, resolved.ID))
 		return true, nil
 	case "next", "prev":
 		target, err := nextChatAgentPanelTarget(session, strings.EqualFold(opts.Nav, "prev"))
@@ -1280,7 +1284,7 @@ func applyChatAgentPanelNavigation(session *ChatSession, opts chatAgentPanelOpti
 		if target == "" {
 			return false, nil
 		}
-		session.SelectedAgentTarget = target
+		setChatSelectedAgentTarget(session, target)
 		return true, nil
 	default:
 		return false, nil
@@ -1307,7 +1311,7 @@ func nextChatAgentPanelTarget(session *ChatSession, previous bool) (string, erro
 	}
 	current := ""
 	if session != nil {
-		current = strings.TrimSpace(session.SelectedAgentTarget)
+		current = strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 	}
 	index := -1
 	for i, target := range targets {
@@ -1501,7 +1505,7 @@ func (c *chatAgentPanelModalController) Select() {
 		c.state.Cursor = len(agents) - 1
 	}
 	selected := agents[c.state.Cursor]
-	c.session.SelectedAgentTarget = firstNonEmptyChatValue(selected.Path, selected.SessionID, selected.ID)
+	setChatSelectedAgentTarget(c.session, firstNonEmptyChatValue(selected.Path, selected.SessionID, selected.ID))
 	warnIfChatSessionSyncFails(c.session, "set panel selected agent target", syncRuntimeSessionFromChat(c.session))
 	c.renderLocked()
 }
@@ -1543,15 +1547,18 @@ func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalSt
 		fmt.Sprintf("  mode=follow view=%s agent_cursor=%d", state.Pane.String(), state.Cursor+1),
 	}
 	selected := "<none>"
-	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
-		selected = strings.TrimSpace(session.SelectedAgentTarget)
+	selectedTarget := chatSessionSelectedAgentTarget(session)
+	if session != nil && strings.TrimSpace(selectedTarget) != "" {
+		selected = strings.TrimSpace(selectedTarget)
 	}
 	lines = append(lines, "  selected="+selected)
 	if session != nil && session.RuntimeSession != nil {
 		lines = append(lines, "  parent_session="+strings.TrimSpace(session.RuntimeSession.ID)+" state="+strings.TrimSpace(string(session.RuntimeSession.State)))
 	}
-	if session != nil && session.ActiveTeam != nil {
-		lines = append(lines, "  active_team="+strings.TrimSpace(session.ActiveTeam.TeamID)+" agent="+strings.TrimSpace(session.ActiveTeam.AgentID))
+	if session != nil {
+		if activeTeam := chatSessionActiveTeam(session); activeTeam != nil {
+			lines = append(lines, "  active_team="+strings.TrimSpace(activeTeam.TeamID)+" agent="+strings.TrimSpace(activeTeam.AgentID))
+		}
 	}
 	lines = append(lines, chatAgentPanelRegistryLine(session))
 	lines = append(lines, chatAgentPanelModalAgentLines(session, state)...)
@@ -1587,7 +1594,7 @@ func chatAgentPanelModalAgentLines(session *ChatSession, state *chatAgentPanelMo
 			marker = ">"
 		}
 		selected := " "
-		if session != nil && chatAgentTargetMatchesSelected(session.SelectedAgentTarget, agent) {
+		if session != nil && chatAgentTargetMatchesSelected(chatSessionSelectedAgentTarget(session), agent) {
 			selected = "*"
 		}
 		lines = append(lines, fmt.Sprintf("  %s%s [%d] %s", marker, selected, index+1, chatAgentPickerOptionLine(agent)))
@@ -1598,7 +1605,7 @@ func chatAgentPanelModalAgentLines(session *ChatSession, state *chatAgentPanelMo
 func chatAgentPanelModalMailboxLines(session *ChatSession, state *chatAgentPanelModalState) []string {
 	lines := []string{"Mailbox:"}
 	target := ""
-	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
+	if session != nil && strings.TrimSpace(chatSessionSelectedAgentTarget(session)) != "" {
 		target = "selected"
 	}
 	return append(lines, chatAgentPanelSnapshotLines(session, target, state.Limit)...)
@@ -1606,7 +1613,7 @@ func chatAgentPanelModalMailboxLines(session *ChatSession, state *chatAgentPanel
 
 func chatAgentPanelModalTimelineLines(session *ChatSession, state *chatAgentPanelModalState) []string {
 	lines := []string{"Timeline:"}
-	if session != nil && session.ActiveTeam != nil {
+	if session != nil && chatSessionActiveTeam(session) != nil {
 		return append(lines, chatAgentPanelTimelineLines(session, state.Limit)...)
 	}
 	return append(lines, "  <none>")
@@ -1656,13 +1663,14 @@ func watchChatAgentPanelAgentUpdates(ctx context.Context, session *ChatSession, 
 }
 
 func watchChatAgentPanelTaskUpdates(ctx context.Context, session *ChatSession, out chan<- struct{}) {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || session.ActiveTeam == nil {
+	activeTeam := chatSessionActiveTeam(session)
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || activeTeam == nil {
 		return
 	}
 	watchSource := team.NewAgentControlTaskRegistry(session.LocalRuntimeHost.TeamStore)
 	watch, unwatch := watchSource.WatchAgentControlTaskWake(ctx, agentcontrol.TaskWakeFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
-		TeamID:   strings.TrimSpace(session.ActiveTeam.TeamID),
+		TeamID:   strings.TrimSpace(activeTeam.TeamID),
 	})
 	go forwardChatAgentPanelModalUpdates(ctx, watch, unwatch, out)
 }
@@ -1692,7 +1700,7 @@ func forwardChatAgentPanelModalUpdates[T any](ctx context.Context, watch <-chan 
 func chatAgentPanelFollowLines(session *ChatSession, opts chatAgentPanelOptions) []string {
 	target := ""
 	if session != nil {
-		target = strings.TrimSpace(session.SelectedAgentTarget)
+		target = strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 	}
 	followOpts := chatCollabCommandConfig{
 		Target:  target,
@@ -1711,7 +1719,7 @@ func chatAgentPanelFollowLines(session *ChatSession, opts chatAgentPanelOptions)
 func chatAgentPanelSummaryLines(session *ChatSession, limit int) []string {
 	selected := ""
 	if session != nil {
-		selected = strings.TrimSpace(session.SelectedAgentTarget)
+		selected = strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 	}
 	displaySelected := firstNonEmptyChatValue(selected, "<none>")
 	lines := []string{
@@ -1721,8 +1729,10 @@ func chatAgentPanelSummaryLines(session *ChatSession, limit int) []string {
 	if session != nil && session.RuntimeSession != nil {
 		lines = append(lines, "  parent_session="+strings.TrimSpace(session.RuntimeSession.ID)+" state="+strings.TrimSpace(string(session.RuntimeSession.State)))
 	}
-	if session != nil && session.ActiveTeam != nil {
-		lines = append(lines, "  active_team="+strings.TrimSpace(session.ActiveTeam.TeamID)+" agent="+strings.TrimSpace(session.ActiveTeam.AgentID))
+	if session != nil {
+		if activeTeam := chatSessionActiveTeam(session); activeTeam != nil {
+			lines = append(lines, "  active_team="+strings.TrimSpace(activeTeam.TeamID)+" agent="+strings.TrimSpace(activeTeam.AgentID))
+		}
 	}
 	lines = append(lines, chatAgentPanelRegistryLine(session), "Agents:")
 
@@ -1811,7 +1821,7 @@ func chatAgentPanelLines(session *ChatSession, limit int) []string {
 	lines := []string{"Agent Control Panel:"}
 	selected := ""
 	if session != nil {
-		selected = strings.TrimSpace(session.SelectedAgentTarget)
+		selected = strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 	}
 	displaySelected := selected
 	if displaySelected == "" {
@@ -1821,8 +1831,10 @@ func chatAgentPanelLines(session *ChatSession, limit int) []string {
 	if session != nil && session.RuntimeSession != nil {
 		lines = append(lines, "  parent_session="+strings.TrimSpace(session.RuntimeSession.ID)+" state="+strings.TrimSpace(string(session.RuntimeSession.State)))
 	}
-	if session != nil && session.ActiveTeam != nil {
-		lines = append(lines, "  active_team="+strings.TrimSpace(session.ActiveTeam.TeamID)+" agent="+strings.TrimSpace(session.ActiveTeam.AgentID))
+	if session != nil {
+		if activeTeam := chatSessionActiveTeam(session); activeTeam != nil {
+			lines = append(lines, "  active_team="+strings.TrimSpace(activeTeam.TeamID)+" agent="+strings.TrimSpace(activeTeam.AgentID))
+		}
 	}
 	lines = append(lines, chatAgentPanelRegistryLine(session))
 	lines = append(lines, "Agents:")
@@ -1842,7 +1854,7 @@ func chatAgentPanelLines(session *ChatSession, limit int) []string {
 		lines = append(lines, chatAgentPanelSnapshotLines(session, "", limit)...)
 	}
 	lines = append(lines, "Timeline:")
-	if session != nil && session.ActiveTeam != nil {
+	if session != nil && chatSessionActiveTeam(session) != nil {
 		lines = append(lines, chatAgentPanelTimelineLines(session, limit)...)
 	} else {
 		lines = append(lines, "  <none>")
@@ -1951,10 +1963,11 @@ func chatAgentPanelSnapshotLinesForSession(session *ChatSession, sessionID strin
 }
 
 func chatAgentPanelTimelineLines(session *ChatSession, limit int) []string {
-	if session == nil || session.ActiveTeam == nil {
+	activeTeam := chatSessionActiveTeam(session)
+	if session == nil || activeTeam == nil {
 		return []string{"  <none>"}
 	}
-	return chatTimelineLinesForTeamWithReadWindow(session, strings.TrimSpace(session.ActiveTeam.TeamID), limit, chatAgentPanelReadWindowLimit(limit))
+	return chatTimelineLinesForTeamWithReadWindow(session, strings.TrimSpace(activeTeam.TeamID), limit, chatAgentPanelReadWindowLimit(limit))
 }
 
 func chatAgentPanelReadWindowLimit(limit int) int {
@@ -2164,10 +2177,11 @@ func parseChatTimelineCommandConfig(command string, fallback int) chatTimelineCo
 }
 
 func chatTimelineLines(session *ChatSession, limit int) []string {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || session.ActiveTeam == nil {
+	activeTeam := chatSessionActiveTeam(session)
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || activeTeam == nil {
 		return []string{"  <none>"}
 	}
-	teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+	teamID := strings.TrimSpace(activeTeam.TeamID)
 	return chatTimelineLinesForTeam(session, teamID, limit)
 }
 
@@ -2175,8 +2189,10 @@ func chatTimelineCommandLines(session *ChatSession, command string) []string {
 	opts := parseChatTimelineCommandConfig(command, 20)
 	teamID := strings.TrimSpace(opts.Target)
 	if teamID == "" || strings.EqualFold(teamID, "active") || strings.EqualFold(teamID, "current") {
-		if session != nil && session.ActiveTeam != nil {
-			teamID = strings.TrimSpace(session.ActiveTeam.TeamID)
+		if session != nil {
+			if activeTeam := chatSessionActiveTeam(session); activeTeam != nil {
+				teamID = strings.TrimSpace(activeTeam.TeamID)
+			}
 		}
 	}
 	return filterChatTimelineLines(chatTimelineLinesForTeam(session, teamID, opts.Limit), opts.Filter)
@@ -2476,7 +2492,7 @@ func resolveChatCollabTargetSession(session *ChatSession, target string) (string
 		return strings.TrimSpace(session.RuntimeSession.ID), nil
 	}
 	if strings.EqualFold(target, "selected") || strings.EqualFold(target, "target") {
-		target = strings.TrimSpace(session.SelectedAgentTarget)
+		target = strings.TrimSpace(chatSessionSelectedAgentTarget(session))
 		if target == "" {
 			return "", fmt.Errorf("no selected agent target")
 		}
@@ -3055,14 +3071,15 @@ func printChatDebugMailbox(session *ChatSession) {
 }
 
 func chatDebugMailboxLines(session *ChatSession) []string {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || session.ActiveTeam == nil {
+	activeTeam := chatSessionActiveTeam(session)
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || activeTeam == nil {
 		return []string{"  <none>"}
 	}
-	teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+	teamID := strings.TrimSpace(activeTeam.TeamID)
 	if teamID == "" {
 		return []string{"  <none>"}
 	}
-	agentID := firstNonEmptyChatValue(session.ActiveTeam.AgentID, "lead")
+	agentID := firstNonEmptyChatValue(activeTeam.AgentID, "lead")
 	messages, err := session.LocalRuntimeHost.TeamStore.ListMail(context.Background(), team.MailFilter{
 		TeamID:           teamID,
 		ToAgent:          agentID,

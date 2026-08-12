@@ -35,7 +35,7 @@ func buildChatDebugModeStatusDocument(session *ChatSession) render.Document {
 		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))
 	}
 	var builder chatDebugDocumentBuilder
-	builder.meta("Debug Mode:", chatDebugBool(session.DebugMode))
+	builder.meta("Debug Mode:", chatDebugBool(chatSessionDebugMode(session)))
 	builder.meta("HTTP Debug:", chatDebugBool(session.HTTPDebug))
 	builder.meta("Skills Debug:", chatDebugBool(session.SkillsDebug))
 	builder.plain(chatDebugUsageText())
@@ -169,6 +169,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))
 	}
 
+	ctx := snapshotChatRuntimeContext(session)
 	var builder chatDebugDocumentBuilder
 	builder.appendDocument(ui.SessionInfoDocument(buildChatSessionInfo(session), chatDebugDocumentWidth(session)))
 	builder.blank()
@@ -213,11 +214,11 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	builder.meta("JSON Output:", chatDebugBool(session.JSONOutput))
 	builder.meta("JSON Envelope:", chatDebugBool(session.JSONEnvelope))
 	builder.meta("MCP Enabled:", chatDebugBool(session.MCPEnabled))
-	builder.meta("Debug Mode:", chatDebugBool(session.DebugMode))
+	builder.meta("Debug Mode:", chatDebugBool(ctx.DebugMode))
 	builder.meta("Skills Debug:", chatDebugBool(session.SkillsDebug))
-	if session.LocalRuntimeHost == nil && (strings.TrimSpace(string(session.PermissionMode)) != "" || strings.TrimSpace(string(session.ApprovalReuseMode)) != "") {
-		builder.meta("Permission Mode:", chatDebugValueOrNone(string(session.PermissionMode)))
-		builder.meta("Approval Reuse:", chatDebugValueOrNone(formatChatApprovalReuseMode(session.ApprovalReuseMode)))
+	if session.LocalRuntimeHost == nil && (strings.TrimSpace(string(ctx.PermissionMode)) != "" || strings.TrimSpace(string(ctx.ApprovalReuseMode)) != "") {
+		builder.meta("Permission Mode:", chatDebugValueOrNone(string(ctx.PermissionMode)))
+		builder.meta("Approval Reuse:", chatDebugValueOrNone(formatChatApprovalReuseMode(ctx.ApprovalReuseMode)))
 	}
 	appendChatDebugPermissionLines(&builder, session)
 	if session.InputQueue != nil {
@@ -234,7 +235,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	} else {
 		builder.meta("Interaction:", "<none>")
 	}
-	builder.meta("Agent Target:", chatDebugValueOrNone(strings.TrimSpace(session.SelectedAgentTarget)))
+	builder.meta("Agent Target:", chatDebugValueOrNone(strings.TrimSpace(ctx.SelectedAgentTarget)))
 	if session.Surface != nil {
 		builder.meta("Surface:", chatDebugBool(session.Surface.Enabled()))
 		if table := session.Surface.RowPlanDebugString(); table != "" {
@@ -452,6 +453,7 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 }
 
 func appendChatDebugSessionDetails(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	ctx := snapshotChatRuntimeContext(session)
 	if descriptor, ok := chatRuntimeExecutorDescriptor(session.ChatExecutor); ok {
 		builder.meta("Runtime Core:", fmt.Sprintf("%s contract=v%d", descriptor.Core.Name, descriptor.Core.ContractVersion))
 		builder.meta("Runtime Transport:", descriptor.Transport)
@@ -477,8 +479,8 @@ func appendChatDebugSessionDetails(builder *chatDebugDocumentBuilder, session *C
 		builder.meta("Reasoning Output:", "off")
 	}
 	if session.LocalRuntimeHost != nil {
-		builder.meta("Permission Mode:", string(session.PermissionMode))
-		builder.meta("Approval Reuse:", formatChatApprovalReuseMode(session.ApprovalReuseMode))
+		builder.meta("Permission Mode:", string(ctx.PermissionMode))
+		builder.meta("Approval Reuse:", formatChatApprovalReuseMode(ctx.ApprovalReuseMode))
 	}
 	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
 		value := fmt.Sprintf("%d pending", queuedCount)

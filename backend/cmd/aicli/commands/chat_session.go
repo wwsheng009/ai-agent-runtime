@@ -496,6 +496,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	if runtimeSession.Metadata.Context == nil {
 		runtimeSession.Metadata.Context = make(map[string]interface{})
 	}
+	ctx := snapshotChatRuntimeContext(session)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderName, session.ProviderName, chatRuntimeContextProviderName)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderProtocol, session.Provider.GetProtocol(), chatRuntimeContextProtocol)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Model, session.Model, chatRuntimeContextModel)
@@ -507,8 +508,8 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 		sessionmeta.EffectiveModel:           strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model)),
 		sessionmeta.RequestedReasoningEffort: strings.TrimSpace(session.RequestedReasoningEffort),
 		sessionmeta.EffectiveReasoningEffort: runtimetypes.NormalizeReasoningEffort(firstNonEmptyChatValue(session.EffectiveReasoningEffort, session.ReasoningEffort)),
-		sessionmeta.RequestedPermissionMode:  strings.TrimSpace(session.RequestedPermissionMode),
-		sessionmeta.EffectivePermissionMode:  strings.TrimSpace(firstNonEmptyChatValue(session.EffectivePermissionMode, string(session.PermissionMode))),
+		sessionmeta.RequestedPermissionMode:  strings.TrimSpace(ctx.RequestedPermissionMode),
+		sessionmeta.EffectivePermissionMode:  strings.TrimSpace(firstNonEmptyChatValue(ctx.EffectivePermissionMode, string(ctx.PermissionMode))),
 		sessionmeta.FallbackUsed:             session.FallbackUsed,
 		sessionmeta.FallbackReason:           strings.TrimSpace(session.FallbackReason),
 	} {
@@ -523,11 +524,11 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	} else {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.RouteWarnings, append([]string(nil), session.RouteWarnings...))
 	}
-	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ApprovalReuse, string(session.ApprovalReuseMode), chatRuntimeContextApprovalReuse)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ApprovalReuse, string(ctx.ApprovalReuseMode), chatRuntimeContextApprovalReuse)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, session.Stream, chatRuntimeContextStream)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.FastMode, session.FastMode, chatRuntimeContextFastMode)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, session.DisableTools, chatRuntimeContextDisableTools)
-	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DebugMode, session.DebugMode, chatRuntimeContextDebugMode)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DebugMode, ctx.DebugMode, chatRuntimeContextDebugMode)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.MessageCount, len(session.Messages), chatRuntimeContextMessageCount)
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	if session.TokenCount > 0 {
@@ -1356,6 +1357,7 @@ func restoreChatRouteTransparency(session *ChatSession, runtimeSession *runtimec
 	}
 	context := runtimeSession.Metadata.Context
 	storedPermissionMode := sessionmeta.String(context, sessionmeta.PermissionMode)
+	ctx := snapshotChatRuntimeContext(session)
 	session.RequestedProvider = firstNonEmptyChatValue(
 		sessionmeta.String(context, sessionmeta.RequestedProvider),
 		session.RequestedProvider,
@@ -1383,17 +1385,21 @@ func restoreChatRouteTransparency(session *ChatSession, runtimeSession *runtimec
 		session.ReasoningEffort,
 		sessionmeta.String(context, sessionmeta.EffectiveReasoningEffort),
 	)
-	session.RequestedPermissionMode = firstNonEmptyChatValue(
+	requestedPermissionMode := firstNonEmptyChatValue(
 		sessionmeta.String(context, sessionmeta.RequestedPermissionMode),
 		storedPermissionMode,
-		session.RequestedPermissionMode,
-		string(session.PermissionMode),
+		ctx.RequestedPermissionMode,
+		string(ctx.PermissionMode),
 	)
-	session.EffectivePermissionMode = firstNonEmptyChatValue(
-		string(session.PermissionMode),
+	effectivePermissionMode := firstNonEmptyChatValue(
+		string(ctx.PermissionMode),
 		sessionmeta.String(context, sessionmeta.EffectivePermissionMode),
 		storedPermissionMode,
 	)
+	session.runtimeCtxMu.Lock()
+	session.RequestedPermissionMode = requestedPermissionMode
+	session.EffectivePermissionMode = effectivePermissionMode
+	session.runtimeCtxMu.Unlock()
 	session.RouteWarnings = runtimeSessionRouteWarnings(runtimeSession)
 	session.FallbackUsed, _ = sessionmeta.Bool(context, sessionmeta.FallbackUsed)
 	session.FallbackReason = sessionmeta.String(context, sessionmeta.FallbackReason)

@@ -417,10 +417,14 @@ func (c *localTeamLifecycleService) hostLeadSessionID() string {
 }
 
 func (c *localTeamLifecycleService) hostActiveTeamID() string {
-	if c == nil || c.Host == nil || c.Host.BaseSession == nil || c.Host.BaseSession.ActiveTeam == nil {
+	if c == nil || c.Host == nil || c.Host.BaseSession == nil {
 		return ""
 	}
-	return strings.TrimSpace(c.Host.BaseSession.ActiveTeam.TeamID)
+	activeTeam := chatSessionActiveTeam(c.Host.BaseSession)
+	if activeTeam == nil {
+		return ""
+	}
+	return strings.TrimSpace(activeTeam.TeamID)
 }
 
 func teamBelongsToHostLead(record team.Team, leadSessionID, activeTeamID string) bool {

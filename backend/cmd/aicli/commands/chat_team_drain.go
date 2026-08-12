@@ -19,7 +19,7 @@ func awaitNoInteractiveLocalTeamDrain(session *ChatSession) {
 	if session == nil || !session.NoInteractive || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil {
 		return
 	}
-	if session.ActiveTeam == nil || strings.TrimSpace(session.ActiveTeam.TeamID) == "" {
+	if activeTeam := chatSessionActiveTeam(session); activeTeam == nil || strings.TrimSpace(activeTeam.TeamID) == "" {
 		_ = reloadChatRuntimeSessionFromStore(session)
 	}
 
@@ -168,7 +168,7 @@ func runtimeAmbientTeamBinding(session *ChatSession) *chatTeamBinding {
 		TeamID:         strings.TrimSpace(state.AmbientRunMeta.Team.TeamID),
 		AgentID:        firstNonEmptyChatValue(strings.TrimSpace(state.AmbientRunMeta.Team.AgentID), "lead"),
 		TaskID:         strings.TrimSpace(state.AmbientRunMeta.Team.CurrentTaskID),
-		PermissionMode: session.PermissionMode,
+		PermissionMode: chatSessionPermissionMode(session),
 	}
 }
 
@@ -194,7 +194,7 @@ func teamStoreAmbientTeamBinding(session *ChatSession) *chatTeamBinding {
 		return &chatTeamBinding{
 			TeamID:         strings.TrimSpace(record.ID),
 			AgentID:        "lead",
-			PermissionMode: session.PermissionMode,
+			PermissionMode: chatSessionPermissionMode(session),
 		}
 	}
 	return nil
@@ -204,8 +204,8 @@ func resolvedInteractiveTeamBinding(session *ChatSession) *chatTeamBinding {
 	if session == nil {
 		return nil
 	}
-	if session.ActiveTeam != nil && strings.TrimSpace(session.ActiveTeam.TeamID) != "" {
-		return session.ActiveTeam.Clone()
+	if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
+		return activeTeam
 	}
 	binding := runtimeAmbientTeamBinding(session)
 	if binding == nil || strings.TrimSpace(binding.TeamID) == "" {
@@ -214,7 +214,7 @@ func resolvedInteractiveTeamBinding(session *ChatSession) *chatTeamBinding {
 			return nil
 		}
 	}
-	session.ActiveTeam = binding.Clone()
+	setChatActiveTeam(session, binding)
 	return binding
 }
 
@@ -222,14 +222,14 @@ func restoreAmbientTeamBindingFromRuntimeStore(session *ChatSession) bool {
 	if session == nil {
 		return false
 	}
-	if session.ActiveTeam != nil && strings.TrimSpace(session.ActiveTeam.TeamID) != "" {
+	if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
 		return false
 	}
 	binding := runtimeAmbientTeamBinding(session)
 	if binding == nil || strings.TrimSpace(binding.TeamID) == "" {
 		return false
 	}
-	session.ActiveTeam = binding.Clone()
+	setChatActiveTeam(session, binding)
 	return true
 }
 
@@ -269,8 +269,8 @@ func syncAmbientTeamLifecycleState(session *ChatSession) error {
 	pending := false
 	if binding != nil {
 		pending = interactiveTeamPendingByTeamID(session, binding.TeamID)
-		if session.ActiveTeam == nil {
-			session.ActiveTeam = binding.Clone()
+		if chatSessionActiveTeam(session) == nil {
+			setChatActiveTeam(session, binding)
 		}
 	}
 	now := time.Now().UTC()

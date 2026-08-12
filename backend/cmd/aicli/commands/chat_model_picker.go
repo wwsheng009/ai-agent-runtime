@@ -57,7 +57,11 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	}
 	// Lifecycle barrier only: the first list frame sees the matching actor
 	// state. Key navigation stays local to the fullscreen list.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("open model picker") {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器渲染未就绪")), false)
+		return
+	}
 
 	// Stage 1: provider. Skipped when the request pinned one explicitly.
 	if providerName == "" {
@@ -155,7 +159,10 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	// LeaseReleased is the primary recovery barrier. Do not mutate session
 	// state until the actor has observed it, otherwise a replacement frame
 	// could race the final alternate-screen exit/recovery transaction.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("close model picker") {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器关闭未就绪")), false)
+		return
+	}
 
 	if releaseErr != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭模型选择器失败: %w", releaseErr)), false)
@@ -180,7 +187,7 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 func closeModelPickerLease(session *ChatSession, lease ui.ScreenLease) {
 	_ = session.Interaction.postUIAction(ui.CloseModelPicker{LeaseID: lease.ID()})
 	_ = lease.Release(context.Background())
-	session.Interaction.waitUIActorIdle()
+	session.Interaction.waitUIActorIdleBounded("close model picker")
 }
 
 // currentModelForProvider returns the effective model to highlight when the

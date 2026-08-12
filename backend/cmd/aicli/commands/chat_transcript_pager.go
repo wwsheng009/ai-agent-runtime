@@ -44,7 +44,10 @@ func openChatTranscriptPager(session *ChatSession) {
 		// actor-owned pager state together. Without this barrier, a just-issued
 		// /history can open against the pre-reconcile Scene and appear empty for
 		// its initial paint.
-		session.Interaction.waitUIActorIdle()
+		if !session.Interaction.waitUIActorIdleBounded("open transcript overlay") {
+			_ = lease.Release(context.Background())
+			return
+		}
 	}
 	defer func() {
 		if session.Interaction != nil {

@@ -15,9 +15,11 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -28,6 +30,12 @@ import (
 
 const chatUIRuntimeEventActionKind = "chat.runtime-event"
 
+const (
+	chatUIActorCloseTimeout    = 3 * time.Second
+	chatUIActorAbortGrace      = 2 * time.Second
+	chatUIActorIdleWaitTimeout = 5 * time.Second
+)
+
 // chatRuntimeEventUIAction is commands' typed payload carried by the generic
 // ui.RuntimeEvent envelope. The bridge queue has already validated the local
 // run epoch before it posts this action; the UI actor supplies the single
@@ -35,6 +43,7 @@ const chatUIRuntimeEventActionKind = "chat.runtime-event"
 type chatRuntimeEventUIAction struct {
 	bridge *chatRuntimeEventBridge
 	event  runtimeevents.Event
+	epoch  uint64
 }
 
 // ensureUIActor 惰性创建 UI actor 并启动其 Run 循环（幂等）。
@@ -147,6 +156,19 @@ func (c *chatInteractionCoordinator) postUIAction(action ui.UIAction) bool {
 		return false
 	}
 	return actor.Post(action)
+}
+
+// postScheduledUIAction is the FramePump-safe posting entry. Timer and
+// DrawRequested are coalescable internal actions with a fixed key set; the
+// deferred FIFO lane admits them without waiting for bounded mailbox capacity,
+// so the single scheduler goroutine can never be blocked by a full actor
+// mailbox. Runtime events keep their normal bounded Post backpressure.
+func (c *chatInteractionCoordinator) postScheduledUIAction(action ui.UIAction) bool {
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return false
+	}
+	return actor.PostDeferred(action)
 }
 
 // postPromptInputAction is the non-blocking editor ingress. Input snapshots
@@ -629,7 +651,7 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 	if c == nil {
 		return
 	}
-	c.uiActorOnce.Do(func() {}) // 确保 Once 已消费，避免之后误建
+	c.uiActorOnce.Do(func() {})
 	c.mu.Lock()
 	presenter := c.primaryPresenter
 	surface := c.surface
@@ -641,16 +663,34 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 		c.session.TerminalSessionExecutor = nil
 	}
 	c.mu.Unlock()
+
+	var aborter ui.TerminalWriteAborter
+	if presenter != nil {
+		aborter = presenter
+	}
+	var abortOnce sync.Once
+	abortTerminalWrite := func() {
+		abortOnce.Do(func() {
+			if aborter != nil {
+				_ = aborter.AbortTerminalWrite()
+			}
+		})
+	}
+	watchdogDone := make(chan struct{})
+	if surface != nil && aborter != nil {
+		go func() {
+			select {
+			case <-time.After(chatUIActorAbortGrace):
+				abortTerminalWrite()
+			case <-watchdogDone:
+			}
+		}()
+	}
+
 	// Leave DEC 1049 while the unified transport and presenter are still alive.
-	// Surface cleanup runs later, after closeUIActor, and cannot restore the
-	// primary buffer once this transport has been detached.
+	// The watchdog makes the release bounded: if the transport write blocks,
+	// AbortTerminalWrite releases the physical writer and the call returns.
 	if surface != nil {
-		// A zero-byte transport failure is explicitly retryable: TerminalSession
-		// retains the physical lease until at least one exit byte is accepted.
-		// Do the bounded retry while the presenter is still attached; detaching
-		// after the first error would strand DEC 1049 with no owner capable of
-		// issuing the retry. The loop is intentionally short and synchronous so
-		// shutdown remains deterministic and never starts a background writer.
 		var releaseErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			releaseErr = surface.ReleaseActiveAlternateScreen(context.Background())
@@ -661,24 +701,29 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 				time.Sleep(5 * time.Millisecond)
 			}
 		}
-		// A persistent transport error is deliberately not converted into a
-		// logical LeaseReleased event. The surface/TerminalSession pair retain
-		// their lease until the transport succeeds, making the failure visible to
-		// diagnostics instead of silently switching to primary rendering.
-		_ = releaseErr
+		if releaseErr != nil {
+			writeSessionDebugInfo(c.session, fmt.Sprintf("[shutdown] alternate-screen release failed after bounded retry: %v", releaseErr), false)
+		}
 	}
-	// Detach the controller callback and drain terminal work before closing the
-	// actor. This ordering prevents an accepted effect from writing after the
-	// chat session has released primary terminal ownership.
+	close(watchdogDone)
+
 	if presenter != nil {
-		presenter.Close()
+		if !presenter.CloseTimeout(chatUIActorCloseTimeout) {
+			c.mu.Lock()
+			c.terminalWritesAbandoned = true
+			c.mu.Unlock()
+			writeSessionDebugInfo(c.session, "[shutdown] terminal writer did not drain after abort; terminal output abandoned", false)
+		}
 	}
 	if surface != nil {
 		surface.SetAlternateScreenLeaseTransport(nil)
 	}
 	if c.uiActor != nil {
 		c.uiActor.Close()
-		c.uiActor.WaitIdle()
+		if !c.uiActor.WaitIdleTimeout(chatUIActorCloseTimeout) {
+			stats := c.uiActor.Stats()
+			writeSessionDebugInfo(c.session, fmt.Sprintf("[shutdown] UI actor did not drain after close timeout pending=%d last=%q", stats.Pending, stats.LastAction), false)
+		}
 	}
 }
 
@@ -772,6 +817,10 @@ func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action u
 	}
 	payload, ok := action.Payload.(chatRuntimeEventUIAction)
 	if !ok || payload.bridge == nil || payload.bridge.session == nil {
+		return
+	}
+	if !payload.bridge.isRunEpochCurrent(payload.epoch) {
+		payload.bridge.logLateRuntimeEvent(payload.event, "runtime event action targets closed run epoch")
 		return
 	}
 	// A replaced interaction owns a different actor/surface. Do not let a
@@ -870,6 +919,32 @@ func (c *chatInteractionCoordinator) waitUIActorIdleTimeout(timeout time.Duratio
 		return true
 	}
 	return c.uiActor.WaitIdleTimeout(timeout)
+}
+
+// waitUIActorIdleBounded is the production idle barrier. On timeout it records
+// a diagnostic and returns false so callers can fail closed instead of
+// continuing into a legacy writer or modal transition with unsettled state.
+func (c *chatInteractionCoordinator) waitUIActorIdleBounded(what string) bool {
+	if c == nil || c.uiActor == nil {
+		return true
+	}
+	if c.uiActor.WaitIdleTimeout(chatUIActorIdleWaitTimeout) {
+		return true
+	}
+	stats := c.uiActor.Stats()
+	writeSessionDebugInfo(c.session, fmt.Sprintf("[ui-actor] idle barrier timeout what=%q pending=%d last=%q", what, stats.Pending, stats.LastAction), false)
+	return false
+}
+
+// TerminalWritesAbandoned reports whether shutdown had to abandon a blocked
+// physical writer. Callers may use it to skip further terminal cleanup.
+func (c *chatInteractionCoordinator) TerminalWritesAbandoned() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.terminalWritesAbandoned
 }
 
 // applyTimerAction 把 Timer action 分发到对应定时业务（各业务函数自带

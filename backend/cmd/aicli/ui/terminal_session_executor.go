@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrTerminalTransactionMissingResult guards the boundary between a claimed
@@ -30,6 +31,7 @@ type TerminalSessionExecutor struct {
 	requested bool
 	closed    bool
 	wg        sync.WaitGroup
+	done      chan struct{}
 }
 
 func NewTerminalSessionExecutor(controller *UIController, session *TerminalSession) *TerminalSessionExecutor {
@@ -69,22 +71,46 @@ func (e *TerminalSessionExecutor) Request() {
 		return
 	}
 	e.running = true
+	e.done = make(chan struct{})
+	done := e.done
 	e.wg.Add(1)
 	e.mu.Unlock()
-	go e.run()
+	go e.run(done)
 }
 
 // Close prevents new work and waits for the already-running worker. As with
 // HistoryCommitExecutor, callers must not invoke it from a controller effect
 // callback because that callback can be waiting for this worker's result post.
 func (e *TerminalSessionExecutor) Close() {
+	_ = e.CloseTimeout(0)
+}
+
+// CloseTimeout is the bounded form of Close. A false return means the worker
+// still holds the physical writer; callers may abort the writer and wait once
+// more before treating the session as abandoned.
+func (e *TerminalSessionExecutor) CloseTimeout(timeout time.Duration) bool {
 	if e == nil {
-		return
+		return true
 	}
 	e.mu.Lock()
 	e.closed = true
+	done := e.done
 	e.mu.Unlock()
-	e.wg.Wait()
+	if done == nil {
+		return true
+	}
+	if timeout <= 0 {
+		e.wg.Wait()
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // WaitIdle is a deterministic test and controlled-shutdown helper.
@@ -94,12 +120,12 @@ func (e *TerminalSessionExecutor) WaitIdle() {
 	}
 }
 
-func (e *TerminalSessionExecutor) run() {
+func (e *TerminalSessionExecutor) run(done chan struct{}) {
 	defer e.wg.Done()
 	for {
 		e.mu.Lock()
 		if e.closed {
-			e.running = false
+			e.finishWorker(done)
 			e.mu.Unlock()
 			return
 		}
@@ -109,7 +135,7 @@ func (e *TerminalSessionExecutor) run() {
 		if !e.runOne() {
 			e.mu.Lock()
 			if e.closed || !e.requested {
-				e.running = false
+				e.finishWorker(done)
 				e.mu.Unlock()
 				return
 			}
@@ -118,22 +144,38 @@ func (e *TerminalSessionExecutor) run() {
 	}
 }
 
+// finishWorker publishes running=false and closes the per-worker done channel
+// in the same critical section. Request() after this point always observes a
+// completed worker, so it can never reuse a channel that the exiting worker
+// is still about to close.
+func (e *TerminalSessionExecutor) finishWorker(done chan struct{}) {
+	e.running = false
+	if done != nil {
+		e.done = nil
+		close(done)
+	}
+}
+
 // runOne returns true when reducer publication exposes immediate ordered work:
 // either one history token was acknowledged or a successful scrollback reset
 // replanned the canonical transcript under a fresh terminal epoch. Frame-only
-// repaint, Deferred handoff, and errors otherwise wait for an explicit wake.
+// repaint, Deferred handoff, and errors otherwise stop the worker and wait for
+// an explicit Request so a failing writer cannot turn the executor into a
+// busy loop.
 func (e *TerminalSessionExecutor) runOne() bool {
 	if e == nil || e.controller == nil || e.session == nil {
 		return false
 	}
 	e.controller.WaitIdle()
 	schedule := e.controller.terminalSessionSchedule()
-	if schedule.projectionUnknown {
+	if schedule.recoveryActionable {
 		snapshot := e.controller.terminalSessionSnapshot(0)
-		if !snapshot.projectionUnknown {
+		if !terminalSessionSnapshotRecoveryActionable(snapshot) {
 			// The schedule changed after the first scalar read. Run one fresh
 			// pass instead of relying on a possibly coalesced wake to flush it.
-			return true
+			latest := e.controller.terminalSessionSchedule()
+			return latest.recoveryActionable || latest.pendingToken != 0 ||
+				e.controller.terminalSessionHasActionableWork()
 		}
 		// A possibly written history range cannot be repaired by repainting only
 		// the bottom viewport. Replace scrollback from semantic source first;
@@ -157,7 +199,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	}
 
 	snapshot := e.controller.terminalSessionSnapshot(claimedToken)
-	if claimedToken == 0 && snapshot.projectionUnknown {
+	if claimedToken == 0 && terminalSessionSnapshotRecoveryActionable(snapshot) {
 		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
 		if snapshot.reconciliationRequired {
 			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
@@ -174,7 +216,8 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		// unchanged token can mean an older in-flight ordering fence; neither case
 		// should spin the executor.
 		latest := e.controller.terminalSessionSchedule()
-		return terminalSessionClaimMissRequiresRetry(schedule, latest)
+		return terminalSessionClaimMissRequiresRetry(schedule, latest) ||
+			e.controller.terminalSessionHasActionableWork()
 	}
 	plan := composeTerminalViewportTransactionPlan(snapshot.appState, snapshot.claimed, snapshot.bootstrap)
 	result := e.session.FlushTransaction(plan)
@@ -182,12 +225,17 @@ func (e *TerminalSessionExecutor) runOne() bool {
 }
 
 func terminalSessionClaimMissRequiresRetry(claimed, latest terminalSessionScheduleSnapshot) bool {
-	if latest.projectionUnknown {
+	if latest.recoveryActionable {
 		return true
 	}
 	return latest.pendingToken != 0 &&
 		(latest.pendingToken != claimed.pendingToken ||
 			latest.pendingGeneration != claimed.pendingGeneration)
+}
+
+func terminalSessionSnapshotRecoveryActionable(snapshot terminalSessionControllerSnapshot) bool {
+	return !snapshot.appState.Lease.Active && !snapshot.appState.HistoryEffects.Frozen &&
+		(snapshot.projectionUnknown || snapshot.reconciliationRequired)
 }
 
 func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *HistoryCommit, result TerminalTransactionResult) bool {
@@ -256,10 +304,10 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	}
 	e.controller.WaitIdle()
 	if result.ScrollbackReset {
-		return e.controller.terminalSessionHasPending()
+		return e.controller.terminalSessionHasActionableWork()
 	}
-	if !historyAcknowledged || claimed == nil {
-		return false
+	if historyAcknowledged && claimed != nil && e.controller.terminalSessionCommitAckedAndHasPending(claimed.Token) {
+		return true
 	}
-	return e.controller.terminalSessionCommitAckedAndHasPending(claimed.Token)
+	return e.controller.terminalSessionHasActionableWork()
 }

@@ -38,10 +38,119 @@ func (b *chatTeamBinding) Clone() *chatTeamBinding {
 	return &clone
 }
 
+// chatRuntimeContextSnapshot is an immutable point-in-time view of the
+// runtime-context fields shared with the actor event bridge.
+type chatRuntimeContextSnapshot struct {
+	DebugMode               bool
+	PermissionMode          runtimepolicy.Mode
+	RequestedPermissionMode string
+	EffectivePermissionMode string
+	ApprovalReuseMode       chatApprovalReuseMode
+	SelectedAgentTarget     string
+	ActiveTeam              *chatTeamBinding
+}
+
+func snapshotChatRuntimeContext(session *ChatSession) chatRuntimeContextSnapshot {
+	if session == nil {
+		return chatRuntimeContextSnapshot{}
+	}
+	session.runtimeCtxMu.RLock()
+	defer session.runtimeCtxMu.RUnlock()
+	return chatRuntimeContextSnapshot{
+		DebugMode:               session.DebugMode,
+		PermissionMode:          session.PermissionMode,
+		RequestedPermissionMode: session.RequestedPermissionMode,
+		EffectivePermissionMode: session.EffectivePermissionMode,
+		ApprovalReuseMode:       session.ApprovalReuseMode,
+		SelectedAgentTarget:     session.SelectedAgentTarget,
+		ActiveTeam:              session.ActiveTeam.Clone(),
+	}
+}
+
+func chatSessionDebugMode(session *ChatSession) bool {
+	return snapshotChatRuntimeContext(session).DebugMode
+}
+
+func chatSessionPermissionMode(session *ChatSession) runtimepolicy.Mode {
+	return snapshotChatRuntimeContext(session).PermissionMode
+}
+
+func chatSessionApprovalReuseMode(session *ChatSession) chatApprovalReuseMode {
+	return snapshotChatRuntimeContext(session).ApprovalReuseMode
+}
+
+func chatSessionSelectedAgentTarget(session *ChatSession) string {
+	return snapshotChatRuntimeContext(session).SelectedAgentTarget
+}
+
+func chatSessionActiveTeam(session *ChatSession) *chatTeamBinding {
+	return snapshotChatRuntimeContext(session).ActiveTeam
+}
+
+func chatSessionRequestedPermissionMode(session *ChatSession) string {
+	return snapshotChatRuntimeContext(session).RequestedPermissionMode
+}
+
+func chatSessionEffectivePermissionMode(session *ChatSession) string {
+	return snapshotChatRuntimeContext(session).EffectivePermissionMode
+}
+
+func setChatDebugModeState(session *ChatSession, enabled bool) {
+	if session == nil {
+		return
+	}
+	session.runtimeCtxMu.Lock()
+	session.DebugMode = enabled
+	session.runtimeCtxMu.Unlock()
+}
+
+func setChatPermissionMode(session *ChatSession, mode runtimepolicy.Mode) {
+	if session == nil {
+		return
+	}
+	session.runtimeCtxMu.Lock()
+	session.PermissionMode = mode
+	session.RequestedPermissionMode = string(mode)
+	session.EffectivePermissionMode = string(mode)
+	if session.ActiveTeam != nil {
+		session.ActiveTeam.PermissionMode = mode
+	}
+	session.runtimeCtxMu.Unlock()
+}
+
+func setChatApprovalReuseMode(session *ChatSession, mode chatApprovalReuseMode) {
+	if session == nil {
+		return
+	}
+	session.runtimeCtxMu.Lock()
+	session.ApprovalReuseMode = mode
+	session.runtimeCtxMu.Unlock()
+}
+
+func setChatSelectedAgentTarget(session *ChatSession, target string) {
+	if session == nil {
+		return
+	}
+	session.runtimeCtxMu.Lock()
+	session.SelectedAgentTarget = target
+	session.runtimeCtxMu.Unlock()
+}
+
+func setChatActiveTeam(session *ChatSession, binding *chatTeamBinding) {
+	if session == nil {
+		return
+	}
+	session.runtimeCtxMu.Lock()
+	session.ActiveTeam = binding.Clone()
+	session.runtimeCtxMu.Unlock()
+}
+
 func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Session) {
 	if session == nil || runtimeSession == nil {
 		return
 	}
+	session.runtimeCtxMu.Lock()
+	defer session.runtimeCtxMu.Unlock()
 	if mode, err := parseChatApprovalReuseMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextApprovalReuse)); err == nil {
 		session.ApprovalReuseMode = mode
 	}
@@ -68,14 +177,21 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 }
 
 func validateAmbientTeamBinding(session *ChatSession, store team.Store) {
-	if session == nil || session.ActiveTeam == nil || store == nil {
+	if session == nil || store == nil {
 		return
 	}
-	binding := session.ActiveTeam.Clone()
+	binding := chatSessionActiveTeam(session)
+	if binding == nil {
+		return
+	}
 	record, err := store.GetTeam(contextBackground(), binding.TeamID)
 	if err != nil || record == nil {
 		fmt.Fprintf(os.Stderr, "Warning: 清理失效的 active team 绑定: %s\n", binding.TeamID)
-		session.ActiveTeam = nil
+		session.runtimeCtxMu.Lock()
+		if session.ActiveTeam != nil && session.ActiveTeam.TeamID == binding.TeamID {
+			session.ActiveTeam = nil
+		}
+		session.runtimeCtxMu.Unlock()
 		return
 	}
 	if binding.TaskID == "" {
@@ -84,7 +200,11 @@ func validateAmbientTeamBinding(session *ChatSession, store team.Store) {
 	task, err := store.GetTask(contextBackground(), binding.TaskID)
 	if err != nil || task == nil || strings.TrimSpace(task.TeamID) != strings.TrimSpace(binding.TeamID) {
 		fmt.Fprintf(os.Stderr, "Warning: 清理失效的 active task 绑定: %s\n", binding.TaskID)
-		session.ActiveTeam.TaskID = ""
+		session.runtimeCtxMu.Lock()
+		if session.ActiveTeam != nil && session.ActiveTeam.TeamID == binding.TeamID && session.ActiveTeam.TaskID == binding.TaskID {
+			session.ActiveTeam.TaskID = ""
+		}
+		session.runtimeCtxMu.Unlock()
 	}
 }
 
@@ -92,6 +212,8 @@ func inferAmbientTeamBinding(session *ChatSession, runtimeSession *runtimechat.S
 	if session == nil || runtimeSession == nil {
 		return
 	}
+	session.runtimeCtxMu.Lock()
+	defer session.runtimeCtxMu.Unlock()
 	toolCallNames := map[string]string{}
 	for _, message := range runtimeSession.History {
 		if message.Role != "assistant" {
@@ -176,9 +298,10 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	if runtimeSession.Metadata.Context == nil {
 		runtimeSession.Metadata.Context = make(map[string]interface{})
 	}
+	ctx := snapshotChatRuntimeContext(session)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Client, "aicli")
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Entrypoint, "aicli")
-	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, string(session.PermissionMode), chatRuntimeContextPermissionMode)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, string(ctx.PermissionMode), chatRuntimeContextPermissionMode)
 	if profileRef := strings.TrimSpace(session.ProfileReference); profileRef != "" {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProfileRef, profileRef, sessionmeta.LegacyAPIProfileReference)
 	} else {
@@ -192,7 +315,7 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 			sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ConfigFile, configFile, sessionmeta.LegacyAICLIConfigFile)
 		}
 	}
-	selectedAgentTarget := strings.TrimSpace(session.SelectedAgentTarget)
+	selectedAgentTarget := strings.TrimSpace(ctx.SelectedAgentTarget)
 	if selectedAgentTarget != "" {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.SelectedAgent, selectedAgentTarget, chatRuntimeContextSelectedAgent)
 	} else {
@@ -207,13 +330,13 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamID, chatRuntimeContextActiveTeamID)
 	sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamAgentID, chatRuntimeContextActiveAgentID)
 	sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamTaskID, chatRuntimeContextActiveTaskID)
-	if session.ActiveTeam == nil || strings.TrimSpace(session.ActiveTeam.TeamID) == "" {
+	if ctx.ActiveTeam == nil || strings.TrimSpace(ctx.ActiveTeam.TeamID) == "" {
 		return
 	}
-	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamID, strings.TrimSpace(session.ActiveTeam.TeamID), chatRuntimeContextActiveTeamID)
-	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamAgentID, firstNonEmptyChatValue(session.ActiveTeam.AgentID, "lead"), chatRuntimeContextActiveAgentID)
-	if strings.TrimSpace(session.ActiveTeam.TaskID) != "" {
-		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamTaskID, strings.TrimSpace(session.ActiveTeam.TaskID), chatRuntimeContextActiveTaskID)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamID, strings.TrimSpace(ctx.ActiveTeam.TeamID), chatRuntimeContextActiveTeamID)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamAgentID, firstNonEmptyChatValue(ctx.ActiveTeam.AgentID, "lead"), chatRuntimeContextActiveAgentID)
+	if strings.TrimSpace(ctx.ActiveTeam.TaskID) != "" {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamTaskID, strings.TrimSpace(ctx.ActiveTeam.TaskID), chatRuntimeContextActiveTaskID)
 	}
 }
 

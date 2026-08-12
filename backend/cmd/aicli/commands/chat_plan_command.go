@@ -172,7 +172,7 @@ func formatPlanModeEntered(state planmode.State, includeWrites bool) string {
 }
 
 func formatPlanModeExited(session *ChatSession, state planmode.State) string {
-	mode := string(session.PermissionMode)
+	mode := string(chatSessionPermissionMode(session))
 	switch state.ExitDecision {
 	case planmode.ExitApprove:
 		return fmt.Sprintf("提示: 已批准计划并退出 plan mode（permission-mode=%s）", mode)
@@ -191,7 +191,7 @@ func exitChatPlanModeCommand(session *ChatSession, decisionToken, notes string) 
 		return false
 	}
 	state := loadChatPlanMode(session)
-	mode := string(session.PermissionMode)
+	mode := string(chatSessionPermissionMode(session))
 	switch state.ExitDecision {
 	case planmode.ExitApprove:
 		fmt.Printf("提示: 已批准计划并退出 plan mode（permission-mode=%s）\n", mode)
@@ -221,7 +221,7 @@ func enterChatPlanModeWithResult(session *ChatSession, planPath string) (chatPla
 	ensureChatPlanModeRuntimeSession(session)
 
 	current := loadChatPlanMode(session)
-	previousMode := string(session.PermissionMode)
+	previousMode := string(chatSessionPermissionMode(session))
 	if previousMode == "" {
 		previousMode = string(runtimepolicy.ModeDefault)
 	}
@@ -261,7 +261,7 @@ func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes strin
 	current := loadChatPlanMode(session)
 	if !planmode.IsActive(current) && current.Status != planmode.StatusExited {
 		// Allow exit even if user only set permission-mode=plan via /mode.
-		if session.PermissionMode != runtimepolicy.ModePlan {
+		if chatSessionPermissionMode(session) != runtimepolicy.ModePlan {
 			return chatPlanModeMutationResult{}, fmt.Errorf("当前不在 plan mode；先执行 /plan enter")
 		}
 		current = planmode.Enter(string(runtimepolicy.ModeDefault), planmode.DefaultPlanPath)
@@ -308,12 +308,7 @@ func applyChatPlanPermissionMode(session *ChatSession, mode runtimepolicy.Mode) 
 	if session == nil {
 		return
 	}
-	session.PermissionMode = mode
-	session.RequestedPermissionMode = string(mode)
-	session.EffectivePermissionMode = string(mode)
-	if session.ActiveTeam != nil {
-		session.ActiveTeam.PermissionMode = mode
-	}
+	setChatPermissionMode(session, mode)
 }
 
 func loadChatPlanMode(session *ChatSession) planmode.State {
@@ -363,8 +358,10 @@ func printPlanModeStatus(session *ChatSession) {
 func planModeStatusText(session *ChatSession) string {
 	state := loadChatPlanMode(session)
 	mode := string(runtimepolicy.ModeDefault)
-	if session != nil && strings.TrimSpace(string(session.PermissionMode)) != "" {
-		mode = string(session.PermissionMode)
+	if session != nil {
+		if permissionMode := chatSessionPermissionMode(session); strings.TrimSpace(string(permissionMode)) != "" {
+			mode = string(permissionMode)
+		}
 	}
 	active := planmode.IsActive(state) || mode == string(runtimepolicy.ModePlan)
 	lines := []string{

@@ -874,7 +874,9 @@ func (e *aicliRuntimeServerChatExecutor) pollRuntimeServerEvents(ctx context.Con
 			processRuntimeServerEvent(&result, event, bridge)
 		}
 		if bridge != nil {
-			bridge.WaitForCurrentEvents(aicliRuntimeServerEventDrainTimeout)
+			if !bridge.WaitForCurrentEvents(aicliRuntimeServerEventDrainTimeout) {
+				writeSessionDebugInfo(session, "[runtime-event] runtime server poll drain timeout", false)
+			}
 			if runErr := bridge.RunError(); runErr != nil {
 				return result, runErr
 			}
@@ -1020,7 +1022,9 @@ func (e *aicliRuntimeServerChatExecutor) streamRuntimeServerEvents(ctx context.C
 			}
 			processRuntimeServerEvent(&result, event, bridge)
 			if bridge != nil {
-				bridge.WaitForCurrentEvents(aicliRuntimeServerEventDrainTimeout)
+				if !bridge.WaitForCurrentEvents(aicliRuntimeServerEventDrainTimeout) {
+					writeSessionDebugInfo(session, "[runtime-event] runtime server stream drain timeout", false)
+				}
 				if runErr := bridge.RunError(); runErr != nil {
 					return runErr
 				}

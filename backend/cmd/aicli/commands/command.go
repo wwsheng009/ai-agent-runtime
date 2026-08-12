@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 func dispatchChatCommand(session *ChatSession, command string, noInteractive bool) bool {
@@ -410,12 +411,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		if !confirmBypassPermissionModeChange(session, "/yolo") {
 			return false
 		}
-		session.PermissionMode = "bypass_permissions"
-		session.RequestedPermissionMode = string(session.PermissionMode)
-		session.EffectivePermissionMode = string(session.PermissionMode)
-		if session.ActiveTeam != nil {
-			session.ActiveTeam.PermissionMode = session.PermissionMode
-		}
+		setChatPermissionMode(session, runtimepolicy.ModeBypassPermissions)
 		warnIfChatSessionSyncFails(session, "toggle permission mode", syncRuntimeSessionFromChat(session))
 		printChatCommandOutput(session, "提示: 已切换到 permission-mode=bypass_permissions（等价于 --yolo）")
 
@@ -500,7 +496,7 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	}
 	value := extractCommandArgument(command)
 	if strings.TrimSpace(value) == "" {
-		printfChatCommandOutput(session, "当前 permission-mode: %s", session.PermissionMode)
+		printfChatCommandOutput(session, "当前 permission-mode: %s", chatSessionPermissionMode(session))
 		return false
 	}
 	mode, err := parseChatPermissionMode(value, false)
@@ -511,12 +507,7 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	if mode == "bypass_permissions" && !confirmBypassPermissionModeChange(session, "/permission-mode") {
 		return false
 	}
-	session.PermissionMode = mode
-	session.RequestedPermissionMode = string(mode)
-	session.EffectivePermissionMode = string(mode)
-	if session.ActiveTeam != nil {
-		session.ActiveTeam.PermissionMode = mode
-	}
+	setChatPermissionMode(session, mode)
 	warnIfChatSessionSyncFails(session, "toggle permission mode", syncRuntimeSessionFromChat(session))
 	printfChatCommandOutput(session, "提示: 已切换到 permission-mode=%s", mode)
 	return false
@@ -536,8 +527,8 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 		"[权限] 影响：当前会话后续的 Agent 工具调用将不再逐次请求审批。",
 		"[权限] 边界：profile/tool policy 的明确拒绝与 sandbox 约束仍然生效。",
 	}
-	if session.ActiveTeam != nil {
-		teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+	if activeTeam := chatSessionActiveTeam(session); activeTeam != nil {
+		teamID := strings.TrimSpace(activeTeam.TeamID)
 		if teamID == "" {
 			teamID = "<unknown>"
 		}
@@ -720,7 +711,7 @@ func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 		printfChatCommandOutput(session, "错误: %v", err)
 		return false
 	}
-	session.ApprovalReuseMode = mode
+	setChatApprovalReuseMode(session, mode)
 	cleared := 0
 	if session.RuntimeEventBridge != nil {
 		cleared = session.RuntimeEventBridge.clearApprovalGrants()
@@ -734,7 +725,7 @@ func printApprovalReuseStatus(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	lines := []string{fmt.Sprintf("当前 approval-reuse: %s", formatChatApprovalReuseMode(session.ApprovalReuseMode))}
+	lines := []string{fmt.Sprintf("当前 approval-reuse: %s", formatChatApprovalReuseMode(chatSessionApprovalReuseMode(session)))}
 	grantLines := []string(nil)
 	if session.RuntimeEventBridge != nil {
 		grantLines = session.RuntimeEventBridge.approvalGrantStatusLines(time.Now())

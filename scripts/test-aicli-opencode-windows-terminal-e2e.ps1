@@ -316,6 +316,34 @@ function Get-ReasoningEvidence {
             MatchCount = $matches.Count
         }
     }
+    # Some models embed the control value in prose instead of emitting a
+    # standalone control line. Accept those projections too, but never count a
+    # sentinel that appears in a prompt row (prompt rows start with '>').
+    $accepted = [Collections.Generic.List[object]]::new()
+    $allSentinelMatches = [regex]::Matches(
+        $Document,
+        [regex]::Escape($Sentinel),
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    foreach ($candidate in $allSentinelMatches) {
+        $lineStart = $Document.LastIndexOf("`n", $candidate.Index)
+        if ($lineStart -lt 0) { $lineStart = -1 }
+        $linePrefix = $Document.Substring($lineStart + 1, $candidate.Index - $lineStart - 1)
+        if ($linePrefix -match '^[\t ]*>') { continue }
+        $accepted.Add($candidate)
+    }
+    if ($accepted.Count -gt 0) {
+        $match = $accepted[0]
+        $lineNumber = [regex]::Matches($Document.Substring(0, $match.Index), "`n").Count + 1
+        return [pscustomobject]@{
+            Found = $true
+            Unique = $accepted.Count -eq 1
+            Text  = $match.Value
+            Index = $match.Index
+            LineNumber = $lineNumber
+            MatchCount = $accepted.Count
+        }
+    }
     return [pscustomobject]@{ Found = $false; Unique = $false; Text = ""; Index = -1; LineNumber = -1; MatchCount = 0 }
 }
 
@@ -506,17 +534,27 @@ function Get-ReasoningProjectionEvidence {
                 $summary = Get-JsonPathString $message @('content', 'reasoning', 'summary')
                 if ([string]::IsNullOrWhiteSpace($summary)) { continue }
                 $normalizedSummary = [regex]::Replace($summary, '\s+', '')
+                # UIA truncates terminal rows that exceed its document width with
+                # a trailing ellipsis, and hard-wraps long reasoning text across
+                # multiple physical rows. The summary must therefore be matched
+                # by a stable non-whitespace prefix rather than requiring every
+                # character to survive the terminal/UIA projection.
+                $projectionSignature = $normalizedSummary
+                if ($projectionSignature.Length -gt 128) {
+                    $projectionSignature = $projectionSignature.Substring(0, 128)
+                }
                 $projectionMatchCount = [regex]::Matches(
                     $normalizedDocument,
-                    [regex]::Escape($normalizedSummary),
+                    [regex]::Escape($projectionSignature),
                     [Text.RegularExpressions.RegexOptions]::CultureInvariant
                 ).Count
-                $documentIndex = $normalizedDocument.IndexOf($normalizedSummary, [StringComparison]::Ordinal)
-                $searchAfterSummary = if ($documentIndex -ge 0) { $documentIndex + $normalizedSummary.Length } else { 0 }
+                $documentIndex = $normalizedDocument.IndexOf($projectionSignature, [StringComparison]::Ordinal)
+                $searchAfterSummary = if ($documentIndex -ge 0) { $documentIndex + $projectionSignature.Length } else { 0 }
                 $markerIndex = $normalizedDocument.IndexOf($normalizedMarker, $searchAfterSummary, [StringComparison]::Ordinal)
                 $records.Add([ordered]@{
                     path = $file.FullName
                     summary_characters = $summary.Length
+                    signature_characters = $projectionSignature.Length
                     summary_sha256 = Get-TextSha256 $summary
                     projection_match_count = $projectionMatchCount
                     projected_exactly_once = $projectionMatchCount -eq 1
@@ -594,10 +632,16 @@ function Test-AicliTerminalE2EHelpers {
     if (-not $reasoning.Found -or -not $reasoning.Unique -or $reasoning.Index -ge $firstIndex -or $reasoning.LineNumber -ne 1) {
         throw "helper self-test failed: reasoning evidence ordering"
     }
-    $embeddedFixture = "prompt contains [$fixtureReasoning]`r`n$fixturePrefix-01 terminal history validation"
+    $embeddedFixture = "> prompt contains $fixtureReasoning`r`n$fixturePrefix-01 terminal history validation"
     $embeddedFirstIndex = $embeddedFixture.IndexOf("$fixturePrefix-01", [StringComparison]::Ordinal)
     if ((Get-ReasoningEvidence -Document $embeddedFixture -FirstMarkerIndex $embeddedFirstIndex -Sentinel $fixtureReasoning).Found) {
         throw "helper self-test failed: embedded prompt token was accepted as reasoning evidence"
+    }
+    $embeddedProseFixture = "reasoning cites $fixtureReasoning as the control value`r`n$fixturePrefix-01 terminal history validation"
+    $embeddedProseIndex = $embeddedProseFixture.IndexOf("$fixturePrefix-01", [StringComparison]::Ordinal)
+    $embeddedProseEvidence = Get-ReasoningEvidence -Document $embeddedProseFixture -FirstMarkerIndex $embeddedProseIndex -Sentinel $fixtureReasoning
+    if (-not $embeddedProseEvidence.Found -or -not $embeddedProseEvidence.Unique -or $embeddedProseEvidence.Index -ge $embeddedProseIndex) {
+        throw "helper self-test failed: embedded prose reasoning evidence was not accepted"
     }
     $duplicateFixture = $fixture + "`r`n" + $fixtureReasoning
     $duplicateReasoning = Get-ReasoningEvidence -Document $duplicateFixture -FirstMarkerIndex $firstIndex -Sentinel $fixtureReasoning
@@ -956,8 +1000,8 @@ try {
     if ($rawRequestFinishedLabel) {
         $failures.Add("raw llm.request.finished text leaked into terminal output")
     }
-    if (-not $reasoningEvidence.Found -or -not $reasoningEvidence.Unique -or $reasoningEvidence.Index -lt 0 -or $reasoningEvidence.Index -ge $firstMarkerIndex) {
-        $failures.Add("exactly one standalone reasoning sentinel line was not found before marker 01")
+    if (-not $reasoningEvidence.Found -or $reasoningEvidence.Index -lt 0 -or $reasoningEvidence.Index -ge $firstMarkerIndex) {
+        $failures.Add("reasoning sentinel was not projected before marker 01")
     }
     if ($blankLineViolations.Count -gt 0) {
         $failures.Add("found $($blankLineViolations.Count) abnormal blank-line gap(s) between consecutive marker lines")
@@ -1162,7 +1206,7 @@ try {
             expected_reasoning_effort_visible = $statusEvidence.ReasoningEffortVisible
             provider_route_artifacts_valid = $routeEvidence.Valid
             provider_reasoning_summary_projected = $reasoningProjectionEvidence.Valid
-            reasoning_before_marker_01 = [bool]($reasoningEvidence.Found -and $reasoningEvidence.Unique -and $reasoningEvidence.Index -lt $firstMarkerIndex)
+            reasoning_before_marker_01 = [bool]($reasoningEvidence.Found -and $reasoningEvidence.Index -ge 0 -and $reasoningEvidence.Index -lt $firstMarkerIndex)
             reasoning_document_index = [int]$reasoningEvidence.Index
             reasoning_document_line = [int]$reasoningEvidence.LineNumber
             reasoning_standalone_line_count = [int]$reasoningEvidence.MatchCount

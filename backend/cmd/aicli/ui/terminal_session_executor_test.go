@@ -3,11 +3,14 @@ package ui
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 type terminalSessionBlockingWriter struct {
@@ -64,6 +67,39 @@ func (w *terminalSessionBlockingWriter) writeCount() int {
 	return len(w.writes)
 }
 
+func drainTerminalSessionExecutor(t *testing.T, writer *terminalSessionBlockingWriter, presenter *TerminalSessionPresenter) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		for {
+			select {
+			case <-writer.started:
+				writer.allow()
+				continue
+			default:
+			}
+			break
+		}
+		presenter.executor.mu.Lock()
+		running := presenter.executor.running
+		presenter.executor.mu.Unlock()
+		if !running {
+			presenter.WaitIdle()
+			presenter.controller.WaitIdle()
+			schedule := presenter.controller.terminalSessionSchedule()
+			if !schedule.recoveryActionable && schedule.pendingToken == 0 {
+				return
+			}
+		}
+		select {
+		case <-writer.started:
+			writer.allow()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Fatal("timed out draining terminal session executor")
+}
+
 func TestTerminalSessionClaimMissRequiresRetryOnlyForActionableScheduleChange(t *testing.T) {
 	claimed := terminalSessionScheduleSnapshot{pendingToken: 7, pendingGeneration: 3}
 	tests := []struct {
@@ -73,8 +109,16 @@ func TestTerminalSessionClaimMissRequiresRetryOnlyForActionableScheduleChange(t 
 	}{
 		{
 			name:   "projection invalidated after claim was scheduled",
-			latest: terminalSessionScheduleSnapshot{projectionUnknown: true},
+			latest: terminalSessionScheduleSnapshot{projectionUnknown: true, recoveryActionable: true},
 			want:   true,
+		},
+		{
+			name: "viewport known but scrollback reconciliation remains",
+			latest: terminalSessionScheduleSnapshot{
+				reconciliationRequired: true,
+				recoveryActionable:     true,
+			},
+			want: true,
 		},
 		{
 			name:   "a replacement token is ready",
@@ -103,6 +147,124 @@ func TestTerminalSessionClaimMissRequiresRetryOnlyForActionableScheduleChange(t 
 				t.Fatalf("retry = %t, want %t; latest=%#v", got, test.want, test.latest)
 			}
 		})
+	}
+}
+
+func TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite(t *testing.T) {
+	const width, height = 100, 24
+	markers := make([]string, 40)
+	lines := make([]string, len(markers))
+	for index := range markers {
+		markers[index] = fmt.Sprintf("ASYNC-FINAL-%02d terminal history validation", index+1)
+		lines[index] = markers[index]
+	}
+
+	var presenter *TerminalSessionPresenter
+	controller := NewUIController(UIControllerConfig{}, nil, nil)
+	go controller.Run()
+	writer := newTerminalSessionBlockingWriter()
+	presenter = NewTerminalSessionPresenterForSession(controller, NewTerminalSession(writer), nil)
+	if !presenter.Attach() {
+		t.Fatal("attach presenter")
+	}
+	t.Cleanup(func() {
+		writer.unblock()
+		presenter.Close()
+		controller.Close()
+		controller.WaitIdle()
+	})
+
+	post := func(actions ...UIAction) {
+		t.Helper()
+		for _, action := range actions {
+			if !controller.Post(action) {
+				t.Fatalf("post %T", action)
+			}
+		}
+		controller.WaitIdle()
+	}
+	post(
+		Resize{Width: width, Height: height, Generation: 1},
+		SetSemanticActiveCellProjectionAction{Enabled: true},
+		ShowPromptAction{Line: "> "},
+	)
+	presenter.Request()
+	writer.waitStarted(t, 1)
+	writer.allow()
+	drainTerminalSessionExecutor(t, writer, presenter)
+
+	var source string
+	for index, line := range lines {
+		if source != "" {
+			source += "\n"
+		}
+		source += line
+		cell := &scene.TranscriptCell{
+			ID: 91, Revision: uint64(index + 1), Kind: scene.KindAssistant,
+			Source: source, Phase: scene.CellMutable,
+		}
+		if index == 0 {
+			post(ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+				Revision: uint64(index + 1), Cells: []*scene.TranscriptCell{cell},
+			}})
+		} else {
+			current := controller.State().Active
+			next := current
+			next.Revision++
+			next.Source = source
+			post(
+				UpdateActiveCellAction{ExpectedCellID: current.CellID, ExpectedRevision: current.Revision, Active: next},
+				ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+					Revision: uint64(index + 1), Cells: []*scene.TranscriptCell{cell},
+				}},
+			)
+		}
+		if index == 30 {
+			select {
+			case <-writer.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for blocked streaming transaction")
+			}
+		}
+	}
+
+	streaming := controller.State()
+	if streaming.Active.Acked.End != 0 || streaming.Active.Enqueued.End == 0 {
+		t.Fatalf("blocked streaming frontier=%+v, want pending history and resident tail", streaming.Active)
+	}
+	finalCell := &scene.TranscriptCell{
+		ID: 91, Revision: 41, Kind: scene.KindAssistant,
+		Source: source, Phase: scene.CellCommitted,
+	}
+	post(FinalizeActiveCellAction{
+		Snapshot:             &scene.Snapshot{Revision: 41, Cells: []*scene.TranscriptCell{finalCell}},
+		ExpectedActiveCellID: 91, ExpectedActiveRevision: streaming.Active.Revision,
+		ExpectedSceneRevision: 41,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	})
+
+	writer.allow()
+	drainTerminalSessionExecutor(t, writer, presenter)
+
+	state := controller.State()
+	if state.Active != (ActiveCellState{}) || state.HistoryEffects.HasPending() ||
+		state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("final drain left active/pending state: active=%+v effects=%+v", state.Active, state.HistoryEffects.Entries())
+	}
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
+			t.Fatalf("final drain left token %d in state %s", entry.Commit.Token, entry.State)
+		}
+	}
+	writer.mu.Lock()
+	physical := make([]byte, 0)
+	for _, write := range writer.writes {
+		physical = append(physical, write...)
+	}
+	writer.mu.Unlock()
+	assertPhysicalMarkersExactlyOnce(t, string(physical), width, height, markers)
+	if strings.Contains(string(physical), markers[30]+"\r\n\r\n"+markers[31]) {
+		t.Fatal("final resident-tail transition inserted an extra blank row")
 	}
 }
 
@@ -464,21 +626,15 @@ func TestTerminalSessionExecutorZeroByteWriterErrorRecoversAndRetriesSameToken(t
 	}
 
 	// Recovery is viewport-only: it must establish a known cache before the
-	// irreversible history token can be claimed again.
-	executor.Request()
-	executor.WaitIdle()
-	state = controller.State()
-	entry = historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitPending || state.HistoryEffects.ProjectionUnknown || writer.writes != 2 {
-		t.Fatalf("viewport recovery changed or failed to unblock token: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
-	}
-
+	// irreversible history token can be claimed again. The same worker run then
+	// drains the now-eligible token, so the second Request observes the Acked
+	// handoff (write 2 = source-backed recovery, write 3 = history retry).
 	executor.Request()
 	executor.WaitIdle()
 	state = controller.State()
 	entry = historyCommitEntry(t, state, firstToken)
 	if entry.State != HistoryCommitAcked || entry.Commit.Token != firstToken || entry.AckFrame == 0 || writer.writes != 3 {
-		t.Fatalf("same token was not acknowledged after retry: entry=%#v writes=%d", entry, writer.writes)
+		t.Fatalf("same token was not recovered and acknowledged: entry=%#v writes=%d", entry, writer.writes)
 	}
 }
 
@@ -525,5 +681,72 @@ func TestTerminalSessionExecutorMissingHistoryResultFailsConservatively(t *testi
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {
 		t.Fatal("missing terminal result did not invalidate projection")
+	}
+}
+
+func TestTerminalSessionExecutorCloseTimeoutAbortsBlockedWrite(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	controller := NewUIController(UIControllerConfig{}, ReducerFunc(func(_ uint64, action UIAction) []Effect {
+		switch action.(type) {
+		case Resize, DrawRequested:
+			return []Effect{FlushEffect{Dirty: renderengine.DirtyContent}}
+		}
+		return nil
+	}), func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	writer := newTerminalSessionBlockingWriter()
+	session := NewTerminalSession(writer)
+	executor = NewTerminalSessionExecutor(controller, session)
+	go controller.Run()
+	defer func() {
+		writer.unblock()
+		executor.Close()
+		controller.Close()
+		controller.WaitIdle()
+	}()
+
+	if !controller.Post(Resize{Width: 80, Height: 24, Applied: true, Generation: 1}) {
+		t.Fatal("failed to post blocked resize")
+	}
+	writer.waitStarted(t, 1)
+
+	if executor.CloseTimeout(50 * time.Millisecond) {
+		t.Fatal("CloseTimeout returned before the blocked physical write")
+	}
+	if err := session.AbortTerminalWrite(); err != nil {
+		t.Fatalf("AbortTerminalWrite: %v", err)
+	}
+	if !executor.CloseTimeout(2 * time.Second) {
+		t.Fatal("CloseTimeout did not complete after abort")
+	}
+	if got := writer.writeCount(); got != 1 {
+		t.Fatalf("write count = %d, want only the abandoned write", got)
+	}
+}
+
+func TestTerminalSessionExecutorWorkerTeardownReusesFreshDoneChannel(t *testing.T) {
+	controller := NewUIController(UIControllerConfig{}, nil, nil)
+	session := NewTerminalSession(&bytes.Buffer{})
+	executor := NewTerminalSessionExecutor(controller, session)
+	go controller.Run()
+	t.Cleanup(func() {
+		executor.Close()
+		controller.Close()
+		controller.WaitIdle()
+	})
+
+	// The worker used to publish running=false before its deferred close(done),
+	// so a Request() arriving in that window could reuse the same per-worker
+	// channel. Two workers then raced to close one channel. The churn below
+	// used to panic deterministically under -count with the old teardown.
+	for i := 0; i < 300; i++ {
+		executor.Request()
+		executor.WaitIdle()
+	}
+	if !executor.CloseTimeout(5 * time.Second) {
+		t.Fatal("executor did not settle after repeated worker teardown")
 	}
 }

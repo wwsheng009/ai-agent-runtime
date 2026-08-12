@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
@@ -85,4 +86,42 @@ func TestTerminalSessionPresenter_RetriesDeferredGeometryPublication(t *testing.
 	presenter.Close()
 	controller.Close()
 	controller.WaitIdle()
+}
+
+func TestTerminalSessionPresenterCloseTimeoutAbortsBlockedWrite(t *testing.T) {
+	controller := NewUIController(UIControllerConfig{}, ReducerFunc(func(_ uint64, action UIAction) []Effect {
+		if _, ok := action.(DrawRequested); ok {
+			return []Effect{FlushEffect{Dirty: renderengine.DirtyContent}}
+		}
+		return nil
+	}), nil)
+	writer := newTerminalSessionBlockingWriter()
+	presenter := NewTerminalSessionPresenter(controller, writer, func() (int, int, bool) {
+		return 80, 24, true
+	})
+	if !presenter.Attach() {
+		t.Fatal("presenter attach failed")
+	}
+	go controller.Run()
+	defer func() {
+		writer.unblock()
+		presenter.AbortTerminalWrite()
+		presenter.CloseTimeout(2 * time.Second)
+		controller.Close()
+		controller.WaitIdle()
+	}()
+
+	if !controller.Post(DrawRequested{Key: "blocked"}) {
+		t.Fatal("failed to post blocked draw")
+	}
+	writer.waitStarted(t, 1)
+
+	// Presenter.CloseTimeout self-aborts the physical writer after its bounded
+	// wait, so a blocked write must not turn shutdown into an unbounded wait.
+	if !presenter.CloseTimeout(50 * time.Millisecond) {
+		t.Fatal("presenter CloseTimeout did not self-abort the blocked writer")
+	}
+	if got := writer.writeCount(); got != 1 {
+		t.Fatalf("write count = %d, want only the abandoned write", got)
+	}
 }

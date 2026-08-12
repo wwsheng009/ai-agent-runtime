@@ -342,7 +342,8 @@ func buildChatStatusPermissionsValue(session *ChatSession) string {
 	if session == nil {
 		return "Default"
 	}
-	switch runtimepolicy.Mode(strings.TrimSpace(string(session.PermissionMode))) {
+	mode := chatSessionPermissionMode(session)
+	switch runtimepolicy.Mode(strings.TrimSpace(string(mode))) {
 	case runtimepolicy.ModeBypassPermissions:
 		return "Full Access"
 	case runtimepolicy.ModeAcceptEdits:
@@ -352,7 +353,7 @@ func buildChatStatusPermissionsValue(session *ChatSession) string {
 	case runtimepolicy.ModeDefault, "":
 		return "Default"
 	default:
-		return strings.ReplaceAll(strings.TrimSpace(string(session.PermissionMode)), "_", " ")
+		return strings.ReplaceAll(strings.TrimSpace(string(mode)), "_", " ")
 	}
 }
 

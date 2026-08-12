@@ -21,6 +21,8 @@ func TestLegacyInteractionWaitsForEarlierRuntimeActorAction(t *testing.T) {
 	}
 
 	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	epoch := bridge.runEpoch
 	deltaStarted := make(chan struct{})
 	releaseDelta := make(chan struct{})
 	approvalStarted := make(chan struct{})
@@ -47,7 +49,7 @@ func TestLegacyInteractionWaitsForEarlierRuntimeActorAction(t *testing.T) {
 		Payload: map[string]interface{}{
 			"delta": "earlier assistant delta",
 		},
-	}})
+	}, epoch: epoch})
 	select {
 	case <-deltaStarted:
 	case <-time.After(time.Second):
@@ -65,7 +67,7 @@ func TestLegacyInteractionWaitsForEarlierRuntimeActorAction(t *testing.T) {
 				"tool_name":  "shell",
 				"reason":     "ordering test",
 			},
-		}})
+		}, epoch: epoch})
 	}()
 
 	select {

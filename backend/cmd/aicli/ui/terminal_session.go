@@ -260,6 +260,7 @@ type TerminalTransactionResult struct {
 type TerminalSession struct {
 	mu        sync.Mutex
 	writer    io.Writer
+	aborter   TerminalWriteAborter
 	presenter *renderengine.Presenter
 	screen    *renderengine.ScreenModel
 	geometry  GeometryState
@@ -310,14 +311,26 @@ func NewTerminalSession(writer io.Writer) *TerminalSession {
 	// A fresh session has no proof that its blank front matches the terminal.
 	// The first primary transaction must therefore be a recovery repaint.
 	screen.Invalidate()
+	abortable := newAbortableTerminalWriter(writer)
 	return &TerminalSession{
-		writer:     writer,
+		writer:     abortable,
+		aborter:    abortable,
 		presenter:  renderengine.NewPresenter(),
 		frameTheme: ThemeContextForProfile(style.ColorProfile{ColorProfile: render.NoColorProfile()}),
 		// A real geometry must arrive through TerminalFramePlan before a
 		// visible frame. The one-cell initial cache is never used as source.
 		screen: screen,
 	}
+}
+
+// AbortTerminalWrite is the shutdown cancellation gate for a blocked physical
+// write. It never takes the session mutex, so it can interrupt a write that is
+// already holding that mutex. After abort, every subsequent frame is rejected.
+func (s *TerminalSession) AbortTerminalWrite() error {
+	if s == nil || s.aborter == nil {
+		return nil
+	}
+	return s.aborter.AbortTerminalWrite()
 }
 
 // ProjectionState returns a detached physical-cache summary. It is intended

@@ -43,6 +43,7 @@ func withRuntimeHTTPRouteMetadata(metadata map[string]interface{}, session *Chat
 	for key, value := range metadata {
 		cloned[key] = value
 	}
+	ctx := snapshotChatRuntimeContext(session)
 	route := map[string]interface{}{
 		"requested_provider":         strings.TrimSpace(firstNonEmptyChatValue(session.RequestedProvider, session.ProviderName)),
 		"effective_provider":         strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveProvider, session.ProviderName)),
@@ -50,8 +51,8 @@ func withRuntimeHTTPRouteMetadata(metadata map[string]interface{}, session *Chat
 		"effective_model":            strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model)),
 		"requested_reasoning_effort": strings.TrimSpace(firstNonEmptyChatValue(session.RequestedReasoningEffort, session.ReasoningEffort)),
 		"effective_reasoning_effort": strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveReasoningEffort, session.ReasoningEffort)),
-		"requested_permission_mode":  strings.TrimSpace(firstNonEmptyChatValue(session.RequestedPermissionMode, string(session.PermissionMode))),
-		"effective_permission_mode":  strings.TrimSpace(firstNonEmptyChatValue(session.EffectivePermissionMode, string(session.PermissionMode))),
+		"requested_permission_mode":  strings.TrimSpace(firstNonEmptyChatValue(ctx.RequestedPermissionMode, string(ctx.PermissionMode))),
+		"effective_permission_mode":  strings.TrimSpace(firstNonEmptyChatValue(ctx.EffectivePermissionMode, string(ctx.PermissionMode))),
 		"fallback_used":              session.FallbackUsed,
 		"fallback_reason":            strings.TrimSpace(session.FallbackReason),
 	}

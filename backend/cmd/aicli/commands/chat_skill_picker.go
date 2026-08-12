@@ -66,7 +66,11 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 	}
 	// Lifecycle barrier only: the first list frame sees the matching actor
 	// state. Key navigation stays local to the fullscreen list.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("open skill picker") {
+		_ = lease.Release(context.Background())
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("skill 选择器渲染未就绪")), false)
+		return
+	}
 
 	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
 		Title:        "选择 Skill",
@@ -80,7 +84,10 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 	releaseErr := lease.Release(context.Background())
 	// LeaseReleased is the primary recovery barrier. Do not touch the composer
 	// until the actor has observed it.
-	session.Interaction.waitUIActorIdle()
+	if !session.Interaction.waitUIActorIdleBounded("close skill picker") {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("skill 选择器关闭未就绪")), false)
+		return
+	}
 
 	if releaseErr != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭 skill 选择器失败: %w", releaseErr)), false)
@@ -218,7 +225,7 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 	if opensPicker {
 		if canOpenChatSkillPicker(session) {
 			return CommandResult{
-				Action:         CommandContinue,
+				Action:          CommandContinue,
 				OpenSkillPicker: &SkillPickerRequest{},
 			}, true
 		}
@@ -230,4 +237,3 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 		Action: CommandContinue,
 	}, true
 }
-

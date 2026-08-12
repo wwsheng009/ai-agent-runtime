@@ -911,8 +911,10 @@ func applyChatPlanModeToAgent(apiAgent *agent.Agent, session *ChatSession, runti
 	if state.Status == planmode.StatusExited {
 		modeText = planmode.ResumeModeAfterExit(state)
 	}
-	if session != nil && strings.TrimSpace(string(session.PermissionMode)) != "" {
-		modeText = string(session.PermissionMode)
+	if session != nil {
+		if permissionMode := chatSessionPermissionMode(session); strings.TrimSpace(string(permissionMode)) != "" {
+			modeText = string(permissionMode)
+		}
 	}
 	mode, err := parseChatPermissionMode(modeText, false)
 	if err != nil {

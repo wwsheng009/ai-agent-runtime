@@ -561,15 +561,23 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	if b == nil {
 		return
 	}
-	b.WaitForCurrentEvents(b.endRunDrainTimeout())
-	b.finalizeOpenUnifiedStreamsAtRunEnd()
-	b.logRunEndFallback()
+	if !b.WaitForCurrentEvents(b.endRunDrainTimeout()) {
+		if b.session != nil {
+			writeSessionDebugInfo(b.session, "[runtime-event] EndRun drain timeout; closing run epoch", false)
+		}
+	}
+	// Stop the run-active log window before finalization so the run-end
+	// render/log work is not double-counted. The render epoch itself stays
+	// open for ambient background events (for example async team orchestration)
+	// until the next BeginRun advances it.
 	b.renderMu.Lock()
 	if b.activeTurnID != "" {
 		b.retireTurnLocked(b.activeTurnID)
 	}
 	b.runActive = false
 	b.renderMu.Unlock()
+	b.finalizeOpenUnifiedStreamsAtRunEnd()
+	b.logRunEndFallback()
 	if b.session != nil && b.session.TitleNotifier != nil {
 		b.session.TitleNotifier.ClearTools()
 	}
@@ -762,15 +770,23 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 	// is still waiting in the actor mailbox.
 	if runtimeEventRequiresLegacyInteraction(queued.event) {
 		if coordinator := b.sessionInteraction(); coordinator != nil {
-			coordinator.waitUIActorIdle()
+			if !coordinator.waitUIActorIdleBounded("runtime legacy interaction barrier") {
+				b.logLateRuntimeEvent(queued.event, "legacy interaction barrier timeout; event dropped")
+				return
+			}
 		}
 		b.handleEvent(queued.event)
 		return
 	}
-	if b.postRuntimeEventToUIActor(queued.event) {
+	if b.postRuntimeEventToUIActorWithEpoch(queued.event, queued.epoch) {
 		return
 	}
-	b.handleEvent(queued.event)
+	// Only fall back to the legacy surface while the captured epoch is still
+	// current. After EndRun seals the epoch, a rejected post must be dropped,
+	// never rendered through a second path.
+	if b.isRunEpochCurrent(queued.epoch) {
+		b.handleEvent(queued.event)
+	}
 }
 
 func runtimeEventRequiresLegacyInteraction(event runtimeevents.Event) bool {
@@ -783,6 +799,16 @@ func runtimeEventRequiresLegacyInteraction(event runtimeevents.Event) bool {
 }
 
 func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.Event) bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	epoch := b.runEpoch
+	b.renderMu.Unlock()
+	return b.postRuntimeEventToUIActorWithEpoch(event, epoch)
+}
+
+func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtimeevents.Event, epoch uint64) bool {
 	if b == nil || b.session == nil || b.session.Interaction == nil {
 		return false
 	}
@@ -792,6 +818,7 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.E
 		Payload: chatRuntimeEventUIAction{
 			bridge: b,
 			event:  event,
+			epoch:  epoch,
 		},
 	}
 	for {
@@ -802,6 +829,12 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.E
 			return false
 		}
 		if coordinator.uiActor == nil || coordinator.uiActor.Stats().Closed {
+			return false
+		}
+		// A bounded mailbox is normal backpressure, but waiting for it must
+		// never outlive the run that owns this event. EndRun seals the epoch
+		// after its drain timeout, which releases this loop.
+		if !b.isRunEpochCurrent(epoch) {
 			return false
 		}
 		// A full bounded mailbox is normal backpressure, not a reason to run
@@ -1835,9 +1868,9 @@ func (b *chatRuntimeEventBridge) releaseEventQueueBytes(size int64) {
 	b.eventQueueMu.Unlock()
 }
 
-func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) {
+func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) bool {
 	if b == nil || timeout <= 0 {
-		return
+		return true
 	}
 	deadline := time.Now().Add(timeout)
 	stableSince := time.Time{}
@@ -1855,16 +1888,18 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) {
 			}
 			if now.Sub(stableSince) >= chatRuntimeEventSettleWindow {
 				if coordinator := b.sessionInteraction(); coordinator != nil {
-					coordinator.waitUIActorIdleTimeout(time.Until(deadline))
+					if !coordinator.waitUIActorIdleTimeout(time.Until(deadline)) {
+						return false
+					}
 				}
-				return
+				return true
 			}
 		} else {
 			stableSince = time.Time{}
 			lastSeenEnqueued = enqueued
 		}
 		if now.After(deadline) {
-			return
+			return false
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -1875,6 +1910,20 @@ func (b *chatRuntimeEventBridge) sessionInteraction() *chatInteractionCoordinato
 		return nil
 	}
 	return b.session.Interaction
+}
+
+// isRunEpochCurrent is the actor-side epoch fence. A queued RuntimeEvent is
+// only applied while its captured run epoch matches the current one. Events
+// from a previous run are rejected as soon as the next BeginRun advances the
+// epoch; events after EndRun remain renderable so ambient background work such
+// as async team orchestration can finish its timeline.
+func (b *chatRuntimeEventBridge) isRunEpochCurrent(epoch uint64) bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return epoch != 0 && epoch == b.runEpoch
 }
 
 func (b *chatRuntimeEventBridge) handleStructuredLogEvent(event runtimeevents.Event) {
@@ -2953,11 +3002,12 @@ func approvalReusePromptScope(session *ChatSession, approval *runtimechat.Approv
 	if session == nil || approval == nil || approvalGrantFamily(strings.TrimSpace(approval.ToolName), approval.ArgsJSON) == "" {
 		return ""
 	}
-	switch session.ApprovalReuseMode {
+	ctx := snapshotChatRuntimeContext(session)
+	switch ctx.ApprovalReuseMode {
 	case chatApprovalReuseSessionReadOnlyShell:
 		return "当前会话内"
 	case chatApprovalReuseTeamReadOnlyShell:
-		if session.ActiveTeam != nil && strings.TrimSpace(session.ActiveTeam.TeamID) != "" {
+		if ctx.ActiveTeam != nil && strings.TrimSpace(ctx.ActiveTeam.TeamID) != "" {
 			return "当前团队内"
 		}
 	}
@@ -3698,10 +3748,11 @@ func (b *chatRuntimeEventBridge) renderAsyncTeamSummaryFallback(event runtimeeve
 	if !b.matchesPrimarySessionID(event.SessionID) {
 		return chatRuntimeTimelineEvent{}
 	}
-	if b.session.ActiveTeam == nil || strings.TrimSpace(b.session.ActiveTeam.TeamID) == "" {
+	ctx := snapshotChatRuntimeContext(b.session)
+	if ctx.ActiveTeam == nil || strings.TrimSpace(ctx.ActiveTeam.TeamID) == "" {
 		return chatRuntimeTimelineEvent{}
 	}
-	teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID)
+	teamID := strings.TrimSpace(ctx.ActiveTeam.TeamID)
 	if !b.hasRenderedTimelineKey("team.completed:"+teamID+":done") &&
 		!b.hasRenderedTimelineKey("team.completed:"+teamID+":failed") &&
 		!b.hasRenderedTimelineKey("team.completed:"+teamID+":partially_completed") &&
@@ -3764,15 +3815,16 @@ func (b *chatRuntimeEventBridge) autoApprovalScope(sessionID string) string {
 	if b == nil || b.session == nil {
 		return ""
 	}
-	switch b.session.ApprovalReuseMode {
+	ctx := snapshotChatRuntimeContext(b.session)
+	switch ctx.ApprovalReuseMode {
 	case chatApprovalReuseSessionReadOnlyShell:
 		if sid := strings.TrimSpace(sessionID); sid != "" {
 			return "session:" + sid
 		}
 		return ""
 	case chatApprovalReuseTeamReadOnlyShell:
-		if b.session.ActiveTeam != nil {
-			if teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID); teamID != "" {
+		if ctx.ActiveTeam != nil {
+			if teamID := strings.TrimSpace(ctx.ActiveTeam.TeamID); teamID != "" {
 				return "team:" + teamID
 			}
 		}
@@ -3895,10 +3947,8 @@ func (b *chatRuntimeEventBridge) nonInteractiveQuestionError(prompt string) erro
 }
 
 func chatRuntimePermissionModeLabel(session *ChatSession) string {
-	if session == nil {
-		return string(runtimepolicy.ModeDefault)
-	}
-	mode := strings.TrimSpace(string(session.PermissionMode))
+	ctx := snapshotChatRuntimeContext(session)
+	mode := strings.TrimSpace(string(ctx.PermissionMode))
 	if mode == "" {
 		return string(runtimepolicy.ModeDefault)
 	}
@@ -3912,6 +3962,7 @@ func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 	if strings.TrimSpace(reason) != "permission_mode_requires_approval" {
 		return
 	}
+	ctx := snapshotChatRuntimeContext(b.session)
 	b.renderMu.Lock()
 	if b.permissionHintShown {
 		b.renderMu.Unlock()
@@ -3920,10 +3971,14 @@ func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 	b.permissionHintShown = true
 	b.renderMu.Unlock()
 
+	mode := strings.TrimSpace(string(ctx.PermissionMode))
+	if mode == "" {
+		mode = string(runtimepolicy.ModeDefault)
+	}
 	b.renderLocalApprovalSupplement(fmt.Sprintf(
 		"[tip] 当前 permission-mode=%s。若你信任当前会话，可用 --yolo（等价于 --permission-mode bypass_permissions）关闭审批；--approval-reuse=%s 可减少重复只读审批（shell/网络搜索等）。",
-		chatRuntimePermissionModeLabel(b.session),
-		formatChatApprovalReuseMode(b.session.ApprovalReuseMode),
+		mode,
+		formatChatApprovalReuseMode(ctx.ApprovalReuseMode),
 	))
 }
 
@@ -3931,12 +3986,13 @@ func (b *chatRuntimeEventBridge) approvalPromptHint(sessionID string, approval *
 	if b == nil || b.session == nil || approval == nil {
 		return ""
 	}
-	if b.session.ApprovalReuseMode == chatApprovalReuseOff {
+	ctx := snapshotChatRuntimeContext(b.session)
+	if ctx.ApprovalReuseMode == chatApprovalReuseOff {
 		return ""
 	}
 	scope := b.autoApprovalScope(sessionID)
 	if scope == "" {
-		if b.session.ApprovalReuseMode == chatApprovalReuseTeamReadOnlyShell {
+		if ctx.ApprovalReuseMode == chatApprovalReuseTeamReadOnlyShell {
 			return "[tip] 当前没有 active team，team_readonly_shell 不会缓存这次审批。"
 		}
 		return ""
@@ -4238,10 +4294,14 @@ func (b *chatRuntimeEventBridge) shouldAcceptTeamLifecycleRuntimeEvent(event run
 	if !isTaskRouteResolvedRuntimeEvent(event.Type) {
 		return false
 	}
-	if b.session == nil || b.session.ActiveTeam == nil {
+	if b.session == nil {
 		return false
 	}
-	activeTeamID := strings.TrimSpace(b.session.ActiveTeam.TeamID)
+	ctx := snapshotChatRuntimeContext(b.session)
+	if ctx.ActiveTeam == nil {
+		return false
+	}
+	activeTeamID := strings.TrimSpace(ctx.ActiveTeam.TeamID)
 	eventTeamID := strings.TrimSpace(payloadStringValue(event.Payload["team_id"]))
 	return activeTeamID != "" && eventTeamID == activeTeamID
 }
@@ -4264,10 +4324,11 @@ func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.
 	if !b.matchesPrimarySessionID(event.SessionID) {
 		return ""
 	}
-	if b.session.ActiveTeam == nil || strings.TrimSpace(b.session.ActiveTeam.TeamID) == "" {
+	ctx := snapshotChatRuntimeContext(b.session)
+	if ctx.ActiveTeam == nil || strings.TrimSpace(ctx.ActiveTeam.TeamID) == "" {
 		return ""
 	}
-	teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID)
+	teamID := strings.TrimSpace(ctx.ActiveTeam.TeamID)
 	if !b.hasRenderedTimelineKey("team.completed:"+teamID+":done") &&
 		!b.hasRenderedTimelineKey("team.completed:"+teamID+":failed") &&
 		!b.hasRenderedTimelineKey("team.completed:"+teamID+":partially_completed") &&

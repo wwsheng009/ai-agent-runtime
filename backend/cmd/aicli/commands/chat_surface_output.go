@@ -357,13 +357,17 @@ func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
 		// Settle any in-flight prompt render before ClearPrompt, otherwise the
 		// prompt-clear facade post queues against a surface whose prompt rows
 		// are not yet reserved and the prompt can resurface in the output.
-		session.Interaction.waitUIActorIdle()
+		if !session.Interaction.waitUIActorIdleBounded("direct output pre-clear") {
+			return false
+		}
 		session.Interaction.ClearPrompt()
 		// ClearPrompt is a facade action once a surface is actor-owned. The
 		// following WriteOutput is a legacy direct writer, so it must not race
 		// ahead of the queued prompt-clear layout transition; otherwise output
 		// is composed against the old bottom reserve and leaves a blank hole.
-		session.Interaction.waitUIActorIdle()
+		if !session.Interaction.waitUIActorIdleBounded("direct output post-clear") {
+			return false
+		}
 	}
 	_, err, handled := session.Surface.WriteOutput(os.Stdout, text)
 	return handled && err == nil

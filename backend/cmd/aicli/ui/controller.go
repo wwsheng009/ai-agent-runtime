@@ -128,14 +128,18 @@ func (HistoryCommitWakeEffect) isEffect() {}
 
 // ControllerStats 是 UI actor 的诊断快照（供 /debug 与测试）。
 type ControllerStats struct {
-	Posted        uint64
-	Processed     uint64
-	Dropped       uint64
-	Pending       int
-	Revision      uint64
-	LastAction    string
-	ReducerPanics uint64
-	Closed        bool
+	Posted           uint64
+	Processed        uint64
+	Dropped          uint64
+	DeferredPosted   uint64
+	DeferredMerged   uint64
+	CapacityOverflow uint64
+	PeakPending      int
+	Pending          int
+	Revision         uint64
+	LastAction       string
+	ReducerPanics    uint64
+	Closed           bool
 }
 
 // UIController 是 UI actor：bounded mailbox + 单一 Run 循环。
@@ -164,12 +168,16 @@ type UIController struct {
 	reducer   Reducer
 	onEffect  func(Effect)
 
-	posted        uint64
-	processed     uint64
-	dropped       uint64
-	revision      uint64
-	reducerPanics uint64
-	inFlight      bool
+	posted           uint64
+	processed        uint64
+	dropped          uint64
+	deferredPosted   uint64
+	deferredMerged   uint64
+	capacityOverflow uint64
+	peakPending      int
+	revision         uint64
+	reducerPanics    uint64
+	inFlight         bool
 	// activeTransaction is the capability currently issued to Run's reducer
 	// invocation. legacyReducerGID supports only the pre-context facade
 	// adapter during migration; unlike the former inFlight-only check it
@@ -323,6 +331,8 @@ func (c *UIController) PostDeferred(action UIAction) bool {
 				c.queue[idx] = mergeActions(c.queue[idx], action)
 				c.posted++
 				c.dropped++
+				c.deferredPosted++
+				c.deferredMerged++
 				c.mu.Unlock()
 				return true
 			}
@@ -335,6 +345,13 @@ func (c *UIController) PostDeferred(action UIAction) bool {
 		}
 	}
 	c.posted++
+	c.deferredPosted++
+	if len(c.queue) > c.cap {
+		c.capacityOverflow++
+	}
+	if len(c.queue) > c.peakPending {
+		c.peakPending = len(c.queue)
+	}
 	c.mu.Unlock()
 	c.cond.Broadcast()
 	return true
@@ -498,22 +515,30 @@ func (c *UIController) collectPostActionEffectsLocked(effects []Effect) []Effect
 // the action's new AppState. It keeps HistoryCommit scheduling on the reducer
 // side while leaving physical terminal ownership to the injected presenter.
 func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
-	if state.HistoryEffects.ProjectionUnknown && state.HistoryEffects.ReconciliationRequired {
+	effects := state.HistoryEffects
+	// A viewport can be Known while scrollback still needs an explicit
+	// reconciliation (for example after a delivered batch could no longer be
+	// acknowledged). HasPending is deliberately false in that state, so the
+	// wake must not depend on the pending-token branch below.
+	if terminalHistoryRecoveryActionable(state) {
 		switch action.(type) {
-		case HistoryCommitFailed, HistoryCommitsAcknowledged,
-			UpdateActiveCellAction, FinalizeActiveCellAction:
+		case HistoryCommitFailed, HistoryCommitsAcknowledged, HistoryCommitAcknowledged,
+			HistoryCommitDeferred, ReplaceTranscriptAction, SetThemeContextAction,
+			SetActiveCellAction, UpdateActiveCellAction, SetSemanticActiveCellProjectionAction,
+			FinalizeActiveCellAction, Resize, LeaseReleased,
+			HistoryProjectionRecovered, HistoryScrollbackReconciled:
 			return true
 		}
 	}
 	if _, resized := action.(Resize); resized &&
-		(state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.hasUnresolvedTerminalDelivery()) {
+		(effects.ProjectionUnknown || effects.hasUnresolvedTerminalDelivery()) {
 		// Resize can invalidate an in-flight token, which deliberately makes
 		// HasPending false. The same barrier must still wake the terminal owner
 		// so it can rebuild the current generation and reconcile scrollback;
 		// relying on an unrelated reducer FlushEffect leaves the queue frozen.
 		return true
 	}
-	if !state.HistoryEffects.HasPending() {
+	if !effects.HasPending() {
 		return false
 	}
 	switch action.(type) {
@@ -675,14 +700,18 @@ func (c *UIController) Stats() ControllerStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return ControllerStats{
-		Posted:        c.posted,
-		Processed:     c.processed,
-		Dropped:       c.dropped,
-		Pending:       len(c.queue) + len(c.followups),
-		Revision:      c.revision,
-		LastAction:    c.lastAction,
-		ReducerPanics: c.reducerPanics,
-		Closed:        c.closed,
+		Posted:           c.posted,
+		Processed:        c.processed,
+		Dropped:          c.dropped,
+		DeferredPosted:   c.deferredPosted,
+		DeferredMerged:   c.deferredMerged,
+		CapacityOverflow: c.capacityOverflow,
+		PeakPending:      c.peakPending,
+		Pending:          len(c.queue) + len(c.followups),
+		Revision:         c.revision,
+		LastAction:       c.lastAction,
+		ReducerPanics:    c.reducerPanics,
+		Closed:           c.closed,
 	}
 }
 

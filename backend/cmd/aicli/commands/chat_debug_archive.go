@@ -185,7 +185,7 @@ func setChatDebugMode(session *ChatSession, enabled bool) {
 		fmt.Println("错误: 当前没有活动会话")
 		return
 	}
-	session.DebugMode = enabled
+	setChatDebugModeState(session, enabled)
 	if session.Surface != nil {
 		// /debug on|off also drives the render paint reconciliation probe so
 		// rendering anomalies (white repaints / missing coverage) are
@@ -201,7 +201,7 @@ func printChatDebugModeStatus(session *ChatSession) {
 		fmt.Println("错误: 当前没有活动会话")
 		return
 	}
-	printChatSessionMetaRow("Debug Mode:", chatDebugBool(session.DebugMode))
+	printChatSessionMetaRow("Debug Mode:", chatDebugBool(chatSessionDebugMode(session)))
 	printChatSessionMetaRow("HTTP Debug:", chatDebugBool(session.HTTPDebug))
 	printChatSessionMetaRow("Skills Debug:", chatDebugBool(session.SkillsDebug))
 	printChatDebugUsage()

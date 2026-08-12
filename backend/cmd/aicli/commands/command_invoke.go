@@ -400,6 +400,7 @@ func authorizeDirectFunctionInvocation(session *ChatSession, functionName string
 	if session == nil {
 		return nil, fmt.Errorf("当前没有活动会话")
 	}
+	permissionMode := chatSessionPermissionMode(session)
 	if session.DisableTools {
 		return nil, fmt.Errorf("当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
 	}
@@ -417,7 +418,7 @@ func authorizeDirectFunctionInvocation(session *ChatSession, functionName string
 		policy = catalog.toolPolicy
 	}
 	engine := &runtimepolicy.Engine{
-		Mode:       session.PermissionMode,
+		Mode:       permissionMode,
 		Policy:     policy,
 		AskHandler: directFunctionApprovalHandler{session: session, interactive: interactive},
 	}
@@ -429,7 +430,7 @@ func authorizeDirectFunctionInvocation(session *ChatSession, functionName string
 		ToolName:     functionName,
 		Args:         args,
 		Capabilities: directFunctionCapabilities(catalog, functionName, args),
-		Mode:         session.PermissionMode,
+		Mode:         permissionMode,
 		Metadata: map[string]interface{}{
 			"source": "direct_slash_command",
 		},
