@@ -325,7 +325,9 @@ function Get-StandaloneMarkerEvidence {
         [Parameter(Mandatory)][string]$Marker
     )
     $expectedLine = $Marker + ' terminal history validation'
-    $linePattern = '(?m)^' + [regex]::Escape($expectedLine) + '[\t ]*\r?$'
+    # Unified assistant chrome indents continuation rows. Treat that
+    # presentation prefix as layout, while keeping the marker payload exact.
+    $linePattern = '(?m)^[\t ]*' + [regex]::Escape($expectedLine) + '[\t ]*\r?$'
     $matches = [regex]::Matches($Document, $linePattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
     if ($matches.Count -eq 0) {
         return [pscustomobject]@{ Found = $false; Unique = $false; Index = -1; LineNumber = -1; MatchCount = 0 }
@@ -543,7 +545,7 @@ function Get-MarkerBlankLineViolations {
     )
     $violations = [Collections.Generic.List[object]]::new()
     $lines = [regex]::Split($Document, "\r?\n")
-    $markerPattern = '^' + [regex]::Escape($Prefix) +
+    $markerPattern = '^[\t ]*' + [regex]::Escape($Prefix) +
         '-(?<number>\d{2}) terminal history validation[\t ]*$'
     $previousNumber = 0
     $previousLine = -1
@@ -613,9 +615,14 @@ function Test-AicliTerminalE2EHelpers {
     if (-not $duplicateMarker.Found -or $duplicateMarker.Unique -or $duplicateMarker.MatchCount -ne 2) {
         throw "helper self-test failed: duplicate standalone marker line was accepted"
     }
+    $indentedMarkerLine = '  ' + $fixtureLines[1]
+    $indentedMarker = Get-StandaloneMarkerEvidence -Document $indentedMarkerLine -Marker "$fixturePrefix-01"
+    if (-not $indentedMarker.Found -or -not $indentedMarker.Unique -or $indentedMarker.Index -ne 2) {
+        throw "helper self-test failed: unified assistant indentation was not accepted"
+    }
     foreach ($malformedMarkerLine in @(
-        (' ' + $fixtureLines[1])
         "$fixturePrefix-01  terminal history validation"
+        ('  ' + "$fixturePrefix-01  terminal history validation")
         ($fixtureLines[1] + ' trailing prose')
     )) {
         if ((Get-StandaloneMarkerEvidence -Document $malformedMarkerLine -Marker "$fixturePrefix-01").Found) {
@@ -624,6 +631,10 @@ function Test-AicliTerminalE2EHelpers {
     }
     if (@(Get-MarkerBlankLineViolations -Document $fixture -Prefix $fixturePrefix).Count -ne 0) {
         throw "helper self-test failed: contiguous markers reported a blank-line violation"
+    }
+    $indentedFixture = $fixtureLines | ForEach-Object { '  ' + $_ }
+    if (@(Get-MarkerBlankLineViolations -Document ($indentedFixture -join "`r`n") -Prefix $fixturePrefix).Count -ne 0) {
+        throw "helper self-test failed: indented contiguous markers reported a blank-line violation"
     }
     $fixtureWithBlank = $fixtureLines[0..1] + "" + $fixtureLines[2..3]
     $blankViolations = @(Get-MarkerBlankLineViolations -Document ($fixtureWithBlank -join "`r`n") -Prefix $fixturePrefix)

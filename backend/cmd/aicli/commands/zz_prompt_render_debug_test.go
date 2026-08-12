@@ -25,6 +25,8 @@ func TestUnifiedPromptWakeChainDebug(t *testing.T) {
 	if !coord.enableUnifiedRendererWithWriter(&terminal) {
 		t.Fatal("unified renderer did not attach")
 	}
+	coord.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coord)
 	terminal.Reset()
 
 	// 先模拟 composer 有输入（prompt 提交前 AppState 显示输入内容）。

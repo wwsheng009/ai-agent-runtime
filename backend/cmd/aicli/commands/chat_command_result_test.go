@@ -183,6 +183,8 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 	if !coord.enableUnifiedRendererWithWriter(&terminal) {
 		t.Fatal("unified renderer did not attach")
 	}
+	coord.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coord)
 	terminal.Reset()
 
 	commands := []struct {

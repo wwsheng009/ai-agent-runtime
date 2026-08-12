@@ -27,6 +27,8 @@ func TestUnifiedPromptRendersImmediatelyWithoutLLMResponse(t *testing.T) {
 	if !coord.enableUnifiedRendererWithWriter(&terminal) {
 		t.Fatal("unified renderer did not attach")
 	}
+	coord.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coord)
 	terminal.Reset()
 
 	// 提交用户输入，不模拟任何 LLM 响应。
