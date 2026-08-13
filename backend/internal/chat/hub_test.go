@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,5 +151,38 @@ func TestBoundedSessionHubCreatesFreshActorAfterIdleSweep(t *testing.T) {
 	}
 	if created.Load() != 2 {
 		t.Fatalf("expected two actor factory calls, got %d", created.Load())
+	}
+}
+
+func TestSessionHubStopContextRemovesActorAndReturnsOnTimeout(t *testing.T) {
+	hub := NewSessionHub(func(id string) (*SessionActor, error) {
+		actor := &SessionActor{
+			id:    id,
+			cmdCh: make(chan Command, 4),
+			stop:  make(chan struct{}),
+			done:  make(chan struct{}),
+			state: &RuntimeState{SessionID: id, Status: SessionIdle},
+		}
+		// Mark Start as consumed so StopContext cannot launch a run loop that
+		// closes done on its own; the test controls done below.
+		actor.startOnce.Do(func() {})
+		return actor, nil
+	})
+
+	if _, err := hub.GetOrCreate("session-1"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := hub.StopContext(ctx, "session-1")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected StopContext timeout, got %v", err)
+	}
+
+	hub.mu.Lock()
+	_, exists := hub.actors["session-1"]
+	hub.mu.Unlock()
+	if exists {
+		t.Fatal("expected timed-out actor to be removed from the hub")
 	}
 }

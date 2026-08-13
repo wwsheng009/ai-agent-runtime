@@ -3,66 +3,52 @@
 package commands
 
 import (
-	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
-// setupSignalHandler 设置信号处理器（Unix-like 特定）
-// Unix-like: 支持 Ctrl+C (SIGINT), Ctrl+Break (SIGTERM), ESC 键 (SIGUSR2)
-func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, sigCountChan chan<- int, shouldExit *atomic.Bool) {
-	// Unix-like: 支持 SIGINT (Ctrl+C), SIGTERM (Ctrl+Break), SIGUSR2 (ESC)
+// setupSignalHandler installs the Unix signal handler. SIGINT/SIGTERM use the
+// shared interrupt/exit state machine; SIGUSR2 (ESC from the terminal bridge)
+// remains interrupt-only.
+func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, shouldExit *atomic.Bool) func() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR2)
-
+	state := &chatInterruptExitState{}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
 	go func() {
-		sigCount := 0
-		lastSigTime := time.Now()
-
-		for sig := range sigChan {
-			// SIGUSR2 表示 ESC 键，直接中断不计数
-			if sig == syscall.SIGUSR2 {
-				session.Interrupt()
-				fmt.Print("\n")
-				ui.PrintInfo("已中断 - 输入已取消")
-				continue
-			}
-
-			// 如果两次信号间隔超过 2 秒，重置计数
-			if time.Since(lastSigTime) > 2*time.Second {
-				sigCount = 0
-			}
-			sigCount++
-			lastSigTime = time.Now()
-
-			// 发送当前信号计数
+		defer close(doneCh)
+		for {
 			select {
-			case sigCountChan <- sigCount:
-			default:
-			}
-
-			if sigCount == 1 {
-				// 第一次 Ctrl+C：中断当前操作
-				session.Interrupt()
-				fmt.Print("\n")
-				ui.PrintInfo("已中断 - 输入已取消")
-			}
-
-			if sigCount >= 2 {
-				// 第二次 Ctrl+C：正常退出循环（会保存日志）
-				session.Interrupt()
-				if shouldExit != nil {
-					shouldExit.Store(true)
+			case sig := <-sigChan:
+				if sig == syscall.SIGUSR2 {
+					if session != nil {
+						// KeyHandler also translates SIGUSR2 into an ESC event
+						// while the turn-scoped watcher is armed; keep the
+						// legacy bridge idempotent with that path.
+						if session.IsInterrupted() {
+							continue
+						}
+						session.InterruptPreservePendingInput()
+					}
+					renderChatEscapeInterruptNotice(session)
+					continue
 				}
-				fmt.Println("\n正在退出...")
-				session.interrupted.Store(true)
-				close(sigCountChan)
+				state.handleInterruptSignal(session, shouldExit, time.Now())
+			case <-stopCh:
 				return
 			}
 		}
 	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			signal.Stop(sigChan)
+			close(stopCh)
+			<-doneCh
+		})
+	}
 }

@@ -221,11 +221,14 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 		return
 	}
 	s.interrupted.Store(true)
+	var composerDraft string
+	if preservePendingInput && s.Interaction != nil {
+		composerDraft = s.Interaction.PromptInputSnapshot().Text
+	}
 	if preservePendingInput && s.Interaction != nil {
 		s.Interaction.SetAgentStage(chatAgentStageStopping)
 	}
-	cleanupDone := s.interruptLocalRuntimeWorkAsync()
-	s.setInterruptCleanup(cleanupDone)
+	s.startInterruptCleanup()
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
@@ -241,6 +244,9 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 		// Do not clear agentStage here: Stopping remains visible while actor
 		// stop / lease release is still in flight.
 		s.Interaction.clearActiveRunStateOnInterrupt()
+	}
+	if preservePendingInput {
+		restoreChatPendingInputAfterInterrupt(s, composerDraft)
 	}
 }
 
@@ -272,6 +278,57 @@ func (s *ChatSession) setInterruptCleanup(done chan struct{}) {
 		<-done
 		close(combined)
 	}()
+}
+
+// reserveInterruptCleanup atomically registers one in-flight cleanup. A second
+// Esc while the first cleanup is still running reuses that cleanup instead of
+// chaining another forever-blocked signal.
+func (s *ChatSession) reserveInterruptCleanup() (chan struct{}, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.interruptCleanupMu.Lock()
+	defer s.interruptCleanupMu.Unlock()
+	if done := s.interruptCleanupDone; done != nil {
+		select {
+		case <-done:
+			// Completed but not yet detached by a waiter; replace it.
+		default:
+			return nil, false
+		}
+	}
+	done := make(chan struct{})
+	s.interruptCleanupDone = done
+	return done, true
+}
+
+// startInterruptCleanup launches async interrupt cleanup exactly once per
+// outstanding cleanup, so repeated Esc cannot stack waiting goroutines.
+func (s *ChatSession) startInterruptCleanup() bool {
+	done, ok := s.reserveInterruptCleanup()
+	if !ok {
+		return false
+	}
+	go s.runInterruptCleanup(done)
+	return true
+}
+
+func (s *ChatSession) runInterruptCleanup(done chan struct{}) {
+	defer close(done)
+	if s == nil {
+		return
+	}
+	defer s.finishInterruptCleanupUI()
+	if s.LocalRuntimeHost == nil {
+		return
+	}
+	host := s.LocalRuntimeHost
+	baseSessionID := currentRuntimeSessionID(s)
+	userID := strings.TrimSpace(s.SessionUserID)
+	activeTeamID := activeTeamID(s)
+	ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
+	defer cancel()
+	host.interruptActiveRuns(ctx, baseSessionID, userID, activeTeamID)
 }
 
 func (s *ChatSession) waitForInterruptCleanup() {
@@ -1129,16 +1186,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 	// 设置信号处理（平台特定：Unix 支持 Ctrl+C Ctrl+Break ESC; Windows 仅 Ctrl+C）
 	sigChan := make(chan os.Signal, 1)
-	sigCountChan := make(chan int, 1)
 	var shouldExit atomic.Bool
-	setupSignalHandler(session, sigChan, sigCountChan, &shouldExit)
-
-	// 监听二次 Ctrl+C，触发优雅退出
-	go func() {
-		for range sigCountChan {
-		}
-		shouldExit.Store(true)
-	}()
+	stopSignalHandler := setupSignalHandler(session, sigChan, &shouldExit)
+	defer stopSignalHandler()
 
 	// 聊天循环
 	for {

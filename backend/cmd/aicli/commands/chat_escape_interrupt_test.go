@@ -53,22 +53,23 @@ func TestStartChatEscapeInterruptWatcherPreservesQueuedInput(t *testing.T) {
 		cancelCtx:  ctx,
 		cancelFunc: cancel,
 	}
+	session.Interaction = newChatInteractionCoordinator(session)
 
 	stop := startChatEscapeInterruptWatcher(session)
 	defer stop()
 	kh.Notify()
 
 	deadline := time.After(2 * time.Second)
-	for !session.IsInterrupted() {
+	for !session.IsInterrupted() || queue.pendingCount() != 0 {
 		select {
 		case <-deadline:
-			t.Fatal("expected ESC watcher to interrupt active session")
+			t.Fatalf("expected ESC watcher to interrupt and restore queued input, got interrupted=%v pending=%d", session.IsInterrupted(), queue.pendingCount())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	if got := queue.pendingCount(); got != 1 {
-		t.Fatalf("expected ESC to preserve queued input, got %d", got)
+	if snapshot := session.Interaction.PromptInputSnapshot(); snapshot.Text != "follow up" {
+		t.Fatalf("expected queued input restored to composer, got %q", snapshot.Text)
 	}
 }
 
@@ -115,5 +116,39 @@ func TestInterruptChatTurnFromBusyInputCancelCancelsActiveTurn(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("expected busy-input ESC cancel to cancel active context")
+	}
+}
+
+func TestStartChatEscapeInterruptWatcherIgnoresRepeatedEsc(t *testing.T) {
+	kh := ui.NewKeyHandler()
+	kh.Start()
+	defer kh.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session := &ChatSession{
+		KeyHandler: kh,
+		cancelCtx:  ctx,
+		cancelFunc: cancel,
+	}
+
+	stop := startChatEscapeInterruptWatcher(session)
+	defer stop()
+	kh.Notify()
+
+	deadline := time.After(2 * time.Second)
+	for !session.IsInterrupted() {
+		select {
+		case <-deadline:
+			t.Fatal("expected first ESC to interrupt active session")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	kh.Notify()
+	time.Sleep(100 * time.Millisecond)
+	if !session.IsInterrupted() {
+		t.Fatal("repeated ESC must not clear the interrupted state")
 	}
 }

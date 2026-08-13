@@ -22,6 +22,10 @@ import (
 // releases it before any destructive work, then replaces the Scene from
 // canonical history instead of writing/replaying terminal rows directly.
 func handleInteractiveBacktrackSelect(session *ChatSession) bool {
+	if session != nil && session.Interaction != nil && !session.Interaction.IsReady() {
+		session.Interaction.RenderLocalSupplement("[input] 当前操作仍在进行，无法打开回溯选择器。")
+		return false
+	}
 	if unifiedDirectInteractiveOutput(session) {
 		// Bare Esc is documented as equivalent to `/backtrack`, so it shares
 		// that command's unified behavior instead of the legacy migration

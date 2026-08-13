@@ -87,6 +87,8 @@ type SessionActor struct {
 	interrupted             bool
 	activeStripMetadataKeys []string
 
+	statePersistMu sync.Mutex
+
 	waiterMu        sync.Mutex
 	approvalWaiters map[string]chan runtimepolicy.ApprovalResponse
 	questionWaiters map[string]chan string
@@ -161,18 +163,32 @@ func (a *SessionActor) Start() {
 	})
 }
 
-// Stop terminates the actor loop.
+// Stop terminates the actor loop and waits for it to exit.
 func (a *SessionActor) Stop() {
+	_ = a.StopContext(context.Background())
+}
+
+// StopContext terminates the actor loop, waiting at most until ctx expires.
+// The actor keeps stopping in the background after a timeout so leases and
+// stop hooks are still released once the in-flight command returns.
+func (a *SessionActor) StopContext(ctx context.Context) error {
 	if a == nil {
-		return
+		return nil
 	}
-	defer a.runStopHook()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.Start()
 	a.stopOnce.Do(func() {
 		close(a.stop)
 		a.cancelActive()
 	})
-	<-a.done
+	select {
+	case <-a.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // IsStopped reports whether the actor has begun stopping or its command loop
@@ -622,7 +638,10 @@ func (a *SessionActor) PendingApproval() *ApprovalRequest {
 }
 
 func (a *SessionActor) run() {
-	defer close(a.done)
+	defer func() {
+		a.runStopHook()
+		close(a.done)
+	}()
 	for {
 		select {
 		case cmd := <-a.cmdCh:
@@ -2489,23 +2508,29 @@ func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeStat
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	a.statePersistMu.Lock()
+	defer a.statePersistMu.Unlock()
+
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.state == nil {
 		a.state = &RuntimeState{SessionID: a.id, Status: SessionIdle}
 	}
 	if mutate != nil {
 		if err := mutate(a.state); err != nil {
+			a.mu.Unlock()
 			return err
 		}
 	}
 	if a.state.UpdatedAt.IsZero() {
 		a.state.UpdatedAt = time.Now().UTC()
 	}
+	snapshot := a.state.Clone()
+	a.mu.Unlock()
+
 	if a.stateStore != nil {
 		var saveErr error
 		for attempt := 1; attempt <= 3; attempt++ {
-			saveErr = a.stateStore.SaveState(ctx, a.state)
+			saveErr = a.stateStore.SaveState(ctx, snapshot)
 			if saveErr == nil {
 				return nil
 			}

@@ -1127,8 +1127,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_theme_command.go", Func: "printThemeConfigDefaults", Kind: "fmt.Print", Count: 3},
 		{File: "chat_tool_debug.go", Func: "writeSessionDebugInfo", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_transcript_renderer.go", Func: "method RenderSupplement", Kind: "fmt.Print", Count: 1},
-		{File: "chat_unix.go", Func: "setupSignalHandler", Kind: "fmt.Print", Count: 3},
-		{File: "chat_windows.go", Func: "setupSignalHandler", Kind: "fmt.Print", Count: 2},
 		{File: "command.go", Func: "executeShellCommandDetailed", Kind: "fmt.Print", Count: 18},
 	}
 }

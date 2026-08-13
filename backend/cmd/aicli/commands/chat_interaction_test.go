@@ -188,6 +188,24 @@ func TestChatInteractionCoordinator_AgentStageLabels(t *testing.T) {
 	}
 }
 
+func TestChatDynamicStatusActionStoppingHasNoInterruptHint(t *testing.T) {
+	action, _, interruptible := chatDynamicStatusAction("stopping", chatInputModeChat)
+	if action != "Stopping" {
+		t.Fatalf("expected Stopping action, got %q", action)
+	}
+	if interruptible {
+		t.Fatal("Stopping must not advertise another Esc interrupt target")
+	}
+
+	model := buildChatDynamicStatusModelForWidthAndInputMode("stopping", 120, chatInputModeChat, 3*time.Second)
+	if model == nil {
+		t.Fatal("expected a dynamic status model for Stopping")
+	}
+	if strings.Contains(model.StateText, "esc to interrupt") {
+		t.Fatalf("Stopping status must not show esc to interrupt, got %q", model.StateText)
+	}
+}
+
 func TestChatInteractionCoordinator_AgentStagePrecedesStreamingState(t *testing.T) {
 	coord := newChatInteractionCoordinator(&ChatSession{})
 	coord.mu.Lock()
@@ -2077,6 +2095,9 @@ func TestBuildChatPromptNoticeLine_QueueWidthMatrix(t *testing.T) {
 			}
 			if !strings.Contains(lines[0], "队列 2") || !strings.Contains(lines[0], "/queue") {
 				t.Fatalf("expected queue count and deferred management entry, got %q", notice)
+			}
+			if strings.Contains(lines[0], "Esc 中断并提前处理") {
+				t.Fatalf("queue hint must not advertise Esc as an early-send control, got %q", notice)
 			}
 			if strings.Contains(lines[0], "/queue clear") {
 				t.Fatalf("did not expect busy composer to advertise unavailable queue clear, got %q", notice)

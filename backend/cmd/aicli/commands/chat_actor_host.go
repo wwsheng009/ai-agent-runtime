@@ -371,7 +371,9 @@ func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
 	setChatActorWarmup(session, nil)
 	var errs []string
 	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.SessionHub != nil && session.RuntimeSession != nil {
-		session.LocalRuntimeHost.SessionHub.Stop(session.RuntimeSession.ID)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
+		_ = session.LocalRuntimeHost.SessionHub.StopContext(stopCtx, session.RuntimeSession.ID)
+		stopCancel()
 	}
 	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.Bootstrap != nil && session.Config != nil {
 		if err := session.LocalRuntimeHost.Bootstrap.ReloadProviderConfigs(buildSkillsProviderConfigs(session.Config)); err != nil {

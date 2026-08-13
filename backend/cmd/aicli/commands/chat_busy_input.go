@@ -82,7 +82,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					queue.signalReadError(errChatInteractivePromptCancelled)
 					return
 				}
-				capture.ClearPrompt()
+				capture.PreserveDraft()
 				continue
 			}
 			if err != nil {
@@ -172,7 +172,7 @@ func ensureChatBufferedInputQueue(session *ChatSession) *chatInputQueue {
 		notifyChatInputDraftState(session, active, lines, text)
 	})
 	session.InputQueue.setCommandGate(func(text string) bool {
-		return chatInputCommandAllowed(session, text)
+		return chatInputCommandQueuable(session, text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)

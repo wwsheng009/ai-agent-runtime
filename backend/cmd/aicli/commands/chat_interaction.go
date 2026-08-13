@@ -1033,8 +1033,8 @@ func buildChatPromptNoticeLineForWidth(session *ChatSession, state string, width
 
 func buildQueuedInputContextLine(count int, width int) string {
 	candidates := []string{
-		fmt.Sprintf("• 队列 %d：当前运行结束后发送；Esc 中断并提前处理（就绪后 /queue 管理）", count),
-		fmt.Sprintf("• 队列 %d：运行后发送；Esc 可中断（就绪后 /queue）", count),
+		fmt.Sprintf("• 队列 %d：运行结束后发送；Esc 中断时恢复草稿（就绪后 /queue 管理）", count),
+		fmt.Sprintf("• 队列 %d：运行后发送；Esc 恢复草稿（就绪后 /queue）", count),
 		fmt.Sprintf("• 队列 %d（就绪后 /queue）", count),
 	}
 	return firstPromptContextCandidateThatFits(candidates, width)
@@ -1963,7 +1963,9 @@ func chatDynamicStatusAction(state string, inputMode chatInputMode) (string, sty
 	case "awaiting answer":
 		return "Waiting for answer", style.RoleWarning, true
 	case "stopping":
-		return "Stopping", style.RoleWarning, true
+		// Stopping is the cleanup phase after an interrupt: another Esc has no
+		// further interrupt target, so the status line must not advertise it.
+		return "Stopping", style.RoleWarning, false
 	case "retrying":
 		return "Retrying", style.RoleWarning, true
 	case "running", "working", "busy":

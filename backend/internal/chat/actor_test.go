@@ -48,6 +48,79 @@ func TestSessionActorSubmitPromptReturnsAfterActorStopped(t *testing.T) {
 	}
 }
 
+type blockingRuntimeStateStore struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingRuntimeStateStore) SaveState(ctx context.Context, state *RuntimeState) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return nil
+}
+
+func (s *blockingRuntimeStateStore) LoadState(ctx context.Context, sessionID string) (*RuntimeState, error) {
+	return nil, nil
+}
+
+func (s *blockingRuntimeStateStore) DeleteState(ctx context.Context, sessionID string) error {
+	return nil
+}
+
+func TestSessionActorStopContextTimesOutWhileCommandIsStuckInSaveState(t *testing.T) {
+	store := &blockingRuntimeStateStore{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	actor := &SessionActor{
+		id:         "stop-timeout-session",
+		cmdCh:      make(chan Command, 4),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		stateStore: store,
+	}
+	actor.Start()
+
+	reply := make(chan error, 1)
+	actor.cmdCh <- Interrupt{Ctx: context.Background(), Reply: reply}
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt handler did not reach SaveState")
+	}
+
+	stateCh := make(chan *RuntimeState, 1)
+	go func() {
+		stateCh <- actor.State()
+	}()
+	select {
+	case <-stateCh:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("State blocked while SaveState was in flight")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	err := actor.StopContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected StopContext deadline, got %v", err)
+	}
+	if time.Since(startedAt) > 500*time.Millisecond {
+		t.Fatalf("StopContext blocked for too long: %s", time.Since(startedAt))
+	}
+
+	close(store.release)
+	select {
+	case <-actor.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("actor did not finish stopping after SaveState was released")
+	}
+}
+
 func TestCloneLoopConfigForRunRequiresBoundTeamTaskForCompleteTask(t *testing.T) {
 	base := &agent.LoopReActConfig{
 		CompletionRequirement: agent.CompletionRequirementCompleteTask,

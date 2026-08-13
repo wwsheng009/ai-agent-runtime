@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -83,10 +82,9 @@ func TestSignalHandlerFirstInterruptCancelsActiveTeamRuns(t *testing.T) {
 	}
 
 	sigChan := make(chan os.Signal, 1)
-	sigCountChan := make(chan int, 1)
 	var shouldExit atomic.Bool
-	setupSignalHandler(session, sigChan, sigCountChan, &shouldExit)
-	defer signal.Stop(sigChan)
+	stopSignalHandler := setupSignalHandler(session, sigChan, &shouldExit)
+	defer stopSignalHandler()
 
 	sigChan <- os.Interrupt
 	waitForSignalInterruptTaskCancelled(t, store, runtimeStore, teamID, "task-signal-interrupt")
@@ -102,6 +100,23 @@ func TestSignalHandlerFirstInterruptCancelsActiveTeamRuns(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+
+	// A third interrupt must keep the listener alive and stay idempotent;
+	// the old implementation closed the count channel and panicked here.
+	sigChan <- os.Interrupt
+	time.Sleep(50 * time.Millisecond)
+	if !shouldExit.Load() {
+		t.Fatal("expected exit request to survive a third interrupt")
+	}
+}
+
+func TestSignalHandlerCleanupStopsListenerIdempotently(t *testing.T) {
+	sigChan := make(chan os.Signal, 1)
+	var shouldExit atomic.Bool
+	stopSignalHandler := setupSignalHandler(nil, sigChan, &shouldExit)
+	stopSignalHandler()
+	stopSignalHandler()
+	sigChan <- os.Interrupt
 }
 
 func waitForSignalInterruptTaskCancelled(t *testing.T, store team.Store, runtimeStore *runtimechat.InMemoryRuntimeStore, teamID, taskID string) {
@@ -499,6 +514,28 @@ func TestTimedOutInterruptCleanupDoesNotReplaceNewCleanup(t *testing.T) {
 	}
 	close(stuck)
 	close(newer)
+	session.waitForInterruptCleanupWithin(time.Second)
+}
+
+func TestReserveInterruptCleanupReusesInFlightCleanup(t *testing.T) {
+	session := &ChatSession{}
+	first, ok := session.reserveInterruptCleanup()
+	if !ok {
+		t.Fatal("first reserve should start an interrupt cleanup")
+	}
+	if second, ok := session.reserveInterruptCleanup(); ok {
+		if second != nil {
+			t.Fatal("second reserve should not register another cleanup")
+		}
+		t.Fatal("second reserve should reuse the in-flight cleanup")
+	}
+
+	close(first)
+	third, ok := session.reserveInterruptCleanup()
+	if !ok {
+		t.Fatal("a completed cleanup should be replaceable")
+	}
+	close(third)
 	session.waitForInterruptCleanupWithin(time.Second)
 }
 

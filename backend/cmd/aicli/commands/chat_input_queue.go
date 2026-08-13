@@ -133,6 +133,85 @@ func prependPendingInputText(prefix, current string) string {
 	return prefix + "\n" + current
 }
 
+func (s *chatPendingInputSuspension) pendingText() string {
+	if s == nil {
+		return ""
+	}
+	var builder strings.Builder
+	appendLine := func(text string) {
+		text = strings.TrimSpace(normalizeQueuedInputLine(text))
+		if text == "" {
+			return
+		}
+		builder.WriteString(text)
+		builder.WriteString("\n")
+	}
+	appendLine(s.readyText)
+	for _, item := range s.queued {
+		appendLine(item.Text)
+	}
+	if s.draftActive {
+		appendLine(s.draftText)
+	}
+	return strings.TrimSuffix(builder.String(), "\n")
+}
+
+// RestoreToComposer moves interrupted pending input into the composer, or back
+// into the queue as an unconfirmed draft when no composer exists. It never
+// signals a ready submission, so an interrupted turn cannot auto-send the
+// follow-ups that were typed while the run was active.
+func (s *chatPendingInputSuspension) RestoreToComposer(session *ChatSession) int {
+	return s.RestoreToComposerWithComposerText(session, "")
+}
+
+// RestoreToComposerWithComposerText restores pending input together with the
+// draft that was live in the composer when the turn was interrupted.
+func (s *chatPendingInputSuspension) RestoreToComposerWithComposerText(session *ChatSession, composerText string) int {
+	if s == nil || s.queue == nil {
+		return 0
+	}
+	restored := 0
+	s.restoreOnce.Do(func() {
+		text := s.pendingText()
+		restored = s.count
+		composerText = strings.TrimSpace(normalizeQueuedInputLine(composerText))
+		if composerText != "" {
+			if text == "" {
+				text = composerText
+			} else {
+				text = text + "\n" + composerText
+			}
+		}
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		if session != nil && session.Interaction != nil {
+			session.Interaction.SetPromptInput(text)
+			return
+		}
+		s.queue.stageDraft(text)
+	})
+	return restored
+}
+
+func restoreChatPendingInputAfterInterrupt(session *ChatSession, composerText string) {
+	if session == nil {
+		return
+	}
+	if session.InputQueue != nil {
+		suspension := session.InputQueue.suspendPendingInput()
+		suspension.RestoreToComposerWithComposerText(session, composerText)
+		session.queuedInputDrain = false
+		session.queuedInputEchoed = false
+		return
+	}
+	composerText = strings.TrimSpace(normalizeQueuedInputLine(composerText))
+	if composerText == "" || session.Interaction == nil {
+		return
+	}
+	session.Interaction.SetPromptInput(composerText)
+}
+
 type chatInputReadLifecycle struct {
 	session *ChatSession
 }
@@ -194,7 +273,7 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 		notifyChatInputDraftState(session, active, lines, text)
 	})
 	session.InputQueue.setCommandGate(func(text string) bool {
-		return chatInputCommandAllowed(session, text)
+		return chatInputCommandQueuable(session, text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)
@@ -1035,6 +1114,37 @@ func chatInputCommandAllowed(session *ChatSession, text string) bool {
 		return true
 	}
 	return session.Interaction.IsReady()
+}
+
+// chatInputCommandQueuable decides whether a slash command may be parked in
+// the busy input queue while the agent is not Ready. Codex-style slash
+// follow-ups are queued and dispatched only after the current turn reaches
+// Ready; destructive or exit commands stay rejected so their effect cannot be
+// deferred silently.
+func chatInputCommandQueuable(session *ChatSession, text string) bool {
+	if !isSlashCommandInput(text) {
+		return true
+	}
+	if session != nil && session.Interaction != nil && session.Interaction.IsReady() {
+		return true
+	}
+	return chatSlashCommandQueueSafe(text)
+}
+
+func chatSlashCommandQueueSafe(text string) bool {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) == 0 {
+		return false
+	}
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	switch name {
+	case "queue":
+		return len(fields) < 2 || !strings.EqualFold(fields[1], "clear")
+	case "model", "help", "?", "status", "session", "history", "h":
+		return true
+	default:
+		return false
+	}
 }
 
 func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) (string, error) {

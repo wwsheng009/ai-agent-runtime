@@ -21,11 +21,19 @@ func startChatEscapeInterruptWatcher(session *ChatSession) func() {
 
 	go func() {
 		defer close(stopped)
-		select {
-		case <-escCh:
-			session.InterruptPreservePendingInput()
-			renderChatEscapeInterruptNotice(session)
-		case <-done:
+		for {
+			select {
+			case <-escCh:
+				// A second Esc while Stopping has no new interrupt target.
+				// Ignore it instead of opening backtrack or re-rendering.
+				if session.IsInterrupted() {
+					continue
+				}
+				session.InterruptPreservePendingInput()
+				renderChatEscapeInterruptNotice(session)
+			case <-done:
+				return
+			}
 		}
 	}()
 

@@ -484,6 +484,13 @@ func printLoginProviderPicker(prompter providerLoginPrompter, state loginProvide
 		return
 	}
 	pageItems, page, pageCount, filteredTotal := state.pageWindow()
+	// Build the whole picker block and submit it as a single PrintLine. In the
+	// unified chat surface every PrintLine becomes one independent transcript
+	// cell separated by a gap row (boundary.ResolveGap), so per-line calls
+	// would render a blank line between every provider row. A single
+	// multi-line cell stays dense while the block itself keeps one gap before
+	// and after it.
+	var block strings.Builder
 	header := fmt.Sprintf("现有 providers（共 %d", len(state.Options))
 	if strings.TrimSpace(state.Filter) != "" {
 		header += fmt.Sprintf("，过滤 %q 匹配 %d", state.Filter, filteredTotal)
@@ -492,24 +499,26 @@ func printLoginProviderPicker(prompter providerLoginPrompter, state loginProvide
 		header += fmt.Sprintf("，第 %d/%d 页", page+1, pageCount)
 	}
 	header += "）:"
-	prompter.PrintLine(header)
+	block.WriteString(header)
 	if filteredTotal == 0 {
-		prompter.PrintLine("  （无匹配项，输入 / 清除过滤，或直接输入新 provider 名称）")
+		block.WriteString("\n  （无匹配项，输入 / 清除过滤，或直接输入新 provider 名称）")
 	} else {
 		for i, option := range pageItems {
 			marker := ""
 			if state.Current != "" && strings.EqualFold(option, state.Current) {
 				marker = " (默认)"
 			}
-			prompter.PrintLine(fmt.Sprintf("  [%d] %s%s", i+1, option, marker))
+			block.WriteString("\n")
+			block.WriteString(fmt.Sprintf("  [%d] %s%s", i+1, option, marker))
 		}
 	}
 	if first {
-		prompter.PrintLine("提示: 输入编号选择当前页；输入名称精确选择/新建；/关键词 模糊搜索；n/p 翻页；c 清除过滤；+名称 强制新建；回车使用默认")
+		block.WriteString("\n提示: 输入编号选择当前页；输入名称精确选择/新建；/关键词 模糊搜索；n/p 翻页；c 清除过滤；+名称 强制新建；回车使用默认")
 		if configuredDefault != "" && state.Current == "" {
-			prompter.PrintLine(fmt.Sprintf("提示: 配置的 default_provider=%s 不在 providers.items 中，回车不会自动使用它", configuredDefault))
+			block.WriteString(fmt.Sprintf("\n提示: 配置的 default_provider=%s 不在 providers.items 中，回车不会自动使用它", configuredDefault))
 		}
 	}
+	prompter.PrintLine(block.String())
 }
 
 func loginProviderSelectionOptions(cfg *config.Config) []string {
@@ -1132,10 +1141,7 @@ func promptExplicitLoginProtocol(prompter providerLoginPrompter) (string, error)
 			options = append(options, option)
 		}
 	}
-	prompter.PrintLine("请选择显式登录协议:")
-	for i, option := range options {
-		prompter.PrintLine(fmt.Sprintf("  [%d] %s", i+1, option))
-	}
+	printLoginProtocolOptions(prompter, "请选择显式登录协议:", options)
 	for {
 		value, err := prompter.PromptText("协议编号或名称", "openai", true)
 		if err != nil {
@@ -2467,12 +2473,28 @@ func loginProtocolOptions() []string {
 	return []string{providerLoginProtocolAuto, "openai", providerLoginProtocolOpenAIImage, "codex-apikey", "anthropic", "gemini", "codex-oauth"}
 }
 
+// printLoginProtocolOptions submits the protocol list as a single PrintLine
+// block. In the unified chat surface every PrintLine becomes an independent
+// transcript cell separated by a gap row (boundary.ResolveGap), so per-line
+// calls would render a blank line between every protocol row. A single
+// multi-line cell stays dense while the block itself keeps one gap before
+// and after it.
+func printLoginProtocolOptions(prompter providerLoginPrompter, title string, options []string) {
+	if prompter == nil {
+		return
+	}
+	var block strings.Builder
+	block.WriteString(title)
+	for i, option := range options {
+		block.WriteString("\n")
+		block.WriteString(fmt.Sprintf("  [%d] %s", i+1, option))
+	}
+	prompter.PrintLine(block.String())
+}
+
 func promptLoginProtocol(prompter providerLoginPrompter) (string, error) {
 	options := loginProtocolOptions()
-	prompter.PrintLine("请选择登录协议:")
-	for i, option := range options {
-		prompter.PrintLine(fmt.Sprintf("  [%d] %s", i+1, option))
-	}
+	printLoginProtocolOptions(prompter, "请选择登录协议:", options)
 	for {
 		value, err := prompter.PromptText("协议编号或名称", "auto", true)
 		if err != nil {

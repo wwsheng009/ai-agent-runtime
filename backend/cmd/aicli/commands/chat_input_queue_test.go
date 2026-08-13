@@ -154,7 +154,48 @@ func TestRenderBusyInputRouteFeedbackExplainsRejectedQueueClear(t *testing.T) {
 	}
 }
 
-func TestInterruptChatTurnFromBusyInputCancelPreservesPendingInput(t *testing.T) {
+func TestChatInputCommandQueuableAllowsSafeSlashWhileBusy(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.StartWaiting()
+
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"normal prompt", true},
+		{"/model", true},
+		{"/model gpt-5", true},
+		{"/help", true},
+		{"/status", true},
+		{"/session", true},
+		{"/history", true},
+		{"/queue", true},
+		{"/queue status", true},
+		{"/queue clear", false},
+		{"/exit", false},
+		{"/quit", false},
+		{"/backtrack", false},
+		{"/resume", false},
+		{"/login", false},
+		{"/theme", false},
+		{"/stream", false},
+		{"/skill", false},
+		{"/compact", false},
+		{"/reasoning_effort", false},
+		{"/permission-mode", false},
+		{"/approval-reuse", false},
+		{"/attach", false},
+	}
+	for _, tt := range tests {
+		if got := chatInputCommandQueuable(session, tt.input); got != tt.want {
+			t.Fatalf("chatInputCommandQueuable(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestInterruptChatTurnFromBusyInputCancelRestoresPendingInputToDraft(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
@@ -172,12 +213,46 @@ func TestInterruptChatTurnFromBusyInputCancelPreservesPendingInput(t *testing.T)
 	if !session.IsInterrupted() {
 		t.Fatal("expected busy-input ESC to interrupt the active turn")
 	}
-	if queue.pendingCount() != 1 || !queue.hasDraft() {
-		t.Fatalf("expected ESC to preserve queued input and draft, pending=%d draft=%v", queue.pendingCount(), queue.hasDraft())
+	if queue.pendingCount() != 0 || !queue.hasDraft() {
+		t.Fatalf("expected ESC to restore queued input as an unconfirmed draft, pending=%d draft=%v", queue.pendingCount(), queue.hasDraft())
 	}
-	previews := queue.queuedPreviewLines(5)
-	if len(previews) != 1 || previews[0] != "queued follow-up" {
-		t.Fatalf("expected queued preview to survive ESC, got %#v", previews)
+	queue.draftMu.RLock()
+	draftText := queue.draftText
+	queue.draftMu.RUnlock()
+	if !strings.Contains(draftText, "queued follow-up") || !strings.Contains(draftText, "unfinished draft") {
+		t.Fatalf("expected queued input and draft restored together, got %q", draftText)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected busy-input ESC to cancel active context")
+	}
+}
+
+func TestInterruptChatTurnFromBusyInputCancelRestoresComposerDraftWithQueuedInput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeInputText("queued follow-up\n")
+	session := &ChatSession{
+		InputQueue: queue,
+		cancelCtx:  ctx,
+		cancelFunc: cancel,
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.SetPromptInput("typing in busy composer")
+
+	interruptChatTurnFromBusyInputCancel(session)
+
+	if !session.IsInterrupted() {
+		t.Fatal("expected busy-input ESC to interrupt the active turn")
+	}
+	snapshot := session.Interaction.PromptInputSnapshot()
+	if !strings.Contains(snapshot.Text, "queued follow-up") || !strings.Contains(snapshot.Text, "typing in busy composer") {
+		t.Fatalf("expected queued input and live composer draft restored together, got %q", snapshot.Text)
+	}
+	if queue.pendingCount() != 0 {
+		t.Fatalf("expected queued input to move into composer, got %d pending", queue.pendingCount())
 	}
 	select {
 	case <-ctx.Done():

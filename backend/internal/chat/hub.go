@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -221,15 +222,26 @@ func (h *SessionHub) evictIdle(now time.Time) {
 
 // Stop stops and removes an actor.
 func (h *SessionHub) Stop(sessionID string) {
+	_ = h.StopContext(context.Background(), sessionID)
+}
+
+// StopContext stops and removes an actor, waiting at most until ctx expires.
+func (h *SessionHub) StopContext(ctx context.Context, sessionID string) error {
 	if h == nil {
-		return
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	h.mu.Lock()
 	actor := h.actors[sessionID]
 	delete(h.actors, sessionID)
 	delete(h.lastAccess, sessionID)
 	h.mu.Unlock()
-	stopActors([]*SessionActor{actor})
+	if actor == nil {
+		return nil
+	}
+	return actor.StopContext(ctx)
 }
 
 // StopAll stops all actors managed by the hub and its eviction worker.

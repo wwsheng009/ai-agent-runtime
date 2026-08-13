@@ -17,32 +17,6 @@ const (
 	chatInterruptCleanupWaitTimeout = chatInterruptCleanupTimeout + time.Second
 )
 
-func (s *ChatSession) interruptLocalRuntimeWorkAsync() chan struct{} {
-	done := make(chan struct{})
-	if s == nil {
-		close(done)
-		return done
-	}
-	if s.LocalRuntimeHost == nil {
-		s.finishInterruptCleanupUI()
-		close(done)
-		return done
-	}
-	host := s.LocalRuntimeHost
-	baseSessionID := currentRuntimeSessionID(s)
-	userID := strings.TrimSpace(s.SessionUserID)
-	activeTeamID := activeTeamID(s)
-
-	go func() {
-		defer s.finishInterruptCleanupUI()
-		defer close(done)
-		ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
-		defer cancel()
-		host.interruptActiveRuns(ctx, baseSessionID, userID, activeTeamID)
-	}()
-	return done
-}
-
 func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSessionID, userID, activeTeamID string) {
 	if h == nil {
 		return
@@ -221,7 +195,7 @@ func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID 
 	// The SessionActor itself must be stopped so OnStop releases the session
 	// lease; otherwise a later terminal/process still sees ownership conflict.
 	// The next prompt recreates the actor via SessionHub.GetOrCreate.
-	h.SessionHub.Stop(sessionID)
+	_ = h.SessionHub.StopContext(ctx, sessionID)
 }
 
 func (h *localChatRuntimeHost) markRuntimeSessionStopped(ctx context.Context, sessionID string) {

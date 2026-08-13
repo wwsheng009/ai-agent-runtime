@@ -2057,3 +2057,165 @@ func (p *testLoginPrompter) PrintLine(line string) {
 	}
 	p.lines = append(p.lines, line)
 }
+
+// TestPrintLoginProviderPicker_EmitsSingleDenseBlock guards the chat /login
+// provider list rendering: every PrintLine call becomes an independent
+// transcript cell with a gap row in the unified surface, so the picker must
+// submit the whole block in one call. Per-row calls used to render a blank
+// line between every provider.
+func TestPrintLoginProviderPicker_EmitsSingleDenseBlock(t *testing.T) {
+	prompter := &testLoginPrompter{}
+	state := loginProviderPickerState{
+		Options:  []string{"alpha", "beta", "gamma"},
+		Current:  "beta",
+		PageSize: loginProviderPageSize,
+	}
+	printLoginProviderPicker(prompter, state, "", true)
+
+	if len(prompter.lines) != 1 {
+		t.Fatalf("expected the picker block in a single PrintLine call, got %d calls: %#v", len(prompter.lines), prompter.lines)
+	}
+	block := prompter.lines[0]
+	rows := strings.Split(block, "\n")
+	if len(rows) != 5 { // header + 3 providers + hint
+		t.Fatalf("expected 5 rows in picker block, got %d:\n%s", len(rows), block)
+	}
+	for i, row := range rows {
+		if strings.TrimSpace(row) == "" {
+			t.Fatalf("unexpected blank row at index %d in picker block (rows must stay dense):\n%s", i, block)
+		}
+	}
+	if !strings.Contains(block, "现有 providers（共 3）:") {
+		t.Fatalf("missing picker header in block:\n%s", block)
+	}
+	for i, name := range []string{"alpha", "beta", "gamma"} {
+		marker := ""
+		if name == "beta" {
+			marker = " (默认)"
+		}
+		expected := fmt.Sprintf("  [%d] %s%s", i+1, name, marker)
+		if !strings.Contains(block, expected) {
+			t.Fatalf("missing provider row %q in block:\n%s", expected, block)
+		}
+	}
+	if !strings.Contains(block, "提示: 输入编号选择当前页") {
+		t.Fatalf("missing first-run hint in block:\n%s", block)
+	}
+}
+
+// TestPrintLoginProviderPicker_EmptyFilterMatchesStaysDense covers the
+// "无匹配项" branch: it must also render as a single dense block.
+func TestPrintLoginProviderPicker_EmptyFilterMatchesStaysDense(t *testing.T) {
+	prompter := &testLoginPrompter{}
+	state := loginProviderPickerState{
+		Options:  []string{"alpha", "beta"},
+		Filter:   "nope",
+		PageSize: loginProviderPageSize,
+	}
+	printLoginProviderPicker(prompter, state, "alpha", false)
+
+	if len(prompter.lines) != 1 {
+		t.Fatalf("expected the filtered picker in a single PrintLine call, got %d calls: %#v", len(prompter.lines), prompter.lines)
+	}
+	block := prompter.lines[0]
+	for _, row := range strings.Split(block, "\n") {
+		if strings.TrimSpace(row) == "" {
+			t.Fatalf("unexpected blank row in filtered picker block:\n%s", block)
+		}
+	}
+	if !strings.Contains(block, "无匹配项") {
+		t.Fatalf("missing no-match notice in block:\n%s", block)
+	}
+}
+
+// TestPrintLoginProtocolOptions_EmitsSingleDenseBlock guards the chat /login
+// protocol list rendering: like the provider picker, the whole protocol list
+// must be submitted as one PrintLine block so rows stay dense in the unified
+// surface instead of getting a gap row between every entry.
+func TestPrintLoginProtocolOptions_EmitsSingleDenseBlock(t *testing.T) {
+	prompter := &testLoginPrompter{}
+	options := loginProtocolOptions()
+	printLoginProtocolOptions(prompter, "请选择登录协议:", options)
+
+	if len(prompter.lines) != 1 {
+		t.Fatalf("expected the protocol list in a single PrintLine call, got %d calls: %#v", len(prompter.lines), prompter.lines)
+	}
+	block := prompter.lines[0]
+	rows := strings.Split(block, "\n")
+	if len(rows) != 1+len(options) {
+		t.Fatalf("expected %d rows in protocol block, got %d:\n%s", 1+len(options), len(rows), block)
+	}
+	for i, row := range rows {
+		if strings.TrimSpace(row) == "" {
+			t.Fatalf("unexpected blank row at index %d in protocol block (rows must stay dense):\n%s", i, block)
+		}
+	}
+	if !strings.HasPrefix(block, "请选择登录协议:") {
+		t.Fatalf("missing protocol header in block:\n%s", block)
+	}
+	for i, option := range options {
+		expected := fmt.Sprintf("  [%d] %s", i+1, option)
+		if !strings.Contains(block, expected) {
+			t.Fatalf("missing protocol row %q in block:\n%s", expected, block)
+		}
+	}
+}
+
+func TestPromptLoginProtocol_EmitsSingleDenseBlock(t *testing.T) {
+	prompter := &testLoginPrompter{
+		textQueue: map[string][]string{
+			"协议编号或名称": {"3"},
+		},
+	}
+	selected, err := promptLoginProtocol(prompter)
+	if err != nil {
+		t.Fatalf("promptLoginProtocol: %v", err)
+	}
+	options := loginProtocolOptions()
+	if selected != options[2] {
+		t.Fatalf("expected selection %q, got %q", options[2], selected)
+	}
+	if len(prompter.lines) != 1 {
+		t.Fatalf("expected the protocol list in a single PrintLine call, got %d calls: %#v", len(prompter.lines), prompter.lines)
+	}
+	rows := strings.Split(prompter.lines[0], "\n")
+	if len(rows) != 1+len(options) {
+		t.Fatalf("expected %d rows in protocol block, got %d:\n%s", 1+len(options), len(rows), prompter.lines[0])
+	}
+	for i, row := range rows {
+		if strings.TrimSpace(row) == "" {
+			t.Fatalf("unexpected blank row at index %d in protocol block:\n%s", i, prompter.lines[0])
+		}
+	}
+}
+
+func TestPromptExplicitLoginProtocol_EmitsSingleDenseBlock(t *testing.T) {
+	prompter := &testLoginPrompter{
+		textQueue: map[string][]string{
+			"协议编号或名称": {"1"},
+		},
+	}
+	selected, err := promptExplicitLoginProtocol(prompter)
+	if err != nil {
+		t.Fatalf("promptExplicitLoginProtocol: %v", err)
+	}
+	if selected != "openai" {
+		t.Fatalf("expected selection \"openai\", got %q", selected)
+	}
+	if len(prompter.lines) != 1 {
+		t.Fatalf("expected the explicit protocol list in a single PrintLine call, got %d calls: %#v", len(prompter.lines), prompter.lines)
+	}
+	block := prompter.lines[0]
+	if !strings.HasPrefix(block, "请选择显式登录协议:") {
+		t.Fatalf("missing explicit protocol header in block:\n%s", block)
+	}
+	rows := strings.Split(block, "\n")
+	if len(rows) != 7 { // header + 6 non-auto protocols
+		t.Fatalf("expected 7 rows in explicit protocol block, got %d:\n%s", len(rows), block)
+	}
+	for i, row := range rows {
+		if strings.TrimSpace(row) == "" {
+			t.Fatalf("unexpected blank row at index %d in explicit protocol block:\n%s", i, block)
+		}
+	}
+}

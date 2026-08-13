@@ -2376,12 +2376,13 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	}
 	s.mu.Lock()
 	writer := s.globalMailboxWriter
-	s.mu.Unlock()
 	txWriter, ok := writer.(agentcontrol.GlobalMailboxSQLiteTxWriter)
 	if !ok || txWriter == nil {
+		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, false, nil
 	}
 	if _, ok := txWriter.GlobalMailboxAttachDSN(); !ok {
+		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, false, nil
 	}
 	if strings.TrimSpace(message.ID) == "" {
@@ -2389,16 +2390,17 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
+		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, false, nil
 	}
 	defer conn.Close()
 	txWriter, schema, detach, attached, err := agentcontrol.AttachGlobalMailboxSQLiteTx(ctx, conn, writer)
 	if err != nil || !attached {
+		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, false, nil
 	}
 	defer detach()
 
-	s.mu.Lock()
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		s.mu.Unlock()
@@ -2411,10 +2413,35 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 		}
 	}()
 
-	record := mailboxRecordFromRuntimeMessage(sessionID, message)
-	appended, err := txWriter.AppendPrimaryGlobalMailboxRecordTx(ctx, tx, schema, record)
-	if err != nil {
+	var (
+		result   mailboxAppendTxResult
+		appended agentcontrol.MailboxRecord
+		notifier agentcontrol.GlobalMailboxWakeNotifier
+		notify   bool
+	)
+	if notifier, ok = txWriter.(agentcontrol.GlobalMailboxWakeNotifier); !ok {
+		notifier = nil
+	}
+	defer func() {
 		s.mu.Unlock()
+		if !notify {
+			return
+		}
+		if notifier != nil {
+			notifier.NotifyGlobalMailboxWake(appended)
+		}
+		controlMessage := cloneTeamMailMessage(result.message)
+		controlMessage.Seq = result.controlSeq
+		controlMessage.ControlSeq = result.controlSeq
+		controlMessage.SessionMailboxSeq = result.mailboxSeq
+		s.notifyAgentControlMailboxWatchers(sessionID, controlMessage)
+		s.notifyMailboxWatchers(sessionID, result.message)
+		s.notifyEventWatchers(result.eventSeq, result.event)
+	}()
+
+	record := mailboxRecordFromRuntimeMessage(sessionID, message)
+	appended, err = txWriter.AppendPrimaryGlobalMailboxRecordTx(ctx, tx, schema, record)
+	if err != nil {
 		return runtimeevents.Event{}, 0, true, fmt.Errorf("append primary global runtime mailbox record: %w", err)
 	}
 	if appended.GlobalSeq > 0 {
@@ -2423,14 +2450,12 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	if strings.TrimSpace(appended.MessageID) != "" {
 		message.ID = appended.MessageID
 	}
-	result, err := s.appendAgentControlMailboxPrimaryTx(ctx, tx, sessionID, message)
+	result, err = s.appendAgentControlMailboxPrimaryTx(ctx, tx, sessionID, message)
 	if err != nil {
-		s.mu.Unlock()
 		return result.event, result.mailboxSeq, true, err
 	}
 	refreshed, err := txWriter.AppendPrimaryGlobalMailboxRecordTx(ctx, tx, schema, mailboxRecordFromRuntimeMessage(sessionID, result.message))
 	if err != nil {
-		s.mu.Unlock()
 		return result.event, result.mailboxSeq, true, fmt.Errorf("refresh primary global runtime mailbox record: %w", err)
 	}
 	if refreshed.GlobalSeq > 0 {
@@ -2438,22 +2463,10 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 		result.message.GlobalSeq = refreshed.GlobalSeq
 	}
 	if err := tx.Commit(); err != nil {
-		s.mu.Unlock()
 		return result.event, result.mailboxSeq, true, fmt.Errorf("commit agent control mailbox tx: %w", err)
 	}
 	committed = true
-	s.mu.Unlock()
-
-	if notifier, ok := txWriter.(agentcontrol.GlobalMailboxWakeNotifier); ok {
-		notifier.NotifyGlobalMailboxWake(appended)
-	}
-	controlMessage := cloneTeamMailMessage(result.message)
-	controlMessage.Seq = result.controlSeq
-	controlMessage.ControlSeq = result.controlSeq
-	controlMessage.SessionMailboxSeq = result.mailboxSeq
-	s.notifyAgentControlMailboxWatchers(sessionID, controlMessage)
-	s.notifyMailboxWatchers(sessionID, result.message)
-	s.notifyEventWatchers(result.eventSeq, result.event)
+	notify = true
 	return result.event, result.mailboxSeq, true, nil
 }
 
