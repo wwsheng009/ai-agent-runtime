@@ -37,8 +37,8 @@ const (
 	// 仅当上游确认支持(metadata supports_sampling=true)时才透传,避免破坏
 	// 严格校验请求体的 Codex 兼容上游。
 	codexSupportsSamplingMetadataKey = "supports_sampling"
-	codexToolSchemaCompactBytes             = 5000
-	codexToolSchemaCompactDepth             = 3
+	codexToolSchemaCompactBytes      = 5000
+	codexToolSchemaCompactDepth      = 3
 )
 
 // Name 返回适配器名称
@@ -49,29 +49,29 @@ func (a *CodexAdapter) Name() string {
 // CodexStreamState Codex 流式状态管理
 // 事件驱动，需要跟踪 output_item 和 reasoning_summary
 type CodexStreamState struct {
-	ResponseID    string
-	Model         string
-	Content       strings.Builder
-	Reasoning     strings.Builder
-	Refusal       strings.Builder
-	ToolCalls     map[int]*CodexToolCall // index -> tool call
-	ToolItemKeys  map[string]int
-	OutputItems   map[int]map[string]interface{}
-	FinishReason  string
-	Usage         map[string]int64
+	ResponseID   string
+	Model        string
+	Content      strings.Builder
+	Reasoning    strings.Builder
+	Refusal      strings.Builder
+	ToolCalls    map[int]*CodexToolCall // index -> tool call
+	ToolItemKeys map[string]int
+	OutputItems  map[int]map[string]interface{}
+	FinishReason string
+	Usage        map[string]int64
 	// UsageDetails 保留官方 Responses usage 的明细(input_tokens_details /
 	// output_tokens_details),流式合并时不被丢弃。
-	UsageDetails  map[string]interface{}
-	ErrorCode     string
-	ErrorMessage  string
-	Annotations   []map[string]interface{}
+	UsageDetails map[string]interface{}
+	ErrorCode    string
+	ErrorMessage string
+	Annotations  []map[string]interface{}
 	// AnnotationDeltas 累积官方 response.output_text.annotation.delta 事件
 	// 的 delta(annotation_index -> 片段)。url_citation 等 annotation 的 url
 	// 字段可能通过 delta 事件流式到达,added 事件中为空串。
 	AnnotationDeltas map[int]string
 	// SafetyItems 累积官方 response.item_safety.* 事件的内容安全过滤信息
 	// (code/reason),供调用方诊断被过滤的输出。
-	SafetyItems []map[string]interface{}
+	SafetyItems   []map[string]interface{}
 	UnknownEvents map[string]int
 	ImagePhases   map[string]map[string]struct{}
 
@@ -369,10 +369,10 @@ func applyCodexExtraBody(request map[string]interface{}, config RequestConfig) {
 
 // codexResponseMetadataReservedKeys 是适配器已消费、不得透传到上游 metadata 的键。
 var codexResponseMetadataReservedKeys = map[string]struct{}{
-	"prompt_cache_key":        {},
-	"session_id":              {},
-	"conversation_id":         {},
-	"service_tier":            {},
+	"prompt_cache_key":           {},
+	"session_id":                 {},
+	"conversation_id":            {},
+	"service_tier":               {},
 	"supports_max_output_tokens": {},
 	"supports_sampling":          {},
 	"max_output_tokens":          {},
@@ -723,7 +723,7 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 			}
 			item := map[string]interface{}{
 				"type":    itemType,
-				"id":      toolCallID,
+				"id":      codexToolCallItemID(itemType, toolCallID),
 				"call_id": toolCallID,
 				"output":  content,
 			}
@@ -1279,31 +1279,31 @@ var codexBuiltinToolEventPrefixes = []string{
 // built-in tools that this adapter does not execute. image_generation_call is
 // excluded: it has dedicated handling in this adapter.
 var codexBuiltinToolItemTypes = map[string]struct{}{
-	"file_search_call":          {},
-	"web_search_call":           {},
-	"code_interpreter_call":     {},
-	"computer_call":             {},
-	"computer_call_output":      {},
-	"local_shell_call":          {},
-	"local_shell_call_output":   {},
-	"shell_call":                {},
-	"shell_call_output":         {},
-	"apply_patch_call":          {},
-	"apply_patch_call_output":   {},
-	"mcp_call":                  {},
-	"mcp_call_output":           {},
-	"mcp_approval_request":      {},
-	"mcp_approval_response":     {},
-	"mcp_list_tools":            {},
-	"program":                   {},
-	"program_output":            {},
-	"function_web_search":       {},
-	"tool_search_call":          {},
-	"tool_search_output":        {},
-	"compaction":                {},
-	"compaction_trigger":        {},
-	"audio":                     {},
-	"audio_output":              {},
+	"file_search_call":        {},
+	"web_search_call":         {},
+	"code_interpreter_call":   {},
+	"computer_call":           {},
+	"computer_call_output":    {},
+	"local_shell_call":        {},
+	"local_shell_call_output": {},
+	"shell_call":              {},
+	"shell_call_output":       {},
+	"apply_patch_call":        {},
+	"apply_patch_call_output": {},
+	"mcp_call":                {},
+	"mcp_call_output":         {},
+	"mcp_approval_request":    {},
+	"mcp_approval_response":   {},
+	"mcp_list_tools":          {},
+	"program":                 {},
+	"program_output":          {},
+	"function_web_search":     {},
+	"tool_search_call":        {},
+	"tool_search_output":      {},
+	"compaction":              {},
+	"compaction_trigger":      {},
+	"audio":                   {},
+	"audio_output":            {},
 }
 
 func isCodexBuiltinToolEventType(eventType string) bool {
@@ -4326,6 +4326,28 @@ func stableCodexCallID(name, arguments string) string {
 	return fmt.Sprintf("call_%x", hasher.Sum64())
 }
 
+// codexToolCallItemID derives the Responses input item id for a tool-call
+// item. The Console Go gateway validates the item id prefix: function calls
+// use fc_ and custom tool calls use ctc_. call_id stays the tool call id, so
+// the derived item id is stable across replay and keeps call/output pairing.
+func codexToolCallItemID(itemType, callID string) string {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return ""
+	}
+	prefix := "fc_"
+	if itemType == "custom_tool_call" || itemType == "custom_tool_call_output" {
+		prefix = "ctc_"
+	}
+	if strings.HasPrefix(callID, prefix) {
+		return callID
+	}
+	if strings.HasPrefix(callID, "call_") {
+		return prefix + strings.TrimPrefix(callID, "call_")
+	}
+	return prefix + callID
+}
+
 func buildCodexAssistantMessageItem(content string) map[string]interface{} {
 	return map[string]interface{}{
 		"type": "message",
@@ -4382,7 +4404,7 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 		}
 		return map[string]interface{}{
 			"type":    "custom_tool_call",
-			"id":      callID,
+			"id":      codexToolCallItemID(toolType, callID),
 			"call_id": callID,
 			"name":    name,
 			"input":   input,
@@ -4391,40 +4413,47 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 
 	return map[string]interface{}{
 		"type":      "function_call",
-		"id":        callID,
+		"id":        codexToolCallItemID(toolType, callID),
 		"call_id":   callID,
 		"name":      name,
 		"arguments": arguments,
 	}
 }
 
-// ensureCodexInputItemID returns the item unchanged when it already carries
-// an id, and otherwise attaches a stable id for wire-mandated item kinds.
+// ensureCodexInputItemID attaches a stable id for wire-mandated item kinds and
+// normalizes tool-call item ids to the prefix the gateway validates.
 // The Console Go gateway deserializes Responses input items with a mandatory
 // id field and rejects function_call / function_call_output / reasoning items
 // that lack one with HTTP 400. Canonicalized history (which intentionally
 // drops id/status/phase) is replayed through this helper so the wire format
-// always satisfies the upstream contract. Tool-call items reuse call_id;
-// reasoning items derive a content-stable id so prompt-cache prefixes stay
-// byte-identical across steps.
+// always satisfies the upstream contract. Tool-call items derive an fc_/ctc_
+// item id from call_id; reasoning items derive a content-stable id so
+// prompt-cache prefixes stay byte-identical across steps.
 func ensureCodexInputItemID(item map[string]interface{}) map[string]interface{} {
 	if len(item) == 0 {
 		return item
 	}
 	itemType := strings.TrimSpace(asCodexString(item["type"]))
-	if strings.TrimSpace(asCodexString(item["id"])) != "" {
-		return item
-	}
 	switch itemType {
 	case "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
 		callID := strings.TrimSpace(asCodexString(item["call_id"]))
 		if callID == "" {
+			callID = strings.TrimSpace(asCodexString(item["id"]))
+		}
+		if callID == "" {
+			return item
+		}
+		wantID := codexToolCallItemID(itemType, callID)
+		if strings.TrimSpace(asCodexString(item["id"])) == wantID {
 			return item
 		}
 		cloned := cloneInterfaceMap(item)
-		cloned["id"] = callID
+		cloned["id"] = wantID
 		return cloned
 	case "reasoning":
+		if strings.TrimSpace(asCodexString(item["id"])) != "" {
+			return item
+		}
 		cloned := cloneInterfaceMap(item)
 		cloned["id"] = stableCodexReasoningItemID(item)
 		return cloned

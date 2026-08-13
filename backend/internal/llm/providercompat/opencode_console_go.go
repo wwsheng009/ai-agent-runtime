@@ -256,14 +256,14 @@ func (openCodeConsoleGoAdapter) PrepareRequestBody(ctx Context, body map[string]
 func normalizeOpenCodeResponsesInputMaps(input []map[string]interface{}) ([]map[string]interface{}, bool) {
 	var normalized []map[string]interface{}
 	for index, item := range input {
-		flattened, changed := flattenOpenCodeAssistantContent(item)
+		updated, changed := normalizeOpenCodeResponsesInputItem(item)
 		if !changed {
 			continue
 		}
 		if normalized == nil {
 			normalized = append([]map[string]interface{}(nil), input...)
 		}
-		normalized[index] = flattened
+		normalized[index] = updated
 	}
 	return normalized, normalized != nil
 }
@@ -275,16 +275,61 @@ func normalizeOpenCodeResponsesInputAny(input []interface{}) ([]interface{}, boo
 		if !ok {
 			continue
 		}
-		flattened, changed := flattenOpenCodeAssistantContent(item)
+		updated, changed := normalizeOpenCodeResponsesInputItem(item)
 		if !changed {
 			continue
 		}
 		if normalized == nil {
 			normalized = append([]interface{}(nil), input...)
 		}
-		normalized[index] = flattened
+		normalized[index] = updated
 	}
 	return normalized, normalized != nil
+}
+
+func normalizeOpenCodeResponsesInputItem(item map[string]interface{}) (map[string]interface{}, bool) {
+	updated, changed := flattenOpenCodeAssistantContent(item)
+	if idUpdated, idChanged := normalizeOpenCodeToolCallItemID(updated); idChanged {
+		updated = idUpdated
+		changed = true
+	}
+	return updated, changed
+}
+
+func normalizeOpenCodeToolCallItemID(item map[string]interface{}) (map[string]interface{}, bool) {
+	itemType := strings.TrimSpace(stringValue(item["type"]))
+	prefix := ""
+	switch itemType {
+	case "function_call", "function_call_output":
+		prefix = "fc_"
+	case "custom_tool_call", "custom_tool_call_output":
+		prefix = "ctc_"
+	default:
+		return item, false
+	}
+	callID := strings.TrimSpace(stringValue(item["call_id"]))
+	if callID == "" {
+		callID = strings.TrimSpace(stringValue(item["id"]))
+	}
+	if callID == "" {
+		return item, false
+	}
+	if strings.HasPrefix(strings.TrimSpace(stringValue(item["id"])), prefix) {
+		return item, false
+	}
+	updated := cloneMapStringAny(item)
+	updated["id"] = openCodeToolCallItemID(prefix, callID)
+	return updated, true
+}
+
+func openCodeToolCallItemID(prefix, callID string) string {
+	if strings.HasPrefix(callID, prefix) {
+		return callID
+	}
+	if strings.HasPrefix(callID, "call_") {
+		return prefix + strings.TrimPrefix(callID, "call_")
+	}
+	return prefix + callID
 }
 
 func flattenOpenCodeAssistantContent(item map[string]interface{}) (map[string]interface{}, bool) {

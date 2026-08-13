@@ -1514,17 +1514,17 @@ func TestCodexBuildRequest_FollowUpToolCallUsesOutputItems(t *testing.T) {
 	if id, _ := input[1]["id"].(string); id == "" {
 		t.Fatalf("expected reasoning item to carry a wire id, got %#v", input[1])
 	}
-	if input[2]["type"] != "function_call" || input[2]["name"] != "execute_shell_command" {
+	if input[2]["type"] != "function_call" || input[2]["name"] != "execute_shell_command" || input[2]["call_id"] != "call_1" {
 		t.Fatalf("unexpected function_call item: %#v", input[2])
 	}
-	if id, _ := input[2]["id"].(string); id != "call_1" {
-		t.Fatalf("expected function_call item to carry id=call_1, got %#v", input[2])
+	if id, _ := input[2]["id"].(string); id != "fc_1" {
+		t.Fatalf("expected function_call item to carry id=fc_1, got %#v", input[2])
 	}
 	if input[3]["type"] != "function_call_output" || input[3]["call_id"] != "call_1" {
 		t.Fatalf("unexpected function_call_output item: %#v", input[3])
 	}
-	if id, _ := input[3]["id"].(string); id != "call_1" {
-		t.Fatalf("expected function_call_output item to carry id=call_1, got %#v", input[3])
+	if id, _ := input[3]["id"].(string); id != "fc_1" {
+		t.Fatalf("expected function_call_output item to carry id=fc_1, got %#v", input[3])
 	}
 }
 
@@ -1561,14 +1561,14 @@ func TestCodexBuildRequest_FollowUpCustomToolCallUsesCustomOutputItems(t *testin
 	if input[1]["type"] != "custom_tool_call" || input[1]["name"] != "apply_patch" {
 		t.Fatalf("unexpected custom tool call item: %#v", input[1])
 	}
-	if id, _ := input[1]["id"].(string); id != "call_patch_1" {
-		t.Fatalf("expected custom_tool_call item to carry id=call_patch_1, got %#v", input[1])
+	if id, _ := input[1]["id"].(string); id != "ctc_patch_1" {
+		t.Fatalf("expected custom_tool_call item to carry id=ctc_patch_1, got %#v", input[1])
 	}
 	if input[2]["type"] != "custom_tool_call_output" || input[2]["call_id"] != "call_patch_1" {
 		t.Fatalf("unexpected custom tool output item: %#v", input[2])
 	}
-	if id, _ := input[2]["id"].(string); id != "call_patch_1" {
-		t.Fatalf("expected custom_tool_call_output item to carry id=call_patch_1, got %#v", input[2])
+	if id, _ := input[2]["id"].(string); id != "ctc_patch_1" {
+		t.Fatalf("expected custom_tool_call_output item to carry id=ctc_patch_1, got %#v", input[2])
 	}
 }
 
@@ -1612,8 +1612,8 @@ func TestCodexBuildAssistantMessage_PreservesReasoningDetails(t *testing.T) {
 // TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs locks the
 // Console Go wire contract: function_call / function_call_output items that
 // were canonicalized (id/status/phase dropped) must be replayed with a
-// mandatory id so the upstream does not reject the request with
-// "messages[N]: missing field `id`" (HTTP 400).
+// mandatory fc_-prefixed id so the upstream does not reject the request with
+// "messages[N]: missing field `id`" or "Invalid 'input[N].id'" (HTTP 400).
 func TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs(t *testing.T) {
 	a := &CodexAdapter{}
 
@@ -1625,13 +1625,13 @@ func TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs(t *testing.T) 
 		"content": "I will inspect logs.",
 		"response_output_items": []map[string]interface{}{
 			{
-				"type":      "reasoning",
-				"summary":   []map[string]interface{}{},
+				"type":    "reasoning",
+				"summary": []map[string]interface{}{},
 			},
 			{
-				"type":      "message",
-				"role":      "assistant",
-				"content":   []map[string]interface{}{{"type": "output_text", "text": "I will inspect logs."}},
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]interface{}{{"type": "output_text", "text": "I will inspect logs."}},
 			},
 			{
 				"type":      "function_call",
@@ -1663,11 +1663,11 @@ func TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs(t *testing.T) 
 	if id, _ := input[1]["id"].(string); id == "" {
 		t.Fatalf("expected replayed reasoning item to carry an id, got %#v", input[1])
 	}
-	if id, _ := input[3]["id"].(string); id != "call_1" {
-		t.Fatalf("expected replayed function_call item to carry id=call_1, got %#v", input[3])
+	if id, _ := input[3]["id"].(string); id != "fc_1" {
+		t.Fatalf("expected replayed function_call item to carry id=fc_1, got %#v", input[3])
 	}
-	if id, _ := input[4]["id"].(string); id != "call_1" {
-		t.Fatalf("expected replayed function_call_output item to carry id=call_1, got %#v", input[4])
+	if id, _ := input[4]["id"].(string); id != "fc_1" {
+		t.Fatalf("expected replayed function_call_output item to carry id=fc_1, got %#v", input[4])
 	}
 
 	// Stability: rebuilding the same history twice must produce identical ids
@@ -1683,6 +1683,9 @@ func TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs(t *testing.T) 
 	secondInput := second["input"].([]map[string]interface{})
 	if id, _ := input[1]["id"].(string); id != secondInput[1]["id"] {
 		t.Fatalf("expected stable reasoning id across rebuilds, got %#v vs %#v", input[1]["id"], secondInput[1]["id"])
+	}
+	if id, _ := input[3]["id"].(string); id != secondInput[3]["id"] {
+		t.Fatalf("expected stable function_call id across rebuilds, got %#v vs %#v", input[3]["id"], secondInput[3]["id"])
 	}
 }
 
@@ -1845,11 +1848,11 @@ func TestCodexBuildRequest_ResponseMetadataPassThroughFiltersInternalKeys(t *tes
 		Model:    "gpt-5.2",
 		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
 		Metadata: map[string]interface{}{
-			"session_id":               "sess_1",
+			"session_id":                 "sess_1",
 			"supports_max_output_tokens": true,
 			"response_format": map[string]interface{}{
-				"type": "json_schema",
-				"name": "x",
+				"type":   "json_schema",
+				"name":   "x",
 				"schema": map[string]interface{}{"type": "object"},
 			},
 			"codex_internal_flag": "secret",
@@ -1941,8 +1944,8 @@ func TestCodexBuildRequest_MultimodalInputParts(t *testing.T) {
 func TestCodexBuildRequest_MaxOutputTokensExplicitMetadata(t *testing.T) {
 	a := &CodexAdapter{}
 	base := RequestConfig{
-		Model:    "gpt-5.2",
-		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
+		Model:     "gpt-5.2",
+		Messages:  []map[string]interface{}{{"role": "user", "content": "hi"}},
 		MaxTokens: 2048,
 	}
 
@@ -2025,8 +2028,8 @@ func TestCodexBuildRequest_StoreAndPreviousResponseID(t *testing.T) {
 func TestNormalizeCodexInputPart_Video(t *testing.T) {
 	// 公开 URL 形态。
 	urlPart := normalizeCodexInputPart(map[string]interface{}{
-		"type":       "input_video",
-		"video_url":  "https://example.com/clip.mp4",
+		"type":      "input_video",
+		"video_url": "https://example.com/clip.mp4",
 	})
 	if urlPart == nil || urlPart["type"] != "input_video" || urlPart["video_url"] != "https://example.com/clip.mp4" {
 		t.Fatalf("expected input_video with video_url, got %#v", urlPart)
@@ -2241,12 +2244,12 @@ func TestCodexBuildRequest_UserAndTruncationTopLevel(t *testing.T) {
 func TestCodexBuildRequest_ExtraBodyMerged(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
-		Model:    "gpt-5.2",
-		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
+		Model:     "gpt-5.2",
+		Messages:  []map[string]interface{}{{"role": "user", "content": "hi"}},
 		MaxTokens: 512,
 		Metadata: map[string]interface{}{
 			"extra_body": map[string]interface{}{
-				"custom_field":  "custom_value",
+				"custom_field":      "custom_value",
 				"max_output_tokens": 9999, // 已存在键,不覆盖
 			},
 		},
@@ -2361,8 +2364,12 @@ func TestCodexBuildFunctionCallItem_MissingCallIDDerived(t *testing.T) {
 		t.Fatal("expected non-nil item when name is present but call_id missing")
 	}
 	id, _ := item["id"].(string)
-	if !strings.HasPrefix(id, "call_") || len(id) <= len("call_") {
-		t.Fatalf("expected derived stable call id, got %#v", item["id"])
+	if !strings.HasPrefix(id, "fc_") || len(id) <= len("fc_") {
+		t.Fatalf("expected derived item id with fc_ prefix, got %#v", item["id"])
+	}
+	callID, _ := item["call_id"].(string)
+	if !strings.HasPrefix(callID, "call_") || len(callID) <= len("call_") {
+		t.Fatalf("expected derived call id with call_ prefix, got %#v", item["call_id"])
 	}
 
 	// 相同 name+arguments 必须派生相同 id(跨轮次重放稳定)。
@@ -2374,6 +2381,9 @@ func TestCodexBuildFunctionCallItem_MissingCallIDDerived(t *testing.T) {
 	if item2["id"] != id {
 		t.Fatalf("expected stable derived id across calls, got %#v vs %#v", item2["id"], id)
 	}
+	if item2["call_id"] != callID {
+		t.Fatalf("expected stable derived call_id across calls, got %#v vs %#v", item2["call_id"], callID)
+	}
 
 	// 缺 name 仍丢弃(没有名字就无法执行工具)。
 	nameless := buildCodexFunctionCallItem(map[string]interface{}{
@@ -2382,6 +2392,54 @@ func TestCodexBuildFunctionCallItem_MissingCallIDDerived(t *testing.T) {
 	})
 	if nameless != nil {
 		t.Fatalf("expected nil when name missing, got %#v", nameless)
+	}
+}
+
+func TestCodexEnsureInputItemID_NormalizesToolCallIDPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		itemType   string
+		callID     string
+		wantPrefix string
+	}{
+		{"function_call", "function_call", "call_1", "fc_"},
+		{"function_call_output", "function_call_output", "call_1", "fc_"},
+		{"function_call realistic", "function_call", "call_P4QjA9D8eJJwmXp9ImxEMtRg", "fc_"},
+		{"custom_tool_call", "custom_tool_call", "call_patch_1", "ctc_"},
+		{"custom_tool_call_output", "custom_tool_call_output", "call_patch_1", "ctc_"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := map[string]interface{}{
+				"type":    tc.itemType,
+				"call_id": tc.callID,
+			}
+			got := ensureCodexInputItemID(item)
+			id, _ := got["id"].(string)
+			if !strings.HasPrefix(id, tc.wantPrefix) {
+				t.Fatalf("expected item id to start with %q, got %#v", tc.wantPrefix, got)
+			}
+			if got["call_id"] != tc.callID {
+				t.Fatalf("expected call_id preserved, got %#v", got)
+			}
+		})
+	}
+
+	// Valid upstream item ids are preserved, while call_-prefixed ids are
+	// rewritten even when the id field is already populated.
+	valid := map[string]interface{}{
+		"type": "function_call", "id": "fc_view", "call_id": "call_view",
+		"name": "ls", "arguments": "{}",
+	}
+	if got := ensureCodexInputItemID(valid); got["id"] != "fc_view" {
+		t.Fatalf("expected valid fc_ item id preserved, got %#v", got)
+	}
+	legacy := map[string]interface{}{
+		"type": "function_call", "id": "call_P4QjA9D8eJJwmXp9ImxEMtRg", "call_id": "call_P4QjA9D8eJJwmXp9ImxEMtRg",
+		"name": "ls", "arguments": "{}",
+	}
+	if got := ensureCodexInputItemID(legacy); got["id"] != "fc_P4QjA9D8eJJwmXp9ImxEMtRg" {
+		t.Fatalf("expected call_ item id rewritten to fc_P4QjA9D8eJJwmXp9ImxEMtRg, got %#v", got)
 	}
 }
 
@@ -2508,9 +2566,9 @@ func TestCodexInput_AssistantContentPartsPreserved(t *testing.T) {
 					},
 				},
 				{
-					"type": "input_image",
+					"type":      "input_image",
 					"image_url": "data:image/png;base64,AAAA",
-					"detail": "low",
+					"detail":    "low",
 				},
 			},
 		},
@@ -2716,9 +2774,9 @@ func TestCodexInput_ContentPartNamePreserved(t *testing.T) {
 					"name":        "voice_note",
 				},
 				{
-					"type":       "input_video",
-					"video_url":  "https://example.com/clip.mp4",
-					"name":       "clip",
+					"type":      "input_video",
+					"video_url": "https://example.com/clip.mp4",
+					"name":      "clip",
 				},
 			},
 		},

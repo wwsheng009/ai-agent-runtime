@@ -129,6 +129,75 @@ func TestOpenCodeConsoleGo_PreserveMixedAssistantContent(t *testing.T) {
 	}
 }
 
+func TestOpenCodeConsoleGo_NormalizeResponsesToolCallItemIDs(t *testing.T) {
+	body := map[string]interface{}{
+		"input": []map[string]interface{}{
+			{
+				"type":      "function_call",
+				"id":        "call_1",
+				"call_id":   "call_1",
+				"name":      "ls",
+				"arguments": "{}",
+			},
+			{
+				"type":    "function_call_output",
+				"id":      "call_1",
+				"call_id": "call_1",
+				"output":  "ok",
+			},
+			{
+				"type":    "custom_tool_call",
+				"id":      "call_patch_1",
+				"call_id": "call_patch_1",
+				"name":    "apply_patch",
+				"input":   "patch",
+			},
+		},
+	}
+	normalized := PrepareRequestBody(Context{
+		Protocol: "codex",
+		Profile:  openCodeProfile,
+	}, body)
+	input := normalized["input"].([]map[string]interface{})
+	if input[0]["id"] != "fc_1" || input[0]["call_id"] != "call_1" {
+		t.Fatalf("unexpected function_call item: %#v", input[0])
+	}
+	if input[1]["id"] != "fc_1" || input[1]["call_id"] != "call_1" {
+		t.Fatalf("unexpected function_call_output item: %#v", input[1])
+	}
+	if input[2]["id"] != "ctc_patch_1" || input[2]["call_id"] != "call_patch_1" {
+		t.Fatalf("unexpected custom_tool_call item: %#v", input[2])
+	}
+	// Canonical body must not be mutated.
+	orig := body["input"].([]map[string]interface{})
+	if orig[0]["id"] != "call_1" || orig[2]["id"] != "call_patch_1" {
+		t.Fatalf("expected original body preserved, got %#v", orig)
+	}
+}
+
+func TestOpenCodeConsoleGo_NormalizeResponsesToolCallItemIDsAnySlice(t *testing.T) {
+	body := map[string]interface{}{
+		"input": []interface{}{
+			map[string]interface{}{
+				"type":      "function_call",
+				"id":        "call_2",
+				"call_id":   "call_2",
+				"name":      "bash",
+				"arguments": "{}",
+			},
+		},
+	}
+	normalized := PrepareRequestBody(Context{
+		Protocol: "codex",
+		Profile:  openCodeProfile,
+	}, body)
+	input := normalized["input"].([]interface{})
+	item := input[0].(map[string]interface{})
+	if item["id"] != "fc_2" || item["call_id"] != "call_2" {
+		t.Fatalf("unexpected function_call item: %#v", item)
+	}
+}
+
 func TestOpenCodeConsoleGo_PreserveUserContent(t *testing.T) {
 	body := map[string]interface{}{
 		"input": []map[string]interface{}{
