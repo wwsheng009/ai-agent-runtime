@@ -1450,3 +1450,19 @@ func TestFinalizeToolHeadAtRunEnd(t *testing.T) {
 		t.Fatalf("failed head = %q", got)
 	}
 }
+
+func TestEncodeCoalescedAssistantIntervalCommitsInOnePass(t *testing.T) {
+	e := NewEventEncoder()
+	merged := assistantDelta("ABCDE", 5)
+	merged.Payload[StreamCoalescedFromKey] = uint64(1)
+	e.Encode(merged)
+	e.Encode(assistantDelta("F", 6))
+
+	m := e.Snapshot()
+	if len(m.Items) != 1 || m.Items[0].Kind != KindAssistant || m.Items[0].Head != "ABCDEF" {
+		t.Fatalf("coalesced interval head = %+v, want single assistant ABCDEF", m.Items)
+	}
+	if stats := e.Stats(); stats.OutOfOrderCount != 0 || stats.DuplicateCount != 0 {
+		t.Fatalf("coalesced interval stats = %+v, want no out-of-order or duplicates", stats)
+	}
+}

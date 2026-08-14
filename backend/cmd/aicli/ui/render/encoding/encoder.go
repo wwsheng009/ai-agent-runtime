@@ -24,6 +24,12 @@ const (
 	assistantStreamPendingByteLimit = 1 << 20
 )
 
+// StreamCoalescedFromKey is the payload field written by the bridge when it
+// folds contiguous sequence deltas into one event. The visible "sequence"
+// field is the interval end; this field carries the interval start so
+// downstream ordering can advance past the whole folded range.
+const StreamCoalescedFromKey = "_coalesced_sequence_from"
+
 // EventEncoder 是统一渲染编码器，对应 Codex ThreadHistoryBuilder：
 // 所有上游事件经 Encode 转换为 RenderModel 的 append/upsert/remove 操作。
 //
@@ -65,9 +71,14 @@ func (e *EventEncoder) EnableReasoningOrderingBarrier(enabled bool) {
 // 连续补拼；超限 tainted 丢弃后续）。
 type assistantStreamOrder struct {
 	nextSeq     uint64
-	pending     map[uint64]string
+	pending     map[uint64]assistantPendingDelta
 	pendingText int
 	tainted     bool
+}
+
+type assistantPendingDelta struct {
+	text   string
+	endSeq uint64
 }
 
 // priorityPromptState tracks the synchronous interaction identity separately
@@ -1254,7 +1265,7 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 	}
 	order := e.streamOrder[key]
 	if order == nil {
-		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]string)}
+		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]assistantPendingDelta)}
 		e.streamOrder[key] = order
 	}
 	if order.tainted {
@@ -1267,33 +1278,50 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 		e.stats.DuplicateCount++
 		return
 	}
+	coalescedFrom, coalesced := assistantCoalescedFrom(ev.Payload)
+	if coalesced && coalescedFrom < order.nextSeq {
+		// The merged interval overlaps already committed content; skip the
+		// whole block instead of partially re-applying its text.
+		e.stats.DuplicateCount++
+		return
+	}
 	if seq > order.nextSeq {
-		if _, dup := order.pending[seq]; dup {
-			e.stats.DuplicateCount++
+		if !(coalesced && coalescedFrom == order.nextSeq) {
+			cacheKey := seq
+			if coalesced {
+				cacheKey = coalescedFrom
+			}
+			if _, dup := order.pending[cacheKey]; dup {
+				e.stats.DuplicateCount++
+				return
+			}
+			order.pending[cacheKey] = assistantPendingDelta{text: delta, endSeq: seq}
+			order.pendingText += len(delta)
+			e.stats.OutOfOrderCount++
+			if len(order.pending) >= assistantStreamPendingLimit ||
+				order.pendingText > assistantStreamPendingByteLimit {
+				order.pending = make(map[uint64]assistantPendingDelta)
+				order.pendingText = 0
+				order.tainted = true
+			}
 			return
 		}
-		order.pending[seq] = delta
-		order.pendingText += len(delta)
-		e.stats.OutOfOrderCount++
-		if len(order.pending) >= assistantStreamPendingLimit ||
-			order.pendingText > assistantStreamPendingByteLimit {
-			order.pending = make(map[uint64]string)
-			order.pendingText = 0
-			order.tainted = true
-		}
-		return
 	}
 	// seq == nextSeq：提交本段并连续补拼 pending（有序拼接，不丢信息）。
 	head := delta
-	order.nextSeq++
+	if coalesced && coalescedFrom == order.nextSeq && seq >= coalescedFrom {
+		order.nextSeq = seq + 1
+	} else {
+		order.nextSeq++
+	}
 	for {
 		p, ok := order.pending[order.nextSeq]
 		if !ok {
 			break
 		}
-		head += p
+		head += p.text
 		delete(order.pending, order.nextSeq)
-		order.nextSeq++
+		order.nextSeq = p.endSeq + 1
 	}
 	if head == "" {
 		return
@@ -1878,9 +1906,9 @@ func (e *EventEncoder) flushAssistantStream(key string, it *Item, cs *ChangeSet)
 	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
 	tail := ""
 	for _, s := range seqs {
-		tail += order.pending[s]
+		tail += order.pending[s].text
 	}
-	order.pending = make(map[uint64]string)
+	order.pending = make(map[uint64]assistantPendingDelta)
 	order.pendingText = 0
 	if tail == "" {
 		return
@@ -2409,7 +2437,11 @@ func assistantSequence(payload map[string]interface{}) (uint64, bool) {
 	if payload == nil {
 		return 0, false
 	}
-	switch value := payload["sequence"].(type) {
+	return assistantSequenceValue(payload["sequence"])
+}
+
+func assistantSequenceValue(value interface{}) (uint64, bool) {
+	switch value := value.(type) {
 	case uint64:
 		return value, true
 	case uint:
@@ -2435,4 +2467,12 @@ func assistantSequence(payload map[string]interface{}) (uint64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func assistantCoalescedFrom(payload map[string]interface{}) (uint64, bool) {
+	if payload == nil {
+		return 0, false
+	}
+	from, ok := assistantSequenceValue(payload[StreamCoalescedFromKey])
+	return from, ok && from > 0
 }
