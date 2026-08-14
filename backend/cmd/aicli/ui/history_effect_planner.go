@@ -284,6 +284,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 		!activeCellSourceBoundary(active.Source, stableEnd) {
 		return nil
 	}
+	highlighter := newActiveBandHighlighter()
 	suffixLines := activeMarkdownSuffixLines
 	if active.Kind == scene.KindSupplement {
 		// Reasoning supplements render their divider rows separately from the
@@ -295,7 +296,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 	// One projector serves the whole handoff loop: prefix (source[:start]) is
 	// memoized across every candidate query and the full-source render is done
 	// once, so planning N rows costs ~N full renders instead of 2×(N+2).
-	proj := newSuffixProjector(active.Source, start, geometry.Width, theme, active.Kind == scene.KindSupplement)
+	proj := newSuffixProjector(active.Source, start, geometry.Width, theme, active.Kind == scene.KindSupplement, highlighter)
 	live, ok := proj.live()
 	if !ok || len(live) <= ActiveBandRows(geometry.Height) {
 		return nil
@@ -339,7 +340,7 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 	commits := make([]HistoryCommit, 0, len(boundaries))
 	sourceStart, displayStart := start, 0
 	for _, sourceEnd := range boundaries {
-		lines, projected := suffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width, theme)
+		lines, projected := suffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width, theme, highlighter)
 		if !projected || len(lines) == 0 || displayStart+len(lines) > len(live) ||
 			!render.LinesEqual(lines, live[displayStart:displayStart+len(lines)]) {
 			return nil

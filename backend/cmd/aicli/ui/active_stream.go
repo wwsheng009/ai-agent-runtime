@@ -19,6 +19,7 @@ import (
 const (
 	activeHighlightMaxBytes = 64 * 1024
 	activeHighlightMaxLines = 2000
+	activeHighlightBudget   = 80 * time.Millisecond
 )
 
 // ActiveStreamController owns the in-progress assistant/tool viewport.
@@ -574,13 +575,18 @@ func activeSourceSuffix(source string, committed int) string {
 	return source[committed:]
 }
 
-func newActiveStreamHighlighter() syntax.Highlighter {
+func newActiveBandHighlighter() syntax.Highlighter {
 	highlighter := syntax.NewChromaHighlighter()
 	highlighter.Limits = syntax.Limits{
 		MaxBytes: activeHighlightMaxBytes,
 		MaxLines: activeHighlightMaxLines,
 	}
+	highlighter.Budget = activeHighlightBudget
 	return highlighter
+}
+
+func newActiveStreamHighlighter() syntax.Highlighter {
+	return newActiveBandHighlighter()
 }
 
 func activeAssistantHeader(active cell.ActiveCell, now time.Time, policy motion.Policy) string {

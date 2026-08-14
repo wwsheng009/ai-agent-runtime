@@ -3,12 +3,27 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
 )
 
+func TestActiveCellProjectionUsesRestrictedHighlighter(t *testing.T) {
+	h, ok := newActiveBandHighlighter().(*syntax.ChromaHighlighter)
+	if !ok {
+		t.Fatalf("active band highlighter = %T, want *syntax.ChromaHighlighter", newActiveBandHighlighter())
+	}
+	if h.Budget != 80*time.Millisecond {
+		t.Fatalf("active band budget = %v, want 80ms", h.Budget)
+	}
+	want := syntax.Limits{MaxBytes: 64 * 1024, MaxLines: 2000}
+	if h.Limits != want {
+		t.Fatalf("active band limits = %+v, want %+v", h.Limits, want)
+	}
+}
 func TestProjectActiveCellBandUsesOnlyUnacknowledgedSemanticSuffix(t *testing.T) {
 	const acknowledged = "already handed off\n"
 	active := ActiveCellState{
@@ -229,5 +244,15 @@ func TestLayoutAppStateUsesActiveProjectionOnlyWithoutLegacyBand(t *testing.T) {
 	}
 	if got := strings.Join(layout.Bottom.State.ActiveBandLines, "\n"); got != "legacy active projection" {
 		t.Fatalf("legacy active-band text = %q, want legacy facade projection", got)
+	}
+}
+func TestSuffixProjectorDefaultsToRestrictedHighlighter(t *testing.T) {
+	proj := newSuffixProjector("```go", 0, 80, style.ThemeContext{}, false, nil)
+	if proj.highlighter == nil {
+		t.Fatal("suffix projector did not receive a restricted highlighter")
+	}
+	hl, ok := proj.highlighter.(*syntax.ChromaHighlighter)
+	if !ok || hl.Budget != 80*time.Millisecond {
+		t.Fatalf("suffix projector highlighter = %#v, want restricted active band highlighter", proj.highlighter)
 	}
 }

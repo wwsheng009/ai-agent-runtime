@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
 )
 
 // ActiveBandProjection is the pure, source-backed display candidate for the
@@ -34,6 +35,16 @@ func (p ActiveBandProjection) Valid() bool {
 func (p ActiveBandProjection) Clone() ActiveBandProjection {
 	p.Lines = cloneRenderLines(p.Lines)
 	return p
+}
+
+// activeBandMarkdownOptions builds assistant-body options for live ActiveBand
+// rendering: the restricted active highlighter plus hidden fallback labels so
+// a large block degrades silently instead of showing a technical notice.
+func activeBandMarkdownOptions(width int, theme style.ThemeContext, highlighter syntax.Highlighter) markdown.Options {
+	opts := markdown.AssistantBodyOptions(width, theme)
+	opts.Highlighter = highlighter
+	opts.HideHighlightFallback = true
+	return opts
 }
 
 // ProjectActiveCellBand derives a bounded rich-line view of the currently
@@ -104,16 +115,17 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 	if width < 1 {
 		width = 80
 	}
+	highlighter := newActiveBandHighlighter()
 	var lines []render.Line
 	markdownSource := (active.Kind == scene.KindAssistant || active.Kind == scene.KindSupplement) && markdown.LooksLikeMarkdown(active.Source)
 	if markdownSource {
 		var projected bool
-		lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme)
+		lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
 		if !projected {
 			// A changed block context must never downgrade the live viewport to
 			// raw Markdown. Keep a rich full-source tail visible while the effect
 			// lifecycle takes the conservative recovery path.
-			lines = activeMarkdownBandLines(markdown.Render(active.Source, markdown.AssistantBodyOptions(width, theme)))
+			lines = activeMarkdownBandLines(markdown.Render(active.Source, activeBandMarkdownOptions(width, theme, highlighter)))
 		}
 	}
 	if len(lines) == 0 && !markdownSource {
@@ -156,19 +168,15 @@ func activeCellRunningToolBandHead(source string) string {
 // activeMarkdownSuffixLines renders from the complete source so a handed-off// prefix cannot strip list/fence/table context from the remaining rich tail.
 // The stable-prefix contract requires the old rendering to remain an exact
 // line prefix; if it does not, callers conservatively keep the source live.
-func activeMarkdownSuffixLines(source string, start, width int, themes ...style.ThemeContext) ([]render.Line, bool) {
+func activeMarkdownSuffixLines(source string, start, width int, theme style.ThemeContext, highlighter syntax.Highlighter) ([]render.Line, bool) {
 	if start < 0 || start > len(source) || !activeCellSourceBoundary(source, start) {
 		return nil, false
 	}
-	theme := style.ThemeContext{}
-	if len(themes) > 0 {
-		theme = themes[0]
-	}
-	full := activeMarkdownBandLines(markdown.Render(source, markdown.AssistantBodyOptions(width, theme)))
+	full := activeMarkdownBandLines(markdown.Render(source, activeBandMarkdownOptions(width, theme, highlighter)))
 	if start == 0 {
 		return full, true
 	}
-	prefix := activeMarkdownBandLines(markdown.Render(source[:start], markdown.AssistantBodyOptions(width, theme)))
+	prefix := activeMarkdownBandLines(markdown.Render(source[:start], activeBandMarkdownOptions(width, theme, highlighter)))
 	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
 		return nil, false
 	}
@@ -183,19 +191,15 @@ func activeMarkdownSuffixLines(source string, start, width int, themes ...style.
 // reasoning through the plain assistant path used to hand off raw markdown
 // source rows ("- `x`") while finalize committed formatted rows ("• x"),
 // making the acked-prefix matcher fail and re-committing the whole cell.
-func activeReasoningMarkdownSuffixLines(source string, start, width int, themes ...style.ThemeContext) ([]render.Line, bool) {
+func activeReasoningMarkdownSuffixLines(source string, start, width int, theme style.ThemeContext, highlighter syntax.Highlighter) ([]render.Line, bool) {
 	if start < 0 || start > len(source) || !activeCellSourceBoundary(source, start) {
 		return nil, false
 	}
-	theme := style.ThemeContext{}
-	if len(themes) > 0 {
-		theme = themes[0]
-	}
-	full := activeReasoningMarkdownBandLines(source, width, theme)
+	full := activeReasoningMarkdownBandLines(source, width, theme, highlighter)
 	if start == 0 {
 		return full, true
 	}
-	prefix := activeReasoningMarkdownBandLines(source[:start], width, theme)
+	prefix := activeReasoningMarkdownBandLines(source[:start], width, theme, highlighter)
 	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
 		return nil, false
 	}
@@ -205,14 +209,14 @@ func activeReasoningMarkdownSuffixLines(source string, start, width int, themes 
 // activeReasoningMarkdownBandLines renders a reasoning supplement source the
 // same way reasoningSupplementScreenRows does: leading/trailing divider rows
 // get the reasoning role, the body goes through the markdown pipeline.
-func activeReasoningMarkdownBandLines(source string, width int, theme style.ThemeContext) []render.Line {
+func activeReasoningMarkdownBandLines(source string, width int, theme style.ThemeContext, highlighter syntax.Highlighter) []render.Line {
 	head, body, tail := splitReasoningSupplementSource(source)
 	var lines []render.Line
 	if head != "" {
 		lines = append(lines, reasoningDividerBandLines(head, width)...)
 	}
 	if strings.TrimSpace(body) != "" {
-		lines = append(lines, activeMarkdownBandLines(markdown.Render(body, markdown.AssistantBodyOptions(width, theme)))...)
+		lines = append(lines, activeMarkdownBandLines(markdown.Render(body, activeBandMarkdownOptions(width, theme, highlighter)))...)
 	}
 	if tail != "" {
 		lines = append(lines, reasoningDividerBandLines(tail, width)...)
@@ -261,11 +265,12 @@ func activeCellSourceBoundary(source string, offset int) bool {
 // whole markdown source — chroma lexing included — 2×(N+2) times per state
 // reduce, which is O(rows × full-source) work on every streamed chunk.
 type suffixProjector struct {
-	source    string
-	start     int
-	width     int
-	theme     style.ThemeContext
-	reasoning bool
+	source      string
+	start       int
+	width       int
+	theme       style.ThemeContext
+	reasoning   bool
+	highlighter syntax.Highlighter
 
 	prefixOnce  sync.Once
 	prefixLines []render.Line
@@ -279,17 +284,20 @@ type suffixProjector struct {
 	lastOK    bool
 }
 
-func newSuffixProjector(source string, start, width int, theme style.ThemeContext, reasoning bool) *suffixProjector {
-	return &suffixProjector{source: source, start: start, width: width, theme: theme, reasoning: reasoning}
+func newSuffixProjector(source string, start, width int, theme style.ThemeContext, reasoning bool, highlighter syntax.Highlighter) *suffixProjector {
+	if highlighter == nil {
+		highlighter = newActiveBandHighlighter()
+	}
+	return &suffixProjector{source: source, start: start, width: width, theme: theme, reasoning: reasoning, highlighter: highlighter}
 }
 
 // band renders one source span the same way the finalized commit does:
 // reasoning supplements split divider rows from the markdown body.
 func (p *suffixProjector) band(source string) []render.Line {
 	if p.reasoning {
-		return activeReasoningMarkdownBandLines(source, p.width, p.theme)
+		return activeReasoningMarkdownBandLines(source, p.width, p.theme, p.highlighter)
 	}
-	return activeMarkdownBandLines(markdown.Render(source, markdown.AssistantBodyOptions(p.width, p.theme)))
+	return activeMarkdownBandLines(markdown.Render(source, activeBandMarkdownOptions(p.width, p.theme, p.highlighter)))
 }
 
 // prefix renders source[:start] once and memoizes it.
