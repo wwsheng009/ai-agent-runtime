@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
@@ -250,6 +251,92 @@ func activeCellSourceBoundary(source string, offset int) bool {
 		return true
 	}
 	return offset > 0 && offset < len(source) && utf8.RuneStart(source[offset])
+}
+
+// suffixProjector memoizes the expensive pieces of activeMarkdownSuffixLines /
+// activeReasoningMarkdownSuffixLines across the many suffix queries one
+// handoff-planning pass makes. The prefix rendering (source[:start]) is
+// identical for every query, and the full-source render (live) is queried at
+// most once, so without memoization planning N handoff rows re-renders the
+// whole markdown source — chroma lexing included — 2×(N+2) times per state
+// reduce, which is O(rows × full-source) work on every streamed chunk.
+type suffixProjector struct {
+	source    string
+	start     int
+	width     int
+	theme     style.ThemeContext
+	reasoning bool
+
+	prefixOnce  sync.Once
+	prefixLines []render.Line
+
+	liveOnce  sync.Once
+	liveLines []render.Line
+	liveOK    bool
+
+	lastEnd   int
+	lastLines []render.Line
+	lastOK    bool
+}
+
+func newSuffixProjector(source string, start, width int, theme style.ThemeContext, reasoning bool) *suffixProjector {
+	return &suffixProjector{source: source, start: start, width: width, theme: theme, reasoning: reasoning}
+}
+
+// band renders one source span the same way the finalized commit does:
+// reasoning supplements split divider rows from the markdown body.
+func (p *suffixProjector) band(source string) []render.Line {
+	if p.reasoning {
+		return activeReasoningMarkdownBandLines(source, p.width, p.theme)
+	}
+	return activeMarkdownBandLines(markdown.Render(source, markdown.AssistantBodyOptions(p.width, p.theme)))
+}
+
+// prefix renders source[:start] once and memoizes it.
+func (p *suffixProjector) prefix() []render.Line {
+	p.prefixOnce.Do(func() {
+		if p.start > 0 {
+			p.prefixLines = p.band(p.source[:p.start])
+		}
+	})
+	return p.prefixLines
+}
+
+// suffix returns the rendered rows of source[start:end] as they appear in a
+// full render of source[:end], mirroring activeMarkdownSuffixLines semantics:
+// the full render's first prefix rows must equal the independent prefix
+// render, otherwise the projection is rejected (nil, false). The returned
+// lines are a fresh clone; internal memoization never escapes.
+func (p *suffixProjector) suffix(end int) ([]render.Line, bool) {
+	if end == p.lastEnd {
+		if !p.lastOK {
+			return nil, false
+		}
+		return cloneRenderLines(p.lastLines), true
+	}
+	if end < p.start || end > len(p.source) {
+		return nil, false
+	}
+	full := p.band(p.source[:end])
+	prefix := p.prefix()
+	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
+		p.lastEnd, p.lastLines, p.lastOK = end, nil, false
+		return nil, false
+	}
+	lines := cloneRenderLines(full[len(prefix):])
+	p.lastEnd, p.lastLines, p.lastOK = end, lines, true
+	return lines, true
+}
+
+// live renders the full-source suffix once.
+func (p *suffixProjector) live() ([]render.Line, bool) {
+	p.liveOnce.Do(func() {
+		p.liveLines, p.liveOK = p.suffix(len(p.source))
+	})
+	if !p.liveOK {
+		return nil, false
+	}
+	return cloneRenderLines(p.liveLines), true
 }
 
 // activeCellBandRows expands each logical source row independently. The

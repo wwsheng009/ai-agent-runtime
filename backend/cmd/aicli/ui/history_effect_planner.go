@@ -3,12 +3,20 @@ package ui
 import (
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
+
+// historyCommitPlanningBudget bounds one handoff-planning pass. Streaming
+// updates re-plan on every chunk; with pathological markdown (large code
+// fences) a single candidate render can take hundreds of milliseconds, so the
+// loop stops committing new rows once the budget is spent and lets the next
+// reduce continue from the same enqueued boundary.
+const historyCommitPlanningBudget = 250 * time.Millisecond
 
 // planEligibleHistoryCommits selects finalized display ranges above the retained
 // primary transcript viewport. It keeps source/display identity explicit: plain
@@ -284,20 +292,36 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 		// whole cell is re-committed (duplicate reasoning in scrollback).
 		suffixLines = activeReasoningMarkdownSuffixLines
 	}
-	live, ok := suffixLines(active.Source, start, geometry.Width, theme)
+	// One projector serves the whole handoff loop: prefix (source[:start]) is
+	// memoized across every candidate query and the full-source render is done
+	// once, so planning N rows costs ~N full renders instead of 2×(N+2).
+	proj := newSuffixProjector(active.Source, start, geometry.Width, theme, active.Kind == scene.KindSupplement)
+	live, ok := proj.live()
 	if !ok || len(live) <= ActiveBandRows(geometry.Height) {
 		return nil
 	}
 	maxCommitRows := len(live) - ActiveBandRows(geometry.Height)
 	commitEnd := active.Enqueued.End
+	// Only rows past the last enqueued boundary can be newly handed off.
+	deadline := time.Now().Add(historyCommitPlanningBudget)
 	for _, line := range sourceLineRanges(active.Source[start:stableEnd]) {
+		if time.Now().After(deadline) {
+			break
+		}
 		candidateEnd := start + line.Source.End
 		if candidateEnd <= commitEnd || candidateEnd > stableEnd {
 			continue
 		}
-		candidateLines, projected := suffixLines(active.Source[:candidateEnd], start, geometry.Width, theme)
-		if !projected || len(candidateLines) == 0 || len(candidateLines) > maxCommitRows ||
-			!render.LinesEqual(candidateLines, live[:len(candidateLines)]) {
+		candidateLines, projected := proj.suffix(candidateEnd)
+		if !projected || len(candidateLines) == 0 {
+			continue
+		}
+		if len(candidateLines) > maxCommitRows {
+			// Rendered row count is monotonic in the source end, so later
+			// candidates can only exceed the band budget as well.
+			break
+		}
+		if !render.LinesEqual(candidateLines, live[:len(candidateLines)]) {
 			continue
 		}
 		commitEnd = candidateEnd

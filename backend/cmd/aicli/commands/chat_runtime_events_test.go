@@ -3828,7 +3828,7 @@ func TestChatRuntimeEvents_NextRunEpochDropsActorRuntimeActionsWhileRunEndAction
 	}
 }
 
-func TestChatRuntimeEvents_HandleDoesNotDropEventsWhenQueueBacksUp(t *testing.T) {
+func TestChatRuntimeEvents_CoalescesStreamingDeltasWhileQueueBacksUp(t *testing.T) {
 	session := &ChatSession{
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
@@ -3876,42 +3876,30 @@ func TestChatRuntimeEvents_HandleDoesNotDropEventsWhenQueueBacksUp(t *testing.T)
 
 	<-started
 
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		bridge.Handle(runtimeevents.Event{
-			Type:      runtimechat.EventAssistantDelta,
-			SessionID: "lead-session",
-			Payload:   map[string]interface{}{"delta": " world"},
-		})
-	}()
-
-	<-secondDone
-
-	thirdDone := make(chan struct{})
-	go func() {
-		defer close(thirdDone)
-		bridge.Handle(runtimeevents.Event{
-			Type:      runtimechat.EventAssistantDelta,
-			SessionID: "lead-session",
-			Payload:   map[string]interface{}{"delta": "!"},
-		})
-	}()
-
-	select {
-	case <-thirdDone:
-		t.Fatal("expected third Handle call to block until queue space was available")
-	case <-time.After(30 * time.Millisecond):
-	}
+	// While the single-slot queue is held by the first event, later streaming
+	// deltas must NOT block the caller: they are coalesced into one pending
+	// event and flushed when the queue frees. Handled synchronously (same
+	// goroutine) so both deltas deterministically arrive while the queue is
+	// still full and therefore coalesce.
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": " world"},
+	})
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "!"},
+	})
 
 	close(release)
 	<-firstDone
-	<-thirdDone
 	bridge.WaitForCurrentEvents(300 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Equal(t, []string{"Hello", " world", "!"}, deltas)
+	// The coalesced deltas arrive as one event; the full text is preserved.
+	require.Equal(t, []string{"Hello", " world!"}, deltas)
 }
 
 func TestChatRuntimeEvents_HandleBackpressuresOnRetainedBytes(t *testing.T) {
@@ -3920,43 +3908,25 @@ func TestChatRuntimeEvents_HandleBackpressuresOnRetainedBytes(t *testing.T) {
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
 	bridge := newChatRuntimeEventBridge(session)
+	// Non-streaming events still honor the retained-byte budget with blocking
+	// backpressure; only streaming deltas take the non-blocking coalescing
+	// path.
 	first := runtimeevents.Event{
-		Type:      runtimechat.EventAssistantDelta,
+		Type:      runtimechat.EventToolStarted,
 		SessionID: "lead-session",
-		Payload:   map[string]interface{}{"delta": strings.Repeat("a", 128)},
+		Payload:   map[string]interface{}{"tool": strings.Repeat("a", 128)},
 	}
 	second := runtimeevents.Event{
-		Type:      runtimechat.EventAssistantDelta,
+		Type:      runtimechat.EventToolStarted,
 		SessionID: "lead-session",
-		Payload:   map[string]interface{}{"delta": strings.Repeat("b", 128)},
+		Payload:   map[string]interface{}{"tool": strings.Repeat("b", 128)},
 	}
 	bridge.eventQueueByteLimit = runtimeevents.ApproximateEventBytes(first)
 
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	bridge.writeDelta = func(string) {
-		select {
-		case started <- struct{}{}:
-		default:
-		}
-		<-release
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		bridge.run()
-	}()
-	defer func() {
-		releaseOnce.Do(func() { close(release) })
-		close(bridge.eventQueue)
-		<-done
-	}()
-
+	// No consumer is started: the retained-byte budget is exercised manually
+	// so the test does not depend on render/UI plumbing.
 	bridge.BeginRun()
 	bridge.Handle(first)
-	<-started
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
@@ -3969,13 +3939,29 @@ func TestChatRuntimeEvents_HandleBackpressuresOnRetainedBytes(t *testing.T) {
 	case <-time.After(30 * time.Millisecond):
 	}
 
-	releaseOnce.Do(func() { close(release) })
+	// Releasing the first payload's bytes unblocks the second Handle.
+	bridge.releaseEventQueueBytes(runtimeevents.ApproximateEventBytes(first))
 	<-secondDone
-	bridge.WaitForCurrentEvents(300 * time.Millisecond)
 	bridge.eventQueueMu.Lock()
 	queuedBytes := bridge.eventQueueBytes
 	bridge.eventQueueMu.Unlock()
-	require.Zero(t, queuedBytes)
+	require.Equal(t, runtimeevents.ApproximateEventBytes(second), queuedBytes)
+
+	// Drain the queue and release the retained bytes to leave the bridge
+	// clean for the test process.
+	select {
+	case <-bridge.eventQueue:
+	default:
+	}
+	select {
+	case <-bridge.eventQueue:
+	default:
+	}
+	bridge.releaseEventQueueBytes(runtimeevents.ApproximateEventBytes(first))
+	bridge.releaseEventQueueBytes(runtimeevents.ApproximateEventBytes(second))
+	bridge.eventQueueMu.Lock()
+	require.Zero(t, bridge.eventQueueBytes)
+	bridge.eventQueueMu.Unlock()
 }
 
 func TestChatRuntimeEvents_AllowsOneEventLargerThanByteLimit(t *testing.T) {

@@ -5,6 +5,7 @@ package syntax
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/styles"
@@ -37,7 +38,21 @@ type ChromaHighlighter struct {
 	Limits Limits
 	// DefaultTheme is used when req.Theme is empty or "auto".
 	DefaultTheme string
+	// Budget caps the wall-clock time spent lexing one code block; 0 means
+	// DefaultHighlightBudget. When exceeded the block degrades to plain lines
+	// so a pathological regex match can never stall the UI reducer.
+	Budget time.Duration
 }
+
+const (
+	// DefaultHighlightBudget bounds a single chroma lex pass. Lexing is
+	// lazy per-token, so the budget is checked between tokens; a single
+	// token may still spend up to chroma's per-rule match timeout.
+	DefaultHighlightBudget = 300 * time.Millisecond
+	// highlightBudgetCheckEvery checks the deadline once per N tokens to
+	// avoid paying time.Now() on every token.
+	highlightBudgetCheckEvery = 16
+)
 
 var (
 	styleOnce sync.Once
@@ -122,9 +137,23 @@ func (h *ChromaHighlighter) Highlight(req HighlightRequest) ([]render.Line, High
 		return plainCodeLines(code), meta
 	}
 
-	lines := tokensToLines(iterator, style)
+	deadline := time.Now().Add(h.highlightBudget())
+	lines, completed := tokensToLines(iterator, style, deadline)
+	if !completed {
+		// Pathological regex backtracking: fall back to plain lines rather
+		// than stalling the UI reducer for unbounded time.
+		meta.FallbackReason = "highlight_budget_exceeded"
+		return plainCodeLines(code), meta
+	}
 	meta.Highlighted = true
 	return lines, meta
+}
+
+func (h *ChromaHighlighter) highlightBudget() time.Duration {
+	if h != nil && h.Budget > 0 {
+		return h.Budget
+	}
+	return DefaultHighlightBudget
 }
 
 func plainCodeLines(code string) []render.Line {
@@ -142,7 +171,10 @@ func plainCodeLines(code string) []render.Line {
 	return out
 }
 
-func tokensToLines(it chroma.Iterator, style *chroma.Style) []render.Line {
+// tokensToLines consumes the lazy lexer iterator token by token, so the
+// caller can enforce a wall-clock budget and abort pathological regex
+// backtracking mid-lex. Returns (nil, false) when the deadline is exceeded.
+func tokensToLines(it chroma.Iterator, style *chroma.Style, deadline time.Time) ([]render.Line, bool) {
 	var lines []render.Line
 	var current render.Line
 
@@ -154,7 +186,14 @@ func tokensToLines(it chroma.Iterator, style *chroma.Style) []render.Line {
 		current = render.Line{}
 	}
 
-	for _, tok := range it.Tokens() {
+	for i := 0; ; i++ {
+		if i&(highlightBudgetCheckEvery-1) == 0 && time.Now().After(deadline) {
+			return nil, false
+		}
+		tok := it()
+		if tok == chroma.EOF {
+			break
+		}
 		text := tok.Value
 		if text == "" {
 			continue
@@ -188,7 +227,7 @@ func tokensToLines(it chroma.Iterator, style *chroma.Style) []render.Line {
 	if len(current.Spans) > 0 || len(lines) == 0 {
 		flush()
 	}
-	return lines
+	return lines, true
 }
 
 func chromaEntryToStyle(entry chroma.StyleEntry, tokType chroma.TokenType) render.Style {
