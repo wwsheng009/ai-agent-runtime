@@ -34,6 +34,7 @@ type AppState struct {
 	ResumePicker                 ResumePickerState
 	BacktrackPicker              BacktrackPickerState
 	ModelPicker                  ModelPickerState
+	LoginPicker                  LoginPickerState
 	ThemePicker                  ThemePickerState
 	SkillPicker                  SkillPickerState
 	ExportPicker                 ExportPickerState
@@ -213,6 +214,14 @@ type BacktrackPickerState struct {
 // Navigation, search and the selected row remain local to the fullscreen list;
 // the provider→model→reasoning mutation is committed only after lease release.
 type ModelPickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// LoginPickerState intentionally holds only alternate-screen ownership.
+// Navigation, search and the selected row remain local to the fullscreen list;
+// the /login provider/protocol selection is committed only after lease release.
+type LoginPickerState struct {
 	Active  bool
 	LeaseID uint64
 }

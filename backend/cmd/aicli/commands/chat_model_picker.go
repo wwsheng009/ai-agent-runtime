@@ -2,8 +2,8 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -14,20 +14,23 @@ import (
 // canOpenChatModelPicker is intentionally stricter than a generic list
 // capability check. Switching the model mutates session state, so the picker
 // may only begin while the unified primary presenter is idle, owns its
-// viewport, and no competing popup or alternate screen owns input.
+// viewport, and no competing popup or alternate screen owns input. It shares
+// the common chat picker readiness gate with /login.
 func canOpenChatModelPicker(session *ChatSession) bool {
-	if session == nil || session.NoInteractive || session.JSONOutput ||
-		session.Interaction == nil || session.Surface == nil {
-		return false
+	return chatPickerSurfaceReady(session)
+}
+
+// modelPickerLeaseHooks binds the model picker stages to their UI-actor
+// barrier actions (OpenModelPicker/CloseModelPicker).
+func modelPickerLeaseHooks() chatPickerLeaseHooks {
+	return chatPickerLeaseHooks{
+		Open: func(leaseID uint64) ui.UIAction {
+			return ui.OpenModelPicker{LeaseID: leaseID}
+		},
+		Close: func(leaseID uint64) ui.UIAction {
+			return ui.CloseModelPicker{LeaseID: leaseID}
+		},
 	}
-	if !session.Surface.Enabled() || !session.Surface.OwnedViewport() ||
-		session.Surface.LeaseActive() || session.Surface.HasActivePopup() {
-		return false
-	}
-	if session.RuntimeEventBridge != nil && session.RuntimeEventBridge.isRunActive() {
-		return false
-	}
-	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
 }
 
 // openChatModelPicker executes the typed alternate-screen interaction for the
@@ -43,23 +46,17 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	providerName := strings.TrimSpace(request.Provider)
 	modelName := strings.TrimSpace(request.Model)
 
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-		Title: "切换模型",
-	})
+	lease, err := chatPickerOpen(session, "切换模型", modelPickerLeaseHooks())
 	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开模型选择器失败: %w", err)), false)
-		return
-	}
-	if !session.Interaction.postUIAction(ui.OpenModelPicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器状态未提交")), false)
-		return
-	}
-	// Lifecycle barrier only: the first list frame sees the matching actor
-	// state. Key navigation stays local to the fullscreen list.
-	if !session.Interaction.waitUIActorIdleBounded("open model picker") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器渲染未就绪")), false)
+		switch {
+		case errors.Is(err, errChatPickerStateUncommitted):
+			err = fmt.Errorf("模型选择器状态未提交")
+		case errors.Is(err, errChatPickerRenderNotReady):
+			err = fmt.Errorf("模型选择器渲染未就绪")
+		default:
+			err = fmt.Errorf("打开模型选择器失败: %w", err)
+		}
+		_ = renderChatCommandResult(session, commandErrorResult(err), false)
 		return
 	}
 
@@ -71,24 +68,24 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 			_ = renderChatCommandResult(session, commandTextResult("没有可用的 provider 配置"), false)
 			return
 		}
-		picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
+		index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
 			Title:        "选择 Provider",
 			Subtitle:     "Enter 确认，Esc 取消",
 			EmptyMessage: "没有匹配的 provider",
 			ConfirmLabel: "使用选中 provider",
 			Items:        buildModelProviderFullScreenItems(providers, currentModelCommandProvider(session)),
-		}, lease)
+		})
 		if pickErr != nil {
 			closeModelPickerLease(session, lease)
 			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择 provider 失败: %w", pickErr)), false)
 			return
 		}
-		if picked.Cancelled || picked.Index < 0 || picked.Index >= len(providers) {
+		if cancelled {
 			closeModelPickerLease(session, lease)
 			_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
 			return
 		}
-		providerName = providers[picked.Index]
+		providerName = providers[index]
 	}
 
 	// Resolve the provider context so the model stage lists its real catalog.
@@ -107,24 +104,24 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 			_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("provider %s 没有可用的模型", providerName)), false)
 			return
 		}
-		picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
+		index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
 			Title:        "选择模型",
 			Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，Esc 取消", providerName),
 			EmptyMessage: "没有匹配的模型",
 			ConfirmLabel: "使用选中模型",
 			Items:        buildModelPickerModelItems(models, currentModelForProvider(session, providerName)),
-		}, lease)
+		})
 		if pickErr != nil {
 			closeModelPickerLease(session, lease)
 			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr)), false)
 			return
 		}
-		if picked.Cancelled || picked.Index < 0 || picked.Index >= len(models) {
+		if cancelled {
 			closeModelPickerLease(session, lease)
 			_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
 			return
 		}
-		modelName = models[picked.Index]
+		modelName = models[index]
 	}
 
 	// Stage 3: reasoning effort. Only when the caller asked for it and the
@@ -133,39 +130,33 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	if request.NeedReasoning {
 		catalog := reasoningEffortCatalogForModel(providerCtx.Provider, modelName)
 		if catalog.supported && len(catalog.options) > 0 {
-			picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
+			index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
 				Title:        "选择 reasoning effort",
 				Subtitle:     fmt.Sprintf("%s · Enter 确认，Esc 取消", modelName),
 				EmptyMessage: "没有可用的 reasoning effort",
 				ConfirmLabel: "使用选中值",
 				Items:        buildModelPickerReasoningItems(catalog.options, reasoning),
-			}, lease)
+			})
 			if pickErr != nil {
 				closeModelPickerLease(session, lease)
 				_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择 reasoning effort 失败: %w", pickErr)), false)
 				return
 			}
-			if picked.Cancelled || picked.Index < 0 || picked.Index >= len(catalog.options) {
+			if cancelled {
 				closeModelPickerLease(session, lease)
 				_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
 				return
 			}
-			reasoning = catalog.options[picked.Index]
+			reasoning = catalog.options[index]
 		}
 	}
 
-	_ = session.Interaction.postUIAction(ui.CloseModelPicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	// LeaseReleased is the primary recovery barrier. Do not mutate session
-	// state until the actor has observed it, otherwise a replacement frame
-	// could race the final alternate-screen exit/recovery transaction.
-	if !session.Interaction.waitUIActorIdleBounded("close model picker") {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器关闭未就绪")), false)
-		return
-	}
-
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭模型选择器失败: %w", releaseErr)), false)
+	if closeErr := chatPickerClose(session, lease, modelPickerLeaseHooks()); closeErr != nil {
+		if errors.Is(closeErr, errChatPickerActorNotIdle) {
+			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器关闭未就绪")), false)
+			return
+		}
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭模型选择器失败: %w", closeErr)), false)
 		return
 	}
 
@@ -185,9 +176,7 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 }
 
 func closeModelPickerLease(session *ChatSession, lease ui.ScreenLease) {
-	_ = session.Interaction.postUIAction(ui.CloseModelPicker{LeaseID: lease.ID()})
-	_ = lease.Release(context.Background())
-	session.Interaction.waitUIActorIdleBounded("close model picker")
+	_ = chatPickerClose(session, lease, modelPickerLeaseHooks())
 }
 
 // currentModelForProvider returns the effective model to highlight when the
@@ -205,84 +194,22 @@ func currentModelForProvider(session *ChatSession, providerName string) string {
 // modelPickerModelOptions lists the selectable models for an explicit provider,
 // mirroring runtimeModelSelectionOptions without borrowing mutable session state.
 func modelPickerModelOptions(provider config.Provider, current string) []string {
-	seen := make(map[string]struct{})
-	options := make([]string, 0, 1+len(provider.SupportedModels))
-	add := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		key := strings.ToLower(value)
-		if _, exists := seen[key]; exists {
-			return
-		}
-		seen[key] = struct{}{}
-		options = append(options, value)
-	}
-
-	add(current)
-	add(provider.DefaultModel)
-	for _, candidate := range provider.SupportedModels {
-		add(candidate)
-	}
-
-	sort.SliceStable(options, func(i, j int) bool {
-		left := strings.ToLower(strings.TrimSpace(options[i]))
-		right := strings.ToLower(strings.TrimSpace(options[j]))
-		if left == right {
-			return strings.TrimSpace(options[i]) < strings.TrimSpace(options[j])
-		}
-		return left < right
-	})
-	return options
+	values := make([]string, 0, 1+len(provider.SupportedModels))
+	values = append(values, current, provider.DefaultModel)
+	values = append(values, provider.SupportedModels...)
+	return normalizeChatPickerOptions(values)
 }
 
 func buildModelProviderFullScreenItems(providers []string, current string) []ui.FullScreenListItem {
-	items := make([]ui.FullScreenListItem, 0, len(providers))
-	for _, provider := range providers {
-		title := provider
-		if strings.EqualFold(strings.TrimSpace(provider), strings.TrimSpace(current)) {
-			title += "  (当前)"
-		}
-		items = append(items, ui.FullScreenListItem{
-			Title:      title,
-			Detail:     "provider",
-			SearchText: "provider " + provider,
-		})
-	}
-	return items
+	return buildChatPickerItems(providers, current, "provider", "provider")
 }
 
 func buildModelPickerModelItems(models []string, current string) []ui.FullScreenListItem {
-	items := make([]ui.FullScreenListItem, 0, len(models))
-	for _, model := range models {
-		title := model
-		if strings.EqualFold(strings.TrimSpace(model), strings.TrimSpace(current)) {
-			title += "  (当前)"
-		}
-		items = append(items, ui.FullScreenListItem{
-			Title:      title,
-			Detail:     "model",
-			SearchText: "model " + model,
-		})
-	}
-	return items
+	return buildChatPickerItems(models, current, "model", "model")
 }
 
 func buildModelPickerReasoningItems(options []string, current string) []ui.FullScreenListItem {
-	items := make([]ui.FullScreenListItem, 0, len(options))
-	for _, option := range options {
-		title := option
-		if strings.EqualFold(strings.TrimSpace(option), strings.TrimSpace(current)) {
-			title += "  (当前)"
-		}
-		items = append(items, ui.FullScreenListItem{
-			Title:      title,
-			Detail:     "reasoning effort",
-			SearchText: "reasoning " + option,
-		})
-	}
-	return items
+	return buildChatPickerItems(options, current, "reasoning effort", "reasoning")
 }
 
 // applyUnifiedModelCommandSelection applies a resolved /model mutation without

@@ -229,6 +229,27 @@ func (CloseModelPicker) isUIAction()         {}
 func (CloseModelPicker) Class() ActionClass  { return ClassBarrier }
 func (CloseModelPicker) CoalesceKey() string { return "" }
 
+// OpenLoginPicker and CloseLoginPicker bind the /login provider/protocol
+// selector to its ScreenLease. Like the model picker, the login picker owns
+// only transient list state; the actor retains the lease identity so stale
+// lifecycle actions cannot clear a newer modal or resume the primary
+// presenter early.
+type OpenLoginPicker struct {
+	LeaseID uint64
+}
+
+func (OpenLoginPicker) isUIAction()         {}
+func (OpenLoginPicker) Class() ActionClass  { return ClassBarrier }
+func (OpenLoginPicker) CoalesceKey() string { return "" }
+
+type CloseLoginPicker struct {
+	LeaseID uint64
+}
+
+func (CloseLoginPicker) isUIAction()         {}
+func (CloseLoginPicker) Class() ActionClass  { return ClassBarrier }
+func (CloseLoginPicker) CoalesceKey() string { return "" }
+
 // OpenThemePicker and CloseThemePicker bind the live-preview theme selector to
 // its ScreenLease. The picker owns only the working theme snapshot; the actor
 // retains the lease identity so stale lifecycle actions cannot clear a newer

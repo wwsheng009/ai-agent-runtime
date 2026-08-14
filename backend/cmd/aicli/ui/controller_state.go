@@ -113,6 +113,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.ModelPicker.Active && state.ModelPicker.LeaseID == a.LeaseID {
 				state.ModelPicker = ModelPickerState{}
 			}
+			if state.LoginPicker.Active && state.LoginPicker.LeaseID == a.LeaseID {
+				state.LoginPicker = LoginPickerState{}
+			}
 			if state.ThemePicker.Active && state.ThemePicker.LeaseID == a.LeaseID {
 				state.ThemePicker = ThemePickerState{}
 			}
@@ -157,6 +160,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseModelPicker:
 		if a.LeaseID != 0 && state.ModelPicker.Active && state.ModelPicker.LeaseID == a.LeaseID {
 			state.ModelPicker = ModelPickerState{}
+		}
+	case OpenLoginPicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.LoginPicker = LoginPickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseLoginPicker:
+		if a.LeaseID != 0 && state.LoginPicker.Active && state.LoginPicker.LeaseID == a.LeaseID {
+			state.LoginPicker = LoginPickerState{}
 		}
 	case OpenThemePicker:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {

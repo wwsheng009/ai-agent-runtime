@@ -780,6 +780,10 @@ func actionClassString(action UIAction) string {
 		return "OpenModelPicker"
 	case CloseModelPicker:
 		return "CloseModelPicker"
+	case OpenLoginPicker:
+		return "OpenLoginPicker"
+	case CloseLoginPicker:
+		return "CloseLoginPicker"
 	case OpenThemePicker:
 		return "OpenThemePicker"
 	case CloseThemePicker:

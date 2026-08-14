@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -728,43 +727,20 @@ func promptModelCommandReasoningSelection(session *ChatSession, provider config.
 }
 
 func runtimeProviderSelectionOptions(session *ChatSession, current string) []string {
-	seen := make(map[string]struct{})
-	options := make([]string, 0, 1)
-	add := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		key := strings.ToLower(value)
-		if _, exists := seen[key]; exists {
-			return
-		}
-		seen[key] = struct{}{}
-		options = append(options, value)
-	}
-
-	add(current)
+	values := make([]string, 0, 1)
+	values = append(values, current)
 	if session != nil && session.Config != nil {
-		add(session.Config.Providers.DefaultProvider)
+		values = append(values, session.Config.Providers.DefaultProvider)
 		for name, provider := range session.Config.Providers.Items {
 			if provider.Enabled {
-				add(name)
+				values = append(values, name)
 			}
 		}
 	}
 	if session != nil && strings.TrimSpace(session.ProviderName) != "" {
-		add(session.ProviderName)
+		values = append(values, session.ProviderName)
 	}
-
-	sort.SliceStable(options, func(i, j int) bool {
-		left := strings.ToLower(strings.TrimSpace(options[i]))
-		right := strings.ToLower(strings.TrimSpace(options[j]))
-		if left == right {
-			return strings.TrimSpace(options[i]) < strings.TrimSpace(options[j])
-		}
-		return left < right
-	})
-	return options
+	return normalizeChatPickerOptions(values)
 }
 
 func runtimeProviderSelectionSummary(session *ChatSession, providerName string) string {

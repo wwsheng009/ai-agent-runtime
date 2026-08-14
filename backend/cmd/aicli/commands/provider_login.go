@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
@@ -34,6 +36,30 @@ type providerLoginPrompter interface {
 	PromptSecret(label, currentMasked string, required bool) (string, error)
 	PrintLine(line string)
 }
+
+// providerLoginSelectPrompter is the optional searchable-picker extension of
+// providerLoginPrompter. Prompters that implement it (the unified chat
+// prompter) let the login flow replace the numbered text picker with the
+// full-screen instant-search + up/down-navigation picker shared with /model.
+// The default fallback keeps working for CLI/TUI/test prompters.
+//
+// PromptSelect returns:
+//   - the chosen option and cancelled=false on success;
+//   - cancelled=true when the user aborts (Esc/q/interrupt);
+//   - ui.ErrFullScreenUnavailable when the environment cannot host the
+//     full-screen list, in which case the caller must fall back to the
+//     numbered text picker.
+//
+// allowCreate appends a trailing "create new" row (used for providers: the
+// user may type a brand-new provider name that is not in the list yet).
+type providerLoginSelectPrompter interface {
+	providerLoginPrompter
+	PromptSelect(label, kind string, options []string, current string, allowCreate bool) (string, bool, error)
+}
+
+// errChatLoginPickerCancelled reports that the user aborted a full-screen
+// login selection. It maps to a neutral "已取消" result instead of an error.
+var errChatLoginPickerCancelled = errors.New("login picker cancelled")
 
 type providerLoginRequest struct {
 	Context       context.Context
@@ -445,6 +471,26 @@ func resolveLoginProviderName(req providerLoginRequest, cfg *config.Config) (str
 	}
 	options := loginProviderSelectionOptions(cfg)
 	current := resolveLoginProviderDefault(cfg, options)
+
+	// Full-screen searchable picker (instant search + up/down navigation,
+	// shared with /model) when the prompter supports it and there is at least
+	// one existing provider to browse. With zero providers the picker would
+	// only offer the "create new" row, so keep the direct text prompt instead.
+	if len(options) > 0 {
+		if selectPrompter, ok := req.Prompter.(providerLoginSelectPrompter); ok {
+			selected, cancelled, selectErr := selectPrompter.PromptSelect("Provider", "provider", options, current, true)
+			switch {
+			case selectErr == nil && cancelled:
+				return "", errChatLoginPickerCancelled
+			case selectErr == nil:
+				return selected, nil
+			case !errors.Is(selectErr, ui.ErrFullScreenUnavailable):
+				return "", selectErr
+			}
+			// ErrFullScreenUnavailable → fall back to the numbered text picker.
+		}
+	}
+
 	state := loginProviderPickerState{
 		Options:  options,
 		Current:  current,
@@ -1140,6 +1186,18 @@ func promptExplicitLoginProtocol(prompter providerLoginPrompter) (string, error)
 		if !isAutoLoginProtocol(option) {
 			options = append(options, option)
 		}
+	}
+	if selectPrompter, ok := prompter.(providerLoginSelectPrompter); ok {
+		selected, cancelled, selectErr := selectPrompter.PromptSelect("显式登录协议", "protocol", options, "openai", false)
+		switch {
+		case selectErr == nil && cancelled:
+			return "", errChatLoginPickerCancelled
+		case selectErr == nil:
+			return selected, nil
+		case !errors.Is(selectErr, ui.ErrFullScreenUnavailable):
+			return "", selectErr
+		}
+		// ErrFullScreenUnavailable → fall back to the numbered text picker.
 	}
 	printLoginProtocolOptions(prompter, "请选择显式登录协议:", options)
 	for {
@@ -2494,6 +2552,18 @@ func printLoginProtocolOptions(prompter providerLoginPrompter, title string, opt
 
 func promptLoginProtocol(prompter providerLoginPrompter) (string, error) {
 	options := loginProtocolOptions()
+	if selectPrompter, ok := prompter.(providerLoginSelectPrompter); ok {
+		selected, cancelled, selectErr := selectPrompter.PromptSelect("登录协议", "protocol", options, providerLoginProtocolAuto, false)
+		switch {
+		case selectErr == nil && cancelled:
+			return "", errChatLoginPickerCancelled
+		case selectErr == nil:
+			return selected, nil
+		case !errors.Is(selectErr, ui.ErrFullScreenUnavailable):
+			return "", selectErr
+		}
+		// ErrFullScreenUnavailable → fall back to the numbered text picker.
+	}
 	printLoginProtocolOptions(prompter, "请选择登录协议:", options)
 	for {
 		value, err := prompter.PromptText("协议编号或名称", "auto", true)

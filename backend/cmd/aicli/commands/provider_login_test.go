@@ -1447,6 +1447,7 @@ func TestRunProviderLogin_InteractiveProviderSelectionByNumber(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1621,6 +1622,7 @@ func TestRunProviderLogin_InteractiveFilterAndPageSelect(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1689,6 +1691,7 @@ func TestRunProviderLogin_InteractiveRejectsGhostDefaultAndInvalidNumber(t *test
 	defer server.Close()
 
 	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)

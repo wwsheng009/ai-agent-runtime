@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,80 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
+
+// loginPickerLeaseHooks binds the /login picker stages to their UI-actor
+// barrier actions (OpenLoginPicker/CloseLoginPicker).
+func loginPickerLeaseHooks() chatPickerLeaseHooks {
+	return chatPickerLeaseHooks{
+		Open: func(leaseID uint64) ui.UIAction {
+			return ui.OpenLoginPicker{LeaseID: leaseID}
+		},
+		Close: func(leaseID uint64) ui.UIAction {
+			return ui.CloseLoginPicker{LeaseID: leaseID}
+		},
+	}
+}
+
+// chatLoginPickerCreateRowTitle is the trailing row that lets the /login
+// provider stage fall back to a text prompt for a brand-new provider name.
+const chatLoginPickerCreateRowTitle = "＋ 新建 provider（手动输入名称）"
+
+// isChatLoginCancelError reports whether a login-flow error means the user
+// aborted the interaction (full-screen picker Esc/q or a text prompt
+// interrupt). Callers map it to a neutral "已取消" outcome instead of an error.
+func isChatLoginCancelError(err error) bool {
+	return errors.Is(err, errChatLoginPickerCancelled) || isChatInteractivePromptCancelError(err)
+}
+
+// PromptSelect implements providerLoginSelectPrompter through the full-screen
+// searchable picker shared with /model (instant search + up/down navigation).
+// When the unified surface cannot host the list it returns
+// ui.ErrFullScreenUnavailable so the login flow falls back to the numbered
+// text picker; cancellation surfaces as cancelled=true.
+func (p chatLoginPrompter) PromptSelect(label, kind string, options []string, current string, allowCreate bool) (string, bool, error) {
+	session := p.session
+	if session == nil || !chatPickerSurfaceReady(session) {
+		return "", false, ui.ErrFullScreenUnavailable
+	}
+
+	items := buildChatPickerItems(options, current, kind, kind)
+	createIndex := -1
+	if allowCreate {
+		createIndex = len(items)
+		items = append(items, ui.FullScreenListItem{
+			Title:      chatLoginPickerCreateRowTitle,
+			Detail:     kind,
+			SearchText: "create new " + kind + " 新建 provider",
+		})
+	}
+
+	lease, err := chatPickerOpen(session, "选择 "+label, loginPickerLeaseHooks())
+	if err != nil {
+		return "", false, err
+	}
+	index, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+		Title:        "选择 " + label,
+		Subtitle:     "Enter 确认，Esc 取消",
+		EmptyMessage: fmt.Sprintf("没有匹配的 %s", kind),
+		ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
+		Items:        items,
+	})
+	_ = chatPickerClose(session, lease, loginPickerLeaseHooks())
+	if stageErr != nil {
+		return "", false, stageErr
+	}
+	if cancelled {
+		return "", true, nil
+	}
+	if index == createIndex {
+		name, nameErr := p.PromptText("新 "+kind+" 名称", "", true)
+		if nameErr != nil {
+			return "", false, nameErr
+		}
+		return strings.TrimSpace(name), false, nil
+	}
+	return options[index], false, nil
+}
 
 // executeStructuredLoginCommand is the unified interactive entry point for
 // /login. It reuses the legacy parse + runProviderLogin chain (whose prompter
@@ -69,6 +144,9 @@ func executeStructuredLoginCommand(session *ChatSession, command string) (Comman
 	req.Prompter = chatLoginPrompter{session: session}
 	result, err := runProviderLogin(req)
 	if err != nil {
+		if isChatLoginCancelError(err) {
+			return commandTextResult("已取消登录"), true
+		}
 		return commandErrorResult(err), true
 	}
 

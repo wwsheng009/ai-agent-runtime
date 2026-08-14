@@ -104,6 +104,9 @@ func handleLoginCommand(session *ChatSession, command string, noInteractive bool
 	beginDirectInteractiveOutput(session)
 	result, err := runProviderLogin(req)
 	if err != nil {
+		if isChatLoginCancelError(err) {
+			return false
+		}
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
