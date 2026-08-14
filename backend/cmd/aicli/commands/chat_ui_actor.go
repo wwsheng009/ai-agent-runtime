@@ -158,6 +158,18 @@ func (c *chatInteractionCoordinator) postUIAction(action ui.UIAction) bool {
 	return actor.Post(action)
 }
 
+// tryPostUIAction is the non-blocking UI actor ingress used by coalesced
+// streaming runtime events. A full mailbox returns false immediately; the
+// caller drops the delta rather than letting a stalled reducer propagate
+// backpressure into the LLM stream callback.
+func (c *chatInteractionCoordinator) tryPostUIAction(action ui.UIAction) bool {
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return false
+	}
+	return actor.TryPost(action)
+}
+
 // postScheduledUIAction is the FramePump-safe posting entry. Timer and
 // DrawRequested are coalescable internal actions with a fixed key set; the
 // deferred FIFO lane admits them without waiting for bounded mailbox capacity,

@@ -35,24 +35,29 @@ import (
 )
 
 type chatRuntimeEventBridge struct {
-	session                         *ChatSession
-	primarySessionMu                sync.RWMutex
-	primarySessionID                string
-	startOnce                       sync.Once
-	processorOnce                   sync.Once
-	eventQueue                      chan chatRuntimeQueuedEvent
-	eventQueueMu                    sync.Mutex
-	eventQueueCond                  *sync.Cond
-	eventQueueBytes                 int64
-	eventQueueByteLimit             int64
+	session             *ChatSession
+	primarySessionMu    sync.RWMutex
+	primarySessionID    string
+	startOnce           sync.Once
+	processorOnce       sync.Once
+	eventQueue          chan chatRuntimeQueuedEvent
+	eventQueueMu        sync.Mutex
+	eventQueueCond      *sync.Cond
+	eventQueueBytes     int64
+	eventQueueByteLimit int64
+	// uiActionPostTimeout is the effective bounded wait for UI actor mailbox
+	// admission. Zero falls back to uiActionPostBudget; tests may shorten it
+	// to exercise the stall path without sleeping for the full budget.
+	uiActionPostTimeout time.Duration
 	// streamMu + pendingStreams coalesce streaming deltas (reasoning /
 	// assistant text) while the consumer is behind, so a slow UI consumer
 	// can never block the LLM stream callback. Merged events are emitted
 	// non-blockingly as soon as the consumer catches up; ordering is
 	// preserved by flushing pending streams before any non-streaming event
 	// is enqueued.
-	streamMu       sync.Mutex
-	pendingStreams []chatRuntimeQueuedEvent
+	streamMu                        sync.Mutex
+	pendingStreams                  []chatRuntimeQueuedEvent
+	pendingStreamsBytes             int64
 	runMu                           sync.Mutex
 	logMu                           sync.Mutex
 	renderMu                        sync.Mutex
@@ -199,11 +204,31 @@ const chatRuntimeEventQueueByteLimit int64 = 4 << 20
 const chatRuntimeEndRunDrainTimeout = 8 * time.Second
 const chatRuntimeInterruptedEndRunDrainTimeout = 250 * time.Millisecond
 const chatAssistantStreamPendingLimit = 128
+
 // uiActionPostBudget bounds how long the bridge waits for a bounded UI actor
 // mailbox slot. A stalled reducer must never wedge the run forever; after the
 // budget the event is dropped (and logged) and the chain continues.
 const uiActionPostBudget = 5 * time.Second
 const chatAssistantStreamPendingByteLimit int64 = 1 << 20
+
+// chatStreamCoalesce* bound the coalesced stream backlog while the UI is
+// behind. Count and byte caps keep a permanently stalled reducer from
+// accumulating unbounded text, and the per-event cap keeps one merged delta
+// from monopolizing the bounded queue.
+const chatStreamCoalescePendingLimit = 128
+const chatStreamCoalescePendingByteLimit int64 = 1 << 20
+const chatStreamCoalesceEventByteLimit int64 = 1 << 20
+
+// streamCoalescedFromKey records the first sequence folded into a coalesced
+// stream event. The visible "sequence" field keeps the last sequence so the
+// merged delta is the authoritative interval; downstream ordering must use
+// this field to advance past the whole interval instead of waiting for the
+// folded intermediate sequences that will never arrive separately.
+const streamCoalescedFromKey = encoding.StreamCoalescedFromKey
+
+// chatStreamFlushBudget bounds how long a non-streaming event waits for the
+// coalesced stream backlog before the remainder is dropped for liveness.
+const chatStreamFlushBudget = 100 * time.Millisecond
 const chatRetiredTurnLimit = 64
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
@@ -242,6 +267,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		primarySessionID:    currentRuntimeSessionID(session),
 		eventQueue:          make(chan chatRuntimeQueuedEvent, 512),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
+		uiActionPostTimeout: uiActionPostBudget,
 		rendered:            make(map[string]struct{}),
 		historySeedSeen:     make(map[string]struct{}),
 		renderEncoder:       encoding.NewEventEncoder(),
@@ -532,6 +558,7 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	// that deterministic.
 	b.streamMu.Lock()
 	b.pendingStreams = nil
+	b.pendingStreamsBytes = 0
 	b.streamMu.Unlock()
 	b.renderMu.Lock()
 	b.rendered = make(map[string]struct{})
@@ -585,6 +612,7 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	if b == nil {
 		return
 	}
+	b.flushPendingStreamEventBounded(chatStreamFlushBudget)
 	if !b.WaitForCurrentEvents(b.endRunDrainTimeout()) {
 		if b.session != nil {
 			writeSessionDebugInfo(b.session, "[runtime-event] EndRun drain timeout; closing run epoch", false)
@@ -761,17 +789,23 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		return
 	}
 	// Non-streaming events (finals, approvals, tool boundaries) are ordered
-	// behind any coalesced streaming event, then enqueue with the original
-	// blocking backpressure: they are rare and semantically must arrive.
-	b.flushPendingStreamEvent()
-	b.reserveEventQueueBytes(size)
-	b.renderMu.Lock()
-	epoch := b.runEpoch
-	b.renderMu.Unlock()
-	b.eventQueue <- chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch}
-	b.progressMu.Lock()
-	b.enqueuedEvents++
-	b.progressMu.Unlock()
+	// behind any coalesced streaming event, then enqueue with a bounded wait:
+	// they are rare and semantically should arrive, but a stalled UI must not
+	// wedge the LLM callback forever. An assistant_message supersedes the
+	// coalesced deltas for its turn, so stale pending text is dropped first.
+	if isAssistantStreamTerminalEvent(event) {
+		b.dropPendingStreamsForTerminal(event)
+	} else {
+		// The non-streaming event itself is allowed a 5s bounded wait below,
+		// so flushing the coalesced tail with the same budget keeps ordering
+		// and content intact whenever the consumer is merely slow. A truly
+		// stalled UI still degrades to a bounded drop instead of wedging the
+		// LLM callback forever.
+		b.flushPendingStreamEventBounded(uiActionPostBudget)
+	}
+	if !b.enqueueNonStreamEvent(event, size, uiActionPostBudget) {
+		b.logLateRuntimeEvent(event, "runtime event queue stalled; event dropped")
+	}
 }
 
 // isMergeableStreamEvent reports whether the event carries monotonic streaming
@@ -786,8 +820,20 @@ func isMergeableStreamEvent(eventType string) bool {
 	}
 }
 
+// isAssistantStreamTerminalEvent reports whether the event is the authoritative
+// snapshot that supersedes any coalesced streaming deltas for its turn.
+func isAssistantStreamTerminalEvent(event runtimeevents.Event) bool {
+	return event.Type == runtimechat.EventAssistantMessage
+}
+
 func streamMergeKey(event runtimeevents.Event) string {
-	return event.Type + "\x00" + event.TraceID
+	turnID, streamID := assistantEventIdentity(event)
+	sequence, hasSequence := assistantEventSequence(event)
+	key := event.Type + "\x00" + event.TraceID + "\x00" + turnID + "\x00" + streamID
+	if hasSequence {
+		key += "\x00" + strconv.FormatUint(sequence, 10)
+	}
+	return key
 }
 
 // enqueueStreamEvent coalesces streaming deltas while the consumer is
@@ -805,39 +851,111 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 	b.renderMu.Lock()
 	epoch := b.runEpoch
 	b.renderMu.Unlock()
-	// Consumer behind: coalesce into the pending queue and let run() flush
-	// once it frees the queue. Deliberately no immediate send attempt here —
-	// the queue may have room while the consumer is still busy with the
-	// in-flight event, and sending then would defeat coalescing.
-	if b.streamQueueBusy() {
-		if n := len(b.pendingStreams); n > 0 {
-			last := &b.pendingStreams[n-1]
-			if streamMergeKey(last.event) == streamMergeKey(event) {
-				// Bound the coalesced payload: a permanently stalled consumer
-				// must not accumulate unbounded text. Past the byte limit the
-				// new delta is dropped (logged) rather than blocking the
-				// stream callback.
-				if last.size+size > chatRuntimeEventQueueByteLimit {
-					b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
-					return
-				}
-				last.event = mergeStreamEvents(last.event, event)
-				last.size += size
-				if last.size < 1 {
-					last.size = 1
-				}
+	q := chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch}
+	// Once any delta is waiting in pendingStreams, every later delta must
+	// append to the same FIFO. The bounded queue can momentarily have room
+	// while run() flushes between consumed events; sending directly then
+	// would let a newer delta overtake older pending ones and corrupt
+	// sequence-ordered assistant text.
+	if n := len(b.pendingStreams); n > 0 {
+		last := &b.pendingStreams[n-1]
+		if streamMergeKey(last.event) == streamMergeKey(event) {
+			// Bound the coalesced payload: a permanently stalled consumer
+			// must not accumulate unbounded text. Past the byte limit the
+			// new delta is dropped (logged) rather than blocking the
+			// stream callback.
+			if last.size+size > chatStreamCoalesceEventByteLimit ||
+				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
+				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
 				return
 			}
+			last.event = mergeStreamEvents(last.event, event)
+			last.size += size
+			if last.size < 1 {
+				last.size = 1
+			}
+			b.pendingStreamsBytes += size
+			return
 		}
-		b.pendingStreams = append(b.pendingStreams, chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch})
+		// Contiguous sequence deltas of the same stream can be folded into
+		// the last pending entry even though their merge keys differ by
+		// sequence. Without this, a long stream behind a stalled consumer
+		// exhausts the pending count budget with one entry per delta and the
+		// tail is dropped, which then poisons sequence-ordered assembly.
+		if contiguousStreamEvent(last.event, event) {
+			if last.size+size > chatStreamCoalesceEventByteLimit ||
+				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
+				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
+				return
+			}
+			lastFrom, hasLastFrom := streamCoalescedFrom(last.event)
+			if !hasLastFrom {
+				if lastSeq, ok := assistantEventSequence(last.event); ok && lastSeq > 0 {
+					lastFrom = lastSeq
+					hasLastFrom = true
+				}
+			}
+			last.event = mergeStreamEvents(last.event, event)
+			if seq, ok := assistantEventSequence(event); ok {
+				last.event.Payload["sequence"] = seq
+			}
+			if hasLastFrom {
+				last.event.Payload[streamCoalescedFromKey] = lastFrom
+			}
+			last.size += size
+			if last.size < 1 {
+				last.size = 1
+			}
+			b.pendingStreamsBytes += size
+			return
+		}
+		b.appendPendingStreamLocked(q)
 		return
 	}
 	// Consumer idle and queue has room: send straight through; fall back to
 	// the pending queue if a slot races away.
-	q := chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch}
-	if !b.trySendStreamEvent(&q) {
-		b.pendingStreams = append(b.pendingStreams, q)
+	if !b.streamQueueBusy() && b.trySendStreamEvent(&q) {
+		return
 	}
+	b.appendPendingStreamLocked(q)
+}
+
+// contiguousStreamEvent reports whether incoming directly extends the pending
+// entry's same stream: same type/trace/turn/stream and exactly the next
+// sequence number. The two events keep distinct merge keys (sequence is part
+// of the key), but coalescing them preserves order and text while using one
+// bounded queue slot.
+func contiguousStreamEvent(last, incoming runtimeevents.Event) bool {
+	if last.Type != incoming.Type || last.TraceID != incoming.TraceID {
+		return false
+	}
+	if !isMergeableStreamEvent(last.Type) || !isMergeableStreamEvent(incoming.Type) {
+		return false
+	}
+	lastTurn, lastStream := assistantEventIdentity(last)
+	incomingTurn, incomingStream := assistantEventIdentity(incoming)
+	if lastTurn != incomingTurn || lastStream != incomingStream {
+		return false
+	}
+	lastSeq, lastOK := assistantEventSequence(last)
+	incomingSeq, incomingOK := assistantEventSequence(incoming)
+	if !lastOK || !incomingOK || lastSeq == 0 || incomingSeq == 0 {
+		return false
+	}
+	return incomingSeq > lastSeq && incomingSeq == lastSeq+1
+}
+
+// appendPendingStreamLocked bounds the coalesced backlog. Caller holds
+// streamMu. Dropping under a stalled consumer is bounded degradation: the
+// terminal assistant_message carries the authoritative snapshot.
+func (b *chatRuntimeEventBridge) appendPendingStreamLocked(q chatRuntimeQueuedEvent) {
+	if len(b.pendingStreams) >= chatStreamCoalescePendingLimit ||
+		b.pendingStreamsBytes+q.size > chatStreamCoalescePendingByteLimit {
+		b.logLateRuntimeEvent(q.event, "coalesced stream pending budget exceeded; delta dropped")
+		return
+	}
+	b.pendingStreams = append(b.pendingStreams, q)
+	b.pendingStreamsBytes += q.size
 }
 
 // streamQueueBusy reports whether the bounded queue or the in-flight
@@ -849,31 +967,42 @@ func (b *chatRuntimeEventBridge) streamQueueBusy() bool {
 	return busy
 }
 
-// flushPendingStreamEvent orders any coalesced streaming event before the next
-// non-streaming event. Blocks only until the merged event fits in the queue,
-// which is at most one event's worth of backpressure.
-func (b *chatRuntimeEventBridge) flushPendingStreamEvent() {
+// flushPendingStreamEventBounded orders any coalesced streaming event before
+// the next non-streaming event. It only waits a short budget: a stalled UI
+// must not wedge the LLM callback behind the coalesced backlog, so remaining
+// pending events are dropped (and logged) rather than blocking forever.
+func (b *chatRuntimeEventBridge) flushPendingStreamEventBounded(budget time.Duration) {
+	if b == nil {
+		return
+	}
 	b.streamMu.Lock()
 	defer b.streamMu.Unlock()
-	b.flushPendingStreamLocked()
+	b.flushPendingStreamBoundedLocked(budget)
 }
 
-// flushPendingStreamLocked blocks until every pending coalesced event is
-// enqueued. Caller holds streamMu.
-func (b *chatRuntimeEventBridge) flushPendingStreamLocked() {
+// flushPendingStreamBoundedLocked drains the pending queue head while the
+// bounded queue accepts events, stopping at the deadline. Caller holds
+// streamMu.
+func (b *chatRuntimeEventBridge) flushPendingStreamBoundedLocked(budget time.Duration) {
+	if budget <= 0 {
+		return
+	}
+	deadline := time.Now().Add(budget)
 	for len(b.pendingStreams) > 0 {
 		q := b.pendingStreams[0]
-		b.pendingStreams = b.pendingStreams[1:]
-		// Blocking path (non-streaming event ordering barrier): honor the
-		// retained-byte budget like a normal event.
-		b.reserveEventQueueBytes(q.size)
-		// The epoch was stamped at enqueue time; do not re-stamp it here, or
-		// a late event from a finished run would be whitened into the new
-		// run instead of being rejected by the consume-time epoch check.
-		b.eventQueue <- q
-		b.progressMu.Lock()
-		b.enqueuedEvents++
-		b.progressMu.Unlock()
+		if b.trySendStreamEvent(&q) {
+			b.pendingStreams = b.pendingStreams[1:]
+			b.pendingStreamsBytes -= q.size
+			if b.pendingStreamsBytes < 0 {
+				b.pendingStreamsBytes = 0
+			}
+			continue
+		}
+		if time.Now().After(deadline) {
+			b.dropAllPendingStreamsLocked("coalesced stream flush budget exceeded")
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -886,7 +1015,101 @@ func (b *chatRuntimeEventBridge) tryFlushPendingLocked() {
 			return
 		}
 		b.pendingStreams = b.pendingStreams[1:]
+		b.pendingStreamsBytes -= q.size
+		if b.pendingStreamsBytes < 0 {
+			b.pendingStreamsBytes = 0
+		}
 	}
+}
+
+// dropPendingStreamsForTerminal drops coalesced deltas superseded by an
+// assistant_message. The terminal snapshot carries the full content, so a
+// stalled UI must not wait behind deltas that would only be thrown away.
+func (b *chatRuntimeEventBridge) dropPendingStreamsForTerminal(event runtimeevents.Event) {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	turnID, streamID := assistantEventIdentity(event)
+	if turnID == "" && streamID == "" {
+		b.dropAllPendingStreamsLocked("assistant terminal supersedes coalesced stream")
+		return
+	}
+	kept := b.pendingStreams[:0]
+	dropped := int64(0)
+	for _, q := range b.pendingStreams {
+		pTurnID, pStreamID := assistantEventIdentity(q.event)
+		if pTurnID == turnID && (streamID == "" || pStreamID == streamID) {
+			b.logLateRuntimeEvent(q.event, "assistant terminal superseded stale coalesced stream")
+			dropped += q.size
+			continue
+		}
+		kept = append(kept, q)
+	}
+	b.pendingStreams = kept
+	if dropped > 0 {
+		b.pendingStreamsBytes -= dropped
+		if b.pendingStreamsBytes < 0 {
+			b.pendingStreamsBytes = 0
+		}
+	}
+}
+
+// dropAllPendingStreamsLocked discards the whole coalesced backlog and logs
+// each dropped event. Caller holds streamMu.
+func (b *chatRuntimeEventBridge) dropAllPendingStreamsLocked(reason string) {
+	for _, q := range b.pendingStreams {
+		b.logLateRuntimeEvent(q.event, reason)
+	}
+	b.pendingStreams = nil
+	b.pendingStreamsBytes = 0
+}
+
+// enqueueNonStreamEvent enqueues a non-streaming event with a bounded wait.
+// Streaming events are already non-blocking; this last-resort backpressure
+// keeps rare terminal/control events reliable without allowing a stalled UI
+// to wedge the LLM callback forever.
+func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event, size int64, wait time.Duration) bool {
+	if b == nil {
+		return false
+	}
+	if size < 1 {
+		size = 1
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if b.tryReserveEventQueueBytes(size) {
+			b.renderMu.Lock()
+			epoch := b.runEpoch
+			b.renderMu.Unlock()
+			select {
+			case b.eventQueue <- chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch}:
+				b.progressMu.Lock()
+				b.enqueuedEvents++
+				b.progressMu.Unlock()
+				return true
+			default:
+				b.releaseEventQueueBytes(size)
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// tryReserveEventQueueBytes is the non-blocking form of
+// reserveEventQueueBytes. Returns true when the byte budget admits the event.
+func (b *chatRuntimeEventBridge) tryReserveEventQueueBytes(size int64) bool {
+	b.eventQueueMu.Lock()
+	defer b.eventQueueMu.Unlock()
+	if size < 1 {
+		size = 1
+	}
+	if b.eventQueueByteLimit > 0 && b.eventQueueBytes > 0 && size > b.eventQueueByteLimit-b.eventQueueBytes {
+		return false
+	}
+	b.eventQueueBytes += size
+	return true
 }
 
 // trySendStreamEvent attempts a non-blocking enqueue. Returns true when the
@@ -1083,15 +1306,22 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 			epoch:  epoch,
 		},
 	}
-	// Bounded wait: a stalled UI reducer (pathological markdown, terminal
-	// output, …) must never wedge the run forever behind a full mailbox. The
-	// idle watchdog covers the LLM read; this covers the rest of the event
-	// chain. Approval/question events never reach this loop (they run through
-	// the legacy interaction barrier instead), so interactive prompts are
-	// unaffected.
-	waitDeadline := time.Now().Add(uiActionPostBudget)
+	// Bounded retry with the non-blocking TryPost ingress. The bridge worker
+	// may wait for a briefly full mailbox so a coalesced streaming tail is not
+	// lost right before llm.finished, while the LLM callback stays decoupled:
+	// while this worker waits, Handle coalesces new deltas into pendingStreams
+	// instead of blocking. A permanently stalled reducer (pathological
+	// markdown, terminal output, …) still drops the event after the budget and
+	// the run moves on. Approval/question events never reach this loop (they
+	// run through the legacy interaction barrier instead), so interactive
+	// prompts are unaffected.
+	timeout := b.uiActionPostTimeout
+	if timeout <= 0 {
+		timeout = uiActionPostBudget
+	}
+	waitDeadline := time.Now().Add(timeout)
 	for {
-		if coordinator.postUIAction(action) {
+		if coordinator.tryPostUIAction(action) {
 			return true, true
 		}
 		if coordinator.uiActionRejectedAfterShutdown() {
@@ -1107,12 +1337,16 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 			return false, false
 		}
 		if time.Now().After(waitDeadline) {
-			b.logLateRuntimeEvent(event, "UI actor mailbox stalled; event dropped")
+			reason := "UI actor mailbox stalled; event dropped"
+			if isMergeableStreamEvent(event.Type) {
+				reason = "UI actor mailbox full; streaming event dropped after bounded wait"
+			}
+			b.logLateRuntimeEvent(event, reason)
 			return false, false
 		}
-		// A full bounded mailbox is normal backpressure, not a reason to run
-		// the same event through the legacy surface concurrently. The UI actor
-		// will release a slot as soon as it finishes the current action.
+		// The UI actor releases a slot as soon as it finishes the current
+		// action; polling keeps the wait genuinely bounded without blocking on
+		// the mailbox cond.
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -2144,6 +2378,9 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) boo
 	stableSince := time.Time{}
 	lastSeenEnqueued := uint64(0)
 	for {
+		// Keep draining coalesced streams while the queue frees slots so the
+		// drain window reflects the full ingress, not just already-queued work.
+		b.flushPendingStreamEventIfAble()
 		b.progressMu.Lock()
 		enqueued := b.enqueuedEvents
 		processed := b.processedEvents
@@ -3707,25 +3944,39 @@ func (b *chatRuntimeEventBridge) orderAssistantDelta(event runtimeevents.Event) 
 	if state.turnID != turnID || state.tainted || sequence < state.nextSequence {
 		return nil, true
 	}
-	if sequence > state.nextSequence {
-		if _, exists := state.pending[sequence]; exists {
-			return nil, true
-		}
-		size := runtimeevents.ApproximateEventBytes(event)
-		if len(state.pending) >= chatAssistantStreamPendingLimit || size > chatAssistantStreamPendingByteLimit-state.pendingBytes {
-			state.pending = make(map[uint64]runtimeevents.Event)
-			state.pendingBytes = 0
-			state.tainted = true
-			return nil, true
-		}
-		state.pending[sequence] = event
-		state.pendingBytes += size
+	from, coalesced := streamCoalescedFrom(event)
+	if coalesced && from < state.nextSequence {
 		return nil, true
+	}
+	if sequence > state.nextSequence {
+		if !(coalesced && from == state.nextSequence) {
+			cacheKey := sequence
+			if coalesced {
+				cacheKey = from
+			}
+			if _, exists := state.pending[cacheKey]; exists {
+				return nil, true
+			}
+			size := runtimeevents.ApproximateEventBytes(event)
+			if len(state.pending) >= chatAssistantStreamPendingLimit || size > chatAssistantStreamPendingByteLimit-state.pendingBytes {
+				state.pending = make(map[uint64]runtimeevents.Event)
+				state.pendingBytes = 0
+				state.tainted = true
+				return nil, true
+			}
+			state.pending[cacheKey] = event
+			state.pendingBytes += size
+			return nil, true
+		}
 	}
 
 	ordered := make([]runtimeevents.Event, 0, 1)
 	ordered = append(ordered, event)
-	state.nextSequence++
+	if coalesced && from == state.nextSequence && sequence >= from {
+		state.nextSequence = sequence + 1
+	} else {
+		state.nextSequence++
+	}
 	for {
 		pending, ok := state.pending[state.nextSequence]
 		if !ok {
@@ -3737,6 +3988,12 @@ func (b *chatRuntimeEventBridge) orderAssistantDelta(event runtimeevents.Event) 
 			state.pendingBytes = 0
 		}
 		ordered = append(ordered, pending)
+		if pendingFrom, pendingCoalesced := streamCoalescedFrom(pending); pendingCoalesced && pendingFrom == state.nextSequence {
+			if pendingSeq, pendingOK := assistantEventSequence(pending); pendingOK {
+				state.nextSequence = pendingSeq + 1
+				continue
+			}
+		}
 		state.nextSequence++
 	}
 	return ordered, true
@@ -3753,7 +4010,11 @@ func assistantEventSequence(event runtimeevents.Event) (uint64, bool) {
 	if event.Payload == nil {
 		return 0, false
 	}
-	switch value := event.Payload["sequence"].(type) {
+	return assistantPayloadSequence(event.Payload["sequence"])
+}
+
+func assistantPayloadSequence(value interface{}) (uint64, bool) {
+	switch value := value.(type) {
 	case uint64:
 		return value, true
 	case uint:
@@ -3779,6 +4040,16 @@ func assistantEventSequence(event runtimeevents.Event) (uint64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// streamCoalescedFrom returns the first sequence folded into a coalesced
+// stream event. The event's visible sequence is the interval end.
+func streamCoalescedFrom(event runtimeevents.Event) (uint64, bool) {
+	if event.Payload == nil {
+		return 0, false
+	}
+	from, ok := assistantPayloadSequence(event.Payload[streamCoalescedFromKey])
+	return from, ok && from > 0
 }
 
 func (b *chatRuntimeEventBridge) acceptAssistantTurnLocked(turnID string) bool {
