@@ -115,9 +115,23 @@ func (h *ChromaHighlighter) Highlight(req HighlightRequest) ([]render.Line, High
 		return []render.Line{{Spans: []render.Span{{Text: ""}}}}, meta
 	}
 
+	// Resolve the style before the memo lookup so meta.Theme is canonicalized
+	// (including the styles.Fallback correction) on every path: lookups and
+	// stores must agree on the theme key.
+	style := styles.Get(meta.Theme)
+	if style == nil {
+		style = styles.Fallback
+		meta.Theme = style.Name
+	}
+
+	budget := h.highlightBudget()
+	if lines, cachedMeta, ok := highlightCached(code, req.Language, req.Filename, meta.Theme, budget, h.Limits); ok {
+		return lines, cachedMeta
+	}
+
 	if h.Limits.Exceeded(code) {
 		meta.FallbackReason = "limit_exceeded"
-		return plainCodeLines(code), meta
+		return h.finish(code, req.Language, req.Filename, meta, plainCodeLines(code), budget, true)
 	}
 
 	lexer := ResolveLexer(req.Language, req.Filename, code)
@@ -125,27 +139,34 @@ func (h *ChromaHighlighter) Highlight(req HighlightRequest) ([]render.Line, High
 		meta.Language = strings.ToLower(lexer.Config().Name)
 	}
 
-	style := styles.Get(meta.Theme)
-	if style == nil {
-		style = styles.Fallback
-		meta.Theme = style.Name
-	}
-
 	iterator, err := lexer.Tokenise(nil, code)
 	if err != nil {
 		meta.FallbackReason = "tokenize_error"
-		return plainCodeLines(code), meta
+		return h.finish(code, req.Language, req.Filename, meta, plainCodeLines(code), budget, true)
 	}
 
-	deadline := time.Now().Add(h.highlightBudget())
+	deadline := time.Now().Add(budget)
 	lines, completed := tokensToLines(iterator, style, deadline)
 	if !completed {
 		// Pathological regex backtracking: fall back to plain lines rather
-		// than stalling the UI reducer for unbounded time.
+		// than stalling the UI reducer for unbounded time. The fallback is
+		// time-dependent (a transient slow render must not pin the degraded
+		// output forever), so it is deliberately not memoized.
 		meta.FallbackReason = "highlight_budget_exceeded"
-		return plainCodeLines(code), meta
+		return h.finish(code, req.Language, req.Filename, meta, plainCodeLines(code), budget, false)
 	}
 	meta.Highlighted = true
+	return h.finish(code, req.Language, req.Filename, meta, lines, budget, true)
+}
+
+// finish records the result in the memo (when cacheable) and returns it to
+// the caller. The cache key uses the request's raw language and resolved
+// theme so lookups and stores always agree, independent of lexer name
+// normalization.
+func (h *ChromaHighlighter) finish(code, language, filename string, meta HighlightMeta, lines []render.Line, budget time.Duration, cacheable bool) ([]render.Line, HighlightMeta) {
+	if cacheable {
+		highlightStore(code, language, filename, meta.Theme, budget, h.Limits, lines, meta)
+	}
 	return lines, meta
 }
 

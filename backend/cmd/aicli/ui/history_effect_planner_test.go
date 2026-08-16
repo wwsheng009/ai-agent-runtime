@@ -605,3 +605,242 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 		t.Fatalf("BUG: acked handoff rows do not match finalize rows — whole cell re-committed (duplicate reasoning)")
 	}
 }
+
+func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
+	lines := make([]string, 0, 31)
+	for index := 0; index < 30; index++ {
+		lines = append(lines, fmt.Sprintf("mutable-row-%03d", index))
+	}
+	plainSource := strings.Join(lines, "\n") + "\n"
+
+	newState := func(source string) *UIControllerState {
+		state := &UIControllerState{AppState: AppState{
+			Geometry:                     GeometryState{Width: 80, Height: 12, Generation: 1},
+			LayoutGeneration:             1,
+			SemanticActiveCellProjection: true,
+			Active: ActiveCellState{
+				CellID:   91,
+				Revision: 2,
+				Kind:     scene.KindAssistant,
+				Phase:    ActiveCellMutable,
+				Source:   source,
+				Stable:   SourceRange{Start: 0, End: len(source)},
+				Acked:    SourceRange{Start: 0, End: 0},
+			},
+		}}
+		state.HistoryEffects.ledger = NewHistoryCommitLedger()
+		return state
+	}
+
+	// corruptPending rewrites the display payload of the first pending entry so
+	// a later planning pass must notice the mismatch (rebase or invalidate).
+	// If the fast path skips planning, the corruption must survive untouched.
+	corruptPending := func(state *UIControllerState) (token uint64, broken string) {
+		for token, entry := range state.HistoryEffects.ledger.byToken {
+			if entry.State != HistoryCommitPending {
+				continue
+			}
+			broken = "BROKEN-SENTINEL"
+			entry.Commit.Lines[0].Spans[0].Text = broken
+			state.HistoryEffects.ledger.byToken[token] = entry
+			return token, broken
+		}
+		t.Fatalf("no pending entry to corrupt")
+		return 0, ""
+	}
+
+	state := newState(plainSource)
+	syncHistoryEffectsForActiveCell(state)
+	first := len(state.HistoryEffects.ledger.Entries())
+	if first == 0 {
+		t.Fatalf("expected handoff candidates on first sync, got none")
+	}
+	if state.Active.Enqueued.End == 0 {
+		t.Fatalf("expected Enqueued advanced past the candidate frontier, got End=0")
+	}
+
+	t.Run("unchanged input hits the fast path", func(t *testing.T) {
+		// Identical input on a later stream chunk must be a no-op. Corrupt a
+		// pending payload first: only the fast-path skip leaves it untouched,
+		// because a real planning pass would rebase or invalidate it.
+		token, broken := corruptPending(state)
+		enqueuedBefore := state.Active.Enqueued
+		syncHistoryEffectsForActiveCell(state)
+		if got := len(state.HistoryEffects.ledger.Entries()); got != first {
+			t.Fatalf("unchanged input re-planned: ledger entries %d -> %d", first, got)
+		}
+		entry, ok := state.HistoryEffects.ledger.byToken[token]
+		if !ok || entry.State != HistoryCommitPending {
+			t.Fatalf("fast path did not run: pending entry %d was reconciled", token)
+		}
+		if entry.Commit.Lines[0].Spans[0].Text != broken {
+			t.Fatalf("fast path did not run: corrupted payload was rebased to %q", entry.Commit.Lines[0].Spans[0].Text)
+		}
+		if state.Active.Enqueued != enqueuedBefore {
+			t.Fatalf("unchanged input moved Enqueued %+v -> %+v", enqueuedBefore, state.Active.Enqueued)
+		}
+	})
+
+	t.Run("stable advance re-plans", func(t *testing.T) {
+		// New stream content past the stable boundary must re-plan and extend
+		// the candidate frontier even though no ack moved.
+		state.Active.Source += "mutable-row-030\nmutable-row-031\n"
+		state.Active.Stable.End = len(state.Active.Source)
+		syncHistoryEffectsForActiveCell(state)
+		if got := len(state.HistoryEffects.ledger.Entries()); got <= first {
+			t.Fatalf("stable advance did not re-plan: ledger entries %d -> %d", first, got)
+		}
+	})
+
+	t.Run("markdown shape flip re-plans", func(t *testing.T) {
+		// A source that flips from plain to markdown must re-plan even when no
+		// boundary moved: the planner branches on LooksLikeMarkdown, and the
+		// markdown collector can leave Stable pinned before an unclosed
+		// construct while the source keeps growing.
+		state2 := newState("# heading\n\n" + strings.Repeat("body-line-here\n", 30))
+		syncHistoryEffectsForActiveCell(state2)
+		if len(state2.HistoryEffects.ledger.Entries()) == 0 {
+			t.Fatalf("markdown source produced no candidates")
+		}
+		token, broken := corruptPending(state2)
+		state2.Active.Source = strings.Repeat("plain-body-line\n", 30) // flips to plain
+		syncHistoryEffectsForActiveCell(state2)
+		entry, ok := state2.HistoryEffects.ledger.byToken[token]
+		if !ok {
+			return // invalidated and pruned by the re-plan: acceptable
+		}
+		if entry.State == HistoryCommitInvalidated {
+			return // invalidated by the re-plan: acceptable
+		}
+		if entry.Commit.Lines[0].Spans[0].Text == broken {
+			t.Fatalf("markdown flip skipped the fast path: corrupted payload survived")
+		}
+	})
+
+	t.Run("commit barrier flip re-plans", func(t *testing.T) {
+		// HistoryCommitBlocked gates the planner (returns nil candidates), so
+		// the barrier flipping while boundaries stay put must invalidate all
+		// pending effects instead of being skipped.
+		state3 := newState(plainSource)
+		syncHistoryEffectsForActiveCell(state3)
+		if !state3.HistoryEffects.HasPending() {
+			t.Fatalf("expected pending effects before barrier")
+		}
+		state3.Active.HistoryCommitBlocked = true
+		syncHistoryEffectsForActiveCell(state3)
+		if state3.HistoryEffects.HasPending() {
+			t.Fatalf("barrier flip did not re-plan: pending effects survived")
+		}
+		if state3.HistoryEffects.ledger.pendingCount != 0 {
+			t.Fatalf("barrier flip left %d pending effects", state3.HistoryEffects.ledger.pendingCount)
+		}
+	})
+
+	t.Run("equal-length replacement with empty frontier still re-plans", func(t *testing.T) {
+		// The dangerous case for the fast-path memo: the frontier has been
+		// consumed back to zero (no candidate ≤ Stable.End, so Enqueued stays
+		// {0,0}) and a producer replaces the source with equal-length content.
+		// Every memo key (Stable/Enqueued/Acked/Len/markdown shape/blocked)
+		// coincides with the pre-replacement snapshot, so only the explicit
+		// memo reset inside reduceActiveCellUpdate can force the re-plan.
+		state5 := newState(plainSource)
+		syncHistoryEffectsForActiveCell(state5)
+		if len(state5.HistoryEffects.ledger.Entries()) == 0 {
+			t.Fatalf("expected candidates before replacement")
+		}
+		// Fold the frontier and the memo back to the empty state that the
+		// planner legitimately records when no candidate is enqueue-able.
+		state5.Active.Enqueued = SourceRange{}
+		state5.Active.Acked = SourceRange{}
+		state5.HistoryEffects.lastPlannedActiveEnqueued = SourceRange{}
+		state5.HistoryEffects.lastPlannedActiveAcked = SourceRange{}
+
+		replLines := make([]string, 0, 30)
+		for index := 0; index < 30; index++ {
+			replLines = append(replLines, fmt.Sprintf("replacement-%03d", index))
+		}
+		replacement := strings.Join(replLines, "\n") + "\n"
+		if len(replacement) != len(plainSource) {
+			t.Fatalf("test setup: replacement length %d != %d", len(replacement), len(plainSource))
+		}
+		next := state5.Active.Clone()
+		next.Revision++
+		next.Source = replacement
+		next.Acked = SourceRange{}
+		next.Enqueued = SourceRange{}
+		next.Stable = SourceRange{}
+		action := UpdateActiveCellAction{
+			ExpectedCellID:   state5.Active.CellID,
+			ExpectedRevision: state5.Active.Revision,
+			Active:           next,
+		}
+		if err := reduceActiveCellUpdate(state5, action); err != nil {
+			t.Fatalf("reduceActiveCellUpdate: %v", err)
+		}
+		syncHistoryEffectsForActiveCell(state5)
+		found := false
+		for _, entry := range state5.HistoryEffects.ledger.Entries() {
+			for _, line := range entry.Commit.Lines {
+				for _, span := range line.Spans {
+					if span.Text == "replacement-000" {
+						found = true
+					}
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("empty-frontier replacement was skipped by the fast path: no replacement payload planned")
+		}
+	})
+
+	t.Run("equal-length replacement invalidates the memo", func(t *testing.T) {
+		// A producer correction that replaces content (not appends) clears the
+		// streaming ranges. With an equal-length source the fast-path boundary
+		// keys would otherwise coincide and the new content would be planned
+		// one chunk late; reduceActiveCellUpdate must reset the memo instead.
+		state4 := newState(plainSource)
+		syncHistoryEffectsForActiveCell(state4)
+		if len(state4.HistoryEffects.ledger.Entries()) == 0 {
+			t.Fatalf("expected candidates before replacement")
+		}
+		replLines := make([]string, 0, 30)
+		for index := 0; index < 30; index++ {
+			replLines = append(replLines, fmt.Sprintf("replacement-%03d", index))
+		}
+		replacement := strings.Join(replLines, "\n") + "\n"
+		if len(replacement) != len(plainSource) {
+			t.Fatalf("test setup: replacement length %d != %d", len(replacement), len(plainSource))
+		}
+		next := state4.Active.Clone()
+		next.Revision++
+		next.Source = replacement
+		next.Acked = SourceRange{}
+		next.Enqueued = SourceRange{}
+		next.Stable = SourceRange{}
+		action := UpdateActiveCellAction{
+			ExpectedCellID:   state4.Active.CellID,
+			ExpectedRevision: state4.Active.Revision,
+			Active:           next,
+		}
+		if err := reduceActiveCellUpdate(state4, action); err != nil {
+			t.Fatalf("reduceActiveCellUpdate: %v", err)
+		}
+		syncHistoryEffectsForActiveCell(state4)
+		if len(state4.HistoryEffects.ledger.Entries()) == 0 {
+			t.Fatalf("replacement did not re-plan: no candidates after sync")
+		}
+		found := false
+		for _, entry := range state4.HistoryEffects.ledger.Entries() {
+			for _, line := range entry.Commit.Lines {
+				for _, span := range line.Spans {
+					if span.Text == "replacement-000" {
+						found = true
+					}
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("replacement re-planned stale content: no replacement payload in candidates")
+		}
+	})
+}

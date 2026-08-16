@@ -3,6 +3,8 @@ package ui
 import (
 	"errors"
 	"sort"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 var (
@@ -22,6 +24,22 @@ type HistoryEffectQueueState struct {
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
 	ledger                 *HistoryCommitLedger
+	// lastPlanned* memoize the active-cell inputs from the most recent
+	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
+	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
+	// reflow cannot change the planned candidate set, so the hot path skips
+	// rebuilding it entirely (rebuilding only burns CPU and allocations).
+	lastPlannedActiveEnqueuedValid bool
+	lastPlannedActiveStable        SourceRange
+	lastPlannedActiveEnqueued      SourceRange
+	lastPlannedActiveAcked         SourceRange
+	lastPlannedLayoutGeneration    uint64
+	lastPlannedGeometryGeneration  uint64
+	lastPlannedSourceLen           int
+	lastPlannedKind                scene.CellKind
+	lastPlannedLooksMarkdown       bool
+	lastPlannedSupplementMarkdown  bool
+	lastPlannedBlocked             bool
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {

@@ -8,12 +8,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/syntax"
-	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
 	extast "github.com/yuin/goldmark/extension/ast"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/text"
 )
 
 type renderer struct {
@@ -23,17 +19,7 @@ type renderer struct {
 
 func (r *renderer) render(source string) render.Document {
 	r.src = []byte(source)
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			// GFM includes table, strikethrough, linkify, and task list.
-			extension.GFM,
-		),
-		goldmark.WithParserOptions(
-			parser.WithAutoHeadingID(),
-		),
-	)
-	reader := text.NewReader(r.src)
-	docNode := md.Parser().Parse(reader)
+	docNode := parseCached(source)
 
 	var blocks []render.Block
 	for node := docNode.FirstChild(); node != nil; node = node.NextSibling() {

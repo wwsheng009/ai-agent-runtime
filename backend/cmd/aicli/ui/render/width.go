@@ -187,6 +187,12 @@ func TruncateText(text string, width int, marker string) string {
 }
 
 // Wrap splits a line into multiple lines that each fit width.
+//
+// Results are memoized per line content (see wrapCacheMemo): streaming renders
+// re-wrap unchanged lines every frame, and the memo skips the grapheme
+// segmentation hot path for them. Hits are validated against the caller's
+// content and cloned before return, so the memo never changes observable
+// behavior.
 func Wrap(line Line, width int, opts WrapOptions) []Line {
 	if width <= 0 {
 		return []Line{cloneLine(line)}
@@ -196,6 +202,10 @@ func Wrap(line Line, width int, opts WrapOptions) []Line {
 	}
 	if opts.TabWidth <= 0 {
 		opts.TabWidth = 4
+	}
+	wrapped, ok, expanded, hash := wrapCached(line, width, opts)
+	if ok {
+		return wrapped
 	}
 
 	// Flatten to grapheme runs preserving style boundaries.
@@ -298,6 +308,7 @@ func Wrap(line Line, width int, opts WrapOptions) []Line {
 	if len(lines) == 0 {
 		return []Line{{Style: line.Style}}
 	}
+	wrapStore(expanded, hash, width, opts, lines)
 	return lines
 }
 

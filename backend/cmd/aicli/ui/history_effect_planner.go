@@ -690,10 +690,44 @@ func syncHistoryEffectsForActiveCell(state *UIControllerState) {
 		state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 {
 		return
 	}
+	// Fast path: an append-only stream update that neither moves a source
+	// boundary (Stable/Enqueued/Acked), nor resizes (Geometry generation), nor
+	// reflows (Layout generation), nor changes the source content that the
+	// planner branches on (length / markdown shape / commit barrier) cannot
+	// change the planned candidate set.
+	// planMutableActiveCellHistoryCommitsWithTheme is pure over these inputs,
+	// so skip the rebuild entirely instead of churning CPU and allocations on
+	// every chunk.
+	looksMarkdown := state.Active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(state.Active.Source)
+	supplementMarkdown := state.Active.Kind == scene.KindSupplement && supplementBodyLooksLikeMarkdown(state.Active.Source)
+	if state.HistoryEffects.lastPlannedActiveEnqueuedValid &&
+		state.HistoryEffects.lastPlannedActiveStable == state.Active.Stable &&
+		state.HistoryEffects.lastPlannedActiveEnqueued == state.Active.Enqueued &&
+		state.HistoryEffects.lastPlannedActiveAcked == state.Active.Acked &&
+		state.HistoryEffects.lastPlannedLayoutGeneration == state.LayoutGeneration &&
+		state.HistoryEffects.lastPlannedGeometryGeneration == state.Geometry.Generation &&
+		state.HistoryEffects.lastPlannedSourceLen == len(state.Active.Source) &&
+		state.HistoryEffects.lastPlannedKind == state.Active.Kind &&
+		state.HistoryEffects.lastPlannedLooksMarkdown == looksMarkdown &&
+		state.HistoryEffects.lastPlannedSupplementMarkdown == supplementMarkdown &&
+		state.HistoryEffects.lastPlannedBlocked == state.Active.HistoryCommitBlocked {
+		return
+	}
 	candidates := planMutableActiveCellHistoryCommitsWithTheme(
 		state.Active, state.Geometry, state.LayoutGeneration, state.Theme,
 	)
 	syncHistoryEffectCandidates(state, candidates, state.Active.CellID)
+	state.HistoryEffects.lastPlannedActiveStable = state.Active.Stable
+	state.HistoryEffects.lastPlannedActiveEnqueued = state.Active.Enqueued
+	state.HistoryEffects.lastPlannedActiveAcked = state.Active.Acked
+	state.HistoryEffects.lastPlannedLayoutGeneration = state.LayoutGeneration
+	state.HistoryEffects.lastPlannedGeometryGeneration = state.Geometry.Generation
+	state.HistoryEffects.lastPlannedSourceLen = len(state.Active.Source)
+	state.HistoryEffects.lastPlannedKind = state.Active.Kind
+	state.HistoryEffects.lastPlannedLooksMarkdown = looksMarkdown
+	state.HistoryEffects.lastPlannedSupplementMarkdown = supplementMarkdown
+	state.HistoryEffects.lastPlannedBlocked = state.Active.HistoryCommitBlocked
+	state.HistoryEffects.lastPlannedActiveEnqueuedValid = true
 }
 
 // syncHistoryEffectCandidates reconciles a planned candidate set with the
