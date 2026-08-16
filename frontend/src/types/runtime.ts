@@ -99,6 +99,13 @@ export type AgentChatStreamChunkPayload = {
   metadata?: Record<string, unknown>;
 };
 
+export type ChatStreamPhase =
+  | "connecting"
+  | "first-token"
+  | "streaming"
+  | "tool"
+  | "finalizing";
+
 export type AgentChatStreamDonePayload = {
   _event?: SseEnvelopeMeta;
   session_id?: string;

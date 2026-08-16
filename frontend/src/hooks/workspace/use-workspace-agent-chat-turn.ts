@@ -21,6 +21,7 @@ import {
 } from "@/lib/runtime-api";
 import {
   appendArtifactToMessage,
+  buildToolSegmentFromPayload,
   buildAssistantMessageSegments,
   buildGeneratedImageAttachments,
   buildGeneratedImagePlaceholderSegment,
@@ -29,14 +30,20 @@ import {
   getErrorMessage,
   getStreamTextDelta,
   getToolName,
+  getToolErrorMessage,
   isRuntimePayload,
   mergeUniqueStrings,
   upsertGeneratedImageSegment,
+  upsertToolSegment,
   updateThreadMessage,
   upsertArtifact,
   upsertArtifacts,
+  type ToolMessageSegment,
 } from "@/lib/workspace-thread-state";
-import type { AgentChatStreamChunkPayload } from "@/types/runtime";
+import type {
+  AgentChatStreamChunkPayload,
+  ChatStreamPhase,
+} from "@/types/runtime";
 
 type WorkspaceAgentChatTurnOptions = {
   onSessionTouched?: () => void;
@@ -66,6 +73,8 @@ export function useWorkspaceAgentChatTurn({
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [isResponding, setIsResponding] = useState(false);
+  const [phase, setPhase] = useState<ChatStreamPhase | null>(null);
+  const phaseRef = useRef<ChatStreamPhase | null>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
   const {
     modelOptions,
@@ -143,6 +152,7 @@ export function useWorkspaceAgentChatTurn({
     let receivedRuntimeActivity = false;
     let receivedErrorEvent = false;
     let pendingStreamingFrame: number | null = null;
+    let pendingStreamingTimeout: number | null = null;
     const controller = new AbortController();
 
     const updateCurrentThread = (updater: (thread: Thread) => Thread) => {
@@ -175,11 +185,31 @@ export function useWorkspaceAgentChatTurn({
             currentSource,
             reasoningText,
             {
+              reasoningRunning: true,
               existingSegments: message.segments,
             },
           ),
         })),
       );
+    };
+
+    const renderStreamingMessage = () => {
+      setStreamingMessage(
+        currentSource,
+        currentKind === "agent" ? "Runtime agent" : "Runtime stream",
+        streamedText,
+      );
+    };
+
+    const clearPendingStreamingTimeout = () => {
+      if (
+        pendingStreamingTimeout !== null &&
+        typeof window !== "undefined" &&
+        typeof window.clearTimeout === "function"
+      ) {
+        window.clearTimeout(pendingStreamingTimeout);
+      }
+      pendingStreamingTimeout = null;
     };
 
     const cancelStreamingFrame = () => {
@@ -191,15 +221,12 @@ export function useWorkspaceAgentChatTurn({
         window.cancelAnimationFrame(pendingStreamingFrame);
       }
       pendingStreamingFrame = null;
+      clearPendingStreamingTimeout();
     };
 
     const flushStreamingMessage = () => {
       cancelStreamingFrame();
-      setStreamingMessage(
-        currentSource,
-        currentKind === "agent" ? "Runtime agent" : "Runtime stream",
-        streamedText,
-      );
+      renderStreamingMessage();
     };
 
     const scheduleStreamingMessage = () => {
@@ -217,12 +244,86 @@ export function useWorkspaceAgentChatTurn({
 
       pendingStreamingFrame = window.requestAnimationFrame(() => {
         pendingStreamingFrame = null;
-        setStreamingMessage(
-          currentSource,
-          currentKind === "agent" ? "Runtime agent" : "Runtime stream",
-          streamedText,
-        );
+        clearPendingStreamingTimeout();
+        renderStreamingMessage();
       });
+
+      // Background tabs do not fire rAF; a setTimeout fallback keeps the
+      // stream rendering alive (G3) and flushes as soon as the tab returns.
+      pendingStreamingTimeout = window.setTimeout(() => {
+        if (
+          pendingStreamingFrame !== null &&
+          typeof window.cancelAnimationFrame === "function"
+        ) {
+          window.cancelAnimationFrame(pendingStreamingFrame);
+          pendingStreamingFrame = null;
+        }
+        pendingStreamingTimeout = null;
+        renderStreamingMessage();
+      }, 100);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        flushStreamingMessage();
+      }
+    };
+
+    const upsertLiveToolSegment = (
+      payload: AgentChatStreamChunkPayload,
+      status: ToolMessageSegment["status"],
+      eventType: string,
+    ) => {
+      toolPayloads.push(payload);
+      setPhaseAndRef("tool");
+      attachTurnArtifact(
+        buildTurnJsonArtifact(
+          turnId,
+          "tool-events",
+          "Tool events observed during agent chat SSE.",
+          toolPayloads,
+        ),
+      );
+      updateCurrentThread((thread) =>
+        updateThreadMessage(thread, assistantMessageId, (message) => ({
+          ...message,
+          segments: upsertToolSegment(
+            message.segments,
+            buildToolSegmentFromPayload(payload, status),
+          ),
+        })),
+      );
+      updateCurrentThread((thread) => ({
+        ...thread,
+        lastRuntimeEventType: `${eventType}:${getToolName(payload)}`,
+      }));
+    };
+
+    const handleToolEnd = (payload: AgentChatStreamChunkPayload) => {
+      const hasError = Boolean(getToolErrorMessage(payload));
+      upsertLiveToolSegment(payload, hasError ? "error" : "finished", "tool_end");
+      if (hasError) {
+        setPhaseAndRef("tool");
+      }
+    };
+
+    const setPhaseAndRef = (nextPhase: ChatStreamPhase | null) => {
+      phaseRef.current = nextPhase;
+      setPhase(nextPhase);
+    };
+
+    const attachVisibilityListener = () => {
+      if (typeof document === "undefined") {
+        return;
+      }
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    };
+
+    const detachVisibilityListener = () => {
+      if (typeof document === "undefined") {
+        return;
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
 
     const updateStreamingError = (
@@ -230,23 +331,32 @@ export function useWorkspaceAgentChatTurn({
       heading = "Runtime stream failed.",
     ) => {
       cancelStreamingFrame();
-      const content = streamedText.trim()
-        ? `${streamedText}\n\n[stream interrupted]\n${message}`
-        : `${heading}\n\n${message}`;
+      const hasStreamedText = streamedText.trim().length > 0;
       updateCurrentThread((thread) =>
-        updateThreadMessage(thread, assistantMessageId, (currentMessage) => ({
-          ...currentMessage,
-          author: "Runtime error",
-          label: "error",
-          segments: buildAssistantMessageSegments(
-            content,
+        updateThreadMessage(thread, assistantMessageId, (currentMessage) => {
+          const segments = buildAssistantMessageSegments(
+            hasStreamedText ? streamedText : `${heading}\n\n${message}`,
             currentSource,
             reasoningText,
             {
               existingSegments: currentMessage.segments,
             },
-          ),
-        })),
+          );
+          if (hasStreamedText) {
+            segments.push({
+              type: "callout",
+              title: heading,
+              tone: "warning",
+              content: message,
+            });
+          }
+          return {
+            ...currentMessage,
+            author: "Runtime error",
+            label: "error",
+            segments,
+          };
+        }),
       );
     };
 
@@ -262,6 +372,7 @@ export function useWorkspaceAgentChatTurn({
 
       turnFinalized = true;
       cancelStreamingFrame();
+      setPhaseAndRef("finalizing");
 
       if (payload.session_id) {
         currentSessionId = payload.session_id;
@@ -342,6 +453,7 @@ export function useWorkspaceAgentChatTurn({
 
         nextThread = updateThreadMessage(nextThread, assistantMessageId, (message) => ({
           ...message,
+          interrupted: stopped ? true : undefined,
           author:
             finalResult?.kind === "agent" || currentKind === "agent"
               ? "Runtime agent"
@@ -386,6 +498,8 @@ export function useWorkspaceAgentChatTurn({
 
     setDraft("");
     setIsResponding(true);
+    setPhaseAndRef("connecting");
+    attachVisibilityListener();
     activeRequestControllerRef.current = controller;
     if (selectedThread.id === NEW_THREAD_ID) {
       startTransition(() => {
@@ -414,6 +528,7 @@ export function useWorkspaceAgentChatTurn({
             signal: controller.signal,
             onMeta: (payload: AgentChatStreamMetaPayload) => {
               receivedRuntimeActivity = true;
+              setPhaseAndRef("first-token");
               if (payload.session_id) {
                 currentSessionId = payload.session_id;
               }
@@ -500,6 +615,7 @@ export function useWorkspaceAgentChatTurn({
                 return;
               }
               streamedText += delta;
+              setPhaseAndRef("streaming");
               scheduleStreamingMessage();
             },
             onReasoning: (payload) => {
@@ -511,59 +627,25 @@ export function useWorkspaceAgentChatTurn({
                     ? payload.reasoning.content
                     : "";
               if (delta) {
-                reasoningText += delta;
-                if (streamedText) {
-                  scheduleStreamingMessage();
+                if (reasoningText && !reasoningText.endsWith("\n")) {
+                  reasoningText += "\n";
                 }
+                reasoningText += delta;
+                setPhaseAndRef("streaming");
+                scheduleStreamingMessage();
               }
             },
             onToolStart: (payload) => {
               receivedRuntimeActivity = true;
-              toolPayloads.push(payload);
-              attachTurnArtifact(
-                buildTurnJsonArtifact(
-                  turnId,
-                  "tool-events",
-                  "Tool events observed during agent chat SSE.",
-                  toolPayloads,
-                ),
-              );
-              updateCurrentThread((thread) => ({
-                ...thread,
-                lastRuntimeEventType: `tool_start:${getToolName(payload)}`,
-              }));
+              upsertLiveToolSegment(payload, "started", "tool_start");
             },
             onToolCall: (payload) => {
               receivedRuntimeActivity = true;
-              toolPayloads.push(payload);
-              attachTurnArtifact(
-                buildTurnJsonArtifact(
-                  turnId,
-                  "tool-events",
-                  "Tool events observed during agent chat SSE.",
-                  toolPayloads,
-                ),
-              );
-              updateCurrentThread((thread) => ({
-                ...thread,
-                lastRuntimeEventType: `tool_call:${getToolName(payload)}`,
-              }));
+              upsertLiveToolSegment(payload, "running", "tool_call");
             },
             onToolEnd: (payload) => {
               receivedRuntimeActivity = true;
-              toolPayloads.push(payload);
-              attachTurnArtifact(
-                buildTurnJsonArtifact(
-                  turnId,
-                  "tool-events",
-                  "Tool events observed during agent chat SSE.",
-                  toolPayloads,
-                ),
-              );
-              updateCurrentThread((thread) => ({
-                ...thread,
-                lastRuntimeEventType: `tool_end:${getToolName(payload)}`,
-              }));
+              handleToolEnd(payload);
             },
             onPlanning: (payload) => {
               receivedRuntimeActivity = true;
@@ -739,10 +821,12 @@ export function useWorkspaceAgentChatTurn({
         );
       } finally {
         cancelStreamingFrame();
+        detachVisibilityListener();
         if (activeRequestControllerRef.current === controller) {
           activeRequestControllerRef.current = null;
         }
         setIsResponding(false);
+        setPhaseAndRef(null);
       }
     })();
   }
@@ -754,6 +838,7 @@ export function useWorkspaceAgentChatTurn({
   return {
     draft,
     isResponding,
+    phase,
     modelOptions,
     providerOptions,
     runtimeModelsError,

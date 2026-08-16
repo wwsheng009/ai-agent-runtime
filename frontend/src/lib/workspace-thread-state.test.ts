@@ -409,17 +409,9 @@ describe("thread-runtime", () => {
         content: "Merged answer",
       },
       {
-        type: "code",
-        language: "json",
-        title: "Reasoning snapshot",
-        code: JSON.stringify(
-          {
-            source: "runtime",
-            reasoning: "Need a follow-up step",
-          },
-          null,
-          2,
-        ),
+        type: "reasoning",
+        content: "Need a follow-up step",
+        running: false,
       },
       {
         type: "image",
@@ -601,17 +593,9 @@ describe("thread-runtime", () => {
         content: "Partial answer",
       },
       {
-        type: "code",
-        language: "json",
-        title: "Reasoning snapshot",
-        code: JSON.stringify(
-          {
-            source: "runtime",
-            reasoning: "Need a follow-up step",
-          },
-          null,
-          2,
-        ),
+        type: "reasoning",
+        content: "Need a follow-up step",
+        running: false,
       },
       {
         type: "callout",

@@ -76,6 +76,7 @@ export function WorkspacePage() {
     draft,
     isResponding,
     modelOptions,
+    phase,
     providerOptions,
     runtimeModelsError,
     runtimeModelsLoading,
@@ -162,6 +163,7 @@ export function WorkspacePage() {
       draft={draft}
       isResponding={isResponding}
       modelOptions={modelOptions}
+      phase={phase}
       onDraftChange={setDraft}
       onModelChange={setSelectedModel}
       onProviderChange={setSelectedProvider}

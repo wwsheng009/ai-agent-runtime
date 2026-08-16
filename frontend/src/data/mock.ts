@@ -4,6 +4,20 @@ export type MessageSegment =
       content: string;
     }
   | {
+      type: "reasoning";
+      content: string;
+      running?: boolean;
+    }
+  | {
+      type: "tool";
+      toolCallId?: string;
+      name: string;
+      status: "started" | "running" | "finished" | "error";
+      argsSummary?: string;
+      resultSummary?: string;
+      errorMessage?: string;
+    }
+  | {
       type: "code";
       language: "bash" | "json" | "tsx" | "ts" | "html";
       code: string;
@@ -55,6 +69,7 @@ export type ChatMessage = {
   label: string;
   segments: MessageSegment[];
   relatedArtifactIds?: string[];
+  interrupted?: boolean;
 };
 
 export type Artifact = {

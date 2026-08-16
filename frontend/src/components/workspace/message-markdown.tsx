@@ -3,8 +3,10 @@ import {
   isValidElement,
   memo,
   useMemo,
+  useState,
   type ReactNode,
 } from "react";
+import { SquareIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -24,6 +26,7 @@ import { cn } from "@/lib/utils";
 type MessageMarkdownProps = {
   className?: string;
   content: string;
+  interrupted?: boolean;
   streaming?: boolean;
 };
 
@@ -442,13 +445,40 @@ function renderStreamingPlainTail(
   );
 }
 
+/**
+ * 稳定区渲染片段：content 在流式追加期间保持冻结（前缀复用），
+ * memo 使 React 在 stableContent 未变化时跳过整棵子树的重渲染与重解析。
+ */
+const StableMarkdownFragment = memo(function StableMarkdownFragment({
+  components,
+  content,
+}: {
+  components: Components;
+  content: string;
+}) {
+  return (
+    <ReactMarkdown
+      components={components}
+      remarkPlugins={[remarkGfm, remarkBreaks]}
+    >
+      {normalizeMarkdown(content, false)}
+    </ReactMarkdown>
+  );
+});
+
 export const MessageMarkdown = memo(function MessageMarkdown({
   className,
   content,
+  interrupted = false,
   streaming = false,
 }: MessageMarkdownProps) {
   const deferredContent = useDeferredValue(content);
   const renderContent = streaming ? deferredContent : content;
+  // 稳定区前缀缓存：新 stableContent 以已渲染内容为前缀时（追加场景），
+  // 复用冻结片段并只渲染增量（delta），避免每帧重解析全部稳定文本。
+  // 使用 render 期间 state 调整（官方 "storing information from previous
+  // renders" 模式）而非 ref，以满足 react-hooks/refs 规则。
+  const [frozenStableContent, setFrozenStableContent] = useState("");
   const markdownComponents = useMemo(
     () => createMarkdownComponents(streaming),
     [streaming],
@@ -464,6 +494,23 @@ export const MessageMarkdown = memo(function MessageMarkdown({
           },
     [renderContent, streaming],
   );
+  let renderedStableContent: string;
+  let stableDeltaContent = "";
+  if (
+    streaming &&
+    frozenStableContent &&
+    streamingParts.stableContent.startsWith(frozenStableContent)
+  ) {
+    renderedStableContent = frozenStableContent;
+    stableDeltaContent = streamingParts.stableContent.slice(
+      frozenStableContent.length,
+    );
+  } else {
+    renderedStableContent = streamingParts.stableContent;
+    if (frozenStableContent !== streamingParts.stableContent) {
+      setFrozenStableContent(streamingParts.stableContent);
+    }
+  }
   const activeStreamingCodeFence = useMemo(
     () =>
       streaming && streamingParts.tailMode === "markdown"
@@ -501,13 +548,22 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         className,
       )}
     >
-      {streamingParts.stableContent ? (
-        <ReactMarkdown
+      {renderedStableContent ? (
+        <StableMarkdownFragment
           components={markdownComponents}
-          remarkPlugins={[remarkGfm, remarkBreaks]}
-        >
-          {normalizeMarkdown(streamingParts.stableContent, false)}
-        </ReactMarkdown>
+          content={renderedStableContent}
+        />
+      ) : null}
+
+      {stableDeltaContent ? (
+        <div className={renderedStableContent ? "mt-3" : undefined}>
+          <ReactMarkdown
+            components={markdownComponents}
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+          >
+            {normalizeMarkdown(stableDeltaContent, false)}
+          </ReactMarkdown>
+        </div>
       ) : null}
 
       {streamingParts.tailContent ? (
@@ -552,6 +608,17 @@ export const MessageMarkdown = memo(function MessageMarkdown({
             streamingParts.stableContent ? "mt-3" : undefined,
           )
         )
+      ) : null}
+
+      {!streaming && interrupted ? (
+        <div
+          aria-label="Response stopped"
+          className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1 app-text-10 font-medium uppercase tracking-[0.12em] text-[var(--muted-foreground)]"
+          role="status"
+        >
+          <SquareIcon aria-hidden="true" size={11} />
+          Stopped
+        </div>
       ) : null}
     </div>
   );

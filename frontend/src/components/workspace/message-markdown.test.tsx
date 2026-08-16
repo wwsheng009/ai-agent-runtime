@@ -1,4 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot } from "react-dom/client";
+import { act } from "react";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { codeHighlightingReady } from "../ui/code-highlighting";
@@ -6,6 +8,7 @@ import { MessageMarkdown } from "./message-markdown";
 
 describe("MessageMarkdown", () => {
   beforeAll(async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     await codeHighlightingReady;
   });
 
@@ -160,5 +163,82 @@ describe("MessageMarkdown", () => {
     expect(markup).toContain('data-line-kind="inserted"');
     expect(markup).toContain('data-line-kind="deleted"');
     expect(markup).toContain("Show 1 more lines");
+  });
+
+  it("renders a stopped tail when interrupted and not streaming", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown content="Partial answer" interrupted />,
+    );
+
+    expect(markup).toContain("Stopped");
+    expect(markup).toContain('role="status"');
+  });
+
+  it("does not render the stopped tail while streaming", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown content="Partial answer" interrupted streaming />,
+    );
+
+    expect(markup).not.toContain("Stopped");
+  });
+
+  it("keeps frozen stable content rendered across streaming appends", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <MessageMarkdown
+          content={"First paragraph.\n\nSecond paragraph."}
+          streaming
+        />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <MessageMarkdown
+          content={"First paragraph.\n\nSecond paragraph.\n\nThird paragraph."}
+          streaming
+        />,
+      );
+    });
+
+    const markup = container.innerHTML;
+    expect(markup).toContain("First paragraph.");
+    expect(markup).toContain("Second paragraph.");
+    expect(markup).toContain("Third paragraph.");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("rebuilds stable content when the streamed text is rewritten", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <MessageMarkdown
+          content={"Old opening.\n\nOld second block."}
+          streaming
+        />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <MessageMarkdown
+          content={"New opening.\n\nNew second block."}
+          streaming
+        />,
+      );
+    });
+
+    const markup = container.innerHTML;
+    expect(markup).toContain("New opening.");
+    expect(markup).toContain("New second block.");
+    expect(markup).not.toContain("Old opening.");
+    await act(async () => {
+      root.unmount();
+    });
   });
 });

@@ -11,6 +11,8 @@ import { useId, useState } from "react";
 
 import { CodeBlock } from "@/components/ui/code-block";
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
+import { MessageReasoningRow } from "@/components/workspace/message-reasoning-row";
+import { MessageToolRow } from "@/components/workspace/message-tool-row";
 import { type Artifact, type MessageSegment } from "@/data/mock";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +35,14 @@ export function MessageRichSegment({
   const baseId = useId();
   const titleId = `${baseId}-title`;
   const descriptionId = `${baseId}-description`;
+
+  if (segment.type === "reasoning") {
+    return <MessageReasoningRow segment={segment} />;
+  }
+
+  if (segment.type === "tool") {
+    return <MessageToolRow segment={segment} />;
+  }
 
   if (segment.type === "image-placeholder") {
     const isFailed = segment.phase === "failed";

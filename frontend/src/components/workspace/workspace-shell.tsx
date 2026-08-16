@@ -40,6 +40,7 @@ import {
   type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
+import { type ChatStreamPhase } from "@/types/runtime";
 import { useTranslation } from "react-i18next";
 
 const SettingsDialog = lazy(() =>
@@ -82,6 +83,7 @@ type WorkspaceShellProps = {
   draft: string;
   isResponding: boolean;
   modelOptions: string[];
+  phase?: ChatStreamPhase | null;
   onDraftChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onProviderChange: (value: string) => void;
@@ -141,6 +143,7 @@ export function WorkspaceShell({
   draft,
   isResponding,
   modelOptions,
+  phase,
   onDraftChange,
   onModelChange,
   onProviderChange,
@@ -403,6 +406,7 @@ export function WorkspaceShell({
                     onBacktrackToMessage={onBacktrackToMessage}
                     onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
                     onSelectArtifact={handleOpenArtifact}
+                    phase={phase}
                     style={messageListStyle}
                   />
                 </div>

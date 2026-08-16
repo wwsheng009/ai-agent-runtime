@@ -10,6 +10,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -18,9 +19,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
+import { MessageReasoningRow } from "@/components/workspace/message-reasoning-row";
+import { MessageToolRow } from "@/components/workspace/message-tool-row";
 import { type Artifact, type ChatMessage, type MessageSegment } from "@/data/mock";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
+import { getToolSegmentKey } from "@/lib/workspace-thread-state";
+import { type ChatStreamPhase } from "@/types/runtime";
 
 const MessageRichSegment = lazy(() =>
   import("@/components/workspace/message-rich-content").then((module) => ({
@@ -32,6 +37,16 @@ const MessageRelatedArtifacts = lazy(() =>
     default: module.MessageRelatedArtifacts,
   })),
 );
+
+const SCROLL_FOLLOW_THRESHOLD = 120;
+
+const PHASE_LABELS: Record<ChatStreamPhase, string> = {
+  connecting: "Connecting to runtime…",
+  "first-token": "Waiting for first output…",
+  streaming: "Streaming output…",
+  tool: "Calling tools…",
+  finalizing: "Finalizing turn…",
+};
 
 export type MessageBacktrackOptions = {
   editPrompt?: string;
@@ -56,6 +71,7 @@ type MessageListProps = {
   ) => void;
   onSelectBacktrackNavigationMessage?: (messageId: string) => void;
   onSelectArtifact: (artifactId: string) => void;
+  phase?: ChatStreamPhase | null;
   style?: CSSProperties;
 };
 
@@ -85,6 +101,7 @@ export function MessageList({
   onBacktrackToMessage,
   onSelectBacktrackNavigationMessage,
   onSelectArtifact,
+  phase,
   style,
 }: MessageListProps) {
   const artifactMap = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
@@ -96,6 +113,33 @@ export function MessageList({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [inlineEditDraft, setInlineEditDraft] = useState("");
   const selectedMessageRef = useRef<HTMLElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  // Tracks whether the user has scrolled away from the bottom. Streaming
+  // follow stays active until the user actively scrolls up (a single large
+  // content flush must not be mistaken for leaving the bottom), and resumes
+  // as soon as they scroll back down.
+  const [userScrolledAway, setUserScrolledAway] = useState(false);
+
+  const handleScroll = () => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    setUserScrolledAway(distanceFromBottom > SCROLL_FOLLOW_THRESHOLD);
+  };
+
+  useLayoutEffect(() => {
+    if (!isResponding || userScrolledAway) {
+      return;
+    }
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }, [isResponding, messages, userScrolledAway]);
 
   useEffect(() => {
     if (!editingMessageId) {
@@ -125,7 +169,12 @@ export function MessageList({
   }, [backtrackNavigationActive, backtrackSelectedMessageId]);
 
   return (
-    <div className={cn("flex-1 overflow-y-auto px-3 py-4 sm:px-4", className)} style={style}>
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className={cn("flex-1 overflow-y-auto px-3 py-4 sm:px-4", className)}
+      style={style}
+    >
       <div
         aria-atomic="false"
         aria-busy={isResponding ? "true" : undefined}
@@ -349,6 +398,7 @@ export function MessageList({
                       message.segments.map((segment, index) => (
                         <div key={`${message.id}-${segment.type}-${index}`}>
                           {renderMessageSegment(segment, {
+                            interrupted: message.interrupted === true,
                             streaming: false,
                             onSelectArtifact,
                           })}
@@ -390,8 +440,15 @@ export function MessageList({
 
                           <div className="relative space-y-4">
                             {message.segments.map((segment, index) => (
-                              <div key={`${message.id}-${segment.type}-${index}`}>
+                              <div
+                                key={
+                                  segment.type === "tool"
+                                    ? `${message.id}-tool-${getToolSegmentKey(segment)}`
+                                    : `${message.id}-${segment.type}-${index}`
+                                }
+                              >
                                 {renderMessageSegment(segment, {
+                                  interrupted: message.interrupted === true,
                                   streaming: message.id === streamingMessageId,
                                   onSelectArtifact,
                                 })}
@@ -421,7 +478,7 @@ export function MessageList({
             role="status"
           >
             <span className="size-2 rounded-full animate-pulse bg-[#8fd0c6]" />
-            Runtime stream active
+            {phase ? PHASE_LABELS[phase] : "Runtime stream active"}
           </div>
         ) : null}
       </div>
@@ -432,6 +489,7 @@ export function MessageList({
 function renderMessageSegment(
   segment: MessageSegment,
   options?: {
+    interrupted?: boolean;
     streaming?: boolean;
     onSelectArtifact?: (artifactId: string) => void;
   },
@@ -440,9 +498,23 @@ function renderMessageSegment(
     return (
       <MessageMarkdown
         content={segment.content}
+        interrupted={options?.interrupted}
         streaming={options?.streaming}
       />
     );
+  }
+
+  if (segment.type === "reasoning") {
+    return (
+      <MessageReasoningRow
+        segment={segment}
+        streaming={options?.streaming}
+      />
+    );
+  }
+
+  if (segment.type === "tool") {
+    return <MessageToolRow segment={segment} />;
   }
 
   return (
@@ -485,7 +557,11 @@ function MessageSegmentFallback({
         ? "图片"
         : segment.type === "image-placeholder"
           ? "图片生成占位"
-        : segment.title;
+          : segment.type === "reasoning"
+            ? "推理过程"
+            : segment.type === "tool"
+              ? "工具调用"
+              : segment.title;
   return (
     <div
       aria-atomic="true"

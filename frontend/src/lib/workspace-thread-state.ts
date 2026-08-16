@@ -30,8 +30,16 @@ type GeneratedImageSegment =
   | Extract<MessageSegment, { type: "image" }>
   | Extract<MessageSegment, { type: "image-placeholder" }>;
 
+export type ToolMessageSegment = Extract<MessageSegment, { type: "tool" }>;
+
+export type ReasoningMessageSegment = Extract<
+  MessageSegment,
+  { type: "reasoning" }
+>;
+
 type AssistantMessageSegmentOptions = {
   status?: "streaming" | "stopped";
+  reasoningRunning?: boolean;
   existingSegments?: MessageSegment[];
   generatedImages?: GeneratedImageAttachments;
 };
@@ -122,11 +130,14 @@ export function buildAssistantMessageSegments(
 ) {
   let segments = buildStreamingMessageSegments(text, source, reasoning, {
     status: options?.status,
+    reasoningRunning: options?.reasoningRunning,
   });
 
   for (const segment of options?.existingSegments ?? []) {
     if (isGeneratedImageSegment(segment)) {
       segments = upsertGeneratedImageSegment(segments, segment);
+    } else if (segment.type === "tool") {
+      segments = upsertToolSegment(segments, segment);
     }
   }
 
@@ -284,6 +295,19 @@ function readFirstTextValue(
     }
   }
   return "";
+}
+
+function readFirstValue(
+  source: Record<string, unknown>,
+  ...keys: string[]
+): unknown {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function readFirstNumberValue(
@@ -512,13 +536,17 @@ export function applySessionHistoryToThread(
     response.history,
     thread.messages,
   );
+  const resolvedMessages =
+    mappedHistory.length > 0
+      ? mappedHistory.map((item) => item.message)
+      : thread.messages;
   return {
     ...thread,
     updatedAt: new Date().toISOString(),
     sessionId: response.session_id,
     transport,
     lastError: thread.transport === "error" ? thread.lastError : null,
-    messages: mappedHistory.map((item) => item.message),
+    messages: resolvedMessages,
     artifacts: upsertArtifacts(thread.artifacts, [
       historyArtifact,
       ...mappedHistory.flatMap((item) => item.artifacts),
@@ -528,10 +556,11 @@ export function applySessionHistoryToThread(
 
 export function buildStreamingMessageSegments(
   text: string,
-  source: string,
+  _source: string,
   reasoning: string,
   options?: {
     status?: "streaming" | "stopped";
+    reasoningRunning?: boolean;
   },
 ) {
   const segments: MessageSegment[] = [
@@ -543,17 +572,9 @@ export function buildStreamingMessageSegments(
 
   if (reasoning.trim()) {
     segments.push({
-      type: "code",
-      language: "json",
-      title: "Reasoning snapshot",
-      code: JSON.stringify(
-        {
-          source,
-          reasoning: reasoning.trim(),
-        },
-        null,
-        2,
-      ),
+      type: "reasoning",
+      content: reasoning.trim(),
+      running: options?.reasoningRunning === true,
     });
   }
 
@@ -568,6 +589,188 @@ export function buildStreamingMessageSegments(
   }
 
   return segments;
+}
+
+export function getToolCallId(payload: AgentChatStreamChunkPayload) {
+  if (payload.tool_call && typeof payload.tool_call === "object") {
+    const id = readFirstTextValue(payload.tool_call, "id", "tool_call_id");
+    if (id) {
+      return id;
+    }
+  }
+  if (payload.tool && typeof payload.tool === "object") {
+    const id = readFirstTextValue(payload.tool, "id", "tool_call_id");
+    if (id) {
+      return id;
+    }
+  }
+  if (payload.delta && typeof payload.delta === "object") {
+    const id = readFirstTextValue(payload.delta, "id");
+    if (id) {
+      return id;
+    }
+  }
+  return "";
+}
+
+export function getToolArgumentsSummary(payload: AgentChatStreamChunkPayload) {
+  for (const source of [
+    payload.tool,
+    payload.tool_call,
+    payload.delta,
+  ]) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+    const args =
+      readFirstValue(source, "args", "arguments", "input", "params") ??
+      source["arguments_json"];
+    if (args === undefined || args === null) {
+      continue;
+    }
+    if (typeof args === "string") {
+      const trimmed = args.trim();
+      if (trimmed) {
+        return trimmed.length > 320 ? `${trimmed.slice(0, 317)}...` : trimmed;
+      }
+      continue;
+    }
+    if (typeof args === "object") {
+      try {
+        const serialized = JSON.stringify(args);
+        return serialized.length > 320
+          ? `${serialized.slice(0, 317)}...`
+          : serialized;
+      } catch {
+        return String(args);
+      }
+    }
+  }
+  return "";
+}
+
+export function getToolResultSummary(payload: AgentChatStreamChunkPayload) {
+  if (payload.tool && typeof payload.tool === "object") {
+    const content = readFirstTextValue(payload.tool, "content", "result");
+    if (content) {
+      return truncateText(content, 240);
+    }
+  }
+  if (payload.tool_call && typeof payload.tool_call === "object") {
+    const content = readFirstTextValue(
+      payload.tool_call,
+      "content",
+      "result",
+      "output",
+    );
+    if (content) {
+      return truncateText(content, 240);
+    }
+  }
+  if (payload.content && payload.content.trim()) {
+    return truncateText(payload.content, 240);
+  }
+  return "";
+}
+
+export function getToolErrorMessage(payload: AgentChatStreamChunkPayload) {
+  if (payload.tool && typeof payload.tool === "object") {
+    const error = readFirstTextValue(
+      payload.tool,
+      "error",
+      "error_message",
+      "message",
+    );
+    if (error) {
+      return error;
+    }
+  }
+  if (payload.tool_call && typeof payload.tool_call === "object") {
+    const error = readFirstTextValue(
+      payload.tool_call,
+      "error",
+      "error_message",
+      "message",
+    );
+    if (error) {
+      return error;
+    }
+  }
+  if (payload.metadata && typeof payload.metadata === "object") {
+    const error = readFirstTextValue(
+      payload.metadata,
+      "error",
+      "error_message",
+      "message",
+    );
+    if (error) {
+      return error;
+    }
+  }
+  return "";
+}
+
+export function buildToolSegmentFromPayload(
+  payload: AgentChatStreamChunkPayload,
+  status: ToolMessageSegment["status"],
+): ToolMessageSegment {
+  return {
+    type: "tool",
+    toolCallId: getToolCallId(payload) || undefined,
+    name: getToolName(payload),
+    status,
+    argsSummary: getToolArgumentsSummary(payload) || undefined,
+    resultSummary:
+      status === "finished" ? getToolResultSummary(payload) || undefined : undefined,
+    errorMessage:
+      status === "error"
+        ? getToolErrorMessage(payload) || "Tool execution failed."
+        : undefined,
+  };
+}
+
+export function getToolSegmentKey(segment: ToolMessageSegment) {
+  return segment.toolCallId?.trim() || segment.name;
+}
+
+export function upsertToolSegment(
+  segments: MessageSegment[],
+  nextSegment: ToolMessageSegment,
+) {
+  const key = getToolSegmentKey(nextSegment);
+  if (!key) {
+    return [...segments, nextSegment];
+  }
+
+  const merged: MessageSegment[] = [];
+  let matched = false;
+
+  for (const segment of segments) {
+    if (segment.type !== "tool") {
+      merged.push(segment);
+      continue;
+    }
+
+    const currentKey = getToolSegmentKey(segment);
+    if (currentKey !== key) {
+      merged.push(segment);
+      continue;
+    }
+
+    if (!matched) {
+      matched = true;
+      merged.push({
+        ...segment,
+        ...nextSegment,
+      });
+    }
+  }
+
+  if (!matched) {
+    merged.push(nextSegment);
+  }
+
+  return merged;
 }
 
 export function mergeRuntimeSessionsIntoThreads(
