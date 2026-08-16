@@ -678,6 +678,7 @@ func validateOpenAIStreamState(state *StreamState) error {
 		}
 	}
 
+	var malformed []MalformedToolCall
 	for index, call := range state.ToolCalls {
 		if call == nil {
 			return &openAIProtocolError{code: "invalid_tool_call", message: fmt.Sprintf("tool call %d is nil", index)}
@@ -698,11 +699,16 @@ func validateOpenAIStreamState(state *StreamState) error {
 		}
 		var decoded map[string]interface{}
 		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
-			return &openAIProtocolError{
-				code:    "invalid_tool_arguments",
-				message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, call.Name),
-			}
+			malformed = append(malformed, MalformedToolCall{
+				Index:     index,
+				ID:        call.ID,
+				Name:      call.Name,
+				Arguments: arguments,
+			})
 		}
+	}
+	if len(malformed) > 0 {
+		return newOpenAIMalformedToolCallError(malformed)
 	}
 	return nil
 }
@@ -719,6 +725,7 @@ func validateOpenAIFinishReason(finishReason string) error {
 }
 
 func validateOpenAIRawToolCalls(toolCalls []map[string]interface{}) error {
+	var malformed []MalformedToolCall
 	for index, call := range toolCalls {
 		function, _ := call["function"].(map[string]interface{})
 		if function == nil {
@@ -738,11 +745,16 @@ func validateOpenAIRawToolCalls(toolCalls []map[string]interface{}) error {
 		}
 		var decoded map[string]interface{}
 		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
-			return &openAIProtocolError{
-				code:    "invalid_tool_arguments",
-				message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, name),
-			}
+			malformed = append(malformed, MalformedToolCall{
+				Index:     index,
+				ID:        strings.TrimSpace(firstOpenAIErrorString(call["id"])),
+				Name:      name,
+				Arguments: arguments,
+			})
 		}
+	}
+	if len(malformed) > 0 {
+		return newOpenAIMalformedToolCallError(malformed)
 	}
 	return nil
 }

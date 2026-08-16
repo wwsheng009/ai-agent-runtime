@@ -521,6 +521,10 @@ func TestValidateAssistantMessageSemanticsRejectsUnsafeToolCallsAndClassifiesFin
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid_tool_arguments")
+	// invalid_tool_arguments 不可重试：重放同一请求无法修复非法 JSON 参数，
+	// 恢复通道是执行层降级 re-prompt（附 schema 让模型按 schema 重发）。
+	assert.False(t, classifyRetryableLLMError(err).Retryable)
+	assert.Equal(t, "malformed_tool_call", classifyRetryableLLMError(err).Reason)
 
 	contentFilterErr := validateAssistantMessageSemantics(map[string]interface{}{
 		"finish_reason": "content_filter",

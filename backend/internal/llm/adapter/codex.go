@@ -922,6 +922,7 @@ func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, callbac
 }
 
 func validateCodexToolCalls(result map[string]interface{}) error {
+	var malformed []MalformedToolCall
 	for index, call := range decodeSliceOfMaps(result["tool_calls"]) {
 		kind := strings.ToLower(strings.TrimSpace(asCodexString(call["type"])))
 		callID := strings.TrimSpace(asCodexString(call["id"]))
@@ -941,12 +942,16 @@ func validateCodexToolCalls(result map[string]interface{}) error {
 		}
 		var decoded map[string]interface{}
 		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
-			return &codexResponseError{
-				kind:    "codex response invalid",
-				code:    "invalid_tool_arguments",
-				message: fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", index, name),
-			}
+			malformed = append(malformed, MalformedToolCall{
+				Index:     index,
+				ID:        callID,
+				Name:      name,
+				Arguments: arguments,
+			})
 		}
+	}
+	if len(malformed) > 0 {
+		return newCodexMalformedToolCallError(malformed)
 	}
 	return nil
 }

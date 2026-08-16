@@ -664,10 +664,18 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 			Delay:     decisionDelayFromServerHint(err),
 			Reason:    "insufficient_system_resource",
 		}
-	case "missing_tool_call", "invalid_tool_call", "invalid_tool_arguments", "ambiguous_tool_call_delta":
+	case "missing_tool_call", "invalid_tool_call", "ambiguous_tool_call_delta":
 		return retryDecision{
 			Retryable: true,
 			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "malformed_tool_call",
+		}
+	case "invalid_tool_arguments":
+		// 工具参数本身是非法 JSON：重放同一请求无法修复（模型会再次生成
+		// 同样的非法参数，只会重复烧 token）。不可重试——由执行层降级为
+		// 工具反馈 re-prompt（附 schema 让模型按 schema 重发）作为唯一恢复通道。
+		return retryDecision{
+			Retryable: false,
 			Reason:    "malformed_tool_call",
 		}
 	}
@@ -736,10 +744,17 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 			Reason:    "insufficient_system_resource",
 		}
 	}
-	if containsAny(lower, "code=missing_tool_call", "code=invalid_tool_call", "code=invalid_tool_arguments", "code=ambiguous_tool_call_delta") {
+	if containsAny(lower, "code=missing_tool_call", "code=invalid_tool_call", "code=ambiguous_tool_call_delta") {
 		return retryDecision{
 			Retryable: true,
 			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "malformed_tool_call",
+		}
+	}
+	if containsAny(lower, "code=invalid_tool_arguments") {
+		// 与上方 switch 分支一致：非法 JSON 参数重放无法修复，由执行层降级 re-prompt。
+		return retryDecision{
+			Retryable: false,
 			Reason:    "malformed_tool_call",
 		}
 	}

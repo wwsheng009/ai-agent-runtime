@@ -1,13 +1,13 @@
 package agent
 
 import (
+	"os"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,6 +22,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -84,6 +85,9 @@ type ReActLoop struct {
 	reasoningEffortUnsupported   atomic.Bool
 	thinkingUnsupported          atomic.Bool
 	temperatureUnsupported       atomic.Bool
+	// malformedToolCallRecoveries 记录同一工具名被「参数非法」降级重发的次数，
+	// 防止模型反复生成非法参数导致死循环烧 token（参照 Reasonix repeat_failure_guard）。
+	malformedToolCallRecoveries map[string]int
 }
 
 type toolExecutionResult struct {
@@ -519,6 +523,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 1. Think: LLM 推理决定下一步行动
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
+			// 模型工具参数非法（invalid_tool_arguments）：不终止 turn，降级为
+			// 工具执行反馈回注（附 schema），让模型按 schema 重新输出参数。
+			if loop.tryRecoverMalformedToolCall(currentCtx, traceID, sessionID, step, prompt, builder, promptBuilder, options, err) {
+				continue
+			}
 			recoveryHistory := builder.Messages()
 			recoveryMetadata := map[string]interface{}(nil)
 			recoveryKind := ""
@@ -992,6 +1001,118 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, result.Steps, result, "step_limit")
 
 	return result, nil
+}
+
+// maxMalformedToolCallRecoveries 控制同一工具名「参数非法」降级重发的最大次数。
+// 超过后放弃降级、走原有错误路径，防止模型反复生成非法参数导致死循环烧 token
+// （参照 DeepSeek-Reasonix 的 repeat_failure_guard）。
+const maxMalformedToolCallRecoveries = 2
+
+// tryRecoverMalformedToolCall 处理模型工具参数非法（invalid_tool_arguments）：
+// 把「参数非法 + 工具 schema」作为工具执行反馈回注下一轮（re-prompt），
+// 让模型按 schema 重新输出参数，而不是终止整个 turn。
+// 返回 true 表示已降级注入并应继续循环。
+func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID, sessionID string, step int, goal string, builder, promptBuilder *MessageBuilder, options loopRunOptions, err error) bool {
+	var malformed *llmadapter.MalformedToolCallError
+	if !stderrors.As(err, &malformed) || len(malformed.ToolCalls) == 0 {
+		return false
+	}
+
+	// 护栏：任一工具名连续降级重发已达上限则放弃，避免死循环。
+	if loop.malformedToolCallRecoveries == nil {
+		loop.malformedToolCallRecoveries = make(map[string]int)
+	}
+	for _, call := range malformed.ToolCalls {
+		if loop.malformedToolCallRecoveries[call.Name] >= maxMalformedToolCallRecoveries {
+			// 与 recovered 事件同构的全量快照（排序保证确定性；
+			// 注意此处是自增前的历史累计，recovered 是自增后的当批列表）。
+			names := make([]string, 0, len(loop.malformedToolCallRecoveries))
+			for name := range loop.malformedToolCallRecoveries {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			recoveries := make(map[string]int, len(names))
+			for _, name := range names {
+				recoveries[name] = loop.malformedToolCallRecoveries[name]
+			}
+			loop.emitRuntimeEvent("tool.malformed_arguments.guardrail_hit", sessionID, call.Name, map[string]interface{}{
+				"trace_id":       traceID,
+				"step":           step,
+				"tool_names":     names,
+				"tool_calls":     len(malformed.ToolCalls),
+				"recoveries":     recoveries,
+				"max_recoveries": maxMalformedToolCallRecoveries,
+			})
+			return false
+		}
+	}
+
+	// 解析当前工具 surface，为每个非法调用找 schema。
+	availableTools, _, toolErr := loop.resolveAvailableTools(ctx, goal, options.ToolWhitelist)
+	if toolErr != nil {
+		return false
+	}
+	schemaByTool := make(map[string]string, len(availableTools))
+	for _, td := range availableTools {
+		if len(td.Parameters) == 0 {
+			continue
+		}
+		raw, marshalErr := json.Marshal(td.Parameters)
+		if marshalErr == nil {
+			schemaByTool[td.Name] = string(raw)
+		}
+	}
+
+	// 构造 assistant 工具调用（参数原文是非法 JSON，无法解析为 Args，置空）+ 失败反馈。
+	toolCalls := make([]types.ToolCall, 0, len(malformed.ToolCalls))
+	feedbacks := make([]string, 0, len(malformed.ToolCalls))
+	for _, call := range malformed.ToolCalls {
+		toolCalls = append(toolCalls, types.ToolCall{Name: call.Name, Args: map[string]interface{}{}})
+		schemaText := "(no schema available)"
+		if text, ok := schemaByTool[call.Name]; ok && text != "" {
+			schemaText = text
+		}
+		feedbacks = append(feedbacks, fmt.Sprintf(
+			"Tool call %q was NOT executed because its arguments were not valid JSON (received: %s). Re-emit the call exactly per this schema:\n%s",
+			call.Name, call.Arguments, schemaText))
+	}
+
+	normalized := builder.AppendAssistantAction("", toolCalls, nil, nil)
+	promptBuilder.AppendAssistantAction("", toolCalls, nil, nil)
+	payloads := make([]ToolResultPayload, 0, len(normalized))
+	for i, call := range normalized {
+		content := "Tool call was not executed: its arguments were not valid JSON."
+		if i < len(feedbacks) {
+			content = feedbacks[i]
+		}
+		payloads = append(payloads, ToolResultPayload{ToolCallID: call.ID, Content: content})
+	}
+	builder.AppendToolResults(normalized, DurableToolResultPayloads(payloads))
+	promptBuilder.AppendToolResults(normalized, payloads)
+	if persistErr := persistBuilderHistory(builder, options.PersistHistory); persistErr != nil {
+		return false
+	}
+
+	for _, call := range malformed.ToolCalls {
+		loop.malformedToolCallRecoveries[call.Name]++
+	}
+	names := make([]string, 0, len(malformed.ToolCalls))
+	for _, call := range malformed.ToolCalls {
+		names = append(names, call.Name)
+	}
+	recoveries := make(map[string]int, len(names))
+	for _, name := range names {
+		recoveries[name] = loop.malformedToolCallRecoveries[name]
+	}
+	loop.emitRuntimeEvent("tool.malformed_arguments.recovered", sessionID, strings.Join(names, ","), map[string]interface{}{
+		"trace_id":      traceID,
+		"step":          step,
+		"tool_names":    names,
+		"tool_calls":    len(malformed.ToolCalls),
+		"recoveries":    recoveries,
+		"max_recoveries": maxMalformedToolCallRecoveries,
+	})
+	return true
 }
 
 // emitRuntimeEvent stamps every event emitted by this ReAct run with the
