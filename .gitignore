@@ -21,6 +21,8 @@ _baseline-check/
 .reasonix/
 
 # Frontend
+# Root-level shared node_modules (e.g. hoisted workspace deps).
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.env.local
