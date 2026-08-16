@@ -117,15 +117,31 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 	}
 	highlighter := newActiveBandHighlighter()
 	var lines []render.Line
-	markdownSource := (active.Kind == scene.KindAssistant || active.Kind == scene.KindSupplement) && markdown.LooksLikeMarkdown(active.Source)
+	// reasoning（KindSupplement）且正文命中 markdown 启发式时，live band 必须
+	// 走与 handoff planner、提交后 scene（reasoningSupplementScreenRows）完全
+	// 相同的"分隔线拆分"投影：divider 独立成 reasoning 角色行、正文单独过
+	// markdown。若像 assistant 一样把整份 source（含 divider）丢进 markdown
+	// 文档渲染，divider 会作为段落参与排版，正文前导换行会在 divider 后产生
+	// 一行"幽灵空行"；提交后该空行消失，帧间出现换行/空行的视觉跳动
+	// （INV-REASON-DIVIDER-02）。
+	reasoningSupplement := active.Kind == scene.KindSupplement && supplementBodyLooksLikeMarkdown(active.Source)
+	markdownSource := (active.Kind == scene.KindAssistant || reasoningSupplement) && markdown.LooksLikeMarkdown(active.Source)
 	if markdownSource {
 		var projected bool
-		lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
+		if reasoningSupplement {
+			lines, projected = activeReasoningMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
+		} else {
+			lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
+		}
 		if !projected {
 			// A changed block context must never downgrade the live viewport to
 			// raw Markdown. Keep a rich full-source tail visible while the effect
 			// lifecycle takes the conservative recovery path.
-			lines = activeMarkdownBandLines(markdown.Render(active.Source, activeBandMarkdownOptions(width, theme, highlighter)))
+			if reasoningSupplement {
+				lines = activeReasoningMarkdownBandLines(active.Source, width, theme, highlighter)
+			} else {
+				lines = activeMarkdownBandLines(markdown.Render(active.Source, activeBandMarkdownOptions(width, theme, highlighter)))
+			}
 		}
 	}
 	if len(lines) == 0 && !markdownSource {

@@ -191,6 +191,57 @@ func TestProjectActiveCellBandRendersSupplementMarkdown(t *testing.T) {
 	}
 }
 
+// TestProjectActiveCellBandSupplementMatchesCommittedRows 是"live band 与
+// 提交后 scene 渲染不一致导致跳动"的回归：markdown 正文的 reasoning 在
+// live band 中必须使用与 handoff planner / 提交后 scene
+// （activeReasoningMarkdownBandLines / reasoningSupplementScreenRows）
+// 完全相同的"分隔线拆分"投影。旧实现把整份 source（含 divider）丢进
+// assistant 的 markdown 文档渲染，divider 后的前导换行会渲染出一行空行，
+// 提交后该空行消失，帧间出现换行/空行的视觉跳动（INV-REASON-DIVIDER-02）。
+func TestProjectActiveCellBandSupplementMatchesCommittedRows(t *testing.T) {
+	active := ActiveCellState{
+		CellID:   30,
+		Revision: 3,
+		Kind:     scene.KindSupplement,
+		Phase:    ActiveCellMutable,
+		Source:   "─── reasoning ───\n\n# Heading\n\n- **one**\n- `two`",
+	}
+	geometry := GeometryState{Width: 40, Height: 16}
+	projection := ProjectActiveCellBand(active, geometry)
+	if !projection.Valid() {
+		t.Fatalf("supplement projection = %+v", projection)
+	}
+	if len(projection.Lines) < 2 {
+		t.Fatalf("supplement projection rows = %d, want >= 2", len(projection.Lines))
+	}
+	// divider 必须是独立首行且带 reasoning 角色（不是 assistant 正文角色）。
+	first := projection.Lines[0]
+	if got := lineText(first); got != "─── reasoning ───" {
+		t.Fatalf("first row = %q, want divider", got)
+	}
+	if len(first.Spans) == 0 || first.Spans[0].Style.Role != string(style.RoleReasoning) {
+		t.Fatalf("divider row style = %+v, want reasoning role", first.Spans)
+	}
+	// divider 后不得出现幽灵空行（提交后该空行会被丢弃 → 帧间跳动）。
+	if strings.TrimSpace(lineText(projection.Lines[1])) == "" {
+		t.Fatalf("blank row after divider in live band: %+v", projection.Lines[:2])
+	}
+	// live band 行必须与提交后投影逐行（含样式）完全一致。
+	theme := style.ThemeContext{}
+	committed := activeReasoningMarkdownBandLines(active.Source, geometry.Width, theme, newActiveBandHighlighter())
+	if !render.LinesEqual(projection.Lines, committed) {
+		t.Fatalf("live band rows diverge from committed rows:\nband:     %+v\ncommitted: %+v", projection.Lines, committed)
+	}
+}
+
+func lineText(line render.Line) string {
+	var b strings.Builder
+	for _, span := range line.Spans {
+		b.WriteString(span.Text)
+	}
+	return b.String()
+}
+
 // TestProjectActiveCellBandKeepsSupplementPlainTextWithoutMarkdown 验证
 // 非 markdown 的 supplement（纯文本思考）保持原有纯文本 + 角色渲染。
 func TestProjectActiveCellBandKeepsSupplementPlainTextWithoutMarkdown(t *testing.T) {

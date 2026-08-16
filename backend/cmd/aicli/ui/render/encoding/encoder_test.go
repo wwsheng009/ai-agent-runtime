@@ -348,6 +348,111 @@ func TestEncodeDottedAssistantReasoningUsesNestedTypedPayload(t *testing.T) {
 	}
 }
 
+// TestEncodeReasoningFullSnapshotKeepsDividerPrefix 是"统一渲染器渲染
+// reasoning divider 前后不一致"的回归：流式 delta 之后到达的全量快照
+// （非 stream_delta，如 summary/plain text 事件）必须保留
+// divider + "\n" 前缀、整体替换正文；后续 delta 继续追加在正文之后，
+// divider 恰好出现一次且始终紧跟换行。旧实现全量快照直接 nextHead = text，
+// 把 divider 及其换行丢掉，下一帧 delta 又追加到无 divider 的 head 上，
+// 帧间出现"分隔线带换行/不带换行"的视觉切换。
+func TestEncodeReasoningFullSnapshotKeepsDividerPrefix(t *testing.T) {
+	e := NewEventEncoder()
+	// 帧 1：流式 delta → divider + "\n" + 正文。
+	e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-divider",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": "first thought. ",
+		},
+	}))
+	head := e.Snapshot().Items[0].Head
+	if head != reasoningDividerLine()+"\n"+"first thought. " {
+		t.Fatalf("after stream delta head = %q, want divider+LF+body", head)
+	}
+	// 帧 2：全量快照（format=summary，非 stream_delta）→ 正文整体替换，
+	// divider + 换行必须保留。
+	e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-divider",
+		"reasoning": map[string]interface{}{
+			"format":     "summary",
+			"visibility": "summary",
+			"summary":    "full snapshot body",
+		},
+	}))
+	head = e.Snapshot().Items[0].Head
+	want := reasoningDividerLine() + "\n" + "full snapshot body"
+	if head != want {
+		t.Fatalf("after full snapshot head = %q, want %q (divider+LF must survive)", head, want)
+	}
+	// 帧 3：后续 delta 追加在快照正文之后；divider 不重复、换行不丢失。
+	e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-divider",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": " tail.",
+		},
+	}))
+	head = e.Snapshot().Items[0].Head
+	if head != reasoningDividerLine()+"\n"+"full snapshot body tail." {
+		t.Fatalf("after trailing delta head = %q, want divider once + snapshot body + tail", head)
+	}
+	if count := strings.Count(head, " reasoning "); count != 1 {
+		t.Fatalf("divider rendered %d times, want exactly 1: %q", count, head)
+	}
+	if strings.HasPrefix(head, reasoningDividerLine()) && !strings.HasPrefix(head, reasoningDividerLine()+"\n") {
+		t.Fatalf("divider not followed by LF: %q", head)
+	}
+}
+
+// TestEncodeReasoningDividerNormalizesLeadingNewlines 验证 divider 后的正文
+// 前导换行被剥离：存储源统一为 "divider\n正文"，避免 divider 后出现"幽灵
+// 空行"——渲染层把正文与分隔线分开处理时前导空行被丢弃，而整文档渲染时
+// 同一空行又显示出来，帧间出现换行出现/消失的跳动（INV-REASON-DIVIDER-02）。
+// 正文中间的换行（段落分隔）必须原样保留。
+func TestEncodeReasoningDividerNormalizesLeadingNewlines(t *testing.T) {
+	e := NewEventEncoder()
+	// 首块 delta 带前导换行 → divider + "\n" + 剥离前导换行后的正文。
+	e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-lf",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": "\n\nfirst thought",
+		},
+	}))
+	head := e.Snapshot().Items[0].Head
+	if want := reasoningDividerLine() + "\n" + "first thought"; head != want {
+		t.Fatalf("after delta head = %q, want %q (leading newlines stripped)", head, want)
+	}
+	// 全量快照正文同样剥离前导换行。
+	e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-lf",
+		"reasoning": map[string]interface{}{
+			"format":     "summary",
+			"visibility": "summary",
+			"summary":    "\n\nreplaced body",
+		},
+	}))
+	head = e.Snapshot().Items[0].Head
+	if want := reasoningDividerLine() + "\n" + "replaced body"; head != want {
+		t.Fatalf("after snapshot head = %q, want %q (leading newlines stripped)", head, want)
+	}
+	// 后续 delta 的段内换行必须保留（段落分隔是真实内容）。
+	e.Encode(event("assistant.reasoning", map[string]interface{}{
+		"trace_id": "trace-lf",
+		"reasoning": map[string]interface{}{
+			"format":  "stream_delta",
+			"summary": "\n\nsecond paragraph",
+		},
+	}))
+	head = e.Snapshot().Items[0].Head
+	if want := reasoningDividerLine() + "\n" + "replaced body\n\nsecond paragraph"; head != want {
+		t.Fatalf("after mid-body delta head = %q, want %q (paragraph breaks survive)", head, want)
+	}
+	if strings.HasPrefix(head, reasoningDividerLine()+"\n\n") {
+		t.Fatalf("divider followed by blank line in stored head: %q", head)
+	}
+}
+
 func TestEncodeSessionEndFinalizesOpenToolCell(t *testing.T) {
 	e := NewEventEncoder()
 	e.Encode(toolStarted("call-orphan", "shell"))

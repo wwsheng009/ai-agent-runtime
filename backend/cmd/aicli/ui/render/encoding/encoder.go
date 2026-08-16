@@ -1012,13 +1012,20 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
-			nextHead := text
+			var nextHead string
 			if strings.TrimSpace(t.Head) == "" {
 				// 占位/空 reasoning（barrier 或空文本）：首行先写思考链分隔线，
 				// 保证每个 reasoning cell 都有可辨识的渲染边界。
-				nextHead = reasoningDividerLine() + "\n" + text
+				nextHead = withReasoningDivider(text)
 			} else if streamDelta {
 				nextHead = appendReasoningDelta(t.Head, text)
+			} else {
+				// 全量快照（非 stream_delta）替换正文：与新建/空占位路径统一，
+				// 保留 divider + "\n" 前缀。旧实现直接 nextHead = text 会把
+				// 上一帧已渲染的 divider 及其换行丢掉，下一帧 delta 又追加到
+				// 无 divider 的 head 上，造成帧间"分隔线带换行/不带换行"的
+				// 视觉切换（INV-REASON-DIVIDER-01）。
+				nextHead = withReasoningDivider(text)
 			}
 			if t.Head == nextHead {
 				return false
@@ -1035,7 +1042,7 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 		return
 	}
 	var it *Item
-	head := reasoningDividerLine() + "\n" + text
+	head := withReasoningDivider(text)
 	if assistant := e.assistantBy[key]; assistant != nil {
 		it = e.insertItemBefore(assistant.ID, KindReasoning, head)
 		setReasoningPresentation(it)
@@ -1047,6 +1054,16 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	}
 	e.reasoningBy[key] = it
 	e.removeReasoningBarrier(key, cs)
+}
+
+// withReasoningDivider 统一 reasoning cell 的首行分隔线：divider 后必须
+// 紧跟换行（"divider\n正文"），所有构建 reasoning Head 的路径共用同一
+// 格式，避免帧间 divider 换行前后不一致。正文的前导换行（provider 常在
+// 首个文本块前输出 "\n\n"）会被剥离：渲染层把正文与分隔线分开处理时前导
+// 空行会被丢弃，而整文档渲染时同一空行又会显示出来，帧间出现"换行出现/
+// 消失"的跳动（INV-REASON-DIVIDER-02）。
+func withReasoningDivider(text string) string {
+	return reasoningDividerLine() + "\n" + strings.TrimLeft(text, "\n")
 }
 
 // setReasoningPresentation 让 reasoning cell 的渲染契约与已累计正文对齐：
