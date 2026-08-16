@@ -2178,7 +2178,9 @@ func toolProgressText(ev runtimeevents.Event) string {
 }
 
 func toolFinishedText(ev runtimeevents.Event) string {
-	for _, key := range []string{"output", "result", "summary"} {
+	// render_output 优先：edit/apply_patch 等工具携带完整 fenced diff，
+	// summary/summary_lines 只是 3 行截断预览，不能作为终态输出。
+	for _, key := range []string{"render_output", "output", "result", "summary"} {
 		if value := payloadString(ev.Payload[key], ""); value != "" {
 			return value
 		}

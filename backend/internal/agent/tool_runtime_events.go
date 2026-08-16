@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pathdisplay"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -773,9 +774,106 @@ func extractToolTextOutput(value interface{}) string {
 		return string(typed)
 	case fmt.Stringer:
 		return typed.String()
+	case *protocol.CallToolResult:
+		return callToolResultText(typed)
+	case []protocol.Content:
+		return contentListText(typed)
+	case *toolprotocol.Result:
+		if typed == nil {
+			return ""
+		}
+		return contentBlockListText(typed.Content)
+	case []toolprotocol.ContentBlock:
+		return contentBlockListText(typed)
+	case map[string]interface{}:
+		return mapContentText(typed)
+	case []interface{}:
+		return sliceContentText(typed)
 	default:
 		return ""
 	}
+}
+
+// callToolResultText 提取 MCP CallToolResult 的文本内容（多个 text block 按序拼接）。
+func callToolResultText(result *protocol.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	return contentListText(result.Content)
+}
+
+// contentListText 拼接 MCP Content 列表中的 text 内容。
+func contentListText(contents []protocol.Content) string {
+	if len(contents) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, content := range contents {
+		if content.Type == "text" {
+			b.WriteString(content.Text)
+		}
+	}
+	return b.String()
+}
+
+// contentBlockListText 拼接 toolprotocol ContentBlock 列表中的 text 内容。
+func contentBlockListText(blocks []toolprotocol.ContentBlock) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, block := range blocks {
+		if block.Type == "text" {
+			b.WriteString(block.Text)
+		}
+	}
+	return b.String()
+}
+
+// mapContentText 从 JSON 解码形态的 MCP 结果（map 带 "content" 数组）中提取 text。
+// 只识别内容块列表形状，避免从任意 map 中误取字段。
+func mapContentText(m map[string]interface{}) string {
+	if m == nil {
+		return ""
+	}
+	content, ok := m["content"]
+	if !ok {
+		return ""
+	}
+	switch typed := content.(type) {
+	case []interface{}:
+		return sliceContentText(typed)
+	case []protocol.Content:
+		return contentListText(typed)
+	}
+	return ""
+}
+
+// sliceContentText 从 []interface{} 中提取 text 类型内容块。
+func sliceContentText(items []interface{}) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range items {
+		switch typed := item.(type) {
+		case map[string]interface{}:
+			if t, _ := typed["type"].(string); t == "text" {
+				if text, _ := typed["text"].(string); text != "" {
+					b.WriteString(text)
+				}
+			}
+		case protocol.Content:
+			if typed.Type == "text" {
+				b.WriteString(typed.Text)
+			}
+		case *protocol.Content:
+			if typed != nil && typed.Type == "text" {
+				b.WriteString(typed.Text)
+			}
+		}
+	}
+	return b.String()
 }
 
 func summarizeToolTextLines(text string, toolName string) []string {
