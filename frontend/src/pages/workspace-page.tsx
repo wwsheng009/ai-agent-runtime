@@ -4,6 +4,7 @@ import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-d
 import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
+import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
 import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
@@ -19,6 +20,7 @@ import {
 import {
   applySessionHistoryToThread,
 } from "@/lib/workspace-thread-state";
+import { trajectoryEventAction } from "@/lib/trajectory/recovery";
 import { useParams } from "react-router-dom";
 
 export function WorkspacePage() {
@@ -87,6 +89,7 @@ export function WorkspacePage() {
     setSelectedProvider,
     stopResponding,
     submitPrompt,
+    trajectoryStore,
   } = useWorkspaceAgentChatTurn({
     onSessionTouched: handleRefreshRuntimeSessions,
     selectedThread,
@@ -95,6 +98,15 @@ export function WorkspacePage() {
     userId: selectedRuntimeSessionUserId || runtimeClient.userId,
     workspacePath: runtimeClient.workspacePath,
   });
+
+  // 用户主动切换线程：轨迹快照 reset（同步于选择动作；新 turn 的 reset
+  // 在提交 hook 内处理，避免导航渲染迟到的 effect reset 打断流事件收集）。
+  function handleSelectThreadWithTrajectoryReset(threadId: string) {
+    // 线程/会话切换：硬重置游标——新会话的事件日志独立自增，
+    // 由 useTrajectoryRecovery 按新会话从 seq=1 重新回放。
+    trajectoryStore.reset({ hard: true });
+    handleSelectThread(threadId);
+  }
 
   useSessionHistorySync({
     applySessionHistoryToThread,
@@ -107,8 +119,24 @@ export function WorkspacePage() {
     getErrorMessage,
     getRuntimeEventSeq,
     mergeRuntimeEvent,
+    onTrajectoryEvent: (event) => {
+      // Q4：runtime 生命周期事件实时投递到轨迹，与恢复路径共用同一转换
+      // （幂等：reducer 按 seq 去重）。被过滤的事件（tool_started/
+      // tool_finished 等与 chat.sse 共享同一 EventStore 全局 seq）已持久化
+      // 但不会渲染——advanceCursor 跳过其空洞，避免后续事件永久卡 pending。
+      const action = trajectoryEventAction(event);
+      if (action.kind === "push") {
+        trajectoryStore.push(action.push.kind, action.push.payload);
+      } else if (action.kind === "skip") {
+        trajectoryStore.advanceCursor(action.seq);
+      }
+    },
     selectedThread,
     setThreads,
+  });
+  useTrajectoryRecovery({
+    store: trajectoryStore,
+    sessionId: selectedThread?.sessionId,
   });
   const {
     backtrackDialog,
@@ -164,11 +192,12 @@ export function WorkspacePage() {
       isResponding={isResponding}
       modelOptions={modelOptions}
       phase={phase}
+      trajectoryStore={trajectoryStore}
       onDraftChange={setDraft}
       onModelChange={setSelectedModel}
       onProviderChange={setSelectedProvider}
       onSelectArtifact={handleSelectArtifact}
-      onSelectThread={handleSelectThread}
+      onSelectThread={handleSelectThreadWithTrajectoryReset}
       onRefreshRuntimeTeams={handleRefreshRuntimeTeams}
       onSelectRuntimeSessionUser={selectRuntimeSessionUserId}
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}

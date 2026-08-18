@@ -19,6 +19,8 @@ type SessionRuntimeStreamOptions = {
     existingEvents: SessionRuntimeEvent[],
     nextEvent: SessionRuntimeEvent,
   ) => SessionRuntimeEvent[];
+  /** Q4：可选轨迹投递——运行时生命周期事件到达时通知（由调用方转成轨迹 push）。 */
+  onTrajectoryEvent?: (event: SessionRuntimeEvent) => void;
   selectedThread: Thread | undefined;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
 };
@@ -28,11 +30,17 @@ export function useSessionRuntimeStream({
   getErrorMessage,
   getRuntimeEventSeq,
   mergeRuntimeEvent,
+  onTrajectoryEvent,
   selectedThread,
   setThreads,
 }: SessionRuntimeStreamOptions) {
   const runtimeEventsRef = useRef<Record<string, SessionRuntimeEvent[]>>({});
   const runtimeSeqRef = useRef<Record<string, number>>({});
+  // Q4：轨迹投递回调经 ref 转发——调用方每次 render 产生新引用时
+  // 不触发 effect 重跑（否则 onEvent 内 setThreads → render → 新 arrow →
+  // abort 重连 → 无限重连循环）。
+  const onTrajectoryEventRef = useRef(onTrajectoryEvent);
+  onTrajectoryEventRef.current = onTrajectoryEvent;
   const threadId = selectedThread?.id;
   const sessionId = selectedThread?.sessionId;
 
@@ -50,6 +58,8 @@ export function useSessionRuntimeStream({
           pollMs: 500,
           signal: controller.signal,
           onEvent: (event) => {
+            onTrajectoryEventRef.current?.(event);
+
             const nextSeq = getRuntimeEventSeq(event);
             if (nextSeq > 0) {
               runtimeSeqRef.current[sessionId] = nextSeq;

@@ -80,12 +80,7 @@ function buildSessionLeaseConflictMessage(payload: RuntimeErrorPayload) {
 
   const ownerKind = readString(lease.owner_kind);
   const ownerId = readString(lease.owner_id);
-  const ownerLabel =
-    ownerKind === "aicli-actor"
-      ? "a local aicli process"
-      : ownerKind === "runtime-server-actor"
-        ? "runtime-server"
-        : ownerKind || ownerId || "another runtime";
+  const ownerLabel = sessionLeaseOwnerLabel(ownerKind, ownerId);
   const pid = readNumber(lease.pid);
   const hostname = readString(lease.hostname);
   const locationParts = [
@@ -101,9 +96,56 @@ function buildSessionLeaseConflictMessage(payload: RuntimeErrorPayload) {
     message += ` ${capitalizeSentence(suggestedAction)}.`;
   }
   if (expiresAt) {
-    message += ` Current lease expiry: ${expiresAt}.`;
+    const remaining = leaseRemainingSeconds(expiresAt);
+    if (remaining !== null && remaining > 0) {
+      message += ` Current lease expires in about ${Math.max(1, Math.round(remaining))}s (at ${expiresAt}).`;
+    } else {
+      message += ` Current lease expiry: ${expiresAt}.`;
+    }
   }
   return message;
+}
+
+/** 占用通道的人读标签：CLI / web / runtime 三分类。 */
+function sessionLeaseOwnerLabel(ownerKind: string, ownerId: string): string {
+  switch (ownerKind) {
+    case "aicli-actor":
+      return "CLI (aicli)";
+    case "runtime-server-actor":
+      return "runtime session actor (command API)";
+    case "runtime-server-agent-chat":
+      return "web (agent chat)";
+    default:
+      return ownerKind || ownerId || "another runtime";
+  }
+}
+
+/** 占用方分类（短标题用）：CLI / web / runtime / other。 */
+export function getSessionLeaseConflictTitle(error: unknown): string | undefined {
+  if (!isRuntimeApiErrorCode(error, "SESSION_LEASE_CONFLICT")) {
+    return undefined;
+  }
+  const payload = (error as RuntimeApiError).payload;
+  const lease = asRecord(payload?.context?.lease);
+  const ownerKind = readString(lease?.owner_kind);
+  switch (ownerKind) {
+    case "aicli-actor":
+      return "This session is in use by a CLI session";
+    case "runtime-server-actor":
+      return "This session is in use by the runtime";
+    case "runtime-server-agent-chat":
+      return "This session is in use by the web app";
+    default:
+      return "This session is in use elsewhere";
+  }
+}
+
+function leaseRemainingSeconds(expiresAt: string): number | null {
+  const parsed = Date.parse(expiresAt);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return (parsed - Date.now()) / 1000;
 }
 
 function appendRequestId(message: string, requestId: string | undefined) {

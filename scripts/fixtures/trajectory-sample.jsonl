@@ -1,0 +1,13 @@
+{"seq":1,"ts":"2026-08-16T08:00:00.000Z","kind":"meta","payload":{"session_id":"sess-1","kind":"llm","source":"runtime","model":"test-model"}}
+{"seq":2,"ts":"2026-08-16T08:00:00.500Z","kind":"reasoning","payload":{"type":"reasoning","content":"think step one.","reasoning":{"content":"think step one.","delta":"think step one.","length":16}}}
+{"seq":3,"ts":"2026-08-16T08:00:01.000Z","kind":"reasoning","payload":{"type":"reasoning","content":"think step two.","reasoning":{"content":"think step two.","delta":"think step two.","length":15}}}
+{"seq":4,"ts":"2026-08-16T08:00:01.500Z","kind":"chunk","payload":{"type":"text","content":"Hello","text":{"content":"Hello","total_chars":5}}}
+{"seq":5,"ts":"2026-08-16T08:00:01.600Z","kind":"chunk","payload":{"type":"text","content":" world","text":{"content":" world","total_chars":11}}}
+{"seq":6,"ts":"2026-08-16T08:00:02.000Z","kind":"tool_start","payload":{"type":"tool_start","tool":{"id":"tool-1","name":"lookup","status":"tool_start","args":{"query":"paris"}}}}
+{"seq":7,"ts":"2026-08-16T08:00:02.500Z","kind":"tool_end","payload":{"type":"tool_end","tool":{"id":"tool-1","name":"lookup","status":"tool_end","content":"Paris is the capital of France."}}}
+{"seq":8,"ts":"2026-08-16T08:00:02.600Z","kind":"tool_start","payload":{"type":"tool_start","tool":{"id":"tool-2","name":"lookup","status":"tool_start","args":{"query":"france"}}}}
+{"seq":9,"ts":"2026-08-16T08:00:02.800Z","kind":"tool_end","payload":{"type":"tool_end","tool":{"id":"tool-2","name":"lookup","status":"tool_end","content":"France is in Europe."}}}
+{"seq":10,"ts":"2026-08-16T08:00:03.000Z","kind":"done","payload":{"session_id":"sess-1","status":"completed","content":"Hello world","result":{"kind":"llm","source":"llm_stream","success":true,"output":"Hello world","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"cached_tokens":10,"reasoning_tokens":20},"model":"test-model","orchestration":{"source":"llm_direct","route_attempted":true,"candidate_count":2,"fallback_reason":"primary provider timeout","success":true}}}}
+{"seq":11,"ts":"2026-08-16T08:00:04.000Z","kind":"done","payload":{"session_id":"sess-1","status":"completed","content":"Second turn","result":{"kind":"llm","source":"llm_direct","success":true,"output":"Second turn","usage":{"prompt_tokens":60,"completion_tokens":40,"total_tokens":100},"model":"test-model","orchestration":{"source":"llm_direct","route_attempted":false,"candidate_count":1,"fallback_reason":"","success":true}}}}
+not-json-line
+{"seq":13,"ts":"2026-08-16T08:00:05.000Z","kind":"chunk","payload":{"type":"text","content":"trailing chunk","text":{"content":"trailing chunk","total_chars":14}}}

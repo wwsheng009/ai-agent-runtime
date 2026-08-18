@@ -114,7 +114,7 @@ describe("thread-runtime", () => {
     expect(nextThread.messages[1].id).toBe("msg_assistant_1");
   });
 
-  it("treats null session history as an empty message list", () => {
+  it("keeps existing streaming messages when session history is null", () => {
     const response = {
       session_id: "session-1",
       count: 0,
@@ -124,7 +124,10 @@ describe("thread-runtime", () => {
     const nextThread = applySessionHistoryToThread(createThread(), response);
 
     expect(nextThread.sessionId).toBe("session-1");
-    expect(nextThread.messages).toEqual([]);
+    // null history = 无权威历史：保留当前流式消息（与 history 匹配时的
+    // 合并语义一致，避免恢复流程清掉正在渲染的内容）。
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0]?.id).toBe("assistant-existing");
     expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
   });
 

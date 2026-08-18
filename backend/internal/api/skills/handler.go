@@ -2839,6 +2839,10 @@ func sessionLeaseConflictMessage(conflict *chat.LeaseConflictError) string {
 	if owner == "" {
 		owner = "another runtime"
 	}
+	label := sessionLeaseOwnerLabel(lease.OwnerKind)
+	if label != "" && label != owner {
+		owner = fmt.Sprintf("%s (%s)", label, owner)
+	}
 	location := ""
 	if lease.PID > 0 {
 		location = fmt.Sprintf(" (pid %d", lease.PID)
@@ -2849,7 +2853,29 @@ func sessionLeaseConflictMessage(conflict *chat.LeaseConflictError) string {
 	} else if hostname := strings.TrimSpace(lease.Hostname); hostname != "" {
 		location = " (on " + hostname + ")"
 	}
-	return fmt.Sprintf("session runtime lease conflict: session is currently owned by %s%s", owner, location)
+	message := fmt.Sprintf("session runtime lease conflict: session is currently owned by %s%s", owner, location)
+	if !lease.ExpiresAt.IsZero() {
+		if remaining := time.Until(lease.ExpiresAt); remaining > 0 {
+			message += fmt.Sprintf("; lease expires in ~%s (at %s)", remaining.Round(time.Second), lease.ExpiresAt.Format(time.RFC3339))
+		} else {
+			message += fmt.Sprintf("; lease marked expired at %s", lease.ExpiresAt.Format(time.RFC3339))
+		}
+	}
+	return message
+}
+
+// sessionLeaseOwnerLabel 把 ownerKind 映射为占用通道的人读标签（CLI / web / runtime）。
+func sessionLeaseOwnerLabel(ownerKind string) string {
+	switch strings.ToLower(strings.TrimSpace(ownerKind)) {
+	case "aicli-actor":
+		return "CLI (aicli)"
+	case "runtime-server-actor":
+		return "runtime session actor (command API)"
+	case "runtime-server-agent-chat":
+		return "web (agent chat)"
+	default:
+		return strings.TrimSpace(ownerKind)
+	}
 }
 
 func sessionLeaseConflictSuggestedAction(lease *chat.SessionLease) string {
@@ -3309,7 +3335,11 @@ func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
 		return false
 	}
 	switch strings.TrimSpace(event.Type) {
-	case "tool.requested", "tool.completed", "context.profile.injected", "recall.performed", "checkpoint_created":
+	case "tool.requested", "tool.completed", "context.profile.injected", "recall.performed", "checkpoint_created",
+		chat.EventApprovalRequested, chat.EventApprovalResolved,
+		chat.EventSessionCompactStarted, chat.EventSessionCompactCompleted, chat.EventSessionCompactSkipped, chat.EventSessionCompactFailed,
+		chat.EventSessionStart, chat.EventSessionEnd, chat.EventSessionInterrupted,
+		chat.EventContextReconciled:
 		return true
 	default:
 		return false
@@ -6969,7 +6999,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	}
 
 	h.prepareSSEHeaders(w)
-	emitter := newSSEEmitter(w)
+	emitter := h.newTrajectoryEmitter(w, session)
 	initialOrchestration := buildOrchestrationPayload("llm_stream", routeAttempted, routeCandidates, nil, &llm.LLMResponse{Model: model}, fallback)
 	if planningPayload != nil {
 		initialOrchestration["planning_attempted"] = planningPayload["attempted"]
@@ -7113,7 +7143,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 func (h *Handler) streamStaticResult(w http.ResponseWriter, session *chat.Session, agentID string, resultPayload map[string]interface{}) {
 	output, _ := resultPayload["output"].(string)
 	h.prepareSSEHeaders(w)
-	emitter := newSSEEmitter(w)
+	emitter := h.newTrajectoryEmitter(w, session)
 	emitter.Emit("meta", map[string]interface{}{
 		"session_id":    sessionID(session),
 		"agent_id":      agentID,
@@ -7658,7 +7688,11 @@ func finalResultStatus(result interface{}) string {
 
 type sseEmitter struct {
 	w        http.ResponseWriter
-	sequence int
+	sequence int64
+	// persist 可选：每个事件写出前先持久化到会话事件存储（chat 轨迹事件日志），
+	// 返回持久化 seq；返回 <=0 表示未持久化，降级为连接内计数。
+	// 用于 /api/agent/chat 的轨迹录制，不影响其他 SSE 使用方。
+	persist func(event string, data interface{}) int64
 }
 
 func newSSEEmitter(w http.ResponseWriter) *sseEmitter {
@@ -7667,6 +7701,11 @@ func newSSEEmitter(w http.ResponseWriter) *sseEmitter {
 
 func (e *sseEmitter) Emit(event string, data interface{}) {
 	e.sequence++
+	if e.persist != nil {
+		if seq := e.persist(event, data); seq > 0 {
+			e.sequence = seq
+		}
+	}
 	writeSSEEventWithEnvelope(e.w, event, data, e.sequence)
 }
 
@@ -7681,7 +7720,7 @@ func (h *Handler) writeSSEEvent(w http.ResponseWriter, event string, data interf
 	writeSSEEventWithEnvelope(w, event, data, 0)
 }
 
-func writeSSEEventWithEnvelope(w http.ResponseWriter, event string, data interface{}, sequence int) {
+func writeSSEEventWithEnvelope(w http.ResponseWriter, event string, data interface{}, sequence int64) {
 	if event != "" {
 		_, _ = fmt.Fprintf(w, "event: %s\n", event)
 	}
@@ -7695,7 +7734,7 @@ func writeSSEEventWithEnvelope(w http.ResponseWriter, event string, data interfa
 	}
 }
 
-func wrapSSEData(event string, data interface{}, sequence int) interface{} {
+func wrapSSEData(event string, data interface{}, sequence int64) interface{} {
 	eventMeta := map[string]interface{}{
 		"name":           event,
 		"schema_version": "skill_runtime.sse.v1",

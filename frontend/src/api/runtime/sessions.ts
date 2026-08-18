@@ -18,6 +18,7 @@ import type {
   RuntimeSessionsQuery,
   RuntimeSessionsResponse,
   SessionHistoryResponse,
+  SessionRuntimeEvent,
 } from "@/types/runtime";
 
 import {
@@ -31,6 +32,38 @@ export async function getSessionHistory(
 ): Promise<SessionHistoryResponse> {
   return fetchRuntimeJson<SessionHistoryResponse>(
     buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/history`),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+export type RuntimeSessionEventsResponse = {
+  events: SessionRuntimeEvent[];
+  count: number;
+  latest_seq: number;
+};
+
+export type RuntimeSessionEventsQuery = {
+  after?: number;
+  limit?: number;
+};
+
+/** 增量拉取会话事件（P3-1/P3-2）：after=已收最大 seq，limit 分页。 */
+export async function fetchSessionRuntimeEvents(
+  sessionId: string,
+  query: RuntimeSessionEventsQuery = {},
+): Promise<RuntimeSessionEventsResponse> {
+  return fetchRuntimeJson<RuntimeSessionEventsResponse>(
+    buildRuntimeUrlWithQuery(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/events`,
+      {
+        after: query.after,
+        limit: query.limit,
+      },
+    ),
     {
       headers: {
         Accept: "application/json",

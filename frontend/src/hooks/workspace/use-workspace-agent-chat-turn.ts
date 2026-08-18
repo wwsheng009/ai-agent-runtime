@@ -11,14 +11,20 @@ import { useNavigate } from "react-router-dom";
 import { useAppSettings } from "@/core/settings";
 import { type Artifact, type ChatMessage, type Thread } from "@/data/mock";
 import { useRuntimeModelCatalog } from "@/hooks/workspace/use-runtime-model-catalog";
+import {
+  createTrajectoryStore,
+  type TrajectoryStore,
+} from "@/hooks/workspace/use-trajectory-snapshot";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
-  isRuntimeApiErrorCode,
   streamAgentChat,
   type AgentChatResult,
   type AgentChatStreamDonePayload,
   type AgentChatStreamMetaPayload,
 } from "@/lib/runtime-api";
+import { getSessionLeaseConflictTitle } from "@/api/runtime/shared";
+import { debugTrajectoryConsistency } from "@/lib/trajectory/projection";
+import type { TrajectoryEventKind } from "@/lib/trajectory/types";
 import {
   appendArtifactToMessage,
   buildToolSegmentFromPayload,
@@ -76,6 +82,11 @@ export function useWorkspaceAgentChatTurn({
   const [phase, setPhase] = useState<ChatStreamPhase | null>(null);
   const phaseRef = useRef<ChatStreamPhase | null>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
+  const trajectoryStoreRef = useRef<TrajectoryStore | null>(null);
+  if (!trajectoryStoreRef.current) {
+    trajectoryStoreRef.current = createTrajectoryStore();
+  }
+  const trajectoryStore = trajectoryStoreRef.current;
   const {
     modelOptions,
     providerOptions,
@@ -90,6 +101,7 @@ export function useWorkspaceAgentChatTurn({
   useEffect(() => {
     return () => {
       activeRequestControllerRef.current?.abort();
+      trajectoryStoreRef.current?.dispose();
     };
   }, []);
 
@@ -172,6 +184,14 @@ export function useWorkspaceAgentChatTurn({
       updateCurrentThread((thread) =>
         appendArtifactToMessage(thread, assistantMessageId, artifact),
       );
+    };
+
+    /** 轨迹事件入口：SSE 回调 → 轨迹快照（reducer 幂等，记录失败不阻断转发）。 */
+    const pushTrajectory = (
+      kind: TrajectoryEventKind,
+      payload: Record<string, unknown> | null | undefined,
+    ) => {
+      trajectoryStore.push(kind, payload);
     };
 
     const setStreamingMessage = (label: string, author: string, content: string) => {
@@ -433,6 +453,9 @@ export function useWorkspaceAgentChatTurn({
           ? "Response stopped before any text was returned."
           : "Runtime request completed, but no textual output was returned.");
 
+      // 冲刷轨迹批处理器：确保快照包含全部 SSE 事件后再做双跑校验。
+      trajectoryStore.flush();
+
       updateCurrentThread((thread) => {
         let nextThread: Thread = {
           ...thread,
@@ -451,15 +474,8 @@ export function useWorkspaceAgentChatTurn({
             : thread.lastRuntimeEventType,
         };
 
-        nextThread = updateThreadMessage(nextThread, assistantMessageId, (message) => ({
-          ...message,
-          interrupted: stopped ? true : undefined,
-          author:
-            finalResult?.kind === "agent" || currentKind === "agent"
-              ? "Runtime agent"
-              : "Runtime stream",
-          label: stopped ? "stopped" : currentSource || "runtime",
-          segments: buildAssistantMessageSegments(
+        nextThread = updateThreadMessage(nextThread, assistantMessageId, (message) => {
+          const finalSegments = buildAssistantMessageSegments(
             finalText,
             currentSource,
             reasoningText,
@@ -468,12 +484,24 @@ export function useWorkspaceAgentChatTurn({
               existingSegments: message.segments,
               generatedImages: generatedImageAttachments,
             },
-          ),
-          relatedArtifactIds: mergeUniqueStrings(
-            ...(message.relatedArtifactIds ?? []),
-            ...artifacts.map((artifact) => artifact.id),
-          ),
-        }));
+          );
+          // DEV 双跑校验：轨迹快照 vs 现有渲染路径（确认无回归后切换唯一路径）。
+          debugTrajectoryConsistency(trajectoryStore.getSnapshot(), finalSegments);
+          return {
+            ...message,
+            interrupted: stopped ? true : undefined,
+            author:
+              finalResult?.kind === "agent" || currentKind === "agent"
+                ? "Runtime agent"
+                : "Runtime stream",
+            label: stopped ? "stopped" : currentSource || "runtime",
+            segments: finalSegments,
+            relatedArtifactIds: mergeUniqueStrings(
+              ...(message.relatedArtifactIds ?? []),
+              ...artifacts.map((artifact) => artifact.id),
+            ),
+          };
+        });
 
         nextThread.artifacts = upsertArtifacts(nextThread.artifacts, artifacts);
         return nextThread;
@@ -497,6 +525,9 @@ export function useWorkspaceAgentChatTurn({
     };
 
     setDraft("");
+    // 新 turn 开始：轨迹快照 reset（同步于首个 SSE 事件之前，避免
+    // 导航渲染迟到的 effect reset 打断流事件收集造成 seq gap）。
+    trajectoryStore.reset();
     setIsResponding(true);
     setPhaseAndRef("connecting");
     attachVisibilityListener();
@@ -527,6 +558,7 @@ export function useWorkspaceAgentChatTurn({
           {
             signal: controller.signal,
             onMeta: (payload: AgentChatStreamMetaPayload) => {
+              pushTrajectory("meta", payload);
               receivedRuntimeActivity = true;
               setPhaseAndRef("first-token");
               if (payload.session_id) {
@@ -588,6 +620,7 @@ export function useWorkspaceAgentChatTurn({
               });
             },
             onChunk: (payload) => {
+              pushTrajectory("chunk", payload);
               receivedRuntimeActivity = true;
               if (payload.type === "image") {
                 const imageProgress = buildGeneratedImagePlaceholderSegment(
@@ -619,6 +652,7 @@ export function useWorkspaceAgentChatTurn({
               scheduleStreamingMessage();
             },
             onReasoning: (payload) => {
+              pushTrajectory("reasoning", payload);
               receivedRuntimeActivity = true;
               const delta =
                 typeof payload.content === "string"
@@ -636,18 +670,22 @@ export function useWorkspaceAgentChatTurn({
               }
             },
             onToolStart: (payload) => {
+              pushTrajectory("tool_start", payload);
               receivedRuntimeActivity = true;
               upsertLiveToolSegment(payload, "started", "tool_start");
             },
             onToolCall: (payload) => {
+              pushTrajectory("tool_call", payload);
               receivedRuntimeActivity = true;
               upsertLiveToolSegment(payload, "running", "tool_call");
             },
             onToolEnd: (payload) => {
+              pushTrajectory("tool_end", payload);
               receivedRuntimeActivity = true;
               handleToolEnd(payload);
             },
             onPlanning: (payload) => {
+              pushTrajectory("planning", payload);
               receivedRuntimeActivity = true;
               planningPayload = payload ?? null;
               if (!payload) {
@@ -663,6 +701,7 @@ export function useWorkspaceAgentChatTurn({
               );
             },
             onOrchestration: (payload) => {
+              pushTrajectory("orchestration", payload);
               receivedRuntimeActivity = true;
               orchestrationPayload = payload ?? null;
               if (!payload) {
@@ -678,6 +717,7 @@ export function useWorkspaceAgentChatTurn({
               );
             },
             onRoute: (payload) => {
+              pushTrajectory("route", payload);
               receivedRuntimeActivity = true;
               routePayload = payload ?? null;
               if (!payload) {
@@ -693,6 +733,7 @@ export function useWorkspaceAgentChatTurn({
               );
             },
             onObservation: (payload) => {
+              pushTrajectory("observation", payload);
               receivedRuntimeActivity = true;
               if (!payload) {
                 return;
@@ -708,6 +749,7 @@ export function useWorkspaceAgentChatTurn({
               );
             },
             onSubagent: (payload) => {
+              pushTrajectory("subagent", payload);
               receivedRuntimeActivity = true;
               if (!payload) {
                 return;
@@ -723,6 +765,7 @@ export function useWorkspaceAgentChatTurn({
               );
             },
             onResult: (payload) => {
+              pushTrajectory("result", payload);
               receivedRuntimeActivity = true;
               finalResult = payload;
               if (payload.source) {
@@ -749,6 +792,7 @@ export function useWorkspaceAgentChatTurn({
               );
             },
             onDone: (payload: AgentChatStreamDonePayload) => {
+              pushTrajectory("done", payload);
               receivedRuntimeActivity = true;
               finalizeTurn(payload);
             },
@@ -761,6 +805,7 @@ export function useWorkspaceAgentChatTurn({
               ) {
                 return;
               }
+              pushTrajectory("error", payload);
               receivedErrorEvent = true;
               const message =
                 typeof payload.message === "string" && payload.message.trim()
@@ -803,9 +848,7 @@ export function useWorkspaceAgentChatTurn({
         const message = getErrorMessage(error, "agent chat stream failed");
         updateStreamingError(
           message,
-          isRuntimeApiErrorCode(error, "SESSION_LEASE_CONFLICT")
-            ? "Session is active in another runtime."
-            : undefined,
+          getSessionLeaseConflictTitle(error),
         );
         updateCurrentThread((thread) => ({
           ...thread,
@@ -839,6 +882,7 @@ export function useWorkspaceAgentChatTurn({
     draft,
     isResponding,
     phase,
+    trajectoryStore,
     modelOptions,
     providerOptions,
     runtimeModelsError,

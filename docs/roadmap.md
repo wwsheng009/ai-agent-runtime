@@ -350,6 +350,8 @@ Deer Flow 前端中的以下领域层能力没有按来源项目原样迁入：
 3. 为多 team fan-out 增加结果聚合、outcome 汇总和 summary 对比视图。
 4. 提升消息区的 workflow 表达，补 inline tool steps、消息分组和更明确的运行轨迹展示。
 
+> 轨迹展示落地（2026-08-16，动作 4 部分达成）：workspace Chat/Trajectory Tab 切换的轨迹视图已上线——`chat.sse.*` 事件经 EventStore 持久化（复用 `runtime/events` 增量拉取），前端统一 reducer 双投影（chat 消息区 inline tool steps / reasoning 行 + 轨迹视图），支持搜索/筛选/时间线/虚拟滚动/详情面板、断线恢复（刷新后逐条一致）、JSONL 导出（含脱敏选项）与离线分析脚本（`scripts/analyze-trajectory.mjs`）。实施与验收详见 `docs/plan/agent-trajectory-view-implementation-todo.md`（Phase 0–3 全部完成，前端 vitest 369/369、轨迹 e2e 7/7）。
+
 验收标准：
 
 - 多 session、多 team 工作流可以稳定复用

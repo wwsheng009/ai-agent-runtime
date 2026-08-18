@@ -170,6 +170,7 @@ export default defineConfig(({ mode }) => {
       environment: "jsdom",
       maxWorkers: testMaxWorkers,
       setupFiles: ["./src/test/setup.ts"],
+      include: ["src/**/*.{test,spec}.?(c|m)[jt]s?(x)"],
     },
   };
 });

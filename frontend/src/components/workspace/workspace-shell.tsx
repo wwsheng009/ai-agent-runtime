@@ -58,6 +58,11 @@ const ArtifactPanel = lazy(() =>
     default: module.ArtifactPanel,
   })),
 );
+const TrajectoryView = lazy(() =>
+  import("@/components/workspace/trajectory/trajectory-view").then((module) => ({
+    default: module.TrajectoryView,
+  })),
+);
 
 type WorkspaceShellProps = {
   threads: Thread[];
@@ -84,6 +89,7 @@ type WorkspaceShellProps = {
   isResponding: boolean;
   modelOptions: string[];
   phase?: ChatStreamPhase | null;
+  trajectoryStore?: import("@/hooks/workspace/use-trajectory-snapshot").TrajectoryStore | null;
   onDraftChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onProviderChange: (value: string) => void;
@@ -173,6 +179,7 @@ export function WorkspaceShell({
   runtimeModelsLoading,
   selectedModel,
   selectedProvider,
+  trajectoryStore = null,
 }: WorkspaceShellProps) {
   const { settings } = useAppSettings();
   const { t } = useTranslation("workspace");
@@ -212,6 +219,7 @@ export function WorkspaceShell({
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<"chat" | "trajectory">("chat");
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("appearance");
   const [artifactRailManualOpen, setArtifactRailManualOpen] = useState(
@@ -384,31 +392,78 @@ export function WorkspaceShell({
               )}
             >
               {!isNewThread ? (
-                <div className="min-h-0 flex-1 overflow-hidden">
-                  <MessageList
-                    artifacts={selectedThread.artifacts}
-                    backtrackError={backtrackError}
-                    backtrackNotice={backtrackNotice}
-                    backtrackPendingMessageId={backtrackPendingMessageId}
-                    backtrackNavigationActive={backtrackNavigationActive}
-                    backtrackSelectedMessageId={backtrackSelectedMessageId}
-                    canBacktrack={canBacktrack}
-                    className={cn(
-                      "h-full px-3 sm:px-4 lg:px-5",
-                      isCompact ? "pt-3" : "pt-4",
-                    )}
-                    contentClassName={cn(
-                      "max-w-[50rem]",
-                      isCompact ? "gap-4" : "gap-6",
-                    )}
-                    isResponding={isResponding}
-                    messages={selectedThread.messages}
-                    onBacktrackToMessage={onBacktrackToMessage}
-                    onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
-                    onSelectArtifact={handleOpenArtifact}
-                    phase={phase}
-                    style={messageListStyle}
-                  />
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  {trajectoryStore ? (
+                    <div
+                      aria-label="Workspace view tabs"
+                      className="flex items-center gap-1 border-b border-[var(--border)] px-3 pt-2"
+                      role="tablist"
+                    >
+                      <button
+                        aria-selected={viewMode === "chat"}
+                        className={cn(
+                          "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
+                          viewMode === "chat"
+                            ? "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)]"
+                            : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                        )}
+                        onClick={() => setViewMode("chat")}
+                        role="tab"
+                        type="button"
+                      >
+                        Chat
+                      </button>
+                      <button
+                        aria-selected={viewMode === "trajectory"}
+                        className={cn(
+                          "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
+                          viewMode === "trajectory"
+                            ? "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)]"
+                            : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                        )}
+                        onClick={() => setViewMode("trajectory")}
+                        role="tab"
+                        type="button"
+                      >
+                        Trajectory
+                      </button>
+                    </div>
+                  ) : null}
+                  {viewMode === "chat" || !trajectoryStore ? (
+                    <MessageList
+                      artifacts={selectedThread.artifacts}
+                      backtrackError={backtrackError}
+                      backtrackNotice={backtrackNotice}
+                      backtrackPendingMessageId={backtrackPendingMessageId}
+                      backtrackNavigationActive={backtrackNavigationActive}
+                      backtrackSelectedMessageId={backtrackSelectedMessageId}
+                      canBacktrack={canBacktrack}
+                      className={cn(
+                        "h-full px-3 sm:px-4 lg:px-5",
+                        isCompact ? "pt-3" : "pt-4",
+                      )}
+                      contentClassName={cn(
+                        "max-w-[50rem]",
+                        isCompact ? "gap-4" : "gap-6",
+                      )}
+                      isResponding={isResponding}
+                      messages={selectedThread.messages}
+                      onBacktrackToMessage={onBacktrackToMessage}
+                      onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
+                      onSelectArtifact={handleOpenArtifact}
+                      phase={phase}
+                      style={messageListStyle}
+                    />
+                  ) : (
+                    <Suspense fallback={null}>
+                      <TrajectoryView
+                        className="h-full"
+                        isLive={isResponding}
+                        sessionId={selectedThread.sessionId}
+                        store={trajectoryStore}
+                      />
+                    </Suspense>
+                  )}
                 </div>
               ) : (
                 <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
@@ -471,28 +526,30 @@ export function WorkspaceShell({
                     : "absolute inset-x-0 bottom-0 pb-3",
                 )}
               >
-                <div className="pointer-events-auto mx-auto w-full max-w-[50rem]">
-                  <MessageComposer
-                    density={settings.workspace.density}
-                    draft={draft}
-                    hasSession={Boolean(selectedThread.sessionId)}
-                    isNewThread={isNewThread}
-                    isResponding={isResponding}
-                    modelOptions={modelOptions}
-                    selectedArtifactCount={selectedThread.artifacts.length}
-                    onModelChange={onModelChange}
-                    onProviderChange={onProviderChange}
-                    providerOptions={providerOptions}
-                    runtimeModelsError={runtimeModelsError}
-                    runtimeModelsLoading={runtimeModelsLoading}
-                    selectedModel={selectedModel}
-                    selectedProvider={selectedProvider}
-                    transport={selectedThread.transport}
-                    onDraftChange={onDraftChange}
-                    onStop={onStopResponding}
-                    onSubmit={onSubmit}
-                  />
-                </div>
+                {isNewThread || viewMode === "chat" || !trajectoryStore ? (
+                  <div className="pointer-events-auto mx-auto w-full max-w-[50rem]">
+                    <MessageComposer
+                      density={settings.workspace.density}
+                      draft={draft}
+                      hasSession={Boolean(selectedThread.sessionId)}
+                      isNewThread={isNewThread}
+                      isResponding={isResponding}
+                      modelOptions={modelOptions}
+                      selectedArtifactCount={selectedThread.artifacts.length}
+                      onModelChange={onModelChange}
+                      onProviderChange={onProviderChange}
+                      providerOptions={providerOptions}
+                      runtimeModelsError={runtimeModelsError}
+                      runtimeModelsLoading={runtimeModelsLoading}
+                      selectedModel={selectedModel}
+                      selectedProvider={selectedProvider}
+                      transport={selectedThread.transport}
+                      onDraftChange={onDraftChange}
+                      onStop={onStopResponding}
+                      onSubmit={onSubmit}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>

@@ -1,6 +1,7 @@
 import { BrainCircuitIcon, ChevronDownIcon } from "lucide-react";
 import { useId, useState } from "react";
 
+import { displayReasoningText } from "@/lib/trajectory/reasoning-window";
 import { type ReasoningMessageSegment } from "@/lib/workspace-thread-state";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,8 @@ export function MessageReasoningRow({
   const running = streaming && segment.running !== false;
   const summary = summarizeReasoning(segment.content);
   const hasContent = segment.content.trim().length > 0;
+  const reasoningDisplay = displayReasoningText(segment.content);
+  const trimmed = reasoningDisplay.droppedChars > 0;
 
   return (
     <section
@@ -64,8 +67,13 @@ export function MessageReasoningRow({
         hidden={!open}
         id={panelId}
       >
+        {trimmed ? (
+          <div className="border-b border-[var(--border)] px-3 py-1.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+            {reasoningDisplay.droppedChars.toLocaleString()} leading chars trimmed
+          </div>
+        ) : null}
         <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 app-text-12 app-chat-copy text-[var(--muted-foreground)]">
-          {segment.content}
+          {reasoningDisplay.visible}
         </pre>
       </div>
     </section>

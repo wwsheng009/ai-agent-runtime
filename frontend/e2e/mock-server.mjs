@@ -48,6 +48,67 @@ const DONE = {
   content: "The capital of France is Paris.",
 };
 
+// --- 会话事件存储（模拟后端 EventStore 的 chat.sse.* 记录；P3-1/P3-2）---
+// SSE 帧写出时同步记录；/runtime/sessions/:id/events 按 after/limit 查询，
+// 并在 payload 注入持久化 seq（对齐后端 ListEvents 契约）。
+const chatSseEventsBySession = new Map(); // sessionId -> [{type, payload, seq, timestamp}]
+const mockSessions = new Map(); // sessionId -> {session_id, id, title, created_at, updated_at, history}
+let mockChatSeq = 0;
+
+function recordChatSseEvent(sessionId, eventName, payload) {
+  if (!sessionId) return undefined;
+  const seq = ++mockChatSeq;
+  const { _event, ...rest } = payload ?? {};
+  let list = chatSseEventsBySession.get(sessionId);
+  if (!list) {
+    list = [];
+    chatSseEventsBySession.set(sessionId, list);
+  }
+  list.push({
+    type: `chat.sse.${eventName}`,
+    payload: rest,
+    seq,
+    timestamp: new Date().toISOString(),
+  });
+  return seq;
+}
+
+/** 测试专用：向事件存储注入一条 runtime 生命周期事件（Q4 映射链路）。 */
+function recordRuntimeTestEvent(sessionId, eventType, payload) {
+  if (!sessionId) return undefined;
+  const seq = ++mockChatSeq;
+  let list = chatSseEventsBySession.get(sessionId);
+  if (!list) {
+    list = [];
+    chatSseEventsBySession.set(sessionId, list);
+  }
+  list.push({
+    type: eventType,
+    payload: { ...(payload ?? {}), _source: "test" },
+    seq,
+    timestamp: new Date().toISOString(),
+  });
+  return seq;
+}
+
+function ensureMockSession(sessionId) {
+  if (!sessionId) return null;
+  let session = mockSessions.get(sessionId);
+  if (!session) {
+    const now = new Date().toISOString();
+    session = {
+      session_id: sessionId,
+      id: sessionId,
+      title: sessionId,
+      created_at: now,
+      updated_at: now,
+      history: [],
+    };
+    mockSessions.set(sessionId, session);
+  }
+  return session;
+}
+
 const TOOL_ARGS = { query: "capital of France" };
 
 const toolScript = [
@@ -199,13 +260,14 @@ function pickScript(rawBody) {
   const haystack = strings.join("\n").toLowerCase();
 
   if (haystack.includes("tool")) return { name: "tool", script: toolScript };
+  if (haystack.includes("burst")) return { name: "burst", script: burstScript };
   if (haystack.includes("scroll")) return { name: "scroll", script: scrollScript };
   if (haystack.includes("error")) return { name: "error", script: errorScript };
   if (haystack.includes("interrupt")) return { name: "interrupt", script: null };
   return { name: "reasoning", script: reasoningScript };
 }
 
-async function runChatScript(req, res, script, onAbort) {
+async function runChatScript(req, res, script, onAbort, sessionId) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -221,12 +283,25 @@ async function runChatScript(req, res, script, onAbort) {
     // consumed (Node autoDestroy); it does NOT mean the client disconnected.
     // Only bail out when the response side is actually gone.
     if (res.destroyed || req.socket?.destroyed || res.writableEnded) return;
-    res.write(sseEvent(step.event, step.payload));
+    // 与真实后端 Phase 0 契约一致：每帧携带 EventStore 持久化 seq
+    // （事件先落存储再写帧；存储不可用时降级为连接内计数）。
+    const seq = recordChatSseEvent(sessionId, step.event, step.payload) ?? 0;
+    const payload = { ...step.payload, _event: { sequence: seq } };
+    if (step.event === "done") {
+      const session = ensureMockSession(sessionId);
+      if (session) {
+        session.history.push({
+          role: "assistant",
+          content: step.payload.content ?? step.payload.text ?? "",
+        });
+      }
+    }
+    res.write(sseEvent(step.event, payload));
   }
   res.end();
 }
 
-async function runInterruptScript(req, res) {
+async function runInterruptScript(req, res, sessionId) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -238,14 +313,48 @@ async function runInterruptScript(req, res) {
     process.stdout.write("[mock] interrupt script: client aborted stream\n");
   });
 
-  res.write(sseEvent("meta", META));
+  const metaSeq = recordChatSseEvent(sessionId, "meta", META) ?? 1;
+  res.write(sseEvent("meta", { ...META, _event: { sequence: metaSeq } }));
   for (let i = 0; i < 100; i += 1) {
     await sleep(90);
     if (res.destroyed || req.socket?.destroyed || res.writableEnded) return;
-    res.write(sseEvent("chunk", makeChunk(i, `Interruptible chunk ${i + 1}. `)));
+    const chunkSeq = recordChatSseEvent(sessionId, "chunk", makeChunk(i, `Interruptible chunk ${i + 1}. `)) ?? i + 2;
+    res.write(
+      sseEvent("chunk", {
+        ...makeChunk(i, `Interruptible chunk ${i + 1}. `),
+        _event: { sequence: chunkSeq },
+      }),
+    );
   }
   res.end();
 }
+
+// burst：1200 条 observation 事件（每条一个独立 structured Item）+ 少量工具调用，
+// 用于轨迹视图 1000+ 行虚拟滚动断言（P2-3/P2-8）。
+const burstScript = [];
+burstScript.push({ event: "meta", payload: META });
+for (let i = 0; i < 1200; i += 1) {
+  burstScript.push({
+    event: "observation",
+    payload: { type: "observation", content: `observation-${i}`, source: "burst" },
+  });
+}
+for (let i = 0; i < 10; i += 1) {
+  const id = `burst-tool-${i}`;
+  burstScript.push({
+    event: "tool_start",
+    payload: { type: "tool_call", tool_call: { id, name: "burst_tool" } },
+  });
+  burstScript.push({
+    event: "tool_end",
+    payload: {
+      type: "tool_call",
+      tool_call: { id, name: "burst_tool" },
+      tool: { output_summary: `result-${i}` },
+    },
+  });
+}
+burstScript.push({ event: "done", delay: 1, payload: { ...DONE, content: "burst complete" } });
 
 function writeJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -294,24 +403,51 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (path === "/api/agent/chat" && req.method === "POST") {
+  // 测试注入（Q4）：POST /api/_test/runtime-events
+  // body: { session_id, type, payload } → 与 chat.sse.* 共用同一 seq 序列。
+  if (path === "/api/_test/runtime-events" && req.method === "POST") {
     const body = await readBody(req);
-    const selected = pickScript(body);
-    process.stdout.write(`[mock] chat POST path=${path} script=${selected.name}\n`);
-    if (selected.name === "interrupt") {
-      await runInterruptScript(req, res);
-      return;
-    }
-    await runChatScript(req, res, selected.script, () => {});
+    const sessionId =
+      typeof body?.session_id === "string" && body.session_id
+        ? body.session_id
+        : "e2e-session-1";
+    const seq = recordRuntimeTestEvent(
+      sessionId,
+      typeof body?.type === "string" ? body.type : "approval_requested",
+      typeof body?.payload === "object" && body.payload ? body.payload : {},
+    );
+    writeJson(res, 200, { seq });
     return;
   }
 
-  // --- static API stubs the workspace page loads on mount ---
+  if (path === "/api/agent/chat" && req.method === "POST") {
+    const body = await readBody(req);
+    const selected = pickScript(body);
+    const sessionId =
+      typeof body?.session_id === "string" && body.session_id
+        ? body.session_id
+        : "e2e-session-1";
+    const session = ensureMockSession(sessionId);
+    const userPrompt = body?.messages?.[0]?.content;
+    if (session && typeof userPrompt === "string") {
+      session.history.push({ role: "user", content: userPrompt });
+    }
+    process.stdout.write(`[mock] chat POST path=${path} script=${selected.name}\n`);
+    if (selected.name === "interrupt") {
+      await runInterruptScript(req, res, sessionId);
+      return;
+    }
+    await runChatScript(req, res, selected.script, () => {}, sessionId);
+    return;
+  }
+
+  // --- 会话 / 事件 / 历史端点（P3-1 恢复支撑；模拟后端 EventStore 查询）---
   if (path === "/api/runtime/sessions" && req.method === "GET") {
-    writeJson(res, 200, { sessions: [] });
+    writeJson(res, 200, { sessions: [...mockSessions.values()] });
     return;
   }
   if (path === "/api/runtime/sessions" && req.method === "POST") {
+    ensureMockSession("e2e-session-1");
     writeJson(res, 200, {
       session: {
         session_id: "e2e-session-1",
@@ -328,13 +464,44 @@ async function handleRequest(req, res) {
     writeJson(res, 200, { users: [] });
     return;
   }
+  if (/^\/api\/runtime\/sessions\/[^/]+\/events$/.test(path) && req.method === "GET") {
+    const sessionId = decodeURIComponent(path.split("/")[4]);
+    const after = Number(url.searchParams.get("after") ?? "0") || 0;
+    const rawLimit = url.searchParams.get("limit");
+    const limit = rawLimit ? Number(rawLimit) || 0 : 0;
+    const list = chatSseEventsBySession.get(sessionId) ?? [];
+    const events = [];
+    let latestSeq = 0;
+    for (const entry of list) {
+      if (entry.seq <= after) continue;
+      latestSeq = Math.max(latestSeq, entry.seq);
+      events.push({
+        type: entry.type,
+        payload: { ...entry.payload, seq: entry.seq },
+        timestamp: entry.timestamp,
+      });
+      if (limit > 0 && events.length >= limit) break;
+    }
+    writeJson(res, 200, { events, count: events.length, latest_seq: latestSeq });
+    return;
+  }
+  if (/^\/api\/runtime\/sessions\/[^/]+\/history$/.test(path) && req.method === "GET") {
+    const sessionId = decodeURIComponent(path.split("/")[4]);
+    const session = mockSessions.get(sessionId);
+    const history = session?.history ?? [];
+    writeJson(res, 200, { session_id: sessionId, count: history.length, history });
+    return;
+  }
   if (/^\/api\/runtime\/sessions\/[^/]+$/.test(path)) {
+    const sessionId = decodeURIComponent(path.split("/")[3]);
+    const session = mockSessions.get(sessionId);
     writeJson(res, 200, {
-      session: {
-        session_id: "e2e-session-1",
-        id: "e2e-session-1",
-        title: "e2e session",
-      },
+      session:
+        session ?? {
+          session_id: sessionId,
+          id: sessionId,
+          title: sessionId,
+        },
     });
     return;
   }

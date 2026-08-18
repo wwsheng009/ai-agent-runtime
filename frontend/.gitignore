@@ -24,4 +24,5 @@ dist-ssr
 *.sw?
 
 # playwright artifacts
-frontend/test-results/
+test-results/
+playwright-report/
