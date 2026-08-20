@@ -523,15 +523,25 @@ func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types
 // the provider reduce that checkpoint together with the largest safe recent
 // suffix. It keeps oversized raw history off the wire while preserving one
 // provider compaction pass whenever a reduced request can fit.
+//
+// To keep the provider prompt-cache prefix stable across turns, the fitted
+// request keeps the original leading user request verbatim in front of the
+// locally-mapped summary whenever the budget allows; only when the anchor
+// cannot fit does the request fall back to the summary-first layout.
 func buildFittedLocalCompactionLLMRequest(runtime *llm.LLMRuntime, req Request, threshold threshold, systemMessages, history []types.Message, maxTokens int, reasoningEffort, preflightReason string) *llm.LLMRequest {
 	starts := safeLocalCompactionStarts(history)
 	if len(starts) == 0 {
 		return nil
 	}
 
-	buildCandidate := func(start int, systems []types.Message) *llm.LLMRequest {
-		reduced := make([]types.Message, 0, len(history)-start+1)
+	buildCandidate := func(start int, systems []types.Message, withAnchor bool) *llm.LLMRequest {
+		reduced := make([]types.Message, 0, len(history)-start+2)
 		if start > 0 {
+			if withAnchor {
+				if anchor := leadingCompactionAnchorUserMessage(history, start); anchor != nil {
+					reduced = append(reduced, *anchor)
+				}
+			}
 			prefix := types.NewUserMessage(buildDeterministicCompactSummary(history[:start], preflightReason))
 			prefix.Metadata["context_stage"] = "compaction"
 			prefix.Metadata["summary_source"] = "deterministic_prefix_map"
@@ -544,34 +554,69 @@ func buildFittedLocalCompactionLLMRequest(runtime *llm.LLMRuntime, req Request, 
 		candidate.Metadata["compact_omitted_messages"] = start
 		candidate.Metadata["compact_retained_messages"] = len(history) - start
 		candidate.Metadata["compact_preflight_reason"] = summarizeCompactLine(preflightReason, 240)
+		if start > 0 && withAnchor {
+			candidate.Metadata["compact_anchor_retained"] = true
+		}
 		if len(systems) == 0 && len(systemMessages) > 0 {
 			candidate.Metadata["compact_system_messages_omitted"] = len(systemMessages)
 		}
 		return candidate
 	}
 
-	findFit := func(systems []types.Message) *llm.LLMRequest {
-		last := buildCandidate(starts[len(starts)-1], systems)
+	findFit := func(systems []types.Message, withAnchor bool) *llm.LLMRequest {
+		last := buildCandidate(starts[len(starts)-1], systems, withAnchor)
 		if localCompactionRequestBudgetFailure(runtime, last, threshold) != "" {
 			return nil
 		}
 		low, high := 0, len(starts)-1
 		for low < high {
 			mid := low + (high-low)/2
-			candidate := buildCandidate(starts[mid], systems)
+			candidate := buildCandidate(starts[mid], systems, withAnchor)
 			if localCompactionRequestBudgetFailure(runtime, candidate, threshold) == "" {
 				high = mid
 			} else {
 				low = mid + 1
 			}
 		}
-		return buildCandidate(starts[low], systems)
+		return buildCandidate(starts[low], systems, withAnchor)
 	}
 
-	if fitted := findFit(systemMessages); fitted != nil {
+	// Prefer the anchor-keeping layout (stable prefix), then degrade in order:
+	// with system -> without system -> summary-only (legacy) layouts.
+	if fitted := findFit(systemMessages, true); fitted != nil {
 		return fitted
 	}
-	return findFit(nil)
+	if fitted := findFit(nil, true); fitted != nil {
+		return fitted
+	}
+	if fitted := findFit(systemMessages, false); fitted != nil {
+		return fitted
+	}
+	return findFit(nil, false)
+}
+
+// leadingCompactionAnchorUserMessage returns a clone of the first plain user
+// message inside the truncated prefix history[:start]. It is kept verbatim at
+// the head of a fitted compact request so the provider prefix cache still sees
+// the same "system + original user request" leading block that ordinary turns
+// carry, instead of diverging at the very first (summary) message. Injected
+// stage messages (previous compaction summaries / durable context) are skipped.
+func leadingCompactionAnchorUserMessage(history []types.Message, start int) *types.Message {
+	limit := start
+	if limit > len(history) {
+		limit = len(history)
+	}
+	for index := 0; index < limit; index++ {
+		message := &history[index]
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			continue
+		}
+		if strings.TrimSpace(message.Metadata.GetString("context_stage", "")) != "" {
+			continue
+		}
+		return message.Clone()
+	}
+	return nil
 }
 
 func safeLocalCompactionStarts(history []types.Message) []int {

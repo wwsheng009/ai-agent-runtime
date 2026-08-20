@@ -199,9 +199,11 @@ func (c *SubagentBatchCoordinator) Get(ctx context.Context, batchID string) (*su
 }
 
 // Cancel requests cancellation of a running/queued batch: it durably marks the
-// batch canceled, signals the worker context, and leaves pending tasks to be
-// recorded as canceled by the worker. Cancel is idempotent for terminal
-// batches (no-op).
+// batch canceled and signals the worker context; pending tasks are recorded as
+// canceled by the worker and the single terminal subagent.batch.canceled event
+// is emitted by finalizeBatch (with cancel_reason/cancel_requested_at), so
+// Cancel itself does not emit a duplicate terminal event. Cancel is idempotent
+// for terminal batches (no-op).
 func (c *SubagentBatchCoordinator) Cancel(ctx context.Context, batchID, reason string) error {
 	if c == nil || c.store == nil {
 		return fmt.Errorf("subagent batch coordinator is not configured")
@@ -225,10 +227,6 @@ func (c *SubagentBatchCoordinator) Cancel(ctx context.Context, batchID, reason s
 	if err != nil {
 		return fmt.Errorf("subagent batch: cancel %s: %w", batchID, err)
 	}
-	c.emit("subagent.batch.canceled", map[string]interface{}{
-		"batch_id":      batchID,
-		"cancel_reason": reason,
-	})
 	return nil
 }
 
@@ -247,11 +245,8 @@ func (c *SubagentBatchCoordinator) runBatch(ctx context.Context, batchID string,
 		b.OwnerID = opts.ParentSessionID
 		b.FencingToken = fmt.Sprintf("%s/%d", opts.ParentSessionID, now.UnixNano())
 	}); err != nil {
-		c.emit("subagent.batch.failed", map[string]interface{}{
-			"batch_id":    batchID,
-			"error":       err.Error(),
-			"error_class": subagentbatch.CanonicalErrorClass(err),
-		})
+		// finalizeBatch persists the terminal state and emits the single
+		// terminal lifecycle event; there is no separate early failure event.
 		c.finalizeBatch(ctx, batchID, opts, tasks, nil, err)
 		return
 	}
@@ -350,6 +345,12 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 	case ctx.Err() == context.DeadlineExceeded:
 		abortReason = batchAbortTimedOut
 	}
+	// The worker context may already be canceled or past its deadline by the
+	// time finalization runs, so durable writes must use a detached context;
+	// otherwise RecordTaskResult/UpdateBatch fail inside dead transactions and
+	// the ledger never reflects the terminal task/batch states. Classification
+	// (abortReason and terminalBatchStatus) still uses the original ctx.
+	persistCtx := context.WithoutCancel(ctx)
 	statuses := make(map[string]string, len(tasks))
 	var criticalErrors []string
 
@@ -403,7 +404,7 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 			Error:       result.Error,
 			ArtifactRef: result.ArtifactRef,
 		}
-		if err := c.store.RecordTaskResult(ctx, batchID, taskID, -1, ts, taskResult); err != nil {
+		if err := c.store.RecordTaskResult(persistCtx, batchID, taskID, -1, ts, taskResult); err != nil {
 			c.emit("subagent.batch.progress", map[string]interface{}{
 				"batch_id":    batchID,
 				"task_id":     taskID,
@@ -419,11 +420,11 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		})
 	}
 
-	batch, err := c.store.GetBatch(ctx, batchID)
+	batch, err := c.store.GetBatch(persistCtx, batchID)
 	if err != nil || batch == nil {
 		batch = &subagentbatch.SubagentBatch{BatchID: batchID, CreatedAt: now}
 	}
-	records, _ := c.store.ListTasks(ctx, batchID)
+	records, _ := c.store.ListTasks(persistCtx, batchID)
 	_, _, completed, failed, canceled, timedOut := subagentbatch.Counts(records)
 
 	status, errorClass := c.terminalBatchStatus(ctx, batch, runErr, failed, canceled, timedOut, completed)
@@ -449,11 +450,14 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		errorDetail = runErr.Error()
 	}
 	finishedAt := now
-	_, updateErr := c.store.UpdateBatch(ctx, batchID, -1, func(b *subagentbatch.SubagentBatch) {
-		if b.Status.Terminal() {
-			return
+	_, updateErr := c.store.UpdateBatch(persistCtx, batchID, -1, func(b *subagentbatch.SubagentBatch) {
+		// Cancel() durably marks a batch canceled (a terminal state) before the
+		// worker finalizes, so a terminal batch still needs its final
+		// summary/counts persisted; only the status flip is skipped once the
+		// batch is already terminal, avoiding a terminal->terminal re-transition.
+		if !b.Status.Terminal() {
+			b.Status = status
 		}
-		b.Status = status
 		b.ResultSummary = summaryJSON
 		b.ErrorClass = errorClass
 		b.ErrorDetail = errorDetail
@@ -475,12 +479,14 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		status = subagentbatch.BatchFailed
 	}
 
-	c.emitTerminalEvent(ctx, batchID, status, opts, summary, runErr)
+	c.emitTerminalEvent(ctx, batchID, status, opts, summary, runErr, batch.CancelReason, batch.CancelRequestedAt)
 }
 
 // terminalBatchStatus decides the durable terminal status for the batch. Order
-// matters: an explicit cancel wins, then deadline (timed_out), then failures,
-// then all-succeeded (completed).
+// matters: the worker context's own outcome wins (an expired deadline yields
+// timed_out, an explicit cancel yields canceled — whichever fired on the
+// context first), then run errors, then derived per-task counts (canceled,
+// timed_out, failed), and finally all-succeeded (completed).
 func (c *SubagentBatchCoordinator) terminalBatchStatus(ctx context.Context, batch *subagentbatch.SubagentBatch, runErr error, failed, canceled, timedOut, completed int) (subagentbatch.BatchStatus, string) {
 	if ctx.Err() == context.DeadlineExceeded {
 		return subagentbatch.BatchTimedOut, "deadline"
@@ -503,7 +509,7 @@ func (c *SubagentBatchCoordinator) terminalBatchStatus(ctx context.Context, batc
 	return subagentbatch.BatchCompleted, ""
 }
 
-func (c *SubagentBatchCoordinator) emitTerminalEvent(ctx context.Context, batchID string, status subagentbatch.BatchStatus, opts BatchStartOptions, summary subagentbatch.BatchSummary, runErr error) {
+func (c *SubagentBatchCoordinator) emitTerminalEvent(ctx context.Context, batchID string, status subagentbatch.BatchStatus, opts BatchStartOptions, summary subagentbatch.BatchSummary, runErr error, cancelReason string, cancelRequestedAt *time.Time) {
 	payload := map[string]interface{}{
 		"batch_id":          batchID,
 		"parent_session_id": opts.ParentSessionID,
@@ -524,6 +530,15 @@ func (c *SubagentBatchCoordinator) emitTerminalEvent(ctx context.Context, batchI
 		eventType = "subagent.batch.failed"
 	case subagentbatch.BatchCanceled:
 		eventType = "subagent.batch.canceled"
+		// The cancel metadata only lives on the batch record, not on the
+		// summary; carry it here so the single terminal event keeps the reason
+		// the (now removed) premature Cancel() event used to carry.
+		if cancelReason != "" {
+			payload["cancel_reason"] = cancelReason
+		}
+		if cancelRequestedAt != nil {
+			payload["cancel_requested_at"] = cancelRequestedAt
+		}
 	case subagentbatch.BatchTimedOut:
 		eventType = "subagent.batch.timed_out"
 	}

@@ -255,7 +255,7 @@ func (s *sqliteBatchStore) CreateBatch(ctx context.Context, batch *SubagentBatch
 		if err == nil && existing != "" {
 			// Idempotent replay: surface the existing durable batch as the
 			// authoritative handle instead of a fresh never-persisted id.
-			if existingBatch, loadErr := scanBatchRow(tx.QueryRowContext(ctx,
+			existingBatch, loadErr := scanBatchRow(tx.QueryRowContext(ctx,
 				`SELECT batch_id, root_scope_id, parent_session_id, parent_turn_id,
 				        parent_tool_call_id, trace_id, execution_mode, status,
 				        idempotency_key, task_count, queued_count, running_count,
@@ -263,9 +263,13 @@ func (s *sqliteBatchStore) CreateBatch(ctx context.Context, batch *SubagentBatch
 				        created_at, started_at, updated_at, finished_at, batch_deadline,
 				        cancel_requested_at, cancel_reason, owner_id, fencing_token,
 				        heartbeat_at, result_summary, error_class, error_detail, version
-				 FROM subagent_batches WHERE batch_id = ?`, existing)); loadErr == nil {
-				*batch = *existingBatch
+				 FROM subagent_batches WHERE batch_id = ?`, existing))
+			if loadErr != nil {
+				// Never hand the caller a phantom (never-inserted) batch with a
+				// fresh id; a failed replay must surface so the caller can recover.
+				return false, fmt.Errorf("subagentbatch: idempotent replay %q: load existing batch: %w", key, loadErr)
 			}
+			*batch = *existingBatch
 			return false, nil
 		}
 		if err != nil && err != sql.ErrNoRows {
@@ -704,7 +708,11 @@ func (s *sqliteBatchStore) UpdateTasks(ctx context.Context, batchID string, upda
 			}
 			return err
 		}
+		from := record.Status
 		update(record)
+		if err := ValidateTaskTransition(from, record.Status); err != nil {
+			return err
+		}
 		record.UpdatedAt = Now()
 		record.Version++
 		if err := overwriteTaskRow(ctx, tx, batchID, taskID, record.Version-1, record); err != nil {

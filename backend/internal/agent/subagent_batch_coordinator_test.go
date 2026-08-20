@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,11 @@ type fakeExecutor struct {
 	// channel is closed. Used to simulate a long-running worker.
 	release chan struct{}
 
+	// done, when non-nil, is closed once RunChildren returns so tests can wait
+	// for the worker (and thus finalizeBatch) to finish before asserting the
+	// durable task/batch states.
+	done chan struct{}
+
 	mu      sync.Mutex
 	seenOpt SubagentRunOptions
 }
@@ -32,6 +38,9 @@ func (f *fakeExecutor) RunChildren(ctx context.Context, options SubagentRunOptio
 	f.mu.Lock()
 	f.seenOpt = options
 	f.mu.Unlock()
+	if f.done != nil {
+		defer close(f.done)
+	}
 	for _, task := range tasks {
 		options.notifyTaskEvent(task.ID, "started")
 	}
@@ -147,10 +156,29 @@ func TestStartBackgroundCancel(t *testing.T) {
 	exec := &fakeExecutor{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	var mu sync.Mutex
+	var events []string
+	terminalCanceled := make(chan struct{})
+	emitter := func(evt string, payload map[string]interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, evt)
+		// The terminal canceled event emitted by finalizeBatch is the dedup
+		// target: it must appear exactly once and carry the cancel metadata.
+		if evt == "subagent.batch.canceled" && payload["status"] == "canceled" && payload["cancel_reason"] == "user abort" {
+			select {
+			case <-terminalCanceled:
+			default:
+				close(terminalCanceled)
+			}
+		}
 	}
 	c := &SubagentBatchCoordinator{
 		store:    store,
 		executor: exec,
+		emitter:  emitter,
 		deadline: time.Minute,
 		cancels:  make(map[string]context.CancelFunc),
 	}
@@ -173,6 +201,20 @@ func TestStartBackgroundCancel(t *testing.T) {
 		t.Fatalf("Cancel: %v", err)
 	}
 
+	// Wait until the worker has returned and finalizeBatch has persisted before
+	// asserting on the durable task state.
+	select {
+	case <-exec.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("worker did not finish after cancel")
+	}
+	// M4: the single terminal canceled event must be emitted by finalizeBatch.
+	select {
+	case <-terminalCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("terminal canceled event never emitted")
+	}
+
 	term := waitTerminal(t, store, batch.BatchID)
 	if term.Status != subagentbatch.BatchCanceled {
 		t.Errorf("terminal status = %s, want canceled", term.Status)
@@ -192,9 +234,36 @@ func TestStartBackgroundCancel(t *testing.T) {
 		t.Errorf("task records = %+v, want one canceled task", recs)
 	}
 
+	// L3: a canceled batch must still persist its final ResultSummary even
+	// though Cancel() made the batch terminal before finalize ran.
+	if len(term.ResultSummary) == 0 {
+		t.Errorf("canceled batch did not persist a result summary")
+	} else {
+		var sum subagentbatch.BatchSummary
+		if err := json.Unmarshal(term.ResultSummary, &sum); err != nil {
+			t.Errorf("unmarshal result summary: %v", err)
+		} else if sum.Status != subagentbatch.BatchCanceled || sum.CanceledCount != 1 {
+			t.Errorf("result summary = %+v, want canceled with CanceledCount=1", sum)
+		}
+	}
+
 	// Cancel is idempotent for terminal batches (no error).
 	if err := c.Cancel(context.Background(), batch.BatchID, "again"); err != nil {
 		t.Errorf("second Cancel: %v", err)
+	}
+
+	// M4: subagent.batch.canceled must be emitted exactly once (before the fix,
+	// both Cancel() and finalizeBatch emitted it, yielding two same-name events).
+	mu.Lock()
+	canceledEvents := 0
+	for _, evt := range events {
+		if evt == "subagent.batch.canceled" {
+			canceledEvents++
+		}
+	}
+	mu.Unlock()
+	if canceledEvents != 1 {
+		t.Errorf("subagent.batch.canceled emitted %d times, want exactly one", canceledEvents)
 	}
 }
 
@@ -203,6 +272,7 @@ func TestStartBackgroundDeadlineMarksTaskTimedOut(t *testing.T) {
 	exec := &fakeExecutor{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	c := &SubagentBatchCoordinator{
 		store:    store,
@@ -226,6 +296,13 @@ func TestStartBackgroundDeadlineMarksTaskTimedOut(t *testing.T) {
 	case <-exec.started:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("worker never started")
+	}
+
+	// Wait for the worker to observe the deadline and finalize before asserting.
+	select {
+	case <-exec.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("worker did not finish after deadline")
 	}
 
 	term := waitTerminal(t, store, batch.BatchID)

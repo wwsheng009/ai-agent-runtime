@@ -281,9 +281,12 @@ func (a *Agent) SubagentBackgroundEnabled() bool {
 }
 
 // GetSubagentBatchCoordinator returns the durable batch coordinator, creating
-// it lazily with the agent's scheduler and a default (in-memory) store when a
-// host has not injected one. A nil result (store construction failure) disables
-// background mode; callers must fall back to the synchronous wait path.
+// it lazily with the agent's scheduler and a default in-memory store when a
+// host has not injected one. Note the default store is process-local only and
+// does not survive restarts (cross-process amnesia), so hosts that need durable
+// supervision should inject a file-backed coordinator via
+// SetSubagentBatchCoordinator. A nil result (store construction failure)
+// disables background mode; callers must fall back to the synchronous wait path.
 func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 	a.mu.RLock()
 	if a.batchCoordinator != nil {
@@ -296,27 +299,29 @@ func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 
 	store, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{})
 	if err != nil {
-		store = nil
+		// Degrade to "background disabled" instead of caching a broken
+		// coordinator: useBackgroundSubagents treats nil as "use the synchronous
+		// wait path" and would otherwise route requests into a coordinator whose
+		// store is nil (StartBackground would always error).
+		return nil
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.batchCoordinator == nil {
 		cfg := SubagentBatchCoordinatorConfig{Scheduler: scheduler, Store: store}
-		if store != nil {
-			cfg.Emitter = func(eventType string, payload map[string]interface{}) {
-				sessionID := ""
-				toolName := "spawn_subagents"
-				if payload != nil {
-					if v, ok := payload["parent_session_id"].(string); ok {
-						sessionID = v
-					}
-					if v, ok := payload["tool_name"].(string); ok && v != "" {
-						toolName = v
-					}
+		cfg.Emitter = func(eventType string, payload map[string]interface{}) {
+			sessionID := ""
+			toolName := "spawn_subagents"
+			if payload != nil {
+				if v, ok := payload["parent_session_id"].(string); ok {
+					sessionID = v
 				}
-				a.emitRuntimeEvent(eventType, sessionID, toolName, payload)
+				if v, ok := payload["tool_name"].(string); ok && v != "" {
+					toolName = v
+				}
 			}
+			a.emitRuntimeEvent(eventType, sessionID, toolName, payload)
 		}
 		a.batchCoordinator = NewSubagentBatchCoordinator(cfg)
 	}

@@ -441,6 +441,44 @@ func TestBuildFittedLocalCompactionRequestKeepsToolBatchBoundary(t *testing.T) {
 	}
 }
 
+func TestBuildFittedLocalCompactionRequestPreservesLeadingUserAnchor(t *testing.T) {
+	// A fitted (suffix-reduced) compact request must keep the ORIGINAL leading
+	// user request verbatim right after the system block, so the provider
+	// prompt-cache prefix stays identical to ordinary turns even though the
+	// middle of the context is replaced by a local summary.
+	runtime := llm.NewLLMRuntime(nil)
+	system := []types.Message{*types.NewSystemMessage("You are a precise engineering assistant.")}
+	anchorText := strings.Repeat("Original anchor request. ", 60)
+	history := []types.Message{
+		// Dropped region: large enough to force a fitted (omitted>0) request.
+		*types.NewUserMessage(anchorText),
+		*types.NewAssistantMessage(strings.Repeat("Work in progress analysis. ", 1200)),
+		// Retained suffix stays small so the trailing user survives verbatim.
+		*types.NewUserMessage("Latest user request: wrap up."),
+		*types.NewAssistantMessage("On it."),
+	}
+	req := Request{Provider: "provider-a", Model: "gpt-5", SessionID: "session-anchor"}
+
+	fitted := buildFittedLocalCompactionLLMRequest(
+		runtime, req, threshold{MaxContextTokens: 3600}, system, history, 128, "", "oversized",
+	)
+
+	require.NotNil(t, fitted)
+	require.Empty(t, localCompactionRequestBudgetFailure(runtime, fitted, threshold{MaxContextTokens: 3600}))
+	require.Equal(t, true, fitted.Metadata["compact_input_reduced"])
+	require.Equal(t, true, fitted.Metadata["compact_anchor_retained"])
+	require.Equal(t, 2, fitted.Metadata["compact_omitted_messages"].(int))
+
+	require.Equal(t, "compact", fitted.Metadata[llm.MetadataKeyInternalOperation])
+	require.Equal(t, "system", fitted.Messages[0].Role, "system block stays at the head of the cache prefix")
+	require.Equal(t, "user", fitted.Messages[1].Role, "anchor is a plain user message")
+	require.Equal(t, anchorText, fitted.Messages[1].Content, "original leading user request kept verbatim")
+	require.Empty(t, fitted.Messages[1].Metadata.GetString("context_stage", ""), "anchor is not an injected stage message")
+	require.Equal(t, "compaction", fitted.Messages[2].Metadata.GetString("context_stage", ""), "summary follows the anchor")
+	require.Equal(t, "user", fitted.Messages[3].Role, "trailing user survives the fitted suffix")
+	require.Equal(t, "Latest user request: wrap up.", fitted.Messages[3].Content)
+}
+
 func TestSelectCompactionRecentMessagesHonorsCountAndKeepsAssistantProgress(t *testing.T) {
 	history := []types.Message{
 		*types.NewUserMessage("old request"),

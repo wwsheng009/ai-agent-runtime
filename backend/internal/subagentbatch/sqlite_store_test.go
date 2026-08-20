@@ -287,6 +287,40 @@ func TestUpdateTaskCASAndResult(t *testing.T) {
 	}
 }
 
+func TestUpdateTasksValidatesTransitions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	batch, tasks := sampleBatch(t, "", "session-1")
+	if _, err := store.CreateBatch(ctx, batch, tasks); err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+
+	// Legal transitions on both rows are applied atomically.
+	if err := store.UpdateTasks(ctx, batch.BatchID, map[string]TaskUpdate{
+		"task-a": func(t *SubagentTaskRecord) { t.Status = TaskRunning },
+		"task-b": func(t *SubagentTaskRecord) { t.Status = TaskReady },
+	}); err != nil {
+		t.Fatalf("UpdateTasks(legal): %v", err)
+	}
+	for id, want := range map[string]TaskStatus{"task-a": TaskRunning, "task-b": TaskReady} {
+		got, _ := store.GetTask(ctx, batch.BatchID, id)
+		if got == nil || got.Status != want {
+			t.Errorf("task %s status = %v, want %s", id, got, want)
+		}
+	}
+
+	// An illegal transition is rejected and the whole transaction rolls back.
+	err := store.UpdateTasks(ctx, batch.BatchID, map[string]TaskUpdate{
+		"task-b": func(t *SubagentTaskRecord) { t.Status = TaskSucceeded },
+	})
+	if err == nil {
+		t.Fatalf("UpdateTasks(pending->succeeded) = nil, want invalid transition error")
+	}
+	if got, _ := store.GetTask(ctx, batch.BatchID, "task-b"); got == nil || got.Status != TaskReady {
+		t.Errorf("task-b status = %v, want TaskReady (unchanged after rollback)", got)
+	}
+}
+
 func TestListBatchesFilter(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
