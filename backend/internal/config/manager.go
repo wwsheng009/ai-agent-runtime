@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,6 +52,10 @@ type RuntimeConfig struct {
 
 	// Rollout 配置
 	Rollout RolloutConfig `yaml:"rollout" json:"rollout"`
+
+	// Observe Runtime Observation Plane 配置（默认关闭；启用后注册
+	// /api/runtime/observe/v1 观测路由并订阅 runtime event bus）。
+	Observe runtimeobserve.Config `yaml:"observe" json:"observe"`
 }
 
 // AgentConfig Agent 配置
@@ -429,6 +434,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			Mode:    "canary",
 			Percent: 0,
 		},
+		Observe: runtimeobserve.DefaultConfig(),
 	}
 }
 

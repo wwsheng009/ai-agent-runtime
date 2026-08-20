@@ -36,3 +36,9 @@ images:
     default_output_format: png
     request_timeout: 5m
     max_n: 4
+
+observe:
+  # Runtime Observation Plane: 默认关闭；此处显式开启只读观测 API。
+  # 启用后注册 /api/runtime/observe/v1/*（capabilities / snapshot /
+  # sessions/{session_id} / events）。SSE 与 renderer 依赖 Phase 3/4，v1 不注册。
+  enabled: true

@@ -46,6 +46,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -122,6 +123,8 @@ type Handler struct {
 	runtimeToolCatalogConfigKey    string
 	runtimeMCPBridgeOnce           sync.Once
 	runtimeEventBridgeOnce         sync.Once
+	observeMu                      sync.RWMutex
+	observeService                 *runtimeobserve.Service
 	scopeResolverMu                sync.RWMutex
 	scopeResolverConfig            ScopeResolverConfig
 	runtimeConfig                  *runtimecfg.RuntimeConfig
@@ -826,6 +829,16 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 			return adminDebugRouteWarning(requestPath(r), canonicalAgentChatEntrypoint)
 		},
 	})).Methods(http.MethodPost)
+
+	// Runtime Observation Plane (Phase 2): 仅当 runtime.observe.enabled=true 时注册。
+	// SSE 与 renderer 依赖 Phase 3/4，v1 阶段不注册 /stream 与 /renderers/*。
+	if h.ensureObserveService() != nil {
+		observeRouter := runtimeRouter.PathPrefix("/observe/v1").Subrouter()
+		observeRouter.HandleFunc("/capabilities", h.ObserveCapabilities).Methods(http.MethodGet)
+		observeRouter.HandleFunc("/snapshot", h.ObserveSnapshot).Methods(http.MethodGet)
+		observeRouter.HandleFunc("/sessions/{session_id}", h.ObserveSession).Methods(http.MethodGet)
+		observeRouter.HandleFunc("/events", h.ObserveEvents).Methods(http.MethodGet)
+	}
 
 	return runtimeRouter
 }

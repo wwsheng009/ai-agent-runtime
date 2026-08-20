@@ -98,6 +98,29 @@ func (h *SessionHub) Get(sessionID string) (*SessionActor, bool) {
 	return actor, true
 }
 
+// ActiveSessionIDs returns up to limit active session IDs (deterministic order
+// is not required; used by the runtime observation SessionSource).
+func (h *SessionHub) ActiveSessionIDs(limit int) []string {
+	if h == nil || limit <= 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ids := make([]string, 0, len(h.actors))
+	for id, actor := range h.actors {
+		if actor == nil || actor.IsStopped() {
+			delete(h.actors, id)
+			delete(h.lastAccess, id)
+			continue
+		}
+		ids = append(ids, id)
+		if len(ids) >= limit {
+			break
+		}
+	}
+	return ids
+}
+
 // GetOrCreate returns an existing actor or creates a new one.
 func (h *SessionHub) GetOrCreate(sessionID string) (*SessionActor, error) {
 	if h == nil {
