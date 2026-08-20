@@ -1973,7 +1973,7 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1300,
+			"context_max_prompt_tokens":    1350,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2047,7 +2047,7 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1300,
+			"context_max_prompt_tokens":    1350,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2469,7 +2469,7 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    500,
+			"context_max_prompt_tokens":    700,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2494,7 +2494,7 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 	preflightErr, ok := AsPromptPreflightError(err)
 	require.True(t, ok, "expected prompt preflight error type")
 	require.Equal(t, "active_turn_not_compactable", preflightErr.Code)
-	require.Equal(t, 500, preflightErr.PromptBudget)
+	require.Equal(t, 700, preflightErr.PromptBudget)
 	require.Equal(t, false, preflightErr.ActiveTurnCompacted)
 	// Recovery may compact more than once while each replacement still shrinks
 	// the history, then returns once compaction can no longer make progress.
@@ -2548,7 +2548,7 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1400,
+			"context_max_prompt_tokens":    1500,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -4478,7 +4478,7 @@ func TestReActLoop_Run_FreezesToolSurfaceForEntireTurn(t *testing.T) {
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1300,
+			"context_max_prompt_tokens":    2000,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -5520,33 +5520,35 @@ func TestSubagentScheduler_EnforcesSingleWriterPolicy(t *testing.T) {
 	assert.Contains(t, deniedReasons[0], "single-writer policy violation")
 }
 
-func TestSubagentScheduler_ReadOnlyRejectsWriteLikeTools(t *testing.T) {
+func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
 	agent := &Agent{
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
 	}
-	bus := runtimeevents.NewBus()
-	var deniedReasons []string
-	bus.Subscribe("subagent.denied", func(event runtimeevents.Event) {
-		if reason, ok := event.Payload["reason"].(string); ok {
-			deniedReasons = append(deniedReasons, reason)
-		}
-	})
-	agent.SetEventBus(bus)
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
 		MaxConcurrent:       2,
 		MaxDepth:            1,
 		EnforceSingleWriter: true,
 	})
 
-	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
-		TraceID: "trace_test",
-		Depth:   1,
-	}, []SubagentTask{
-		{ID: "reader-1", Goal: "Inspect files", ReadOnly: true, ToolsWhitelist: []string{"write_file"}},
+	prepared, err := scheduler.prepareTasks([]SubagentTask{
+		{
+			ID:             "reader-1",
+			Goal:           "Inspect files",
+			ReadOnly:       true,
+			ToolsWhitelist: []string{"write_file", "read_file", "apply_patch", "git_log"},
+		},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requested write-like tools")
-	assert.Contains(t, deniedReasons[0], "requested write-like tools")
+	require.NoError(t, err)
+	require.Len(t, prepared, 1)
+	assert.True(t, prepared[0].ReadOnly)
+	assert.Equal(t, []string{"read_file", "git_log"}, prepared[0].ToolsWhitelist)
+	assert.Equal(t, []string{"write_file", "apply_patch"}, prepared[0].ReadOnlyFilteredTools)
+	assert.Equal(t, "spawn_subagents.read_only", prepared[0].ReadOnlySource)
+
+	readers, writers, err := scheduler.partitionTasks(prepared)
+	require.NoError(t, err)
+	assert.Len(t, readers, 1)
+	assert.Empty(t, writers)
 }
 
 func TestSubagentScheduler_RejectsDuplicateTaskID(t *testing.T) {
@@ -5643,20 +5645,11 @@ func TestSubagentScheduler_RejectsDependencyCycle(t *testing.T) {
 	assert.Contains(t, deniedReasons, "subagent dependency deadlock detected")
 }
 
-func TestSubagentScheduler_ReadOnlyParentRejectsWritableSubagent(t *testing.T) {
+func TestSubagentScheduler_ReadOnlyParentNarrowsWritableSubagent(t *testing.T) {
 	agent := &Agent{
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
 	}
 	agent.SetToolExecutionPolicy(NewToolExecutionPolicy(nil, true))
-
-	bus := runtimeevents.NewBus()
-	var deniedPolicies []string
-	bus.Subscribe("subagent.denied", func(event runtimeevents.Event) {
-		if policy, ok := event.Payload["policy"].(string); ok {
-			deniedPolicies = append(deniedPolicies, policy)
-		}
-	})
-	agent.SetEventBus(bus)
 
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
 		MaxConcurrent:       2,
@@ -5664,15 +5657,34 @@ func TestSubagentScheduler_ReadOnlyParentRejectsWritableSubagent(t *testing.T) {
 		EnforceSingleWriter: true,
 	})
 
-	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
-		TraceID: "trace_test",
-		Depth:   1,
-	}, []SubagentTask{
+	prepared, err := scheduler.prepareTasks([]SubagentTask{
 		{ID: "writer-1", Goal: "Modify config", ReadOnly: false, ToolsWhitelist: []string{"write_file"}},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "read-only parent policy blocks writable subagent")
-	assert.Contains(t, deniedPolicies, "read_only")
+	require.NoError(t, err)
+	require.Len(t, prepared, 1)
+	assert.True(t, prepared[0].ReadOnly)
+	assert.Empty(t, prepared[0].ToolsWhitelist)
+	assert.Equal(t, []string{"write_file"}, prepared[0].ReadOnlyFilteredTools)
+	assert.Equal(t, "parent_tool_execution_policy", prepared[0].ReadOnlySource)
+}
+
+func TestWhitelistSetPreservesExplicitEmptyAllowlist(t *testing.T) {
+	assert.Nil(t, whitelistSet(nil))
+	empty := whitelistSet([]string{})
+	require.NotNil(t, empty)
+	assert.Empty(t, empty)
+}
+
+func TestComputeAvailableToolsRespectsExplicitEmptyAllowlist(t *testing.T) {
+	agent := &Agent{
+		config:     &Config{Name: "empty-whitelist", Model: "test-provider"},
+		mcpManager: &MockMCPManager{},
+	}
+	loop := NewReActLoop(agent, nil, &LoopReActConfig{})
+
+	tools, err := loop.computeAvailableTools(context.Background(), "Inspect files", []string{}, false)
+	require.NoError(t, err)
+	assert.Empty(t, tools)
 }
 
 // MockMCPManager 实现 skill.MCPManager 接口

@@ -230,7 +230,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 
 	if loop.agent.mcpManager != nil {
 		for _, mt := range loop.agent.mcpManager.ListTools() {
-			if len(allowed) > 0 && !allowed[mt.Name] {
+			if allowed != nil && !allowed[mt.Name] {
 				continue
 			}
 			if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && policy.AllowToolInfo(mt) != nil {
@@ -274,7 +274,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 
 	if broker := loop.agent.GetToolBroker(); broker != nil {
 		for _, def := range broker.DefinitionsForContext(ctx) {
-			if len(allowed) > 0 && !allowed[def.Name] {
+			if allowed != nil && !allowed[def.Name] {
 				continue
 			}
 			if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && !policy.AllowsDefinition(def.Name) {

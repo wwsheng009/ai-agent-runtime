@@ -66,7 +66,7 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 		if name == "spawn_subagents" {
 			return nil
 		}
-		if len(allowedTools) > 0 && !allowedTools[name] {
+		if allowedTools != nil && !allowedTools[name] {
 			return nil
 		}
 

@@ -44,6 +44,13 @@ type SubagentTask struct {
 	BudgetTokens        int         `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
 	TimeoutSec          int         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	ReadOnly            bool        `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	// ReadOnlySource records an inherited or explicit read-only boundary for
+	// diagnostics. It is internal metadata and is not part of the tool payload.
+	ReadOnlySource string `json:"-" yaml:"-"`
+	// ReadOnlyFilteredTools contains write-like tools removed from the
+	// requested whitelist before the child is started. It is internal audit
+	// metadata; execution policy remains the final hard boundary.
+	ReadOnlyFilteredTools []string `json:"-" yaml:"-"`
 	// CompletionRequirement is none|complete_task for child harness loops.
 	// Empty inherits none at the child factory (team workers set complete_task via RunMeta).
 	CompletionRequirement string `json:"completion_requirement,omitempty" yaml:"completion_requirement,omitempty"`
@@ -81,6 +88,19 @@ type SubagentRunOptions struct {
 	ParentSessionID  string
 	ParentToolCallID string
 	Depth            int
+	// OnTaskEvent, when set, is invoked serially as child tasks transition
+	// between running and finished so a durable coordinator can mirror
+	// progress without racing concurrent store writes from wave goroutines.
+	// event is "started" | "completed".
+	OnTaskEvent func(taskID, event string)
+}
+
+// notifyTaskEvent calls OnTaskEvent when configured. It is best-effort: the
+// scheduler must not fail the run because a metadata mirror failed.
+func (o SubagentRunOptions) notifyTaskEvent(taskID, event string) {
+	if o.OnTaskEvent != nil {
+		o.OnTaskEvent(taskID, event)
+	}
 }
 
 // SubagentScheduler 在 Go 侧调度 fresh child agents。
@@ -205,7 +225,9 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 
 		for _, item := range readyWriters {
 			task := s.enrichTaskFromDependencies(item.task, completedByID)
+			options.notifyTaskEvent(task.ID, "started")
 			result, err := s.runChild(ctx, options, task)
+			options.notifyTaskEvent(task.ID, "completed")
 			results[item.index] = result
 			done[item.index] = true
 			completedByID[task.ID] = result
@@ -673,6 +695,7 @@ func (s *SubagentScheduler) runReaderWave(ctx context.Context, options SubagentR
 	var wg sync.WaitGroup
 
 	for i, item := range readers {
+		options.notifyTaskEvent(item.task.ID, "started")
 		index := i
 		task := s.enrichTaskFromDependencies(item.task, completedByID)
 		wg.Add(1)
@@ -689,6 +712,7 @@ func (s *SubagentScheduler) runReaderWave(ctx context.Context, options SubagentR
 
 	wg.Wait()
 	for i, item := range readers {
+		options.notifyTaskEvent(item.task.ID, "completed")
 		results[item.index] = waveResults[i]
 		done[item.index] = true
 		completedByID[item.task.ID] = waveResults[i]
@@ -1012,13 +1036,26 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 		}
 		if parentPolicy != nil {
 			if parentPolicy.ReadOnly && !effective.ReadOnly {
-				return nil, fmt.Errorf("read-only parent policy blocks writable subagent %q", effective.ID)
+				// A child cannot widen a read-only parent boundary. Narrow the
+				// request instead of rejecting the whole batch; the requested
+				// write-like tools are removed below and the child remains
+				// subject to the execution-side hard deny.
+				effective.ReadOnly = true
+				effective.ReadOnlySource = "parent_tool_execution_policy"
 			}
 			childPolicy := parentPolicy.DeriveChildForTask(effective.ToolsWhitelist, effective.ReadOnly, effective.Role, subagentWritePaths(effective))
 			effective.ReadOnly = childPolicy.ReadOnly
 			if childPolicy.AllowlistEnabled {
 				effective.ToolsWhitelist = childPolicy.AllowedToolNames()
 			}
+		}
+		if effective.ReadOnly {
+			if effective.ReadOnlySource == "" {
+				effective.ReadOnlySource = "spawn_subagents.read_only"
+			}
+			effective.ToolsWhitelist, effective.ReadOnlyFilteredTools = filterReadOnlyTools(
+				effective.ToolsWhitelist,
+			)
 		}
 		knownIDs[effective.ID] = true
 		prepared = append(prepared, effective)
@@ -1123,6 +1160,42 @@ func containsWriteLikeTool(tools []string) bool {
 		}
 	}
 	return false
+}
+
+// filterReadOnlyTools narrows a requested child allowlist without widening it.
+// A read-only task may still use every explicitly requested non-mutating tool,
+// while write-like names are omitted before the child is built. The returned
+// empty-but-non-nil slice intentionally means "no requested tools", not an
+// unrestricted child.
+func filterReadOnlyTools(tools []string) ([]string, []string) {
+	if tools == nil {
+		return nil, nil
+	}
+	filtered := make([]string, 0, len(tools))
+	removed := make([]string, 0)
+	seen := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		if isWriteLikeToolName(tool) {
+			if !seen[tool] {
+				removed = append(removed, tool)
+				seen[tool] = true
+			}
+			continue
+		}
+		if seen[tool] {
+			continue
+		}
+		seen[tool] = true
+		filtered = append(filtered, tool)
+	}
+	if len(filtered) == 0 {
+		filtered = []string{}
+	}
+	return filtered, removed
 }
 
 func (s *SubagentScheduler) emitSubagentDenied(options SubagentRunOptions, taskID, policy, reason string, payload map[string]interface{}) {

@@ -28,6 +28,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -1840,7 +1841,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		}
 
 		visibleSearchCall := searchToolVisible && strings.EqualFold(strings.TrimSpace(tc.Name), toolSearchName)
-		if len(allowedTools) > 0 && !allowedTools[tc.Name] && !visibleSearchCall {
+		if allowedTools != nil && !allowedTools[tc.Name] && !visibleSearchCall {
 			result.Error = fmt.Sprintf("tool not allowed for this agent: %s", tc.Name)
 			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_whitelist", result.Error, nil)
 			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
@@ -2069,11 +2070,50 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if scheduler == nil {
 					result.Error = "subagent scheduler is not configured"
 					loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_scheduler", result.Error, nil)
+				} else if loop.useBackgroundSubagents(tc.Args) {
+					batch, bgErr := loop.startBackgroundSubagentBatch(ctx, subtasks, sessionID, tc, step, traceID, depth)
+					if bgErr != nil {
+						result.Error = bgErr.Error()
+						loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
+					} else {
+						handleOutput, marshalErr := json.Marshal(map[string]interface{}{
+							"ok":            true,
+							"execution_mode": "background",
+							"batch_id":       batch.BatchID,
+							"status":         string(batch.Status),
+							"task_count":     batch.TaskCount,
+							"parent_action":  "continue_parent_turn; lifecycle_updates_will_be_delivered_by_supervision",
+						})
+						if marshalErr != nil {
+							result.Error = marshalErr.Error()
+							loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
+						} else {
+							result.Output = string(handleOutput)
+							metadata["execution_mode"] = "background"
+							metadata["batch_id"] = batch.BatchID
+							metadata["subagent_count"] = len(subtasks)
+							loop.emitRuntimeEvent("subagent.batch.created", sessionID, tc.Name, map[string]interface{}{
+								"tool_call_id":      tc.ID,
+								"step":              step,
+								"trace_id":          traceID,
+								"batch_id":          batch.BatchID,
+								"execution_mode":    "background",
+								"task_count":        batch.TaskCount,
+								"parent_session_id": sessionID,
+							})
+						}
+					}
 				} else {
+					syncBatchID := subagentbatch.NewID("batch")
+					syncStart := time.Now()
 					loop.emitRuntimeEvent("subagent.batch.started", sessionID, tc.Name, map[string]interface{}{
-						"tool_call_id": tc.ID,
-						"step":         step,
-						"trace_id":     traceID,
+						"tool_call_id":      tc.ID,
+						"step":              step,
+						"trace_id":          traceID,
+						"batch_id":          syncBatchID,
+						"execution_mode":    "wait",
+						"task_count":        len(subtasks),
+						"parent_session_id": sessionID,
 					})
 					reports, runErr := scheduler.RunChildren(ctx, SubagentRunOptions{
 						TraceID:          traceID,
@@ -2081,13 +2121,20 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						ParentToolCallID: tc.ID,
 						Depth:            depth + 1,
 					}, subtasks)
+					completedCount, failedCount := subagentResultCounts(reports)
 					loop.emitRuntimeEvent("subagent.batch.completed", sessionID, tc.Name, map[string]interface{}{
-						"tool_call_id":   tc.ID,
-						"step":           step,
-						"trace_id":       traceID,
-						"success":        runErr == nil,
-						"subagent_count": len(reports),
-						"error":          errorString(runErr),
+						"tool_call_id":      tc.ID,
+						"step":              step,
+						"trace_id":          traceID,
+						"batch_id":          syncBatchID,
+						"execution_mode":    "wait",
+						"success":           runErr == nil,
+						"subagent_count":    len(reports),
+						"completed_count":   completedCount,
+						"failed_count":      failedCount,
+						"elapsed_ms":        int(time.Since(syncStart).Milliseconds()),
+						"error":             errorString(runErr),
+						"parent_session_id": sessionID,
 					})
 					if runErr != nil {
 						result.Error = runErr.Error()
@@ -2105,6 +2152,8 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 							metadata["subagent_reports_omitted"] = parentReports.Omitted
 						}
 					}
+					metadata["execution_mode"] = "wait"
+					metadata["batch_id"] = syncBatchID
 				}
 			}
 
@@ -2733,7 +2782,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 
 	if loop.agent.mcpManager != nil {
 		for _, mt := range loop.agent.mcpManager.ListTools() {
-			if len(allowed) > 0 && !allowed[mt.Name] {
+			if allowed != nil && !allowed[mt.Name] {
 				continue
 			}
 			if seen[mt.Name] {
@@ -2774,7 +2823,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 
 	if broker := loop.agent.GetToolBroker(); broker != nil {
 		for _, def := range broker.DefinitionsForContext(ctx) {
-			if len(allowed) > 0 && !allowed[def.Name] {
+			if allowed != nil && !allowed[def.Name] {
 				continue
 			}
 			if seen[def.Name] {
@@ -3780,7 +3829,7 @@ func stripSystemMessages(history []types.Message) []types.Message {
 }
 
 func whitelistSet(values []string) map[string]bool {
-	if len(values) == 0 {
+	if values == nil {
 		return nil
 	}
 	set := make(map[string]bool, len(values))
@@ -5073,6 +5122,75 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 	return tasks, nil
 }
 
+// subagentToolExecutionMode parses execution_mode from the tool request,
+// defaulting to wait for compatibility when omitted or invalid.
+func subagentToolExecutionMode(args map[string]interface{}) subagentbatch.ExecutionMode {
+	if args == nil {
+		return subagentbatch.ExecutionModeWait
+	}
+	raw, ok := args["execution_mode"].(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return subagentbatch.ExecutionModeWait
+	}
+	if parsed, err := subagentbatch.ParseExecutionMode(raw); err == nil {
+		return parsed
+	}
+	return subagentbatch.ExecutionModeWait
+}
+
+// useBackgroundSubagents decides whether a spawn_subagents request should be
+// routed through the durable background coordinator. It requires an explicit
+// execution_mode=background, the feature flag and a working coordinator/store.
+func (loop *ReActLoop) useBackgroundSubagents(args map[string]interface{}) bool {
+	if loop == nil || loop.agent == nil {
+		return false
+	}
+	if subagentToolExecutionMode(args) != subagentbatch.ExecutionModeBackground {
+		return false
+	}
+	if !loop.agent.SubagentBackgroundEnabled() {
+		return false
+	}
+	return loop.agent.GetSubagentBatchCoordinator() != nil
+}
+
+// startBackgroundSubagentBatch persists a background batch and launches its
+// detached worker, returning the durable handle. Lifecycle events are
+// delivered asynchronously by the coordinator.
+func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtasks []SubagentTask, sessionID string, tc types.ToolCall, step int, traceID string, depth int) (*subagentbatch.SubagentBatch, error) {
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return nil, fmt.Errorf("subagent batch coordinator is not configured")
+	}
+	var deadline time.Time
+	if secs := intValue(tc.Args["wait_timeout_sec"]); secs > 0 {
+		deadline = time.Now().UTC().Add(time.Duration(secs) * time.Second)
+	}
+	return coordinator.StartBackground(ctx, BatchStartOptions{
+		TraceID:          traceID,
+		ParentSessionID:  sessionID,
+		ParentTurnID:     strings.TrimSpace(loop.turnID),
+		ParentToolCallID: tc.ID,
+		RootScopeID:      sessionID,
+		Depth:            depth + 1,
+		ExecutionMode:    subagentToolExecutionMode(tc.Args),
+		IdempotencyKey:   stringValue(tc.Args["batch_idempotency_key"]),
+		BatchDeadline:    deadline,
+	}, subtasks)
+}
+
+// subagentResultCounts tallies succeeded vs failed reports for observability.
+func subagentResultCounts(reports []SubagentResult) (completed, failed int) {
+	for _, r := range reports {
+		if r.Error != "" || !r.Success {
+			failed++
+		} else {
+			completed++
+		}
+	}
+	return
+}
+
 func renderSubagentResults(results []SubagentResult) string {
 	if len(results) == 0 {
 		return "No subagent results were produced."
@@ -5251,6 +5369,19 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
+				"execution_mode": map[string]interface{}{
+					"type":        "string",
+					"enum":        []string{"wait", "background"},
+					"description": "wait (default) preserves the legacy synchronous semantics and returns full reports; background persists the batch durably and returns a batch handle immediately while a supervisor delivers lifecycle updates.",
+				},
+				"wait_timeout_sec": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional batch deadline (seconds) for background batches; defaults to the coordinator deadline when unset.",
+				},
+				"batch_idempotency_key": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional dedupe key scoped to the parent session: repeating the same key returns the existing background batch instead of creating a duplicate.",
+				},
 				"agents": map[string]interface{}{
 					"type": "array",
 					"items": map[string]interface{}{
@@ -5264,10 +5395,15 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 							"provider":             map[string]interface{}{"type": "string", "description": "Optional provider hint. The local runtime may ignore it unless explicitly allowed."},
 							"reasoning_effort":     map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy."},
 							"thinking_effort":      map[string]interface{}{"type": "string", "description": "Deprecated alias for reasoning_effort."},
+							"completion_requirement": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"none", "complete_task"},
+								"description": "none (default) or complete_task for child harness loops; empty inherits none.",
+							},
 							"tools_whitelist": map[string]interface{}{
 								"type":        "array",
 								"items":       map[string]interface{}{"type": "string"},
-								"description": "Optional child tool allowlist. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true.",
+								"description": "Optional child tool allowlist. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true. In read-only tasks, write-like entries are automatically filtered instead of rejecting the whole child batch.",
 							},
 							"depends_on": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 							"patches": map[string]interface{}{
@@ -5286,7 +5422,7 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 							"timeout":       map[string]interface{}{"type": "integer"},
 							"read_only": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Hard child execution boundary. Blocks write-like tools and allows shell only for individually classified read-only commands. Independent of permission_mode; approval and bypass_permissions do not override it.",
+								"description": "Hard child execution boundary. Write-like requested tools are filtered from the child allowlist, while shell is allowed only for individually classified read-only commands. A read-only parent narrows writable child requests instead of widening the boundary. Independent of permission_mode; approval and bypass_permissions do not override it.",
 							},
 						},
 						"required": []string{"goal"},

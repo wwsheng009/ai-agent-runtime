@@ -65,28 +65,51 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	}
 	childConfig.Options = cloneAgentOptions(parentConfig.Options)
 	applyRouteOptions(childConfig.Options, decision)
-	if task.ReadOnly {
-		childConfig.Options["read_only"] = true
-		childConfig.Options["read_only_source"] = "spawn_subagents.read_only"
-	}
 
 	if task.ToolsWhitelist == nil {
 		task.ToolsWhitelist = DefaultToolsForRole(task.Role)
 	}
 	childPolicy := parent.GetSubagentScheduler().childPolicy(task)
-	promptTask := taskWithRouteDecision(task, decision)
+	promptTask := task
 	// The prompt must describe the effective inherited boundary, not only the
 	// child's requested flag. A read-only parent cannot be widened by omitting
 	// read_only on a nested child request.
 	if childPolicy != nil && childPolicy.ReadOnly {
-		promptTask.ReadOnly = true
-		childConfig.Options["read_only"] = true
 		if !task.ReadOnly {
-			if _, exists := childConfig.Options["read_only_source"]; !exists {
-				childConfig.Options["read_only_source"] = "parent_tool_execution_policy"
+			task.ReadOnly = true
+			if task.ReadOnlySource == "" {
+				task.ReadOnlySource = "parent_tool_execution_policy"
 			}
 		}
+		filteredTools, removedTools := filterReadOnlyTools(task.ToolsWhitelist)
+		if len(removedTools) > 0 {
+			task.ToolsWhitelist = filteredTools
+			task.ReadOnlyFilteredTools = append(task.ReadOnlyFilteredTools, removedTools...)
+			// Re-derive after filtering so the child policy and its capability
+			// scope describe the same effective tool surface.
+			childPolicy = parent.GetSubagentScheduler().childPolicy(task)
+		}
+		childConfig.Options["read_only"] = true
+		source := task.ReadOnlySource
+		if source == "" {
+			source = "spawn_subagents.read_only"
+		}
+		childConfig.Options["read_only_source"] = source
+	} else if task.ReadOnly {
+		filteredTools, removedTools := filterReadOnlyTools(task.ToolsWhitelist)
+		if len(removedTools) > 0 {
+			task.ToolsWhitelist = filteredTools
+			task.ReadOnlyFilteredTools = append(task.ReadOnlyFilteredTools, removedTools...)
+			childPolicy = parent.GetSubagentScheduler().childPolicy(task)
+		}
+		childConfig.Options["read_only"] = true
+		source := task.ReadOnlySource
+		if source == "" {
+			source = "spawn_subagents.read_only"
+		}
+		childConfig.Options["read_only_source"] = source
 	}
+	promptTask = taskWithRouteDecision(task, decision)
 	childConfig.SystemPrompt = parent.GetPromptBuilder().BuildSubagentPrompt(parentConfig, promptTask)
 
 	childAgent := NewAgentWithLLM(&childConfig, parent.mcpManager, parent.llmRuntime)

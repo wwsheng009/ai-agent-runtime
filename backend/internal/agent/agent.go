@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
 )
@@ -56,6 +57,8 @@ type Agent struct {
 	contextMgr         *contextmgr.Manager
 	outputGate         *output.Gateway
 	subagents          *SubagentScheduler
+	batchCoordinator   *SubagentBatchCoordinator
+	backgroundBatches  bool
 	toolCatalog        *mcpcatalog.Catalog
 	eventBus           *runtimeevents.Bus
 	promptBuild        *PromptBuilder
@@ -159,6 +162,7 @@ func NewAgentWithLLM(cfg *Config, mcpManager skill.MCPManager, llmRuntime *llm.L
 		contextMgr:         contextMgr,
 		outputGate:         outputGate,
 		subagents:          NewSubagentScheduler(nil, SubagentSchedulerConfig{}),
+		backgroundBatches:  true,
 		toolCatalog:        toolCatalog,
 		eventBus:           runtimeevents.NewBus(),
 		promptBuild:        NewPromptBuilder(),
@@ -254,6 +258,79 @@ func (a *Agent) SetSubagentScheduler(scheduler *SubagentScheduler) {
 		scheduler.parent = a
 	}
 	a.subagents = scheduler
+}
+
+// SetSubagentBackgroundEnabled toggles the durable background batch feature
+// flag. When disabled, spawn_subagents requests with execution_mode=background
+// fall back to the synchronous wait path (compatibility/rollback).
+func (a *Agent) SetSubagentBackgroundEnabled(enabled bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.backgroundBatches = enabled
+}
+
+// SubagentBackgroundEnabled reports whether durable background batches are
+// enabled for this agent.
+func (a *Agent) SubagentBackgroundEnabled() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.backgroundBatches
+}
+
+// GetSubagentBatchCoordinator returns the durable batch coordinator, creating
+// it lazily with the agent's scheduler and a default (in-memory) store when a
+// host has not injected one. A nil result (store construction failure) disables
+// background mode; callers must fall back to the synchronous wait path.
+func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
+	a.mu.RLock()
+	if a.batchCoordinator != nil {
+		c := a.batchCoordinator
+		a.mu.RUnlock()
+		return c
+	}
+	scheduler := a.subagents
+	a.mu.RUnlock()
+
+	store, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{})
+	if err != nil {
+		store = nil
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.batchCoordinator == nil {
+		cfg := SubagentBatchCoordinatorConfig{Scheduler: scheduler, Store: store}
+		if store != nil {
+			cfg.Emitter = func(eventType string, payload map[string]interface{}) {
+				sessionID := ""
+				toolName := "spawn_subagents"
+				if payload != nil {
+					if v, ok := payload["parent_session_id"].(string); ok {
+						sessionID = v
+					}
+					if v, ok := payload["tool_name"].(string); ok && v != "" {
+						toolName = v
+					}
+				}
+				a.emitRuntimeEvent(eventType, sessionID, toolName, payload)
+			}
+		}
+		a.batchCoordinator = NewSubagentBatchCoordinator(cfg)
+	}
+	return a.batchCoordinator
+}
+
+// SetSubagentBatchCoordinator injects a durable batch coordinator (normally a
+// file-backed store configured by the host). It also enables background
+// batches by default once a real coordinator is present.
+func (a *Agent) SetSubagentBatchCoordinator(c *SubagentBatchCoordinator) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.batchCoordinator = c
+	a.backgroundBatches = c != nil
 }
 
 // GetToolCatalog 返回 MCP Tool Catalog。
@@ -376,7 +453,7 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 	if a == nil || !a.hasSubagentScheduler() {
 		return false
 	}
-	if len(callWhitelist) > 0 && !callWhitelist[SpawnSubagentsToolName] {
+	if callWhitelist != nil && !callWhitelist[SpawnSubagentsToolName] {
 		return false
 	}
 	if policy := a.GetToolExecutionPolicy(); policy != nil {
