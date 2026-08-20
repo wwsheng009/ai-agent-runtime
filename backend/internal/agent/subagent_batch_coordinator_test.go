@@ -181,9 +181,63 @@ func TestStartBackgroundCancel(t *testing.T) {
 		t.Errorf("cancel metadata not persisted: reason=%q requested=%v", term.CancelReason, term.CancelRequestedAt)
 	}
 
+	// Tasks that never produced a report must be durably classified as canceled,
+	// not failed, so the task records agree with the terminal batch status and
+	// CanceledCount is reflected in the summary.
+	recs, err := store.ListTasks(context.Background(), batch.BatchID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Status != subagentbatch.TaskCanceled {
+		t.Errorf("task records = %+v, want one canceled task", recs)
+	}
+
 	// Cancel is idempotent for terminal batches (no error).
 	if err := c.Cancel(context.Background(), batch.BatchID, "again"); err != nil {
 		t.Errorf("second Cancel: %v", err)
+	}
+}
+
+func TestStartBackgroundDeadlineMarksTaskTimedOut(t *testing.T) {
+	store := testStore(t)
+	exec := &fakeExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	c := &SubagentBatchCoordinator{
+		store:    store,
+		executor: exec,
+		deadline: time.Minute,
+		cancels:  make(map[string]context.CancelFunc),
+	}
+
+	batch, err := c.StartBackground(context.Background(), BatchStartOptions{
+		ParentSessionID: "session-1",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		BatchDeadline:   time.Now().Add(150 * time.Millisecond),
+	}, []SubagentTask{{ID: "t1", Role: "researcher", Goal: "g"}})
+	if err != nil {
+		t.Fatalf("StartBackground: %v", err)
+	}
+
+	// Wait for the worker to observe the deadline before asserting, so the
+	// task is not still mid-transition.
+	select {
+	case <-exec.started:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("worker never started")
+	}
+
+	term := waitTerminal(t, store, batch.BatchID)
+	if term.Status != subagentbatch.BatchTimedOut {
+		t.Errorf("terminal status = %s, want timed_out", term.Status)
+	}
+	recs, err := store.ListTasks(context.Background(), batch.BatchID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Status != subagentbatch.TaskTimedOut {
+		t.Errorf("task records = %+v, want one timed_out task", recs)
 	}
 }
 
