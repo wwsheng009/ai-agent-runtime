@@ -492,6 +492,16 @@ func (e *aicliRuntimeServerChatExecutor) RuntimeDescriptor() aicliRuntimeExecuto
 	return newAICLIActorRuntimeDescriptor(aicliRuntimeTransportHTTP)
 }
 
+// RuntimeServerURL 返回当前连接的 runtime-server 基础地址（含 scheme 与 host，
+// 末尾不带 /）。未配置或非 server 模式时返回空串；/debug display 用它渲染
+// Observe API 的实际可访问地址。
+func (e *aicliRuntimeServerChatExecutor) RuntimeServerURL() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(e.serverURL), "/")
+}
+
 func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")

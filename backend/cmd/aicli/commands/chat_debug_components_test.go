@@ -81,6 +81,47 @@ func TestChatDebugDisplayObserveDisabled(t *testing.T) {
 	}
 }
 
+func TestChatDebugDisplayShowsObserveActualBaseURL(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	prev := chatDebugPprofProvider
+	defer func() { chatDebugPprofProvider = prev }()
+	RegisterChatDebugPprofProvider(func() string { return "" })
+
+	cfg := config.DefaultRuntimeConfig()
+	cfg.Observe.Enabled = true
+	cfg.Observe.RoutePrefix = "/api/runtime/observe/v1"
+	host := &localChatRuntimeHost{RuntimeConfig: cfg}
+	session := &ChatSession{
+		ProviderName:     "test",
+		Model:            "test-model",
+		LocalRuntimeHost: host,
+		ChatExecutor:     newAICLIRuntimeServerChatExecutor("http://127.0.0.1:8101"),
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug display", false); quit {
+			t.Fatal("expected debug command not to exit")
+		}
+	})
+
+	for _, expected := range []string{
+		"Observe API:",
+		"已启用",
+		"http://127.0.0.1:8101/api/runtime/observe/v1",
+		"GET http://127.0.0.1:8101/api/runtime/observe/v1/capabilities",
+		"GET http://127.0.0.1:8101/api/runtime/observe/v1/snapshot",
+		"GET http://127.0.0.1:8101/api/runtime/observe/v1/sessions/{session_id}",
+		"GET http://127.0.0.1:8101/api/runtime/observe/v1/events",
+		"[enabled]",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected /debug display output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
 func TestChatDebugDisplayWithoutRuntimeHost(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)

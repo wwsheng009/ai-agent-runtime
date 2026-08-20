@@ -49,6 +49,13 @@ type aicliChatExecutor interface {
 	ToolAvailable(session *ChatSession, toolName string) bool
 }
 
+// runtimeServerURLProvider 是 aicliChatExecutor 的可选扩展接口：返回当前
+// 连接的 runtime-server 基础地址（含 scheme 与 host，末尾不带 /）。
+// 仅 HTTP 传输模式的 executor 需要实现；非 server 模式不必实现。
+type runtimeServerURLProvider interface {
+	RuntimeServerURL() string
+}
+
 type aicliRuntimeExecutorDescriptor struct {
 	Core          runtimechat.RuntimeCoreDescriptor `json:"core"`
 	Transport     string                            `json:"transport"`
