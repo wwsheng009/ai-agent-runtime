@@ -473,7 +473,7 @@ func notifyChatInputDraftState(session *ChatSession, active bool, lines int, tex
 			return
 		}
 		if session.Interaction != nil {
-			session.Interaction.RefreshStatus(fmt.Sprintf("Paste draft %d lines", lines))
+			session.Interaction.SetNotice(fmt.Sprintf("Paste draft %d lines", lines))
 		}
 		return
 	}

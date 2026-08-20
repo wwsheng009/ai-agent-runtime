@@ -3047,7 +3047,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	// llm.retry：重试信息渲染在动态数据状态区域（composer 上方状态行），
 	// 不进入 timeline/transcript（重试是过程状态，非持久历史）。格式复用
 	// 旧 renderLLMRetryTimelineEvent 的重试详情（step/attempt/reason 等），
-	// 由 chatDynamicStatusAction 的 "retrying <detail>" 分支呈现。
+	// 由结构化 SetRetrying 呈现（detail 仅为展示数据，不参与语义判断）。
 	if event.Type == "llm.retry" {
 		// Retry is live process state, only meaningful while the run is active.
 		// A late retry event (for example published without a turn_id by an
@@ -3056,7 +3056,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		// summary and flip the state icon back to running.
 		if parts := chatLLMRetryParts(event); len(parts) > 0 &&
 			shouldRenderInteractiveOutput(b.session) && b.session.Interaction != nil {
-			b.session.Interaction.RefreshStatus("retrying " + strings.Join(parts, " "))
+			b.session.Interaction.SetRetrying(strings.Join(parts, " "))
 		}
 		rendered = chatRuntimeTimelineEvent{}
 	}

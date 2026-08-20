@@ -71,6 +71,12 @@ type chatInteractionCoordinator struct {
 	finalizingAssistantProjection     bool
 	streamRenderedPrefixLen           int
 	streamEnqueuedPrefixLen           int
+	// streamPresentationDeferred keeps assistant text out of irreversible
+	// scrollback after reasoning closes. The first assistant chunk can look
+	// plain while a later chunk/final snapshot reveals Markdown; once the
+	// plain block chrome has been written there is no safe way to remove it
+	// from a non-rewritable writer.
+	streamPresentationDeferred bool
 	// streamTrailingLF is the assistant-stream open-row cursor (Phase C).
 	// true  = cursor already at column 0 (row boundary / never opened a row)
 	// false = mid-line content was written without a row terminator
@@ -185,6 +191,11 @@ type chatInteractionCoordinator struct {
 	dynamicStatusCompletedElapsed time.Duration
 	dynamicStatusCompleted        bool
 	dynamicStatusTimerSeq         uint64
+	// surfaceStatus 缓存最近一次 updateSurfaceStatusLocked 的结构化状态。
+	// 动态状态 tick 用它在每秒钟重建状态行：SetRetrying/SetNotice 等入口
+	// 写入的状态不落在 agentStage/activity flags 上，若 tick 重新派生会
+	// 丢失 retry 状态（计时行每 tick 闪回 idle）。语义判断仍走 kind。
+	surfaceStatus                 chatSurfaceStatus
 	persistentStatusModel         style.StatusLineModel
 	dynamicStatusModel            *style.StatusLineModel
 	statusModelsCached            bool
@@ -761,19 +772,20 @@ func promptDisplayText(session *ChatSession) string {
 	return ui.UserPromptText(attachmentCount)
 }
 
-func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
+func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStatus) {
 	if c == nil || c.shutdown {
 		return
 	}
+	c.surfaceStatus = s
 	if c.session != nil && c.session.TitleNotifier != nil {
-		c.session.TitleNotifier.SetBaseState(chatTitleStateForSurface(chatSurfaceTitleState(state)))
+		c.session.TitleNotifier.SetBaseState(chatTitleStateForSurface(chatSurfaceTitleState(s)))
 	}
 	now := time.Now()
-	c.updateDynamicStatusClockLocked(state, now)
+	c.updateDynamicStatusClockLocked(s, now)
 	if c.surface != nil {
 		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
 		dynamicModel := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
-			state,
+			s,
 			ui.GetTerminalWidth(),
 			c.inputMode,
 			c.dynamicStatusElapsedLocked(now),
@@ -786,7 +798,7 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 			persistentModel,
 			dynamicModel,
 		)
-		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, state, ui.GetTerminalWidth()))
+		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, s, ui.GetTerminalWidth()))
 		c.scheduleDynamicStatusTickLocked(now)
 	}
 }
@@ -892,8 +904,8 @@ func chatAccountBalanceStatusInsertIndex(segments []style.StatusSegment) int {
 	return len(segments)
 }
 
-func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(state string, now time.Time) {
-	if !chatSurfaceStateIsRunning(state) {
+func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(s chatSurfaceStatus, now time.Time) {
+	if !s.isRunning() {
 		c.dynamicStatusStarted = time.Time{}
 		c.stopDynamicStatusTickLocked()
 		return
@@ -946,13 +958,18 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 		return
 	}
 	now := time.Now()
-	c.surface.SetDynamicStatusModel(buildChatDynamicStatusModelForWidthInputModeAndCompletion(
-		c.currentSurfaceStateLocked(),
+	// 用最近一次 updateSurfaceStatusLocked 的结构化状态重建，而不是重新派生：
+	// SetRetrying/SetNotice 写入的状态不反映在 agentStage/activity flags 上，
+	// 重新派生会让 retry 状态行在每秒钟的 tick 中闪回 idle/丢失计时。
+	model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		c.surfaceStatus,
 		ui.GetTerminalWidth(),
 		c.inputMode,
 		c.dynamicStatusElapsedLocked(now),
 		c.dynamicStatusCompleted,
-	))
+	)
+	c.dynamicStatusModel = cloneChatStatusLineModelPointer(model)
+	c.surface.SetDynamicStatusModel(model)
 	c.scheduleDynamicStatusTickLocked(now)
 }
 
@@ -964,27 +981,25 @@ func (c *chatInteractionCoordinator) stopDynamicStatusTickLocked() {
 	c.cancelRenderIntent(renderengine.FrameKeyDynamicStatus)
 }
 
-func chatSurfaceTitleState(state string) string {
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
+func chatSurfaceTitleState(s chatSurfaceStatus) string {
+	switch s.kind {
+	case chatSurfaceStatusTool, chatSurfaceStatusPlanning,
+		chatSurfaceStatusThinking, chatSurfaceStatusStreaming:
 		return "running"
-	}
-	switch normalized {
-	case "planning", "tool running":
-		return "running"
-	case "stopping":
+	case chatSurfaceStatusStopping:
 		return "stopping"
-	case "awaiting approval", "awaiting answer":
+	case chatSurfaceStatusWaiting, chatSurfaceStatusApproval, chatSurfaceStatusAnswer:
 		return "waiting"
-	case "completed", "failed":
-		return "ready"
+	case chatSurfaceStatusRetrying:
+		return "retrying"
 	default:
-		return state
+		// Idle / Notice 无活动标题（chatTitleStateForSurface 归为 idle）。
+		return "ready"
 	}
 }
 
 func buildChatPromptNoticeLine(session *ChatSession) string {
-	return buildChatPromptNoticeLineForWidth(session, "Ready", ui.GetTerminalWidth())
+	return buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, ui.GetTerminalWidth())
 }
 
 func refreshChatComposerContext(session *ChatSession) {
@@ -993,7 +1008,7 @@ func refreshChatComposerContext(session *ChatSession) {
 	}
 }
 
-func buildChatPromptNoticeLineForWidth(session *ChatSession, state string, width int) string {
+func buildChatPromptNoticeLineForWidth(session *ChatSession, s chatSurfaceStatus, width int) string {
 	if session == nil {
 		return ""
 	}
@@ -1006,7 +1021,7 @@ func buildChatPromptNoticeLineForWidth(session *ChatSession, state string, width
 	if queuedCount > 0 {
 		lines = append(lines, buildQueuedInputContextLine(queuedCount, width))
 	}
-	if len(session.ImagePaths) > 0 && !chatSurfaceStateIsRunning(state) {
+	if len(session.ImagePaths) > 0 && !s.isRunning() {
 		lines = append(lines, buildAttachmentContextLine(session.ImagePaths, width))
 	}
 
@@ -1385,11 +1400,42 @@ func (c *chatInteractionCoordinator) RefreshStatus(state string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	state = strings.TrimSpace(state)
-	if state == "" {
-		state = c.currentSurfaceStateLocked()
+	// 结构化状态迁移（方案 B）后，状态语义不再由字符串承载。本入口仅保留
+	// "重新派生当前状态"的兼容语义：历史非空字符串调用（"retrying ..."、
+	// "Agent Panel"、"Paste draft ..."）已分别迁移到 SetRetrying / SetNotice，
+	// 这里一律忽略入参并重新从活动标志/agent stage 派生。
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+}
+
+// SetRetrying 用结构化重试状态刷新动态状态行（替代旧的
+// RefreshStatus("retrying "+detail) 字符串拼接）。detail 是 retry 展示字段
+// （step/attempt/reason/...），只作展示数据，不参与语义判断。
+func (c *chatInteractionCoordinator) SetRetrying(detail string) {
+	c.setSurfaceStatus(chatSurfaceStatus{
+		kind:   chatSurfaceStatusRetrying,
+		detail: strings.TrimSpace(detail),
+	})
+}
+
+// SetNotice 把一句非状态机 UI 文案透传到状态行（如 "Paste draft N lines"、
+// "Agent Panel"），与 running/重试语义解耦；不启动计时、不可中断。
+func (c *chatInteractionCoordinator) SetNotice(text string) {
+	c.setSurfaceStatus(chatSurfaceStatus{
+		kind:   chatSurfaceStatusNotice,
+		detail: strings.TrimSpace(text),
+	})
+}
+
+func (c *chatInteractionCoordinator) setSurfaceStatus(s chatSurfaceStatus) {
+	if c == nil {
+		return
 	}
-	c.updateSurfaceStatusLocked(state)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	c.updateSurfaceStatusLocked(s)
 }
 
 // SetAgentStage switches the composer to an agent-specific run phase. Passing
@@ -1813,23 +1859,109 @@ func (c *chatInteractionCoordinator) isReadyLocked() bool {
 	return c != nil && !c.shutdown && !c.waitingActive && !c.thinkingActive && !c.streamingActive && !c.reasoningActive && !chatAgentStageBlocksReady(c.agentStage)
 }
 
-func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
-	if stage := chatAgentStageSurfaceLabel(c.agentStage); stage != "" {
-		if c.agentStage == chatAgentStageToolRunning && c.agentStageDetail != "" {
-			return "Tool " + c.agentStageDetail
+// chatSurfaceStatusKind 是 surface 状态机的语义家族。状态以结构化 kind 表达，
+// detail 只承载展示文本（工具名 / retry 详情 / 面板文案），不参与语义判断。
+// 这取代了旧的"自由字符串 + 各消费方前缀/精确匹配"状态协议：新增家族或子状态
+// 只需在此声明，语义函数基于 kind 分发，不再要求多处解析函数同步维护相同的
+// 前缀/精确词规则。
+type chatSurfaceStatusKind int
+
+const (
+	chatSurfaceStatusIdle chatSurfaceStatusKind = iota // Ready / 终态（Codex 对齐）
+	chatSurfaceStatusWaiting                           // 等待（legacy activity flag）
+	chatSurfaceStatusThinking                          // 思考（thinking / reasoning）
+	chatSurfaceStatusStreaming                         // 流式输出
+	chatSurfaceStatusPlanning                          // 规划阶段
+	chatSurfaceStatusStopping                          // 中断清理
+	chatSurfaceStatusTool                              // 执行工具，detail=工具名/进度
+	chatSurfaceStatusRetrying                          // 正在重试，detail=retry parts
+	chatSurfaceStatusApproval                          // 等待审批（agent stage）
+	chatSurfaceStatusAnswer                            // 等待回答（agent stage）
+	chatSurfaceStatusNotice                            // 透传 UI 文案（detail=全文），非状态机语义
+)
+
+// chatSurfaceStatus 是 surface 状态的结构化描述。kind 决定语义（是否 running、
+// 是否可中断、标题/角色/文案），detail 仅为展示数据。
+type chatSurfaceStatus struct {
+	kind   chatSurfaceStatusKind
+	detail string
+}
+
+func (s chatSurfaceStatus) isRunning() bool {
+	switch s.kind {
+	case chatSurfaceStatusWaiting, chatSurfaceStatusThinking, chatSurfaceStatusStreaming,
+		chatSurfaceStatusPlanning, chatSurfaceStatusStopping,
+		chatSurfaceStatusTool, chatSurfaceStatusRetrying,
+		chatSurfaceStatusApproval, chatSurfaceStatusAnswer:
+		return true
+	default:
+		return false
+	}
+}
+
+// String 生成与旧 currentSurfaceStateLocked 一致的规范展示文本，供测试断言与
+// 面向外部的输出（标题/日志）使用；语义判断一律走 kind，不要解析该文本。
+func (s chatSurfaceStatus) String() string {
+	switch s.kind {
+	case chatSurfaceStatusTool:
+		if detail := strings.TrimSpace(s.detail); detail != "" {
+			return "Tool " + detail
 		}
-		return stage
+		return "Tool running"
+	case chatSurfaceStatusStreaming:
+		return "Streaming"
+	case chatSurfaceStatusThinking:
+		return "Thinking"
+	case chatSurfaceStatusWaiting:
+		return "Waiting"
+	case chatSurfaceStatusPlanning:
+		return "Planning"
+	case chatSurfaceStatusStopping:
+		return "Stopping"
+	case chatSurfaceStatusApproval:
+		return "Awaiting approval"
+	case chatSurfaceStatusAnswer:
+		return "Awaiting answer"
+	case chatSurfaceStatusRetrying:
+		if detail := strings.TrimSpace(s.detail); detail != "" {
+			return "retrying " + detail
+		}
+		return "Retrying"
+	case chatSurfaceStatusNotice:
+		if detail := strings.TrimSpace(s.detail); detail != "" {
+			return detail
+		}
+		return "Ready"
+	default:
+		return "Ready"
+	}
+}
+
+// currentSurfaceStateLocked 派生当前状态：agent stage 优先（结构化），否则回退
+// 到 legacy activity flags。终态（Completed/Failed）按 Codex 对齐汇出 Ready。
+func (c *chatInteractionCoordinator) currentSurfaceStateLocked() chatSurfaceStatus {
+	switch normalizeChatAgentStage(c.agentStage) {
+	case chatAgentStagePlanning:
+		return chatSurfaceStatus{kind: chatSurfaceStatusPlanning}
+	case chatAgentStageToolRunning:
+		return chatSurfaceStatus{kind: chatSurfaceStatusTool, detail: c.agentStageDetail}
+	case chatAgentStageAwaitingApproval:
+		return chatSurfaceStatus{kind: chatSurfaceStatusApproval}
+	case chatAgentStageAwaitingAnswer:
+		return chatSurfaceStatus{kind: chatSurfaceStatusAnswer}
+	case chatAgentStageStopping:
+		return chatSurfaceStatus{kind: chatSurfaceStatusStopping}
 	}
 	if c.streamingActive {
-		return "Streaming"
+		return chatSurfaceStatus{kind: chatSurfaceStatusStreaming}
 	}
 	if c.thinkingActive || c.reasoningActive {
-		return "Thinking"
+		return chatSurfaceStatus{kind: chatSurfaceStatusThinking}
 	}
 	if c.waitingActive {
-		return "Waiting"
+		return chatSurfaceStatus{kind: chatSurfaceStatusWaiting}
 	}
-	return "Ready"
+	return chatSurfaceStatus{kind: chatSurfaceStatusIdle}
 }
 
 const chatSurfaceStatusSeparator = " · "
@@ -1846,9 +1978,9 @@ type fittedChatStatusSegment struct {
 	text string
 }
 
-func buildChatSurfaceStatusModelForWidthAndInputMode(session *ChatSession, state string, width int, inputMode chatInputMode) style.StatusLineModel {
-	state, width = normalizeChatSurfaceStatusInput(state, width)
-	fitted := fitChatSurfaceStatusSegments(buildChatSurfaceStatusSegments(session, state, inputMode), width)
+func buildChatSurfaceStatusModelForWidthAndInputMode(session *ChatSession, s chatSurfaceStatus, width int, inputMode chatInputMode) style.StatusLineModel {
+	s, width = normalizeChatSurfaceStatusInput(s, width)
+	fitted := fitChatSurfaceStatusSegments(buildChatSurfaceStatusSegments(session, s, inputMode), width)
 	if len(fitted) == 0 {
 		return style.StatusLineModel{State: style.RunReady}
 	}
@@ -1879,15 +2011,15 @@ func buildChatSurfaceStatusModelForWidthAndInputMode(session *ChatSession, state
 }
 
 func buildChatPersistentStatusModelForWidth(session *ChatSession, width int) style.StatusLineModel {
-	return buildChatSurfaceStatusModelForWidthAndInputMode(session, "Ready", width, chatInputModeChat)
+	return buildChatSurfaceStatusModelForWidthAndInputMode(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, width, chatInputModeChat)
 }
 
-func buildChatDynamicStatusModelForWidthAndInputMode(state string, width int, inputMode chatInputMode, elapsed time.Duration) *style.StatusLineModel {
-	return buildChatDynamicStatusModelForWidthInputModeAndCompletion(state, width, inputMode, elapsed, false)
+func buildChatDynamicStatusModelForWidthAndInputMode(s chatSurfaceStatus, width int, inputMode chatInputMode, elapsed time.Duration) *style.StatusLineModel {
+	return buildChatDynamicStatusModelForWidthInputModeAndCompletion(s, width, inputMode, elapsed, false)
 }
 
-func buildChatDynamicStatusModelForWidthInputModeAndCompletion(state string, width int, inputMode chatInputMode, elapsed time.Duration, completed bool) *style.StatusLineModel {
-	state, width = normalizeChatSurfaceStatusInput(state, width)
+func buildChatDynamicStatusModelForWidthInputModeAndCompletion(s chatSurfaceStatus, width int, inputMode chatInputMode, elapsed time.Duration, completed bool) *style.StatusLineModel {
+	s, width = normalizeChatSurfaceStatusInput(s, width)
 	if completed {
 		text := "Worked for " + formatChatDynamicStatusElapsed(elapsed)
 		if ui.DisplayWidth(text) > width {
@@ -1899,7 +2031,7 @@ func buildChatDynamicStatusModelForWidthInputModeAndCompletion(state string, wid
 			StateRole: style.RoleSuccess,
 		}
 	}
-	action, role, interruptible := chatDynamicStatusAction(state, inputMode)
+	action, role, interruptible := chatDynamicStatusAction(s, inputMode)
 	if action == "" {
 		return nil
 	}
@@ -1919,7 +2051,7 @@ func buildChatDynamicStatusModelForWidthInputModeAndCompletion(state string, wid
 	return model
 }
 
-func chatDynamicStatusAction(state string, inputMode chatInputMode) (string, style.Role, bool) {
+func chatDynamicStatusAction(s chatSurfaceStatus, inputMode chatInputMode) (string, style.Role, bool) {
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:
 		return "Waiting for approval", style.RoleApproval, true
@@ -1935,42 +2067,34 @@ func chatDynamicStatusAction(state string, inputMode chatInputMode) (string, sty
 		return "Navigating panel", style.RoleInfo, false
 	}
 
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
-		detail := compactStatusValue(strings.TrimSpace(state[len("tool "):]), chatAgentStageDetailMaxWidth)
+	switch s.kind {
+	case chatSurfaceStatusTool:
+		detail := compactStatusValue(s.detail, chatAgentStageDetailMaxWidth)
 		if detail == "" {
 			detail = "tool"
 		}
 		return "Running " + detail, style.RoleTool, true
-	}
-	if strings.HasPrefix(normalized, "retrying ") {
+	case chatSurfaceStatusRetrying:
 		// llm.retry 的动态状态详情：状态行显示 "◦ Retrying step=1 attempt=2/3 ..."。
-		detail := compactStatusValue(strings.TrimSpace(state[len("retrying "):]), chatAgentStageDetailMaxWidth)
-		if detail == "" {
-			detail = "request"
+		if strings.TrimSpace(s.detail) == "" {
+			return "Retrying", style.RoleWarning, true
 		}
+		detail := compactStatusValue(s.detail, chatAgentStageDetailMaxWidth)
 		return "Retrying " + detail, style.RoleWarning, true
-	}
-	switch normalized {
-	case "waiting", "thinking", "planning":
+	case chatSurfaceStatusWaiting, chatSurfaceStatusThinking, chatSurfaceStatusPlanning:
 		return "Analyzing", style.RoleReasoning, true
-	case "streaming":
+	case chatSurfaceStatusStreaming:
 		return "Generating response", style.RoleProgress, true
-	case "tool running":
-		return "Running tool", style.RoleTool, true
-	case "awaiting approval":
+	case chatSurfaceStatusApproval:
 		return "Waiting for approval", style.RoleApproval, true
-	case "awaiting answer":
+	case chatSurfaceStatusAnswer:
 		return "Waiting for answer", style.RoleWarning, true
-	case "stopping":
+	case chatSurfaceStatusStopping:
 		// Stopping is the cleanup phase after an interrupt: another Esc has no
 		// further interrupt target, so the status line must not advertise it.
 		return "Stopping", style.RoleWarning, false
-	case "retrying":
-		return "Retrying", style.RoleWarning, true
-	case "running", "working", "busy":
-		return "Working", style.RoleProgress, true
 	default:
+		// Idle / Notice 不产生动态活动行。
 		return "", "", false
 	}
 }
@@ -1993,15 +2117,11 @@ func formatChatDynamicStatusElapsed(elapsed time.Duration) string {
 	return fmt.Sprintf("%dh %dm %ds", hours, remainingMinutes, remainingSeconds)
 }
 
-func normalizeChatSurfaceStatusInput(state string, width int) (string, int) {
-	state = strings.TrimSpace(state)
-	if state == "" {
-		state = "Ready"
-	}
+func normalizeChatSurfaceStatusInput(s chatSurfaceStatus, width int) (chatSurfaceStatus, int) {
 	if width <= 0 {
 		width = 80
 	}
-	return state, width
+	return s, width
 }
 
 func chatStatusRunState(role style.Role) style.RunState {
@@ -2019,14 +2139,14 @@ func chatStatusRunState(role style.Role) style.RunState {
 	}
 }
 
-func buildChatSurfaceStatusSegments(session *ChatSession, state string, inputMode chatInputMode) []chatStatusSegment {
+func buildChatSurfaceStatusSegments(session *ChatSession, s chatSurfaceStatus, inputMode chatInputMode) []chatStatusSegment {
 	segments := make([]chatStatusSegment, 0, 12)
 
 	// Keep this projection capable of describing a complete status model for
 	// non-surface consumers. The fixed-bottom production path requests a Ready
 	// projection and renders live state in its dedicated composer-adjacent row.
-	if modal := chatSurfaceModalStatusSegment(state, inputMode); modal.full != "" {
-		segments = append(segments, presentChatStatusSegment(modal, style.StatusSegState, chatSurfaceModalStatusRole(state, inputMode)))
+	if modal := chatSurfaceModalStatusSegment(s, inputMode); modal.full != "" {
+		segments = append(segments, presentChatStatusSegment(modal, style.StatusSegState, chatSurfaceModalStatusRole(s, inputMode)))
 	}
 	queuedCount, _ := queuedInteractiveInputState(session)
 	if queuedCount > 0 {
@@ -2360,7 +2480,7 @@ func chatGoalStatusActiveTurnStartedAt(session *ChatSession) time.Time {
 	return session.goalStatusActiveTurnStartedAt
 }
 
-func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatStatusSegment {
+func chatSurfaceModalStatusSegment(s chatSurfaceStatus, inputMode chatInputMode) chatStatusSegment {
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:
 		return chatStatusSegment{full: "等待审批", compact: "审批"}
@@ -2376,9 +2496,9 @@ func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatSt
 		return chatStatusSegment{full: "面板导航", compact: "导航"}
 	}
 
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
-		detail := strings.TrimSpace(state[len("tool "):])
+	switch s.kind {
+	case chatSurfaceStatusTool:
+		detail := strings.TrimSpace(s.detail)
 		if detail != "" {
 			return chatStatusSegment{
 				full:    "执行工具 " + detail,
@@ -2386,37 +2506,35 @@ func chatSurfaceModalStatusSegment(state string, inputMode chatInputMode) chatSt
 			}
 		}
 		return chatStatusSegment{full: "执行工具", compact: "执行工具"}
-	}
-	switch normalized {
-	case "ready", "completed", "failed", "idle":
+	case chatSurfaceStatusIdle:
 		// Codex-aligned idle surface: terminal outcomes do not keep a sticky label.
 		return chatStatusSegment{}
-	case "waiting":
+	case chatSurfaceStatusWaiting:
 		return chatStatusSegment{full: "等待", compact: "等待"}
-	case "thinking":
+	case chatSurfaceStatusThinking:
 		return chatStatusSegment{full: "思考", compact: "思考"}
-	case "streaming":
+	case chatSurfaceStatusStreaming:
 		return chatStatusSegment{full: "输出中", compact: "输出中"}
-	case "planning":
+	case chatSurfaceStatusPlanning:
 		return chatStatusSegment{full: "规划中", compact: "规划中"}
-	case "tool running":
-		return chatStatusSegment{full: "执行工具", compact: "执行工具"}
-	case "awaiting approval":
+	case chatSurfaceStatusApproval:
 		return chatStatusSegment{full: "等待审批", compact: "审批"}
-	case "awaiting answer":
+	case chatSurfaceStatusAnswer:
 		return chatStatusSegment{full: "等待回答", compact: "回答"}
-	case "stopping":
+	case chatSurfaceStatusStopping:
 		return chatStatusSegment{full: "停止中", compact: "停止"}
+	case chatSurfaceStatusRetrying:
+		return chatStatusSegment{full: "重试中", compact: "重试"}
 	default:
-		display := chatSurfaceStateDisplay(state)
+		display := chatSurfaceStateDisplay(s)
 		if display == "" || display == "就绪" {
 			return chatStatusSegment{}
 		}
-		return chatStatusSegment{full: display, compact: compactChatSurfaceState(state)}
+		return chatStatusSegment{full: display, compact: compactChatSurfaceState(s)}
 	}
 }
 
-func chatSurfaceModalStatusRole(state string, inputMode chatInputMode) style.Role {
+func chatSurfaceModalStatusRole(s chatSurfaceStatus, inputMode chatInputMode) style.Role {
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:
 		return style.RoleApproval
@@ -2424,19 +2542,14 @@ func chatSurfaceModalStatusRole(state string, inputMode chatInputMode) style.Rol
 		chatInputModeSecret, chatInputModePanel:
 		return style.RoleWarning
 	}
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
-		return style.RoleTool
-	}
-	switch normalized {
-	case "thinking":
+	switch s.kind {
+	case chatSurfaceStatusThinking:
 		return style.RoleReasoning
-	case "streaming", "planning", "tool running":
+	case chatSurfaceStatusTool, chatSurfaceStatusStreaming, chatSurfaceStatusPlanning:
 		return style.RoleTool
-	case "waiting", "awaiting approval", "awaiting answer", "stopping":
+	case chatSurfaceStatusWaiting, chatSurfaceStatusApproval, chatSurfaceStatusAnswer,
+		chatSurfaceStatusStopping, chatSurfaceStatusRetrying:
 		return style.RoleWarning
-	case "failed", "error":
-		return style.RoleError
 	default:
 		return style.RoleInfo
 	}
@@ -2756,69 +2869,56 @@ func lookupChatStatusGitBranch(cwd string) string {
 	return branch
 }
 
-func compactChatSurfaceState(state string) string {
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
+func compactChatSurfaceState(s chatSurfaceStatus) string {
+	switch s.kind {
+	case chatSurfaceStatusTool:
 		return "执行工具"
-	}
-	switch normalized {
-	case "ready":
+	case chatSurfaceStatusIdle:
 		return "就绪"
-	case "waiting":
+	case chatSurfaceStatusWaiting:
 		return "等待"
-	case "thinking":
+	case chatSurfaceStatusThinking:
 		return "思考"
-	case "streaming":
+	case chatSurfaceStatusStreaming:
 		return "输出中"
-	case "planning":
+	case chatSurfaceStatusPlanning:
 		return "规划中"
-	case "tool running":
-		return "执行工具"
-	case "awaiting approval":
+	case chatSurfaceStatusApproval:
 		return "等待审批"
-	case "awaiting answer":
+	case chatSurfaceStatusAnswer:
 		return "等待回答"
-	case "stopping":
+	case chatSurfaceStatusStopping:
 		return "停止中"
-	case "completed":
-		return "已完成"
-	case "failed":
-		return "失败"
+	case chatSurfaceStatusRetrying:
+		return "重试中"
 	default:
-		return compactStatusValue(state, 10)
+		return compactStatusValue(s.detail, 10)
 	}
 }
 
-func chatSurfaceStateDisplay(state string) string {
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
-		return "执行工具 " + strings.TrimSpace(state[len("tool "):])
+func chatSurfaceStateDisplay(s chatSurfaceStatus) string {
+	if s.kind == chatSurfaceStatusTool {
+		if detail := strings.TrimSpace(s.detail); detail != "" {
+			return "执行工具 " + detail
+		}
+		return "执行工具"
 	}
-	return compactChatSurfaceState(state)
+	return compactChatSurfaceState(s)
 }
 
-func chatInputModeForSurfaceState(state string) chatInputMode {
-	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "awaiting approval":
+func chatInputModeForSurfaceState(s chatSurfaceStatus) chatInputMode {
+	switch s.kind {
+	case chatSurfaceStatusApproval:
 		return chatInputModeApproval
-	case "awaiting answer":
+	case chatSurfaceStatusAnswer:
 		return chatInputModeAnswer
 	default:
 		return chatInputModeChat
 	}
 }
 
-func chatSurfaceStateIsRunning(state string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(state))
-	if strings.HasPrefix(normalized, "tool ") {
-		return true
-	}
-	switch normalized {
-	case "waiting", "thinking", "streaming", "planning", "tool running", "awaiting approval", "awaiting answer", "stopping", "retrying", "running", "working", "busy":
-		return true
-	default:
-		return false
-	}
+func chatSurfaceStateIsRunning(s chatSurfaceStatus) bool {
+	return s.isRunning()
 }
 
 func compactChatStatusDirectory(cwd string) string {
@@ -3120,7 +3220,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 			}
 		}
 		c.streamingActive = true
-		c.updateSurfaceStatusLocked("Streaming")
+		c.updateSurfaceStatusLocked(chatSurfaceStatus{kind: chatSurfaceStatusStreaming})
 		c.streamRendered = false
 		c.streamMode = assistantStreamModeUnknown
 		c.streamRenderedPrefixLen = 0
@@ -3173,7 +3273,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	newlyStable := c.paintActiveStreamLocked(delta, c.streamMode == assistantStreamModeMarkdown)
 	activeShadowAction = c.activeStreamShadowActionLocked()
 
-	if c.shouldLiveStreamOutputLocked() && !c.reasoningActive {
+	if c.shouldLiveStreamOutputLocked() && !c.reasoningActive && !c.streamPresentationDeferred {
 		if c.streamMode == assistantStreamModeMarkdown {
 			// Keep markdown holdback until finalize so formatted blocks land once.
 			// Surface path already mirrors progress via ActiveBand above.
@@ -3186,6 +3286,11 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		}
 		if !c.streamRendered {
 			// First activation writes the full classified buffer so far.
+			// 纯空白缓冲没有可见内容：直接跳过，避免在 "end reasoning" 分隔线
+			// 之后写出孤立一行的 "• " 幽灵行（等真实文本到达时再走首激活）。
+			if strings.TrimSpace(c.streamBuffer.String()) == "" {
+				return
+			}
 			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 			return
 		}
@@ -3285,10 +3390,10 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if strings.TrimSpace(finalContent) == "" {
 		finalContent = c.streamBuffer.String()
 	}
-	if finalContent == "" {
+	if strings.TrimSpace(finalContent) == "" {
 		finalContent = c.finalizeActiveAssistantLocked("", c.streamMode == assistantStreamModeMarkdown)
 	}
-	if finalContent == "" {
+	if strings.TrimSpace(finalContent) == "" {
 		activeShadowAction = c.finalizeActiveCellShadowActionLocked()
 		c.resetStreamLocked()
 		return true
@@ -3307,7 +3412,9 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		finalContent = consolidated
 	}
 	activeShadowAction = c.finalizeActiveCellShadowActionLocked()
-	if c.streamMode == assistantStreamModeMarkdown || c.streamRenderedPrefixLen > 0 {
+	if c.streamMode == assistantStreamModeMarkdown ||
+		c.streamRenderedPrefixLen > 0 ||
+		c.streamPresentationDeferred {
 		c.renderFormattedAssistantStreamLocked(finalContent)
 		c.resetStreamLocked()
 		return true
@@ -3437,7 +3544,16 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		content = consolidated
 	}
 	activeShadowAction = c.finalizeActiveCellShadowActionLocked()
-	if c.streamRenderedPrefixLen > 0 && content != "" {
+	if c.streamRenderedPrefixLen > 0 && strings.TrimSpace(content) != "" {
+		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+		c.renderFormattedAssistantStreamLocked(content)
+		c.resetStreamLocked()
+		return
+	}
+	if c.streamPresentationDeferred && strings.TrimSpace(content) != "" {
+		// No bytes from the provisional plain presentation were committed.
+		// Render the complete final source so the formatter, rather than the
+		// first delta, decides whether the assistant block gets plain chrome.
 		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
 		c.renderFormattedAssistantStreamLocked(content)
 		c.resetStreamLocked()
@@ -3457,7 +3573,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		c.resetStreamLocked()
 		return
 	}
-	if content != "" {
+	if strings.TrimSpace(content) != "" {
 		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
 		c.writeFinalAssistantCellLocked(content)
 		c.resetStreamLocked()
@@ -3850,6 +3966,10 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	// 才一起出现。ShowPromptAction 清空 PromptInput 并置空提示符行。
 	if c.UnifiedRendererEnabled() {
 		_ = c.postUIAction(ui.ShowPromptAction{Line: formatSessionUserPrompt(c.session)})
+		// PromptSubmittedAction 是无条件重绘栅栏（见 ui.PromptSubmittedAction）：
+		// 保证用户消息块 + 空 composer 立即出帧，不依赖 history commit ledger
+		// 的 pending/recovery 状态，也不等 LLM 首个 chunk。
+		_ = c.postUIAction(ui.PromptSubmittedAction{})
 	}
 }
 
@@ -4695,6 +4815,19 @@ func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
 	if !c.reasoningActive {
 		return
 	}
+	// If an assistant stream was accumulated while reasoning was open, its
+	// first chunks may still look like plain prose even though a later chunk
+	// (or the authoritative final snapshot) reveals Markdown. Do not commit
+	// that provisional plain presentation to irreversible scrollback: the
+	// plain assistant block chrome ("• ") cannot be removed from a non-rewritable
+	// writer after the stream upgrades to Markdown.
+	if c.streamingActive &&
+		!c.streamRendered &&
+		c.streamMode != assistantStreamModeMarkdown &&
+		c.session != nil &&
+		c.session.Formatter != nil {
+		c.streamPresentationDeferred = true
+	}
 	// Close an open reasoning mid-line the same way closeOpenRowLocked does for
 	// the assistant stream — never invent a cross-block gap here.
 	if c.reasoningRendered && !c.reasoningTrailingLF {
@@ -4711,8 +4844,16 @@ func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
 	if !c.shouldLiveStreamOutputLocked() || !c.streamingActive || c.streamRendered {
 		return
 	}
+	if c.streamPresentationDeferred {
+		// The complete assistant snapshot will choose the final plain/Markdown
+		// presentation. Rendering this provisional buffer now would make a later
+		// Markdown upgrade retain the wrong plain block prefix permanently.
+		return
+	}
 	content := c.streamBuffer.String()
-	if content == "" {
+	if strings.TrimSpace(content) == "" {
+		// 纯空白缓冲（reasoning-only turn 的占位 delta）没有可见内容：
+		// 不写出 "• " 幽灵行，等待后续真实文本或干净地结束。
 		return
 	}
 	if c.streamMode == assistantStreamModeMarkdown {
@@ -4988,6 +5129,7 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamMode = assistantStreamModeUnknown
 	c.streamRenderedPrefixLen = 0
 	c.streamEnqueuedPrefixLen = 0
+	c.streamPresentationDeferred = false
 	c.stableCommitQueue = nil
 	c.stableCommitCatchUp = false
 	c.stableCommitBelowExit = time.Time{}
@@ -5044,6 +5186,7 @@ func (c *chatInteractionCoordinator) resetUnifiedStreamLocked() {
 	c.streamMode = assistantStreamModeUnknown
 	c.streamRenderedPrefixLen = 0
 	c.streamEnqueuedPrefixLen = 0
+	c.streamPresentationDeferred = false
 	c.stableCommitQueue = nil
 	c.stableCommitCatchUp = false
 	c.stableCommitBelowExit = time.Time{}
@@ -5096,7 +5239,8 @@ func (c *chatInteractionCoordinator) paintActiveStreamLocked(delta string, asMar
 }
 
 func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdown bool) bool {
-	if c == nil || c.activeStream == nil || c.reasoningActive || !c.surfaceOutputActiveLocked() {
+	if c == nil || c.activeStream == nil || c.reasoningActive ||
+		c.streamPresentationDeferred || !c.surfaceOutputActiveLocked() {
 		return false
 	}
 	stable := c.activeStream.StableContent()

@@ -189,7 +189,7 @@ func TestChatInteractionCoordinator_AgentStageLabels(t *testing.T) {
 }
 
 func TestChatDynamicStatusActionStoppingHasNoInterruptHint(t *testing.T) {
-	action, _, interruptible := chatDynamicStatusAction("stopping", chatInputModeChat)
+	action, _, interruptible := chatDynamicStatusAction(chatSurfaceStatus{kind: chatSurfaceStatusStopping}, chatInputModeChat)
 	if action != "Stopping" {
 		t.Fatalf("expected Stopping action, got %q", action)
 	}
@@ -197,7 +197,7 @@ func TestChatDynamicStatusActionStoppingHasNoInterruptHint(t *testing.T) {
 		t.Fatal("Stopping must not advertise another Esc interrupt target")
 	}
 
-	model := buildChatDynamicStatusModelForWidthAndInputMode("stopping", 120, chatInputModeChat, 3*time.Second)
+	model := buildChatDynamicStatusModelForWidthAndInputMode(chatSurfaceStatus{kind: chatSurfaceStatusStopping}, 120, chatInputModeChat, 3*time.Second)
 	if model == nil {
 		t.Fatal("expected a dynamic status model for Stopping")
 	}
@@ -428,7 +428,7 @@ func TestFinishInteractiveReadPromptState_PreservesDraftForQueuedInput(t *testin
 func (c *chatInteractionCoordinator) currentSurfaceStateForTest() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.currentSurfaceStateLocked()
+	return c.currentSurfaceStateLocked().String()
 }
 
 func TestRenderSubmittedUserInputEchoSkipsLegacyPromptPath(t *testing.T) {
@@ -1613,7 +1613,7 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 func TestBuildChatSurfaceStatusModelIdleUsesTypedSegmentsWithoutReady(t *testing.T) {
 	model := buildChatSurfaceStatusModelForWidthAndInputMode(
 		&ChatSession{Model: "gpt-5.6-sol"},
-		"Ready",
+		chatSurfaceStatus{kind: chatSurfaceStatusIdle},
 		200,
 		chatInputModeChat,
 	)
@@ -1639,7 +1639,7 @@ func TestBuildChatSurfaceStatusModelIdleUsesTypedSegmentsWithoutReady(t *testing
 func TestBuildChatSurfaceStatusModelUsesTypedApprovalState(t *testing.T) {
 	model := buildChatSurfaceStatusModelForWidthAndInputMode(
 		&ChatSession{Model: "gpt-5.6-sol"},
-		"Streaming",
+		chatSurfaceStatus{kind: chatSurfaceStatusStreaming},
 		200,
 		chatInputModeApproval,
 	)
@@ -1907,7 +1907,7 @@ func TestBuildChatSurfaceStatusLine_ShowsPlanModeState(t *testing.T) {
 func TestBuildChatSurfaceStatusLine_ExplicitModalInputModeOverridesAgentState(t *testing.T) {
 	status := buildChatSurfaceStatusLineForWidthAndInputMode(
 		&ChatSession{Model: "gpt-5.4-code"},
-		"Ready",
+		chatSurfaceStatus{kind: chatSurfaceStatusIdle},
 		120,
 		chatInputModeSelection,
 	)
@@ -1952,7 +1952,7 @@ func TestPushChatComposerInputMode_SameModeLeaseReleaseCannotOverwriteNewOwner(t
 func TestBuildChatSurfaceStatusLine_ShowsConfirmationInputDestination(t *testing.T) {
 	status := buildChatSurfaceStatusLineForWidthAndInputMode(
 		&ChatSession{Model: "gpt-5.4-code"},
-		"Ready",
+		chatSurfaceStatus{kind: chatSurfaceStatusIdle},
 		120,
 		chatInputModeConfirmation,
 	)
@@ -2050,7 +2050,7 @@ func TestBuildChatPromptNoticeLine_IncludesQueuedInputState(t *testing.T) {
 		queuedInputDrain: true,
 	}
 
-	notice := buildChatPromptNoticeLineForWidth(session, "Thinking", 80)
+	notice := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusThinking}, 80)
 	if !strings.Contains(notice, "队列 1") || !strings.Contains(notice, "就绪后 /queue") {
 		t.Fatalf("expected prompt notice to include queued input state, got %q", notice)
 	}
@@ -2066,7 +2066,7 @@ func TestBuildChatPromptNoticeLine_IncludesReadySubmissionPreview(t *testing.T) 
 		InputQueue: queue,
 	}
 
-	notice := buildChatPromptNoticeLineForWidth(session, "Thinking", 80)
+	notice := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusThinking}, 80)
 	if !strings.Contains(notice, "队列 1") || !strings.Contains(notice, "就绪后 /queue") {
 		t.Fatalf("expected prompt notice to include ready submission state, got %q", notice)
 	}
@@ -2083,7 +2083,7 @@ func TestBuildChatPromptNoticeLine_QueueWidthMatrix(t *testing.T) {
 
 	for _, width := range []int{40, 80, 120} {
 		t.Run(strconv.Itoa(width), func(t *testing.T) {
-			notice := buildChatPromptNoticeLineForWidth(session, "Thinking", width)
+			notice := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusThinking}, width)
 			lines := strings.Split(notice, "\n")
 			if len(lines) > 3 {
 				t.Fatalf("expected bounded composer context rows, got %d: %q", len(lines), notice)
@@ -2117,7 +2117,7 @@ func TestBuildChatPromptNoticeLine_AttachmentWidthMatrix(t *testing.T) {
 
 	for _, width := range []int{40, 80, 120} {
 		t.Run(strconv.Itoa(width), func(t *testing.T) {
-			notice := buildChatPromptNoticeLineForWidth(session, "Ready", width)
+			notice := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, width)
 			if got := ui.DisplayWidth(notice); got > width {
 				t.Fatalf("attachment context width %d exceeds budget %d: %q", got, width, notice)
 			}
@@ -2139,7 +2139,7 @@ func TestBuildChatPromptNoticeLine_PrioritizesQueueAndCapsCombinedRows(t *testin
 		ImagePaths: []string{filepath.Join("images", "reference.png")},
 	}
 
-	notice := buildChatPromptNoticeLineForWidth(session, "Ready", 120)
+	notice := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, 120)
 	lines := strings.Split(notice, "\n")
 	if len(lines) != 3 {
 		t.Fatalf("expected queue, attachment and one preview row, got %q", notice)
@@ -2151,7 +2151,7 @@ func TestBuildChatPromptNoticeLine_PrioritizesQueueAndCapsCombinedRows(t *testin
 		t.Fatalf("expected remaining row budget to show one queue preview, got %q", notice)
 	}
 
-	running := buildChatPromptNoticeLineForWidth(session, "Planning", 120)
+	running := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusPlanning}, 120)
 	if strings.Contains(running, "图片") {
 		t.Fatalf("expected in-flight attachments to stay out of pending composer context, got %q", running)
 	}
@@ -2170,7 +2170,7 @@ func TestFinishSuccessfulChatSendClearsAndRefreshesAttachmentContext(t *testing.
 	coord.agentStage = chatAgentStagePlanning
 	session.Interaction = coord
 
-	if before := buildChatPromptNoticeLineForWidth(session, "Ready", 80); !strings.Contains(before, "图片 1") {
+	if before := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, 80); !strings.Contains(before, "图片 1") {
 		t.Fatalf("expected pending attachment context before successful send, got %q", before)
 	}
 	finishSuccessfulChatSend(session, "", true)
@@ -2178,7 +2178,7 @@ func TestFinishSuccessfulChatSendClearsAndRefreshesAttachmentContext(t *testing.
 	if len(session.ImagePaths) != 0 {
 		t.Fatalf("expected successful send to clear attachments, got %#v", session.ImagePaths)
 	}
-	if after := buildChatPromptNoticeLineForWidth(session, "Ready", 80); after != "" {
+	if after := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, 80); after != "" {
 		t.Fatalf("expected attachment context to clear after successful send, got %q", after)
 	}
 	if state := notifier.currentSnapshot().baseState; state != chatTitleRunning {

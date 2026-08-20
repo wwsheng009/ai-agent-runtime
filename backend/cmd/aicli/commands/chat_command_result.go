@@ -141,6 +141,14 @@ type CommandResult struct {
 	// the send for every projection that entered the structured path (JSON
 	// mode still uses the legacy handler).
 	SendObjective string
+	// SendMessageAfterCommit requests a chat send of the given message after
+	// the command cell is committed. Only commands that share a captured
+	// execution result with the AI (currently /shell and /cmd) set it: the
+	// result document stays the atomic command cell, while the message streams
+	// through the normal send pipeline as its own turn. Plain/JSON/
+	// noninteractive projections ignore the flag; dispatch performs the send
+	// for every projection that entered the structured path.
+	SendMessageAfterCommit string
 	// RestoreComposerDraft restores a failed-turn prompt after the command cell
 	// is committed. This is a typed post-commit UI effect, not terminal output:
 	// the actor remains the only composer renderer and refuses to overwrite a
@@ -253,6 +261,14 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 	if commandMatches(cmdLower, "/retry") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredRetryCommand(session, command), true, nil
+	}
+	// /shell and /cmd are fully migrated: the command runs captured and the
+	// result is rendered as one unified command cell, then the output is
+	// shared with the AI through the post-commit send effect. They must be
+	// recognized before the gate so no variant can revive the legacy terminal
+	// writer or the fail-closed unified guard.
+	if (commandMatches(cmdLower, "/shell") || commandMatches(cmdLower, "/cmd")) && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredShellCommand(session, command), true, nil
 	}
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&

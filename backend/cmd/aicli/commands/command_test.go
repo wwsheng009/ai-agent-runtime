@@ -1747,8 +1747,8 @@ func TestExecuteDirectFunctionPublishesAndRestoresToolRunningStage(t *testing.T)
 			interaction.mu.Lock()
 			surfaceState := interaction.currentSurfaceStateLocked()
 			interaction.mu.Unlock()
-			if surfaceState != "Tool blocking_tool" {
-				t.Fatalf("expected non-ready tool surface state, got %q", surfaceState)
+			if surfaceState.String() != "Tool blocking_tool" || !surfaceState.isRunning() {
+				t.Fatalf("expected non-ready tool surface state, got %v", surfaceState)
 			}
 
 			close(fn.release)

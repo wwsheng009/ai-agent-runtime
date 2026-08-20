@@ -925,6 +925,123 @@ func TestEncodeReActToolBoundaryFinalizesIntermediateAssistant(t *testing.T) {
 	}
 }
 
+// TestEncodeEmptyAssistantFinalDropsGhostCell 回归：reasoning-only turn 的
+// assistant 块没有可见内容（纯空白 delta + 空终态文本）时，不得提交成空
+// assistant cell —— 否则渲染层会把它画成 "end reasoning" 分隔线之后孤立
+// 一行的 "• "（空命令行输出）。
+func TestEncodeEmptyAssistantFinalDropsGhostCell(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(llmStarted())
+	e.Encode(assistantDelta(" ", 1)) // 纯空白 delta：不构成内容
+	e.Encode(llmFinished())
+	e.Encode(assistantFinal("")) // 权威终态也无文本
+
+	m := e.Snapshot()
+	for _, it := range m.Items {
+		if it.Kind == KindAssistant {
+			t.Fatalf("empty assistant committed as ghost cell: %+v", m.Items)
+		}
+	}
+	cs := e.Encode(assistantFinal(""))
+	if len(cs.Changes) != 0 {
+		t.Fatalf("duplicate empty final produced changes: %+v", cs.Changes)
+	}
+}
+
+func TestEncodeEmptyAssistantTombstoneRejectsLateEvents(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(llmStarted())
+	e.Encode(assistantDelta(" ", 1))
+	e.Encode(llmFinished())
+	e.Encode(assistantFinal(""))
+
+	if cs := e.Encode(assistantDelta("late delta", 2)); len(cs.Changes) != 0 {
+		t.Fatalf("late delta resurrected removed assistant: %+v", cs.Changes)
+	}
+	if cs := e.Encode(assistantFinal("late final")); len(cs.Changes) != 0 {
+		t.Fatalf("late final resurrected removed assistant: %+v", cs.Changes)
+	}
+	if model := e.Snapshot(); len(model.Items) != 0 {
+		t.Fatalf("empty assistant tombstone left visible items: %+v", model.Items)
+	}
+
+	// A new request generation must still be allowed to reuse the same
+	// transport identity after the old empty request was retired.
+	e.Encode(event(runtimechat.EventLLMRequestStarted, map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1",
+	}))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1",
+		"sequence": uint64(1), "delta": "new answer",
+	}))
+	e.Encode(event(runtimechat.EventAssistantMessage, map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1",
+		"content": "new answer",
+	}))
+	model := e.Snapshot()
+	if len(model.Items) != 1 || model.Items[0].Kind != KindAssistant ||
+		model.Items[0].Head != "new answer" || model.Items[0].Status != StatusCompleted {
+		t.Fatalf("new request generation was blocked by old empty tombstone: %+v", model.Items)
+	}
+}
+
+func TestEncodeFailedEmptyAssistantTombstoneRejectsLateDelta(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(event(runtimechat.EventLLMRequestStarted, map[string]interface{}{
+		"turn_id": "failed-empty-turn", "stream_id": "failed-empty-stream",
+	}))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"turn_id": "failed-empty-turn", "stream_id": "failed-empty-stream",
+		"sequence": uint64(1), "delta": " ",
+	}))
+	e.Encode(event(runtimechat.EventLLMRequestFinished, map[string]interface{}{
+		"turn_id": "failed-empty-turn", "stream_id": "failed-empty-stream",
+		"success": false, "error": "provider unavailable",
+	}))
+	cs := e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"turn_id": "failed-empty-turn", "stream_id": "failed-empty-stream",
+		"sequence": uint64(2), "delta": "late after failure",
+	}))
+	if len(cs.Changes) != 0 {
+		t.Fatalf("late delta after empty failed stream changed model: %+v", cs.Changes)
+	}
+	for _, item := range e.Snapshot().Items {
+		if item.Kind == KindAssistant {
+			t.Fatalf("empty failed assistant resurrected: %+v", e.Snapshot().Items)
+		}
+	}
+}
+
+// TestEncodeEmptyAssistantBeforeToolBoundaryDropped 回归：ReAct 工具边界
+// （tool.requested 触发 assistant 前置终态）时，若 assistant 只有纯空白
+// delta（无内容），必须移除而不是提交成终态 cell，保证 transcript 中
+// reasoning 分隔线之后直接接 tool 结果，没有空 "• " 行。
+func TestEncodeEmptyAssistantBeforeToolBoundaryDropped(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(event("llm.request.started", map[string]interface{}{
+		"trace_id": "ghost-tool", "turn_id": "ghost-turn", "stream_id": "ghost-stream", "step": 1,
+	}))
+	e.Encode(event(runtimechat.EventAssistantDelta, map[string]interface{}{
+		"trace_id": "ghost-tool", "turn_id": "ghost-turn", "stream_id": "ghost-stream",
+		"step": 1, "sequence": uint64(1), "delta": " ",
+	}))
+	e.Encode(event("llm.request.finished", map[string]interface{}{
+		"trace_id": "ghost-tool", "turn_id": "ghost-turn", "stream_id": "ghost-stream", "step": 1, "success": true,
+	}))
+	cs := e.Encode(event("tool.requested", map[string]interface{}{
+		"trace_id": "ghost-tool", "step": 1, "tool_call_id": "ghost-call-1", "tool_name": "grep",
+	}))
+	if len(cs.Changes) != 2 || cs.Changes[0].Op != OpRemove ||
+		cs.Changes[0].Item.Kind != KindAssistant ||
+		cs.Changes[1].Op != OpAppend || cs.Changes[1].Item.Kind != KindToolCall {
+		t.Fatalf("tool boundary with empty assistant = %+v, want [OpRemove assistant, OpAppend tool]", cs.Changes)
+	}
+	m := e.Snapshot()
+	if len(m.Items) != 1 || m.Items[0].Kind != KindToolCall {
+		t.Fatalf("ghost assistant cell survived tool boundary: %+v", m.Items)
+	}
+}
+
 func TestEncodeFailedDottedRequestPreservesPartialAndReadableError(t *testing.T) {
 	e := NewEventEncoder()
 	e.Encode(event("llm.request.started", map[string]interface{}{

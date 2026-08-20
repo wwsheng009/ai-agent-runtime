@@ -18,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -2012,6 +2013,68 @@ func TestAICLIEventRenderer_StreamsReasoningBeforeResult(t *testing.T) {
 	}
 	if strings.Contains(rendered, "--- Thinking ---") || strings.Contains(rendered, "--- End Thinking ---") {
 		t.Fatalf("expected legacy reasoning markers to be removed, got %q", rendered)
+	}
+}
+
+func TestAICLIEventRenderer_DefersPlainIntroUntilMarkdownFinal(t *testing.T) {
+	session := &ChatSession{
+		Stream:    true,
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.liveStreamFn = func() bool { return true }
+	session.Interaction.streamRuneDelay = 0
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+	renderer := newAICLIEventRenderer(session)
+
+	intro := "我先检查仓库状态和版本文件。\n\n"
+	markdown := "- backend/config.yaml"
+	final := intro + markdown
+
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventPlanning,
+		Content: "先确认当前状态。",
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventResult,
+		Content: intro,
+	})
+
+	// The first result is plain-looking, but reasoning finalization must not
+	// commit its provisional assistant "• " chrome before a later result chunk
+	// reveals Markdown.
+	partial := output.String()
+	if strings.Contains(partial, ui.AssistantStreamMarker()+intro) {
+		t.Fatalf("plain intro escaped before Markdown classification: %q", partial)
+	}
+	if !strings.Contains(partial, chatToolDivider("end reasoning")) {
+		t.Fatalf("expected end reasoning divider after first result: %q", partial)
+	}
+
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventResult,
+		Content: markdown,
+	})
+	if strings.Contains(output.String(), "- backend/config.yaml") {
+		t.Fatalf("raw Markdown escaped before finalization: %q", output.String())
+	}
+
+	renderer.Finalize(&runtimechatcore.ChatResult{Output: final}, nil)
+	rendered := output.String()
+	if strings.Contains(rendered, ui.AssistantStreamMarker()+intro) {
+		t.Fatalf("Markdown final retained plain assistant chrome: %q", rendered)
+	}
+	if strings.Count(rendered, "我先检查仓库状态和版本文件。") != 1 {
+		t.Fatalf("expected intro exactly once, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• backend/config.yaml") {
+		t.Fatalf("expected formatted Markdown list item, got %q", rendered)
+	}
+	endReasoning := strings.Index(rendered, chatToolDivider("end reasoning"))
+	introAt := strings.Index(rendered, "我先检查仓库状态和版本文件。")
+	if endReasoning < 0 || introAt < 0 || endReasoning >= introAt {
+		t.Fatalf("expected reasoning to precede final assistant body: %q", rendered)
 	}
 }
 

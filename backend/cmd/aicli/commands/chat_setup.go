@@ -6,9 +6,12 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/term"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
@@ -747,10 +750,75 @@ func printChatSessionInfoRow(writer *os.File, label, value string, width int) {
 	if pad < 0 {
 		pad = 0
 	}
+	// Condense over-long values (paths, titles, summaries) to the remaining
+	// interactive-terminal width so restore/resume/load preambles render as
+	// compact rows like the chat command instead of spilling full-width text.
+	value = condenseChatSessionInfoValue(writer, value, pad+ui.DisplayWidth(label))
 	writeChatParts(writer, true,
 		chatBoldPart(label+strings.Repeat(" ", pad), style.RoleMetaLabel),
 		chatPart(" "+value, style.RoleTextSecondary),
 	)
+}
+
+// condenseChatSessionInfoValue truncates a long session-meta value to the
+// width left after the padded label on an interactive terminal, appending
+// "..." via fitDisplayText. Non-terminal writers (pipes, test capture,
+// redirects) keep the full value so redirected output stays lossless.
+func condenseChatSessionInfoValue(writer *os.File, value string, labelWidth int) string {
+	if writer == nil || value == "" || labelWidth <= 0 {
+		return value
+	}
+	termWidth, ok := chatTerminalWidthProbe(writer)
+	if !ok || termWidth <= labelWidth+1 {
+		return value
+	}
+	return condenseChatSessionInfoValueForWidth(value, termWidth, labelWidth)
+}
+
+// chatTerminalWidthProbe reports terminal width for a writer. It is a package
+// variable so tests can simulate an interactive terminal without a real tty;
+// production behavior is exactly chatTerminalWriterWidth.
+var chatTerminalWidthProbe = func(writer *os.File) (int, bool) {
+	return chatTerminalWriterWidth(writer)
+}
+
+// condenseChatSessionInfoValueForWidth is the pure width-math half of
+// condenseChatSessionInfoValue, kept separate for deterministic tests.
+func condenseChatSessionInfoValueForWidth(value string, termWidth, labelWidth int) string {
+	if value == "" || labelWidth <= 0 || termWidth <= labelWidth+1 {
+		return value
+	}
+	remaining := termWidth - labelWidth - 1 // leading space before the value
+	if remaining < 8 {                      // never destroy a short meaningful tail
+		return value
+	}
+	return fitDisplayText(value, remaining)
+}
+
+// chatTerminalWriterWidth reports the interactive terminal width for writer.
+// It returns ok=false when the writer is not a terminal or its size is
+// unavailable, in which case values are left untruncated. Setting the
+// AICLI_TERM_WIDTH environment variable overrides terminal detection so
+// headless runs, pty-less test harnesses, and redirected output exercise the
+// same condensing that interactive terminals get.
+func chatTerminalWriterWidth(writer *os.File) (int, bool) {
+	if writer == nil {
+		return 0, false
+	}
+	if v := os.Getenv("AICLI_TERM_WIDTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n, true
+		}
+	}
+	fd := int(writer.Fd())
+	if !term.IsTerminal(fd) {
+		return 0, false
+	}
+	width, _, err := term.GetSize(fd)
+	if err != nil || width <= 0 {
+		return 0, false
+	}
+	return width, true
 }
 
 func finalizeChatSession(session *ChatSession) {

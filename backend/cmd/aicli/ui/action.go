@@ -736,6 +736,19 @@ func (ShowPromptAction) isUIAction()         {}
 func (ShowPromptAction) Class() ActionClass  { return ClassDurable }
 func (ShowPromptAction) CoalesceKey() string { return "" }
 
+// PromptSubmittedAction is posted after the user submits a chat prompt in
+// unified interactive mode. It carries no state: the controller treats it as
+// a repaint fence that must produce a fresh frame so the echoed user message
+// appears immediately instead of waiting for the LLM response or for history
+// commit ledger state (e.g. HasPending can be false while geometry is not yet
+// published, which would otherwise defer the echo until the first stream
+// chunk).
+type PromptSubmittedAction struct{}
+
+func (PromptSubmittedAction) isUIAction()         {}
+func (PromptSubmittedAction) Class() ActionClass  { return ClassDurable }
+func (PromptSubmittedAction) CoalesceKey() string { return "" }
+
 // ClearPromptRowsAction 对应 ClearPromptRows。ShowPrompt 与 ClearPromptRows
 // 成对出现（chat loop 提交时隐藏 prompt 给 band 让位）：两者必须走同一条
 // actor 队列，否则 ShowPrompt 异步渲染后同步 ClearPromptRows 已失效，

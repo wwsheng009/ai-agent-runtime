@@ -516,6 +516,15 @@ func (c *UIController) collectPostActionEffectsLocked(effects []Effect) []Effect
 // side while leaving physical terminal ownership to the injected presenter.
 func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 	effects := state.HistoryEffects
+	// PromptSubmittedAction is a repaint fence posted right after the user
+	// submits a prompt (chatInteractionCoordinator.RenderSubmittedUserInput).
+	// It must wake the presenter unconditionally so the echoed user message
+	// and the cleared composer show up immediately, regardless of ledger
+	// pending/recovery state — otherwise the echo can be deferred until the
+	// first LLM stream chunk triggers a flush.
+	if _, submitted := action.(PromptSubmittedAction); submitted {
+		return true
+	}
 	// A viewport can be Known while scrollback still needs an explicit
 	// reconciliation (for example after a delivered batch could no longer be
 	// acknowledged). HasPending is deliberately false in that state, so the
@@ -834,6 +843,8 @@ func actionClassString(action UIAction) string {
 		return "FinalizeActiveCell"
 	case InputEvent:
 		return "InputEvent"
+	case PromptSubmittedAction:
+		return "PromptSubmitted"
 	default:
 		return "Action"
 	}

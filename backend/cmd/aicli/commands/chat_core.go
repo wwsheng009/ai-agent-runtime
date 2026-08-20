@@ -819,8 +819,17 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 		r.clearSpinner()
 		if r.session.Interaction != nil {
 			if r.reasoningOpen {
+				// Feed the first result while reasoning is still open. The
+				// coordinator can then retain the provisional assistant source
+				// until its final presentation (plain vs Markdown) is known,
+				// instead of flushing an irreversible plain "• " prefix before
+				// a later result chunk reveals Markdown.
+				r.streamBuffer.WriteString(event.Content)
+				r.streamLines += strings.Count(event.Content, "\n")
+				r.session.Interaction.RenderAssistantDelta(event.Content)
 				r.session.Interaction.FinalizeReasoningDelta()
 				r.reasoningOpen = false
+				return
 			}
 			r.streamBuffer.WriteString(event.Content)
 			r.streamLines += strings.Count(event.Content, "\n")

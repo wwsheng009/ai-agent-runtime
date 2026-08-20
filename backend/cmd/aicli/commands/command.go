@@ -86,12 +86,20 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// replacement, one result cell, then submit/draft mutation.
 				applyUnifiedBacktrackRequest(session, result.ApplyBacktrack.Request)
 			}
-			if result.SendObjective != "" && session != nil {
+			if renderErr == nil && result.SendObjective != "" && session != nil {
 				// /goal <objective>: stream the objective request through the
 				// normal send pipeline after the confirmation cell commits.
 				// The send error goes through the surface-aware output helper
 				// so it stays visible without bypassing the owned viewport.
 				if err := sendGoalObjectiveRequest(session, result.SendObjective); err != nil {
+					printfDirectInteractiveOutput(session, "错误: %v\n", err)
+				}
+			}
+			if renderErr == nil && result.SendMessageAfterCommit != "" && session != nil {
+				// /shell: the captured command cell commits first; the output
+				// then streams to the AI through the normal send pipeline as
+				// its own turn (same post-commit boundary as SendObjective).
+				if err := sendChatMessageAfterCommit(session, result.SendMessageAfterCommit); err != nil {
 					printfDirectInteractiveOutput(session, "错误: %v\n", err)
 				}
 			}
@@ -1298,8 +1306,23 @@ func shouldRenderLocalShellDiff(command string, capture runtimeexecutor.Combined
 		runtimeexecutor.LooksLikeUnifiedDiffOutput(capture.Output)
 }
 
-// executeShellCommand 执行 shell 命令
+// executeShellCommandDetailed 执行 shell 命令（legacy 实时流式输出路径，仅
+// 供非统一渲染投影使用）。
 func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellCommandResult, error) {
+	// The legacy streaming path writes raw stdout and must stay fail-closed
+	// while a TerminalSession owns the TTY; the unified interactive path uses
+	// the captured variant (executeShellCommandDetailedMode, streamOutput=false)
+	// through executeStructuredShellCommand instead.
+	if unifiedDirectInteractiveOutput(session) {
+		return shellCommandResult{}, fmt.Errorf("interactive shell command is not migrated to the unified renderer")
+	}
+	return executeShellCommandDetailedMode(session, cmdStr, true)
+}
+
+// executeShellCommandDetailedMode 执行本地 shell 命令。streamOutput 选择 legacy
+// 的实时终端流式输出（原始 stdout 写入，仅用于非统一渲染投影）；统一交互路径
+// 传 false，命令以捕获模式运行并把结果交给一个 Scene 命令 cell 渲染。
+func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, streamOutput bool) (shellCommandResult, error) {
 	executedCommand, cfg, err := parseShellCommandInvocation(cmdStr)
 	if err != nil {
 		return shellCommandResult{ExecutedCommand: executedCommand, Config: cfg}, err
@@ -1308,9 +1331,6 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 	result := shellCommandResult{
 		ExecutedCommand: executedCommand,
 		Config:          cfg,
-	}
-	if unifiedDirectInteractiveOutput(session) {
-		return result, fmt.Errorf("interactive shell command is not migrated to the unified renderer")
 	}
 	bufferGitDiffOutput := runtimeexecutor.IsGitDiffCommand(executedCommand)
 	gitDiffRenderBufferLimit := runtimeexecutor.DefaultRetainedOutputBytes
@@ -1323,8 +1343,10 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 	if isDangerousCommand(executedCommand) {
 		printfDirectInteractiveOutput(session, "\n警告: 检测到可能危险的命令: %s\n", executedCommand)
 		if !showRuntimeComposerPrompt(session, "确认执行? (yes/no): ") {
-			beginDirectInteractiveOutput(session)
-			fmt.Print("确认执行? (yes/no): ")
+			// The unified TerminalSession path has no legacy surface to host
+			// transient composer UI. Route the fallback prompt through the same
+			// owned-output adapter instead of reviving a raw stdout writer.
+			printDirectInteractiveOutput(session, "确认执行? (yes/no): ")
 		}
 		confirm, err := func() (string, error) {
 			endAction := beginChatTitleAction(session, "Command Approval Required")
@@ -1357,8 +1379,10 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 	result.Shell = shell
 	shellCmd := shell.DeriveExecArgs(executedCommand, false)
 
-	fmt.Printf("\n执行命令: %s\n", executedCommand)
-	fmt.Println("--- 输出 ---")
+	if streamOutput {
+		fmt.Printf("\n执行命令: %s\n", executedCommand)
+		fmt.Println("--- 输出 ---")
+	}
 
 	// 创建带超时和中断的 context
 	ctx, cancel := context.WithTimeout(session.cancelCtx, cfg.Timeout)
@@ -1423,7 +1447,7 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 			if !ok {
 				// 输出通道关闭，等待 goroutine 完成
 				<-doneChan
-				if !bufferGitDiffOutput {
+				if streamOutput && !bufferGitDiffOutput {
 					fmt.Println()
 				}
 				goto commandDone
@@ -1435,11 +1459,13 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 					// Rendering waits for a complete diff, but an explicitly
 					// disabled/large capture limit must not create an unbounded
 					// in-memory display buffer. Fall back to the original stream.
-					fmt.Print(bufferedGitDiff.String())
+					if streamOutput {
+						fmt.Print(bufferedGitDiff.String())
+					}
 					bufferedGitDiff.Reset()
 					bufferGitDiffOutput = false
 				}
-			} else {
+			} else if streamOutput {
 				fmt.Print(string(chunk))
 			}
 			if artifactWriter != nil {
@@ -1457,27 +1483,31 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 			if session.IsInterrupted() {
 				cmd.Process.Kill()
 				<-doneChan
-				if bufferGitDiffOutput {
+				if streamOutput && bufferGitDiffOutput {
 					fmt.Print(bufferedGitDiff.String())
 				}
 				capture := captureAccumulator.Result()
 				result.Capture = capture
 				result.Output = capture.Output
 				logLocalShellCommandDebug(session, result, fmt.Errorf("用户中断"))
-				fmt.Println("\n[已中断] 命令执行已停止")
+				if streamOutput {
+					fmt.Println("\n[已中断] 命令执行已停止")
+				}
 				return result, fmt.Errorf("用户中断")
 			}
 			// 超时
 			cmd.Process.Kill()
 			<-doneChan
-			if bufferGitDiffOutput {
+			if streamOutput && bufferGitDiffOutput {
 				fmt.Print(bufferedGitDiff.String())
 			}
 			capture := captureAccumulator.Result()
 			result.Capture = capture
 			result.Output = capture.Output
 			logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行超时（超过 %v）", cfg.Timeout))
-			fmt.Println("\n[超时] 命令执行超时")
+			if streamOutput {
+				fmt.Println("\n[超时] 命令执行超时")
+			}
 			return result, fmt.Errorf("命令执行超时（超过 %v）", cfg.Timeout)
 		}
 	}
@@ -1497,7 +1527,7 @@ commandDone: // 等待命令完成
 			renderedDiff = ui.FormatAssistantSupplementBlock(supplement)
 		}
 	}
-	if bufferGitDiffOutput && renderedDiff == "" {
+	if bufferGitDiffOutput && renderedDiff == "" && streamOutput {
 		fmt.Print(bufferedGitDiff.String())
 		fmt.Println()
 	}
@@ -1571,26 +1601,25 @@ commandDone: // 等待命令完成
 		return result, fmt.Errorf("命令执行失败: %w", waitErr)
 	}
 
-	// 命令执行成功
-	if outputStr == "" {
-		logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行成功，但没有输出"))
-		return result, fmt.Errorf("命令执行成功，但没有输出")
-	}
-
-	if outputCapture.Truncated {
-		fmt.Printf("[提示] 命令输出较大，传递给 AI 的内容已按 capture limit 截断：total=%dB retained=%dB omitted=%dB limit=%dB\n",
-			outputCapture.TotalBytes, outputCapture.RetainedBytes, outputCapture.OmittedBytes, outputCapture.CaptureLimitBytes)
-		if strings.TrimSpace(result.RawOutputArtifactPath) != "" {
-			fmt.Printf("[提示] 完整原始输出已保存到: %s\n", resolveAbsoluteChatPath(result.RawOutputArtifactPath))
+	// 命令执行成功。空 stdout 仍是成功的命令结果；统一渲染器会在
+	// command cell 中显示 "(无输出)"，不能把 mkdir/cd/true 等成功命令
+	// 误报成失败并跳过 post-commit 发送。
+	if streamOutput {
+		if outputCapture.Truncated {
+			fmt.Printf("[提示] 命令输出较大，传递给 AI 的内容已按 capture limit 截断：total=%dB retained=%dB omitted=%dB limit=%dB\n",
+				outputCapture.TotalBytes, outputCapture.RetainedBytes, outputCapture.OmittedBytes, outputCapture.CaptureLimitBytes)
+			if strings.TrimSpace(result.RawOutputArtifactPath) != "" {
+				fmt.Printf("[提示] 完整原始输出已保存到: %s\n", resolveAbsoluteChatPath(result.RawOutputArtifactPath))
+			}
 		}
-	}
-	if renderedDiff != "" {
-		fmt.Println(renderedDiff)
+		if renderedDiff != "" {
+			fmt.Println(renderedDiff)
+			fmt.Println()
+		}
+
+		fmt.Println("--- 完成 ---")
 		fmt.Println()
 	}
-
-	fmt.Println("--- 完成 ---")
-	fmt.Println()
 
 	logLocalShellCommandDebug(session, result, nil)
 	return result, nil

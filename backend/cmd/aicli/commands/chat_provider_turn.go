@@ -96,7 +96,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}
 	if shouldRenderInteractiveOutput(session) && session.Interaction != nil {
 		retryCfg.RetryNotice = func(notice string) {
-			session.Interaction.RefreshStatus("Retrying")
+			session.Interaction.SetRetrying("")
 			session.Interaction.RenderLocalSupplement(notice)
 		}
 	}

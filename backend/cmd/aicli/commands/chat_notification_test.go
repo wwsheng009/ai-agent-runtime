@@ -211,7 +211,7 @@ func TestChatTitleStoppingOverridesStaleToolsAndActions(t *testing.T) {
 	if got := snapshot.effectiveState(); got != chatTitleStopping {
 		t.Fatalf("stopping should override stale activity, got %v", got)
 	}
-	if got := chatTitleStateForSurface(chatSurfaceTitleState("Stopping")); got != chatTitleStopping {
+	if got := chatTitleStateForSurface(chatSurfaceTitleState(chatSurfaceStatus{kind: chatSurfaceStatusStopping})); got != chatTitleStopping {
 		t.Fatalf("surface stopping should map to title stopping, got %v", got)
 	}
 }

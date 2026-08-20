@@ -115,6 +115,49 @@ func TestDottedLifecycleProjectsMarkdownExactlyOnceIntoNativeHistory(t *testing.
 	}
 }
 
+func TestDottedLifecycleLateMarkdownFinalStaysOneAssistantCell(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	traceID, turnID, streamID := "trace-late-markdown", "turn-late-markdown", "stream-late-markdown"
+	intro := "我先检查仓库状态和版本文件。\n\n"
+	final := intro + "- backend/config.yaml"
+
+	for _, event := range []runtimeevents.Event{
+		{Type: "assistant.reasoning", TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "step": 1,
+			"reasoning": map[string]interface{}{"format": "stream_delta", "summary": "先确认状态"},
+		}},
+		{Type: runtimechat.EventAssistantDelta, TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
+			"step": 1, "sequence": uint64(1), "delta": intro,
+		}},
+		// The first delta is plain-looking; Markdown is only visible in the
+		// authoritative final snapshot.
+		{Type: runtimechat.EventAssistantMessage, TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "stream_id": streamID, "content": final,
+		}},
+	} {
+		bridge.encodeRenderModelEvent(event)
+	}
+
+	cells := bridgeSceneCells(t, bridge)
+	if len(cells) != 2 {
+		t.Fatalf("cells=%d want reasoning + one assistant: %+v", len(cells), cells)
+	}
+	if cells[0].Kind != scene.KindSupplement || cells[1].Kind != scene.KindAssistant {
+		t.Fatalf("cell kinds=%s,%s want supplement,assistant", cells[0].Kind, cells[1].Kind)
+	}
+	assistant := cells[1]
+	if assistant.Presentation.Kind != scene.PresentationAssistantMarkdown {
+		t.Fatalf("assistant presentation=%v want markdown: %+v", assistant.Presentation.Kind, assistant)
+	}
+	if assistant.Source != final {
+		t.Fatalf("assistant source=%q want raw final %q", assistant.Source, final)
+	}
+	if strings.Contains(assistant.Source, ui.AssistantStreamMarker()+intro) {
+		t.Fatalf("plain assistant chrome leaked into final Scene source: %q", assistant.Source)
+	}
+}
+
 // The local ReAct producer can emit a successful request boundary before a
 // non-streamed reasoning summary. The semantic/physical order must still be
 // reasoning followed by the authoritative assistant final.

@@ -2666,3 +2666,113 @@ func (s *recordingPanelTeamStore) ListTeamEvents(_ context.Context, filter team.
 func (s *recordingPanelTeamStore) LastTeamEventSeq(context.Context, string) (int64, error) {
 	return s.lastSeq, nil
 }
+func TestCondenseChatSessionInfoValueForWidth(t *testing.T) {
+	longPath := `C:\Users\vince\.aicli\chat-logs\2026\08\18\20260818_103616.615_cdaf1a1e\chat_opencode.ai_openai_deepseek-v4-flash_20260818_103616.615_cdaf1a1e.json`
+
+	t.Run("truncates over-long value to remaining terminal width", func(t *testing.T) {
+		got := condenseChatSessionInfoValueForWidth(longPath, 120, 19)
+		if got == longPath {
+			t.Fatalf("expected long value to be condensed, got full value")
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Fatalf("expected ellipsis suffix, got %q", got)
+		}
+		if ui.DisplayWidth(got) > 120-19-1 {
+			t.Fatalf("condensed value %q exceeds remaining width", got)
+		}
+		if !strings.HasPrefix(got, "C:\\Users\\vince") {
+			t.Fatalf("expected value head preserved, got %q", got)
+		}
+	})
+
+	t.Run("keeps short values unchanged", func(t *testing.T) {
+		short := "gpt-4.1-mini"
+		if got := condenseChatSessionInfoValueForWidth(short, 120, 19); got != short {
+			t.Fatalf("expected short value unchanged, got %q", got)
+		}
+	})
+
+	t.Run("passthrough on too-narrow terminal", func(t *testing.T) {
+		if got := condenseChatSessionInfoValueForWidth(longPath, 24, 19); got != longPath {
+			t.Fatalf("expected passthrough when remaining width is tiny, got %q", got)
+		}
+	})
+
+	t.Run("passthrough when terminal cannot fit label", func(t *testing.T) {
+		if got := condenseChatSessionInfoValueForWidth(longPath, 19, 19); got != longPath {
+			t.Fatalf("expected passthrough when terminal width <= label width, got %q", got)
+		}
+	})
+}
+
+func TestCondenseChatSessionInfoValue_NonTerminalWriterKeepsFullValue(t *testing.T) {
+	longPath := `C:\Users\vince\.aicli\chat-logs\2026\08\18\20260818_103616.615_cdaf1a1e\chat_opencode.ai_openai_deepseek-v4-flash_20260818_103616.615_cdaf1a1e.json`
+	// Under `go test` the process stdout is a pipe, not a tty, so the
+	// interactive-condense gate must leave the value untouched (lossless for
+	// pipes, test capture, and file redirects).
+	if got := condenseChatSessionInfoValue(os.Stdout, longPath, 19); got != longPath {
+		t.Fatalf("expected full value on non-terminal writer, got %q", got)
+	}
+	if got := condenseChatSessionInfoValue(nil, longPath, 19); got != longPath {
+		t.Fatalf("expected full value for nil writer, got %q", got)
+	}
+}
+
+func TestCondenseChatSessionInfoValue_AICLITermWidthOverridesTtyGate(t *testing.T) {
+	longPath := `C:\Users\vince\.aicli\chat-logs\2026\08\18\20260818_103616.615_cdaf1a1e\chat_opencode.ai_openai_deepseek-v4-flash_20260818_103616.615_cdaf1a1e.json`
+	// AICLI_TERM_WIDTH lets headless runs / redirected output exercise the
+	// same condensation an interactive terminal gets, without a real tty.
+	t.Setenv("AICLI_TERM_WIDTH", "100")
+	got := condenseChatSessionInfoValue(os.Stdout, longPath, 19)
+	if got == longPath {
+		t.Fatalf("expected value to be condensed under AICLI_TERM_WIDTH, got full %q", got)
+	}
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected condensed value to contain ellipsis, got %q", got)
+	}
+}
+
+// TestPrintChatSessionInfoRow_CondensesOnInteractiveTerminal proves the
+// restore/resume/load preamble row printer actually truncates long values
+// when the writer is an interactive terminal. A real tty cannot be allocated
+// in CI, so the width probe is injected to simulate a 120-column terminal.
+func TestPrintChatSessionInfoRow_CondensesOnInteractiveTerminal(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	longPath := `C:\Users\vince\.aicli\chat-logs\2026\08\18\20260818_103616.615_cdaf1a1e\chat_opencode.ai_openai_deepseek-v4-flash_20260818_103616.615_cdaf1a1e.json`
+
+	restore := chatTerminalWidthProbe
+	chatTerminalWidthProbe = func(writer *os.File) (int, bool) { return 120, true }
+	defer func() { chatTerminalWidthProbe = restore }()
+
+	output := captureStdout(t, func() {
+		printChatSessionInfoRow(os.Stdout, "Chat Log File:", longPath, chatSessionMetaLabelWidth)
+	})
+	if !strings.Contains(output, "...") {
+		t.Fatalf("expected condensed ellipsis on simulated terminal, got:\n%s", output)
+	}
+	if strings.Contains(output, longPath) {
+		t.Fatalf("expected long path truncated, full path still present:\n%s", output)
+	}
+	if !strings.Contains(output, "Chat Log File:") {
+		t.Fatalf("expected row label preserved, got:\n%s", output)
+	}
+}
+
+// TestPrintChatSessionInfoRow_PipeKeepsFullValue proves the same row printer
+// stays lossless when the writer is not a terminal (the default under go test,
+// shell pipes, and file redirects), so redirecting output never destroys data.
+func TestPrintChatSessionInfoRow_PipeKeepsFullValue(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	longPath := `C:\Users\vince\.aicli\chat-logs\2026\08\18\20260818_103616.615_cdaf1a1e\chat_opencode.ai_openai_deepseek-v4-flash_20260818_103616.615_cdaf1a1e.json`
+
+	output := captureStdout(t, func() {
+		printChatSessionInfoRow(os.Stdout, "Chat Log File:", longPath, chatSessionMetaLabelWidth)
+	})
+	if !strings.Contains(output, longPath) {
+		t.Fatalf("expected full path preserved for non-terminal writer, got:\n%s", output)
+	}
+}

@@ -916,6 +916,7 @@ func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 		"chat_reasoning_document.go",
 		"chat_simple_command_document.go",
 		"chat_stream_document.go",
+		"chat_shell_command.go",
 		"chat_title_document.go",
 		"chat_unified_command_gate.go",
 	} {
@@ -1127,7 +1128,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_theme_command.go", Func: "printThemeConfigDefaults", Kind: "fmt.Print", Count: 3},
 		{File: "chat_tool_debug.go", Func: "writeSessionDebugInfo", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_transcript_renderer.go", Func: "method RenderSupplement", Kind: "fmt.Print", Count: 1},
-		{File: "command.go", Func: "executeShellCommandDetailed", Kind: "fmt.Print", Count: 18},
+		{File: "command.go", Func: "executeShellCommandDetailedMode", Kind: "fmt.Print", Count: 17},
 	}
 }
 

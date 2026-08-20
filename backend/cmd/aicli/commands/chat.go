@@ -1306,7 +1306,11 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if session.IsInterrupted() {
 				continue
 			}
-			if rejectUnmigratedUnifiedChatCommand(session, "/shell") {
+			if unifiedDirectInteractiveOutput(session) {
+				// 统一渲染 TTY 拥有 /shell：命令以捕获模式执行并提交为一个
+				// Scene 命令 cell，输出经 post-commit 发送效应作为独立 turn
+				// 分享给 AI（与 /shell 斜杠命令同一入口）。
+				dispatchChatCommand(session, "/shell "+strings.TrimPrefix(input, "!"), noInteractive)
 				continue
 			}
 

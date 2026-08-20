@@ -42,6 +42,7 @@ type EventEncoder struct {
 	clock                  uint64 // 编码器时钟（每事件 +1）
 	revisions              map[string]uint64
 	assistantBy            map[string]*Item                 // canonical request key -> 当前 assistant item
+	assistantTombstones    map[string]struct{}              // canonical request key -> 已移除的空 assistant 终态
 	reasoningBy            map[string]*Item                 // canonical request key -> 当前 reasoning item
 	reasoningBarriers      map[string]bool                  // request key -> assistant native-history ordering fence
 	requestAliases         map[string]string                // transport/logical alias -> canonical request key
@@ -97,6 +98,7 @@ func NewEventEncoder() *EventEncoder {
 		model:                &RenderModel{},
 		revisions:            make(map[string]uint64),
 		assistantBy:          make(map[string]*Item),
+		assistantTombstones:  make(map[string]struct{}),
 		reasoningBy:          make(map[string]*Item),
 		reasoningBarriers:    make(map[string]bool),
 		requestAliases:       make(map[string]string),
@@ -497,6 +499,7 @@ func (e *EventEncoder) Reset() {
 	e.clock = 0
 	e.revisions = make(map[string]uint64)
 	e.assistantBy = make(map[string]*Item)
+	e.assistantTombstones = make(map[string]struct{})
 	e.reasoningBy = make(map[string]*Item)
 	e.reasoningBarriers = make(map[string]bool)
 	e.requestAliases = make(map[string]string)
@@ -1232,6 +1235,13 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 	if delta == "" {
 		return
 	}
+	if _, retired := e.assistantTombstones[key]; retired {
+		// An empty assistant was deliberately removed from the retained model.
+		// Keep its request identity retired so a late delta cannot resurrect a
+		// ghost assistant cell.
+		e.stats.DuplicateCount++
+		return
+	}
 	if current := e.assistantBy[key]; current != nil && current.Status.Terminal() {
 		// A delta arriving after the authoritative final belongs to a retired
 		// request. Do not create a fresh ordering barrier (or a duplicate
@@ -1360,11 +1370,24 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 
 func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet) {
 	key := e.resolveAssistantRequestKey(ev)
+	if _, retired := e.assistantTombstones[key]; retired {
+		// A removed empty assistant is terminal too. In particular, a late
+		// non-empty authoritative snapshot must not recreate the cell.
+		e.stats.DuplicateCount++
+		return
+	}
 	text := payloadString(ev.Payload["content"], payloadString(ev.Payload["message"], ""))
 	e.removeReasoningBarrier(key, cs)
 	e.finalizeReasoningBeforeAssistant(key, cs)
 	it := e.assistantBy[key]
 	if it == nil {
+		if strings.TrimSpace(text) == "" {
+			// 孤儿 final 没有可见内容（reasoning-only turn 的 assistant 块常为空）：
+			// 不落空 assistant 项，否则渲染层会把它画成孤立一行的 "• "，
+			// 表现为 "end reasoning" 分隔线之后、tool 结果之前的一行空输出。
+			e.retireAssistant(key)
+			return
+		}
 		it = e.appendItem(KindAssistant, "", text)
 		setAssistantPresentation(it)
 		it.Status = StatusCompleted // 孤儿 final：直接终态（不保持 pending）
@@ -1374,6 +1397,9 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 	}
 	// 流结束：补拼乱序缓冲中尚未提交的 delta（不丢信息）。
 	e.flushAssistantStream(key, it, cs)
+	if e.dropEmptyAssistant(key, text, cs) {
+		return
+	}
 	u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
 		changed := false
 		if text != "" && t.Head != text {
@@ -1392,6 +1418,36 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 	if changed {
 		e.change(cs, OpUpsert, u)
 	}
+}
+
+// dropEmptyAssistant 在提交终态前检查 assistant 项是否没有任何可见内容：
+// Head 与传入的终态文本均为空/纯空白。此时项不是内容（reasoning-only
+// turn 的 assistant 块、纯空白 delta 流），直接移除而不是提交成终态 cell
+// —— 与 removeReasoningBarrier 的空占位清理同源，否则渲染层会把空项画成
+// 孤立一行的 "• "，出现在 "end reasoning" 分隔线与后续 tool 结果之间。
+// 返回 true 表示已移除，调用方应跳过终态 upsert。
+func (e *EventEncoder) dropEmptyAssistant(key, text string, cs *ChangeSet) bool {
+	it := e.assistantBy[key]
+	if it == nil || it.Status.Terminal() {
+		return false
+	}
+	if strings.TrimSpace(it.Head) != "" || strings.TrimSpace(text) != "" {
+		return false
+	}
+	e.retireAssistant(key)
+	delete(e.assistantBy, key)
+	e.removeItem(it.ID, cs)
+	return true
+}
+
+func (e *EventEncoder) retireAssistant(key string) {
+	if e == nil || key == "" {
+		return
+	}
+	if e.assistantTombstones == nil {
+		e.assistantTombstones = make(map[string]struct{})
+	}
+	e.assistantTombstones[key] = struct{}{}
 }
 
 func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
@@ -1486,6 +1542,9 @@ func (e *EventEncoder) finalizeRequestStream(key string, status ItemStatus, cs *
 		return
 	}
 	e.flushAssistantStream(key, it, cs)
+	if e.dropEmptyAssistant(key, "", cs) {
+		return
+	}
 	if u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
 		t.Status = status
 		return true
@@ -1587,6 +1646,9 @@ func (e *EventEncoder) finalizeOpenStreams(status ItemStatus, cs *ChangeSet) {
 		}
 		e.removeReasoningBarrier(key, cs)
 		e.flushAssistantStream(key, it, cs)
+		if e.dropEmptyAssistant(key, "", cs) {
+			continue
+		}
 		u, changed := e.upsertItem(it.ID, KindAssistant, func(item *Item) bool {
 			if item.Status.Terminal() {
 				return false
@@ -2090,21 +2152,24 @@ func (e *EventEncoder) beginAssistantRequest(ev runtimeevents.Event) string {
 	id := assistantRequestIdentityFromEvent(ev)
 	if id.anonymous() {
 		key := e.latestRequestByScope[anonymousAssistantRequestScope]
-		if key == "" || anonymousRequestTerminal(e.assistantBy[key], e.reasoningBy[key]) {
+		if key == "" || anonymousRequestTerminal(e.assistantBy[key], e.reasoningBy[key]) ||
+			e.assistantTombstoned(key) {
 			key = id.newCanonicalKey(e.clock)
 			e.latestRequestByScope[anonymousAssistantRequestScope] = key
 		}
 		e.requestFinished[key] = false
 		return key
 	}
-	if key := e.lookupAssistantRequestAlias(id.strongAliases()); key != "" {
+	strongKey := e.lookupAssistantRequestAlias(id.strongAliases())
+	if strongKey != "" && !e.assistantTombstoned(strongKey) {
+		key := strongKey
 		e.bindAssistantRequestAliases(key, id.stepAliases(), false)
 		e.rememberLatestAssistantRequest(id, key, true)
 		return key
 	}
 
 	stepKey := e.lookupAssistantRequestAlias(id.stepAliases())
-	if stepKey != "" && !e.requestFinished[stepKey] {
+	if stepKey != "" && !e.requestFinished[stepKey] && !e.assistantTombstoned(stepKey) {
 		e.bindAssistantRequestAliases(stepKey, id.strongAliases(), false)
 		e.rememberLatestAssistantRequest(id, stepKey, true)
 		return stepKey
@@ -2121,7 +2186,13 @@ func (e *EventEncoder) beginAssistantRequest(ev runtimeevents.Event) string {
 			key += "#" + strconv.FormatUint(e.clock, 10)
 		}
 	}
-	e.bindAssistantRequestAliases(key, id.strongAliases(), false)
+	// A retry may reuse a logical step or transport alias after an empty
+	// assistant was retired. Never let the new request inherit that tombstone's
+	// canonical key; repoint the old strong alias to the fresh generation.
+	if e.assistantTombstoned(key) {
+		key += "#" + strconv.FormatUint(e.clock, 10)
+	}
+	e.bindAssistantRequestAliases(key, id.strongAliases(), strongKey != "")
 	e.bindAssistantRequestAliases(key, id.stepAliases(), stepKey != "")
 	e.requestFinished[key] = false
 	e.rememberLatestAssistantRequest(id, key, true)
@@ -2131,6 +2202,14 @@ func (e *EventEncoder) beginAssistantRequest(ev runtimeevents.Event) string {
 func anonymousRequestTerminal(assistant, reasoning *Item) bool {
 	return (assistant != nil && assistant.Status.Terminal()) ||
 		(assistant == nil && reasoning != nil && reasoning.Status.Terminal())
+}
+
+func (e *EventEncoder) assistantTombstoned(key string) bool {
+	if e == nil || key == "" {
+		return false
+	}
+	_, ok := e.assistantTombstones[key]
+	return ok
 }
 
 func anonymousEventStartsNewRequest(ev runtimeevents.Event, assistant, reasoning *Item) bool {

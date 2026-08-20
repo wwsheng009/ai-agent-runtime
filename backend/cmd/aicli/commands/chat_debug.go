@@ -1152,7 +1152,7 @@ func printChatAgentPanel(session *ChatSession, argument string) {
 	if useRuntimeSelectionPopup(session) {
 		showChatAgentPanelPopup(session, lines)
 		if session.Interaction != nil {
-			session.Interaction.RefreshStatus("Agent Panel")
+			session.Interaction.SetNotice("Agent Panel")
 		}
 		return
 	}

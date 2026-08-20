@@ -10,7 +10,7 @@ import (
 
 func TestBuildChatDynamicStatusModelUsesCodexActivityFormat(t *testing.T) {
 	model := buildChatDynamicStatusModelForWidthAndInputMode(
-		"Thinking",
+		chatSurfaceStatus{kind: chatSurfaceStatusThinking},
 		160,
 		chatInputModeChat,
 		2*time.Minute+20*time.Second,
@@ -26,7 +26,7 @@ func TestBuildChatDynamicStatusModelUsesCodexActivityFormat(t *testing.T) {
 
 func TestBuildChatDynamicStatusModelRendersRetryDetail(t *testing.T) {
 	model := buildChatDynamicStatusModelForWidthAndInputMode(
-		"retrying step=1 attempt=2/3 reason=rate_limit delay=500ms",
+		chatSurfaceStatus{kind: chatSurfaceStatusRetrying, detail: "step=1 attempt=2/3 reason=rate_limit delay=500ms"},
 		160,
 		chatInputModeChat,
 		time.Second,
@@ -40,9 +40,67 @@ func TestBuildChatDynamicStatusModelRendersRetryDetail(t *testing.T) {
 	}
 }
 
+func TestSurfaceStatusKindRunningClassification(t *testing.T) {
+	// llm.retry 通过 SetRetrying(parts) 发布结构化状态，detail 只作展示数据。
+	// 语义（是否 running / 是否可中断）完全由 kind 决定——不再有字符串前缀
+	// 匹配，因此旧 "retrying <detail> 卡 0s" 这类"某处忘记前缀"的 bug 从结构
+	// 上不可能再发生。
+	detailed := chatSurfaceStatus{
+		kind:   chatSurfaceStatusRetrying,
+		detail: "step=18 ttai / codex / gpt-5.6-sol attempt=1/3 reason=http_5xx_retry delay=1000ms source=prov...",
+	}
+	if !chatSurfaceStateIsRunning(detailed) {
+		t.Fatalf("detailed retry status must be treated as running: %+v", detailed)
+	}
+	for _, s := range []chatSurfaceStatus{
+		{kind: chatSurfaceStatusRetrying},
+		{kind: chatSurfaceStatusTool, detail: "shell"},
+		{kind: chatSurfaceStatusTool, detail: "git status"},
+		{kind: chatSurfaceStatusStreaming},
+		{kind: chatSurfaceStatusThinking},
+		{kind: chatSurfaceStatusWaiting},
+	} {
+		if !chatSurfaceStateIsRunning(s) {
+			t.Fatalf("status %+v must be treated as running", s)
+		}
+	}
+	for _, s := range []chatSurfaceStatus{
+		{kind: chatSurfaceStatusIdle},
+		{kind: chatSurfaceStatusNotice, detail: "Agent Panel"},
+		{kind: chatSurfaceStatusNotice, detail: "Paste draft 3 lines"},
+	} {
+		if chatSurfaceStateIsRunning(s) {
+			t.Fatalf("status %+v must not be treated as running", s)
+		}
+	}
+}
+
+func TestRetryDetailStateKeepsDynamicStatusClockRunning(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coord.Shutdown)
+
+	// A live activity clock is already running mid-turn.
+	start := time.Now().Add(-5 * time.Second)
+	coord.mu.Lock()
+	coord.dynamicStatusStarted = start
+	coord.mu.Unlock()
+
+	// The llm.retry bridge path: SetRetrying(parts) with structured status.
+	coord.SetRetrying("step=18 ttai / codex / gpt-5.6-sol attempt=1/3 reason=http_5xx_retry delay=1000ms source=prov...")
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if coord.dynamicStatusStarted.IsZero() {
+		t.Fatal("retry detail must not reset the dynamic-status clock, otherwise elapsed freezes at 0s")
+	}
+	if !coord.dynamicStatusStarted.Equal(start) {
+		t.Fatalf("retry detail must keep the running clock; got start=%v want %v", coord.dynamicStatusStarted, start)
+	}
+}
+
 func TestBuildChatDynamicStatusModelKeepsCompletedTurnSummary(t *testing.T) {
 	model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
-		"Ready",
+		chatSurfaceStatus{kind: chatSurfaceStatusIdle},
 		160,
 		chatInputModeChat,
 		time.Minute+21*time.Second,
@@ -58,7 +116,7 @@ func TestBuildChatDynamicStatusModelKeepsCompletedTurnSummary(t *testing.T) {
 
 func TestBuildChatDynamicStatusModelOmitsSummaryForInitialReady(t *testing.T) {
 	if model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
-		"Ready",
+		chatSurfaceStatus{kind: chatSurfaceStatusIdle},
 		160,
 		chatInputModeChat,
 		0,

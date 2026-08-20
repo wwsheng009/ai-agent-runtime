@@ -1263,6 +1263,7 @@ func TestUIActionClassification(t *testing.T) {
 		{"SetStatusModelAction", SetStatusModelAction{}, ClassDurable, ""},
 		{"SetDynamicStatusModelAction", SetDynamicStatusModelAction{}, ClassDurable, ""},
 		{"ShowPromptAction", ShowPromptAction{}, ClassDurable, ""},
+		{"PromptSubmittedAction", PromptSubmittedAction{}, ClassDurable, ""},
 		{"SetPromptStateAction", SetPromptStateAction{}, ClassDurable, ""},
 		{"TrackPromptInputAction", TrackPromptInputAction{}, ClassDurable, ""},
 		{"ResetPromptAction", ResetPromptAction{}, ClassDurable, ""},
@@ -1304,6 +1305,27 @@ func TestInputEventSequenceMergeKeepsNewestDraftAndRenderIntent(t *testing.T) {
 	got, ok := merged.(InputEvent)
 	if !ok || got.Text != "new" || got.Sequence != 2 || !got.Render {
 		t.Fatalf("merged InputEvent = %#v, want newest text with preserved render", merged)
+	}
+}
+
+func TestHistoryCommitWakeNeededForPromptSubmittedFence(t *testing.T) {
+	// PromptSubmittedAction 是用户提交输入后的无条件重绘栅栏：即使 history
+	// ledger 无 pending（例如 geometry 尚未发布导致 planEligibleHistoryCommits
+	// 返回空），也必须 wake presenter，让用户消息块立即出帧，而不是等 LLM
+	// 首个 chunk 触发 flush。
+	state := UIControllerState{}
+	if !historyCommitWakeNeeded(PromptSubmittedAction{}, state) {
+		t.Fatal("PromptSubmittedAction must wake the presenter unconditionally")
+	}
+	state.HistoryEffects.Frozen = true
+	if !historyCommitWakeNeeded(PromptSubmittedAction{}, state) {
+		t.Fatal("PromptSubmittedAction must wake even while history effects are frozen")
+	}
+	// 对照组：同样的空状态（无 pending、无 reconciliation）下，普通 action
+	// 不应 wake——证明 PromptSubmittedAction 走的是独立的无条件分支。
+	state.HistoryEffects.Frozen = false
+	if historyCommitWakeNeeded(SetActiveCellAction{}, state) {
+		t.Fatal("SetActiveCellAction must not wake an idle ledger with no pending commits")
 	}
 }
 

@@ -579,7 +579,7 @@ func TestChatInteractionCoordinator_FirstSubmittedUserInputRendersWithLateBridge
 }
 
 func TestChatRuntimeEventBridge_LLMRetryRendersDynamicStatus(t *testing.T) {
-	// llm.retry 渲染在动态数据状态区域：RefreshStatus("retrying ...") 更新
+	// llm.retry 渲染在动态数据状态区域：SetRetrying(parts) 更新结构化重试
 	// 状态行（composer 上方），不产生 timeline/transcript 行（重试是过程
 	// 状态，非持久历史）。
 	session := &ChatSession{
