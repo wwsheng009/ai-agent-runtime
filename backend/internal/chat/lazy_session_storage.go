@@ -176,6 +176,17 @@ func (s *lazySessionStorage) List(ctx context.Context, userID string) ([]*Sessio
 	return store.List(ctx, userID)
 }
 
+func (s *lazySessionStorage) ListAll(ctx context.Context, limit, offset int) ([]*Session, error) {
+	store, err := s.ensure()
+	if err != nil {
+		return nil, err
+	}
+	if lister, ok := store.(SessionStorageAllLister); ok {
+		return lister.ListAll(ctx, limit, offset)
+	}
+	return nil, fmt.Errorf("session storage does not support listing all sessions")
+}
+
 func (s *lazySessionStorage) ListWithState(ctx context.Context, userID string, state SessionState) ([]*Session, error) {
 	store, err := s.ensure()
 	if err != nil {

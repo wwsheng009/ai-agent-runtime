@@ -99,3 +99,36 @@ func TestLazySessionStorage_MaintenanceOpensExistingFileAfterRestart(t *testing.
 	}
 	require.NoError(t, second.(SessionStorageCloser).CloseStorage())
 }
+
+func TestLazySessionStorage_ListAllDelegatesToDurableBackend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session_history.sqlite")
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = path
+	cfg.ImportLegacyJSON = false
+
+	store, err := OpenPersistentSessionStorage(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.(SessionStorageCloser).CloseStorage()) })
+
+	// Lazy wrapper must expose the optional all-lister capability so user
+	// discovery (ListSessionUsers) can see every persisted user's sessions.
+	allLister, ok := store.(SessionStorageAllLister)
+	require.True(t, ok, "lazy session storage must implement SessionStorageAllLister")
+
+	first := NewSession("thinkbook14\\wangweisheng")
+	require.NoError(t, store.Save(context.Background(), first))
+	second := NewSession("anonymous")
+	require.NoError(t, store.Save(context.Background(), second))
+
+	all, err := allLister.ListAll(context.Background(), 0, 0)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+
+	byID := make(map[string]string, len(all))
+	for _, session := range all {
+		byID[session.ID] = session.UserID
+	}
+	require.Equal(t, "thinkbook14\\wangweisheng", byID[first.ID])
+	require.Equal(t, "anonymous", byID[second.ID])
+}
