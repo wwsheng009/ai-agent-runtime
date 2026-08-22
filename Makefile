@@ -6,7 +6,7 @@ FRONTEND_DIR := frontend
 # ---- aicli build / install ----
 BIN_NAME    := aicli
 CMD_PATH    := ./cmd/aicli
-VERSION     ?= dev
+VERSION     ?= $(shell cat VERSION 2>/dev/null || echo dev)
 # 在不同平台拿到一个 ISO-8601 的构建时间（GNU date / BusyBox / git bash 都支持 -u）
 BUILD_TIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
