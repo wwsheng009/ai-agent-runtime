@@ -321,6 +321,9 @@ if (-not $SkipTests) {
         $e2eRoot = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetTempPath()) "ai-agent-runtime-package-e2e"))
         $e2eDir = Join-Path $e2eRoot ([Guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $e2eDir -Force | Out-Null
+        # runtime-server 启动引导要求工作目录下存在 .agents/skills（技能发现目录）。
+        # 缺少该目录时 bootstrap 以 SKILL_LOAD_FAILED 失败退出，导致健康检查无法通过。
+        New-Item -ItemType Directory -Path (Join-Path $e2eDir '.agents/skills') -Force | Out-Null
         $stdoutPath = Join-Path $e2eDir "stdout.log"
         $stderrPath = Join-Path $e2eDir "stderr.log"
         $probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
