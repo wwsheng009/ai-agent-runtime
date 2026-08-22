@@ -6,6 +6,7 @@ param(
     [string]$Goarch = "",
     [string]$ApiBaseUrl = "",
     [switch]$SkipFrontendInstall,
+    [switch]$SkipFrontendBuild,
     [switch]$SkipTests
 )
 
@@ -107,8 +108,11 @@ function Get-FrontendEntryAsset {
 }
 
 Assert-Command "go"
-Assert-Command "node"
-Assert-Command "pnpm"
+# 复用预构建 frontend dist 时（CI 中由 build-frontend job 提供）不再要求 node/pnpm。
+if (-not $SkipFrontendBuild) {
+    Assert-Command "node"
+    Assert-Command "pnpm"
+}
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $frontendDir = Join-Path $repoRoot "frontend"
@@ -153,29 +157,34 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     }
 }
 
-Write-Host "==> Building frontend"
-$oldApiBaseUrl = $env:VITE_API_BASE_URL
-Push-Location $frontendDir
-try {
-    # An embedded frontend should use same-origin /api routes by default.
-    $env:VITE_API_BASE_URL = $ApiBaseUrl.Trim()
+if (-not $SkipFrontendBuild) {
+    Write-Host "==> Building frontend"
+    $oldApiBaseUrl = $env:VITE_API_BASE_URL
+    Push-Location $frontendDir
+    try {
+        # An embedded frontend should use same-origin /api routes by default.
+        $env:VITE_API_BASE_URL = $ApiBaseUrl.Trim()
 
-    if (-not $SkipFrontendInstall) {
-        & pnpm install --frozen-lockfile
-        Assert-LastExitCode "Install frontend dependencies"
+        if (-not $SkipFrontendInstall) {
+            & pnpm install --frozen-lockfile
+            Assert-LastExitCode "Install frontend dependencies"
+        }
+
+        & pnpm build
+        Assert-LastExitCode "Build frontend"
     }
-
-    & pnpm build
-    Assert-LastExitCode "Build frontend"
+    finally {
+        $env:VITE_API_BASE_URL = $oldApiBaseUrl
+        Pop-Location
+    }
 }
-finally {
-    $env:VITE_API_BASE_URL = $oldApiBaseUrl
-    Pop-Location
+else {
+    Write-Host "==> Reusing prebuilt frontend dist: $frontendDist"
 }
 
 $frontendIndex = Join-Path $frontendDist "index.html"
 if (-not (Test-Path -LiteralPath $frontendIndex -PathType Leaf)) {
-    throw "Frontend build did not produce '$frontendIndex'."
+    throw "Frontend dist is missing '$frontendIndex' (run pnpm build or pass -SkipFrontendBuild with a prebuilt dist)."
 }
 
 Write-Host "==> Staging frontend for Go embed"
@@ -379,6 +388,13 @@ if (Test-Path -LiteralPath $archivePath) {
 }
 Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $archivePath -CompressionLevel Optimal
 
+Write-Host "==> Writing checksum"
+$archiveName = Split-Path -Leaf $archivePath
+$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksumPath = "$archivePath.sha256"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($checksumPath, "$archiveHash  $archiveName`n", $utf8NoBom)
+
 $binarySize = (Get-Item -LiteralPath $binaryPath).Length
 $archiveSize = (Get-Item -LiteralPath $archivePath).Length
 Write-Host ""
@@ -389,3 +405,4 @@ Write-Host "  Backend commit:    $gitCommit (dirty=$gitDirty)"
 Write-Host "  Build time:        $buildTime"
 Write-Host "  Binary:            $binaryPath ($binarySize bytes)"
 Write-Host "  Archive:           $archivePath ($archiveSize bytes)"
+Write-Host "  Checksum:          $checksumPath ($archiveHash)"

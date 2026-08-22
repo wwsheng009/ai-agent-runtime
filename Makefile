@@ -1,4 +1,4 @@
-.PHONY: build test lint tidy clean aicli install-aicli uninstall-aicli
+.PHONY: build test lint tidy clean aicli install-aicli uninstall-aicli package-server
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -28,6 +28,10 @@ uninstall-aicli:
 	@dir=$$(go env GOBIN); [ -z "$$dir" ] && dir=$$(go env GOPATH)/bin; \
 	  rm -f "$$dir/$(BIN_NAME)" "$$dir/$(BIN_NAME).exe" && \
 	  echo "Removed $(BIN_NAME) from $$dir"
+
+# 打包 runtime-server（含内嵌前端）到 dist/；版本号复用 VERSION 文件（v0.4.x）
+package-server:
+	pwsh scripts/package-runtime-server.ps1 -Version $(VERSION) -OutputDir dist
 
 test:
 	cd $(BACKEND_DIR) && go test ./...

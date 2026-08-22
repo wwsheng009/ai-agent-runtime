@@ -1,4 +1,4 @@
-name: Release aicli
+name: Release aicli + runtime-server
 
 # 触发条件：
 # 1. 推送形如 v*（含 v1.2.3、v1.2.3-rc.1、aicli-v1.2.3 等）的 tag 时自动编译并发布 Release
@@ -229,6 +229,42 @@ jobs:
           set -euo pipefail
           AICLI_SCENE_PRESENTER=1 go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1
 
+  build-frontend:
+    name: Build embedded frontend (webui dist)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+
+      - name: Upload webui dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     # Hard gate: validate (no-CGO). Soft gate: release-gate (continue-on-error).
@@ -353,9 +389,96 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-server:
+    name: Build runtime-server ${{ matrix.goos }}/${{ matrix.goarch }}
+    # 复用 build-frontend 产出的 webui dist；要求 validate 与前端构建均成功。
+    needs: [validate, build-frontend]
+    if: ${{ always() && needs.validate.result == 'success' && needs.build-frontend.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKDIR }}/go.sum
+
+      - name: Download prebuilt frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: webui-dist
+          path: frontend/dist
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION}"
+
+      - name: Package runtime-server
+        shell: pwsh
+        run: >-
+          ./scripts/package-runtime-server.ps1
+          -OutputDir dist
+          -Version "${{ steps.ver.outputs.version }}"
+          -Goos "${{ matrix.goos }}"
+          -Goarch "${{ matrix.goarch }}"
+          -SkipFrontendInstall
+          -SkipFrontendBuild
+
+      - name: Verify server archive
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          BASENAME="runtime-server-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          test -f "dist/${BASENAME}.zip"
+          test -f "dist/${BASENAME}.zip.sha256"
+          ls -lh "dist/${BASENAME}.zip" "dist/${BASENAME}.zip.sha256"
+          echo "archive=${BASENAME}.zip" >> "$GITHUB_OUTPUT"
+          echo "basename=${BASENAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.basename }}
+          path: |
+            dist/${{ steps.pkg.outputs.archive }}
+            dist/${{ steps.pkg.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-server]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release == 'true'
     permissions:

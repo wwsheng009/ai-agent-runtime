@@ -367,9 +367,9 @@ ai-agent-runtime/
 发版（tag 触发跨平台 Release）：
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
-# .github/workflows/release-aicli.yml → 6 平台 GitHub Release
+git tag v0.4.4
+git push origin v0.4.4
+# .github/workflows/release-aicli.yml → 6 平台 GitHub Release（aicli + runtime-server 制品）
 ```
 
 支持的 tag：`v*`、`aicli-v*`。含 `-rc` / `-beta` / `-alpha` 的 tag 会标为 prerelease。
