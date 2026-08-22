@@ -396,6 +396,7 @@ jobs:
     if: ${{ always() && needs.validate.result == 'success' && needs.build-frontend.result == 'success' }}
     permissions:
       contents: write
+      issues: write
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -490,6 +491,36 @@ jobs:
           URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git push -f "$URL" "HEAD:$BRANCH" 2>&1 || (sleep 5 && git push -f "$URL" "HEAD:$BRANCH" 2>&1) || exit 0
           exit 0
+
+      - name: Publish server debug log issue (on failure)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          BODY_FILE="dist/debug-issue-body.txt"
+          {
+            echo "## phase trail (dist/phases.log)"
+            cat dist/phases.log 2>/dev/null || echo "(no phases.log)"
+            echo
+            echo "## package-step.log (tail ~8000 bytes)"
+            tail -c 8000 dist/package-step.log 2>/dev/null || echo "(no package-step.log)"
+            echo
+            echo "## dist listing"
+            ls -la dist 2>/dev/null || echo "(no dist/)"
+          } > "$BODY_FILE"
+          BODY=$(python3 - "$BODY_FILE" <<'PY'
+import json, sys
+data = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+print(json.dumps(data[:7000]))
+PY
+          )
+          curl -s -o /dev/null -w "issue http %{http_code}\n" -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues" \
+            -d "{\"title\":\"ci-debug: server package failure run ${{ github.run_id }} (${{ matrix.goos }}/${{ matrix.goarch }})\",\"body\":${BODY}}"
 
       - name: Verify server archive
         id: pkg

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
@@ -131,8 +132,7 @@ type chatInteractionCoordinator struct {
 	streamCellID string
 	// assistantBoundaryGroupID joins the legacy reasoning and assistant cells
 	// that belong to one response without reusing tool ChainKey semantics.
-	assistantBoundaryGroupID  string
-	assistantBoundaryGroupSeq uint64
+	assistantBoundaryGroupID string
 	// supplementBlockSeq / errorBlockSeq 为无 historyCell 的完整块
 	// （reasoning supplement divider、error 块）分配稳定 boundary ID。
 	supplementBlockSeq uint64
@@ -1313,9 +1313,15 @@ func (c *chatInteractionCoordinator) beginAssistantBoundaryGroupLocked() string 
 	if c == nil {
 		return ""
 	}
-	c.assistantBoundaryGroupSeq++
-	c.assistantBoundaryGroupID = fmt.Sprintf("assistant-request-%d", c.assistantBoundaryGroupSeq)
+	c.assistantBoundaryGroupID = newAssistantBoundaryGroupKey()
 	return c.assistantBoundaryGroupID
+}
+
+// newAssistantBoundaryGroupKey returns a process- and restart-safe identity for
+// one exact assistant request. It is boundary metadata only: it must never be
+// reused as a tool chain/cause identity.
+func newAssistantBoundaryGroupKey() string {
+	return "assistant-request-" + uuid.NewString()
 }
 
 func (c *chatInteractionCoordinator) ensureAssistantBoundaryGroupLocked() string {
@@ -3149,12 +3155,13 @@ func (c *chatInteractionCoordinator) RenderLocalAssistant(response string) {
 	}
 	bridge := c.session.RuntimeEventBridge
 	response = sanitizeInteractiveAsyncTeamLaunchResponse(response)
+	groupKey := c.ensureAssistantBoundaryGroupLocked()
 	if bridge != nil {
-		bridge.submitAssistant(response)
+		bridge.submitAssistantWithBoundaryGroup(response, groupKey)
 	}
 	cell := c.finalAssistantCellLocked(response)
 	meta := cellBoundaryMeta(cell)
-	meta.GroupKey = c.ensureAssistantBoundaryGroupLocked()
+	meta.GroupKey = groupKey
 	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
 	c.assistantBoundaryGroupID = ""
 	c.mu.Unlock()

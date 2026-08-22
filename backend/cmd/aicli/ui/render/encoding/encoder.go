@@ -175,6 +175,13 @@ func (e *EventEncoder) SubmitUserInput(text string) *ChangeSet {
 // completed assistant 块。正常 runtime assistant 仍必须经 Encode，调用方
 // 不得把同一回复同时走两个入口。
 func (e *EventEncoder) SubmitAssistant(text string) *ChangeSet {
+	return e.SubmitAssistantWithBoundaryGroup(text, "")
+}
+
+// SubmitAssistantWithBoundaryGroup is the key-aware form used when a caller
+// reconstructs or directly injects a response with an exact request identity.
+// The key controls spacing only; it never becomes CauseID/tool ownership.
+func (e *EventEncoder) SubmitAssistantWithBoundaryGroup(text, boundaryGroupKey string) *ChangeSet {
 	if e == nil {
 		return nil
 	}
@@ -182,6 +189,7 @@ func (e *EventEncoder) SubmitAssistant(text string) *ChangeSet {
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
 	it := e.appendItem(KindAssistant, "", text)
+	it.BoundaryGroupKey = boundaryGroupKey
 	setAssistantPresentation(it)
 	it.Status = StatusCompleted
 	e.change(cs, OpAppend, it)
@@ -273,6 +281,12 @@ func (e *EventEncoder) SubmitError(text string) *ChangeSet {
 // 但不冒充 system/error 语义；调用方必须只在该内容尚未由 Encode 映射时
 // 使用，避免 runtime event + direct supplement 双重注入。
 func (e *EventEncoder) SubmitSupplement(text string) *ChangeSet {
+	return e.SubmitSupplementWithBoundaryGroup(text, "")
+}
+
+// SubmitSupplementWithBoundaryGroup is reserved for reconstructed reasoning
+// with an exact request identity. Ordinary notices remain ungrouped.
+func (e *EventEncoder) SubmitSupplementWithBoundaryGroup(text, boundaryGroupKey string) *ChangeSet {
 	if e == nil {
 		return nil
 	}
@@ -280,6 +294,7 @@ func (e *EventEncoder) SubmitSupplement(text string) *ChangeSet {
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
 	it := e.appendItem(KindSupplement, "", text)
+	it.BoundaryGroupKey = boundaryGroupKey
 	it.Status = StatusCompleted
 	e.change(cs, OpAppend, it)
 	if e.model.Tail == nil {

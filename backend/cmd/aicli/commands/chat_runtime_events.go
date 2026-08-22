@@ -1382,13 +1382,24 @@ func (b *chatRuntimeEventBridge) submitUserInput(text string) {
 // submitAssistant 把没有 runtime assistant 终态事件的 direct response 接入
 // Scene 数据面。runtime event path 已经 Encode 的回复不得调用该入口。
 func (b *chatRuntimeEventBridge) submitAssistant(text string) {
+	b.submitAssistantWithBoundaryGroup(text, newAssistantBoundaryGroupKey())
+}
+
+// submitAssistantWithBoundaryGroup keeps the direct-response Scene item and
+// the legacy presentation cell on the same exact-request boundary identity.
+// The identity is persisted for replay and is deliberately independent of
+// CauseID/ChainKey tool ownership.
+func (b *chatRuntimeEventBridge) submitAssistantWithBoundaryGroup(text, boundaryGroupKey string) {
 	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
 		return
 	}
+	if boundaryGroupKey == "" {
+		boundaryGroupKey = newAssistantBoundaryGroupKey()
+	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	b.applyChangeSet(b.renderEncoder.SubmitAssistant(text))
-	b.appendAssistantLog(text)
+	b.applyChangeSet(b.renderEncoder.SubmitAssistantWithBoundaryGroup(text, boundaryGroupKey))
+	b.appendAssistantLog(text, boundaryGroupKey)
 }
 
 // submitCommand 把本地命令执行结果注入统一渲染数据面（设计文档 §1.3 行
@@ -1700,6 +1711,7 @@ type eventLogInjection struct {
 	HistoryResetHeader string                 `json:"history_reset_header,omitempty"`
 	UserInput          string                 `json:"user_input,omitempty"`
 	Assistant          string                 `json:"assistant,omitempty"`
+	AssistantBoundaryGroup string             `json:"assistant_boundary_group,omitempty"`
 	Command            string                 `json:"command,omitempty"`
 	Error              string                 `json:"error,omitempty"`
 	Supplement         string                 `json:"supplement,omitempty"`
@@ -1753,9 +1765,11 @@ func (b *chatRuntimeEventBridge) appendUserInputLog(text string) {
 	b.appendInjectionLog(eventLogInjection{UserInput: text})
 }
 
-// appendAssistantLog 追加 direct assistant 终态注入记录。
-func (b *chatRuntimeEventBridge) appendAssistantLog(text string) {
-	b.appendInjectionLog(eventLogInjection{Assistant: text})
+// appendAssistantLog 追加 direct assistant 终态注入记录及其边界身份。
+func (b *chatRuntimeEventBridge) appendAssistantLog(text, boundaryGroupKey string) {
+	b.appendInjectionLog(eventLogInjection{
+		Assistant: text, AssistantBoundaryGroup: boundaryGroupKey,
+	})
 }
 
 // appendCommandLog 追加命令结果注入记录。
@@ -1863,6 +1877,7 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		event              runtimeevents.Event
 		userInput          string          // 非空表示用户输入注入记录（无 runtime 事件类型）
 		assistant          string          // 非空表示 direct assistant 终态注入记录
+		assistantBoundaryGroup string      // 可选；旧日志为空时保持独立块语义
 		command            string          // 非空表示命令结果注入记录
 		err                string          // 非空表示操作错误注入记录
 		supplement         string          // 非空表示本地补充注入记录
@@ -1909,7 +1924,9 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 			case inj.UserInput != "":
 				entries = append(entries, entry{userInput: inj.UserInput})
 			case inj.Assistant != "":
-				entries = append(entries, entry{assistant: inj.Assistant})
+				entries = append(entries, entry{
+					assistant: inj.Assistant, assistantBoundaryGroup: inj.AssistantBoundaryGroup,
+				})
 			case inj.Command != "":
 				en := entry{command: inj.Command}
 				if inj.Document != nil {
@@ -1962,7 +1979,9 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		case en.userInput != "":
 			b.applyChangeSet(b.renderEncoder.SubmitUserInput(en.userInput))
 		case en.assistant != "":
-			b.applyChangeSet(b.renderEncoder.SubmitAssistant(en.assistant))
+			b.applyChangeSet(b.renderEncoder.SubmitAssistantWithBoundaryGroup(
+				en.assistant, en.assistantBoundaryGroup,
+			))
 		case en.command != "":
 			b.applyChangeSet(b.renderEncoder.SubmitCommandDocument(en.command, en.document))
 		case en.err != "":
