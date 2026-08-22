@@ -199,7 +199,7 @@ func TestRenderLayer_UserInput_ReplayPathDoesNotInject(t *testing.T) {
 		t.Fatalf("replay path injected: cells before=%d after=%d", before, after)
 	}
 	got := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	want := []string{"> 旧消息", "", "• 你好"}
+	want := []string{"> 旧消息", "", "你好"}
 	if len(got) != len(want) {
 		t.Fatalf("lines=%d want %d got=%q", len(got), len(want), got)
 	}

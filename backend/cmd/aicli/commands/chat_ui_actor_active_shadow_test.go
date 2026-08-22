@@ -290,7 +290,7 @@ func TestCompleteAssistantResponsePostsFinalizationShadowTransaction(t *testing.
 	if state.Active != (ui.ActiveCellState{}) {
 		t.Fatalf("finalization left active shadow cell mounted: %+v", state.Active)
 	}
-	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Phase != scene.CellCommitted || state.Transcript.Cells[0].Source != "• final" {
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Phase != scene.CellCommitted || state.Transcript.Cells[0].Source != "final" {
 		t.Fatalf("finalization shadow transcript = %+v", state.Transcript)
 	}
 }
@@ -367,7 +367,7 @@ func TestRuntimeDeltaSnapshotDoesNotEraseShadowStreamingLedger(t *testing.T) {
 		},
 	})
 	state := coordinator.uiActor.AppState()
-	if state.Active.Source != "• hello" || state.Active.Phase != ui.ActiveCellMutable {
+	if state.Active.Source != "hello" || state.Active.Phase != ui.ActiveCellMutable {
 		t.Fatalf("first delta active state = %+v", state.Active)
 	}
 
@@ -380,7 +380,7 @@ func TestRuntimeDeltaSnapshotDoesNotEraseShadowStreamingLedger(t *testing.T) {
 		},
 	})
 	state = coordinator.uiActor.AppState()
-	if state.Active.Source != "• hello world" || state.Active.Revision == 0 {
+	if state.Active.Source != "hello world" || state.Active.Revision == 0 {
 		t.Fatalf("second delta active state = %+v", state.Active)
 	}
 	if state.Active.Stable.End != len("hello world") {

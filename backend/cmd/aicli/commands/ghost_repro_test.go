@@ -110,3 +110,102 @@ func TestChatInteractionCoordinator_WhitespaceAssistantBufferProducesNoGhostLine
 		}
 	}
 }
+
+func TestChatInteractionCoordinator_ReasoningAndAssistantStayAdjacentWithoutEventBullet(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	reasoning := &runtimetypes.ReasoningBlock{
+		Format:     "stream_delta",
+		Summary:    "inspect first",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	}
+
+	t.Run("live stream", func(t *testing.T) {
+		coord := newChatInteractionCoordinator(&ChatSession{})
+		coord.liveStreamFn = func() bool { return true }
+		coord.streamRuneDelay = 0
+		var output bytes.Buffer
+		coord.SetWriter(&output)
+
+		coord.RenderReasoningDelta(reasoning)
+		coord.FinalizeReasoningDelta()
+		coord.RenderAssistantDelta("Hello")
+		if !coord.CompleteAssistantResponse("Hello") {
+			t.Fatal("assistant response was not completed")
+		}
+
+		assertReasoningAssistantTerminalJoin(t, output.String(), "Hello")
+	})
+
+	t.Run("one shot final", func(t *testing.T) {
+		coord := newChatInteractionCoordinator(&ChatSession{})
+		coord.liveStreamFn = func() bool { return true }
+		coord.streamRuneDelay = 0
+		var output bytes.Buffer
+		coord.SetWriter(&output)
+
+		coord.RenderReasoningDelta(reasoning)
+		coord.FinalizeReasoningDelta()
+		coord.RenderAssistant("Hello")
+
+		assertReasoningAssistantTerminalJoin(t, output.String(), "Hello")
+	})
+}
+
+func assertReasoningAssistantTerminalJoin(t *testing.T, rendered, answer string) {
+	t.Helper()
+	join := chatToolDivider("end reasoning") + "\n" + answer
+	if !strings.Contains(rendered, join) {
+		t.Fatalf("reasoning and assistant were not adjacent; want %q in %q", join, rendered)
+	}
+	if strings.Contains(rendered, chatToolDivider("end reasoning")+"\n\n"+answer) {
+		t.Fatalf("reasoning/assistant boundary contains a ghost blank row: %q", rendered)
+	}
+	if strings.Contains(rendered, ui.AssistantStreamMarker()+answer) {
+		t.Fatalf("ordinary assistant body was rendered as an event: %q", rendered)
+	}
+}
+
+func TestChatRuntimeEventBridge_SameRequestReasoningAssistantLayoutIsDense(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	post := func(typ string, payload map[string]interface{}) {
+		t.Helper()
+		bridge.encodeRenderModelEvent(runtimeevents.Event{Type: typ, Payload: payload})
+	}
+	identity := map[string]interface{}{
+		"trace_id": "dense-trace", "turn_id": "dense-turn", "stream_id": "dense-stream", "step": 1,
+	}
+	post("llm.request.started", identity)
+	post("assistant.reasoning", map[string]interface{}{
+		"trace_id": "dense-trace", "turn_id": "dense-turn", "step": 1,
+		"reasoning": map[string]interface{}{"format": "summary", "summary": "inspect first"},
+	})
+	post("assistant.delta", map[string]interface{}{
+		"trace_id": "dense-trace", "turn_id": "dense-turn", "stream_id": "dense-stream", "step": 1,
+		"sequence": uint64(1), "delta": "Hello",
+	})
+	post("assistant.message", map[string]interface{}{
+		"trace_id": "dense-trace", "turn_id": "dense-turn", "stream_id": "dense-stream", "step": 1,
+		"content": "Hello",
+	})
+
+	cells := bridgeSceneCells(t, bridge)
+	if len(cells) != 2 || cells[0].Kind != scene.KindSupplement || cells[1].Kind != scene.KindAssistant {
+		t.Fatalf("scene cells = %+v, want reasoning then assistant", cells)
+	}
+	if cells[0].BoundaryGroupKey == "" || cells[0].BoundaryGroupKey != cells[1].BoundaryGroupKey {
+		t.Fatalf("same request lost boundary group: %+v", cells)
+	}
+	if cells[0].ChainKey != "" || cells[1].ChainKey != "" {
+		t.Fatalf("request boundary identity leaked into tool chain: %+v", cells)
+	}
+	if cells[1].Source != "Hello" || strings.HasPrefix(cells[1].Source, ui.AssistantStreamMarker()) {
+		t.Fatalf("assistant Scene source is not semantic text: %q", cells[1].Source)
+	}
+	rows := scene.LayoutTranscript(cells, 1)
+	for _, row := range rows {
+		if row.Boundary != nil && row.Boundary.PrevCellID == cells[0].ID && row.Boundary.NextCellID == cells[1].ID {
+			t.Fatalf("same-request reasoning/assistant gained a ghost gap row: %+v", rows)
+		}
+	}
+}

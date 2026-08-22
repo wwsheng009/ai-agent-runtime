@@ -129,6 +129,10 @@ type chatInteractionCoordinator struct {
 	// streamCellID 是当前 assistant 流的 boundary 身份：同一流内所有
 	// 残差 chunk 共享该 ID（ResolveGap 同 ID → 稠密），与后续独立块不同。
 	streamCellID string
+	// assistantBoundaryGroupID joins the legacy reasoning and assistant cells
+	// that belong to one response without reusing tool ChainKey semantics.
+	assistantBoundaryGroupID  string
+	assistantBoundaryGroupSeq uint64
 	// supplementBlockSeq / errorBlockSeq 为无 historyCell 的完整块
 	// （reasoning supplement divider、error 块）分配稳定 boundary ID。
 	supplementBlockSeq uint64
@@ -195,14 +199,14 @@ type chatInteractionCoordinator struct {
 	// 动态状态 tick 用它在每秒钟重建状态行：SetRetrying/SetNotice 等入口
 	// 写入的状态不落在 agentStage/activity flags 上，若 tick 重新派生会
 	// 丢失 retry 状态（计时行每 tick 闪回 idle）。语义判断仍走 kind。
-	surfaceStatus                 chatSurfaceStatus
-	persistentStatusModel         style.StatusLineModel
-	dynamicStatusModel            *style.StatusLineModel
-	statusModelsCached            bool
-	activeTools                   map[string]chatActiveTool
-	activeToolSequence            uint64
-	commandCellSequence           uint64
-	lastCommandCellID             string
+	surfaceStatus         chatSurfaceStatus
+	persistentStatusModel style.StatusLineModel
+	dynamicStatusModel    *style.StatusLineModel
+	statusModelsCached    bool
+	activeTools           map[string]chatActiveTool
+	activeToolSequence    uint64
+	commandCellSequence   uint64
+	lastCommandCellID     string
 
 	// assistantTurnTranscript is the source-backed authoritative record for the
 	// current assistant turn. It is kept separate from the mutable streamBuffer
@@ -1265,6 +1269,7 @@ func (c *chatInteractionCoordinator) resetBlockBoundaryLocked() {
 	c.lastBlockMeta = boundary.CellMeta{}
 	c.gapPreWritten = false
 	c.streamCellID = ""
+	c.assistantBoundaryGroupID = ""
 }
 
 // cellBoundaryMeta projects a history cell onto the boundary metadata view
@@ -1298,7 +1303,29 @@ func (c *chatInteractionCoordinator) streamBoundaryMetaLocked() boundary.CellMet
 	if c.streamCellID == "" {
 		c.streamCellID = fmt.Sprintf("cell-%d", cellIdentityCounter.Add(1))
 	}
-	return boundary.CellMeta{ID: c.streamCellID, Kind: boundary.KindAssistant, TopLevel: true}
+	return boundary.CellMeta{
+		ID: c.streamCellID, Kind: boundary.KindAssistant, TopLevel: true,
+		GroupKey: c.ensureAssistantBoundaryGroupLocked(),
+	}
+}
+
+func (c *chatInteractionCoordinator) beginAssistantBoundaryGroupLocked() string {
+	if c == nil {
+		return ""
+	}
+	c.assistantBoundaryGroupSeq++
+	c.assistantBoundaryGroupID = fmt.Sprintf("assistant-request-%d", c.assistantBoundaryGroupSeq)
+	return c.assistantBoundaryGroupID
+}
+
+func (c *chatInteractionCoordinator) ensureAssistantBoundaryGroupLocked() string {
+	if c == nil {
+		return ""
+	}
+	if c.assistantBoundaryGroupID == "" {
+		return c.beginAssistantBoundaryGroupLocked()
+	}
+	return c.assistantBoundaryGroupID
 }
 
 // nextSupplementMetaLocked / nextErrorMetaLocked allocate stable boundary IDs
@@ -1310,6 +1337,7 @@ func (c *chatInteractionCoordinator) nextSupplementMetaLocked() boundary.CellMet
 		ID:       fmt.Sprintf("supplement-%d", c.supplementBlockSeq),
 		Kind:     boundary.KindAssistant,
 		TopLevel: true,
+		GroupKey: c.ensureAssistantBoundaryGroupLocked(),
 	}
 }
 
@@ -1867,17 +1895,17 @@ func (c *chatInteractionCoordinator) isReadyLocked() bool {
 type chatSurfaceStatusKind int
 
 const (
-	chatSurfaceStatusIdle chatSurfaceStatusKind = iota // Ready / 终态（Codex 对齐）
-	chatSurfaceStatusWaiting                           // 等待（legacy activity flag）
-	chatSurfaceStatusThinking                          // 思考（thinking / reasoning）
-	chatSurfaceStatusStreaming                         // 流式输出
-	chatSurfaceStatusPlanning                          // 规划阶段
-	chatSurfaceStatusStopping                          // 中断清理
-	chatSurfaceStatusTool                              // 执行工具，detail=工具名/进度
-	chatSurfaceStatusRetrying                          // 正在重试，detail=retry parts
-	chatSurfaceStatusApproval                          // 等待审批（agent stage）
-	chatSurfaceStatusAnswer                            // 等待回答（agent stage）
-	chatSurfaceStatusNotice                            // 透传 UI 文案（detail=全文），非状态机语义
+	chatSurfaceStatusIdle      chatSurfaceStatusKind = iota // Ready / 终态（Codex 对齐）
+	chatSurfaceStatusWaiting                                // 等待（legacy activity flag）
+	chatSurfaceStatusThinking                               // 思考（thinking / reasoning）
+	chatSurfaceStatusStreaming                              // 流式输出
+	chatSurfaceStatusPlanning                               // 规划阶段
+	chatSurfaceStatusStopping                               // 中断清理
+	chatSurfaceStatusTool                                   // 执行工具，detail=工具名/进度
+	chatSurfaceStatusRetrying                               // 正在重试，detail=retry parts
+	chatSurfaceStatusApproval                               // 等待审批（agent stage）
+	chatSurfaceStatusAnswer                                 // 等待回答（agent stage）
+	chatSurfaceStatusNotice                                 // 透传 UI 文案（detail=全文），非状态机语义
 )
 
 // chatSurfaceStatus 是 surface 状态的结构化描述。kind 决定语义（是否 running、
@@ -3101,7 +3129,9 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	response = sanitizeInteractiveAsyncTeamLaunchResponse(response)
 	cell := c.finalAssistantCellLocked(response)
 	meta := cellBoundaryMeta(cell)
+	meta.GroupKey = c.ensureAssistantBoundaryGroupLocked()
 	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
+	c.assistantBoundaryGroupID = ""
 }
 
 // RenderLocalAssistant commits a final response produced outside the runtime
@@ -3124,7 +3154,9 @@ func (c *chatInteractionCoordinator) RenderLocalAssistant(response string) {
 	}
 	cell := c.finalAssistantCellLocked(response)
 	meta := cellBoundaryMeta(cell)
+	meta.GroupKey = c.ensureAssistantBoundaryGroupLocked()
 	c.commitHistoryCellLocked(cell, c.gapBeforeBlockLocked(meta), meta)
+	c.assistantBoundaryGroupID = ""
 	c.mu.Unlock()
 	c.postTranscriptSnapshotFromBridge(bridge)
 }
@@ -3150,6 +3182,13 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 			return
 		}
 		c.reasoningActive = true
+		// A reasoning block starts a fresh exact-request group unless assistant
+		// deltas for that request already opened one out of order.
+		if !c.streamingActive {
+			c.beginAssistantBoundaryGroupLocked()
+		} else {
+			c.ensureAssistantBoundaryGroupLocked()
+		}
 		c.reasoningRendered = false
 		c.reasoningMarkdownMode = false
 		// Dividers below end with writeLineLocked, so the cursor is at a row
@@ -3220,6 +3259,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 			}
 		}
 		c.streamingActive = true
+		c.ensureAssistantBoundaryGroupLocked()
 		c.updateSurfaceStatusLocked(chatSurfaceStatus{kind: chatSurfaceStatusStreaming})
 		c.streamRendered = false
 		c.streamMode = assistantStreamModeUnknown
@@ -3291,10 +3331,10 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 			if strings.TrimSpace(c.streamBuffer.String()) == "" {
 				return
 			}
-			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), "", "", &c.streamRendered, &c.streamTrailingLF)
 			return
 		}
-		c.writeIndentedStreamingDeltaLocked(newlyStable, ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+		c.writeIndentedStreamingDeltaLocked(newlyStable, "", "", &c.streamRendered, &c.streamTrailingLF)
 	}
 }
 
@@ -3422,7 +3462,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 	if c.shouldLiveStreamOutputLocked() {
 		suffix := resolveStreamCompletionSuffix(c.streamBuffer.String(), finalContent)
 		if suffix != "" {
-			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+			c.writeIndentedStreamingDeltaLocked(suffix, "", "", &c.streamRendered, &c.streamTrailingLF)
 			c.streamBuffer.WriteString(suffix)
 		}
 		if c.streamRendered {
@@ -4819,8 +4859,8 @@ func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
 	// first chunks may still look like plain prose even though a later chunk
 	// (or the authoritative final snapshot) reveals Markdown. Do not commit
 	// that provisional plain presentation to irreversible scrollback: the
-	// plain assistant block chrome ("• ") cannot be removed from a non-rewritable
-	// writer after the stream upgrades to Markdown.
+	// already-emitted plain layout cannot be replaced on a non-rewritable writer
+	// after the stream upgrades to Markdown.
 	if c.streamingActive &&
 		!c.streamRendered &&
 		c.streamMode != assistantStreamModeMarkdown &&
@@ -4847,7 +4887,7 @@ func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
 	if c.streamPresentationDeferred {
 		// The complete assistant snapshot will choose the final plain/Markdown
 		// presentation. Rendering this provisional buffer now would make a later
-		// Markdown upgrade retain the wrong plain block prefix permanently.
+		// Markdown upgrade retain the wrong plain layout permanently.
 		return
 	}
 	content := c.streamBuffer.String()
@@ -4859,7 +4899,7 @@ func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
 	if c.streamMode == assistantStreamModeMarkdown {
 		return
 	}
-	c.writeIndentedStreamingDeltaLocked(content, ui.AssistantStreamMarker(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+	c.writeIndentedStreamingDeltaLocked(content, "", "", &c.streamRendered, &c.streamTrailingLF)
 	// 流式增量已提供块间视觉分隔（增量行本身或随后的终止空行）：下一个
 	// 完整块（如打断插入的 tool_result）不再重复写 gap——旧
 	// completeBlockOutput=false 打断补偿语义的显式化。正常 finalize 的
@@ -5135,6 +5175,7 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.stableCommitBelowExit = time.Time{}
 	c.stableCommitLastExit = time.Time{}
 	c.streamCellID = ""
+	c.assistantBoundaryGroupID = ""
 	c.activeCellShadowID = 0
 	c.activeCellShadowRevision = 0
 	// Drop both coordinator source ownership and the surface rewrite window.
@@ -5192,6 +5233,7 @@ func (c *chatInteractionCoordinator) resetUnifiedStreamLocked() {
 	c.stableCommitBelowExit = time.Time{}
 	c.stableCommitLastExit = time.Time{}
 	c.streamCellID = ""
+	c.assistantBoundaryGroupID = ""
 	c.activeCellShadowID = 0
 	c.activeCellShadowRevision = 0
 	c.clearSoftEmittedTailLocked()

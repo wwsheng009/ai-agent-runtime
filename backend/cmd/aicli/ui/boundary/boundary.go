@@ -31,11 +31,11 @@ const (
 type CellKind uint8
 
 const (
-	KindUser         CellKind = iota // 用户消息
-	KindAssistant                    // assistant 流式消息（含 reasoning/supplement 归属）
-	KindTool                         // 工具调用/工具输出（tool chain）
-	KindCommand                      // 本地命令执行结果
-	KindSystem                       // 会话/诊断/notice/warning
+	KindUser      CellKind = iota // 用户消息
+	KindAssistant                 // assistant 流式消息（含 reasoning/supplement 归属）
+	KindTool                      // 工具调用/工具输出（tool chain）
+	KindCommand                   // 本地命令执行结果
+	KindSystem                    // 会话/诊断/notice/warning
 )
 
 // CellMeta 是 ResolveGap 所需的相邻 cell 元数据视图。
@@ -43,11 +43,16 @@ const (
 // 它是 unified plan TranscriptCell 的最小投影：Scene 终局落地后由
 // TranscriptCell 派生，本包不依赖完整 Scene 结构，保持纯函数可单测。
 type CellMeta struct {
-	ID       string     // 稳定 cell 身份；空表示"无前项"
-	Kind     CellKind   // 语义分类
-	TopLevel bool       // 是否独立 top-level cell（tool-chain 内部成员为 false）
-	ChainKey string     // 同一 tool-chain 的归组键（并行工具输出归组到父调用）；
+	ID       string   // 稳定 cell 身份；空表示"无前项"
+	Kind     CellKind // 语义分类
+	TopLevel bool     // 是否独立 top-level cell（tool-chain 内部成员为 false）
+	ChainKey string   // 同一 tool-chain 的归组键（并行工具输出归组到父调用）；
 	// 非空且与相邻 cell 相等 → 链内稠密（gap 0）
+	// GroupKey is an independent boundary-only identity. Distinct top-level
+	// cells with the same non-empty value are sections of one semantic block
+	// (for example reasoning + final answer from the same exact LLM request).
+	// Unlike ChainKey it never changes ownership, sequence, or tool merging.
+	GroupKey string
 	Boundary BoundaryClass // 边界类别（默认 BoundaryNormal）
 	Mutable  bool          // 是否 mutable cell（update/finalize 期间）
 }
@@ -100,10 +105,16 @@ func ResolveGap(prev, next CellMeta) GapRows {
 	if prev.ChainKey != "" && prev.ChainKey == next.ChainKey {
 		return GapNone
 	}
+	// Distinct top-level sections of the same exact request stay dense without
+	// pretending to be a tool chain. Empty keys never match: independent turns
+	// and ungrouped supplements retain the normal one-row boundary.
+	if prev.TopLevel && next.TopLevel && prev.GroupKey != "" && prev.GroupKey == next.GroupKey {
+		return GapNone
+	}
 	// supplement/reasoning 属于同一 assistant cell：其后续 section 由
 	// cell 内 layout 决定，默认稠密（规则表：同 cell 后续 section -> 0）。
-	// 本包通过 ChainKey（assistant 流身份）表达归属；无 ChainKey 的
-	// 独立 supplement 按 top-level 处理。
+	// 本包通过 GroupKey 表达这种跨 cell、同 request 的归属；无 GroupKey
+	// 的独立 supplement 按 top-level 处理。
 	//
 	// 其余全部组合：独立 top-level cell 之间最多一个语义 gap
 	// （INV-GAP-02 / 规则表 user->assistant、assistant->user、

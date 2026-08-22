@@ -124,7 +124,7 @@ func TestRenderLayer_TextParity_NilProbeSafe(t *testing.T) {
 	coord.RenderAssistant("你好")
 	coord.RenderAssistant("世界")
 	got := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	want := []string{"• 你好", "", "• 世界"}
+	want := []string{"你好", "", "世界"}
 	if len(got) != len(want) {
 		t.Fatalf("lines=%d want %d got=%q", len(got), len(want), got)
 	}

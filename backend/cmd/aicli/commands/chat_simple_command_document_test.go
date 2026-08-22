@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -134,7 +135,7 @@ func TestTryExecuteStructuredChatCommandHistoryOpensUnifiedTranscriptView(t *tes
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.AppState()
-	for _, want := range []string{"show prior work", "• prior answer"} {
+	for _, want := range []string{"show prior work", "prior answer"} {
 		found := false
 		for _, cell := range state.Transcript.Cells {
 			if cell.Source == want {
@@ -144,6 +145,11 @@ func TestTryExecuteStructuredChatCommandHistoryOpensUnifiedTranscriptView(t *tes
 		}
 		if !found {
 			t.Fatalf("unified /history did not reconcile %q into Scene: %+v", want, state.Transcript.Cells)
+		}
+	}
+	for _, cell := range state.Transcript.Cells {
+		if cell.Kind == scene.KindAssistant && strings.HasPrefix(cell.Source, ui.AssistantStreamMarker()) {
+			t.Fatalf("history/replay assistant source contains event chrome: %+v", cell)
 		}
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {

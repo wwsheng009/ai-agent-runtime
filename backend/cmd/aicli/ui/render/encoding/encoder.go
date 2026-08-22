@@ -546,10 +546,10 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 		// than a fallback system row containing only "assistant.reasoning".
 		return opReasoning
 
-	case runtimechat.EventAssistantDelta:
+	case runtimechat.EventAssistantDelta, "assistant.delta":
 		return opAssistantDelta
 
-	case runtimechat.EventAssistantMessage:
+	case runtimechat.EventAssistantMessage, "assistant.message":
 		return opAssistantFinal
 
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
@@ -1015,6 +1015,7 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
+			t.BoundaryGroupKey = key
 			var nextHead string
 			if strings.TrimSpace(t.Head) == "" {
 				// 占位/空 reasoning（barrier 或空文本）：首行先写思考链分隔线，
@@ -1048,10 +1049,12 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	head := withReasoningDivider(text)
 	if assistant := e.assistantBy[key]; assistant != nil {
 		it = e.insertItemBefore(assistant.ID, KindReasoning, head)
+		it.BoundaryGroupKey = key
 		setReasoningPresentation(it)
 		e.changeBefore(cs, OpAppend, it, assistant.ID)
 	} else {
 		it = e.appendItem(KindReasoning, "", head)
+		it.BoundaryGroupKey = key
 		setReasoningPresentation(it)
 		e.change(cs, OpAppend, it)
 	}
@@ -1153,6 +1156,7 @@ func (e *EventEncoder) markReasoningBarrier(key string, assistant *Item, cs *Cha
 	// 占位插在 assistant 之前（模型数组 insertItemBefore + Scene 锚定
 	// InsertCellBefore），保证 Scene 渲染顺序 reasoning -> assistant。
 	placeholder := e.insertItemBefore(assistant.ID, KindReasoning, "")
+	placeholder.BoundaryGroupKey = key
 	e.reasoningBy[key] = placeholder
 	e.changeBefore(cs, OpAppend, placeholder, assistant.ID)
 }
@@ -1261,6 +1265,7 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 			e.finalizeReasoningBeforeAssistant(key, cs)
 		}
 		it = e.appendItem(KindAssistant, "", "")
+		it.BoundaryGroupKey = key
 		setAssistantPresentation(it)
 		e.assistantBy[key] = it
 		e.change(cs, OpAppend, it)
@@ -1389,6 +1394,7 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 			return
 		}
 		it = e.appendItem(KindAssistant, "", text)
+		it.BoundaryGroupKey = key
 		setAssistantPresentation(it)
 		it.Status = StatusCompleted // 孤儿 final：直接终态（不保持 pending）
 		e.assistantBy[key] = it
@@ -2216,8 +2222,9 @@ func anonymousEventStartsNewRequest(ev runtimeevents.Event, assistant, reasoning
 	if !anonymousRequestTerminal(assistant, reasoning) {
 		return false
 	}
-	return ev.Type == runtimechat.EventAssistantDelta ||
-		ev.Type == runtimechat.EventAssistantReasoning || ev.Type == "assistant.reasoning"
+	return ev.Type == runtimechat.EventAssistantDelta || ev.Type == "assistant.delta" ||
+		ev.Type == runtimechat.EventAssistantReasoning || ev.Type == "assistant.reasoning" ||
+		ev.Type == runtimechat.EventAssistantMessage || ev.Type == "assistant.message"
 }
 
 func (e *EventEncoder) lookupAssistantRequestAlias(aliases []string) string {

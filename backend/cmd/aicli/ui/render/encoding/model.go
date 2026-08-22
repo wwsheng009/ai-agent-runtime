@@ -76,19 +76,24 @@ func (s ItemStatus) Terminal() bool {
 // Item 是渲染模型的最小信息块，对应 Codex ThreadItem。
 // ID/Seq/Created/Updated 全部由编码器分配；渲染层只读。
 type Item struct {
-	ID           string       // 全局唯一，编码器单调分配："item-{n}"
-	Seq          uint64       // 提交序号（单调、仅追加语义）
-	Kind         ItemKind     // 信息块类型
-	CauseID      string       // 父事件 id（工具输出 -> 工具调用 id）；"" 表示 top-level
-	Status       ItemStatus   // 生命周期状态
-	Head         string       // 当前渲染内容快照（流式增量的最新文本）
+	ID      string     // 全局唯一，编码器单调分配："item-{n}"
+	Seq     uint64     // 提交序号（单调、仅追加语义）
+	Kind    ItemKind   // 信息块类型
+	CauseID string     // 父事件 id（工具输出 -> 工具调用 id）；"" 表示 top-level
+	Status  ItemStatus // 生命周期状态
+	Head    string     // 当前渲染内容快照（流式增量的最新文本）
+	// BoundaryGroupKey groups distinct top-level render items which are
+	// sections of the same exact LLM request (currently reasoning + assistant).
+	// It is deliberately separate from CauseID/tool ChainKey: grouping these
+	// sections must not change tool merging, top-level sequence, or ownership.
+	BoundaryGroupKey string
 	// HistoryCommitBlocked is a physical-order fence, not visible content.
 	// It keeps a mutable assistant prefix out of native scrollback while a
 	// reasoning predecessor may still arrive late.
 	HistoryCommitBlocked bool
-	Presentation Presentation // structured presentation descriptor
-	Created      uint64       // 创建时的编码器时钟
-	Updated      uint64       // 最近一次 upsert 的编码器时钟
+	Presentation         Presentation // structured presentation descriptor
+	Created              uint64       // 创建时的编码器时钟
+	Updated              uint64       // 最近一次 upsert 的编码器时钟
 }
 
 // Tail 是模型尾部指针：/debug、/model 等用户交互输出以此为锚点参与总序。

@@ -162,10 +162,8 @@ func (c userMessageCell) DisplayLines(width int) []string {
 }
 
 // assistantMessageCell renders a finalized assistant turn (one-shot reference).
-// It holds the raw body; DisplayLines applies the unified assistant event
-// chrome ("• " marker + gutter indent) exactly like the plain stream cell,
-// then width-aware wrap when width > 0. Markdown bodies are formatter-rendered
-// upstream and routed through assistantStreamCell, never here.
+// It holds and projects raw prose without runtime-event chrome. Markdown bodies
+// are formatter-rendered upstream and routed through assistantStreamCell.
 type assistantMessageCell struct {
 	cellIdentity
 	body string
@@ -178,7 +176,7 @@ func newAssistantMessageCell(body string) assistantMessageCell {
 func (assistantMessageCell) Kind() historyCellKind { return historyCellAssistant }
 
 func (c assistantMessageCell) DisplayLines(width int) []string {
-	return widthAwareDisplayLines(ui.FormatAssistantBlockChrome(c.body), width)
+	return widthAwareDisplayLines(c.body, width)
 }
 
 // supplementLineCell renders one async/supplement line (tool feedback, warnings,
@@ -340,10 +338,9 @@ func (c assistantStreamCell) DisplayLines(width int) []string {
 		formatted += c.trailingDisplayLine
 	}
 	if c.formatFn == nil && !c.markdown {
-		// Plain assistant block gets the unified event chrome: "• " marker on
-		// the first line, continuation lines indented to the marker gutter.
-		// Markdown keeps its own structure (FormatAssistantRendered indent only).
-		return widthAwareDisplayLines(ui.FormatAssistantBlockChrome(formatted), width)
+		// Plain assistant prose is not a tool/runtime event. Keep every source
+		// line unchanged and let widthAwareDisplayLines own wrapping only.
+		return widthAwareDisplayLines(formatted, width)
 	}
 	return widthAwareDisplayLines(ui.FormatAssistantRendered(formatted), width)
 }

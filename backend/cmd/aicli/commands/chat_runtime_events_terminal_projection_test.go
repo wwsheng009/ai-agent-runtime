@@ -154,7 +154,7 @@ func TestDottedLifecycleLateMarkdownFinalStaysOneAssistantCell(t *testing.T) {
 		t.Fatalf("assistant source=%q want raw final %q", assistant.Source, final)
 	}
 	if strings.Contains(assistant.Source, ui.AssistantStreamMarker()+intro) {
-		t.Fatalf("plain assistant chrome leaked into final Scene source: %q", assistant.Source)
+		t.Fatalf("legacy assistant event marker leaked into final Scene source: %q", assistant.Source)
 	}
 }
 
@@ -681,12 +681,12 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 		t.Fatalf("final history delivery did not settle: %+v", final.HistoryEffects)
 	}
 	tailAcknowledged := false
-	// HistoryCommit.SourceRange 是 cell.Source（chrome 后展示文本）的字节
-	// 区间；流式 ledger（Stable/Enqueued/Acked）才是原始内容坐标。
-	chromedAnswer := boundary.FormatAssistantBlockChrome(answer)
+	// HistoryCommit.SourceRange 与流式 ledger（Stable/Enqueued/Acked）统一
+	// 使用语义正文的字节坐标。
+	semanticAnswer := answer
 	for _, entry := range final.HistoryEffects.Entries() {
 		if entry.State == ui.HistoryCommitAcked && entry.Commit.CellID == streaming.Active.CellID &&
-			entry.Commit.SourceRange.End == len(chromedAnswer) {
+			entry.Commit.SourceRange.End == len(semanticAnswer) {
 			tailAcknowledged = true
 			break
 		}

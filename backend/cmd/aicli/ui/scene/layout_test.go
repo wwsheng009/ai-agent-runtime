@@ -55,6 +55,44 @@ func TestLayoutTopLevelCellsGetGapRow(t *testing.T) {
 	}
 }
 
+func TestLayoutSameRequestReasoningAssistantHasNoGhostGap(t *testing.T) {
+	s := New()
+	reasoning := newTestCell(1, KindSupplement, "end reasoning")
+	reasoning.BoundaryGroupKey = "request-1"
+	assistant := newTestCell(2, KindAssistant, "Hello")
+	assistant.BoundaryGroupKey = "request-1"
+	mustSubmit(t, s, &AppendCell{Cell: reasoning})
+	mustSubmit(t, s, &AppendCell{Cell: assistant})
+
+	rows := layoutScene(t, s, 1)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want adjacent reasoning and assistant without a boundary row", rows)
+	}
+	if rows[0].Text != "end reasoning" || rows[1].Text != "Hello" {
+		t.Fatalf("unexpected dense rows: %+v", rows)
+	}
+	for _, row := range rows {
+		if row.Boundary != nil {
+			t.Fatalf("same-request sections gained ghost gap: %+v", rows)
+		}
+	}
+}
+
+func TestLayoutDifferentRequestReasoningAssistantKeepsTurnGap(t *testing.T) {
+	s := New()
+	reasoning := newTestCell(1, KindSupplement, "end reasoning")
+	reasoning.BoundaryGroupKey = "request-1"
+	assistant := newTestCell(2, KindAssistant, "Hello")
+	assistant.BoundaryGroupKey = "request-2"
+	mustSubmit(t, s, &AppendCell{Cell: reasoning})
+	mustSubmit(t, s, &AppendCell{Cell: assistant})
+
+	rows := layoutScene(t, s, 1)
+	if len(rows) != 3 || rows[1].Boundary == nil || rows[1].Gap != boundary.GapOne {
+		t.Fatalf("different requests lost their boundary: %+v", rows)
+	}
+}
+
 func TestLayoutToolChainDense(t *testing.T) {
 	// 规则表：同一 tool-chain cell 内的 tool events -> 0（链内事件合并进链首 cell，
 	// 内容行之间无 boundary 行；§7.3）。

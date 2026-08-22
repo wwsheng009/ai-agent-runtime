@@ -584,7 +584,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.AppState()
-	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "• scene streamed body" {
+	if state.Active.Phase != ui.ActiveCellMutable || state.Active.Source != "scene streamed body" {
 		t.Fatalf("stream did not advance Scene-backed active cell: %+v", state.Active)
 	}
 	if got := surface.ActiveBandLines(); len(got) != 0 {
@@ -611,7 +611,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *
 	if state.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("finalized stream left an active visual source: %+v", state.Active)
 	}
-	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != "• authoritative final body" {
+	if len(state.Transcript.Cells) != 1 || state.Transcript.Cells[0].Source != "authoritative final body" {
 		t.Fatalf("final Scene cell not committed exactly through transcript: %+v", state.Transcript)
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
@@ -794,7 +794,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamTerminalBoundaries(t *t
 				t.Fatalf("transcript cells=%d, want exactly one finalized partial cell", len(state.Transcript.Cells))
 			}
 			cell := state.Transcript.Cells[0]
-			if cell.Source != "• "+partial || cell.Phase != scene.CellCommitted {
+			if cell.Source != partial || cell.Phase != scene.CellCommitted {
 				t.Fatalf("terminal partial cell=%+v, want committed source=%q", cell, partial)
 			}
 			if strings.Count(output.String(), partial) > 2 {

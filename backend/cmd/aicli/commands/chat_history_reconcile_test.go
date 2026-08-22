@@ -248,7 +248,7 @@ func TestPresentChatStartupSession_UnifiedSeedsHistoryWithoutLoadedRuntimeHandle
 
 	state := coordinator.uiActor.AppState()
 	assertTranscriptSourceCount(t, state.Transcript.Cells, "startup canonical user without runtime handle", 1)
-	assertTranscriptSourceCount(t, state.Transcript.Cells, "• startup canonical assistant without runtime handle", 1)
+	assertTranscriptSourceCount(t, state.Transcript.Cells, "startup canonical assistant without runtime handle", 1)
 	if strings.Contains(terminal.String(), "已恢复历史会话") {
 		t.Fatalf("startup without a loaded handle rendered a false resume status: %q", terminal.String())
 	}
@@ -312,7 +312,7 @@ func TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory(t *te
 	}
 	for index := 1; index <= 8; index++ {
 		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("historical question %d", index), 1)
-		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("• historical answer %d", index), 1)
+		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("historical answer %d", index), 1)
 	}
 	acked := 0
 	for _, entry := range state.HistoryEffects.Entries() {
@@ -509,7 +509,7 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 		t.Fatalf("startup reasoning did not remain semantic active content: %+v", state.Active)
 	}
 	assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, "startup history user 6", 1)
-	assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, "• startup history assistant 6", 1)
+	assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, "startup history assistant 6", 1)
 	if session.TerminalSession == nil {
 		t.Fatal("startup did not publish TerminalSession")
 	}
@@ -666,7 +666,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	}
 	for index := 1; index <= 6; index++ {
 		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("replayed canonical user %d", index), 1)
-		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("• replayed canonical assistant %d", index), 1)
+		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("replayed canonical assistant %d", index), 1)
 	}
 	if session.TerminalSession == nil {
 		t.Fatal("startup did not publish TerminalSession")
@@ -884,7 +884,7 @@ func assertPersistedHistoryScene(t *testing.T, snapshot *scene.Snapshot) {
 		scene.KindUser,
 		scene.KindAssistant,
 	}
-	wantSources := []string{"repeat", "• first response", "repeat", "• second response"}
+	wantSources := []string{"repeat", "first response", "repeat", "second response"}
 	for index, cell := range snapshot.Cells {
 		if cell.Kind != wantKinds[index] || cell.Source != wantSources[index] {
 			t.Fatalf("cell[%d]=%+v, want kind=%v source=%q", index, cell, wantKinds[index], wantSources[index])

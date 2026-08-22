@@ -23,6 +23,17 @@ trap {
         "runtime-server package failed at phase: $script:phase"
         "exception: $message"
     )
+    # 落盘诊断日志（CI 中由失败步骤推到 ci-debug-* 分支，便于无 token 读取）。
+    try {
+        $repoDist = Join-Path (Split-Path $PSScriptRoot -Parent) "dist"
+        New-Item -ItemType Directory -Force -Path $repoDist -ErrorAction SilentlyContinue | Out-Null
+        $trapLogPath = Join-Path $repoDist "package-debug-$PID.log"
+        [System.IO.File]::WriteAllLines($trapLogPath, $script:trapSummary, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "Trap debug log: $trapLogPath"
+    }
+    catch {
+        Write-Host "Failed to write trap debug log: $($_.Exception.Message)"
+    }
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "## runtime-server package failure" -Encoding utf8
         Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($script:trapSummary -join "`n") -Encoding utf8

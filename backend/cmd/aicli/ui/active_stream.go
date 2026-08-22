@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
@@ -92,12 +91,10 @@ func (c *ActiveStreamController) SourceSnapshot() ActiveStreamSourceSnapshot {
 		snapshot.Source = c.cell.Body
 		snapshot.StableEnd = len(c.md.Stable())
 	} else {
-		// 纯文本 assistant 的 Source 必须与 Scene 快照的展示文本一致
-		// （assistantCellSource 施加 "• " chrome），否则 shadow 更新与
-		// ReplaceTranscriptAction 的前缀/相等比较失败，ledger 会被清零。
-		// StableEnd 保持原始内容坐标：流式 ledger 与历史提交都按原始内容
-		// 长度记账，chrome 只是展示层文本。
-		snapshot.Source = boundary.FormatAssistantBlockChrome(c.cell.Body)
+		// Source and all ledger ranges use the same semantic byte coordinates.
+		// Ordinary assistant presentation no longer bakes event chrome into the
+		// source, so shadow replacement and history handoff compare raw content.
+		snapshot.Source = c.cell.Body
 		snapshot.StableEnd = len(c.cell.Stable)
 	}
 	return snapshot

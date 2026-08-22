@@ -37,18 +37,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 )
 
-// assistantCellSource 为纯文本 assistant cell 应用统一事件块 chrome
-// （首行 "• " 标识 + 续行缩进），与 legacy history cell 的输出一致，保证
-// 渲染层切换的文本 parity。markdown assistant 保持原始 source，由
-// presenter 负责格式化（烤进 "• " 会破坏 markdown 结构）。
+// assistantCellSource returns semantic source only. Presentation chrome must
+// never be baked into TranscriptCell.Source: replay, active-stream offsets,
+// resize, and text parity all operate in the original content coordinates.
 func assistantCellSource(it *encoding.Item) string {
-	if it.Kind == encoding.KindAssistant && presentationFromEncoding(it.Presentation).Kind == PresentationPlain {
-		return boundary.FormatAssistantBlockChrome(it.Head)
+	if it == nil {
+		return ""
 	}
 	return it.Head
 }
@@ -104,6 +102,7 @@ func NewChangeSetMapper(s *TuiScene) *ChangeSetMapper {
 type pendingCell struct {
 	kind                 CellKind
 	chainKey             string
+	boundaryGroupKey     string
 	revision             uint64
 	phase                CellPhase
 	source               string
@@ -158,6 +157,7 @@ func (m *ChangeSetMapper) Map(cs *encoding.ChangeSet) (SceneTransaction, error) 
 		tx.Mutations = append(tx.Mutations, &FinalizeCell{
 			ID: id, Revision: p.revision + 1, Source: p.source,
 			Presentation: p.presentation, HistoryCommitBlocked: false,
+			BoundaryGroupKey: p.boundaryGroupKey,
 		})
 		p.phase = CellCommitted
 		p.finalizeAtEnd = false
@@ -220,7 +220,11 @@ func (m *ChangeSetMapper) mapChange(ch encoding.ItemChange, pending map[CellID]p
 				"changeset: remove of committed cell %d (item %q) is a session-level backtrack; not supported by mutable-only Scene remove", id, it.ID)
 		}
 		mu := &RemoveMutableCell{ID: id, Revision: cur.revision + 1}
-		pending[id] = pendingCell{kind: cur.kind, chainKey: cur.chainKey, revision: mu.Revision, phase: CellMutable, source: cur.source}
+		pending[id] = pendingCell{
+			kind: cur.kind, chainKey: cur.chainKey, boundaryGroupKey: cur.boundaryGroupKey,
+			revision: mu.Revision, phase: CellMutable, source: cur.source,
+			presentation: cur.presentation, historyCommitBlocked: cur.historyCommitBlocked,
+		}
 		return mu, false, nil
 
 	default:
@@ -247,6 +251,7 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID, befor
 		Source:               assistantCellSource(it),
 		Presentation:         presentationFromEncoding(it.Presentation),
 		HistoryCommitBlocked: it.HistoryCommitBlocked,
+		BoundaryGroupKey:     it.BoundaryGroupKey,
 		Revision:             1, // 编码器 append 修订号为 1（render-model-spec §4.2）
 		Provenance:           "changeset:" + string(it.Kind),
 	}
@@ -290,7 +295,8 @@ func (m *ChangeSetMapper) mapAppend(id CellID, it *encoding.Item, afterID, befor
 		mu = &InsertCell{After: anchorCell, Cell: cell}
 	}
 	pending[id] = pendingCell{
-		kind: kind, chainKey: cell.ChainKey, revision: 1, phase: cell.Phase,
+		kind: kind, chainKey: cell.ChainKey, boundaryGroupKey: cell.BoundaryGroupKey,
+		revision: 1, phase: cell.Phase,
 		source: assistantCellSource(it), presentation: cell.Presentation,
 		historyCommitBlocked: cell.HistoryCommitBlocked,
 	}
@@ -354,9 +360,10 @@ func (m *ChangeSetMapper) mapUpsert(id CellID, it *encoding.Item, pending map[Ce
 		// 链首（applyToolFinished 产出 [upsert, append]）。pending 保持
 		// mutable 并打标记，批次结束统一产出 FinalizeCell（见 Map）。
 		pending[id] = pendingCell{
-			kind: cur.kind, chainKey: cur.chainKey, revision: next,
-			phase: CellMutable, source: newSource,
-			presentation: presentationFromEncoding(it.Presentation),
+			kind: cur.kind, chainKey: cur.chainKey, boundaryGroupKey: it.BoundaryGroupKey,
+			revision: next,
+			phase:    CellMutable, source: newSource,
+			presentation:         presentationFromEncoding(it.Presentation),
 			historyCommitBlocked: false, finalizeAtEnd: true,
 		}
 		return nil, false, nil
@@ -365,11 +372,12 @@ func (m *ChangeSetMapper) mapUpsert(id CellID, it *encoding.Item, pending map[Ce
 	presentation := presentationFromEncoding(it.Presentation)
 	mu := &UpdateCell{
 		ID: id, Revision: next, Source: newSource, Presentation: presentation,
-		HistoryCommitBlocked: it.HistoryCommitBlocked,
+		HistoryCommitBlocked: it.HistoryCommitBlocked, BoundaryGroupKey: it.BoundaryGroupKey,
 	}
 	pending[id] = pendingCell{
-		kind: cur.kind, chainKey: cur.chainKey, revision: next,
-		phase: CellMutable, source: newSource, presentation: presentation,
+		kind: cur.kind, chainKey: cur.chainKey, boundaryGroupKey: it.BoundaryGroupKey,
+		revision: next,
+		phase:    CellMutable, source: newSource, presentation: presentation,
 		historyCommitBlocked: it.HistoryCommitBlocked, finalizeAtEnd: cur.finalizeAtEnd,
 	}
 	return mu, true, nil
@@ -392,14 +400,16 @@ func (m *ChangeSetMapper) mergeOutput(target *TranscriptCell, outID CellID, it *
 	mu := &UpdateCell{
 		ID: target.ID, Revision: rev, Source: source, Presentation: presentation,
 		HistoryCommitBlocked: target.HistoryCommitBlocked,
+		BoundaryGroupKey:     target.BoundaryGroupKey,
 	}
 	finalizeAtEnd := false
 	if p, ok := pending[target.ID]; ok {
 		finalizeAtEnd = p.finalizeAtEnd // 保留终态标记（合并发生在 finalize 之前）
 	}
 	pending[target.ID] = pendingCell{
-		kind: target.Kind, chainKey: target.ChainKey, revision: rev,
-		phase: target.Phase, source: source, presentation: presentation,
+		kind: target.Kind, chainKey: target.ChainKey, boundaryGroupKey: target.BoundaryGroupKey,
+		revision: rev,
+		phase:    target.Phase, source: source, presentation: presentation,
 		historyCommitBlocked: target.HistoryCommitBlocked, finalizeAtEnd: finalizeAtEnd,
 	}
 	// 归组键（outID）不创建 cell；留占位以防同批后续 upsert 命中
@@ -431,7 +441,8 @@ func (m *ChangeSetMapper) chainTarget(causeID string, pending map[CellID]pending
 			return nil, false
 		}
 		return &TranscriptCell{
-			ID: cid, Kind: p.kind, ChainKey: p.chainKey, Revision: p.revision,
+			ID: cid, Kind: p.kind, ChainKey: p.chainKey,
+			BoundaryGroupKey: p.boundaryGroupKey, Revision: p.revision,
 			Phase: p.phase, Source: p.source, Presentation: p.presentation,
 			HistoryCommitBlocked: p.historyCommitBlocked,
 		}, true
@@ -453,8 +464,9 @@ func (m *ChangeSetMapper) current(id CellID, pending map[CellID]pendingCell) (pe
 		return pendingCell{}, false
 	}
 	return pendingCell{
-		kind: cell.Kind, chainKey: cell.ChainKey, revision: cell.Revision,
-		phase: cell.Phase, source: cell.Source, presentation: cell.Presentation,
+		kind: cell.Kind, chainKey: cell.ChainKey, boundaryGroupKey: cell.BoundaryGroupKey,
+		revision: cell.Revision,
+		phase:    cell.Phase, source: cell.Source, presentation: cell.Presentation,
 		historyCommitBlocked: cell.HistoryCommitBlocked,
 	}, true
 }

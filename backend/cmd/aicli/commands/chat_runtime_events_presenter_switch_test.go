@@ -90,8 +90,8 @@ func TestPresenterSwitch_SceneModeOutputMatchesLegacy(t *testing.T) {
 		t.Fatalf("%s\nlegacy raw=%q\nscene raw=%q", b.String(), legacyOut, sceneOut)
 	}
 
-	// 场景模式会话中探针仍注入：Scene 驱动的完整块行（剥 chrome 后）与
-	// Scene 投影逐块 matched，证明切换未破坏双跑对照。
+	// 场景模式会话中探针仍注入：Scene 驱动的语义正文行与 Scene 投影
+	// 逐块 matched，证明切换未破坏双跑对照。
 	blocks, matched, missed, lastErr := sceneBridge.textParityStats()
 	if blocks == 0 || matched != blocks || missed != 0 {
 		t.Fatalf("scene-mode parity: blocks=%d matched=%d missed=%d last=%q",
@@ -170,4 +170,3 @@ func TestPresenterSwitch_EnvParsing(t *testing.T) {
 		}
 	}
 }
-

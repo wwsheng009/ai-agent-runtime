@@ -2042,8 +2042,7 @@ func TestAICLIEventRenderer_DefersPlainIntroUntilMarkdownFinal(t *testing.T) {
 	})
 
 	// The first result is plain-looking, but reasoning finalization must not
-	// commit its provisional assistant "• " chrome before a later result chunk
-	// reveals Markdown.
+	// commit it before a later result chunk reveals Markdown.
 	partial := output.String()
 	if strings.Contains(partial, ui.AssistantStreamMarker()+intro) {
 		t.Fatalf("plain intro escaped before Markdown classification: %q", partial)
@@ -2063,7 +2062,7 @@ func TestAICLIEventRenderer_DefersPlainIntroUntilMarkdownFinal(t *testing.T) {
 	renderer.Finalize(&runtimechatcore.ChatResult{Output: final}, nil)
 	rendered := output.String()
 	if strings.Contains(rendered, ui.AssistantStreamMarker()+intro) {
-		t.Fatalf("Markdown final retained plain assistant chrome: %q", rendered)
+		t.Fatalf("Markdown final retained legacy assistant event marker: %q", rendered)
 	}
 	if strings.Count(rendered, "我先检查仓库状态和版本文件。") != 1 {
 		t.Fatalf("expected intro exactly once, got %q", rendered)

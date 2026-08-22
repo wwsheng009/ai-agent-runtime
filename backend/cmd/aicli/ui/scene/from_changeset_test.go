@@ -91,11 +91,9 @@ func TestMapBasicKinds(t *testing.T) {
 		if ap.Cell.ChainKey != "" {
 			t.Errorf("%s: chain key = %q, want \"\" (top-level)", k.itemKind, ap.Cell.ChainKey)
 		}
+		// Scene stores semantic source only. Presentation chrome belongs to the
+		// terminal projection and ordinary assistant text has no event bullet.
 		wantSource := "hello"
-		if k.itemKind == encoding.KindAssistant {
-			// assistant source 经 assistantCellSource 统一 chrome（"• " 首行标识）。
-			wantSource = "• hello"
-		}
 		if ap.Cell.Source != wantSource {
 			t.Errorf("%s: source = %q", k.itemKind, ap.Cell.Source)
 		}
@@ -654,7 +652,47 @@ func TestMapAppendBeforeID(t *testing.T) {
 		t.Fatalf("insert reasoning before assistant: %v", err)
 	}
 	cells := s.Cells()
-	if len(cells) != 2 || cells[0].ID != 2 || cells[0].Source != "reasoning" || cells[1].ID != 1 || cells[1].Source != "• assistant" {
+	if len(cells) != 2 || cells[0].ID != 2 || cells[0].Source != "reasoning" || cells[1].ID != 1 || cells[1].Source != "assistant" {
 		t.Fatalf("before insertion order = %+v", cells)
+	}
+}
+
+func TestMapAssistantPreservesRawSourceAndBoundaryGroup(t *testing.T) {
+	s := New()
+	m := NewChangeSetMapper(s)
+	const group = "request:turn-1:stream-1"
+	raw := "\nHello\nworld\n"
+	assistant := mkItem(encoding.KindAssistant, "item-1", "", encoding.StatusRunning, raw)
+	assistant.BoundaryGroupKey = group
+
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		{Op: encoding.OpAppend, Item: assistant, Revision: 1},
+	}}); err != nil {
+		t.Fatalf("append assistant: %v", err)
+	}
+	cells := s.Cells()
+	if len(cells) != 1 {
+		t.Fatalf("cells = %d, want 1", len(cells))
+	}
+	if got := cells[0].Source; got != raw {
+		t.Fatalf("assistant source = %q, want exact semantic body %q", got, raw)
+	}
+	if got := cells[0].BoundaryGroupKey; got != group {
+		t.Fatalf("append boundary group = %q, want %q", got, group)
+	}
+	if cells[0].ChainKey != "" {
+		t.Fatalf("assistant boundary group leaked into tool ChainKey: %+v", cells[0])
+	}
+
+	assistant.Head = raw + "tail"
+	assistant.Status = encoding.StatusCompleted
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		{Op: encoding.OpUpsert, Item: assistant, Revision: 2},
+	}}); err != nil {
+		t.Fatalf("finalize assistant: %v", err)
+	}
+	cell := s.Cells()[0]
+	if cell.Source != raw+"tail" || cell.BoundaryGroupKey != group || cell.Phase != CellCommitted {
+		t.Fatalf("finalized assistant lost semantic source/group: %+v", cell)
 	}
 }

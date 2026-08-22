@@ -104,6 +104,62 @@ func TestResolveGapSameIDMutableUpdateNoBoundary(t *testing.T) {
 	}
 }
 
+func TestResolveGapSameRequestReasoningAssistantDense(t *testing.T) {
+	prev := topCell("reasoning-1", KindAssistant)
+	prev.GroupKey = "request-1"
+	next := topCell("assistant-1", KindAssistant)
+	next.GroupKey = "request-1"
+
+	if got := ResolveGap(prev, next); got != GapNone {
+		t.Fatalf("same-request reasoning->assistant gap = %d, want 0", got)
+	}
+	if prev.ChainKey != "" || next.ChainKey != "" {
+		t.Fatalf("boundary grouping must not reuse tool ChainKey: prev=%+v next=%+v", prev, next)
+	}
+}
+
+func TestResolveGapDifferentOrEmptyRequestGroupsStaySeparate(t *testing.T) {
+	tests := []struct {
+		name      string
+		prevGroup string
+		nextGroup string
+	}{
+		{name: "different exact requests", prevGroup: "request-1", nextGroup: "request-2"},
+		{name: "empty groups never match"},
+		{name: "one grouped one independent", prevGroup: "request-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prev := topCell("reasoning", KindAssistant)
+			prev.GroupKey = tt.prevGroup
+			next := topCell("assistant", KindAssistant)
+			next.GroupKey = tt.nextGroup
+			if got := ResolveGap(prev, next); got != GapOne {
+				t.Fatalf("groups %q -> %q gap = %d, want 1", tt.prevGroup, tt.nextGroup, got)
+			}
+		})
+	}
+}
+
+func TestResolveGapBoundaryGroupDoesNotChangeToolChainRules(t *testing.T) {
+	prev := chainCell("tool-a", "chain-1")
+	next := chainCell("tool-b", "chain-1")
+	prev.GroupKey = "request-1"
+	next.GroupKey = "request-2"
+	if got := ResolveGap(prev, next); got != GapNone {
+		t.Fatalf("same tool chain with unrelated groups gap = %d, want 0", got)
+	}
+
+	other := chainCell("tool-c", "chain-2")
+	other.GroupKey = "request-2"
+	if got := ResolveGap(next, other); got != GapOne {
+		t.Fatalf("boundary group must not collapse distinct tool chains: gap = %d, want 1", got)
+	}
+	if next.ChainKey == other.ChainKey {
+		t.Fatal("fixture must keep tool chains distinct")
+	}
+}
+
 func TestResolveGapReplayEqualsLive(t *testing.T) {
 	// 规则表：replay cell -> replay next cell 与 live 相同（禁止 replay 特例）。
 	// 本函数无状态：相同元数据输入必然相同输出，此测试固化契约，

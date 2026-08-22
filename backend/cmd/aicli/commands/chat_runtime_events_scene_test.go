@@ -93,8 +93,8 @@ func TestChatRuntimeEventBridge_SceneFollowsModelOrder(t *testing.T) {
 		t.Fatalf("cell[0].Phase=%v want committed", cells[0].Phase)
 	}
 	// assistant 流式合并 + 终态（item-2）
-	if cells[1].ID != 2 || cells[1].Kind != scene.KindAssistant || cells[1].Source != "• 你好" {
-		t.Fatalf("cell[1]=%+v want assistant cell-2 %q", cells[1], "• 你好")
+	if cells[1].ID != 2 || cells[1].Kind != scene.KindAssistant || cells[1].Source != "你好" {
+		t.Fatalf("cell[1]=%+v want assistant cell-2 %q", cells[1], "你好")
 	}
 	if cells[1].Phase != scene.CellCommitted || cells[1].ChainKey != "" {
 		t.Fatalf("cell[1].Phase=%v ChainKey=%q want committed/top-level", cells[1].Phase, cells[1].ChainKey)
@@ -225,17 +225,13 @@ func TestChatRuntimeEventBridge_SceneConsistentUnderOutOfOrderDeltas(t *testing.
 	// 每个 cell 的 Source 与对应模型 Item.Head 一致；顺序 = 模型数组顺序。
 	for i := range cells {
 		want := model.Items[i].Head
-		if cells[i].Kind == scene.KindAssistant {
-			// assistant source 带统一 chrome（assistantCellSource）。
-			want = "• " + want
-		}
 		if cells[i].Source != want {
 			t.Fatalf("cell[%d].Source=%q want model Head %q", i, cells[i].Source, model.Items[i].Head)
 		}
 	}
 	// 同流乱序按 sequence 有序提交：C(3) 缓存，A(1)+B(2) 提交后补 C -> ABC。
-	if cells[1].Source != "• ABC" {
-		t.Fatalf("assistant Source=%q want %q (sequence order)", cells[1].Source, "• ABC")
+	if cells[1].Source != "ABC" {
+		t.Fatalf("assistant Source=%q want %q (sequence order)", cells[1].Source, "ABC")
 	}
 	// 编码器统计到乱序（诊断面），Scene 面无失败。
 	if stats := bridge.renderEncoderStats(); stats.OutOfOrderCount == 0 {
@@ -288,7 +284,7 @@ func TestChatRuntimeEventBridge_ReActToolBoundaryDoesNotLeaveOldMutableAssistant
 	cells = bridgeSceneCells(t, bridge)
 	if len(cells) != 3 || cells[0].Phase != scene.CellCommitted ||
 		cells[1].Phase != scene.CellCommitted || cells[2].Kind != scene.KindAssistant ||
-		cells[2].Phase != scene.CellMutable || cells[2].Source != "• next round" {
+		cells[2].Phase != scene.CellMutable || cells[2].Source != "next round" {
 		t.Fatalf("next ReAct round scene = %+v, want only newest assistant mutable", cells)
 	}
 }

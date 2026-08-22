@@ -394,6 +394,8 @@ jobs:
     # 复用 build-frontend 产出的 webui dist；要求 validate 与前端构建均成功。
     needs: [validate, build-frontend]
     if: ${{ always() && needs.validate.result == 'success' && needs.build-frontend.result == 'success' }}
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -461,6 +463,23 @@ jobs:
           path: dist/**/*.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Publish server debug log branch (on failure)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ls dist/*.log >/dev/null 2>&1; then
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+            git config user.name "ci-release-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git checkout -b "ci-debug-${{ github.run_id }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+            git add dist/*.log
+            git commit -m "ci: server package debug log (run ${{ github.run_id }})" || true
+            git push origin "ci-debug-${{ github.run_id }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
 
       - name: Verify server archive
         id: pkg

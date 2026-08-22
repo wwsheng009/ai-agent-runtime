@@ -3614,8 +3614,11 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_StreamsImmediatelyWhenL
 	coord.RenderAssistantDelta("Hello")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello") {
+	if !strings.Contains(rendered, "Hello") {
 		t.Fatalf("expected live stream output immediately, got %q", rendered)
+	}
+	if strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello") {
+		t.Fatalf("ordinary live assistant text rendered as an event, got %q", rendered)
 	}
 	if strings.Contains(rendered, "\n") {
 		t.Fatalf("expected live stream to avoid premature newline, got %q", rendered)
@@ -3781,8 +3784,11 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitesp
 	coord.RenderAssistantDelta(" Next")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello world. Next") {
+	if !strings.Contains(rendered, "Hello world. Next") {
 		t.Fatalf("expected streamed assistant text to preserve leading whitespace, got %q", rendered)
+	}
+	if strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello world. Next") {
+		t.Fatalf("ordinary multi-chunk assistant text rendered as an event, got %q", rendered)
 	}
 }
 
@@ -3928,8 +3934,12 @@ func TestChatInteractionCoordinator_DefersAssistantTextUntilReasoningCompletes(t
 	if !strings.Contains(rendered, ui.AssistantContentIndent()+"  先确认问题。 即可。") {
 		t.Fatalf("expected reasoning chunks to stay contiguous, got %q", rendered)
 	}
-	if !strings.Contains(rendered, chatToolDivider("end reasoning")+"\n"+ui.AssistantStreamMarker()+"Hello") {
+	if !strings.Contains(rendered, chatToolDivider("end reasoning")+"\nHello") {
 		t.Fatalf("expected buffered assistant text after reasoning block, got %q", rendered)
+	}
+	if strings.Contains(rendered, chatToolDivider("end reasoning")+"\n\nHello") ||
+		strings.Contains(rendered, ui.AssistantStreamMarker()+"Hello") {
+		t.Fatalf("reasoning/assistant join contains a ghost gap or event marker, got %q", rendered)
 	}
 }
 

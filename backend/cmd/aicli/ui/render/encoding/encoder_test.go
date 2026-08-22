@@ -242,6 +242,13 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	if m.Items[1].Kind != KindAssistant || m.Items[1].Head != "Hello" {
 		t.Fatalf("items[1] = %+v, want assistant with Hello", m.Items[1])
 	}
+	if m.Items[0].BoundaryGroupKey == "" || m.Items[0].BoundaryGroupKey != m.Items[1].BoundaryGroupKey {
+		t.Fatalf("same-request reasoning/assistant groups = %q/%q, want one non-empty exact-request key",
+			m.Items[0].BoundaryGroupKey, m.Items[1].BoundaryGroupKey)
+	}
+	if m.Items[0].CauseID != "" || m.Items[1].CauseID != "" {
+		t.Fatalf("reasoning/assistant grouping reused tool cause identity: %+v", m.Items)
+	}
 	if !strings.HasPrefix(m.Items[0].Head, "─") || !strings.Contains(m.Items[0].Head, " reasoning ") {
 		t.Fatalf("items[0].Head = %q, want reasoning divider prefix", m.Items[0].Head)
 	}
@@ -767,7 +774,7 @@ func TestEncodeProductionDottedLifecyclePreservesReasoningBeforeAssistant(t *tes
 		"trace_id": traceID, "turn_id": turnID, "step": 1,
 		"reasoning": map[string]interface{}{"format": "stream_delta", "summary": "reasoning first"},
 	}})
-	cs := e.Encode(runtimeevents.Event{Type: runtimechat.EventAssistantDelta, TraceID: traceID, Payload: map[string]interface{}{
+	cs := e.Encode(runtimeevents.Event{Type: "assistant.delta", TraceID: traceID, Payload: map[string]interface{}{
 		"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
 		"step": 1, "sequence": uint64(1), "delta": "assistant second",
 	}})
@@ -782,7 +789,7 @@ func TestEncodeProductionDottedLifecyclePreservesReasoningBeforeAssistant(t *tes
 	}}); len(cs.Changes) != 0 {
 		t.Fatalf("successful dotted finished changes = %+v, want lifecycle-only update", cs.Changes)
 	}
-	if cs := e.Encode(runtimeevents.Event{Type: runtimechat.EventAssistantMessage, TraceID: traceID, Payload: map[string]interface{}{
+	if cs := e.Encode(runtimeevents.Event{Type: "assistant.message", TraceID: traceID, Payload: map[string]interface{}{
 		"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
 		"content": "assistant second",
 	}}); len(cs.Changes) != 1 || cs.Changes[0].Op != OpUpsert ||
@@ -795,10 +802,34 @@ func TestEncodeProductionDottedLifecyclePreservesReasoningBeforeAssistant(t *tes
 		model.Items[1].Kind != KindAssistant || model.Items[1].Head != "assistant second" {
 		t.Fatalf("production item order = %+v", model.Items)
 	}
+	if model.Items[0].BoundaryGroupKey == "" || model.Items[0].BoundaryGroupKey != model.Items[1].BoundaryGroupKey {
+		t.Fatalf("dotted aliases lost exact-request boundary identity: %+v", model.Items)
+	}
 	for _, item := range model.Items {
-		if item.Head == "llm.request.finished" || item.Head == "assistant.reasoning" {
+		if item.Kind == KindSystem || item.Head == "llm.request.finished" || item.Head == "assistant.reasoning" ||
+			item.Head == "assistant.delta" || item.Head == "assistant.message" {
 			t.Fatalf("raw lifecycle label leaked into model: %+v", model.Items)
 		}
+	}
+}
+
+func TestEncodeAnonymousDottedFinalsStartDistinctRequests(t *testing.T) {
+	e := NewEventEncoder()
+	for _, body := range []string{"first", "second"} {
+		cs := e.Encode(event("assistant.message", map[string]interface{}{"content": body}))
+		if len(cs.Changes) == 0 {
+			t.Fatalf("anonymous dotted final %q produced no change", body)
+		}
+	}
+
+	items := e.Snapshot().Items
+	if len(items) != 2 || items[0].Kind != KindAssistant || items[0].Head != "first" ||
+		items[1].Kind != KindAssistant || items[1].Head != "second" {
+		t.Fatalf("anonymous dotted finals merged or changed kind: %+v", items)
+	}
+	if items[0].BoundaryGroupKey == "" || items[1].BoundaryGroupKey == "" ||
+		items[0].BoundaryGroupKey == items[1].BoundaryGroupKey {
+		t.Fatalf("distinct anonymous finals share request boundary identity: %+v", items)
 	}
 }
 
@@ -855,10 +886,33 @@ func TestEncodeRequestAliasesKeepReActStepsDistinct(t *testing.T) {
 		model.Items[1].Head != "answer-step-2" || model.Items[0].ID == model.Items[1].ID {
 		t.Fatalf("multi-step request aliases merged or duplicated cells: %+v", model.Items)
 	}
+	if model.Items[0].BoundaryGroupKey == "" || model.Items[1].BoundaryGroupKey == "" ||
+		model.Items[0].BoundaryGroupKey == model.Items[1].BoundaryGroupKey {
+		t.Fatalf("distinct requests share a boundary group: %+v", model.Items)
+	}
 	for _, item := range model.Items {
 		if item.Kind != KindAssistant || item.Status != StatusCompleted {
 			t.Fatalf("multi-step assistant not committed independently: %+v", item)
 		}
+	}
+}
+
+func TestEncodeAssistantFinalPreservesLeadingAndTrailingNewlines(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(event("llm.request.started", map[string]interface{}{
+		"turn_id": "raw-turn", "stream_id": "raw-stream", "step": 1,
+	}))
+	const raw = "\nHello\nworld\n"
+	e.Encode(event("assistant.message", map[string]interface{}{
+		"turn_id": "raw-turn", "stream_id": "raw-stream", "step": 1, "content": raw,
+	}))
+
+	items := e.Snapshot().Items
+	if len(items) != 1 || items[0].Kind != KindAssistant || items[0].Head != raw {
+		t.Fatalf("assistant semantic source changed: %+v", items)
+	}
+	if items[0].BoundaryGroupKey == "" || items[0].CauseID != "" {
+		t.Fatalf("assistant request identity projection = %+v", items[0])
 	}
 }
 

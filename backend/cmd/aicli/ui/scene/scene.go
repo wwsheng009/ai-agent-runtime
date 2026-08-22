@@ -121,6 +121,8 @@ func (p TranscriptPresentation) Clone() TranscriptPresentation {
 // ChainKey 是 tool-chain 归组键（本包的扩展字段，供 Layout 的 gap 决策
 // 投影 boundary.CellMeta 使用）：非空表示该 cell 是某 tool-chain 的内部
 // 成员，不推进 Sequence、与同链成员稠密衔接（§7.3 规则表）。
+// BoundaryGroupKey 仅控制相邻顶层 section 的 gap；它不影响 tool ownership
+// 或 Sequence。reasoning 与同一精确 LLM request 的 assistant 共享该键。
 type TranscriptCell struct {
 	ID           CellID
 	Sequence     uint64 // 只在创建 top-level cell 时增加（§5.3）
@@ -136,6 +138,7 @@ type TranscriptCell struct {
 	Boundary             boundary.BoundaryClass
 	Provenance           string
 	ChainKey             string // tool-chain 归组键；"" = top-level 独立 cell
+	BoundaryGroupKey     string // 同一语义请求的边界归组键；"" = 独立边界
 	CreatedAt            time.Time
 	FinalizedAt          *time.Time
 }
@@ -165,6 +168,7 @@ func (c *TranscriptCell) BoundaryMeta() boundary.CellMeta {
 		Kind:     kind,
 		TopLevel: c.ChainKey == "",
 		ChainKey: c.ChainKey,
+		GroupKey: c.BoundaryGroupKey,
 		Boundary: cls,
 		Mutable:  c.Phase == CellMutable,
 	}
@@ -335,6 +339,7 @@ type UpdateCell struct {
 	Source               string
 	Presentation         TranscriptPresentation
 	HistoryCommitBlocked bool
+	BoundaryGroupKey     string
 }
 
 // FinalizeCell 把 mutable cell 转为 committed（unified plan §6.1）。
@@ -345,6 +350,7 @@ type FinalizeCell struct {
 	Source               string
 	Presentation         TranscriptPresentation
 	HistoryCommitBlocked bool
+	BoundaryGroupKey     string
 }
 
 // RemoveMutableCell 按 ID 移除 mutable cell（unified plan §6.1）。
@@ -540,6 +546,7 @@ func (s *TuiScene) update(m *UpdateCell) (*TranscriptCell, error) {
 	nc.Source = m.Source
 	nc.Presentation = m.Presentation.Clone()
 	nc.HistoryCommitBlocked = m.HistoryCommitBlocked
+	nc.BoundaryGroupKey = m.BoundaryGroupKey
 	nc.Revision = m.Revision
 	s.replaceCell(&nc)
 	cp := cloneCell(nc)
@@ -565,6 +572,7 @@ func (s *TuiScene) finalize(m *FinalizeCell) (*TranscriptCell, error) {
 	nc.Source = m.Source
 	nc.Presentation = m.Presentation.Clone()
 	nc.HistoryCommitBlocked = m.HistoryCommitBlocked
+	nc.BoundaryGroupKey = m.BoundaryGroupKey
 	nc.Revision = m.Revision
 	nc.Phase = CellCommitted
 	now := time.Now().UTC()

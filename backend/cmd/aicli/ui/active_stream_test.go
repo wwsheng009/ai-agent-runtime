@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -507,20 +506,18 @@ func TestActiveStreamControllerSourceSnapshotAssistantRanges(t *testing.T) {
 	c.BeginAssistant("assistant")
 	c.PushAssistantDelta("stable prefix\n", false)
 	const rawSource = "stable prefix\n"
-	chromedSource := boundary.FormatAssistantBlockChrome(rawSource)
 	snapshot := c.SourceSnapshot()
 	if !snapshot.Active || snapshot.Kind != cell.ActiveAssistant {
 		t.Fatalf("assistant snapshot identity = %+v", snapshot)
 	}
-	// Source 是展示文本（含事件块 chrome），StableEnd 是原始内容坐标；
-	// 两者不再相等（chrome 只属于展示层）。
-	if snapshot.Source != chromedSource || snapshot.StableEnd != len(rawSource) || snapshot.CommittedEnd != 0 {
+	// Source 与流式区间都使用未经展示 chrome 改写的语义正文坐标。
+	if snapshot.Source != rawSource || snapshot.StableEnd != len(rawSource) || snapshot.CommittedEnd != 0 {
 		t.Fatalf("assistant snapshot = %+v", snapshot)
 	}
 
 	c.CommitStablePrefix(len(rawSource))
 	snapshot = c.SourceSnapshot()
-	if snapshot.Source != chromedSource || snapshot.StableEnd != len(rawSource) || snapshot.CommittedEnd != len(rawSource) {
+	if snapshot.Source != rawSource || snapshot.StableEnd != len(rawSource) || snapshot.CommittedEnd != len(rawSource) {
 		t.Fatalf("committed assistant snapshot = %+v", snapshot)
 	}
 
