@@ -13,8 +13,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Set-Phase {
+    param([string]$Name)
+    $script:phase = $Name
+    try {
+        $phaseLogDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist'
+        New-Item -ItemType Directory -Force -Path $phaseLogDir -ErrorAction SilentlyContinue | Out-Null
+        Add-Content -LiteralPath (Join-Path $phaseLogDir 'phases.log') -Value $Name -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
 # 顶层陷阱：任何终止性错误都记录阶段与异常，便于 CI 失败时定位（诊断日志 + step summary）。
-$script:phase = "startup"
+Set-Phase "startup"
 $script:trapSummary = $null
 trap {
     $err = $_.Exception
@@ -218,7 +229,7 @@ if (-not (Test-Path -LiteralPath $frontendIndex -PathType Leaf)) {
 }
 
 Write-Host "==> Staging frontend for Go embed"
-$script:phase = "stage-frontend"
+Set-Phase "stage-frontend"
 New-Item -ItemType Directory -Path $embeddedDist -Force | Out-Null
 Get-ChildItem -LiteralPath $embeddedDist -Force |
     Where-Object { $_.Name -ne "placeholder.txt" } |
@@ -251,7 +262,7 @@ Write-Host "  Frontend entry:    $frontendEntryAsset"
 
 if (-not $SkipTests) {
     Write-Host "==> Testing embedded web UI and runtime-server"
-    $script:phase = "go-test"
+    Set-Phase "go-test"
     Push-Location $backendDir
     try {
         & go test ./internal/webui ./cmd/runtime-server
@@ -263,7 +274,7 @@ if (-not $SkipTests) {
 }
 
 Write-Host "==> Building runtime-server for $Goos/$Goarch"
-$script:phase = "go-build"
+Set-Phase "go-build"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 if (Test-Path -LiteralPath $packageDir) {
     Remove-Item -LiteralPath $packageDir -Recurse -Force
@@ -306,7 +317,7 @@ if (-not $SkipTests) {
     Assert-LastExitCode "Resolve host GOARCH"
     if ($Goos -eq $hostGoos -and $Goarch -eq $hostGoarch) {
         Write-Host "==> Running embedded runtime-server smoke test"
-        $script:phase = "smoke-test"
+        Set-Phase "smoke-test"
         $e2eRoot = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetTempPath()) "ai-agent-runtime-package-e2e"))
         $e2eDir = Join-Path $e2eRoot ([Guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $e2eDir -Force | Out-Null
@@ -451,7 +462,7 @@ Health check:
 [System.IO.File]::WriteAllText((Join-Path $packageDir "README.txt"), $packageReadme)
 
 Write-Host "==> Creating archive"
-$script:phase = "archive"
+Set-Phase "archive"
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
 }

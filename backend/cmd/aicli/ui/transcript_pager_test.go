@@ -38,6 +38,54 @@ func TestTranscriptPagerModel_SeparatesMutableTailFromCommittedCells(t *testing.
 	}
 }
 
+func TestTranscriptPagerModel_UsesUnifiedBoundaryPolicy(t *testing.T) {
+	reasoning := committedPagerCell(1, "end reasoning")
+	reasoning.Kind = scene.KindSupplement
+	reasoning.BoundaryGroupKey = "request-1"
+	answer := committedPagerCell(2, "answer")
+	answer.BoundaryGroupKey = "request-1"
+
+	model := NewTranscriptPagerModel(pagerSnapshot(1, reasoning, answer))
+	if got := transcriptPagerGapRows(model.Rows(40)); got != 0 {
+		t.Fatalf("same-request pager gaps = %d, want 0", got)
+	}
+
+	answer.BoundaryGroupKey = "request-2"
+	model = NewTranscriptPagerModel(pagerSnapshot(2, reasoning, answer))
+	if got := transcriptPagerGapRows(model.Rows(40)); got != 1 {
+		t.Fatalf("different-request pager gaps = %d, want 1", got)
+	}
+}
+
+func TestTranscriptPagerModel_LiveTailRetainsBoundaryGroup(t *testing.T) {
+	reasoning := committedPagerCell(1, "end reasoning")
+	reasoning.Kind = scene.KindSupplement
+	reasoning.BoundaryGroupKey = "request-1"
+	live := scene.TranscriptCell{
+		ID: 2, Revision: 3, Kind: scene.KindAssistant, Source: "partial",
+		Phase: scene.CellMutable, BoundaryGroupKey: "request-1",
+	}
+	snapshot := pagerSnapshot(1, reasoning, live)
+	snapshot.Active = ActiveCellState{CellID: 2, Revision: 3, Phase: ActiveCellMutable, Source: "partial"}
+	model := NewTranscriptPagerModel(snapshot)
+	if model.LiveTail == nil || model.LiveTail.BoundaryGroupKey != "request-1" {
+		t.Fatalf("live tail lost request boundary metadata: %#v", model.LiveTail)
+	}
+	if got := transcriptPagerGapRows(model.Rows(40)); got != 0 {
+		t.Fatalf("same-request reasoning/live-assistant pager gaps = %d, want 0", got)
+	}
+}
+
+func transcriptPagerGapRows(rows []TranscriptPagerRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.CellID == 0 && row.Text == "" {
+			count++
+		}
+	}
+	return count
+}
+
 func TestTranscriptPagerState_AppendFollowsBottom(t *testing.T) {
 	model := NewTranscriptPagerModel(pagerSnapshot(1,
 		committedPagerCell(1, "one"), committedPagerCell(2, "two"),
