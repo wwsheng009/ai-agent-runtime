@@ -453,6 +453,15 @@ jobs:
           -SkipFrontendInstall
           -SkipFrontendBuild
 
+      - name: Upload server debug logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-debug-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Verify server archive
         id: pkg
         shell: bash

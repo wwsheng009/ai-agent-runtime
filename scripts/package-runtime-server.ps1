@@ -301,7 +301,7 @@ if (-not $SkipTests) {
             $process = Start-Process @startParams
 
             $health = $null
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
                 if ($process.HasExited) {
                     $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
                     throw "Embedded runtime-server exited before health check (code $($process.ExitCode)): $stderr"
@@ -311,6 +311,9 @@ if (-not $SkipTests) {
                     break
                 }
                 catch {
+                    if ($attempt % 20 -eq 0) {
+                        Write-Host "  smoke: health not ready yet (attempt $($attempt + 1)/120)..."
+                    }
                     Start-Sleep -Milliseconds 500
                 }
             }
@@ -353,6 +356,31 @@ if (-not $SkipTests) {
             if ($entryResponse.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($entryResponse.Content)) {
                 throw "Embedded frontend entry asset did not return content."
             }
+        }
+        catch {
+            # 写诊断日志到输出目录，CI 失败时可作为 artifact 上传定位问题。
+            $debugLogPath = Join-Path $outputRoot "smoke-debug-$artifactBaseName.log"
+            $stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
+            $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+            $debugLines = @(
+                "exception: $($_.Exception.ToString())"
+                "psversion: $($PSVersionTable.PSVersion.ToString()) ($($PSVersionTable.PSEdition))"
+                "target:    $Goos/$Goarch"
+                "binary:    $binaryPath"
+                "listen:    $listenAddress"
+                "--- stdout ---"
+                $stdoutText
+                "--- stderr ---"
+                $stderrText
+            )
+            [System.IO.File]::WriteAllLines($debugLogPath, $debugLines, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host "Smoke test failed. Debug log written to $debugLogPath"
+            if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+                Write-Host "--- server stderr ---"
+                Write-Host $stderrText
+                Write-Host "--- end stderr ---"
+            }
+            throw
         }
         finally {
             if ($null -ne $process -and -not $process.HasExited) {
