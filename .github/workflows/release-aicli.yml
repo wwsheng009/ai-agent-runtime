@@ -510,12 +510,7 @@ jobs:
             echo "## dist listing"
             ls -la dist 2>/dev/null || echo "(no dist/)"
           } > "$BODY_FILE"
-          BODY=$(python3 - "$BODY_FILE" <<'PY'
-import json, sys
-data = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-print(json.dumps(data[:7000]))
-PY
-          )
+          BODY=$(python3 -c 'import json,sys; sys.stdout.write(json.dumps(open(sys.argv[1],encoding="utf-8",errors="replace").read()[:7000]))' "$BODY_FILE")
           curl -s -o /dev/null -w "issue http %{http_code}\n" -X POST \
             -H "Authorization: token ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
