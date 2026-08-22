@@ -446,14 +446,24 @@ jobs:
 
       - name: Package runtime-server
         shell: pwsh
-        run: >-
-          ./scripts/package-runtime-server.ps1
-          -OutputDir dist
-          -Version "${{ steps.ver.outputs.version }}"
-          -Goos "${{ matrix.goos }}"
-          -Goarch "${{ matrix.goarch }}"
-          -SkipFrontendInstall
-          -SkipFrontendBuild
+        run: |
+          # 子进程运行打包脚本并把全部输出(含解析错误/trap)追加到 dist/package-step.log，
+          # 失败时由后续步骤将日志推到 ci-debug-* 分支（匿名可读），精确暴露失败点。
+          $pkgLog = Join-Path $env:GITHUB_WORKSPACE 'dist/package-step.log'
+          New-Item -ItemType Directory -Force -Path (Split-Path $pkgLog) | Out-Null
+          Add-Content -LiteralPath $pkgLog -Value "== wrapper start $(Get-Date -Format o) cell=${{ matrix.goos }}/${{ matrix.goarch }} version=${{ steps.ver.outputs.version }} =="
+          & pwsh -NoProfile -File ./scripts/package-runtime-server.ps1 `
+            -OutputDir dist `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -Goos "${{ matrix.goos }}" `
+            -Goarch "${{ matrix.goarch }}" `
+            -SkipFrontendInstall `
+            -SkipFrontendBuild *>> $pkgLog
+          $code = $LASTEXITCODE
+          if (Test-Path -LiteralPath $pkgLog) {
+            Get-Content -LiteralPath $pkgLog -Tail 120 -ErrorAction SilentlyContinue
+          }
+          exit $code
 
       - name: Upload server debug logs (on failure)
         if: failure()
