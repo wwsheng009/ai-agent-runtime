@@ -92,14 +92,18 @@ jobs:
             (& git rev-parse HEAD).Trim()
           }
           $version = "gate-" + $sha.Substring(0, [Math]::Min(12, $sha.Length))
-          $gateArgs = @(
-            "-Version", $version,
-            "-OutputDir", $gateOutput,
-            "-PlaywrightVersion", $env:PLAYWRIGHT_CLI_VERSION,
-            "-StepTimeoutSeconds", "1200"
-          )
+          # Splat a named-parameter hashtable: order-independent binding that is
+          # immune to the argument-transformation failure seen on every prior run
+          # ("'StepTimeoutSeconds' cannot convert value 'output/release-gate' to
+          # type 'System.Int32'" -- the gate died before running any check).
+          $gateArgs = @{
+            Version = $version
+            OutputDir = $gateOutput
+            PlaywrightVersion = $env:PLAYWRIGHT_CLI_VERSION
+            StepTimeoutSeconds = 1200
+          }
           if ("${{ steps.playwright_browser.outcome }}" -eq "success") {
-            $gateArgs += "-SkipBrowserInstall"
+            $gateArgs.SkipBrowserInstall = $true
           }
 
           Write-Host "Release gate tools:"
