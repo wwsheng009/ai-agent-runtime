@@ -25,9 +25,10 @@ const (
 )
 
 type persistedHistorySeedUnit struct {
-	identity string
-	kind     persistedHistorySeedKind
-	content  string
+	identity         string
+	kind             persistedHistorySeedKind
+	content          string
+	boundaryGroupKey string
 
 	toolCallID string
 	toolName   string
@@ -69,7 +70,8 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 		b.historySeedSeen = make(map[string]struct{})
 	}
 	snapshot := b.renderEncoder.Snapshot()
-	matched := make(map[string]struct{})
+	matchedItemIDs := make(map[string]struct{})
+	headerSeededNow := false
 	// A history header must lead the imported transcript. Once a partial event
 	// log already owns the prefix, appending the header would put it in the
 	// middle of canonical history, so preserve order and reconcile rows only.
@@ -82,15 +84,49 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 		if _, alreadySeeded := b.historySeedSeen[headerUnit.identity]; !alreadySeeded {
 			headerUnit.apply(b)
 			b.historySeedSeen[headerUnit.identity] = struct{}{}
+			headerSeededNow = true
+		}
+	}
+
+	// Reconcile all canonical units before importing any missing one. Besides
+	// preserving occurrence order, the first pass lets a missing reasoning or
+	// assistant section adopt the exact runtime request identity of its matched
+	// sibling. A one-pass append would assign the deterministic persisted key
+	// before discovering that the other section already has a live/replayed key.
+	if strings.TrimSpace(header) != "" {
+		headerUnit := persistedHistorySeedUnit{
+			identity: persistedHistoryHeaderIdentity(header, units),
+			kind:     persistedHistorySeedSupplement,
+			content:  header,
+		}
+		if _, seeded := b.historySeedSeen[headerUnit.identity]; seeded && !headerSeededNow {
+			persistedHistoryUnitMatch(snapshot, headerUnit, matchedItemIDs)
+		}
+	}
+	matchedUnits := make(map[string]*encoding.Item, len(units))
+	groupAliases := make(map[string]string)
+	for _, unit := range units {
+		item := persistedHistoryUnitMatch(snapshot, unit, matchedItemIDs)
+		if item == nil {
+			continue
+		}
+		matchedUnits[unit.identity] = item
+		if unit.boundaryGroupKey != "" && item.BoundaryGroupKey != "" {
+			if _, exists := groupAliases[unit.boundaryGroupKey]; !exists {
+				groupAliases[unit.boundaryGroupKey] = item.BoundaryGroupKey
+			}
 		}
 	}
 	for _, unit := range units {
 		if _, alreadySeeded := b.historySeedSeen[unit.identity]; alreadySeeded {
 			continue
 		}
-		if persistedHistoryUnitPresent(snapshot, unit, matched) {
+		if matchedUnits[unit.identity] != nil {
 			b.historySeedSeen[unit.identity] = struct{}{}
 			continue
+		}
+		if alias := groupAliases[unit.boundaryGroupKey]; alias != "" {
+			unit.boundaryGroupKey = alias
 		}
 		unit.apply(b)
 		b.historySeedSeen[unit.identity] = struct{}{}
@@ -161,6 +197,7 @@ func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persisted
 	toolCalls := indexChatHistoryToolCalls(messages)
 	units := make([]persistedHistorySeedUnit, 0, len(messages))
 	occurrences := make(map[string]uint64)
+	assistantRequestOccurrences := make(map[string]uint64)
 	appendUnit := func(unit persistedHistorySeedUnit) {
 		base := unit.stableKey()
 		occurrences[base]++
@@ -178,13 +215,25 @@ func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persisted
 				appendUnit(persistedHistorySeedUnit{kind: persistedHistorySeedUser, content: content})
 			}
 		case "assistant":
+			var reasoningDisplay string
 			if reasoning := finalReasoningBlock(&message); reasoning != nil {
-				if display := reasoning.RawDisplayText(); strings.TrimSpace(display) != "" {
-					appendUnit(persistedHistorySeedUnit{kind: persistedHistorySeedSupplement, content: display})
-				}
+				reasoningDisplay = reasoning.RawDisplayText()
+			}
+			requestBase := persistedAssistantRequestStableKey(content, reasoningDisplay)
+			assistantRequestOccurrences[requestBase]++
+			groupKey := fmt.Sprintf("persisted-assistant-request:%s:%d",
+				requestBase, assistantRequestOccurrences[requestBase])
+			if strings.TrimSpace(reasoningDisplay) != "" {
+				appendUnit(persistedHistorySeedUnit{
+					kind: persistedHistorySeedSupplement, content: reasoningDisplay,
+					boundaryGroupKey: groupKey,
+				})
 			}
 			if strings.TrimSpace(content) != "" {
-				appendUnit(persistedHistorySeedUnit{kind: persistedHistorySeedAssistant, content: content})
+				appendUnit(persistedHistorySeedUnit{
+					kind: persistedHistorySeedAssistant, content: content,
+					boundaryGroupKey: groupKey,
+				})
 			}
 		case "tool":
 			callID := strings.TrimSpace(message.ToolCallID)
@@ -228,6 +277,15 @@ func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persisted
 	return units
 }
 
+func persistedAssistantRequestStableKey(content, reasoning string) string {
+	var builder strings.Builder
+	for _, value := range []string{content, reasoning} {
+		fmt.Fprintf(&builder, "%d:%s|", len(value), value)
+	}
+	sum := sha256.Sum256([]byte(builder.String()))
+	return fmt.Sprintf("%x", sum[:])
+}
+
 func (u persistedHistorySeedUnit) stableKey() string {
 	var builder strings.Builder
 	for _, value := range []string{
@@ -250,9 +308,9 @@ func persistedHistoryHeaderIdentity(header string, units []persistedHistorySeedU
 	return fmt.Sprintf("persisted-history-header:%x", sum[:])
 }
 
-func persistedHistoryUnitPresent(snapshot *encoding.RenderModel, unit persistedHistorySeedUnit, matched map[string]struct{}) bool {
+func persistedHistoryUnitMatch(snapshot *encoding.RenderModel, unit persistedHistorySeedUnit, matched map[string]struct{}) *encoding.Item {
 	if snapshot == nil {
-		return false
+		return nil
 	}
 	for _, item := range snapshot.Items {
 		if item == nil || item.ID == "" {
@@ -262,9 +320,9 @@ func persistedHistoryUnitPresent(snapshot *encoding.RenderModel, unit persistedH
 			continue
 		}
 		matched[item.ID] = struct{}{}
-		return true
+		return item
 	}
-	return false
+	return nil
 }
 
 func (u persistedHistorySeedUnit) matches(item *encoding.Item) bool {
@@ -277,12 +335,33 @@ func (u persistedHistorySeedUnit) matches(item *encoding.Item) bool {
 	case persistedHistorySeedAssistant:
 		return item.Kind == encoding.KindAssistant && item.Head == u.content
 	case persistedHistorySeedSupplement:
+		if item.Kind == encoding.KindReasoning && u.boundaryGroupKey != "" {
+			return persistedReasoningContentMatches(item.Head, u.content)
+		}
 		return (item.Kind == encoding.KindSupplement || item.Kind == encoding.KindReasoning || item.Kind == encoding.KindSystem) && item.Head == u.content
 	case persistedHistorySeedTool:
 		return item.Kind == encoding.KindToolCall && item.Head == u.toolHead()
 	default:
 		return false
 	}
+}
+
+func persistedReasoningContentMatches(head, content string) bool {
+	if head == content {
+		return true
+	}
+	head = strings.ReplaceAll(head, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	firstLF := strings.IndexByte(head, '\n')
+	if firstLF < 0 {
+		return false
+	}
+	body := strings.TrimLeft(head[firstLF+1:], "\n")
+	if lastLF := strings.LastIndexByte(body, '\n'); lastLF >= 0 &&
+		strings.Contains(strings.ToLower(body[lastLF+1:]), "end reasoning") {
+		body = body[:lastLF]
+	}
+	return body == strings.TrimLeft(content, "\n")
 }
 
 func (u persistedHistorySeedUnit) toolHead() string {
@@ -304,9 +383,9 @@ func (u persistedHistorySeedUnit) apply(b *chatRuntimeEventBridge) {
 	case persistedHistorySeedUser:
 		b.applyChangeSet(b.renderEncoder.SubmitUserInput(u.content))
 	case persistedHistorySeedAssistant:
-		b.applyChangeSet(b.renderEncoder.SubmitAssistant(u.content))
+		b.applyChangeSet(b.renderEncoder.SubmitAssistantWithBoundaryGroup(u.content, u.boundaryGroupKey))
 	case persistedHistorySeedSupplement:
-		b.applyChangeSet(b.renderEncoder.SubmitSupplement(u.content))
+		b.applyChangeSet(b.renderEncoder.SubmitSupplementWithBoundaryGroup(u.content, u.boundaryGroupKey))
 	case persistedHistorySeedTool:
 		// A persisted tool result is final history, not a viewport-only running
 		// row. Establish the stable call identity before the result so the

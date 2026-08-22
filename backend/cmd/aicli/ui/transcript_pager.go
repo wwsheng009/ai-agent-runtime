@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"golang.org/x/term"
 )
@@ -57,10 +58,13 @@ type TranscriptPagerModel struct {
 }
 
 type TranscriptPagerLiveTail struct {
-	CellID   scene.CellID
-	Revision uint64
-	Kind     scene.CellKind
-	Source   string
+	CellID           scene.CellID
+	Revision         uint64
+	Kind             scene.CellKind
+	Source           string
+	ChainKey         string
+	BoundaryGroupKey string
+	Boundary         boundary.BoundaryClass
 }
 
 func (m TranscriptPagerModel) Clone() TranscriptPagerModel {
@@ -87,23 +91,27 @@ func NewTranscriptPagerModel(snapshot TranscriptPagerSnapshot) TranscriptPagerMo
 		model.Cells = append(model.Cells, cloneTranscriptCell(cell))
 	}
 	if snapshot.Active.Phase == ActiveCellMutable || snapshot.Active.Phase == ActiveCellFinalizing {
+		metadata := transcriptPagerActiveCellMetadata(snapshot.Transcript, snapshot.Active.CellID)
 		model.LiveTail = &TranscriptPagerLiveTail{
-			CellID:   snapshot.Active.CellID,
-			Revision: snapshot.Active.Revision,
-			Kind:     transcriptPagerActiveKind(snapshot.Transcript, snapshot.Active.CellID),
-			Source:   snapshot.Active.Source,
+			CellID:           snapshot.Active.CellID,
+			Revision:         snapshot.Active.Revision,
+			Kind:             metadata.Kind,
+			Source:           snapshot.Active.Source,
+			ChainKey:         metadata.ChainKey,
+			BoundaryGroupKey: metadata.BoundaryGroupKey,
+			Boundary:         metadata.Boundary,
 		}
 	}
 	return model
 }
 
-func transcriptPagerActiveKind(transcript TranscriptState, id scene.CellID) scene.CellKind {
+func transcriptPagerActiveCellMetadata(transcript TranscriptState, id scene.CellID) scene.TranscriptCell {
 	for index := len(transcript.Cells) - 1; index >= 0; index-- {
 		if transcript.Cells[index].ID == id {
-			return transcript.Cells[index].Kind
+			return transcript.Cells[index]
 		}
 	}
-	return scene.KindAssistant
+	return scene.TranscriptCell{ID: id, Kind: scene.KindAssistant}
 }
 
 // TranscriptPagerAnchor identifies the top content row semantically. Row is
@@ -148,22 +156,26 @@ func (m TranscriptPagerModel) Rows(width int) []TranscriptPagerRow {
 		width = 1
 	}
 	rows := make([]TranscriptPagerRow, 0, len(m.Cells)*3)
+	var previous *scene.TranscriptCell
 	for index := range m.Cells {
-		if len(rows) > 0 {
+		cell := &m.Cells[index]
+		if previous != nil && boundary.ResolveGap(previous.BoundaryMeta(), cell.BoundaryMeta()) == boundary.GapOne {
 			rows = append(rows, TranscriptPagerRow{Text: ""})
 		}
-		rows = appendTranscriptPagerCellRows(rows, m.Cells[index], width, false)
+		rows = appendTranscriptPagerCellRows(rows, *cell, width, false)
+		previous = cell
 	}
 	if m.LiveTail != nil {
-		if len(rows) > 0 {
+		liveCell := scene.TranscriptCell{
+			ID: m.LiveTail.CellID, Revision: m.LiveTail.Revision,
+			Kind: m.LiveTail.Kind, Source: m.LiveTail.Source,
+			ChainKey: m.LiveTail.ChainKey, BoundaryGroupKey: m.LiveTail.BoundaryGroupKey,
+			Boundary: m.LiveTail.Boundary, Phase: scene.CellMutable,
+		}
+		if previous != nil && boundary.ResolveGap(previous.BoundaryMeta(), liveCell.BoundaryMeta()) == boundary.GapOne {
 			rows = append(rows, TranscriptPagerRow{Text: ""})
 		}
-		rows = appendTranscriptPagerCellRows(rows, scene.TranscriptCell{
-			ID:       m.LiveTail.CellID,
-			Revision: m.LiveTail.Revision,
-			Kind:     m.LiveTail.Kind,
-			Source:   m.LiveTail.Source,
-		}, width, true)
+		rows = appendTranscriptPagerCellRows(rows, liveCell, width, true)
 	}
 	return rows
 }

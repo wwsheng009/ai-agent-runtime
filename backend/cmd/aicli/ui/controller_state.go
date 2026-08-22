@@ -690,7 +690,7 @@ func transcriptReplacementOnlyUpdatesActive(previous, next TranscriptState, acti
 			left.Sequence != right.Sequence || left.Kind != right.Kind ||
 			left.HistoryCommitBlocked != right.HistoryCommitBlocked ||
 			left.Boundary != right.Boundary || left.Provenance != right.Provenance ||
-			left.ChainKey != right.ChainKey {
+			left.ChainKey != right.ChainKey || left.BoundaryGroupKey != right.BoundaryGroupKey {
 			return false
 		}
 		found = true

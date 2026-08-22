@@ -38,6 +38,69 @@ func TestTranscriptPagerModel_SeparatesMutableTailFromCommittedCells(t *testing.
 	}
 }
 
+func TestTranscriptPagerRowsUseSharedBoundaryPolicy(t *testing.T) {
+	reasoning := committedPagerCell(1, "reasoning")
+	reasoning.Kind = scene.KindSupplement
+	reasoning.BoundaryGroupKey = "request-1"
+	answer := committedPagerCell(2, "answer")
+	answer.BoundaryGroupKey = "request-1"
+
+	rows := NewTranscriptPagerModel(pagerSnapshot(1, reasoning, answer)).Rows(40)
+	if got := transcriptPagerBoundaryRowCount(rows); got != 0 {
+		t.Fatalf("same-request reasoning/assistant boundary rows = %d, want 0: %+v", got, rows)
+	}
+
+	answer.BoundaryGroupKey = "request-2"
+	rows = NewTranscriptPagerModel(pagerSnapshot(2, reasoning, answer)).Rows(40)
+	if got := transcriptPagerBoundaryRowCount(rows); got != 1 {
+		t.Fatalf("different-request boundary rows = %d, want 1: %+v", got, rows)
+	}
+}
+
+func TestTranscriptPagerLiveTailRetainsBoundaryMetadata(t *testing.T) {
+	reasoning := committedPagerCell(1, "reasoning")
+	reasoning.Kind = scene.KindSupplement
+	reasoning.BoundaryGroupKey = "request-live"
+	mutable := scene.TranscriptCell{
+		ID: 2, Revision: 3, Kind: scene.KindAssistant, Source: "old partial",
+		Phase: scene.CellMutable, BoundaryGroupKey: "request-live",
+	}
+	snapshot := pagerSnapshot(3, reasoning, mutable)
+	snapshot.Active = ActiveCellState{
+		CellID: 2, Revision: 4, Kind: scene.KindAssistant,
+		Phase: ActiveCellMutable, Source: "latest partial",
+	}
+	model := NewTranscriptPagerModel(snapshot)
+	if model.LiveTail == nil || model.LiveTail.BoundaryGroupKey != "request-live" {
+		t.Fatalf("live tail lost request boundary metadata: %+v", model.LiveTail)
+	}
+	if got := transcriptPagerBoundaryRowCount(model.Rows(40)); got != 0 {
+		t.Fatalf("same-request committed reasoning/live assistant boundary rows = %d, want 0", got)
+	}
+}
+
+func TestTranscriptPagerLiveToolTailKeepsChainDensity(t *testing.T) {
+	completed := committedPagerCell(1, "completed tool output")
+	completed.Kind = scene.KindToolChain
+	completed.ChainKey = "tool-chain-1"
+	mutable := scene.TranscriptCell{
+		ID: 2, Revision: 2, Kind: scene.KindToolChain, Source: "running tool",
+		Phase: scene.CellMutable, ChainKey: "tool-chain-1",
+	}
+	snapshot := pagerSnapshot(2, completed, mutable)
+	snapshot.Active = ActiveCellState{
+		CellID: 2, Revision: 3, Kind: scene.KindToolChain,
+		Phase: ActiveCellMutable, Source: "running tool now",
+	}
+	model := NewTranscriptPagerModel(snapshot)
+	if model.LiveTail == nil || model.LiveTail.ChainKey != "tool-chain-1" {
+		t.Fatalf("live tool tail lost chain metadata: %+v", model.LiveTail)
+	}
+	if got := transcriptPagerBoundaryRowCount(model.Rows(40)); got != 0 {
+		t.Fatalf("same-chain committed/live tool boundary rows = %d, want 0", got)
+	}
+}
+
 func TestTranscriptPagerState_AppendFollowsBottom(t *testing.T) {
 	model := NewTranscriptPagerModel(pagerSnapshot(1,
 		committedPagerCell(1, "one"), committedPagerCell(2, "two"),
@@ -439,6 +502,16 @@ func transcriptPagerRowsText(rows []TranscriptPagerRow) string {
 		parts = append(parts, row.Text)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func transcriptPagerBoundaryRowCount(rows []TranscriptPagerRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.CellID == 0 && row.Text == "" {
+			count++
+		}
+	}
+	return count
 }
 
 func ptrPagerCell(cell scene.TranscriptCell) *scene.TranscriptCell {

@@ -16,6 +16,71 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+func TestSeedPersistedHistoryGroupsReasoningAndAssistantByExactRequest(t *testing.T) {
+	assistant := runtimetypes.NewAssistantMessage("persisted answer")
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Summary: "persisted reasoning", Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	messages := []runtimetypes.Message{*assistant}
+
+	units := buildPersistedHistorySeedUnits(messages)
+	if len(units) != 2 || units[0].boundaryGroupKey == "" ||
+		units[0].boundaryGroupKey != units[1].boundaryGroupKey {
+		t.Fatalf("persisted request units lost shared boundary identity: %+v", units)
+	}
+
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.seedPersistedHistory(messages, "")
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != 2 {
+		t.Fatalf("seeded Scene = %+v, want reasoning and assistant", snapshot)
+	}
+	reasoning, answer := snapshot.Cells[0], snapshot.Cells[1]
+	if reasoning.BoundaryGroupKey == "" || reasoning.BoundaryGroupKey != answer.BoundaryGroupKey {
+		t.Fatalf("seeded request groups = %q/%q, want one non-empty key",
+			reasoning.BoundaryGroupKey, answer.BoundaryGroupKey)
+	}
+	if reasoning.ChainKey != "" || answer.ChainKey != "" {
+		t.Fatalf("persisted request grouping contaminated tool ownership: %+v", snapshot.Cells)
+	}
+	for _, row := range scene.LayoutTranscript(snapshot.Cells, 1) {
+		if row.Gap != 0 {
+			t.Fatalf("same-request persisted reasoning/assistant produced gap row: %+v", row)
+		}
+	}
+}
+
+func TestSeedPersistedHistoryAdoptsMatchedRuntimeRequestGroup(t *testing.T) {
+	assistant := runtimetypes.NewAssistantMessage("missing persisted answer")
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Summary: "already replayed reasoning", Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	messages := []runtimetypes.Message{*assistant}
+
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	const runtimeGroup = "runtime-request-group"
+	bridge.renderMu.Lock()
+	bridge.applyChangeSet(bridge.renderEncoder.SubmitSupplementWithBoundaryGroup(
+		"already replayed reasoning", runtimeGroup,
+	))
+	bridge.renderMu.Unlock()
+	bridge.seedPersistedHistory(messages, "")
+
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != 2 {
+		t.Fatalf("partially reconciled Scene = %+v, want two cells", snapshot)
+	}
+	if snapshot.Cells[0].BoundaryGroupKey != runtimeGroup ||
+		snapshot.Cells[1].BoundaryGroupKey != runtimeGroup {
+		t.Fatalf("partial reconcile groups = %q/%q, want adopted %q",
+			snapshot.Cells[0].BoundaryGroupKey, snapshot.Cells[1].BoundaryGroupKey, runtimeGroup)
+	}
+	bridge.seedPersistedHistory(messages, "")
+	if again := bridge.sceneSnapshot(); again == nil || len(again.Cells) != 2 {
+		t.Fatalf("idempotent grouped reconcile duplicated cells: %+v", again)
+	}
+}
+
 // A runtime event log can be persisted after only a prefix of a turn while
 // the canonical session store already contains the full transcript. A nonempty
 // Scene must therefore not suppress persisted-history import, and repeated

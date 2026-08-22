@@ -466,6 +466,14 @@ func TestTranscriptReplacementOnlyUpdatesActive(t *testing.T) {
 	if transcriptReplacementOnlyUpdatesActive(previous, finalized, active) {
 		t.Fatal("active finalization was incorrectly classified as active-only")
 	}
+	regrouped := next.Clone()
+	regrouped.Cells[1].BoundaryGroupKey = "different-request"
+	if transcriptReplacementOnlyUpdatesActive(previous, regrouped, active) {
+		t.Fatal("active boundary-group change was incorrectly classified as content-only")
+	}
+	if transcriptCellStaticMetadataEqual(previous.Cells[1], regrouped.Cells[1]) {
+		t.Fatal("BoundaryGroupKey change was ignored by static metadata equality")
+	}
 }
 
 func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {

@@ -162,6 +162,13 @@ func TestChatRuntimeEventBridge_ReplayRestoresLocalAssistant(t *testing.T) {
 	if !strings.Contains(string(raw), `"assistant":"legacy executor response"`) {
 		t.Fatalf("log missing direct assistant injection: %q", string(raw))
 	}
+	if !strings.Contains(string(raw), `"assistant_boundary_group":"assistant-request-`) {
+		t.Fatalf("log missing direct assistant request boundary identity: %q", string(raw))
+	}
+	live := bridge1.sceneSnapshot()
+	if live == nil || len(live.Cells) != 1 || live.Cells[0].BoundaryGroupKey == "" {
+		t.Fatalf("live direct assistant lost boundary identity: %+v", live)
+	}
 
 	bridge2 := newChatRuntimeEventBridge(&ChatSession{})
 	bridge2.eventLogPathOverride = logPath
@@ -175,6 +182,10 @@ func TestChatRuntimeEventBridge_ReplayRestoresLocalAssistant(t *testing.T) {
 	cell := snapshot.Cells[0]
 	if cell.Kind != scene.KindAssistant || cell.Source != "legacy executor response" || cell.Phase != scene.CellCommitted {
 		t.Fatalf("replayed cell = %+v, want completed assistant", cell)
+	}
+	if cell.BoundaryGroupKey != live.Cells[0].BoundaryGroupKey {
+		t.Fatalf("replayed assistant group = %q, want live group %q",
+			cell.BoundaryGroupKey, live.Cells[0].BoundaryGroupKey)
 	}
 }
 
