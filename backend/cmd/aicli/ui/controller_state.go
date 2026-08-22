@@ -658,8 +658,7 @@ func transcriptCellStaticMetadataEqual(left, right scene.TranscriptCell) bool {
 	if left.ID != right.ID || left.Sequence != right.Sequence || left.Kind != right.Kind ||
 		left.Phase != right.Phase || left.HistoryCommitBlocked != right.HistoryCommitBlocked ||
 		left.Boundary != right.Boundary || left.Provenance != right.Provenance ||
-		left.ChainKey != right.ChainKey || left.BoundaryGroupKey != right.BoundaryGroupKey ||
-		left.CreatedAt != right.CreatedAt {
+		left.ChainKey != right.ChainKey || left.CreatedAt != right.CreatedAt {
 		return false
 	}
 	if left.FinalizedAt == nil || right.FinalizedAt == nil {

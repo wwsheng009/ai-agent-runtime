@@ -1371,24 +1371,6 @@ func TestSubmitAssistant(t *testing.T) {
 	}
 }
 
-func TestSubmitBoundaryGroupedReasoningAndAssistant(t *testing.T) {
-	e := NewEventEncoder()
-	const group = "persisted-request-1"
-	e.SubmitSupplementWithBoundaryGroup("reasoning", group)
-	e.SubmitAssistantWithBoundaryGroup("answer", group)
-	items := e.Snapshot().Items
-	if len(items) != 2 || items[0].Kind != KindSupplement || items[1].Kind != KindAssistant {
-		t.Fatalf("grouped reconstructed items = %+v", items)
-	}
-	if items[0].BoundaryGroupKey != group || items[1].BoundaryGroupKey != group {
-		t.Fatalf("grouped reconstructed keys = %q/%q, want %q",
-			items[0].BoundaryGroupKey, items[1].BoundaryGroupKey, group)
-	}
-	if items[0].CauseID != "" || items[1].CauseID != "" {
-		t.Fatalf("boundary-only identity leaked into tool ownership: %+v", items)
-	}
-}
-
 // TestSubmitError 固化 SubmitError 契约：操作错误作为一次性终态 system 块
 // （KindSystem + StatusCompleted）append（会话/诊断语义），不与 assistant
 // 流状态机交互；错误文本原样保留。

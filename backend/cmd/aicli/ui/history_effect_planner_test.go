@@ -461,14 +461,6 @@ func TestTranscriptReplacementOnlyUpdatesActive(t *testing.T) {
 	if transcriptReplacementOnlyUpdatesActive(previous, changedFinalized, active) {
 		t.Fatal("finalized-cell correction was incorrectly classified as active-only")
 	}
-	changedGroup := next.Clone()
-	changedGroup.Cells[1].BoundaryGroupKey = "request-2"
-	if transcriptReplacementOnlyUpdatesActive(previous, changedGroup, active) {
-		t.Fatal("active boundary-group change was incorrectly classified as content-only")
-	}
-	if transcriptCellStaticMetadataEqual(previous.Cells[1], changedGroup.Cells[1]) {
-		t.Fatal("boundary group was omitted from static transcript metadata")
-	}
 	finalized := next.Clone()
 	finalized.Cells[1].Phase = scene.CellCommitted
 	if transcriptReplacementOnlyUpdatesActive(previous, finalized, active) {
