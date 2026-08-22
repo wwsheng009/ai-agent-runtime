@@ -286,13 +286,19 @@ if (-not $SkipTests) {
         $baseUrl = "http://127.0.0.1:$port"
         $process = $null
         try {
-            $process = Start-Process -FilePath $binaryPath `
-                -ArgumentList @("serve", "--listen", $listenAddress, "--pid-file", "runtime-server.pid") `
-                -WorkingDirectory $e2eDir `
-                -RedirectStandardOutput $stdoutPath `
-                -RedirectStandardError $stderrPath `
-                -PassThru `
-                -WindowStyle Hidden
+            $startParams = @{
+                FilePath               = $binaryPath
+                ArgumentList           = @("serve", "--listen", $listenAddress, "--pid-file", "runtime-server.pid")
+                WorkingDirectory       = $e2eDir
+                RedirectStandardOutput = $stdoutPath
+                RedirectStandardError  = $stderrPath
+                PassThru               = $true
+            }
+            if ($IsWindows) {
+                # -WindowStyle 仅 Windows 支持；Linux/macOS runner 上不传该参数。
+                $startParams["WindowStyle"] = "Hidden"
+            }
+            $process = Start-Process @startParams
 
             $health = $null
             for ($attempt = 0; $attempt -lt 60; $attempt++) {
