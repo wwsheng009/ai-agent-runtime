@@ -5,8 +5,8 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/ast"
+	extast "github.com/yuin/goldmark/extension/ast"
 )
 
 func (r *renderer) renderTable(n *extast.Table) render.Block {

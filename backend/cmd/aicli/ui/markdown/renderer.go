@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
@@ -187,23 +189,42 @@ func (r *renderer) codeBlock(code, lang string) render.Block {
 
 func (r *renderer) renderBlockquote(n *ast.Blockquote) []render.Block {
 	var out []render.Block
+	const quotePrefix = "│ "
+	prefix := render.Span{Text: quotePrefix, Style: render.Style{Role: string(style.RoleTextMuted), Dim: true}}
+	prefixWidth := render.Width(quotePrefix)
+	// Wrap the inner text at the budget left after the prefix, then prepend
+	// the marker to every resulting line (including wrap continuations); the
+	// old approach wrapped prefix+content together and lost the marker on
+	// continuation lines.
+	budget := r.opts.Width - prefixWidth
+	if budget < 8 {
+		// Too narrow to keep a marker: fall back to wrapping at full width.
+		budget = r.opts.Width
+		prefixWidth = 0
+	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		inner := r.renderBlock(c)
 		for _, b := range inner {
-			prefixed := make([]render.Line, 0, len(b.Lines))
+			var lines []render.Line
 			for _, line := range b.Lines {
-				spans := append([]render.Span{{
-					Text:  "│ ",
-					Style: render.Style{Role: string(style.RoleTextMuted), Dim: true},
-				}}, line.Spans...)
-				// Re-wrap after prefix.
-				budget := r.opts.Width
-				if budget > 2 {
-					// Already included prefix in spans; wrap whole line.
-					prefixed = append(prefixed, render.Wrap(render.Line{Spans: spans}, budget, render.WrapOptions{BreakWord: true})...)
+				if budget > 0 && render.LineWidth(line) > budget {
+					lines = append(lines, render.Wrap(line, budget, render.WrapOptions{BreakWord: true})...)
 				} else {
-					prefixed = append(prefixed, render.Line{Spans: spans})
+					lines = append(lines, line)
 				}
+			}
+			prefixed := make([]render.Line, 0, len(lines))
+			for _, line := range lines {
+				spans := make([]render.Span, 0, len(line.Spans)+1)
+				if prefixWidth > 0 {
+					spans = append(spans, prefix)
+				}
+				spans = append(spans, line.Spans...)
+				pl := render.Line{Spans: spans}
+				if prefixWidth > 0 && render.LineWidth(pl) > r.opts.Width {
+					pl = render.Truncate(pl, r.opts.Width, "…")
+				}
+				prefixed = append(prefixed, pl)
 			}
 			out = append(out, render.Block{Kind: render.BlockQuote, Lines: prefixed})
 		}
@@ -370,15 +391,22 @@ func (r *renderer) collectInline(node ast.Node) []render.Span {
 		case *ast.Text:
 			seg := t.Segment
 			val := string(seg.Value(r.src))
-			if t.SoftLineBreak() {
-				val += " "
-			}
 			if t.HardLineBreak() {
 				val += "\n"
 			}
 			if val != "" {
 				spans = append(spans, render.Span{
 					Text:  val,
+					Style: render.Style{Role: string(style.RoleTextPrimary)},
+				})
+			}
+			if t.SoftLineBreak() {
+				// A soft line break has the semantics of a space. It is added
+				// as its own span so the CJK pass below can drop it when both
+				// sides are CJK text (where inserting a space would read as an
+				// "extra" space inside a sentence).
+				spans = append(spans, render.Span{
+					Text:  " ",
 					Style: render.Style{Role: string(style.RoleTextPrimary)},
 				})
 			}
@@ -475,8 +503,73 @@ func (r *renderer) collectInline(node ast.Node) []render.Span {
 			return ast.WalkContinue, nil
 		}
 	})
+	// Drop soft-break separator spaces between CJK characters before hard
+	// newline normalization (the passes are disjoint: soft breaks are their
+	// own " " spans, hard breaks carry "\n" inside span text).
+	spans = dropCJKSoftbreakSpaces(spans)
 	// Normalize hard newlines inside span text into separate handling by replacing \n with space for paragraph wrap.
 	return normalizeInlineNewlines(spans)
+}
+
+// dropCJKSoftbreakSpaces removes soft-break separator spans (" ") whose left
+// and right neighbors are both CJK-ish glyphs. Markdown semantics turn a soft
+// line break into a space; for Latin text that is the correct inter-word
+// separator, but between CJK characters (which carry no word spacing) it
+// renders as an extra space inside a sentence.
+func dropCJKSoftbreakSpaces(spans []render.Span) []render.Span {
+	out := make([]render.Span, 0, len(spans))
+	for i, sp := range spans {
+		if sp.Text != " " {
+			out = append(out, sp)
+			continue
+		}
+		if !cjkPairAroundSoftbreak(spans, i) {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+// cjkPairAroundSoftbreak reports whether the soft-break space at index i sits
+// between two CJK-ish characters (or at the very end of the inline run, where
+// a dangling space would be redundant).
+func cjkPairAroundSoftbreak(spans []render.Span, i int) bool {
+	left := lastRuneBefore(spans, i)
+	if left == utf8.RuneError {
+		return false
+	}
+	right := firstRuneAfter(spans, i)
+	if right == utf8.RuneError {
+		return true // dangling soft-break space at the run end
+	}
+	return isCJKish(left) && isCJKish(right)
+}
+
+func lastRuneBefore(spans []render.Span, i int) rune {
+	for j := i - 1; j >= 0; j-- {
+		r, _ := utf8.DecodeLastRuneInString(spans[j].Text)
+		if r != utf8.RuneError {
+			return r
+		}
+	}
+	return utf8.RuneError
+}
+
+func firstRuneAfter(spans []render.Span, i int) rune {
+	for j := i + 1; j < len(spans); j++ {
+		r, _ := utf8.DecodeRuneInString(spans[j].Text)
+		if r != utf8.RuneError {
+			return r
+		}
+	}
+	return utf8.RuneError
+}
+
+// isCJKish reports whether r is a non-ASCII, non-space glyph. Latin text keeps
+// the space separator (the left/right neighbor is ASCII), while CJK, Kana,
+// Hangul and full-width punctuation all suppress it.
+func isCJKish(r rune) bool {
+	return r >= 0x80 && !unicode.IsSpace(r) && r != '\u0085' && r != '\u00a0'
 }
 
 func (r *renderer) collectInlineChildren(node ast.Node) []render.Span {

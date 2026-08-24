@@ -27,15 +27,28 @@ type WrapOptions struct {
 
 // Width returns the terminal cell width of plain text.
 // Style and link metadata are never counted; callers must pass visible text only.
+//
+// Results are memoized per exact text (see widthCacheMemo): streaming renders
+// measure unchanged strings on every frame, and the memo skips the grapheme
+// segmentation hot path for them. Purely printable ASCII (the common case)
+// takes an even cheaper byte-scan fast path. Calls return exact widths; the
+// cache never changes observable behavior.
 func Width(text string) int {
 	if text == "" {
 		return 0
+	}
+	if w, ok := fastASCIIWidth(text); ok {
+		return w
+	}
+	if w, ok := widthMemo.get(text); ok {
+		return w
 	}
 	total := 0
 	gr := uniseg.NewGraphemes(text)
 	for gr.Next() {
 		total += graphemeWidth(gr.Runes())
 	}
+	widthMemo.store(text, total)
 	return total
 }
 
@@ -240,14 +253,22 @@ func Wrap(line Line, width int, opts WrapOptions) []Line {
 	var current Line
 	current.Style = line.Style
 	curWidth := 0
+	// flushed is true once at least one line has been emitted. Separator
+	// spaces that land at the start of a continuation line are layout
+	// artifacts (the break already provides the separation), so they are
+	// dropped instead of becoming a leading space. The first line keeps its
+	// leading whitespace (e.g. indented code content).
+	flushed := false
 
 	flush := func() {
+		trimTrailingSpaceRuns(&current, &curWidth)
 		if len(current.Spans) == 0 && curWidth == 0 {
 			return
 		}
 		lines = append(lines, current)
 		current = Line{Style: line.Style}
 		curWidth = 0
+		flushed = true
 	}
 
 	appendRun := func(r run) {
@@ -281,6 +302,18 @@ func Wrap(line Line, width int, opts WrapOptions) []Line {
 		j := i
 		wordWidth := 0
 		if isBreakSpace(runs[i].text) {
+			// Inter-word separators must never survive as a leading space of a
+			// continuation line (wrap moved the break) nor as a trailing space
+			// of a full line (it would overflow or dangle at line end). The
+			// line break itself already provides the separation.
+			if curWidth == 0 && flushed {
+				i++
+				continue
+			}
+			if curWidth+runs[i].w > width && curWidth > 0 {
+				i++
+				continue
+			}
 			appendRun(runs[i])
 			i++
 			continue
@@ -310,6 +343,31 @@ func Wrap(line Line, width int, opts WrapOptions) []Line {
 	}
 	wrapStore(expanded, hash, width, opts, lines)
 	return lines
+}
+
+// trimTrailingSpaceRuns removes whitespace-only runs from the end of a line
+// about to be flushed. Wrapping decisions can leave the inter-word separator
+// as the last grapheme of the line when the next word does not fit; that
+// dangling space renders as an "extra" space and is dropped here. Content
+// whitespace that is part of the source text (e.g. alignment spaces inside a
+// code line) is unaffected when it does not sit exactly at the wrap boundary.
+func trimTrailingSpaceRuns(line *Line, width *int) {
+	for len(line.Spans) > 0 {
+		last := &line.Spans[len(line.Spans)-1]
+		trimmed := strings.TrimRight(last.Text, " \t\n\r")
+		if len(trimmed) == len(last.Text) {
+			return
+		}
+		if width != nil && *width > 0 {
+			*width -= Width(last.Text) - Width(trimmed)
+		}
+		if trimmed == "" {
+			line.Spans = line.Spans[:len(line.Spans)-1]
+			continue
+		}
+		last.Text = trimmed
+		return
+	}
 }
 
 // Pad expands a line to width using spaces on the chosen side.

@@ -47,11 +47,11 @@ func TestRuneWidthKnownValues(t *testing.T) {
 		{'\n', 0},
 		{'a', 1},
 		{'中', 2},
-		{0x2e3a, 3}, // TWO-EM DASH (uniseg special case)
-		{0x2e3b, 4}, // THREE-EM DASH
-		{0x200d, 0}, // ZERO WIDTH JOINER
-		{0x0301, 0}, // COMBINING ACUTE ACCENT
-		{0xfe0f, 0}, // VARIATION SELECTOR-16
+		{0x2e3a, 3},  // TWO-EM DASH (uniseg special case)
+		{0x2e3b, 4},  // THREE-EM DASH
+		{0x200d, 0},  // ZERO WIDTH JOINER
+		{0x0301, 0},  // COMBINING ACUTE ACCENT
+		{0xfe0f, 0},  // VARIATION SELECTOR-16
 		{0x1f3fb, 0}, // EMOJI MODIFIER FITZPATRICK
 		{0x1f1e6, 2}, // REGIONAL INDICATOR A
 		{0x1f600, 2}, // GRINNING FACE (emoji presentation)
