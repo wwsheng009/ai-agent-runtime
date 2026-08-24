@@ -31,6 +31,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -42,30 +43,39 @@ import (
 const localChatSessionActorLeaseOwnerKind = "aicli-actor"
 
 type localChatRuntimeHost struct {
-	Bootstrap          *runtimebootstrap.Manager
-	RuntimeConfig      *runtimecfg.RuntimeConfig
-	SessionHub         *runtimechat.SessionHub
-	RuntimeStore       runtimechat.RuntimeStateStore
-	EventStore         runtimechat.EventStore
-	ReceiptStore       runtimechat.ToolReceiptStore
-	TeamStore          team.Store
-	AgentControl       *agentcontrol.RegistryService
-	AgentRegistryStore agentcontrol.AgentRegistryStore
-	Background         *background.Manager
-	TeamClaims         *team.PathClaimManager
-	Orchestrator       *team.Orchestrator
-	ToolSurface        runtimeskill.MCPManager
-	EventBus           *runtimeevents.Bus
-	SessionStore       runtimechat.SessionStorage
-	SessionUser        string
-	BaseSession        *ChatSession
-	TeamLifecycle      teamLifecycleService
-	ActorRegistry      *localActorRegistry
-	Supervision        *runtimeserver.SupervisionControlPlane
-	supervisionWake    *supervision.WakeConsumer
-	supervisionConfig  supervision.Config
-	cleanupFns         []func()
-	closeOnce          sync.Once
+	Bootstrap            *runtimebootstrap.Manager
+	RuntimeConfig        *runtimecfg.RuntimeConfig
+	SessionHub           *runtimechat.SessionHub
+	RuntimeStore         runtimechat.RuntimeStateStore
+	EventStore           runtimechat.EventStore
+	ReceiptStore         runtimechat.ToolReceiptStore
+	TeamStore            team.Store
+	AgentControl         *agentcontrol.RegistryService
+	AgentRegistryStore   agentcontrol.AgentRegistryStore
+	Background           *background.Manager
+	TeamClaims           *team.PathClaimManager
+	Orchestrator         *team.Orchestrator
+	ToolSurface          runtimeskill.MCPManager
+	EventBus             *runtimeevents.Bus
+	SessionStore         runtimechat.SessionStorage
+	SessionUser          string
+	BaseSession          *ChatSession
+	TeamLifecycle        teamLifecycleService
+	ActorRegistry        *localActorRegistry
+	Supervision          *runtimeserver.SupervisionControlPlane
+	SubagentBatches      subagentbatch.BatchStore
+	supervisionWake      *supervision.WakeConsumer
+	supervisionConfig    supervision.Config
+	cleanupFns           []func()
+	closeOnce            sync.Once
+	subagentMu           sync.Mutex
+	subagentCoordinators map[*agent.SubagentBatchCoordinator]struct{}
+	subagentOps          int
+	subagentIdle         chan struct{}
+	closing              bool
+	lifecycleCtx         context.Context
+	lifecycleCancel      context.CancelFunc
+	asyncWG              sync.WaitGroup
 }
 
 func (h *localChatRuntimeHost) Close() {
@@ -73,13 +83,127 @@ func (h *localChatRuntimeHost) Close() {
 		return
 	}
 	h.closeOnce.Do(func() {
+		h.subagentMu.Lock()
+		h.closing = true
+		subagentIdle := h.subagentIdle
+		waitForSubagentOps := h.subagentOps > 0
+		h.subagentMu.Unlock()
+		if h.lifecycleCancel != nil {
+			h.lifecycleCancel()
+		}
 		h.waitForWarmup()
+		h.asyncWG.Wait()
+		if waitForSubagentOps && subagentIdle != nil {
+			<-subagentIdle
+		}
 		for i := len(h.cleanupFns) - 1; i >= 0; i-- {
 			if h.cleanupFns[i] != nil {
 				h.cleanupFns[i]()
 			}
 		}
 	})
+}
+
+func (h *localChatRuntimeHost) registerSubagentCoordinator(coordinator *agent.SubagentBatchCoordinator) bool {
+	if h == nil || coordinator == nil {
+		return false
+	}
+	h.subagentMu.Lock()
+	if h.closing {
+		h.subagentMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = coordinator.Shutdown(ctx, "host already closing")
+		return false
+	}
+	if h.subagentCoordinators == nil {
+		h.subagentCoordinators = make(map[*agent.SubagentBatchCoordinator]struct{})
+	}
+	h.subagentCoordinators[coordinator] = struct{}{}
+	h.subagentMu.Unlock()
+	return true
+}
+
+// beginSubagentOperation serializes coordinator setup/replay with host
+// shutdown. Close waits for the returned release before it can close the
+// durable batch store, preventing a replay from racing store teardown.
+func (h *localChatRuntimeHost) beginSubagentOperation() (func(), bool) {
+	if h == nil {
+		return func() {}, false
+	}
+	h.subagentMu.Lock()
+	if h.closing {
+		h.subagentMu.Unlock()
+		return func() {}, false
+	}
+	if h.subagentOps == 0 {
+		h.subagentIdle = make(chan struct{})
+	}
+	h.subagentOps++
+	idle := h.subagentIdle
+	h.subagentMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.subagentMu.Lock()
+			h.subagentOps--
+			if h.subagentOps == 0 && idle != nil {
+				close(idle)
+			}
+			h.subagentMu.Unlock()
+		})
+	}, true
+}
+
+func (h *localChatRuntimeHost) shutdownSubagentCoordinators() {
+	if h == nil {
+		return
+	}
+	h.subagentMu.Lock()
+	coordinators := make([]*agent.SubagentBatchCoordinator, 0, len(h.subagentCoordinators))
+	for coordinator := range h.subagentCoordinators {
+		coordinators = append(coordinators, coordinator)
+	}
+	h.subagentMu.Unlock()
+	for _, coordinator := range coordinators {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = coordinator.Shutdown(ctx, "host shutdown")
+		cancel()
+	}
+}
+
+func localSubagentBatchEmitter(host *localChatRuntimeHost) agent.BatchEmitter {
+	return func(eventType string, payload map[string]interface{}) {
+		if host == nil || host.EventBus == nil {
+			return
+		}
+		sessionID := ""
+		if payload != nil {
+			if value, ok := payload["parent_session_id"].(string); ok {
+				sessionID = strings.TrimSpace(value)
+			}
+		}
+		host.EventBus.Publish(runtimeevents.Event{Type: eventType, SessionID: sessionID, ToolName: "spawn_subagents", Payload: payload})
+	}
+}
+
+func localSubagentBatchTerminalSink(host *localChatRuntimeHost) agent.BatchTerminalSink {
+	return func(ctx context.Context, notification agent.BatchTerminalNotification) agent.BatchTerminalDelivery {
+		if host == nil {
+			return agent.BatchTerminalDelivery{Status: agent.BatchTerminalDeliveryFailed, Err: fmt.Errorf("local chat host is nil")}
+		}
+		parentSessionID := strings.TrimSpace(notification.Batch.ParentSessionID)
+		message := toolbroker.BuildSubagentBatchTerminalMailboxMessage(parentSessionID, notification.Batch.BatchID, notification.EventType, notification.DeliveryKey, notification.Payload)
+		result, err := runtimechat.DeliverMailboxEventFirstResult(ctx, host.EventStore, host.EventBus, nil, parentSessionID, message)
+		if err != nil {
+			return agent.BatchTerminalDelivery{Status: agent.BatchTerminalDeliveryFailed, DeliveryKey: notification.DeliveryKey, Err: err}
+		}
+		return agent.BatchTerminalDelivery{
+			Status:           agent.BatchTerminalDeliveryPersisted,
+			DeliveryKey:      notification.DeliveryKey,
+			AlreadyDelivered: result.Duplicate,
+		}
+	}
 }
 
 // wireLocalSupervisionExecutor installs the concrete runtime executor after
@@ -236,6 +360,14 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 
 	runtimeStore, eventStore := buildLocalChatRuntimeStores(session, runtimeConfig)
 	receiptStore, _ := runtimeStore.(runtimechat.ToolReceiptStore)
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: resolveLocalChatSubagentBatchStorePath(session, runtimeConfig),
+	})
+	if err != nil {
+		_ = bootstrapManager.Stop()
+		closeLocalRuntimeStores(runtimeStore, eventStore)
+		return nil, fmt.Errorf("initialize subagent batch store: %w", err)
+	}
 	agentControlRegistry := buildLocalChatAgentControlRegistryService(runtimeConfig)
 	backgroundManager := buildLocalChatBackgroundManager(runtimeConfig)
 	var globalMailboxStore agentcontrol.GlobalMailboxRegistryStore
@@ -256,6 +388,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	if err != nil {
 		_ = bootstrapManager.Stop()
 		closeLocalRuntimeStores(runtimeStore, eventStore)
+		_ = batchStore.Close()
 		if agentControlRegistry != nil {
 			_ = agentControlRegistry.Close()
 		}
@@ -282,8 +415,28 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		SessionUser:        session.SessionUserID,
 		BaseSession:        session,
 		Supervision:        supervisionPlane,
+		SubagentBatches:    batchStore,
 		supervisionConfig:  supervisionConfig,
 	}
+	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
+	// Recover only rows whose heartbeat is older than the restart grace period.
+	// The recovery coordinator is deliberately not registered: it performs a
+	// bounded startup scan but owns no worker that should be canceled during host
+	// shutdown. Terminal replay is performed here as well so a host with no
+	// materialized actor still drains notifications left by a prior process.
+	host.asyncWG.Add(1)
+	go func(batchStore subagentbatch.BatchStore, lifecycleCtx context.Context) {
+		defer host.asyncWG.Done()
+		recoveryCtx, recoveryCancel := context.WithTimeout(lifecycleCtx, 15*time.Second)
+		defer recoveryCancel()
+		coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
+			Store:        batchStore,
+			Emitter:      localSubagentBatchEmitter(host),
+			TerminalSink: localSubagentBatchTerminalSink(host),
+		})
+		_, _ = coordinator.RecoverStaleBatches(recoveryCtx, 5*time.Minute, "", 512)
+		_, _ = coordinator.ReplayTerminalDeliveries(recoveryCtx, "", 512)
+	}(batchStore, host.lifecycleCtx)
 	host.TeamLifecycle = newLocalTeamLifecycleService(host)
 
 	workspaceRoot := resolveLocalWorkspacePath(runtimeConfig, session)
@@ -334,6 +487,14 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			}
 		},
 		func() {
+			closeLocalRuntimeStores(runtimeStore, eventStore)
+		},
+		func() {
+			if batchStore != nil {
+				_ = batchStore.Close()
+			}
+		},
+		func() {
 			if host.Orchestrator != nil && globalMailboxStore != nil {
 				host.Orchestrator.MailboxWake = nil
 			}
@@ -341,9 +502,6 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			if agentControlRegistry != nil {
 				_ = agentControlRegistry.Close()
 			}
-		},
-		func() {
-			closeLocalRuntimeStores(runtimeStore, eventStore)
 		},
 		func() {
 			if host.SessionHub != nil {
@@ -357,6 +515,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			if supervisionPlane != nil {
 				_ = supervisionPlane.Close()
 			}
+		},
+		func() {
+			host.shutdownSubagentCoordinators()
 		},
 	}
 
@@ -762,9 +923,35 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
-	apiAgent.SetSubagentScheduler(agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
+	scheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
 		Routing: localChatSubagentRoutingConfig(session),
-	}))
+	})
+	apiAgent.SetSubagentScheduler(scheduler)
+	var batchCoordinator *agent.SubagentBatchCoordinator
+	if host.SubagentBatches != nil {
+		coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
+			Store:        host.SubagentBatches,
+			Scheduler:    scheduler,
+			Emitter:      localSubagentBatchEmitter(host),
+			TerminalSink: localSubagentBatchTerminalSink(host),
+		})
+		if release, active := host.beginSubagentOperation(); active {
+			if host.registerSubagentCoordinator(coordinator) {
+				batchCoordinator = coordinator
+				apiAgent.SetSubagentBatchCoordinator(coordinator)
+				parentSessionID := ""
+				if session != nil && session.RuntimeSession != nil && strings.TrimSpace(session.RuntimeSession.ID) != "" {
+					if parentSessionID == "" {
+						parentSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+					}
+				}
+				replayCtx, replayCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_, _ = coordinator.SetTerminalSinkAndReplay(replayCtx, localSubagentBatchTerminalSink(host), parentSessionID, 512)
+				replayCancel()
+			}
+			release()
+		}
+	}
 	if registry := host.Bootstrap.Registry(); registry != nil {
 		for _, summary := range registry.ListSummaries() {
 			if summary == nil {
@@ -780,6 +967,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 	if host.EventBus != nil {
 		apiAgent.SetEventBus(host.EventBus)
+	}
+	if batchCoordinator != nil {
+		batchCoordinator.SetTerminalSink(localSubagentBatchTerminalSink(host))
 	}
 	checkpointConfig := runtimecfg.DefaultRuntimeConfig().Checkpoint
 	if runtimeConfig != nil {
@@ -864,7 +1054,20 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 	return func(ctx context.Context, runtimeSession *runtimechat.Session, resume bool) error {
 		ensureChatSystemPromptMessage(session)
 		if cfg := apiAgent.GetConfig(); cfg != nil {
-			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, workspaceRoot)
+			// Provider prompt caching requires the outbound instruction head
+			// (messages[0]) to stay byte-identical for the whole session.
+			// Compose it once and freeze it on the session: re-deriving it here
+			// on every run would silently rewrite the cached prefix whenever a
+			// later run resolves the workspace root (or any other compose input)
+			// differently from session start. Session-scoped changes belong in
+			// turn-context form (e.g. active_goal_guidance below), never in the
+			// frozen instruction head.
+			composed := loadFrozenChatSystemPrompt(runtimeSession, session)
+			if composed == "" {
+				composed = composeLocalChatSystemPrompt(session, workspaceRoot)
+				storeFrozenChatSystemPrompt(runtimeSession, session, composed)
+			}
+			cfg.SystemPrompt = composed
 			if cfg.Options == nil {
 				cfg.Options = make(map[string]interface{})
 			}
@@ -878,6 +1081,43 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 		applyChatPlanModeToAgent(apiAgent, session, runtimeSession)
 		applyChatPermissionsOverlayToAgent(apiAgent, session)
 		return nil
+	}
+}
+
+// frozenChatSystemPromptContext returns the durable session context map used to
+// anchor the frozen outbound system prompt, initializing it when missing.
+func frozenChatSystemPromptContext(runtimeSession *runtimechat.Session, session *ChatSession) map[string]interface{} {
+	if runtimeSession != nil {
+		if runtimeSession.Metadata.Context == nil {
+			runtimeSession.Metadata.Context = make(map[string]interface{})
+		}
+		return runtimeSession.Metadata.Context
+	}
+	if session != nil && session.RuntimeSession != nil {
+		if session.RuntimeSession.Metadata.Context == nil {
+			session.RuntimeSession.Metadata.Context = make(map[string]interface{})
+		}
+		return session.RuntimeSession.Metadata.Context
+	}
+	return nil
+}
+
+// loadFrozenChatSystemPrompt returns the session-frozen outbound system prompt
+// anchored by the first prepare run, or "" when the session has not anchored
+// one yet.
+func loadFrozenChatSystemPrompt(runtimeSession *runtimechat.Session, session *ChatSession) string {
+	if ctx := frozenChatSystemPromptContext(runtimeSession, session); ctx != nil {
+		return strings.TrimSpace(sessionmeta.String(ctx, sessionmeta.SystemPromptFrozen))
+	}
+	return ""
+}
+
+// storeFrozenChatSystemPrompt anchors the composed outbound system prompt for
+// the life of the session so later prepare runs reuse the identical head and
+// never invalidate the provider prompt cache mid-session.
+func storeFrozenChatSystemPrompt(runtimeSession *runtimechat.Session, session *ChatSession, composed string) {
+	if ctx := frozenChatSystemPromptContext(runtimeSession, session); ctx != nil {
+		sessionmeta.Set(ctx, sessionmeta.SystemPromptFrozen, strings.TrimSpace(composed))
 	}
 }
 
@@ -1460,6 +1700,19 @@ func resolveLocalChatRuntimeStorePath(session *ChatSession, runtimeConfig *runti
 		Mode:       sessionruntime.ModeCLILocal,
 	})
 	return paths.SessionRuntimeStorePath
+}
+
+func resolveLocalChatSubagentBatchStorePath(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) string {
+	if session != nil && session.Ephemeral {
+		return ""
+	}
+	if session != nil && strings.TrimSpace(session.SessionDir) != "" {
+		return filepath.Join(session.SessionDir, "runtime", "subagent_batches.sqlite")
+	}
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath) != "" {
+		return filepath.Join(filepath.Dir(strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath)), "subagent_batches.sqlite")
+	}
+	return ""
 }
 
 // resolveLocalChatSupervisionDataDir returns a per-session durable directory

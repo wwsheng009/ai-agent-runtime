@@ -102,6 +102,7 @@ type chatRuntimeEventBridge struct {
 	toolSummaryLogged               bool
 	enqueuedEvents                  uint64
 	processedEvents                 uint64
+	criticalPending                 uint64
 	askApproval                     func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
 	askQuestion                     func(prompt string, suggestions []string, required bool) (string, error)
 	approveTool                     func(ctx context.Context, sessionID, requestID string, allow bool) error
@@ -201,6 +202,8 @@ func (t chatRuntimePriorityTranscriptTarget) valid() bool {
 const chatApprovalGrantTTL = 10 * time.Minute
 const chatRuntimeEventSettleWindow = 80 * time.Millisecond
 const chatRuntimeEventQueueByteLimit int64 = 4 << 20
+const chatRuntimeEventQueueNormalCapacity = 512
+const chatRuntimeEventQueueCriticalReserve = 64
 const chatRuntimeEndRunDrainTimeout = 8 * time.Second
 const chatRuntimeInterruptedEndRunDrainTimeout = 250 * time.Millisecond
 const chatAssistantStreamPendingLimit = 128
@@ -265,7 +268,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	bridge := &chatRuntimeEventBridge{
 		session:             session,
 		primarySessionID:    currentRuntimeSessionID(session),
-		eventQueue:          make(chan chatRuntimeQueuedEvent, 512),
+		eventQueue:          make(chan chatRuntimeQueuedEvent, chatRuntimeEventQueueNormalCapacity+chatRuntimeEventQueueCriticalReserve),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
 		uiActionPostTimeout: uiActionPostBudget,
 		rendered:            make(map[string]struct{}),
@@ -614,9 +617,7 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	b.flushPendingStreamEventBounded(chatStreamFlushBudget)
 	if !b.WaitForCurrentEvents(b.endRunDrainTimeout()) {
-		if b.session != nil {
-			writeSessionDebugInfo(b.session, "[runtime-event] EndRun drain timeout; closing run epoch", false)
-		}
+		b.markEndRunDrainTimeout()
 	}
 	// Stop the run-active log window before finalization so the run-end
 	// render/log work is not double-counted. The render epoch itself stays
@@ -648,6 +649,17 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	flushChatSessionLog(b.session)
 	b.writePromptIfIdle()
+}
+
+func (b *chatRuntimeEventBridge) markEndRunDrainTimeout() {
+	if b == nil {
+		return
+	}
+	err := fmt.Errorf("runtime event EndRun drain timeout: critical lifecycle delivery may still be pending")
+	b.setRunError(err)
+	if b.session != nil {
+		writeSessionDebugInfo(b.session, "[runtime-event] EndRun drain timeout; finalizing run as failed while critical lifecycle delivery remains recoverable", false)
+	}
 }
 
 // finalizeOpenUnifiedStreamsAtRunEnd is the fail-closed terminal boundary for
@@ -788,6 +800,17 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		b.enqueueStreamEvent(event, size)
 		return
 	}
+	if isCriticalSubagentLifecycleEvent(event.Type) {
+		// Critical control-plane terminal events do not wait behind coalesced
+		// assistant deltas. The queue reserves capacity for them; if even that
+		// reserve is temporarily exhausted, retry asynchronously and include the
+		// pending handoff in EndRun's drain barrier rather than silently dropping
+		// the only parent-visible lifecycle notification.
+		if !b.enqueueNonStreamEvent(event, size, 0) {
+			b.enqueueCriticalRuntimeEventEventually(event, size)
+		}
+		return
+	}
 	// Non-streaming events (finals, approvals, tool boundaries) are ordered
 	// behind any coalesced streaming event, then enqueue with a bounded wait:
 	// they are rare and semantically should arrive, but a stalled UI must not
@@ -806,6 +829,47 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if !b.enqueueNonStreamEvent(event, size, uiActionPostBudget) {
 		b.logLateRuntimeEvent(event, "runtime event queue stalled; event dropped")
 	}
+}
+
+// isCriticalSubagentLifecycleEvent identifies control-plane outcomes that
+// must remain observable after their initiating turn has retired. Started and
+// progress events intentionally remain ordinary; terminal state is the
+// authoritative recovery record.
+func isCriticalSubagentLifecycleEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "subagent.completed", "subagent.denied",
+		"subagent.batch.completed", "subagent.batch.failed",
+		"subagent.batch.canceled", "subagent.batch.cancelled",
+		"subagent.batch.timed_out", "subagent.batch.orphaned",
+		"subagent.batch.circuit_open":
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *chatRuntimeEventBridge) enqueueCriticalRuntimeEventEventually(event runtimeevents.Event, size int64) {
+	if b == nil {
+		return
+	}
+	b.progressMu.Lock()
+	b.criticalPending++
+	b.progressMu.Unlock()
+	go func() {
+		defer func() {
+			b.progressMu.Lock()
+			if b.criticalPending > 0 {
+				b.criticalPending--
+			}
+			b.progressMu.Unlock()
+		}()
+		for !b.enqueueNonStreamEvent(event, size, 250*time.Millisecond) {
+			// A terminal event is bounded in size and frequency. Retrying here is
+			// safer than blocking the runtime publisher or losing the event; app
+			// shutdown still terminates the process/goroutine naturally.
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 }
 
 // isMergeableStreamEvent reports whether the event carries monotonic streaming
@@ -1076,7 +1140,7 @@ func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		if b.tryReserveEventQueueBytes(size) {
+		if b.tryReserveEventQueueBytes(size, isCriticalSubagentLifecycleEvent(event.Type)) {
 			b.renderMu.Lock()
 			epoch := b.runEpoch
 			b.renderMu.Unlock()
@@ -1099,23 +1163,37 @@ func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event
 
 // tryReserveEventQueueBytes is the non-blocking form of
 // reserveEventQueueBytes. Returns true when the byte budget admits the event.
-func (b *chatRuntimeEventBridge) tryReserveEventQueueBytes(size int64) bool {
+func (b *chatRuntimeEventBridge) tryReserveEventQueueBytes(size int64, critical bool) bool {
 	b.eventQueueMu.Lock()
 	defer b.eventQueueMu.Unlock()
 	if size < 1 {
 		size = 1
 	}
-	if b.eventQueueByteLimit > 0 && b.eventQueueBytes > 0 && size > b.eventQueueByteLimit-b.eventQueueBytes {
+	if !critical && len(b.eventQueue) >= b.normalEventQueueCapacity() {
+		return false
+	}
+	if !critical && b.eventQueueByteLimit > 0 && b.eventQueueBytes > 0 && size > b.eventQueueByteLimit-b.eventQueueBytes {
 		return false
 	}
 	b.eventQueueBytes += size
 	return true
 }
 
+func (b *chatRuntimeEventBridge) normalEventQueueCapacity() int {
+	capacity := cap(b.eventQueue)
+	if capacity > chatRuntimeEventQueueCriticalReserve {
+		return capacity - chatRuntimeEventQueueCriticalReserve
+	}
+	return capacity
+}
+
 // trySendStreamEvent attempts a non-blocking enqueue. Returns true when the
 // event was accepted by the queue. The epoch on q was stamped at enqueue
 // time and is preserved (see enqueueStreamEvent).
 func (b *chatRuntimeEventBridge) trySendStreamEvent(q *chatRuntimeQueuedEvent) bool {
+	if len(b.eventQueue) >= b.normalEventQueueCapacity() {
+		return false
+	}
 	select {
 	case b.eventQueue <- *q:
 		// Streaming events are exempt from the blocking byte budget but are
@@ -1232,7 +1310,7 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 	b.renderMu.Lock()
 	currentEpoch := b.runEpoch
 	b.renderMu.Unlock()
-	if queued.epoch != currentEpoch {
+	if queued.epoch != currentEpoch && !isCriticalSubagentLifecycleEvent(queued.event.Type) {
 		b.logLateRuntimeEvent(queued.event, "stale local run epoch")
 		return
 	}
@@ -1255,6 +1333,13 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 		return
 	}
 	if accepted, legacyOK := b.postRuntimeEventToUIActorWithEpoch(queued.event, queued.epoch); accepted {
+		return
+	} else if isCriticalSubagentLifecycleEvent(queued.event.Type) {
+		// If the UI actor is already closed/replaced, retain the control-plane
+		// terminal in the legacy/Scene path instead of silently losing it. The
+		// critical actor admission path never times out merely due to a full
+		// mailbox, so this fallback cannot overtake queued actor predecessors.
+		b.handleEvent(queued.event)
 		return
 	} else if legacyOK && b.isRunEpochCurrent(queued.epoch) {
 		// Only fall back to the legacy surface while the captured epoch is
@@ -1333,10 +1418,15 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 		// A bounded mailbox is normal backpressure, but waiting for it must
 		// never outlive the run that owns this event. EndRun seals the epoch
 		// after its drain timeout, which releases this loop.
-		if !b.isRunEpochCurrent(epoch) {
+		if !isCriticalSubagentLifecycleEvent(event.Type) && !b.isRunEpochCurrent(epoch) {
 			return false, false
 		}
 		if time.Now().After(waitDeadline) {
+			if isCriticalSubagentLifecycleEvent(event.Type) {
+				b.logLateRuntimeEvent(event, "UI actor mailbox stalled; critical lifecycle event remains pending")
+				waitDeadline = time.Now().Add(timeout)
+				continue
+			}
 			reason := "UI actor mailbox stalled; event dropped"
 			if isMergeableStreamEvent(event.Type) {
 				reason = "UI actor mailbox full; streaming event dropped after bounded wait"
@@ -1706,20 +1796,20 @@ type eventLogInjection struct {
 	// such as backtrack. Earlier append-only event rows remain in the file for
 	// audit, but replay must discard their derived model/Scene before seeding
 	// the supplied canonical history.
-	HistoryReset       bool                   `json:"history_reset,omitempty"`
-	History            []runtimetypes.Message `json:"history,omitempty"`
-	HistoryResetHeader string                 `json:"history_reset_header,omitempty"`
-	UserInput          string                 `json:"user_input,omitempty"`
-	Assistant          string                 `json:"assistant,omitempty"`
-	AssistantBoundaryGroup string             `json:"assistant_boundary_group,omitempty"`
-	Command            string                 `json:"command,omitempty"`
-	Error              string                 `json:"error,omitempty"`
-	Supplement         string                 `json:"supplement,omitempty"`
-	PriorityKind       string                 `json:"priority_kind,omitempty"`
-	PriorityKey        string                 `json:"priority_key,omitempty"`
-	PriorityTranscript string                 `json:"priority_transcript,omitempty"`
-	Interaction        string                 `json:"interaction,omitempty"`        // /debug、/model 等交互输出
-	InteractionAnchor  *encoding.Tail         `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
+	HistoryReset           bool                   `json:"history_reset,omitempty"`
+	History                []runtimetypes.Message `json:"history,omitempty"`
+	HistoryResetHeader     string                 `json:"history_reset_header,omitempty"`
+	UserInput              string                 `json:"user_input,omitempty"`
+	Assistant              string                 `json:"assistant,omitempty"`
+	AssistantBoundaryGroup string                 `json:"assistant_boundary_group,omitempty"`
+	Command                string                 `json:"command,omitempty"`
+	Error                  string                 `json:"error,omitempty"`
+	Supplement             string                 `json:"supplement,omitempty"`
+	PriorityKind           string                 `json:"priority_kind,omitempty"`
+	PriorityKey            string                 `json:"priority_key,omitempty"`
+	PriorityTranscript     string                 `json:"priority_transcript,omitempty"`
+	Interaction            string                 `json:"interaction,omitempty"`        // /debug、/model 等交互输出
+	InteractionAnchor      *encoding.Tail         `json:"interaction_anchor,omitempty"` // 触发时刻模型尾部锚点
 	// Document is the terminal-neutral render IR for command/interaction
 	// injections. It is optional for backward compatibility with old JSONL
 	// records that only persisted the plain text projection.
@@ -1871,22 +1961,22 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 		return 0, err
 	}
 	type entry struct {
-		historyReset       bool
-		history            []runtimetypes.Message
-		historyResetHeader string
-		event              runtimeevents.Event
-		userInput          string          // 非空表示用户输入注入记录（无 runtime 事件类型）
-		assistant          string          // 非空表示 direct assistant 终态注入记录
-		assistantBoundaryGroup string      // 可选；旧日志为空时保持独立块语义
-		command            string          // 非空表示命令结果注入记录
-		err                string          // 非空表示操作错误注入记录
-		supplement         string          // 非空表示本地补充注入记录
-		priorityKind       string          // approval_requested/question_asked
-		priorityKey        string          // request_id/question_id-derived key
-		priorityTranscript string          // retained prompt + answer
-		interaction        string          // 非空表示用户交互输出注入记录
-		interactionAnchor  *encoding.Tail  // 交互输出触发时刻锚点
-		document           render.Document // 可选结构化 command/interaction IR
+		historyReset           bool
+		history                []runtimetypes.Message
+		historyResetHeader     string
+		event                  runtimeevents.Event
+		userInput              string          // 非空表示用户输入注入记录（无 runtime 事件类型）
+		assistant              string          // 非空表示 direct assistant 终态注入记录
+		assistantBoundaryGroup string          // 可选；旧日志为空时保持独立块语义
+		command                string          // 非空表示命令结果注入记录
+		err                    string          // 非空表示操作错误注入记录
+		supplement             string          // 非空表示本地补充注入记录
+		priorityKind           string          // approval_requested/question_asked
+		priorityKey            string          // request_id/question_id-derived key
+		priorityTranscript     string          // retained prompt + answer
+		interaction            string          // 非空表示用户交互输出注入记录
+		interactionAnchor      *encoding.Tail  // 交互输出触发时刻锚点
+		document               render.Document // 可选结构化 command/interaction IR
 	}
 	var entries []entry
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -2403,9 +2493,10 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) boo
 		b.progressMu.Lock()
 		enqueued := b.enqueuedEvents
 		processed := b.processedEvents
+		criticalPending := b.criticalPending
 		b.progressMu.Unlock()
 		now := time.Now()
-		if processed >= enqueued {
+		if processed >= enqueued && criticalPending == 0 {
 			if stableSince.IsZero() || enqueued != lastSeenEnqueued {
 				stableSince = now
 				lastSeenEnqueued = enqueued
@@ -3224,7 +3315,7 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 	}
 	// Team/task/mailbox events have their own durable team/task/message
 	// identities and may legitimately arrive after the initiating chat turn.
-	if isTeamLifecycleRuntimeEvent(event.Type) || event.Type == runtimechat.EventMailboxReceived {
+	if isTeamLifecycleRuntimeEvent(event.Type) || event.Type == runtimechat.EventMailboxReceived || isCriticalSubagentLifecycleEvent(event.Type) {
 		return false
 	}
 	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
@@ -5131,6 +5222,15 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
 			Kind: cell.TimelineTeam, Status: cell.StatusSuccess, Tag: "[subagents]", Title: "completed",
 		}, "")
+	case "subagent.batch.failed", "subagent.batch.canceled", "subagent.batch.cancelled", "subagent.batch.timed_out", "subagent.batch.orphaned", "subagent.batch.circuit_open":
+		status := strings.TrimPrefix(event.Type, "subagent.batch.")
+		details := []string{}
+		if reason := strings.TrimSpace(payloadStringValue(event.Payload["error"])); reason != "" {
+			details = append(details, reason)
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind: cell.TimelineTeam, Status: cell.StatusError, Tag: "[subagents]", Title: status, Details: details,
+		}, firstNonEmptyChatValue(payloadStringValue(event.Payload["batch_id"]), event.Type))
 	case "subagent.started":
 		return chatRuntimeTimelineEvent{}
 	case "subagent.completed":

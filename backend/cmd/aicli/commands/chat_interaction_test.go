@@ -108,6 +108,67 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *t
 	}
 }
 
+func TestChatInteractionCoordinator_RenderSubmittedUserInputDoesNotRestoreSubmittedDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.SetPromptInput("draft")
+	coord.RenderSubmittedUserInput("draft")
+
+	if got := coord.PromptInputSnapshot().Text; got != "" {
+		t.Fatalf("expected submitted draft cache to be cleared, got %q", got)
+	}
+
+	// PrintPrompt is the path that used to rehydrate the stale coordinator
+	// cache into the visible prompt placeholder after the user block landed.
+	coord.PrintPrompt()
+	coord.waitUIActorIdle()
+	if got := coord.PromptInputSnapshot().Text; got != "" {
+		t.Fatalf("expected PrintPrompt not to restore submitted draft, got %q", got)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderSubmittedUserInputPreservesNewerDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+
+	coord.SetPromptInput("submitted")
+	coord.SetPromptInput("next draft")
+	coord.RenderSubmittedUserInput("submitted")
+
+	if got := coord.PromptInputSnapshot().Text; got != "next draft" {
+		t.Fatalf("expected newer draft to survive submit cleanup, got %q", got)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderSubmittedUserInputPreservesFirstNewerDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	// The first observed editor revision already belongs to the next prompt.
+	// There is no positive submitted cutoff before sequence 1, so the submit
+	// fence must carry the explicit preserve-newer intent rather than using the
+	// legacy zero-sequence unconditional clear.
+	coord.SetPromptInput("next draft")
+	coord.RenderSubmittedUserInput("submitted")
+	coord.waitUIActorIdle()
+
+	if got := coord.PromptInputSnapshot().Text; got != "next draft" {
+		t.Fatalf("expected first newer draft to survive submit cleanup, got %q", got)
+	}
+	if coord.uiActor != nil {
+		bottom := coord.uiActor.AppState().Bottom
+		if bottom.PromptInput != "next draft" {
+			t.Fatalf("expected actor to retain first newer draft, got %+v", bottom)
+		}
+	}
+}
+
 func TestChatInteractionCoordinator_WaitingStateBlocksCommandInput(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -442,6 +503,18 @@ func TestRenderSubmittedUserInputEchoSkipsLegacyPromptPath(t *testing.T) {
 
 	if output.String() != "" {
 		t.Fatalf("expected submitted input echo to be gated to fixed-bottom surface, got %q", output.String())
+	}
+}
+
+func TestPromptSubmittedSequenceDoesNotConsumeDifferentNextDraft(t *testing.T) {
+	if got := promptSubmittedSequence(chatPromptInputState{text: "submitted", sequence: 7}, "submitted"); got != 7 {
+		t.Fatalf("matching submitted draft sequence = %d, want 7", got)
+	}
+	if got := promptSubmittedSequence(chatPromptInputState{text: "next draft", sequence: 8}, "submitted"); got != 7 {
+		t.Fatalf("different next-draft cutoff = %d, want 7", got)
+	}
+	if got := promptSubmittedSequence(chatPromptInputState{text: "", sequence: 8}, "submitted"); got != 8 {
+		t.Fatalf("empty editor reset cutoff = %d, want 8", got)
 	}
 }
 

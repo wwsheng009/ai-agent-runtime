@@ -831,7 +831,7 @@ func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action u
 	if !ok || payload.bridge == nil || payload.bridge.session == nil {
 		return
 	}
-	if !payload.bridge.isRunEpochCurrent(payload.epoch) {
+	if !payload.bridge.isRunEpochCurrent(payload.epoch) && !isCriticalSubagentLifecycleEvent(payload.event.Type) {
 		payload.bridge.logLateRuntimeEvent(payload.event, "runtime event action targets closed run epoch")
 		return
 	}
@@ -1003,7 +1003,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 		if draft.text != "" {
 			rows := c.currentPromptDisplayRowsLocked()
 			cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-			c.surface.SetPromptInputState(prompt, draft.text, rows, cursorRow, cursorCol)
+			c.surface.SetPromptInputStateVersioned(prompt, draft.text, rows, cursorRow, cursorCol, draft.sequence)
 		}
 		return
 	}

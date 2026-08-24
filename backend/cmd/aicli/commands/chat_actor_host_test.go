@@ -4325,3 +4325,92 @@ func TestFindGitRoot(t *testing.T) {
 		t.Fatalf("findGitRoot in temp dir = %q, want empty", got)
 	}
 }
+func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
+	llmRuntime := runtimellm.NewLLMRuntime(nil)
+	runtimeSession := &runtimechat.Session{ID: "freeze-session"}
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		PermissionMode: runtimepolicy.ModeDefault,
+	}
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "test-agent",
+		Provider:     "test-provider",
+		Model:        "test-model",
+		SystemPrompt: "",
+	}, nil, llmRuntime)
+
+	// First prepare anchors the outbound head while the workspace root is not
+	// resolved yet (the observed turn-1 state).
+	hook := localChatPrepareRunHook(apiAgent, session, "", true)
+	if hook == nil {
+		t.Fatal("expected prepare hook for base session")
+	}
+	ctx := context.Background()
+	if err := hook(ctx, runtimeSession, false); err != nil {
+		t.Fatalf("first prepare: %v", err)
+	}
+	first := apiAgent.GetConfig().SystemPrompt
+	if strings.TrimSpace(first) == "" {
+		t.Fatal("expected composed system prompt on first prepare")
+	}
+	if strings.Contains(first, "Current workspace root:") {
+		t.Fatalf("first prepare must not carry the later-resolved workspace paragraph, got %q", first)
+	}
+
+	// A later run resolves the workspace root only now. The provider-facing
+	// instruction head must stay byte-identical: rewriting messages[0] here is
+	// exactly the turn-boundary prefix break that invalidated the provider
+	// prompt cache mid-session.
+	hook2 := localChatPrepareRunHook(apiAgent, session, `E:\projects\ai\ai-gateway`, true)
+	if err := hook2(ctx, runtimeSession, true); err != nil {
+		t.Fatalf("second prepare: %v", err)
+	}
+	second := apiAgent.GetConfig().SystemPrompt
+	if second != first {
+		t.Fatalf("system prompt must be frozen across prepare runs: first=%q second=%q", first, second)
+	}
+	if strings.Contains(second, "Current workspace root:") {
+		t.Fatalf("later workspace resolution must not rewrite the frozen head, got %q", second)
+	}
+
+	// The anchor is persisted on the session context so actor rebuilds after
+	// warmup/model reselection reuse the identical frozen head.
+	anchored := sessionmeta.String(runtimeSession.Metadata.Context, sessionmeta.SystemPromptFrozen)
+	if anchored != first {
+		t.Fatalf("expected session-anchored frozen prompt, got %q want %q", anchored, first)
+	}
+}
+
+func TestLocalChatRuntimeHostCloseWaitsForSubagentOperation(t *testing.T) {
+	host := &localChatRuntimeHost{}
+	cleanupDone := make(chan struct{})
+	host.cleanupFns = []func(){func() { close(cleanupDone) }}
+
+	release, ok := host.beginSubagentOperation()
+	if !ok {
+		t.Fatal("beginSubagentOperation unexpectedly rejected an open host")
+	}
+	closeDone := make(chan struct{})
+	go func() {
+		host.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-cleanupDone:
+		t.Fatal("host cleanup ran while subagent operation was still active")
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("host Close did not finish after subagent operation released")
+	}
+	select {
+	case <-cleanupDone:
+	default:
+		t.Fatal("host cleanup did not run after Close")
+	}
+}
