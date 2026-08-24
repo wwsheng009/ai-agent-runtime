@@ -530,6 +530,35 @@ func DiagnoseFailure(err error) FailureDiagnostic {
 	}
 }
 
+// isResponseHeaderTimeoutError reports whether err is the HTTP client's
+// response-header wait timeout ("net/http: timeout awaiting response
+// headers", also surfaced as http2errTimeout once the request bytes have been
+// sent). It fires when the upstream accepted the connection and the request
+// but never returns response headers — the hung-upstream signature. String
+// matching is deliberate: the error is wrapped by *url.Error with no stable
+// exported sentinel, and the message is identical across HTTP/1.1 and HTTP/2.
+func isResponseHeaderTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "timeout awaiting response headers")
+}
+
+// trackHeaderTimeoutStreak advances the hung-upstream streak and reports when
+// the retry loop must abort. A response-header timeout increments the streak;
+// any other error (or any received response, via the caller clearing on
+// resp != nil) resets it. Two consecutive increments mean the upstream
+// accepted connections/requests twice without ever returning headers, so
+// further attempts would just burn another ResponseHeaderTimeout each.
+func trackHeaderTimeoutStreak(consecutive *int, err error) (abort bool) {
+	if isResponseHeaderTimeoutError(err) {
+		*consecutive++
+		return *consecutive >= 2
+	}
+	*consecutive = 0
+	return false
+}
+
 func classifyLLMFailureCode(err error, decision retryDecision) string {
 	if err == nil {
 		return ""

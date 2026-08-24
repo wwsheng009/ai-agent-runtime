@@ -93,12 +93,24 @@ func ProviderStreamReadTimeoutFromAgentConfig(cfg *agentconfig.Config) time.Dura
 	return cfg.Providers.HTTPTimeout.StreamReadTimeout
 }
 
+// DefaultResponseHeaderTimeout bounds how long a request may wait for the
+// upstream's response headers once the request bytes have been sent. It is
+// the last line of defense against a hung upstream that neither responds nor
+// closes: without it, client.Do can block forever on the response-header
+// select while every agent waiting on the request looks wedged.
+const DefaultResponseHeaderTimeout = 60 * time.Second
+
 // ProviderResponseHeaderTimeoutFromAgentConfig resolves the response-header
-// wait bound from the global HTTP timeout config. Returns 0 when unset,
-// meaning no explicit response-header deadline is applied.
+// wait bound (the transport's ResponseHeaderTimeout) from the global HTTP
+// timeout config. An unset or non-positive value falls back to
+// DefaultResponseHeaderTimeout so a missing field can never leave requests
+// waiting for headers indefinitely.
 func ProviderResponseHeaderTimeoutFromAgentConfig(cfg *agentconfig.Config) time.Duration {
 	if cfg == nil {
-		return 0
+		return DefaultResponseHeaderTimeout
 	}
-	return cfg.Providers.HTTPTimeout.ResponseHeaderTimeout
+	if t := cfg.Providers.HTTPTimeout.ResponseHeaderTimeout; t > 0 {
+		return t
+	}
+	return DefaultResponseHeaderTimeout
 }

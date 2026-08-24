@@ -25,3 +25,22 @@ func TestRetryConfigAdapterPreservesScheduleAndUnlimitedRetries(t *testing.T) {
 	require.Equal(t, -1, ProviderMaxRetriesFromAgentConfig(cfg))
 	require.Equal(t, -1, ProviderMaxRetriesFromAgentConfig(nil))
 }
+
+func TestProviderResponseHeaderTimeoutFromAgentConfigFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *agentconfig.Config
+		want time.Duration
+	}{
+		{"nil config gets default", nil, DefaultResponseHeaderTimeout},
+		{"unset gets default", &agentconfig.Config{}, DefaultResponseHeaderTimeout},
+		{"explicit zero gets default", &agentconfig.Config{Providers: agentconfig.ProvidersConfig{HTTPTimeout: agentconfig.HTTPTimeout{ResponseHeaderTimeout: 0}}}, DefaultResponseHeaderTimeout},
+		{"negative gets default", &agentconfig.Config{Providers: agentconfig.ProvidersConfig{HTTPTimeout: agentconfig.HTTPTimeout{ResponseHeaderTimeout: -1}}}, DefaultResponseHeaderTimeout},
+		{"explicit positive preserved", &agentconfig.Config{Providers: agentconfig.ProvidersConfig{HTTPTimeout: agentconfig.HTTPTimeout{ResponseHeaderTimeout: 20 * time.Second}}}, 20 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ProviderResponseHeaderTimeoutFromAgentConfig(tc.cfg))
+		})
+	}
+}

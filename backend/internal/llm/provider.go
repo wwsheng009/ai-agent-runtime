@@ -958,6 +958,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	resolvedModel := p.resolveModel(chatReq.Model)
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
+	var consecutiveHeaderTimeouts int
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -975,6 +976,23 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
+		// Fail fast on a hung upstream: two consecutive response-header
+		// timeouts mean the provider never returns headers, and every further
+		// attempt just burns another ResponseHeaderTimeout. The streak resets
+		// on any non-header error, so a transient timeout followed by a
+		// healthy exchange and another timeout is never misjudged.
+		if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+				Source:   "provider_wrapper",
+				Phase:    "response",
+				Protocol: p.config.Type,
+				Model:    resolvedModel,
+				Method:   http.MethodPost,
+				URL:      p.buildURL(p.adapter.GetAPIPath()),
+				Error:    "repeated response-header timeout; upstream appears hung, aborting retries",
+			})
+			break
+		}
 		// Deterministic max_tokens ceiling rejections can be repaired once by
 		// lowering the request budget to the provider-reported limit.
 		if !maxTokensRecovered && applyMaxTokensLimitRecovery(&chatReq.MaxTokens, err) {
@@ -1153,6 +1171,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
+	var consecutiveHeaderTimeouts int
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -1189,6 +1208,24 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:    err.Error(),
 			})
 			lastErr = fmt.Errorf("failed to send request: %w", err)
+			// Fail fast on a hung upstream: two consecutive response-header
+			// timeouts mean the provider never returns headers, and every
+			// further attempt just burns a full ResponseHeaderTimeout for
+			// nothing. The streak resets on any other error, and on any
+			// received response (cleared below), so a healthy exchange in
+			// between never counts as consecutive.
+			if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+					Source:   "provider_wrapper",
+					Phase:    "response",
+					Protocol: p.config.Type,
+					Model:    adapterRequest.Model,
+					Method:   http.MethodPost,
+					URL:      url,
+					Error:    "repeated response-header timeout; upstream appears hung, aborting retries",
+				})
+				break
+			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",
 				Protocol: p.config.Type,
@@ -1203,6 +1240,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			}
 			break
 		}
+
+		// A response was received (whatever its status): the upstream is
+		// alive, so any prior response-header timeout streak is void.
+		consecutiveHeaderTimeouts = 0
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			responseBody, _ := io.ReadAll(resp.Body)
