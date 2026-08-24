@@ -98,8 +98,11 @@ func (f *MarkdownFormatter) IsMarkdown(text string) bool {
 		return true
 	}
 
-	// 检查粗体（**）
-	if strings.Contains(text, "**") {
+	// 检查粗体（**）：只认"成对的、中间有内容的 ** 定界符"。裸星号串
+	// （****、***** 分隔线）和未闭合的 ** 不算 markdown——纯文本 reasoning
+	// 里的星号串会因此被误判进 markdown 渲染路径，被 goldmark 当作未闭合
+	// 强调解析，造成 "****" 符号与换行被吞掉/泄漏。
+	if hasClosedBoldPair(text) {
 		return true
 	}
 
@@ -134,6 +137,29 @@ func (f *MarkdownFormatter) IsMarkdown(text string) bool {
 	}
 
 	return false
+}
+
+// hasClosedBoldPair 报告 text 中是否存在成对的粗体定界符：** 后跟非 * 的
+// 内容，并在之后再次出现闭合的 **。** 后紧跟 * 属于更长的星号串（如 ****），
+// 不是粗体起止符；未闭合的 ** 也不计数。
+func hasClosedBoldPair(text string) bool {
+	for i := 0; ; {
+		open := strings.Index(text[i:], "**")
+		if open < 0 {
+			return false
+		}
+		open += i
+		rest := text[open+2:]
+		if rest == "" || strings.HasPrefix(rest, "*") {
+			// 裸星号串/未闭合：从该 ** 之后继续找下一对。
+			i = open + 2
+			continue
+		}
+		if close := strings.Index(rest, "**"); close >= 0 {
+			return true
+		}
+		i = open + 2
+	}
 }
 
 // Format 格式化 Markdown 文本到终端输出。

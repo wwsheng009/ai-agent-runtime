@@ -28,6 +28,9 @@ func TestIsMarkdown(t *testing.T) {
 		{"缩进表格", "  | 列名1 | 列名2 |\n  | --- | --- |\n  | A | B |", true},
 		{"普通文本", "这是普通文本，不是 Markdown", false},
 		{"混合", "普通文本\n```go\n代码\n```", true},
+		{"裸星号串", "breaks****Inspecting Markdown\ndetection logic", false},
+		{"未闭合粗体", "这种 **粗体没有闭合", false},
+		{"三连星非成对", "*** 星号装饰 ***", false},
 	}
 
 	for _, tt := range tests {
