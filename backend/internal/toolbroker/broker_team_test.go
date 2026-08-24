@@ -303,9 +303,14 @@ func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 	require.NoError(t, err)
 
 	broker := &Broker{TeamStore: store}
+	// Terminal + summary are already durable before the call, so the wait
+	// returns immediately on the first snapshot read. The budget only needs to
+	// be large enough that the context cannot expire before that first read on
+	// a slow/scheduled CI machine: timeout_ms=1 made this flaky (TimedOut was
+	// observed spuriously). 5s keeps the success path instant.
 	raw, meta, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
 		"team_id":    teamID,
-		"timeout_ms": 1,
+		"timeout_ms": 5000,
 	})
 	require.NoError(t, err)
 	result, ok := raw.(WaitTeamResult)
@@ -506,8 +511,12 @@ func TestBrokerExecuteWaitTeamInfersSingleLeadTeam(t *testing.T) {
 	require.NoError(t, err)
 
 	broker := &Broker{TeamStore: store}
+	// Terminal state is already durable, so the wait resolves on the first
+	// snapshot read. Use a generous budget (5s) instead of timeout_ms=1: the
+	// 1ms budget could expire before that first read on a slow/scheduled CI
+	// machine, spuriously flipping the result to the timeout path.
 	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
-		"timeout_ms": 1,
+		"timeout_ms": 5000,
 	})
 	require.NoError(t, err)
 	result, ok := raw.(WaitTeamResult)
