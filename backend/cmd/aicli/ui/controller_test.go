@@ -1089,6 +1089,297 @@ func TestUIController_AppStateSnapshotTracksActorDomainsAndDetaches(t *testing.T
 	}
 }
 
+func TestUIController_ShowPromptRefreshPreservesTypedInput(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		ShowPromptAction{Line: "> "},
+		InputEvent{Text: "typed while rendering", Cursor: 21, Sequence: 1},
+		// Prompt refreshes are produced by status/turn transitions and may be
+		// admitted after a newer coalesced editor snapshot. They update the
+		// prompt chrome; they must not replace the editor-owned draft.
+		ShowPromptAction{Line: "> "},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "typed while rendering" || bottom.PromptCursor != 21 {
+		t.Fatalf("prompt refresh replaced typed input: %+v", bottom)
+	}
+}
+
+func TestUIController_ClearPromptRowsPreservesTypedInput(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		ShowPromptAction{Line: "> "},
+		InputEvent{Text: "typed before async output", Cursor: 25, Sequence: 1},
+		ClearPromptRowsAction{Rows: 1},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "typed before async output" || bottom.PromptCursor != 25 {
+		t.Fatalf("clearing prompt rows discarded typed input: %+v", bottom)
+	}
+	if bottom.PromptVisible || bottom.PromptReservedRows != 0 {
+		t.Fatalf("prompt rows remained visible after clear: %+v", bottom)
+	}
+}
+
+func TestUIController_StalePromptProjectionCannotReplaceNewerInput(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		ShowPromptAction{Line: "> "},
+		InputEvent{Text: "newest", Cursor: 6, Sequence: 2},
+		SetPromptStateAction{Line: "> ", Input: "old", Rows: 1, CursorCol: 3, Sequence: 1},
+		TrackPromptInputAction{Line: "> ", Input: "older", Rows: 1, CursorCol: 5, Sequence: 1},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "newest" || bottom.PromptCursor != 6 || bottom.PromptInputSequence != 2 {
+		t.Fatalf("stale full prompt projection replaced newer input: %+v", bottom)
+	}
+}
+
+func TestUIController_PromptSubmittedClearsAndFencesSubmittedDraft(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		ShowPromptAction{Line: "> "},
+		InputEvent{Text: "submitted", Cursor: 9, Sequence: 3},
+		PromptSubmittedAction{Sequence: 3},
+		// A delayed paint measured from the submitted snapshot must not bring
+		// that text back after the explicit clear barrier.
+		SetPromptStateAction{Line: "> ", Input: "submitted", Rows: 1, CursorCol: 9, Sequence: 3},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "" || !bottom.PromptVisible || bottom.PromptInputClearedThrough != 3 {
+		t.Fatalf("submitted draft was not cleared/fenced: %+v", bottom)
+	}
+
+	if !c.Post(InputEvent{Text: "next", Cursor: 4, Sequence: 4}) {
+		t.Fatal("new post-submit input rejected")
+	}
+	c.WaitIdle()
+	bottom = c.AppState().Bottom
+	if bottom.PromptInput != "next" || bottom.PromptCursor != 4 || bottom.PromptInputSequence != 4 {
+		t.Fatalf("newer post-submit input was rejected: %+v", bottom)
+	}
+}
+
+func TestUIController_UnversionedPromptSubmittedFencesObservedVersion(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		InputEvent{Text: "submitted", Cursor: 9, Sequence: 3},
+		PromptSubmittedAction{},
+		SetPromptStateAction{Line: "> ", Input: "submitted", Rows: 1, CursorCol: 9, Sequence: 3},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "" || bottom.PromptInputClearedThrough != 3 {
+		t.Fatalf("unversioned submit did not fence observed draft: %+v", bottom)
+	}
+}
+
+func TestUIController_PromptSubmittedDoesNotClearNewerNextDraft(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		InputEvent{Text: "submitted", Cursor: 9, Sequence: 3},
+		InputEvent{Text: "next draft", Cursor: 10, Sequence: 4},
+		PromptSubmittedAction{Sequence: 3},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "next draft" || bottom.PromptCursor != 10 || bottom.PromptInputSequence != 4 {
+		t.Fatalf("submit barrier cleared newer next-draft input: %+v", bottom)
+	}
+	if bottom.PromptInputClearedThrough != 3 {
+		t.Fatalf("submitted sequence was not fenced: %+v", bottom)
+	}
+}
+
+func TestUIController_PromptSubmittedPreservesFirstNewerDraftWithoutCutoff(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	// A programmatic submit can race the editor's first snapshot: the
+	// coordinator then knows a newer revision exists, but has no positive
+	// revision before it to use as a cutoff (Sequence==0). The repaint fence
+	// must still preserve that first draft rather than taking the legacy
+	// unconditional-clear path.
+	for _, action := range []UIAction{
+		InputEvent{Text: "first next draft", Cursor: 16, Sequence: 1},
+		PromptSubmittedAction{PreserveNewerDraft: true},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "first next draft" || bottom.PromptInputSequence != 1 {
+		t.Fatalf("first newer draft was cleared by zero-cutoff submit: %+v", bottom)
+	}
+	if bottom.PromptInputClearedThrough != 0 {
+		t.Fatalf("zero-cutoff submit unexpectedly fenced revision %d", bottom.PromptInputClearedThrough)
+	}
+}
+
+func TestUIController_CoalescedNextInputSurvivesEarlierSubmitFence(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+
+	// InputEvent coalescing replaces the earlier input at its original queue
+	// position. This can move the next draft ahead of ShowPrompt and the submit
+	// fence, so the reducer must compare versions rather than rely on FIFO.
+	for _, action := range []UIAction{
+		InputEvent{Text: "submitted", Cursor: 9, Sequence: 3},
+		ShowPromptAction{Line: "> "},
+		PromptSubmittedAction{Sequence: 3},
+		InputEvent{Text: "next draft", Cursor: 10, Sequence: 4},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	go c.Run()
+	c.WaitIdle()
+	c.Close()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "next draft" || bottom.PromptCursor != 10 || bottom.PromptInputSequence != 4 {
+		t.Fatalf("coalesced next draft was cleared by earlier submit: %+v", bottom)
+	}
+	if bottom.PromptInputClearedThrough != 3 {
+		t.Fatalf("submit fence sequence = %d, want 3", bottom.PromptInputClearedThrough)
+	}
+}
+
+func TestUIController_CoalescedNextInputSurvivesResetFence(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+
+	// The newer InputEvent replaces the older one in its coalescing slot and
+	// can therefore reduce before the reset action. A reset must not erase a
+	// draft that was created after its cutoff.
+	for _, action := range []UIAction{
+		InputEvent{Text: "before reset", Cursor: 12, Sequence: 3},
+		ResetPromptAction{Line: "> ", Rows: 1, Sequence: 4},
+		InputEvent{Text: "next draft", Cursor: 10, Sequence: 5},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	go c.Run()
+	c.WaitIdle()
+	c.Close()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "next draft" || bottom.PromptCursor != 10 || bottom.PromptInputSequence != 5 {
+		t.Fatalf("coalesced next draft was cleared by reset: %+v", bottom)
+	}
+	if bottom.PromptInputClearedThrough != 4 {
+		t.Fatalf("reset fence sequence = %d, want 4", bottom.PromptInputClearedThrough)
+	}
+}
+
+func TestUIController_DelayedPromptProjectionCannotReviveAfterReset(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		InputEvent{Text: "stale draft", Cursor: 11, Sequence: 3},
+		ResetPromptAction{Line: "> ", Rows: 1, Sequence: 4},
+		SetPromptStateAction{Line: "> ", Input: "stale draft", Rows: 1, CursorCol: 11, Sequence: 3},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "" || bottom.PromptInputClearedThrough != 4 {
+		t.Fatalf("reset did not fence delayed stale projection: %+v", bottom)
+	}
+	if !bottom.PromptVisible || bottom.PromptLine != "> " {
+		t.Fatalf("reset prompt chrome was not retained: %+v", bottom)
+	}
+}
+
+func TestUIController_DiscardPromptClearsAndFencesDraft(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		ShowPromptAction{Line: "> "},
+		InputEvent{Text: "discard me", Cursor: 10, Sequence: 3},
+		DiscardPromptAction{Sequence: 4},
+		SetPromptStateAction{Line: "> ", Input: "discard me", Rows: 1, CursorCol: 10, Sequence: 3},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptInput != "" || bottom.PromptInputClearedThrough != 4 {
+		t.Fatalf("discard did not clear/fence draft: %+v", bottom)
+	}
+	if bottom.PromptVisible || bottom.PromptReservedRows != 0 {
+		t.Fatalf("discard left prompt chrome visible: %+v", bottom)
+	}
+}
+
 func TestUIController_TranscriptActionDerivesMutableActiveCell(t *testing.T) {
 	c, _ := newP1Controller(t, 0)
 	go c.Run()
@@ -1264,6 +1555,7 @@ func TestUIActionClassification(t *testing.T) {
 		{"SetDynamicStatusModelAction", SetDynamicStatusModelAction{}, ClassDurable, ""},
 		{"ShowPromptAction", ShowPromptAction{}, ClassDurable, ""},
 		{"PromptSubmittedAction", PromptSubmittedAction{}, ClassDurable, ""},
+		{"DiscardPromptAction", DiscardPromptAction{}, ClassDurable, ""},
 		{"SetPromptStateAction", SetPromptStateAction{}, ClassDurable, ""},
 		{"TrackPromptInputAction", TrackPromptInputAction{}, ClassDurable, ""},
 		{"ResetPromptAction", ResetPromptAction{}, ClassDurable, ""},

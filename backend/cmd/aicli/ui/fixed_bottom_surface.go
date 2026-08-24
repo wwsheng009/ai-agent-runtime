@@ -1885,7 +1885,15 @@ func (s *FixedBottomSurface) showPromptImpl(line string) bool {
 }
 
 func (s *FixedBottomSurface) ResetPrompt(line string, rows int) bool {
-	if s.postFacadeAction(ResetPromptAction{Line: line, Rows: rows}) {
+	return s.ResetPromptVersioned(line, rows, 0)
+}
+
+// ResetPromptVersioned is the lifecycle-fenced reset adapter used by the
+// unified coordinator. A non-zero sequence invalidates editor snapshots
+// measured before the reset while allowing a genuinely newer snapshot to win
+// if queue coalescing moves it ahead of this action.
+func (s *FixedBottomSurface) ResetPromptVersioned(line string, rows int, sequence uint64) bool {
+	if s.postFacadeAction(ResetPromptAction{Line: line, Rows: rows, Sequence: sequence}) {
 		return true
 	}
 	return s.resetPromptImpl(line, rows)
@@ -2425,8 +2433,17 @@ func normalizeFixedPromptInputState(line string, input string, rows int, cursorR
 }
 
 func (s *FixedBottomSurface) TrackPromptInputState(line string, input string, rows int, cursorRow int, cursorCol int) bool {
+	return s.TrackPromptInputStateVersioned(line, input, rows, cursorRow, cursorCol, 0)
+}
+
+// TrackPromptInputStateVersioned publishes display metadata together with the
+// editor snapshot revision it was measured from. Unified rendering uses the
+// revision to reject a delayed facade projection after newer keyboard input.
+// The synchronous legacy adapter ignores sequence and preserves its FIFO
+// behavior.
+func (s *FixedBottomSurface) TrackPromptInputStateVersioned(line string, input string, rows int, cursorRow int, cursorCol int, sequence uint64) bool {
 	if s.postFacadeAction(TrackPromptInputAction{
-		Line: line, Input: input, Rows: rows, CursorRow: cursorRow, CursorCol: cursorCol,
+		Line: line, Input: input, Rows: rows, CursorRow: cursorRow, CursorCol: cursorCol, Sequence: sequence,
 	}) {
 		return true
 	}
@@ -2464,7 +2481,13 @@ func (s *FixedBottomSurface) trackPromptInputStateImpl(line string, input string
 }
 
 func (s *FixedBottomSurface) SetPromptInputState(line string, input string, rows int, cursorRow int, cursorCol int) bool {
-	if s.postFacadeAction(SetPromptStateAction{Line: line, Input: input, Rows: rows, CursorRow: cursorRow, CursorCol: cursorCol}) {
+	return s.SetPromptInputStateVersioned(line, input, rows, cursorRow, cursorCol, 0)
+}
+
+// SetPromptInputStateVersioned is the full-paint counterpart of
+// TrackPromptInputStateVersioned. See that method for the sequence contract.
+func (s *FixedBottomSurface) SetPromptInputStateVersioned(line string, input string, rows int, cursorRow int, cursorCol int, sequence uint64) bool {
+	if s.postFacadeAction(SetPromptStateAction{Line: line, Input: input, Rows: rows, CursorRow: cursorRow, CursorCol: cursorCol, Sequence: sequence}) {
 		return true
 	}
 	return s.setPromptInputStateImpl(line, input, rows, cursorRow, cursorCol)
@@ -4210,6 +4233,12 @@ type BottomPaneState struct {
 	// presenter. They are also populated in AppState during the Phase 2 bridge.
 	PromptLine  string
 	PromptInput string
+	// PromptInputSequence is the newest versioned editor snapshot accepted by
+	// the AppState reducer. PromptInputClearedThrough is an explicit submission
+	// fence: delayed full-state projections at or below it cannot resurrect text
+	// that was already submitted. Zero-valued legacy facade actions remain FIFO.
+	PromptInputSequence       uint64
+	PromptInputClearedThrough uint64
 	// PromptCursor is the logical rune offset supplied by InputEvent. The
 	// visual cursor fields below are derived from it and geometry by Layout.
 	PromptCursor            int

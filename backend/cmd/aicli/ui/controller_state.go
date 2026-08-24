@@ -388,12 +388,16 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case InputEvent:
+		if controllerPromptInputSequenceStale(state.Bottom, a.Sequence) {
+			break
+		}
 		state.Bottom.PromptInput = a.Text
 		state.Bottom.PromptCursor = a.Cursor
 		state.Bottom.PromptCursorKnown = true
 		state.Bottom.PromptRowsOverride = 0
 		state.Bottom.PasteActive = a.PasteActive
 		state.Bottom.Focus = BottomFocusPrompt
+		recordControllerPromptInputSequence(&state.Bottom, a.Sequence)
 	case SetActiveBandAction:
 		if state.SemanticActiveCellProjection {
 			// Unified production frames derive their mutable body exclusively
@@ -431,36 +435,74 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case SetDynamicStatusModelAction:
 		state.Bottom.DynamicStatusModel = normalizeControllerDynamicStatusModel(a.Dynamic)
 	case ShowPromptAction:
-		state.Bottom.PromptLine = a.Line
-		state.Bottom.PromptInput = ""
-		state.Bottom.PromptCursor = 0
-		state.Bottom.PromptCursorKnown = true
-		state.Bottom.PromptCursorAbsoluteRow = 0
-		state.Bottom.PromptCursorRow = 0
-		state.Bottom.PromptCursorCol = 0
-		state.Bottom.PromptTotalRows = 1
-		state.Bottom.PromptViewportStart = 0
+		// ShowPrompt is a chrome refresh, not an editor-state replacement. The
+		// facade action may be admitted through the deferred FIFO after a newer
+		// coalesced InputEvent; retaining the draft prevents that refresh from
+		// visually painting an empty prompt over text the user just entered.
+		state.Bottom.PromptLine = strings.TrimRight(SanitizeTerminalText(a.Line), "\r\n")
+		if !state.Bottom.PromptCursorKnown {
+			state.Bottom.PromptCursor = 0
+			state.Bottom.PromptCursorKnown = true
+			state.Bottom.PromptCursorAbsoluteRow = 0
+			state.Bottom.PromptCursorRow = 0
+			state.Bottom.PromptCursorCol = 0
+		}
+		if state.Bottom.PromptTotalRows < 1 {
+			state.Bottom.PromptTotalRows = 1
+		}
 		state.Bottom.PromptRowsOverride = 0
 		state.Bottom.PromptReservedRows = 1
 		state.Bottom.PromptVisible = true
 		state.Bottom.Focus = BottomFocusPrompt
+	case PromptSubmittedAction:
+		// A coordinator can observe a newer draft before the submitted
+		// snapshot has reached the actor. Sequence zero in that mode means
+		// there is no older revision to fence (the newer draft is revision 1);
+		// retain it while still allowing this action to wake the presenter.
+		if a.PreserveNewerDraft && a.Sequence == 0 {
+			break
+		}
+		cutoff := recordControllerPromptInputFence(&state.Bottom, a.Sequence)
+		// Input callbacks update the responsive coordinator cache without c.mu.
+		// A next-draft snapshot can therefore reach the actor while submit echo
+		// work is still preparing this barrier. Clear only the submitted version;
+		// a genuinely newer draft already belongs to the next prompt.
+		if a.Sequence == 0 || a.Sequence >= state.Bottom.PromptInputSequence {
+			clearControllerPromptInput(&state.Bottom)
+			recordControllerPromptInputSequence(&state.Bottom, cutoff)
+		}
+	case DiscardPromptAction:
+		cutoff := recordControllerPromptInputFence(&state.Bottom, a.Sequence)
+		if a.Sequence == 0 || a.Sequence >= state.Bottom.PromptInputSequence {
+			clearControllerPromptState(&state.Bottom)
+			recordControllerPromptInputSequence(&state.Bottom, cutoff)
+		}
 	case ClearPromptRowsAction:
-		clearControllerPromptState(&state.Bottom)
+		clearControllerPromptRows(&state.Bottom)
 	case SetPromptStateAction:
+		if controllerPromptInputSequenceStale(state.Bottom, a.Sequence) {
+			break
+		}
 		applyControllerPromptState(&state.Bottom, state.Geometry, a.Line, a.Input, a.Rows, a.CursorRow, a.CursorCol)
+		recordControllerPromptInputSequence(&state.Bottom, a.Sequence)
 	case TrackPromptInputAction:
+		if controllerPromptInputSequenceStale(state.Bottom, a.Sequence) {
+			break
+		}
 		applyControllerPromptState(&state.Bottom, state.Geometry, a.Line, a.Input, a.Rows, a.CursorRow, a.CursorCol)
+		recordControllerPromptInputSequence(&state.Bottom, a.Sequence)
 	case ResetPromptAction:
 		line := strings.TrimRight(SanitizeTerminalText(a.Line), "\r\n")
 		state.Bottom.PromptLine = line
-		state.Bottom.PromptInput = ""
-		state.Bottom.PromptCursor = 0
-		state.Bottom.PromptCursorKnown = true
-		state.Bottom.PromptCursorAbsoluteRow = 0
-		state.Bottom.PromptCursorRow = 0
-		state.Bottom.PromptCursorCol = 0
-		state.Bottom.PromptTotalRows = 1
-		state.Bottom.PromptViewportStart = 0
+		cutoff := recordControllerPromptInputFence(&state.Bottom, a.Sequence)
+		// A reset invalidates the draft observed by the caller, not a newer
+		// editor snapshot that was already admitted through a coalescing slot.
+		// This is the same latest-wins rule as PromptSubmittedAction, but reset
+		// also owns the fresh prompt chrome.
+		if a.Sequence == 0 || a.Sequence >= state.Bottom.PromptInputSequence {
+			clearControllerPromptInput(&state.Bottom)
+			recordControllerPromptInputSequence(&state.Bottom, cutoff)
+		}
 		state.Bottom.PromptRowsOverride = 0
 		state.Bottom.PromptReservedRows = 1
 		state.Bottom.PromptVisible = true
@@ -886,14 +928,78 @@ func applyControllerPromptState(bottom *BottomPaneState, geometry GeometryState,
 	bottom.Focus = BottomFocusPrompt
 }
 
+func controllerPromptInputSequenceStale(bottom BottomPaneState, sequence uint64) bool {
+	if sequence == 0 {
+		// Unversioned facade actions retain their legacy FIFO semantics. Unified
+		// prompt producers carry the coordinator-assigned sequence.
+		return false
+	}
+	if sequence <= bottom.PromptInputClearedThrough {
+		return true
+	}
+	return sequence < bottom.PromptInputSequence
+}
+
+func recordControllerPromptInputSequence(bottom *BottomPaneState, sequence uint64) {
+	if bottom != nil && sequence > bottom.PromptInputSequence {
+		bottom.PromptInputSequence = sequence
+	}
+}
+
+// recordControllerPromptInputFence advances the invalidation barrier. A
+// zero-valued lifecycle action has no explicit cutoff, so fence the newest
+// version already observed by the reducer rather than allowing a delayed
+// versioned projection to resurrect it.
+func recordControllerPromptInputFence(bottom *BottomPaneState, sequence uint64) uint64 {
+	if bottom == nil {
+		return sequence
+	}
+	if sequence == 0 {
+		sequence = bottom.PromptInputSequence
+	}
+	if sequence > bottom.PromptInputClearedThrough {
+		bottom.PromptInputClearedThrough = sequence
+	}
+	return sequence
+}
+
+func clearControllerPromptInput(bottom *BottomPaneState) {
+	if bottom == nil {
+		return
+	}
+	bottom.PromptInput = ""
+	bottom.PromptCursor = 0
+	bottom.PromptCursorKnown = true
+	bottom.PromptCursorAbsoluteRow = 0
+	bottom.PromptCursorRow = 0
+	bottom.PromptCursorCol = 0
+	bottom.PromptTotalRows = 1
+	bottom.PromptViewportStart = 0
+	bottom.PromptRowsOverride = 0
+	bottom.PasteActive = false
+}
+
 func clearControllerPromptState(bottom *BottomPaneState) {
 	if bottom == nil {
 		return
 	}
 	bottom.PromptLine = ""
-	bottom.PromptInput = ""
-	bottom.PromptCursor = 0
+	clearControllerPromptInput(bottom)
 	bottom.PromptCursorKnown = false
+	bottom.PromptTotalRows = 0
+	bottom.PromptVisible = false
+	bottom.PromptReservedRows = 0
+}
+
+// clearControllerPromptRows releases the visible prompt footprint while
+// retaining the editor draft. ClearPrompt is a physical-row transition; the
+// coordinator deliberately keeps typed text so a later ShowPrompt can repaint
+// it after streaming output or an async notice.
+func clearControllerPromptRows(bottom *BottomPaneState) {
+	if bottom == nil {
+		return
+	}
+	bottom.PromptLine = ""
 	bottom.PromptCursorAbsoluteRow = 0
 	bottom.PromptCursorRow = 0
 	bottom.PromptCursorCol = 0

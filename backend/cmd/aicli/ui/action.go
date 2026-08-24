@@ -727,7 +727,10 @@ func (SetDynamicStatusModelAction) isUIAction()         {}
 func (SetDynamicStatusModelAction) Class() ActionClass  { return ClassDurable }
 func (SetDynamicStatusModelAction) CoalesceKey() string { return "" }
 
-// ShowPromptAction 对应 ShowPrompt。
+// ShowPromptAction refreshes the prompt chrome (line/visibility/allocation).
+// The editor-owned input is deliberately not part of this action: a facade
+// refresh can be admitted after a newer coalesced InputEvent and must not erase
+// text the user has already typed.
 type ShowPromptAction struct {
 	Line string
 }
@@ -737,17 +740,41 @@ func (ShowPromptAction) Class() ActionClass  { return ClassDurable }
 func (ShowPromptAction) CoalesceKey() string { return "" }
 
 // PromptSubmittedAction is posted after the user submits a chat prompt in
-// unified interactive mode. It carries no state: the controller treats it as
-// a repaint fence that must produce a fresh frame so the echoed user message
+// unified interactive mode. The controller treats it as both the explicit
+// composer-clear barrier and a repaint fence. Sequence is the latest editor
+// snapshot consumed by the submit; delayed prompt projections at or below that
+// sequence cannot resurrect submitted text. PreserveNewerDraft is set when
+// the coordinator observed a different, newer editor draft while rendering
+// the submitted message; in that case the action still fences the known older
+// revisions and wakes the presenter, but must not unconditionally clear the
+// newer draft. Zero retains legacy/test behavior when PreserveNewerDraft is
+// false.
+// The fence must produce a fresh frame so the echoed user message
 // appears immediately instead of waiting for the LLM response or for history
 // commit ledger state (e.g. HasPending can be false while geometry is not yet
 // published, which would otherwise defer the echo until the first stream
 // chunk).
-type PromptSubmittedAction struct{}
+type PromptSubmittedAction struct {
+	Sequence           uint64
+	PreserveNewerDraft bool
+}
 
 func (PromptSubmittedAction) isUIAction()         {}
 func (PromptSubmittedAction) Class() ActionClass  { return ClassDurable }
 func (PromptSubmittedAction) CoalesceKey() string { return "" }
+
+// DiscardPromptAction is the lifecycle counterpart of ClearPromptRowsAction.
+// ClearPromptRows releases only the painted footprint and keeps the editor
+// draft; DiscardPrompt also invalidates that draft. Sequence is the cutoff
+// observed by the coordinator, so a delayed projection from the discarded
+// editor revision cannot resurrect it. Zero keeps legacy/test FIFO behavior.
+type DiscardPromptAction struct {
+	Sequence uint64
+}
+
+func (DiscardPromptAction) isUIAction()         {}
+func (DiscardPromptAction) Class() ActionClass  { return ClassDurable }
+func (DiscardPromptAction) CoalesceKey() string { return "" }
 
 // ClearPromptRowsAction 对应 ClearPromptRows。ShowPrompt 与 ClearPromptRows
 // 成对出现（chat loop 提交时隐藏 prompt 给 band 让位）：两者必须走同一条
@@ -768,6 +795,9 @@ type SetPromptStateAction struct {
 	Rows      int
 	CursorRow int
 	CursorCol int
+	// Sequence identifies the editor snapshot represented by Input. Zero keeps
+	// the legacy facade contract; unified producers always supply a sequence.
+	Sequence uint64
 }
 
 func (SetPromptStateAction) isUIAction()         {}
@@ -784,6 +814,8 @@ type TrackPromptInputAction struct {
 	Rows      int
 	CursorRow int
 	CursorCol int
+	// Sequence has the same ordering contract as SetPromptStateAction.Sequence.
+	Sequence uint64
 }
 
 func (TrackPromptInputAction) isUIAction()         {}
@@ -792,10 +824,14 @@ func (TrackPromptInputAction) CoalesceKey() string { return "" }
 
 // ResetPromptAction clears a previous physical prompt footprint and starts a
 // fresh one-line prompt. Rows is the previous footprint to clear, rather than
-// the row allocation of the new prompt.
+// the row allocation of the new prompt. Sequence, when non-zero, is the
+// coordinator's input invalidation cutoff: a delayed editor projection at or
+// below that revision must not repopulate the reset prompt. Zero preserves the
+// legacy unversioned reset behavior.
 type ResetPromptAction struct {
-	Line string
-	Rows int
+	Line     string
+	Rows     int
+	Sequence uint64
 }
 
 func (ResetPromptAction) isUIAction()         {}
