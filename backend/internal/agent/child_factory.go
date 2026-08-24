@@ -113,7 +113,17 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	childConfig.SystemPrompt = parent.GetPromptBuilder().BuildSubagentPrompt(parentConfig, promptTask)
 
 	childAgent := NewAgentWithLLM(&childConfig, parent.mcpManager, parent.llmRuntime)
-	childAgent.SetSubagentScheduler(NewSubagentScheduler(childAgent, req.Config))
+	childSchedulerConfig := childSubagentSchedulerConfig(parent.GetSubagentScheduler(), req.Config)
+	childAgent.SetSubagentScheduler(NewSubagentScheduler(childAgent, childSchedulerConfig))
+	if childPolicy == nil {
+		childPolicy = NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
+	}
+	if childSchedulerConfig.DelegationPolicy == DelegationPolicyDisabled {
+		childPolicy.BlockDelegation = true
+		childConfig.Options["delegation_policy"] = DelegationPolicyDisabled
+	} else {
+		childConfig.Options["delegation_policy"] = DelegationPolicyEnabled
+	}
 	childAgent.SetEventBus(parent.GetEventBus())
 	childAgent.SetPromptBuilder(parent.GetPromptBuilder())
 	childAgent.inheritToolHooksFrom(parent)
@@ -141,6 +151,13 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		Task:       task,
 		Decision:   decision,
 	}, nil
+}
+
+func childSubagentSchedulerConfig(parentScheduler *SubagentScheduler, config SubagentSchedulerConfig) SubagentSchedulerConfig {
+	if parentScheduler == nil || !parentScheduler.NestedDelegationOptIn() {
+		config.DelegationPolicy = DelegationPolicyDisabled
+	}
+	return config
 }
 
 func subagentTaskRouteHint(task SubagentTask) modelrouting.TaskHint {

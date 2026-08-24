@@ -38,9 +38,15 @@ const (
 	// ErrAgentSpawnDepthLimit marks spawn_agent failures caused by MaxDepth.
 	// Not retryable: continue locally or use spawn_team / an existing agent.
 	ErrAgentSpawnDepthLimit ErrorCode = "SPAWN_DEPTH_LIMIT"
-	ErrToolBrokerFailure    ErrorCode = "TOOL_BROKER_FAILURE"
-	ErrProcessStartFailed   ErrorCode = "PROCESS_START_FAILED"
-	ErrProcessHealthcheck   ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
+	// ErrAgentNestedDelegation marks a child attempting to create another
+	// execution node without an explicit inherited delegation opt-in.
+	ErrAgentNestedDelegation ErrorCode = "NESTED_DELEGATION_DISABLED"
+	// ErrAgentSubagentCircuitOpen marks fail-fast rejection after consecutive
+	// failed subagent batches. It is intentionally distinct from depth/policy.
+	ErrAgentSubagentCircuitOpen ErrorCode = "SUBAGENT_CIRCUIT_OPEN"
+	ErrToolBrokerFailure        ErrorCode = "TOOL_BROKER_FAILURE"
+	ErrProcessStartFailed       ErrorCode = "PROCESS_START_FAILED"
+	ErrProcessHealthcheck       ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
 
 	// Agent 错误
 	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"

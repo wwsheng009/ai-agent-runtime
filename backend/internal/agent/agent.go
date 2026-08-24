@@ -324,6 +324,11 @@ func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 			a.emitRuntimeEvent(eventType, sessionID, toolName, payload)
 		}
 		a.batchCoordinator = NewSubagentBatchCoordinator(cfg)
+	} else {
+		// Another concurrent lazy initializer won the race while this
+		// goroutine was constructing its SQLite store. Do not leak the losing
+		// in-memory database/connection.
+		_ = store.Close()
 	}
 	return a.batchCoordinator
 }
@@ -458,6 +463,16 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 	if a == nil || !a.hasSubagentScheduler() {
 		return false
 	}
+	// Presence alone is not capability. Child factories attach a disabled
+	// scheduler as an execution-side guard, but that boundary must also remove
+	// the tool from the model-visible surface so a child does not waste a turn
+	// attempting a spawn that can never succeed.
+	a.mu.RLock()
+	scheduler := a.subagents
+	a.mu.RUnlock()
+	if scheduler == nil || !scheduler.AllowsDelegation() {
+		return false
+	}
 	if callWhitelist != nil && !callWhitelist[SpawnSubagentsToolName] {
 		return false
 	}
@@ -466,7 +481,7 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 		// may use the runtime-essential allowlist bypass. Its model-visible
 		// definition is stricter: an explicit allowlist must opt it in, while
 		// an explicit deny always hides it.
-		if policy.DeniedTools[SpawnSubagentsToolName] {
+		if policy.BlockDelegation || policy.DeniedTools[SpawnSubagentsToolName] {
 			return false
 		}
 		if policy.AllowlistEnabled && !policy.AllowedTools[SpawnSubagentsToolName] {

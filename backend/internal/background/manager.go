@@ -100,6 +100,14 @@ type Manager struct {
 	doneCh            chan struct{}
 	closeOnce         sync.Once
 	jobWG             sync.WaitGroup
+	runJobImplMu      sync.RWMutex
+	runJobImpl        func(*Manager, *managedJob)
+	// lastCreatedAt makes creation ordering deterministic even when the
+	// platform clock has coarser resolution than two adjacent submissions.
+	// Queue dispatch and diagnostics both use CreatedAt as their FIFO tie
+	// breaker, so allowing equal timestamps would make insertion order depend
+	// on the random UUID tie breaker.
+	lastCreatedAt time.Time
 }
 
 type managedJob struct {
@@ -280,6 +288,11 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	managed.outputOffset = currentLogSize(logPath)
 
 	m.mu.Lock()
+	if !now.After(m.lastCreatedAt) {
+		now = m.lastCreatedAt.Add(time.Nanosecond)
+		managed.info.CreatedAt = now
+	}
+	m.lastCreatedAt = now
 	m.jobs[jobID] = managed
 	m.mu.Unlock()
 
@@ -563,10 +576,30 @@ func pathWithinRoot(path, root string) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-// runJobImpl is a seam used by tests to inject panic/block behavior into
-// runJobSafely; production always routes through (*Manager).runJob.
-var runJobImpl = func(m *Manager, managed *managedJob) {
-	m.runJob(managed)
+// setRunJobImpl is a test seam for injecting panic/block behavior into
+// runJobSafely. Production leaves it nil and routes through (*Manager).runJob.
+func (m *Manager) setRunJobImpl(impl func(*Manager, *managedJob)) {
+	if m == nil {
+		return
+	}
+	m.runJobImplMu.Lock()
+	m.runJobImpl = impl
+	m.runJobImplMu.Unlock()
+}
+
+func (m *Manager) currentRunJobImpl() func(*Manager, *managedJob) {
+	if m == nil {
+		return nil
+	}
+	m.runJobImplMu.RLock()
+	impl := m.runJobImpl
+	m.runJobImplMu.RUnlock()
+	if impl == nil {
+		impl = func(m *Manager, managed *managedJob) {
+			m.runJob(managed)
+		}
+	}
+	return impl
 }
 
 // runJobSafely runs a job in a worker goroutine and guarantees that a panic
@@ -590,7 +623,7 @@ func (m *Manager) runJobSafely(managed *managedJob) {
 			m.notifyDispatcher()
 		}
 	}()
-	runJobImpl(m, managed)
+	m.currentRunJobImpl()(m, managed)
 }
 
 func (m *Manager) runJob(managed *managedJob) {

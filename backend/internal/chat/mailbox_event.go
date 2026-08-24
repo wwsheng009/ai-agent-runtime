@@ -66,6 +66,17 @@ type AgentControlMailboxSequenceStore interface {
 	LastAgentControlMailboxSeq(ctx context.Context, sessionID string) (int64, error)
 }
 
+// MailboxDeliveryResult describes the durable mailbox write performed before
+// the optional runtime notification. Duplicate means the store had already
+// committed this stable message id, so restart recovery must not emit another
+// display mirror.
+type MailboxDeliveryResult struct {
+	Event     runtimeevents.Event
+	Sequence  int64
+	Duplicate bool
+	Fallback  bool
+}
+
 // IsAgentControlMailboxMessage reports whether a mailbox message carries the
 // standard AgentControl envelope metadata.
 func IsAgentControlMailboxMessage(message team.MailMessage) bool {
@@ -349,29 +360,45 @@ func NewMailboxReceivedEvent(sessionID string, message team.MailMessage) runtime
 // event store path is unavailable or fails, keeping mailbox delivery durable by
 // default while still supporting older in-memory-only hosts.
 func DeliverMailboxEventFirst(ctx context.Context, eventStore EventStore, eventBus runtimeevents.Publisher, fallback MailboxActorFallback, sessionID string, message team.MailMessage) error {
-	return DeliverMailboxStoreFirst(ctx, NewSessionEventMailboxStore(eventStore), eventBus, fallback, sessionID, message)
+	_, err := DeliverMailboxEventFirstResult(ctx, eventStore, eventBus, fallback, sessionID, message)
+	return err
+}
+
+// DeliverMailboxEventFirstResult is DeliverMailboxEventFirst with an explicit
+// idempotency result for recovery callers.
+func DeliverMailboxEventFirstResult(ctx context.Context, eventStore EventStore, eventBus runtimeevents.Publisher, fallback MailboxActorFallback, sessionID string, message team.MailMessage) (MailboxDeliveryResult, error) {
+	return DeliverMailboxStoreFirstResult(ctx, NewSessionEventMailboxStore(eventStore), eventBus, fallback, sessionID, message)
 }
 
 // DeliverMailboxStoreFirst records a mailbox message through the mailbox store
 // before notifying the runtime bus. It only falls back to live actor delivery
 // when the durable mailbox path is unavailable or fails.
 func DeliverMailboxStoreFirst(ctx context.Context, mailboxStore MailboxStore, eventBus runtimeevents.Publisher, fallback MailboxActorFallback, sessionID string, message team.MailMessage) error {
+	_, err := DeliverMailboxStoreFirstResult(ctx, mailboxStore, eventBus, fallback, sessionID, message)
+	return err
+}
+
+// DeliverMailboxStoreFirstResult writes the durable mailbox row first and
+// reports whether the stable message id was already present. A duplicate is a
+// successful delivery and is deliberately not republished to the event bus.
+func DeliverMailboxStoreFirstResult(ctx context.Context, mailboxStore MailboxStore, eventBus runtimeevents.Publisher, fallback MailboxActorFallback, sessionID string, message team.MailMessage) (MailboxDeliveryResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return fmt.Errorf("session id is required")
+		return MailboxDeliveryResult{}, fmt.Errorf("session id is required")
 	}
 	runtimeEvent := NewMailboxReceivedEvent(sessionID, message)
 	if mailboxStore != nil {
-		storedEvent, _, err := appendMailboxThroughPreferredStore(ctx, mailboxStore, sessionID, message)
+		storedEvent, seq, err := appendMailboxThroughPreferredStore(ctx, mailboxStore, sessionID, message)
 		if err == nil {
 			runtimeEvent = storedEvent
-			if eventBus != nil {
+			duplicate := mailboxEventDuplicate(runtimeEvent)
+			if eventBus != nil && !duplicate {
 				eventBus.Publish(runtimeEvent)
 			}
-			return nil
+			return MailboxDeliveryResult{Event: runtimeEvent, Sequence: seq, Duplicate: duplicate}, nil
 		}
 		if fallback == nil {
-			return err
+			return MailboxDeliveryResult{}, err
 		}
 	}
 	if fallback != nil {
@@ -379,15 +406,23 @@ func DeliverMailboxStoreFirst(ctx context.Context, mailboxStore MailboxStore, ev
 			ctx = context.Background()
 		}
 		if err := fallback(ctx, sessionID, message); err != nil {
-			return err
+			return MailboxDeliveryResult{}, err
 		}
-		return nil
+		return MailboxDeliveryResult{Event: runtimeEvent, Fallback: true}, nil
 	}
 	if eventBus != nil {
 		eventBus.Publish(runtimeEvent)
-		return nil
+		return MailboxDeliveryResult{Event: runtimeEvent}, nil
 	}
-	return fmt.Errorf("mailbox delivery is not configured")
+	return MailboxDeliveryResult{}, fmt.Errorf("mailbox delivery is not configured")
+}
+
+func mailboxEventDuplicate(event runtimeevents.Event) bool {
+	if event.Payload == nil {
+		return false
+	}
+	duplicate, _ := event.Payload["duplicate"].(bool)
+	return duplicate
 }
 
 func appendMailboxThroughPreferredStore(ctx context.Context, mailboxStore MailboxStore, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, error) {

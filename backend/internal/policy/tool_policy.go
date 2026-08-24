@@ -13,10 +13,15 @@ import (
 
 // ToolExecutionPolicy constrains which runtime tools may execute.
 type ToolExecutionPolicy struct {
-	ReadOnly               bool
-	AllowedTools           map[string]bool
-	DeniedTools            map[string]bool
-	AllowlistEnabled       bool
+	ReadOnly         bool
+	AllowedTools     map[string]bool
+	DeniedTools      map[string]bool
+	AllowlistEnabled bool
+	// BlockDelegation is an inherited control-plane boundary.  It is kept
+	// separate from ReadOnly because a read-only agent may still be allowed to
+	// coordinate work, while an ordinary child must not create more agents
+	// unless its parent explicitly opted into nested delegation.
+	BlockDelegation        bool
 	AllowedCapabilities    map[Capability]bool
 	CapabilityScopeEnabled bool
 	CapabilityResolver     CapabilityResolver
@@ -47,6 +52,9 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	normalizedToolName := normalizeToolName(toolName)
 	if p.DeniedTools[toolName] || runtimeOwnedEssentialExplicitlyDenied(p.DeniedTools, normalizedToolName) {
 		return fmt.Errorf("tool denied by execution policy: %s", toolName)
+	}
+	if p.BlockDelegation && IsDelegationToolName(normalizedToolName) {
+		return fmt.Errorf("nested delegation is disabled by execution policy: %s", toolName)
 	}
 	// Runtime-owned agent essentials (plan mode, goal/todos, collab, search_tool)
 	// may be injected after a *narrow non-empty* product/profile allowlist is
@@ -224,6 +232,7 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 		AllowedTools:           cloneAllowedToolsMap(p.AllowedTools),
 		DeniedTools:            cloneAllowedToolsMap(p.DeniedTools),
 		AllowlistEnabled:       p.AllowlistEnabled,
+		BlockDelegation:        p.BlockDelegation,
 		AllowedCapabilities:    cloneCapabilityMap(p.AllowedCapabilities),
 		CapabilityScopeEnabled: p.CapabilityScopeEnabled,
 		CapabilityResolver:     p.CapabilityResolver,
@@ -259,6 +268,19 @@ func (p *ToolExecutionPolicy) DeriveChildForTask(allowedTools []string, readOnly
 	}
 	child.SetCapabilityScope(requested)
 	return child
+}
+
+// IsDelegationToolName reports tools that can create another execution node.
+// Keep this list independent of the tool broker package so policy can enforce
+// the boundary on both built-in and broker-provided control-plane tools
+// without introducing an import cycle.
+func IsDelegationToolName(toolName string) bool {
+	switch normalizeToolName(toolName) {
+	case "spawn_agent", "spawn_subagents", "spawn_team":
+		return true
+	default:
+		return false
+	}
 }
 
 // AllowedToolNames returns sorted allowed tool names.

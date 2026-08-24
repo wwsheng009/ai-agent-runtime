@@ -589,6 +589,13 @@ func (s *sqliteBatchStore) UpdateTask(ctx context.Context, batchID, taskID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	batch, err := getBatchTx(ctx, tx, batchID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("subagentbatch: batch %q not found", batchID)
+		}
+		return nil, err
+	}
 	record, err := s.getTaskTx(ctx, tx, batchID, taskID)
 	if err != nil {
 		return nil, err
@@ -604,6 +611,9 @@ func (s *sqliteBatchStore) UpdateTask(ctx context.Context, batchID, taskID strin
 	from := record.Status
 	update(record)
 	if err := ValidateTaskTransition(from, record.Status); err != nil {
+		return nil, err
+	}
+	if err := validateTaskWriteAfterBatchTerminal(batch, from, record.Status); err != nil {
 		return nil, err
 	}
 	record.UpdatedAt = Now()
@@ -629,6 +639,49 @@ func (s *sqliteBatchStore) getTaskTx(ctx context.Context, q interface {
 		       task_deadline, started_at, updated_at, finished_at, last_progress_at,
 		       spec_json, result_json, artifact_ref, error_class, error_code, version
 		FROM subagent_tasks WHERE batch_id = ? AND task_id = ?`, batchID, taskID))
+}
+
+func getBatchTx(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}, batchID string) (*SubagentBatch, error) {
+	return scanBatchRow(q.QueryRowContext(ctx, `
+		SELECT batch_id, root_scope_id, parent_session_id, parent_turn_id,
+		       parent_tool_call_id, trace_id, execution_mode, status,
+		       idempotency_key, task_count, queued_count, running_count,
+		       completed_count, failed_count, canceled_count, timed_out_count,
+		       created_at, started_at, updated_at, finished_at, batch_deadline,
+		       cancel_requested_at, cancel_reason, owner_id, fencing_token,
+		       heartbeat_at, result_summary, error_class, error_detail, version
+		FROM subagent_batches WHERE batch_id = ?`, batchID))
+}
+
+// validateTaskWriteAfterBatchTerminal enforces the durable write fence used by
+// recovery and shutdown. Once a batch is terminal, an old scheduler callback
+// must not refresh task progress or replace a task result. Explicit
+// cancellation is the sole exception: a task which was still in flight may
+// settle as canceled (or with its eventual result) while the batch is
+// canceled. Pending/ready tasks are allowed to move to canceled so the
+// unowned-cancel path can close their rows.
+func validateTaskWriteAfterBatchTerminal(batch *SubagentBatch, from, to TaskStatus) error {
+	if batch == nil || !batch.Status.Terminal() {
+		return nil
+	}
+	if batch.Status == BatchCanceled && !from.Terminal() && to == TaskCanceled {
+		return nil
+	}
+	return terminalBatchWriteConflict(batch)
+}
+
+func terminalBatchWriteConflict(batch *SubagentBatch) error {
+	if batch == nil {
+		return nil
+	}
+	return &VersionConflictError{
+		Kind:     "batch",
+		ID:       batch.BatchID,
+		Expected: -1,
+		Actual:   batch.Version,
+	}
 }
 
 func overwriteTaskRow(ctx context.Context, tx *sql.Tx, batchID, taskID string, expectedVersion int64, t *SubagentTaskRecord) error {
@@ -700,6 +753,13 @@ func (s *sqliteBatchStore) UpdateTasks(ctx context.Context, batchID string, upda
 		return fmt.Errorf("subagentbatch: begin update tasks: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	batch, err := getBatchTx(ctx, tx, batchID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("subagentbatch: batch %q not found", batchID)
+		}
+		return err
+	}
 	for taskID, update := range updates {
 		record, err := s.getTaskTx(ctx, tx, batchID, taskID)
 		if err != nil {
@@ -711,6 +771,9 @@ func (s *sqliteBatchStore) UpdateTasks(ctx context.Context, batchID string, upda
 		from := record.Status
 		update(record)
 		if err := ValidateTaskTransition(from, record.Status); err != nil {
+			return err
+		}
+		if err := validateTaskWriteAfterBatchTerminal(batch, from, record.Status); err != nil {
 			return err
 		}
 		record.UpdatedAt = Now()
@@ -736,6 +799,27 @@ func (s *sqliteBatchStore) RecordTaskResult(ctx context.Context, batchID, taskID
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// A worker may outlive recovery/shutdown and arrive after its batch has
+	// already been converged to a terminal state. Reject late writes for every
+	// terminal status except canceled: an in-flight task is still allowed to
+	// settle after an explicit cancel, while orphaned/completed/failed/timed-out
+	// rows must remain immutable.
+	batch, err := getBatchTx(ctx, tx, batchID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("subagentbatch: batch %q not found", batchID)
+		}
+		return err
+	}
+	if batch.Status.Terminal() && batch.Status != BatchCanceled {
+		return &VersionConflictError{
+			Kind:     "batch",
+			ID:       batchID,
+			Expected: -1,
+			Actual:   batch.Version,
+		}
+	}
+
 	record, err := s.getTaskTx(ctx, tx, batchID, taskID)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -752,6 +836,15 @@ func (s *sqliteBatchStore) RecordTaskResult(ctx context.Context, batchID, taskID
 		} else if result != nil {
 			status = TaskFailed
 		}
+	}
+	if batch.Status == BatchCanceled && record.Status.Terminal() {
+		// A cancellation can race with a worker that already settled this
+		// task. Treat an identical terminal report as an idempotent no-op, but
+		// never let a late report replace the durable terminal outcome.
+		if status == record.Status {
+			return nil
+		}
+		return terminalBatchWriteConflict(batch)
 	}
 	if err := ValidateTaskTransition(record.Status, status); err != nil {
 		return err

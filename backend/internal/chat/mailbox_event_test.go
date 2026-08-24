@@ -88,6 +88,36 @@ func TestDeliverMailboxEventFirstPersistsBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestDeliverMailboxEventFirstDoesNotRepublishDuplicateDelivery(t *testing.T) {
+	store := NewInMemoryRuntimeStore(8)
+	bus := runtimeevents.NewBusWithRetention(8)
+	message := team.MailMessage{
+		ID:        "mail-stable",
+		FromAgent: "child",
+		ToAgent:   "session-1",
+		Kind:      "agent_message",
+		Body:      "terminal result",
+	}
+
+	if err := DeliverMailboxEventFirst(context.Background(), store, bus, nil, "session-1", message); err != nil {
+		t.Fatalf("first DeliverMailboxEventFirst: %v", err)
+	}
+	if err := DeliverMailboxEventFirst(context.Background(), store, bus, nil, "session-1", message); err != nil {
+		t.Fatalf("duplicate DeliverMailboxEventFirst: %v", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), "session-1", 0, 10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("duplicate delivery persisted another event: %#v", events)
+	}
+	if recent := bus.Recent(10); len(recent) != 1 {
+		t.Fatalf("duplicate delivery republished display event: %#v", recent)
+	}
+}
+
 func TestDeliverMailboxStoreFirstUsesMailboxStoreSubstrate(t *testing.T) {
 	store := NewInMemoryRuntimeStore(8)
 	bus := runtimeevents.NewBusWithRetention(8)

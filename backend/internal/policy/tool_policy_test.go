@@ -398,3 +398,24 @@ func TestToolExecutionPolicy_DeriveChild_PreservesSandboxAndIntersectsAllowlist(
 		t.Fatalf("expected sandbox allowed path to be preserved, got %#v", cfg.AllowedPaths)
 	}
 }
+
+func TestToolExecutionPolicy_BlockDelegationOverridesRuntimeEssentialBypass(t *testing.T) {
+	policy := NewToolExecutionPolicy([]string{"view", "spawn_agent", "spawn_subagents", "spawn_team"}, true)
+	policy.BlockDelegation = true
+
+	for _, name := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+		if err := policy.AllowTool(name); err == nil {
+			t.Fatalf("expected inherited delegation boundary to block %q", name)
+		} else if !strings.Contains(err.Error(), "nested delegation is disabled") {
+			t.Fatalf("expected actionable delegation error for %q, got %v", name, err)
+		}
+	}
+	if err := policy.AllowTool("view"); err != nil {
+		t.Fatalf("expected non-delegation read tool to remain allowed, got %v", err)
+	}
+
+	child := policy.DeriveChild([]string{"spawn_agent"}, true)
+	if !child.BlockDelegation {
+		t.Fatal("expected delegation boundary to be inherited by derived child")
+	}
+}

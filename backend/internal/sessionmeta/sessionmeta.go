@@ -60,6 +60,13 @@ const (
 	// EnvironmentValues is the session-frozen structured environment facts map
 	// (os/shell/date/commands) used by request summaries without re-probing.
 	EnvironmentValues = "environment_values"
+	// SystemPromptFrozen is the session-frozen outbound system prompt anchored by
+	// the first prepare run. Provider prompt caching requires the instruction
+	// head (messages[0]) to stay byte-identical for the whole session, so the
+	// composed prompt is captured once and reused instead of being re-derived on
+	// every turn (a later workspace-root resolution or snapshot change must not
+	// silently rewrite the cached prefix).
+	SystemPromptFrozen = "system_prompt_frozen"
 
 	LegacyAICLIProviderName       = "aicli_provider_name"
 	LegacyAICLIProviderProtocol   = "aicli_protocol"

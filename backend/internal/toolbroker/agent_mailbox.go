@@ -11,18 +11,19 @@ import (
 )
 
 const (
-	AgentMailboxMessageKind          = agentcontrol.MailboxKindAgentMessage
-	AgentMailboxFollowupKind         = agentcontrol.MailboxKindFollowupTask
-	AgentMailboxMessageType          = agentcontrol.MessageTypeAgentMessage
-	AgentMailboxFollowupMessageType  = agentcontrol.MessageTypeFollowupTask
-	AgentMailboxMessageAction        = agentcontrol.ActionAgentMessage
-	AgentMailboxFollowupAction       = agentcontrol.ActionAgentFollowupTask
-	AgentMailboxWorkflow             = agentcontrol.WorkflowSpawnAgent
-	AgentMailboxDeliverySessionStore = agentcontrol.DeliverySessionMailbox
-	SubagentCompletionMailboxKind    = agentcontrol.MailboxKindSubagentCompleted
-	SubagentCompletionMessageType    = agentcontrol.MessageTypeSubagentCompleted
-	SubagentCompletionAction         = agentcontrol.ActionAgentCompleted
-	SubagentCompletionMirrorSource   = "agent_control_mailbox"
+	AgentMailboxMessageKind           = agentcontrol.MailboxKindAgentMessage
+	AgentMailboxFollowupKind          = agentcontrol.MailboxKindFollowupTask
+	AgentMailboxMessageType           = agentcontrol.MessageTypeAgentMessage
+	AgentMailboxFollowupMessageType   = agentcontrol.MessageTypeFollowupTask
+	AgentMailboxMessageAction         = agentcontrol.ActionAgentMessage
+	AgentMailboxFollowupAction        = agentcontrol.ActionAgentFollowupTask
+	AgentMailboxWorkflow              = agentcontrol.WorkflowSpawnAgent
+	AgentMailboxDeliverySessionStore  = agentcontrol.DeliverySessionMailbox
+	SubagentCompletionMailboxKind     = agentcontrol.MailboxKindSubagentCompleted
+	SubagentCompletionMessageType     = agentcontrol.MessageTypeSubagentCompleted
+	SubagentCompletionAction          = agentcontrol.ActionAgentCompleted
+	SubagentCompletionMirrorSource    = "agent_control_mailbox"
+	SubagentBatchTerminalMirrorSource = "subagent_batch_terminal_mailbox"
 )
 
 // BuildAgentMailboxMessage creates the mailbox envelope used by send_message
@@ -142,6 +143,49 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 		ToAgent:   "parent",
 		Kind:      SubagentCompletionMailboxKind,
 		Body:      fmt.Sprintf("Subagent %s completed with status %s.", childSessionID, status),
+		Metadata:  metadata,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+// BuildSubagentBatchTerminalMailboxMessage creates the durable AgentControl
+// mailbox record for a background spawn_subagents batch. deliveryKey is
+// deterministic and becomes the message id so store retries can deduplicate it.
+func BuildSubagentBatchTerminalMailboxMessage(parentSessionID, batchID, sourceEventType, deliveryKey string, payload map[string]interface{}) team.MailMessage {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	batchID = strings.TrimSpace(batchID)
+	deliveryKey = strings.TrimSpace(deliveryKey)
+	metadata := agentcontrol.Envelope{
+		MessageType:     SubagentCompletionMessageType,
+		ControlAction:   SubagentCompletionAction,
+		Workflow:        "spawn_subagents",
+		MailboxDelivery: AgentMailboxDeliverySessionStore,
+		MailboxKind:     SubagentCompletionMailboxKind,
+	}.Metadata()
+	metadata["parent_session_id"] = parentSessionID
+	metadata["batch_id"] = batchID
+	metadata["source_event_type"] = strings.TrimSpace(sourceEventType)
+	metadata["delivery_key"] = deliveryKey
+	for _, key := range []string{
+		"parent_turn_id", "parent_tool_call_id", "trace_id", "root_scope_id",
+		"execution_mode", "status", "task_count", "completed_count",
+		"failed_count", "canceled_count", "timed_out_count", "elapsed_ms",
+		"error", "error_class", "cancel_reason", "cancel_requested_at",
+	} {
+		if value, ok := payload[key]; ok {
+			metadata[key] = value
+		}
+	}
+	status := strings.TrimSpace(fmt.Sprint(metadata["status"]))
+	if status == "" {
+		status = "completed"
+	}
+	return team.MailMessage{
+		ID:        deliveryKey,
+		FromAgent: "subagent-batch:" + batchID,
+		ToAgent:   "parent",
+		Kind:      SubagentCompletionMailboxKind,
+		Body:      fmt.Sprintf("Subagent batch %s completed with status %s.", batchID, status),
 		Metadata:  metadata,
 		CreatedAt: time.Now().UTC(),
 	}

@@ -287,6 +287,134 @@ func TestUpdateTaskCASAndResult(t *testing.T) {
 	}
 }
 
+func TestRecordTaskResultRejectsLateWriteAfterBatchOrphaned(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	batch, tasks := sampleBatch(t, "", "session-late-worker")
+	if _, err := store.CreateBatch(ctx, batch, tasks); err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	task, err := store.GetTask(ctx, batch.BatchID, "task-a")
+	if err != nil || task == nil {
+		t.Fatalf("GetTask: task=%+v err=%v", task, err)
+	}
+	task, err = store.UpdateTask(ctx, batch.BatchID, task.TaskID, task.Version, func(t *SubagentTaskRecord) {
+		t.Status = TaskRunning
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask(running): %v", err)
+	}
+	if _, err := store.UpdateBatch(ctx, batch.BatchID, batch.Version, func(b *SubagentBatch) {
+		b.Status = BatchOrphaned
+	}); err != nil {
+		t.Fatalf("UpdateBatch(orphaned): %v", err)
+	}
+
+	err = store.RecordTaskResult(ctx, batch.BatchID, task.TaskID, task.Version, TaskSucceeded, &TaskResult{
+		TaskID:  task.TaskID,
+		Success: true,
+		Summary: "late result",
+	})
+	var conflict *VersionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("late RecordTaskResult err = %v, want batch VersionConflictError", err)
+	}
+	unchanged, err := store.GetTask(ctx, batch.BatchID, task.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask(after late result): %v", err)
+	}
+	if unchanged.Status != TaskRunning || unchanged.Version != task.Version {
+		t.Fatalf("late result mutated task: before=%+v after=%+v", task, unchanged)
+	}
+}
+
+func TestTaskWritesRejectLateProgressAfterBatchOrphaned(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	batch, tasks := sampleBatch(t, "", "session-late-progress")
+	if _, err := store.CreateBatch(ctx, batch, tasks); err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	task, err := store.GetTask(ctx, batch.BatchID, "task-a")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	task, err = store.UpdateTask(ctx, batch.BatchID, task.TaskID, task.Version, func(t *SubagentTaskRecord) {
+		t.Status = TaskRunning
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask(running): %v", err)
+	}
+	current, err := store.GetBatch(ctx, batch.BatchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if _, err := store.UpdateBatch(ctx, batch.BatchID, current.Version, func(b *SubagentBatch) {
+		b.Status = BatchOrphaned
+	}); err != nil {
+		t.Fatalf("UpdateBatch(orphaned): %v", err)
+	}
+
+	now := Now()
+	_, err = store.UpdateTask(ctx, batch.BatchID, task.TaskID, task.Version, func(t *SubagentTaskRecord) {
+		t.LastProgressAt = &now
+	})
+	var conflict *VersionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("late UpdateTask err = %v, want batch VersionConflictError", err)
+	}
+	unchanged, err := store.GetTask(ctx, batch.BatchID, task.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask(after late progress): %v", err)
+	}
+	if unchanged.Status != TaskRunning || unchanged.Version != task.Version || unchanged.LastProgressAt != nil {
+		t.Fatalf("late progress mutated task: before=%+v after=%+v", task, unchanged)
+	}
+}
+
+func TestCanceledBatchAllowsUnownedTaskCancellationButRejectsLateResult(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	batch, tasks := sampleBatch(t, "", "session-cancel-fence")
+	if _, err := store.CreateBatch(ctx, batch, tasks); err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	current, err := store.GetBatch(ctx, batch.BatchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if _, err := store.UpdateBatch(ctx, batch.BatchID, current.Version, func(b *SubagentBatch) {
+		b.Status = BatchCanceled
+	}); err != nil {
+		t.Fatalf("UpdateBatch(canceled): %v", err)
+	}
+	task, err := store.GetTask(ctx, batch.BatchID, "task-a")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	task, err = store.UpdateTask(ctx, batch.BatchID, task.TaskID, task.Version, func(t *SubagentTaskRecord) {
+		t.Status = TaskCanceled
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask(cancel pending): %v", err)
+	}
+	err = store.RecordTaskResult(ctx, batch.BatchID, task.TaskID, task.Version, TaskSucceeded, &TaskResult{
+		TaskID:  task.TaskID,
+		Success: true,
+	})
+	var conflict *VersionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("late result after task cancellation err = %v, want batch VersionConflictError", err)
+	}
+	unchanged, err := store.GetTask(ctx, batch.BatchID, task.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask(after late result): %v", err)
+	}
+	if unchanged.Status != TaskCanceled || unchanged.Version != task.Version {
+		t.Fatalf("late result mutated canceled task: before=%+v after=%+v", task, unchanged)
+	}
+}
+
 func TestUpdateTasksValidatesTransitions(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

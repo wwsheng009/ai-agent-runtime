@@ -233,6 +233,7 @@ const (
 // InMemoryRuntimeStore stores bounded runtime state and events in memory.
 type InMemoryRuntimeStore struct {
 	mu             sync.RWMutex
+	mailboxWriteMu sync.Mutex
 	states         map[string]*RuntimeState
 	events         map[string]*boundedRuntimeLog[storedEvent]
 	mailbox        map[string]*boundedRuntimeLog[team.MailMessage]
@@ -776,8 +777,13 @@ func (s *InMemoryRuntimeStore) AppendMailbox(ctx context.Context, sessionID stri
 	if sessionID == "" {
 		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
 	}
+	s.mailboxWriteMu.Lock()
+	defer s.mailboxWriteMu.Unlock()
 	if message.CreatedAt.IsZero() {
 		message.CreatedAt = time.Now().UTC()
+	}
+	if event, seq, ok := s.existingMailboxDelivery(sessionID, message.ID); ok {
+		return event, seq, nil
 	}
 	globalPrimaryUsed := false
 	var err error
@@ -854,8 +860,13 @@ func (s *InMemoryRuntimeStore) AppendAgentControlMailbox(ctx context.Context, se
 	if sessionID == "" {
 		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
 	}
+	s.mailboxWriteMu.Lock()
+	defer s.mailboxWriteMu.Unlock()
 	if message.CreatedAt.IsZero() {
 		message.CreatedAt = time.Now().UTC()
+	}
+	if event, seq, ok := s.existingMailboxDelivery(sessionID, message.ID); ok {
+		return event, seq, nil
 	}
 	var globalPrimaryUsed bool
 	var err error
@@ -907,6 +918,33 @@ func (s *InMemoryRuntimeStore) AppendAgentControlMailbox(ctx context.Context, se
 	event.Payload["seq"] = seq
 	event.Payload["mailbox_seq"] = mailboxSeq
 	return event, mailboxSeq, nil
+}
+
+func (s *InMemoryRuntimeStore) existingMailboxDelivery(sessionID, messageID string) (runtimeevents.Event, int64, bool) {
+	messageID = strings.TrimSpace(messageID)
+	if s == nil || messageID == "" {
+		return runtimeevents.Event{}, 0, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	log := s.mailbox[sessionID]
+	if log == nil {
+		return runtimeevents.Event{}, 0, false
+	}
+	for index := 0; index < log.len(); index++ {
+		entry := log.at(index)
+		if entry == nil || strings.TrimSpace(entry.ID) != messageID {
+			continue
+		}
+		event := NewMailboxReceivedEvent(sessionID, cloneTeamMailMessage(*entry))
+		if event.Payload == nil {
+			event.Payload = map[string]interface{}{}
+		}
+		event.Payload["duplicate"] = true
+		event.Payload["mailbox_seq"] = entry.SessionMailboxSeq
+		return event, entry.SessionMailboxSeq, true
+	}
+	return runtimeevents.Event{}, 0, false
 }
 
 func (s *InMemoryRuntimeStore) appendGlobalMailboxRecord(ctx context.Context, sessionID string, message team.MailMessage) (int64, error) {
@@ -1447,6 +1485,7 @@ type SQLiteRuntimeStore struct {
 	closed   bool
 
 	mu               sync.Mutex
+	mailboxWriteMu   sync.Mutex
 	db               *sql.DB
 	fileBacked       bool
 	busyTimeout      time.Duration
@@ -2318,8 +2357,15 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 	if sessionID == "" {
 		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
 	}
+	s.mailboxWriteMu.Lock()
+	defer s.mailboxWriteMu.Unlock()
 	if message.CreatedAt.IsZero() {
 		message.CreatedAt = time.Now().UTC()
+	}
+	if event, seq, ok, err := s.existingSQLiteMailboxDelivery(ctx, sessionID, message); err != nil {
+		return runtimeevents.Event{}, 0, err
+	} else if ok {
+		return event, seq, nil
 	}
 	globalPrimaryUsed := false
 	var err error
@@ -2339,31 +2385,43 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 	if err != nil {
 		_ = tx.Rollback()
 		s.mu.Unlock()
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+			return event, seq, nil
+		}
 		return result.event, result.mailboxSeq, err
 	}
 	if err := tx.Commit(); err != nil {
 		s.mu.Unlock()
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+			return event, seq, nil
+		}
 		return result.event, result.mailboxSeq, fmt.Errorf("commit mailbox tx: %w", err)
 	}
 	s.mu.Unlock()
-	if globalPrimaryUsed {
+	if !result.duplicate && globalPrimaryUsed {
 		if refreshed, _, err := s.appendPrimaryGlobalMailboxRecord(ctx, sessionID, result.message); err != nil {
 			return result.event, result.mailboxSeq, err
 		} else if refreshed.GlobalSeq > 0 {
 			result.message.GlobalSeq = refreshed.GlobalSeq
 		}
-	} else if globalSeq, _ := s.appendGlobalMailboxRecord(ctx, sessionID, result); globalSeq > 0 {
-		result.message.GlobalSeq = globalSeq
+	} else if !result.duplicate {
+		if globalSeq, _ := s.appendGlobalMailboxRecord(ctx, sessionID, result); globalSeq > 0 {
+			result.message.GlobalSeq = globalSeq
+		}
 	}
-	s.notifyMailboxWatchers(sessionID, result.message)
-	if result.controlSeq > 0 {
+	if !result.duplicate {
+		s.notifyMailboxWatchers(sessionID, result.message)
+	}
+	if result.controlSeq > 0 && !result.duplicate {
 		controlMessage := cloneTeamMailMessage(result.message)
 		controlMessage.Seq = result.controlSeq
 		controlMessage.ControlSeq = result.controlSeq
 		controlMessage.SessionMailboxSeq = result.mailboxSeq
 		s.notifyAgentControlMailboxWatchers(sessionID, controlMessage)
 	}
-	s.notifyEventWatchers(result.eventSeq, result.event)
+	if !result.duplicate {
+		s.notifyEventWatchers(result.eventSeq, result.event)
+	}
 	return result.event, result.mailboxSeq, nil
 }
 
@@ -2452,21 +2510,28 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	}
 	result, err = s.appendAgentControlMailboxPrimaryTx(ctx, tx, sessionID, message)
 	if err != nil {
+		_ = tx.Rollback()
+		committed = true
+		if event, seq, duplicate := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); duplicate {
+			return event, seq, true, nil
+		}
 		return result.event, result.mailboxSeq, true, err
 	}
-	refreshed, err := txWriter.AppendPrimaryGlobalMailboxRecordTx(ctx, tx, schema, mailboxRecordFromRuntimeMessage(sessionID, result.message))
-	if err != nil {
-		return result.event, result.mailboxSeq, true, fmt.Errorf("refresh primary global runtime mailbox record: %w", err)
-	}
-	if refreshed.GlobalSeq > 0 {
-		appended = refreshed
-		result.message.GlobalSeq = refreshed.GlobalSeq
+	if !result.duplicate {
+		refreshed, err := txWriter.AppendPrimaryGlobalMailboxRecordTx(ctx, tx, schema, mailboxRecordFromRuntimeMessage(sessionID, result.message))
+		if err != nil {
+			return result.event, result.mailboxSeq, true, fmt.Errorf("refresh primary global runtime mailbox record: %w", err)
+		}
+		if refreshed.GlobalSeq > 0 {
+			appended = refreshed
+			result.message.GlobalSeq = refreshed.GlobalSeq
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return result.event, result.mailboxSeq, true, fmt.Errorf("commit agent control mailbox tx: %w", err)
 	}
 	committed = true
-	notify = true
+	notify = !result.duplicate
 	return result.event, result.mailboxSeq, true, nil
 }
 
@@ -2487,8 +2552,15 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 	if sessionID == "" {
 		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
 	}
+	s.mailboxWriteMu.Lock()
+	defer s.mailboxWriteMu.Unlock()
 	if message.CreatedAt.IsZero() {
 		message.CreatedAt = time.Now().UTC()
+	}
+	if event, seq, ok, err := s.existingSQLiteMailboxDelivery(ctx, sessionID, message); err != nil {
+		return runtimeevents.Event{}, 0, err
+	} else if ok {
+		return event, seq, nil
 	}
 	if event, mailboxSeq, ok, err := s.appendAgentControlMailboxSameTx(ctx, sessionID, message); ok {
 		return event, mailboxSeq, err
@@ -2509,29 +2581,39 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 	if err != nil {
 		_ = tx.Rollback()
 		s.mu.Unlock()
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+			return event, seq, nil
+		}
 		return result.event, result.mailboxSeq, err
 	}
 	if err := tx.Commit(); err != nil {
 		s.mu.Unlock()
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+			return event, seq, nil
+		}
 		return result.event, result.mailboxSeq, fmt.Errorf("commit agent control mailbox tx: %w", err)
 	}
 	s.mu.Unlock()
-	if globalPrimaryUsed {
+	if !result.duplicate && globalPrimaryUsed {
 		if refreshed, _, err := s.appendPrimaryGlobalMailboxRecord(ctx, sessionID, result.message); err != nil {
 			return result.event, result.mailboxSeq, err
 		} else if refreshed.GlobalSeq > 0 {
 			result.message.GlobalSeq = refreshed.GlobalSeq
 		}
-	} else if globalSeq, _ := s.appendGlobalMailboxRecord(ctx, sessionID, result); globalSeq > 0 {
-		result.message.GlobalSeq = globalSeq
+	} else if !result.duplicate {
+		if globalSeq, _ := s.appendGlobalMailboxRecord(ctx, sessionID, result); globalSeq > 0 {
+			result.message.GlobalSeq = globalSeq
+		}
 	}
-	controlMessage := cloneTeamMailMessage(result.message)
-	controlMessage.Seq = result.controlSeq
-	controlMessage.ControlSeq = result.controlSeq
-	controlMessage.SessionMailboxSeq = result.mailboxSeq
-	s.notifyAgentControlMailboxWatchers(sessionID, controlMessage)
-	s.notifyMailboxWatchers(sessionID, result.message)
-	s.notifyEventWatchers(result.eventSeq, result.event)
+	if !result.duplicate {
+		controlMessage := cloneTeamMailMessage(result.message)
+		controlMessage.Seq = result.controlSeq
+		controlMessage.ControlSeq = result.controlSeq
+		controlMessage.SessionMailboxSeq = result.mailboxSeq
+		s.notifyAgentControlMailboxWatchers(sessionID, controlMessage)
+		s.notifyMailboxWatchers(sessionID, result.message)
+		s.notifyEventWatchers(result.eventSeq, result.event)
+	}
 	return result.event, result.mailboxSeq, nil
 }
 
@@ -2541,10 +2623,88 @@ type mailboxAppendTxResult struct {
 	mailboxSeq int64
 	controlSeq int64
 	eventSeq   int64
+	duplicate  bool
+}
+
+type runtimeMailboxQuery interface {
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+func (s *SQLiteRuntimeStore) existingSQLiteMailboxDelivery(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool, error) {
+	if s == nil || strings.TrimSpace(message.ID) == "" {
+		return runtimeevents.Event{}, 0, false, nil
+	}
+	result, ok, err := existingSQLiteMailboxDeliveryQuery(ctx, s.db, sessionID, message)
+	return result.event, result.mailboxSeq, ok, err
+}
+
+func (s *SQLiteRuntimeStore) recoverSQLiteMailboxDuplicate(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool) {
+	if s == nil || strings.TrimSpace(message.ID) == "" {
+		return runtimeevents.Event{}, 0, false
+	}
+	wait := s.busyTimeout
+	if wait <= 0 || wait > 2*time.Second {
+		wait = 2 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if event, seq, ok, err := s.existingSQLiteMailboxDelivery(ctx, sessionID, message); err == nil && ok {
+			return event, seq, true
+		}
+		if time.Now().After(deadline) {
+			return runtimeevents.Event{}, 0, false
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return runtimeevents.Event{}, 0, false
+		case <-timer.C:
+		}
+	}
+}
+
+func existingSQLiteMailboxDeliveryQuery(ctx context.Context, query runtimeMailboxQuery, sessionID string, message team.MailMessage) (mailboxAppendTxResult, bool, error) {
+	var result mailboxAppendTxResult
+	messageID := strings.TrimSpace(message.ID)
+	if query == nil || messageID == "" {
+		return result, false, nil
+	}
+	var globalSeq int64
+	err := query.QueryRowContext(ctx, `
+		SELECT id, session_mailbox_seq, global_seq
+		FROM agent_control_mailbox_records
+		WHERE scope = ? AND session_id = ? AND message_id = ?
+		ORDER BY id ASC LIMIT 1
+	`, agentcontrol.MailboxScopeSession, strings.TrimSpace(sessionID), messageID).Scan(&result.controlSeq, &result.mailboxSeq, &globalSeq)
+	if err == sql.ErrNoRows {
+		return result, false, nil
+	}
+	if err != nil {
+		return result, false, fmt.Errorf("find existing mailbox delivery: %w", err)
+	}
+	message.Seq = result.mailboxSeq
+	message.SessionMailboxSeq = result.mailboxSeq
+	message.ControlSeq = result.controlSeq
+	message.GlobalSeq = globalSeq
+	result.message = message
+	result.event = NewMailboxReceivedEvent(sessionID, message)
+	if result.event.Payload == nil {
+		result.event.Payload = map[string]interface{}{}
+	}
+	result.event.Payload["duplicate"] = true
+	result.event.Payload["mailbox_seq"] = result.mailboxSeq
+	result.duplicate = true
+	return result, true, nil
 }
 
 func (s *SQLiteRuntimeStore) appendMailboxTx(ctx context.Context, tx *sql.Tx, sessionID string, message team.MailMessage) (mailboxAppendTxResult, error) {
 	var result mailboxAppendTxResult
+	if duplicate, ok, err := existingSQLiteMailboxDeliveryQuery(ctx, tx, sessionID, message); err != nil {
+		return result, err
+	} else if ok {
+		return duplicate, nil
+	}
 	var mailboxSeq int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(session_mailbox_seq), 0) + 1
@@ -2624,6 +2784,11 @@ func (s *SQLiteRuntimeStore) appendMailboxTx(ctx context.Context, tx *sql.Tx, se
 
 func (s *SQLiteRuntimeStore) appendAgentControlMailboxPrimaryTx(ctx context.Context, tx *sql.Tx, sessionID string, message team.MailMessage) (mailboxAppendTxResult, error) {
 	var result mailboxAppendTxResult
+	if duplicate, ok, err := existingSQLiteMailboxDeliveryQuery(ctx, tx, sessionID, message); err != nil {
+		return result, err
+	} else if ok {
+		return duplicate, nil
+	}
 	var mailboxSeq int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(session_mailbox_seq), 0) + 1
@@ -4046,6 +4211,23 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 			UpSQL: `
 				CREATE INDEX IF NOT EXISTS idx_agent_control_mailbox_records_session_mailbox_seq
 				ON agent_control_mailbox_records(scope, session_id, session_mailbox_seq);
+			`,
+		},
+		{
+			Version: 19,
+			Name:    "runtime_mailbox_delivery_idempotency",
+			UpSQL: `
+				DELETE FROM agent_control_mailbox_records
+				WHERE scope = 'session' AND message_id <> ''
+				  AND id NOT IN (
+					SELECT MIN(id)
+					FROM agent_control_mailbox_records
+					WHERE scope = 'session' AND message_id <> ''
+					GROUP BY scope, session_id, message_id
+				  );
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_control_mailbox_records_session_message
+				ON agent_control_mailbox_records(scope, session_id, message_id)
+				WHERE scope = 'session' AND message_id <> '';
 			`,
 		},
 	}

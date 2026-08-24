@@ -76,10 +76,18 @@ type SubagentResult struct {
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
 type SubagentSchedulerConfig struct {
-	MaxConcurrent       int                                     `json:"maxConcurrent" yaml:"maxConcurrent"`
-	MaxDepth            int                                     `json:"maxDepth" yaml:"maxDepth"`
-	EnforceSingleWriter bool                                    `json:"enforceSingleWriter" yaml:"enforceSingleWriter"`
-	Routing             *agentconfig.AICLISubagentRoutingConfig `json:"-" yaml:"-"`
+	MaxConcurrent       int  `json:"maxConcurrent" yaml:"maxConcurrent"`
+	MaxDepth            int  `json:"maxDepth" yaml:"maxDepth"`
+	EnforceSingleWriter bool `json:"enforceSingleWriter" yaml:"enforceSingleWriter"`
+	// DelegationPolicy controls whether an agent created by this scheduler may
+	// create another execution node. The empty value is the root/default
+	// policy: the current agent may delegate, but its children are restricted
+	// unless the caller explicitly sets "enabled".
+	DelegationPolicy string `json:"delegationPolicy,omitempty" yaml:"delegationPolicy,omitempty"`
+	// MaxConsecutiveFailures opens a circuit after this many consecutive
+	// unsuccessful batches. Zero uses the conservative runtime default.
+	MaxConsecutiveFailures int                                     `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
+	Routing                *agentconfig.AICLISubagentRoutingConfig `json:"-" yaml:"-"`
 }
 
 // SubagentRunOptions 描述一次 parent -> child 协同批次的上下文。
@@ -105,9 +113,14 @@ func (o SubagentRunOptions) notifyTaskEvent(taskID, event string) {
 
 // SubagentScheduler 在 Go 侧调度 fresh child agents。
 type SubagentScheduler struct {
-	parent    *Agent
-	config    SubagentSchedulerConfig
-	expertSem chan struct{}
+	parent                *Agent
+	config                SubagentSchedulerConfig
+	expertSem             chan struct{}
+	delegationAllowed     bool
+	nestedDelegationOptIn bool
+	failureMu             sync.Mutex
+	consecutiveFailures   int
+	circuitOpen           bool
 }
 
 // NewSubagentScheduler 创建一个最小子代理调度器。
@@ -121,14 +134,50 @@ func NewSubagentScheduler(parent *Agent, config SubagentSchedulerConfig) *Subage
 	if !config.EnforceSingleWriter {
 		config.EnforceSingleWriter = true
 	}
+	if config.MaxConsecutiveFailures <= 0 {
+		config.MaxConsecutiveFailures = 2
+	}
+	delegationAllowed, nestedOptIn := resolveDelegationPolicy(config.DelegationPolicy)
 	scheduler := &SubagentScheduler{
-		parent: parent,
-		config: config,
+		parent:                parent,
+		config:                config,
+		delegationAllowed:     delegationAllowed,
+		nestedDelegationOptIn: nestedOptIn,
 	}
 	if limit := subagentExpertConcurrencyLimit(config.Routing); limit > 0 {
 		scheduler.expertSem = make(chan struct{}, limit)
 	}
 	return scheduler
+}
+
+const (
+	DelegationPolicyEnabled  = "enabled"
+	DelegationPolicyDisabled = "disabled"
+)
+
+func resolveDelegationPolicy(policy string) (allowed bool, nestedOptIn bool) {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case DelegationPolicyDisabled, "deny", "none":
+		return false, false
+	case DelegationPolicyEnabled, "allow":
+		return true, true
+	default:
+		// A scheduler explicitly attached to the root agent is useful by
+		// default. Child factories use DelegationPolicyDisabled unless the
+		// root explicitly opted into nested delegation.
+		return true, false
+	}
+}
+
+// AllowsDelegation reports whether this scheduler can launch children.
+func (s *SubagentScheduler) AllowsDelegation() bool {
+	return s != nil && s.delegationAllowed
+}
+
+// NestedDelegationOptIn reports whether the parent explicitly opted into
+// propagating delegation capability to descendants.
+func (s *SubagentScheduler) NestedDelegationOptIn() bool {
+	return s != nil && s.delegationAllowed && s.nestedDelegationOptIn
 }
 
 func subagentExpertConcurrencyLimit(cfg *agentconfig.AICLISubagentRoutingConfig) int {
@@ -151,9 +200,20 @@ func (s *SubagentScheduler) acquireExpertSlot(ctx context.Context, difficulty st
 }
 
 // RunChildren 执行一批子代理任务，并只返回结构化摘要。
-func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRunOptions, tasks []SubagentTask) ([]SubagentResult, error) {
+func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRunOptions, tasks []SubagentTask) (results []SubagentResult, runErr error) {
 	if s == nil {
 		return nil, fmt.Errorf("subagent scheduler is nil")
+	}
+	if !s.delegationAllowed {
+		err := runtimeerrors.Newf(
+			runtimeerrors.ErrAgentNestedDelegation,
+			"nested subagent delegation is disabled before child creation: set delegationPolicy=enabled on the root/coordinator or complete the work locally; retrying the same child spawn will not help",
+		)
+		s.emitSubagentDenied(options, "", "nested_delegation", err.Error(), map[string]interface{}{
+			"delegation_policy": DelegationPolicyDisabled,
+			"depth":             options.Depth,
+		})
+		return nil, err
 	}
 	// 动态扩展 depth：expert 难度任务允许额外 1 层深度
 	maxDepth := s.config.MaxDepth
@@ -180,6 +240,9 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 	if len(tasks) == 0 {
 		return nil, nil
 	}
+	if err := s.checkFailureCircuit(options); err != nil {
+		return nil, err
+	}
 
 	preparedTasks, err := s.prepareTasks(tasks)
 	if err != nil {
@@ -196,8 +259,11 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 		})
 		return nil, err
 	}
+	defer func() {
+		s.recordBatchOutcome(options, results, runErr)
+	}()
 
-	results := make([]SubagentResult, len(tasks))
+	results = make([]SubagentResult, len(tasks))
 	done := make([]bool, len(tasks))
 	completedByID := make(map[string]SubagentResult, len(tasks))
 	remaining := len(tasks)
@@ -1220,6 +1286,71 @@ func (s *SubagentScheduler) emitSubagentDenied(options SubagentRunOptions, taskI
 	payload["reason"] = reason
 	payload["trace_id"] = options.TraceID
 	s.parent.emitRuntimeEvent("subagent.denied", "", "", payload)
+}
+
+func (s *SubagentScheduler) checkFailureCircuit(options SubagentRunOptions) error {
+	if s == nil {
+		return nil
+	}
+	s.failureMu.Lock()
+	open := s.circuitOpen
+	consecutive := s.consecutiveFailures
+	threshold := s.config.MaxConsecutiveFailures
+	s.failureMu.Unlock()
+	if !open {
+		return nil
+	}
+	err := runtimeerrors.Newf(
+		runtimeerrors.ErrAgentSubagentCircuitOpen,
+		"subagent batch circuit is open after %d consecutive unsuccessful batches (threshold=%d); inspect or reset the coordinator instead of retrying the same spawn",
+		consecutive, threshold,
+	)
+	s.emitSubagentDenied(options, "", "circuit_open", err.Error(), map[string]interface{}{
+		"consecutive_failures": consecutive,
+		"failure_threshold":    threshold,
+	})
+	return err
+}
+
+func (s *SubagentScheduler) recordBatchOutcome(options SubagentRunOptions, results []SubagentResult, runErr error) {
+	if s == nil {
+		return
+	}
+	success := runErr == nil && len(results) > 0
+	if success {
+		for _, result := range results {
+			if !result.Success || strings.TrimSpace(result.Error) != "" {
+				success = false
+				break
+			}
+		}
+	}
+
+	s.failureMu.Lock()
+	if success {
+		s.consecutiveFailures = 0
+		s.failureMu.Unlock()
+		return
+	}
+	s.consecutiveFailures++
+	consecutive := s.consecutiveFailures
+	threshold := s.config.MaxConsecutiveFailures
+	openedNow := !s.circuitOpen && consecutive >= threshold
+	if openedNow {
+		s.circuitOpen = true
+	}
+	s.failureMu.Unlock()
+	if !openedNow || s.parent == nil {
+		return
+	}
+	s.parent.emitRuntimeEvent("subagent.batch.circuit_open", options.ParentSessionID, "spawn_subagents", map[string]interface{}{
+		"trace_id":             options.TraceID,
+		"parent_session_id":    options.ParentSessionID,
+		"parent_tool_call_id":  options.ParentToolCallID,
+		"consecutive_failures": consecutive,
+		"failure_threshold":    threshold,
+		"error":                errorString(runErr),
+	})
 }
 
 func classifySubagentDeniedPolicy(reason string) string {

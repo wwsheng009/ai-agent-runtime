@@ -625,9 +625,9 @@ func TestPanicInRunJobFailsJobAndReleasesSlot(t *testing.T) {
 	defer manager.Close()
 	ctx := context.Background()
 
-	original := runJobImpl
-	runJobImpl = func(m *Manager, managed *managedJob) { panic("boom") }
-	defer func() { runJobImpl = original }()
+	original := manager.currentRunJobImpl()
+	manager.setRunJobImpl(func(m *Manager, managed *managedJob) { panic("boom") })
+	defer manager.setRunJobImpl(original)
 
 	job, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("panic")})
 	require.NoError(t, err)
@@ -641,7 +641,7 @@ func TestPanicInRunJobFailsJobAndReleasesSlot(t *testing.T) {
 	require.Equal(t, string(runtimeerrors.ErrToolBrokerFailure), current.Metadata["error_code"])
 
 	// The panicked goroutine must not leak its scheduling slot.
-	runJobImpl = original
+	manager.setRunJobImpl(original)
 	second, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("after-panic")})
 	require.NoError(t, err)
 	require.NoError(t, waitForJobStatus(ctx, manager, second.ID, StatusCompleted, backgroundTestTimeout(5*time.Second)))
@@ -656,11 +656,11 @@ func TestWatchdogReclaimsStuckScheduledJob(t *testing.T) {
 	defer manager.Close()
 	ctx := context.Background()
 
-	original := runJobImpl
+	original := manager.currentRunJobImpl()
 	// Simulate a worker goroutine that never starts the process: it blocks
 	// until the watchdog cancels the job context.
-	runJobImpl = func(m *Manager, managed *managedJob) { <-managed.ctx.Done() }
-	defer func() { runJobImpl = original }()
+	manager.setRunJobImpl(func(m *Manager, managed *managedJob) { <-managed.ctx.Done() })
+	defer manager.setRunJobImpl(original)
 
 	job, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("stuck")})
 	require.NoError(t, err)
@@ -674,7 +674,7 @@ func TestWatchdogReclaimsStuckScheduledJob(t *testing.T) {
 	require.Equal(t, string(runtimeerrors.ErrToolBrokerFailure), current.Metadata["error_code"])
 
 	// The reclaimed slot accepts new work.
-	runJobImpl = original
+	manager.setRunJobImpl(original)
 	second, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{Command: shellEchoCommand("after-stuck")})
 	require.NoError(t, err)
 	require.NoError(t, waitForJobStatus(ctx, manager, second.ID, StatusCompleted, backgroundTestTimeout(5*time.Second)))

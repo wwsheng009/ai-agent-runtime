@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +33,17 @@ type fakeExecutor struct {
 
 	mu      sync.Mutex
 	seenOpt SubagentRunOptions
+}
+
+type stubbornExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *stubbornExecutor) RunChildren(_ context.Context, _ SubagentRunOptions, _ []SubagentTask) ([]SubagentResult, error) {
+	close(f.started)
+	<-f.release
+	return nil, nil
 }
 
 func (f *fakeExecutor) RunChildren(ctx context.Context, options SubagentRunOptions, tasks []SubagentTask) ([]SubagentResult, error) {
@@ -267,6 +279,97 @@ func TestStartBackgroundCancel(t *testing.T) {
 	}
 }
 
+func TestCancelQueuedBatchBeforeWorkerAdmissionFinalizesOnce(t *testing.T) {
+	store := testStore(t)
+	now := subagentbatch.Now()
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		ParentSessionID: "parent-queued-cancel",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchQueued,
+		TaskCount:       2,
+		QueuedCount:     2,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		HeartbeatAt:     now,
+		BatchDeadline:   now.Add(time.Hour),
+		Version:         1,
+	}
+	tasks := []subagentbatch.SubagentTaskRecord{
+		{TaskID: "queued-a", BatchID: batch.BatchID, Status: subagentbatch.TaskPending, OrderIndex: 0, UpdatedAt: now, Version: 1},
+		{TaskID: "queued-b", BatchID: batch.BatchID, Status: subagentbatch.TaskReady, OrderIndex: 1, UpdatedAt: now, Version: 1},
+	}
+	if created, err := store.CreateBatch(context.Background(), batch, tasks); err != nil || !created {
+		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
+	}
+
+	var mu sync.Mutex
+	var events []string
+	var deliveries int
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store: store,
+		Emitter: func(eventType string, _ map[string]interface{}) {
+			mu.Lock()
+			events = append(events, eventType)
+			mu.Unlock()
+		},
+		TerminalSink: func(_ context.Context, notification BatchTerminalNotification) BatchTerminalDelivery {
+			mu.Lock()
+			deliveries++
+			mu.Unlock()
+			return BatchTerminalDelivery{
+				Status:      BatchTerminalDeliveryPersisted,
+				DeliveryKey: notification.DeliveryKey,
+			}
+		},
+	})
+	// Admission registers a cancel function before the worker can claim the
+	// durable row. Exercise that narrow state explicitly: Cancel must still
+	// finalize the unowned queued batch rather than assuming a worker will do
+	// it later.
+	c.mu.Lock()
+	c.cancels[batch.BatchID] = func() {}
+	c.mu.Unlock()
+
+	if err := c.Cancel(context.Background(), batch.BatchID, "queued abort"); err != nil {
+		t.Fatalf("Cancel queued batch: %v", err)
+	}
+	got, err := store.GetBatch(context.Background(), batch.BatchID)
+	if err != nil || got == nil || got.Status != subagentbatch.BatchCanceled {
+		t.Fatalf("batch after cancel: got=%+v err=%v", got, err)
+	}
+	records, err := store.ListTasks(context.Background(), batch.BatchID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("task count = %d, want 2", len(records))
+	}
+	for _, record := range records {
+		if record.Status != subagentbatch.TaskCanceled {
+			t.Errorf("task %s status = %s, want canceled", record.TaskID, record.Status)
+		}
+	}
+	if got.CanceledCount != 2 || got.QueuedCount != 0 || got.RunningCount != 0 {
+		t.Errorf("batch counts = queued=%d running=%d canceled=%d, want 0/0/2", got.QueuedCount, got.RunningCount, got.CanceledCount)
+	}
+
+	if err := c.Cancel(context.Background(), batch.BatchID, "duplicate abort"); err != nil {
+		t.Fatalf("duplicate Cancel: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	canceledEvents := 0
+	for _, eventType := range events {
+		if eventType == "subagent.batch.canceled" {
+			canceledEvents++
+		}
+	}
+	if canceledEvents != 1 || deliveries != 1 {
+		t.Errorf("terminal events=%d deliveries=%d, want exactly one each; events=%v", canceledEvents, deliveries, events)
+	}
+}
+
 func TestStartBackgroundDeadlineMarksTaskTimedOut(t *testing.T) {
 	store := testStore(t)
 	exec := &fakeExecutor{
@@ -403,6 +506,261 @@ func TestStartBackgroundWithoutExecutor(t *testing.T) {
 	if !term.Status.Terminal() {
 		t.Errorf("batch status = %s, want terminal", term.Status)
 	}
+}
+
+func TestRecoverStaleBatchMarksOrphanedAndDeliversTerminal(t *testing.T) {
+	store := testStore(t)
+	now := subagentbatch.Now().Add(-time.Hour)
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		ParentSessionID: "parent-recovery",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       1,
+		QueuedCount:     1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		HeartbeatAt:     now,
+		BatchDeadline:   subagentbatch.Now().Add(time.Hour),
+		Version:         1,
+	}
+	tasks := []subagentbatch.SubagentTaskRecord{{
+		TaskID: "task-recovery", BatchID: batch.BatchID, Status: subagentbatch.TaskRunning,
+		Role: "reviewer", OrderIndex: 0, UpdatedAt: now, Version: 1,
+	}}
+	created, err := store.CreateBatch(context.Background(), batch, tasks)
+	if err != nil || !created {
+		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
+	}
+	var delivered []agentTerminalTestDelivery
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store: store,
+		TerminalSink: func(_ context.Context, notification BatchTerminalNotification) BatchTerminalDelivery {
+			delivered = append(delivered, agentTerminalTestDelivery{EventType: notification.EventType, Key: notification.DeliveryKey})
+			return BatchTerminalDelivery{Status: BatchTerminalDeliveryPersisted, DeliveryKey: notification.DeliveryKey}
+		},
+	})
+	changed, err := c.RecoverStaleBatches(context.Background(), 0, "parent-recovery", 10)
+	if err != nil || changed != 1 {
+		t.Fatalf("RecoverStaleBatches: changed=%d err=%v", changed, err)
+	}
+	got, err := store.GetBatch(context.Background(), batch.BatchID)
+	if err != nil || got.Status != subagentbatch.BatchOrphaned {
+		t.Fatalf("recovered batch: got=%+v err=%v", got, err)
+	}
+	if len(delivered) != 1 || delivered[0].EventType != "subagent.batch.orphaned" {
+		t.Fatalf("terminal delivery = %#v", delivered)
+	}
+}
+
+func TestReplayTerminalDeliveryRetriesAfterSinkFailure(t *testing.T) {
+	store := testStore(t)
+	now := subagentbatch.Now()
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		ParentSessionID: "parent-replay",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchCompleted,
+		TaskCount:       1,
+		CompletedCount:  1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		FinishedAt:      &now,
+		HeartbeatAt:     now,
+		BatchDeadline:   now.Add(time.Hour),
+		Version:         1,
+	}
+	if created, err := store.CreateBatch(context.Background(), batch, []subagentbatch.SubagentTaskRecord{{
+		TaskID: "task-replay", BatchID: batch.BatchID, Status: subagentbatch.TaskSucceeded,
+		Role: "researcher", OrderIndex: 0, UpdatedAt: now, Version: 1,
+	}}); err != nil || !created {
+		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
+	}
+	var attempts int
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store: store,
+		TerminalSink: func(_ context.Context, _ BatchTerminalNotification) BatchTerminalDelivery {
+			attempts++
+			if attempts == 1 {
+				return BatchTerminalDelivery{Status: BatchTerminalDeliveryFailed, Err: fmt.Errorf("temporary mailbox outage")}
+			}
+			return BatchTerminalDelivery{Status: BatchTerminalDeliveryPersisted}
+		},
+	})
+	first, err := c.ReplayTerminalDeliveries(context.Background(), "parent-replay", 10)
+	if err == nil || first.Failed != 1 || attempts != 1 {
+		t.Fatalf("first replay = %+v attempts=%d err=%v", first, attempts, err)
+	}
+	second, err := c.ReplayTerminalDeliveries(context.Background(), "parent-replay", 10)
+	if err != nil || second.Delivered != 1 || attempts != 2 {
+		t.Fatalf("second replay = %+v attempts=%d err=%v", second, attempts, err)
+	}
+}
+
+func TestRecoverStaleBatchesLeavesFreshBatchWithoutDeadlineAlone(t *testing.T) {
+	store := testStore(t)
+	now := subagentbatch.Now()
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		ParentSessionID: "parent-fresh",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       1,
+		RunningCount:    1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		HeartbeatAt:     now,
+		Version:         1,
+	}
+	if created, err := store.CreateBatch(context.Background(), batch, []subagentbatch.SubagentTaskRecord{{
+		TaskID: "task-fresh", BatchID: batch.BatchID, Status: subagentbatch.TaskRunning,
+		Role: "researcher", OrderIndex: 0, UpdatedAt: now, Version: 1,
+	}}); err != nil || !created {
+		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
+	}
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{Store: store})
+	changed, err := c.RecoverStaleBatches(context.Background(), time.Minute, "parent-fresh", 10)
+	if err != nil || changed != 0 {
+		t.Fatalf("RecoverStaleBatches: changed=%d err=%v", changed, err)
+	}
+	got, err := store.GetBatch(context.Background(), batch.BatchID)
+	if err != nil || got == nil || got.Status != subagentbatch.BatchRunning {
+		t.Fatalf("fresh batch changed: got=%+v err=%v", got, err)
+	}
+}
+
+func TestShutdownTimeoutOrphansOnlyOwnedBatches(t *testing.T) {
+	store := testStore(t)
+	otherNow := subagentbatch.Now()
+	other := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		ParentSessionID: "other-parent",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       1,
+		RunningCount:    1,
+		CreatedAt:       otherNow,
+		UpdatedAt:       otherNow,
+		HeartbeatAt:     otherNow,
+		BatchDeadline:   otherNow.Add(time.Hour),
+		Version:         1,
+	}
+	if created, err := store.CreateBatch(context.Background(), other, []subagentbatch.SubagentTaskRecord{{
+		TaskID: "other-task", BatchID: other.BatchID, Status: subagentbatch.TaskRunning,
+		Role: "reader", UpdatedAt: otherNow, Version: 1,
+	}}); err != nil || !created {
+		t.Fatalf("CreateBatch(other): created=%v err=%v", created, err)
+	}
+	exec := &stubbornExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{Store: store})
+	c.executor = exec
+	owned, err := c.StartBackground(context.Background(), BatchStartOptions{
+		ParentSessionID: "owned-parent", ExecutionMode: subagentbatch.ExecutionModeBackground,
+	}, []SubagentTask{{ID: "owned-task", Role: "reader", Goal: "block"}})
+	if err != nil {
+		t.Fatalf("StartBackground: %v", err)
+	}
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		t.Fatal("owned worker did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := c.Shutdown(ctx, "test shutdown"); err == nil {
+		t.Fatal("Shutdown timeout = nil, want context error")
+	}
+	ownedAfter, err := store.GetBatch(context.Background(), owned.BatchID)
+	if err != nil || ownedAfter == nil || ownedAfter.Status != subagentbatch.BatchOrphaned {
+		t.Fatalf("owned batch after shutdown: got=%+v err=%v", ownedAfter, err)
+	}
+	otherAfter, err := store.GetBatch(context.Background(), other.BatchID)
+	if err != nil || otherAfter == nil || otherAfter.Status != subagentbatch.BatchRunning {
+		t.Fatalf("unowned batch changed: got=%+v err=%v", otherAfter, err)
+	}
+	taskBefore, err := store.GetTask(context.Background(), owned.BatchID, "owned-task")
+	if err != nil || taskBefore == nil {
+		t.Fatalf("owned task before late worker release: task=%+v err=%v", taskBefore, err)
+	}
+	close(exec.release)
+	c.workers.Wait()
+	taskAfter, err := store.GetTask(context.Background(), owned.BatchID, "owned-task")
+	if err != nil || taskAfter == nil {
+		t.Fatalf("owned task after late worker release: task=%+v err=%v", taskAfter, err)
+	}
+	if taskAfter.Status != taskBefore.Status || taskAfter.Version != taskBefore.Version {
+		t.Fatalf("late worker mutated orphaned task: before=%+v after=%+v", taskBefore, taskAfter)
+	}
+}
+
+func TestLateFinalizeAfterRecoveryDoesNotEmitTaskLifecycleEvents(t *testing.T) {
+	store := testStore(t)
+	now := subagentbatch.Now()
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		ParentSessionID: "parent-late-finalize",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       1,
+		RunningCount:    1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		HeartbeatAt:     now,
+		BatchDeadline:   now.Add(time.Hour),
+		OwnerID:         "old-coordinator",
+		FencingToken:    "old-coordinator/1",
+		Version:         1,
+	}
+	tasks := []subagentbatch.SubagentTaskRecord{{
+		TaskID: "late-task", BatchID: batch.BatchID, Status: subagentbatch.TaskRunning,
+		OrderIndex: 0, UpdatedAt: now, Version: 1,
+	}}
+	if created, err := store.CreateBatch(context.Background(), batch, tasks); err != nil || !created {
+		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
+	}
+	current, err := store.GetBatch(context.Background(), batch.BatchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if _, err := store.UpdateBatch(context.Background(), batch.BatchID, current.Version, func(b *subagentbatch.SubagentBatch) {
+		b.Status = subagentbatch.BatchOrphaned
+	}); err != nil {
+		t.Fatalf("UpdateBatch(orphaned): %v", err)
+	}
+
+	var mu sync.Mutex
+	var events []string
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store: store,
+		Emitter: func(eventType string, _ map[string]interface{}) {
+			mu.Lock()
+			events = append(events, eventType)
+			mu.Unlock()
+		},
+	})
+	c.finalizeBatch(context.Background(), batch.BatchID, BatchStartOptions{
+		ParentSessionID: "parent-late-finalize",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+	}, []SubagentTask{{ID: "late-task", Role: "reader"}}, []SubagentResult{{
+		SessionID: "late-child", Success: true, Summary: "late",
+	}}, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, eventType := range events {
+		if eventType == "subagent.task.completed" || eventType == "subagent.batch.progress" {
+			t.Fatalf("late finalize emitted %q: events=%v", eventType, events)
+		}
+	}
+	got, err := store.GetBatch(context.Background(), batch.BatchID)
+	if err != nil || got == nil || got.Status != subagentbatch.BatchOrphaned {
+		t.Fatalf("batch after late finalize: got=%+v err=%v", got, err)
+	}
+}
+
+type agentTerminalTestDelivery struct {
+	EventType string
+	Key       string
 }
 
 func containsEvent(values []string, want string) bool {
