@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -747,7 +749,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 		if draft.text != "" {
 			rows := c.currentPromptDisplayRowsLocked()
 			cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-			c.surface.SetPromptInputState(prompt, draft.text, rows, cursorRow, cursorCol)
+			c.surface.SetPromptInputStateVersioned(prompt, draft.text, rows, cursorRow, cursorCol, draft.sequence)
 		}
 		return
 	}
@@ -1810,7 +1812,18 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 	draft := c.promptInputSnapshotState()
 	if c.writer == os.Stdout && c.surface != nil {
 		if c.promptVisible && c.promptRenderedOnSurface {
-			if c.surface.ResetPrompt(formatSessionUserPrompt(c.session), 1) {
+			// Unified AppState already owns the prompt draft. Refresh only its
+			// chrome there; a versioned ResetPromptAction is a destructive
+			// lifecycle fence and would reject the same-sequence projection
+			// emitted immediately below. Keep the legacy physical reset for the
+			// compatibility surface, whose synchronous adapter owns its cache.
+			refreshAccepted := false
+			if c.unifiedRenderer {
+				refreshAccepted = c.surface.ShowPrompt(formatSessionUserPrompt(c.session))
+			} else {
+				refreshAccepted = c.surface.ResetPrompt(formatSessionUserPrompt(c.session), 1)
+			}
+			if refreshAccepted {
 				c.promptRenderedOnSurface = true
 			}
 		} else if c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
@@ -1825,7 +1838,7 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 	if c.promptVisible && c.promptRenderedOnSurface && draft.text != "" && c.writer == os.Stdout && c.surface != nil {
 		rows := c.currentPromptDisplayRowsLocked()
 		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
-		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), draft.text, rows, cursorRow, cursorCol)
+		c.surface.SetPromptInputStateVersioned(formatSessionUserPrompt(c.session), draft.text, rows, cursorRow, cursorCol, draft.sequence)
 	}
 	c.waitingActive = true
 	// Codex turn_lifecycle.start: begin live goal-time accrual for this turn.
@@ -3219,6 +3232,10 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 	if delta == "" {
 		return
 	}
+	// 仅兼容少数“按行切块但没有换行”的 provider：数字、连字符、冒号、
+	// 句号不能触发补行，否则会把 UUID/时间戳拆成多行。真正的空白仍完全
+	// 由 provider 原样提供。
+	delta = normalizeReasoningDeltaSeam(c.reasoningBuffer.String(), delta)
 	fullContent := c.reasoningBuffer.String() + delta
 	if c.shouldLiveStreamOutputLocked() {
 		// Markdown reasoning can only be rendered from a complete document;
@@ -3352,7 +3369,51 @@ func normalizeAssistantStreamDelta(existing, incoming string) string {
 	if strings.HasPrefix(incoming, existing) {
 		return incoming[len(existing):]
 	}
+	if strings.HasSuffix(existing, incoming) {
+		// 与已累积缓冲区尾部逐字相同：同一块的重复投递，不产生新内容。
+		return ""
+	}
 	return incoming
+}
+
+// normalizeReasoningDeltaSeam 只在有明确句子边界信号时补行：
+//  1. 拉丁等有大小写区分的字母：delta 以大写字母开头视为新句（词级切块
+//     以小写/空格开头，不会被误拆）；
+//  2. 中文/日文等无大小写字母的文本：任意词级/短语级切块都以字母开头，
+//     不能靠首字符判断新行（否则每个 delta 都会被拆成独立一行——中文
+//     reasoning 实测每块一行）；只有前一块以句子结束标点收尾时才补行。
+// 数字、连字符、冒号、句号等位于 delta 开头时仍不能触发补行，避免
+// UUID、时间戳和标点被错误拆开。
+func normalizeReasoningDeltaSeam(existing, delta string) string {
+	if existing == "" || delta == "" {
+		return delta
+	}
+	last, _ := utf8.DecodeLastRuneInString(existing)
+	first, _ := utf8.DecodeRuneInString(delta)
+	if !unicode.IsLetter(first) {
+		return delta
+	}
+	if unicode.IsUpper(first) {
+		return "\n" + delta
+	}
+	if unicode.IsLower(first) {
+		return delta
+	}
+	if reasoningSentenceEndRune(last) {
+		return "\n" + delta
+	}
+	return delta
+}
+
+// reasoningSentenceEndRune 报告该字符是否属于句子结束标点。仅用于无大小写
+// 区分的字母文本（中文/日文等）的接缝判断：此时首字符无法表达"新句子"，
+// 只能依赖前一块的收尾标点。
+func reasoningSentenceEndRune(r rune) bool {
+	switch r {
+	case '。', '！', '？', '；', '」', '』', '）', '”', '"', ')', '!', '?', ';':
+		return true
+	}
+	return false
 }
 
 func (c *chatInteractionCoordinator) classifyAssistantStreamModeLocked(content string) assistantStreamMode {
@@ -3992,6 +4053,8 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 		return
 	}
 	c.mu.Lock()
+	submittedDraft := c.promptInputSnapshotState()
+	submittedSequence := promptSubmittedSequence(submittedDraft, input)
 	bridge := c.session.RuntimeEventBridge
 	if bridge == nil {
 		// 新会话首次提交发生在 actor 启动之前：bridge 尚未创建，用户输入
@@ -4002,6 +4065,16 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 		bridge = ensureChatRuntimeEventBridge(c.session)
 	}
 	c.renderUserEchoLocked(input, true, true)
+	// The line editor normally emits an empty OnChange snapshot before
+	// returning the submitted text, but programmatic/test submit paths do not
+	// always do so. Clear a cache that still represents the submitted draft;
+	// never clear a genuinely newer next draft that raced the submit.
+	normalizedInput := strings.ReplaceAll(input, "\r\n", "\n")
+	normalizedInput = strings.ReplaceAll(normalizedInput, "\r", "\n")
+	clearedSubmittedDraft, cacheSequence := c.clearPromptInputIfMatches(normalizedInput)
+	if clearedSubmittedDraft {
+		c.clearPromptInputDispatchThrough(cacheSequence)
+	}
 	c.mu.Unlock()
 	// submitUserInput mutates Scene while the legacy coordinator lock is held.
 	// Publish the complete immutable Scene only after unlocking: Post may apply
@@ -4010,13 +4083,20 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	// Unified 模式下 legacy surface.ShowPrompt 已被物理 fence，AppState 的
 	// composer 状态只能经 action 更新。提交后立即恢复空提示符：否则渲染帧
 	// 仍显示已提交的输入（看起来像"prompt 没发出去"），直到 LLM 响应刷新
-	// 才一起出现。ShowPromptAction 清空 PromptInput 并置空提示符行。
+	// 才一起出现。ShowPromptAction 只刷新 prompt chrome；显式清空及陈旧
+	// snapshot 栅栏由 PromptSubmittedAction 负责。
 	if c.UnifiedRendererEnabled() {
 		_ = c.postUIAction(ui.ShowPromptAction{Line: formatSessionUserPrompt(c.session)})
 		// PromptSubmittedAction 是无条件重绘栅栏（见 ui.PromptSubmittedAction）：
 		// 保证用户消息块 + 空 composer 立即出帧，不依赖 history commit ledger
 		// 的 pending/recovery 状态，也不等 LLM 首个 chunk。
-		_ = c.postUIAction(ui.PromptSubmittedAction{})
+		// The reducer decides whether the fence may clear the current draft;
+		// posting it is still required even when a newer draft won the race,
+		// because it is also the unconditional repaint wake-up.
+		_ = c.postUIAction(ui.PromptSubmittedAction{
+			Sequence:           submittedSequence,
+			PreserveNewerDraft: !clearedSubmittedDraft,
+		})
 	}
 }
 
@@ -4138,7 +4218,14 @@ func (c *chatInteractionCoordinator) clearPrompt(dropDraft bool) {
 	c.promptSeq++
 	c.promptVisible = false
 	if dropDraft {
-		c.clearPromptInputDispatchThrough(c.clearPromptInputState(true))
+		inputCutoff := c.clearPromptInputState(true)
+		c.clearPromptInputDispatchThrough(inputCutoff)
+		// ClearPromptRows deliberately preserves the actor's editor draft so
+		// ordinary output transitions can repaint it. DiscardPrompt needs a
+		// second, ordered semantic action to clear that draft in AppState too.
+		if c.unifiedRenderer {
+			_ = c.postUIAction(ui.DiscardPromptAction{Sequence: inputCutoff})
+		}
 	}
 	c.promptRenderedOnSurface = false
 	c.setPromptPasteActive(false)
@@ -4153,15 +4240,31 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 	if c.shutdown {
 		return
 	}
+	surfaceActive := c.promptSurfaceActiveLocked()
+	rows := 1
+	if surfaceActive {
+		rows = c.currentPromptDisplayRowsLocked()
+	}
 	c.promptSeq++
-	c.clearPromptInputDispatchThrough(c.clearPromptInputState(true))
-	if c.promptSurfaceActiveLocked() {
-		rows := c.currentPromptDisplayRowsLocked()
-		if c.surface.ResetPrompt(formatSessionUserPrompt(c.session), rows) {
+	inputCutoff := c.clearPromptInputState(true)
+	c.clearPromptInputDispatchThrough(inputCutoff)
+	if surfaceActive {
+		if c.surface.ResetPromptVersioned(formatSessionUserPrompt(c.session), rows, inputCutoff) {
 			c.promptVisible = true
 			c.promptRenderedOnSurface = true
 			return
 		}
+	}
+	// ResetPromptState also invalidates semantic AppState when the prompt is
+	// currently hidden (for example after ClearPrompt released its rows). There
+	// is no surface transition to carry the action in that case, but delayed
+	// editor projections must still observe the reset cutoff.
+	if c.unifiedRenderer {
+		_ = c.postUIAction(ui.ResetPromptAction{
+			Line:     formatSessionUserPrompt(c.session),
+			Rows:     rows,
+			Sequence: inputCutoff,
+		})
 	}
 	c.promptVisible = false
 	c.promptRenderedOnSurface = false
@@ -4270,9 +4373,9 @@ func (c *chatInteractionCoordinator) applyPromptInputSnapshotNow(snapshot ui.Lin
 		rows := c.currentPromptDisplayRowsLocked()
 		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
 		if render {
-			c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+			c.surface.SetPromptInputStateVersioned(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol, sequence)
 		} else {
-			c.surface.TrackPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+			c.surface.TrackPromptInputStateVersioned(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol, sequence)
 		}
 	}
 }
@@ -4320,10 +4423,49 @@ func (c *chatInteractionCoordinator) clearPromptInputState(invalidate bool) uint
 	return c.promptInputSeq
 }
 
+// clearPromptInputIfMatches atomically clears the submitted editor snapshot
+// only when no different draft has raced the submit. The prompt cache is
+// intentionally independent from c.mu, so a compare-then-clear split would
+// otherwise erase a keystroke arriving while terminal/history work is locked.
+func (c *chatInteractionCoordinator) clearPromptInputIfMatches(input string) (bool, uint64) {
+	if c == nil {
+		return false, 0
+	}
+	c.promptInputMu.Lock()
+	defer c.promptInputMu.Unlock()
+	if c.promptInput != "" && c.promptInput != input {
+		return false, c.promptInputSeq
+	}
+	// Advance the local revision even when the editor already emitted its
+	// empty snapshot. A submitted InputEvent may still be queued in the actor;
+	// leaving the revision unchanged would let that stale action repopulate the
+	// coordinator cache after this compare-and-clear.
+	c.promptInputSeq++
+	c.promptInput = ""
+	c.promptCursor = 0
+	c.promptPasteActive = false
+	return true, c.promptInputSeq
+}
+
 type chatPromptInputState struct {
 	text        string
 	cursor      int
 	pasteActive bool
+	sequence    uint64
+}
+
+func promptSubmittedSequence(draft chatPromptInputState, submittedInput string) uint64 {
+	sequence := draft.sequence
+	normalizedSubmittedInput := strings.ReplaceAll(submittedInput, "\r\n", "\n")
+	normalizedSubmittedInput = strings.ReplaceAll(normalizedSubmittedInput, "\r", "\n")
+	if draft.text != "" && draft.text != normalizedSubmittedInput && sequence > 0 {
+		// The responsive editor cache has already advanced to a different,
+		// non-empty next draft. Its immediately preceding revision is a safe
+		// upper bound for the submitted input; never label the next draft itself
+		// as consumed by this submit barrier.
+		sequence--
+	}
+	return sequence
 }
 
 func (c *chatInteractionCoordinator) promptInputSnapshotState() chatPromptInputState {
@@ -4336,6 +4478,7 @@ func (c *chatInteractionCoordinator) promptInputSnapshotState() chatPromptInputS
 		text:        c.promptInput,
 		cursor:      c.promptCursor,
 		pasteActive: c.promptPasteActive,
+		sequence:    c.promptInputSeq,
 	}
 }
 

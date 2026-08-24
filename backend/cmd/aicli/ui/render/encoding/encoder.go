@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -53,6 +55,7 @@ type EventEncoder struct {
 	toolOutputBy           map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
 	priorityBy             map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
 	streamOrder            map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
+	reasoningStreams       map[string]*reasoningStreamState // canonical request key -> reasoning 增量重放去重状态
 	orderingBarrierEnabled bool                             // production bridge reserves a hidden reasoning predecessor
 	stats                  Stats
 }
@@ -109,7 +112,19 @@ func NewEventEncoder() *EventEncoder {
 		toolOutputBy:         make(map[string]map[string]struct{}),
 		priorityBy:           make(map[string]*priorityPromptState),
 		streamOrder:          make(map[string]*assistantStreamOrder),
+		reasoningStreams:     make(map[string]*reasoningStreamState),
 	}
+}
+
+// reasoningStreamState 记忆单条 reasoning 流的增量序列，用于识别并丢弃
+// provider/重试链路整段重放的重复增量（如连接重试后相同思考重新流一遍，
+// 会把已渲染的正文整体再追加一遍）。只保存原始 chunk 文本（不含拼缝补偿
+// 的换行），数量有界：超过上限即停止追踪，行为退化为常规追加。
+type reasoningStreamState struct {
+	seq      []string
+	replay   bool
+	idx      int
+	tracking bool
 }
 
 // Encode 处理单个上游事件，返回增量变更集。事件类型未映射时按
@@ -1037,8 +1052,14 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 				// 保证每个 reasoning cell 都有可辨识的渲染边界。
 				nextHead = withReasoningDivider(text)
 			} else if streamDelta {
+				if e.skipReplayedReasoningDelta(key, text) {
+					// 整段重放的重复增量：丢弃，不追加进正文（避免内容翻倍）。
+					return false
+				}
 				nextHead = appendReasoningDelta(t.Head, text)
 			} else {
+				// 全量快照：正文被整体替换，重放追踪状态随之作废。
+				delete(e.reasoningStreams, key)
 				// 全量快照（非 stream_delta）替换正文：与新建/空占位路径统一，
 				// 保留 divider + "\n" 前缀。旧实现直接 nextHead = text 会把
 				// 上一帧已渲染的 divider 及其换行丢掉，下一帧 delta 又追加到
@@ -1224,6 +1245,16 @@ func reasoningText(ev runtimeevents.Event) (text string, streamDelta bool) {
 // repeat a full snapshot in each event. It is deliberately local to the
 // encoder: the semantic Scene must receive the same monotonic visible body as
 // the live reasoning presenter.
+//
+// 增量边界通常不是文本边界：provider 可以在任意 UTF-8 字节/字符位置切块。
+// 因此只保留旧版为"按行切块但不带换行"的极窄兼容规则，且只在有明确句子
+// 边界信号时补行：
+//  1. 拉丁等有大小写区分的字母：incoming 以大写字母开头视为新句（词级
+//     切块以小写/空格开头，不会被误拆）；
+//  2. 中文/日文等无大小写字母的文本：任意切块都以字母开头，不能靠首字符
+//     判断新行（否则每个 delta 都会被拆成独立一行）；只有 existing 以
+//     句子结束标点收尾时才补行。
+// 数字、连字符、冒号、句号等不能触发补行，避免 UUID、时间戳和标点被错误拆开。
 func appendReasoningDelta(existing, incoming string) string {
 	if incoming == "" || incoming == existing {
 		return existing
@@ -1234,7 +1265,96 @@ func appendReasoningDelta(existing, incoming string) string {
 	if strings.HasPrefix(incoming, existing) {
 		return incoming
 	}
-	return existing + incoming
+	if strings.HasSuffix(existing, incoming) {
+		// 与已累积正文尾部逐字相同：同一块的重复投递，不产生新内容。
+		return existing
+	}
+	return existing + reasoningDeltaSeam(existing, incoming) + incoming
+}
+
+func reasoningDeltaSeam(existing, incoming string) string {
+	if existing == "" || incoming == "" {
+		return ""
+	}
+	last, _ := utf8.DecodeLastRuneInString(existing)
+	first, _ := utf8.DecodeRuneInString(incoming)
+	if !unicode.IsLetter(first) {
+		return ""
+	}
+	if unicode.IsUpper(first) {
+		return "\n"
+	}
+	if unicode.IsLower(first) {
+		return ""
+	}
+	if reasoningSentenceEndRune(last) {
+		return "\n"
+	}
+	return ""
+}
+
+// reasoningSentenceEndRune 报告该字符是否属于句子结束标点。仅用于无大小写
+// 区分的字母文本（中文/日文等）的接缝判断：此时首字符无法表达"新句子"，
+// 只能依赖前一块的收尾标点。
+func reasoningSentenceEndRune(r rune) bool {
+	switch r {
+	case '。', '！', '？', '；', '」', '』', '）', '”', '"', ')', '!', '?', ';':
+		return true
+	}
+	return false
+}
+
+// skipReplayedReasoningDelta 判断当前 reasoning 增量是否属于整段重放并应丢弃。
+// 已累积多块之后再次收到与首块相同的文本，判定为重放开始：随后增量只要与
+// 已提交序列逐块一致就丢弃；一旦出现新内容立即恢复常规累积。返回 true 表示
+// 本条增量是重复内容，调用方不应再把它追加进正文。
+func (e *EventEncoder) skipReplayedReasoningDelta(key, text string) bool {
+	if e == nil || text == "" {
+		return false
+	}
+	st := e.reasoningStreams[key]
+	if st == nil {
+		if len(e.reasoningStreams) > 256 {
+			// 安全阀：请求键很多时整体重置，避免状态无限增长。
+			e.reasoningStreams = make(map[string]*reasoningStreamState)
+		}
+		st = &reasoningStreamState{tracking: true}
+		e.reasoningStreams[key] = st
+	}
+	if !st.tracking {
+		return false
+	}
+	if st.replay {
+		if st.idx < len(st.seq) && text == st.seq[st.idx] {
+			st.idx++
+			if st.idx >= len(st.seq) {
+				// 整段重放消费完毕：后续按正常增量继续。
+				st.replay = false
+				st.tracking = false
+			}
+			return true
+		}
+		// 重放中断：出现与已提交序列不同的内容，恢复常规累积并在本次正常追加。
+		st.replay = false
+		st.tracking = false
+		return false
+	}
+	if len(st.seq) > 0 && text == st.seq[0] {
+		// 已累积首块之后再收到相同首块 → 判定为整段重放开始。
+		st.replay = true
+		st.idx = 1
+		if st.idx >= len(st.seq) {
+			st.replay = false
+			st.tracking = false
+		}
+		return true
+	}
+	st.seq = append(st.seq, text)
+	if len(st.seq) > 64 {
+		// 超出有界窗口停止追踪：不影响正确性，只失去重放去重能力。
+		st.tracking = false
+	}
+	return false
 }
 
 func (e *EventEncoder) applyLLMStarted(ev runtimeevents.Event, _ *ChangeSet) {
