@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -3232,10 +3230,6 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 	if delta == "" {
 		return
 	}
-	// 仅兼容少数“按行切块但没有换行”的 provider：数字、连字符、冒号、
-	// 句号不能触发补行，否则会把 UUID/时间戳拆成多行。真正的空白仍完全
-	// 由 provider 原样提供。
-	delta = normalizeReasoningDeltaSeam(c.reasoningBuffer.String(), delta)
 	fullContent := c.reasoningBuffer.String() + delta
 	if c.shouldLiveStreamOutputLocked() {
 		// Markdown reasoning can only be rendered from a complete document;
@@ -3374,46 +3368,6 @@ func normalizeAssistantStreamDelta(existing, incoming string) string {
 		return ""
 	}
 	return incoming
-}
-
-// normalizeReasoningDeltaSeam 只在有明确句子边界信号时补行：
-//  1. 拉丁等有大小写区分的字母：delta 以大写字母开头视为新句（词级切块
-//     以小写/空格开头，不会被误拆）；
-//  2. 中文/日文等无大小写字母的文本：任意词级/短语级切块都以字母开头，
-//     不能靠首字符判断新行（否则每个 delta 都会被拆成独立一行——中文
-//     reasoning 实测每块一行）；只有前一块以句子结束标点收尾时才补行。
-// 数字、连字符、冒号、句号等位于 delta 开头时仍不能触发补行，避免
-// UUID、时间戳和标点被错误拆开。
-func normalizeReasoningDeltaSeam(existing, delta string) string {
-	if existing == "" || delta == "" {
-		return delta
-	}
-	last, _ := utf8.DecodeLastRuneInString(existing)
-	first, _ := utf8.DecodeRuneInString(delta)
-	if !unicode.IsLetter(first) {
-		return delta
-	}
-	if unicode.IsUpper(first) {
-		return "\n" + delta
-	}
-	if unicode.IsLower(first) {
-		return delta
-	}
-	if reasoningSentenceEndRune(last) {
-		return "\n" + delta
-	}
-	return delta
-}
-
-// reasoningSentenceEndRune 报告该字符是否属于句子结束标点。仅用于无大小写
-// 区分的字母文本（中文/日文等）的接缝判断：此时首字符无法表达"新句子"，
-// 只能依赖前一块的收尾标点。
-func reasoningSentenceEndRune(r rune) bool {
-	switch r {
-	case '。', '！', '？', '；', '」', '』', '）', '”', '"', ')', '!', '?', ';':
-		return true
-	}
-	return false
 }
 
 func (c *chatInteractionCoordinator) classifyAssistantStreamModeLocked(content string) assistantStreamMode {

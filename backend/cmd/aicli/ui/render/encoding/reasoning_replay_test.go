@@ -2,14 +2,17 @@ package encoding
 
 import "testing"
 
-// 回归：保留旧版对行切块的兼容，但不能根据数字/标点推断换行。
-func TestAppendReasoningDeltaConservativeSeam(t *testing.T) {
+// 回归：本地不做"猜换行/补空格"启发式——provider 的切块按原样拼接，
+// 分行与否完全由 provider 提供的空白决定。
+func TestAppendReasoningDeltaPureConcatenation(t *testing.T) {
 	body := appendReasoningDelta("", "Inspecting buildSessionActor architecture")
 	body = appendReasoningDelta(body, "Designing per-actor coordinator")
 	body = appendReasoningDelta(body, "Planning per-actor coordinator instantiation and shutdown")
-	want := "Inspecting buildSessionActor architecture\nDesigning per-actor coordinator\nPlanning per-actor coordinator instantiation and shutdown"
+	want := "Inspecting buildSessionActor architecture" +
+		"Designing per-actor coordinator" +
+		"Planning per-actor coordinator instantiation and shutdown"
 	if body != want {
-		t.Fatalf("line seam was not restored\n got: %q\nwant: %q", body, want)
+		t.Fatalf("local line seam heuristic still active\n got: %q\nwant: %q", body, want)
 	}
 }
 
@@ -81,13 +84,40 @@ func TestAppendReasoningDeltaCJKWordChunksStayInline(t *testing.T) {
 	}
 }
 
-// 中文句子接缝：前一块以句子结束标点收尾时才补行。
-func TestAppendReasoningDeltaCJKLineAfterSentenceEnd(t *testing.T) {
-	if got := appendReasoningDelta("检查统一渲染器架构。", "设计协调器"); got != "检查统一渲染器架构。\n设计协调器" {
-		t.Fatalf("CJK sentence seam missing: %q", got)
+// 中文句子边界同样不做本地补行：即使前一块以句号收尾，也按 provider 原样拼接。
+func TestAppendReasoningDeltaCJKNoLocalLineInsertion(t *testing.T) {
+	if got := appendReasoningDelta("检查统一渲染器架构。", "设计协调器"); got != "检查统一渲染器架构。设计协调器" {
+		t.Fatalf("CJK sentence seam still inserted: %q", got)
 	}
 	if got := appendReasoningDelta("先确认状态", "当前目录"); got != "先确认状态当前目录" {
 		t.Fatalf("CJK word seam wrongly split: %q", got)
+	}
+}
+
+// 回归：provider 提供的空白（含真实 \n）与裸星号串（****）必须逐字节保留，
+// 不被本地启发式吞掉或插入——对应实测异常样例
+// "breaksReviewing test coverage for reasoning hard breaks****Inspecting Markdown\n..."。
+func TestAppendReasoningDeltaPreservesProviderWhitespaceAndAsterisks(t *testing.T) {
+	chunks := []string{
+		"Inspecting MarkdownFormatter space insertion",
+		"Planning unit tests for CJK hard breaks",
+		"Reviewing test coverage for reasoning hard breaks",
+		"****",
+		"Inspecting Markdown",
+		"\ndetection logic",
+	}
+	var body string
+	for _, chunk := range chunks {
+		body = appendReasoningDelta(body, chunk)
+	}
+	want := "Inspecting MarkdownFormatter space insertion" +
+		"Planning unit tests for CJK hard breaks" +
+		"Reviewing test coverage for reasoning hard breaks" +
+		"****" +
+		"Inspecting Markdown" +
+		"\ndetection logic"
+	if body != want {
+		t.Fatalf("provider deltas not preserved verbatim\n got: %q\nwant: %q", body, want)
 	}
 }
 

@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -1280,15 +1278,10 @@ func reasoningText(ev runtimeevents.Event) (text string, streamDelta bool) {
 // encoder: the semantic Scene must receive the same monotonic visible body as
 // the live reasoning presenter.
 //
-// 增量边界通常不是文本边界：provider 可以在任意 UTF-8 字节/字符位置切块。
-// 因此只保留旧版为"按行切块但不带换行"的极窄兼容规则，且只在有明确句子
-// 边界信号时补行：
-//  1. 拉丁等有大小写区分的字母：incoming 以大写字母开头视为新句（词级
-//     切块以小写/空格开头，不会被误拆）；
-//  2. 中文/日文等无大小写字母的文本：任意切块都以字母开头，不能靠首字符
-//     判断新行（否则每个 delta 都会被拆成独立一行）；只有 existing 以
-//     句子结束标点收尾时才补行。
-// 数字、连字符、冒号、句号等不能触发补行，避免 UUID、时间戳和标点被错误拆开。
+// 增量边界不是文本边界：provider 可以在任意 UTF-8 字节/字符位置切块，分行
+// 与否完全由 provider 提供的空白决定。这里不做任何"猜换行/补空格"的启发式，
+// 只保留纯文本去重：整块重复、快照前缀替换、尾部重复投递直接丢弃，其余情况
+// 一律原样拼接（existing + incoming）。
 func appendReasoningDelta(existing, incoming string) string {
 	if incoming == "" || incoming == existing {
 		return existing
@@ -1303,39 +1296,7 @@ func appendReasoningDelta(existing, incoming string) string {
 		// 与已累积正文尾部逐字相同：同一块的重复投递，不产生新内容。
 		return existing
 	}
-	return existing + reasoningDeltaSeam(existing, incoming) + incoming
-}
-
-func reasoningDeltaSeam(existing, incoming string) string {
-	if existing == "" || incoming == "" {
-		return ""
-	}
-	last, _ := utf8.DecodeLastRuneInString(existing)
-	first, _ := utf8.DecodeRuneInString(incoming)
-	if !unicode.IsLetter(first) {
-		return ""
-	}
-	if unicode.IsUpper(first) {
-		return "\n"
-	}
-	if unicode.IsLower(first) {
-		return ""
-	}
-	if reasoningSentenceEndRune(last) {
-		return "\n"
-	}
-	return ""
-}
-
-// reasoningSentenceEndRune 报告该字符是否属于句子结束标点。仅用于无大小写
-// 区分的字母文本（中文/日文等）的接缝判断：此时首字符无法表达"新句子"，
-// 只能依赖前一块的收尾标点。
-func reasoningSentenceEndRune(r rune) bool {
-	switch r {
-	case '。', '！', '？', '；', '」', '』', '）', '”', '"', ')', '!', '?', ';':
-		return true
-	}
-	return false
+	return existing + incoming
 }
 
 // skipReplayedReasoningDelta 判断当前 reasoning 增量是否属于整段重放并应丢弃。
