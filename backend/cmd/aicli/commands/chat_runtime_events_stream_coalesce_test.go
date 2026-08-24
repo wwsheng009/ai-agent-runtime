@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // TestChatRuntimeEvents_StreamCoalescingConcurrentWithBeginRun is a lock-order
@@ -190,6 +191,60 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 	bridge.streamMu.Unlock()
 	if count != 2 {
 		t.Fatalf("pending count after sequence gap = %d, want 2", count)
+	}
+}
+
+// 回归：assistant.reasoning 事件只带嵌套 reasoning 块（loop.go 的
+// emitRuntimeEvent 形态，无顶层 text/summary、无 sequence）。同流增量在
+// 合并时必须逐字节保留文本，而不是把后续增量整条丢弃；合并结果仍可被
+// 编码器（reasoningText 优先读顶层 text）正确消费。
+func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "pending-reasoning"}})
+	bridge.eventQueue = make(chan chatRuntimeQueuedEvent, 1)
+	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
+	t.Cleanup(func() {
+		bridge.streamMu.Lock()
+		bridge.pendingStreams = nil
+		bridge.pendingStreamsBytes = 0
+		bridge.streamMu.Unlock()
+	})
+
+	reasoningEvent := func(chunk string) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type:    runtimechat.EventAssistantReasoning,
+			TraceID: "trace-reasoning",
+			Payload: map[string]interface{}{
+				"reasoning": map[string]interface{}{
+					"summary":    chunk,
+					"format":     "stream_delta",
+					"visibility": string(runtimetypes.ReasoningVisibilitySummary),
+				},
+			},
+		}
+	}
+	bridge.Handle(reasoningEvent("Inspecting MarkdownFormatter space insertion"))
+	bridge.Handle(reasoningEvent("****"))
+
+	bridge.streamMu.Lock()
+	count := len(bridge.pendingStreams)
+	var text string
+	if count > 0 {
+		text = streamEventText(bridge.pendingStreams[0].event)
+	}
+	bridge.streamMu.Unlock()
+
+	if count != 1 {
+		t.Fatalf("coalesced reasoning pending count = %d, want 1", count)
+	}
+	want := "Inspecting MarkdownFormatter space insertion****"
+	if text != want {
+		t.Fatalf("nested reasoning deltas not preserved verbatim\n got: %q\nwant: %q", text, want)
+	}
+	if _, ok := bridge.pendingStreams[0].event.Payload["reasoning"]; ok {
+		t.Fatal("merged event still carries stale nested reasoning block")
+	}
+	if got := bridge.pendingStreams[0].event.Payload["text"]; got != want {
+		t.Fatalf("merged event text payload = %q, want %q", got, want)
 	}
 }
 

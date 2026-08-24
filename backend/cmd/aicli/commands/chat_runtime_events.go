@@ -1253,6 +1253,12 @@ func streamEventText(event runtimeevents.Event) string {
 		if s, ok := event.Payload["summary"].(string); ok {
 			return s
 		}
+		if block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"]); block != nil {
+			// 运行时环发出的 assistant.reasoning 只带嵌套 reasoning 块
+			// （loop.go emitRuntimeEvent），没有顶层 text/summary；不识别
+			// 嵌套块会让合并路径把后续 reasoning 增量整条丢弃。
+			return block.RawDisplayText()
+		}
 	case runtimechat.EventAssistantDelta:
 		if s, ok := event.Payload["delta"].(string); ok {
 			return s
