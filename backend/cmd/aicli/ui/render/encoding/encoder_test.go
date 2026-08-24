@@ -1435,6 +1435,40 @@ func TestSubmitSupplement(t *testing.T) {
 	}
 }
 
+// TestSubmitReasoningWithBoundaryGroup 固化 resume/历史种子路径的 reasoning
+// 重建契约：必须与 live 路径（applyReasoning + finalizeReasoning）一样产出
+// KindReasoning，Head 以开始分隔线开头、以结束分隔线收尾，否则恢复会话后
+// reasoning 会退化为普通 supplement 文本，丢失两条分隔线。
+func TestSubmitReasoningWithBoundaryGroup(t *testing.T) {
+	e := NewEventEncoder()
+	e.SubmitUserInput("U1")
+	body := "先确认状态，再检查渲染路径。"
+	cs := e.SubmitReasoningWithBoundaryGroup(body, "persisted-assistant-request:abc:1")
+	if cs == nil || len(cs.Changes) != 1 {
+		t.Fatalf("changes = %+v, want 1 append", cs)
+	}
+	it := e.Snapshot().Items[len(e.Snapshot().Items)-1]
+	if it.Kind != KindReasoning || it.Status != StatusCompleted {
+		t.Fatalf("item = %+v, want KindReasoning completed", it)
+	}
+	if it.BoundaryGroupKey != "persisted-assistant-request:abc:1" {
+		t.Fatalf("boundary group = %q", it.BoundaryGroupKey)
+	}
+	if !strings.HasPrefix(it.Head, reasoningDividerLine()+"\n") {
+		t.Fatalf("head missing start divider: %q", it.Head)
+	}
+	if !strings.Contains(it.Head, "\n"+reasoningEndDividerLine()) {
+		t.Fatalf("head missing end divider: %q", it.Head)
+	}
+	wantBody := reasoningDividerLine() + "\n" + body + "\n" + reasoningEndDividerLine()
+	if it.Head != wantBody {
+		t.Fatalf("head = %q, want %q", it.Head, wantBody)
+	}
+	if tl := e.Tail(); tl == nil || tl.ItemID != it.ID {
+		t.Fatalf("tail = %+v, want ItemID %q", tl, it.ID)
+	}
+}
+
 func TestPriorityPromptTranscriptLifecycleOrdering(t *testing.T) {
 	requested := event(runtimechat.EventApprovalRequested, map[string]interface{}{
 		"request_id": "approval-1",

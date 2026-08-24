@@ -50,6 +50,36 @@ func TestSeedPersistedHistoryGroupsReasoningAndAssistantByExactRequest(t *testin
 	}
 }
 
+// resume 种子路径必须与 live 路径一样保留 reasoning 分隔线：否则恢复会话后
+// 推理正文会退化为普通 supplement 文本，丢失 "…… reasoning ……" 开头线与
+// "…… end reasoning ……" 结束线。
+func TestSeedPersistedHistoryRendersReasoningDividers(t *testing.T) {
+	assistant := runtimetypes.NewAssistantMessage("persisted answer")
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Summary: "先确认状态，再检查渲染路径。", Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	messages := []runtimetypes.Message{*assistant}
+
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.seedPersistedHistory(messages, "")
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != 2 {
+		t.Fatalf("seeded Scene = %+v, want reasoning and assistant", snapshot)
+	}
+	startSeen, endSeen := false, false
+	for _, row := range scene.LayoutTranscript(snapshot.Cells, 1) {
+		if strings.Contains(row.Text, " reasoning ") {
+			startSeen = true
+		}
+		if strings.Contains(row.Text, " end reasoning ") {
+			endSeen = true
+		}
+	}
+	if !startSeen || !endSeen {
+		t.Fatalf("seeded reasoning lost dividers (start=%v end=%v): %+v", startSeen, endSeen, snapshot.Cells)
+	}
+}
+
 func TestSeedPersistedHistoryAdoptsMatchedRuntimeRequestGroup(t *testing.T) {
 	assistant := runtimetypes.NewAssistantMessage("missing persisted answer")
 	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
@@ -240,7 +270,12 @@ func TestPresentChatStartupSession_UnifiedRendersCanonicalHistoryWithMarkdown(t 
 
 	state := coordinator.uiActor.AppState()
 	assertTranscriptSourceCount(t, state.Transcript.Cells, "continue the previous task", 1)
-	assertTranscriptSourceCount(t, state.Transcript.Cells, "reviewed the resumed context", 1)
+	// Resumed reasoning is seeded as a KindReasoning cell whose source is
+	// "start divider\n<summary>\nend divider", so the body is matched by
+	// containment and both dividers are asserted explicitly.
+	assertTranscriptSourceContainsCount(t, state.Transcript.Cells, "reviewed the resumed context", 1)
+	assertTranscriptSourceContainsCount(t, state.Transcript.Cells, " reasoning ", 1)
+	assertTranscriptSourceContainsCount(t, state.Transcript.Cells, " end reasoning ", 1)
 	assertTranscriptSourceCount(t, state.Transcript.Cells, "# Resumed answer\n\n- **complete**\n- `code`", 1)
 	if session.TerminalSession == nil || session.TerminalSession.ProjectionState().Frame == 0 {
 		t.Fatal("startup history was not painted by TerminalSession")
@@ -931,6 +966,19 @@ func assertTranscriptSourceCount(t *testing.T, cells []scene.TranscriptCell, wan
 	}
 	if got != count {
 		t.Fatalf("transcript source %q occurs %d times, want %d: %#v", want, got, count, cells)
+	}
+}
+
+func assertTranscriptSourceContainsCount(t *testing.T, cells []scene.TranscriptCell, want string, count int) {
+	t.Helper()
+	got := 0
+	for _, cell := range cells {
+		if strings.Contains(cell.Source, want) {
+			got++
+		}
+	}
+	if got != count {
+		t.Fatalf("transcript source containing %q occurs %d times, want %d: %#v", want, got, count, cells)
 	}
 }
 

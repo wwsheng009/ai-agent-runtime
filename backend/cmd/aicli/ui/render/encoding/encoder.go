@@ -327,6 +327,40 @@ func (e *EventEncoder) SubmitSupplementWithBoundaryGroup(text, boundaryGroupKey 
 	return cs
 }
 
+// SubmitReasoningWithBoundaryGroup 提交重建的终态 reasoning cell（resume /
+// 历史种子路径）。持久化转录只保留推理正文，不保留渲染分隔线；这里必须
+// 与 live 路径（applyReasoning 的开头 divider + finalizeReasoning 的结束
+// divider）产出相同形态的 Head，否则恢复会话后 reasoning 会被渲染成普通
+// supplement 文本，丢失“…… reasoning ……”与“…… end reasoning ……”
+// 两条分隔线。
+func (e *EventEncoder) SubmitReasoningWithBoundaryGroup(text, boundaryGroupKey string) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	head := strings.TrimRight(withReasoningDivider(text), "\n") + "\n" + reasoningEndDividerLine()
+	it := e.appendItem(KindReasoning, "", head)
+	it.BoundaryGroupKey = boundaryGroupKey
+	it.Status = StatusCompleted
+	setReasoningPresentation(it)
+	e.change(cs, OpAppend, it)
+	if e.model.Tail == nil {
+		e.model.Tail = &Tail{}
+	}
+	if len(e.model.Items) > 0 {
+		last := e.model.Items[len(e.model.Items)-1]
+		e.model.Tail.ItemID = last.ID
+		e.model.Tail.Seq = last.Seq
+	} else {
+		e.model.Tail.ItemID = ""
+		e.model.Tail.Seq = 0
+	}
+	cs.Tail = e.model.Tail
+	return cs
+}
+
 // SubmitPriorityPromptTranscript commits the one retained semantic item for a
 // previously observed approval/question request. The request itself is only
 // pending interaction identity and never occupies a RenderModel position.

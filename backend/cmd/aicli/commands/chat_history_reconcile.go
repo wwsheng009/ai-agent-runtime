@@ -385,7 +385,16 @@ func (u persistedHistorySeedUnit) apply(b *chatRuntimeEventBridge) {
 	case persistedHistorySeedAssistant:
 		b.applyChangeSet(b.renderEncoder.SubmitAssistantWithBoundaryGroup(u.content, u.boundaryGroupKey))
 	case persistedHistorySeedSupplement:
-		b.applyChangeSet(b.renderEncoder.SubmitSupplementWithBoundaryGroup(u.content, u.boundaryGroupKey))
+		if u.boundaryGroupKey != "" {
+			// 带请求身份的 supplement 是重建的 reasoning（persisted-
+			// assistant-request:*）。必须以与 live 路径一致的
+			// KindReasoning + divider Head 导入，否则恢复会话后
+			// reasoning 正文会退化为普通 supplement 文本，丢失
+			// "…… reasoning ……" 与 "…… end reasoning ……" 分隔线。
+			b.applyChangeSet(b.renderEncoder.SubmitReasoningWithBoundaryGroup(u.content, u.boundaryGroupKey))
+		} else {
+			b.applyChangeSet(b.renderEncoder.SubmitSupplementWithBoundaryGroup(u.content, u.boundaryGroupKey))
+		}
 	case persistedHistorySeedTool:
 		// A persisted tool result is final history, not a viewport-only running
 		// row. Establish the stable call identity before the result so the
