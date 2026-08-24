@@ -9,8 +9,7 @@ import (
 
 // TestReproReasoningNewlinesPreserved reproduces the reported regression:
 // unified renderer output fuses words that were separated by single newlines
-// in the reasoning body (e.g. "architecture" + "Designing" ->
-// "architectureDesigning").
+// in the reasoning body (e.g. "architecture" + "Designing" -> "architectureDesigning").
 func TestReproReasoningNewlinesPreserved(t *testing.T) {
 	body := "Inspecting buildSessionActor architecture\n" +
 		"Designing per-actor coordinator with idempotent replay\n" +
@@ -92,6 +91,28 @@ func TestCJKSoftbreakNoSpace(t *testing.T) {
 	latin := render.PlainBackend{}.Render(Render("aaa bbb\nccc ddd", Options{Width: 60}))
 	if want := "aaa bbb ccc ddd"; latin != want {
 		t.Fatalf("latin soft break spacing changed: %q, want %q", latin, want)
+	}
+}
+
+func TestReportedChineseReasoningSentenceDoesNotGainSpaces(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{
+			name:   "reported reasoning",
+			source: "根据  \n交接摘要，主  \n任务  \n已  \n全部完成：备份、删旧  \n库、恢复新库、切换启动  \n验证、收  \n尾清理都  \n已完成。剩余  \n工作只有  \n一项：向  \n用户提交最终报告。",
+			want:   "根据交接摘要，主任务已全部完成：备份、删旧库、恢复新库、切换启动验证、收尾清理都已完成。剩余工作只有一项：向用户提交最终报告。",
+		},
+		{name: "styled CJK", source: "**根据**  \n**交接摘要**", want: "根据交接摘要"},
+		{name: "mixed", source: "中文  \nhello", want: "中文 hello"},
+		{name: "Latin", source: "hello  \nworld", want: "hello world"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (render.PlainBackend{}).Render(Render(tc.source, Options{Width: 300})); got != tc.want {
+				t.Fatalf("hard-break spacing changed\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
 	}
 }
 

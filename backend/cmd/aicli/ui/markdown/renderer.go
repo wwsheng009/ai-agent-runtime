@@ -610,7 +610,7 @@ func findTaskCheckBox(item *ast.ListItem) *extast.TaskCheckBox {
 
 func normalizeInlineNewlines(spans []render.Span) []render.Span {
 	out := make([]render.Span, 0, len(spans))
-	for _, sp := range spans {
+	for spanIndex, sp := range spans {
 		if !strings.Contains(sp.Text, "\n") {
 			out = append(out, sp)
 			continue
@@ -618,7 +618,22 @@ func normalizeInlineNewlines(spans []render.Span) []render.Span {
 		parts := strings.Split(sp.Text, "\n")
 		for i, p := range parts {
 			if i > 0 {
-				out = append(out, render.Span{Text: " ", Style: sp.Style})
+				// The separator belongs between parts[i-1] and parts[i].
+				// Inspect that exact newline rather than the next one when a
+				// single span contains multiple hard breaks.
+				before := strings.Join(parts[:i], "\n")
+				after := strings.Join(parts[i:], "\n")
+				if !cjkPairAroundHardBreak(spans, spanIndex, before, after) {
+					out = append(out, render.Span{Text: " ", Style: sp.Style})
+				}
+			}
+			// Goldmark keeps the source spaces which introduce a hard line break
+			// (normally two spaces before the newline) in the Text segment. Those
+			// spaces are Markdown syntax, not visible content. Leaving them here
+			// makes a Chinese hard break render as several spaces after the line
+			// break is flattened to the paragraph separator below.
+			if i < len(parts)-1 {
+				p = strings.TrimRight(p, " \t\r")
 			}
 			if p != "" {
 				nsp := sp
@@ -628,4 +643,53 @@ func normalizeInlineNewlines(spans []render.Span) []render.Span {
 		}
 	}
 	return out
+}
+
+// cjkPairAroundHardBreak reports whether a hard-break newline has CJK-ish
+// visible glyphs on both sides. The local before/after strings cover newlines
+// within one span; neighboring spans handle breaks that coincide with a style
+// boundary. Whitespace (including other newlines) is ignored while finding the
+// visible neighbors because Markdown hard-break markers are not content.
+func cjkPairAroundHardBreak(spans []render.Span, spanIndex int, before, after string) bool {
+	left, ok := lastNonSpaceRune(before)
+	if !ok {
+		for i := spanIndex - 1; i >= 0 && !ok; i-- {
+			left, ok = lastNonSpaceRune(spans[i].Text)
+		}
+	}
+	right, rightOK := firstNonSpaceRune(after)
+	if !rightOK {
+		for i := spanIndex + 1; i < len(spans) && !rightOK; i++ {
+			right, rightOK = firstNonSpaceRune(spans[i].Text)
+		}
+	}
+	return ok && rightOK && isCJKish(left) && isCJKish(right)
+}
+
+func lastNonSpaceRune(text string) (rune, bool) {
+	for len(text) > 0 {
+		r, size := utf8.DecodeLastRuneInString(text)
+		if size <= 0 {
+			break
+		}
+		text = text[:len(text)-size]
+		if !unicode.IsSpace(r) {
+			return r, true
+		}
+	}
+	return 0, false
+}
+
+func firstNonSpaceRune(text string) (rune, bool) {
+	for len(text) > 0 {
+		r, size := utf8.DecodeRuneInString(text)
+		if size <= 0 {
+			break
+		}
+		text = text[size:]
+		if !unicode.IsSpace(r) {
+			return r, true
+		}
+	}
+	return 0, false
 }
