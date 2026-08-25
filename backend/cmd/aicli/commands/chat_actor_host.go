@@ -40,7 +40,53 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-const localChatSessionActorLeaseOwnerKind = "aicli-actor"
+const (
+	localChatSessionActorLeaseOwnerKind   = "aicli-actor"
+	localSubagentBatchRestartGrace        = 5 * time.Minute
+	localSubagentBatchRecoveryPassTimeout = 15 * time.Second
+)
+
+// runLocalSubagentStartupRecovery runs the bounded startup pass immediately
+// and once more after restartGrace. The delayed pass catches rows that were
+// still inside the stale-worker grace window when this process started.
+func runLocalSubagentStartupRecovery(
+	ctx context.Context,
+	restartGrace time.Duration,
+	passTimeout time.Duration,
+	recoverOnce func(context.Context),
+) {
+	if recoverOnce == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	timer := time.NewTimer(restartGrace)
+	defer timer.Stop()
+	runOnce := func() bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		passCtx := ctx
+		cancel := func() {}
+		if passTimeout > 0 {
+			passCtx, cancel = context.WithTimeout(ctx, passTimeout)
+		}
+		recoverOnce(passCtx)
+		cancel()
+		return ctx.Err() == nil
+	}
+	if !runOnce() {
+		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		runOnce()
+	}
+}
 
 type localChatRuntimeHost struct {
 	Bootstrap            *runtimebootstrap.Manager
@@ -187,6 +233,91 @@ func localSubagentBatchEmitter(host *localChatRuntimeHost) agent.BatchEmitter {
 	}
 }
 
+// localSubagentBatchLifecycleProjector is the single host bridge for both
+// synchronous and durable background spawn_subagents terminal states. The
+// agent package stays independent from supervision; this adapter turns the
+// host-neutral record into a durable lifecycle notification and then offers
+// the wake consumer a runnable transition point.
+func localSubagentBatchLifecycleProjector(host *localChatRuntimeHost) agent.BatchLifecycleProjector {
+	return func(ctx context.Context, terminal agent.BatchTerminalLifecycle) error {
+		if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
+			return fmt.Errorf("local supervision control plane is not configured")
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		rootScopeID := strings.TrimSpace(terminal.RootScopeID)
+		if rootScopeID == "" {
+			rootScopeID = strings.TrimSpace(terminal.ParentSessionID)
+		}
+		parentSessionID := strings.TrimSpace(terminal.ParentSessionID)
+		if rootScopeID == "" || parentSessionID == "" || strings.TrimSpace(terminal.BatchID) == "" {
+			return fmt.Errorf("subagent batch lifecycle requires root, parent and batch ids")
+		}
+
+		severity := supervision.SeverityInfo
+		supervisionState := supervision.SupervisionTerminated
+		resolution := supervision.ResolutionClosed
+		recommended := string(supervision.ActionInspect)
+		reason := fmt.Sprintf("subagent batch %s finished with status %s (%d/%d completed)", terminal.BatchID, terminal.Status, terminal.CompletedCount, terminal.TaskCount)
+		switch terminal.Status {
+		case subagentbatch.BatchFailed:
+			severity = supervision.SeverityCritical
+			supervisionState = supervision.SupervisionBlocked
+			resolution = supervision.ResolutionUnresolved
+			recommended = string(supervision.ActionInspect)
+		case subagentbatch.BatchTimedOut:
+			severity = supervision.SeverityCritical
+			supervisionState = supervision.SupervisionTimedOut
+			resolution = supervision.ResolutionUnresolved
+			recommended = string(supervision.ActionCancel)
+		case subagentbatch.BatchOrphaned:
+			severity = supervision.SeverityCritical
+			supervisionState = supervision.SupervisionOrphaned
+			resolution = supervision.ResolutionUnresolved
+			recommended = string(supervision.ActionCancel)
+		case subagentbatch.BatchCanceled:
+			severity = supervision.SeverityWarning
+			supervisionState = supervision.SupervisionTerminated
+			resolution = supervision.ResolutionClosed
+		}
+		if strings.TrimSpace(terminal.Error) != "" {
+			reason += ": " + strings.TrimSpace(terminal.Error)
+		}
+		_, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, host.Supervision.Wakes, supervision.LifecycleProjection{
+			RootScopeID:           rootScopeID,
+			TargetParentSessionID: parentSessionID,
+			SubjectKind:           supervision.SubjectAgentRun,
+			SubjectID:             terminal.BatchID,
+			SubjectVersion:        terminal.SubjectVersion,
+			EventType:             terminal.EventType,
+			Severity:              severity,
+			SupervisionState:      supervisionState,
+			Reason:                reason,
+			RecommendedAction:     recommended,
+			AllowedActions:        []string{string(supervision.ActionInspect), string(supervision.ActionCancel), string(supervision.ActionClose)},
+			ResolutionState:       resolution,
+		})
+		if err != nil {
+			return err
+		}
+		// ProjectLifecycle schedules a wake for unresolved critical states. This
+		// call also drains any existing wake after a successful informational or
+		// warning projection, without creating a second wake row.
+		if err := host.wakeSupervisedParent(ctx, parentSessionID, rootScopeID); err != nil {
+			// A busy parent or an exhausted auto-wake budget is an expected
+			// durable-control-plane outcome: the wake remains pending for the
+			// next turn-end/runnable transition and must not be reported as a
+			// failed lifecycle projection.
+			if errors.Is(err, supervision.ErrWakeParentBusy) || errors.Is(err, supervision.ErrWakeRateLimited) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+}
+
 func localSubagentBatchTerminalSink(host *localChatRuntimeHost) agent.BatchTerminalSink {
 	return func(ctx context.Context, notification agent.BatchTerminalNotification) agent.BatchTerminalDelivery {
 		if host == nil {
@@ -270,6 +401,18 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 		},
 	}
 	h.bindSupervisionWakeConsumer()
+	// Recovery runs concurrently during host initialization and may have
+	// projected a critical terminal batch before the actor registry/wake
+	// consumer was ready. Drain any such durable wake once the consumer is
+	// wired; the scheduler keeps it pending if the parent is still busy.
+	if h.BaseSession != nil && h.BaseSession.RuntimeSession != nil {
+		rootSessionID := strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
+		if rootSessionID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID)
+		}
+	}
 }
 
 // bindSupervisionWakeConsumer subscribes the parent root session turn end so
@@ -420,22 +563,29 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	}
 	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
 	// Recover only rows whose heartbeat is older than the restart grace period.
-	// The recovery coordinator is deliberately not registered: it performs a
-	// bounded startup scan but owns no worker that should be canceled during host
-	// shutdown. Terminal replay is performed here as well so a host with no
-	// materialized actor still drains notifications left by a prior process.
+	// Run a second pass after that grace expires: rows written immediately before
+	// the previous process died are intentionally too fresh for the first pass,
+	// but must not remain queued/running forever when no actor is materialized.
+	// The recovery coordinator is deliberately not registered because it owns no
+	// worker; lifecycleCtx still cancels the delayed pass before store teardown.
 	host.asyncWG.Add(1)
 	go func(batchStore subagentbatch.BatchStore, lifecycleCtx context.Context) {
 		defer host.asyncWG.Done()
-		recoveryCtx, recoveryCancel := context.WithTimeout(lifecycleCtx, 15*time.Second)
-		defer recoveryCancel()
-		coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
-			Store:        batchStore,
-			Emitter:      localSubagentBatchEmitter(host),
-			TerminalSink: localSubagentBatchTerminalSink(host),
-		})
-		_, _ = coordinator.RecoverStaleBatches(recoveryCtx, 5*time.Minute, "", 512)
-		_, _ = coordinator.ReplayTerminalDeliveries(recoveryCtx, "", 512)
+		runLocalSubagentStartupRecovery(
+			lifecycleCtx,
+			localSubagentBatchRestartGrace,
+			localSubagentBatchRecoveryPassTimeout,
+			func(recoveryCtx context.Context) {
+				coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
+					Store:              batchStore,
+					Emitter:            localSubagentBatchEmitter(host),
+					TerminalSink:       localSubagentBatchTerminalSink(host),
+					LifecycleProjector: localSubagentBatchLifecycleProjector(host),
+				})
+				_, _ = coordinator.RecoverStaleBatches(recoveryCtx, localSubagentBatchRestartGrace, "", 512)
+				_, _ = coordinator.ReplayTerminalDeliveries(recoveryCtx, "", 512)
+			},
+		)
 	}(batchStore, host.lifecycleCtx)
 	host.TeamLifecycle = newLocalTeamLifecycleService(host)
 
@@ -923,6 +1073,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
+	apiAgent.SetBatchLifecycleProjector(localSubagentBatchLifecycleProjector(host))
 	scheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
 		Routing: localChatSubagentRoutingConfig(session),
 	})
@@ -930,10 +1081,11 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	var batchCoordinator *agent.SubagentBatchCoordinator
 	if host.SubagentBatches != nil {
 		coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
-			Store:        host.SubagentBatches,
-			Scheduler:    scheduler,
-			Emitter:      localSubagentBatchEmitter(host),
-			TerminalSink: localSubagentBatchTerminalSink(host),
+			Store:              host.SubagentBatches,
+			Scheduler:          scheduler,
+			Emitter:            localSubagentBatchEmitter(host),
+			TerminalSink:       localSubagentBatchTerminalSink(host),
+			LifecycleProjector: localSubagentBatchLifecycleProjector(host),
 		})
 		if release, active := host.beginSubagentOperation(); active {
 			if host.registerSubagentCoordinator(coordinator) {

@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -27,6 +29,41 @@ func newLocalSupervisionTestHost(t *testing.T) *localChatRuntimeHost {
 		_ = teamStore.Close()
 	})
 	return host
+}
+
+func TestLocalSubagentBatchLifecycleProjectorPersistsAndDeduplicates(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	projector := localSubagentBatchLifecycleProjector(host)
+	event := agent.BatchTerminalLifecycle{
+		BatchID:         "batch-failed-1",
+		RootScopeID:     "parent-session",
+		ParentSessionID: "parent-session",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchFailed,
+		EventType:       "subagent.batch.failed",
+		SubjectVersion:  3,
+		TaskCount:       2,
+		CompletedCount:  1,
+		FailedCount:     1,
+		ErrorClass:      "provider",
+		Error:           "provider unavailable",
+	}
+	require.NoError(t, projector(context.Background(), event))
+	require.NoError(t, projector(context.Background(), event))
+
+	notifications, err := host.Supervision.Store.ListNotifications(context.Background(), supervision.NotificationFilter{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "batch-failed-1",
+		IncludeResolved:       true,
+		Limit:                 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Equal(t, supervision.SeverityCritical, notifications[0].Severity)
+	require.Equal(t, supervision.SupervisionBlocked, notifications[0].SupervisionState)
+	require.Equal(t, supervision.ResolutionUnresolved, notifications[0].ResolutionState)
 }
 
 func TestResolveLocalChatSupervisionDataDir(t *testing.T) {

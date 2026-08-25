@@ -26,6 +26,7 @@ import (
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -999,7 +1000,8 @@ func TestReActLoop_RunWithSession_EmitsLLMRetryRuntimeEvent(t *testing.T) {
 		DefaultModel:    "test-model",
 		MaxRetries:      1,
 		RetryTuning: llm.RetryTuning{
-			BaseDelay: time.Millisecond,
+			BaseDelay:     time.Millisecond,
+			Randomization: -1, // 关闭默认 ±10% 抖动，精确断言 retry_delay_ms
 		},
 	})
 	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
@@ -1119,7 +1121,10 @@ func TestReActLoop_ProviderContextErrorCompactsAndRetriesSameStep(t *testing.T) 
 	})
 	agent.SetEventBus(bus)
 
-	session := newTestHistorySession("session-provider-context-recovery")
+	session := &testContextHistorySession{
+		testHistorySession: newTestHistorySession("session-provider-context-recovery"),
+		context:            map[string]interface{}{},
+	}
 	for index := 0; index < 8; index++ {
 		session.messages = append(session.messages,
 			*types.NewUserMessage(fmt.Sprintf("历史请求 %d %s", index, strings.Repeat("context ", 40))),
@@ -1137,6 +1142,24 @@ func TestReActLoop_ProviderContextErrorCompactsAndRetriesSameStep(t *testing.T) 
 	require.Equal(t, 3, provider.callCount, "one failed call, one compact stream, and one recovered call")
 	require.Len(t, startedEvents, 1)
 	require.Equal(t, "provider_context_window_recovery", startedEvents[0].Payload["reason"])
+	require.Equal(t, 1, sessionPromptCacheEpoch(session))
+	require.Len(t, provider.requests, 3)
+	require.Equal(t, 0, intValue(provider.requests[0].Metadata["prompt_cache_epoch"]))
+	require.Equal(t, 1, intValue(provider.requests[2].Metadata["prompt_cache_epoch"]))
+	recoveredCacheKey := provider.requests[2].Metadata["prompt_cache_key"]
+	require.NotEqual(t, provider.requests[0].Metadata["prompt_cache_key"], recoveredCacheKey)
+
+	// The durable replacement survives this run. A later turn must resume the
+	// same rewritten-history generation instead of resetting to the raw session
+	// key that was previously associated with the pre-compaction prefix.
+	next, err := loop.RunWithSession(context.Background(), "继续下一轮", session)
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.True(t, next.Success)
+	require.Equal(t, 4, provider.callCount)
+	require.Len(t, provider.requests, 4)
+	require.Equal(t, 1, intValue(provider.requests[3].Metadata["prompt_cache_epoch"]))
+	require.Equal(t, recoveredCacheKey, provider.requests[3].Metadata["prompt_cache_key"])
 }
 
 func TestCompactionRecoveryMadeProgressUsesActualHistoryReduction(t *testing.T) {
@@ -1990,6 +2013,13 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 	require.NotNil(t, result)
 	require.True(t, result.Success)
 	require.Len(t, provider.requests, 3)
+	require.Equal(t, 0, intValue(provider.requests[0].Metadata["prompt_cache_epoch"]))
+	require.Equal(t, 0, intValue(provider.requests[1].Metadata["prompt_cache_epoch"]))
+	require.Equal(t, 1, intValue(provider.requests[2].Metadata["prompt_cache_epoch"]))
+	require.NotEqual(t,
+		provider.requests[0].Metadata["prompt_cache_key"],
+		provider.requests[2].Metadata["prompt_cache_key"],
+	)
 
 	foundCompaction := false
 	for _, message := range provider.requests[2].Messages {
@@ -2825,7 +2855,7 @@ func TestReActLoop_ThinkPreservesOlderHistoryWithCapabilityBuildBudget(t *testin
 		*types.NewUserMessage("继续"),
 	}
 
-	_, _, _, err := loop.think(context.Background(), "trace-capability-build", "session-capability-build", 1, "继续", history, nil, nil, 0)
+	_, _, _, err := loop.think(context.Background(), "trace-capability-build", "session-capability-build", 1, "继续", history, nil, nil, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, provider.requests, 1)
 	foundObjective := false
@@ -3377,6 +3407,11 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 		MaxConcurrent: 2,
 		MaxDepth:      1,
 	}))
+	projected := make(chan BatchTerminalLifecycle, 1)
+	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
+		projected <- event
+		return nil
+	})
 
 	llmRuntime := llm.NewLLMRuntime(nil)
 	provider := &SequenceLLMProvider{
@@ -3451,6 +3486,16 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 	}
 	if !sawStructuredReport {
 		t.Fatal("expected parent to receive structured subagent report in tool_result history")
+	}
+	select {
+	case event := <-projected:
+		require.Equal(t, subagentbatch.ExecutionModeWait, event.ExecutionMode)
+		require.Equal(t, subagentbatch.BatchCompleted, event.Status)
+		require.NotEmpty(t, event.ParentSessionID)
+		require.Equal(t, event.ParentSessionID, event.RootScopeID)
+		require.Equal(t, 1, event.CompletedCount)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected synchronous subagent terminal lifecycle projection")
 	}
 }
 
@@ -5982,6 +6027,13 @@ type testContextHistorySession struct {
 func (s *testContextHistorySession) GetContext(key string) (interface{}, bool) {
 	value, ok := s.context[key]
 	return value, ok
+}
+
+func (s *testContextHistorySession) SetContext(key string, value interface{}) {
+	if s.context == nil {
+		s.context = make(map[string]interface{})
+	}
+	s.context[key] = value
 }
 
 func TestSessionGoalIDReadsOnlyCurrentSessionMetadata(t *testing.T) {

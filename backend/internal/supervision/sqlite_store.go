@@ -461,10 +461,18 @@ func (s *SQLiteSupervisionStore) UpsertNotification(ctx context.Context, n Notif
 
 	var existingID string
 	var existingVersion int64
+	var existingDecisionState string
+	var existingResolutionState string
 	err = tx.QueryRowContext(ctx, `
-		SELECT notification_id, version FROM supervision_lifecycle_notifications
+		SELECT notification_id, version, decision_state, resolution_state
+		FROM supervision_lifecycle_notifications
 		WHERE root_scope_id = ? AND subject_kind = ? AND subject_id = ? AND subject_version = ? AND event_type = ?
-	`, n.RootScopeID, string(n.SubjectKind), n.SubjectID, n.SubjectVersion, n.EventType).Scan(&existingID, &existingVersion)
+	`, n.RootScopeID, string(n.SubjectKind), n.SubjectID, n.SubjectVersion, n.EventType).Scan(
+		&existingID,
+		&existingVersion,
+		&existingDecisionState,
+		&existingResolutionState,
+	)
 	switch {
 	case err == nil:
 		// Refresh existing row, keeping original id and created_at.
@@ -472,6 +480,21 @@ func (s *SQLiteSupervisionStore) UpsertNotification(ctx context.Context, n Notif
 		n.Version = existingVersion + 1
 		n.CreatedAt = parseExistingCreatedAt(ctx, tx, existingID, n.CreatedAt)
 		n.UpdatedAt = now
+		// An at-least-once lifecycle replay must not regress decisions or
+		// resolutions already made by the parent. Reopening requires a new
+		// subject version/event idempotency key, not a refresh of the same row.
+		if n.DecisionState == "" {
+			n.DecisionState = DecisionState(existingDecisionState)
+		} else if n.DecisionState == DecisionUnacknowledged &&
+			DecisionState(existingDecisionState) != "" &&
+			DecisionState(existingDecisionState) != DecisionUnacknowledged {
+			n.DecisionState = DecisionState(existingDecisionState)
+		}
+		if n.ResolutionState == ResolutionUnresolved &&
+			ResolutionState(existingResolutionState) != "" &&
+			ResolutionState(existingResolutionState) != ResolutionUnresolved {
+			n.ResolutionState = ResolutionState(existingResolutionState)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE supervision_lifecycle_notifications SET
 				target_parent_session_id = ?, target_parent_team_id = ?,

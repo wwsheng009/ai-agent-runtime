@@ -46,29 +46,30 @@ type Config struct {
 
 // Agent AI Agent
 type Agent struct {
-	config             *Config
-	skillRouter        *skill.Router
-	skillExec          *skill.Executor
-	mcpManager         skill.MCPManager
-	llmRuntime         *llm.LLMRuntime
-	memory             *memory.Memory
-	planner            *Planner
-	artifacts          *artifact.Store
-	contextMgr         *contextmgr.Manager
-	outputGate         *output.Gateway
-	subagents          *SubagentScheduler
-	batchCoordinator   *SubagentBatchCoordinator
-	backgroundBatches  bool
-	toolCatalog        *mcpcatalog.Catalog
-	eventBus           *runtimeevents.Bus
-	promptBuild        *PromptBuilder
-	toolPolicy         *ToolExecutionPolicy
-	toolHooks          ToolHooks
-	permEngine         *PermissionEngine
-	toolBroker         *ToolBroker
-	hookManager        *HookManager
-	checkpointMgr      *CheckpointManager
-	checkpointDisabled bool
+	config                  *Config
+	skillRouter             *skill.Router
+	skillExec               *skill.Executor
+	mcpManager              skill.MCPManager
+	llmRuntime              *llm.LLMRuntime
+	memory                  *memory.Memory
+	planner                 *Planner
+	artifacts               *artifact.Store
+	contextMgr              *contextmgr.Manager
+	outputGate              *output.Gateway
+	subagents               *SubagentScheduler
+	batchCoordinator        *SubagentBatchCoordinator
+	batchLifecycleProjector BatchLifecycleProjector
+	backgroundBatches       bool
+	toolCatalog             *mcpcatalog.Catalog
+	eventBus                *runtimeevents.Bus
+	promptBuild             *PromptBuilder
+	toolPolicy              *ToolExecutionPolicy
+	toolHooks               ToolHooks
+	permEngine              *PermissionEngine
+	toolBroker              *ToolBroker
+	hookManager             *HookManager
+	checkpointMgr           *CheckpointManager
+	checkpointDisabled      bool
 
 	mu      sync.RWMutex
 	running bool
@@ -309,7 +310,11 @@ func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.batchCoordinator == nil {
-		cfg := SubagentBatchCoordinatorConfig{Scheduler: scheduler, Store: store}
+		cfg := SubagentBatchCoordinatorConfig{
+			Scheduler:          scheduler,
+			Store:              store,
+			LifecycleProjector: a.batchLifecycleProjector,
+		}
 		cfg.Emitter = func(eventType string, payload map[string]interface{}) {
 			sessionID := ""
 			toolName := "spawn_subagents"
@@ -341,6 +346,35 @@ func (a *Agent) SetSubagentBatchCoordinator(c *SubagentBatchCoordinator) {
 	defer a.mu.Unlock()
 	a.batchCoordinator = c
 	a.backgroundBatches = c != nil
+	if c != nil {
+		c.SetLifecycleProjector(a.batchLifecycleProjector)
+	}
+}
+
+// SetBatchLifecycleProjector installs the host adapter used for terminal
+// supervision projections for both synchronous and background subagent
+// batches. The callback is intentionally host-neutral; failures are handled
+// best-effort by the batch execution paths.
+func (a *Agent) SetBatchLifecycleProjector(projector BatchLifecycleProjector) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.batchLifecycleProjector = projector
+	coordinator := a.batchCoordinator
+	a.mu.Unlock()
+	if coordinator != nil {
+		coordinator.SetLifecycleProjector(projector)
+	}
+}
+
+func (a *Agent) batchLifecycleProjectorSnapshot() BatchLifecycleProjector {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.batchLifecycleProjector
 }
 
 // GetToolCatalog 返回 MCP Tool Catalog。

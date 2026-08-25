@@ -533,8 +533,13 @@ func TestRecoverStaleBatchMarksOrphanedAndDeliversTerminal(t *testing.T) {
 		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
 	}
 	var delivered []agentTerminalTestDelivery
+	var projected []BatchTerminalLifecycle
 	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
 		Store: store,
+		LifecycleProjector: func(_ context.Context, event BatchTerminalLifecycle) error {
+			projected = append(projected, event)
+			return nil
+		},
 		TerminalSink: func(_ context.Context, notification BatchTerminalNotification) BatchTerminalDelivery {
 			delivered = append(delivered, agentTerminalTestDelivery{EventType: notification.EventType, Key: notification.DeliveryKey})
 			return BatchTerminalDelivery{Status: BatchTerminalDeliveryPersisted, DeliveryKey: notification.DeliveryKey}
@@ -550,6 +555,9 @@ func TestRecoverStaleBatchMarksOrphanedAndDeliversTerminal(t *testing.T) {
 	}
 	if len(delivered) != 1 || delivered[0].EventType != "subagent.batch.orphaned" {
 		t.Fatalf("terminal delivery = %#v", delivered)
+	}
+	if len(projected) != 1 || projected[0].Status != subagentbatch.BatchOrphaned {
+		t.Fatalf("terminal projection = %#v", projected)
 	}
 }
 

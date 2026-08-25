@@ -74,8 +74,11 @@ func ProjectLifecycle(ctx context.Context, store Store, wakes *WakeScheduler, ev
 		Reason:            strings.TrimSpace(event.Reason),
 		RecommendedAction: strings.TrimSpace(event.RecommendedAction),
 		AllowedActions:    append([]string(nil), event.AllowedActions...),
-		DecisionState:     DecisionUnacknowledged,
-		ResolutionState:   event.ResolutionState,
+		// Leave decision state empty here. The store initializes new rows as
+		// unacknowledged, while an idempotent replay must preserve an existing
+		// acknowledgement/action instead of reopening the parent decision.
+		DecisionState:   "",
+		ResolutionState: event.ResolutionState,
 	})
 	if err != nil {
 		return Notification{}, fmt.Errorf("supervision: persist lifecycle projection: %w", err)

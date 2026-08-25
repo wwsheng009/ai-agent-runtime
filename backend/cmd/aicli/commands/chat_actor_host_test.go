@@ -4414,3 +4414,71 @@ func TestLocalChatRuntimeHostCloseWaitsForSubagentOperation(t *testing.T) {
 		t.Fatal("host cleanup did not run after Close")
 	}
 }
+
+func TestRunLocalSubagentStartupRecoveryRunsImmediateAndDelayedPass(t *testing.T) {
+	type recoveryCall struct {
+		hasDeadline bool
+	}
+	calls := make(chan recoveryCall, 2)
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		runLocalSubagentStartupRecovery(ctx, 20*time.Millisecond, time.Second, func(passCtx context.Context) {
+			_, hasDeadline := passCtx.Deadline()
+			calls <- recoveryCall{hasDeadline: hasDeadline}
+		})
+		close(done)
+	}()
+
+	for pass := 1; pass <= 2; pass++ {
+		select {
+		case call := <-calls:
+			if !call.hasDeadline {
+				t.Fatalf("recovery pass %d did not receive a bounded context", pass)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("recovery pass %d was not invoked", pass)
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("startup recovery did not return after its delayed pass")
+	}
+	select {
+	case <-calls:
+		t.Fatal("startup recovery invoked more than two passes")
+	default:
+	}
+}
+
+func TestRunLocalSubagentStartupRecoveryCancellationSkipsDelayedPass(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := make(chan struct{}, 2)
+	done := make(chan struct{})
+	go func() {
+		runLocalSubagentStartupRecovery(ctx, time.Hour, time.Second, func(context.Context) {
+			calls <- struct{}{}
+		})
+		close(done)
+	}()
+
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("immediate recovery pass was not invoked")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("startup recovery did not exit promptly after cancellation")
+	}
+	select {
+	case <-calls:
+		t.Fatal("delayed recovery pass ran after cancellation")
+	default:
+	}
+}

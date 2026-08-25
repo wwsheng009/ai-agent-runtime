@@ -90,6 +90,7 @@ type SubagentBatchCoordinatorConfig struct {
 	Scheduler               *SubagentScheduler
 	Emitter                 BatchEmitter
 	TerminalSink            BatchTerminalSink
+	LifecycleProjector      BatchLifecycleProjector
 	DefaultDeadline         time.Duration // applied when a request carries no deadline
 	TerminalDeliveryTimeout time.Duration
 	HeartbeatInterval       time.Duration
@@ -104,13 +105,14 @@ type subagentExecutor interface {
 
 // SubagentBatchCoordinator persists and drives background subagent batches.
 type SubagentBatchCoordinator struct {
-	store           subagentbatch.BatchStore
-	executor        subagentExecutor
-	emitter         BatchEmitter
-	sink            BatchTerminalSink
-	deadline        time.Duration
-	deliveryTimeout time.Duration
-	heartbeatEvery  time.Duration
+	store              subagentbatch.BatchStore
+	executor           subagentExecutor
+	emitter            BatchEmitter
+	sink               BatchTerminalSink
+	lifecycleProjector BatchLifecycleProjector
+	deadline           time.Duration
+	deliveryTimeout    time.Duration
+	heartbeatEvery     time.Duration
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -129,6 +131,7 @@ type SubagentBatchCoordinator struct {
 	terminalMu        sync.Mutex
 	terminalDelivered map[string]struct{}
 	emitterMu         sync.RWMutex
+	lifecycleMu       sync.RWMutex
 }
 
 // NewSubagentBatchCoordinator constructs a coordinator from a config. The
@@ -145,19 +148,41 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 	}
 	scheduler := cfg.Scheduler
 	return &SubagentBatchCoordinator{
-		store:             cfg.Store,
-		executor:          scheduler,
-		emitter:           cfg.Emitter,
-		sink:              cfg.TerminalSink,
-		deadline:          cfg.DefaultDeadline,
-		deliveryTimeout:   cfg.TerminalDeliveryTimeout,
-		heartbeatEvery:    cfg.HeartbeatInterval,
-		cancels:           make(map[string]context.CancelFunc),
-		owned:             make(map[string]struct{}),
-		abandoned:         make(map[string]struct{}),
-		terminalDelivered: make(map[string]struct{}),
-		ownerID:           subagentbatch.NewID("coordinator"),
+		store:              cfg.Store,
+		executor:           scheduler,
+		emitter:            cfg.Emitter,
+		sink:               cfg.TerminalSink,
+		lifecycleProjector: cfg.LifecycleProjector,
+		deadline:           cfg.DefaultDeadline,
+		deliveryTimeout:    cfg.TerminalDeliveryTimeout,
+		heartbeatEvery:     cfg.HeartbeatInterval,
+		cancels:            make(map[string]context.CancelFunc),
+		owned:              make(map[string]struct{}),
+		abandoned:          make(map[string]struct{}),
+		terminalDelivered:  make(map[string]struct{}),
+		ownerID:            subagentbatch.NewID("coordinator"),
 	}
+}
+
+// SetLifecycleProjector installs or replaces the host lifecycle adapter. It
+// is safe to call while workers are running; the callback is snapshotted before
+// invocation and never called while coordinator write/terminal locks are held.
+func (c *SubagentBatchCoordinator) SetLifecycleProjector(projector BatchLifecycleProjector) {
+	if c == nil {
+		return
+	}
+	c.lifecycleMu.Lock()
+	c.lifecycleProjector = projector
+	c.lifecycleMu.Unlock()
+}
+
+func (c *SubagentBatchCoordinator) lifecycleProjectorSnapshot() BatchLifecycleProjector {
+	if c == nil {
+		return nil
+	}
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	return c.lifecycleProjector
 }
 
 func (c *SubagentBatchCoordinator) coordinatorOwnerID() string {
@@ -260,6 +285,11 @@ func (c *SubagentBatchCoordinator) ReplayTerminalDeliveries(ctx context.Context,
 		batch := batches[i]
 		result.Scanned++
 		eventType, deliveryKey, payload := terminalNotificationFromBatch(&batch)
+		if projectionErr := c.projectTerminalLifecycle(ctx, &batch, eventType, nil); projectionErr != nil {
+			result.Failed++
+			deliveryErrors = append(deliveryErrors, fmt.Errorf("batch %s: lifecycle projection: %w", batch.BatchID, projectionErr))
+			payload["supervision_projection_error"] = projectionErr.Error()
+		}
 		if strings.TrimSpace(batch.ParentSessionID) == "" {
 			result.Failed++
 			deliveryErrors = append(deliveryErrors, fmt.Errorf("batch %s: parent session id is empty", batch.BatchID))
@@ -382,6 +412,12 @@ func (c *SubagentBatchCoordinator) StartBackground(parentCtx context.Context, op
 	if !created {
 		// Idempotent replay: the existing batch is the durable truth.
 		if batch.Status.Terminal() {
+			eventType, _, _ := terminalNotificationFromBatch(batch)
+			// A caller may replay an already-terminal idempotency key after a
+			// process crashed between terminal persistence and projection. Do
+			// not return the handle without giving the host projection another
+			// at-least-once opportunity.
+			_ = c.projectTerminalLifecycle(parentCtx, batch, eventType, nil)
 			return batch, nil
 		}
 		// A replay can arrive after a process crashed between durable creation
@@ -687,6 +723,9 @@ func (c *SubagentBatchCoordinator) finalizeUnownedCanceledBatch(ctx context.Cont
 		return nil
 	}
 	eventType, deliveryKey, payload := terminalNotificationFromBatch(updated)
+	if projectionErr := c.projectTerminalLifecycle(ctx, updated, eventType, nil); projectionErr != nil {
+		payload["supervision_projection_error"] = projectionErr.Error()
+	}
 	delivery := c.deliverTerminalOnce(ctx, updated, eventType, deliveryKey, payload)
 	if strings.TrimSpace(delivery.DeliveryKey) != "" {
 		payload["delivery_key"] = strings.TrimSpace(delivery.DeliveryKey)
@@ -852,6 +891,9 @@ func (c *SubagentBatchCoordinator) convergeBatchTerminal(ctx context.Context, ba
 		return nil
 	}
 	eventType, deliveryKey, payload := terminalNotificationFromBatch(updated)
+	if projectionErr := c.projectTerminalLifecycle(ctx, updated, eventType, nil); projectionErr != nil {
+		payload["supervision_projection_error"] = projectionErr.Error()
+	}
 	delivery := c.deliverTerminalOnce(ctx, updated, eventType, deliveryKey, payload)
 	if delivery.Err != nil {
 		return delivery.Err
@@ -1524,6 +1566,9 @@ func (c *SubagentBatchCoordinator) emitTerminalEvent(ctx context.Context, batch 
 	payload["delivery_key"] = deliveryKey
 	payload["display_mirror"] = true
 	payload["mirror_source"] = "subagent_batch_terminal_mailbox"
+	if projectionErr := c.projectTerminalLifecycle(ctx, batch, eventType, &summary); projectionErr != nil {
+		payload["supervision_projection_error"] = projectionErr.Error()
+	}
 	delivery := c.deliverTerminalOnce(ctx, batch, eventType, deliveryKey, payload)
 	if strings.TrimSpace(delivery.DeliveryKey) != "" {
 		payload["delivery_key"] = strings.TrimSpace(delivery.DeliveryKey)
@@ -1629,6 +1674,76 @@ func terminalNotificationFromBatch(batch *subagentbatch.SubagentBatch) (string, 
 	payload["display_mirror"] = true
 	payload["mirror_source"] = "subagent_batch_terminal_mailbox"
 	return eventType, deliveryKey, payload
+}
+
+// projectTerminalLifecycle is deliberately best-effort. The batch row has
+// already reached a durable terminal state before this function is called;
+// replay scans invoke it again so a transient host/supervision outage is
+// recoverable without changing mailbox or tool-result semantics.
+func (c *SubagentBatchCoordinator) projectTerminalLifecycle(ctx context.Context, batch *subagentbatch.SubagentBatch, eventType string, summary *subagentbatch.BatchSummary) error {
+	projector := c.lifecycleProjectorSnapshot()
+	if projector == nil || batch == nil || !batch.Status.Terminal() {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	projectionTimeout := c.deliveryTimeout
+	if projectionTimeout <= 0 {
+		projectionTimeout = 5 * time.Second
+	}
+	projectionCtx, projectionCancel := context.WithTimeout(context.WithoutCancel(ctx), projectionTimeout)
+	defer projectionCancel()
+	var resolved subagentbatch.BatchSummary
+	if summary != nil {
+		resolved = *summary
+	} else if len(batch.ResultSummary) > 0 {
+		_ = json.Unmarshal(batch.ResultSummary, &resolved)
+	}
+	if resolved.BatchID == "" {
+		resolved.BatchID = batch.BatchID
+	}
+	if resolved.Status == "" {
+		resolved.Status = batch.Status
+	}
+	if resolved.TaskCount == 0 {
+		resolved.TaskCount = batch.TaskCount
+	}
+	if resolved.CompletedCount == 0 {
+		resolved.CompletedCount = batch.CompletedCount
+	}
+	if resolved.FailedCount == 0 {
+		resolved.FailedCount = batch.FailedCount
+	}
+	if resolved.CanceledCount == 0 {
+		resolved.CanceledCount = batch.CanceledCount
+	}
+	if resolved.TimedOutCount == 0 {
+		resolved.TimedOutCount = batch.TimedOutCount
+	}
+	errorDetail := batch.ErrorDetail
+	if errorDetail == "" && len(resolved.CriticalErrors) > 0 {
+		errorDetail = strings.Join(resolved.CriticalErrors, "; ")
+	}
+	return projector(projectionCtx, BatchTerminalLifecycle{
+		BatchID:          batch.BatchID,
+		RootScopeID:      batch.RootScopeID,
+		ParentSessionID:  batch.ParentSessionID,
+		ParentTurnID:     batch.ParentTurnID,
+		ParentToolCallID: batch.ParentToolCallID,
+		TraceID:          batch.TraceID,
+		ExecutionMode:    batch.ExecutionMode,
+		Status:           batch.Status,
+		EventType:        eventType,
+		SubjectVersion:   batch.Version,
+		TaskCount:        resolved.TaskCount,
+		CompletedCount:   resolved.CompletedCount,
+		FailedCount:      resolved.FailedCount,
+		CanceledCount:    resolved.CanceledCount,
+		TimedOutCount:    resolved.TimedOutCount,
+		ErrorClass:       firstNonEmptyString(batch.ErrorClass, resolved.ErrorClass),
+		Error:            errorDetail,
+	}.normalized())
 }
 
 func batchTerminalEventType(status subagentbatch.BatchStatus) string {

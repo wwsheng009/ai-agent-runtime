@@ -1,13 +1,13 @@
 package agent
 
 import (
-	"os"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -112,14 +112,16 @@ type toolSourceResolver interface {
 }
 
 type loopRunOptions struct {
-	TraceID        string
-	SessionID      string
-	History        []types.Message
-	IncludePrompt  bool
-	Depth          int
-	BudgetTokens   int
-	ToolWhitelist  []string
-	PersistHistory func([]types.Message) error
+	TraceID                 string
+	SessionID               string
+	History                 []types.Message
+	IncludePrompt           bool
+	Depth                   int
+	BudgetTokens            int
+	ToolWhitelist           []string
+	PromptCacheEpoch        int
+	PersistHistory          func([]types.Message) error
+	PersistPromptCacheEpoch func(int) error
 }
 
 // HistorySession 描述 ReActLoop 运行时需要的最小 session 能力。
@@ -133,6 +135,16 @@ type HistorySession interface {
 type historySessionContextReader interface {
 	GetContext(key string) (interface{}, bool)
 }
+
+type historySessionContextWriter interface {
+	SetContext(key string, value interface{})
+}
+
+// PromptCacheEpochSessionContextKey stores the durable prompt-cache generation
+// for a session. Hosts that rewrite session history outside ReActLoop (for
+// example an explicit session compact command) must advance this value before
+// persisting the replacement history.
+const PromptCacheEpochSessionContextKey = "aicli.prompt_cache_epoch"
 
 // NewReActLoop 创建 ReAct 循环
 func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActConfig) *ReActLoop {
@@ -276,12 +288,17 @@ func (loop *ReActLoop) RunWithSession(ctx context.Context, prompt string, sessio
 
 	ctx = toolctx.WithGoalID(ctx, sessionGoalID(session))
 	return loop.run(ctx, prompt, loopRunOptions{
-		TraceID:       "trace_" + uuid.NewString(),
-		SessionID:     session.SessionID(),
-		History:       session.GetMessages(),
-		IncludePrompt: includePrompt,
+		TraceID:          "trace_" + uuid.NewString(),
+		SessionID:        session.SessionID(),
+		History:          session.GetMessages(),
+		IncludePrompt:    includePrompt,
+		PromptCacheEpoch: sessionPromptCacheEpoch(session),
 		PersistHistory: func(messages []types.Message) error {
 			session.ReplaceHistory(stripSystemMessages(messages))
+			return nil
+		},
+		PersistPromptCacheEpoch: func(epoch int) error {
+			setSessionPromptCacheEpoch(session, epoch)
 			return nil
 		},
 	})
@@ -295,12 +312,17 @@ func (loop *ReActLoop) ContinueWithSession(ctx context.Context, session HistoryS
 
 	ctx = toolctx.WithGoalID(ctx, sessionGoalID(session))
 	return loop.run(ctx, "", loopRunOptions{
-		TraceID:       "trace_" + uuid.NewString(),
-		SessionID:     session.SessionID(),
-		History:       session.GetMessages(),
-		IncludePrompt: false,
+		TraceID:          "trace_" + uuid.NewString(),
+		SessionID:        session.SessionID(),
+		History:          session.GetMessages(),
+		IncludePrompt:    false,
+		PromptCacheEpoch: sessionPromptCacheEpoch(session),
 		PersistHistory: func(messages []types.Message) error {
 			session.ReplaceHistory(stripSystemMessages(messages))
+			return nil
+		},
+		PersistPromptCacheEpoch: func(epoch int) error {
+			setSessionPromptCacheEpoch(session, epoch)
 			return nil
 		},
 	})
@@ -326,6 +348,33 @@ func sessionGoalID(session HistorySession) string {
 		return ""
 	}
 	return strings.TrimSpace(owner.GoalID)
+}
+
+func sessionPromptCacheEpoch(session HistorySession) int {
+	reader, ok := session.(historySessionContextReader)
+	if !ok {
+		return 0
+	}
+	raw, ok := reader.GetContext(PromptCacheEpochSessionContextKey)
+	if !ok {
+		return 0
+	}
+	epoch := intValue(raw)
+	if epoch < 0 {
+		return 0
+	}
+	return epoch
+}
+
+func setSessionPromptCacheEpoch(session HistorySession, epoch int) {
+	writer, ok := session.(historySessionContextWriter)
+	if !ok {
+		return
+	}
+	if epoch < 0 {
+		epoch = 0
+	}
+	writer.SetContext(PromptCacheEpochSessionContextKey, epoch)
 }
 
 func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOptions) (result *Result, runErr error) {
@@ -427,6 +476,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		return nil, err
 	}
 	remainingBudget := options.BudgetTokens
+	// A prompt-cache key is stable while the prompt history only grows by
+	// appending.  Any explicit history replacement (active-turn or semantic
+	// compaction) starts a new cache epoch so the provider never associates a
+	// rewritten prefix with the previous generation.
+	promptCacheEpoch := options.PromptCacheEpoch
+	if promptCacheEpoch < 0 {
+		promptCacheEpoch = 0
+	}
 	sessionCompactionRecoveryStep := 0
 	sessionCompactionRecoveryInputs := make(map[string]struct{})
 	lastToolPromptFingerprint := ""
@@ -513,6 +570,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				}
 			} else if compacted {
 				promptBuilder = NewMessageBuilder(compactedHistory)
+				promptCacheEpoch++
 				totalUsage.Add(compactUsage)
 				result.Usage = totalUsage.Clone()
 				if options.BudgetTokens > 0 && compactUsage != nil {
@@ -522,7 +580,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 1. Think: LLM 推理决定下一步行动
-		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget)
+		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget, promptCacheEpoch)
+		if nextEpoch, ok := promptCacheEpochFromAction(action); ok && nextEpoch > promptCacheEpoch {
+			promptCacheEpoch = nextEpoch
+		}
 		if err != nil {
 			// 模型工具参数非法（invalid_tool_arguments）：不终止 turn，降级为
 			// 工具执行反馈回注（附 schema），让模型按 schema 重新输出参数。
@@ -555,6 +616,21 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				if recoveryErr != nil {
 					loop.agent.AddError(fmt.Sprintf("session compaction recovery failed after %s error: %v", recoveryKind, recoveryErr))
 				} else if recovered && compactionRecoveryMadeProgress(loop.llmRuntime, recoveryHistory, recoveredHistory) {
+					nextPromptCacheEpoch := promptCacheEpoch + 1
+					// Persist the new generation before the rewritten history.
+					// If history persistence subsequently fails, an unnecessary
+					// cache miss is safe; persisting rewritten history under the
+					// old generation is not.
+					if options.PersistPromptCacheEpoch != nil {
+						if persistErr := options.PersistPromptCacheEpoch(nextPromptCacheEpoch); persistErr != nil {
+							loop.agent.AddError(fmt.Sprintf("persist prompt cache epoch after %s error failed: %v", recoveryKind, persistErr))
+							result.Error = err.Error()
+							setLLMFailureDiagnostic(result, err)
+							result.Usage = totalUsage.Clone()
+							result.State = loop.agent.GetState()
+							return result, fmt.Errorf("%w: persisted prompt cache epoch failed: %v", err, persistErr)
+						}
+					}
 					if options.PersistHistory != nil {
 						if persistErr := options.PersistHistory(recoveredHistory); persistErr != nil {
 							loop.agent.AddError(fmt.Sprintf("persist compacted history after %s error failed: %v", recoveryKind, persistErr))
@@ -567,6 +643,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					}
 					builder = NewMessageBuilder(recoveredHistory)
 					promptBuilder = NewMessageBuilder(recoveredHistory)
+					// Session compaction replaces already-sent history just like the
+					// active-turn/preflight compaction paths above.  Do not reuse the
+					// old provider cache generation for the rewritten prefix.
+					promptCacheEpoch = nextPromptCacheEpoch
 					step--
 					continue
 				}
@@ -955,6 +1035,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 		} else if compacted {
 			promptBuilder = NewMessageBuilder(compactedHistory)
+			promptCacheEpoch++
 			totalUsage.Add(compactUsage)
 			result.Usage = totalUsage.Clone()
 			if options.BudgetTokens > 0 && compactUsage != nil {
@@ -1106,11 +1187,11 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		recoveries[name] = loop.malformedToolCallRecoveries[name]
 	}
 	loop.emitRuntimeEvent("tool.malformed_arguments.recovered", sessionID, strings.Join(names, ","), map[string]interface{}{
-		"trace_id":      traceID,
-		"step":          step,
-		"tool_names":    names,
-		"tool_calls":    len(malformed.ToolCalls),
-		"recoveries":    recoveries,
+		"trace_id":       traceID,
+		"step":           step,
+		"tool_names":     names,
+		"tool_calls":     len(malformed.ToolCalls),
+		"recoveries":     recoveries,
 		"max_recoveries": maxMalformedToolCallRecoveries,
 	})
 	return true
@@ -1166,9 +1247,10 @@ func repeatedToolLimitReachedMessage(maxCalls int) string {
 }
 
 // think 思考阶段：让 LLM 决定下一步行动
-func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, step int, goal string, history []types.Message, observations []types.Observation, toolWhitelist []string, remainingBudget int) (thought string, action *AgentAction, usage *types.TokenUsage, err error) {
+func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, step int, goal string, history []types.Message, observations []types.Observation, toolWhitelist []string, remainingBudget, promptCacheEpoch int) (thought string, action *AgentAction, usage *types.TokenUsage, err error) {
 	action = &AgentAction{}
 	managedHistory := history
+	promptPrefixRewritten := false
 	countTokens := func(messages []types.Message) int {
 		if loop == nil || loop.llmRuntime == nil {
 			return 0
@@ -1212,6 +1294,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			EnablePromptCompaction: true,
 		})
 		managedHistory = built.Messages
+		promptPrefixRewritten = promptHistoryPrefixChanged(history, managedHistory)
 		action.Metadata = map[string]interface{}{
 			"context": built.Metadata,
 		}
@@ -1263,10 +1346,31 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	var preflightMetadata map[string]interface{}
 	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget)
 	if err != nil {
-		return "", nil, nil, err
+		if boolValue(preflightMetadata["prompt_cache_epoch_break"]) {
+			if action.Metadata == nil {
+				action.Metadata = map[string]interface{}{}
+			}
+			action.Metadata["prompt_cache_epoch"] = promptCacheEpoch + 1
+		}
+		// Preserve the action metadata on prompt-preflight failures so the outer
+		// loop can carry the cache epoch across its recovery/compaction retry.
+		return "", action, nil, err
+	}
+	if boolValue(preflightMetadata["prompt_cache_epoch_break"]) || promptHistoryPrefixChanged(history, managedHistory) {
+		promptPrefixRewritten = true
 	}
 	action.promptHistory = reusablePromptHistory(history, managedHistory)
 	action.toolSchemaTokens = estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
+	requestCacheEpoch := promptCacheEpoch
+	if promptPrefixRewritten {
+		requestCacheEpoch++
+	}
+	requestCacheKey := promptCacheKeyForEpoch(sessionID, requestCacheEpoch)
+	if action.Metadata == nil {
+		action.Metadata = map[string]interface{}{}
+	}
+	action.Metadata["prompt_cache_epoch"] = requestCacheEpoch
+	action.Metadata["prompt_cache_key"] = requestCacheKey
 
 	requestProvider := loop.requestProvider()
 	requestModel := loop.requestModel()
@@ -1315,7 +1419,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		req.Metadata["context_preflight"] = cloneInterfaceMap(preflightMetadata)
 	}
 	if sessionID != "" {
-		req.Metadata["prompt_cache_key"] = sessionID
+		req.Metadata["prompt_cache_key"] = requestCacheKey
+		req.Metadata["prompt_cache_epoch"] = requestCacheEpoch
 	}
 	promptLayoutSummary := ""
 	promptLayoutLength := 0
@@ -1429,14 +1534,16 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 
 	// 调用 LLM
 	requestPayload := map[string]interface{}{
-		"trace_id":        traceID,
-		"logical_turn_id": logicalTurnID,
-		"llm_request_id":  llmRequestID,
-		"step":            step,
-		"model":           req.Model,
-		"provider":        req.Provider,
-		"message_count":   len(req.Messages),
-		"tool_count":      len(req.Tools),
+		"trace_id":           traceID,
+		"logical_turn_id":    logicalTurnID,
+		"llm_request_id":     llmRequestID,
+		"step":               step,
+		"model":              req.Model,
+		"provider":           req.Provider,
+		"message_count":      len(req.Messages),
+		"tool_count":         len(req.Tools),
+		"prompt_cache_epoch": requestCacheEpoch,
+		"prompt_cache_key":   requestCacheKey,
 	}
 	addRemainingBudgetMetadata(requestPayload, remainingBudget)
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
@@ -2077,7 +2184,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
 					} else {
 						handleOutput, marshalErr := json.Marshal(map[string]interface{}{
-							"ok":            true,
+							"ok":             true,
 							"execution_mode": "background",
 							"batch_id":       batch.BatchID,
 							"status":         string(batch.Status),
@@ -2122,7 +2229,11 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						Depth:            depth + 1,
 					}, subtasks)
 					completedCount, failedCount := subagentResultCounts(reports)
-					loop.emitRuntimeEvent("subagent.batch.completed", sessionID, tc.Name, map[string]interface{}{
+					terminalLifecycle := waitBatchTerminalLifecycle(syncBatchID, sessionID, tc.ID, traceID, len(subtasks), reports, runErr, ctx)
+					projectionCtx, projectionCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					terminalProjectionErr := loop.agent.projectBatchLifecycle(projectionCtx, terminalLifecycle)
+					projectionCancel()
+					terminalPayload := map[string]interface{}{
 						"tool_call_id":      tc.ID,
 						"step":              step,
 						"trace_id":          traceID,
@@ -2135,7 +2246,11 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						"elapsed_ms":        int(time.Since(syncStart).Milliseconds()),
 						"error":             errorString(runErr),
 						"parent_session_id": sessionID,
-					})
+					}
+					if terminalProjectionErr != nil {
+						terminalPayload["supervision_projection_error"] = terminalProjectionErr.Error()
+					}
+					loop.emitRuntimeEvent("subagent.batch.completed", sessionID, tc.Name, terminalPayload)
 					if runErr != nil {
 						result.Error = runErr.Error()
 						loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_scheduler", result.Error, nil)
@@ -3779,6 +3894,48 @@ func reusablePromptHistory(source, managed []types.Message) []types.Message {
 	return reusable
 }
 
+// promptHistoryPrefixChanged reports whether managed rewrote any message that
+// was already present in source. Context-manager projections and advisories are
+// allowed to append after the durable history; only a wire-level prefix change
+// needs a new provider prompt-cache generation.
+func promptHistoryPrefixChanged(source, managed []types.Message) bool {
+	if len(source) == 0 {
+		return false
+	}
+	if len(managed) < len(source) {
+		return true
+	}
+	prefix := managed[:len(source)]
+	return promptMessageFingerprint(source) != promptMessageFingerprint(prefix)
+}
+
+// promptCacheKeyForEpoch keeps the common append-only path compatible with the
+// caller's session key, while making every rewritten prompt history an explicit
+// cache generation. Empty sessions retain the empty key so providers can apply
+// their own default cache policy.
+func promptCacheKeyForEpoch(sessionID string, epoch int) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || epoch <= 0 {
+		return sessionID
+	}
+	return fmt.Sprintf("%s#prompt-cache-epoch-%d", sessionID, epoch)
+}
+
+func promptCacheEpochFromAction(action *AgentAction) (int, bool) {
+	if action == nil || len(action.Metadata) == 0 {
+		return 0, false
+	}
+	epoch, ok := action.Metadata["prompt_cache_epoch"]
+	if !ok {
+		return 0, false
+	}
+	value := intValue(epoch)
+	if value < 0 {
+		return 0, false
+	}
+	return value, true
+}
+
 func appendMissingContextSnapshots(builder *MessageBuilder, managed []types.Message) bool {
 	if builder == nil || len(managed) == 0 {
 		return false
@@ -5189,6 +5346,102 @@ func subagentResultCounts(reports []SubagentResult) (completed, failed int) {
 		}
 	}
 	return
+}
+
+func waitBatchTerminalLifecycle(batchID, parentSessionID, parentToolCallID, traceID string, taskCount int, reports []SubagentResult, runErr error, ctx context.Context) BatchTerminalLifecycle {
+	completed, failed, canceled, timedOut := 0, 0, 0, 0
+	firstError := ""
+	for _, report := range reports {
+		if report.Success && strings.TrimSpace(report.Error) == "" {
+			completed++
+			continue
+		}
+		errText := strings.TrimSpace(report.Error)
+		if errText == "" {
+			errText = strings.TrimSpace(report.Summary)
+		}
+		if firstError == "" && errText != "" {
+			firstError = errText
+		}
+		switch {
+		case isSubagentTimeoutText(errText):
+			timedOut++
+		case isSubagentCanceledText(errText):
+			canceled++
+		default:
+			failed++
+		}
+	}
+	if taskCount < 0 {
+		taskCount = len(reports)
+	}
+	accounted := completed + failed + canceled + timedOut
+	if runErr == nil && accounted < taskCount {
+		failed += taskCount - accounted
+		if firstError == "" {
+			firstError = "subagent batch returned incomplete reports"
+		}
+	}
+
+	status := subagentbatch.BatchCompleted
+	errorClass := ""
+	errorDetail := firstError
+	switch {
+	case ctx != nil && ctx.Err() == context.DeadlineExceeded:
+		status, errorClass = subagentbatch.BatchTimedOut, "timeout"
+	case ctx != nil && ctx.Err() == context.Canceled:
+		status, errorClass = subagentbatch.BatchCanceled, "canceled"
+	case isSubagentTimeoutError(runErr):
+		status, errorClass = subagentbatch.BatchTimedOut, "timeout"
+	case isSubagentCanceledError(runErr):
+		status, errorClass = subagentbatch.BatchCanceled, "canceled"
+	case runErr != nil:
+		status, errorClass = subagentbatch.BatchFailed, subagentbatch.CanonicalErrorClass(runErr)
+	case canceled > 0:
+		status, errorClass = subagentbatch.BatchCanceled, "canceled"
+	case timedOut > 0:
+		status, errorClass = subagentbatch.BatchTimedOut, "timeout"
+	case failed > 0:
+		status, errorClass = subagentbatch.BatchFailed, "task_failure"
+	}
+	if runErr != nil {
+		errorDetail = runErr.Error()
+	}
+	return BatchTerminalLifecycle{
+		BatchID:          batchID,
+		RootScopeID:      parentSessionID,
+		ParentSessionID:  parentSessionID,
+		ParentToolCallID: parentToolCallID,
+		TraceID:          traceID,
+		ExecutionMode:    subagentbatch.ExecutionModeWait,
+		Status:           status,
+		EventType:        batchTerminalEventType(status),
+		SubjectVersion:   1,
+		TaskCount:        taskCount,
+		CompletedCount:   completed,
+		FailedCount:      failed,
+		CanceledCount:    canceled,
+		TimedOutCount:    timedOut,
+		ErrorClass:       errorClass,
+		Error:            errorDetail,
+	}
+}
+
+func isSubagentTimeoutError(err error) bool {
+	return err != nil && (stderrors.Is(err, context.DeadlineExceeded) || isSubagentTimeoutText(err.Error()))
+}
+
+func isSubagentCanceledError(err error) bool {
+	return err != nil && (stderrors.Is(err, context.Canceled) || isSubagentCanceledText(err.Error()))
+}
+
+func isSubagentTimeoutText(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(value, "timeout") || strings.Contains(value, "timed out") || strings.Contains(value, "deadline")
+}
+
+func isSubagentCanceledText(value string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(value)), "cancel")
 }
 
 func renderSubagentResults(results []SubagentResult) string {
