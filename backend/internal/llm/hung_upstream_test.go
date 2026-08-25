@@ -134,6 +134,50 @@ func TestProviderAbortsAfterRepeatedResponseHeaderTimeouts(t *testing.T) {
 	}
 }
 
+// TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts asserts that a
+// FINITE retry budget is honored end-to-end even when every attempt hits a
+// response-header timeout: the agent contract is to retry within the budget,
+// so the hung-upstream guard must not take away the configured attempts.
+func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			addr, accepts, stop := hungUpstreamListener(t)
+			defer stop()
+
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                  "openai",
+				BaseURL:               "http://" + addr,
+				MaxRetries:            3, // finite: retries must run their course
+				ResponseHeaderTimeout: 300 * time.Millisecond,
+			})
+			require.NoError(t, err)
+
+			runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "hung-model", MaxRetries: 3})
+			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_, err = runtime.Call(ctx, &LLMRequest{
+				Model:  "hung-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "timeout awaiting response headers",
+				"error should report the hung-upstream header wait, got: %v", err)
+			assert.Equal(t, int64(3), accepts.Load(),
+				"finite budget of 3 attempts must be fully used; the guard must not stop retries early")
+		})
+	}
+}
+
 // TestProviderRetriesTransientErrorsNormally guards against the fail-fast
 // guard firing for non-header errors: a 5xx retry still uses both retries.
 func TestProviderRetriesTransientErrorsNormally(t *testing.T) {
@@ -187,4 +231,52 @@ func TestTrackHeaderTimeoutStreak(t *testing.T) {
 			t.Fatalf("streak = %d, want 1 (hang, reset, hang)", n)
 		}
 	})
+}
+
+// TestProviderTransportBudgetBoundsHungUpstream asserts the two-tier budget
+// (mirrors codex-rs request-level transport retries): a hung upstream burns
+// the tighter transport budget (4 attempts) instead of the full business
+// budget (10 attempts), because retrying a dead connection from scratch
+// rarely succeeds immediately.
+func TestProviderTransportBudgetBoundsHungUpstream(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			addr, accepts, stop := hungUpstreamListener(t)
+			defer stop()
+
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                  "openai",
+				BaseURL:               "http://" + addr,
+				MaxRetries:            10, // generous business budget
+				MaxTransportRetries:   4,  // tighter transport budget wins
+				ResponseHeaderTimeout: 300 * time.Millisecond,
+			})
+			require.NoError(t, err)
+
+			runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "hung-model", MaxRetries: 10})
+			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_, err = runtime.Call(ctx, &LLMRequest{
+				Model:  "hung-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "timeout awaiting response headers",
+				"error should report the hung-upstream header wait, got: %v", err)
+			assert.Contains(t, err.Error(), "transport",
+				"transport budget exhaustion should surface as transport failure, got: %v", err)
+			assert.Equal(t, int64(4), accepts.Load(),
+				"transport budget of 4 attempts must bound the hung upstream; got %d attempts", accepts.Load())
+		})
+	}
 }

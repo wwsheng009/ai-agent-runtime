@@ -23,6 +23,13 @@ const (
 	defaultLLMRetryBaseDelay  = 200 * time.Millisecond
 	defaultLLMRetryMaxDelay   = 5 * time.Second
 	defaultLLMRetryMultiplier = 2.0
+	// defaultLLMRetryRandomization aligns the default backoff jitter with
+	// codex-rs (codex-rs/codex-client/src/retry.rs backoff(): random_range
+	// 0.9..1.1, i.e. ±10%). Randomized backoff avoids synchronized retry
+	// storms against a shared upstream after an outage. Semantics: zero
+	// (unset) uses this default; an explicit negative value disables jitter;
+	// values > 1 are clamped to 1.
+	defaultLLMRetryRandomization = 0.1
 )
 
 type retryDecision struct {
@@ -91,15 +98,19 @@ type RetryStatusCodeMatcher struct {
 }
 
 type retryPolicy struct {
-	MaxAttempts        int
-	DefaultMaxAttempts int
-	BaseDelay          time.Duration
-	MaxDelay           time.Duration
-	MaxElapsedTime     time.Duration
-	Multiplier         float64
-	Randomization      float64
-	Schedule           []time.Duration
-	Rules              []RetryRule
+	MaxAttempts          int
+	DefaultMaxAttempts   int
+	MaxTransportAttempts int
+	// DefaultMaxTransportAttempts mirrors DefaultMaxAttempts for the
+	// transport-level budget (connection / header-timeout failures).
+	DefaultMaxTransportAttempts int
+	BaseDelay                   time.Duration
+	MaxDelay                    time.Duration
+	MaxElapsedTime              time.Duration
+	Multiplier                  float64
+	Randomization               float64
+	Schedule                    []time.Duration
+	Rules                       []RetryRule
 }
 
 type retryExhaustedError struct {
@@ -211,6 +222,12 @@ func (c RetryTuning) normalized() RetryTuning {
 	if c.Multiplier < 1 {
 		c.Multiplier = defaultLLMRetryMultiplier
 	}
+	// Unset randomization (zero) defaults to codex-style ±10% jitter instead
+	// of deterministic backoff. An explicit negative value stays the off
+	// switch (mapped to 0 below); values in (0,1] are honored as-is.
+	if c.Randomization == 0 {
+		c.Randomization = defaultLLMRetryRandomization
+	}
 	if c.Randomization < 0 {
 		c.Randomization = 0
 	}
@@ -243,7 +260,20 @@ func maxRetryScheduleDelay(schedule []time.Duration) time.Duration {
 	return maximum
 }
 
-func newRuntimeRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule) retryPolicy {
+// retryAttemptsCeiling mirrors codex-rs MAX_REQUEST_MAX_RETRIES /
+// MAX_STREAM_MAX_RETRIES (100): a sanity cap for positive retry budgets.
+const retryAttemptsCeiling = 100
+
+// clampRetryAttempts caps a positive attempt budget at retryAttemptsCeiling.
+// Non-positive budgets (-1 unlimited, 0 disabled) pass through unchanged.
+func clampRetryAttempts(n int) int {
+	if n > retryAttemptsCeiling {
+		return retryAttemptsCeiling
+	}
+	return n
+}
+
+func newRuntimeRetryPolicy(maxRetries int, transportMaxRetries int, tuning RetryTuning, rules []RetryRule) retryPolicy {
 	attempts := 0
 	if maxRetries >= 0 {
 		attempts = maxRetries + 1
@@ -251,6 +281,10 @@ func newRuntimeRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule
 	if maxRetries >= 0 && attempts < 1 {
 		attempts = 1
 	}
+	transportAttempts := 0
+	if transportMaxRetries > 0 {
+		transportAttempts = transportMaxRetries
+	}
 	tuning = tuning.normalized()
 	rules = cloneRetryRules(rules)
 	maxAttempts := maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules))
@@ -258,25 +292,31 @@ func newRuntimeRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule
 		maxAttempts = 0
 	}
 	return retryPolicy{
-		MaxAttempts:        maxAttempts,
-		DefaultMaxAttempts: attempts,
-		BaseDelay:          tuning.BaseDelay,
-		MaxDelay:           tuning.MaxDelay,
-		MaxElapsedTime:     tuning.MaxElapsedTime,
-		Multiplier:         tuning.Multiplier,
-		Randomization:      tuning.Randomization,
-		Schedule:           append([]time.Duration(nil), tuning.Schedule...),
-		Rules:              rules,
+		MaxAttempts:                 clampRetryAttempts(maxAttempts),
+		DefaultMaxAttempts:          clampRetryAttempts(attempts),
+		MaxTransportAttempts:        clampRetryAttempts(transportAttempts),
+		DefaultMaxTransportAttempts: clampRetryAttempts(transportAttempts),
+		BaseDelay:                   tuning.BaseDelay,
+		MaxDelay:                    tuning.MaxDelay,
+		MaxElapsedTime:              tuning.MaxElapsedTime,
+		Multiplier:                  tuning.Multiplier,
+		Randomization:               tuning.Randomization,
+		Schedule:                    append([]time.Duration(nil), tuning.Schedule...),
+		Rules:                       rules,
 	}
 }
 
-func newProviderRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule) retryPolicy {
+func newProviderRetryPolicy(maxRetries int, transportMaxRetries int, tuning RetryTuning, rules []RetryRule) retryPolicy {
 	attempts := maxRetries
 	if maxRetries == 0 {
 		attempts = 1
 	} else if maxRetries < 0 {
 		attempts = 0
 	}
+	transportAttempts := 0
+	if transportMaxRetries > 0 {
+		transportAttempts = transportMaxRetries
+	}
 	tuning = tuning.normalized()
 	rules = cloneRetryRules(rules)
 	maxAttempts := maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules))
@@ -284,15 +324,17 @@ func newProviderRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRul
 		maxAttempts = 0
 	}
 	return retryPolicy{
-		MaxAttempts:        maxAttempts,
-		DefaultMaxAttempts: attempts,
-		BaseDelay:          tuning.BaseDelay,
-		MaxDelay:           tuning.MaxDelay,
-		MaxElapsedTime:     tuning.MaxElapsedTime,
-		Multiplier:         tuning.Multiplier,
-		Randomization:      tuning.Randomization,
-		Schedule:           append([]time.Duration(nil), tuning.Schedule...),
-		Rules:              rules,
+		MaxAttempts:                 clampRetryAttempts(maxAttempts),
+		DefaultMaxAttempts:          clampRetryAttempts(attempts),
+		MaxTransportAttempts:        clampRetryAttempts(transportAttempts),
+		DefaultMaxTransportAttempts: clampRetryAttempts(transportAttempts),
+		BaseDelay:                   tuning.BaseDelay,
+		MaxDelay:                    tuning.MaxDelay,
+		MaxElapsedTime:              tuning.MaxElapsedTime,
+		Multiplier:                  tuning.Multiplier,
+		Randomization:               tuning.Randomization,
+		Schedule:                    append([]time.Duration(nil), tuning.Schedule...),
+		Rules:                       rules,
 	}
 }
 
@@ -302,7 +344,7 @@ func (p retryPolicy) decisionForError(err error) retryDecision {
 
 func (p retryPolicy) maxAttemptsForDecision(decision retryDecision) int {
 	if decision.MaxAttempts > 0 {
-		return decision.MaxAttempts
+		return clampRetryAttempts(decision.MaxAttempts)
 	}
 	if p.DefaultMaxAttempts > 0 {
 		return p.DefaultMaxAttempts
@@ -320,12 +362,36 @@ func applyRequestRetryPolicy(policy retryPolicy, metadata map[string]interface{}
 	}
 	policy.MaxAttempts = 1
 	policy.DefaultMaxAttempts = 1
+	policy.MaxTransportAttempts = 1
+	policy.DefaultMaxTransportAttempts = 1
 	policy.Rules = nil
 	return policy
 }
 
 func retryAttemptAllowed(maxAttempts int, attempt int) bool {
 	return attempt > 0 && (maxAttempts <= 0 || attempt <= maxAttempts)
+}
+
+// transportAttemptAllowed reports whether another attempt may start under the
+// transport-level budget. A non-positive budget means the budget is not
+// enabled (legacy behavior: the business-level budget governs).
+func transportAttemptAllowed(maxTransportAttempts int, transportAttempts int) bool {
+	return maxTransportAttempts <= 0 || transportAttempts < maxTransportAttempts
+}
+
+// isTransportBudgetError classifies an error as a transport-layer failure for
+// the two-tier retry budget: raw connection / header-timeout / TLS errors,
+// excluding provider HTTP status errors (429/5xx -> business budget) and
+// business-level errors (quota, context-window, ...).
+func isTransportBudgetError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *providerHTTPError
+	if stderrs.As(err, &httpErr) {
+		return false
+	}
+	return isRetryableTransportError(err, strings.ToLower(err.Error()))
 }
 
 func (p retryPolicy) delayForDecision(attempt int, decision retryDecision) time.Duration {
@@ -599,6 +665,15 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 		return "USER_CANCELLED"
 	case "invalid_request", "non_retryable_response", "content_inspection_failed", "truncated_tool_call":
 		return "UPSTREAM_INVALID_REQUEST"
+	case "retry_exhausted", "retry_suppressed":
+		// retryExhaustedError/retrySuppressedError 已吞掉底层错误的分类。
+		// 还原底层语义，否则上游挂死（如 http2: timeout awaiting response
+		// headers）会退化为笼统 UPSTREAM_ERROR，且 next_action 变成误导性的
+		// "Inspect the provider error and correct the cause"。
+		if cause := stderrs.Unwrap(err); cause != nil {
+			return classifyLLMFailureCode(cause, classifyRetryableLLMError(cause))
+		}
+		return "UPSTREAM_ERROR"
 	}
 	if code := extractRetryErrorCode(err); code != "" {
 		return code

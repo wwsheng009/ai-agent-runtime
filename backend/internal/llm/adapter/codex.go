@@ -89,9 +89,18 @@ type CodexStreamState struct {
 	NextSyntheticIndex int
 
 	// 追踪 reasoning summary
-	SummaryIndex   int
-	SummaryStarted bool
-	SummaryContent strings.Builder
+	SummaryIndex        int
+	SummaryStarted      bool
+	SummaryParts        map[int]*codexReasoningSummaryPartState
+	SummaryEmittedParts int
+}
+
+// codexReasoningSummaryPartState keeps delta/done reconciliation local to one
+// protocol-level summary part. A summary_index boundary is semantic; arbitrary
+// SSE delta boundaries are not.
+type codexReasoningSummaryPartState struct {
+	Content    strings.Builder
+	EmittedEnd int
 }
 
 // CodexToolCall 工具调用状态
@@ -114,6 +123,7 @@ func NewCodexStreamState() *CodexStreamState {
 		UnknownEvents:      make(map[string]int),
 		BuiltinToolEvents:  make(map[string]int),
 		ImagePhases:        make(map[string]map[string]struct{}),
+		SummaryParts:       make(map[int]*codexReasoningSummaryPartState),
 		CurrentItemIndex:   -1,
 		NextSyntheticIndex: 1000000,
 	}
@@ -1173,7 +1183,7 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 	case "response.reasoning_summary_text.delta":
 		a.handleReasoningSummaryTextDelta(state, event, callbacks)
 	case "response.reasoning_summary_text.done":
-		a.handleReasoningTextDone(state, event, callbacks)
+		a.handleReasoningSummaryTextDone(state, event, callbacks)
 
 	case "response.reasoning_summary_part.done":
 		// 推理块结束，无需特殊处理
@@ -1694,19 +1704,86 @@ func (a *CodexAdapter) handleReasoningSummaryPartAdded(state *CodexStreamState, 
 	summaryIndex := getSummaryIndex(event)
 	state.SummaryIndex = summaryIndex
 	state.SummaryStarted = true
+	state.reasoningSummaryPart(summaryIndex)
 }
 
 // handleReasoningSummaryTextDelta 处理 response.reasoning_summary_text.delta 事件
 func (a *CodexAdapter) handleReasoningSummaryTextDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	// 注意：使用 summary_index 而非 index
-	delta, _ := event["delta"].(string)
+	summaryIndex := getSummaryIndex(event)
+	delta := asCodexString(event["delta"])
 	if delta == "" {
 		return
 	}
 
-	state.Reasoning.WriteString(delta)
-	state.SummaryContent.WriteString(delta)
-	callbacks.EmitReasoning(delta)
+	state.SummaryIndex = summaryIndex
+	state.SummaryStarted = true
+	part := state.reasoningSummaryPart(summaryIndex)
+	part.Content.WriteString(delta)
+	state.flushReasoningSummaryPart(part, callbacks.EmitReasoning)
+}
+
+// handleReasoningSummaryTextDone reconciles the authoritative text against the
+// matching summary part rather than the response-wide reasoning buffer. This
+// avoids replaying a partial part when a done snapshot extends it, and lets the
+// same semantic separator be used by delta and snapshot recovery paths.
+func (a *CodexAdapter) handleReasoningSummaryTextDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	text := asCodexString(event["text"])
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+
+	summaryIndex := getSummaryIndex(event)
+	state.SummaryIndex = summaryIndex
+	state.SummaryStarted = true
+	part := state.reasoningSummaryPart(summaryIndex)
+	appendMissingCodexText(&part.Content, text, nil)
+	state.flushReasoningSummaryPart(part, callbacks.EmitReasoning)
+}
+
+func (s *CodexStreamState) reasoningSummaryPart(summaryIndex int) *codexReasoningSummaryPartState {
+	if s.SummaryParts == nil {
+		s.SummaryParts = make(map[int]*codexReasoningSummaryPartState)
+	}
+	part := s.SummaryParts[summaryIndex]
+	if part == nil {
+		part = &codexReasoningSummaryPartState{}
+		s.SummaryParts[summaryIndex] = part
+	}
+	return part
+}
+
+// flushReasoningSummaryPart emits a newline only before the first visible byte
+// of a later protocol summary part. Leading whitespace is buffered until the
+// part proves non-empty, then preserved byte-for-byte with the rest of the part.
+// Subsequent deltas in the same part are emitted unchanged.
+func (s *CodexStreamState) flushReasoningSummaryPart(part *codexReasoningSummaryPartState, emit func(string)) {
+	if s == nil || part == nil {
+		return
+	}
+	text := part.Content.String()
+	separator := ""
+	if part.EmittedEnd == 0 {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		if s.SummaryEmittedParts > 0 {
+			separator = "\n"
+			s.Reasoning.WriteString(separator)
+		}
+		s.SummaryEmittedParts++
+	}
+	if part.EmittedEnd >= len(text) {
+		return
+	}
+	missing := text[part.EmittedEnd:]
+	s.Reasoning.WriteString(missing)
+	part.EmittedEnd = len(text)
+	if emit != nil {
+		// Keep the semantic boundary attached to visible text. Downstream
+		// reasoning filters may intentionally suppress whitespace-only blocks.
+		emit(separator + missing)
+	}
 }
 
 // handleReasoningTextDelta 处理 response.reasoning_text.delta 事件
@@ -1968,16 +2045,35 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 }
 
 func (a *CodexAdapter) recoverCodexReasoningItem(state *CodexStreamState, item map[string]interface{}, callbacks StreamCallbacks) {
-	for _, part := range decodeSliceOfMaps(item["summary"]) {
-		if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "summary_text") {
-			appendMissingCodexText(&state.Reasoning, asCodexString(part["text"]), callbacks.EmitReasoning)
-		}
-	}
+	appendMissingCodexText(&state.Reasoning, codexReasoningSummaryText(item["summary"]), callbacks.EmitReasoning)
 	for _, part := range decodeSliceOfMaps(item["content"]) {
 		if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "reasoning_text") {
 			appendMissingCodexText(&state.Reasoning, asCodexString(part["text"]), callbacks.EmitReasoning)
 		}
 	}
+}
+
+// codexReasoningSummaryText is the canonical representation used by streaming
+// recovery, response.completed snapshots, and non-stream Responses payloads.
+// The provider's summary_index partitions complete semantic parts, so visible
+// parts are separated with a newline. Text within each part remains untouched.
+func codexReasoningSummaryText(raw interface{}) string {
+	parts := decodeSliceOfMaps(raw)
+	if len(parts) == 0 {
+		return ""
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if !strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "summary_text") {
+			continue
+		}
+		text := asCodexString(part["text"])
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		texts = append(texts, text)
+	}
+	return strings.Join(texts, "\n")
 }
 
 func (a *CodexAdapter) recoverCodexMessageItem(state *CodexStreamState, item map[string]interface{}, callbacks StreamCallbacks) {
@@ -2071,11 +2167,7 @@ func (a *CodexAdapter) recoverCodexFinalOutput(state *CodexStreamState, output [
 			}
 		case "reasoning":
 			state.OutputItems[index] = cloneInterfaceMap(item)
-			for _, part := range decodeSliceOfMaps(item["summary"]) {
-				if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "summary_text") {
-					reasoning.WriteString(asCodexString(part["text"]))
-				}
-			}
+			reasoning.WriteString(codexReasoningSummaryText(item["summary"]))
 			for _, part := range decodeSliceOfMaps(item["content"]) {
 				if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "reasoning_text") {
 					reasoning.WriteString(asCodexString(part["text"]))
@@ -2528,17 +2620,7 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 
 		case "reasoning":
 			// 提取推理内容
-			if summary, ok := itemMap["summary"].([]interface{}); ok {
-				for _, s := range summary {
-					if sMap, ok := s.(map[string]interface{}); ok {
-						if sType, ok := sMap["type"].(string); ok && sType == "summary_text" {
-							if text, ok := sMap["text"].(string); ok {
-								reasoning.WriteString(text)
-							}
-						}
-					}
-				}
-			}
+			reasoning.WriteString(codexReasoningSummaryText(itemMap["summary"]))
 		}
 	}
 
@@ -3078,7 +3160,7 @@ func codexToolName(tool map[string]interface{}) string {
 
 // getSummaryIndex 从事件中获取 summary_index 字段
 func getSummaryIndex(event map[string]interface{}) int {
-	if summaryIndex, ok := event["summary_index"].(float64); ok {
+	if summaryIndex, ok := numericValue(event["summary_index"]); ok {
 		return int(summaryIndex)
 	}
 	return 0

@@ -356,7 +356,7 @@ func TestCodexHandleResponseDoesNotDuplicateReasoningWithTrailingNewline(t *test
 	}
 
 	// Final assistant message trims display text via ReasoningBlock.Summary; the
-// important contract is no duplicated body after done/item/completed recovery.
+	// important contract is no duplicated body after done/item/completed recovery.
 	wantStored := strings.TrimSpace(reasoning)
 	got, _ := msg["reasoning_content"].(string)
 	if got != wantStored {
@@ -374,6 +374,182 @@ func TestCodexHandleResponseDoesNotDuplicateReasoningWithTrailingNewline(t *test
 	}
 	if len(reasoningParts) != 1 {
 		t.Fatalf("expected a single reasoning emit from deltas, got %#v", reasoningParts)
+	}
+}
+
+func TestCodexHandleResponsePreservesReasoningSummaryPartBoundaries(t *testing.T) {
+	adapter := &CodexAdapter{}
+	const (
+		first  = "Assessing terminal lifecycle callback timing"
+		second = "Reevaluating host adapter projection order"
+	)
+	want := first + "\n" + second
+	var reasoningParts []string
+
+	msg, err := adapter.HandleResponse(true, strings.NewReader(strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_parts","model":"gpt-5.4"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[]}}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"Assessing terminal "}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"lifecycle callback timing"}`,
+		"",
+		"event: response.reasoning_summary_text.done",
+		`data: {"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"text":"Assessing terminal lifecycle callback timing"}`,
+		"",
+		"event: response.reasoning_summary_part.done",
+		`data: {"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":0}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":1}`,
+		"",
+		// A replayed lifecycle event must not create another separator.
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":1}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":1,"delta":"Reevaluating host adapter "}`,
+		"",
+		"event: response.reasoning_summary_text.done",
+		`data: {"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":1,"text":"Reevaluating host adapter projection order"}`,
+		"",
+		"event: response.reasoning_summary_part.done",
+		`data: {"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":1}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":[{"type":"summary_text","text":"Assessing terminal lifecycle callback timing"},{"type":"summary_text","text":"Reevaluating host adapter projection order"}]}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","content":[]}}`,
+		"",
+		"event: response.output_text.delta",
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"ok"}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_parts","status":"completed","stop_reason":"end_turn","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"Assessing terminal lifecycle callback timing"},{"type":"summary_text","text":"Reevaluating host adapter projection order"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`,
+		"",
+	}, "\n")), StreamCallbacks{
+		OnReasoning: func(part string) {
+			reasoningParts = append(reasoningParts, part)
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleResponse: %v", err)
+	}
+
+	if got, _ := msg["reasoning_content"].(string); got != want {
+		t.Fatalf("unexpected reasoning_content:\n got: %q\nwant: %q", got, want)
+	}
+	if got := strings.Join(reasoningParts, ""); got != want {
+		t.Fatalf("unexpected streamed reasoning:\n got: %q\nwant: %q\nparts: %#v", got, want, reasoningParts)
+	}
+	wantParts := []string{
+		"Assessing terminal ",
+		"lifecycle callback timing",
+		"\nReevaluating host adapter ",
+		"projection order",
+	}
+	if len(reasoningParts) != len(wantParts) {
+		t.Fatalf("done/item/completed snapshots replayed reasoning: got %#v, want %#v", reasoningParts, wantParts)
+	}
+	for index := range wantParts {
+		if reasoningParts[index] != wantParts[index] {
+			t.Fatalf("reasoning part %d = %q, want %q (all parts: %#v)", index, reasoningParts[index], wantParts[index], reasoningParts)
+		}
+	}
+	if count := strings.Count(strings.Join(reasoningParts, ""), first); count != 1 {
+		t.Fatalf("first summary part was replayed %d times: %#v", count, reasoningParts)
+	}
+	if count := strings.Count(strings.Join(reasoningParts, ""), second); count != 1 {
+		t.Fatalf("second summary part was replayed %d times: %#v", count, reasoningParts)
+	}
+}
+
+func TestCodexHandleResponseNonStreamPreservesReasoningSummaryPartBoundaries(t *testing.T) {
+	adapter := &CodexAdapter{}
+	const want = "Assessing lifecycle\nReevaluating projection"
+	msg, err := adapter.HandleResponse(false, strings.NewReader(`{
+		"id":"resp_parts",
+		"status":"completed",
+		"output":[
+			{"type":"reasoning","summary":[
+				{"type":"summary_text","text":"Assessing lifecycle"},
+				{"type":"summary_text","text":"   "},
+				{"type":"summary_text","text":"Reevaluating projection"}
+			]}
+		]
+	}`), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse: %v", err)
+	}
+	if got, _ := msg["reasoning_content"].(string); got != want {
+		t.Fatalf("unexpected reasoning_content: got %q, want %q", got, want)
+	}
+}
+
+func TestCodexHandleResponseRecoversReasoningSummaryPartBoundariesFromSnapshots(t *testing.T) {
+	const (
+		summary = `[{"type":"summary_text","text":"Assessing lifecycle"},{"type":"summary_text","text":"Reevaluating projection"}]`
+		want    = "Assessing lifecycle\nReevaluating projection"
+	)
+	tests := []struct {
+		name   string
+		events []string
+	}{
+		{
+			name: "output item done then completed",
+			events: []string{
+				"event: response.output_item.done",
+				`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":` + summary + `}}`,
+				"",
+				"event: response.completed",
+				`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","summary":` + summary + `}]}}`,
+				"",
+			},
+		},
+		{
+			name: "completed only",
+			events: []string{
+				"event: response.completed",
+				`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","summary":` + summary + `}]}}`,
+				"",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := &CodexAdapter{}
+			var emitted []string
+			msg, err := adapter.HandleResponse(true, strings.NewReader(strings.Join(test.events, "\n")), StreamCallbacks{
+				OnReasoning: func(part string) {
+					emitted = append(emitted, part)
+				},
+			})
+			if err != nil {
+				t.Fatalf("HandleResponse: %v", err)
+			}
+			if got, _ := msg["reasoning_content"].(string); got != want {
+				t.Fatalf("unexpected reasoning_content: got %q, want %q", got, want)
+			}
+			if got := strings.Join(emitted, ""); got != want {
+				t.Fatalf("unexpected recovered reasoning: got %q, want %q (parts: %#v)", got, want, emitted)
+			}
+			if len(emitted) != 1 {
+				t.Fatalf("snapshot lifecycle replayed reasoning: %#v", emitted)
+			}
+		})
 	}
 }
 

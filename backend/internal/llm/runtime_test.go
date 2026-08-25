@@ -364,7 +364,8 @@ func TestLLMRuntime_Call_ReportsRetryDebugEventAndPropagatesAttemptContext(t *te
 		DefaultModel:    "gpt-5.4-mini",
 		MaxRetries:      2,
 		RetryTuning: RetryTuning{
-			BaseDelay: 10 * time.Millisecond,
+			BaseDelay:     10 * time.Millisecond,
+			Randomization: -1, // 关闭默认 ±10% 抖动，精确断言 RetryDelayMS
 		},
 	})
 	provider := &debugFlakyProvider{

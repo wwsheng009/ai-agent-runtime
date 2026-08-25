@@ -66,6 +66,36 @@ func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
 	assert.NotEmpty(t, catalogProvider.SupportedModels())
 }
 
+func TestProviderWrapper_OpenAIPropagatesPromptCacheKeyToWireBody(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-cache-key","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	response, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Metadata: map[string]interface{}{
+			"prompt_cache_key": "session-cache-key",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, "session-cache-key", capturedBody["prompt_cache_key"])
+}
+
 func TestNewProvider_ReusesHTTPConnectionAcrossCalls(t *testing.T) {
 	var mu sync.Mutex
 	newConnections := 0

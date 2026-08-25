@@ -41,14 +41,19 @@ type Config struct {
 
 // ProvidersConfig holds the provider collection configuration.
 type ProvidersConfig struct {
-	DefaultProvider string              `yaml:"default_provider" mapstructure:"default_provider" env:"PROVIDERS_DEFAULT"`
-	Headers         map[string]string   `yaml:"headers" mapstructure:"headers"`
-	Timeout         time.Duration       `yaml:"timeout" mapstructure:"timeout" env:"PROVIDERS_TIMEOUT"`
-	MaxRetries      int                 `yaml:"max_retries" mapstructure:"max_retries" env:"PROVIDERS_MAX_RETRIES"`
-	Backoff         BackoffConfig       `yaml:"backoff" mapstructure:"backoff"`
-	HTTPTimeout     HTTPTimeout         `yaml:"http_timeout" mapstructure:"http_timeout"`
-	Proxy           ProxyConfig         `yaml:"proxy" mapstructure:"proxy"`
-	Items           map[string]Provider `yaml:"items" mapstructure:"items"`
+	DefaultProvider string            `yaml:"default_provider" mapstructure:"default_provider" env:"PROVIDERS_DEFAULT"`
+	Headers         map[string]string `yaml:"headers" mapstructure:"headers"`
+	Timeout         time.Duration     `yaml:"timeout" mapstructure:"timeout" env:"PROVIDERS_TIMEOUT"`
+	MaxRetries      int               `yaml:"max_retries" mapstructure:"max_retries" env:"PROVIDERS_MAX_RETRIES"`
+	// TransportMaxRetries bounds transport-layer retries (connection /
+	// response-header timeout / TLS failures). Zero falls back to the default
+	// (4); a negative value means unlimited (bounded by the header-timeout
+	// streak guard).
+	TransportMaxRetries int                 `yaml:"transport_max_retries" mapstructure:"transport_max_retries" env:"PROVIDERS_TRANSPORT_MAX_RETRIES"`
+	Backoff             BackoffConfig       `yaml:"backoff" mapstructure:"backoff"`
+	HTTPTimeout         HTTPTimeout         `yaml:"http_timeout" mapstructure:"http_timeout"`
+	Proxy               ProxyConfig         `yaml:"proxy" mapstructure:"proxy"`
+	Items               map[string]Provider `yaml:"items" mapstructure:"items"`
 }
 
 // EffectiveProviderHeaders merges global and provider-specific request headers.
@@ -75,12 +80,15 @@ func EffectiveProviderHeaders(globalHeaders, providerHeaders map[string]string) 
 
 // BackoffConfig holds retry backoff configuration.
 type BackoffConfig struct {
-	InitialInterval time.Duration   `yaml:"initial_interval" mapstructure:"initial_interval"`
-	MaxInterval     time.Duration   `yaml:"max_interval" mapstructure:"max_interval"`
-	MaxElapsedTime  time.Duration   `yaml:"max_elapsed_time" mapstructure:"max_elapsed_time"`
-	Multiplier      float64         `yaml:"multiplier" mapstructure:"multiplier"`
-	Randomization   float64         `yaml:"randomization" mapstructure:"randomization"`
-	Schedule        []time.Duration `yaml:"schedule" mapstructure:"schedule"`
+	InitialInterval time.Duration `yaml:"initial_interval" mapstructure:"initial_interval"`
+	MaxInterval     time.Duration `yaml:"max_interval" mapstructure:"max_interval"`
+	MaxElapsedTime  time.Duration `yaml:"max_elapsed_time" mapstructure:"max_elapsed_time"`
+	Multiplier      float64       `yaml:"multiplier" mapstructure:"multiplier"`
+	// Randomization jitters each backoff delay by ±Randomization*100%.
+	// Unset (0) defaults to 0.1 (±10%, matching codex-rs); set a negative
+	// value to disable jitter.
+	Randomization float64         `yaml:"randomization" mapstructure:"randomization"`
+	Schedule      []time.Duration `yaml:"schedule" mapstructure:"schedule"`
 }
 
 // RetryConfig holds fine-grained retry rule configuration.

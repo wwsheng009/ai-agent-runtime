@@ -309,6 +309,64 @@ func TestScopeGatewayPromptCacheKey_IsStableForSameToolsAndIgnoresToolChoice(t *
 	assert.NotEqual(t, normal["prompt_cache_key"], changed["prompt_cache_key"])
 }
 
+func TestGatewayClientCall_RepeatedIdenticalRequestsReusePromptCacheKey(t *testing.T) {
+	var bodies []map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-cache","object":"chat.completion","model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "openai-cache-stable",
+			Type:    "openai",
+			BaseURL: server.URL,
+		},
+		KeyValue: "test-key",
+		Model:    "gpt-4o-mini",
+	}
+	client := NewGatewayClient(&gatewayTestResourceManager{selected: selected}, "gpt-4o-mini")
+	request := func() *LLMRequest {
+		return &LLMRequest{
+			Model: "gpt-4o-mini",
+			Messages: []types.Message{{
+				Role:    "user",
+				Content: "inspect the same cache lane",
+			}},
+			Tools: []types.ToolDefinition{{
+				Name:        "view",
+				Description: "read a file",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{"type": "string"},
+					},
+				},
+			}},
+			Metadata: map[string]interface{}{"prompt_cache_key": "session-repeat"},
+		}
+	}
+
+	first, err := client.Call(context.Background(), request())
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	second, err := client.Call(context.Background(), request())
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	require.Len(t, bodies, 2)
+
+	firstKey, _ := bodies[0]["prompt_cache_key"].(string)
+	secondKey, _ := bodies[1]["prompt_cache_key"].(string)
+	require.NotEmpty(t, firstKey)
+	require.Equal(t, firstKey, secondKey)
+	require.True(t, strings.HasPrefix(firstKey, "gw_"))
+	require.Equal(t, bodies[0]["tools"], bodies[1]["tools"])
+}
+
 func TestGatewayClient_ConvertTools_CodexDoesNotAddImageGenerationWhenProviderDisabled(t *testing.T) {
 	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
 	caps := map[string]agentconfig.ModelCapabilitySpec{
@@ -547,6 +605,66 @@ func TestGatewayClient_CallProvider_WithStreamAggregatesSSEResponse(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", resp.Content)
 	assert.Empty(t, resp.ToolCalls)
+}
+
+func TestGatewayClient_StreamScopesPromptCacheKey(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "openai-stream",
+			Type:    "openai",
+			BaseURL: server.URL,
+		},
+		KeyValue: "test-key",
+	}
+	client := NewGatewayClient(&gatewayTestResourceManager{selected: selected}, "gpt-4o-mini")
+
+	stream, err := client.Stream(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Metadata: map[string]interface{}{"prompt_cache_key": "session-stream-cache"},
+	})
+	require.NoError(t, err)
+	var chunks []StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	require.NotEmpty(t, chunks)
+
+	key, _ := capturedBody["prompt_cache_key"].(string)
+	require.NotEmpty(t, key)
+	assert.NotEqual(t, "session-stream-cache", key)
+	assert.True(t, strings.HasPrefix(key, "gw_"), "expected scoped gateway key, got %q", key)
+}
+
+func TestPropagatePromptCacheKey_SupportedProtocolsOnly(t *testing.T) {
+	for _, protocol := range []string{"openai", "OPENAI", "codex", "Codex"} {
+		body := map[string]interface{}{}
+		propagatePromptCacheKey(body, map[string]interface{}{
+			"prompt_cache_key": "session-cache",
+		}, protocol)
+		assert.Equal(t, "session-cache", body["prompt_cache_key"], protocol)
+	}
+
+	for _, protocol := range []string{"anthropic", "gemini", "unknown"} {
+		body := map[string]interface{}{}
+		propagatePromptCacheKey(body, map[string]interface{}{
+			"prompt_cache_key": "session-cache",
+		}, protocol)
+		assert.NotContains(t, body, "prompt_cache_key", protocol)
+	}
 }
 
 func TestGatewayClient_CallProvider_WithStreamUsesProviderReportedUsage(t *testing.T) {

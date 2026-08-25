@@ -164,6 +164,7 @@ type ProviderConfig struct {
 	CompatibilityProfile string                                     `json:"compatibilityProfile,omitempty"`
 	Timeout              time.Duration                              `json:"timeout"`
 	MaxRetries           int                                        `json:"maxRetries"`
+	MaxTransportRetries  int                                        `json:"maxTransportRetries"`
 	RetryTuning          RetryTuning                                `json:"retryTuning,omitempty"`
 	RetryRules           []RetryRule                                `json:"retryRules,omitempty"`
 	DefaultModel         string                                     `json:"defaultModel,omitempty"`
@@ -472,6 +473,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	// 构建请求体
 	requestBody := p.adapter.BuildRequest(adapterRequest)
 	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
+	propagatePromptCacheKey(requestBody, request.Metadata, p.config.Type)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -719,6 +721,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	// 构建请求体
 	requestBody := p.adapter.BuildRequest(adapterRequest)
 	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
+	propagatePromptCacheKey(requestBody, request.Metadata, p.config.Type)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request body: %w", err)
@@ -951,7 +954,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	}
 
 	chatReq := p.toChatRequest(req)
-	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
+	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.MaxTransportRetries, p.config.RetryTuning, p.config.RetryRules)
 	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastErr error
 	startedAt := time.Now()
@@ -959,8 +962,9 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
 	var consecutiveHeaderTimeouts int
+	var transportAttempts int
 
-	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
+	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt) && transportAttemptAllowed(policy.MaxTransportAttempts, transportAttempts); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		chatResp, err := p.Chat(attemptCtx, chatReq)
 		if err == nil {
@@ -976,12 +980,16 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
-		// Fail fast on a hung upstream: two consecutive response-header
-		// timeouts mean the provider never returns headers, and every further
-		// attempt just burns another ResponseHeaderTimeout. The streak resets
-		// on any non-header error, so a transient timeout followed by a
-		// healthy exchange and another timeout is never misjudged.
-		if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+		// Fail fast on a hung upstream -- but only when the retry budget is
+		// UNLIMITED. With a finite budget (MaxAttempts > 0) the agent is
+		// expected to keep retrying within the budget, so the guard must not
+		// take away attempts the caller asked for. Two consecutive
+		// response-header timeouts mean the provider never returns headers and
+		// every further attempt just burns another ResponseHeaderTimeout. The
+		// streak resets on any non-header error, so a transient timeout
+		// followed by a healthy exchange and another timeout is never
+		// misjudged.
+		if policy.MaxAttempts <= 0 && trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
 			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 				Source:   "provider_wrapper",
 				Phase:    "response",
@@ -1004,6 +1012,17 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 				policy.MaxAttempts = activeMaxAttempts
 			}
 			continue
+		}
+		// Charge a transport failure to the transport budget immediately after
+		// the failed call.  prepareRetry waits for the backoff delay, so counting
+		// afterwards can let the parent context expire during that wait before
+		// the configured transport ceiling is observed.
+		transportFailure := isTransportBudgetError(err)
+		if transportFailure {
+			transportAttempts++
+			if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
+				return nil, markRetryExhausted("provider transport call failed after retries", policy.MaxTransportAttempts, err)
+			}
 		}
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 			Source:   "provider_wrapper",
@@ -1143,6 +1162,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		adapterRequest.Stream = true
 		requestBody := p.adapter.BuildRequest(adapterRequest)
 		requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
+		propagatePromptCacheKey(requestBody, chatReq.Metadata, p.config.Type)
 		bodyBytes, err := json.Marshal(requestBody)
 		if err != nil {
 			return adapter.RequestConfig{}, nil, nil, nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -1165,15 +1185,16 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 
 	url := p.buildURL(p.adapter.GetAPIPath())
 	client := p.providerHTTPClient(true)
-	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
+	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.MaxTransportRetries, p.config.RetryTuning, p.config.RetryRules)
 	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastErr error
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
 	var consecutiveHeaderTimeouts int
+	var transportAttempts int
 
-	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
+	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt) && transportAttemptAllowed(policy.MaxTransportAttempts, transportAttempts); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 			Source:           "provider_wrapper",
@@ -1208,13 +1229,16 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:    err.Error(),
 			})
 			lastErr = fmt.Errorf("failed to send request: %w", err)
-			// Fail fast on a hung upstream: two consecutive response-header
-			// timeouts mean the provider never returns headers, and every
-			// further attempt just burns a full ResponseHeaderTimeout for
-			// nothing. The streak resets on any other error, and on any
-			// received response (cleared below), so a healthy exchange in
-			// between never counts as consecutive.
-			if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+			// Fail fast on a hung upstream -- but only when the retry budget
+			// is UNLIMITED. With a finite budget (MaxAttempts > 0) the agent
+			// is expected to keep retrying within the budget, so the guard
+			// must not take away attempts the caller asked for. Two
+			// consecutive response-header timeouts mean the provider never
+			// returns headers, and every further attempt just burns a full
+			// ResponseHeaderTimeout for nothing. The streak resets on any
+			// other error, and on any received response (cleared below), so a
+			// healthy exchange in between never counts as consecutive.
+			if policy.MaxAttempts <= 0 && trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
 				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 					Source:   "provider_wrapper",
 					Phase:    "response",
@@ -1225,6 +1249,16 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 					Error:    "repeated response-header timeout; upstream appears hung, aborting retries",
 				})
 				break
+			}
+			// Count the failed transport call before prepareRetry sleeps. This
+			// guarantees that the tighter transport ceiling, rather than the
+			// outer context deadline, determines the terminal error.
+			transportFailure := isTransportBudgetError(lastErr)
+			if transportFailure {
+				transportAttempts++
+				if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
+					return nil, markRetryExhausted("provider transport stream failed after retries", policy.MaxTransportAttempts, lastErr)
+				}
 			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",

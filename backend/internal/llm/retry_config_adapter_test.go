@@ -44,3 +44,22 @@ func TestProviderResponseHeaderTimeoutFromAgentConfigFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderMaxTransportRetriesFromAgentConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *agentconfig.Config
+		want int
+	}{
+		{"nil config gets default", nil, DefaultTransportMaxRetries},
+		{"unset gets default", &agentconfig.Config{}, DefaultTransportMaxRetries},
+		{"explicit zero gets default", &agentconfig.Config{Providers: agentconfig.ProvidersConfig{TransportMaxRetries: 0}}, DefaultTransportMaxRetries},
+		{"negative means unlimited", &agentconfig.Config{Providers: agentconfig.ProvidersConfig{TransportMaxRetries: -1}}, -1},
+		{"explicit positive preserved", &agentconfig.Config{Providers: agentconfig.ProvidersConfig{TransportMaxRetries: 5}}, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ProviderMaxTransportRetriesFromAgentConfig(tc.cfg))
+		})
+	}
+}

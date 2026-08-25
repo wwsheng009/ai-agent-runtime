@@ -78,9 +78,38 @@ func ProviderMaxRetriesFromAgentConfig(cfg *agentconfig.Config) int {
 		return cfg.Retry.DefaultMaxRetries
 	}
 	if maxRetries <= 0 {
-		maxRetries = 3
+		maxRetries = 10
 	}
 	return maxRetries
+}
+
+// DefaultTransportMaxRetries is the default transport-level retry budget,
+// inspired by codex-rs' tight request-level transport budget. Note the
+// semantics: aicli treats it as a cap on total transport attempts (like
+// MaxAttempts), not as an additional retry count.
+// Transport-layer failures -- connection errors, response-header timeouts,
+// TLS failures -- get a tighter budget than business-level retries: retrying
+// a dead connection from scratch rarely succeeds immediately, so a small
+// budget bounds the hang (e.g. 4 x response-header timeout) while generous
+// business retries keep 429/5xx flows retrying to the business budget.
+const DefaultTransportMaxRetries = 4
+
+// ProviderMaxTransportRetriesFromAgentConfig resolves the transport-level
+// retry budget. A negative value means unlimited (the header-timeout streak
+// guard then provides the bound); zero falls back to
+// DefaultTransportMaxRetries.
+func ProviderMaxTransportRetriesFromAgentConfig(cfg *agentconfig.Config) int {
+	if cfg == nil {
+		return DefaultTransportMaxRetries
+	}
+	transportRetries := cfg.Providers.TransportMaxRetries
+	if transportRetries < 0 {
+		return transportRetries
+	}
+	if transportRetries <= 0 {
+		transportRetries = DefaultTransportMaxRetries
+	}
+	return transportRetries
 }
 
 // ProviderStreamReadTimeoutFromAgentConfig resolves the streaming idle timeout

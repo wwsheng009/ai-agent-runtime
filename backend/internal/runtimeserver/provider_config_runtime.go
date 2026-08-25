@@ -34,6 +34,7 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			timeout = 60 * time.Second
 		}
 		maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(cfg)
+		maxTransportRetries := runtimellm.ProviderMaxTransportRetriesFromAgentConfig(cfg)
 
 		providerConfigs[name] = &runtimellm.ProviderConfig{
 			Type:                    providerType,
@@ -43,6 +44,7 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			CompatibilityProfile:    provider.Compatibility.Profile,
 			Timeout:                 timeout,
 			MaxRetries:              maxRetries,
+			MaxTransportRetries:     maxTransportRetries,
 			RetryTuning:             retryTuning,
 			RetryRules:              retryRules,
 			DefaultModel:            provider.DefaultModel,

@@ -326,7 +326,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	}
 
 	// 选择 Provider
-	policy := newProviderRetryPolicy(c.maxRetries, c.retryTuning, c.retryRules)
+	policy := newProviderRetryPolicy(c.maxRetries, 0, c.retryTuning, c.retryRules)
 	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
@@ -459,6 +459,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
+	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
 	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
@@ -703,6 +704,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
+	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
 	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
@@ -990,6 +992,8 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
+	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
+	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -1210,6 +1214,40 @@ func (c *GatewayClient) CheckHealth(ctx context.Context) error {
 	return err
 }
 
+// propagatePromptCacheKey copies the stable caller key into adapters
+// (notably OpenAI chat, whose adapter deliberately does not copy arbitrary
+// metadata). Gateway callers scope the copied key to the selected provider
+// generation afterwards; direct provider calls keep the stable key unchanged.
+func propagatePromptCacheKey(requestBody map[string]interface{}, metadata map[string]interface{}, protocol string) {
+	if requestBody == nil || !gatewayPromptCacheKeySupported(protocol) {
+		return
+	}
+	if existing, _ := requestBody["prompt_cache_key"].(string); strings.TrimSpace(existing) != "" {
+		return
+	}
+	for _, metadataKey := range []string{"prompt_cache_key", "session_id", "conversation_id"} {
+		value, ok := metadata[metadataKey]
+		if !ok || value == nil {
+			continue
+		}
+		key := strings.TrimSpace(fmt.Sprint(value))
+		if key == "" || key == "<nil>" {
+			continue
+		}
+		requestBody["prompt_cache_key"] = key
+		return
+	}
+}
+
+func gatewayPromptCacheKeySupported(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "openai", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
 // scopeGatewayPromptCacheKey binds the caller's stable session key to the
 // selected provider generation and the final wire tool surface. Gateway retry
 // may select another protocol/model/capability set; that is an explicit cache
@@ -1217,7 +1255,7 @@ func (c *GatewayClient) CheckHealth(ctx context.Context) error {
 // tool_choice is intentionally excluded so compact requests (choice=none) keep
 // sharing the same tools prefix as normal turns.
 func scopeGatewayPromptCacheKey(requestBody map[string]interface{}, selected *SelectedResource, protocol, model string) {
-	if requestBody == nil {
+	if requestBody == nil || !gatewayPromptCacheKeySupported(protocol) {
 		return
 	}
 	original, _ := requestBody["prompt_cache_key"].(string)

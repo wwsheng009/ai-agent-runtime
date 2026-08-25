@@ -279,7 +279,8 @@ provider_queue:
         max_wait_time: 120s
 providers:
     default_provider: ${PROVIDERS_DEFAULT:-nvidia}
-    max_retries: ${PROVIDERS_MAX_RETRIES:--1}
+    max_retries: ${PROVIDERS_MAX_RETRIES:-10}
+    transport_max_retries: ${PROVIDERS_TRANSPORT_MAX_RETRIES:-4}
     backoff:
         initial_interval: ${PROVIDERS_RETRY_DELAY_1:-30s}
         max_interval: ${PROVIDERS_RETRY_MAX_INTERVAL:-6m}
@@ -947,7 +948,7 @@ resource_manager:
     stats_retention: ${RESOURCE_MANAGER_STATS_RETENTION:-24h}
 retry:
     default_backoff_multiplier: 2
-    default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:--1}
+    default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:-10}
     default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-30000}
     enabled: ${RETRY_ENABLED:-true}
     enhanced_strategy:

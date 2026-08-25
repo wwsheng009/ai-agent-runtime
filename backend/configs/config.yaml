@@ -271,9 +271,17 @@ providers:
   # Includes User-Agent: when set here or under items.<provider>.headers, the
   # configured value replaces the built-in default (aicli/<version> (os; arch)).
   headers: {}
-  # Transient provider failures retry until the caller cancels. Deterministic
-  # authentication, permission and request errors remain non-retryable.
-  max_retries: ${PROVIDERS_MAX_RETRIES:--1}
+  # Transient provider failures retry within this finite default budget.
+  # Set a negative value to opt into caller-cancelled unlimited retries;
+  # deterministic authentication, permission and request errors remain
+  # non-retryable.
+  max_retries: ${PROVIDERS_MAX_RETRIES:-10}
+  # Transport-level retry budget (connection / response-header timeout / TLS
+  # failures), tighter than the business-level max_retries above: retrying a
+  # dead connection rarely succeeds immediately, so 4 header-timeouts bound
+  # a hung upstream quickly while 429/5xx keep retrying to max_retries.
+  # <0 means unlimited (the 2-consecutive-header-timeout streak guard applies).
+  transport_max_retries: ${PROVIDERS_TRANSPORT_MAX_RETRIES:-4}
   backoff:
     initial_interval: ${PROVIDERS_RETRY_DELAY_1:-30s}
     max_interval: ${PROVIDERS_RETRY_MAX_INTERVAL:-6m}
@@ -1076,7 +1084,7 @@ resource_manager:
   stats_retention: ${RESOURCE_MANAGER_STATS_RETENTION:-24h}
 retry:
   default_backoff_multiplier: 2
-  default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:--1}
+  default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:-10}
   default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-30000}
   enabled: ${RETRY_ENABLED:-true}
   enhanced_strategy:

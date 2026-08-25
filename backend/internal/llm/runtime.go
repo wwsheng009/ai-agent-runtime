@@ -113,7 +113,7 @@ func NewLLMRuntime(config *RuntimeConfig) *LLMRuntime {
 			DefaultProvider: "",
 			DefaultModel:    "gpt-4-turbo",
 			DefaultTimeout:  60 * time.Second,
-			MaxRetries:      3,
+			MaxRetries:      10,
 			RetryTuning:     RetryTuning{},
 			RetryRules:      nil,
 			Providers:       make(map[string]string),
@@ -452,7 +452,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	}
 
 	maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
-	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
+	policy := newRuntimeRetryPolicy(maxRetries, 0, retryTuning, retryRules)
 	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastError error
 	startedAt := time.Now()
@@ -529,7 +529,7 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 	}
 
 	maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
-	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
+	policy := newRuntimeRetryPolicy(maxRetries, 0, retryTuning, retryRules)
 	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	startedAt := time.Now()
 	meta := retryExecutionMeta{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,27 @@ func TestClassifyFailureCodeUsesVendorNeutralTaxonomy(t *testing.T) {
 	assert.Equal(t, "PERMISSION_DENIED", ClassifyFailureCode(newProviderHTTPError(403, "forbidden", nil)))
 	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", ClassifyFailureCode(newProviderHTTPError(403, "insufficient_user_quota", nil)))
 	assert.Equal(t, "UPSTREAM_RATE_LIMITED", ClassifyFailureCode(newProviderHTTPError(429, "rate limit exceeded", nil)))
+}
+
+func TestDiagnoseFailureRetainsCauseCodeWhenRetriesExhausted(t *testing.T) {
+	// 模拟上游挂死：请求已发出，但等不到响应头。
+	cause := &url.Error{
+		Op:  "Post",
+		URL: "https://ttai.online/v1/responses",
+		Err: fmt.Errorf("http2: timeout awaiting response headers"),
+	}
+	exhausted := markRetryExhausted("streaming aggregate call failed after retries", 2, cause)
+	diag := DiagnoseFailure(exhausted)
+	assert.Equal(t, "UPSTREAM_UNAVAILABLE", diag.ErrorCode)
+	assert.False(t, diag.Retryable)
+	assert.Contains(t, diag.NextAction, "Automatic retries are exhausted")
+	assert.NotContains(t, diag.NextAction, "Inspect the provider error")
+
+	// quota 类错误在重试耗尽后也应保留原始分类。
+	quotaExhausted := markRetryExhausted("all retry attempts failed", 2, newProviderHTTPError(403, "insufficient_user_quota", nil))
+	quotaDiag := DiagnoseFailure(quotaExhausted)
+	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", quotaDiag.ErrorCode)
+	assert.False(t, quotaDiag.Retryable)
 }
 
 func TestDiagnoseFailureSeparatesQuotaAndTransientFailures(t *testing.T) {
@@ -186,10 +208,13 @@ func TestRetryAfterDelayFromBody_ParsesNestedRetryAfterFields(t *testing.T) {
 }
 
 func TestNewProviderRetryPolicy_UsesConfiguredTuning(t *testing.T) {
-	policy := newProviderRetryPolicy(3, RetryTuning{
-		BaseDelay:  400 * time.Millisecond,
-		MaxDelay:   3 * time.Second,
-		Multiplier: 1.5,
+	// Randomization: -1 显式关闭抖动（默认已改为 codex 式 ±10%），
+	// 精确断言保持可读。
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{
+		BaseDelay:     400 * time.Millisecond,
+		MaxDelay:      3 * time.Second,
+		Multiplier:    1.5,
+		Randomization: -1,
 	}, nil)
 
 	assert.Equal(t, 3, policy.MaxAttempts)
@@ -202,10 +227,10 @@ func TestNewProviderRetryPolicy_UsesConfiguredTuning(t *testing.T) {
 
 func TestRetryPolicy_UsesConfiguredStaircaseAndRepeatsFinalDelay(t *testing.T) {
 	schedule := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}
-	policy := newProviderRetryPolicy(-1, RetryTuning{
+	policy := newProviderRetryPolicy(-1, 0, RetryTuning{
 		Schedule:      schedule,
 		MaxDelay:      6 * time.Minute,
-		Randomization: 0,
+		Randomization: -1, // 关闭默认抖动，精确断言 schedule 值
 	}, nil)
 	decision := policy.decisionForError(fmt.Errorf("HTTP 503: upstream unavailable"))
 
@@ -219,14 +244,62 @@ func TestRetryPolicy_UsesConfiguredStaircaseAndRepeatsFinalDelay(t *testing.T) {
 }
 
 func TestRetryPolicy_ServerHintCanExtendButNotShortenSchedule(t *testing.T) {
-	policy := newProviderRetryPolicy(-1, RetryTuning{
+	policy := newProviderRetryPolicy(-1, 0, RetryTuning{
 		Schedule:      []time.Duration{30 * time.Second, time.Minute},
 		MaxDelay:      2 * time.Minute,
-		Randomization: 0,
+		Randomization: -1, // 关闭默认抖动，精确断言 schedule 值
 	}, nil)
 
 	require.Equal(t, 30*time.Second, policy.delayForDecision(1, retryDecision{Delay: time.Second}))
 	require.Equal(t, 90*time.Second, policy.delayForDecision(1, retryDecision{Delay: 90 * time.Second}))
+}
+
+func TestRetryTuning_UnsetRandomizationDefaultsToCodexStyleJitter(t *testing.T) {
+	// 对齐 codex-rs backoff()（retry.rs）的固定 ±10% jitter：未配置时默认 0.1。
+	assert.Equal(t, 0.1, RetryTuning{}.normalized().Randomization)
+	assert.Equal(t, 0.1, RetryTuning{BaseDelay: 400 * time.Millisecond}.normalized().Randomization)
+	// 显式配置被尊重。
+	assert.Equal(t, 0.25, RetryTuning{Randomization: 0.25}.normalized().Randomization)
+	// 显式负值是关闭开关。
+	assert.Zero(t, RetryTuning{Randomization: -1}.normalized().Randomization)
+	// 超过 1 被钳制。
+	assert.Equal(t, 1.0, RetryTuning{Randomization: 1.5}.normalized().Randomization)
+}
+
+func TestRetryPolicy_DefaultJitterBoundsBackoffWithinTenPercent(t *testing.T) {
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{
+		BaseDelay:  400 * time.Millisecond,
+		MaxDelay:   10 * time.Second,
+		Multiplier: 2.0,
+	}, nil)
+	decision := policy.decisionForError(fmt.Errorf("HTTP 500: upstream unavailable"))
+
+	original := retryPolicyRandomFloat64
+	defer func() { retryPolicyRandomFloat64 = original }()
+
+	// factor = 1 - 0.1 = 0.9 → 360ms。
+	retryPolicyRandomFloat64 = func() float64 { return 0 }
+	assert.Equal(t, 360*time.Millisecond, policy.delayForDecision(1, decision))
+
+	// factor = 1 + 0.1 = 1.1 → 440ms。
+	retryPolicyRandomFloat64 = func() float64 { return 1 }
+	assert.Equal(t, 440*time.Millisecond, policy.delayForDecision(1, decision))
+}
+
+func TestRetryPolicy_NegativeRandomizationDisablesJitter(t *testing.T) {
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{
+		BaseDelay:     400 * time.Millisecond,
+		MaxDelay:      10 * time.Second,
+		Multiplier:    2.0,
+		Randomization: -1,
+	}, nil)
+	decision := policy.decisionForError(fmt.Errorf("HTTP 500: upstream unavailable"))
+
+	original := retryPolicyRandomFloat64
+	defer func() { retryPolicyRandomFloat64 = original }()
+	// 若抖动仍启用，rand=1 会把 400ms 放大到 440ms。
+	retryPolicyRandomFloat64 = func() float64 { return 1 }
+	assert.Equal(t, 400*time.Millisecond, policy.delayForDecision(1, decision))
 }
 
 func TestRetryPolicy_KeepsRuleAttemptLimitsErrorSpecific(t *testing.T) {
@@ -249,7 +322,7 @@ func TestRetryPolicy_KeepsRuleAttemptLimitsErrorSpecific(t *testing.T) {
 		},
 	}
 
-	policy := newProviderRetryPolicy(3, RetryTuning{}, rules)
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{}, rules)
 	assert.Equal(t, 10, policy.MaxAttempts)
 	assert.Equal(t, 3, policy.DefaultMaxAttempts)
 	assert.Equal(t, 3, policy.initialMaxAttempts())
@@ -271,7 +344,7 @@ func TestRetryPolicy_KeepsRuleAttemptLimitsErrorSpecific(t *testing.T) {
 }
 
 func TestApplyRequestRetryPolicy_DisablesConfiguredAndRuleRetries(t *testing.T) {
-	policy := newProviderRetryPolicy(3, RetryTuning{}, []RetryRule{{
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{}, []RetryRule{{
 		Name:       "rate_limit_retry",
 		Enabled:    true,
 		MaxRetries: 10,
@@ -292,19 +365,19 @@ func TestApplyRequestRetryPolicy_DisablesConfiguredAndRuleRetries(t *testing.T) 
 }
 
 func TestRetryPolicy_DefaultAttemptLimitWithoutRulesRemainsUnchanged(t *testing.T) {
-	providerPolicy := newProviderRetryPolicy(3, RetryTuning{}, nil)
+	providerPolicy := newProviderRetryPolicy(3, 0, RetryTuning{}, nil)
 	assert.Equal(t, 3, providerPolicy.MaxAttempts)
 	assert.Equal(t, 3, providerPolicy.DefaultMaxAttempts)
 	assert.Equal(t, 3, providerPolicy.maxAttemptsForDecision(providerPolicy.decisionForError(fmt.Errorf("temporary failure"))))
 
-	runtimePolicy := newRuntimeRetryPolicy(2, RetryTuning{}, nil)
+	runtimePolicy := newRuntimeRetryPolicy(2, 0, RetryTuning{}, nil)
 	assert.Equal(t, 3, runtimePolicy.MaxAttempts)
 	assert.Equal(t, 3, runtimePolicy.DefaultMaxAttempts)
 	assert.Equal(t, 3, runtimePolicy.maxAttemptsForDecision(runtimePolicy.decisionForError(fmt.Errorf("temporary failure"))))
 }
 
 func TestPrepareRetry_UsesTheLimitForTheCurrentErrorClass(t *testing.T) {
-	policy := newProviderRetryPolicy(3, RetryTuning{}, []RetryRule{
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{}, []RetryRule{
 		{
 			Name:       "rate_limit_retry",
 			Enabled:    true,
@@ -553,4 +626,29 @@ func (e retryPolicyTestError) Error() string {
 
 func (e retryPolicyTestError) RetryErrorCode() string {
 	return e.code
+}
+
+// TestRetryAttemptsCeiling mirrors codex-rs MAX_REQUEST_MAX_RETRIES=100: any
+// positive budget above the ceiling is clamped, while unlimited (-1) and
+// disabled (0) budgets pass through unchanged.
+func TestRetryAttemptsCeiling(t *testing.T) {
+	require.Equal(t, -1, clampRetryAttempts(-1))
+	require.Equal(t, 0, clampRetryAttempts(0))
+	require.Equal(t, 100, clampRetryAttempts(100))
+	require.Equal(t, 100, clampRetryAttempts(500))
+
+	policy := newProviderRetryPolicy(500, 4, RetryTuning{}, nil)
+	require.Equal(t, 100, policy.MaxAttempts, "business budget must be clamped to 100")
+	require.Equal(t, 100, policy.DefaultMaxAttempts)
+	require.Equal(t, 4, policy.MaxTransportAttempts)
+
+	policy = newProviderRetryPolicy(10, 500, RetryTuning{}, nil)
+	require.Equal(t, 10, policy.MaxAttempts)
+	require.Equal(t, 100, policy.MaxTransportAttempts, "transport budget must be clamped to 100")
+
+	policy = newProviderRetryPolicy(10, 0, RetryTuning{}, nil)
+	require.Equal(t, 0, policy.MaxTransportAttempts, "0 means the transport budget is not enabled")
+
+	policy = newProviderRetryPolicy(10, -1, RetryTuning{}, nil)
+	require.Equal(t, 0, policy.MaxTransportAttempts, "-1 means unlimited transport retries")
 }
