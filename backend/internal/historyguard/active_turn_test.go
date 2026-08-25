@@ -62,6 +62,12 @@ func TestCompactActiveTurnReplay_CompactsEarlierReplayAndKeepsLatestBlock(t *tes
 	if got[1].Role != "assistant" || got[1].Metadata["active_turn_compaction"] != true {
 		t.Fatalf("expected compacted assistant summary, got %#v", got[1])
 	}
+	if !got[1].Metadata.GetBool("prompt_cache_epoch_break", false) {
+		t.Fatalf("expected prompt cache epoch break metadata, got %#v", got[1].Metadata)
+	}
+	if reason := got[1].Metadata.GetString("prompt_cache_epoch_reason", ""); reason != "active_turn_replay_compaction" {
+		t.Fatalf("unexpected prompt cache epoch reason %q in %#v", reason, got[1].Metadata)
+	}
 	if !strings.Contains(got[1].Content, "Compacted earlier tool replay in current turn") {
 		t.Fatalf("expected compacted summary content, got %q", got[1].Content)
 	}
@@ -157,6 +163,35 @@ func TestCompactActiveTurnReplay_ReducesLatestReplayToolResultWithoutBreakingToo
 	}
 	if len(got[2].Content) >= len(large) {
 		t.Fatalf("expected reduced content to be shorter")
+	}
+}
+
+func TestCompactActiveTurnReplay_DoesNotRereduceAnExistingToolSnapshot(t *testing.T) {
+	// Deliberately make the existing snapshot larger than the current fixed
+	// reducer budget.  The marker, rather than the current byte length, is the
+	// invariant that protects an already-sent prompt prefix.
+	snapshot := strings.Repeat("stable snapshot ", 400)
+	tool := types.NewToolMessage("call_snapshot", snapshot)
+	tool.Metadata["active_turn_tool_result_reduced"] = true
+	messages := []types.Message{
+		*types.NewUserMessage("continue analysis"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{{
+				ID:   "call_snapshot",
+				Name: "read_file",
+			}},
+			Metadata: types.NewMetadata(),
+		},
+		*tool,
+	}
+
+	got, compacted := CompactActiveTurnReplay(messages, 128)
+	if compacted {
+		t.Fatalf("did not expect an existing snapshot to be rewritten, got %#v", got)
+	}
+	if got[2].Content != snapshot {
+		t.Fatalf("existing reduced snapshot changed: got %d bytes, want %d", len(got[2].Content), len(snapshot))
 	}
 }
 

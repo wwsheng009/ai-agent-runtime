@@ -48,6 +48,30 @@ func TestSessionActorSubmitPromptReturnsAfterActorStopped(t *testing.T) {
 	}
 }
 
+func TestReplaceSessionHistoryAndAdvancePromptCacheEpoch(t *testing.T) {
+	session := NewSession("prompt-cache-user")
+	session.AddMessage(*types.NewUserMessage("original"))
+
+	previous := replaceSessionHistoryAndAdvancePromptCacheEpoch(session, []types.Message{
+		*types.NewUserMessage("replacement"),
+	})
+	require.Zero(t, previous)
+	require.Equal(t, 1, contextIntValue(session.Metadata.Context, agent.PromptCacheEpochSessionContextKey))
+	require.Len(t, session.History, 1)
+	require.Equal(t, "replacement", session.History[0].Content)
+
+	original := session.GetMessages()
+	previous = replaceSessionHistoryAndAdvancePromptCacheEpoch(session, []types.Message{
+		*types.NewUserMessage("second replacement"),
+	})
+	require.Equal(t, 1, previous)
+	require.Equal(t, 2, contextIntValue(session.Metadata.Context, agent.PromptCacheEpochSessionContextKey))
+
+	restoreSessionHistoryAndPromptCacheEpoch(session, original, previous)
+	require.Equal(t, 1, contextIntValue(session.Metadata.Context, agent.PromptCacheEpochSessionContextKey))
+	require.Equal(t, original, session.GetMessages())
+}
+
 type blockingRuntimeStateStore struct {
 	started chan struct{}
 	release chan struct{}
@@ -1438,6 +1462,7 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.NotContains(t, updated.Metadata.Title, " · compact")
 	require.NotContains(t, updated.Metadata.Title, "Preserve the prior investigation")
 	require.Equal(t, 1, contextIntValue(updated.Metadata.Context, ContextCompactGeneration))
+	require.Equal(t, 1, contextIntValue(updated.Metadata.Context, agent.PromptCacheEpochSessionContextKey))
 
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
 	require.NoError(t, err)

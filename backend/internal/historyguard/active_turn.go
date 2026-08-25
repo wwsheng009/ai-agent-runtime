@@ -167,6 +167,15 @@ func reduceLatestReplayToolResults(messages []types.Message, maxBytes int, maxTo
 		if next[index].Role != "tool" {
 			continue
 		}
+		// A reduced tool result is a prompt-view snapshot.  It may be larger
+		// than the current fixed reduction budget (for example when an
+		// advisory was appended after the snapshot was installed), but it must
+		// not be rendered again from that already reduced text.  Re-reducing an
+		// old item makes the bytes at the middle of the provider prefix depend
+		// on the current token budget and destroys prompt-cache reuse.
+		if next[index].Metadata.GetBool("active_turn_tool_result_reduced", false) {
+			continue
+		}
 		reduced, changed := buildReducedToolResultContent(next[index].Content, defaultLatestReplayToolResultMaxBytes)
 		if !changed {
 			continue

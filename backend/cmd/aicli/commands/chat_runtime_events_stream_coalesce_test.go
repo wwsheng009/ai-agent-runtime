@@ -248,6 +248,43 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 	}
 }
 
+func TestHandleAssistantReasoningConsumesCoalescedTextAsDelta(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "coalesced-reasoning"}}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	interaction.liveStreamFn = func() bool { return true }
+	session.Interaction = interaction
+
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered *runtimetypes.ReasoningBlock
+	bridge.writeReasoningDelta = func(block *runtimetypes.ReasoningBlock) {
+		rendered = block
+	}
+	event := runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "coalesced-reasoning",
+		Payload: map[string]interface{}{
+			"text": "Assessing lifecycleReevaluating projection",
+		},
+	}
+
+	if !bridge.handleAssistantReasoning(event) {
+		t.Fatal("coalesced reasoning event was not handled")
+	}
+	if rendered == nil {
+		t.Fatal("coalesced reasoning text was not projected as a stream delta")
+	}
+	if got, want := rendered.RawDisplayText(), "Assessing lifecycleReevaluating projection"; got != want {
+		t.Fatalf("rendered reasoning = %q, want %q", got, want)
+	}
+	if rendered.Format != "stream_delta" || !rendered.Streamable {
+		t.Fatalf("coalesced reasoning lost delta semantics: %#v", rendered)
+	}
+	if !bridge.hasRenderedReasoningDelta() {
+		t.Fatal("bridge lifecycle did not record the coalesced reasoning delta")
+	}
+}
+
 func TestOrderAssistantDeltaAdvancesPastCoalescedInterval(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "order-coalesced"}})
 	bridge.BeginRun()

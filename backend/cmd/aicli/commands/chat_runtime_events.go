@@ -3937,7 +3937,7 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 	if !chatReasoningOutputEnabled(b.session) {
 		return true
 	}
-	block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"])
+	block := reasoningBlockFromRuntimeEvent(event)
 	if block == nil {
 		return false
 	}
@@ -3976,6 +3976,29 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 	b.renderedReasoningFinal = true
 	b.renderMu.Unlock()
 	return true
+}
+
+// reasoningBlockFromRuntimeEvent normalizes the two stream shapes accepted by
+// the bridge. Production agent events carry a typed nested ReasoningBlock,
+// while queue backpressure coalescing replaces several such blocks with one
+// top-level text payload. The coalesced form is still a delta, not a terminal
+// snapshot; treating it as an unrecognized event lets the Scene advance while
+// coordinator lifecycle bookkeeping stays stale and can later replay the final
+// reasoning snapshot through a second presentation path.
+func reasoningBlockFromRuntimeEvent(event runtimeevents.Event) *runtimetypes.ReasoningBlock {
+	if block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"]); block != nil {
+		return block
+	}
+	text := streamEventText(event)
+	if text == "" {
+		return nil
+	}
+	return &runtimetypes.ReasoningBlock{
+		Summary:    text,
+		Format:     "stream_delta",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	}
 }
 
 func (b *chatRuntimeEventBridge) handleAssistantDelta(event runtimeevents.Event) bool {

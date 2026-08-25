@@ -1095,7 +1095,7 @@ func (a *SessionActor) applyConversationSnapshot(ctx context.Context, messages [
 	if err != nil {
 		return err
 	}
-	session.ReplaceHistory(messages)
+	replaceSessionHistoryAndAdvancePromptCacheEpoch(session, messages)
 	session.SetHeadOffset(0)
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
@@ -1129,7 +1129,7 @@ func (a *SessionActor) applyConversationPrefix(ctx context.Context, targetCount 
 	for i := 0; i < targetCount; i++ {
 		cloned[i] = *session.History[i].Clone()
 	}
-	session.ReplaceHistory(cloned)
+	replaceSessionHistoryAndAdvancePromptCacheEpoch(session, cloned)
 	session.SetHeadOffset(0)
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
@@ -1438,7 +1438,7 @@ func (a *SessionActor) rollbackLastUserPrompt(ctx context.Context, session *Sess
 	if last.Role != "user" || last.Content != prompt {
 		return nil
 	}
-	session.ReplaceHistory(history[:len(history)-1])
+	replaceSessionHistoryAndAdvancePromptCacheEpoch(session, history[:len(history)-1])
 	return a.persistSession(ctx, session)
 }
 
@@ -1699,12 +1699,15 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	// ReplaceHistory keeps the sticky derived/manual title unchanged.
 	rootTitleHint := session.CompactRootTitleCandidate()
 	titleSnapshot := snapshotSessionTitleState(session)
-	session.ReplaceHistory(result.ReplacementHistory)
+	previousPromptCacheEpoch := replaceSessionHistoryAndAdvancePromptCacheEpoch(session, result.ReplacementHistory)
+	// Explicit session compaction rewrites an already-cacheable prefix outside
+	// ReActLoop. Advance the same durable generation that RunWithSession reads
+	// before the replacement history can be persisted.
 	// Compact rewrites history in place; record parent/root lineage + generation
 	// as diagnostics without changing the user-visible title.
 	session.ApplyCompactTitleLineage(session.ID, rootTitleHint)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
-		session.ReplaceHistory(originalHistory)
+		restoreSessionHistoryAndPromptCacheEpoch(session, originalHistory, previousPromptCacheEpoch)
 		restoreSessionTitleState(session, titleSnapshot)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
@@ -1885,12 +1888,14 @@ func (a *SessionActor) runManualCompact(
 	// ReplaceHistory keeps the sticky derived/manual title unchanged.
 	rootTitleHint := session.CompactRootTitleCandidate()
 	titleSnapshot := snapshotSessionTitleState(session)
-	session.ReplaceHistory(result.ReplacementHistory)
+	previousPromptCacheEpoch := replaceSessionHistoryAndAdvancePromptCacheEpoch(session, result.ReplacementHistory)
+	// Keep explicit actor-side compaction on the same durable cache-generation
+	// lane as automatic ReAct session recovery.
 	// Compact rewrites history in place; record parent/root lineage + generation
 	// as diagnostics without changing the user-visible title.
 	session.ApplyCompactTitleLineage(session.ID, rootTitleHint)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
-		session.ReplaceHistory(originalHistory)
+		restoreSessionHistoryAndPromptCacheEpoch(session, originalHistory, previousPromptCacheEpoch)
 		restoreSessionTitleState(session, titleSnapshot)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
@@ -2029,8 +2034,33 @@ func stripMessagesWithMetadataKeys(session *Session, keys []string) {
 		stripped = append(stripped, message)
 	}
 	if changed {
-		session.ReplaceHistory(stripped)
+		replaceSessionHistoryAndAdvancePromptCacheEpoch(session, stripped)
 	}
+}
+
+// replaceSessionHistoryAndAdvancePromptCacheEpoch is the actor-side boundary
+// for intentional history rewrites. Append-only AddMessage paths retain their
+// current generation; restore, rollback, compaction, and transient-message
+// removal move to a new one before the replacement can be persisted.
+func replaceSessionHistoryAndAdvancePromptCacheEpoch(session *Session, messages []runtimetypes.Message) int {
+	if session == nil {
+		return 0
+	}
+	previous := contextIntValue(session.Metadata.Context, agent.PromptCacheEpochSessionContextKey)
+	session.ReplaceHistory(messages)
+	session.SetContext(agent.PromptCacheEpochSessionContextKey, previous+1)
+	return previous
+}
+
+func restoreSessionHistoryAndPromptCacheEpoch(session *Session, messages []runtimetypes.Message, epoch int) {
+	if session == nil {
+		return
+	}
+	session.ReplaceHistory(messages)
+	if epoch < 0 {
+		epoch = 0
+	}
+	session.SetContext(agent.PromptCacheEpochSessionContextKey, epoch)
 }
 
 func messageHasAnyMetadataKey(message runtimetypes.Message, keys []string) bool {
