@@ -2087,6 +2087,11 @@ func TestBuildChatSurfaceStatusLine_ToolDetailDegradesAtNarrowWidth(t *testing.T
 }
 
 func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyWindowIsKnown(t *testing.T) {
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
 	session := &ChatSession{
 		ContextWindowTokenCount: 128000,
 	}
@@ -2439,6 +2444,11 @@ func TestBuildChatSurfaceStatusLine_IncludesActiveGoalLiveElapsed(t *testing.T) 
 }
 
 func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabilityExists(t *testing.T) {
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
 	session := &ChatSession{
 		TokenCount:        500000,
 		ContextTokenCount: 28640,
