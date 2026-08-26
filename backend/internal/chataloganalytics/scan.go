@@ -98,6 +98,9 @@ func isSessionDir(path string) bool {
 		return false
 	}
 	name := filepath.Base(path)
+	if isSessionArtifactName(name) {
+		return false
+	}
 	if !looksLikeSessionID(name) {
 		return false
 	}
@@ -117,6 +120,60 @@ func isSessionDir(path string) bool {
 		}
 	}
 	return true
+}
+
+// sessionArtifactDirSuffixes 是新布局中依附于 <sid>.json 的 artifact 目录后缀，
+// 扫描时必须排除，避免被宽松的 looksLikeSessionID 规则误判为会话。
+var sessionArtifactDirSuffixes = []string{".http", ".shell", ".images", ".exports", ".events", ".toolkit"}
+
+// isSessionArtifactName 判断目录/文件基名是否为新布局的 artifact（<sid>.http 等）。
+func isSessionArtifactName(name string) bool {
+	lower := strings.ToLower(name)
+	for _, suffix := range sessionArtifactDirSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSessionLogFile 判断是否为文件型会话日志（新布局 <sid>.json）。
+func isSessionLogFile(entry os.DirEntry) bool {
+	if entry.IsDir() {
+		return false
+	}
+	name := entry.Name()
+	lower := strings.ToLower(name)
+	if !strings.HasSuffix(lower, ".json") || isSessionArtifactName(name) {
+		return false
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	return base != "" && looksLikeSessionID(base)
+}
+
+// sessionPathMatches 判断候选路径是否为会话：目录（旧布局）或 <sid>.json 文件（新布局）。
+func sessionPathMatches(candidate string) bool {
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return isSessionDir(candidate)
+	}
+	name := filepath.Base(candidate)
+	if isSessionArtifactName(name) || !strings.HasSuffix(strings.ToLower(name), ".json") {
+		return false
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	return base != "" && looksLikeSessionID(base)
+}
+
+// sessionDebugLogPath 返回会话调试日志路径，兼容新布局文件型会话（<sid>.json → <sid>.debug.log）。
+func sessionDebugLogPath(dir SessionDir) string {
+	if strings.HasSuffix(strings.ToLower(dir.Path), ".json") {
+		return strings.TrimSuffix(dir.Path, filepath.Ext(dir.Path)) + ".debug.log"
+	}
+	return filepath.Join(dir.Path, "debug.log")
 }
 
 func toRelPath(root, full string) string {
@@ -245,12 +302,20 @@ func walkDatePartitionYear(root, yearPath, year string, out *[]SessionDir, maxSc
 				return err
 			}
 			for _, sessEntry := range sessions {
-				if !sessEntry.IsDir() {
+				name := sessEntry.Name()
+				full := filepath.Join(dayPath, sessEntry.Name())
+				if sessEntry.IsDir() {
+					// 排除 <sid>.http/.shell/.images/.exports/.events 等 artifact 目录
+					if isSessionArtifactName(name) || !isSessionDir(full) {
+						continue
+					}
+				} else if !isSessionLogFile(sessEntry) {
+					// 新布局文件型会话 <sid>.json；跳过 <sid>.debug.log 等其余文件
 					continue
 				}
-				full := filepath.Join(dayPath, sessEntry.Name())
-				if !isSessionDir(full) {
-					continue
+				sid := name
+				if !sessEntry.IsDir() {
+					sid = strings.TrimSuffix(name, filepath.Ext(name))
 				}
 				mod := time.Time{}
 				if fi, statErr := sessEntry.Info(); statErr == nil {
@@ -259,7 +324,7 @@ func walkDatePartitionYear(root, yearPath, year string, out *[]SessionDir, maxSc
 				rel := toRelPath(root, full)
 				*out = append(*out, SessionDir{
 					Path:      full,
-					SessionID: sessEntry.Name(),
+					SessionID: sid,
 					RelPath:   rel,
 					Directory: directoryFromRelPath(rel),
 					ModTime:   mod,
@@ -285,14 +350,16 @@ func ResolveSessionDir(root, sessionID string) (SessionDir, bool, error) {
 		return SessionDir{}, false, nil
 	}
 
-	candidates := make([]string, 0, 3)
+	candidates := make([]string, 0, 4)
 	if parsed, ok := aiclipaths.ParseTimestampedSessionIDTime(sessionID); ok {
+		sidBase := strings.ReplaceAll(sessionID, ".", "_")
+		candidates = append(candidates, aiclipaths.JoinDatePartition(root, parsed, sidBase+".json"))
 		candidates = append(candidates, aiclipaths.JoinDatePartition(root, parsed, sessionID))
 	}
 	candidates = append(candidates, filepath.Join(root, sessionID))
 
 	for _, candidate := range candidates {
-		if isSessionDir(candidate) {
+		if sessionPathMatches(candidate) {
 			rel := toRelPath(root, candidate)
 			mod := time.Time{}
 			if fi, err := os.Stat(candidate); err == nil {
@@ -314,7 +381,7 @@ func ResolveSessionDir(root, sessionID string) (SessionDir, bool, error) {
 		return SessionDir{}, false, err
 	}
 	for _, dir := range dirs {
-		if dir.SessionID == sessionID {
+		if dir.SessionID == sessionID || dir.SessionID == strings.ReplaceAll(sessionID, ".", "_") {
 			return dir, true, nil
 		}
 	}

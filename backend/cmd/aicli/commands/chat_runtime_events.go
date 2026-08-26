@@ -1821,11 +1821,36 @@ func (b *chatRuntimeEventBridge) eventLogFilePath() string {
 	if b.session == nil || b.session.Logger == nil {
 		return ""
 	}
-	sessionDir := b.session.Logger.SessionDirPath()
-	if sessionDir == "" {
+	dir := b.session.Logger.RuntimeEventsDir()
+	if dir == "" {
 		return ""
 	}
-	return filepath.Join(sessionDir, "runtime-events.jsonl")
+	newPath := filepath.Join(dir, "runtime-events.jsonl")
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath
+	}
+	// 兼容旧布局 chat-logs/YYYY/MM/DD/<sessionID>/runtime-events.jsonl，防止事件链断连
+	if legacy := b.legacyRuntimeEventsLogPath(); legacy != "" {
+		if _, err := os.Stat(legacy); err == nil {
+			return legacy
+		}
+	}
+	return newPath
+}
+
+// legacyRuntimeEventsLogPath 返回旧布局下的 runtime 事件文件路径。
+func (b *chatRuntimeEventBridge) legacyRuntimeEventsLogPath() string {
+	l := b.session.Logger
+	if l == nil || strings.TrimSpace(l.sessionID) == "" {
+		return ""
+	}
+	dir := b.session.Logger.RuntimeEventsDir()
+	if dir == "" {
+		return ""
+	}
+	// <sid>.events 的上一级即 YYYY/MM/DD 日期分区
+	partitionDir := filepath.Dir(dir)
+	return filepath.Join(partitionDir, l.sessionID, "runtime-events.jsonl")
 }
 
 // appendEventLog 把事件 JSON 追加到事件日志（best-effort：失败只计数，不阻塞事件循环）。
