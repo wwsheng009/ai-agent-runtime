@@ -430,7 +430,7 @@ func (q *chatInputQueue) stdinPump() {
 func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
 	defer close(events)
 	for {
-		line, err := q.reader.ReadString('\n')
+		line, err := readChatSessionLine(context.Background(), q.reader)
 		if line == "" && err != nil {
 			events <- stdinLineEvent{Err: err}
 			return
