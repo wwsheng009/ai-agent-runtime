@@ -97,6 +97,10 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 			keyHandler = nil
 			surface = nil
 			interactiveUI = false
+			// 降级模式：win7 conhost 的 cooked 行编辑在 CP65001 下按字节工作
+			// （中文退格删不动）且不支持 Delete 键，改用传统控制台行编辑器
+			// （ReadConsoleInputW + WriteConsoleW）自绘输入行。
+			setChatLegacyConsoleInputMode(true)
 		}
 	}
 	if opts.NoInteractive || opts.OutputFormat == "json" {
