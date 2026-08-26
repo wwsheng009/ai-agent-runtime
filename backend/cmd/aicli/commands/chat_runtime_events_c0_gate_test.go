@@ -63,10 +63,14 @@ func restRunes(s string) string {
 // 全部阶段，跑完后 textParityMatched == textParityBlocks &&
 // textParityMissed == 0 —— 双跑偏差在提交时失败，而不是上线后观察。
 //
-// 完整块（探针逐一对照 Scene 投影）共 6 个：
+// legacy 完整块（探针逐一对照 Scene 投影）共 6 个：
 //
 //	U1 → turn-1 assistant（含 reasoning 元数据）→ command → error(system)
 //	→ prompt gap + U2 → turn-2 assistant
+//
+// reasoning 是额外的 Scene-owned 语义 cell：其正文不再经过 legacy
+// writeRowsLocked，divider 也只由 presentation 派生，所以它不占用 text
+// parity 的 legacy block 游标；专用 reasoning 投影测试负责其可见输出。
 //
 // tool 阶段不在本序列中交错：tool 事件的 Scene 侧投影（KindToolChain cell）
 // 与旧路径完整块序列的对齐属 C1 任务 2（"补齐所有 finalized cell 类型的
@@ -107,14 +111,15 @@ func TestRenderLayer_C0_ParityGate_FullSessionKinds(t *testing.T) {
 	}
 	coord.RenderAssistant("世界")
 
-	// C0 出口断言：parity 门禁全绿（6 完整块 = 2 user + 2 assistant + command + system）。
+	// C0 出口断言：parity 门禁全绿（6 legacy 完整块 =
+	// 2 user + 2 assistant + command + system；reasoning 单独跳过）。
 	blocks, matched, missed, lastErr := bridge.textParityStats()
 	if blocks != 6 || matched != 6 || missed != 0 {
 		t.Fatalf("parity: blocks=%d matched=%d missed=%d last=%q\nlegacy out=%q",
 			blocks, matched, missed, lastErr, out.String())
 	}
 
-	// Scene cell 类型序列：user, assistant, command, system, user, assistant。
+	// Scene cell 类型序列包含独立 reasoning predecessor。
 	snap := bridge.sceneSnapshot()
 	var kinds []string
 	for _, c := range snap.Cells {
@@ -122,7 +127,7 @@ func TestRenderLayer_C0_ParityGate_FullSessionKinds(t *testing.T) {
 			kinds = append(kinds, c.Kind.String())
 		}
 	}
-	wantKinds := []string{"user", "assistant", "command", "system", "user", "assistant"}
+	wantKinds := []string{"user", "reasoning", "assistant", "command", "system", "user", "assistant"}
 	if len(kinds) != len(wantKinds) {
 		t.Fatalf("cell kinds = %v, want %v", kinds, wantKinds)
 	}
@@ -132,18 +137,25 @@ func TestRenderLayer_C0_ParityGate_FullSessionKinds(t *testing.T) {
 		}
 	}
 
-	// 全量对照：Scene 快照 RenderText == 旧路径输出（样式归一化与探针一致：
-	// user 行剥 "> "，error 行剥 ErrorIcon 前缀）。
+	// 全量对照只取具有 legacy 完整块对应物的 Scene cells。Reasoning source
+	// 由 Scene 独占且 presentation chrome 不进入 source，已在上面的 kind
+	// 序列及 reasoning 专用测试中覆盖。
 	legacyLines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	want := scene.RenderText(snap.Cells, snap.Revision)
+	parityCells := make([]*scene.TranscriptCell, 0, len(snap.Cells))
+	for _, c := range snap.Cells {
+		if c != nil && c.Kind != scene.KindReasoning {
+			parityCells = append(parityCells, c)
+		}
+	}
+	want := scene.RenderText(parityCells, snap.Revision)
 	if len(legacyLines) != len(want) {
 		t.Fatalf("lines: legacy=%d (%q) scene=%d (%q)", len(legacyLines), legacyLines, len(want), want)
 	}
-	layoutRows := scene.LayoutTranscript(snap.Cells, snap.Revision)
+	layoutRows := scene.LayoutTranscript(parityCells, snap.Revision)
 	userRow := make(map[int]bool)
 	for _, row := range layoutRows {
 		if row.CellID != 0 {
-			for _, c := range snap.Cells {
+			for _, c := range parityCells {
 				if c != nil && c.ID == row.CellID && c.Kind == scene.KindUser {
 					userRow[row.Index] = true
 				}

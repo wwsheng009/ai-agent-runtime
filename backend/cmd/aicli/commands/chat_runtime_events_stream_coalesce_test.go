@@ -2,11 +2,13 @@ package commands
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -194,6 +196,175 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 	}
 }
 
+func TestMergeAssistantAppendEventsUsesSequenceNotTextHeuristics(t *testing.T) {
+	event := func(sequence uint64, delta string) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type:    runtimechat.EventAssistantDelta,
+			TraceID: "trace-explicit-append",
+			Payload: map[string]interface{}{
+				"turn_id": "turn-explicit-append", "stream_id": "stream-explicit-append",
+				"sequence": sequence, "mode": "append", "delta": delta,
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		first    string
+		second   string
+		expected string
+	}{
+		{name: "equal prose is legal twice", first: "ha", second: "ha", expected: "haha"},
+		{name: "prefix-like prose is still a delta", first: "a", second: "ab", expected: "aab"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := mergeStreamEvents(event(1, tc.first), event(2, tc.second))
+			if got := streamEventText(merged); got != tc.expected {
+				t.Fatalf("merged append text = %q, want exact bytes %q", got, tc.expected)
+			}
+		})
+	}
+
+	duplicate := mergeStreamEvents(event(7, "first delivery"), event(7, "conflicting replay"))
+	if got := streamEventText(duplicate); got != "first delivery" {
+		t.Fatalf("same-sequence replay = %q, want first accepted delivery", got)
+	}
+}
+
+func TestReasoningCompatibilityLifecycleIsScopedPerStream(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "reasoning-multi-request"}}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	interaction.liveStreamFn = func() bool { return true }
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	deltas, finals := 0, 0
+	bridge.writeReasoningDelta = func(*runtimetypes.ReasoningBlock) { deltas++ }
+	bridge.completeReasoning = func(*runtimetypes.ReasoningBlock) bool {
+		finals++
+		return true
+	}
+	reasoningEvent := func(streamID, mode, format, text string, sequence uint64) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type: runtimechat.EventAssistantReasoning, SessionID: session.RuntimeSession.ID,
+			TraceID: "trace-" + streamID,
+			Payload: map[string]interface{}{
+				"turn_id": "turn-multi", "stream_id": streamID, "llm_request_id": "request-" + streamID,
+				"step": 1, "sequence": sequence, "mode": mode,
+				"reasoning": map[string]interface{}{
+					"format": format, "summary": text,
+					"visibility": string(runtimetypes.ReasoningVisibilitySummary),
+				},
+			},
+		}
+	}
+
+	for _, streamID := range []string{"stream-a", "stream-b"} {
+		if !bridge.handleAssistantReasoning(reasoningEvent(streamID, "append", "stream_delta", "delta-"+streamID, 1)) {
+			t.Fatalf("%s append was not handled", streamID)
+		}
+		if !bridge.handleAssistantReasoning(reasoningEvent(streamID, "replace", "summary", "final-"+streamID, 2)) {
+			t.Fatalf("%s final was not handled", streamID)
+		}
+	}
+	if deltas != 2 || finals != 2 {
+		t.Fatalf("reasoning lifecycle callbacks deltas=%d finals=%d, want 2/2 across two streams", deltas, finals)
+	}
+}
+
+func TestLateReasoningFinalDoesNotReplaceNewerActiveRequest(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "reasoning-interleaved"}}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	interaction.liveStreamFn = func() bool { return true }
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	var callbacks []string
+	bridge.writeReasoningDelta = func(block *runtimetypes.ReasoningBlock) {
+		callbacks = append(callbacks, "delta:"+block.RawDisplayText())
+	}
+	bridge.completeReasoning = func(block *runtimetypes.ReasoningBlock) bool {
+		callbacks = append(callbacks, "final:"+block.RawDisplayText())
+		return true
+	}
+	reasoningEvent := func(streamID, mode, text string, sequence uint64) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type: runtimechat.EventAssistantReasoning, SessionID: session.RuntimeSession.ID,
+			TraceID: "trace-shared",
+			Payload: map[string]interface{}{
+				"turn_id": "turn-shared", "stream_id": streamID,
+				"llm_request_id": "request-" + streamID,
+				"step":           1, "sequence": sequence, "mode": mode,
+				"reasoning": map[string]interface{}{
+					"format": "stream_delta", "summary": text,
+					"visibility": string(runtimetypes.ReasoningVisibilitySummary),
+				},
+			},
+		}
+	}
+
+	bridge.handleAssistantReasoning(reasoningEvent("stream-a", "append", "A", 1))
+	keyA := bridge.activeReasoningRenderKey()
+	bridge.handleAssistantReasoning(reasoningEvent("stream-b", "append", "B", 1))
+	keyB := bridge.activeReasoningRenderKey()
+	if keyA == keyB {
+		t.Fatalf("request keys collapsed: A=%q B=%q", keyA, keyB)
+	}
+
+	// A's late terminal snapshot is consumed for A but must not complete or
+	// overwrite B's single coordinator-owned active band.
+	bridge.handleAssistantReasoning(reasoningEvent("stream-a", "replace", "A-final", 2))
+	bridge.handleAssistantReasoning(reasoningEvent("stream-b", "replace", "B-final", 2))
+
+	want := []string{"delta:A", "delta:B", "final:B-final"}
+	if !slices.Equal(callbacks, want) {
+		t.Fatalf("interleaved callbacks = %q, want %q", callbacks, want)
+	}
+	if !bridge.hasRenderedReasoningFinalFor(keyA) || !bridge.hasRenderedReasoningFinalFor(keyB) {
+		t.Fatalf("per-request final states A=%v B=%v, want both final",
+			bridge.hasRenderedReasoningFinalFor(keyA), bridge.hasRenderedReasoningFinalFor(keyB))
+	}
+}
+
+func TestReasoningCompatibilityDropsSameSequenceRetransmission(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "reasoning-retransmission"}}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	interaction.liveStreamFn = func() bool { return true }
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	var rendered []string
+	bridge.writeReasoningDelta = func(block *runtimetypes.ReasoningBlock) {
+		rendered = append(rendered, block.RawDisplayText())
+	}
+	event := func(sequence uint64, text string) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type: runtimechat.EventAssistantReasoning, SessionID: session.RuntimeSession.ID,
+			Payload: map[string]interface{}{
+				"turn_id": "turn-retransmission", "stream_id": "stream-retransmission",
+				"sequence": sequence, "mode": "append",
+				"reasoning": map[string]interface{}{
+					"format": "stream_delta", "summary": text,
+					"visibility": string(runtimetypes.ReasoningVisibilitySummary),
+				},
+			},
+		}
+	}
+	bridge.handleAssistantReasoning(event(1, "first"))
+	bridge.handleAssistantReasoning(event(1, "conflicting replay"))
+	bridge.handleAssistantReasoning(event(2, " second"))
+
+	want := []string{"first", " second"}
+	if !slices.Equal(rendered, want) {
+		t.Fatalf("reasoning retransmission callbacks = %q, want %q", rendered, want)
+	}
+}
+
 // 回归：assistant.reasoning 事件只带嵌套 reasoning 块（loop.go 的
 // emitRuntimeEvent 形态，无顶层 text/summary、无 sequence）。同流增量在
 // 合并时必须逐字节保留文本，而不是把后续增量整条丢弃；合并结果仍可被
@@ -264,7 +435,8 @@ func TestHandleAssistantReasoningConsumesCoalescedTextAsDelta(t *testing.T) {
 		Type:      runtimechat.EventAssistantReasoning,
 		SessionID: "coalesced-reasoning",
 		Payload: map[string]interface{}{
-			"text": "Assessing lifecycleReevaluating projection",
+			"text":                           "Assessing lifecycleReevaluating projection",
+			encoding.ReasoningStreamDeltaKey: true,
 		},
 	}
 

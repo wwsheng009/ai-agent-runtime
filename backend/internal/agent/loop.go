@@ -684,7 +684,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			if loop.config.Verbose {
 				fmt.Printf("[Step %d] No tool calls, finishing\n", step)
 			}
-			if strings.TrimSpace(action.Content) == "" {
+			if strings.TrimSpace(action.Content) == "" && !reasoningBlockHasPayload(action.Reasoning) {
 				err := fmt.Errorf(emptyTerminalAssistantResponseError)
 				loop.agent.AddError(err.Error())
 				result.Success = false
@@ -1085,6 +1085,18 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	return result, nil
 }
 
+func reasoningBlockHasPayload(block *types.ReasoningBlock) bool {
+	if block == nil {
+		return false
+	}
+	// Provider whitespace is semantic reasoning content and must not be
+	// collapsed with TrimSpace. Opaque continuation state/metadata also makes
+	// the model response non-empty even when it has no displayable summary.
+	return block.RawDisplayText() != "" ||
+		strings.TrimSpace(block.OpaqueState) != "" ||
+		len(block.Metadata) > 0
+}
+
 // maxMalformedToolCallRecoveries 控制同一工具名「参数非法」降级重发的最大次数。
 // 超过后放弃降级、走原有错误路径，防止模型反复生成非法参数导致死循环烧 token
 // （参照 DeepSeek-Reasonix 的 repeat_failure_guard）。
@@ -1479,6 +1491,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	callCtx := ctx
 	streamedReasoning := false
 	var assistantSequence atomic.Uint64
+	var reasoningSequence atomic.Uint64
 	if req.Stream {
 		callCtx = llm.WithStreamReporter(ctx, func(chunk llm.StreamChunk) {
 			switch chunk.Type {
@@ -1513,11 +1526,20 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					Streamable: true,
 					Visibility: types.ReasoningVisibilitySummary,
 				}
-				loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
-					"trace_id":  traceID,
-					"step":      step,
-					"reasoning": reasoning.ToMap(),
-				})
+				payload := map[string]interface{}{
+					"trace_id":        traceID,
+					"logical_turn_id": logicalTurnID,
+					"llm_request_id":  llmRequestID,
+					"stream_id":       streamID,
+					"sequence":        reasoningSequence.Add(1),
+					"mode":            "append",
+					"step":            step,
+					"reasoning":       reasoning.ToMap(),
+				}
+				if turnID != "" {
+					payload["turn_id"] = turnID
+				}
+				loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", payload)
 			case llm.EventTypeImage:
 				if len(chunk.Metadata) == 0 {
 					return
@@ -1829,10 +1851,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			action.MessageMetadata[key] = value
 		}
 	}
-	if action.Reasoning == nil && strings.TrimSpace(response.Reasoning) != "" {
+	if action.Reasoning == nil && response.Reasoning != "" {
 		action.Reasoning = &types.ReasoningBlock{
 			Provider:   req.Provider,
-			Summary:    strings.TrimSpace(response.Reasoning),
+			Summary:    response.Reasoning,
 			Visibility: types.ReasoningVisibilitySummary,
 		}
 	}
@@ -1841,11 +1863,19 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			action.Reasoning.Provider = req.Provider
 		}
 		if !streamedReasoning {
-			loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
-				"trace_id":  traceID,
-				"step":      step,
-				"reasoning": action.Reasoning.ToMap(),
-			})
+			payload := map[string]interface{}{
+				"trace_id":        traceID,
+				"logical_turn_id": logicalTurnID,
+				"llm_request_id":  llmRequestID,
+				"stream_id":       streamID,
+				"mode":            "replace",
+				"step":            step,
+				"reasoning":       action.Reasoning.ToMap(),
+			}
+			if turnID != "" {
+				payload["turn_id"] = turnID
+			}
+			loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", payload)
 		}
 	}
 	thought = "Based on the context, I'll " + action.Content

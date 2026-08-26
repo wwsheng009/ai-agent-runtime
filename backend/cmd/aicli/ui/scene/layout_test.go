@@ -57,7 +57,7 @@ func TestLayoutTopLevelCellsGetGapRow(t *testing.T) {
 
 func TestLayoutSameRequestReasoningAssistantHasNoGhostGap(t *testing.T) {
 	s := New()
-	reasoning := newTestCell(1, KindSupplement, "end reasoning")
+	reasoning := newTestCell(1, KindReasoning, "reasoning body")
 	reasoning.BoundaryGroupKey = "request-1"
 	assistant := newTestCell(2, KindAssistant, "Hello")
 	assistant.BoundaryGroupKey = "request-1"
@@ -68,7 +68,7 @@ func TestLayoutSameRequestReasoningAssistantHasNoGhostGap(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %+v, want adjacent reasoning and assistant without a boundary row", rows)
 	}
-	if rows[0].Text != "end reasoning" || rows[1].Text != "Hello" {
+	if rows[0].Text != "reasoning body" || rows[1].Text != "Hello" {
 		t.Fatalf("unexpected dense rows: %+v", rows)
 	}
 	for _, row := range rows {
@@ -80,7 +80,7 @@ func TestLayoutSameRequestReasoningAssistantHasNoGhostGap(t *testing.T) {
 
 func TestLayoutDifferentRequestReasoningAssistantKeepsTurnGap(t *testing.T) {
 	s := New()
-	reasoning := newTestCell(1, KindSupplement, "end reasoning")
+	reasoning := newTestCell(1, KindReasoning, "reasoning body")
 	reasoning.BoundaryGroupKey = "request-1"
 	assistant := newTestCell(2, KindAssistant, "Hello")
 	assistant.BoundaryGroupKey = "request-2"

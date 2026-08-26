@@ -3,17 +3,19 @@ package scene
 import "fmt"
 
 // CellMutation 是一次 transcript cell 变更（unified plan §6.1 的
-// AppendCell/UpdateCell/FinalizeCell/RemoveMutableCell 投影）。
+// AppendCell/UpdateCell/FinalizeCell/CorrectCommittedReasoningCell/
+// RemoveMutableCell 投影）。
 type CellMutation interface {
 	mutation()
 }
 
-func (*AppendCell) mutation()        {}
-func (*InsertCell) mutation()        {}
-func (*InsertCellBefore) mutation()  {}
-func (*UpdateCell) mutation()        {}
-func (*FinalizeCell) mutation()      {}
-func (*RemoveMutableCell) mutation() {}
+func (*AppendCell) mutation()                    {}
+func (*InsertCell) mutation()                    {}
+func (*InsertCellBefore) mutation()              {}
+func (*UpdateCell) mutation()                    {}
+func (*FinalizeCell) mutation()                  {}
+func (*CorrectCommittedReasoningCell) mutation() {}
+func (*RemoveMutableCell) mutation()             {}
 
 // FlushPolicy 控制事务提交后的 presenter flush 策略（unified plan §6.2）。
 // 不能绕过 Scene：任何策略下 Scene 都先完整提交。

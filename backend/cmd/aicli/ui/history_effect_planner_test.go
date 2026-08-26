@@ -341,7 +341,7 @@ func TestPlanEligibleHistoryCommitsRespectsCanonicalMutableFrontier(t *testing.T
 		LayoutGeneration:             1,
 		SemanticActiveCellProjection: true,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
-			{ID: 1, Sequence: 1, Revision: 3, Kind: scene.KindSupplement, Source: "reasoning still mutable", Phase: scene.CellMutable},
+			{ID: 1, Sequence: 1, Revision: 3, Kind: scene.KindReasoning, Source: "reasoning still mutable", Phase: scene.CellMutable},
 			{ID: 2, Sequence: 2, Revision: 8, Kind: scene.KindAssistant, Source: assistantSource, Phase: scene.CellMutable},
 		}}),
 		Active: ActiveCellState{
@@ -356,7 +356,7 @@ func TestPlanEligibleHistoryCommitsRespectsCanonicalMutableFrontier(t *testing.T
 	}
 
 	state.Transcript = NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
-		{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindSupplement, Source: "reasoning still mutable", Phase: scene.CellCommitted},
+		{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindReasoning, Source: "reasoning still mutable", Phase: scene.CellCommitted},
 		{ID: 2, Sequence: 2, Revision: 8, Kind: scene.KindAssistant, Source: assistantSource, Phase: scene.CellMutable},
 	}})
 	commits := planEligibleHistoryCommits(state)
@@ -380,7 +380,7 @@ func TestPlanEligibleHistoryCommitsStopsAtFirstMutableCell(t *testing.T) {
 		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
-			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindSupplement, Source: "mutable barrier", Phase: scene.CellMutable},
+			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindReasoning, Source: "mutable barrier", Phase: scene.CellMutable},
 			{ID: 3, Sequence: 3, Revision: 1, Kind: scene.KindAssistant, Source: "finalized but blocked", Phase: scene.CellCommitted},
 		}}),
 	}
@@ -401,7 +401,7 @@ func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T)
 		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
-			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindSupplement, Source: "", Phase: scene.CellMutable},
+			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindReasoning, Source: "", Phase: scene.CellMutable},
 			{ID: 3, Sequence: 3, Revision: 1, Kind: scene.KindAssistant, Source: "must remain blocked", Phase: scene.CellCommitted},
 		}}),
 	}
@@ -518,27 +518,22 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 	}
 }
 
-// TestPlanMutableReasoningHistoryCommitMatchesFinalizeFormat is the regression
-// for "reasoning renders halfway raw then switches to formatted markdown".
-// A mutable reasoning (KindSupplement) cell whose markdown body overflows the
-// ActiveBand must hand off the SAME formatted rows that the finalize commit
-// produces. Before the fix, planMutableActiveCellHistoryCommits routed
-// KindSupplement through the plain path (raw "- `x`" rows) while the finalize
-// commit rendered markdown ("• x") — the acked-prefix matcher then failed and
-// the whole cell was re-committed, duplicating the reasoning in scrollback.
-func TestPlanMutableReasoningHistoryCommitMatchesFinalizeFormat(t *testing.T) {
+// A mutable reasoning cell whose markdown-looking body overflows the ActiveBand
+// must hand off the same source-faithful rows that finalization projects. Its
+// derived divider crosses the handoff with the first body-backed source range
+// and is never stored in Source.
+func TestPlanMutableReasoningHistoryCommitMatchesSourceFaithfulFinalize(t *testing.T) {
 	bodyLines := make([]string, 0, 30)
 	bodyLines = append(bodyLines, "Good. Key modules all exist:")
 	for i := 0; i < 14; i++ {
 		bodyLines = append(bodyLines, fmt.Sprintf("- `backend/internal/module%02d` ✅", i))
 	}
 	bodyLines = append(bodyLines, "", "And `.agents/agents/explore.md`, `general.md`, `plan.md` exist.", "")
-	body := strings.Join(bodyLines, "\n")
-	source := "── reasoning ──\n" + body
+	source := strings.Join(bodyLines, "\n")
 
 	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
 	active := ActiveCellState{
-		CellID: 1, Revision: 3, Kind: scene.KindSupplement,
+		CellID: 1, Revision: 3, Kind: scene.KindReasoning,
 		Phase:  ActiveCellMutable,
 		Source: source,
 		Stable: SourceRange{Start: 0, End: len(source)},
@@ -549,16 +544,20 @@ func TestPlanMutableReasoningHistoryCommitMatchesFinalizeFormat(t *testing.T) {
 	if len(commits) == 0 {
 		t.Fatalf("long reasoning should hand off overflow rows, got no commits")
 	}
+	rawReasoningSeen := false
 	for _, c := range commits {
 		for _, line := range c.Lines {
 			if strings.Contains(renderLineText(line), "- `backend/internal/module") {
-				t.Fatalf("BUG: mutable reasoning handoff emits RAW markdown rows; finalize re-commits formatted and duplicates: %#v", c)
+				rawReasoningSeen = true
 			}
 		}
 	}
+	if !rawReasoningSeen {
+		t.Fatalf("reasoning handoff normalized markdown-looking provider text: %#v", commits)
+	}
 }
 
-// TestPlanReasoningAckedPrefixMatchesFinalize proves the formatted handoff
+// TestPlanReasoningAckedPrefixMatchesFinalize proves the source-faithful handoff
 // rows are recognized by the acked-prefix matcher, so the finalized cell only
 // commits the remaining tail instead of the whole cell (duplicate render).
 func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
@@ -569,11 +568,10 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 		bodyLines = append(bodyLines, fmt.Sprintf("- `backend/internal/module%02d` ✅", i))
 	}
 	bodyLines = append(bodyLines, "", "And `.agents/agents/explore.md`, `general.md`, `plan.md` exist.", "")
-	body := strings.Join(bodyLines, "\n")
-	source := "── reasoning ──\n" + body
+	source := strings.Join(bodyLines, "\n")
 
 	active := ActiveCellState{
-		CellID: 1, Revision: 3, Kind: scene.KindSupplement,
+		CellID: 1, Revision: 3, Kind: scene.KindReasoning,
 		Phase:  ActiveCellMutable,
 		Source: source,
 		Stable: SourceRange{Start: 0, End: len(source)},
@@ -602,7 +600,7 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 		Geometry:         geometry,
 		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
-			{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindSupplement, Source: source, Phase: scene.CellCommitted},
+			{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindReasoning, Source: source, Phase: scene.CellCommitted},
 		}}),
 		HistoryEffects: HistoryEffectQueueState{ledger: ledger},
 	}

@@ -469,6 +469,12 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 	if err := replaceRuntimeMessages(session, result.ReplacementHistory); err != nil {
 		return history, report, fmt.Errorf("共享 chat 自动压缩结果更新失败: %w", err)
 	}
+	// History rewrites must never reuse the previous provider cache
+	// generation. The actor-first path does this inside
+	// replaceSessionHistoryAndAdvancePromptCacheEpoch; the shared-chat
+	// fallback advances the same durable session context so any request
+	// built after this point derives the new epoch-scoped cache key.
+	advanceSharedChatPromptCacheEpoch(session)
 	if session.RuntimeSession != nil {
 		// Shared-chat fallback path does not go through actor.Compact; apply the
 		// same in-place compact title lineage used by the actor-first path.
@@ -478,6 +484,71 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
 	refreshChatTitleMetadata(session)
 	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
+}
+
+// chatSessionPromptCacheEpoch reads the durable prompt-cache generation that
+// the actor-first path maintains under agent.PromptCacheEpochSessionContextKey.
+func chatSessionPromptCacheEpoch(session *ChatSession) int {
+	if session == nil || session.RuntimeSession == nil {
+		return 0
+	}
+	epoch := chatContextIntValue(session.RuntimeSession.Metadata.Context, agent.PromptCacheEpochSessionContextKey)
+	if epoch < 0 {
+		return 0
+	}
+	return epoch
+}
+
+// advanceSharedChatPromptCacheEpoch marks a rewritten prompt history as a new
+// provider cache generation. It mirrors the actor-side rule
+// (replaceSessionHistoryAndAdvancePromptCacheEpoch): compaction / restore /
+// rollback history rewrites must never associate the rewritten prefix with the
+// previous generation's cache key.
+func advanceSharedChatPromptCacheEpoch(session *ChatSession) int {
+	if session == nil || session.RuntimeSession == nil {
+		return 0
+	}
+	next := chatSessionPromptCacheEpoch(session) + 1
+	session.RuntimeSession.SetContext(agent.PromptCacheEpochSessionContextKey, next)
+	return next
+}
+
+// sharedChatPromptCacheKeyForEpoch mirrors agent.promptCacheKeyForEpoch so both
+// request shapes derive the same cache key for a given session/generation:
+// append-only turns keep the bare session key, rewritten history moves to
+// "sessionID#prompt-cache-epoch-N".
+func sharedChatPromptCacheKeyForEpoch(sessionID string, epoch int) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || epoch <= 0 {
+		return sessionID
+	}
+	return fmt.Sprintf("%s#prompt-cache-epoch-%d", sessionID, epoch)
+}
+
+// chatContextIntValue reads a numeric value from session context, tolerating
+// the JSON round-trip shapes (float64) and in-memory int shapes (int/int64).
+func chatContextIntValue(ctx map[string]interface{}, key string) int {
+	if ctx == nil {
+		return 0
+	}
+	raw, ok := ctx[key]
+	if !ok || raw == nil {
+		return 0
+	}
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float32:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
 }
 
 func applyChatCompactContextUsage(session *ChatSession, result *compactruntime.Result, status compactruntime.Status, forceRefresh bool) {

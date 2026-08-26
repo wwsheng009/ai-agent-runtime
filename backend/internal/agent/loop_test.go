@@ -977,6 +977,12 @@ func TestReActLoop_RunWithSession_DoesNotEmitDuplicateReasoningAfterStreaming(t 
 	require.NotNil(t, block)
 	require.Equal(t, "stream_delta", block.Format)
 	require.Equal(t, "先确认问题。", block.DisplayText())
+	payload := reasoningEvents[0].Payload
+	require.Equal(t, "append", payload["mode"])
+	require.Equal(t, uint64(1), payload["sequence"])
+	require.Equal(t, result.AssistantStreamID, payload["stream_id"])
+	require.NotEmpty(t, payload["llm_request_id"])
+	require.NotEmpty(t, payload["logical_turn_id"])
 }
 
 func TestReActLoop_RunWithSession_EmitsLLMRetryRuntimeEvent(t *testing.T) {

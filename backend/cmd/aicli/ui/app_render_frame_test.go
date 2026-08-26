@@ -144,6 +144,7 @@ func TestAppTranscriptRenderRoleCoversCellKinds(t *testing.T) {
 		{scene.KindAssistant, style.RoleAssistant},
 		{scene.KindToolChain, style.RoleTool},
 		{scene.KindSupplement, style.RoleReasoning},
+		{scene.KindReasoning, style.RoleReasoning},
 		{scene.KindCommand, style.RoleCommand},
 		{scene.KindSystem, style.RoleSystem},
 		{scene.KindRuntimeEvent, style.RoleSystem},

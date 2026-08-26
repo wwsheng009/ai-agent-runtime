@@ -177,14 +177,17 @@ func planMutableActiveCellHistoryCommits(active ActiveCellState, geometry Geomet
 
 func planMutableActiveCellHistoryCommitsWithTheme(active ActiveCellState, geometry GeometryState, generation uint64, theme style.ThemeContext) []HistoryCommit {
 	if active.Phase != ActiveCellMutable || active.CellID == 0 || active.HistoryCommitBlocked ||
-		(active.Kind != scene.KindAssistant && active.Kind != scene.KindSupplement) || active.Source == "" ||
+		(active.Kind != scene.KindAssistant && active.Kind != scene.KindSupplement && active.Kind != scene.KindReasoning) || active.Source == "" ||
 		geometry.Width < 1 || geometry.Height < 1 {
 		return nil
 	}
 	if active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source) {
 		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
 	}
-	if active.Kind == scene.KindSupplement && supplementBodyLooksLikeMarkdown(active.Source) {
+	if active.Kind == scene.KindReasoning {
+		// Every reasoning projection is structured even when its semantic body
+		// is plain text: the opening divider is derived chrome and must cross
+		// the history handoff exactly once with the first source-backed range.
 		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
 	}
 	start := active.Acked.End
@@ -285,18 +288,14 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 		return nil
 	}
 	highlighter := newActiveBandHighlighter()
-	suffixLines := activeMarkdownSuffixLines
-	if active.Kind == scene.KindSupplement {
-		// Reasoning supplements render their divider rows separately from the
-		// markdown body (same as the finalize commit), so the handoff rows must
-		// use the same projection or the acked-prefix matcher fails and the
-		// whole cell is re-committed (duplicate reasoning in scrollback).
-		suffixLines = activeReasoningMarkdownSuffixLines
-	}
+	// Reasoning renders derived divider rows around its semantic body, so the
+	// projector must preserve that exact shape or finalization can re-commit the
+	// whole cell and duplicate reasoning in scrollback.
+	reasoning := active.Kind == scene.KindReasoning
 	// One projector serves the whole handoff loop: prefix (source[:start]) is
 	// memoized across every candidate query and the full-source render is done
 	// once, so planning N rows costs ~N full renders instead of 2×(N+2).
-	proj := newSuffixProjector(active.Source, start, geometry.Width, theme, active.Kind == scene.KindSupplement, highlighter)
+	proj := newSuffixProjector(active.Source, start, geometry.Width, theme, reasoning, highlighter)
 	live, ok := proj.live()
 	if !ok || len(live) <= ActiveBandRows(geometry.Height) {
 		return nil
@@ -340,8 +339,12 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 	commits := make([]HistoryCommit, 0, len(boundaries))
 	sourceStart, displayStart := start, 0
 	for _, sourceEnd := range boundaries {
-		lines, projected := suffixLines(active.Source[:sourceEnd], sourceStart, geometry.Width, theme, highlighter)
-		if !projected || len(lines) == 0 || displayStart+len(lines) > len(live) ||
+		projectedPrefix, projected := proj.suffix(sourceEnd)
+		if !projected || displayStart >= len(projectedPrefix) {
+			return nil
+		}
+		lines := cloneRenderLines(projectedPrefix[displayStart:])
+		if len(lines) == 0 || displayStart+len(lines) > len(live) ||
 			!render.LinesEqual(lines, live[displayStart:displayStart+len(lines)]) {
 			return nil
 		}
@@ -699,7 +702,7 @@ func syncHistoryEffectsForActiveCell(state *UIControllerState) {
 	// so skip the rebuild entirely instead of churning CPU and allocations on
 	// every chunk.
 	looksMarkdown := state.Active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(state.Active.Source)
-	supplementMarkdown := state.Active.Kind == scene.KindSupplement && supplementBodyLooksLikeMarkdown(state.Active.Source)
+	supplementMarkdown := state.Active.Kind == scene.KindReasoning && markdown.LooksLikeMarkdown(state.Active.Source)
 	if state.HistoryEffects.lastPlannedActiveEnqueuedValid &&
 		state.HistoryEffects.lastPlannedActiveStable == state.Active.Stable &&
 		state.HistoryEffects.lastPlannedActiveEnqueued == state.Active.Enqueued &&

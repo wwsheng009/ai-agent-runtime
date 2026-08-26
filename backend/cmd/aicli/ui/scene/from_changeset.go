@@ -210,6 +210,9 @@ func (m *ChangeSetMapper) mapChange(ch encoding.ItemChange, pending map[CellID]p
 	case encoding.OpUpsert:
 		return m.mapUpsert(id, it, pending)
 
+	case encoding.OpCorrectReasoning:
+		return m.mapCommittedReasoningCorrection(id, it, pending)
+
 	case encoding.OpRemove:
 		cur, ok := m.current(id, pending)
 		if !ok {
@@ -383,6 +386,45 @@ func (m *ChangeSetMapper) mapUpsert(id CellID, it *encoding.Item, pending map[Ce
 	return mu, true, nil
 }
 
+func (m *ChangeSetMapper) mapCommittedReasoningCorrection(
+	id CellID,
+	it *encoding.Item,
+	pending map[CellID]pendingCell,
+) (CellMutation, bool, error) {
+	if it.Kind != encoding.KindReasoning || !it.Status.Terminal() {
+		return nil, false, fmt.Errorf(
+			"changeset: committed reasoning correction requires terminal reasoning item %q", it.ID)
+	}
+	cur, ok := m.current(id, pending)
+	if !ok {
+		return nil, false, fmt.Errorf(
+			"changeset: committed reasoning correction of unknown item %q (cell %d)", it.ID, id)
+	}
+	if cur.kind != KindReasoning || cur.phase != CellCommitted {
+		return nil, false, fmt.Errorf(
+			"changeset: committed reasoning correction requires committed reasoning cell %d (kind %v phase %v)",
+			id, cur.kind, cur.phase)
+	}
+	if cur.boundaryGroupKey == "" || it.BoundaryGroupKey == "" ||
+		cur.boundaryGroupKey != it.BoundaryGroupKey {
+		return nil, false, fmt.Errorf(
+			"changeset: committed reasoning correction identity mismatch for cell %d (current %q, incoming %q)",
+			id, cur.boundaryGroupKey, it.BoundaryGroupKey)
+	}
+	next := cur.revision + 1
+	presentation := presentationFromEncoding(it.Presentation)
+	mu := &CorrectCommittedReasoningCell{
+		ID: id, Revision: next, Source: assistantCellSource(it),
+		Presentation: presentation, BoundaryGroupKey: it.BoundaryGroupKey,
+	}
+	pending[id] = pendingCell{
+		kind: cur.kind, chainKey: cur.chainKey, boundaryGroupKey: it.BoundaryGroupKey,
+		revision: next, phase: CellCommitted, source: mu.Source,
+		presentation: presentation, historyCommitBlocked: false,
+	}
+	return mu, false, nil
+}
+
 // mergeOutput 把 tool 输出合并进链首 cell（update 不产生新边界）。
 func (m *ChangeSetMapper) mergeOutput(target *TranscriptCell, outID CellID, it *encoding.Item, pending map[CellID]pendingCell) CellMutation {
 	source := target.Source // 追加式：callHead + 已合并输出 + 新输出
@@ -489,7 +531,7 @@ func presentationFromEncoding(source encoding.Presentation) TranscriptPresentati
 
 // cellKind 把 ItemKind 映射为 Scene CellKind（render-model-spec §5 表格）。
 //
-//	KindUser → KindUser；KindAssistant → KindAssistant；KindReasoning → KindSupplement
+//	KindUser → KindUser；KindAssistant → KindAssistant；KindReasoning → KindReasoning
 //	KindToolCall/KindToolOutput → KindToolChain；KindCommand → KindCommand
 //	KindSystem → KindSystem；KindPriorityPrompt → KindSupplement；KindUserInteraction → KindCommand
 //	（/debug、/model 输出按 command cell 呈现，与既有 /debug display 实现一致）
@@ -501,7 +543,7 @@ func (m *ChangeSetMapper) cellKind(it *encoding.Item) CellKind {
 	case encoding.KindAssistant:
 		return KindAssistant
 	case encoding.KindReasoning:
-		return KindSupplement
+		return KindReasoning
 	case encoding.KindSupplement:
 		return KindSupplement
 	case encoding.KindToolCall, encoding.KindToolOutput:

@@ -30,6 +30,47 @@ const (
 // downstream ordering can advance past the whole folded range.
 const StreamCoalescedFromKey = "_coalesced_sequence_from"
 
+// ReasoningStreamDeltaKey preserves the semantic mode of a reasoning event
+// after the bridge coalesces several typed ReasoningBlock payloads into one
+// top-level text payload. Chunk boundaries are transport boundaries only; this
+// marker tells every downstream consumer to append the bytes exactly instead
+// of interpreting the folded text as an authoritative snapshot.
+const ReasoningStreamDeltaKey = "_reasoning_stream_delta"
+
+// ReasoningOperation is the normalized semantic operation carried by an
+// assistant.reasoning event. Transport chunking is never inferred from prose:
+// append means byte-for-byte continuation, replace means an authoritative
+// snapshot for the same canonical request.
+type ReasoningOperation uint8
+
+const (
+	ReasoningOperationReplace ReasoningOperation = iota
+	ReasoningOperationAppend
+)
+
+// ReasoningOperationForEvent is the single protocol classifier shared by the
+// queue coalescer, bridge compatibility state, and EventEncoder. Streamable is
+// deliberately not a signal: it describes provider/UI capability, not whether
+// this particular payload is a delta.
+func ReasoningOperationForEvent(ev runtimeevents.Event) ReasoningOperation {
+	for _, key := range []string{"mode", "operation"} {
+		switch strings.ToLower(strings.TrimSpace(payloadString(ev.Payload[key], ""))) {
+		case "replace", "snapshot":
+			return ReasoningOperationReplace
+		case "append", "delta":
+			return ReasoningOperationAppend
+		}
+	}
+	if marked, ok := ev.Payload[ReasoningStreamDeltaKey].(bool); ok && marked {
+		return ReasoningOperationAppend
+	}
+	if block := runtimetypes.ReasoningBlockFromMap(ev.Payload["reasoning"]); block != nil &&
+		strings.EqualFold(strings.TrimSpace(block.Format), "stream_delta") {
+		return ReasoningOperationAppend
+	}
+	return ReasoningOperationReplace
+}
+
 // EventEncoder 是统一渲染编码器，对应 Codex ThreadHistoryBuilder：
 // 所有上游事件经 Encode 转换为 RenderModel 的 append/upsert/remove 操作。
 //
@@ -53,7 +94,7 @@ type EventEncoder struct {
 	toolOutputBy           map[string]map[string]struct{}   // callID -> 已提交 output 文本（幂等）
 	priorityBy             map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
 	streamOrder            map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
-	reasoningStreams       map[string]*reasoningStreamState // canonical request key -> reasoning 增量重放去重状态
+	reasoningOrder         map[string]*assistantStreamOrder // canonical request key -> reasoning delta 有序提交状态
 	orderingBarrierEnabled bool                             // production bridge reserves a hidden reasoning predecessor
 	stats                  Stats
 }
@@ -110,19 +151,8 @@ func NewEventEncoder() *EventEncoder {
 		toolOutputBy:         make(map[string]map[string]struct{}),
 		priorityBy:           make(map[string]*priorityPromptState),
 		streamOrder:          make(map[string]*assistantStreamOrder),
-		reasoningStreams:     make(map[string]*reasoningStreamState),
+		reasoningOrder:       make(map[string]*assistantStreamOrder),
 	}
-}
-
-// reasoningStreamState 记忆单条 reasoning 流的增量序列，用于识别并丢弃
-// provider/重试链路整段重放的重复增量（如连接重试后相同思考重新流一遍，
-// 会把已渲染的正文整体再追加一遍）。只保存原始 chunk 文本（不含拼缝补偿
-// 的换行），数量有界：超过上限即停止追踪，行为退化为常规追加。
-type reasoningStreamState struct {
-	seq      []string
-	replay   bool
-	idx      int
-	tracking bool
 }
 
 // Encode 处理单个上游事件，返回增量变更集。事件类型未映射时按
@@ -326,11 +356,9 @@ func (e *EventEncoder) SubmitSupplementWithBoundaryGroup(text, boundaryGroupKey 
 }
 
 // SubmitReasoningWithBoundaryGroup 提交重建的终态 reasoning cell（resume /
-// 历史种子路径）。持久化转录只保留推理正文，不保留渲染分隔线；这里必须
-// 与 live 路径（applyReasoning 的开头 divider + finalizeReasoning 的结束
-// divider）产出相同形态的 Head，否则恢复会话后 reasoning 会被渲染成普通
-// supplement 文本，丢失“…… reasoning ……”与“…… end reasoning ……”
-// 两条分隔线。
+// 历史种子路径）。Head 与持久化转录一样只保存原始推理正文；reasoning 的
+// 开始/结束 divider 是由 Scene kind + terminal status 派生的展示 chrome，
+// 不能进入语义文本、流 offset 或快照去重身份。
 func (e *EventEncoder) SubmitReasoningWithBoundaryGroup(text, boundaryGroupKey string) *ChangeSet {
 	if e == nil {
 		return nil
@@ -338,8 +366,7 @@ func (e *EventEncoder) SubmitReasoningWithBoundaryGroup(text, boundaryGroupKey s
 	e.clock++
 	e.stats.EncodeCount++
 	cs := &ChangeSet{}
-	head := strings.TrimRight(withReasoningDivider(text), "\n") + "\n" + reasoningEndDividerLine()
-	it := e.appendItem(KindReasoning, "", head)
+	it := e.appendItem(KindReasoning, "", text)
 	it.BoundaryGroupKey = boundaryGroupKey
 	it.Status = StatusCompleted
 	setReasoningPresentation(it)
@@ -923,6 +950,33 @@ func (e *EventEncoder) upsertItem(id string, kind ItemKind, mutate func(*Item) b
 	return it, true
 }
 
+// correctTerminalReasoningItem is the sole encoder escape hatch from the
+// ordinary terminal-item immutability rule. assistant.message can carry the
+// authoritative reasoning snapshot after an assistant delta already closed the
+// reasoning predecessor. That snapshot corrects the same item in place; it
+// never reopens it and never applies to another item kind.
+func (e *EventEncoder) correctTerminalReasoningItem(id string, mutate func(*Item) bool) (*Item, bool) {
+	for _, it := range e.model.Items {
+		if it.ID != id {
+			continue
+		}
+		if it.Kind != KindReasoning || !it.Status.Terminal() {
+			e.stats.DuplicateCount++
+			return it, false
+		}
+		if mutate != nil && !mutate(it) {
+			e.stats.DuplicateCount++
+			return it, false
+		}
+		it.Updated = e.clock
+		e.revisions[id]++
+		e.stats.UpsertCount++
+		return it, true
+	}
+	e.stats.DuplicateCount++
+	return nil, false
+}
+
 // removeItem 按 ID 移除；不存在则忽略（幂等）。
 func (e *EventEncoder) removeItem(id string, cs *ChangeSet) {
 	for i, it := range e.model.Items {
@@ -1073,31 +1127,46 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	if text == "" {
 		return
 	}
+	if assistant := e.assistantBy[key]; assistant != nil && assistant.Status.Terminal() {
+		// assistant.message is the terminal ownership boundary for the whole
+		// response. A late reasoning event must not reopen or mutate its already
+		// committed predecessor.
+		e.stats.DuplicateCount++
+		return
+	}
+	if streamDelta {
+		var ready bool
+		text, ready = e.orderReasoningDelta(key, text, ev.Payload)
+		if !ready || text == "" {
+			return
+		}
+	} else {
+		// An authoritative snapshot supersedes all transport ordering state.
+		delete(e.reasoningOrder, key)
+	}
 	// reasoning 拥有独立索引：绝不允许覆盖 assistant Item 的内容或状态
 	// （render-model-spec：reasoning 是独立 Kind，与 assistant 并存）。
 	if it := e.reasoningBy[key]; it != nil {
+		if it.Status.Terminal() {
+			if streamDelta {
+				e.stats.DuplicateCount++
+				return
+			}
+			// A transport boundary may have closed reasoning before its
+			// authoritative snapshot arrived. Replace source in place while
+			// preserving terminal status; never reopen the cell.
+			e.applyFinalReasoningSnapshot(key, text, cs)
+			return
+		}
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
 			t.BoundaryGroupKey = key
-			var nextHead string
-			if strings.TrimSpace(t.Head) == "" {
-				// 占位/空 reasoning（barrier 或空文本）：首行先写思考链分隔线，
-				// 保证每个 reasoning cell 都有可辨识的渲染边界。
-				nextHead = withReasoningDivider(text)
-			} else if streamDelta {
-				if e.skipReplayedReasoningDelta(key, text) {
-					// 整段重放的重复增量：丢弃，不追加进正文（避免内容翻倍）。
-					return false
-				}
-				nextHead = appendReasoningDelta(t.Head, text)
-			} else {
-				// 全量快照：正文被整体替换，重放追踪状态随之作废。
-				delete(e.reasoningStreams, key)
-				// 全量快照（非 stream_delta）替换正文：与新建/空占位路径统一，
-				// 保留 divider + "\n" 前缀。旧实现直接 nextHead = text 会把
-				// 上一帧已渲染的 divider 及其换行丢掉，下一帧 delta 又追加到
-				// 无 divider 的 head 上，造成帧间"分隔线带换行/不带换行"的
-				// 视觉切换（INV-REASON-DIVIDER-01）。
-				nextHead = withReasoningDivider(text)
+			nextHead := text
+			if streamDelta {
+				// Ordered deltas are byte-faithful appends. A provider may split
+				// inside a word, punctuation token, code span, or UTF-8 rune
+				// boundary represented by separate valid strings; the renderer
+				// must never infer whitespace from that transport seam.
+				nextHead = t.Head + text
 			}
 			if t.Head == nextHead {
 				return false
@@ -1114,14 +1183,13 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 		return
 	}
 	var it *Item
-	head := withReasoningDivider(text)
 	if assistant := e.assistantBy[key]; assistant != nil {
-		it = e.insertItemBefore(assistant.ID, KindReasoning, head)
+		it = e.insertItemBefore(assistant.ID, KindReasoning, text)
 		it.BoundaryGroupKey = key
 		setReasoningPresentation(it)
 		e.changeBefore(cs, OpAppend, it, assistant.ID)
 	} else {
-		it = e.appendItem(KindReasoning, "", head)
+		it = e.appendItem(KindReasoning, "", text)
 		it.BoundaryGroupKey = key
 		setReasoningPresentation(it)
 		e.change(cs, OpAppend, it)
@@ -1130,84 +1198,18 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	e.removeReasoningBarrier(key, cs)
 }
 
-// withReasoningDivider 统一 reasoning cell 的首行分隔线：divider 后必须
-// 紧跟换行（"divider\n正文"），所有构建 reasoning Head 的路径共用同一
-// 格式，避免帧间 divider 换行前后不一致。正文的前导换行（provider 常在
-// 首个文本块前输出 "\n\n"）会被剥离：渲染层把正文与分隔线分开处理时前导
-// 空行会被丢弃，而整文档渲染时同一空行又会显示出来，帧间出现"换行出现/
-// 消失"的跳动（INV-REASON-DIVIDER-02）。
-func withReasoningDivider(text string) string {
-	return reasoningDividerLine() + "\n" + strings.TrimLeft(text, "\n")
-}
-
-// setReasoningPresentation 让 reasoning cell 的渲染契约与已累计正文对齐：
-// 正文（去除首/尾分隔线后的可见思考内容）命中 markdown 启发式时走结构化
-// markdown 渲染，否则保持纯文本。分隔线行永不参与 markdown 检测或渲染，
-// 由渲染层（structuredTranscriptScreenRows / reasoningSupplementScreenRows）
-// 单独拆分并保留 reasoning 样式。
+// setReasoningPresentation keeps reasoning source-faithful. Reasoning prose is
+// not assistant Markdown: provider newlines and markdown-looking bytes remain
+// literal, while dividers and terminal wrapping are derived by the UI.
 func setReasoningPresentation(it *Item) bool {
 	if it == nil {
 		return false
 	}
-	next := PresentationPlain
-	if reasoningBodyLooksLikeMarkdown(it.Head) {
-		next = PresentationAssistantMarkdown
-	}
-	if it.Presentation.Kind == next && len(it.Presentation.Document.Blocks) == 0 {
+	if it.Presentation.Kind == PresentationPlain && len(it.Presentation.Document.Blocks) == 0 {
 		return false
 	}
-	it.Presentation = Presentation{Kind: next}
+	it.Presentation = Presentation{Kind: PresentationPlain}
 	return true
-}
-
-// reasoningBodyLooksLikeMarkdown 对 reasoning cell 去除分隔线后的正文做
-// markdown 启发式检测（分隔线行本身不匹配任何 markdown 模式，直接对完整
-// Head 检测也安全，这里显式剥离是为了与渲染层的拆分语义保持一致）。
-func reasoningBodyLooksLikeMarkdown(head string) bool {
-	return markdown.LooksLikeMarkdown(reasoningBodySource(head))
-}
-
-// reasoningBodySource 返回 reasoning cell 去除首/尾分隔线后的正文。
-func reasoningBodySource(head string) string {
-	lines := strings.Split(head, "\n")
-	if len(lines) == 0 {
-		return head
-	}
-	if isReasoningDividerLine(lines[0]) {
-		lines = lines[1:]
-	}
-	if len(lines) > 0 && isReasoningDividerLine(lines[len(lines)-1]) {
-		lines = lines[:len(lines)-1]
-	}
-	return strings.Join(lines, "\n")
-}
-
-// isReasoningDividerLine 识别 reasoning 分隔线（与 reasoningDividerLine /
-// reasoningEndDividerLine 的生成格式一致：─/═/--- 开头）。
-func isReasoningDividerLine(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	return strings.HasPrefix(trimmed, "──") || strings.HasPrefix(trimmed, "═") || strings.HasPrefix(trimmed, "---")
-}
-
-// reasoningDividerLine 返回思考链的分隔线（对齐旧版 chatToolDivider：
-// " reasoning " 居中、─ 填充到 72 列）。unified 数据面用它给 reasoning
-// cell 的首行加分隔标识，与旧 timeline 路径的渲染格式保持一致。
-func reasoningDividerLine() string {
-	const width = 72
-	content := " reasoning "
-	left := (width - len([]rune(content))) / 2
-	right := width - len([]rune(content)) - left
-	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
-}
-
-// reasoningEndDividerLine 返回思考链的结束分隔线（与开始分隔线对称，
-// 标识 reasoning 块在 transcript 中的结束边界）。
-func reasoningEndDividerLine() string {
-	const width = 72
-	content := " end reasoning "
-	left := (width - len([]rune(content))) / 2
-	right := width - len([]rune(content)) - left
-	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
 }
 
 // markReasoningBarrier 创建空 reasoning 占位 cell：native-history ordering
@@ -1251,7 +1253,7 @@ func (e *EventEncoder) removeReasoningBarrier(key string, cs *ChangeSet) bool {
 	// 空占位（barrier 的语义位置）从未被迟到的 reasoning 填充：它不是持久
 	// 内容，barrier 解除时必须移除，否则会成为空白 supplement cell。
 	if placeholder := e.reasoningBy[key]; placeholder != nil &&
-		placeholder.Kind == KindReasoning && strings.TrimSpace(placeholder.Head) == "" {
+		placeholder.Kind == KindReasoning && placeholder.Head == "" {
 		delete(e.reasoningBy, key)
 		e.removeItem(placeholder.ID, cs)
 	}
@@ -1264,92 +1266,91 @@ func (e *EventEncoder) removeReasoningBarrier(key string, cs *ChangeSet) bool {
 // leaked only the event type into the TUI and discarded its visible thought.
 func reasoningText(ev runtimeevents.Event) (text string, streamDelta bool) {
 	text = payloadString(ev.Payload["text"], payloadString(ev.Payload["summary"], ""))
+	streamDelta = ReasoningOperationForEvent(ev) == ReasoningOperationAppend
 	if block := runtimetypes.ReasoningBlockFromMap(ev.Payload["reasoning"]); block != nil {
 		if display := block.RawDisplayText(); display != "" {
 			text = display
 		}
-		streamDelta = strings.EqualFold(strings.TrimSpace(block.Format), "stream_delta")
 	}
 	return text, streamDelta
 }
 
-// appendReasoningDelta accepts both provider delta chunks and providers which
-// repeat a full snapshot in each event. It is deliberately local to the
-// encoder: the semantic Scene must receive the same monotonic visible body as
-// the live reasoning presenter.
-//
-// 增量边界不是文本边界：provider 可以在任意 UTF-8 字节/字符位置切块，分行
-// 与否完全由 provider 提供的空白决定。这里不做任何"猜换行/补空格"的启发式，
-// 只保留纯文本去重：整块重复、快照前缀替换、尾部重复投递直接丢弃，其余情况
-// 一律原样拼接（existing + incoming）。
+// appendReasoningDelta deliberately performs no content-based reconciliation.
+// Ordered deltas append exactly; authoritative snapshots are handled by the
+// non-delta branch in applyReasoning.
 func appendReasoningDelta(existing, incoming string) string {
-	if incoming == "" || incoming == existing {
-		return existing
-	}
-	if existing == "" {
-		return incoming
-	}
-	if strings.HasPrefix(incoming, existing) {
-		return incoming
-	}
-	if strings.HasSuffix(existing, incoming) {
-		// 与已累积正文尾部逐字相同：同一块的重复投递，不产生新内容。
-		return existing
-	}
 	return existing + incoming
 }
 
-// skipReplayedReasoningDelta 判断当前 reasoning 增量是否属于整段重放并应丢弃。
-// 已累积多块之后再次收到与首块相同的文本，判定为重放开始：随后增量只要与
-// 已提交序列逐块一致就丢弃；一旦出现新内容立即恢复常规累积。返回 true 表示
-// 本条增量是重复内容，调用方不应再把它追加进正文。
-func (e *EventEncoder) skipReplayedReasoningDelta(key, text string) bool {
-	if e == nil || text == "" {
-		return false
+// orderReasoningDelta gives reasoning the same explicit identity/ordering
+// contract as assistant text. It never examines text equality: duplicate,
+// replayed, out-of-order, and coalesced events are decided only by sequence
+// metadata within the canonical request.
+func (e *EventEncoder) orderReasoningDelta(key, text string, payload map[string]interface{}) (string, bool) {
+	seq, hasSeq := assistantSequence(payload)
+	if !hasSeq || seq == 0 {
+		// Compatibility for legacy providers without ordering metadata. Preserve
+		// bytes and arrival order; do not guess replay from repeated prose.
+		return text, true
 	}
-	st := e.reasoningStreams[key]
-	if st == nil {
-		if len(e.reasoningStreams) > 256 {
-			// 安全阀：请求键很多时整体重置，避免状态无限增长。
-			e.reasoningStreams = make(map[string]*reasoningStreamState)
+	order := e.reasoningOrder[key]
+	if order == nil {
+		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]assistantPendingDelta)}
+		e.reasoningOrder[key] = order
+	}
+	if order.tainted {
+		e.stats.OutOfOrderCount++
+		return "", false
+	}
+	if seq < order.nextSeq {
+		e.stats.DuplicateCount++
+		return "", false
+	}
+	coalescedFrom, coalesced := assistantCoalescedFrom(payload)
+	if coalesced && coalescedFrom < order.nextSeq {
+		e.stats.DuplicateCount++
+		return "", false
+	}
+	if seq > order.nextSeq && !(coalesced && coalescedFrom == order.nextSeq) {
+		cacheKey := seq
+		if coalesced {
+			cacheKey = coalescedFrom
 		}
-		st = &reasoningStreamState{tracking: true}
-		e.reasoningStreams[key] = st
-	}
-	if !st.tracking {
-		return false
-	}
-	if st.replay {
-		if st.idx < len(st.seq) && text == st.seq[st.idx] {
-			st.idx++
-			if st.idx >= len(st.seq) {
-				// 整段重放消费完毕：后续按正常增量继续。
-				st.replay = false
-				st.tracking = false
-			}
-			return true
+		if _, duplicate := order.pending[cacheKey]; duplicate {
+			e.stats.DuplicateCount++
+			return "", false
 		}
-		// 重放中断：出现与已提交序列不同的内容，恢复常规累积并在本次正常追加。
-		st.replay = false
-		st.tracking = false
-		return false
-	}
-	if len(st.seq) > 0 && text == st.seq[0] {
-		// 已累积首块之后再收到相同首块 → 判定为整段重放开始。
-		st.replay = true
-		st.idx = 1
-		if st.idx >= len(st.seq) {
-			st.replay = false
-			st.tracking = false
+		order.pending[cacheKey] = assistantPendingDelta{text: text, endSeq: seq}
+		order.pendingText += len(text)
+		e.stats.OutOfOrderCount++
+		if len(order.pending) >= assistantStreamPendingLimit ||
+			order.pendingText > assistantStreamPendingByteLimit {
+			order.pending = make(map[uint64]assistantPendingDelta)
+			order.pendingText = 0
+			order.tainted = true
 		}
-		return true
+		return "", false
 	}
-	st.seq = append(st.seq, text)
-	if len(st.seq) > 64 {
-		// 超出有界窗口停止追踪：不影响正确性，只失去重放去重能力。
-		st.tracking = false
+	head := text
+	if coalesced && coalescedFrom == order.nextSeq && seq >= coalescedFrom {
+		order.nextSeq = seq + 1
+	} else {
+		order.nextSeq++
 	}
-	return false
+	for {
+		pending, ok := order.pending[order.nextSeq]
+		if !ok {
+			break
+		}
+		head += pending.text
+		order.pendingText -= len(pending.text)
+		delete(order.pending, order.nextSeq)
+		order.nextSeq = pending.endSeq + 1
+	}
+	if order.pendingText < 0 {
+		order.pendingText = 0
+	}
+	return head, true
 }
 
 func (e *EventEncoder) applyLLMStarted(ev runtimeevents.Event, _ *ChangeSet) {
@@ -1511,6 +1512,16 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 		e.stats.DuplicateCount++
 		return
 	}
+	if assistant := e.assistantBy[key]; assistant != nil && assistant.Status.Terminal() {
+		// The first assistant.message owns the terminal snapshot for this exact
+		// request. A retransmission must not apply a conflicting embedded
+		// reasoning snapshot before the generic terminal upsert guard runs.
+		e.stats.DuplicateCount++
+		return
+	}
+	if block := runtimetypes.ReasoningBlockFromMap(ev.Payload["reasoning"]); block != nil {
+		e.applyFinalReasoningSnapshot(key, block.RawDisplayText(), cs)
+	}
 	text := payloadString(ev.Payload["content"], payloadString(ev.Payload["message"], ""))
 	e.removeReasoningBarrier(key, cs)
 	e.finalizeReasoningBeforeAssistant(key, cs)
@@ -1554,6 +1565,68 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 	if changed {
 		e.change(cs, OpUpsert, u)
 	}
+}
+
+// applyFinalReasoningSnapshot applies reasoning carried by assistant.message to
+// the existing canonical reasoning item before that item is finalized. The
+// snapshot is authoritative source, not a new presentation block: identity and
+// placement stay unchanged, ordering state is retired, and an already-terminal
+// item is never regressed to running.
+func (e *EventEncoder) applyFinalReasoningSnapshot(key, text string, cs *ChangeSet) {
+	if e == nil || cs == nil || key == "" {
+		return
+	}
+	delete(e.reasoningOrder, key)
+	if text == "" {
+		return
+	}
+	if it := e.reasoningBy[key]; it != nil {
+		update := func(t *Item) bool {
+			changed := false
+			t.BoundaryGroupKey = key
+			if t.Head != text {
+				t.Head = text
+				changed = true
+			}
+			if setReasoningPresentation(t) {
+				changed = true
+			}
+			return changed
+		}
+		var (
+			u       *Item
+			changed bool
+		)
+		if it.Status.Terminal() {
+			u, changed = e.correctTerminalReasoningItem(it.ID, update)
+		} else {
+			u, changed = e.upsertItem(it.ID, KindReasoning, update)
+		}
+		if changed {
+			op := OpUpsert
+			if u.Status.Terminal() {
+				op = OpCorrectReasoning
+			}
+			e.change(cs, op, u)
+		}
+		e.removeReasoningBarrier(key, cs)
+		return
+	}
+
+	var it *Item
+	if assistant := e.assistantBy[key]; assistant != nil {
+		it = e.insertItemBefore(assistant.ID, KindReasoning, text)
+		it.BoundaryGroupKey = key
+		setReasoningPresentation(it)
+		e.changeBefore(cs, OpAppend, it, assistant.ID)
+	} else {
+		it = e.appendItem(KindReasoning, "", text)
+		it.BoundaryGroupKey = key
+		setReasoningPresentation(it)
+		e.change(cs, OpAppend, it)
+	}
+	e.reasoningBy[key] = it
+	e.removeReasoningBarrier(key, cs)
 }
 
 // dropEmptyAssistant 在提交终态前检查 assistant 项是否没有任何可见内容：
@@ -1646,12 +1719,8 @@ func (e *EventEncoder) finalizeReasoning(key string, status ItemStatus, cs *Chan
 			t.Status = status
 			changed = true
 		}
-		// 思考链结束标识：finalize 时在内容末尾追加结束分隔线（幂等，
-		// 与开始分隔线对称，避免重复 finalize 叠加）。
-		if !strings.Contains(t.Head, " end reasoning ") {
-			t.Head = strings.TrimRight(t.Head, "\n") + "\n" + reasoningEndDividerLine()
-			changed = true
-		}
+		// Finalization changes lifecycle only. Opening/closing divider rows are
+		// presentation chrome derived from KindReasoning and terminal status.
 		return changed
 	}); changed {
 		e.change(cs, OpUpsert, u)

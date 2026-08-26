@@ -693,7 +693,7 @@ func TestHistoryEffectsReducer_InsertionBeforeAckedHistoryRequiresScrollbackReco
 
 	snapshot := state.Transcript.Snapshot()
 	reasoning := &scene.TranscriptCell{
-		ID: 99, Revision: 1, Kind: scene.KindSupplement,
+		ID: 99, Revision: 1, Kind: scene.KindReasoning,
 		Source: "late reasoning before delivered assistant", Phase: scene.CellCommitted,
 	}
 	snapshot.Cells = append([]*scene.TranscriptCell{reasoning}, snapshot.Cells...)

@@ -114,7 +114,7 @@ func appTranscriptRenderRole(kind scene.CellKind) style.Role {
 		return style.RoleAssistant
 	case scene.KindToolChain:
 		return style.RoleTool
-	case scene.KindSupplement:
+	case scene.KindSupplement, scene.KindReasoning:
 		return style.RoleReasoning
 	case scene.KindCommand:
 		return style.RoleCommand

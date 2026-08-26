@@ -2855,3 +2855,98 @@ func (p *staticProvider) GetCapabilities() *runtimellm.ModelCapabilities {
 	return &runtimellm.ModelCapabilities{}
 }
 func (p *staticProvider) CheckHealth(ctx context.Context) error { return nil }
+func TestSharedChatPromptCacheKeyForEpoch(t *testing.T) {
+	tests := []struct {
+		name      string
+		sessionID string
+		epoch     int
+		want      string
+	}{
+		{name: "bare key at epoch zero", sessionID: "sess-1", epoch: 0, want: "sess-1"},
+		{name: "bare key with negative epoch", sessionID: "sess-1", epoch: -3, want: "sess-1"},
+		{name: "epoch-scoped key", sessionID: "sess-1", epoch: 2, want: "sess-1#prompt-cache-epoch-2"},
+		{name: "empty session stays empty", sessionID: "  ", epoch: 5, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sharedChatPromptCacheKeyForEpoch(tt.sessionID, tt.epoch); got != tt.want {
+				t.Fatalf("sharedChatPromptCacheKeyForEpoch(%q, %d) = %q, want %q", tt.sessionID, tt.epoch, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChatSessionPromptCacheEpoch_ReadsDurableGeneration(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "sess-epoch-read"}}
+	if got := chatSessionPromptCacheEpoch(session); got != 0 {
+		t.Fatalf("expected default epoch 0, got %d", got)
+	}
+	advanceSharedChatPromptCacheEpoch(session)
+	if got := chatSessionPromptCacheEpoch(session); got != 1 {
+		t.Fatalf("expected epoch 1 after first advance, got %d", got)
+	}
+	advanceSharedChatPromptCacheEpoch(session)
+	if got := chatSessionPromptCacheEpoch(session); got != 2 {
+		t.Fatalf("expected epoch 2 after second advance, got %d", got)
+	}
+	// Nil and missing-runtime-session must be safe no-ops.
+	if got := chatSessionPromptCacheEpoch(nil); got != 0 {
+		t.Fatalf("nil session epoch = %d, want 0", got)
+	}
+	if got := chatSessionPromptCacheEpoch(&ChatSession{}); got != 0 {
+		t.Fatalf("session without runtime epoch = %d, want 0", got)
+	}
+}
+
+func TestChatSessionPromptCacheEpoch_ToleratesJSONRoundTripShapes(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "sess-epoch-json"}}
+	session.RuntimeSession.SetContext(agent.PromptCacheEpochSessionContextKey, float64(3))
+	if got := chatSessionPromptCacheEpoch(session); got != 3 {
+		t.Fatalf("float64 epoch = %d, want 3", got)
+	}
+	session.RuntimeSession.SetContext(agent.PromptCacheEpochSessionContextKey, int64(4))
+	if got := chatSessionPromptCacheEpoch(session); got != 4 {
+		t.Fatalf("int64 epoch = %d, want 4", got)
+	}
+	session.RuntimeSession.SetContext(agent.PromptCacheEpochSessionContextKey, "not-a-number")
+	if got := chatSessionPromptCacheEpoch(session); got != 0 {
+		t.Fatalf("non-numeric epoch = %d, want 0", got)
+	}
+}
+
+func TestAdapterRequestConfig_PromptCacheKeyScopedByEpoch(t *testing.T) {
+	newSession := func() *ChatSession {
+		return &ChatSession{
+			RuntimeSession: &runtimechat.Session{ID: "sess-epoch-key"},
+			Provider:       config.Provider{Protocol: "openai"},
+			Model:          "gpt-5",
+		}
+	}
+
+	// Append-only generation keeps the bare session key.
+	cfg := adapterRequestConfig(newSession(), nil, runtimechatcore.ProviderTurnRequest{Stream: false})
+	if got := cfg.Metadata["prompt_cache_key"]; got != "sess-epoch-key" {
+		t.Fatalf("epoch-0 prompt_cache_key = %v, want sess-epoch-key", got)
+	}
+	if got := cfg.Metadata["session_id"]; got != "sess-epoch-key" {
+		t.Fatalf("session_id = %v, want sess-epoch-key", got)
+	}
+
+	// After a history rewrite (epoch advanced) the key moves to the next
+	// generation while session_id stays stable.
+	session := newSession()
+	advanceSharedChatPromptCacheEpoch(session)
+	cfg = adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{Stream: false})
+	if got := cfg.Metadata["prompt_cache_key"]; got != "sess-epoch-key#prompt-cache-epoch-1" {
+		t.Fatalf("epoch-1 prompt_cache_key = %v, want sess-epoch-key#prompt-cache-epoch-1", got)
+	}
+	if got := cfg.Metadata["session_id"]; got != "sess-epoch-key" {
+		t.Fatalf("session_id drifted = %v, want sess-epoch-key", got)
+	}
+
+	// No runtime session: no cache key metadata at all (existing behavior).
+	cfg = adapterRequestConfig(&ChatSession{Provider: config.Provider{Protocol: "openai"}, Model: "gpt-5"}, nil, runtimechatcore.ProviderTurnRequest{Stream: false})
+	if _, exists := cfg.Metadata["prompt_cache_key"]; exists {
+		t.Fatal("expected no prompt_cache_key without runtime session")
+	}
+}

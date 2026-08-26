@@ -19,18 +19,18 @@ func reasoningTestTheme() style.ThemeContext {
 func reasoningTestCell(source string, presentation scene.PresentationKind) scene.TranscriptCell {
 	return scene.TranscriptCell{
 		ID:           scene.CellID(7),
-		Kind:         scene.KindSupplement,
+		Kind:         scene.KindReasoning,
 		Source:       source,
+		Phase:        scene.CellCommitted,
 		Presentation: scene.TranscriptPresentation{Kind: presentation},
 	}
 }
 
-// TestCellUsesStructuredPresentationForSupplementMarkdown 验证 supplement
-// （reasoning 等）cell 的结构化渲染判定：markdown presentation 或正文兜底
-// 命中时走结构化，纯文本保持 plain。
-func TestCellUsesStructuredPresentationForSupplementMarkdown(t *testing.T) {
+// Reasoning is always a structured projection because its dividers are
+// presentation chrome. Ordinary supplements retain body-based Markdown
+// detection and do not acquire reasoning chrome.
+func TestCellUsesStructuredPresentationForReasoning(t *testing.T) {
 	markdownBody := "# Heading\n\n- **one**\n- `two`"
-	divider := strings.Repeat("─", 30) + " reasoning " + strings.Repeat("─", 30)
 
 	cases := []struct {
 		name string
@@ -39,17 +39,22 @@ func TestCellUsesStructuredPresentationForSupplementMarkdown(t *testing.T) {
 	}{
 		{
 			name: "marked markdown presentation",
-			cell: reasoningTestCell(divider+"\n"+markdownBody, scene.PresentationAssistantMarkdown),
+			cell: reasoningTestCell(markdownBody, scene.PresentationAssistantMarkdown),
 			want: true,
 		},
 		{
-			name: "plain presentation with markdown body fallback",
-			cell: reasoningTestCell(divider+"\n"+markdownBody, scene.PresentationPlain),
+			name: "plain presentation with markdown-looking body",
+			cell: reasoningTestCell(markdownBody, scene.PresentationPlain),
 			want: true,
 		},
 		{
-			name: "plain presentation with plain body",
-			cell: reasoningTestCell(divider+"\nplain thinking", scene.PresentationPlain),
+			name: "plain reasoning still derives chrome",
+			cell: reasoningTestCell("plain thinking", scene.PresentationPlain),
+			want: true,
+		},
+		{
+			name: "ordinary plain supplement stays plain",
+			cell: scene.TranscriptCell{Kind: scene.KindSupplement, Source: "plain supplement"},
 			want: false,
 		},
 	}
@@ -60,13 +65,10 @@ func TestCellUsesStructuredPresentationForSupplementMarkdown(t *testing.T) {
 	}
 }
 
-// TestStructuredSupplementCellRendersMarkdownBodyWithReasoningDividers 验证
-// reasoning cell 的结构化渲染：首/尾分隔线保留 reasoning 角色，正文走
-// markdown（标题/列表/行内代码有样式，无原始语法残留）。
-func TestStructuredSupplementCellRendersMarkdownBodyWithReasoningDividers(t *testing.T) {
-	head := strings.Repeat("─", 30) + " reasoning " + strings.Repeat("─", 30)
-	tail := strings.Repeat("─", 30) + " end reasoning " + strings.Repeat("─", 30)
-	source := head + "\n# Heading\n\n- **one**\n- `two`\n" + tail
+// A committed reasoning cell derives exactly one opening and closing divider;
+// the semantic provider body remains literal even when it resembles Markdown.
+func TestStructuredReasoningCellRendersSourceFaithfulBodyWithDerivedDividers(t *testing.T) {
+	source := "# Heading\n\n- **one**\n- `two`"
 	cell := reasoningTestCell(source, scene.PresentationAssistantMarkdown)
 
 	rows := structuredTranscriptScreenRows(cell, 60, reasoningTestTheme())
@@ -99,15 +101,19 @@ func TestStructuredSupplementCellRendersMarkdownBodyWithReasoningDividers(t *tes
 		t.Fatalf("tailRow.RenderLine = %+v, want reasoning role", tailRow.RenderLine)
 	}
 
-	// 正文：markdown 语义渲染，无原始语法残留。
+	// 正文：provider bytes remain literal; reasoning does not pass through the
+	// assistant Markdown parser.
 	plain := strings.Join(rowsText(rows), "\n")
-	for _, want := range []string{"Heading", "one", "two"} {
+	for _, want := range []string{"# Heading", "- **one**", "- `two`"} {
 		if !strings.Contains(plain, want) {
-			t.Fatalf("structured supplement missing %q: %q", want, plain)
+			t.Fatalf("structured reasoning missing %q: %q", want, plain)
 		}
 	}
-	if strings.Contains(plain, "# Heading") || strings.Contains(plain, "**one**") {
-		t.Fatalf("structured supplement retained raw markdown: %q", plain)
+	if strings.Count(plain, " end reasoning ") != 1 {
+		t.Fatalf("end divider count = %d, want 1: %q", strings.Count(plain, " end reasoning "), plain)
+	}
+	if strings.Count(strings.ReplaceAll(plain, " end reasoning ", ""), " reasoning ") != 1 {
+		t.Fatalf("opening divider count is not exactly 1: %q", plain)
 	}
 }
 
@@ -115,7 +121,11 @@ func TestStructuredSupplementCellRendersMarkdownBodyWithReasoningDividers(t *tes
 // supplement（如 priority prompt）整体按正文渲染，不丢内容。
 func TestStructuredSupplementWithoutDividersRendersWholeSource(t *testing.T) {
 	source := "**prompt** body\n- item"
-	cell := reasoningTestCell(source, scene.PresentationAssistantMarkdown)
+	cell := scene.TranscriptCell{
+		ID: scene.CellID(8), Kind: scene.KindSupplement, Source: source,
+		Phase:        scene.CellCommitted,
+		Presentation: scene.TranscriptPresentation{Kind: scene.PresentationAssistantMarkdown},
+	}
 	rows := structuredTranscriptScreenRows(cell, 60, reasoningTestTheme())
 	plain := strings.Join(rowsText(rows), "\n")
 	for _, want := range []string{"prompt", "body", "item"} {
@@ -125,6 +135,74 @@ func TestStructuredSupplementWithoutDividersRendersWholeSource(t *testing.T) {
 	}
 	if strings.Contains(plain, "**prompt**") {
 		t.Fatalf("undivided supplement retained raw markdown: %q", plain)
+	}
+}
+
+func TestReasoningDerivedChromeRespectsLifecycleAndProviderWhitespace(t *testing.T) {
+	body := "\n\nrepeat\nrepeat\n"
+	cell := reasoningTestCell(body, scene.PresentationPlain)
+	cell.Phase = scene.CellMutable
+
+	mutable := strings.Join(rowsText(structuredTranscriptScreenRows(cell, 80, reasoningTestTheme())), "\n")
+	if strings.Count(mutable, " reasoning ") != 1 || strings.Contains(mutable, " end reasoning ") {
+		t.Fatalf("mutable reasoning chrome = %q, want one opening and no closing divider", mutable)
+	}
+	if !strings.Contains(mutable, "\n\n\nrepeat\nrepeat\n") {
+		t.Fatalf("mutable reasoning did not preserve provider blank/repeated lines: %q", mutable)
+	}
+
+	cell.Phase = scene.CellCommitted
+	committed := strings.Join(rowsText(structuredTranscriptScreenRows(cell, 80, reasoningTestTheme())), "\n")
+	if strings.Count(committed, " end reasoning ") != 1 {
+		t.Fatalf("committed reasoning end divider count != 1: %q", committed)
+	}
+	if strings.Count(committed, "repeat") != 2 {
+		t.Fatalf("legitimate repeated body text changed: %q", committed)
+	}
+}
+
+func TestCommittedReasoningTrailingLFUsesClosingDividerCursorRow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{name: "single trailing LF", body: "A\n", want: []string{"A"}},
+		{name: "double trailing LF", body: "A\n\n", want: []string{"A", ""}},
+		{name: "leading LF", body: "\nA", want: []string{"", "A"}},
+		{name: "single LF body", body: "\n", want: []string{""}},
+		{name: "double LF body", body: "\n\n", want: []string{"", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := rowsText(structuredTranscriptScreenRows(
+				reasoningTestCell(tc.body, scene.PresentationPlain),
+				100,
+				reasoningTestTheme(),
+			))
+			if len(rows) < 2 {
+				t.Fatalf("reasoning rows = %q, want opening/body/closing", rows)
+			}
+			got := rows[1 : len(rows)-1]
+			if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Fatalf("body rows = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWhitespaceOnlyReasoningIsNotTreatedAsOrderingPlaceholder(t *testing.T) {
+	for _, source := range []string{" ", "\n", "\n\n"} {
+		active, ok := activeCellFromTranscriptCell(&scene.TranscriptCell{
+			ID: 9, Kind: scene.KindReasoning, Phase: scene.CellMutable, Source: source,
+		})
+		if !ok || active.Source != source {
+			t.Fatalf("whitespace reasoning %q projected as (%+v,%v), want active exact source", source, active, ok)
+		}
+	}
+	if _, ok := activeCellFromTranscriptCell(&scene.TranscriptCell{
+		ID: 10, Kind: scene.KindReasoning, Phase: scene.CellMutable,
+	}); ok {
+		t.Fatal("empty ordering placeholder projected as active reasoning")
 	}
 }
 

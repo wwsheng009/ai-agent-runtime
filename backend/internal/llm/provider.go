@@ -980,16 +980,15 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
-		// Fail fast on a hung upstream -- but only when the retry budget is
-		// UNLIMITED. With a finite budget (MaxAttempts > 0) the agent is
-		// expected to keep retrying within the budget, so the guard must not
-		// take away attempts the caller asked for. Two consecutive
-		// response-header timeouts mean the provider never returns headers and
-		// every further attempt just burns another ResponseHeaderTimeout. The
-		// streak resets on any non-header error, so a transient timeout
-		// followed by a healthy exchange and another timeout is never
-		// misjudged.
-		if policy.MaxAttempts <= 0 && trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+		// Fail fast on a hung upstream regardless of the retry budget. Two
+		// consecutive response-header timeouts mean the provider accepted the
+		// connection and the request but never returns headers: further
+		// attempts would each burn another full ResponseHeaderTimeout for no
+		// progress, whether the budget is unlimited (infinite spin) or finite
+		// (the budget is drained without any chance of recovery). The streak
+		// resets on any non-header error, so a transient timeout followed by a
+		// healthy exchange and another timeout is never misjudged.
+		if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
 			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 				Source:   "provider_wrapper",
 				Phase:    "response",
@@ -1229,16 +1228,16 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:    err.Error(),
 			})
 			lastErr = fmt.Errorf("failed to send request: %w", err)
-			// Fail fast on a hung upstream -- but only when the retry budget
-			// is UNLIMITED. With a finite budget (MaxAttempts > 0) the agent
-			// is expected to keep retrying within the budget, so the guard
-			// must not take away attempts the caller asked for. Two
-			// consecutive response-header timeouts mean the provider never
-			// returns headers, and every further attempt just burns a full
-			// ResponseHeaderTimeout for nothing. The streak resets on any
-			// other error, and on any received response (cleared below), so a
-			// healthy exchange in between never counts as consecutive.
-			if policy.MaxAttempts <= 0 && trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+			// Fail fast on a hung upstream regardless of the retry budget. Two
+			// consecutive response-header timeouts mean the provider accepted
+			// the connection and the request but never returns headers: every
+			// further attempt burns a full ResponseHeaderTimeout for nothing,
+			// whether the budget is unlimited (infinite spin) or finite (the
+			// budget is drained without any chance of recovery). The streak
+			// resets on any other error, and on any received response (cleared
+			// below), so a healthy exchange in between never counts as
+			// consecutive.
+			if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
 				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 					Source:   "provider_wrapper",
 					Phase:    "response",

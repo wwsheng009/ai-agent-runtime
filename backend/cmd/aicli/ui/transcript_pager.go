@@ -216,8 +216,10 @@ func transcriptPagerCellLabel(kind scene.CellKind) string {
 		return "Assistant"
 	case scene.KindToolChain:
 		return "Tool"
-	case scene.KindSupplement:
+	case scene.KindReasoning:
 		return "Reasoning"
+	case scene.KindSupplement:
+		return "Supplement"
 	case scene.KindCommand:
 		return "Command"
 	case scene.KindSystem:

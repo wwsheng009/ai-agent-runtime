@@ -97,7 +97,7 @@ func activeSceneKind(kind cell.ActiveKind) (scene.CellKind, bool) {
 	case cell.ActiveAssistant:
 		return scene.KindAssistant, true
 	case cell.ActiveReasoning:
-		return scene.KindSupplement, true
+		return scene.KindReasoning, true
 	case cell.ActiveTool:
 		return scene.KindToolChain, true
 	default:

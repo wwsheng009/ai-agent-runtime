@@ -2,10 +2,10 @@ package encoding
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
@@ -236,8 +236,8 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	if len(m.Items) != 2 {
 		t.Fatalf("items = %d, want 2 (reasoning + assistant)", len(m.Items))
 	}
-	if m.Items[0].Kind != KindReasoning || !strings.Contains(m.Items[0].Head, "thinking...") || !strings.Contains(m.Items[0].Head, " reasoning ") || !strings.Contains(m.Items[0].Head, " end reasoning ") || m.Items[0].Status != StatusCompleted {
-		t.Fatalf("items[0] = %+v, want completed reasoning with dividers", m.Items[0])
+	if m.Items[0].Kind != KindReasoning || m.Items[0].Head != "thinking..." || m.Items[0].Status != StatusCompleted {
+		t.Fatalf("items[0] = %+v, want completed body-only reasoning", m.Items[0])
 	}
 	if m.Items[1].Kind != KindAssistant || m.Items[1].Head != "Hello" {
 		t.Fatalf("items[1] = %+v, want assistant with Hello", m.Items[1])
@@ -249,8 +249,8 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	if m.Items[0].CauseID != "" || m.Items[1].CauseID != "" {
 		t.Fatalf("reasoning/assistant grouping reused tool cause identity: %+v", m.Items)
 	}
-	if !strings.HasPrefix(m.Items[0].Head, "─") || !strings.Contains(m.Items[0].Head, " reasoning ") {
-		t.Fatalf("items[0].Head = %q, want reasoning divider prefix", m.Items[0].Head)
+	if strings.Contains(m.Items[0].Head, " reasoning ") || strings.Contains(m.Items[0].Head, " end reasoning ") {
+		t.Fatalf("items[0].Head = %q, presentation chrome leaked into semantic body", m.Items[0].Head)
 	}
 	// request finished 先于 assistant_message：不得提前提交 assistant。
 	if cs := e.Encode(llmFinished()); len(cs.Changes) != 0 {
@@ -269,10 +269,197 @@ func TestEncodeReasoningIndependentOfAssistant(t *testing.T) {
 	}
 }
 
-// TestEncodeReasoningMarkdownPresentation 验证 reasoning cell 的渲染契约：
-// 正文（去分隔线后）命中 markdown 启发式时打 PresentationAssistantMarkdown，
-// 纯文本保持 PresentationPlain；流式增长中可从 plain 升级为 markdown。
-func TestEncodeReasoningMarkdownPresentation(t *testing.T) {
+func TestAssistantFinalReplacesReasoningSnapshotInPlace(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(llmStarted())
+	for sequence, text := range []string{"first line\n\n", "# literal heading\n- **literal markdown**\nlast line"} {
+		e.Encode(event(runtimechat.EventAssistantReasoning, map[string]interface{}{
+			"turn_id":   "turn-1",
+			"stream_id": "stream-1",
+			"sequence":  uint64(sequence + 1),
+			"mode":      "append",
+			"reasoning": map[string]interface{}{
+				"format":     "stream_delta",
+				"streamable": true,
+				"summary":    text,
+			},
+		}))
+	}
+	before := e.Snapshot()
+	if len(before.Items) != 1 || before.Items[0].Kind != KindReasoning {
+		t.Fatalf("streamed model = %+v, want one reasoning item", before.Items)
+	}
+	reasoningID := before.Items[0].ID
+
+	finalBody := "first line\n\n# literal heading\n- **literal markdown**\nlast line"
+	final := assistantFinal("answer")
+	final.Payload["reasoning"] = map[string]interface{}{
+		"format":     "summary",
+		"streamable": true, // capability is not append semantics
+		"summary":    finalBody,
+	}
+	e.Encode(final)
+
+	after := e.Snapshot()
+	if len(after.Items) != 2 {
+		t.Fatalf("final model item count = %d, want reasoning + assistant: %+v", len(after.Items), after.Items)
+	}
+	reasoning, assistant := after.Items[0], after.Items[1]
+	if reasoning.ID != reasoningID {
+		t.Fatalf("reasoning identity changed from %q to %q", reasoningID, reasoning.ID)
+	}
+	if reasoning.Kind != KindReasoning || reasoning.Head != finalBody ||
+		reasoning.Status != StatusCompleted || reasoning.Presentation.Kind != PresentationPlain {
+		t.Fatalf("final reasoning = %+v, want source-faithful completed item", reasoning)
+	}
+	if assistant.Kind != KindAssistant || assistant.Head != "answer" || assistant.Status != StatusCompleted {
+		t.Fatalf("final assistant = %+v", assistant)
+	}
+
+	// Delivery after assistant.message is a protocol duplicate even when its
+	// prose is new. It must not reopen or mutate the committed predecessor.
+	e.Encode(event(runtimechat.EventAssistantReasoning, map[string]interface{}{
+		"turn_id": "turn-1", "stream_id": "stream-1", "sequence": uint64(3), "mode": "append",
+		"text": "MUST-NOT-REOPEN",
+	}))
+	stable := e.Snapshot()
+	if len(stable.Items) != 2 || stable.Items[0].ID != reasoningID ||
+		stable.Items[0].Head != finalBody || stable.Items[0].Status != StatusCompleted {
+		t.Fatalf("late reasoning mutated committed response: %+v", stable.Items)
+	}
+}
+
+func TestAssistantFinalCorrectsAlreadyCompletedReasoningWithExplicitOperation(t *testing.T) {
+	e := NewEventEncoder()
+	base := map[string]interface{}{
+		"trace_id":  "trace-correction",
+		"turn_id":   "turn-correction",
+		"stream_id": "stream-correction",
+		"step":      1,
+	}
+	reasoning := maps.Clone(base)
+	reasoning["sequence"] = uint64(1)
+	reasoning["mode"] = "append"
+	reasoning["text"] = "streamed partial"
+	e.Encode(event(runtimechat.EventAssistantReasoning, reasoning))
+
+	delta := maps.Clone(base)
+	delta["sequence"] = uint64(1)
+	delta["mode"] = "append"
+	delta["delta"] = "answer"
+	e.Encode(event(runtimechat.EventAssistantDelta, delta))
+	before := e.Snapshot()
+	if len(before.Items) != 2 || before.Items[0].Status != StatusCompleted {
+		t.Fatalf("model before correction = %+v, want completed reasoning followed by assistant", before.Items)
+	}
+	reasoningID := before.Items[0].ID
+
+	final := maps.Clone(base)
+	final["mode"] = "snapshot"
+	final["content"] = "answer"
+	final["reasoning"] = map[string]interface{}{
+		"format": "summary", "summary": "authoritative full reasoning",
+	}
+	cs := e.Encode(event(runtimechat.EventAssistantMessage, final))
+	var correction *ItemChange
+	for i := range cs.Changes {
+		if cs.Changes[i].Item != nil && cs.Changes[i].Item.ID == reasoningID {
+			correction = &cs.Changes[i]
+			break
+		}
+	}
+	if correction == nil || correction.Op != OpCorrectReasoning ||
+		correction.Item.Head != "authoritative full reasoning" {
+		t.Fatalf("authoritative reasoning changes = %+v, want explicit correction for %q", cs.Changes, reasoningID)
+	}
+}
+
+func TestAssistantFinalRetransmissionCannotCorrectTerminalReasoning(t *testing.T) {
+	e := NewEventEncoder()
+	base := map[string]interface{}{
+		"trace_id":  "trace-terminal-replay",
+		"turn_id":   "turn-terminal-replay",
+		"stream_id": "stream-terminal-replay",
+		"step":      1,
+	}
+
+	reasoning := maps.Clone(base)
+	reasoning["sequence"] = uint64(1)
+	reasoning["mode"] = "append"
+	reasoning["text"] = "streamed partial"
+	e.Encode(event(runtimechat.EventAssistantReasoning, reasoning))
+
+	delta := maps.Clone(base)
+	delta["sequence"] = uint64(1)
+	delta["mode"] = "append"
+	delta["delta"] = "answer"
+	e.Encode(event(runtimechat.EventAssistantDelta, delta))
+
+	first := maps.Clone(base)
+	first["mode"] = "snapshot"
+	first["content"] = "answer"
+	first["reasoning"] = map[string]interface{}{
+		"format": "summary", "summary": "first authoritative reasoning",
+	}
+	e.Encode(event(runtimechat.EventAssistantMessage, first))
+
+	before := e.Snapshot()
+	if len(before.Items) != 2 || before.Items[0].Kind != KindReasoning ||
+		before.Items[0].Head != "first authoritative reasoning" ||
+		before.Items[1].Kind != KindAssistant || before.Items[1].Head != "answer" ||
+		!before.Items[1].Status.Terminal() {
+		t.Fatalf("first terminal snapshot = %+v", before.Items)
+	}
+
+	replay := maps.Clone(first)
+	replay["content"] = "conflicting replay answer"
+	replay["reasoning"] = map[string]interface{}{
+		"format": "summary", "summary": "conflicting replay reasoning",
+	}
+	cs := e.Encode(event(runtimechat.EventAssistantMessage, replay))
+	if len(cs.Changes) != 0 {
+		t.Fatalf("terminal retransmission changes = %+v, want none", cs.Changes)
+	}
+
+	after := e.Snapshot()
+	if len(after.Items) != 2 || after.Items[0].Head != "first authoritative reasoning" ||
+		after.Items[1].Head != "answer" {
+		t.Fatalf("terminal retransmission mutated canonical response: %+v", after.Items)
+	}
+}
+
+func TestReasoningOperationIgnoresStreamableCapability(t *testing.T) {
+	snapshot := event(runtimechat.EventAssistantReasoning, map[string]interface{}{
+		"reasoning": map[string]interface{}{
+			"format":     "summary",
+			"streamable": true,
+			"summary":    "authoritative snapshot",
+		},
+	})
+	if got := ReasoningOperationForEvent(snapshot); got != ReasoningOperationReplace {
+		t.Fatalf("streamable snapshot operation = %v, want replace", got)
+	}
+	snapshot.Payload["mode"] = "append"
+	if got := ReasoningOperationForEvent(snapshot); got != ReasoningOperationAppend {
+		t.Fatalf("explicit append operation = %v, want append", got)
+	}
+	snapshot.Payload["reasoning"].(map[string]interface{})["format"] = "stream_delta"
+	snapshot.Payload[ReasoningStreamDeltaKey] = true
+	snapshot.Payload["mode"] = "replace"
+	if got := ReasoningOperationForEvent(snapshot); got != ReasoningOperationReplace {
+		t.Fatalf("explicit replace operation = %v, want replace despite legacy delta hints", got)
+	}
+	delete(snapshot.Payload, "mode")
+	snapshot.Payload["operation"] = "snapshot"
+	if got := ReasoningOperationForEvent(snapshot); got != ReasoningOperationReplace {
+		t.Fatalf("explicit snapshot operation = %v, want replace", got)
+	}
+}
+
+// Reasoning is source-faithful provider prose. Markdown-looking bytes stay
+// literal and PresentationPlain throughout streaming; assistant Markdown owns
+// rich formatting separately.
+func TestEncodeReasoningKeepsPlainPresentation(t *testing.T) {
 	reasoning := func(text string) {
 		t.Helper()
 		e := NewEventEncoder()
@@ -285,13 +472,9 @@ func TestEncodeReasoningMarkdownPresentation(t *testing.T) {
 		if item.Kind != KindReasoning {
 			t.Fatalf("items[0].Kind = %s, want reasoning", item.Kind)
 		}
-		want := PresentationPlain
-		if markdown.LooksLikeMarkdown(text) {
-			want = PresentationAssistantMarkdown
-		}
-		if item.Presentation.Kind != want {
-			t.Fatalf("reasoning %q presentation = %v, want %v (head=%q)",
-				text, item.Presentation.Kind, want, item.Head)
+		if item.Presentation.Kind != PresentationPlain {
+			t.Fatalf("reasoning %q presentation = %v, want plain (head=%q)",
+				text, item.Presentation.Kind, item.Head)
 		}
 	}
 	reasoning("thinking...")
@@ -309,8 +492,8 @@ func TestEncodeReasoningMarkdownPresentation(t *testing.T) {
 	e.Encode(assistantDelta("answer", 2))
 	e.Encode(assistantFinal("answer"))
 	item := e.Snapshot().Items[0]
-	if item.Presentation.Kind != PresentationAssistantMarkdown {
-		t.Fatalf("streamed reasoning presentation = %v, want markdown (head=%q)",
+	if item.Presentation.Kind != PresentationPlain {
+		t.Fatalf("streamed reasoning presentation = %v, want plain (head=%q)",
 			item.Presentation.Kind, item.Head)
 	}
 }
@@ -342,7 +525,7 @@ func TestEncodeDottedAssistantReasoningUsesNestedTypedPayload(t *testing.T) {
 		t.Fatalf("items = %d, want one reasoning item: %#v", len(model.Items), model.Items)
 	}
 	item := model.Items[0]
-	if item.Kind != KindReasoning || !strings.HasSuffix(item.Head, "first thought. second thought.") || !strings.Contains(item.Head, " reasoning ") {
+	if item.Kind != KindReasoning || item.Head != "first thought. second thought." {
 		t.Fatalf("reasoning item = %+v", item)
 	}
 	if item.Status != StatusRunning {
@@ -355,16 +538,11 @@ func TestEncodeDottedAssistantReasoningUsesNestedTypedPayload(t *testing.T) {
 	}
 }
 
-// TestEncodeReasoningFullSnapshotKeepsDividerPrefix 是"统一渲染器渲染
-// reasoning divider 前后不一致"的回归：流式 delta 之后到达的全量快照
-// （非 stream_delta，如 summary/plain text 事件）必须保留
-// divider + "\n" 前缀、整体替换正文；后续 delta 继续追加在正文之后，
-// divider 恰好出现一次且始终紧跟换行。旧实现全量快照直接 nextHead = text，
-// 把 divider 及其换行丢掉，下一帧 delta 又追加到无 divider 的 head 上，
-// 帧间出现"分隔线带换行/不带换行"的视觉切换。
-func TestEncodeReasoningFullSnapshotKeepsDividerPrefix(t *testing.T) {
+// A reasoning item stores provider content only. An authoritative snapshot
+// replaces accumulated deltas, and a later stream delta appends exactly;
+// presentation dividers never participate in that state transition.
+func TestEncodeReasoningFullSnapshotKeepsBodyOnlySource(t *testing.T) {
 	e := NewEventEncoder()
-	// 帧 1：流式 delta → divider + "\n" + 正文。
 	e.Encode(event("assistant.reasoning", map[string]interface{}{
 		"trace_id": "trace-divider",
 		"reasoning": map[string]interface{}{
@@ -373,11 +551,9 @@ func TestEncodeReasoningFullSnapshotKeepsDividerPrefix(t *testing.T) {
 		},
 	}))
 	head := e.Snapshot().Items[0].Head
-	if head != reasoningDividerLine()+"\n"+"first thought. " {
-		t.Fatalf("after stream delta head = %q, want divider+LF+body", head)
+	if head != "first thought. " {
+		t.Fatalf("after stream delta head = %q, want provider body only", head)
 	}
-	// 帧 2：全量快照（format=summary，非 stream_delta）→ 正文整体替换，
-	// divider + 换行必须保留。
 	e.Encode(event("assistant.reasoning", map[string]interface{}{
 		"trace_id": "trace-divider",
 		"reasoning": map[string]interface{}{
@@ -387,11 +563,9 @@ func TestEncodeReasoningFullSnapshotKeepsDividerPrefix(t *testing.T) {
 		},
 	}))
 	head = e.Snapshot().Items[0].Head
-	want := reasoningDividerLine() + "\n" + "full snapshot body"
-	if head != want {
-		t.Fatalf("after full snapshot head = %q, want %q (divider+LF must survive)", head, want)
+	if head != "full snapshot body" {
+		t.Fatalf("after snapshot head = %q, want authoritative body", head)
 	}
-	// 帧 3：后续 delta 追加在快照正文之后；divider 不重复、换行不丢失。
 	e.Encode(event("assistant.reasoning", map[string]interface{}{
 		"trace_id": "trace-divider",
 		"reasoning": map[string]interface{}{
@@ -400,25 +574,19 @@ func TestEncodeReasoningFullSnapshotKeepsDividerPrefix(t *testing.T) {
 		},
 	}))
 	head = e.Snapshot().Items[0].Head
-	if head != reasoningDividerLine()+"\n"+"full snapshot body tail." {
-		t.Fatalf("after trailing delta head = %q, want divider once + snapshot body + tail", head)
+	if head != "full snapshot body tail." {
+		t.Fatalf("after trailing delta head = %q, want snapshot body + exact delta", head)
 	}
-	if count := strings.Count(head, " reasoning "); count != 1 {
-		t.Fatalf("divider rendered %d times, want exactly 1: %q", count, head)
-	}
-	if strings.HasPrefix(head, reasoningDividerLine()) && !strings.HasPrefix(head, reasoningDividerLine()+"\n") {
-		t.Fatalf("divider not followed by LF: %q", head)
+	if strings.Contains(head, " reasoning ") {
+		t.Fatalf("presentation divider leaked into stored head: %q", head)
 	}
 }
 
-// TestEncodeReasoningDividerNormalizesLeadingNewlines 验证 divider 后的正文
-// 前导换行被剥离：存储源统一为 "divider\n正文"，避免 divider 后出现"幽灵
-// 空行"——渲染层把正文与分隔线分开处理时前导空行被丢弃，而整文档渲染时
-// 同一空行又显示出来，帧间出现换行出现/消失的跳动（INV-REASON-DIVIDER-02）。
-// 正文中间的换行（段落分隔）必须原样保留。
-func TestEncodeReasoningDividerNormalizesLeadingNewlines(t *testing.T) {
+// Provider whitespace is semantic input. The encoder must preserve leading,
+// interior, and trailing newlines rather than normalizing around derived
+// presentation chrome.
+func TestEncodeReasoningPreservesProviderNewlines(t *testing.T) {
 	e := NewEventEncoder()
-	// 首块 delta 带前导换行 → divider + "\n" + 剥离前导换行后的正文。
 	e.Encode(event("assistant.reasoning", map[string]interface{}{
 		"trace_id": "trace-lf",
 		"reasoning": map[string]interface{}{
@@ -427,10 +595,9 @@ func TestEncodeReasoningDividerNormalizesLeadingNewlines(t *testing.T) {
 		},
 	}))
 	head := e.Snapshot().Items[0].Head
-	if want := reasoningDividerLine() + "\n" + "first thought"; head != want {
-		t.Fatalf("after delta head = %q, want %q (leading newlines stripped)", head, want)
+	if want := "\n\nfirst thought"; head != want {
+		t.Fatalf("after delta head = %q, want exact provider bytes %q", head, want)
 	}
-	// 全量快照正文同样剥离前导换行。
 	e.Encode(event("assistant.reasoning", map[string]interface{}{
 		"trace_id": "trace-lf",
 		"reasoning": map[string]interface{}{
@@ -440,10 +607,9 @@ func TestEncodeReasoningDividerNormalizesLeadingNewlines(t *testing.T) {
 		},
 	}))
 	head = e.Snapshot().Items[0].Head
-	if want := reasoningDividerLine() + "\n" + "replaced body"; head != want {
-		t.Fatalf("after snapshot head = %q, want %q (leading newlines stripped)", head, want)
+	if want := "\n\nreplaced body"; head != want {
+		t.Fatalf("after snapshot head = %q, want exact provider bytes %q", head, want)
 	}
-	// 后续 delta 的段内换行必须保留（段落分隔是真实内容）。
 	e.Encode(event("assistant.reasoning", map[string]interface{}{
 		"trace_id": "trace-lf",
 		"reasoning": map[string]interface{}{
@@ -452,11 +618,8 @@ func TestEncodeReasoningDividerNormalizesLeadingNewlines(t *testing.T) {
 		},
 	}))
 	head = e.Snapshot().Items[0].Head
-	if want := reasoningDividerLine() + "\n" + "replaced body\n\nsecond paragraph"; head != want {
-		t.Fatalf("after mid-body delta head = %q, want %q (paragraph breaks survive)", head, want)
-	}
-	if strings.HasPrefix(head, reasoningDividerLine()+"\n\n") {
-		t.Fatalf("divider followed by blank line in stored head: %q", head)
+	if want := "\n\nreplaced body\n\nsecond paragraph"; head != want {
+		t.Fatalf("after trailing delta head = %q, want exact concatenation %q", head, want)
 	}
 }
 
@@ -1437,8 +1600,8 @@ func TestSubmitSupplement(t *testing.T) {
 
 // TestSubmitReasoningWithBoundaryGroup 固化 resume/历史种子路径的 reasoning
 // 重建契约：必须与 live 路径（applyReasoning + finalizeReasoning）一样产出
-// KindReasoning，Head 以开始分隔线开头、以结束分隔线收尾，否则恢复会话后
-// reasoning 会退化为普通 supplement 文本，丢失两条分隔线。
+// KindReasoning，但 Head 只保存 provider 的语义正文。开始/结束分隔线由展示层
+// 根据 KindReasoning 和终态派生，不能污染 source identity。
 func TestSubmitReasoningWithBoundaryGroup(t *testing.T) {
 	e := NewEventEncoder()
 	e.SubmitUserInput("U1")
@@ -1454,15 +1617,11 @@ func TestSubmitReasoningWithBoundaryGroup(t *testing.T) {
 	if it.BoundaryGroupKey != "persisted-assistant-request:abc:1" {
 		t.Fatalf("boundary group = %q", it.BoundaryGroupKey)
 	}
-	if !strings.HasPrefix(it.Head, reasoningDividerLine()+"\n") {
-		t.Fatalf("head missing start divider: %q", it.Head)
+	if it.Head != body {
+		t.Fatalf("head = %q, want provider body %q", it.Head, body)
 	}
-	if !strings.Contains(it.Head, "\n"+reasoningEndDividerLine()) {
-		t.Fatalf("head missing end divider: %q", it.Head)
-	}
-	wantBody := reasoningDividerLine() + "\n" + body + "\n" + reasoningEndDividerLine()
-	if it.Head != wantBody {
-		t.Fatalf("head = %q, want %q", it.Head, wantBody)
+	if strings.Contains(it.Head, " reasoning ") || strings.Contains(it.Head, " end reasoning ") {
+		t.Fatalf("semantic reasoning head contains presentation chrome: %q", it.Head)
 	}
 	if tl := e.Tail(); tl == nil || tl.ItemID != it.ID {
 		t.Fatalf("tail = %+v, want ItemID %q", tl, it.ID)

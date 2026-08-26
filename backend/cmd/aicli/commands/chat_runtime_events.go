@@ -76,8 +76,10 @@ type chatRuntimeEventBridge struct {
 	renderedAssistantFinal          bool
 	renderedAssistantFinalDigest    [sha256.Size]byte
 	renderedAssistantFinalLength    int
-	renderedReasoningDelta          bool
-	renderedReasoningFinal          bool
+	reasoningRenderStates           map[string]*chatReasoningRenderState
+	reasoningRequestAliases         map[string]string
+	reasoningLatestByScope          map[string]string
+	activeReasoningRequestKey       string
 	runStarted                      bool
 	runActive                       bool
 	runEpoch                        uint64
@@ -169,6 +171,12 @@ type chatAssistantStreamState struct {
 	pending      map[uint64]runtimeevents.Event
 	pendingBytes int64
 	tainted      bool
+}
+
+type chatReasoningRenderState struct {
+	renderedDelta bool
+	renderedFinal bool
+	lastSequence  uint64
 }
 
 type chatRuntimeRequestLogState struct {
@@ -574,8 +582,10 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.renderedAssistantFinal = false
 	b.renderedAssistantFinalDigest = [sha256.Size]byte{}
 	b.renderedAssistantFinalLength = 0
-	b.renderedReasoningDelta = false
-	b.renderedReasoningFinal = false
+	b.reasoningRenderStates = make(map[string]*chatReasoningRenderState)
+	b.reasoningRequestAliases = make(map[string]string)
+	b.reasoningLatestByScope = make(map[string]string)
+	b.activeReasoningRequestKey = ""
 	b.runStarted = true
 	b.runActive = true
 	b.runEpoch++
@@ -703,6 +713,7 @@ func (b *chatRuntimeEventBridge) finalizeOpenUnifiedStreamsAtRunEnd() {
 	// The Scene is committed before this callback. It can therefore emit the
 	// fenced FinalizeActiveCellAction, reset coordinator-local compatibility
 	// bookkeeping, and never write the partial body a second time.
+	b.session.Interaction.FinalizeReasoningDelta()
 	b.session.Interaction.FinalizeAssistantDelta()
 	b.session.Interaction.postTranscriptSnapshotFromBridge(b)
 }
@@ -1217,10 +1228,11 @@ func (b *chatRuntimeEventBridge) accountEventQueueBytes(size int64) {
 	b.eventQueueMu.Unlock()
 }
 
-// mergeStreamEvents combines two deltas of the same stream into one event.
-// Text is merged with the same monotonic rules the encoder applies per chunk
-// (snapshot providers repeat the full text; delta providers append), so the
-// coalesced event renders identically to the original sequence.
+// mergeStreamEvents combines two events of the same stream into one event.
+// Reasoning uses its explicit protocol mode rather than inspecting prose:
+// stream deltas append byte-for-byte, while an authoritative snapshot replaces
+// earlier content. The merged delta marker survives removal of the nested
+// ReasoningBlock so every downstream consumer keeps append semantics.
 func mergeStreamEvents(a, b runtimeevents.Event) runtimeevents.Event {
 	if streamEventText(b) == "" {
 		return a
@@ -1228,15 +1240,56 @@ func mergeStreamEvents(a, b runtimeevents.Event) runtimeevents.Event {
 	if streamEventText(a) == "" {
 		return b
 	}
-	merged := mergeStreamText(streamEventText(a), streamEventText(b))
-	// A snapshot-style reasoning block would shadow the merged text and can
-	// only represent the older snapshot; drop it so the text path wins.
-	delete(a.Payload, "reasoning")
 	switch a.Type {
 	case runtimechat.EventAssistantReasoning:
-		a.Payload["text"] = merged
+		aSeq, aHasSeq := assistantEventSequence(a)
+		bSeq, bHasSeq := assistantEventSequence(b)
+		if aHasSeq && bHasSeq && aSeq == bSeq {
+			// Sequence identity, not text equality, defines a duplicate.
+			return a
+		}
+		aDelta := encoding.ReasoningOperationForEvent(a) == encoding.ReasoningOperationAppend
+		bDelta := encoding.ReasoningOperationForEvent(b) == encoding.ReasoningOperationAppend
+		switch {
+		case bDelta:
+			a.Payload["text"] = streamEventText(a) + streamEventText(b)
+			if aDelta {
+				a.Payload[encoding.ReasoningStreamDeltaKey] = true
+			} else {
+				// A snapshot followed by a delta is still an authoritative
+				// replacement containing the snapshot plus its later suffix.
+				delete(a.Payload, encoding.ReasoningStreamDeltaKey)
+			}
+		default:
+			// The latest snapshot is authoritative. Do not infer replay or
+			// overlap from its textual contents.
+			a.Payload["text"] = streamEventText(b)
+			delete(a.Payload, encoding.ReasoningStreamDeltaKey)
+		}
+		delete(a.Payload, "reasoning")
+		delete(a.Payload, "summary")
 	case runtimechat.EventAssistantDelta:
-		a.Payload["delta"] = merged
+		aSeq, aHasSeq := assistantEventSequence(a)
+		bSeq, bHasSeq := assistantEventSequence(b)
+		if aHasSeq && bHasSeq && aSeq == bSeq {
+			// Sequence identity, not repeated prose, defines retransmission.
+			return a
+		}
+		mode := strings.ToLower(strings.TrimSpace(payloadStringValue(b.Payload["mode"])))
+		if mode == "" {
+			mode = strings.ToLower(strings.TrimSpace(payloadStringValue(b.Payload["operation"])))
+		}
+		switch mode {
+		case "append", "delta":
+			// Explicit append chunks are transport bytes. Equal or prefix-like
+			// prose is still legal repeated content and must not be collapsed.
+			a.Payload["delta"] = streamEventText(a) + streamEventText(b)
+		case "replace", "snapshot":
+			a.Payload["delta"] = streamEventText(b)
+		default:
+			// Compatibility only for legacy providers that carry no operation.
+			a.Payload["delta"] = mergeStreamText(streamEventText(a), streamEventText(b))
+		}
 	}
 	return a
 }
@@ -2182,9 +2235,11 @@ func (b *chatRuntimeEventBridge) sceneStats() (cells, revision, failures uint64,
 // 原样对照。
 //
 // 只读旁路审计：不改变任何输出行为；统计经 textParityStats 供 /debug 展示。
-// 对照假设：同会话事件序列下，旧路径完整块序列与 Scene cell 序列一一对应
-// （切片 7/8/10 已固化该等价，含用户输入注入）；流式中间态不经过
-// writeRowsLocked，不会误对照。
+// 对照假设：除 reasoning 外，同会话事件序列下，旧路径完整块序列与 Scene
+// cell 序列一一对应（切片 7/8/10 已固化该等价，含用户输入注入）。Reasoning
+// 现在由 Scene 独占语义正文，divider 与 terminal chrome 由 presentation
+// 派生，不再对应一个 legacy writeRowsLocked 完整块，因此在对照游标中跳过；
+// 它由 reasoning 专用的 source/projection/physical-terminal 测试覆盖。
 func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 	if b == nil || len(blockRows) == 0 {
 		return
@@ -2199,6 +2254,11 @@ func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 		return
 	}
 	groups := sceneBlockGroups(snap)
+	skippedReasoningGapRows := 0
+	for b.textParityCell < len(groups) && groups[b.textParityCell].kind == scene.KindReasoning {
+		skippedReasoningGapRows += groups[b.textParityCell].leadingGapRows
+		b.textParityCell++
+	}
 	if b.textParityCell >= len(groups) {
 		b.textParityMissed++
 		b.textParityLastErr = fmt.Sprintf("block %d: scene cells=%d consumed=%d block=%d (overflow)",
@@ -2207,6 +2267,11 @@ func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 	}
 	g := groups[b.textParityCell]
 	wantLines := g.lines
+	if skippedReasoningGapRows > 0 {
+		withGap := make([]string, 0, skippedReasoningGapRows+len(wantLines))
+		withGap = append(withGap, make([]string, skippedReasoningGapRows)...)
+		wantLines = append(withGap, wantLines...)
+	}
 	if g.kind == scene.KindUser {
 		// 旧路径 user 块的前导 gap 由 prompt 重绘（writePromptGapLocked）
 		// 输出，不在块行内；数据面把该 gap 归属后继 user cell。对照时
@@ -2242,8 +2307,9 @@ func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 // sceneBlockGroup 是 Scene 投影按 cell 分组后的一个完整块行序列
 // （LayoutTranscript gap 行归属后继 cell，§7.4）。
 type sceneBlockGroup struct {
-	kind  scene.CellKind
-	lines []string
+	kind           scene.CellKind
+	lines          []string
+	leadingGapRows int
 }
 
 // sceneBlockGroups 按 cell 分组 LayoutTranscript 行：gap 行归属后继 cell。
@@ -2270,6 +2336,9 @@ func sceneBlockGroups(snap *scene.Snapshot) []sceneBlockGroup {
 			idx = len(groups)
 			groupByID[row.CellID] = idx
 			groups = append(groups, sceneBlockGroup{kind: cellKindOf(row.CellID)})
+		}
+		if row.Gap > 0 {
+			groups[idx].leadingGapRows++
 		}
 		groups[idx].lines = append(groups[idx].lines, row.Text)
 	}
@@ -3878,15 +3947,14 @@ func (b *chatRuntimeEventBridge) shouldFlushReasoningOnSessionEnd(event runtimee
 	if b == nil || b.session == nil || event.Type != runtimechat.EventSessionEnd {
 		return false
 	}
-	if !b.hasRenderedReasoningDelta() || b.hasRenderedReasoningFinal() {
+	key := b.activeReasoningRenderKey()
+	if !b.hasRenderedReasoningDeltaFor(key) || b.hasRenderedReasoningFinalFor(key) {
 		return false
 	}
 	if b.finalizeReasoning != nil {
 		b.finalizeReasoning()
 	}
-	b.renderMu.Lock()
-	b.renderedReasoningFinal = true
-	b.renderMu.Unlock()
+	b.markReasoningFinal(key)
 	return true
 }
 
@@ -3937,32 +4005,56 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 	if !chatReasoningOutputEnabled(b.session) {
 		return true
 	}
+	key := b.beginReasoningRenderRequest(event)
 	block := reasoningBlockFromRuntimeEvent(event)
 	if block == nil {
 		return false
 	}
 	display := block.RawDisplayText()
-	if b.hasRenderedReasoningFinal() {
+	if b.hasRenderedReasoningFinalFor(key) {
 		return true
 	}
-	if b.hasRenderedReasoningDelta() && !isReasoningStreamDeltaBlock(block) && b.completeReasoning != nil {
+	operation := encoding.ReasoningOperationForEvent(event)
+	if !b.isActiveReasoningRequest(key) {
+		// The unified Scene has already consumed this identity-scoped event.
+		// Compatibility callbacks are backed by one live terminal band, so an
+		// event for an older request must never overwrite the newer active band.
+		if operation == encoding.ReasoningOperationReplace {
+			b.markReasoningFinal(key)
+		}
+		return true
+	}
+	unified := b.session.Interaction != nil && b.session.Interaction.UnifiedRendererEnabled()
+	if operation == encoding.ReasoningOperationReplace &&
+		b.hasRenderedReasoningDeltaFor(key) && b.completeReasoning != nil {
 		if b.completeReasoning(block) {
-			b.renderMu.Lock()
-			b.renderedReasoningFinal = true
-			b.renderMu.Unlock()
+			b.markReasoningFinal(key)
 			return true
 		}
 		// completeReasoning 失败（reasoning 已提前 reset/flush）：增量已渲染，
 		// 不得重放完整内容当新 delta 或再走 timeline，避免双份输出。
-		if b.hasRenderedReasoningDelta() {
+		if b.hasRenderedReasoningDeltaFor(key) {
 			return true
 		}
 	}
-	if block.Streamable && display != "" && b.writeReasoningDelta != nil && b.session.Interaction != nil && b.session.Interaction.SupportsLiveStream() {
-		b.renderMu.Lock()
-		b.renderedReasoningDelta = true
-		b.renderMu.Unlock()
+	if operation == encoding.ReasoningOperationAppend && display != "" && b.writeReasoningDelta != nil &&
+		b.session.Interaction != nil && (unified || b.session.Interaction.SupportsLiveStream()) {
+		if !b.acceptReasoningAppendSequence(key, event) {
+			return true
+		}
+		b.markReasoningDelta(key)
 		b.writeReasoningDelta(block)
+		return true
+	}
+	if unified {
+		// encodeRenderModelEvent already applied this event to the Scene. In
+		// unified mode that Scene is the sole content/chrome owner; claiming the
+		// event here prevents the legacy timeline/coordinator path from emitting
+		// a second divider and body. A replace event is the terminal reasoning
+		// snapshot even when there was no preceding live delta.
+		if operation == encoding.ReasoningOperationReplace {
+			b.markReasoningFinal(key)
+		}
 		return true
 	}
 	rendered := chatReasoningTimelineEvent(strings.TrimSpace(event.TraceID), payloadStringValue(event.Payload["step"]), block)
@@ -3972,9 +4064,7 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 	if b.shouldRenderTimelineEvent(rendered) {
 		b.emitTimelineEvent(rendered)
 	}
-	b.renderMu.Lock()
-	b.renderedReasoningFinal = true
-	b.renderMu.Unlock()
+	b.markReasoningFinal(key)
 	return true
 }
 
@@ -3993,12 +4083,15 @@ func reasoningBlockFromRuntimeEvent(event runtimeevents.Event) *runtimetypes.Rea
 	if text == "" {
 		return nil
 	}
-	return &runtimetypes.ReasoningBlock{
+	block := &runtimetypes.ReasoningBlock{
 		Summary:    text,
-		Format:     "stream_delta",
-		Streamable: true,
 		Visibility: runtimetypes.ReasoningVisibilitySummary,
 	}
+	if encoding.ReasoningOperationForEvent(event) == encoding.ReasoningOperationAppend {
+		block.Format = "stream_delta"
+		block.Streamable = true
+	}
+	return block
 }
 
 func (b *chatRuntimeEventBridge) handleAssistantDelta(event runtimeevents.Event) bool {
@@ -4031,6 +4124,19 @@ func (b *chatRuntimeEventBridge) renderAssistantDelta(event runtimeevents.Event)
 	}
 	if delta == "" {
 		return
+	}
+	reasoningKey := b.beginReasoningRenderRequest(event)
+	if b.session.Interaction != nil && b.session.Interaction.UnifiedRendererEnabled() &&
+		b.isActiveReasoningRequest(reasoningKey) &&
+		b.hasRenderedReasoningDeltaFor(reasoningKey) && !b.hasRenderedReasoningFinalFor(reasoningKey) {
+		// applyAssistantDelta finalized the canonical Scene reasoning item
+		// before appending the assistant item. Close only the coordinator's
+		// compatibility state at the same boundary; the unified implementation
+		// emits an actor fence and cannot replay reasoning bytes.
+		if b.finalizeReasoning != nil {
+			b.finalizeReasoning()
+		}
+		b.markReasoningFinal(reasoningKey)
 	}
 	b.markAssistantDeltaRendered(delta)
 	if b.writeDelta != nil {
@@ -4367,23 +4473,44 @@ func (b *chatRuntimeEventBridge) handleAsyncTeamAssistantMessage(event runtimeev
 }
 
 func (b *chatRuntimeEventBridge) renderReasoningFromAssistantMessage(event runtimeevents.Event, block *runtimetypes.ReasoningBlock) {
-	if b == nil || block == nil || b.hasRenderedReasoningFinal() {
+	if b == nil || block == nil {
+		return
+	}
+	key := b.beginReasoningRenderRequest(event)
+	if b.hasRenderedReasoningFinalFor(key) {
 		return
 	}
 	if !chatReasoningOutputEnabled(b.session) {
 		return
 	}
-	if b.hasRenderedReasoningDelta() && !b.hasRenderedReasoningFinal() && b.completeReasoning != nil {
+	if !b.isActiveReasoningRequest(key) {
+		// Scene correction is identity-aware and already applied. The legacy
+		// coordinator exposes only one active band, so a late final for an older
+		// request is acknowledged without touching the current request's band.
+		b.markReasoningFinal(key)
+		return
+	}
+	if b.session != nil && b.session.Interaction != nil && b.session.Interaction.UnifiedRendererEnabled() {
+		// assistant.message was encoded before this compatibility callback. Its
+		// embedded authoritative reasoning snapshot has already replaced and
+		// finalized the existing Scene item in place. Only close coordinator
+		// bookkeeping for a live stream; never replay body/chrome through the
+		// timeline owner.
+		if b.hasRenderedReasoningDeltaFor(key) && b.completeReasoning != nil {
+			_ = b.completeReasoning(block)
+		}
+		b.markReasoningFinal(key)
+		return
+	}
+	if b.hasRenderedReasoningDeltaFor(key) && !b.hasRenderedReasoningFinalFor(key) && b.completeReasoning != nil {
 		if b.completeReasoning(block) {
-			b.renderMu.Lock()
-			b.renderedReasoningFinal = true
-			b.renderMu.Unlock()
+			b.markReasoningFinal(key)
 			return
 		}
 		// completeReasoning 失败（如 reasoning 已提前 reset/flush）：该内容
 		// 已经以流式增量或 flush 完整渲染过，不得再走 timeline 完整渲染
 		// 造成同一 reasoning 双份输出。
-		if b.hasRenderedReasoningDelta() {
+		if b.hasRenderedReasoningDeltaFor(key) {
 			return
 		}
 	}
@@ -4394,9 +4521,7 @@ func (b *chatRuntimeEventBridge) renderReasoningFromAssistantMessage(event runti
 	if b.shouldRenderTimelineEvent(rendered) {
 		b.emitTimelineEvent(rendered)
 	}
-	b.renderMu.Lock()
-	b.renderedReasoningFinal = true
-	b.renderMu.Unlock()
+	b.markReasoningFinal(key)
 }
 
 func (b *chatRuntimeEventBridge) shouldRenderTimelineEvent(rendered chatRuntimeTimelineEvent) bool {
@@ -4895,22 +5020,309 @@ func (b *chatRuntimeEventBridge) HasCommittedExecutorTurnFinal() bool {
 	return committed
 }
 
-func (b *chatRuntimeEventBridge) hasRenderedReasoningDelta() bool {
+// reasoningRenderRequestIdentity joins the event shapes emitted for one model
+// response. Streaming reasoning can be step-scoped while assistant.message can
+// omit step and retain only stream/request or logical-turn identity.
+type reasoningRenderRequestIdentity struct {
+	scopes    []string
+	step      string
+	streamID  string
+	requestID string
+}
+
+func reasoningRenderIdentityFromEvent(event runtimeevents.Event) reasoningRenderRequestIdentity {
+	id := reasoningRenderRequestIdentity{}
+	if event.Payload == nil {
+		return id
+	}
+	id.step = strings.TrimSpace(payloadStringValue(event.Payload["step"]))
+	id.streamID = strings.TrimSpace(payloadStringValue(event.Payload["stream_id"]))
+	id.requestID = strings.TrimSpace(payloadStringValue(event.Payload["llm_request_id"]))
+	for _, raw := range []string{
+		payloadStringValue(event.Payload["turn_id"]),
+		payloadStringValue(event.Payload["logical_turn_id"]),
+		payloadStringValue(event.Payload["trace_id"]),
+		event.TraceID,
+	} {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range id.scopes {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			id.scopes = append(id.scopes, value)
+		}
+	}
+	return id
+}
+
+func (id reasoningRenderRequestIdentity) strongAliases() []string {
+	aliases := make([]string, 0, 2)
+	if id.streamID != "" {
+		aliases = append(aliases, "stream:"+id.streamID)
+	}
+	if id.requestID != "" {
+		aliases = append(aliases, "request:"+id.requestID)
+	}
+	return aliases
+}
+
+func (id reasoningRenderRequestIdentity) stepAliases() []string {
+	if id.step == "" {
+		return nil
+	}
+	aliases := make([]string, 0, len(id.scopes))
+	for _, scope := range id.scopes {
+		aliases = append(aliases, "step:"+scope+"/"+id.step)
+	}
+	return aliases
+}
+
+// beginReasoningRenderRequest returns the canonical compatibility-render key
+// for this exact response. State is retained per request rather than reset when
+// another request appears, so a late event for A cannot reopen or overwrite the
+// live state for B.
+func (b *chatRuntimeEventBridge) beginReasoningRenderRequest(event runtimeevents.Event) string {
 	if b == nil {
+		return ""
+	}
+	id := reasoningRenderIdentityFromEvent(event)
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.reasoningRenderStates == nil {
+		b.reasoningRenderStates = make(map[string]*chatReasoningRenderState)
+	}
+	if b.reasoningRequestAliases == nil {
+		b.reasoningRequestAliases = make(map[string]string)
+	}
+	if b.reasoningLatestByScope == nil {
+		b.reasoningLatestByScope = make(map[string]string)
+	}
+
+	lookup := func(aliases []string) string {
+		for _, alias := range aliases {
+			if key := b.reasoningRequestAliases[alias]; key != "" {
+				return key
+			}
+		}
+		return ""
+	}
+	strongAliases := id.strongAliases()
+	stepAliases := id.stepAliases()
+	strongKey := lookup(strongAliases)
+	stepKey := lookup(stepAliases)
+	hasStrongConflict := func(key string) bool {
+		if key == "" {
+			return false
+		}
+		for alias, mapped := range b.reasoningRequestAliases {
+			if mapped != key {
+				continue
+			}
+			switch {
+			case id.streamID != "" && strings.HasPrefix(alias, "stream:") && alias != "stream:"+id.streamID:
+				return true
+			case id.requestID != "" && strings.HasPrefix(alias, "request:") && alias != "request:"+id.requestID:
+				return true
+			}
+		}
 		return false
+	}
+
+	key := strongKey
+	if key == "" && stepKey != "" {
+		// A fresh transport identity for an already-final step is a retry/new
+		// response, not a continuation of the terminal compatibility stream.
+		if len(strongAliases) > 0 {
+			if prior := b.reasoningRenderStates[stepKey]; hasStrongConflict(stepKey) ||
+				(prior != nil && prior.renderedFinal) {
+				key = strongAliases[0]
+			} else {
+				key = stepKey
+			}
+		} else {
+			key = stepKey
+		}
+	}
+	if key == "" && id.step == "" {
+		for _, scope := range id.scopes {
+			if latest := b.reasoningLatestByScope[scope]; latest != "" {
+				key = latest
+				break
+			}
+		}
+	}
+	if key == "" {
+		switch {
+		case len(stepAliases) > 0:
+			key = stepAliases[0]
+		case len(strongAliases) > 0:
+			key = strongAliases[0]
+		case len(id.scopes) > 0:
+			key = "scope:" + id.scopes[0]
+		default:
+			key = "\x00anonymous-reasoning-request"
+		}
+	}
+
+	state, existed := b.reasoningRenderStates[key]
+	if !existed {
+		state = &chatReasoningRenderState{}
+		b.reasoningRenderStates[key] = state
+	}
+	for _, alias := range strongAliases {
+		if current := b.reasoningRequestAliases[alias]; current == "" || current == key {
+			b.reasoningRequestAliases[alias] = key
+		}
+	}
+	for _, alias := range stepAliases {
+		current := b.reasoningRequestAliases[alias]
+		if current == "" || current == key ||
+			(!existed && (hasStrongConflict(current) ||
+				(b.reasoningRenderStates[current] != nil && b.reasoningRenderStates[current].renderedFinal))) {
+			b.reasoningRequestAliases[alias] = key
+		}
+	}
+
+	// A newly discovered request becomes live. Merely receiving a late event
+	// for an already-known non-active request must not steal the coordinator
+	// stream from the newer active request.
+	if b.activeReasoningRequestKey == "" || !existed {
+		b.activeReasoningRequestKey = key
+	}
+	if b.activeReasoningRequestKey == key {
+		for _, scope := range id.scopes {
+			b.reasoningLatestByScope[scope] = key
+		}
+	}
+	return key
+}
+
+func (b *chatRuntimeEventBridge) reasoningRenderState(key string) (delta, final, active bool) {
+	if b == nil || key == "" {
+		return false, false, false
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	return b.renderedReasoningDelta
+	state := b.reasoningRenderStates[key]
+	if state == nil {
+		return false, false, b.activeReasoningRequestKey == key
+	}
+	return state.renderedDelta, state.renderedFinal, b.activeReasoningRequestKey == key
+}
+
+func (b *chatRuntimeEventBridge) markReasoningDelta(key string) {
+	if b == nil || key == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.reasoningRenderStates == nil {
+		b.reasoningRenderStates = make(map[string]*chatReasoningRenderState)
+	}
+	state := b.reasoningRenderStates[key]
+	if state == nil {
+		state = &chatReasoningRenderState{}
+		b.reasoningRenderStates[key] = state
+	}
+	state.renderedDelta = true
+}
+
+// acceptReasoningAppendSequence is the compatibility-render retransmission and
+// ordering fence. The authoritative encoder independently owns canonical
+// content; this guard prevents the one live terminal band from printing the
+// same request/stream/sequence twice or rendering an out-of-order gap. A final
+// snapshot later reconciles any dropped gap in place.
+func (b *chatRuntimeEventBridge) acceptReasoningAppendSequence(key string, event runtimeevents.Event) bool {
+	if b == nil || key == "" {
+		return false
+	}
+	sequence, hasSequence := assistantEventSequence(event)
+	if !hasSequence || sequence == 0 {
+		return true // legacy events have no transport identity to fence
+	}
+	first := sequence
+	if coalescedFrom, ok := streamCoalescedFrom(event); ok && coalescedFrom > 0 {
+		first = coalescedFrom
+	}
+	if first > sequence {
+		return false
+	}
+
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.reasoningRenderStates == nil {
+		b.reasoningRenderStates = make(map[string]*chatReasoningRenderState)
+	}
+	state := b.reasoningRenderStates[key]
+	if state == nil {
+		state = &chatReasoningRenderState{}
+		b.reasoningRenderStates[key] = state
+	}
+	if state.lastSequence == 0 {
+		if first != 1 {
+			return false
+		}
+	} else if first != state.lastSequence+1 {
+		return false
+	}
+	state.lastSequence = sequence
+	return true
+}
+
+func (b *chatRuntimeEventBridge) markReasoningFinal(key string) {
+	if b == nil || key == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.reasoningRenderStates == nil {
+		b.reasoningRenderStates = make(map[string]*chatReasoningRenderState)
+	}
+	state := b.reasoningRenderStates[key]
+	if state == nil {
+		state = &chatReasoningRenderState{}
+		b.reasoningRenderStates[key] = state
+	}
+	state.renderedFinal = true
+}
+
+func (b *chatRuntimeEventBridge) activeReasoningRenderKey() string {
+	if b == nil {
+		return ""
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.activeReasoningRequestKey
+}
+
+func (b *chatRuntimeEventBridge) hasRenderedReasoningDeltaFor(key string) bool {
+	delta, _, _ := b.reasoningRenderState(key)
+	return delta
+}
+
+func (b *chatRuntimeEventBridge) hasRenderedReasoningFinalFor(key string) bool {
+	_, final, _ := b.reasoningRenderState(key)
+	return final
+}
+
+func (b *chatRuntimeEventBridge) isActiveReasoningRequest(key string) bool {
+	_, _, active := b.reasoningRenderState(key)
+	return active
+}
+
+func (b *chatRuntimeEventBridge) hasRenderedReasoningDelta() bool {
+	return b.hasRenderedReasoningDeltaFor(b.activeReasoningRenderKey())
 }
 
 func (b *chatRuntimeEventBridge) hasRenderedReasoningFinal() bool {
-	if b == nil {
-		return false
-	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	return b.renderedReasoningFinal
+	return b.hasRenderedReasoningFinalFor(b.activeReasoningRenderKey())
 }
 
 func (b *chatRuntimeEventBridge) isPrimarySessionEvent(event runtimeevents.Event) bool {

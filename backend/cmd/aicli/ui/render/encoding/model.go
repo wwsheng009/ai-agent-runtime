@@ -134,9 +134,10 @@ func (m *RenderModel) Clone() *RenderModel {
 type Op int
 
 const (
-	OpAppend Op = iota // 追加新信息块
-	OpUpsert           // 按 ID 更新既有信息块（找不到时编码器退化为 append）
-	OpRemove           // 按 ID 移除
+	OpAppend           Op = iota // 追加新信息块
+	OpUpsert                     // 按 ID 更新既有 mutable 信息块
+	OpCorrectReasoning           // authoritative terminal reasoning 原位修正
+	OpRemove                     // 按 ID 移除
 )
 
 func (o Op) String() string {
@@ -145,6 +146,8 @@ func (o Op) String() string {
 		return "append"
 	case OpUpsert:
 		return "upsert"
+	case OpCorrectReasoning:
+		return "correct_reasoning"
 	case OpRemove:
 		return "remove"
 	default:

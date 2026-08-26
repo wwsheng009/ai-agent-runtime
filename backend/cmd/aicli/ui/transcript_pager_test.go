@@ -40,7 +40,7 @@ func TestTranscriptPagerModel_SeparatesMutableTailFromCommittedCells(t *testing.
 
 func TestTranscriptPagerRowsUseSharedBoundaryPolicy(t *testing.T) {
 	reasoning := committedPagerCell(1, "reasoning")
-	reasoning.Kind = scene.KindSupplement
+	reasoning.Kind = scene.KindReasoning
 	reasoning.BoundaryGroupKey = "request-1"
 	answer := committedPagerCell(2, "answer")
 	answer.BoundaryGroupKey = "request-1"
@@ -59,7 +59,7 @@ func TestTranscriptPagerRowsUseSharedBoundaryPolicy(t *testing.T) {
 
 func TestTranscriptPagerLiveTailRetainsBoundaryMetadata(t *testing.T) {
 	reasoning := committedPagerCell(1, "reasoning")
-	reasoning.Kind = scene.KindSupplement
+	reasoning.Kind = scene.KindReasoning
 	reasoning.BoundaryGroupKey = "request-live"
 	mutable := scene.TranscriptCell{
 		ID: 2, Revision: 3, Kind: scene.KindAssistant, Source: "old partial",

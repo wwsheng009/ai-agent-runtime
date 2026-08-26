@@ -3218,7 +3218,7 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		} else {
 			c.reasoningMeta = ""
 		}
-		if c.shouldLiveStreamOutputLocked() {
+		if !c.unifiedRenderer && c.shouldLiveStreamOutputLocked() {
 			c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("reasoning")))
 			if c.reasoningMeta != "" {
 				c.writeLineLocked(ui.FormatAssistantSupplementBlock(c.reasoningMeta))
@@ -3226,11 +3226,22 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		}
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
-	delta := normalizeAssistantStreamDelta(c.reasoningBuffer.String(), display)
+	delta := display
+	if !c.unifiedRenderer {
+		delta = normalizeAssistantStreamDelta(c.reasoningBuffer.String(), display)
+	}
 	if delta == "" {
 		return
 	}
 	fullContent := c.reasoningBuffer.String() + delta
+	if c.unifiedRenderer {
+		// The runtime event has already advanced the canonical Scene reasoning
+		// item. Keep only lifecycle state and publish that Scene snapshot; the
+		// coordinator must not retain a second copy of provider body bytes or
+		// derive a divider, Markdown mode, or terminal output from them.
+		activeShadowAction = c.unifiedSceneActiveCellActionLocked()
+		return
+	}
 	if c.shouldLiveStreamOutputLocked() {
 		// Markdown reasoning can only be rendered from a complete document;
 		// incremental deltas would leave spans/fences open. Once the content
@@ -3516,6 +3527,14 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 	if !c.reasoningActive {
 		return false
 	}
+	if c.unifiedRenderer {
+		// assistant.message has already replaced/finalized the Scene reasoning
+		// item. The actor fence closes the active projection; resetting local
+		// compatibility state must not write the body or divider again.
+		activeShadowAction = c.finalizeActiveCellShadowActionLocked()
+		c.resetReasoningLocked()
+		return true
+	}
 	finalText := c.reasoningBuffer.String()
 	if block != nil {
 		if display := block.RawDisplayText(); display != "" {
@@ -3657,6 +3676,14 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 		}
 	}()
 	if !c.reasoningActive {
+		return
+	}
+	if c.unifiedRenderer {
+		// The encoder has already finalized the semantic item. Mirror the
+		// assistant path: emit only the active-cell fence and discard local
+		// compatibility state, with no legacy terminal replay.
+		activeShadowAction = c.finalizeActiveCellShadowActionLocked()
+		c.resetReasoningLocked()
 		return
 	}
 	if c.shouldLiveStreamOutputLocked() {

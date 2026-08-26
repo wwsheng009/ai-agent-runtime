@@ -312,9 +312,64 @@ func TestChatRuntimeEventBridge_ReActToolBoundaryFinalizesReasoningOnlyStep(t *t
 	}
 
 	cells := bridgeSceneCells(t, bridge)
-	if len(cells) != 2 || cells[0].Kind != scene.KindSupplement ||
+	if len(cells) != 2 || cells[0].Kind != scene.KindReasoning ||
 		cells[0].Phase != scene.CellCommitted || !strings.Contains(cells[0].Source, "inspect before tool") ||
 		cells[1].Kind != scene.KindToolChain || cells[1].Phase != scene.CellMutable {
 		t.Fatalf("reasoning-only tool boundary scene = %+v, want committed reasoning followed by mutable tool", cells)
+	}
+}
+
+func TestChatRuntimeEventBridge_AssistantFinalCorrectsCommittedReasoningInPlace(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	const traceID = "trace-reasoning-correction"
+	payload := func() map[string]interface{} {
+		return map[string]interface{}{
+			"trace_id": traceID, "turn_id": "turn-reasoning-correction",
+			"stream_id": "stream-reasoning-correction", "step": 1,
+		}
+	}
+	reasoningDelta := payload()
+	reasoningDelta["sequence"] = uint64(1)
+	reasoningDelta["mode"] = "append"
+	reasoningDelta["text"] = "streamed partial"
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantReasoning, TraceID: traceID, Payload: reasoningDelta,
+	})
+	assistantDelta := payload()
+	assistantDelta["sequence"] = uint64(1)
+	assistantDelta["delta"] = "answer"
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantDelta, TraceID: traceID, Payload: assistantDelta,
+	})
+
+	before := bridgeSceneCells(t, bridge)
+	if len(before) != 2 || before[0].Kind != scene.KindReasoning ||
+		before[0].Phase != scene.CellCommitted || before[0].Source != "streamed partial" {
+		t.Fatalf("scene before authoritative final = %+v", before)
+	}
+	reasoningID := before[0].ID
+
+	final := payload()
+	final["content"] = "answer"
+	final["mode"] = "snapshot"
+	final["reasoning"] = map[string]interface{}{
+		"format": "summary", "summary": "authoritative full reasoning",
+	}
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantMessage, TraceID: traceID, Payload: final,
+	})
+
+	after := bridgeSceneCells(t, bridge)
+	if len(after) != 2 || after[0].ID != reasoningID ||
+		after[0].Kind != scene.KindReasoning || after[0].Phase != scene.CellCommitted ||
+		after[0].Source != "authoritative full reasoning" {
+		t.Fatalf(
+			"corrected reasoning = %+v scene=%#v (apply failures=%d last=%q), want same committed cell with authoritative source",
+			after[0], after, bridge.sceneApplyFailures, bridge.sceneLastError,
+		)
+	}
+	if after[1].Kind != scene.KindAssistant || after[1].Phase != scene.CellCommitted ||
+		!strings.Contains(after[1].Source, "answer") {
+		t.Fatalf("assistant final rolled back with reasoning correction: %+v", after[1])
 	}
 }

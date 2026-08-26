@@ -304,7 +304,7 @@ func TestRenderReasoningDeltaMirrorsAndClearsShadowActiveCell(t *testing.T) {
 	if !actor.Post(ui.SetActiveCellAction{Active: ui.ActiveCellState{
 		CellID:   21,
 		Revision: 5,
-		Kind:     scene.KindSupplement,
+		Kind:     scene.KindReasoning,
 		Phase:    ui.ActiveCellMutable,
 	}}) {
 		t.Fatal("post reasoning active mount")
@@ -318,7 +318,7 @@ func TestRenderReasoningDeltaMirrorsAndClearsShadowActiveCell(t *testing.T) {
 	})
 	coordinator.waitUIActorIdle()
 	active := actor.AppState().Active
-	if active.CellID != 21 || active.Kind != scene.KindSupplement || active.Source != "reasoning source" {
+	if active.CellID != 21 || active.Kind != scene.KindReasoning || active.Source != "reasoning source" {
 		t.Fatalf("reasoning shadow active = %+v", active)
 	}
 	if active.Acked.End != 0 || active.Enqueued.End != 0 {

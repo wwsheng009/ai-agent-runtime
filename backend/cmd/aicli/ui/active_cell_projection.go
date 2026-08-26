@@ -117,19 +117,17 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 	}
 	highlighter := newActiveBandHighlighter()
 	var lines []render.Line
-	// reasoning（KindSupplement）且正文命中 markdown 启发式时，live band 必须
-	// 走与 handoff planner、提交后 scene（reasoningSupplementScreenRows）完全
-	// 相同的"分隔线拆分"投影：divider 独立成 reasoning 角色行、正文单独过
-	// markdown。若像 assistant 一样把整份 source（含 divider）丢进 markdown
-	// 文档渲染，divider 会作为段落参与排版，正文前导换行会在 divider 后产生
-	// 一行"幽灵空行"；提交后该空行消失，帧间出现换行/空行的视觉跳动
-	// （INV-REASON-DIVIDER-02）。
-	reasoningSupplement := active.Kind == scene.KindSupplement && supplementBodyLooksLikeMarkdown(active.Source)
-	markdownSource := (active.Kind == scene.KindAssistant || reasoningSupplement) && markdown.LooksLikeMarkdown(active.Source)
-	if markdownSource {
+	// Reasoning owns a semantic kind and body-only source. Its divider is
+	// derived here, using the same projection as committed transcript rows.
+	// This keeps live/final rows identical without putting chrome into source
+	// offsets or asking Markdown to interpret the divider as body text.
+	reasoning := active.Kind == scene.KindReasoning
+	markdownSource := active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source)
+	structuredSource := reasoning || markdownSource
+	if structuredSource {
 		var projected bool
-		if reasoningSupplement {
-			lines, projected = activeReasoningMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
+		if reasoning {
+			lines, projected = activeReasoningSuffixLines(active.Source, start, width, theme, highlighter)
 		} else {
 			lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
 		}
@@ -137,14 +135,14 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 			// A changed block context must never downgrade the live viewport to
 			// raw Markdown. Keep a rich full-source tail visible while the effect
 			// lifecycle takes the conservative recovery path.
-			if reasoningSupplement {
-				lines = activeReasoningMarkdownBandLines(active.Source, width, theme, highlighter)
+			if reasoning {
+				lines = activeReasoningBandLines(active.Source, width, theme, highlighter)
 			} else {
 				lines = activeMarkdownBandLines(markdown.Render(active.Source, activeBandMarkdownOptions(width, theme, highlighter)))
 			}
 		}
 	}
-	if len(lines) == 0 && !markdownSource {
+	if len(lines) == 0 && !structuredSource {
 		rows := activeCellBandRows(active.Source[start:], width)
 		role := appTranscriptRenderRole(active.Kind)
 		lines = make([]render.Line, 0, len(rows))
@@ -199,58 +197,41 @@ func activeMarkdownSuffixLines(source string, start, width int, theme style.Them
 	return cloneRenderLines(full[len(prefix):]), true
 }
 
-// activeReasoningMarkdownSuffixLines is the reasoning (KindSupplement)
-// counterpart of activeMarkdownSuffixLines. It renders the supplement the
-// same way the finalized commit does — divider lines as their own
-// reasoning-styled rows, body through the markdown pipeline — so the mutable
-// handoff rows are byte- and style-identical to the finalize commit. Routing
-// reasoning through the plain assistant path used to hand off raw markdown
-// source rows ("- `x`") while finalize committed formatted rows ("• x"),
-// making the acked-prefix matcher fail and re-committing the whole cell.
-func activeReasoningMarkdownSuffixLines(source string, start, width int, theme style.ThemeContext, highlighter syntax.Highlighter) ([]render.Line, bool) {
+// activeReasoningSuffixLines is the reasoning counterpart of the assistant
+// suffix projector. Both live and finalized reasoning use the same literal
+// source-line projection, including derived opening chrome, so an acknowledged
+// prefix cannot make finalization replay the complete body.
+func activeReasoningSuffixLines(source string, start, width int, theme style.ThemeContext, highlighter syntax.Highlighter) ([]render.Line, bool) {
 	if start < 0 || start > len(source) || !activeCellSourceBoundary(source, start) {
 		return nil, false
 	}
-	full := activeReasoningMarkdownBandLines(source, width, theme, highlighter)
+	full := activeReasoningBandLines(source, width, theme, highlighter)
 	if start == 0 {
 		return full, true
 	}
-	prefix := activeReasoningMarkdownBandLines(source[:start], width, theme, highlighter)
+	prefix := activeReasoningBandLines(source[:start], width, theme, highlighter)
+	prefix = trimReasoningContinuationCursor(prefix, source[:start], start < len(source))
 	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
 		return nil, false
 	}
 	return cloneRenderLines(full[len(prefix):]), true
 }
 
-// activeReasoningMarkdownBandLines renders a reasoning supplement source the
-// same way reasoningSupplementScreenRows does: leading/trailing divider rows
-// get the reasoning role, the body goes through the markdown pipeline.
-func activeReasoningMarkdownBandLines(source string, width int, theme style.ThemeContext, highlighter syntax.Highlighter) []render.Line {
-	head, body, tail := splitReasoningSupplementSource(source)
-	var lines []render.Line
-	if head != "" {
-		lines = append(lines, reasoningDividerBandLines(head, width)...)
+// A prefix ending at '\n' has a cursor row that is not yet a provider-owned
+// blank line when more source follows. Exclude only that transient last row
+// from handoff comparison; two newlines still retain one real blank row.
+func trimReasoningContinuationCursor(lines []render.Line, prefix string, continues bool) []render.Line {
+	if !continues || !strings.HasSuffix(prefix, "\n") || len(lines) == 0 {
+		return lines
 	}
-	if strings.TrimSpace(body) != "" {
-		lines = append(lines, activeMarkdownBandLines(markdown.Render(body, activeBandMarkdownOptions(width, theme, highlighter)))...)
-	}
-	if tail != "" {
-		lines = append(lines, reasoningDividerBandLines(tail, width)...)
-	}
-	return lines
+	return lines[:len(lines)-1]
 }
 
-// reasoningDividerBandLines wraps a supplement divider line into
-// reasoning-styled rows, mirroring supplementDividerScreenRows.
-func reasoningDividerBandLines(text string, width int) []render.Line {
-	segments := wrapAppScreenText(text, width)
-	lines := make([]render.Line, 0, len(segments))
-	for _, segment := range segments {
-		lines = append(lines, render.Line{Spans: []render.Span{{
-			Text: segment, Style: render.Style{Role: string(style.RoleReasoning)},
-		}}})
-	}
-	return lines
+// activeReasoningBandLines deliberately ignores Markdown presentation hints.
+// Reasoning is provider prose: preserve every logical newline and only apply
+// terminal-width wrapping. The closing divider appears only after finalization.
+func activeReasoningBandLines(source string, width int, _ style.ThemeContext, _ syntax.Highlighter) []render.Line {
+	return reasoningProjectionLines(source, width, false)
 }
 
 func activeMarkdownBandLines(doc render.Document) []render.Line {
@@ -274,7 +255,7 @@ func activeCellSourceBoundary(source string, offset int) bool {
 }
 
 // suffixProjector memoizes the expensive pieces of activeMarkdownSuffixLines /
-// activeReasoningMarkdownSuffixLines across the many suffix queries one
+// activeReasoningSuffixLines across the many suffix queries one
 // handoff-planning pass makes. The prefix rendering (source[:start]) is
 // identical for every query, and the full-source render (live) is queried at
 // most once, so without memoization planning N handoff rows re-renders the
@@ -307,11 +288,10 @@ func newSuffixProjector(source string, start, width int, theme style.ThemeContex
 	return &suffixProjector{source: source, start: start, width: width, theme: theme, reasoning: reasoning, highlighter: highlighter}
 }
 
-// band renders one source span the same way the finalized commit does:
-// reasoning supplements split divider rows from the markdown body.
+// band renders one source span the same way the finalized commit does.
 func (p *suffixProjector) band(source string) []render.Line {
 	if p.reasoning {
-		return activeReasoningMarkdownBandLines(source, p.width, p.theme, p.highlighter)
+		return activeReasoningBandLines(source, p.width, p.theme, p.highlighter)
 	}
 	return activeMarkdownBandLines(markdown.Render(source, activeBandMarkdownOptions(p.width, p.theme, p.highlighter)))
 }
@@ -321,6 +301,11 @@ func (p *suffixProjector) prefix() []render.Line {
 	p.prefixOnce.Do(func() {
 		if p.start > 0 {
 			p.prefixLines = p.band(p.source[:p.start])
+			if p.reasoning {
+				p.prefixLines = trimReasoningContinuationCursor(
+					p.prefixLines, p.source[:p.start], p.start < len(p.source),
+				)
+			}
 		}
 	})
 	return p.prefixLines
@@ -342,6 +327,9 @@ func (p *suffixProjector) suffix(end int) ([]render.Line, bool) {
 		return nil, false
 	}
 	full := p.band(p.source[:end])
+	if p.reasoning {
+		full = trimReasoningContinuationCursor(full, p.source[:end], end < len(p.source))
+	}
 	prefix := p.prefix()
 	if len(prefix) > len(full) || !render.LinesEqual(prefix, full[:len(prefix)]) {
 		p.lastEnd, p.lastLines, p.lastOK = end, nil, false

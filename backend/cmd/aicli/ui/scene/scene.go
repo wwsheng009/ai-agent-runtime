@@ -37,7 +37,8 @@ const (
 	KindAssistant                    // assistant 消息
 	KindToolChain                    // tool chain（含并行工具归组）
 	KindRuntimeEvent                 // runtime event（async 诊断/事件）
-	KindSupplement                   // supplement/reasoning（属 assistant cell）
+	KindSupplement                   // ordinary assistant supplement
+	KindReasoning                    // reasoning semantic body; divider is derived chrome
 	KindSystem                       // system/notice/warning
 	KindCommand                      // command result
 	KindDiagnostic                   // 显式允许进入交互 transcript 的诊断
@@ -55,6 +56,8 @@ func (k CellKind) String() string {
 		return "runtime_event"
 	case KindSupplement:
 		return "supplement"
+	case KindReasoning:
+		return "reasoning"
 	case KindSystem:
 		return "system"
 	case KindCommand:
@@ -152,7 +155,7 @@ func (c *TranscriptCell) BoundaryMeta() boundary.CellMeta {
 	switch c.Kind {
 	case KindUser:
 		kind = boundary.KindUser
-	case KindAssistant, KindSupplement:
+	case KindAssistant, KindSupplement, KindReasoning:
 		kind = boundary.KindAssistant
 	case KindToolChain:
 		kind = boundary.KindTool
@@ -353,6 +356,19 @@ type FinalizeCell struct {
 	BoundaryGroupKey     string
 }
 
+// CorrectCommittedReasoningCell applies an authoritative final snapshot to the
+// same already-committed reasoning cell. This is deliberately narrower than a
+// general committed-cell update: provider reasoning may be closed when
+// assistant streaming begins, while assistant.message later carries the
+// canonical full snapshot. Identity, order, phase and FinalizedAt stay stable.
+type CorrectCommittedReasoningCell struct {
+	ID               CellID
+	Revision         uint64
+	Source           string
+	Presentation     TranscriptPresentation
+	BoundaryGroupKey string
+}
+
 // RemoveMutableCell 按 ID 移除 mutable cell（unified plan §6.1）。
 type RemoveMutableCell struct {
 	ID       CellID
@@ -380,6 +396,8 @@ func (s *TuiScene) ApplyCellMutation(m CellMutation) (*TranscriptCell, error) {
 		cell, err = s.update(m)
 	case *FinalizeCell:
 		cell, err = s.finalize(m)
+	case *CorrectCommittedReasoningCell:
+		cell, err = s.correctCommittedReasoning(m)
 	case *RemoveMutableCell:
 		cell, err = s.remove(m)
 	default:
@@ -577,6 +595,38 @@ func (s *TuiScene) finalize(m *FinalizeCell) (*TranscriptCell, error) {
 	nc.Phase = CellCommitted
 	now := time.Now().UTC()
 	nc.FinalizedAt = &now
+	s.replaceCell(&nc)
+	cp := cloneCell(nc)
+	return &cp, nil
+}
+
+func (s *TuiScene) correctCommittedReasoning(m *CorrectCommittedReasoningCell) (*TranscriptCell, error) {
+	if m == nil {
+		return nil, fmt.Errorf("nil committed reasoning correction")
+	}
+	c, ok := s.byID[m.ID]
+	if !ok {
+		return nil, fmt.Errorf("correct reasoning: unknown cell %d", m.ID)
+	}
+	if c.Kind != KindReasoning || c.Phase != CellCommitted {
+		return nil, fmt.Errorf(
+			"correct reasoning: cell %d must be committed reasoning (kind %v phase %v)",
+			m.ID, c.Kind, c.Phase)
+	}
+	if m.Revision <= c.Revision {
+		return nil, fmt.Errorf("correct reasoning: stale revision %d <= %d (INV-SCENE-03)", m.Revision, c.Revision)
+	}
+	if c.BoundaryGroupKey == "" || m.BoundaryGroupKey == "" ||
+		c.BoundaryGroupKey != m.BoundaryGroupKey {
+		return nil, fmt.Errorf(
+			"correct reasoning: cell %d request identity mismatch (current %q, incoming %q)",
+			m.ID, c.BoundaryGroupKey, m.BoundaryGroupKey)
+	}
+	nc := *c
+	nc.Source = m.Source
+	nc.Presentation = m.Presentation.Clone()
+	nc.BoundaryGroupKey = m.BoundaryGroupKey
+	nc.Revision = m.Revision
 	s.replaceCell(&nc)
 	cp := cloneCell(nc)
 	return &cp, nil

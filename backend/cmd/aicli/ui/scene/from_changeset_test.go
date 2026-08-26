@@ -52,6 +52,72 @@ func TestCellIDFromItemID(t *testing.T) {
 	}
 }
 
+func TestMapperCorrectsCommittedReasoningFromAuthoritativeSnapshot(t *testing.T) {
+	s := New()
+	m := NewChangeSetMapper(s)
+	const requestKey = "stream:reasoning-correction"
+	running := mkItem(encoding.KindReasoning, "item-1", "", encoding.StatusRunning, "streamed")
+	running.BoundaryGroupKey = requestKey
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		mkChange(encoding.OpAppend, running, 1),
+	}}); err != nil {
+		t.Fatalf("append reasoning: %v", err)
+	}
+	completed := mkItem(encoding.KindReasoning, "item-1", "", encoding.StatusCompleted, "streamed")
+	completed.BoundaryGroupKey = requestKey
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		mkChange(encoding.OpUpsert, completed, 2),
+	}}); err != nil {
+		t.Fatalf("finalize reasoning: %v", err)
+	}
+	before, _ := s.Cell(1)
+	if before == nil || before.Phase != CellCommitted || before.FinalizedAt == nil {
+		t.Fatalf("reasoning before correction = %+v", before)
+	}
+	finalizedAt := *before.FinalizedAt
+
+	wrongRequest := mkItem(encoding.KindReasoning, "item-1", "", encoding.StatusCompleted, "wrong request")
+	wrongRequest.BoundaryGroupKey = "stream:other"
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		mkChange(encoding.OpCorrectReasoning, wrongRequest, 3),
+	}}); err == nil {
+		t.Fatal("cross-request committed reasoning correction unexpectedly accepted")
+	}
+
+	corrected := mkItem(encoding.KindReasoning, "item-1", "", encoding.StatusCompleted, "authoritative")
+	corrected.BoundaryGroupKey = requestKey
+	tx, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		mkChange(encoding.OpCorrectReasoning, corrected, 3),
+	}})
+	if err != nil {
+		t.Fatalf("correct committed reasoning: %v", err)
+	}
+	if len(tx.Mutations) != 1 {
+		t.Fatalf("correction mutations = %d, want one", len(tx.Mutations))
+	}
+	if _, ok := tx.Mutations[0].(*CorrectCommittedReasoningCell); !ok {
+		t.Fatalf("correction mutation = %T, want *CorrectCommittedReasoningCell", tx.Mutations[0])
+	}
+	after, _ := s.Cell(1)
+	if after == nil || after.ID != before.ID || after.Source != "authoritative" ||
+		after.Phase != CellCommitted || after.FinalizedAt == nil || !after.FinalizedAt.Equal(finalizedAt) {
+		t.Fatalf("reasoning after correction = %+v, want same committed identity/finalization", after)
+	}
+
+	assistant := mkItem(encoding.KindAssistant, "item-2", "", encoding.StatusCompleted, "answer")
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		mkChange(encoding.OpAppend, assistant, 4),
+	}}); err != nil {
+		t.Fatalf("append committed assistant: %v", err)
+	}
+	assistant.Head = "different"
+	if _, _, err := m.Apply(&encoding.ChangeSet{Changes: []encoding.ItemChange{
+		mkChange(encoding.OpUpsert, assistant, 5),
+	}}); err == nil {
+		t.Fatal("general committed assistant correction unexpectedly accepted")
+	}
+}
+
 func TestMapBasicKinds(t *testing.T) {
 	// 每个 top-level kind 的 append 映射（§5 表格）。
 	kinds := []struct {
@@ -60,7 +126,7 @@ func TestMapBasicKinds(t *testing.T) {
 	}{
 		{encoding.KindUser, KindUser},
 		{encoding.KindAssistant, KindAssistant},
-		{encoding.KindReasoning, KindSupplement},
+		{encoding.KindReasoning, KindReasoning},
 		{encoding.KindSupplement, KindSupplement},
 		{encoding.KindCommand, KindCommand},
 		{encoding.KindSystem, KindSystem},

@@ -393,8 +393,14 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 		config.Metadata["reasoning_effort"] = requestReasoningEffort
 	}
 	if session.RuntimeSession != nil && strings.TrimSpace(session.RuntimeSession.ID) != "" {
-		config.Metadata["prompt_cache_key"] = strings.TrimSpace(session.RuntimeSession.ID)
-		config.Metadata["session_id"] = strings.TrimSpace(session.RuntimeSession.ID)
+		sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+		// Derive the cache key from the durable prompt-cache generation the
+		// session maintains: append-only turns keep the bare session key, any
+		// history rewrite (compact / restore / rollback) moves the request to
+		// the next "sessionID#prompt-cache-epoch-N" generation so the provider
+		// never associates a rewritten prefix with the previous cache.
+		config.Metadata["prompt_cache_key"] = sharedChatPromptCacheKeyForEpoch(sessionID, chatSessionPromptCacheEpoch(session))
+		config.Metadata["session_id"] = sessionID
 	}
 	if outputDir := currentGeneratedImageArtifactDir(session); strings.TrimSpace(outputDir) != "" {
 		config.Metadata[runtimellm.MetadataKeyGeneratedImageOutputDir] = outputDir

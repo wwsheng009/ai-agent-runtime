@@ -293,43 +293,20 @@ func cellUsesStructuredPresentation(cell scene.TranscriptCell) bool {
 	if cell.Presentation.Kind != scene.PresentationPlain {
 		return true
 	}
+	if cell.Kind == scene.KindReasoning {
+		// Reasoning is always a structured projection because its opening and
+		// terminal dividers are derived chrome, not bytes in cell.Source.
+		return true
+	}
 	if cell.Kind == scene.KindSupplement {
-		// reasoning / priority prompt 等补充块：编码器已打 markdown
-		// presentation 标记时走结构化渲染；旧快照（无标记）按正文启发式兜底。
-		return supplementBodyLooksLikeMarkdown(cell.Source)
+		return markdown.LooksLikeMarkdown(cell.Source)
 	}
 	return cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source)
 }
 
-// splitReasoningSupplementSource 把 reasoning supplement 的 Source 拆分为
-// 首分隔线、正文、尾分隔线。非 reasoning 的 supplement（如 priority
-// prompt）没有分隔线，整体作为正文返回。
-func splitReasoningSupplementSource(source string) (head, body, tail string) {
-	lines := strings.Split(source, "\n")
-	if len(lines) == 0 {
-		return "", source, ""
-	}
-	if isAssistantSupplementDivider(strings.TrimSpace(lines[0])) {
-		head = lines[0]
-		lines = lines[1:]
-	}
-	if len(lines) > 0 && isAssistantSupplementDivider(strings.TrimSpace(lines[len(lines)-1])) {
-		tail = lines[len(lines)-1]
-		lines = lines[:len(lines)-1]
-	}
-	return head, strings.Join(lines, "\n"), tail
-}
-
-// supplementBodyLooksLikeMarkdown 对 supplement 去分隔线后的正文做 markdown
-// 启发式检测（分隔线行本身不匹配任何 markdown 模式）。
-func supplementBodyLooksLikeMarkdown(source string) bool {
-	_, body, _ := splitReasoningSupplementSource(source)
-	return markdown.LooksLikeMarkdown(body)
-}
-
 func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {
-	if cell.Kind == scene.KindSupplement {
-		return reasoningSupplementScreenRows(cell, width, theme)
+	if cell.Kind == scene.KindReasoning {
+		return reasoningScreenRows(cell, width, theme)
 	}
 	var doc render.Document
 	switch cell.Presentation.Kind {
@@ -366,51 +343,90 @@ func documentScreenRows(doc render.Document, cell scene.TranscriptCell, width in
 	return rows
 }
 
-// reasoningSupplementScreenRows 渲染 reasoning supplement cell：首/尾分隔线
-// 单独保留 reasoning 样式，正文按 markdown 启发式走结构化渲染（与 assistant
-// 正文同规格）或纯文本。非 reasoning 的 supplement（如 priority prompt）
-// 无分隔线，整体按正文渲染。
-func reasoningSupplementScreenRows(cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {
-	head, body, tail := splitReasoningSupplementSource(cell.Source)
-	var rows []AppScreenRow
-	if head != "" {
-		rows = append(rows, supplementDividerScreenRows(head, cell.ID, width)...)
-	}
-	if strings.TrimSpace(body) != "" {
-		var doc render.Document
-		if markdown.LooksLikeMarkdown(body) {
-			doc, _ = renderengine.SharedRenderCache().Render("assistant", body, markdown.AssistantBodyOptions(width, theme))
-		} else {
-			doc = markdown.Render(body, markdown.AssistantBodyOptions(width, theme))
+// reasoningScreenRows derives presentation chrome from semantic kind/lifecycle.
+// cell.Source is always the provider body verbatim: no divider, wrapping, trim,
+// Markdown normalization, or inferred whitespace is persisted back into it.
+func reasoningScreenRows(cell scene.TranscriptCell, width int, _ style.ThemeContext) []AppScreenRow {
+	return reasoningProjectionScreenRows(
+		reasoningProjectionLines(cell.Source, width, cell.Phase != scene.CellMutable),
+		cell.ID,
+	)
+}
+
+// reasoningProjectionLines is the single live/committed reasoning projector.
+// Provider newlines define logical rows; terminal width only creates visual
+// wraps. In particular, markdown-looking reasoning remains literal so a parser
+// cannot collapse leading, interior, or trailing provider-owned blank lines.
+func reasoningProjectionLines(source string, width int, terminal bool) []render.Line {
+	lines := reasoningDividerBandLines(reasoningChromeLine("reasoning"), width)
+	if source != "" {
+		bodyRows := activeCellBandRows(source, width)
+		if terminal && strings.HasSuffix(source, "\n") && len(bodyRows) > 0 {
+			// The last split row represents the cursor position created by the
+			// final LF, not an additional provider-owned blank line. The closing
+			// divider occupies that row. With N trailing LFs this removes only
+			// the cursor row and preserves the preceding N-1 real blank rows.
+			bodyRows = bodyRows[:len(bodyRows)-1]
 		}
-		doc = doc.Clone()
-		rows = append(rows, documentScreenRows(doc, cell, width, theme)...)
+		for _, text := range bodyRows {
+			lines = append(lines, render.Line{Spans: []render.Span{{
+				Text: text, Style: render.Style{Role: string(style.RoleReasoning)},
+			}}})
+		}
 	}
-	if tail != "" {
-		rows = append(rows, supplementDividerScreenRows(tail, cell.ID, width)...)
+	if terminal {
+		lines = append(lines, reasoningDividerBandLines(reasoningChromeLine("end reasoning"), width)...)
+	}
+	return lines
+}
+
+func reasoningProjectionScreenRows(lines []render.Line, cellID scene.CellID) []AppScreenRow {
+	rows := make([]AppScreenRow, 0, len(lines))
+	for _, line := range lines {
+		rendered := cloneAppRenderLine(line)
+		rows = append(rows, AppScreenRow{
+			Owner:  renderengine.RowOwnerTranscript,
+			Text:   render.PlainBackend{}.Render(render.LinesDoc(rendered)),
+			CellID: cellID, RenderLine: rendered,
+		})
 	}
 	return rows
+}
+
+// reasoningChromeLine matches the legacy 72-column chat divider while keeping
+// that decoration wholly inside the presentation layer.
+func reasoningChromeLine(label string) string {
+	const width = 72
+	content := " " + label + " "
+	contentWidth := len([]rune(content))
+	left := (width - contentWidth) / 2
+	if left < 0 {
+		left = 0
+	}
+	right := width - contentWidth - left
+	if right < 0 {
+		right = 0
+	}
+	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
 }
 
 // supplementDividerScreenRows 把 supplement 分隔线按 width wrap 成带
 // reasoning 角色的结构化行（对齐旧版 dividerRoleForLine 的 reasoning 分支）。
 func supplementDividerScreenRows(text string, cellID scene.CellID, width int) []AppScreenRow {
-	if width < 1 {
-		width = 80
-	}
+	return reasoningProjectionScreenRows(reasoningDividerBandLines(text, width), cellID)
+}
+
+// reasoningDividerBandLines wraps derived chrome using the same VT width model
+// as body rows and assigns the reasoning role without adding source bytes.
+func reasoningDividerBandLines(text string, width int) []render.Line {
 	segments := wrapAppScreenText(text, width)
-	rows := make([]AppScreenRow, 0, len(segments))
+	lines := make([]render.Line, 0, len(segments))
 	for _, segment := range segments {
-		line := render.Line{Spans: []render.Span{{
-			Text:  segment,
-			Style: render.Style{Role: string(style.RoleReasoning)},
-		}}}
-		rows = append(rows, AppScreenRow{
-			Owner: renderengine.RowOwnerTranscript, Text: segment,
-			CellID: cellID, RenderLine: line,
-		})
+		lines = append(lines, render.Line{Spans: []render.Span{{
+			Text: segment, Style: render.Style{Role: string(style.RoleReasoning)},
+		}}})
 	}
-	return rows
+	return lines
 }
 
 // wrapAppScreenText expands one semantic source line with the same pure VT

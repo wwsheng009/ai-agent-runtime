@@ -55,8 +55,8 @@ func TestChatRuntimeEventBridge_WhitespaceAssistantBeforeToolBoundaryDropped(t *
 		}
 		t.Fatalf("scene cells=%d, want [reasoning, toolchain]", len(cells))
 	}
-	if cells[0].Kind != scene.KindSupplement || cells[1].Kind != scene.KindToolChain {
-		t.Fatalf("scene kinds=%s,%s want supplement,toolchain", cells[0].Kind, cells[1].Kind)
+	if cells[0].Kind != scene.KindReasoning || cells[1].Kind != scene.KindToolChain {
+		t.Fatalf("scene kinds=%s,%s want reasoning,toolchain", cells[0].Kind, cells[1].Kind)
 	}
 	for i, c := range cells {
 		trimmed := strings.TrimSpace(c.Source)
@@ -65,8 +65,11 @@ func TestChatRuntimeEventBridge_WhitespaceAssistantBeforeToolBoundaryDropped(t *
 				i, c.Kind, c.Phase, c.Source)
 		}
 	}
-	if !strings.Contains(cells[0].Source, chatToolDivider("end reasoning")) {
-		t.Fatalf("reasoning cell missing end divider: %q", cells[0].Source)
+	if cells[0].Source != "inspect before tool" {
+		t.Fatalf("reasoning source=%q, want provider body only", cells[0].Source)
+	}
+	if strings.Contains(cells[0].Source, " reasoning ") || strings.Contains(cells[0].Source, " end reasoning ") {
+		t.Fatalf("reasoning source contains presentation chrome: %q", cells[0].Source)
 	}
 	if !strings.Contains(cells[1].Source, "Completed grep") || !strings.Contains(cells[1].Source, "config.yaml:465") {
 		t.Fatalf("tool cell missing completion/output: %q", cells[1].Source)
@@ -190,7 +193,7 @@ func TestChatRuntimeEventBridge_SameRequestReasoningAssistantLayoutIsDense(t *te
 	})
 
 	cells := bridgeSceneCells(t, bridge)
-	if len(cells) != 2 || cells[0].Kind != scene.KindSupplement || cells[1].Kind != scene.KindAssistant {
+	if len(cells) != 2 || cells[0].Kind != scene.KindReasoning || cells[1].Kind != scene.KindAssistant {
 		t.Fatalf("scene cells = %+v, want reasoning then assistant", cells)
 	}
 	if cells[0].BoundaryGroupKey == "" || cells[0].BoundaryGroupKey != cells[1].BoundaryGroupKey {

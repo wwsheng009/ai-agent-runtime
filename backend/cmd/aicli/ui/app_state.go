@@ -2,7 +2,6 @@ package ui
 
 import (
 	"reflect"
-	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
@@ -293,7 +292,7 @@ func activeCellFromTranscriptCell(cell *scene.TranscriptCell) (ActiveCellState, 
 	}
 	// Skip the empty reasoning placeholder used as a native-history ordering
 	// fence; it is not the mutable body shown in the active band.
-	if cell.Kind == scene.KindSupplement && strings.TrimSpace(cell.Source) == "" {
+	if cell.Kind == scene.KindReasoning && cell.Source == "" {
 		return ActiveCellState{}, false
 	}
 	return ActiveCellState{

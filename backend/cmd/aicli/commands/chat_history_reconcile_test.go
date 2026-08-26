@@ -50,13 +50,14 @@ func TestSeedPersistedHistoryGroupsReasoningAndAssistantByExactRequest(t *testin
 	}
 }
 
-// resume 种子路径必须与 live 路径一样保留 reasoning 分隔线：否则恢复会话后
-// 推理正文会退化为普通 supplement 文本，丢失 "…… reasoning ……" 开头线与
-// "…… end reasoning ……" 结束线。
-func TestSeedPersistedHistoryRendersReasoningDividers(t *testing.T) {
+// resume 种子路径必须与 live 路径一样重建 KindReasoning，但 Scene 只保存
+// provider 正文。分隔线由 ui 的 reasoning presentation 测试覆盖；若在此处
+// 写入 chrome，source identity 会在恢复、active handoff 和最终提交之间漂移。
+func TestSeedPersistedHistoryKeepsSemanticReasoningCell(t *testing.T) {
+	const body = "先确认状态，再检查渲染路径。"
 	assistant := runtimetypes.NewAssistantMessage("persisted answer")
 	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
-		Summary: "先确认状态，再检查渲染路径。", Visibility: runtimetypes.ReasoningVisibilitySummary,
+		Summary: body, Visibility: runtimetypes.ReasoningVisibilitySummary,
 	})
 	messages := []runtimetypes.Message{*assistant}
 
@@ -66,17 +67,15 @@ func TestSeedPersistedHistoryRendersReasoningDividers(t *testing.T) {
 	if snapshot == nil || len(snapshot.Cells) != 2 {
 		t.Fatalf("seeded Scene = %+v, want reasoning and assistant", snapshot)
 	}
-	startSeen, endSeen := false, false
-	for _, row := range scene.LayoutTranscript(snapshot.Cells, 1) {
-		if strings.Contains(row.Text, " reasoning ") {
-			startSeen = true
-		}
-		if strings.Contains(row.Text, " end reasoning ") {
-			endSeen = true
-		}
+	reasoning := snapshot.Cells[0]
+	if reasoning.Kind != scene.KindReasoning || reasoning.Phase != scene.CellCommitted {
+		t.Fatalf("seeded reasoning lifecycle = %+v, want committed KindReasoning", reasoning)
 	}
-	if !startSeen || !endSeen {
-		t.Fatalf("seeded reasoning lost dividers (start=%v end=%v): %+v", startSeen, endSeen, snapshot.Cells)
+	if reasoning.Source != body {
+		t.Fatalf("seeded reasoning source = %q, want provider body %q", reasoning.Source, body)
+	}
+	if strings.Contains(reasoning.Source, " reasoning ") || strings.Contains(reasoning.Source, " end reasoning ") {
+		t.Fatalf("seeded semantic source contains presentation chrome: %q", reasoning.Source)
 	}
 }
 
@@ -270,12 +269,22 @@ func TestPresentChatStartupSession_UnifiedRendersCanonicalHistoryWithMarkdown(t 
 
 	state := coordinator.uiActor.AppState()
 	assertTranscriptSourceCount(t, state.Transcript.Cells, "continue the previous task", 1)
-	// Resumed reasoning is seeded as a KindReasoning cell whose source is
-	// "start divider\n<summary>\nend divider", so the body is matched by
-	// containment and both dividers are asserted explicitly.
-	assertTranscriptSourceContainsCount(t, state.Transcript.Cells, "reviewed the resumed context", 1)
-	assertTranscriptSourceContainsCount(t, state.Transcript.Cells, " reasoning ", 1)
-	assertTranscriptSourceContainsCount(t, state.Transcript.Cells, " end reasoning ", 1)
+	// Resumed reasoning is seeded as a semantic KindReasoning cell. Its source
+	// is provider body only; opening/closing dividers are presentation chrome.
+	assertTranscriptSourceCount(t, state.Transcript.Cells, "reviewed the resumed context", 1)
+	reasoningCells := 0
+	for _, cell := range state.Transcript.Cells {
+		if cell.Kind != scene.KindReasoning {
+			continue
+		}
+		reasoningCells++
+		if strings.Contains(cell.Source, " reasoning ") || strings.Contains(cell.Source, " end reasoning ") {
+			t.Fatalf("reasoning source contains presentation chrome: %q", cell.Source)
+		}
+	}
+	if reasoningCells != 1 {
+		t.Fatalf("reasoning cells = %d, want 1: %#v", reasoningCells, state.Transcript.Cells)
+	}
 	assertTranscriptSourceCount(t, state.Transcript.Cells, "# Resumed answer\n\n- **complete**\n- `code`", 1)
 	if session.TerminalSession == nil || session.TerminalSession.ProjectionState().Frame == 0 {
 		t.Fatal("startup history was not painted by TerminalSession")

@@ -56,7 +56,7 @@ func TestDottedLifecycleProjectsMarkdownExactlyOnceIntoNativeHistory(t *testing.
 	if snapshot == nil || len(snapshot.Cells) != 2 {
 		t.Fatalf("bridge scene cells=%d, want reasoning + one assistant", len(snapshot.Cells))
 	}
-	if snapshot.Cells[0].Kind != scene.KindSupplement || !strings.Contains(snapshot.Cells[0].Source, "BRIDGE-REASONING-SENTINEL") ||
+	if snapshot.Cells[0].Kind != scene.KindReasoning || !strings.Contains(snapshot.Cells[0].Source, "BRIDGE-REASONING-SENTINEL") ||
 		snapshot.Cells[1].Kind != scene.KindAssistant || snapshot.Cells[1].Source != answer ||
 		snapshot.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("bridge scene did not preserve canonical reasoning/assistant order: %+v", snapshot.Cells)
@@ -115,6 +115,135 @@ func TestDottedLifecycleProjectsMarkdownExactlyOnceIntoNativeHistory(t *testing.
 	}
 }
 
+func TestUnifiedReasoningDeltasAndFinalSnapshotProjectExactlyOnce(t *testing.T) {
+	const width, height = 100, 22
+	const (
+		sessionID = "session-reasoning-exactly-once"
+		traceID   = "trace-reasoning-exactly-once"
+		turnID    = "turn-reasoning-exactly-once"
+		streamID  = "stream-reasoning-exactly-once"
+		answer    = "ASSISTANT-EXACTLY-ONCE"
+	)
+	chunks := []string{
+		"REASONING-FIRST-LINE\n\n",
+		"# REASONING-LITERAL-HEADING\n",
+		"- **REASONING-LITERAL-MARKDOWN**\n",
+		"`REASONING-LAST-LINE`",
+	}
+	finalBody := strings.Join(chunks, "")
+
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}, Stream: true}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var physical bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&physical) {
+		t.Fatal("unified renderer did not attach")
+	}
+	bridge.startProcessor()
+	defer close(bridge.eventQueue)
+	bridge.BeginRun()
+
+	events := []runtimeevents.Event{
+		{Type: runtimechat.EventSessionStart, SessionID: sessionID, TraceID: traceID, Payload: map[string]interface{}{
+			"turn_id": turnID,
+		}},
+		{Type: runtimechat.EventLLMRequestStarted, SessionID: sessionID, TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "stream_id": streamID, "step": 1,
+		}},
+	}
+	for index, chunk := range chunks {
+		events = append(events, runtimeevents.Event{
+			Type: runtimechat.EventAssistantReasoning, SessionID: sessionID, TraceID: traceID,
+			Payload: map[string]interface{}{
+				"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
+				"step": 1, "sequence": uint64(index + 1), "mode": "append",
+				"reasoning": map[string]interface{}{
+					"format": "stream_delta", "streamable": true, "summary": chunk,
+				},
+			},
+		})
+	}
+	events = append(events,
+		runtimeevents.Event{Type: runtimechat.EventAssistantDelta, SessionID: sessionID, TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "stream_id": streamID,
+			"step": 1, "sequence": uint64(1), "mode": "append", "delta": answer,
+		}},
+		runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, SessionID: sessionID, TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "stream_id": streamID, "step": 1, "success": true,
+		}},
+		runtimeevents.Event{Type: runtimechat.EventAssistantMessage, SessionID: sessionID, TraceID: traceID, Payload: map[string]interface{}{
+			"trace_id": traceID, "turn_id": turnID, "stream_id": streamID, "mode": "snapshot",
+			"content": answer,
+			"reasoning": map[string]interface{}{
+				"format": "summary", "streamable": true, "summary": finalBody,
+			},
+		}},
+		runtimeevents.Event{Type: runtimechat.EventSessionEnd, SessionID: sessionID, TraceID: traceID, Payload: map[string]interface{}{
+			"turn_id": turnID, "success": true,
+		}},
+	)
+	for _, event := range events {
+		bridge.Handle(event)
+	}
+	bridge.WaitForCurrentEvents(5 * time.Second)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	if state.Active.Phase != ui.ActiveCellInactive {
+		t.Fatalf("final reasoning flow retained mutable active: %+v", state.Active)
+	}
+	if len(state.Transcript.Cells) != 2 {
+		t.Fatalf("transcript cells=%d, want reasoning + assistant: %+v", len(state.Transcript.Cells), state.Transcript.Cells)
+	}
+	reasoning, assistant := state.Transcript.Cells[0], state.Transcript.Cells[1]
+	if reasoning.Kind != scene.KindReasoning || reasoning.Phase != scene.CellCommitted || reasoning.Source != finalBody {
+		t.Fatalf("canonical reasoning cell = %+v, want exact final source", reasoning)
+	}
+	if strings.Contains(reasoning.Source, " reasoning ") || strings.Contains(reasoning.Source, " end reasoning ") {
+		t.Fatalf("presentation chrome leaked into reasoning source: %q", reasoning.Source)
+	}
+	if assistant.Kind != scene.KindAssistant || assistant.Phase != scene.CellCommitted ||
+		assistant.Source != boundary.FormatAssistantBlockChrome(answer) {
+		t.Fatalf("canonical assistant cell = %+v", assistant)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
+		t.Fatalf("reasoning history did not settle: %+v", state.HistoryEffects)
+	}
+
+	screen := vt.NewScreen(width, height)
+	screen.Feed(physical.String())
+	projected := strings.Join(append(screen.ScrollbackLines(), screen.Lines(1, height)...), "\n")
+	for _, marker := range []string{
+		"REASONING-FIRST-LINE",
+		"# REASONING-LITERAL-HEADING",
+		"- **REASONING-LITERAL-MARKDOWN**",
+		"`REASONING-LAST-LINE`",
+		answer,
+	} {
+		if count := strings.Count(projected, marker); count != 1 {
+			t.Fatalf("physical marker %q count=%d, want exactly one\n%s", marker, count, screen.Dump())
+		}
+	}
+	for label, divider := range map[string]string{
+		"opening": chatToolDivider("reasoning"),
+		"closing": chatToolDivider("end reasoning"),
+	} {
+		if count := strings.Count(projected, divider); count != 1 {
+			t.Fatalf("%s reasoning divider count=%d, want exactly one\n%s", label, count, screen.Dump())
+		}
+	}
+}
+
 func TestDottedLifecycleLateMarkdownFinalStaysOneAssistantCell(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{})
 	traceID, turnID, streamID := "trace-late-markdown", "turn-late-markdown", "stream-late-markdown"
@@ -143,7 +272,7 @@ func TestDottedLifecycleLateMarkdownFinalStaysOneAssistantCell(t *testing.T) {
 	if len(cells) != 2 {
 		t.Fatalf("cells=%d want reasoning + one assistant: %+v", len(cells), cells)
 	}
-	if cells[0].Kind != scene.KindSupplement || cells[1].Kind != scene.KindAssistant {
+	if cells[0].Kind != scene.KindReasoning || cells[1].Kind != scene.KindAssistant {
 		t.Fatalf("cell kinds=%s,%s want supplement,assistant", cells[0].Kind, cells[1].Kind)
 	}
 	assistant := cells[1]
@@ -224,7 +353,7 @@ func TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal(t *te
 	if state.Active.Phase != ui.ActiveCellInactive {
 		t.Fatalf("late reasoning flow retained mutable active: %+v", state.Active)
 	}
-	if len(state.Transcript.Cells) != 2 || state.Transcript.Cells[0].Kind != scene.KindSupplement ||
+	if len(state.Transcript.Cells) != 2 || state.Transcript.Cells[0].Kind != scene.KindReasoning ||
 		!strings.Contains(state.Transcript.Cells[0].Source, reasoning) || state.Transcript.Cells[1].Kind != scene.KindAssistant ||
 		state.Transcript.Cells[1].Source != boundary.FormatAssistantBlockChrome(answer) || state.Transcript.Cells[1].Phase != scene.CellCommitted {
 		t.Fatalf("late reasoning/final semantic order = %+v", state.Transcript.Cells)
@@ -310,7 +439,7 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 		t.Fatalf("assistant crossed native-history ordering barrier before late reasoning: active=%+v effects=%+v",
 			streaming.Active, streaming.HistoryEffects.Entries())
 	}
-	if len(streaming.Transcript.Cells) != 2 || streaming.Transcript.Cells[0].Kind != scene.KindSupplement ||
+	if len(streaming.Transcript.Cells) != 2 || streaming.Transcript.Cells[0].Kind != scene.KindReasoning ||
 		streaming.Transcript.Cells[0].Source != "" || streaming.Transcript.Cells[0].Phase != scene.CellMutable ||
 		streaming.Transcript.Cells[1].Kind != scene.KindAssistant {
 		t.Fatalf("missing empty reasoning ordering barrier: %+v", streaming.Transcript.Cells)

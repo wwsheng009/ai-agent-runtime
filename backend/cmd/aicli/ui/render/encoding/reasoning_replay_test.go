@@ -121,52 +121,42 @@ func TestAppendReasoningDeltaPreservesProviderWhitespaceAndAsterisks(t *testing.
 	}
 }
 
-// 尾部重复投递（最后一块被重发）不得让正文翻倍。
-func TestAppendReasoningDeltaDuplicateTailDropped(t *testing.T) {
+// Text equality is not a replay identity. Providers may legitimately emit the
+// same phrase twice, so byte concatenation must keep both occurrences.
+func TestAppendReasoningDeltaKeepsLegitimateRepeatedTail(t *testing.T) {
 	got := appendReasoningDelta("alpha\nbeta\n", "beta\n")
-	if got != "alpha\nbeta\n" {
-		t.Fatalf("duplicate tail appended: %q", got)
+	if got != "alpha\nbeta\nbeta\n" {
+		t.Fatalf("legitimate repeated tail changed: %q", got)
 	}
 }
 
-// 整段重放：已累积多块后从头重新流一遍相同增量，应全部丢弃，正文保持不变。
-func TestSkipReplayedReasoningDeltaDropsWholeReplay(t *testing.T) {
+// Duplicate delivery is rejected by explicit stream sequence, never by prose
+// overlap. A later sequence carrying identical text remains visible.
+func TestOrderReasoningDeltaUsesSequenceIdentity(t *testing.T) {
 	e := NewEventEncoder()
 	key := "req-1"
-	chunks := []string{
-		"Inspecting buildSessionActor architecture",
-		"Designing per-actor coordinator",
-		"Planning per-actor coordinator instantiation",
-		"Replacing host.SubagentCoordinator usage",
-	}
-	for _, chunk := range chunks {
-		if e.skipReplayedReasoningDelta(key, chunk) {
-			t.Fatalf("first pass chunk %q wrongly skipped", chunk)
-		}
-	}
-	for i, chunk := range chunks {
-		if !e.skipReplayedReasoningDelta(key, chunk) {
-			t.Fatalf("replay chunk %d (%q) not skipped", i, chunk)
-		}
-	}
-	// 重放结束后到达的新增量必须正常放行。
-	if e.skipReplayedReasoningDelta(key, "Final new thought") {
-		t.Fatal("new content after replay wrongly skipped")
-	}
-}
 
-// 重放中途出现新内容：后续增量恢复正常累积（只丢弃与已提交序列一致的部分）。
-func TestSkipReplayedReasoningDeltaBrokenReplayResumes(t *testing.T) {
-	e := NewEventEncoder()
-	key := "req-2"
-	chunks := []string{"A thought", "B thought", "C thought"}
-	for _, chunk := range chunks {
-		e.skipReplayedReasoningDelta(key, chunk)
+	first, ready := e.orderReasoningDelta(key, "repeat", map[string]interface{}{
+		"sequence": uint64(1),
+	})
+	if !ready || first != "repeat" {
+		t.Fatalf("first sequence = %q ready=%v", first, ready)
 	}
-	if !e.skipReplayedReasoningDelta(key, chunks[0]) || !e.skipReplayedReasoningDelta(key, chunks[1]) {
-		t.Fatal("expected replay prefix to be skipped")
+
+	duplicate, ready := e.orderReasoningDelta(key, "repeat", map[string]interface{}{
+		"sequence": uint64(1),
+	})
+	if ready || duplicate != "" {
+		t.Fatalf("duplicate sequence rendered: %q ready=%v", duplicate, ready)
 	}
-	if e.skipReplayedReasoningDelta(key, "D diverges") {
-		t.Fatal("diverging chunk wrongly skipped")
+
+	second, ready := e.orderReasoningDelta(key, "repeat", map[string]interface{}{
+		"sequence": uint64(2),
+	})
+	if !ready || second != "repeat" {
+		t.Fatalf("distinct sequence with repeated prose = %q ready=%v", second, ready)
+	}
+	if stats := e.Stats(); stats.DuplicateCount != 1 {
+		t.Fatalf("duplicate stats = %+v, want one duplicate", stats)
 	}
 }

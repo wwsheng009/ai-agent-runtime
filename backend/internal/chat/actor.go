@@ -2271,7 +2271,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			}
 			hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionEnd, hookPayload)
 		}
-		if result != nil && strings.TrimSpace(result.Output) != "" {
+		// assistant.message is the authoritative terminal event for the whole
+		// model response, not merely a non-empty text block. Publish it even
+		// when content is empty so a reasoning-only/whitespace response can
+		// reconcile its final reasoning snapshot and retire the stream identity.
+		if result != nil {
 			messagePayload := map[string]interface{}{
 				"turn_id": turnID,
 				"content": result.Output,

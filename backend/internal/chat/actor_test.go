@@ -1184,6 +1184,41 @@ func TestNewSessionActor_DefaultLoopConfigEnablesBoundedParallelTools(t *testing
 	assert.Equal(t, 4, actor.loopConfig.MaxParallelToolCalls)
 }
 
+type reasoningOnlyActorProvider struct{}
+
+func (*reasoningOnlyActorProvider) Name() string { return "reasoning-only-actor-provider" }
+
+func (*reasoningOnlyActorProvider) Call(context.Context, *llm.LLMRequest) (*llm.LLMResponse, error) {
+	return &llm.LLMResponse{
+		Content: "",
+		Model:   "reasoning-only-model",
+		ReasoningBlock: &types.ReasoningBlock{
+			Provider:   "reasoning-only-actor-provider",
+			Format:     "summary",
+			Summary:    "authoritative reasoning without assistant text",
+			Visibility: types.ReasoningVisibilitySummary,
+		},
+		Usage: &types.TokenUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+	}, nil
+}
+
+func (p *reasoningOnlyActorProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	ch := make(chan llm.StreamChunk, 1)
+	close(ch)
+	return ch, nil
+}
+
+func (*reasoningOnlyActorProvider) CountTokens(text string) int { return len(text) / 4 }
+
+func (*reasoningOnlyActorProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens: 128000, MaxOutputTokens: 4096,
+		SupportsTools: true, SupportsStreaming: false,
+	}
+}
+
+func (*reasoningOnlyActorProvider) CheckHealth(context.Context) error { return nil }
+
 func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
@@ -1273,6 +1308,66 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.Equal(t, result.Usage.PromptTokens, sessionEndPayload["usage_prompt_tokens"])
 	require.Equal(t, result.Usage.CompletionTokens, sessionEndPayload["usage_completion_tokens"])
 	require.Equal(t, result.Usage.TotalTokens, sessionEndPayload["usage_total_tokens"])
+}
+
+func TestSessionActorSubmitPrompt_PublishesReasoningOnlyAssistantMessage(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-reasoning-only-user")
+	require.NoError(t, err)
+
+	provider := &reasoningOnlyActorProvider{}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: provider.Name(),
+		DefaultModel:    "reasoning-only-model",
+		MaxRetries:      1,
+	})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name: "actor-reasoning-only-test", Provider: provider.Name(),
+		Model: "reasoning-only-model", MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent: apiAgent, LLMRuntime: runtime, SessionStore: storage,
+		StateStore: runtimeStore, EventStore: runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	result, err := actor.SubmitPrompt(ctx, "Reason without answer text.", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "", result.Output)
+	require.NotNil(t, result.Reasoning)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	assistantIndex, sessionEndIndex := -1, -1
+	var assistantPayload map[string]interface{}
+	for index, event := range events {
+		switch event.Type {
+		case EventAssistantMessage:
+			assistantIndex = index
+			assistantPayload = event.Payload
+		case EventSessionEnd:
+			sessionEndIndex = index
+		}
+	}
+	require.GreaterOrEqual(t, assistantIndex, 0)
+	require.GreaterOrEqual(t, sessionEndIndex, 0)
+	require.Less(t, assistantIndex, sessionEndIndex)
+	require.Contains(t, assistantPayload, "content")
+	require.Equal(t, "", assistantPayload["content"])
+	require.Equal(t, "snapshot", assistantPayload["mode"])
+	require.Equal(t, result.TurnID, assistantPayload["turn_id"])
+	require.Equal(t, result.AssistantStreamID, assistantPayload["stream_id"])
+	require.NotEmpty(t, assistantPayload["stream_id"])
+	require.EqualValues(t, result.AssistantStreamSequence+1, assistantPayload["sequence"])
+	finalReasoning := types.ReasoningBlockFromMap(assistantPayload["reasoning"])
+	require.NotNil(t, finalReasoning)
+	require.Equal(t, result.Reasoning.RawDisplayText(), finalReasoning.RawDisplayText())
 }
 
 func TestSessionActorInterruptConvergesStoppedStateAndTelemetry(t *testing.T) {

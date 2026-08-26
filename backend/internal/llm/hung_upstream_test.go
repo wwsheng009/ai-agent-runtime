@@ -75,6 +75,41 @@ func hungUpstreamListener(t *testing.T) (addr string, accepts *atomic.Int64, sto
 	return ln.Addr().String(), &n, stop
 }
 
+// resetUpstreamListener accepts TCP connections and immediately closes them,
+// simulating an upstream that rejects requests at the transport layer (RST /
+// EOF). Unlike hungUpstreamListener this is a transport-level failure, not a
+// response-header hang, so the hung-upstream streak guard does not fire and
+// the transport budget governs retries.
+func resetUpstreamListener(t *testing.T) (addr string, accepts *atomic.Int64, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var n atomic.Int64
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				c.Close()
+				<-done
+			}(conn)
+		}
+	}()
+	stop = func() {
+		close(done)
+		ln.Close()
+		wg.Wait()
+	}
+	return ln.Addr().String(), &n, stop
+}
+
 // TestProviderAbortsAfterRepeatedResponseHeaderTimeouts drives the retry loop
 // against a hung upstream and asserts that two consecutive response-header
 // timeouts stop further attempts, instead of spinning through the remaining
@@ -134,11 +169,12 @@ func TestProviderAbortsAfterRepeatedResponseHeaderTimeouts(t *testing.T) {
 	}
 }
 
-// TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts asserts that a
-// FINITE retry budget is honored end-to-end even when every attempt hits a
-// response-header timeout: the agent contract is to retry within the budget,
-// so the hung-upstream guard must not take away the configured attempts.
-func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
+// TestProviderAbortsOnFiniteBudgetAfterRepeatedHeaderTimeouts asserts that the
+// hung-upstream guard fires even with a FINITE retry budget: two consecutive
+// response-header timeouts mean the provider never returns headers, and
+// further attempts would each burn another ResponseHeaderTimeout for no
+// progress.
+func TestProviderAbortsOnFiniteBudgetAfterRepeatedHeaderTimeouts(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		name := "non-streaming"
 		if streaming {
@@ -151,7 +187,7 @@ func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
 			provider, err := NewProvider(&ProviderConfig{
 				Type:                  "openai",
 				BaseURL:               "http://" + addr,
-				MaxRetries:            3, // finite: retries must run their course
+				MaxRetries:            3, // finite: the guard must still stop the spin
 				ResponseHeaderTimeout: 300 * time.Millisecond,
 			})
 			require.NoError(t, err)
@@ -161,6 +197,7 @@ func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
+			start := time.Now()
 			_, err = runtime.Call(ctx, &LLMRequest{
 				Model:  "hung-model",
 				Stream: streaming,
@@ -170,10 +207,14 @@ func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
 				}},
 			})
 			require.Error(t, err)
+			assert.NotContains(t, err.Error(), context.DeadlineExceeded.Error(), "test relied on ctx timeout, not the guard")
 			assert.Contains(t, err.Error(), "timeout awaiting response headers",
 				"error should report the hung-upstream header wait, got: %v", err)
-			assert.Equal(t, int64(3), accepts.Load(),
-				"finite budget of 3 attempts must be fully used; the guard must not stop retries early")
+			assert.Equal(t, int64(2), accepts.Load(),
+				"the guard must stop retries after two hung attempts; got %d attempts", accepts.Load())
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("fail-fast guard did not stop the finite-budget retry spin (elapsed %v)", elapsed)
+			}
 		})
 	}
 }
@@ -233,19 +274,21 @@ func TestTrackHeaderTimeoutStreak(t *testing.T) {
 	})
 }
 
-// TestProviderTransportBudgetBoundsHungUpstream asserts the two-tier budget
-// (mirrors codex-rs request-level transport retries): a hung upstream burns
-// the tighter transport budget (4 attempts) instead of the full business
-// budget (10 attempts), because retrying a dead connection from scratch
-// rarely succeeds immediately.
-func TestProviderTransportBudgetBoundsHungUpstream(t *testing.T) {
+// TestProviderTransportBudgetBoundsResetUpstream asserts the two-tier budget
+// (mirrors codex-rs request-level transport retries): a transport-level
+// rejection (connection reset immediately after accept) burns the tighter
+// transport budget (4 attempts) instead of the full business budget (10
+// attempts), because retrying a dead connection from scratch rarely succeeds
+// immediately. The reset upstream is used (not a header hang) so the
+// hung-upstream streak guard does not preempt the transport budget.
+func TestProviderTransportBudgetBoundsResetUpstream(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		name := "non-streaming"
 		if streaming {
 			name = "streaming"
 		}
 		t.Run(name, func(t *testing.T) {
-			addr, accepts, stop := hungUpstreamListener(t)
+			addr, accepts, stop := resetUpstreamListener(t)
 			defer stop()
 
 			provider, err := NewProvider(&ProviderConfig{
@@ -257,13 +300,13 @@ func TestProviderTransportBudgetBoundsHungUpstream(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "hung-model", MaxRetries: 10})
-			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+			runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "reset-model", MaxRetries: 10})
+			require.NoError(t, runtime.RegisterProvider("reset-model", provider))
 
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			_, err = runtime.Call(ctx, &LLMRequest{
-				Model:  "hung-model",
+				Model:  "reset-model",
 				Stream: streaming,
 				Messages: []types.Message{{
 					Role:    "user",
@@ -271,12 +314,10 @@ func TestProviderTransportBudgetBoundsHungUpstream(t *testing.T) {
 				}},
 			})
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "timeout awaiting response headers",
-				"error should report the hung-upstream header wait, got: %v", err)
 			assert.Contains(t, err.Error(), "transport",
 				"transport budget exhaustion should surface as transport failure, got: %v", err)
 			assert.Equal(t, int64(4), accepts.Load(),
-				"transport budget of 4 attempts must bound the hung upstream; got %d attempts", accepts.Load())
+				"transport budget of 4 attempts must bound the reset upstream; got %d attempts", accepts.Load())
 		})
 	}
 }
