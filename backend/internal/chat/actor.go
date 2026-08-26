@@ -31,14 +31,42 @@ import (
 
 const aicliRuntimeContextTokenCountKey = "aicli_context_token_count"
 
+const interruptedRunReplyGrace = 250 * time.Millisecond
+
 // ErrSessionActorStopped is returned when a command targets an actor whose
 // command loop has already been stopped.
 var ErrSessionActorStopped = errors.New("session actor is stopped")
+
+var errSessionRunSuperseded = errors.New("session run was superseded")
 
 type approvalDetachContextKey struct{}
 
 type approvalDetachState struct {
 	detached atomic.Bool
+}
+
+type sessionRunControlContextKey struct{}
+
+// sessionRunControl is the comparable ownership token for one actor run.
+// Mutable cancellation ownership is guarded by SessionActor.mu; wait-group
+// bookkeeping is guarded by runWaitMu; the remaining shared flags are atomic
+// because the watchdog, command loop, and run tail use them concurrently.
+type sessionRunControl struct {
+	generation            uint64
+	turnID                string
+	stripMetadataKeys     []string
+	reply                 chan SubmitResult
+	replyOnce             sync.Once
+	runWaitMu             sync.Mutex
+	runWaitOnce           sync.Once
+	runWaitTracked        bool
+	runWaitDetached       bool
+	runWaitReleasePending bool
+	cancel                context.CancelFunc
+	interrupted           atomic.Bool
+	abandoned             atomic.Bool
+	finalizing            atomic.Bool
+	lastActivity          atomic.Int64
 }
 
 // SessionActorConfig configures a SessionActor instance.
@@ -81,9 +109,7 @@ type SessionActor struct {
 	// runStallTimeout / onRunStalled mirror SessionActorConfig; see there.
 	runStallTimeout time.Duration
 	onRunStalled    func(turnID string)
-	// lastRunActivity 记录最近一次 run 进展（unixnano），由 publish/updateState
-	// 与总线进展事件刷新，watchdog 据此判定 run 是否挂死。
-	lastRunActivity atomic.Int64
+	runSequence     atomic.Uint64
 
 	cmdCh chan Command
 	stop  chan struct{}
@@ -94,13 +120,13 @@ type SessionActor struct {
 	onStop     func()
 	onStopOnce sync.Once
 
-	mu                      sync.RWMutex
-	state                   *RuntimeState
-	activeCancel            context.CancelFunc
-	interrupted             bool
-	activeStripMetadataKeys []string
+	mu        sync.RWMutex
+	state     *RuntimeState
+	activeRun *sessionRunControl
 
-	statePersistMu sync.Mutex
+	runLifecycleMu   sync.Mutex
+	statePersistMu   sync.Mutex
+	sessionPersistMu sync.Mutex
 
 	waiterMu        sync.Mutex
 	approvalWaiters map[string]chan runtimepolicy.ApprovalResponse
@@ -184,6 +210,26 @@ func (a *SessionActor) Stop() {
 	_ = a.StopContext(context.Background())
 }
 
+// StopAsync begins stopping the actor loop without waiting for it to exit.
+// The stop signal is delivered and any in-flight run is cancelled via its run
+// context; the actor loop then finishes in the background as soon as the run
+// goroutines return.
+//
+// Use StopAsync instead of Stop/StopContext from code that executes on the
+// actor's own run goroutine (e.g. a tool call that closes the current
+// session): waiting for a.done there would deadlock, because the actor loop
+// only exits after every run goroutine — including the caller — returns.
+func (a *SessionActor) StopAsync() {
+	if a == nil {
+		return
+	}
+	a.Start()
+	a.stopOnce.Do(func() {
+		close(a.stop)
+		a.cancelActive()
+	})
+}
+
 // StopContext terminates the actor loop, waiting at most until ctx expires.
 // The actor keeps stopping in the background after a timeout so leases and
 // stop hooks are still released once the in-flight command returns.
@@ -194,11 +240,7 @@ func (a *SessionActor) StopContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	a.Start()
-	a.stopOnce.Do(func() {
-		close(a.stop)
-		a.cancelActive()
-	})
+	a.StopAsync()
 	select {
 	case <-a.done:
 		return nil
@@ -713,16 +755,21 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		reply <- SubmitResult{Err: err}
 		return
 	}
-	session, err := a.loadSession(ctx)
+	turnID := "turn_" + uuid.NewString()
+	run := a.claimSessionRun(turnID, nil, reply)
+	runCtx := withSessionRunControl(ctx, run)
+	session, err := a.loadSession(runCtx)
 	if err != nil {
-		reply <- SubmitResult{Err: err}
+		a.releaseSessionRun(run)
+		run.complete(SubmitResult{Err: err})
 		return
 	}
 	preparedPrompt := llm.NewUserPromptMessage(prompt)
 	if len(cmd.ImagePaths) > 0 {
 		msg, err := llm.NewUserPromptMessageWithImages(prompt, cmd.ImagePaths)
 		if err != nil {
-			reply <- SubmitResult{Err: fmt.Errorf("resolving image attachments: %w", err)}
+			a.releaseSessionRun(run)
+			run.complete(SubmitResult{Err: fmt.Errorf("resolving image attachments: %w", err)})
 			return
 		}
 		preparedPrompt = msg
@@ -739,23 +786,27 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	appendedPrompt := false
 	if shouldAppendUserPromptMessage(session.LastMessage(), preparedPrompt) {
 		session.AddMessage(*preparedPrompt)
-		if err := a.persistSession(ctx, session); err != nil {
-			reply <- SubmitResult{Err: err}
+		if err := a.persistSession(runCtx, session); err != nil {
+			a.releaseSessionRun(run)
+			run.complete(SubmitResult{Err: err})
 			return
 		}
 		appendedPrompt = true
 	}
 
-	turnID := "turn_" + uuid.NewString()
-	_ = a.updateState(ctx, func(state *RuntimeState) error {
+	if err := a.updateState(ctx, func(state *RuntimeState) error {
 		state.Status = SessionRunning
 		state.CurrentTurnID = turnID
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
 		resetFrozenTurnTools(state)
 		state.UpdatedAt = time.Now().UTC()
 		return nil
-	})
-	a.startSessionRun(ctx, session, prompt, false, turnID, cmd.RunMeta, cmd.RouteOverride, reply, appendedPrompt)
+	}); err != nil {
+		a.releaseSessionRun(run)
+		run.complete(SubmitResult{Err: err})
+		return
+	}
+	a.startSessionRun(runCtx, session, prompt, false, turnID, cmd.RunMeta, cmd.RouteOverride, reply, appendedPrompt, run)
 }
 
 func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
@@ -771,22 +822,29 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		reply <- SubmitResult{Err: err}
 		return
 	}
-	session, err := a.loadSession(ctx)
+	turnID := "turn_" + uuid.NewString()
+	run := a.claimSessionRun(turnID, cmd.StripMetadataKeys, reply)
+	runCtx := withSessionRunControl(ctx, run)
+	session, err := a.loadSession(runCtx)
 	if err != nil {
-		reply <- SubmitResult{Err: err}
+		a.releaseSessionRun(run)
+		run.complete(SubmitResult{Err: err})
 		return
 	}
 	appendTransientContinuationPrompt(session, cmd.ContinuationPrompt, cmd.ContinuationMetadata)
-	turnID := "turn_" + uuid.NewString()
-	_ = a.updateState(ctx, func(state *RuntimeState) error {
+	if err := a.updateState(ctx, func(state *RuntimeState) error {
 		state.Status = SessionRunning
 		state.CurrentTurnID = turnID
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
 		resetFrozenTurnTools(state)
 		state.UpdatedAt = time.Now().UTC()
 		return nil
-	})
-	a.startSessionRun(ctx, session, "", true, turnID, cmd.RunMeta, runRouteOverrideFromRunMeta(cmd.RunMeta), reply, false, cmd.StripMetadataKeys...)
+	}); err != nil {
+		a.releaseSessionRun(run)
+		run.complete(SubmitResult{Err: err})
+		return
+	}
+	a.startSessionRun(runCtx, session, "", true, turnID, cmd.RunMeta, runRouteOverrideFromRunMeta(cmd.RunMeta), reply, false, run)
 }
 
 func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
@@ -918,9 +976,8 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	if cmd.Reply == nil {
 		return
 	}
-	a.markInterrupted()
-	a.cancelActive()
-	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+	run := a.interruptActiveSessionRun()
+	_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 		state.Status = SessionStopped
 		state.CurrentTurnID = ""
 		state.CurrentRunMeta = nil
@@ -931,31 +988,45 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
+	payload := map[string]interface{}{
+		"reason": "interrupt",
+	}
+	if run != nil && strings.TrimSpace(run.turnID) != "" {
+		payload["turn_id"] = run.turnID
+	}
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
-		Payload: map[string]interface{}{
-			"reason": "interrupt",
-		},
+		TraceID:   sessionRunTurnID(run),
+		Payload:   payload,
 	})
+	if run != nil {
+		// Give a cancel-aware execution tail a short opportunity to return its
+		// structured Result/telemetry. A provider that ignores cancellation still
+		// cannot strand the public caller indefinitely.
+		a.retireInterruptedSessionRunAfter(run, interruptedRunReplyGrace)
+	}
 	cmd.Reply <- nil
 }
 
-// touchRunActivity marks the current run as making progress so the stall
-// watchdog does not force-abort a slow-but-live execution.
-func (a *SessionActor) touchRunActivity() {
-	a.lastRunActivity.Store(time.Now().UnixNano())
+// touchRunActivity marks run as making progress when it still owns the actor
+// and the event is not explicitly stamped for another turn.
+func (a *SessionActor) touchRunActivity(run *sessionRunControl, event runtimeevents.Event) {
+	if run == nil || !a.sessionRunOwned(run) || !sessionRunEventMatches(run, event, a.id) {
+		return
+	}
+	run.lastActivity.Store(time.Now().UnixNano())
 }
 
 // startRunStallWatchdog launches the stall watchdog for a run and returns a
 // stop function (never nil) that unsubscribes progress events and halts it.
 // A stall is judged as zero progress events for RunStallTimeout; when hit the
 // run is force-aborted, the busy state released and OnRunStalled invoked.
-func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID string) func() {
-	if a == nil || a.runStallTimeout <= 0 {
+func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, run *sessionRunControl) func() {
+	if a == nil || run == nil || a.runStallTimeout <= 0 {
 		return func() {}
 	}
-	a.touchRunActivity()
+	run.lastActivity.Store(time.Now().UnixNano())
 	var unsubs []runtimeevents.Unsubscribe
 	// Loop 的 assistant_delta/assistant.reasoning 与工具事件 emit 到 agent 的
 	// bus；actor 自身的结构化事件走 a.eventBus。两处都订阅，任一进展都算。
@@ -975,7 +1046,9 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID stri
 			"tool.requested",
 			"tool.completed",
 		} {
-			u := bus.SubscribeCancelable(t, func(runtimeevents.Event) { a.touchRunActivity() })
+			u := bus.SubscribeCancelable(t, func(event runtimeevents.Event) {
+				a.touchRunActivity(run, event)
+			})
 			unsubs = append(unsubs, u)
 		}
 	}
@@ -1015,9 +1088,9 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID stri
 			case <-done:
 				return
 			case <-ticker.C:
-				last := time.Unix(0, a.lastRunActivity.Load())
+				last := time.Unix(0, run.lastActivity.Load())
 				if time.Since(last) >= a.runStallTimeout {
-					a.abortStalledRun(turnID)
+					a.abortStalledRun(run)
 					return
 				}
 			}
@@ -1030,13 +1103,12 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID stri
 // releases the busy state so the session is usable again without a restart.
 // It mirrors the interrupt path: mark interrupted, cancel the run context,
 // write back stopped, publish the event and notify the host (lease release).
-func (a *SessionActor) abortStalledRun(turnID string) {
-	a.markInterrupted()
-	a.cancelActive()
-	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
-		// 异步提交场景下，若新 turn 已接管（state 的 turn 已不是本 turn），
-		// 不要用 stopped 覆盖新 run 的进行中状态。
-		if state.CurrentTurnID != "" && state.CurrentTurnID != turnID {
+func (a *SessionActor) abortStalledRun(run *sessionRunControl) {
+	if !a.abandonSessionRun(run) {
+		return
+	}
+	_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+		if state.CurrentTurnID != run.turnID {
 			return nil
 		}
 		state.Status = SessionStopped
@@ -1049,35 +1121,27 @@ func (a *SessionActor) abortStalledRun(turnID string) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
+	// Complete before event persistence/callbacks: those integrations must not
+	// keep the public submit caller blocked after runtime state is released.
+	run.complete(SubmitResult{Err: context.Canceled})
+	// The abandoned provider may never return. The local runtime state is now
+	// non-busy (durable persistence was attempted), so its goroutine must not
+	// keep Stop/StopContext waiting forever.
+	a.releaseDetachedSessionRunWait(run)
+	// Lease release must not sit behind an unbounded event-store append.
+	if a.onRunStalled != nil {
+		a.onRunStalled(run.turnID)
+	}
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
-		TraceID:   turnID,
+		TraceID:   run.turnID,
 		Payload: map[string]interface{}{
 			"reason":     "stall_timeout",
-			"turn_id":    turnID,
+			"turn_id":    run.turnID,
 			"timeout_ns": a.runStallTimeout,
 		},
 	})
-	if a.onRunStalled != nil {
-		a.onRunStalled(turnID)
-	}
-}
-
-func (a *SessionActor) markInterrupted() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.interrupted = true
-}
-
-func (a *SessionActor) consumeInterrupted() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if !a.interrupted {
-		return false
-	}
-	a.interrupted = false
-	return true
 }
 
 func (a *SessionActor) handleRewindTo(cmd RewindTo) {
@@ -1088,7 +1152,7 @@ func (a *SessionActor) handleRewindTo(cmd RewindTo) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_ = a.updateState(ctx, func(state *RuntimeState) error {
+	_ = a.updateStateConvergent(ctx, func(state *RuntimeState) error {
 		state.Status = SessionRewinding
 		state.CurrentCheckpointID = cmd.CheckpointID
 		state.UpdatedAt = time.Now().UTC()
@@ -1135,7 +1199,7 @@ func (a *SessionActor) handleRewindTo(cmd RewindTo) {
 	if err != nil {
 		status = SessionStopped
 	}
-	_ = a.updateState(ctx, func(state *RuntimeState) error {
+	_ = a.updateStateConvergent(ctx, func(state *RuntimeState) error {
 		state.Status = status
 		state.UpdatedAt = time.Now().UTC()
 		return nil
@@ -1239,7 +1303,7 @@ func (a *SessionActor) applyConversationSnapshot(ctx context.Context, messages [
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
 	}
-	_ = a.updateState(ctx, func(state *RuntimeState) error {
+	_ = a.updateStateConvergent(ctx, func(state *RuntimeState) error {
 		state.HeadOffset = 0
 		state.UpdatedAt = time.Now().UTC()
 		return nil
@@ -1273,7 +1337,7 @@ func (a *SessionActor) applyConversationPrefix(ctx context.Context, targetCount 
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
 	}
-	_ = a.updateState(ctx, func(state *RuntimeState) error {
+	_ = a.updateStateConvergent(ctx, func(state *RuntimeState) error {
 		state.HeadOffset = 0
 		state.UpdatedAt = time.Now().UTC()
 		return nil
@@ -2232,9 +2296,14 @@ func normalizedMetadataKeys(keys []string) []string {
 	return normalized
 }
 
-func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, routeOverride *RunRouteOverride, reply chan SubmitResult, appendedPrompt bool, stripMetadataKeys ...string) {
+func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, routeOverride *RunRouteOverride, reply chan SubmitResult, appendedPrompt bool, run *sessionRunControl) {
 	if a == nil || session == nil {
-		if reply != nil {
+		if a != nil {
+			a.releaseSessionRun(run)
+		}
+		if run != nil {
+			run.complete(SubmitResult{Err: fmt.Errorf("session is nil")})
+		} else if reply != nil {
 			reply <- SubmitResult{Err: fmt.Errorf("session is nil")}
 		}
 		return
@@ -2245,9 +2314,52 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	if strings.TrimSpace(turnID) == "" {
 		turnID = "turn_" + uuid.NewString()
 	}
+	if run == nil || run.turnID != turnID {
+		run = a.claimSessionRun(turnID, nil, reply)
+	}
+	ctx = withSessionRunControl(ctx, run)
+	runCtx, cancel := context.WithCancel(ctx)
+	approvalDetach := &approvalDetachState{}
+	runCtx = context.WithValue(runCtx, approvalDetachContextKey{}, approvalDetach)
+	runCtx = team.WithRunMeta(runCtx, runMeta)
+	runCtx = agent.WithTurnID(runCtx, turnID)
+	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
+	if !a.installSessionRunCancel(run, cancel) {
+		cancel()
+		a.releaseSessionRun(run)
+		run.complete(SubmitResult{Err: context.Canceled})
+		return
+	}
+	abortStartup := func() {
+		cancel()
+		a.clearSessionRunCancel(run)
+		run.complete(SubmitResult{Err: context.Canceled})
+		if a.sessionRunOwned(run) {
+			_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+				if state.CurrentTurnID != turnID {
+					return nil
+				}
+				state.Status = SessionStopped
+				state.CurrentTurnID = ""
+				state.CurrentRunMeta = nil
+				resetFrozenTurnTools(state)
+				state.PendingTool = nil
+				state.PendingApproval = nil
+				state.PendingQuestion = nil
+				state.UpdatedAt = time.Now().UTC()
+				return nil
+			})
+		}
+		a.releaseSessionRun(run)
+	}
 	if a.prepareRun != nil {
-		if err := a.prepareRun(ctx, session, resume); err != nil {
-			_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		if err := a.prepareRun(runCtx, session, resume); err != nil {
+			cancel()
+			a.clearSessionRunCancel(run)
+			_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+				if state.CurrentTurnID != turnID {
+					return nil
+				}
 				state.Status = SessionIdle
 				state.CurrentTurnID = ""
 				state.CurrentRunMeta = nil
@@ -2255,9 +2367,8 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				state.UpdatedAt = time.Now().UTC()
 				return nil
 			})
-			if reply != nil {
-				reply <- SubmitResult{Err: err}
-			}
+			a.releaseSessionRun(run)
+			run.complete(SubmitResult{Err: err})
 			return
 		}
 	}
@@ -2265,6 +2376,10 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	// session permission mode stay enforced for this turn.
 	if engine := a.agent.GetPermissionEngine(); engine != nil {
 		a.applyPlanModeStateToEngine(engine, planmode.Load(session))
+	}
+	if runCtx.Err() != nil || !a.sessionRunOwnsRunningState(run) {
+		abortStartup()
+		return
 	}
 
 	if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
@@ -2275,9 +2390,9 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		if !resume {
 			hookPayload["prompt"] = prompt
-			hookMgr.DispatchAsync(ctx, runtimehooks.EventUserPromptSubmit, hookPayload)
+			hookMgr.DispatchAsync(runCtx, runtimehooks.EventUserPromptSubmit, hookPayload)
 		}
-		hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionStart, hookPayload)
+		hookMgr.DispatchAsync(runCtx, runtimehooks.EventSessionStart, hookPayload)
 	}
 	startPayload := map[string]interface{}{
 		"turn_id": turnID,
@@ -2293,22 +2408,19 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		Payload:   startPayload,
 	})
 
-	a.maybeAutoCompactSession(ctx, session, turnID, runMeta, resume)
+	a.maybeAutoCompactSession(runCtx, session, turnID, runMeta, resume)
+	a.runLifecycleMu.Lock()
+	if runCtx.Err() != nil || !a.sessionRunOwnsRunningState(run) {
+		a.runLifecycleMu.Unlock()
+		abortStartup()
+		return
+	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	approvalDetach := &approvalDetachState{}
-	runCtx = context.WithValue(runCtx, approvalDetachContextKey{}, approvalDetach)
-	runCtx = team.WithRunMeta(runCtx, runMeta)
-	runCtx = agent.WithTurnID(runCtx, turnID)
-	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
-	a.setActiveCancel(cancel)
-	a.setActiveStripMetadataKeys(stripMetadataKeys)
-	a.activeRunWG.Add(1)
-	stopStallWatchdog := a.startRunStallWatchdog(runCtx, turnID)
+	runStartedAt := time.Now()
+	a.trackSessionRunWait(run)
+	stopStallWatchdog := a.startRunStallWatchdog(runCtx, run)
 	go func() {
-		runStartedAt := time.Now()
-		defer a.activeRunWG.Done()
-		defer a.clearActiveStripMetadataKeys()
+		defer a.releaseSessionRunWait(run)
 		defer stopStallWatchdog()
 		var (
 			result  *agent.Result
@@ -2319,7 +2431,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		} else {
 			result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
 			if preflightErr, ok := agent.AsPromptPreflightError(execErr); ok && preflightErr != nil {
-				if compactResult, _, compactErr := a.runManualCompact(ctx, session, compactruntime.ModeLocal); compactErr == nil && compactResult != nil {
+				if compactResult, _, compactErr := a.runManualCompact(runCtx, session, compactruntime.ModeLocal); compactErr == nil && compactResult != nil {
 					result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
 				}
 			}
@@ -2330,35 +2442,64 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			// agent.WithTurnID through its Result.
 			result.TurnID = turnID
 		}
+		// Once the loop returns, a non-interrupted run may expose idle/stopped
+		// state before terminal event/reply dispatch. A successor may replace its
+		// actor slot, but must not turn that already-completed result into a
+		// synthetic cancellation.
+		run.finalizing.Store(true)
+		// The execution loop has returned. Stop supervision before durable tail
+		// cleanup so a slow store write cannot be misclassified as an LLM stall.
+		stopStallWatchdog()
 		cancel()
-		a.clearActiveCancel()
+		a.clearSessionRunCancel(run)
 		approvalDetached := approvalDetach.detached.Load()
-		if !approvalDetached && shouldRollbackFailedPrompt(execErr, result, resume, appendedPrompt) {
-			if rollbackErr := a.rollbackLastUserPrompt(context.Background(), session, prompt); rollbackErr != nil && execErr == nil {
-				execErr = rollbackErr
-			}
-		}
-		if !approvalDetached && len(stripMetadataKeys) > 0 {
-			stripMessagesWithMetadataKeys(session, stripMetadataKeys)
-		}
-
+		interrupted := run.interrupted.Load()
 		status := SessionIdle
-		interrupted := a.consumeInterrupted()
 		if ctx.Err() != nil || interrupted || errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
 			status = SessionStopped
 		}
-		if !approvalDetached {
-			_ = a.updateState(context.Background(), func(state *RuntimeState) error {
-				state.Status = status
-				state.CurrentTurnID = ""
-				state.CurrentRunMeta = nil
-				resetFrozenTurnTools(state)
-				state.PendingTool = nil
-				state.UpdatedAt = time.Now().UTC()
-				return nil
-			})
-			if persistErr := a.persistSession(context.Background(), session); persistErr != nil && execErr == nil {
-				execErr = persistErr
+		// A watchdog-abandoned or superseded run may still return after a newer
+		// turn starts. Only the current ownership token may mutate or persist
+		// session state.
+		publishTerminal := false
+		if a.sessionRunOwned(run) {
+			finalizeCtx := withSessionRunControl(context.Background(), run)
+			if !approvalDetached && shouldRollbackFailedPrompt(execErr, result, resume, appendedPrompt) {
+				if rollbackErr := a.rollbackLastUserPrompt(finalizeCtx, session, prompt); rollbackErr != nil &&
+					!errors.Is(rollbackErr, errSessionRunSuperseded) && execErr == nil {
+					execErr = rollbackErr
+				}
+			}
+			if !approvalDetached && a.sessionRunOwned(run) && len(run.stripMetadataKeys) > 0 {
+				stripMessagesWithMetadataKeys(session, run.stripMetadataKeys)
+			}
+			if !approvalDetached && a.sessionRunOwned(run) {
+				// Persist history before exposing an idle/stopped runtime state.
+				// Once the state is non-busy, a successor is allowed to load and
+				// append to this durable snapshot.
+				if persistErr := a.persistSession(finalizeCtx, session); persistErr != nil &&
+					!errors.Is(persistErr, errSessionRunSuperseded) && execErr == nil {
+					execErr = persistErr
+				}
+			}
+			// Latch terminal ownership while the runtime state is still busy.
+			// Once idle/stopped is exposed a successor may claim the actor before
+			// this goroutine reaches event dispatch, but the completed turn must
+			// still publish its assistant_message/session_end pair.
+			publishTerminal = a.sessionRunOwned(run)
+			if !approvalDetached && publishTerminal {
+				_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+					if state.CurrentTurnID != turnID {
+						return nil
+					}
+					state.Status = status
+					state.CurrentTurnID = ""
+					state.CurrentRunMeta = nil
+					resetFrozenTurnTools(state)
+					state.PendingTool = nil
+					state.UpdatedAt = time.Now().UTC()
+					return nil
+				})
 			}
 		}
 
@@ -2396,27 +2537,33 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				}
 			}
 		}
-		if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
-			hookPayload := map[string]interface{}{
-				"session_id": a.id,
-				"turn_id":    turnID,
-				"resume":     resume,
-				"success":    execErr == nil && result != nil && result.Success,
-				"error":      firstNonEmptyError(execErr, result),
+		// No run-owned mutation occurs after this point. Release ownership before
+		// dispatching terminal hooks/events so a successor cannot invalidate one
+		// half of the assistant_message/session_end terminal pair.
+		a.releaseSessionRun(run)
+		if publishTerminal {
+			if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
+				hookPayload := map[string]interface{}{
+					"session_id": a.id,
+					"turn_id":    turnID,
+					"resume":     resume,
+					"success":    execErr == nil && result != nil && result.Success,
+					"error":      firstNonEmptyError(execErr, result),
+				}
+				appendStructuredRunErrorPayload(hookPayload, execErr)
+				if result != nil {
+					hookPayload["trace_id"] = result.TraceID
+					appendSessionActorUsagePayload(hookPayload, result.Usage)
+					appendSessionActorToolErrorPayload(hookPayload, result)
+				}
+				hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionEnd, hookPayload)
 			}
-			appendStructuredRunErrorPayload(hookPayload, execErr)
-			if result != nil {
-				hookPayload["trace_id"] = result.TraceID
-				appendSessionActorUsagePayload(hookPayload, result.Usage)
-				appendSessionActorToolErrorPayload(hookPayload, result)
-			}
-			hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionEnd, hookPayload)
 		}
 		// assistant.message is the authoritative terminal event for the whole
 		// model response, not merely a non-empty text block. Publish it even
 		// when content is empty so a reasoning-only/whitespace response can
 		// reconcile its final reasoning snapshot and retire the stream identity.
-		if result != nil {
+		if publishTerminal && result != nil {
 			messagePayload := map[string]interface{}{
 				"turn_id": turnID,
 				"content": result.Output,
@@ -2446,16 +2593,19 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		// Publish assistant_message before session_end so interactive clients can
 		// complete any buffered streaming output before session teardown.
-		a.publish(runtimeevents.Event{
-			Type:      EventSessionEnd,
-			SessionID: a.id,
-			TraceID:   resultTraceID(result, turnID),
-			Payload:   payload,
-		})
-		if reply != nil {
-			reply <- SubmitResult{Result: result, Err: execErr}
+		if publishTerminal {
+			a.publish(runtimeevents.Event{
+				Type:      EventSessionEnd,
+				SessionID: a.id,
+				TraceID:   resultTraceID(result, turnID),
+				Payload:   payload,
+			})
+		}
+		if !run.abandoned.Load() {
+			run.complete(SubmitResult{Result: result, Err: execErr})
 		}
 	}()
+	a.runLifecycleMu.Unlock()
 }
 
 func (a *SessionActor) loadSession(ctx context.Context) (*Session, error) {
@@ -2488,7 +2638,21 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	if session == nil || a.sessionStore == nil {
 		return nil
 	}
-	if keys := a.currentStripMetadataKeys(); len(keys) > 0 {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.sessionPersistMu.Lock()
+	defer a.sessionPersistMu.Unlock()
+
+	run, hasRun := sessionRunControlFromContext(ctx)
+	if hasRun && !a.sessionRunOwned(run) {
+		return errSessionRunSuperseded
+	}
+	keys := a.activeSessionRunMetadataKeys()
+	if hasRun {
+		keys = run.stripMetadataKeys
+	}
+	if len(keys) > 0 {
 		stripMessagesWithMetadataKeys(session, keys)
 	}
 	if a.persistHook != nil {
@@ -2508,12 +2672,17 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	if err != nil {
 		return err
 	}
-	if aliases, ok := latest.GetContext(toolbroker.SessionHandleAliasesContextKey); ok {
-		copiedAliases, err := cloneSessionContextValue(aliases)
-		if err != nil {
-			return fmt.Errorf("clone broker handle aliases: %w", err)
+	if latest != nil {
+		if aliases, ok := latest.GetContext(toolbroker.SessionHandleAliasesContextKey); ok {
+			copiedAliases, err := cloneSessionContextValue(aliases)
+			if err != nil {
+				return fmt.Errorf("clone broker handle aliases: %w", err)
+			}
+			session.SetContext(toolbroker.SessionHandleAliasesContextKey, copiedAliases)
 		}
-		session.SetContext(toolbroker.SessionHandleAliasesContextKey, copiedAliases)
+	}
+	if hasRun && !a.sessionRunOwned(run) {
+		return errSessionRunSuperseded
 	}
 	return a.sessionStore.Update(ctx, session)
 }
@@ -2686,36 +2855,82 @@ func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeStat
 	a.statePersistMu.Lock()
 	defer a.statePersistMu.Unlock()
 
+	a.mu.RLock()
+	var next *RuntimeState
+	if a.state != nil {
+		next = a.state.Clone()
+	}
+	a.mu.RUnlock()
+	if next == nil {
+		next = &RuntimeState{SessionID: a.id, Status: SessionIdle}
+	}
+	if mutate != nil {
+		if err := mutate(next); err != nil {
+			return err
+		}
+	}
+	if next.UpdatedAt.IsZero() {
+		next.UpdatedAt = time.Now().UTC()
+	}
+
+	if a.stateStore != nil {
+		snapshot := next.Clone()
+		var saveErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			saveErr = a.stateStore.SaveState(ctx, snapshot)
+			if saveErr != nil && attempt < 3 {
+				time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
+			}
+			if saveErr == nil {
+				break
+			}
+		}
+		if saveErr != nil {
+			return saveErr
+		}
+	}
+
+	// Install only after durable persistence succeeds. This keeps a failed
+	// SaveState from exposing a phantom running turn or clearing recoverable
+	// approval/tool state in memory.
+	a.mu.Lock()
+	a.state = next
+	run := a.activeRun
+	a.mu.Unlock()
+	if run != nil {
+		a.touchRunActivity(run, runtimeevents.Event{
+			SessionID: a.id,
+			Payload:   map[string]interface{}{"turn_id": run.turnID},
+		})
+	}
+	return nil
+}
+
+// updateStateConvergent is for terminal/best-effort transitions whose local
+// state must advance even when durable state persistence is unavailable. Its
+// mutator must be idempotent and must not have side effects: on SaveState
+// failure it is applied a second time to the current in-memory state.
+func (a *SessionActor) updateStateConvergent(ctx context.Context, mutate func(*RuntimeState) error) error {
+	err := a.updateState(ctx, mutate)
+	if err == nil || a == nil || mutate == nil {
+		return err
+	}
+
+	a.statePersistMu.Lock()
+	defer a.statePersistMu.Unlock()
 	a.mu.Lock()
 	if a.state == nil {
 		a.state = &RuntimeState{SessionID: a.id, Status: SessionIdle}
 	}
-	if mutate != nil {
-		if err := mutate(a.state); err != nil {
-			a.mu.Unlock()
-			return err
-		}
-	}
+	fallbackErr := mutate(a.state)
 	if a.state.UpdatedAt.IsZero() {
 		a.state.UpdatedAt = time.Now().UTC()
 	}
-	snapshot := a.state.Clone()
 	a.mu.Unlock()
-
-	if a.stateStore != nil {
-		var saveErr error
-		for attempt := 1; attempt <= 3; attempt++ {
-			saveErr = a.stateStore.SaveState(ctx, snapshot)
-			if saveErr == nil {
-				return nil
-			}
-			if attempt < 3 {
-				time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
-			}
-		}
-		return saveErr
+	if fallbackErr != nil {
+		return errors.Join(err, fallbackErr)
 	}
-	return nil
+	return err
 }
 
 // UpdateStateForTest mutates runtime state for unit/integration tests.
@@ -2986,13 +3201,19 @@ func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	turnID := strings.TrimSpace(state.CurrentTurnID)
+	if turnID == "" {
+		turnID = "turn_" + uuid.NewString()
+	}
+	run := a.claimSessionRun(turnID, nil, nil)
+	runCtx := withSessionRunControl(ctx, run)
 	ensurePendingToolBatchInSession(session, pending, nil)
-	if err := a.persistSession(ctx, session); err != nil {
+	if err := a.persistSession(runCtx, session); err != nil {
+		a.releaseSessionRun(run)
 		return err
 	}
 	recoveryPending := clonePendingToolInvocation(pending, false)
 	runMeta := state.CurrentRunMeta.Clone()
-	turnID := strings.TrimSpace(state.CurrentTurnID)
 	if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
 		if runtimeState.PendingTool == nil || runtimeState.PendingTool.ToolCallID != state.PendingTool.ToolCallID {
 			return fmt.Errorf("pending tool changed while resuming")
@@ -3001,19 +3222,21 @@ func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context,
 		runtimeState.PendingApproval = nil
 		runtimeState.PendingQuestion = nil
 		runtimeState.Status = SessionRunning
+		runtimeState.CurrentTurnID = turnID
 		runtimeState.UpdatedAt = time.Now().UTC()
 		return nil
 	}); err != nil {
+		a.releaseSessionRun(run)
 		return err
 	}
 	if deleteStoredReceipt {
 		a.deleteStoredToolReceipt(context.Background(), a.id, pending.ToolCallID)
 	}
-	a.startPendingBatchRecoveryRun(ctx, session, recoveryPending, turnID, runMeta)
+	a.startPendingBatchRecoveryRun(runCtx, session, recoveryPending, turnID, runMeta, run)
 	return nil
 }
 
-func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session *Session, pending *PendingToolInvocation, turnID string, runMeta *team.RunMeta) {
+func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session *Session, pending *PendingToolInvocation, turnID string, runMeta *team.RunMeta, run *sessionRunControl) {
 	if a == nil || session == nil || pending == nil {
 		return
 	}
@@ -3023,19 +3246,27 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
-	a.setActiveCancel(cancel)
+	if !a.installSessionRunCancel(run, cancel) {
+		cancel()
+		a.releaseSessionRun(run)
+		return
+	}
 	a.activeRunWG.Add(1)
 	go func() {
 		defer a.activeRunWG.Done()
 		if err := a.executeRemainingPendingBatch(runCtx, session, pending); err != nil {
 			cancel()
-			a.clearActiveCancel()
-			a.finishPendingBatchRecovery(session, turnID, err)
+			a.clearSessionRunCancel(run)
+			a.finishPendingBatchRecovery(session, turnID, err, run)
 			return
 		}
 		cancel()
-		a.clearActiveCancel()
-		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, runRouteOverrideFromRunMeta(runMeta), nil, false)
+		a.clearSessionRunCancel(run)
+		if !a.sessionRunOwnsRunningState(run) {
+			a.finishPendingBatchRecovery(session, turnID, context.Canceled, run)
+			return
+		}
+		a.startSessionRun(withSessionRunControl(context.Background(), run), session, "", true, turnID, runMeta, runRouteOverrideFromRunMeta(runMeta), nil, false, run)
 	}()
 }
 
@@ -3074,77 +3305,390 @@ func (a *SessionActor) executeRemainingPendingBatch(ctx context.Context, session
 	return nil
 }
 
-func (a *SessionActor) finishPendingBatchRecovery(session *Session, turnID string, execErr error) {
+func (a *SessionActor) finishPendingBatchRecovery(session *Session, turnID string, execErr error, run *sessionRunControl) {
 	if a == nil {
 		return
 	}
+	if !a.sessionRunOwned(run) {
+		return
+	}
+	run.finalizing.Store(true)
 	status := SessionIdle
-	if a.consumeInterrupted() || (execErr != nil && (strings.Contains(execErr.Error(), "context canceled") || strings.Contains(execErr.Error(), "deadline exceeded"))) {
+	if run.interrupted.Load() || errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) ||
+		(execErr != nil && (strings.Contains(execErr.Error(), "context canceled") || strings.Contains(execErr.Error(), "deadline exceeded"))) {
 		status = SessionStopped
 	}
-	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
-		state.Status = status
-		state.CurrentTurnID = ""
-		state.CurrentRunMeta = nil
-		resetFrozenTurnTools(state)
-		state.PendingTool = nil
-		state.PendingApproval = nil
-		state.PendingQuestion = nil
-		state.UpdatedAt = time.Now().UTC()
-		return nil
-	})
+	finalizeCtx := withSessionRunControl(context.Background(), run)
 	if session != nil {
-		_ = a.persistSession(context.Background(), session)
+		if persistErr := a.persistSession(finalizeCtx, session); persistErr != nil &&
+			!errors.Is(persistErr, errSessionRunSuperseded) && execErr == nil {
+			execErr = persistErr
+		}
 	}
-	a.publish(runtimeevents.Event{
-		Type:      EventSessionEnd,
-		SessionID: a.id,
-		TraceID:   strings.TrimSpace(turnID),
-		Payload: map[string]interface{}{
-			"turn_id":  strings.TrimSpace(turnID),
-			"resume":   true,
-			"success":  false,
-			"steps":    0,
-			"error":    errorString(execErr),
-			"duration": int64(0),
-		},
+	if a.sessionRunOwned(run) {
+		_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+			if state.CurrentTurnID != strings.TrimSpace(turnID) {
+				return nil
+			}
+			state.Status = status
+			state.CurrentTurnID = ""
+			state.CurrentRunMeta = nil
+			resetFrozenTurnTools(state)
+			state.PendingTool = nil
+			state.PendingApproval = nil
+			state.PendingQuestion = nil
+			state.UpdatedAt = time.Now().UTC()
+			return nil
+		})
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionEnd,
+			SessionID: a.id,
+			TraceID:   strings.TrimSpace(turnID),
+			Payload: map[string]interface{}{
+				"turn_id":  strings.TrimSpace(turnID),
+				"resume":   true,
+				"success":  false,
+				"steps":    0,
+				"error":    errorString(execErr),
+				"duration": int64(0),
+				"status":   status,
+			},
+		})
+	}
+	a.releaseSessionRun(run)
+}
+
+func withSessionRunControl(ctx context.Context, run *sessionRunControl) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if run == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionRunControlContextKey{}, run)
+}
+
+func sessionRunControlFromContext(ctx context.Context) (*sessionRunControl, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	run, ok := ctx.Value(sessionRunControlContextKey{}).(*sessionRunControl)
+	return run, ok && run != nil
+}
+
+func sessionRunTurnID(run *sessionRunControl) string {
+	if run == nil {
+		return ""
+	}
+	return strings.TrimSpace(run.turnID)
+}
+
+func (run *sessionRunControl) complete(result SubmitResult) {
+	if run == nil || run.reply == nil {
+		return
+	}
+	run.replyOnce.Do(func() {
+		run.reply <- result
 	})
 }
 
-func (a *SessionActor) setActiveCancel(cancel context.CancelFunc) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.activeCancel = cancel
+func (a *SessionActor) retireInterruptedSessionRunAfter(run *sessionRunControl, delay time.Duration) {
+	if a == nil || run == nil {
+		return
+	}
+	retire := func() {
+		if run.finalizing.Load() {
+			return
+		}
+		if a.abandonSessionRun(run) {
+			a.releaseDetachedSessionRunWait(run)
+			run.complete(SubmitResult{Err: context.Canceled})
+			return
+		}
+		// The execution loop may have entered finalization while abandonment
+		// was acquiring lifecycle ownership. Preserve its structured result.
+		if !run.finalizing.Load() {
+			run.complete(SubmitResult{Err: context.Canceled})
+		}
+	}
+	if delay <= 0 {
+		retire()
+		return
+	}
+	time.AfterFunc(delay, retire)
 }
 
-func (a *SessionActor) clearActiveCancel() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.activeCancel = nil
+func (a *SessionActor) releaseSessionRunWait(run *sessionRunControl) {
+	a.releaseSessionRunWaitMode(run, false)
 }
 
-func (a *SessionActor) setActiveStripMetadataKeys(keys []string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.activeStripMetadataKeys = normalizedMetadataKeys(keys)
+func (a *SessionActor) detachSessionRunWait(run *sessionRunControl) {
+	if run == nil {
+		return
+	}
+	run.runWaitMu.Lock()
+	run.runWaitDetached = true
+	run.runWaitMu.Unlock()
 }
 
-func (a *SessionActor) clearActiveStripMetadataKeys() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.activeStripMetadataKeys = nil
+func (a *SessionActor) releaseDetachedSessionRunWait(run *sessionRunControl) {
+	a.releaseSessionRunWaitMode(run, true)
 }
 
-func (a *SessionActor) currentStripMetadataKeys() []string {
+func (a *SessionActor) trackSessionRunWait(run *sessionRunControl) {
+	if a == nil || run == nil {
+		return
+	}
+	run.runWaitMu.Lock()
+	defer run.runWaitMu.Unlock()
+	if run.runWaitTracked {
+		return
+	}
+	a.activeRunWG.Add(1)
+	run.runWaitTracked = true
+	if run.runWaitReleasePending {
+		run.runWaitOnce.Do(func() {
+			a.activeRunWG.Done()
+		})
+	}
+}
+
+func (a *SessionActor) releaseSessionRunWaitMode(run *sessionRunControl, allowDetached bool) {
+	if a == nil || run == nil {
+		return
+	}
+	run.runWaitMu.Lock()
+	defer run.runWaitMu.Unlock()
+	if run.runWaitDetached && !allowDetached {
+		return
+	}
+	if !run.runWaitTracked {
+		// A forced supersession can win the race with asynchronous run startup.
+		// Remember the release so tracking performs a balanced Add/Done pair.
+		run.runWaitReleasePending = true
+		return
+	}
+	run.runWaitOnce.Do(func() {
+		a.activeRunWG.Done()
+	})
+}
+
+func sessionRunEventMatches(run *sessionRunControl, event runtimeevents.Event, sessionID string) bool {
+	if run == nil {
+		return false
+	}
+	sessionMatched := false
+	if eventSessionID := strings.TrimSpace(event.SessionID); eventSessionID != "" {
+		if eventSessionID != strings.TrimSpace(sessionID) {
+			return false
+		}
+		sessionMatched = true
+	}
+	if event.Payload != nil {
+		if eventTurnID, ok := event.Payload["turn_id"].(string); ok && strings.TrimSpace(eventTurnID) != "" {
+			return strings.TrimSpace(eventTurnID) == run.turnID
+		}
+	}
+	if traceID := strings.TrimSpace(event.TraceID); strings.HasPrefix(traceID, "turn_") {
+		return traceID == run.turnID
+	}
+	// Anonymous events on a shared agent bus are not proof of progress for this
+	// session; require at least a positive session match when no turn is present.
+	return sessionMatched
+}
+
+func (a *SessionActor) claimSessionRun(turnID string, stripMetadataKeys []string, reply chan SubmitResult) *sessionRunControl {
+	if a == nil {
+		return nil
+	}
+	a.runLifecycleMu.Lock()
+	defer a.runLifecycleMu.Unlock()
+
+	run := &sessionRunControl{
+		generation:        a.runSequence.Add(1),
+		turnID:            strings.TrimSpace(turnID),
+		stripMetadataKeys: normalizedMetadataKeys(stripMetadataKeys),
+		reply:             reply,
+	}
+	run.lastActivity.Store(time.Now().UnixNano())
+
+	var (
+		previous         *sessionRunControl
+		superseded       *sessionRunControl
+		supersededCancel context.CancelFunc
+	)
+	a.mu.Lock()
+	if previous = a.activeRun; previous != nil {
+		// A completed run can briefly remain installed after it exposes
+		// idle/stopped state. Replacing that finalizing token is safe, but
+		// canceling it would incorrectly discard its successful public result.
+		if !previous.finalizing.Load() {
+			superseded = previous
+			a.detachSessionRunWait(previous)
+			previous.interrupted.Store(true)
+			previous.abandoned.Store(true)
+			supersededCancel = previous.cancel
+			previous.cancel = nil
+		}
+	}
+	a.mu.Unlock()
+	if supersededCancel != nil {
+		supersededCancel()
+	}
+	if superseded != nil {
+		superseded.complete(SubmitResult{Err: context.Canceled})
+	}
+
+	// Do not install the successor until any predecessor write that passed its
+	// ownership check has drained. Cancellation/completion happen first so an
+	// uncooperative provider or cancel-aware store cannot strand the old caller.
+	a.sessionPersistMu.Lock()
+	a.mu.Lock()
+	a.activeRun = run
+	a.mu.Unlock()
+	a.sessionPersistMu.Unlock()
+	if superseded != nil {
+		a.releaseDetachedSessionRunWait(superseded)
+	}
+	return run
+}
+
+func (a *SessionActor) installSessionRunCancel(run *sessionRunControl, cancel context.CancelFunc) bool {
+	if a == nil || run == nil || cancel == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeRun != run || run.abandoned.Load() || run.interrupted.Load() {
+		return false
+	}
+	run.cancel = cancel
+	return true
+}
+
+func (a *SessionActor) clearSessionRunCancel(run *sessionRunControl) {
+	if a == nil || run == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeRun == run {
+		run.cancel = nil
+	}
+}
+
+func (a *SessionActor) sessionRunOwned(run *sessionRunControl) bool {
+	if a == nil || run == nil || run.abandoned.Load() {
+		return false
+	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return append([]string(nil), a.activeStripMetadataKeys...)
+	return a.activeRun == run && a.activeRun.generation == run.generation
+}
+
+func (a *SessionActor) sessionRunOwnsRunningState(run *sessionRunControl) bool {
+	if a == nil || run == nil || run.abandoned.Load() || run.interrupted.Load() {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.activeRun == run &&
+		a.activeRun.generation == run.generation &&
+		a.state != nil &&
+		a.state.Status == SessionRunning &&
+		a.state.CurrentTurnID == run.turnID
+}
+
+func (a *SessionActor) activeSessionRunMetadataKeys() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.activeRun == nil || a.activeRun.abandoned.Load() || a.activeRun.interrupted.Load() {
+		return nil
+	}
+	return append([]string(nil), a.activeRun.stripMetadataKeys...)
+}
+
+func (a *SessionActor) releaseSessionRun(run *sessionRunControl) {
+	if a == nil || run == nil {
+		return
+	}
+	var cancel context.CancelFunc
+	a.mu.Lock()
+	if a.activeRun == run {
+		cancel = run.cancel
+		run.cancel = nil
+		a.activeRun = nil
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *SessionActor) abandonSessionRun(run *sessionRunControl) bool {
+	if a == nil || run == nil {
+		return false
+	}
+	a.runLifecycleMu.Lock()
+	defer a.runLifecycleMu.Unlock()
+
+	var cancel context.CancelFunc
+	a.mu.Lock()
+	if a.activeRun != run || run.abandoned.Load() || run.finalizing.Load() {
+		a.mu.Unlock()
+		return false
+	}
+	a.detachSessionRunWait(run)
+	run.interrupted.Store(true)
+	run.abandoned.Store(true)
+	cancel = run.cancel
+	run.cancel = nil
+	a.activeRun = nil
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+
+	// A persist that passed its ownership check before abandonment may still be
+	// writing a full session row. Drain it before OnRunStalled can release the
+	// lease or a local successor can load the session, fencing stale history.
+	a.sessionPersistMu.Lock()
+	a.sessionPersistMu.Unlock()
+	return true
+}
+
+func (a *SessionActor) interruptActiveSessionRun() *sessionRunControl {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	run := a.activeRun
+	var cancel context.CancelFunc
+	if run != nil {
+		run.interrupted.Store(true)
+		cancel = run.cancel
+		run.cancel = nil
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return run
 }
 
 func (a *SessionActor) cancelActive() {
+	if a == nil {
+		return
+	}
 	a.mu.Lock()
-	cancel := a.activeCancel
-	a.activeCancel = nil
+	var cancel context.CancelFunc
+	if a.activeRun != nil {
+		cancel = a.activeRun.cancel
+		a.activeRun.cancel = nil
+	}
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -3214,7 +3758,7 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 	case <-expiry:
 		a.unregisterApprovalWaiter(req.ID)
 		expiryErr := approvalExpiredError(pending)
-		_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 			if state.PendingApproval != nil && state.PendingApproval.ID == req.ID {
 				state.PendingApproval = nil
 				state.PendingTool = nil
@@ -3233,7 +3777,7 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 			detach.detached.Store(true)
 		}
 		a.unregisterApprovalWaiter(req.ID)
-		_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 			if state.PendingApproval != nil && state.PendingApproval.ID == req.ID {
 				state.Status = SessionWaitingApproval
 				state.UpdatedAt = time.Now().UTC()
@@ -3439,7 +3983,7 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 		return answer, nil
 	case <-ctx.Done():
 		a.unregisterQuestionWaiter(req.ID)
-		_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 			if state.PendingQuestion != nil && state.PendingQuestion.ID == req.ID {
 				state.PendingQuestion = nil
 				state.PendingTool = nil
@@ -4034,10 +4578,13 @@ func (a *SessionActor) publish(event runtimeevents.Event) {
 	if a == nil {
 		return
 	}
-	a.touchRunActivity()
 	if event.SessionID == "" {
 		event.SessionID = a.id
 	}
+	a.mu.RLock()
+	run := a.activeRun
+	a.mu.RUnlock()
+	a.touchRunActivity(run, event)
 	if event.AgentName == "" && a.agent != nil && a.agent.GetConfig() != nil {
 		event.AgentName = a.agent.GetConfig().Name
 	}
