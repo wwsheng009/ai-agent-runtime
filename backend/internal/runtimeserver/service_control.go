@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 const DefaultPIDFile = "./logs/runtime-server.pid"
@@ -104,11 +106,26 @@ func ProcessRunning(pid int) bool {
 		return false
 	}
 	if runtime.GOOS == "windows" {
-		host := windowsPowerShellHost()
-		cmd := exec.Command(host, "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }", pid))
-		return cmd.Run() == nil
+		return processRunningWindows(uint32(pid))
 	}
 	return exec.Command("/bin/sh", "-c", fmt.Sprintf("kill -0 %d 2>/dev/null", pid)).Run() == nil
+}
+
+// processRunningWindows 用 Windows API OpenProcess 探测进程是否存在，
+// 不依赖外部 PowerShell。此前用 powershell.exe -Command "if (Get-Process ...)"
+// 检查：在无 PowerShell（或被裁剪/禁用）的 Win7 工控机上恒失败，导致
+// start 命令在 serve 进程已写好 PID 文件的正常启动情况下空转 30s，
+// 误报"未写入 PID 文件"。
+func processRunningWindows(pid uint32) bool {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		// Vista+ 语义：进程不存在返回 ERROR_INVALID_PARAMETER；
+		// 其他错误（如 ERROR_ACCESS_DENIED）表示进程存在但权限不足，
+		// 此时按"存在"处理，避免误判。
+		return err != windows.ERROR_INVALID_PARAMETER
+	}
+	_ = windows.CloseHandle(h)
+	return true
 }
 
 func StartDetachedProcess(executable string, args []string, env []string) (*exec.Cmd, error) {
