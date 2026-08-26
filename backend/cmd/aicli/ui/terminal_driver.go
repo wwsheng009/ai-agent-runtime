@@ -40,6 +40,15 @@ type TerminalDriver struct {
 	caps   TerminalCapabilities
 }
 
+// EnsureConsoleUTF8Output 在任何输出发生前调用一次，确保无 VT 的 Windows
+// 控制台（如 Win7 conhost）按 UTF-8 解码程序输出，避免中文显示为乱码。
+// 支持 VT 的控制台、管道/文件重定向、非 Windows 平台均为空操作。
+// 返回值：仅在确实切换过代码页时非 nil；调用者应 defer 它在进程正常
+// 退出时恢复原代码页，避免污染同一 console 上后续命令的显示。
+func EnsureConsoleUTF8Output() (restore func()) {
+	return platformEnsureConsoleUTF8Output(os.Stdout)
+}
+
 func NewTerminalDriver(stdin, stdout *os.File) *TerminalDriver {
 	d := &TerminalDriver{
 		stdin:  stdin,
