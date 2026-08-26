@@ -73,6 +73,9 @@ func shouldDisplayInteractivePrompt(session *ChatSession) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return false
 	}
+	if session.Interaction != nil && !session.Interaction.IsReady() {
+		return false
+	}
 	return !interactiveTeamPending(session)
 }
 
@@ -112,7 +115,7 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
-	return true, "", nil
+	return shouldDisplayInteractivePrompt(session), "", nil
 }
 
 func waitForInteractivePromptReady(session *ChatSession) error {

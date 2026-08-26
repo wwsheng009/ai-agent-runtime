@@ -2795,6 +2795,36 @@ func TestChatRuntimeEvents_RestoresPromptWithoutRuntimeStoreAfterRunEnds(t *test
 	require.Equal(t, []string{"PROMPT"}, rendered)
 }
 
+func TestChatRuntimeEvents_DoesNotRestorePromptUntilInteractionReady(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	coord.promptDelay = 10 * time.Millisecond
+	output := &synchronizedBuffer{}
+	coord.SetWriter(output)
+
+	// sendMessage marks the interaction waiting before the actor executor starts
+	// its runtime event window. EndRun happens before sendMessage's deferred
+	// CompleteWaiting, so it must not expose a Ready prompt at this boundary.
+	coord.StartWaiting()
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	bridge.EndRun()
+
+	require.Never(t, func() bool {
+		return strings.Contains(output.String(), ui.UserPromptText(0))
+	}, 80*time.Millisecond, 10*time.Millisecond)
+
+	coord.CompleteWaiting()
+	bridge.writePromptIfIdle()
+	require.Eventually(t, func() bool {
+		return strings.Contains(output.String(), ui.UserPromptText(0))
+	}, 200*time.Millisecond, 10*time.Millisecond)
+}
+
 func TestChatRuntimeEvents_DoesNotRedrawPromptWhileRunActive(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
 	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
