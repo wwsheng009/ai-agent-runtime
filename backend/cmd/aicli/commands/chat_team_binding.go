@@ -154,8 +154,14 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 	if mode, err := parseChatApprovalReuseMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextApprovalReuse)); err == nil {
 		session.ApprovalReuseMode = mode
 	}
-	if mode, err := parseChatPermissionMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode), false); err == nil {
-		session.PermissionMode = mode
+	// CLI 显式指定的权限模式（--yolo / --permission-mode）优先于
+	// 持久化会话中存储的模式：恢复会话时不得用旧会话的权限设置
+	// 覆盖用户本次命令行上的明确要求（否则 --yolo 会被降级为
+	// default，导致工具调用继续弹审批）。
+	if !session.permissionModeCLIChanged {
+		if mode, err := parseChatPermissionMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode), false); err == nil {
+			session.PermissionMode = mode
+		}
 	}
 	if debugMode, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextDebugMode); ok {
 		session.DebugMode = debugMode

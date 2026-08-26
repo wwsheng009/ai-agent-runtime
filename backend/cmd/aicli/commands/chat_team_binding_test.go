@@ -8,6 +8,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -108,6 +109,59 @@ func TestRestoreChatRuntimeContext_ClearsDebugModeWhenMetadataMissing(t *testing
 
 	if session.DebugMode {
 		t.Fatal("expected debug mode to reset when restored session has no debug metadata")
+	}
+}
+
+func TestRestoreChatRuntimeContext_KeepsCLIPermissionOverride(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, "default", chatRuntimeContextPermissionMode)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.RequestedPermissionMode, "default")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.EffectivePermissionMode, "default")
+
+	session := &ChatSession{
+		PermissionMode:           runtimepolicy.ModeBypassPermissions,
+		RequestedPermissionMode:  string(runtimepolicy.ModeBypassPermissions),
+		EffectivePermissionMode:  string(runtimepolicy.ModeBypassPermissions),
+		permissionModeCLIChanged: true, // 相当于 --yolo / --permission-mode
+	}
+
+	restoreChatRuntimeContext(session, runtimeSession)
+	if session.PermissionMode != runtimepolicy.ModeBypassPermissions {
+		t.Fatalf("CLI 显式指定的权限模式被持久化会话覆盖: got %s, want %s", session.PermissionMode, runtimepolicy.ModeBypassPermissions)
+	}
+
+	restoreChatRouteTransparency(session, runtimeSession)
+	if session.RequestedPermissionMode != string(runtimepolicy.ModeBypassPermissions) {
+		t.Fatalf("CLI requested permission mode 被 route 元数据覆盖: got %q, want %q", session.RequestedPermissionMode, runtimepolicy.ModeBypassPermissions)
+	}
+	if session.EffectivePermissionMode != string(runtimepolicy.ModeBypassPermissions) {
+		t.Fatalf("CLI effective permission mode 被 route 元数据覆盖: got %q, want %q", session.EffectivePermissionMode, runtimepolicy.ModeBypassPermissions)
+	}
+}
+
+func TestRestoreChatRuntimeContext_StoredModeWinsWithoutCLIOverride(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, "default", chatRuntimeContextPermissionMode)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.RequestedPermissionMode, "default")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.EffectivePermissionMode, "default")
+
+	session := &ChatSession{
+		PermissionMode:          runtimepolicy.ModeBypassPermissions,
+		RequestedPermissionMode: string(runtimepolicy.ModeBypassPermissions),
+		EffectivePermissionMode: string(runtimepolicy.ModeBypassPermissions),
+	}
+
+	restoreChatRuntimeContext(session, runtimeSession)
+	if session.PermissionMode != runtimepolicy.ModeDefault {
+		t.Fatalf("未显式指定权限模式时应恢复持久化会话的模式: got %s, want %s", session.PermissionMode, runtimepolicy.ModeDefault)
+	}
+
+	restoreChatRouteTransparency(session, runtimeSession)
+	if session.RequestedPermissionMode != string(runtimepolicy.ModeDefault) {
+		t.Fatalf("route 元数据应恢复 requested permission mode: got %q, want %q", session.RequestedPermissionMode, runtimepolicy.ModeDefault)
+	}
+	if session.EffectivePermissionMode != string(runtimepolicy.ModeDefault) {
+		t.Fatalf("route 元数据应恢复 effective permission mode: got %q, want %q", session.EffectivePermissionMode, runtimepolicy.ModeDefault)
 	}
 }
 

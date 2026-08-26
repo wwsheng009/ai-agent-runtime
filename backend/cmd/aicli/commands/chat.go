@@ -55,6 +55,10 @@ type ChatSession struct {
 	SuppressReasoningOutput  bool
 	DisableTools             bool
 	DebugMode                bool
+	// permissionModeCLIChanged 表示权限模式由命令行显式指定
+	// （--yolo / --permission-mode）。恢复或切换持久化会话时，
+	// 不得用会话中存储的权限模式覆盖 CLI 显式指定值。
+	permissionModeCLIChanged bool
 	HTTPDebug                bool
 	Stream                   bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.

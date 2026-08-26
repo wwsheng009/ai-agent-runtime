@@ -148,6 +148,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		OutputFormat:             opts.OutputFormat,
 		InputReader:              chatOptionInputReader(opts),
 		PermissionMode:           opts.PermissionMode,
+		permissionModeCLIChanged: opts.PermissionModeChanged,
 		CLIAllowTools:            append([]string(nil), opts.CLIAllowTools...),
 		CLIDenyTools:             append([]string(nil), opts.CLIDenyTools...),
 		ApprovalReuseMode:        opts.ApprovalReuseMode,

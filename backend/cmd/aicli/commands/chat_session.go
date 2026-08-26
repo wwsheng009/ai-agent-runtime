@@ -1385,21 +1385,26 @@ func restoreChatRouteTransparency(session *ChatSession, runtimeSession *runtimec
 		session.ReasoningEffort,
 		sessionmeta.String(context, sessionmeta.EffectiveReasoningEffort),
 	)
-	requestedPermissionMode := firstNonEmptyChatValue(
-		sessionmeta.String(context, sessionmeta.RequestedPermissionMode),
-		storedPermissionMode,
-		ctx.RequestedPermissionMode,
-		string(ctx.PermissionMode),
-	)
-	effectivePermissionMode := firstNonEmptyChatValue(
-		string(ctx.PermissionMode),
-		sessionmeta.String(context, sessionmeta.EffectivePermissionMode),
-		storedPermissionMode,
-	)
-	session.runtimeCtxMu.Lock()
-	session.RequestedPermissionMode = requestedPermissionMode
-	session.EffectivePermissionMode = effectivePermissionMode
-	session.runtimeCtxMu.Unlock()
+	// CLI 显式指定的权限模式（--yolo / --permission-mode）优先：
+	// 恢复会话时保留构建阶段写入的 Requested/EffectivePermissionMode，
+	// 不被旧会话存储的 route 元数据覆盖。
+	if !session.permissionModeCLIChanged {
+		requestedPermissionMode := firstNonEmptyChatValue(
+			sessionmeta.String(context, sessionmeta.RequestedPermissionMode),
+			storedPermissionMode,
+			ctx.RequestedPermissionMode,
+			string(ctx.PermissionMode),
+		)
+		effectivePermissionMode := firstNonEmptyChatValue(
+			string(ctx.PermissionMode),
+			sessionmeta.String(context, sessionmeta.EffectivePermissionMode),
+			storedPermissionMode,
+		)
+		session.runtimeCtxMu.Lock()
+		session.RequestedPermissionMode = requestedPermissionMode
+		session.EffectivePermissionMode = effectivePermissionMode
+		session.runtimeCtxMu.Unlock()
+	}
 	session.RouteWarnings = runtimeSessionRouteWarnings(runtimeSession)
 	session.FallbackUsed, _ = sessionmeta.Bool(context, sessionmeta.FallbackUsed)
 	session.FallbackReason = sessionmeta.String(context, sessionmeta.FallbackReason)
