@@ -2594,7 +2594,13 @@ func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*tool
 			continue
 		}
 		if r != nil && r.Host != nil && r.Host.SessionHub != nil {
-			r.Host.SessionHub.Stop(closeID)
+			// Use asynchronous stop: the close tool can execute on the target
+			// actor's own run goroutine (self-stop). Waiting synchronously
+			// there deadlocks — the actor loop only exits after that run
+			// goroutine returns while the run goroutine is stuck waiting for
+			// the loop to exit. The run is cancelled immediately, so the
+			// actor drains on its own.
+			r.Host.SessionHub.StopAsync(closeID)
 		}
 		if r != nil && r.Host != nil && r.Host.SessionStore != nil {
 			if session, loadErr := r.Host.SessionStore.Load(ctx, closeID); loadErr == nil && session != nil {

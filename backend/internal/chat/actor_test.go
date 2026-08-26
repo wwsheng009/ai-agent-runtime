@@ -3,9 +3,11 @@ package chat
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +79,23 @@ type blockingRuntimeStateStore struct {
 	release chan struct{}
 }
 
+type failingRuntimeStateStore struct {
+	saveCalls atomic.Int32
+}
+
+func (s *failingRuntimeStateStore) SaveState(ctx context.Context, state *RuntimeState) error {
+	s.saveCalls.Add(1)
+	return errors.New("save state failed")
+}
+
+func (s *failingRuntimeStateStore) LoadState(ctx context.Context, sessionID string) (*RuntimeState, error) {
+	return nil, nil
+}
+
+func (s *failingRuntimeStateStore) DeleteState(ctx context.Context, sessionID string) error {
+	return nil
+}
+
 func (s *blockingRuntimeStateStore) SaveState(ctx context.Context, state *RuntimeState) error {
 	select {
 	case s.started <- struct{}{}:
@@ -142,6 +161,97 @@ func TestSessionActorStopContextTimesOutWhileCommandIsStuckInSaveState(t *testin
 	case <-actor.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("actor did not finish stopping after SaveState was released")
+	}
+}
+
+func TestSessionActorUpdateStateDoesNotInstallFailedSave(t *testing.T) {
+	store := &failingRuntimeStateStore{}
+	actor := &SessionActor{
+		id: "transactional-state-session",
+		state: &RuntimeState{
+			SessionID: "transactional-state-session",
+			Status:    SessionIdle,
+			UpdatedAt: time.Now().UTC(),
+		},
+		stateStore: store,
+	}
+
+	err := actor.updateState(context.Background(), func(state *RuntimeState) error {
+		state.Status = SessionRunning
+		state.CurrentTurnID = "turn_not_durable"
+		state.PendingQuestion = &toolbroker.UserQuestionRequest{ID: "question_not_durable"}
+		return nil
+	})
+	require.EqualError(t, err, "save state failed")
+	require.Equal(t, int32(3), store.saveCalls.Load())
+
+	state := actor.State()
+	require.NotNil(t, state)
+	require.Equal(t, SessionIdle, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+	require.Nil(t, state.PendingQuestion)
+}
+
+func TestSessionActorUpdateStateConvergentAdvancesLocalStateAfterFailedSave(t *testing.T) {
+	store := &failingRuntimeStateStore{}
+	actor := &SessionActor{
+		id: "convergent-state-session",
+		state: &RuntimeState{
+			SessionID:     "convergent-state-session",
+			Status:        SessionRunning,
+			CurrentTurnID: "turn_stalled",
+			UpdatedAt:     time.Now().UTC(),
+		},
+		stateStore: store,
+	}
+
+	err := actor.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+		if state.CurrentTurnID != "turn_stalled" {
+			return nil
+		}
+		state.Status = SessionStopped
+		state.CurrentTurnID = ""
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	require.EqualError(t, err, "save state failed")
+	require.Equal(t, int32(3), store.saveCalls.Load())
+
+	state := actor.State()
+	require.NotNil(t, state)
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+}
+
+func TestSessionActorClaimDoesNotCancelFinalizingRun(t *testing.T) {
+	previousReply := make(chan SubmitResult, 1)
+	previous := &sessionRunControl{
+		generation: 1,
+		turnID:     "turn_previous",
+		reply:      previousReply,
+	}
+	previous.finalizing.Store(true)
+	actor := &SessionActor{
+		id:        "finalizing-replacement-session",
+		state:     &RuntimeState{SessionID: "finalizing-replacement-session", Status: SessionIdle},
+		activeRun: previous,
+	}
+
+	next := actor.claimSessionRun("turn_next", nil, make(chan SubmitResult, 1))
+	require.NotNil(t, next)
+	require.Same(t, next, actor.activeRun)
+	require.False(t, previous.abandoned.Load())
+	require.False(t, previous.interrupted.Load())
+	require.Zero(t, len(previousReply), "replacement must not synthesize cancellation for a completed run")
+
+	expected := &agent.Result{Success: true, TurnID: previous.turnID}
+	previous.complete(SubmitResult{Result: expected})
+	select {
+	case outcome := <-previousReply:
+		require.Same(t, expected, outcome.Result)
+		require.NoError(t, outcome.Err)
+	case <-time.After(time.Second):
+		t.Fatal("finalizing run could not complete its original reply")
 	}
 }
 
@@ -258,6 +368,53 @@ func TestPersistSessionPreservesBrokerHandleAliasesFromLatestStoredSession(t *te
 	got, ok := persisted.GetContext(toolbroker.SessionHandleAliasesContextKey)
 	require.True(t, ok)
 	assert.Equal(t, aliases, got)
+}
+
+func TestSessionActorStopAsyncFromOwnRunGoroutineDoesNotDeadlock(t *testing.T) {
+	// Regression for the 25840 deadlock: the close tool executed on the
+	// actor's own run goroutine used to call Stop/StopContext, which waits
+	// for a.done. done only closes after the actor loop drains
+	// activeRunWG — which includes the caller's own run goroutine, so the
+	// wait never completes. StopAsync breaks the cycle: it signals the stop
+	// and cancels in-flight runs but never waits.
+	store := &failingRuntimeStateStore{}
+	actor := &SessionActor{
+		id:         "self-stop-session",
+		cmdCh:      make(chan Command, 4),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		stateStore: store,
+	}
+	actor.Start()
+
+	// An in-flight run is holding activeRunWG; the Close-tool invocation is
+	// modelled after it as an extra run goroutine (the tool executes in a
+	// run goroutine, not on the actor loop).
+	actor.activeRunWG.Add(1)
+
+	stopped := make(chan struct{})
+	go func() {
+		actor.StopAsync()
+		close(stopped)
+		// The cancelled run unwinds and returns (provider call aborted by
+		// the run cancellation / response-header guard).
+		actor.activeRunWG.Done()
+	}()
+
+	select {
+	case <-stopped:
+		// StopAsync returned promptly; the old synchronous Stop would
+		// still be blocked on <-done here.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("StopAsync blocked: synchronous stop inside a run goroutine deadlocks")
+	}
+
+	select {
+	case <-actor.done:
+		// The loop drained activeRunWG and exited once the run returned.
+	case <-time.After(2 * time.Second):
+		t.Fatal("actor did not finish stopping after the run returned")
+	}
 }
 
 func TestSessionActorSubmitPromptReturnsWhenLoopExitsBeforeReply(t *testing.T) {
@@ -459,6 +616,69 @@ type cancelBlockingLLMProvider struct {
 	name    string
 	entered chan struct{}
 }
+
+type ignoreCancelLLMCall struct {
+	release  chan struct{}
+	returned chan struct{}
+	response string
+}
+
+// ignoreCancelLLMProvider 模拟无视 ctx 取消的挂死 provider。每次调用有独立
+// release，测试可先完成新 run、继续挂住旧 run，再单独放行旧 run 收尾。
+type ignoreCancelLLMProvider struct {
+	name      string
+	entered   chan *ignoreCancelLLMCall
+	shutdown  chan struct{}
+	responses int32
+}
+
+func (p *ignoreCancelLLMProvider) Name() string { return p.name }
+
+func (p *ignoreCancelLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	sequence := atomic.AddInt32(&p.responses, 1)
+	call := &ignoreCancelLLMCall{
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+		response: fmt.Sprintf("released-%d", sequence),
+	}
+	defer close(call.returned)
+	select {
+	case p.entered <- call:
+	case <-p.shutdown:
+		return nil, errors.New("provider shut down")
+	}
+	select {
+	case <-call.release:
+	case <-p.shutdown:
+		return nil, errors.New("provider shut down")
+	}
+	return &llm.LLMResponse{
+		Content: call.response,
+		Usage: &types.TokenUsage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+		Model: "test-model",
+	}, nil
+}
+
+func (p *ignoreCancelLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	return nil, fmt.Errorf("streaming is not supported")
+}
+
+func (p *ignoreCancelLLMProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *ignoreCancelLLMProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens: 128000,
+		SupportsTools:    true,
+	}
+}
+
+func (p *ignoreCancelLLMProvider) CheckHealth(ctx context.Context) error { return nil }
 
 func (p *cancelBlockingLLMProvider) Name() string {
 	return p.name
@@ -1449,6 +1669,251 @@ func TestSessionActorInterruptConvergesStoppedStateAndTelemetry(t *testing.T) {
 	require.Greater(t, sessionEnd["duration"].(int64), int64(0))
 }
 
+func TestSessionActorInterruptDuringPrepareRunDoesNotStartProvider(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-interrupt-prepare-user")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "prepare-interrupt-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-prepare-interrupt-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 2,
+	}, nil, runtime)
+
+	prepareEntered := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+		PrepareRun: func(ctx context.Context, session *Session, resume bool) error {
+			close(prepareEntered)
+			<-releasePrepare
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	// Pending recovery may enter startSessionRun outside the actor command loop.
+	// Build that shape directly so Interrupt can race a blocked PrepareRun.
+	turnID := "turn_prepare_interrupt"
+	reply := make(chan SubmitResult, 1)
+	run := actor.claimSessionRun(turnID, nil, reply)
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.Status = SessionRunning
+		state.CurrentTurnID = turnID
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}))
+	go actor.startSessionRun(ctx, session, "do not execute", false, turnID, nil, nil, reply, false, run)
+
+	select {
+	case <-prepareEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PrepareRun did not start")
+	}
+	require.NoError(t, actor.Interrupt(ctx))
+	close(releasePrepare)
+
+	select {
+	case outcome := <-reply:
+		require.Nil(t, outcome.Result)
+		require.ErrorIs(t, outcome.Err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupted startup did not release its caller")
+	}
+	select {
+	case <-provider.entered:
+		t.Fatal("provider started after PrepareRun was interrupted")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	state := actor.State()
+	require.NotNil(t, state)
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, actor.StopContext(stopCtx))
+}
+
+func TestSessionActorCanceledContextDuringPrepareRunDoesNotStartProvider(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-canceled-prepare-user")
+	require.NoError(t, err)
+
+	provider := &failingLLMProvider{
+		name: "canceled-prepare-provider",
+		err:  errors.New("provider must not be called"),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-canceled-prepare-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 2,
+	}, nil, runtime)
+
+	prepareEntered := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+		PrepareRun: func(ctx context.Context, session *Session, resume bool) error {
+			close(prepareEntered)
+			<-releasePrepare
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	turnID := "turn_canceled_prepare"
+	reply := make(chan SubmitResult, 1)
+	run := actor.claimSessionRun(turnID, nil, reply)
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.Status = SessionRunning
+		state.CurrentTurnID = turnID
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}))
+	runCtx, cancelRun := context.WithCancel(ctx)
+	startupReturned := make(chan struct{})
+	go func() {
+		defer close(startupReturned)
+		actor.startSessionRun(runCtx, session, "do not execute", false, turnID, nil, nil, reply, false, run)
+	}()
+
+	select {
+	case <-prepareEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PrepareRun did not start")
+	}
+	cancelRun()
+	close(releasePrepare)
+
+	select {
+	case outcome := <-reply:
+		require.Nil(t, outcome.Result)
+		require.ErrorIs(t, outcome.Err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled startup did not release its caller")
+	}
+	select {
+	case <-startupReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled startup did not finish")
+	}
+	require.Empty(t, provider.requests, "provider started with an already canceled run context")
+
+	state := actor.State()
+	require.NotNil(t, state)
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelStop()
+	require.NoError(t, actor.StopContext(stopCtx))
+}
+
+func TestSessionActorInterruptReleasesCallerWhenProviderIgnoresCancellation(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-ignore-cancel-interrupt-user")
+	require.NoError(t, err)
+
+	provider := &ignoreCancelLLMProvider{
+		name:     "interrupt-ignore-cancel-provider",
+		entered:  make(chan *ignoreCancelLLMCall, 1),
+		shutdown: make(chan struct{}),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-ignore-cancel-interrupt-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 2,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		close(provider.shutdown)
+		actor.Stop()
+	})
+
+	type submitOutcome struct {
+		result *agent.Result
+		err    error
+	}
+	done := make(chan submitOutcome, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(ctx, "ignore interrupt cancellation", nil)
+		done <- submitOutcome{result: result, err: submitErr}
+	}()
+
+	var call *ignoreCancelLLMCall
+	select {
+	case call = <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	require.NoError(t, actor.Interrupt(ctx))
+
+	select {
+	case outcome := <-done:
+		require.Nil(t, outcome.result)
+		require.ErrorIs(t, outcome.err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt did not release the SubmitPrompt caller")
+	}
+	require.Equal(t, SessionStopped, actor.State().Status)
+	require.Empty(t, actor.State().CurrentTurnID)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, actor.StopContext(stopCtx),
+		"an interrupted provider that ignores cancellation must be detached from actor shutdown")
+
+	// The provider goroutine is still deliberately blocked even though actor
+	// shutdown completed. Release it so the test leaves no background work.
+	close(call.release)
+	select {
+	case <-call.returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider call did not return after release")
+	}
+}
+
 func TestSessionActorRunStallWatchdogAbortsHungRun(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
@@ -1523,17 +1988,21 @@ func TestSessionActorRunStallWatchdogAbortsHungRun(t *testing.T) {
 		t.Fatal("OnRunStalled was not invoked")
 	}
 
-	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
-	require.NoError(t, err)
-	foundStall := false
-	for _, event := range events {
-		if event.Type == EventSessionInterrupted {
-			if reason, _ := event.Payload["reason"].(string); reason == "stall_timeout" {
-				foundStall = true
+	require.Eventually(t, func() bool {
+		events, listErr := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+		if listErr != nil {
+			return false
+		}
+		for _, event := range events {
+			if event.Type == EventSessionInterrupted {
+				if reason, _ := event.Payload["reason"].(string); reason == "stall_timeout" {
+					return true
+				}
 			}
 		}
-	}
-	require.True(t, foundStall, "expected a session_interrupted event with reason=stall_timeout")
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		"expected a session_interrupted event with reason=stall_timeout")
 
 	// The session must accept a new prompt right away instead of staying busy.
 	resumeCh := make(chan submitResponse, 1)
@@ -1637,6 +2106,199 @@ func TestSessionActorRunStallWatchdogToleratesSlowStreaming(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	require.Equal(t, SessionStopped, actor.State().Status, "stall must trigger once deltas stop")
+}
+
+func TestSessionActorRunStallWatchdogOldRunTailDoesNotClobberNewTurn(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-stall-clobber-user")
+	require.NoError(t, err)
+
+	bus := runtimeevents.NewBus()
+	provider := &ignoreCancelLLMProvider{
+		name:     "ignore-cancel-provider",
+		entered:  make(chan *ignoreCancelLLMCall, 4),
+		shutdown: make(chan struct{}),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-stall-clobber-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 2,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:           apiAgent,
+		LLMRuntime:      runtime,
+		SessionStore:    storage,
+		StateStore:      runtimeStore,
+		EventStore:      runtimeStore,
+		EventBus:        bus,
+		RunStallTimeout: 300 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	// shutdown 必须先于 Stop：若测试在 watchdog 完成所有权转移前失败，
+	// 仍要唤醒无视 ctx 的 provider，避免清理阶段阻塞。
+	t.Cleanup(func() {
+		close(provider.shutdown)
+		actor.Stop()
+	})
+
+	// 第一轮挂死：provider 无视 ctx 取消，run goroutine 卡在 LLM 调用里。
+	type submitOutcome struct {
+		result *agent.Result
+		err    error
+	}
+	firstDone := make(chan submitOutcome, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(ctx, "first hang", nil)
+		firstDone <- submitOutcome{result: result, err: submitErr}
+	}()
+	var firstCall *ignoreCancelLLMCall
+	select {
+	case firstCall = <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first provider call did not start")
+	}
+	firstTurnID := actor.State().CurrentTurnID
+	require.NotEmpty(t, firstTurnID)
+
+	// watchdog 触发中止，busy 状态应被释放（旧 run goroutine 仍未返回）。
+	require.Eventually(t, func() bool {
+		return actor.State().Status == SessionStopped
+	}, 3*time.Second, 20*time.Millisecond)
+	require.Equal(t, SessionStopped, actor.State().Status, "watchdog must abort the hung first run")
+	var first submitOutcome
+	select {
+	case first = <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog did not release the blocked SubmitPrompt caller")
+	}
+	require.Nil(t, first.result)
+	require.ErrorIs(t, first.err, context.Canceled)
+	runWaitDrained := make(chan struct{})
+	go func() {
+		actor.activeRunWG.Wait()
+		close(runWaitDrained)
+	}()
+	select {
+	case <-runWaitDrained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog-abandoned provider kept the actor run wait group busy")
+	}
+
+	// 第二轮立即开始。每轮有独立 release，因此可以只放行旧调用，让旧 tail
+	// 在新 run 仍明确处于 running 时返回并尝试收尾。
+	secondDone := make(chan submitOutcome, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(ctx, "second run", nil)
+		secondDone <- submitOutcome{result: result, err: submitErr}
+	}()
+	var secondCall *ignoreCancelLLMCall
+	select {
+	case secondCall = <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second provider call did not start")
+	}
+
+	require.Equal(t, SessionRunning, actor.State().Status,
+		"old run tail must not clobber the new turn's running state")
+	secondTurnID := actor.State().CurrentTurnID
+	require.NotEmpty(t, secondTurnID)
+	require.NotEqual(t, firstTurnID, secondTurnID)
+
+	close(firstCall.release)
+	select {
+	case <-firstCall.returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first provider call did not return after release")
+	}
+
+	// Keep the successor watchdog alive while giving the stale goroutine ample
+	// time to execute its tail. Any stale state write is observed immediately.
+	require.Never(t, func() bool {
+		bus.Publish(runtimeevents.Event{
+			Type:      "assistant_delta",
+			SessionID: session.ID,
+			Payload:   map[string]interface{}{"turn_id": secondTurnID},
+		})
+		state := actor.State()
+		return state.Status != SessionRunning || state.CurrentTurnID != secondTurnID
+	}, 250*time.Millisecond, 10*time.Millisecond,
+		"old run tail must not overwrite an active successor")
+
+	persistedAfterOldTail, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persistedAfterOldTail)
+	historyAfterOldTail, err := json.Marshal(persistedAfterOldTail.GetMessages())
+	require.NoError(t, err)
+	historyText := string(historyAfterOldTail)
+	require.Contains(t, historyText, "first hang")
+	require.Contains(t, historyText, "second run",
+		"old run tail must not overwrite the successor's durable prompt")
+	require.NotContains(t, historyText, firstCall.response,
+		"the abandoned run's assistant response must not reach durable history")
+	require.NotContains(t, historyText, secondCall.response)
+
+	close(secondCall.release)
+	var second submitOutcome
+	select {
+	case second = <-secondDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second run did not finish")
+	}
+	require.NoError(t, second.err)
+	require.NotNil(t, second.result)
+	require.Equal(t, secondTurnID, second.result.TurnID)
+	require.Equal(t, SessionIdle, actor.State().Status)
+	require.Empty(t, actor.State().CurrentTurnID)
+
+	// Stop the actor after the successor finishes. The detached stale tail was
+	// released and given the explicit quiescence window above.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	require.NoError(t, actor.StopContext(stopCtx))
+	stopCancel()
+	require.Equal(t, SessionIdle, actor.State().Status,
+		"old run tail must not overwrite the finished second run")
+	require.Empty(t, actor.State().CurrentTurnID)
+
+	persistedAfterSuccessor, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persistedAfterSuccessor)
+	finalHistory, err := json.Marshal(persistedAfterSuccessor.GetMessages())
+	require.NoError(t, err)
+	finalHistoryText := string(finalHistory)
+	require.Contains(t, finalHistoryText, "first hang")
+	require.Contains(t, finalHistoryText, "second run")
+	require.Contains(t, finalHistoryText, secondCall.response)
+	require.NotContains(t, finalHistoryText, firstCall.response)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	terminalSequence := make([]string, 0, 2)
+	stallInterrupts := 0
+	for _, event := range events {
+		turnID, _ := event.Payload["turn_id"].(string)
+		switch event.Type {
+		case EventAssistantMessage, EventSessionEnd:
+			terminalSequence = append(terminalSequence, event.Type+":"+turnID)
+		case EventSessionInterrupted:
+			reason, _ := event.Payload["reason"].(string)
+			if reason == "stall_timeout" && turnID == firstTurnID && event.TraceID == firstTurnID {
+				stallInterrupts++
+			}
+		}
+	}
+	require.Equal(t, []string{
+		EventAssistantMessage + ":" + secondTurnID,
+		EventSessionEnd + ":" + secondTurnID,
+	}, terminalSequence, "only the successor may publish terminal events, in order")
+	require.Equal(t, 1, stallInterrupts)
 }
 
 func TestAppendStructuredRunErrorPayload_UsesPromptPreflightMetadata(t *testing.T) {
@@ -4024,4 +4686,169 @@ func toolDefinitionNames(defs []types.ToolDefinition) []string {
 		names = append(names, def.Name)
 	}
 	return names
+}
+
+// TestSessionActorSelfStopFromRunGoroutineDoesNotDeadlock reproduces the
+// self-stop deadlock: a tool call executing on the actor's own run goroutine
+// closes the current session (localActorRegistry.Close -> SessionHub.Stop,
+// which waits for the actor loop to exit). The loop only exits after the run
+// goroutine returns, so a synchronous stop could never complete. The fix:
+// the close path delivers the stop asynchronously (StopAsync) and the run
+// drains on its own because its run context is cancelled.
+func TestSessionActorSelfStopFromRunGoroutineDoesNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-self-stop-user")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "self-stop-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-self-stop-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 2,
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = actor.StopContext(stopCtx)
+	})
+
+	turnID := "turn_self_stop"
+	reply := make(chan SubmitResult, 1)
+	run := actor.claimSessionRun(turnID, nil, reply)
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.Status = SessionRunning
+		state.CurrentTurnID = turnID
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}))
+	go actor.startSessionRun(ctx, session, "close yourself", false, turnID, nil, nil, reply, false, run)
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not reach the provider")
+	}
+
+	// Simulate the close tool running on the run goroutine: stopping the
+	// current session must not wait for that run goroutine to return.
+	actor.StopAsync()
+
+	// The run drains promptly: the run context is cancelled, the blocked
+	// provider call returns, and the run loop exits.
+	select {
+	case outcome := <-reply:
+		require.NotNil(t, outcome.Result)
+		require.False(t, outcome.Result.Success)
+		require.ErrorIs(t, outcome.Err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("self-stop deadlocked: run goroutine never returned")
+	}
+
+	// The actor loop itself exits right after the run goroutine returns.
+	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	require.NoError(t, actor.StopContext(stopCtx))
+	require.True(t, actor.IsStopped())
+}
+
+// TestSessionHubStopAsyncRemovesActorAndStopsRun verifies that StopAsync
+// removes the actor from the hub immediately while the run still drains in
+// the background (the shape used by the local-actor close tool).
+func TestSessionHubStopAsyncRemovesActorAndStopsRun(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "hub-stopasync-user")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "hub-stopasync-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "hub-stopasync-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 2,
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = actor.StopContext(stopCtx)
+	})
+
+	hub := NewSessionHub(func(sessionID string) (*SessionActor, error) {
+		return actor, nil
+	})
+	stored, err := hub.GetOrCreate(session.ID)
+	require.NoError(t, err)
+	require.Same(t, actor, stored)
+
+	turnID := "turn_hub_stop_async"
+	reply := make(chan SubmitResult, 1)
+	run := actor.claimSessionRun(turnID, nil, reply)
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.Status = SessionRunning
+		state.CurrentTurnID = turnID
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}))
+	go actor.startSessionRun(ctx, session, "close via hub", false, turnID, nil, nil, reply, false, run)
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not reach the provider")
+	}
+
+	hub.StopAsync(session.ID)
+
+	// Removed from the hub immediately.
+	_, present := hub.Get(session.ID)
+	require.False(t, present)
+
+	// Run drains in the background without any synchronous wait.
+	select {
+	case outcome := <-reply:
+		require.NotNil(t, outcome.Result)
+		require.False(t, outcome.Result.Success)
+		require.ErrorIs(t, outcome.Err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("run goroutine never returned after StopAsync")
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	require.NoError(t, actor.StopContext(stopCtx))
+	require.True(t, actor.IsStopped())
 }

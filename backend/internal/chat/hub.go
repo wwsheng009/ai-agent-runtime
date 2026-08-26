@@ -253,27 +253,50 @@ func (h *SessionHub) Stop(sessionID string) {
 	_ = h.StopContext(context.Background(), sessionID)
 }
 
+// StopAsync stops and removes an actor without waiting for it to exit.
+// The stop is delivered and the run is cancelled; the actor loop finishes in
+// the background once its run goroutines return.
+//
+// Safe to call from the actor's own run goroutine (self-stop, e.g. a tool
+// call that closes the current session), where Stop/StopContext would
+// deadlock waiting for the caller itself to return.
+func (h *SessionHub) StopAsync(sessionID string) {
+	if h == nil {
+		return
+	}
+	actor := h.take(sessionID)
+	if actor != nil {
+		actor.StopAsync()
+	}
+}
+
 // StopContext stops and removes an actor, waiting at most until ctx expires.
 func (h *SessionHub) StopContext(ctx context.Context, sessionID string) error {
 	if h == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	actor := h.take(sessionID)
+	if actor == nil {
+		return nil
+	}
+	return actor.StopContext(ctx)
+}
+
+// take removes and returns the actor registered for sessionID, or nil.
+func (h *SessionHub) take(sessionID string) *SessionActor {
 	sessionID = NormalizeSessionID(sessionID)
 	if sessionID == "" {
 		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	h.mu.Lock()
 	actor := h.actors[sessionID]
 	delete(h.actors, sessionID)
 	delete(h.lastAccess, sessionID)
 	h.mu.Unlock()
-	if actor == nil {
-		return nil
-	}
-	return actor.StopContext(ctx)
+	return actor
 }
 
 // StopAll stops all actors managed by the hub and its eviction worker.
