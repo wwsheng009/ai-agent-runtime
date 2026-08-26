@@ -987,7 +987,25 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID stri
 		interval = 30 * time.Second
 	}
 	done := make(chan struct{})
+	stopOnce := sync.Once{}
+	cleanup := func() {
+		stopOnce.Do(func() {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+			for _, u := range unsubs {
+				if u != nil {
+					u()
+				}
+			}
+		})
+	}
 	go func() {
+		// 无论因何退出（run 结束 / 主动停止 / 触发中止），都清理订阅，
+		// 避免 run goroutine 卡死永不返回时总线订阅泄漏。
+		defer cleanup()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -1005,18 +1023,7 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID stri
 			}
 		}
 	}()
-	return func() {
-		select {
-		case <-done:
-		default:
-			close(done)
-		}
-		for _, u := range unsubs {
-			if u != nil {
-				u()
-			}
-		}
-	}
+	return cleanup
 }
 
 // abortStalledRun force-terminates a run the stall watchdog judged hung and
@@ -1027,6 +1034,11 @@ func (a *SessionActor) abortStalledRun(turnID string) {
 	a.markInterrupted()
 	a.cancelActive()
 	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		// 异步提交场景下，若新 turn 已接管（state 的 turn 已不是本 turn），
+		// 不要用 stopped 覆盖新 run 的进行中状态。
+		if state.CurrentTurnID != "" && state.CurrentTurnID != turnID {
+			return nil
+		}
 		state.Status = SessionStopped
 		state.CurrentTurnID = ""
 		state.CurrentRunMeta = nil
