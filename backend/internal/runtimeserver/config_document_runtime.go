@@ -583,9 +583,15 @@ func normalizeSkillsRuntimeConfigForHotReload(cfg *agentconfig.Config) *agentcon
 		skillsCfg.RoleClaims = []string{"role", "roles"}
 	}
 	skillsCfg.ConfigFile = ResolveUpwardPath(skillsCfg.ConfigFile)
-	skillsCfg.SkillDir = ResolveUpwardPath(skillsCfg.SkillDir)
-	skillsCfg.SkillDirs = ResolveUpwardPaths(skillsCfg.SkillDirs)
-	skillsCfg.ExtraSkillDirs = ResolveUpwardPaths(skillsCfg.ExtraSkillDirs)
+	if ensured, err := skill.EnsureSkillDirs([]string{ResolveUpwardPath(skillsCfg.SkillDir)}); err == nil && len(ensured) > 0 {
+		skillsCfg.SkillDir = ensured[0]
+	}
+	if ensured, err := skill.EnsureSkillDirs(ResolveUpwardPaths(skillsCfg.SkillDirs)); err == nil {
+		skillsCfg.SkillDirs = ensured
+	}
+	if ensured, err := skill.EnsureSkillDirs(ResolveUpwardPaths(skillsCfg.ExtraSkillDirs)); err == nil {
+		skillsCfg.ExtraSkillDirs = ensured
+	}
 	return skillsCfg
 }
 

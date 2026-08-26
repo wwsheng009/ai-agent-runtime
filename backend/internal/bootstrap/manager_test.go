@@ -614,3 +614,60 @@ tools: ["echo_tool"]
 	assert.Equal(t, filepath.Join(skillDir, "prompt.md"), item.Source.PromptPath)
 	require.NotNil(t, manager.EmbeddingRouter())
 }
+
+func TestManager_NewManager_CreatesMissingSkillDir(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist", "skills")
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+
+	manager, err := NewManager(&Options{
+		Config:          cfg,
+		SkillDir:        missingDir,
+		MCPManager:      mcpManager,
+		ResourceManager: &bootstrapResourceManager{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Validate())
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	info, err := os.Stat(missingDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	assert.Equal(t, 0, manager.Registry().Count())
+	assert.Equal(t, missingDir, manager.SkillDir())
+}
+
+func TestManager_NewManager_AbsolutizesRelativeSkillDir(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+
+	// 相对路径会在测试包目录下创建 .agents/skills；仅当测试前不存在时，
+	// 测试结束后才清理，避免误删仓库/机器上已有的 .agents 目录。
+	relativeDir := filepath.Join(".agents", "skills")
+	_, preExistsErr := os.Stat(relativeDir)
+	t.Cleanup(func() {
+		if os.IsNotExist(preExistsErr) {
+			_ = os.RemoveAll(filepath.Join(".agents"))
+		}
+	})
+
+	manager, err := NewManager(&Options{
+		Config:          cfg,
+		SkillDir:        "./.agents/skills",
+		MCPManager:      mcpManager,
+		ResourceManager: &bootstrapResourceManager{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Validate())
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	absDir, err := filepath.Abs("./.agents/skills")
+	require.NoError(t, err)
+	info, err := os.Stat(absDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	assert.Equal(t, absDir, manager.SkillDir())
+}
