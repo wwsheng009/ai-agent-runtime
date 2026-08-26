@@ -2409,9 +2409,21 @@ func (b *chatRuntimeEventBridge) sceneBlockSource() func(blockRows []string) []s
 		if idx < 0 {
 			return nil
 		}
+		// 与 checkTextParity 对称：被跳过的 reasoning 分组的前导 gap 行在本
+		// 块输出前置（legacy 路径把这些空行作为本块的前导 gapBlank 写出，
+		// 如 user → reasoning → assistant 时 assistant 块前的空行）。
+		leadBlanks := 0
+		for i := nextGroup; i < idx; i++ {
+			if groups[i].kind == scene.KindReasoning {
+				leadBlanks += groups[i].leadingGapRows
+			}
+		}
 		g := groups[idx]
 		nextGroup = idx + 1
-		out := make([]string, 0, len(g.lines))
+		out := make([]string, 0, leadBlanks+len(g.lines))
+		for j := 0; j < leadBlanks; j++ {
+			out = append(out, "")
+		}
 		for i, line := range g.lines {
 			if i == 0 && g.kind == scene.KindUser && line == "" {
 				// 与 checkTextParity 对称：旧路径 user 块的前导 gap 由
