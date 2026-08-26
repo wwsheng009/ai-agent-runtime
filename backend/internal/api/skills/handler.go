@@ -2217,7 +2217,7 @@ func (h *Handler) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "history limit must be a positive integer"))
 			return
 		}
-		limit = min(parsed, 1000)
+		limit = builtinMin(parsed, 1000)
 	}
 	beforeSeq := 0
 	if rawBefore := strings.TrimSpace(r.URL.Query().Get("before_seq")); rawBefore != "" {

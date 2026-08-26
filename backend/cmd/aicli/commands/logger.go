@@ -349,7 +349,9 @@ func (cl *ChatLogger) appendDetail(detail ChatLogDetail) {
 	drop := len(cl.sessionLog.Messages) - chatLogRetainedMessages
 	cl.sessionLog.DroppedMessages += drop
 	copy(cl.sessionLog.Messages, cl.sessionLog.Messages[drop:])
-	clear(cl.sessionLog.Messages[len(cl.sessionLog.Messages)-drop:])
+	for i := len(cl.sessionLog.Messages) - drop; i < len(cl.sessionLog.Messages); i++ {
+		cl.sessionLog.Messages[i] = ChatLogDetail{}
+	}
 	cl.sessionLog.Messages = cl.sessionLog.Messages[:chatLogRetainedMessages]
 	if cl.currentReqIndex >= 0 {
 		cl.currentReqIndex -= drop

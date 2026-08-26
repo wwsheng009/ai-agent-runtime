@@ -453,7 +453,7 @@ func (c *SubagentBatchCoordinator) StartBackground(parentCtx context.Context, op
 	// The worker must outlive the parent turn, but stay bounded by the batch
 	// deadline. Detaching from the parent context avoids killing queued work
 	// when the caller returns.
-	workerCtx, cancel := context.WithCancel(context.WithoutCancel(parentCtx))
+	workerCtx, cancel := context.WithCancel(agentWithoutCancel(parentCtx))
 	if !deadline.IsZero() {
 		var deadlineCancel context.CancelFunc
 		workerCtx, deadlineCancel = context.WithDeadline(workerCtx, deadline)
@@ -503,7 +503,7 @@ func (c *SubagentBatchCoordinator) admitExistingBatch(parentCtx context.Context,
 		return nil
 	}
 	c.mu.Unlock()
-	workerCtx, cancel := context.WithCancel(context.WithoutCancel(parentCtx))
+	workerCtx, cancel := context.WithCancel(agentWithoutCancel(parentCtx))
 	if !deadline.IsZero() {
 		var deadlineCancel context.CancelFunc
 		workerCtx, deadlineCancel = context.WithDeadline(workerCtx, deadline)
@@ -977,7 +977,7 @@ func (c *SubagentBatchCoordinator) runBatch(ctx context.Context, batchID string,
 		// Re-read detached before entering finalizeBatch; otherwise the late
 		// worker would write synthetic task results without an owner and leave
 		// the terminal cancellation without its summary/outbox delivery.
-		detached := context.WithoutCancel(ctx)
+		detached := agentWithoutCancel(ctx)
 		if durable, readErr := c.store.GetBatch(detached, batchID); readErr == nil &&
 			(durable == nil || durable.Status.Terminal()) {
 			return
@@ -1270,7 +1270,7 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 	// otherwise RecordTaskResult/UpdateBatch fail inside dead transactions and
 	// the ledger never reflects the terminal task/batch states. Classification
 	// (abortReason and terminalBatchStatus) still uses the original ctx.
-	persistCtx := context.WithoutCancel(ctx)
+	persistCtx := agentWithoutCancel(ctx)
 	var unlockWrite func()
 	var writable bool
 	unlockWrite, writable = c.acquireBatchWrite(batchID)
@@ -1692,7 +1692,7 @@ func (c *SubagentBatchCoordinator) projectTerminalLifecycle(ctx context.Context,
 	if projectionTimeout <= 0 {
 		projectionTimeout = 5 * time.Second
 	}
-	projectionCtx, projectionCancel := context.WithTimeout(context.WithoutCancel(ctx), projectionTimeout)
+	projectionCtx, projectionCancel := context.WithTimeout(agentWithoutCancel(ctx), projectionTimeout)
 	defer projectionCancel()
 	var resolved subagentbatch.BatchSummary
 	if summary != nil {

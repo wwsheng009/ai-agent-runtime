@@ -38,10 +38,10 @@ func platformDiscardPendingConsoleInput() (int, error) {
 		return 0, err
 	}
 	var eventCount uint32
-	if err := windows.GetNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
+	if err := getNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
 		return 0, err
 	}
-	if err := windows.FlushConsoleInputBuffer(handle); err != nil {
+	if err := flushConsoleInputBuffer(handle); err != nil {
 		return 0, err
 	}
 	return int(eventCount), nil
@@ -53,7 +53,7 @@ func platformPendingConsoleInputCount() (int, error) {
 		return 0, err
 	}
 	var eventCount uint32
-	if err := windows.GetNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
+	if err := getNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
 		return 0, err
 	}
 	return int(eventCount), nil
@@ -69,7 +69,7 @@ func platformPendingConsoleLineInput() (bool, error) {
 		return false, err
 	}
 	for i := range records {
-		if records[i].EventType != windows.KEY_EVENT {
+		if records[i].EventType != consoleKeyEventType {
 			continue
 		}
 		key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
@@ -93,7 +93,7 @@ func platformPendingConsoleTextInput() (bool, error) {
 		return false, err
 	}
 	for i := range records {
-		if records[i].EventType != windows.KEY_EVENT {
+		if records[i].EventType != consoleKeyEventType {
 			continue
 		}
 		key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
@@ -121,7 +121,7 @@ func stdinConsoleHandle() (windows.Handle, error) {
 
 func peekConsoleInput(handle windows.Handle) ([]consoleInputRecord, error) {
 	var eventCount uint32
-	if err := windows.GetNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
+	if err := getNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
 		return nil, err
 	}
 	if eventCount == 0 {

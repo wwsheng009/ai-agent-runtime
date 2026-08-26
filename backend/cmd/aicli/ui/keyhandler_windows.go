@@ -87,7 +87,7 @@ func consumeLeadingConsoleEscape(handle windows.Handle, records []consoleInputRe
 	noiseRecords := 0
 	for i := range records {
 		record := records[i]
-		if record.EventType == windows.KEY_EVENT {
+		if record.EventType == consoleKeyEventType {
 			key := (*consoleKeyEventRecord)(unsafe.Pointer(&record.Event[0]))
 			if key.KeyDown != 0 && key.VirtualKeyCode == windowsEscapeVirtualKeyCode {
 				return windowsConsumeConsoleInputRecordsFn(handle, noiseRecords+1) == nil
