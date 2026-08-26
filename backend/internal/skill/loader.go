@@ -232,6 +232,12 @@ func (l *Loader) registerSkills(skills []*Skill, registry *Registry) error {
 	var errs []error
 	for _, skill := range skills {
 		if err := registry.Register(skill); err != nil {
+			// 工具未在当前 surface 注册属于软失败：跳过该 skill（例如 tools
+			// 被禁用或运行时未暴露 fetch/bash/view 等工具时，声明依赖这些工具
+			// 的 skill 不可用），但不阻断其余 skills 的注册。
+			if errors.Is(err, errors.ErrToolNotRegistered) {
+				continue
+			}
 			errs = append(errs, err)
 		}
 	}
@@ -250,6 +256,10 @@ func (l *Loader) registerSummaryStubs(summaries []*SkillSummary, registry *Regis
 			continue
 		}
 		if err := registry.Register(summary.ToSkillStub()); err != nil {
+			// 同上：工具缺失时跳过该轻量 stub，不阻断整体注册。
+			if errors.Is(err, errors.ErrToolNotRegistered) {
+				continue
+			}
 			errs = append(errs, err)
 		}
 	}
