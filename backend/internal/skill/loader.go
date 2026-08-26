@@ -480,13 +480,11 @@ func normalizeSkillDirs(dirs []string) []string {
 	normalized := make([]string, 0, len(dirs))
 
 	for _, dir := range dirs {
-		dir = filepath.Clean(strings.TrimSpace(dir))
-		if dir == "." || dir == "" {
-			if strings.TrimSpace(dir) == "" {
-				continue
-			}
-			dir = filepath.Clean(dir)
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
 		}
+		dir = filepath.Clean(dir)
 		if _, exists := seen[dir]; exists {
 			continue
 		}
@@ -495,6 +493,37 @@ func normalizeSkillDirs(dirs []string) []string {
 	}
 
 	return normalized
+}
+
+// EnsureSkillDirs 规范化技能目录列表：相对路径相对当前工作目录绝对化，
+// 目录不存在时自动创建（空技能目录等价于空技能集，不应阻断启动）。
+// 返回去重后的绝对目录列表；任一目录无法创建时返回错误。
+func EnsureSkillDirs(dirs []string) ([]string, error) {
+	normalized := normalizeSkillDirs(dirs)
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{}, len(normalized))
+	ensured := make([]string, 0, len(normalized))
+	for _, dir := range normalized {
+		if !filepath.IsAbs(dir) {
+			abs, err := filepath.Abs(dir)
+			if err != nil {
+				return nil, fmt.Errorf("resolve skill directory %q to absolute path: %w", dir, err)
+			}
+			dir = abs
+		}
+		if _, exists := seen[dir]; exists {
+			continue
+		}
+		seen[dir] = struct{}{}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create skill directory %s: %w", dir, err)
+		}
+		ensured = append(ensured, dir)
+	}
+	return ensured, nil
 }
 
 func (l *Loader) annotateSkillLayers(skills []*Skill, dir, layer string) {

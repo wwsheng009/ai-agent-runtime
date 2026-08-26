@@ -74,10 +74,15 @@ func NewManager(opts *Options) (*Manager, error) {
 		return nil, err
 	}
 
+	skillDirs, err := skill.EnsureSkillDirs(resolveSkillDirs(opts.SkillDir, opts.SkillDirs))
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare skill directories: %w", err)
+	}
+
 	manager := &Manager{
 		config:          config,
 		skillDir:        strings.TrimSpace(opts.SkillDir),
-		skillDirs:       resolveSkillDirs(opts.SkillDir, opts.SkillDirs),
+		skillDirs:       skillDirs,
 		mcpManager:      opts.MCPManager,
 		resourceManager: opts.ResourceManager,
 		providerConfigs: opts.ProviderConfigs,
