@@ -32,6 +32,11 @@ func main() {
 	}
 
 	commands.SetChatStatusBuildInfo(version, buildTime)
+	// Win7 及更早 conhost 无 VT 处理，先切输出代码页为 UTF-8，否则所有
+	// 中文输出（chat、帮助、错误信息）都会按 GBK 解码成乱码。
+	if restore := ui.EnsureConsoleUTF8Output(); restore != nil {
+		defer restore()
+	}
 	// 向 /debug display 暴露 pprof 端点信息（未启用时显示提示）。
 	commands.RegisterChatDebugPprofProvider(func() string {
 		if pprofHandle == nil {
