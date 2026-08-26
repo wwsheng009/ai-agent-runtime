@@ -112,6 +112,14 @@ func ProcessRunning(pid int) bool {
 }
 
 func StartDetachedProcess(executable string, args []string, env []string) (*exec.Cmd, error) {
+	return StartDetachedProcessWithOutput(executable, args, env, "", "")
+}
+
+// StartDetachedProcessWithOutput 与 StartDetachedProcess 相同，但允许把子进程
+// stdout/stderr 重定向到文件（stdoutPath/stderrPath）。任一参数为空时对应
+// 流仍丢弃到系统空设备。用于 start 模式下未配置日志文件路径时的失败诊断
+// fallback：子进程启动失败的真实错误会落入捕获文件，父进程可以 tail 展示。
+func StartDetachedProcessWithOutput(executable string, args []string, env []string, stdoutPath, stderrPath string) (*exec.Cmd, error) {
 	executable = strings.TrimSpace(executable)
 	if executable == "" {
 		return nil, fmt.Errorf("executable is required")
@@ -129,8 +137,24 @@ func StartDetachedProcess(executable string, args []string, env []string) (*exec
 	defer devNull.Close()
 
 	cmd.Stdin = devNull
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	if strings.TrimSpace(stdoutPath) == "" {
+		cmd.Stdout = devNull
+	} else {
+		output, openErr := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if openErr != nil {
+			return nil, fmt.Errorf("open stdout capture file: %w", openErr)
+		}
+		cmd.Stdout = output
+	}
+	if strings.TrimSpace(stderrPath) == "" {
+		cmd.Stderr = devNull
+	} else {
+		output, openErr := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if openErr != nil {
+			return nil, fmt.Errorf("open stderr capture file: %w", openErr)
+		}
+		cmd.Stderr = output
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start detached process: %w", err)
 	}
