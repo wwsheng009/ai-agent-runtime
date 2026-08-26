@@ -61,6 +61,17 @@ type chatSessionSummary struct {
 }
 
 func findChatLogFile(sessionDir string) (string, error) {
+	info, err := os.Stat(sessionDir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		// 新布局文件型会话：Path 即 <sid>.json
+		if strings.HasSuffix(strings.ToLower(sessionDir), ".json") {
+			return sessionDir, nil
+		}
+		return "", os.ErrNotExist
+	}
 	entries, err := os.ReadDir(sessionDir)
 	if err != nil {
 		return "", err
@@ -855,7 +866,7 @@ func loadSessionRollup(dir SessionDir, enrichDebug bool) (SessionRollup, []StepU
 		}
 	}
 
-	debugPath := filepath.Join(dir.Path, "debug.log")
+	debugPath := sessionDebugLogPath(dir)
 	var steps []StepUsage
 	if enrichDebug {
 		parsed, parseErr := ParseDebugRequestFinished(debugPath)

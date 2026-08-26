@@ -207,7 +207,7 @@ func TestHandleDebugCommandExportsArchive(t *testing.T) {
 	if err := os.WriteFile(shellPath, []byte("git output"), 0o644); err != nil {
 		t.Fatalf("write shell artifact: %v", err)
 	}
-	imageDir := filepath.Join(logger.SessionDirPath(), "generated-images")
+	imageDir := logger.GeneratedImagesDir()
 	if err := os.MkdirAll(imageDir, 0o755); err != nil {
 		t.Fatalf("mkdir image dir: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestHandleDebugCommandExportsArchive(t *testing.T) {
 	for _, expected := range []string{
 		"manifest.json",
 		"session_file/session-debug.json",
-		"debug_log_file/debug.log",
+		"debug_log_file/" + filepath.Base(logger.DebugLogPath()),
 		"runtime_http_artifact_dir/001_request_gateway_client.json",
 		"local_shell_artifact_dir/001_git.txt",
 		"generated_image_artifact_dir/image.png",

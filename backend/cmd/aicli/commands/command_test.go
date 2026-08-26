@@ -914,7 +914,7 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	if payload.TotalTokens != 42 || payload.ResponseTimeMs != 1234 {
 		t.Fatalf("unexpected payload summary fields: %+v", payload)
 	}
-	if !strings.Contains(payload.LogPath, "chat_codex_ee_codex_gpt-5.2-code_") {
+	if payload.LogPath != logger.SessionLogPath() {
 		t.Fatalf("unexpected payload log path: %+v", payload)
 	}
 	if payload.DebugLogPath != logger.DebugLogPath() {
@@ -1082,20 +1082,28 @@ func TestChatLoggerSessionLogPath(t *testing.T) {
 	}
 
 	path := logger.SessionLogPath()
-	if !strings.Contains(path, "chat_codex_ee_codex_gpt-5.2-code_") {
+	wantBase := strings.ReplaceAll(logger.sessionID, ".", "_") + ".json"
+	if filepath.Base(path) != wantBase {
 		t.Fatalf("unexpected session log path: %s", path)
 	}
-	if sessionDir := logger.SessionDirPath(); sessionDir == "" || filepath.Dir(path) != sessionDir {
-		t.Fatalf("unexpected session dir path: %q (log path %q)", sessionDir, path)
+	partDir := filepath.Dir(path)
+	if partDir == "" {
+		t.Fatalf("unexpected session partition dir (log path %q)", path)
 	}
-	if debugPath := logger.DebugLogPath(); debugPath == "" || filepath.Dir(debugPath) != logger.SessionDirPath() {
+	if debugPath := logger.DebugLogPath(); debugPath == "" || filepath.Dir(debugPath) != partDir {
 		t.Fatalf("unexpected debug log path: %q", debugPath)
 	}
-	if artifactDir := logger.RuntimeHTTPArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != logger.SessionDirPath() {
+	if artifactDir := logger.RuntimeHTTPArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
 		t.Fatalf("unexpected runtime HTTP artifact dir: %q", artifactDir)
 	}
-	if artifactDir := logger.LocalShellArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != logger.SessionDirPath() {
+	if artifactDir := logger.LocalShellArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
 		t.Fatalf("unexpected local shell artifact dir: %q", artifactDir)
+	}
+	if artifactDir := logger.GeneratedImagesDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
+		t.Fatalf("unexpected generated images artifact dir: %q", artifactDir)
+	}
+	if artifactDir := logger.ExportsDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
+		t.Fatalf("unexpected exports dir: %q", artifactDir)
 	}
 
 	summary := logger.CurrentSummary()
@@ -1117,20 +1125,24 @@ func TestNewChatLogger_UsesDefaultChatLogDir(t *testing.T) {
 	if logger.logDir != defaultDir {
 		t.Fatalf("expected logger default dir %q, got %q", defaultDir, logger.logDir)
 	}
-	wantSessionDir := logger.sessionDirPathFor(defaultDir)
-	if got, want := logger.SessionDirPath(), wantSessionDir; got != want {
-		t.Fatalf("unexpected session dir path: got %q want %q", got, want)
+	logPath := logger.SessionLogPath()
+	if logPath == "" || !strings.HasPrefix(logPath, filepath.Join(defaultDir, "")) {
+		t.Fatalf("expected session log under default dir, got %q", logPath)
 	}
 	year, month, day := logger.sessionLog.StartTime.Local().Format("2006"), logger.sessionLog.StartTime.Local().Format("01"), logger.sessionLog.StartTime.Local().Format("02")
-	if !strings.Contains(filepath.ToSlash(wantSessionDir), "/"+year+"/"+month+"/"+day+"/") {
-		t.Fatalf("expected date partition in session dir path: %q", wantSessionDir)
+	if !strings.Contains(filepath.ToSlash(logPath), "/"+year+"/"+month+"/"+day+"/") {
+		t.Fatalf("expected date partition in session log path: %q", logPath)
 	}
-	if got := logger.SessionLogPath(); got == "" || filepath.Dir(got) != logger.SessionDirPath() {
+	if got := logger.SessionLogPath(); got == "" || filepath.Dir(got) != partDirOf(logger) {
 		t.Fatalf("unexpected session log path: %q", got)
 	}
-	if got := logger.DebugLogPath(); got == "" || filepath.Dir(got) != logger.SessionDirPath() {
+	if got := logger.DebugLogPath(); got == "" || filepath.Dir(got) != partDirOf(logger) {
 		t.Fatalf("unexpected debug log path: %q", got)
 	}
+}
+
+func partDirOf(logger *ChatLogger) string {
+	return filepath.Dir(logger.SessionLogPath())
 }
 
 func TestChatLoggerSetLogDirEnsuresSessionArtifacts(t *testing.T) {
@@ -1141,9 +1153,11 @@ func TestChatLoggerSetLogDirEnsuresSessionArtifacts(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		logger.SessionDirPath(),
+		filepath.Dir(logger.SessionLogPath()),
 		logger.RuntimeHTTPArtifactDir(),
 		logger.LocalShellArtifactDir(),
+		logger.GeneratedImagesDir(),
+		logger.ExportsDir(),
 	} {
 		info, err := os.Stat(path)
 		if err != nil {

@@ -89,7 +89,7 @@ func sessionSourceFingerprint(dir SessionDir) string {
 			parts = append(parts, fmt.Sprintf("chat:%d:%d", info.ModTime().UnixNano(), info.Size()))
 		}
 	}
-	if info, err := os.Stat(filepath.Join(dir.Path, "debug.log")); err == nil {
+	if info, err := os.Stat(sessionDebugLogPath(dir)); err == nil {
 		parts = append(parts, fmt.Sprintf("debug:%d:%d", info.ModTime().UnixNano(), info.Size()))
 	}
 	return strings.Join(parts, "|")

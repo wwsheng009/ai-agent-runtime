@@ -118,9 +118,8 @@ func TestChatLoggerRotateSessionStartsFreshArtifactLayout(t *testing.T) {
 	require.NoError(t, logger.SetLogDir(logDir))
 
 	oldSessionID := logger.sessionID
-	oldSessionDir := logger.SessionDirPath()
 	oldLogPath := logger.SessionLogPath()
-	require.NotEmpty(t, oldSessionDir)
+	require.NotEmpty(t, oldLogPath)
 
 	logger.LogRequest(aicliLogScope{TurnID: "turn-1", RequestID: "req-1"}, map[string]string{"hello": "world"})
 	require.NoError(t, logger.FlushSession())
@@ -130,7 +129,6 @@ func TestChatLoggerRotateSessionStartsFreshArtifactLayout(t *testing.T) {
 	require.NoError(t, logger.RotateSession())
 
 	require.NotEqual(t, oldSessionID, logger.sessionID)
-	require.NotEqual(t, oldSessionDir, logger.SessionDirPath())
 	require.NotEqual(t, oldLogPath, logger.SessionLogPath())
 	require.Equal(t, "active", logger.sessionLog.Status)
 	require.True(t, logger.sessionLog.EndTime.IsZero())
@@ -143,10 +141,11 @@ func TestChatLoggerRotateSessionStartsFreshArtifactLayout(t *testing.T) {
 	require.Zero(t, logger.totalRequests)
 
 	for _, path := range []string{
-		logger.SessionDirPath(),
 		logger.RuntimeHTTPArtifactDir(),
 		logger.LocalShellArtifactDir(),
 		logger.DebugLogPath(),
+		logger.GeneratedImagesDir(),
+		logger.ExportsDir(),
 	} {
 		info, statErr := os.Stat(path)
 		require.NoError(t, statErr, path)

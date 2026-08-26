@@ -652,7 +652,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		"Debug Log File:    " + logger.DebugLogPath(),
 		fmt.Sprintf("%-18s %s", "HTTP Artifact Dir:", logger.RuntimeHTTPArtifactDir()),
 		fmt.Sprintf("%-18s %s", "Shell Artifact Dir:", logger.LocalShellArtifactDir()),
-		fmt.Sprintf("%-18s %s", "Generated Image Artifact Dir:", filepath.Join(logger.SessionDirPath(), "generated-images")),
+		fmt.Sprintf("%-18s %s", "Generated Image Artifact Dir:", logger.GeneratedImagesDir()),
 		fmt.Sprintf("%-18s %s", "Last HTTP Req:", requestPath),
 		fmt.Sprintf("%-18s %s", "Last HTTP Resp:", responsePath),
 		fmt.Sprintf("%-18s %s", "Last Shell Out:", filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt")),

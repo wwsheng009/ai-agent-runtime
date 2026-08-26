@@ -834,8 +834,8 @@ func resolveChatExportOutputPath(session *ChatSession, runtimeSession *runtimech
 
 func defaultChatExportDir(session *ChatSession) string {
 	if session != nil && session.Logger != nil {
-		if dir := session.Logger.SessionDirPath(); strings.TrimSpace(dir) != "" {
-			return resolveAbsoluteChatPath(filepath.Join(dir, "exports"))
+		if dir := session.Logger.ExportsDir(); strings.TrimSpace(dir) != "" {
+			return resolveAbsoluteChatPath(dir)
 		}
 	}
 	return resolveAbsoluteChatPath(filepath.Join(resolveDefaultChatLogDir(), "exports"))

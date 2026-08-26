@@ -13,8 +13,8 @@ func currentGeneratedImageArtifactDir(session *ChatSession) string {
 		return ""
 	}
 	if session.Logger != nil {
-		if sessionDir := session.Logger.SessionDirPath(); strings.TrimSpace(sessionDir) != "" {
-			return resolveAbsoluteChatPath(filepath.Join(sessionDir, "generated-images"))
+		if dir := session.Logger.GeneratedImagesDir(); strings.TrimSpace(dir) != "" {
+			return resolveAbsoluteChatPath(dir)
 		}
 	}
 	artifactRoot := currentRuntimeSessionArtifactRoot(session)
