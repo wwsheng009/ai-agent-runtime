@@ -367,8 +367,8 @@ ai-agent-runtime/
 发版（tag 触发跨平台 Release）：
 
 ```bash
-git tag v0.4.4
-git push origin v0.4.4
+git tag v0.4.5
+git push origin v0.4.5
 # .github/workflows/release-aicli.yml → 6 平台 GitHub Release（aicli + runtime-server 制品）
 ```
 
