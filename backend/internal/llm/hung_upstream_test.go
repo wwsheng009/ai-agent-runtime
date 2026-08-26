@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -319,5 +321,41 @@ func TestProviderTransportBudgetBoundsResetUpstream(t *testing.T) {
 			assert.Equal(t, int64(4), accepts.Load(),
 				"transport budget of 4 attempts must bound the reset upstream; got %d attempts", accepts.Load())
 		})
+	}
+}
+
+// TestProviderHeaderGuardAppliesToHTTP2 reproduces the hung-upstream shape
+// over HTTP/2: the transport-level ResponseHeaderTimeout is HTTP/1.1-only,
+// so without the per-request header guard an HTTP/2 request whose response
+// headers never arrive would hang forever. The server below accepts the
+// request (over H2) and never writes headers back.
+func TestProviderHeaderGuardAppliesToHTTP2(t *testing.T) {
+	protoCh := make(chan string, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case protoCh <- fmt.Sprintf("%d.%d", r.ProtoMajor, r.ProtoMinor):
+		default:
+		}
+		select {} // hold the request, never respond
+	})
+	ts := httptest.NewUnstartedServer(handler)
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer ts.Close()
+
+	p := &ProviderWrapper{
+		config: &ProviderConfig{ResponseHeaderTimeout: 300 * time.Millisecond},
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL, nil)
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, err = p.doRequest(ts.Client(), req)
+	require.Error(t, err)
+	require.Equal(t, "2.0", <-protoCh, "test must exercise HTTP/2 to cover the guard")
+	assert.Contains(t, err.Error(), "timeout awaiting response headers",
+		"h2 hang must surface as a header timeout, got: %v", err)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("header guard did not stop the h2 request promptly (elapsed %v)", elapsed)
 	}
 }

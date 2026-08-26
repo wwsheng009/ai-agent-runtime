@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -465,6 +466,88 @@ func (p *ProviderWrapper) providerHTTPClient(stream bool) *http.Client {
 	return p.httpClient
 }
 
+// responseHeaderTimeoutError is returned by doRequest when the response-header
+// guard fires. Its message reuses the standard transport wording so
+// isResponseHeaderTimeoutError (text match) classifies it as the
+// hung-upstream signature; unlike wrapping context.DeadlineExceeded, the
+// message stays clean (no "context deadline exceeded" suffix) and callers that
+// assert on the message keep working.
+type responseHeaderTimeoutError struct {
+	timeout time.Duration
+}
+
+func (e *responseHeaderTimeoutError) Error() string {
+	return fmt.Sprintf("timeout awaiting response headers (response-header guard after %s)", e.timeout)
+}
+
+func (e *responseHeaderTimeoutError) Timeout() bool   { return true }
+func (e *responseHeaderTimeoutError) Temporary() bool { return true }
+
+// doRequest performs client.Do with a hard bound on the response-header wait.
+// The transport-level ResponseHeaderTimeout only applies to HTTP/1.1; HTTP/2
+// requests bypass it (the http2 transport used here has no equivalent wired
+// up), so a half-dead upstream that accepts the connection and the request
+// but never returns headers would hang forever — the exact shape seen on
+// HTTP/2 providers. This guard covers both protocols, using the same
+// watchdog pattern as the stream idle timeout: on timeout the request
+// context is cancelled and RoundTrip is guaranteed to unwind, so no
+// goroutine leaks; on success the response body keeps streaming under the
+// still-live request context.
+func (p *ProviderWrapper) doRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	timeout := DefaultResponseHeaderTimeout
+	if p != nil && p.config != nil && p.config.ResponseHeaderTimeout > 0 {
+		timeout = p.config.ResponseHeaderTimeout
+	}
+	if timeout <= 0 {
+		return client.Do(req)
+	}
+
+	reqCtx, cancelRequest := context.WithCancel(req.Context())
+	req = req.WithContext(reqCtx)
+
+	type roundTripResult struct {
+		resp *http.Response
+		err  error
+	}
+	done := make(chan roundTripResult, 1)
+	go func() {
+		// NOTE: this must stay a raw client.Do — routing through
+		// p.doRequest would recurse forever (one goroutine per level).
+		resp, err := client.Do(req)
+		done <- roundTripResult{resp: resp, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		// Request finished normally. Deliberately do NOT call
+		// cancelRequest() here: cancelling would tear down the (still
+		// in-flight, body-not-yet-read) connection, defeating keep-alive
+		// reuse. The reqCtx is only observed by client.Do, which has
+		// already returned, so nothing leaks. (The lostcancel vet warning
+		// on this path is a known false positive for this guarded-Do
+		// pattern.)
+		return r.resp, r.err
+	case <-timer.C:
+		// Abort the round trip; RoundTrip unwinds once the request context
+		// is cancelled, so the goroutine does not leak.
+		cancelRequest()
+		r := <-done
+		if r.resp != nil {
+			// The response arrived inside the cancellation race window.
+			return r.resp, nil
+		}
+		if r.err != nil && !errors.Is(r.err, context.Canceled) {
+			return nil, r.err
+		}
+		// Reuse the transport-level wording so hung-upstream classification
+		// (isResponseHeaderTimeoutError and the streak guard) treats this
+		// attempt exactly like a ResponseHeaderTimeout.
+		return nil, &responseHeaderTimeoutError{timeout: timeout}
+	}
+}
+
 // Chat 执行聊天请求
 func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatResponse, error) {
 	// 转换为 Adapter 请求
@@ -516,7 +599,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 
 	// 发送请求
 	client := p.providerHTTPClient(false)
-	resp, err := client.Do(req)
+	resp, err := p.doRequest(client, req)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
 			Source:   "provider_wrapper",
@@ -764,7 +847,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 
 	// 发送请求
 	client := p.providerHTTPClient(true)
-	resp, err := client.Do(req)
+	resp, err := p.doRequest(client, req)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
 			Source:   "provider_wrapper",
@@ -1216,7 +1299,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			httpReq.Header.Set(key, value)
 		}
 
-		resp, err := client.Do(httpReq)
+		resp, err := p.doRequest(client, httpReq)
 		if err != nil {
 			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 				Source:   "provider_wrapper",
