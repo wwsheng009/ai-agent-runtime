@@ -1445,3 +1445,170 @@ func TestHardFailureSupersedesEmptySoftCache(t *testing.T) {
 		t.Fatal("hard failure must clear empty soft cache for same digest")
 	}
 }
+
+func TestPreflightNormalizesCoercibleSchemaArgs(t *testing.T) {
+	// Live residual: models pass timeout as bare seconds integer and commands
+	// as a single string. Both are tolerated by the tool layer
+	// (parseShellCommandTimeout / parseBashCommandBatch) and must not be
+	// rejected by preflight; args must carry the normalized shape onward.
+	tests := []struct {
+		name   string
+		schema map[string]interface{}
+		args   map[string]interface{}
+		check  func(t *testing.T, d PreflightDecision)
+	}{
+		{
+			name: "integer timeout rewritten to seconds string",
+			schema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{"type": "string"},
+					"timeout": map[string]interface{}{"type": "string"},
+					"workdir": map[string]interface{}{"type": "string"},
+				},
+			},
+			args: map[string]interface{}{"command": "go test", "timeout": 120},
+			check: func(t *testing.T, d PreflightDecision) {
+				got, ok := d.Args["timeout"].(string)
+				if !ok || got != "120" {
+					t.Fatalf("timeout must be rewritten to \"120\", got %#v", d.Args["timeout"])
+				}
+			},
+		},
+		{
+			name: "float duration kept as decimal text",
+			schema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{"type": "string"},
+					"timeout": map[string]interface{}{"type": "string"},
+				},
+			},
+			args: map[string]interface{}{"command": "go test", "timeout": 30.5},
+			check: func(t *testing.T, d PreflightDecision) {
+				if got, ok := d.Args["timeout"].(string); !ok || got != "30.5" {
+					t.Fatalf("timeout must be rewritten to \"30.5\", got %#v", d.Args["timeout"])
+				}
+			},
+		},
+		{
+			name: "string commands wrapped as single-item array",
+			schema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"commands": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "object"},
+					},
+				},
+			},
+			args: map[string]interface{}{"commands": "go test ./..."},
+			check: func(t *testing.T, d PreflightDecision) {
+				items, ok := d.Args["commands"].([]interface{})
+				if !ok || len(items) != 1 || items[0] != "go test ./..." {
+					t.Fatalf("commands must become [\"go test ./...\"], got %#v", d.Args["commands"])
+				}
+			},
+		},
+		{
+			name: "JSON array string commands parsed",
+			schema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"commands": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "object"},
+					},
+				},
+			},
+			args: map[string]interface{}{"commands": `[{"command":"go test"},{"command":"git status"}]`},
+			check: func(t *testing.T, d PreflightDecision) {
+				items, ok := d.Args["commands"].([]interface{})
+				if !ok || len(items) != 2 {
+					t.Fatalf("commands must parse into 2 items, got %#v", d.Args["commands"])
+				}
+				if first, ok := items[0].(map[string]interface{}); !ok || first["command"] != "go test" {
+					t.Fatalf("first item must be {command:go test}, got %#v", items[0])
+				}
+			},
+		},
+		{
+			name: "string items tolerated when items declares object",
+			schema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"commands": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "object"},
+					},
+				},
+			},
+			args: map[string]interface{}{"commands": []interface{}{"go test ./...", "git status"}},
+			check: func(t *testing.T, d PreflightDecision) {
+				if !d.Allow {
+					t.Fatalf("bare string items under object items must be allowed, got %+v", d)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decision := ApplyPreflight(NewMemory(2), PreflightRequest{
+				ToolName:    "shell",
+				Args:        tt.args,
+				InputSchema: tt.schema,
+			})
+			if !decision.Allow {
+				t.Fatalf("must allow after normalization, got %+v", decision)
+			}
+			tt.check(t, decision)
+		})
+	}
+}
+
+func TestPreflightStillRejectsGenuineTypeMismatch(t *testing.T) {
+	// Guard: normalization must not turn real type errors into passes.
+	// Boolean where string is declared stays invalid; declared integer args
+	// are untouched; empty string stays untouched for array fields.
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pattern":    map[string]interface{}{"type": "string"},
+			"timeout_ms": map[string]interface{}{"type": "integer"},
+			"commands": map[string]interface{}{
+				"type":  "array",
+				"items": map[string]interface{}{"type": "object"},
+			},
+		},
+	}
+
+	bad := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "grep",
+		Args:        map[string]interface{}{"pattern": true},
+		InputSchema: schema,
+	})
+	if bad.Allow {
+		t.Fatalf("boolean for string field must still be rejected, got %+v", bad)
+	}
+
+	intOK := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "shell",
+		Args:        map[string]interface{}{"timeout_ms": 120},
+		InputSchema: schema,
+	})
+	if !intOK.Allow {
+		t.Fatalf("integer for integer field must pass untouched, got %+v", intOK)
+	}
+
+	emptyString := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "shell",
+		Args:        map[string]interface{}{"commands": ""},
+		InputSchema: schema,
+	})
+	if emptyString.Allow {
+		if _, rewritten := emptyString.Args["commands"].([]interface{}); rewritten {
+			t.Fatalf("empty string for array field must not be coerced into a single-item array, got %#v", emptyString.Args["commands"])
+		}
+	}
+}

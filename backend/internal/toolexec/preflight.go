@@ -1,6 +1,7 @@
 package toolexec
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,6 +75,11 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 	if clearPlaceholderPathLikeArgs(req.Args) {
 		// Keep decision.Args pointing at the mutated map below.
 	}
+	// Models routinely send schema-mismatched JSON types that tool
+	// implementations already tolerate (timeout=120 as bare seconds, commands
+	// as a single string). Normalize those before digest/type checks so
+	// preflight does not reject what the tool would have accepted.
+	normalizeCoercibleSchemaArgs(req.InputSchema, req.Args)
 	digest := ArgsDigest(toolName, req.Args)
 	attempt := 1
 	if memory != nil {
@@ -634,6 +640,15 @@ func describeSchemaValueIssue(name string, prop map[string]interface{}, value in
 						continue
 					}
 					if !valueMatchesSchemaTypes(item, itemTypes) {
+						// Bash-style batch tools accept bare string items even
+						// when items declares object (single-command shorthand
+						// in parseBashCommandBatch). Mirror that tolerance in
+						// preflight instead of rejecting what the tool would
+						// have handled; the nested object-property check below
+						// safely skips non-object items.
+						if containsSchemaType(itemTypes, "object") && jsonSchemaValueKind(item) == "string" {
+							continue
+						}
 						return fmt.Sprintf("%s[%d] expected %s, got %s", name, i, strings.Join(itemTypes, "|"), jsonSchemaValueKind(item))
 					}
 					// One-level object property types (e.g. files[].file_path).
@@ -1048,6 +1063,100 @@ func isEmptyArgValue(value interface{}) bool {
 		return len(typed) == 0
 	default:
 		return false
+	}
+}
+
+// normalizeCoercibleSchemaArgs rewrites top-level args whose runtime JSON
+// types differ from the declared schema in ways tool implementations already
+// tolerate. It mutates args in place and reports whether anything changed.
+//
+// Supported coerce directions (mirrors tool-layer tolerance):
+//   - declared "string", got integer/number → formatted decimal string
+//     (models send timeout=120 as bare seconds; parseShellCommandTimeout
+//     already parses plain numbers as seconds via ParseFloat)
+//   - declared "array", got string → JSON array text parsed when valid,
+//     otherwise wrapped as a single-item array (models send commands as one
+//     command string; parseBashCommandBatch already accepts that shape)
+func normalizeCoercibleSchemaArgs(schema, args map[string]interface{}) bool {
+	if len(schema) == 0 || len(args) == 0 {
+		return false
+	}
+	props := schemaProperties(schema)
+	if len(props) == 0 {
+		return false
+	}
+	changed := false
+	for name, value := range args {
+		if value == nil || isEmptyArgValue(value) {
+			continue
+		}
+		prop := asObjectMap(props[name])
+		if prop == nil {
+			continue
+		}
+		declared := schemaDeclaredTypes(prop)
+		if len(declared) == 0 {
+			continue
+		}
+		got := jsonSchemaValueKind(value)
+		switch {
+		case containsSchemaType(declared, "string") &&
+			!containsSchemaType(declared, "integer") &&
+			!containsSchemaType(declared, "number") &&
+			(got == "integer" || got == "number"):
+			// number → string, preserving the exact decimal text so duration
+			// parsers can reinterpret it as seconds.
+			args[name] = numericArgString(value)
+			changed = true
+		case containsSchemaType(declared, "array") && got == "string":
+			text := strings.TrimSpace(value.(string))
+			if text == "" {
+				continue
+			}
+			var parsed []interface{}
+			if json.Unmarshal([]byte(text), &parsed) == nil {
+				args[name] = parsed
+			} else {
+				args[name] = []interface{}{text}
+			}
+			changed = true
+		}
+	}
+	return changed
+}
+
+// numericArgString formats a numeric JSON value without scientific notation
+// (120 → "120", 120.0 → "120", 30.5 → "30.5").
+func numericArgString(value interface{}) string {
+	switch typed := value.(type) {
+	case int:
+		return strconv.Itoa(typed)
+	case int8:
+		return strconv.FormatInt(int64(typed), 10)
+	case int16:
+		return strconv.FormatInt(int64(typed), 10)
+	case int32:
+		return strconv.FormatInt(int64(typed), 10)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case uint:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint64:
+		return strconv.FormatUint(typed, 10)
+	case float32:
+		return strconv.FormatFloat(float64(typed), 'f', -1, 64)
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case jsonNumber:
+		return typed.String()
+	default:
+		return fmt.Sprintf("%v", value)
 	}
 }
 
