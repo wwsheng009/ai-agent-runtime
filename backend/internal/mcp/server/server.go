@@ -1,3 +1,5 @@
+//go:build !win7compat
+
 package server
 
 import (

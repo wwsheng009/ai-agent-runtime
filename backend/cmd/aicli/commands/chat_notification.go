@@ -200,7 +200,9 @@ func (n *chatTitleNotifier) ClearTools() {
 		return
 	}
 	n.mu.Lock()
-	clear(n.snapshot.tools)
+	for key := range n.snapshot.tools {
+		delete(n.snapshot.tools, key)
+	}
 	n.mu.Unlock()
 	n.signal()
 }

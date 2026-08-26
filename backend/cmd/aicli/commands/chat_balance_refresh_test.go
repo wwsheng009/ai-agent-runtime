@@ -259,6 +259,14 @@ func TestChatAccountBalanceRefresherDiscardsStaleProviderResult(t *testing.T) {
 }
 
 func TestChatSurfaceStatusIncludesAccountBalance(t *testing.T) {
+	// Pin an empty git branch: the status line embeds the real branch name,
+	// and a long branch (e.g. feat/win7-go120-compat) can crowd out the
+	// balance segment at the fixed render width.
+	previousLookup := chatStatusGitBranchLookup
+	chatStatusGitBranchLookup = func(string) string { return "" }
+	defer func() { chatStatusGitBranchLookup = previousLookup }()
+	resetChatStatusGitBranchCacheForTest()
+
 	remaining := 12.34
 	session := &ChatSession{
 		Model:        "gpt-5.6-sol",

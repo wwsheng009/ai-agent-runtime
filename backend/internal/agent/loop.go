@@ -404,7 +404,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
 	if loop.config.MaxRunDuration > 0 {
 		var runCancel context.CancelFunc
-		currentCtx, runCancel = context.WithTimeoutCause(currentCtx, loop.config.MaxRunDuration, errReActRunTimeout)
+		currentCtx, runCancel = agentWithTimeoutCause(currentCtx, loop.config.MaxRunDuration, errReActRunTimeout)
 		defer runCancel()
 	}
 
@@ -423,7 +423,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if runErr != nil && strings.TrimSpace(result.Error) == "" {
 			result.Error = runErr.Error()
 		}
-		if stderrors.Is(context.Cause(currentCtx), errReActRunTimeout) {
+		if stderrors.Is(agentContextCause(currentCtx), errReActRunTimeout) {
 			result.LimitReached = true
 			result.LimitReason = "run_timeout"
 		} else if (stderrors.Is(runErr, context.Canceled) || stderrors.Is(runErr, context.DeadlineExceeded)) && result.LimitReason == "" {
@@ -536,7 +536,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if err := currentCtx.Err(); err != nil {
 			result.Success = false
 			result.Error = err.Error()
-			result.LimitReached = stderrors.Is(context.Cause(currentCtx), errReActRunTimeout)
+			result.LimitReached = stderrors.Is(agentContextCause(currentCtx), errReActRunTimeout)
 			if result.LimitReached {
 				result.LimitReason = "run_timeout"
 			} else {
@@ -609,7 +609,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			recoveryFingerprint := promptMessageFingerprint(recoveryHistory)
 			if sessionCompactionRecoveryStep != step {
 				sessionCompactionRecoveryStep = step
-				clear(sessionCompactionRecoveryInputs)
+				for key := range sessionCompactionRecoveryInputs {
+					delete(sessionCompactionRecoveryInputs, key)
+				}
 			}
 			if recoveryKind != "" && markSessionCompactionRecoveryInput(sessionCompactionRecoveryInputs, recoveryFingerprint) {
 				recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(currentCtx, sessionID, traceID, step, recoveryHistory, recoveryMetadata)
@@ -2260,7 +2262,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 					}, subtasks)
 					completedCount, failedCount := subagentResultCounts(reports)
 					terminalLifecycle := waitBatchTerminalLifecycle(syncBatchID, sessionID, tc.ID, traceID, len(subtasks), reports, runErr, ctx)
-					projectionCtx, projectionCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					projectionCtx, projectionCancel := context.WithTimeout(agentWithoutCancel(ctx), 5*time.Second)
 					terminalProjectionErr := loop.agent.projectBatchLifecycle(projectionCtx, terminalLifecycle)
 					projectionCancel()
 					terminalPayload := map[string]interface{}{

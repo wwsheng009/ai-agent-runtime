@@ -101,7 +101,7 @@ func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, 
 
 func hasPendingConsoleKeyEvent(handle windows.Handle) (bool, error) {
 	var eventCount uint32
-	if err := windows.GetNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
+	if err := getNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
 		return false, err
 	}
 	if eventCount == 0 {
@@ -130,7 +130,7 @@ func hasPendingConsoleKeyEvent(handle windows.Handle) (bool, error) {
 	}
 
 	for i := 0; i < int(read); i++ {
-		if records[i].EventType != windows.KEY_EVENT {
+		if records[i].EventType != consoleKeyEventType {
 			continue
 		}
 		key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
@@ -183,7 +183,7 @@ func platformConsumeSpecialInteractiveKey(fd int) (editorKey, bool, error) {
 	}
 	noiseRecords := 0
 	for i := range records {
-		if records[i].EventType == windows.KEY_EVENT {
+		if records[i].EventType == consoleKeyEventType {
 			key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
 			if consoleKeyEventIsModifiedEnterDown(key) {
 				for consumed := 0; consumed <= i; consumed++ {
@@ -224,7 +224,7 @@ func consoleKeyEventIsModifiedEnterDown(key *consoleKeyEventRecord) bool {
 }
 
 func consoleInputRecordCanProduceInput(record consoleInputRecord) bool {
-	if record.EventType != windows.KEY_EVENT {
+	if record.EventType != consoleKeyEventType {
 		return false
 	}
 	key := (*consoleKeyEventRecord)(unsafe.Pointer(&record.Event[0]))
@@ -268,7 +268,7 @@ func consumeConsoleInputRecords(handle windows.Handle, count int) error {
 
 func peekConsoleInputRecords(handle windows.Handle, limit uint32) ([]consoleInputRecord, error) {
 	var eventCount uint32
-	if err := windows.GetNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
+	if err := getNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
 		return nil, err
 	}
 	if eventCount == 0 {
