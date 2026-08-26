@@ -7,7 +7,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { type Artifact, type Thread } from "@/data/mock";
 import {
@@ -15,6 +15,7 @@ import {
   mergeRuntimeSessionsIntoThreads,
 } from "@/lib/workspace-thread-state";
 import type { RuntimeSessionRecord } from "@/types/runtime";
+import { normalizeSessionId } from "@/lib/session-id";
 
 type WorkspaceThreadSelectionOptions = {
   initialThreads: Thread[];
@@ -54,6 +55,24 @@ export function createDraftThread(): Thread {
   };
 }
 
+function createPendingSessionThread(sessionId: string): Thread {
+  return {
+    id: sessionId,
+    title: `Runtime session ${sessionId.slice(0, 10)}`,
+    summary: "Loading the requested runtime session.",
+    updatedAt: "1970-01-01T00:00:00.000Z",
+    status: "active",
+    sessionId,
+    transport: "live",
+    runtimeSource: "runtime",
+    lastError: null,
+    prompts: [],
+    tags: ["runtime-session", "loading"],
+    messages: [],
+    artifacts: [],
+  };
+}
+
 export function resolveSelectedThread(
   threads: Thread[],
   { routeSessionId, routeThreadId }: WorkspaceRouteSelection,
@@ -62,10 +81,14 @@ export function resolveSelectedThread(
     return createDraftThread();
   }
 
-  const directThreadMatch = routeThreadId
+  const normalizedRouteThreadId = normalizeSessionId(routeThreadId);
+  const normalizedRouteSessionId = normalizeSessionId(routeSessionId);
+
+  const directThreadMatch = normalizedRouteThreadId
     ? threads.find(
         (thread) =>
-          thread.id === routeThreadId || thread.sessionId === routeThreadId,
+          normalizeSessionId(thread.id) === normalizedRouteThreadId ||
+          normalizeSessionId(thread.sessionId) === normalizedRouteThreadId,
       )
     : undefined;
 
@@ -73,14 +96,24 @@ export function resolveSelectedThread(
     return directThreadMatch;
   }
 
-  const directSessionMatch = routeSessionId
+  const directSessionMatch = normalizedRouteSessionId
     ? threads.find(
         (thread) =>
-          thread.sessionId === routeSessionId || thread.id === routeSessionId,
+          normalizeSessionId(thread.sessionId) === normalizedRouteSessionId ||
+          normalizeSessionId(thread.id) === normalizedRouteSessionId,
       )
     : undefined;
 
-  return directSessionMatch ?? threads[0];
+  if (directSessionMatch) {
+    return directSessionMatch;
+  }
+  if (normalizedRouteSessionId) {
+    // Keep a deep-linked session selected while the pinned-session request is
+    // still in flight. Falling back to threads[0] here would replace the URL
+    // before the requested session has a chance to load.
+    return createPendingSessionThread(normalizedRouteSessionId);
+  }
+  return threads[0];
 }
 
 export function buildWorkspaceThreadPath(thread: Thread | undefined) {
@@ -92,11 +125,12 @@ export function buildWorkspaceThreadPath(thread: Thread | undefined) {
     return "/workspace/chats/new";
   }
 
-  if (thread.sessionId) {
-    return `/workspace/sessions/${thread.sessionId}`;
+  const sessionId = normalizeSessionId(thread.sessionId);
+  if (sessionId) {
+    return `/workspace/sessions/${encodeURIComponent(sessionId)}`;
   }
 
-  return `/workspace/chats/${thread.id}`;
+  return `/workspace/chats/${encodeURIComponent(thread.id)}`;
 }
 
 export function resolveArtifactSelection(
@@ -133,6 +167,7 @@ export function useWorkspaceThreadSelection({
   initialThreads,
   runtimeSessions,
 }: WorkspaceThreadSelectionOptions) {
+  const location = useLocation();
   const navigate = useNavigate();
   const {
     sessionId: routeSessionId,
@@ -155,10 +190,14 @@ export function useWorkspaceThreadSelection({
     [runtimeSessions],
   );
 
-  const selectedThread = resolveSelectedThread(threads, {
-    routeSessionId,
-    routeThreadId,
-  });
+  const selectedThread = useMemo(
+    () =>
+      resolveSelectedThread(threads, {
+        routeSessionId,
+        routeThreadId,
+      }),
+    [routeSessionId, routeThreadId, threads],
+  );
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(
     getFirstArtifactId(selectedThread),
   );
@@ -169,16 +208,10 @@ export function useWorkspaceThreadSelection({
     }
 
     const canonicalPath = buildWorkspaceThreadPath(selectedThread);
-    const currentPath = routeSessionId
-      ? `/workspace/sessions/${routeSessionId}`
-      : routeThreadId
-        ? `/workspace/chats/${routeThreadId}`
-        : "/workspace";
-
-    if (currentPath !== canonicalPath) {
+    if (location.pathname !== canonicalPath) {
       navigate(canonicalPath, { replace: true });
     }
-  }, [navigate, routeSessionId, routeThreadId, selectedThread]);
+  }, [location.pathname, navigate, selectedThread]);
 
   function handleSelectThread(threadId: string) {
     if (threadId === NEW_THREAD_ID) {

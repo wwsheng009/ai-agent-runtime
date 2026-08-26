@@ -44,6 +44,12 @@ const (
 	localChatSessionActorLeaseOwnerKind   = "aicli-actor"
 	localSubagentBatchRestartGrace        = 5 * time.Minute
 	localSubagentBatchRecoveryPassTimeout = 15 * time.Second
+	// defaultLocalChatRunStallTimeout 是 run 无进展 watchdog 的默认阈值：
+	// run 启动后超过该时长没有任何进展事件（assistant_delta /
+	// assistant.reasoning / tool.* / 状态更新）即判定挂死并强制中止。
+	// 15 分钟对正常长任务（多步工具调用、长流式输出）足够，同时远小于
+	// 用户遇到的"上游挂死 30+ 分钟无事件"场景。
+	defaultLocalChatRunStallTimeout = 15 * time.Minute
 )
 
 // runLocalSubagentStartupRecovery runs the bounded startup pass immediately
@@ -773,6 +779,15 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
 		PersistHook:  localGoalPersistHook(sessionStore),
 		RecoverStale: true,
+		// 上游挂死/网络卡死时 run 可能长时间无任何进展（无 delta、无工具
+		// 事件、无状态更新），状态卡在 running，busy 锁让用户无法继续也无法
+		// 重启接管。watchdog 超时后强制中止并释放 lease，让会话可恢复。
+		RunStallTimeout: defaultLocalChatRunStallTimeout,
+		OnRunStalled: func(turnID string) {
+			if leaseHandle != nil {
+				_ = leaseHandle.Release(context.Background())
+			}
+		},
 		OnStop: func() {
 			if leaseHandle != nil {
 				_ = leaseHandle.Release(context.Background())

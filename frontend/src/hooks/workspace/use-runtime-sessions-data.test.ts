@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildStoredRuntimeSessionsKey,
   chooseRuntimeSessionUserId,
+  loadRuntimeSessions,
   mergePinnedRuntimeSession,
   normalizeRuntimeSessionUsers,
   normalizeRuntimeSessions,
@@ -14,6 +15,15 @@ import {
   writeStoredRuntimeSessionUserId,
   writeStoredRuntimeSessions,
 } from "@/hooks/workspace/use-runtime-sessions-data";
+import { getRuntimeSession, listRuntimeSessions } from "@/lib/runtime-api";
+
+vi.mock("@/lib/runtime-api", () => ({
+  getRuntimeSession: vi.fn(),
+  listRuntimeSessions: vi.fn(),
+}));
+
+const mockGetRuntimeSession = vi.mocked(getRuntimeSession);
+const mockListRuntimeSessions = vi.mocked(listRuntimeSessions);
 
 class MemoryStorage implements Storage {
   private values = new Map<string, string>();
@@ -224,5 +234,112 @@ describe("use-runtime-sessions-data helpers", () => {
     expect(resolveRuntimeSessionsRetryDelay(2)).toBe(5000);
     expect(resolveRuntimeSessionsRetryDelay(3)).toBe(8000);
     expect(resolveRuntimeSessionsRetryDelay(99)).toBe(8000);
+  });
+});
+
+describe("loadRuntimeSessions pinned session id normalization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("matches a listed session when the pinned id is a variant", async () => {
+    mockListRuntimeSessions.mockResolvedValue({
+      count: 1,
+      sessions: [
+        {
+          createdAt: "2026-03-31T08:00:00Z",
+          id: "session-1",
+          state: "active",
+          updatedAt: "2026-03-31T08:30:00Z",
+        },
+      ],
+    });
+
+    const result = await loadRuntimeSessions("user-1", "session-1/");
+
+    expect(result.map((session) => session.id)).toEqual(["session-1"]);
+    expect(mockGetRuntimeSession).not.toHaveBeenCalled();
+  });
+
+  it("fetches a missing pinned session with its canonical id", async () => {
+    mockListRuntimeSessions.mockResolvedValue({
+      count: 1,
+      sessions: [
+        {
+          createdAt: "2026-03-31T08:00:00Z",
+          id: "session-1",
+          state: "active",
+          updatedAt: "2026-03-31T08:30:00Z",
+        },
+      ],
+    });
+    mockGetRuntimeSession.mockResolvedValue({
+      session: {
+        createdAt: "2026-03-31T09:00:00Z",
+        id: "session-pinned",
+        state: "idle",
+        updatedAt: "2026-03-31T09:30:00Z",
+      },
+    });
+
+    const result = await loadRuntimeSessions("user-1", " dir/session-pinned ");
+
+    expect(mockGetRuntimeSession).toHaveBeenCalledWith("session-pinned");
+    expect(result.map((session) => session.id)).toEqual([
+      "session-pinned",
+      "session-1",
+    ]);
+  });
+
+  it("falls back to the listed sessions when the pinned session cannot be fetched", async () => {
+    mockListRuntimeSessions.mockResolvedValue({
+      count: 1,
+      sessions: [
+        {
+          createdAt: "2026-03-31T08:00:00Z",
+          id: "session-1",
+          state: "active",
+          updatedAt: "2026-03-31T08:30:00Z",
+        },
+      ],
+    });
+    mockGetRuntimeSession.mockRejectedValue(new Error("not found"));
+
+    const result = await loadRuntimeSessions("user-1", "dir/session-missing");
+
+    expect(result.map((session) => session.id)).toEqual(["session-1"]);
+  });
+});
+
+describe("runtime session record normalization", () => {
+  it("canonicalizes ids, drops invalid entries and deduplicates aliases", () => {
+    expect(
+      normalizeRuntimeSessions([
+        {
+          id: "dir/session-1/",
+          state: "active",
+        },
+        {
+          id: "session-1",
+          state: "idle",
+        },
+        null,
+        {
+          id: " / ",
+        },
+      ]),
+    ).toEqual([
+      {
+        id: "session-1",
+        state: "active",
+      },
+    ]);
+  });
+
+  it("does not append a pinned alias that is already listed", () => {
+    const listed = [{ id: "session-1" }];
+    expect(
+      mergePinnedRuntimeSession(listed, { id: "dir/session-1/" }),
+    ).toBe(listed);
   });
 });

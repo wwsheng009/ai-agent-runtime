@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chataloganalytics"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
@@ -108,7 +109,7 @@ func (h *Handler) GetAnalyticsSessionUsage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -132,7 +133,7 @@ func (h *Handler) ListAnalyticsSessionTurns(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return

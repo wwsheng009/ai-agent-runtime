@@ -435,7 +435,19 @@ func (s *FileStorage) readSessionLocked(sessionID string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.readSessionFileLocked(path)
+	session, err := s.readSessionFileLocked(path)
+	if err != nil {
+		return nil, err
+	}
+	storedID := NormalizeSessionID(session.ID)
+	if storedID != sessionID {
+		// Session IDs are case-sensitive. In particular, do not let a
+		// case-insensitive filesystem turn two logical IDs into aliases while
+		// the runtime/lease stores still use case-sensitive keys.
+		return nil, ErrSessionNotFound
+	}
+	session.ID = storedID
+	return session, nil
 }
 
 func (s *FileStorage) readSessionFileLocked(path string) (*Session, error) {
@@ -624,12 +636,27 @@ func decodeFileSessionHistoryMetadata(decoder *json.Decoder, preview *fileSessio
 }
 
 func (s *FileStorage) writeSessionLocked(session *Session) error {
-	if session == nil || strings.TrimSpace(session.ID) == "" {
+	if session == nil {
+		return ErrInvalidSession
+	}
+	session.ID = NormalizeSessionID(session.ID)
+	if session.ID == "" {
 		return ErrInvalidSession
 	}
 	path, err := s.sessionWritePathLocked(session)
 	if err != nil {
 		return err
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		existing, readErr := s.readSessionFileLocked(path)
+		if readErr != nil {
+			return readErr
+		}
+		if existing != nil && NormalizeSessionID(existing.ID) != session.ID {
+			return fmt.Errorf("%w: session id collides with existing session %q", ErrInvalidSession, existing.ID)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat session %s: %w", session.ID, statErr)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create session dir for %s: %w", session.ID, err)
@@ -927,10 +954,25 @@ func isMonthOrDayDirName(name string) bool {
 
 func sanitizeSessionID(sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
+	sessionID = strings.TrimRight(sessionID, `/\`)
 	if sessionID == "" {
 		return ""
 	}
-	return filepath.Base(sessionID)
+	if separator := strings.LastIndexAny(sessionID, `/\`); separator >= 0 {
+		return sessionID[separator+1:]
+	}
+	return sessionID
+}
+
+// NormalizeSessionID 返回会话 ID 的规范形式，与 session 存储层（sessions 表/文件）
+// 使用的 sanitizeSessionID 完全一致：去除首尾空白、移除尾部分隔符并取路径
+// 最后一段。正斜杠和反斜杠在所有平台上都按分隔符处理，避免同一 ID 因运行
+// 平台不同而映射到不同的存储键。
+// 锁机制（session_actor_leases）必须使用同一规范化，否则同一会话的不同字符串
+// 变体（如 "abc" 与 "abc/"、"dir/abc"）会在存储层命中同一会话，却在锁表里
+// 分裂成多把互不冲突的锁，绕过单拥有者互斥。
+func NormalizeSessionID(sessionID string) string {
+	return sanitizeSessionID(sessionID)
 }
 
 func sortSessionsByUpdated(sessions []*Session) {

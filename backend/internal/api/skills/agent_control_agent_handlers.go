@@ -84,10 +84,10 @@ func parseAgentControlAgentFilter(r *http.Request) (agentcontrol.AgentFilter, er
 	}
 	return agentcontrol.AgentFilter{
 		AgentID:         strings.TrimSpace(q.Get("agent_id")),
-		RootSessionID:   firstNonEmptyString(strings.TrimSpace(q.Get("root_session_id")), strings.TrimSpace(q.Get("root"))),
+		RootSessionID:   firstNonEmptyString(chat.NormalizeSessionID(q.Get("root_session_id")), chat.NormalizeSessionID(q.Get("root"))),
 		ParentAgentID:   strings.TrimSpace(q.Get("parent_agent_id")),
-		ParentSessionID: strings.TrimSpace(q.Get("parent_session_id")),
-		SessionID:       firstNonEmptyString(strings.TrimSpace(q.Get("session_id")), strings.TrimSpace(q.Get("session"))),
+		ParentSessionID: chat.NormalizeSessionID(q.Get("parent_session_id")),
+		SessionID:       firstNonEmptyString(chat.NormalizeSessionID(q.Get("session_id")), chat.NormalizeSessionID(q.Get("session"))),
 		AgentPath:       firstNonEmptyString(strings.TrimSpace(q.Get("agent_path")), strings.TrimSpace(q.Get("path"))),
 		PathPrefix:      strings.TrimSpace(q.Get("path_prefix")),
 		Workflow:        strings.TrimSpace(q.Get("workflow")),

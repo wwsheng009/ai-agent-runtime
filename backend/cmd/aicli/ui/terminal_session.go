@@ -252,19 +252,53 @@ type TerminalTransactionResult struct {
 	TerminalEpoch   uint64
 }
 
+// terminalPreparedTransaction contains pure presentation work derived from one
+// immutable plan. It is built without holding TerminalSession.mu so a large
+// bootstrap history batch cannot block projection diagnostics or shutdown
+// state inspection. transactionMu still orders theme/lease transitions with
+// the eventual physical write.
+type terminalPreparedTransaction struct {
+	theme        style.ThemeContext
+	viewportRows [][]vt.Cell
+	viewportErr  error
+	history      *terminalPreparedHistory
+}
+
+type terminalPreparedHistory struct {
+	commits []HistoryCommit
+	rows    []string
+	err     error
+}
+
+// terminalPreparedHistoryCache retains at most the current pending batch. It is
+// guarded by TerminalSession.transactionMu and is cleared after a successful or
+// possibly-partial history write. Exact presentation equality, width, and theme
+// are revalidated before reuse, so a same-token pending rebase cannot return
+// stale terminal bytes.
+type terminalPreparedHistoryCache struct {
+	commits []HistoryCommit
+	theme   style.ThemeContext
+	width   int
+	rows    []string
+}
+
 // TerminalSession owns one physical bottom-inline viewport projection cache. The
 // mutex serializes mutable front/back/cursor state; Presenter additionally
 // serializes each terminal write with the repository-wide terminal lock. The
 // unified chat path installs TerminalSession through TerminalSessionPresenter;
 // FixedBottomSurface remains only a compatibility state facade in that mode.
 type TerminalSession struct {
-	mu        sync.Mutex
-	writer    io.Writer
-	aborter   TerminalWriteAborter
-	presenter *renderengine.Presenter
-	screen    *renderengine.ScreenModel
-	geometry  GeometryState
-	viewport  ViewportArea
+	// transactionMu preserves call order across the prepare-without-state-lock
+	// phase and the physical write. AbortTerminalWrite intentionally bypasses
+	// it so a blocked target remains interruptible.
+	transactionMu sync.Mutex
+	mu            sync.Mutex
+	writer        io.Writer
+	aborter       TerminalWriteAborter
+	presenter     *renderengine.Presenter
+	screen        *renderengine.ScreenModel
+	geometry      GeometryState
+	viewport      ViewportArea
 	// viewportBoundaryKnown proves that viewport was confirmed on a terminal
 	// with viewportTerminalHeight rows. It is separate from the cell cache:
 	// theme/lease recovery can invalidate content while DEC 1049 still preserves
@@ -299,9 +333,12 @@ type TerminalSession struct {
 	// exit completes before LeaseReleased is reduced. FlushTransaction checks
 	// it directly so no stale AppState snapshot can write a primary frame into
 	// the alternate buffer during either transition.
-	alternateLeaseID uint64
-	colorProfile     render.ColorProfile
-	frameTheme       style.ThemeContext
+	alternateLeaseID     uint64
+	colorProfile         render.ColorProfile
+	frameTheme           style.ThemeContext
+	preparedHistory      *terminalPreparedHistoryCache
+	historyPrepareHits   uint64
+	historyPrepareMisses uint64
 }
 
 var _ HistoryCommitSink = (*TerminalSession)(nil)
@@ -396,14 +433,17 @@ func (s *TerminalSession) AlternateScreenLeaseID() uint64 {
 // FixedBottomSurface: once the unified renderer is selected, all terminal
 // control bytes must pass through this owner and its Presenter lock.
 //
-// The caller posts LeaseAcquired only after this method succeeds. Holding the
-// session mutex across the transport write closes the race where an old actor
+// The caller posts LeaseAcquired only after this method succeeds. The
+// transaction mutex keeps this physical transition ordered with primary/history
+// preparation, while the session mutex closes the race where an old actor
 // snapshot could otherwise flush a primary frame after DEC 1049 entered but
 // before the lease barrier reached the reducer.
 func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 	if s == nil || leaseID == 0 {
 		return ErrTerminalAlternateScreenLease
 	}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writer == nil || s.presenter == nil || s.screen == nil {
@@ -452,6 +492,8 @@ func (s *TerminalSession) WriteAlternateScreen(leaseID uint64, bytes string) err
 	if bytes == "" {
 		return nil
 	}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.alternateLeaseID != leaseID {
@@ -477,6 +519,8 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 	if s == nil || leaseID == 0 {
 		return ErrTerminalAlternateScreenLease
 	}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.alternateLeaseID == 0 {
@@ -516,6 +560,8 @@ func (s *TerminalSession) SetColorProfile(profile render.ColorProfile) {
 	if s == nil {
 		return
 	}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.colorProfile == profile {
@@ -524,6 +570,10 @@ func (s *TerminalSession) SetColorProfile(profile render.ColorProfile) {
 	s.colorProfile = profile
 	s.frameTheme.Terminal.ColorProfile = profile
 	s.frameTheme.UseHyperlink = profile.Hyperlinks
+	// Prepared history contains already-resolved ANSI for the old profile.
+	// Exact validation would reject it later, but clearing now releases the
+	// retained batch even when no further history transaction is scheduled.
+	s.preparedHistory = nil
 	if s.screen != nil {
 		s.screen.Invalidate()
 	}
@@ -539,10 +589,14 @@ func (s *TerminalSession) SetThemeContext(theme style.ThemeContext) {
 	if s == nil {
 		return
 	}
+	theme = cloneThemeContext(theme)
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.frameTheme = theme
 	s.colorProfile = theme.Terminal.ColorProfile
+	s.preparedHistory = nil
 	if s.screen != nil {
 		s.screen.Invalidate()
 	}
@@ -573,8 +627,7 @@ func (s *TerminalSession) Flush(plan TerminalFramePlan) TerminalFrameResult {
 // fenced from physical output. It must never be connected beside the legacy
 // historyWindow handoff path.
 func (s *TerminalSession) FlushTransaction(plan TerminalTransactionPlan) TerminalTransactionResult {
-	plan = plan.Clone()
-	if s == nil || !plan.Valid() {
+	if s == nil {
 		result := TerminalFrameResult{Err: ErrInvalidTerminalFrame}
 		if plan.History != nil {
 			history := HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
@@ -582,12 +635,119 @@ func (s *TerminalSession) FlushTransaction(plan TerminalTransactionPlan) Termina
 		}
 		return TerminalTransactionResult{Frame: result}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.flushTransactionLocked(plan)
+	plan = plan.Clone()
+	if !plan.Valid() {
+		result := TerminalFrameResult{Err: ErrInvalidTerminalFrame}
+		if plan.History != nil {
+			history := HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
+			return TerminalTransactionResult{Frame: result, History: &history}
+		}
+		return TerminalTransactionResult{Frame: result}
+	}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
+
+	for {
+		s.mu.Lock()
+		if !s.transactionPreparationAllowedLocked(plan) {
+			result := s.flushTransactionLocked(plan, nil)
+			s.mu.Unlock()
+			return result
+		}
+		theme := plan.Frame.Theme
+		usesFallbackTheme := theme.Palette.Styles == nil
+		if usesFallbackTheme {
+			theme = cloneThemeContext(s.frameTheme)
+		}
+		s.mu.Unlock()
+
+		prepared := s.prepareTerminalTransaction(plan, theme)
+
+		s.mu.Lock()
+		if usesFallbackTheme && !themeContextEqual(theme, s.frameTheme) {
+			// Theme replacement raced pure preparation. Discard only the
+			// viewport preparation; the history cache revalidates theme and
+			// will replace its entry on the next pass.
+			s.mu.Unlock()
+			continue
+		}
+		result := s.flushTransactionLocked(plan, prepared)
+		s.mu.Unlock()
+		return result
+	}
 }
 
-func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) TerminalTransactionResult {
+// transactionPreparationAllowedLocked mirrors only the early, no-presentation
+// exits of flushTransactionLocked. It is an optimization, not an authorization
+// decision: the complete checks run again after preparation.
+func (s *TerminalSession) transactionPreparationAllowedLocked(plan TerminalTransactionPlan) bool {
+	frame := plan.Frame
+	if s.writer == nil || s.presenter == nil || s.screen == nil ||
+		frame.LayoutGeneration < s.generation ||
+		s.alternateLeaseID != 0 || frame.Lease.Active {
+		return false
+	}
+	return terminalFrameViewportArea(frame).validFor(frame.Geometry)
+}
+
+func (s *TerminalSession) prepareTerminalTransaction(plan TerminalTransactionPlan, theme style.ThemeContext) *terminalPreparedTransaction {
+	area := terminalFrameViewportArea(plan.Frame)
+	rows, viewportErr := terminalViewportCells(plan.Frame, area, theme)
+	prepared := &terminalPreparedTransaction{
+		theme:        theme,
+		viewportRows: rows,
+		viewportErr:  viewportErr,
+	}
+	if plan.History == nil {
+		return prepared
+	}
+	commits := terminalHistoryTransactionCommits(plan.History, plan.BootstrapHistory)
+	historyRows, historyErr := s.prepareTerminalHistoryRows(commits, theme, plan.Frame.Geometry.Width)
+	prepared.history = &terminalPreparedHistory{
+		commits: commits,
+		rows:    historyRows,
+		err:     historyErr,
+	}
+	return prepared
+}
+
+func (s *TerminalSession) prepareTerminalHistoryRows(commits []HistoryCommit, theme style.ThemeContext, width int) ([]string, error) {
+	if cached := s.preparedHistory; cached != nil &&
+		cached.width == width &&
+		themeContextEqual(cached.theme, theme) &&
+		terminalHistoryCommitsPresentationEqual(cached.commits, commits) {
+		s.historyPrepareHits++
+		return cached.rows, nil
+	}
+	s.preparedHistory = nil
+	s.historyPrepareMisses++
+	rows, err := terminalHistoryCommitRows(commits, theme, width)
+	if err != nil {
+		return nil, err
+	}
+	s.preparedHistory = &terminalPreparedHistoryCache{
+		commits: cloneHistoryCommits(commits),
+		theme:   cloneThemeContext(theme),
+		width:   width,
+		rows:    append([]string(nil), rows...),
+	}
+	return rows, nil
+}
+
+func terminalHistoryCommitsPresentationEqual(left, right []HistoryCommit) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Token != right[index].Token ||
+			!historyCommitPresentationEqual(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, prepared *terminalPreparedTransaction) TerminalTransactionResult {
 	frame := plan.Frame
 	if s.writer == nil || s.presenter == nil || s.screen == nil {
 		result := TerminalFrameResult{Frame: s.frame, Err: ErrTerminalWriterMissing}
@@ -646,11 +806,11 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	}
 
 	fullRepaint := !projectionKnown
-	theme := frame.Theme
-	if theme.Palette.Styles == nil {
-		theme = s.frameTheme
+	if prepared == nil {
+		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: ErrInvalidTerminalFrame}
+		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
 	}
-	rows, err := terminalViewportCells(frame, area, theme)
+	rows, err := prepared.viewportRows, prepared.viewportErr
 	if err != nil {
 		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
@@ -663,17 +823,21 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	if plan.History != nil {
 		result := HistoryCommitResult{Deferred: true}
 		if historyProjectionWritable && frame.OutputBottomRow > 0 && plan.History.LayoutGeneration == frame.LayoutGeneration {
-			commits := terminalHistoryTransactionCommits(plan.History, plan.BootstrapHistory)
-			candidateRows, _, historyErr := terminalHistoryCommitRows(commits, theme, frame.Geometry.Width)
-			if historyErr != nil {
-				result = HistoryCommitResult{Err: historyErr}
-			} else if len(candidateRows) == 0 {
+			if history := prepared.history; history == nil {
 				result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 			} else {
-				historyInsertedRows = len(candidateRows)
-				historyInsertedPayload = append([]string(nil), candidateRows...)
-				delivered = cloneHistoryCommits(commits)
-				result = HistoryCommitResult{}
+				commits := history.commits
+				candidateRows, historyErr := history.rows, history.err
+				if historyErr != nil {
+					result = HistoryCommitResult{Err: historyErr}
+				} else if len(candidateRows) == 0 {
+					result = HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
+				} else {
+					historyInsertedRows = len(candidateRows)
+					historyInsertedPayload = candidateRows
+					delivered = cloneHistoryCommits(commits)
+					result = HistoryCommitResult{}
+				}
 			}
 		}
 		historyResult = &result
@@ -744,6 +908,9 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 				s.historyProjectionKnown = false
 				s.historyProjectionStarted = true
 			}
+			if historyBytes != "" {
+				s.preparedHistory = nil
+			}
 		}
 		frameResult := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: write.Err}
 		if historyResult != nil && historyBytes != "" {
@@ -786,6 +953,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan) T
 	frameResult := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint}
 	if historyResult != nil && historyBytes != "" {
 		*historyResult = HistoryCommitResult{Frame: s.frame, Delivered: delivered}
+		s.preparedHistory = nil
 	}
 	return TerminalTransactionResult{
 		Frame:           frameResult,
@@ -849,28 +1017,60 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 	if s == nil {
 		return HistoryCommitResult{Err: ErrTerminalWriterMissing}
 	}
+	commit = commit.Clone()
 	if !commit.Valid() {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.writer == nil || s.presenter == nil || s.screen == nil {
-		return HistoryCommitResult{Err: ErrTerminalWriterMissing}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
+
+	for {
+		s.mu.Lock()
+		if result, done := s.commitHistoryEarlyResultLocked(commit); done {
+			s.mu.Unlock()
+			return result
+		}
+		theme := cloneThemeContext(s.frameTheme)
+		width := s.geometry.Width
+		s.mu.Unlock()
+
+		rows, err := s.prepareTerminalHistoryRows([]HistoryCommit{commit}, theme, width)
+		if err != nil {
+			return HistoryCommitResult{Err: err}
+		}
+
+		s.mu.Lock()
+		if width != s.geometry.Width || !themeContextEqual(theme, s.frameTheme) {
+			s.mu.Unlock()
+			continue
+		}
+		if result, done := s.commitHistoryEarlyResultLocked(commit); done {
+			s.mu.Unlock()
+			return result
+		}
+		result := s.commitHistoryRowsLocked(rows)
+		s.mu.Unlock()
+		return result
 	}
-	if s.lease.Active || s.generation == 0 || commit.LayoutGeneration != s.generation ||
+}
+
+func (s *TerminalSession) commitHistoryEarlyResultLocked(commit HistoryCommit) (HistoryCommitResult, bool) {
+	if s.writer == nil || s.presenter == nil || s.screen == nil {
+		return HistoryCommitResult{Err: ErrTerminalWriterMissing}, true
+	}
+	if s.alternateLeaseID != 0 || s.lease.Active || s.generation == 0 || commit.LayoutGeneration != s.generation ||
 		s.outputBottom < 1 || !s.historyProjectionKnown ||
 		s.screen.ProjectionValidity() != renderengine.ProjectionKnown {
 		// No primary transaction has begun. The executor may return this token
 		// to Pending without inventing a retry identity or marking projection
 		// failure; a later source-backed frame/recovery owns the wake-up.
-		return HistoryCommitResult{Deferred: true}
+		return HistoryCommitResult{Deferred: true}, true
 	}
+	return HistoryCommitResult{}, false
+}
 
-	rows, _, err := terminalHistoryHandoffRows(commit.Lines, s.frameTheme, s.geometry.Width)
-	if err != nil {
-		return HistoryCommitResult{Err: err}
-	}
+func (s *TerminalSession) commitHistoryRowsLocked(rows []string) HistoryCommitResult {
 	// The top-anchored region ends immediately above the inline viewport. Since
 	// its top margin is physical row one, overflow becomes native scrollback;
 	// prompt/status rows below outputBottom never participate in the scroll.
@@ -890,6 +1090,7 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 			s.historyTopAligned = false
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
+			s.preparedHistory = nil
 		}
 		return HistoryCommitResult{
 			Err:                     write.Err,
@@ -900,6 +1101,7 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 	s.frame++
 	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
 	s.historyTopAligned = nextHistoryTopAligned
+	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
 }
 
@@ -907,31 +1109,26 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 // same explicit ThemeContext used for viewport rows. It does not parse source
 // strings or build a second formatter; HistoryCommit.Lines already are the
 // selected layout-generation display rows.
-func terminalHistoryHandoffRows(lines []render.Line, theme style.ThemeContext, width int) ([]string, [][]vt.Cell, error) {
+func terminalHistoryHandoffRows(lines []render.Line, theme style.ThemeContext, width int) ([]string, error) {
 	if width < 1 || len(lines) == 0 {
-		return nil, nil, ErrInvalidHistoryHandoff
+		return nil, ErrInvalidHistoryHandoff
 	}
 	for index, line := range lines {
 		if render.LineWidth(line) > width {
-			return nil, nil, fmt.Errorf("%w: row %d exceeds width %d", ErrInvalidHistoryHandoff, index+1, width)
+			return nil, fmt.Errorf("%w: row %d exceeds width %d", ErrInvalidHistoryHandoff, index+1, width)
 		}
 	}
 	document := style.NewResolver(theme).ResolveDocument(render.LinesDoc(lines...))
 	rows := (render.ANSIBackend{Profile: theme.Terminal.ColorProfile}).RenderLines(document)
 	if len(rows) != len(lines) {
-		return nil, nil, ErrInvalidHistoryHandoff
+		return nil, ErrInvalidHistoryHandoff
 	}
-	cells := make([][]vt.Cell, len(rows))
-	screen := vt.NewScreen(width, 2)
 	for index, row := range rows {
 		if strings.ContainsAny(row, "\r\n") {
-			return nil, nil, fmt.Errorf("%w: encoded row %d contains a line control", ErrInvalidHistoryHandoff, index+1)
+			return nil, fmt.Errorf("%w: encoded row %d contains a line control", ErrInvalidHistoryHandoff, index+1)
 		}
-		screen.Reset()
-		screen.Feed(row)
-		cells[index] = screen.CellRows(1, 1)[0]
 	}
-	return rows, cells, nil
+	return rows, nil
 }
 
 func terminalHistoryTransactionCommits(claimed *HistoryCommit, bootstrap []HistoryCommit) []HistoryCommit {
@@ -941,25 +1138,29 @@ func terminalHistoryTransactionCommits(claimed *HistoryCommit, bootstrap []Histo
 	if len(bootstrap) > 0 && bootstrap[0].Token == claimed.Token &&
 		bootstrap[0].LayoutGeneration == claimed.LayoutGeneration &&
 		historyCommitPresentationEqual(bootstrap[0], *claimed) {
-		return cloneHistoryCommits(bootstrap)
+		return bootstrap
 	}
-	return []HistoryCommit{claimed.Clone()}
+	return []HistoryCommit{*claimed}
 }
 
-func terminalHistoryCommitRows(commits []HistoryCommit, theme style.ThemeContext, width int) ([]string, [][]vt.Cell, error) {
+func terminalHistoryCommitRows(commits []HistoryCommit, theme style.ThemeContext, width int) ([]string, error) {
 	if len(commits) == 0 {
-		return nil, nil, ErrInvalidHistoryHandoff
+		return nil, ErrInvalidHistoryHandoff
 	}
-	lines := make([]render.Line, 0)
 	generation := commits[0].LayoutGeneration
 	previousToken := uint64(0)
+	lineCount := 0
 	for _, commit := range commits {
 		if !commit.Valid() || commit.LayoutGeneration != generation ||
 			(previousToken != 0 && commit.Token <= previousToken) {
-			return nil, nil, ErrInvalidHistoryHandoff
+			return nil, ErrInvalidHistoryHandoff
 		}
-		lines = append(lines, cloneRenderLines(commit.Lines)...)
+		lineCount += len(commit.Lines)
 		previousToken = commit.Token
+	}
+	lines := make([]render.Line, 0, lineCount)
+	for _, commit := range commits {
+		lines = append(lines, commit.Lines...)
 	}
 	return terminalHistoryHandoffRows(lines, theme, width)
 }

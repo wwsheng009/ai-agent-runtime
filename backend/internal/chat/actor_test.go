@@ -1449,6 +1449,196 @@ func TestSessionActorInterruptConvergesStoppedStateAndTelemetry(t *testing.T) {
 	require.Greater(t, sessionEnd["duration"].(int64), int64(0))
 }
 
+func TestSessionActorRunStallWatchdogAbortsHungRun(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-stall-user")
+	require.NoError(t, err)
+
+	bus := runtimeevents.NewBus()
+	provider := &cancelBlockingLLMProvider{
+		name:    "stall-blocking-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-stall-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+
+	stalledTurn := make(chan string, 1)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:           apiAgent,
+		LLMRuntime:      runtime,
+		SessionStore:    storage,
+		StateStore:      runtimeStore,
+		EventStore:      runtimeStore,
+		EventBus:        bus,
+		RunStallTimeout: 300 * time.Millisecond,
+		OnRunStalled: func(turnID string) {
+			stalledTurn <- turnID
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	type submitResponse struct {
+		result *agent.Result
+		err    error
+	}
+	responseCh := make(chan submitResponse, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(ctx, "hang forever", nil)
+		responseCh <- submitResponse{result: result, err: submitErr}
+	}()
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+
+	var response submitResponse
+	select {
+	case response = <-responseCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SubmitPrompt did not return after stall watchdog")
+	}
+	require.ErrorIs(t, response.err, context.Canceled)
+
+	state := actor.State()
+	require.Equal(t, SessionStopped, state.Status, "stall watchdog must release the busy state")
+	require.Empty(t, state.CurrentTurnID)
+
+	select {
+	case turnID := <-stalledTurn:
+		require.NotEmpty(t, turnID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnRunStalled was not invoked")
+	}
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	foundStall := false
+	for _, event := range events {
+		if event.Type == EventSessionInterrupted {
+			if reason, _ := event.Payload["reason"].(string); reason == "stall_timeout" {
+				foundStall = true
+			}
+		}
+	}
+	require.True(t, foundStall, "expected a session_interrupted event with reason=stall_timeout")
+
+	// The session must accept a new prompt right away instead of staying busy.
+	resumeCh := make(chan submitResponse, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(context.Background(), "continue after stall", nil)
+		resumeCh <- submitResponse{result: result, err: submitErr}
+	}()
+	select {
+	case <-provider.entered:
+		// 第二次进入 LLM 调用，说明 busy 锁已解除、新 turn 正常开始。
+	case <-time.After(2 * time.Second):
+		t.Fatal("new prompt was not accepted after stall watchdog released the busy state")
+	}
+	require.NoError(t, actor.Interrupt(context.Background()))
+	select {
+	case <-resumeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resume did not return after interrupt")
+	}
+}
+
+func TestSessionActorRunStallWatchdogToleratesSlowStreaming(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-stall-slow-user")
+	require.NoError(t, err)
+
+	bus := runtimeevents.NewBus()
+	provider := &cancelBlockingLLMProvider{
+		name:    "slow-stream-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-stall-slow-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:           apiAgent,
+		LLMRuntime:      runtime,
+		SessionStore:    storage,
+		StateStore:      runtimeStore,
+		EventStore:      runtimeStore,
+		EventBus:        bus,
+		RunStallTimeout: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	go func() {
+		_, _ = actor.SubmitPrompt(ctx, "slow but alive", nil)
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+
+	// 模拟慢流式输出：持续发布 assistant_delta，watchdog 不应误杀。
+	stopDelta := make(chan struct{})
+	deltaDone := make(chan struct{})
+	go func() {
+		defer close(deltaDone)
+		ticker := time.NewTicker(60 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopDelta:
+				return
+			case <-ticker.C:
+				bus.Publish(runtimeevents.Event{
+					Type:      "assistant_delta",
+					SessionID: session.ID,
+					Payload:   map[string]interface{}{"content": "x"},
+				})
+			}
+		}
+	}()
+
+	time.Sleep(900 * time.Millisecond)
+	if got := actor.State().Status; got != SessionRunning {
+		t.Fatalf("slow streaming run was wrongly aborted, status=%s", got)
+	}
+
+	close(stopDelta)
+	<-deltaDone
+
+	// 停发 delta 后 watchdog 应最终触发（阻塞 provider 一直无结果）。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if actor.State().Status == SessionStopped {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, SessionStopped, actor.State().Status, "stall must trigger once deltas stop")
+}
+
 func TestAppendStructuredRunErrorPayload_UsesPromptPreflightMetadata(t *testing.T) {
 	payload := map[string]interface{}{
 		"error": "prompt preflight budget exceeded",

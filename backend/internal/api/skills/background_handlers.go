@@ -5,9 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/background"
-	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 // ListBackgroundJobs lists background jobs with optional filters.
@@ -18,7 +19,7 @@ func (h *Handler) ListBackgroundJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	sessionID := chat.NormalizeSessionID(r.URL.Query().Get("session_id"))
 	statuses, err := parseBackgroundStatusFilter(r.URL.Query().Get("status"))
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err)
@@ -254,4 +255,3 @@ func parseOptionalOffset64(raw string) (int64, error) {
 	}
 	return value, nil
 }
-

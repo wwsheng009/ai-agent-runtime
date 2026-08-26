@@ -5,11 +5,52 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+func TestFileStorageCanonicalizesPersistedSessionID(t *testing.T) {
+	storage, err := NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := NewSession("canonical-id-user")
+	session.ID = `nested\session-1/`
+	if err := storage.Save(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := storage.Load(context.Background(), "dir/session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ID != "session-1" {
+		t.Fatalf("stored session id = %q, want session-1", loaded.ID)
+	}
+}
+
+func TestFileStorageRejectsCaseOnlyCollisionOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-only filesystem collision is Windows-specific")
+	}
+	storage, err := NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := NewSession("case-id-user")
+	first.ID = "session-case"
+	if err := storage.Save(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := NewSession("case-id-user")
+	second.ID = "SESSION-CASE"
+	if err := storage.Save(context.Background(), second); err == nil {
+		t.Fatal("expected case-only session id collision to be rejected")
+	}
+}
 
 func TestSessionBuildPreviewDerivesTitleAndSummary(t *testing.T) {
 	session := NewSession("preview-user")

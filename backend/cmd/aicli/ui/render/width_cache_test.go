@@ -1,6 +1,7 @@
 package render
 
 import (
+	"container/list"
 	"strings"
 	"sync"
 	"testing"
@@ -38,9 +39,11 @@ func TestWidthCacheMemoized(t *testing.T) {
 	}
 }
 
-// TestWidthCacheEviction asserts the cache stays bounded.
+// TestWidthCacheEviction asserts the cache stays bounded and evicts in LRU
+// order: the least-recently-used entry goes first, and a re-read rescues an
+// entry from eviction.
 func TestWidthCacheEviction(t *testing.T) {
-	m := &widthCacheMemo{byKey: make(map[string]widthCacheEntry), max: 8}
+	m := newTestWidthCache(8)
 	for i := 0; i < 100; i++ {
 		text := strings.Repeat("字", i+1)
 		m.store(text, i+1)
@@ -52,12 +55,141 @@ func TestWidthCacheEviction(t *testing.T) {
 			t.Fatalf("fresh entry missing: %q", text)
 		}
 	}
+	// LRU order: after the loop the oldest inserts were evicted long ago; the
+	// surviving entries are the last `max` inserts, each touched once at its
+	// own insert step, so the front is the oldest of them: "字" x (100-max+1).
+	frontWant := strings.Repeat("字", 100-m.max+1)
+	m.mu.Lock()
+	if got, want := m.lru.Len(), m.max; got != want {
+		t.Fatalf("lru len = %d, want %d", got, want)
+	}
+	first := m.lru.Front()
+	if first == nil {
+		t.Fatal("expected cached entries")
+	}
+	if got := first.Value.(*widthCacheEntry).key; got != frontWant {
+		t.Fatalf("front key = %q, want oldest survivor %q", got, frontWant)
+	}
+	m.mu.Unlock()
+}
+
+// TestWidthCacheEvictionRescuesRecency asserts a re-read moves the entry to
+// the back so it survives a later eviction.
+func TestWidthCacheEvictionRescuesRecency(t *testing.T) {
+	m := newTestWidthCache(4)
+	for i := 0; i < 4; i++ {
+		m.store(strings.Repeat("a", i+1), i+1) // a, aa, aaa, aaaa
+	}
+	// Re-read the oldest ("a") to make it most-recent.
+	if _, ok := m.get("a"); !ok {
+		t.Fatal("expected hit for a")
+	}
+	// Inserting a new key should evict "aa" (now the oldest), not "a".
+	text := "新"
+	m.store(text, 1)
+	m.mu.Lock()
+	if _, ok := m.byKey["a"]; !ok {
+		t.Fatalf("recency re-read was not honored: %q evicted", "a")
+	}
+	if _, ok := m.byKey["aa"]; ok {
+		t.Fatal("expected LRU victim aa to be evicted")
+	}
+	if _, ok := m.byKey[text]; !ok {
+		t.Fatalf("fresh entry missing: %q", text)
+	}
+	m.mu.Unlock()
+}
+
+// TestWidthCacheStoreRefresh asserts re-storing an existing key updates the
+// width and does not duplicate entries.
+func TestWidthCacheStoreRefresh(t *testing.T) {
+	m := newTestWidthCache(4)
+	m.store("k", 1)
+	m.store("k", 3)
+	m.store("x", 2)
+	m.store("y", 2)
+	m.store("z", 2)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lru.Len() != 4 {
+		t.Fatalf("lru len = %d, want 4", m.lru.Len())
+	}
+	el, ok := m.byKey["k"]
+	if !ok {
+		t.Fatal("expected refreshed key to survive eviction")
+	}
+	if w := el.Value.(*widthCacheEntry).w; w != 3 {
+		t.Fatalf("refreshed width = %d, want 3", w)
+	}
+}
+
+func newTestWidthCache(max int) *widthCacheMemo {
+	return &widthCacheMemo{
+		byKey: make(map[string]*list.Element),
+		lru:   list.New(),
+		max:   max,
+	}
+}
+
+func TestWidthCacheKeyByteBudget(t *testing.T) {
+	m := newTestWidthCache(16)
+	m.maxBytes = 6
+	m.store("aa", 2)
+	m.store("bbb", 3)
+	m.store("cccc", 4)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.keyBytes > m.maxBytes {
+		t.Fatalf("retained key bytes = %d, max = %d", m.keyBytes, m.maxBytes)
+	}
+	if len(m.byKey) != 1 {
+		t.Fatalf("entries = %d, want only the newest entry after byte eviction", len(m.byKey))
+	}
+	if _, ok := m.byKey["cccc"]; !ok {
+		t.Fatal("newest entry was not retained")
+	}
+	if m.evictions != 2 {
+		t.Fatalf("evictions = %d, want 2", m.evictions)
+	}
+}
+
+func TestWidthCacheSkipsOversizeKey(t *testing.T) {
+	m := newTestWidthCache(4)
+	m.maxBytes = 64
+	m.maxKeyBytes = 8
+	m.store("012345678", 9)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.byKey) != 0 || m.keyBytes != 0 {
+		t.Fatalf("oversize key was retained: entries=%d bytes=%d", len(m.byKey), m.keyBytes)
+	}
+	if m.skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", m.skipped)
+	}
+}
+
+func TestWidthCacheMissMetricCountsLookups(t *testing.T) {
+	m := newTestWidthCache(2)
+	if _, ok := m.get("missing"); ok {
+		t.Fatal("unexpected cache hit")
+	}
+	m.store("missing", 7)
+	if got, ok := m.get("missing"); !ok || got != 7 {
+		t.Fatalf("cached lookup = (%d, %t), want (7, true)", got, ok)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.miss != 1 || m.hits != 1 {
+		t.Fatalf("metrics hits=%d misses=%d, want 1/1", m.hits, m.miss)
+	}
 }
 
 // TestWidthCacheConcurrent fills and reads the cache from many goroutines to
 // exercise the mutex (run with -race).
 func TestWidthCacheConcurrent(t *testing.T) {
-	memo := &widthCacheMemo{byKey: make(map[string]widthCacheEntry), max: 64}
+	memo := newTestWidthCache(64)
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
 		wg.Add(1)

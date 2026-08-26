@@ -145,12 +145,12 @@ type Handler struct {
 	profileGlobalSkillDirs         []string
 	profileMCPAutoConnect          bool
 
-	teamStoreMu        sync.RWMutex
-	teamStoreConfigKey string
-	teamStore          team.Store
-	teamOrchestrator   *team.Orchestrator
-	teamClaimsManager  *team.PathClaimManager
-	teamLifecycle      *handlerTeamLifecycleService
+	teamStoreMu               sync.RWMutex
+	teamStoreConfigKey        string
+	teamStore                 team.Store
+	teamOrchestrator          *team.Orchestrator
+	teamClaimsManager         *team.PathClaimManager
+	teamLifecycle             *handlerTeamLifecycleService
 	teamOrchestratorOwnerOnce sync.Once
 	teamOrchestratorOwnerID   string
 
@@ -2171,7 +2171,7 @@ func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := h.sessionManager.GetSession(r.Context(), mux.Vars(r)["id"])
+	session, err := h.sessionManager.GetSession(r.Context(), chat.NormalizeSessionID(mux.Vars(r)["id"]))
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, err)
 		return
@@ -2190,14 +2190,14 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.sessionManager.Delete(r.Context(), mux.Vars(r)["id"]); err != nil {
+	if err := h.sessionManager.Delete(r.Context(), chat.NormalizeSessionID(mux.Vars(r)["id"])); err != nil {
 		h.writeError(w, http.StatusNotFound, err)
 		return
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deleted": true,
-		"id":      mux.Vars(r)["id"],
+		"id":      chat.NormalizeSessionID(mux.Vars(r)["id"]),
 	})
 }
 
@@ -2209,7 +2209,7 @@ func (h *Handler) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := mux.Vars(r)["id"]
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	limit := 100
 	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
 		parsed, parseErr := strconv.Atoi(rawLimit)
@@ -2355,7 +2355,7 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := mux.Vars(r)["id"]
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	session, err := h.sessionManager.GetSession(r.Context(), sessionID)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, err)
@@ -2424,7 +2424,7 @@ func (h *Handler) ClearSessionHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := mux.Vars(r)["id"]
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if err := h.sessionManager.ClearHistory(r.Context(), sessionID); err != nil {
 		h.writeError(w, http.StatusNotFound, err)
 		return
@@ -2457,7 +2457,7 @@ func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 
-	sessionID := mux.Vars(r)["id"]
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if err := action(r.Context(), sessionID); err != nil {
 		h.writeError(w, http.StatusNotFound, err)
 		return
@@ -2799,7 +2799,7 @@ func (h *Handler) resolveServerSessionUserID(userID string) string {
 }
 
 func (h *Handler) acquireSessionLease(ctx context.Context, sessionID, ownerKind, ownerScope string) (*chat.SessionLeaseHandle, error) {
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = chat.NormalizeSessionID(sessionID)
 	if h == nil || sessionID == "" {
 		return nil, nil
 	}
@@ -8847,7 +8847,7 @@ func (h *Handler) GetRuntimeTraces(w http.ResponseWriter, r *http.Request) {
 
 	filters := runtimeevents.TraceFilter{
 		TraceIDPrefix:       strings.TrimSpace(r.URL.Query().Get("trace_prefix")),
-		SessionID:           strings.TrimSpace(r.URL.Query().Get("session_id")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
 		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
 		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
 		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
@@ -8931,7 +8931,7 @@ func (h *Handler) GetRuntimeTraceStats(w http.ResponseWriter, r *http.Request) {
 
 	filters := runtimeevents.TraceFilter{
 		TraceIDPrefix:       strings.TrimSpace(r.URL.Query().Get("trace_prefix")),
-		SessionID:           strings.TrimSpace(r.URL.Query().Get("session_id")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
 		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
 		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
 		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
@@ -8985,7 +8985,7 @@ func (h *Handler) GetRuntimeTraceGovernance(w http.ResponseWriter, r *http.Reque
 
 	filters := runtimeevents.TraceFilter{
 		TraceIDPrefix:       strings.TrimSpace(r.URL.Query().Get("trace_prefix")),
-		SessionID:           strings.TrimSpace(r.URL.Query().Get("session_id")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
 		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
 		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
 		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
@@ -9052,7 +9052,7 @@ func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
 	bus := h.getRuntimeEventBus()
 	events := bus.Query(runtimeevents.QueryFilter{
 		TraceID:   traceID,
-		SessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
+		SessionID: chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
 		AgentName: strings.TrimSpace(r.URL.Query().Get("agent_name")),
 		ToolName:  strings.TrimSpace(r.URL.Query().Get("tool_name")),
 		EventType: strings.TrimSpace(r.URL.Query().Get("event_type")),
@@ -9108,7 +9108,7 @@ func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
 		"recovery":         recoverySummary,
 		"team_count":       countTeamIDsFromSummary(summary),
 		"filters": map[string]interface{}{
-			"session_id": strings.TrimSpace(r.URL.Query().Get("session_id")),
+			"session_id": chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
 			"agent_name": strings.TrimSpace(r.URL.Query().Get("agent_name")),
 			"tool_name":  strings.TrimSpace(r.URL.Query().Get("tool_name")),
 			"event_type": strings.TrimSpace(r.URL.Query().Get("event_type")),

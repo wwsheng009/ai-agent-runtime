@@ -77,15 +77,26 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		if !surface.Enable() {
 			// A TTY alone is insufficient for the owned renderer: the primary
 			// transaction requires ANSI plus DECSTBM scroll-region support and a
-			// confirmed geometry source. Continuing with a nil facade would attach
-			// TerminalSession against fallback dimensions, which can lose the
-			// retained history tail and native-scrollback handoff. Do not revive the
-			// retired legacy writer as a fallback for this one-way cutover.
+			// confirmed geometry source. Native Windows 7 consoles cannot enable
+			// virtual-terminal processing, so attaching TerminalSession here would
+			// render control bytes literally and corrupt its retained-history
+			// bookkeeping.
+			//
+			// Fall back to the existing sequential line-mode path used by
+			// interactive sessions without a TTY. Discard every partially-created
+			// screen component first: a disabled surface plus a stopped key handler
+			// guarantees that stdout and stdin each retain a single owner.
 			layout.Disable()
 			if keyHandler != nil {
 				keyHandler.Stop()
 			}
-			return nil, nil, fmt.Errorf("initialize unified terminal renderer: terminal does not support ANSI scroll-region rendering")
+			_, _ = fmt.Fprintln(newChatSystemOutputWriter(os.Stderr),
+				"Warning: terminal does not support ANSI scroll-region rendering; using plain interactive mode")
+			layout = nil
+			inputBox = nil
+			keyHandler = nil
+			surface = nil
+			interactiveUI = false
 		}
 	}
 	if opts.NoInteractive || opts.OutputFormat == "json" {
@@ -260,10 +271,11 @@ func shouldInitializeChatInteractiveUI(opts *chatCommandOptions) bool {
 	if opts == nil || opts.NoInteractive || opts.OutputFormat == "json" {
 		return false
 	}
-	// An interactive TTY has one production renderer: TerminalSession. The old
-	// AICLI_TUI=legacy/plain escape hatch created a second, known-broken screen
-	// authority and is intentionally retired. Plain and JSON remain explicit
-	// non-interactive output modes rather than an in-session renderer fallback.
+	// An ANSI-capable interactive TTY has one production screen renderer:
+	// TerminalSession. Capability probing happens when FixedBottomSurface is
+	// enabled; buildChatSession downgrades an unsupported TTY to sequential
+	// line mode before publishing the session, so it never creates a competing
+	// screen authority.
 	return chatIsInteractiveTerminal()
 }
 

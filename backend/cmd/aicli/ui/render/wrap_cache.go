@@ -1,10 +1,18 @@
 package render
 
 import (
+	"container/list"
 	"hash"
 	"hash/fnv"
 	"io"
+	"strings"
 	"sync"
+)
+
+const (
+	defaultWrapCacheEntries       = 1024
+	defaultWrapCachePayloadBytes  = 16 << 20
+	defaultWrapCacheMaxEntryBytes = 1 << 20
 )
 
 // wrapCacheMemo memoizes Wrap results keyed by the line's expanded content
@@ -18,14 +26,20 @@ import (
 // cached entry is re-validated against the caller's expanded spans, so even a
 // hash collision can never return the wrong wrapping; it degrades to a miss.
 // Stored wrapped lines are cloned on every hit so callers may mutate the
-// returned lines freely.
+// returned lines freely. Entry count and retained string bytes are independently
+// bounded; the byte counter is not a complete heap-size estimate.
 type wrapCacheMemo struct {
-	mu    sync.Mutex
-	byKey map[wrapCacheKey]*wrapCacheEntry
-	max   int
-	seq   uint64
-	hits  uint64
-	miss  uint64
+	mu            sync.Mutex
+	byKey         map[wrapCacheKey]*list.Element
+	lru           *list.List // Front = least recently used, Back = most recent
+	max           int
+	maxBytes      int
+	maxEntryBytes int
+	payloadBytes  int
+	hits          uint64
+	miss          uint64
+	evictions     uint64
+	skipped       uint64
 }
 
 type wrapCacheKey struct {
@@ -36,14 +50,18 @@ type wrapCacheKey struct {
 }
 
 type wrapCacheEntry struct {
-	expanded []Span // expanded spans used to validate the hit
-	wrapped  []Line
-	lastUsed uint64
+	key          wrapCacheKey
+	expanded     []Span // expanded spans used to validate the hit
+	wrapped      []Line
+	payloadBytes int
 }
 
 var wrapMemo = &wrapCacheMemo{
-	byKey: make(map[wrapCacheKey]*wrapCacheEntry),
-	max:   1024,
+	byKey:         make(map[wrapCacheKey]*list.Element),
+	lru:           list.New(),
+	max:           defaultWrapCacheEntries,
+	maxBytes:      defaultWrapCachePayloadBytes,
+	maxEntryBytes: defaultWrapCacheMaxEntryBytes,
 }
 
 // wrapCached looks up a memoized Wrap result. Returns ok=false on a miss or
@@ -63,19 +81,23 @@ func wrapCached(line Line, width int, opts WrapOptions) ([]Line, bool, []Span, u
 		hash:      hash,
 	}
 	wrapMemo.mu.Lock()
-	entry, ok := wrapMemo.byKey[key]
-	if ok {
-		wrapMemo.seq++
-		entry.lastUsed = wrapMemo.seq
-		wrapMemo.hits++
-	}
-	wrapMemo.mu.Unlock()
+	el, ok := wrapMemo.byKey[key]
 	if !ok {
+		wrapMemo.miss++
+		wrapMemo.mu.Unlock()
 		return nil, false, expanded, hash
 	}
+	entry := el.Value.(*wrapCacheEntry)
 	if !expandedSpansEqual(expanded, entry.expanded) {
-		return nil, false, expanded, hash // fingerprint collision with different content
+		// A fingerprint collision is a miss. Do not promote the unrelated
+		// entry; wrapStore will replace it with the caller's exact content.
+		wrapMemo.miss++
+		wrapMemo.mu.Unlock()
+		return nil, false, expanded, hash
 	}
+	wrapMemo.lru.MoveToBack(el)
+	wrapMemo.hits++
+	wrapMemo.mu.Unlock()
 	return cloneLines(entry.wrapped), true, expanded, hash
 }
 
@@ -94,36 +116,69 @@ func wrapStore(expanded []Span, hash uint64, width int, opts WrapOptions, wrappe
 		breakWord: opts.BreakWord,
 		hash:      hash,
 	}
-	wrapMemo.mu.Lock()
-	wrapMemo.miss++
-	wrapMemo.seq++
-	wrapMemo.byKey[key] = &wrapCacheEntry{
-		expanded: cloneSpans(expanded),
-		wrapped:  cloneLines(wrapped),
-		lastUsed: wrapMemo.seq,
-	}
-	if len(wrapMemo.byKey) > wrapMemo.max {
-		wrapMemo.evictOldestLocked()
-	}
-	wrapMemo.mu.Unlock()
-}
-
-// evictOldestLocked drops the single least-recently-used entry. The map is
-// bounded by wrapCacheMemo.max, so eviction runs only when the cache is full
-// and the linear scan over at most max entries is amortized across renders.
-func (m *wrapCacheMemo) evictOldestLocked() {
-	if len(m.byKey) == 0 {
+	payloadBytes := wrapRetainedStringBytes(expanded, wrapped)
+	memo := wrapMemo
+	memo.mu.Lock()
+	if !memo.admitsLocked(payloadBytes) {
+		memo.skipped++
+		memo.mu.Unlock()
 		return
 	}
-	var oldestKey wrapCacheKey
-	oldestUsed := ^uint64(0)
-	for key, entry := range m.byKey {
-		if entry.lastUsed < oldestUsed {
-			oldestUsed = entry.lastUsed
-			oldestKey = key
-		}
+	memo.mu.Unlock()
+	entry := &wrapCacheEntry{
+		key:          key,
+		expanded:     cloneOwnedSpans(expanded),
+		wrapped:      cloneOwnedLines(wrapped),
+		payloadBytes: payloadBytes,
 	}
-	delete(m.byKey, oldestKey)
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if !memo.admitsLocked(payloadBytes) {
+		memo.skipped++
+		return
+	}
+	if el, ok := memo.byKey[key]; ok {
+		previous := el.Value.(*wrapCacheEntry)
+		el.Value = entry
+		memo.payloadBytes += entry.payloadBytes - previous.payloadBytes
+		memo.lru.MoveToBack(el)
+		for memo.overLimitLocked() {
+			memo.evictOldestLocked()
+		}
+		return
+	}
+	el := memo.lru.PushBack(entry)
+	memo.byKey[key] = el
+	memo.payloadBytes += entry.payloadBytes
+	for memo.overLimitLocked() {
+		memo.evictOldestLocked()
+	}
+}
+
+func (m *wrapCacheMemo) admitsLocked(payloadBytes int) bool {
+	return m.max > 0 &&
+		(m.maxEntryBytes <= 0 || payloadBytes <= m.maxEntryBytes) &&
+		(m.maxBytes <= 0 || payloadBytes <= m.maxBytes)
+}
+
+func (m *wrapCacheMemo) overLimitLocked() bool {
+	return m.lru.Len() > m.max || (m.maxBytes > 0 && m.payloadBytes > m.maxBytes)
+}
+
+// evictOldestLocked drops one least-recently-used entry in O(1).
+func (m *wrapCacheMemo) evictOldestLocked() {
+	front := m.lru.Front()
+	if front == nil {
+		return
+	}
+	m.lru.Remove(front)
+	entry := front.Value.(*wrapCacheEntry)
+	delete(m.byKey, entry.key)
+	m.payloadBytes -= entry.payloadBytes
+	if m.payloadBytes < 0 {
+		m.payloadBytes = 0
+	}
+	m.evictions++
 }
 
 var (
@@ -196,14 +251,49 @@ func expandedSpansEqual(a, b []Span) bool {
 	return true
 }
 
-// cloneSpans copies a span slice so the cache owns its validation content.
-func cloneSpans(spans []Span) []Span {
-	return append([]Span(nil), spans...)
+func wrapRetainedStringBytes(expanded []Span, wrapped []Line) int {
+	total := retainedSpanStringBytes(expanded)
+	for _, line := range wrapped {
+		total += len(line.Style.Role)
+		total += retainedSpanStringBytes(line.Spans)
+	}
+	return total
+}
+
+func retainedSpanStringBytes(spans []Span) int {
+	total := 0
+	for _, span := range spans {
+		total += len(span.Text) + len(span.Link) + len(span.Style.Role)
+	}
+	return total
+}
+
+// cloneOwnedSpans gives the cache compact string storage as well as its own
+// slice, so a wrapped substring cannot pin an arbitrarily large source buffer.
+func cloneOwnedSpans(spans []Span) []Span {
+	out := make([]Span, len(spans))
+	for index, span := range spans {
+		span.Text = strings.Clone(span.Text)
+		span.Link = strings.Clone(span.Link)
+		span.Style.Role = strings.Clone(span.Style.Role)
+		out[index] = span
+	}
+	return out
+}
+
+func cloneOwnedLines(lines []Line) []Line {
+	out := make([]Line, len(lines))
+	for index, line := range lines {
+		line.Style.Role = strings.Clone(line.Style.Role)
+		line.Spans = cloneOwnedSpans(line.Spans)
+		out[index] = line
+	}
+	return out
 }
 
 // cloneLines deep-copies wrapped lines so callers can mutate them without
-// corrupting the cache. Spans are value types, so one slice copy per line
-// suffices.
+// corrupting the cache. Strings are immutable, so hit results may safely share
+// the cache-owned compact string storage.
 func cloneLines(lines []Line) []Line {
 	out := make([]Line, len(lines))
 	for i, line := range lines {

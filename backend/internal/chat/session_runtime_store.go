@@ -551,7 +551,7 @@ func (s *InMemoryRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerI
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = NormalizeSessionID(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
 	if sessionID == "" || ownerID == "" {
 		return fmt.Errorf("session id and owner id are required")
@@ -578,7 +578,7 @@ func (s *InMemoryRuntimeStore) ReleaseLease(ctx context.Context, sessionID, owne
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = NormalizeSessionID(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
 	if sessionID == "" || ownerID == "" {
 		return fmt.Errorf("session id and owner id are required")
@@ -595,7 +595,7 @@ func (s *InMemoryRuntimeStore) GetLease(ctx context.Context, sessionID string) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = NormalizeSessionID(sessionID)
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
@@ -1781,7 +1781,7 @@ func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID 
 	if err := s.ensure(); err != nil {
 		return err
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = NormalizeSessionID(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
 	if sessionID == "" || ownerID == "" {
 		return fmt.Errorf("session id and owner id are required")
@@ -1826,7 +1826,7 @@ func (s *SQLiteRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerI
 	if err := s.ensure(); err != nil {
 		return err
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = NormalizeSessionID(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
 	if sessionID == "" || ownerID == "" {
 		return fmt.Errorf("session id and owner id are required")
@@ -1847,7 +1847,7 @@ func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*S
 	} else if skip {
 		return nil, nil
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = NormalizeSessionID(sessionID)
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
@@ -4293,7 +4293,7 @@ func getSessionLeaseTx(ctx context.Context, tx *sql.Tx, sessionID string) (*Sess
 }
 
 func buildLeaseFromRequest(req LeaseRequest) (*SessionLease, error) {
-	sessionID := strings.TrimSpace(req.SessionID)
+	sessionID := NormalizeSessionID(req.SessionID)
 	ownerID := strings.TrimSpace(req.OwnerID)
 	if sessionID == "" || ownerID == "" {
 		return nil, fmt.Errorf("session id and owner id are required")

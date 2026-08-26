@@ -76,7 +76,7 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -127,7 +127,7 @@ func (h *Handler) loadSessionForPlanMode(r *http.Request) (*chat.Session, error)
 	if h == nil || h.sessionManager == nil {
 		return nil, errors.New(errors.ErrConfigInvalid, "session manager not configured")
 	}
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		return nil, errors.New(errors.ErrValidationFailed, "session id is required")
 	}

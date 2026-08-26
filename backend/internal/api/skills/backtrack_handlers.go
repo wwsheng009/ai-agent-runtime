@@ -18,7 +18,7 @@ func (h *Handler) ListSessionTurns(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
 		return
 	}
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := runtimechat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -52,7 +52,7 @@ func (h *Handler) ListSessionBacktrackAudit(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
 		return
 	}
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := runtimechat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -98,7 +98,7 @@ func (h *Handler) handleSessionBacktrack(w http.ResponseWriter, r *http.Request,
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
 		return
 	}
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := runtimechat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return

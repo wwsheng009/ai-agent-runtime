@@ -56,6 +56,13 @@ type SessionActorConfig struct {
 	// actor instance. Enable it only after acquiring exclusive session ownership.
 	RecoverStale bool
 	OnStop       func()
+	// RunStallTimeout 无进展超时：run 启动后，若超过该时长没有任何进展事件
+	// （assistant_delta / assistant.reasoning / tool.* / 状态更新），判定 run
+	// 挂死（如上游挂死），自动强制中止并写回 stopped 状态，解除 busy 锁。
+	// 0 表示禁用。
+	RunStallTimeout time.Duration
+	// OnRunStalled 在 run 因停滞被 watchdog 强制中止后回调（宿主在此释放 lease）。
+	OnRunStalled func(turnID string)
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -71,6 +78,12 @@ type SessionActor struct {
 	prepareRun   func(context.Context, *Session, bool) error
 	persistHook  func(context.Context, *Session) (*Session, error)
 	recoverStale bool
+	// runStallTimeout / onRunStalled mirror SessionActorConfig; see there.
+	runStallTimeout time.Duration
+	onRunStalled    func(turnID string)
+	// lastRunActivity 记录最近一次 run 进展（unixnano），由 publish/updateState
+	// 与总线进展事件刷新，watchdog 据此判定 run 是否挂死。
+	lastRunActivity atomic.Int64
 
 	cmdCh chan Command
 	stop  chan struct{}
@@ -97,7 +110,8 @@ type SessionActor struct {
 
 // NewSessionActor creates a new session actor.
 func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, error) {
-	if strings.TrimSpace(sessionID) == "" {
+	sessionID = NormalizeSessionID(sessionID)
+	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
 	if cfg.Agent == nil {
@@ -140,6 +154,8 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		persistHook:     cfg.PersistHook,
 		recoverStale:    cfg.RecoverStale,
 		onStop:          cfg.OnStop,
+		runStallTimeout: cfg.RunStallTimeout,
+		onRunStalled:    cfg.OnRunStalled,
 		cmdCh:           make(chan Command, 32),
 		stop:            make(chan struct{}),
 		done:            make(chan struct{}),
@@ -923,6 +939,117 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 		},
 	})
 	cmd.Reply <- nil
+}
+
+// touchRunActivity marks the current run as making progress so the stall
+// watchdog does not force-abort a slow-but-live execution.
+func (a *SessionActor) touchRunActivity() {
+	a.lastRunActivity.Store(time.Now().UnixNano())
+}
+
+// startRunStallWatchdog launches the stall watchdog for a run and returns a
+// stop function (never nil) that unsubscribes progress events and halts it.
+// A stall is judged as zero progress events for RunStallTimeout; when hit the
+// run is force-aborted, the busy state released and OnRunStalled invoked.
+func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, turnID string) func() {
+	if a == nil || a.runStallTimeout <= 0 {
+		return func() {}
+	}
+	a.touchRunActivity()
+	var unsubs []runtimeevents.Unsubscribe
+	// Loop 的 assistant_delta/assistant.reasoning 与工具事件 emit 到 agent 的
+	// bus；actor 自身的结构化事件走 a.eventBus。两处都订阅，任一进展都算。
+	seen := map[*runtimeevents.Bus]bool{}
+	if a.eventBus != nil {
+		seen[a.eventBus] = true
+	}
+	if a.agent != nil {
+		if agentBus := a.agent.GetEventBus(); agentBus != nil {
+			seen[agentBus] = true
+		}
+	}
+	for bus := range seen {
+		for _, t := range []string{
+			"assistant_delta",
+			"assistant.reasoning",
+			"tool.requested",
+			"tool.completed",
+		} {
+			u := bus.SubscribeCancelable(t, func(runtimeevents.Event) { a.touchRunActivity() })
+			unsubs = append(unsubs, u)
+		}
+	}
+	interval := a.runStallTimeout / 6
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				last := time.Unix(0, a.lastRunActivity.Load())
+				if time.Since(last) >= a.runStallTimeout {
+					a.abortStalledRun(turnID)
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		for _, u := range unsubs {
+			if u != nil {
+				u()
+			}
+		}
+	}
+}
+
+// abortStalledRun force-terminates a run the stall watchdog judged hung and
+// releases the busy state so the session is usable again without a restart.
+// It mirrors the interrupt path: mark interrupted, cancel the run context,
+// write back stopped, publish the event and notify the host (lease release).
+func (a *SessionActor) abortStalledRun(turnID string) {
+	a.markInterrupted()
+	a.cancelActive()
+	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		state.Status = SessionStopped
+		state.CurrentTurnID = ""
+		state.CurrentRunMeta = nil
+		resetFrozenTurnTools(state)
+		state.PendingTool = nil
+		state.PendingApproval = nil
+		state.PendingQuestion = nil
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	a.publish(runtimeevents.Event{
+		Type:      EventSessionInterrupted,
+		SessionID: a.id,
+		TraceID:   turnID,
+		Payload: map[string]interface{}{
+			"reason":     "stall_timeout",
+			"turn_id":    turnID,
+			"timeout_ns": a.runStallTimeout,
+		},
+	})
+	if a.onRunStalled != nil {
+		a.onRunStalled(turnID)
+	}
 }
 
 func (a *SessionActor) markInterrupted() {
@@ -2165,10 +2292,12 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	a.setActiveCancel(cancel)
 	a.setActiveStripMetadataKeys(stripMetadataKeys)
 	a.activeRunWG.Add(1)
+	stopStallWatchdog := a.startRunStallWatchdog(runCtx, turnID)
 	go func() {
 		runStartedAt := time.Now()
 		defer a.activeRunWG.Done()
 		defer a.clearActiveStripMetadataKeys()
+		defer stopStallWatchdog()
 		var (
 			result  *agent.Result
 			execErr error
@@ -3893,6 +4022,7 @@ func (a *SessionActor) publish(event runtimeevents.Event) {
 	if a == nil {
 		return
 	}
+	a.touchRunActivity()
 	if event.SessionID == "" {
 		event.SessionID = a.id
 	}

@@ -81,7 +81,7 @@ func parseAgentControlMailboxFilter(r *http.Request) (agentcontrol.MailboxRecord
 	return agentcontrol.MailboxRecordFilter{
 		Workflow:  strings.TrimSpace(q.Get("workflow")),
 		Scope:     scope,
-		SessionID: firstNonEmptyString(strings.TrimSpace(q.Get("session_id")), strings.TrimSpace(q.Get("session"))),
+		SessionID: firstNonEmptyString(chat.NormalizeSessionID(q.Get("session_id")), chat.NormalizeSessionID(q.Get("session"))),
 		TeamID:    strings.TrimSpace(q.Get("team_id")),
 		AfterSeq:  afterSeq,
 		Limit:     limit,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
@@ -106,7 +107,7 @@ func (h *Handler) openCheckpointReadService(sessionID string) (checkpointReadSer
 
 // ListSessionCheckpoints lists checkpoints for a session.
 func (h *Handler) ListSessionCheckpoints(w http.ResponseWriter, r *http.Request) {
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -205,7 +206,7 @@ func checkpointMetadataConversationMessageCount(metadata map[string]interface{})
 // PreviewSessionCheckpoint previews a checkpoint restore.
 func (h *Handler) PreviewSessionCheckpoint(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	sessionID := strings.TrimSpace(vars["id"])
+	sessionID := chat.NormalizeSessionID(vars["id"])
 	checkpointID := strings.TrimSpace(vars["checkpoint_id"])
 	if sessionID == "" || checkpointID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id and checkpoint id are required"))
@@ -264,7 +265,7 @@ func (h *Handler) RestoreSessionCheckpoint(w http.ResponseWriter, r *http.Reques
 	}
 
 	vars := mux.Vars(r)
-	sessionID := strings.TrimSpace(vars["id"])
+	sessionID := chat.NormalizeSessionID(vars["id"])
 	checkpointID := strings.TrimSpace(vars["checkpoint_id"])
 	if sessionID == "" || checkpointID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id and checkpoint id are required"))
@@ -311,7 +312,7 @@ func (h *Handler) RestoreSessionCheckpoint(w http.ResponseWriter, r *http.Reques
 // GetCheckpointFiles returns files for a checkpoint.
 func (h *Handler) GetCheckpointFiles(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	sessionID := strings.TrimSpace(vars["id"])
+	sessionID := chat.NormalizeSessionID(vars["id"])
 	checkpointID := strings.TrimSpace(vars["checkpoint_id"])
 	if sessionID == "" || checkpointID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id and checkpoint id are required"))

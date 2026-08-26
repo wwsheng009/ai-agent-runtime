@@ -1,6 +1,7 @@
 package render
 
 import (
+	"container/list"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,7 +38,7 @@ func TestWrapCacheConsistentWithUncached(t *testing.T) {
 		for _, breakWord := range []bool{false, true} {
 			opts := WrapOptions{BreakWord: breakWord, TabWidth: 4}
 			// Reset the shared cache so the first Wrap is a cold miss.
-			wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 1024}
+			wrapMemo = newTestWrapCache(1024)
 			for index, line := range testWrapCases() {
 				reference := Wrap(line, width, opts)
 				second := Wrap(line, width, opts)
@@ -50,7 +51,7 @@ func TestWrapCacheConsistentWithUncached(t *testing.T) {
 }
 
 func TestWrapCacheHitAccounting(t *testing.T) {
-	wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 1024}
+	wrapMemo = newTestWrapCache(1024)
 	line := Line{Spans: []Span{{Text: strings.Repeat("hit-me ", 50)}}}
 	opts := WrapOptions{BreakWord: true}
 	_ = Wrap(line, 30, opts)
@@ -75,14 +76,15 @@ func TestWrapCacheHitAccounting(t *testing.T) {
 }
 
 func TestWrapCacheCollisionDegradesToMiss(t *testing.T) {
-	wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 1024}
+	wrapMemo = newTestWrapCache(1024)
 	lineA := Line{Spans: []Span{{Text: strings.Repeat("a", 200)}}}
 	opts := WrapOptions{BreakWord: true}
 	refA := Wrap(lineA, 25, opts)
 	// Corrupt the stored entry so its expanded content no longer matches
 	// lineA: the next Wrap must detect the mismatch and recompute instead of
 	// returning the stale wrapped lines.
-	for _, entry := range wrapMemo.byKey {
+	for _, element := range wrapMemo.byKey {
+		entry := element.Value.(*wrapCacheEntry)
 		if len(entry.expanded) > 0 {
 			entry.expanded[0].Text = strings.Repeat("c", 200)
 		}
@@ -94,7 +96,7 @@ func TestWrapCacheCollisionDegradesToMiss(t *testing.T) {
 }
 
 func TestWrapCacheEvictionBounded(t *testing.T) {
-	wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 64}
+	wrapMemo = newTestWrapCache(64)
 	opts := WrapOptions{BreakWord: true}
 	for i := 0; i < 300; i++ {
 		line := Line{Spans: []Span{{Text: strings.Repeat(fmt.Sprintf("row-%03d ", i), 30)}}}
@@ -103,12 +105,56 @@ func TestWrapCacheEvictionBounded(t *testing.T) {
 	if len(wrapMemo.byKey) > 64 {
 		t.Fatalf("cache exceeded max: %d entries", len(wrapMemo.byKey))
 	}
+	if wrapMemo.lru.Len() != len(wrapMemo.byKey) {
+		t.Fatalf("map/list length mismatch: map=%d list=%d", len(wrapMemo.byKey), wrapMemo.lru.Len())
+	}
+	if wrapMemo.evictions == 0 {
+		t.Fatal("expected bounded workload to evict entries")
+	}
+	assertWrapCachePayloadInvariant(t, wrapMemo)
+}
+
+func TestWrapCachePayloadByteBudget(t *testing.T) {
+	wrapMemo = newTestWrapCache(16)
+	opts := WrapOptions{BreakWord: true}
+	first := Line{Spans: []Span{{Text: strings.Repeat("a", 40)}}}
+	_ = Wrap(first, 10, opts)
+	firstBytes := wrapMemo.payloadBytes
+	if firstBytes <= 0 {
+		t.Fatal("first entry retained no measured payload")
+	}
+	wrapMemo.maxBytes = firstBytes + 1
+
+	second := Line{Spans: []Span{{Text: strings.Repeat("b", 40)}}}
+	_ = Wrap(second, 10, opts)
+	if wrapMemo.payloadBytes > wrapMemo.maxBytes {
+		t.Fatalf("payload bytes = %d, max = %d", wrapMemo.payloadBytes, wrapMemo.maxBytes)
+	}
+	if len(wrapMemo.byKey) != 1 || wrapMemo.evictions != 1 {
+		t.Fatalf("byte-bound cache entries=%d evictions=%d, want 1/1", len(wrapMemo.byKey), wrapMemo.evictions)
+	}
+	assertWrapCachePayloadInvariant(t, wrapMemo)
+}
+
+func TestWrapCacheSkipsOversizeEntry(t *testing.T) {
+	wrapMemo = newTestWrapCache(16)
+	wrapMemo.maxBytes = 128
+	wrapMemo.maxEntryBytes = 64
+	line := Line{Spans: []Span{{Text: strings.Repeat("oversize", 40)}}}
+	_ = Wrap(line, 20, WrapOptions{BreakWord: true})
+
+	if len(wrapMemo.byKey) != 0 || wrapMemo.payloadBytes != 0 {
+		t.Fatalf("oversize entry retained: entries=%d bytes=%d", len(wrapMemo.byKey), wrapMemo.payloadBytes)
+	}
+	if wrapMemo.skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", wrapMemo.skipped)
+	}
 }
 
 func TestWrapCacheMissResultOwnership(t *testing.T) {
 	// The miss path returns the freshly computed lines while the cache stores
 	// its own clone: mutating the returned lines must not corrupt later hits.
-	wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 1024}
+	wrapMemo = newTestWrapCache(1024)
 	line := Line{Spans: []Span{{Text: strings.Repeat("owner-", 60)}}}
 	opts := WrapOptions{BreakWord: true}
 	miss := Wrap(line, 20, opts)
@@ -130,7 +176,7 @@ func TestWrapCacheMissResultOwnership(t *testing.T) {
 }
 
 func TestWrapCacheKeyIsolation(t *testing.T) {
-	wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 1024}
+	wrapMemo = newTestWrapCache(1024)
 	line := Line{Spans: []Span{{Text: "\t" + strings.Repeat("tabbed ", 40)}}}
 	// Same text and width, different tab expansion: must not share entries.
 	ref4 := Wrap(line, 30, WrapOptions{BreakWord: true, TabWidth: 4})
@@ -149,7 +195,7 @@ func TestWrapCacheKeyIsolation(t *testing.T) {
 }
 
 func TestWrapCacheConcurrent(t *testing.T) {
-	wrapMemo = &wrapCacheMemo{byKey: make(map[wrapCacheKey]*wrapCacheEntry), max: 1024}
+	wrapMemo = newTestWrapCache(1024)
 	// All goroutines wrap the same lines and mutate the results they get, so
 	// -race exercises both the shared map and the miss/hit ownership contract.
 	shared := []Line{
@@ -174,6 +220,27 @@ func TestWrapCacheConcurrent(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+func newTestWrapCache(max int) *wrapCacheMemo {
+	return &wrapCacheMemo{
+		byKey:         make(map[wrapCacheKey]*list.Element),
+		lru:           list.New(),
+		max:           max,
+		maxBytes:      defaultWrapCachePayloadBytes,
+		maxEntryBytes: defaultWrapCacheMaxEntryBytes,
+	}
+}
+
+func assertWrapCachePayloadInvariant(t *testing.T, memo *wrapCacheMemo) {
+	t.Helper()
+	total := 0
+	for _, element := range memo.byKey {
+		total += element.Value.(*wrapCacheEntry).payloadBytes
+	}
+	if total != memo.payloadBytes {
+		t.Fatalf("entry payload sum = %d, memo payload = %d", total, memo.payloadBytes)
+	}
 }
 
 // linesEqual compares two wrapped outputs field by field.

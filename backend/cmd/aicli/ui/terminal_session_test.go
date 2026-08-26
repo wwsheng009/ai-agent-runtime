@@ -150,6 +150,214 @@ func TestTerminalSessionBootstrapBatchPushesHistoryOverflowIntoScrollback(t *tes
 	}
 }
 
+func TestTerminalSessionHistoryPreparationReusedAfterZeroByteFailure(t *testing.T) {
+	errZero := errors.New("history transport unavailable")
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	frame := terminalSessionPlan(1, 28, 6, 4, LeaseState{})
+	if result := session.Flush(frame); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "缓存重试历史"}}})
+	plan := TerminalTransactionPlan{Frame: frame, History: &commit}
+	writer.zeroError = errZero
+	writer.failZero = 1
+	first := session.FlushTransaction(plan)
+	if !errors.Is(first.Frame.Err, errZero) || first.History == nil ||
+		!errors.Is(first.History.Err, errZero) || first.History.MayHavePartiallyWritten {
+		t.Fatalf("zero-byte history transaction = %#v", first)
+	}
+	if session.historyPrepareMisses != 1 || session.historyPrepareHits != 0 || session.preparedHistory == nil {
+		t.Fatalf("prepared cache after zero-byte failure: hits=%d misses=%d cache=%#v",
+			session.historyPrepareHits, session.historyPrepareMisses, session.preparedHistory)
+	}
+
+	second := session.FlushTransaction(plan)
+	if second.Frame.Err != nil || second.History == nil || second.History.Err != nil ||
+		second.History.Deferred || len(second.History.Delivered) != 1 {
+		t.Fatalf("history retry = %#v", second)
+	}
+	if session.historyPrepareMisses != 1 || session.historyPrepareHits != 1 || session.preparedHistory != nil {
+		t.Fatalf("prepared cache after successful retry: hits=%d misses=%d cache=%#v",
+			session.historyPrepareHits, session.historyPrepareMisses, session.preparedHistory)
+	}
+	if count := strings.Count(writer.bytes.String(), "缓存重试历史"); count != 1 {
+		t.Fatalf("history payload write count = %d, output=%q", count, writer.bytes.String())
+	}
+}
+
+func TestTerminalSessionHistoryPreparationRejectsSameTokenRebase(t *testing.T) {
+	errZero := errors.New("history transport unavailable")
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	frame := terminalSessionPlan(1, 32, 6, 4, LeaseState{})
+	if result := session.Flush(frame); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	stale := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "STALE-HISTORY-PAYLOAD"}}})
+	writer.zeroError = errZero
+	writer.failZero = 1
+	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &stale}); !errors.Is(result.Frame.Err, errZero) {
+		t.Fatalf("zero-byte stale preparation = %#v", result)
+	}
+
+	rebased := stale.Clone()
+	rebased.Lines[0].Spans[0].Text = "FRESH-HISTORY-PAYLOAD"
+	result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &rebased})
+	if result.Frame.Err != nil || result.History == nil || result.History.Err != nil || result.History.Deferred {
+		t.Fatalf("rebased history transaction = %#v", result)
+	}
+	if session.historyPrepareMisses != 2 || session.historyPrepareHits != 0 {
+		t.Fatalf("same-token rebase reused stale preparation: hits=%d misses=%d",
+			session.historyPrepareHits, session.historyPrepareMisses)
+	}
+	output := writer.bytes.String()
+	if strings.Contains(output, "STALE-HISTORY-PAYLOAD") || !strings.Contains(output, "FRESH-HISTORY-PAYLOAD") {
+		t.Fatalf("rebased terminal output = %q", output)
+	}
+}
+
+func TestTerminalSessionHistoryPreparationRevalidatesWidth(t *testing.T) {
+	errZero := errors.New("history transport unavailable")
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	frame := terminalSessionPlan(1, 28, 6, 4, LeaseState{})
+	if result := session.Flush(frame); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "WIDTH-CACHE-HISTORY"}}})
+	writer.zeroError = errZero
+	writer.failZero = 1
+	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &commit}); !errors.Is(result.Frame.Err, errZero) {
+		t.Fatalf("zero-byte width preparation = %#v", result)
+	}
+
+	resized := terminalSessionPlan(1, 29, 6, 4, LeaseState{})
+	recovery := session.FlushTransaction(TerminalTransactionPlan{Frame: resized, History: &commit})
+	if recovery.Frame.Err != nil || recovery.History == nil || !recovery.History.Deferred {
+		t.Fatalf("resize recovery = %#v", recovery)
+	}
+	if session.historyPrepareMisses != 2 || session.historyPrepareHits != 0 || session.preparedHistory == nil {
+		t.Fatalf("width change did not replace preparation: hits=%d misses=%d cache=%#v",
+			session.historyPrepareHits, session.historyPrepareMisses, session.preparedHistory)
+	}
+
+	delivered := session.FlushTransaction(TerminalTransactionPlan{Frame: resized, History: &commit})
+	if delivered.Frame.Err != nil || delivered.History == nil || delivered.History.Err != nil || delivered.History.Deferred {
+		t.Fatalf("post-resize history delivery = %#v", delivered)
+	}
+	if session.historyPrepareMisses != 2 || session.historyPrepareHits != 1 || session.preparedHistory != nil {
+		t.Fatalf("post-resize prepared cache: hits=%d misses=%d cache=%#v",
+			session.historyPrepareHits, session.historyPrepareMisses, session.preparedHistory)
+	}
+}
+
+func TestTerminalSessionHistoryPreparationRevalidatesTheme(t *testing.T) {
+	errZero := errors.New("history transport unavailable")
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	frame := terminalSessionPlan(1, 32, 6, 4, LeaseState{})
+	if result := session.Flush(frame); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{
+		Text: "THEME-CACHE-HISTORY", Style: render.Style{Role: string(style.RoleUser)},
+	}}})
+	writer.zeroError = errZero
+	writer.failZero = 1
+	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &commit}); !errors.Is(result.Frame.Err, errZero) {
+		t.Fatalf("zero-byte theme preparation = %#v", result)
+	}
+
+	theme := style.BuildThemeContext(style.ThemeSelection{
+		PaletteName: style.PaletteFocus,
+		Mode:        style.ThemeModeDark,
+	}, style.ColorProfile{ColorProfile: render.TrueColorProfile(), Background: style.BackgroundDark})
+	session.SetThemeContext(theme)
+	result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &commit})
+	if result.Frame.Err != nil || result.History == nil || result.History.Err != nil || result.History.Deferred {
+		t.Fatalf("theme-changed history transaction = %#v", result)
+	}
+	if session.historyPrepareMisses != 2 || session.historyPrepareHits != 0 {
+		t.Fatalf("theme change reused stale preparation: hits=%d misses=%d",
+			session.historyPrepareHits, session.historyPrepareMisses)
+	}
+}
+
+func TestTerminalSessionPartialHistoryWriteClearsPreparation(t *testing.T) {
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	frame := terminalSessionPlan(1, 28, 6, 4, LeaseState{})
+	if result := session.Flush(frame); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "PARTIAL-CACHE-HISTORY"}}})
+	writer.short = true
+	result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &commit})
+	if !errors.Is(result.Frame.Err, io.ErrShortWrite) || result.History == nil ||
+		!result.History.MayHavePartiallyWritten || !errors.Is(result.History.Err, io.ErrShortWrite) {
+		t.Fatalf("partial history transaction = %#v", result)
+	}
+	if session.preparedHistory != nil {
+		t.Fatalf("partial history write retained prepared payload: %#v", session.preparedHistory)
+	}
+}
+
+func TestTerminalHistoryBatchBudgetEnforcesEveryBound(t *testing.T) {
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "x"}}})
+	tests := []struct {
+		name   string
+		budget terminalHistoryBatchBudget
+	}{
+		{name: "commits", budget: terminalHistoryBatchBudget{commits: terminalHistoryBatchMaxCommits}},
+		{name: "rows", budget: terminalHistoryBatchBudget{rows: terminalHistoryBatchMaxRows}},
+		{name: "spans", budget: terminalHistoryBatchBudget{spans: terminalHistoryBatchMaxSpans}},
+		{name: "text bytes", budget: terminalHistoryBatchBudget{textBytes: terminalHistoryBatchMaxTextBytes}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := test.budget
+			if test.budget.admit(commit) {
+				t.Fatalf("budget admitted commit at %s limit: %#v", test.name, test.budget)
+			}
+			if test.budget != before {
+				t.Fatalf("rejected commit mutated budget: before=%#v after=%#v", before, test.budget)
+			}
+		})
+	}
+
+	budget := terminalHistoryBatchBudget{
+		commits:   terminalHistoryBatchMaxCommits - 1,
+		rows:      terminalHistoryBatchMaxRows - 1,
+		spans:     terminalHistoryBatchMaxSpans - 1,
+		textBytes: terminalHistoryBatchMaxTextBytes - 1,
+	}
+	if !budget.admit(commit) {
+		t.Fatalf("budget rejected commit that exactly fills every bound: %#v", budget)
+	}
+}
+
+func TestTerminalHistoryBatchBudgetCountsPresentationMetadata(t *testing.T) {
+	commit := terminalSessionCommit(1, render.Line{
+		Style: render.Style{Role: "line-role"},
+		Spans: []render.Span{{
+			Text:  "text",
+			Link:  "https://example.test",
+			Style: render.Style{Role: "span-role"},
+		}},
+	})
+	want := len("line-role") + len("text") + len("https://example.test") + len("span-role")
+	budget := terminalHistoryBatchBudget{textBytes: terminalHistoryBatchMaxTextBytes - want}
+	if !budget.admit(commit) || budget.textBytes != terminalHistoryBatchMaxTextBytes {
+		t.Fatalf("presentation byte accounting = %#v, want exact limit %d", budget, terminalHistoryBatchMaxTextBytes)
+	}
+}
+
 func TestTerminalSessionViewportExpansionPreservesOldHistoryRows(t *testing.T) {
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)

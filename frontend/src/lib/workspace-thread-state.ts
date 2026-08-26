@@ -12,6 +12,7 @@ import {
   type SessionHistoryResponse,
   type SessionRuntimeEvent,
 } from "@/types/runtime";
+import { normalizeSessionId } from "@/lib/session-id";
 
 const MAX_RUNTIME_EVENTS = 100;
 const STREAM_PLACEHOLDER_TEXT = "...";
@@ -528,11 +529,14 @@ export function applySessionHistoryToThread(
   thread: Thread,
   response: SessionHistoryResponse,
 ) {
+  const sessionId =
+    normalizeSessionId(response.session_id) ||
+    normalizeSessionId(thread.sessionId);
   const transport: Thread["transport"] =
     thread.transport === "error" ? "error" : "live";
   const historyArtifact = buildSessionHistoryArtifact(response);
   const mappedHistory = mapSessionHistoryToMessages(
-    response.session_id,
+    sessionId,
     response.history,
     thread.messages,
   );
@@ -543,7 +547,7 @@ export function applySessionHistoryToThread(
   return {
     ...thread,
     updatedAt: new Date().toISOString(),
-    sessionId: response.session_id,
+    sessionId,
     transport,
     lastError: thread.transport === "error" ? thread.lastError : null,
     messages: resolvedMessages,
@@ -781,11 +785,17 @@ export function mergeRuntimeSessionsIntoThreads(
   let changed = false;
 
   for (const session of sessions) {
+    const sessionId = normalizeSessionId(session?.id);
+    if (!sessionId) {
+      continue;
+    }
     const existingIndex = nextThreads.findIndex(
-      (thread) => thread.sessionId === session.id || thread.id === session.id,
+      (thread) =>
+        normalizeSessionId(thread.sessionId) === sessionId ||
+        normalizeSessionId(thread.id) === sessionId,
     );
     const title =
-      session.metadata?.title?.trim() || `Runtime session ${session.id.slice(0, 10)}`;
+      session.metadata?.title?.trim() || `Runtime session ${sessionId.slice(0, 10)}`;
     const summary =
       session.metadata?.summary?.trim() ||
       "Restored runtime session from /api/runtime/sessions.";
@@ -801,12 +811,12 @@ export function mergeRuntimeSessionsIntoThreads(
     if (existingIndex < 0) {
       changed = true;
       nextThreads.push({
-        id: session.id,
+        id: sessionId,
         title,
         summary,
         updatedAt,
         status: mapSessionStateToThreadStatus(session.state),
-        sessionId: session.id,
+        sessionId,
         transport: "live",
         runtimeSource: session.metadata?.lastAgent || session.metadata?.lastSkill || "runtime",
         lastError: null,
@@ -825,12 +835,12 @@ export function mergeRuntimeSessionsIntoThreads(
     const current = nextThreads[existingIndex];
     const merged = {
       ...current,
-      id: current.sessionId ? current.id : session.id,
+      id: current.sessionId ? current.id : sessionId,
       title,
       summary,
       updatedAt,
       status: mapSessionStateToThreadStatus(session.state),
-      sessionId: session.id,
+      sessionId,
       transport: current.transport === "error" ? "error" : "live",
       runtimeSource:
         current.runtimeSource ||

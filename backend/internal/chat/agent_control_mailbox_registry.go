@@ -133,7 +133,7 @@ func (r AgentControlMailboxRegistry) registrySessionIDs(filterSessionID string) 
 		if sessionID == "" {
 			continue
 		}
-		key := strings.ToLower(sessionID)
+		key := sessionID
 		if _, exists := seen[key]; exists {
 			continue
 		}

@@ -247,7 +247,7 @@ func TestBuildChatSession_NoInteractive(t *testing.T) {
 	}
 }
 
-func TestBuildChatSession_FailsClosedWithoutOwnedRendererCapabilities(t *testing.T) {
+func TestBuildChatSession_FallsBackToPlainModeWithoutOwnedRendererCapabilities(t *testing.T) {
 	oldInteractive := chatIsInteractiveTerminal
 	chatIsInteractiveTerminal = func() bool { return true }
 	defer func() { chatIsInteractiveTerminal = oldInteractive }()
@@ -274,11 +274,24 @@ func TestBuildChatSession_FailsClosedWithoutOwnedRendererCapabilities(t *testing
 		&chatPersistenceState{sessionUserID: "tester", resolvedSessionDir: t.TempDir()},
 		runtimeState,
 	)
-	if err == nil || !strings.Contains(err.Error(), "does not support ANSI scroll-region") {
-		t.Fatalf("buildChatSession error = %v, want unsupported owned renderer", err)
+	if err != nil {
+		t.Fatalf("buildChatSession should fall back to plain mode: %v", err)
 	}
-	if session != nil || cleanup != nil {
-		t.Fatalf("unsupported owned renderer must not publish a partial session: session=%+v cleanup=%v", session, cleanup != nil)
+	if session == nil || cleanup == nil {
+		t.Fatalf("plain fallback must publish a complete session: session=%+v cleanup=%v", session, cleanup != nil)
+	}
+	defer cleanup()
+	if session.NoInteractive || session.JSONOutput {
+		t.Fatalf("plain fallback must remain interactive: %+v", session)
+	}
+	if session.Layout != nil || session.InputBox != nil || session.KeyHandler != nil || session.Surface != nil {
+		t.Fatalf("plain fallback retained terminal UI owners: %+v", session)
+	}
+	if session.Interaction == nil {
+		t.Fatal("plain fallback must retain the sequential interaction coordinator")
+	}
+	if session.Interaction.UnifiedRendererEnabled() || session.TerminalSession != nil || session.TerminalSessionExecutor != nil {
+		t.Fatalf("plain fallback unexpectedly attached unified terminal ownership: %+v", session)
 	}
 }
 

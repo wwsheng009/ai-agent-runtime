@@ -78,6 +78,10 @@ func (h *SessionHub) Get(sessionID string) (*SessionActor, bool) {
 	if h == nil {
 		return nil, false
 	}
+	sessionID = NormalizeSessionID(sessionID)
+	if sessionID == "" {
+		return nil, false
+	}
 	h.mu.Lock()
 	actor, ok := h.actors[sessionID]
 	if !ok {
@@ -126,6 +130,7 @@ func (h *SessionHub) GetOrCreate(sessionID string) (*SessionActor, error) {
 	if h == nil {
 		return nil, fmt.Errorf("session hub is nil")
 	}
+	sessionID = NormalizeSessionID(sessionID)
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
@@ -251,6 +256,10 @@ func (h *SessionHub) Stop(sessionID string) {
 // StopContext stops and removes an actor, waiting at most until ctx expires.
 func (h *SessionHub) StopContext(ctx context.Context, sessionID string) error {
 	if h == nil {
+		return nil
+	}
+	sessionID = NormalizeSessionID(sessionID)
+	if sessionID == "" {
 		return nil
 	}
 	if ctx == nil {

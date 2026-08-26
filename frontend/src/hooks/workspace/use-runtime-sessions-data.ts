@@ -8,6 +8,7 @@ import {
   type RuntimeSessionUserSummary,
 } from "@/lib/runtime-api";
 import { getRuntimeClientIdentity } from "@/lib/runtime-client";
+import { normalizeSessionId } from "@/lib/session-id";
 
 type RuntimeSessionsDataOptions = {
   pinnedSessionId?: string;
@@ -167,9 +168,25 @@ export function summarizeRuntimeSessions(
 }
 
 export function normalizeRuntimeSessions(
-  sessions: RuntimeSessionRecord[] | null | undefined,
+  sessions:
+    | Array<RuntimeSessionRecord | null | undefined>
+    | null
+    | undefined,
 ) {
-  return Array.isArray(sessions) ? sessions : [];
+  if (!Array.isArray(sessions)) {
+    return [];
+  }
+  const normalized: RuntimeSessionRecord[] = [];
+  const seen = new Set<string>();
+  for (const session of sessions) {
+    const id = normalizeSessionId(session?.id);
+    if (!session || !id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    normalized.push(session.id === id ? session : { ...session, id });
+  }
+  return normalized;
 }
 
 export function normalizeRuntimeSessionUsers(
@@ -235,15 +252,25 @@ export function mergePinnedRuntimeSession(
   sessions: RuntimeSessionRecord[],
   pinnedSession: RuntimeSessionRecord | null | undefined,
 ) {
-  if (!pinnedSession) {
+  const pinnedSessionId = normalizeSessionId(pinnedSession?.id);
+  if (!pinnedSession || !pinnedSessionId) {
     return sessions;
   }
 
-  if (sessions.some((session) => session.id === pinnedSession.id)) {
+  if (
+    sessions.some(
+      (session) => normalizeSessionId(session.id) === pinnedSessionId,
+    )
+  ) {
     return sessions;
   }
 
-  return [...sessions, pinnedSession];
+  return [
+    ...sessions,
+    pinnedSession.id === pinnedSessionId
+      ? pinnedSession
+      : { ...pinnedSession, id: pinnedSessionId },
+  ];
 }
 
 export async function loadRuntimeSessions(
@@ -252,7 +279,7 @@ export async function loadRuntimeSessions(
 ) {
   const response = await listRuntimeSessions({ userId });
   const listedSessions = normalizeRuntimeSessions(response.sessions);
-  const resolvedPinnedSessionId = pinnedSessionId?.trim();
+  const resolvedPinnedSessionId = normalizeSessionId(pinnedSessionId);
 
   if (
     !resolvedPinnedSessionId ||
@@ -278,7 +305,7 @@ export function useRuntimeSessionsData({
   const fallbackUserId = userId?.trim() || getRuntimeClientIdentity().userId;
   const initialSelectedUserId =
     readStoredRuntimeSessionUserId(getBrowserStorage()) || fallbackUserId;
-  const resolvedPinnedSessionId = pinnedSessionId?.trim();
+  const resolvedPinnedSessionId = normalizeSessionId(pinnedSessionId);
   const initialStoredSessions = readStoredRuntimeSessions(
     getBrowserStorage(),
     initialSelectedUserId,

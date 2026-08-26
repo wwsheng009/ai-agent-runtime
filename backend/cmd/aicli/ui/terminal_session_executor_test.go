@@ -289,8 +289,9 @@ func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTran
 		t.Fatalf("initial bootstrap did not atomically hand off history: entry=%#v unknown=%t writes=%d", first, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
 
-	// A complete bootstrap is one physical transaction: it must not first paint
-	// a single-screen-only frame and rely on a later subregion handoff.
+	// A complete bootstrap that fits the scheduling budget is one physical
+	// transaction: it must not first paint a single-screen-only frame and rely
+	// on a later subregion handoff.
 	entries := state.HistoryEffects.Entries()
 	if len(entries) != len(before) {
 		t.Fatalf("history inventory changed across presenter bootstrap: before=%d after=%d", len(before), len(entries))
@@ -302,6 +303,34 @@ func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTran
 		if index > 0 && entry.AckFrame < entries[index-1].AckFrame {
 			t.Fatalf("ack frames regressed: previous=%#v current=%#v", entries[index-1], entry)
 		}
+	}
+}
+
+func TestTerminalSessionExecutorBoundsBootstrapAcrossTransactions(t *testing.T) {
+	controller := newHistoryExecutorController(t, nil)
+	postHistoryEffectFixture(t, controller, scene.CellID(terminalHistoryBatchMaxCommits+5))
+	controller.WaitIdle()
+	before := controller.State().HistoryEffects.Entries()
+	if len(before) <= terminalHistoryBatchMaxCommits {
+		t.Fatalf("fixture entries = %d, want more than batch limit %d", len(before), terminalHistoryBatchMaxCommits)
+	}
+
+	writer := &terminalSessionShortWriter{}
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+	executor.Request()
+	executor.WaitIdle()
+
+	entries := controller.State().HistoryEffects.Entries()
+	ackFrames := make(map[uint64]struct{})
+	for index, entry := range entries {
+		if entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
+			t.Fatalf("entry[%d] was not acknowledged after bounded drain: %#v", index, entry)
+		}
+		ackFrames[entry.AckFrame] = struct{}{}
+	}
+	if writer.writes != 2 || len(ackFrames) != 2 {
+		t.Fatalf("bounded bootstrap writes=%d ackFrames=%v, want two ordered transactions", writer.writes, ackFrames)
 	}
 }
 

@@ -2309,3 +2309,76 @@ func TestSQLiteRuntimeStoreMigratesAgentControlMailboxSequence(t *testing.T) {
 	assert.Equal(t, int64(3), messages[0].Seq)
 	assert.Equal(t, int64(5), messages[0].SessionMailboxSeq)
 }
+
+func TestNormalizeSessionIDConvergesLockVariants(t *testing.T) {
+	// 纯函数收敛性：与 session 存储层 sanitizeSessionID 完全一致且幂等。
+	for input, want := range map[string]string{
+		"abc":                "abc",
+		"  abc  ":            "abc",
+		"abc/":               "abc",
+		"dir/abc":            "abc",
+		`dir\abc`:            "abc",
+		"/":                  "",
+		`\`:                  "",
+		" session_20260826 ": "session_20260826",
+	} {
+		got := NormalizeSessionID(input)
+		require.Equal(t, want, got, "NormalizeSessionID(%q)", input)
+		require.Equal(t, got, NormalizeSessionID(got), "NormalizeSessionID must be idempotent for %q", input)
+	}
+
+	t.Run("lock converges across variants", func(t *testing.T) {
+		stores := map[string]func() SessionLeaseStore{
+			"inmemory": func() SessionLeaseStore { return NewInMemoryRuntimeStore(64) },
+			"sqlite": func() SessionLeaseStore {
+				store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{DSN: "file:lease-norm-test?mode=memory&cache=shared"})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = store.Close() })
+				return store
+			},
+		}
+		for name, newStore := range stores {
+			t.Run(name, func(t *testing.T) {
+				store := newStore()
+				ctx := context.Background()
+				now := time.Now().UTC()
+
+				// 规范 id 首次获取成功。
+				lease, err := store.AcquireLease(ctx, LeaseRequest{
+					SessionID: "abc", OwnerID: "owner-1", OwnerKind: "test", Now: now, TTL: 5 * time.Minute,
+				})
+				require.NoError(t, err)
+				require.Equal(t, "abc", lease.SessionID)
+
+				// 同一 owner 用变体 id（尾斜杠）再次获取：必须命中同一把锁（幂等续期），
+				// 而不是在锁表里分裂出第二行。
+				lease, err = store.AcquireLease(ctx, LeaseRequest{
+					SessionID: "abc/", OwnerID: "owner-1", OwnerKind: "test", Now: now, TTL: 5 * time.Minute,
+				})
+				require.NoError(t, err)
+				require.Equal(t, "abc", lease.SessionID)
+
+				// 不同 owner 用另一变体（路径前缀）获取：必须冲突，证明锁未被分裂绕过互斥。
+				_, err = store.AcquireLease(ctx, LeaseRequest{
+					SessionID: "dir/abc", OwnerID: "owner-2", OwnerKind: "test", Now: now, TTL: 5 * time.Minute,
+				})
+				require.Error(t, err)
+				var conflict *LeaseConflictError
+				require.ErrorAs(t, err, &conflict)
+				require.Equal(t, "abc", conflict.Lease.SessionID)
+				require.Equal(t, "owner-1", conflict.Lease.OwnerID)
+
+				// Get/Renew/Release 对变体 id 全部落到同一把锁。
+				got, err := store.GetLease(ctx, "abc/")
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				require.Equal(t, "owner-1", got.OwnerID)
+				require.NoError(t, store.RenewLease(ctx, " abc ", "owner-1", time.Minute))
+				require.NoError(t, store.ReleaseLease(ctx, "./abc", "owner-1"))
+				got, err = store.GetLease(ctx, "abc")
+				require.NoError(t, err)
+				require.Nil(t, got)
+			})
+		}
+	})
+}

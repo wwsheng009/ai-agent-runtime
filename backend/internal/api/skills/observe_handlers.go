@@ -176,7 +176,7 @@ func (h *Handler) ObserveSession(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, fmt.Errorf("%s: runtime observation disabled", runtimeobserve.ErrCodeDisabled))
 		return
 	}
-	sessionID := strings.TrimSpace(mux.Vars(r)["session_id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["session_id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, fmt.Errorf("%s: session_id required", runtimeobserve.ErrCodeInvalidRequest))
 		return
@@ -258,7 +258,7 @@ func observeHTTPStatus(err error) int {
 func parseObserveEventQuery(r *http.Request) (runtimeobserve.EventQuery, error) {
 	var q runtimeobserve.EventQuery
 	values := r.URL.Query()
-	q.SessionID = strings.TrimSpace(values.Get("session_id"))
+	q.SessionID = chat.NormalizeSessionID(values.Get("session_id"))
 	q.TraceID = strings.TrimSpace(values.Get("trace_id"))
 	q.AgentID = strings.TrimSpace(values.Get("agent_id"))
 	q.TurnID = strings.TrimSpace(values.Get("turn_id"))

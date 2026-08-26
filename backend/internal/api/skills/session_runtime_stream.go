@@ -22,7 +22,7 @@ import (
 // live-only events such as tool.progress. Live events are marked with
 // payload["live"]=true and are never written to the durable store by this path.
 func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Request) {
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return

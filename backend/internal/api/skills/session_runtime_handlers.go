@@ -51,7 +51,7 @@ func (h *Handler) SpawnSessionAgent(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "agent session controller not configured"))
 		return
 	}
-	parentSessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	parentSessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if parentSessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -129,7 +129,7 @@ func (h *Handler) WaitSessionAgents(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "agent session controller not configured"))
 		return
 	}
-	parentSessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	parentSessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if parentSessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -166,7 +166,7 @@ func (h *Handler) ListSessionAgentEvents(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "agent session controller not configured"))
 		return
 	}
-	parentSessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	parentSessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if parentSessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -215,7 +215,7 @@ func (h *Handler) ListSessionAgentEvents(w http.ResponseWriter, r *http.Request)
 // ListSessionAgentControlMailbox lists durable AgentControl mailbox rows for a
 // session without converting them through legacy runtime event shape.
 func (h *Handler) ListSessionAgentControlMailbox(w http.ResponseWriter, r *http.Request) {
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -373,7 +373,7 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -397,7 +397,7 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 
 // ListSessionRuntimeTools returns the current runtime-server tool surface for a session.
 func (h *Handler) ListSessionRuntimeTools(w http.ResponseWriter, r *http.Request) {
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -493,7 +493,7 @@ func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -597,7 +597,7 @@ func (h *Handler) ListSessionToolReceipts(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
@@ -646,7 +646,7 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return

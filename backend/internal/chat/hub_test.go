@@ -125,6 +125,33 @@ func TestSessionHubGetOrCreateReplacesStoppedActor(t *testing.T) {
 	}
 }
 
+func TestSessionHubConvergesSessionIDVariants(t *testing.T) {
+	var created atomic.Int32
+	hub := NewSessionHub(func(id string) (*SessionActor, error) {
+		created.Add(1)
+		if id != "session-1" {
+			t.Fatalf("factory session id = %q, want canonical session-1", id)
+		}
+		return newHubTestActor(id, SessionIdle, nil), nil
+	})
+	t.Cleanup(hub.StopAll)
+
+	first, err := hub.GetOrCreate(`dir\session-1/`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, ok := hub.Get("nested/session-1")
+	if !ok {
+		t.Fatal("expected variant lookup to find the canonical actor")
+	}
+	if second != first {
+		t.Fatal("expected all variants to resolve to the same actor")
+	}
+	if created.Load() != 1 {
+		t.Fatalf("expected one actor factory call, got %d", created.Load())
+	}
+}
+
 func TestBoundedSessionHubCreatesFreshActorAfterIdleSweep(t *testing.T) {
 	var created atomic.Int32
 	hub := NewBoundedSessionHub(func(id string) (*SessionActor, error) {

@@ -72,6 +72,18 @@ describe("workspace thread selection helpers", () => {
         sessionId: "session-2",
       }),
     ).toBe("/workspace/sessions/session-2");
+    expect(
+      buildWorkspaceThreadPath({
+        ...createThread("thread?#%", []),
+        sessionId: undefined,
+      }),
+    ).toBe("/workspace/chats/thread%3F%23%25");
+    expect(
+      buildWorkspaceThreadPath({
+        ...createThread("thread-encoded", []),
+        sessionId: "session%2Fvalue",
+      }),
+    ).toBe("/workspace/sessions/session%252Fvalue");
   });
 
   it("resolves artifact selection to a valid artifact or null for empty threads", () => {
@@ -158,6 +170,53 @@ describe("workspace thread selection helpers", () => {
           id: "history-1",
         },
       ],
+    });
+  });
+});
+
+describe("workspace thread selection session id variants", () => {
+  it("matches route session ids across whitespace, trailing-slash and path variants", () => {
+    const first = createThread("thread-1", ["artifact-a"]);
+    const second = {
+      ...createThread("thread-2", ["artifact-b"]),
+      sessionId: "session-2",
+    };
+
+    for (const variant of ["session-2/", "dir/session-2", " session-2 "]) {
+      expect(
+        resolveSelectedThread([first, second], { routeSessionId: variant })
+          ?.id,
+      ).toBe("thread-2");
+    }
+  });
+
+  it("keeps an unmatched deep-linked session selected while it loads", () => {
+    const cached = createThread("cached-thread", []);
+    const selected = resolveSelectedThread([cached], {
+      routeSessionId: "dir/session-pinned/",
+    });
+
+    expect(selected).toMatchObject({
+      id: "session-pinned",
+      sessionId: "session-pinned",
+      tags: ["runtime-session", "loading"],
+    });
+  });
+
+  it("matches canonical runtime sessions against stored thread aliases", () => {
+    const aliased = {
+      ...createThread("thread-aliased", []),
+      sessionId: "dir/session-2/",
+    };
+    const merged = mergeRuntimeSessionsIntoThreads(
+      [aliased],
+      [{ id: "session-2", state: "active" }],
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      id: "thread-aliased",
+      sessionId: "session-2",
     });
   });
 });

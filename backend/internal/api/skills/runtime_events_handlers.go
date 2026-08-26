@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
@@ -26,7 +27,7 @@ func (h *Handler) ListRuntimeEvents(w http.ResponseWriter, r *http.Request) {
 
 	filters := runtimeevents.QueryFilter{
 		TraceID:             strings.TrimSpace(r.URL.Query().Get("trace_id")),
-		SessionID:           strings.TrimSpace(r.URL.Query().Get("session_id")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
 		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
 		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
 		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
@@ -58,4 +59,3 @@ func (h *Handler) ListRuntimeEvents(w http.ResponseWriter, r *http.Request) {
 
 	h.writeJSON(w, http.StatusOK, payload)
 }
-

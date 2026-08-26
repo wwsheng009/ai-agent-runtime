@@ -1,5 +1,16 @@
 package ui
 
+const (
+	// Bootstrap batching is a scheduling bound, not a semantic truncation:
+	// every admitted prefix is acknowledged before the executor claims the next
+	// token. The already-claimed head is always included even when it alone
+	// exceeds a bound because HistoryCommit has no partial-token ACK state.
+	terminalHistoryBatchMaxCommits   = 256
+	terminalHistoryBatchMaxRows      = 2048
+	terminalHistoryBatchMaxSpans     = 8192
+	terminalHistoryBatchMaxTextBytes = 4 << 20
+)
+
 type terminalSessionScheduleSnapshot struct {
 	projectionUnknown      bool
 	reconciliationRequired bool
@@ -88,9 +99,12 @@ func terminalViewportAppState(state AppState) AppState {
 	}
 }
 
-// terminalSessionClaimedBatchLocked returns detached payloads while the actor
-// mutex still protects the ledger. It preserves the token-ordered bootstrap
-// rule without cloning every Acked or invalidated ledger entry.
+// terminalSessionClaimedBatchLocked returns a detached, bounded pending prefix
+// while the actor mutex still protects the ledger. Bounding aggregate commits,
+// rows, spans, and retained text prevents aggregate idle backlog from becoming
+// one uninterruptible clone/prepare/write operation. A single claimed token is
+// still atomic; the executor acknowledges each prefix and immediately claims
+// the next oldest token.
 func terminalSessionClaimedBatchLocked(state UIControllerState, token uint64) (*HistoryCommit, []HistoryCommit) {
 	ledger := state.HistoryEffects.ledger
 	if ledger == nil {
@@ -102,16 +116,64 @@ func terminalSessionClaimedBatchLocked(state UIControllerState, token uint64) (*
 	}
 	claimed := entry.Commit.Clone()
 	commits := []HistoryCommit{claimed.Clone()}
+	var budget terminalHistoryBatchBudget
+	if !budget.admit(entry.Commit) {
+		return &claimed, commits
+	}
 	for _, nextToken := range ledger.orderedTokens() {
 		if nextToken <= token {
 			continue
 		}
 		next := ledger.byToken[nextToken]
 		if next.State == HistoryCommitPending && next.Commit.LayoutGeneration == state.LayoutGeneration {
+			if !budget.admit(next.Commit) {
+				break
+			}
 			commits = append(commits, next.Commit.Clone())
 		}
 	}
 	return &claimed, commits
+}
+
+type terminalHistoryBatchBudget struct {
+	commits   int
+	rows      int
+	spans     int
+	textBytes int
+}
+
+func (b *terminalHistoryBatchBudget) admit(commit HistoryCommit) bool {
+	if b == nil || b.commits >= terminalHistoryBatchMaxCommits ||
+		len(commit.Lines) > terminalHistoryBatchMaxRows-b.rows {
+		return false
+	}
+	remainingSpans := terminalHistoryBatchMaxSpans - b.spans
+	remainingText := terminalHistoryBatchMaxTextBytes - b.textBytes
+	addedSpans := 0
+	addedText := 0
+	for _, line := range commit.Lines {
+		if len(line.Style.Role) > remainingText-addedText {
+			return false
+		}
+		addedText += len(line.Style.Role)
+		if len(line.Spans) > remainingSpans-addedSpans {
+			return false
+		}
+		for _, span := range line.Spans {
+			for _, value := range [...]string{span.Text, span.Link, span.Style.Role} {
+				if len(value) > remainingText-addedText {
+					return false
+				}
+				addedText += len(value)
+			}
+		}
+		addedSpans += len(line.Spans)
+	}
+	b.commits++
+	b.rows += len(commit.Lines)
+	b.spans += addedSpans
+	b.textBytes += addedText
+	return true
 }
 
 func (c *UIController) terminalSessionHasPending() bool {

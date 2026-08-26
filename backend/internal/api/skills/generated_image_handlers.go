@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -23,7 +24,7 @@ func (h *Handler) GetSessionGeneratedImage(w http.ResponseWriter, r *http.Reques
 	}
 
 	vars := mux.Vars(r)
-	sessionID := strings.TrimSpace(vars["id"])
+	sessionID := chat.NormalizeSessionID(vars["id"])
 	name := strings.TrimSpace(vars["name"])
 	if sessionID == "" || name == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id and image name are required"))
