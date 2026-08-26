@@ -367,7 +367,21 @@ func runStart(args []string) int {
 	env := ensureEnvDefault(os.Environ(), "LOG_OUTPUT", "file")
 	env = ensureEnvDefault(env, "LOG_ENABLE_CONSOLE", "false")
 
-	cmd, err := runtimeserver.StartDetachedProcess(launchCommand, launchArgs, env)
+	// 日志文件路径未配置时，把子进程 stdout/stderr 捕获到 PID 文件同目录的
+	// fallback 文件，保证启动失败的真实原因可诊断（否则错误被丢弃只剩
+	// "未配置日志文件路径"）。已配置日志文件路径时保持原行为。
+	captureStdout, captureStderr := "", ""
+	if strings.TrimSpace(logCapture.Path) == "" {
+		fallbackPath := filepath.Join(filepath.Dir(pidFile), "runtime-server-startup.fallback.log")
+		if err := os.MkdirAll(filepath.Dir(fallbackPath), 0o755); err == nil {
+			captureStdout, captureStderr = fallbackPath, fallbackPath
+			logCapture.Path = fallbackPath
+			logCapture.Existed = false
+			logCapture.InitialSize = 0
+		}
+	}
+
+	cmd, err := runtimeserver.StartDetachedProcessWithOutput(launchCommand, launchArgs, env, captureStdout, captureStderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start runtime-server in background: %v\n", err)
 		return 1
