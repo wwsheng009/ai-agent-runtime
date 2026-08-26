@@ -985,7 +985,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.shutdown {
+	if c.shutdown || !c.isReadyLocked() {
 		return
 	}
 	if seq != c.promptSeq {

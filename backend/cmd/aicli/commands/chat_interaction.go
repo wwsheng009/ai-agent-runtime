@@ -730,7 +730,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.shutdown {
+	if c.shutdown || !c.isReadyLocked() {
 		return
 	}
 	c.promptSeq++
