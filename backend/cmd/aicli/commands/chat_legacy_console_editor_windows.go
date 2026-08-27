@@ -43,6 +43,12 @@ const (
 	vkEnd        = 0x23
 	vkDelete     = 0x2E
 	vkProcessKey = 0xE5
+
+	// IBM PC/AT set-1 scan code used by Windows KEY_EVENT_RECORD for the
+	// physical Backspace key. Old conhost/remote-console compatibility layers
+	// can preserve this scan code even when VirtualKeyCode is translated
+	// incorrectly (for example, to VK_LEFT).
+	scanBackspace = 0x0E
 )
 
 var procReadConsoleInputW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
@@ -50,6 +56,14 @@ var procWriteConsoleW = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteC
 var procWriteConsoleOutputCharacterW = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteConsoleOutputCharacterW")
 var procGetConsoleScreenBufferInfo = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleScreenBufferInfo")
 var procSetConsoleCursorPosition = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCursorPosition")
+
+var legacyConsoleDebugf = func(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, format, args...)
+}
+
+var legacyConsoleDebugln = func(args ...any) {
+	_, _ = fmt.Fprintln(os.Stderr, args...)
+}
 
 // consoleCoord 对应 COORD。
 type consoleCoord struct {
@@ -101,7 +115,7 @@ func readLegacyConsoleLine(ctx context.Context) (line string, ok bool, err error
 		if err := windows.SetConsoleMode(in, next); err == nil {
 			defer windows.SetConsoleMode(in, ed.inputMode)
 			if chatDebugFlagEnabled() {
-				_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] legacy console line editor active")
+				legacyConsoleDebugln("[aicli-diag] legacy console line editor active")
 			}
 			text, err := ed.readLine(ctx)
 			return text, true, err
@@ -167,19 +181,21 @@ func (ed *legacyConsoleLineEditor) dispatch(recs []consoleInputRecord) bool {
 		if key.KeyDown == 0 {
 			continue
 		}
-		// 诊断探针：打印 backspace/方向键/delete 的实际 VK 码（仅 --debug）。
-		switch key.VirtualKeyCode {
-		case 0x08, 0x25, 0x2E, 0x2D, 0x7F:
-			if chatDebugFlagEnabled() {
-				_, _ = fmt.Fprintf(os.Stderr, "[aicli-diag] key VK=0x%02X uni=%#04x rep=%d\n",
-					key.VirtualKeyCode, key.UnicodeChar, key.RepeatCount)
-			}
+		virtualKey := normalizedLegacyConsoleVirtualKey(key)
+		// 诊断探针：同时打印原始与兼容归一化后的按键字段（仅 --debug）。
+		if chatDebugFlagEnabled() && (virtualKey == vkBack ||
+			virtualKey == vkLeft || virtualKey == vkDelete ||
+			key.UnicodeChar == '\b' || key.UnicodeChar == 0x7F) {
+			legacyConsoleDebugf(
+				"[aicli-diag] key rawVK=0x%02X normalizedVK=0x%02X scan=0x%02X uni=%#04x rep=%d ctrl=0x%04X\n",
+				key.VirtualKeyCode, virtualKey, key.VirtualScanCode, key.UnicodeChar,
+				key.RepeatCount, key.ControlKeyState)
 		}
 		repeat := int(key.RepeatCount)
 		if repeat < 1 {
 			repeat = 1
 		}
-		switch key.VirtualKeyCode {
+		switch virtualKey {
 		case vkReturn:
 			// 提交：结束编辑行（\r\n），保证后续协调器输出/LLM 响应从
 			// 新行开始，不会接在用户输入同一行。
@@ -190,37 +206,37 @@ func (ed *legacyConsoleLineEditor) dispatch(recs []consoleInputRecord) bool {
 				ed.cur--
 				ed.buf = append(ed.buf[:ed.cur], ed.buf[ed.cur+1:]...)
 			}
-			ed.redraw()
+			ed.redrawIfConsole()
 		case vkDelete:
 			for j := 0; j < repeat && ed.cur < len(ed.buf); j++ {
 				ed.buf = append(ed.buf[:ed.cur], ed.buf[ed.cur+1:]...)
 			}
-			ed.redraw()
+			ed.redrawIfConsole()
 		case vkLeft:
 			if ed.cur > 0 {
 				ed.cur--
-				ed.redraw()
+				ed.redrawIfConsole()
 			}
 		case vkRight:
 			if ed.cur < len(ed.buf) {
 				ed.cur++
-				ed.redraw()
+				ed.redrawIfConsole()
 			}
 		case vkHome:
 			if ed.cur != 0 {
 				ed.cur = 0
-				ed.redraw()
+				ed.redrawIfConsole()
 			}
 		case vkEnd:
 			if ed.cur != len(ed.buf) {
 				ed.cur = len(ed.buf)
-				ed.redraw()
+				ed.redrawIfConsole()
 			}
 		case vkEscape:
 			if len(ed.buf) > 0 {
 				ed.buf = ed.buf[:0]
 				ed.cur = 0
-				ed.redraw()
+				ed.redrawIfConsole()
 			}
 		case vkTab, vkUp, vkDown, vkProcessKey:
 			// 传统降级模式无补全/历史/IME 合成键语义，忽略。
@@ -233,11 +249,39 @@ func (ed *legacyConsoleLineEditor) dispatch(recs []consoleInputRecord) bool {
 					ed.buf[ed.cur] = ch
 					ed.cur++
 				}
-				ed.redraw()
+				ed.redrawIfConsole()
 			}
 		}
 	}
 	return false
+}
+
+// normalizedLegacyConsoleVirtualKey reconciles inconsistent KEY_EVENT_RECORD
+// fields produced by old Windows console stacks. Only the observed stale
+// VK_LEFT candidate may be overridden by a physical Backspace scan code (0x0E)
+// or translated '\b'; unrelated keys retain their explicit virtual-key code. A
+// real Left key uses scan 0x4B and Unicode 0, so it remains VK_LEFT. Unlike
+// terminal byte streams, Unicode 0x7F is not a Windows virtual-key code (VK 0x7F
+// is F16), so it is never used to override an explicit Windows key identity.
+func normalizedLegacyConsoleVirtualKey(key *consoleKeyEventRecord) uint16 {
+	if key == nil {
+		return 0
+	}
+	switch key.VirtualKeyCode {
+	case vkBack:
+		return vkBack
+	case vkLeft:
+		if key.UnicodeChar == '\b' || key.VirtualScanCode == scanBackspace {
+			return vkBack
+		}
+	case 0:
+		// Some injected/remote-console records omit the VK. Require both
+		// independent Backspace fields before accepting such a synthetic event.
+		if key.UnicodeChar == '\b' && key.VirtualScanCode == scanBackspace {
+			return vkBack
+		}
+	}
+	return key.VirtualKeyCode
 }
 
 // isEditableConsoleRune 判定字符是否应插入编辑缓冲。
@@ -250,6 +294,15 @@ func isEditableConsoleRune(ch rune) bool {
 		return false
 	}
 	return true
+}
+
+func (ed *legacyConsoleLineEditor) redrawIfConsole() {
+	// A zero output handle is used by dispatch-only unit tests. Skipping the
+	// Win32 redraw keeps key normalization/RepeatCount tests deterministic while
+	// production editors always carry a valid console handle.
+	if ed.out != 0 {
+		ed.redraw()
+	}
 }
 
 // redraw 以自持锚点 (y0, x0) 为基准重绘文本区并定位光标。
@@ -276,7 +329,7 @@ func (ed *legacyConsoleLineEditor) redraw() {
 	// 诊断探针：重绘后实际光标落点（仅 --debug）。
 	if chatDebugFlagEnabled() {
 		if info2, err2 := ed.screenInfo(); err2 == nil {
-			_, _ = fmt.Fprintf(os.Stderr, "[redraw] y=%d x0=%d curX=%d right=%d text=%q cur=%d after=(%d,%d)\n",
+			legacyConsoleDebugf("[redraw] y=%d x0=%d curX=%d right=%d text=%q cur=%d after=(%d,%d)\n",
 				ed.y0, ed.x0, curX, int(info.Window.Right), string(ed.buf), ed.cur,
 				info2.CursorPosition.Y, info2.CursorPosition.X)
 		}
@@ -314,7 +367,7 @@ func (ed *legacyConsoleLineEditor) clearTextArea() {
 func (ed *legacyConsoleLineEditor) writeTextAt(text string) {
 	if err := ed.setCursor(ed.y0, ed.x0); err != nil {
 		if chatDebugFlagEnabled() {
-			_, _ = fmt.Fprintf(os.Stderr, "[redraw] setCursor(%d,%d) failed: %v\n", ed.y0, ed.x0, err)
+			legacyConsoleDebugf("[redraw] setCursor(%d,%d) failed: %v\n", ed.y0, ed.x0, err)
 		}
 		return
 	}
