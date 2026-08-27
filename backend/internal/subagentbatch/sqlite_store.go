@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
@@ -169,14 +170,21 @@ func (s *sqliteBatchStore) ensure() error {
 				return
 			}
 		}
-		db, err := sql.Open("sqlite3", s.dsn)
+		var db *sql.DB
+		var err error
+		if batchMemoryDSN(s.dsn) {
+			db, err = sql.Open("sqlite3", s.dsn)
+			if err == nil {
+				db.SetMaxOpenConns(1)
+				db.SetMaxIdleConns(1)
+			}
+		} else {
+			// 共享文件库统一并发基线：WAL + busy_timeout + 单连接池 + 锁重试。
+			db, err = sqliteutil.OpenFile(s.dsn, true)
+		}
 		if err != nil {
 			s.openErr = fmt.Errorf("open subagentbatch db: %w", err)
 			return
-		}
-		if batchMemoryDSN(s.dsn) {
-			db.SetMaxOpenConns(1)
-			db.SetMaxIdleConns(1)
 		}
 		if err := db.PingContext(context.Background()); err != nil {
 			s.openErr = fmt.Errorf("ping subagentbatch db: %w", err)

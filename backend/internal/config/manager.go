@@ -518,10 +518,46 @@ func (rm *RuntimeManager) Save() error {
 		return errors.Wrap(errors.ErrConfigNotFound, "failed to create config directory", err)
 	}
 
-	if err := os.WriteFile(rm.filePath, data, 0644); err != nil {
+	if err := atomicWriteConfigFile(rm.filePath, data, 0644); err != nil {
 		return errors.Wrap(errors.ErrConfigInvalid, fmt.Sprintf("failed to write config: %s", rm.filePath), err)
 	}
 
+	return nil
+}
+
+// atomicWriteConfigFile 原子写配置文件（临时文件 + rename）：
+// 多 aicli 实例并发写同一 config.yaml 时避免 read-modify-write 竞态
+// 导致的互相覆盖/半文件。
+func atomicWriteConfigFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
 	return nil
 }
 

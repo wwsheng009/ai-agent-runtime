@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
@@ -193,14 +194,22 @@ func (s *SQLiteStore) ensure() error {
 			s.openErr = err
 			return
 		}
-		db, err := sql.Open("sqlite3", s.dsn)
+		var db *sql.DB
+		var err error
+		if isSQLiteMemoryDSN(s.dsn) {
+			db, err = sql.Open("sqlite3", s.dsn)
+			if err == nil {
+				db.SetMaxOpenConns(1)
+				db.SetMaxIdleConns(1)
+			}
+		} else {
+			// 共享文件库统一并发基线：WAL + busy_timeout + 单连接池 +
+			// 锁重试（多 aicli/runtime-server 实例并发打开同一库）。
+			db, err = sqliteutil.OpenFile(s.dsn, true)
+		}
 		if err != nil {
 			s.openErr = fmt.Errorf("open team db: %w", err)
 			return
-		}
-		if isSQLiteMemoryDSN(s.dsn) {
-			db.SetMaxOpenConns(1)
-			db.SetMaxIdleConns(1)
 		}
 		store := &SQLiteStore{db: db}
 		if err := store.init(context.Background()); err != nil {

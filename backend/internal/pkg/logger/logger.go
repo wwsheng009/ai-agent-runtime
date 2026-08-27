@@ -171,6 +171,9 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, []io.Closer, 
 		opts = append(opts, zap.AddStacktrace(zap.ErrorLevel))
 	}
 
+	// 每条日志携带进程 PID：多 aicli 实例共享同一日志文件时可按实例区分。
+	core = core.With([]zap.Field{zap.Int("pid", os.Getpid())})
+
 	logger := zap.New(core, opts...)
 	return logger, logger.Sugar(), closers, nil
 }
