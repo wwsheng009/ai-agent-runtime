@@ -10,6 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/consolehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -22,6 +23,20 @@ var (
 )
 
 func main() {
+	// --console-host 必须先于 .env、配置、日志和终端初始化处理。MobaXterm /
+	// mintty 中的原生 Windows 进程拿到的是 pipe；父进程通过
+	// CREATE_NEW_CONSOLE 重启自身后，子进程才能从 CONIN$/CONOUT$ 获得真实
+	// Windows Console 句柄。参数在重启前会被移除，因此不会递归启动。
+	consoleBootstrap, err := consolehost.BootstrapSelf(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s: %v\n", consolehost.FlagName, err)
+		os.Exit(1)
+	}
+	os.Args = append([]string{os.Args[0]}, consoleBootstrap.Args...)
+	if consoleBootstrap.Launched {
+		os.Exit(consoleBootstrap.ExitCode)
+	}
+
 	// 加载 .env 文件（按 config.yaml 同样的查找顺序）
 	envPaths := config.DefaultDotEnvSearchPaths()
 	envPath := config.ResolveDotEnvPath(envPaths)
@@ -157,6 +172,7 @@ func main() {
 	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 	rootCmd.PersistentFlags().Bool("pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
+	rootCmd.PersistentFlags().Bool("console-host", false, "Windows：当前 stdin/stdout 为 PTY/pipe 时，在新的原生 Console 窗口中重启 aicli")
 
 	// config 子命令
 	configCmd := &cobra.Command{
