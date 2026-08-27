@@ -11,6 +11,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 
@@ -18,17 +19,34 @@ import (
 )
 
 // pipeFrameDiagWriter 在 --debug 下把编辑器每次 Write 的渲染帧原始字节以
-// repr 形式转发到 stderr，用于真机取证：一眼确认帧格式、是否以 \n 结尾、
-// 是否走了补偿模式。
+// repr 形式写入诊断日志文件（aicli-pipe-debug.log，追加）。注意不能写
+// stderr：诊断行结尾的 \n 会把 mintty 光标从输入行推走，导致后续帧的 \r
+// 重绘落到错误行——这是 MobaXterm 混流下"输入行不更新"的直接原因。
 type pipeFrameDiagWriter struct {
 	w io.Writer
 }
 
 func (p *pipeFrameDiagWriter) Write(b []byte) (int, error) {
 	if chatDebugFlagEnabled() {
-		aicliDiagf("[aicli-diag] pipe-frame: %q\n", string(b))
+		pipeDebugLogf("[aicli-diag] pipe-frame: %q\n", string(b))
 	}
 	return p.w.Write(b)
+}
+
+// pipeDebugLog 是 --debug 下管道编辑器诊断的落盘目标（避免 stderr 混流）。
+var pipeDebugLog = func() *os.File {
+	f, err := os.OpenFile("aicli-pipe-debug.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
+}()
+
+func pipeDebugLogf(format string, args ...any) {
+	if pipeDebugLog == nil {
+		return
+	}
+	fmt.Fprintf(pipeDebugLog, format, args...)
 }
 
 // readPipeInteractiveLineFn 是「管道/PTY 终端逐键行编辑器」的入口，测试可替换。
@@ -53,7 +71,12 @@ func readPipeInteractiveLine(ctx context.Context, prompt string) (string, bool, 
 	injected := chatDebugFlagEnabled()
 	if injected {
 		aicliDiagln("[aicli-diag] input path: pipe/PTY interactive line editor (byte-key editor, direct read)")
-		ui.SetInteractiveInputDebugHook(aicliDiagf)
+		aicliDiagln("[aicli-diag] pipe 编辑器诊断将写入 aicli-pipe-debug.log（不写 stderr，避免混流把帧重绘推错行）")
+		// 按键/帧诊断写入日志文件而非 stderr：诊断行结尾的 \n 会把 mintty
+		// 光标从输入行推走，导致帧的 \r 重绘落到错误行（MobaXterm 混流）。
+		ui.SetInteractiveInputDebugHook(func(format string, args ...any) {
+			pipeDebugLogf(format+"\n", args...)
+		})
 		defer ui.SetInteractiveInputDebugHook(nil)
 	}
 	writer := io.Writer(os.Stdout)
