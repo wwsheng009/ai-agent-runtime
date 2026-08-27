@@ -55,7 +55,7 @@ internal/toolkit/
 | multiedit | P3 | 单文件多处编辑；长内容请拆分为多次 multiedit 调用 |
 | todos | P3 | 结构化任务列表；长列表请拆分为多次 todos 调用 |
 | sourcegraph | P3 | 代码搜索；复杂查询请拆分为多次 sourcegraph 调用 |
-| web_search | P3 | 网络搜索；多意图查询请拆分为多次 web_search 调用 |
+| web_search | P3 | 网络搜索（DuckDuckGo→Bing 可配置回退，env `WEB_SEARCH_PROVIDERS`）；多意图查询请拆分为多次 web_search 调用 |
 
 ## 快速开始
 
