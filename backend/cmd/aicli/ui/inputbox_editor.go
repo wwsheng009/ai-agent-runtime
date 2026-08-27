@@ -1861,6 +1861,7 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			return editorKey{}, false, err
 		}
 		if decoded, ok := decodeInteractiveKey(*pending); ok {
+			interactiveInputDebugKey(decoded.key, (*pending)[:decoded.consumed])
 			*pending = (*pending)[decoded.consumed:]
 			return decoded.key, true, nil
 		}
@@ -1887,6 +1888,7 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 		if stdinFile != nil && len(*pending) == 0 {
 			key, ok, _ := consumeSpecialInteractiveKey(int(stdinFile.Fd()))
 			if ok {
+				interactiveInputDebugKey(key, nil)
 				return key, true, nil
 			}
 		}
