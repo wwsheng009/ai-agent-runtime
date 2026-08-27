@@ -502,13 +502,13 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			endPos.col = 0
 		}
 
-		// 补偿模式（非 console 桥接输出，如 MobaXterm/cygwin/mintty）：该终端对
-		// 「同一行的连续快速改写」做绘制合并（探针实测），行内重绘只显示
-		// 最终状态。改用「按键行回显」帧：每帧输出完整一行
-		// 「提示符+内容+\x1b[K+\n」，帧是不同行、不会被合并，内容始终可见。
+		// 补偿模式（非 console 桥接输出，如 MobaXterm/cygwin/mintty）：
+		// 帧主体以 \n 结束，促使按行转发的桥接层放行；帧尾随即回到上一行并
+		// 恢复插入光标。每次按键因此仍重绘同一输入行，不会把 p、pw、pwd 等
+		// 中间状态作为多条“调试历史”留在终端中。
 		if interactiveOutputNeedsTrailingNewline() && resolvedMaxVisibleRows <= 0 &&
 			cursorPos.row == 0 && endPos.row == 0 {
-			frame := buildBridgeFlushFrame(line, cursor, cursorPos.col, prompt)
+			frame := buildBridgeFlushFrame(line, cursorPos.col, prompt)
 			lastRenderedRows = 1
 			lastRenderedHasContent = true
 			lastRenderedTermWidth = termWidth
@@ -1762,19 +1762,23 @@ func runesEqual(a, b []rune) bool {
 	return true
 }
 
-// buildBridgeFlushFrame 构造「桥接输出补偿帧」：MobaXterm/cygwin/mintty 对
-// 「同一行的连续快速改写」做绘制合并（探针实测：250ms 间隔的行内重绘只
-// 显示最终状态），行内编辑观感不可行。改为「按键行回显」：每帧输出一整行
-// 「提示符 + 完整内容 + \x1b[K + \n」——每帧是不同行，不会被合并，任何
-// 合并/批处理下内容都实时可见；退格/删除立即反映为变短的整行。
-func buildBridgeFlushFrame(line []rune, cursor, cursorCol int, promptText string) string {
+// buildBridgeFlushFrame 构造「桥接输出补偿帧」：先完整重写提示符和输入内容，
+// 用 \n 促使按行缓冲的 MobaXterm/cygwin/mintty 桥接层转发，再用
+// 「上移一行 + 回到行首 + 右移到插入列」把光标恢复到同一输入行。这样连续
+// 帧始终覆盖同一行；即使桥接层直到 Enter 才批量执行帧，屏幕也只保留最终
+// 输入状态，不再出现每键一行的 p、pw、pwd 调试式历史。
+func buildBridgeFlushFrame(line []rune, cursorCol int, promptText string) string {
 	var builder strings.Builder
-	builder.Grow(len(line)*2 + len(promptText) + 8)
+	builder.Grow(len(line)*2 + len(promptText) + 32)
 	builder.WriteByte('\r')
 	builder.WriteString(promptText)
 	builder.WriteString(renderInteractiveInputForTerminal(line))
 	builder.WriteString("\x1b[K")
 	builder.WriteByte('\n')
+	builder.WriteString("\x1b[1A\r")
+	if cursorCol > 0 {
+		fmt.Fprintf(&builder, "\x1b[%dC", cursorCol)
+	}
 	return builder.String()
 }
 
