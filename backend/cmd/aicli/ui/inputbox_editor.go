@@ -502,14 +502,13 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			endPos.col = 0
 		}
 
-		// 补偿模式（非 console 桥接输出，如 MobaXterm/cygwin/mintty）：探针实测
-		// 桥接层把 stdout 按 \n 行缓冲，渲染帧必须以 \n 结尾才会实时转发。帧 =
-		// 「\r + 跳过提示符列 + 整行内容 + \x1b[K 清尾 + 光标回插入列 + \n」，
-		// 帧尾用 \x1b[1A 收回输入行、绝对列定位光标。帧尾序列与下一帧内容同批
-		// 到达，mintty 依次执行后光标位置依然正确；每帧整行重写，与历史无关。
+		// 补偿模式（非 console 桥接输出，如 MobaXterm/cygwin/mintty）：该终端对
+		// 「同一行的连续快速改写」做绘制合并（探针实测），行内重绘只显示
+		// 最终状态。改用「按键行回显」帧：每帧输出完整一行
+		// 「提示符+内容+\x1b[K+\n」，帧是不同行、不会被合并，内容始终可见。
 		if interactiveOutputNeedsTrailingNewline() && resolvedMaxVisibleRows <= 0 &&
 			cursorPos.row == 0 && endPos.row == 0 {
-			frame := buildBridgeFlushFrame(line, cursor, promptWidth, cursorPos.col)
+			frame := buildBridgeFlushFrame(line, cursor, cursorPos.col, prompt)
 			lastRenderedRows = 1
 			lastRenderedHasContent = true
 			lastRenderedTermWidth = termWidth
@@ -1763,28 +1762,19 @@ func runesEqual(a, b []rune) bool {
 	return true
 }
 
-// buildBridgeFlushFrame 构造「桥接输出补偿帧」：非 console（MobaXterm/cygwin/
-// mintty）下 stdout 按 \n 行缓冲，渲染帧必须以 \n 结尾才会实时转发。帧 =
-// 「\r + 跳过提示符列 + 整行内容 + \x1b[K 清尾 + 光标回插入列 + \n」，
-// 帧尾用 \x1b[1A 收回输入行、\x1b[G 绝对列定位光标。帧尾序列与下一帧内容
-// 同批到达，终端依次执行后光标位置依然正确；每帧整行重写，与历史无关。
-func buildBridgeFlushFrame(line []rune, cursor, promptWidth, cursorCol int) string {
+// buildBridgeFlushFrame 构造「桥接输出补偿帧」：MobaXterm/cygwin/mintty 对
+// 「同一行的连续快速改写」做绘制合并（探针实测：250ms 间隔的行内重绘只
+// 显示最终状态），行内编辑观感不可行。改为「按键行回显」：每帧输出一整行
+// 「提示符 + 完整内容 + \x1b[K + \n」——每帧是不同行，不会被合并，任何
+// 合并/批处理下内容都实时可见；退格/删除立即反映为变短的整行。
+func buildBridgeFlushFrame(line []rune, cursor, cursorCol int, promptText string) string {
 	var builder strings.Builder
-	builder.Grow(len(line)*2 + 32)
+	builder.Grow(len(line)*2 + len(promptText) + 8)
 	builder.WriteByte('\r')
-	if promptWidth > 0 {
-		fmt.Fprintf(&builder, "\x1b[%dC", promptWidth)
-	}
+	builder.WriteString(promptText)
 	builder.WriteString(renderInteractiveInputForTerminal(line))
 	builder.WriteString("\x1b[K")
-	if cursor < len(line) {
-		fmt.Fprintf(&builder, "\x1b[%dD", len(line)-cursor)
-	}
 	builder.WriteByte('\n')
-	builder.WriteString("\x1b[1A")
-	if cursorCol > 0 {
-		fmt.Fprintf(&builder, "\x1b[%dG", cursorCol)
-	}
 	return builder.String()
 }
 
