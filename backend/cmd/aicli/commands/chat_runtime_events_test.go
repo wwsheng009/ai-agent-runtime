@@ -2825,6 +2825,32 @@ func TestChatRuntimeEvents_DoesNotRestorePromptUntilInteractionReady(t *testing.
 	}, 200*time.Millisecond, 10*time.Millisecond)
 }
 
+func TestChatRuntimeEvents_ProjectsBackgroundPrimaryRunAsNotReady(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	bridge := newChatRuntimeEventBridge(session)
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-background"},
+	})
+	require.Equal(t, chatAgentStagePlanning, coord.AgentStage())
+	require.False(t, coord.IsReady())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-background"},
+	})
+	require.Equal(t, chatAgentStageIdle, coord.AgentStage())
+	require.True(t, coord.IsReady())
+}
+
 func TestChatRuntimeEvents_DoesNotRedrawPromptWhileRunActive(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
 	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{

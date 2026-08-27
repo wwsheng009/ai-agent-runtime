@@ -1901,7 +1901,9 @@ func (c *chatInteractionCoordinator) IsReady() bool {
 }
 
 func (c *chatInteractionCoordinator) isReadyLocked() bool {
-	return c != nil && !c.shutdown && !c.waitingActive && !c.thinkingActive && !c.streamingActive && !c.reasoningActive && !chatAgentStageBlocksReady(c.agentStage)
+	return c != nil && !c.shutdown && interactiveSessionActorReady(c.session) &&
+		!c.waitingActive && !c.thinkingActive && !c.streamingActive &&
+		!c.reasoningActive && !chatAgentStageBlocksReady(c.agentStage)
 }
 
 // chatSurfaceStatusKind 是 surface 状态机的语义家族。状态以结构化 kind 表达，
@@ -2004,6 +2006,12 @@ func (c *chatInteractionCoordinator) currentSurfaceStateLocked() chatSurfaceStat
 		return chatSurfaceStatus{kind: chatSurfaceStatusThinking}
 	}
 	if c.waitingActive {
+		return chatSurfaceStatus{kind: chatSurfaceStatusWaiting}
+	}
+	// A supervision auto-wake is started outside sendMessage, so it does not
+	// toggle the legacy activity flags above. Never project that real actor run
+	// as Ready merely because the foreground coordinator is locally idle.
+	if !interactiveSessionActorReady(c.session) {
 		return chatSurfaceStatus{kind: chatSurfaceStatusWaiting}
 	}
 	return chatSurfaceStatus{kind: chatSurfaceStatusIdle}

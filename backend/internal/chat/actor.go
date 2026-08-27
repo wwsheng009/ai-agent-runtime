@@ -37,6 +37,12 @@ const interruptedRunReplyGrace = 250 * time.Millisecond
 // command loop has already been stopped.
 var ErrSessionActorStopped = errors.New("session actor is stopped")
 
+// ErrSessionBusy is returned when a command that starts a new turn targets an
+// actor that still owns an active turn. Callers that intentionally serialize
+// follow-up work may wait for readiness and retry; control-plane callers can
+// continue returning the error to make concurrent submissions explicit.
+var ErrSessionBusy = errors.New("session is busy")
+
 var errSessionRunSuperseded = errors.New("session run was superseded")
 
 type approvalDetachContextKey struct{}
@@ -1413,7 +1419,7 @@ func (a *SessionActor) ensureReady() error {
 	}
 	switch state.Status {
 	case SessionRunning, SessionWaitingApproval, SessionWaitingInput, SessionRewinding:
-		return fmt.Errorf("session is busy (%s)", state.Status)
+		return fmt.Errorf("%w (%s)", ErrSessionBusy, state.Status)
 	default:
 		return nil
 	}
