@@ -351,6 +351,9 @@ func TestWebSearchAndSourcegraph_RespectSandboxNetworkPolicy(t *testing.T) {
 	})
 
 	webSearch := NewWebSearchTool()
+	// 限制为 DDG 单 provider：确保整条链都被沙箱策略拒绝，不触达
+	// 默认链中未被 deny 的 Bing 端点。
+	webSearch.providers = []webSearchProvider{{name: "duckduckgo", search: webSearch.searchDuckDuckGoProvider}}
 	webSearch.SetSandbox(sandbox)
 	searchResult, err := webSearch.Execute(context.Background(), map[string]interface{}{
 		"query": "sandbox policy",
