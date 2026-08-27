@@ -1,4 +1,4 @@
-.PHONY: build test lint tidy clean aicli install-aicli uninstall-aicli package-server
+.PHONY: build test lint tidy clean aicli aicli-console install-aicli uninstall-aicli package-server
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -6,6 +6,8 @@ FRONTEND_DIR := frontend
 # ---- aicli build / install ----
 BIN_NAME    := aicli
 CMD_PATH    := ./cmd/aicli
+CONSOLE_BIN_NAME := aicli-console
+CONSOLE_CMD_PATH := ./cmd/aicli-console
 VERSION     ?= $(shell cat VERSION 2>/dev/null || echo dev)
 # 在不同平台拿到一个 ISO-8601 的构建时间（GNU date / BusyBox / git bash 都支持 -u）
 BUILD_TIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -18,15 +20,22 @@ build:
 aicli:
 	cd $(BACKEND_DIR) && go build -trimpath -ldflags "$(LDFLAGS)" -o ../$(BIN_NAME) $(CMD_PATH)
 
+# 构建 Windows 原生 Console 启动器。它在 MobaXterm/mintty 等 pipe/PTY
+# 环境中通过 CREATE_NEW_CONSOLE 启动同目录的 aicli.exe。
+aicli-console:
+	cd $(BACKEND_DIR) && go build -trimpath -ldflags "-s -w" -o ../$(CONSOLE_BIN_NAME) $(CONSOLE_CMD_PATH)
+
 # 安装 aicli 到 $GOBIN（默认 $(go env GOPATH)/bin）
 # 该目录通常已在用户 PATH 中，跨平台一致；可通过 GOBIN=/your/dir make install-aicli 覆盖
 install-aicli:
 	cd $(BACKEND_DIR) && go install -trimpath -ldflags "$(LDFLAGS)" $(CMD_PATH)
+	cd $(BACKEND_DIR) && go install -trimpath -ldflags "-s -w" $(CONSOLE_CMD_PATH)
 	@echo "Installed $(BIN_NAME) to $$(go env GOBIN 2>/dev/null || echo $$(go env GOPATH)/bin)"
 
 uninstall-aicli:
 	@dir=$$(go env GOBIN); [ -z "$$dir" ] && dir=$$(go env GOPATH)/bin; \
-	  rm -f "$$dir/$(BIN_NAME)" "$$dir/$(BIN_NAME).exe" && \
+	  rm -f "$$dir/$(BIN_NAME)" "$$dir/$(BIN_NAME).exe" \
+	    "$$dir/$(CONSOLE_BIN_NAME)" "$$dir/$(CONSOLE_BIN_NAME).exe" && \
 	  echo "Removed $(BIN_NAME) from $$dir"
 
 # 打包 runtime-server（含内嵌前端）到 dist/；版本号复用 VERSION 文件（v0.4.x）
@@ -44,7 +53,7 @@ tidy:
 
 clean:
 	cd $(BACKEND_DIR) && go clean ./...
-	rm -f $(BIN_NAME) $(BIN_NAME).exe
+	rm -f $(BIN_NAME) $(BIN_NAME).exe $(CONSOLE_BIN_NAME) $(CONSOLE_BIN_NAME).exe
 
 frontend-install:
 	cd $(FRONTEND_DIR) && pnpm install
