@@ -17,6 +17,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 // StoreConfig 控制 artifact store 的持久化方式。
@@ -166,14 +167,21 @@ func (s *Store) ensure() error {
 			s.openErr = err
 			return
 		}
-		db, err := sql.Open("sqlite3", s.dsn)
+		var db *sql.DB
+		var err error
+		if isArtifactSQLiteMemoryDSN(s.dsn) {
+			db, err = sql.Open("sqlite3", s.dsn)
+			if err == nil {
+				db.SetMaxOpenConns(1)
+				db.SetMaxIdleConns(1)
+			}
+		} else {
+			// 共享文件库统一并发基线：WAL + busy_timeout + 单连接池 + 锁重试。
+			db, err = sqliteutil.OpenFile(s.dsn, true)
+		}
 		if err != nil {
 			s.openErr = fmt.Errorf("open artifact db: %w", err)
 			return
-		}
-		if isArtifactSQLiteMemoryDSN(s.dsn) {
-			db.SetMaxOpenConns(1)
-			db.SetMaxIdleConns(1)
 		}
 		bootstrap := &Store{db: db}
 		if err := bootstrap.init(context.Background()); err != nil {

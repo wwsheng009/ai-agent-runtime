@@ -148,10 +148,9 @@ func (s *SQLiteGlobalMailboxRegistryStore) ensure() error {
 			s.openErr = fmt.Errorf("open agent control mailbox registry db: %w", err)
 			return
 		}
-		if isGlobalMailboxMemoryDSN(s.dsn) {
-			db.SetMaxOpenConns(1)
-			db.SetMaxIdleConns(1)
-		}
+		// 单写者连接池（含文件模式）：避免同库多连接自锁。
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 		if err := configureAgentControlSQLiteDB(context.Background(), db, s.dsn); err != nil {
 			_ = db.Close()
 			s.openErr = err

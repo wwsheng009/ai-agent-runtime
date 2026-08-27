@@ -1873,13 +1873,38 @@ func resolveLocalChatSubagentBatchStorePath(session *ChatSession, runtimeConfig 
 	if session != nil && session.Ephemeral {
 		return ""
 	}
+	// 按会话分文件：subagent batch 数据是会话局部的（BatchFilter 按
+	// ParentSessionID 过滤），多 aicli 实例同时跑不同会话时互不争锁；
+	// 同一会话的恢复/续跑仍命中同一文件。
+	if session != nil && strings.TrimSpace(currentRuntimeSessionID(session)) != "" {
+		return filepath.Join(session.SessionDir, "runtime", "subagent_batches",
+			sanitizeLocalFileName(currentRuntimeSessionID(session))+".sqlite")
+	}
 	if session != nil && strings.TrimSpace(session.SessionDir) != "" {
-		return filepath.Join(session.SessionDir, "runtime", "subagent_batches.sqlite")
+		return filepath.Join(session.SessionDir, "runtime", "subagent_batches", "default.sqlite")
 	}
 	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath) != "" {
-		return filepath.Join(filepath.Dir(strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath)), "subagent_batches.sqlite")
+		return filepath.Join(filepath.Dir(strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath)), "subagent_batches", "default.sqlite")
 	}
 	return ""
+}
+
+// sanitizeLocalFileName 把会话 ID 规整为安全的文件名字段
+// （保留字母数字与 - _ ，其余字符替换为 _ ）。
+func sanitizeLocalFileName(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
 }
 
 // resolveLocalChatSupervisionDataDir returns a per-session durable directory

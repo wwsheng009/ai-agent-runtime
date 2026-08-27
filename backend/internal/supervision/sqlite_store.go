@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
@@ -116,14 +117,22 @@ func (s *SQLiteSupervisionStore) ensure() error {
 				return
 			}
 		}
-		db, err := sql.Open("sqlite3", s.dsn)
+		db, err := func() (*sql.DB, error) {
+			if supervisionMemoryDSN(s.dsn) {
+				db, err := sql.Open("sqlite3", s.dsn)
+				if err != nil {
+					return nil, err
+				}
+				db.SetMaxOpenConns(1)
+				db.SetMaxIdleConns(1)
+				return db, nil
+			}
+			// 共享文件库统一并发基线：WAL + busy_timeout + 单连接池 + 锁重试。
+			return sqliteutil.OpenFile(s.dsn, true)
+		}()
 		if err != nil {
 			s.openErr = fmt.Errorf("open supervision db: %w", err)
 			return
-		}
-		if supervisionMemoryDSN(s.dsn) {
-			db.SetMaxOpenConns(1)
-			db.SetMaxIdleConns(1)
 		}
 		s.openMu.Lock()
 		if s.closed {

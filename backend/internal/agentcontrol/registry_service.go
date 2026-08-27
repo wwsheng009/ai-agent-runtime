@@ -184,10 +184,9 @@ func NewRegistryService(ctx context.Context, cfg RegistryServiceConfig) (*Regist
 			if err != nil {
 				return fmt.Errorf("open agent control registry db: %w", err)
 			}
-			if isGlobalMailboxMemoryDSN(mailboxStore.dsn) {
-				db.SetMaxOpenConns(1)
-				db.SetMaxIdleConns(1)
-			}
+			// 单写者连接池（含文件模式）：避免同库多连接自锁。
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
 			if err := configureAgentControlSQLiteDB(context.Background(), db, mailboxStore.dsn); err != nil {
 				_ = db.Close()
 				return err
