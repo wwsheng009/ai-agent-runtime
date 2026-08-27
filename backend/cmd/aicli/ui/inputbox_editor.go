@@ -48,6 +48,10 @@ const (
 	clearToEndSequence            = "\x1b[J"
 	escapeSequenceWait            = 30 * time.Millisecond
 	trailingLineFeedDrainWait     = 12 * time.Millisecond
+	// nonConsoleForcedReadTicks 是非控制台 stdin 空转强制直接读的阈值：
+	// nextInteractiveKey 每轮空转约 50ms，6 次约 300ms 后切换为阻塞直读，
+	// 用于 PeekNamedPipe 在 cygwin 桥接管道上永远报「无数据」的场景。
+	nonConsoleForcedReadTicks     = 6
 	bracketedPasteDisplayIdleWait = 60 * time.Millisecond
 )
 
@@ -1028,6 +1032,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		draft = append(draft[:0], line...)
 	}
 
+	// 非控制台 stdin（管道/字符设备，如 MobaXterm 的 cygwin 桥接）下，
+	// readiness 轮询（PeekNamedPipe）可能永远报告「无数据」，导致
+	// nextInteractiveKey 空转读不到任何按键。空转超过阈值后直接阻塞读
+	// 字节流（字节到达即唤醒，读到的字节进 pending 供解码）。
+	var emptyReadTicks int
+
 	for {
 		if err := ctx.Err(); err != nil {
 			flushPasteBurstBeforeModifiedInput()
@@ -1039,14 +1049,31 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if err := waitForBracketedPasteDisplay(); err != nil {
 			return "", err
 		}
+		if stdinFile != nil && !interactiveStdinNeedsPolledReadiness() && emptyReadTicks >= nonConsoleForcedReadTicks {
+			var buf [64]byte
+			n, err := reader.Read(buf[:])
+			if n > 0 {
+				pending = append(pending, buf[:n]...)
+				emptyReadTicks = 0
+				continue
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				flushPasteBurstBeforeModifiedInput()
+				return "", err
+			}
+			// EOF 或未读到：交回 nextInteractiveKey 的轮询路径
+			// （EOF 会在内部转换为 editorKeyEOF）。
+		}
 		key, ok, readErr := nextInteractiveKey(ctx, reader, &pending, stdinFile)
 		if readErr != nil {
 			flushPasteBurstBeforeModifiedInput()
 			return "", readErr
 		}
 		if !ok || key.kind == editorKeyIgnore {
+			emptyReadTicks++
 			continue
 		}
+		emptyReadTicks = 0
 		if key.kind == editorKeyFocusGained {
 			SetTerminalFocused(true)
 			continue
@@ -1866,7 +1893,10 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			return decoded.key, true, nil
 		}
 		if len(*pending) == 1 && (*pending)[0] == '\x1b' {
-			if stdinFile == nil {
+			if stdinFile == nil || !interactiveStdinNeedsPolledReadiness() {
+				// 非控制台（管道/PTY）下无法可靠地轮询 ESC 后的后续字节：
+				// 方向键序列（ESC[C 等）整串到达时不会停在此处，单字节 ESC
+				// 直接按取消弹窗处理。
 				*pending = (*pending)[:0]
 				return editorKey{kind: editorKeyCancelPopup}, true, nil
 			}
@@ -1893,7 +1923,7 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			}
 		}
 
-		if stdinFile != nil {
+		if stdinFile != nil && interactiveStdinNeedsPolledReadiness() {
 			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), 50*time.Millisecond)
 			if err != nil {
 				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
@@ -1908,6 +1938,31 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			}
 			if !ready {
 				continue
+			}
+		}
+
+		if stdinFile != nil && !interactiveStdinNeedsPolledReadiness() {
+			// 非控制台（管道/PTY，如 MobaXterm cygwin 桥接、SSH 管道）：
+			// readiness 轮询（PeekNamedPipe）在 cygwin 桥接管道上可能永远
+			// 报告「无数据」或 unsupported，导致空转读不到键。peek 可用时
+			// 照常读；peek 不可用/无数据则返回 !ok，由 main loop 空转计数，
+			// 超阈值后直接阻塞读字节流。
+			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), 50*time.Millisecond)
+			if err != nil {
+				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					if cancelable {
+						select {
+						case <-ctx.Done():
+							return editorKey{}, false, ctx.Err()
+						case <-time.After(50 * time.Millisecond):
+						}
+					}
+					return editorKey{}, false, nil
+				}
+				return editorKey{}, false, err
+			}
+			if !ready {
+				return editorKey{}, false, nil
 			}
 		}
 

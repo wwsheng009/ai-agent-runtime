@@ -1713,3 +1713,51 @@ func TestReadTransientSecretPrompt_DoesNotAddToHistory(t *testing.T) {
 		t.Fatalf("expected existing history to remain unchanged, got %q ok=%v", stored, ok)
 	}
 }
+
+// TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty 模拟 MobaXterm 的
+// cygwin 桥接管道：PeekNamedPipe 永远报告「无数据」（waitForInteractive
+// InputReady 恒返回 false,nil），但字节实际已在管道里。回归验证：编辑器
+// 空转超过 nonConsoleForcedReadTicks 后必须切换为直接阻塞读，仍能读到键。
+func TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	oldWait := waitForInteractiveInputReady
+	waitForInteractiveInputReady = func(int, time.Duration) (bool, error) {
+		return false, nil
+	}
+	defer func() {
+		waitForInteractiveInputReady = oldWait
+	}()
+
+	if _, err := writer.WriteString("hello cygwin\n"); err != nil {
+		t.Fatalf("seed input: %v", err)
+	}
+
+	var output bytes.Buffer
+	type lineResult struct {
+		line string
+		err  error
+	}
+	result := make(chan lineResult, 1)
+	go func() {
+		line, err := readInteractiveLine(reader, &output, UserPromptText(0), nil, nil)
+		result <- lineResult{line, err}
+	}()
+
+	select {
+	case r := <-result:
+		if r.err != nil {
+			t.Fatalf("readInteractiveLine: %v", r.err)
+		}
+		if r.line != "hello cygwin" {
+			t.Fatalf("expected 'hello cygwin', got %q", r.line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("editor starved: peek always empty and forced direct read never engaged")
+	}
+}
