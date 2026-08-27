@@ -41,6 +41,9 @@ func platformClipboardText() (string, error) {
 // 和管道都可靠，维持轮询可取消语义不变。
 func interactiveStdinNeedsPolledReadiness() bool { return true }
 
+// Unix 终端输出直接走 pty（无 MobaXterm 式按行桥接缓冲），无需帧尾 \n 补偿。
+func interactiveOutputNeedsTrailingNewline() bool { return false }
+
 func platformConsumeSpecialInteractiveKey(int) (editorKey, bool, error) {
 	return editorKey{}, false, nil
 }

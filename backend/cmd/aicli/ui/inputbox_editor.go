@@ -491,6 +491,37 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		viewportStartRow = viewport.startRow
 		cursorPos := viewport.cursor
 
+		endPos := interactiveInputVisualPosition(line, len(line), promptWidth, termWidth)
+		endPos.row -= viewport.startRow
+		if endPos.row >= viewport.rows {
+			endPos.row = viewport.rows - 1
+			endPos.col = termWidth - 1
+		}
+		if endPos.row < 0 {
+			endPos.row = 0
+			endPos.col = 0
+		}
+
+		// 补偿模式（非 console 桥接输出，如 MobaXterm/cygwin/mintty）：探针实测
+		// 桥接层把 stdout 按 \n 行缓冲，渲染帧必须以 \n 结尾才会实时转发。帧 =
+		// 「\r + 跳过提示符列 + 整行内容 + \x1b[K 清尾 + 光标回插入列 + \n」，
+		// 帧尾用 \x1b[1A 收回输入行、绝对列定位光标。帧尾序列与下一帧内容同批
+		// 到达，mintty 依次执行后光标位置依然正确；每帧整行重写，与历史无关。
+		if interactiveOutputNeedsTrailingNewline() && resolvedMaxVisibleRows <= 0 &&
+			cursorPos.row == 0 && endPos.row == 0 {
+			frame := buildBridgeFlushFrame(line, cursor, promptWidth, cursorPos.col)
+			lastRenderedRows = 1
+			lastRenderedHasContent = true
+			lastRenderedTermWidth = termWidth
+			lastRenderedPromptWidth = promptWidth
+			lastRenderedViewportStart = viewport.startRow
+			lastRenderedLine = append(lastRenderedLine[:0], line...)
+			lastCursorRow = 0
+			lastCursorCol = cursorPos.col
+			writeEditorText(frame, renderBefore)
+			return
+		}
+
 		// Fast path: 内容、终端宽度、提示符宽度都未变化时，只发光标增量。
 		// 这能让方向键 / Home / End / 历史导航等"光标-only"操作跳过整段
 		// `\x1b[K` + 重写流程，长粘贴下也不会再有逐行闪烁。
@@ -553,16 +584,6 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			builder.WriteString(renderInteractiveInputViewport(prompt, line, termWidth, viewport.startRow, viewport.rows))
 		} else {
 			builder.WriteString(renderInteractiveInputForTerminal(line))
-		}
-		endPos := interactiveInputVisualPosition(line, len(line), promptWidth, termWidth)
-		endPos.row -= viewport.startRow
-		if endPos.row >= viewport.rows {
-			endPos.row = viewport.rows - 1
-			endPos.col = termWidth - 1
-		}
-		if endPos.row < 0 {
-			endPos.row = 0
-			endPos.col = 0
 		}
 		if cursor < len(line) {
 			if rowsUp := endPos.row - cursorPos.row; rowsUp > 0 {
@@ -1740,6 +1761,31 @@ func runesEqual(a, b []rune) bool {
 		}
 	}
 	return true
+}
+
+// buildBridgeFlushFrame 构造「桥接输出补偿帧」：非 console（MobaXterm/cygwin/
+// mintty）下 stdout 按 \n 行缓冲，渲染帧必须以 \n 结尾才会实时转发。帧 =
+// 「\r + 跳过提示符列 + 整行内容 + \x1b[K 清尾 + 光标回插入列 + \n」，
+// 帧尾用 \x1b[1A 收回输入行、\x1b[G 绝对列定位光标。帧尾序列与下一帧内容
+// 同批到达，终端依次执行后光标位置依然正确；每帧整行重写，与历史无关。
+func buildBridgeFlushFrame(line []rune, cursor, promptWidth, cursorCol int) string {
+	var builder strings.Builder
+	builder.Grow(len(line)*2 + 32)
+	builder.WriteByte('\r')
+	if promptWidth > 0 {
+		fmt.Fprintf(&builder, "\x1b[%dC", promptWidth)
+	}
+	builder.WriteString(renderInteractiveInputForTerminal(line))
+	builder.WriteString("\x1b[K")
+	if cursor < len(line) {
+		fmt.Fprintf(&builder, "\x1b[%dD", len(line)-cursor)
+	}
+	builder.WriteByte('\n')
+	builder.WriteString("\x1b[1A")
+	if cursorCol > 0 {
+		fmt.Fprintf(&builder, "\x1b[%dG", cursorCol)
+	}
+	return builder.String()
 }
 
 func renderInteractiveInputForTerminal(line []rune) string {

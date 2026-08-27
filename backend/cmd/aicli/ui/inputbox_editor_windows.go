@@ -65,6 +65,15 @@ func interactiveStdinNeedsPolledReadiness() bool {
 	return windows.GetConsoleMode(windows.Handle(os.Stdin.Fd()), &mode) == nil
 }
 
+// interactiveOutputNeedsTrailingNewline 判断输出设备是否需要「帧尾 \n」补偿。
+// MobaXterm/cygwin/mintty 等桥接终端把 stdout 按 \n 行缓冲（实测探针：无 \n
+// 的字节流会积压到下一个 \n 才显示），交互渲染帧必须以 \n 结尾才会实时可见。
+// 真 conhost（GetConsoleMode 成功）直接写屏幕，无需补偿；winpty/管道下补
+// 偿同样安全（序列被逐字节转发，语义不变）。
+func interactiveOutputNeedsTrailingNewline() bool {
+	return !interactiveStdinNeedsPolledReadiness()
+}
+
 func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, error) {
 	if timeout < 0 {
 		timeout = 0

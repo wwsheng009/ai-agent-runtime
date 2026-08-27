@@ -31,7 +31,7 @@ func TestReadPipeInteractiveLineFromPipe(t *testing.T) {
 	if !pipeConsoleLineEditorSupported() {
 		t.Skipf("stdout 不是管道/字符设备（%v），跳过", os.Stdout)
 	}
-	line, ok, err := readPipeInteractiveLineFn(context.Background())
+	line, ok, err := readPipeInteractiveLineFn(context.Background(), "")
 	if err != nil {
 		t.Fatalf("readPipeInteractiveLineFn: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPipeInteractiveDebugHookReceivesKeys(t *testing.T) {
 	})
 	defer ui.SetInteractiveInputDebugHook(nil)
 
-	line, ok, err := readPipeInteractiveLine(context.Background())
+	line, ok, err := readPipeInteractiveLine(context.Background(), "")
 	if err != nil {
 		t.Fatalf("readPipeInteractiveLine: %v", err)
 	}
