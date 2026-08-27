@@ -39,10 +39,10 @@ type webSearchProvider struct {
 
 const (
 	// webSearchProvidersEnv 逗号分隔、按优先级排列的搜索引擎列表，取值
-	// duckduckgo 或 bing。默认 "duckduckgo,bing"：DDG 网络不可达时快速
-	// 失败并自动回退 Bing（内网/防火墙场景），DDG 可达环境行为不变。
-	webSearchProvidersEnv      = "WEB_SEARCH_PROVIDERS"
-	defaultWebSearchProviders  = "duckduckgo,bing"
+	// duckduckgo 或 bing。默认 "bing,duckduckgo"：Bing 优先（内网/防火墙
+	// 场景 cn.bing.com 可达），Bing 不可达时自动回退 DDG。
+	webSearchProvidersEnv     = "WEB_SEARCH_PROVIDERS"
+	defaultWebSearchProviders = "bing,duckduckgo"
 	bingSearchURLCN            = "https://cn.bing.com/search?q=%s&count=%d"
 	bingSearchURLWWW           = "https://www.bing.com/search?q=%s&count=%d"
 	webSearchConnectTimeout    = 5 * time.Second

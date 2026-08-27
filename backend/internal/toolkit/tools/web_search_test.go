@@ -43,6 +43,14 @@ func TestWebSearchTool_EmptySearchMarksEmptySuccess(t *testing.T) {
 					Header:     make(http.Header),
 					Request:    req,
 				}, nil
+			case strings.Contains(host, "bing.com"):
+				// 默认链 Bing 先行：空结果也是成功，不是传输失败。
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`<html><body></body></html>`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
 			default:
 				t.Fatalf("unexpected request host/path: %s %s", host, path)
 				return nil, nil
@@ -351,7 +359,7 @@ func TestWebSearchTool_BingParsesResultsAndDecodesRedirect(t *testing.T) {
 }
 
 func TestWebSearchTool_ProviderChainFallsBackToBing(t *testing.T) {
-	// 默认链 duckduckgo,bing：DDG 网络不可达 → 快速回退 Bing。
+	// 默认链 bing,duckduckgo：Bing 优先，Bing 不可达时回退 DDG。
 	tool := NewWebSearchTool()
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -443,11 +451,11 @@ func TestWebSearchTool_BingCNFailsFallsBackToWWW(t *testing.T) {
 
 func TestWebSearchTool_AllProvidersFailStampsAttempts(t *testing.T) {
 	// 整条链失败时，失败信息应记录所有尝试过的 provider 及各自错误，
-	// 并按链顺序取第一个可分类的错误（此处 DDG connectex → network）。
+	// 并按链顺序取第一个可分类的错误（此处 Bing connectex → network）。
 	tool := NewWebSearchTool()
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Host, "duckduckgo.com") {
+			if strings.Contains(req.URL.Host, "bing.com") {
 				return nil, &url.Error{
 					Op:  "Get",
 					URL: req.URL.String(),
@@ -476,8 +484,8 @@ func TestWebSearchTool_AllProvidersFailStampsAttempts(t *testing.T) {
 		t.Fatalf("error_code=%q want NETWORK_UNAVAILABLE meta=%#v", code, result.Metadata)
 	}
 	attempted, _ := result.Metadata["providers_attempted"].([]string)
-	if len(attempted) != 2 || attempted[0] != "duckduckgo" || attempted[1] != "bing" {
-		t.Fatalf("expected providers_attempted=[duckduckgo bing], got %#v", result.Metadata["providers_attempted"])
+	if len(attempted) != 2 || attempted[0] != "bing" || attempted[1] != "duckduckgo" {
+		t.Fatalf("expected providers_attempted=[bing duckduckgo], got %#v", result.Metadata["providers_attempted"])
 	}
 	perProvider, _ := result.Metadata["provider_errors"].(map[string]string)
 	if perProvider["duckduckgo"] == "" || perProvider["bing"] == "" {
@@ -543,8 +551,8 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 		for _, p := range tool.providers {
 			names = append(names, p.name)
 		}
-		if strings.Join(names, ",") != "duckduckgo,bing" {
-			t.Fatalf("default providers = %v, want [duckduckgo bing]", names)
+		if strings.Join(names, ",") != "bing,duckduckgo" {
+			t.Fatalf("default providers = %v, want [bing duckduckgo]", names)
 		}
 	})
 
@@ -559,7 +567,7 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 	t.Run("invalid env falls back to default", func(t *testing.T) {
 		t.Setenv(webSearchProvidersEnv, "google")
 		tool := NewWebSearchTool()
-		if len(tool.providers) != 2 || tool.providers[0].name != "duckduckgo" {
+		if len(tool.providers) != 2 || tool.providers[0].name != "bing" {
 			t.Fatalf("invalid env providers = %v, want default chain", tool.providers)
 		}
 	})
