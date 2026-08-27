@@ -26,6 +26,12 @@ func readPipeInteractiveLine(ctx context.Context) (string, bool, error) {
 	if !pipeConsoleLineEditorSupported() {
 		return "", false, nil
 	}
+	injected := chatDebugFlagEnabled()
+	if injected {
+		aicliDiagln("[aicli-diag] input path: pipe/PTY interactive line editor (byte-key editor)")
+		ui.SetInteractiveInputDebugHook(aicliDiagf)
+		defer ui.SetInteractiveInputDebugHook(nil)
+	}
 	line, err := ui.ReadInteractiveLineContext(ctx, os.Stdin, os.Stdout)
 	if err != nil {
 		return "", false, err
