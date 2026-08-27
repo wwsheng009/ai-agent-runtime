@@ -24,6 +24,8 @@ type chatCommandOptions struct {
 	FastFlag               bool
 	FastChanged            bool
 	NoInteractive          bool
+	CompatMode             bool   // --compat-mode：强制无 ANSI 降级路径 + 传统控制台行编辑器
+	Debug                  bool   // --debug：输出传统控制台行编辑器诊断信息到 stderr
 	Message                string // resolved startup prompt; --message is an alias of --prompt
 	ImagePaths             []string
 	LogDir                 string
@@ -112,6 +114,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		fastChanged = cmd.Flags().Changed("fast")
 	}
 	noInteractive, _ := cmd.Flags().GetBool("no-interactive")
+	compatMode, _ := cmd.Flags().GetBool("compat-mode")
+	debugMode, _ := cmd.Flags().GetBool("debug")
 	message, err := resolveChatInitialPrompt(cmd)
 	if err != nil {
 		return nil, err
@@ -205,6 +209,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		FastFlag:               fastFlag,
 		FastChanged:            fastChanged,
 		NoInteractive:          noInteractive,
+		CompatMode:             compatMode,
+		Debug:                  debugMode,
 		Message:                message,
 		ImagePaths:             imagePaths,
 		LogDir:                 logDir,

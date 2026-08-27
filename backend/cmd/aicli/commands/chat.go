@@ -456,6 +456,8 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		activeChatStartupTiming = nil
 	}()
 	startupTiming.mark("begin")
+	// 启动挂起 watchdog：90s 未到 ready 自动 dump goroutine 栈。
+	armChatStartupHangWatchdog()
 
 	opts, err := parseChatCommandOptions(cmd, cfg)
 	if err != nil {
@@ -1183,8 +1185,14 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		if shouldUseInteractiveLineEditor(session) {
 			// 交互 TTY 场景使用逐键 line editor，不再走按行队列。
 			session.InputQueue = nil
+			if chatDebugFlagEnabled() {
+				_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] input path: interactive line editor (TUI composer)")
+			}
 		} else {
 			ensureChatInputQueue(session)
+			if chatDebugFlagEnabled() {
+				_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] input path: line-mode queue (pump/legacy editor)")
+			}
 		}
 	}
 
