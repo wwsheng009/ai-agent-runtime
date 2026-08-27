@@ -45,9 +45,21 @@ var readLegacyConsoleLineFn = readLegacyConsoleLine
 // 降级模式优先走传统控制台行编辑器；当 stdin 不是控制台（管道/重定向/测试
 // 注入的 reader）或编辑器不可用（GetConsoleMode 失败）时回退到 buffered
 // 读取，行为与旧版完全一致。
+//
+// 中间插入的管道/PTY 分支（readPipeInteractiveLineFn）专门处理「stdin 是
+// 管道或字符设备但不是真实控制台」的场景（MobaXterm 本地 shell、cygwin/
+// mintty、winpty、SSH 管道等）：此时 legacy 控制台编辑器读不到按键记录，
+// 而 buffered 回退会让 backspace/Delete/方向键的字节序列原样进入输入行；
+// 改用 ui 包的逐键编辑器（ANSI 重绘 + 完整按键解析）。
 func readChatSessionLine(ctx context.Context, reader *bufio.Reader) (string, error) {
 	if chatLegacyConsoleInputEnabled() {
 		if line, ok, err := readLegacyConsoleLineFn(ctx); ok {
+			if err != nil {
+				return "", err
+			}
+			return line, nil
+		}
+		if line, ok, err := readPipeInteractiveLineFn(ctx); ok {
 			if err != nil {
 				return "", err
 			}
