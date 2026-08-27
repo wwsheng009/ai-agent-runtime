@@ -18,8 +18,19 @@ import (
 // rune 缓冲与光标，完全绕过 conhost 的行编辑。
 var chatLegacyConsoleInputMode atomic.Bool
 
+// chatDebugMode 控制诊断输出（[aicli-diag] 前缀），仅 --debug 时打印。
+var chatDebugMode atomic.Bool
+
 func setChatLegacyConsoleInputMode(v bool) {
 	chatLegacyConsoleInputMode.Store(v)
+}
+
+func setChatDebugFlag(v bool) {
+	chatDebugMode.Store(v)
+}
+
+func chatDebugFlagEnabled() bool {
+	return chatDebugMode.Load()
 }
 
 func chatLegacyConsoleInputEnabled() bool {

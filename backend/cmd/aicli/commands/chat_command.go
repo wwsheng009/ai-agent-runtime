@@ -88,6 +88,8 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolP("stream", "s", false, "使用流式输出")
 	cmd.Flags().Bool("fast", false, "启用 Codex Fast 模式（service_tier=priority；仅 protocol=codex 生效）")
 	cmd.Flags().Bool("no-interactive", false, "非交互模式（单次请求）")
+	cmd.Flags().Bool("compat-mode", false, "强制兼容模式：不走 TUI，使用传统控制台行编辑器（无 ANSI 降级路径；win7 等终端 backspace/delete 输入异常时使用）")
+	cmd.Flags().Bool("debug", false, "输出诊断调试信息到 stderr（传统控制台行编辑器重绘/按键等）")
 	cmd.Flags().String("output", "", "非交互模式输出格式（text|json）")
 	cmd.Flags().BoolP("json", "j", false, "兼容选项：等价于 --output json")
 	cmd.Flags().String("prompt", "", "启动后自动提交的消息（交互模式提交后继续留在界面）")

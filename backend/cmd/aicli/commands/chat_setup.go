@@ -60,8 +60,12 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		keyHandler *ui.KeyHandler
 		surface    *ui.FixedBottomSurface
 	)
-	interactiveUI := shouldInitializeChatInteractiveUI(opts)
-	if shouldInitializeChatKeyHandler(opts) {
+	// --compat-mode 强制走无 ANSI 降级路径：跳过 TUI/keyHandler 初始化，
+	// 直接启用传统控制台行编辑器（win7 等终端输入异常时手动指定）。
+	compatMode := opts != nil && opts.CompatMode
+	setChatDebugFlag(opts.Debug)
+	interactiveUI := shouldInitializeChatInteractiveUI(opts) && !compatMode
+	if shouldInitializeChatKeyHandler(opts) && !compatMode {
 		keyHandler = ui.NewKeyHandler()
 		keyHandler.Start()
 	}
@@ -74,7 +78,15 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		// but an interactive production session must never let it emit even the
 		// initial legacy frame. TerminalSession becomes the only writer below.
 		surface.SetPhysicalWritesEnabled(false)
-		if !surface.Enable() {
+		enabled := surface.Enable()
+		if chatDebugFlagEnabled() {
+			_, _ = fmt.Fprintf(os.Stderr, "[aicli-diag] surface.Enable() = %v\n", enabled)
+		}
+		if !enabled {
+			if chatDebugFlagEnabled() {
+				_, _ = fmt.Fprintln(os.Stderr,
+					"[aicli-diag] surface.Enable() FAILED -> plain interactive mode + legacy console line editor")
+			}
 			// A TTY alone is insufficient for the owned renderer: the primary
 			// transaction requires ANSI plus DECSTBM scroll-region support and a
 			// confirmed geometry source. Native Windows 7 consoles cannot enable
@@ -92,6 +104,11 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 			}
 			_, _ = fmt.Fprintln(newChatSystemOutputWriter(os.Stderr),
 				"Warning: terminal does not support ANSI scroll-region rendering; using plain interactive mode")
+			// 诊断探针：不经包装 writer，直接打到 stderr，仅 --debug 时输出。
+			if opts.Debug {
+				_, _ = fmt.Fprintln(os.Stderr,
+					"[aicli-diag] no ANSI -> plain interactive mode + legacy console line editor")
+			}
 			layout = nil
 			inputBox = nil
 			keyHandler = nil
@@ -101,6 +118,19 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 			// （中文退格删不动）且不支持 Delete 键，改用传统控制台行编辑器
 			// （ReadConsoleInputW + WriteConsoleW）自绘输入行。
 			setChatLegacyConsoleInputMode(true)
+		}
+	}
+	if compatMode {
+		// 强制兼容模式：即使终端支持 ANSI 也走传统行编辑。
+		layout = nil
+		inputBox = nil
+		keyHandler = nil
+		surface = nil
+		interactiveUI = false
+		setChatLegacyConsoleInputMode(true)
+		if opts.Debug {
+			_, _ = fmt.Fprintln(os.Stderr,
+				"[aicli-diag] compat mode: plain interactive mode + legacy console line editor")
 		}
 	}
 	if opts.NoInteractive || opts.OutputFormat == "json" {

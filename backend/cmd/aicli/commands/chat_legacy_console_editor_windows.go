@@ -4,6 +4,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"syscall"
 	"time"
@@ -46,6 +47,7 @@ const (
 
 var procReadConsoleInputW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
 var procWriteConsoleW = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteConsoleW")
+var procWriteConsoleOutputCharacterW = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteConsoleOutputCharacterW")
 var procGetConsoleScreenBufferInfo = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleScreenBufferInfo")
 var procSetConsoleCursorPosition = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCursorPosition")
 
@@ -71,6 +73,12 @@ type legacyConsoleLineEditor struct {
 	inputMode uint32
 	buf       []rune
 	cur       int
+
+	// 重绘锚点：x0 = 编辑文本区起始列（首次 redraw 时锁定，不随每次
+	// 重绘漂移）；y = 编辑行所在行（跟随输出滚动刷新）。
+	anchored bool
+	x0       int
+	y0       int16
 }
 
 // readLegacyConsoleLine 在降级模式下读取一行交互输入。
@@ -92,6 +100,9 @@ func readLegacyConsoleLine(ctx context.Context) (line string, ok bool, err error
 		next := ed.inputMode &^ (windows.ENABLE_ECHO_INPUT | windows.ENABLE_LINE_INPUT)
 		if err := windows.SetConsoleMode(in, next); err == nil {
 			defer windows.SetConsoleMode(in, ed.inputMode)
+			if chatDebugFlagEnabled() {
+				_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] legacy console line editor active")
+			}
 			text, err := ed.readLine(ctx)
 			return text, true, err
 		}
@@ -156,12 +167,23 @@ func (ed *legacyConsoleLineEditor) dispatch(recs []consoleInputRecord) bool {
 		if key.KeyDown == 0 {
 			continue
 		}
+		// 诊断探针：打印 backspace/方向键/delete 的实际 VK 码（仅 --debug）。
+		switch key.VirtualKeyCode {
+		case 0x08, 0x25, 0x2E, 0x2D, 0x7F:
+			if chatDebugFlagEnabled() {
+				_, _ = fmt.Fprintf(os.Stderr, "[aicli-diag] key VK=0x%02X uni=%#04x rep=%d\n",
+					key.VirtualKeyCode, key.UnicodeChar, key.RepeatCount)
+			}
+		}
 		repeat := int(key.RepeatCount)
 		if repeat < 1 {
 			repeat = 1
 		}
 		switch key.VirtualKeyCode {
 		case vkReturn:
+			// 提交：结束编辑行（\r\n），保证后续协调器输出/LLM 响应从
+			// 新行开始，不会接在用户输入同一行。
+			ed.advanceLine()
 			return true
 		case vkBack:
 			for j := 0; j < repeat && ed.cur > 0; j++ {
@@ -230,25 +252,92 @@ func isEditableConsoleRune(ch rune) bool {
 	return true
 }
 
-// redraw 以当前光标位置为基准重绘文本区并定位光标。
+// redraw 以自持锚点 (y0, x0) 为基准重绘文本区并定位光标。
+// 锚点在首次 redraw 时锁定（协调器刚写出 `> ` 提示符），整个编辑会话
+// 期间固定；清行用 WriteConsoleOutputCharacterW（不移动光标、不触发
+// conhost 自动换行），彻底避免“写满行尾 → 光标卷到下一行行首”的漂移。
 func (ed *legacyConsoleLineEditor) redraw() {
 	info, err := ed.screenInfo()
 	if err != nil {
 		return
 	}
-	x := int(info.CursorPosition.X)
-	y := info.CursorPosition.Y
-	right := int(info.Window.Right)
-	// 清掉从文本起点到行尾的残留（含流式输出残余）。
-	if x <= right {
-		ed.setCursor(y, x)
-		ed.writeSpaces(right - x + 1)
+	curX := int(info.CursorPosition.X)
+	curY := info.CursorPosition.Y
+	if !ed.anchored {
+		ed.x0 = curX
+		ed.y0 = curY
+		ed.anchored = true
 	}
-	// 写当前文本。
-	ed.setCursor(y, x)
-	ed.writeText(string(ed.buf))
-	// 光标定位到编辑位。
-	ed.setCursor(y, x+ui.DisplayWidth(string(ed.buf[:ed.cur])))
+	// 清文本区：直接覆盖字符缓冲，不动光标、不 wrap。
+	ed.clearTextArea()
+	// 写文本 + 定位输入光标。
+	ed.writeTextAt(string(ed.buf))
+	ed.setCursor(ed.y0, ed.x0+displayWidthOfRunes(ed.buf[:ed.cur]))
+	// 诊断探针：重绘后实际光标落点（仅 --debug）。
+	if chatDebugFlagEnabled() {
+		if info2, err2 := ed.screenInfo(); err2 == nil {
+			_, _ = fmt.Fprintf(os.Stderr, "[redraw] y=%d x0=%d curX=%d right=%d text=%q cur=%d after=(%d,%d)\n",
+				ed.y0, ed.x0, curX, int(info.Window.Right), string(ed.buf), ed.cur,
+				info2.CursorPosition.Y, info2.CursorPosition.X)
+		}
+	}
+}
+
+// clearTextArea 用空格覆盖 x0..right 列（WriteConsoleOutputCharacterW
+// 写字符缓冲，光标位置不变，不会触发行尾自动换行）。
+func (ed *legacyConsoleLineEditor) clearTextArea() {
+	info, err := ed.screenInfo()
+	if err != nil {
+		return
+	}
+	right := int(info.Window.Right)
+	if ed.x0 > right {
+		return
+	}
+	n := right - ed.x0 + 1
+	chars := make([]uint16, n)
+	for i := range chars {
+		chars[i] = ' '
+	}
+	var written uint32
+	coord := uint32(uint16(ed.x0)) | uint32(uint16(ed.y0))<<16
+	procWriteConsoleOutputCharacterW.Call(
+		uintptr(ed.out),
+		uintptr(unsafe.Pointer(&chars[0])),
+		uintptr(n),
+		uintptr(coord),
+		uintptr(unsafe.Pointer(&written)),
+	)
+}
+
+// writeTextAt 先定位到 (y0, x0) 再写文本。
+func (ed *legacyConsoleLineEditor) writeTextAt(text string) {
+	if err := ed.setCursor(ed.y0, ed.x0); err != nil {
+		if chatDebugFlagEnabled() {
+			_, _ = fmt.Fprintf(os.Stderr, "[redraw] setCursor(%d,%d) failed: %v\n", ed.y0, ed.x0, err)
+		}
+		return
+	}
+	ed.writeText(text)
+}
+
+func displayWidthOfRunes(runes []rune) int {
+	return ui.DisplayWidth(string(runes))
+}
+
+// advanceLine 在提交时输出 \r\n，把光标移到下一行行首。
+// 编辑行本身保留在屏幕上作为用户输入的可见记录（协调器后续
+// 会按自己的会话模型追加用户消息与响应）。
+func (ed *legacyConsoleLineEditor) advanceLine() {
+	var nl = []uint16{'\r', '\n'}
+	var written uint32
+	procWriteConsoleW.Call(
+		uintptr(ed.out),
+		uintptr(unsafe.Pointer(&nl[0])),
+		uintptr(len(nl)),
+		uintptr(unsafe.Pointer(&written)),
+		0,
+	)
 }
 
 func (ed *legacyConsoleLineEditor) screenInfo() (*consoleScreenBufferInfo, error) {
@@ -263,11 +352,15 @@ func (ed *legacyConsoleLineEditor) screenInfo() (*consoleScreenBufferInfo, error
 	return &info, nil
 }
 
-func (ed *legacyConsoleLineEditor) setCursor(y int16, x int) {
-	var c consoleCoord
-	c.Y = y
-	c.X = int16(x)
-	procSetConsoleCursorPosition.Call(uintptr(ed.out), uintptr(unsafe.Pointer(&c)))
+func (ed *legacyConsoleLineEditor) setCursor(y int16, x int) error {
+	// SetConsoleCursorPosition 的 COORD 是**值参数**（4 字节 SHORT X/Y），
+	// 不是指针！传指针会被当作 8 字节坐标读取，光标定位完全失效。
+	coord := uint32(uint16(x)) | uint32(uint16(y))<<16
+	r1, _, err := procSetConsoleCursorPosition.Call(uintptr(ed.out), uintptr(coord))
+	if r1 == 0 {
+		return err
+	}
+	return nil
 }
 
 func (ed *legacyConsoleLineEditor) writeText(text string) {

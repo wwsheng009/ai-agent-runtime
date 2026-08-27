@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -70,6 +71,35 @@ func (t *chatStartupTiming) mark(name string) {
 		elapsed: now.Sub(t.start),
 	})
 	t.last = now
+}
+
+func (t *chatStartupTiming) reached(name string) bool {
+	if t == nil {
+		return false
+	}
+	for _, m := range t.marks {
+		if m.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// armChatStartupHangWatchdog 在启动 90 秒后仍未到达 ready 阶段时，把全部
+// goroutine 栈打印到 stderr——用于定位“aicli chat 启动后长时间无响应”
+// （10 分钟级挂起）的卡点。正常启动（几十毫秒到几秒）永不触发。
+func armChatStartupHangWatchdog() {
+	go func() {
+		time.Sleep(90 * time.Second)
+		t := activeChatStartupTiming
+		if t == nil || t.reached("ready") {
+			return
+		}
+		buf := make([]byte, 2<<20)
+		n := runtime.Stack(buf, true)
+		_, _ = fmt.Fprintf(os.Stderr,
+			"[aicli-diag] chat startup stalled >90s (not ready); goroutine dump:\n%s", buf[:n])
+	}()
 }
 
 func (t *chatStartupTiming) flush(opts *chatCommandOptions) {
