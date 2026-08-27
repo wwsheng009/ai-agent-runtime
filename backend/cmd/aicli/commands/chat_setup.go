@@ -80,12 +80,11 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		surface.SetPhysicalWritesEnabled(false)
 		enabled := surface.Enable()
 		if chatDebugFlagEnabled() {
-			_, _ = fmt.Fprintf(os.Stderr, "[aicli-diag] surface.Enable() = %v\n", enabled)
+			aicliDiagf("[aicli-diag] surface.Enable() = %v\n", enabled)
 		}
 		if !enabled {
 			if chatDebugFlagEnabled() {
-				_, _ = fmt.Fprintln(os.Stderr,
-					"[aicli-diag] surface.Enable() FAILED -> plain interactive mode + legacy console line editor")
+				aicliDiagln("[aicli-diag] surface.Enable() FAILED -> plain interactive mode + legacy console line editor")
 			}
 			// A TTY alone is insufficient for the owned renderer: the primary
 			// transaction requires ANSI plus DECSTBM scroll-region support and a
@@ -104,10 +103,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 			}
 			_, _ = fmt.Fprintln(newChatSystemOutputWriter(os.Stderr),
 				"Warning: terminal does not support ANSI scroll-region rendering; using plain interactive mode")
-			// 诊断探针：不经包装 writer，直接打到 stderr，仅 --debug 时输出。
+			// 诊断探针：仅 --debug 时输出。
 			if opts.Debug {
-				_, _ = fmt.Fprintln(os.Stderr,
-					"[aicli-diag] no ANSI -> plain interactive mode + legacy console line editor")
+				aicliDiagln("[aicli-diag] no ANSI -> plain interactive mode + legacy console line editor")
 			}
 			layout = nil
 			inputBox = nil
@@ -129,8 +127,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		interactiveUI = false
 		setChatLegacyConsoleInputMode(true)
 		if opts.Debug {
-			_, _ = fmt.Fprintln(os.Stderr,
-				"[aicli-diag] compat mode: plain interactive mode + legacy console line editor")
+			aicliDiagln("[aicli-diag] compat mode: plain interactive mode + legacy console line editor")
 		}
 	}
 	if opts.NoInteractive || opts.OutputFormat == "json" {

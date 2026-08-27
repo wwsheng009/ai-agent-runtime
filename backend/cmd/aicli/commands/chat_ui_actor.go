@@ -112,7 +112,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 		c.unifiedRenderer = false
 		c.mu.Unlock()
 		if chatDebugFlagEnabled() {
-			_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] EnableUnifiedRenderer: actor.Post failed -> unified renderer OFF")
+			aicliDiagln("[aicli-diag] EnableUnifiedRenderer: actor.Post failed -> unified renderer OFF")
 		}
 		return false
 	}
@@ -120,7 +120,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	presenter := ui.NewTerminalSessionPresenter(actor, writer, c.primaryTerminalGeometry)
 	if c.SetPrimaryPresenter(presenter) {
 		if chatDebugFlagEnabled() {
-			_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] EnableUnifiedRenderer: presenter attached -> unified renderer ON")
+			aicliDiagln("[aicli-diag] EnableUnifiedRenderer: presenter attached -> unified renderer ON")
 		}
 		return true
 	}
@@ -993,7 +993,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	defer c.mu.Unlock()
 	if c.shutdown || !c.isReadyLocked() {
 		if chatDebugFlagEnabled() {
-			_, _ = fmt.Fprintf(os.Stderr, "[aicli-diag] paintScheduledPromptFrame: skipped (shutdown=%v ready=%v)\n",
+			aicliDiagf("[aicli-diag] paintScheduledPromptFrame: skipped (shutdown=%v ready=%v)\n",
 				c.shutdown, c.isReadyLocked())
 		}
 		return
@@ -1008,7 +1008,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	draft := c.promptInputSnapshotState()
 	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 		if chatDebugFlagEnabled() {
-			_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] prompt painted on surface (surface!=nil showPrompt=ok)")
+			aicliDiagln("[aicli-diag] prompt painted on surface (surface!=nil showPrompt=ok)")
 		}
 		c.promptVisible = true
 		c.promptRenderedOnSurface = true
@@ -1022,7 +1022,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	}
 	c.promptRenderedOnSurface = false
 	if chatDebugFlagEnabled() {
-		_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] prompt NOT painted: surface prompt path unavailable -> physical prompt write")
+		aicliDiagln("[aicli-diag] prompt NOT painted: surface prompt path unavailable -> physical prompt write")
 	}
 	c.preparePromptGapLocked(true)
 	c.writeTextLocked(prompt)
