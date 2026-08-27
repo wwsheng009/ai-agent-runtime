@@ -182,6 +182,15 @@ func (ed *legacyConsoleLineEditor) dispatch(recs []consoleInputRecord) bool {
 			continue
 		}
 		virtualKey := normalizedLegacyConsoleVirtualKey(key)
+		// 归一化命中诊断：win7/旧 conhost 把物理 Backspace 翻译成 VK_LEFT
+		// 时（常见于旧版控制台/远程会话），无条件打一次告警，方便不
+		// 开 --debug 也能取证原始字段（scan/uni 哪一个救回了按键）。
+		if key.VirtualKeyCode == vkLeft && virtualKey == vkBack {
+			legacyConsoleDebugf(
+				"[aicli-diag] Console layer translated Backspace to VK_LEFT; rawVK=0x%02X scan=0x%02X uni=%#04x rep=%d ctrl=0x%04X -> normalized VK_BACK\n",
+				key.VirtualKeyCode, key.VirtualScanCode, key.UnicodeChar,
+				key.RepeatCount, key.ControlKeyState)
+		}
 		// 诊断探针：同时打印原始与兼容归一化后的按键字段（仅 --debug）。
 		if chatDebugFlagEnabled() && (virtualKey == vkBack ||
 			virtualKey == vkLeft || virtualKey == vkDelete ||
