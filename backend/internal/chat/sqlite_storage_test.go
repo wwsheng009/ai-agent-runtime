@@ -613,3 +613,74 @@ func messageContents(messages []types.Message) []string {
 	}
 	return contents
 }
+
+func TestSQLiteSessionStorageOpenRetriesOnLockedDatabase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.sqlite")
+
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = path
+	cfg.ImportLegacyJSON = false
+	first, err := NewSQLiteSessionStorage(cfg)
+	require.NoError(t, err)
+	require.NoError(t, first.CloseStorage())
+
+	// Hold a write lock on a rollback-journal database so new readers (the
+	// PRAGMA user_version probe during open) hit SQLITE_BUSY until the lock
+	// is released, mimicking a concurrent process mid-write.
+	locker, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = locker.Exec("PRAGMA journal_mode=DELETE")
+	require.NoError(t, err)
+	_, err = locker.Exec("BEGIN EXCLUSIVE")
+	require.NoError(t, err)
+	release := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(600 * time.Millisecond):
+		case <-release:
+		}
+		_, _ = locker.ExecContext(context.Background(), "COMMIT")
+		_ = locker.Close()
+	}()
+
+	cfg.BusyTimeout = 100 * time.Millisecond
+	store, err := NewSQLiteSessionStorage(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.CloseStorage()) })
+
+	session := NewSession("open-retry-user")
+	require.NoError(t, store.Save(context.Background(), session))
+	loaded, err := store.Load(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.Equal(t, session.ID, loaded.ID)
+}
+
+func TestSQLiteSessionStorageOpenFailsWhenLockPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.sqlite")
+
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = path
+	cfg.ImportLegacyJSON = false
+	first, err := NewSQLiteSessionStorage(cfg)
+	require.NoError(t, err)
+	require.NoError(t, first.CloseStorage())
+
+	locker, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = locker.Exec("PRAGMA journal_mode=DELETE")
+	require.NoError(t, err)
+	_, err = locker.Exec("BEGIN EXCLUSIVE")
+	require.NoError(t, err)
+	defer func() {
+		_, _ = locker.ExecContext(context.Background(), "COMMIT")
+		_ = locker.Close()
+	}()
+
+	cfg.BusyTimeout = 20 * time.Millisecond
+	_, err = NewSQLiteSessionStorage(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "database is locked")
+	require.Contains(t, err.Error(), path)
+}

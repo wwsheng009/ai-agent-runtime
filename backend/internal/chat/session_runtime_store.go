@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
@@ -1656,12 +1657,12 @@ func (s *SQLiteRuntimeStore) ensure() error {
 			busyTimeout: s.busyTimeout,
 			cacheKiB:    s.cacheKiB,
 		}
-		if err := store.init(context.Background()); err != nil {
-			_ = db.Close()
+		store, err = openSQLiteRuntimeStoreWithLockRetry(store)
+		if err != nil {
 			s.openErr = err
 			return
 		}
-		s.db = db
+		s.db = store.db
 	})
 
 	s.openMu.RLock()
@@ -3875,6 +3876,46 @@ func (s *SQLiteRuntimeStore) notifyAgentControlMailboxWatchers(sessionID string,
 		select {
 		case watcher.ch <- message:
 		default:
+		}
+	}
+}
+
+// openSQLiteRuntimeStoreWithLockRetry runs init, retrying transient
+// "database is locked" failures with backoff. A concurrent aicli/runtime
+// process can hold the write lock longer than busy_timeout (migration, large
+// session flush, wal_checkpoint(TRUNCATE)); without retry this makes a whole
+// startup fail. A failed connection is replaced with a fresh one per attempt.
+func openSQLiteRuntimeStoreWithLockRetry(store *SQLiteRuntimeStore) (*SQLiteRuntimeStore, error) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			// 等待数据库锁释放时打日志：并发 aicli/runtime-server 进程
+			// 可能长时间持有写锁（迁移、大会话 flush、checkpoint），
+			// 没有日志时启动会表现为“长时间无响应”且无从定位。
+			if s := logpkg.S(); s != nil {
+				s.Infof("[sqlite-lock] database locked, retrying open (attempt %d/%d, wait %v) path=%s",
+					attempt, sqliteLockRetries, sqliteLockRetryWait(attempt-1), store.path)
+			}
+			time.Sleep(sqliteLockRetryWait(attempt - 1))
+		}
+		if err := store.init(context.Background()); err == nil {
+			return store, nil
+		} else if !isSQLiteLockedError(err) || attempt >= sqliteLockRetries {
+			_ = store.db.Close()
+			return store, err
+		}
+		db, err := sql.Open("sqlite3", store.dsn)
+		if err != nil {
+			_ = store.db.Close()
+			return store, err
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		_ = store.db.Close()
+		store = &SQLiteRuntimeStore{
+			db:          db,
+			fileBacked:  store.fileBacked,
+			busyTimeout: store.busyTimeout,
+			cacheKiB:    store.cacheKiB,
 		}
 	}
 }

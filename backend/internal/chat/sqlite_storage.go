@@ -95,24 +95,60 @@ func NewSQLiteSessionStorage(cfg PersistentSessionStorageConfig) (*SQLiteSession
 	if err := os.MkdirAll(filepath.Dir(cfg.Path), 0o755); err != nil {
 		return nil, fmt.Errorf("create sqlite session directory: %w", err)
 	}
-	db, err := sql.Open("sqlite3", cfg.Path)
+	store, err := openSQLiteSessionStorageDB(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite session storage: %w", err)
+		return nil, fmt.Errorf("open sqlite session storage %s: %w", cfg.Path, err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	store := &SQLiteSessionStorage{db: db, cfg: cfg}
-	if err := store.init(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	store, err = openSQLiteSessionStorageWithLockRetry(store)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite session storage %s: %w", cfg.Path, err)
 	}
 	if cfg.ImportLegacyJSON {
 		if err := store.importLegacyJSONFiles(context.Background()); err != nil {
-			_ = db.Close()
+			_ = store.db.Close()
 			return nil, err
 		}
 	}
 	return store, nil
+}
+
+// openSQLiteSessionStorageDB opens a single-connection sql.DB handle for the
+// session history database. The single connection guarantees that connection
+// scoped PRAGMAs (busy_timeout, ...) applied in init apply to every query.
+func openSQLiteSessionStorageDB(cfg PersistentSessionStorageConfig) (*SQLiteSessionStorage, error) {
+	db, err := sql.Open("sqlite3", cfg.Path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return &SQLiteSessionStorage{db: db, cfg: cfg}, nil
+}
+
+// openSQLiteSessionStorageWithLockRetry runs init, retrying transient
+// "database is locked" failures with backoff. A concurrent aicli/runtime
+// process can hold the write lock longer than busy_timeout (migration, large
+// session flush, wal_checkpoint(TRUNCATE)); without retry this makes a whole
+// startup fail. A failed connection is replaced with a fresh one per attempt.
+func openSQLiteSessionStorageWithLockRetry(store *SQLiteSessionStorage) (*SQLiteSessionStorage, error) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			time.Sleep(sqliteLockRetryWait(attempt - 1))
+		}
+		if err := store.init(context.Background()); err == nil {
+			return store, nil
+		} else if !isSQLiteLockedError(err) || attempt >= sqliteLockRetries {
+			_ = store.db.Close()
+			return store, err
+		}
+		reopened, err := openSQLiteSessionStorageDB(store.cfg)
+		if err != nil {
+			_ = store.db.Close()
+			return store, err
+		}
+		_ = store.db.Close()
+		store = reopened
+	}
 }
 
 func (s *SQLiteSessionStorage) Dir() string {
