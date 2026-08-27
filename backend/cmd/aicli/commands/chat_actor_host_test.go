@@ -4381,6 +4381,66 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 	}
 }
 
+func TestLocalChatRuntimeHostActorTurnGateSerializesSameSession(t *testing.T) {
+	host := &localChatRuntimeHost{}
+	releaseFirst, err := host.acquireActorTurnGate(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("acquire first turn gate: %v", err)
+	}
+
+	acquiredSecond := make(chan func(), 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		release, acquireErr := host.acquireActorTurnGate(context.Background(), "session-1")
+		if acquireErr != nil {
+			secondErr <- acquireErr
+			return
+		}
+		acquiredSecond <- release
+	}()
+
+	select {
+	case release := <-acquiredSecond:
+		release()
+		t.Fatal("second same-session turn acquired before the first released")
+	case err := <-secondErr:
+		t.Fatalf("second same-session acquire failed: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	// A different session has an independent gate.
+	releaseOther, err := host.acquireActorTurnGate(context.Background(), "session-2")
+	if err != nil {
+		t.Fatalf("acquire other-session turn gate: %v", err)
+	}
+	releaseOther()
+
+	releaseFirst()
+	select {
+	case release := <-acquiredSecond:
+		release()
+	case err := <-secondErr:
+		t.Fatalf("second same-session acquire failed after release: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("second same-session turn did not acquire after the first released")
+	}
+}
+
+func TestLocalChatRuntimeHostActorTurnGateHonorsContextCancellation(t *testing.T) {
+	host := &localChatRuntimeHost{}
+	release, err := host.acquireActorTurnGate(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("acquire first turn gate: %v", err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := host.acquireActorTurnGate(ctx, "session-1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline while waiting for turn gate, got %v", err)
+	}
+}
+
 func TestLocalChatRuntimeHostCloseWaitsForSubagentOperation(t *testing.T) {
 	host := &localChatRuntimeHost{}
 	cleanupDone := make(chan struct{})

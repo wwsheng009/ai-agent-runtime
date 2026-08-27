@@ -3,9 +3,11 @@ package commands
 import (
 	"context"
 	"testing"
+	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -16,6 +18,74 @@ func TestPrepareAICLIActorRuntimeContextDoesNotAttachRetainedOutputMirror(t *tes
 	if mirror := runtimeexecutor.OutputMirrorFromContext(ctx); mirror != nil {
 		t.Fatalf("actor runtime context attached raw output mirror %T; runtime tool.progress owns ActiveBand", mirror)
 	}
+}
+
+func TestSubmitAICLIActorPromptWaitsForBackgroundRunAndReadyUsesActorState(t *testing.T) {
+	provider := runtimellm.NewMockProvider("mock", 150*time.Millisecond)
+	provider.SetResponse("background", "background complete")
+	provider.SetResponse("foreground", "foreground complete")
+	hub := buildTestSessionHubWithProvider(t, provider)
+	t.Cleanup(hub.StopAll)
+	actor, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+
+	backgroundDone := make(chan error, 1)
+	go func() {
+		_, runErr := actor.SubmitPrompt(context.Background(), "background", nil)
+		backgroundDone <- runErr
+	}()
+	waitForTestActorBusy(t, actor)
+
+	session := &ChatSession{
+		RuntimeSession:   &runtimechat.Session{ID: "session-1"},
+		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
+	}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	if coord.IsReady() {
+		t.Fatal("UI reported Ready while the authoritative session actor was running")
+	}
+	if shouldDisplayInteractivePrompt(session) {
+		t.Fatal("interactive prompt was exposed while the authoritative session actor was running")
+	}
+	coord.mu.Lock()
+	surfaceStatus := coord.currentSurfaceStateLocked()
+	coord.mu.Unlock()
+	if surfaceStatus.kind == chatSurfaceStatusIdle {
+		t.Fatal("status line projected Ready while the authoritative session actor was running")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := submitAICLIActorPrompt(ctx, actor, "foreground", nil, runtimechat.SubmitPromptOption{})
+	if err != nil {
+		t.Fatalf("serialized foreground submit failed: %v", err)
+	}
+	if result == nil || !result.Success || result.Output == "" {
+		t.Fatalf("unexpected foreground result: %#v", result)
+	}
+	if err := <-backgroundDone; err != nil {
+		t.Fatalf("background run failed: %v", err)
+	}
+	if !coord.IsReady() {
+		t.Fatal("UI did not return to Ready after both actor turns completed")
+	}
+}
+
+func waitForTestActorBusy(t *testing.T, actor *runtimechat.SessionActor) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if state, ok := actor.StateSummary(); ok && state.Busy() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	state, _ := actor.StateSummary()
+	t.Fatalf("actor did not enter a busy state: %+v", state)
 }
 
 func TestRenderAsyncTeamLaunchNotice_RendersForNewRunningTeam(t *testing.T) {

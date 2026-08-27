@@ -22,6 +22,71 @@ import (
 
 type aicliActorChatExecutor struct{}
 
+const aicliActorReadyPollInterval = 20 * time.Millisecond
+
+// submitAICLIActorPrompt serializes an interactive user turn behind an
+// internally-triggered parent turn (for example a supervision auto-wake).
+// SessionActor still rejects concurrent control-plane submissions; only the
+// primary interactive path opts into wait-and-retry semantics.
+func submitAICLIActorPrompt(
+	ctx context.Context,
+	actor *runtimechat.SessionActor,
+	prompt string,
+	runMeta *team.RunMeta,
+	opt runtimechat.SubmitPromptOption,
+) (*agent.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		result, err := actor.SubmitPrompt(ctx, prompt, runMeta, opt)
+		if !errors.Is(err, runtimechat.ErrSessionBusy) {
+			return result, err
+		}
+		if err := waitForAICLIActorReady(ctx, actor); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func continueAICLIActorWhenReady(
+	ctx context.Context,
+	actor *runtimechat.SessionActor,
+	runMeta *team.RunMeta,
+	opt runtimechat.ContinueOption,
+) (*agent.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		result, err := actor.Continue(ctx, runMeta, opt)
+		if !errors.Is(err, runtimechat.ErrSessionBusy) {
+			return result, err
+		}
+		if err := waitForAICLIActorReady(ctx, actor); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor) error {
+	if actor == nil {
+		return fmt.Errorf("session actor is nil")
+	}
+	ticker := time.NewTicker(aicliActorReadyPollInterval)
+	defer ticker.Stop()
+	for {
+		if state, ok := actor.StateSummary(); !ok || !state.Busy() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // prepareAICLIActorRuntimeContext keeps the actor path's output ownership in
 // the runtime event bridge. Agent tool execution binds a stable
 // tool_call_id-scoped progress reporter before invoking shell-like tools; the
@@ -65,6 +130,16 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if err != nil {
 		return "", err
 	}
+	releaseTurn, err := session.LocalRuntimeHost.acquireActorTurnGate(ctx, session.RuntimeSession.ID)
+	if err != nil {
+		return "", err
+	}
+	defer releaseTurn()
+	// A non-gated control-plane caller may already own the actor. Wait before
+	// BeginRun so its lifecycle cannot be mistaken for this foreground turn.
+	if err := waitForAICLIActorReady(ctx, actor); err != nil {
+		return "", err
+	}
 	previousAssistant := latestAssistantResponseText(session)
 	previousTeamID := activeTeamID(session)
 	if bridge := ensureChatRuntimeEventBridge(session); bridge != nil {
@@ -78,7 +153,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if reporter := newRuntimeHTTPDebugReporter(session); reporter != nil {
 		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
 	}
-	result, err := actor.SubmitPrompt(ctx, prompt, currentRunMetaForSession(session), runtimechat.SubmitPromptOption{
+	result, err := submitAICLIActorPrompt(ctx, actor, prompt, currentRunMetaForSession(session), runtimechat.SubmitPromptOption{
 		ImagePaths:       session.ImagePaths,
 		ImageArtifactDir: chatSessionImageArtifactDir(session),
 	})
@@ -154,6 +229,14 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if err != nil {
 		return "", err
 	}
+	releaseTurn, err := session.LocalRuntimeHost.acquireActorTurnGate(ctx, session.RuntimeSession.ID)
+	if err != nil {
+		return "", err
+	}
+	defer releaseTurn()
+	if err := waitForAICLIActorReady(ctx, actor); err != nil {
+		return "", err
+	}
 	previousAssistant := latestAssistantResponseText(session)
 	previousTeamID := activeTeamID(session)
 	if bridge := ensureChatRuntimeEventBridge(session); bridge != nil {
@@ -167,7 +250,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if reporter := newRuntimeHTTPDebugReporter(session); reporter != nil {
 		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
 	}
-	result, err := actor.Continue(ctx, currentRunMetaForSession(session), runtimechat.ContinueOption{
+	result, err := continueAICLIActorWhenReady(ctx, actor, currentRunMetaForSession(session), runtimechat.ContinueOption{
 		ContinuationPrompt: goalAutoContinuationPrompt,
 		ContinuationMetadata: map[string]interface{}{
 			goalContinuationMetadataKey: true,

@@ -3199,6 +3199,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	// Logging is append-only observability and may retain stale events. All
 	// mutable UI/transcript paths below remain guarded by turn ownership.
 	b.handleStructuredLogEvent(event)
+	b.updateComposerAgentStageForAmbientPrimaryRunEvent(event)
 	if b.shouldSuppressMismatchedPrimaryTurnEvent(event) {
 		payload, _ := json.Marshal(event.Payload)
 		writeSessionDebugInfo(
@@ -3483,6 +3484,27 @@ func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event r
 		)
 	case runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
 		b.session.Interaction.ClearRuntimeToolAgentStages()
+	}
+}
+
+func (b *chatRuntimeEventBridge) updateComposerAgentStageForAmbientPrimaryRunEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil || b.session.Interaction == nil ||
+		b.isRunActive() || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	// Supervision auto-wake turns run directly through ActorRegistry rather
+	// than the foreground executor, so they have no BeginRun/EndRun pair. This
+	// status-only projection intentionally runs before the turn-ownership
+	// renderer fence: ambient turn events remain suppressed from the foreground
+	// transcript but must still prevent an already-painted Ready state.
+	switch event.Type {
+	case runtimechat.EventSessionStart:
+		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
+	case runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+		b.session.Interaction.ClearRuntimeToolAgentStages()
+		if interactiveSessionActorReady(b.session) {
+			b.session.Interaction.SetAgentStage(chatAgentStageIdle)
+		}
 	}
 }
 

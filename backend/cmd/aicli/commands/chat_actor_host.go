@@ -125,9 +125,48 @@ type localChatRuntimeHost struct {
 	subagentOps          int
 	subagentIdle         chan struct{}
 	closing              bool
+	actorTurnGateMu      sync.Mutex
+	actorTurnGates       map[string]chan struct{}
 	lifecycleCtx         context.Context
 	lifecycleCancel      context.CancelFunc
 	asyncWG              sync.WaitGroup
+}
+
+// acquireActorTurnGate serializes internally-triggered and foreground turns
+// for the same local actor. The SessionActor remains the final concurrency
+// authority; this context-aware gate prevents an auto-wake from racing the
+// foreground bridge's BeginRun/SubmitPrompt boundary.
+func (h *localChatRuntimeHost) acquireActorTurnGate(ctx context.Context, sessionID string) (func(), error) {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
+		return func() {}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	h.actorTurnGateMu.Lock()
+	if h.actorTurnGates == nil {
+		h.actorTurnGates = make(map[string]chan struct{})
+	}
+	gate := h.actorTurnGates[sessionID]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		gate <- struct{}{}
+		h.actorTurnGates[sessionID] = gate
+	}
+	h.actorTurnGateMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-gate:
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			gate <- struct{}{}
+		})
+	}, nil
 }
 
 func (h *localChatRuntimeHost) Close() {
@@ -401,6 +440,11 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			go func() {
 				runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 				defer cancel()
+				releaseTurn, err := h.acquireActorTurnGate(runCtx, parentSessionID)
+				if err != nil {
+					return
+				}
+				defer releaseTurn()
 				_, _ = h.ActorRegistry.SubmitPrompt(runCtx, parentSessionID, supervision.AutoWakePrompt, nil)
 			}()
 			return nil

@@ -73,10 +73,34 @@ func shouldDisplayInteractivePrompt(session *ChatSession) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return false
 	}
+	if !interactiveSessionActorReady(session) {
+		return false
+	}
 	if session.Interaction != nil && !session.Interaction.IsReady() {
 		return false
 	}
 	return !interactiveTeamPending(session)
+}
+
+// interactiveSessionActorReady ties the visible Ready/composer state to the
+// actor that actually arbitrates new turns. UI activity flags alone are not
+// sufficient because supervision may start an asynchronous auto-wake turn
+// between foreground chat-loop iterations.
+func interactiveSessionActorReady(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost == nil ||
+		session.LocalRuntimeHost.SessionHub == nil || session.RuntimeSession == nil {
+		return true
+	}
+	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	if sessionID == "" {
+		return true
+	}
+	actor, exists := session.LocalRuntimeHost.SessionHub.Get(sessionID)
+	if !exists || actor == nil {
+		return true
+	}
+	state, ok := actor.StateSummary()
+	return !ok || !state.Busy()
 }
 
 func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
