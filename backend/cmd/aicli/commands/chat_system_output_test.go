@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"slices"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,7 +103,7 @@ func TestChatSystemOutputWriter_SemanticSinkPublishesRawLinesWithoutTerminalWrit
 
 	got := sink.snapshot()
 	want := []string{"[Manager] MCP started", "[Manager] loaded tools"}
-	if !slices.Equal(got, want) {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("semantic lines=%q, want %q", got, want)
 	}
 	for _, line := range got {
@@ -123,7 +123,7 @@ func TestChatLimitedSystemOutputWriter_SemanticSinkRetainsLimitPolicy(t *testing
 
 	got := sink.snapshot()
 	want := []string{"first", chatLiveToolOutputLimitNotice}
-	if !slices.Equal(got, want) {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("semantic limited lines=%q, want %q", got, want)
 	}
 }
