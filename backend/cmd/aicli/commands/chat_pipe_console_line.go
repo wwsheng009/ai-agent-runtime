@@ -11,10 +11,25 @@ package commands
 
 import (
 	"context"
+	"io"
 	"os"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
+
+// pipeFrameDiagWriter 在 --debug 下把编辑器每次 Write 的渲染帧原始字节以
+// repr 形式转发到 stderr，用于真机取证：一眼确认帧格式、是否以 \n 结尾、
+// 是否走了补偿模式。
+type pipeFrameDiagWriter struct {
+	w io.Writer
+}
+
+func (p *pipeFrameDiagWriter) Write(b []byte) (int, error) {
+	if chatDebugFlagEnabled() {
+		aicliDiagf("[aicli-diag] pipe-frame: %q\n", string(b))
+	}
+	return p.w.Write(b)
+}
 
 // readPipeInteractiveLineFn 是「管道/PTY 终端逐键行编辑器」的入口，测试可替换。
 var readPipeInteractiveLineFn = readPipeInteractiveLine
@@ -41,7 +56,11 @@ func readPipeInteractiveLine(ctx context.Context, prompt string) (string, bool, 
 		ui.SetInteractiveInputDebugHook(aicliDiagf)
 		defer ui.SetInteractiveInputDebugHook(nil)
 	}
-	line, err := ui.ReadInteractiveLineContextWithPrompt(ctx, os.Stdin, os.Stdout, prompt)
+	writer := io.Writer(os.Stdout)
+	if chatDebugFlagEnabled() {
+		writer = &pipeFrameDiagWriter{w: os.Stdout}
+	}
+	line, err := ui.ReadInteractiveLineContextWithPrompt(ctx, os.Stdin, writer, prompt)
 	if err != nil {
 		return "", false, err
 	}
