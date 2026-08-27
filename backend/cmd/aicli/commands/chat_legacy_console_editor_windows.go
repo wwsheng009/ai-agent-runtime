@@ -95,6 +95,21 @@ type legacyConsoleLineEditor struct {
 	y0       int16
 }
 
+// legacyConsoleLineEditorUsable 纯探测传统控制台行编辑器在当前进程上是否
+// 可用（stdin/stdout 均为真实控制台）。无副作用，供运行路径选择使用。
+func legacyConsoleLineEditorUsable() bool {
+	in, err := stdinConsoleHandle()
+	if err != nil {
+		return false
+	}
+	var outMode uint32
+	if werr := windows.GetConsoleMode(windows.Handle(os.Stdout.Fd()), &outMode); werr != nil {
+		return false
+	}
+	var inMode uint32
+	return windows.GetConsoleMode(in, &inMode) == nil
+}
+
 // readLegacyConsoleLine 在降级模式下读取一行交互输入。
 // ok=false 表示 stdin 不是控制台或初始化失败，调用方应回退 buffered 读取。
 func readLegacyConsoleLine(ctx context.Context) (line string, ok bool, err error) {
