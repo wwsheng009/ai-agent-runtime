@@ -6,13 +6,19 @@ import (
 	"io"
 )
 
+// ReadInteractiveLineContextWithPrompt 同 ReadInteractiveLineContext，但显式
+// 传入提示符文本（用于桥接输出补偿帧的列对齐，避免整行重绘覆盖提示符）。
+func ReadInteractiveLineContextWithPrompt(ctx context.Context, reader io.Reader, writer io.Writer, prompt string) (string, error) {
+	return readInteractiveLineWithHooksContext(ctx, reader, writer, prompt, nil, nil, nil, true, defaultPasteBurstHoldFirstRune())
+}
+
 // ReadInteractiveLineContext 是 readInteractiveLineWithHooksContext 的导出包装：
 // 以默认设置（无历史、无变更回调、提交时回显、默认粘贴保持首字符）在
 // reader/writer 上读取一行交互输入。适用于 stdin 不是真实控制台、但终端
 // 支持 ANSI 重绘的场景（MobaXterm/cygwin/mintty、winpty、SSH 管道等），
 // 完整解析 backspace、Delete、方向键、Home/End 等按键。
 func ReadInteractiveLineContext(ctx context.Context, reader io.Reader, writer io.Writer) (string, error) {
-	return readInteractiveLineWithHooksContext(ctx, reader, writer, "", nil, nil, nil, true, defaultPasteBurstHoldFirstRune())
+	return ReadInteractiveLineContextWithPrompt(ctx, reader, writer, "")
 }
 
 // InteractiveInputDebugHook 接收交互行编辑器（字节逐键路径）的按键调试

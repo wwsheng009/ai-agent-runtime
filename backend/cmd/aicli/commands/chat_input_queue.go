@@ -1079,7 +1079,7 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		}
 	}
 	if pipeConsoleLineEditorSupported() {
-		line, ok, err := readPipeInteractiveLineFn(ctx)
+		line, ok, err := readPipeInteractiveLineFn(ctx, chatInteractiveInputPromptText(session))
 		if ok {
 			return line, err
 		}

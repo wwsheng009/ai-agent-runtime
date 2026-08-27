@@ -19,10 +19,19 @@ import (
 // readPipeInteractiveLineFn 是「管道/PTY 终端逐键行编辑器」的入口，测试可替换。
 var readPipeInteractiveLineFn = readPipeInteractiveLine
 
+// chatInteractiveInputPromptText 返回主循环读行前打印的提示符文本，用于把
+// 桥接输出补偿帧的列对齐（整行重绘从提示符之后开始，避免覆盖提示符）。
+func chatInteractiveInputPromptText(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	return ui.FormatUserPromptWithAttachments(len(session.ImagePaths))
+}
+
 // readPipeInteractiveLine 在 stdin/stdout 均为管道或字符设备（即非普通文件
 // 重定向、非真实控制台）时，用 ui 包的逐键编辑器读取一行。返回 ok=false
 // 表示当前环境不适合逐键编辑，调用方应保持原有 buffered 回退读取。
-func readPipeInteractiveLine(ctx context.Context) (string, bool, error) {
+func readPipeInteractiveLine(ctx context.Context, prompt string) (string, bool, error) {
 	if !pipeConsoleLineEditorSupported() {
 		return "", false, nil
 	}
@@ -32,7 +41,7 @@ func readPipeInteractiveLine(ctx context.Context) (string, bool, error) {
 		ui.SetInteractiveInputDebugHook(aicliDiagf)
 		defer ui.SetInteractiveInputDebugHook(nil)
 	}
-	line, err := ui.ReadInteractiveLineContext(ctx, os.Stdin, os.Stdout)
+	line, err := ui.ReadInteractiveLineContextWithPrompt(ctx, os.Stdin, os.Stdout, prompt)
 	if err != nil {
 		return "", false, err
 	}
