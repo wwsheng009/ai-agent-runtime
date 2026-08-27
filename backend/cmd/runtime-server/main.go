@@ -45,6 +45,7 @@ type runtimeServerCommandOptions struct {
 	PIDFile    string
 	PID        int
 	Wait       time.Duration
+	Pprof      bool
 }
 
 type runtimeServerStartConflict struct {
@@ -97,8 +98,8 @@ func run() int {
 
 func printRuntimeServerRootUsage() {
 	fmt.Fprintln(os.Stdout, "Usage:")
-	fmt.Fprintln(os.Stdout, "  runtime-server serve  [--config PATH] [--listen HOST:PORT] [--pid-file PATH]")
-	fmt.Fprintln(os.Stdout, "  runtime-server start  [--config PATH] [--listen HOST:PORT] [--pid-file PATH] [--wait 30s]")
+	fmt.Fprintln(os.Stdout, "  runtime-server serve  [--config PATH] [--listen HOST:PORT] [--pid-file PATH] [--pprof]")
+	fmt.Fprintln(os.Stdout, "  runtime-server start  [--config PATH] [--listen HOST:PORT] [--pid-file PATH] [--wait 30s] [--pprof]")
 	fmt.Fprintln(os.Stdout, "  runtime-server stop   [--pid-file PATH] [--pid PID] [--wait 10s]")
 	fmt.Fprintln(os.Stdout, "  runtime-server status [--config PATH] [--listen HOST:PORT] [--pid-file PATH]")
 	fmt.Fprintln(os.Stdout, "")
@@ -124,6 +125,7 @@ func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
+	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
 	return opts, flags.Parse(args)
 }
 
@@ -137,6 +139,7 @@ func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	flags.DurationVar(&opts.Wait, "wait", opts.Wait, "等待后台进程完成启动的超时时间")
+	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
 	return opts, flags.Parse(args)
 }
 
@@ -230,6 +233,16 @@ func runServe(args []string) int {
 		_ = logger.Sync()
 	}()
 
+	// pprof 诊断端点按需启动：AICLI_PPROF 环境变量或 --pprof 显式开启，
+	// 默认绑定 127.0.0.1 随机空闲端口（仅本机可访问）。
+	// 启动于 PID 冲突检查之后，避免冗余实例短暂占用 pprof 端口。
+	var pprofHandle *pprofServerHandle
+	defer func() {
+		if pprofHandle != nil {
+			_ = pprofHandle.Close()
+		}
+	}()
+
 	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
 	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
 		if runtimeserver.ProcessRunning(info.PID) {
@@ -241,6 +254,23 @@ func runServe(args []string) int {
 			return 1
 		}
 		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
+	}
+
+	// pprof 服务器在通过 PID 冲突检查后启动：AICLI_PPROF 环境变量或 --pprof 显式开启。
+	if pprofAddr := resolveRuntimeServerPprofAddr(opts.Pprof); pprofAddr != "" {
+		if !isLoopbackAddr(pprofAddr) {
+			logger.Warn("pprof endpoint will listen on a non-loopback address; "+
+				"pprof 可触发 GC / 执行分析代码，暴露到网络上有风险，建议使用 127.0.0.1",
+				logger.String("addr", pprofAddr))
+		}
+		handle, err := startPprofServer(pprofAddr)
+		if err != nil {
+			logger.Error("Failed to start pprof server", logger.Err(err))
+			return 1
+		}
+		pprofHandle = handle
+		logger.Info("pprof endpoint enabled", logger.String("url", handle.URL()))
+		fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled: %s\n", handle.URL())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -357,6 +387,9 @@ func runStart(args []string) int {
 	commandArgs := []string{"serve", "--config", opts.ConfigPath, "--pid-file", pidFile}
 	if strings.TrimSpace(opts.ListenAddr) != "" {
 		commandArgs = append(commandArgs, "--listen", strings.TrimSpace(opts.ListenAddr))
+	}
+	if opts.Pprof {
+		commandArgs = append(commandArgs, "--pprof")
 	}
 	launchCommand, launchArgs, err := runtimeserver.PrepareStartCommand(executable, cwd, commandArgs)
 	if err != nil {
