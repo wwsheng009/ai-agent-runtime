@@ -97,8 +97,7 @@ func armChatStartupHangWatchdog() {
 		}
 		buf := make([]byte, 2<<20)
 		n := runtime.Stack(buf, true)
-		_, _ = fmt.Fprintf(os.Stderr,
-			"[aicli-diag] chat startup stalled >90s (not ready); goroutine dump:\n%s", buf[:n])
+		aicliDiagf("[aicli-diag] chat startup stalled >90s (not ready); goroutine dump:\n%s", buf[:n])
 	}()
 }
 

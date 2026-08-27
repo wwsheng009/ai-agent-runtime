@@ -1186,12 +1186,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			// 交互 TTY 场景使用逐键 line editor，不再走按行队列。
 			session.InputQueue = nil
 			if chatDebugFlagEnabled() {
-				_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] input path: interactive line editor (TUI composer)")
+				aicliDiagln("[aicli-diag] input path: interactive line editor (TUI composer)")
 			}
 		} else {
 			ensureChatInputQueue(session)
 			if chatDebugFlagEnabled() {
-				_, _ = fmt.Fprintln(os.Stderr, "[aicli-diag] input path: line-mode queue (pump/legacy editor)")
+				aicliDiagln("[aicli-diag] input path: line-mode queue (pump/legacy editor)")
 			}
 		}
 	}
