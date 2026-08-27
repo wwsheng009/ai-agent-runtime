@@ -2,7 +2,7 @@ package commands
 
 import (
 	"fmt"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -320,7 +320,7 @@ func TestLateReasoningFinalDoesNotReplaceNewerActiveRequest(t *testing.T) {
 	bridge.handleAssistantReasoning(reasoningEvent("stream-b", "replace", "B-final", 2))
 
 	want := []string{"delta:A", "delta:B", "final:B-final"}
-	if !slices.Equal(callbacks, want) {
+	if !reflect.DeepEqual(callbacks, want) {
 		t.Fatalf("interleaved callbacks = %q, want %q", callbacks, want)
 	}
 	if !bridge.hasRenderedReasoningFinalFor(keyA) || !bridge.hasRenderedReasoningFinalFor(keyB) {
@@ -360,7 +360,7 @@ func TestReasoningCompatibilityDropsSameSequenceRetransmission(t *testing.T) {
 	bridge.handleAssistantReasoning(event(2, " second"))
 
 	want := []string{"first", " second"}
-	if !slices.Equal(rendered, want) {
+	if !reflect.DeepEqual(rendered, want) {
 		t.Fatalf("reasoning retransmission callbacks = %q, want %q", rendered, want)
 	}
 }
