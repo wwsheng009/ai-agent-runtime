@@ -4,6 +4,7 @@ package ui
 
 import (
 	"errors"
+	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -51,6 +52,17 @@ type consoleKeyEventRecord struct {
 	VirtualScanCode uint16
 	UnicodeChar     uint16
 	ControlKeyState uint32
+}
+
+// interactiveStdinNeedsPolledReadiness 决定 nextInteractiveKey 是否需要
+// 轮询 readiness 判定后再读。仅真实 Windows 控制台（conhost，按键以
+// KEY_EVENT_RECORD 记录到达、可被 GetNumberOfConsoleInputEvents 轮询）
+// 需要；MobaXterm/cygwin/mintty/winpty/SSH 等桥接场景下 stdin 是管道或
+// 字符设备，按键以字节流到达，应直接阻塞读——轮询依赖的 PeekNamedPipe
+// 在 cygwin 桥接管道上可能永远报告无数据，导致编辑器空转永远读不到键。
+func interactiveStdinNeedsPolledReadiness() bool {
+	var mode uint32
+	return windows.GetConsoleMode(windows.Handle(os.Stdin.Fd()), &mode) == nil
 }
 
 func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, error) {

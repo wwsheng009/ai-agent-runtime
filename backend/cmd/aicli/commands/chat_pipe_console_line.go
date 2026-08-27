@@ -28,7 +28,7 @@ func readPipeInteractiveLine(ctx context.Context) (string, bool, error) {
 	}
 	injected := chatDebugFlagEnabled()
 	if injected {
-		aicliDiagln("[aicli-diag] input path: pipe/PTY interactive line editor (byte-key editor)")
+		aicliDiagln("[aicli-diag] input path: pipe/PTY interactive line editor (byte-key editor, direct read)")
 		ui.SetInteractiveInputDebugHook(aicliDiagf)
 		defer ui.SetInteractiveInputDebugHook(nil)
 	}

@@ -37,6 +37,10 @@ func platformClipboardText() (string, error) {
 	return "", errors.New("platform clipboard paste unsupported")
 }
 
+// interactiveStdinNeedsPolledReadiness 在 unix 下恒为 true：Poll 对 tty
+// 和管道都可靠，维持轮询可取消语义不变。
+func interactiveStdinNeedsPolledReadiness() bool { return true }
+
 func platformConsumeSpecialInteractiveKey(int) (editorKey, bool, error) {
 	return editorKey{}, false, nil
 }
