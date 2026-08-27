@@ -1188,6 +1188,15 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if chatDebugFlagEnabled() {
 				aicliDiagln("[aicli-diag] input path: interactive line editor (TUI composer)")
 			}
+		} else if chatPipeLineEditorPreferred() {
+			// 管道/PTY 场景（MobaXterm、cygwin/mintty、winpty、SSH 等）：
+			// legacy 控制台编辑器不可用，且 stdin/stdout 是管道或字符设备。
+			// 不启动 queue/pump，由 chatInteractiveReadLine 回退分支独占 stdin
+			// 打开逐键编辑器，避免 pump 后台读取与其竞争同一句柄。
+			session.InputQueue = nil
+			if chatDebugFlagEnabled() {
+				aicliDiagln("[aicli-diag] input path: pipe/PTY interactive line editor (direct reader)")
+			}
 		} else {
 			ensureChatInputQueue(session)
 			if chatDebugFlagEnabled() {

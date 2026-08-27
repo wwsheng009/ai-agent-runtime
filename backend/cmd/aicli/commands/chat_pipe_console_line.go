@@ -52,6 +52,24 @@ func pipeConsoleLineEditorSupported() bool {
 	return ui.SupportsCancelableInteractiveInputRead()
 }
 
+// chatPipeLineEditorPreferred 判断本会话是否应以「管道/PTY 逐键编辑器」为主
+// 输入路径（MobaXterm 本地 shell、cygwin/mintty、winpty、SSH 管道等）：
+//
+//   - stdin/stdout 是管道或字符设备且 ui 编辑器支持（pipeConsoleLineEditorSupported）；
+//   - legacy 控制台行编辑器不可用（非真实 conhost，ReadConsoleInputW 无按键记录）。
+//
+// 为真时 runChatLoop 不启动 queue/pump，主循环 chatInteractiveReadLine 的
+// 回退分支独占 stdin 打开逐键编辑器，避免 pump 后台读取与其竞争同一句柄。
+func chatPipeLineEditorPreferred() bool {
+	if !pipeConsoleLineEditorSupported() {
+		return false
+	}
+	if !chatLegacyConsoleInputEnabled() {
+		return true
+	}
+	return !legacyConsoleLineEditorUsable()
+}
+
 func fdIsPipeOrChar(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {

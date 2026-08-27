@@ -1070,6 +1070,20 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		return line, err
 	}
 	reader := chatSessionInputReader(session)
+	if chatLegacyConsoleInputEnabled() {
+		if line, ok, err := readLegacyConsoleLineFn(ctx); ok {
+			if err != nil {
+				return "", err
+			}
+			return line, nil
+		}
+	}
+	if pipeConsoleLineEditorSupported() {
+		line, ok, err := readPipeInteractiveLineFn(ctx)
+		if ok {
+			return line, err
+		}
+	}
 	line, err := reader.ReadString('\n')
 	if line != "" {
 		return line, nil
