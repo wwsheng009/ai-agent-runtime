@@ -1,0 +1,50 @@
+version: "v1"
+
+# Windows 7 uses the Go 1.20-compatible SQLite driver. Keep its session
+# database (and WAL/SHM sidecars) separate from the main build's newer driver.
+sessions:
+  backend: sqlite
+  storePath: session_history_win7.sqlite
+
+agent:
+  # The model decides when the run is complete. Positive limits are explicit
+  # operator policies; zero keeps the normal agent loop unbounded.
+  maxSteps: 0
+  maxToolCalls: 0
+  maxExplorationSteps: 0
+  maxRepeatedToolCalls: 0
+  timeout: 0s
+  enableParallelTools: true
+  maxParallelToolCalls: 4
+
+background:
+  # Background tools are also unbounded unless timeout_sec is supplied.
+  defaultTimeout: 0s
+  monitorInterval: 250ms
+  heartbeatTimeout: 30s
+  launchMaxAttempts: 3
+  retryBackoff: 500ms
+  # -1 keeps explicitly rerunnable jobs recovering until they are cancelled.
+  recoveryMaxAttempts: -1
+  recoveryBackoffSchedule: [30s, 1m, 2m, 3m, 5m]
+
+context:
+  # Used only when neither provider/model capability nor context.maxPromptTokens
+  # can provide an effective prompt budget.
+  fallbackMaxPromptTokens: 32000
+
+images:
+  cacheMaxAge: 1h
+  generations:
+    default_model: gpt-image-2
+    default_size: "1024x1024"
+    default_quality: medium
+    default_output_format: png
+    request_timeout: 5m
+    max_n: 4
+
+observe:
+  # Runtime Observation Plane: 默认关闭；此处显式开启只读观测 API。
+  # 启用后注册 /api/runtime/observe/v1/*（capabilities / snapshot /
+  # sessions/{session_id} / events）。SSE 与 renderer 依赖 Phase 3/4，v1 不注册。
+  enabled: true

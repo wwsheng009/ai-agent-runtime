@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -56,7 +57,7 @@ func normalizePersistentSessionStorageConfig(cfg PersistentSessionStorageConfig)
 	}
 	cfg.Dir = strings.TrimSpace(cfg.Dir)
 	if cfg.Path == "" && cfg.Dir != "" {
-		cfg.Path = filepath.Join(cfg.Dir, "session_history.sqlite")
+		cfg.Path = filepath.Join(cfg.Dir, aiclipaths.DefaultSessionHistoryFileName)
 	} else if cfg.Path != "" && !filepath.IsAbs(cfg.Path) && cfg.Dir != "" {
 		cfg.Path = filepath.Join(cfg.Dir, cfg.Path)
 	}

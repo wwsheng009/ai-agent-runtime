@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 func TestRunInitCommandUsesLocalStarterPathByDefault(t *testing.T) {
@@ -29,7 +30,7 @@ func TestRunInitCommandUsesLocalStarterPathByDefault(t *testing.T) {
 	if !result.Created {
 		t.Fatalf("expected starter config to be created, got %+v", result)
 	}
-	if result.ConfigPath != filepath.Clean(".aicli/config.yaml") {
+	if result.ConfigPath != filepath.Join(".aicli", aiclipaths.DefaultConfigFileName) {
 		t.Fatalf("unexpected config path: %q", result.ConfigPath)
 	}
 
@@ -72,7 +73,7 @@ func TestRunInitCommandSupportsGlobalFlag(t *testing.T) {
 	if !strings.HasPrefix(result.ConfigPath, tempDir) {
 		t.Fatalf("expected global config under temp home, got %q", result.ConfigPath)
 	}
-	expected := filepath.Join(tempDir, ".aicli", "config.yaml")
+	expected := filepath.Join(tempDir, ".aicli", aiclipaths.DefaultConfigFileName)
 	if result.ConfigPath != expected {
 		t.Fatalf("unexpected config path: %q, want %q", result.ConfigPath, expected)
 	}

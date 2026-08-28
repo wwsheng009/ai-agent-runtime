@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
@@ -52,6 +54,9 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 	if !strings.Contains(content, "headers: {}") {
 		t.Fatalf("starter config missing global provider headers section: %s", content)
 	}
+	if !strings.Contains(content, "config_file: "+aiclipaths.DefaultRuntimeConfigRelativePath) {
+		t.Fatalf("starter config missing build-profile runtime config path: %s", content)
+	}
 
 	cfg, err := InitGlobalConfig(path)
 	if err != nil {
@@ -65,6 +70,9 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 	}
 	if len(cfg.Providers.Items) != 0 {
 		t.Fatalf("expected no providers in starter config, got %d", len(cfg.Providers.Items))
+	}
+	if cfg.SkillsRuntime == nil || cfg.SkillsRuntime.ConfigFile != aiclipaths.DefaultRuntimeConfigRelativePath {
+		t.Fatalf("expected build-profile runtime config default, got %+v", cfg.SkillsRuntime)
 	}
 }
 
@@ -144,9 +152,31 @@ func TestResolveGlobalConfigPathUsesHomeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveGlobalConfigPath failed: %v", err)
 	}
-	expected := filepath.Join(home, ".aicli", "config.yaml")
+	expected := filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName)
 	if path != expected {
 		t.Fatalf("unexpected global config path: %q, want %q", path, expected)
+	}
+}
+
+func TestDefaultConfigSearchPathsUseBuildProfileNames(t *testing.T) {
+	home := t.TempDir()
+	previous := userHomeDir
+	userHomeDir = func() (string, error) {
+		return home, nil
+	}
+	t.Cleanup(func() {
+		userHomeDir = previous
+	})
+
+	paths := DefaultConfigSearchPaths()
+	expected := []string{
+		filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName),
+		filepath.Join(".aicli", aiclipaths.DefaultConfigFileName),
+		aiclipaths.DefaultCLIConfigFileName,
+		filepath.Join("configs", aiclipaths.DefaultConfigFileName),
+	}
+	if strings.Join(paths, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected %s config search paths:\n got: %v\nwant: %v", aiclipaths.BuildProfile, paths, expected)
 	}
 }
 
@@ -186,6 +216,77 @@ func TestDefaultDotEnvSearchPathsDeriveFromConfigSearchPaths(t *testing.T) {
 	}
 	if strings.Join(paths, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected .env search paths:\n got: %v\nwant: %v", paths, expected)
+	}
+}
+
+func TestExplicitConfigPathFromArgsUsesLastFlagBeforeSeparator(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "long flag with separate value",
+			args: []string{"serve", "--config", filepath.Join("profiles", "first.yaml")},
+			want: filepath.Join("profiles", "first.yaml"),
+		},
+		{
+			name: "short flag with equals",
+			args: []string{"-c=" + filepath.Join("profiles", "short.yaml"), "chat"},
+			want: filepath.Join("profiles", "short.yaml"),
+		},
+		{
+			name: "attached short flag",
+			args: []string{"-c" + filepath.Join("profiles", "attached.yaml"), "chat"},
+			want: filepath.Join("profiles", "attached.yaml"),
+		},
+		{
+			name: "last repeated flag wins",
+			args: []string{
+				"--config=first.yaml",
+				"chat",
+				"-c",
+				filepath.Join("profiles", "last.yaml"),
+			},
+			want: filepath.Join("profiles", "last.yaml"),
+		},
+		{
+			name: "flags after separator are ignored",
+			args: []string{"chat", "--", "--config", "ignored.yaml"},
+			want: "",
+		},
+		{
+			name: "unrelated args",
+			args: []string{"chat", "--message", "hello"},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExplicitConfigPathFromArgs(tt.args); got != tt.want {
+				t.Fatalf("ExplicitConfigPathFromArgs(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStartupDotEnvSearchPathsPrefersExplicitConfigDirectory(t *testing.T) {
+	paths := StartupDotEnvSearchPaths(
+		[]string{"chat", "--config", filepath.Join("profiles", "custom.yaml")},
+		[]string{
+			filepath.Join("configs", "config.yaml"),
+			filepath.Join("profiles", "fallback.yaml"),
+			"config.yaml",
+		},
+	)
+	expected := []string{
+		filepath.Join("profiles", ".env"),
+		filepath.Join("configs", ".env"),
+		".env",
+	}
+	if strings.Join(paths, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected startup .env paths:\n got: %v\nwant: %v", paths, expected)
 	}
 }
 

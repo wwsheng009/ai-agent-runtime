@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -85,6 +86,29 @@ func TestResolveRuntimeServerSessionDir_ResolvesConfiguredRelativePathFromConfig
 	expected := filepath.Clean(filepath.Join("backend", "data", "runtime", "sessions"))
 	if resolved != expected {
 		t.Fatalf("expected %q, got %q", expected, resolved)
+	}
+}
+
+func TestNormalizeSkillsRuntimeConfigUsesBuildProfileRuntimeConfig(t *testing.T) {
+	skills := normalizeSkillsRuntimeConfig(&config.Config{})
+	if got := filepath.Base(skills.ConfigFile); got != aiclipaths.DefaultRuntimeConfigFileName {
+		t.Fatalf("default runtime config = %q, want %s", skills.ConfigFile, aiclipaths.DefaultRuntimeConfigFileName)
+	}
+	if _, err := os.Stat(skills.ConfigFile); err != nil {
+		t.Fatalf("default runtime config should resolve to an existing asset: %q: %v", skills.ConfigFile, err)
+	}
+}
+
+func TestNormalizeSkillsRuntimeConfigPreservesExplicitRuntimeConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom-runtime.yaml")
+	if err := os.WriteFile(path, []byte("version: v1\n"), 0o644); err != nil {
+		t.Fatalf("write custom runtime config: %v", err)
+	}
+	skills := normalizeSkillsRuntimeConfig(&config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: path},
+	})
+	if skills.ConfigFile != path {
+		t.Fatalf("explicit runtime config = %q, want %q", skills.ConfigFile, path)
 	}
 }
 

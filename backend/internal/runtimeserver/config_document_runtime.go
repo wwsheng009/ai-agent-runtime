@@ -9,6 +9,7 @@ import (
 	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -546,9 +547,9 @@ func normalizeSkillsRuntimeConfigForHotReload(cfg *agentconfig.Config) *agentcon
 		*skillsCfg = *cfg.SkillsRuntime
 	}
 
-	if strings.TrimSpace(skillsCfg.ConfigFile) == "" {
-		skillsCfg.ConfigFile = "backend/configs/runtime.yaml"
-	}
+	skillsCfg.ConfigFile = aiclipaths.ResolveRuntimeConfigBootstrapPath(
+		skillsCfg.ConfigFile,
+	)
 	if strings.TrimSpace(skillsCfg.SkillDir) == "" {
 		skillsCfg.SkillDir = "./.agents/skills"
 	}

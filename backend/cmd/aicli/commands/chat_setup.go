@@ -879,7 +879,7 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 	awaitNoInteractiveLocalTeamDrain(session)
 	// Skip durable flush for brand-new shells that never left memory. Writing
 	// an empty system-prompt-only session only pollutes history and forces a
-	// late session_history.sqlite open during shutdown.
+	// late session-history SQLite open during shutdown.
 	if !session.runtimeSessionUnpersisted || runtimeSessionHasConversation(session.RuntimeSession) || chatMessagesHaveConversation(session.Messages) {
 		warnIfChatSessionSyncFails(session, "shutdown", syncRuntimeSessionFromChat(session))
 	}

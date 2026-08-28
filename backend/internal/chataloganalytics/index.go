@@ -368,7 +368,7 @@ func loadSessionTitleCatalog(root string) (*sessionTitleCatalog, error) {
 	if _, enabled := analyticsIndexPath(root); !enabled {
 		return nil, nil
 	}
-	path := filepath.Join(aiclipaths.DefaultSessionsDir(), "session_history.sqlite")
+	path := filepath.Join(aiclipaths.DefaultSessionsDir(), aiclipaths.DefaultSessionHistoryFileName)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

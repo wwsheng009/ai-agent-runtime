@@ -17,7 +17,7 @@ func NewLoginCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "新增或更新 provider 登录凭证",
-		Long: `新增 provider 或修改现有 provider 的 base_url/API key/OAuth 凭证，校验 models endpoint 后写回 config.yaml。
+		Long: `新增 provider 或修改现有 provider 的 base_url/API key/OAuth 凭证，校验 models endpoint 后写回当前配置文件。
 
 首次使用常见流程：
   aicli init --global
@@ -60,7 +60,7 @@ chat 内也可使用 /login，与本命令共用同一套登录逻辑。
 	cmd.Flags().Bool("skip-site-detect", false, "跳过站点类型自动探测")
 	cmd.Flags().Bool("skip-account", false, "跳过账户余额/订阅同步")
 	cmd.Flags().Bool("require-account", false, "账户同步失败时使登录失败（默认 best-effort）")
-	cmd.Flags().String("newapi-access-token", "", "New-API system access token（写入 auth store，不写 config.yaml）")
+	cmd.Flags().String("newapi-access-token", "", "New-API system access token（写入 auth store，不写当前配置文件）")
 	cmd.Flags().String("newapi-user-id", "", "New-API subject user id（New-Api-User）")
 	cmd.Flags().String("output", "", "输出格式（text|json）")
 	cmd.Flags().BoolP("json", "j", false, "以 JSON 格式输出")

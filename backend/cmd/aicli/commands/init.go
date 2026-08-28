@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 type initCommandResult struct {
@@ -20,10 +21,10 @@ func NewInitCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "初始化 aicli starter 配置",
-		Long: `初始化本地 aicli 配置文件。
+		Long: fmt.Sprintf(`初始化本地 aicli 配置文件。
 
-默认会在当前工作目录的 .aicli/config.yaml 创建最小 starter 配置。
-如需写入用户目录，可使用 --global 或 --config ~/.aicli/config.yaml。
+默认会在当前工作目录的 .aicli/%[1]s 创建最小 starter 配置。
+如需写入用户目录，可使用 --global 或 --config ~/.aicli/%[1]s。
 如果配置文件已经存在，则保持原样，不会覆盖。
 
 首次使用推荐：
@@ -31,19 +32,22 @@ func NewInitCommand() *cobra.Command {
   aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-... --set-default
   aicli
 
-更多说明见 docs/aicli/quickstart.md。`,
-		Example: `  aicli init
+更多说明见 docs/aicli/quickstart.md。`, aiclipaths.DefaultConfigFileName),
+		Example: fmt.Sprintf(`  aicli init
   aicli init --global
-  aicli init --config .aicli/config.yaml
-  aicli init --config ~/.aicli/config.yaml
+  aicli init --config .aicli/%[1]s
+  aicli init --config ~/.aicli/%[1]s
   aicli init --config /path/to/custom/config.yaml
-  aicli init --global --json`,
+  aicli init --global --json`, aiclipaths.DefaultConfigFileName),
 		Run: func(cmd *cobra.Command, args []string) {
 			handleInitCommand(cmd)
 		},
 	}
 	cmd.Flags().StringP("config", "c", "", "初始化目标配置文件路径（留空时使用默认本地 starter 路径）")
-	cmd.Flags().Bool("global", false, "初始化用户目录下的 ~/.aicli/config.yaml（等价于 --config ~/.aicli/config.yaml）")
+	cmd.Flags().Bool("global", false, fmt.Sprintf(
+		"初始化用户目录下的 ~/.aicli/%[1]s（等价于 --config ~/.aicli/%[1]s）",
+		aiclipaths.DefaultConfigFileName,
+	))
 	cmd.Flags().String("output", "", "输出格式（text|json）")
 	cmd.Flags().BoolP("json", "j", false, "以 JSON 格式输出")
 	return cmd

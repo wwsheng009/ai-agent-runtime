@@ -22,6 +22,70 @@ func DefaultLogsDir() string {
 	return defaultAICLIDir("logs")
 }
 
+// DefaultRuntimeConfigSearchPaths returns the active profile's portable bundle
+// path followed by the repository-layout compatibility path. Build-tag files
+// select only the filename; path/layout behavior remains shared.
+func DefaultRuntimeConfigSearchPaths() []string {
+	return []string{
+		filepath.FromSlash(DefaultRuntimeConfigRelativePath),
+		filepath.Join("backend", "configs", DefaultRuntimeConfigFileName),
+	}
+}
+
+// ResolveRuntimeConfigBootstrapPath locates the active profile's default
+// runtime config from the working directory or executable directory. Explicit
+// non-default paths are returned unchanged so YAML/flag configuration keeps
+// precedence over build-profile defaults.
+func ResolveRuntimeConfigBootstrapPath(configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	portableDefault := filepath.FromSlash(DefaultRuntimeConfigRelativePath)
+	if configPath != "" && filepath.Clean(configPath) != filepath.Clean(portableDefault) {
+		return configPath
+	}
+
+	if cwd, err := os.Getwd(); err == nil {
+		if resolved := resolveDefaultRuntimeConfigPathFromBase(cwd); resolved != "" {
+			return resolved
+		}
+	}
+	if executable, err := os.Executable(); err == nil {
+		if resolved := resolveDefaultRuntimeConfigPathFromBase(filepath.Dir(executable)); resolved != "" {
+			return resolved
+		}
+	}
+
+	if configPath != "" {
+		return configPath
+	}
+	return DefaultRuntimeConfigRelativePath
+}
+
+func resolveDefaultRuntimeConfigPathFromBase(baseDir string) string {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(baseDir); err == nil {
+		baseDir = absolute
+	}
+	baseDir = filepath.Clean(baseDir)
+
+	for dir := baseDir; ; {
+		for _, relativePath := range DefaultRuntimeConfigSearchPaths() {
+			candidate := filepath.Join(dir, relativePath)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return filepath.Clean(candidate)
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
 // DatePartition returns year/month/day path segments for t in local time.
 // Zero times fall back to time.Now() so callers always get a usable partition.
 func DatePartition(t time.Time) (year, month, day string) {

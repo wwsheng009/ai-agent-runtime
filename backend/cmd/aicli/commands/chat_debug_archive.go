@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
@@ -280,7 +281,7 @@ func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, ite
 	sourcePath := currentRuntimeSessionPath(session)
 	snapshotName := filepath.Base(sourcePath)
 	if snapshotName == "" || snapshotName == "." {
-		snapshotName = "session_history.sqlite"
+		snapshotName = aiclipaths.DefaultSessionHistoryFileName
 	}
 	snapshotPath := filepath.Join(temporaryDir, snapshotName)
 	var snapshotErr error

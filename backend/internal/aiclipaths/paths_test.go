@@ -1,6 +1,7 @@
 package aiclipaths
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -45,6 +46,55 @@ func TestExpandUserPathLeavesNonCurrentUserTildePathsAlone(t *testing.T) {
 	expected := filepath.Clean("~other/.aicli/logs/aicli.log")
 	if got != expected {
 		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestDefaultRuntimeConfigSearchPathsUseActiveProfileFilename(t *testing.T) {
+	got := DefaultRuntimeConfigSearchPaths()
+	want := []string{
+		filepath.Join("configs", DefaultRuntimeConfigFileName),
+		filepath.Join("backend", "configs", DefaultRuntimeConfigFileName),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("runtime config search paths = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("runtime config search paths = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestResolveDefaultRuntimeConfigPathFromBaseSupportsBundleAndRepositoryLayouts(t *testing.T) {
+	for _, relativePath := range []string{
+		filepath.Join("configs", DefaultRuntimeConfigFileName),
+		filepath.Join("backend", "configs", DefaultRuntimeConfigFileName),
+	} {
+		t.Run(relativePath, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, relativePath)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+				t.Fatalf("create config directory: %v", err)
+			}
+			if err := os.WriteFile(configPath, []byte("version: v1\n"), 0o644); err != nil {
+				t.Fatalf("write runtime config: %v", err)
+			}
+			startDir := filepath.Join(root, "work", "nested")
+			if err := os.MkdirAll(startDir, 0o755); err != nil {
+				t.Fatalf("create start directory: %v", err)
+			}
+
+			if got := resolveDefaultRuntimeConfigPathFromBase(startDir); got != configPath {
+				t.Fatalf("resolved runtime config = %q, want %q", got, configPath)
+			}
+		})
+	}
+}
+
+func TestResolveRuntimeConfigBootstrapPathPreservesExplicitPath(t *testing.T) {
+	explicit := filepath.Join("custom", "runtime.yaml")
+	if got := ResolveRuntimeConfigBootstrapPath(explicit); got != explicit {
+		t.Fatalf("explicit runtime config = %q, want %q", got, explicit)
 	}
 }
 

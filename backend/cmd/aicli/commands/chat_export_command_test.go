@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -280,7 +281,7 @@ func TestDebugArchiveUsesStandaloneSQLiteSnapshot(t *testing.T) {
 	var databaseEntry *zip.File
 	foundCanonicalArtifact := false
 	for _, entry := range archive.File {
-		if entry.Name == "session_file/session_history.sqlite" {
+		if entry.Name == "session_file/"+aiclipaths.DefaultSessionHistoryFileName {
 			databaseEntry = entry
 		}
 		if strings.HasPrefix(entry.Name, "session_file/session-artifacts/"+runtimeSession.ID+"/") &&

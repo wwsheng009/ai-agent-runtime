@@ -9,8 +9,27 @@ import (
 
 	"github.com/stretchr/testify/require"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 )
+
+func TestNormalizeSkillsRuntimeConfigForHotReloadUsesProfileDefaultAndPreservesExplicitPath(t *testing.T) {
+	defaults := normalizeSkillsRuntimeConfigForHotReload(&agentconfig.Config{})
+	if filepath.Base(defaults.ConfigFile) != aiclipaths.DefaultRuntimeConfigFileName {
+		t.Fatalf("default runtime config = %q, want profile file %s", defaults.ConfigFile, aiclipaths.DefaultRuntimeConfigFileName)
+	}
+	if _, err := os.Stat(defaults.ConfigFile); err != nil {
+		t.Fatalf("default runtime config should resolve to an existing asset: %q: %v", defaults.ConfigFile, err)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "custom-runtime.yaml")
+	configured := normalizeSkillsRuntimeConfigForHotReload(&agentconfig.Config{
+		SkillsRuntime: &agentconfig.SkillsRuntimeConfig{ConfigFile: explicit},
+	})
+	if configured.ConfigFile != explicit {
+		t.Fatalf("explicit runtime config = %q, want %q", configured.ConfigFile, explicit)
+	}
+}
 
 type fakeRuntimeConfigApplyTarget struct {
 	aicliConfig    *agentconfig.Config
