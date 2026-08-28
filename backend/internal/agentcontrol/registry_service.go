@@ -103,6 +103,7 @@ type RegistryService struct {
 	startedAt time.Time
 	closed    bool
 	db        *sql.DB
+	sharedKey string
 	closers   []func() error
 }
 
@@ -172,13 +173,32 @@ func NewRegistryService(ctx context.Context, cfg RegistryServiceConfig) (*Regist
 			if service.db != nil {
 				return nil
 			}
-			pathKey := strings.TrimSpace(mailboxStore.path)
-			if pathKey != "" {
+			sharedKey := agentControlSharedDBKey(mailboxStore.dsn)
+			if sharedKey != "" {
 				agentControlPathOpenMu.Lock()
 				defer agentControlPathOpenMu.Unlock()
 			}
 			if err := ensureAgentControlStoreDirectory(mailboxStore.path); err != nil {
 				return err
+			}
+			attachDB := func(db *sql.DB) {
+				mailboxStore.openMu.Lock()
+				mailboxStore.db = db
+				mailboxStore.ownsDB = false
+				mailboxStore.openMu.Unlock()
+				agentStore.openMu.Lock()
+				agentStore.db = db
+				agentStore.ownsDB = false
+				agentStore.openMu.Unlock()
+				service.db = db
+				service.sharedKey = sharedKey
+			}
+			if sharedKey != "" {
+				if shared := agentControlSharedDBs[sharedKey]; shared != nil {
+					shared.refs++
+					attachDB(shared.db)
+					return nil
+				}
 			}
 			db, err := sql.Open("sqlite3", mailboxStore.dsn)
 			if err != nil {
@@ -201,15 +221,13 @@ func NewRegistryService(ctx context.Context, cfg RegistryServiceConfig) (*Regist
 				_ = db.Close()
 				return err
 			}
-			mailboxStore.openMu.Lock()
-			mailboxStore.db = db
-			mailboxStore.ownsDB = false
-			mailboxStore.openMu.Unlock()
-			agentStore.openMu.Lock()
-			agentStore.db = db
-			agentStore.ownsDB = false
-			agentStore.openMu.Unlock()
-			service.db = db
+			if sharedKey != "" {
+				agentControlSharedDBs[sharedKey] = &agentControlSharedDB{
+					db:   db,
+					refs: 1,
+				}
+			}
+			attachDB(db)
 			return nil
 		}
 		mailboxStore.sharedOpen = openShared
@@ -317,11 +335,13 @@ func (s *RegistryService) Close() error {
 	}
 	closers := append([]func() error(nil), s.closers...)
 	db := s.db
+	sharedKey := s.sharedKey
 	s.closed = true
 	s.MailboxStore = closedGlobalMailboxRegistryStore{}
 	s.AgentStore = closedAgentRegistryStore{}
 	s.closers = nil
 	s.db = nil
+	s.sharedKey = ""
 	s.mu.Unlock()
 
 	var firstErr error
@@ -334,7 +354,13 @@ func (s *RegistryService) Close() error {
 		}
 	}
 	if db != nil {
-		if err := db.Close(); err != nil && firstErr == nil {
+		var err error
+		if sharedKey != "" {
+			err = releaseAgentControlSharedDB(sharedKey, db)
+		} else {
+			err = db.Close()
+		}
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -346,10 +372,9 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 		return fmt.Errorf("agent control registry db is not initialized")
 	}
 	dsn = strings.TrimSpace(dsn)
-	if !isGlobalMailboxMemoryDSN(dsn) {
-		db.SetMaxOpenConns(8)
-		db.SetMaxIdleConns(4)
-	}
+	// Connection-pool limits are selected by the caller before configuration.
+	// Path-backed stores use one connection so concurrent writers are
+	// serialized in-process, including with the Go 1.20-compatible driver.
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		return fmt.Errorf("configure agent control registry foreign keys: %w", err)
 	}
@@ -357,9 +382,21 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 		return fmt.Errorf("configure agent control registry busy timeout: %w", err)
 	}
 	if !isGlobalMailboxMemoryDSN(dsn) {
-		var err error
+		agentControlJournalMu.Lock()
+		defer agentControlJournalMu.Unlock()
+		if _, configured := agentControlWALConfigured[dsn]; configured {
+			return nil
+		}
+		var (
+			journalMode string
+			err         error
+		)
 		for attempt := 0; attempt < 8; attempt++ {
-			if _, err = db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err == nil {
+			// journal_mode returns a result row. Consume it explicitly: older
+			// SQLite drivers can retain the schema lock when this PRAGMA is
+			// issued through Exec, wedging every later handle for the file.
+			err = db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&journalMode)
+			if err == nil {
 				break
 			}
 			if !strings.Contains(strings.ToLower(err.Error()), "database is locked") {
@@ -370,6 +407,10 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 		if err != nil {
 			return fmt.Errorf("configure agent control registry wal mode: %w", err)
 		}
+		if !strings.EqualFold(strings.TrimSpace(journalMode), "wal") {
+			return fmt.Errorf("configure agent control registry wal mode: sqlite returned %q", journalMode)
+		}
+		agentControlWALConfigured[dsn] = struct{}{}
 	}
 	return nil
 }
@@ -377,6 +418,59 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 // agentControlPathOpenMu serializes first-open/migrate of path-backed AgentControl
 // SQLite files across store instances in the same process.
 var agentControlPathOpenMu sync.Mutex
+
+// The Go 1.20-compatible SQLite driver cannot safely reissue journal_mode=WAL
+// from a second handle while the first handle remains open. Remember successful
+// configuration per DSN so later in-process handles use the file's existing
+// mode instead of attempting another schema-level journal transition.
+var (
+	agentControlJournalMu     sync.Mutex
+	agentControlWALConfigured = make(map[string]struct{})
+)
+
+type agentControlSharedDB struct {
+	db   *sql.DB
+	refs int
+}
+
+// agentControlSharedDBs keeps one physical pool per file DSN. RegistryService
+// instances still own independent lifecycle/store wrappers, while the old
+// Win7-compatible SQLite driver never has to coordinate multiple pools for the
+// same file inside one process.
+var agentControlSharedDBs = make(map[string]*agentControlSharedDB)
+
+func agentControlSharedDBKey(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" || isGlobalMailboxMemoryDSN(dsn) {
+		return ""
+	}
+	return dsn
+}
+
+func releaseAgentControlSharedDB(key string, db *sql.DB) error {
+	key = strings.TrimSpace(key)
+	if key == "" || db == nil {
+		return nil
+	}
+	agentControlPathOpenMu.Lock()
+	shared := agentControlSharedDBs[key]
+	if shared == nil || shared.db != db {
+		agentControlPathOpenMu.Unlock()
+		return fmt.Errorf("release unregistered agent control shared db: %s", key)
+	}
+	shared.refs--
+	if shared.refs > 0 {
+		agentControlPathOpenMu.Unlock()
+		return nil
+	}
+	delete(agentControlSharedDBs, key)
+	agentControlJournalMu.Lock()
+	delete(agentControlWALConfigured, key)
+	agentControlJournalMu.Unlock()
+	err := db.Close()
+	agentControlPathOpenMu.Unlock()
+	return err
+}
 
 type closedGlobalMailboxRegistryStore struct{}
 
