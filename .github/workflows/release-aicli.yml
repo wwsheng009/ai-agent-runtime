@@ -583,6 +583,18 @@ jobs:
             go test -tags ${{ env.WIN7_BUILD_TAGS }} ./internal/agent \
             -run 'TestAgentWithoutCancel|TestAgentWithTimeoutCause|TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents' \
             -count=1
+          # Profile defaults and the packaged runtime.win7.yaml must stay in
+          # lockstep with config discovery, session persistence, and the
+          # runtime-server bootstrap code.
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go test -tags ${{ env.WIN7_BUILD_TAGS }} \
+            ./internal/aiclipaths ./internal/agentconfig ./internal/config \
+            ./internal/chat ./cmd/runtime-server \
+            -count=1
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go test -tags ${{ env.WIN7_BUILD_TAGS }} ./cmd/aicli/commands \
+            -run 'Test(GetMCPConfigPath|ResolveGlobalRuntimeConfigPath|RunInitCommand|InitCommandHelp)' \
+            -count=1
           GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
             go test -tags ${{ env.WIN7_BUILD_TAGS }} ./cmd/aicli-console -count=1
           GOOS=windows GOARCH=amd64 GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
@@ -640,10 +652,11 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
           BASENAME="${BIN_NAME}-win7-${VERSION}-windows-amd64"
-          mkdir -p dist/release
+          mkdir -p dist/release/configs
           cp dist/aicli-win7.exe dist/release/${BIN_NAME}.exe
           cp dist/aicli-console-win7.exe dist/release/${BIN_NAME}-console.exe
           cp dist/runtime-server-win7.exe dist/release/runtime-server.exe
+          cp configs/runtime.win7.yaml dist/release/configs/runtime.win7.yaml
           cp ../docs/aicli/windows7.md dist/release/WINDOWS7-README.md
           # 可选的 README / LICENSE（与主 build job 一致）
           [ -f README.md ] && cp README.md dist/release/ || true

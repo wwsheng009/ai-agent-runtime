@@ -240,7 +240,7 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	ensureChatSystemPromptMessage(session)
 	// Keep the empty shell in memory only. Durable Save happens on the first
 	// real conversation content (or shutdown with content), so new-chat
-	// startup stays off the large session_history.sqlite open path.
+	// startup stays off the large session-history SQLite open path.
 	if !session.runtimeSessionUnpersisted {
 		if err := syncRuntimeSessionFromChat(session); err != nil {
 			return err

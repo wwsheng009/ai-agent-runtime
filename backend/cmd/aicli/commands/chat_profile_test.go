@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -183,6 +184,16 @@ func TestResolveChatProfileState_UnknownAgentWithoutProfileErrors(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveGlobalRuntimeConfigPath_UsesBuildProfileDefault(t *testing.T) {
+	got := resolveGlobalRuntimeConfigPath(nil)
+	if filepath.Base(got) != aiclipaths.DefaultRuntimeConfigFileName {
+		t.Fatalf("default runtime config path = %q, want profile file %s", got, aiclipaths.DefaultRuntimeConfigFileName)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("default runtime config path should resolve to the packaged/repository asset: %q: %v", got, err)
 	}
 }
 

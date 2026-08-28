@@ -37,7 +37,7 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-const runtimeServerDefaultConfigName = "config.yaml"
+const runtimeServerDefaultConfigName = aiclipaths.DefaultConfigFileName
 
 type runtimeServerCommandOptions struct {
 	ConfigPath string
@@ -68,9 +68,9 @@ func main() {
 }
 
 func run() int {
-	loadEnv()
-
 	args := os.Args[1:]
+	loadEnv(args)
+
 	if len(args) > 0 {
 		switch strings.ToLower(strings.TrimSpace(args[0])) {
 		case "help", "-h", "--help":
@@ -107,7 +107,11 @@ func printRuntimeServerRootUsage() {
 	fmt.Fprintln(os.Stdout, "  - 不带子命令时，等价于 `serve`，以前的启动方式保持兼容。")
 	fmt.Fprintln(os.Stdout, "  - `start` 会在后台启动服务并写入 PID 文件。")
 	fmt.Fprintln(os.Stdout, "  - `stop` 优先使用 PID 文件停止受管实例，也支持 `--pid` 直接停止指定进程。")
-	fmt.Fprintln(os.Stdout, "  - 未指定 `--config` 时，按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml 顺序查找。")
+	fmt.Fprintf(
+		os.Stdout,
+		"  - 未指定 `--config` 时，按 $HOME/.aicli/%[1]s -> ./.aicli/%[1]s -> ./%[1]s -> ./configs/%[1]s 顺序查找。\n",
+		runtimeServerDefaultConfigName,
+	)
 	fmt.Fprintln(os.Stdout, "  - 默认 PID 文件为 ./logs/runtime-server.pid。")
 }
 
@@ -122,7 +126,10 @@ func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 		PIDFile: runtimeserver.DefaultPIDFile,
 	}
 	flags := newRuntimeServerFlagSet("runtime-server serve")
-	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, fmt.Sprintf(
+		"配置文件路径；未指定时按默认搜索顺序查找 %s",
+		runtimeServerDefaultConfigName,
+	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
@@ -135,7 +142,10 @@ func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
 		Wait:    30 * time.Second,
 	}
 	flags := newRuntimeServerFlagSet("runtime-server start")
-	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, fmt.Sprintf(
+		"配置文件路径；未指定时按默认搜索顺序查找 %s",
+		runtimeServerDefaultConfigName,
+	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	flags.DurationVar(&opts.Wait, "wait", opts.Wait, "等待后台进程完成启动的超时时间")
@@ -160,7 +170,10 @@ func parseStatusOptions(args []string) (runtimeServerCommandOptions, error) {
 		PIDFile: runtimeserver.DefaultPIDFile,
 	}
 	flags := newRuntimeServerFlagSet("runtime-server status")
-	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, fmt.Sprintf(
+		"配置文件路径；未指定时按默认搜索顺序查找 %s",
+		runtimeServerDefaultConfigName,
+	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	return opts, flags.Parse(args)
@@ -1041,8 +1054,9 @@ func (a *runtimeServerApp) close() {
 	}
 }
 
-func loadEnv() {
-	path := config.ResolveDotEnvPath(defaultRuntimeServerDotEnvSearchPaths())
+func loadEnv(args []string) {
+	paths := config.StartupDotEnvSearchPaths(args, defaultRuntimeServerConfigSearchPaths())
+	path := config.ResolveDotEnvPath(paths)
 	if path == "" {
 		return
 	}
@@ -1060,9 +1074,9 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 	if cfg.SkillsRuntime == nil {
 		cfg.SkillsRuntime = &config.SkillsRuntimeConfig{}
 	}
-	if strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) == "" {
-		cfg.SkillsRuntime.ConfigFile = "backend/configs/runtime.yaml"
-	}
+	cfg.SkillsRuntime.ConfigFile = aiclipaths.ResolveRuntimeConfigBootstrapPath(
+		cfg.SkillsRuntime.ConfigFile,
+	)
 	if strings.TrimSpace(cfg.SkillsRuntime.SkillDir) == "" {
 		cfg.SkillsRuntime.SkillDir = "./.agents/skills"
 	}

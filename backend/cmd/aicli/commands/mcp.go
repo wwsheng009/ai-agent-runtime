@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/wwsheng009/ai-agent-runtime/internal/config/loader"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -159,23 +159,12 @@ func getMCPConfigPath() string {
 		return mcpConfigFile
 	}
 
-	// 先尝试从 configs/config.yaml 读取
-	mainConfigPath := "configs/config.yaml"
-	if loader.NewLoader(mainConfigPath).ConfigExists() {
-		type cfgStruct struct {
-			AICLI *struct {
-				MCP *struct {
-					ConfigFile string `yaml:"config_file"`
-				} `yaml:"mcp"`
-			} `yaml:"aicli"`
-		}
-		var cfg cfgStruct
-		ldr := loader.NewLoader(mainConfigPath)
-		if err := ldr.Load(&cfg); err == nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && cfg.AICLI.MCP.ConfigFile != "" {
-			// 如果指定路径存在且文件存在，则返回
-			if _, err := os.Stat(cfg.AICLI.MCP.ConfigFile); err == nil {
-				return cfg.AICLI.MCP.ConfigFile
-			}
+	// Reuse the root command's effective config. Re-scanning a default agent
+	// config here would ignore an explicit --config selection and could cross
+	// build-profile boundaries.
+	if configured := resolveConfiguredMCPConfigPath(agentconfig.GetGlobalConfig()); configured != "" {
+		if _, err := os.Stat(configured); err == nil {
+			return configured
 		}
 	}
 

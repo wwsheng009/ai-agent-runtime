@@ -6,6 +6,7 @@ import (
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
@@ -185,13 +186,15 @@ func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProf
 }
 
 func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
+	configPath := aiclipaths.DefaultRuntimeConfigRelativePath
 	if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
-		if resolved := resolveExistingPathValue(cfg.SkillsRuntime.ConfigFile, false); resolved != "" {
-			return resolved
-		}
-		return strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
+		configPath = strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
 	}
-	return "configs/runtime.yaml"
+	configPath = aiclipaths.ResolveRuntimeConfigBootstrapPath(configPath)
+	if resolved := resolveExistingPathValue(configPath, false); resolved != "" {
+		return resolved
+	}
+	return configPath
 }
 
 func resolveConfiguredMCPConfigPath(cfg *config.Config) string {

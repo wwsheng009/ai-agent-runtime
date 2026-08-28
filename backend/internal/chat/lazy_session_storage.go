@@ -10,12 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // lazySessionStorage defers opening the durable backend until the first real
 // storage operation. This keeps new-chat startup off the critical path of
-// opening a large session_history.sqlite when no resume/list/load is needed.
+// opening a large session-history SQLite database when no resume/list/load is needed.
 type lazySessionStorage struct {
 	cfg PersistentSessionStorageConfig
 
@@ -112,7 +113,7 @@ func (s *lazySessionStorage) Path() string {
 		return path
 	}
 	if dir := strings.TrimSpace(s.cfg.Dir); dir != "" {
-		return filepath.Join(dir, "session_history.sqlite")
+		return filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName)
 	}
 	return ""
 }
@@ -132,7 +133,7 @@ func (s *lazySessionStorage) durableFileExists() bool {
 // shouldOpenForMaintenance returns true when housekeeping can safely touch the
 // durable backend: either it is already open in this process, or an existing
 // file is present from a previous run. A brand-new chat must not create an empty
-// session_history.sqlite just because a cleanup timer fired.
+// session-history SQLite database just because a cleanup timer fired.
 func (s *lazySessionStorage) shouldOpenForMaintenance() bool {
 	return s.Opened() || s.durableFileExists()
 }
@@ -231,7 +232,7 @@ func (s *lazySessionStorage) Close(ctx context.Context, sessionID string) error 
 func (s *lazySessionStorage) Cleanup(ctx context.Context, after time.Time) (int, error) {
 	// Background timers must not force a first open of a large history DB
 	// just to discover there is nothing to clean. After restart, though, an
-	// existing session_history.sqlite still needs maintenance.
+	// existing session-history SQLite database still needs maintenance.
 	if !s.shouldOpenForMaintenance() {
 		return 0, nil
 	}

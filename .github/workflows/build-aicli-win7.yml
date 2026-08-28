@@ -76,6 +76,18 @@ jobs:
             go test -tags ${{ env.BUILD_TAGS }} ./internal/agent \
             -run 'TestAgentWithoutCancel|TestAgentWithTimeoutCause|TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents' \
             -count=1
+          # Profile defaults and the packaged runtime.win7.yaml must stay in
+          # lockstep with config discovery, session persistence, and the
+          # runtime-server bootstrap code.
+          GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go test -tags ${{ env.BUILD_TAGS }} \
+            ./internal/aiclipaths ./internal/agentconfig ./internal/config \
+            ./internal/chat ./cmd/runtime-server \
+            -count=1
+          GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go test -tags ${{ env.BUILD_TAGS }} ./cmd/aicli/commands \
+            -run 'Test(GetMCPConfigPath|ResolveGlobalRuntimeConfigPath|RunInitCommand|InitCommandHelp)' \
+            -count=1
           GOFLAGS="-modfile=${{ env.MODFILE }}" \
             go test -tags ${{ env.BUILD_TAGS }} ./cmd/aicli-console -count=1
           # Cross-compile the command tests instead of executing a Windows test
@@ -141,10 +153,11 @@ jobs:
           fi
           BASENAME="aicli-${VERSION}-windows-amd64"
           rm -rf dist/release
-          mkdir -p dist/release
+          mkdir -p dist/release/configs
           cp dist/${{ env.BIN_NAME }}.exe dist/release/aicli.exe
           cp dist/${{ env.CONSOLE_BIN_NAME }}.exe dist/release/aicli-console.exe
           cp dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe dist/release/runtime-server.exe
+          cp configs/runtime.win7.yaml dist/release/configs/runtime.win7.yaml
           cp ../docs/aicli/windows7.md dist/release/WINDOWS7-README.md
           (
             cd dist/release

@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -64,10 +65,10 @@ func TestPrepareChatPersistence_DoesNotOpenSQLiteEagerly(t *testing.T) {
 
 	// New-chat bootstrap only prepares a lazy manager; the large history DB
 	// must stay closed until the first Save/Load/List.
-	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	_, statErr := os.Stat(filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName))
 	require.True(t, os.IsNotExist(statErr), "prepareChatPersistence must not open sqlite for a new chat")
 	if pathReader, ok := state.runtimeSessionManager.GetStorage().(interface{ Path() string }); ok {
-		require.Equal(t, filepath.Join(dir, "session_history.sqlite"), pathReader.Path())
+		require.Equal(t, filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName), pathReader.Path())
 	}
 }
 
@@ -93,19 +94,19 @@ func TestCreateNewRuntimeConversation_DefersDurableSave(t *testing.T) {
 	require.Equal(t, session.RuntimeSession.ID, session.Logger.sessionLog.RuntimeSessionID)
 	require.Equal(t, "deferred", session.Logger.sessionLog.Title)
 
-	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	_, statErr := os.Stat(filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName))
 	require.True(t, os.IsNotExist(statErr), "empty new session must not open sqlite")
 
 	// Shutdown without conversation content must stay off the durable path.
 	finalizeChatSession(session)
 	require.True(t, session.runtimeSessionUnpersisted)
-	_, statErr = os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	_, statErr = os.Stat(filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName))
 	require.True(t, os.IsNotExist(statErr), "empty finalize must not open sqlite")
 
 	session.Messages = append(session.Messages, *runtimetypes.NewUserMessage("hello"))
 	require.NoError(t, ensureChatRuntimeSessionPersisted(session))
 	require.False(t, session.runtimeSessionUnpersisted)
-	_, statErr = os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	_, statErr = os.Stat(filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName))
 	require.NoError(t, statErr)
 
 	loaded, err := manager.Get(context.Background(), session.RuntimeSession.ID)
@@ -199,7 +200,7 @@ func TestRestoreChatPersistenceState_NewSessionStaysUnpersisted(t *testing.T) {
 	}, &chatCommandOptions{})
 	require.NoError(t, err)
 	require.True(t, session.runtimeSessionUnpersisted)
-	_, statErr := os.Stat(filepath.Join(dir, "session_history.sqlite"))
+	_, statErr := os.Stat(filepath.Join(dir, aiclipaths.DefaultSessionHistoryFileName))
 	require.True(t, os.IsNotExist(statErr))
 }
 

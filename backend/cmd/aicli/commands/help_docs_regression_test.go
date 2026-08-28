@@ -9,13 +9,14 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 func TestInitCommandHelpMentionsStarterPathAndDocs(t *testing.T) {
 	cmd := NewInitCommand()
 	text := cmd.Long + "\n" + cmd.Example
 	for _, want := range []string{
-		".aicli/config.yaml",
+		".aicli/" + aiclipaths.DefaultConfigFileName,
 		"--global",
 		"aicli login --provider openai",
 		"docs/aicli/quickstart.md",

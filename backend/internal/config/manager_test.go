@@ -10,6 +10,25 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
+func TestWin7RuntimeConfigUsesDedicatedSessionDatabase(t *testing.T) {
+	configDir := filepath.Join("..", "..", "configs")
+	mainManager := NewRuntimeManager(filepath.Join(configDir, "runtime.yaml"))
+	win7Manager := NewRuntimeManager(filepath.Join(configDir, "runtime.win7.yaml"))
+	require.NoError(t, mainManager.Load())
+	require.NoError(t, win7Manager.Load())
+
+	mainConfig := mainManager.Get()
+	win7Config := win7Manager.Get()
+	require.Equal(t, "sqlite", win7Config.Sessions.Backend)
+	require.Equal(t, "session_history_win7.sqlite", win7Config.Sessions.StorePath)
+
+	// The Win7 file is an override profile, not an independent behavior fork.
+	// Keep every effective value aligned with runtime.yaml except the dedicated
+	// session DB required by its Go 1.20-compatible SQLite driver.
+	win7Config.Sessions = mainConfig.Sessions
+	require.Equal(t, mainConfig, win7Config)
+}
+
 func TestRuntimeManager_VersionHistoryAndRollback(t *testing.T) {
 	rm := NewRuntimeManager("")
 

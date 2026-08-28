@@ -5,11 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
-const starterConfigRelativePath = ".aicli/config.yaml"
-
-var userHomeDir = os.UserHomeDir
+var (
+	starterConfigRelativePath = filepath.Join(".aicli", aiclipaths.DefaultConfigFileName)
+	userHomeDir               = os.UserHomeDir
+)
 
 // UserHomeDirForTest returns the current home-directory resolver.
 // Tests can snapshot this before swapping in a deterministic resolver.
@@ -32,12 +35,12 @@ func SetUserHomeDirForTest(resolver func() (string, error)) {
 func DefaultConfigSearchPaths() []string {
 	paths := make([]string, 0, 4)
 	if home, err := userHomeDir(); err == nil && home != "" {
-		paths = append(paths, filepath.Join(home, ".aicli", "config.yaml"))
+		paths = append(paths, filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName))
 	}
 	paths = append(paths,
-		filepath.Join(".aicli", "config.yaml"),
-		"aicli.yaml",
-		filepath.Join("configs", "config.yaml"),
+		filepath.Join(".aicli", aiclipaths.DefaultConfigFileName),
+		aiclipaths.DefaultCLIConfigFileName,
+		filepath.Join("configs", aiclipaths.DefaultConfigFileName),
 	)
 	return paths
 }
@@ -53,6 +56,52 @@ func DefaultConfigSearchPaths() []string {
 // Callers should treat the first existing file as authoritative.
 func DefaultDotEnvSearchPaths() []string {
 	return DotEnvSearchPathsForConfigPaths(DefaultConfigSearchPaths())
+}
+
+// StartupDotEnvSearchPaths returns .env candidates for early process startup.
+// An explicitly selected --config/-c file takes precedence, followed by the
+// directories of the supplied default config candidates.
+//
+// Config flags must be inspected before the command framework parses them
+// because .env values are needed during command construction.
+func StartupDotEnvSearchPaths(args, defaultConfigPaths []string) []string {
+	configPaths := make([]string, 0, len(defaultConfigPaths)+1)
+	if explicitPath := ExplicitConfigPathFromArgs(args); explicitPath != "" {
+		configPaths = append(configPaths, explicitPath)
+	}
+	configPaths = append(configPaths, defaultConfigPaths...)
+	return DotEnvSearchPathsForConfigPaths(configPaths)
+}
+
+// ExplicitConfigPathFromArgs extracts the last --config/-c value that appears
+// before "--". Separate, equals, and attached shorthand forms (for example
+// -cconfig.yaml) are supported. Returning the last value matches pflag/cobra
+// behavior for repeated flags.
+func ExplicitConfigPathFromArgs(args []string) string {
+	var configPath string
+	for index := 0; index < len(args); index++ {
+		arg := strings.TrimSpace(args[index])
+		if arg == "--" {
+			break
+		}
+		switch arg {
+		case "--config", "-c":
+			if index+1 < len(args) {
+				index++
+				configPath = strings.TrimSpace(args[index])
+			}
+		default:
+			switch {
+			case strings.HasPrefix(arg, "--config="):
+				configPath = strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
+			case strings.HasPrefix(arg, "-c="):
+				configPath = strings.TrimSpace(strings.TrimPrefix(arg, "-c="))
+			case strings.HasPrefix(arg, "-c") && len(arg) > len("-c"):
+				configPath = strings.TrimSpace(strings.TrimPrefix(arg, "-c"))
+			}
+		}
+	}
+	return configPath
 }
 
 // DotEnvSearchPathsForConfigPaths maps each config file candidate to a .env
@@ -134,7 +183,7 @@ func ResolveGlobalConfigPath() (string, error) {
 //
 // The helper intentionally keeps the generated file minimal:
 // - provider-related sections stay empty so users can fill them in later
-// - non-provider settings continue to rely on code defaults
+// - only the selected runtime-config path is explicit; other settings use code defaults
 func EnsureStarterConfigFile(configPath string) (string, bool, error) {
 	configPath = normalizeConfigPath(configPath)
 	if configPath != "" {
@@ -171,18 +220,20 @@ func EnsureStarterConfigAtPath(configPath string) (string, bool, error) {
 }
 
 func defaultStarterConfigYAML() string {
-	return strings.TrimSpace(`
+	return strings.TrimSpace(fmt.Sprintf(`
 # Auto-generated starter config for aicli.
 # Add providers under providers.items, then set providers.default_provider when ready.
 # Add shared upstream request headers under providers.headers when required.
 aicli:
   chat:
     stream: true
+skills_runtime:
+  config_file: %s
 providers:
   default_provider: ""
   headers: {}
   items: {}
-`) + "\n"
+`, aiclipaths.DefaultRuntimeConfigRelativePath)) + "\n"
 }
 
 func normalizeConfigPath(path string) string {

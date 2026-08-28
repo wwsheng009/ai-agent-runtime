@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 func TestEnrichRollupTitlesFromSessionHistory(t *testing.T) {
@@ -19,7 +21,7 @@ func TestEnrichRollupTitlesFromSessionHistory(t *testing.T) {
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite3", filepath.Join(sessionsDir, "session_history.sqlite"))
+	db, err := sql.Open("sqlite3", filepath.Join(sessionsDir, aiclipaths.DefaultSessionHistoryFileName))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/consolehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
@@ -37,8 +38,9 @@ func main() {
 		os.Exit(consoleBootstrap.ExitCode)
 	}
 
-	// 加载 .env 文件（按 config.yaml 同样的查找顺序）
-	envPaths := config.DefaultDotEnvSearchPaths()
+	// 加载 .env 文件：显式 --config/-c 所在目录优先，其后按当前
+	// build profile 的默认配置目录顺序查找。
+	envPaths := config.StartupDotEnvSearchPaths(os.Args[1:], config.DefaultConfigSearchPaths())
 	envPath := config.ResolveDotEnvPath(envPaths)
 	if envPath != "" {
 		_ = godotenv.Load(envPath)
@@ -166,7 +168,11 @@ func main() {
 	}
 
 	// 全局 flags
-	rootCmd.PersistentFlags().StringP("config", "c", "", "配置文件路径（未指定时按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml 顺序查找）")
+	rootCmd.PersistentFlags().StringP("config", "c", "", fmt.Sprintf(
+		"配置文件路径（未指定时按 $HOME/.aicli/%[1]s -> ./.aicli/%[1]s -> ./%[2]s -> ./configs/%[1]s 顺序查找）",
+		aiclipaths.DefaultConfigFileName,
+		aiclipaths.DefaultCLIConfigFileName,
+	))
 	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
 	rootCmd.PersistentFlags().String("theme", "", "输出主题配色或明暗（classic|focus|contrast|mono 或 auto|dark|light；优先级: --theme > AICLI_THEME/AICLI_THEME_MODE > 配置）")
 	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")

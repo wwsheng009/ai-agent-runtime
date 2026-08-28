@@ -9,7 +9,7 @@ import (
 func TestResolveRuntimeServerConfigPathUsesConfigsConfigFromCurrentDir(t *testing.T) {
 	root := t.TempDir()
 	isolateRuntimeServerHome(t, root)
-	configPath := filepath.Join(root, "configs", "config.yaml")
+	configPath := filepath.Join(root, "configs", runtimeServerDefaultConfigName)
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
@@ -43,11 +43,11 @@ func TestResolveRuntimeServerConfigPathUsesConfigsConfigFromCurrentDir(t *testin
 func TestResolveRuntimeServerConfigPathPrefersProjectConfigYAMLOverConfigsDir(t *testing.T) {
 	root := t.TempDir()
 	isolateRuntimeServerHome(t, root)
-	configPath := filepath.Join(root, "config.yaml")
+	configPath := filepath.Join(root, runtimeServerDefaultConfigName)
 	if err := os.WriteFile(configPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	legacyPath := filepath.Join(root, "configs", "config.yaml")
+	legacyPath := filepath.Join(root, "configs", runtimeServerDefaultConfigName)
 	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
 		t.Fatalf("mkdir legacy dir: %v", err)
 	}
@@ -109,6 +109,27 @@ func TestResolveRuntimeServerConfigPathDoesNotRemapExplicitConfigPath(t *testing
 	}
 	if resolved != expected {
 		t.Fatalf("expected %q, got %q", expected, resolved)
+	}
+}
+
+func TestDefaultRuntimeServerConfigSearchPathsUseBuildProfileNames(t *testing.T) {
+	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
+
+	paths := defaultRuntimeServerConfigSearchPaths()
+	expected := []string{
+		filepath.Join(root, "home", ".aicli", runtimeServerDefaultConfigName),
+		filepath.Join(".aicli", runtimeServerDefaultConfigName),
+		runtimeServerDefaultConfigName,
+		filepath.Join("configs", runtimeServerDefaultConfigName),
+	}
+	if len(paths) != len(expected) {
+		t.Fatalf("unexpected config path count: got %d %v, want %d %v", len(paths), paths, len(expected), expected)
+	}
+	for i := range expected {
+		if paths[i] != expected[i] {
+			t.Fatalf("unexpected config path at %d: got %q, want %q\nall paths: %v", i, paths[i], expected[i], paths)
+		}
 	}
 }
 

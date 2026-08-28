@@ -29,6 +29,8 @@ C:\Tools\aicli\
   aicli.exe
   aicli-console.exe
   runtime-server.exe
+  configs\
+    runtime.win7.yaml
 ```
 
 `runtime-server.exe` 是 Win7 兼容的 runtime server（Go 1.20 构建，使用
@@ -70,8 +72,31 @@ set OPENAI_API_KEY=
 默认配置保存在：
 
 ```text
-%USERPROFILE%\.aicli\config.yaml
+%USERPROFILE%\.aicli\config.win7.yaml
 ```
+
+Win7 兼容版不会默认读取普通版的 `config.yaml`。兼容包内还包含独立的
+runtime 配置：
+
+```text
+C:\Tools\aicli\configs\runtime.win7.yaml
+```
+
+该配置以及 Win7 分支的代码级回退值都会把会话数据库设为：
+
+```text
+%USERPROFILE%\.aicli\sessions\session_history_win7.sqlite
+```
+
+普通版继续使用
+`%USERPROFILE%\.aicli\sessions\session_history.sqlite`。两者的 `-wal` /
+`-shm` 文件也因此完全分离，避免 Go 1.20 兼容版的旧 SQLite 驱动与普通版
+的新驱动同时操作同一数据库。代价是两个版本的会话历史默认互不可见。
+
+如果要把普通版历史一次性复制给 Win7 版，必须先正常停止所有正在访问原
+数据库的 `aicli` 和 `runtime-server` 进程；不要在 WAL 写入期间只复制主
+`.sqlite` 文件。更安全的方式是使用应用的导出/导入能力或 SQLite
+backup/snapshot。
 
 首次看到 `.env file not found` 警告不影响使用；`.env` 是可选项。
 
@@ -172,6 +197,14 @@ winpty ./aicli.exe chat --compat-mode
   Win7 客户端 `aicli.exe chat --runtime-server <host:port>` 可连接本机或
   其他机器上的 server。win7 兼容包未内嵌完整前端页面（`win7compat`
   构建使用占位 `dist/`），`/` 返回运行时信息，功能通过 API 与 aicli 使用。
+- Win7 runtime server 默认查找 `config.win7.yaml`，并使用
+  `configs\runtime.win7.yaml`。若要与普通版 server 同机并行运行，还应使用
+  不同端口和 PID 文件，例如：
+
+  ```bat
+  runtime-server.exe start --listen 127.0.0.1:8102 --pid-file logs\runtime-server-win7.pid
+  ```
+
 - `win7compat` 构建当前禁用 MCP 集成；需要 MCP 时应在受支持的新系统上运行。
 - 搜索工具找不到外部 `rg.exe` 时会回退到内置扫描器。若自行提供 ripgrep，
   也必须确认该 ripgrep 版本能在 Windows 7 上启动。
