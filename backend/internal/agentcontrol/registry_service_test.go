@@ -279,6 +279,9 @@ func TestRegistryServiceSharedSQLiteConcurrentInstances(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	if first.db == nil || first.db != second.db {
+		t.Fatalf("path-backed services must share one physical DB pool: first=%p second=%p", first.db, second.db)
+	}
 	if len(otherErrors) > 0 {
 		msgs := make([]string, 0, len(otherErrors))
 		for _, err := range otherErrors {
@@ -345,6 +348,22 @@ func TestRegistryServiceSharedSQLiteConcurrentInstances(t *testing.T) {
 	}
 	if len(afterClose) != 4 {
 		t.Fatalf("unexpected agent rows after first close: %#v", afterClose)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("close second service: %v", err)
+	}
+
+	reopened, err := NewRegistryService(ctx, RegistryServiceConfig{StorePath: storePath})
+	if err != nil {
+		t.Fatalf("reopen registry service: %v", err)
+	}
+	defer reopened.Close()
+	reopenedAgents, err := reopened.AgentStore.ListAgentControlAgents(ctx, AgentFilter{RootSessionID: "root-session"})
+	if err != nil {
+		t.Fatalf("reopened service should remain usable: %v", err)
+	}
+	if len(reopenedAgents) != 4 {
+		t.Fatalf("unexpected agent rows after reopen: %#v", reopenedAgents)
 	}
 }
 
