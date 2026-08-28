@@ -51,6 +51,7 @@ func TestNewChatCommandRegistersSharedFlagsAndHelp(t *testing.T) {
 		"permission-mode",
 		"runtime-server",
 		"image",
+		"input-mode",
 	} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Fatalf("chat flag %q not registered", name)
@@ -68,6 +69,44 @@ func TestNewChatCommandRegistersSharedFlagsAndHelp(t *testing.T) {
 	}
 	if got := cmd.Flags().Lookup("prompt").Shorthand; got != "" {
 		t.Fatalf("prompt unexpectedly claimed shorthand %q", got)
+	}
+}
+
+func TestParseChatCommandOptionsConsoleInputMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr string
+	}{
+		{name: "default auto", want: chatConsoleInputAuto},
+		{name: "system", value: "system", want: chatConsoleInputSystem},
+		{name: "custom case insensitive", value: " CUSTOM ", want: chatConsoleInputCustom},
+		{name: "invalid", value: "raw", wantErr: "--input-mode 必须是"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewChatCommand(func() *config.Config { return nil })
+			if tt.value != "" {
+				if err := cmd.Flags().Set("input-mode", tt.value); err != nil {
+					t.Fatalf("Set input-mode: %v", err)
+				}
+			}
+			opts, err := parseChatCommandOptions(cmd, &config.Config{})
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseChatCommandOptions: %v", err)
+			}
+			if opts.InputMode != tt.want {
+				t.Fatalf("InputMode = %q, want %q", opts.InputMode, tt.want)
+			}
+		})
 	}
 }
 

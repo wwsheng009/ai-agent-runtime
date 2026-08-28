@@ -293,6 +293,22 @@ func (h *Handler) RestoreSessionCheckpoint(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Rewind rewrites session history. The hub actor no longer holds the
+	// session lease while idle (run-scoped leases), so take it explicitly for
+	// the mutation and yield to any same-process web turn before it.
+	leaseHandle, leaseErr := h.acquireSessionLease(r.Context(), sessionID, sessionActorLeaseOwnerKind, "checkpoint-restore")
+	if leaseErr != nil {
+		if h.writeSessionLeaseConflict(w, leaseErr) {
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, leaseErr)
+		return
+	}
+	if leaseHandle != nil {
+		defer func() {
+			_ = leaseHandle.Release(context.Background())
+		}()
+	}
 	result, err := actor.Rewind(r.Context(), checkpointID, mode)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {

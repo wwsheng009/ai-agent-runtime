@@ -23,7 +23,7 @@ import (
 // canonical history instead of writing/replaying terminal rows directly.
 func handleInteractiveBacktrackSelect(session *ChatSession) bool {
 	if session != nil && session.Interaction != nil && !session.Interaction.IsReady() {
-		session.Interaction.RenderLocalSupplement("[input] 当前操作仍在进行，无法打开回溯选择器。")
+		session.Interaction.RenderLocalSupplement("[input] 当前操作仍在进行，无法打开回溯选择器。可等待其完成，或连续按两次 Ctrl+C 中断/退出。")
 		return false
 	}
 	if unifiedDirectInteractiveOutput(session) {

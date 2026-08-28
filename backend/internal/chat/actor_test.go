@@ -4852,3 +4852,59 @@ func TestSessionHubStopAsyncRemovesActorAndStopsRun(t *testing.T) {
 	require.NoError(t, actor.StopContext(stopCtx))
 	require.True(t, actor.IsStopped())
 }
+
+func TestSessionActorOnRunFinishedFiresOncePerCompletedRun(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-run-finished-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "gpt-4",
+		MaxRetries:   1,
+	})
+	mockProvider := NewMockLLMProviderForChat()
+	runtime.RegisterProvider(mockProvider.Name(), mockProvider)
+	_ = runtime.RegisterProviderAlias("gpt-4", mockProvider.Name())
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-run-finished-agent",
+		Model:    "gpt-4",
+		MaxSteps: 3,
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	finished := make(chan struct{}, 4)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+		OnRunFinished: func() {
+			finished <- struct{}{}
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	// First completed run must fire OnRunFinished exactly once.
+	for i := 0; i < 2; i++ {
+		result, err := actor.SubmitPrompt(ctx, "Hello there", nil)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("OnRunFinished was not fired after run %d", i+1)
+		}
+		select {
+		case <-finished:
+			t.Fatalf("OnRunFinished fired more than once after run %d", i+1)
+		default:
+		}
+	}
+}

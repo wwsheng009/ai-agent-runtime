@@ -686,6 +686,9 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		}
 		result, state, err, completed := submitSessionPrompt(actor, r.Context(), prompt, req.RunMeta)
 		if err != nil {
+			if h.writeSessionLeaseConflict(w, err) {
+				return
+			}
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -716,6 +719,9 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			StripMetadataKeys:    append([]string(nil), req.StripMetadataKeys...),
 		})
 		if err != nil {
+			if h.writeSessionLeaseConflict(w, err) {
+				return
+			}
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -771,6 +777,21 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		if checkpointID == "" {
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "checkpoint_id is required"))
 			return
+		}
+		// Rewind rewrites session history; the run-scoped lease is taken
+		// explicitly while the actor is idle (see buildSessionActor).
+		leaseHandle, leaseErr := h.acquireSessionLease(r.Context(), sessionID, sessionActorLeaseOwnerKind, "command-rewind")
+		if leaseErr != nil {
+			if h.writeSessionLeaseConflict(w, leaseErr) {
+				return
+			}
+			h.writeError(w, http.StatusInternalServerError, leaseErr)
+			return
+		}
+		if leaseHandle != nil {
+			defer func() {
+				_ = leaseHandle.Release(context.Background())
+			}()
 		}
 		result, err := actor.Rewind(r.Context(), checkpointID, strings.TrimSpace(req.Mode))
 		if err != nil {

@@ -62,12 +62,12 @@ type WakeSchedulerConfig struct {
 type WakeScheduler struct {
 	store Store
 
-	rateMu   sync.Mutex
-	claims   map[string][]time.Time // rootScopeID -> claim timestamps
+	rateMu sync.Mutex
+	claims map[string][]time.Time // rootScopeID -> claim timestamps
 
-	rateWindow         time.Duration
-	maxAutoWake        int
-	now                func() time.Time
+	rateWindow  time.Duration
+	maxAutoWake int
+	now         func() time.Time
 }
 
 // NewWakeScheduler creates a wake scheduler over a durable store.
@@ -84,11 +84,11 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		maxAutoWake = 5
 	}
 	return &WakeScheduler{
-		store:         store,
-		claims:        map[string][]time.Time{},
-		rateWindow:    rateWindow,
-		maxAutoWake:   maxAutoWake,
-		now:           timeNow,
+		store:       store,
+		claims:      map[string][]time.Time{},
+		rateWindow:  rateWindow,
+		maxAutoWake: maxAutoWake,
+		now:         timeNow,
 	}
 }
 
@@ -111,14 +111,14 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 		strings.TrimSpace(req.WakeReason),
 	}, "|")
 	w := WakePending{
-		WakeID:               "wake_" + newWakeID(),
-		RootScopeID:          strings.TrimSpace(req.RootScopeID),
+		WakeID:                "wake_" + newWakeID(),
+		RootScopeID:           strings.TrimSpace(req.RootScopeID),
 		TargetParentSessionID: strings.TrimSpace(req.TargetParentSessionID),
-		TargetParentTeamID:   strings.TrimSpace(req.TargetParentTeamID),
-		WakeReason:           strings.TrimSpace(req.WakeReason),
-		NotificationSeq:      req.NotificationSeq,
-		DedupKey:             dedupKey,
-		CreatedAt:            s.now().UTC(),
+		TargetParentTeamID:    strings.TrimSpace(req.TargetParentTeamID),
+		WakeReason:            strings.TrimSpace(req.WakeReason),
+		NotificationSeq:       req.NotificationSeq,
+		DedupKey:              dedupKey,
+		CreatedAt:             s.now().UTC(),
 	}
 	if err := s.store.InsertWakePending(ctx, w); err != nil {
 		return WakeResult{}, err
@@ -183,7 +183,12 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 	}
 
 	var claimed []WakePending
+	// A wake stores the sequence of the notification that caused it. Digest
+	// AfterSeq is exclusive, so use one less than the earliest claimed
+	// sequence; using the latest sequence directly drops every triggering
+	// notification from the wake digest.
 	afterSeq := int64(0)
+	firstNotificationSeq := int64(0)
 	for _, w := range pending {
 		ok, err := s.store.ClaimWakePending(ctx, w.WakeID, "wake_scheduler", s.now().UTC())
 		if err != nil {
@@ -192,13 +197,16 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		if !ok {
 			continue // claimed by a concurrent drainer; skip
 		}
-		if w.NotificationSeq > afterSeq {
-			afterSeq = w.NotificationSeq
+		if w.NotificationSeq > 0 && (firstNotificationSeq == 0 || w.NotificationSeq < firstNotificationSeq) {
+			firstNotificationSeq = w.NotificationSeq
 		}
 		claimed = append(claimed, w)
 	}
 	if len(claimed) == 0 {
 		return nil, nil, nil
+	}
+	if firstNotificationSeq > 0 {
+		afterSeq = firstNotificationSeq - 1
 	}
 
 	digest, err := BuildDigest(ctx, s.store, DigestRequest{
@@ -218,7 +226,9 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		}
 		_ = s.store.MarkNotificationDelivered(ctx, item.NotificationID, s.now().UTC())
 	}
-	s.recordClaim(rootScopeID, s.now().UTC())
+	if len(digest.Items) > 0 {
+		s.recordClaim(rootScopeID, s.now().UTC())
+	}
 	return claimed, digest, nil
 }
 

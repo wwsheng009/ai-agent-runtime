@@ -60,6 +60,14 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	for _, w := range claimed {
 		wakeIDs = append(wakeIDs, w.WakeID)
 	}
+	// The underlying notification may have been acknowledged, actioned, or
+	// resolved while the parent was busy. DrainRunnable still claims that
+	// stale durable wake so it can be cleaned up, but an empty digest must not
+	// launch a content-free supervision turn.
+	if len(digest.Items) == 0 {
+		c.release(ctx, wakeIDs)
+		return nil
+	}
 	if c.Deliver != nil {
 		if err := c.Deliver(ctx, parentSessionID, digest, wakeIDs); err != nil {
 			// Delivery failed: release the claims anyway. The notification

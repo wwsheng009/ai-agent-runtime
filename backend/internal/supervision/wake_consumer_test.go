@@ -20,7 +20,7 @@ func TestWakeConsumer_DeliversOneParentTurnPerDrain(t *testing.T) {
 	ctx := context.Background()
 	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{})
 	consumer := &WakeConsumer{
-		Wakes:   scheduler,
+		Wakes:    scheduler,
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
 	}
 
@@ -59,6 +59,7 @@ func TestWakeConsumer_DeliversOneParentTurnPerDrain(t *testing.T) {
 
 	mu.Lock()
 	require.Len(t, deliveries, 1, "two critical wakes must coalesce into one parent turn")
+	require.Equal(t, "root-session-1|2", deliveries[0], "wake digest must include both triggering notifications")
 	mu.Unlock()
 
 	// Wakes are resolved: a drain now finds nothing to do.
@@ -78,7 +79,7 @@ func TestWakeConsumer_ParentBusyKeepsWakeDurable(t *testing.T) {
 
 	runnable := true
 	consumer := &WakeConsumer{
-		Wakes:   scheduler,
+		Wakes:    scheduler,
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return runnable },
 	}
 	delivered := false
@@ -111,6 +112,42 @@ func TestWakeConsumer_ParentBusyKeepsWakeDurable(t *testing.T) {
 	claimed, _, err := scheduler.DrainRunnable(ctx, "root-session-1", "", "root-session-1", func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true })
 	require.NoError(t, err)
 	require.Empty(t, claimed, "wake must be resolved after delivery")
+}
+
+func TestWakeConsumer_AcknowledgedPendingWakeDoesNotStartParentTurn(t *testing.T) {
+	store := newTestStore(t, "wake-consumer-acknowledged")
+	ctx := context.Background()
+	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{})
+	delivered := false
+	consumer := &WakeConsumer{
+		Wakes:    scheduler,
+		Runnable: func(context.Context, string, string, string) bool { return true },
+		Deliver: func(context.Context, string, *Digest, []string) error {
+			delivered = true
+			return nil
+		},
+	}
+
+	notification, err := ProjectLifecycle(ctx, store, scheduler, LifecycleProjection{
+		RootScopeID:           "root-session-1",
+		TargetParentSessionID: "root-session-1",
+		SubjectKind:           SubjectAgentRun,
+		SubjectID:             "child-1",
+		EventType:             "exception",
+		Severity:              SeverityCritical,
+		SupervisionState:      SupervisionBlocked,
+	})
+	require.NoError(t, err)
+	acknowledged, err := store.AcknowledgeNotification(ctx, notification.NotificationID, time.Now().UTC(), notification.Version)
+	require.NoError(t, err)
+	require.True(t, acknowledged)
+
+	require.NoError(t, consumer.MaybeWakeParent(ctx, "root-session-1", "", "root-session-1"))
+	require.False(t, delivered, "an acknowledged stale wake must not submit the fixed auto-wake prompt")
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-session-1"})
+	require.NoError(t, err)
+	require.Empty(t, pending, "the stale durable wake must still be resolved")
 }
 
 // TestWakeConsumer_DeliveryFailureReleasesClaims verifies that a failed
@@ -193,7 +230,7 @@ func TestWakeConsumer_RateLimitKeepsWakeDurable(t *testing.T) {
 	store := newTestStore(t, "wake-consumer-ratelimit")
 	ctx := context.Background()
 	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{
-		RateWindow:          time.Hour,
+		RateWindow:           time.Hour,
 		MaxAutoWakePerWindow: 1,
 	})
 	consumer := &WakeConsumer{

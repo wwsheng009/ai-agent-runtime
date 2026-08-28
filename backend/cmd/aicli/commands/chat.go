@@ -1374,7 +1374,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		if strings.HasPrefix(input, "/") {
 			if !chatInputCommandAllowed(session, input) {
 				if session != nil && session.Interaction != nil {
-					session.Interaction.RenderLocalSupplement("[input] 当前状态不是 Ready，暂不接受 slash 命令；请等待 Ready 后重试。")
+					session.Interaction.RenderLocalSupplement("[input] 当前状态不是 Ready，暂不接受 slash 命令；可等待 Ready 后重试，或连续按两次 Ctrl+C 中断/退出。")
 				}
 				continue
 			}

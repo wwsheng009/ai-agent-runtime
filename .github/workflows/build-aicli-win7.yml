@@ -8,7 +8,7 @@ name: Build aicli for Windows 7 (Go 1.20)
 # 系统 API（如 Windows 10 1903+ 才有的 ConPTY），在 Win7 上启动即崩溃
 # （Exception 0xc0000005 PC=0x0）。
 # 本 workflow 使用 Go 1.20 + 独立的 go.win7.mod（降级依赖）+ win7compat
-# build tag（裁剪 MCP/markdown 渲染等依赖），产出可在 Windows 7 上运行的
+# build tag（裁剪要求更高 Go 版本的 MCP 依赖），产出可在 Windows 7 上运行的
 # aicli.exe。所有兼容代码由 build tag / 独立模块文件隔离，不影响主线。
 on:
   push:
@@ -23,7 +23,11 @@ env:
   GO_VERSION: '1.20.14'
   WORKDIR: backend
   CMD_PATH: ./cmd/aicli
+  CONSOLE_CMD_PATH: ./cmd/aicli-console
+  RUNTIME_SERVER_CMD_PATH: ./cmd/runtime-server
   BIN_NAME: aicli-win7
+  CONSOLE_BIN_NAME: aicli-console-win7
+  RUNTIME_SERVER_BIN_NAME: runtime-server-win7
   MODFILE: go.win7.mod
   BUILD_TAGS: win7compat
   CGO_ENABLED: '0'
@@ -64,26 +68,90 @@ jobs:
           GOFLAGS="-modfile=${{ env.MODFILE }}" go list -m -mod=mod all >/dev/null
           GOFLAGS="-modfile=${{ env.MODFILE }}" go mod verify
 
-      - name: Build Windows 7 compatible binary
+      - name: Test Go 1.20 compatibility shims and console launcher
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -euo pipefail
+          GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go test -tags ${{ env.BUILD_TAGS }} ./internal/agent \
+            -run 'TestAgentWithoutCancel|TestAgentWithTimeoutCause|TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents' \
+            -count=1
+          GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go test -tags ${{ env.BUILD_TAGS }} ./cmd/aicli-console -count=1
+          # Cross-compile the command tests instead of executing a Windows test
+          # binary on Linux. This catches Go 1.20/build-tag regressions in the
+          # ReadConsoleW Unicode/IME compatibility path.
+          GOOS=windows GOARCH=amd64 GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go test -tags ${{ env.BUILD_TAGS }} ./cmd/aicli/commands \
+            -run 'Test(ReadChatSessionLine|ParseChatCommandOptionsConsoleInputMode|DecodeSystemConsoleLine|ReadSystemConsoleUTF16Line|LegacyConsoleDispatchAcceptsCommittedIMEProcessCharacter)' \
+            -c -o /tmp/aicli-commands-win7.test.exe
+          test "$(head -c 2 /tmp/aicli-commands-win7.test.exe)" = "MZ"
+          rm -f /tmp/aicli-commands-win7.test.exe
+
+      - name: Build Windows 7 compatible binary
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
           mkdir -p dist
+          VERSION="${GITHUB_REF_NAME:-win7-dev}"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}"
+          GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go build -tags ${{ env.BUILD_TAGS }} -mod=mod -trimpath -ldflags "${LDFLAGS}" \
+            -o dist/${{ env.BIN_NAME }}.exe ${{ env.CMD_PATH }}
           GOFLAGS="-modfile=${{ env.MODFILE }}" \
             go build -tags ${{ env.BUILD_TAGS }} -mod=mod -trimpath \
-            -o dist/${{ env.BIN_NAME }}.exe ${{ env.CMD_PATH }}
+            -o dist/${{ env.CONSOLE_BIN_NAME }}.exe ${{ env.CONSOLE_CMD_PATH }}
+          # runtime-server：Win7 客户端通过 `aicli --runtime-server <host>` 连接。
+          # 版本注入走 internal/buildinfo（与主线 release workflow 一致）。
+          GOFLAGS="-modfile=${{ env.MODFILE }}" \
+            go build -tags ${{ env.BUILD_TAGS }} -mod=mod -trimpath \
+            -ldflags "-s -w -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.version=${VERSION} -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.buildTime=${BUILD_TIME}" \
+            -o dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe ${{ env.RUNTIME_SERVER_CMD_PATH }}
 
       - name: Verify binary build metadata
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -euo pipefail
-          ls -lh dist/${{ env.BIN_NAME }}.exe
-          # go version -m 输出编译工具链版本，确认确实是 Go 1.20 产物
-          go version -m dist/${{ env.BIN_NAME }}.exe | sed -n '1,8p'
-          test "$(go version -m dist/${{ env.BIN_NAME }}.exe | awk '$1=="go"{print $2}')" = "go1.20.14"
-          # PE 头校验：MZ 魔数
-          test "$(head -c 2 dist/${{ env.BIN_NAME }}.exe)" = "MZ"
-          sha256sum dist/${{ env.BIN_NAME }}.exe | tee dist/${{ env.BIN_NAME }}.exe.sha256
+          for binary in \
+            "dist/${{ env.BIN_NAME }}.exe" \
+            "dist/${{ env.CONSOLE_BIN_NAME }}.exe" \
+            "dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe"; do
+            ls -lh "${binary}"
+            # go version -m 的首行为 "<binary>: go1.20.14"；旧 awk
+            # 检查错误地寻找以 "go" 开头的字段，导致有效构建被判失败。
+            go version -m "${binary}" | sed -n '1,8p'
+            test "$(go version -m "${binary}" | sed -n '1s/.*: //p')" = "go${{ env.GO_VERSION }}"
+            # PE 头校验：MZ 魔数
+            test "$(head -c 2 "${binary}")" = "MZ"
+            sha256sum "${binary}" | tee "${binary}.sha256"
+          done
+
+      - name: Package Windows 7 bundle
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="win7-dev-$(git rev-parse --short HEAD)"
+          fi
+          BASENAME="aicli-${VERSION}-windows-amd64"
+          rm -rf dist/release
+          mkdir -p dist/release
+          cp dist/${{ env.BIN_NAME }}.exe dist/release/aicli.exe
+          cp dist/${{ env.CONSOLE_BIN_NAME }}.exe dist/release/aicli-console.exe
+          cp dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe dist/release/runtime-server.exe
+          cp ../docs/aicli/windows7.md dist/release/WINDOWS7-README.md
+          (
+            cd dist/release
+            zip -9 -r "../${BASENAME}.zip" ./*
+          )
+          sha256sum "dist/${BASENAME}.zip" > "dist/${BASENAME}.zip.sha256"
+          rm -rf dist/release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -92,6 +160,12 @@ jobs:
           path: |
             backend/dist/${{ env.BIN_NAME }}.exe
             backend/dist/${{ env.BIN_NAME }}.exe.sha256
+            backend/dist/${{ env.CONSOLE_BIN_NAME }}.exe
+            backend/dist/${{ env.CONSOLE_BIN_NAME }}.exe.sha256
+            backend/dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe
+            backend/dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe.sha256
+            backend/dist/aicli-win7-*-windows-amd64.zip
+            backend/dist/aicli-win7-*-windows-amd64.zip.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -125,6 +199,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           files: |
             dist/*.exe
+            dist/*.zip
             dist/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

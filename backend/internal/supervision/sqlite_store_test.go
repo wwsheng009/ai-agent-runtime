@@ -65,6 +65,49 @@ func TestSQLiteStore_UpsertNotification_IdempotentKey(t *testing.T) {
 	require.NotEqual(t, first.NotificationID, other.NotificationID)
 }
 
+func TestSQLiteStore_UpsertNotification_ReplayDoesNotRegressAllocatedCursor(t *testing.T) {
+	store := newTestStore(t, "supervision-upsert-replay-cursor")
+	ctx := context.Background()
+
+	projected := testNotification("agent-replay", 0)
+	first, err := store.UpsertNotification(ctx, projected)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), first.EventSeq)
+
+	// Projection events use zero as the "allocate a root-scoped cursor"
+	// sentinel. An at-least-once replay of the same idempotency key must retain
+	// the allocated sequence instead of moving the durable row back to zero.
+	replayed, err := store.UpsertNotification(ctx, projected)
+	require.NoError(t, err)
+	require.Equal(t, first.NotificationID, replayed.NotificationID)
+	require.Equal(t, first.EventSeq, replayed.EventSeq)
+
+	stored, err := store.GetNotification(ctx, first.NotificationID)
+	require.NoError(t, err)
+	require.Equal(t, first.EventSeq, stored.EventSeq)
+
+	digest, err := BuildDigest(ctx, store, DigestRequest{
+		RootScopeID:           "root-session-1",
+		TargetParentSessionID: "root-session-1",
+		AfterSeq:              first.EventSeq,
+	})
+	require.NoError(t, err)
+	require.Empty(t, digest.Items, "advanced cursor must exclude an idempotent replay")
+}
+
+func TestSQLiteStore_UpsertNotification_ExplicitOlderCursorDoesNotRegress(t *testing.T) {
+	store := newTestStore(t, "supervision-upsert-older-cursor")
+	ctx := context.Background()
+
+	first, err := store.UpsertNotification(ctx, testNotification("agent-older", 10))
+	require.NoError(t, err)
+
+	older := testNotification("agent-older", 9)
+	replayed, err := store.UpsertNotification(ctx, older)
+	require.NoError(t, err)
+	require.Equal(t, first.EventSeq, replayed.EventSeq)
+}
+
 // TestSQLiteStore_Notification_SeenDeliveredAck covers the delivery and
 // decision sequence: delivered -> seen -> acknowledged (CAS), and that acked
 // items leave the unresolved set.

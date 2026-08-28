@@ -2798,7 +2798,31 @@ func (h *Handler) resolveServerSessionUserID(userID string) string {
 	})
 }
 
+// sessionLeaseSameProcessWaitBudget bounds how long a request waits for a
+// lease held by another channel of the *same* runtime-server process (e.g. a
+// web agent-chat turn waiting behind a hub actor turn on the same session).
+// Same-process contention means the holder is still executing inside this
+// process, so waiting is safe and queues the turn instead of failing 409.
+// The budget must cover a full turn; the holder also yields on stall/stop.
+const sessionLeaseSameProcessWaitBudget = 5 * time.Minute
+
+// sessionLeaseSameProcessPollInterval is the poll interval while waiting for
+// a same-process lease holder to release.
+const sessionLeaseSameProcessPollInterval = 250 * time.Millisecond
+
 func (h *Handler) acquireSessionLease(ctx context.Context, sessionID, ownerKind, ownerScope string) (*chat.SessionLeaseHandle, error) {
+	return h.acquireSessionLeaseMode(ctx, sessionID, ownerKind, ownerScope, true)
+}
+
+// acquireSessionLeaseNoWait acquires the session lease without queueing
+// behind same-process holders. Use it only where blocking is unsafe, e.g.
+// inside the session hub factory (hub.GetOrCreate holds the hub lock while
+// building an actor; a long wait there would stall every session).
+func (h *Handler) acquireSessionLeaseNoWait(ctx context.Context, sessionID, ownerKind, ownerScope string) (*chat.SessionLeaseHandle, error) {
+	return h.acquireSessionLeaseMode(ctx, sessionID, ownerKind, ownerScope, false)
+}
+
+func (h *Handler) acquireSessionLeaseMode(ctx context.Context, sessionID, ownerKind, ownerScope string, waitSameProcess bool) (*chat.SessionLeaseHandle, error) {
 	sessionID = chat.NormalizeSessionID(sessionID)
 	if h == nil || sessionID == "" {
 		return nil, nil
@@ -2815,13 +2839,72 @@ func (h *Handler) acquireSessionLease(ctx context.Context, sessionID, ownerKind,
 	if ownerKind == "" {
 		ownerKind = sessionruntime.DefaultSessionRuntimeOwner()
 	}
-	return chat.AcquireSessionLease(ctx, leaseStore, chat.LeaseRequest{
+	req := chat.LeaseRequest{
 		SessionID: sessionID,
 		OwnerID:   sessionLeaseOwnerID(ownerKind, ownerScope),
 		OwnerKind: ownerKind,
 		PID:       os.Getpid(),
 		Hostname:  currentHostname(),
-	})
+	}
+	for {
+		handle, err := chat.AcquireSessionLease(ctx, leaseStore, req)
+		if err == nil {
+			return handle, nil
+		}
+		var conflict *chat.LeaseConflictError
+		if !stderrors.As(err, &conflict) || conflict.Lease == nil {
+			return nil, err
+		}
+		if !waitSameProcess || !sameProcessLease(conflict.Lease) {
+			// Cross-process ownership, or waiting disabled: keep the conflict
+			// semantics; the holder is an independent runtime (e.g. aicli) we
+			// cannot queue behind.
+			return nil, err
+		}
+		// Same-process holder (web agent chat vs hub actor, or two web turns):
+		// the holder lives inside this runtime-server, so wait for it to
+		// release instead of failing immediately. This makes concurrent turns
+		// on one session queue instead of producing 409 self-conflicts.
+		if !waitForSameProcessLeaseRelease(ctx, leaseStore, sessionID, conflict.Lease,
+			sessionLeaseSameProcessWaitBudget, sessionLeaseSameProcessPollInterval) {
+			return nil, err
+		}
+		// Lease released (or superseded by another owner): retry acquisition.
+	}
+}
+
+// sameProcessLease reports whether lease belongs to this runtime-server process.
+func sameProcessLease(lease *chat.SessionLease) bool {
+	return lease != nil && lease.PID == os.Getpid() && lease.Hostname == currentHostname()
+}
+
+// waitForSameProcessLeaseRelease polls until the given holder no longer owns
+// the session lease (released, expired, or superseded). Returns false when ctx
+// is done or the budget expires without the holder yielding.
+func waitForSameProcessLeaseRelease(ctx context.Context, store chat.SessionLeaseStore, sessionID string, holder *chat.SessionLease, budget, interval time.Duration) bool {
+	if store == nil || holder == nil {
+		return false
+	}
+	deadline := time.Now().Add(budget)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		lease, err := store.GetLease(ctx, sessionID)
+		if err == nil && (lease == nil || lease.OwnerID != holder.OwnerID) {
+			return true
+		}
+		if lease != nil && !lease.ExpiresAt.IsZero() && time.Now().After(lease.ExpiresAt) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return false
+			}
+		}
+	}
 }
 
 func (h *Handler) writeSessionLeaseConflict(w http.ResponseWriter, err error) bool {

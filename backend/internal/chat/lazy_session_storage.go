@@ -19,8 +19,11 @@ import (
 type lazySessionStorage struct {
 	cfg PersistentSessionStorageConfig
 
-	once    sync.Once
-	mu      sync.RWMutex
+	// mu serializes open attempts. A failed open (e.g. a concurrent
+	// aicli/runtime-server process holding the sqlite write lock) is NOT
+	// cached permanently: the next operation retries the open so a transient
+	// "database is locked" cannot wedge the whole process until restart.
+	mu      sync.Mutex
 	inner   SessionStorage
 	openErr error
 	closed  bool
@@ -63,44 +66,34 @@ func (s *lazySessionStorage) ensure() (SessionStorage, error) {
 	if s == nil {
 		return nil, fmt.Errorf("lazy session storage is nil")
 	}
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.RUnlock()
 		return nil, fmt.Errorf("sqlite session storage is closed")
 	}
-	if s.inner != nil || s.openErr != nil {
-		inner, err := s.inner, s.openErr
-		s.mu.RUnlock()
-		return inner, err
+	if s.inner != nil {
+		return s.inner, nil
 	}
-	s.mu.RUnlock()
-
-	s.once.Do(func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.closed {
-			s.openErr = fmt.Errorf("sqlite session storage is closed")
-			return
-		}
-		store, err := NewSQLiteSessionStorage(s.cfg)
-		if err != nil {
-			s.openErr = err
-			return
-		}
-		s.inner = store
-	})
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.inner, s.openErr
+	store, err := NewSQLiteSessionStorage(s.cfg)
+	if err != nil {
+		// A failed open is NOT cached permanently: the next call retries, so
+		// a transient sqlite lock (a concurrent aicli / another
+		// runtime-server mid-checkpoint, migration, or large write) cannot
+		// wedge this process's session storage until restart.
+		s.openErr = err
+		return nil, err
+	}
+	s.openErr = nil
+	s.inner = store
+	return store, nil
 }
 
 func (s *lazySessionStorage) Opened() bool {
 	if s == nil {
 		return false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.inner != nil
 }
 

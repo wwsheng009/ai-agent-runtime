@@ -36,6 +36,8 @@ env:
   PLAYWRIGHT_CLI_VERSION: '0.1.17'
   RIPGREP_VERSION: '15.2.0'
   CMD_PATH: ./cmd/aicli
+  CONSOLE_CMD_PATH: ./cmd/aicli-console
+  RUNTIME_SERVER_CMD_PATH: ./cmd/runtime-server
   BIN_NAME: aicli
   WORKDIR: backend
   CGO_ENABLED: '0'
@@ -554,7 +556,7 @@ jobs:
   build-win7:
     name: Build Windows 7 compatible aicli (Go 1.20)
     # 独立 job：Go 1.20.14 + go.win7.mod（降级依赖图）+ win7compat build tag
-    # （裁剪 MCP/markdown 渲染依赖）产出可在 Windows 7 上运行的 aicli.exe。
+    # （裁剪要求更高 Go 版本的 MCP 依赖）产出可在 Windows 7 上运行的 aicli.exe。
     # 与主线矩阵隔离，不共享 go.sum 缓存（依赖图不同）。
     needs: [validate, release-gate]
     if: ${{ always() && needs.validate.result == 'success' }}
@@ -573,9 +575,29 @@ jobs:
           cache: true
           cache-dependency-path: ${{ env.WORKDIR }}/${{ env.WIN7_MODFILE }}.sum
 
+      - name: Test Go 1.20 compatibility shims and console launcher
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go test -tags ${{ env.WIN7_BUILD_TAGS }} ./internal/agent \
+            -run 'TestAgentWithoutCancel|TestAgentWithTimeoutCause|TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents' \
+            -count=1
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go test -tags ${{ env.WIN7_BUILD_TAGS }} ./cmd/aicli-console -count=1
+          GOOS=windows GOARCH=amd64 GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go test -tags ${{ env.WIN7_BUILD_TAGS }} ./cmd/aicli/commands \
+            -run 'Test(ReadChatSessionLine|ParseChatCommandOptionsConsoleInputMode|DecodeSystemConsoleLine|ReadSystemConsoleUTF16Line|LegacyConsoleDispatchAcceptsCommittedIMEProcessCharacter)' \
+            -c -o /tmp/aicli-commands-win7.test.exe
+          test "$(head -c 2 /tmp/aicli-commands-win7.test.exe)" = "MZ"
+          rm -f /tmp/aicli-commands-win7.test.exe
+
       - name: Build Windows 7 compatible aicli
         id: ver
         working-directory: ${{ env.WORKDIR }}
+        env:
+          GOOS: windows
+          GOARCH: amd64
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -588,12 +610,28 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building aicli-win7 (version ${VERSION}) with Go ${{ env.WIN7_GO_VERSION }}"
           mkdir -p dist
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}"
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath -ldflags "${LDFLAGS}" \
+            -o dist/aicli-win7.exe ${CMD_PATH}
           GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
             go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath \
-            -o dist/aicli-win7.exe ${CMD_PATH}
-          # 校验产物确实是 Go 1.20 编译（buildinfo 内嵌工具链版本）
-          test "$(go version -m dist/aicli-win7.exe | awk '$1=="go"{print $2}')" = "${{ env.WIN7_GO_VERSION }}"
-          ls -lh dist/aicli-win7.exe
+            -o dist/aicli-console-win7.exe ${CONSOLE_CMD_PATH}
+          # runtime-server（Win7 兼容）：ai CLI 可作为客户端连接，
+          # 也可以在 Win7 机器上独立启动 server。版本注入走 internal/buildinfo。
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath \
+            -ldflags "-s -w -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.version=${VERSION} -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.buildTime=${BUILD_TIME}" \
+            -o dist/runtime-server-win7.exe ${RUNTIME_SERVER_CMD_PATH}
+          # go version -m 的首行为 "<binary>: go1.20.14"。检查主程序、
+          # 原生 Console 启动器和 runtime-server，避免把 Go 1.24 产物误发给
+          # Windows 7。
+          for binary in dist/aicli-win7.exe dist/aicli-console-win7.exe dist/runtime-server-win7.exe; do
+            test "$(go version -m "${binary}" | sed -n '1s/.*: //p')" = "go${{ env.WIN7_GO_VERSION }}"
+            test "$(head -c 2 "${binary}")" = "MZ"
+            ls -lh "${binary}"
+          done
 
       - name: Package artifact
         id: pkg
@@ -604,6 +642,9 @@ jobs:
           BASENAME="${BIN_NAME}-win7-${VERSION}-windows-amd64"
           mkdir -p dist/release
           cp dist/aicli-win7.exe dist/release/${BIN_NAME}.exe
+          cp dist/aicli-console-win7.exe dist/release/${BIN_NAME}-console.exe
+          cp dist/runtime-server-win7.exe dist/release/runtime-server.exe
+          cp ../docs/aicli/windows7.md dist/release/WINDOWS7-README.md
           # 可选的 README / LICENSE（与主 build job 一致）
           [ -f README.md ] && cp README.md dist/release/ || true
           [ -f LICENSE ] && cp LICENSE dist/release/ || true

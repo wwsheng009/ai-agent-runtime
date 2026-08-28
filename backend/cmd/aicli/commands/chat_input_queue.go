@@ -1070,13 +1070,11 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		return line, err
 	}
 	reader := chatSessionInputReader(session)
-	if chatLegacyConsoleInputEnabled() {
-		if line, ok, err := readLegacyConsoleLineFn(ctx); ok {
-			if err != nil {
-				return "", err
-			}
-			return line, nil
+	if line, ok, err := readConfiguredChatConsoleLine(ctx); ok {
+		if err != nil {
+			return "", err
 		}
+		return line, nil
 	}
 	if pipeConsoleLineEditorSupported() {
 		line, ok, err := readPipeInteractiveLineFn(ctx, chatInteractiveInputPromptText(session))
@@ -1184,6 +1182,12 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 	if session != nil && session.InputBox != nil {
 		return newChatTransientLineComposer(session).ReadLine()
 	}
+	if line, ok, err := readConfiguredChatConsoleLine(ctx); ok {
+		if err != nil {
+			return "", err
+		}
+		return line, nil
+	}
 	reader := chatSessionInputReader(session)
 	line, err := reader.ReadString('\n')
 	if line != "" {
@@ -1200,6 +1204,12 @@ func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context
 	}
 	if session != nil && session.InputBox != nil {
 		return newChatModalComposerPrompt(session, prompt).ReadLine()
+	}
+	if line, ok, err := readConfiguredChatConsoleLine(ctx); ok {
+		if err != nil {
+			return "", err
+		}
+		return line, nil
 	}
 	return chatInteractiveReadTransientLine(session, ctx)
 }

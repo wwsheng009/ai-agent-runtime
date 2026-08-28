@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -131,8 +132,16 @@ func openSQLiteSessionStorageDB(cfg PersistentSessionStorageConfig) (*SQLiteSess
 // session flush, wal_checkpoint(TRUNCATE)); without retry this makes a whole
 // startup fail. A failed connection is replaced with a fresh one per attempt.
 func openSQLiteSessionStorageWithLockRetry(store *SQLiteSessionStorage) (*SQLiteSessionStorage, error) {
+	var lastLockErr error
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
+			// 等待数据库锁释放时打日志：并发 aicli/runtime-server 进程
+			// 可能长时间持有写锁（迁移、大会话 flush、checkpoint），
+			// 没有日志时加载会表现为“长时间无响应”且无从定位。
+			if s := logpkg.S(); s != nil {
+				s.Infof("[sqlite-lock] session storage locked, retrying open (attempt %d/%d, wait %v) path=%s error=%v",
+					attempt, sqliteLockRetries, sqliteLockRetryWait(attempt-1), store.cfg.Path, lastLockErr)
+			}
 			time.Sleep(sqliteLockRetryWait(attempt - 1))
 		}
 		if err := store.init(context.Background()); err == nil {
@@ -140,6 +149,8 @@ func openSQLiteSessionStorageWithLockRetry(store *SQLiteSessionStorage) (*SQLite
 		} else if !isSQLiteLockedError(err) || attempt >= sqliteLockRetries {
 			_ = store.db.Close()
 			return store, err
+		} else {
+			lastLockErr = err
 		}
 		reopened, err := openSQLiteSessionStorageDB(store.cfg)
 		if err != nil {

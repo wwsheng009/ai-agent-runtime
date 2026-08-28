@@ -94,6 +94,10 @@ aicli config --models
 
 ## 一、安装
 
+> Windows 7 需要使用 Go 1.20 构建的独立兼容包，不能使用普通 Windows
+> Release。下载、终端选择和故障处理见
+> [《在 Windows 7 上使用 aicli》](./windows7.md)。
+
 ### 方式 1：一键安装脚本（推荐）
 
 从 [GitHub Release](https://github.com/wwsheng009/ai-agent-runtime/releases) 下载预编译二进制并自动放入用户 PATH。

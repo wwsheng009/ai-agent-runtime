@@ -61,9 +61,12 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		surface    *ui.FixedBottomSurface
 	)
 	// --compat-mode 强制走无 ANSI 降级路径：跳过 TUI/keyHandler 初始化，
-	// 直接启用传统控制台行编辑器（win7 等终端输入异常时手动指定）。
+	// 使用系统 Unicode cooked 输入（默认）或显式选择的自定义控制台编辑器。
 	compatMode := opts != nil && opts.CompatMode
 	setChatDebugFlag(opts.Debug)
+	// A process normally builds one chat session, but tests and embedded callers may
+	// build more than one. Never leak a previous compatibility input selection.
+	resetChatConsoleInputMode()
 	interactiveUI := shouldInitializeChatInteractiveUI(opts) && !compatMode
 	if shouldInitializeChatKeyHandler(opts) && !compatMode {
 		keyHandler = ui.NewKeyHandler()
@@ -112,22 +115,21 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 			keyHandler = nil
 			surface = nil
 			interactiveUI = false
-			// 降级模式：win7 conhost 的 cooked 行编辑在 CP65001 下按字节工作
-			// （中文退格删不动）且不支持 Delete 键，改用传统控制台行编辑器
-			// （ReadConsoleInputW + WriteConsoleW）自绘输入行。
-			setChatLegacyConsoleInputMode(true)
+			// 降级模式优先使用 ReadConsoleW 系统 Unicode 行输入，让 Win7
+			// conhost 保留 IME 组合/候选词；不可用时回退自定义逐键编辑器。
+			setChatConsoleInputMode(opts.InputMode)
 		}
 	}
 	if compatMode {
-		// 强制兼容模式：即使终端支持 ANSI 也走传统行编辑。
+		// 强制兼容模式：即使终端支持 ANSI 也走兼容控制台行输入。
 		layout = nil
 		inputBox = nil
 		keyHandler = nil
 		surface = nil
 		interactiveUI = false
-		setChatLegacyConsoleInputMode(true)
+		setChatConsoleInputMode(opts.InputMode)
 		if opts.Debug {
-			aicliDiagln("[aicli-diag] compat mode: plain interactive mode + legacy console line editor")
+			aicliDiagf("[aicli-diag] compat mode: plain interactive mode + %s console input\n", opts.InputMode)
 		}
 	}
 	if opts.NoInteractive || opts.OutputFormat == "json" {
