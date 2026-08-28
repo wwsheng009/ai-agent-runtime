@@ -1,3 +1,5 @@
+//go:build !go1.21
+
 package agent
 
 import (
@@ -6,32 +8,31 @@ import (
 	"time"
 )
 
-// 本文件为 Go 1.20 兼容构建（Windows 7 目标）提供 context 扩展 API 的
-// 等价实现：context.WithoutCancel / context.WithTimeoutCause /
-// context.Cause 均为 Go 1.21+ 标准库函数。实现保持与标准库一致的语义，
-// 两个工具链（go 1.20 与主线 go 1.24）行为无差异。
+// 本文件为 Go 1.20 兼容构建（Windows 7 目标）提供 Go 1.21 才加入的
+// context.WithoutCancel / context.WithTimeoutCause。context.Cause 已在 Go
+// 1.20 提供，因此可用于传播标准库父上下文的取消原因。
 
-// causeError 包装 cause 与底层错误，Unwrap 返回二者，使
-// errors.Is(err, cause) 和 errors.Is(err, context.DeadlineExceeded) 都能命中。
-type causeError struct {
-	cause error
-	err   error
+// valueOnlyCtx detaches cancellation while preserving values. It is used as
+// the parent of a Go 1.20 WithCancelCause context. That standard cancel context
+// acts as a "cause anchor": its private Value key shadows the original
+// parent's cancellation state, so context.Cause keeps working through
+// WithValue and other standard context wrappers.
+type valueOnlyCtx struct {
+	context.Context
 }
 
-func (e *causeError) Error() string { return e.err.Error() }
-
-func (e *causeError) Unwrap() []error { return []error{e.cause, e.err} }
-
-// causeProvider 由带 cause 的上下文实现，供 agentContextCause 探测。
-type causeProvider interface{ cause() error }
+func (valueOnlyCtx) Deadline() (deadline time.Time, ok bool) { return }
+func (valueOnlyCtx) Done() <-chan struct{}                   { return nil }
+func (valueOnlyCtx) Err() error                              { return nil }
 
 // agentWithoutCancel 等价于 context.WithoutCancel（Go 1.21+）：
-// 返回的上下文永不过期、不可取消、不携带任何值。
+// 返回的上下文永不过期、不可取消，但仍可读取父上下文中的值。
 func agentWithoutCancel(parent context.Context) context.Context {
 	if parent == nil {
-		return context.Background()
+		panic("cannot create context from nil parent")
 	}
-	return withoutCancelCtx{parent}
+	causeAnchor, _ := context.WithCancelCause(valueOnlyCtx{parent})
+	return withoutCancelCtx{causeAnchor}
 }
 
 type withoutCancelCtx struct {
@@ -41,12 +42,15 @@ type withoutCancelCtx struct {
 func (withoutCancelCtx) Deadline() (deadline time.Time, ok bool) { return }
 func (withoutCancelCtx) Done() <-chan struct{}                   { return nil }
 func (withoutCancelCtx) Err() error                              { return nil }
-func (withoutCancelCtx) Value(key any) any                       { return nil }
+func (c withoutCancelCtx) Value(key any) any                     { return c.Context.Value(key) }
 
 // timeoutCauseCtx 等价于 context.WithTimeoutCause（Go 1.21+）。
 type timeoutCauseCtx struct {
-	parent   context.Context
-	causeErr error
+	parent      context.Context
+	causeErr    error
+	deadline    time.Time
+	causeCtx    context.Context
+	cancelCause context.CancelCauseFunc
 
 	mu    sync.Mutex
 	timer *time.Timer
@@ -55,7 +59,10 @@ type timeoutCauseCtx struct {
 }
 
 func (c *timeoutCauseCtx) Deadline() (deadline time.Time, ok bool) {
-	return time.Time{}, false
+	if c == nil || c.deadline.IsZero() {
+		return time.Time{}, false
+	}
+	return c.deadline, true
 }
 
 func (c *timeoutCauseCtx) Done() <-chan struct{} { return c.done }
@@ -66,75 +73,113 @@ func (c *timeoutCauseCtx) Err() error {
 	return c.err
 }
 
-func (c *timeoutCauseCtx) Value(key any) any { return c.parent.Value(key) }
+func (c *timeoutCauseCtx) Value(key any) any { return c.causeCtx.Value(key) }
 
-// cause 在 deadline 触发（且设置了 cause）时返回 cause，否则返回 nil。
-func (c *timeoutCauseCtx) cause() error {
+func (c *timeoutCauseCtx) complete(err, cause error) {
+	if c == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.err.(*causeError); ok {
-		return c.causeErr
+	if c.err != nil {
+		return
 	}
-	return nil
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	c.err = err
+	c.cancelCause(cause)
+	close(c.done)
+}
+
+func (c *timeoutCauseCtx) expire() {
+	if c.parent.Err() != nil {
+		c.cancelFromParent()
+		return
+	}
+	cause := c.causeErr
+	if cause == nil {
+		cause = context.DeadlineExceeded
+	}
+	c.complete(context.DeadlineExceeded, cause)
+}
+
+func (c *timeoutCauseCtx) cancelFromParent() {
+	if c == nil || c.parent == nil {
+		return
+	}
+	err := c.parent.Err()
+	if err == nil {
+		return
+	}
+	cause := agentContextCause(c.parent)
+	if cause == nil {
+		cause = err
+	}
+	c.complete(err, cause)
 }
 
 // agentWithTimeoutCause 等价于 context.WithTimeoutCause（Go 1.21+）：
-// 超时后 Err() 返回包装 cause 的错误（errors.Is 可命中 cause 与
-// context.DeadlineExceeded）；手动取消返回 context.Canceled。
+// 超时后 Err() 返回 context.DeadlineExceeded，agentContextCause 返回调用
+// 方提供的 cause；手动取消时二者分别返回 context.Canceled。
 func agentWithTimeoutCause(parent context.Context, d time.Duration, cause error) (context.Context, context.CancelFunc) {
 	if parent == nil {
-		parent = context.Background()
+		panic("cannot create context from nil parent")
 	}
-	c := &timeoutCauseCtx{parent: parent, causeErr: cause, done: make(chan struct{})}
-	if d <= 0 {
-		c.mu.Lock()
-		if cause != nil {
-			c.err = &causeError{cause: cause, err: context.DeadlineExceeded}
-		} else {
-			c.err = context.DeadlineExceeded
+	deadline := time.Now().Add(d)
+	parentDeadlineSooner := false
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+		parentDeadlineSooner = true
+	}
+	causeAnchor, cancelCause := context.WithCancelCause(valueOnlyCtx{parent})
+	c := &timeoutCauseCtx{
+		parent:      parent,
+		causeErr:    cause,
+		deadline:    deadline,
+		causeCtx:    causeAnchor,
+		cancelCause: cancelCause,
+		done:        make(chan struct{}),
+	}
+	switch {
+	case parent.Err() != nil:
+		c.cancelFromParent()
+	case parentDeadlineSooner:
+		c.watchParent()
+	default:
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			c.expire()
+			break
 		}
-		close(c.done)
+		c.mu.Lock()
+		c.timer = time.AfterFunc(remaining, c.expire)
 		c.mu.Unlock()
-	} else {
-		c.timer = time.AfterFunc(d, func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if c.err != nil {
-				return
-			}
-			if cause != nil {
-				c.err = &causeError{cause: cause, err: context.DeadlineExceeded}
-			} else {
-				c.err = context.DeadlineExceeded
-			}
-			close(c.done)
-		})
+		c.watchParent()
 	}
 	cancel := func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.err != nil {
-			return
-		}
-		if c.timer != nil {
-			c.timer.Stop()
-		}
-		c.err = context.Canceled
-		close(c.done)
+		c.complete(context.Canceled, context.Canceled)
 	}
 	return c, cancel
 }
 
-// agentContextCause 等价于 context.Cause（Go 1.21+）：返回带 cause 的
+func (c *timeoutCauseCtx) watchParent() {
+	parentDone := c.parent.Done()
+	if parentDone == nil {
+		return
+	}
+	go func() {
+		select {
+		case <-parentDone:
+			c.cancelFromParent()
+		case <-c.done:
+		}
+	}()
+}
+
+// agentContextCause 等价于 context.Cause（Go 1.20+）：返回带 cause 的
 // 上下文（agentWithTimeoutCause 创建的）所关联的 cause；否则返回 ctx.Err()。
 func agentContextCause(ctx context.Context) error {
-	if ctx == nil {
-		return nil
-	}
-	if provider, ok := ctx.(causeProvider); ok {
-		if cause := provider.cause(); cause != nil {
-			return cause
-		}
-	}
-	return ctx.Err()
+	return context.Cause(ctx)
 }

@@ -119,6 +119,14 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 		if item.Resolved && req.IncludeResolvedSince {
 			digest.ResolvedSinceLastTurn++
 		}
+		// Acknowledgement is the parent's durable decision that no further
+		// attention is required. It is intentionally distinct from delivery:
+		// seen unresolved critical notifications keep reappearing, while an
+		// acknowledged notification must leave ordinary preflight injection
+		// even if its underlying execution has no recovery resolution yet.
+		if n.DecisionState == DecisionAcknowledged {
+			continue
+		}
 		if !item.Resolved || req.IncludeResolvedSince {
 			items = append(items, item)
 		}

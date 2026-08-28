@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -3287,12 +3288,47 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 
 	stateStore := h.getSessionRuntimeStore()
 	eventStore := h.getSessionEventStore()
-	leaseHandle, leaseErr := h.acquireSessionLease(context.Background(), sessionID, sessionActorLeaseOwnerKind, sessionID)
+	// NoWait: this runs inside the session hub factory while the hub lock is
+	// held; queueing behind a same-process holder here would stall every
+	// session in the hub. Construction-time conflicts surface immediately and
+	// the caller (GetOrCreate) maps them to 409.
+	leaseHandle, leaseErr := h.acquireSessionLeaseNoWait(context.Background(), sessionID, sessionActorLeaseOwnerKind, sessionID)
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
 	loopConfig := buildSessionLoopConfig(selectedConfig, requestedReasoningEffort)
 	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, childCompletionRequirement, workspacePath)
+
+	// The session lease is scoped to each run rather than to the actor
+	// lifetime. The initial acquisition above guards actor construction
+	// (loadState/RecoverStale) against concurrent cross-process writers; it is
+	// released immediately after construction. Each subsequent run acquires
+	// the lease in PrepareRun and releases it in OnRunFinished / OnRunStalled /
+	// OnStop. This prevents an idle actor from blocking web agent-chat turns
+	// on the same session for up to the hub idle TTL, which previously caused
+	// same-session 409 self-conflicts even without any concurrent execution.
+	var leaseMu sync.Mutex
+	ensureLease := func(ctx context.Context) error {
+		leaseMu.Lock()
+		defer leaseMu.Unlock()
+		if leaseHandle != nil {
+			return nil
+		}
+		h2, err := h.acquireSessionLease(ctx, sessionID, sessionActorLeaseOwnerKind, sessionID)
+		if err != nil {
+			return err
+		}
+		leaseHandle = h2
+		return nil
+	}
+	releaseLease := func() {
+		leaseMu.Lock()
+		defer leaseMu.Unlock()
+		if leaseHandle != nil {
+			_ = leaseHandle.Release(context.Background())
+			leaseHandle = nil
+		}
+	}
 	actor, err := chat.NewSessionActor(sessionID, chat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.llmRuntime,
@@ -3303,18 +3339,27 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		LoopConfig:   loopConfig,
 		PersistHook:  h.runtimeServerGoalPersistHook,
 		RecoverStale: true,
+		PrepareRun: func(ctx context.Context, session *chat.Session, resume bool) error {
+			return ensureLease(ctx)
+		},
+		OnRunStalled: func(turnID string) {
+			releaseLease()
+		},
+		OnRunFinished: func() {
+			releaseLease()
+		},
 		OnStop: func() {
-			if leaseHandle != nil {
-				_ = leaseHandle.Release(context.Background())
-			}
+			releaseLease()
 		},
 	})
 	if err != nil {
-		if leaseHandle != nil {
-			_ = leaseHandle.Release(context.Background())
-		}
+		releaseLease()
 		return nil, err
 	}
+	// Actor construction (including loadState/RecoverStale) is complete and
+	// no run is executing yet: drop the construction lease so an idle actor
+	// does not block other channels. The next run re-acquires via PrepareRun.
+	releaseLease()
 	return actor, nil
 }
 

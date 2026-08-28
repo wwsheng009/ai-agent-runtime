@@ -44,7 +44,9 @@ func TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents(t *testing
 	apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy([]string{"view"}, false))
 
 	loop := NewReActLoop(apiAgent, nil, &LoopReActConfig{})
-	tools, err := loop.computeAvailableTools(t.Context(), "delegate research", nil, false)
+	// testing.T.Context was added after Go 1.20. Keep this package's tests
+	// buildable with the Windows 7 compatibility toolchain.
+	tools, err := loop.computeAvailableTools(context.Background(), "delegate research", nil, false)
 	if err != nil {
 		t.Fatalf("computeAvailableTools: %v", err)
 	}

@@ -19,8 +19,8 @@ import (
 // 行编辑器：
 //
 //   - 读：ReadConsoleInputW 直接读按键记录（VK 码 + UnicodeChar），与终端
-//     输出代码页无关，中文（BMP）天然可用；backspace/delete/方向键/Home/
-//     End 全部可用。
+//     输出代码页无关；已提交的 Unicode 中文、backspace/delete/方向键/Home/
+//     End 可用。完整 IME 组合优先由 system ReadConsoleW 模式处理。
 //   - 写：WriteConsoleW（UTF-16，conhost 内部按 WCHAR 渲染，同样避开
 //     65001 字节解码问题）+ SetConsoleCursorPosition 定位，纯 Win32 经典
 //     API，win7 原生支持。
@@ -262,22 +262,35 @@ func (ed *legacyConsoleLineEditor) dispatch(recs []consoleInputRecord) bool {
 				ed.cur = 0
 				ed.redrawIfConsole()
 			}
-		case vkTab, vkUp, vkDown, vkProcessKey:
-			// 传统降级模式无补全/历史/IME 合成键语义，忽略。
+		case vkTab, vkUp, vkDown:
+			// 传统降级模式无补全/历史语义，忽略。
+		case vkProcessKey:
+			// system 模式承担完整 IME 生命周期；若它不可用而回退到本
+			// 编辑器，仍接收 conhost/输入法附在 VK_PROCESSKEY 上的已提交
+			// Unicode 字符，避免把可恢复的中文直接丢弃。
+			ch := rune(key.UnicodeChar)
+			if isEditableConsoleRune(ch) {
+				ed.insertRune(ch, repeat)
+				ed.redrawIfConsole()
+			}
 		default:
 			ch := rune(key.UnicodeChar)
 			if isEditableConsoleRune(ch) {
-				for j := 0; j < repeat; j++ {
-					ed.buf = append(ed.buf, 0)
-					copy(ed.buf[ed.cur+1:], ed.buf[ed.cur:])
-					ed.buf[ed.cur] = ch
-					ed.cur++
-				}
+				ed.insertRune(ch, repeat)
 				ed.redrawIfConsole()
 			}
 		}
 	}
 	return false
+}
+
+func (ed *legacyConsoleLineEditor) insertRune(ch rune, repeat int) {
+	for j := 0; j < repeat; j++ {
+		ed.buf = append(ed.buf, 0)
+		copy(ed.buf[ed.cur+1:], ed.buf[ed.cur:])
+		ed.buf[ed.cur] = ch
+		ed.cur++
+	}
 }
 
 // normalizedLegacyConsoleVirtualKey reconciles inconsistent KEY_EVENT_RECORD

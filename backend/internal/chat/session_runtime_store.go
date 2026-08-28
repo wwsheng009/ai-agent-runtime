@@ -1480,10 +1480,9 @@ type SQLiteRuntimeStore struct {
 	dsn  string
 	path string
 
-	openOnce sync.Once
-	openMu   sync.RWMutex
-	openErr  error
-	closed   bool
+	openMu  sync.RWMutex
+	openErr error
+	closed  bool
 
 	mu               sync.Mutex
 	mailboxWriteMu   sync.Mutex
@@ -1618,56 +1617,43 @@ func (s *SQLiteRuntimeStore) ensure() error {
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	s.openMu.RLock()
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
 	if s.closed {
-		s.openMu.RUnlock()
 		return fmt.Errorf("runtime store is closed")
 	}
-	if s.db != nil || s.openErr != nil {
-		err := s.openErr
-		s.openMu.RUnlock()
+	if s.db != nil {
+		return nil
+	}
+	// A failed open is NOT cached permanently: the next call retries, so a
+	// transient sqlite lock (a concurrent aicli / another runtime-server
+	// mid-checkpoint, migration, or large write) cannot wedge this store
+	// until restart.
+	if err := ensureRuntimeStoreDirectory(s.path); err != nil {
+		s.openErr = err
 		return err
 	}
-	s.openMu.RUnlock()
-
-	s.openOnce.Do(func() {
-		s.openMu.Lock()
-		defer s.openMu.Unlock()
-		if s.closed {
-			s.openErr = fmt.Errorf("runtime store is closed")
-			return
-		}
-		if s.db != nil || s.openErr != nil {
-			return
-		}
-		if err := ensureRuntimeStoreDirectory(s.path); err != nil {
-			s.openErr = err
-			return
-		}
-		db, err := sql.Open("sqlite3", s.dsn)
-		if err != nil {
-			s.openErr = fmt.Errorf("open runtime db: %w", err)
-			return
-		}
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-		store := &SQLiteRuntimeStore{
-			db:          db,
-			fileBacked:  s.fileBacked,
-			busyTimeout: s.busyTimeout,
-			cacheKiB:    s.cacheKiB,
-		}
-		store, err = openSQLiteRuntimeStoreWithLockRetry(store)
-		if err != nil {
-			s.openErr = err
-			return
-		}
-		s.db = store.db
-	})
-
-	s.openMu.RLock()
-	defer s.openMu.RUnlock()
-	return s.openErr
+	db, err := sql.Open("sqlite3", s.dsn)
+	if err != nil {
+		s.openErr = fmt.Errorf("open runtime db: %w", err)
+		return err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	store := &SQLiteRuntimeStore{
+		db:          db,
+		fileBacked:  s.fileBacked,
+		busyTimeout: s.busyTimeout,
+		cacheKiB:    s.cacheKiB,
+	}
+	store, err = openSQLiteRuntimeStoreWithLockRetry(store)
+	if err != nil {
+		s.openErr = err
+		return err
+	}
+	s.openErr = nil
+	s.db = store.db
+	return nil
 }
 
 func (s *SQLiteRuntimeStore) durableFileExists() bool {
@@ -3924,21 +3910,26 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
+	// busy_timeout must come FIRST: this driver (ncruces/go-sqlite3) uses a
+	// 60s default lock wait when busy_timeout is unset, so any pragma touching
+	// the database lock (auto_vacuum, journal_mode=WAL) would block for a
+	// minute per open attempt while a concurrent process holds the write lock,
+	// instead of failing fast into the retry loop.
 	pragmas := []string{
-		"PRAGMA synchronous=NORMAL",
 		fmt.Sprintf("PRAGMA busy_timeout=%d", s.busyTimeout.Milliseconds()),
+		"PRAGMA synchronous=NORMAL",
 		fmt.Sprintf("PRAGMA cache_size=-%d", s.cacheKiB),
 		"PRAGMA temp_store=FILE",
 		"PRAGMA mmap_size=0",
 		"PRAGMA foreign_keys=ON",
 	}
 	if s.fileBacked {
-		pragmas = append([]string{
+		pragmas = append(pragmas,
 			"PRAGMA auto_vacuum=INCREMENTAL",
 			"PRAGMA journal_mode=WAL",
 			"PRAGMA wal_autocheckpoint=256",
 			"PRAGMA journal_size_limit=16777216",
-		}, pragmas...)
+		)
 	}
 	for _, statement := range pragmas {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

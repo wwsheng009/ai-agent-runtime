@@ -83,7 +83,12 @@ func ProjectLifecycle(ctx context.Context, store Store, wakes *WakeScheduler, ev
 	if err != nil {
 		return Notification{}, fmt.Errorf("supervision: persist lifecycle projection: %w", err)
 	}
-	if wakes != nil && notification.Severity == SeverityCritical && notification.ResolutionState == ResolutionUnresolved {
+	// Only a critical transition that still needs a parent decision may
+	// schedule an auto turn. Idempotent terminal replay preserves an existing
+	// acknowledgement/action in UpsertNotification; scheduling solely from
+	// severity+resolution would otherwise wake the parent again on every
+	// restart even though the durable decision is already complete.
+	if wakes != nil && notification.Severity == SeverityCritical && notification.ActionRequired() {
 		_, err := wakes.ScheduleWake(ctx, WakeRequest{
 			RootScopeID:           notification.RootScopeID,
 			TargetParentSessionID: notification.TargetParentSessionID,

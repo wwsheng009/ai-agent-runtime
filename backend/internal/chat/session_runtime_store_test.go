@@ -2382,3 +2382,37 @@ func TestNormalizeSessionIDConvergesLockVariants(t *testing.T) {
 		}
 	})
 }
+
+// TestSQLiteRuntimeStore_OpenFailureRecoversAfterFix is the runtime store
+// counterpart of TestLazySessionStorage_OpenLockFailureRecoversAfterRelease:
+// a failed lazy open must not be cached permanently — after the underlying
+// problem is fixed the next operation reopens the store instead of failing
+// until restart.
+func TestSQLiteRuntimeStore_OpenFailureRecoversAfterFix(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &RuntimeStoreConfig{
+		Path:        filepath.Join(dir, "session_runtime.sqlite"),
+		BusyTimeout: 100 * time.Millisecond,
+	}
+	store, err := NewSQLiteRuntimeStore(cfg)
+	require.NoError(t, err)
+	require.False(t, store.Opened())
+
+	// Make the first open deterministically fail: the parent "directory" is a
+	// regular file, so ensureRuntimeStoreDirectory cannot create it.
+	blocker := filepath.Join(dir, "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("not a dir"), 0o644))
+	store.path = filepath.Join(blocker, "runtime.sqlite")
+	store.dsn = store.path
+
+	err = store.ensure()
+	require.Error(t, err)
+
+	// Fix the path; the next ensure must recover on its own instead of
+	// re-serving the cached open failure.
+	store.path = filepath.Join(dir, "session_runtime.sqlite")
+	store.dsn = store.path
+	require.NoError(t, store.ensure())
+	require.True(t, store.Opened())
+	require.NoError(t, store.Close())
+}

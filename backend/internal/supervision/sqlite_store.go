@@ -470,15 +470,17 @@ func (s *SQLiteSupervisionStore) UpsertNotification(ctx context.Context, n Notif
 
 	var existingID string
 	var existingVersion int64
+	var existingEventSeq int64
 	var existingDecisionState string
 	var existingResolutionState string
 	err = tx.QueryRowContext(ctx, `
-		SELECT notification_id, version, decision_state, resolution_state
+		SELECT notification_id, version, event_seq, decision_state, resolution_state
 		FROM supervision_lifecycle_notifications
 		WHERE root_scope_id = ? AND subject_kind = ? AND subject_id = ? AND subject_version = ? AND event_type = ?
 	`, n.RootScopeID, string(n.SubjectKind), n.SubjectID, n.SubjectVersion, n.EventType).Scan(
 		&existingID,
 		&existingVersion,
+		&existingEventSeq,
 		&existingDecisionState,
 		&existingResolutionState,
 	)
@@ -489,6 +491,20 @@ func (s *SQLiteSupervisionStore) UpsertNotification(ctx context.Context, n Notif
 		n.Version = existingVersion + 1
 		n.CreatedAt = parseExistingCreatedAt(ctx, tx, existingID, n.CreatedAt)
 		n.UpdatedAt = now
+		// EventSeq is a root-scope cursor, not ordinary refreshable payload.
+		// At-least-once projections commonly replay with the zero sentinel that
+		// asked the store to allocate the original sequence. Never let that
+		// sentinel (or an older explicit cursor) move an existing notification
+		// backwards. Repair legacy zero-cursor rows while they are being replayed.
+		switch {
+		case existingEventSeq > 0 && n.EventSeq < existingEventSeq:
+			n.EventSeq = existingEventSeq
+		case n.EventSeq <= 0:
+			n.EventSeq, err = nextNotificationEventSeq(ctx, tx, n.RootScopeID)
+			if err != nil {
+				return n, err
+			}
+		}
 		// An at-least-once lifecycle replay must not regress decisions or
 		// resolutions already made by the parent. Reopening requires a new
 		// subject version/event idempotency key, not a refresh of the same row.
@@ -560,15 +576,10 @@ func (s *SQLiteSupervisionStore) UpsertNotification(ctx context.Context, n Notif
 			n.ResolutionState = ResolutionUnresolved
 		}
 		if n.EventSeq <= 0 {
-			var lastSeq int64
-			if err := tx.QueryRowContext(ctx, `
-				SELECT COALESCE(MAX(event_seq), 0)
-				FROM supervision_lifecycle_notifications
-				WHERE root_scope_id = ?
-			`, n.RootScopeID).Scan(&lastSeq); err != nil {
-				return n, fmt.Errorf("allocate notification event sequence: %w", err)
+			n.EventSeq, err = nextNotificationEventSeq(ctx, tx, n.RootScopeID)
+			if err != nil {
+				return n, err
 			}
-			n.EventSeq = lastSeq + 1
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO supervision_lifecycle_notifications (
@@ -616,6 +627,18 @@ func (s *SQLiteSupervisionStore) UpsertNotification(ctx context.Context, n Notif
 		return n, fmt.Errorf("commit upsert notification: %w", err)
 	}
 	return n, nil
+}
+
+func nextNotificationEventSeq(ctx context.Context, tx *sql.Tx, rootScopeID string) (int64, error) {
+	var lastSeq int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(event_seq), 0)
+		FROM supervision_lifecycle_notifications
+		WHERE root_scope_id = ?
+	`, rootScopeID).Scan(&lastSeq); err != nil {
+		return 0, fmt.Errorf("allocate notification event sequence: %w", err)
+	}
+	return lastSeq + 1, nil
 }
 
 func parseExistingCreatedAt(ctx context.Context, tx *sql.Tx, notificationID string, fallback time.Time) time.Time {

@@ -97,6 +97,7 @@ func TestBuildDigest_AckAndResolve(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, digest.ActionRequired)
 	require.Equal(t, 0, digest.CriticalUnresolved)
+	require.Empty(t, digest.Items, "acknowledged notifications must leave ordinary preflight")
 
 	// With resolved-since: the resolved item is summarized compactly.
 	digest, err = BuildDigest(ctx, store, DigestRequest{
@@ -107,7 +108,9 @@ func TestBuildDigest_AckAndResolve(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, digest.ResolvedSinceLastTurn)
+	require.Len(t, digest.Items, 1, "acknowledged unresolved notification must not be re-injected")
 	require.Contains(t, digest.Text, "child-resolved: recovered; resolved")
+	require.NotContains(t, digest.Text, "child-ack")
 }
 
 // TestBuildDigest_DeferReentry verifies a deferred-past item re-enters the

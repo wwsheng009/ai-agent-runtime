@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -107,6 +108,33 @@ func TestInjectLocalSupervisionPreflight(t *testing.T) {
 	require.NotNil(t, updated)
 	require.Equal(t, supervision.DeliverySeen, updated.DeliveryState)
 	require.Equal(t, supervision.DecisionUnacknowledged, updated.DecisionState)
+}
+
+func TestInjectLocalSupervisionPreflight_DoesNotRepeatAcknowledgedNotification(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+
+	notification, err := host.Supervision.Store.UpsertNotification(ctx, supervision.Notification{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "acknowledged-child",
+		SubjectVersion:        1,
+		EventType:             "subagent.batch.failed",
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionBlocked,
+		Reason:                "provider timeout",
+		DecisionState:         supervision.DecisionUnacknowledged,
+		ResolutionState:       supervision.ResolutionUnresolved,
+	})
+	require.NoError(t, err)
+	ok, err := host.Supervision.Store.AcknowledgeNotification(ctx, notification.NotificationID, time.Now().UTC(), notification.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
+	require.NoError(t, err)
+	require.Equal(t, "continue work", prompt)
 }
 
 // TestInjectLocalSupervisionPreflight_DoesNotLeakTeamInboxToWorker ensures a

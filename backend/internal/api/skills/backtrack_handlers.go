@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -146,12 +147,29 @@ func (h *Handler) handleSessionBacktrack(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Backtrack rewrites session history. The hub actor no longer holds the
+	// session lease while idle (run-scoped leases), so take it explicitly for
+	// the mutation and yield to any same-process web turn before it. Preview
+	// is read-only and does not need the lease.
 	var (
 		result *runtimechat.BacktrackResult
 	)
 	if req.PreviewOnly || forcePreview {
 		result, err = actor.PreviewBacktrack(r.Context(), req)
 	} else {
+		leaseHandle, leaseErr := h.acquireSessionLease(r.Context(), sessionID, sessionActorLeaseOwnerKind, "backtrack-apply")
+		if leaseErr != nil {
+			if h.writeSessionLeaseConflict(w, leaseErr) {
+				return
+			}
+			h.writeError(w, http.StatusInternalServerError, leaseErr)
+			return
+		}
+		if leaseHandle != nil {
+			defer func() {
+				_ = leaseHandle.Release(context.Background())
+			}()
+		}
 		result, _, err = actor.Backtrack(r.Context(), req)
 	}
 	if err != nil {

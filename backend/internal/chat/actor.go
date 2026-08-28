@@ -97,6 +97,11 @@ type SessionActorConfig struct {
 	RunStallTimeout time.Duration
 	// OnRunStalled 在 run 因停滞被 watchdog 强制中止后回调（宿主在此释放 lease）。
 	OnRunStalled func(turnID string)
+	// OnRunFinished 在每次 run 完全结束后回调一次（无论成功、失败还是被
+	// 中断）。宿主可在此把 run 级 session lease 释放掉，使 actor 空闲时
+	// 不再长期占用 session 锁（配合 PrepareRun 在下一个 run 前重新获取）。
+	// 回调在 actor 的命令循环线程执行，不应阻塞或长时间运行。
+	OnRunFinished func()
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -115,6 +120,7 @@ type SessionActor struct {
 	// runStallTimeout / onRunStalled mirror SessionActorConfig; see there.
 	runStallTimeout time.Duration
 	onRunStalled    func(turnID string)
+	onRunFinished   func()
 	runSequence     atomic.Uint64
 
 	cmdCh chan Command
@@ -188,6 +194,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		onStop:          cfg.OnStop,
 		runStallTimeout: cfg.RunStallTimeout,
 		onRunStalled:    cfg.OnRunStalled,
+		onRunFinished:   cfg.OnRunFinished,
 		cmdCh:           make(chan Command, 32),
 		stop:            make(chan struct{}),
 		done:            make(chan struct{}),
@@ -3622,15 +3629,24 @@ func (a *SessionActor) releaseSessionRun(run *sessionRunControl) {
 		return
 	}
 	var cancel context.CancelFunc
+	finished := false
 	a.mu.Lock()
 	if a.activeRun == run {
 		cancel = run.cancel
 		run.cancel = nil
 		a.activeRun = nil
+		finished = true
 	}
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	// The run that owned the actor slot has fully ended (or was superseded by
+	// a newer run, in which case the newer run owns the slot and will trigger
+	// this callback when it ends). Notify the host so a run-scoped session
+	// lease can be released while the actor stays idle.
+	if finished && a.onRunFinished != nil {
+		a.onRunFinished()
 	}
 }
 

@@ -24,8 +24,9 @@ type chatCommandOptions struct {
 	FastFlag               bool
 	FastChanged            bool
 	NoInteractive          bool
-	CompatMode             bool   // --compat-mode：强制无 ANSI 降级路径 + 传统控制台行编辑器
-	Debug                  bool   // --debug：输出传统控制台行编辑器诊断信息到 stderr
+	CompatMode             bool   // --compat-mode：强制无 ANSI 的兼容控制台输入路径
+	InputMode              string // --input-mode：auto|system|custom；system 保留 Win7 conhost IME
+	Debug                  bool   // --debug：输出兼容控制台输入诊断信息到 stderr
 	Message                string // resolved startup prompt; --message is an alias of --prompt
 	ImagePaths             []string
 	LogDir                 string
@@ -97,6 +98,25 @@ func resolveChatInitialPrompt(cmd *cobra.Command) (string, error) {
 	return message, nil
 }
 
+func normalizeChatConsoleInputMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		mode = chatConsoleInputAuto
+	}
+	switch mode {
+	case chatConsoleInputAuto, chatConsoleInputSystem, chatConsoleInputCustom:
+		return mode, nil
+	default:
+		return "", fmt.Errorf(
+			"--input-mode 必须是 %s、%s 或 %s，当前为 %q",
+			chatConsoleInputAuto,
+			chatConsoleInputSystem,
+			chatConsoleInputCustom,
+			raw,
+		)
+	}
+}
+
 func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatCommandOptions, error) {
 	if cmd == nil {
 		return nil, fmt.Errorf("chat command is nil")
@@ -115,6 +135,11 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	}
 	noInteractive, _ := cmd.Flags().GetBool("no-interactive")
 	compatMode, _ := cmd.Flags().GetBool("compat-mode")
+	inputModeFlag, _ := cmd.Flags().GetString("input-mode")
+	inputMode, err := normalizeChatConsoleInputMode(inputModeFlag)
+	if err != nil {
+		return nil, err
+	}
 	debugMode, _ := cmd.Flags().GetBool("debug")
 	message, err := resolveChatInitialPrompt(cmd)
 	if err != nil {
@@ -210,6 +235,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		FastChanged:            fastChanged,
 		NoInteractive:          noInteractive,
 		CompatMode:             compatMode,
+		InputMode:              inputMode,
 		Debug:                  debugMode,
 		Message:                message,
 		ImagePaths:             imagePaths,

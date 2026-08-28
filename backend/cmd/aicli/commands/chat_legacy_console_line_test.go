@@ -61,6 +61,127 @@ func TestReadChatSessionLineUsesEditorWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestReadChatSessionLineSystemModePrefersUnicodeConsoleReader(t *testing.T) {
+	setChatConsoleInputMode(chatConsoleInputSystem)
+	defer resetChatConsoleInputMode()
+
+	oldSystemFn := readSystemConsoleLineFn
+	oldCustomFn := readLegacyConsoleLineFn
+	readSystemConsoleLineFn = func(context.Context) (string, bool, error) {
+		return "中文输入", true, nil
+	}
+	readLegacyConsoleLineFn = func(context.Context) (string, bool, error) {
+		t.Fatal("custom editor must not run when the system reader succeeds")
+		return "", false, nil
+	}
+	defer func() {
+		readSystemConsoleLineFn = oldSystemFn
+		readLegacyConsoleLineFn = oldCustomFn
+	}()
+
+	line, err := readChatSessionLine(context.Background(), bufio.NewReader(strings.NewReader("ignored\n")))
+	if err != nil || line != "中文输入" {
+		t.Fatalf("line = %q, err = %v", line, err)
+	}
+}
+
+func TestReadChatSessionLineAutoModeFallsBackToCustomEditor(t *testing.T) {
+	setChatConsoleInputMode(chatConsoleInputAuto)
+	defer resetChatConsoleInputMode()
+
+	oldSystemFn := readSystemConsoleLineFn
+	oldCustomFn := readLegacyConsoleLineFn
+	readSystemConsoleLineFn = func(context.Context) (string, bool, error) {
+		return "", false, nil
+	}
+	readLegacyConsoleLineFn = func(context.Context) (string, bool, error) {
+		return "custom fallback", true, nil
+	}
+	defer func() {
+		readSystemConsoleLineFn = oldSystemFn
+		readLegacyConsoleLineFn = oldCustomFn
+	}()
+
+	line, err := readChatSessionLine(context.Background(), bufio.NewReader(strings.NewReader("ignored\n")))
+	if err != nil || line != "custom fallback" {
+		t.Fatalf("line = %q, err = %v", line, err)
+	}
+}
+
+func TestReadChatSessionLineSystemModeDoesNotFallBackToCustomEditor(t *testing.T) {
+	setChatConsoleInputMode(chatConsoleInputSystem)
+	defer resetChatConsoleInputMode()
+
+	oldSystemFn := readSystemConsoleLineFn
+	oldCustomFn := readLegacyConsoleLineFn
+	readSystemConsoleLineFn = func(context.Context) (string, bool, error) {
+		return "", false, nil
+	}
+	readLegacyConsoleLineFn = func(context.Context) (string, bool, error) {
+		t.Fatal("explicit system mode must not silently switch to the custom editor")
+		return "", false, nil
+	}
+	defer func() {
+		readSystemConsoleLineFn = oldSystemFn
+		readLegacyConsoleLineFn = oldCustomFn
+	}()
+
+	line, err := readChatSessionLine(
+		context.Background(),
+		bufio.NewReader(strings.NewReader("buffered fallback\n")),
+	)
+	if err != nil || line != "buffered fallback\n" {
+		t.Fatalf("line = %q, err = %v", line, err)
+	}
+}
+
+func TestReadChatSessionLineCustomModeSkipsSystemReader(t *testing.T) {
+	setChatConsoleInputMode(chatConsoleInputCustom)
+	defer resetChatConsoleInputMode()
+
+	oldSystemFn := readSystemConsoleLineFn
+	oldCustomFn := readLegacyConsoleLineFn
+	readSystemConsoleLineFn = func(context.Context) (string, bool, error) {
+		t.Fatal("system reader must not run in custom mode")
+		return "", false, nil
+	}
+	readLegacyConsoleLineFn = func(context.Context) (string, bool, error) {
+		return "custom only", true, nil
+	}
+	defer func() {
+		readSystemConsoleLineFn = oldSystemFn
+		readLegacyConsoleLineFn = oldCustomFn
+	}()
+
+	line, err := readChatSessionLine(context.Background(), nil)
+	if err != nil || line != "custom only" {
+		t.Fatalf("line = %q, err = %v", line, err)
+	}
+}
+
+func TestReadConfiguredChatConsoleLineDisabledSkipsConsoleReaders(t *testing.T) {
+	resetChatConsoleInputMode()
+
+	oldSystemFn := readSystemConsoleLineFn
+	oldCustomFn := readLegacyConsoleLineFn
+	readSystemConsoleLineFn = func(context.Context) (string, bool, error) {
+		t.Fatal("system reader must not run while console input mode is disabled")
+		return "", false, nil
+	}
+	readLegacyConsoleLineFn = func(context.Context) (string, bool, error) {
+		t.Fatal("custom reader must not run while console input mode is disabled")
+		return "", false, nil
+	}
+	defer func() {
+		readSystemConsoleLineFn = oldSystemFn
+		readLegacyConsoleLineFn = oldCustomFn
+	}()
+
+	if line, ok, err := readConfiguredChatConsoleLine(context.Background()); ok || err != nil || line != "" {
+		t.Fatalf("readConfiguredChatConsoleLine() = (%q, %v, %v), want empty/unhandled", line, ok, err)
+	}
+}
+
 func TestChatLegacyConsoleInputModeFlag(t *testing.T) {
 	setChatLegacyConsoleInputMode(true)
 	if !chatLegacyConsoleInputEnabled() {

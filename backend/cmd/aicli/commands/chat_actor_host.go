@@ -438,14 +438,26 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			// prompt only references the lifecycle digest; the digest itself
 			// is injected by the turn preflight (doc 6.5 rule 5).
 			go func() {
-				runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				// The wake turn must never wedge the parent UI into a
+				// non-interruptible state: bind its ctx to the host lifecycle
+				// so close/exit cancels it immediately instead of waiting out
+				// the 30m cap, and mark it as an internal bypass run so tool
+				// approvals / user questions cannot park the actor in
+				// SessionWaitingApproval / SessionWaitingInput with no UI
+				// responder attached to this background turn.
+				baseCtx := context.Background()
+				if h.lifecycleCtx != nil {
+					baseCtx = h.lifecycleCtx
+				}
+				runCtx, cancel := context.WithTimeout(baseCtx, 30*time.Minute)
 				defer cancel()
 				releaseTurn, err := h.acquireActorTurnGate(runCtx, parentSessionID)
 				if err != nil {
 					return
 				}
 				defer releaseTurn()
-				_, _ = h.ActorRegistry.SubmitPrompt(runCtx, parentSessionID, supervision.AutoWakePrompt, nil)
+				runMeta := &team.RunMeta{PermissionMode: "bypass_permissions"}
+				_, _ = h.ActorRegistry.SubmitPrompt(runCtx, parentSessionID, supervision.AutoWakePrompt, runMeta)
 			}()
 			return nil
 		},
