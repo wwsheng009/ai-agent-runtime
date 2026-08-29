@@ -7296,3 +7296,112 @@ func TestChatRuntimeEventBridge_RunEndResolvesOpenToolRunningHead(t *testing.T) 
 		t.Fatalf("ActiveBand still shows running row after session_end: %q", band)
 	}
 }
+
+// newAdoptTestBridge builds a bridge whose primary session is "lead-session",
+// with a live interaction writer so adopted-turn rendering has a sink.
+func newAdoptTestBridge(t *testing.T) *chatRuntimeEventBridge {
+	t.Helper()
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	interaction.SetWriter(&bytes.Buffer{})
+	session.Interaction = interaction
+	return newChatRuntimeEventBridge(session)
+}
+
+func adoptTestEvent(typ, turnID string, ts int64) runtimeevents.Event {
+	return runtimeevents.Event{
+		Type:      typ,
+		SessionID: "lead-session",
+		Timestamp: time.Unix(1700000000+ts, 0),
+		Payload:   map[string]interface{}{"turn_id": turnID},
+	}
+}
+
+func TestChatRuntimeEventBridgeAutoAdoptsSidecarInitiatedPrimaryTurn(t *testing.T) {
+	bridge := newAdoptTestBridge(t)
+
+	// 无任何 BeginRun：sidecar/后台自动发起 turn（supervision wake、中断后
+	// 自动恢复）的事件流。session_start 必须被自动收养，事件才能过门禁。
+	bridge.Handle(adoptTestEvent(runtimechat.EventSessionStart, "turn-auto", 1))
+	if bridge.adoptedTurnID != "turn-auto" {
+		t.Fatalf("session_start was not auto-adopted: adopted=%q", bridge.adoptedTurnID)
+	}
+	if !bridge.runActive {
+		t.Fatalf("adopted run is not active")
+	}
+	if !bridge.isRunEpochCurrent(bridge.runEpoch) {
+		t.Fatalf("adopted run epoch is not current: epoch=%d", bridge.runEpoch)
+	}
+
+	// turn 中间事件必须放行（不再被 shouldSuppressMismatchedPrimaryTurnEvent 吞掉）。
+	for _, typ := range []string{
+		runtimechat.EventLLMRequestStarted,
+		runtimechat.EventLLMRequestFinished,
+		"tool.requested",
+		"tool.completed",
+		"assistant.delta",
+	} {
+		e := adoptTestEvent(typ, "turn-auto", 2)
+		if bridge.shouldSuppressMismatchedPrimaryTurnEvent(e) {
+			t.Fatalf("%s of adopted turn was suppressed", typ)
+		}
+		bridge.handleEvent(e)
+	}
+
+	// session_end：该事件放行后自动关闭 adopted run。
+	bridge.handleEvent(adoptTestEvent(runtimechat.EventSessionEnd, "turn-auto", 3))
+	if bridge.adoptedTurnID != "" {
+		t.Fatalf("adopted turn not closed after session_end: %q", bridge.adoptedTurnID)
+	}
+	if bridge.runActive {
+		t.Fatalf("adopted run is still active after session_end")
+	}
+
+	// 同一 turn 的迟到事件必须被拒。
+	if !bridge.shouldSuppressMismatchedPrimaryTurnEvent(adoptTestEvent("tool.completed", "turn-auto", 4)) {
+		t.Fatalf("stray event of closed adopted turn was not suppressed")
+	}
+}
+
+func TestChatRuntimeEventBridgeAdoptIsIdempotentWhileSubmitterRunActive(t *testing.T) {
+	bridge := newAdoptTestBridge(t)
+	bridge.BeginRun() // CLI 提交方（executor/wake）已建立 run-epoch 上下文
+	bridge.Handle(adoptTestEvent(runtimechat.EventSessionStart, "turn-cli", 1))
+	if bridge.adoptedTurnID != "" {
+		t.Fatalf("submitter-owned run must not be auto-adopted, got %q", bridge.adoptedTurnID)
+	}
+	// handleEvent 同步驱动 observePrimaryRunTurn（Handle 是异步入队路径）。
+	bridge.handleEvent(adoptTestEvent(runtimechat.EventSessionStart, "turn-cli", 1))
+	if bridge.activeTurnID != "turn-cli" {
+		t.Fatalf("active turn not observed: %q", bridge.activeTurnID)
+	}
+}
+
+func TestChatRuntimeEventBridgeAdoptedRunYieldsToNewCLISubmission(t *testing.T) {
+	bridge := newAdoptTestBridge(t)
+	bridge.Handle(adoptTestEvent(runtimechat.EventSessionStart, "turn-auto", 1))
+	if bridge.adoptedTurnID != "turn-auto" {
+		t.Fatalf("auto turn not adopted")
+	}
+
+	// 用户中断后重新提交：executor BeginRun 推进 epoch，接管活动 run。
+	bridge.BeginRun()
+	if !bridge.runActive {
+		t.Fatalf("submitter run should be active")
+	}
+
+	// adopted turn 迟到的 session_end 只清标记，不能把 submitter run 关掉。
+	bridge.handleEvent(adoptTestEvent(runtimechat.EventSessionEnd, "turn-auto", 2))
+	if bridge.adoptedTurnID != "" {
+		t.Fatalf("adopted marker not cleared: %q", bridge.adoptedTurnID)
+	}
+	if !bridge.runActive {
+		t.Fatalf("submitter run must stay active after stale adopted session_end")
+	}
+	if bridge.activeTurnID != "" {
+		t.Fatalf("submitter run turn ownership was clobbered: %q", bridge.activeTurnID)
+	}
+}

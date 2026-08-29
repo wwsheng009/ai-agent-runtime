@@ -84,7 +84,13 @@ type chatRuntimeEventBridge struct {
 	runActive                       bool
 	runEpoch                        uint64
 	activeTurnID                    string
-	executorTurnID                  string
+	// adoptedTurnID marks a primary turn that this bridge auto-adopted from
+	// the event stream (session_start opens / session_end closes) because the
+	// submitting side (sidecar/background auto-recovery wake turns) never
+	// called BeginRun. Empty means no adopted run is open.
+	adoptedTurnID   string
+	adoptedRunEpoch uint64 // runEpoch captured at adopt time
+	executorTurnID  string
 	activeAssistantStreamID         string
 	assistantStreams                map[string]*chatAssistantStreamState
 	retiredAssistantStreams         map[string]struct{}
@@ -799,6 +805,7 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if b == nil {
 		return
 	}
+	b.maybeAdoptPrimaryRunTurn(event)
 	size := runtimeevents.ApproximateEventBytes(event)
 	if size < 1 {
 		size = 1
@@ -3208,6 +3215,12 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		return
 	}
 	b.observePrimaryRunTurn(event)
+	// An auto-adopted run (sidecar-initiated turn that never went through a
+	// CLI BeginRun) closes itself on its own session_end once the event has
+	// been fully handled.
+	if b.shouldEndAdoptedRun(event) {
+		defer b.endAdoptedRun(event)
+	}
 	// Logging is append-only observability and may retain stale events. All
 	// mutable UI/transcript paths below remain guarded by turn ownership.
 	b.handleStructuredLogEvent(event)
@@ -3432,6 +3445,76 @@ func (b *chatRuntimeEventBridge) observePrimaryRunTurn(event runtimeevents.Event
 	if b.activeTurnID == "" {
 		b.activeTurnID = turnID
 	}
+}
+
+// maybeAdoptPrimaryRunTurn establishes a run-epoch context for a primary
+// turn that the submitting side (runtime-server sidecar / background
+// auto-recovery, e.g. supervision wake or post-interrupt auto-continuation)
+// started without a CLI BeginRun. Without adoption, runActive stays false
+// and shouldSuppressMismatchedPrimaryTurnEvent rejects every event of the
+// turn (silent UI during the whole auto-recovered execution). The bridge
+// treats the event stream itself as the lifecycle source: session_start
+// opens the adopted run, session_end closes it.
+//
+// Idempotent: while a submitter-owned run is active (executor or wake
+// BeginRun), or when an adopted run is already open, this is a no-op.
+func (b *chatRuntimeEventBridge) maybeAdoptPrimaryRunTurn(event runtimeevents.Event) {
+	if b == nil || event.Type != runtimechat.EventSessionStart || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	if turnID == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.runActive || b.adoptedTurnID != "" {
+		return
+	}
+	b.runStarted = true
+	b.runActive = true
+	b.runEpoch++
+	b.activeTurnID = turnID
+	b.adoptedTurnID = turnID
+	b.adoptedRunEpoch = b.runEpoch
+}
+
+// shouldEndAdoptedRun reports whether event is the session_end of the
+// currently auto-adopted primary run.
+func (b *chatRuntimeEventBridge) shouldEndAdoptedRun(event runtimeevents.Event) bool {
+	if b == nil || event.Type != runtimechat.EventSessionEnd || !b.isPrimarySessionEvent(event) {
+		return false
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	if turnID == "" {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.adoptedTurnID != "" && turnID == b.adoptedTurnID
+}
+
+// endAdoptedRun closes the auto-adopted run after its session_end event has
+// been fully handled. If a CLI submission (executor/wake BeginRun) advanced
+// the epoch in the meantime, only the adopted marker is cleared and the
+// active run keeps its submitter-owned lifecycle.
+func (b *chatRuntimeEventBridge) endAdoptedRun(event runtimeevents.Event) {
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.adoptedTurnID == "" {
+		return
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	if turnID != b.adoptedTurnID {
+		return
+	}
+	if b.runEpoch == b.adoptedRunEpoch && b.activeTurnID == turnID {
+		b.activeTurnID = ""
+		b.retireTurnLocked(turnID)
+		b.runActive = false
+	}
+	b.adoptedTurnID = ""
+	b.adoptedRunEpoch = 0
 }
 
 func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event runtimeevents.Event) bool {
