@@ -93,6 +93,12 @@ type CodexStreamState struct {
 	SummaryStarted      bool
 	SummaryParts        map[int]*codexReasoningSummaryPartState
 	SummaryEmittedParts int
+	// SummaryItemID 标识当前 summary 流所属的 reasoning item
+	// (response.reasoning_summary_*. 事件的 item_id)。上游在**每个** item 内
+	// 都从 summary_index=0 重新编号，所以 part 状态必须以 item 为隔离边界，
+	// 否则下一个 item 的 part 会复用上一个 item 的状态（EmittedEnd 非零导致
+	// 跨 item 丢失分隔符，Content 被前后 item 的片段拼接污染）。
+	SummaryItemID string
 }
 
 // codexReasoningSummaryPartState keeps delta/done reconciliation local to one
@@ -1698,8 +1704,23 @@ func (a *CodexAdapter) handleCustomToolCallInputDone(state *CodexStreamState, ev
 	applyAuthoritativeCodexToolArguments(&tc.Arguments, codexToolCallInputString(event["input"]))
 }
 
+// beginReasoningSummaryItem resets per-item reasoning part state when the
+// protocol moves to a new reasoning item. Upstream payloads reuse
+// summary_index (0..n-1) inside every item; without this isolation the next
+// item's parts would inherit the previous item's EmittedEnd/Content, dropping
+// the newline separator at item boundaries and corrupting buffered content.
+func (s *CodexStreamState) beginReasoningSummaryItem(itemID string) {
+	if itemID == "" || itemID == s.SummaryItemID {
+		return
+	}
+	s.SummaryItemID = itemID
+	s.SummaryParts = nil
+	s.SummaryEmittedParts = 0
+}
+
 // handleReasoningSummaryPartAdded 处理 response.reasoning_summary_part.added 事件
 func (a *CodexAdapter) handleReasoningSummaryPartAdded(state *CodexStreamState, event map[string]interface{}) {
+	state.beginReasoningSummaryItem(asCodexString(event["item_id"]))
 	// 注意：使用 summary_index 而非 index
 	summaryIndex := getSummaryIndex(event)
 	state.SummaryIndex = summaryIndex
@@ -1709,6 +1730,7 @@ func (a *CodexAdapter) handleReasoningSummaryPartAdded(state *CodexStreamState, 
 
 // handleReasoningSummaryTextDelta 处理 response.reasoning_summary_text.delta 事件
 func (a *CodexAdapter) handleReasoningSummaryTextDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	state.beginReasoningSummaryItem(asCodexString(event["item_id"]))
 	// 注意：使用 summary_index 而非 index
 	summaryIndex := getSummaryIndex(event)
 	delta := asCodexString(event["delta"])
@@ -1728,6 +1750,7 @@ func (a *CodexAdapter) handleReasoningSummaryTextDelta(state *CodexStreamState, 
 // avoids replaying a partial part when a done snapshot extends it, and lets the
 // same semantic separator be used by delta and snapshot recovery paths.
 func (a *CodexAdapter) handleReasoningSummaryTextDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	state.beginReasoningSummaryItem(asCodexString(event["item_id"]))
 	text := asCodexString(event["text"])
 	if strings.TrimSpace(text) == "" {
 		return
@@ -1756,7 +1779,9 @@ func (s *CodexStreamState) reasoningSummaryPart(summaryIndex int) *codexReasonin
 // flushReasoningSummaryPart emits a newline only before the first visible byte
 // of a later protocol summary part. Leading whitespace is buffered until the
 // part proves non-empty, then preserved byte-for-byte with the rest of the part.
-// Subsequent deltas in the same part are emitted unchanged.
+// Subsequent deltas in the same part are emitted unchanged. The separator is
+// gated on accumulated content (not EmittedParts) so that the first part of a
+// new reasoning item still separates from the previous item's last part.
 func (s *CodexStreamState) flushReasoningSummaryPart(part *codexReasoningSummaryPartState, emit func(string)) {
 	if s == nil || part == nil {
 		return
@@ -1767,7 +1792,7 @@ func (s *CodexStreamState) flushReasoningSummaryPart(part *codexReasoningSummary
 		if strings.TrimSpace(text) == "" {
 			return
 		}
-		if s.SummaryEmittedParts > 0 {
+		if s.Reasoning.Len() > 0 {
 			separator = "\n"
 			s.Reasoning.WriteString(separator)
 		}
@@ -1830,6 +1855,14 @@ func appendMissingCodexText(builder *strings.Builder, authoritative string, emit
 		strings.HasSuffix(trimCurrent, trimAuth) {
 		return
 	}
+	// Recover snapshots may insert separators between reasoning items (item
+	// boundaries become "\n") that streaming deltas never emitted. Compare
+	// line breaks independently of text: identical prose with different
+	// newline layout must not be re-emitted in full (and must not glue a
+	// duplicate body onto the display buffer later).
+	if foldLineBreaks(trimCurrent) == foldLineBreaks(trimAuth) {
+		return
+	}
 	missing := authoritative
 	if strings.HasPrefix(authoritative, current) {
 		missing = authoritative[len(current):]
@@ -1852,6 +1885,23 @@ func appendMissingCodexText(builder *strings.Builder, authoritative string, emit
 	if emit != nil {
 		emit(missing)
 	}
+}
+
+// foldLineBreaks strips every CR/LF byte so callers can compare reasoning
+// prose independently of newline layout (streaming deltas vs compacted
+// snapshots may differ only in where item separators are inserted).
+func foldLineBreaks(text string) string {
+	if !strings.ContainsAny(text, "\r\n") {
+		return text
+	}
+	var builder strings.Builder
+	builder.Grow(len(text))
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\r' && text[i] != '\n' {
+			builder.WriteByte(text[i])
+		}
+	}
+	return builder.String()
 }
 
 // applyAuthoritativeCodexToolArguments merges a done/completed tool-argument
@@ -2167,10 +2217,28 @@ func (a *CodexAdapter) recoverCodexFinalOutput(state *CodexStreamState, output [
 			}
 		case "reasoning":
 			state.OutputItems[index] = cloneInterfaceMap(item)
-			reasoning.WriteString(codexReasoningSummaryText(item["summary"]))
+			summaryText := codexReasoningSummaryText(item["summary"])
+			if summaryText != "" {
+				if reasoning.Len() > 0 && !strings.HasSuffix(reasoning.String(), "\n") {
+					// Distinct reasoning items must remain distinct display
+					// lines. Streaming deltas separate parts per event, but the
+					// compacted completed snapshot joins items without a
+					// separator, gluing the last part of item N to the first of
+					// item N+1 (e.g. "p3p4", "p6p10").
+					reasoning.WriteString("\n")
+				}
+				reasoning.WriteString(summaryText)
+			}
 			for _, part := range decodeSliceOfMaps(item["content"]) {
 				if strings.EqualFold(strings.TrimSpace(asCodexString(part["type"])), "reasoning_text") {
-					reasoning.WriteString(asCodexString(part["text"]))
+					text := asCodexString(part["text"])
+					if text == "" {
+						continue
+					}
+					if reasoning.Len() > 0 && !strings.HasSuffix(reasoning.String(), "\n") {
+						reasoning.WriteString("\n")
+					}
+					reasoning.WriteString(text)
 				}
 			}
 		case "function_call", "custom_tool_call":

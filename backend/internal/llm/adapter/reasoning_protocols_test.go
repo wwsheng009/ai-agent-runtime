@@ -591,3 +591,79 @@ func jsonQuote(s string) (string, error) {
 	}
 	return string(b), nil
 }
+
+func TestCodexHandleResponseSummaryPartsIsolatedPerItem(t *testing.T) {
+	adapter := &CodexAdapter{}
+	var reasoningParts []string
+
+	ss := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_iso","model":"gpt-5.4"}}`,
+		"",
+		// item rs_a: 3 summary parts (summary_index 0..2)
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_a","output_index":0,"summary_index":0}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_a","output_index":0,"summary_index":0,"delta":"**P1**"}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_a","output_index":0,"summary_index":1}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_a","output_index":0,"summary_index":1,"delta":"**P2**"}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_a","output_index":0,"summary_index":2}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_a","output_index":0,"summary_index":2,"delta":"**P3**"}`,
+		"",
+		// item rs_b: summary_index restarts at 0
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_b","output_index":1,"summary_index":0}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_b","output_index":1,"summary_index":0,"delta":"**Q1**"}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_b","output_index":1,"summary_index":1}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_b","output_index":1,"summary_index":1,"delta":"**Q2**"}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_b","output_index":1,"summary_index":2}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_b","output_index":1,"summary_index":2,"delta":"**Q3**"}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_iso","status":"completed","stop_reason":"end_turn","output":[{"id":"rs_a","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"**P1**"},{"type":"summary_text","text":"**P2**"},{"type":"summary_text","text":"**P3**"}]},{"id":"rs_b","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"**Q1**"},{"type":"summary_text","text":"**Q2**"},{"type":"summary_text","text":"**Q3**"}]}]}}`,
+		"",
+	}, "\n")
+
+	msg, err := adapter.HandleResponse(true, strings.NewReader(ss), StreamCallbacks{
+		OnText:     func(text string) {},
+		OnReasoning: func(reasoning string) {
+			reasoningParts = append(reasoningParts, reasoning)
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleResponse: %v", err)
+	}
+
+	// 每个 part 恰好 emit 一次；跨 item 必须保留 \n 分隔；completed 快照
+	// 与流式累积一致时不允许全量重发（修复前这里会多出 2 整段重复）。
+	joined := strings.Join(reasoningParts, "")
+	want := "**P1**\n**P2**\n**P3**\n**Q1**\n**Q2**\n**Q3**"
+	if joined != want {
+		t.Fatalf("unexpected reasoning join:\n got %q\nwant %q\nparts=%#v", joined, want, reasoningParts)
+	}
+	if len(reasoningParts) != 6 {
+		t.Fatalf("expected 6 reasoning emissions, got %d: %#v", len(reasoningParts), reasoningParts)
+	}
+	if got, _ := msg["reasoning_content"].(string); got != want {
+		t.Fatalf("unexpected reasoning_content: %q", got)
+	}
+}
