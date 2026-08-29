@@ -356,6 +356,7 @@ ai-agent-runtime/
 - [aicli agents](./docs/aicli/agents.md)
 - [aicli 图片生成](./docs/aicli/tool_image_generate.md)
 - [aicli 文档目录](./docs/aicli/README.md)
+- [开发规范](./docs/development-guidelines.md)
 - [项目文档目录](./docs/README.md)
 - [Roadmap](./docs/roadmap.md)
 - [迁移指南](./MIGRATION.md)

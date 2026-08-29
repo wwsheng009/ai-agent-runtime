@@ -31,6 +31,7 @@ Main sections:
 
 Recommended starting points:
 
+- `development-guidelines.md`
 - `aicli/quickstart.md`
 - `aicli/README.md`
 - `aicli/install.md`
