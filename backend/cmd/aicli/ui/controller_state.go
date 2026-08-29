@@ -816,10 +816,17 @@ func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCom
 // migration-only streaming ledger already published by the actor. Scene owns
 // cell identity/source/revision, while Stable/Enqueued/Acked are physical
 // handoff progress and are therefore absent from ReplaceTranscriptAction.
-// When both views describe the same mutable source, dropping the ledger on
-// every runtime-event snapshot would make a shadow update disappear before a
-// presenter can consume it. Keep the newer/equal semantic active cell in that
-// case; a newer Scene source or a finalized/removed cell still replaces it.
+// Append-only Scene updates must carry the physical ranges forward. Scene cell
+// revisions and reducer-side active revisions are separate version domains, so
+// comparing those counters cannot prove that Stable/Enqueued/Acked are stale.
+// Dropping the ranges here makes the next structured overflow handoff start at
+// source offset zero and append the already-delivered reasoning/Markdown prefix
+// to native history again.
+//
+// An accepted non-prefix correction still replaces the active state with zero
+// ranges; the caller has already marked an acknowledged correction for
+// reconciliation. A lower reducer revision remains a stale shadow snapshot and
+// keeps the existing active state, as before.
 func reconcileTranscriptActiveCell(current ActiveCellState, transcript TranscriptState) ActiveCellState {
 	next, ok := ActiveCellFromTranscript(transcript)
 	if !ok {
@@ -828,11 +835,23 @@ func reconcileTranscriptActiveCell(current ActiveCellState, transcript Transcrip
 	if current.CellID == 0 || current.Phase == ActiveCellInactive || current.CellID != next.CellID {
 		return next
 	}
-	if current.Revision > next.Revision {
-		return current.Clone()
+	if current.Kind == next.Kind && strings.HasPrefix(next.Source, current.Source) {
+		merged := next.Clone()
+		merged.Stable = current.Stable
+		merged.Enqueued = current.Enqueued
+		merged.Acked = current.Acked
+		if next.Source == current.Source {
+			if merged.Revision < current.Revision {
+				merged.Revision = current.Revision
+			}
+		} else if merged.Revision <= current.Revision {
+			// Preserve the reducer's strict source-update fence even when the
+			// independent Scene revision happens to lag or equal it.
+			merged.Revision = current.Revision + 1
+		}
+		return merged
 	}
-	if current.Revision == next.Revision &&
-		current.Kind == next.Kind && current.Source == next.Source {
+	if current.Revision > next.Revision {
 		return current.Clone()
 	}
 	return next

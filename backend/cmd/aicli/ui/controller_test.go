@@ -67,6 +67,77 @@ func newP1Controller(t *testing.T, cap int) (*UIController, *p1Recorder) {
 	return c, rec
 }
 
+func TestReconcileTranscriptActiveCellPreservesPhysicalProgressAcrossAppendOnlySceneRevision(t *testing.T) {
+	tests := []struct {
+		name            string
+		kind            scene.CellKind
+		sceneRevision   uint64
+		wantRevision    uint64
+		currentSource   string
+		appendedSource  string
+		acknowledgedEnd int
+	}{
+		{
+			name:            "reasoning scene revision advances",
+			kind:            scene.KindReasoning,
+			sceneRevision:   11,
+			wantRevision:    11,
+			currentSource:   "**Preparing audit**\n**Mapping renderer**\n",
+			appendedSource:  "**Checking history handoff**\n",
+			acknowledgedEnd: len("**Preparing audit**\n"),
+		},
+		{
+			name:            "assistant scene revision is an independent counter",
+			kind:            scene.KindAssistant,
+			sceneRevision:   3,
+			wantRevision:    8,
+			currentSource:   "**First answer row**\n**Second answer row**\n",
+			appendedSource:  "**Third answer row**\n",
+			acknowledgedEnd: len("**First answer row**\n"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			current := ActiveCellState{
+				CellID:   41,
+				Revision: 7,
+				Kind:     test.kind,
+				Phase:    ActiveCellMutable,
+				Source:   test.currentSource,
+				Stable:   SourceRange{Start: 0, End: len(test.currentSource)},
+				Enqueued: SourceRange{Start: 0, End: len(test.currentSource)},
+				Acked:    SourceRange{Start: 0, End: test.acknowledgedEnd},
+			}
+			nextSource := test.currentSource + test.appendedSource
+			transcript := NewTranscriptState(&scene.Snapshot{
+				Revision: 12,
+				Cells: []*scene.TranscriptCell{{
+					ID:       current.CellID,
+					Revision: test.sceneRevision,
+					Kind:     test.kind,
+					Phase:    scene.CellMutable,
+					Source:   nextSource,
+				}},
+			})
+
+			got := reconcileTranscriptActiveCell(current, transcript)
+			if got.Source != nextSource || got.Kind != test.kind || got.Phase != ActiveCellMutable {
+				t.Fatalf("reconciled active cell = %+v, want appended %v source", got, test.kind)
+			}
+			if got.Revision != test.wantRevision {
+				t.Fatalf("reconciled revision = %d, want %d", got.Revision, test.wantRevision)
+			}
+			if got.Stable != current.Stable || got.Enqueued != current.Enqueued || got.Acked != current.Acked {
+				t.Fatalf(
+					"append-only Scene snapshot reset physical history progress:\n got=%+v\nwant stable=%+v enqueued=%+v acked=%+v",
+					got, current.Stable, current.Enqueued, current.Acked,
+				)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 基础：FIFO、revision、stats
 // ---------------------------------------------------------------------------

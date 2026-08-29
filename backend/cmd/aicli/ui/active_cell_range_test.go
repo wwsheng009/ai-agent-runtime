@@ -188,7 +188,7 @@ func TestReplaceTranscriptPreservesStreamingLedgerForSameMutableSource(t *testin
 	}
 }
 
-func TestReplaceTranscriptReplacesLedgerWhenSceneSourceAdvances(t *testing.T) {
+func TestReplaceTranscriptPreservesLedgerWhenSceneSourceAppends(t *testing.T) {
 	current := activeRangeFixture("abc", 2, 3, 2, 1)
 	state := UIControllerState{AppState: AppState{Active: current}}
 	snapshot := &scene.Snapshot{Revision: 4, Cells: []*scene.TranscriptCell{{
@@ -199,8 +199,10 @@ func TestReplaceTranscriptReplacesLedgerWhenSceneSourceAdvances(t *testing.T) {
 	if state.Active.Source != "abcd" || state.Active.Revision != 3 {
 		t.Fatalf("advanced Scene source was not installed: %+v", state.Active)
 	}
-	if state.Active.StreamingRangesKnown() {
-		t.Fatalf("advanced Scene source inherited old physical ledger: %+v", state.Active)
+	if state.Active.Stable != current.Stable ||
+		state.Active.Enqueued != current.Enqueued ||
+		state.Active.Acked != current.Acked {
+		t.Fatalf("append-only Scene source lost physical ledger: got %+v want %+v", state.Active, current)
 	}
 }
 

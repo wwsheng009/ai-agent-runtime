@@ -239,6 +239,113 @@ func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 	}
 }
 
+func TestReplaceTranscriptAppendDoesNotReplayStructuredActiveHistoryPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		kind scene.CellKind
+		line func(int) string
+	}{
+		{
+			name: "reasoning",
+			kind: scene.KindReasoning,
+			line: func(index int) string {
+				return fmt.Sprintf("**reasoning-row-%03d**", index)
+			},
+		},
+		{
+			name: "assistant markdown",
+			kind: scene.KindAssistant,
+			line: func(index int) string {
+				return fmt.Sprintf("**assistant-row-%03d**", index)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			makeSource := func(start, end int) string {
+				lines := make([]string, 0, end-start)
+				for index := start; index < end; index++ {
+					lines = append(lines, test.line(index))
+				}
+				return strings.Join(lines, "\n")
+			}
+
+			const cellID = scene.CellID(91)
+			initialSource := makeSource(0, 30)
+			state := UIControllerState{}
+			state = reduceUIControllerState(state, Resize{Width: 80, Height: 12, Generation: 1}, 1)
+			state = reduceUIControllerState(state, SetSemanticActiveCellProjectionAction{Enabled: true}, 2)
+			state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+				Revision:       1,
+				ContentVersion: 1,
+				Cells: []*scene.TranscriptCell{{
+					ID: cellID, Sequence: 1, Revision: 1, Kind: test.kind,
+					Source: initialSource, Phase: scene.CellMutable,
+				}},
+			}}, 3)
+
+			initialEntries := state.HistoryEffects.Entries()
+			if len(initialEntries) == 0 {
+				t.Fatal("initial structured active source produced no history handoff")
+			}
+			frame := uint64(1)
+			for _, entry := range initialEntries {
+				if entry.Commit.Origin != HistoryCommitActive || entry.State != HistoryCommitPending {
+					continue
+				}
+				state = reduceUIControllerState(state, BeginHistoryCommit{
+					Token: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration,
+				}, frame+3)
+				state = reduceUIControllerState(state, HistoryCommitAcknowledged{
+					Token: entry.Commit.Token, Frame: frame, LayoutGeneration: state.LayoutGeneration,
+				}, frame+4)
+				frame++
+			}
+			ackedEnd := state.Active.Acked.End
+			if ackedEnd <= 0 {
+				t.Fatalf("initial active history did not advance ack frontier: %+v", state.Active)
+			}
+
+			nextSource := initialSource + "\n" + makeSource(30, 55)
+			state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+				Revision:       2,
+				ContentVersion: 2,
+				Cells: []*scene.TranscriptCell{{
+					ID: cellID, Sequence: 1, Revision: 2, Kind: test.kind,
+					Source: nextSource, Phase: scene.CellMutable,
+				}},
+			}}, 100)
+
+			if state.Active.Acked.End != ackedEnd {
+				t.Fatalf("append-only Scene replacement reset ack frontier %d -> %d", ackedEnd, state.Active.Acked.End)
+			}
+			pending := 0
+			var pendingText strings.Builder
+			for _, entry := range state.HistoryEffects.Entries() {
+				commit := entry.Commit
+				if entry.State != HistoryCommitPending || commit.Origin != HistoryCommitActive {
+					continue
+				}
+				pending++
+				if commit.SourceRange.Start < ackedEnd {
+					t.Fatalf("new handoff restarts before acked prefix: commit=%+v ackedEnd=%d", commit, ackedEnd)
+				}
+				for _, line := range commit.Lines {
+					pendingText.WriteString(renderLineText(line))
+					pendingText.WriteByte('\n')
+				}
+			}
+			if pending == 0 {
+				t.Fatal("appended structured source produced no new history handoff")
+			}
+			if strings.Contains(pendingText.String(), test.line(0)) {
+				t.Fatalf("new history payload replayed the committed prefix: %q", pendingText.String())
+			}
+		})
+	}
+}
+
 func TestFinalizeActiveCellPlansOnlyUnacknowledgedResidentTail(t *testing.T) {
 	const width, height = 100, 24
 	markers := make([]string, 40)
