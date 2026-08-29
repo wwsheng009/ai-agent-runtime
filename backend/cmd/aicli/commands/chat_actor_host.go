@@ -456,8 +456,7 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 					return
 				}
 				defer releaseTurn()
-				runMeta := &team.RunMeta{PermissionMode: "bypass_permissions"}
-				_, _ = h.ActorRegistry.SubmitPrompt(runCtx, parentSessionID, supervision.AutoWakePrompt, runMeta)
+				_ = h.submitParentWakeTurn(runCtx, parentSessionID)
 			}()
 			return nil
 		},
@@ -475,6 +474,37 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			_ = h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID)
 		}
 	}
+}
+
+// beginWakeTurnRun engages the UI run-epoch protocol for one wake turn and
+// returns the matching endRun, which must be invoked (defer) when the turn
+// finishes. Without BeginRun the wake turn's runtime events are captured
+// with run epoch 0 and every one of them is rejected by the actor-side
+// fence (chatRuntimeEventBridge.isRunEpochCurrent) as targeting a closed
+// run epoch — observed as a fully blank parent UI for the entire wake turn
+// while the log fills with "render suppressed reason=... closed run epoch".
+func (h *localChatRuntimeHost) beginWakeTurnRun() func() {
+	if h == nil {
+		return func() {}
+	}
+	if bridge := ensureChatRuntimeEventBridge(h.BaseSession); bridge != nil {
+		bridge.PrepareRunPrompt(supervision.AutoWakePrompt)
+		bridge.BeginRun()
+		return bridge.EndRun
+	}
+	return func() {}
+}
+
+// submitParentWakeTurn delivers one supervision wake turn on the parent
+// actor, wrapped in the UI run-epoch protocol (BeginRun/EndRun).
+func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentSessionID string) error {
+	if h == nil || h.ActorRegistry == nil {
+		return fmt.Errorf("actor registry is not ready")
+	}
+	endRun := h.beginWakeTurnRun()
+	defer endRun()
+	_, err := h.ActorRegistry.SubmitPrompt(ctx, parentSessionID, supervision.AutoWakePrompt, &team.RunMeta{PermissionMode: "bypass_permissions"})
+	return err
 }
 
 // bindSupervisionWakeConsumer subscribes the parent root session turn end so

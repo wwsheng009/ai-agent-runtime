@@ -2566,10 +2566,22 @@ func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, 
 	payload, _ := json.Marshal(event.Payload)
 	writeSessionDebugInfo(
 		b.session,
-		fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q payload=%s",
-			reason, event.Type, event.SessionID, event.TraceID, payload),
+		fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q current_run_epoch=%d run_active=%t payload=%s",
+			reason, event.Type, event.SessionID, event.TraceID, b.currentRunEpoch(), b.isRunActive(), payload),
 		false,
 	)
+}
+
+// currentRunEpoch reports the bridge's current run epoch (0 when no run has
+// begun on this session yet). Diagnostic aid: a suppressed event storm while
+// current_run_epoch stays 0 means the emitting turn bypassed BeginRun.
+func (b *chatRuntimeEventBridge) currentRunEpoch() uint64 {
+	if b == nil {
+		return 0
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.runEpoch
 }
 
 func (b *chatRuntimeEventBridge) reserveEventQueueBytes(size int64) {
@@ -4054,6 +4066,18 @@ func (b *chatRuntimeEventBridge) shouldFinalizeAssistantDeltaOnTerminalEvent(eve
 func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Event) bool {
 	if b == nil || b.session == nil {
 		return false
+	}
+	if os.Getenv("AICLI_REASONING_PROBE") != "" {
+		// Temporary diagnostic probe: record every reasoning event reaching the
+		// UI bridge so a reproduction run yields the exact event sequence
+		// (sequence/mode/stream) that produced a duplicated or glued display.
+		seq, _ := event.Payload["sequence"]
+		mode, _ := event.Payload["mode"].(string)
+		text := streamEventText(event)
+		if text != "" {
+			logpkg.Debugf("[reasoning-probe] turn=%s stream=%s seq=%v mode=%q len=%d text=%q",
+				event.TraceID, event.Payload["stream_id"], seq, mode, len(text), text)
+		}
 	}
 	if event.Type != runtimechat.EventAssistantReasoning && event.Type != "assistant.reasoning" {
 		return false
@@ -7840,7 +7864,11 @@ func chatReasoningRenderText(block *runtimetypes.ReasoningBlock, formatter *form
 // blocks, multi-line spans), so the ANSI output is not re-split, trimmed or
 // truncated per line.
 func chatReasoningRenderContent(display string, formatter *formatter.MarkdownFormatter, indent string) string {
-	display = strings.TrimSpace(display)
+	// Normalize CR line endings (CRLF and bare CR) to LF before any display
+	// work: band rows, terminal copies and markdown parsing all expect plain
+	// newlines. Otherwise the reasoning source leaks carriage returns into the
+	// copied output and blocks equality-based delta reconciliation.
+	display = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(display, "\r\n", "\n"), "\r", "\n"))
 	if display == "" {
 		return ""
 	}

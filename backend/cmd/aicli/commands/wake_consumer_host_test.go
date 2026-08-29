@@ -206,3 +206,34 @@ func TestLocalHostWakeConsumer_ParentSessionEndIgnoresOtherSessions(t *testing.T
 	deliveries.wait(t, 5*time.Second)
 	require.Equal(t, 1, deliveries.count())
 }
+
+// TestLocalHostWakeConsumer_WakeTurnAppliesRunEpochProtocol is the
+// regression test for the blank-parent-UI bug: the supervision wake turn
+// used to be submitted without BeginRun, so every runtime event it emitted
+// was captured with run epoch 0 and rejected by the epoch fence
+// (isRunEpochCurrent) — the parent UI stayed blank for the whole wake while
+// the debug log filled with "render suppressed ... closed run epoch". The
+// wake turn must join the run-epoch protocol like every other turn.
+func TestLocalHostWakeConsumer_WakeTurnAppliesRunEpochProtocol(t *testing.T) {
+	host, _, _ := newWakeConsumerTestHost(t, "aicli-wake-epoch")
+	require.NotNil(t, host.BaseSession)
+
+	bridge := ensureChatRuntimeEventBridge(host.BaseSession)
+	require.NotNil(t, bridge)
+
+	// Bug precondition: before any run has begun the fence rejects every
+	// event ("closed run epoch") — this is exactly what blanked the UI.
+	require.Zero(t, bridge.currentRunEpoch())
+	require.False(t, bridge.isRunEpochCurrent(1))
+
+	// Engaging the wake-turn run protocol advances the epoch.
+	endRun := host.beginWakeTurnRun()
+	require.Equal(t, uint64(1), bridge.currentRunEpoch())
+	require.True(t, bridge.isRunEpochCurrent(1), "wake turn events must clear the epoch fence")
+
+	// EndRun keeps the epoch at 1: late ambient events of the same run stay
+	// renderable (documented isRunEpochCurrent contract).
+	endRun()
+	require.Equal(t, uint64(1), bridge.currentRunEpoch())
+	require.True(t, bridge.isRunEpochCurrent(1))
+}
