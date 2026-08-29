@@ -205,6 +205,11 @@ func (c *localTeamLifecycleService) RunSettled(ctx context.Context, teamID strin
 		return true, nil
 	}
 	if record.Status == team.TeamStatusActive {
+		// Stale-active 团队（进程异常退出或团队结束时状态未持久化遗留）的
+		// 终止判定不在这里做：运行中进程可能正处于中断/暂停窗口（任务已
+		// cancelled 而团队尚未 pause），此时误 reconcile 会提前终结团队。
+		// stale 探测只发生在启动早期 —— 见 restoreLocalRuntimeHostTeamState
+		// 中的 one-shot 探测（新进程必无 live loop）。
 		return false, nil
 	}
 	if c.hasTeamLoop(teamID) {
@@ -265,16 +270,7 @@ func (c *localTeamLifecycleService) terminalSummaryReady(ctx context.Context, te
 		return false, nil
 	}
 
-	services := team.TerminalTeamServices{
-		Store:               c.Host.TeamStore,
-		IgnoreBusyTeammates: true,
-	}
-	if orchestrator := c.Host.Orchestrator; orchestrator != nil {
-		services.Planner = orchestrator.LeadPlanner
-		services.Mailbox = orchestrator.Mailbox
-		services.Events = orchestrator.Events
-	}
-	if _, err := team.ReconcileTerminalTeamState(ctx, services, strings.TrimSpace(teamID)); err != nil {
+	if _, err := team.ReconcileTerminalTeamState(ctx, c.terminalTeamServices(), strings.TrimSpace(teamID)); err != nil {
 		return false, err
 	}
 	events, err = c.Host.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
@@ -288,6 +284,21 @@ func (c *localTeamLifecycleService) terminalSummaryReady(ctx context.Context, te
 	return len(events) > 0, nil
 }
 
+// terminalTeamServices builds the terminal-state reconciliation collaborators
+// shared by RunSettled and terminalSummaryReady.
+func (c *localTeamLifecycleService) terminalTeamServices() team.TerminalTeamServices {
+	services := team.TerminalTeamServices{
+		Store:               c.Host.TeamStore,
+		IgnoreBusyTeammates: true,
+	}
+	if orchestrator := c.Host.Orchestrator; orchestrator != nil {
+		services.Planner = orchestrator.LeadPlanner
+		services.Mailbox = orchestrator.Mailbox
+		services.Events = orchestrator.Events
+	}
+	return services
+}
+
 func (c *localTeamLifecycleService) closeTerminalTeammatesAsync(teamID string) {
 	if c == nil || c.Host == nil || strings.TrimSpace(teamID) == "" {
 		return
@@ -298,6 +309,46 @@ func (c *localTeamLifecycleService) closeTerminalTeammatesAsync(teamID string) {
 		cancel()
 		_ = c.closeTerminalTeammates(context.Background(), teamID)
 	}()
+}
+
+// reconcileStaleAmbientTeams performs a one-shot stale-active team detection
+// during startup (restoreLocalRuntimeHostTeamState, before team loops are
+// synced). A team record stuck at TeamStatusActive does not necessarily mean
+// the team is still running: an abnormal process exit or a team finishing
+// right before persistence leaves an active record behind. Without this
+// pass, resume would block the main loop forever on waitForTeamTerminal
+// (Pending==true) — the unified renderer shows an execution state and the
+// prompt never renders.
+//
+// It is safe here (unlike in RunSettled) because a fresh process has no live
+// team loop yet: ReconcileTerminalTeamState only terminates teams whose tasks
+// are all terminal, so genuinely running teams stay active and are resumed by
+// the subsequent syncTeamLifecycleLoops.
+func reconcileStaleAmbientTeams(session *ChatSession) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil {
+		return
+	}
+	lifecycle, ok := session.LocalRuntimeHost.teamLifecycleService().(*localTeamLifecycleService)
+	if !ok || lifecycle == nil {
+		return
+	}
+	binding := resolvedInteractiveTeamBinding(session)
+	if binding == nil || strings.TrimSpace(binding.TeamID) == "" {
+		return
+	}
+	teamID := strings.TrimSpace(binding.TeamID)
+	if lifecycle.hasTeamLoop(teamID) {
+		// 本进程已有 live loop：不是 stale，由 loop 正常收尾。
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
+	defer cancel()
+	record, err := session.LocalRuntimeHost.TeamStore.GetTeam(ctx, teamID)
+	if err != nil || record == nil || record.Status != team.TeamStatusActive {
+		return
+	}
+	// Best-effort：探测失败不阻断启动，既有等待路径按原逻辑继续。
+	_, _ = team.ReconcileTerminalTeamState(ctx, lifecycle.terminalTeamServices(), teamID)
 }
 
 func (c *localTeamLifecycleService) waitForTerminalCleanupReady(ctx context.Context, teamID string) error {

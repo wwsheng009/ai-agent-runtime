@@ -602,6 +602,12 @@ func restoreLocalRuntimeHostTeamState(session *ChatSession) {
 		warnIfChatSessionSyncFails(session, "restore ambient team binding", syncRuntimeSessionFromChat(session))
 	}
 	validateAmbientTeamBinding(session, session.LocalRuntimeHost.TeamStore)
+	// 启动早期做一次 stale-active team 探测：进程异常退出/状态未持久化会
+	// 在 TeamStore 留下 active 但实际已结束的团队。若不处理，resume 后主循环
+	// 会因 Pending==true 永久等待其 terminal 事件，prompt 与输入区永不渲染，
+	// UI 却显示执行状态。必须赶在 syncTeamLifecycleLoops 之前：已被判定终止的
+	// 团队不会被重新拉起 loop；真在执行的团队保持 active，正常恢复运行。
+	reconcileStaleAmbientTeams(session)
 	if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
 		session.LocalRuntimeHost.replayStoredTerminalTeamLifecycleEvents(activeTeam.TeamID)
 	}
