@@ -39,7 +39,7 @@ var terminalOutputProxy io.Writer = processTerminalOutputProxy{}
 //
 // Phase 3 降级语义（8.2 接入顺序 6）：TerminalOutput() 只保留启动前
 // process-compat 与测试入口。active session 期间不动态解析"当前 session"；
-// 生产 interactive 路径通过 Terminal.SetLegacyBinding / 
+// 生产 interactive 路径通过 Terminal.SetLegacyBinding /
 // FixedBottomSurface.SetLegacyBinding 把输出重定向到 gateway binding——
 // binding 存在时相应方法不触达本 writer（physical fence）。本函数自身
 // 不得被 late goroutine 用来补写旧 session 的输出。
