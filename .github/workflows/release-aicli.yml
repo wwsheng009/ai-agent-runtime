@@ -242,6 +242,17 @@ jobs:
           set -euo pipefail
           AICLI_SCENE_PRESENTER=1 go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1
 
+      # Zero-bypass gate (Phase 6 acceptance): terminal writer call sites are
+      # inventoried statically (tools/terminal-inventory); verify mode fails the
+      # build on ANY added/removed call site so the interactive pipeline can
+      # never silently bypass the render gateway (legacy flush / compatibility
+      # fallbacks are tracked in the same baseline).
+      - name: Verify terminal output inventory (zero-bypass gate)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go run ./tools/terminal-inventory -root .. -out ../terminal-output-inventory.json -verify
+
   build-frontend:
     name: Build embedded frontend (webui dist)
     runs-on: ubuntu-latest
