@@ -53,22 +53,27 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 	}
 
 	b.renderMu.Lock()
-	b.seedPersistedHistoryLocked(units, header)
+	seeded := b.seedPersistedHistoryLocked(units, header)
 	b.renderMu.Unlock()
-	b.sessionInteractionSnapshot()
+	if seeded {
+		// 仅在本次实际新增了 header/unit 时发布 snapshot；否则 Scene 未变，
+		// 全量 ReplaceTranscriptAction 会触发历史重放动画且无任何内容更新。
+		b.sessionInteractionSnapshot()
+	}
 }
 
 // seedPersistedHistoryLocked is the render-transaction half of history seed.
 // It exists so destructive transcript replacement can rebuild the encoder and
 // Scene under the same renderMu ownership before publishing one new snapshot.
-func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHistorySeedUnit, header string) {
+func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHistorySeedUnit, header string) bool {
 	if b == nil || b.renderEncoder == nil ||
 		(len(units) == 0 && strings.TrimSpace(header) == "") {
-		return
+		return false
 	}
 	if b.historySeedSeen == nil {
 		b.historySeedSeen = make(map[string]struct{})
 	}
+	seededAny := false
 	snapshot := b.renderEncoder.Snapshot()
 	matchedItemIDs := make(map[string]struct{})
 	headerSeededNow := false
@@ -85,6 +90,7 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 			headerUnit.apply(b)
 			b.historySeedSeen[headerUnit.identity] = struct{}{}
 			headerSeededNow = true
+			seededAny = true
 		}
 	}
 
@@ -130,7 +136,9 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 		}
 		unit.apply(b)
 		b.historySeedSeen[unit.identity] = struct{}{}
+		seededAny = true
 	}
+	return seededAny
 }
 
 // replaceCanonicalHistoryProjection rebuilds the owned transcript from the
