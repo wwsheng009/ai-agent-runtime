@@ -50,6 +50,11 @@ build/
 output/
 artifacts/
 
+# render/output 是源码包（渲染交付中间层），不是构建产物。
+backend/cmd/aicli/ui/render/output/*
+!backend/cmd/aicli/ui/render/output/
+!backend/cmd/aicli/ui/render/output/**
+
 # runtime-server embeds generated frontend files; only keep the build placeholder.
 !backend/internal/webui/dist/
 backend/internal/webui/dist/*

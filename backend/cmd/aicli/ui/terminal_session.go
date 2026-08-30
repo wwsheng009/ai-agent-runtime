@@ -1,14 +1,17 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
@@ -295,10 +298,14 @@ type TerminalSession struct {
 	mu            sync.Mutex
 	writer        io.Writer
 	aborter       TerminalWriteAborter
-	presenter     *renderengine.Presenter
-	screen        *renderengine.ScreenModel
-	geometry      GeometryState
-	viewport      ViewportArea
+	// output 是非 nil 时，所有 terminal bytes 经 gateway port 提交
+	// （Phase 1 统一接入；NewTerminalSession 仍走 writer 直写兼容路径）。
+	// port 的 admission/序列化由 gateway 保证；此字段只在锁内读写。
+	output    outputpkg.RenderOutputPort
+	presenter *renderengine.Presenter
+	screen    *renderengine.ScreenModel
+	geometry  GeometryState
+	viewport  ViewportArea
 	// viewportBoundaryKnown proves that viewport was confirmed on a terminal
 	// with viewportTerminalHeight rows. It is separate from the cell cache:
 	// theme/lease recovery can invalidate content while DEC 1049 still preserves
@@ -360,11 +367,35 @@ func NewTerminalSession(writer io.Writer) *TerminalSession {
 	}
 }
 
+// NewTerminalSessionWithOutput 构造 gateway-backed session：所有 terminal
+// bytes 经 port 提交（Phase 1 统一接入入口，供 command setup、测试与嵌入
+// 调用）。writer/presenter 字段保持 nil——不会创建第二个物理 sink。
+func NewTerminalSessionWithOutput(port outputpkg.RenderOutputPort) *TerminalSession {
+	screen := renderengine.NewScreenModel(1, 1)
+	screen.Invalidate()
+	return &TerminalSession{
+		output:     port,
+		presenter:  renderengine.NewPresenter(),
+		frameTheme: ThemeContextForProfile(style.ColorProfile{ColorProfile: render.NoColorProfile()}),
+		screen:     screen,
+	}
+}
+
 // AbortTerminalWrite is the shutdown cancellation gate for a blocked physical
 // write. It never takes the session mutex, so it can interrupt a write that is
 // already holding that mutex. After abort, every subsequent frame is rejected.
+// Gateway-backed sessions（output != nil）委托 port.Close（bounded shutdown）。
 func (s *TerminalSession) AbortTerminalWrite() error {
-	if s == nil || s.aborter == nil {
+	if s == nil {
+		return nil
+	}
+	port := s.output
+	if port != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return port.Close(ctx)
+	}
+	if s.aborter == nil {
 		return nil
 	}
 	return s.aborter.AbortTerminalWrite()
@@ -446,16 +477,16 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 	defer s.transactionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.writer == nil || s.presenter == nil || s.screen == nil {
+	if !s.writerAvailable() || s.screen == nil {
 		return ErrTerminalWriterMissing
 	}
 	if s.alternateLeaseID != 0 {
 		return fmt.Errorf("%w: lease id=%d", ErrTerminalAlternateScreenBusy, s.alternateLeaseID)
 	}
 
-	enter := s.writeTerminalBytesLocked("\x1b[?1049h\x1b[r\x1b[?25l\x1b[2J\x1b[H")
+	enter := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateEnter, "\x1b[?1049h\x1b[r\x1b[?25l\x1b[2J\x1b[H")
 	if enter.Err != nil {
-		rollback := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
+		rollback := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateExit, "\x1b[?25h\x1b[r\x1b[?1049l")
 		// A proven zero-byte enter followed by a complete rollback preserves the
 		// primary buffer. Any partial transport loses buffer ownership proof.
 		if enter.MayHavePartiallyWritten || (rollback.Err != nil && rollback.MayHavePartiallyWritten) {
@@ -499,7 +530,7 @@ func (s *TerminalSession) WriteAlternateScreen(leaseID uint64, bytes string) err
 	if s.alternateLeaseID != leaseID {
 		return fmt.Errorf("%w: want id=%d active id=%d", ErrTerminalAlternateScreenLease, leaseID, s.alternateLeaseID)
 	}
-	write := s.writeTerminalBytesLocked(bytes)
+	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateWrite, bytes)
 	if write.Err != nil {
 		if s.screen != nil {
 			s.screen.Invalidate()
@@ -530,7 +561,7 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 		return fmt.Errorf("%w: want id=%d active id=%d", ErrTerminalAlternateScreenLease, leaseID, s.alternateLeaseID)
 	}
 
-	write := s.writeTerminalBytesLocked("\x1b[?25h\x1b[r\x1b[?1049l")
+	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateExit, "\x1b[?25h\x1b[r\x1b[?1049l")
 	if write.Err != nil && !write.MayHavePartiallyWritten {
 		// No exit byte reached the host, so the same physical alternate lease is
 		// still active and may be retried without guessing buffer ownership.
@@ -677,12 +708,24 @@ func (s *TerminalSession) FlushTransaction(plan TerminalTransactionPlan) Termina
 	}
 }
 
+// writerAvailable 判断本 session 是否有可用的物理写路径：直写模式要求
+// writer+presenter，gateway 模式要求 output port。
+func (s *TerminalSession) writerAvailable() bool {
+	if s == nil {
+		return false
+	}
+	if s.output != nil {
+		return true
+	}
+	return s.writer != nil && s.presenter != nil
+}
+
 // transactionPreparationAllowedLocked mirrors only the early, no-presentation
 // exits of flushTransactionLocked. It is an optimization, not an authorization
 // decision: the complete checks run again after preparation.
 func (s *TerminalSession) transactionPreparationAllowedLocked(plan TerminalTransactionPlan) bool {
 	frame := plan.Frame
-	if s.writer == nil || s.presenter == nil || s.screen == nil ||
+	if !s.writerAvailable() || s.screen == nil ||
 		frame.LayoutGeneration < s.generation ||
 		s.alternateLeaseID != 0 || frame.Lease.Active {
 		return false
@@ -749,7 +792,7 @@ func terminalHistoryCommitsPresentationEqual(left, right []HistoryCommit) bool {
 
 func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, prepared *terminalPreparedTransaction) TerminalTransactionResult {
 	frame := plan.Frame
-	if s.writer == nil || s.presenter == nil || s.screen == nil {
+	if !s.writerAvailable() || s.screen == nil {
 		result := TerminalFrameResult{Frame: s.frame, Err: ErrTerminalWriterMissing}
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Err: ErrTerminalWriterMissing})
 	}
@@ -891,7 +934,12 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	if cursor := terminalCursorSequence(frame.Cursor, frame.Geometry.Width, frame.Geometry.Height); cursor != "" {
 		bytes += cursor
 	}
-	if write := s.writeTerminalBytesLocked(bytes); write.Err != nil {
+	// history+viewport 合并事务：frame 与历史 token 同 batch（11.2 要求）。
+	kind := outputpkg.TransactionFrame
+	if historyBytes != "" {
+		kind = outputpkg.TransactionFrameAndHistory
+	}
+	if write := s.writeTerminalBytesKindLocked(kind, bytes); write.Err != nil {
 		if write.MayHavePartiallyWritten {
 			// The target consumed an unknown prefix. Preserve no incremental
 			// viewport proof, but keep the last confirmed scalar snapshot so the
@@ -1056,7 +1104,7 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 }
 
 func (s *TerminalSession) commitHistoryEarlyResultLocked(commit HistoryCommit) (HistoryCommitResult, bool) {
-	if s.writer == nil || s.presenter == nil || s.screen == nil {
+	if !s.writerAvailable() || s.screen == nil {
 		return HistoryCommitResult{Err: ErrTerminalWriterMissing}, true
 	}
 	if s.alternateLeaseID != 0 || s.lease.Active || s.generation == 0 || commit.LayoutGeneration != s.generation ||
@@ -1080,7 +1128,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(rows []string) HistoryCommitRe
 	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
-	write := s.writeTerminalBytesLocked(bytes)
+	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionHistoryHandoff, bytes)
 	if write.Err != nil {
 		s.screen.MarkWriteFailed()
 		s.cursor = nil
@@ -1401,9 +1449,23 @@ type terminalWriteResult struct {
 // Callers hold s.mu; Presenter serializes the actual terminal bytes globally.
 // A writer panic is made equivalent to a possible partial write, so callers
 // never retain a Known front after an interrupted transaction.
+//
+// Gateway-backed sessions（output != nil）把 bytes 经 port 提交，kind 默认
+// frame；语义化调用点使用 writeTerminalBytesKindLocked。
 func (s *TerminalSession) writeTerminalBytesLocked(bytes string) (result terminalWriteResult) {
+	return s.writeTerminalBytesKindLocked(outputpkg.TransactionFrame, bytes)
+}
+
+// writeTerminalBytesKindLocked 是带事务 kind 的写入入口。output == nil 时
+// 走 writer/presenter 直写兼容路径；output != nil 时经 gateway port 提交并
+// 从 primary receipt 推导 result。
+func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.TransactionKind, bytes string) (result terminalWriteResult) {
 	if bytes == "" {
 		return result
+	}
+	port := s.output
+	if port != nil {
+		return s.submitWithPortLocked(port, kind, bytes)
 	}
 	if s == nil || s.writer == nil || s.presenter == nil {
 		return terminalWriteResult{Err: ErrTerminalWriterMissing}
@@ -1422,6 +1484,59 @@ func (s *TerminalSession) writeTerminalBytesLocked(bytes string) (result termina
 	})
 	result.MayHavePartiallyWritten = probe.bytesWritten > 0
 	return result
+}
+
+// submitWithPortLocked 提交一笔 intent 并消费 primary receipt。receipt 到
+// terminalWriteResult 的映射：
+//   - committed → 成功（Err=nil）；
+//   - failed_zero_bytes → 可证明零写：Err 保留（class 由 error 转换），
+//     MayHavePartiallyWritten=false——调用方可以按零写重建；
+//   - unknown_partial → 部分写：MayHavePartiallyWritten=true，Err=classified；
+//   - target-level rejected/deferred → Err=classified，无部分写证明。
+//
+// pre-admission rejection（Primary==nil）不调用 sink，Err=classified。
+func (s *TerminalSession) submitWithPortLocked(port outputpkg.RenderOutputPort, kind outputpkg.TransactionKind, bytes string) terminalWriteResult {
+	intent := outputpkg.RenderIntent{
+		Kind:   kind,
+		Source: "terminal_session",
+		Cause:  "writeTerminalBytes",
+		Bytes:  []byte(bytes),
+	}
+	receipt := port.Submit(context.Background(), intent)
+	if receipt.Primary == nil {
+		// pre-admission rejection/defer：未调用 sink、零写证明。
+		return terminalWriteResult{
+			Err: outputpkg.NewClassifiedError(receipt.Admission.ErrorClass, receipt.Admission.Message),
+		}
+	}
+	p := receipt.Primary
+	switch p.Status {
+	case outputpkg.DeliveryCommitted:
+		return terminalWriteResult{}
+	case outputpkg.DeliveryFailedZeroBytes:
+		// 可证明零写：调用方可安全重试/重建。
+		return terminalWriteResult{Err: receiptError(p.ErrorClass)}
+	case outputpkg.DeliveryUnknownPartial:
+		return terminalWriteResult{
+			Err:                     receiptError(p.ErrorClass),
+			MayHavePartiallyWritten: true,
+		}
+	default: // deferred/rejected
+		return terminalWriteResult{Err: receiptError(p.ErrorClass)}
+	}
+}
+
+// receiptError 从稳定 class 映射可读错误；gateway 的 classified error 已
+// 携带 class 信息。
+func receiptError(class outputpkg.DeliveryErrorClass) error {
+	switch class {
+	case outputpkg.DeliveryErrorCanceledBeforeIO, outputpkg.DeliveryErrorCanceledAfterStart:
+		return ErrTerminalWriteAborted
+	case outputpkg.DeliveryErrorClosed, outputpkg.DeliveryErrorAbandoned:
+		return ErrTerminalWriterMissing
+	default:
+		return fmt.Errorf("terminal write failed: %s", class)
+	}
 }
 
 type terminalSessionWriter struct {
