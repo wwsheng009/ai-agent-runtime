@@ -24,43 +24,74 @@ type mirrorEntry struct {
 	skipReason   MirrorSkipReason
 	sealed       bool
 	sealedAt     time.Time
+	sealReason   string // "timeout"/"callback"/"drain"
 	callbackDone bool
 	sinkInvoked  bool
+	// timedOutByWatchdog 标记 entry 已被看门狗按时限封存（callback 仍在跑）。
+	timedOutByWatchdog bool
+	// wdDone 由 worker/drain 在移除 watchdog 时关闭，令 watchdogWait 退出。
+	wdOnce sync.Once
+	wdDone chan struct{}
 }
 
 // mirrorSlot 管理一个 mirror 的 bounded 队列与 entry seal。
 type mirrorSlot struct {
-	g         *RenderOutputGateway
-	index     int
-	cfg       RenderMirror
-	desc      TargetDescriptor
-	queue     chan *mirrorEntry
-	mu        sync.Mutex
-	pending   int
-	inFlight  int
-	scheduled uint64
-	applied   uint64
-	skipped   uint64
-	failed    uint64
-	timedOut  uint64
-	late      uint64
-	drops     uint64
+	g          *RenderOutputGateway
+	index      int
+	cfg        RenderMirror
+	desc       TargetDescriptor
+	queue      chan *mirrorEntry
+	routeEpoch uint64
+	mu         sync.Mutex
+	startOnce  sync.Once
+	started    bool
+	pending    int
+	inFlight   int
+	scheduled  uint64
+	applied    uint64
+	skipped    uint64
+	failed     uint64
+	timedOut   uint64
+	late       uint64
+	drops      uint64
+	// highWater 是 queue 同时 in-flight+pending 的最大值（overload health）。
+	highWater int
+	// watchdog 跟踪正在执行的 callback 的时限（key=entry）。
+	watchdog map[*mirrorEntry]ClockTimer
 }
 
-func newMirrorSlot(g *RenderOutputGateway, index int, cfg RenderMirror) *mirrorSlot {
+func newMirrorSlot(g *RenderOutputGateway, index int, cfg RenderMirror, routeEpoch ...uint64) *mirrorSlot {
 	desc := cfg.Sink.Descriptor()
 	cap := g.opts.MirrorQueueCapacity
 	if cap <= 0 {
 		cap = 1024
 	}
-	return &mirrorSlot{
-		g:     g,
-		index: index,
-		cfg:   cfg,
-		desc:  desc,
-		queue: make(chan *mirrorEntry, cap),
-		mu:    sync.Mutex{},
+	epoch := g.routeEpoch
+	if len(routeEpoch) > 0 && routeEpoch[0] != 0 {
+		epoch = routeEpoch[0]
 	}
+	return &mirrorSlot{
+		g:          g,
+		index:      index,
+		cfg:        cfg,
+		desc:       desc,
+		queue:      make(chan *mirrorEntry, cap),
+		routeEpoch: epoch,
+		watchdog:   map[*mirrorEntry]ClockTimer{},
+	}
+}
+
+// start launches the single consumer for this slot.  Keeping the launch behind
+// a once gate is important when Run is called concurrently with a lifecycle
+// cleanup path: a mirror must never acquire two consumers for its serial
+// callback boundary.
+func (ms *mirrorSlot) start() {
+	ms.startOnce.Do(func() {
+		ms.mu.Lock()
+		ms.started = true
+		ms.mu.Unlock()
+		go ms.workerLoop()
+	})
 }
 
 // closed 返回 gateway 是否已关闭（供 drop 分类）。
@@ -102,6 +133,7 @@ func (ms *mirrorSlot) enqueue(batch RenderBatch, primary TargetReceipt, ad Mirro
 		},
 		primary:   primary,
 		admission: ad,
+		wdDone:    make(chan struct{}),
 	}
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -113,6 +145,9 @@ func (ms *mirrorSlot) enqueue(batch RenderBatch, primary TargetReceipt, ad Mirro
 	// 先登记后发送；失败回滚登记。
 	ms.pending++
 	ms.scheduled++
+	if cur := ms.pending + ms.inFlight; cur > ms.highWater {
+		ms.highWater = cur
+	}
 	ms.g.mu.Lock()
 	ms.g.stats.mirrorScheduled++
 	ms.g.stats.mirrorPending++
@@ -142,13 +177,13 @@ func (ms *mirrorSlot) workerLoop() {
 			ms.mu.Lock()
 			ms.pending--
 			ms.inFlight++
+			entry.sinkInvoked = true
 			ms.g.mu.Lock()
 			ms.g.stats.mirrorPending--
 			ms.g.stats.mirrorInFlight++
 			ms.g.mu.Unlock()
 			ms.mu.Unlock()
 
-			entry.sinkInvoked = true
 			ms.g.publish(OutputEvent{
 				SchemaVersion: SchemaVersion,
 				Kind:          EventMirrorLifecycle,
@@ -164,13 +199,37 @@ func (ms *mirrorSlot) workerLoop() {
 				SinkInvoked:   true,
 			})
 
+			// 看门狗：callback 超过 Timeout 未返回时，entry 按时限封存为
+			// timeout/failed（不可变）；callback 稍后返回只进 late 诊断。
+			watchdog := ms.g.clock.NewTimer(ms.cfg.Timeout)
+			ms.mu.Lock()
+			ms.watchdog[entry] = watchdog
+			ms.mu.Unlock()
+			go ms.watchdogWait(entry, watchdog)
+
 			ctx, cancel := contextWithClockTimeout(ms.g.clock, context.Background(), ms.cfg.Timeout)
 			res := mirrorSubmitWithPanicGuard(ms.cfg.Sink.SubmitMirror, ctx, entry.envelope)
 			cancel()
 
+			ms.mu.Lock()
 			entry.callbackDone = true
-			ms.applyMirrorOutcome(entry, res)
-			ms.sealEntry(entry)
+			if wd, ok := ms.watchdog[entry]; ok {
+				wd.Stop()
+				delete(ms.watchdog, entry)
+				entry.wdOnce.Do(func() { close(entry.wdDone) })
+			}
+			if entry.timedOutByWatchdog {
+				// entry 已被看门狗按时限封存（status=timeout/failed）；
+				// worker 不再写 status，只记 late 诊断。
+				ms.mu.Unlock()
+				ms.lateComplete(entry, res)
+			} else {
+				// 正常路径：同一临界区内确定 outcome 并封存，保证与
+				// watchdog 的 timeout seal 互斥。
+				ms.applyMirrorOutcomeLocked(entry, res)
+				ms.sealEntryLocked(entry, "callback")
+				ms.mu.Unlock()
+			}
 
 			ms.mu.Lock()
 			ms.inFlight--
@@ -190,14 +249,19 @@ func (ms *mirrorSlot) workerLoop() {
 					ms.g.mu.Lock()
 					ms.g.stats.mirrorPending--
 					ms.g.mu.Unlock()
-					ms.mu.Unlock()
 					entry.sinkInvoked = true
-					ms.applyMirrorOutcome(entry, MirrorSinkResult{
+					if wd, ok := ms.watchdog[entry]; ok {
+						wd.Stop()
+						delete(ms.watchdog, entry)
+						entry.wdOnce.Do(func() { close(entry.wdDone) })
+					}
+					ms.applyMirrorOutcomeLocked(entry, MirrorSinkResult{
 						Status:     MirrorFailed,
 						ErrorClass: DeliveryErrorClosed,
 						Err:        NewClassifiedError(DeliveryErrorClosed, "gateway closed"),
 					})
-					ms.sealEntry(entry)
+					ms.sealEntryLocked(entry, "drain")
+					ms.mu.Unlock()
 				default:
 					return
 				}
@@ -206,8 +270,9 @@ func (ms *mirrorSlot) workerLoop() {
 	}
 }
 
-// applyMirrorOutcome 把 sink result 归一化到 entry（含 late/超时处理）。
-func (ms *mirrorSlot) applyMirrorOutcome(entry *mirrorEntry, res MirrorSinkResult) {
+// applyMirrorOutcomeLocked 把 sink result 归一化到 entry；调用者必须已持
+// ms.mu（worker 正常路径在临界区内调用，保证与 watchdog timeout seal 互斥）。
+func (ms *mirrorSlot) applyMirrorOutcomeLocked(entry *mirrorEntry, res MirrorSinkResult) {
 	entry.status = res.Status
 	entry.errClass = res.ErrorClass
 	if res.Err != nil {
@@ -259,18 +324,40 @@ func (ms *mirrorSlot) applyMirrorOutcome(entry *mirrorEntry, res MirrorSinkResul
 	}
 }
 
-// sealEntry 封存 entry（不可变）；sealed 后 late return 只进诊断。
-func (ms *mirrorSlot) sealEntry(entry *mirrorEntry) {
+// sealEntry 封存 entry（不可变；加锁入口）。sealed 后 late return 只进诊断。
+func (ms *mirrorSlot) sealEntry(entry *mirrorEntry, reason string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.sealEntryLocked(entry, reason)
+}
+
+// sealEntryLocked 封存 entry；调用者必须已持 ms.mu。reason ∈
+// "callback"/"timeout"/"drain"。timeout 封存使用
+// DeliveryErrorTimeout + MirrorFailed，callback 仍返回后由 lateComplete
+// 只进诊断（不改写 entry）。
+func (ms *mirrorSlot) sealEntryLocked(entry *mirrorEntry, reason string) {
 	if entry.sealed {
 		return
 	}
 	entry.sealed = true
 	entry.sealedAt = ms.g.clock.Now()
+	entry.sealReason = reason
 	if entry.status == "" {
 		entry.status = MirrorFailed
 		if entry.errClass == DeliveryErrorNone {
 			entry.errClass = DeliveryErrorSink
 		}
+	}
+	if reason == "timeout" {
+		entry.status = MirrorFailed
+		entry.errClass = DeliveryErrorTimeout
+		entry.errMsg = "mirror callback exceeded timeout"
+	}
+	if reason == "drain" && entry.errClass == DeliveryErrorNone {
+		entry.errClass = DeliveryErrorClosed
+	}
+	if reason == "timeout" {
+		ms.timedOut++
 	}
 	mr := MirrorReceipt{
 		EntryID:                 entry.envelope.EntryID,
@@ -297,7 +384,6 @@ func (ms *mirrorSlot) sealEntry(entry *mirrorEntry) {
 		mr.Err = NewClassifiedError(entry.errClass, entry.errMsg)
 	}
 	ms.g.recordMirrorOutcome(entry.envelope.Sequence, mr)
-	ms.mu.Lock()
 	switch entry.status {
 	case MirrorApplied:
 		ms.applied++
@@ -306,10 +392,11 @@ func (ms *mirrorSlot) sealEntry(entry *mirrorEntry) {
 	case MirrorFailed:
 		ms.failed++
 	}
-	ms.mu.Unlock()
 	ms.g.mu.Lock()
 	ms.g.stats.mirrorSealed++
 	ms.g.mu.Unlock()
+	// 注意：ms.g.publish 在 ms.mu 持锁下调用（eventHub 自锁，无环；
+	// mirror worker 不与 gateway Close 双向等待）。
 	ms.g.publish(OutputEvent{
 		SchemaVersion: SchemaVersion,
 		Kind:          EventMirrorLifecycle,
@@ -354,12 +441,61 @@ func (ms *mirrorSlot) waitSealed(ctx context.Context, _ time.Time) error {
 	}
 }
 
+// watchdogWait 等待 callback 时限；到期时把 entry 按时限封存（不可变）。
+// callback 已返回（timer 被 worker 停止）时不做事。timeout 封存后，
+// callback 稍后返回走 lateComplete 只进诊断。
+func (ms *mirrorSlot) watchdogWait(entry *mirrorEntry, timer ClockTimer) {
+	select {
+	case <-entry.wdDone:
+		// worker/drain 已移除 watchdog：无事可做，直接退出（不泄漏）。
+		return
+	case <-timer.C():
+		ms.mu.Lock()
+		if _, registered := ms.watchdog[entry]; !registered {
+			// callback 已返回并移除 watchdog；timer 迟到。
+			ms.mu.Unlock()
+			return
+		}
+		// entry 仍注册：在锁内置标志并按 timeout 封存（与 worker 的
+		// callback path 互斥）。
+		entry.timedOutByWatchdog = true
+		ms.sealEntryLocked(entry, "timeout")
+		ms.mu.Unlock()
+	case <-ms.g.closedCh:
+	}
+}
+
+// lateComplete 处理 timeout 之后才返回的 callback：只进诊断与 late 计数，
+// 绝不改写已封存 entry/record。
+func (ms *mirrorSlot) lateComplete(entry *mirrorEntry, res MirrorSinkResult) {
+	ms.mu.Lock()
+	ms.late++
+	ms.mu.Unlock()
+	ms.g.publish(OutputEvent{
+		SchemaVersion:    SchemaVersion,
+		Kind:             EventMirrorLifecycle,
+		At:               ms.g.clock.Now(),
+		SessionID:        entry.envelope.SessionID,
+		Sequence:         entry.envelope.Sequence,
+		RouteEpoch:       entry.envelope.RouteEpoch,
+		BatchID:          entry.envelope.BatchID,
+		MirrorEntryID:    entry.envelope.EntryID,
+		MirrorIndex:      ms.index,
+		MirrorPhase:      MirrorPhaseLateCompletion,
+		Policy:           ms.cfg.Policy,
+		MirrorStatus:     entry.status, // 已封存的 timeout/failed
+		ErrorClass:       entry.errClass,
+		SinkInvoked:      true,
+		CallbackReturned: true,
+	})
+}
+
 // MirrorSnapshot 返回该 mirror 的可观察快照。
 func (ms *mirrorSlot) MirrorSnapshot() MirrorRouteSnapshot {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	return MirrorRouteSnapshot{
-		RouteEpoch:         ms.g.routeEpochSnapshot(),
+		RouteEpoch:         ms.routeEpoch,
 		MirrorIndex:        ms.index,
 		Sink:               ms.cfg.Sink.Snapshot(),
 		Policy:             ms.cfg.Policy,
@@ -375,5 +511,6 @@ func (ms *mirrorSlot) MirrorSnapshot() MirrorRouteSnapshot {
 		TimedOut:           ms.timedOut,
 		LateCompleted:      ms.late,
 		ScheduleDrops:      ms.drops,
+		QueueHighWater:     ms.highWater,
 	}
 }

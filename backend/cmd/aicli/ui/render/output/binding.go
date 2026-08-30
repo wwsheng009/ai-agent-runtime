@@ -61,14 +61,7 @@ func NewSessionBindingRegistry() *SessionBindingRegistry {
 // 重复 bind 递增 generation 并使旧 facade 失效。
 func (r *SessionBindingRegistry) Bind(sessionID string, port RenderSubmitPort) SessionBindingRef {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	// Rebinding the same session supersedes the previous facade.  Fence it
-	// before replacing the registry entry so callers retaining the old
-	// SessionBindingRef fail closed instead of dynamically writing through the
-	// new session binding.
-	if old, ok := r.bindings[sessionID]; ok {
-		old.fence()
-	}
+	old := r.bindings[sessionID]
 	r.nextGen++
 	ref := SessionBindingRef{
 		SessionID:         sessionID,
@@ -76,27 +69,44 @@ func (r *SessionBindingRegistry) Bind(sessionID string, port RenderSubmitPort) S
 		Port:              newFencedPort(r, sessionID, r.nextGen, port),
 	}
 	r.bindings[sessionID] = ref.Port.(*fencedPort)
+	r.mu.Unlock()
+
+	// Never wait for an old facade while holding the registry-wide lock.  An
+	// already admitted submission may call unrelated registry control code;
+	// keeping r.mu here would turn that callback into a lock-order cycle.
+	// The replacement is already linearized above, while fence() still makes
+	// Bind's return the old generation's completion fence.
+	if old != nil {
+		old.fence()
+	}
 	return ref
 }
 
 // Unbind 使指定 session 的全部旧 facade 失效（fence）。幂等。
 func (r *SessionBindingRegistry) Unbind(sessionID string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if fp, ok := r.bindings[sessionID]; ok {
-		fp.fence()
+	fp := r.bindings[sessionID]
+	if fp != nil {
 		delete(r.bindings, sessionID)
+	}
+	r.mu.Unlock()
+	if fp != nil {
+		fp.fence()
 	}
 }
 
 // UnbindFenceAll 使所有旧 facade 失效（shutdown）。
 func (r *SessionBindingRegistry) UnbindFenceAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	old := make([]*fencedPort, 0, len(r.bindings))
 	for _, fp := range r.bindings {
-		fp.fence()
+		old = append(old, fp)
 	}
 	r.bindings = map[string]*fencedPort{}
+	r.mu.Unlock()
+	for _, fp := range old {
+		fp.fence()
+	}
 }
 
 // fencedPort 是 generation-fenced RenderSubmitPort facade。Submit 前校验
@@ -122,10 +132,8 @@ func (p *fencedPort) fence() {
 
 func (p *fencedPort) Submit(ctx context.Context, intent RenderIntent) OutputReceipt {
 	p.mu.RLock()
-	fenced := p.fenced
-	port := p.port
-	p.mu.RUnlock()
-	if fenced || port == nil {
+	defer p.mu.RUnlock()
+	if p.fenced || p.port == nil {
 		return OutputReceipt{
 			Admission: AdmissionReceipt{
 				Decision:   AdmissionRejected,
@@ -134,7 +142,11 @@ func (p *fencedPort) Submit(ctx context.Context, intent RenderIntent) OutputRece
 			},
 		}
 	}
-	return port.Submit(ctx, intent)
+	// Keep the read-side lease until the underlying submission returns.
+	// Bind/Unbind take the write lock in fence(), so once either lifecycle
+	// operation returns no previously retained facade can still enter (or be
+	// executing in) its old port.
+	return p.port.Submit(ctx, intent)
 }
 
 // ============================================================================

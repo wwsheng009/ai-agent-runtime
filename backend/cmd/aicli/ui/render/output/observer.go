@@ -153,6 +153,7 @@ type MirrorRouteSnapshot struct {
 	TimedOut           uint64
 	LateCompleted      uint64
 	ScheduleDrops      uint64
+	QueueHighWater     int // queue 同时 in-flight+pending 的最大值（overload health）
 	Quarantined        bool
 	QuarantineReason   DeliveryErrorClass
 	Abandoned          uint64

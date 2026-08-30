@@ -184,6 +184,20 @@ func sameSink(a, b interface{}) bool {
 	return false
 }
 
+func interfaceIsNil(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
 // validateRoute 校验 route 配置约束（8.x 配置约束 1-5）：
 //  1. Primary 非空（nil 时用 DiscardSink 显式声明）；
 //  2. ProjectionTargetID 非空且 route 与 descriptor 相等；
@@ -235,6 +249,7 @@ type RenderOutputGateway struct {
 	pendingStamps  uint64 // 已盖章、尚未进入 deliver serial 段的 batch 数
 	primaryAborted bool   // deviate 后置位：等待中的 batch 快速收敛，不再执行 sink
 	primaryCond    *sync.Cond
+	nextInvocation uint64 // gateway-owned, non-zero and monotonic
 	closeCutoff    uint64 // Closing 后捕获；Open 时为 lastStamped
 
 	// mirrors
@@ -446,6 +461,7 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 	// waiting for the serial boundary; it must never retarget an admitted
 	// batch.
 	batch.primarySink = g.primary
+	batch.primaryDesc = g.targetDesc
 	batch.mirrorSlots = append([]*mirrorSlot(nil), g.mirrors...)
 	g.initRecordSlot(batch, len(batch.mirrorSlots))
 	if intent.HistoryEpoch != nil && historyBearingKind(intent.Kind) {
@@ -555,30 +571,41 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 			},
 		}
 	}
+	sink := batch.primarySink
+	targetInvoked := !interfaceIsNil(sink)
+	var invocationID uint64
+	if targetInvoked {
+		g.nextInvocation++
+		if g.nextInvocation == 0 {
+			g.nextInvocation++
+		}
+		invocationID = g.nextInvocation
+	}
 	g.primaryBusy = true
 	g.stats.primaryInFlight++
 	g.mu.Unlock()
 
-	// 事件：primary started（gate 未 frozen，仍然 open）。
-	gate.Publish(OutputEvent{
-		SchemaVersion: SchemaVersion,
-		Kind:          EventPrimaryStarted,
-		At:            g.clock.Now(),
-		SessionID:     batch.SessionID,
-		Sequence:      batch.Sequence,
-		RouteEpoch:    batch.RouteEpoch,
-		BatchID:       batch.BatchID,
-		IntentID:      batch.IntentID,
-		Transaction:   batch.Kind,
-		Terminal:      batch.Terminal,
-		History:       batch.History,
-		TargetInvoked: false,
-		InvocationID:  randomInvocation(),
-	})
+	var startedAt time.Time
+	if targetInvoked {
+		startedAt = g.clock.Now()
+		gate.Publish(OutputEvent{
+			SchemaVersion: SchemaVersion,
+			Kind:          EventPrimaryStarted,
+			At:            startedAt,
+			SessionID:     batch.SessionID,
+			Sequence:      batch.Sequence,
+			RouteEpoch:    batch.RouteEpoch,
+			BatchID:       batch.BatchID,
+			IntentID:      batch.IntentID,
+			Transaction:   batch.Kind,
+			Terminal:      batch.Terminal,
+			History:       batch.History,
+			TargetInvoked: true,
+			InvocationID:  invocationID,
+		})
+	}
 
-	startedAt := g.clock.Now()
-	sink := batch.primarySink
-	if sink == nil {
+	if !targetInvoked {
 		// This should be impossible after admission, but fail closed rather than
 		// dereferencing a route that may have been concurrently replaced.
 		res := SinkDeliveryResult{
@@ -588,7 +615,77 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 			AttemptedBytes: len(batch.Bytes),
 			Err:            NewClassifiedError(DeliveryErrorAbandoned, "admitted batch lost its primary sink"),
 		}
-		_ = res
+		outcomeFixedAt := g.clock.Now()
+		tr := TargetReceipt{
+			SessionID:          batch.SessionID,
+			Sequence:           batch.Sequence,
+			BatchID:            batch.BatchID,
+			RouteEpoch:         batch.RouteEpoch,
+			BindingGeneration:  batch.BindingGeneration,
+			SinkID:             batch.primaryDesc.SinkID,
+			TargetClass:        batch.primaryDesc.Class,
+			ProjectionTargetID: batch.primaryDesc.ProjectionTargetID,
+			InvocationID:       0,
+			Synthetic:          true,
+			SinkDeliveryResult: normalizeSinkResult(res, len(batch.Bytes)),
+			CallbackReturned:   false,
+			OutcomeFixedAt:     outcomeFixedAt,
+		}
+		gate.Publish(OutputEvent{
+			SchemaVersion:    SchemaVersion,
+			Kind:             EventPrimaryCompleted,
+			At:               outcomeFixedAt,
+			SessionID:        batch.SessionID,
+			Sequence:         batch.Sequence,
+			RouteEpoch:       batch.RouteEpoch,
+			BatchID:          batch.BatchID,
+			TargetInvoked:    false,
+			CallbackReturned: false,
+			InvocationID:     0,
+			Synthetic:        true,
+			Status:           tr.Status,
+			Certainty:        tr.Certainty,
+			ErrorClass:       tr.ErrorClass,
+			AttemptedBytes:   tr.AttemptedBytes,
+			AcceptedBytes:    tr.AcceptedBytes,
+		})
+		_ = gate.Freeze(EventReceiptCutoff, outcomeFixedAt)
+		mirrorAdmissions := g.skipFrozenMirrors(batch, DeliveryErrorAbandoned)
+
+		g.mu.Lock()
+		g.stats.primaryInFlight--
+		g.primaryBusy = false
+		g.primaryCond.Broadcast()
+		g.stats.primaryRejected++
+		if cutoffDrops := gate.CutoffDrops(); cutoffDrops > 0 {
+			g.stats.observerDrops += cutoffDrops - g.lastObserverDrops
+			g.lastObserverDrops = cutoffDrops
+		}
+		g.mu.Unlock()
+
+		receipt := OutputReceipt{
+			SessionID:             batch.SessionID,
+			Sequence:              batch.Sequence,
+			BatchID:               batch.BatchID,
+			RouteEpoch:            batch.RouteEpoch,
+			ProjectionTargetID:    batch.ProjectionTargetID,
+			ProjectionTargetClass: batch.ProjectionTargetClass,
+			BindingGeneration:     batch.BindingGeneration,
+			History:               cloneHistory(batch.History),
+			Admission: AdmissionReceipt{
+				Decision:   AdmissionAccepted,
+				ErrorClass: DeliveryErrorNone,
+			},
+			TargetInvoked:              false,
+			Primary:                    &tr,
+			MirrorAdmissions:           mirrorAdmissions,
+			ReceiptCutoffEventSequence: gate.CutoffSequence(),
+			ObserverDrops:              gate.CutoffDrops(),
+		}
+		g.setRecordReceipt(batch.Sequence, receipt)
+		gate.Retire()
+		g.trySealRecord(batch.Sequence)
+		return receipt
 	}
 	sinkCtx, cancel := contextWithClockTimeout(g.clock, ctx, g.opts.CloseTimeout) // 无专用 primary timeout，用 close budget 兜底
 	res := deliverWithPanicGuard(sink.Submit, sinkCtx, batch)
@@ -601,11 +698,11 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 		Sequence:           batch.Sequence,
 		BatchID:            batch.BatchID,
 		RouteEpoch:         batch.RouteEpoch,
-		BindingGeneration:  0,
-		SinkID:             batch.ProjectionTargetID,
-		TargetClass:        batch.ProjectionTargetClass,
-		ProjectionTargetID: batch.ProjectionTargetID,
-		InvocationID:       randomInvocation(),
+		BindingGeneration:  batch.BindingGeneration,
+		SinkID:             batch.primaryDesc.SinkID,
+		TargetClass:        batch.primaryDesc.Class,
+		ProjectionTargetID: batch.primaryDesc.ProjectionTargetID,
+		InvocationID:       invocationID,
 		SinkDeliveryResult: normalizeSinkResult(res, len(batch.Bytes)),
 		CallbackReturned:   true,
 		StartedAt:          startedAt,
@@ -630,7 +727,7 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 		AttemptedBytes:   tr.AttemptedBytes,
 		AcceptedBytes:    tr.AcceptedBytes,
 	})
-	_ = gate.Freeze(EventReceiptCutoff, finishedAt)
+	_ = gate.Freeze(EventReceiptCutoff, outcomeFixedAt)
 
 	// admission mirrors（非阻塞；在 cutoff 之后记录，只含已完成的 enqueue/drop）。
 	mirrorAdmissions, scheduled, drops := g.admitMirrors(batch, tr)
@@ -665,8 +762,8 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 		RouteEpoch:            batch.RouteEpoch,
 		ProjectionTargetID:    batch.ProjectionTargetID,
 		ProjectionTargetClass: batch.ProjectionTargetClass,
-		BindingGeneration:     0,
-		History:               batch.History,
+		BindingGeneration:     batch.BindingGeneration,
+		History:               cloneHistory(batch.History),
 		Admission: AdmissionReceipt{
 			Decision:   AdmissionAccepted,
 			ErrorClass: DeliveryErrorNone,
@@ -684,7 +781,7 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 
 	// 交付记录封存：Phase 0 在 primary outcome 固定、mirror 终态后由
 	// mirror seal path 完成；若没有 mirrors 立即封存。
-	if len(g.mirrors) == 0 {
+	if len(batch.mirrorSlots) == 0 {
 		g.trySealRecord(batch.Sequence)
 	}
 	return receipt
@@ -806,6 +903,36 @@ func (g *RenderOutputGateway) admitMirrors(batch RenderBatch, primary TargetRece
 		g.recordAdmission(batch.Sequence, ad)
 	}
 	return ads, scheduled, drops
+}
+
+// skipFrozenMirrors fixes every mirror selected at admission as a terminal,
+// non-authoritative skip when the admitted primary cannot be invoked.  It must
+// use batch.mirrorSlots rather than the current route: reconfiguration may
+// replace g.mirrors while this batch waits at the primary serial boundary.
+func (g *RenderOutputGateway) skipFrozenMirrors(batch RenderBatch, class DeliveryErrorClass) []MirrorAdmissionReceipt {
+	mirrors := append([]*mirrorSlot(nil), batch.mirrorSlots...)
+	ads := make([]MirrorAdmissionReceipt, 0, len(mirrors))
+	for i, ms := range mirrors {
+		ad := MirrorAdmissionReceipt{
+			EntryID:            randomID("me"),
+			MirrorIndex:        i,
+			EffectiveApplyMode: MirrorApplyMetadataOnly,
+			NonAuthoritative:   true,
+			Scheduled:          false,
+			ErrorClass:         class,
+			SkipReason:         MirrorSkipPrimaryNotCommitted,
+		}
+		if ms != nil {
+			ad.SinkID = ms.desc.SinkID
+			ad.TargetClass = ms.desc.Class
+			ad.ProjectionTargetID = ms.desc.ProjectionTargetID
+			ad.Policy = ms.cfg.Policy
+			ad.RequestedApplyMode = ms.cfg.ApplyMode
+		}
+		ads = append(ads, ad)
+		g.recordAdmission(batch.Sequence, ad)
+	}
+	return ads
 }
 
 // mirrorDecide 是 6.5 outcome-aware 计算表：

@@ -199,6 +199,7 @@ type RenderBatch struct {
 	// route/sink that stamped it. They are intentionally unexported and never
 	// serialized as part of the public batch contract.
 	primarySink RenderOutputSink
+	primaryDesc TargetDescriptor
 	mirrorSlots []*mirrorSlot
 }
 

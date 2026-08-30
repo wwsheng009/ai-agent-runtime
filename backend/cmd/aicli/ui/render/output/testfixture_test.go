@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -311,6 +312,140 @@ func TestGatewayStampImmutability(t *testing.T) {
 	r2 := submitOK(t, gw, TransactionFrame, []byte("again"))
 	if r2.Sequence <= r.Sequence {
 		t.Fatalf("sequence not monotonic: %d <= %d", r2.Sequence, r.Sequence)
+	}
+}
+
+// TestGatewayPrimaryIdentityUsesFrozenDescriptor verifies that SinkID remains
+// distinct from ProjectionTargetID and that primary lifecycle events use the
+// same invocation identity as the returned receipt.
+func TestGatewayPrimaryIdentityUsesFrozenDescriptor(t *testing.T) {
+	gw := mustGateway(t, memoryPrimary(t))
+	r := submitOK(t, gw, TransactionFrame, []byte("identity"))
+	if r.Primary.SinkID != "memory-primary" {
+		t.Fatalf("primary sink id: got %q want %q", r.Primary.SinkID, "memory-primary")
+	}
+	if r.Primary.ProjectionTargetID != "pt-primary" {
+		t.Fatalf("primary projection target: got %q want %q",
+			r.Primary.ProjectionTargetID, "pt-primary")
+	}
+	if r.Primary.InvocationID == 0 {
+		t.Fatal("primary invocation id must be non-zero")
+	}
+
+	var started, completed uint64
+	for _, ev := range gw.RecentEvents(64) {
+		if ev.BatchID != r.BatchID {
+			continue
+		}
+		switch ev.Kind {
+		case EventPrimaryStarted:
+			started = ev.InvocationID
+		case EventPrimaryCompleted:
+			completed = ev.InvocationID
+		}
+	}
+	if started != r.Primary.InvocationID || completed != r.Primary.InvocationID {
+		t.Fatalf("invocation identity mismatch: started=%d completed=%d receipt=%d",
+			started, completed, r.Primary.InvocationID)
+	}
+}
+
+// TestGatewayMissingCapturedPrimaryFailsClosed exercises the defensive path
+// directly: a corrupted admitted batch must yield a target-level rejection,
+// not panic while dereferencing a nil sink.
+func TestGatewayMissingCapturedPrimaryFailsClosed(t *testing.T) {
+	gw := mustGateway(t, memoryPrimary(t))
+	mirror := NewMemorySink(TargetDescriptor{
+		SinkID:             "frozen-mirror",
+		Class:              TargetClassCapture,
+		ProjectionTargetID: "pt-frozen-mirror",
+	})
+	frozenMirrorSlot := newMirrorSlot(gw, 0, RenderMirror{
+		Sink:      mirror,
+		Policy:    MirrorBestEffort,
+		ApplyMode: MirrorApplyBytes,
+		Ownership: SinkBorrowed,
+		Timeout:   time.Second,
+	})
+	var typedNil *MemorySink
+	cases := []struct {
+		name string
+		sink RenderOutputSink
+	}{
+		{name: "nil"},
+		{name: "typed nil", sink: typedNil},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seq := uint64(i + 1)
+			batch := RenderBatch{
+				RenderIntent: RenderIntent{
+					IntentID: "missing-primary",
+					Kind:     TransactionFrame,
+					Bytes:    []byte("x"),
+				},
+				SessionID:             gw.sessID,
+				Sequence:              seq,
+				BatchID:               fmt.Sprintf("missing-primary-batch-%d", seq),
+				RouteEpoch:            1,
+				ProjectionTargetID:    "pt-primary",
+				ProjectionTargetClass: TargetClassPhysical,
+				PreparedAt:            gw.clock.Now(),
+				primarySink:           tc.sink,
+				primaryDesc: TargetDescriptor{
+					SinkID:             "memory-primary",
+					Class:              TargetClassPhysical,
+					ProjectionTargetID: "pt-primary",
+				},
+				mirrorSlots: []*mirrorSlot{frozenMirrorSlot},
+			}
+			gw.mu.Lock()
+			gw.sequence = batch.Sequence
+			gw.pendingStamps++
+			gw.stats.admissionAccepted++
+			gw.mu.Unlock()
+			gw.initRecordSlot(batch, len(batch.mirrorSlots))
+
+			r := gw.deliver(context.Background(), batch)
+			if r.Primary == nil {
+				t.Fatal("admitted batch must return a primary receipt")
+			}
+			if r.Primary.Status != DeliveryRejected ||
+				r.Primary.ErrorClass != DeliveryErrorAbandoned {
+				t.Fatalf("missing primary did not fail closed: %+v", r.Primary)
+			}
+			if !r.Primary.Synthetic || r.Primary.CallbackReturned ||
+				r.Primary.InvocationID != 0 || r.TargetInvoked {
+				t.Fatalf("missing primary callback facts are inconsistent: %+v", r)
+			}
+			if r.Primary.SinkID != "memory-primary" {
+				t.Fatalf("defensive receipt lost frozen sink identity: %+v", r.Primary)
+			}
+			if len(r.MirrorAdmissions) != 1 || r.MirrorAdmissions[0].Scheduled ||
+				r.MirrorAdmissions[0].ErrorClass != DeliveryErrorAbandoned {
+				t.Fatalf("frozen mirror did not reach terminal skip: %+v", r.MirrorAdmissions)
+			}
+			for _, ev := range gw.RecentEvents(64) {
+				if ev.BatchID == r.BatchID && ev.Kind == EventPrimaryStarted {
+					t.Fatalf("uninvoked primary published started event: %+v", ev)
+				}
+			}
+			var found *DeliveryRecord
+			for _, rec := range gw.RecentDeliveries(10) {
+				if rec.Batch.BatchID == r.BatchID {
+					cp := rec
+					found = &cp
+					break
+				}
+			}
+			if found == nil || found.Output.Primary == nil ||
+				!found.Output.Primary.Synthetic || len(found.Mirrors) != 1 {
+				t.Fatalf("synthetic outcome was not completely sealed: %+v", found)
+			}
+		})
+	}
+	if got := len(mirror.SnapshotBatches()); got != 0 {
+		t.Fatalf("fail-closed path invoked frozen mirror %d times", got)
 	}
 }
 

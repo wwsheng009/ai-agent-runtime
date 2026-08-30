@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -210,6 +211,79 @@ func TestBindingLateWriteNoCrossSession(t *testing.T) {
 	batches := fx.Sink.SnapshotBatches()
 	if len(batches) != 1 {
 		t.Fatalf("expected 1 batch, got %d", len(batches))
+	}
+}
+
+// TestBindingRebindWaitsForInFlightOldGeneration verifies that Bind's return
+// is the generation fence: an old submission that already owns the facade's
+// read-side lease finishes before rebind returns, and no later old submission
+// can enter the underlying port.
+func TestBindingRebindWaitsForInFlightOldGeneration(t *testing.T) {
+	registry := NewSessionBindingRegistry()
+	port := &blockingSubmitPort{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	old := registry.Bind("ses-linearized", port)
+
+	submitDone := make(chan struct{})
+	go func() {
+		defer close(submitDone)
+		old.Port.Submit(context.Background(), RenderIntent{
+			Kind:  TransactionFrame,
+			Bytes: []byte("old"),
+		})
+	}()
+	select {
+	case <-port.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old submission did not enter underlying port")
+	}
+
+	rebindDone := make(chan struct{})
+	go func() {
+		registry.Bind("ses-linearized", port)
+		close(rebindDone)
+	}()
+	select {
+	case <-rebindDone:
+		t.Fatal("rebind returned while an old-generation submission was still active")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(port.release)
+	select {
+	case <-submitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old submission did not finish")
+	}
+	select {
+	case <-rebindDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rebind did not finish after old submission returned")
+	}
+
+	late := old.Port.Submit(context.Background(), RenderIntent{
+		Kind:  TransactionFrame,
+		Bytes: []byte("late"),
+	})
+	if late.Admission.Decision != AdmissionRejected ||
+		late.Admission.ErrorClass != DeliveryErrorClosed {
+		t.Fatalf("late old-generation submit was not fenced: %+v", late.Admission)
+	}
+}
+
+type blockingSubmitPort struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingSubmitPort) Submit(context.Context, RenderIntent) OutputReceipt {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+	return OutputReceipt{
+		Admission: AdmissionReceipt{Decision: AdmissionAccepted},
 	}
 }
 

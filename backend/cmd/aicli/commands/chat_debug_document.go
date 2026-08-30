@@ -262,7 +262,53 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	builder.heading("Mailbox Pending:")
 	builder.plainLines(chatDebugMailboxLines(session))
 	appendChatDebugRenderEncoderLines(&builder, session)
+	appendChatDebugRenderOutputLines(&builder, session)
 	return builder.document()
+}
+
+// appendChatDebugRenderOutputLines 输出 /debug Render Output 节：gateway
+// 的 primary/mirror 指标（10.3）。terminal session 未接 gateway 时显示
+// not attached。所有数据来自 detached snapshot。
+func appendChatDebugRenderOutputLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	if builder == nil || session == nil {
+		return
+	}
+	builder.heading("Render Output:")
+	if session.TerminalSession == nil {
+		builder.meta("Gateway:", "<none>")
+		return
+	}
+	snap := session.TerminalSession.RenderOutputSnapshot()
+	if snap == nil {
+		builder.meta("Gateway:", "not attached")
+		return
+	}
+	builder.meta("State:", string(snap.State))
+	builder.meta("Route Epoch:", strconv.FormatUint(snap.RouteEpoch, 10))
+	builder.meta("Last Sequence:", strconv.FormatUint(snap.LastSequence, 10))
+	builder.meta("Primary:", fmt.Sprintf("committed=%d zero_fail=%d unknown=%d deferred=%d rejected=%d",
+		snap.PrimaryCommitted, snap.PrimaryZeroFailed, snap.PrimaryUnknown,
+		snap.PrimaryDeferred, snap.PrimaryRejected))
+	builder.meta("Admission:", fmt.Sprintf("accepted=%d rejected=%d deferred=%d",
+		snap.AdmissionAccepted, snap.AdmissionRejected, snap.AdmissionDeferred))
+	builder.meta("Mirrors:", fmt.Sprintf("scheduled=%d drop=%d applied=%d skipped=%d failed=%d timed_out=%d late=%d",
+		snap.MirrorsScheduled, snap.MirrorScheduleDrops, snap.MirrorsApplied,
+		snap.MirrorsSkipped, snap.MirrorsFailed, snap.MirrorsTimedOut, snap.MirrorsLate))
+	builder.meta("Mirror In-Flight:", fmt.Sprintf("pending=%d in_flight=%d entries_unsealed=%d",
+		snap.MirrorPending, snap.MirrorInFlight, snap.MirrorEntriesUnsealed))
+	for _, m := range snap.Mirrors {
+		builder.meta(fmt.Sprintf("  Mirror[%d] %s:", m.MirrorIndex, m.Sink.Descriptor.SinkID),
+			fmt.Sprintf("policy=%s mode=%s applied=%d skipped=%d failed=%d timed_out=%d late=%d drop=%d high_water=%d",
+				m.Policy, m.RequestedApplyMode, m.Applied, m.Skipped, m.Failed,
+				m.TimedOut, m.LateCompleted, m.ScheduleDrops, m.QueueHighWater))
+	}
+	builder.meta("Observer Drops:", strconv.FormatUint(snap.ObserverDrops, 10))
+	builder.meta("Event Journal Drops:", strconv.FormatUint(snap.EventJournalDrops, 10))
+	builder.meta("Delivery Journal Drops:", strconv.FormatUint(snap.DeliveryJournalDrops, 10))
+	builder.meta("Delivery Records Sealed:", strconv.FormatUint(snap.DeliveryRecordsSealed, 10))
+	if snap.CloseCutoffSequence != 0 {
+		builder.meta("Close Cutoff Sequence:", strconv.FormatUint(snap.CloseCutoffSequence, 10))
+	}
 }
 
 // appendChatDebugAppStatePresenterLines exposes the migration's immutable

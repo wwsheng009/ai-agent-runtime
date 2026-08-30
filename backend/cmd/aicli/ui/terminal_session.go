@@ -435,6 +435,24 @@ func (s *TerminalSession) projectionStateLocked() TerminalProjectionState {
 	}
 }
 
+// RenderOutputSnapshot 返回 gateway-backed 会话的 render output 快照
+// （/debug Render Output 节数据面）。s 未接 gateway 时返回 nil。
+func (s *TerminalSession) RenderOutputSnapshot() *outputpkg.RenderOutputSnapshot {
+	if s == nil {
+		return nil
+	}
+	port := s.output
+	if port == nil {
+		return nil
+	}
+	gw, ok := port.(*outputpkg.RenderOutputGateway)
+	if !ok {
+		return nil
+	}
+	snap := gw.Snapshot()
+	return &snap
+}
+
 // InvalidateProjection requests a recovery full repaint from the next frame
 // plan. It never reads content back from the terminal or the front buffer.
 func (s *TerminalSession) InvalidateProjection() {
