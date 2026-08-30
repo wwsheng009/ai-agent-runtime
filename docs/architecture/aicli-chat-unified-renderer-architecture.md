@@ -1127,6 +1127,32 @@ approval/question 还没有完全拆成 actor effect/result：
 7. **文档中的旧阶段标记可能过时**
    代码注释仍出现 P1/P3/P4、双跑、future presenter 等迁移术语；实际交互式 setup 已强制 TerminalSession primary writer。维护时应以启动接线和测试为事实，不应仅根据早期计划判断生产状态。
 
+### 16.1 Phase 6 现状：gateway-backed 交互输出（2026-08）
+
+`render/output` 中间层的 Phase 0-6 已交付并门禁化：
+
+- **交互输出经 gateway**：`chatInteractionCoordinator.EnableUnifiedRendererGateway()` 是
+  production factory——构造 `PhysicalSink→RenderOutputGateway`（稳定 render session ID，
+  不复用随 resume/load 变化的 `RuntimeSession.ID`），interactive terminal bytes 全部经
+  gateway 提交（receipt/journal/mirror/capture 可观测），不再直写 `os.Stdout`。
+- **Terminal 控制序列收口**：`ui.Terminal` 全部控制方法（Clear/MoveTo/cursor/alt screen/
+  scroll region/bracketed paste/focus/NewLine/PrintAt 等）经 `emitControl`——binding 非
+  nil 时经 gateway 提交 `legacy_immediate`，否则回落 process `TerminalOutput()`（仅
+  启动前 process-compat）。control-sequence 直写点从 63 降到 1（helper 自身回落）。
+- **Surface/会话层**：`FixedBottomSurface.flushLegacyANSIHoldingLock` 与所有 paint 路径
+  均已列入 inventory 且分类为 `gateway-terminal-effect`。
+- **零旁路门禁**：`tools/terminal-inventory` 静态登记全部 terminal writer call sites
+  （当前 1147 条）；`release-aicli.yml` 的 `Verify terminal output inventory` step 在
+  发布前对 baseline 做指纹比对，任何 added/removed 直写点都 fail——交互管线无法静默
+  绕过 gateway。`verify` 模式：`go run ./tools/terminal-inventory -root .. -out
+  ../terminal-output-inventory.json -verify`。
+- **收口后仍保留的 process-compat 回落**：仅启动前初始化、`emitControl` helper 自身、
+  `PrintAt` legacy fallback——全部登记在 inventory 中，不允许新的绕过路径。
+
+使用门禁的诚实边界：inventory 按 call-site 指纹比对（防新增/删除），不验证每个 site
+在运行时确实走了 binding（运行时穿戴由
+`TestEnableUnifiedRendererGateway*`/reconfigure/capture parity 集成测试覆盖）。
+
 建议的演进优先级：
 
 ```text
