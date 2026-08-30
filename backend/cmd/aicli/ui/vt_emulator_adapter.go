@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -148,6 +149,30 @@ func (e *VtTerminalEmulator) trackCursorAndAlternate(stream string) {
 	}
 	if strings.Contains(stream, "\x1b[?25l") {
 		e.cursorVis = false
+	}
+	// DECSCUSR：CSI Ps SP q / CSI Ps q 设置光标形状。
+	e.trackCursorShape(stream)
+}
+
+// decscusrRe 匹配 DECSCUSR 形状序列（CSI Ps SP q）。预编译避免每次调用
+// 正则编译开销。
+var decscusrRe = regexp.MustCompile(`\x1b\[([0-9]) q`)
+
+// trackCursorShape 解析 DECSCUSR 形状序列：
+// 0/1 → block、2 → block(blink 变体)、3 → underline、4 → underline(blink)、
+// 5 → bar、6 → bar(blink)。vn/vt 不跟踪形状，adapter 层维护。
+func (e *VtTerminalEmulator) trackCursorShape(stream string) {
+	m := decscusrRe.FindStringSubmatch(stream)
+	if len(m) != 2 {
+		return
+	}
+	switch m[1] {
+	case "0", "1", "2":
+		e.cursorShape = outputpkg.CursorShapeBlock
+	case "3", "4":
+		e.cursorShape = outputpkg.CursorShapeUnderline
+	case "5", "6":
+		e.cursorShape = outputpkg.CursorShapeBar
 	}
 }
 

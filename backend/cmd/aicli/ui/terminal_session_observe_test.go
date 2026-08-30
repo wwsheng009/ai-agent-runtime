@@ -259,3 +259,34 @@ func TestP2VirtualResizeShrink(t *testing.T) {
 		t.Fatalf("content lost after grow: %v", snap.Rows)
 	}
 }
+
+// TestP2CursorShapeTracking：DECSCUSR 形状序列被 adapter 跟踪
+// （underline/bar），快照的 Cursor.Shape 反映之。
+func TestP2CursorShapeTracking(t *testing.T) {
+	emu := NewVtTerminalEmulator()
+	if err := emu.ApplyContext(outputpkg.TerminalGeometry{Width: 20, Height: 6},
+		outputpkg.TerminalProfileRef{ID: "ansi", Version: 1}); err != nil {
+		t.Fatalf("context: %v", err)
+	}
+	if err := emu.Apply([]byte("hello\x1b[3 q")); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	snap := emu.Snapshot()
+	if snap.Cursor.Shape != outputpkg.CursorShapeUnderline {
+		t.Fatalf("shape: %s, want underline", snap.Cursor.Shape)
+	}
+	if err := emu.Apply([]byte("\x1b[5 q")); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	snap = emu.Snapshot()
+	if snap.Cursor.Shape != outputpkg.CursorShapeBar {
+		t.Fatalf("shape: %s, want bar", snap.Cursor.Shape)
+	}
+	// cursor 可见性。
+	if err := emu.Apply([]byte("\x1b[?25h")); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !emu.Snapshot().Cursor.Visible {
+		t.Fatal("cursor should be visible after ?25h")
+	}
+}
