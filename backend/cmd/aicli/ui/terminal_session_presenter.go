@@ -4,6 +4,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 )
 
 const terminalWriterAbortGrace = 2 * time.Second
@@ -53,6 +55,14 @@ func NewTerminalSessionPresenterForSession(controller *UIController, session *Te
 		executor:   NewTerminalSessionExecutor(controller, session),
 		probe:      probe,
 	}
+}
+
+// NewTerminalSessionPresenterWithOutput 是 Phase 6 production factory：
+// 用 gateway-backed session（所有 terminal bytes 经 output port 提交）构造
+// presenter。调用方负责创建 gateway（PhysicalSink→Gateway）并注入 port；
+// presenter 不持有 writer，不产生第二 physical writer。
+func NewTerminalSessionPresenterWithOutput(controller *UIController, port outputpkg.RenderOutputPort, probe TerminalGeometryProbe) *TerminalSessionPresenter {
+	return NewTerminalSessionPresenterForSession(controller, NewTerminalSessionWithOutput(port), probe)
 }
 
 // Attach makes this presenter the controller's effect consumer. It is safe to

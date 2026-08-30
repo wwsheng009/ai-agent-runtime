@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
@@ -68,6 +70,133 @@ func (c *chatInteractionCoordinator) ensureUIActor() *ui.UIController {
 // is fenced before TerminalSessionPresenter attaches to the UI actor.
 func (c *chatInteractionCoordinator) EnableUnifiedRenderer() bool {
 	return c.enableUnifiedRendererWithWriter(os.Stdout)
+}
+
+// sessionRenderIDLocked 返回稳定 render session ID（Phase 6 gateway 命名；
+// 不直接用会随 resume/load 变化的 RuntimeSession.ID）。调用方无需持锁。
+func (c *chatInteractionCoordinator) sessionRenderIDLocked() string {
+	if c == nil {
+		return "render-unknown"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.renderGatewayID != "" {
+		return c.renderGatewayID
+	}
+	if c.session != nil && c.session.RuntimeSession != nil && c.session.RuntimeSession.ID != "" {
+		c.renderGatewayID = "render-" + c.session.RuntimeSession.ID
+		return c.renderGatewayID
+	}
+	c.renderGatewayID = "render-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	return c.renderGatewayID
+}
+
+// EnableUnifiedRendererGateway 是 Phase 6 production factory：构造
+// PhysicalSink→RenderOutputGateway，session 的所有 terminal bytes 经
+// gateway 提交（receipt/journal/mirror 可观测），不再直写 os.Stdout。
+// 返回 gateway 供 /debug 与测试观察；失败返回 nil。
+func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.RenderOutputGateway {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	if c.shutdown {
+		c.mu.Unlock()
+		return nil
+	}
+	if c.primaryPresenter != nil {
+		// 已安装（可能为直写模式）：不重复安装。
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+
+	sink := outputpkg.NewPhysicalSink(
+		outputpkg.TargetDescriptor{
+			SinkID:             "physical-interactive",
+			Class:              outputpkg.TargetClassPhysical,
+			ProjectionTargetID: "pt-interactive",
+		},
+		os.Stdout,
+		outputpkg.PhysicalSinkOptions{},
+	)
+	gw, err := outputpkg.NewRenderOutputGateway(
+		"render-"+c.sessionRenderIDLocked(),
+		outputpkg.RenderGatewayOptions{
+			Clock:                 outputpkg.SystemClock{},
+			CloseTimeout:          3 * time.Second,
+			ReconfigureTimeout:    5 * time.Second,
+			MaxIntentBytes:        1 << 20,
+			MirrorQueueCapacity:   64,
+			DeliveryJournalLimit:  outputpkg.JournalLimit{MaxItems: 512, MaxBytes: 4 << 20},
+			EventJournalLimit:     outputpkg.JournalLimit{MaxItems: 1024, MaxBytes: 8 << 20},
+			MaxSubscriptions:      16,
+			MaxSubscriptionBuffer: 128,
+		},
+		outputpkg.RenderRouteConfig{
+			Primary:            sink,
+			PrimaryOwnership:   outputpkg.SinkOwned,
+			ProjectionTargetID: "pt-interactive",
+		},
+	)
+	if err != nil {
+		return nil
+	}
+	gw.Run()
+	if !c.enableUnifiedRendererWithPort(gw) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = gw.Close(ctx)
+		return nil
+	}
+	c.renderGateway = gw
+	return gw
+}
+
+func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpkg.RenderOutputPort) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	if c.shutdown {
+		c.mu.Unlock()
+		return false
+	}
+	if c.primaryPresenter != nil {
+		c.mu.Unlock()
+		return true
+	}
+	surface := c.surface
+	c.unifiedRenderer = true
+	c.mu.Unlock()
+	if surface != nil {
+		surface.SetPhysicalWritesEnabled(false)
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		c.mu.Lock()
+		c.unifiedRenderer = false
+		c.mu.Unlock()
+		return false
+	}
+	if !actor.Post(ui.SetThemeContextAction{Theme: ui.CurrentThemeContext()}) ||
+		!actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
+		c.mu.Lock()
+		c.unifiedRenderer = false
+		c.mu.Unlock()
+		return false
+	}
+	actor.WaitIdle()
+	presenter := ui.NewTerminalSessionPresenterWithOutput(actor, port, c.primaryTerminalGeometry)
+	if c.SetPrimaryPresenter(presenter) {
+		return true
+	}
+	c.mu.Lock()
+	if c.primaryPresenter == nil {
+		c.unifiedRenderer = false
+	}
+	c.mu.Unlock()
+	return false
 }
 
 func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.Writer) bool {
@@ -820,6 +949,13 @@ func unifiedRendererActionNeedsFlush(action ui.UIAction) bool {
 		// pending handoff is actually actionable; retrying the same failed frame
 		// from a generic FlushEffect would spin forever on a persistent error.
 		return false
+	case ui.RuntimeEvent:
+		// RuntimeEvent is only the semantic parent transaction. Its reducer
+		// publishes the actual AppState mutations (status/band actions and the
+		// Scene transcript projection) as causal follow-ups. Flushing the parent
+		// first paints an unchanged frame for every provider chunk and doubles
+		// the pressure on the terminal executor during a fast stream.
+		return false
 	default:
 		return true
 	}
@@ -853,8 +989,61 @@ func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action u
 	// causal follow-up of this RuntimeEvent. This never derives transcript from
 	// the terminal, ScreenModel, or legacy historyWindow.
 	if snapshot := payload.bridge.sceneSnapshot(); snapshot != nil {
-		c.postCausalUIActionWithContext(context, ui.ReplaceTranscriptAction{Snapshot: snapshot})
+		if c.runtimeEventNeedsTranscriptReplace(payload.bridge, payload.event, snapshot) {
+			c.postCausalUIActionWithContext(context, ui.ReplaceTranscriptAction{Snapshot: snapshot})
+		}
 	}
+}
+
+// runtimeEventNeedsTranscriptReplace reports whether a runtime event still
+// needs a full immutable Scene snapshot projection. The first stream chunk must
+// replace the transcript atomically so it can mount the new mutable cell.
+// Subsequent chunks for that same mounted assistant or reasoning cell are
+// already projected as UpdateActiveCellAction causal follow-ups; replacing the
+// whole transcript again would create one full-frame transaction per provider
+// chunk and let the UI actor fall arbitrarily far behind the stream.
+func (c *chatInteractionCoordinator) runtimeEventNeedsTranscriptReplace(bridge *chatRuntimeEventBridge, event runtimeevents.Event, snapshot *scene.Snapshot) bool {
+	if c == nil || snapshot == nil {
+		return true
+	}
+	if c.session == nil || !c.UnifiedRendererEnabled() || !shouldRenderInteractiveOutput(c.session) {
+		return true
+	}
+	if bridge == nil || !bridge.isPrimarySessionEvent(event) {
+		return true
+	}
+	next, ok := ui.ActiveCellFromSnapshot(snapshot)
+	if !ok || next.Phase != ui.ActiveCellMutable {
+		return true
+	}
+	expectedKind := scene.KindAssistant
+	switch event.Type {
+	case runtimechat.EventAssistantDelta:
+	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
+		if !chatReasoningOutputEnabled(c.session) {
+			return true
+		}
+		expectedKind = scene.KindReasoning
+	default:
+		return true
+	}
+	if next.Kind != expectedKind {
+		return true
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return true
+	}
+	current := actor.ActiveCellState()
+	// A changed source is the evidence that the compatibility callback emitted
+	// an UpdateActiveCellAction for this event. If ordering/request fences
+	// rejected it, keep the full snapshot fallback so unrelated Scene changes
+	// (for example a late reasoning request) are not hidden.
+	return current.CellID == 0 ||
+		current.Phase != ui.ActiveCellMutable ||
+		current.CellID != next.CellID ||
+		current.Kind != next.Kind ||
+		current.Source == next.Source
 }
 
 func (c *chatInteractionCoordinator) applyInputEvent(action ui.InputEvent) {

@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/motion"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
@@ -177,6 +178,10 @@ type chatInteractionCoordinator struct {
 	terminalWritesAbandoned bool
 	primaryPresenter        *ui.TerminalSessionPresenter
 	terminalSession         *ui.TerminalSession
+	// renderGateway（Phase 6 production factory）:interactive 会话安装的
+	// gateway；terminal bytes 经其提交，供 /debug 与收尾 Close。
+	renderGateway   *outputpkg.RenderOutputGateway
+	renderGatewayID string
 	// terminalExecutor remains a diagnostic compatibility alias. New code must
 	// use primaryPresenter so effect binding and shutdown stay paired.
 	terminalExecutor      *ui.TerminalSessionExecutor
@@ -4650,7 +4655,15 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.surface = nil
 	c.terminalSession = nil
 	c.terminalExecutor = nil
+	gw := c.renderGateway
+	c.renderGateway = nil
 	c.mu.Unlock()
+	if gw != nil {
+		// Phase 6 收口：关闭 gateway（primary PhysicalSink bounded close）。
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = gw.Close(ctx)
+	}
 }
 
 func (c *chatInteractionCoordinator) beginMessageLocked() bool {
