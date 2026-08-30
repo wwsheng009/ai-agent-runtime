@@ -33,13 +33,21 @@ func TestOpenCodeConsoleGo_DeveloperRoleToSystem(t *testing.T) {
 	}
 }
 
-func TestOpenCodeConsoleGo_DeveloperRolePreservedWithoutProfile(t *testing.T) {
+// TestOpenCodeConsoleGo_DeveloperRoleProjectedWithoutProfile locks the
+// default OpenAI-compatible wire: even without an explicit profile, outgoing
+// developer instructions are projected to system because strict gateways
+// (system/user/assistant/tool only) reject developer with HTTP 400. Canonical
+// history must stay untouched.
+func TestOpenCodeConsoleGo_DeveloperRoleProjectedWithoutProfile(t *testing.T) {
 	messages := []map[string]interface{}{
 		{"role": "developer", "content": "be terse"},
 	}
 	got := NormalizeOpenAICompatibleMessages(Context{Protocol: "openai"}, messages)
-	if got[0]["role"] != "developer" {
-		t.Fatalf("expected developer role preserved without profile, got %#v", got[0]["role"])
+	if got[0]["role"] != "system" {
+		t.Fatalf("expected developer projected to system without profile, got %#v", got[0]["role"])
+	}
+	if messages[0]["role"] != "developer" {
+		t.Fatalf("expected original message left intact, got %#v", messages[0]["role"])
 	}
 }
 
@@ -286,8 +294,10 @@ func TestOpenCodeConsoleGo_AllDeveloperMessagesConverted(t *testing.T) {
 
 // TestOpenCodeConsoleGo_ReversibleAcrossProfiles proves the transform is a
 // send-time projection, not a rewrite: the same developer history projects to
-// system under the OpenCode profile and back to developer under the standard
-// profile, so switching providers stays lossless.
+// system under every OpenAI-compatible wire dialect (explicit OpenCode profile
+// and default/standard alike, since strict gateways reject developer). The
+// canonical history itself never changes, so switching providers stays
+// lossless.
 func TestOpenCodeConsoleGo_ReversibleAcrossProfiles(t *testing.T) {
 	history := []map[string]interface{}{
 		{"role": "developer", "content": "be terse"},
@@ -304,8 +314,11 @@ func TestOpenCodeConsoleGo_ReversibleAcrossProfiles(t *testing.T) {
 		Protocol: "openai",
 		Profile:  agentconfig.CompatibilityProfileStandard,
 	}, history)
-	if role, _ := standard[0]["role"].(string); role != "developer" {
-		t.Fatalf("expected standard profile to preserve developer, got %#v", role)
+	if role, _ := standard[0]["role"].(string); role != "system" {
+		t.Fatalf("expected standard/default profile to project developer as system, got %#v", role)
+	}
+	if role, _ := history[0]["role"].(string); role != "developer" {
+		t.Fatalf("expected canonical history untouched by both projections, got %#v", role)
 	}
 }
 

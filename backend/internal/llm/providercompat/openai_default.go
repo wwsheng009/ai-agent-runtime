@@ -28,6 +28,45 @@ func (openAIDefaultAdapter) LoginModelUsesDefaultReasoningEfforts(_ Context, mod
 	return LooksLikeOpenAIReasoningModel(modelID), true
 }
 
+// NormalizeOpenAICompatibleMessages projects outgoing developer instructions
+// to system for every OpenAI-compatible endpoint without an explicit wire
+// profile. Developer is the canonical role for turn-context instructions
+// (fact ledger, frozen goal, prompt layers), but many OpenAI-compatible
+// gateways only accept the strict enum system/user/assistant/tool and reject
+// developer with HTTP 400 (retryable=false). System is the universally
+// accepted equivalent (OpenAI documents developer messages as the
+// replacement for system), so projecting at send time avoids the 400 while
+// keeping destination semantics close. Endpoints that distinguish developer
+// from system can opt into a richer profile later. Explicit profiles such as
+// opencode-console-go run earlier in the chain and already projected; this
+// pass is idempotent. When a provider-specific adapter like sensenova merges
+// system messages first, a developer instruction may land as its own system
+// message rather than joining the merged system block — acceptable, since
+// previously it went out verbatim and strict gateways rejected it. It copies
+// changed messages and never mutates canonical/runtime history.
+func (openAIDefaultAdapter) NormalizeOpenAICompatibleMessages(ctx Context, messages []map[string]interface{}) ([]map[string]interface{}, bool) {
+	if !strings.EqualFold(strings.TrimSpace(ctx.Protocol), "openai") || len(messages) == 0 {
+		return messages, false
+	}
+	normalized := []map[string]interface{}(nil)
+	for index, message := range messages {
+		role, _ := message["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "developer") {
+			continue
+		}
+		if normalized == nil {
+			normalized = append([]map[string]interface{}(nil), messages...)
+		}
+		updated := cloneMapStringAny(message)
+		updated["role"] = "system"
+		normalized[index] = updated
+	}
+	if normalized == nil {
+		return messages, false
+	}
+	return normalized, true
+}
+
 func (openAIDefaultAdapter) NormalizeAssistantMessage(_ Context, message map[string]interface{}) (map[string]interface{}, bool) {
 	return normalizeOpenAICompatibleAssistantMessage(message)
 }
