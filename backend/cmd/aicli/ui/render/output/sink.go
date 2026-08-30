@@ -112,7 +112,9 @@ type RenderMirrorSink interface {
 type MirrorEnvelope struct {
 	MirrorEntryRef
 	RenderBatch
+	Policy             MirrorPolicy
 	RequestedApplyMode MirrorApplyMode
+	EffectiveApplyMode MirrorApplyMode // gateway admission 计算后的有效 mode
 	NonAuthoritative   bool
 	Timeout            time.Duration
 }
@@ -194,18 +196,60 @@ type CapturePayloadAuthorizer interface {
 	Authorize(ctx context.Context, request CapturePayloadRequest) error
 }
 
-// VirtualProjectionSink 提供投影快照（Phase 2 使用；Phase 0 定义窄接口）。
+// VirtualProjectionSink 提供投影快照（Phase 2；primary 或 mirror 均可）。
 type VirtualProjectionSink interface {
 	Projection() VirtualProjectionSnapshot
 }
 
-// VirtualProjectionSnapshot 是虚拟终端投影的 detached 快照。
+// CursorShape 是虚拟投影光标形状（7.3）。
+type CursorShape string
+
+const (
+	CursorShapeUnknown   CursorShape = "unknown"
+	CursorShapeBlock     CursorShape = "block"
+	CursorShapeUnderline CursorShape = "underline"
+	CursorShapeBar       CursorShape = "bar"
+	CursorShapeHidden    CursorShape = "hidden"
+)
+
+// TerminalCursor 是虚拟投影光标（output/vt 自有类型，零基行/列）。
+type TerminalCursor struct {
+	Row     int // zero-based
+	Column  int // zero-based display cell，非 UTF-8 byte offset
+	Visible bool
+	Shape   CursorShape
+}
+
+// ProjectionValidity 描述投影有效状态（9.4/6.6 floor）。
+type ProjectionValidity string
+
+const (
+	ProjectionUnavailable ProjectionValidity = "unavailable" // 尚未建立 projection
+	ProjectionValid       ProjectionValidity = "valid"
+	ProjectionUnknown     ProjectionValidity = "unknown" // partial/abort 后不可证明
+)
+
+// VirtualProjectionSnapshot 是虚拟终端投影的 detached 快照（7.3）。
+// SchemaVersion 第一版为 1。Validity==ProjectionValid 时 geometry 必须为正，
+// cursor 坐标必须落在当前 geometry 内；Unavailable/Unknown 时 rows/scrollback
+// 只可用于诊断，不能作为 recovery source 或物理 projection 证明。
+// NonAuthoritative=true 时 Validity 不得为 ProjectionValid。
+// 所有 slice 必须是 detached copy。
 type VirtualProjectionSnapshot struct {
-	Rows         []string
-	CursorRow    int
-	CursorColumn int
-	Width        int
-	Height       int
+	SchemaVersion           uint32
+	Width, Height           int
+	Rows                    []string
+	Scrollback              []string
+	Cursor                  TerminalCursor
+	Alternate               bool
+	Validity                ProjectionValidity
+	NonAuthoritative        bool
+	LastSequence            uint64
+	LastBatchID             string
+	LastMirrorEntryID       string // primary virtual 时为空
+	ProjectionTargetID      string
+	ObservedPrimaryTargetID string
+	Profile                 TerminalProfileRef
 }
 
 // DiscardSink 丢弃全部字节（zero proof），不进行异步 I/O，接受所有几何

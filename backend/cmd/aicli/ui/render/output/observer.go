@@ -572,28 +572,5 @@ func (h *eventHub) getJournalDrops() uint64 {
 	return h.journalDrops
 }
 
-// ProjectionValidity 描述投影有效状态（9.4/6.6 floor）。
-type ProjectionValidity string
-
-const (
-	ProjectionUnavailable ProjectionValidity = "unavailable"
-	ProjectionValid       ProjectionValidity = "valid"
-	ProjectionUnknown     ProjectionValidity = "unknown"
-)
-
-// TerminalCursor 是虚拟投影光标（output/vt 自有类型）。
-type TerminalCursor struct {
-	Row     int
-	Column  int
-	Visible bool
-}
-
-// CursorShape 是光标形状枚举（供 projection 快照使用）。
-type CursorShape string
-
-const (
-	CursorShapeBlock     CursorShape = "block"
-	CursorShapeUnderline CursorShape = "underline"
-	CursorShapeBar       CursorShape = "bar"
-	CursorShapeHidden    CursorShape = "hidden"
-)
+// ProjectionValidity / TerminalCursor / CursorShape 完整定义在 sink.go
+//（7.3 schema）；此处不再重复，避免两处漂移。

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -484,9 +485,9 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 		return fmt.Errorf("%w: lease id=%d", ErrTerminalAlternateScreenBusy, s.alternateLeaseID)
 	}
 
-	enter := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateEnter, "\x1b[?1049h\x1b[r\x1b[?25l\x1b[2J\x1b[H")
+	enter := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateEnter, "\x1b[?1049h\x1b[r\x1b[?25l\x1b[2J\x1b[H", s.geometry)
 	if enter.Err != nil {
-		rollback := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateExit, "\x1b[?25h\x1b[r\x1b[?1049l")
+		rollback := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateExit, "\x1b[?25h\x1b[r\x1b[?1049l", s.geometry)
 		// A proven zero-byte enter followed by a complete rollback preserves the
 		// primary buffer. Any partial transport loses buffer ownership proof.
 		if enter.MayHavePartiallyWritten || (rollback.Err != nil && rollback.MayHavePartiallyWritten) {
@@ -530,7 +531,7 @@ func (s *TerminalSession) WriteAlternateScreen(leaseID uint64, bytes string) err
 	if s.alternateLeaseID != leaseID {
 		return fmt.Errorf("%w: want id=%d active id=%d", ErrTerminalAlternateScreenLease, leaseID, s.alternateLeaseID)
 	}
-	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateWrite, bytes)
+	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateWrite, bytes, s.geometry)
 	if write.Err != nil {
 		if s.screen != nil {
 			s.screen.Invalidate()
@@ -561,7 +562,7 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 		return fmt.Errorf("%w: want id=%d active id=%d", ErrTerminalAlternateScreenLease, leaseID, s.alternateLeaseID)
 	}
 
-	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateExit, "\x1b[?25h\x1b[r\x1b[?1049l")
+	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionAlternateExit, "\x1b[?25h\x1b[r\x1b[?1049l", s.geometry)
 	if write.Err != nil && !write.MayHavePartiallyWritten {
 		// No exit byte reached the host, so the same physical alternate lease is
 		// still active and may be retried without guessing buffer ownership.
@@ -939,7 +940,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	if historyBytes != "" {
 		kind = outputpkg.TransactionFrameAndHistory
 	}
-	if write := s.writeTerminalBytesKindLocked(kind, bytes); write.Err != nil {
+	if write := s.writeTerminalBytesKindLocked(kind, bytes, frame.Geometry); write.Err != nil {
 		if write.MayHavePartiallyWritten {
 			// The target consumed an unknown prefix. Preserve no incremental
 			// viewport proof, but keep the last confirmed scalar snapshot so the
@@ -1128,7 +1129,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(rows []string) HistoryCommitRe
 	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
-	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionHistoryHandoff, bytes)
+	write := s.writeTerminalBytesKindLocked(outputpkg.TransactionHistoryHandoff, bytes, s.geometry)
 	if write.Err != nil {
 		s.screen.MarkWriteFailed()
 		s.cursor = nil
@@ -1453,19 +1454,20 @@ type terminalWriteResult struct {
 // Gateway-backed sessions（output != nil）把 bytes 经 port 提交，kind 默认
 // frame；语义化调用点使用 writeTerminalBytesKindLocked。
 func (s *TerminalSession) writeTerminalBytesLocked(bytes string) (result terminalWriteResult) {
-	return s.writeTerminalBytesKindLocked(outputpkg.TransactionFrame, bytes)
+	return s.writeTerminalBytesKindLocked(outputpkg.TransactionFrame, bytes, s.geometry)
 }
 
 // writeTerminalBytesKindLocked 是带事务 kind 的写入入口。output == nil 时
 // 走 writer/presenter 直写兼容路径；output != nil 时经 gateway port 提交并
-// 从 primary receipt 推导 result。
-func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.TransactionKind, bytes string) (result terminalWriteResult) {
+// 从 primary receipt 推导 result。geometry 是本次提交的终端尺寸（frame
+// 路径传 plan 几何，其余传已确认的 s.geometry）。
+func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.TransactionKind, bytes string, geometry GeometryState) (result terminalWriteResult) {
 	if bytes == "" {
 		return result
 	}
 	port := s.output
 	if port != nil {
-		return s.submitWithPortLocked(port, kind, bytes)
+		return s.submitWithPortLocked(port, kind, bytes, geometry)
 	}
 	if s == nil || s.writer == nil || s.presenter == nil {
 		return terminalWriteResult{Err: ErrTerminalWriterMissing}
@@ -1495,12 +1497,23 @@ func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.Transactio
 //   - target-level rejected/deferred → Err=classified，无部分写证明。
 //
 // pre-admission rejection（Primary==nil）不调用 sink，Err=classified。
-func (s *TerminalSession) submitWithPortLocked(port outputpkg.RenderOutputPort, kind outputpkg.TransactionKind, bytes string) terminalWriteResult {
+func (s *TerminalSession) submitWithPortLocked(port outputpkg.RenderOutputPort, kind outputpkg.TransactionKind, bytes string, geometry GeometryState) terminalWriteResult {
 	intent := outputpkg.RenderIntent{
-		Kind:   kind,
-		Source: "terminal_session",
-		Cause:  "writeTerminalBytes",
-		Bytes:  []byte(bytes),
+		IntentID: "ts-" + terminalSessionIntentID(),
+		Kind:     kind,
+		Source:   "terminal_session",
+		Cause:    "writeTerminalBytes",
+		Bytes:    []byte(bytes),
+		Terminal: outputpkg.RenderTerminalContext{
+			Geometry: outputpkg.TerminalGeometry{
+				Width:  geometry.Width,
+				Height: geometry.Height,
+			},
+			Profile:          outputpkg.TerminalProfileRef{ID: "ansi", Version: 1},
+			LayoutGeneration: s.generation,
+			TerminalEpoch:    s.terminalEpoch,
+			Frame:            s.frame,
+		},
 	}
 	receipt := port.Submit(context.Background(), intent)
 	if receipt.Primary == nil {
@@ -1525,6 +1538,13 @@ func (s *TerminalSession) submitWithPortLocked(port outputpkg.RenderOutputPort, 
 		return terminalWriteResult{Err: receiptError(p.ErrorClass)}
 	}
 }
+
+// terminalSessionIntentID 生成诊断用 intent id（非幂等键）。
+func terminalSessionIntentID() string {
+	return strconv.FormatUint(atomic.AddUint64(&terminalSessionIntentSeq, 1), 10)
+}
+
+var terminalSessionIntentSeq uint64
 
 // receiptError 从稳定 class 映射可读错误；gateway 的 classified error 已
 // 携带 class 信息。

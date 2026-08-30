@@ -21,93 +21,11 @@ type RenderTestFixture struct {
 	Gateway *RenderOutputGateway
 	Primary *MemorySink
 	Capture *CaptureSink
-	Virtual *VirtualSink
+	Virtual *VirtualTerminalSink
 	Session string
 	Start   time.Time
 }
 
-// VirtualSink 是 Phase 0 的最小 virtual sink（记录 bytes + 行投影）。
-type VirtualSink struct {
-	desc  TargetDescriptor
-	rows  []string
-	mu    sync.Mutex
-	calls uint64
-	state SinkLifecycleState
-}
-
-// NewVirtualSink 创建虚拟 sink。
-func NewVirtualSink(projectionTargetID string) *VirtualSink {
-	return &VirtualSink{
-		desc: TargetDescriptor{
-			SinkID:             "virtual",
-			Class:              TargetClassVirtual,
-			ProjectionTargetID: projectionTargetID,
-		},
-		state: SinkLifecycleOpen,
-	}
-}
-
-func (v *VirtualSink) Descriptor() TargetDescriptor { return v.desc }
-
-func (v *VirtualSink) Submit(_ context.Context, batch RenderBatch) SinkDeliveryResult {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.calls++
-	v.rows = append(v.rows, string(batch.Bytes))
-	return SinkDeliveryResult{
-		Status:         DeliveryCommitted,
-		Certainty:      WriteCertaintyFull,
-		ErrorClass:     DeliveryErrorNone,
-		AttemptedBytes: len(batch.Bytes),
-		AcceptedBytes:  len(batch.Bytes),
-	}
-}
-
-func (v *VirtualSink) Snapshot() SinkSnapshot {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return SinkSnapshot{Descriptor: v.desc, State: v.state, WriteCount: v.calls}
-}
-
-func (v *VirtualSink) Abort(AbortProof) error { return nil }
-func (v *VirtualSink) Close(context.Context) error {
-	v.state = SinkLifecycleClosed
-	return nil
-}
-
-// SubmitMirror 让 VirtualSink 也可以作为 mirror。
-func (v *VirtualSink) SubmitMirror(_ context.Context, env MirrorEnvelope) MirrorSinkResult {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.calls++
-	v.rows = append(v.rows, string(env.Bytes))
-	return MirrorSinkResult{
-		Status:         MirrorApplied,
-		ErrorClass:     DeliveryErrorNone,
-		AttemptedBytes: len(env.Bytes),
-		AcceptedBytes:  len(env.Bytes),
-		Certainty:      WriteCertaintyFull,
-	}
-}
-
-// Rows 返回投影行（detached）。
-func (v *VirtualSink) Rows() []string {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	out := make([]string, len(v.rows))
-	copy(out, v.rows)
-	return out
-}
-
-// Projection 实现 VirtualProjectionSink。
-func (v *VirtualSink) Projection() VirtualProjectionSnapshot {
-	return VirtualProjectionSnapshot{
-		Rows:  v.Rows(),
-		Width: 80,
-	}
-}
-
-// FixtureOption 配置 Fixture。
 type FixtureOption func(*fixtureConfig)
 
 type fixtureConfig struct {
@@ -206,9 +124,9 @@ func NewRenderTestFixture(t *testing.T, opts ...FixtureOption) *RenderTestFixtur
 			Timeout:   1 * time.Second,
 		})
 	}
-	var virtual *VirtualSink
+	var virtual *VirtualTerminalSink
 	if cfg.withVirtual {
-		virtual = NewVirtualSink("virtual-test")
+		virtual = NewVirtualTerminalSink("virtual-test", newFakeEmulator(80, 24), VirtualSinkOptions{})
 		route.Mirrors = append(route.Mirrors, RenderMirror{
 			Sink:      virtual,
 			Policy:    MirrorBestEffort,
