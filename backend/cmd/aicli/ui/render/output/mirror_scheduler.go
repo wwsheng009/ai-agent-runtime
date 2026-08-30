@@ -44,6 +44,8 @@ type mirrorSlot struct {
 	routeEpoch uint64
 	mu         sync.Mutex
 	startOnce  sync.Once
+	retireOnce sync.Once
+	retireCh   chan struct{}
 	started    bool
 	pending    int
 	inFlight   int
@@ -78,6 +80,7 @@ func newMirrorSlot(g *RenderOutputGateway, index int, cfg RenderMirror, routeEpo
 		queue:      make(chan *mirrorEntry, cap),
 		routeEpoch: epoch,
 		watchdog:   map[*mirrorEntry]ClockTimer{},
+		retireCh:   make(chan struct{}),
 	}
 }
 
@@ -100,8 +103,17 @@ func (ms *mirrorSlot) closed() bool {
 	case <-ms.g.closedCh:
 		return true
 	default:
+	}
+	select {
+	case <-ms.retireCh:
+		return true
+	default:
 		return false
 	}
+}
+
+func (ms *mirrorSlot) retire() {
+	ms.retireOnce.Do(func() { close(ms.retireCh) })
 }
 
 // enqueue 尝试入队；成功返回 true。队列满或 gateway 已 closing 时返回
@@ -139,6 +151,11 @@ func (ms *mirrorSlot) enqueue(batch RenderBatch, primary TargetReceipt, ad Mirro
 	defer ms.mu.Unlock()
 	select {
 	case <-ms.g.closedCh:
+		return false
+	default:
+	}
+	select {
+	case <-ms.retireCh:
 		return false
 	default:
 	}
@@ -266,6 +283,10 @@ func (ms *mirrorSlot) workerLoop() {
 					return
 				}
 			}
+		case <-ms.retireCh:
+			// Reconfigure retires a slot only after waitSealed has observed no
+			// pending/in-flight entry, so there is nothing left to finalize.
+			return
 		}
 	}
 }
@@ -421,24 +442,6 @@ func (ms *mirrorSlot) sealEntryLocked(entry *mirrorEntry, reason string) {
 // 封存整笔 record。具体的 slot 聚合由 gateway 负责。
 func (g *RenderOutputGateway) maybeSealBatchRecord(seq uint64) {
 	g.trySealRecord(seq)
-}
-
-// waitSealed 等待该 mirror 全部已登记 entry 终态，直到 ctx 超时或 deadline。
-func (ms *mirrorSlot) waitSealed(ctx context.Context, _ time.Time) error {
-	for {
-		ms.mu.Lock()
-		pending := ms.pending + ms.inFlight
-		if pending == 0 {
-			ms.mu.Unlock()
-			return nil
-		}
-		ms.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
 }
 
 // watchdogWait 等待 callback 时限；到期时把 entry 按时限封存（不可变）。

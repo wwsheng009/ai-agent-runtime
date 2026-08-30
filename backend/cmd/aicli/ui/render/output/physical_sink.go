@@ -91,11 +91,32 @@ func (p *PhysicalSink) Descriptor() TargetDescriptor { return p.desc }
 func (p *PhysicalSink) Snapshot() SinkSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	abortProof := AbortProofNone
+	if p.aborted {
+		abortProof = p.abortProof
+		if abortProof == "" {
+			// A request is observable even when the caller did not provide a
+			// more specific proof.  Do not promote it to terminated: an
+			// io.Writer/aborter pair returning nil does not prove that an
+			// already-running syscall has stopped.
+			abortProof = AbortProofRequested
+		}
+	}
 	return SinkSnapshot{
-		Descriptor:    p.desc,
-		State:         p.state,
-		WriteCount:    p.committed + p.zero + p.partial + p.rejected,
-		RetainedBytes: int(p.accepted),
+		SchemaVersion:    SchemaVersion,
+		Descriptor:       p.desc,
+		State:            p.state,
+		AbortSupported:   p.aborter != nil,
+		AbortRequested:   p.aborted,
+		AbortProof:       abortProof,
+		Committed:        p.committed,
+		FailedZeroBytes:  p.zero,
+		UnknownPartial:   p.partial,
+		Rejected:         p.rejected,
+		LastSequence:     p.lastSeq,
+		LastErrorClass:   p.lastClass,
+		WriteCount:       p.committed + p.zero + p.partial + p.rejected,
+		RetainedBytes:    int(p.accepted),
 		LastResult: SinkDeliveryResult{
 			Status:         DeliveryUnknownPartial,
 			Certainty:      WriteCertaintyUnknown,

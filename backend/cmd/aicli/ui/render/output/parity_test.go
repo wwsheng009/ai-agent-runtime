@@ -280,6 +280,11 @@ func TestP4CaptureFullDoesNotBlockPrimary(t *testing.T) {
 	if n := len(sink.SnapshotBatches()); n != 20 {
 		t.Fatalf("primary batches: %d", n)
 	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer drainCancel()
+	if err := gw.Drain(drainCtx); err != nil {
+		t.Fatalf("drain capture mirror: %v", err)
+	}
 	snap := capture.CaptureSnapshot()
 	if snap.DroppedBatches == 0 {
 		t.Fatal("expected capture drops with tiny capacity")

@@ -502,6 +502,75 @@ func TestGatewayPreAdmissionRejection(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsTypedNilRouteSinks(t *testing.T) {
+	var typedNil *MemorySink
+	validPrimary := memoryPrimary(t)
+	cases := []struct {
+		name  string
+		route RenderRouteConfig
+	}{
+		{
+			name: "primary",
+			route: RenderRouteConfig{
+				Primary:            typedNil,
+				PrimaryOwnership:   SinkBorrowed,
+				ProjectionTargetID: "pt-primary",
+			},
+		},
+		{
+			name: "mirror",
+			route: RenderRouteConfig{
+				Primary:            validPrimary,
+				PrimaryOwnership:   SinkBorrowed,
+				ProjectionTargetID: validPrimary.Descriptor().ProjectionTargetID,
+				Mirrors: []RenderMirror{{
+					Sink:      typedNil,
+					Policy:    MirrorBestEffort,
+					ApplyMode: MirrorApplyMetadataOnly,
+					Ownership: SinkBorrowed,
+					Timeout:   time.Second,
+				}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewRenderOutputGateway(
+				"typed-nil-"+tc.name, gatewayOptions(), tc.route,
+			); err == nil || ClassOf(err) != DeliveryErrorInvalid {
+				t.Fatalf("typed-nil %s must be rejected as invalid, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestGatewayNilControlContexts(t *testing.T) {
+	gw := mustGateway(t, memoryPrimary(t))
+	if err := gw.WaitIdle(nil); err != nil {
+		t.Fatalf("WaitIdle(nil): %v", err)
+	}
+	if err := gw.Drain(nil); err != nil {
+		t.Fatalf("Drain(nil): %v", err)
+	}
+	if err := gw.Close(nil); err != nil {
+		t.Fatalf("Close(nil): %v", err)
+	}
+}
+
+func TestGatewaySnapshotCountsUnsealedRecords(t *testing.T) {
+	gw := mustGateway(t, memoryPrimary(t))
+	batch := RenderBatch{SessionID: gw.sessID, Sequence: 1, BatchID: "unsealed"}
+	gw.initRecordSlot(batch, 0)
+	t.Cleanup(func() {
+		gw.recordsMu.Lock()
+		delete(gw.recordSlots, batch.Sequence)
+		gw.recordsMu.Unlock()
+	})
+	if got := gw.Snapshot().DeliveryRecordsUnsealed; got != 1 {
+		t.Fatalf("unsealed delivery records=%d, want 1", got)
+	}
+}
+
 // TestGatewayStateMachineClose：关闭后提交返回 rejected/closed 且 Sequence=0。
 func TestGatewayStateMachineClose(t *testing.T) {
 	gw := mustGateway(t, memoryPrimary(t))
@@ -1021,8 +1090,8 @@ func TestGatewayCloseDrainsQueuedBatches(t *testing.T) {
 	}
 }
 
-// TestGatewayCloseAbortDrainsQueue：deviate 路径（ctx 取消）时排队 batch 以
-// abandoned 收敛，不执行 sink、不永久阻塞。
+// TestGatewayCloseAbortDrainsQueue：caller 取消只停止该 caller 的等待；shared
+// CloseTimeout 到期后，排队 batch 以 synthetic abandoned 收敛，不执行 sink。
 func TestGatewayCloseAbortDrainsQueue(t *testing.T) {
 	blocker := NewFaultSink(TargetDescriptor{
 		SinkID:             "block-abort",
@@ -1065,17 +1134,32 @@ func TestGatewayCloseAbortDrainsQueue(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- gw.Close(ctx) }()
-	// 取消 context 触发 deviate。
+	// 取消 context 只结束该 caller 的等待，不能取消 shared close。
 	time.Sleep(20 * time.Millisecond)
 	cancel()
-	// 排队中的第二笔必须返回（abandoned），不永久阻塞。
+	select {
+	case err := <-closeDone:
+		if ClassOf(err) != DeliveryErrorControlCanceled {
+			t.Fatalf("caller cancellation class: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled close caller did not return")
+	}
+	// shared close 继续；推进注入时钟触发其独立 CloseTimeout。
+	clock, ok := gw.clock.(*FakeClock)
+	if !ok {
+		t.Fatalf("gateway clock is %T, want *FakeClock", gw.clock)
+	}
+	clock.Advance(gw.opts.CloseTimeout)
+	// 排队中的第二笔必须返回 synthetic abandoned，不永久阻塞。
 	select {
 	case r2 := <-second:
-		if r2.Primary != nil {
-			t.Fatalf("queued batch after deviate must not reach sink: %+v", r2.Primary)
+		if r2.Primary == nil || !r2.Primary.Synthetic || r2.TargetInvoked {
+			t.Fatalf("queued batch must finalize without invoking sink: %+v", r2)
 		}
-		if r2.Admission.Decision != AdmissionRejected {
-			t.Fatalf("expected rejected admission after deviate, got %+v", r2.Admission)
+		if r2.Admission.Decision != AdmissionAccepted ||
+			r2.Primary.ErrorClass != DeliveryErrorAbandoned {
+			t.Fatalf("expected accepted synthetic abandoned outcome, got %+v", r2)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("queued batch blocked forever after close-deviate")
@@ -1086,11 +1170,6 @@ func TestGatewayCloseAbortDrainsQueue(t *testing.T) {
 	case <-first:
 	case <-time.After(3 * time.Second):
 		t.Fatal("first submit did not return")
-	}
-	select {
-	case <-closeDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("close did not finish")
 	}
 }
 
@@ -1111,6 +1190,7 @@ func TestGatewayCloseAbortsBlockedPhysicalWriter(t *testing.T) {
 	// 自定义 gateway：CloseTimeout 很短（200ms），让 deadline deviate
 	// 确定性触发（不依赖 ctx 到期与 closedCh 的竞争）。
 	opts := gatewayOptions()
+	opts.Clock = SystemClock{}
 	opts.CloseTimeout = 200 * time.Millisecond
 	gw, err := NewRenderOutputGateway("blocked-writer-"+randomID("s"), opts, RenderRouteConfig{
 		Primary:            phys,
@@ -1145,11 +1225,15 @@ func TestGatewayCloseAbortsBlockedPhysicalWriter(t *testing.T) {
 	}
 
 	// Close：drainLoop 等到 CloseTimeout 到期 → deviate → 必须调用
-	// primary.Abort → aborter 被调用；ctx 足够长保证 Close 返回 nil。
+	// primary.Abort → aborter 被调用；without terminated proof the shared
+	// operation memoizes Abandoned rather than claiming a clean close.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := gw.Close(ctx); err != nil {
-		t.Fatalf("close: %v", err)
+	if err := gw.Close(ctx); ClassOf(err) != DeliveryErrorAbandoned {
+		t.Fatalf("close without termination proof must abandon: %v", err)
+	}
+	if gw.stateOf() != GatewayAbandoned {
+		t.Fatalf("gateway claimed terminal state %s without termination proof", gw.stateOf())
 	}
 	if !aborter.wasCalled() {
 		t.Fatal("gateway close-deviate must call primary.Abort to interrupt blocked writer")
@@ -1431,11 +1515,18 @@ func TestLegacyAdapterNoPort(t *testing.T) {
 	}
 }
 
-// TestReconfigureSkeleton：Begin/Abort 幂等语义。
+// TestReconfigureSkeleton：Abort 只固定 rollback disposition，Commit 是唯一
+// 解除 admission barrier 的 finalizer。
 func TestReconfigureSkeleton(t *testing.T) {
 	gw := mustGateway(t, memoryPrimary(t))
 	ctx := context.Background()
-	if err := gw.BeginReconfigure(ctx, "tok1"); err != nil {
+	candidate := memoryPrimary(t)
+	plan, err := gw.BeginReconfigure(ctx, RenderRouteConfig{
+		Primary:            candidate,
+		PrimaryOwnership:   SinkBorrowed,
+		ProjectionTargetID: candidate.Descriptor().ProjectionTargetID,
+	})
+	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	if gw.stateOf() != GatewayReconfiguring {
@@ -1454,10 +1545,221 @@ func TestReconfigureSkeleton(t *testing.T) {
 	if err := gw.AbortReconfigure(ctx, "wrong"); err == nil {
 		t.Fatal("abort with wrong token must fail")
 	}
-	if err := gw.AbortReconfigure(ctx, "tok1"); err != nil {
+	if err := gw.AbortReconfigure(ctx, plan.Token); err != nil {
 		t.Fatalf("abort: %v", err)
 	}
+	if gw.stateOf() != GatewayReconfiguring {
+		t.Fatalf("abort must retain barrier until commit, got %s", gw.stateOf())
+	}
+	if err := gw.CommitReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("rollback commit: %v", err)
+	}
 	if gw.stateOf() != GatewayOpen {
-		t.Fatalf("expected open after abort, got %s", gw.stateOf())
+		t.Fatalf("expected open after rollback finalizer, got %s", gw.stateOf())
+	}
+}
+
+// TestReconfigureInstallsFrozenMirrorRoute verifies that commit replaces the
+// complete route (primary plus mirror runners), starts the new runners, and
+// retires/closes owned resources from the old route outside the control lock.
+func TestReconfigureInstallsFrozenMirrorRoute(t *testing.T) {
+	oldPrimary := NewMemorySink(TargetDescriptor{
+		SinkID:             "reconfig-old-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-reconfig-old",
+	})
+	oldMirror := NewMemorySink(TargetDescriptor{
+		SinkID:             "reconfig-old-mirror",
+		Class:              TargetClassCapture,
+		ProjectionTargetID: "pt-reconfig-old-mirror",
+	})
+	gw := mustGateway(t, oldPrimary, RenderMirror{
+		Sink:      oldMirror,
+		Policy:    MirrorBestEffort,
+		ApplyMode: MirrorApplyBytes,
+		Ownership: SinkOwned,
+		Timeout:   time.Second,
+	})
+	gw.Run()
+	before := submitOK(t, gw, TransactionFrame, []byte("before"))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := gw.Drain(ctx); err != nil {
+		t.Fatalf("drain old route: %v", err)
+	}
+	if len(oldMirror.SnapshotBatches()) != 1 {
+		t.Fatal("old mirror did not receive pre-switch batch")
+	}
+
+	newPrimary := NewMemorySink(TargetDescriptor{
+		SinkID:             "reconfig-new-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-reconfig-new",
+	})
+	newMirror := NewMemorySink(TargetDescriptor{
+		SinkID:             "reconfig-new-mirror",
+		Class:              TargetClassCapture,
+		ProjectionTargetID: "pt-reconfig-new-mirror",
+	})
+	plan, err := gw.BeginReconfigure(ctx, RenderRouteConfig{
+		Primary:            newPrimary,
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: newPrimary.Descriptor().ProjectionTargetID,
+		Mirrors: []RenderMirror{{
+			Sink:      newMirror,
+			Policy:    MirrorBestEffort,
+			ApplyMode: MirrorApplyBytes,
+			Ownership: SinkOwned,
+			Timeout:   time.Second,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if plan.ReconfigureCutoffSequence != before.Sequence {
+		t.Fatalf("cutoff=%d want %d", plan.ReconfigureCutoffSequence, before.Sequence)
+	}
+	if err := gw.CommitReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if got := gw.Snapshot().RouteEpoch; got != plan.NewRouteEpoch {
+		t.Fatalf("route epoch=%d want %d", got, plan.NewRouteEpoch)
+	}
+	if oldPrimary.Snapshot().State != SinkLifecycleClosed ||
+		oldMirror.Snapshot().State != SinkLifecycleClosed {
+		t.Fatalf("old owned route not retired: primary=%s mirror=%s",
+			oldPrimary.Snapshot().State, oldMirror.Snapshot().State)
+	}
+
+	after := submitOK(t, gw, TransactionFrame, []byte("after"))
+	if after.RouteEpoch != plan.NewRouteEpoch || after.Primary.SinkID != "reconfig-new-primary" {
+		t.Fatalf("post-switch receipt used stale route: %+v", after)
+	}
+	if err := gw.Drain(ctx); err != nil {
+		t.Fatalf("drain new route: %v", err)
+	}
+	if len(newPrimary.SnapshotBatches()) != 1 || len(newMirror.SnapshotBatches()) != 1 {
+		t.Fatalf("new route deliveries: primary=%d mirror=%d",
+			len(newPrimary.SnapshotBatches()), len(newMirror.SnapshotBatches()))
+	}
+	if len(oldMirror.SnapshotBatches()) != 1 {
+		t.Fatalf("retired mirror received post-switch batch: %d", len(oldMirror.SnapshotBatches()))
+	}
+}
+
+// TestReconfigureRollbackRetainsOldRouteAndDoesNotReuseEpoch verifies candidate
+// ownership cleanup, reuse safety, and the monotonic reservation of route
+// epochs even when a candidate is rolled back.
+func TestReconfigureRollbackRetainsOldRouteAndDoesNotReuseEpoch(t *testing.T) {
+	oldPrimary := NewMemorySink(TargetDescriptor{
+		SinkID:             "rollback-old-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-rollback-old",
+	})
+	gw := mustGateway(t, oldPrimary)
+	gw.Run()
+	candidateMirror := NewMemorySink(TargetDescriptor{
+		SinkID:             "rollback-candidate-mirror",
+		Class:              TargetClassCapture,
+		ProjectionTargetID: "pt-rollback-candidate-mirror",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	plan, err := gw.BeginReconfigure(ctx, RenderRouteConfig{
+		// Reusing the installed primary must not let rollback close it, even
+		// though the candidate declaration also says owned.
+		Primary:            oldPrimary,
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: oldPrimary.Descriptor().ProjectionTargetID,
+		Mirrors: []RenderMirror{{
+			Sink:      candidateMirror,
+			Policy:    MirrorBestEffort,
+			ApplyMode: MirrorApplyMetadataOnly,
+			Ownership: SinkOwned,
+			Timeout:   time.Second,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("begin rollback: %v", err)
+	}
+	if err := gw.AbortReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if err := gw.CommitReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("rollback finalizer: %v", err)
+	}
+	if oldPrimary.Snapshot().State != SinkLifecycleOpen {
+		t.Fatalf("rollback closed retained primary: %s", oldPrimary.Snapshot().State)
+	}
+	if candidateMirror.Snapshot().State != SinkLifecycleClosed {
+		t.Fatalf("rollback did not close candidate mirror: %s", candidateMirror.Snapshot().State)
+	}
+	if got := submitOK(t, gw, TransactionFrame, []byte("still-old")); got.Primary.SinkID != oldPrimary.Descriptor().SinkID {
+		t.Fatalf("rollback did not retain old route: %+v", got.Primary)
+	}
+
+	nextPrimary := NewMemorySink(TargetDescriptor{
+		SinkID:             "rollback-next-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-rollback-next",
+	})
+	nextPlan, err := gw.BeginReconfigure(ctx, RenderRouteConfig{
+		Primary:            nextPrimary,
+		PrimaryOwnership:   SinkBorrowed,
+		ProjectionTargetID: nextPrimary.Descriptor().ProjectionTargetID,
+	})
+	if err != nil {
+		t.Fatalf("second begin: %v", err)
+	}
+	if nextPlan.NewRouteEpoch <= plan.NewRouteEpoch {
+		t.Fatalf("aborted epoch was reused: first=%d next=%d",
+			plan.NewRouteEpoch, nextPlan.NewRouteEpoch)
+	}
+	if err := gw.AbortReconfigure(ctx, nextPlan.Token); err != nil {
+		t.Fatalf("second abort: %v", err)
+	}
+	if err := gw.CommitReconfigure(ctx, nextPlan.Token); err != nil {
+		t.Fatalf("second rollback finalizer: %v", err)
+	}
+}
+
+// TestReconfigureConcurrentCommitJoinsSharedFinalizer verifies that duplicate
+// callers observe the same memoized terminal operation rather than closing or
+// installing resources twice.
+func TestReconfigureConcurrentCommitJoinsSharedFinalizer(t *testing.T) {
+	gw := mustGateway(t, memoryPrimary(t))
+	candidate := NewMemorySink(TargetDescriptor{
+		SinkID:             "concurrent-commit-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-concurrent-commit",
+	})
+	plan, err := gw.BeginReconfigure(context.Background(), RenderRouteConfig{
+		Primary:            candidate,
+		PrimaryOwnership:   SinkBorrowed,
+		ProjectionTargetID: candidate.Descriptor().ProjectionTargetID,
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			results <- gw.CommitReconfigure(context.Background(), plan.Token)
+		}()
+	}
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("commit caller %d: %v", i, err)
+		}
+	}
+	if err := gw.CommitReconfigure(context.Background(), plan.Token); err != nil {
+		t.Fatalf("memoized commit: %v", err)
+	}
+	if gw.stateOf() != GatewayOpen || gw.Snapshot().RouteEpoch != plan.NewRouteEpoch {
+		t.Fatalf("final route not installed exactly once: state=%s epoch=%d",
+			gw.stateOf(), gw.Snapshot().RouteEpoch)
 	}
 }
