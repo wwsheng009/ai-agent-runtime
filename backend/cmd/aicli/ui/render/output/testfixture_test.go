@@ -1763,3 +1763,102 @@ func TestReconfigureConcurrentCommitJoinsSharedFinalizer(t *testing.T) {
 			gw.stateOf(), gw.Snapshot().RouteEpoch)
 	}
 }
+
+// TestReconfigureCutoffNoBatchSmuggling：切换在 quiescent boundary 完成，
+// cutoff 内的 accepted batch 全部按旧 route 登记执行，新 route 安装前
+// 不接受任何新 batch（不偷渡旧 batch、不建立隐式 pending queue）。
+func TestReconfigureCutoffNoBatchSmuggling(t *testing.T) {
+	oldSink := memoryPrimary(t)
+	gw := mustGateway(t, oldSink)
+	ctx := context.Background()
+	// 提交一笔 accepted batch（cutoff 前登记）。
+	r := submitOK(t, gw, TransactionFrame, []byte("pre-switch"))
+	// Begin：cutoff = 当前 sequence。
+	plan, err := gw.BeginReconfigure(ctx, RenderRouteConfig{
+		Primary:            NewDiscardSink("pt-secondary"),
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: "pt-secondary",
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if plan.ReconfigureCutoffSequence != r.Sequence {
+		t.Fatalf("cutoff=%d want %d", plan.ReconfigureCutoffSequence, r.Sequence)
+	}
+	// Reconfiguring 期间 Submit 全部被拒（不隐式排队）。
+	for i := 0; i < 3; i++ {
+		rej := gw.Submit(context.Background(), RenderIntent{
+			IntentID: "smuggle",
+			Kind:     TransactionFrame,
+			Bytes:    []byte("post-switch"),
+		})
+		if rej.Admission.Decision != AdmissionRejected {
+			t.Fatalf("submit during reconfigure must be rejected: %+v", rej)
+		}
+		if rej.Primary != nil || rej.Sequence != 0 {
+			t.Fatalf("rejected during reconfigure must be pre-admission: %+v", rej)
+		}
+	}
+	// 旧 route primary 只收到 pre-switch 一笔（无被偷渡的新 batch）。
+	batches := oldSink.SnapshotBatches()
+	if len(batches) != 1 || string(batches[0].Bytes) != "pre-switch" {
+		t.Fatalf("old route received smuggled batches: %+v", batches)
+	}
+	// Commit 安装新 route。
+	if err := gw.CommitReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if gw.stateOf() != GatewayOpen {
+		t.Fatalf("state: %s", gw.stateOf())
+	}
+	// 新 route 接受新 batch（到 discard）。
+	r2 := gw.Submit(context.Background(), RenderIntent{
+		IntentID: "after-switch",
+		Kind:     TransactionFrame,
+		Bytes:    []byte("post-commit"),
+	})
+	if r2.Admission.Decision != AdmissionAccepted || r2.RouteEpoch != plan.NewRouteEpoch {
+		t.Fatalf("post-commit submit wrong epoch: %+v", r2)
+	}
+}
+
+// TestReconfigureAbortKeepsAdmissionBarrierUntilFinalize：abort 后、commit
+// finalize 前 Submit 持续被拒；finalize 后才恢复。
+func TestReconfigureAbortKeepsAdmissionBarrierUntilFinalize(t *testing.T) {
+	gw := mustGateway(t, memoryPrimary(t))
+	ctx := context.Background()
+	plan, err := gw.BeginReconfigure(ctx, RenderRouteConfig{
+		Primary:            NewDiscardSink("pt-secondary"),
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: "pt-secondary",
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// abort 固定 rollback，但不开放 admission。
+	if err := gw.AbortReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		rej := gw.Submit(context.Background(), RenderIntent{
+			IntentID: "barrier",
+			Kind:     TransactionFrame,
+			Bytes:    []byte("x"),
+		})
+		if rej.Admission.Decision != AdmissionRejected {
+			t.Fatalf("submit after abort must stay rejected: %+v", rej)
+		}
+	}
+	// finalize（rollback-old commit）后恢复。
+	if err := gw.CommitReconfigure(ctx, plan.Token); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	r := gw.Submit(context.Background(), RenderIntent{
+		IntentID: "open-again",
+		Kind:     TransactionFrame,
+		Bytes:    []byte("y"),
+	})
+	if r.Admission.Decision != AdmissionAccepted {
+		t.Fatalf("submit after finalize must be accepted: %+v", r)
+	}
+}

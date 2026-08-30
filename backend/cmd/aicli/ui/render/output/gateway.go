@@ -288,14 +288,14 @@ type RenderOutputGateway struct {
 	runCh     chan struct{}
 
 	// reconfigure 两阶段状态（9.2）
-	pendingRoute                 RenderRouteConfig
-	reconfigureCutoffSequence    uint64
-	nextRouteEpoch               uint64
-	reconfigurePlan              RouteChangePlan
-	reconfigureDisposition       reconfigureDisposition
-	reconfigureFinalized         bool
-	reconfigureDone              chan struct{}
-	reconfigureMemo              map[string]reconfigureCompletion
+	pendingRoute              RenderRouteConfig
+	reconfigureCutoffSequence uint64
+	nextRouteEpoch            uint64
+	reconfigurePlan           RouteChangePlan
+	reconfigureDisposition    reconfigureDisposition
+	reconfigureFinalized      bool
+	reconfigureDone           chan struct{}
+	reconfigureMemo           map[string]reconfigureCompletion
 
 	// 上次读到的 observer drop 累计（用于把 cutoff delta 归因到 submit）
 	lastObserverDrops uint64
@@ -1449,7 +1449,11 @@ func (g *RenderOutputGateway) finishClose(cutoff uint64, pendingRoute RenderRout
 		}
 	}
 	for _, ms := range mirrors {
-		ms.retire()
+		if deviated {
+			ms.abandonQueued()
+		} else {
+			ms.retire()
+		}
 		closeOwned(ms.cfg.Sink, ms.cfg.Ownership == SinkOwned)
 	}
 	closeOwned(primary, route.PrimaryOwnership == SinkOwned)

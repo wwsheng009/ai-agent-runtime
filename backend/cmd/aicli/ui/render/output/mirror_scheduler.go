@@ -46,6 +46,7 @@ type mirrorSlot struct {
 	startOnce  sync.Once
 	retireOnce sync.Once
 	retireCh   chan struct{}
+	retired    bool
 	started    bool
 	pending    int
 	inFlight   int
@@ -113,7 +114,47 @@ func (ms *mirrorSlot) closed() bool {
 }
 
 func (ms *mirrorSlot) retire() {
-	ms.retireOnce.Do(func() { close(ms.retireCh) })
+	ms.retireWithError(DeliveryErrorClosed)
+}
+
+// abandonQueued stops this slot and seals entries that were accepted by the
+// mirror queue but never reached its callback.  Close may retire a slot before
+// closedCh is published; doing this synchronously is therefore necessary when
+// Run was never called or when the worker selected retireCh before queue drain.
+func (ms *mirrorSlot) abandonQueued() {
+	ms.retireWithError(DeliveryErrorAbandoned)
+}
+
+func (ms *mirrorSlot) retireWithError(class DeliveryErrorClass) {
+	var queued []*mirrorEntry
+	ms.retireOnce.Do(func() {
+		ms.mu.Lock()
+		ms.retired = true
+		close(ms.retireCh)
+		for {
+			select {
+			case entry := <-ms.queue:
+				ms.pending--
+				ms.g.mu.Lock()
+				ms.g.stats.mirrorPending--
+				ms.g.mu.Unlock()
+				queued = append(queued, entry)
+			default:
+				ms.mu.Unlock()
+				return
+			}
+		}
+	})
+	for _, entry := range queued {
+		ms.mu.Lock()
+		entry.status = MirrorFailed
+		entry.errClass = class
+		entry.errMsg = string(class)
+		entry.sinkInvoked = false
+		entry.callbackDone = false
+		ms.sealEntryLocked(entry, "drain")
+		ms.mu.Unlock()
+	}
 }
 
 // enqueue 尝试入队；成功返回 true。队列满或 gateway 已 closing 时返回
@@ -192,6 +233,20 @@ func (ms *mirrorSlot) workerLoop() {
 		select {
 		case entry := <-ms.queue:
 			ms.mu.Lock()
+			if ms.retired {
+				ms.pending--
+				ms.g.mu.Lock()
+				ms.g.stats.mirrorPending--
+				ms.g.mu.Unlock()
+				entry.status = MirrorFailed
+				entry.errClass = DeliveryErrorClosed
+				entry.errMsg = string(DeliveryErrorClosed)
+				entry.sinkInvoked = false
+				entry.callbackDone = false
+				ms.sealEntryLocked(entry, "drain")
+				ms.mu.Unlock()
+				continue
+			}
 			ms.pending--
 			ms.inFlight++
 			entry.sinkInvoked = true
