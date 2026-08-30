@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"golang.org/x/term"
 )
 
@@ -20,6 +22,18 @@ type Terminal struct {
 	driver         *TerminalDriver
 	sizeOverride   bool
 	sizeProbeCount int // RefreshSize invocations; tests assert paint/layout probe budgets
+	// legacyBinding（Phase 3）：非 nil 时控制类方法（title/bell/clear 等）
+	// 经 gateway binding 提交，不再直写 process writer；nil 保持
+	// process-compat（启动前）。
+	legacyBinding *LegacySurfaceBinding
+}
+
+// SetLegacyBinding 绑定 terminal 控制输出到 gateway port。
+func (t *Terminal) SetLegacyBinding(binding *LegacySurfaceBinding) {
+	if t == nil {
+		return
+	}
+	t.legacyBinding = binding
 }
 
 // NewTerminal 创建新的终端控制组件
@@ -272,12 +286,32 @@ func (t *Terminal) DisableFocusChange() {
 func (t *Terminal) SetTitle(title string) {
 	title = strings.ReplaceAll(title, "\x1b", "")
 	title = strings.ReplaceAll(title, "\a", "")
-	fmt.Fprintf(TerminalOutput(), "\033]0;%s\a", title)
+	seq := "\033]0;" + title + "\a"
+	if t != nil && t.legacyBinding != nil {
+		_, _ = FlushLegacySurfaceBytes(context.Background(), t.legacyBinding,
+			outputpkg.TransactionTitle, "terminal", t.geometryState(), seq)
+		return
+	}
+	fmt.Fprint(TerminalOutput(), seq)
 }
 
 // ClearTitle 清空由应用设置的终端标题。
 func (t *Terminal) ClearTitle() {
-	fmt.Fprint(TerminalOutput(), "\033]0;\a")
+	seq := "\033]0;\a"
+	if t != nil && t.legacyBinding != nil {
+		_, _ = FlushLegacySurfaceBytes(context.Background(), t.legacyBinding,
+			outputpkg.TransactionTitle, "terminal", t.geometryState(), seq)
+		return
+	}
+	fmt.Fprint(TerminalOutput(), seq)
+}
+
+// geometryState 返回当前尺寸（binding 提交时携带）。
+func (t *Terminal) geometryState() GeometryState {
+	if t == nil {
+		return GeometryState{}
+	}
+	return GeometryState{Width: t.width, Height: t.height}
 }
 
 // CleanupOnExit 恢复终端状态并可选清屏。
