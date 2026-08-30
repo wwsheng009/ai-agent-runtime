@@ -369,6 +369,174 @@ func TestHandleCommand_ModelSwitchPersistsProviderModelAndReasoning(t *testing.T
 	}
 }
 
+func TestHandleCommand_ModelSwitchReloadsNewProviderFromLocalConfig(t *testing.T) {
+	cfg, cfgPath := testModelCommandConfig(t)
+
+	// Simulate another command/user adding a provider after chat startup. The
+	// session still points at the startup snapshot in cfg.
+	enabled := true
+	protocol := "openai"
+	baseURL := "https://gamma.example.com"
+	defaultModel := "gamma-model"
+	if _, err := agentconfig.UpdateProviderConfig(cfgPath, agentconfig.ProviderConfigUpdate{
+		Name:         "gamma",
+		Enabled:      &enabled,
+		Protocol:     &protocol,
+		BaseURL:      &baseURL,
+		DefaultModel: &defaultModel,
+	}); err != nil {
+		t.Fatalf("add provider to local config: %v", err)
+	}
+	if _, ok := cfg.Providers.Items["gamma"]; ok {
+		t.Fatal("test setup unexpectedly mutated the startup config snapshot")
+	}
+
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        cfg.Providers.Items["alpha"],
+		Adapter:         adapter.GetAdapterOrDefault("openai"),
+		Model:           "alpha-model",
+		ReasoningEffort: "low",
+		Config:          cfg,
+	}
+
+	if quit := handleCommand(session, "/model --provider gamma --model gamma-model --reasoning-effort medium", true); quit {
+		t.Fatal("expected /model command not to exit")
+	}
+	if session.ProviderName != "gamma" {
+		t.Fatalf("expected provider gamma after reloading config, got %q", session.ProviderName)
+	}
+	if session.Model != "gamma-model" {
+		t.Fatalf("expected model gamma-model after reloading config, got %q", session.Model)
+	}
+	if session.Config == cfg {
+		t.Fatal("expected /model to replace the stale config snapshot")
+	}
+	if _, ok := session.Config.Providers.Items["gamma"]; !ok {
+		t.Fatalf("reloaded config does not contain newly added provider: %+v", session.Config.Providers.Items)
+	}
+}
+
+func TestExecuteStructuredModelMutationReloadsNewProviderFromLocalConfig(t *testing.T) {
+	cfg, cfgPath := testModelCommandConfig(t)
+
+	enabled := true
+	protocol := "openai"
+	baseURL := "https://gamma.example.com"
+	defaultModel := "gamma-model"
+	if _, err := agentconfig.UpdateProviderConfig(cfgPath, agentconfig.ProviderConfigUpdate{
+		Name:         "gamma",
+		Enabled:      &enabled,
+		Protocol:     &protocol,
+		BaseURL:      &baseURL,
+		DefaultModel: &defaultModel,
+	}); err != nil {
+		t.Fatalf("add provider to local config: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        cfg.Providers.Items["alpha"],
+		Model:           "alpha-model",
+		ReasoningEffort: "low",
+		Config:          cfg,
+	}
+	result := executeStructuredModelMutation(session, modelCommandRequest{
+		Provider:          "gamma",
+		Model:             "gamma-model",
+		ReasoningEffort:   "medium",
+		ProviderExplicit:  true,
+		ModelExplicit:     true,
+		ReasoningExplicit: true,
+	})
+	if session.ProviderName != "gamma" || session.Model != "gamma-model" {
+		t.Fatalf("structured /model mutation result=%+v; expected switch to gamma/gamma-model, got provider=%q model=%q",
+			result, session.ProviderName, session.Model)
+	}
+}
+
+func TestReloadChatConfigForModelCommandKeepsInMemoryConfigWhenPathIsMissing(t *testing.T) {
+	cfg := &agentconfig.Config{
+		ConfigFilePath: filepath.Join(t.TempDir(), "missing.yaml"),
+		Providers: agentconfig.ProvidersConfig{
+			DefaultProvider: "alpha",
+			Items: map[string]agentconfig.Provider{
+				"alpha": {
+					Enabled:      true,
+					Protocol:     "openai",
+					DefaultModel: "alpha-model",
+				},
+			},
+		},
+	}
+	session := &ChatSession{Config: cfg}
+
+	if err := reloadChatConfigForModelCommand(session); err != nil {
+		t.Fatalf("reloadChatConfigForModelCommand: %v", err)
+	}
+	if session.Config != cfg {
+		t.Fatal("missing config path must not replace an in-memory session config")
+	}
+	if _, ok := session.Config.Providers.Items["alpha"]; !ok {
+		t.Fatal("missing config path unexpectedly discarded in-memory providers")
+	}
+}
+
+func TestReloadChatConfigForModelCommandRejectsDirectory(t *testing.T) {
+	cfg := &agentconfig.Config{
+		ConfigFilePath: t.TempDir(),
+		Providers: agentconfig.ProvidersConfig{
+			DefaultProvider: "alpha",
+			Items: map[string]agentconfig.Provider{
+				"alpha": {Enabled: true, Protocol: "openai", DefaultModel: "alpha-model"},
+			},
+		},
+	}
+	session := &ChatSession{Config: cfg}
+
+	err := reloadChatConfigForModelCommand(session)
+	if err == nil {
+		t.Fatal("expected directory config path to be rejected")
+	}
+	if !strings.Contains(err.Error(), "路径是目录") {
+		t.Fatalf("unexpected directory error: %v", err)
+	}
+	if session.Config != cfg {
+		t.Fatal("directory error must preserve the previous session config")
+	}
+}
+
+func TestReloadChatConfigForModelCommandKeepsPreviousConfigOnParseError(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("providers:\n  items: [\n"), 0o644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	cfg := &agentconfig.Config{
+		ConfigFilePath: cfgPath,
+		Providers: agentconfig.ProvidersConfig{
+			DefaultProvider: "alpha",
+			Items: map[string]agentconfig.Provider{
+				"alpha": {Enabled: true, Protocol: "openai", DefaultModel: "alpha-model"},
+			},
+		},
+	}
+	session := &ChatSession{Config: cfg}
+
+	err := reloadChatConfigForModelCommand(session)
+	if err == nil {
+		t.Fatal("expected invalid config to return an error")
+	}
+	if !strings.Contains(err.Error(), "重新读取本地配置文件") {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if session.Config != cfg {
+		t.Fatal("parse error must preserve the previous session config")
+	}
+	if _, ok := session.Config.Providers.Items["alpha"]; !ok {
+		t.Fatal("parse error unexpectedly discarded the previous provider")
+	}
+}
+
 func TestHandleCommand_ModelClearReasoningPersistsPreference(t *testing.T) {
 	cfg, cfgPath := testModelCommandConfig(t)
 

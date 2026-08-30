@@ -42,6 +42,10 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	if !canOpenChatModelPicker(session) {
 		return
 	}
+	if err := reloadChatConfigForModelCommand(session); err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(err), false)
+		return
+	}
 
 	providerName := strings.TrimSpace(request.Provider)
 	modelName := strings.TrimSpace(request.Model)
@@ -300,6 +304,9 @@ func executeStructuredModelCommand(session *ChatSession, command string) (Comman
 func executeStructuredModelMutation(session *ChatSession, request modelCommandRequest) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	if err := reloadChatConfigForModelCommand(session); err != nil {
+		return commandErrorResult(err)
 	}
 
 	providerName := currentModelCommandProvider(session)

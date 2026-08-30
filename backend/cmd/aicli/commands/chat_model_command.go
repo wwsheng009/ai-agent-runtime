@@ -132,6 +132,53 @@ func consumeModelCommandValue(tokens []string, index int) (string, int, error) {
 	return value, index + 1, nil
 }
 
+// reloadChatConfigForModelCommand refreshes the aicli config immediately
+// before a /model mutation or picker interaction. Chat keeps the config in the
+// session for the lifetime of the process, but providers can be added or
+// changed by another command (or by the user) while chat is running. Using the
+// startup snapshot here makes those providers invisible to both the picker and
+// explicit provider resolution.
+//
+// A session assembled by tests or an embedding caller may have no real config
+// file (or may use an in-memory sentinel path). In that case retain the
+// existing in-memory config. An existing file, however, is authoritative: a
+// parse/validation error is returned instead of silently switching with stale
+// provider data.
+func reloadChatConfigForModelCommand(session *ChatSession) error {
+	if session == nil || session.Config == nil {
+		return nil
+	}
+
+	configPath := strings.TrimSpace(session.Config.ConfigFilePath)
+	if configPath == "" {
+		return nil
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Keep support for in-memory/test sessions whose ConfigFilePath is
+			// only descriptive. InitGlobalConfig treats a missing explicit
+			// path as an empty config, which would otherwise discard the
+			// session's usable in-memory providers.
+			return nil
+		}
+		return fmt.Errorf("读取本地配置文件 %s 失败: %w", configPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("读取本地配置文件 %s 失败: 路径是目录", configPath)
+	}
+
+	reloaded, err := config.InitGlobalConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("重新读取本地配置文件 %s 失败: %w", configPath, err)
+	}
+	if reloaded == nil {
+		return fmt.Errorf("重新读取本地配置文件 %s 失败: 配置为空", configPath)
+	}
+	session.Config = reloaded
+	return nil
+}
+
 func executeModelCommand(session *ChatSession, request modelCommandRequest, interactive bool) error {
 	if session == nil {
 		return fmt.Errorf("当前没有活动会话")
@@ -145,6 +192,9 @@ func executeModelCommand(session *ChatSession, request modelCommandRequest, inte
 	}
 	if request.ShowStatus && !request.HasMutation() {
 		return nil
+	}
+	if err := reloadChatConfigForModelCommand(session); err != nil {
+		return err
 	}
 	if !request.HasMutation() {
 		if !interactive {
