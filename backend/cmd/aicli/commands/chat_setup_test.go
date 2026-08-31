@@ -1115,7 +1115,11 @@ func TestBootstrapChatSession_CreatesRuntimeConversation(t *testing.T) {
 }
 
 func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
-	cfg := &config.Config{}
+	// 指向一份空 runtime 配置：bootstrap 的默认持久化语义（session dir 惰性
+	// store）不应被仓库 configs/runtime.yaml 中的 server 专用 storePath 改变。
+	configPath := filepath.Join(t.TempDir(), "runtime.json")
+	require.NoError(t, os.WriteFile(configPath, []byte("{}"), 0o600))
+	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: configPath}}
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -1476,7 +1480,13 @@ func TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir(t *
 		Model:      "gpt-5.2-codex",
 	}
 
-	cfg, err := loadLocalChatRuntimeConfig(&config.Config{}, session)
+	// 显式指向一份空 runtime 配置，避免测试依赖仓库 configs/runtime.yaml
+	// 的存在（仓库默认配置可能携带 server 专用 storePath，会改变默认值断言）。
+	configPath := filepath.Join(t.TempDir(), "runtime.json")
+	require.NoError(t, os.WriteFile(configPath, []byte("{}"), 0o600))
+	cfg, err := loadLocalChatRuntimeConfig(&config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: configPath},
+	}, session)
 	if err != nil {
 		t.Fatalf("loadLocalChatRuntimeConfig: %v", err)
 	}
