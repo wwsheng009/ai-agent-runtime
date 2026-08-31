@@ -432,6 +432,13 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 		return response, nil
 	}
 
+	// Transport/stream-class failures (SSE stream EOF, connection drops)
+	// are handed to the enclosing runtime loop instead of becoming terminal:
+	// the gateway fast-fails on its own budget, the runtime owns the total
+	// retry guarantee across providers/routes.
+	if isHandoffEligibleError(lastError) {
+		return nil, markRetryExhaustedForNextLayer("all retry attempts failed", policy.MaxAttempts, lastError)
+	}
 	return nil, markRetryExhausted("all retry attempts failed", policy.MaxAttempts, lastError)
 }
 

@@ -55,11 +55,13 @@ func TestDiagnoseFailureRetainsCauseCodeWhenRetriesExhausted(t *testing.T) {
 	exhausted := markRetryExhausted("streaming aggregate call failed after retries", 2, cause)
 	diag := DiagnoseFailure(exhausted)
 	assert.Equal(t, "UPSTREAM_UNAVAILABLE", diag.ErrorCode)
-	assert.False(t, diag.Retryable)
-	assert.Contains(t, diag.NextAction, "Automatic retries are exhausted")
+	// 底层 cause 是瞬态 transport 错误：即使预算耗尽，也应按 cause 还原为可重试，
+	// 让会话层自动继续而不是要求手动 continue。
+	assert.True(t, diag.Retryable)
+	assert.Contains(t, diag.NextAction, "bounded backoff")
 	assert.NotContains(t, diag.NextAction, "Inspect the provider error")
 
-	// quota 类错误在重试耗尽后也应保留原始分类。
+	// quota 类错误在重试耗尽后也应保留原始分类（确定性错误仍不可重试）。
 	quotaExhausted := markRetryExhausted("all retry attempts failed", 2, newProviderHTTPError(403, "insufficient_user_quota", nil))
 	quotaDiag := DiagnoseFailure(quotaExhausted)
 	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", quotaDiag.ErrorCode)

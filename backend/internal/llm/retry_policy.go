@@ -268,6 +268,13 @@ func maxRetryScheduleDelay(schedule []time.Duration) time.Duration {
 // MAX_STREAM_MAX_RETRIES (100): a sanity cap for positive retry budgets.
 const retryAttemptsCeiling = 100
 
+// maxConsecutiveFastFailHandoffs bounds how many consecutive outer-loop
+// attempts may end in a provider fast-fail handoff before the runtime gives
+// up. The inner loop fast-fails on its tight transport budget; without this
+// guard the outer loop would keep spending its whole budget on the same dead
+// upstream. Any non-handoff error (or a success) resets the streak.
+const maxConsecutiveFastFailHandoffs = 3
+
 // clampRetryAttempts caps a positive attempt budget at retryAttemptsCeiling.
 // Non-positive budgets (-1 unlimited, 0 disabled) pass through unchanged.
 func clampRetryAttempts(n int) int {
@@ -670,14 +677,60 @@ func ClassifyFailureCode(err error) string {
 // DiagnoseFailure classifies an LLM failure and explains the safe recovery
 // action. Retryable describes whether a fresh bounded attempt can help; it is
 // false after retry exhaustion and for account, permission, and request errors.
+//
+// When the error is a retry-exhaustion wrapper whose underlying cause is itself
+// a transient, retryable failure (5xx, transport, stream interruption, system
+// resource pressure, rate limit), the diagnostic reports Retryable=true so
+// session-level recovery (goal auto-continuation, provider failover, next user
+// turn) keeps trying with a fresh bounded attempt instead of requiring a manual
+// continue.  classifyLLMFailureCode already mirrors this: it unwraps exhaustion
+// to restore the vendor-neutral error code (e.g. UPSTREAM_UNAVAILABLE).
+// retrySuppressedError (content already emitted) and deterministic causes
+// (quota, invalid request, content filter, user cancel) stay terminal.
 func DiagnoseFailure(err error) FailureDiagnostic {
 	decision := classifyRetryableLLMError(err)
 	code := classifyLLMFailureCode(err, decision)
+
+	if !decision.Retryable {
+		if cause := exhaustionCause(err); cause != nil {
+			if causeDecision := classifyRetryableLLMError(cause); causeDecision.Retryable {
+				decision = causeDecision
+			}
+		}
+	}
+
 	return FailureDiagnostic{
 		ErrorCode:  code,
 		Retryable:  decision.Retryable,
 		NextAction: llmFailureNextAction(code, decision),
 	}
+}
+
+// exhaustionCause unwraps retryExhaustedError chains to the underlying failure
+// cause.  It returns nil when err is not an exhaustion marker or the chain
+// contains a retrySuppressedError (which must remain terminal: visible content
+// was already emitted and retrying would duplicate output).
+func exhaustionCause(err error) error {
+	if err == nil {
+		return nil
+	}
+	var suppressed *retrySuppressedError
+	if stderrs.As(err, &suppressed) {
+		return nil
+	}
+	var exhausted *retryExhaustedError
+	if !stderrs.As(err, &exhausted) || exhausted == nil {
+		return nil
+	}
+	cause := exhausted.cause
+	for cause != nil {
+		var nested *retryExhaustedError
+		if !stderrs.As(cause, &nested) || nested == nil {
+			break
+		}
+		cause = nested.cause
+	}
+	return cause
 }
 
 // isResponseHeaderTimeoutError reports whether err is the HTTP client's

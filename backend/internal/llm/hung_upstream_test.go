@@ -548,3 +548,145 @@ func TestProviderDoRequestReleasesGuardContextOnBodyClose(t *testing.T) {
 	}, time.Second, time.Millisecond,
 		"closing the response body must release the watchdog context")
 }
+
+// responsePhaseEOFHandoffRoundTripper simulates an upstream that accepts the
+// request, returns HTTP 200 with an SSE stream, then drops the connection
+// mid-stream before any complete frame (io.ErrUnexpectedEOF). The first
+// failFirst requests die this way; later requests return a valid SSE
+// completion. This exercises the response-phase transport path (the upstream
+// was alive — it produced a response — so the failure is transient).
+type responsePhaseEOFHandoffRoundTripper struct {
+	requests  atomic.Int64
+	failFirst int64
+}
+
+type unexpectedEOFReadCloser struct{}
+
+func (unexpectedEOFReadCloser) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+func (unexpectedEOFReadCloser) Close() error             { return nil }
+
+func (t *responsePhaseEOFHandoffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	n := t.requests.Add(1)
+	if n <= t.failFirst {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       unexpectedEOFReadCloser{},
+			Request:    req,
+		}, nil
+	}
+	body := `data: {"choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+// TestProviderResponsePhaseEOFHandoffRetriesAtRuntimeLayer verifies the
+// response-phase handoff: an upstream that starts an SSE stream (HTTP 200)
+// and then drops it mid-flight is a transient transport failure. The inner
+// provider counts those failures against the tighter transport budget and,
+// once exhausted, hands the error to the enclosing runtime loop; the runtime
+// retries and a fresh request succeeds.
+func TestProviderResponsePhaseEOFHandoffRetriesAtRuntimeLayer(t *testing.T) {
+	provider, err := NewProvider(&ProviderConfig{
+		Type:                "openai",
+		BaseURL:             "http://provider.invalid",
+		MaxRetries:          5, // generous business budget
+		MaxTransportRetries: 2, // tighter transport budget wins
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: -1,
+		},
+	})
+	require.NoError(t, err)
+	transport := &responsePhaseEOFHandoffRoundTripper{failFirst: 2}
+	wrapper := provider.(*ProviderWrapper)
+	wrapper.httpClient = &http.Client{Transport: transport}
+	wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultModel: "hung-model",
+		MaxRetries:   3,
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: -1,
+		},
+	})
+	require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := runtime.Call(ctx, &LLMRequest{
+		Model:  "hung-model",
+		Stream: true,
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, int64(3), transport.requests.Load(),
+		"the runtime retry should follow the two response-phase transport failures")
+}
+
+// TestRuntimeStopsAfterRepeatedResponsePhaseHandoffs verifies the outer-loop
+// consecutive-handoff guard: when the upstream keeps dropping the SSE stream,
+// each inner run fast-fails on its transport budget and hands off. The
+// runtime must stop after a few consecutive handoffs instead of spending its
+// whole business budget on the same dead upstream.
+func TestRuntimeStopsAfterRepeatedResponsePhaseHandoffs(t *testing.T) {
+	provider, err := NewProvider(&ProviderConfig{
+		Type:                "openai",
+		BaseURL:             "http://provider.invalid",
+		MaxRetries:          5,
+		MaxTransportRetries: 2,
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: -1,
+		},
+	})
+	require.NoError(t, err)
+	transport := &responsePhaseEOFHandoffRoundTripper{failFirst: 1 << 30} // always fail
+	wrapper := provider.(*ProviderWrapper)
+	wrapper.httpClient = &http.Client{Transport: transport}
+	wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultModel: "hung-model",
+		MaxRetries:   10,
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: -1,
+		},
+	})
+	require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = runtime.Call(ctx, &LLMRequest{
+		Model:  "hung-model",
+		Stream: true,
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fast-fail",
+		"consecutive-handoff guard should surface as a fast-fail stop, got: %v", err)
+	// 3 consecutive handoffs x 2 transport attempts each = 6 requests.
+	assert.Equal(t, int64(6), transport.requests.Load(),
+		"the consecutive-handoff guard must bound the requests; got %d", transport.requests.Load())
+}

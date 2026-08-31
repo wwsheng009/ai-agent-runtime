@@ -186,6 +186,31 @@ func IsMaxTokensLimitError(err error) bool {
 	return ok
 }
 
+// isHandoffEligibleError reports whether an inner-loop exhaustion should hand
+// the transient failure to the enclosing runtime retry loop instead of
+// becoming terminal. Transport-class failures (connection drops, SSE stream
+// EOF, header timeouts) and transient stream/server failures benefit from a
+// fresh outer-layer request: the inner loop fast-fails on the tighter
+// transport budget, and the outer loop provides the total attempt guarantee
+// with its own finite budget.
+func isHandoffEligibleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	decision := classifyRetryableLLMError(err)
+	if !decision.Retryable {
+		return false
+	}
+	switch decision.Reason {
+	case "transport", "transient_stream_or_server", "stream_interrupted",
+		"empty_reply", "reasoning_only_empty_reply", "insufficient_system_resource",
+		"rate_limit", "http_429", "http_408", "http_409",
+		"http_500", "http_502", "http_503", "http_504":
+		return true
+	}
+	return false
+}
+
 func providerCallHTTPStatus(err error) (int, bool) {
 	if err == nil {
 		return 0, false

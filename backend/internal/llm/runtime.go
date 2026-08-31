@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	stderrs "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -461,6 +462,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	var lastError error
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
+	consecutiveHandoffs := 0
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -470,6 +472,20 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		}
 
 		lastError = err
+		// Consecutive-handoff guard: when the provider keeps fast-failing and
+		// handing the transient error back to this outer loop, stop after a
+		// few rounds instead of spending the whole runtime budget on the same
+		// dead upstream. Any non-handoff error resets the streak.
+		var exhaustedErr *retryExhaustedError
+		if stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
+			consecutiveHandoffs++
+			if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
+				return nil, markRetryExhausted("provider call failed after repeated fast-fail retries", policy.MaxAttempts, err)
+			}
+		} else {
+			consecutiveHandoffs = 0
+		}
+
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 			Source:   "llm_runtime",
 			Provider: providerName,
@@ -565,6 +581,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 
 	var lastErr error
 	lastAttempt := startAttempt
+	consecutiveHandoffs := 0
 	for attempt := startAttempt; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		lastAttempt = attempt
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -576,6 +593,18 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 			err = fmt.Errorf("empty_stream_response: provider returned nil stream")
 		}
 		lastErr = err
+
+		// Consecutive-handoff guard: same as Call — stop after repeated
+		// fast-fail handoffs from the provider.
+		var exhaustedErr *retryExhaustedError
+		if stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
+			consecutiveHandoffs++
+			if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
+				return nil, attempt, markRetryExhausted("LLM stream failed after repeated fast-fail retries", policy.MaxAttempts, err)
+			}
+		} else {
+			consecutiveHandoffs = 0
+		}
 
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, meta)
 		if retryErr != nil {

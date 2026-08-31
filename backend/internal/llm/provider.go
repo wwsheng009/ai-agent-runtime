@@ -1141,6 +1141,12 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		if transportFailure {
 			transportAttempts++
 			if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
+				// The tighter transport budget is exhausted before any
+				// response was received: the upstream is unreachable right
+				// now, and a fresh connection from scratch rarely succeeds
+				// immediately. This is terminal, not handed to the outer
+				// loop: the transport budget deliberately binds over the
+				// business budget for dead connections.
 				return nil, markRetryExhausted("provider transport call failed after retries", policy.MaxTransportAttempts, err)
 			}
 		}
@@ -1161,6 +1167,12 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 	}
 
+	// Business budget exhausted. Transport/stream-class failures are handed to
+	// the enclosing runtime loop (it owns the total retry guarantee); only
+	// deterministic, non-retryable failures become terminal here.
+	if isHandoffEligibleError(lastErr) {
+		return nil, markRetryExhaustedForNextLayer("provider call failed after retries", policy.MaxAttempts, lastErr)
+	}
 	return nil, markRetryExhausted("provider call failed after retries", policy.MaxAttempts, lastErr)
 }
 
@@ -1379,6 +1391,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			if transportFailure {
 				transportAttempts++
 				if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
+					// Request-phase transport budget exhausted before any
+					// response headers arrived: the upstream is dead, so the
+					// tighter transport budget wins over the business budget.
 					return nil, markRetryExhausted("provider transport stream failed after retries", policy.MaxTransportAttempts, lastErr)
 				}
 			}
@@ -1531,6 +1546,18 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			if emissionState.emittedAnything() {
 				return nil, suppressRetry(lastErr)
 			}
+			// Transport/stream-class failures (SSE stream EOF, connection
+			// reset, idle timeout) count toward the tighter transport budget.
+			// Once that budget is exhausted, hand the transient failure to
+			// the enclosing runtime loop instead of burning the whole
+			// business budget on a dead upstream: the inner loop fast-fails,
+			// the outer loop guarantees the total retry count.
+			if isTransportBudgetError(lastErr) || isRetryableTransportError(lastErr, strings.ToLower(lastErr.Error())) {
+				transportAttempts++
+				if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
+					return nil, markRetryExhaustedForNextLayer("streaming aggregate call failed after retries", attempt, lastErr)
+				}
+			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:   "provider_wrapper",
 				Protocol: p.config.Type,
@@ -1627,6 +1654,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		return p.toLLMResponse(response), nil
 	}
 
+	if isHandoffEligibleError(lastErr) {
+		return nil, markRetryExhaustedForNextLayer("streaming aggregate call failed after retries", policy.MaxAttempts, lastErr)
+	}
 	return nil, markRetryExhausted("streaming aggregate call failed after retries", policy.MaxAttempts, lastErr)
 }
 
