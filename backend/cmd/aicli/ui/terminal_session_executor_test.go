@@ -779,3 +779,52 @@ func TestTerminalSessionExecutorWorkerTeardownReusesFreshDoneChannel(t *testing.
 		t.Fatal("executor did not settle after repeated worker teardown")
 	}
 }
+
+// TestTerminalSessionExecutorScrollbackResetBackoffIsRevisionBased locks in
+// the progress guard: a failing writer must not turn the executor into an
+// unbounded reset+replay loop, while a genuine state change (new revision)
+// always allows the next recovery attempt. The predicate is exercised
+// directly so the test is deterministic and has no wall-clock races.
+func TestTerminalSessionExecutorScrollbackResetBackoffIsRevisionBased(t *testing.T) {
+	controller := NewUIController(UIControllerConfig{}, nil, nil)
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(&bytes.Buffer{}))
+
+	// No prior reset: recovery is always allowed.
+	if executor.scrollbackResetBackoff(7) {
+		t.Fatal("backoff engaged before any scrollback reset")
+	}
+
+	// A confirmed reset at revision 7 must block a same-revision retry.
+	executor.recordScrollbackReset(3, 7)
+	if !executor.scrollbackResetBackoff(7) {
+		t.Fatal("same-revision recovery was not rate-limited after a reset")
+	}
+
+	// A new revision (new action) always breaks the backoff, even within the
+	// window — the reset is a genuine retry, not a non-progressing loop.
+	if executor.scrollbackResetBackoff(8) {
+		t.Fatal("new-revision recovery was blocked by stale backoff")
+	}
+
+	// A second reset at the new revision re-arms the guard for that revision.
+	executor.recordScrollbackReset(4, 8)
+	if !executor.scrollbackResetBackoff(8) {
+		t.Fatal("same-revision recovery was not rate-limited after the second reset")
+	}
+
+	// Once the backoff window expires, the same revision may retry again.
+	executor.mu.Lock()
+	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetBackoff - time.Millisecond)
+	executor.mu.Unlock()
+	if executor.scrollbackResetBackoff(8) {
+		t.Fatal("expired backoff window still blocked a same-revision retry")
+	}
+
+	// The epoch bookkeeping follows the reset that armed the guard.
+	executor.mu.Lock()
+	gotEpoch, gotRevision := executor.lastResetEpoch, executor.lastResetRevision
+	executor.mu.Unlock()
+	if gotEpoch != 4 || gotRevision != 8 {
+		t.Fatalf("last reset bookkeeping = epoch %d revision %d, want 4 / 8", gotEpoch, gotRevision)
+	}
+}

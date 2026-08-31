@@ -182,6 +182,42 @@ func TestRuntimeMessagesToProtocolMessages_OpenAIReplaysDeepSeekEmptyReasoningCo
 	}
 }
 
+func TestRuntimeMessagesToProtocolMessages_DeepSeekReplaysEmptyReasoningForPlainTextAssistantTurn(t *testing.T) {
+	assistant := types.Message{
+		Role:     "assistant",
+		Content:  "别急，我先看看结果。",
+		Metadata: types.NewMetadata(),
+	}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "deepseek-v4-flash")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	if got, exists := messages[0]["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty deepseek reasoning_content key on plain-text assistant turn, got exists=%v value=%#v", exists, got)
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_DeepSeekModelHintWinsOverProviderName(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	// aicli passes (ProviderName, Model): the provider name (e.g.
+	// "sub.aiok.club") does not identify DeepSeek, but the model hint must.
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "sub.aiok.club", "deepseek-v4-flash")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	if got, exists := messages[0]["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty deepseek reasoning_content key from model hint, got exists=%v value=%#v", exists, got)
+	}
+}
+
 func TestRuntimeMessagesToProtocolMessages_OpenAIDropsOrphanToolReplayPayload(t *testing.T) {
 	assistant := types.Message{
 		Role: "assistant",
@@ -788,6 +824,127 @@ func TestRuntimeMessagesToProtocolMessages_AnthropicKeepsCompleteMultiToolReplay
 	}
 	if blocks[0]["tool_use_id"] != "call_1" || blocks[1]["tool_use_id"] != "call_2" {
 		t.Fatalf("expected both matching tool results in order, got %#v", blocks)
+	}
+}
+
+// 回归：上游只给 signature 不给 thinking 文本（如 strict 网关上的 opaque
+// thinking）时，重放必须输出 redacted_thinking 块而非 `{"type":"thinking"}`
+// 残缺块——后者会被严格网关以 "thinking.thinking: Field required" 拒绝。
+func TestRuntimeMessagesToProtocolMessages_AnthropicOpaqueThinkingReplaysAsRedactedThinking(t *testing.T) {
+	assistant := types.Message{
+		Role:    "assistant",
+		Content: "我看一下。",
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
+		Format:         "anthropic_thinking",
+		Summary:        "",
+		OpaqueState:    "sig_abc123",
+		ReplayRequired: true,
+		Streamable:     true,
+		Visibility:     types.ReasoningVisibilityOpaque,
+	})
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewUserMessage("继续"),
+		assistant,
+		*types.NewUserMessage("再来一轮"),
+	}, "anthropic")
+
+	if len(messages) != 3 {
+		t.Fatalf("expected both messages to be preserved, got %d: %#v", len(messages), messages)
+	}
+	blocks := decodeSliceOfMaps(messages[1]["content"])
+	if len(blocks) != 2 {
+		t.Fatalf("expected thinking + text blocks, got %#v", messages[1])
+	}
+	if blocks[0]["type"] != "redacted_thinking" {
+		t.Fatalf("expected redacted_thinking block for signature-only reasoning, got %#v", blocks[0])
+	}
+	if blocks[0]["data"] != "sig_abc123" {
+		t.Fatalf("expected signature in redacted_thinking.data, got %#v", blocks[0])
+	}
+	if _, exists := blocks[0]["thinking"]; exists {
+		t.Fatalf("redacted_thinking block must not carry a thinking field: %#v", blocks[0])
+	}
+	if blocks[1]["type"] != "text" {
+		t.Fatalf("expected text block after thinking, got %#v", blocks[1])
+	}
+}
+
+// 有可见文本 + signature 的 reasoning 重放时保持 thinking 块（text+signature）。
+func TestRuntimeMessagesToProtocolMessages_AnthropicThinkingWithTextAndSignature(t *testing.T) {
+	assistant := types.Message{
+		Role:    "assistant",
+		Content: "结论。",
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
+		Format:         "anthropic_thinking",
+		Summary:        "推理过程摘要",
+		OpaqueState:    "sig_def456",
+		ReplayRequired: true,
+		Streamable:     true,
+		Visibility:     types.ReasoningVisibilitySummary,
+	})
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewUserMessage("继续"),
+		assistant,
+		*types.NewUserMessage("再来一轮"),
+	}, "anthropic")
+
+	blocks := decodeSliceOfMaps(messages[1]["content"])
+	if len(blocks) != 2 {
+		t.Fatalf("expected thinking + text blocks, got %#v", messages[1])
+	}
+	if blocks[0]["type"] != "thinking" {
+		t.Fatalf("expected thinking block, got %#v", blocks[0])
+	}
+	if blocks[0]["thinking"] != "推理过程摘要" {
+		t.Fatalf("expected thinking text preserved, got %#v", blocks[0])
+	}
+	if blocks[0]["signature"] != "sig_def456" {
+		t.Fatalf("expected signature on thinking block, got %#v", blocks[0])
+	}
+}
+
+func TestNormalizeAnthropicReplayContentBlocks(t *testing.T) {
+	complete := map[string]interface{}{"type": "thinking", "thinking": "text", "signature": "sig"}
+	missingField := map[string]interface{}{"type": "thinking", "signature": "sig_only"}
+	// 官方 omitted-display 合法形态：thinking 键存在但为空串，必须原样回传。
+	emptyString := map[string]interface{}{"type": "thinking", "thinking": "", "signature": "sig_empty"}
+	emptyThinking := map[string]interface{}{"type": "thinking"}
+	text := map[string]interface{}{"type": "text", "text": "hi"}
+
+	got := normalizeAnthropicReplayContentBlocks([]map[string]interface{}{
+		complete, missingField, emptyString, emptyThinking, text, nil,
+	})
+	if len(got) != 4 {
+		t.Fatalf("expected 4 normalized blocks, got %d: %#v", len(got), got)
+	}
+	if got[0]["type"] != "thinking" || got[0]["thinking"] != "text" || got[0]["signature"] != "sig" {
+		t.Fatalf("complete thinking block must pass through untouched, got %#v", got[0])
+	}
+	if got[1]["type"] != "redacted_thinking" || got[1]["data"] != "sig_only" {
+		t.Fatalf("missing-field thinking with signature must become redacted_thinking, got %#v", got[1])
+	}
+	if got[1]["thinking"] != nil {
+		t.Fatalf("redacted_thinking must not keep a thinking field, got %#v", got[1])
+	}
+	if got[2]["type"] != "thinking" || got[2]["thinking"] != "" || got[2]["signature"] != "sig_empty" {
+		t.Fatalf("empty-string thinking block must pass through untouched, got %#v", got[2])
+	}
+	if got[3]["type"] != "text" || got[3]["text"] != "hi" {
+		t.Fatalf("non-thinking block must pass through untouched, got %#v", got[3])
+	}
+
+	untouched := normalizeAnthropicReplayContentBlocks([]map[string]interface{}{complete, emptyString, text})
+	if len(untouched) != 3 || untouched[1]["type"] != "thinking" {
+		t.Fatalf("all-valid blocks should be returned as-is, got %#v", untouched)
+	}
+	if len(normalizeAnthropicReplayContentBlocks(nil)) != 0 {
+		t.Fatal("nil input should return nil")
 	}
 }
 

@@ -1,4 +1,5 @@
 export {
+  applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
   applySessionHistoryToThread,
   getErrorMessage,

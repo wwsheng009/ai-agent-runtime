@@ -251,6 +251,10 @@ func TestShouldPersistRuntimeSessionEvent(t *testing.T) {
 		chat.EventSessionCompactSkipped, chat.EventSessionCompactFailed,
 		chat.EventSessionStart, chat.EventSessionEnd, chat.EventSessionInterrupted,
 		chat.EventContextReconciled,
+		// 方案B：打字机增量事件（assistant_delta / assistant.reasoning /
+		// assistant.image_progress）必须落库，runtime/stream 长轮询才能拉到。
+		chat.EventAssistantDelta, chat.EventAssistantReasoning,
+		chat.EventAssistantReasoningDelta, chat.EventAssistantImageProgress,
 	} {
 		require.Truef(t, shouldPersistRuntimeSessionEvent(withSession(eventType)),
 			"expected %q to be persisted", eventType)

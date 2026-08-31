@@ -47,8 +47,8 @@ type ProvidersConfig struct {
 	MaxRetries      int               `yaml:"max_retries" mapstructure:"max_retries" env:"PROVIDERS_MAX_RETRIES"`
 	// TransportMaxRetries bounds transport-layer retries (connection /
 	// response-header timeout / TLS failures). Zero falls back to the default
-	// (4); a negative value means unlimited (bounded by the header-timeout
-	// streak guard).
+	// (4); a negative value means unlimited. The response-header streak guard
+	// is used only when no finite business or transport budget is available.
 	TransportMaxRetries int                 `yaml:"transport_max_retries" mapstructure:"transport_max_retries" env:"PROVIDERS_TRANSPORT_MAX_RETRIES"`
 	Backoff             BackoffConfig       `yaml:"backoff" mapstructure:"backoff"`
 	HTTPTimeout         HTTPTimeout         `yaml:"http_timeout" mapstructure:"http_timeout"`

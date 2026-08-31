@@ -72,43 +72,30 @@ pnpm dev
 
 ### 4.1 长期分支职责
 
-本项目保留两条职责不同的长期分支。两条分支允许且应当存在明确、可审查的代码差异：
+Win7 兼容代码与构建资产已全部合入 `main`，以 `main` 为唯一事实来源，不设并行适配分支：
 
-| 分支 | 职责 | 默认工具链与目标 | 应承载的改动 |
+| 分支 | 职责 | 构建隔离 | 应承载的改动 |
 | --- | --- | --- | --- |
-| `main` | 标准系统主线 | `backend/go.mod`、Go 1.24、当前受支持操作系统 | 通用功能、通用修复、现代系统实现和标准发布 |
-| `feat/win7-go120-compat` | Windows 7 适配分支 | `backend/go.win7.mod`、Go 1.20.14、`win7compat`、Windows 7 amd64 | Win7 专用 API 回退、旧控制台兼容、依赖降级、配置隔离、适配测试及 Win7 发布 |
+| `main` | 标准系统主线 + Windows 7 兼容 | `backend/go.mod`（Go 1.24）/ `backend/go.win7.mod`（Go 1.20.14、`-tags win7compat`、Windows 7 amd64） | 通用功能、通用修复、现代系统实现、标准发布，以及 Win7 专用 API 回退、旧控制台兼容、依赖降级、配置隔离、适配测试与 Win7 发布 |
+| `feat/win7-go120-compat`（历史遗留） | 原 Win7 适配分支，代码已全部合入 `main`，两分支 Win7 资产零差异；仅保留用于历史发布与追溯 | — | 不再承载新改动 |
 
-分支边界要求：
+边界要求：
 
 - `main` 是通用功能和现代系统实现的事实来源，不应为了兼容 Win7 而整体降级 Go 版本、依赖或现代系统能力。
-- `feat/win7-go120-compat` 以 `main` 为基础，额外承载 Windows 7 操作系统适配代码；它不是 `main` 的同内容镜像。
-- `go.win7.mod`、`win7compat` build tag 和专用配置是技术隔离手段，不能取代 Win7 分支本身的职责边界。
-- Win7 分支中的新增提交必须能说明具体适配目标，例如旧 Win32 API、控制台/PTY、TLS、进程管理、文件系统、SQLite、Go 1.20 或依赖兼容。
-- 与操作系统无关的功能和缺陷修复应先进入 `main`，不得只在 Win7 分支长期维护一份通用实现。
-- Win7 专用改动不得无差别合回 `main`。其中可复用的抽象或通用修复应单独提取，Win7 实现继续留在适配分支。
+- Win7 适配代码通过技术隔离手段直接维护在 `main` 上：`go.win7.mod` 独立依赖图 + `win7compat` build tag 成对隔离 + 专用配置（`runtime.win7.yaml` 等）。
+- Win7 新增提交必须能说明具体适配目标，例如旧 Win32 API、控制台/PTY、TLS、进程管理、文件系统、SQLite、Go 1.20 或依赖兼容。
+- 与操作系统无关的功能和缺陷修复直接进入 `main`，维护一份通用实现即可。
+- Win7 专用实现必须隔离在 `//go:build win7compat` 变体中，不得进入标准构建热路径；可复用的抽象或通用修复应单独提取。
+- 完整的 Win7 编译与验证步骤见 [docs/aicli/windows7-build.md](aicli/windows7-build.md)。
 
 ### 4.2 分支同步策略
 
-两条长期分支按以下方向同步：
+Win7 适配已并入 `main`，不再存在需要双向同步的并行适配分支：
 
-1. 通用功能、协议、数据模型和跨平台修复先合入 `main`。
-2. 定期把 `main` 合入 `feat/win7-go120-compat`，再在 Win7 分支解决 Go 1.20、依赖和操作系统 API 不兼容。
-3. Win7 适配提交应独立于同步 merge，避免把“同步主线”和“新增适配”混在一个不可审查的提交中。
-4. 在 Win7 分支发现通用缺陷时，先把通用修复提交到 `main`，再同步到 Win7 分支；仅平台专用部分直接提交到 Win7 分支。
-5. 不对已共享的长期分支随意 rebase 或 force push。需要同步历史时优先使用可追踪的 merge。
-6. 不把整个 Win7 分支反向合并到 `main`；确需回流的通用提交应单独移植或重新提交，并重新执行标准构建验证。
-
-同步后使用以下命令检查 Win7 分支相对主线的有效差异：
-
-```bash
-git fetch --prune origin
-git log --oneline origin/main..HEAD
-git diff --stat origin/main...HEAD
-git diff --name-status origin/main...HEAD
-```
-
-Win7 适配工作完成后，差异应集中在平台适配、兼容依赖、配置、测试、构建和文档范围内。若两条分支长期完全相同，应检查 Win7 专用实现是否被错误地放入了 `main`，或适配分支是否已经失去实际作用。
+1. 通用功能、协议、数据模型和跨平台修复直接合入 `main`，Win7 兼容性由 `win7compat` 构建验证兜底。
+2. 新增 Win7 适配提交直接进入 `main`，与通用改动同处一个可审查流程；提交主题应体现具体兼容目标。
+3. 在 `main` 上修改 Win7 配置、路径、console、session、SQLite、依赖或 workflow 后，必须同时验证标准构建和 Win7 构建（见 [第 8 节](#8-windows-7-兼容规范)）。
+4. 历史遗留的 `feat/win7-go120-compat` 分支不再开发新功能；如仍用于追溯 Win7 历史发布，仅在确需时执行单向 merge，且不得成为新适配的落点。
 
 ### 4.3 分支命名
 
@@ -125,7 +112,7 @@ chore/<topic>
 
 分支应聚焦单一目标。跨模块的大改动应拆成可独立验证、可独立审查的阶段。
 
-Win7 适配分支固定使用 `feat/win7-go120-compat`。在该分支内继续开发时，提交主题应体现具体兼容目标，而不是再创建含义不清的平行 Win7 长期分支。
+历史 Win7 适配分支 `feat/win7-go120-compat` 的代码已合入 `main`，不再继续使用；新的 Win7 适配直接提交到 `main` 并带 `win7compat` build tag，提交主题应体现具体兼容目标，而不是再创建含义不清的平行 Win7 长期分支。
 
 ### 4.4 开始修改前
 
@@ -238,28 +225,28 @@ pnpm test:e2e
 
 ## 8. Windows 7 兼容规范
 
-### 8.1 分支与代码边界
+### 8.1 代码边界
 
-Windows 7 适配代码以 `feat/win7-go120-compat` 为主要落点。适配分支应在不降低 `main` 标准实现能力的前提下，维护可独立构建、测试和发布的 Win7 版本。
+Windows 7 适配代码直接维护在 `main`，以 `win7compat` build tag 隔离。适配实现不得降低标准实现能力，标准构建和 Win7 构建均可独立构建、测试和发布。
 
 改动归属按下表判断：
 
-| 改动类型 | 目标分支 | 示例 |
+| 改动类型 | 落点 | 示例 |
 | --- | --- | --- |
-| 跨平台接口、通用协议和通用缺陷修复 | `main` | 通用 session 契约、与 OS 无关的并发修复 |
-| 现代系统默认实现 | `main` | 现代 Windows API、当前 Go 工具链实现 |
-| Windows 7 专用实现与回退 | `feat/win7-go120-compat` | 缺失 Win32 API 的替代实现、旧 Console/PTY 处理 |
-| Go 1.20 或兼容依赖调整 | `feat/win7-go120-compat` | 替代 Go 1.21+ API、依赖降级、兼容 shim |
-| Win7 配置、会话、打包与验证 | `feat/win7-go120-compat` | `runtime.win7.yaml`、独立 session DB、Win7 workflow |
+| 跨平台接口、通用协议和通用缺陷修复 | `main`（通用实现） | 通用 session 契约、与 OS 无关的并发修复 |
+| 现代系统默认实现 | `main`（`!win7compat` 变体） | 现代 Windows API、当前 Go 工具链实现 |
+| Windows 7 专用实现与回退 | `main`（`win7compat` 变体） | 缺失 Win32 API 的替代实现、旧 Console/PTY 处理 |
+| Go 1.20 或兼容依赖调整 | `main`（`go.win7.mod` 依赖图） | 替代 Go 1.21+ API、依赖降级、兼容 shim |
+| Win7 配置、会话、打包与验证 | `main` | `runtime.win7.yaml`、独立 session DB、Win7 workflow |
 
 推荐实现方式：
 
-- 通用接口和平台无关逻辑放在 `main`，Win7 分支只增加或替换平台实现。
+- 通用接口和平台无关逻辑放在通用实现（`!win7compat`），Win7 只增加或替换平台实现。
 - 优先使用 `//go:build win7compat` 与 `//go:build !win7compat` 成对隔离实现，避免在通用热路径中散布大量运行时版本判断。
 - 文件名可以表达 Win7 语义，但真正的编译隔离必须依赖 build constraint；`_win7.go` 不是 Go 内建的 GOOS 后缀。
 - 禁止在 Win7 路径中引入 Go 1.21+ 标准库 API、要求更高 Go 版本的依赖，或 Windows 7 不提供的系统 API。
 - Win7 适配不得通过删除标准版功能来实现。必要时定义共同接口，并分别维护标准实现和 Win7 回退实现。
-- 若发布流程需要在 `main` 保留少量共享的 Win7 构建基础设施，这些文件不得包含替代 Win7 适配分支的完整平台实现；实际适配差异仍应在 Win7 分支上可见。
+- 共享的 Win7 构建基础设施（workflow、`go.win7.mod`）维护在 `main`，但平台实现差异必须隔离在 `win7compat` build tag 变体中，不得进入标准构建热路径。
 
 ### 8.2 构建隔离
 
@@ -280,6 +267,8 @@ CGO_ENABLED=0
 - `backend/internal/aiclipaths/profile_win7.go`
 - `.github/workflows/build-aicli-win7.yml`
 - `docs/aicli/windows7.md`
+- `docs/aicli/windows7-build.md`（完整的编译、测试与打包步骤）
+- `scripts/build-aicli-win7.ps1` / `scripts/build-runtime-server-win7.ps1`（本地可重复构建）
 
 标准构建必须继续使用 `backend/go.mod`，且不能因为 Win7 兼容代码改变默认 Profile。
 
@@ -318,23 +307,22 @@ go test -tags win7compat ./internal/aiclipaths ./internal/agentconfig ./internal
 
 若修改了 Win7 配置、路径、console、session、SQLite、依赖或 workflow，必须同时验证标准构建和 Win7 构建。
 
-在 Win7 分支提交或发布前，还必须检查分支差异没有混入无关功能：
+在提交或发布 Win7 相关改动前，检查改动没有混入无关功能，且与标准构建互不影响：
 
 ```bash
-git fetch --prune origin
-git merge-base --is-ancestor origin/main HEAD
-git log --oneline origin/main..HEAD
-git diff --check origin/main...HEAD
-git diff --name-status origin/main...HEAD
+cd backend
+GOFLAGS="-modfile=go.win7.mod" go test -tags win7compat \
+  ./internal/aiclipaths ./internal/agentconfig ./internal/config \
+  ./internal/chat ./cmd/runtime-server -count=1
+go test ./... -count=1   # 标准依赖图回归
 ```
 
 检查结果应满足：
 
-- 当前 Win7 分支包含预期的适配提交；
-- `main` 是当前 Win7 分支的祖先，或同步关系已有明确说明；
-- 差异仅包含 Win7 适配及其必要测试、配置、依赖、工作流和文档；
+- 改动包含预期的适配提交，`git diff --check` 无空白错误；
 - 标准版和 Win7 版均通过各自的最低验证；
-- Win7 产物确实由 Go 1.20.14、`go.win7.mod` 和 `win7compat` 构建。
+- 差异仅包含 Win7 适配及其必要测试、配置、依赖、工作流和文档；
+- Win7 产物确实由 Go 1.20.14、`go.win7.mod` 和 `win7compat` 构建（`go version -m` 首行为 `go1.20.14`）。
 
 ## 9. API、配置与持久化兼容
 
@@ -463,8 +451,8 @@ subject 使用祈使式或清晰的结果描述，不加句号。重大不兼容
 - [ ] 新行为有测试，修复有回归测试；
 - [ ] context、超时、取消、goroutine 和资源关闭路径已检查；
 - [ ] API、事件、配置和持久化兼容性已检查；
-- [ ] 改动进入了职责正确的分支；
-- [ ] Win7 专用代码未无差别进入 `main`，通用修复也未只停留在 Win7 分支；
+- [ ] 改动进入了职责正确的实现（通用实现或 `win7compat` 变体）；
+- [ ] Win7 专用代码已隔离在 `win7compat` build tag 变体中，标准构建热路径未被破坏；
 - [ ] 标准构建与 Win7 构建边界未被破坏；
 - [ ] 用户可见变化已更新文档；
 - [ ] 已运行与改动范围相匹配的验证；
@@ -474,11 +462,11 @@ subject 使用祈使式或清晰的结果描述，不加句号。重大不兼容
 ## 14. 发布规范
 
 - 标准版本从 `main` 创建 `v*` 或 `aicli-v*` tag。
-- Windows 7 适配版本从 `feat/win7-go120-compat` 创建 `win7-*` tag。
-- `.github/workflows/release-aicli.yml` 负责标准发布；其中的 Win7 构建检查或共享制品不能替代适配分支上的正式 Win7 差异验证。
-- `.github/workflows/build-aicli-win7.yml` 响应 `win7-*` tag 或手动触发，正式 Win7 tag 必须指向 Win7 适配分支上的目标提交。
+- Windows 7 适配版本从 `main` 创建 `win7-*` tag。
+- `.github/workflows/release-aicli.yml` 负责标准发布；其中的 Win7 构建检查或共享制品不能替代 `win7compat` 构建的正式差异验证。
+- `.github/workflows/build-aicli-win7.yml` 响应 `win7-*` tag 或手动触发，正式 Win7 tag 直接指向 `main` 上的目标提交。
 - 创建 tag 前应确认工作区干净、本地与远端同步、目标 commit 正确、必要 gate 已通过。
-- 不得把包含 Win7 专用适配的 `win7-*` tag 直接打在 `main`，否则会绕过适配分支中的代码差异。
+- 完整的 Win7 编译、验证与打包步骤见 [docs/aicli/windows7-build.md](aicli/windows7-build.md)。
 
 标准版本：
 
@@ -494,11 +482,11 @@ git push origin vX.Y.Z
 Win7 版本：
 
 ```bash
-git switch feat/win7-go120-compat
+git switch main
 git status --short --branch
 git fetch --prune origin
 git merge-base --is-ancestor origin/main HEAD
-git diff --stat origin/main...HEAD
+# 提交前验证 win7compat 构建（GOFLAGS=-modfile=go.win7.mod -tags win7compat，见 windows7-build.md）
 git tag win7-vX.Y.Z
 git push origin win7-vX.Y.Z
 ```

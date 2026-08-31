@@ -127,8 +127,9 @@ func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 	}
 	flags := newRuntimeServerFlagSet("runtime-server serve")
 	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, fmt.Sprintf(
-		"配置文件路径；未指定时按默认搜索顺序查找 %s",
+		"配置文件路径；未指定时按默认搜索顺序查找 %s（找不到时回退 %s）",
 		runtimeServerDefaultConfigName,
+		aiclipaths.StandardConfigFileName,
 	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
@@ -143,8 +144,9 @@ func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
 	}
 	flags := newRuntimeServerFlagSet("runtime-server start")
 	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, fmt.Sprintf(
-		"配置文件路径；未指定时按默认搜索顺序查找 %s",
+		"配置文件路径；未指定时按默认搜索顺序查找 %s（找不到时回退 %s）",
 		runtimeServerDefaultConfigName,
+		aiclipaths.StandardConfigFileName,
 	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
@@ -171,8 +173,9 @@ func parseStatusOptions(args []string) (runtimeServerCommandOptions, error) {
 	}
 	flags := newRuntimeServerFlagSet("runtime-server status")
 	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, fmt.Sprintf(
-		"配置文件路径；未指定时按默认搜索顺序查找 %s",
+		"配置文件路径；未指定时按默认搜索顺序查找 %s（找不到时回退 %s）",
 		runtimeServerDefaultConfigName,
+		aiclipaths.StandardConfigFileName,
 	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
@@ -194,16 +197,34 @@ func resolveRuntimeServerConfigPath(configPath string) string {
 	return ""
 }
 
-func defaultRuntimeServerConfigSearchPaths() []string {
-	paths := make([]string, 0, 4)
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		paths = append(paths, filepath.Join(home, ".aicli", runtimeServerDefaultConfigName))
+// runtimeServerConfigSearchNames returns the bootstrap config filenames tried
+// by default discovery, most specific first. The active build profile's name
+// leads; the standard profile's name (config.yaml) follows as a compatibility
+// fallback so a win7compat binary can still discover standard-layout agent
+// configs when no profile-specific file exists.
+func runtimeServerConfigSearchNames() []string {
+	names := []string{runtimeServerDefaultConfigName}
+	if aiclipaths.StandardConfigFileName != runtimeServerDefaultConfigName {
+		names = append(names, aiclipaths.StandardConfigFileName)
 	}
-	paths = append(paths,
-		filepath.Join(".aicli", runtimeServerDefaultConfigName),
-		runtimeServerDefaultConfigName,
-		filepath.Join("configs", runtimeServerDefaultConfigName),
-	)
+	return names
+}
+
+func defaultRuntimeServerConfigSearchPaths() []string {
+	names := runtimeServerConfigSearchNames()
+	paths := make([]string, 0, 4*len(names))
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		for _, name := range names {
+			paths = append(paths, filepath.Join(home, ".aicli", name))
+		}
+	}
+	for _, name := range names {
+		paths = append(paths,
+			filepath.Join(".aicli", name),
+			name,
+			filepath.Join("configs", name),
+		)
+	}
 	return paths
 }
 
@@ -258,9 +279,9 @@ func runServe(args []string) int {
 
 	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
 	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
-		if runtimeserver.ProcessRunning(info.PID) {
+		if targetPID, alive := runtimeserver.ResolveInstancePID(info.PID, info.ListenAddr); alive {
 			logger.Error("Runtime server already running",
-				logger.Int("pid", info.PID),
+				logger.Int("pid", targetPID),
 				logger.String("pid_file", pidFile),
 				logger.String("listen", info.ListenAddr),
 			)
@@ -444,10 +465,12 @@ func runStart(args []string) int {
 	defer ticker.Stop()
 
 	for {
-		if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil && info.PID > 0 && runtimeserver.ProcessRunning(info.PID) {
-			if runtimeServerReady(info.ListenAddr, 500*time.Millisecond) {
-				fmt.Fprintf(os.Stdout, "runtime-server 已启动: pid=%d listen=%s pid_file=%s\n", info.PID, strings.TrimSpace(info.ListenAddr), pidFile)
-				return 0
+		if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil && info.PID > 0 {
+			if targetPID, alive := runtimeserver.ResolveInstancePID(info.PID, info.ListenAddr); alive {
+				if runtimeServerReady(info.ListenAddr, 500*time.Millisecond) {
+					fmt.Fprintf(os.Stdout, "runtime-server 已启动: pid=%d listen=%s pid_file=%s\n", targetPID, strings.TrimSpace(info.ListenAddr), pidFile)
+					return 0
+				}
 			}
 		}
 
@@ -483,9 +506,9 @@ func detectRuntimeServerStartConflict(configPath, listenOverride, pidFile string
 	pidFile = runtimeserver.ResolvePIDFilePath(pidFile)
 	requestedConfigPath := strings.TrimSpace(configPath)
 	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
-		if runtimeserver.ProcessRunning(info.PID) {
+		if targetPID, alive := runtimeserver.ResolveInstancePID(info.PID, info.ListenAddr); alive {
 			return &runtimeServerStartConflict{
-				PID:                 info.PID,
+				PID:                 targetPID,
 				ListenAddr:          strings.TrimSpace(info.ListenAddr),
 				PIDFile:             pidFile,
 				RequestedConfigPath: requestedConfigPath,
@@ -696,6 +719,8 @@ func runStop(args []string) int {
 
 	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
 	targetPID := opts.PID
+	listenAddr := ""
+	recordedPID := 0
 	if targetPID <= 0 {
 		info, err := runtimeserver.ReadInstanceInfo(pidFile)
 		if err != nil {
@@ -706,7 +731,22 @@ func runStop(args []string) int {
 			}
 			return 1
 		}
-		targetPID = info.PID
+		recordedPID = info.PID
+		listenAddr = strings.TrimSpace(info.ListenAddr)
+		var alive bool
+		targetPID, alive, err = runtimeserver.ResolveStopTarget(info.PID, info.ListenAddr)
+		if err != nil {
+			// 无法确认目标进程身份：不得清理 PID 文件，也不得强杀。
+			fmt.Fprintf(os.Stderr, "停止 runtime-server 失败: %v\n", err)
+			return 1
+		}
+		if !alive {
+			// 端口无监听者：服务已退出。记录 PID 即使还"存在"也只是被系统
+			// 复用的无关进程，不能杀；直接清理陈旧 PID 文件。
+			_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
+			fmt.Fprintf(os.Stdout, "runtime-server 未在运行（PID 文件陈旧，端口 %s 无监听），已清理: pid=%d\n", displayListenAddr(listenAddr), info.PID)
+			return 0
+		}
 	}
 
 	if !runtimeserver.ProcessRunning(targetPID) {
@@ -715,13 +755,26 @@ func runStop(args []string) int {
 		return 0
 	}
 
-	if err := runtimeserver.TerminateProcess(targetPID, opts.Wait); err != nil {
+	if err := runtimeserver.TerminateProcess(targetPID, listenAddr, opts.Wait); err != nil {
 		fmt.Fprintf(os.Stderr, "停止 runtime-server 失败: %v\n", err)
 		return 1
 	}
-	_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, targetPID)
+	// PID 文件记录可能因重启滞后于真实服务 PID（端口交叉验证找到的才是
+	// 活跃者），清理时以文件记录值为准，避免残留陈旧文件。
+	if recordedPID > 0 {
+		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, recordedPID)
+	} else {
+		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, targetPID)
+	}
 	fmt.Fprintf(os.Stdout, "runtime-server 已停止: pid=%d\n", targetPID)
 	return 0
+}
+
+func displayListenAddr(listenAddr string) string {
+	if strings.TrimSpace(listenAddr) == "" {
+		return "未知"
+	}
+	return listenAddr
 }
 
 func runStatus(args []string) int {
@@ -737,8 +790,8 @@ func runStatus(args []string) int {
 
 	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
 	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
-		if runtimeserver.ProcessRunning(info.PID) {
-			fmt.Fprintf(os.Stdout, "runtime-server 运行中: pid=%d listen=%s pid_file=%s\n", info.PID, strings.TrimSpace(info.ListenAddr), pidFile)
+		if targetPID, alive := runtimeserver.ResolveInstancePID(info.PID, info.ListenAddr); alive {
+			fmt.Fprintf(os.Stdout, "runtime-server 运行中: pid=%d listen=%s pid_file=%s\n", targetPID, strings.TrimSpace(info.ListenAddr), pidFile)
 			return 0
 		}
 		fmt.Fprintf(os.Stdout, "runtime-server 未运行，发现陈旧 PID 文件: pid=%d pid_file=%s\n", info.PID, pidFile)
@@ -1187,6 +1240,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			CompatibilityProfile:  provider.Compatibility.Profile,
 			Timeout:               timeout,
 			MaxRetries:            maxRetries,
+			MaxTransportRetries:   runtimellm.ProviderMaxTransportRetriesFromAgentConfig(cfg),
 			RetryTuning:           retryTuning,
 			RetryRules:            retryRules,
 			DefaultModel:          provider.DefaultModel,
@@ -1194,6 +1248,8 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			ModelMappings:         cloneStringMap(provider.ModelMappings),
 			ModelCapabilities:     cloneProviderModelCapabilities(provider.ModelCapabilities),
 			EnableImageGeneration: provider.EnableImageGeneration,
+			StreamReadTimeout:     runtimellm.ProviderStreamReadTimeoutFromAgentConfig(cfg),
+			ResponseHeaderTimeout: runtimellm.ProviderResponseHeaderTimeoutFromAgentConfig(cfg),
 			Headers:               config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 			HeaderMappings:        cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules:    cloneHeaderMappingRules(provider.HeaderMappingRules),

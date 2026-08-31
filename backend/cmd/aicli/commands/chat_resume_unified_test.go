@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -76,18 +79,23 @@ func TestResumeUnifiedPromptRenderedAfterStaleAmbientTeam(t *testing.T) {
 	surface.EnableForTest(72, 22)
 	surface.SetPhysicalWritesEnabled(false)
 	coordinator.SetSurface(surface)
-	if !coordinator.enableUnifiedRendererWithWriter(&bytesWriter{}) {
+	var terminal bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
 		t.Fatal("unified renderer did not attach")
 	}
 
-	if err := replaceRuntimeMessages(session, []runtimetypes.Message{
-		*runtimetypes.NewUserMessage("continue the previous task"),
-		*runtimetypes.NewAssistantMessage("resumed answer"),
-	}); err != nil {
+	history := make([]runtimetypes.Message, 0, 48)
+	for index := 0; index < 24; index++ {
+		history = append(history,
+			*runtimetypes.NewUserMessage(fmt.Sprintf("continue the previous task %02d", index)),
+			*runtimetypes.NewAssistantMessage(fmt.Sprintf("resumed answer %02d", index)),
+		)
+	}
+	if err := replaceRuntimeMessages(session, history); err != nil {
 		t.Fatalf("restore canonical history: %v", err)
 	}
 
-	presentChatStartupSession(session, &chatCommandOptions{OutputFormat: "interactive"}, nil)
+	presentChatStartupSession(session, &chatCommandOptions{OutputFormat: "interactive"}, session.RuntimeSession)
 	coordinator.waitUIActorIdle()
 	awaitUnifiedPresenterIdle(t, coordinator)
 
@@ -129,12 +137,82 @@ func TestResumeUnifiedPromptRenderedAfterStaleAmbientTeam(t *testing.T) {
 		}
 		session.Interaction.PrintPrompt()
 		coordinator.waitUIActorIdle()
+		awaitUnifiedPresenterIdle(t, coordinator)
 		state := coordinator.uiActor.AppState()
 		if !state.Bottom.PromptVisible || strings.TrimSpace(state.Bottom.PromptLine) == "" {
 			t.Fatalf("AppState prompt not rendered after resume: %+v", state.Bottom)
 		}
+		assertResumeBottomPhysicallyRendered(t, terminal.String(), state, 72, 22)
 	case <-time.After(3 * time.Second):
 		t.Fatalf("prepareInteractiveRead blocked >3s waiting for stale active team terminal — prompt never rendered")
+	}
+}
+
+func TestResumeReconcilePausesEmptyActiveAmbientTeam(t *testing.T) {
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = teamStore.Close() })
+
+	const (
+		sessionID = "sess-empty-team"
+		teamID    = "team-empty"
+	)
+	_, err = teamStore.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: sessionID,
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: sessionID,
+		Status:    runtimechat.SessionRunning,
+		AmbientRunMeta: &team.RunMeta{
+			Team: &team.TeamRunMeta{TeamID: teamID, AgentID: "lead"},
+		},
+	}))
+	host := &localChatRuntimeHost{
+		TeamStore:    teamStore,
+		RuntimeStore: runtimeStore,
+	}
+	lifecycle := newLocalTeamLifecycleService(host)
+	t.Cleanup(lifecycle.StopLoops)
+	host.TeamLifecycle = lifecycle
+	session := &ChatSession{
+		cancelCtx:        context.Background(),
+		RuntimeSession:   &runtimechat.Session{ID: sessionID},
+		LocalRuntimeHost: host,
+		ActiveTeam: &chatTeamBinding{
+			TeamID:  teamID,
+			AgentID: "lead",
+		},
+	}
+	host.BaseSession = session
+
+	if !lifecycle.Pending(context.Background(), teamID) {
+		t.Fatal("test precondition: empty active team must be pending before startup reconciliation")
+	}
+	restoreLocalRuntimeHostTeamState(session)
+
+	record, err := teamStore.GetTeam(context.Background(), teamID)
+	require.NoError(t, err)
+	if record == nil || record.Status != team.TeamStatusPaused {
+		t.Fatalf("empty recovered team status = %+v, want paused", record)
+	}
+	if lifecycle.Pending(context.Background(), teamID) {
+		t.Fatal("empty recovered team still blocks the interactive prompt")
+	}
+	state, err := runtimeStore.LoadState(context.Background(), sessionID)
+	require.NoError(t, err)
+	if state == nil || state.AmbientRunMeta != nil {
+		t.Fatalf("stale ambient run metadata was not cleared: %+v", state)
+	}
+	showPrompt, notice, err := prepareInteractiveRead(session)
+	require.NoError(t, err)
+	require.Empty(t, notice)
+	if !showPrompt {
+		t.Fatal("empty recovered team prevented the first resumed prompt")
 	}
 }
 
@@ -162,7 +240,8 @@ func TestResumeUnifiedPromptRenderedPlainHistory(t *testing.T) {
 	surface.EnableForTest(72, 22)
 	surface.SetPhysicalWritesEnabled(false)
 	coordinator.SetSurface(surface)
-	if !coordinator.enableUnifiedRendererWithWriter(&bytesWriter{}) {
+	var terminal bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
 		t.Fatal("unified renderer did not attach")
 	}
 
@@ -185,13 +264,26 @@ func TestResumeUnifiedPromptRenderedPlainHistory(t *testing.T) {
 	}
 	session.Interaction.PrintPrompt()
 	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
 	state := coordinator.uiActor.AppState()
 	if !state.Bottom.PromptVisible || strings.TrimSpace(state.Bottom.PromptLine) == "" {
 		t.Fatalf("plain resume: AppState prompt not rendered: %+v", state.Bottom)
 	}
+	assertResumeBottomPhysicallyRendered(t, terminal.String(), state, 72, 22)
 }
 
-// bytesWriter 是 enableUnifiedRendererWithWriter 的最小 sink（测试不需读帧）。
-type bytesWriter struct{}
-
-func (w *bytesWriter) Write(p []byte) (int, error) { return len(p), nil }
+func assertResumeBottomPhysicallyRendered(t *testing.T, output string, state ui.AppState, width, height int) {
+	t.Helper()
+	screen := newScreenVT(width, height)
+	screen.feed(output)
+	frame := ui.ComposeAppTextLayout(state)
+	for _, row := range frame.Rows {
+		if row.Owner != renderengine.RowOwnerPrompt && row.Owner != renderengine.RowOwnerStatus {
+			continue
+		}
+		if got := screen.line(row.Row); got != row.Text {
+			t.Fatalf("resume: physical row %d (%v) = %q, want %q\nscreen:\n%s",
+				row.Row, row.Owner, got, row.Text, screen.dump())
+		}
+	}
+}

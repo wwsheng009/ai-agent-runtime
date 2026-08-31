@@ -72,6 +72,7 @@ var (
 		"build":        {},
 		"__pycache__":  {},
 		".DS_Store":    {},
+		".aicli":       {}, // aicli 会话/存档目录，非项目代码
 	}
 	goFuncPattern          = regexp.MustCompile(`^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)`)
 	goStructPattern        = regexp.MustCompile(`^type\s+(\w+)\s+struct`)

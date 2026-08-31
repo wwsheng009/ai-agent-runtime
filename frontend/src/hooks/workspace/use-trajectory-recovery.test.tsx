@@ -137,11 +137,104 @@ describe("useTrajectoryRecovery", () => {
     await vi.waitFor(() => {
       expect(store.getSnapshot().items.length).toBeGreaterThan(0);
     });
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    console.log("DBG calls:", mockFetch.mock.calls.length, "sessionIds:", mockFetch.mock.calls.map(c=>c[0])); expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it("无 sessionId 时不拉取", () => {
     render(undefined);
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("拉取失败时通过 onError 上报，不再静默", async () => {
+    const errors: string[] = [];
+    mockFetch.mockRejectedValue(new Error("runtime request failed with status 404"));
+
+    function HarnessWithError({
+      store,
+      sessionId,
+    }: {
+      store: TrajectoryStore;
+      sessionId: string | undefined;
+    }) {
+      useTrajectoryRecovery({
+        store,
+        sessionId,
+        onError: (failedSessionId, m) => errors.push(`${failedSessionId}:${m}`),
+      });
+      return null;
+    }
+    const harness = (
+      <HarnessWithError store={store} sessionId="broken-session" />
+    );
+    act(() => {
+      root.render(harness);
+    });
+
+    await vi.waitFor(() => {
+      expect(errors.length).toBeGreaterThan(0);
+    });
+    // 回调携带发起恢复的会话 id 与错误文案。
+    expect(errors[0]).toBe("broken-session:runtime request failed with status 404");
+    // 失败后不固化：切到新会话仍应尝试恢复（不污染防重游标）。
+    mockFetch.mockResolvedValue({
+      events: [
+        chatSseEvent("meta", 1, { kind: "chat", status: "started" }),
+        chatSseEvent("tool_start", 2, TOOL_START_PAYLOAD),
+      ],
+      count: 2,
+      latest_seq: 2,
+    });
+    act(() => {
+      root.render(<HarnessWithError store={store} sessionId="broken-session-2" />);
+    });
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().items.length).toBeGreaterThan(0);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("已取消的恢复（会话切换）失败时不再上报 onError", async () => {
+    const rejectors: Array<(e: Error) => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectors.push(reject);
+        }),
+    );
+
+    const errors: string[] = [];
+    function HarnessSwitch({
+      store: s,
+      sessionId,
+    }: {
+      store: TrajectoryStore;
+      sessionId: string | undefined;
+    }) {
+      useTrajectoryRecovery({
+        store: s,
+        sessionId,
+        onError: (sid, m) => errors.push(`${sid}:${m}`),
+      });
+      return null;
+    }
+
+    act(() => {
+      root.render(<HarnessSwitch store={store} sessionId="session-a" />);
+    });
+    // 等 fetch 挂起后切换会话 → 旧恢复被取消。
+    await vi.waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+    act(() => {
+      root.render(<HarnessSwitch store={store} sessionId="session-b" />);
+    });
+    await vi.waitFor(() => {
+      expect(rejectors.length).toBe(2);
+    });
+    // 迟到的失败（session-a 的请求现在才 reject）不得触发 onError。
+    rejectors[0](new Error("runtime request failed with status 500"));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(errors).toHaveLength(0);
   });
 });

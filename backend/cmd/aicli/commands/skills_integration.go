@@ -990,6 +990,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			CompatibilityProfile:  provider.Compatibility.Profile,
 			Timeout:               timeout,
 			MaxRetries:            maxRetries,
+			MaxTransportRetries:   runtimellm.ProviderMaxTransportRetriesFromAgentConfig(cfg),
 			RetryTuning:           retryTuning,
 			RetryRules:            retryRules,
 			DefaultModel:          provider.DefaultModel,

@@ -19,6 +19,54 @@ import {
   type TrajectorySnapshot,
 } from "@/lib/trajectory/types";
 
+const MAX_SEEN_DELTA_KEYS = 2048;
+
+function trajectoryDeltaKey(
+  kind: TrajectoryEventKind,
+  payload: Record<string, unknown>,
+): string {
+  const streamId =
+    typeof payload.stream_id === "string"
+      ? payload.stream_id.trim()
+      : typeof payload.streamId === "string"
+        ? payload.streamId.trim()
+        : "";
+  const sequenceValue =
+    payload.sequence ?? payload.stream_sequence ?? payload.streamSequence;
+  const sequence =
+    typeof sequenceValue === "number" || typeof sequenceValue === "string"
+      ? String(sequenceValue).trim()
+      : "";
+  if (!streamId || !sequence) {
+    return "";
+  }
+
+  const turnValue = payload.turn_id ?? payload.turnId ?? payload.turn;
+  const turnId =
+    typeof turnValue === "number" || typeof turnValue === "string"
+      ? String(turnValue).trim()
+      : "";
+  const payloadType =
+    typeof payload.type === "string" ? payload.type.trim().toLowerCase() : "";
+  if (
+    kind !== "reasoning" &&
+    payloadType !== "" &&
+    payloadType !== "text" &&
+    payloadType !== "image"
+  ) {
+    // Tool-call chunks may carry their own stream sequence, but they do not
+    // have a mirrored assistant-delta transport and must remain distinct.
+    return "";
+  }
+  const channel =
+    kind === "reasoning" || payloadType === "reasoning"
+      ? "reasoning"
+      : payloadType === "image"
+        ? "image"
+        : "text";
+  return `runtime-delta|${turnId}|${streamId}|${channel}|${sequence}`;
+}
+
 export interface TrajectoryStore {
   getSnapshot(): TrajectorySnapshot;
   /** 推送一条轨迹事件（seq 从 payload._event.sequence 提取；0 = 降级按到达序）。 */
@@ -56,6 +104,7 @@ export function createTrajectoryStore(options?: {
 }): TrajectoryStore {
   let snapshot = createEmptyTrajectory();
   const listeners = new Set<() => void>();
+  const seenDeltaKeys = new Set<string>();
 
   const notify = () => {
     for (const listener of listeners) {
@@ -82,6 +131,7 @@ export function createTrajectoryStore(options?: {
     batcher.clear();
     if (options?.hard) {
       snapshot = createEmptyTrajectory();
+      seenDeltaKeys.clear();
     } else {
       snapshot = {
         ...createEmptyTrajectory(),
@@ -104,8 +154,31 @@ export function createTrajectoryStore(options?: {
   return {
     getSnapshot: () => snapshot,
     push: (kind, payload) => {
+      const normalizedPayload = payload ?? {};
+      const deltaKey = trajectoryDeltaKey(kind, normalizedPayload);
+      if (deltaKey) {
+        if (seenDeltaKeys.has(deltaKey)) {
+          const duplicateSeq = eventSeqOf(normalizedPayload);
+          if (duplicateSeq > 0) {
+            batcher.push(
+              makeTrajectoryEvent("runtime", duplicateSeq, {
+                __trajectory_skip: true,
+              }),
+            );
+          }
+          return;
+        }
+        seenDeltaKeys.add(deltaKey);
+        while (seenDeltaKeys.size > MAX_SEEN_DELTA_KEYS) {
+          const oldest = seenDeltaKeys.values().next().value as string | undefined;
+          if (oldest === undefined) {
+            break;
+          }
+          seenDeltaKeys.delete(oldest);
+        }
+      }
       batcher.push(
-        makeTrajectoryEvent(kind, eventSeqOf(payload ?? {}), payload ?? {}),
+        makeTrajectoryEvent(kind, eventSeqOf(normalizedPayload), normalizedPayload),
       );
     },
     flush,
@@ -120,6 +193,7 @@ export function createTrajectoryStore(options?: {
     dispose: () => {
       batcher.dispose();
       listeners.clear();
+      seenDeltaKeys.clear();
     },
   };
 }

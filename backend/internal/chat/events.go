@@ -2,11 +2,16 @@ package chat
 
 // Runtime event types emitted by the session actor.
 const (
-	EventSessionStart            = "session_start"
-	EventSessionEnd              = "session_end"
-	EventSessionInterrupted      = "session_interrupted"
-	EventAssistantDelta          = "assistant_delta"
-	EventAssistantReasoning      = "assistant_reasoning"
+	EventSessionStart       = "session_start"
+	EventSessionEnd         = "session_end"
+	EventSessionInterrupted = "session_interrupted"
+	EventAssistantDelta     = "assistant_delta"
+	EventAssistantReasoning = "assistant_reasoning"
+	// EventAssistantReasoningDelta is the canonical runtime stream event name.
+	// Keep EventAssistantReasoning above as a compatibility alias for clients
+	// which still publish the historical underscore spelling.
+	EventAssistantReasoningDelta = "assistant.reasoning"
+	EventAssistantImageProgress  = "assistant.image_progress"
 	EventAssistantMessage        = "assistant_message"
 	EventLLMRequestStarted       = "llm_request_started"
 	EventLLMRequestFinished      = "llm_request_finished"

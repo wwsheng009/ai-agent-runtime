@@ -34,8 +34,8 @@ export default defineConfig({
       stdout: "pipe",
     },
     {
-      command: "pnpm dev",
-      env: { VITE_API_PROXY_PORT: "8111" },
+      command: "pnpm --dir . dev",
+      env: { VITE_API_PROXY_PORT: "8111", VITE_DEV_HOST: "127.0.0.1" },
       url: "http://127.0.0.1:5193",
       reuseExistingServer: false,
       timeout: 90_000,

@@ -95,7 +95,9 @@ export function buildProviderRecordFromDraft(
       default_model: draft.defaultModel.trim(),
       supported_models: normalizeStringArrayInput(draft.supportedModelsText),
       support_types: normalizeStringArrayInput(draft.supportTypesText),
-      timeout: draft.timeout.trim(),
+      ...(draft.timeout.trim()
+        ? { timeout: draft.timeout.trim() }
+        : {}),
       truncation_adapter: draft.truncationAdapter.trim(),
       headers: headers.record,
       model_mappings: modelMappings.record,

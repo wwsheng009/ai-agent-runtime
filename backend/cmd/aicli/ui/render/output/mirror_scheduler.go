@@ -29,6 +29,9 @@ type mirrorEntry struct {
 	sinkInvoked  bool
 	// timedOutByWatchdog 标记 entry 已被看门狗按时限封存（callback 仍在跑）。
 	timedOutByWatchdog bool
+	// abandonedByRetire 标记 slot 在 callback 返回前被 lifecycle finalizer
+	// 接管；该 callback 的稍后返回只能作为 late diagnostic。
+	abandonedByRetire bool
 	// wdDone 由 worker/drain 在移除 watchdog 时关闭，令 watchdogWait 退出。
 	wdOnce sync.Once
 	wdDone chan struct{}
@@ -36,31 +39,33 @@ type mirrorEntry struct {
 
 // mirrorSlot 管理一个 mirror 的 bounded 队列与 entry seal。
 type mirrorSlot struct {
-	g          *RenderOutputGateway
-	index      int
-	cfg        RenderMirror
-	desc       TargetDescriptor
-	queue      chan *mirrorEntry
-	routeEpoch uint64
-	mu         sync.Mutex
-	startOnce  sync.Once
-	retireOnce sync.Once
-	retireCh   chan struct{}
-	retired    bool
-	started    bool
-	pending    int
-	inFlight   int
-	scheduled  uint64
-	applied    uint64
-	skipped    uint64
-	failed     uint64
-	timedOut   uint64
-	late       uint64
-	drops      uint64
+	g           *RenderOutputGateway
+	index       int
+	cfg         RenderMirror
+	desc        TargetDescriptor
+	queue       chan *mirrorEntry
+	routeEpoch  uint64
+	mu          sync.Mutex
+	startOnce   sync.Once
+	retireOnce  sync.Once
+	retireCh    chan struct{}
+	retired     bool
+	retireClass DeliveryErrorClass
+	started     bool
+	pending     int
+	inFlight    int
+	scheduled   uint64
+	applied     uint64
+	skipped     uint64
+	failed      uint64
+	timedOut    uint64
+	late        uint64
+	drops       uint64
 	// highWater 是 queue 同时 in-flight+pending 的最大值（overload health）。
 	highWater int
 	// watchdog 跟踪正在执行的 callback 的时限（key=entry）。
 	watchdog map[*mirrorEntry]ClockTimer
+	active   map[*mirrorEntry]struct{}
 }
 
 func newMirrorSlot(g *RenderOutputGateway, index int, cfg RenderMirror, routeEpoch ...uint64) *mirrorSlot {
@@ -82,6 +87,7 @@ func newMirrorSlot(g *RenderOutputGateway, index int, cfg RenderMirror, routeEpo
 		routeEpoch: epoch,
 		watchdog:   map[*mirrorEntry]ClockTimer{},
 		retireCh:   make(chan struct{}),
+		active:     map[*mirrorEntry]struct{}{},
 	}
 }
 
@@ -130,6 +136,7 @@ func (ms *mirrorSlot) retireWithError(class DeliveryErrorClass) {
 	ms.retireOnce.Do(func() {
 		ms.mu.Lock()
 		ms.retired = true
+		ms.retireClass = class
 		close(ms.retireCh)
 		for {
 			select {
@@ -140,6 +147,22 @@ func (ms *mirrorSlot) retireWithError(class DeliveryErrorClass) {
 				ms.g.mu.Unlock()
 				queued = append(queued, entry)
 			default:
+				for entry := range ms.active {
+					if entry.sealed {
+						continue
+					}
+					entry.abandonedByRetire = true
+					entry.timedOutByWatchdog = true
+					if wd, ok := ms.watchdog[entry]; ok {
+						wd.Stop()
+						delete(ms.watchdog, entry)
+						entry.wdOnce.Do(func() { close(entry.wdDone) })
+					}
+					entry.status = MirrorFailed
+					entry.errClass = class
+					entry.errMsg = string(class)
+					ms.sealEntryLocked(entry, "drain")
+				}
 				ms.mu.Unlock()
 				return
 			}
@@ -239,8 +262,8 @@ func (ms *mirrorSlot) workerLoop() {
 				ms.g.stats.mirrorPending--
 				ms.g.mu.Unlock()
 				entry.status = MirrorFailed
-				entry.errClass = DeliveryErrorClosed
-				entry.errMsg = string(DeliveryErrorClosed)
+				entry.errClass = ms.retireClass
+				entry.errMsg = string(ms.retireClass)
 				entry.sinkInvoked = false
 				entry.callbackDone = false
 				ms.sealEntryLocked(entry, "drain")
@@ -249,11 +272,33 @@ func (ms *mirrorSlot) workerLoop() {
 			}
 			ms.pending--
 			ms.inFlight++
+			ms.active[entry] = struct{}{}
 			entry.sinkInvoked = true
 			ms.g.mu.Lock()
 			ms.g.stats.mirrorPending--
 			ms.g.stats.mirrorInFlight++
 			ms.g.mu.Unlock()
+			ms.mu.Unlock()
+
+			// A lifecycle finalizer may have retired the slot after the
+			// dequeue but before callback admission.  Convert that ticket to
+			// a synthetic terminal entry rather than invoking the sink.
+			ms.mu.Lock()
+			if ms.retired {
+				entry.abandonedByRetire = true
+				entry.timedOutByWatchdog = true
+				entry.status = MirrorFailed
+				entry.errClass = ms.retireClass
+				entry.errMsg = string(ms.retireClass)
+				ms.sealEntryLocked(entry, "drain")
+				delete(ms.active, entry)
+				ms.inFlight--
+				ms.g.mu.Lock()
+				ms.g.stats.mirrorInFlight--
+				ms.g.mu.Unlock()
+				ms.mu.Unlock()
+				continue
+			}
 			ms.mu.Unlock()
 
 			ms.g.publish(OutputEvent{
@@ -305,6 +350,7 @@ func (ms *mirrorSlot) workerLoop() {
 
 			ms.mu.Lock()
 			ms.inFlight--
+			delete(ms.active, entry)
 			ms.g.mu.Lock()
 			ms.g.stats.mirrorInFlight--
 			ms.g.mu.Unlock()
@@ -333,6 +379,7 @@ func (ms *mirrorSlot) workerLoop() {
 						Err:        NewClassifiedError(DeliveryErrorClosed, "gateway closed"),
 					})
 					ms.sealEntryLocked(entry, "drain")
+					delete(ms.active, entry)
 					ms.mu.Unlock()
 				default:
 					return

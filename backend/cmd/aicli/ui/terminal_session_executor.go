@@ -12,6 +12,15 @@ import (
 // would risk an untracked terminal write.
 var ErrTerminalTransactionMissingResult = errors.New("terminal transaction omitted claimed history result")
 
+// terminalScrollbackResetBackoff bounds how frequently the executor may re-enter
+// a full scrollback reset + replay after a failed or dropped reconciliation.
+// A persistently failing physical writer would otherwise spin on
+// reset -> replay-all -> fail -> reset forever; production pprof observed this
+// as unbounded history replay plus GC pressure. The backoff yields the worker
+// so the next explicit Request (from a real state change) retries instead of
+// the executor burning CPU in a tight recovery loop.
+const terminalScrollbackResetBackoff = 100 * time.Millisecond
+
 // TerminalSessionExecutor is the bounded physical worker used by
 // TerminalSessionPresenter. It claims one reducer-owned history token, derives
 // one immutable AppState frame and commits the combined transaction. It never
@@ -32,10 +41,46 @@ type TerminalSessionExecutor struct {
 	closed    bool
 	wg        sync.WaitGroup
 	done      chan struct{}
+
+	// lastResetAt / lastResetEpoch are the scrollback recovery progress guard.
+	// A reconciliation that did not converge must not be re-armed on the next
+	// worker cycle; these fields rate-limit full scrollback resets so a failing
+	// writer cannot turn the executor into an unbounded reset+replay loop.
+	lastResetAt    time.Time
+	lastResetEpoch uint64
+	// lastResetRevision is the controller state revision at the time of the
+	// last scrollback reset. The backoff only engages when the state has NOT
+	// advanced since that reset (i.e., a non-progressing loop). A new action
+	// (new revision) always allows recovery.
+	lastResetRevision uint64
 }
 
 func NewTerminalSessionExecutor(controller *UIController, session *TerminalSession) *TerminalSessionExecutor {
 	return &TerminalSessionExecutor{controller: controller, session: session}
+}
+
+// scrollbackResetBackoff reports whether the executor must yield before
+// attempting another full scrollback reset. It engages only when the last
+// reset happened within the backoff window AND the controller state revision
+// has not advanced since then — the signature of a non-progressing
+// reset+replay loop. A new action (new revision) always allows recovery.
+func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateRevision uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.lastResetAt.IsZero() &&
+		e.lastResetRevision == stateRevision &&
+		time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
+}
+
+// recordScrollbackReset persists the progress-guard state after a confirmed
+// scrollback reset so the next worker cycle can rate-limit a non-converging
+// recovery without blocking legitimate retries under a new revision.
+func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateRevision uint64) {
+	e.mu.Lock()
+	e.lastResetAt = time.Now()
+	e.lastResetEpoch = epoch
+	e.lastResetRevision = stateRevision
+	e.mu.Unlock()
 }
 
 // HandleEffect is the presenter-side effect adapter. It accepts only
@@ -169,6 +214,15 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	e.controller.WaitIdle()
 	schedule := e.controller.terminalSessionSchedule()
 	if schedule.recoveryActionable {
+		// Scrollback-reset backoff: a failing writer must not turn the
+		// executor into an unbounded reset+replay loop. If the last reset
+		// happened within the backoff window AND the state revision has not
+		// advanced since then, yield the worker. A new action (new revision)
+		// always allows recovery — the reset is a genuine retry, not a loop.
+		if e.scrollbackResetBackoff(schedule.stateRevision) {
+			return false
+		}
+
 		snapshot := e.controller.terminalSessionSnapshot(0)
 		if !terminalSessionSnapshotRecoveryActionable(snapshot) {
 			// The schedule changed after the first scalar read. Run one fresh
@@ -185,6 +239,9 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
 		}
 		result := e.session.FlushTransaction(plan)
+		if result.ScrollbackReset {
+			e.recordScrollbackReset(result.TerminalEpoch, schedule.stateRevision)
+		}
 		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 	}
 	claimedToken := uint64(0)
@@ -205,6 +262,9 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
 		}
 		result := e.session.FlushTransaction(plan)
+		if result.ScrollbackReset {
+			e.recordScrollbackReset(result.TerminalEpoch, schedule.stateRevision)
+		}
 		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 	}
 	if claimedToken != 0 && snapshot.claimed == nil {

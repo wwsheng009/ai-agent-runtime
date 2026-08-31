@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
-	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
@@ -116,11 +114,6 @@ type FixedBottomSurface struct {
 	// ScreenLease delegates DEC 1049 and fullscreen frame bytes to this
 	// transport instead of retaining a second terminal writer.
 	alternateTransport AlternateScreenLeaseTransport
-	// legacyBinding（Phase 3）存在时，flush 路径把 surface bytes 经
-	// gateway binding 提交（一次 flush 一笔 primary transaction），不再直写
-	// process writer。nil 保持旧 process-compat 行为（启动前）。
-	legacyBinding    *LegacySurfaceBinding
-	legacyBindingCtx context.Context
 	// ownedFrameFlushCount counts frames actually emitted by the owned
 	// viewport renderer. Exposed for lease tests that assert flush
 	// suppression while an alternate-screen lease is active.
@@ -300,19 +293,6 @@ func (s *FixedBottomSurface) SetAlternateScreenLeaseTransport(transport Alternat
 	s.mu.Unlock()
 }
 
-// SetLegacyBinding（Phase 3）把 surface flush 输出绑定到 gateway port。
-// binding 非 nil 时，flushLegacyANSIHoldingLock/flushHoldingLock 的输出经
-// LegacyTransactionAdapter 提交（一次 flush 一笔 primary transaction），
-// 不再直写 process writer。nil 恢复 process-compat 行为。
-func (s *FixedBottomSurface) SetLegacyBinding(binding *LegacySurfaceBinding) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.legacyBinding = binding
-	s.mu.Unlock()
-}
-
 func (s *FixedBottomSurface) physicalWritesEnabledLocked() bool {
 	if s == nil {
 		return false
@@ -420,21 +400,11 @@ func (s *FixedBottomSurface) flushHandoffHoldingLock(writer io.Writer, plan rend
 // on the same Presenter batch path as owned frames. Callers already hold the
 // shared terminal write lock.
 //
-// Phase 3：legacy binding 存在时，一次 flush 提交一笔 primary transaction
-// （LegacyTransactionAdapter），不再直写 process writer。
+// Phase 6：legacy binding 已删除，一次 flush 直接提交 process writer
+// （TerminalOutput），不再路由到 gateway（capture/mirror 由 presenter
+// 层负责）。
 func (s *FixedBottomSurface) flushLegacyANSIHoldingLock(sequence string) {
 	if s == nil || sequence == "" {
-		return
-	}
-	binding := s.legacyBinding
-	if binding != nil {
-		geometry := GeometryState{Width: s.terminal.Width(), Height: s.terminal.Height()}
-		if _, err := FlushLegacySurfaceBytes(context.Background(), binding,
-			outputpkg.TransactionLegacyFlush, "fixed_bottom_surface", geometry, sequence); err != nil {
-			// binding 失效（session 已关闭）：静默丢弃，绝不回落 process
-			// writer（late goroutine 串写防护）。
-			return
-		}
 		return
 	}
 	_ = s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {

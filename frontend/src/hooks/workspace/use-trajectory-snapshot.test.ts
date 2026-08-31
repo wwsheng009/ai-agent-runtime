@@ -68,6 +68,41 @@ describe("createTrajectoryStore（快照订阅 store）", () => {
     store.dispose();
   });
 
+  it("双通道相同 provider delta 只进入轨迹一次", () => {
+    const store = createTrajectoryStore();
+    // The chat SSE and runtime stream have different durable EventStore seq
+    // values, but share the provider stream identity.
+    store.push("chunk", {
+      type: "text",
+      content: "a",
+      stream_id: "stream-1",
+      sequence: 1,
+      _event: { sequence: 1 },
+    });
+    store.push("chunk", {
+      type: "text",
+      content: "a",
+      stream_id: "stream-1",
+      sequence: 1,
+      _event: { sequence: 2 },
+    });
+    store.push("chunk", {
+      type: "text",
+      content: "b",
+      stream_id: "stream-1",
+      sequence: 2,
+      _event: { sequence: 3 },
+    });
+    store.flush();
+    const text = store.getSnapshot().items.find((item) => item.id === "assistant");
+    expect(text?.head.kind).toBe("text");
+    if (text?.head.kind === "text") {
+      expect(text.head.content).toBe("ab");
+    }
+    expect(store.getSnapshot().lastEventSeq).toBe(3);
+    store.dispose();
+  });
+
   it("dispose 幂等（重复调用不抛错，之后 push 仍安全）", () => {
     const store = createTrajectoryStore();
     store.dispose();

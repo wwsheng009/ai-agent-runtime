@@ -456,10 +456,10 @@ func decodeMapAny(raw interface{}) map[string]interface{} {
 	return nil
 }
 
-func runtimeMessageToAdapterMessage(msg types.Message, protocol string, providerHint string) map[string]interface{} {
+func runtimeMessageToAdapterMessage(msg types.Message, protocol string, providerHint string, modelHints ...string) map[string]interface{} {
 	reasoning := reasoningFromMessageMetadata(msg.Metadata)
 	toolCalls := EncodeRuntimeToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, mapFromMetadata(msg.Metadata))
+	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, firstNonEmptyHint(modelHints), mapFromMetadata(msg.Metadata))
 }
 
 // RuntimeMessagesToProtocolMessages converts normalized runtime messages into
@@ -470,16 +470,24 @@ func RuntimeMessagesToProtocolMessages(messages []types.Message, protocol string
 	}
 
 	providerHint := ""
+	modelHint := ""
 	for _, hint := range providerHints {
-		if trimmed := strings.TrimSpace(hint); trimmed != "" {
+		trimmed := strings.TrimSpace(hint)
+		if trimmed == "" {
+			continue
+		}
+		if providerHint == "" {
 			providerHint = trimmed
-			break
+			continue
+		}
+		if modelHint == "" {
+			modelHint = trimmed
 		}
 	}
 
 	result := make([]map[string]interface{}, 0, len(messages))
 	for _, msg := range messages {
-		result = append(result, runtimeMessageToAdapterMessage(msg, protocol, providerHint))
+		result = append(result, runtimeMessageToAdapterMessage(msg, protocol, providerHint, modelHint))
 	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		result = sanitizeCodexProtocolMessages(result)
@@ -900,7 +908,7 @@ func protocolMessageToolCallIDs(message map[string]interface{}) map[string]struc
 	return ids
 }
 
-func providerMessageToAdapterMessage(msg Message, protocol string, providerHint string) map[string]interface{} {
+func providerMessageToAdapterMessage(msg Message, protocol string, providerHint string, modelHints ...string) map[string]interface{} {
 	reasoning := reasoningFromMapMetadata(msg.Metadata)
 	if reasoning == nil && strings.TrimSpace(msg.Reasoning) != "" {
 		reasoning = &types.ReasoningBlock{
@@ -909,10 +917,10 @@ func providerMessageToAdapterMessage(msg Message, protocol string, providerHint 
 		}
 	}
 	toolCalls := encodeProviderToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, msg.Metadata)
+	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, firstNonEmptyHint(modelHints), msg.Metadata)
 }
 
-func buildProtocolMessageMap(role, content string, contentParts []types.ContentPart, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, protocol string, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
+func buildProtocolMessageMap(role, content string, contentParts []types.ContentPart, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, protocol string, providerHint string, modelHint string, messageMetadata map[string]interface{}) map[string]interface{} {
 	// contentParts carries structured multimodal content (text + images).
 	// Protocol builders currently still read from messageMetadata for backward
 	// compatibility; a future refactor will migrate them to use contentParts
@@ -928,11 +936,11 @@ func buildProtocolMessageMap(role, content string, contentParts []types.ContentP
 	case "gemini":
 		return buildGeminiProtocolMessage(role, content, toolCalls, toolCallID, reasoning, messageMetadata)
 	default:
-		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, providerHint, messageMetadata)
+		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, providerHint, modelHint, messageMetadata)
 	}
 }
 
-func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
+func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, providerHint string, modelHint string, messageMetadata map[string]interface{}) map[string]interface{} {
 	message := map[string]interface{}{
 		"role": role,
 	}
@@ -977,7 +985,7 @@ func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]int
 		}
 		if reasoningContent, ok := stringMetadataValueAllowEmpty(messageMetadata, "reasoning_content"); ok {
 			message["reasoning_content"] = reasoningContent
-		} else if reasoningContent, ok := replayableOpenAIReasoningContent(toolCalls, reasoning, providerHint); ok {
+		} else if reasoningContent, ok := replayableOpenAIReasoningContent(toolCalls, reasoning, providerHint, modelHint); ok {
 			message["reasoning_content"] = reasoningContent
 		}
 	}
@@ -992,10 +1000,10 @@ func buildCodexProtocolMessage(role, content string, toolCalls []map[string]inte
 				"content": parts,
 			}
 		}
-		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", nil)
+		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", "", nil)
 	}
 
-	message := buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", nil)
+	message := buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", "", nil)
 	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
 		return message
 	}
@@ -1225,23 +1233,37 @@ func buildAnthropicProtocolMessage(role, content string, toolCalls []map[string]
 
 		if reasoning != nil {
 			if blocks := decodeSliceOfMaps(reasoning.Metadata[reasoningMetadataAnthropicBlocksKey]); len(blocks) > 0 {
-				message["content"] = blocks
+				message["content"] = normalizeAnthropicReplayContentBlocks(blocks)
 				return message
 			}
 		}
 
 		blocks := make([]map[string]interface{}, 0, len(toolCalls)+2)
 		if reasoning != nil && (strings.TrimSpace(reasoning.DisplayText()) != "" || strings.TrimSpace(reasoning.OpaqueState) != "") {
-			block := map[string]interface{}{
-				"type": "thinking",
+			text := strings.TrimSpace(reasoning.DisplayText())
+			opaque := strings.TrimSpace(reasoning.OpaqueState)
+			if text == "" {
+				// Signature-only reasoning（如上游 omitted-display 或 streaming
+				// 中断只回 signature）：Anthropic 的 thinking 块要求 `thinking`
+				// 字段必填且原样回传；存储层不区分「空文本」与「无文本」，
+				// 无法还原空串形态，因此降级输出 redacted_thinking 块——
+				// 官方规定的无可见文本重放格式，严格网关不会拒绝。
+				if opaque != "" {
+					blocks = append(blocks, map[string]interface{}{
+						"type": "redacted_thinking",
+						"data": opaque,
+					})
+				}
+			} else {
+				block := map[string]interface{}{
+					"type":     "thinking",
+					"thinking": text,
+				}
+				if opaque != "" {
+					block["signature"] = opaque
+				}
+				blocks = append(blocks, block)
 			}
-			if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
-				block["thinking"] = text
-			}
-			if opaque := strings.TrimSpace(reasoning.OpaqueState); opaque != "" {
-				block["signature"] = opaque
-			}
-			blocks = append(blocks, block)
 		}
 		if strings.TrimSpace(content) != "" {
 			blocks = append(blocks, map[string]interface{}{
@@ -1301,6 +1323,56 @@ func buildAnthropicProtocolMessage(role, content string, toolCalls []map[string]
 		message["content"] = content
 	}
 	return message
+}
+
+// normalizeAnthropicReplayContentBlocks 规范化从历史 metadata 透传的
+// Anthropic content blocks。Anthropic 要求 thinking 块必须携带 `thinking`
+// 字段；残缺块（缺字段的 thinking 或纯 signature）会让严格网关以
+// "thinking.thinking: Field required" 拒绝整个请求。
+func normalizeAnthropicReplayContentBlocks(blocks []map[string]interface{}) []map[string]interface{} {
+	if len(blocks) == 0 {
+		return blocks
+	}
+	result := make([]map[string]interface{}, 0, len(blocks))
+	changed := false
+	for _, block := range blocks {
+		if block == nil {
+			changed = true
+			continue
+		}
+		typ, _ := block["type"].(string)
+		if typ != "thinking" {
+			result = append(result, block)
+			continue
+		}
+		if text, _ := block["thinking"].(string); strings.TrimSpace(text) != "" {
+			// 官方要求 thinking 块原样回传；有可见文本的直接放行。
+			result = append(result, block)
+			continue
+		}
+		if _, exists := block["thinking"].(string); exists {
+			// thinking 键存在但值为空串：官方 omitted-display 模式下
+			// {"type":"thinking","thinking":"","signature":...} 是合法形态，
+			// 必须原样保留，不能当作缺失改写成 redacted_thinking。
+			result = append(result, block)
+			continue
+		}
+		// thinking 键完全缺失：残缺块，有 signature 则降级为 redacted_thinking。
+		if signature, _ := block["signature"].(string); strings.TrimSpace(signature) != "" {
+			changed = true
+			result = append(result, map[string]interface{}{
+				"type": "redacted_thinking",
+				"data": strings.TrimSpace(signature),
+			})
+			continue
+		}
+		// 既无 thinking 字段也无 signature：丢弃空块。
+		changed = true
+	}
+	if !changed {
+		return blocks
+	}
+	return result
 }
 
 func anthropicToolUseBlock(toolCall map[string]interface{}) map[string]interface{} {
@@ -1490,10 +1562,20 @@ func boolMetadataValue(metadata map[string]interface{}, key string) (bool, bool)
 	return value, true
 }
 
-func replayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, providerHint string) (string, bool) {
+func replayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, providerHint string, modelHint string) (string, bool) {
 	return providercompat.ReplayableOpenAIReasoningContent(providercompat.Context{
 		ProviderName: providerHint,
+		Model:        modelHint,
 	}, toolCalls, reasoning)
+}
+
+func firstNonEmptyHint(hints []string) string {
+	for _, hint := range hints {
+		if trimmed := strings.TrimSpace(hint); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // EncodeRuntimeToolCalls 将运行时 ToolCall 列表编码为统一格式层的 wire 形状：

@@ -90,6 +90,10 @@ type StreamChunk struct {
 	Done     bool                   `json:"done,omitempty" yaml:"done,omitempty"`
 	Error    string                 `json:"error,omitempty" yaml:"error,omitempty"`
 	Metadata map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	StreamID string                 `json:"stream_id,omitempty" yaml:"stream_id,omitempty"`
+	Sequence uint64                 `json:"sequence,omitempty" yaml:"sequence,omitempty"`
+	TurnID   string                 `json:"turn_id,omitempty" yaml:"turn_id,omitempty"`
+	Step     int                    `json:"step,omitempty" yaml:"step,omitempty"`
 }
 
 // StreamEventType 流事件类型

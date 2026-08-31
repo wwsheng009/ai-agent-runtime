@@ -187,6 +187,15 @@ type HistoryCommitLedger struct {
 	bySource           map[historyCommitSourceKey]map[uint64]struct{}
 	activeTokensByCell map[scene.CellID][]uint64
 	pendingCount       int
+	// unresolvedCount caches the number of entries that require terminal
+	// recovery (Failed, or Invalidated with MayHavePartiallyWritten). It keeps
+	// hasUnresolvedTerminalDelivery O(1); production pprof showed the previous
+	// full-map scan inside the per-action wake predicate as a hot spot.
+	unresolvedCount int
+	// tokens is the deduplicated, ascending set of live token identities. It
+	// mirrors byToken keys so orderedTokens avoids a per-call sort allocation;
+	// byToken has no delete path, so the slice only ever grows.
+	tokens []uint64
 }
 
 func NewHistoryCommitLedger() *HistoryCommitLedger {
@@ -195,6 +204,7 @@ func NewHistoryCommitLedger() *HistoryCommitLedger {
 		byRange:            make(map[historyCommitRangeKey]uint64),
 		bySource:           make(map[historyCommitSourceKey]map[uint64]struct{}),
 		activeTokensByCell: make(map[scene.CellID][]uint64),
+		tokens:             make([]uint64, 0, 64),
 	}
 }
 
@@ -229,6 +239,7 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	}
 	l.byToken[commit.Token] = HistoryCommitEntry{Commit: commit.Clone(), State: HistoryCommitPending}
 	l.byRange[key] = commit.Token
+	l.tokens = insertSortedToken(l.tokens, commit.Token)
 	sourceKey := historyCommitSourceIdentity(commit)
 	if l.bySource[sourceKey] == nil {
 		l.bySource[sourceKey] = make(map[uint64]struct{})
@@ -314,6 +325,12 @@ func (l *HistoryCommitLedger) Invalidate(token uint64) (wasInFlight bool, err er
 	}
 	wasInFlight = entry.State == HistoryCommitInFlight
 	entry.State = HistoryCommitInvalidated
+	// An invalidated in-flight transaction had MayHavePartiallyWritten set to
+	// true below, which counts as an unresolved terminal delivery. The counter
+	// is monotonic (unresolved entries never revert to resolved).
+	if wasInFlight {
+		l.unresolvedCount++
+	}
 	// An in-flight transaction can already have written a prefix before a
 	// semantic replacement or geometry barrier reaches the actor. Preserve that
 	// fact on the ledger entry so later planning never treats this identity as a
@@ -366,6 +383,9 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 	entry.State = HistoryCommitStateFailed
 	entry.Failure = err
 	entry.MayHavePartiallyWritten = mayHavePartiallyWritten
+	// HistoryCommitStateFailed is always unresolved regardless of
+	// MayHavePartiallyWritten.
+	l.unresolvedCount++
 	l.byToken[token] = entry
 	return nil
 }
@@ -420,20 +440,10 @@ func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSource
 }
 
 func (l *HistoryCommitLedger) hasUnresolvedTerminalDelivery() bool {
-	if l == nil {
-		return false
-	}
-	for _, entry := range l.byToken {
-		switch entry.State {
-		case HistoryCommitStateFailed:
-			return true
-		case HistoryCommitInvalidated:
-			if entry.MayHavePartiallyWritten {
-				return true
-			}
-		}
-	}
-	return false
+	// Counter-backed O(1) predicate. The counter is monotonic: entries reach
+	// Failed or Invalidated-with-partial-write and never revert to a resolved
+	// state (no path re-arms DeferInFlight/Ack/Invalidate from those states).
+	return l != nil && l.unresolvedCount > 0
 }
 
 func (l *HistoryCommitLedger) hasOlderPendingOrInFlight(token uint64) bool {
@@ -455,6 +465,15 @@ func (l *HistoryCommitLedger) orderedTokens() []uint64 {
 	if l == nil || len(l.byToken) == 0 {
 		return nil
 	}
+	if len(l.tokens) == len(l.byToken) {
+		// Fast path: every key went through Enqueue, so the cached ascending
+		// slice is authoritative. Return a detached view; callers may not
+		// mutate the ledger's internal token ordering.
+		return append([]uint64(nil), l.tokens...)
+	}
+	// Defensive fallback: an externally constructed ledger (tests, hand-rolled
+	// state) bypassed Enqueue. Rebuild the ordering from the map so behavior
+	// stays identical even though the cache never observed those keys.
 	tokens := make([]uint64, 0, len(l.byToken))
 	for token := range l.byToken {
 		tokens = append(tokens, token)
@@ -487,6 +506,8 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		clone.activeTokensByCell[cellID] = append([]uint64(nil), tokens...)
 	}
 	clone.pendingCount = l.pendingCount
+	clone.unresolvedCount = l.unresolvedCount
+	clone.tokens = append([]uint64(nil), l.tokens...)
 	return clone
 }
 
@@ -496,4 +517,16 @@ func (l *HistoryCommitLedger) entry(token uint64) (HistoryCommitEntry, bool) {
 	}
 	entry, ok := l.byToken[token]
 	return entry, ok
+}
+
+// insertSortedToken inserts token into the ascending slice s and returns it.
+// s must already be sorted ascending; token is assumed absent (Enqueue is the
+// only insertion point and byToken has no delete path, so duplicates cannot
+// occur).
+func insertSortedToken(s []uint64, token uint64) []uint64 {
+	at := sort.Search(len(s), func(i int) bool { return s[i] >= token })
+	s = append(s, 0)
+	copy(s[at+1:], s[at:])
+	s[at] = token
+	return s
 }

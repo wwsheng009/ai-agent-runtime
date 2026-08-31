@@ -47,12 +47,17 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 	if !effects.HasPending() || effects.ledger == nil {
 		return snapshot
 	}
-	for token, entry := range effects.ledger.byToken {
-		if entry.State != HistoryCommitPending || (snapshot.pendingToken != 0 && token >= snapshot.pendingToken) {
+	// Use the ordered token cache so the schedule predicate avoids a full-map
+	// scan on every executor cycle. The first pending entry in ascending order
+	// is the oldest eligible claim.
+	for _, token := range effects.ledger.orderedTokens() {
+		entry, ok := effects.ledger.byToken[token]
+		if !ok || entry.State != HistoryCommitPending {
 			continue
 		}
 		snapshot.pendingToken = token
 		snapshot.pendingGeneration = entry.Commit.LayoutGeneration
+		break
 	}
 	return snapshot
 }

@@ -83,6 +83,22 @@ describe("runtime-provider-domain-editor", () => {
     });
   });
 
+  it("omits timeout key when the timeout input is cleared", () => {
+    const result = buildProviderRecordFromDraft(createDraft({ timeout: "" }));
+
+    expect(result.error).toBeNull();
+    expect(result.record).not.toHaveProperty("timeout");
+  });
+
+  it("keeps raw timeout string preserving whitespace trimming", () => {
+    const result = buildProviderRecordFromDraft(
+      createDraft({ timeout: "  90s  " }),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.record).toMatchObject({ timeout: "90s" });
+  });
+
   it("rejects invalid provider JSON fields", () => {
     const result = buildProviderRecordFromDraft(
       createDraft({

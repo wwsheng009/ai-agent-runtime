@@ -599,3 +599,13 @@ func TestP4PhysicalPartialVirtualAttempted(t *testing.T) {
 		t.Fatalf("attempted partial must not be valid: %+v", proj)
 	}
 }
+
+// shortWriteWriter 声称写入少于请求字节（违反完整写契约→物理 sink 标 unknown）。
+type shortWriteWriter struct{ n int }
+
+func (w *shortWriteWriter) Write(p []byte) (int, error) {
+	if w.n > len(p) {
+		w.n = len(p)
+	}
+	return w.n, nil
+}

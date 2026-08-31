@@ -33,6 +33,40 @@ func TestAnthropicProcessResponseExtractsThinkingBlock(t *testing.T) {
 	}
 }
 
+func TestAnthropicProcessResponseRedactedThinkingKeepsPlainData(t *testing.T) {
+	adapter := &AnthropicAdapter{}
+	result := adapter.ProcessResponse(map[string]interface{}{
+		"content": []interface{}{
+			map[string]interface{}{
+				"type": "redacted_thinking",
+				"data": "rt-data-1",
+			},
+			map[string]interface{}{
+				"type": "text",
+				"text": "结果如下",
+			},
+		},
+	})
+
+	if result.ReasoningBlock == nil {
+		t.Fatal("expected anthropic reasoning block")
+	}
+	// OpaqueState 必须只存 data 值本身；若把整块 JSON 塞进去，
+	// 重建重放时会输出双重序列化的 data 字段导致 400。
+	if result.ReasoningBlock.OpaqueState != "rt-data-1" {
+		t.Fatalf("expected plain data in OpaqueState, got %q", result.ReasoningBlock.OpaqueState)
+	}
+	if strings.Contains(result.ReasoningBlock.OpaqueState, "redacted_thinking") {
+		t.Fatalf("OpaqueState must not contain the block JSON: %q", result.ReasoningBlock.OpaqueState)
+	}
+	if !result.ReasoningBlock.ReplayRequired {
+		t.Fatal("expected ReplayRequired for redacted_thinking signature")
+	}
+	if result.Reasoning != "" {
+		t.Fatalf("redacted_thinking must not surface visible reasoning, got %q", result.Reasoning)
+	}
+}
+
 func TestGeminiProcessResponseExtractsThoughtSummaryAndSignature(t *testing.T) {
 	adapter := &GeminiAdapter{}
 	result := adapter.ProcessResponse(map[string]interface{}{

@@ -2,7 +2,6 @@ package ui
 
 import (
 	"errors"
-	"sort"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -64,13 +63,11 @@ func (s HistoryEffectQueueState) Pending() []HistoryCommit {
 		return nil
 	}
 	commits := make([]HistoryCommit, 0, s.ledger.pendingCount)
-	for _, entry := range s.ledger.byToken {
-		if entry.State == HistoryCommitPending {
+	for _, token := range s.ledger.orderedTokens() {
+		entry, ok := s.ledger.byToken[token]
+		if ok && entry.State == HistoryCommitPending {
 			commits = append(commits, entry.Commit.Clone())
 		}
-	}
-	if len(commits) > 1 {
-		sort.Slice(commits, func(i, j int) bool { return commits[i].Token < commits[j].Token })
 	}
 	return commits
 }
@@ -227,6 +224,8 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		if !ok || entry.State == HistoryCommitAcked {
 			continue
 		}
+		wasUnresolved := entry.State == HistoryCommitStateFailed ||
+			(entry.State == HistoryCommitInvalidated && entry.MayHavePartiallyWritten)
 		switch entry.State {
 		case HistoryCommitPending:
 			s.ledger.pendingCount--
@@ -238,6 +237,15 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		}
 		entry.Failure = cause
 		entry.MayHavePartiallyWritten = true
+		// Keep the unresolved counter monotonic: only a transition into an
+		// unresolved state increments it (Pending/InFlight/plain-Invalidated ->
+		// Failed or Invalidated-with-partial-write). Already-unresolved entries
+		// (Failed, or Invalidated with MayHavePartiallyWritten) do not bump it.
+		nowUnresolved := entry.State == HistoryCommitStateFailed ||
+			(entry.State == HistoryCommitInvalidated && entry.MayHavePartiallyWritten)
+		if !wasUnresolved && nowUnresolved {
+			s.ledger.unresolvedCount++
+		}
 		s.ledger.byToken[delivered.Token] = entry
 	}
 	s.ReconciliationRequired = true

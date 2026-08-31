@@ -55,7 +55,15 @@ func (deepSeekOpenAIAdapter) ReplayableOpenAIReasoningContent(ctx Context, toolC
 		}
 		return "", false
 	}
-	if IsDeepSeek(provider, ctx.BaseURL, ctx.Model) && len(toolCalls) > 0 {
+	// DeepSeek thinking mode rejects requests where an assistant message in a
+	// tool-calling conversation lacks the reasoning_content key entirely
+	// ("The reasoning_content in the thinking mode must be passed back to the
+	// API", HTTP 400). The upstream accepts an explicit empty value, so once
+	// the provider is DeepSeek every assistant message must carry the key —
+	// regardless of whether this turn had tool calls or persisted reasoning.
+	// Without this, plain-text assistant turns inside a tool loop (no
+	// tool_calls, reasoning lost on replay) fail the whole request.
+	if IsDeepSeek(provider, ctx.BaseURL, ctx.Model) {
 		return "", true
 	}
 	return "", false

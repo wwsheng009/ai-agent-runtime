@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	outputpkg "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"golang.org/x/term"
 )
 
@@ -22,30 +20,12 @@ type Terminal struct {
 	driver         *TerminalDriver
 	sizeOverride   bool
 	sizeProbeCount int // RefreshSize invocations; tests assert paint/layout probe budgets
-	// legacyBinding（Phase 3）：非 nil 时控制类方法（title/bell/clear 等）
-	// 经 gateway binding 提交，不再直写 process writer；nil 保持
-	// process-compat（启动前）。
-	legacyBinding *LegacySurfaceBinding
 }
 
-// SetLegacyBinding 绑定 terminal 控制输出到 gateway port。
-func (t *Terminal) SetLegacyBinding(binding *LegacySurfaceBinding) {
-	if t == nil {
-		return
-	}
-	t.legacyBinding = binding
-}
-
-// emitControl 是 terminal 控制序列的统一出口（Phase 6）：binding 非 nil 时
-// 经 gateway 提交（legacy_immediate，可被 capture/mirror 观察），否则回落
-// process TerminalOutput()（启动前 process-compat）。
+// emitControl 是 terminal 控制序列的统一出口（Phase 6）：直接写 process
+// TerminalOutput()（interactive/legacy 路径均以该 writer 为唯一物理出口）。
 func (t *Terminal) emitControl(seq string) {
 	if seq == "" {
-		return
-	}
-	if t != nil && t.legacyBinding != nil {
-		_, _ = FlushLegacySurfaceBytes(context.Background(), t.legacyBinding,
-			outputpkg.TransactionLegacyImmediate, "terminal", t.geometryState(), seq)
 		return
 	}
 	fmt.Fprint(TerminalOutput(), seq)
@@ -330,11 +310,6 @@ func (t *Terminal) SetTitle(title string) {
 	title = strings.ReplaceAll(title, "\x1b", "")
 	title = strings.ReplaceAll(title, "\a", "")
 	seq := "\033]0;" + title + "\a"
-	if t != nil && t.legacyBinding != nil {
-		_, _ = FlushLegacySurfaceBytes(context.Background(), t.legacyBinding,
-			outputpkg.TransactionTitle, "terminal", t.geometryState(), seq)
-		return
-	}
 	t.emitControl(seq)
 
 }
@@ -342,21 +317,8 @@ func (t *Terminal) SetTitle(title string) {
 // ClearTitle 清空由应用设置的终端标题。
 func (t *Terminal) ClearTitle() {
 	seq := "\033]0;\a"
-	if t != nil && t.legacyBinding != nil {
-		_, _ = FlushLegacySurfaceBytes(context.Background(), t.legacyBinding,
-			outputpkg.TransactionTitle, "terminal", t.geometryState(), seq)
-		return
-	}
 	t.emitControl(seq)
 
-}
-
-// geometryState 返回当前尺寸（binding 提交时携带）。
-func (t *Terminal) geometryState() GeometryState {
-	if t == nil {
-		return GeometryState{}
-	}
-	return GeometryState{Width: t.width, Height: t.height}
 }
 
 // CleanupOnExit 恢复终端状态并可选清屏。
@@ -379,15 +341,8 @@ func (t *Terminal) NewLine() {
 	t.emitControl("\r\n")
 }
 
-// PrintAt 在指定位置打印（经 WriteTerminalText 串行化；binding 模式下
-// 光标定位与文本合成一次 legacy transaction 提交）。
+// PrintAt 在指定位置打印（经 WriteTerminalText 串行化）。
 func (t *Terminal) PrintAt(row, col int, text string) {
-	if t != nil && t.legacyBinding != nil {
-		seq := fmt.Sprintf("\x1b[s\x1b[%d;%dH%s\x1b[u", row, col, text)
-		_, _ = FlushLegacySurfaceBytes(context.Background(), t.legacyBinding,
-			outputpkg.TransactionLegacyImmediate, "terminal", t.geometryState(), seq)
-		return
-	}
 	t.SaveCursor()
 	t.MoveTo(row, col)
 	_, _ = WriteTerminalText(TerminalOutput(), text)

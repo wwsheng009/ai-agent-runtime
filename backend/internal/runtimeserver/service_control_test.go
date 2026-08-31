@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -61,7 +62,13 @@ func TestFindListeningPID_FreePortReturnsZero(t *testing.T) {
 	require.NoError(t, listener.Close())
 
 	pid, err := findListeningPIDByPort(port)
-	require.NoError(t, err)
+	if err != nil {
+		// Linux 无 lsof 时端口探测不可用；Windows netstat 始终可用。
+		if runtime.GOOS == "windows" {
+			require.NoError(t, err)
+		}
+		t.Skipf("listening port probe unavailable: %v", err)
+	}
 	require.Zero(t, pid)
 }
 
@@ -99,4 +106,131 @@ func TestParseWindowsNetstatListeningPID(t *testing.T) {
 	pid, err = parseWindowsNetstatListeningPID(output, 9999)
 	require.NoError(t, err)
 	require.Zero(t, pid)
+}
+
+// 本测试进程自己绑定端口充当"受管服务"：监听者必然是本进程 PID。
+// OS PID 复用会造成"记录 PID 存在但服务已死"的误判，端口交叉验证应免疫。
+func TestResolveInstancePID(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("端口探测依赖 Windows netstat")
+	}
+
+	// 1. 记录 PID 与端口监听者一致 → 正常运行。
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	addr := listener.Addr().String()
+	selfPID := os.Getpid()
+
+	pid, alive := ResolveInstancePID(selfPID, addr)
+	require.True(t, alive)
+	require.Equal(t, selfPID, pid)
+
+	// 2. 记录 PID 陈旧（与监听者不符）→ 以端口监听者为准。
+	pid, alive = ResolveInstancePID(999999, addr)
+	require.True(t, alive)
+	require.Equal(t, selfPID, pid)
+
+	// 3. 端口无监听但记录 PID 仍"存在"（被系统复用的无关进程）→ 视为未运行。
+	//    复用场景难复现，用"本进程活着但没监听"模拟：进程存在但该端口
+	//    没有它，判定结果应一致（不杀、不误报）。
+	require.NoError(t, listener.Close())
+	pid, alive = ResolveInstancePID(selfPID, addr)
+	require.False(t, alive)
+	require.Zero(t, pid)
+
+	// 4. 端口无监听且 PID 不存在 → 未运行。
+	pid, alive = ResolveInstancePID(999999, addr)
+	require.False(t, alive)
+	require.Zero(t, pid)
+
+	// 5. 无监听地址时退回进程存在性判断（兼容旧格式 PID 文件）。
+	pid, alive = ResolveInstancePID(selfPID, "")
+	require.True(t, alive)
+	require.Equal(t, selfPID, pid)
+	pid, alive = ResolveInstancePID(999999, "")
+	require.False(t, alive)
+	require.Zero(t, pid)
+
+	// 6. 端口探测不可用（非法地址）→ 退回进程存在性判断，不误判"未运行"。
+	pid, alive = ResolveInstancePID(selfPID, "not-a-valid-addr:::")
+	require.True(t, alive)
+	require.Equal(t, selfPID, pid)
+
+	// 7. 非法记录 PID。
+	pid, alive = ResolveInstancePID(0, addr)
+	require.False(t, alive)
+	require.Zero(t, pid)
+}
+
+func TestResolveStopTarget(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("端口探测依赖 Windows netstat")
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	addr := listener.Addr().String()
+	selfPID := os.Getpid()
+
+	// 1. 记录 PID 与端口监听者一致 → 以记录 PID 为目标。
+	pid, alive, err := ResolveStopTarget(selfPID, addr)
+	require.NoError(t, err)
+	require.True(t, alive)
+	require.Equal(t, selfPID, pid)
+
+	// 2. 记录 PID 陈旧但端口监听者存在：监听者身份不是 runtime-server
+	//    （测试二进制名不含 "runtime-server"）→ 拒绝自动终止，err 非空。
+	pid, alive, err = ResolveStopTarget(999999, addr)
+	require.Error(t, err)
+	require.False(t, alive)
+	require.Zero(t, pid)
+
+	// 3. 端口无监听者（监听者为本测试进程但端口已关闭）→ 未运行。
+	require.NoError(t, listener.Close())
+	pid, alive, err = ResolveStopTarget(selfPID, addr)
+	require.NoError(t, err)
+	require.False(t, alive)
+	require.Zero(t, pid)
+
+	// 4. 无监听地址 → 退回进程存在性判断。
+	pid, alive, err = ResolveStopTarget(selfPID, "")
+	require.NoError(t, err)
+	require.True(t, alive)
+	require.Equal(t, selfPID, pid)
+
+	// 5. 非法记录 PID。
+	pid, alive, err = ResolveStopTarget(0, addr)
+	require.NoError(t, err)
+	require.False(t, alive)
+	require.Zero(t, pid)
+}
+
+func TestLooksLikeRuntimeServerProcess(t *testing.T) {
+	// 测试二进制本身不是 runtime-server 构建。
+	require.False(t, looksLikeRuntimeServerProcess(os.Getpid()))
+	require.False(t, looksLikeRuntimeServerProcess(999999))
+}
+
+func TestTerminationTargetAlive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("端口探测依赖 Windows netstat")
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	selfPID := os.Getpid()
+
+	// 服务存活且端口仍由该 PID 监听。
+	require.True(t, terminationTargetAlive(selfPID, addr))
+
+	// 服务退出但 PID 被"复用"（本进程仍活着）→ 不再判定为存活。
+	require.NoError(t, listener.Close())
+	require.False(t, terminationTargetAlive(selfPID, addr))
+
+	// 无监听地址时退回进程存在性判断。
+	require.True(t, terminationTargetAlive(selfPID, ""))
+	require.False(t, terminationTargetAlive(999999, ""))
 }

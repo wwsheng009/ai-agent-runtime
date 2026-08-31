@@ -480,7 +480,7 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 		RouteEpoch:            g.routeEpoch,
 		ProjectionTargetID:    g.targetDesc.ProjectionTargetID,
 		ProjectionTargetClass: g.targetDesc.Class,
-		BindingGeneration:     0, // Phase 3 前 binding generation 未启用；Phase 0 置 0
+		BindingGeneration:     intent.bindingGeneration,
 		PreparedAt:            g.clock.Now(),
 	}
 	// Keep the exact route membership selected by this admission.  A later
@@ -490,7 +490,6 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 	batch.primarySink = g.primary
 	batch.primaryDesc = g.targetDesc
 	batch.mirrorSlots = append([]*mirrorSlot(nil), g.mirrors...)
-	g.initRecordSlot(batch, len(batch.mirrorSlots))
 	if intent.HistoryEpoch != nil && historyBearingKind(intent.Kind) {
 		ep := *intent.HistoryEpoch
 		batch.History = &HistoryDeliveryDomain{
@@ -498,6 +497,10 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 			HistoryEpoch:       ep,
 		}
 	}
+	// Register the slot only after all gateway-owned batch fields, including
+	// history domain, have been stamped.  initRecordSlot takes a detached copy;
+	// registering earlier would silently drop History from DeliveryRecord.
+	g.initRecordSlot(batch, len(batch.mirrorSlots))
 	g.lastTerminal = intent.Terminal
 	if batch.History != nil {
 		h := *batch.History
@@ -700,9 +703,12 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 		g.trySealRecord(batch.Sequence)
 		return receipt
 	}
-	sinkCtx, cancel := contextWithClockTimeout(g.clock, ctx, g.opts.CloseTimeout) // 无专用 primary timeout，用 close budget 兜底
-	res := deliverWithPanicGuard(sink.Submit, sinkCtx, batch)
-	cancel()
+	// Submit owns the primary invocation runner.  Do not attach the gateway's
+	// CloseTimeout to an ordinary submission: CloseTimeout is a shared
+	// lifecycle budget, not a per-write deadline.  The caller context is still
+	// passed through so sinks with an explicit cancellation contract can report
+	// their real outcome; an uninterruptible sink is quarantined by finishClose.
+	res := deliverWithPanicGuard(sink.Submit, nonNilContext(ctx), batch)
 
 	finishedAt := g.clock.Now()
 	outcomeFixedAt := g.clock.Now()
@@ -1125,7 +1131,6 @@ func (g *RenderOutputGateway) takeReadyRecordLocked(sequence uint64, slot *deliv
 	}
 	slot.sealed = true
 	delete(g.recordSlots, sequence)
-	markContiguous(sequence, &g.recordDoneThrough, g.recordDonePending)
 	return record
 }
 
@@ -1182,6 +1187,13 @@ func (g *RenderOutputGateway) appendDeliveryRecord(record DeliveryRecord) {
 	}
 	g.recordsSealed++
 	g.journalMu.Unlock()
+	// Advance the record cutoff only after the detached record is visible in
+	// the journal.  Advancing it in takeReadyRecordLocked created a small
+	// window where Drain could return before RecentDeliveries observed the
+	// supposedly sealed record.
+	g.recordsMu.Lock()
+	markContiguous(record.Batch.Sequence, &g.recordDoneThrough, g.recordDonePending)
+	g.recordsMu.Unlock()
 	g.signalProgress()
 }
 
@@ -1670,13 +1682,17 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 			g.mu.Unlock()
 			return
 		}
-		g.state = GatewayOpen
-		g.clearReconfigureLocked()
 		g.mu.Unlock()
 		closeRouteResources(finalizeCtx, newRoute, nil, oldRoute)
 		g.mu.Lock()
 		g.completeReconfigureLocked(token,
 			NewClassifiedError(DeliveryErrorTimeout, "reconfigure drain deadline exceeded"))
+		// Keep the admission barrier in place until candidate cleanup and the
+		// memoized result are both fixed.  Publishing Open before populating
+		// reconfigureMemo lets a concurrent Commit observe an apparent token
+		// mismatch in the tiny handoff window.
+		g.state = GatewayOpen
+		g.clearReconfigureLocked()
 		g.mu.Unlock()
 		return
 	}
@@ -1689,12 +1705,12 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 			g.mu.Unlock()
 			return
 		}
-		g.state = GatewayOpen
-		g.clearReconfigureLocked()
 		g.mu.Unlock()
 		closeRouteResources(finalizeCtx, newRoute, nil, oldRoute)
 		g.mu.Lock()
 		g.completeReconfigureLocked(token, nil)
+		g.state = GatewayOpen
+		g.clearReconfigureLocked()
 		g.mu.Unlock()
 		return
 	}
@@ -1704,11 +1720,24 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 		newMirrors = append(newMirrors, newMirrorSlot(g, i, mirror, newEpoch))
 	}
 
+	// Retire the old route before publishing the new route.  Keeping the
+	// gateway in Reconfiguring while this fence runs prevents Close (or a
+	// concurrent finalizer) from observing a half-installed route and closing
+	// the same sink behind the new worker's back.
+	closeRouteResources(finalizeCtx, oldRoute, oldMirrors, newRoute)
+
 	g.mu.Lock()
 	if g.state != GatewayReconfiguring || g.reconfigurePlan.Token != token {
 		for _, ms := range newMirrors {
 			ms.retire()
 		}
+		// The candidate was never installed.  Release any owned candidate
+		// sinks here; a concurrent Close may also have captured it, so sink
+		// implementations must tolerate idempotent Close as required by the
+		// ownership contract.
+		g.mu.Unlock()
+		closeRouteResources(finalizeCtx, newRoute, newMirrors, RenderRouteConfig{})
+		g.mu.Lock()
 		g.completeReconfigureLocked(token,
 			NewClassifiedError(DeliveryErrorClosed, "reconfigure superseded by gateway close"))
 		g.mu.Unlock()
@@ -1720,8 +1749,6 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 	g.route = newRoute
 	g.mirrors = newMirrors
 	g.routeEpoch = newEpoch
-	g.state = GatewayOpen
-	g.clearReconfigureLocked()
 	g.mu.Unlock()
 
 	if running {
@@ -1729,10 +1756,20 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 			ms.start()
 		}
 	}
-	closeRouteResources(finalizeCtx, oldRoute, oldMirrors, newRoute)
-
 	g.mu.Lock()
+	if g.state != GatewayReconfiguring || g.reconfigurePlan.Token != token {
+		// Close can request shutdown while the new slots are being started.
+		// Do not reopen the gateway; finishClose owns the terminal transition.
+		if _, memoized := g.reconfigureMemo[token]; !memoized {
+			g.completeReconfigureLocked(token,
+				NewClassifiedError(DeliveryErrorClosed, "reconfigure superseded by gateway close"))
+		}
+		g.mu.Unlock()
+		return
+	}
 	g.completeReconfigureLocked(token, nil)
+	g.state = GatewayOpen
+	g.clearReconfigureLocked()
 	g.mu.Unlock()
 }
 

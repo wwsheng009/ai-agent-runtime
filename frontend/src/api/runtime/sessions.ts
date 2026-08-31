@@ -58,7 +58,7 @@ export async function fetchSessionRuntimeEvents(
 ): Promise<RuntimeSessionEventsResponse> {
   return fetchRuntimeJson<RuntimeSessionEventsResponse>(
     buildRuntimeUrlWithQuery(
-      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/events`,
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/events`,
       {
         after: query.after,
         limit: query.limit,

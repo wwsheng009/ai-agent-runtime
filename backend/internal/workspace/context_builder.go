@@ -55,6 +55,27 @@ func NewContextBuilder(scan *ScanResult, config *ContextBuilderConfig) *ContextB
 	}
 }
 
+// NewContextBuilderWithIndexes 用预构建的符号索引和引用图创建构建器。
+// 索引构建（NewSymbolIndex / NewReferenceGraph）在扫描大仓库时开销可观，
+// 而搜索与引用查找对索引只读；多次请求复用同一套索引可避免重复构建。
+func NewContextBuilderWithIndexes(scan *ScanResult, symbols *SymbolIndex, references *ReferenceGraph, config *ContextBuilderConfig) *ContextBuilder {
+	if config == nil {
+		config = DefaultContextBuilderConfig()
+	}
+	if symbols == nil {
+		symbols = NewSymbolIndex(scan)
+	}
+	if references == nil {
+		references = NewReferenceGraph(scan)
+	}
+	return &ContextBuilder{
+		scan:       scan,
+		symbols:    symbols,
+		references: references,
+		config:     config,
+	}
+}
+
 // Build 构建工作区上下文
 func (b *ContextBuilder) Build(query string) *WorkspaceContext {
 	ctx := &WorkspaceContext{

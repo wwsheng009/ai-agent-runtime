@@ -28,7 +28,11 @@ func prepareRetry(ctx context.Context, policy retryPolicy, startedAt time.Time, 
 		return result, ctx.Err()
 	}
 
-	result.Decision = policy.decisionForError(err)
+	// An inner provider may have ended an unlimited retry burst at a fast-fail
+	// guard. Reclassify only an explicitly marked handoff for this finite outer
+	// execution loop so a fresh request can still be attempted. Final failure
+	// diagnostics intentionally remain terminal via decisionForError.
+	result.Decision = policy.decisionForRetry(err)
 	result.MaxAttempts = policy.maxAttemptsForDecision(result.Decision)
 	if !result.Decision.Retryable {
 		return result, nil

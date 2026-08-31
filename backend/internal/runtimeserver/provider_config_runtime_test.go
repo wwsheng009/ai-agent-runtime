@@ -22,6 +22,11 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 				Multiplier:      1.8,
 				Schedule:        []time.Duration{time.Second, 2 * time.Second},
 			},
+			TransportMaxRetries: 7,
+			HTTPTimeout: agentconfig.HTTPTimeout{
+				StreamReadTimeout:     11 * time.Second,
+				ResponseHeaderTimeout: 13 * time.Second,
+			},
 			Proxy: agentconfig.ProxyConfig{
 				Enabled: true,
 				HTTP:    "http://127.0.0.1:10810",
@@ -79,6 +84,9 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 	require.Equal(t, 1.8, result["openai-main"].RetryTuning.Multiplier)
 	require.Equal(t, []time.Duration{time.Second, 2 * time.Second}, result["openai-main"].RetryTuning.Schedule)
 	require.Equal(t, 4, result["openai-main"].MaxRetries)
+	require.Equal(t, 7, result["openai-main"].MaxTransportRetries)
+	require.Equal(t, 11*time.Second, result["openai-main"].StreamReadTimeout)
+	require.Equal(t, 13*time.Second, result["openai-main"].ResponseHeaderTimeout)
 	require.Len(t, result["openai-main"].RetryRules, 1)
 	require.Equal(t, "http_5xx_retry", result["openai-main"].RetryRules[0].Name)
 	require.Equal(t, 4, result["openai-main"].RetryRules[0].MaxRetries)

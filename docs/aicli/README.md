@@ -16,6 +16,10 @@ Recommended entry points:
   - Portable AgentDefinition, `aicli chat --agent` (with or without profile), `spawn_agent.agent_type` defaults, `aicli agent stdio` ACP host, agents three-layer meanings, and difference from skill `openai.yaml`.
 - [tool_image_generate.md](./tool_image_generate.md)
   - `openai_image_generate` / `aicli image` / chat `/image` paths: OpenAI-compatible images API vs Codex native image generation, auto path selection, and output directories.
+- [windows7.md](./windows7.md)
+  - Windows 7 end-user installation, isolated configuration/session paths, console/IME modes, and troubleshooting.
+- [windows7-build.md](./windows7-build.md)
+  - Developer build and verification recipe for the Go 1.20.14 `win7compat` binaries and release bundle.
 
 Related runtime docs:
 

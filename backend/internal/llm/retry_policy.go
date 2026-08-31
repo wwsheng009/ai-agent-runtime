@@ -116,6 +116,10 @@ type retryPolicy struct {
 type retryExhaustedError struct {
 	message string
 	cause   error
+	// retryAtNextLayer is reserved for a lower-level fast-fail guard. A
+	// normal budget exhaustion remains terminal to avoid multiplying retry
+	// budgets across nested loops.
+	retryAtNextLayer bool
 }
 
 func (e *retryExhaustedError) Error() string {
@@ -342,6 +346,62 @@ func (p retryPolicy) decisionForError(err error) retryDecision {
 	return classifyRetryableLLMErrorWithRules(err, p.Rules)
 }
 
+// decisionForRetry is the execution-time counterpart of decisionForError.
+//
+// A provider may have its own retry loop nested below the runtime (for
+// example, ProviderWrapper's transport/business loop). When a lower-level
+// fast-fail guard ends that loop, it marks the exhaustion for handoff so the
+// caller's outer retry loop gets a chance to make a fresh request. A normal
+// budget exhaustion remains terminal, preventing nested loops from multiplying
+// requests. Reclassification is for execution only; DiagnoseFailure
+// continues to use decisionForError and therefore still reports an exhausted
+// error as non-retryable after all layers finish.
+func (p retryPolicy) decisionForRetry(err error) retryDecision {
+	decision := p.decisionForError(err)
+	if decision.Reason != "retry_exhausted" {
+		return decision
+	}
+	// A suppressed error means that a streaming response already emitted
+	// user-visible data. Even if its cause contains a lower-level handoff
+	// marker, replaying the request would duplicate that output.
+	var suppressedErr *retrySuppressedError
+	if stderrs.As(err, &suppressedErr) {
+		return decision
+	}
+	// Do not turn an unlimited outer loop into an unbounded sequence of
+	// provider-local guard bursts. A handoff is useful only when the caller
+	// has a finite larger budget; otherwise the guard's terminal disposition
+	// is the safety boundary.
+	if p.initialMaxAttempts() <= 0 {
+		return decision
+	}
+
+	// Follow the exhaustion chain defensively. In normal operation there is
+	// only one marker, but a GatewayClient can wrap a provider's marked error
+	// in its own ordinary exhaustion error before the runtime sees it.
+	current := err
+	for depth := 0; depth < 16; depth++ {
+		var exhaustedErr *retryExhaustedError
+		if !stderrs.As(current, &exhaustedErr) || exhaustedErr == nil ||
+			exhaustedErr.cause == nil {
+			return decision
+		}
+
+		if exhaustedErr.retryAtNextLayer {
+			causeDecision := p.decisionForError(exhaustedErr.cause)
+			if causeDecision.Reason != "retry_exhausted" {
+				if causeDecision.Retryable {
+					return causeDecision
+				}
+				return decision
+			}
+		}
+		current = exhaustedErr.cause
+	}
+
+	return decision
+}
+
 func (p retryPolicy) maxAttemptsForDecision(decision retryDecision) int {
 	if decision.MaxAttempts > 0 {
 		return clampRetryAttempts(decision.MaxAttempts)
@@ -396,7 +456,7 @@ func isTransportBudgetError(err error) bool {
 
 func (p retryPolicy) delayForDecision(attempt int, decision retryDecision) time.Duration {
 	if decision.Delay > 0 && len(p.Schedule) == 0 {
-		return decision.Delay
+		return capServerHintDelay(p.MaxDelay, decision.Delay)
 	}
 	delay := time.Duration(0)
 	if len(p.Schedule) > 0 && decision.BaseDelay <= 0 && decision.Multiplier < 1 {
@@ -414,9 +474,19 @@ func (p retryPolicy) delayForDecision(attempt int, decision retryDecision) time.
 	}
 	delay = p.randomizeDelay(delay)
 	if decision.Delay > delay {
-		return decision.Delay
+		return capServerHintDelay(p.MaxDelay, decision.Delay)
 	}
 	return delay
+}
+
+// capServerHintDelay 限制服务端 Retry-After 类提示延迟的上限，防止上游
+// 返回异常巨大的等待时间（如月度限额 Reset 需要 1 天）时请求挂死数小时，
+// 让请求在 MaxDelay 预算内快速失败并回报错误。
+func capServerHintDelay(max time.Duration, hint time.Duration) time.Duration {
+	if max > 0 && hint > max {
+		return max
+	}
+	return hint
 }
 
 func retryScheduleDelay(schedule []time.Duration, attempt int) time.Duration {
@@ -511,6 +581,20 @@ func markRetryExhausted(prefix string, attempts int, err error) error {
 		message: fmt.Sprintf("%s: %v", message, err),
 		cause:   err,
 	}
+}
+
+// markRetryExhaustedForNextLayer preserves the terminal diagnostic semantics
+// of retryExhaustedError while explicitly handing a lower-level exhaustion to
+// an enclosing retry loop.  This is used when a fast-fail guard (rather than
+// the configured business budget) ends a provider attempt.
+func markRetryExhaustedForNextLayer(prefix string, attempts int, err error) error {
+	exhausted := markRetryExhausted(prefix, attempts, err)
+	exhaustedErr, ok := exhausted.(*retryExhaustedError)
+	if !ok || exhaustedErr == nil {
+		return exhausted
+	}
+	exhaustedErr.retryAtNextLayer = true
+	return exhaustedErr
 }
 
 func suppressRetry(err error) error {
@@ -694,6 +778,10 @@ func isQuotaExhaustionError(err error) bool {
 		"exceeded your current quota",
 		"billing hard limit",
 		"account balance is insufficient",
+		"usage limit reached",
+		"usage limit exceeded",
+		"usage_limit_reached",
+		"usage_limit_exceeded",
 	)
 }
 

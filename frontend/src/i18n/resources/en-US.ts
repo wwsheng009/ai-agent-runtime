@@ -457,6 +457,15 @@ export const enUS = {
       currentFocusPrefix: "Current focus:",
       sourceFocus: "Source fallback editor",
       structuredFocus: "Dedicated config mode",
+      table: {
+        searchPlaceholder: "Search…",
+        noSearchResults: "No matching entries. Try a different keyword.",
+        pagination: {
+          showing: "Showing {{start}}-{{end}} of {{total}}",
+          prev: "Previous page",
+          next: "Next page",
+        },
+      },
       controls: {
         reload: "Reload",
         preview: "Generate preview",

@@ -12,9 +12,11 @@ import (
 func TestDetectRuntimeServerStartConflictReturnsManagedInstance(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "runtime-server.pid")
 	runningConfigPath := filepath.Join(t.TempDir(), "running-config.yaml")
+	// 无监听地址时按进程存在性判定（该测试进程必然存活），跨平台稳定；
+	// 端口交叉验证的行为由 internal/runtimeserver 的 TestResolveInstancePID 覆盖。
 	if err := runtimeserver.WriteInstanceInfo(pidFile, runtimeserver.InstanceInfo{
 		PID:        os.Getpid(),
-		ListenAddr: "127.0.0.1:8101",
+		ListenAddr: "",
 		ConfigPath: runningConfigPath,
 	}); err != nil {
 		t.Fatalf("write pid file: %v", err)

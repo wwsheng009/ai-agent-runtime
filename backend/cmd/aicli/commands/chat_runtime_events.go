@@ -3639,6 +3639,12 @@ func (b *chatRuntimeEventBridge) shouldSuppressLatePrimaryRunEvent(event runtime
 		return true
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		return true
+	case "llm.retry":
+		// Retry is foreground process state, not durable history. An
+		// identity-less transport callback can arrive after EndRun; allowing it
+		// through would restart the activity clock and replace the completed
+		// status with a retry that no longer owns a live run.
+		return true
 	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
 		return true
 	case runtimechat.EventAssistantDelta:

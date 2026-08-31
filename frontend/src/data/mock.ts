@@ -70,6 +70,10 @@ export type ChatMessage = {
   segments: MessageSegment[];
   relatedArtifactIds?: string[];
   interrupted?: boolean;
+  /** Durable identity used to isolate runtime deltas across chat turns. */
+  runtimeTurnId?: string;
+  /** True only while the assistant message is receiving process events. */
+  streaming?: boolean;
 };
 
 export type Artifact = {

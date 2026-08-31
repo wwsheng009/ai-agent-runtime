@@ -109,6 +109,8 @@ type Handler struct {
 	searchReindexCooldown          time.Duration
 	searchReindexMu                sync.Mutex
 	lastSearchReindexAt            time.Time
+	workspaceScanMu                sync.Mutex
+	workspaceScanCache             map[string]*workspaceScanCacheEntry
 	mutationPolicyMu               sync.RWMutex
 	mutationPolicy                 MutationPolicy
 	usagePolicyMu                  sync.RWMutex
@@ -1378,6 +1380,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		ApproveBlockedPatches      bool                  `json:"approve_blocked_patches,omitempty"`
 		PatchApprovalNote          string                `json:"patch_approval_note,omitempty"`
 		PatchApproval              *agent.PatchApproval  `json:"patch_approval,omitempty"`
+		TurnID                     string                `json:"turn_id,omitempty"`
 		Stream                     bool                  `json:"stream,omitempty"`
 	}
 
@@ -1397,6 +1400,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if requestID != "" {
 		ctx = logger.WithRequestID(ctx, requestID)
 	}
+	// The workspace consumes assistant deltas from the session runtime stream.
+	// Carry a client-provided turn identity through the agent context so a
+	// delayed event from a previous turn cannot be rendered into the new one.
+	turnID := strings.TrimSpace(req.TurnID)
+	if turnID == "" {
+		turnID = "turn_" + uuid.NewString()
+	}
+	ctx = agent.WithTurnID(ctx, turnID)
 	usageScope := h.resolveUsageScope(r, req.TenantID, req.ProjectID, req.UserID)
 	effectiveProfile := strings.TrimSpace(req.Profile)
 	if effectiveProfile == "" && isAutoProfileRef(h.profileDefaultRef) {
@@ -1602,6 +1613,16 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	} else if agentConfig.MaxSteps == 0 && selectedConfig != nil {
 		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
 	}
+	// Set the stream option before constructing the API agent.  The ReAct loop
+	// reads this option from the agent configuration when each provider request
+	// is assembled; setting it only after construction makes custom agent
+	// implementations that snapshot options miss the reporter opt-in.
+	if (req.Stream || wantsEventStream(r)) && req.EnableReAct {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options["stream"] = true
+	}
 
 	a := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
 		registry:        runtimeRegistry,
@@ -1641,6 +1662,61 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			execSession.ReplaceHistory(prependContextMessages(historyForAgent, contextMessages))
 			execSession.AddMessage(*types.NewUserMessage(lastMessage))
 
+			// Open the request SSE before entering the ReAct loop.  The loop's
+			// provider reporter observes every upstream text/reasoning/image
+			// chunk; forwarding those chunks here restores the incremental
+			// workspace experience instead of waiting for streamStaticResult.
+			h.prepareSSEHeaders(w)
+			emitter := h.newTrajectoryEmitter(w, session, turnID)
+			emitter.Emit("meta", map[string]interface{}{
+				"session_id": sessionID(session),
+				"agent_id":   a.GetConfig().Name,
+				"source":     "agent_react",
+				"kind":       "agent",
+				"model":      agentModel,
+				"status":     "streaming",
+				"turn_id":    turnID,
+				"orchestration": buildOrchestrationPayload(
+					"agent_react",
+					routeAttempted,
+					routeCandidates,
+					nil,
+					nil,
+					"",
+				),
+			})
+
+			var streamMu sync.Mutex
+			chunkIndex := 0
+			textChars := 0
+			streamSink := func(chunk llm.StreamChunk) {
+				if chunk.Content == "" && len(chunk.Metadata) == 0 {
+					return
+				}
+				streamMu.Lock()
+				defer streamMu.Unlock()
+
+				chunkIndex++
+				switch chunk.Type {
+				case llm.EventTypeText:
+					if chunk.Content == "" {
+						return
+					}
+					textChars += len(chunk.Content)
+					emitter.Emit("chunk", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				case llm.EventTypeReasoning:
+					if chunk.Content == "" {
+						return
+					}
+					emitter.Emit("reasoning", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				case llm.EventTypeImage:
+					if len(chunk.Metadata) == 0 {
+						return
+					}
+					emitter.Emit("chunk", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				}
+			}
+
 			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
 				MaxToolCalls:         agentConfig.MaxToolCalls,
@@ -1659,9 +1735,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				ReasoningEffort: types.ResolveReasoningEffort(req.ReasoningEffort),
 				Thinking:        types.ResolveThinkingConfig(req.Thinking),
 				Temperature:     0.7,
+				StreamSink:      streamSink,
 			})
 			if reactErr != nil {
-				h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, reactErr, session, requestTraceID)
+				emitter.Emit("error", map[string]interface{}{
+					"index":   chunkIndex,
+					"message": reactErr.Error(),
+					"source":  "agent_react",
+					"turn_id": turnID,
+				})
 				return
 			}
 
@@ -1684,7 +1766,32 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			)
 			h.recordUsage(usageScope, "agent_chat", reactResult.Skill, reactResult.Success, estimatedPromptTokens, reactResult.Usage, reactResult.Output)
 
-			h.streamStaticResult(w, session, a.GetConfig().Name, resultPayload)
+			// Emit the post-run evidence tail without replaying a full-output
+			// chunk.  Replaying that chunk after the live deltas would append the
+			// answer a second time in the workspace.
+			emitter.Emit("orchestration", resultPayload["orchestration"])
+			if routePayload, ok := buildAgentRouteEventPayload(resultPayload); ok {
+				emitter.Emit("route", routePayload)
+			}
+			for _, toolEvent := range buildObservedToolEventPayloads(resultPayload) {
+				emitter.Emit(toolEvent.Event, toolEvent.Payload)
+			}
+			for _, observationPayload := range buildObservationEventPayloads(resultPayload) {
+				emitter.Emit("observation", observationPayload)
+			}
+			for _, subagentPayload := range buildSubagentEventPayloads(resultPayload) {
+				emitter.Emit("subagent", subagentPayload)
+			}
+			emitter.Emit("result", resultPayload)
+			emitter.Emit("done", map[string]interface{}{
+				"session_id": sessionID(session),
+				"agent_id":   a.GetConfig().Name,
+				"source":     responseResultSource(resultPayload),
+				"status":     finalResultStatus(resultPayload),
+				"content":    resultPayload["output"],
+				"result":     resultPayload,
+				"turn_id":    turnID,
+			})
 			return
 		}
 
@@ -1803,7 +1910,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			h.streamStaticResult(w, session, a.GetConfig().Name, resultPayload)
+			h.streamStaticResult(w, session, a.GetConfig().Name, resultPayload, turnID)
 			return
 		}
 
@@ -1875,7 +1982,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 						buildWorkspaceEvidenceMetadata(payload),
 					)
 				}
-				h.streamStaticResult(w, session, a.GetConfig().Name, payload)
+				h.streamStaticResult(w, session, a.GetConfig().Name, payload, turnID)
 				return
 			}
 		}
@@ -1940,6 +2047,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		responseResult := buildAgentResultPayload("agent_react", reactResult)
+		attachAgentChatTurnID(responseResult, turnID)
 		attachExecutionRouteTransparency(responseResult, chatRoute)
 		responseResult["orchestration"] = buildOrchestrationPayload(
 			"agent_react",
@@ -1957,6 +2065,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			"result":     responseResult,
 			"source":     responseResultSource(responseResult),
 			"status":     finalResultStatus(responseResult),
+			"turn_id":    turnID,
 		}
 		attachExecutionRouteTransparency(response, chatRoute)
 		h.writeJSON(w, http.StatusOK, response)
@@ -2039,6 +2148,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	attachExecutionRouteTransparency(responseResult.(map[string]interface{}), chatRoute)
+	attachAgentChatTurnID(responseResult.(map[string]interface{}), turnID)
 	if planningPayload := buildPlanningPayload(orchResult); planningPayload != nil {
 		responseResult.(map[string]interface{})["planning"] = planningPayload
 		if orchestration, ok := responseResult.(map[string]interface{})["orchestration"].(map[string]interface{}); ok {
@@ -2087,6 +2197,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		"result":     responseResult,
 		"source":     responseResultSource(responseResult),
 		"status":     finalResultStatus(responseResult),
+		"turn_id":    turnID,
 	}
 	attachExecutionRouteTransparency(response, chatRoute)
 	responseTraceID := requestTraceID
@@ -3435,7 +3546,12 @@ func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
 		chat.EventApprovalRequested, chat.EventApprovalResolved,
 		chat.EventSessionCompactStarted, chat.EventSessionCompactCompleted, chat.EventSessionCompactSkipped, chat.EventSessionCompactFailed,
 		chat.EventSessionStart, chat.EventSessionEnd, chat.EventSessionInterrupted,
-		chat.EventContextReconciled:
+		chat.EventContextReconciled,
+		// 方案B：增量打字机事件持久化到会话事件流，供 runtime/stream
+		// 长轮询实时消费（前端按 isResponding gate 决定是否渲染，
+		// 回放/reload 不会误渲染历史增量）。
+		chat.EventAssistantDelta, chat.EventAssistantReasoning,
+		chat.EventAssistantReasoningDelta, chat.EventAssistantImageProgress:
 		return true
 	default:
 		return false
@@ -4519,6 +4635,26 @@ func shouldUseAgentResult(result *agent.Result, runtime *llm.LLMRuntime) bool {
 	return result.Skill != "" || result.Success || result.Output != "No matching skill found for the request"
 }
 
+// attachAgentChatTurnID adds the request turn identity to a result envelope
+// without replacing a more specific identity already supplied by the runtime.
+// The frontend uses this field as the boundary between live assistant deltas
+// and a later chat turn, so every response dialect (agent, LLM, and fallback)
+// must carry the same value.
+func attachAgentChatTurnID(payload map[string]interface{}, turnID string) map[string]interface{} {
+	if payload == nil {
+		return payload
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return payload
+	}
+	if existing, ok := payload["turn_id"].(string); ok && strings.TrimSpace(existing) != "" {
+		return payload
+	}
+	payload["turn_id"] = turnID
+	return payload
+}
+
 func buildAgentResultPayload(source string, result *agent.Result) map[string]interface{} {
 	if result == nil {
 		return map[string]interface{}{
@@ -4541,6 +4677,22 @@ func buildAgentResultPayload(source string, result *agent.Result) map[string]int
 		"usage":        result.Usage,
 		"duration":     result.Duration,
 		"error":        result.Error,
+	}
+	if turnID := strings.TrimSpace(result.TurnID); turnID != "" {
+		payload["turn_id"] = turnID
+	}
+	if streamID := strings.TrimSpace(result.AssistantStreamID); streamID != "" {
+		payload["assistant_stream_id"] = streamID
+	}
+	if result.AssistantStreamSequence > 0 {
+		payload["assistant_stream_sequence"] = result.AssistantStreamSequence
+	}
+	if result.Reasoning != nil {
+		// Keep the public result shape compatible with the LLM path (a
+		// displayable string) while also retaining the provider/format metadata
+		// needed by trajectory consumers.
+		payload["reasoning"] = result.Reasoning.RawDisplayText()
+		payload["reasoning_block"] = result.Reasoning.ToMap()
 	}
 	if toolCalls := observedToolCalls(result.Observations); len(toolCalls) > 0 {
 		payload["tool_calls"] = toolCalls
@@ -5153,15 +5305,66 @@ func (h *Handler) buildWorkspaceContext(path, query string, config *runtimecfg.R
 		return nil, nil
 	}
 
-	scanner := workspace.NewScanner(workspaceConfigFromRuntime(config))
-	scan, err := scanner.Scan(path)
+	scan, symbols, references, err := h.scanWorkspaceCached(path, config)
 	if err != nil {
 		return nil, errors.New(errors.ErrValidationFailed,
 			fmt.Sprintf("failed to scan workspace path: %s", path))
 	}
 
-	builder := workspace.NewContextBuilder(scan, nil)
+	builder := workspace.NewContextBuilderWithIndexes(scan, symbols, references, nil)
 	return builder.Build(query), nil
+}
+
+// workspaceScanCacheTTL 工作区扫描结果的缓存时长。全量扫描大仓库耗时可达数十秒，
+// 每次请求都重扫会让 SSE 首包（meta 事件）迟迟不发，前端表现为一直 "Connecting to runtime…"。
+const workspaceScanCacheTTL = 60 * time.Second
+
+type workspaceScanCacheEntry struct {
+	scan       *workspace.ScanResult
+	symbols    *workspace.SymbolIndex
+	references *workspace.ReferenceGraph
+	at         time.Time
+}
+
+// scanWorkspaceCached 返回 workspace 的扫描结果，带 TTL 缓存：
+// 命中缓存直接返回；未命中时在锁内执行扫描，同一工作区的并发请求会复用同一次扫描结果。
+// 符号索引与引用图随扫描结果一起缓存，避免每次请求重复构建（大仓库可达数秒）。
+func (h *Handler) scanWorkspaceCached(path string, config *runtimecfg.RuntimeConfig) (*workspace.ScanResult, *workspace.SymbolIndex, *workspace.ReferenceGraph, error) {
+	key := path + "|" + workspaceConfigFingerprint(config)
+
+	h.workspaceScanMu.Lock()
+	defer h.workspaceScanMu.Unlock()
+
+	if h.workspaceScanCache == nil {
+		h.workspaceScanCache = make(map[string]*workspaceScanCacheEntry)
+	}
+	if entry := h.workspaceScanCache[key]; entry != nil && time.Since(entry.at) < workspaceScanCacheTTL {
+		return entry.scan, entry.symbols, entry.references, nil
+	}
+
+	scanner := workspace.NewScanner(workspaceConfigFromRuntime(config))
+	scan, err := scanner.Scan(path)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	entry := &workspaceScanCacheEntry{
+		scan:       scan,
+		symbols:    workspace.NewSymbolIndex(scan),
+		references: workspace.NewReferenceGraph(scan),
+		at:         time.Now(),
+	}
+	h.workspaceScanCache[key] = entry
+	return entry.scan, entry.symbols, entry.references, nil
+}
+
+// workspaceConfigFingerprint 将影响扫描结果的配置参数编码进缓存 key，
+// 配置变化（如 include/exclude 调整）时自动失效。
+func workspaceConfigFingerprint(config *runtimecfg.RuntimeConfig) string {
+	cfg := workspaceConfigFromRuntime(config)
+	if cfg == nil {
+		return "default"
+	}
+	return fmt.Sprintf("%d|%d|%d|%v|%v", cfg.MaxFileSize, cfg.MaxChunkSize, cfg.ChunkOverlap, cfg.IncludePatterns, cfg.ExcludePatterns)
 }
 
 func workspaceConfigFromRuntime(config *runtimecfg.RuntimeConfig) *workspace.WorkspaceConfig {
@@ -7072,6 +7275,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	if len(promptLayoutSources) > 0 {
 		requestPayload["prompt_sources"] = promptLayoutSources
 	}
+	turnID := agent.TurnIDFromContext(ctx)
 	ctx = llm.WithRetryEventReporter(ctx, h.runtimeRetryEventReporter(traceID, sessionID(session)))
 	h.publishSessionRuntimeEvent("llm.request.started", traceID, sessionID(session), requestPayload)
 	stream, err := h.llmRuntime.Stream(ctx, &llm.LLMRequest{
@@ -7095,7 +7299,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	}
 
 	h.prepareSSEHeaders(w)
-	emitter := h.newTrajectoryEmitter(w, session)
+	emitter := h.newTrajectoryEmitter(w, session, turnID)
 	initialOrchestration := buildOrchestrationPayload("llm_stream", routeAttempted, routeCandidates, nil, &llm.LLMResponse{Model: model}, fallback)
 	if planningPayload != nil {
 		initialOrchestration["planning_attempted"] = planningPayload["attempted"]
@@ -7183,6 +7387,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		"reasoning":   reasoningBuilder.String(),
 		"tool_events": toolEvents,
 	}
+	attachAgentChatTurnID(resultPayload, turnID)
 	if len(routeAudit) > 0 {
 		attachExecutionRouteTransparency(resultPayload, activeRoute)
 	}
@@ -7236,10 +7441,15 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	return nil
 }
 
-func (h *Handler) streamStaticResult(w http.ResponseWriter, session *chat.Session, agentID string, resultPayload map[string]interface{}) {
+func (h *Handler) streamStaticResult(w http.ResponseWriter, session *chat.Session, agentID string, resultPayload map[string]interface{}, turnIDs ...string) {
+	turnID := ""
+	if len(turnIDs) > 0 {
+		turnID = strings.TrimSpace(turnIDs[0])
+	}
+	attachAgentChatTurnID(resultPayload, turnID)
 	output, _ := resultPayload["output"].(string)
 	h.prepareSSEHeaders(w)
-	emitter := h.newTrajectoryEmitter(w, session)
+	emitter := h.newTrajectoryEmitter(w, session, turnID)
 	emitter.Emit("meta", map[string]interface{}{
 		"session_id":    sessionID(session),
 		"agent_id":      agentID,
@@ -7300,6 +7510,18 @@ func buildStreamChunkPayload(chunk llm.StreamChunk, index int, totalChars int) m
 		"type":     string(chunk.Type),
 		"content":  chunk.Content,
 		"metadata": chunk.Metadata,
+	}
+	if strings.TrimSpace(chunk.StreamID) != "" {
+		payload["stream_id"] = chunk.StreamID
+	}
+	if chunk.Sequence > 0 {
+		payload["sequence"] = chunk.Sequence
+	}
+	if strings.TrimSpace(chunk.TurnID) != "" {
+		payload["turn_id"] = chunk.TurnID
+	}
+	if chunk.Step > 0 {
+		payload["step"] = chunk.Step
 	}
 
 	switch chunk.Type {
@@ -7785,6 +8007,10 @@ func finalResultStatus(result interface{}) string {
 type sseEmitter struct {
 	w        http.ResponseWriter
 	sequence int64
+	// turnID is copied onto every top-level chat SSE payload when present.
+	// Keeping this at the emitter boundary prevents one terminal path from
+	// accidentally omitting the identity required for frontend turn gating.
+	turnID string
 	// persist 可选：每个事件写出前先持久化到会话事件存储（chat 轨迹事件日志），
 	// 返回持久化 seq；返回 <=0 表示未持久化，降级为连接内计数。
 	// 用于 /api/agent/chat 的轨迹录制，不影响其他 SSE 使用方。
@@ -7797,12 +8023,29 @@ func newSSEEmitter(w http.ResponseWriter) *sseEmitter {
 
 func (e *sseEmitter) Emit(event string, data interface{}) {
 	e.sequence++
+	data = e.withTurnID(data)
 	if e.persist != nil {
 		if seq := e.persist(event, data); seq > 0 {
 			e.sequence = seq
 		}
 	}
 	writeSSEEventWithEnvelope(e.w, event, data, e.sequence)
+}
+
+func (e *sseEmitter) withTurnID(data interface{}) interface{} {
+	if e == nil || strings.TrimSpace(e.turnID) == "" {
+		return data
+	}
+	payload, ok := data.(map[string]interface{})
+	if !ok {
+		return data
+	}
+	cloned := make(map[string]interface{}, len(payload)+1)
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	attachAgentChatTurnID(cloned, e.turnID)
+	return cloned
 }
 
 func (h *Handler) prepareSSEHeaders(w http.ResponseWriter) {

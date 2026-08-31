@@ -521,6 +521,17 @@ func TestReplayableOpenAIReasoningContent(t *testing.T) {
 	if got != "" {
 		t.Fatalf("expected empty reasoning text for replay without reasoning, got %q", got)
 	}
+
+	// Plain-text assistant turns inside a tool loop must also carry the key:
+	// DeepSeek thinking mode rejects the whole request with HTTP 400 when any
+	// assistant message in a tool-calling conversation lacks reasoning_content.
+	got, ok = ReplayableOpenAIReasoningContent(Context{ProviderName: "deepseek"}, nil, nil)
+	if !ok {
+		t.Fatal("expected plain-text deepseek assistant replay to be replayable")
+	}
+	if got != "" {
+		t.Fatalf("expected empty reasoning text for replay without tool calls, got %q", got)
+	}
 }
 
 func TestLooksLikeOpenAIReasoningModel(t *testing.T) {

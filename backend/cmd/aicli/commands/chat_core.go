@@ -674,6 +674,7 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		CompatibilityProfile:    session.Provider.Compatibility.Profile,
 		Timeout:                 session.Provider.Timeout,
 		MaxRetries:              maxRetries,
+		MaxTransportRetries:     runtimellm.ProviderMaxTransportRetriesFromAgentConfig(session.Config),
 		RetryTuning:             retryTuning,
 		RetryRules:              retryRules,
 		DefaultModel:            strings.TrimSpace(session.Provider.DefaultModel),

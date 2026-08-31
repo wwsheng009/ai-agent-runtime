@@ -28,11 +28,8 @@ const (
 	TransactionAlternateExit   TransactionKind = "alternate_exit"
 	TransactionPromptEditor    TransactionKind = "prompt_editor"
 	TransactionBell            TransactionKind = "bell"
-	TransactionTitle           TransactionKind = "title"
 	TransactionContextBarrier  TransactionKind = "terminal_context"
 	TransactionShutdownCleanup TransactionKind = "shutdown_cleanup"
-	TransactionLegacyFlush     TransactionKind = "legacy_flush"
-	TransactionLegacyImmediate TransactionKind = "legacy_immediate"
 )
 
 // historyBearingKinds 是允许携带 HistoryEpoch 的事务类型；其他 kind 携带
@@ -56,11 +53,8 @@ func validTransactionKind(k TransactionKind) bool {
 		TransactionAlternateExit,
 		TransactionPromptEditor,
 		TransactionBell,
-		TransactionTitle,
 		TransactionContextBarrier,
-		TransactionShutdownCleanup,
-		TransactionLegacyFlush,
-		TransactionLegacyImmediate:
+		TransactionShutdownCleanup:
 		return true
 	default:
 		return false
@@ -180,6 +174,12 @@ type RenderIntent struct {
 	Operations    []RenderOperation // 可选诊断摘要，不是执行计划
 	HistoryEpoch  *uint64           // 可选；只由 history authority 提供 epoch
 	Terminal      RenderTerminalContext
+
+	// bindingGeneration is injected by SessionBindingRegistry's fenced facade.
+	// It is deliberately not exported: producers cannot claim a generation by
+	// filling an intent literal, while the gateway can still stamp the
+	// generation into the immutable batch/receipt.
+	bindingGeneration uint64
 }
 
 // RenderBatch 由 gateway 复制 intent 并盖章；producer 不得自行填写这些字段。

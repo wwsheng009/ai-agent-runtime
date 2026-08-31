@@ -63,6 +63,7 @@ backend/internal/webui/dist/*
 # Temp
 tmp/
 .tmp/
+.tmp-stream-diff.txt
 backend/.tmp/
 .backups/
 .env

@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
@@ -8,6 +10,7 @@ import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
 import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
+  applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
   getErrorMessage,
   getRuntimeEventSeq,
@@ -17,8 +20,10 @@ import {
   resetStoredRuntimeClientId,
   useRuntimeClientIdentity,
 } from "@/lib/runtime-client";
+import { normalizeSessionId } from "@/lib/session-id";
 import {
   applySessionHistoryToThread,
+  createRuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
 import { trajectoryEventAction } from "@/lib/trajectory/recovery";
 import { useParams } from "react-router-dom";
@@ -26,6 +31,10 @@ import { useParams } from "react-router-dom";
 export function WorkspacePage() {
   const runtimeClient = useRuntimeClientIdentity();
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
+  const runtimeDeltaCoordinator = useMemo(
+    () => createRuntimeDeltaCoordinator(),
+    [],
+  );
 
   function handleResetRuntimeClientIdentity() {
     if (typeof window === "undefined") {
@@ -75,6 +84,7 @@ export function WorkspacePage() {
     runtimeSessions,
   });
   const {
+    activeTurnId,
     draft,
     isResponding,
     modelOptions,
@@ -95,6 +105,7 @@ export function WorkspacePage() {
     selectedThread,
     setSelectedArtifactId,
     setThreads,
+    deltaCoordinator: runtimeDeltaCoordinator,
     userId: selectedRuntimeSessionUserId || runtimeClient.userId,
     workspacePath: runtimeClient.workspacePath,
   });
@@ -116,6 +127,7 @@ export function WorkspacePage() {
   });
   useSessionRuntimeStream({
     applyRuntimeEventToThread,
+    applyRuntimeDeltaToThread,
     getErrorMessage,
     getRuntimeEventSeq,
     mergeRuntimeEvent,
@@ -131,12 +143,36 @@ export function WorkspacePage() {
         trajectoryStore.advanceCursor(action.seq);
       }
     },
+    // 方案B：请求进行中才渲染 runtime/stream 的打字机增量（delta/reasoning/
+    // image_progress）；回放/reload 只进事件快照，不误渲染历史增量。
+    activeTurnId,
+    deltaCoordinator: runtimeDeltaCoordinator,
+    renderLiveDeltas: isResponding && Boolean(activeTurnId),
     selectedThread,
     setThreads,
   });
   useTrajectoryRecovery({
     store: trajectoryStore,
     sessionId: selectedThread?.sessionId,
+    onError: (failedSessionId, message) => {
+      // 轨迹恢复失败 → 发起恢复的会话对应的 thread 标记为连接降级
+      // （Topbar/composer 显示"运行时降级 / 需要恢复关注"提示），
+      // 不再静默吞错。按发起时的 sessionId 匹配，避免竞态错标。
+      const normalizedFailedSession =
+        normalizeSessionId(failedSessionId) || failedSessionId;
+      if (!normalizedFailedSession) return;
+      setThreads((current) =>
+        current.map((t) =>
+          normalizeSessionId(t.sessionId || t.id) === normalizedFailedSession
+            ? {
+                ...t,
+                transport: "error",
+                lastError: `Trajectory recovery failed: ${message}`,
+              }
+            : t,
+        ),
+      );
+    },
   });
   const {
     backtrackDialog,

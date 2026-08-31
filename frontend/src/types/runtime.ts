@@ -6,6 +6,7 @@ export type AgentChatMessage = {
 export type AgentChatRequest = {
   messages: AgentChatMessage[];
   session_id?: string;
+  turn_id?: string;
   user_id?: string;
   workspace_path?: string;
   provider?: string;
@@ -35,6 +36,9 @@ export type AgentChatResult = {
   usage?: Record<string, unknown> | null;
   duration?: Record<string, unknown> | null;
   trace_id?: string;
+  turn_id?: string;
+  assistant_stream_id?: string;
+  assistant_stream_sequence?: number;
 };
 
 export type AgentChatResponse = {
@@ -80,6 +84,7 @@ export type AgentChatStreamMetaPayload = {
   model?: string;
   orchestration?: Record<string, unknown>;
   planning?: Record<string, unknown>;
+  turn_id?: string;
 };
 
 export type AgentChatStreamChunkPayload = {
@@ -87,6 +92,10 @@ export type AgentChatStreamChunkPayload = {
   index?: number;
   type?: string;
   content?: string;
+  stream_id?: string;
+  sequence?: number;
+  turn_id?: string;
+  step?: number;
   total_chars?: number;
   text?: {
     content?: string;
@@ -114,6 +123,7 @@ export type AgentChatStreamDonePayload = {
   status?: string;
   content?: string;
   result?: AgentChatResult;
+  turn_id?: string;
 };
 
 export type SessionHistoryMessage = {

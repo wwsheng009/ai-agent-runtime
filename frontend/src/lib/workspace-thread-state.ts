@@ -31,12 +31,197 @@ type GeneratedImageSegment =
   | Extract<MessageSegment, { type: "image" }>
   | Extract<MessageSegment, { type: "image-placeholder" }>;
 
+export type RuntimeDeltaKind = "text" | "reasoning" | "image";
+
+/**
+ * Coordinates the two live delivery paths used by the workspace:
+ * `/api/agent/chat` SSE and the session runtime stream. Both paths carry the
+ * same provider delta, so claiming its stable stream identity before applying
+ * it makes delivery order irrelevant.
+ */
+export type RuntimeDeltaCoordinator = {
+  beginTurn: (turnId: string) => void;
+  endTurn: (turnId?: string) => void;
+  isTurnActive: (turnId?: string) => boolean;
+  claim: (key: string) => boolean;
+};
+
+const MAX_RUNTIME_DELTA_KEYS = 512;
+
+export function createRuntimeDeltaCoordinator(): RuntimeDeltaCoordinator {
+  const seenKeys = new Set<string>();
+  let activeTurnId = "";
+
+  return {
+    beginTurn(turnId: string) {
+      activeTurnId = turnId.trim();
+      seenKeys.clear();
+    },
+    endTurn(turnId?: string) {
+      const normalized = turnId?.trim() ?? "";
+      if (!normalized || normalized === activeTurnId) {
+        activeTurnId = "";
+      }
+    },
+    isTurnActive(turnId?: string) {
+      if (!activeTurnId) {
+        return false;
+      }
+      const normalized = turnId?.trim() ?? "";
+      return !normalized || normalized === activeTurnId;
+    },
+    claim(key: string) {
+      const normalized = key.trim();
+      if (!normalized) {
+        // Legacy providers may not expose identity. Callers can still
+        // suppress those payloads while a direct request stream is active.
+        return true;
+      }
+      if (seenKeys.has(normalized)) {
+        return false;
+      }
+      seenKeys.add(normalized);
+      while (seenKeys.size > MAX_RUNTIME_DELTA_KEYS) {
+        const oldest = seenKeys.values().next().value as string | undefined;
+        if (oldest === undefined) {
+          break;
+        }
+        seenKeys.delete(oldest);
+      }
+      return true;
+    },
+  };
+}
+
+function readDeltaIdentityValue(
+  payload: Record<string, unknown> | undefined,
+  keys: string[],
+): string {
+  if (!payload) {
+    return "";
+  }
+  for (const key of keys) {
+    const value = payload[key];
+    if (
+      (typeof value === "string" || typeof value === "number") &&
+      String(value).trim()
+    ) {
+      return String(value).trim();
+    }
+  }
+  return "";
+}
+
+/**
+ * Return the cross-channel identity for one text/reasoning/image delta.
+ * EventStore `_event.sequence` is deliberately not used: it is assigned by
+ * each transport independently, while provider stream_id + sequence is shared.
+ */
+export function getRuntimeDeltaKey(
+  payload: Record<string, unknown> | undefined,
+  kind: RuntimeDeltaKind,
+): string {
+  const streamId = readDeltaIdentityValue(payload, ["stream_id", "streamId"]);
+  const sequence = readDeltaIdentityValue(payload, [
+    "sequence",
+    "stream_sequence",
+    "streamSequence",
+  ]);
+  if (!streamId || !sequence) {
+    return "";
+  }
+  const turnId = readDeltaIdentityValue(payload, ["turn_id", "turnId", "turn"]);
+  return ["runtime-delta", turnId, streamId, kind, sequence].join("|");
+}
+
+export function getRuntimeDeltaKind(
+  eventType: string,
+): RuntimeDeltaKind | null {
+  switch (eventType) {
+    case "assistant_delta":
+      return "text";
+    case "assistant_reasoning":
+    case "assistant.reasoning":
+    case "assistant.reasoning_delta":
+      return "reasoning";
+    case "assistant.image_progress":
+      return "image";
+    default:
+      return null;
+  }
+}
+
+export function getRuntimeDeltaKeyFromEvent(
+  event: SessionRuntimeEvent,
+): string {
+  const kind = getRuntimeDeltaKind(event.type);
+  return kind ? getRuntimeDeltaKey(event.payload, kind) : "";
+}
+
 export type ToolMessageSegment = Extract<MessageSegment, { type: "tool" }>;
 
 export type ReasoningMessageSegment = Extract<
   MessageSegment,
   { type: "reasoning" }
 >;
+
+/**
+ * Reconcile a live assistant buffer with a terminal result without allowing a
+ * shorter terminal snapshot to erase text that was already displayed.  When
+ * the two buffers diverge, the longer one wins; when one is a prefix of the
+ * other this also preserves the normal authoritative-result extension case.
+ */
+export function reconcileRuntimeText(
+  liveText: string | null | undefined,
+  resultText: string | null | undefined,
+): string {
+  const live = typeof liveText === "string" ? liveText : "";
+  const result = typeof resultText === "string" ? resultText : "";
+  if (!live.trim()) {
+    return result;
+  }
+  if (!result.trim()) {
+    return live;
+  }
+  if (live === result) {
+    return result;
+  }
+  if (live.startsWith(result)) {
+    return live;
+  }
+  if (result.startsWith(live)) {
+    return result;
+  }
+  return result.length >= live.length ? result : live;
+}
+
+/** Extract text already rendered for one assistant message (placeholder-safe). */
+export function getAssistantMessageText(message: ChatMessage): string {
+  const values = message.segments
+    .filter((segment): segment is Extract<MessageSegment, { type: "text" }> =>
+      segment.type === "text",
+    )
+    .map((segment) => segment.content);
+  if (
+    message.streaming &&
+    values.length === 1 &&
+    values[0] === STREAM_PLACEHOLDER_TEXT
+  ) {
+    return "";
+  }
+  return values.join("");
+}
+
+/** Extract reasoning already rendered for one assistant message. */
+export function getAssistantMessageReasoning(message: ChatMessage): string {
+  return message.segments
+    .filter(
+      (segment): segment is ReasoningMessageSegment =>
+        segment.type === "reasoning",
+    )
+    .map((segment) => segment.content)
+    .join("");
+}
 
 type AssistantMessageSegmentOptions = {
   status?: "streaming" | "stopped";
@@ -512,6 +697,9 @@ export function applyRuntimeEventToThread(
     artifacts: upsertArtifact(thread.artifacts, nextArtifact),
   };
 
+  // Keep the historical snapshot behavior for image progress.  Text and
+  // reasoning deltas are gated to the live path, but image placeholders are
+  // also useful while replaying a session that was restored mid-generation.
   if (event.type === "assistant.image_progress") {
     const imageSegment = buildGeneratedImagePlaceholderSegment(event.payload);
     if (imageSegment) {
@@ -523,6 +711,209 @@ export function applyRuntimeEventToThread(
   }
 
   return nextThread;
+}
+
+/**
+ * 方案B：把 runtime/stream 实时到达的打字机增量事件应用到 thread。
+ *
+ * 只在“正在请求中”（渲染 gate=true）时由 useSessionRuntimeStream 调用；
+ * 历史回放/reload 不会触发（否则会把旧 turn 的增量误渲染到当前消息）。
+ * 覆盖三类增量：
+ * - assistant_delta        → 最新 assistant 消息 text segment 追加增量
+ * - assistant_reasoning    → 最新 assistant 消息 reasoning segment 追加增量
+ * - assistant.image_progress → 图片生成占位段 upsert（原 applyRuntimeEventToThread 迁移）
+ *
+ * 与 /api/agent/chat 的最终 result 天然不冲突：result 到达时 onChunk 以
+ * 完整文本重建 text segment（替换而非追加），文本不会翻倍。
+ */
+export function applyRuntimeDeltaToThread(
+  thread: Thread,
+  event: SessionRuntimeEvent,
+  expectedTurnId?: string,
+): Thread {
+  const eventTurnId = getRuntimeEventTurnId(event);
+  if (
+    expectedTurnId &&
+    eventTurnId &&
+    expectedTurnId !== eventTurnId
+  ) {
+    return thread;
+  }
+
+  const updateLiveAssistant = (
+    updater: (message: ChatMessage) => ChatMessage,
+  ) => {
+    let applied = false;
+    const nextThread = updateLatestAssistantMessage(
+      thread,
+      (message) => {
+        applied = true;
+        return updater(message);
+      },
+      (message) => isLiveAssistantMessage(message, eventTurnId),
+    );
+    return applied ? nextThread : thread;
+  };
+
+  switch (event.type) {
+    case "assistant_delta":
+      return appendAssistantTextDelta(thread, event, updateLiveAssistant);
+    case "assistant_reasoning":
+    case "assistant.reasoning":
+    case "assistant.reasoning_delta":
+      return appendAssistantReasoningDelta(thread, event, updateLiveAssistant);
+    case "assistant.image_progress":
+      return appendAssistantImageProgress(thread, event, updateLiveAssistant);
+    default:
+      return thread;
+  }
+}
+
+export function getRuntimeEventTurnId(event: SessionRuntimeEvent): string {
+  const payload = event.payload;
+  if (!payload) {
+    return "";
+  }
+  for (const key of ["turn_id", "turnId", "turn"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function appendAssistantTextDelta(
+  thread: Thread,
+  event: SessionRuntimeEvent,
+  updateLiveAssistant: (
+    updater: (message: ChatMessage) => ChatMessage,
+  ) => Thread,
+): Thread {
+  const deltaText = readTextDelta(event.payload);
+  if (!deltaText) {
+    return thread;
+  }
+  return updateLiveAssistant((message) => {
+    const segments = appendTextToMessageSegments(message.segments, deltaText);
+    return { ...message, segments };
+  });
+}
+
+function appendAssistantReasoningDelta(
+  thread: Thread,
+  event: SessionRuntimeEvent,
+  updateLiveAssistant: (
+    updater: (message: ChatMessage) => ChatMessage,
+  ) => Thread,
+): Thread {
+  const payload = event.payload ?? {};
+  const reasoningBlock =
+    payload.reasoning && typeof payload.reasoning === "object"
+      ? (payload.reasoning as Record<string, unknown>)
+      : null;
+  const deltaText =
+    readRawTextValue(reasoningBlock ?? {}, "summary", "content", "delta") ||
+    readRawTextValue(payload, "content", "delta");
+  if (!deltaText) {
+    return thread;
+  }
+  return updateLiveAssistant((message) => {
+    return {
+      ...message,
+      segments: appendReasoningToMessageSegments(message.segments, deltaText),
+    };
+  });
+}
+
+function appendAssistantImageProgress(
+  thread: Thread,
+  event: SessionRuntimeEvent,
+  updateLiveAssistant: (
+    updater: (message: ChatMessage) => ChatMessage,
+  ) => Thread,
+): Thread {
+  const imageSegment = buildGeneratedImagePlaceholderSegment(event.payload);
+  if (!imageSegment) {
+    return thread;
+  }
+  return updateLiveAssistant((message) => {
+    return {
+      ...message,
+      segments: upsertGeneratedImageSegment(message.segments, imageSegment),
+    };
+  });
+}
+
+function readTextDelta(payload: Record<string, unknown> | undefined) {
+  if (!payload) {
+    return "";
+  }
+  return (
+    readRawTextValue(payload, "delta", "content") ||
+    (payload.text && typeof payload.text === "object"
+      ? readRawTextValue(payload.text as Record<string, unknown>, "content", "delta")
+      : "")
+  );
+}
+
+/** 不 trim 的文本提取：打字机增量必须保留原始空白（delta 语义）。 */
+function readRawTextValue(source: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function appendTextToMessageSegments(
+  segments: MessageSegment[],
+  delta: string,
+): MessageSegment[] {
+  const nextSegments = [...segments];
+  for (let index = nextSegments.length - 1; index >= 0; index--) {
+    const segment = nextSegments[index];
+    if (segment.type !== "text") {
+      continue;
+    }
+    const previous = segment.content;
+    const base = previous === STREAM_PLACEHOLDER_TEXT ? "" : previous;
+    nextSegments[index] = { ...segment, content: base + delta };
+    return nextSegments;
+  }
+  nextSegments.push({ type: "text", content: delta });
+  return nextSegments;
+}
+
+function appendReasoningToMessageSegments(
+  segments: MessageSegment[],
+  delta: string,
+): MessageSegment[] {
+  const nextSegments = [...segments];
+  for (let index = nextSegments.length - 1; index >= 0; index--) {
+    const segment = nextSegments[index];
+    if (segment.type !== "reasoning") {
+      continue;
+    }
+    const previous = segment.content;
+    // A persisted/final reasoning block may be followed by the first live
+    // block for this turn.  Keep the visual separator used by the chat SSE
+    // path, while preserving raw chunk boundaries once streaming is running.
+    const separator =
+      previous.length > 0 && segment.running !== true && !previous.endsWith("\n")
+        ? "\n"
+        : "";
+    nextSegments[index] = {
+      ...segment,
+      content: previous + separator + delta,
+      running: true,
+    };
+    return nextSegments;
+  }
+  nextSegments.push({ type: "reasoning", content: delta, running: true });
+  return nextSegments;
 }
 
 export function applySessionHistoryToThread(
@@ -893,12 +1284,15 @@ export function buildTurnJsonArtifact(
 export function createStreamingAssistantMessage(
   messageId: string,
   artifactIds: string[],
+  runtimeTurnId?: string,
 ) {
   return {
     id: messageId,
     role: "assistant" as const,
     author: "Runtime stream",
     label: "streaming",
+    runtimeTurnId,
+    streaming: true,
     relatedArtifactIds: artifactIds,
     segments: [
       {
@@ -962,8 +1356,21 @@ export function mergeRuntimeEvent(
   existingEvents: SessionRuntimeEvent[],
   nextEvent: SessionRuntimeEvent,
 ) {
+  const nextSeq = getRuntimeEventSeq(nextEvent);
+  if (
+    nextSeq > 0 &&
+    existingEvents.some((event) => getRuntimeEventSeq(event) === nextSeq)
+  ) {
+    // `payload.seq` is the session EventStore identity.  Do not include
+    // timestamp/type in this comparison: a reconnect may deserialize the same
+    // row with a different representation, but it must still be idempotent.
+    return existingEvents;
+  }
   const eventKey = buildRuntimeEventKey(nextEvent);
-  if (existingEvents.some((event) => buildRuntimeEventKey(event) === eventKey)) {
+  if (
+    nextSeq <= 0 &&
+    existingEvents.some((event) => buildRuntimeEventKey(event) === eventKey)
+  ) {
     return existingEvents;
   }
   return [...existingEvents, nextEvent].slice(-MAX_RUNTIME_EVENTS);
@@ -996,10 +1403,11 @@ export function updateThreadMessage(
 function updateLatestAssistantMessage(
   thread: Thread,
   updater: (message: ChatMessage) => ChatMessage,
+  predicate: (message: ChatMessage) => boolean = () => true,
 ) {
   for (let index = thread.messages.length - 1; index >= 0; index--) {
     const message = thread.messages[index];
-    if (message.role !== "assistant") {
+    if (message.role !== "assistant" || !predicate(message)) {
       continue;
     }
     return {
@@ -1011,6 +1419,27 @@ function updateLatestAssistantMessage(
   }
 
   return thread;
+}
+
+function isLiveAssistantMessage(
+  message: ChatMessage,
+  eventTurnId: string,
+): boolean {
+  // New messages carry an explicit streaming bit. The label fallback keeps
+  // compatibility with callers/tests created before the bit was introduced.
+  if (message.streaming === false || message.interrupted) {
+    return false;
+  }
+  if (message.streaming !== true && message.label !== "streaming") {
+    return false;
+  }
+  // Once a request has an identity, an unlabelled or differently labelled
+  // durable event is unsafe: it may be a replay from an earlier turn.  Never
+  // fall back to the old global "currently responding" gate.
+  if (message.runtimeTurnId && eventTurnId) {
+    return message.runtimeTurnId === eventTurnId;
+  }
+  return !message.runtimeTurnId && !eventTurnId;
 }
 
 export function upsertArtifact(artifacts: Artifact[], artifact: Artifact) {
@@ -1028,8 +1457,17 @@ export function upsertArtifacts(artifacts: Artifact[], nextItems: Artifact[]) {
 }
 
 function buildRuntimeEventKey(event: SessionRuntimeEvent) {
+  const payload = event.payload ?? {};
+  const streamID =
+    typeof payload.stream_id === "string" ? payload.stream_id : "";
+  const streamSequence =
+    typeof payload.sequence === "number" || typeof payload.sequence === "string"
+      ? String(payload.sequence)
+      : "";
   return [
     getRuntimeEventSeq(event),
+    streamID,
+    streamSequence,
     event.type,
     event.trace_id ?? "",
     event.tool_name ?? "",

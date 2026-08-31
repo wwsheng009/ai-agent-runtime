@@ -73,6 +73,13 @@ type LoopReActConfig struct {
 	// MaxCompletionRecoveryTurns limits recovery turns when complete_task is missing.
 	// Zero with complete_task defaults to 1; negative disables recovery (finish unsatisfied).
 	MaxCompletionRecoveryTurns int `yaml:"maxCompletionRecoveryTurns"`
+	// StreamSink receives the same incremental model chunks observed by the
+	// ReAct loop.  It is intentionally a direct callback rather than another
+	// context reporter: the loop owns the reporter context and must not hide a
+	// caller-provided reporter behind a nested context value.
+	//
+	// The callback is optional and is never invoked for nil/empty chunks.
+	StreamSink func(llm.StreamChunk) `yaml:"-"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -1494,6 +1501,19 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	streamedReasoning := false
 	var assistantSequence atomic.Uint64
 	var reasoningSequence atomic.Uint64
+	reportSink := func(chunk llm.StreamChunk, sequence uint64) {
+		if loop.config == nil || loop.config.StreamSink == nil {
+			return
+		}
+		// Carry the same identity used by the durable runtime event into the
+		// request SSE path.  The workspace can therefore atomically claim a
+		// delta whichever channel observes it first.
+		chunk.StreamID = streamID
+		chunk.Sequence = sequence
+		chunk.TurnID = turnID
+		chunk.Step = step
+		loop.config.StreamSink(chunk)
+	}
 	if req.Stream {
 		callCtx = llm.WithStreamReporter(ctx, func(chunk llm.StreamChunk) {
 			switch chunk.Type {
@@ -1501,12 +1521,13 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if chunk.Content == "" {
 					return
 				}
+				sequence := assistantSequence.Add(1)
 				payload := map[string]interface{}{
 					"trace_id":        traceID,
 					"logical_turn_id": logicalTurnID,
 					"llm_request_id":  llmRequestID,
 					"stream_id":       streamID,
-					"sequence":        assistantSequence.Add(1),
+					"sequence":        sequence,
 					"mode":            "append",
 					"step":            step,
 					"content":         chunk.Content,
@@ -1516,11 +1537,13 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					payload["turn_id"] = turnID
 				}
 				loop.emitRuntimeEvent("assistant_delta", sessionID, "", payload)
+				reportSink(chunk, sequence)
 			case llm.EventTypeReasoning:
 				if chunk.Content == "" {
 					return
 				}
 				streamedReasoning = true
+				sequence := reasoningSequence.Add(1)
 				reasoning := &types.ReasoningBlock{
 					Provider:   req.Provider,
 					Summary:    chunk.Content,
@@ -1533,7 +1556,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					"logical_turn_id": logicalTurnID,
 					"llm_request_id":  llmRequestID,
 					"stream_id":       streamID,
-					"sequence":        reasoningSequence.Add(1),
+					"sequence":        sequence,
 					"mode":            "append",
 					"step":            step,
 					"reasoning":       reasoning.ToMap(),
@@ -1542,15 +1565,24 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					payload["turn_id"] = turnID
 				}
 				loop.emitRuntimeEvent("assistant.reasoning", sessionID, "", payload)
+				reportSink(chunk, sequence)
 			case llm.EventTypeImage:
 				if len(chunk.Metadata) == 0 {
 					return
 				}
-				loop.emitRuntimeEvent("assistant.image_progress", sessionID, "", map[string]interface{}{
-					"trace_id": traceID,
-					"step":     step,
-					"image":    chunk.Metadata,
-				})
+				sequence := assistantSequence.Add(1)
+				imagePayload := map[string]interface{}{
+					"trace_id":  traceID,
+					"stream_id": streamID,
+					"sequence":  sequence,
+					"step":      step,
+					"image":     chunk.Metadata,
+				}
+				if turnID != "" {
+					imagePayload["turn_id"] = turnID
+				}
+				loop.emitRuntimeEvent("assistant.image_progress", sessionID, "", imagePayload)
+				reportSink(chunk, sequence)
 			}
 		})
 	}

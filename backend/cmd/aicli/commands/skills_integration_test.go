@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
@@ -1432,6 +1433,9 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 	}
 	if providerCfg.MaxRetries != 4 {
 		t.Fatalf("expected max retries 4, got %d", providerCfg.MaxRetries)
+	}
+	if providerCfg.MaxTransportRetries != runtimellm.DefaultTransportMaxRetries {
+		t.Fatalf("expected max transport retries %d, got %d", runtimellm.DefaultTransportMaxRetries, providerCfg.MaxTransportRetries)
 	}
 	if providerCfg.RetryTuning.BaseDelay != 300*time.Millisecond {
 		t.Fatalf("expected base delay 300ms, got %v", providerCfg.RetryTuning.BaseDelay)

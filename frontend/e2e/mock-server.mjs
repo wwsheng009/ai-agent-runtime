@@ -53,6 +53,7 @@ const DONE = {
 // 并在 payload 注入持久化 seq（对齐后端 ListEvents 契约）。
 const chatSseEventsBySession = new Map(); // sessionId -> [{type, payload, seq, timestamp}]
 const mockSessions = new Map(); // sessionId -> {session_id, id, title, created_at, updated_at, history}
+const brokenEventsSessions = new Set(); // e2e 故障开关：事件增量接口 500
 let mockChatSeq = 0;
 
 function recordChatSseEvent(sessionId, eventName, payload) {
@@ -442,6 +443,25 @@ async function handleRequest(req, res) {
   }
 
   // --- 会话 / 事件 / 历史端点（P3-1 恢复支撑；模拟后端 EventStore 查询）---
+  // e2e 故障开关：对指定 session 的事件增量接口返回 500（模拟后端连接失败）。
+  if (path === "/api/_mock/break-events" && req.method === "POST") {
+    const breakBody = await readBody(req);
+    const breakFor = String(breakBody?.session_id ?? "e2e-session-1");
+    brokenEventsSessions.add(breakFor);
+    process.stdout.write(`[mock] break-events enabled for ${breakFor}\n`);
+    writeJson(res, 200, { ok: true, session_id: breakFor });
+    return;
+  }
+  if (path === "/api/_mock/break-events" && req.method === "DELETE") {
+    const clearBody = await readBody(req);
+    if (clearBody?.session_id) {
+      brokenEventsSessions.delete(String(clearBody.session_id));
+    } else {
+      brokenEventsSessions.clear();
+    }
+    writeJson(res, 200, { ok: true });
+    return;
+  }
   if (path === "/api/runtime/sessions" && req.method === "GET") {
     writeJson(res, 200, { sessions: [...mockSessions.values()] });
     return;
@@ -464,8 +484,14 @@ async function handleRequest(req, res) {
     writeJson(res, 200, { users: [] });
     return;
   }
-  if (/^\/api\/runtime\/sessions\/[^/]+\/events$/.test(path) && req.method === "GET") {
+  if (/^\/api\/runtime\/sessions\/[^/]+\/(?:runtime\/)?events$/.test(path) && req.method === "GET") {
     const sessionId = decodeURIComponent(path.split("/")[4]);
+    if (brokenEventsSessions.has(sessionId)) {
+      writeJson(res, 500, {
+        error: "simulated events failure (e2e break-events)",
+      });
+      return;
+    }
     const after = Number(url.searchParams.get("after") ?? "0") || 0;
     const rawLimit = url.searchParams.get("limit");
     const limit = rawLimit ? Number(rawLimit) || 0 : 0;
@@ -537,10 +563,6 @@ async function handleRequest(req, res) {
       status: "inactive",
       permission_mode: "default",
     });
-    return;
-  }
-  if (/^\/api\/runtime\/sessions\/[^/]+\/history$/.test(path)) {
-    writeJson(res, 200, { session_id: "e2e-session-1", history: [], count: 0 });
     return;
   }
   if (path === "/api/runtime/teams" && req.method === "GET") {

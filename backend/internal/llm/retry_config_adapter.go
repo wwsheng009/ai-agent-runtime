@@ -95,9 +95,9 @@ func ProviderMaxRetriesFromAgentConfig(cfg *agentconfig.Config) int {
 const DefaultTransportMaxRetries = 4
 
 // ProviderMaxTransportRetriesFromAgentConfig resolves the transport-level
-// retry budget. A negative value means unlimited (the header-timeout streak
-// guard then provides the bound); zero falls back to
-// DefaultTransportMaxRetries.
+// retry budget. A negative value means unlimited; the header-timeout streak
+// guard provides the fallback bound only when the business budget is also
+// unlimited. Zero falls back to DefaultTransportMaxRetries.
 func ProviderMaxTransportRetriesFromAgentConfig(cfg *agentconfig.Config) int {
 	if cfg == nil {
 		return DefaultTransportMaxRetries

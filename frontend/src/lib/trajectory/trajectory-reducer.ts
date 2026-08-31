@@ -373,6 +373,13 @@ function applySequencedEvent(
   const changes: TrajectoryChange[] = [];
   const seq = event.seq;
 
+  // A transport duplicate may have a different durable EventStore sequence
+  // from the original provider delta. It still has to advance the global
+  // cursor, but must not append the content a second time.
+  if (event.payload["__trajectory_skip"] === true) {
+    return changes;
+  }
+
   switch (event.kind) {
     case "meta":
     case "done":

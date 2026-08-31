@@ -3,7 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
 func TestResolveRuntimeServerConfigPathUsesConfigsConfigFromCurrentDir(t *testing.T) {
@@ -112,17 +115,12 @@ func TestResolveRuntimeServerConfigPathDoesNotRemapExplicitConfigPath(t *testing
 	}
 }
 
-func TestDefaultRuntimeServerConfigSearchPathsUseBuildProfileNames(t *testing.T) {
+func TestDefaultRuntimeServerConfigSearchPathsFollowSearchNames(t *testing.T) {
 	root := t.TempDir()
 	isolateRuntimeServerHome(t, root)
 
+	expected := runtimeServerConfigSearchPathsForNames(runtimeServerConfigSearchNames())
 	paths := defaultRuntimeServerConfigSearchPaths()
-	expected := []string{
-		filepath.Join(root, "home", ".aicli", runtimeServerDefaultConfigName),
-		filepath.Join(".aicli", runtimeServerDefaultConfigName),
-		runtimeServerDefaultConfigName,
-		filepath.Join("configs", runtimeServerDefaultConfigName),
-	}
 	if len(paths) != len(expected) {
 		t.Fatalf("unexpected config path count: got %d %v, want %d %v", len(paths), paths, len(expected), expected)
 	}
@@ -138,12 +136,7 @@ func TestDefaultRuntimeServerDotEnvSearchPathsFollowConfigDirectories(t *testing
 	isolateRuntimeServerHome(t, root)
 
 	paths := defaultRuntimeServerDotEnvSearchPaths()
-	expected := []string{
-		filepath.Join(root, "home", ".aicli", ".env"),
-		filepath.Join(".aicli", ".env"),
-		".env",
-		filepath.Join("configs", ".env"),
-	}
+	expected := runtimeServerConfigPathsForDotEnv(runtimeServerConfigSearchNames())
 	if len(paths) != len(expected) {
 		t.Fatalf("unexpected .env path count: got %d %v, want %d %v", len(paths), paths, len(expected), expected)
 	}
@@ -152,6 +145,52 @@ func TestDefaultRuntimeServerDotEnvSearchPathsFollowConfigDirectories(t *testing
 			t.Fatalf("unexpected .env path at %d: got %q, want %q\nall paths: %v", i, paths[i], expected[i], paths)
 		}
 	}
+}
+
+func TestRuntimeServerConfigSearchNamesAlwaysFallBackToStandardName(t *testing.T) {
+	names := runtimeServerConfigSearchNames()
+	if len(names) == 0 || names[0] != runtimeServerDefaultConfigName {
+		t.Fatalf("expected build profile name %q to lead, got %v", runtimeServerDefaultConfigName, names)
+	}
+	foundStandard := false
+	for _, name := range names {
+		if name == aiclipaths.StandardConfigFileName {
+			foundStandard = true
+		}
+	}
+	if !foundStandard {
+		t.Fatalf("expected standard config file name %q in search names, got %v", aiclipaths.StandardConfigFileName, names)
+	}
+}
+
+func runtimeServerConfigSearchPathsForNames(names []string) []string {
+	paths := make([]string, 0, 4*len(names))
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		for _, name := range names {
+			paths = append(paths, filepath.Join(home, ".aicli", name))
+		}
+	}
+	for _, name := range names {
+		paths = append(paths,
+			filepath.Join(".aicli", name),
+			name,
+			filepath.Join("configs", name),
+		)
+	}
+	return paths
+}
+
+func runtimeServerConfigPathsForDotEnv(names []string) []string {
+	paths := make([]string, 0, 4*len(names))
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		paths = append(paths, filepath.Join(home, ".aicli", ".env"))
+	}
+	paths = append(paths,
+		filepath.Join(".aicli", ".env"),
+		".env",
+		filepath.Join("configs", ".env"),
+	)
+	return paths
 }
 
 func isolateRuntimeServerHome(t *testing.T, root string) {

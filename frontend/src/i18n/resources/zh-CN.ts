@@ -437,6 +437,15 @@ export const zhCN = {
       currentFocusPrefix: "当前焦点：",
       sourceFocus: "源码兜底编辑",
       structuredFocus: "专用配置域模式",
+      table: {
+        searchPlaceholder: "搜索…",
+        noSearchResults: "没有匹配的条目，试试其他关键词。",
+        pagination: {
+          showing: "第 {{start}}-{{end}} 条，共 {{total}} 条",
+          prev: "上一页",
+          next: "下一页",
+        },
+      },
       controls: {
         reload: "重新加载",
         preview: "生成预览",

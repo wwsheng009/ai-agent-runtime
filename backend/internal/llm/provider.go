@@ -483,6 +483,30 @@ func (e *responseHeaderTimeoutError) Error() string {
 func (e *responseHeaderTimeoutError) Timeout() bool   { return true }
 func (e *responseHeaderTimeoutError) Temporary() bool { return true }
 
+// cancelOnCloseReadCloser keeps the guarded request context alive while the
+// caller is consuming the response body, then releases it when the body is
+// closed. Cancelling as soon as headers arrive would tear down a still-live
+// streaming response and defeat connection reuse; never cancelling would keep
+// the child context reachable until the transport is collected.
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	if r == nil {
+		return nil
+	}
+	if r.cancel != nil {
+		r.once.Do(r.cancel)
+	}
+	if r.ReadCloser == nil {
+		return nil
+	}
+	return r.ReadCloser.Close()
+}
+
 // doRequest performs client.Do with a hard bound on the response-header wait.
 // The transport-level ResponseHeaderTimeout only applies to HTTP/1.1; HTTP/2
 // requests bypass it (the http2 transport used here has no equivalent wired
@@ -524,10 +548,21 @@ func (p *ProviderWrapper) doRequest(client *http.Client, req *http.Request) (*ht
 		// Request finished normally. Deliberately do NOT call
 		// cancelRequest() here: cancelling would tear down the (still
 		// in-flight, body-not-yet-read) connection, defeating keep-alive
-		// reuse. The reqCtx is only observed by client.Do, which has
-		// already returned, so nothing leaks. (The lostcancel vet warning
-		// on this path is a known false positive for this guarded-Do
-		// pattern.)
+		// reuse. Transfer cancellation to the response body instead; the
+		// wrapper releases the child context when the caller closes the body.
+		if r.err == nil && r.resp != nil && r.resp.Body != nil {
+			r.resp.Body = &cancelOnCloseReadCloser{
+				ReadCloser: r.resp.Body,
+				cancel:     cancelRequest,
+			}
+		} else {
+			// A nil response/body cannot be consumed, so there is no
+			// keep-alive lifecycle to preserve.
+			if r.resp != nil && r.resp.Body != nil {
+				_ = r.resp.Body.Close()
+			}
+			cancelRequest()
+		}
 		return r.resp, r.err
 	case <-timer.C:
 		// Abort the round trip; RoundTrip unwinds once the request context
@@ -1063,15 +1098,15 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
-		// Fail fast on a hung upstream regardless of the retry budget. Two
-		// consecutive response-header timeouts mean the provider accepted the
-		// connection and the request but never returns headers: further
-		// attempts would each burn another full ResponseHeaderTimeout for no
-		// progress, whether the budget is unlimited (infinite spin) or finite
-		// (the budget is drained without any chance of recovery). The streak
-		// resets on any non-header error, so a transient timeout followed by a
-		// healthy exchange and another timeout is never misjudged.
-		if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+		// A finite provider or transport budget is the configured retry
+		// phase: response-header failures must be allowed to consume that
+		// budget instead of being stopped by the unlimited-loop guard. Only
+		// when both budgets are unlimited/disabled does the hung-upstream
+		// guard apply. Once it fires, hand the transient failure to an
+		// enclosing finite runtime loop rather than making it terminal.
+		if policy.MaxAttempts <= 0 &&
+			policy.MaxTransportAttempts <= 0 &&
+			trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
 			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 				Source:   "provider_wrapper",
 				Phase:    "response",
@@ -1081,7 +1116,10 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 				URL:      p.buildURL(p.adapter.GetAPIPath()),
 				Error:    "repeated response-header timeout; upstream appears hung, aborting retries",
 			})
-			break
+			// The guard intentionally cuts short an unlimited provider-local
+			// retry burst. Hand the transient transport failure to the
+			// enclosing runtime retry loop instead of making it terminal.
+			return nil, markRetryExhaustedForNextLayer("provider call failed after retries", attempt, err)
 		}
 		// Deterministic max_tokens ceiling rejections can be repaired once by
 		// lowering the request budget to the provider-reported limit.
@@ -1311,16 +1349,15 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:    err.Error(),
 			})
 			lastErr = fmt.Errorf("failed to send request: %w", err)
-			// Fail fast on a hung upstream regardless of the retry budget. Two
-			// consecutive response-header timeouts mean the provider accepted
-			// the connection and the request but never returns headers: every
-			// further attempt burns a full ResponseHeaderTimeout for nothing,
-			// whether the budget is unlimited (infinite spin) or finite (the
-			// budget is drained without any chance of recovery). The streak
-			// resets on any other error, and on any received response (cleared
-			// below), so a healthy exchange in between never counts as
-			// consecutive.
-			if trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
+			// A finite provider or transport budget is the configured retry
+			// phase: response-header failures must be allowed to consume that
+			// budget instead of being stopped by the unlimited-loop guard.
+			// Only when both budgets are unlimited/disabled does the guard
+			// apply. Once it fires, hand the transient failure to an enclosing
+			// finite runtime loop rather than making it terminal.
+			if policy.MaxAttempts <= 0 &&
+				policy.MaxTransportAttempts <= 0 &&
+				trackHeaderTimeoutStreak(&consecutiveHeaderTimeouts, err) {
 				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 					Source:   "provider_wrapper",
 					Phase:    "response",
@@ -1330,7 +1367,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 					URL:      url,
 					Error:    "repeated response-header timeout; upstream appears hung, aborting retries",
 				})
-				break
+				// The guard intentionally cuts short an unlimited
+				// provider-local retry burst. Hand the transient transport
+				// failure to the enclosing runtime retry loop.
+				return nil, markRetryExhaustedForNextLayer("streaming aggregate call failed after retries", attempt, lastErr)
 			}
 			// Count the failed transport call before prepareRetry sleeps. This
 			// guarantees that the tighter transport ceiling, rather than the
@@ -1881,7 +1921,7 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	messages := make([]map[string]interface{}, len(request.Messages))
 	providerHint := strings.TrimSpace(resolvedModel)
 	for i, msg := range request.Messages {
-		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type, providerHint)
+		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type, providerHint, resolvedModel)
 	}
 
 	return buildProviderAdapterRequest(providerAdapterRequestInput{

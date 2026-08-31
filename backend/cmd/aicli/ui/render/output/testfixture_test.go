@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1495,23 +1494,6 @@ func TestGatewayCloseDrainWaiterRace(t *testing.T) {
 	}
 	if r2.Primary == nil {
 		t.Fatalf("waiter batch must be drained to sink, not dropped: %+v", r2)
-	}
-}
-
-// TestLegacyAdapterNoPort：无绑定端口的 adapter fail closed（gateway 调用前
-// 失败，返回 zero receipt + non-nil error）。
-func TestLegacyAdapterNoPort(t *testing.T) {
-	a := &LegacyTransactionAdapter{}
-	r, err := a.Submit(context.Background(), TransactionLegacyFlush, "test", RenderTerminalContext{},
-		nil, func(w io.Writer) error {
-			_, werr := w.Write([]byte("x"))
-			return werr
-		})
-	if err == nil {
-		t.Fatal("adapter without binding must return error")
-	}
-	if r.Admission.Decision != "" && r.Primary != nil {
-		t.Fatalf("no gateway receipt expected: %+v", r)
 	}
 }
 

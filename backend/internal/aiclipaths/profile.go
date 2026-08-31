@@ -12,6 +12,12 @@ const (
 	// current directory by aicli.
 	DefaultCLIConfigFileName = defaultCLIConfigFileName
 
+	// StandardConfigFileName is the main build profile's bootstrap config
+	// filename. It is kept constant across build profiles so non-main binaries
+	// (for example win7compat) can fall back to standard-layout agent configs
+	// (config.yaml) when no profile-specific file exists.
+	StandardConfigFileName = "config.yaml"
+
 	// DefaultRuntimeConfigFileName is the packaged runtime config selected by the
 	// active build profile.
 	DefaultRuntimeConfigFileName = defaultRuntimeConfigFileName

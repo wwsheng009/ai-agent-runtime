@@ -361,9 +361,12 @@ func (a *AnthropicAdapter) ProcessResponse(result map[string]interface{}) Proces
 						opaqueState = strings.TrimSpace(signature)
 					}
 				} else if typ == "redacted_thinking" {
+					// 官方要求 redacted_thinking 块原样回传；重建路径会把
+					// OpaqueState 当作 data 字段输出，因此这里只保存 data 值
+					// 本身，不能把整块 JSON marshal 进去（会双重序列化）。
 					if opaqueState == "" {
-						if raw, err := json.Marshal(itemMap); err == nil {
-							opaqueState = string(raw)
+						if data, _ := itemMap["data"].(string); strings.TrimSpace(data) != "" {
+							opaqueState = strings.TrimSpace(data)
 						}
 					}
 				} else if typ == "tool_use" {

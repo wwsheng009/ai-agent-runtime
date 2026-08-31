@@ -1309,7 +1309,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		providerHint = strings.TrimSpace(resolvedModel)
 	}
 	for i, msg := range req.Messages {
-		messages[i] = runtimeMessageToAdapterMessage(msg, protocol, providerHint)
+		messages[i] = runtimeMessageToAdapterMessage(msg, protocol, providerHint, resolvedModel)
 	}
 
 	var supportsMaxOutputTokens *bool

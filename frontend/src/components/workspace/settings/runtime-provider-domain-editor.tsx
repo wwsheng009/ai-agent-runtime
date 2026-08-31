@@ -38,6 +38,24 @@ import {
 } from "./runtime-provider-config-utils";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
 import { readRuntimeProxyConfig } from "./runtime-proxy-domain-utils";
+
+function providerSearchText(provider: RuntimeProviderSummary): string {
+  return [
+    provider.name,
+    provider.baseUrl,
+    provider.protocol,
+    provider.defaultModel,
+    provider.siteType,
+    provider.siteTypeConfidence,
+    provider.accountSummary,
+    provider.accountAuthRef,
+    provider.apiPath,
+    provider.forwardUrl,
+    provider.proxySummary,
+    ...provider.supportTypes,
+    ...provider.supportedModels,
+  ].join(" ");
+}
 import {
   SettingsActionGroup,
   SettingsIconActionButton,
@@ -374,6 +392,9 @@ export function RuntimeProviderDomainEditor({
         description={t("editor.providers.description")}
         items={providers}
         getRowKey={(provider) => provider.name}
+        searchable
+        getSearchText={providerSearchText}
+        pageSize={10}
         emptyState={t("editor.providers.emptyState")}
         summary={
           <>

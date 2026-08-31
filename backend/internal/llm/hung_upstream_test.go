@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -129,7 +131,7 @@ func TestProviderAbortsAfterRepeatedResponseHeaderTimeouts(t *testing.T) {
 			provider, err := NewProvider(&ProviderConfig{
 				Type:                  "openai",
 				BaseURL:               "http://" + addr,
-				MaxRetries:            0, // unlimited: only the fail-fast guard can stop the loop
+				MaxRetries:            -1, // unlimited: only the fail-fast guard can stop the loop
 				ResponseHeaderTimeout: 300 * time.Millisecond,
 			})
 			require.NoError(t, err)
@@ -171,12 +173,11 @@ func TestProviderAbortsAfterRepeatedResponseHeaderTimeouts(t *testing.T) {
 	}
 }
 
-// TestProviderAbortsOnFiniteBudgetAfterRepeatedHeaderTimeouts asserts that the
-// hung-upstream guard fires even with a FINITE retry budget: two consecutive
-// response-header timeouts mean the provider never returns headers, and
-// further attempts would each burn another ResponseHeaderTimeout for no
-// progress.
-func TestProviderAbortsOnFiniteBudgetAfterRepeatedHeaderTimeouts(t *testing.T) {
+// TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts asserts that a
+// FINITE provider budget reaches its configured "large" retry phase even when
+// every attempt hits a response-header timeout. The hung-upstream guard is
+// reserved for unlimited provider loops.
+func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		name := "non-streaming"
 		if streaming {
@@ -189,17 +190,16 @@ func TestProviderAbortsOnFiniteBudgetAfterRepeatedHeaderTimeouts(t *testing.T) {
 			provider, err := NewProvider(&ProviderConfig{
 				Type:                  "openai",
 				BaseURL:               "http://" + addr,
-				MaxRetries:            3, // finite: the guard must still stop the spin
+				MaxRetries:            3, // finite: the large retry phase must run
 				ResponseHeaderTimeout: 300 * time.Millisecond,
 			})
 			require.NoError(t, err)
 
-			runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "hung-model", MaxRetries: 3})
+			runtime := NewLLMRuntime(&RuntimeConfig{DefaultModel: "hung-model", MaxRetries: 0})
 			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
 
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			start := time.Now()
 			_, err = runtime.Call(ctx, &LLMRequest{
 				Model:  "hung-model",
 				Stream: streaming,
@@ -212,11 +212,94 @@ func TestProviderAbortsOnFiniteBudgetAfterRepeatedHeaderTimeouts(t *testing.T) {
 			assert.NotContains(t, err.Error(), context.DeadlineExceeded.Error(), "test relied on ctx timeout, not the guard")
 			assert.Contains(t, err.Error(), "timeout awaiting response headers",
 				"error should report the hung-upstream header wait, got: %v", err)
-			assert.Equal(t, int64(2), accepts.Load(),
-				"the guard must stop retries after two hung attempts; got %d attempts", accepts.Load())
-			if elapsed := time.Since(start); elapsed > 2*time.Second {
-				t.Fatalf("fail-fast guard did not stop the finite-budget retry spin (elapsed %v)", elapsed)
-			}
+			assert.Equal(t, int64(3), accepts.Load(),
+				"finite provider budget must use all three attempts; got %d attempts", accepts.Load())
+		})
+	}
+}
+
+type headerGuardHandoffRoundTripper struct {
+	requests  atomic.Int64
+	streaming bool
+}
+
+func (t *headerGuardHandoffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	n := t.requests.Add(1)
+	if n <= 2 {
+		return nil, &responseHeaderTimeoutError{timeout: 25 * time.Millisecond}
+	}
+
+	body := `{"id":"chatcmpl-recovered","object":"chat.completion","created":1,"model":"hung-model","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	contentType := "application/json"
+	if t.streaming {
+		contentType = "text/event-stream"
+		body = `data: {"choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}` + "\n\n" +
+			"data: [DONE]\n\n"
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{contentType}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+// TestProviderHeaderGuardHandoffRetriesAtRuntimeLayer verifies that the
+// provider-local hung-upstream guard does not become the final disposition of
+// a request. After the guard aborts the first provider call, the runtime gets
+// the transient cause and starts its larger retry loop; the third HTTP request
+// is then allowed to succeed.
+func TestProviderHeaderGuardHandoffRetriesAtRuntimeLayer(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                  "openai",
+				BaseURL:               "http://provider.invalid",
+				MaxRetries:            -1,
+				ResponseHeaderTimeout: 25 * time.Millisecond,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, err)
+			transport := &headerGuardHandoffRoundTripper{streaming: streaming}
+			wrapper := provider.(*ProviderWrapper)
+			wrapper.httpClient = &http.Client{Transport: transport}
+			wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+			runtime := NewLLMRuntime(&RuntimeConfig{
+				DefaultModel: "hung-model",
+				MaxRetries:   2,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			resp, err := runtime.Call(ctx, &LLMRequest{
+				Model:  "hung-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, "recovered", resp.Content)
+			assert.Equal(t, int64(3), transport.requests.Load(),
+				"the outer retry should follow the two guarded requests")
 		})
 	}
 }
@@ -324,6 +407,69 @@ func TestProviderTransportBudgetBoundsResetUpstream(t *testing.T) {
 	}
 }
 
+type transportBudgetHeaderTimeoutRoundTripper struct {
+	requests atomic.Int64
+}
+
+func (t *transportBudgetHeaderTimeoutRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	t.requests.Add(1)
+	return nil, &responseHeaderTimeoutError{timeout: time.Millisecond}
+}
+
+// TestProviderTransportBudgetWinsOverHeaderGuard verifies that an explicitly
+// finite transport budget is authoritative even when the business retry
+// budget is unlimited. The two-consecutive-timeout guard is only a fallback
+// for the case where neither configured budget can bound the loop.
+func TestProviderTransportBudgetWinsOverHeaderGuard(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                  "openai",
+				BaseURL:               "http://provider.invalid",
+				MaxRetries:            -1,
+				MaxTransportRetries:   4,
+				ResponseHeaderTimeout: time.Millisecond,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, err)
+			transport := &transportBudgetHeaderTimeoutRoundTripper{}
+			wrapper := provider.(*ProviderWrapper)
+			wrapper.httpClient = &http.Client{Transport: transport}
+			wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+			runtime := NewLLMRuntime(&RuntimeConfig{
+				DefaultModel: "transport-budget-model",
+				MaxRetries:   0,
+			})
+			require.NoError(t, runtime.RegisterProvider("transport-budget-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err = runtime.Call(ctx, &LLMRequest{
+				Model:  "transport-budget-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "transport",
+				"the finite transport budget should determine the terminal error, got: %v", err)
+			assert.Equal(t, int64(4), transport.requests.Load(),
+				"finite transport budget must allow four attempts before exhaustion")
+		})
+	}
+}
+
 // TestProviderHeaderGuardAppliesToHTTP2 reproduces the hung-upstream shape
 // over HTTP/2: the transport-level ResponseHeaderTimeout is HTTP/1.1-only,
 // so without the per-request header guard an HTTP/2 request whose response
@@ -358,4 +504,47 @@ func TestProviderHeaderGuardAppliesToHTTP2(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("header guard did not stop the h2 request promptly (elapsed %v)", elapsed)
 	}
+}
+
+type guardedResponseRoundTripper struct {
+	contexts chan context.Context
+}
+
+func (t *guardedResponseRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.contexts <- req.Context()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("ok")),
+		Request:    req,
+	}, nil
+}
+
+// TestProviderDoRequestReleasesGuardContextOnBodyClose ensures the
+// response-header watchdog does not leak its child context while preserving
+// the response body long enough for streaming callers to consume it.
+func TestProviderDoRequestReleasesGuardContextOnBodyClose(t *testing.T) {
+	transport := &guardedResponseRoundTripper{contexts: make(chan context.Context, 1)}
+	provider := &ProviderWrapper{
+		config: &ProviderConfig{ResponseHeaderTimeout: time.Second},
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://provider.invalid", nil)
+	require.NoError(t, err)
+
+	resp, err := provider.doRequest(&http.Client{Transport: transport}, req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.Body)
+	guardedCtx := <-transport.contexts
+	require.NoError(t, guardedCtx.Err(), "guard context must remain live while the body is readable")
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "ok", string(body))
+	require.NoError(t, resp.Body.Close())
+	require.Eventually(t, func() bool {
+		return errors.Is(guardedCtx.Err(), context.Canceled)
+	}, time.Second, time.Millisecond,
+		"closing the response body must release the watchdog context")
 }

@@ -66,6 +66,41 @@ func TestDiagnoseFailureRetainsCauseCodeWhenRetriesExhausted(t *testing.T) {
 	assert.False(t, quotaDiag.Retryable)
 }
 
+func TestRetryDecisionForRetryHandoffReclassifiesOnlyMarkedExhaustion(t *testing.T) {
+	policy := newRuntimeRetryPolicy(3, 0, RetryTuning{
+		BaseDelay:     time.Millisecond,
+		MaxDelay:      time.Millisecond,
+		Randomization: -1,
+	}, nil)
+	transient := fmt.Errorf("failed to send request: timeout awaiting response headers")
+
+	handoff := markRetryExhaustedForNextLayer("provider call failed after retries", 2, transient)
+	assert.False(t, policy.decisionForError(handoff).Retryable,
+		"the exhausted marker must stay terminal for final diagnostics")
+	decision := policy.decisionForRetry(handoff)
+	assert.True(t, decision.Retryable)
+	assert.Equal(t, "transport", decision.Reason)
+	nested := fmt.Errorf("gateway exhausted: %w", handoff)
+	assert.True(t, policy.decisionForRetry(nested).Retryable,
+		"an enclosing retry layer must preserve a marked handoff")
+
+	unlimitedOuter := newRuntimeRetryPolicy(-1, 0, RetryTuning{}, nil)
+	assert.False(t, unlimitedOuter.decisionForRetry(handoff).Retryable,
+		"an unlimited outer loop must keep the guard as its safety boundary")
+
+	terminal := markRetryExhausted("provider call failed after retries", 2, transient)
+	assert.False(t, policy.decisionForRetry(terminal).Retryable,
+		"ordinary budget exhaustion must not multiply nested retry loops")
+
+	quota := markRetryExhaustedForNextLayer(
+		"provider call failed after retries",
+		2,
+		newProviderHTTPError(http.StatusForbidden, "insufficient_user_quota", nil),
+	)
+	assert.False(t, policy.decisionForRetry(quota).Retryable,
+		"the handoff must still honor non-retryable provider causes")
+}
+
 func TestDiagnoseFailureSeparatesQuotaAndTransientFailures(t *testing.T) {
 	quota := DiagnoseFailure(newProviderHTTPError(403, "insufficient_user_quota", nil))
 	assert.Equal(t, "UPSTREAM_QUOTA_EXHAUSTED", quota.ErrorCode)
@@ -651,4 +686,34 @@ func TestRetryAttemptsCeiling(t *testing.T) {
 
 	policy = newProviderRetryPolicy(10, -1, RetryTuning{}, nil)
 	require.Equal(t, 0, policy.MaxTransportAttempts, "-1 means unlimited transport retries")
+}
+
+func TestClassifyRetryableLLMError_UsageLimitIsQuotaExhausted(t *testing.T) {
+	// opencode.ai GoUsageLimitError：月度限额已用完，重试无意义，必须
+	// 立即失败而不是按服务端 hint 等待数小时（曾实测 retry_delay 47.8h）。
+	decision := classifyRetryableLLMError(fmt.Errorf("HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"GoUsageLimitError\",\"message\":\"Monthly usage limit reached. Resets in 1 day. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/x/go\"}}"))
+	assert.False(t, decision.Retryable)
+	assert.Equal(t, "quota_exhausted", decision.Reason)
+}
+
+func TestDelayForDecision_CapsServerHintDelay(t *testing.T) {
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{
+		BaseDelay:     400 * time.Millisecond,
+		MaxDelay:      5 * time.Second,
+		Multiplier:    1.5,
+		Randomization: -1,
+	}, nil)
+
+	// 服务端 hint（Retry-After 头/body）超过 MaxDelay 时截断，
+	// 防止上游返回极端等待时间（如月度限额 Reset）导致请求挂死。
+	hugeHint := retryDecision{Retryable: true, Delay: 48 * time.Hour, Reason: "http_429"}
+	require.Equal(t, 5*time.Second, policy.delayForDecision(1, hugeHint))
+
+	// 第二分支：退避计算值小于 hint 时，hint 同样受 MaxDelay 约束。
+	hint := retryDecision{Retryable: true, Delay: 90 * time.Second, Reason: "http_429"}
+	require.Equal(t, 5*time.Second, policy.delayForDecision(1, hint))
+
+	// hint 未超上限时保持原值。
+	smallHint := retryDecision{Retryable: true, Delay: 2 * time.Second, Reason: "http_429"}
+	require.Equal(t, 2*time.Second, policy.delayForDecision(1, smallHint))
 }

@@ -171,3 +171,127 @@ func TestTerminalEffectResultsKeepAckAndPartialFailureDistinct(t *testing.T) {
 		t.Fatalf("failed action = %+v", failed)
 	}
 }
+
+// TestHistoryCommitLedger_UnresolvedCounterMatchesScan cross-checks the O(1)
+// unresolvedCount cache against a brute-force scan of the same ledger across
+// every state transition. The executor and reducer rely on
+// hasUnresolvedTerminalDelivery to decide recovery; a counter/scan divergence
+// would either skip a required recovery or freeze the queue forever.
+func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	check := func(when string) {
+		t.Helper()
+		want := 0
+		for _, entry := range ledger.byToken {
+			switch entry.State {
+			case HistoryCommitStateFailed:
+				want++
+			case HistoryCommitInvalidated:
+				if entry.MayHavePartiallyWritten {
+					want++
+				}
+			}
+		}
+		if got := ledger.hasUnresolvedTerminalDelivery(); got != (want > 0) {
+			t.Fatalf("%s: hasUnresolvedTerminalDelivery=%t, scan=%d", when, got, want)
+		}
+		if ledger.unresolvedCount != want {
+			t.Fatalf("%s: unresolvedCount=%d, scan=%d", when, ledger.unresolvedCount, want)
+		}
+	}
+
+	// Pending and in-flight entries are never unresolved.
+	first := testHistoryCommit(1, 41, 8)
+	if err := ledger.Enqueue(first); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	check("pending")
+	if err := ledger.MarkInFlight(first.Token); err != nil {
+		t.Fatalf("MarkInFlight: %v", err)
+	}
+	check("in-flight")
+
+	// Ack resolves cleanly and never counts.
+	if err := ledger.Ack(first.Token, 1, 8); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	check("acked")
+
+	// Fail always counts, even without a partial-write signal.
+	second := testHistoryCommit(2, 42, 8)
+	if err := ledger.Enqueue(second); err != nil {
+		t.Fatalf("Enqueue second: %v", err)
+	}
+	if err := ledger.MarkInFlight(second.Token); err != nil {
+		t.Fatalf("MarkInFlight second: %v", err)
+	}
+	if err := ledger.Fail(second.Token, errors.New("boom"), false); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	check("failed without partial write")
+
+	// Pending invalidation without a partial write is NOT unresolved.
+	third := testHistoryCommit(3, 43, 8)
+	if err := ledger.Enqueue(third); err != nil {
+		t.Fatalf("Enqueue third: %v", err)
+	}
+	if wasInFlight, err := ledger.Invalidate(third.Token); err != nil || wasInFlight {
+		t.Fatalf("Invalidate pending: wasInFlight=%t err=%v", wasInFlight, err)
+	}
+	check("pending invalidated")
+
+	// In-flight invalidation implies a partial write and IS unresolved.
+	fourth := testHistoryCommit(4, 44, 8)
+	if err := ledger.Enqueue(fourth); err != nil {
+		t.Fatalf("Enqueue fourth: %v", err)
+	}
+	if err := ledger.MarkInFlight(fourth.Token); err != nil {
+		t.Fatalf("MarkInFlight fourth: %v", err)
+	}
+	if wasInFlight, err := ledger.Invalidate(fourth.Token); err != nil || !wasInFlight {
+		t.Fatalf("Invalidate in-flight: wasInFlight=%t err=%v", wasInFlight, err)
+	}
+	check("in-flight invalidated")
+
+	// Clone must carry the counter forward.
+	clone := ledger.Clone()
+	if got := clone.hasUnresolvedTerminalDelivery(); got != ledger.hasUnresolvedTerminalDelivery() {
+		t.Fatalf("clone counter diverged: clone=%t ledger=%t", got, ledger.hasUnresolvedTerminalDelivery())
+	}
+	if clone.unresolvedCount != ledger.unresolvedCount {
+		t.Fatalf("clone unresolvedCount=%d, want %d", clone.unresolvedCount, ledger.unresolvedCount)
+	}
+}
+
+// TestHistoryCommitLedger_OrderedTokensStaysAscending verifies the cached
+// token slice mirrors byToken keys in ascending order even for out-of-order
+// Enqueue calls (the defensive fallback path must never be observable).
+func TestHistoryCommitLedger_OrderedTokensStaysAscending(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	for _, token := range []uint64{5, 1, 9, 3, 7} {
+		if err := ledger.Enqueue(testHistoryCommit(token, scene.CellID(token), 8)); err != nil {
+			t.Fatalf("Enqueue(%d): %v", token, err)
+		}
+	}
+	got := ledger.orderedTokens()
+	want := []uint64{1, 3, 5, 7, 9}
+	if len(got) != len(want) {
+		t.Fatalf("orderedTokens = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("orderedTokens = %v, want %v", got, want)
+		}
+	}
+	// Detached view: mutating the result must not corrupt the cache.
+	got[0] = 99
+	if after := ledger.orderedTokens(); after[0] != 1 {
+		t.Fatalf("orderedTokens returned shared backing: %v", after)
+	}
+	// External byToken write (test-only path) triggers the defensive rebuild.
+	ledger.byToken[11] = HistoryCommitEntry{Commit: testHistoryCommit(11, 42, 8), State: HistoryCommitPending}
+	rebuild := ledger.orderedTokens()
+	if len(rebuild) != len(want)+1 || rebuild[len(rebuild)-1] != 11 {
+		t.Fatalf("defensive rebuild = %v, want %v + 11", rebuild, want)
+	}
+}

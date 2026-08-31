@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -444,6 +445,59 @@ func TestLLMRuntime_Call_DoesNotRetryRetryExhaustedErrors(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Equal(t, 1, provider.calls)
+}
+
+func TestLLMRuntime_Call_DoesNotRetryNestedNonRetryableExhaustion(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{
+			markRetryExhausted("all retry attempts failed", 2, newProviderHTTPError(http.StatusForbidden, "insufficient_user_quota", nil)),
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, provider.calls)
+}
+
+func TestLLMRuntime_Call_RetriesAfterProviderGuardHandoff(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: -1,
+		},
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{
+			markRetryExhaustedForNextLayer(
+				"streaming aggregate call failed after retries",
+				2,
+				fmt.Errorf("failed to send request: timeout awaiting response headers"),
+			),
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "provider:provider-a", resp.Content)
+	assert.Equal(t, 2, provider.calls)
 }
 
 type mockResourceManager struct{}

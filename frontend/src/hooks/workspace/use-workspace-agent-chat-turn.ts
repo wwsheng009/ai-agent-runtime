@@ -33,17 +33,22 @@ import {
   buildGeneratedImagePlaceholderSegment,
   buildTurnJsonArtifact,
   createStreamingAssistantMessage,
+  getAssistantMessageReasoning,
+  getAssistantMessageText,
   getErrorMessage,
   getStreamTextDelta,
   getToolName,
   getToolErrorMessage,
   isRuntimePayload,
   mergeUniqueStrings,
+  reconcileRuntimeText,
+  getRuntimeDeltaKey,
   upsertGeneratedImageSegment,
   upsertToolSegment,
   updateThreadMessage,
   upsertArtifact,
   upsertArtifacts,
+  type RuntimeDeltaCoordinator,
   type ToolMessageSegment,
 } from "@/lib/workspace-thread-state";
 import type {
@@ -52,6 +57,7 @@ import type {
 } from "@/types/runtime";
 
 type WorkspaceAgentChatTurnOptions = {
+  deltaCoordinator?: RuntimeDeltaCoordinator;
   onSessionTouched?: () => void;
   selectedThread: Thread | undefined;
   setSelectedArtifactId: (artifactId: string | null) => void;
@@ -68,6 +74,7 @@ export function shouldIgnoreTerminalStreamError(options: {
 }
 
 export function useWorkspaceAgentChatTurn({
+  deltaCoordinator,
   onSessionTouched,
   selectedThread,
   setSelectedArtifactId,
@@ -79,6 +86,8 @@ export function useWorkspaceAgentChatTurn({
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [isResponding, setIsResponding] = useState(false);
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const activeTurnIdRef = useRef<string | null>(null);
   const [phase, setPhase] = useState<ChatStreamPhase | null>(null);
   const phaseRef = useRef<ChatStreamPhase | null>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
@@ -118,6 +127,7 @@ export function useWorkspaceAgentChatTurn({
     const threadId = threadSnapshot.id;
     const turnId = crypto.randomUUID();
     const assistantMessageId = `turn-${turnId}-assistant`;
+    deltaCoordinator?.beginTurn(turnId);
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -128,6 +138,7 @@ export function useWorkspaceAgentChatTurn({
     const requestPayload = {
       messages: [{ role: "user" as const, content: prompt }],
       session_id: threadSnapshot.sessionId,
+      turn_id: turnId,
       user_id: userId || undefined,
       workspace_path: workspacePath || undefined,
       provider: selectedProvider || undefined,
@@ -374,6 +385,7 @@ export function useWorkspaceAgentChatTurn({
             ...currentMessage,
             author: "Runtime error",
             label: "error",
+            streaming: false,
             segments,
           };
         }),
@@ -391,6 +403,10 @@ export function useWorkspaceAgentChatTurn({
       }
 
       turnFinalized = true;
+      if (activeTurnIdRef.current === turnId) {
+        activeTurnIdRef.current = null;
+        setActiveTurnId(null);
+      }
       cancelStreamingFrame();
       setPhaseAndRef("finalizing");
 
@@ -409,11 +425,14 @@ export function useWorkspaceAgentChatTurn({
           currentKind = payload.result.kind;
         }
         if (payload.result.reasoning && payload.result.reasoning.trim()) {
-          reasoningText = payload.result.reasoning;
+          reasoningText = reconcileRuntimeText(
+            reasoningText,
+            payload.result.reasoning,
+          );
         }
       }
       if (payload.content && payload.content.trim()) {
-        streamedText = payload.content;
+        streamedText = reconcileRuntimeText(streamedText, payload.content);
       }
 
       const generatedImageAttachments = buildGeneratedImageAttachments(
@@ -429,6 +448,7 @@ export function useWorkspaceAgentChatTurn({
         status: payload.status ?? (stopped ? "stopped" : "completed"),
         content: streamedText,
         result: finalResult ?? payload.result,
+        turn_id: payload.turn_id ?? turnId,
       };
 
       const artifacts = buildFinalArtifacts(
@@ -446,9 +466,12 @@ export function useWorkspaceAgentChatTurn({
         generatedImageAttachments.artifacts,
       );
 
+      const terminalText = reconcileRuntimeText(
+        streamedText,
+        finalResult?.output ?? payload.content,
+      );
       const finalText =
-        streamedText ||
-        finalResult?.output?.trim() ||
+        terminalText ||
         (stopped
           ? "Response stopped before any text was returned."
           : "Runtime request completed, but no textual output was returned.");
@@ -475,10 +498,28 @@ export function useWorkspaceAgentChatTurn({
         };
 
         nextThread = updateThreadMessage(nextThread, assistantMessageId, (message) => {
+          // The runtime/stream path may have rendered deltas independently of
+          // the request SSE path.  Read that message *inside* the functional
+          // updater so the terminal snapshot cannot erase a longer live
+          // buffer (and so reasoning follows the same reconciliation rules).
+          const renderedText = getAssistantMessageText(message);
+          const renderedReasoning = getAssistantMessageReasoning(message);
+          const reconciledText = reconcileRuntimeText(
+            renderedText,
+            terminalText,
+          );
+          const reconciledReasoning = reconcileRuntimeText(
+            renderedReasoning,
+            reconcileRuntimeText(
+              reasoningText,
+              finalResult?.reasoning,
+            ),
+          );
+          const resolvedText = reconciledText || finalText;
           const finalSegments = buildAssistantMessageSegments(
-            finalText,
+            resolvedText,
             currentSource,
-            reasoningText,
+            reconciledReasoning,
             {
               status: stopped ? "stopped" : undefined,
               existingSegments: message.segments,
@@ -490,6 +531,7 @@ export function useWorkspaceAgentChatTurn({
           return {
             ...message,
             interrupted: stopped ? true : undefined,
+            streaming: false,
             author:
               finalResult?.kind === "agent" || currentKind === "agent"
                 ? "Runtime agent"
@@ -528,6 +570,8 @@ export function useWorkspaceAgentChatTurn({
     // 新 turn 开始：轨迹快照 reset（同步于首个 SSE 事件之前，避免
     // 导航渲染迟到的 effect reset 打断流事件收集造成 seq gap）。
     trajectoryStore.reset();
+    activeTurnIdRef.current = turnId;
+    setActiveTurnId(turnId);
     setIsResponding(true);
     setPhaseAndRef("connecting");
     attachVisibilityListener();
@@ -546,7 +590,11 @@ export function useWorkspaceAgentChatTurn({
       messages: [
         ...thread.messages,
         userMessage,
-        createStreamingAssistantMessage(assistantMessageId, [requestArtifact.id]),
+        createStreamingAssistantMessage(
+          assistantMessageId,
+          [requestArtifact.id],
+          turnId,
+        ),
       ],
     }));
     setSelectedArtifactId(requestArtifact.id);
@@ -581,12 +629,18 @@ export function useWorkspaceAgentChatTurn({
                   lastError: null,
                 };
 
-                nextThread = updateThreadMessage(nextThread, assistantMessageId, (message) => ({
-                  ...message,
-                  author:
-                    payload.kind === "agent" ? "Runtime agent" : "Runtime stream",
-                  label: payload.source ?? "streaming",
-                }));
+                nextThread = updateThreadMessage(
+                  nextThread,
+                  assistantMessageId,
+                  (message) => ({
+                    ...message,
+                    author:
+                      payload.kind === "agent"
+                        ? "Runtime agent"
+                        : "Runtime stream",
+                    label: payload.source ?? "streaming",
+                  }),
+                );
 
                 if (isRuntimePayload(payload.orchestration)) {
                   orchestrationPayload = payload.orchestration;
@@ -623,18 +677,29 @@ export function useWorkspaceAgentChatTurn({
               pushTrajectory("chunk", payload);
               receivedRuntimeActivity = true;
               if (payload.type === "image") {
+                const imageKey = getRuntimeDeltaKey(
+                  payload as unknown as Record<string, unknown>,
+                  "image",
+                );
+                if (deltaCoordinator && !deltaCoordinator.claim(imageKey)) {
+                  return;
+                }
                 const imageProgress = buildGeneratedImagePlaceholderSegment(
                   payload.metadata,
                 );
                 if (imageProgress) {
                   updateCurrentThread((thread) =>
-                    updateThreadMessage(thread, assistantMessageId, (message) => ({
-                      ...message,
-                      segments: upsertGeneratedImageSegment(
-                        message.segments,
-                        imageProgress,
-                      ),
-                    })),
+                    updateThreadMessage(
+                      thread,
+                      assistantMessageId,
+                      (message) => ({
+                        ...message,
+                        segments: upsertGeneratedImageSegment(
+                          message.segments,
+                          imageProgress,
+                        ),
+                      }),
+                    ),
                   );
                   updateCurrentThread((thread) => ({
                     ...thread,
@@ -647,6 +712,13 @@ export function useWorkspaceAgentChatTurn({
               if (!delta) {
                 return;
               }
+              const textKey = getRuntimeDeltaKey(
+                payload as unknown as Record<string, unknown>,
+                "text",
+              );
+              if (deltaCoordinator && !deltaCoordinator.claim(textKey)) {
+                return;
+              }
               streamedText += delta;
               setPhaseAndRef("streaming");
               scheduleStreamingMessage();
@@ -657,10 +729,18 @@ export function useWorkspaceAgentChatTurn({
               const delta =
                 typeof payload.content === "string"
                   ? payload.content
-                  : payload.reasoning && typeof payload.reasoning.content === "string"
+                  : payload.reasoning &&
+                      typeof payload.reasoning.content === "string"
                     ? payload.reasoning.content
                     : "";
               if (delta) {
+                const reasoningKey = getRuntimeDeltaKey(
+                  payload as unknown as Record<string, unknown>,
+                  "reasoning",
+                );
+                if (deltaCoordinator && !deltaCoordinator.claim(reasoningKey)) {
+                  return;
+                }
                 if (reasoningText && !reasoningText.endsWith("\n")) {
                   reasoningText += "\n";
                 }
@@ -775,10 +855,16 @@ export function useWorkspaceAgentChatTurn({
                 currentKind = payload.kind;
               }
               if (payload.reasoning && payload.reasoning.trim()) {
-                reasoningText = payload.reasoning;
+                reasoningText = reconcileRuntimeText(
+                  reasoningText,
+                  payload.reasoning,
+                );
               }
               if (payload.output && payload.output.trim()) {
-                streamedText = payload.output;
+                streamedText = reconcileRuntimeText(
+                  streamedText,
+                  payload.output,
+                );
                 flushStreamingMessage();
               }
 
@@ -868,6 +954,11 @@ export function useWorkspaceAgentChatTurn({
         if (activeRequestControllerRef.current === controller) {
           activeRequestControllerRef.current = null;
         }
+        if (activeTurnIdRef.current === turnId) {
+          activeTurnIdRef.current = null;
+          setActiveTurnId(null);
+        }
+        deltaCoordinator?.endTurn(turnId);
         setIsResponding(false);
         setPhaseAndRef(null);
       }
@@ -881,6 +972,7 @@ export function useWorkspaceAgentChatTurn({
   return {
     draft,
     isResponding,
+    activeTurnId,
     phase,
     trajectoryStore,
     modelOptions,

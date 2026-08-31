@@ -212,6 +212,13 @@ func (c *localTeamLifecycleService) RunSettled(ctx context.Context, teamID strin
 		// 中的 one-shot 探测（新进程必无 live loop）。
 		return false, nil
 	}
+	if record.Status == team.TeamStatusPaused {
+		// Paused is a resumable control state, not foreground work. In
+		// particular, stale runtime-session rows from the previous process must
+		// not keep the composer blocked after startup has paused an orphaned
+		// empty team. A still-live loop remains the only reason to wait.
+		return !c.hasTeamLoop(teamID), nil
+	}
 	if c.hasTeamLoop(teamID) {
 		return false, nil
 	}
@@ -345,6 +352,20 @@ func reconcileStaleAmbientTeams(session *ChatSession) {
 	defer cancel()
 	record, err := session.LocalRuntimeHost.TeamStore.GetTeam(ctx, teamID)
 	if err != nil || record == nil || record.Status != team.TeamStatusActive {
+		return
+	}
+	tasks, err := session.LocalRuntimeHost.TeamStore.ListTasks(ctx, team.TaskFilter{TeamID: teamID})
+	if err != nil {
+		return
+	}
+	if len(tasks) == 0 {
+		// ReconcileTerminalTeamState deliberately keeps an empty active team
+		// non-terminal because an in-process caller may still add its first
+		// task. During fresh-process recovery there is no live loop and no work
+		// to resume, so keeping it active creates an unresolvable prompt wait.
+		// Pause rather than cancel it: the durable shell remains available for
+		// an explicit later resume, while Pending no longer hides the composer.
+		_ = session.LocalRuntimeHost.TeamStore.UpdateTeamStatus(ctx, teamID, team.TeamStatusPaused)
 		return
 	}
 	// Best-effort：探测失败不阻断启动，既有等待路径按原逻辑继续。

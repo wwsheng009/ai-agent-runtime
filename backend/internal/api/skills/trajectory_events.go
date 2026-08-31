@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -23,8 +24,11 @@ const chatSSEStreamEventPrefix = "chat.sse."
 //     block forwarding」）；
 //   - 事件载荷以原始 payload 形式存储（不含 _event envelope），Type 为
 //     "chat.sse.<event>"，Payload 规范为 map 形式（EventStore payload_json 列要求）。
-func (h *Handler) newTrajectoryEmitter(w http.ResponseWriter, session *chat.Session) *sseEmitter {
+func (h *Handler) newTrajectoryEmitter(w http.ResponseWriter, session *chat.Session, turnIDs ...string) *sseEmitter {
 	emitter := newSSEEmitter(w)
+	if len(turnIDs) > 0 {
+		emitter.turnID = strings.TrimSpace(turnIDs[0])
+	}
 	store := h.getSessionEventStore()
 	sessionID := sessionID(session)
 	if store == nil || sessionID == "" {

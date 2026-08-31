@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -172,6 +173,193 @@ func TestLLMRetryEventE2E_RepeatedRetriesKeepClockRunning(t *testing.T) {
 	if !strings.Contains(plain, "Retrying step=1 attempt=2/3") {
 		t.Fatalf("attempt field did not update on repeated retry: %q", plain)
 	}
+}
+
+// Production-path regression: after a retry, a recovered provider can emit a
+// long assistant stream. The unified reducer must mount the first mutable Scene
+// cell once, then advance only AppState.Active for later chunks. Replacing the
+// whole transcript for every chunk creates a full-frame action storm; the
+// backend keeps reading tokens while the visible UI remains on "Retrying" until
+// the final snapshot eventually catches up.
+func TestLLMRetryUnifiedRendererProjectsDeltasBeforeFinal(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(100, 18)
+	interaction.SetSurface(surface)
+	var terminal bytes.Buffer
+	require.True(t, interaction.enableUnifiedRendererWithWriter(&terminal), "attach unified renderer")
+
+	bridge.BeginRun()
+	bridge.startProcessor()
+	defer close(bridge.eventQueue)
+	post := func(event runtimeevents.Event) {
+		t.Helper()
+		bridge.Handle(event)
+		require.True(t, bridge.WaitForCurrentEvents(2*time.Second), "drain bridge event %s", event.Type)
+		interaction.waitUIActorIdle()
+		awaitUnifiedPresenterIdle(t, interaction)
+	}
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventSessionStart,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"turn_id": "turn-1"},
+	})
+	post(runtimeevents.Event{
+		Type:      "llm.retry",
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "step": 9, "attempt": 1, "max_attempts": 10,
+			"retry_reason": "transport", "retry_delay_ms": 1073,
+		},
+	})
+
+	// Reasoning uses the same mutable-cell projection as assistant output.
+	// Cover it explicitly because many providers resume with hidden/summary
+	// reasoning immediately after retrying, before the first answer token.
+	terminal.Reset()
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "llm_request_id": "request-1",
+			"sequence": uint64(1), "mode": "append",
+			"reasoning": map[string]interface{}{
+				"format": "stream_delta", "summary": "checking recovery",
+			},
+		},
+	})
+	reasoningFirst := interaction.uiActor.AppState()
+	require.Equal(t, scene.KindReasoning, reasoningFirst.Active.Kind)
+	require.Equal(t, "checking recovery", reasoningFirst.Active.Source)
+	require.Contains(t, terminal.String(), "checking recovery")
+	reasoningTranscriptRevision := reasoningFirst.Transcript.Revision
+
+	terminal.Reset()
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "llm_request_id": "request-1",
+			"sequence": uint64(2), "mode": "append",
+			"reasoning": map[string]interface{}{
+				"format": "stream_delta", "summary": " while streaming",
+			},
+		},
+	})
+	reasoningSecond := interaction.uiActor.AppState()
+	require.Equal(t, "checking recovery while streaming", reasoningSecond.Active.Source)
+	require.Equal(t, reasoningTranscriptRevision, reasoningSecond.Transcript.Revision,
+		"later reasoning chunks must not enqueue a full ReplaceTranscript transaction")
+	require.NotEmpty(t, terminal.String(),
+		"the incremental reasoning frame must be flushed before assistant output")
+
+	terminal.Reset()
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "sequence": uint64(1),
+			"mode": "append", "delta": "recovered output",
+		},
+	})
+	first := interaction.uiActor.AppState()
+	require.Equal(t, "recovered output", first.Active.Source)
+	require.Equal(t, ui.ActiveCellMutable, first.Active.Phase)
+	require.Contains(t, terminal.String(), "recovered output",
+		"the first recovered chunk must reach the terminal before assistant.message")
+	firstTranscriptRevision := first.Transcript.Revision
+
+	terminal.Reset()
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "sequence": uint64(2),
+			"mode": "append", "delta": " is still streaming",
+		},
+	})
+	second := interaction.uiActor.AppState()
+	require.Equal(t, "recovered output is still streaming", second.Active.Source)
+	require.Equal(t, firstTranscriptRevision, second.Transcript.Revision,
+		"later chunks must not enqueue a full ReplaceTranscript transaction")
+	require.NotEmpty(t, terminal.String(),
+		"the incremental active-cell frame must be flushed before assistant.message")
+
+	post(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1",
+			"content": "recovered output is still streaming",
+		},
+	})
+	final := interaction.uiActor.AppState()
+	require.Equal(t, ui.ActiveCellState{}, final.Active)
+	require.Greater(t, final.Transcript.Revision, firstTranscriptRevision)
+	require.Len(t, final.Transcript.Cells, 2)
+	require.Equal(t, "checking recovery while streaming", final.Transcript.Cells[0].Source)
+	require.Equal(t, "recovered output is still streaming", final.Transcript.Cells[1].Source)
+}
+
+func TestLLMRetryAfterRunEndDoesNotRestartCompletedStatus(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(100, 12)
+	interaction.SetSurface(surface)
+
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+	bridge.EndRun()
+	interaction.waitUIActorIdle()
+
+	interaction.mu.Lock()
+	before := interaction.surfaceStatus
+	beforeStarted := interaction.dynamicStatusStarted
+	interaction.mu.Unlock()
+	require.Equal(t, chatSurfaceStatusIdle, before.kind)
+	require.True(t, beforeStarted.IsZero())
+
+	// Transport callbacks from older/legacy providers may omit turn_id. The
+	// late-run fence, rather than identity matching, must keep this live-only
+	// state from rearming the completed composer.
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.retry",
+		SessionID: "lead-session",
+		TraceID:   "late-trace",
+		Payload: map[string]interface{}{
+			"step": 9, "attempt": 2, "max_attempts": 10,
+			"retry_reason": "transport", "retry_delay_ms": 1073,
+		},
+	})
+	interaction.waitUIActorIdle()
+
+	interaction.mu.Lock()
+	after := interaction.surfaceStatus
+	afterStarted := interaction.dynamicStatusStarted
+	interaction.mu.Unlock()
+	require.Equal(t, before, after)
+	require.True(t, afterStarted.IsZero(), "late retry must not restart the status clock")
 }
 
 // L3 真实主循环 e2e：runChatLoop + os.Pipe 脚本注入 + 捕获真实渲染字节流，

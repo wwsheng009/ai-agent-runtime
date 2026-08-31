@@ -1769,6 +1769,7 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			CompatibilityProfile:  session.Provider.Compatibility.Profile,
 			Timeout:               session.Provider.Timeout,
 			MaxRetries:            maxRetries,
+			MaxTransportRetries:   runtimellm.ProviderMaxTransportRetriesFromAgentConfig(session.Config),
 			RetryTuning:           retryTuning,
 			RetryRules:            retryRules,
 			DefaultModel:          session.Provider.DefaultModel,
