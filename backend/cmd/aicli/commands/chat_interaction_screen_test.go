@@ -126,7 +126,9 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 			})
 			screen.feed(final)
 
-			promptRow := height - 2
+			// statusbar 占两行（第二行显示 --pprof/--debug flag 状态），prompt
+			// 位于 height-3；旧单行 status 假设已过时。
+			promptRow := height - 3
 			if got := screen.line(promptRow); !strings.HasPrefix(got, ">") {
 				t.Fatalf("expected prompt on row %d, got %q, screen:\n%s", promptRow, got, screen.dump())
 			}

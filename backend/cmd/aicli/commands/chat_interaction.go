@@ -4070,7 +4070,23 @@ func (c *chatInteractionCoordinator) writeFinalAssistantCellLocked(content strin
 }
 
 func (c *chatInteractionCoordinator) finalAssistantOverflowHintLocked(content string) string {
-	return c.finalAssistantCellLocked(content).trailingDisplayLine
+	cell := c.finalAssistantCellLocked(content)
+	if cell.trailingDisplayLine != "" {
+		return cell.trailingDisplayLine
+	}
+	// finalizingAssistantProjection 期间 finalAssistantCellLocked 会短路跳过
+	// 溢出提示，但 finalize 残差路径必须先于实际渲染计算出 hint，否则 live
+	// 与 one-shot RenderAssistant 对同一 source 的投影不对称。这里用同一
+	// 判定规则独立重算，保证两条入口的 hint 一致。
+	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+		return ""
+	}
+	rows := c.assistantBodyDisplayRowsLocked(content, cell)
+	visible := c.session.Surface.VisibleOutputRows()
+	if rows <= visible {
+		return ""
+	}
+	return fmt.Sprintf("回复共 %d 行，超出屏幕可见区；完整内容已滚入终端滚动缓冲区，请向上滚动查看", rows)
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
