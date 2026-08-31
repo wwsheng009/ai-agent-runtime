@@ -187,3 +187,67 @@ func TestRenderEditedDiffOutput_MarkdownFenceKeepsEveryHunk(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderStructuredDiffToolOutput_LabelsReadOnlyDiffSeparately pins the
+// "查看 vs 编辑" distinction: a markdown-format diff whose tool is a read-only
+// inspection (shell / view) must render as "• Diff", while a real editing tool
+// (edit / apply_patch / namespaced .edit) keeps "• Edited".
+func TestRenderStructuredDiffToolOutput_LabelsReadOnlyDiffSeparately(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1,1 +1,1 @@",
+		"-old",
+		"+new",
+	}, "\n")
+
+	// Read-only shell inspection must never be labeled an edit.
+	for _, tool := range []string{"execute_shell_command", "bash", "shell"} {
+		got := renderStructuredDiffToolOutput(map[string]interface{}{
+			"tool_name":                 tool,
+			"render_output_format":      "markdown",
+			"render_output_untruncated": true,
+			"render_output":             diff,
+		})
+		if strings.Contains(got, "• Edited app.go") {
+			t.Fatalf("read-only tool %q was mislabeled as edit:\n%s", tool, got)
+		}
+		if !strings.Contains(got, "• Diff app.go (+1 -1)") {
+			t.Fatalf("read-only tool %q expected Diff label, got:\n%s", tool, got)
+		}
+	}
+
+	// Real editing tools keep the edit label.
+	for _, tool := range []string{"edit", "apply_patch", "apply", "filesystem.edit_file", "mcp/apply_patch"} {
+		got := renderStructuredDiffToolOutput(map[string]interface{}{
+			"tool_name":                 tool,
+			"render_output_format":      "markdown",
+			"render_output_untruncated": true,
+			"render_output":             diff,
+		})
+		if !strings.Contains(got, "• Edited app.go (+1 -1)") {
+			t.Fatalf("editing tool %q lost Edit label:\n%s", tool, got)
+		}
+		if strings.Contains(got, "• Diff app.go") {
+			t.Fatalf("editing tool %q was mislabeled as Diff:\n%s", tool, got)
+		}
+	}
+}
+
+// TestEditingSharedToolRenderOutput_RejectsShellLikeTools pins the producer-side
+// guard: shell tools (whose output is read-only, e.g. `git diff`) are never fed
+// into the editing render path, so the structured shell-diff path owns them and
+// labels them "• Diff" instead of "• Edited".
+func TestEditingSharedToolRenderOutput_RejectsShellLikeTools(t *testing.T) {
+	for _, tool := range []string{"execute_shell_command", "bash", "shell", "run"} {
+		if got := editingSharedToolRenderOutput(tool, "--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new"); got != "" {
+			t.Fatalf("shell-like tool %q must not produce editing render output, got %q", tool, got)
+		}
+	}
+	// Non-shell editing tools still produce render output.
+	for _, tool := range []string{"edit", "apply_patch", "patch", "filesystem.edit_file"} {
+		if got := editingSharedToolRenderOutput(tool, "ok"); got == "" {
+			t.Fatalf("editing tool %q should produce render output", tool)
+		}
+	}
+}
