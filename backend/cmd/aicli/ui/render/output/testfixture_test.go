@@ -1615,8 +1615,8 @@ func TestReconfigureSkeleton(t *testing.T) {
 		Kind:     TransactionFrame,
 		Bytes:    []byte("x"),
 	})
-	if r.Admission.Decision != AdmissionRejected {
-		t.Fatalf("expected rejection during reconfigure, got %+v", r.Admission)
+	if r.Admission.Decision != AdmissionDeferred {
+		t.Fatalf("expected deferral during reconfigure, got %+v", r.Admission)
 	}
 	// Abort 恢复 open；错误 token 拒绝。
 	if err := gw.AbortReconfigure(ctx, "wrong"); err == nil {
@@ -1841,6 +1841,90 @@ func TestReconfigureConcurrentCommitJoinsSharedFinalizer(t *testing.T) {
 	}
 }
 
+// TestReconfigureDeadlineStartsAtBeginAndAbandonsUnclaimedPlan verifies that
+// the gateway-owned deadline includes presenter handoff time. Once Begin has
+// returned the plan, timing out without Commit cannot safely guess whether the
+// presenter ledger is old or new, so the gateway must fail closed rather than
+// leave a permanent barrier or reopen either route.
+func TestReconfigureDeadlineStartsAtBeginAndAbandonsUnclaimedPlan(t *testing.T) {
+	clock := NewFakeClock(time.Date(2026, 8, 30, 6, 0, 0, 0, time.UTC))
+	oldPrimary := NewMemorySink(TargetDescriptor{
+		SinkID:             "deadline-old-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-deadline-old",
+	})
+	opts := gatewayOptions()
+	opts.Clock = clock
+	opts.ReconfigureTimeout = 2 * time.Second
+	gw, err := NewRenderOutputGateway(
+		"reconfigure-deadline-"+randomID("s"),
+		opts,
+		RenderRouteConfig{
+			Primary:            oldPrimary,
+			PrimaryOwnership:   SinkOwned,
+			ProjectionTargetID: oldPrimary.Descriptor().ProjectionTargetID,
+		},
+	)
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	gw.Run()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = gw.Close(ctx)
+	})
+
+	candidate := NewMemorySink(TargetDescriptor{
+		SinkID:             "deadline-candidate-primary",
+		Class:              TargetClassCapture,
+		ProjectionTargetID: "pt-deadline-candidate",
+	})
+	plan, err := gw.BeginReconfigure(context.Background(), RenderRouteConfig{
+		Primary:            candidate,
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: candidate.Descriptor().ProjectionTargetID,
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if state := gw.stateOf(); state != GatewayReconfiguring {
+		t.Fatalf("state after begin=%s", state)
+	}
+
+	clock.Advance(opts.ReconfigureTimeout)
+	deadline := time.Now().Add(2 * time.Second)
+	for gw.stateOf() == GatewayReconfiguring && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if state := gw.stateOf(); state != GatewayAbandoned {
+		t.Fatalf("deadline left ambiguous gateway state=%s", state)
+	}
+	if state := oldPrimary.Snapshot().State; state != SinkLifecycleClosed {
+		t.Fatalf("old owned primary not closed after abandonment: %s", state)
+	}
+	if state := candidate.Snapshot().State; state != SinkLifecycleClosed {
+		t.Fatalf("candidate owned primary not closed after abandonment: %s", state)
+	}
+
+	if err := gw.CommitReconfigure(context.Background(), plan.Token); ClassOf(err) != DeliveryErrorAbandoned {
+		t.Fatalf("same-token commit did not return memoized abandonment: %v", err)
+	}
+	late := gw.Submit(context.Background(), RenderIntent{
+		IntentID: "after-reconfigure-deadline",
+		Kind:     TransactionFrame,
+		Bytes:    []byte("must-not-run"),
+	})
+	if late.Admission.Decision != AdmissionRejected ||
+		late.Admission.ErrorClass != DeliveryErrorAbandoned ||
+		late.Sequence != 0 || late.Primary != nil {
+		t.Fatalf("abandoned gateway admitted or misclassified submit: %+v", late)
+	}
+	if err := gw.Close(context.Background()); ClassOf(err) != DeliveryErrorAbandoned {
+		t.Fatalf("close did not join terminal abandonment: %v", err)
+	}
+}
+
 // TestReconfigureCutoffNoBatchSmuggling：切换在 quiescent boundary 完成，
 // cutoff 内的 accepted batch 全部按旧 route 登记执行，新 route 安装前
 // 不接受任何新 batch（不偷渡旧 batch、不建立隐式 pending queue）。
@@ -1869,8 +1953,8 @@ func TestReconfigureCutoffNoBatchSmuggling(t *testing.T) {
 			Kind:     TransactionFrame,
 			Bytes:    []byte("post-switch"),
 		})
-		if rej.Admission.Decision != AdmissionRejected {
-			t.Fatalf("submit during reconfigure must be rejected: %+v", rej)
+		if rej.Admission.Decision != AdmissionDeferred {
+			t.Fatalf("submit during reconfigure must be deferred: %+v", rej)
 		}
 		if rej.Primary != nil || rej.Sequence != 0 {
 			t.Fatalf("rejected during reconfigure must be pre-admission: %+v", rej)
@@ -1922,8 +2006,8 @@ func TestReconfigureAbortKeepsAdmissionBarrierUntilFinalize(t *testing.T) {
 			Kind:     TransactionFrame,
 			Bytes:    []byte("x"),
 		})
-		if rej.Admission.Decision != AdmissionRejected {
-			t.Fatalf("submit after abort must stay rejected: %+v", rej)
+		if rej.Admission.Decision != AdmissionDeferred {
+			t.Fatalf("submit after abort must stay deferred: %+v", rej)
 		}
 	}
 	// finalize（rollback-old commit）后恢复。
