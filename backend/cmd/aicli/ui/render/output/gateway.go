@@ -557,28 +557,14 @@ func (g *RenderOutputGateway) unregisterPrimaryAttempt(sequence uint64, attempt 
 }
 
 func (g *RenderOutputGateway) primaryAttemptsThrough(cutoff uint64) []*primaryAttempt {
-	type sequencedAttempt struct {
-		sequence uint64
-		attempt  *primaryAttempt
-	}
 	g.attemptsMu.Lock()
-	sequenced := make([]sequencedAttempt, 0, len(g.primaryAttempts))
+	out := make([]*primaryAttempt, 0, len(g.primaryAttempts))
 	for sequence, attempt := range g.primaryAttempts {
 		if sequence <= cutoff {
-			sequenced = append(sequenced, sequencedAttempt{
-				sequence: sequence,
-				attempt:  attempt,
-			})
+			out = append(out, attempt)
 		}
 	}
 	g.attemptsMu.Unlock()
-	sort.Slice(sequenced, func(i, j int) bool {
-		return sequenced[i].sequence < sequenced[j].sequence
-	})
-	out := make([]*primaryAttempt, 0, len(sequenced))
-	for _, item := range sequenced {
-		out = append(out, item.attempt)
-	}
 	return out
 }
 
@@ -594,9 +580,6 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 		g.mu.Unlock()
 		if state == GatewayReconfiguring {
 			return g.deferredReceipt(intent, DeliveryErrorReconfiguring, "gateway is reconfiguring")
-		}
-		if state == GatewayAbandoned {
-			return g.rejectedReceipt(intent, DeliveryErrorAbandoned, "gateway was abandoned")
 		}
 		return g.rejectedReceipt(intent, DeliveryErrorClosed, "gateway not accepting submissions")
 	}
@@ -1756,25 +1739,12 @@ func (g *RenderOutputGateway) Close(ctx context.Context) error {
 	ctx = nonNilContext(ctx)
 	g.closeOnce.Do(func() {
 		g.mu.Lock()
-		wasReconfiguring := g.state == GatewayReconfiguring
-		reconfigureToken := g.reconfigurePlan.Token
-		reconfigureFinalized := g.reconfigureFinalized
-		reconfigureCancel := g.reconfigureCancel
 		g.state = GatewayClosing
 		g.closeCutoff = g.sequence
 		cutoff := g.closeCutoff
 		pendingRoute := g.pendingRoute
 		g.pendingRoute = RenderRouteConfig{}
-		if wasReconfiguring && !reconfigureFinalized && reconfigureToken != "" {
-			g.completeReconfigureLocked(reconfigureToken,
-				NewClassifiedError(DeliveryErrorClosed, "reconfigure superseded by gateway close"))
-			g.clearReconfigureLocked()
-			reconfigureCancel = nil
-		}
 		g.mu.Unlock()
-		if reconfigureCancel != nil {
-			reconfigureCancel()
-		}
 		// The shared close operation owns its own deadline. A caller context
 		// only controls that caller's wait below.
 		go g.finishClose(cutoff, pendingRoute)
