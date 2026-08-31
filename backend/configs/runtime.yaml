@@ -42,3 +42,9 @@ observe:
   # 启用后注册 /api/runtime/observe/v1/*（capabilities / snapshot /
   # sessions/{session_id} / events）。SSE 与 renderer 依赖 Phase 3/4，v1 不注册。
   enabled: true
+
+sessionRuntime:
+  # 会话运行时事件/状态持久化：file 时写入 session_dir/runtime/session_runtime.sqlite，
+  # 使 Trajectory 断线恢复（/api/runtime/sessions/{id}/runtime/events）跨重启可回放。
+  # 缺省为 memory（内存存储），重启后轨迹事件丢失、面板显示为空。
+  defaultPersistence: file
