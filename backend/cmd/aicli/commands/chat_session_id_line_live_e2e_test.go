@@ -85,3 +85,38 @@ func TestChatSessionIDLineE2E_ShowsFlagStatusWithoutRuntimeSession(t *testing.T)
 		t.Fatalf("status line on row 12 is empty:\n%s", frame)
 	}
 }
+
+// buildChatFlagStatusLine 反映 --pprof / --debug 的启用状态（on/off）。
+func TestBuildChatFlagStatusLine(t *testing.T) {
+	prevDebug := chatDebugFlagEnabled()
+	prevProvider := chatDebugPprofProvider
+	t.Cleanup(func() {
+		setChatDebugFlag(prevDebug)
+		chatDebugPprofProvider = prevProvider
+	})
+
+	// 两个标志都关闭 → off/off
+	setChatDebugFlag(false)
+	chatDebugPprofProvider = func() string { return "" }
+	if got := buildChatFlagStatusLine(); got != "--pprof off  --debug off" {
+		t.Fatalf("both off: got %q", got)
+	}
+
+	// --debug 开启
+	setChatDebugFlag(true)
+	if got := buildChatFlagStatusLine(); got != "--pprof off  --debug on" {
+		t.Fatalf("debug on: got %q", got)
+	}
+
+	// --pprof 开启（provider 返回端点 URL）
+	chatDebugPprofProvider = func() string { return "http://127.0.0.1:6060/debug/pprof/" }
+	if got := buildChatFlagStatusLine(); got != "--pprof on  --debug on" {
+		t.Fatalf("both on: got %q", got)
+	}
+
+	// --pprof 开启、--debug 关闭
+	setChatDebugFlag(false)
+	if got := buildChatFlagStatusLine(); got != "--pprof on  --debug off" {
+		t.Fatalf("pprof on only: got %q", got)
+	}
+}
