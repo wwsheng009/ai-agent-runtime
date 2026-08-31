@@ -107,7 +107,7 @@ func layoutBottomPane(state AppState, activeBand ActiveBandProjection, legacyBan
 	policy := BottomPanePolicyForGeometry(bottom, state.Geometry)
 	return appBottomPaneLayout{
 		State:               bottom,
-		StatusRows:          bottom.statusVisibleRowCount(),
+		StatusRows:          bottom.statusVisibleRowCount() + bottom.sessionStatusVisibleRowCount(),
 		DynamicStatusRows:   bottom.dynamicStatusVisibleRowCount(),
 		PromptNoticeRows:    bottom.promptNoticeVisibleRowCount(),
 		ActiveBandRows:      bottom.activeBandLayoutRowCount(),

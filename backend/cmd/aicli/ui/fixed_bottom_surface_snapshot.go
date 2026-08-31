@@ -599,6 +599,13 @@ func (s *FixedBottomSurface) bottomRowsWithOwnersLocked() []renderengine.PlanRow
 	// owned frame and reintroduce the band/popup shrink cell-mismatch.
 	appendBottomPaintRows(&frame, promptPlan.rows, height)
 	appendBottomPaintRows(&frame, popupPlan.rows, height)
+	if state.sessionStatusVisibleRowCount() > 0 {
+		appendBottomPaintRows(&frame, []fixedBottomPaintRow{{
+			row:   s.statusRowLocked() - 1,
+			text:  s.sessionStatusPaintTextLocked(state, width),
+			owner: renderengine.RowOwnerStatus,
+		}}, height)
+	}
 	appendBottomPaintRows(&frame, []fixedBottomPaintRow{{
 		row:   s.statusRowLocked(),
 		text:  s.statusPaintTextLocked(state, width),
@@ -625,6 +632,9 @@ func (s *FixedBottomSurface) bottomRowsWithOwnersLocked() []renderengine.PlanRow
 func (s *FixedBottomSurface) bottomOwnerMapLocked(height int, state BottomPaneState, popupPlan fixedBottomPopupPaintPlan, promptPlan fixedBottomPromptPaintPlan) map[int]renderengine.RowOwner {
 	owners := make(map[int]renderengine.RowOwner)
 	owners[s.statusRowLocked()] = renderengine.RowOwnerStatus
+	if state.sessionStatusVisibleRowCount() > 0 {
+		owners[s.statusRowLocked()-1] = renderengine.RowOwnerStatus
+	}
 	for _, p := range popupPlan.rows {
 		owners[p.row] = renderengine.RowOwnerPopup
 	}
@@ -805,6 +815,10 @@ func (s *FixedBottomSurface) statusPaintTextLocked(state BottomPaneState, width 
 		model = *state.StatusModel
 	}
 	return formatFixedStatusModelWithContext(model, width, s.activeBandThemeContextLocked())
+}
+
+func (s *FixedBottomSurface) sessionStatusPaintTextLocked(state BottomPaneState, width int) string {
+	return truncateFixedPopupLine(strings.TrimSpace(state.SessionIDLine), width)
 }
 
 func (s *FixedBottomSurface) promptPaintPlanLocked(state BottomPaneState, width int) fixedBottomPromptPaintPlan {

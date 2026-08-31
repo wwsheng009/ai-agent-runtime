@@ -91,6 +91,9 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 	if bottom.composerVisibleRowCount() == 0 {
 		promptInputStart, promptInputRows = layoutBottomPanePromptRows(setRow, bottom, policy, height, outputBottom, promptBottom)
 	}
+	if bottom.sessionStatusVisibleRowCount() > 0 {
+		setRow(statusRow-1, renderengine.RowOwnerStatus, truncateFixedPopupLine(strings.TrimSpace(bottom.SessionIDLine), policy.Width))
+	}
 	setRow(statusRow, renderengine.RowOwnerStatus, bottomPaneStatusPlainText(bottom.StatusModel, policy.Width))
 
 	plan := BottomPaneRowPlan{
@@ -107,7 +110,7 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 }
 
 func bottomPaneReservedRowCount(bottom BottomPaneState, visiblePopupLines int) int {
-	rows := 1 + visiblePopupLines
+	rows := 1 + bottom.sessionStatusVisibleRowCount() + visiblePopupLines
 	if bottom.popupExpandsBelowPrompt() {
 		rows += bottom.promptAreaVisibleRowCount()
 	} else {
@@ -132,7 +135,7 @@ func bottomPanePromptBottomRow(bottom BottomPaneState, height, outputBottom, vis
 		return clampBottomPaneRow(row, statusRow)
 	}
 	if bottom.popupInputGapRowCount() > 0 || bottom.promptReservedRowCount() > 0 || bottom.dynamicStatusVisibleRowCount() > 0 || bottom.activeBandVisibleRowCount() > 0 {
-		return clampBottomPaneRow(statusRow-1-bottom.promptBottomMarginRowCount(), statusRow)
+		return clampBottomPaneRow(statusRow-1-bottom.sessionStatusVisibleRowCount()-bottom.promptBottomMarginRowCount(), statusRow)
 	}
 	return outputBottom
 }

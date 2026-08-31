@@ -162,6 +162,8 @@ func appBottomRenderLines(bottom BottomPaneLayout, width int) map[int]render.Lin
 			bandIndex++
 		case row.Owner == renderengine.RowOwnerStatus && row.Row == plan.StatusRow:
 			lines[row.Row] = appStatusRenderLine(bottom.State.StatusModel, width, row.Text)
+		case row.Owner == renderengine.RowOwnerStatus && row.Row == plan.StatusRow-1:
+			lines[row.Row] = appPlainRenderLine(row.Text)
 		case row.Owner == renderengine.RowOwnerStatus:
 			lines[row.Row] = appStatusRenderLine(bottom.State.DynamicStatusModel, width, row.Text)
 		}

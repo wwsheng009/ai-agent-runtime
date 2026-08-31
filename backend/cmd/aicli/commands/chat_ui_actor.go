@@ -912,6 +912,7 @@ func (c *chatInteractionCoordinator) reduceUIActionWithContext(revision uint64, 
 		}
 	case ui.SetActiveBandAction, ui.ClearActiveBandAction,
 		ui.SetStatusModelsAction, ui.SetStatusModelAction, ui.SetDynamicStatusModelAction,
+		ui.SetSessionIDLineAction,
 		ui.ShowPromptAction, ui.ClearPromptRowsAction, ui.SetPromptStateAction,
 		ui.TrackPromptInputAction, ui.ResetPromptAction, ui.SetPromptRowsAction,
 		ui.SetPromptNoticeAction, ui.SetPromptEditorStatusAction,

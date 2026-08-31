@@ -130,6 +130,7 @@ type FixedBottomSurface struct {
 	composerLine           string
 	promptNoticeLine       string
 	promptEditorStatusLine string
+	sessionIDLine          string
 	// activeBandLines is the Phase 5 in-progress stream viewport (not scrollback).
 	activeBandLines        []string
 	activeBandStyled       []render.Line
@@ -833,9 +834,12 @@ func (s *FixedBottomSurface) promptInputMaxVisibleRowsLocked() int {
 	}
 	const (
 		outputRows       = 1
-		statusRows       = 1
 		editorStatusRows = 1
 	)
+	statusRows := 1
+	if strings.TrimSpace(s.sessionIDLine) != "" && s.composerLine == "" && len(s.popupLines) == 0 {
+		statusRows = 2
+	}
 	dynamicStatusRows := 0
 	if s.dynamicStatusModel != nil {
 		dynamicStatusRows = 1
@@ -1793,6 +1797,8 @@ func (s *FixedBottomSurface) Apply(action UIAction) bool {
 	case SetDynamicStatusModelAction:
 		s.setDynamicStatusModelImpl(a.Dynamic)
 		return true
+	case SetSessionIDLineAction:
+		return s.setSessionIDLineImpl(a.Line)
 	case ShowPromptAction:
 		return s.showPromptImpl(a.Line)
 	case ClearPromptRowsAction:
@@ -3152,6 +3158,33 @@ func (s *FixedBottomSurface) SetStatusModels(status style.StatusLineModel, dynam
 	s.setStatusModelsImpl(status, dynamic)
 }
 
+// SetSessionIDLine sets the plain-text session ID line shown on the second
+// status row. It is a persistent label that is hidden while a popup or composer
+// is active.
+func (s *FixedBottomSurface) SetSessionIDLine(line string) bool {
+	if s.postFacadeAction(SetSessionIDLineAction{Line: line}) {
+		return true
+	}
+	return s.setSessionIDLineImpl(line)
+}
+
+// setSessionIDLineImpl is the synchronous implementation for SetSessionIDLine.
+func (s *FixedBottomSurface) setSessionIDLineImpl(line string) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionIDLine == line {
+		return true
+	}
+	s.sessionIDLine = line
+	s.reflowPromptViewportLocked()
+	s.repaintStatusUpdateLocked()
+	return true
+}
+
 // setStatusModelsImpl 是 SetStatusModels 的同步实现（legacy adapter 调用目标）。
 func (s *FixedBottomSurface) setStatusModelsImpl(status style.StatusLineModel, dynamic *style.StatusLineModel) {
 	if s == nil || s.terminal == nil {
@@ -3787,6 +3820,12 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 		return
 	}
 	state := s.bottomPaneStateLocked()
+	if state.sessionStatusVisibleRowCount() > 0 {
+		s.terminal.MoveTo(s.statusRowLocked()-1, 1)
+		s.terminal.ClearLine()
+		fmt.Fprint(TerminalOutput(), truncateFixedPopupLine(strings.TrimSpace(state.SessionIDLine), s.terminal.Width()))
+		s.terminal.ClearLine()
+	}
 	s.terminal.MoveTo(s.statusRowLocked(), 1)
 	s.terminal.ClearLine()
 	fmt.Fprint(TerminalOutput(), s.statusPaintTextLocked(state, s.terminal.Width()))
@@ -3985,7 +4024,7 @@ func (s *FixedBottomSurface) promptBottomRowLocked() int {
 	// stack to the output bottom in that case would paint the band inside the
 	// scroll region and leave its reserved rows blank above the status line.
 	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 || state.dynamicStatusVisibleRowCount() > 0 || state.activeBandVisibleRowCount() > 0 {
-		row := s.statusRowLocked() - 1 - state.promptBottomMarginRowCount()
+		row := s.statusRowLocked() - 1 - state.sessionStatusVisibleRowCount() - state.promptBottomMarginRowCount()
 		if row < 1 {
 			return 1
 		}
@@ -4023,7 +4062,7 @@ func (s *FixedBottomSurface) popupStartRowLocked(rows int, gapRows int) int {
 
 func (s *FixedBottomSurface) bottomRowsLocked() int {
 	state := s.bottomPaneStateLocked()
-	rows := 1 + state.popupVisibleRowCount(s.terminal.Height())
+	rows := 1 + state.sessionStatusVisibleRowCount() + state.popupVisibleRowCount(s.terminal.Height())
 	if state.popupExpandsBelowPrompt() {
 		rows += state.promptAreaVisibleRowCount()
 	} else {
@@ -4232,6 +4271,10 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 type BottomPaneState struct {
 	StatusModel        *style.StatusLineModel
 	DynamicStatusModel *style.StatusLineModel
+	// SessionIDLine is the plain text shown on the second status row (directly
+	// above the persistent status row). It is hidden while a popup or composer
+	// is active so those overlays keep the same reserved bottom area.
+	SessionIDLine string
 	// Prompt fields are semantic overlay inputs. Row allocation remains pure
 	// BottomPaneState derivation; physical cursor placement belongs to the
 	// presenter. They are also populated in AppState during the Phase 2 bridge.
@@ -4324,6 +4367,19 @@ func (s BottomPaneState) statusVisibleRowCount() int {
 		return 0
 	}
 	if strings.TrimSpace(style.StatusLineDocument(*s.StatusModel, 0).PlainText()) == "" {
+		return 0
+	}
+	return 1
+}
+
+func (s BottomPaneState) sessionStatusVisibleRowCount() int {
+	if strings.TrimSpace(s.SessionIDLine) == "" {
+		return 0
+	}
+	if s.composerVisibleRowCount() > 0 {
+		return 0
+	}
+	if len(s.PopupLines) > 0 || s.PopupReservedRows > 0 {
 		return 0
 	}
 	return 1
@@ -4711,6 +4767,7 @@ func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	state := BottomPaneState{
 		StatusModel:             cloneStatusLineModel(s.statusModel),
 		DynamicStatusModel:      cloneStatusLineModel(s.dynamicStatusModel),
+		SessionIDLine:           s.sessionIDLine,
 		PromptLine:              s.promptLine,
 		PromptInput:             s.promptInput,
 		PromptCursorAbsoluteRow: s.promptViewportStart + s.promptCursorRow,

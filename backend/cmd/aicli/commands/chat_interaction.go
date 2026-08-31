@@ -808,6 +808,7 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 			dynamicModel,
 		)
 		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, s, ui.GetTerminalWidth()))
+		c.surface.SetSessionIDLine(buildChatSessionIDLine(c.session))
 		c.scheduleDynamicStatusTickLocked(now)
 	}
 }
@@ -1053,6 +1054,20 @@ func buildChatPromptNoticeLineForWidth(session *ChatSession, s chatSurfaceStatus
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// buildChatSessionIDLine renders the second status row: the current persistent
+// session ID. Empty when no runtime session is bound yet; the surface hides an
+// empty session line entirely.
+func buildChatSessionIDLine(session *ChatSession) string {
+	if session == nil || session.RuntimeSession == nil {
+		return ""
+	}
+	id := strings.TrimSpace(session.RuntimeSession.ID)
+	if id == "" {
+		return ""
+	}
+	return "会话 " + id
 }
 
 func buildQueuedInputContextLine(count int, width int) string {

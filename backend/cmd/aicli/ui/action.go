@@ -727,6 +727,17 @@ func (SetDynamicStatusModelAction) isUIAction()         {}
 func (SetDynamicStatusModelAction) Class() ActionClass  { return ClassDurable }
 func (SetDynamicStatusModelAction) CoalesceKey() string { return "" }
 
+// SetSessionIDLineAction sets the session ID line displayed in the second
+// status row. It is a persistent status field that appears when no popup or
+// composer is active.
+type SetSessionIDLineAction struct {
+	Line string
+}
+
+func (SetSessionIDLineAction) isUIAction()         {}
+func (SetSessionIDLineAction) Class() ActionClass  { return ClassDurable }
+func (SetSessionIDLineAction) CoalesceKey() string { return "" }
+
 // ShowPromptAction refreshes the prompt chrome (line/visibility/allocation).
 // The editor-owned input is deliberately not part of this action: a facade
 // refresh can be admitted after a newer coalesced InputEvent and must not erase

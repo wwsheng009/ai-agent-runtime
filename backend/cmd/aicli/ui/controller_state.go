@@ -434,6 +434,8 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		state.Bottom.StatusModel = normalizeControllerStatusModel(a.Status)
 	case SetDynamicStatusModelAction:
 		state.Bottom.DynamicStatusModel = normalizeControllerDynamicStatusModel(a.Dynamic)
+	case SetSessionIDLineAction:
+		state.Bottom.SessionIDLine = strings.TrimRight(SanitizeTerminalText(a.Line), "\r\n")
 	case ShowPromptAction:
 		// ShowPrompt is a chrome refresh, not an editor-state replacement. The
 		// facade action may be admitted through the deferred FIFO after a newer
