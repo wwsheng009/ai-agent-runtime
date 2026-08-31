@@ -397,22 +397,6 @@ func (s *FixedBottomSurface) flushHandoffHoldingLock(writer io.Writer, plan rend
 	return s.presenter.FlushHandoffHoldingLock(writer, plan)
 }
 
-// flushLegacyANSIHoldingLock keeps the capability fallback's layout protocol
-// on the same Presenter batch path as owned frames. Callers already hold the
-// shared terminal write lock.
-//
-// Phase 6：legacy binding 已删除，一次 flush 直接提交 process writer
-// （TerminalOutput），不再路由到 gateway（capture/mirror 由 presenter
-// 层负责）。
-func (s *FixedBottomSurface) flushLegacyANSIHoldingLock(sequence string) {
-	if s == nil || sequence == "" {
-		return
-	}
-	_ = s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {
-		_, _ = io.WriteString(w, sequence)
-	})
-}
-
 func (s *FixedBottomSurface) Enable() bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -691,10 +675,6 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 		// but do not let this legacy maintenance hook move the real cursor or
 		// flush a scroll-region sequence while TerminalSession owns the writer.
 		s.applyLayoutLocked()
-		if !s.ownedViewport {
-			s.flushPendingOutputScrollDownLocked()
-			s.flushOutputScrollDebtLocked()
-		}
 		return
 	}
 	WithTerminalWriteLock(func() {
@@ -707,8 +687,6 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 			return
 		}
 		s.applyLayoutLocked()
-		s.flushPendingOutputScrollDownLocked()
-		s.flushOutputScrollDebtLocked()
 		s.moveToOutputLocked()
 	})
 }
@@ -889,8 +867,6 @@ func (s *FixedBottomSurface) BeginOutput() {
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
-		// Raw writers may land on a row occupied by a legacy absorbed tail.
-		s.flushOutputScrollDebtLocked()
 		// Raw writers (fmt.Println after beginDirectInteractiveOutput) paint at
 		// the cursor this call parks.
 		s.moveToOutputLocked()
@@ -1061,13 +1037,10 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 			return
 		}
 		s.applyLayoutLocked()
-		s.flushPendingOutputScrollDownLocked()
-		s.flushOutputScrollDebtLocked()
 		s.moveToOutputLocked()
 		output := normalizeFixedSurfaceOutputText(text)
 		n, err = io.WriteString(writer, output)
 		if n > 0 {
-			s.markOutputWrittenLocked()
 			fullWrite := err == nil && n == len(output)
 			if fullWrite {
 				if trackSoft {
@@ -1435,7 +1408,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 	var rewritten bool
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
-		s.flushPendingOutputScrollDownLocked()
 		if prevStart < 1 {
 			s.invalidateSoftOutputLocked()
 			rewritten = false
@@ -1480,7 +1452,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		s.softOutput.Replace(normalized)
 		s.legacyReserve.CursorOnBlankRow = true
 		s.legacyReserve.OutputScrollDebtRows = 0
-		s.markOutputWrittenLocked()
 		s.restoreStoredPromptCursorLocked()
 		rewritten = true
 	})
@@ -1534,9 +1505,6 @@ func (s *FixedBottomSurface) ClearCommittedHistoryForReplay() bool {
 			// double buffer; the next diffing Flush must start from a clean
 			// slate so stale committed cells cannot resurface.
 			s.viewportBackend.Invalidate()
-		} else {
-			s.applyLayoutLocked()
-			s.flushPendingOutputScrollDownLocked()
 		}
 		for row := 1; row <= bottom; row++ {
 			s.terminal.MoveTo(row, 1)
@@ -1983,7 +1951,6 @@ func (s *FixedBottomSurface) setPromptRowsImpl(rows int) bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -2027,7 +1994,6 @@ func (s *FixedBottomSurface) setPromptNoticeLineImpl(line string) bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -2175,7 +2141,6 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		} else {
@@ -2266,7 +2231,6 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		} else {
@@ -3230,7 +3194,6 @@ func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		s.flushPendingOutputScrollDownLocked()
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
@@ -3599,19 +3562,8 @@ func (s *FixedBottomSurface) canEnableLocked() bool {
 }
 
 func (s *FixedBottomSurface) applyLayoutLocked() {
-	if s.ownedViewport {
-		width, height := s.terminal.RefreshSize()
-		s.applyOwnedViewportGeometryLocked(width, height)
-		return
-	}
-	if s.leaseID != 0 {
-		return
-	}
-	var builder strings.Builder
-	s.appendApplyLayoutSequenceLocked(&builder)
-	if builder.Len() > 0 {
-		s.flushLegacyANSIHoldingLock(builder.String())
-	}
+	width, height := s.terminal.RefreshSize()
+	s.applyLayoutWithSizeLocked(width, height)
 }
 
 // applyLayoutWithSizeLocked applies layout using a size that was already probed
@@ -3622,13 +3574,23 @@ func (s *FixedBottomSurface) applyLayoutWithSizeLocked(width, height int) {
 		s.applyOwnedViewportGeometryLocked(width, height)
 		return
 	}
-	if s.leaseID != 0 {
-		return
+	if width <= 0 {
+		width = 80
 	}
-	var builder strings.Builder
-	s.appendApplyLayoutSequenceWithSizeLocked(&builder, width, height)
-	if builder.Len() > 0 {
-		s.flushLegacyANSIHoldingLock(builder.String())
+	if height <= 0 {
+		height = 24
+	}
+	bottomRows := s.effectiveBottomRowsLocked(height)
+	sizeChanged := width != s.lastWidth || height != s.lastHeight
+	s.lastWidth = width
+	s.lastHeight = height
+	s.lastBottomRows = bottomRows
+	// Retired legacy path: keep layout bookkeeping coherent for the
+	// compatibility surface, but no scroll-region sequence is emitted.
+	s.legacyReserve.ScrollCompensatedRows = 0
+	s.legacyReserve.PendingScrollDownRows = 0
+	if sizeChanged {
+		s.legacyReserve.OutputScrollDebtRows = 0
 	}
 }
 
@@ -3637,11 +3599,7 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Bu
 		return
 	}
 	width, height := s.terminal.RefreshSize()
-	if s.ownedViewport {
-		s.applyOwnedViewportGeometryLocked(width, height)
-		return
-	}
-	s.appendApplyLayoutSequenceWithSizeLocked(builder, width, height)
+	s.applyLayoutWithSizeLocked(width, height)
 }
 
 func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *strings.Builder, width, height int) {
@@ -3655,29 +3613,21 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *st
 	if width <= 0 {
 		width = 80
 	}
-	if height <= 1 {
-		return
+	if height <= 0 {
+		height = 24
 	}
 	bottomRows := s.effectiveBottomRowsLocked(height)
-	lastWidth := s.lastWidth
-	lastHeight := s.lastHeight
-	lastBottomRows := s.lastBottomRows
-	if width == lastWidth && height == lastHeight && bottomRows == lastBottomRows {
-		return
-	}
-	transition := s.legacyReserve.ApplyGeometry(width, height, bottomRows, lastWidth, lastHeight, lastBottomRows)
-	if transition.ScrollUpOldBottomRows > 0 && transition.ScrollUpNewBottomRows > transition.ScrollUpOldBottomRows {
-		appendOutputScrollUpForBottomReserveGrowthSequence(
-			builder,
-			height,
-			transition.ScrollUpOldBottomRows,
-			transition.ScrollUpNewBottomRows,
-		)
-	}
+	sizeChanged := width != s.lastWidth || height != s.lastHeight
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = bottomRows
-	builder.WriteString(terminalScrollRegionSequence(1, outputBottomRowForHeight(height, bottomRows)))
+	// Retired legacy path: keep layout bookkeeping coherent for the
+	// compatibility surface, but no scroll-region sequence is emitted.
+	s.legacyReserve.ScrollCompensatedRows = 0
+	s.legacyReserve.PendingScrollDownRows = 0
+	if sizeChanged {
+		s.legacyReserve.OutputScrollDebtRows = 0
+	}
 }
 
 func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int) {
@@ -3731,82 +3681,6 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	}
 }
 
-// appendPendingOutputScrollDownLocked emits deferred legacy reserve-release
-// compensation. Owned frames never use this path.
-func (s *FixedBottomSurface) appendPendingOutputScrollDownLocked(builder *strings.Builder) {
-	if s == nil || s.terminal == nil || builder == nil || s.legacyReserve.PendingScrollDownRows < 1 || s.ownedViewport {
-		return
-	}
-	rows := s.legacyReserve.PendingScrollDownRows
-	s.legacyReserve.PendingScrollDownRows = 0
-	height := s.terminal.Height()
-	if height > 1 {
-		appendOutputScrollDownForBottomReserveShrinkSequence(builder, height, s.effectiveBottomRowsLocked(height), rows)
-	}
-}
-
-func (s *FixedBottomSurface) flushPendingOutputScrollDownLocked() {
-	if s == nil || s.legacyReserve.PendingScrollDownRows < 1 || s.ownedViewport {
-		return
-	}
-	var builder strings.Builder
-	s.appendPendingOutputScrollDownLocked(&builder)
-	if builder.Len() > 0 {
-		s.flushLegacyANSIHoldingLock(builder.String())
-	}
-}
-
-// appendOutputScrollDebtLocked pays the row absorbed from a legacy trailing
-// blank before the next write reaches the output bottom.
-func (s *FixedBottomSurface) appendOutputScrollDebtLocked(builder *strings.Builder) {
-	if s == nil || s.terminal == nil || builder == nil || s.legacyReserve.OutputScrollDebtRows < 1 || s.ownedViewport || s.legacyReserve.PendingScrollDownRows > 0 {
-		return
-	}
-	rows := s.legacyReserve.OutputScrollDebtRows
-	s.legacyReserve.OutputScrollDebtRows = 0
-	height := s.terminal.Height()
-	if height <= 1 {
-		return
-	}
-	builder.WriteString(renderengine.LegacyReserveDebtANSI(height, s.effectiveBottomRowsLocked(height), rows))
-	s.legacyReserve.CursorOnBlankRow = true
-}
-
-func (s *FixedBottomSurface) flushOutputScrollDebtLocked() {
-	if s == nil || s.legacyReserve.OutputScrollDebtRows < 1 || s.ownedViewport {
-		return
-	}
-	var builder strings.Builder
-	s.appendOutputScrollDebtLocked(&builder)
-	if builder.Len() > 0 {
-		s.flushLegacyANSIHoldingLock(builder.String())
-	}
-}
-
-func (s *FixedBottomSurface) markOutputWrittenLocked() {
-	if s == nil || s.terminal == nil || s.ownedViewport {
-		return
-	}
-	height := s.terminal.Height()
-	if height <= 0 {
-		_, height = s.terminal.RefreshSize()
-	}
-	s.legacyReserve.MarkOutputWritten(s.effectiveBottomRowsLocked(height))
-}
-
-func appendOutputScrollUpForBottomReserveGrowthSequence(builder *strings.Builder, height, oldBottomRows, newBottomRows int) {
-	if builder == nil {
-		return
-	}
-	builder.WriteString(renderengine.LegacyReserveScrollUpANSI(height, oldBottomRows, newBottomRows))
-}
-
-func appendOutputScrollDownForBottomReserveShrinkSequence(builder *strings.Builder, height, bottomRows, rows int) {
-	if builder == nil {
-		return
-	}
-	builder.WriteString(renderengine.LegacyReserveScrollDownANSI(height, bottomRows, rows))
-}
 
 func (s *FixedBottomSurface) renderStatusLocked() {
 	if !s.enabled {
@@ -4918,15 +4792,6 @@ func terminalMoveToSequence(row, col int) string {
 	return fmt.Sprintf("\x1b[%d;%dH", row, col)
 }
 
-func terminalScrollRegionSequence(top, bottom int) string {
-	if top < 1 {
-		top = 1
-	}
-	if bottom < top {
-		bottom = top
-	}
-	return fmt.Sprintf("\x1b[%d;%dr", top, bottom) + terminalMoveToSequence(top, 1)
-}
 
 func appendClearRowsSequence(builder *strings.Builder, startRow, rows int) {
 	if builder == nil || startRow < 1 || rows < 1 {

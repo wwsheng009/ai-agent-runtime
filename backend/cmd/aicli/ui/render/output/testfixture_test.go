@@ -1251,6 +1251,101 @@ func TestGatewayCloseAbortsBlockedPhysicalWriter(t *testing.T) {
 	}
 }
 
+// TestGatewayCloseSealsBlockedPrimaryBeforePublishingTerminalState verifies the
+// lifecycle-finalizer contract for an uninterruptible primary callback.  Close
+// must fix and seal one synthetic abandoned outcome before it returns; the
+// callback's eventual return is diagnostic-only and cannot rewrite that
+// receipt or append a second delivery record.
+func TestGatewayCloseSealsBlockedPrimaryBeforePublishingTerminalState(t *testing.T) {
+	block := make(chan struct{})
+	w := &blockingPhysicalWriter{block: block}
+	aborter := &recordingAborter{}
+	phys := NewPhysicalSink(TargetDescriptor{
+		SinkID:             "late-writer",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-late",
+	}, w, PhysicalSinkOptions{Aborter: aborter})
+
+	opts := gatewayOptions()
+	opts.Clock = SystemClock{}
+	opts.CloseTimeout = 100 * time.Millisecond
+	gw, err := NewRenderOutputGateway("late-close-"+randomID("s"), opts, RenderRouteConfig{
+		Primary:            phys,
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: "pt-late",
+	})
+	if err != nil {
+		t.Fatalf("gateway: %v", err)
+	}
+
+	submitDone := make(chan OutputReceipt, 1)
+	go func() {
+		submitDone <- gw.Submit(context.Background(), RenderIntent{
+			IntentID: "late-primary",
+			Kind:     TransactionFrame,
+			Bytes:    []byte("blocked"),
+		})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for !w.started() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !w.started() {
+		t.Fatal("submit never reached writer")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := gw.Close(closeCtx); ClassOf(err) != DeliveryErrorAbandoned {
+		t.Fatalf("close without termination proof must abandon: %v", err)
+	}
+
+	snap := gw.Snapshot()
+	if snap.State != GatewayAbandoned || snap.DeliveryRecordsUnsealed != 0 ||
+		snap.DeliveryRecordsSealed != 1 {
+		t.Fatalf("terminal close exposed incomplete record state: %+v", snap)
+	}
+	before := gw.RecentDeliveries(8)
+	if len(before) != 1 || before[0].Output.Primary == nil {
+		t.Fatalf("blocked primary was not sealed exactly once: %+v", before)
+	}
+	primary := before[0].Output.Primary
+	if !primary.Synthetic || primary.CallbackReturned || !before[0].Output.TargetInvoked ||
+		primary.InvocationID == 0 || primary.ErrorClass != DeliveryErrorAbandoned ||
+		!primary.FinishedAt.IsZero() {
+		t.Fatalf("synthetic blocked-primary facts are inconsistent: %+v", before[0])
+	}
+
+	close(block)
+	var returned OutputReceipt
+	select {
+	case returned = <-submitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("late primary callback did not return")
+	}
+	if returned.Primary == nil || !returned.Primary.Synthetic ||
+		returned.Primary.ErrorClass != DeliveryErrorAbandoned {
+		t.Fatalf("submit did not observe the fixed synthetic outcome: %+v", returned)
+	}
+
+	after := gw.RecentDeliveries(8)
+	if len(after) != 1 || after[0].RecordID != before[0].RecordID ||
+		after[0].Output.Primary == nil ||
+		after[0].Output.Primary.OutcomeFixedAt != primary.OutcomeFixedAt ||
+		after[0].Output.Primary.Status != primary.Status {
+		t.Fatalf("late callback rewrote or duplicated sealed record: before=%+v after=%+v", before, after)
+	}
+	lateCount := 0
+	for _, ev := range gw.RecentEvents(128) {
+		if ev.BatchID == returned.BatchID && ev.Kind == EventPrimaryLateCompletion {
+			lateCount++
+		}
+	}
+	if lateCount != 1 {
+		t.Fatalf("late callback diagnostics=%d, want exactly one", lateCount)
+	}
+}
+
 // blockingPhysicalWriter 首次 Write 阻塞直到 block 关闭，随后返回 full。
 type blockingPhysicalWriter struct {
 	block       chan struct{}

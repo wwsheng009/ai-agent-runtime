@@ -230,6 +230,102 @@ type reconfigureCompletion struct {
 	err error
 }
 
+// primaryAttempt is the once-only outcome authority shared by the Submit
+// runner and lifecycle finalizers.  A callback may outlive Close, so its
+// goroutine cannot itself be the sole owner of receipt/record completion.
+type primaryAttempt struct {
+	mu sync.Mutex
+
+	batch RenderBatch
+	gate  *ReceiptPublicationGate
+	ready chan struct{}
+
+	claimed       bool
+	receipt       OutputReceipt
+	receiptReady  bool
+	reserved      bool
+	targetInvoked bool
+	invocationID  uint64
+	startedAt     time.Time
+}
+
+type primaryAttemptSnapshot struct {
+	batch         RenderBatch
+	reserved      bool
+	targetInvoked bool
+	invocationID  uint64
+	startedAt     time.Time
+}
+
+func newPrimaryAttempt(batch RenderBatch, hub *eventHub) *primaryAttempt {
+	return &primaryAttempt{
+		batch: batch.deepCopy(),
+		gate: newReceiptPublicationGate(BatchIdentity{
+			SessionID:  batch.SessionID,
+			Sequence:   batch.Sequence,
+			BatchID:    batch.BatchID,
+			RouteEpoch: batch.RouteEpoch,
+		}, hub),
+		ready: make(chan struct{}),
+	}
+}
+
+func (a *primaryAttempt) reserve(invocationID uint64) {
+	a.mu.Lock()
+	a.reserved = true
+	a.invocationID = invocationID
+	a.mu.Unlock()
+}
+
+// beginInvocation linearizes target invocation and its started event against a
+// lifecycle finalizer.  If Close claimed the outcome first, the sink must not
+// be called.
+func (a *primaryAttempt) beginInvocation(startedAt time.Time, event OutputEvent) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.claimed {
+		return false
+	}
+	a.targetInvoked = true
+	a.startedAt = startedAt
+	a.gate.Publish(event)
+	return true
+}
+
+func (a *primaryAttempt) claim() (primaryAttemptSnapshot, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snapshot := primaryAttemptSnapshot{
+		batch:         a.batch.deepCopy(),
+		reserved:      a.reserved,
+		targetInvoked: a.targetInvoked,
+		invocationID:  a.invocationID,
+		startedAt:     a.startedAt,
+	}
+	if a.claimed {
+		return snapshot, false
+	}
+	a.claimed = true
+	return snapshot, true
+}
+
+func (a *primaryAttempt) complete(receipt OutputReceipt) {
+	a.mu.Lock()
+	if !a.receiptReady {
+		a.receipt = receipt
+		a.receiptReady = true
+		close(a.ready)
+	}
+	a.mu.Unlock()
+}
+
+func (a *primaryAttempt) waitReceipt() OutputReceipt {
+	<-a.ready
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.receipt
+}
+
 // RenderOutputGateway 是性能边界：所有业务调用只访问公开字段与只读不可变
 // 配置，writer/aborter 由 invocation runner 独占。
 type RenderOutputGateway struct {
@@ -280,6 +376,8 @@ type RenderOutputGateway struct {
 	recordDonePending  map[uint64]struct{}
 	progressMu         sync.Mutex
 	progressCh         chan struct{}
+	attemptsMu         sync.Mutex
+	primaryAttempts    map[uint64]*primaryAttempt
 
 	closedCh  chan struct{}
 	closeOnce sync.Once
@@ -296,6 +394,9 @@ type RenderOutputGateway struct {
 	reconfigureFinalized      bool
 	reconfigureDone           chan struct{}
 	reconfigureMemo           map[string]reconfigureCompletion
+	reconfigureCtx            context.Context
+	reconfigureCancel         context.CancelFunc
+	reconfigureTimedOut       bool
 
 	// 上次读到的 observer drop 累计（用于把 cutoff delta 归因到 submit）
 	lastObserverDrops uint64
@@ -394,6 +495,7 @@ func NewRenderOutputGateway(sessionID string, opts RenderGatewayOptions, route R
 		primaryDonePending: make(map[uint64]struct{}),
 		recordDonePending:  make(map[uint64]struct{}),
 		progressCh:         make(chan struct{}),
+		primaryAttempts:    make(map[uint64]*primaryAttempt),
 	}
 	g.primaryCond = sync.NewCond(&g.mu)
 	for i, m := range normalized.Mirrors {
@@ -438,6 +540,34 @@ func (g *RenderOutputGateway) publish(ev OutputEvent) EventPublishResult {
 // Submit：pre-admission -> stamp -> primary dispatch -> mirror admission
 // ============================================================================
 
+func (g *RenderOutputGateway) registerPrimaryAttempt(batch RenderBatch) *primaryAttempt {
+	attempt := newPrimaryAttempt(batch, g.hub)
+	g.attemptsMu.Lock()
+	g.primaryAttempts[batch.Sequence] = attempt
+	g.attemptsMu.Unlock()
+	return attempt
+}
+
+func (g *RenderOutputGateway) unregisterPrimaryAttempt(sequence uint64, attempt *primaryAttempt) {
+	g.attemptsMu.Lock()
+	if g.primaryAttempts[sequence] == attempt {
+		delete(g.primaryAttempts, sequence)
+	}
+	g.attemptsMu.Unlock()
+}
+
+func (g *RenderOutputGateway) primaryAttemptsThrough(cutoff uint64) []*primaryAttempt {
+	g.attemptsMu.Lock()
+	out := make([]*primaryAttempt, 0, len(g.primaryAttempts))
+	for sequence, attempt := range g.primaryAttempts {
+		if sequence <= cutoff {
+			out = append(out, attempt)
+		}
+	}
+	g.attemptsMu.Unlock()
+	return out
+}
+
 // Submit 提交一笔 intent。契约：
 //   - 返回前已送达 admission 决策与（若被接受）primary outcome；
 //   - pre-admission rejection/defer 的 Primary 为 nil、Sequence 为 0；
@@ -449,7 +579,7 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 		state := g.state
 		g.mu.Unlock()
 		if state == GatewayReconfiguring {
-			return g.rejectedReceipt(intent, DeliveryErrorReconfiguring, "gateway is reconfiguring")
+			return g.deferredReceipt(intent, DeliveryErrorReconfiguring, "gateway is reconfiguring")
 		}
 		return g.rejectedReceipt(intent, DeliveryErrorClosed, "gateway not accepting submissions")
 	}
@@ -501,6 +631,7 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 	// history domain, have been stamped.  initRecordSlot takes a detached copy;
 	// registering earlier would silently drop History from DeliveryRecord.
 	g.initRecordSlot(batch, len(batch.mirrorSlots))
+	attempt := g.registerPrimaryAttempt(batch)
 	g.lastTerminal = intent.Terminal
 	if batch.History != nil {
 		h := *batch.History
@@ -509,7 +640,7 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 	g.stats.admissionAccepted++
 	g.mu.Unlock()
 
-	return g.deliver(ctx, batch)
+	return g.deliverAttempt(ctx, batch, attempt)
 }
 
 func safeAdmissionMessage(class DeliveryErrorClass, _ string) string {
@@ -532,6 +663,33 @@ func safeAdmissionMessage(class DeliveryErrorClass, _ string) string {
 	}
 }
 
+func (g *RenderOutputGateway) deferredReceipt(intent RenderIntent, class DeliveryErrorClass, msg string) OutputReceipt {
+	r := OutputReceipt{
+		SessionID: g.sessID,
+		Admission: AdmissionReceipt{
+			Decision:   AdmissionDeferred,
+			ErrorClass: class,
+			Message:    msg,
+		},
+	}
+	g.mu.Lock()
+	g.stats.admissionDeferred++
+	sessionID := g.sessID
+	g.mu.Unlock()
+	r.SessionID = sessionID
+	g.hub.submit(OutputEvent{
+		SchemaVersion: SchemaVersion,
+		Kind:          EventAdmissionDeferred,
+		At:            g.clock.Now(),
+		SessionID:     sessionID,
+		IntentID:      intent.IntentID,
+		Transaction:   intent.Kind,
+		Admission:     r.Admission,
+	})
+	return r
+}
+
+// rejectedReceipt 构造 pre-admission 拒绝 receipt（Primary=nil/Sequence=0）。
 func (g *RenderOutputGateway) rejectedReceipt(intent RenderIntent, class DeliveryErrorClass, msg string) OutputReceipt {
 	r := OutputReceipt{
 		SessionID: g.sessID,
@@ -562,13 +720,20 @@ func (g *RenderOutputGateway) rejectedReceipt(intent RenderIntent, class Deliver
 }
 
 // deliver 执行 primary dispatch + mirror admission（serial 语义，见 6.3（1））。
+// deliver is retained as a package-level test seam for defensive admitted
+// batches assembled by fixtures. Production admission registers the attempt in
+// Submit and calls deliverAttempt directly.
 func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) OutputReceipt {
-	gate := newReceiptPublicationGate(BatchIdentity{
-		SessionID:  batch.SessionID,
-		Sequence:   batch.Sequence,
-		BatchID:    batch.BatchID,
-		RouteEpoch: batch.RouteEpoch,
-	}, g.hub)
+	return g.deliverAttempt(ctx, batch, g.registerPrimaryAttempt(batch))
+}
+
+func (g *RenderOutputGateway) deliverAttempt(
+	ctx context.Context,
+	batch RenderBatch,
+	attempt *primaryAttempt,
+) OutputReceipt {
+	defer g.unregisterPrimaryAttempt(batch.Sequence, attempt)
+	gate := attempt.gate
 
 	// primary serial boundary：同一时刻只有一个 sink callback 在跑。
 	g.mu.Lock()
@@ -601,13 +766,14 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 	if targetInvoked {
 		g.primaryBusy = true
 		g.stats.primaryInFlight++
+		attempt.reserve(invocationID)
 	}
 	g.mu.Unlock()
 
 	var startedAt time.Time
 	if targetInvoked {
 		startedAt = g.clock.Now()
-		gate.Publish(OutputEvent{
+		if !attempt.beginInvocation(startedAt, OutputEvent{
 			SchemaVersion: SchemaVersion,
 			Kind:          EventPrimaryStarted,
 			At:            startedAt,
@@ -621,10 +787,15 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 			History:       batch.History,
 			TargetInvoked: true,
 			InvocationID:  invocationID,
-		})
+		}) {
+			return attempt.waitReceipt()
+		}
 	}
 
 	if !targetInvoked {
+		if _, claimed := attempt.claim(); !claimed {
+			return attempt.waitReceipt()
+		}
 		// This should be impossible after admission, but fail closed rather than
 		// dereferencing a route that may have been concurrently replaced.
 		res := SinkDeliveryResult{
@@ -701,6 +872,7 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 		g.setRecordReceipt(batch.Sequence, receipt)
 		gate.Retire()
 		g.trySealRecord(batch.Sequence)
+		attempt.complete(receipt)
 		return receipt
 	}
 	// Submit owns the primary invocation runner.  Do not attach the gateway's
@@ -711,6 +883,10 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 	res := deliverWithPanicGuard(sink.Submit, nonNilContext(ctx), batch)
 
 	finishedAt := g.clock.Now()
+	if _, claimed := attempt.claim(); !claimed {
+		g.publishPrimaryLateCompletion(batch, invocationID, res, finishedAt)
+		return attempt.waitReceipt()
+	}
 	outcomeFixedAt := g.clock.Now()
 	tr := TargetReceipt{
 		SessionID:          batch.SessionID,
@@ -803,7 +979,48 @@ func (g *RenderOutputGateway) deliver(ctx context.Context, batch RenderBatch) Ou
 	if len(batch.mirrorSlots) == 0 {
 		g.trySealRecord(batch.Sequence)
 	}
+	attempt.complete(receipt)
 	return receipt
+}
+
+func (g *RenderOutputGateway) publishPrimaryLateCompletion(
+	batch RenderBatch,
+	invocationID uint64,
+	result SinkDeliveryResult,
+	at time.Time,
+) {
+	normalized := normalizeSinkResult(result, len(batch.Bytes))
+	g.publish(OutputEvent{
+		SchemaVersion:    SchemaVersion,
+		Kind:             EventPrimaryLateCompletion,
+		At:               at,
+		SessionID:        batch.SessionID,
+		Sequence:         batch.Sequence,
+		RouteEpoch:       batch.RouteEpoch,
+		BatchID:          batch.BatchID,
+		IntentID:         batch.IntentID,
+		Transaction:      batch.Kind,
+		Terminal:         batch.Terminal,
+		History:          batch.History,
+		TargetInvoked:    true,
+		CallbackReturned: true,
+		InvocationID:     invocationID,
+		Status:           normalized.Status,
+		Certainty:        normalized.Certainty,
+		ErrorClass:       normalized.ErrorClass,
+		AttemptedBytes:   normalized.AttemptedBytes,
+		AcceptedBytes:    normalized.AcceptedBytes,
+		Late: &LateCompletionDiagnostic{
+			InvocationID:     invocationID,
+			CallbackReturned: true,
+			TargetInvoked:    true,
+			Status:           normalized.Status,
+			Certainty:        normalized.Certainty,
+			ErrorClass:       normalized.ErrorClass,
+			AttemptedBytes:   normalized.AttemptedBytes,
+			AcceptedBytes:    normalized.AcceptedBytes,
+		},
+	})
 }
 
 // deliver 内部使用；primarySink 每次取当前 route primary。
@@ -1373,6 +1590,145 @@ func (g *RenderOutputGateway) Drain(ctx context.Context) error {
 	return g.waitForCutoff(ctx, cutoff, true)
 }
 
+func (g *RenderOutputGateway) finalizeAbandonedPrimaryAttempts(cutoff uint64) {
+	type claimedAttempt struct {
+		attempt  *primaryAttempt
+		snapshot primaryAttemptSnapshot
+	}
+	var claimed []claimedAttempt
+	var completing []*primaryAttempt
+	for _, attempt := range g.primaryAttemptsThrough(cutoff) {
+		snapshot, won := attempt.claim()
+		if won {
+			claimed = append(claimed, claimedAttempt{attempt: attempt, snapshot: snapshot})
+			continue
+		}
+		completing = append(completing, attempt)
+	}
+
+	// Claim every still-running callback before publishing any synthetic
+	// result.  This makes the shared close deadline one linearization point:
+	// callbacks returning afterwards can only emit late diagnostics.
+	for _, item := range claimed {
+		g.completeAbandonedPrimaryAttempt(item.attempt, item.snapshot)
+	}
+	// A runner that won immediately before the close finalizer owns only
+	// bounded gateway bookkeeping (the sink callback has already returned).
+	// Join that publication before GatewayClosed is observable.
+	for _, attempt := range completing {
+		_ = attempt.waitReceipt()
+	}
+}
+
+func (g *RenderOutputGateway) completeAbandonedPrimaryAttempt(
+	attempt *primaryAttempt,
+	snapshot primaryAttemptSnapshot,
+) {
+	batch := snapshot.batch
+	targetInvoked := snapshot.targetInvoked
+	invocationID := uint64(0)
+	status := DeliveryRejected
+	certainty := WriteCertaintyZero
+	mayHaveWritten := false
+	if targetInvoked {
+		invocationID = snapshot.invocationID
+		status = DeliveryUnknownPartial
+		certainty = WriteCertaintyUnknown
+		mayHaveWritten = true
+	}
+	outcomeFixedAt := g.clock.Now()
+	result := SinkDeliveryResult{
+		Status:                  status,
+		Certainty:               certainty,
+		ErrorClass:              DeliveryErrorAbandoned,
+		AttemptedBytes:          len(batch.Bytes),
+		MayHavePartiallyWritten: mayHaveWritten,
+		Err: NewClassifiedError(
+			DeliveryErrorAbandoned,
+			"primary callback outcome fixed by lifecycle finalizer",
+		),
+	}
+	primary := TargetReceipt{
+		SessionID:          batch.SessionID,
+		Sequence:           batch.Sequence,
+		BatchID:            batch.BatchID,
+		RouteEpoch:         batch.RouteEpoch,
+		BindingGeneration:  batch.BindingGeneration,
+		SinkID:             batch.primaryDesc.SinkID,
+		TargetClass:        batch.primaryDesc.Class,
+		ProjectionTargetID: batch.primaryDesc.ProjectionTargetID,
+		InvocationID:       invocationID,
+		Synthetic:          true,
+		SinkDeliveryResult: normalizeSinkResult(result, len(batch.Bytes)),
+		CallbackReturned:   false,
+		StartedAt:          snapshot.startedAt,
+		OutcomeFixedAt:     outcomeFixedAt,
+	}
+	attempt.gate.Publish(OutputEvent{
+		SchemaVersion:    SchemaVersion,
+		Kind:             EventPrimaryCompleted,
+		At:               outcomeFixedAt,
+		SessionID:        batch.SessionID,
+		Sequence:         batch.Sequence,
+		RouteEpoch:       batch.RouteEpoch,
+		BatchID:          batch.BatchID,
+		IntentID:         batch.IntentID,
+		Transaction:      batch.Kind,
+		Terminal:         batch.Terminal,
+		History:          batch.History,
+		TargetInvoked:    targetInvoked,
+		CallbackReturned: false,
+		InvocationID:     invocationID,
+		Synthetic:        true,
+		Status:           primary.Status,
+		Certainty:        primary.Certainty,
+		ErrorClass:       primary.ErrorClass,
+		AttemptedBytes:   primary.AttemptedBytes,
+		AcceptedBytes:    primary.AcceptedBytes,
+	})
+	_ = attempt.gate.Freeze(EventReceiptCutoff, outcomeFixedAt)
+	mirrorAdmissions := g.skipFrozenMirrors(batch, DeliveryErrorAbandoned)
+
+	g.mu.Lock()
+	if snapshot.reserved && g.stats.primaryInFlight > 0 {
+		g.stats.primaryInFlight--
+	}
+	if targetInvoked {
+		g.stats.primaryUnknown++
+	} else {
+		g.stats.primaryRejected++
+	}
+	if cutoffDrops := attempt.gate.CutoffDrops(); cutoffDrops > 0 {
+		g.stats.observerDrops += cutoffDrops - g.lastObserverDrops
+		g.lastObserverDrops = cutoffDrops
+	}
+	g.mu.Unlock()
+
+	receipt := OutputReceipt{
+		SessionID:             batch.SessionID,
+		Sequence:              batch.Sequence,
+		BatchID:               batch.BatchID,
+		RouteEpoch:            batch.RouteEpoch,
+		ProjectionTargetID:    batch.ProjectionTargetID,
+		ProjectionTargetClass: batch.ProjectionTargetClass,
+		BindingGeneration:     batch.BindingGeneration,
+		History:               cloneHistory(batch.History),
+		Admission: AdmissionReceipt{
+			Decision:   AdmissionAccepted,
+			ErrorClass: DeliveryErrorNone,
+		},
+		TargetInvoked:              targetInvoked,
+		Primary:                    &primary,
+		MirrorAdmissions:           mirrorAdmissions,
+		ReceiptCutoffEventSequence: attempt.gate.CutoffSequence(),
+		ObserverDrops:              attempt.gate.CutoffDrops(),
+	}
+	g.setRecordReceipt(batch.Sequence, receipt)
+	attempt.gate.Retire()
+	g.trySealRecord(batch.Sequence)
+	attempt.complete(receipt)
+}
+
 // Close 进入 Closing、捕获 cutoff、排空并关闭 owned sinks。幂等。
 //
 // 语义：Close 捕获 closeCutoff=lastStamped 后，已盖章（Sequence<=cutoff）
@@ -1441,6 +1797,9 @@ func (g *RenderOutputGateway) finishClose(cutoff uint64, pendingRoute RenderRout
 			primaryTerminated = abortSnapshot.AbortProof == AbortProofTerminated
 		}
 	}
+	if deviated {
+		g.finalizeAbandonedPrimaryAttempts(cutoff)
+	}
 
 	seen := make([]interface{}, 0, 2+len(mirrors)+len(pendingRoute.Mirrors))
 	closeOwned := func(sink interface{}, owned bool) {
@@ -1473,6 +1832,12 @@ func (g *RenderOutputGateway) finishClose(cutoff uint64, pendingRoute RenderRout
 		closeOwned(mirror.Sink, mirror.Ownership == SinkOwned)
 	}
 	closeOwned(pendingRoute.Primary, pendingRoute.PrimaryOwnership == SinkOwned)
+	if deviated {
+		// retire/abandon above seals queued and active mirror entries
+		// synchronously.  Do not expose GatewayClosed/Abandoned until every
+		// accepted record at the close cutoff is visible in the journal.
+		_ = g.waitForCutoff(context.Background(), cutoff, true)
+	}
 
 	finalState := GatewayClosed
 	var terminalErr error
@@ -1559,6 +1924,17 @@ func (g *RenderOutputGateway) BeginReconfigure(ctx context.Context, newRoute Ren
 		g.mu.Unlock()
 		return RouteChangePlan{}, err
 	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			g.mu.Unlock()
+			return RouteChangePlan{}, NewClassifiedError(
+				DeliveryErrorControlCanceled, "reconfigure begin canceled")
+		default:
+		}
+	}
+	opCtx, opCancel := context.WithCancel(context.Background())
+	opTimer := g.clock.NewTimer(g.opts.ReconfigureTimeout)
 	g.state = GatewayReconfiguring
 	g.reconfigureCutoffSequence = cutoff
 	g.nextRouteEpoch = newEpoch
@@ -1567,8 +1943,51 @@ func (g *RenderOutputGateway) BeginReconfigure(ctx context.Context, newRoute Ren
 	g.reconfigureDisposition = reconfigureInstallNew
 	g.reconfigureFinalized = false
 	g.reconfigureDone = nil
+	g.reconfigureCtx = opCtx
+	g.reconfigureCancel = func() {
+		opTimer.Stop()
+		opCancel()
+	}
+	g.reconfigureTimedOut = false
 	g.mu.Unlock()
+	go g.watchReconfigure(plan.Token, opCtx, opCancel, opTimer)
 	return plan, nil
+}
+
+// watchReconfigure owns the deadline created at Begin's admission
+// linearization point. A presenter that never returns the plan cannot strand
+// the admission barrier forever. If Commit already owns the finalizer, the
+// watchdog only cancels its shared operation context; otherwise it starts that
+// same finalizer exactly once.
+func (g *RenderOutputGateway) watchReconfigure(
+	token string,
+	opCtx context.Context,
+	opCancel context.CancelFunc,
+	timer ClockTimer,
+) {
+	select {
+	case <-opCtx.Done():
+		return
+	case <-timer.C():
+	}
+	// Make an already-running finalizer observe the absolute Begin deadline.
+	opCancel()
+
+	g.mu.Lock()
+	if g.state != GatewayReconfiguring || g.reconfigurePlan.Token != token {
+		g.mu.Unlock()
+		return
+	}
+	g.reconfigureTimedOut = true
+	if g.reconfigureFinalized {
+		g.mu.Unlock()
+		return
+	}
+	g.reconfigureFinalized = true
+	g.reconfigureDone = make(chan struct{})
+	g.mu.Unlock()
+
+	go g.finishReconfigure(token)
 }
 
 // CommitReconfigure 是唯一解除 admission barrier 的操作：统一 finalizer，
@@ -1647,10 +2066,164 @@ func (g *RenderOutputGateway) completeReconfigureLocked(token string, err error)
 }
 
 func (g *RenderOutputGateway) clearReconfigureLocked() {
+	if g.reconfigureCancel != nil {
+		g.reconfigureCancel()
+	}
 	g.reconfigurePlan = RouteChangePlan{}
 	g.pendingRoute = RenderRouteConfig{}
 	g.reconfigureCutoffSequence = 0
 	g.reconfigureDisposition = reconfigureInstallNew
+	g.reconfigureCtx = nil
+	g.reconfigureCancel = nil
+	g.reconfigureTimedOut = false
+}
+
+func contextIsDone(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// abandonReconfigure is the sole fail-closed terminal owner for a
+// ReconfigureTimeout. Once the plan has been handed to the presenter, the
+// gateway cannot prove whether its projection ledger is old or new, so it must
+// not reopen either route. It seals the frozen cutoff, quarantines callbacks,
+// closes owned resources, memoizes the token result, and publishes one
+// terminal Abandoned state.
+func (g *RenderOutputGateway) abandonReconfigure(
+	token string,
+	cutoff uint64,
+	oldRoute RenderRouteConfig,
+	oldMirrors []*mirrorSlot,
+	newRoute RenderRouteConfig,
+	newMirrors []*mirrorSlot,
+) {
+	g.mu.Lock()
+	if g.state != GatewayReconfiguring || g.reconfigurePlan.Token != token {
+		if _, memoized := g.reconfigureMemo[token]; !memoized {
+			g.completeReconfigureLocked(token,
+				NewClassifiedError(DeliveryErrorClosed, "reconfigure superseded by gateway close"))
+		}
+		g.mu.Unlock()
+		return
+	}
+	g.mu.Unlock()
+
+	// Race the normal Close API through its once-only terminal authority. If
+	// Close won, it owns route cleanup and closedCh; this finalizer only joins
+	// by fixing the reconfigure token result.
+	terminalOwner := false
+	g.closeOnce.Do(func() {
+		terminalOwner = true
+	})
+	if !terminalOwner {
+		g.mu.Lock()
+		if _, memoized := g.reconfigureMemo[token]; !memoized {
+			g.completeReconfigureLocked(token,
+				NewClassifiedError(DeliveryErrorClosed, "reconfigure superseded by gateway close"))
+		}
+		g.mu.Unlock()
+		return
+	}
+
+	terminalErr := NewClassifiedError(
+		DeliveryErrorAbandoned,
+		"reconfigure operation deadline exceeded after plan handoff",
+	)
+	g.mu.Lock()
+	// Winning closeOnce prevents Close from changing the state after the
+	// initial check; retain this guard as a fail-closed consistency assertion.
+	if g.state != GatewayReconfiguring || g.reconfigurePlan.Token != token {
+		g.completeReconfigureLocked(token, terminalErr)
+		g.state = GatewayAbandoned
+		g.closeErr = terminalErr
+		g.clearReconfigureLocked()
+		g.mu.Unlock()
+		g.hub.shutdown()
+		close(g.closedCh)
+		return
+	}
+	cleanupCtx := g.reconfigureCtx
+	primaryWasBusy := g.primaryBusy
+	g.closeCutoff = cutoff
+	g.primaryAborted = true
+	g.primaryBusy = false
+	g.primaryCond.Broadcast()
+	g.mu.Unlock()
+
+	if primaryWasBusy && oldRoute.PrimaryOwnership == SinkOwned &&
+		!interfaceIsNil(oldRoute.Primary) {
+		_ = oldRoute.Primary.Abort(AbortProofRequested)
+	}
+	g.finalizeAbandonedPrimaryAttempts(cutoff)
+	for _, slots := range [][]*mirrorSlot{oldMirrors, newMirrors} {
+		for _, slot := range slots {
+			if slot != nil {
+				slot.abandonQueued()
+			}
+		}
+	}
+	if cleanupCtx == nil {
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		cleanupCtx = canceledCtx
+	}
+
+	// Close each owned sink at most once even when old and candidate routes
+	// intentionally reuse the same instance.
+	seen := make([]interface{}, 0,
+		2+len(oldRoute.Mirrors)+len(newRoute.Mirrors))
+	closeOwned := func(sink interface{}, owned bool) {
+		if !owned || interfaceIsNil(sink) {
+			return
+		}
+		for _, prior := range seen {
+			if sameSink(prior, sink) {
+				return
+			}
+		}
+		seen = append(seen, sink)
+		switch typed := sink.(type) {
+		case RenderOutputSink:
+			_ = typed.Close(cleanupCtx)
+		case RenderMirrorSink:
+			_ = typed.Close(cleanupCtx)
+		}
+	}
+	closeRoute := func(route RenderRouteConfig) {
+		closeOwned(route.Primary, route.PrimaryOwnership == SinkOwned)
+		for _, mirror := range route.Mirrors {
+			closeOwned(mirror.Sink, mirror.Ownership == SinkOwned)
+		}
+	}
+	closeRoute(oldRoute)
+	closeRoute(newRoute)
+
+	// abandonQueued/finalizeAbandonedPrimaryAttempts synchronously fix all
+	// missing outcomes; no external callback is awaited here.
+	_ = g.waitForCutoff(context.Background(), cutoff, true)
+	g.hub.submit(OutputEvent{
+		SchemaVersion: SchemaVersion,
+		Kind:          EventGatewayClosed,
+		At:            g.clock.Now(),
+		SessionID:     g.sessID,
+		GatewayState:  GatewayAbandoned,
+	})
+	g.hub.shutdown()
+
+	g.mu.Lock()
+	g.completeReconfigureLocked(token, terminalErr)
+	g.state = GatewayAbandoned
+	g.closeErr = terminalErr
+	g.clearReconfigureLocked()
+	g.mu.Unlock()
+	close(g.closedCh)
 }
 
 func (g *RenderOutputGateway) finishReconfigure(token string) {
@@ -1668,12 +2241,17 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 	newEpoch := g.reconfigurePlan.NewRouteEpoch
 	newDesc := g.reconfigurePlan.NewTarget
 	rollback := g.reconfigureDisposition == reconfigureRollback
+	finalizeCtx := g.reconfigureCtx
+	timedOut := g.reconfigureTimedOut
 	g.mu.Unlock()
 
-	finalizeCtx, cancel := contextWithClockTimeout(
-		g.clock, context.Background(), g.opts.ReconfigureTimeout,
-	)
-	defer cancel()
+	if finalizeCtx == nil {
+		finalizeCtx = context.Background()
+	}
+	if timedOut || contextIsDone(finalizeCtx) {
+		g.abandonReconfigure(token, cutoff, oldRoute, oldMirrors, newRoute, nil)
+		return
+	}
 	if err := g.waitForCutoff(finalizeCtx, cutoff, true); err != nil {
 		g.mu.Lock()
 		if g.state != GatewayReconfiguring || g.reconfigurePlan.Token != token {
@@ -1683,17 +2261,7 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 			return
 		}
 		g.mu.Unlock()
-		closeRouteResources(finalizeCtx, newRoute, nil, oldRoute)
-		g.mu.Lock()
-		g.completeReconfigureLocked(token,
-			NewClassifiedError(DeliveryErrorTimeout, "reconfigure drain deadline exceeded"))
-		// Keep the admission barrier in place until candidate cleanup and the
-		// memoized result are both fixed.  Publishing Open before populating
-		// reconfigureMemo lets a concurrent Commit observe an apparent token
-		// mismatch in the tiny handoff window.
-		g.state = GatewayOpen
-		g.clearReconfigureLocked()
-		g.mu.Unlock()
+		g.abandonReconfigure(token, cutoff, oldRoute, oldMirrors, newRoute, nil)
 		return
 	}
 
