@@ -581,6 +581,9 @@ func (g *RenderOutputGateway) Submit(ctx context.Context, intent RenderIntent) O
 		if state == GatewayReconfiguring {
 			return g.deferredReceipt(intent, DeliveryErrorReconfiguring, "gateway is reconfiguring")
 		}
+		if state == GatewayAbandoned {
+			return g.rejectedReceipt(intent, DeliveryErrorAbandoned, "gateway was abandoned")
+		}
 		return g.rejectedReceipt(intent, DeliveryErrorClosed, "gateway not accepting submissions")
 	}
 	if err := validateIntent(intent, g.opts.MaxIntentBytes); err != nil {
@@ -1739,12 +1742,25 @@ func (g *RenderOutputGateway) Close(ctx context.Context) error {
 	ctx = nonNilContext(ctx)
 	g.closeOnce.Do(func() {
 		g.mu.Lock()
+		wasReconfiguring := g.state == GatewayReconfiguring
+		reconfigureToken := g.reconfigurePlan.Token
+		reconfigureFinalized := g.reconfigureFinalized
+		reconfigureCancel := g.reconfigureCancel
 		g.state = GatewayClosing
 		g.closeCutoff = g.sequence
 		cutoff := g.closeCutoff
 		pendingRoute := g.pendingRoute
 		g.pendingRoute = RenderRouteConfig{}
+		if wasReconfiguring && !reconfigureFinalized && reconfigureToken != "" {
+			g.completeReconfigureLocked(reconfigureToken,
+				NewClassifiedError(DeliveryErrorClosed, "reconfigure superseded by gateway close"))
+			g.clearReconfigureLocked()
+			reconfigureCancel = nil
+		}
 		g.mu.Unlock()
+		if reconfigureCancel != nil {
+			reconfigureCancel()
+		}
 		// The shared close operation owns its own deadline. A caller context
 		// only controls that caller's wait below.
 		go g.finishClose(cutoff, pendingRoute)
