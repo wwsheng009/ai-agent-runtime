@@ -1614,8 +1614,15 @@ func (s *SQLiteRuntimeStore) Path() string {
 }
 
 func (s *SQLiteRuntimeStore) ensure() error {
+	return s.ensureCtx(context.Background())
+}
+
+func (s *SQLiteRuntimeStore) ensureCtx(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
@@ -1646,7 +1653,7 @@ func (s *SQLiteRuntimeStore) ensure() error {
 		busyTimeout: s.busyTimeout,
 		cacheKiB:    s.cacheKiB,
 	}
-	store, err = openSQLiteRuntimeStoreWithLockRetry(store)
+	store, err = openSQLiteRuntimeStoreWithLockRetryCtx(ctx, store)
 	if err != nil {
 		s.openErr = err
 		return err
@@ -1672,14 +1679,18 @@ func (s *SQLiteRuntimeStore) durableFileExists() bool {
 // previously opened). For a brand-new path-backed store, callers can treat the
 // absent file as an empty result set without creating session_runtime.sqlite.
 func (s *SQLiteRuntimeStore) ensureForRead() (skipEmpty bool, err error) {
+	return s.ensureForReadCtx(context.Background())
+}
+
+func (s *SQLiteRuntimeStore) ensureForReadCtx(ctx context.Context) (skipEmpty bool, err error) {
 	if s == nil {
 		return false, fmt.Errorf("runtime store is not initialized")
 	}
 	if s.Opened() || s.durableFileExists() {
-		return false, s.ensure()
+		return false, s.ensureCtx(ctx)
 	}
 	if strings.TrimSpace(s.path) == "" {
-		return false, s.ensure()
+		return false, s.ensureCtx(ctx)
 	}
 	return true, nil
 }
@@ -1701,12 +1712,22 @@ func (s *SQLiteRuntimeStore) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), s.busyTimeout)
 		_, checkpointErr := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 		cancel()
+		if checkpointErr != nil {
+			// 拿不到写锁（并发 aicli/runtime 进程正在写库）时，TRUNCATE
+			// checkpoint 会失败。降级为 PASSIVE：尽力冲刷 WAL，绝不因此
+			// 阻塞或失败关闭流程。
+			if _, passiveErr := db.ExecContext(context.Background(), "PRAGMA wal_checkpoint(PASSIVE)"); passiveErr != nil {
+				checkpointErr = fmt.Errorf("checkpoint runtime sqlite WAL: %w", passiveErr)
+			} else {
+				checkpointErr = nil
+			}
+		}
 		closeErr := db.Close()
 		if closeErr != nil {
 			return closeErr
 		}
 		if checkpointErr != nil {
-			return fmt.Errorf("checkpoint runtime sqlite WAL: %w", checkpointErr)
+			return checkpointErr
 		}
 		return nil
 	}
@@ -1857,7 +1878,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -3249,7 +3270,7 @@ func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, a
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -3866,13 +3887,24 @@ func (s *SQLiteRuntimeStore) notifyAgentControlMailboxWatchers(sessionID string,
 	}
 }
 
-// openSQLiteRuntimeStoreWithLockRetry runs init, retrying transient
+// openSQLiteRuntimeStoreWithLockRetryCtx runs init, retrying transient
 // "database is locked" failures with backoff. A concurrent aicli/runtime
 // process can hold the write lock longer than busy_timeout (migration, large
 // session flush, wal_checkpoint(TRUNCATE)); without retry this makes a whole
 // startup fail. A failed connection is replaced with a fresh one per attempt.
-func openSQLiteRuntimeStoreWithLockRetry(store *SQLiteRuntimeStore) (*SQLiteRuntimeStore, error) {
+//
+// The retry loop honors ctx: when ctx is cancelled (e.g. a health-check
+// deadline), it aborts instead of continuing to sleep, so no caller waits
+// longer than its own budget for a wedged database.
+func openSQLiteRuntimeStoreWithLockRetryCtx(ctx context.Context, store *SQLiteRuntimeStore) (*SQLiteRuntimeStore, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			_ = store.db.Close()
+			return store, err
+		}
 		if attempt > 0 {
 			// 等待数据库锁释放时打日志：并发 aicli/runtime-server 进程
 			// 可能长时间持有写锁（迁移、大会话 flush、checkpoint），
@@ -3881,9 +3913,15 @@ func openSQLiteRuntimeStoreWithLockRetry(store *SQLiteRuntimeStore) (*SQLiteRunt
 				s.Infof("[sqlite-lock] database locked, retrying open (attempt %d/%d, wait %v) path=%s",
 					attempt, sqliteLockRetries, sqliteLockRetryWait(attempt-1), store.path)
 			}
-			time.Sleep(sqliteLockRetryWait(attempt - 1))
+			wait := sqliteLockRetryWait(attempt - 1)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				_ = store.db.Close()
+				return store, ctx.Err()
+			}
 		}
-		if err := store.init(context.Background()); err == nil {
+		if err := store.init(ctx); err == nil {
 			return store, nil
 		} else if !isSQLiteLockedError(err) || attempt >= sqliteLockRetries {
 			_ = store.db.Close()
@@ -3904,6 +3942,12 @@ func openSQLiteRuntimeStoreWithLockRetry(store *SQLiteRuntimeStore) (*SQLiteRunt
 			cacheKiB:    store.cacheKiB,
 		}
 	}
+}
+
+// openSQLiteRuntimeStoreWithLockRetry wraps openSQLiteRuntimeStoreWithLockRetryCtx
+// with context.Background() for callers without a ctx.
+func openSQLiteRuntimeStoreWithLockRetry(store *SQLiteRuntimeStore) (*SQLiteRuntimeStore, error) {
+	return openSQLiteRuntimeStoreWithLockRetryCtx(context.Background(), store)
 }
 
 func (s *SQLiteRuntimeStore) init(ctx context.Context) error {

@@ -44,7 +44,15 @@ observe:
   enabled: true
 
 sessionRuntime:
-  # 会话运行时事件/状态持久化：file 时写入 session_dir/runtime/session_runtime.sqlite，
-  # 使 Trajectory 断线恢复（/api/runtime/sessions/{id}/runtime/events）跨重启可回放。
-  # 缺省为 memory（内存存储），重启后轨迹事件丢失、面板显示为空。
-  defaultPersistence: file
+  # 会话运行时事件/状态持久化：显式 storePath 指向本服务专用文件
+  # backend/data/runtime/session_runtime.sqlite，使 Trajectory 断线恢复
+  # （/api/runtime/sessions/{id}/runtime/events）跨重启可回放。
+  # 注意：defaultPersistence 必须保持 memory（默认）。若设为 file，会级联把
+  # Team/AgentControl/Artifact/Background 的 store 路径也填充到共享的
+  # C:\Users\vince\.aicli\sessions\runtime\*.sqlite —— 该目录被正在运行的
+  # aicli CLI 进程持有锁，executionDiagnosticsSnapshot 访问这些 store 时会
+  # 无视 2s ctx 阻塞在 sqlite busy_timeout（默认 60s），导致 /api/runtime/health
+  # 死锁。显式 storePath 与 DefaultPersistence 无关，refreshSessionRuntimeStore
+  # 只看 StorePath 非空即启用专用文件 store。
+  defaultPersistence: memory
+  storePath: ../data/runtime/session_runtime.sqlite

@@ -69,3 +69,6 @@ backend/.tmp/
 .env
 backend/chat-logs/
 /plan.md
+
+# Local runtime data (sqlite stores, session artifacts)
+backend/data/

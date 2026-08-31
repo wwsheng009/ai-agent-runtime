@@ -17,6 +17,13 @@ const (
 	executionDiagnosticsSchemaVersion = 1
 	executionDiagnosticsSourceTimeout = 2 * time.Second
 	executionDiagnosticsSessionPage   = 1000
+	// executionDiagnosticsSnapshotTimeout 是整个快照的硬上限。单个 source
+	// 的查询已受 executionDiagnosticsSourceTimeout 约束，但底层 sqlite 打开/
+	// 锁重试可能无视 ctx（历史实现用 context.Background()），导致单个
+	// source 阻塞远超其 2s 预算。若没有这一层，/api/runtime/health 会跟着
+	// wait.Wait() 一起挂起。该值应明显大于单个 source 的超时，给正常路径
+	// 留足余量，同时保证 health 端点有界返回。
+	executionDiagnosticsSnapshotTimeout = 5 * time.Second
 
 	executionDiagnosticsSourceOK          = "ok"
 	executionDiagnosticsSourceDegraded    = "degraded"
@@ -64,30 +71,110 @@ func (h *Handler) executionDiagnosticsSnapshot(ctx context.Context) map[string]i
 	}
 
 	var (
+		mu         sync.Mutex
 		sessions   executionDiagnosticsSessionResult
 		background executionDiagnosticsResult
 		teams      executionDiagnosticsTeamResult
 		agents     executionDiagnosticsResult
-		wait       sync.WaitGroup
 	)
-	wait.Add(4)
-	go func() {
-		defer wait.Done()
-		sessions = h.sessionExecutionDiagnostics(ctx)
-	}()
-	go func() {
-		defer wait.Done()
-		background = h.backgroundExecutionDiagnostics(ctx)
-	}()
-	go func() {
-		defer wait.Done()
-		teams = h.teamExecutionDiagnostics(ctx)
-	}()
-	go func() {
-		defer wait.Done()
-		agents = h.agentExecutionDiagnostics(ctx)
-	}()
-	wait.Wait()
+	// 每个 source 独立 goroutine，结果写入互斥保护的结构；主路径只做
+	// 有界等待，超时后立即返回部分结果，绝不阻塞 health 端点。
+	doneCh := make(chan struct{}, 4)
+	runSource := func(fn func()) {
+		go func() {
+			defer func() { doneCh <- struct{}{} }()
+			fn()
+		}()
+	}
+	runSource(func() {
+		result := h.sessionExecutionDiagnostics(ctx)
+		mu.Lock()
+		sessions = result
+		mu.Unlock()
+	})
+	runSource(func() {
+		result := h.backgroundExecutionDiagnostics(ctx)
+		mu.Lock()
+		background = result
+		mu.Unlock()
+	})
+	runSource(func() {
+		result := h.teamExecutionDiagnostics(ctx)
+		mu.Lock()
+		teams = result
+		mu.Unlock()
+	})
+	runSource(func() {
+		result := h.agentExecutionDiagnostics(ctx)
+		mu.Lock()
+		agents = result
+		mu.Unlock()
+	})
+
+	timedOut := false
+	deadline := time.Now().Add(executionDiagnosticsSnapshotTimeout)
+	for i := 0; i < 4; i++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			timedOut = true
+			break
+		}
+		select {
+		case <-doneCh:
+		case <-time.After(remaining):
+			timedOut = true
+		}
+		if timedOut {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if timedOut {
+		// 未完成的 source 标记为 unavailable/timeout，避免返回 nil map。
+		if sessions.source == nil {
+			sessions.source = executionDiagnosticsSource("session_runtime_store", executionDiagnosticsSourceUnavailable, "timeout")
+		}
+		if sessions.sessionCounts == nil {
+			sessions.sessionCounts = newExecutionDiagnosticsCounts(
+				"idle", "running", "waiting_approval", "waiting_input", "rewinding", "stopped",
+			)
+		}
+		if sessions.approvalCounts == nil {
+			sessions.approvalCounts = newExecutionDiagnosticsCounts("waiting")
+		}
+		if background.source == nil {
+			background.source = executionDiagnosticsSource("background_manager", executionDiagnosticsSourceUnavailable, "timeout")
+		}
+		if background.counts == nil {
+			background.counts = newExecutionDiagnosticsCounts(
+				"pending", "running", "completed", "failed", "timed_out", "cancelled", "orphaned",
+			)
+		}
+		if teams.source == nil {
+			teams.source = executionDiagnosticsSource("team_store", executionDiagnosticsSourceUnavailable, "timeout")
+		}
+		if teams.teamCounts == nil {
+			teams.teamCounts = newExecutionDiagnosticsCounts(
+				"active", "paused", "done", "failed", "partially_completed", "canceled",
+			)
+		}
+		if teams.taskCounts == nil {
+			teams.taskCounts = newExecutionDiagnosticsCounts(
+				"pending", "ready", "running", "blocked", "done", "failed", "cancelled",
+			)
+		}
+		if teams.orchestratorCounts == nil {
+			teams.orchestratorCounts = map[string]int{}
+		}
+		if agents.source == nil {
+			agents.source = executionDiagnosticsSource("agent_control_registry_store", executionDiagnosticsSourceUnavailable, "timeout")
+		}
+		if agents.counts == nil {
+			agents.counts = newExecutionDiagnosticsCounts("active", "closed")
+		}
+	}
 
 	return map[string]interface{}{
 		"schema_version": executionDiagnosticsSchemaVersion,

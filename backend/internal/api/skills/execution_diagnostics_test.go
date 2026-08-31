@@ -252,6 +252,58 @@ func TestSessionExecutionDiagnosticsDoesNotHoldRuntimeLockDuringQuery(t *testing
 	}
 }
 
+// hungExecutionDiagnosticsRuntimeStore 模拟 sqlite 锁卡死：LoadState 无视 ctx
+// 取消（等价于 busy_timeout 期间驱动阻塞、ExecContext 未在 ctx 到期时返回），
+// 只有 release 关闭才会返回。用于验证 snapshot 的硬超时兜底。
+type hungExecutionDiagnosticsRuntimeStore struct {
+	release chan struct{}
+}
+
+func (s *hungExecutionDiagnosticsRuntimeStore) LoadState(ctx context.Context, sessionID string) (*chat.RuntimeState, error) {
+	<-s.release
+	return nil, ctx.Err()
+}
+
+func (*hungExecutionDiagnosticsRuntimeStore) SaveState(context.Context, *chat.RuntimeState) error {
+	return nil
+}
+
+func (*hungExecutionDiagnosticsRuntimeStore) DeleteState(context.Context, string) error {
+	return nil
+}
+
+func TestExecutionDiagnosticsSnapshotBoundedWhenRuntimeStoreHung(t *testing.T) {
+	storage := chat.NewInMemoryStorage()
+	session := chat.NewSession("hung-test")
+	require.NoError(t, storage.Save(context.Background(), session))
+	manager := chat.NewSessionManager(storage, chat.DefaultSessionManagerConfig())
+	t.Cleanup(manager.Stop)
+
+	store := &hungExecutionDiagnosticsRuntimeStore{release: make(chan struct{})}
+	defer close(store.release)
+	handler := NewHandler(nil, nil, nil)
+	handler.SetSessionManager(manager)
+	handler.sessionRuntimeStore = store
+
+	start := time.Now()
+	result := handler.executionDiagnosticsSnapshot(context.Background())
+	elapsed := time.Since(start)
+
+	// 硬超时兜底：即使 session source 完全卡死（无视 ctx），快照也必须在
+	// executionDiagnosticsSnapshotTimeout 附近有界返回。
+	require.Less(t, elapsed, executionDiagnosticsSnapshotTimeout+2*time.Second,
+		"snapshot must be bounded even when a source hangs")
+	require.GreaterOrEqual(t, elapsed, executionDiagnosticsSnapshotTimeout-200*time.Millisecond,
+		"snapshot should hit its hard deadline when a source hangs")
+
+	sources, ok := result["sources"].(map[string]interface{})
+	require.True(t, ok, "snapshot must include sources")
+	sessionsSrc, ok := sources["sessions"].(map[string]interface{})
+	require.True(t, ok, "snapshot must include sessions source")
+	require.Equal(t, "unavailable", sessionsSrc["status"])
+	require.Equal(t, "timeout", sessionsSrc["error"])
+}
+
 type blockingExecutionDiagnosticsAgentStore struct {
 	started chan struct{}
 	release chan struct{}
