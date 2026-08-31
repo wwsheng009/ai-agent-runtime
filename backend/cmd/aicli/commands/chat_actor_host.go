@@ -466,7 +466,14 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 	// projected a critical terminal batch before the actor registry/wake
 	// consumer was ready. Drain any such durable wake once the consumer is
 	// wired; the scheduler keeps it pending if the parent is still busy.
-	if h.BaseSession != nil && h.BaseSession.RuntimeSession != nil {
+	//
+	// Interactive sessions must NOT drain during host init: the drain would
+	// asynchronously start a real auto-wake turn before the first prompt is
+	// rendered, which flips the SessionActor into Busy and suppresses the
+	// composer (`aicli resume` showed "Analyzing" with no prompt input area).
+	// The wake stays durable and is drained by bindSupervisionWakeConsumer on
+	// the parent's first turn-end (doc 6.5 rule 2 closure).
+	if !chatHostSessionInteractive(h.BaseSession) && h.BaseSession != nil && h.BaseSession.RuntimeSession != nil {
 		rootSessionID := strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
 		if rootSessionID != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -474,6 +481,13 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			_ = h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID)
 		}
 	}
+}
+
+// chatHostSessionInteractive reports whether the local host base session is
+// attached to an interactive foreground prompt (the resume/chat TTY path).
+// Headless and JSON runs keep the original startup wake-drain semantics.
+func chatHostSessionInteractive(session *ChatSession) bool {
+	return session != nil && !session.NoInteractive && !session.JSONOutput
 }
 
 // beginWakeTurnRun engages the UI run-epoch protocol for one wake turn and
