@@ -623,3 +623,72 @@ func TestUserMessagePrefixReservesWidthAndPrefixesEveryLine(t *testing.T) {
 		t.Fatalf("rendered user content %q != source %q", rendered, source)
 	}
 }
+
+// TestLayoutTwoRowStatus validates that setting SessionIDLine produces a second
+// status row at statusRow-1 in the BottomPaneRowPlan, and that StatusRows
+// reports 2. Without SessionIDLine the behaviour stays unchanged at 1 row.
+func TestLayoutTwoRowStatus(t *testing.T) {
+	// --- Baseline: no SessionIDLine → single status row ---
+	base := AppState{
+		Geometry:   GeometryState{Width: 80, Height: 24},
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1}),
+		Bottom: BottomPaneState{
+			StatusModel: &style.StatusLineModel{State: style.RunReady, StateText: "Ready"},
+		},
+	}
+	layout := LayoutAppState(base)
+	if layout.Bottom.StatusRows != 1 {
+		t.Fatalf("baseline StatusRows = %d, want 1", layout.Bottom.StatusRows)
+	}
+	basePlan := LayoutBottomPaneRows(base.Bottom, base.Geometry)
+	if basePlan.StatusRow != 24 {
+		t.Fatalf("baseline StatusRow = %d, want 24", basePlan.StatusRow)
+	}
+	for _, r := range basePlan.Rows {
+		if r.Row == 23 && r.Owner == renderengine.RowOwnerStatus {
+			t.Fatalf("baseline has unexpected status row at row 23: %+v", r)
+		}
+	}
+
+	// --- With SessionIDLine → two status rows ---
+	session := base
+	session.Bottom.SessionIDLine = "session abc-123"
+	layout2 := LayoutAppState(session)
+	if layout2.Bottom.StatusRows != 2 {
+		t.Fatalf("session StatusRows = %d, want 2", layout2.Bottom.StatusRows)
+	}
+	sessionPlan := LayoutBottomPaneRows(session.Bottom, session.Geometry)
+	if sessionPlan.StatusRow != 24 {
+		t.Fatalf("session StatusRow = %d, want 24", sessionPlan.StatusRow)
+	}
+	var sessionRowText string
+	for _, r := range sessionPlan.Rows {
+		if r.Row == 23 && r.Owner == renderengine.RowOwnerStatus {
+			sessionRowText = r.Text
+		}
+	}
+	if sessionRowText == "" {
+		t.Fatalf("session row at row 23 not found in row plan: %+v", sessionPlan.Rows)
+	}
+	if !strings.Contains(sessionRowText, "abc-123") {
+		t.Fatalf("session row text = %q, expected to contain abc-123", sessionRowText)
+	}
+
+	// --- With popup active → session line hidden ---
+	popup := base
+	popup.Bottom.SessionIDLine = "session hidden"
+	popup.Bottom.PopupLines = []string{"popup line"}
+	layout3 := LayoutAppState(popup)
+	if layout3.Bottom.StatusRows != 1 {
+		t.Fatalf("popup StatusRows = %d, want 1", layout3.Bottom.StatusRows)
+	}
+
+	// --- With composer active → session line hidden ---
+	composer := base
+	composer.Bottom.SessionIDLine = "session hidden"
+	composer.Bottom.ComposerLine = "composer"
+	layout4 := LayoutAppState(composer)
+	if layout4.Bottom.StatusRows != 1 {
+		t.Fatalf("composer StatusRows = %d, want 1", layout4.Bottom.StatusRows)
+	}
+}
