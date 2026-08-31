@@ -406,7 +406,25 @@ ActiveBand/prompt/popup/status 的行数变化只产生 `GeometryChanged`/state 
 
 **切片 16 施工记录（priority transcript and raw tool-output ownership）**：approval/question request 现在只登记待同步交互的 stable identity，不提前占用 Scene 顺序；同步 prompt 转录完成时才以 request key 追加一个 completed `KindPriorityPrompt`。这样 permission/reuse hint 先于 transcript 出现在 legacy history、Scene 与 AppState；resolved/answered 可早到但不会阻断 late transcript，重复 request/resolution 与 history replay 均不创建第二份 Scene cell。local permission/decision 等没有 runtime event 的输出改走 `RenderLocalSupplement` typed injection，已 Encode runtime event 保持 projection-only。稳定 `tool_call_id` 的 shell raw bytes 已限定为 ActiveBand-only stage projection，completion 保留唯一 normalized tool result cell；actor executor 的顶层 retained `OutputMirror` 已删除，因为 stable runtime `tool.progress` 已是带 call identity 的 live owner。无 call ID/non-owned 兼容路径暂保留 legacy fallback。新增 priority order/race/single-cell/replay、raw-output no-history/limit 和 actor context no-mirror 回归；本切片不改变 `FixedBottomSurface`、TerminalSession 或 production Presenter authority。
 
-## 9. 被否决方案记录
+**切片 17 施工记录（2026-08-31，legacy 删除与 Phase 6 状态盘点）**：完成 Phase 6 前三项的实质性删除，并逐项核对 §5.1/Phase 6 清单的可行性。
+
+已删除（生产代码 + 关联测试）：
+
+1. 诊断 `zz_` 测试文件 4 个（ui ×2 + commands ×2）。
+2. legacy surface binding 链：`render/output/binding.go`（−222）、`binding_test.go`（−282）主体删除，`gateway.go`/`mirror_scheduler.go` 相应瘦身，`FixedBottomSurface.legacyBinding` 字段与 `fixed_bottom_surface.go`/`terminal.go` 的 legacy 分支同步清除。
+3. `LegacyTransactionAdapter`/`LegacyImmediateAdapter`、`vt_emulator_adapter.go`、`virtual_terminal.go` 及仅测试引用全部删除。
+4. legacyReserve 渲染序列链整链删除：`appendPendingOutputScrollDownLocked`/`flushPendingOutputScrollDownLocked`/`appendOutputScrollDebtLocked`/`flushOutputScrollDebtLocked`/`markOutputWrittenLocked`/`appendOutputScrollUp|DownForBottomReserveGrowth|ShrinkSequence` 7 个函数、`flushLegacyANSIHoldingLock`，以及 `SettleOutputDebt`/`BeginOutput`/`writeOutput`/`RewriteSoftOutputTail`/`ClearCommittedHistoryForReplay`/`setPromptRowsImpl`/`setPromptNoticeLineImpl`/`repaintActiveBandLocked`/`clearActiveBand`/`repaintStatusUpdateLocked` 中的 legacy-only flush/debt 分支体。`renderengine/legacy_reserve.go` 仅保留 `LegacyReserveState` 4 字段诊断结构，`legacy_reserve_test.go` 删除。
+5. `applyLayoutLocked`/`applyLayoutWithSizeLocked`/`appendApplyLayoutSequenceLocked`/`appendApplyLayoutSequenceWithSizeLocked` 的非 owned 路径改为布局簿记（更新 `lastWidth/lastHeight/lastBottomRows` 并清零 legacy 字段），不再 emit DECSTBM/scroll 序列——`SyncTerminalGeometry*` 三测试因此恢复通过。
+6. fixed_bottom_surface_test.go 删除 22 个 legacy 渲染合约测试（−896），`terminalScrollRegionSequence` 死函数删除。
+
+逐项核对结论（与 §5.1/Phase 6 清单的分歧，需母计划口径修正）：
+
+- `historyWindow`、`commitExcessHistoryToScrollbackLocked`、`handoffFrontier`（含 `AdvanceTo/TrimPrefix/Clamp/Value`）**均为 owned 模式活跃代码，不可删除**；§5.1 与 Phase 6 中"删除 historyWindow/commitExcess/frontier"条目应改为"删除其 legacy-only 调用面"（已完成）。
+- `headroom` 仅为注释语义，无独立符号。
+- `renderStatusLocked`/`renderPopupLocked`/`renderPromptRowsLocked` 的 legacy 即时渲染主体（直写 `TerminalOutput()`）是**活跃代码**：~20 个双路径调用点 + 31 个 legacy 行为合约测试依赖。删除尝试已回退；其退役需要独立的"legacy 测试迁移到 owned 模式"里程碑（测试环境默认 non-owned，断言 TerminalOutput 序列），不在本切片内强推。
+- `activeHandoffFrontier`/`historyWindowAbsorbed` 已不存在（此前清理）。
+
+验证：`go build ./...`、`go vet`、`go test ./cmd/aicli/ui/...`（15 包，-count=1）全绿；`go test -race ./cmd/aicli/ui/` 绿。`commands` 包仅剩 1 个环境性失败（`TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir`：本机运行中的 aicli 进程占用 `data/runtime/session_runtime.sqlite`，与删除工作无关）。剩余：renderer-mode session 初始化选择、非 Windows PTY 验收、Windows 长会话/resize/400+ 行矩阵、P8/P9 清单与 runbook 同步（见实施指南 Phase 6 任务 3/5/6）。
 
 2026-08-02 版本曾提出“两个物理所有者 + `AppendNewRows/ScrollExistingRows` + 全局 Frame/Scrollback mode + `committedBoundary int`”。评审后否决，原因如下：
 
