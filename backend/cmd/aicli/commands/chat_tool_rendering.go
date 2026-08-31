@@ -457,7 +457,7 @@ func renderStructuredDiffToolOutput(payload map[string]interface{}) string {
 		return renderDiffOutput(output, "Diff")
 	}
 	if output, ok := markdownToolOutput(payload); ok {
-		return renderDiffOutput(output, "Edited")
+		return renderDiffOutput(output, diffSupplementLabel(payload))
 	}
 	return ""
 }
@@ -467,7 +467,7 @@ func renderMarkdownToolOutputLines(payload map[string]interface{}) []string {
 	if !ok {
 		return nil
 	}
-	if rendered := renderEditedDiffOutput(output); rendered != "" {
+	if rendered := renderDiffOutput(output, diffSupplementLabel(payload)); rendered != "" {
 		return strings.Split(rendered, "\n")
 	}
 	lines := strings.Split(output, "\n")
@@ -475,6 +475,37 @@ func renderMarkdownToolOutputLines(payload map[string]interface{}) []string {
 		lines[i] = "  " + line
 	}
 	return lines
+}
+
+// diffSupplementLabel 决定 diff 补充块使用的动词标签，用于区分"编辑文件"与
+// "查看文件变化"。格式为 "diff" 的（只读 shell git diff）恒为 "Diff"；
+// 格式为 "markdown" 的由工具名判定：真正的编辑工具输出 "Edited"，其余
+// （只读查看 / shell 类工具）输出 "Diff"，避免把只读 diff 误标为编辑。
+func diffSupplementLabel(payload map[string]interface{}) string {
+	if isEditingToolName(payloadStringValue(payload["tool_name"])) {
+		return "Edited"
+	}
+	return "Diff"
+}
+
+// isEditingToolName 报告工具名是否为文件编辑工具。仅匹配已知编辑工具及其
+// 命名空间变体（如 filesystem.edit_file / mcp.apply_patch），shell 类与只读
+// 工具（git diff 查看）一律不算编辑，保证查看操作不会被标成 "Edited"。
+func isEditingToolName(toolName string) bool {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name == "" {
+		return true // 兼容旧路径：无工具名的 markdown diff 按编辑处理
+	}
+	switch name {
+	case "edit", "apply", "apply_patch", "patch", "multiedit", "write", "append_write":
+		return true
+	}
+	if strings.HasSuffix(name, "/edit") || strings.HasSuffix(name, "/apply_patch") ||
+		strings.HasSuffix(name, ".edit") || strings.HasSuffix(name, ".edit_file") ||
+		strings.HasSuffix(name, ".apply_patch") || strings.HasSuffix(name, ".apply") {
+		return true
+	}
+	return false
 }
 
 func markdownToolOutput(payload map[string]interface{}) (string, bool) {
@@ -784,6 +815,12 @@ func formatRenderedDiffLine(oldLine int, marker rune, newLine int, text string) 
 
 func editingSharedToolRenderOutput(toolName string, output string) string {
 	normalizedToolName := strings.TrimSpace(toolName)
+	// shell 类工具（bash / execute_shell_command 等）的输出永远不是"编辑"：
+	// git diff 等只读查看命令必须走 shellDiffSharedToolRenderOutput 的
+	// "diff" 格式路径，否则会被误标成 "• Edited"。
+	if runtimepolicy.IsShellLikeToolName(normalizedToolName) {
+		return ""
+	}
 	switch normalizedToolName {
 	case "edit", "apply", "apply_patch", "patch":
 	default:
