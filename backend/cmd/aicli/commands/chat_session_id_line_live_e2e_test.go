@@ -38,6 +38,9 @@ func TestChatSessionIDLineE2E_PublishedOnSurfaceMount(t *testing.T) {
 	if !strings.Contains(frame, "会话 lead-session") {
 		t.Fatalf("session ID line missing after surface mount:\n%s", frame)
 	}
+	if !strings.Contains(frame, "--pprof off") || !strings.Contains(frame, "--debug off") {
+		t.Fatalf("flag status missing on second status row:\n%s", frame)
+	}
 	// 双行状态栏：session 行必须在 status 行上方（12 行终端 → index 11 是
 	// status，index 10 是 session）。
 	rows := strings.Split(strings.TrimRight(frame, "\n"), "\n")
@@ -52,8 +55,8 @@ func TestChatSessionIDLineE2E_PublishedOnSurfaceMount(t *testing.T) {
 	}
 }
 
-// 未绑定 runtime session 时，状态栏必须保持单行且不渲染 "会话 " 行。
-func TestChatSessionIDLineE2E_HiddenWithoutRuntimeSession(t *testing.T) {
+// 未绑定 runtime session 时，第二行显示 --pprof / --debug 标志状态（不渲染 "会话 " 前缀）。
+func TestChatSessionIDLineE2E_ShowsFlagStatusWithoutRuntimeSession(t *testing.T) {
 	session := &ChatSession{Stream: true}
 	interaction := newChatInteractionCoordinator(session)
 	t.Cleanup(interaction.Shutdown)
@@ -67,6 +70,12 @@ func TestChatSessionIDLineE2E_HiddenWithoutRuntimeSession(t *testing.T) {
 	frame := commandResultFrameText(surface)
 	if strings.Contains(frame, "会话 ") {
 		t.Fatalf("session ID line rendered without a bound runtime session:\n%s", frame)
+	}
+	if !strings.Contains(frame, "--pprof off") {
+		t.Fatalf("expected --pprof off in second status row but not found:\n%s", frame)
+	}
+	if !strings.Contains(frame, "--debug off") {
+		t.Fatalf("expected --debug off in second status row but not found:\n%s", frame)
 	}
 	rows := strings.Split(strings.TrimRight(frame, "\n"), "\n")
 	if len(rows) < 12 {

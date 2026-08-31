@@ -1057,17 +1057,33 @@ func buildChatPromptNoticeLineForWidth(session *ChatSession, s chatSurfaceStatus
 }
 
 // buildChatSessionIDLine renders the second status row: the current persistent
-// session ID. Empty when no runtime session is bound yet; the surface hides an
-// empty session line entirely.
+// session ID (when bound) combined with the --pprof / --debug flag status.
+// The surface hides an empty session line entirely (both session unbound and
+// flags evaluated as empty).
 func buildChatSessionIDLine(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil {
-		return ""
+	parts := make([]string, 0, 2)
+	if session != nil && session.RuntimeSession != nil {
+		if id := strings.TrimSpace(session.RuntimeSession.ID); id != "" {
+			parts = append(parts, "会话 "+id)
+		}
 	}
-	id := strings.TrimSpace(session.RuntimeSession.ID)
-	if id == "" {
-		return ""
+	parts = append(parts, buildChatFlagStatusLine())
+	return strings.Join(parts, "  ")
+}
+
+// buildChatFlagStatusLine returns the --pprof / --debug flag status segment.
+// Always non-empty (shows on/off for each flag) so the second status row
+// remains visible as a persistent diagnostic indicator.
+func buildChatFlagStatusLine() string {
+	pprof := "off"
+	if chatDebugPprofEndpointURL() != "" {
+		pprof = "on"
 	}
-	return "会话 " + id
+	debug := "off"
+	if chatDebugFlagEnabled() {
+		debug = "on"
+	}
+	return "--pprof " + pprof + "  --debug " + debug
 }
 
 func buildQueuedInputContextLine(count int, width int) string {
