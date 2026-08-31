@@ -35,7 +35,7 @@ type InventoryEntry struct {
 	Reason          string `json:"reason,omitempty"` // 为什么此 call site 存在
 	RemovalPhase    string `json:"removal_phase,omitempty"`
 	TransactionKind string `json:"transaction_kind,omitempty"`
-	Classification  string `json:"classification"` // gateway-terminal-effect / semantic-reducer-input / command-plain / command-tty / process-compat-startup
+	Classification  string `json:"classification"` // gateway-terminal-effect / semantic-reducer-input / command-plain / command-tty / process-compat-startup / diagnostic-stderr
 }
 
 // Inventory 是完整 baseline。
@@ -87,16 +87,18 @@ func main() {
 				return nil
 			}
 			walkFuncs(fset, f, rel, func(symbol string, line int, fp, kind, branch string) {
+				classification, reason, removalPhase, txKind := classifyEntry(rel, symbol, kind)
 				e := InventoryEntry{
 					Source:          rel,
 					Symbol:          symbol,
 					Line:            line,
 					Fingerprint:     fp,
 					Kind:            kind,
-					Classification:  "gateway-terminal-effect",
+					Classification:  classification,
 					Owner:           "ai-agent-runtime",
-					RemovalPhase:    "phase-6",
-					TransactionKind: "frame",
+					Reason:          reason,
+					RemovalPhase:    removalPhase,
+					TransactionKind: txKind,
 					BranchPredicate: branch,
 				}
 				inv.Entries = append(inv.Entries, e)
@@ -220,6 +222,38 @@ func walkFuncs(fset *token.FileSet, f *ast.File, rel string, emit func(symbol st
 		emit(symbol, pos.Line, fp, kind, "")
 		return true
 	})
+}
+
+// classifyEntry 按来源与符号模式给出保守分类（证据驱动，每条规则注明依据）。
+//
+// 默认 gateway-terminal-effect：交互渲染 effect，意向路径是经
+// RenderOutputGateway 提交（含 fixed_bottom_surface 的 legacy paint 直写点
+// ——它们是待退役的迁移债，分类记录的是意向路径而非当前路径）。
+//
+// 分类语义来自设计计划审计节
+// （docs/plan/aicli-chat-render-intermediate-layer-design-plan.md:3714）：
+// gateway-terminal-effect / semantic-reducer-input / command-plain /
+// command-tty / process-compat-startup。diagnostic-stderr 是补充类：
+// aicli_diag.go 注释明确将诊断日志划出迁移债清单（调试/日志路径而非交互
+// 渲染 writer），单独标记以免与交互渲染债混淆；仍登记指纹以防新增直写。
+func classifyEntry(rel, symbol, kind string) (classification, reason, removalPhase, transactionKind string) {
+	switch {
+	case strings.HasSuffix(rel, "aicli_diag.go"):
+		// 依据 aicli_diag.go 文件注释：stderr 诊断输出不进入迁移债清单。
+		return "diagnostic-stderr",
+			"stderr 诊断输出（[aicli-diag]），调试/日志路径，非交互渲染",
+			"", ""
+	case strings.HasSuffix(rel, "ui/terminal.go") && (symbol == "emitControl" || symbol == "PrintAt"):
+		// 依据设计计划 legacy terminal-control facade 行：production
+		// TerminalOutput() 只留 startup/process-compat allowlist。
+		// emitControl 是控制序列统一出口（process proxy 物理出口），
+		// PrintAt 是 legacy fallback——两者即该 allowlist 的现存成员。
+		return "process-compat-startup",
+			"process TerminalOutput() 允许列表：控制序列统一出口/legacy fallback",
+			"phase-6", "legacy_immediate"
+	default:
+		return "gateway-terminal-effect", "", "phase-6", "frame"
+	}
 }
 
 func callName(fun ast.Expr) string {

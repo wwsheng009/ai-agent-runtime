@@ -214,18 +214,26 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		// The already-mounted compatibility facade contributes geometry and
 		// semantic bottom-pane state only; TerminalSession becomes the sole
 		// physical terminal owner below.
-		if !session.Interaction.EnableUnifiedRenderer() {
-			mcpmanager.SetStatusOutput(os.Stdout)
-			if surface != nil {
-				surface.Disable()
+		//
+		// Phase 6 收口：interactive 生产默认经 render output gateway 交付
+		// （PhysicalSink→RenderOutputGateway，receipt/journal/mirror 可观测）。
+		// factory 失败时回退直写 unified renderer，保持"无 TerminalSession
+		// 不继续"不变式；回滚开关为直接调用 EnableUnifiedRenderer()。
+		if session.Interaction.EnableUnifiedRendererGateway() == nil {
+			aicliDiagln("[aicli-diag] EnableUnifiedRendererGateway: factory failed -> fallback to direct-writer unified renderer")
+			if !session.Interaction.EnableUnifiedRenderer() {
+				mcpmanager.SetStatusOutput(os.Stdout)
+				if surface != nil {
+					surface.Disable()
+				}
+				if layout != nil {
+					layout.Disable()
+				}
+				if keyHandler != nil {
+					keyHandler.Stop()
+				}
+				return nil, nil, fmt.Errorf("initialize unified terminal renderer")
 			}
-			if layout != nil {
-				layout.Disable()
-			}
-			if keyHandler != nil {
-				keyHandler.Stop()
-			}
-			return nil, nil, fmt.Errorf("initialize unified terminal renderer")
 		}
 		// MCP bootstrap/status output is semantic transcript input in the unified
 		// session. Do not leave the old system writer pointed at a physically
