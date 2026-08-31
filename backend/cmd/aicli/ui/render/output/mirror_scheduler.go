@@ -29,6 +29,9 @@ type mirrorEntry struct {
 	sinkInvoked  bool
 	// timedOutByWatchdog 标记 entry 已被看门狗按时限封存（callback 仍在跑）。
 	timedOutByWatchdog bool
+	// invocationID 是该 entry 唯一的 mirror invocation identity（6.5 第 7
+	// 条）；enqueue 时分配，callback 尚未 dispatch 或从未调度时为零。
+	invocationID uint64
 	// abandonedByRetire 标记 slot 在 callback 返回前被 lifecycle finalizer
 	// 接管；该 callback 的稍后返回只能作为 late diagnostic。
 	abandonedByRetire bool
@@ -210,6 +213,9 @@ func (ms *mirrorSlot) enqueue(batch RenderBatch, primary TargetReceipt, ad Mirro
 		primary:   primary,
 		admission: ad,
 		wdDone:    make(chan struct{}),
+		// 6.5 第 7 条：outer InvocationID 在 callback dispatch 前固定，timeout
+		// synthetic 终态与 callback return 共用同一 invocation identity。
+		invocationID: randomInvocation(),
 	}
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -429,7 +435,8 @@ func (ms *mirrorSlot) applyMirrorOutcomeLocked(entry *mirrorEntry, res MirrorSin
 			SinkID:             ms.desc.SinkID,
 			TargetClass:        ms.desc.Class,
 			ProjectionTargetID: ms.desc.ProjectionTargetID,
-			InvocationID:       0,
+			// 6.5 第 7 条：nested target 与 outer 共用同一 invocation identity。
+			InvocationID: entry.invocationID,
 			SinkDeliveryResult: SinkDeliveryResult{
 				Status:         status,
 				Certainty:      certainty,
@@ -482,12 +489,46 @@ func (ms *mirrorSlot) sealEntryLocked(entry *mirrorEntry, reason string) {
 	if reason == "timeout" {
 		ms.timedOut++
 	}
+	// 6.5 第 7 条：timeout 是 synthetic 终态（gateway 在真实 callback 返回前
+	// 固定），必须 Synthetic=true；callback 已 dispatch 时保留非零 outer
+	// InvocationID 并合成 UnknownPartial nested target receipt（nested
+	// InvocationID 与 outer 相等），使 timeout 后 target outcome 不可变。
+	synthetic := entry.sealReason == "timeout" && !entry.callbackDone
+	if synthetic && entry.sinkInvoked && entry.target == nil {
+		now := ms.g.clock.Now()
+		entry.target = &TargetReceipt{
+			SessionID:          entry.envelope.SessionID,
+			Sequence:           entry.envelope.Sequence,
+			BatchID:            entry.envelope.BatchID,
+			RouteEpoch:         entry.envelope.RouteEpoch,
+			BindingGeneration:  entry.envelope.BindingGeneration,
+			SinkID:             ms.desc.SinkID,
+			TargetClass:        ms.desc.Class,
+			ProjectionTargetID: ms.desc.ProjectionTargetID,
+			InvocationID:       entry.invocationID,
+			Synthetic:          true,
+			SinkDeliveryResult: SinkDeliveryResult{
+				Status:                  DeliveryUnknownPartial,
+				Certainty:               WriteCertaintyUnknown,
+				ErrorClass:              DeliveryErrorTimeout,
+				AttemptedBytes:          len(entry.envelope.Bytes),
+				AcceptedBytes:           0,
+				MayHavePartiallyWritten: true,
+				Err:                     NewClassifiedError(DeliveryErrorTimeout, "mirror callback exceeded timeout"),
+			},
+			CallbackReturned: false,
+			StartedAt:        entry.sealedAt,
+			OutcomeFixedAt:   now,
+		}
+	}
 	mr := MirrorReceipt{
 		EntryID:                 entry.envelope.EntryID,
 		MirrorIndex:             entry.envelope.MirrorIndex,
 		SinkID:                  entry.envelope.SinkID,
 		TargetClass:             entry.envelope.TargetClass,
 		ProjectionTargetID:      entry.envelope.MirrorEntryRef.ProjectionTargetID,
+		InvocationID:            entry.invocationID,
+		Synthetic:               synthetic,
 		ObservedPrimaryTargetID: entry.primary.ProjectionTargetID,
 		Policy:                  entry.admission.Policy,
 		RequestedApplyMode:      entry.admission.RequestedApplyMode,

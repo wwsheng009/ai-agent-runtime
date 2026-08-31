@@ -536,6 +536,21 @@ func (g *RenderOutputGateway) publish(ev OutputEvent) EventPublishResult {
 	return g.hub.submit(ev)
 }
 
+// publishStateTransition 发布 gateway 生命周期状态转换事件
+// （10.2 EventGatewayStateChanged；Open/Reconfiguring/Closing/Closed/
+// Abandoned 每次转换发布一次）。调用者必须不持 g.mu（publish 自锁）。
+func (g *RenderOutputGateway) publishStateTransition(previous, next GatewayLifecycleState, safeMsg string) {
+	g.publish(OutputEvent{
+		SchemaVersion:        SchemaVersion,
+		Kind:                 EventGatewayStateChanged,
+		At:                   g.clock.Now(),
+		SessionID:            g.sessID,
+		GatewayState:         next,
+		PreviousGatewayState: previous,
+		SafeMessage:          safeMsg,
+	})
+}
+
 // ============================================================================
 // Submit：pre-admission -> stamp -> primary dispatch -> mirror admission
 // ============================================================================
@@ -1369,9 +1384,17 @@ func (g *RenderOutputGateway) takeReadyRecordLocked(sequence uint64, slot *deliv
 }
 
 func mirrorReceiptFromAdmission(ad MirrorAdmissionReceipt) MirrorReceipt {
+	// 6.5：终态分两类——
+	//  - policy skip（ErrorClass=None）：MirrorSkipped + SkipReason 非空；
+	//  - scheduler drop（queue-full/closing，ErrorClass 非 None）：Scheduled=false
+	//    但必须终态为 MirrorFailed（drop 不是"接受后跳过"，是未调度失败）。
 	status := MirrorSkipped
 	reason := ad.SkipReason
-	if ad.Scheduled {
+	if ad.ErrorClass != DeliveryErrorNone {
+		status = MirrorFailed
+		reason = ""
+	} else if ad.Scheduled {
+		// 罕见：Scheduled=true 但 admission 层直接终态（防御）。
 		status = MirrorFailed
 		reason = MirrorSkipMetadataOnly
 	}
@@ -1385,7 +1408,7 @@ func mirrorReceiptFromAdmission(ad MirrorAdmissionReceipt) MirrorReceipt {
 		RequestedApplyMode: ad.RequestedApplyMode,
 		EffectiveApplyMode: ad.EffectiveApplyMode,
 		NonAuthoritative:   ad.NonAuthoritative,
-		Scheduled:          false,
+		Scheduled:          ad.Scheduled,
 		SinkInvoked:        false,
 		TargetInvoked:      false,
 		CallbackReturned:   false,
@@ -1429,6 +1452,18 @@ func (g *RenderOutputGateway) appendDeliveryRecord(record DeliveryRecord) {
 	markContiguous(record.Batch.Sequence, &g.recordDoneThrough, g.recordDonePending)
 	g.recordsMu.Unlock()
 	g.signalProgress()
+	// 10.2：每笔 delivery record 封存时发布 EventBatchCompleted（唯一发布
+	// 点；entry_sealed 事件先于 record 封存，次序由 seal 链保证）。
+	g.publish(OutputEvent{
+		SchemaVersion: SchemaVersion,
+		Kind:          EventBatchCompleted,
+		At:            g.clock.Now(),
+		SessionID:     record.Batch.SessionID,
+		Sequence:      record.Batch.Sequence,
+		BatchID:       record.Batch.BatchID,
+		RecordID:      record.RecordID,
+		RouteEpoch:    record.Batch.RouteEpoch,
+	})
 }
 
 // sealRecord 把 sanitized DeliveryRecord 追加到有界 journal。幂等由调用点保证
@@ -1775,6 +1810,8 @@ func (g *RenderOutputGateway) Close(ctx context.Context) error {
 		if reconfigureCancel != nil {
 			reconfigureCancel()
 		}
+		// 10.2：Open -> Closing 转换事件。publish 自锁，不持 g.mu。
+		g.publishStateTransition(GatewayOpen, GatewayClosing, "gateway close")
 		// The shared close operation owns its own deadline. A caller context
 		// only controls that caller's wait below.
 		go g.finishClose(cutoff, pendingRoute)
@@ -1888,6 +1925,8 @@ func (g *RenderOutputGateway) finishClose(cutoff uint64, pendingRoute RenderRout
 		SessionID:     g.sessID,
 		GatewayState:  finalState,
 	})
+	// 10.2：Closing -> Closed/Abandoned 转换事件。
+	g.publishStateTransition(GatewayClosing, finalState, "gateway close finalization complete")
 	g.hub.shutdown()
 	g.mu.Lock()
 	g.state = finalState
@@ -1980,6 +2019,8 @@ func (g *RenderOutputGateway) BeginReconfigure(ctx context.Context, newRoute Ren
 	}
 	g.reconfigureTimedOut = false
 	g.mu.Unlock()
+	// 10.2：Open -> Reconfiguring 转换事件。publish 自锁，不持 g.mu。
+	g.publishStateTransition(GatewayOpen, GatewayReconfiguring, "reconfigure begin")
 	go g.watchReconfigure(plan.Token, opCtx, opCancel, opTimer)
 	return plan, nil
 }
@@ -2245,6 +2286,8 @@ func (g *RenderOutputGateway) abandonReconfigure(
 		SessionID:     g.sessID,
 		GatewayState:  GatewayAbandoned,
 	})
+	// 10.2：Reconfiguring -> Abandoned 转换事件（fail-closed）。
+	g.publishStateTransition(GatewayReconfiguring, GatewayAbandoned, "reconfigure abandoned after deadline")
 	g.hub.shutdown()
 
 	g.mu.Lock()
@@ -2310,6 +2353,8 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 		g.state = GatewayOpen
 		g.clearReconfigureLocked()
 		g.mu.Unlock()
+		// 10.2：Reconfiguring -> Open（rollback-old 收口）。
+		g.publishStateTransition(GatewayReconfiguring, GatewayOpen, "reconfigure commit (rollback old)")
 		return
 	}
 
@@ -2342,12 +2387,27 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 		return
 	}
 	running := g.running
+	oldEpoch := g.routeEpoch
+	oldTargetID := g.targetDesc.ProjectionTargetID
 	g.primary = newRoute.Primary
 	g.targetDesc = newDesc
 	g.route = newRoute
 	g.mirrors = newMirrors
 	g.routeEpoch = newEpoch
 	g.mu.Unlock()
+
+	// 10.2：EventRouteChanged 在 route 安装后发布（old/new target 与 epoch
+	// 可见；不持锁）。
+	g.publish(OutputEvent{
+		SchemaVersion:              SchemaVersion,
+		Kind:                       EventRouteChanged,
+		At:                         g.clock.Now(),
+		SessionID:                  g.sessID,
+		RouteEpoch:                 newEpoch,
+		PreviousRouteEpoch:         oldEpoch,
+		ProjectionTargetID:         newDesc.ProjectionTargetID,
+		PreviousProjectionTargetID: oldTargetID,
+	})
 
 	if running {
 		for _, ms := range newMirrors {
@@ -2369,6 +2429,8 @@ func (g *RenderOutputGateway) finishReconfigure(token string) {
 	g.state = GatewayOpen
 	g.clearReconfigureLocked()
 	g.mu.Unlock()
+	// 10.2：Reconfiguring -> Open（install-new 收口）。
+	g.publishStateTransition(GatewayReconfiguring, GatewayOpen, "reconfigure commit (install new)")
 }
 
 // AbortReconfigure 只把 disposition 固定为 rollback-old；不开放 admission、
