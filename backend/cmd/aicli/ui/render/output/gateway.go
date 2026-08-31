@@ -557,14 +557,28 @@ func (g *RenderOutputGateway) unregisterPrimaryAttempt(sequence uint64, attempt 
 }
 
 func (g *RenderOutputGateway) primaryAttemptsThrough(cutoff uint64) []*primaryAttempt {
+	type sequencedAttempt struct {
+		sequence uint64
+		attempt  *primaryAttempt
+	}
 	g.attemptsMu.Lock()
-	out := make([]*primaryAttempt, 0, len(g.primaryAttempts))
+	sequenced := make([]sequencedAttempt, 0, len(g.primaryAttempts))
 	for sequence, attempt := range g.primaryAttempts {
 		if sequence <= cutoff {
-			out = append(out, attempt)
+			sequenced = append(sequenced, sequencedAttempt{
+				sequence: sequence,
+				attempt:  attempt,
+			})
 		}
 	}
 	g.attemptsMu.Unlock()
+	sort.Slice(sequenced, func(i, j int) bool {
+		return sequenced[i].sequence < sequenced[j].sequence
+	})
+	out := make([]*primaryAttempt, 0, len(sequenced))
+	for _, item := range sequenced {
+		out = append(out, item.attempt)
+	}
 	return out
 }
 

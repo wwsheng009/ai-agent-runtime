@@ -1925,6 +1925,76 @@ func TestReconfigureDeadlineStartsAtBeginAndAbandonsUnclaimedPlan(t *testing.T) 
 	}
 }
 
+func TestCloseCancelsUnfinalizedReconfigureWatchdog(t *testing.T) {
+	clock := NewFakeClock(time.Date(2026, 8, 30, 7, 0, 0, 0, time.UTC))
+	oldPrimary := NewMemorySink(TargetDescriptor{
+		SinkID:             "close-race-old-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-close-race-old",
+	})
+	opts := gatewayOptions()
+	opts.Clock = clock
+	opts.ReconfigureTimeout = 2 * time.Second
+	gw, err := NewRenderOutputGateway(
+		"reconfigure-close-race-"+randomID("s"),
+		opts,
+		RenderRouteConfig{
+			Primary:            oldPrimary,
+			PrimaryOwnership:   SinkOwned,
+			ProjectionTargetID: oldPrimary.Descriptor().ProjectionTargetID,
+		},
+	)
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	gw.Run()
+
+	candidate := NewMemorySink(TargetDescriptor{
+		SinkID:             "close-race-candidate-primary",
+		Class:              TargetClassCapture,
+		ProjectionTargetID: "pt-close-race-candidate",
+	})
+	plan, err := gw.BeginReconfigure(context.Background(), RenderRouteConfig{
+		Primary:            candidate,
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: candidate.Descriptor().ProjectionTargetID,
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- gw.Close(context.Background())
+	}()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("close did not take over unfinalized reconfigure")
+	}
+	if state := gw.stateOf(); state != GatewayClosed {
+		t.Fatalf("close/reconfigure race ended in %s", state)
+	}
+	if oldPrimary.Snapshot().State != SinkLifecycleClosed ||
+		candidate.Snapshot().State != SinkLifecycleClosed {
+		t.Fatalf("close did not release both owned routes: old=%s candidate=%s",
+			oldPrimary.Snapshot().State, candidate.Snapshot().State)
+	}
+
+	// A canceled Begin timer must not publish a second terminal outcome later.
+	clock.Advance(opts.ReconfigureTimeout)
+	time.Sleep(time.Millisecond)
+	if state := gw.stateOf(); state != GatewayClosed {
+		t.Fatalf("late reconfigure watchdog rewrote closed state to %s", state)
+	}
+	if err := gw.CommitReconfigure(context.Background(), plan.Token); ClassOf(err) != DeliveryErrorClosed {
+		t.Fatalf("invalidated token did not retain memoized closed result: %v", err)
+	}
+}
+
 // TestReconfigureCutoffNoBatchSmuggling：切换在 quiescent boundary 完成，
 // cutoff 内的 accepted batch 全部按旧 route 登记执行，新 route 安装前
 // 不接受任何新 batch（不偷渡旧 batch、不建立隐式 pending queue）。
@@ -1946,7 +2016,7 @@ func TestReconfigureCutoffNoBatchSmuggling(t *testing.T) {
 	if plan.ReconfigureCutoffSequence != r.Sequence {
 		t.Fatalf("cutoff=%d want %d", plan.ReconfigureCutoffSequence, r.Sequence)
 	}
-	// Reconfiguring 期间 Submit 全部被拒（不隐式排队）。
+	// Reconfiguring 期间 Submit 全部 deferred（不隐式排队）。
 	for i := 0; i < 3; i++ {
 		rej := gw.Submit(context.Background(), RenderIntent{
 			IntentID: "smuggle",
@@ -1984,7 +2054,7 @@ func TestReconfigureCutoffNoBatchSmuggling(t *testing.T) {
 }
 
 // TestReconfigureAbortKeepsAdmissionBarrierUntilFinalize：abort 后、commit
-// finalize 前 Submit 持续被拒；finalize 后才恢复。
+// finalize 前 Submit 持续 deferred；finalize 后才恢复。
 func TestReconfigureAbortKeepsAdmissionBarrierUntilFinalize(t *testing.T) {
 	gw := mustGateway(t, memoryPrimary(t))
 	ctx := context.Background()
