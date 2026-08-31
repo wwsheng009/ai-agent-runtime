@@ -217,23 +217,23 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		//
 		// Phase 6 收口：interactive 生产默认经 render output gateway 交付
 		// （PhysicalSink→RenderOutputGateway，receipt/journal/mirror 可观测）。
-		// factory 失败时回退直写 unified renderer，保持"无 TerminalSession
-		// 不继续"不变式；回滚开关为直接调用 EnableUnifiedRenderer()。
+		// factory 失败时 fail-closed 终止会话——不再回退直写 unified renderer
+		// （回退路径会让全部 terminal effects 绕过 gateway，违反
+		// "所有 interactive effects 经 session-scoped gateway" 收敛目标）。
+		// 回滚开关：恢复对 EnableUnifiedRenderer() 的回退调用。
 		if session.Interaction.EnableUnifiedRendererGateway() == nil {
-			aicliDiagln("[aicli-diag] EnableUnifiedRendererGateway: factory failed -> fallback to direct-writer unified renderer")
-			if !session.Interaction.EnableUnifiedRenderer() {
-				mcpmanager.SetStatusOutput(os.Stdout)
-				if surface != nil {
-					surface.Disable()
-				}
-				if layout != nil {
-					layout.Disable()
-				}
-				if keyHandler != nil {
-					keyHandler.Stop()
-				}
-				return nil, nil, fmt.Errorf("initialize unified terminal renderer")
+			aicliDiagln("[aicli-diag] EnableUnifiedRendererGateway: factory failed -> fail-closed (no direct-writer fallback)")
+			mcpmanager.SetStatusOutput(os.Stdout)
+			if surface != nil {
+				surface.Disable()
 			}
+			if layout != nil {
+				layout.Disable()
+			}
+			if keyHandler != nil {
+				keyHandler.Stop()
+			}
+			return nil, nil, fmt.Errorf("initialize unified terminal renderer gateway")
 		}
 		// MCP bootstrap/status output is semantic transcript input in the unified
 		// session. Do not leave the old system writer pointed at a physically

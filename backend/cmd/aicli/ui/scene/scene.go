@@ -108,6 +108,11 @@ const (
 type TranscriptPresentation struct {
 	Kind     PresentationKind
 	Document render.Document
+	// DiffLabel 是布局层投影 raw unified diff（PresentationDiffSupplement）
+	// 时必须使用的头部动词（"Edited"/"Diff"）。带 "• Edited "/"• Diff "
+	// 前缀的 supplement 文本自带标签，此字段为空；缺失时只读 git diff
+	// 查看输出会退化为 diff 渲染器默认的 "Edited" 头部。
+	DiffLabel string
 }
 
 func (p TranscriptPresentation) Clone() TranscriptPresentation {

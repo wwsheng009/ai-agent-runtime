@@ -1668,17 +1668,30 @@ func TestProviderWrapper_CodexCall_RetriesSSEErrorBeforeOutput(t *testing.T) {
 	assert.Equal(t, 2, requests)
 }
 
-func TestProviderWrapper_CodexCall_DoesNotRetrySSEErrorAfterText(t *testing.T) {
+// Partial-output replay policy: transient SSE errors keep retrying even after
+// user-visible text was emitted; duplicated partial output is accepted.
+func TestProviderWrapper_CodexCall_RetriesTransientSSEErrorAfterText(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, strings.Join([]string{
+				"event: response.output_text.delta",
+				`data: {"type":"response.output_text.delta","delta":"partial"}`,
+				"",
+				"event: error",
+				`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
+				"",
+			}, "\n"))
+			return
+		}
 		fmt.Fprint(w, strings.Join([]string{
 			"event: response.output_text.delta",
-			`data: {"type":"response.output_text.delta","delta":"partial"}`,
+			`data: {"type":"response.output_text.delta","delta":"recovered"}`,
 			"",
-			"event: error",
-			`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"output":[{"content":[{"type":"output_text","text":"recovered"}]}]}}`,
 			"",
 		}, "\n"))
 	}))
@@ -1692,14 +1705,15 @@ func TestProviderWrapper_CodexCall_DoesNotRetrySSEErrorAfterText(t *testing.T) {
 			deltas = append(deltas, chunk.Content)
 		}
 	})
-	_, err = provider.Call(ctx, &LLMRequest{
+	resp, err := provider.Call(ctx, &LLMRequest{
 		Model: "gpt-5.4", Stream: true,
 		Messages: []types.Message{{Role: "user", Content: "continue"}},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "upstream_error")
-	assert.Equal(t, 1, requests)
-	assert.Equal(t, []string{"partial"}, deltas)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, []string{"partial", "recovered"}, deltas)
 }
 
 func TestProviderWrapper_Call_RetryRuleOverridesMaxRetriesForHTTP503(t *testing.T) {
@@ -1859,12 +1873,20 @@ func TestProviderWrapper_CallWithStream_RetriesIncompleteStreamBeforeFirstDelta(
 	assert.Equal(t, []string{"hello"}, deltas)
 }
 
-func TestProviderWrapper_CallWithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
+// Partial-output replay policy: transient stream interruption (missing DONE)
+// keeps retrying even after user-visible text was emitted; duplicated partial
+// output is accepted and the final reply comes from the successful attempt.
+func TestProviderWrapper_CallWithStream_RetriesTransientFailureAfterTextDelta(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+		if requests == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
 
@@ -1882,7 +1904,7 @@ func TestProviderWrapper_CallWithStream_DoesNotRetryAfterTextDelta(t *testing.T)
 		}
 	})
 
-	_, err = provider.Call(ctx, &LLMRequest{
+	resp, err := provider.Call(ctx, &LLMRequest{
 		Model: "gpt-4o-mini",
 		Messages: []types.Message{{
 			Role:    "user",
@@ -1890,25 +1912,33 @@ func TestProviderWrapper_CallWithStream_DoesNotRetryAfterTextDelta(t *testing.T)
 		}},
 		Stream: true,
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to handle stream response")
-	assert.Contains(t, err.Error(), "stream disconnected before completion")
-	assert.Equal(t, 1, requests)
-	assert.Equal(t, []string{"hello"}, deltas)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, []string{"hello", "recovered"}, deltas)
 }
 
-func TestProviderWrapper_CallWithStream_PropagatesSSEErrorAfterTextDelta(t *testing.T) {
+// Partial-output replay policy: transient in-stream SSE errors keep retrying
+// even after user-visible text was emitted; duplicated partial output is
+// accepted and the final reply comes from the successful attempt.
+func TestProviderWrapper_CallWithStream_RetriesSSEErrorAfterTextDelta(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, strings.Join([]string{
-			`data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
-			"",
-			"event: error",
-			`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
-			"",
-		}, "\n"))
+		if requests == 1 {
+			fmt.Fprint(w, strings.Join([]string{
+				`data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+				"",
+				"event: error",
+				`data: {"error":{"message":"Upstream request failed","type":"upstream_error"}}`,
+				"",
+			}, "\n"))
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
 
@@ -1926,7 +1956,7 @@ func TestProviderWrapper_CallWithStream_PropagatesSSEErrorAfterTextDelta(t *test
 		}
 	})
 
-	_, err = provider.Call(ctx, &LLMRequest{
+	resp, err := provider.Call(ctx, &LLMRequest{
 		Model: "grok-4.5",
 		Messages: []types.Message{{
 			Role:    "user",
@@ -1934,12 +1964,11 @@ func TestProviderWrapper_CallWithStream_PropagatesSSEErrorAfterTextDelta(t *test
 		}},
 		Stream: true,
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to handle stream response")
-	assert.Contains(t, err.Error(), "upstream_error")
-	assert.Contains(t, err.Error(), "Upstream request failed")
-	assert.Equal(t, 1, requests)
-	assert.Equal(t, []string{"partial"}, deltas)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, []string{"partial", "recovered"}, deltas)
 }
 
 func TestProviderWrapper_CallWithStream_RetriesSSEErrorBeforeOutput(t *testing.T) {

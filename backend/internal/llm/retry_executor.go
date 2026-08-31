@@ -10,6 +10,9 @@ type retryExecutionMeta struct {
 	Provider string
 	Protocol string
 	Model    string
+	// PartialOutput flags retries issued after a prior streaming attempt
+	// already emitted user-visible content (partial-output replay).
+	PartialOutput bool
 }
 
 type retryExecutionResult struct {
@@ -60,16 +63,17 @@ func prepareRetry(ctx context.Context, policy retryPolicy, startedAt time.Time, 
 		RetryDelayMS: result.Delay.Milliseconds(),
 	})
 	retryEvent := RetryEvent{
-		Source:       meta.Source,
-		Provider:     meta.Provider,
-		Protocol:     meta.Protocol,
-		Model:        meta.Model,
-		Attempt:      attempt,
-		MaxAttempts:  result.MaxAttempts,
-		Error:        err.Error(),
-		RetryReason:  result.Decision.Reason,
-		ErrorCode:    classifyLLMFailureCode(err, result.Decision),
-		RetryDelayMS: result.Delay.Milliseconds(),
+		Source:        meta.Source,
+		Provider:      meta.Provider,
+		Protocol:      meta.Protocol,
+		Model:         meta.Model,
+		Attempt:       attempt,
+		MaxAttempts:   result.MaxAttempts,
+		Error:         err.Error(),
+		RetryReason:   result.Decision.Reason,
+		ErrorCode:     classifyLLMFailureCode(err, result.Decision),
+		RetryDelayMS:  result.Delay.Milliseconds(),
+		PartialOutput: meta.PartialOutput,
 	}
 	if state, ok := retryAttemptStateFromContext(ctx); ok {
 		retryEvent.LogicalTurnID = state.LogicalTurnID

@@ -67,6 +67,90 @@ func TestLocalSubagentBatchLifecycleProjectorPersistsAndDeduplicates(t *testing.
 	require.Equal(t, supervision.ResolutionUnresolved, notifications[0].ResolutionState)
 }
 
+func TestLocalSubagentBatchRecoveryLifecycleProjectorDefersWakeDelivery(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.BaseSession = &ChatSession{}
+	ctx := context.Background()
+	deliveries := 0
+	host.supervisionWake = &supervision.WakeConsumer{
+		Wakes: host.Supervision.Wakes,
+		Runnable: func(context.Context, string, string, string) bool {
+			return true
+		},
+		Deliver: func(context.Context, string, *supervision.Digest, []string) error {
+			deliveries++
+			return nil
+		},
+	}
+
+	projector := localSubagentBatchRecoveryLifecycleProjector(host)
+	require.NoError(t, projector(ctx, agent.BatchTerminalLifecycle{
+		BatchID:         "batch-recovery-failed",
+		RootScopeID:     "parent-session",
+		ParentSessionID: "parent-session",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchFailed,
+		EventType:       "subagent.batch.failed",
+		SubjectVersion:  1,
+		TaskCount:       1,
+		FailedCount:     1,
+		Error:           "provider unavailable",
+	}))
+	require.Zero(t, deliveries, "startup recovery must not drain the wake")
+
+	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "startup recovery must leave a durable wake")
+
+	require.NoError(t, host.wakeSupervisedParent(ctx, "parent-session", "parent-session"))
+	require.Equal(t, 1, deliveries, "a later runnable transition must deliver the wake")
+
+	pending, err = host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
+func TestLocalSubagentBatchRecoveryLifecycleProjectorKeepsHeadlessWakeDelivery(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.BaseSession = &ChatSession{NoInteractive: true}
+	deliveries := 0
+	host.supervisionWake = &supervision.WakeConsumer{
+		Wakes: host.Supervision.Wakes,
+		Runnable: func(context.Context, string, string, string) bool {
+			return true
+		},
+		Deliver: func(context.Context, string, *supervision.Digest, []string) error {
+			deliveries++
+			return nil
+		},
+	}
+
+	require.NoError(t, localSubagentBatchRecoveryLifecycleProjector(host)(
+		context.Background(),
+		agent.BatchTerminalLifecycle{
+			BatchID:         "batch-headless-recovery-failed",
+			RootScopeID:     "parent-session",
+			ParentSessionID: "parent-session",
+			ExecutionMode:   subagentbatch.ExecutionModeBackground,
+			Status:          subagentbatch.BatchFailed,
+			EventType:       "subagent.batch.failed",
+			SubjectVersion:  1,
+			TaskCount:       1,
+			FailedCount:     1,
+			Error:           "provider unavailable",
+		},
+	))
+	require.Equal(t, 1, deliveries, "headless startup recovery must keep immediate wake delivery")
+}
+
 func TestResolveLocalChatSupervisionDataDir(t *testing.T) {
 	session := &ChatSession{SessionDir: t.TempDir()}
 	require.Equal(t, filepath.Join(session.SessionDir, "runtime", "supervision"), resolveLocalChatSupervisionDataDir(session, nil))

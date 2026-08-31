@@ -2,6 +2,7 @@ package output
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -600,12 +601,14 @@ func TestP4PhysicalPartialVirtualAttempted(t *testing.T) {
 	}
 }
 
-// shortWriteWriter 声称写入少于请求字节（违反完整写契约→物理 sink 标 unknown）。
+// shortWriteWriter 声称写入少于请求字节并返回错误：err!=nil 的短写不可
+// 补全（错误表明写入被中断），物理 sink 标 unknown partial。无错误的干净
+// 短写会被 PhysicalSink 自动补全为 committed，无法构造 partial 场景。
 type shortWriteWriter struct{ n int }
 
 func (w *shortWriteWriter) Write(p []byte) (int, error) {
 	if w.n > len(p) {
 		w.n = len(p)
 	}
-	return w.n, nil
+	return w.n, errors.New("short write")
 }

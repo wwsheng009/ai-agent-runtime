@@ -719,3 +719,60 @@ func TestDelayForDecision_CapsServerHintDelay(t *testing.T) {
 	smallHint := retryDecision{Retryable: true, Delay: 2 * time.Second, Reason: "http_429"}
 	require.Equal(t, 2*time.Second, policy.delayForDecision(1, smallHint))
 }
+
+func TestMustSuppressRetryAfterEmission_ClassifiesPartialOutputReplay(t *testing.T) {
+	// 瞬态错误(SSE EOF / 连接重置 / 5xx / 空回复)在已输出部分正文后仍然重试。
+	transient := []error{
+		fmt.Errorf("failed to handle stream response: read SSE stream: unexpected EOF"),
+		fmt.Errorf("HTTP 503: temporary upstream failure"),
+		fmt.Errorf("HTTP 429: rate limit reached"),
+		fmt.Errorf("stream disconnected before completion"),
+	}
+	for _, err := range transient {
+		assert.False(t, mustSuppressRetryAfterEmission(err), "transient error must replay after partial emission: %v", err)
+	}
+
+	// 确定性错误在已输出部分正文后保持抑制,重放同一请求必然再失败。
+	deterministic := []error{
+		fmt.Errorf("HTTP 403: insufficient_user_quota"),
+		fmt.Errorf("HTTP 400: invalid_request_error: unknown parameter"),
+		fmt.Errorf("HTTP 400: content_filter: response blocked"),
+		context.Canceled,
+	}
+	for _, err := range deterministic {
+		assert.True(t, mustSuppressRetryAfterEmission(err), "deterministic error must stay suppressed after partial emission: %v", err)
+	}
+
+	assert.False(t, mustSuppressRetryAfterEmission(nil))
+}
+
+func TestPartialOutputMarker_WrapsAndDetectsOnce(t *testing.T) {
+	base := fmt.Errorf("failed to handle stream response: read SSE stream: unexpected EOF")
+
+	marked := withPartialOutputMarker(base)
+	require.True(t, errHasPartialOutput(marked))
+	assert.Equal(t, base.Error(), marked.Error(), "marker must stay transparent to error text")
+	assert.ErrorIs(t, marked, base, "marker must unwrap to the cause")
+
+	// 重复包装只保留一层标记。
+	remarked := withPartialOutputMarker(marked)
+	require.True(t, errHasPartialOutput(remarked))
+	assert.Equal(t, base.Error(), remarked.Error())
+
+	// 未标记的错误不误报。
+	assert.False(t, errHasPartialOutput(base))
+	assert.False(t, errHasPartialOutput(nil))
+	assert.Nil(t, withPartialOutputMarker(nil))
+}
+
+func TestSuppressRetryAfterEmission_PreservesPartialOutputMarker(t *testing.T) {
+	base := fmt.Errorf("failed to handle stream response: read SSE stream: unexpected EOF")
+	suppressed := suppressRetry(withPartialOutputMarker(base))
+
+	// 抑制错误依旧对分类器呈 retryable=false(终态),
+	// 同时保留 partial_output 标记供上层 UI 注记。
+	decision := classifyRetryableLLMError(suppressed)
+	assert.False(t, decision.Retryable)
+	assert.True(t, errHasPartialOutput(suppressed))
+	assert.Contains(t, suppressed.Error(), "read SSE stream: unexpected EOF")
+}

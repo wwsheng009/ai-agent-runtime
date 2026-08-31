@@ -86,3 +86,62 @@ func TestSceneEditRendersFullDiff(t *testing.T) {
 		t.Fatalf("cell.Presentation=%+v want diff supplement", cell.Presentation)
 	}
 }
+
+// TestSceneGitDiffUsesDiffLabel is the end-to-end regression test for the
+// user-observed bug: a read-only `git diff` tool output rendered as
+// "• Edited <path>" in the unified Scene renderer. The legacy path already
+// labeled it "Diff" (commands.diffSupplementLabel), but the Scene data plane
+// re-rendered the raw unified diff through ui/diff with the renderer's
+// default "Edited" header because the encoder never carried the verb. The
+// encoder now annotates Presentation.DiffLabel and the layout honors it.
+func TestSceneGitDiffUsesDiffLabel(t *testing.T) {
+	diffOutput := strings.Join([]string{
+		"diff --git a/backend/internal/llm/gateway_client.go b/backend/internal/llm/gateway_client.go",
+		"index 1111111..2222222 100644",
+		"--- a/backend/internal/llm/gateway_client.go",
+		"+++ b/backend/internal/llm/gateway_client.go",
+		"@@ -432,6 +432,13 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse,",
+		" \tcontext.Background(),",
+		"+\tvalue := render(item)",
+		"}",
+		"",
+	}, "\n")
+
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.encodeRenderModelEvent(events.Event{
+		Type:     "tool.requested",
+		ToolName: "shell",
+		Payload: map[string]interface{}{
+			"tool_call_id": "call_git_diff_1",
+			"tool_name":    "shell",
+			"arg_preview":  "command=git diff",
+		},
+	})
+	bridge.encodeRenderModelEvent(events.Event{
+		Type:     runtimechat.EventToolFinished,
+		ToolName: "shell",
+		Payload: map[string]interface{}{
+			"tool_call_id":              "call_git_diff_1",
+			"logical_tool":              "shell",
+			"duration_ms":               int64(120),
+			"render_output":             diffOutput,
+			"render_output_format":      "diff",
+			"render_output_untruncated": true,
+		},
+	})
+
+	cells := bridgeSceneCells(t, bridge)
+	if len(cells) != 1 {
+		t.Fatalf("cells=%d want 1", len(cells))
+	}
+	cell := cells[0]
+	if cell.Kind != scene.KindToolChain {
+		t.Fatalf("cell.Kind=%v want tool chain", cell.Kind)
+	}
+	if cell.Presentation.Kind != scene.PresentationDiffSupplement {
+		t.Fatalf("cell.Presentation=%+v want diff supplement", cell.Presentation)
+	}
+	if cell.Presentation.DiffLabel != "Diff" {
+		t.Fatalf("cell.Presentation.DiffLabel=%q want Diff", cell.Presentation.DiffLabel)
+	}
+}

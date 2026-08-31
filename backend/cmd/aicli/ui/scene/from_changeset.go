@@ -514,7 +514,7 @@ func (m *ChangeSetMapper) current(id CellID, pending map[CellID]pendingCell) (pe
 }
 
 func presentationFromEncoding(source encoding.Presentation) TranscriptPresentation {
-	presentation := TranscriptPresentation{Document: source.Document.Clone()}
+	presentation := TranscriptPresentation{Document: source.Document.Clone(), DiffLabel: source.DiffLabel}
 	switch source.Kind {
 	case encoding.PresentationAssistantMarkdown:
 		presentation.Kind = PresentationAssistantMarkdown

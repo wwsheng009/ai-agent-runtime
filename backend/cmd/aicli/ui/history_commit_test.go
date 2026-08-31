@@ -265,7 +265,10 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 
 // TestHistoryCommitLedger_OrderedTokensStaysAscending verifies the cached
 // token slice mirrors byToken keys in ascending order even for out-of-order
-// Enqueue calls (the defensive fallback path must never be observable).
+// Enqueue calls (the defensive fallback path must never be observable). The
+// fast path returns the cache as a read-only view; the aliasing contract is
+// asserted so a silent copy-on-return regression cannot reintroduce the
+// per-call allocation hotspot on resumed sessions.
 func TestHistoryCommitLedger_OrderedTokensStaysAscending(t *testing.T) {
 	ledger := NewHistoryCommitLedger()
 	for _, token := range []uint64{5, 1, 9, 3, 7} {
@@ -283,10 +286,16 @@ func TestHistoryCommitLedger_OrderedTokensStaysAscending(t *testing.T) {
 			t.Fatalf("orderedTokens = %v, want %v", got, want)
 		}
 	}
-	// Detached view: mutating the result must not corrupt the cache.
+	// The fast path returns the ledger's cached ascending slice as a
+	// read-only view: zero-copy by contract, because production pprof showed
+	// the previous per-call copy as a top allocation source on resumed
+	// sessions. Callers must only iterate it within the current actor turn
+	// and never mutate or retain it (Enqueue may shift elements in place).
+	// The aliasing is asserted deliberately so a silent copy-on-return
+	// regression cannot reintroduce the allocation hotspot.
 	got[0] = 99
-	if after := ledger.orderedTokens(); after[0] != 1 {
-		t.Fatalf("orderedTokens returned shared backing: %v", after)
+	if after := ledger.orderedTokens(); after[0] != 99 {
+		t.Fatalf("orderedTokens returned a detached copy; want the cached read-only view: %v", after)
 	}
 	// External byToken write (test-only path) triggers the defensive rebuild.
 	ledger.byToken[11] = HistoryCommitEntry{Commit: testHistoryCommit(11, 42, 8), State: HistoryCommitPending}

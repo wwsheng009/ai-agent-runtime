@@ -136,3 +136,60 @@ func TestEncoderEditToolCompleted_RendersFullDiff(t *testing.T) {
 		t.Fatalf("unexpected content:\n%s", got)
 	}
 }
+
+// TestEncoderDiffPresentationLabelByTool pins the read-only git diff fix:
+// the encoder must annotate raw unified diffs with the header verb the layout
+// layer should use — "Diff" for non-editing tools (shell git diff view),
+// "Edited" for editing tools — so the Scene renderer no longer shows
+// "• Edited <path>" for read-only diffs. Supplement-prefixed text keeps its
+// own embedded label and must not be annotated.
+func TestEncoderDiffPresentationLabelByTool(t *testing.T) {
+	rawDiff := strings.Join([]string{
+		"diff --git a/backend/internal/llm/gateway_client.go b/backend/internal/llm/gateway_client.go",
+		"index 1111111..2222222 100644",
+		"--- a/backend/internal/llm/gateway_client.go",
+		"+++ b/backend/internal/llm/gateway_client.go",
+		"@@ -432,6 +432,13 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse,",
+		" \tcontext.Background(),",
+		"+\tvalue := render(item)",
+		"}",
+		"",
+	}, "\n")
+
+	cases := []struct {
+		name   string
+		tool   string
+		output string
+		want   string
+	}{
+		{"shell git diff", "shell", rawDiff, "Diff"},
+		{"read-only view", "view", rawDiff, "Diff"},
+		{"edit tool", "edit", rawDiff, "Edited"},
+		{"namespaced apply_patch", "filesystem.apply_patch", rawDiff, "Edited"},
+		{"supplement keeps own label", "shell", "• Diff app.go (+1 -1)\n      1 -     old\n      1 +     new", ""},
+	}
+	for _, tc := range cases {
+		e := NewEventEncoder()
+		e.Encode(event("tool.requested", map[string]interface{}{
+			"tool_call_id": "call_1",
+			"tool_name":    tc.tool,
+		}))
+		e.Encode(event("tool.completed", map[string]interface{}{
+			"tool_call_id":              "call_1",
+			"logical_tool":              tc.tool,
+			"render_output":             tc.output,
+			"render_output_format":      "diff",
+			"render_output_untruncated": true,
+		}))
+		var got string
+		for _, item := range e.Snapshot().Items {
+			if item.Kind == KindToolOutput && item.Presentation.Kind == PresentationDiffSupplement {
+				got = item.Presentation.DiffLabel
+				break
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("case %q: DiffLabel = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

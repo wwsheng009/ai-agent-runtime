@@ -212,20 +212,15 @@ func historyCommitClaimCurrent(state UIControllerState, commit HistoryCommit) bo
 		state.LayoutGeneration != commit.LayoutGeneration {
 		return false
 	}
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Token == commit.Token {
-			return entry.State == HistoryCommitInFlight &&
-				entry.Commit.LayoutGeneration == commit.LayoutGeneration
-		}
+	entry, ok := state.HistoryEffects.Entry(commit.Token)
+	if !ok {
+		return false
 	}
-	return false
+	return entry.State == HistoryCommitInFlight &&
+		entry.Commit.LayoutGeneration == commit.LayoutGeneration
 }
 
 func historyCommitAcked(state UIControllerState, token uint64) bool {
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Token == token {
-			return entry.State == HistoryCommitAcked
-		}
-	}
-	return false
+	entry, ok := state.HistoryEffects.Entry(token)
+	return ok && entry.State == HistoryCommitAcked
 }

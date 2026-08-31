@@ -2093,3 +2093,28 @@ func TestReconfigureAbortKeepsAdmissionBarrierUntilFinalize(t *testing.T) {
 		t.Fatalf("submit after finalize must be accepted: %+v", r)
 	}
 }
+
+// mustGatewayWithOptions 用给定 options 构造 gateway（memory primary）。
+func mustGatewayWithOptions(t *testing.T, opts RenderGatewayOptions) *RenderOutputGateway {
+	t.Helper()
+	desc := TargetDescriptor{
+		SinkID:             "mem-primary",
+		Class:              TargetClassPhysical,
+		ProjectionTargetID: "pt-primary",
+	}
+	gw, err := NewRenderOutputGateway("overload-session-"+randomID("s"), opts, RenderRouteConfig{
+		Primary:            NewMemorySink(desc),
+		PrimaryOwnership:   SinkOwned,
+		ProjectionTargetID: desc.ProjectionTargetID,
+	})
+	if err != nil {
+		t.Fatalf("NewRenderOutputGateway: %v", err)
+	}
+	gw.Run()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = gw.Close(ctx)
+	})
+	return gw
+}

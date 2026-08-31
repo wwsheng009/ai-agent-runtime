@@ -151,8 +151,14 @@ return nil, markRetryExhausted(...)                   // 确定性失败 → 终
 ```
 if handleErr != nil {
     lastErr = ...
-    // 已经发出可见内容（正文/图片）→ 抑制重试，避免重复输出
-    if emissionState.emittedAnything() { return nil, suppressRetry(lastErr) }
+    // Partial-output replay（2026-08-31）：已发出可见内容（正文/图片）后,
+    // 仅确定性错误保持抑制；瞬态错误（SSE EOF/连接重置/空闲超时/5xx/429/
+    // 流中断/空回复）继续重试,重放重新生成全文,接受重复的部分输出。
+    // llm.retry 事件带 partial_output=true 标记,UI 可注记重放。
+    if emissionState.emittedAnything() {
+        lastErr = withPartialOutputMarker(lastErr)
+        if mustSuppressRetryAfterEmission(lastErr) { return nil, suppressRetry(lastErr) }
+    }
     // transport/stream 类（SSE EOF、连接重置、空闲超时）计入 transport 预算；
     // 耗尽后接力外层，而不是烧光整个业务预算
     if isTransportBudgetError(lastErr) || isRetryableTransportError(...) {
@@ -161,7 +167,7 @@ if handleErr != nil {
             return nil, markRetryExhaustedForNextLayer(...)
         }
     }
-    retryResult, retryErr := prepareRetry(...)
+    retryResult, retryErr := prepareRetry(...)  // meta.PartialOutput = errHasPartialOutput(lastErr)
     ...
 }
 ```
@@ -264,7 +270,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
   - 是 → 用底层 cause 重新分类（429 → `rate_limit`，transport → `transport`），**恢复可重试 + 服务器提示延迟**
   - 否 → 保持终态
 - 边界守卫：
-  - `retrySuppressedError`（已输出内容）→ 永不重试
+  - `retrySuppressedError`（已输出内容 + 确定性错误）→ 永不重试；已输出内容 + 瞬态错误（2026-08-31 起）→ 正常重试并带 partial_output 标记
   - **外层无限预算**（`initialMaxAttempts() <= 0`）→ 保持终态，防止无限循环放大内层快速失败
   - 最多沿 Unwrap 链追踪 16 层（防御 GatewayClient 多层包装）
 
@@ -276,7 +282,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 |---|---|---|---|
 | `markRetryExhaustedForNextLayer` | retry_policy.go:597 | 内层预算耗尽且错误可接力 | 标记 `retryAtNextLayer=true`，外层可重试 |
 | `markRetryExhausted` | retry_policy.go:579 | 内层/外层普通预算耗尽 | 终态（保留 cause 供诊断） |
-| `suppressRetry` | retry_policy.go:607 | 流式已输出可见内容后出错 | 永不重试（避免重复输出） |
+| `suppressRetry` | retry_policy.go:607 | 流式已输出可见内容后出错且错误为确定性（quota/invalid_request/content_filter/取消/预算耗尽） | 永不重试（重放必然再失败）；瞬态错误不再进入此路径 |
 | `maxConsecutiveFastFailHandoffs` | retry_policy.go:276 | 外层连续收到 3 次接力 | 外层快速失败，避免死上游耗尽整个外层预算 |
 | `trackHeaderTimeoutStreak` | retry_policy.go:710 | 连续 2 次响应头超时 | 无限预算内层快速失败并接力外层 |
 | `retryAttemptsCeiling` | retry_policy.go:269 | 正数预算 >100 | 截断为 100（对齐 codex-rs） |
@@ -337,7 +343,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 1. 内层收到 200，流读取到一半 EOF → `read SSE stream: unexpected EOF`
 2. 未输出可见内容 → 不是 `retrySuppressed`；计入 transport 预算
 3. transport 预算耗尽 → **接力外层**（全新请求值得再试）
-4. 若已输出正文 → `suppressRetry` 终态（避免重复内容）
+4. 若已输出正文且错误为确定性 → `suppressRetry` 终态；瞬态错误继续重试（partial-output replay，接受重复的部分输出，`llm.retry` 事件带 `partial_output=true`）
 
 ### 场景 D：确定性错误（配额/参数错误）
 - `quota_exhausted`、`invalid_request`、`content_filter`、`invalid_tool_arguments` 等
@@ -359,8 +365,9 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 
 ### 9.1 RetryEvent（retry_events.go）
 每次实际重试前通过 `prepareRetry` 上报，字段：
-`Source / Provider / Protocol / Model / Attempt / MaxAttempts / Error / RetryReason / ErrorCode / RetryDelayMS / LogicalTurnID / LLMRequestID / RetryAttemptID / ProviderRequestID / StreamID`
+`Source / Provider / Protocol / Model / Attempt / MaxAttempts / Error / RetryReason / ErrorCode / RetryDelayMS / LogicalTurnID / LLMRequestID / RetryAttemptID / ProviderRequestID / StreamID / PartialOutput`
 
+- `PartialOutput`（2026-08-31）：本次重试前的失败尝试已流出用户可见内容（partial-output replay）；事件 payload 落为 `partial_output=true`，aicli 渲染为 `partial_output=true` 注记
 - 注册：`WithRetryEventReporter(ctx, reporter)`（可组合多个）
 - 上下文中的尝试状态（`withHTTPDebugRetryAttempt`）自动回填 ID 字段
 
@@ -374,7 +381,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 **耗尽还原语义**：`retryExhaustedError` 包装本身表示"该层预算耗尽"，但 `DiagnoseFailure` 会解开包装、按底层 cause 还原语义：
 
 - cause 是瞬态可重试错误（5xx / transport / 流中断 / 系统资源不足 / 429）→ `Retryable: true`，NextAction 指引"bounded backoff 后换 provider/上报"，让会话层（goal 自动续跑、下轮用户输入）自动发起新尝试，而不是把预算耗尽误报为"不可重试、必须手动继续"
-- cause 是确定性错误（quota / invalid_request / content_filter / 用户取消）或 `retrySuppressedError`（已输出内容）→ `Retryable: false`，保持终态
+- cause 是确定性错误（quota / invalid_request / content_filter / 用户取消）→ `Retryable: false`，保持终态；`retrySuppressedError`（已输出内容 + 确定性错误）同样保持终态
 
 错误码映射（`classifyLLMFailureCode`）：
 
@@ -397,7 +404,8 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 
 1. **两层互相配合**：内层在 transport 小预算上快速失败（连接超时后快速断开），外层用大预算保证总重试次数；内层"快速断开 + 接力"避免把外层预算浪费在死连接上。
 2. **transport 预算绑定死连接**：请求阶段 transport 耗尽终态，防止对不可达上游反复建连。
-3. **已输出内容永不重试**：流式中途出错若已产生可见内容，`suppressRetry` 保证不重复输出。
+3. **已输出内容 + 瞬态错误 → 强制重试（partial-output replay，2026-08-31）**：流式中途出错若已产生可见内容，只有确定性错误（quota/invalid_request/content_filter/取消）保持 `suppressRetry` 终态；瞬态错误（SSE EOF/连接重置/空闲超时/5xx/429/流中断/空回复）继续走完整重试链路，重放重新生成全文并接受重复的部分输出。重放事件通过 `llm.retry` 的 `partial_output=true` 标记透传（RetryEvent.PartialOutput → loop.go/skills handler payload → aicli `chatLLMRetryParts` 渲染 `partial_output=true`）。判定入口：`mustSuppressRetryAfterEmission`（retry_policy.go，非 `classifyRetryableLLMError().Retryable` 即抑制）；标记：`withPartialOutputMarker`/`errHasPartialOutput`（`partialOutputError` 包装，对分类透明）。
+4. **已输出内容永不重复计费重试的例外已收窄**：历史行为是"已输出即永不重试"，导致 aicli 端 `read SSE stream: unexpected EOF` 在已流出部分正文后零重试直接终态（2026-08-31 修复前）；现仅确定性错误保留该语义。
 4. **无限预算防放大**：外层无限（MaxRetries=-1）时接力不会扩展循环；连续接力 3 轮封顶。
 5. **尊重服务器提示但设上限**：Retry-After 优先，但被 MaxDelay 截断，防止异常巨大的等待时间挂死请求。
 6. **确定性错误零重试**：配额、参数、内容过滤、非法工具参数等重放无法修复的错误立即终态并给出明确 NextAction。

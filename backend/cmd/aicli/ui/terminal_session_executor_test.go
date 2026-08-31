@@ -11,6 +11,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 type terminalSessionBlockingWriter struct {
@@ -615,6 +616,13 @@ func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *te
 	executor.WaitIdle()
 	controller.WaitIdle()
 
+	// The failed bootstrap flush woke the reconciliation attempt, which also
+	// failed and armed the scrollback reset backoff (settled-revision guard).
+	// The writer healing below is a physical change the reducer cannot
+	// observe, so the retry must wait out the rate-limit window — the same
+	// throttle a production transient writer failure gets when no state
+	// change intervenes.
+	time.Sleep(terminalScrollbackResetBackoff + 50*time.Millisecond)
 	writer.short = false
 	executor.Request()
 	executor.WaitIdle()
@@ -826,5 +834,70 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsRevisionBased(t *testing
 	executor.mu.Unlock()
 	if gotEpoch != 4 || gotRevision != 8 {
 		t.Fatalf("last reset bookkeeping = epoch %d revision %d, want 4 / 8", gotEpoch, gotRevision)
+	}
+}
+
+// TestTerminalSessionExecutorFailedReconciliationArmsBackoff locks in the
+// flicker-loop fix: a scrollback reconciliation that FAILS must still arm the
+// reset backoff, and the recorded revision must be the one settled AFTER the
+// executor published its own outcome posts. The executor's own
+// HistoryProjectionInvalidated/HistoryCommitFailed posts advance the actor
+// revision; a guard recorded before them can never match the next cycle's
+// read, so a persistently failing writer replayed the full history on every
+// external wake (the reported constant-replay flicker).
+func TestTerminalSessionExecutorFailedReconciliationArmsBackoff(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	controller := newHistoryExecutorController(t, func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	writer := &terminalSessionShortWriter{short: true}
+	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	postHistoryEffectFixture(t, controller, 20)
+	controller.WaitIdle()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	// First Request: the claimed history flush fails (short write). The wake
+	// from HistoryCommitFailed immediately drives the reconciliation attempt,
+	// which fails again against the same writer. Both cycles settle inside
+	// this WaitIdle.
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	state := controller.State()
+	if !state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("persistent short writer left a known projection: %#v", state.HistoryEffects)
+	}
+
+	// The next Request arrives within the backoff window and the revision has
+	// not advanced since the failed reconciliation settled: the executor must
+	// yield without touching the writer again.
+	writesBefore := writer.writes
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	if writer.writes != writesBefore {
+		t.Fatalf("backoff did not rate-limit the failed reconciliation: writes %d -> %d",
+			writesBefore, writer.writes)
+	}
+	if !controller.State().HistoryEffects.ProjectionUnknown {
+		t.Fatal("backoff cycle unexpectedly resolved the projection")
+	}
+
+	// A genuine external action (new revision) re-arms recovery immediately:
+	// the next Request retries the reconciliation even inside the window.
+	if !controller.Post(SetThemeContextAction{Theme: style.ThemeContext{SyntaxName: "test"}}) {
+		t.Fatal("post external action")
+	}
+	controller.WaitIdle()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	if writer.writes <= writesBefore {
+		t.Fatalf("new-revision recovery did not retry the reconciliation: writes=%d", writer.writes)
 	}
 }

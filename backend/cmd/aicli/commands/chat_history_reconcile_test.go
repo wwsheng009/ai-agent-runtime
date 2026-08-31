@@ -535,6 +535,29 @@ func TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsi
 	screen.feed(terminal.String())
 	dump := screen.dump()
 	layout := ui.LayoutAppScreen(state)
+	t.Logf("DEBUG OutputBottomRow=%d height=%d primary=%q band=%q",
+		layout.OutputBottomRow, height,
+		strings.Join(screen.Lines(1, layout.OutputBottomRow), "|"),
+		strings.Join(screen.Lines(layout.OutputBottomRow+1, height), "|"))
+	for i := len(state.Transcript.Cells) - 5; i < len(state.Transcript.Cells); i++ {
+		if i >= 0 {
+			c := state.Transcript.Cells[i]
+			t.Logf("DEBUG cell[%d] kind=%v id=%d source=%q", i, c.Kind, c.ID, c.Source)
+		}
+	}
+	{
+		rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+		for i := 0; i < len(rows); i++ {
+			r := rows[i]
+			t.Logf("DEBUG row[%d] cell=%d gap=%v text=%q", i, uint64(r.CellID), r.Gap > 0, r.Text)
+		}
+	}
+	{
+		ls := ui.LayoutAppScreen(state)
+		for i := 0; i < len(ls.Rows); i++ {
+			t.Logf("DEBUG screenrow[%d] owner=%v cell=%d text=%q", i+1, ls.Rows[i].Owner, uint64(ls.Rows[i].CellID), ls.Rows[i].Text)
+		}
+	}
 	primary := strings.Join(screen.Lines(1, layout.OutputBottomRow), "\n")
 	for _, want := range []string{
 		"history user 6",

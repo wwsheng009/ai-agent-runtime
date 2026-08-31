@@ -213,7 +213,10 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// the current schedule wake the presenter; marking ProjectionUnknown here
 		// would create an endless recovery/reclaim loop for the same stale token.
 		if a.LayoutGeneration == state.LayoutGeneration {
-			_ = state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration)
+			if err := state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration); err != nil {
+				// A stale claim miss is intentionally ignored; see the comment
+				// above for why marking ProjectionUnknown here would loop.
+			}
 		}
 	case HistoryCommitAcknowledged:
 		if a.LayoutGeneration != state.LayoutGeneration {

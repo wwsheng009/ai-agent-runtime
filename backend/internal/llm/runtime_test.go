@@ -603,7 +603,10 @@ func TestLLMRuntime_Stream_RetriesErrorChunkBeforeText(t *testing.T) {
 	assert.Equal(t, 2, provider.calls)
 }
 
-func TestLLMRuntime_Stream_DoesNotRetryAfterText(t *testing.T) {
+// Partial-output replay policy: transient stream errors keep retrying even
+// after user-visible text was emitted; duplicated partial output is accepted
+// and the final reply comes from the successful attempt.
+func TestLLMRuntime_Stream_RetriesTransientErrorAfterText(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",
 		DefaultModel:    "gpt-5.4-mini",
@@ -620,7 +623,7 @@ func TestLLMRuntime_Stream_DoesNotRetryAfterText(t *testing.T) {
 				{Type: EventTypeError, Error: "HTTP 503: temporary upstream failure", Done: true},
 			},
 			{
-				{Type: EventTypeText, Content: "should-not-run"},
+				{Type: EventTypeText, Content: "recovered"},
 				{Type: EventTypeDone, Done: true},
 			},
 		},
@@ -637,11 +640,13 @@ func TestLLMRuntime_Stream_DoesNotRetryAfterText(t *testing.T) {
 		chunks = append(chunks, chunk)
 	}
 
-	require.Len(t, chunks, 2)
+	require.Len(t, chunks, 3)
 	assert.Equal(t, EventTypeText, chunks[0].Type)
 	assert.Equal(t, "partial", chunks[0].Content)
-	assert.Equal(t, EventTypeError, chunks[1].Type)
-	assert.Equal(t, 1, provider.calls)
+	assert.Equal(t, EventTypeText, chunks[1].Type)
+	assert.Equal(t, "recovered", chunks[1].Content)
+	assert.Equal(t, EventTypeDone, chunks[2].Type)
+	assert.Equal(t, 2, provider.calls)
 }
 
 func TestLLMRuntime_Stream_UsesConfiguredRetryRules(t *testing.T) {

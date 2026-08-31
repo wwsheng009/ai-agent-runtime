@@ -48,10 +48,15 @@ type TerminalSessionExecutor struct {
 	// writer cannot turn the executor into an unbounded reset+replay loop.
 	lastResetAt    time.Time
 	lastResetEpoch uint64
-	// lastResetRevision is the controller state revision at the time of the
-	// last scrollback reset. The backoff only engages when the state has NOT
-	// advanced since that reset (i.e., a non-progressing loop). A new action
-	// (new revision) always allows recovery.
+	// lastResetRevision is the controller state revision recorded AFTER the
+	// executor published its own transaction outcome for the last scrollback
+	// reset attempt. The backoff only engages when the state has NOT advanced
+	// since that settled revision (i.e., a non-progressing loop). Recording
+	// after the outcome posts is essential: the executor's own failure posts
+	// (HistoryProjectionInvalidated, HistoryCommitFailed) advance the actor
+	// revision, so a revision captured before them can never match the next
+	// cycle's read and the guard would never engage. A genuinely new external
+	// action (new revision) still always allows recovery.
 	lastResetRevision uint64
 }
 
@@ -61,9 +66,10 @@ func NewTerminalSessionExecutor(controller *UIController, session *TerminalSessi
 
 // scrollbackResetBackoff reports whether the executor must yield before
 // attempting another full scrollback reset. It engages only when the last
-// reset happened within the backoff window AND the controller state revision
-// has not advanced since then — the signature of a non-progressing
-// reset+replay loop. A new action (new revision) always allows recovery.
+// reset attempt happened within the backoff window AND the controller state
+// revision has not advanced since the executor settled its own outcome posts
+// — the signature of a non-progressing reset+replay loop. A new external
+// action (new revision) always allows recovery.
 func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateRevision uint64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -72,9 +78,12 @@ func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateRevision uint64) b
 		time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
 }
 
-// recordScrollbackReset persists the progress-guard state after a confirmed
-// scrollback reset so the next worker cycle can rate-limit a non-converging
+// recordScrollbackReset persists the progress-guard state after a scrollback
+// reset attempt so the next worker cycle can rate-limit a non-converging
 // recovery without blocking legitimate retries under a new revision.
+// stateRevision MUST be read after the executor has published its outcome and
+// the actor has settled (see runOne): the settled revision is what the next
+// cycle observes when no external action intervened.
 func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateRevision uint64) {
 	e.mu.Lock()
 	e.lastResetAt = time.Now()
@@ -235,14 +244,28 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		// the bottom viewport. Replace scrollback from semantic source first;
 		// zero-byte viewport failures still use the cheaper repaint-only path.
 		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
-		if snapshot.reconciliationRequired {
+		reconciliation := snapshot.reconciliationRequired
+		if reconciliation {
 			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
 		}
 		result := e.session.FlushTransaction(plan)
-		if result.ScrollbackReset {
-			e.recordScrollbackReset(result.TerminalEpoch, schedule.stateRevision)
+		continued := e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+		// Arm the guard only on a FAILED reconciliation, and record the
+		// revision settled AFTER publishResult: the executor's own outcome
+		// posts (HistoryProjectionInvalidated, HistoryCommitFailed) advance
+		// the actor revision, so a revision captured before them can never
+		// match the next cycle's read and the backoff could never engage —
+		// a persistently failing writer replayed the full history on every
+		// external wake (the reported flicker loop). A SUCCESSFUL reset must
+		// not arm the guard: the next pending generation recovery (for
+		// example a resize that raced the in-flight transaction) is genuine
+		// progress and must run immediately. A stale guard from an older
+		// failure can never block later retries because the actor revision
+		// is monotonic.
+		if reconciliation && result.Frame.Err != nil {
+			e.recordScrollbackReset(result.TerminalEpoch, e.controller.Revision())
 		}
-		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+		return continued
 	}
 	claimedToken := uint64(0)
 	if schedule.pendingToken != 0 {
@@ -258,14 +281,18 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	snapshot := e.controller.terminalSessionSnapshot(claimedToken)
 	if claimedToken == 0 && terminalSessionSnapshotRecoveryActionable(snapshot) {
 		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
-		if snapshot.reconciliationRequired {
+		reconciliation := snapshot.reconciliationRequired
+		if reconciliation {
 			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
 		}
 		result := e.session.FlushTransaction(plan)
-		if result.ScrollbackReset {
-			e.recordScrollbackReset(result.TerminalEpoch, schedule.stateRevision)
+		continued := e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+		// Same failed-reconciliation guard as the scheduled recovery branch
+		// above.
+		if reconciliation && result.Frame.Err != nil {
+			e.recordScrollbackReset(result.TerminalEpoch, e.controller.Revision())
 		}
-		return e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+		return continued
 	}
 	if claimedToken != 0 && snapshot.claimed == nil {
 		// BeginHistoryCommit is queued behind any reducer actions that raced the

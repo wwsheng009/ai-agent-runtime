@@ -221,7 +221,9 @@ func (p *PhysicalSink) recordLocked(seq uint64, res SinkDeliveryResult) {
 //   - n==0, err!=nil：FailedZeroBytes/Zero；
 //   - n==0, err==nil, len>0：FailedZeroBytes/Zero + WriterContract
 //     （转换为 io.ErrNoProgress，不循环）；
-//   - 0<n<len（无论 err）：UnknownPartial/Unknown；
+//   - 0<n<len 且 err==nil：短写自动补全剩余字节（见 doWrite），全部写完
+//     且无错误仍判 Committed/Full；补全中断按已写部分归一化；
+//   - 0<n<len 且 err!=nil：UnknownPartial/Unknown（有错误不补全）；
 //   - n==len, err!=nil：UnknownPartial/Unknown；
 //   - n<0 或 n>len：UnknownPartial/Unknown + WriterContract；
 //   - ctx 在 writer 调用前已取消：FailedZeroBytes/Zero + CanceledAfterStart
@@ -341,30 +343,115 @@ func (p *PhysicalSink) Submit(ctx context.Context, batch RenderBatch) SinkDelive
 	return res
 }
 
-// doWrite 在 gate 锁内执行一次底层 Write 并归一化、记录统计；返回结果。
-func (p *PhysicalSink) doWrite(batch RenderBatch) SinkDeliveryResult {
-	n, err, panicked := p.invokeWriter(batch.Bytes)
-	res := p.normalizeWrite(n, err, panicked, len(batch.Bytes))
-	// abort 已请求时，writer 返回的任何零写/错误都归因于 cancel
-	// （7.1：writer invocation 开始后 cancel/abort 默认 Unknown，但
-	// PhysicalSink 转发的 aborter 明确证明零写时降为 zero）。
-	p.mu.Lock()
-	aborted := p.aborted
-	p.mu.Unlock()
-	if aborted {
-		if res.Status == DeliveryFailedZeroBytes {
-			res.ErrorClass = DeliveryErrorCanceledAfterStart
-			res.Err = NewClassifiedError(DeliveryErrorCanceledAfterStart, "write aborted")
-		} else {
-			res.Status = DeliveryUnknownPartial
-			res.Certainty = WriteCertaintyUnknown
-			res.ErrorClass = DeliveryErrorCanceledAfterStart
-			res.Err = NewClassifiedError(DeliveryErrorCanceledAfterStart, "write aborted during invocation")
+// doWrite 在 gate 锁内执行底层 Write 并归一化、记录统计；返回结果。
+// 短写（0<n<len 且 err==nil）自动补全剩余字节：终端/管道等底层 writer
+// 的短写是常见可恢复情况，直接判 UnknownPartial 会把可恢复的 I/O 升级为
+// "投影未知"，从而触发上层历史重放。只要最终全部字节被接受且无错误，
+// 仍判 Committed/Full；补全中断（错误/零进度/abort）按已写部分归一化。
+func (p *PhysicalSink) doWrite(batch RenderBatch) (res SinkDeliveryResult) {
+	defer func() {
+		// abort 已请求时，writer 返回的任何零写/错误都归因于 cancel
+		// （7.1：writer invocation 开始后 cancel/abort 默认 Unknown，但
+		// PhysicalSink 转发的 aborter 明确证明零写时降为 zero）。
+		p.mu.Lock()
+		aborted := p.aborted
+		p.mu.Unlock()
+		if aborted {
+			if res.Status == DeliveryFailedZeroBytes {
+				res.ErrorClass = DeliveryErrorCanceledAfterStart
+				res.Err = NewClassifiedError(DeliveryErrorCanceledAfterStart, "write aborted")
+			} else {
+				res.Status = DeliveryUnknownPartial
+				res.Certainty = WriteCertaintyUnknown
+				res.ErrorClass = DeliveryErrorCanceledAfterStart
+				res.Err = NewClassifiedError(DeliveryErrorCanceledAfterStart, "write aborted during invocation")
+			}
+		}
+		p.mu.Lock()
+		p.recordLocked(batch.Sequence, res)
+		p.mu.Unlock()
+	}()
+
+	payload := batch.Bytes
+	remaining := payload
+	totalAccepted := 0
+	var lastErr error
+	panicked := false
+
+	for len(remaining) > 0 {
+		n, err, pk := p.invokeWriter(remaining)
+		if pk {
+			panicked = true
+			break
+		}
+		if n < 0 || n > len(remaining) {
+			// 契约破坏：n 越界立即失败，已写部分保留 unknown。
+			res = SinkDeliveryResult{
+				Status:                  DeliveryUnknownPartial,
+				Certainty:               WriteCertaintyUnknown,
+				ErrorClass:              DeliveryErrorWriterContract,
+				AttemptedBytes:          len(payload),
+				AcceptedBytes:           totalAccepted,
+				MayHavePartiallyWritten: true,
+				Err:                     NewClassifiedError(DeliveryErrorWriterContract, "writer returned out-of-range n"),
+			}
+			return res
+		}
+		totalAccepted += n
+		if err != nil {
+			lastErr = err
+			break
+		}
+		if n == 0 {
+			// n==0,nil：零进度，转换为 io.ErrNoProgress，不循环。
+			lastErr = io.ErrNoProgress
+			break
+		}
+		if n == len(remaining) {
+			break // 全部写完
+		}
+		// 短写且无错误：补全剩余字节。补全前检查 abort，避免向已终止的
+		// writer 继续写（结果会在下方 defer 统一归因 cancel）。
+		remaining = remaining[n:]
+		p.mu.Lock()
+		aborted := p.aborted
+		p.mu.Unlock()
+		if aborted {
+			lastErr = NewClassifiedError(DeliveryErrorCanceledAfterStart, "write aborted during invocation")
+			break
 		}
 	}
-	p.mu.Lock()
-	p.recordLocked(batch.Sequence, res)
-	p.mu.Unlock()
+
+	switch {
+	case panicked:
+		res = SinkDeliveryResult{
+			Status:                  DeliveryUnknownPartial,
+			Certainty:               WriteCertaintyUnknown,
+			ErrorClass:              DeliveryErrorSink,
+			AttemptedBytes:          len(payload),
+			AcceptedBytes:           totalAccepted,
+			MayHavePartiallyWritten: true,
+			Err:                     NewClassifiedError(DeliveryErrorSink, "physical writer panicked"),
+		}
+	case errors.Is(lastErr, io.ErrNoProgress):
+		// n==0,nil 或补全中途零进度：WriterContract，不循环。
+		res = SinkDeliveryResult{
+			Status:                  DeliveryUnknownPartial,
+			Certainty:               WriteCertaintyUnknown,
+			ErrorClass:              DeliveryErrorWriterContract,
+			AttemptedBytes:          len(payload),
+			AcceptedBytes:           totalAccepted,
+			MayHavePartiallyWritten: totalAccepted > 0,
+			Err:                     io.ErrNoProgress,
+		}
+		if totalAccepted == 0 {
+			res.Status = DeliveryFailedZeroBytes
+			res.Certainty = WriteCertaintyZero
+			res.MayHavePartiallyWritten = false
+		}
+	default:
+		res = p.normalizeWrite(totalAccepted, lastErr, false, len(payload))
+	}
 	return res
 }
 func (p *PhysicalSink) invokeWriter(bytes []byte) (n int, err error, panicked bool) {

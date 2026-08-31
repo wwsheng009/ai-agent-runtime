@@ -674,14 +674,85 @@ func cellIsFinalizedForHistory(cell scene.TranscriptCell) bool {
 	}
 }
 
-// syncHistoryEffectsForTranscript is invoked only by semantic transcript
+// syncHistoryEffectsForTranscript is invoked by semantic transcript
 // transitions. Geometry changes rebase existing pending payloads separately;
 // they never mint a new token merely because the viewport resized.
+//
+// The full plan re-lays-out and re-wraps every finalized cell, so on resumed
+// sessions it costs O(entire history) even when the triggering action only
+// grew the still-mutable active cell. A fingerprint memo skips the rebuild
+// when every planEligibleHistoryCommits input is unchanged; see the
+// lastPlannedTranscript* field comment on HistoryEffectQueueState.
 func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	if state == nil {
 		return
 	}
+	if transcriptPlanMemoHit(state) {
+		// The finalized transcript prefix and every layout input it depends on
+		// are unchanged. Only the mutable active cell's handoff inputs can have
+		// moved (the executor acks advance Acked/Enqueued on every handoff), so
+		// reconcile just that O(viewport) part. Re-laying-out the entire
+		// finalized history per ack is what pinned resumed sessions at ~190%
+		// CPU: the active handoff loop paid O(entire history) per commit.
+		syncHistoryEffectsForActiveCell(state)
+		return
+	}
 	syncHistoryEffectCandidates(state, planEligibleHistoryCommits(state.AppState), 0)
+	recordTranscriptPlanMemo(state)
+}
+
+// transcriptPlanMemoHit reports whether the finalized-prefix plan inputs are
+// identical to the ones that produced the last full transcript plan. The plan
+// (planEligibleHistoryCommits) is pure over the transcript fence, geometry,
+// theme, layout generation, and the projection flag: the acked Active-origin
+// prefix it reads via activeAckedRenderedPrefixRows is frozen once a cell
+// finalizes, and the mutable cell itself is the frontier barrier — never part
+// of the finalized plan. The transcript fields reuse the exact provenance
+// fence that transcriptSnapshotAlreadyInstalled already trusts to skip a whole
+// snapshot install, so they cannot miss a semantic content change.
+func transcriptPlanMemoHit(state *UIControllerState) bool {
+	effects := &state.HistoryEffects
+	if state.Transcript.SceneID == 0 {
+		// Without scene provenance the version fields are not a fence: an
+		// unversioned snapshot can mutate cell structure (chain/boundary keys)
+		// while every counter stays put. The reducer's own
+		// transcriptSnapshotAlreadyInstalled guard refuses to trust such
+		// snapshots either, so the memo must replan instead of skipping.
+		return false
+	}
+	if !effects.lastPlannedTranscriptValid ||
+		effects.lastPlannedTranscriptSceneID != state.Transcript.SceneID ||
+		effects.lastPlannedTranscriptRevision != state.Transcript.Revision ||
+		effects.lastPlannedTranscriptContent != state.Transcript.ContentVersion ||
+		effects.lastPlannedTranscriptCells != len(state.Transcript.Cells) ||
+		effects.lastPlannedTranscriptLayoutGen != state.LayoutGeneration ||
+		effects.lastPlannedWidth != state.Geometry.Width ||
+		effects.lastPlannedHeight != state.Geometry.Height ||
+		effects.lastPlannedProjection != state.SemanticActiveCellProjection ||
+		effects.lastPlannedThemeKey != themeFingerprint(state.Theme) ||
+		effects.lastPlannedTerminalEpoch != effects.TerminalEpoch {
+		return false
+	}
+	return true
+}
+
+func recordTranscriptPlanMemo(state *UIControllerState) {
+	effects := &state.HistoryEffects
+	if state.Transcript.SceneID == 0 {
+		effects.lastPlannedTranscriptValid = false
+		return
+	}
+	effects.lastPlannedTranscriptValid = true
+	effects.lastPlannedTranscriptSceneID = state.Transcript.SceneID
+	effects.lastPlannedTranscriptRevision = state.Transcript.Revision
+	effects.lastPlannedTranscriptContent = state.Transcript.ContentVersion
+	effects.lastPlannedTranscriptCells = len(state.Transcript.Cells)
+	effects.lastPlannedTranscriptLayoutGen = state.LayoutGeneration
+	effects.lastPlannedWidth = state.Geometry.Width
+	effects.lastPlannedHeight = state.Geometry.Height
+	effects.lastPlannedProjection = state.SemanticActiveCellProjection
+	effects.lastPlannedThemeKey = themeFingerprint(state.Theme)
+	effects.lastPlannedTerminalEpoch = effects.TerminalEpoch
 }
 
 // syncHistoryEffectsForActiveCell is the hot path for append-only stream

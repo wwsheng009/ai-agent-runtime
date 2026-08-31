@@ -2765,6 +2765,11 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 		if errorCode := strings.TrimSpace(event.ErrorCode); errorCode != "" {
 			payload["error_code"] = errorCode
 		}
+		// Partial-output replay: the failed streaming attempt already emitted
+		// user-visible content; the retry regenerates the full response.
+		if event.PartialOutput {
+			payload["partial_output"] = true
+		}
 		for key, value := range map[string]string{
 			"logical_turn_id":     event.LogicalTurnID,
 			"llm_request_id":      event.LLMRequestID,

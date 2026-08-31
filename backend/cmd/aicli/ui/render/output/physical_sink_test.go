@@ -142,15 +142,18 @@ func TestPhysicalSinkNormalizeTable(t *testing.T) {
 		wantCertainty WriteCertainty
 		wantClass     DeliveryErrorClass
 		wantAccepted  int
+		wantCalls     int
 	}{
-		{"full write", len(payload), nil, DeliveryCommitted, WriteCertaintyFull, DeliveryErrorNone, len(payload)},
-		{"zero byte error", 0, errors.New("boom"), DeliveryFailedZeroBytes, WriteCertaintyZero, DeliveryErrorSink, 0},
-		{"zero nil contract break", 0, nil, DeliveryFailedZeroBytes, WriteCertaintyZero, DeliveryErrorWriterContract, 0},
-		{"short nil", len(payload) / 2, nil, DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorSink, len(payload) / 2},
-		{"short error", len(payload) / 2, errors.New("short"), DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorSink, len(payload) / 2},
-		{"full with error", len(payload), errors.New("late"), DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorSink, len(payload)},
-		{"negative n", -1, nil, DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorWriterContract, 0},
-		{"oversized n", len(payload) + 10, nil, DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorWriterContract, 0},
+		{"full write", len(payload), nil, DeliveryCommitted, WriteCertaintyFull, DeliveryErrorNone, len(payload), 1},
+		{"zero byte error", 0, errors.New("boom"), DeliveryFailedZeroBytes, WriteCertaintyZero, DeliveryErrorSink, 0, 1},
+		{"zero nil contract break", 0, nil, DeliveryFailedZeroBytes, WriteCertaintyZero, DeliveryErrorWriterContract, 0, 1},
+		// 短写（err==nil）自动补全：第一次写一半，第二次写剩余，最终 Committed。
+		{"short nil completes", len(payload) / 2, nil, DeliveryCommitted, WriteCertaintyFull, DeliveryErrorNone, len(payload), 2},
+		// 短写带错误：不补全（错误表明写入被中断），保持 UnknownPartial。
+		{"short error", len(payload) / 2, errors.New("short"), DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorSink, len(payload) / 2, 1},
+		{"full with error", len(payload), errors.New("late"), DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorSink, len(payload), 1},
+		{"negative n", -1, nil, DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorWriterContract, 0, 1},
+		{"oversized n", len(payload) + 10, nil, DeliveryUnknownPartial, WriteCertaintyUnknown, DeliveryErrorWriterContract, 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -172,8 +175,8 @@ func TestPhysicalSinkNormalizeTable(t *testing.T) {
 			if res.AttemptedBytes != len(payload) {
 				t.Fatalf("attempted: got %d want %d", res.AttemptedBytes, len(payload))
 			}
-			if writer.callsCount() != 1 {
-				t.Fatalf("writer must be called exactly once per batch, got %d", writer.callsCount())
+			if writer.callsCount() != tc.wantCalls {
+				t.Fatalf("writer calls: got %d want %d", writer.callsCount(), tc.wantCalls)
 			}
 		})
 	}
@@ -445,16 +448,156 @@ func TestPhysicalSinkSnapshotMetrics(t *testing.T) {
 	_ = sink.Submit(context.Background(), physicalBatch(2, TransactionFrame, []byte("x")))
 	_ = sink.Submit(context.Background(), physicalBatch(3, TransactionFrame, []byte("part")))
 	m := sink.Metrics()
-	if m.Committed != 1 || m.Zero != 1 || m.Partial != 1 {
+	// "part" 短写后自动补全成功，计入 Committed 而非 Partial。
+	if m.Committed != 2 || m.Zero != 1 || m.Partial != 0 {
 		t.Fatalf("metrics: committed=%d zero=%d partial=%d", m.Committed, m.Zero, m.Partial)
 	}
 	if m.LastSeq != 3 {
 		t.Fatalf("last seq: %d", m.LastSeq)
 	}
+	// "x" 批次零写失败贡献 0 accepted；"part" 补全后全部接受。
+	if m.Attempted != uint64(len("ok")+1+len("part")) || m.Accepted != uint64(len("ok")+len("part")) {
+		t.Fatalf("bytes: attempted=%d accepted=%d", m.Attempted, m.Accepted)
+	}
 	snap := sink.Snapshot()
 	if snap.State != SinkLifecycleOpen || snap.Descriptor.SinkID != "physical-test" {
 		t.Fatalf("snapshot: %+v", snap)
 	}
+}
+
+// TestPhysicalSinkShortWriteCompletion：短写（0<n<len 且 err==nil）自动补全
+// 剩余字节，全部写完判 Committed；补全中断（错误/零进度/abort）按已写部分
+// 归一化，且不无限循环。
+func TestPhysicalSinkShortWriteCompletion(t *testing.T) {
+	t.Run("multi chunk completion", func(t *testing.T) {
+		// 每次只写 1 字节，最终全部写完。
+		writer := &chunkWriter{chunk: 1}
+		sink := physicalSink(writer, PhysicalSinkOptions{})
+		payload := []byte("terminal-frame-bytes")
+		res := sink.Submit(context.Background(), physicalBatch(1, TransactionFrame, payload))
+		if res.Status != DeliveryCommitted || res.Certainty != WriteCertaintyFull {
+			t.Fatalf("multi chunk: got %s/%s", res.Status, res.Certainty)
+		}
+		if res.AcceptedBytes != len(payload) || res.AttemptedBytes != len(payload) {
+			t.Fatalf("multi chunk bytes: accepted=%d attempted=%d", res.AcceptedBytes, res.AttemptedBytes)
+		}
+		if writer.calls != len(payload) {
+			t.Fatalf("writer calls: %d want %d", writer.calls, len(payload))
+		}
+		if string(writer.written) != string(payload) {
+			t.Fatalf("bytes corrupted: %q", writer.written)
+		}
+	})
+
+	t.Run("completion interrupted by error", func(t *testing.T) {
+		// 第一次短写成功，第二次出错：不无限循环，UnknownPartial + 已写字节。
+		writer := newFakePhysicalWriter().
+			with(2, nil).
+			with(0, errors.New("pipe broken"))
+		sink := physicalSink(writer, PhysicalSinkOptions{})
+		payload := []byte("abcdef")
+		res := sink.Submit(context.Background(), physicalBatch(1, TransactionFrame, payload))
+		if res.Status != DeliveryUnknownPartial || res.Certainty != WriteCertaintyUnknown {
+			t.Fatalf("interrupted: got %s/%s", res.Status, res.Certainty)
+		}
+		if res.ErrorClass != DeliveryErrorSink {
+			t.Fatalf("interrupted class: %s", res.ErrorClass)
+		}
+		if res.AcceptedBytes != 2 || res.AttemptedBytes != len(payload) {
+			t.Fatalf("interrupted bytes: accepted=%d attempted=%d", res.AcceptedBytes, res.AttemptedBytes)
+		}
+		if writer.callsCount() != 2 {
+			t.Fatalf("writer calls: %d", writer.callsCount())
+		}
+	})
+
+	t.Run("completion zero progress stops", func(t *testing.T) {
+		// 补全中途零进度（n==0,nil）：ErrNoProgress，不无限循环。
+		writer := newFakePhysicalWriter().
+			with(3, nil).
+			with(0, nil)
+		sink := physicalSink(writer, PhysicalSinkOptions{})
+		payload := []byte("abcdef")
+		res := sink.Submit(context.Background(), physicalBatch(1, TransactionFrame, payload))
+		if res.Status != DeliveryUnknownPartial || res.ErrorClass != DeliveryErrorWriterContract {
+			t.Fatalf("zero progress: got %s/%s", res.Status, res.ErrorClass)
+		}
+		if res.AcceptedBytes != 3 {
+			t.Fatalf("zero progress accepted: %d", res.AcceptedBytes)
+		}
+		if writer.callsCount() != 2 {
+			t.Fatalf("writer calls: %d (must not loop)", writer.callsCount())
+		}
+	})
+
+	t.Run("completion abort stops", func(t *testing.T) {
+		// 第一次短写返回时触发 abort（模拟 abort 发生在 writer invocation
+		// 期间）：补全前检查到 aborted，不再向 writer 继续写。
+		aborter := &fakeAborter{}
+		w := &abortDuringWriteWriter{}
+		sink := physicalSink(w, PhysicalSinkOptions{Aborter: aborter})
+		w.sink = sink
+		payload := []byte("abcdef")
+		res := sink.Submit(context.Background(), physicalBatch(1, TransactionFrame, payload))
+		if res.Status != DeliveryUnknownPartial || res.ErrorClass != DeliveryErrorCanceledAfterStart {
+			t.Fatalf("aborted completion: got %s/%s", res.Status, res.ErrorClass)
+		}
+		if res.AcceptedBytes != 3 {
+			t.Fatalf("aborted accepted: %d", res.AcceptedBytes)
+		}
+		if w.calls != 1 {
+			t.Fatalf("writer calls: %d (must stop after abort)", w.calls)
+		}
+	})
+
+	t.Run("gate wraps whole completion", func(t *testing.T) {
+		// 补全循环在单次 gate 包裹内完成：gate.calls==1，writer 多次调用。
+		writer := &chunkWriter{chunk: 2}
+		gate := &gateRecorder{}
+		sink := physicalSink(writer, PhysicalSinkOptions{Gate: gate})
+		res := sink.Submit(context.Background(), physicalBatch(1, TransactionFrame, []byte("abcd")))
+		if res.Status != DeliveryCommitted {
+			t.Fatalf("gate completion: %s", res.Status)
+		}
+		if gate.calls != 1 {
+			t.Fatalf("gate calls: %d want 1", gate.calls)
+		}
+		if writer.calls != 2 {
+			t.Fatalf("writer calls: %d want 2", writer.calls)
+		}
+	})
+}
+
+// chunkWriter 每次最多写 chunk 字节（模拟终端/管道短写）。
+type chunkWriter struct {
+	chunk   int
+	written []byte
+	calls   int
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	w.calls++
+	n := w.chunk
+	if n > len(p) {
+		n = len(p)
+	}
+	w.written = append(w.written, p[:n]...)
+	return n, nil
+}
+
+// abortDuringWriteWriter 在第一次 Write 返回前触发 sink.Abort（模拟 abort
+// 发生在 writer invocation 期间），并始终短写一半。
+type abortDuringWriteWriter struct {
+	sink  *PhysicalSink
+	calls int
+}
+
+func (w *abortDuringWriteWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls == 1 && w.sink != nil {
+		_ = w.sink.Abort(AbortProofRequested)
+	}
+	return len(p) / 2, nil
 }
 
 // TestPhysicalSinkConcurrent：并发 Submit 串行通过 gate，无 panic、无 race。

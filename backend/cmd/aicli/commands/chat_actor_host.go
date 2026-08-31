@@ -278,12 +278,25 @@ func localSubagentBatchEmitter(host *localChatRuntimeHost) agent.BatchEmitter {
 	}
 }
 
-// localSubagentBatchLifecycleProjector is the single host bridge for both
+// localSubagentBatchLifecycleProjector is the live host bridge for both
 // synchronous and durable background spawn_subagents terminal states. The
 // agent package stays independent from supervision; this adapter turns the
 // host-neutral record into a durable lifecycle notification and then offers
 // the wake consumer a runnable transition point.
 func localSubagentBatchLifecycleProjector(host *localChatRuntimeHost) agent.BatchLifecycleProjector {
+	return localSubagentBatchLifecycleProjectorWithWakeDrain(host, true)
+}
+
+// localSubagentBatchRecoveryLifecycleProjector persists and schedules durable
+// lifecycle wakes during startup recovery. Interactive resume defers delivery
+// until the next normal parent runnable transition so startup cannot suppress
+// the first composer; headless recovery keeps its immediate-delivery behavior.
+func localSubagentBatchRecoveryLifecycleProjector(host *localChatRuntimeHost) agent.BatchLifecycleProjector {
+	drainWake := host == nil || !chatHostSessionInteractive(host.BaseSession)
+	return localSubagentBatchLifecycleProjectorWithWakeDrain(host, drainWake)
+}
+
+func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHost, drainWake bool) agent.BatchLifecycleProjector {
 	return func(ctx context.Context, terminal agent.BatchTerminalLifecycle) error {
 		if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
 			return fmt.Errorf("local supervision control plane is not configured")
@@ -345,6 +358,9 @@ func localSubagentBatchLifecycleProjector(host *localChatRuntimeHost) agent.Batc
 		})
 		if err != nil {
 			return err
+		}
+		if !drainWake {
+			return nil
 		}
 		// ProjectLifecycle schedules a wake for unresolved critical states. This
 		// call also drains any existing wake after a successful informational or
@@ -686,7 +702,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 					Store:              batchStore,
 					Emitter:            localSubagentBatchEmitter(host),
 					TerminalSink:       localSubagentBatchTerminalSink(host),
-					LifecycleProjector: localSubagentBatchLifecycleProjector(host),
+					LifecycleProjector: localSubagentBatchRecoveryLifecycleProjector(host),
 				})
 				_, _ = coordinator.RecoverStaleBatches(recoveryCtx, localSubagentBatchRestartGrace, "", 512)
 				_, _ = coordinator.ReplayTerminalDeliveries(recoveryCtx, "", 512)

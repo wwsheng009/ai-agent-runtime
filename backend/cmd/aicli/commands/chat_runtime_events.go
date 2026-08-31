@@ -6170,6 +6170,12 @@ func chatLLMRetryParts(event runtimeevents.Event) []string {
 	if source != "" {
 		parts = append(parts, "source="+source)
 	}
+	// Partial-output replay: the failed streaming attempt already emitted
+	// user-visible content; the retry regenerates the full response and the
+	// duplicated partial output is accepted by design.
+	if payloadBoolValue(payload, "partial_output") {
+		parts = append(parts, "partial_output=true")
+	}
 	if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 120); errText != "" {
 		parts = append(parts, "error="+errText)
 	}

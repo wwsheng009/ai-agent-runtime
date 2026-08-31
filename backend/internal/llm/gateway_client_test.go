@@ -1716,12 +1716,21 @@ func TestGatewayClientCall_WithStream_RetriesIncompleteStreamBeforeFirstDelta(t 
 	assert.True(t, rm.results[1].success)
 }
 
-func TestGatewayClientCall_WithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
+// Partial-output replay policy (2026-08-31): transient stream failures keep
+// retrying even after user-visible text was emitted; duplicated partial
+// output is accepted and the final reply comes from the last successful
+// attempt. Non-retryable causes still fail after a single request.
+func TestGatewayClientCall_WithStream_RetriesTransientFailureAfterTextDelta(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+		if requests == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
 
@@ -1738,7 +1747,14 @@ func TestGatewayClientCall_WithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
 	client := NewGatewayClient(rm, "gpt-5.4-mini")
 	client.SetMaxRetries(3)
 
-	_, err := client.Call(context.Background(), &LLMRequest{
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+
+	resp, err := client.Call(ctx, &LLMRequest{
 		Model: "gpt-5.4-mini",
 		Messages: []types.Message{{
 			Role:    "user",
@@ -1746,13 +1762,15 @@ func TestGatewayClientCall_WithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
 		}},
 		Stream: true,
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to handle stream response")
-	assert.Contains(t, err.Error(), "stream disconnected before completion")
-	assert.Equal(t, 1, requests)
-	assert.Equal(t, 1, rm.selectCalls)
-	require.Len(t, rm.results, 1)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, []string{"hello", "recovered"}, deltas)
+	assert.Equal(t, 2, rm.selectCalls)
+	require.Len(t, rm.results, 2)
 	assert.False(t, rm.results[0].success)
+	assert.True(t, rm.results[1].success)
 }
 
 func TestGatewayClientCall_WithStream_RetriesAfterReasoningOnlyDeltaWithoutContent(t *testing.T) {

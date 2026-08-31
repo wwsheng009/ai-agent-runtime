@@ -2,8 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -30,22 +28,15 @@ func renderChatCommandResult(session *ChatSession, result CommandResult, noInter
 		return nil
 	}
 
-	return writeChatCommandResultPlain(os.Stdout, result)
+	return writeChatCommandResultPlain(NewStdoutCommandTextWriter(CommandOutputPlain), result)
 }
 
-func writeChatCommandResultPlain(writer io.Writer, result CommandResult) error {
-	if writer == nil {
+func writeChatCommandResultPlain(textWriter *CommandTextWriter, result CommandResult) error {
+	if textWriter == nil {
 		return fmt.Errorf("structured command plain writer is nil")
 	}
 	text := ui.RenderDocumentPlain(result.Document())
-	if strings.TrimSpace(text) == "" {
-		return nil
-	}
-	if !strings.HasSuffix(text, "\n") {
-		text += "\n"
-	}
-	_, err := io.WriteString(writer, text)
-	return err
+	return textWriter.WriteText(text)
 }
 
 // writeLegacyChatDebugDisplay keeps direct handleCommand callers compatible
@@ -63,6 +54,5 @@ func writeLegacyChatDebugDisplay(session *ChatSession) error {
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
-	_, err := io.WriteString(os.Stdout, text)
-	return err
+	return NewStdoutCommandTextWriter(CommandOutputPlain).WriteText(text)
 }

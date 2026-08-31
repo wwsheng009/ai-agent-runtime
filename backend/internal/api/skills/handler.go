@@ -8447,6 +8447,9 @@ func (h *Handler) runtimeRetryEventReporter(traceID, sessionID string) llm.Retry
 		if errText := strings.TrimSpace(event.Error); errText != "" {
 			payload["error"] = errText
 		}
+		if event.PartialOutput {
+			payload["partial_output"] = true
+		}
 		if sessionID != "" {
 			h.publishSessionRuntimeEvent("llm.retry", traceID, sessionID, payload)
 			return

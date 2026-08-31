@@ -19,6 +19,10 @@ type RetryEvent struct {
 	RetryAttemptID    string `json:"retry_attempt_id,omitempty"`
 	ProviderRequestID string `json:"provider_request_id,omitempty"`
 	StreamID          string `json:"stream_id,omitempty"`
+	// PartialOutput marks a retry issued after the previous streaming attempt
+	// already emitted user-visible content. The replay regenerates the full
+	// response; consumers may use the flag to annotate or clear partial text.
+	PartialOutput bool `json:"partial_output,omitempty"`
 }
 
 // RetryEventReporter consumes structured retry events emitted by runtime LLM providers.

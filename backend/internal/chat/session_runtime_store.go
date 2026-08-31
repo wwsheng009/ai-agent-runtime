@@ -1738,7 +1738,7 @@ func (s *SQLiteRuntimeStore) AcquireLease(ctx context.Context, req LeaseRequest)
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return nil, err
 	}
 	lease, err := buildLeaseFromRequest(req)
@@ -1786,7 +1786,7 @@ func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID 
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	sessionID = NormalizeSessionID(sessionID)
@@ -1831,7 +1831,7 @@ func (s *SQLiteRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerI
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	sessionID = NormalizeSessionID(sessionID)
@@ -1850,7 +1850,7 @@ func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*S
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -2004,7 +2004,7 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	if state == nil || strings.TrimSpace(state.SessionID) == "" {
@@ -2114,7 +2114,7 @@ func (s *SQLiteRuntimeStore) DeleteState(ctx context.Context, sessionID string) 
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM session_tool_receipts WHERE session_id = ?`, sessionID); err != nil {
@@ -2132,7 +2132,7 @@ func (s *SQLiteRuntimeStore) SaveToolReceipt(ctx context.Context, receipt ToolEx
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	receipt.SessionID = strings.TrimSpace(receipt.SessionID)
@@ -2164,7 +2164,7 @@ func (s *SQLiteRuntimeStore) GetToolReceipt(ctx context.Context, sessionID, tool
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -2200,7 +2200,7 @@ func (s *SQLiteRuntimeStore) DeleteToolReceipt(ctx context.Context, sessionID, t
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -2217,7 +2217,7 @@ func (s *SQLiteRuntimeStore) ListToolReceipts(ctx context.Context, sessionID str
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -2269,7 +2269,7 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return 0, err
 	}
 	if strings.TrimSpace(event.SessionID) == "" {
@@ -2358,7 +2358,7 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 	if s == nil {
 		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return runtimeevents.Event{}, 0, err
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -2437,7 +2437,7 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	if s == nil {
 		return runtimeevents.Event{}, 0, false, nil
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return runtimeevents.Event{}, 0, false, err
 	}
 	s.mu.Lock()
@@ -2553,7 +2553,7 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 	if s == nil {
 		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return runtimeevents.Event{}, 0, err
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -2929,7 +2929,7 @@ func (s *SQLiteRuntimeStore) updateRuntimeMailboxGlobalSeq(ctx context.Context, 
 	if s == nil || controlSeq <= 0 || globalSeq <= 0 {
 		return nil
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -2956,7 +2956,7 @@ func (s *SQLiteRuntimeStore) RepairAgentControlMailboxProjection(ctx context.Con
 		// Bootstrap reconcile must not create an empty runtime store on new chats.
 		return 0, nil
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return 0, err
 	}
 	s.mu.Lock()
@@ -3086,7 +3086,7 @@ func (s *SQLiteRuntimeStore) RepairAgentControlMailboxLocalProjection(ctx contex
 		// Bootstrap reconcile must not create an empty runtime store on new chats.
 		return 0, nil
 	}
-	if err := s.ensure(); err != nil {
+	if err := s.ensureCtx(ctx); err != nil {
 		return 0, err
 	}
 	s.mu.Lock()
@@ -3343,7 +3343,7 @@ func (s *SQLiteRuntimeStore) ListMailbox(ctx context.Context, sessionID string, 
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -3419,7 +3419,7 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessio
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -3492,7 +3492,7 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailboxRecords(ctx context.Context,
 	if s == nil {
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return nil, err
 	} else if skip {
 		return nil, nil
@@ -3695,7 +3695,7 @@ func (s *SQLiteRuntimeStore) LastEventSeq(ctx context.Context, sessionID string)
 	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return 0, err
 	} else if skip {
 		return 0, nil
@@ -3717,7 +3717,7 @@ func (s *SQLiteRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID strin
 	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return 0, err
 	} else if skip {
 		return 0, nil
@@ -3739,7 +3739,7 @@ func (s *SQLiteRuntimeStore) LastAgentControlMailboxSeq(ctx context.Context, ses
 	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return 0, err
 	} else if skip {
 		return 0, nil
@@ -3762,7 +3762,7 @@ func (s *SQLiteRuntimeStore) LastAgentControlMailboxRecordSeq(ctx context.Contex
 	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
 		return 0, err
 	} else if skip {
 		return 0, nil

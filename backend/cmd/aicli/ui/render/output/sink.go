@@ -181,6 +181,7 @@ type CapturePayloadRequest struct {
 
 // CapturePayloadHandle 是 payload 访问结果。
 type CapturePayloadHandle struct {
+	HandleID    string // 显式 handle 凭证；仅经 AcquirePayload 返回，不暴露
 	EntryID     string
 	Mode        RecordedPayloadMode
 	BytesLength int

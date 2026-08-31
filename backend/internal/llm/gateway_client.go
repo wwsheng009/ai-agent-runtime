@@ -400,10 +400,11 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			}
 
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
-				Source:   "gateway_client",
-				Provider: gatewaySelectedProviderName(selected),
-				Protocol: gatewaySelectedProviderProtocol(selected),
-				Model:    resolveGatewaySelectedModel(selected, model),
+				Source:        "gateway_client",
+				Provider:      gatewaySelectedProviderName(selected),
+				Protocol:      gatewaySelectedProviderProtocol(selected),
+				Model:         resolveGatewaySelectedModel(selected, model),
+				PartialOutput: errHasPartialOutput(err),
 			})
 			if retryErr != nil {
 				return nil, retryErr
@@ -878,11 +879,18 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		// Partial-output replay policy: transient failures keep retrying even
+		// when partial text was already emitted (duplicated partial output is
+		// accepted; the llm.retry event carries the partial_output marker).
+		// Only non-retryable causes stay suppressed after emission.
 		if emissionState.emittedAnything() {
-			return nil, &gatewayProviderError{
-				message:   fmt.Sprintf("failed to handle stream response: %v", err),
-				retryable: false,
-				cause:     err,
+			err = withPartialOutputMarker(err)
+			if mustSuppressRetryAfterEmission(err) {
+				return nil, &gatewayProviderError{
+					message:   fmt.Sprintf("failed to handle stream response: %v", err),
+					retryable: false,
+					cause:     err,
+				}
 			}
 		}
 		return nil, newGatewayResponseError("failed to handle stream response", err, c.retryRules)

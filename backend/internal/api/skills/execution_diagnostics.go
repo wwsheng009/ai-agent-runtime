@@ -121,6 +121,10 @@ func (h *Handler) executionDiagnosticsSnapshot(ctx context.Context) map[string]i
 		}
 		select {
 		case <-doneCh:
+		case <-ctx.Done():
+			// 外层调用方已取消（客户端断开/请求超时）：立即返回部分结果，
+			// 不再等待剩余 source goroutine。
+			timedOut = true
 		case <-time.After(remaining):
 			timedOut = true
 		}

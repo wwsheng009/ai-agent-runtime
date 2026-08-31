@@ -30,6 +30,13 @@ const (
 type Presentation struct {
 	Kind     PresentationKind
 	Document render.Document
+	// DiffLabel is the header verb ("Edited"/"Diff") the layout layer must
+	// use when projecting a raw unified diff marked as
+	// PresentationDiffSupplement. Supplement-prefixed text ("• Edited "/"•
+	// Diff ") already carries its own label and leaves this empty; without
+	// it, raw diffs (e.g. read-only `git diff` tool output) would fall back
+	// to the diff renderer's default "Edited" header.
+	DiffLabel string
 }
 
 func (p Presentation) Clone() Presentation {

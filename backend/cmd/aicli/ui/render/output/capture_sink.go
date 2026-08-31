@@ -80,6 +80,9 @@ type CaptureOptions struct {
 	// MaxSingleBatch 是单 batch 上限（bytes）；超出走 truncation（DroppedBytes
 	// + TruncationReason），不复用 gateway primary safety limit。<=0 不限。
 	MaxSingleBatch int
+	// PayloadHandleTTL 是显式 payload handle 的默认存活时长（10.4：带
+	// purpose、大小限制和 TTL 的显式 handle）。<=0 用默认 60s。
+	PayloadHandleTTL time.Duration
 }
 
 // CaptureSink 是有界 capture sink：镜像是自己的 target，有独立 maxEntries/
@@ -87,15 +90,18 @@ type CaptureOptions struct {
 // metadata/hash 并增加 drop 计数，绝不改变 physical primary；作为 primary
 // 时使用 strict capacity（无法满足声明模式就在触达存储前 zero Rejected）。
 type CaptureSink struct {
-	desc         TargetDescriptor
-	opts         CaptureOptions
-	clock        Clock
-	mu           sync.Mutex
-	state        SinkLifecycleState
-	owner        string
-	entries      []CapturedDelivery
-	store        map[string]*capturedPayload
-	bytes        int
+	desc    TargetDescriptor
+	opts    CaptureOptions
+	clock   Clock
+	mu      sync.Mutex
+	state   SinkLifecycleState
+	owner   string
+	entries []CapturedDelivery
+	store   map[string]*capturedPayload
+	bytes   int
+	// handles 是显式 payload 读取授权（10.4）；handleID 不暴露。
+	handles      map[string]*payloadHandle
+	handleTTL    time.Duration
 	dropped      uint64 // 淘汰条目（含 ring 超限）批次计数
 	droppedBytes uint64
 	erased       uint64
@@ -107,8 +113,19 @@ type CaptureSink struct {
 }
 
 type capturedPayload struct {
-	data []byte
-	hash string
+	data             []byte
+	hash             string
+	nonAuthoritative bool // NonAuthoritative=true 的 payload 拒绝显式申请（7.2）
+}
+
+// payloadHandle 是一次显式 payload 读取的授权记录（10.4）。
+// handleID 仅通过 AcquirePayload 返回；snapshot 只暴露计数。
+type payloadHandle struct {
+	id        string
+	entryID   string
+	purpose   string
+	expiresAt time.Time
+	revoked   bool
 }
 
 // NewCaptureSink 创建 capture sink。ProjectionTargetID 与 primary 隔离，
@@ -137,7 +154,12 @@ func NewCaptureSink(projectionTargetID string, opts CaptureOptions) *CaptureSink
 		clock:      SystemClock{},
 		state:      SinkLifecycleOpen,
 		store:      make(map[string]*capturedPayload),
+		handles:    make(map[string]*payloadHandle),
+		handleTTL:  opts.PayloadHandleTTL,
 		journalCap: journalCap,
+	}
+	if c.handleTTL <= 0 {
+		c.handleTTL = 60 * time.Second
 	}
 	return c
 }
@@ -186,7 +208,7 @@ func (c *CaptureSink) CaptureSnapshot() CaptureSnapshot {
 		Deliveries:         deliveries,
 		PayloadItems:       len(c.store),
 		PayloadBytes:       uint64(c.bytes),
-		ActiveHandleCount:  0, // Phase 2 无长期 handle；见 CapturePayloadAccess
+		ActiveHandleCount:  c.activeHandleCountLocked(),
 		DroppedBatches:     c.dropped + c.journalDrop,
 		DroppedBytes:       c.droppedBytes,
 		Retained:           c.bytes,
@@ -346,11 +368,11 @@ func (c *CaptureSink) captureLocked(env MirrorEnvelope, primary bool) {
 		if keptLen <= c.opts.MaxBytes-c.bytes {
 			if truncated {
 				payload := env.Bytes[:keptLen]
-				c.store[entryID] = &capturedPayload{data: payload, hash: hashStr}
+				c.store[entryID] = &capturedPayload{data: payload, hash: hashStr, nonAuthoritative: env.NonAuthoritative}
 				c.bytes += keptLen
 				mode = RecordedTruncated
 			} else {
-				c.store[entryID] = &capturedPayload{data: env.Bytes, hash: hashStr}
+				c.store[entryID] = &capturedPayload{data: env.Bytes, hash: hashStr, nonAuthoritative: env.NonAuthoritative}
 				c.bytes += len(env.Bytes)
 				mode = RecordedFullAvailable
 			}
@@ -358,7 +380,7 @@ func (c *CaptureSink) captureLocked(env MirrorEnvelope, primary bool) {
 			// 预算不足：不保留 payload，降级为 hash-only（记录元数据 + hash，
 			// 不声明 full proof）。
 			mode = RecordedHashOnly
-			c.store[entryID] = &capturedPayload{hash: hashStr}
+			c.store[entryID] = &capturedPayload{hash: hashStr, nonAuthoritative: env.NonAuthoritative}
 		}
 	}
 	capAt := c.clock.Now()
@@ -481,4 +503,129 @@ func (c *CaptureSink) Payload(entryID string) ([]byte, CapturePayloadErrorClass)
 	out := make([]byte, len(p.data))
 	copy(out, p.data)
 	return out, CapturePayloadErrorNone
+}
+
+// AcquirePayload 按 CapturePayloadAccess 显式申请 payload 读取（10.4/7.2）：
+// 带 purpose（authorizer 校验）、LimitBytes 大小限制与 TTL 的 handle。
+// 语义：
+//   - authorizer 非 nil 时先 Authorize；拒绝返回 CapturePayloadErrorUnauthorized；
+//   - entry 不存在或 hash-only → CapturePayloadErrorNotFound；
+//   - NonAuthoritative=true 的 payload 即使完整存在也拒绝（7.2，不提供
+//     attempted bytes 的权威读取）；
+//   - LimitBytes>0 且超出时截断，Mode=RecordedTruncated；
+//   - 返回 detached handle（含 ExpiresAt）；读取经 PayloadHandle(handleID)。
+func (c *CaptureSink) AcquirePayload(ctx context.Context, request CapturePayloadRequest, authorizer CapturePayloadAuthorizer) CapturePayloadHandle {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if authorizer != nil {
+		if err := authorizer.Authorize(ctx, request); err != nil {
+			return CapturePayloadHandle{
+				EntryID:    request.CaptureEntryID,
+				ErrorClass: CapturePayloadErrorUnauthorized,
+			}
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.store[request.CaptureEntryID]
+	if !ok || p == nil || len(p.data) == 0 {
+		return CapturePayloadHandle{
+			EntryID:    request.CaptureEntryID,
+			ErrorClass: CapturePayloadErrorNotFound,
+		}
+	}
+	if p.nonAuthoritative {
+		// 7.2：NonAuthoritative 的 attempted bytes 不提供权威读取。
+		return CapturePayloadHandle{
+			EntryID:    request.CaptureEntryID,
+			ErrorClass: CapturePayloadErrorUnauthorized,
+		}
+	}
+	mode := RecordedFullAvailable
+	payload := p.data
+	if request.LimitBytes > 0 && len(payload) > request.LimitBytes {
+		payload = payload[:request.LimitBytes]
+		mode = RecordedTruncated
+	}
+	c.evictExpiredHandlesLocked()
+	handleID := randomID("ph")
+	h := &payloadHandle{
+		id:        handleID,
+		entryID:   request.CaptureEntryID,
+		purpose:   string(request.Access),
+		expiresAt: c.clock.Now().Add(c.handleTTL),
+	}
+	c.handles[handleID] = h
+	out := CapturePayloadHandle{
+		HandleID:    handleID,
+		EntryID:     request.CaptureEntryID,
+		Mode:        mode,
+		BytesLength: len(payload),
+		Hash:        p.hash,
+		Payload:     make([]byte, len(payload)),
+		ExpiresAt:   h.expiresAt,
+		ErrorClass:  CapturePayloadErrorNone,
+	}
+	copy(out.Payload, payload)
+	return out
+}
+
+// PayloadHandle 按 handleID 读取已授权 payload；handle 过期/吊销返回稳定
+// 错误（不退回 journal，10.4）。读取不延长 TTL。
+func (c *CaptureSink) PayloadHandle(handleID string) ([]byte, CapturePayloadErrorClass) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictExpiredHandlesLocked()
+	h, ok := c.handles[handleID]
+	if !ok {
+		return nil, CapturePayloadErrorNotFound
+	}
+	if h.revoked {
+		return nil, CapturePayloadErrorRevoked
+	}
+	if !h.expiresAt.After(c.clock.Now()) {
+		delete(c.handles, handleID)
+		return nil, CapturePayloadErrorNotFound
+	}
+	if c.store[h.entryID] == nil {
+		// entry 已被淘汰/蒸发：handle 失效，不退回 journal。
+		delete(c.handles, handleID)
+		return nil, CapturePayloadErrorNotFound
+	}
+	out := make([]byte, len(c.store[h.entryID].data))
+	copy(out, c.store[h.entryID].data)
+	return out, CapturePayloadErrorNone
+}
+
+// RevokePayload 吊销 handle；此后 PayloadHandle 返回 Revoked（10.4）。
+func (c *CaptureSink) RevokePayload(handleID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if h, ok := c.handles[handleID]; ok {
+		h.revoked = true
+	}
+}
+
+// evictExpiredHandlesLocked 清理过期 handle；计数随 ActiveHandleCount
+// （snapshot）线性缩减。调用者必须已持 c.mu。
+func (c *CaptureSink) evictExpiredHandlesLocked() {
+	now := c.clock.Now()
+	for id, h := range c.handles {
+		if !h.expiresAt.After(now) {
+			delete(c.handles, id)
+		}
+	}
+}
+
+// activeHandleCount 当前未过期、未吊销的 handle 数。
+func (c *CaptureSink) activeHandleCountLocked() int {
+	c.evictExpiredHandlesLocked()
+	n := 0
+	for _, h := range c.handles {
+		if !h.revoked {
+			n++
+		}
+	}
+	return n
 }

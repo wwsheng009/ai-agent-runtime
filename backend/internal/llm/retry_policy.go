@@ -614,6 +614,71 @@ func suppressRetry(err error) error {
 	}
 }
 
+// mustSuppressRetryAfterEmission reports whether a streamed response that
+// already emitted user-visible content must stay suppressed instead of being
+// replayed through the retry loop.
+//
+// Partial-output replay policy (2026-08-31): transient causes — SSE stream
+// EOF, connection reset, idle timeout, 5xx/429, stream interruption, empty
+// reply — keep retrying even when partial text was already emitted. The retry
+// regenerates the full response and duplicated partial output is accepted;
+// callers publish a partial_output marker on the llm.retry event so the UI
+// can annotate the replay. Only non-retryable failures keep the historical
+// no-replay guarantee: quota exhaustion, deterministic request errors,
+// content filter, malformed tool calls, user cancellation, and errors that
+// already exhausted an enclosing retry budget.
+func mustSuppressRetryAfterEmission(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !classifyRetryableLLMError(err).Retryable
+}
+
+// partialOutputError marks an error raised by a streaming attempt that already
+// emitted user-visible content. The wrapper is transparent to classification
+// (Error/Unwrap delegate to the cause); it exists so enclosing retry loops can
+// annotate their llm.retry events with partial_output.
+type partialOutputError struct {
+	cause error
+}
+
+func (e *partialOutputError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *partialOutputError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// withPartialOutputMarker wraps err so enclosing retry loops can detect that
+// the failed attempt already emitted user-visible content.
+func withPartialOutputMarker(err error) error {
+	if err == nil {
+		return nil
+	}
+	var partialErr *partialOutputError
+	if stderrs.As(err, &partialErr) {
+		return err
+	}
+	return &partialOutputError{cause: err}
+}
+
+// errHasPartialOutput reports whether err was raised by a streaming attempt
+// that already emitted user-visible content.
+func errHasPartialOutput(err error) bool {
+	if err == nil {
+		return false
+	}
+	var partialErr *partialOutputError
+	return stderrs.As(err, &partialErr)
+}
+
 var retryAfterPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(?:retry[- ]after|try again in)\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|sec|secs|seconds?|m|min|mins|minutes?)`),
 	regexp.MustCompile(`(?i)(?:retry[- ]after|try again in)\s*([0-9]+(?:\.[0-9]+)?)`),

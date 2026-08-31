@@ -1543,8 +1543,19 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 
 		if handleErr != nil {
 			lastErr = fmt.Errorf("failed to handle stream response: %w", handleErr)
+			// Partial-output replay policy: transient failures (SSE EOF,
+			// connection reset, idle timeout, 5xx/429, stream interruption)
+			// keep retrying even when partial text was already emitted — the
+			// retry regenerates the full response and duplicated partial
+			// output is accepted. The llm.retry event carries the
+			// partial_output marker so downstream UI can annotate the replay.
+			// Only non-retryable causes (quota, invalid request, content
+			// filter, user cancellation) stay suppressed after emission.
 			if emissionState.emittedAnything() {
-				return nil, suppressRetry(lastErr)
+				lastErr = withPartialOutputMarker(lastErr)
+				if mustSuppressRetryAfterEmission(lastErr) {
+					return nil, suppressRetry(lastErr)
+				}
 			}
 			// Transport/stream-class failures (SSE stream EOF, connection
 			// reset, idle timeout) count toward the tighter transport budget.
@@ -1559,9 +1570,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				}
 			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
-				Source:   "provider_wrapper",
-				Protocol: p.config.Type,
-				Model:    adapterRequest.Model,
+				Source:        "provider_wrapper",
+				Protocol:      p.config.Type,
+				Model:         adapterRequest.Model,
+				PartialOutput: errHasPartialOutput(lastErr),
 			})
 			if retryErr != nil {
 				return nil, retryErr

@@ -187,6 +187,22 @@ type HistoryCommitLedger struct {
 	bySource           map[historyCommitSourceKey]map[uint64]struct{}
 	activeTokensByCell map[scene.CellID][]uint64
 	pendingCount       int
+	// minNonTerminalToken caches the smallest token whose state is still
+	// Pending or InFlight. It backs hasOlderPendingOrInFlight as an O(1)
+	// predicate; production pprof showed the previous full-map scan inside
+	// the per-claim ordering guard as a hot spot on resumed sessions with a
+	// very large ledger. Terminal states are absorbing (no path re-arms
+	// Acked/Failed/Invalidated), so the minimum only ever moves forward and
+	// the recompute-after-terminal scan is amortized O(1) per transition.
+	minNonTerminalToken uint64
+	// activeAckPlanVersion bumps whenever the acked Active-origin prefix that
+	// planEligibleHistoryCommits reads via activeAckedRenderedPrefixRows can
+	// change. Ack is the only transition that grows that set (terminal states
+	// are absorbing and Invalidate/Fail/Defer never touch Acked entries), and
+	// reconcileScrollback replaces the whole ledger behind a new TerminalEpoch.
+	// The transcript-plan memo uses this counter instead of scanning
+	// activeTokensByCell on every stream chunk.
+	activeAckPlanVersion uint64
 	// unresolvedCount caches the number of entries that require terminal
 	// recovery (Failed, or Invalidated with MayHavePartiallyWritten). It keeps
 	// hasUnresolvedTerminalDelivery O(1); production pprof showed the previous
@@ -254,6 +270,9 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 		l.activeTokensByCell[commit.CellID] = tokens
 	}
 	l.pendingCount++
+	if l.minNonTerminalToken == 0 || commit.Token < l.minNonTerminalToken {
+		l.minNonTerminalToken = commit.Token
+	}
 	return nil
 }
 
@@ -341,6 +360,7 @@ func (l *HistoryCommitLedger) Invalidate(token uint64) (wasInFlight bool, err er
 		l.pendingCount--
 	}
 	l.byToken[token] = entry
+	l.advanceMinAfterTerminal(token)
 	return wasInFlight, nil
 }
 
@@ -372,7 +392,60 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 		entry.Commit.Lines = nil
 	}
 	l.byToken[token] = entry
+	if entry.Commit.Origin == HistoryCommitActive {
+		l.activeAckPlanVersion++
+	}
+	l.advanceMinAfterTerminal(token)
 	return nil
+}
+
+// nextNonTerminalToken returns the smallest live token greater than from that
+// is still Pending or InFlight, or 0 when none remains. It walks the cached
+// ascending token slice; the walk is bounded by the number of consecutive
+// terminal tokens after from, so the total cost is amortized O(1) per
+// terminal transition across the ledger's lifetime.
+func (l *HistoryCommitLedger) nextNonTerminalToken(from uint64) uint64 {
+	tokens := l.orderedTokens()
+	// Binary-search the first token above `from`, then scan forward only over
+	// the terminal run. The previous implementation skipped the token prefix
+	// with a linear walk, which is O(total ledger) per Ack — on resumed
+	// sessions with tens of thousands of accumulated tokens that alone pinned
+	// a core (production pprof: nextNonTerminalToken 9% flat). Acks proceed
+	// oldest-first, so the forward scan stays amortized O(1) per transition.
+	index := sort.Search(len(tokens), func(i int) bool { return tokens[i] > from })
+	for ; index < len(tokens); index++ {
+		if entry, ok := l.byToken[tokens[index]]; ok &&
+			(entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight) {
+			return tokens[index]
+		}
+	}
+	return 0
+}
+
+func (l *HistoryCommitLedger) nextNonTerminalTokenByScan(from uint64) uint64 {
+	for _, token := range l.orderedTokens() {
+		if token <= from {
+			continue
+		}
+		if entry, ok := l.byToken[token]; ok &&
+			(entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight) {
+			return token
+		}
+	}
+	return 0
+}
+
+// advanceMinAfterTerminal refreshes the cached minimum non-terminal token
+// after a transition into a terminal state (Acked, Failed, or Invalidated).
+// Terminal states are absorbing, so the minimum only ever moves forward and
+// the bounded recompute scan stays amortized O(1) per terminal transition.
+// Skipping this refresh pins the cache on a terminal token and makes
+// hasOlderPendingOrInFlight report a phantom older effect forever, which
+// deadlocks every later claim behind out-of-order rejection.
+func (l *HistoryCommitLedger) advanceMinAfterTerminal(token uint64) {
+	if l.minNonTerminalToken == token {
+		l.minNonTerminalToken = l.nextNonTerminalToken(token)
+	}
 }
 
 func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWritten bool) error {
@@ -387,6 +460,7 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 	// MayHavePartiallyWritten.
 	l.unresolvedCount++
 	l.byToken[token] = entry
+	l.advanceMinAfterTerminal(token)
 	return nil
 }
 
@@ -447,18 +521,10 @@ func (l *HistoryCommitLedger) hasUnresolvedTerminalDelivery() bool {
 }
 
 func (l *HistoryCommitLedger) hasOlderPendingOrInFlight(token uint64) bool {
-	if l == nil {
-		return false
-	}
-	for earlierToken, entry := range l.byToken {
-		if earlierToken >= token {
-			continue
-		}
-		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
-			return true
-		}
-	}
-	return false
+	// O(1) equivalent of the previous full-map scan: an earlier Pending or
+	// InFlight token exists exactly when the smallest non-terminal token is
+	// still older than token. See the minNonTerminalToken field comment.
+	return l != nil && l.minNonTerminalToken != 0 && l.minNonTerminalToken < token
 }
 
 func (l *HistoryCommitLedger) orderedTokens() []uint64 {
@@ -467,9 +533,13 @@ func (l *HistoryCommitLedger) orderedTokens() []uint64 {
 	}
 	if len(l.tokens) == len(l.byToken) {
 		// Fast path: every key went through Enqueue, so the cached ascending
-		// slice is authoritative. Return a detached view; callers may not
-		// mutate the ledger's internal token ordering.
-		return append([]uint64(nil), l.tokens...)
+		// slice is authoritative. Return the internal slice as a read-only
+		// view: callers must only iterate it within the current actor turn
+		// and must never mutate or retain it across ledger mutations
+		// (Enqueue may shift elements in place). Production pprof showed the
+		// previous per-call copy as a top allocation source on resumed
+		// sessions where every Pending/Entries call copied the full history.
+		return l.tokens
 	}
 	// Defensive fallback: an externally constructed ledger (tests, hand-rolled
 	// state) bypassed Enqueue. Rebuild the ordering from the map so behavior
@@ -506,6 +576,8 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		clone.activeTokensByCell[cellID] = append([]uint64(nil), tokens...)
 	}
 	clone.pendingCount = l.pendingCount
+	clone.minNonTerminalToken = l.minNonTerminalToken
+	clone.activeAckPlanVersion = l.activeAckPlanVersion
 	clone.unresolvedCount = l.unresolvedCount
 	clone.tokens = append([]uint64(nil), l.tokens...)
 	return clone

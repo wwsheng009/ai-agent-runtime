@@ -1025,6 +1025,7 @@ func (e *EventEncoder) applySystem(ev runtimeevents.Event, cs *ChangeSet) {
 	it := e.appendItem(KindSystem, "", head)
 	if looksLikeDiffPresentation(head) {
 		it.Presentation.Kind = PresentationDiffSupplement
+		it.Presentation.DiffLabel = diffPresentationLabel(toolCallName(ev), head)
 	}
 	e.change(cs, OpAppend, it)
 }
@@ -2078,6 +2079,7 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 			}
 			if looksLikeDiffPresentation(t.Head) {
 				t.Presentation.Kind = PresentationDiffSupplement
+				t.Presentation.DiffLabel = diffPresentationLabel(toolCallName(ev), t.Head)
 			}
 			t.Status = StatusCompleted
 			return true
@@ -2120,6 +2122,7 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 	out := e.appendItem(KindToolOutput, cause, treeText)
 	if looksLikeDiffPresentation(output) {
 		out.Presentation.Kind = PresentationDiffSupplement
+		out.Presentation.DiffLabel = diffPresentationLabel(toolCallName(ev), output)
 	}
 	out.Status = StatusCompleted // 工具输出一次性完成（终态语义）
 	e.change(cs, OpAppend, out)
@@ -2173,6 +2176,45 @@ func looksLikeDiffPresentation(text string) bool {
 	return strings.Contains("\n"+trimmed, "\n--- ") &&
 		strings.Contains("\n"+trimmed, "\n+++ ") &&
 		strings.Contains("\n"+trimmed, "\n@@ ")
+}
+
+// diffPresentationLabel returns the header verb the layout layer must use
+// when projecting text marked as PresentationDiffSupplement. Supplement
+// text ("• Edited "/"• Diff " prefixes) already carries its own label —
+// ui/diff.ParseSupplementBlocks overrides the header — so only raw unified
+// diffs need the encoder's annotation. Without it, a read-only `git diff`
+// tool output would render under the diff renderer's default "Edited" verb.
+func diffPresentationLabel(toolName, text string) string {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	for _, line := range strings.Split(strings.TrimSpace(normalized), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "• Edited ") || strings.HasPrefix(line, "• Diff ") {
+			return ""
+		}
+	}
+	return diffHeaderLabelForTool(toolName)
+}
+
+// diffHeaderLabelForTool mirrors the legacy renderer's verb choice
+// (commands.diffSupplementLabel): editing tools annotate "Edited", every
+// other tool — shell git diff, read-only view — annotates "Diff". An empty
+// name keeps the legacy compatibility default "Edited".
+func diffHeaderLabelForTool(toolName string) string {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name == "" {
+		return "Edited"
+	}
+	switch name {
+	case "edit", "apply", "apply_patch", "patch", "multiedit", "write", "append_write":
+		return "Edited"
+	}
+	if strings.HasSuffix(name, "/edit") || strings.HasSuffix(name, "/apply_patch") ||
+		strings.HasSuffix(name, ".edit") || strings.HasSuffix(name, ".edit_file") ||
+		strings.HasSuffix(name, ".apply_patch") || strings.HasSuffix(name, ".apply") {
+		return "Edited"
+	}
+	return "Diff"
 }
 
 // flushAssistantStream 在流结束事件（assistant final / llm finished）时

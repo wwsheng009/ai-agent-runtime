@@ -65,12 +65,9 @@ func (c *chatInteractionCoordinator) ensureUIActor() *ui.UIController {
 	return c.uiActor
 }
 
-// EnableUnifiedRenderer installs the session-level production authority. The
-// retained FixedBottomSurface becomes a state facade only; its physical writer
-// is fenced before TerminalSessionPresenter attaches to the UI actor.
-func (c *chatInteractionCoordinator) EnableUnifiedRenderer() bool {
-	return c.enableUnifiedRendererWithWriter(os.Stdout)
-}
+// （EnableUnifiedRenderer 已退役：生产 interactive 会话必须经
+// EnableUnifiedRendererGateway——PhysicalSink→RenderOutputGateway。
+// 直写 writer 模式仅存在于测试，见 enableUnifiedRendererWithWriter。）
 
 // sessionRenderIDLocked 返回稳定 render session ID（Phase 6 gateway 命名；
 // 不直接用会随 resume/load 变化的 RuntimeSession.ID）。调用方无需持锁。
@@ -199,6 +196,10 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpk
 	return false
 }
 
+// enableUnifiedRendererWithWriter 构造直写 writer 模式的 unified renderer。
+// Test-only：生产 interactive 会话禁止使用——直写模式不经 gateway，违反
+// "所有 interactive terminal effects 经 session-scoped gateway" 收敛目标。
+// 生产入口是 EnableUnifiedRendererGateway（PhysicalSink→RenderOutputGateway）。
 func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.Writer) bool {
 	if c == nil {
 		return false

@@ -31,7 +31,10 @@ func TestDeriveBottomPaneState_ReflowsPromptViewportFromSemanticInput(t *testing
 	if short.ActiveBandMaxRows != ActiveBandRows(12) || short.ActiveBandMaxRows != 6 {
 		t.Fatalf("active-band policy = %+v", short)
 	}
-	if short.ActiveBandTopGapRows != 1 || short.PromptTopMarginRows != 1 || short.PromptBottomMarginRows != 1 {
+	// The permanent second status row (session ID / --pprof / --debug) reserves
+	// one more row than the historical single-status layout, so short terminals
+	// collapse the band-top separator before sacrificing retained history rows.
+	if short.ActiveBandTopGapRows != 0 || short.PromptTopMarginRows != 1 || short.PromptBottomMarginRows != 1 {
 		t.Fatalf("geometry policy not applied: %+v", short)
 	}
 	if got := strings.Join(short.ActiveBandLines, ","); got != "3,4,5,6,7,8" {
@@ -42,6 +45,9 @@ func TestDeriveBottomPaneState_ReflowsPromptViewportFromSemanticInput(t *testing
 	}
 
 	tall := DeriveBottomPaneState(bottom, GeometryState{Width: 80, Height: 24})
+	if tall.ActiveBandTopGapRows != 1 {
+		t.Fatalf("tall geometry policy lost the band-top gap: %+v", tall)
+	}
 	if tall.PromptTotalRows != 5 || tall.PromptReservedRows != 5 || tall.PromptViewportStart != 0 || tall.PromptCursorRow != 4 {
 		t.Fatalf("tall prompt viewport = %+v", tall)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -959,6 +960,9 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		kind = outputpkg.TransactionFrameAndHistory
 	}
 	if write := s.writeTerminalBytesKindLocked(kind, bytes, frame.Geometry); write.Err != nil {
+		if os.Getenv("TERM_SESSION_TRACE") != "" {
+			fmt.Printf("TERMTRACE_WRITE_ERR frame=%d err=%v\n", s.frame, write.Err)
+		}
 		if write.MayHavePartiallyWritten {
 			// The target consumed an unknown prefix. Preserve no incremental
 			// viewport proof, but keep the last confirmed scalar snapshot so the
@@ -986,6 +990,17 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		return TerminalTransactionResult{Frame: frameResult, History: historyResult}
 	}
 	candidateScreen.ConfirmFlush()
+	if os.Getenv("TERM_SESSION_TRACE") != "" {
+		fmt.Printf("TERMTRACE frame=%d gen=%d outBottom=%d area.Top=%d area.H=%d prevTop=%d prevH=%d prevKnown=%v prevTermH=%d histKnown=%v histStarted=%v topAligned=%v tailRows=%d transitionBytes=%d historyBytes=%d histInsertedRows=%d fullRepaint=%v initHist=%v resize=%v reset=%v\n",
+			s.frame, frame.LayoutGeneration, frame.OutputBottomRow, area.Top, area.Height,
+			s.viewport.Top, s.viewport.Height, s.viewportBoundaryKnown, s.viewportTerminalHeight,
+			s.historyProjectionKnown, s.historyProjectionStarted, s.historyTopAligned, len(s.historyTailRows),
+			len(transitionBytes), len(historyBytes), historyInsertedRows, fullRepaint,
+			initializeHistoryProjection, resizeRebuild, forceScrollbackReset)
+		if os.Getenv("TERM_SESSION_TRACE_BYTES") != "" {
+			fmt.Printf("TERMTRACE_BYTES frame=%d:\n%q\n", s.frame, bytes)
+		}
+	}
 	s.screen = candidateScreen
 	s.geometry = frame.Geometry
 	s.generation = frame.LayoutGeneration

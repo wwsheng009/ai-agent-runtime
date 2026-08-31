@@ -1005,7 +1005,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_backtrack_select.go", Func: "readBacktrackTurnPickPlain", Kind: "fmt.Print", Count: 3},
 		{File: "chat_bootstrap.go", Func: "prepareChatPersistence", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_bootstrap.go", Func: "prepareChatRuntimeState", Kind: "fmt.Fprint(os.Std*)", Count: 3},
-		{File: "chat_command_output.go", Func: "writeLegacyChatDebugDisplay", Kind: "io.WriteString(os.Std*)", Count: 1},
 		{File: "chat_core.go", Func: "method Finalize", Kind: "fmt.Print", Count: 5},
 		{File: "chat_core.go", Func: "method Handle", Kind: "fmt.Print", Count: 4},
 		{File: "chat_core.go", Func: "method clearSpinner", Kind: "fmt.Print", Count: 1},

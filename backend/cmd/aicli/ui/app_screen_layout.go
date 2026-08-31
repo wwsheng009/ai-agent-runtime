@@ -313,7 +313,14 @@ func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme 
 	case scene.PresentationDocument:
 		doc = cell.Presentation.Document.Clone()
 	case scene.PresentationDiffSupplement:
-		doc = uidiff.RenderText(cell.Source, uidiff.DefaultRenderOptions(width, theme))
+		// 带标签的 supplement 文本自带 "• Edited/• Diff" 头部，空 DiffLabel
+		// 走渲染器默认；raw unified diff 使用编码器按工具语义标注的动词，
+		// 保证只读 git diff 查看不显示 "Edited"。
+		opts := uidiff.DefaultRenderOptions(width, theme)
+		if cell.Presentation.DiffLabel != "" {
+			opts.HeaderLabel = cell.Presentation.DiffLabel
+		}
+		doc = uidiff.RenderText(cell.Source, opts)
 	case scene.PresentationAssistantMarkdown:
 		doc, _ = renderengine.SharedRenderCache().Render("assistant", cell.Source, markdown.AssistantBodyOptions(width, theme))
 		doc = doc.Clone()

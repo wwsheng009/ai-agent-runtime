@@ -487,9 +487,10 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		}
 
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
-			Source:   "llm_runtime",
-			Provider: providerName,
-			Model:    req.Model,
+			Source:        "llm_runtime",
+			Provider:      providerName,
+			Model:         req.Model,
+			PartialOutput: errHasPartialOutput(err),
 		})
 		if retryErr != nil {
 			return nil, retryErr
@@ -633,10 +634,22 @@ func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provide
 
 		for chunk := range stream {
 			markRuntimeStreamEmission(emissionState, chunk)
-			if chunk.Type == EventTypeError && strings.TrimSpace(chunk.Error) != "" && !emissionState.emittedAnything() {
+			// Partial-output replay policy: transient stream errors keep
+			// retrying even when partial text was already emitted (duplicated
+			// partial output is accepted; the llm.retry event carries the
+			// partial_output marker). Non-retryable errors fall through and
+			// are forwarded to the consumer unchanged.
+			if chunk.Type == EventTypeError && strings.TrimSpace(chunk.Error) != "" &&
+				(!emissionState.emittedAnything() || !mustSuppressRetryAfterEmission(fmt.Errorf("%s", chunk.Error))) {
 				err := fmt.Errorf("%s", chunk.Error)
 				attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
-				retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, meta)
+				retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
+					Source:        meta.Source,
+					Provider:      meta.Provider,
+					Protocol:      meta.Protocol,
+					Model:         meta.Model,
+					PartialOutput: emissionState.emittedAnything(),
+				})
 				if retryErr != nil {
 					sendStreamChunk(ctx, out, StreamChunk{Type: EventTypeError, Error: retryErr.Error(), Done: true})
 					return

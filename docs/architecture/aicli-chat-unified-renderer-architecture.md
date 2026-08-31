@@ -9,7 +9,7 @@
 
 当前 `aicli chat` 在**支持 ANSI 的交互式 TTY、且未进入兼容降级模式**时，已经以统一渲染器作为**强制生产路径**，而不是可选实验开关：
 
-- `chat_setup.go` 对满足 `interactiveUI` 判定的会话调用 `EnableUnifiedRenderer()`；初始化失败会直接终止会话，不能退回到一个已被物理写入隔离的 legacy surface。
+- `chat_setup.go` 对满足 `interactiveUI` 判定的会话调用 `EnableUnifiedRendererGateway()`（PhysicalSink→RenderOutputGateway）；factory 失败会 fail-closed 终止会话，不能退回到直写 unified renderer 或一个已被物理写入隔离的 legacy surface。
 - 上游 runtime 事件先被编码为有稳定身份和生命周期的 `RenderModel/ChangeSet`，再原子映射到 `TuiScene`。
 - `UIController` 是单线程 reducer/actor，按 action 顺序维护唯一的 `AppState` 快照。
 - `TerminalSessionPresenter -> TerminalSessionExecutor -> TerminalSession` 是唯一生产级物理终端写入链路；fullscreen lease 也必须通过同一个 presenter transport，不得另开 writer。
@@ -234,7 +234,7 @@ sequenceDiagram
 
     Setup->>Coord: newChatInteractionCoordinator(session)
     Setup->>Coord: SetSurface(surface)
-    Setup->>Coord: EnableUnifiedRenderer()
+    Setup->>Coord: EnableUnifiedRendererGateway()
     Coord->>Surface: SetPhysicalWritesEnabled(false)
     Coord->>Actor: ensureUIActor() + Run()
     Coord->>Actor: SetThemeContextAction
@@ -246,7 +246,7 @@ sequenceDiagram
     Coord-->>Setup: success; otherwise fail session setup
 ```
 
-`EnableUnifiedRenderer()` 的语义是 authority transition：
+`EnableUnifiedRendererGateway()` 的语义是 authority transition：
 
 - 不是“能开则开”的视觉 feature flag；
 - surface 可继续保留逻辑状态和尺寸接口，但不能再输出字节；
@@ -941,7 +941,7 @@ Release lease -> exit alternate screen -> request primary recovery
 
 `AICLI_SCENE_PRESENTER` 仍存在于旧“完整块 visible rows”桥接中，用于曾经的 Scene/legacy 文本切换和 parity。它不等于当前 `TerminalSession` 统一 renderer 总开关：
 
-- 交互式 `EnableUnifiedRenderer()` 已是强制 authority transition；
+- 交互式 `EnableUnifiedRendererGateway()` 已是强制 authority transition（直写回退已删除，factory 失败 fail-closed）；
 - Scene snapshot 已经是 AppState transcript source；
 - 环境开关主要影响遗留块源/对照逻辑，不能用来允许第二物理 writer。
 
@@ -1135,8 +1135,9 @@ approval/question 还没有完全拆成 actor effect/result：
   interactive TTY 下默认调用 `chatInteractionCoordinator.EnableUnifiedRendererGateway()`
   ——构造 `PhysicalSink→RenderOutputGateway`（稳定 render session ID），interactive
   terminal bytes 全部经 gateway 提交（receipt/journal/mirror/capture 可观测），不再直写
-  `os.Stdout`。factory 失败时回退直写 `EnableUnifiedRenderer()` 并输出
-  `[aicli-diag]` 诊断；回滚开关为在 setup 处直接调用 `EnableUnifiedRenderer()`。
+  `os.Stdout`。factory 失败时 fail-closed 终止会话（不回退直写 unified
+  renderer——回退会让全部 terminal effects 绕过 gateway）；直写 writer 模式
+  仅存在于测试（`enableUnifiedRendererWithWriter`）。
 - **Terminal 控制序列现状**：legacy binding 路由链（`emitControl`→gateway
   `legacy_immediate`）已在 Phase 6 简化中删除；`ui.Terminal` 控制方法经 `emitControl`
   直写 process `TerminalOutput()`（启动前 process-compat / legacy 兼容路径）。unified
@@ -1155,6 +1156,19 @@ approval/question 还没有完全拆成 actor effect/result：
 使用门禁的诚实边界：inventory 按 call-site 指纹比对（防新增/删除），不验证每个 site
 在运行时确实走了 gateway（运行时穿戴由
 `TestEnableUnifiedRendererGateway*`/reconfigure/capture parity 集成测试覆盖）。
+
+**收敛目标核对（2026-08-31）**：终局目标"renderer 只产生意图 / 全部 interactive
+effects 经 session-scoped gateway / 协议输出各自管理 / console 是可替换 primary sink"
+的主路径已闭合——直写回退已删除（fail-closed），`EnableUnifiedRenderer` 公共方法退役，
+协议输出经 `CommandTextWriter` 类型边界（`chat_command_text_writer.go`）。已知边界：
+
+- **v1 范围声明：single primary sink**。gateway 的 route reconfigure/mirror 机制
+  完整且经测试（`parity_test.go`/`capture_upgrade_test.go`），但生产只配置过 stdout
+  primary。非 stdout primary（文件/PTY/远端）属 v2 能力，届时需在真实替代 sink 上
+  验证 reconfigure barrier 与 mirror 一致性。
+- `emitControl`/`PrintAt` 仍解析 process `TerminalOutput()`（process-compat
+  allowlist）；active session 内主要调用点已被 fence/owned 守卫覆盖，但该出口对
+  未来调用者保持开放。
 
 建议的演进优先级：
 

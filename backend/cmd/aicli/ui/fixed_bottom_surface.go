@@ -33,9 +33,13 @@ const (
 	chatComposerVerticalMarginMinHeight = 12
 	// A visible ActiveBand is a transient event block, so keep one semantic row
 	// between retained history and Running/progress content. Short terminals
-	// collapse the margin before sacrificing usable content.
+	// collapse the margin before sacrificing usable content. The permanent
+	// second status row (session ID / --pprof / --debug) reserves one more row
+	// than the historical single-status layout, so the gap threshold is raised
+	// to keep at least seven retained history rows on a 15-row terminal instead
+	// of letting the separator shrink the visible transcript tail to six.
 	activeBandTopGapRows      = 1
-	activeBandTopGapMinHeight = 12
+	activeBandTopGapMinHeight = 16
 	// DefaultGeometryProbeMinInterval caps how often the live stream paint path
 	// re-probes terminal size. Active cells paint up to ~30 FPS; probing every
 	// frame is unnecessary because human resize events are far slower.

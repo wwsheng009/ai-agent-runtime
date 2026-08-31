@@ -39,6 +39,28 @@ type HistoryEffectQueueState struct {
 	lastPlannedLooksMarkdown       bool
 	lastPlannedSupplementMarkdown  bool
 	lastPlannedBlocked             bool
+	// Transcript-plan memo for syncHistoryEffectsForTranscript. The full
+	// transcript plan re-lays-out and re-wraps every finalized cell, which on
+	// resumed sessions costs O(entire history) per stream chunk even though
+	// the chunk only grows the still-mutable active cell. The fingerprint
+	// covers every planEligibleHistoryCommits input: the transcript version
+	// fence (same trust level as transcriptSnapshotAlreadyInstalled),
+	// geometry/layout/theme identity, the semantic-projection flag, and — only
+	// when semantic projection is on, because that is the only mode where the
+	// planner reads Active — the active-cell planner inputs. Ledger-dependent
+	// plan input (the acked Active-origin prefix) is tracked by the ledger's
+	// activeAckPlanVersion plus TerminalEpoch instead of a per-call scan.
+	lastPlannedTranscriptValid    bool
+	lastPlannedTranscriptSceneID  uint64
+	lastPlannedTranscriptRevision uint64
+	lastPlannedTranscriptContent  uint64
+	lastPlannedTranscriptCells    int
+	lastPlannedTranscriptLayoutGen uint64
+	lastPlannedWidth              int
+	lastPlannedHeight             int
+	lastPlannedProjection         bool
+	lastPlannedThemeKey           string
+	lastPlannedTerminalEpoch      uint64
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
@@ -50,6 +72,18 @@ func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
 // future presenter. Callers cannot mutate the actor-owned ledger through it.
 func (s HistoryEffectQueueState) Entries() []HistoryCommitEntry {
 	return s.ledger.Entries()
+}
+
+// Entry returns a detached copy of a single ledger entry without cloning the
+// whole history. The executor previously called Entries() (a full deep copy
+// of every commit's render lines) just to read one token's state; on resumed
+// sessions that repeated an O(entire history) allocation per commit step.
+func (s HistoryEffectQueueState) Entry(token uint64) (HistoryCommitEntry, bool) {
+	if s.ledger == nil {
+		return HistoryCommitEntry{}, false
+	}
+	entry, ok := s.ledger.Entry(token)
+	return entry.Clone(), ok
 }
 
 // Pending returns the oldest-first commits eligible for a primary presenter.
@@ -247,6 +281,9 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 			s.ledger.unresolvedCount++
 		}
 		s.ledger.byToken[delivered.Token] = entry
+		// Pending/InFlight -> Failed is a terminal transition; keep the cached
+		// minimum non-terminal token from pinning on this token.
+		s.ledger.advanceMinAfterTerminal(delivered.Token)
 	}
 	s.ReconciliationRequired = true
 }
