@@ -201,6 +201,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		ImagePaths:               opts.ImagePaths,
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.renderOutputFile = opts.RenderOutputFile
 	// The compatibility facade is already physically fenced above, so it is
 	// safe to mount its geometry and semantic bottom-pane inputs before the
 	// primary presenter attaches. Doing so makes the first TerminalSession frame

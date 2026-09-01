@@ -117,6 +117,36 @@ func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.R
 		os.Stdout,
 		outputpkg.PhysicalSinkOptions{},
 	)
+	route := outputpkg.RenderRouteConfig{
+		Primary:            sink,
+		PrimaryOwnership:   outputpkg.SinkOwned,
+		ProjectionTargetID: "pt-interactive",
+	}
+	if path := strings.TrimSpace(c.renderOutputFile); path != "" {
+		// --render-output-file：FileSink 作为 committed-only mirror，把全部
+		// terminal wire 字节镜像落盘；console primary 渲染完全不变。mirror
+		// 是 best-effort 旁路——文件打开失败不阻断交互会话（网关本身无碍）。
+		fs, fsErr := outputpkg.NewFileSink(
+			outputpkg.TargetDescriptor{
+				SinkID:             "file-interactive",
+				Class:              outputpkg.TargetClassCapture,
+				ProjectionTargetID: "pt-interactive",
+			},
+			path,
+			outputpkg.FileSinkOptions{SyncOnClose: true},
+		)
+		if fsErr != nil {
+			fmt.Fprintf(os.Stderr, "[aicli] --render-output-file 打开失败，已跳过镜像落盘: %v\n", fsErr)
+		} else {
+			route.Mirrors = append(route.Mirrors, outputpkg.RenderMirror{
+				Sink:      fs,
+				Policy:    outputpkg.MirrorCommittedOnly,
+				ApplyMode: outputpkg.MirrorApplyBytes,
+				Ownership: outputpkg.SinkOwned,
+				Timeout:   3 * time.Second,
+			})
+		}
+	}
 	gw, err := outputpkg.NewRenderOutputGateway(
 		"render-"+c.sessionRenderIDLocked(),
 		outputpkg.RenderGatewayOptions{
@@ -130,11 +160,7 @@ func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.R
 			MaxSubscriptions:      16,
 			MaxSubscriptionBuffer: 128,
 		},
-		outputpkg.RenderRouteConfig{
-			Primary:            sink,
-			PrimaryOwnership:   outputpkg.SinkOwned,
-			ProjectionTargetID: "pt-interactive",
-		},
+		route,
 	)
 	if err != nil {
 		return nil

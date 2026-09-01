@@ -182,6 +182,9 @@ type chatInteractionCoordinator struct {
 	// gateway；terminal bytes 经其提交，供 /debug 与收尾 Close。
 	renderGateway   *outputpkg.RenderOutputGateway
 	renderGatewayID string
+	// renderOutputFile（--render-output-file）：非空时在 gateway 装配时挂一个
+	// FileSink mirror，把全部 terminal wire 字节镜像落盘（console 渲染不变）。
+	renderOutputFile string
 	// terminalExecutor remains a diagnostic compatibility alias. New code must
 	// use primaryPresenter so effect binding and shutdown stay paired.
 	terminalExecutor      *ui.TerminalSessionExecutor

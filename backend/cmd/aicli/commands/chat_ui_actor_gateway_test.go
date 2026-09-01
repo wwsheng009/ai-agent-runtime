@@ -3,6 +3,8 @@ package commands
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +114,56 @@ func TestEnableUnifiedRendererGatewayNoSecondPhysicalWriter(t *testing.T) {
 	// surface 物理写被禁用；gateway 是唯一 physical 提交者。
 	if coordinator.surface != nil && coordinator.surface.PhysicalWritesEnabled() {
 		t.Fatal("surface physical writes must stay fenced after gateway attach")
+	}
+}
+
+// TestEnableUnifiedRendererGatewayMirrorsToRenderOutputFile：--render-output-file
+// 装配时 gateway 挂 FileSink committed-only mirror——console primary 渲染不变，
+// 提交的 terminal wire 字节镜像落盘；文件随 gateway Close 关闭并同步。
+func TestEnableUnifiedRendererGatewayMirrorsToRenderOutputFile(t *testing.T) {
+	var terminal bytes.Buffer
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	session.Interaction = coordinator
+	coordinator.SetWriter(&terminal)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 20)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	// 关键：指定镜像落盘路径（生产经 --render-output-file 注入）。
+	coordinator.renderOutputFile = filepath.Join(t.TempDir(), "mirror.ans")
+
+	gw := coordinator.EnableUnifiedRendererGateway()
+	if gw == nil {
+		t.Fatal("gateway factory did not attach")
+	}
+	// mirror 已登记（snapshot 可观测）。
+	snap := gw.Snapshot()
+	if len(snap.Mirrors) != 1 || snap.Mirrors[0].Sink.Descriptor.SinkID != "file-interactive" {
+		t.Fatalf("expected file-interactive mirror, got: %+v", snap.Mirrors)
+	}
+
+	// 提交一个 committed batch；mirror committed-only 应镜像字节。
+	r := gw.Submit(context.Background(), outputpkg.RenderIntent{
+		IntentID: "mirror-probe",
+		Kind:     outputpkg.TransactionFrame,
+		Bytes:    []byte("hello mirror\n"),
+	})
+	if r.Admission.Decision != outputpkg.AdmissionAccepted || r.Primary == nil {
+		t.Fatalf("gateway submit: %+v", r)
+	}
+	// Close 触发 mirror 文件 sync/close（SinkOwned）。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := gw.Close(ctx); err != nil {
+		t.Fatalf("gateway close: %v", err)
+	}
+
+	data, err := os.ReadFile(coordinator.renderOutputFile)
+	if err != nil {
+		t.Fatalf("read mirror file: %v", err)
+	}
+	if !strings.Contains(string(data), "hello mirror") {
+		t.Fatalf("mirror file missing committed bytes, got: %q", string(data))
 	}
 }

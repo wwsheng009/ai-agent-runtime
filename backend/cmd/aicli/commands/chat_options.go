@@ -74,6 +74,7 @@ type chatCommandOptions struct {
 	InputReader              *bufio.Reader
 	SessionFilter            ChatSessionListFilter
 	SessionFeaturesRequested bool
+	RenderOutputFile         string // --render-output-file：交互聊天终端镜像落盘路径
 }
 
 func resolveChatInitialPrompt(cmd *cobra.Command) (string, error) {
@@ -182,6 +183,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	sessionLimitFlag, _ := cmd.Flags().GetInt("session-limit")
 	runtimeServerFlag, _ := cmd.Flags().GetString("runtime-server")
 	runtimeModeFlag, _ := cmd.Flags().GetString("runtime-mode")
+	renderOutputFile, _ := cmd.Flags().GetString("render-output-file")
 
 	outputFormat, err := resolveChatOutputFormat(noInteractive, outputFlag, jsonOutput)
 	if err != nil {
@@ -275,6 +277,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		RuntimeModeFlag:        runtimeModeFlag,
 		RuntimeMode:            runtimeMode,
 		RuntimeServerURL:       runtimeServerURL,
+		RenderOutputFile:       renderOutputFile,
 		ProviderChanged:        cmd.Flags().Changed("provider"),
 		ModelChanged:           cmd.Flags().Changed("model"),
 		OutputFormat:           outputFormat,
