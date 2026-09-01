@@ -11,21 +11,22 @@ import (
 // can observe the recovery loop's per-iteration state — the exact signal that
 // was previously invisible to CPU/goroutine profiles.
 type ExecutorRecoveryDiagEntry struct {
-	Seq                uint64 `json:"seq"`
-	Branch             string `json:"branch"` // "scheduled" | "snapshot"
-	Revision           uint64 `json:"revision"`
-	RevisionAfter      uint64 `json:"revisionAfter"`
-	Generation         uint64 `json:"generation"`
-	TerminalEpoch      uint64 `json:"terminalEpoch"`
-	ProjectionUnknown  bool   `json:"projectionUnknown"`
-	ReconciliationReq  bool   `json:"reconciliationRequired"`
-	BackoffEngaged     bool   `json:"backoffEngaged"`
-	FullRepaint        bool   `json:"fullRepaint"`
-	ScrollbackReset    bool   `json:"scrollbackReset"`
-	FrameErr           string `json:"frameErr"`
-	ObligationPending  bool   `json:"obligationPending"`
-	ArmedBackoff       bool   `json:"armedBackoff"`
-	Continued          bool   `json:"continued"`
+	Seq               uint64 `json:"seq"`
+	AtUnixMs          int64  `json:"atUnixMs"` // wall-clock stamp of the iteration
+	Branch            string `json:"branch"`   // "scheduled" | "snapshot"
+	Revision          uint64 `json:"revision"`
+	RevisionAfter     uint64 `json:"revisionAfter"`
+	Generation        uint64 `json:"generation"`
+	TerminalEpoch     uint64 `json:"terminalEpoch"`
+	ProjectionUnknown bool   `json:"projectionUnknown"`
+	ReconciliationReq bool   `json:"reconciliationRequired"`
+	BackoffEngaged    bool   `json:"backoffEngaged"`
+	FullRepaint       bool   `json:"fullRepaint"`
+	ScrollbackReset   bool   `json:"scrollbackReset"`
+	FrameErr          string `json:"frameErr"`
+	ObligationPending bool   `json:"obligationPending"`
+	ArmedBackoff      bool   `json:"armedBackoff"`
+	Continued         bool   `json:"continued"`
 }
 
 // ExecutorRecoveryDiag is the JSON-exportable recovery-loop diagnostic of one
@@ -36,6 +37,33 @@ type ExecutorRecoveryDiag struct {
 	BackoffEngaged  uint64                      `json:"backoffEngaged"`
 	ArmedBackoff    uint64                      `json:"armedBackoff"`
 	TotalRecoveries uint64                      `json:"totalRecoveries"`
+	// GeneratedAtUnixMs is when this snapshot was assembled; it lets a caller
+	// compute whether the loop is still advancing between two polls.
+	GeneratedAtUnixMs int64 `json:"generatedAtUnixMs"`
+	// Diagnosis is a derived verdict that encodes the debugging lesson learned
+	// from the reported replay loop: a backoff that is armed but never engaged
+	// (ArmedBackoff>0, BackoffEngaged==0) is a dead guard, not a working one.
+	// Single-counter reads are misleading; the verdict compares both.
+	Diagnosis string `json:"diagnosis"` // "idle" | "healthy" | "backoff_engaged" | "dead_guard" | "unknown"
+	// WindowRecoveriesPerSec is the recovery rate over the retained window
+	// (entries[0].AtUnixMs .. entries[last].AtUnixMs). A continuously growing
+	// rate under an unchanged generation is the loop signature.
+	WindowRecoveriesPerSec float64 `json:"windowRecoveriesPerSec"`
+	// GenerationAdvancesInWindow is how many distinct layout generations were
+	// observed across the retained entries. 1 with many recoveries means the
+	// loop is re-arming at a frozen generation (no real progress).
+	GenerationAdvancesInWindow int `json:"generationAdvancesInWindow"`
+	// FrameErrorsInWindow counts how many retained iterations ended with a
+	// physical writer error. Combined with the diagnosis it distinguishes a
+	// dead-guard loop (no errors, armed but never engaged) from a genuinely
+	// failing writer (errors on every iteration).
+	FrameErrorsInWindow int `json:"frameErrorsInWindow"`
+	// ScrollbackResetsInWindow counts how many retained iterations performed a
+	// full scrollback reset+replay. A high count under one generation is the
+	// visible replay-loop signature.
+	ScrollbackResetsInWindow int `json:"scrollbackResetsInWindow"`
+	// LastGeneration is the layout generation of the most recent entry.
+	LastGeneration uint64 `json:"lastGeneration"`
 }
 
 const diagRecoveryRingSize = 256
@@ -145,12 +173,67 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 	defer e.diagMu.Unlock()
 	entries := make([]ExecutorRecoveryDiagEntry, len(e.diagRing))
 	copy(entries, e.diagRing)
-	return ExecutorRecoveryDiag{
-		Entries:         entries,
-		BackoffEngaged:  e.diagBackoffEngaged,
-		ArmedBackoff:    e.diagArmedBackoff,
-		TotalRecoveries: e.diagSeq,
+	d := ExecutorRecoveryDiag{
+		Entries:                    entries,
+		BackoffEngaged:             e.diagBackoffEngaged,
+		ArmedBackoff:               e.diagArmedBackoff,
+		TotalRecoveries:            e.diagSeq,
+		GeneratedAtUnixMs:          time.Now().UnixMilli(),
+		GenerationAdvancesInWindow: executorDiagGenerationAdvances(entries),
 	}
+	for _, en := range entries {
+		if en.FrameErr != "" {
+			d.FrameErrorsInWindow++
+		}
+		if en.ScrollbackReset {
+			d.ScrollbackResetsInWindow++
+		}
+	}
+	if len(entries) > 0 {
+		d.LastGeneration = entries[len(entries)-1].Generation
+		if dt := entries[len(entries)-1].AtUnixMs - entries[0].AtUnixMs; dt > 0 && len(entries) > 1 {
+			d.WindowRecoveriesPerSec = float64(len(entries)-1) / (float64(dt) / 1000.0)
+		}
+	}
+	d.Diagnosis = executorDiagDiagnosis(d)
+	return d
+}
+
+// executorDiagGenerationAdvances counts distinct layout generations observed in
+// the retained window. A value of 1 across many entries means the recovery loop
+// is re-arming at a frozen generation — the signature of a non-progressing loop
+// (the executor's transcript replay advances Revision, never LayoutGeneration).
+func executorDiagGenerationAdvances(entries []ExecutorRecoveryDiagEntry) int {
+	if len(entries) == 0 {
+		return 0
+	}
+	seen := map[uint64]struct{}{}
+	for _, en := range entries {
+		seen[en.Generation] = struct{}{}
+	}
+	return len(seen)
+}
+
+// executorDiagDiagnosis derives a loop-health verdict from the two counters that
+// single-read diagnostics mislead on. This encodes the production finding:
+// armedBackoff=439 with backoffEngaged=0 was NOT a working rate-limit — it was
+// a guard that never fired. The verdict surfaces that state directly.
+func executorDiagDiagnosis(d ExecutorRecoveryDiag) string {
+	if d.TotalRecoveries == 0 {
+		return "idle"
+	}
+	// armed without a single engage is the dead-guard signature regardless of
+	// how many recoveries ran (the production bug: 439 armed, 0 engaged).
+	if d.ArmedBackoff > 0 && d.BackoffEngaged == 0 {
+		return "dead_guard"
+	}
+	// Backoff has engaged at least once (or there is none armed). Look at the
+	// most recent iteration: if it is currently throttled the guard is live;
+	// otherwise the recovery either converged or is making genuine progress.
+	if len(d.Entries) > 0 && d.Entries[len(d.Entries)-1].BackoffEngaged {
+		return "backoff_engaged"
+	}
+	return "healthy"
 }
 
 // recordRecoveryDiag appends one recovery-branch iteration to the ring buffer.
@@ -159,6 +242,7 @@ func (e *TerminalSessionExecutor) recordRecoveryDiag(entry ExecutorRecoveryDiagE
 	defer e.diagMu.Unlock()
 	e.diagSeq++
 	entry.Seq = e.diagSeq
+	entry.AtUnixMs = time.Now().UnixMilli()
 	if entry.BackoffEngaged {
 		e.diagBackoffEngaged++
 	}

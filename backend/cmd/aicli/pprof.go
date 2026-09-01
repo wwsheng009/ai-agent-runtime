@@ -73,9 +73,17 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 诊断（环形缓冲 + 计数器）。这是 CPU/goroutine profile 之外的观测手段：
 	// 它显示每次 recovery flush 的 revision 前后值、generation、epoch、
 	// ProjectionUnknown/ReconciliationRequired、FullRepaint/ScrollbackReset、
-	// frame 错误、backoff 是否 arm/触发——精确回答"executor 在重放什么、为什么
-	// 没有收敛"。未设置 provider 时返回空快照。
+	// frame 错误、backoff 是否 arm/触发，并给出派生的循环健康诊断
+	// （Diagnosis：idle / healthy / backoff_engaged / dead_guard）——
+	// 精确回答"executor 在重放什么、为什么没有收敛、backoff 是否真的在工作"。
+	// ?format=text 时返回人类可读摘要（便于 curl 直接观测，无需解析 JSON）；
+	// 未设置 provider 时返回空快照。
 	mux.HandleFunc("/debug/pprof/executor", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") == "text" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(ui.ExecutorDiagTextSummary()))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(ui.ExecutorDiagSnapshot())
 	})

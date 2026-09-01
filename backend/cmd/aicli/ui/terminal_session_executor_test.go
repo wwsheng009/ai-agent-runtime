@@ -1027,3 +1027,114 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 		t.Fatalf("scrollback-reset arm recorded generation %d, want start %d", gotResetGen, startGen)
 	}
 }
+
+// TestExecutorDiagDiagnosisIdle verifies that a fresh diag reports "idle".
+func TestExecutorDiagDiagnosisIdle(t *testing.T) {
+	d := ExecutorRecoveryDiag{}
+	if got := executorDiagDiagnosis(d); got != "idle" {
+		t.Fatalf("empty diag: diagnosis=%q, want idle", got)
+	}
+}
+
+// TestExecutorDiagDiagnosisDeadGuard verifies the dead-guard verdict:
+// armed>0, engaged==0, recoveries>0 — the exact bug signature.
+func TestExecutorDiagDiagnosisDeadGuard(t *testing.T) {
+	d := ExecutorRecoveryDiag{
+		TotalRecoveries: 100,
+		ArmedBackoff:    100,
+		BackoffEngaged:  0,
+	}
+	if got := executorDiagDiagnosis(d); got != "dead_guard" {
+		t.Fatalf("dead-guard signature: diagnosis=%q, want dead_guard", got)
+	}
+}
+
+// TestExecutorDiagDiagnosisBackoffEngaged verifies that when the last entry
+// shows backoff engagement the verdict is "backoff_engaged".
+func TestExecutorDiagDiagnosisBackoffEngaged(t *testing.T) {
+	d := ExecutorRecoveryDiag{
+		TotalRecoveries: 5,
+		ArmedBackoff:    5,
+		BackoffEngaged:  3,
+		Entries: []ExecutorRecoveryDiagEntry{
+			{Seq: 1, BackoffEngaged: false, Generation: 1},
+			{Seq: 2, BackoffEngaged: false, Generation: 1},
+			{Seq: 3, BackoffEngaged: true, Generation: 1},
+			{Seq: 4, BackoffEngaged: true, Generation: 1},
+			{Seq: 5, BackoffEngaged: true, Generation: 1},
+		},
+	}
+	if got := executorDiagDiagnosis(d); got != "backoff_engaged" {
+		t.Fatalf("backoff-engaged signature: diagnosis=%q, want backoff_engaged", got)
+	}
+}
+
+// TestExecutorDiagDiagnosisHealthy verifies that after a successful recovery
+// with no backoff the verdict is "healthy".
+func TestExecutorDiagDiagnosisHealthy(t *testing.T) {
+	d := ExecutorRecoveryDiag{
+		TotalRecoveries: 3,
+		Entries: []ExecutorRecoveryDiagEntry{
+			{Seq: 1, Generation: 1, FullRepaint: true},
+			{Seq: 2, Generation: 2, FullRepaint: true},
+			{Seq: 3, Generation: 3, FullRepaint: true},
+		},
+	}
+	if got := executorDiagDiagnosis(d); got != "healthy" {
+		t.Fatalf("healthy signature: diagnosis=%q, want healthy", got)
+	}
+}
+
+// TestExecutorDiagGenerationAdvances verifies the counting of distinct
+// layout generations across the ring buffer.
+func TestExecutorDiagGenerationAdvances(t *testing.T) {
+	entries := []ExecutorRecoveryDiagEntry{
+		{Seq: 1, Generation: 1},
+		{Seq: 2, Generation: 1},
+		{Seq: 3, Generation: 2},
+		{Seq: 4, Generation: 2},
+		{Seq: 5, Generation: 1},
+		{Seq: 6, Generation: 3},
+	}
+	if got := executorDiagGenerationAdvances(entries); got != 3 {
+		t.Fatalf("generation advances: got %d, want 3", got)
+	}
+	if got := executorDiagGenerationAdvances(nil); got != 0 {
+		t.Fatalf("empty: got %d, want 0", got)
+	}
+}
+
+// TestExecutorDiagTextSummarySmoke verifies that the text summary renders
+// without panic and contains expected key fields.
+func TestExecutorDiagTextSummarySmoke(t *testing.T) {
+	d := ExecutorRecoveryDiag{
+		TotalRecoveries:            5,
+		ArmedBackoff:               3,
+		BackoffEngaged:             1,
+		Diagnosis:                  "backoff_engaged",
+		GeneratedAtUnixMs:          time.Now().UnixMilli(),
+		LastGeneration:             2,
+		GenerationAdvancesInWindow: 2,
+		WindowRecoveriesPerSec:     0.5,
+		Entries: []ExecutorRecoveryDiagEntry{
+			{Seq: 1, Branch: "scheduled", Generation: 1, Revision: 10, RevisionAfter: 20, BackoffEngaged: false},
+			{Seq: 2, Branch: "scheduled", Generation: 1, Revision: 20, RevisionAfter: 30, FrameErr: "write: broken pipe"},
+			{Seq: 3, Branch: "scheduled", Generation: 1, Revision: 30, RevisionAfter: 40, BackoffEngaged: true},
+			{Seq: 4, Branch: "scheduled", Generation: 2, Revision: 40, RevisionAfter: 50, FullRepaint: true},
+			{Seq: 5, Branch: "scheduled", Generation: 2, Revision: 50, RevisionAfter: 60, ScrollbackReset: true},
+		},
+	}
+	summary := executorDiagTextSummary(d)
+	if summary == "" {
+		t.Fatal("text summary is empty")
+	}
+	if !strings.Contains(summary, "backoff_engaged") {
+		t.Fatal("text summary missing diagnosis")
+	}
+	if !strings.Contains(summary, "frameErrorsInWindow") {
+		t.Fatal("text summary missing frameErrorsInWindow")
+	}
+	if !strings.Contains(summary, "scrollbackResetsInWindow") {
+		t.Fatal("text summary missing scrollbackResetsInWindow")
+	}
+}
