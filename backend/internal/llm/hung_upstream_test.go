@@ -220,12 +220,13 @@ func TestProviderRetriesThroughFiniteBudgetDespiteHeaderTimeouts(t *testing.T) {
 
 type headerGuardHandoffRoundTripper struct {
 	requests  atomic.Int64
+	failures  int // number of initial requests that fail with a header timeout
 	streaming bool
 }
 
 func (t *headerGuardHandoffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	n := t.requests.Add(1)
-	if n <= 2 {
+	if n <= int64(t.failures) {
 		return nil, &responseHeaderTimeoutError{timeout: 25 * time.Millisecond}
 	}
 
@@ -269,7 +270,7 @@ func TestProviderHeaderGuardHandoffRetriesAtRuntimeLayer(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			transport := &headerGuardHandoffRoundTripper{streaming: streaming}
+			transport := &headerGuardHandoffRoundTripper{failures: 2, streaming: streaming}
 			wrapper := provider.(*ProviderWrapper)
 			wrapper.httpClient = &http.Client{Transport: transport}
 			wrapper.streamHTTPClient = &http.Client{Transport: transport}
@@ -362,10 +363,14 @@ func TestTrackHeaderTimeoutStreak(t *testing.T) {
 // TestProviderTransportBudgetBoundsResetUpstream asserts the two-tier budget
 // (mirrors codex-rs request-level transport retries): a transport-level
 // rejection (connection reset immediately after accept) burns the tighter
-// transport budget (4 attempts) instead of the full business budget (10
-// attempts), because retrying a dead connection from scratch rarely succeeds
-// immediately. The reset upstream is used (not a header hang) so the
-// hung-upstream streak guard does not preempt the transport budget.
+// transport budget (4 attempts per provider call) instead of the full business
+// budget (10 attempts), because retrying a dead connection from scratch rarely
+// succeeds immediately. The exhaustion is transient, not terminal: it hands
+// off to the runtime loop, which retries the whole provider call after a
+// backoff. The consecutive-handoff guard bounds that handoff loop at three
+// fast-fail rounds, so the upstream sees 3 x 4 = 12 connections in total. The
+// reset upstream is used (not a header hang) so the hung-upstream streak guard
+// does not preempt the transport budget.
 func TestProviderTransportBudgetBoundsResetUpstream(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		name := "non-streaming"
@@ -401,8 +406,10 @@ func TestProviderTransportBudgetBoundsResetUpstream(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "transport",
 				"transport budget exhaustion should surface as transport failure, got: %v", err)
-			assert.Equal(t, int64(4), accepts.Load(),
-				"transport budget of 4 attempts must bound the reset upstream; got %d attempts", accepts.Load())
+			assert.Contains(t, err.Error(), "fast-fail",
+				"the runtime handoff loop must stop via the consecutive-handoff guard, got: %v", err)
+			assert.Equal(t, int64(12), accepts.Load(),
+				"transport budget of 4 attempts bounds each provider call; the runtime handoff loop is bounded by the fast-fail guard at 3 rounds; got %d attempts", accepts.Load())
 		})
 	}
 }
@@ -466,6 +473,69 @@ func TestProviderTransportBudgetWinsOverHeaderGuard(t *testing.T) {
 				"the finite transport budget should determine the terminal error, got: %v", err)
 			assert.Equal(t, int64(4), transport.requests.Load(),
 				"finite transport budget must allow four attempts before exhaustion")
+		})
+	}
+}
+
+// TestProviderTransportBudgetHandoffRecoversAtRuntimeLayer reproduces the
+// production report "provider transport stream failed after retries: failed
+// to send request: timeout awaiting response headers (response-header guard
+// after 20s)" surfacing as retryable=false: the request-phase transport
+// budget must hand the transient failure to the outer runtime loop — the same
+// semantics as the response-phase exhaustion — instead of terminating, so the
+// runtime can retry the whole provider call after a backoff and the call
+// recovers once the upstream starts answering again.
+func TestProviderTransportBudgetHandoffRecoversAtRuntimeLayer(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                  "openai",
+				BaseURL:               "http://provider.invalid",
+				MaxRetries:            5,
+				MaxTransportRetries:   2, // tighter transport budget: 2 requests per provider call
+				ResponseHeaderTimeout: 25 * time.Millisecond,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, err)
+			transport := &headerGuardHandoffRoundTripper{failures: 4, streaming: streaming}
+			wrapper := provider.(*ProviderWrapper)
+			wrapper.httpClient = &http.Client{Transport: transport}
+			wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+			runtime := NewLLMRuntime(&RuntimeConfig{
+				DefaultModel: "hung-model",
+				MaxRetries:   3,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			resp, err := runtime.Call(ctx, &LLMRequest{
+				Model:  "hung-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, "recovered", resp.Content)
+			assert.Equal(t, int64(5), transport.requests.Load(),
+				"two exhausted transport budgets (2+2 requests) must hand off to the runtime loop, whose retry lets the fifth request succeed")
 		})
 	}
 }
@@ -689,4 +759,160 @@ func TestRuntimeStopsAfterRepeatedResponsePhaseHandoffs(t *testing.T) {
 	// 3 consecutive handoffs x 2 transport attempts each = 6 requests.
 	assert.Equal(t, int64(6), transport.requests.Load(),
 		"the consecutive-handoff guard must bound the requests; got %d", transport.requests.Load())
+}
+
+// requestPhaseEOFHandoffRoundTripper simulates an upstream whose connection is
+// closed before any response bytes arrive (io.EOF at the transport layer —
+// the exact "failed to send request: Post ... EOF" production shape). The
+// first failFirst requests die this way; later requests return a valid
+// response.
+type requestPhaseEOFHandoffRoundTripper struct {
+	requests  atomic.Int64
+	failFirst int64
+	streaming bool
+}
+
+func (t *requestPhaseEOFHandoffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	n := t.requests.Add(1)
+	if n <= t.failFirst {
+		return nil, io.EOF
+	}
+	body := `{"id":"chatcmpl-recovered","object":"chat.completion","created":1,"model":"hung-model","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	contentType := "application/json"
+	if t.streaming {
+		contentType = "text/event-stream"
+		body = `data: {"choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}` + "\n\n" +
+			"data: [DONE]\n\n"
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{contentType}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+// TestProviderRequestPhaseEOFHandoffRetriesWithUnlimitedRuntimeBudget
+// reproduces the user's production report: an upstream that answers
+// "provider transport stream failed after retries: failed to send request:
+// Post ... EOF" (request-phase transport EOF). The inner provider burns its
+// tight transport budget (2 attempts) and hands the transient failure to the
+// enclosing runtime loop. Even with an UNLIMITED outer runtime budget
+// (MaxRetries=-1) — the configuration that previously surfaced as
+// retryable=false with no "Retrying" because decisionForRetry refused to
+// reclassify a handoff — the runtime loop must retry the whole provider call
+// after a backoff and recover once the upstream starts answering again.
+func TestProviderRequestPhaseEOFHandoffRetriesWithUnlimitedRuntimeBudget(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                "openai",
+				BaseURL:             "http://provider.invalid",
+				MaxRetries:          3,
+				MaxTransportRetries: 2,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, err)
+			transport := &requestPhaseEOFHandoffRoundTripper{failFirst: 5, streaming: streaming}
+			wrapper := provider.(*ProviderWrapper)
+			wrapper.httpClient = &http.Client{Transport: transport}
+			wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+			runtime := NewLLMRuntime(&RuntimeConfig{
+				DefaultModel: "hung-model",
+				MaxRetries:   -1, // unlimited outer runtime budget
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			resp, err := runtime.Call(ctx, &LLMRequest{
+				Model:  "hung-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, "recovered", resp.Content)
+			assert.Equal(t, int64(6), transport.requests.Load(),
+				"two exhausted transport budgets (2+2 requests) hand off to the unlimited runtime loop; the third round's first request (the 5th) still fails and the 6th succeeds")
+		})
+	}
+}
+
+// TestUnlimitedRuntimeStopsAfterRepeatedRequestPhaseHandoffs verifies that an
+// unlimited outer runtime loop is still bounded: when the upstream keeps
+// dying with request-phase EOF, each inner run fast-fails on its transport
+// budget and hands off. The runtime's consecutive-handoff guard stops after a
+// few rounds instead of spinning forever on the same dead upstream.
+func TestUnlimitedRuntimeStopsAfterRepeatedRequestPhaseHandoffs(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider, err := NewProvider(&ProviderConfig{
+				Type:                "openai",
+				BaseURL:             "http://provider.invalid",
+				MaxRetries:          3,
+				MaxTransportRetries: 2,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, err)
+			transport := &requestPhaseEOFHandoffRoundTripper{failFirst: 1 << 30, streaming: streaming}
+			wrapper := provider.(*ProviderWrapper)
+			wrapper.httpClient = &http.Client{Transport: transport}
+			wrapper.streamHTTPClient = &http.Client{Transport: transport}
+
+			runtime := NewLLMRuntime(&RuntimeConfig{
+				DefaultModel: "hung-model",
+				MaxRetries:   -1,
+				RetryTuning: RetryTuning{
+					BaseDelay:     time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					Randomization: -1,
+				},
+			})
+			require.NoError(t, runtime.RegisterProvider("hung-model", provider))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err = runtime.Call(ctx, &LLMRequest{
+				Model:  "hung-model",
+				Stream: streaming,
+				Messages: []types.Message{{
+					Role:    "user",
+					Content: "hello",
+				}},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "fast-fail",
+				"consecutive-handoff guard should bound an unlimited runtime loop, got: %v", err)
+			// 3 consecutive handoffs x 2 transport attempts each = 6 requests.
+			assert.Equal(t, int64(6), transport.requests.Load(),
+				"the consecutive-handoff guard must bound the requests; got %d", transport.requests.Load())
+		})
+	}
 }

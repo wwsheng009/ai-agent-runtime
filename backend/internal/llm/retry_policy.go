@@ -360,9 +360,12 @@ func (p retryPolicy) decisionForError(err error) retryDecision {
 // fast-fail guard ends that loop, it marks the exhaustion for handoff so the
 // caller's outer retry loop gets a chance to make a fresh request. A normal
 // budget exhaustion remains terminal, preventing nested loops from multiplying
-// requests. Reclassification is for execution only; DiagnoseFailure
-// continues to use decisionForError and therefore still reports an exhausted
-// error as non-retryable after all layers finish.
+// requests. The outer retry rounds are bounded by the caller's consecutive
+// handoff guard (maxConsecutiveFastFailHandoffs), which stops an unlimited
+// outer loop after a few fast-fail rounds instead of spinning forever.
+// Reclassification is for execution only; DiagnoseFailure continues to use
+// decisionForError and therefore still reports an exhausted error as
+// non-retryable after all layers finish.
 func (p retryPolicy) decisionForRetry(err error) retryDecision {
 	decision := p.decisionForError(err)
 	if decision.Reason != "retry_exhausted" {
@@ -373,13 +376,6 @@ func (p retryPolicy) decisionForRetry(err error) retryDecision {
 	// marker, replaying the request would duplicate that output.
 	var suppressedErr *retrySuppressedError
 	if stderrs.As(err, &suppressedErr) {
-		return decision
-	}
-	// Do not turn an unlimited outer loop into an unbounded sequence of
-	// provider-local guard bursts. A handoff is useful only when the caller
-	// has a finite larger budget; otherwise the guard's terminal disposition
-	// is the safety boundary.
-	if p.initialMaxAttempts() <= 0 {
 		return decision
 	}
 

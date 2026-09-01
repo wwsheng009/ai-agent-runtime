@@ -340,6 +340,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 
 	var lastError error
 	maxTokensRecovered := false
+	consecutiveHandoffs := 0
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		retryInfo.Attempt = attempt
@@ -368,6 +369,20 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			)
 
 			lastError = err
+			// Consecutive-handoff guard: when a nested provider keeps
+			// fast-failing and handing its transient error back to this
+			// gateway loop, stop after a few rounds instead of spending an
+			// unlimited gateway budget on the same dead upstream. Any
+			// non-handoff error resets the streak.
+			var exhaustedErr *retryExhaustedError
+			if errors.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
+				consecutiveHandoffs++
+				if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
+					return nil, markRetryExhausted("gateway call failed after repeated fast-fail retries", policy.MaxAttempts, err)
+				}
+			} else {
+				consecutiveHandoffs = 0
+			}
 			// Deterministic max_tokens ceiling rejections can be repaired once
 			// without rotating providers, using the provider-reported limit.
 			if !maxTokensRecovered && applyMaxTokensLimitRecovery(&req.MaxTokens, err) {

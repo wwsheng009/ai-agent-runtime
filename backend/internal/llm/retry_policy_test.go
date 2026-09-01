@@ -87,8 +87,8 @@ func TestRetryDecisionForRetryHandoffReclassifiesOnlyMarkedExhaustion(t *testing
 		"an enclosing retry layer must preserve a marked handoff")
 
 	unlimitedOuter := newRuntimeRetryPolicy(-1, 0, RetryTuning{}, nil)
-	assert.False(t, unlimitedOuter.decisionForRetry(handoff).Retryable,
-		"an unlimited outer loop must keep the guard as its safety boundary")
+	assert.True(t, unlimitedOuter.decisionForRetry(handoff).Retryable,
+		"an unlimited outer loop must reclassify a marked handoff; the consecutive-handoff guard bounds the retry rounds")
 
 	terminal := markRetryExhausted("provider call failed after retries", 2, transient)
 	assert.False(t, policy.decisionForRetry(terminal).Retryable,

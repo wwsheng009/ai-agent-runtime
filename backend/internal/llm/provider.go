@@ -1143,11 +1143,12 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 			if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
 				// The tighter transport budget is exhausted before any
 				// response was received: the upstream is unreachable right
-				// now, and a fresh connection from scratch rarely succeeds
-				// immediately. This is terminal, not handed to the outer
-				// loop: the transport budget deliberately binds over the
-				// business budget for dead connections.
-				return nil, markRetryExhausted("provider transport call failed after retries", policy.MaxTransportAttempts, err)
+				// now. The transport budget still binds inside this loop
+				// (fast-fail instead of burning the business budget), but
+				// the transient failure is handed to the enclosing runtime
+				// loop, which owns the total retry guarantee and can retry
+				// after a backoff once the upstream recovers.
+				return nil, markRetryExhaustedForNextLayer("provider transport call failed after retries", policy.MaxTransportAttempts, err)
 			}
 		}
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
@@ -1392,9 +1393,14 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				transportAttempts++
 				if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
 					// Request-phase transport budget exhausted before any
-					// response headers arrived: the upstream is dead, so the
-					// tighter transport budget wins over the business budget.
-					return nil, markRetryExhausted("provider transport stream failed after retries", policy.MaxTransportAttempts, lastErr)
+					// response headers arrived. The transport budget still
+					// binds inside this loop (fast-fail instead of burning
+					// the business budget), but the transient failure is
+					// handed to the enclosing runtime loop — same semantics
+					// as the response-phase exhaustion below — so the outer
+					// loop can retry after a backoff and surface
+					// "Retrying attempt=..." progress instead of a hard stop.
+					return nil, markRetryExhaustedForNextLayer("provider transport stream failed after retries", policy.MaxTransportAttempts, lastErr)
 				}
 			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{

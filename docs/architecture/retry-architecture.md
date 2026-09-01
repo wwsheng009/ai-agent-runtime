@@ -130,8 +130,9 @@ for attempt := 1; retryAttemptAllowed(MaxAttempts, attempt)
     if transportFailure := isTransportBudgetError(err); transportFailure {
         transportAttempts++
         if MaxTransportAttempts > 0 && transportAttempts >= MaxTransportAttempts {
-            // 响应头都未收到即耗尽 → 上游当前不可达，终态（不接力）
-            return nil, markRetryExhausted("provider transport call failed after retries", ...)
+            // 响应头都未收到即耗尽 → 上游当前不可达。内层快速失败（不烧业务
+            // 预算），但作为瞬态失败接力外层，由外层退避后重试整轮 provider 调用
+            return nil, markRetryExhaustedForNextLayer("provider transport call failed after retries", ...)
         }
     }
     retryResult, retryErr := prepareRetry(...)   // 分类 + 退避 + 等待 + 上报事件
@@ -172,9 +173,10 @@ if handleErr != nil {
 }
 ```
 
-> **请求阶段 vs 响应阶段的关键差异**：
-> - 请求阶段 transport 耗尽 → **终态**（上游已死，别浪费外层预算）
-> - 响应阶段 transport 耗尽 → **接力外层**（HTTP 200 后流中断值得用全新请求再试）
+> **请求阶段与响应阶段语义一致（2026-08-31 统一）**：
+> - 两个阶段的 transport 预算耗尽都 → **接力外层**。内层小预算快速失败、
+>   不烧业务预算；外层大预算负责总重试保证，退避后用全新请求再试
+>   （上游恢复即可成功）。外层连续接力由 fast-fail 守卫（3 轮）封顶。
 
 ### 4.3 内层循环退出后：`isHandoffEligibleError`
 
@@ -335,9 +337,10 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 ### 场景 B：连接挂死（响应头超时）
 1. 内层第一次 `Chat` 等待响应头 60s 超时 → transport 计数 1
 2. 第二次再超时 → transport 计数 2 … 直到 `MaxTransportAttempts=4` 耗尽
-3. 请求阶段耗尽 → 终态 `provider transport call failed`（不接力，因为上游已死）
-4. （若预算无限）连续 2 次响应头超时触发 streak 守卫 → 接力外层
-5. 外层接力重分类 `transport` → 按间隔重试，连续 3 轮接力后终止
+3. 请求阶段耗尽 → `provider transport call failed` **接力外层**（瞬态失败；
+   总请求上限 ≈ 3 轮 × 4 次 = 12 次，由外层 fast-fail 守卫封顶）
+4. 外层接力重分类 `transport` → 按间隔重试，连续 3 轮接力后终止
+5. （若内层预算无限）连续 2 次响应头超时触发 streak 守卫 → 同样接力外层
 
 ### 场景 C：SSE 流中断（HTTP 200 后 EOF）
 1. 内层收到 200，流读取到一半 EOF → `read SSE stream: unexpected EOF`
@@ -403,7 +406,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 ## 10. 设计要点与约束
 
 1. **两层互相配合**：内层在 transport 小预算上快速失败（连接超时后快速断开），外层用大预算保证总重试次数；内层"快速断开 + 接力"避免把外层预算浪费在死连接上。
-2. **transport 预算绑定死连接**：请求阶段 transport 耗尽终态，防止对不可达上游反复建连。
+2. **transport 预算绑定死连接**：请求阶段 transport 耗尽在内层快速失败（不烧业务预算），但作为瞬态失败接力外层；外层 fast-fail 守卫（3 轮）防止对不可达上游无限建连。
 3. **已输出内容 + 瞬态错误 → 强制重试（partial-output replay，2026-08-31）**：流式中途出错若已产生可见内容，只有确定性错误（quota/invalid_request/content_filter/取消）保持 `suppressRetry` 终态；瞬态错误（SSE EOF/连接重置/空闲超时/5xx/429/流中断/空回复）继续走完整重试链路，重放重新生成全文并接受重复的部分输出。重放事件通过 `llm.retry` 的 `partial_output=true` 标记透传（RetryEvent.PartialOutput → loop.go/skills handler payload → aicli `chatLLMRetryParts` 渲染 `partial_output=true`）。判定入口：`mustSuppressRetryAfterEmission`（retry_policy.go，非 `classifyRetryableLLMError().Retryable` 即抑制）；标记：`withPartialOutputMarker`/`errHasPartialOutput`（`partialOutputError` 包装，对分类透明）。
 4. **已输出内容永不重复计费重试的例外已收窄**：历史行为是"已输出即永不重试"，导致 aicli 端 `read SSE stream: unexpected EOF` 在已流出部分正文后零重试直接终态（2026-08-31 修复前）；现仅确定性错误保留该语义。
 4. **无限预算防放大**：外层无限（MaxRetries=-1）时接力不会扩展循环；连续接力 3 轮封顶。

@@ -480,7 +480,14 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		if stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
 			consecutiveHandoffs++
 			if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
-				return nil, markRetryExhausted("provider call failed after repeated fast-fail retries", policy.MaxAttempts, err)
+				// Use consecutiveHandoffs as the attempt count so
+				// markRetryExhausted always wraps the error (it returns err
+				// unchanged when attempts <= 1).  With MaxRetries=-1
+				// (unlimited), policy.MaxAttempts would be -1, which is <= 1,
+				// and the guard's "fast-fail" message would be lost, causing
+				// DiagnoseFailure to report retryable=false for the provider's
+				// raw exhaustion error.
+				return nil, markRetryExhausted("provider call failed after repeated fast-fail retries", consecutiveHandoffs, err)
 			}
 		} else {
 			consecutiveHandoffs = 0
@@ -601,7 +608,11 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 		if stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
 			consecutiveHandoffs++
 			if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
-				return nil, attempt, markRetryExhausted("LLM stream failed after repeated fast-fail retries", policy.MaxAttempts, err)
+				// Same guard as Call: use consecutiveHandoffs as the attempt
+				// count so markRetryExhausted always wraps the error even when
+				// the runtime budget is unlimited (MaxRetries=-1) and
+				// policy.MaxAttempts would otherwise be <= 1.
+				return nil, attempt, markRetryExhausted("LLM stream failed after repeated fast-fail retries", consecutiveHandoffs, err)
 			}
 		} else {
 			consecutiveHandoffs = 0
