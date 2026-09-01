@@ -10,7 +10,7 @@ import (
 
 func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	surface := newTestFixedBottomSurface()
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
 
 	output := captureUIStdout(t, func() {
 		if !surface.ShowPrompt("> ") {
@@ -95,7 +95,7 @@ func TestBottomPaneStateDynamicStatusReservesOneRow(t *testing.T) {
 
 func TestFixedBottomSurface_ComposerMarginsCollapseOnShortTerminal(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	surface := newTestFixedBottomSurfaceWithSize(80, 10)
+	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 10)
 
 	output := captureUIStdout(t, func() {
 		if !surface.ShowPrompt("> ") {

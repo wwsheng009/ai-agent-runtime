@@ -54,7 +54,7 @@ func TestFixedBottomSurface_BottomRowsSnapshotMatchesLegacyVT(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	const width, height = 32, 24
-	surface := newTestFixedBottomSurfaceWithSize(width, height)
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	screen := vt.NewScreen(width, height)
 	apply := func(name string, paint func()) {
 		t.Helper()
@@ -107,7 +107,7 @@ func TestFixedBottomSurface_BottomRowsSnapshotPreservesStyledCells(t *testing.T)
 	t.Setenv("FORCE_COLOR", "1")
 
 	const width, height = 36, 24
-	surface := newTestFixedBottomSurfaceWithSize(width, height)
+	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	surface.terminal.driver.caps = TerminalCapabilities{Interactive: true, ANSI: true}
 	screen := vt.NewScreen(width, height)
 	output := captureUIStdout(t, func() {

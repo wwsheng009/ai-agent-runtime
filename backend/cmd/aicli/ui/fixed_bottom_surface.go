@@ -3830,17 +3830,9 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 		s.renderOwnedViewportLocked()
 		return
 	}
-	state := s.bottomPaneStateLocked()
-	if state.sessionStatusVisibleRowCount() > 0 {
-		s.terminal.MoveTo(s.statusRowLocked()-1, 1)
-		s.terminal.ClearLine()
-		fmt.Fprint(TerminalOutput(), truncateFixedPopupLine(strings.TrimSpace(state.SessionIDLine), s.terminal.Width()))
-		s.terminal.ClearLine()
-	}
-	s.terminal.MoveTo(s.statusRowLocked(), 1)
-	s.terminal.ClearLine()
-	fmt.Fprint(TerminalOutput(), s.statusPaintTextLocked(state, s.terminal.Width()))
-	s.terminal.ClearLine()
+	// Legacy body removed (Phase 6): owned mode handles status rendering via
+	// renderOwnedViewportLocked or TerminalSession presenter. This codepath
+	// was only reachable in legacy test mode (ownedViewport=false).
 }
 
 func (s *FixedBottomSurface) renderPopupLocked() {
@@ -3858,29 +3850,9 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 		s.renderOwnedViewportLocked()
 		return
 	}
-	state := s.bottomPaneStateLocked()
-	plan := s.popupPaintPlanLocked(state, s.terminal.Height())
-	if plan.reservedRows == 0 {
-		if s.popupRenderedRows > 0 {
-			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.clearPopupRenderStateLocked()
-		}
-		return
-	}
-	if s.popupRenderedRows > 0 && (s.popupRenderedRows != plan.reservedRows || s.popupRenderedGapRows != plan.gapRows) {
-		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-		s.clearPopupRenderStateLocked()
-	}
-	for _, paint := range plan.rows {
-		s.terminal.MoveTo(paint.row, 1)
-		s.terminal.ClearLine()
-		if paint.text != "" {
-			fmt.Fprint(TerminalOutput(), paint.text)
-		}
-	}
-	s.popupRenderedRows = plan.reservedRows
-	s.popupRenderedGapRows = plan.gapRows
-	s.popupRenderedStartRow = plan.startRow
+	// Legacy body removed (Phase 6): owned mode handles popup rendering via
+	// renderOwnedViewportLocked or TerminalSession presenter. This codepath
+	// was only reachable in legacy test mode (ownedViewport=false).
 }
 
 func (s *FixedBottomSurface) moveToOutputLocked() {
@@ -4174,39 +4146,9 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		s.renderOwnedViewportLocked()
 		return
 	}
-	state := s.bottomPaneStateLocked()
-	plan := s.promptPaintPlanLocked(state, s.terminal.Width())
-	if plan.skip {
-		return
-	}
-	if plan.empty {
-		if s.promptRenderedRows > 0 {
-			s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
-			s.promptRenderedStartRow = 0
-			s.promptRenderedRows = 0
-		}
-		return
-	}
-	// Layout bottom-up: [active band][notice][dynamic status][top margin]
-	// [prompt][bottom margin][status]. Margins are reserved only for the main
-	// chat composer, so transient popups and prompt-less streaming stay dense.
-	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != plan.startRow || s.promptRenderedRows != plan.areaRows) {
-		s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
-	}
-	if clear {
-		s.clearRowsLocked(plan.startRow, plan.areaRows)
-	}
-	for _, paint := range plan.rows {
-		if paint.row < 1 {
-			continue
-		}
-		s.terminal.MoveTo(paint.row, 1)
-		if paint.text != "" {
-			fmt.Fprint(TerminalOutput(), paint.text)
-		}
-	}
-	s.promptRenderedStartRow = plan.startRow
-	s.promptRenderedRows = plan.areaRows
+	// Legacy body removed (Phase 6): owned mode handles prompt rendering via
+	// renderOwnedViewportLocked or TerminalSession presenter. This codepath
+	// was only reachable in legacy test mode (ownedViewport=false).
 }
 
 // OwnedViewport reports whether the production owned-viewport renderer is active.

@@ -318,7 +318,7 @@ type TerminalEffectFailed struct { Token uint64; Err error; MayHavePartiallyWrit
 
 - 任务 1/2 实质性删除已完成并全绿：`zz_` 诊断、legacy binding 链、`LegacyTransactionAdapter`/`LegacyImmediateAdapter`、`vt_emulator_adapter.go`/`virtual_terminal.go`、legacyReserve 序列链（含 `flushLegacyANSIHoldingLock` 与各双路径函数的 legacy flush/debt 分支体）、22 个 legacy 渲染合约测试、死函数 `terminalScrollRegionSequence`。`applyLayout*` 非 owned 路径改为布局簿记（`SyncTerminalGeometry*` 恢复通过）。
 - 清单口径修正：`historyWindow`/`commitExcessHistoryToScrollbackLocked`/`handoffFrontier` 为 owned 模式活跃代码，删除项应为"legacy-only 调用面"（已完成）；`headroom` 仅注释语义。
-- **遗留边界**：`renderStatusLocked`/`renderPopupLocked`/`renderPromptRowsLocked` legacy 即时渲染主体仍保留——活跃代码（~20 调用点 + 31 个 legacy 合约测试），删除需先完成"测试迁移到 owned 模式"（测试环境默认 non-owned、断言 `TerminalOutput()` 序列）；`screen_lease.go` 的 Release legacy 渲染序列同理由保留。
+- **遗留边界（2026-09-01 已关闭）**：`renderStatusLocked`/`renderPopupLocked`/`renderPromptRowsLocked` legacy 即时渲染主体已删除（替换为 Phase 6 注释占位），配套 33 个 legacy 合约测试已迁移到 owned 模式（`newOwnedTestFixedBottomSurfaceWithSize` + owned diff 输出契约断言），`go test ./cmd/aicli/... -count=1` 全绿；`screen_lease.go` 的 Release legacy 渲染序列经核对仍为 owned/lease 模式活跃代码（保留）。详见母计划"切片 17 施工记录续"。
 - 任务 3（renderer mode 仅 session 初始化选择）、任务 5（真实终端矩阵）未开工；详细盘点见母计划"切片 17 施工记录"。
 
 **出口**

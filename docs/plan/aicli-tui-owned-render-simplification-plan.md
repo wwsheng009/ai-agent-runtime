@@ -426,6 +426,18 @@ ActiveBand/prompt/popup/status 的行数变化只产生 `GeometryChanged`/state 
 
 验证：`go build ./...`、`go vet`、`go test ./cmd/aicli/ui/...`（15 包，-count=1）全绿；`go test -race ./cmd/aicli/ui/` 绿。`commands` 包仅剩 1 个环境性失败（`TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir`：本机运行中的 aicli 进程占用 `data/runtime/session_runtime.sqlite`，与删除工作无关）。剩余：renderer-mode session 初始化选择、非 Windows PTY 验收、Windows 长会话/resize/400+ 行矩阵、P8/P9 清单与 runbook 同步（见实施指南 Phase 6 任务 3/5/6）。
 
+**切片 17 续（2026-09-01，render*Locked legacy 主体删除完成）**：上一条记录中被标记"已回退、待独立里程碑"的 `renderStatusLocked`/`renderPopupLocked`/`renderPromptRowsLocked` legacy 即时渲染主体（直写 `TerminalOutput()`）已正式删除，替换为 Phase 6 注释占位（owned 模式经 `renderOwnedViewportLocked`/TerminalSession presenter 渲染，legacy 分支仅在测试 legacy 模式可达且为空操作）。
+
+配套的 33 个 legacy 行为合约测试已迁移到 owned 模式（`newTestFixedBottomSurface*` → `newOwnedTestFixedBottomSurfaceWithSize`，断言从 legacy 字节序列适配 owned diff 输出契约：`\x1b[row;1H\x1b[0m`+text+`\x1b[0m`、未变行/帧不重绘、NO_COLOR 下仅允许结构性 `\x1b[0m` 重置）：
+
+- `fixed_bottom_surface_test.go`：27 个测试迁移（popup 簿记、prompt 多行 viewport、active band、composer preview、notice/status 布局等）。
+- `fixed_bottom_surface_snapshot_test.go`：`BottomRowsSnapshotMatchesLegacyVT`/`PreservesStyledCells` 迁移（snapshot 与 vt.Screen 回放断言在 owned 模式下保持）。
+- `dynamic_status_test.go`：`DynamicStatusRendersAbovePrompt`/`ComposerMarginsCollapseOnShortTerminal` 迁移。
+
+行为契约适配点（owned diff 语义替代 legacy 字节格式）：行内 move 与文本之间出现结构性 `\x1b[0m`；多行文本不再用 `\r\n` 连接而是逐行 MoveTo；未变帧 `RefreshActiveBand` 不产字节（状态保留断言）；`SetActiveBand` 变化行只输出变化单元格；`ClearComposerPreview` 不重绘未变 popup 内容（popup 状态断言为准）；NO_COLOR SGR 正则改为仅禁止非零 SGR。
+
+验证：`go build`、`go vet ./cmd/aicli/ui/`、`go test ./cmd/aicli/... -count=1`（含 commands 68s、ui 15 包）全绿。剩余：renderer-mode session 初始化选择、非 Windows PTY 验收、Windows 长会话/resize/400+ 行矩阵、P8/P9 清单与 runbook 同步（见实施指南 Phase 6 任务 3/5/6）。
+
 2026-08-02 版本曾提出“两个物理所有者 + `AppendNewRows/ScrollExistingRows` + 全局 Frame/Scrollback mode + `committedBoundary int`”。评审后否决，原因如下：
 
 - 缺少独立 semantic source truth 和 pending effect 层；
