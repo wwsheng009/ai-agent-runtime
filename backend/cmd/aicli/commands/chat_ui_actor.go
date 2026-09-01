@@ -126,6 +126,9 @@ func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.R
 		// --render-output-file：FileSink 作为 committed-only mirror，把全部
 		// terminal wire 字节镜像落盘；console primary 渲染完全不变。mirror
 		// 是 best-effort 旁路——文件打开失败不阻断交互会话（网关本身无碍）。
+		// SyncEveryWrite：每个 committed batch 写入后立即 fsync，运行期间
+		// 数据就落盘可见，不依赖 aicli 退出时的 Close 才 flush；SyncOnClose
+		// 兜底保证收尾时再做最终同步。
 		fs, fsErr := outputpkg.NewFileSink(
 			outputpkg.TargetDescriptor{
 				SinkID:             "file-interactive",
@@ -133,7 +136,7 @@ func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.R
 				ProjectionTargetID: "pt-interactive",
 			},
 			path,
-			outputpkg.FileSinkOptions{SyncOnClose: true},
+			outputpkg.FileSinkOptions{SyncEveryWrite: true, SyncOnClose: true},
 		)
 		if fsErr != nil {
 			fmt.Fprintf(os.Stderr, "[aicli] --render-output-file 打开失败，已跳过镜像落盘: %v\n", fsErr)
