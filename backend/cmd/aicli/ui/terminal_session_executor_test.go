@@ -1028,6 +1028,90 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 	}
 }
 
+// TestTerminalSessionExecutorFlushesWhileSuccessBackoff locks in the
+// frozen-prompt-input fix: when the scrollback-reset backoff is engaged in
+// SUCCESS mode (the writer is healthy but the recovery obligation is not
+// converging at an unchanged layout generation), the executor must still flush
+// a plain viewport transaction so the bottom surface / prompt input keeps
+// rendering. It must NOT perform the expensive reset+replay, and it must not
+// starve the prompt surface either. In FAILED mode the writer is broken and
+// stays untouched (covered by TestTerminalSessionExecutorFailedReconciliationArmsBackoff).
+func TestTerminalSessionExecutorFlushesWhileSuccessBackoff(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	controller := newHistoryExecutorController(t, func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	writer := &terminalSessionShortWriter{}
+	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	// A minimal settled UI state with a prompt input surface, mirroring a
+	// session that has resumed and settled.
+	post := func(actions ...UIAction) {
+		t.Helper()
+		for _, action := range actions {
+			if !controller.Post(action) {
+				t.Fatalf("post %T", action)
+			}
+		}
+		controller.WaitIdle()
+	}
+	post(
+		Resize{Width: 80, Height: 10, Generation: 4},
+		SetSemanticActiveCellProjectionAction{Enabled: true},
+		ShowPromptAction{Line: "> "},
+	)
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	// Simulate the post-resume recovery obligation that transcript replay
+	// re-arms but never converges at an unchanged layout generation.
+	controller.mu.Lock()
+	controller.state.HistoryEffects.ProjectionUnknown = true
+	controller.mu.Unlock()
+	startGen := controller.LayoutGeneration()
+
+	// Arm the success-mode backoff exactly as armRecoveryBackoff does for a
+	// successful-but-non-converging recovery: lastResetFailed=false at the
+	// settled generation.
+	if !executor.armRecoveryBackoff(TerminalTransactionResult{}, startGen) {
+		t.Fatal("success-mode backoff was not armed")
+	}
+	executor.mu.Lock()
+	successMode := !executor.lastResetFailed
+	executor.mu.Unlock()
+	if !successMode {
+		t.Fatal("test setup: backoff not in success mode")
+	}
+
+	writesBefore := writer.writes
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	if writer.writes <= writesBefore {
+		t.Fatalf("success-mode backoff starved the prompt surface: writes %d -> %d",
+			writesBefore, writer.writes)
+	}
+
+	diag := executor.RecoveryDiag()
+	if diag.FlushesWhileBackoff == 0 {
+		t.Fatalf("success-mode backoff flush not recorded: diag=%+v", diag)
+	}
+	if len(diag.Entries) == 0 {
+		t.Fatal("no diag entries recorded")
+	}
+	last := diag.Entries[len(diag.Entries)-1]
+	if !last.BackoffEngaged || !last.FlushedWhileBackoff {
+		t.Fatalf("last diag entry missing backoff-flush markers: %+v", last)
+	}
+	if last.ScrollbackReset {
+		t.Fatal("success-mode backoff flush unexpectedly performed a scrollback reset")
+	}
+}
+
 // TestExecutorDiagDiagnosisIdle verifies that a fresh diag reports "idle".
 func TestExecutorDiagDiagnosisIdle(t *testing.T) {
 	d := ExecutorRecoveryDiag{}

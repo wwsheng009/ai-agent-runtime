@@ -21,6 +21,7 @@ type ExecutorRecoveryDiagEntry struct {
 	ProjectionUnknown bool   `json:"projectionUnknown"`
 	ReconciliationReq bool   `json:"reconciliationRequired"`
 	BackoffEngaged    bool   `json:"backoffEngaged"`
+	FlushedWhileBackoff bool `json:"flushedWhileBackoff"`
 	FullRepaint       bool   `json:"fullRepaint"`
 	ScrollbackReset   bool   `json:"scrollbackReset"`
 	FrameErr          string `json:"frameErr"`
@@ -36,6 +37,11 @@ type ExecutorRecoveryDiag struct {
 	Entries         []ExecutorRecoveryDiagEntry `json:"entries"`
 	BackoffEngaged  uint64                      `json:"backoffEngaged"`
 	ArmedBackoff    uint64                      `json:"armedBackoff"`
+	// FlushesWhileBackoff counts plain viewport flushes performed while the
+	// scrollback-reset backoff was engaged. A growing count proves the bottom
+	// surface (prompt input) is still being rendered under backoff — the guard
+	// suppresses scrollback resets only, not live rendering.
+	FlushesWhileBackoff uint64 `json:"flushesWhileBackoff"`
 	TotalRecoveries uint64                      `json:"totalRecoveries"`
 	// GeneratedAtUnixMs is when this snapshot was assembled; it lets a caller
 	// compute whether the loop is still advancing between two polls.
@@ -120,6 +126,12 @@ type TerminalSessionExecutor struct {
 	// and how often the executor armed it after a non-converging recovery.
 	diagBackoffEngaged uint64
 	diagArmedBackoff   uint64
+	// diagFlushedWhileBackoff counts how many times the executor performed a
+	// plain viewport flush while the scrollback-reset backoff was engaged.
+	// A growing count proves prompt-input rendering stays live under backoff
+	// (the fix for the post-resume frozen input area), distinct from the
+	// suppressed scrollback resets.
+	diagFlushedWhileBackoff uint64
 
 	// lastResetAt / lastResetEpoch are the scrollback recovery progress guard.
 	// A reconciliation that did not converge must not be re-armed on the next
@@ -177,6 +189,7 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 		Entries:                    entries,
 		BackoffEngaged:             e.diagBackoffEngaged,
 		ArmedBackoff:               e.diagArmedBackoff,
+		FlushesWhileBackoff:        e.diagFlushedWhileBackoff,
 		TotalRecoveries:            e.diagSeq,
 		GeneratedAtUnixMs:          time.Now().UnixMilli(),
 		GenerationAdvancesInWindow: executorDiagGenerationAdvances(entries),
@@ -249,6 +262,9 @@ func (e *TerminalSessionExecutor) recordRecoveryDiag(entry ExecutorRecoveryDiagE
 	if entry.ArmedBackoff {
 		e.diagArmedBackoff++
 	}
+	if entry.FlushedWhileBackoff {
+		e.diagFlushedWhileBackoff++
+	}
 	if len(e.diagRing) == diagRecoveryRingSize {
 		copy(e.diagRing, e.diagRing[1:])
 		e.diagRing[len(e.diagRing)-1] = entry
@@ -286,6 +302,18 @@ func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateGeneration uint64)
 		return time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
 	}
 	return true
+}
+
+// scrollbackResetSuccessMode reports whether the engaged backoff came from a
+// successful-but-non-converging recovery (lastResetFailed=false). In that mode
+// the physical writer is healthy and the executor may still perform plain
+// viewport flushes to keep the bottom surface (prompt input) live while
+// suppressing the expensive scrollback reset+replay. In failed mode the writer
+// is broken and must not be touched until the bounded window expires.
+func (e *TerminalSessionExecutor) scrollbackResetSuccessMode() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.lastResetFailed
 }
 
 // recordScrollbackReset persists the progress-guard state after a scrollback
@@ -510,6 +538,48 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		// (new layout generation) always allows recovery — the reset is a
 		// genuine retry, not a loop.
 		if e.scrollbackResetBackoff(schedule.stateGeneration) {
+			// Backoff engaged. Two failure modes:
+			//   - failed mode (lastResetFailed=true): the physical writer is
+			//     broken; do not touch it until the bounded window expires.
+			//   - success mode (lastResetFailed=false): the writer is healthy
+			//     but the recovery obligation will not converge at this layout
+			//     generation. A full scrollback reset would re-enter the
+			//     reset+replay loop (the observed ~2-core busy loop), so that
+			//     stays suppressed. But yielding without ANY flush would starve
+			//     the bottom surface — prompt input rendering depends on this
+			//     executor's flush, so after `resume` the user's keystrokes
+			//     would never reach the terminal (frozen input area). Perform a
+			//     plain viewport transaction instead, which keeps prompt
+			//     rendering live while still suppressing the expensive
+			//     reset+replay. publishResult may also post
+			//     HistoryProjectionRecovered when the viewport repaint proves
+			//     the projection known, which heals the obligation and exits
+			//     the guard naturally.
+			if e.scrollbackResetSuccessMode() {
+				snapshot := e.controller.terminalSessionSnapshot(0)
+				if terminalSessionSnapshotRecoveryActionable(snapshot) {
+					plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
+					result := e.session.FlushTransaction(plan)
+					e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+					e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
+						Branch:              "scheduled",
+						Revision:            schedule.stateRevision,
+						RevisionAfter:       e.controller.Revision(),
+						Generation:          plan.Frame.LayoutGeneration,
+						TerminalEpoch:       result.TerminalEpoch,
+						ProjectionUnknown:   snapshot.projectionUnknown,
+						ReconciliationReq:   snapshot.reconciliationRequired,
+						BackoffEngaged:      true,
+						FlushedWhileBackoff: true,
+						FullRepaint:         result.Frame.FullRepaint,
+						ScrollbackReset:     result.ScrollbackReset,
+						FrameErr:            frameErrString(result.Frame.Err),
+						ObligationPending:   e.controller.terminalHistoryRecoveryObligationPending(),
+						Continued:           false,
+					})
+					return false
+				}
+			}
 			e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
 				Branch:         "scheduled",
 				Revision:       schedule.stateRevision,
