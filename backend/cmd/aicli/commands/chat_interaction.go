@@ -652,6 +652,9 @@ func (c *chatInteractionCoordinator) SetPrimaryPresenter(presenter *ui.TerminalS
 	c.unifiedRenderer = true
 	c.terminalSession = presenter.Session()
 	c.terminalExecutor = presenter.Executor()
+	// 把 executor 的 recovery-loop 诊断接到 pprof /debug/pprof/executor 端点，
+	// 使真实 resume 会话的逐次 recovery flush 状态可观测（观测手段）。
+	ui.SetExecutorDiagProvider(c.terminalExecutor.RecoveryDiag)
 	if c.session != nil {
 		c.session.TerminalSession = c.terminalSession
 		c.session.TerminalSessionExecutor = c.terminalExecutor

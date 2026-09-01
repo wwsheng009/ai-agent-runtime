@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
 // pprofServerHandle 持有按需启动的 pprof HTTP 服务器。
@@ -66,6 +69,16 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
 	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
 	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	// /debug/pprof/executor 暴露 TerminalSessionExecutor 的 recovery-loop 逐次
+	// 诊断（环形缓冲 + 计数器）。这是 CPU/goroutine profile 之外的观测手段：
+	// 它显示每次 recovery flush 的 revision 前后值、generation、epoch、
+	// ProjectionUnknown/ReconciliationRequired、FullRepaint/ScrollbackReset、
+	// frame 错误、backoff 是否 arm/触发——精确回答"executor 在重放什么、为什么
+	// 没有收敛"。未设置 provider 时返回空快照。
+	mux.HandleFunc("/debug/pprof/executor", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(ui.ExecutorDiagSnapshot())
+	})
 
 	server := &http.Server{
 		Handler: mux,

@@ -3,9 +3,9 @@ package commands
 // e2e：复现 win11 正常模式（unified renderer）下
 // "aicli chat 启动后 prompt 输入区消失 / 长时间无响应"。
 //
-// 与既有 driveTTYLiveLoop 测试的区别：显式走 EnableUnifiedRenderer
-// （TerminalSessionPresenter / Scene 渲染），覆盖 unified 模式下
-// prompt 渲染与输入可达性——这是用户 win11 报告问题的路径。
+// 与既有 driveTTYLiveLoop 测试的区别：显式驱动正常模式（unified
+// renderer / TerminalSessionPresenter / Scene 渲染）真实主循环，覆盖 unified
+// 模式下 prompt 渲染与输入可达性——这是用户 win11 报告问题的路径。
 
 import (
 	"os"

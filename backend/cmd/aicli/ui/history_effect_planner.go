@@ -701,29 +701,87 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	recordTranscriptPlanMemo(state)
 }
 
+// transcriptFinalizedPrefixFence fingerprints every finalized transcript cell
+// (Phase != CellMutable). The scene-wide Revision/ContentVersion counters
+// advance on every cell mutation — including the active cell's append-only
+// stream growth — so a memo keyed on them misses on every chunk and re-lays
+// out the entire finalized history (the O(entire history) cost this memo
+// exists to avoid). The fingerprint covers exactly what the finalized-prefix
+// plan reads: each finalized cell's identity, its per-cell mutation fence
+// (update/finalize/correct all require a strictly greater cell Revision, so
+// Revision is a reliable content/presentation proxy), sequence/chain grouping
+// (layout gap decisions read both), kind, phase, commit-block flag, boundary
+// class, and source length. Mutable cells are excluded because they are the
+// frontier barrier — their growth is planned by syncHistoryEffectsForActiveCell,
+// never part of the finalized plan. Chain keys are folded into the fence so an
+// unversioned snapshot that rewires tool-chain grouping cannot be memoized as
+// identical (the SceneID == 0 guard this fence replaces).
+func transcriptFinalizedPrefixFence(transcript TranscriptState) uint64 {
+	const (
+		fnvOffset = uint64(14695981039346656037) // FNV-1a 64-bit offset basis
+		fnvPrime  = uint64(1099511628211)
+	)
+	h := fnvOffset
+	for _, cell := range transcript.Cells {
+		// The mutable cell (and any transient second mutable cell before it
+		// finalizes) is the frontier barrier and never enters the finalized
+		// plan; exclude it so its stream growth cannot invalidate the memo.
+		if cell.Phase == scene.CellMutable {
+			continue
+		}
+		h ^= uint64(cell.ID)
+		h *= fnvPrime
+		h ^= cell.Revision
+		h *= fnvPrime
+		h ^= cell.Sequence
+		h *= fnvPrime
+		h ^= uint64(cell.Kind)
+		h *= fnvPrime
+		h ^= uint64(cell.Phase)
+		h *= fnvPrime
+		if cell.HistoryCommitBlocked {
+			h ^= 1
+		}
+		h *= fnvPrime
+		h ^= uint64(cell.Boundary)
+		h *= fnvPrime
+		h ^= uint64(len(cell.Source))
+		h *= fnvPrime
+		h = transcriptFenceFoldString(h, cell.ChainKey, fnvPrime)
+		h = transcriptFenceFoldString(h, cell.BoundaryGroupKey, fnvPrime)
+	}
+	return h
+}
+
+// transcriptFenceFoldString folds a grouping key into the finalized-prefix
+// fence. Chain keys are identity-relevant layout inputs (gap decisions), so
+// they must be part of the fingerprint even for unversioned snapshots.
+func transcriptFenceFoldString(h uint64, s string, prime uint64) uint64 {
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime
+	}
+	return h
+}
+
 // transcriptPlanMemoHit reports whether the finalized-prefix plan inputs are
 // identical to the ones that produced the last full transcript plan. The plan
-// (planEligibleHistoryCommits) is pure over the transcript fence, geometry,
-// theme, layout generation, and the projection flag: the acked Active-origin
-// prefix it reads via activeAckedRenderedPrefixRows is frozen once a cell
-// finalizes, and the mutable cell itself is the frontier barrier — never part
-// of the finalized plan. The transcript fields reuse the exact provenance
-// fence that transcriptSnapshotAlreadyInstalled already trusts to skip a whole
-// snapshot install, so they cannot miss a semantic content change.
+// (planEligibleHistoryCommits) is pure over the finalized transcript fence,
+// geometry, theme, layout generation, and the projection flag: the acked
+// Active-origin prefix it reads via activeAckedRenderedPrefixRows is frozen
+// once a cell finalizes, and the mutable cell itself is the frontier barrier —
+// never part of the finalized plan. The transcript fence is the per-cell
+// finalized fingerprint (not the scene-wide Revision/ContentVersion counters,
+// which the active cell's stream growth advances on every chunk). The fence
+// folds chain keys and sequence, so even an unversioned snapshot (SceneID ==
+// 0) can be memoized safely: every layout-relevant cell mutation advances a
+// covered field (cell Revision on update/finalize, ID/kind/phase/boundary/
+// blocked/chain on structural rewiring, source length on stream growth).
 func transcriptPlanMemoHit(state *UIControllerState) bool {
 	effects := &state.HistoryEffects
-	if state.Transcript.SceneID == 0 {
-		// Without scene provenance the version fields are not a fence: an
-		// unversioned snapshot can mutate cell structure (chain/boundary keys)
-		// while every counter stays put. The reducer's own
-		// transcriptSnapshotAlreadyInstalled guard refuses to trust such
-		// snapshots either, so the memo must replan instead of skipping.
-		return false
-	}
 	if !effects.lastPlannedTranscriptValid ||
 		effects.lastPlannedTranscriptSceneID != state.Transcript.SceneID ||
-		effects.lastPlannedTranscriptRevision != state.Transcript.Revision ||
-		effects.lastPlannedTranscriptContent != state.Transcript.ContentVersion ||
+		effects.lastPlannedTranscriptFence != transcriptFinalizedPrefixFence(state.Transcript) ||
 		effects.lastPlannedTranscriptCells != len(state.Transcript.Cells) ||
 		effects.lastPlannedTranscriptLayoutGen != state.LayoutGeneration ||
 		effects.lastPlannedWidth != state.Geometry.Width ||
@@ -738,14 +796,9 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 
 func recordTranscriptPlanMemo(state *UIControllerState) {
 	effects := &state.HistoryEffects
-	if state.Transcript.SceneID == 0 {
-		effects.lastPlannedTranscriptValid = false
-		return
-	}
 	effects.lastPlannedTranscriptValid = true
 	effects.lastPlannedTranscriptSceneID = state.Transcript.SceneID
-	effects.lastPlannedTranscriptRevision = state.Transcript.Revision
-	effects.lastPlannedTranscriptContent = state.Transcript.ContentVersion
+	effects.lastPlannedTranscriptFence = transcriptFinalizedPrefixFence(state.Transcript)
 	effects.lastPlannedTranscriptCells = len(state.Transcript.Cells)
 	effects.lastPlannedTranscriptLayoutGen = state.LayoutGeneration
 	effects.lastPlannedWidth = state.Geometry.Width
@@ -867,16 +920,32 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 // affect terminal bytes. Token is reducer-owned delivery identity and is
 // intentionally omitted so a pending effect can retain its identity while its
 // current-layout display payload is safely rebased before any write begins.
+//
+// For active commits, DisplayRange is the band row relative to the Acked
+// frontier at planning time.  When the Acked frontier advances between the
+// full-transcript replan (after a scrollback reconciliation resets
+// Acked=0) and the next active-only replan (from the new Acked.End), two
+// plans for the same source range + lines produce different DisplayRange
+// values although the terminal bytes are identical.  Comparing DisplayRange
+// here would invalidate the in-flight commit on every streaming delta,
+// re-arming a full scrollback reset + O(N²) replan per chunk — the
+// high-CPU loop.  Skip DisplayRange for active commits; the source range
+// and rendered lines are the authority for byte equality.
 func historyCommitPresentationEqual(current, candidate HistoryCommit) bool {
 	sameRevision := current.Revision == candidate.Revision ||
 		(current.Origin == HistoryCommitActive && candidate.Origin == HistoryCommitActive)
-	return current.Origin == candidate.Origin &&
-		current.CellID == candidate.CellID && sameRevision &&
-		current.SourceRange == candidate.SourceRange &&
-		current.FragmentID == candidate.FragmentID &&
-		current.DisplayRange == candidate.DisplayRange &&
-		current.LayoutGeneration == candidate.LayoutGeneration &&
-		render.LinesEqual(current.Lines, candidate.Lines)
+	if current.Origin != candidate.Origin ||
+		current.CellID != candidate.CellID || !sameRevision ||
+		current.SourceRange != candidate.SourceRange ||
+		current.FragmentID != candidate.FragmentID ||
+		current.LayoutGeneration != candidate.LayoutGeneration ||
+		!render.LinesEqual(current.Lines, candidate.Lines) {
+		return false
+	}
+	if current.Origin == HistoryCommitActive {
+		return true
+	}
+	return current.DisplayRange == candidate.DisplayRange
 }
 
 func advanceActiveCellEnqueuedFromEffects(state *UIControllerState) {

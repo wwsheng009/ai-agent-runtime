@@ -788,12 +788,12 @@ func TestTerminalSessionExecutorWorkerTeardownReusesFreshDoneChannel(t *testing.
 	}
 }
 
-// TestTerminalSessionExecutorScrollbackResetBackoffIsRevisionBased locks in
+// TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased locks in
 // the progress guard: a failing writer must not turn the executor into an
-// unbounded reset+replay loop, while a genuine state change (new revision)
+// unbounded reset+replay loop, while a genuine layout change (new generation)
 // always allows the next recovery attempt. The predicate is exercised
 // directly so the test is deterministic and has no wall-clock races.
-func TestTerminalSessionExecutorScrollbackResetBackoffIsRevisionBased(t *testing.T) {
+func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testing.T) {
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
 	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(&bytes.Buffer{}))
 
@@ -802,38 +802,60 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsRevisionBased(t *testing
 		t.Fatal("backoff engaged before any scrollback reset")
 	}
 
-	// A confirmed reset at revision 7 must block a same-revision retry.
-	executor.recordScrollbackReset(3, 7)
+	// A confirmed reset at generation 7 must block a same-generation retry.
+	// (Non-failed mode: success without convergence — persistent backoff.)
+	executor.recordScrollbackReset(3, 7, false)
 	if !executor.scrollbackResetBackoff(7) {
-		t.Fatal("same-revision recovery was not rate-limited after a reset")
+		t.Fatal("same-generation recovery was not rate-limited after a reset")
 	}
 
-	// A new revision (new action) always breaks the backoff, even within the
-	// window — the reset is a genuine retry, not a non-progressing loop.
+	// A new generation (real geometry/theme change) always breaks the backoff,
+	// even within the window — the reset is a genuine retry, not a
+	// non-progressing loop. Revision advance alone must NOT break it: a
+	// transcript replay advances Revision ~240/cycle without converging.
 	if executor.scrollbackResetBackoff(8) {
-		t.Fatal("new-revision recovery was blocked by stale backoff")
+		t.Fatal("new-generation recovery was blocked by stale backoff")
 	}
 
-	// A second reset at the new revision re-arms the guard for that revision.
-	executor.recordScrollbackReset(4, 8)
+	// A second reset at the new generation re-arms the guard for that generation.
+	executor.recordScrollbackReset(4, 8, false)
 	if !executor.scrollbackResetBackoff(8) {
-		t.Fatal("same-revision recovery was not rate-limited after the second reset")
+		t.Fatal("same-generation recovery was not rate-limited after the second reset")
 	}
 
-	// Once the backoff window expires, the same revision may retry again.
+	// The backoff is deliberately NOT wall-clock gated: a recovery cycle is
+	// dominated by WaitIdle draining the transcript replay (~500ms in
+	// production), so a time window shorter than the cycle always expires
+	// before the next schedule read and the guard never engages (observed
+	// 439 arms / 0 engages with the executor pinned at ~2 cores). The same
+	// generation must therefore keep blocking retries regardless of elapsed
+	// time; only a real generation change (Resize / theme) may retry.
+	executor.mu.Lock()
+	executor.lastResetAt = time.Now().Add(-time.Hour)
+	executor.mu.Unlock()
+	if !executor.scrollbackResetBackoff(8) {
+		t.Fatal("long-elapsed same-generation retry was not still blocked by backoff")
+	}
+
+	// Writer-failure mode: the backoff is a bounded rate-limit window so a
+	// transient writer error can heal and retry.
+	executor.recordScrollbackReset(5, 9, true)
+	if !executor.scrollbackResetBackoff(9) {
+		t.Fatal("failed-mode backoff did not rate-limit within window")
+	}
 	executor.mu.Lock()
 	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetBackoff - time.Millisecond)
 	executor.mu.Unlock()
-	if executor.scrollbackResetBackoff(8) {
-		t.Fatal("expired backoff window still blocked a same-revision retry")
+	if executor.scrollbackResetBackoff(9) {
+		t.Fatal("failed-mode expired window still blocked a same-generation retry")
 	}
 
 	// The epoch bookkeeping follows the reset that armed the guard.
 	executor.mu.Lock()
-	gotEpoch, gotRevision := executor.lastResetEpoch, executor.lastResetRevision
+	gotEpoch, gotGeneration, gotFailed := executor.lastResetEpoch, executor.lastResetGeneration, executor.lastResetFailed
 	executor.mu.Unlock()
-	if gotEpoch != 4 || gotRevision != 8 {
-		t.Fatalf("last reset bookkeeping = epoch %d revision %d, want 4 / 8", gotEpoch, gotRevision)
+	if gotEpoch != 5 || gotGeneration != 9 || !gotFailed {
+		t.Fatalf("last reset bookkeeping = epoch %d generation %d failed %t, want 5 / 9 / true", gotEpoch, gotGeneration, gotFailed)
 	}
 }
 
@@ -899,5 +921,109 @@ func TestTerminalSessionExecutorFailedReconciliationArmsBackoff(t *testing.T) {
 	controller.WaitIdle()
 	if writer.writes <= writesBefore {
 		t.Fatalf("new-revision recovery did not retry the reconciliation: writes=%d", writer.writes)
+	}
+}
+
+// TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging locks in
+// the fix for the continuous-replay root cause: a successful recovery flush
+// that leaves the recovery obligation pending but DID NOT advance the layout
+// generation (no real geometry/theme change) must arm the scrollback reset
+// backoff at the start generation, so the next no-progress cycle yields
+// instead of busy-replaying. A successful flush where the layout generation DID
+// advance (genuine progress, e.g. a racing resize) must NOT arm the backoff.
+// Revision advance alone must NOT disarm the guard: transcript replay advances
+// Revision hundreds of times per cycle without ever converging.
+func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testing.T) {
+	controller := NewUIController(UIControllerConfig{}, nil, nil)
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(&bytes.Buffer{}))
+
+	// 1. Failed flush: always arms the guard at the settled generation
+	// (unchanged from the existing behaviour — the executor's own failure posts
+	// advance the revision, but the layout generation is the settled signal).
+	if !executor.armRecoveryBackoff(TerminalTransactionResult{
+		Frame: TerminalFrameResult{Err: errors.New("short write")},
+	}, 0) {
+		t.Fatal("failed flush did not arm backoff")
+	}
+	executor.mu.Lock()
+	failGen := executor.lastResetGeneration
+	executor.mu.Unlock()
+	if failGen != controller.LayoutGeneration() {
+		t.Fatalf("failed flush recorded generation %d, want controller generation %d", failGen, controller.LayoutGeneration())
+	}
+
+	// 2. Successful flush, obligation pending, no generation advance: the
+	// signature of a non-progressing reset+replay loop. Must arm the guard at
+	// the start generation (== settled generation) so the next cycle yields.
+	controller.mu.Lock()
+	controller.state.HistoryEffects.ProjectionUnknown = true
+	controller.mu.Unlock()
+	startGen := controller.LayoutGeneration()
+	if !executor.armRecoveryBackoff(TerminalTransactionResult{}, startGen) {
+		t.Fatal("non-converging success without generation advance did not arm backoff")
+	}
+	executor.mu.Lock()
+	gotGen := executor.lastResetGeneration
+	executor.mu.Unlock()
+	if gotGen != startGen {
+		t.Fatalf("non-converging success recorded generation %d, want start %d", gotGen, startGen)
+	}
+
+	// 3. Successful flush, obligation pending, revision advanced but generation
+	// unchanged (transcript replay churn): still a non-progressing loop. Must
+	// arm the backoff — this is the case that previously busy-looped at ~2
+	// cores because revision advance was mistaken for genuine progress.
+	controller.mu.Lock()
+	controller.revision += 240
+	controller.mu.Unlock()
+	if controller.Revision() == 0 {
+		t.Fatal("test setup failed: revision did not advance")
+	}
+	if !executor.armRecoveryBackoff(TerminalTransactionResult{}, startGen) {
+		t.Fatal("replay churn (revision advance, same generation) did not arm backoff")
+	}
+
+	// 4. Successful flush, obligation pending, generation advanced (racing
+	// resize/theme change): genuine progress. Must NOT arm.
+	controller.mu.Lock()
+	controller.state.LayoutGeneration++
+	controller.mu.Unlock()
+	if controller.LayoutGeneration() == startGen {
+		t.Fatal("test setup failed: generation did not advance")
+	}
+	if executor.armRecoveryBackoff(TerminalTransactionResult{}, startGen) {
+		t.Fatal("racing progress was blocked by stale backoff")
+	}
+
+	// 5. Successful scrollback reset, obligation already cleared (the executor's
+	// own HistoryProjectionRecovered/HistoryScrollbackReconciled posts were
+	// reduced by WaitIdle before armRecoveryBackoff runs), generation unchanged:
+	// this is the actual production reset+replay loop — the reconcile handler
+	// replanned the whole transcript, the next cycle is recoveryActionable
+	// again, and the obligation check alone never sees it. A successful reset
+	// at an unchanged layout generation must arm the guard.
+	controller.mu.Lock()
+	controller.state.LayoutGeneration = startGen // restore: no racing progress
+	controller.state.HistoryEffects.ProjectionUnknown = false
+	controller.state.HistoryEffects.ReconciliationRequired = false
+	controller.mu.Unlock()
+	if controller.LayoutGeneration() != startGen {
+		t.Fatal("test setup failed: generation was not restored")
+	}
+	if !executor.armRecoveryBackoff(TerminalTransactionResult{
+		ScrollbackReset: true,
+		TerminalEpoch:   9,
+	}, startGen) {
+		t.Fatal("successful scrollback reset without generation advance did not arm backoff")
+	}
+	executor.mu.Lock()
+	gotEpoch := executor.lastResetEpoch
+	gotResetGen := executor.lastResetGeneration
+	executor.mu.Unlock()
+	if gotEpoch != 9 {
+		t.Fatalf("scrollback-reset arm recorded epoch %d, want 9", gotEpoch)
+	}
+	if gotResetGen != startGen {
+		t.Fatalf("scrollback-reset arm recorded generation %d, want start %d", gotResetGen, startGen)
 	}
 }

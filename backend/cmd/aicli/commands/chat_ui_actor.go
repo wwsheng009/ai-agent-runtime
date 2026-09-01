@@ -65,9 +65,9 @@ func (c *chatInteractionCoordinator) ensureUIActor() *ui.UIController {
 	return c.uiActor
 }
 
-// （EnableUnifiedRenderer 已退役：生产 interactive 会话必须经
-// EnableUnifiedRendererGateway——PhysicalSink→RenderOutputGateway。
-// 直写 writer 模式仅存在于测试，见 enableUnifiedRendererWithWriter。）
+// 生产 interactive 会话必须经 EnableUnifiedRendererGateway——
+// PhysicalSink→RenderOutputGateway。直写 writer 模式仅存在于测试，
+// 见 enableUnifiedRendererWithWriter。
 
 // sessionRenderIDLocked 返回稳定 render session ID（Phase 6 gateway 命名；
 // 不直接用会随 resume/load 变化的 RuntimeSession.ID）。调用方无需持锁。
@@ -242,7 +242,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 		c.unifiedRenderer = false
 		c.mu.Unlock()
 		if chatDebugFlagEnabled() {
-			aicliDiagln("[aicli-diag] EnableUnifiedRenderer: actor.Post failed -> unified renderer OFF")
+			aicliDiagln("[aicli-diag] enableUnifiedRendererWithWriter: actor.Post failed -> unified renderer OFF")
 		}
 		return false
 	}
@@ -250,7 +250,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	presenter := ui.NewTerminalSessionPresenter(actor, writer, c.primaryTerminalGeometry)
 	if c.SetPrimaryPresenter(presenter) {
 		if chatDebugFlagEnabled() {
-			aicliDiagln("[aicli-diag] EnableUnifiedRenderer: presenter attached -> unified renderer ON")
+			aicliDiagln("[aicli-diag] enableUnifiedRendererWithWriter: presenter attached -> unified renderer ON")
 		}
 		return true
 	}

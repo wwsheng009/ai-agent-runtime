@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
@@ -956,4 +957,82 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 			t.Fatalf("replacement re-planned stale content: no replacement payload in candidates")
 		}
 	})
+}
+// TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange is a
+// regression test for the high-CPU loop (185% sustained).  The loop was driven
+// by every streaming delta invalidating an in-flight Active-origin commit
+// whose DisplayRange differed from the new candidate's DisplayRange because
+// the Acked frontier advanced between the full-transcript replan (after
+// reconciliation reset Acked=0) and the active-only replan (from the new
+// Acked.End).  Source range + lines were identical; only the derived
+// display-row range changed.  historyCommitPresentationEqual now skips
+// DisplayRange for active commits, so this scenario must NOT trigger
+// invalidate → ReconciliationRequired=true.
+func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *testing.T) {
+	// Setup: state with a ledger containing one Active-origin commit in-flight.
+	state := &UIControllerState{AppState: AppState{
+		LayoutGeneration: 1,
+	}}
+	state.HistoryEffects.ledger = NewHistoryCommitLedger()
+
+	// Build a valid Active-origin commit (as produced by a full-transcript
+	// replan after reconciliation reset Acked=0 → DisplayRange {1,2}).
+	inFlight := HistoryCommit{
+		Origin:           HistoryCommitActive,
+		CellID:           91,
+		Revision:         2,
+		SourceRange:      SourceRange{Start: 0, End: 10},
+		FragmentID:       0,
+		DisplayRange:     DisplayRange{Start: 1, End: 2},
+		LayoutGeneration: 1,
+		Lines: []render.Line{{
+			Spans: []render.Span{{Text: "test-text"}},
+		}},
+	}
+	if err := state.HistoryEffects.enqueue(inFlight); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Mark it InFlight (simulating executor claim).
+	if err := state.HistoryEffects.markInFlight(1, 1); err != nil {
+		t.Fatalf("markInFlight: %v", err)
+	}
+	entry, ok := state.HistoryEffects.ledger.Entry(1)
+	if !ok || entry.State != HistoryCommitInFlight {
+		t.Fatalf("expected in-flight entry, got state=%s", entry.State)
+	}
+
+	// Build a candidate with the same source identity (origin, cellID, source
+	// range, fragmentID) but a different DisplayRange — this is what happens
+	// when the active-only replan starts from the new Acked frontier and
+	// assigns displayRow=0 again.
+	candidate := inFlight
+	candidate.Token = 0       // auto-assigned on enqueue
+	candidate.DisplayRange = DisplayRange{Start: 0, End: 1} // relative row
+
+	// Call syncHistoryEffectCandidates — the exact trigger path.
+	syncHistoryEffectCandidates(state, []HistoryCommit{candidate}, 91)
+
+	// Assert: the in-flight entry was NOT invalidated.
+	entry, ok = state.HistoryEffects.ledger.Entry(1)
+	if !ok {
+		t.Fatal("in-flight entry was removed from ledger")
+	}
+	if entry.State != HistoryCommitInFlight {
+		t.Fatalf("in-flight entry was invalidated (state=%s); fix broke: "+
+			"DisplayRange-only difference for active commit must not trigger invalidate",
+			entry.State)
+	}
+	if state.HistoryEffects.ProjectionUnknown {
+		t.Fatal("ProjectionUnknown was set — in-flight commit was invalidated")
+	}
+	if state.HistoryEffects.ReconciliationRequired {
+		t.Fatal("ReconciliationRequired was set — in-flight commit was invalidated")
+	}
+
+	// Also verify that the candidate was NOT enqueued as a duplicate
+	// (hasTerminalRecordForSource returns true for the in-flight source).
+	entries := state.HistoryEffects.ledger.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 ledger entry, got %d: %#v", len(entries), entries)
+	}
 }

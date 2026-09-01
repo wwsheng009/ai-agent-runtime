@@ -614,9 +614,16 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 
 		oldCell := previous.Cells[oldAt]
 		newCell := next.Cells[newAt]
-		if oldCell.Kind != newCell.Kind || !reflect.DeepEqual(oldCell.Presentation, newCell.Presentation) {
+		if oldCell.Kind != newCell.Kind {
 			return true
 		}
+		// Presentation is a rendering projection of the semantic source. The
+		// acked prefix bytes are verified below through each commit's
+		// SourceRange; dropping the Presentation comparison here, on the
+		// mutable path, and in transcriptSemanticPrefixEqual does not hide a
+		// genuine correction of acknowledged bytes. A theme change that
+		// affects rendering is handled by SetThemeContextAction (rebasePending),
+		// not by the transcript replacement path.
 		for _, commit := range commits {
 			start, end := commit.SourceRange.Start, commit.SourceRange.End
 			if start < 0 || end < start || end > len(oldCell.Source) || end > len(newCell.Source) ||
@@ -639,14 +646,21 @@ func transcriptCellIndexes(transcript TranscriptState) map[scene.CellID]int {
 	return indexes
 }
 
+// transcriptSemanticPrefixEqual verifies the semantic identity of the
+// finalized prefix before the first mutable cell. It compares source bytes,
+// kind, and cell identity only — Presentation is a rendering projection and
+// must not invalidate already-acknowledged native scrollback. A theme change
+// that affects rendering is handled by SetThemeContextAction (rebasePending),
+// not by the transcript replacement path. The acked source-range byte
+// comparison in transcriptReplacementInvalidatesAckedHistory is the authority
+// for detecting genuine corrections of acknowledged bytes.
 func transcriptSemanticPrefixEqual(previous, next []scene.TranscriptCell) bool {
 	if len(previous) != len(next) {
 		return false
 	}
 	for index := range previous {
 		left, right := previous[index], next[index]
-		if left.ID != right.ID || left.Kind != right.Kind || left.Source != right.Source ||
-			!reflect.DeepEqual(left.Presentation, right.Presentation) {
+		if left.ID != right.ID || left.Kind != right.Kind || left.Source != right.Source {
 			return false
 		}
 	}

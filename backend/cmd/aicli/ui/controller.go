@@ -701,6 +701,19 @@ func (c *UIController) Revision() uint64 {
 	return c.revision
 }
 
+// LayoutGeneration 返回当前布局代数。它只在真实的几何/主题变更
+// （Resize、SetThemeContextAction）时推进；transcript 重放/流式 action
+// 只推进 Revision 不推进 LayoutGeneration。executor 的 scrollback 恢复
+// backoff 用它区分"外部真实进展"与"自噬重放循环"。
+func (c *UIController) LayoutGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.LayoutGeneration
+}
+
 // Stats 返回一致的诊断快照。
 func (c *UIController) Stats() ControllerStats {
 	if c == nil {

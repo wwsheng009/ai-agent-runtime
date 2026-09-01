@@ -18,6 +18,7 @@ type terminalSessionScheduleSnapshot struct {
 	pendingToken           uint64
 	pendingGeneration      uint64
 	stateRevision          uint64
+	stateGeneration        uint64
 }
 
 type terminalSessionControllerSnapshot struct {
@@ -43,6 +44,7 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 		reconciliationRequired: effects.ReconciliationRequired,
 		recoveryActionable:     terminalHistoryRecoveryActionable(c.state),
 		stateRevision:          c.revision,
+		stateGeneration:        c.state.LayoutGeneration,
 	}
 	if !effects.HasPending() || effects.ledger == nil {
 		return snapshot
@@ -212,6 +214,22 @@ func terminalHistoryRecoveryActionable(state UIControllerState) bool {
 	effects := state.HistoryEffects
 	return !state.Lease.Active && !effects.Frozen &&
 		(effects.ProjectionUnknown || effects.ReconciliationRequired)
+}
+
+// terminalHistoryRecoveryObligationPending reports whether a recovery
+// obligation (ProjectionUnknown or ReconciliationRequired) is still present in
+// the live controller state. It is used by the executor to detect a
+// non-converging scrollback reset: a flush that succeeded at the terminal
+// layer but left the recovery obligation in place must be treated like a
+// failure for backoff purposes, otherwise the worker re-enters the full
+// reset+replay every cycle with no yield (the reported continuous replay).
+func (c *UIController) terminalHistoryRecoveryObligationPending() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.HistoryEffects.ProjectionUnknown || c.state.HistoryEffects.ReconciliationRequired
 }
 
 func (c *UIController) terminalSessionCommitAckedAndHasPending(token uint64) bool {

@@ -6,6 +6,40 @@ import (
 	"time"
 )
 
+// ExecutorRecoveryDiagEntry captures one recovery-branch iteration of the
+// executor. It is exported so the pprof diagnostics endpoint (and e2e drivers)
+// can observe the recovery loop's per-iteration state — the exact signal that
+// was previously invisible to CPU/goroutine profiles.
+type ExecutorRecoveryDiagEntry struct {
+	Seq                uint64 `json:"seq"`
+	Branch             string `json:"branch"` // "scheduled" | "snapshot"
+	Revision           uint64 `json:"revision"`
+	RevisionAfter      uint64 `json:"revisionAfter"`
+	Generation         uint64 `json:"generation"`
+	TerminalEpoch      uint64 `json:"terminalEpoch"`
+	ProjectionUnknown  bool   `json:"projectionUnknown"`
+	ReconciliationReq  bool   `json:"reconciliationRequired"`
+	BackoffEngaged     bool   `json:"backoffEngaged"`
+	FullRepaint        bool   `json:"fullRepaint"`
+	ScrollbackReset    bool   `json:"scrollbackReset"`
+	FrameErr           string `json:"frameErr"`
+	ObligationPending  bool   `json:"obligationPending"`
+	ArmedBackoff       bool   `json:"armedBackoff"`
+	Continued          bool   `json:"continued"`
+}
+
+// ExecutorRecoveryDiag is the JSON-exportable recovery-loop diagnostic of one
+// TerminalSessionExecutor. It is a bounded ring buffer: at most the most recent
+// diagRecoveryRingSize iterations are retained.
+type ExecutorRecoveryDiag struct {
+	Entries         []ExecutorRecoveryDiagEntry `json:"entries"`
+	BackoffEngaged  uint64                      `json:"backoffEngaged"`
+	ArmedBackoff    uint64                      `json:"armedBackoff"`
+	TotalRecoveries uint64                      `json:"totalRecoveries"`
+}
+
+const diagRecoveryRingSize = 256
+
 // ErrTerminalTransactionMissingResult guards the boundary between a claimed
 // reducer effect and the physical session. A transaction with a claimed token
 // must return a typed history result; treating a missing result as Deferred
@@ -19,7 +53,15 @@ var ErrTerminalTransactionMissingResult = errors.New("terminal transaction omitt
 // as unbounded history replay plus GC pressure. The backoff yields the worker
 // so the next explicit Request (from a real state change) retries instead of
 // the executor burning CPU in a tight recovery loop.
-const terminalScrollbackResetBackoff = 100 * time.Millisecond
+//
+// terminalScrollbackResetBackoffYield is the per-engaged-check sleep. It must
+// be well below the window above so a failed-mode backoff does not consume the
+// window while the worker is yielding (a Request that lands inside the window
+// must still be rate-limited).
+const (
+	terminalScrollbackResetBackoff      = 100 * time.Millisecond
+	terminalScrollbackResetBackoffYield = 10 * time.Millisecond
+)
 
 // TerminalSessionExecutor is the bounded physical worker used by
 // TerminalSessionPresenter. It claims one reducer-owned history token, derives
@@ -42,54 +84,208 @@ type TerminalSessionExecutor struct {
 	wg        sync.WaitGroup
 	done      chan struct{}
 
+	diagMu   sync.Mutex
+	diagSeq  uint64
+	diagRing []ExecutorRecoveryDiagEntry
+	// diagBackoffEngaged / diagArmedBackoff are monotonic counters exposed via
+	// RecoveryDiag so e2e drivers can quantify how often the backoff engaged
+	// and how often the executor armed it after a non-converging recovery.
+	diagBackoffEngaged uint64
+	diagArmedBackoff   uint64
+
 	// lastResetAt / lastResetEpoch are the scrollback recovery progress guard.
 	// A reconciliation that did not converge must not be re-armed on the next
 	// worker cycle; these fields rate-limit full scrollback resets so a failing
 	// writer cannot turn the executor into an unbounded reset+replay loop.
 	lastResetAt    time.Time
 	lastResetEpoch uint64
-	// lastResetRevision is the controller state revision recorded AFTER the
+	// lastResetGeneration is the controller LayoutGeneration recorded AFTER the
 	// executor published its own transaction outcome for the last scrollback
-	// reset attempt. The backoff only engages when the state has NOT advanced
-	// since that settled revision (i.e., a non-progressing loop). Recording
-	// after the outcome posts is essential: the executor's own failure posts
-	// (HistoryProjectionInvalidated, HistoryCommitFailed) advance the actor
-	// revision, so a revision captured before them can never match the next
-	// cycle's read and the guard would never engage. A genuinely new external
-	// action (new revision) still always allows recovery.
-	lastResetRevision uint64
+	// reset attempt. The backoff only engages when the layout generation has
+	// NOT advanced since that settled generation (i.e., a non-progressing
+	// loop). LayoutGeneration — not Revision — is the progress signal: a
+	// transcript replay / streaming resume posts hundreds of actions per cycle
+	// (advancing Revision ~240/cycle) that re-arm ProjectionUnknown and
+	// ReconciliationRequired, so a revision-based guard can never match and the
+	// executor busy-loops at ~2 cores. Only a real geometry/theme change
+	// (Resize, SetThemeContextAction) advances LayoutGeneration and must run
+	// the next recovery immediately.
+	lastResetGeneration uint64
+	// lastResetFailed distinguishes the two recovery-failure modes:
+	//   - true:  the physical writer failed (Frame.Err). The writer may heal,
+	//     so the guard is a bounded rate-limit window and a later retry is
+	//     allowed after the window expires.
+	//   - false: the flush succeeded but did NOT converge (ProjectionUnknown /
+	//     ReconciliationRequired still pending, or a scrollback reset whose
+	//     generation did not advance). Transcript replay re-arms the
+	//     obligation every cycle (~238 actions/cycle, Revision +240) without
+	//     ever advancing LayoutGeneration, so the guard must persist until a
+	//     real geometry/theme change; a time window would expire before the
+	//     next schedule read (cycle ~500ms >> 100ms window) and the executor
+	//     would busy-loop at ~2 cores (observed: 439 arms, 0 engages).
+	lastResetFailed bool
 }
 
+// NewTerminalSessionExecutor creates the bounded physical worker.
 func NewTerminalSessionExecutor(controller *UIController, session *TerminalSession) *TerminalSessionExecutor {
-	return &TerminalSessionExecutor{controller: controller, session: session}
+	return &TerminalSessionExecutor{
+		controller: controller,
+		session:    session,
+		diagRing:   make([]ExecutorRecoveryDiagEntry, 0, diagRecoveryRingSize),
+	}
+}
+
+// RecoveryDiag returns a snapshot of the executor's recovery-loop ring buffer.
+// It is safe to call from any goroutine (e.g. the pprof HTTP handler).
+func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
+	if e == nil {
+		return ExecutorRecoveryDiag{}
+	}
+	e.diagMu.Lock()
+	defer e.diagMu.Unlock()
+	entries := make([]ExecutorRecoveryDiagEntry, len(e.diagRing))
+	copy(entries, e.diagRing)
+	return ExecutorRecoveryDiag{
+		Entries:         entries,
+		BackoffEngaged:  e.diagBackoffEngaged,
+		ArmedBackoff:    e.diagArmedBackoff,
+		TotalRecoveries: e.diagSeq,
+	}
+}
+
+// recordRecoveryDiag appends one recovery-branch iteration to the ring buffer.
+func (e *TerminalSessionExecutor) recordRecoveryDiag(entry ExecutorRecoveryDiagEntry) {
+	e.diagMu.Lock()
+	defer e.diagMu.Unlock()
+	e.diagSeq++
+	entry.Seq = e.diagSeq
+	if entry.BackoffEngaged {
+		e.diagBackoffEngaged++
+	}
+	if entry.ArmedBackoff {
+		e.diagArmedBackoff++
+	}
+	if len(e.diagRing) == diagRecoveryRingSize {
+		copy(e.diagRing, e.diagRing[1:])
+		e.diagRing[len(e.diagRing)-1] = entry
+		return
+	}
+	e.diagRing = append(e.diagRing, entry)
 }
 
 // scrollbackResetBackoff reports whether the executor must yield before
-// attempting another full scrollback reset. It engages only when the last
-// reset attempt happened within the backoff window AND the controller state
-// revision has not advanced since the executor settled its own outcome posts
-// — the signature of a non-progressing reset+replay loop. A new external
-// action (new revision) always allows recovery.
-func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateRevision uint64) bool {
+// attempting another full scrollback reset. It engages when the controller
+// layout generation has not advanced since the executor settled its own
+// outcome posts for the last reset attempt — the signature of a
+// non-progressing reset+replay loop. A real external geometry/theme change
+// (new layout generation) always allows recovery.
+//
+// The engagement semantics depend on how the last reset failed:
+//   - Writer failure (lastResetFailed=true): bounded rate-limit window. The
+//     physical writer may heal, so after the window expires the same
+//     generation may retry once.
+//   - Success without convergence (lastResetFailed=false): NO wall-clock
+//     window. A recovery cycle is dominated by WaitIdle draining the
+//     transcript replay (~238 actions/cycle in production, ~500ms), so a time
+//     window shorter than the cycle always expires before the next schedule
+//     read and the guard never engages (observed: 439 arms, 0 engages,
+//     executor pinned at ~2 cores). The generation discriminator alone is the
+//     correct progress signal; the guard persists until LayoutGeneration
+//     advances.
+func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateGeneration uint64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return !e.lastResetAt.IsZero() &&
-		e.lastResetRevision == stateRevision &&
-		time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
+	if e.lastResetAt.IsZero() || e.lastResetGeneration != stateGeneration {
+		return false
+	}
+	if e.lastResetFailed {
+		return time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
+	}
+	return true
 }
 
 // recordScrollbackReset persists the progress-guard state after a scrollback
 // reset attempt so the next worker cycle can rate-limit a non-converging
-// recovery without blocking legitimate retries under a new revision.
-// stateRevision MUST be read after the executor has published its outcome and
-// the actor has settled (see runOne): the settled revision is what the next
-// cycle observes when no external action intervened.
-func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateRevision uint64) {
+// recovery without blocking legitimate retries under a new generation.
+// stateGeneration MUST be read after the executor has published its outcome
+// and the actor has settled (see runOne): the settled generation is what the
+// next cycle observes when no external geometry/theme change intervened.
+func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration uint64, failed bool) {
 	e.mu.Lock()
 	e.lastResetAt = time.Now()
 	e.lastResetEpoch = epoch
-	e.lastResetRevision = stateRevision
+	e.lastResetGeneration = stateGeneration
+	e.lastResetFailed = failed
 	e.mu.Unlock()
+}
+
+// armRecoveryBackoff decides whether to arm the scrollback-reset backoff guard
+// after a recovery flush. It returns true when the guard was armed.
+//
+// Two distinct cases arm the guard:
+//
+//  1. FAILED flush (Frame.Err != nil): every failure posts
+//     HistoryProjectionInvalidated, which advances the actor revision. We must
+//     record the generation AFTER publishResult so the settled generation
+//     matches the next no-progress cycle.
+//
+//  2. SUCCESSFUL flush that left the recovery obligation pending AND the layout
+//     generation did NOT advance during the flush. A successful flush that posts
+//     no outcome (viewport-only recovery that fails to prove FullRepaint or a
+//     known projection) leaves the obligation in place with an unchanged
+//     generation — the signature of a non-progressing reset+replay loop.
+//     Recording startGeneration (which equals the settled generation here)
+//     makes the next no-progress cycle match and the backoff yields the worker.
+//
+// A successful flush where the layout generation DID advance during the flush
+// is genuine progress (e.g. a resize that raced the in-flight transaction) and
+// must NOT arm the guard: the next pending generation recovery must run
+// immediately.
+//
+//  3. SUCCESSFUL scrollback reset whose layout generation did NOT advance.
+//     This is the reset+replay-loop signature the obligation check cannot see:
+//     the executor's own HistoryProjectionRecovered / HistoryScrollbackReconciled
+//     posts are reduced (WaitIdle) before this function runs, so
+//     terminalHistoryRecoveryObligationPending() is already false even though
+//     the reconcile handler replanned the entire transcript (memo misses on
+//     every TerminalEpoch bump) and the next worker cycle re-enters recovery.
+//     The successful flush genuinely reset the terminal (epoch advanced), but
+//     the loop that follows is non-progressing; only a real geometry/theme
+//     change (new layout generation) must run the next recovery immediately.
+//
+// NOTE: LayoutGeneration, not Revision, is the progress discriminator. A
+// transcript replay / streaming resume posts hundreds of actions per executor
+// cycle (observed ~240 Revision increments/cycle while LayoutGeneration stays
+// constant), each re-arming ProjectionUnknown and ReconciliationRequired. A
+// revision-based guard therefore never matches and the executor busy-loops at
+// ~2 cores of CPU. Revision advance is NOT genuine progress; only a real
+// geometry/theme change advances LayoutGeneration.
+func (e *TerminalSessionExecutor) armRecoveryBackoff(result TerminalTransactionResult, startGeneration uint64) bool {
+	if result.Frame.Err != nil {
+		e.recordScrollbackReset(result.TerminalEpoch, e.controller.LayoutGeneration(), true)
+		return true
+	}
+	if e.controller.terminalHistoryRecoveryObligationPending() && e.controller.LayoutGeneration() == startGeneration {
+		e.recordScrollbackReset(result.TerminalEpoch, startGeneration, false)
+		return true
+	}
+	if result.ScrollbackReset && e.controller.LayoutGeneration() == startGeneration {
+		// Successful reset at an unchanged layout generation: the reconcile
+		// handler replans the full transcript (TerminalEpoch memo miss) and the
+		// next cycle is recoveryActionable again. Arm so the worker yields on
+		// the next same-generation recovery instead of busy-looping at ~2 cores.
+		e.recordScrollbackReset(result.TerminalEpoch, startGeneration, false)
+		return true
+	}
+	return false
+}
+
+// frameErrString converts a frame error to a string for diag logging.
+func frameErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // HandleEffect is the presenter-side effect adapter. It accepts only
@@ -225,10 +421,23 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	if schedule.recoveryActionable {
 		// Scrollback-reset backoff: a failing writer must not turn the
 		// executor into an unbounded reset+replay loop. If the last reset
-		// happened within the backoff window AND the state revision has not
-		// advanced since then, yield the worker. A new action (new revision)
-		// always allows recovery — the reset is a genuine retry, not a loop.
-		if e.scrollbackResetBackoff(schedule.stateRevision) {
+		// happened within the backoff window AND the layout generation has not
+		// advanced since then, yield the worker. A real geometry/theme change
+		// (new layout generation) always allows recovery — the reset is a
+		// genuine retry, not a loop.
+		if e.scrollbackResetBackoff(schedule.stateGeneration) {
+			e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
+				Branch:         "scheduled",
+				Revision:       schedule.stateRevision,
+				BackoffEngaged: true,
+			})
+			// Yield the worker: with a persistent same-generation backoff, an
+			// external replay that keeps re-arming the recovery obligation would
+			// otherwise turn this into a tight Request() -> check -> false loop.
+			// The sleep bounds that churn; only a real generation change breaks
+			// the guard. Must stay well below terminalScrollbackResetBackoff
+			// so a failed-mode window is not consumed during the yield itself.
+			time.Sleep(terminalScrollbackResetBackoffYield)
 			return false
 		}
 
@@ -250,21 +459,22 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		}
 		result := e.session.FlushTransaction(plan)
 		continued := e.publishResult(plan.Frame.LayoutGeneration, nil, result)
-		// Arm the guard only on a FAILED reconciliation, and record the
-		// revision settled AFTER publishResult: the executor's own outcome
-		// posts (HistoryProjectionInvalidated, HistoryCommitFailed) advance
-		// the actor revision, so a revision captured before them can never
-		// match the next cycle's read and the backoff could never engage —
-		// a persistently failing writer replayed the full history on every
-		// external wake (the reported flicker loop). A SUCCESSFUL reset must
-		// not arm the guard: the next pending generation recovery (for
-		// example a resize that raced the in-flight transaction) is genuine
-		// progress and must run immediately. A stale guard from an older
-		// failure can never block later retries because the actor revision
-		// is monotonic.
-		if reconciliation && result.Frame.Err != nil {
-			e.recordScrollbackReset(result.TerminalEpoch, e.controller.Revision())
-		}
+		armed := e.armRecoveryBackoff(result, schedule.stateGeneration)
+		e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
+			Branch:            "scheduled",
+			Revision:          schedule.stateRevision,
+			RevisionAfter:     e.controller.Revision(),
+			Generation:        plan.Frame.LayoutGeneration,
+			TerminalEpoch:     result.TerminalEpoch,
+			ProjectionUnknown: snapshot.projectionUnknown,
+			ReconciliationReq: snapshot.reconciliationRequired,
+			FullRepaint:       result.Frame.FullRepaint,
+			ScrollbackReset:   result.ScrollbackReset,
+			FrameErr:          frameErrString(result.Frame.Err),
+			ObligationPending: e.controller.terminalHistoryRecoveryObligationPending(),
+			ArmedBackoff:      armed,
+			Continued:         continued,
+		})
 		return continued
 	}
 	claimedToken := uint64(0)
@@ -287,11 +497,22 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		}
 		result := e.session.FlushTransaction(plan)
 		continued := e.publishResult(plan.Frame.LayoutGeneration, nil, result)
-		// Same failed-reconciliation guard as the scheduled recovery branch
-		// above.
-		if reconciliation && result.Frame.Err != nil {
-			e.recordScrollbackReset(result.TerminalEpoch, e.controller.Revision())
-		}
+		armed := e.armRecoveryBackoff(result, schedule.stateGeneration)
+		e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
+			Branch:            "snapshot",
+			Revision:          schedule.stateRevision,
+			RevisionAfter:     e.controller.Revision(),
+			Generation:        plan.Frame.LayoutGeneration,
+			TerminalEpoch:     result.TerminalEpoch,
+			ProjectionUnknown: snapshot.projectionUnknown,
+			ReconciliationReq: snapshot.reconciliationRequired,
+			FullRepaint:       result.Frame.FullRepaint,
+			ScrollbackReset:   result.ScrollbackReset,
+			FrameErr:          frameErrString(result.Frame.Err),
+			ObligationPending: e.controller.terminalHistoryRecoveryObligationPending(),
+			ArmedBackoff:      armed,
+			Continued:         continued,
+		})
 		return continued
 	}
 	if claimedToken != 0 && snapshot.claimed == nil {

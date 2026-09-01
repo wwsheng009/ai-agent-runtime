@@ -220,7 +220,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		// factory 失败时 fail-closed 终止会话——不再回退直写 unified renderer
 		// （回退路径会让全部 terminal effects 绕过 gateway，违反
 		// "所有 interactive effects 经 session-scoped gateway" 收敛目标）。
-		// 回滚开关：恢复对 EnableUnifiedRenderer() 的回退调用。
+		// 直写 unified renderer（enableUnifiedRendererWithWriter）仅保留给测试。
 		if session.Interaction.EnableUnifiedRendererGateway() == nil {
 			aicliDiagln("[aicli-diag] EnableUnifiedRendererGateway: factory failed -> fail-closed (no direct-writer fallback)")
 			mcpmanager.SetStatusOutput(os.Stdout)

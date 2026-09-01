@@ -52,8 +52,16 @@ type HistoryEffectQueueState struct {
 	// activeAckPlanVersion plus TerminalEpoch instead of a per-call scan.
 	lastPlannedTranscriptValid    bool
 	lastPlannedTranscriptSceneID  uint64
-	lastPlannedTranscriptRevision uint64
-	lastPlannedTranscriptContent  uint64
+	// lastPlannedTranscriptFence fingerprints every finalized transcript cell
+	// (ID/Revision/Phase/Kind/blocked/boundary/source length). The scene-wide
+	// Revision/ContentVersion counters are NOT used: they advance on every
+	// cell mutation, including the still-mutable active cell's stream growth,
+	// so a memo keyed on them misses on every chunk and re-lays-out the whole
+	// finalized history (the exact O(entire history) cost this memo exists to
+	// avoid). Cell Revision is the scene's own per-cell mutation fence
+	// (update/finalize require a strictly greater revision), so the
+	// fingerprint has the same trust level as transcriptCellVersionEqual.
+	lastPlannedTranscriptFence  uint64
 	lastPlannedTranscriptCells    int
 	lastPlannedTranscriptLayoutGen uint64
 	lastPlannedWidth              int

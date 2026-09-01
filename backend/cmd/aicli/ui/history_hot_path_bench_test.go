@@ -124,3 +124,89 @@ func BenchmarkReplyStreamChunks(b *testing.B) {
 		seq++
 	}
 }
+
+// BenchmarkAckLoopResync reproduces the production hot loop measured on the
+// resumed session: every active-handoff ack advances Active.Acked.End, and a
+// transcript-path sync runs afterwards. Before the finalized-prefix memo this
+// re-laid-out the entire transcript history per ack (production pprof: ~190%
+// CPU pinned by layoutTranscriptScreenRows + nextNonTerminalToken); after it
+// the finalized plan is skipped and only the O(viewport) active handoff is
+// reconciled.
+func BenchmarkAckLoopResync(b *testing.B) {
+	state := UIControllerState{}
+	seq := uint64(1)
+	state = reduceUIControllerState(state, Resize{Width: 100, Height: 24, Generation: 1}, seq)
+	seq++
+	state = reduceUIControllerState(state, SetSemanticActiveCellProjectionAction{Enabled: true}, seq)
+	seq++
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: benchResumedSnapshot(300)}, seq)
+	seq++
+	source := strings.Repeat("ack loop overflow row\n", 40)
+	active := benchMutableActive(source)
+	state = reduceUIControllerState(state, SetActiveCellAction{Active: active}, seq)
+	seq++
+	b.ResetTimer()
+	for b.Loop() {
+		// Simulate the executor ack of one overflow row: Acked.End advances
+		// (advanceActiveCellLedgerOnAck) and the next sync re-plans.
+		next := active
+		next.Acked = SourceRange{Start: 0, End: next.Acked.End + 22}
+		if next.Acked.End > len(source) {
+			next.Acked.End = len(source)
+		}
+		active = next
+		state.Active = next
+		syncHistoryEffectsForTranscript(&state)
+	}
+}
+
+// BenchmarkResumeStreamChunkWithLargeHistory measures the per-chunk cost of a
+// resumed long session while the mutable active cell streams. Each iteration
+// calls syncHistoryEffectsForTranscript directly (bypassing the activeOnly fast
+// path) after advancing the scene-wide Revision/ContentVersion and the active
+// cell's source — exactly what happens post-memo in the reducer when every new
+// scene snapshot arrives.
+//
+// Before the finalized-prefix memo (ContentVersion fence), each chunk incurred
+// a full planEligibleHistoryCommits: re-layout and re-wrap of every finalized
+// cell (production pprof: syncHistoryEffectsForTranscript 17.5%,
+// planEligibleHistoryCommits 9.67s, vt.blankRow 129GB allocs). After the fix
+// (finalized-prefix fence), the memo hits and only the O(viewport) active
+// handoff is reconciled.
+func BenchmarkResumeStreamChunkWithLargeHistory(b *testing.B) {
+	snapshot := benchResumedSnapshot(300)
+	snapshot.ContentVersion = 1
+	snapshot.Cells = append(snapshot.Cells, &scene.TranscriptCell{
+		ID:       300001,
+		Sequence: 301,
+		Kind:     scene.KindAssistant,
+		Source:   "stream start",
+		Revision: 1,
+		Phase:    scene.CellMutable,
+	})
+
+	state := UIControllerState{}
+	seq := uint64(1)
+	state = reduceUIControllerState(state, Resize{Width: 100, Height: 24, Generation: 1}, seq)
+	seq++
+	state = reduceUIControllerState(state, SetSemanticActiveCellProjectionAction{Enabled: true}, seq)
+	seq++
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, seq)
+	seq++
+	if state.Active.CellID != 300001 || state.Active.Phase != ActiveCellMutable {
+		b.Fatalf("active cell not mounted: %+v", state.Active)
+	}
+
+	b.ResetTimer()
+	for b.Loop() {
+		// Bump scene counters and active source to simulate a new chunk.
+		state.Transcript.Revision++
+		state.Transcript.ContentVersion++
+		state.Active.Source += " more streaming content"
+		state.Active.Revision++
+		// Drive syncHistoryEffectsForTranscript directly — this is what the
+		// non-activeOnly reducer paths (SetActiveCellAction, FinalizeActiveCellAction,
+		// ReplaceTranscriptAction when activeOnly fails) call per chunk in production.
+		syncHistoryEffectsForTranscript(&state)
+	}
+}
