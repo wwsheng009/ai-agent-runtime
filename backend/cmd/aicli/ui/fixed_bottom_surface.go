@@ -869,6 +869,10 @@ func (s *FixedBottomSurface) BeginOutput() {
 		// only need to dismiss transient UI.
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter owns the screen; suppress legacy cursor park.
+		return
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		// Raw writers (fmt.Println after beginDirectInteractiveOutput) paint at
@@ -1495,6 +1499,14 @@ func (s *FixedBottomSurface) ClearCommittedHistoryForReplay() bool {
 	if bottom < 1 {
 		return false
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified mode: clear retained-history projection without emitting
+		// erase bytes into the unified screen.
+		s.resetOwnedHistoryLocked()
+		s.invalidateSoftOutputLocked()
+		s.legacyReserve = renderengine.LegacyReserveState{}
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		if s.leaseID != 0 {
 			// Lease active: retain state only; the release repaint flushes a
@@ -1856,6 +1868,11 @@ func (s *FixedBottomSurface) showPromptImpl(line string) bool {
 		// terminal. Release will repaint it on the primary screen.
 		return true
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Logical prompt state committed above; unified presenter renders
+		// from retained state. Suppress legacy byte emission.
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -1895,6 +1912,16 @@ func (s *FixedBottomSurface) resetPromptImpl(line string, rows int) bool {
 	if !s.enabled {
 		return false
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained state; still commit the
+		// logical reset so snapshots/recovery stay coherent.
+		s.promptLine = line
+		s.promptInput = ""
+		s.promptReservedRows = 1
+		s.promptViewportStart = 0
+		s.setPromptCursorToLineEndLocked(line)
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.clearPromptRowsLocked(rows)
@@ -1933,6 +1960,12 @@ func (s *FixedBottomSurface) setPromptRowsImpl(rows int) bool {
 		return false
 	}
 	if s.promptReservedRows == rows {
+		return true
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained state; commit the new row
+		// budget logically only.
+		s.promptReservedRows = rows
 		return true
 	}
 	restorePromptCursor := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
@@ -1984,6 +2017,9 @@ func (s *FixedBottomSurface) setPromptNoticeLineImpl(line string) bool {
 	s.reflowPromptViewportLocked()
 	if !s.enabled {
 		return false
+	}
+	if !s.physicalWritesEnabledLocked() {
+		return true
 	}
 	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
 	WithTerminalWriteLock(func() {
@@ -2209,6 +2245,12 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		return s.repaintActiveBandLocked()
 	}
 
+	if !s.physicalWritesEnabledLocked() {
+		// Logical band state cleared above; unified presenter renders from
+		// retained state. Suppress the legacy erase-scroll-repaint sequence.
+		return true
+	}
+
 	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
 	WithTerminalWriteLock(func() {
 		if restorePromptCursor {
@@ -2381,6 +2423,9 @@ func (s *FixedBottomSurface) setPromptEditorStatusLineImpl(line string) bool {
 	if !s.enabled {
 		return false
 	}
+	if !s.physicalWritesEnabledLocked() {
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.terminal.HideCursor()
 		defer s.terminal.ShowCursor()
@@ -2443,6 +2488,11 @@ func (s *FixedBottomSurface) trackPromptInputStateImpl(line string, input string
 	previousRows := s.promptReservedRows
 	previousViewportStart := s.promptViewportStart
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
+	if !s.physicalWritesEnabledLocked() {
+		// Logical prompt state committed above; unified presenter renders
+		// from retained state.
+		return true
+	}
 	needsRender := previousRows != s.promptReservedRows || previousViewportStart != s.promptViewportStart
 	if needsRender {
 		WithTerminalWriteLock(func() {
@@ -2483,6 +2533,11 @@ func (s *FixedBottomSurface) setPromptInputStateImpl(line string, input string, 
 		return false
 	}
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
+	if !s.physicalWritesEnabledLocked() {
+		// Logical prompt state committed above; unified presenter renders
+		// from retained state.
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.terminal.HideCursor()
 		defer s.terminal.ShowCursor()
@@ -2543,6 +2598,10 @@ func (s *FixedBottomSurface) MoveToPromptCursor(rowOffset, col int) bool {
 	}
 	s.promptCursorRow = rowOffset
 	s.promptCursorCol = col
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained cursor state.
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.terminal.MoveTo(row, column)
@@ -2576,6 +2635,20 @@ func (s *FixedBottomSurface) clearPromptRowsImpl(rows int) bool {
 	defer s.mu.Unlock()
 	if !s.enabled {
 		return false
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained prompt state.
+		s.promptNoticeLine = ""
+		s.promptEditorStatusLine = ""
+		s.promptLine = ""
+		s.promptInput = ""
+		s.promptReservedRows = 0
+		s.promptViewportStart = 0
+		s.promptCursorRow = 0
+		s.promptCursorCol = 0
+		s.promptRenderedStartRow = 0
+		s.promptRenderedRows = 0
+		return true
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
@@ -2613,6 +2686,10 @@ func (s *FixedBottomSurface) showPopupImpl(lines []string) {
 	defer s.mu.Unlock()
 	s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), "", "", false)
 	if !s.enabled {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained popup state.
 		return
 	}
 	WithTerminalWriteLock(func() {
@@ -2655,6 +2732,10 @@ func (s *FixedBottomSurface) showPopupPreserveCursorForOwner(lines []string, own
 		return
 	}
 	if !s.enabled {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained popup state.
 		return
 	}
 	restorePromptCursor := belowPrompt || s.bottomPaneStateLocked().popupExpandsBelowPrompt()
@@ -2745,6 +2826,10 @@ func (s *FixedBottomSurface) beginPopupInputForHandleImpl(lines []string, prompt
 	if !s.beginPopupInstanceLocked(cloneAndSanitizePopupLines(lines), prompt, handle, viewport) || !s.enabled {
 		return true
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained popup state.
+		return true
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -2780,6 +2865,10 @@ func (s *FixedBottomSurface) updatePopupInputForHandleImpl(handle PopupHandle, l
 	active := s.updatePopupInstanceLocked(handle, cloneAndSanitizePopupLines(lines), prompt)
 	if !active || !s.enabled {
 		return active
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained popup state.
+		return true
 	}
 	WithTerminalWriteLock(func() {
 		if preserveCursor {
@@ -2824,6 +2913,10 @@ func (s *FixedBottomSurface) showPopupInputForOwnerImpl(lines []string, prompt s
 		return
 	}
 	if !s.enabled {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained popup state.
 		return
 	}
 	WithTerminalWriteLock(func() {
@@ -2884,6 +2977,12 @@ func (s *FixedBottomSurface) clearPopupImpl() {
 		s.clearPopupRenderStateLocked()
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Logical popup state cleared above; unified presenter renders from
+		// retained state. Suppress legacy erase bytes.
+		s.clearPopupRenderStateLocked()
+		return
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		if s.ownedViewport {
@@ -2919,6 +3018,12 @@ func (s *FixedBottomSurface) clearPopupPreserveCursorImpl() {
 	s.clearPopupStateLocked(true)
 	s.clearComposerStateLocked()
 	if !s.enabled {
+		s.clearPopupRenderStateLocked()
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Logical popup state cleared above; unified presenter renders from
+		// retained state. Suppress legacy erase bytes.
 		s.clearPopupRenderStateLocked()
 		return
 	}
@@ -2984,6 +3089,11 @@ func (s *FixedBottomSurface) clearPopupForOwnerPreserveCursorImpl(owner string) 
 	if !s.enabled {
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Popup stack restored above; unified presenter renders from retained
+		// state. Suppress legacy erase-repaint sequence.
+		return
+	}
 	restorePromptCursor := wasBelowPrompt || s.bottomPaneStateLocked().popupExpandsBelowPrompt()
 	WithTerminalWriteLock(func() {
 		if restorePromptCursor {
@@ -3035,6 +3145,11 @@ func (s *FixedBottomSurface) clearPopupHandlePreserveCursorImpl(handle PopupHand
 	previousGapRows := s.popupRenderedGapRows
 	s.restorePopupStateFromStackLocked()
 	if !s.enabled {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Popup stack restored above; unified presenter renders from retained
+		// state. Suppress legacy erase-repaint sequence.
 		return
 	}
 	restorePromptCursor := wasBelowPrompt || s.bottomPaneStateLocked().popupExpandsBelowPrompt()
@@ -3184,6 +3299,11 @@ func (s *FixedBottomSurface) repaintStatusUpdateLocked() {
 	if s.leaseID != 0 {
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Status model already updated by the caller; unified presenter
+		// renders the status row from retained state.
+		return
+	}
 	restorePromptCursor := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
 	WithTerminalWriteLock(func() {
 		if restorePromptCursor {
@@ -3264,6 +3384,10 @@ func (s *FixedBottomSurface) setComposerPreviewImpl(line string) {
 	if !s.enabled {
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained composer state.
+		return
+	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -3296,6 +3420,11 @@ func (s *FixedBottomSurface) clearComposerPreviewImpl() {
 	s.promptCursorRow = 0
 	s.promptCursorCol = 0
 	if !s.enabled {
+		s.clearPopupRenderStateLocked()
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter renders from retained composer state.
 		s.clearPopupRenderStateLocked()
 		return
 	}
@@ -3690,6 +3819,10 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 	if !s.enabled {
 		return
 	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter owns the screen; suppress legacy status paint.
+		return
+	}
 	if s.leaseID != 0 {
 		return
 	}
@@ -3712,6 +3845,10 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 
 func (s *FixedBottomSurface) renderPopupLocked() {
 	if !s.enabled {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter owns the screen; suppress legacy popup paint.
 		return
 	}
 	if s.leaseID != 0 {
@@ -4024,6 +4161,10 @@ func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
 
 func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if s == nil || s.terminal == nil || !s.enabled {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() {
+		// Unified presenter owns the screen; suppress legacy prompt rows paint.
 		return
 	}
 	if s.leaseID != 0 {

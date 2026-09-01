@@ -1,6 +1,6 @@
 # aicli chat 渲染中间层设计方案
 
-> 文档状态：设计方案（未开始实现）  
+> 文档状态：已实施  
 > 代码基线：2026-08-29，`main` 分支  
 > 关联架构：`docs/architecture/aicli-chat-unified-renderer-architecture.md`  
 > 主要范围：`backend/cmd/aicli/commands`、`backend/cmd/aicli/ui`、`backend/cmd/aicli/ui/render`  
