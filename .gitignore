@@ -76,3 +76,17 @@ backend/data/
 # runtime capture artifacts (aicli-x fix verification runs)
 backend/aicli_x_fix4_stdout.txt
 backend/aicli_x_fix4_stderr.txt
+
+# Debug / scratch artifacts (not source)
+_tmp_*
+tmp_*
+backend/check_*.py
+backend/ncrprobe_*.go
+backend/.ncrprobe-bak/
+backend/session-*.json
+backend/session-*.txt
+backend/plan.md
+backend/go.win7.mod.bak
+analysis/
+backend/configs/backend/
+terminal-output-inventory.json
