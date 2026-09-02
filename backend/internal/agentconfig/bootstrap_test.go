@@ -171,12 +171,51 @@ func TestDefaultConfigSearchPathsUseBuildProfileNames(t *testing.T) {
 	paths := DefaultConfigSearchPaths()
 	expected := []string{
 		filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName),
+	}
+	if aiclipaths.DefaultConfigFileName != aiclipaths.StandardConfigFileName {
+		expected = append(expected, filepath.Join(home, ".aicli", aiclipaths.StandardConfigFileName))
+	}
+	expected = append(expected,
 		filepath.Join(".aicli", aiclipaths.DefaultConfigFileName),
 		aiclipaths.DefaultCLIConfigFileName,
 		filepath.Join("configs", aiclipaths.DefaultConfigFileName),
+	)
+	if aiclipaths.DefaultConfigFileName != aiclipaths.StandardConfigFileName {
+		expected = append(expected,
+			filepath.Join(".aicli", aiclipaths.StandardConfigFileName),
+			filepath.Join("configs", aiclipaths.StandardConfigFileName),
+		)
 	}
 	if strings.Join(paths, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected %s config search paths:\n got: %v\nwant: %v", aiclipaths.BuildProfile, paths, expected)
+	}
+}
+
+// TestResolveConfigPathFallsBackToStandardConfigName verifies that a non-main
+// build profile (for example win7compat) still discovers the standard-layout
+// config.yaml when no profile-specific file exists, so reads and writes stay
+// on the same file as the standard runtime-server / web UI.
+func TestResolveConfigPathFallsBackToStandardConfigName(t *testing.T) {
+	home := t.TempDir()
+	previous := userHomeDir
+	userHomeDir = func() (string, error) {
+		return home, nil
+	}
+	t.Cleanup(func() {
+		userHomeDir = previous
+	})
+
+	standardPath := filepath.Join(home, ".aicli", aiclipaths.StandardConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(standardPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(standardPath, []byte("auth:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveConfigPath(DefaultConfigSearchPaths())
+	if got != standardPath {
+		t.Fatalf("expected standard config %q to be discovered, got %q", standardPath, got)
 	}
 }
 

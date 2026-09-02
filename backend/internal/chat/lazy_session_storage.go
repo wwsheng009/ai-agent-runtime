@@ -63,11 +63,23 @@ func OpenEagerPersistentSessionStorage(cfg PersistentSessionStorageConfig) (Sess
 	}
 }
 
-func (s *lazySessionStorage) ensure() (SessionStorage, error) {
+func (s *lazySessionStorage) ensure(ctx context.Context) (SessionStorage, error) {
 	if s == nil {
 		return nil, fmt.Errorf("lazy session storage is nil")
 	}
-	s.mu.Lock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if s.mu.TryLock() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, fmt.Errorf("sqlite session storage is closed")
@@ -75,7 +87,7 @@ func (s *lazySessionStorage) ensure() (SessionStorage, error) {
 	if s.inner != nil {
 		return s.inner, nil
 	}
-	store, err := NewSQLiteSessionStorage(s.cfg)
+	store, err := NewSQLiteSessionStorageContext(ctx, s.cfg)
 	if err != nil {
 		// A failed open is NOT cached permanently: the next call retries, so
 		// a transient sqlite lock (a concurrent aicli / another
@@ -139,7 +151,7 @@ func (s *lazySessionStorage) shouldOpenForMaintenance() bool {
 }
 
 func (s *lazySessionStorage) Save(ctx context.Context, session *Session) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -147,7 +159,7 @@ func (s *lazySessionStorage) Save(ctx context.Context, session *Session) error {
 }
 
 func (s *lazySessionStorage) Load(ctx context.Context, sessionID string) (*Session, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +167,7 @@ func (s *lazySessionStorage) Load(ctx context.Context, sessionID string) (*Sessi
 }
 
 func (s *lazySessionStorage) Delete(ctx context.Context, sessionID string) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -163,7 +175,7 @@ func (s *lazySessionStorage) Delete(ctx context.Context, sessionID string) error
 }
 
 func (s *lazySessionStorage) List(ctx context.Context, userID string) ([]*Session, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +183,7 @@ func (s *lazySessionStorage) List(ctx context.Context, userID string) ([]*Sessio
 }
 
 func (s *lazySessionStorage) ListAll(ctx context.Context, limit, offset int) ([]*Session, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +194,7 @@ func (s *lazySessionStorage) ListAll(ctx context.Context, limit, offset int) ([]
 }
 
 func (s *lazySessionStorage) ListWithState(ctx context.Context, userID string, state SessionState) ([]*Session, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +202,7 @@ func (s *lazySessionStorage) ListWithState(ctx context.Context, userID string, s
 }
 
 func (s *lazySessionStorage) ListByTags(ctx context.Context, userID string, tags []string) ([]*Session, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +210,7 @@ func (s *lazySessionStorage) ListByTags(ctx context.Context, userID string, tags
 }
 
 func (s *lazySessionStorage) Update(ctx context.Context, session *Session) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -206,7 +218,7 @@ func (s *lazySessionStorage) Update(ctx context.Context, session *Session) error
 }
 
 func (s *lazySessionStorage) AddMessage(ctx context.Context, sessionID string, message interface{}) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -214,7 +226,7 @@ func (s *lazySessionStorage) AddMessage(ctx context.Context, sessionID string, m
 }
 
 func (s *lazySessionStorage) GetMessages(ctx context.Context, sessionID string) ([]interface{}, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +234,7 @@ func (s *lazySessionStorage) GetMessages(ctx context.Context, sessionID string) 
 }
 
 func (s *lazySessionStorage) Close(ctx context.Context, sessionID string) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -236,7 +248,7 @@ func (s *lazySessionStorage) Cleanup(ctx context.Context, after time.Time) (int,
 	if !s.shouldOpenForMaintenance() {
 		return 0, nil
 	}
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -244,7 +256,7 @@ func (s *lazySessionStorage) Cleanup(ctx context.Context, after time.Time) (int,
 }
 
 func (s *lazySessionStorage) GetStatistics(ctx context.Context, userID string) (*SessionStatistics, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +264,7 @@ func (s *lazySessionStorage) GetStatistics(ctx context.Context, userID string) (
 }
 
 func (s *lazySessionStorage) ListPreviews(ctx context.Context, userID string, limit, offset int) ([]*SessionPreview, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +275,7 @@ func (s *lazySessionStorage) ListPreviews(ctx context.Context, userID string, li
 }
 
 func (s *lazySessionStorage) ListMetadataPage(ctx context.Context, userID string, limit, offset int) ([]*Session, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +299,7 @@ func (s *lazySessionStorage) ListMetadataPage(ctx context.Context, userID string
 }
 
 func (s *lazySessionStorage) GetRecentMessages(ctx context.Context, sessionID string, limit int) ([]types.Message, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +310,7 @@ func (s *lazySessionStorage) GetRecentMessages(ctx context.Context, sessionID st
 }
 
 func (s *lazySessionStorage) GetMessagePage(ctx context.Context, sessionID string, beforeSeq, limit int) (*SessionHistoryPage, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +321,7 @@ func (s *lazySessionStorage) GetMessagePage(ctx context.Context, sessionID strin
 }
 
 func (s *lazySessionStorage) StreamMessages(ctx context.Context, sessionID string, visit func(seq int, message types.Message) error) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -320,7 +332,7 @@ func (s *lazySessionStorage) StreamMessages(ctx context.Context, sessionID strin
 }
 
 func (s *lazySessionStorage) StreamMessageJSON(ctx context.Context, sessionID string, visit func(seq int, info CanonicalMessageInfo, payload io.Reader) error) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -331,7 +343,7 @@ func (s *lazySessionStorage) StreamMessageJSON(ctx context.Context, sessionID st
 }
 
 func (s *lazySessionStorage) ClearMessages(ctx context.Context, sessionID string) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -342,7 +354,7 @@ func (s *lazySessionStorage) ClearMessages(ctx context.Context, sessionID string
 }
 
 func (s *lazySessionStorage) MessageCount(ctx context.Context, sessionID string) (int, error) {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -356,7 +368,7 @@ func (s *lazySessionStorage) ArchiveIdleSessions(ctx context.Context, before tim
 	if !s.shouldOpenForMaintenance() {
 		return 0, nil
 	}
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -367,7 +379,7 @@ func (s *lazySessionStorage) ArchiveIdleSessions(ctx context.Context, before tim
 }
 
 func (s *lazySessionStorage) Snapshot(ctx context.Context, destinationPath string) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}
@@ -378,7 +390,7 @@ func (s *lazySessionStorage) Snapshot(ctx context.Context, destinationPath strin
 }
 
 func (s *lazySessionStorage) SnapshotSession(ctx context.Context, sessionID, destinationPath string) error {
-	store, err := s.ensure()
+	store, err := s.ensure(ctx)
 	if err != nil {
 		return err
 	}

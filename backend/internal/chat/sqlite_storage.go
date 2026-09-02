@@ -89,6 +89,15 @@ func (s *SQLiteSessionStorage) rollbackWriteTx(tx *sql.Tx, tracker *artifactWrit
 }
 
 func NewSQLiteSessionStorage(cfg PersistentSessionStorageConfig) (*SQLiteSessionStorage, error) {
+	return NewSQLiteSessionStorageContext(context.Background(), cfg)
+}
+
+// NewSQLiteSessionStorageContext opens the sqlite session store, honoring ctx
+// while acquiring the database. A concurrent aicli/runtime-server process can
+// hold the write lock for longer than busy_timeout; without a cancellable
+// open, a request whose ctx expires would still block for the full retry
+// sequence (sqliteLockRetries x backoff, ~15s+) on a shared database.
+func NewSQLiteSessionStorageContext(ctx context.Context, cfg PersistentSessionStorageConfig) (*SQLiteSessionStorage, error) {
 	cfg = normalizePersistentSessionStorageConfig(cfg)
 	if strings.TrimSpace(cfg.Path) == "" {
 		return nil, fmt.Errorf("sqlite session storage path cannot be empty")
@@ -100,12 +109,12 @@ func NewSQLiteSessionStorage(cfg PersistentSessionStorageConfig) (*SQLiteSession
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite session storage %s: %w", cfg.Path, err)
 	}
-	store, err = openSQLiteSessionStorageWithLockRetry(store)
+	store, err = openSQLiteSessionStorageWithLockRetry(ctx, store)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite session storage %s: %w", cfg.Path, err)
 	}
 	if cfg.ImportLegacyJSON {
-		if err := store.importLegacyJSONFiles(context.Background()); err != nil {
+		if err := store.importLegacyJSONFiles(ctx); err != nil {
 			_ = store.db.Close()
 			return nil, err
 		}
@@ -131,7 +140,7 @@ func openSQLiteSessionStorageDB(cfg PersistentSessionStorageConfig) (*SQLiteSess
 // process can hold the write lock longer than busy_timeout (migration, large
 // session flush, wal_checkpoint(TRUNCATE)); without retry this makes a whole
 // startup fail. A failed connection is replaced with a fresh one per attempt.
-func openSQLiteSessionStorageWithLockRetry(store *SQLiteSessionStorage) (*SQLiteSessionStorage, error) {
+func openSQLiteSessionStorageWithLockRetry(ctx context.Context, store *SQLiteSessionStorage) (*SQLiteSessionStorage, error) {
 	var lastLockErr error
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
@@ -142,10 +151,20 @@ func openSQLiteSessionStorageWithLockRetry(store *SQLiteSessionStorage) (*SQLite
 				s.Infof("[sqlite-lock] session storage locked, retrying open (attempt %d/%d, wait %v) path=%s error=%v",
 					attempt, sqliteLockRetries, sqliteLockRetryWait(attempt-1), store.cfg.Path, lastLockErr)
 			}
-			time.Sleep(sqliteLockRetryWait(attempt - 1))
+			select {
+			case <-time.After(sqliteLockRetryWait(attempt - 1)):
+			case <-ctx.Done():
+				_ = store.db.Close()
+				return store, ctx.Err()
+			}
 		}
-		if err := store.init(context.Background()); err == nil {
+		if err := store.init(ctx); err == nil {
 			return store, nil
+		} else if ctx.Err() != nil {
+			// ctx 已过期（例如请求级 5s deadline）：立即退出，不再占用
+			// 重试窗口，让上层把超时翻译成明确的 503 而非无限挂起。
+			_ = store.db.Close()
+			return store, ctx.Err()
 		} else if !isSQLiteLockedError(err) || attempt >= sqliteLockRetries {
 			_ = store.db.Close()
 			return store, err
@@ -711,7 +730,23 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 			// Metadata-only updates do not rewrite the bounded prompt projection.
 			*storedProjection = session.History
 		default:
-			projection, err := s.buildHotProjection(session.History)
+			canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
+			if loadErr != nil || len(canonical) == 0 {
+				canonical = session.History
+			}
+			// The caller-supplied history may either be:
+			//   (a) a stale/shorter in-memory projection that is merely a window
+			//       of the canonical transcript (e.g. a CLI exit sync racing an
+			//       actor persist) — rebuilding from it would silently drop the
+			//       newest turn, so rebuild from the canonical transcript, or
+			//   (b) a deliberate replacement containing messages that do NOT
+			//       exist in the canonical transcript (e.g. a compaction
+			//       summary) — honor the caller's replacement.
+			source := canonical
+			if incomingHistoryReachesNewest(session.History, canonical) {
+				source = session.History
+			}
+			projection, err := s.buildHotProjection(source)
 			if err != nil {
 				return err
 			}
@@ -891,6 +926,80 @@ func (s *SQLiteSessionStorage) loadPromptMessages(ctx context.Context, sessionID
 		history = append(history, message)
 	}
 	return history, rows.Err()
+}
+
+// loadCanonicalMessagesTx reads the full canonical transcript (session_messages)
+// in sequence order. It is used to rebuild the bounded prompt projection from
+// the source of truth instead of a caller-supplied history that may be stale or
+// shorter than the stored projection (e.g. a CLI exit sync with an outdated
+// in-memory projection that would otherwise drop the newest turn).
+func (s *SQLiteSessionStorage) loadCanonicalMessagesTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]types.Message, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
+		FROM session_messages
+		WHERE session_id = ?
+		ORDER BY seq ASC
+	`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query canonical messages for projection rebuild: %w", err)
+	}
+	defer rows.Close()
+	var messages []types.Message
+	for rows.Next() {
+		var sequence int
+		var inline []byte
+		var artifact sql.NullString
+		var preview []byte
+		var byteCount int
+		var digest string
+		if err := rows.Scan(&sequence, &inline, &artifact, &preview, &byteCount, &digest); err != nil {
+			return nil, fmt.Errorf("scan canonical message for projection rebuild: %w", err)
+		}
+		payload, err := s.readCanonicalPayload(inline, artifact, byteCount, digest)
+		if err != nil {
+			return nil, err
+		}
+		var message types.Message
+		if err := json.Unmarshal(payload, &message); err != nil {
+			return nil, fmt.Errorf("decode canonical message for projection rebuild: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+// incomingHistoryReachesNewest reports whether the caller-supplied history ends
+// at the newest canonical message (or at a message absent from the canonical
+// transcript, e.g. a compaction summary). When false, the incoming history is a
+// stale/truncated window of the canonical transcript that would regress the
+// projection's newest message, so the projection must be rebuilt from the
+// canonical instead. Messages are compared by role+content identity because
+// reconstructed in-memory copies carry fresh timestamps/IDs that would make a
+// structural comparison unreliable.
+func incomingHistoryReachesNewest(incoming, canonical []types.Message) bool {
+	if len(incoming) == 0 {
+		return false
+	}
+	last := incoming[len(incoming)-1]
+	for index := len(canonical) - 1; index >= 0; index-- {
+		if messageIdentityEqual(last, canonical[index]) {
+			// Found the last occurrence of this message in the canonical
+			// transcript. Only if it is the transcript's newest message does
+			// the incoming history represent a current view worth honoring.
+			return index == len(canonical)-1
+		}
+	}
+	// The last incoming message is absent from the canonical transcript: it is
+	// a brand-new message (e.g. a compaction summary or a fresh append), so
+	// honor the caller's replacement.
+	return true
+}
+
+func messageIdentityEqual(a, b types.Message) bool {
+	return a.Role == b.Role && a.Content == b.Content
 }
 
 func encodeMessages(messages []types.Message) ([]encodedSessionMessage, error) {

@@ -529,13 +529,13 @@ func (s *InMemoryStorage) ListByUser(ctx context.Context, userID string, limit, 
 		return nil, err
 	}
 
-	// 应用分页
+	// 应用分页（limit <= 0 表示不限量，与 SQLite 存储一致）
 	if offset >= len(sessions) {
 		return []*Session{}, nil
 	}
 
 	end := offset + limit
-	if end > len(sessions) {
+	if limit <= 0 || end > len(sessions) {
 		end = len(sessions)
 	}
 
@@ -557,13 +557,13 @@ func (s *InMemoryStorage) ListAll(ctx context.Context, limit, offset int) ([]*Se
 
 	s.sortSessionsByUpdated(allSessions)
 
-	// 应用分页
+	// 应用分页（limit <= 0 表示不限量，与 SQLite 存储一致）
 	if offset >= len(allSessions) {
 		return []*Session{}, nil
 	}
 
 	end := offset + limit
-	if end > len(allSessions) {
+	if limit <= 0 || end > len(allSessions) {
 		end = len(allSessions)
 	}
 

@@ -181,6 +181,27 @@ func (a *Agent) GetConfig() *Config {
 	return a.config
 }
 
+// EnableStreaming 在运行中开启 LLM 流式输出（assistant_delta / reasoning_delta
+// 增量事件）。ReAct loop 每次 LLM 调用前都会读取 config.Options["stream"]，
+// 因此对已构建的 agent 动态开启同样生效。幂等且线程安全。
+func (a *Agent) EnableStreaming() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.config == nil {
+		return
+	}
+	if a.config.Options == nil {
+		a.config.Options = make(map[string]interface{})
+	}
+	if v, ok := a.config.Options["stream"]; ok && boolValue(v) {
+		return
+	}
+	a.config.Options["stream"] = true
+}
+
 // GetState 获取状态
 func (a *Agent) GetState() AgentState {
 	a.mu.RLock()

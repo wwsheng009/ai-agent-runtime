@@ -7,6 +7,48 @@ import (
 	"testing"
 )
 
+func TestAgentEnableStreaming(t *testing.T) {
+	t.Run("nil agent safe", func(t *testing.T) {
+		var a *Agent
+		a.EnableStreaming() // must not panic
+	})
+
+	t.Run("nil config safe", func(t *testing.T) {
+		a := &Agent{}
+		a.EnableStreaming() // must not panic
+	})
+
+	t.Run("sets stream option true", func(t *testing.T) {
+		a := &Agent{config: &Config{Options: map[string]interface{}{}}}
+		a.EnableStreaming()
+		v, ok := a.config.Options["stream"]
+		if !ok || !boolValue(v) {
+			t.Fatalf("stream option not enabled: %#v", a.config.Options)
+		}
+	})
+
+	t.Run("creates nil options map", func(t *testing.T) {
+		a := &Agent{config: &Config{}}
+		a.EnableStreaming()
+		if a.config.Options == nil {
+			t.Fatal("Options map was not created")
+		}
+		v, ok := a.config.Options["stream"]
+		if !ok || !boolValue(v) {
+			t.Fatalf("stream option not enabled: %#v", a.config.Options)
+		}
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		a := &Agent{config: &Config{Options: map[string]interface{}{"stream": true}}}
+		a.EnableStreaming()
+		a.EnableStreaming()
+		if !boolValue(a.config.Options["stream"]) {
+			t.Fatalf("stream option lost: %#v", a.config.Options)
+		}
+	})
+}
+
 func TestNewAgentWithLLM_DefersWorkspaceScanUntilBuild(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := NewAgentWithLLM(&Config{

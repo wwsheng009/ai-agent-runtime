@@ -32,16 +32,31 @@ func SetUserHomeDirForTest(resolver func() (string, error)) {
 
 // DefaultConfigSearchPaths returns the default config lookup order for aicli.
 // Callers should treat the first existing file as authoritative.
+//
+// On non-main build profiles (for example win7compat) the profile-specific
+// filename leads and the standard filename (config.yaml) follows as a
+// compatibility fallback, so a win7compat binary discovers the same config
+// file that a standard runtime-server / web UI writes to instead of creating
+// an isolated profile config that silently diverges.
 func DefaultConfigSearchPaths() []string {
-	paths := make([]string, 0, 4)
+	paths := make([]string, 0, 8)
 	if home, err := userHomeDir(); err == nil && home != "" {
 		paths = append(paths, filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName))
+		if aiclipaths.StandardConfigFileName != aiclipaths.DefaultConfigFileName {
+			paths = append(paths, filepath.Join(home, ".aicli", aiclipaths.StandardConfigFileName))
+		}
 	}
 	paths = append(paths,
 		filepath.Join(".aicli", aiclipaths.DefaultConfigFileName),
 		aiclipaths.DefaultCLIConfigFileName,
 		filepath.Join("configs", aiclipaths.DefaultConfigFileName),
 	)
+	if aiclipaths.StandardConfigFileName != aiclipaths.DefaultConfigFileName {
+		paths = append(paths,
+			filepath.Join(".aicli", aiclipaths.StandardConfigFileName),
+			filepath.Join("configs", aiclipaths.StandardConfigFileName),
+		)
+	}
 	return paths
 }
 

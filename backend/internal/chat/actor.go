@@ -610,6 +610,17 @@ func (a *SessionActor) GetCheckpointFiles(ctx context.Context, checkpointID stri
 	return store.GetCheckpointFiles(ctx, checkpointID)
 }
 
+// EnableStreaming 在运行中开启此会话的流式输出，使 LLM 增量事件
+//（assistant_delta / reasoning_delta）实时推送到 EventBus。幂等。
+func (a *SessionActor) EnableStreaming() {
+	if a == nil {
+		return
+	}
+	if a.agent != nil {
+		a.agent.EnableStreaming()
+	}
+}
+
 // DeliverMailboxMessage notifies the actor of a mailbox message.
 func (a *SessionActor) DeliverMailboxMessage(ctx context.Context, message team.MailMessage) error {
 	if a == nil {
